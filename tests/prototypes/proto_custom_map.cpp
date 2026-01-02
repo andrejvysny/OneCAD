@@ -62,6 +62,10 @@ int main() {
         }
     }
     
+    if (topFaceId.value.empty()) {
+        std::cout << "Failed to find top face" << std::endl;
+        return 1;
+    }
     std::cout << "Registered " << count << " faces. Top Face is " << topFaceId.value << std::endl;
     
     // 3. Cut with Cylinder
@@ -84,9 +88,14 @@ int main() {
     std::cout << "After Cut:" << std::endl;
     
     if (const auto* topEntry = emap.find(topFaceId)) {
+        if (topEntry->shape.IsNull()) {
+            std::cout << "FAILURE: Top Face shape missing." << std::endl;
+            return 1;
+        }
         std::cout << "SUCCESS: Top Face ID preserved! TShape: " << topEntry->shape.TShape().get() << std::endl;
     } else {
         std::cout << "FAILURE: Top Face ID lost." << std::endl;
+        return 1;
     }
 
     return 0;
