@@ -1,5 +1,6 @@
 #include "Grid3D.h"
 #include <QtMath>
+#include <QVector2D>
 #include <iostream>
 
 namespace onecad {
@@ -12,22 +13,32 @@ layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec4 aColor;
 
 uniform mat4 uMVP;
+uniform vec2 uFadeOrigin;
 
 out vec4 vColor;
+out vec2 vWorldPos;
 
 void main() {
     gl_Position = uMVP * vec4(aPos, 1.0);
     vColor = aColor;
+    vWorldPos = aPos.xy;
 }
 )";
 
 static const char* fragmentShaderSource = R"(
 #version 410 core
 in vec4 vColor;
+in vec2 vWorldPos;
 out vec4 FragColor;
 
+uniform float uFadeStart;
+uniform float uFadeEnd;
+uniform vec2 uFadeOrigin;
+
 void main() {
-    FragColor = vColor;
+    float distanceToOrigin = length(vWorldPos - uFadeOrigin);
+    float fade = 1.0 - smoothstep(uFadeStart, uFadeEnd, distanceToOrigin);
+    FragColor = vec4(vColor.rgb, vColor.a * fade);
 }
 )";
 
@@ -110,6 +121,7 @@ float Grid3D::calculateSpacing(float cameraDistance) const {
 void Grid3D::buildGrid(float spacing, float extent) {
     m_vertices.clear();
     m_colors.clear();
+    m_lastExtent = extent;
     
     int lineCount = static_cast<int>(extent / spacing);
     // Limit line count to avoid excessive geometry
@@ -205,7 +217,8 @@ void Grid3D::buildGrid(float spacing, float extent) {
     m_vao.release();
 }
 
-void Grid3D::render(const QMatrix4x4& viewProjection, float cameraDistance) {
+void Grid3D::render(const QMatrix4x4& viewProjection, float cameraDistance,
+                    const QVector3D& cameraPosition) {
     if (!m_visible || !m_initialized || m_lineCount == 0) return;
 
     // Fixed 10mm spacing - rebuild only if forced (color change)
@@ -218,6 +231,12 @@ void Grid3D::render(const QMatrix4x4& viewProjection, float cameraDistance) {
     
     m_shader->bind();
     m_shader->setUniformValue("uMVP", viewProjection);
+    m_shader->setUniformValue("uFadeOrigin", QVector2D(cameraPosition.x(), cameraPosition.y()));
+
+    const float fadeStart = m_lastExtent * 0.35f;
+    const float fadeEnd = m_lastExtent * 0.95f;
+    m_shader->setUniformValue("uFadeStart", fadeStart);
+    m_shader->setUniformValue("uFadeEnd", fadeEnd);
     
     m_vao.bind();
     

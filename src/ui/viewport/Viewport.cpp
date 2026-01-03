@@ -154,7 +154,7 @@ void Viewport::paintGL() {
     QMatrix4x4 viewProjection = projection * view;
     
     // Render grid
-    m_grid->render(viewProjection, m_camera->distance());
+    m_grid->render(viewProjection, m_camera->distance(), m_camera->position());
 }
 
 void Viewport::mousePressEvent(QMouseEvent* event) {

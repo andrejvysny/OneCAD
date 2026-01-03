@@ -27,7 +27,8 @@ public:
     ~Grid3D();
 
     void initialize();
-    void render(const QMatrix4x4& viewProjection, float cameraDistance);
+    void render(const QMatrix4x4& viewProjection, float cameraDistance,
+                const QVector3D& cameraPosition);
     void cleanup();
     
     // Appearance
@@ -58,6 +59,7 @@ private:
     int m_lineCount = 0;
     
     float m_lastSpacing = 0.0f;
+    float m_lastExtent = 0.0f;
 };
 
 } // namespace render
