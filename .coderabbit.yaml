@@ -1,0 +1,65 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+# General settings
+system_language: "en-US"
+disable_poem: true
+release_notes: true
+
+# Review scope
+path_filters:
+  - "!third_party/**"
+  - "!build/**"
+  - "!resources/**"
+  - "!**/*.lock"
+  - "!**/moc_*.cpp"
+  - "!**/ui_*.h"
+
+# Review behavior
+reviews:
+  high_level_summary: true
+  auto_approve: false
+  profile: "assertive"
+  
+  # Static analysis tools (if supported by plan)
+  tools:
+    cppcheck:
+      enabled: true
+    clang:
+      enabled: true
+
+# Project specific instructions
+file_path_instructions:
+  - path: "**/*.{h,cpp}"
+    instructions: |
+      **C++20 & General Safety:**
+      - Enforce C++20 standards (concepts, ranges) where applicable.
+      - Verify smart pointer usage (prefer unique_ptr, avoid raw pointers unless non-owning and null-checked).
+      - Check for `const` correctness and `[[nodiscard]]` usage.
+      - Ensure strict RAII compliance.
+      - **Performance:** 
+        - Avoid unnecessary copies (prefer `std::move`, `emplace_back`).
+        - Check container usage (prefer `reserve()`, avoid `std::list` unless needed).
+      - **Qt/Core:** 
+        - Ensure QObjects have parents where appropriate.
+        - Verify signal/slot connection types (Queued vs Direct).
+
+  - path: "src/kernel/elementmap/**"
+    instructions: |
+      **CRITICAL: Topological Naming System**
+      - This directory contains the persistent naming logic. 
+      - **Descriptor Logic:** Ensure changes to descriptor matching/hashing are regression-safe.
+      - **Persistence:** `ElementId` MUST be used for all persistent geometry references.
+      - **Math:** Validate epsilon comparisons for geometric equality.
+
+  - path: "src/kernel/**"
+    instructions: |
+      **Geometry & Math (OpenCASCADE/Eigen)**
+      - **OCCT:** Verify `TopoDS_Shape` and `Handle` usage. Check for null shapes.
+      - **Eigen:** Ensure alignment (though less critical in C++17+, watch for `EIGEN_MAKE_ALIGNED_OPERATOR_NEW`).
+      - Prefer pass-by-value for small Eigen vectors/matrices, reference for large ones.
+
+  - path: "src/ui/**"
+    instructions: |
+      **UI & Interaction**
+      - Ensure UI logic is decoupled from Core logic (use Commands/Tools).
+      - Verify event handling performance (avoid heavy logic in paint events).
