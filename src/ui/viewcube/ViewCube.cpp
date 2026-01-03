@@ -20,8 +20,8 @@ ViewCube::ViewCube(QWidget* parent)
     m_cubeRotation.setToIdentity();
     m_cubeRotation.rotate(90.0f, 0.0f, 0.0f, 1.0f);
     initGeometry();
-    
-    // Theme integration - store connection for proper lifecycle management
+
+    // Theme integration
     m_themeConnection = connect(&ThemeManager::instance(), &ThemeManager::themeChanged,
                                 this, &ViewCube::updateTheme, Qt::UniqueConnection);
     updateTheme();

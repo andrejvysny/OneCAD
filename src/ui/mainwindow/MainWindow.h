@@ -2,12 +2,16 @@
 #define ONECAD_UI_MAINWINDOW_H
 
 #include <QMainWindow>
+#include <memory>
 
 class QLabel;
 class QSlider;
 class QEvent;
 
 namespace onecad {
+namespace core::sketch {
+    class Sketch;
+}
 namespace ui {
 
 class Viewport;
@@ -33,6 +37,8 @@ public:
 
 private slots:
     void onNewSketch();
+    void onExitSketch();
+    void onSketchModeChanged(bool inSketchMode);
     void onImport();
     void onMousePositionChanged(double x, double y, double z);
 
@@ -51,6 +57,9 @@ private:
     Viewport* m_viewport = nullptr;
     ModelNavigator* m_navigator = nullptr;
     ContextToolbar* m_toolbar = nullptr;
+
+    // Sketch state
+    std::unique_ptr<core::sketch::Sketch> m_currentSketch;
     
     // Status bar labels
     QLabel* m_toolStatus = nullptr;

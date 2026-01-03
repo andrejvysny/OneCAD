@@ -169,6 +169,11 @@ public:
     EntityID addCircle(EntityID centerId, double radius, bool construction = false);
 
     /**
+     * @brief Add a circle, creating a new center point at given coordinates
+     */
+    EntityID addCircle(double centerX, double centerY, double radius, bool construction = false);
+
+    /**
      * @brief Remove an entity and all constraints referencing it
      */
     bool removeEntity(EntityID id);

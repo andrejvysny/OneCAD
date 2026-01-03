@@ -31,7 +31,15 @@ void ContextToolbar::setupDefaultActions() {
 
 void ContextToolbar::setupSketchActions() {
     addSeparator();
-    
+
+    m_exitSketchAction = new QAction(tr("✓ Done"), this);
+    m_exitSketchAction->setToolTip(tr("Exit sketch mode (Escape)"));
+    connect(m_exitSketchAction, &QAction::triggered,
+            this, &ContextToolbar::exitSketchRequested);
+    addAction(m_exitSketchAction);
+
+    addSeparator();
+
     m_lineAction = new QAction(tr("📏 Line"), this);
     m_lineAction->setToolTip(tr("Draw line (L)"));
     connect(m_lineAction, &QAction::triggered,
@@ -62,12 +70,14 @@ void ContextToolbar::setContext(Context context) {
 }
 
 void ContextToolbar::updateVisibleActions() {
-    // Default actions always visible
-    m_newSketchAction->setVisible(true);
-    m_importAction->setVisible(m_currentContext == Context::Default);
-    
-    // Sketch actions only in sketch mode
     bool inSketch = (m_currentContext == Context::Sketch);
+
+    // Default actions - hide New Sketch button when in sketch mode
+    m_newSketchAction->setVisible(!inSketch);
+    m_importAction->setVisible(m_currentContext == Context::Default);
+
+    // Sketch actions only in sketch mode
+    m_exitSketchAction->setVisible(inSketch);
     m_lineAction->setVisible(inSketch);
     m_rectangleAction->setVisible(inSketch);
     m_circleAction->setVisible(inSketch);

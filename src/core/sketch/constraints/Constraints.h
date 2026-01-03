@@ -25,6 +25,76 @@ namespace onecad::core::sketch::constraints {
 //==============================================================================
 
 /**
+ * @brief Fixed constraint - fixes a point to specific coordinates
+ *
+ * DOF removed: 2 (both X and Y are fixed)
+ */
+class FixedConstraint : public SketchConstraint {
+public:
+    FixedConstraint(const PointID& pointId, double x, double y);
+
+    ConstraintType type() const override { return ConstraintType::Fixed; }
+    std::string typeName() const override { return "Fixed"; }
+    std::string toString() const override;
+
+    std::vector<EntityID> referencedEntities() const override;
+    int degreesRemoved() const override { return 2; }
+
+    bool isSatisfied(const Sketch& sketch, double tolerance) const override;
+    double getError(const Sketch& sketch) const override;
+
+    void serialize(QJsonObject& json) const override;
+    bool deserialize(const QJsonObject& json) override;
+    gp_Pnt2d getIconPosition(const Sketch& sketch) const override;
+
+    const PointID& pointId() const { return m_pointId; }
+    double fixedX() const { return m_fixedX; }
+    double fixedY() const { return m_fixedY; }
+    const double& fixedXRef() const { return m_fixedX; }
+    const double& fixedYRef() const { return m_fixedY; }
+
+private:
+    friend class onecad::core::sketch::ConstraintFactory;
+    FixedConstraint() = default;
+    PointID m_pointId;
+    double m_fixedX = 0.0;
+    double m_fixedY = 0.0;
+};
+
+/**
+ * @brief Midpoint constraint - constrains a point to lie on the midpoint of a line
+ *
+ * DOF removed: 2 (the point is fully determined by the line's midpoint)
+ */
+class MidpointConstraint : public SketchConstraint {
+public:
+    MidpointConstraint(const PointID& pointId, const EntityID& lineId);
+
+    ConstraintType type() const override { return ConstraintType::Midpoint; }
+    std::string typeName() const override { return "Midpoint"; }
+    std::string toString() const override { return "Midpoint"; }
+
+    std::vector<EntityID> referencedEntities() const override;
+    int degreesRemoved() const override { return 2; }
+
+    bool isSatisfied(const Sketch& sketch, double tolerance) const override;
+    double getError(const Sketch& sketch) const override;
+
+    void serialize(QJsonObject& json) const override;
+    bool deserialize(const QJsonObject& json) override;
+    gp_Pnt2d getIconPosition(const Sketch& sketch) const override;
+
+    const PointID& pointId() const { return m_pointId; }
+    const EntityID& lineId() const { return m_lineId; }
+
+private:
+    friend class onecad::core::sketch::ConstraintFactory;
+    MidpointConstraint() = default;
+    PointID m_pointId;
+    EntityID m_lineId;
+};
+
+/**
  * @brief Coincident constraint - makes two points occupy the same location
  *
  * DOF removed: 2 (merges two independent points)

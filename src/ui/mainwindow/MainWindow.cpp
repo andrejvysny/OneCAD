@@ -2,6 +2,7 @@
 #include "../theme/ThemeManager.h"
 #include "../viewport/Viewport.h"
 #include "../../render/Camera3D.h"
+#include "../../core/sketch/Sketch.h"
 #include "../navigator/ModelNavigator.h"
 #include "../toolbar/ContextToolbar.h"
 
@@ -151,19 +152,34 @@ void MainWindow::setupMenuBar() {
 void MainWindow::setupToolBar() {
     m_toolbar = new ContextToolbar(this);
     addToolBar(Qt::TopToolBarArea, m_toolbar);
-    
+
     connect(m_toolbar, &ContextToolbar::newSketchRequested,
             this, &MainWindow::onNewSketch);
+    connect(m_toolbar, &ContextToolbar::exitSketchRequested,
+            this, &MainWindow::onExitSketch);
     connect(m_toolbar, &ContextToolbar::importRequested,
             this, &MainWindow::onImport);
+
+    // Tool activation signals - connect after m_viewport is created
+    // These are connected in setupViewport() after viewport exists
 }
 
 void MainWindow::setupViewport() {
     m_viewport = new Viewport(this);
     setCentralWidget(m_viewport);
-    
+
     connect(m_viewport, &Viewport::mousePositionChanged,
             this, &MainWindow::onMousePositionChanged);
+    connect(m_viewport, &Viewport::sketchModeChanged,
+            this, &MainWindow::onSketchModeChanged);
+
+    // Connect toolbar tool signals to viewport
+    connect(m_toolbar, &ContextToolbar::lineToolActivated,
+            m_viewport, &Viewport::activateLineTool);
+    connect(m_toolbar, &ContextToolbar::circleToolActivated,
+            m_viewport, &Viewport::activateCircleTool);
+    connect(m_toolbar, &ContextToolbar::rectangleToolActivated,
+            m_viewport, &Viewport::activateRectangleTool);
 
     m_viewport->installEventFilter(this);
 }
@@ -247,7 +263,50 @@ void MainWindow::setupStatusBar() {
 }
 
 void MainWindow::onNewSketch() {
-    m_toolStatus->setText(tr("Select plane for new sketch..."));
+    // If already in sketch mode, exit first
+    if (m_viewport->isInSketchMode()) {
+        onExitSketch();
+    }
+
+    // Create new sketch on XY plane (default)
+    m_currentSketch = std::make_unique<core::sketch::Sketch>();
+
+    // Enter sketch mode
+    m_viewport->enterSketchMode(m_currentSketch.get());
+    m_toolStatus->setText(tr("Sketch Mode - XY Plane"));
+
+    // Update toolbar context
+    m_toolbar->setContext(ContextToolbar::Context::Sketch);
+}
+
+void MainWindow::onExitSketch() {
+    if (!m_viewport->isInSketchMode()) return;
+
+    m_viewport->exitSketchMode();
+    m_currentSketch.reset();
+
+    m_toolStatus->setText(tr("Ready"));
+    m_toolbar->setContext(ContextToolbar::Context::Default);
+}
+
+void MainWindow::onSketchModeChanged(bool inSketchMode) {
+    if (inSketchMode && m_currentSketch) {
+        // Update DOF display
+        int dof = m_currentSketch->getDegreesOfFreedom();
+        m_dofStatus->setText(tr("DOF: %1").arg(dof));
+
+        // Color code DOF
+        if (dof == 0) {
+            m_dofStatus->setStyleSheet("color: green;");
+        } else if (dof > 0) {
+            m_dofStatus->setStyleSheet("color: orange;");
+        } else {
+            m_dofStatus->setStyleSheet("color: red;");
+        }
+    } else {
+        m_dofStatus->setText(tr("DOF: —"));
+        m_dofStatus->setStyleSheet("");
+    }
 }
 
 void MainWindow::onImport() {

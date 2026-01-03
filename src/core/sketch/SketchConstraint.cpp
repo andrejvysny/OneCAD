@@ -26,6 +26,8 @@ void registerBuiltins() {
         ConstraintFactory::registerType<constraints::DistanceConstraint>("Distance");
         ConstraintFactory::registerType<constraints::AngleConstraint>("Angle");
         ConstraintFactory::registerType<constraints::RadiusConstraint>("Radius");
+        ConstraintFactory::registerType<constraints::FixedConstraint>("Fixed");
+        ConstraintFactory::registerType<constraints::MidpointConstraint>("Midpoint");
     });
 }
 

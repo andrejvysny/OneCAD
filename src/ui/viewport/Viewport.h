@@ -5,12 +5,22 @@
 #include <QOpenGLFunctions>
 #include <QPoint>
 #include <QElapsedTimer>
+#include <QVector3D>
 #include <memory>
 
 namespace onecad {
 namespace render {
     class Camera3D;
     class Grid3D;
+}
+namespace core::sketch {
+    class Sketch;
+    class SketchRenderer;
+    struct Vec2d;
+    namespace tools {
+        class SketchToolManager;
+        enum class ToolType;
+    }
 }
 }
 
@@ -34,11 +44,31 @@ public:
 
     render::Camera3D* camera() const { return m_camera.get(); }
 
+    // Sketch mode
+    bool isInSketchMode() const { return m_inSketchMode; }
+    core::sketch::Sketch* activeSketch() const { return m_activeSketch; }
+
+    // Tool management
+    core::sketch::tools::SketchToolManager* toolManager() const;
+    core::sketch::Vec2d screenToSketch(const QPoint& screenPos) const;
+
 signals:
     void mousePositionChanged(double x, double y, double z);
     void cameraChanged();
+    void sketchModeChanged(bool inSketchMode);
 
 public slots:
+    // Sketch mode
+    void enterSketchMode(core::sketch::Sketch* sketch);
+    void exitSketchMode();
+
+    // Tool activation
+    void activateLineTool();
+    void activateCircleTool();
+    void activateRectangleTool();
+    void deactivateTool();
+
+    // Views
     void setFrontView();
     void setBackView();
     void setLeftView();
@@ -63,7 +93,8 @@ protected:
     void mouseReleaseEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
-    
+    void keyPressEvent(QKeyEvent* event) override;
+
     // Touch/gesture events (for trackpad)
     bool event(QEvent* event) override;
 
@@ -75,7 +106,17 @@ private:
 
     std::unique_ptr<render::Camera3D> m_camera;
     std::unique_ptr<render::Grid3D> m_grid;
+    std::unique_ptr<core::sketch::SketchRenderer> m_sketchRenderer;
+    std::unique_ptr<core::sketch::tools::SketchToolManager> m_toolManager;
     ViewCube* m_viewCube = nullptr;
+
+    // Sketch mode
+    core::sketch::Sketch* m_activeSketch = nullptr;
+    bool m_inSketchMode = false;
+    float m_savedCameraAngle = 45.0f;  // Store camera angle before sketch mode
+    QVector3D m_savedCameraPosition;
+    QVector3D m_savedCameraTarget;
+    QVector3D m_savedCameraUp;
     
     // Appearance
     QColor m_backgroundColor;

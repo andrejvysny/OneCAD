@@ -143,6 +143,154 @@ std::string formatValue(double value, const std::string& units) {
 
 } // namespace
 
+//==============================================================================
+// FixedConstraint
+//==============================================================================
+
+FixedConstraint::FixedConstraint(const PointID& pointId, double x, double y)
+    : SketchConstraint(),
+      m_pointId(pointId),
+      m_fixedX(x),
+      m_fixedY(y) {
+}
+
+std::string FixedConstraint::toString() const {
+    std::ostringstream stream;
+    stream.setf(std::ios::fixed);
+    stream.precision(2);
+    stream << "Fixed(" << m_fixedX << ", " << m_fixedY << ")";
+    return stream.str();
+}
+
+std::vector<EntityID> FixedConstraint::referencedEntities() const {
+    return {m_pointId};
+}
+
+bool FixedConstraint::isSatisfied(const Sketch& sketch, double tolerance) const {
+    gp_Pnt2d pos;
+    if (!getPointPosition(sketch, m_pointId, pos)) {
+        return false;
+    }
+    gp_Pnt2d target(m_fixedX, m_fixedY);
+    return pos.Distance(target) <= tolerance;
+}
+
+double FixedConstraint::getError(const Sketch& sketch) const {
+    gp_Pnt2d pos;
+    if (!getPointPosition(sketch, m_pointId, pos)) {
+        return std::numeric_limits<double>::infinity();
+    }
+    gp_Pnt2d target(m_fixedX, m_fixedY);
+    return pos.Distance(target);
+}
+
+void FixedConstraint::serialize(QJsonObject& json) const {
+    serializeBase(json);
+    json["point"] = QString::fromStdString(m_pointId);
+    json["x"] = m_fixedX;
+    json["y"] = m_fixedY;
+}
+
+bool FixedConstraint::deserialize(const QJsonObject& json) {
+    if (!json.contains("point") || !json.contains("x") || !json.contains("y")) {
+        return false;
+    }
+    if (!json["point"].isString() || !json["x"].isDouble() || !json["y"].isDouble()) {
+        return false;
+    }
+    if (!deserializeBase(json, "Fixed")) {
+        return false;
+    }
+    m_pointId = json["point"].toString().toStdString();
+    m_fixedX = json["x"].toDouble();
+    m_fixedY = json["y"].toDouble();
+    return true;
+}
+
+gp_Pnt2d FixedConstraint::getIconPosition(const Sketch& sketch) const {
+    gp_Pnt2d pos;
+    if (!getPointPosition(sketch, m_pointId, pos)) {
+        return gp_Pnt2d(m_fixedX, m_fixedY);
+    }
+    return pos;
+}
+
+//==============================================================================
+// MidpointConstraint
+//==============================================================================
+
+MidpointConstraint::MidpointConstraint(const PointID& pointId, const EntityID& lineId)
+    : SketchConstraint(),
+      m_pointId(pointId),
+      m_lineId(lineId) {
+}
+
+std::vector<EntityID> MidpointConstraint::referencedEntities() const {
+    return {m_pointId, m_lineId};
+}
+
+bool MidpointConstraint::isSatisfied(const Sketch& sketch, double tolerance) const {
+    gp_Pnt2d point;
+    gp_Pnt2d lineStart;
+    gp_Pnt2d lineEnd;
+    if (!getPointPosition(sketch, m_pointId, point)) {
+        return false;
+    }
+    if (!getLinePoints(sketch, m_lineId, lineStart, lineEnd)) {
+        return false;
+    }
+    gp_Pnt2d mid = midpoint(lineStart, lineEnd);
+    return point.Distance(mid) <= tolerance;
+}
+
+double MidpointConstraint::getError(const Sketch& sketch) const {
+    gp_Pnt2d point;
+    gp_Pnt2d lineStart;
+    gp_Pnt2d lineEnd;
+    if (!getPointPosition(sketch, m_pointId, point)) {
+        return std::numeric_limits<double>::infinity();
+    }
+    if (!getLinePoints(sketch, m_lineId, lineStart, lineEnd)) {
+        return std::numeric_limits<double>::infinity();
+    }
+    gp_Pnt2d mid = midpoint(lineStart, lineEnd);
+    return point.Distance(mid);
+}
+
+void MidpointConstraint::serialize(QJsonObject& json) const {
+    serializeBase(json);
+    json["point"] = QString::fromStdString(m_pointId);
+    json["line"] = QString::fromStdString(m_lineId);
+}
+
+bool MidpointConstraint::deserialize(const QJsonObject& json) {
+    if (!json.contains("point") || !json.contains("line")) {
+        return false;
+    }
+    if (!json["point"].isString() || !json["line"].isString()) {
+        return false;
+    }
+    if (!deserializeBase(json, "Midpoint")) {
+        return false;
+    }
+    m_pointId = json["point"].toString().toStdString();
+    m_lineId = json["line"].toString().toStdString();
+    return true;
+}
+
+gp_Pnt2d MidpointConstraint::getIconPosition(const Sketch& sketch) const {
+    gp_Pnt2d lineStart;
+    gp_Pnt2d lineEnd;
+    if (!getLinePoints(sketch, m_lineId, lineStart, lineEnd)) {
+        return gp_Pnt2d(0.0, 0.0);
+    }
+    return midpoint(lineStart, lineEnd);
+}
+
+//==============================================================================
+// CoincidentConstraint
+//==============================================================================
+
 CoincidentConstraint::CoincidentConstraint(const PointID& point1, const PointID& point2)
     : SketchConstraint(),
       m_point1(point1),

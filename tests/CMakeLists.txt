@@ -59,3 +59,10 @@ target_link_libraries(proto_loop_detector
     PRIVATE
     onecad_core
 )
+
+# Face Builder Prototype
+add_executable(proto_face_builder prototypes/proto_face_builder.cpp)
+target_link_libraries(proto_face_builder
+    PRIVATE
+    onecad_core
+)

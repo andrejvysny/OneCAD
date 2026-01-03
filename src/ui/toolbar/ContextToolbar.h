@@ -36,6 +36,7 @@ public slots:
 
 signals:
     void newSketchRequested();
+    void exitSketchRequested();
     void importRequested();
     void lineToolActivated();
     void rectangleToolActivated();
@@ -53,6 +54,7 @@ private:
     QAction* m_importAction = nullptr;
     
     // Sketch context actions
+    QAction* m_exitSketchAction = nullptr;
     QAction* m_lineAction = nullptr;
     QAction* m_rectangleAction = nullptr;
     QAction* m_circleAction = nullptr;

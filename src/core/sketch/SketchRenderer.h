@@ -34,6 +34,28 @@ class SketchEntity;
 class SketchConstraint;
 
 /**
+ * @brief Snap type enumeration
+ *
+ * Per SPECIFICATION.md §5.14:
+ * Different snap types with priority order
+ */
+enum class SnapType {
+    None = 0,
+    Vertex,       // Snap to existing point (highest priority)
+    Endpoint,     // Snap to line/arc endpoint
+    Midpoint,     // Snap to line midpoint
+    Center,       // Snap to arc/circle center
+    Quadrant,     // Snap to circle quadrant points
+    Intersection, // Snap to intersection of two entities
+    OnCurve,      // Snap to nearest point on curve
+    Grid,         // Snap to grid (lowest priority)
+    Perpendicular,// Perpendicular snap (inference)
+    Tangent,      // Tangent snap (inference)
+    Horizontal,   // Horizontal inference
+    Vertical      // Vertical inference
+};
+
+/**
  * @brief Color definitions for sketch rendering
  */
 struct SketchColors {
@@ -177,6 +199,9 @@ struct ConstraintRenderData {
  * - Viewport culling
  * - Selection highlighting
  */
+// Forward declare PIMPL class
+class SketchRendererImpl;
+
 class SketchRenderer {
 public:
     SketchRenderer();
@@ -276,6 +301,16 @@ public:
                        double startAngle, double endAngle);
 
     /**
+     * @brief Set preview circle (full arc 0 to 2π)
+     */
+    void setPreviewCircle(const Vec2d& center, double radius);
+
+    /**
+     * @brief Set preview rectangle (4 lines)
+     */
+    void setPreviewRectangle(const Vec2d& corner1, const Vec2d& corner2);
+
+    /**
      * @brief Clear preview geometry
      */
     void clearPreview();
@@ -343,6 +378,9 @@ public:
     ConstraintID pickConstraint(const Vec2d& screenPos, double tolerance = 5.0) const;
 
 private:
+    // PIMPL for OpenGL internals
+    std::unique_ptr<SketchRendererImpl> impl_;
+
     Sketch* sketch_ = nullptr;
     SketchRenderStyle style_;
     Viewport viewport_;
@@ -350,21 +388,21 @@ private:
 
     // Selection state
     std::unordered_map<EntityID, SelectionState> entitySelections_;
-    EntityID hoverEntity_ = 0;
+    EntityID hoverEntity_;  // Empty string by default
     std::vector<ConstraintID> conflictingConstraints_;
 
     // Preview geometry
     struct {
         bool active = false;
-        EntityType type;
+        EntityType type = EntityType::Line;
         std::vector<Vec2d> vertices;
     } preview_;
 
     // Snap indicator
     struct {
         bool active = false;
-        Vec2d position;
-        SnapType type;
+        Vec2d position{0.0, 0.0};
+        SnapType type = SnapType::None;
     } snapIndicator_;
 
     // DOF indicator
@@ -376,6 +414,7 @@ private:
     std::vector<ConstraintRenderData> constraintRenderData_;
     bool geometryDirty_ = true;
     bool constraintsDirty_ = true;
+    bool vboDirty_ = true;
 
     // ========== OpenGL Resources (PLACEHOLDERS) ==========
     // These will be initialized in Phase 4
@@ -428,36 +467,14 @@ private:
 };
 
 /**
- * @brief Snap type enumeration
- *
- * Per SPECIFICATION.md §5.14:
- * Different snap types with priority order
- */
-enum class SnapType {
-    None = 0,
-    Vertex,       // Snap to existing point (highest priority)
-    Endpoint,     // Snap to line/arc endpoint
-    Midpoint,     // Snap to line midpoint
-    Center,       // Snap to arc/circle center
-    Quadrant,     // Snap to circle quadrant points
-    Intersection, // Snap to intersection of two entities
-    OnCurve,      // Snap to nearest point on curve
-    Grid,         // Snap to grid (lowest priority)
-    Perpendicular,// Perpendicular snap (inference)
-    Tangent,      // Tangent snap (inference)
-    Horizontal,   // Horizontal inference
-    Vertical      // Vertical inference
-};
-
-/**
  * @brief Snap result from snap system
  */
 struct SnapResult {
     bool snapped = false;
     SnapType type = SnapType::None;
     Vec2d position;
-    EntityID entityId = 0;      // Entity snapped to (if any)
-    EntityID secondEntity = 0;  // For intersections
+    EntityID entityId;          // Entity snapped to (if any)
+    EntityID secondEntity;      // For intersections
     double distance = 0.0;      // Distance from cursor
 
     bool operator<(const SnapResult& other) const {
@@ -486,7 +503,7 @@ public:
      * @param excludeEntity Entity to exclude (e.g., entity being drawn)
      */
     SnapResult findSnap(const Vec2d& cursorPos, const Sketch& sketch,
-                        EntityID excludeEntity = 0) const;
+                        EntityID excludeEntity = {}) const;
 
     /**
      * @brief Set snap radius in mm

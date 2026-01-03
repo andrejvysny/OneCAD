@@ -887,6 +887,39 @@ bool ConstraintSolver::translateConstraint(SketchConstraint* constraint, int tag
         return false;
     }
 
+    if (auto* fixed = dynamic_cast<FixedConstraint*>(constraint)) {
+        auto* p = getPoint(fixed->pointId());
+        if (!p) {
+            return false;
+        }
+        auto gp = makePoint(p);
+        // Use const_cast to get mutable pointer to constraint's stored values
+        double* xPtr = const_cast<double*>(&fixed->fixedXRef());
+        double* yPtr = const_cast<double*>(&fixed->fixedYRef());
+        gcsSystem_->addConstraintCoordinateX(gp, xPtr, tagId, true);
+        gcsSystem_->addConstraintCoordinateY(gp, yPtr, tagId, true);
+        return true;
+    }
+
+    if (auto* midpoint = dynamic_cast<MidpointConstraint*>(constraint)) {
+        auto* p = getPoint(midpoint->pointId());
+        auto* line = getLine(midpoint->lineId());
+        if (!p || !line) {
+            return false;
+        }
+        SketchPoint* start = nullptr;
+        SketchPoint* end = nullptr;
+        if (!lineEndpoints(pointsById_, line, start, end)) {
+            return false;
+        }
+        auto gp = makePoint(p);
+        GCS::Line gcsLine = makeLine(start, end);
+        // Midpoint = point on line AND on perpendicular bisector
+        gcsSystem_->addConstraintPointOnLine(gp, gcsLine, tagId, true);
+        gcsSystem_->addConstraintPointOnPerpBisector(gp, gcsLine, tagId, true);
+        return true;
+    }
+
     if (auto* equal = dynamic_cast<EqualConstraint*>(constraint)) {
         auto* line1 = getLine(equal->entity1());
         auto* line2 = getLine(equal->entity2());

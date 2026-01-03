@@ -107,6 +107,14 @@ EntityID Sketch::addCircle(EntityID centerId, double radius, bool construction) 
     return id;
 }
 
+EntityID Sketch::addCircle(double centerX, double centerY, double radius, bool construction) {
+    EntityID centerId = addPoint(centerX, centerY);
+    if (centerId.empty()) {
+        return {};
+    }
+    return addCircle(centerId, radius, construction);
+}
+
 bool Sketch::removeEntity(EntityID id) {
     auto it = entityIndex_.find(id);
     if (it == entityIndex_.end()) {

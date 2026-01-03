@@ -149,6 +149,16 @@ bool loopContainsLoop(const Loop& outer, const Loop& inner, double tolerance) {
     return true;
 }
 
+void reverseLoop(Loop& loop) {
+    std::reverse(loop.wire.edges.begin(), loop.wire.edges.end());
+    std::reverse(loop.wire.forward.begin(), loop.wire.forward.end());
+    for (size_t i = 0; i < loop.wire.forward.size(); ++i) {
+        loop.wire.forward[i] = !loop.wire.forward[i];
+    }
+    std::reverse(loop.polygon.begin(), loop.polygon.end());
+    loop.signedArea = -loop.signedArea;
+}
+
 LoopDetector::LoopDetector()
     : config_() {
 }
@@ -789,6 +799,16 @@ std::vector<Face> LoopDetector::buildFaceHierarchy(std::vector<Loop> loops) cons
         parent[loopIdx] = bestParent;
         if (bestParent >= 0) {
             depth[loopIdx] = depth[bestParent] + 1;
+        }
+    }
+
+    for (size_t i = 0; i < loops.size(); ++i) {
+        if (loops[i].polygon.size() < 3) {
+            continue;
+        }
+        bool shouldBeCCW = (depth[i] % 2 == 0);
+        if (loops[i].isCCW() != shouldBeCCW) {
+            reverseLoop(loops[i]);
         }
     }
 
