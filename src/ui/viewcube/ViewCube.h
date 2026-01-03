@@ -79,6 +79,7 @@ private:
     
     const float m_cubeSize = 120.0f;
     float m_scale = 0.6f;
+    QMatrix4x4 m_cubeRotation;
 };
 
 } // namespace ui

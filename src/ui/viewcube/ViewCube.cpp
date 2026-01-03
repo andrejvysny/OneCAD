@@ -16,6 +16,8 @@ ViewCube::ViewCube(QWidget* parent)
     setFixedSize(static_cast<int>(m_cubeSize), static_cast<int>(m_cubeSize));
     setAttribute(Qt::WA_TranslucentBackground);
     setMouseTracking(true);
+    m_cubeRotation.setToIdentity();
+    m_cubeRotation.rotate(90.0f, 0.0f, 0.0f, 1.0f);
     initGeometry();
 }
 
@@ -110,7 +112,7 @@ void ViewCube::initGeometry() {
 }
 
 QPointF ViewCube::project(const QVector3D& point, const QMatrix4x4& viewRot, float scale) {
-    QVector3D transformed = viewRot * point;
+    QVector3D transformed = viewRot * (m_cubeRotation * point);
     float x = transformed.x() * scale + width() / 2.0f;
     float y = -transformed.y() * scale + height() / 2.0f; 
     return QPointF(x, y);
@@ -123,11 +125,17 @@ ViewCube::Hit ViewCube::hitTest(const QPoint& pos) {
     view.setColumn(3, QVector4D(0, 0, 0, 1));
     QVector3D forward = m_camera->forward().normalized();
     float scale = (std::min(width(), height()) / 2.0f) * m_scale;
-    auto isPointVisible = [&forward](const QVector3D& point) {
-        return QVector3D::dotProduct(point, forward) < 0.0f;
+    auto rotatePoint = [this](const QVector3D& point) {
+        return m_cubeRotation * point;
     };
-    auto isFaceVisible = [&forward](const QVector3D& normal) {
-        return QVector3D::dotProduct(normal, forward) < -0.001f;
+    auto rotateNormal = [this](const QVector3D& normal) {
+        return m_cubeRotation * normal;
+    };
+    auto isPointVisible = [&forward, &rotatePoint](const QVector3D& point) {
+        return QVector3D::dotProduct(rotatePoint(point), forward) < 0.0f;
+    };
+    auto isFaceVisible = [&forward, &rotateNormal](const QVector3D& normal) {
+        return QVector3D::dotProduct(rotateNormal(normal), forward) < -0.001f;
     };
 
     // 1. Check Corners (Highest Priority)
@@ -175,7 +183,7 @@ ViewCube::Hit ViewCube::hitTest(const QPoint& pos) {
         if (dist < bestEdgeDist) {
             // Check Z depth to ensure we pick the front one if they overlap?
             // Midpoint Z
-            float depth = -QVector3D::dotProduct(mid, forward);
+            float depth = -QVector3D::dotProduct(rotatePoint(mid), forward);
             // Larger depth is closer
             if (depth > bestEdgeDepth) {
                 bestEdgeDist = dist;
@@ -199,7 +207,7 @@ ViewCube::Hit ViewCube::hitTest(const QPoint& pos) {
     for (int i = 0; i < m_faces.size(); ++i) {
         if (isFaceVisible(m_faces[i].normal)) {
             QVector3D center = (m_vertices[m_faces[i].vIndices[0]].pos + m_vertices[m_faces[i].vIndices[2]].pos) * 0.5f;
-            float depth = -QVector3D::dotProduct(center, forward);
+            float depth = -QVector3D::dotProduct(rotatePoint(center), forward);
             visibleFaces.append({i, depth});
         }
     }
@@ -233,8 +241,14 @@ void ViewCube::paintEvent(QPaintEvent* event) {
     view.setColumn(3, QVector4D(0, 0, 0, 1));
     QVector3D forward = m_camera->forward().normalized();
     float scale = (std::min(width(), height()) / 2.0f) * m_scale;
-    auto isFaceVisible = [&forward](const QVector3D& normal) {
-        return QVector3D::dotProduct(normal, forward) < -0.001f;
+    auto rotatePoint = [this](const QVector3D& point) {
+        return m_cubeRotation * point;
+    };
+    auto rotateNormal = [this](const QVector3D& normal) {
+        return m_cubeRotation * normal;
+    };
+    auto isFaceVisible = [&forward, &rotateNormal](const QVector3D& normal) {
+        return QVector3D::dotProduct(rotateNormal(normal), forward) < -0.001f;
     };
 
     // Sort Faces
@@ -247,7 +261,7 @@ void ViewCube::paintEvent(QPaintEvent* event) {
     for (int i = 0; i < m_faces.size(); ++i) {
         if (isFaceVisible(m_faces[i].normal)) {
             QVector3D center = (m_vertices[m_faces[i].vIndices[0]].pos + m_vertices[m_faces[i].vIndices[2]].pos) * 0.5f;
-            float depth = -QVector3D::dotProduct(center, forward);
+            float depth = -QVector3D::dotProduct(rotatePoint(center), forward);
             visibleFaces.append({i, depth});
         }
     }
@@ -286,6 +300,38 @@ void ViewCube::paintEvent(QPaintEvent* event) {
         painter.setFont(font);
         QRectF textRect(center.x() - 30, center.y() - 15, 60, 30);
         painter.drawText(textRect, Qt::AlignCenter, face.text);
+    }
+
+    // Axes from front-left-bottom corner (origin for view cube)
+    {
+        const QVector3D origin(-1.0f, -1.0f, -1.0f);
+        const QVector3D xAxisEnd(1.0f, -1.0f, -1.0f);
+        const QVector3D yAxisEnd(-1.0f, 1.0f, -1.0f);
+        const QVector3D zAxisEnd(-1.0f, -1.0f, 1.0f);
+
+        QPointF o = project(origin, view, scale);
+        QPointF x = project(xAxisEnd, view, scale);
+        QPointF y = project(yAxisEnd, view, scale);
+        QPointF z = project(zAxisEnd, view, scale);
+
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(QColor(220, 80, 80, 191), 2, Qt::SolidLine, Qt::RoundCap));
+        painter.drawLine(o, x);
+        painter.setPen(QPen(QColor(80, 200, 120, 191), 2, Qt::SolidLine, Qt::RoundCap));
+        painter.drawLine(o, y);
+        painter.setPen(QPen(QColor(80, 120, 220, 191), 2, Qt::SolidLine, Qt::RoundCap));
+        painter.drawLine(o, z);
+
+        QFont axisFont = painter.font();
+        axisFont.setPointSize(8);
+        axisFont.setBold(true);
+        painter.setFont(axisFont);
+        painter.setPen(QColor(220, 80, 80, 191));
+        painter.drawText(QRectF(x.x() - 8, x.y() - 8, 16, 16), Qt::AlignCenter, "X");
+        painter.setPen(QColor(80, 200, 120, 191));
+        painter.drawText(QRectF(y.x() - 8, y.y() - 8, 16, 16), Qt::AlignCenter, "Y");
+        painter.setPen(QColor(80, 120, 220, 191));
+        painter.drawText(QRectF(z.x() - 8, z.y() - 8, 16, 16), Qt::AlignCenter, "Z");
     }
 
     // Highlight Edge if hovered
