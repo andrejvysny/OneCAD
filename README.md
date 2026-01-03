@@ -1,5 +1,7 @@
 # OneCAD
 
+> **⚠️ VibeCoding Alert**: Full codebase generated with AI. Project in active development—manual review & validation required.
+
 ## Overview
 OneCAD is a C++ CAD application utilizing:
 - **CMake** for build configuration.

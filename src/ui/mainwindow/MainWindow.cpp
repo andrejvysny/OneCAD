@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "../theme/ThemeManager.h"
 #include "../viewport/Viewport.h"
 #include "../navigator/ModelNavigator.h"
 #include "../inspector/PropertyInspector.h"
@@ -10,6 +11,7 @@
 #include <QApplication>
 #include <QMessageBox>
 #include <QFileDialog>
+#include <QActionGroup>
 
 namespace onecad {
 namespace ui {
@@ -32,45 +34,7 @@ MainWindow::MainWindow(QWidget* parent)
 MainWindow::~MainWindow() = default;
 
 void MainWindow::applyTheme() {
-    // Dark theme
-    setStyleSheet(R"(
-        QMainWindow {
-            background-color: #1e1e1e;
-        }
-        QMenuBar {
-            background-color: #2d2d30;
-            color: #cccccc;
-            border-bottom: 1px solid #3e3e42;
-        }
-        QMenuBar::item:selected {
-            background-color: #094771;
-        }
-        QMenu {
-            background-color: #2d2d30;
-            color: #cccccc;
-            border: 1px solid #3e3e42;
-        }
-        QMenu::item:selected {
-            background-color: #094771;
-        }
-        QMenu::separator {
-            height: 1px;
-            background-color: #3e3e42;
-        }
-        QStatusBar {
-            background-color: #007acc;
-            color: white;
-        }
-        QDockWidget {
-            color: #cccccc;
-            titlebar-close-icon: none;
-        }
-        QDockWidget::title {
-            background-color: #2d2d30;
-            padding: 6px;
-            border-bottom: 1px solid #3e3e42;
-        }
-    )");
+    ThemeManager::instance().applyTheme();
 }
 
 void MainWindow::setupMenuBar() {
@@ -128,6 +92,40 @@ void MainWindow::setupMenuBar() {
     viewMenu->addAction(tr("Toggle &Grid"), QKeySequence(Qt::Key_G), this, [this]() {
         m_viewport->toggleGrid();
     });
+    viewMenu->addSeparator();
+
+    // Theme Submenu
+    QMenu* themeMenu = viewMenu->addMenu(tr("&Theme"));
+    
+    QAction* lightAction = themeMenu->addAction(tr("&Light"));
+    lightAction->setCheckable(true);
+    connect(lightAction, &QAction::triggered, this, [](){
+        ThemeManager::instance().setThemeMode(ThemeManager::ThemeMode::Light);
+    });
+
+    QAction* darkAction = themeMenu->addAction(tr("&Dark"));
+    darkAction->setCheckable(true);
+    connect(darkAction, &QAction::triggered, this, [](){
+        ThemeManager::instance().setThemeMode(ThemeManager::ThemeMode::Dark);
+    });
+
+    QAction* systemAction = themeMenu->addAction(tr("&System"));
+    systemAction->setCheckable(true);
+    connect(systemAction, &QAction::triggered, this, [](){
+        ThemeManager::instance().setThemeMode(ThemeManager::ThemeMode::System);
+    });
+
+    QActionGroup* themeGroup = new QActionGroup(this);
+    themeGroup->addAction(lightAction);
+    themeGroup->addAction(darkAction);
+    themeGroup->addAction(systemAction);
+    
+    // Set initial state
+    auto currentMode = ThemeManager::instance().themeMode();
+    if (currentMode == ThemeManager::ThemeMode::Light) lightAction->setChecked(true);
+    else if (currentMode == ThemeManager::ThemeMode::Dark) darkAction->setChecked(true);
+    else systemAction->setChecked(true);
+
     viewMenu->addSeparator();
     
     QAction* navAction = viewMenu->addAction(tr("&Navigator"));

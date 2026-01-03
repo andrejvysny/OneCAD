@@ -27,21 +27,6 @@ void ModelNavigator::setupUi() {
     m_treeWidget->setAnimated(true);
     m_treeWidget->setExpandsOnDoubleClick(false);
     
-    // Style
-    m_treeWidget->setStyleSheet(R"(
-        QTreeWidget {
-            background-color: #2d2d30;
-            color: #cccccc;
-            border: none;
-        }
-        QTreeWidget::item:hover {
-            background-color: #3e3e42;
-        }
-        QTreeWidget::item:selected {
-            background-color: #094771;
-        }
-    )");
-    
     connect(m_treeWidget, &QTreeWidget::itemClicked,
             this, &ModelNavigator::onItemClicked);
     connect(m_treeWidget, &QTreeWidget::itemDoubleClicked,

@@ -1,5 +1,6 @@
 #include "ViewCube.h"
 #include "../../render/Camera3D.h"
+#include "../theme/ThemeManager.h"
 #include <QPainter>
 #include <QPainterPath>
 #include <QPolygonF>
@@ -19,6 +20,34 @@ ViewCube::ViewCube(QWidget* parent)
     m_cubeRotation.setToIdentity();
     m_cubeRotation.rotate(90.0f, 0.0f, 0.0f, 1.0f);
     initGeometry();
+    
+    // Theme integration - store connection for proper lifecycle management
+    m_themeConnection = connect(&ThemeManager::instance(), &ThemeManager::themeChanged,
+                                this, &ViewCube::updateTheme, Qt::UniqueConnection);
+    updateTheme();
+}
+
+void ViewCube::updateTheme() {
+    bool isDark = ThemeManager::instance().isDark();
+    
+    if (isDark) {
+        m_faceColor = QColor(220, 220, 220, 191);
+        m_faceHoverColor = QColor(64, 128, 255, 191);
+        m_textColor = Qt::black;
+        m_textHoverColor = Qt::white;
+        m_edgeHoverColor = QColor(64, 128, 255, 191);
+        m_cornerHoverColor = QColor(64, 128, 255, 191);
+    } else {
+        // Light theme - adjust if needed, but the cube usually stands out
+        // keeping similar high-contrast colors for the cube itself
+        m_faceColor = QColor(200, 200, 200, 191); 
+        m_faceHoverColor = QColor(0, 122, 204, 191);
+        m_textColor = Qt::black;
+        m_textHoverColor = Qt::white;
+        m_edgeHoverColor = QColor(0, 122, 204, 191);
+        m_cornerHoverColor = QColor(0, 122, 204, 191);
+    }
+    update();
 }
 
 void ViewCube::setCamera(render::Camera3D* camera) {
@@ -280,8 +309,8 @@ void ViewCube::paintEvent(QPaintEvent* event) {
 
         bool isHovered = (m_hoveredHit.type == ElementType::Face && m_hoveredHit.index == face.id);
         
-        QColor fillColor = isHovered ? QColor(64, 128, 255, 191) : QColor(220, 220, 220, 191);
-        QColor textColor = isHovered ? Qt::white : Qt::black;
+        QColor fillColor = isHovered ? m_faceHoverColor : m_faceColor;
+        QColor textColor = isHovered ? m_textHoverColor : m_textColor;
 
         QPainterPath path;
         path.addPolygon(poly);
@@ -340,7 +369,7 @@ void ViewCube::paintEvent(QPaintEvent* event) {
         QPointF p1 = project(m_vertices[e.v1].pos, view, scale);
         QPointF p2 = project(m_vertices[e.v2].pos, view, scale);
         
-        painter.setPen(QPen(QColor(64, 128, 255, 191), 4, Qt::SolidLine, Qt::RoundCap));
+        painter.setPen(QPen(m_edgeHoverColor, 4, Qt::SolidLine, Qt::RoundCap));
         painter.drawLine(p1, p2);
     }
     
@@ -349,7 +378,7 @@ void ViewCube::paintEvent(QPaintEvent* event) {
         const CubeVertex& v = m_vertices[m_hoveredHit.index];
         QPointF p = project(v.pos, view, scale);
         
-        painter.setBrush(QColor(64, 128, 255, 191));
+        painter.setBrush(m_cornerHoverColor);
         painter.setPen(Qt::NoPen);
         painter.drawEllipse(p, 6, 6);
     }

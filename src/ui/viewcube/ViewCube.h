@@ -21,12 +21,15 @@ class ViewCube : public QWidget {
 
 public:
     explicit ViewCube(QWidget* parent = nullptr);
-    
+
     void setCamera(render::Camera3D* camera);
-    void updateRotation(); 
+
+public slots:
+    void updateRotation();
+    void updateTheme();
 
 signals:
-    void viewChanged(); // Emitted when interaction causes camera change
+    void viewChanged();
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -73,13 +76,24 @@ private:
     QVector<CubeEdge> m_edges;
     QVector<CubeFace> m_faces;
     
+    QMatrix4x4 m_cubeRotation;
+    float m_cubeSize = 120.0f;
+    float m_scale = 0.6f;
+
     Hit m_hoveredHit;
     bool m_isDragging = false;
     QPoint m_lastMousePos;
-    
-    const float m_cubeSize = 120.0f;
-    float m_scale = 0.6f;
-    QMatrix4x4 m_cubeRotation;
+
+    // Theme Colors
+    QColor m_faceColor;
+    QColor m_faceHoverColor;
+    QColor m_textColor;
+    QColor m_textHoverColor;
+    QColor m_edgeHoverColor;
+    QColor m_cornerHoverColor;
+
+    // Signal connection management
+    QMetaObject::Connection m_themeConnection;
 };
 
 } // namespace ui

@@ -35,6 +35,9 @@ public:
     void setMinorColor(const QColor& color) { m_minorColor = color; }
     void setVisible(bool visible) { m_visible = visible; }
     bool isVisible() const { return m_visible; }
+    
+    // Force grid rebuild (e.g. after color change)
+    void forceUpdate() { m_lastSpacing = -1.0f; }
 
 private:
     float calculateSpacing(float cameraDistance) const;

@@ -2,6 +2,7 @@
 #include "../../render/Camera3D.h"
 #include "../../render/Grid3D.h"
 #include "../viewcube/ViewCube.h"
+#include "../theme/ThemeManager.h"
 
 #include <QMouseEvent>
 #include <QWheelEvent>
@@ -60,6 +61,11 @@ Viewport::Viewport(QWidget* parent)
     // Connect Viewport -> ViewCube
     connect(this, &Viewport::cameraChanged, m_viewCube, &ViewCube::updateRotation);
     
+    // Theme integration - store connection for proper lifecycle management
+    m_themeConnection = connect(&ThemeManager::instance(), &ThemeManager::themeChanged,
+                                this, &Viewport::updateTheme, Qt::UniqueConnection);
+    updateTheme(); // Initial theme setup
+
     // Note: QSurfaceFormat is now set globally in main.cpp
     // This ensures the format is applied BEFORE context creation
 }
@@ -79,8 +85,8 @@ void Viewport::initializeGL() {
     std::cout << "OpenGL Version: " << (version ? version : "unknown") << std::endl;
     std::cout << "OpenGL Renderer: " << (renderer ? renderer : "unknown") << std::endl;
     
-    // Dark background per spec
-    glClearColor(0.176f, 0.176f, 0.188f, 1.0f); // #2d2d30
+    // Background color set via updateTheme
+    glClearColor(m_backgroundColor.redF(), m_backgroundColor.greenF(), m_backgroundColor.blueF(), m_backgroundColor.alphaF());
     
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_MULTISAMPLE);
@@ -91,6 +97,25 @@ void Viewport::initializeGL() {
     glDisable(GL_CULL_FACE);
     
     m_grid->initialize();
+}
+
+void Viewport::updateTheme() {
+    if (ThemeManager::instance().isDark()) {
+        m_backgroundColor = QColor(45, 45, 48); // #2d2d30
+        if (m_grid) {
+            m_grid->setMajorColor(QColor(80, 80, 80));
+            m_grid->setMinorColor(QColor(50, 50, 50));
+            m_grid->forceUpdate();
+        }
+    } else {
+        m_backgroundColor = QColor(243, 243, 243); // #f3f3f3
+        if (m_grid) {
+            m_grid->setMajorColor(QColor(200, 200, 200));
+            m_grid->setMinorColor(QColor(225, 225, 225));
+            m_grid->forceUpdate();
+        }
+    }
+    update();
 }
 
 void Viewport::resizeGL(int w, int h) {
@@ -116,7 +141,7 @@ void Viewport::paintGL() {
     glViewport(0, 0, static_cast<GLsizei>(m_width * ratio), static_cast<GLsizei>(m_height * ratio));
     
     // Clear to background color
-    glClearColor(0.176f, 0.176f, 0.188f, 1.0f);
+    glClearColor(m_backgroundColor.redF(), m_backgroundColor.greenF(), m_backgroundColor.blueF(), m_backgroundColor.alphaF());
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     
     // Reset depth test state

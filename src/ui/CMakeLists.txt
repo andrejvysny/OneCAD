@@ -1,6 +1,7 @@
 # UI module - Qt Widgets UI components
 add_library(onecad_ui STATIC
     mainwindow/MainWindow.cpp
+    theme/ThemeManager.cpp
     viewport/Viewport.cpp
     viewcube/ViewCube.cpp
     navigator/ModelNavigator.cpp

@@ -31,16 +31,8 @@ void PropertyInspector::setupUi() {
     mainLayout->addWidget(m_stackedWidget);
     setWidget(container);
     
-    // Style
-    container->setStyleSheet(R"(
-        QWidget {
-            background-color: #2d2d30;
-            color: #cccccc;
-        }
-        QLabel {
-            padding: 4px;
-        }
-    )");
+    // Set object name for styling
+    container->setObjectName("inspectorContainer");
 }
 
 void PropertyInspector::createEmptyStateWidget() {
@@ -48,20 +40,20 @@ void PropertyInspector::createEmptyStateWidget() {
     QVBoxLayout* layout = new QVBoxLayout(m_emptyWidget);
     
     QLabel* iconLabel = new QLabel("🔍");
+    iconLabel->setObjectName("inspectorIcon");
     iconLabel->setAlignment(Qt::AlignCenter);
-    iconLabel->setStyleSheet("font-size: 32px; padding-top: 40px;");
     
     QLabel* titleLabel = new QLabel(tr("No Selection"));
+    titleLabel->setObjectName("inspectorTitle");
     titleLabel->setAlignment(Qt::AlignCenter);
-    titleLabel->setStyleSheet("font-weight: bold; font-size: 14px;");
     
     QLabel* hintLabel = new QLabel(tr("Select an entity to view\nits properties"));
+    hintLabel->setObjectName("inspectorHint");
     hintLabel->setAlignment(Qt::AlignCenter);
-    hintLabel->setStyleSheet("color: #888888; font-size: 12px;");
     
     QLabel* tipLabel = new QLabel(tr("💡 Tip: Double-click a face\nto start a new sketch"));
+    tipLabel->setObjectName("inspectorTip");
     tipLabel->setAlignment(Qt::AlignCenter);
-    tipLabel->setStyleSheet("color: #6b9f6b; font-size: 11px; padding-top: 20px;");
     
     layout->addWidget(iconLabel);
     layout->addWidget(titleLabel);
@@ -76,17 +68,17 @@ void PropertyInspector::createPropertiesWidget() {
     layout->setContentsMargins(12, 12, 12, 12);
     
     m_entityTypeLabel = new QLabel();
-    m_entityTypeLabel->setStyleSheet("font-weight: bold; font-size: 14px;");
+    m_entityTypeLabel->setObjectName("inspectorEntityTitle");
     
     m_entityIdLabel = new QLabel();
-    m_entityIdLabel->setStyleSheet("color: #888888; font-size: 11px;");
+    m_entityIdLabel->setObjectName("inspectorEntityId");
     
     QLabel* separator = new QLabel();
+    separator->setObjectName("inspectorSeparator");
     separator->setFixedHeight(1);
-    separator->setStyleSheet("background-color: #3e3e42;");
     
     QLabel* placeholderLabel = new QLabel(tr("Properties will appear here"));
-    placeholderLabel->setStyleSheet("color: #666666; font-style: italic;");
+    placeholderLabel->setObjectName("inspectorPlaceholder");
     
     layout->addWidget(m_entityTypeLabel);
     layout->addWidget(m_entityIdLabel);

@@ -48,6 +48,7 @@ public slots:
     void setIsometricView();
     void resetView();
     void toggleGrid();
+    void updateTheme();
 
 protected:
     // OpenGL
@@ -75,6 +76,9 @@ private:
     std::unique_ptr<render::Grid3D> m_grid;
     ViewCube* m_viewCube = nullptr;
     
+    // Appearance
+    QColor m_backgroundColor;
+    
     // Mouse state
     QPoint m_lastMousePos;
     bool m_isPanning = false;
@@ -89,6 +93,9 @@ private:
     // Viewport size
     int m_width = 1;
     int m_height = 1;
+
+    // Signal connection management
+    QMetaObject::Connection m_themeConnection;
 };
 
 } // namespace ui

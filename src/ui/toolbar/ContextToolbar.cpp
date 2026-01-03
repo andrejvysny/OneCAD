@@ -10,32 +10,6 @@ ContextToolbar::ContextToolbar(QWidget* parent)
     setIconSize(QSize(24, 24));
     setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
     
-    // Style
-    setStyleSheet(R"(
-        QToolBar {
-            background-color: #2d2d30;
-            border: none;
-            border-bottom: 1px solid #3e3e42;
-            spacing: 4px;
-            padding: 4px;
-        }
-        QToolButton {
-            background-color: transparent;
-            border: 1px solid transparent;
-            border-radius: 4px;
-            padding: 6px 12px;
-            color: #cccccc;
-            min-width: 60px;
-        }
-        QToolButton:hover {
-            background-color: #3e3e42;
-            border-color: #4e4e52;
-        }
-        QToolButton:pressed {
-            background-color: #094771;
-        }
-    )");
-    
     setupDefaultActions();
     setupSketchActions();
     updateVisibleActions();
