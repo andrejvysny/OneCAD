@@ -2,13 +2,13 @@
 
 Status: **Phase 3 Complete** - Loop Detection Implemented
 
-**Last Updated:** 2026-01-03
+**Last Updated:** 2026-01-03 *(Corrected based on actual codebase analysis)*
 
 ---
 
 ## Implementation Status Overview
 
-### COMPLETED - Phase 1: Architecture Foundation
+### ✅ COMPLETED - Phase 1: Architecture Foundation
 
 | Component | File | Status |
 |-----------|------|--------|
@@ -18,28 +18,29 @@ Status: **Phase 3 Complete** - Loop Detection Implemented
 | Line Entity | `src/core/sketch/SketchLine.h/cpp` | ✅ Complete |
 | Arc Entity | `src/core/sketch/SketchArc.h/cpp` | ✅ Complete |
 | Circle Entity | `src/core/sketch/SketchCircle.h/cpp` | ✅ Complete |
+| Ellipse Entity | *Declared in API* | ❌ **NOT IMPLEMENTED** |
 | Constraint Base | `src/core/sketch/SketchConstraint.h/cpp` | ✅ Complete |
-| Concrete Constraints | `src/core/sketch/constraints/Constraints.h/cpp` | ✅ Complete |
+| Concrete Constraints | `src/core/sketch/constraints/Constraints.h/cpp` | ✅ Complete (454 lines) |
 | Sketch Manager | `src/core/sketch/Sketch.h/cpp` | ✅ Complete |
 | Solver Interface | `src/core/sketch/solver/ConstraintSolver.h` | ✅ Complete |
-| Loop Detector | `src/core/loop/LoopDetector.h` | ✅ Interface Complete |
-| Renderer Interface | `src/core/sketch/SketchRenderer.h` | ✅ Interface Complete |
+| Loop Detector | `src/core/loop/LoopDetector.h` | ✅ Complete (Interface + Impl) |
+| **Renderer FULL IMPLEMENTATION** | `src/core/sketch/SketchRenderer.h/cpp` | ✅ **COMPLETE (1200 lines)** |
 | CMake Configuration | `src/core/CMakeLists.txt` | ✅ Complete |
 
-### COMPLETED - Phase 2: PlaneGCS Integration & Core Implementation
+### ✅ COMPLETED - Phase 2: PlaneGCS Integration & Core Implementation
 
 | Component | File | Status |
 |-----------|------|--------|
 | PlaneGCS Library | `third_party/planegcs/` | ✅ Complete |
-| Constraint Solver | `src/core/sketch/solver/ConstraintSolver.cpp` | ✅ Complete (980 lines) |
+| Constraint Solver | `src/core/sketch/solver/ConstraintSolver.cpp` | ✅ Complete (1015 lines) |
 | Solver Adapter | `src/core/sketch/solver/SolverAdapter.h/cpp` | ✅ Complete |
-| Sketch.cpp | `src/core/sketch/Sketch.cpp` | ✅ Complete (894 lines) |
+| Sketch.cpp | `src/core/sketch/Sketch.cpp` | ✅ Complete (903 lines) |
 | Solve & Drag | `Sketch::solve()`, `Sketch::solveWithDrag()` | ✅ Complete |
 | DOF Calculation | `Sketch::getDegreesOfFreedom()` | ✅ Complete |
 | Conflict Detection | `ConstraintSolver::findRedundantConstraints()` | ✅ Complete |
 | Serialization | `Sketch::toJson()`, `Sketch::fromJson()` | ✅ Complete |
 
-### Constraint Mappings (All Complete)
+### PlaneGCS-Mapped Constraints (9 types integrated)
 
 | OneCAD Constraint | PlaneGCS Constraint | Status |
 |-------------------|---------------------|--------|
@@ -54,12 +55,17 @@ Status: **Phase 3 Complete** - Loop Detection Implemented
 | Tangent | `GCS::addConstraintTangent` (all combinations) | ✅ |
 | Equal | `GCS::addConstraintEqualLength/EqualRadius` | ✅ |
 
-### COMPLETED - Phase 3: Loop Detection Algorithms
+**Additional Constraints (Not PlaneGCS-mapped):**
+- Fixed (2 DOF removed) - ✅ Implemented in Constraints.cpp
+- Midpoint (2 DOF removed) - ✅ Implemented in Constraints.cpp
+
+### ✅ COMPLETED - Phase 3: Loop Detection Algorithms
 
 | Component | File | Status |
 |-----------|------|--------|
-| Loop Detector | `src/core/loop/LoopDetector.h/cpp` | ✅ Complete (969 lines) |
+| Loop Detector | `src/core/loop/LoopDetector.h/cpp` | ✅ Complete (990 lines) |
 | Adjacency Graph | `src/core/loop/AdjacencyGraph.h/cpp` | ✅ Complete |
+| Face Builder | `src/core/loop/FaceBuilder.h/cpp` | ✅ Complete |
 | DFS Cycle Detection | `LoopDetector::findCycles()` | ✅ Complete |
 | Area Calculation | `computeSignedArea()` (Shoelace) | ✅ Complete |
 | Point-in-Polygon | `isPointInPolygon()` (Ray casting) | ✅ Complete |
@@ -67,130 +73,50 @@ Status: **Phase 3 Complete** - Loop Detection Implemented
 | Wire Building | `buildWire()` | ✅ Complete |
 | Loop Validation | `validateLoop()` | ✅ Complete |
 
+### ✅ COMPLETED - Phase 4: Rendering System (Previously Undocumented)
+
+**Actual Status:** **FULLY IMPLEMENTED** ✅
+
+| Component | File | Lines | Status |
+|-----------|------|-------|--------|
+| **SketchRenderer Implementation** | `src/core/sketch/SketchRenderer.cpp` | **1200** | ✅ Complete |
+| Inline GLSL Shaders | Embedded in SketchRenderer.cpp | ~120 | ✅ Complete |
+| VBO Batching System | `buildVBOs()`, `render()` methods | — | ✅ Complete |
+| Adaptive Arc Tessellation | Implemented (8+ segments/π) | — | ✅ Complete |
+| Selection State Colors | Blue/Green/Orange feedback | — | ✅ Complete |
+| Preview Rendering | Line/Circle/Rectangle preview | — | ✅ Complete |
+
+**Key Implementation Details:**
+- **GLSL Shaders**: Inline vertex & fragment shaders (OpenGL 4.1 Core)
+- **Geometry Batching**: Separate VBOs for lines, points, construction geometry
+- **State-based Coloring**: Hover, selected, construction modes
+- **Constraint Icons**: Positioned via `getIconPosition()` (texture rendering pending)
+
+### ✅ PARTIAL - Phase 5: Sketch Tools
+
+| Component | File | Lines | Status |
+|-----------|------|-------|--------|
+| Tool Base & Manager | `SketchTool.h`, `SketchToolManager.h/cpp` | — | ✅ Complete |
+| Line Tool | `tools/LineTool.h/cpp` | 94 | ✅ Complete (polyline mode) |
+| Circle Tool | `tools/CircleTool.h/cpp` | 95 | ✅ Complete (center-radius) |
+| Rectangle Tool | `tools/RectangleTool.h/cpp` | 125 | ✅ Complete (auto-constrained) |
+| **Arc Tool** | — | — | ❌ **NOT IMPLEMENTED** |
+| **Ellipse Tool** | — | — | ❌ **NOT IMPLEMENTED** |
+
 ### AWAITING IMPLEMENTATION
 
 | Component | Phase | Complexity | Priority |
 |-----------|-------|------------|----------|
-| Rendering System | 4 | High | **BLOCKING** |
-| Snap & Auto-Constrain | 5 | Medium | Medium |
-| Sketch Tools (Interactive) | 6 | Medium | High |
+| Snap & Auto-Constrain | 6 | Medium | High |
+| Arc & Ellipse Tools | 5 (cont'd) | Medium | Medium |
 | UI Integration | 7 | Medium | Medium |
+| DOF Color Visualization | 7 | Low | Low |
 
----
 
-## Detailed Implementation Phases
 
-### Phase 3: Loop Detection Algorithms ✅ COMPLETE
+## Next Implementation Priorities
 
-**Status: IMPLEMENTED** (969 lines in LoopDetector.cpp)
-**Files:**
-- `src/core/loop/LoopDetector.cpp` ✅
-- `src/core/loop/AdjacencyGraph.h/cpp` ✅
-
-#### 3.1 Graph Construction ✅
-Implemented in `buildGraph()` method. Builds adjacency graph from sketch entities:
-- Lines → 2 edges (start/end nodes)
-- Arcs → 2 edges with center/radius/angle data
-- Circles → handled separately as complete loops
-
-#### 3.2 Cycle Detection (DFS) ✅
-Implemented in `findCycles()` method (lines 560-628):
-- Uses DFS with backtracking
-- Deduplication via sorted edge key hashing
-- Returns vector of Wire objects with forward/backward flags
-
-#### 3.3 Area & Orientation Calculation ✅
-Implemented:
-- `computeSignedArea()` - Shoelace formula (positive=CCW, negative=CW)
-- `computeLoopProperties()` - area, bounds, centroid, polygon sampling
-- Arc tessellation: 8+ segments per π radians
-
-#### 3.4 Hole Detection & Face Hierarchy ✅
-Implemented in `buildFaceHierarchy()`:
-- Sorts loops by area (largest first)
-- Uses depth-based even/odd rule (even=outer, odd=hole)
-- Containment via `loopContainsLoop()` + bounding box pre-check
-- Validates holes don't overlap via `polygonsIntersect()`
-
----
-
-### Phase 4: Rendering System
-
-**Priority: High**
-**Estimated Complexity: High**
-**Dependencies: Phase 2 (complete), existing OpenGL infrastructure**
-
-#### 4.1 Shader Programs
-```glsl
-// sketch_line.vert
-uniform mat4 u_mvp;
-uniform float u_lineWidth;
-attribute vec2 a_position;
-attribute vec4 a_color;
-// Expand line to quad in geometry shader or vertex shader
-
-// sketch_line.frag
-uniform bool u_dashed;
-uniform float u_dashLength;
-varying float v_linePos;  // For dash pattern
-```
-
-Files to Create:
-- `src/core/sketch/SketchRenderer.cpp`
-- `resources/shaders/sketch_line.vert`
-- `resources/shaders/sketch_line.frag`
-- `resources/shaders/sketch_point.vert`
-- `resources/shaders/sketch_point.frag`
-
-#### 4.2 VBO Management
-```cpp
-// Batch geometry by type for efficient rendering
-struct RenderBatch {
-    GLuint vao;
-    GLuint vbo;
-    size_t vertexCount;
-    GLenum primitiveType;
-};
-
-void SketchRenderer::buildVBOs() {
-    // Collect all line vertices
-    // Tessellate all arcs
-    // Upload to GPU
-}
-```
-
-#### 4.3 Constraint Icon Atlas
-```
-Icon Layout (16x16 per icon):
-[Coincident][Horizontal][Vertical][Parallel]
-[Perpendicular][Tangent][Concentric][Equal]
-[Distance][Angle][Radius][Diameter]
-[Fixed][Midpoint][Symmetric][Error]
-```
-
-#### 4.4 Adaptive Arc Tessellation
-```cpp
-int calculateArcSegments(double radius, double arcAngle, double zoom) {
-    // More segments at higher zoom
-    // Minimum 8, maximum 128
-    double pixelArc = radius * arcAngle * zoom;
-    int segments = std::clamp(
-        static_cast<int>(pixelArc / TESSELLATION_ANGLE),
-        MIN_SEGMENTS, MAX_SEGMENTS
-    );
-    return segments;
-}
-```
-
----
-
-### Phase 5: Snap & Auto-Constrain
-
-**Priority: Medium**
-**Estimated Complexity: Medium**
-**Dependencies: Phase 4**
-
-#### 5.1 Snap Point Finding
+### Immediate (Phase 6 - Snap & Auto-Constrain)
 ```cpp
 // Find all snap candidates within radius
 std::vector<SnapResult> findAllSnaps(const Vec2d& cursor, const Sketch& sketch) {
@@ -412,6 +338,40 @@ src/core/
 │   ├── SketchEntity.h/cpp      [✅ COMPLETE]
 │   ├── SketchPoint.h/cpp       [✅ COMPLETE]
 │   ├── SketchLine.h/cpp        [✅ COMPLETE]
+│   ├── SketchArc.h/cpp         [✅ COMPLETE]
+│   ├── SketchCircle.h/cpp      [✅ COMPLETE]
+│   ├── SketchEllipse.h/cpp     [❌ NOT IMPLEMENTED - Declared in API only]
+│   ├── SketchConstraint.h/cpp  [✅ COMPLETE]
+│   ├── Sketch.h/cpp            [✅ COMPLETE] (903 lines)
+│   ├── SketchRenderer.h        [✅ COMPLETE]
+│   ├── SketchRenderer.cpp      [✅ COMPLETE] (1200 lines with GLSL)
+│   ├── SketchTool.h            [✅ COMPLETE]
+│   ├── SnapManager.h/cpp       [❌ NOT IMPLEMENTED]
+│   ├── AutoConstrainer.h/cpp   [❌ NOT IMPLEMENTED]
+│   ├── tools/
+│   │   ├── SketchToolManager.h/cpp [✅ COMPLETE]
+│   │   ├── LineTool.h/cpp      [✅ COMPLETE]
+│   │   ├── RectangleTool.h/cpp [✅ COMPLETE]
+│   │   ├── CircleTool.h/cpp    [✅ COMPLETE]
+│   │   ├── ArcTool.h/cpp       [❌ NOT IMPLEMENTED]
+│   │   └── EllipseTool.h/cpp   [❌ NOT IMPLEMENTED]
+│   ├── constraints/
+│   │   └── Constraints.h/cpp   [✅ COMPLETE] (1033 lines)
+│   └── solver/
+│       ├── ConstraintSolver.h  [✅ COMPLETE]
+│       ├── ConstraintSolver.cpp[✅ COMPLETE] (1015 lines)
+│       ├── SolverAdapter.h     [✅ COMPLETE]
+│       └── SolverAdapter.cpp   [✅ COMPLETE]
+├── loop/
+│   ├── LoopDetector.h          [✅ COMPLETE]
+│   ├── LoopDetector.cpp        [✅ COMPLETE] (990 lines)
+│   ├── AdjacencyGraph.h/cpp    [✅ COMPLETE]
+│   └── FaceBuilder.h/cpp       [✅ COMPLETE]
+└── CMakeLists.txt              [✅ COMPLETE]
+
+third_party/
+└── planegcs/                   [✅ COMPLETE]
+```
 │   ├── SketchArc.h/cpp         [✅ COMPLETE]
 │   ├── SketchCircle.h/cpp      [✅ COMPLETE]
 │   ├── SketchConstraint.h/cpp  [✅ COMPLETE]
