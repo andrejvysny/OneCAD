@@ -7,6 +7,7 @@
 #include <QGestureEvent>
 #include <QPinchGesture>
 #include <QPanGesture>
+#include <QNativeGestureEvent>
 #include <QApplication>
 #include <QOpenGLContext>
 #include <QSizePolicy>
@@ -14,6 +15,15 @@
 
 namespace onecad {
 namespace ui {
+
+namespace {
+constexpr float kOrbitSensitivity = 0.3f;
+constexpr float kTrackpadPanScale = 1.0f;
+constexpr float kTrackpadOrbitScale = 0.35f;
+constexpr float kPinchZoomScale = 1000.0f;
+constexpr float kWheelZoomShiftScale = 0.2f;
+constexpr float kAngleDeltaToPixels = 1.0f / 8.0f;
+} // namespace
 
 Viewport::Viewport(QWidget* parent) 
     : QOpenGLWidget(parent)
@@ -99,7 +109,6 @@ void Viewport::paintGL() {
 
 void Viewport::mousePressEvent(QMouseEvent* event) {
     m_lastMousePos = event->pos();
-    m_shiftHeld = event->modifiers() & Qt::ShiftModifier;
     
     if (event->button() == Qt::RightButton) {
         m_isOrbiting = true;
@@ -140,20 +149,60 @@ void Viewport::mouseReleaseEvent(QMouseEvent* event) {
 }
 
 void Viewport::wheelEvent(QWheelEvent* event) {
-    // Zoom with scroll wheel
-    float delta = event->angleDelta().y();
-    
+    const QPoint pixelDelta = event->pixelDelta();
+    const QPoint angleDelta = event->angleDelta();
+    const bool hasPixelDelta = !pixelDelta.isNull();
+    const bool hasAngleDelta = !angleDelta.isNull();
+    const bool isTrackpad = (event->phase() != Qt::NoScrollPhase) ||
+        (hasPixelDelta && !hasAngleDelta);
+
+    if (isTrackpad && (hasPixelDelta || hasAngleDelta)) {
+        QPointF delta = hasPixelDelta
+            ? QPointF(pixelDelta)
+            : QPointF(angleDelta) * kAngleDeltaToPixels;
+
+        if (event->modifiers() & Qt::ShiftModifier) {
+            handleOrbit(delta.x() * kTrackpadOrbitScale, 
+                        delta.y() * kTrackpadOrbitScale);
+        } else {
+            handlePan(delta.x() * kTrackpadPanScale, 
+                      delta.y() * kTrackpadPanScale);
+        }
+
+        event->accept();
+        return;
+    }
+
+    if (!hasAngleDelta) {
+        event->ignore();
+        return;
+    }
+
+    float delta = static_cast<float>(angleDelta.y());
+
     // Shift for slower zoom
     if (event->modifiers() & Qt::ShiftModifier) {
-        delta *= 0.2f;
+        delta *= kWheelZoomShiftScale;
     }
-    
+
     handleZoom(delta);
-    
     event->accept();
 }
 
 bool Viewport::event(QEvent* event) {
+    if (event->type() == QEvent::NativeGesture) {
+        QNativeGestureEvent* gestureEvent = static_cast<QNativeGestureEvent*>(event);
+
+        if (gestureEvent->gestureType() == Qt::ZoomNativeGesture && !m_pinchActive) {
+            qreal value = gestureEvent->value();
+            if (value > 0.5 && value < 1.5) {
+                value -= 1.0;
+            }
+            handleZoom(static_cast<float>(value * kPinchZoomScale));
+            return true;
+        }
+    }
+
     if (event->type() == QEvent::Gesture) {
         QGestureEvent* gestureEvent = static_cast<QGestureEvent*>(event);
         
@@ -163,13 +212,19 @@ bool Viewport::event(QEvent* event) {
             
             if (pinch->state() == Qt::GestureStarted) {
                 m_lastPinchScale = 1.0;
+                m_pinchActive = true;
             }
             
             qreal scaleFactor = pinch->scaleFactor();
-            qreal delta = (scaleFactor - m_lastPinchScale) * 1000.0;
+            qreal delta = (scaleFactor - m_lastPinchScale) * kPinchZoomScale;
             m_lastPinchScale = scaleFactor;
             
             handleZoom(static_cast<float>(delta));
+
+            if (pinch->state() == Qt::GestureFinished ||
+                pinch->state() == Qt::GestureCanceled) {
+                m_pinchActive = false;
+            }
             
             return true;
         }
@@ -185,12 +240,12 @@ bool Viewport::event(QEvent* event) {
             
             if (shiftHeld) {
                 // Shift + two-finger = orbit
-                handleOrbit(static_cast<float>(delta.x()), 
-                           static_cast<float>(delta.y()));
+                handleOrbit(static_cast<float>(delta.x()) * kTrackpadOrbitScale,
+                           static_cast<float>(delta.y()) * kTrackpadOrbitScale);
             } else {
                 // Two-finger = pan
-                handlePan(static_cast<float>(delta.x()), 
-                         static_cast<float>(delta.y()));
+                handlePan(static_cast<float>(delta.x()) * kTrackpadPanScale,
+                         static_cast<float>(delta.y()) * kTrackpadPanScale);
             }
             
             return true;
@@ -208,8 +263,7 @@ void Viewport::handlePan(float dx, float dy) {
 
 void Viewport::handleOrbit(float dx, float dy) {
     // Sensitivity adjustment
-    float sensitivity = 0.3f;
-    m_camera->orbit(dx * sensitivity, dy * sensitivity);
+    m_camera->orbit(dx * kOrbitSensitivity, dy * kOrbitSensitivity);
     update();
     emit cameraChanged();
 }

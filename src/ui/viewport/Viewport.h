@@ -17,8 +17,8 @@ namespace onecad {
 namespace ui {
 
 /**
- * @brief OpenGL 3D viewport with Blender-like navigation.
- * 
+ * @brief OpenGL 3D viewport with Shapr3D-style navigation.
+ *
  * Navigation controls:
  * - Mouse: Right-drag=orbit, Middle-drag=pan, Scroll=zoom
  * - Trackpad: Two-finger=pan, Shift+two-finger=orbit, Pinch=zoom
@@ -77,7 +77,7 @@ private:
     
     // Gesture state
     qreal m_lastPinchScale = 1.0;
-    bool m_shiftHeld = false;
+    bool m_pinchActive = false;
     
     // Viewport size
     int m_width = 1;
