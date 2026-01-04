@@ -31,12 +31,7 @@ double distanceSquared(const sk::Vec2d& a, const sk::Vec2d& b) {
     return dx * dx + dy * dy;
 }
 
-void appendArcSamples(std::vector<sk::Vec2d>& points,
-                      const sk::Vec2d& center,
-                      double radius,
-                      double startAngle,
-                      double endAngle,
-                      bool forward) {
+double computeArcSweep(double startAngle, double endAngle, bool forward) {
     double sweep = endAngle - startAngle;
     if (forward) {
         if (sweep < 0.0) {
@@ -47,11 +42,76 @@ void appendArcSamples(std::vector<sk::Vec2d>& points,
             sweep -= 2.0 * std::numbers::pi_v<double>;
         }
     }
+    return sweep;
+}
 
+double computeTessellationTolerance(double radius, const LoopDetectorConfig& config) {
+    double absRadius = std::abs(radius);
+    double tol = config.tessellationTolerance;
+    if (config.tessellationRelative > 0.0 && absRadius > 0.0) {
+        double relativeTol = absRadius * config.tessellationRelative;
+        tol = (tol > 0.0) ? std::min(tol, relativeTol) : relativeTol;
+    }
+    if (tol <= 0.0) {
+        tol = 1e-6;
+    }
+    return tol;
+}
+
+int computeSegmentsForSweep(double radius, double absSweep,
+                            int minSegments, int maxSegments,
+                            const LoopDetectorConfig& config) {
+    int minSeg = std::max(1, minSegments);
+    int maxSeg = std::max(minSeg, maxSegments);
+    if (absSweep <= 0.0) {
+        return minSeg;
+    }
+
+    double absRadius = std::abs(radius);
+    int segments = minSeg;
+    if (absRadius > 0.0) {
+        double tol = computeTessellationTolerance(absRadius, config);
+        double ratio = 1.0 - tol / absRadius;
+        ratio = std::clamp(ratio, -1.0, 1.0);
+        double step = 2.0 * std::acos(ratio);
+        if (std::isfinite(step) && step > 1e-6) {
+            segments = static_cast<int>(std::ceil(absSweep / step));
+        } else {
+            segments = maxSeg;
+        }
+    }
+
+    return std::clamp(segments, minSeg, maxSeg);
+}
+
+int computeArcSegments(double radius, double absSweep, const LoopDetectorConfig& config) {
+    return computeSegmentsForSweep(radius, absSweep,
+                                   config.minArcSegments, config.maxArcSegments,
+                                   config);
+}
+
+int computeCircleSegments(double radius, const LoopDetectorConfig& config) {
+    int minSeg = std::max(3, config.minCircleSegments);
+    int maxSeg = std::max(minSeg, config.maxCircleSegments);
+    return computeSegmentsForSweep(radius, 2.0 * std::numbers::pi_v<double>,
+                                   minSeg, maxSeg,
+                                   config);
+}
+
+void appendArcSamples(std::vector<sk::Vec2d>& points,
+                      const sk::Vec2d& center,
+                      double radius,
+                      double startAngle,
+                      double endAngle,
+                      bool forward,
+                      const LoopDetectorConfig& config) {
+    double sweep = computeArcSweep(startAngle, endAngle, forward);
     double absSweep = std::abs(sweep);
-    int segments = std::max(8, static_cast<int>(std::ceil(absSweep / (std::numbers::pi_v<double> / 8.0))));
+    int segments = computeArcSegments(radius, absSweep, config);
+    if (segments <= 0) {
+        return;
+    }
     double step = sweep / static_cast<double>(segments);
-
     for (int i = 1; i <= segments; ++i) {
         double angle = startAngle + step * static_cast<double>(i);
         points.push_back({center.x + radius * std::cos(angle),
@@ -139,18 +199,21 @@ bool segmentIntersection(const sk::Vec2d& p1, const sk::Vec2d& p2,
 std::vector<sk::Vec2d> tessellateArcPoints(const sk::Vec2d& center,
                                            double radius,
                                            double startAngle,
-                                           double endAngle) {
+                                           double endAngle,
+                                           const LoopDetectorConfig& config) {
     std::vector<sk::Vec2d> points;
     points.reserve(16);
     points.push_back({center.x + radius * std::cos(startAngle),
                       center.y + radius * std::sin(startAngle)});
-    appendArcSamples(points, center, radius, startAngle, endAngle, true);
+    appendArcSamples(points, center, radius, startAngle, endAngle, true, config);
     return points;
 }
 
-std::vector<sk::Vec2d> tessellateCirclePoints(const sk::Vec2d& center, double radius) {
+std::vector<sk::Vec2d> tessellateCirclePoints(const sk::Vec2d& center,
+                                              double radius,
+                                              const LoopDetectorConfig& config) {
     std::vector<sk::Vec2d> points;
-    int segments = 32;
+    int segments = computeCircleSegments(radius, config);
     points.reserve(static_cast<size_t>(segments) + 1);
     for (int i = 0; i <= segments; ++i) {
         double angle = (2.0 * std::numbers::pi_v<double> * i) / static_cast<double>(segments);
@@ -736,7 +799,8 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
             }
             sk::Vec2d centerPos = toVec2(centerPoint->position());
             auto points = tessellateArcPoints(centerPos, arc->radius(),
-                                              arc->startAngle(), arc->endAngle());
+                                              arc->startAngle(), arc->endAngle(),
+                                              config_);
             for (size_t i = 0; i + 1 < points.size(); ++i) {
                 if (distanceSquared(points[i], points[i + 1]) <= tolerance * tolerance) {
                     continue;
@@ -754,7 +818,7 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
                 continue;
             }
             sk::Vec2d centerPos = toVec2(centerPoint->position());
-            auto points = tessellateCirclePoints(centerPos, circle->radius());
+            auto points = tessellateCirclePoints(centerPos, circle->radius(), config_);
             for (size_t i = 0; i + 1 < points.size(); ++i) {
                 if (distanceSquared(points[i], points[i + 1]) <= tolerance * tolerance) {
                     continue;
@@ -1148,7 +1212,8 @@ void LoopDetector::computeLoopProperties(Loop& loop, const sk::Sketch& sketch) c
             appendArcSamples(loop.polygon, centerPos, arc->radius(),
                              forward ? arc->startAngle() : arc->endAngle(),
                              forward ? arc->endAngle() : arc->startAngle(),
-                             forward);
+                             forward,
+                             config_);
         } else if (entity->type() == sk::EntityType::Circle) {
             auto* circle = sketch.getEntityAs<sk::SketchCircle>(edgeId);
             if (!circle) {
@@ -1159,7 +1224,7 @@ void LoopDetector::computeLoopProperties(Loop& loop, const sk::Sketch& sketch) c
                 continue;
             }
             sk::Vec2d centerPos = toVec2(centerPoint->position());
-            int segments = 32;
+            int segments = computeCircleSegments(circle->radius(), config_);
             for (int s = 0; s <= segments; ++s) {
                 double angle = (2.0 * std::numbers::pi_v<double> * s) / static_cast<double>(segments);
                 loop.polygon.push_back({centerPos.x + circle->radius() * std::cos(angle),

@@ -39,6 +39,12 @@ double dot(const sk::Vec3d& a, const sk::Vec3d& b) {
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
+double distanceSquared(const sk::Vec2d& a, const sk::Vec2d& b) {
+    double dx = a.x - b.x;
+    double dy = a.y - b.y;
+    return dx * dx + dy * dy;
+}
+
 sk::Vec3d cross(const sk::Vec3d& a, const sk::Vec3d& b) {
     return {
         a.y * b.z - a.z * b.y,
@@ -308,29 +314,81 @@ WireBuildResult FaceBuilder::buildWire(const Loop& loop, const sk::Sketch& sketc
                                         const gp_Pln& plane) const {
     WireBuildResult result;
 
-    if (loop.wire.edges.empty()) {
-        result.errorMessage = "Empty wire";
+    bool canUseEntities = !loop.wire.edges.empty();
+    if (canUseEntities) {
+        for (const auto& entityId : loop.wire.edges) {
+            if (!sketch.getEntity(entityId)) {
+                canUseEntities = false;
+                break;
+            }
+        }
+    }
+
+    if (!canUseEntities && loop.polygon.size() < 3) {
+        result.errorMessage = "Wire has no valid entities or polygon data";
         return result;
     }
 
     try {
         BRepBuilderAPI_MakeWire wireMaker;
 
-        for (size_t i = 0; i < loop.wire.edges.size(); ++i) {
-            const auto& entityId = loop.wire.edges[i];
-            bool forward = (i < loop.wire.forward.size()) ? loop.wire.forward[i] : true;
+        if (canUseEntities) {
+            for (size_t i = 0; i < loop.wire.edges.size(); ++i) {
+                const auto& entityId = loop.wire.edges[i];
+                bool forward = (i < loop.wire.forward.size()) ? loop.wire.forward[i] : true;
 
-            auto edge = createEdge(entityId, sketch, plane, forward);
-            if (!edge.has_value()) {
-                result.errorMessage = "Failed to create edge for entity: " + entityId;
+                auto edge = createEdge(entityId, sketch, plane, forward);
+                if (!edge.has_value()) {
+                    result.errorMessage = "Failed to create edge for entity: " + entityId;
+                    return result;
+                }
+
+                wireMaker.Add(edge.value());
+                if (wireMaker.Error() != BRepBuilderAPI_WireDone) {
+                    result.warnings.push_back(
+                        std::string("Wire build reported: ") + wireErrorToString(wireMaker.Error()));
+                }
+            }
+        } else {
+            std::vector<sk::Vec2d> points = loop.polygon;
+            double tol2 = config_.edgeTolerance * config_.edgeTolerance;
+            if (points.size() > 1 && distanceSquared(points.front(), points.back()) <= tol2) {
+                points.pop_back();
+            }
+            if (points.size() < 3) {
+                result.errorMessage = "Polygon wire has insufficient points";
                 return result;
             }
 
-            wireMaker.Add(edge.value());
-            if (wireMaker.Error() != BRepBuilderAPI_WireDone) {
-                result.warnings.push_back(
-                    std::string("Wire build reported: ") + wireErrorToString(wireMaker.Error()));
+            for (size_t i = 0; i < points.size(); ++i) {
+                const sk::Vec2d& from = points[i];
+                const sk::Vec2d& to = points[(i + 1) % points.size()];
+                if (distanceSquared(from, to) <= tol2) {
+                    continue;
+                }
+
+                gp_Pnt p1 = toGpPnt(from, plane);
+                gp_Pnt p2 = toGpPnt(to, plane);
+                GC_MakeSegment segmentMaker(p1, p2);
+                if (!segmentMaker.IsDone()) {
+                    result.errorMessage = "Failed to create polygon segment";
+                    return result;
+                }
+
+                BRepBuilderAPI_MakeEdge edgeMaker(segmentMaker.Value());
+                if (!edgeMaker.IsDone()) {
+                    result.errorMessage = "Failed to create polygon edge";
+                    return result;
+                }
+
+                wireMaker.Add(edgeMaker.Edge());
+                if (wireMaker.Error() != BRepBuilderAPI_WireDone) {
+                    result.warnings.push_back(
+                        std::string("Wire build reported: ") + wireErrorToString(wireMaker.Error()));
+                }
             }
+
+            result.warnings.push_back("Using polygon wire for planarized loop");
         }
 
         if (!wireMaker.IsDone()) {

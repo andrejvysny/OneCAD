@@ -202,6 +202,24 @@ struct LoopDetectorConfig {
 
     /// Whether to planarize intersections by splitting edges
     bool planarizeIntersections = false;
+
+    /// Tessellation tolerance for arcs/circles (mm)
+    double tessellationTolerance = 0.05;
+
+    /// Relative tessellation tolerance (fraction of radius)
+    double tessellationRelative = 0.02;
+
+    /// Minimum arc segments
+    int minArcSegments = 8;
+
+    /// Maximum arc segments
+    int maxArcSegments = 256;
+
+    /// Minimum circle segments
+    int minCircleSegments = 32;
+
+    /// Maximum circle segments
+    int maxCircleSegments = 512;
 };
 
 /**
