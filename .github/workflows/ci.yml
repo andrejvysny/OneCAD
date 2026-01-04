@@ -20,7 +20,7 @@ jobs:
             build-essential ninja-build cmake \
             qt6-base-dev qt6-base-dev-tools qt6-tools-dev qt6-tools-dev-tools libqt6svg6 libqt6svg6-dev \
             libgl1-mesa-dev libx11-dev libxext-dev libxrandr-dev libxfixes-dev libxi-dev libxrender-dev libxkbcommon-dev \
-            libocct-foundation-dev libocct-modeling-data-dev libocct-modeling-algorithms-dev libocct-ocaf-dev libocct-visualization-dev libocct-draw-dev libocct-data-exchange-dev \
+            libocct-all-dev libocct-foundation-dev libocct-modeling-data-dev libocct-modeling-algorithms-dev libocct-ocaf-dev libocct-visualization-dev libocct-draw-dev libocct-data-exchange-dev \
             libeigen3-dev libvulkan-dev
 
       - name: Configure
@@ -28,7 +28,8 @@ jobs:
           cmake -S . -B build -GNinja \
             -DCMAKE_BUILD_TYPE=Release \
             -DQt6_DIR=/usr/lib/x86_64-linux-gnu/cmake/Qt6 \
-            -DOpenCASCADE_DIR=/usr/lib/x86_64-linux-gnu/cmake/opencascade
+            -DOpenCASCADE_DIR=/usr/lib/x86_64-linux-gnu/cmake/opencascade \
+            -DCMAKE_PREFIX_PATH="/usr/lib/x86_64-linux-gnu/cmake;/usr/lib/cmake"
 
       - name: Build prototypes
         run: |
