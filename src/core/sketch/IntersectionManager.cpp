@@ -101,12 +101,34 @@ IntersectionResult IntersectionManager::processIntersections(
         }
     }
 
-    // Now split intersected entities
-    // Build map of entity -> intersection points on that entity
+    // Build map of entity -> intersection points (using MERGED points for accurate splitting)
+    // For each merged point, determine which entities it lies on
     std::unordered_map<EntityID, std::vector<Vec2d>> entityIntersections;
+    double mergeTolSq = minPointSpacing_ * minPointSpacing_;
 
-    for (size_t i = 0; i < std::min(allIntersections.size(), intersectedEntityIds.size()); ++i) {
-        entityIntersections[intersectedEntityIds[i]].push_back(allIntersections[i]);
+    for (const Vec2d& mergedPt : mergedPoints) {
+        // Track which entities this merged point should be applied to
+        std::unordered_set<EntityID> entitiesForThisPoint;
+
+        // All merged points lie on the new entity (by construction)
+        if (newEntity->type() == EntityType::Line || newEntity->type() == EntityType::Arc) {
+            entitiesForThisPoint.insert(newEntityId);
+        }
+
+        // Find which existing entities contributed to this merged point
+        for (size_t i = 0; i < allIntersections.size(); ++i) {
+            double dx = allIntersections[i].x - mergedPt.x;
+            double dy = allIntersections[i].y - mergedPt.y;
+            if (dx*dx + dy*dy <= mergeTolSq) {
+                // This raw intersection was merged into mergedPt
+                entitiesForThisPoint.insert(intersectedEntityIds[i]);
+            }
+        }
+
+        // Add merged point to all relevant entities
+        for (const EntityID& entityId : entitiesForThisPoint) {
+            entityIntersections[entityId].push_back(mergedPt);
+        }
     }
 
     // Split each intersected entity at its intersection points
