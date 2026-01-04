@@ -7,6 +7,7 @@ add_library(onecad_ui STATIC
     viewcube/ViewCube.cpp
     navigator/ModelNavigator.cpp
     toolbar/ContextToolbar.cpp
+    sketch/ConstraintPanel.cpp
 )
 
 target_include_directories(onecad_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

@@ -1,8 +1,8 @@
 # OneCAD Sketch System Implementation Plan
 
-Status: **Phase 4 Complete** - Rendering System Implemented
+Status: **Phase 6 Complete, Phase 7 Partial** - Snap/AutoConstrain + UI Integration
 
-**Last Updated:** 2026-01-04 *(Detailed UX Specifications Added)*
+**Last Updated:** 2026-01-04 *(Phase 6 Complete, Phase 7 UI Integration Partial)*
 
 ---
 
@@ -183,14 +183,21 @@ Status: **Phase 4 Complete** - Rendering System Implemented
 
 | Component | File | Lines | Status |
 |-----------|------|-------|--------|
-| Tool Base & Manager | `SketchTool.h`, `SketchToolManager.h/cpp` | 367 | ✅ Complete |
-| Line Tool | `tools/LineTool.h/cpp` | 167 | ✅ Complete (polyline mode) |
-| Circle Tool | `tools/CircleTool.h/cpp` | 157 | ✅ Complete (center-radius) |
-| Rectangle Tool | `tools/RectangleTool.h/cpp` | 205 | ✅ Complete (auto-constrained) |
+| Tool Base | `SketchTool.h` | 141 | ✅ Complete |
+| Tool Manager | `SketchToolManager.h/cpp` | 380 | ✅ Complete (snap+auto-constrain) |
+| Line Tool | `tools/LineTool.h/cpp` | 315 | ✅ Complete (polyline, snap, infer) |
+| Circle Tool | `tools/CircleTool.h/cpp` | 219 | ✅ Complete (center-radius, snap) |
+| Rectangle Tool | `tools/RectangleTool.h/cpp` | 206 | ✅ Complete (auto-constrained) |
 | **Arc Tool** | `tools/ArcTool.h/cpp` | ~250 | ❌ **NOT IMPLEMENTED** |
 | **Ellipse Tool** | `tools/EllipseTool.h/cpp` | ~180 | ❌ **NOT IMPLEMENTED** |
 | **Trim Tool** | `tools/TrimTool.h/cpp` | ~150 | ❌ **NOT IMPLEMENTED** |
 | **Mirror Tool** | `tools/MirrorTool.h/cpp` | ~150 | ❌ **NOT IMPLEMENTED** |
+
+**Tool Features Implemented:**
+- All tools integrate with SnapManager for precision placement
+- All tools integrate with AutoConstrainer for constraint inference
+- Ghost constraint icons shown during drawing
+- Preview geometry with live updates
 
 #### ArcTool Specification
 - **Primary mode:** 3-Point Arc (start → point-on-arc → end)
@@ -209,14 +216,20 @@ Status: **Phase 4 Complete** - Rendering System Implemented
 - **Constraints:** Auto-applies symmetric constraint (linked geometry)
 - **Multi-select:** Supports mirroring multiple entities at once
 
-### ⚠️ PARTIAL - Phase 6: Snap & Auto-Constrain
+### ✅ COMPLETE - Phase 6: Snap & Auto-Constrain
 
 | Component | File | Lines | Status |
 |-----------|------|-------|--------|
-| **SnapManager** | `src/core/sketch/SnapManager.h/cpp` | ~400 | ✅ **IMPLEMENTED** |
-| **AutoConstrainer** | `src/core/sketch/AutoConstrainer.h/cpp` | ~350 | ✅ **IMPLEMENTED** |
-| **Tool Integration** | `tools/*` + `SketchToolManager` | — | ⚠️ **PARTIAL** (Line/Circle) |
-| **Ghost Icons** | (in SketchRenderer) | ~100 | ❌ **NOT IMPLEMENTED** |
+| **SnapManager** | `src/core/sketch/SnapManager.h/cpp` | 1166 | ✅ **COMPLETE** |
+| **AutoConstrainer** | `src/core/sketch/AutoConstrainer.h/cpp` | 1091 | ✅ **COMPLETE** |
+| **Tool Integration** | `tools/*` + `SketchToolManager` | — | ✅ **COMPLETE** (all tools) |
+| **Ghost Icons** | (in SketchRenderer + ToolManager) | ~80 | ✅ **COMPLETE** |
+
+**Implementation Details:**
+- SnapManager supports: Vertex, Endpoint, Midpoint, Center, Quadrant, Intersection, OnCurve, Grid
+- AutoConstrainer infers: Horizontal, Vertical, Coincident, Tangent, Perpendicular
+- Ghost constraints render at 50% opacity during drawing
+- Snap indicator shows at snap point with type-specific icon
 
 #### SnapManager Architecture
 ```cpp
@@ -295,15 +308,26 @@ void LineTool::onMouseRelease(const Vec2d& pos) {
 }
 ```
 
-### ❌ NOT STARTED - Phase 7: UI Integration
+### ⚠️ PARTIAL - Phase 7: UI Integration
 
 | Component | File | Lines | Status |
 |-----------|------|-------|--------|
-| **Sketch Mode Panel** | `src/ui/sketch/SketchModePanel.h/cpp` | ~300 | ❌ **NOT IMPLEMENTED** |
+| **Constraint Panel** | `src/ui/sketch/ConstraintPanel.h/cpp` | 251 | ✅ **COMPLETE** |
+| **DOF Status Bar** | (in MainWindow) | ~40 | ✅ **COMPLETE** |
+| **Keyboard Shortcuts** | (in MainWindow: L/R/C/Esc) | ~30 | ✅ **COMPLETE** |
+| **Ghost Constraint Rendering** | (in SketchRenderer) | ~50 | ✅ **COMPLETE** |
+| **sketchUpdated Signal** | (Viewport→MainWindow) | ~20 | ✅ **COMPLETE** |
+| **pickConstraint()** | (in SketchRenderer) | ~50 | ⚠️ **STUB ONLY** |
 | **Dimension Editor** | `src/ui/sketch/DimensionEditor.h/cpp` | ~150 | ❌ **NOT IMPLEMENTED** |
-| **DOF Indicator** | `src/ui/sketch/DOFIndicator.h/cpp` | ~100 | ❌ **NOT IMPLEMENTED** |
-| **pickConstraint()** | (in SketchRenderer) | ~50 | ❌ **NOT IMPLEMENTED** |
-| **Constraint Icon Rendering** | (in SketchRenderer) | ~150 | ❌ **NOT IMPLEMENTED** |
+| **Full SketchModePanel** | `src/ui/sketch/SketchModePanel.h/cpp` | ~300 | ❌ **NOT IMPLEMENTED** |
+
+**Implemented Features:**
+- ConstraintPanel: Floating panel showing constraint list with icons
+- DOF indicator in status bar with color coding (green=0, orange>0, red<0)
+- Keyboard shortcuts: L=Line, R=Rectangle, C=Circle, Esc=cancel/exit
+- Real-time DOF updates via Viewport::sketchUpdated() signal
+- Ghost constraints render semi-transparent during drawing
+- ConstraintPanel auto-shows/hides with sketch mode
 
 #### DimensionEditor Widget
 - **Activation:** Double-click on segment shows inline editor
@@ -337,90 +361,52 @@ void LineTool::onMouseRelease(const Vec2d& pos) {
 
 ## Next Implementation Priorities
 
-### Immediate (Phase 6 - Snap & Auto-Constrain)
-```cpp
-// Find all snap candidates within radius
-std::vector<SnapResult> findAllSnaps(const Vec2d& cursor, const Sketch& sketch) {
-    std::vector<SnapResult> results;
+### Immediate Priority: Complete Phase 7 UI
 
-    // Check points (highest priority)
-    for (auto* pt : sketch.getPoints()) {
-        double dist = distance(cursor, pt->pos());
-        if (dist < snapRadius_)
-            results.push_back({SnapType::Vertex, pt->pos(), pt->id(), dist});
-    }
+| # | Component | Lines | Rationale |
+|---|-----------|-------|-----------|
+| 1 | **pickConstraint()** | ~50 | Enable clicking on constraints |
+| 2 | **DimensionEditor** | ~150 | Double-click to edit dimensions |
 
-    // Check endpoints, midpoints, centers
-    // Check intersections
-    // Check grid
+### Priority 2: Missing Tools (Phase 5 Completion)
 
-    // Sort by priority then distance
-    std::sort(results.begin(), results.end());
-    return results;
-}
-```
+| # | Component | Lines | Rationale |
+|---|-----------|-------|-----------|
+| 3 | **ArcTool** | ~250 | Required for most real CAD work |
+| 4 | **TrimTool** | ~150 | Essential for sketch cleanup |
+| 5 | **MirrorTool** | ~150 | With symmetric constraint link |
 
-#### Auto-Constraint Detection
-```cpp
-// Per SPECIFICATION.md §5.14
-struct AutoConstraint {
-    ConstraintType type;
-    EntityID entity1;
-    EntityID entity2;
-    double confidence;  // For UI preview
-};
+### Priority 3: Entity & Constraint Completion
 
-std::vector<AutoConstraint> detectAutoConstraints(
-    const Vec2d& newPoint,
-    const Sketch& sketch,
-    EntityID drawingEntity
-) {
-    // Detect potential coincident
-    // Detect horizontal/vertical alignments
-    // Detect tangent/perpendicular to nearby
-}
-```
+| # | Component | Lines | Rationale |
+|---|-----------|-------|-----------|
+| 6 | **SketchEllipse** | ~200 | Entity class |
+| 7 | **EllipseTool** | ~180 | Drawing tool |
+| 8 | **ConcentricConstraint** | ~50 | P2PCoincident on centers |
+| 9 | **DiameterConstraint** | ~50 | Radius × 2 |
 
-Files Implemented:
-- `src/core/sketch/SnapManager.h/cpp`
-- `src/core/sketch/AutoConstrainer.h/cpp`
+### Priority 4: UI Polish
+
+| # | Component | Lines | Rationale |
+|---|-----------|-------|-----------|
+| 10 | **Full SketchModePanel** | ~300 | Constraint buttons + tool selection |
+| 11 | **Constraint Icon Textures** | ~150 | Texture atlas billboards |
 
 ---
 
-### Phase 7: UI Integration
+### Already Completed (Phase 6)
 
-**Priority: Medium**
-**Dependencies: Phases 5, 6**
+✅ **SnapManager** (1166 lines) - Full implementation with all snap types
+✅ **AutoConstrainer** (1091 lines) - Constraint inference for all tools
+✅ **Tool Integration** - All three tools use snap + auto-constrain
+✅ **Ghost Constraints** - Semi-transparent icons during drawing
 
-#### Sketch Mode Panel
-```
-UI Elements:
-- Tool buttons (Line, Arc, Circle, Rectangle)
-- Constraint buttons (when entities selected)
-- DOF indicator with color coding
-- Constraint list with edit/delete
-- Expression editor for dimensions
-```
+### Already Completed (Phase 7 Partial)
 
-#### Dimension Editor
-```cpp
-// Click-to-edit dimensional constraints
-// Per SPECIFICATION.md §5.15
-class DimensionEditor : public QLineEdit {
-    // Popup at constraint position
-    // Parse expression: "10", "10+5", "width/2"
-    // Support basic math: +, -, *, /, ()
-};
-```
-
-#### Constraint Conflict Dialog
-```
-When over-constrained:
-- Show conflicting constraints list
-- Suggest which to remove
-- "Remove" button per constraint
-- "Remove All Conflicts" button
-```
+✅ **ConstraintPanel** (251 lines) - Floating constraint list widget
+✅ **DOF Status Bar** - Real-time updates with color coding
+✅ **Keyboard Shortcuts** - L/R/C/Esc working in sketch mode
+✅ **sketchUpdated Signal** - Viewport to MainWindow communication
 
 ---
 
@@ -456,9 +442,9 @@ When over-constrained:
 | Metric | Target | Current |
 |--------|--------|---------|
 | Solve time (≤100 entities) | <33ms (30 FPS) | ✅ Achievable |
-| Background threshold | >100 entities | Implemented |
+| Background threshold | >100 entities | ✅ Implemented |
 | Arc tessellation | 8-256 segments | ✅ Implemented |
-| Snap radius | 2mm | Not implemented |
+| Snap radius | 2mm | ✅ Implemented |
 | Solver tolerance | 1e-4mm | ✅ Configured |
 
 ---
@@ -508,16 +494,16 @@ src/core/
 │   ├── SketchEllipse.h/cpp     [❌ NOT IMPLEMENTED] (~200 lines)
 │   ├── SketchConstraint.h/cpp  [✅ COMPLETE]
 │   ├── Sketch.h/cpp            [✅ COMPLETE] (1370 lines)
-│   ├── SketchRenderer.h        [✅ COMPLETE] (628 lines)
-│   ├── SketchRenderer.cpp      [✅ COMPLETE] (1897 lines)
-│   ├── SketchTool.h            [✅ COMPLETE]
-│   ├── SnapManager.h/cpp       [❌ NOT IMPLEMENTED] (~400 lines)
-│   ├── AutoConstrainer.h/cpp   [❌ NOT IMPLEMENTED] (~350 lines)
+│   ├── SketchRenderer.h        [✅ COMPLETE] (530 lines)
+│   ├── SketchRenderer.cpp      [✅ COMPLETE] (1851 lines)
+│   ├── SketchTool.h            [✅ COMPLETE] (141 lines)
+│   ├── SnapManager.h/cpp       [✅ COMPLETE] (1166 lines)
+│   ├── AutoConstrainer.h/cpp   [✅ COMPLETE] (1091 lines)
 │   ├── tools/
-│   │   ├── SketchToolManager.h/cpp [✅ COMPLETE] (263 lines)
-│   │   ├── LineTool.h/cpp      [✅ COMPLETE] (167 lines)
-│   │   ├── RectangleTool.h/cpp [✅ COMPLETE] (205 lines)
-│   │   ├── CircleTool.h/cpp    [✅ COMPLETE] (157 lines)
+│   │   ├── SketchToolManager.h/cpp [✅ COMPLETE] (380 lines)
+│   │   ├── LineTool.h/cpp      [✅ COMPLETE] (315 lines)
+│   │   ├── RectangleTool.h/cpp [✅ COMPLETE] (206 lines)
+│   │   ├── CircleTool.h/cpp    [✅ COMPLETE] (219 lines)
 │   │   ├── ArcTool.h/cpp       [❌ NOT IMPLEMENTED] (~250 lines)
 │   │   ├── EllipseTool.h/cpp   [❌ NOT IMPLEMENTED] (~180 lines)
 │   │   ├── TrimTool.h/cpp      [❌ NOT IMPLEMENTED] (~150 lines)
@@ -529,19 +515,24 @@ src/core/
 │   └── solver/
 │       ├── ConstraintSolver.h  [✅ COMPLETE] (436 lines)
 │       ├── ConstraintSolver.cpp[✅ COMPLETE] (1014 lines)
-│       ├── SolverAdapter.h     [✅ COMPLETE]
-│       └── SolverAdapter.cpp   [✅ COMPLETE] (85 lines)
+│       ├── SolverAdapter.h     [✅ COMPLETE] (36 lines)
+│       └── SolverAdapter.cpp   [✅ COMPLETE] (49 lines)
 ├── loop/
-│   ├── LoopDetector.h          [✅ COMPLETE] (389 lines)
+│   ├── LoopDetector.h          [✅ COMPLETE] (381 lines)
 │   ├── LoopDetector.cpp        [✅ COMPLETE] (1506 lines)
 │   ├── AdjacencyGraph.h/cpp    [✅ COMPLETE] (98 lines)
 │   └── FaceBuilder.h/cpp       [✅ COMPLETE] (719 lines)
 └── CMakeLists.txt              [✅ COMPLETE]
 
-src/ui/sketch/                  [❌ NEW DIRECTORY]
-├── SketchModePanel.h/cpp       [❌ NOT IMPLEMENTED] (~300 lines)
-├── DimensionEditor.h/cpp       [❌ NOT IMPLEMENTED] (~150 lines)
-└── DOFIndicator.h/cpp          [❌ NOT IMPLEMENTED] (~100 lines)
+src/ui/
+├── sketch/
+│   ├── ConstraintPanel.h/cpp   [✅ COMPLETE] (251 lines)
+│   ├── DimensionEditor.h/cpp   [❌ NOT IMPLEMENTED] (~150 lines)
+│   └── SketchModePanel.h/cpp   [❌ NOT IMPLEMENTED] (~300 lines)
+├── viewport/
+│   └── Viewport.h/cpp          [✅ COMPLETE] (1411 lines) - sketchUpdated signal
+└── mainwindow/
+    └── MainWindow.h/cpp        [✅ COMPLETE] (701 lines) - DOF status, shortcuts
 
 third_party/
 └── planegcs/                   [✅ COMPLETE]
@@ -551,51 +542,53 @@ third_party/
 
 ## Implementation Order (Prioritized)
 
-### Priority 1: Core Precision (Must Have)
-| # | Component | Lines | Rationale |
-|---|-----------|-------|-----------|
-| 1 | **SnapManager** | ~400 | Foundation for all precision drawing |
-| 2 | **AutoConstrainer** | ~350 | Core Shapr3D UX differentiator |
-| 3 | **Ghost constraint icons** | ~100 | Visual feedback for inference |
+### ✅ COMPLETED - Priority 1: Core Precision
+| # | Component | Lines | Status |
+|---|-----------|-------|--------|
+| 1 | **SnapManager** | 1166 | ✅ COMPLETE |
+| 2 | **AutoConstrainer** | 1091 | ✅ COMPLETE |
+| 3 | **Ghost constraint icons** | ~80 | ✅ COMPLETE |
 
-### Priority 2: Tool Completion (Must Have)
-| # | Component | Lines | Rationale |
-|---|-----------|-------|-----------|
-| 4 | **ArcTool** | ~250 | Required for most real CAD work |
-| 5 | **TrimTool** | ~150 | Essential for sketch cleanup |
-| 6 | **MirrorTool** | ~150 | With symmetric constraint link |
+### ⚠️ IN PROGRESS - Priority 2: Tool Completion
+| # | Component | Lines | Status |
+|---|-----------|-------|--------|
+| 4 | **ArcTool** | ~250 | ❌ NOT IMPLEMENTED |
+| 5 | **TrimTool** | ~150 | ❌ NOT IMPLEMENTED |
+| 6 | **MirrorTool** | ~150 | ❌ NOT IMPLEMENTED |
 
-### Priority 3: Entity Completion (Should Have)
-| # | Component | Lines | Rationale |
-|---|-----------|-------|-----------|
-| 7 | **SketchEllipse** | ~200 | Entity class |
-| 8 | **EllipseTool** | ~180 | Drawing tool |
-| 9 | **ConcentricConstraint** | ~50 | P2PCoincident on centers |
-| 10 | **DiameterConstraint** | ~50 | Radius × 2 |
+### ❌ PENDING - Priority 3: Entity Completion
+| # | Component | Lines | Status |
+|---|-----------|-------|--------|
+| 7 | **SketchEllipse** | ~200 | ❌ NOT IMPLEMENTED |
+| 8 | **EllipseTool** | ~180 | ❌ NOT IMPLEMENTED |
+| 9 | **ConcentricConstraint** | ~50 | ❌ NOT IMPLEMENTED |
+| 10 | **DiameterConstraint** | ~50 | ❌ NOT IMPLEMENTED |
 
-### Priority 4: Dimension Editing (Should Have)
-| # | Component | Lines | Rationale |
-|---|-----------|-------|-----------|
-| 11 | **pickConstraint()** | ~50 | Enable clicking constraints |
-| 12 | **DimensionEditor** | ~150 | Double-click to edit |
+### ⚠️ PARTIAL - Priority 4: Dimension Editing
+| # | Component | Lines | Status |
+|---|-----------|-------|--------|
+| 11 | **pickConstraint()** | ~50 | ⚠️ STUB ONLY |
+| 12 | **DimensionEditor** | ~150 | ❌ NOT IMPLEMENTED |
 
-### Priority 5: UI Polish (Nice to Have)
-| # | Component | Lines | Rationale |
-|---|-----------|-------|-----------|
-| 13 | **SketchModePanel** | ~300 | Floating constraint panel |
-| 14 | **DOFIndicator** | ~100 | Status feedback widget |
-| 15 | **Constraint icon rendering** | ~150 | Texture atlas billboards |
+### ⚠️ PARTIAL - Priority 5: UI Polish
+| # | Component | Lines | Status |
+|---|-----------|-------|--------|
+| 13 | **ConstraintPanel** | 251 | ✅ COMPLETE |
+| 14 | **DOF Status Bar** | ~40 | ✅ COMPLETE |
+| 15 | **Keyboard Shortcuts** | ~30 | ✅ COMPLETE |
+| 16 | **Full SketchModePanel** | ~300 | ❌ NOT IMPLEMENTED |
+| 17 | **Constraint icon textures** | ~150 | ❌ NOT IMPLEMENTED |
 
-### Total Estimated Effort
+### Implementation Progress Summary
 
-| Phase | Lines | Files |
-|-------|-------|-------|
-| Priority 1 | ~850 | 3 |
-| Priority 2 | ~550 | 3 |
-| Priority 3 | ~480 | 4 |
-| Priority 4 | ~200 | 2 |
-| Priority 5 | ~550 | 3 |
-| **TOTAL** | **~2,630** | **15** |
+| Priority | Status | Completed | Remaining |
+|----------|--------|-----------|-----------|
+| Priority 1 | ✅ COMPLETE | 2337 lines | 0 |
+| Priority 2 | ❌ NOT STARTED | 0 | ~550 lines |
+| Priority 3 | ❌ NOT STARTED | 0 | ~480 lines |
+| Priority 4 | ⚠️ PARTIAL | 0 | ~200 lines |
+| Priority 5 | ⚠️ PARTIAL | ~321 lines | ~450 lines |
+| **TOTAL** | **~60% COMPLETE** | **~2658 lines** | **~1680 lines** |
 
 ---
 
@@ -637,6 +630,16 @@ All major UX questions have been resolved. See **Detailed UX Specifications** se
 
 ---
 
-*Document Version: 5.0*
+## Changelog
+
+| Version | Date | Changes |
+|---------|------|---------|
+| 6.0 | 2026-01-04 | Phase 6 complete, Phase 7 partial (ConstraintPanel, DOF, shortcuts) |
+| 5.0 | 2026-01-04 | Detailed UX Specifications added |
+| 4.0 | — | Phase 4 Rendering complete |
+
+---
+
+*Document Version: 6.0*
 *Last Updated: 2026-01-04*
-*Status: Detailed UX Specifications Added*
+*Status: Phase 6 Complete, Phase 7 Partial (~60% of prioritized work done)*

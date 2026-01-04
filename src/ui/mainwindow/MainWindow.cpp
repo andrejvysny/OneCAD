@@ -3,9 +3,11 @@
 #include "../viewport/Viewport.h"
 #include "../../render/Camera3D.h"
 #include "../../core/sketch/Sketch.h"
+#include "../../core/sketch/tools/SketchToolManager.h"
 #include "../../app/document/Document.h"
 #include "../navigator/ModelNavigator.h"
 #include "../toolbar/ContextToolbar.h"
+#include "../sketch/ConstraintPanel.h"
 
 #include <QMenuBar>
 #include <QStatusBar>
@@ -59,6 +61,30 @@ MainWindow::~MainWindow() {
 
 void MainWindow::applyTheme() {
     ThemeManager::instance().applyTheme();
+}
+
+void MainWindow::updateDofStatus(core::sketch::Sketch* sketch) {
+    if (!m_dofStatus) {
+        return;
+    }
+
+    if (!sketch) {
+        m_dofStatus->setText(tr("DOF: —"));
+        m_dofStatus->setStyleSheet("");
+        return;
+    }
+
+    int dof = sketch->getDegreesOfFreedom();
+    bool overConstrained = sketch->isOverConstrained();
+    m_dofStatus->setText(tr("DOF: %1").arg(dof));
+
+    if (overConstrained) {
+        m_dofStatus->setStyleSheet("color: red;");
+    } else if (dof == 0) {
+        m_dofStatus->setStyleSheet("color: green;");
+    } else {
+        m_dofStatus->setStyleSheet("color: orange;");
+    }
 }
 
 void MainWindow::setupMenuBar() {
@@ -161,6 +187,52 @@ void MainWindow::setupMenuBar() {
                "<p>A beginner-friendly 3D CAD for makers.</p>"
                "<p>Built with Qt 6 + OpenCASCADE + Eigen3</p>"));
     });
+
+    // Sketch mode keyboard shortcuts (global, work when viewport has focus)
+    QAction* lineAction = new QAction(tr("Line Tool"), this);
+    lineAction->setShortcut(Qt::Key_L);
+    connect(lineAction, &QAction::triggered, this, [this]() {
+        if (m_viewport && m_viewport->isInSketchMode()) {
+            m_viewport->activateLineTool();
+        }
+    });
+    addAction(lineAction);
+
+    QAction* rectAction = new QAction(tr("Rectangle Tool"), this);
+    rectAction->setShortcut(Qt::Key_R);
+    connect(rectAction, &QAction::triggered, this, [this]() {
+        if (m_viewport && m_viewport->isInSketchMode()) {
+            m_viewport->activateRectangleTool();
+        }
+    });
+    addAction(rectAction);
+
+    QAction* circleAction = new QAction(tr("Circle Tool"), this);
+    circleAction->setShortcut(Qt::Key_C);
+    connect(circleAction, &QAction::triggered, this, [this]() {
+        if (m_viewport && m_viewport->isInSketchMode()) {
+            m_viewport->activateCircleTool();
+        }
+    });
+    addAction(circleAction);
+
+    QAction* escAction = new QAction(tr("Cancel/Exit"), this);
+    escAction->setShortcut(Qt::Key_Escape);
+    connect(escAction, &QAction::triggered, this, [this]() {
+        if (m_viewport) {
+            if (m_viewport->isInSketchMode()) {
+                auto* tm = m_viewport->toolManager();
+                if (tm && tm->hasActiveTool()) {
+                    m_viewport->deactivateTool();
+                } else {
+                    onExitSketch();
+                }
+            } else if (m_viewport->isPlaneSelectionActive()) {
+                m_viewport->cancelPlaneSelection();
+            }
+        }
+    });
+    addAction(escAction);
 }
 
 void MainWindow::setupToolBar() {
@@ -240,6 +312,18 @@ void MainWindow::positionNavigatorOverlayButton() {
     m_navigatorOverlayButton->raise();
 }
 
+void MainWindow::positionConstraintPanel() {
+    if (!m_viewport || !m_constraintPanel) {
+        return;
+    }
+
+    const int margin = 20;
+    int x = m_viewport->width() - m_constraintPanel->width() - margin;
+    int y = margin + 130;  // Below ViewCube
+    m_constraintPanel->move(x, y);
+    m_constraintPanel->raise();
+}
+
 void MainWindow::setupViewport() {
     QWidget* central = new QWidget(this);
     QHBoxLayout* layout = new QHBoxLayout(central);
@@ -267,8 +351,14 @@ void MainWindow::setupViewport() {
             this, &MainWindow::onSketchPlanePicked);
     connect(m_viewport, &Viewport::planeSelectionCancelled,
             this, &MainWindow::onPlaneSelectionCancelled);
+    connect(m_viewport, &Viewport::sketchUpdated,
+            this, &MainWindow::onSketchUpdated);
 
     setupNavigatorOverlayButton();
+
+    // Create constraint panel (hidden initially)
+    m_constraintPanel = new ConstraintPanel(m_viewport);
+    m_constraintPanel->setVisible(false);
 
     m_viewport->installEventFilter(this);
 }
@@ -292,6 +382,7 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
     if (obj == m_viewport && event->type() == QEvent::Resize) {
         positionToolbarOverlay();
         positionNavigatorOverlayButton();
+        positionConstraintPanel();
     }
 
     return QMainWindow::eventFilter(obj, event);
@@ -425,21 +516,21 @@ void MainWindow::onSketchModeChanged(bool inSketchMode) {
     }
 
     if (inSketchMode && activeSketch) {
-        // Update DOF display
-        int dof = activeSketch->getDegreesOfFreedom();
-        m_dofStatus->setText(tr("DOF: %1").arg(dof));
+        updateDofStatus(activeSketch);
 
-        // Color code DOF
-        if (dof == 0) {
-            m_dofStatus->setStyleSheet("color: green;");
-        } else if (dof > 0) {
-            m_dofStatus->setStyleSheet("color: orange;");
-        } else {
-            m_dofStatus->setStyleSheet("color: red;");
+        // Show constraint panel
+        if (m_constraintPanel) {
+            m_constraintPanel->setSketch(activeSketch);
+            m_constraintPanel->setVisible(true);
+            positionConstraintPanel();
         }
     } else {
-        m_dofStatus->setText(tr("DOF: —"));
-        m_dofStatus->setStyleSheet("");
+        updateDofStatus(nullptr);
+
+        // Hide constraint panel
+        if (m_constraintPanel) {
+            m_constraintPanel->setVisible(false);
+        }
     }
 }
 
@@ -459,6 +550,20 @@ void MainWindow::onMousePositionChanged(double x, double y, double z) {
         .arg(x, 0, 'f', 2)
         .arg(y, 0, 'f', 2)
         .arg(z, 0, 'f', 2));
+}
+
+void MainWindow::onSketchUpdated() {
+    if (!m_viewport->isInSketchMode()) return;
+
+    core::sketch::Sketch* sketch = m_viewport->activeSketch();
+    if (!sketch) return;
+
+    updateDofStatus(sketch);
+
+    // Refresh constraint panel
+    if (m_constraintPanel) {
+        m_constraintPanel->refresh();
+    }
 }
 
 void MainWindow::loadSettings() {

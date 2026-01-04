@@ -668,6 +668,17 @@ void Viewport::cancelPlaneSelection() {
     emit planeSelectionCancelled();
 }
 
+void Viewport::updateSketchRenderingState() {
+    if (!m_inSketchMode || !m_activeSketch || !m_sketchRenderer) {
+        return;
+    }
+
+    int dof = m_activeSketch->getDegreesOfFreedom();
+    bool overConstrained = m_activeSketch->isOverConstrained();
+    m_sketchRenderer->setDOF(overConstrained ? -1 : dof);
+    m_sketchRenderer->updateConstraints();
+}
+
 void Viewport::handlePan(float dx, float dy) {
     m_camera->pan(dx, dy);
     update();
@@ -798,6 +809,7 @@ void Viewport::enterSketchMode(sketch::Sketch* sketch) {
     if (m_sketchRenderer) {
         m_sketchRenderer->setSketch(sketch);
         m_sketchRenderer->updateGeometry();
+        updateSketchRenderingState();
     }
 
     // Initialize tool manager
@@ -809,8 +821,10 @@ void Viewport::enterSketchMode(sketch::Sketch* sketch) {
     connect(m_toolManager.get(), &tools::SketchToolManager::geometryCreated, this, [this]() {
         if (m_sketchRenderer) {
             m_sketchRenderer->updateGeometry();
+            updateSketchRenderingState();
         }
         update();
+        emit sketchUpdated();  // Notify DOF changes
     });
     connect(m_toolManager.get(), &tools::SketchToolManager::updateRequested, this, [this]() {
         update();

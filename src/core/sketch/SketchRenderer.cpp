@@ -606,6 +606,7 @@ public:
                    const Viewport& viewport,
                    double pixelScale,
                    const std::vector<ConstraintRenderData>& constraints,
+                   const std::vector<InferredConstraint>& ghosts,
                    bool snapActive,
                    const Vec2d& snapPos,
                    float snapSize,
@@ -797,6 +798,7 @@ void SketchRendererImpl::buildVBOs(
     const Viewport& viewport,
     double pixelScale,
     const std::vector<ConstraintRenderData>& constraints,
+    const std::vector<InferredConstraint>& ghosts,
     bool snapActive,
     const Vec2d& snapPos,
     float snapSize,
@@ -901,6 +903,28 @@ void SketchRendererImpl::buildVBOs(
         pointData.push_back(static_cast<float>(color.y));
         pointData.push_back(static_cast<float>(color.z));
         pointData.push_back(1.0f);
+        pointData.push_back(style.constraintIconSize);
+    }
+
+    // Render ghost constraints (inferred, semi-transparent)
+    for (const auto& ghost : ghosts) {
+        if (!ghost.position) continue;
+
+        Vec2d pos = ghost.position.value();
+        if (viewport.size.x > 0.0 && viewport.size.y > 0.0) {
+            if (!viewport.contains(pos)) {
+                continue;
+            }
+        }
+
+        Vec3d color = style.colors.constraintIcon;
+        float alpha = static_cast<float>(0.5 * ghost.confidence);  // Semi-transparent
+        pointData.push_back(static_cast<float>(pos.x));
+        pointData.push_back(static_cast<float>(pos.y));
+        pointData.push_back(static_cast<float>(color.x));
+        pointData.push_back(static_cast<float>(color.y));
+        pointData.push_back(static_cast<float>(color.z));
+        pointData.push_back(alpha);
         pointData.push_back(style.constraintIconSize);
     }
 
@@ -1651,6 +1675,16 @@ void SketchRenderer::hideSnapIndicator() {
     vboDirty_ = true;
 }
 
+void SketchRenderer::setGhostConstraints(const std::vector<InferredConstraint>& ghosts) {
+    ghostConstraints_ = ghosts;
+    vboDirty_ = true;
+}
+
+void SketchRenderer::clearGhostConstraints() {
+    ghostConstraints_.clear();
+    vboDirty_ = true;
+}
+
 void SketchRenderer::setStyle(const SketchRenderStyle& style) {
     style_ = style;
     vboDirty_ = true;
@@ -1798,7 +1832,7 @@ void SketchRenderer::buildVBOs() {
     impl_->buildVBOs(entityRenderData_, regionRenderData_, renderStyle, entitySelections_,
                      selectedRegions_, hoverRegion_, hoverEntity_,
                      viewport_, pixelScale_, constraintRenderData_,
-                     snapActive, snapPos, snapSize, snapColor);
+                     ghostConstraints_, snapActive, snapPos, snapSize, snapColor);
     vboDirty_ = false;
 }
 

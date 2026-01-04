@@ -76,6 +76,7 @@ signals:
     void sketchModeChanged(bool inSketchMode);
     void sketchPlanePicked(int planeIndex);
     void planeSelectionCancelled();
+    void sketchUpdated();  // Emitted when geometry/constraints change
 
 public slots:
     void beginPlaneSelection();
@@ -122,6 +123,7 @@ protected:
     bool event(QEvent* event) override;
 
 private:
+    void updateSketchRenderingState();
     void handlePan(float dx, float dy);
     void handleOrbit(float dx, float dy);
     void handleZoom(float delta);

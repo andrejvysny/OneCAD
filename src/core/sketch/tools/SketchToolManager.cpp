@@ -56,6 +56,7 @@ void SketchToolManager::deactivateTool() {
     if (renderer_) {
         renderer_->clearPreview();
         renderer_->hideSnapIndicator();
+        renderer_->clearGhostConstraints();
     }
 
     emit toolChanged(ToolType::None);
@@ -177,6 +178,9 @@ void SketchToolManager::renderPreview() {
     } else {
         renderer_->hideSnapIndicator();
     }
+
+    // Show ghost constraints (inferred constraints during drawing)
+    renderer_->setGhostConstraints(currentInferredConstraints_);
 
     // Render tool preview
     if (activeTool_) {

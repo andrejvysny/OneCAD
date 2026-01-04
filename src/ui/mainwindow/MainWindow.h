@@ -26,6 +26,7 @@ namespace ui {
 class Viewport;
 class ModelNavigator;
 class ContextToolbar;
+class ConstraintPanel;
 
 /**
  * @brief Main application window for OneCAD.
@@ -52,6 +53,7 @@ private slots:
     void onPlaneSelectionCancelled();
     void onImport();
     void onMousePositionChanged(double x, double y, double z);
+    void onSketchUpdated();
 
 private:
     void setupMenuBar();
@@ -59,9 +61,11 @@ private:
     void setupViewport();
     void setupStatusBar();
     void applyTheme();
+    void updateDofStatus(core::sketch::Sketch* sketch);
     void positionToolbarOverlay();
     void setupNavigatorOverlayButton();
     void positionNavigatorOverlayButton();
+    void positionConstraintPanel();
 
     bool eventFilter(QObject* obj, QEvent* event) override;
 
@@ -70,6 +74,7 @@ private:
     ModelNavigator* m_navigator = nullptr;
     ContextToolbar* m_toolbar = nullptr;
     SidebarToolButton* m_navigatorOverlayButton = nullptr;
+    ConstraintPanel* m_constraintPanel = nullptr;
 
     // Document model (owns all sketches)
     std::unique_ptr<app::Document> m_document;

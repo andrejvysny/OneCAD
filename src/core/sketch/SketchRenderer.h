@@ -17,6 +17,7 @@
 
 #include "SketchTypes.h"
 #include "SnapManager.h"  // For SnapType, SnapResult
+#include "AutoConstrainer.h"  // For InferredConstraint
 #include <functional>
 #include <memory>
 #include <optional>
@@ -373,6 +374,17 @@ public:
      */
     void hideSnapIndicator();
 
+    /**
+     * @brief Set ghost constraints for preview during drawing
+     * Ghost icons show semi-transparent for inferred constraints
+     */
+    void setGhostConstraints(const std::vector<InferredConstraint>& ghosts);
+
+    /**
+     * @brief Clear ghost constraints
+     */
+    void clearGhostConstraints();
+
     // ========== Style & Configuration ==========
 
     /**
@@ -470,6 +482,7 @@ private:
     // Cached render data
     std::vector<EntityRenderData> entityRenderData_;
     std::vector<ConstraintRenderData> constraintRenderData_;
+    std::vector<InferredConstraint> ghostConstraints_;
     bool geometryDirty_ = true;
     bool constraintsDirty_ = true;
     bool vboDirty_ = true;
