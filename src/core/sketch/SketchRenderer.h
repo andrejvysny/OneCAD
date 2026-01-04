@@ -20,6 +20,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -64,18 +65,18 @@ enum class SnapType {
 struct SketchColors {
     // Entity colors
     Vec3d normalGeometry{1.0, 1.0, 1.0};       // White
-    Vec3d constructionGeometry{0.5, 0.8, 0.5}; // Light green
+    Vec3d constructionGeometry{0.5, 0.5, 0.9}; // Light blue
     Vec3d selectedGeometry{0.2, 0.6, 1.0};     // Blue
     Vec3d previewGeometry{0.7, 0.7, 0.7};      // Gray
     Vec3d errorGeometry{1.0, 0.3, 0.3};        // Red
 
     // Constraint colors
     Vec3d constraintIcon{0.9, 0.7, 0.2};       // Orange
-    Vec3d dimensionText{0.2, 0.8, 0.2};        // Green
+    Vec3d dimensionText{0.4, 0.4, 1.0};        // Blue
     Vec3d conflictHighlight{1.0, 0.0, 0.0};    // Red
 
     // DOF indicator
-    Vec3d fullyConstrained{0.0, 1.0, 0.0};     // Green
+    Vec3d fullyConstrained{0.1, 0.4, 0.9};     // Blue
     Vec3d underConstrained{1.0, 0.5, 0.0};     // Orange
     Vec3d overConstrained{1.0, 0.0, 0.0};      // Red
 
@@ -358,6 +359,29 @@ public:
      */
     void clearPreview();
 
+    // ========== Preview Dimensions ==========
+
+    struct PreviewDimension {
+        Vec2d position;  // Position in sketch coordinates
+        std::string text;
+        Vec3d color{0.0, 0.0, 0.0}; // Optional override, defaults to style
+    };
+
+    /**
+     * @brief Set preview dimensions
+     */
+    void setPreviewDimensions(const std::vector<PreviewDimension>& dimensions);
+
+    /**
+     * @brief Get preview dimensions
+     */
+    const std::vector<PreviewDimension>& getPreviewDimensions() const { return previewDimensions_; }
+
+    /**
+     * @brief Clear preview dimensions
+     */
+    void clearPreviewDimensions();
+
     // ========== Snap Indicators ==========
 
     /**
@@ -441,6 +465,8 @@ private:
         EntityType type = EntityType::Line;
         std::vector<Vec2d> vertices;
     } preview_;
+
+    std::vector<PreviewDimension> previewDimensions_;
 
     // Snap indicator
     struct {

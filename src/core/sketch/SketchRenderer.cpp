@@ -1628,6 +1628,15 @@ void SketchRenderer::setPreviewRectangle(const Vec2d& corner1, const Vec2d& corn
 void SketchRenderer::clearPreview() {
     preview_.active = false;
     preview_.vertices.clear();
+    previewDimensions_.clear();
+}
+
+void SketchRenderer::setPreviewDimensions(const std::vector<PreviewDimension>& dimensions) {
+    previewDimensions_ = dimensions;
+}
+
+void SketchRenderer::clearPreviewDimensions() {
+    previewDimensions_.clear();
 }
 
 void SketchRenderer::showSnapIndicator(const Vec2d& pos, SnapType type) {

@@ -2,7 +2,11 @@
 #include "../Sketch.h"
 #include "../SketchRenderer.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <vector>
+#include <string>
 
 namespace onecad::core::sketch::tools {
 
@@ -77,6 +81,27 @@ void RectangleTool::render(SketchRenderer& renderer) {
 
         if (width > 0.01 || height > 0.01) {
             renderer.setPreviewRectangle(corner1_, corner2_);
+
+            std::vector<SketchRenderer::PreviewDimension> dims;
+            char buffer[32];
+
+            // Width dimension (top edge)
+            if (width > 0.01) {
+                std::snprintf(buffer, sizeof(buffer), "%.2f", width);
+                double midX = (corner1_.x + corner2_.x) * 0.5;
+                double maxY = std::max(corner1_.y, corner2_.y);
+                dims.push_back({{midX, maxY}, std::string(buffer)});
+            }
+
+            // Height dimension (right edge)
+            if (height > 0.01) {
+                std::snprintf(buffer, sizeof(buffer), "%.2f", height);
+                double maxX = std::max(corner1_.x, corner2_.x);
+                double midY = (corner1_.y + corner2_.y) * 0.5;
+                dims.push_back({{maxX, midY}, std::string(buffer)});
+            }
+
+            renderer.setPreviewDimensions(dims);
         } else {
             renderer.clearPreview();
         }

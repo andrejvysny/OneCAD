@@ -3,6 +3,8 @@
 #include "../SketchRenderer.h"
 
 #include <cmath>
+#include <cstdio>
+#include <string>
 
 namespace onecad::core::sketch::tools {
 
@@ -86,6 +88,17 @@ void CircleTool::render(SketchRenderer& renderer) {
     if (state_ == State::FirstClick && currentRadius_ > 0.01) {
         // Show preview circle
         renderer.setPreviewCircle(centerPoint_, currentRadius_);
+
+        char buffer[32];
+        std::snprintf(buffer, sizeof(buffer), "R: %.2f", currentRadius_);
+        
+        // Place label at midpoint of the radius line (from center to cursor)
+        Vec2d labelPos = {
+            (centerPoint_.x + currentPoint_.x) * 0.5,
+            (centerPoint_.y + currentPoint_.y) * 0.5
+        };
+        
+        renderer.setPreviewDimensions({{labelPos, std::string(buffer)}});
     } else {
         renderer.clearPreview();
     }

@@ -2,6 +2,10 @@
 #include "../Sketch.h"
 #include "../SketchRenderer.h"
 
+#include <cstdio>
+#include <string>
+#include <cmath>
+
 namespace onecad::core::sketch::tools {
 
 LineTool::LineTool() = default;
@@ -85,6 +89,25 @@ void LineTool::render(SketchRenderer& renderer) {
     if (state_ == State::FirstClick) {
         // Show preview line from start to current mouse position
         renderer.setPreviewLine(startPoint_, currentPoint_);
+
+        // Calculate length for dimension
+        double dx = currentPoint_.x - startPoint_.x;
+        double dy = currentPoint_.y - startPoint_.y;
+        double length = std::sqrt(dx * dx + dy * dy);
+
+        if (length > 0.01) {
+            char buffer[32];
+            std::snprintf(buffer, sizeof(buffer), "%.2f", length);
+            
+            Vec2d midPoint = {
+                (startPoint_.x + currentPoint_.x) * 0.5,
+                (startPoint_.y + currentPoint_.y) * 0.5
+            };
+
+            renderer.setPreviewDimensions({{midPoint, std::string(buffer)}});
+        } else {
+             renderer.clearPreviewDimensions();
+        }
     } else {
         renderer.clearPreview();
     }

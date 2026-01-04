@@ -299,6 +299,60 @@ void Viewport::paintGL() {
         }
 
         m_sketchRenderer->render(view, projection);
+
+        // Render preview dimensions overlay
+        const auto& dims = m_sketchRenderer->getPreviewDimensions();
+        if (!dims.empty()) {
+            // Unbind GL context resources before QPainter to be safe
+            // QPainter painter(this) automatically handles GL state for the widget
+            QPainter painter(this);
+            painter.setRenderHint(QPainter::Antialiasing);
+            
+            // Setup font/pen based on theme
+            bool isDark = ThemeManager::instance().isDark();
+            QColor textColor = isDark ? Qt::white : Qt::black;
+            QColor bgColor = isDark ? QColor(0, 0, 0, 180) : QColor(255, 255, 255, 180);
+            
+            QFont font = painter.font();
+            font.setPointSize(10);
+            font.setBold(true);
+            painter.setFont(font);
+
+            PlaneAxes axes = buildPlaneAxes(plane);
+            QVector3D origin(plane.origin.x, plane.origin.y, plane.origin.z);
+
+            for (const auto& dim : dims) {
+                // Calculate world position: origin + xAxis * x + yAxis * y
+                QVector3D worldPos = origin + 
+                                   axes.xAxis * dim.position.x + 
+                                   axes.yAxis * dim.position.y;
+                
+                QPointF screenPos;
+                if (projectToScreen(viewProjection, worldPos, 
+                                  static_cast<float>(width()), 
+                                  static_cast<float>(height()), 
+                                  &screenPos)) {
+                    
+                    QString text = QString::fromStdString(dim.text);
+                    QFontMetrics fm(font);
+                    int textWidth = fm.horizontalAdvance(text);
+                    int textHeight = fm.height();
+                    int padding = 4;
+                    
+                    QRectF bgRect(screenPos.x() - textWidth / 2 - padding, 
+                                screenPos.y() - textHeight / 2 - padding, 
+                                textWidth + 2 * padding, 
+                                textHeight + 2 * padding);
+                    
+                    painter.setPen(Qt::NoPen);
+                    painter.setBrush(bgColor);
+                    painter.drawRoundedRect(bgRect, 4, 4);
+                    
+                    painter.setPen(textColor);
+                    painter.drawText(bgRect, Qt::AlignCenter, text);
+                }
+            }
+        }
     } else if (m_document && m_sketchRenderer) {
         // Not in sketch mode: render all sketches from document
         auto sketchIds = m_document->getSketchIds();
