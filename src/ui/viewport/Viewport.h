@@ -128,6 +128,7 @@ protected:
     void wheelEvent(QWheelEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
+    void leaveEvent(QEvent* event) override;
 
     // Touch/gesture events (for trackpad)
     bool event(QEvent* event) override;

@@ -436,16 +436,35 @@ void Viewport::mousePressEvent(QMouseEvent* event) {
     if (m_inSketchMode && m_sketchRenderer && event->button() == Qt::LeftButton &&
         (!m_toolManager || !m_toolManager->hasActiveTool())) {
         sketch::Vec2d sketchPos = screenToSketch(event->pos());
-        auto region = m_sketchRenderer->pickRegion(sketchPos);
-        bool toggle = (event->modifiers() & Qt::ShiftModifier);
+        bool shift = (event->modifiers() & Qt::ShiftModifier);
 
-        if (region.has_value()) {
-            if (!toggle) {
+        // Entity selection has priority over region selection
+        // Use same 2mm tolerance as snap system (per user requirement #3)
+        constexpr double PICK_TOLERANCE = 2.0;
+        sketch::EntityID pickedEntity = m_sketchRenderer->pickEntity(sketchPos, PICK_TOLERANCE);
+
+        if (!pickedEntity.empty()) {
+            // Entity hit
+            if (!shift) {
+                // Clear all selections when not holding Shift
+                m_sketchRenderer->clearSelection();
                 m_sketchRenderer->clearRegionSelection();
             }
-            m_sketchRenderer->toggleRegionSelection(*region);
-        } else if (!toggle) {
-            m_sketchRenderer->clearRegionSelection();
+            m_sketchRenderer->toggleEntitySelection(pickedEntity);
+        } else {
+            // No entity hit - try region
+            auto region = m_sketchRenderer->pickRegion(sketchPos);
+            if (region.has_value()) {
+                if (!shift) {
+                    m_sketchRenderer->clearSelection();
+                    m_sketchRenderer->clearRegionSelection();
+                }
+                m_sketchRenderer->toggleRegionSelection(*region);
+            } else if (!shift) {
+                // Clicked empty space - clear all (per user requirement #2)
+                m_sketchRenderer->clearSelection();
+                m_sketchRenderer->clearRegionSelection();
+            }
         }
 
         update();
@@ -551,10 +570,25 @@ void Viewport::mouseMoveEvent(QMouseEvent* event) {
         m_toolManager->handleMouseMove(sketchPos);
         if (m_sketchRenderer) {
             m_sketchRenderer->clearRegionHover();
+            m_sketchRenderer->setHoverEntity("");
         }
     } else if (m_inSketchMode && m_sketchRenderer && !m_isOrbiting && !m_isPanning) {
         sketch::Vec2d sketchPos = screenToSketch(event->pos());
-        m_sketchRenderer->setRegionHover(m_sketchRenderer->pickRegion(sketchPos));
+
+        // Entity hover has priority over region hover (per user requirement #4)
+        constexpr double PICK_TOLERANCE = 2.0;
+        sketch::EntityID hoveredEntity = m_sketchRenderer->pickEntity(sketchPos, PICK_TOLERANCE);
+
+        if (!hoveredEntity.empty()) {
+            // Hovering over entity
+            m_sketchRenderer->setHoverEntity(hoveredEntity);
+            m_sketchRenderer->clearRegionHover();
+        } else {
+            // No entity hover - try region
+            m_sketchRenderer->setHoverEntity("");
+            m_sketchRenderer->setRegionHover(m_sketchRenderer->pickRegion(sketchPos));
+        }
+
         update();
     }
 
@@ -655,6 +689,16 @@ void Viewport::wheelEvent(QWheelEvent* event) {
 
     handleZoom(delta);
     event->accept();
+}
+
+void Viewport::leaveEvent(QEvent* event) {
+    // Clear hover state when mouse leaves viewport
+    if (m_sketchRenderer) {
+        m_sketchRenderer->setHoverEntity("");
+        m_sketchRenderer->clearRegionHover();
+        update();
+    }
+    QOpenGLWidget::leaveEvent(event);
 }
 
 bool Viewport::event(QEvent* event) {

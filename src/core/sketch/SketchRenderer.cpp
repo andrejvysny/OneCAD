@@ -1630,6 +1630,18 @@ void SketchRenderer::setHoverEntity(EntityID id) {
     }
 }
 
+void SketchRenderer::toggleEntitySelection(EntityID id) {
+    auto it = entitySelections_.find(id);
+    if (it != entitySelections_.end() && it->second == SelectionState::Selected) {
+        // Already selected - deselect
+        entitySelections_.erase(it);
+    } else {
+        // Not selected or in other state - select
+        entitySelections_[id] = SelectionState::Selected;
+    }
+    vboDirty_ = true;
+}
+
 void SketchRenderer::setConflictingConstraints(const std::vector<ConstraintID>& ids) {
     conflictingConstraints_ = ids;
     constraintsDirty_ = true;

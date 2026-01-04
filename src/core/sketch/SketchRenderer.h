@@ -277,6 +277,11 @@ public:
     void setHoverEntity(EntityID id);
 
     /**
+     * @brief Toggle entity selection (add if not selected, remove if selected)
+     */
+    void toggleEntitySelection(EntityID id);
+
+    /**
      * @brief Set entities to highlight as conflicting
      */
     void setConflictingConstraints(const std::vector<ConstraintID>& ids);
