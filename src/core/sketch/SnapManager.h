@@ -142,6 +142,13 @@ public:
     void setEnabled(bool enabled) { enabled_ = enabled; }
     bool isEnabled() const { return enabled_; }
 
+    /**
+     * @brief Find intersections between two entities (public for IntersectionManager)
+     */
+    std::vector<Vec2d> findEntityIntersections(const SketchEntity* e1,
+                                                const SketchEntity* e2,
+                                                const Sketch& sketch) const;
+
 private:
     double snapRadius_ = constants::SNAP_RADIUS_MM;  // 2.0mm default
     double gridSize_ = 1.0;  // 1mm grid default
@@ -266,13 +273,6 @@ private:
                                                         double radius1,
                                                         const Vec2d& center2,
                                                         double radius2);
-
-    /**
-     * @brief Find intersections between two entities
-     */
-    std::vector<Vec2d> findEntityIntersections(const SketchEntity* e1,
-                                                const SketchEntity* e2,
-                                                const Sketch& sketch) const;
 };
 
 } // namespace onecad::core::sketch

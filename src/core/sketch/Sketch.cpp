@@ -255,6 +255,139 @@ bool Sketch::removeEntity(EntityID id) {
     return true;
 }
 
+std::pair<EntityID, EntityID> Sketch::splitLineAt(EntityID lineId, const Vec2d& splitPoint) {
+    auto* line = getEntityAs<SketchLine>(lineId);
+    if (!line) {
+        return {{}, {}};
+    }
+
+    auto* startPt = getEntityAs<SketchPoint>(line->startPointId());
+    auto* endPt = getEntityAs<SketchPoint>(line->endPointId());
+    if (!startPt || !endPt) {
+        return {{}, {}};
+    }
+
+    // Verify split point is on line segment
+    gp_Pnt2d p1 = startPt->position();
+    gp_Pnt2d p2 = endPt->position();
+    double dx = p2.X() - p1.X();
+    double dy = p2.Y() - p1.Y();
+    double lenSq = dx * dx + dy * dy;
+
+    if (lenSq < 1e-10) {
+        return {{}, {}};  // Degenerate line
+    }
+
+    // Calculate parameter t for split point
+    double t = ((splitPoint.x - p1.X()) * dx + (splitPoint.y - p1.Y()) * dy) / lenSq;
+
+    // Tolerance check: point must be on segment (not at endpoints)
+    constexpr double MIN_SEGMENT_PARAM = 0.001;  // Avoid creating tiny segments
+    if (t < MIN_SEGMENT_PARAM || t > (1.0 - MIN_SEGMENT_PARAM)) {
+        return {{}, {}};  // Too close to endpoint
+    }
+
+    // Store original properties
+    EntityID origStartId = line->startPointId();
+    EntityID origEndId = line->endPointId();
+    bool construction = line->isConstruction();
+
+    // Collect constraints that reference this line
+    std::vector<std::unique_ptr<SketchConstraint>> constraintsToMigrate;
+    for (auto& constraint : constraints_) {
+        if (constraint && constraint->references(lineId)) {
+            // Clone constraint for migration (we'll recreate for new segments)
+            // For now, we'll just remove them - proper migration TBD
+        }
+    }
+
+    // Remove original line (this also removes constraints)
+    if (!removeEntity(lineId)) {
+        return {{}, {}};
+    }
+
+    // Create intermediate point at split location
+    EntityID midPointId = addPoint(splitPoint.x, splitPoint.y, construction);
+    if (midPointId.empty()) {
+        return {{}, {}};
+    }
+
+    // Create two new line segments
+    EntityID line1Id = addLine(origStartId, midPointId, construction);
+    EntityID line2Id = addLine(midPointId, origEndId, construction);
+
+    if (line1Id.empty() || line2Id.empty()) {
+        return {{}, {}};
+    }
+
+    return {line1Id, line2Id};
+}
+
+std::pair<EntityID, EntityID> Sketch::splitArcAt(EntityID arcId, double splitAngle) {
+    auto* arc = getEntityAs<SketchArc>(arcId);
+    if (!arc) {
+        return {{}, {}};
+    }
+
+    auto* centerPt = getEntityAs<SketchPoint>(arc->centerPointId());
+    if (!centerPt) {
+        return {{}, {}};
+    }
+
+    // Verify split angle is within arc extent
+    if (!arc->containsAngle(splitAngle)) {
+        return {{}, {}};
+    }
+
+    // Check not too close to endpoints
+    double startAngle = arc->startAngle();
+    double endAngle = arc->endAngle();
+    double sweep = arc->sweepAngle();
+
+    // Normalize angle difference to check proximity
+    auto angleDiff = [](double a1, double a2) {
+        double diff = std::fmod(std::abs(a1 - a2), 2.0 * std::numbers::pi);
+        return std::min(diff, 2.0 * std::numbers::pi - diff);
+    };
+
+    constexpr double MIN_ANGLE_SEPARATION = 0.01;  // ~0.57 degrees
+    if (angleDiff(splitAngle, startAngle) < MIN_ANGLE_SEPARATION ||
+        angleDiff(splitAngle, endAngle) < MIN_ANGLE_SEPARATION) {
+        return {{}, {}};  // Too close to endpoint
+    }
+
+    // Store original properties
+    EntityID centerId = arc->centerPointId();
+    double radius = arc->radius();
+    bool construction = arc->isConstruction();
+
+    // Remove original arc
+    if (!removeEntity(arcId)) {
+        return {{}, {}};
+    }
+
+    // Calculate split point position
+    gp_Pnt2d center = centerPt->position();
+    double splitX = center.X() + radius * std::cos(splitAngle);
+    double splitY = center.Y() + radius * std::sin(splitAngle);
+
+    // Create point at split location (shared between two arcs)
+    EntityID splitPointId = addPoint(splitX, splitY, construction);
+    if (splitPointId.empty()) {
+        return {{}, {}};
+    }
+
+    // Create two arc segments
+    EntityID arc1Id = addArc(centerId, radius, startAngle, splitAngle, construction);
+    EntityID arc2Id = addArc(centerId, radius, splitAngle, endAngle, construction);
+
+    if (arc1Id.empty() || arc2Id.empty()) {
+        return {{}, {}};
+    }
+
+    return {arc1Id, arc2Id};
+}
+
 SketchEntity* Sketch::getEntity(EntityID id) {
     auto it = entityIndex_.find(id);
     if (it == entityIndex_.end()) {

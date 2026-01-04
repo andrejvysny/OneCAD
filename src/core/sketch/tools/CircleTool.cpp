@@ -2,6 +2,7 @@
 #include "../Sketch.h"
 #include "../SketchRenderer.h"
 #include "../AutoConstrainer.h"
+#include "../IntersectionManager.h"
 #include "../SketchCircle.h"
 #include "../SketchArc.h"
 #include "../constraints/Constraints.h"
@@ -63,6 +64,12 @@ void CircleTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
 
         if (!circleId.empty()) {
             circleCreated_ = true;
+
+            // Process intersections - split existing entities at intersection points
+            if (snapManager_) {
+                IntersectionManager intersectionMgr;
+                intersectionMgr.processIntersections(circleId, *sketch_, *snapManager_);
+            }
 
             auto resolveCenterPointId = [this](const EntityID& entityId) -> EntityID {
                 if (const auto* circle = sketch_->getEntityAs<SketchCircle>(entityId)) {

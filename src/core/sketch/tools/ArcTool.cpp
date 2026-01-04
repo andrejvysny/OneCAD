@@ -1,6 +1,7 @@
 #include "ArcTool.h"
 #include "../Sketch.h"
 #include "../SketchRenderer.h"
+#include "../IntersectionManager.h"
 #include "../SketchArc.h"
 #include "../SketchPoint.h"
 #include "../SketchLine.h"
@@ -103,6 +104,12 @@ void ArcTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
         EntityID arcId = sketch_->addArc(centerPointId, radius, startAngle, endAngle);
 
         if (!arcId.empty()) {
+            // Process intersections - split existing entities at intersection points
+            if (snapManager_) {
+                IntersectionManager intersectionMgr;
+                intersectionMgr.processIntersections(arcId, *sketch_, *snapManager_);
+            }
+
             // Apply point-on-curve constraint for start point if snapped
             if (!startPointId_.empty()) {
                 sketch_->addPointOnCurve(startPointId_, arcId, CurvePosition::Start);

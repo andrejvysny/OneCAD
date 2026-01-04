@@ -42,6 +42,7 @@ void SketchToolManager::activateTool(ToolType type) {
     if (activeTool_) {
         activeTool_->setSketch(sketch_);
         activeTool_->setAutoConstrainer(&autoConstrainer_);
+        activeTool_->setSnapManager(&snapManager_);
         currentType_ = type;
         emit toolChanged(type);
     }

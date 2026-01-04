@@ -2,6 +2,7 @@
 #include "../Sketch.h"
 #include "../SketchRenderer.h"
 #include "../AutoConstrainer.h"
+#include "../IntersectionManager.h"
 #include "../SketchLine.h"
 #include "../SketchPoint.h"
 
@@ -71,6 +72,12 @@ void LineTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
 
         if (!lineId.empty()) {
             lineCreated_ = true;
+
+            // Process intersections - split existing entities at intersection points
+            if (snapManager_) {
+                IntersectionManager intersectionMgr;
+                intersectionMgr.processIntersections(lineId, *sketch_, *snapManager_);
+            }
 
             // Get the end point for polyline continuation
             // The line stores startPointId and endPointId

@@ -127,12 +127,18 @@ public:
      */
     void setAutoConstrainer(AutoConstrainer* constrainer) { autoConstrainer_ = constrainer; }
 
+    /**
+     * @brief Set snap manager (called by ToolManager)
+     */
+    void setSnapManager(SnapManager* manager) { snapManager_ = manager; }
+
 protected:
     Sketch* sketch_ = nullptr;
     State state_ = State::Idle;
     SnapResult snapResult_;
     std::vector<InferredConstraint> inferredConstraints_;
     AutoConstrainer* autoConstrainer_ = nullptr;
+    SnapManager* snapManager_ = nullptr;
 };
 
 } // namespace tools

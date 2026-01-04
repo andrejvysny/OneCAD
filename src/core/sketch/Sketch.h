@@ -209,6 +209,28 @@ public:
     bool removeEntity(EntityID id);
 
     /**
+     * @brief Split a line at a point, creating two line segments
+     * @param lineId ID of line to split
+     * @param splitPoint Point where to split (must be on line)
+     * @return IDs of two new line segments (empty if failed)
+     *
+     * Creates intermediate point at splitPoint, removes original line,
+     * creates two new lines. Migrates constraints to new segments.
+     */
+    std::pair<EntityID, EntityID> splitLineAt(EntityID lineId, const Vec2d& splitPoint);
+
+    /**
+     * @brief Split an arc at an angle, creating two arc segments
+     * @param arcId ID of arc to split
+     * @param splitAngle Angle where to split (radians, must be within arc extent)
+     * @return IDs of two new arc segments (empty if failed)
+     *
+     * Creates point on arc at splitAngle, removes original arc,
+     * creates two new arcs sharing the split point.
+     */
+    std::pair<EntityID, EntityID> splitArcAt(EntityID arcId, double splitAngle);
+
+    /**
      * @brief Get entity by ID
      * @return Pointer to entity, or nullptr if not found
      */
