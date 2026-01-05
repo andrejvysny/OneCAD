@@ -2,6 +2,9 @@
 
 > **⚠️ VibeCoding Alert**: Full codebase generated with AI. Project in active development—manual review & validation required.
 
+![OneCAD screenshot](docs/screenshot.png)
+
+
 ## Overview
 
 **OneCAD** is a free, open-source 3D CAD application for makers and hobbyists. Sketch 2D geometry, add constraints, create faces, then extrude to 3D. Inspired by Shapr3D, built with C++20 + Qt6 + OpenCASCADE.
