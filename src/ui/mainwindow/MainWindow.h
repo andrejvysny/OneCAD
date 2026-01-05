@@ -8,6 +8,7 @@
 class QLabel;
 class QSlider;
 class QEvent;
+class QAction;
 namespace onecad {
 namespace ui {
 class SidebarToolButton;
@@ -17,6 +18,9 @@ class SidebarToolButton;
 namespace onecad {
 namespace app {
     class Document;
+    namespace commands {
+        class CommandProcessor;
+    }
 }
 namespace core::sketch {
     class Sketch;
@@ -54,6 +58,7 @@ private slots:
     void onSketchPlanePicked(int planeIndex);
     void onPlaneSelectionCancelled();
     void onImport();
+    void onAddDebugBox();
     void onMousePositionChanged(double x, double y, double z);
     void onSketchUpdated();
     void onConstraintRequested(core::sketch::ConstraintType constraintType);
@@ -83,6 +88,7 @@ private:
 
     // Document model (owns all sketches)
     std::unique_ptr<app::Document> m_document;
+    std::unique_ptr<app::commands::CommandProcessor> m_commandProcessor;
 
     // Active editing state
     std::string m_activeSketchId;  // Currently editing sketch ID (empty if not in sketch mode)
@@ -91,6 +97,8 @@ private:
     QLabel* m_toolStatus = nullptr;
     QLabel* m_dofStatus = nullptr;
     QLabel* m_coordStatus = nullptr;
+    QAction* m_undoAction = nullptr;
+    QAction* m_redoAction = nullptr;
 
     // Camera angle control
     QLabel* m_cameraAngleLabel = nullptr;

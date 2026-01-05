@@ -14,6 +14,7 @@
 #include "SketchLine.h"
 #include "SketchPoint.h"
 #include "../loop/LoopDetector.h"
+#include "../loop/RegionUtils.h"
 
 #include <QMatrix4x4>
 #include <QOpenGLBuffer>
@@ -1353,89 +1354,15 @@ void SketchRenderer::updateRegions() {
         return;
     }
 
-    std::vector<loop::Loop> loops;
-    std::unordered_set<std::string> seen;
-
-    auto loopKey = [](const loop::Loop& loop) {
-        std::vector<EntityID> edges = loop.wire.edges;
-        std::sort(edges.begin(), edges.end());
-        std::string key;
-        key.reserve(edges.size() * 40);
-        for (const auto& id : edges) {
-            key.append(id);
-            key.push_back('|');
-        }
-        return key;
-    };
-
-    auto addLoop = [&](const loop::Loop& loop) {
-        std::string key = loopKey(loop);
-        if (seen.insert(key).second) {
-            loops.push_back(loop);
-        }
-    };
-
-    for (const auto& face : result.faces) {
-        addLoop(face.outerLoop);
-        for (const auto& hole : face.innerLoops) {
-            addLoop(hole);
-        }
-    }
-
-    if (loops.empty()) {
+    auto regions = loop::buildRegionDefinitions(result, constants::COINCIDENCE_TOLERANCE);
+    if (regions.empty()) {
         return;
     }
 
-    std::vector<size_t> order(loops.size());
-    for (size_t i = 0; i < loops.size(); ++i) {
-        order[i] = i;
-    }
-    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-        return loops[a].area() > loops[b].area();
-    });
-
-    std::vector<int> parent(loops.size(), -1);
-
-    for (size_t i = 0; i < loops.size(); ++i) {
-        size_t loopIdx = order[i];
-        double bestArea = std::numeric_limits<double>::infinity();
-        int bestParent = -1;
-        for (size_t j = 0; j < loops.size(); ++j) {
-            size_t candidateIdx = order[j];
-            if (candidateIdx == loopIdx) {
-                continue;
-            }
-            if (loops[candidateIdx].area() <= loops[loopIdx].area()) {
-                continue;
-            }
-            if (!polygonContainsPolygon(loops[candidateIdx].polygon, loops[loopIdx].polygon,
-                                        constants::COINCIDENCE_TOLERANCE)) {
-                continue;
-            }
-            if (polygonsIntersect(loops[candidateIdx].polygon, loops[loopIdx].polygon)) {
-                continue;
-            }
-            double area = loops[candidateIdx].area();
-            if (area < bestArea) {
-                bestArea = area;
-                bestParent = static_cast<int>(candidateIdx);
-            }
-        }
-
-        parent[loopIdx] = bestParent;
-    }
-
-    std::vector<std::vector<size_t>> children(loops.size());
-    for (size_t i = 0; i < loops.size(); ++i) {
-        if (parent[i] >= 0) {
-            children[static_cast<size_t>(parent[i])].push_back(i);
-        }
-    }
-
-    for (size_t i = 0; i < loops.size(); ++i) {
+    for (const auto& regionDef : regions) {
         RegionRenderData region;
-        region.id = loopKey(loops[i]);
-        region.outerPolygon = normalizePolygon(loops[i].polygon, kGeometryEpsilon);
+        region.id = regionDef.id;
+        region.outerPolygon = normalizePolygon(regionDef.outerLoop.polygon, kGeometryEpsilon);
         if (region.outerPolygon.size() < 3) {
             continue;
         }
@@ -1443,8 +1370,8 @@ void SketchRenderer::updateRegions() {
             std::reverse(region.outerPolygon.begin(), region.outerPolygon.end());
         }
 
-        for (size_t childIdx : children[i]) {
-            std::vector<Vec2d> hole = normalizePolygon(loops[childIdx].polygon, kGeometryEpsilon);
+        for (const auto& holeLoop : regionDef.holes) {
+            std::vector<Vec2d> hole = normalizePolygon(holeLoop.polygon, kGeometryEpsilon);
             if (hole.size() < 3) {
                 continue;
             }
@@ -1767,26 +1694,38 @@ void SketchRenderer::setShowDOF(bool show) {
 }
 
 EntityID SketchRenderer::pickEntity(const Vec2d& screenPos, double tolerance) const {
+    auto hits = pickEntities(screenPos, tolerance);
+    if (hits.empty()) {
+        return {};
+    }
+    return hits.front().id;
+}
+
+std::vector<EntityPickHit> SketchRenderer::pickEntities(const Vec2d& screenPos, double tolerance) const {
     // Note: screenPos must be in world/sketch coordinates, not pixel screen coordinates.
     // Caller should transform screen pixels to sketch space before calling.
-    EntityID closest;
-    double minDist = tolerance;
+    std::vector<EntityPickHit> hits;
 
     for (const auto& data : entityRenderData_) {
         if (!isEntityVisible(data)) continue;
+
+        double minDist = tolerance;
 
         if (data.type == EntityType::Point) {
             if (!data.vertices.empty()) {
                 double dx = screenPos.x - data.vertices[0].x;
                 double dy = screenPos.y - data.vertices[0].y;
                 double dist = std::sqrt(dx * dx + dy * dy);
-                if (dist < minDist) {
+                if (dist <= minDist) {
                     minDist = dist;
-                    closest = data.id;
+                } else {
+                    continue;
                 }
+            } else {
+                continue;
             }
         } else {
-            // Check distance to line segments
+            bool hit = false;
             for (size_t i = 0; i + 1 < data.vertices.size(); ++i) {
                 const auto& p1 = data.vertices[i];
                 const auto& p2 = data.vertices[i + 1];
@@ -1806,15 +1745,24 @@ EntityID SketchRenderer::pickEntity(const Vec2d& screenPos, double tolerance) co
                 double dist = std::sqrt((screenPos.x - projX) * (screenPos.x - projX) +
                                          (screenPos.y - projY) * (screenPos.y - projY));
 
-                if (dist < minDist) {
+                if (dist <= minDist) {
                     minDist = dist;
-                    closest = data.id;
+                    hit = true;
                 }
             }
+            if (!hit) {
+                continue;
+            }
         }
+
+        hits.push_back(EntityPickHit{data.id, data.type, data.isConstruction, minDist});
     }
 
-    return closest;
+    std::sort(hits.begin(), hits.end(), [](const EntityPickHit& a, const EntityPickHit& b) {
+        return a.distance < b.distance;
+    });
+
+    return hits;
 }
 
 ConstraintID SketchRenderer::pickConstraint(const Vec2d& screenPos,

@@ -1,0 +1,1706 @@
+Starting CodeRabbit review in plain text mode...
+
+Connecting to review service
+Setting up
+Analyzing
+Reviewing
+
+============================================================================
+File: src/ui/CMakeLists.txt
+Line: 22
+Type: potential_issue
+
+Comment:
+Verify potential circular dependency and consider architectural implications.
+
+Adding onecad_app as a PUBLIC dependency to onecad_ui raises concerns:
+
+1. Circular dependency risk: If onecad_app already links to onecad_ui (typical in most architectures), this creates a circular dependency that can cause build failures or subtle linking issues.
+
+2. Layering violation: UI components typically should not depend on the application layer. This reverses the expected dependency direction and can lead to tight coupling.
+
+3. PUBLIC vs PRIVATE: PUBLIC linkage means all targets linking to onecad_ui will also link onecad_app, potentially propagating the architectural issue.
+
+Please verify:
+- Does onecad_app link to onecad_ui? If so, this is a circular dependency.
+- Can the new selection components be refactored to avoid this dependency?
+- If the dependency is unavoidable, should it be PRIVATE instead of PUBLIC?
+
+
+
+
+============================================================================
+File: src/ui/toolbar/ContextToolbar.h
+Line: 56
+Type: nitpick
+
+Comment:
+Verify button initialization and lifecycle management.
+
+Ensure the following implementation details are complete:
+
+1. The button is created and configured in setupUi() (typically with new SidebarToolButton(...))
+2. The button is added to m_layout
+3. The button's clicked signal is connected to the testBoxRequested() signal
+4. The button's visibility is properly managed in updateVisibleButtons() based on the appropriate Context value(s)
+
+Additionally, the name "testBox" is somewhat generic and unclear. Consider using a more descriptive name that indicates the feature's purpose, unless this is intentionally temporary test/debug functionality.
+
+Prompt for AI Agent:
+m_testBoxButton is declared but not initialized or wired up; in setupUi() instantiate it with new SidebarToolButton(...), configure its icon/tooltip, add it to m_layout, and connect its clicked() signal to emit testBoxRequested() (or forward to that signal); ensure updateVisibleButtons() checks the relevant Context enum/flags and shows/hides m_testBoxButton accordingly; finally consider renaming m_testBoxButton to a more descriptive identifier reflecting the feature purpose unless it is intentionally temporary.
+
+
+
+============================================================================
+File: src/app/document/Document.cpp
+Line: 235 to 251
+Type: nitpick
+
+Comment:
+removeBody rebuilds the entire element map.
+
+Calling rebuildElementMap() clears and re-registers all bodies, which is O(n) in the number of bodies and their elements. For frequent deletions, consider removing only the specific body's elements from the map if ElementMap supports targeted removal.
+
+Prompt for AI Agent:
+Document::removeBody currently calls rebuildElementMap() which is O(n) and costly on frequent deletions; instead remove only the deleted body's entries from the ElementMap. Update Document::removeBody to: 1) look up the body's element ids via the body object in bodies_ (or bodyNames_ if that maps to elements), 2) call a targeted removal API on ElementMap (e.g., ElementMap::removeElementsForBody(bodyId) or ElementMap::remove(elementIds)) to remove just that body's elements, 3) fall back to calling rebuildElementMap() only if the ElementMap lacks a targeted removal method, and 4) preserve the existing behavior of sceneMeshStore_->removeBody(id), setModified(true), and emit bodyRemoved(...).
+
+
+
+============================================================================
+File: src/app/document/Document.cpp
+Line: 309 to 316
+Type: potential_issue
+
+Comment:
+updateBodyMesh emits bodyUpdated which may be redundant on initial add.
+
+When addBody calls updateBodyMesh, it emits bodyUpdated before addBody emits bodyAdded. Listeners may receive an update signal for a body they haven't been notified about yet. Consider either:
+1. Suppressing the signal during initial creation, or
+2. Documenting that bodyUpdated may precede bodyAdded for new bodies.
+
+Prompt for AI Agent:
+The updateBodyMesh method currently emits bodyUpdated which can arrive before addBody's bodyAdded; modify updateBodyMesh to accept an optional bool emitSignal (default true) and only emit bodyUpdated when emitSignal is true, keep the mesh building and sceneMeshStore_->setBodyMesh unchanged, then update addBody to call updateBodyMesh(bodyId, shape, /emitSignal=/false) so addBody can emit bodyAdded first; alternatively, if you prefer the other approach, document in comments on updateBodyMesh that bodyUpdated may precede bodyAdded and leave behavior as-is.
+
+
+
+============================================================================
+File: src/app/document/Document.h
+Line: 116 to 118
+Type: nitpick
+
+Comment:
+Consider future-proofing BodyEntry struct.
+
+The struct currently only holds a TopoDS_Shape. If additional metadata (e.g., material, visibility, transform) is anticipated, this is a good extensibility point. Otherwise, consider using TopoDS_Shape directly in the map if no expansion is planned.
+
+Prompt for AI Agent:
+The BodyEntry struct currently only wraps TopoDS_Shape which limits clarity and future extensibility; either replace BodyEntry with TopoDS_Shape throughout if you don't plan to add metadata, or convert BodyEntry into a proper extensible data holder (e.g., add fields for material, visibility, transform and provide constructors/accessors). Update all references to BodyEntry (map declarations, functions that insert/return entries, and any serialization/clone logic) to match the chosen approach and ensure constructors, copy/move semantics and any uses in Document methods compile with the new type.
+
+
+
+============================================================================
+File: src/app/document/Document.h
+Line: 100
+Type: nitpick
+
+Comment:
+Returning raw pointer from meshStore() exposes ownership ambiguity.
+
+The method returns a raw pointer to a unique_ptr-managed resource. While common for internal access, callers cannot easily determine if they can store this pointer safely. Consider documenting the lifetime contract or returning a reference if null is not expected after construction.
+
+Prompt for AI Agent:
+The meshStore() accessor currently returns a raw pointer from sceneMeshStore_.get(), which leaves ownership and lifetime ambiguous; change meshStore() to return a reference (render::SceneMeshStore&) instead of a raw pointer if sceneMeshStore_ is expected to be non-null after construction (and add an assertion or throw if it is null), or explicitly document the lifetime contract and nullability if it can be null; update the signature and callers to use meshStore() as a reference (or adjust to handle a nullable pointer) and ensure sceneMeshStore_ is initialized appropriately in the constructor.
+
+
+
+============================================================================
+File: src/ui/toolbar/ContextToolbar.cpp
+Line: 45 to 46
+Type: potential_issue
+
+Comment:
+Verify if this is production-ready code or test functionality.
+
+The button name m_testBoxButton and label "Add test box" strongly suggest this is test or debug functionality. If this is temporary development code, it should be removed before merging to production. If it's intentional, consider:
+
+- Renaming to reflect its actual purpose (e.g., m_boxButton, "Add box")
+- Feature-flagging test functionality so it's not exposed in production builds
+- Adding documentation explaining why test functionality is exposed in the UI
+
+Prompt for AI Agent:
+The m_testBoxButton instantiation and connected slot (SidebarToolButton with label "Add test box" connected to ContextToolbar::testBoxRequested) appears to be test/debug UI; either remove it for production, guard it behind a feature flag, or rename it to reflect intended functionality. Update the code by either deleting the m_testBoxButton creation and connect call if it’s temporary, or wrap them in a compile/runtime feature check (e.g., if (enableTestUi) { ... }), or rename m_testBoxButton and the visible label to the real feature names (e.g., m_boxButton, "Add box") and update the connected slot name accordingly; also add a brief comment documenting why the control is present if it must remain.
+
+
+
+============================================================================
+File: src/ui/selection/SketchPickerAdapter.cpp
+Line: 13 to 28
+Type: nitpick
+
+Comment:
+LGTM!
+
+The priority logic is clear and handles all cases appropriately. Construction entities are deprioritized (priority 3), while points have the highest priority (0).
+
+
+
+Consider adding a comment explaining the priority scheme (lower = higher priority) for future maintainability.
+
+Prompt for AI Agent:
+Add a brief explanatory comment above the priorityForSketchEntity function describing the priority scheme (e.g., "lower number = higher selection priority"), and summarize how values map to entity types (construction -> 3, Point -> 0, Lines/Arcs/Circles/Ellipses -> 1, others -> 2) so future readers understand the ordering; update the comment near the function signature priorityForSketchEntity(core::sketch::EntityType type, bool isConstruction) to include this note.
+
+
+
+============================================================================
+File: src/ui/navigator/ModelNavigator.cpp
+Line: 196 to 238
+Type: nitpick
+
+Comment:
+Consider extracting common item management logic.
+
+The body handlers duplicate the sketch handlers' logic nearly identically. While the current explicit implementation is clear and maintainable, you could reduce duplication by extracting a generic helper that handles add/remove/rename operations for both bodies and sketches, parameterized by the item map, counter, root, and name prefix.
+
+
+
+
+Example approach
+
+Create a helper structure and methods to encapsulate common tree item management:
+
+struct ItemCollection {
+    std::unordered_map& items;
+    int& counter;
+    QTreeWidgetItem* root;
+    QString namePrefix;
+    QString placeholderText;
+};
+
+void addItem(ItemCollection& collection, const QString& id) {
+    // Common logic using collection parameters
+}
+
+void removeItem(ItemCollection& collection, const QString& id) {
+    // Common logic using collection parameters
+}
+
+void renameItem(ItemCollection& collection, const QString& id, const QString& newName) {
+    // Common logic using collection parameters
+}
+
+
+Then call these helpers from the specific body/sketch methods.
+
+Prompt for AI Agent:
+The body handlers in ModelNavigator (ModelNavigator::onBodyAdded, ::onBodyRemoved, ::onBodyRenamed) duplicate the sketch handlers' logic; extract a generic helper (e.g., an ItemCollection struct that holds references to the map (m_bodyItems), counter (m_bodyCounter), root (m_bodiesRoot), name prefix ("Body %1") and placeholder text ("(No bodies)")) and implement common functions addItem(ItemCollection&, const QString& id), removeItem(ItemCollection&, const QString& id) and renameItem(ItemCollection&, const QString& newName) that encapsulate the creation of the placeholder, selectable flags, counter increment, setData/setText, deletion and map updates, then replace the body-specific methods to call these helpers (and reuse the same helpers for sketches).
+
+
+
+============================================================================
+File: src/render/tessellation/TessellationCache.h
+Line: 4 to 7
+Type: potential_issue
+
+Comment:
+Missing includes for TopoDS_Face and .
+
+The header uses TopoDS_Face (line 30) and std::string (lines 24, 29) but doesn't include their respective headers. This can cause compilation failures depending on what transitive headers happen to be included.
+
+
+
+
+🔎 Proposed fix
+
+ #include "../scene/SceneMeshStore.h"
+ #include "../../kernel/elementmap/ElementMap.h"
+ 
+ #include 
++#include 
++
++#include
+
+Prompt for AI Agent:
+The header is missing includes for TopoDS_Face and std::string which are used in TessellationCache.h (symbols: TopoDS_Face and std::string); add the appropriate includes (the OpenCASCADE face header and the C++  header) near the other includes so the declarations compile reliably regardless of transitive includes.
+
+
+
+============================================================================
+File: src/ui/selection/DeepSelectPopup.cpp
+Line: 38 to 48
+Type: potential_issue
+
+Comment:
+Guard against empty labels list.
+
+If labels is empty, sizeHintForRow(0) and sizeHintForColumn(0) return -1, leading to invalid size calculations that could make the popup invisible or cause layout issues.
+
+
+
+🔎 Proposed fix to handle empty labels
+
+ void DeepSelectPopup::setCandidateLabels(const QStringList& labels) {
+     list_->clear();
++    if (labels.isEmpty()) {
++        return;
++    }
+     list_->addItems(labels);
+     list_->setCurrentRow(0);
+     int rows = labels.size();
+     int rowHeight = list_->sizeHintForRow(0);
+     int maxVisible = std::min(8, rows);
+     int height = rowHeight * maxVisible + 8;
+     list_->setFixedHeight(height);
+     list_->setFixedWidth(std::max(180, list_->sizeHintForColumn(0) + 24));
+ }
+
+
+
+
+============================================================================
+File: src/render/scene/SceneMeshStore.h
+Line: 45 to 54
+Type: nitpick
+
+Comment:
+Consider adding size() and empty() convenience methods.
+
+These are commonly needed accessors that avoid the overhead of calling meshes() just to check count.
+
+Additionally, if SceneMeshStore may be accessed from multiple threads (e.g., render thread vs. main thread), consider documenting the thread-safety contract or adding synchronization.
+
+
+
+🔎 Optional convenience methods
+
+    [[nodiscard]] std::size_t size() const { return meshes_.size(); }
+    [[nodiscard]] bool empty() const { return meshes_.empty(); }
+
+Prompt for AI Agent:
+Add small convenience accessors to SceneMeshStore: implement [[nodiscard]] std::size_t size() const and [[nodiscard]] bool empty() const that forward to meshes_.size() and meshes_.empty() respectively so callers can cheaply query count without copying meshes() (add declarations to the class header next to meshes()/findMesh()/clear()). Also document the thread-safety contract for SceneMeshStore (or add synchronization such as a mutex protecting meshes_ if the store can be accessed from multiple threads) so concurrent access is explicit.
+
+
+
+============================================================================
+File: src/render/scene/SceneMeshStore.cpp
+Line: 18 to 25
+Type: nitpick
+
+Comment:
+Consider providing a const iterator interface to avoid copying.
+
+This method copies all stored Mesh objects, which can be expensive since each Mesh contains vectors and a map. If callers typically just need to iterate, consider adding a forEachMesh callback or exposing const iterators to avoid the allocation overhead.
+
+
+
+🔎 Example alternative interface
+
+// In header:
+template
+void forEachMesh(Func&& func) const {
+    for (const auto& [id, mesh] : meshes_) {
+        func(mesh);
+    }
+}
+
+Prompt for AI Agent:
+The SceneMeshStore::meshes() method currently copies all Mesh objects from meshes_, which is expensive; add a const iteration interface instead (e.g., a template method named forEachMesh or const_iterator begin()/end()) that accepts a callable and invokes it with a const Mesh& for each entry to avoid allocations and copies; implement forEachMesh(Func&& func) const to iterate over meshes_ and call func(mesh) for each pair, and update callers to use forEachMesh (or expose const iterators) while leaving meshes() only if you need a copy-producing helper.
+
+
+
+============================================================================
+File: src/app/selection/SelectionManager.h
+Line: 62
+Type: nitpick
+
+Comment:
+Avoid magic numbers for sentinel values.
+
+Using {-10000, -10000} as a sentinel value for "no previous click" is fragile and unclear. Consider using std::optional instead, which explicitly models the absence of a value.
+
+
+🔎 Proposed fix
+
+-    QPoint lastClickPos_{-10000, -10000};
++    std::optional lastClickPos_;
+
+
+This would require updating sameClickLocation to check lastClickPos_.has_value() before comparing positions.
+
+Prompt for AI Agent:
+Replace the sentinel QPoint lastClickPos_{-10000, -10000} with std::optional lastClickPos_ = std::nullopt (add #include ), update any assignments to set lastClickPos_ = QPoint(...) and reset with std::nullopt where appropriate, and modify sameClickLocation to first check lastClickPos_.has_value() before comparing positions (use lastClickPos_.value() or operator* safely); also audit other usages to dereference only when has_value() is true.
+
+
+
+============================================================================
+File: src/app/document/Document.cpp
+Line: 281 to 307
+Type: potential_issue
+
+Comment:
+TopExp_Explorer may register duplicate edges and vertices.
+
+When iterating with TopExp_Explorer, shared edges (between faces) and shared vertices are visited multiple times. This will register duplicate elements with different IDs in the element map, which may cause issues with element selection or persistence.
+
+Consider using TopExp::MapShapes or tracking visited shapes with a TopTools_IndexedMapOfShape to avoid duplicates.
+
+
+
+
+🔎 Proposed fix using indexed maps
+
+ void Document::registerBodyElements(const std::string& bodyId, const TopoDS_Shape& shape) {
+     using kernel::elementmap::ElementId;
+     using kernel::elementmap::ElementKind;
++    
++    TopTools_IndexedMapOfShape faceMap, edgeMap, vertexMap;
++    TopExp::MapShapes(shape, TopAbs_FACE, faceMap);
++    TopExp::MapShapes(shape, TopAbs_EDGE, edgeMap);
++    TopExp::MapShapes(shape, TopAbs_VERTEX, vertexMap);
+
+     elementMap_.registerElement(ElementId::From(bodyId), ElementKind::Body, shape);
+
+-    int faceIndex = 0;
+-    for (TopExp_Explorer exp(shape, TopAbs_FACE); exp.More(); exp.Next()) {
+-        TopoDS_Face face = TopoDS::Face(exp.Current());
+-        std::string faceId = bodyId + "/face/" + std::to_string(faceIndex++);
++    for (int i = 1; i 
+#include
+
+Prompt for AI Agent:
+Document::registerBodyElements currently iterates with TopExp_Explorer and can register duplicate edges/vertices from shared topology; change the implementation to collect unique faces/edges/vertices using TopExp::MapShapes or a TopTools_IndexedMapOfShape (add includes TopExp.hxx and TopTools_IndexedMapOfShape.hxx), iterate the indexed map(s) to build faceId/edgeId/vertexId and call elementMap_.registerElement only once per unique shape; keep the body registration as-is but replace each TopExp_Explorer loop (faces, edges, vertices) with a TopExp::MapShapes or TopTools_IndexedMapOfShape-based collection to avoid duplicate registrations.
+
+
+
+============================================================================
+File: src/ui/selection/SketchPickerAdapter.cpp
+Line: 54 to 55
+Type: potential_issue
+
+Comment:
+Critical: Use pixelScaleSafe for tolerance calculation.
+
+Line 54 calculates toleranceWorld using pixelScale before the safety check on line 55. If pixelScale is zero or negative, toleranceWorld will be invalid, causing incorrect behavior in pickConstraint and pickEntities.
+
+
+
+🔎 Proposed fix
+
+-    const double toleranceWorld = tolerancePixels * pixelScale;
+     const double pixelScaleSafe = (pixelScale > 0.0) ? pixelScale : 1.0;
++    const double toleranceWorld = tolerancePixels * pixelScaleSafe;
+
+Prompt for AI Agent:
+toleranceWorld is computed from pixelScale before pixelScaleSafe is derived, so if pixelScale <= 0 you get an invalid tolerance used by pickConstraint and pickEntities; change the calculation to use pixelScaleSafe (i.e., compute pixelScaleSafe first from pixelScale, then compute toleranceWorld = tolerancePixels * pixelScaleSafe) so all subsequent calls (pickConstraint, pickEntities) receive a safe, non-zero world tolerance.
+
+
+
+============================================================================
+File: tests/prototypes/proto_tessellation_cache.cpp
+Line: 34 to 43
+Type: potential_issue
+
+Comment:
+Add error handling for ElementId::From.
+
+The call to ElementId::From(tri.faceId) on line 39 lacks exception handling. If tri.faceId contains an unexpected format, this could throw an exception and crash the test instead of failing gracefully with a meaningful error message.
+
+
+
+🔎 Proposed fix with exception handling
+
+ for (const auto& tri : mesh->triangles) {
+     if (tri.faceId.empty()) {
+         std::cerr
+
+Prompt for AI Agent:
+The loop over mesh->triangles should catch exceptions thrown by ElementId::From(tri.faceId); wrap the call to onecad::kernel::elementmap::ElementId::From(tri.faceId) in a try-catch, and on exception log a clear error including tri.faceId and the exception message (use std::cerr) and return 1 to fail the test gracefully; then only call document.elementMap().contains(...) with the successfully constructed ElementId. Ensure references to mesh->triangles, tri.faceId, ElementId::From, document.elementMap() are used so the fix is applied in the correct location.
+
+
+
+============================================================================
+File: src/render/tessellation/TessellationCache.h
+Line: 19
+Type: nitpick
+
+Comment:
+Consider using = default if the constructor has no custom logic.
+
+If the constructor body is empty and only relies on in-class member initializers, consider declaring it as = default to make the intent explicit and allow potential compiler optimizations.
+
+
+
+
+🔎 Proposed change
+
+-    TessellationCache();
++    TessellationCache() = default;
+
+Prompt for AI Agent:
+The default constructor TessellationCache() should be declared as = default in the class declaration (replace the empty-bodied constructor with TessellationCache() = default;) to express intent and enable compiler optimizations; if there is a separate out-of-line definition in the .cpp (TessellationCache::TessellationCache() { } ), remove that definition to avoid duplicate definitions and keep the defaulted declaration in the header.
+
+
+
+============================================================================
+File: src/core/sketch/SketchRenderer.h
+Line: 457
+Type: potential_issue
+
+Comment:
+Add documentation for the new pickEntities method.
+
+The method lacks documentation, which is inconsistent with the surrounding code style and the existing pickEntity method. Documentation should clarify:
+- What entities are returned (all within tolerance?)
+- Whether results are sorted by distance (most useful to callers)
+- The relationship to the single-entity pickEntity method
+
+
+
+
+📝 Suggested documentation
+
++    /
++     * @brief Find all entities at screen position
++     * @param screenPos Position in screen coordinates
++     * @param tolerance Pick tolerance in pixels
++     * @return Vector of all entities within tolerance, sorted by distance (nearest first)
++     */
+     std::vector pickEntities(const Vec2d& screenPos, double tolerance = 5.0) const;
+
+
+
+
+============================================================================
+File: tests/prototypes/proto_pickmesh_integration.cpp
+Line: 55 to 66
+Type: nitpick
+
+Comment:
+Consider adding more detailed hit validation.
+
+The test verifies a face hit exists, but for better confidence, you could also verify the hit's bodyId matches the added body, ensuring the pick correctly identifies the expected geometry.
+
+
+🔎 Suggested enhancement
+
+     bool hasFace = false;
+     for (const auto& hit : result.hits) {
+         if (hit.kind == onecad::app::selection::SelectionKind::Face) {
+-            hasFace = true;
+-            break;
++            if (hit.bodyId == bodyId) {
++                hasFace = true;
++                break;
++            }
+         }
+     }
+     if (!hasFace) {
+-        std::cerr
+
+
+
+
+============================================================================
+File: tests/prototypes/proto_pick_topology_promotion.cpp
+Line: 84 to 87
+Type: nitpick
+
+Comment:
+Consider using std::string::starts_with() for clarity.
+
+The rfind(..., 0) != 0 idiom works correctly, but if C++20 is available, starts_with() is more readable.
+
+
+
+
+🔎 Proposed refactor using C++20
+
+-    if (edgeId.rfind(bodyId + "/edge/", 0) != 0) {
++    if (!edgeId.starts_with(bodyId + "/edge/")) {
+
+Prompt for AI Agent:
+Replace the rfind check that verifies the edge id prefix with the clearer C++20 starts_with usage: locate the conditional using edgeId.rfind(bodyId + "/edge/", 0) in the code (the variables edgeId and bodyId) and change it to use edgeId.starts_with(bodyId + "/edge/") (negating as needed). Ensure the project is compiled with C++20 (or provide a small fallback using compare(0, prefix.size(), prefix) == 0 if C++20 is not available).
+
+
+
+============================================================================
+File: src/render/CMakeLists.txt
+Line: 20 to 24
+Type: nitpick
+
+Comment:
+Consider consolidating include directories and reviewing scope.
+
+There are now two target_include_directories calls for onecad_render (lines 10 and 20-24). Consider consolidating them into a single call for better clarity.
+
+Additionally:
+1. Verify that ${OpenCASCADE_INCLUDE_DIR} is properly defined by the OpenCASCADE find module.
+2. Consider whether ${CMAKE_SOURCE_DIR}/src should be PRIVATE instead of PUBLIC. Using PUBLIC exposes this include path to all consumers of onecad_render, which may be overly broad if these headers are only needed internally.
+
+
+
+
+
+🔎 Proposed consolidation
+
+-target_include_directories(onecad_render PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
++target_include_directories(onecad_render
++    PUBLIC
++    ${CMAKE_CURRENT_SOURCE_DIR}
++    ${OpenCASCADE_INCLUDE_DIR}
++    PRIVATE
++    ${CMAKE_SOURCE_DIR}/src
++)
+ 
+ target_link_libraries(onecad_render
+     PUBLIC
+     Qt6::Core
+     Qt6::Gui
+     Qt6::OpenGLWidgets
+     ${OpenCASCADE_LIBRARIES}
+ )
+-
+-target_include_directories(onecad_render
+-    PUBLIC
+-    ${OpenCASCADE_INCLUDE_DIR}
+-    ${CMAKE_SOURCE_DIR}/src
+-)
+
+Prompt for AI Agent:
+Consolidate the two target_include_directories calls for the target onecad_render into a single target_include_directories(onecad_render ...) statement, listing ${OpenCASCADE_INCLUDE_DIR} and ${CMAKE_SOURCE_DIR}/src together and choosing appropriate scope keywords; verify that ${OpenCASCADE_INCLUDE_DIR} is set by your OpenCASCADE find module (or replace with the correct imported target if available) and change ${CMAKE_SOURCE_DIR}/src to PRIVATE instead of PUBLIC if those headers are only needed internally so they are not propagated to consumers.
+
+
+
+============================================================================
+File: src/app/selection/SelectionTypes.h
+Line: 90 to 106
+Type: nitpick
+
+Comment:
+Consider improving hash combination for better distribution.
+
+The current hash implementations use h1 ^ (h2 
+🔎 Recommended hash combination improvement
+
+Replace the XOR-shift pattern with a more robust combination inspired by boost::hash_combine:
+
+ template 
+ struct hash {
+     size_t operator()(const onecad::app::selection::SelectionId& id) const noexcept {
+-        return std::hash{}(id.ownerId) ^ (std::hash{}(id.elementId) {}(id.ownerId);
++        seed ^= std::hash{}(id.elementId) + 0x9e3779b9 + (seed > 2);
++        return seed;
+     }
+ };
+
+ template 
+ struct hash {
+     size_t operator()(const onecad::app::selection::SelectionKey& key) const noexcept {
+         size_t h1 = std::hash{}(static_cast(key.kind));
+         size_t h2 = std::hash{}(key.id);
+-        return h1 ^ (h2 > 2);
++        return h1;
+     }
+ };
+
+
+This approach uses the golden ratio constant (0x9e3779b9) and additional mixing to reduce collision rates.
+
+Prompt for AI Agent:
+The custom std::hash specializations for onecad::app::selection::SelectionId and SelectionKey use a simple XOR-shift (h1 ^ (h2 >2) to reduce collisions; update both operator() implementations (the hash::operator() and hash::operator()) to use this mixing pattern to produce the final size_t.
+
+
+
+============================================================================
+File: src/render/BodyRenderer.h
+Line: 20 to 29
+Type: potential_issue
+
+Comment:
+Initialize color members with sensible defaults.
+
+The baseColor and edgeColor members lack default values, which means they'll be initialized using QColor's default constructor, creating invalid colors (QColor::isValid() returns false). This could lead to rendering issues if users don't explicitly set these colors.
+
+
+
+
+🔎 Suggested defaults
+
+ struct RenderStyle {
+-    QColor baseColor;
+-    QColor edgeColor;
++    QColor baseColor{200, 200, 200};  // Light gray
++    QColor edgeColor{0, 0, 0};        // Black
+     float baseAlpha = 1.0f;
+     float edgeAlpha = 1.0f;
+     float previewAlpha = 0.35f;
+     float ghostFactor = 1.0f;
+     bool ghosted = false;
+     bool drawEdges = true;
+ };
+
+Prompt for AI Agent:
+RenderStyle's QColor members baseColor and edgeColor are left uninitialized (invalid); set sensible defaults by assigning them explicit QColor values (e.g., QColor(Qt::white) for baseColor and QColor(Qt::black) for edgeColor) using in-struct default member initializers or inside RenderStyle's constructor so they are valid by default; update the RenderStyle declaration where baseColor and edgeColor are defined to include these defaults and keep the existing float/bool defaults unchanged.
+
+
+
+============================================================================
+File: src/app/selection/SelectionTypes.h
+Line: 4 to 7
+Type: potential_issue
+
+Comment:
+Add missing  include.
+
+The hash specializations (lines 93-105) use std::hash, which requires #include . While some standard library implementations may transitively include this header, relying on transitive includes is not portable and can cause compilation failures.
+
+
+
+
+🔎 Proposed fix
+
+ #include 
+ #include 
+ #include 
+ #include 
++#include
+
+Prompt for AI Agent:
+Add a missing #include for  at the top of SelectionTypes.h so the custom hash specializations (which use std::hash) compile portably; locate the existing include block (currently containing , , , ) and add  alongside them so the std::hash usages in the hash specializations are properly declared.
+
+
+
+============================================================================
+File: src/ui/selection/SketchPickerAdapter.h
+Line: 16 to 19
+Type: nitpick
+
+Comment:
+Consider passing Options by value for potential efficiency gain.
+
+The Options struct contains only two booleans and is likely very small (2-8 bytes with padding). For such small types, passing by value may be more efficient than passing by const reference, as it avoids pointer indirection. However, const reference is not incorrect and provides flexibility if the struct grows in the future.
+
+
+
+
+🔎 Proposed change to pass by value
+
+If you choose to pass by value, update line 27:
+
+-                                    const Options& options) const;
++                                    Options options) const;
+
+Prompt for AI Agent:
+The Options struct is tiny and should be passed by value: change any function or method signatures that currently take const Options& (for example the SketchPickerAdapter constructor and any SketchPickerAdapter methods named in this header) to take Options by value instead, update the corresponding definitions/implementations to match, and update all call sites accordingly so callers pass the Options directly (no other behavior change needed).
+
+
+
+============================================================================
+File: src/ui/mainwindow/MainWindow.cpp
+Line: 650 to 656
+Type: potential_issue
+
+Comment:
+Missing viewport update and user feedback.
+
+The implementation correctly creates and adds the box, but:
+
+1. Missing viewport update: The viewport should be updated after adding the body so the new geometry is rendered immediately. Other similar operations call m_viewport->update() (e.g., line 599, line 829).
+
+2. No user feedback: Unlike other operations (e.g., onImport at line 645), there's no status bar update to inform the user that the box was added.
+
+
+
+
+
+🔎 Proposed improvements
+
+ void MainWindow::onAddDebugBox() {
+     if (!m_document) {
+         return;
+     }
+     TopoDS_Shape shape = BRepPrimAPI_MakeBox(50.0, 30.0, 20.0).Shape();
+     m_document->addBody(shape);
++    
++    if (m_viewport) {
++        m_viewport->update();
++    }
++    
++    m_toolStatus->setText(tr("Debug box added"));
+ }
+
+Prompt for AI Agent:
+In MainWindow::onAddDebugBox, after calling m_document->addBody(shape) call m_viewport->update() to refresh the viewport so the new box is rendered immediately, and also post a user-facing status update (use the same mechanism as onImport, e.g. statusBar()->showMessage or m_statusBar->showMessage with a concise message like "Added debug box") to inform the user the action completed.
+
+
+
+============================================================================
+File: src/render/tessellation/TessellationCache.cpp
+Line: 105 to 112
+Type: potential_issue
+
+Comment:
+Same deduplication issue exists for edges without elementMap IDs.
+
+Similar to the vertex issue, when an edge has no elementMap ID, a new unknown ID is generated on each encounter. If the same physical edge is shared by multiple wires or faces, deduplication will fail, potentially causing duplicate EdgePolyline entries.
+
+Consider applying the same shape-hash-based deduplication approach for edges.
+
+Prompt for AI Agent:
+When an edge has no elementMap IDs the code generates a new unknown ID every time (edgeId using unknownEdgeCount), causing duplicate EdgePolyline entries; change the branch that handles empty edgeIds to compute a stable shape-hash for the edge (the same hash used for vertices) and use a lookup map from shapeHash->generatedEdgeId to return the same generated ID across encounters; update code around elementMap.findIdsByShape(edge), edgeId, unknownEdgeCount to: if edgeIds.empty() compute shapeHash, check/insert into a generatedIdMap (e.g., generatedEdgeIdsByHash) and use that id (falling back to bodyId + "/edge/unknown_" when inserting), ensuring deduplication for shared edges.
+
+
+
+============================================================================
+File: src/render/scene/SceneMeshStore.h
+Line: 14 to 19
+Type: nitpick
+
+Comment:
+Consider using unsigned type for triangle indices.
+
+Vertex indices are inherently non-negative. Using uint32_t (or std::uint32_t from ) instead of int better represents the domain and prevents accidental negative values.
+
+
+
+🔎 Suggested change
+
+     struct Triangle {
+-        int i0 = 0;
+-        int i1 = 0;
+-        int i2 = 0;
++        std::uint32_t i0 = 0;
++        std::uint32_t i1 = 0;
++        std::uint32_t i2 = 0;
+         std::string faceId;
+     };
+
+Prompt for AI Agent:
+The Triangle struct currently uses signed ints for indices (i0, i1, i2); change their types to an unsigned integer (e.g., std::uint32_t) to reflect that vertex indices are non-negative and to prevent accidental negatives; add #include  (or use std::uint32_t qualified) and update any code that constructs or assigns to Triangle::i0/i1/i2 to use the new unsigned type or perform explicit casts where necessary to keep interfaces consistent.
+
+
+
+============================================================================
+File: src/render/BodyRenderer.h
+Line: 4 to 14
+Type: nitpick
+
+Comment:
+Consider reordering includes to follow standard convention.
+
+By convention, system/library includes typically come before project includes to catch missing dependencies in project headers.
+
+
+
+
+🔎 Suggested include order
+
+-#include "scene/SceneMeshStore.h"
+-
+ #include 
+ #include 
+ #include 
+ #include 
+ #include 
+ #include 
+ #include 
+ #include 
+ #include 
++
++#include "scene/SceneMeshStore.h"
+
+Prompt for AI Agent:
+The include order in BodyRenderer.h should follow convention: place standard/library headers (QColor, QMatrix4x4, QOpenGLBuffer, QOpenGLFunctions, QOpenGLShaderProgram, QOpenGLVertexArrayObject, QVector3D, , ) before the project header "scene/SceneMeshStore.h" so that missing dependencies in project headers are caught; update the include sequence in BodyRenderer.h so system/Qt/std headers appear first and project includes (SceneMeshStore.h) come last.
+
+
+
+============================================================================
+File: src/ui/selection/SketchPickerAdapter.h
+Line: 21 to 27
+Type: nitpick
+
+Comment:
+Consider using std::string_view for the sketchId parameter.
+
+The sketchId parameter is passed as const std::string&. For a read-only string parameter, std::string_view can be more flexible and efficient, as it avoids potential string copies and works seamlessly with string literals, std::string, and other string-like types.
+
+
+
+
+🔎 Proposed change to use std::string_view
+
++#include 
++
+ namespace onecad::core::sketch {
+
+
+ app::selection::PickResult pick(const core::sketch::SketchRenderer& renderer,
+                                 const core::sketch::Sketch& sketch,
+                                 const core::sketch::Vec2d& sketchPos,
+-                                const std::string& sketchId,
++                                std::string_view sketchId,
+                                 double pixelScale,
+                                 double tolerancePixels,
+                                 const Options& options) const;
+
+Prompt for AI Agent:
+The pick function's sketchId parameter should be changed from const std::string& to std::string_view to avoid unnecessary copies and accept string literals efficiently; update the declaration of app::selection::PickResult pick(...) to use std::string_view sketchId, update the corresponding implementation/definition to match, add or include  where needed, and ensure any call sites compile (they typically do since std::string converts to std::string_view); adjust any places that store or outlive the view to make an owning copy if required.
+
+
+
+============================================================================
+File: src/render/BodyRenderer.h
+Line: 31 to 32
+Type: potential_issue
+
+Comment:
+Explicitly delete or implement copy and move operations (Rule of 5).
+
+The class manages OpenGL resources (shader programs, VAOs, VBOs) and contains non-copyable Qt types. The destructor is explicitly declared, which triggers the Rule of 5. You should explicitly delete copy constructor and copy assignment operator (and likely move operations too) to prevent accidental copies that would lead to double-free or resource corruption.
+
+
+
+
+🔎 Suggested fix
+
+ BodyRenderer();
+ ~BodyRenderer();
++
++// Prevent copying (OpenGL resources are not copyable)
++BodyRenderer(const BodyRenderer&) = delete;
++BodyRenderer& operator=(const BodyRenderer&) = delete;
++
++// Prevent moving (OpenGL context dependency)
++BodyRenderer(BodyRenderer&&) = delete;
++BodyRenderer& operator=(BodyRenderer&&) = delete;
+
+ void initialize();
+
+Prompt for AI Agent:
+BodyRenderer declares a destructor and manages non-copyable GL/Qt resources, so add explicit special-member declarations to follow the Rule of 5: delete the copy constructor and copy assignment (e.g., BodyRenderer(const BodyRenderer&) = delete; BodyRenderer& operator=(const BodyRenderer&) = delete;) and also either delete or implement move constructor and move assignment (recommend deleting them as well: BodyRenderer(BodyRenderer&&) = delete; BodyRenderer& operator=(BodyRenderer&&) = delete;) to prevent accidental copies/moves and double-free of shader programs, VAOs, and VBOs.
+
+
+
+============================================================================
+File: src/ui/viewport/Viewport.h
+Line: 13
+Type: nitpick
+
+Comment:
+Remove redundant forward declaration.
+
+Line 13 includes the full header "selection/ModelPickerAdapter.h", making the forward declaration of ModelPickerAdapter on line 53 redundant. Forward declarations are only needed when the full type definition isn't required.
+
+
+
+
+🔎 Proposed fix
+
+Remove the forward declaration since the full header is already included:
+
+ namespace selection {
+     class DeepSelectPopup;
+     class SketchPickerAdapter;
+-    class ModelPickerAdapter;
+ }
+
+
+
+
+
+Also applies to: 50-54
+
+Prompt for AI Agent:
+The header includes "selection/ModelPickerAdapter.h", so remove the redundant forward declaration of ModelPickerAdapter (the class forward declaration around lines 50-54) from Viewport.h; keep the existing #include and delete only the forward-declare statement to avoid duplication and potential confusion.
+
+
+
+============================================================================
+File: src/render/BodyRenderer.h
+Line: 31 to 43
+Type: refactor_suggestion
+
+Comment:
+Add isInitialized() method mentioned in the AI summary.
+
+The AI summary lists "isInitialized" as part of the public API, but it's not declared in the header. Consider adding this query method for consistency.
+
+
+
+
+
+🔎 Suggested addition
+
+ void cleanup();
++bool isInitialized() const { return m_initialized; }
+
+ void setMeshes(const std::vector& meshes);
+
+Prompt for AI Agent:
+The header is missing the isInitialized() query mentioned in the summary; add a public bool isInitialized() const declaration to BodyRenderer and implement it to return the internal initialized flag (e.g., m_initialized) which you should set to true in initialize() and false in cleanup(); update anywhere that constructs BodyRenderer to rely on isInitialized() instead of inspecting internals.
+
+
+
+============================================================================
+File: src/ui/selection/ModelPickerAdapter.cpp
+Line: 202 to 211
+Type: potential_issue
+
+Comment:
+Same bounds check concern applies here.
+
+Similar to setMeshes, the triangle vertex indices are accessed without validation. For consistency and safety, consider adding bounds checks or ensure validation happens at mesh ingestion time.
+
+Prompt for AI Agent:
+The loop in ModelPickerAdapter.cpp accesses mesh.vertices[tri.i0/1/2] without validating triangle indices (meshes_, mesh.triangles, mesh.vertices, rayTriangleIntersect), risking out-of-bounds reads; fix by either validating indices before access (check tri.i0/tri.i1/tri.i2 < mesh.vertices.size() and skip or log invalid triangles) or sanitize/validate triangles when meshes_ is set (e.g., in setMeshes) so triangles always reference valid vertex indices; update the loop or setMeshes to perform this bounds check and handle invalid triangles gracefully.
+
+
+
+============================================================================
+File: tests/prototypes/proto_model_picker.cpp
+Line: 39 to 48
+Type: nitpick
+
+Comment:
+Consider documenting the coordinate system and test values.
+
+The pick coordinates (26, 74) and tolerance (6.0) are magic numbers without explanation. While acceptable for a prototype, adding brief comments about the expected coordinate mapping would improve maintainability.
+
+
+
+
+💡 Optional: Add explanatory comments
+
+ QMatrix4x4 viewProjection;
+ viewProjection.setToIdentity();
+ QSize viewportSize(100, 100);
+-double tolerance = 6.0;
++double tolerance = 6.0; // Screen-space pixel tolerance for picking
+
++// With identity matrix, NDC coordinates map to screen space as:
++// NDC [-1,1] → Screen [0,100] for 100x100 viewport
++// Pick near vertex at (-0.5, -0.5) → screen ~(25, 75)
+ auto vertexPick = picker.pick(QPoint(26, 74), tolerance, viewProjection, viewportSize);
+
+Prompt for AI Agent:
+Add brief inline comments around the picker test to document the coordinate system and why these values were chosen: explain that viewProjection is identity so coordinates are in normalized viewport pixel space, note viewportSize = QSize(100,100) sets the pixel grid, document that QPoint(26,74) is the test pick position in that pixel space and tolerance = 6.0 is in pixels for the distance threshold used by picker.pick, and add a short note that the expected result is a vertex selection checked by hasKind(vertexPick, SelectionKind::Vertex).
+
+
+
+============================================================================
+File: tests/prototypes/proto_model_picker.cpp
+Line: 85 to 95
+Type: nitpick
+
+Comment:
+Overlap detection validation is functional.
+
+The test correctly validates that multiple face hits are detected. For more comprehensive validation, consider also verifying that both "face0" and "face1" are present in the results.
+
+
+
+
+
+💡 Optional: Validate specific face IDs
+
+ auto overlapPick = picker.pick(QPoint(50, 50), tolerance, viewProjection, viewportSize);
+ int faceCount = 0;
++bool hasFace0 = false, hasFace1 = false;
+ for (const auto& hit : overlapPick.hits) {
+     if (hit.kind == SelectionKind::Face) {
+         faceCount++;
++        if (hit.id.elementId == "face0") hasFace0 = true;
++        if (hit.id.elementId == "face1") hasFace1 = true;
+     }
+ }
+ if (faceCount
+
+Prompt for AI Agent:
+Test currently only counts face hits from overlapPick.hits; extend it to assert that specific faces "face0" and "face1" are present. After computing overlapPick (variable overlapPick from picker.pick) and iterating hits (overlapPick.hits) where hit.kind == SelectionKind::Face, collect hit identifiers (e.g., hit.id or hit.name as used in the Hit structure) and add checks that both "face0" and "face1" exist in that collection, failing the test if either is missing.
+
+
+
+============================================================================
+File: src/ui/selection/ModelPickerAdapter.h
+Line: 54
+Type: nitpick
+
+Comment:
+Consider using move semantics for better performance.
+
+The method takes std::vector by value, which creates a copy. For large mesh data, this can be expensive. Consider using rvalue reference to enable move semantics.
+
+
+
+
+🔎 Proposed refactor
+
+-void setMeshes(std::vector meshes);
++void setMeshes(std::vector&& meshes);
+
+
+This allows callers to move their vector instead of copying:
+adapter.setMeshes(std::move(myMeshes));
+
+Prompt for AI Agent:
+The setMeshes declaration currently copies the vector; change it to accept an rvalue reference (e.g., setMeshes(std::vector&& meshes)) so callers can move their mesh vector into the adapter, and update the implementation to std::move the parameter into the member storage; optionally add an overload taking const std::vector& for callers that want to copy.
+
+
+
+============================================================================
+File: src/ui/mainwindow/MainWindow.cpp
+Line: 158 to 162
+Type: potential_issue
+
+Comment:
+Misplaced separator affects menu structure.
+
+The separator at line 162 is added to viewMenu after the Debug menu is created, which breaks the logical flow. The separator should either be:
+- Moved before line 159 (before the Debug menu creation) to separate View menu sections, or
+- Added to debugMenu instead if you plan to add more debug actions, or  
+- Removed if it's unintentional
+
+
+
+
+🔎 Proposed fix: Move separator before Debug menu
+
++    viewMenu->addSeparator();
++
+     // Debug menu
+     QMenu* debugMenu = menuBar->addMenu(tr("&Debug"));
+     debugMenu->addAction(tr("Add Test Box"), this, &MainWindow::onAddDebugBox);
+-    viewMenu->addSeparator();
+     viewMenu->addAction(tr("Toggle &Grid"), QKeySequence(Qt::Key_G), this, [this]() {
+
+Prompt for AI Agent:
+The separator call is misplaced: viewMenu->addSeparator() is added after creating the Debug menu which breaks menu structure; move the separator line so it runs before the Debug menu is created (i.e., place the viewMenu->addSeparator() call before the QMenu* debugMenu = menuBar->addMenu(tr("&Debug")) statement), or alternatively replace it with debugMenu->addSeparator() if you intend the separator to belong to the Debug menu, or remove the separator entirely if it was accidental.
+
+
+
+============================================================================
+File: src/ui/selection/ModelPickerAdapter.cpp
+Line: 90 to 97
+Type: potential_issue
+
+Comment:
+Missing bounds check on triangle vertex indices.
+
+Accessing cache.vertices[tri.i0], etc., without validating that indices are within bounds can cause undefined behavior if the mesh data is malformed.
+
+
+
+🔎 Proposed fix
+
+         for (const auto& tri : cache.triangles) {
++            if (tri.i0 >= cache.vertices.size() ||
++                tri.i1 >= cache.vertices.size() ||
++                tri.i2 >= cache.vertices.size()) {
++                continue;  // Skip malformed triangle
++            }
+             std::array triVerts = {
+                 cache.vertices[tri.i0],
+                 cache.vertices[tri.i1],
+                 cache.vertices[tri.i2]
+             };
+             cache.faceMap[tri.faceId].push_back(triVerts);
+         }
+
+Prompt for AI Agent:
+In the loop over cache.triangles in ModelPickerAdapter.cpp, validate triangle vertex indices before indexing cache.vertices: check that tri.i0, tri.i1, and tri.i2 are >= 0 and < cache.vertices.size(); if any index is out of range, skip adding that triangle to cache.faceMap[tri.faceId] (or log/handle the malformed triangle) to avoid undefined behavior when accessing cache.vertices[tri.i0]/i1/i2. Ensure you reference the same symbols (cache.triangles, cache.vertices, tri.i0/i1/i2, cache.faceMap, tri.faceId) when implementing the checks so the fix is localized to this loop.
+
+
+
+============================================================================
+File: src/ui/selection/ModelPickerAdapter.h
+Line: 61 to 76
+Type: nitpick
+
+Comment:
+Consider using references instead of raw pointers for output parameters.
+
+While raw pointers for output parameters is a valid C-style pattern, modern C++ style prefers non-null references for mandatory output parameters, reserving pointers for optional outputs or nullable cases.
+
+
+
+
+🔎 Example refactor for reference-based output parameters
+
+-bool getFaceTriangles(const std::string& bodyId,
+-                      const std::string& faceId,
+-                      std::vector>* outTriangles) const;
++bool getFaceTriangles(const std::string& bodyId,
++                      const std::string& faceId,
++                      std::vector>& outTriangles) const;
+
+
+Apply similarly to other getter methods. This makes it clear that the output parameter cannot be null and eliminates nullptr checks in the implementation.
+
+Prompt for AI Agent:
+Change the output-parameter signatures from raw pointers to non-null references for the mandatory getters: getFaceTriangles, getBodyTriangles, getEdgePolyline, getEdgeSegment, and getVertexPosition; e.g., replace std::vector outTriangles with std::vector& outTriangles and std::array outSegment with std::array& outSegment. Update the corresponding implementations to accept references (remove nullptr checks) and update all call sites to pass lvalues instead of addresses; if any caller legitimately needs a nullable/optional output keep a pointer or use std::optional as appropriate. Ensure const correctness remains and adjust any forward declarations or header includes affected by the signature changes.
+
+
+
+============================================================================
+File: src/render/tessellation/TessellationCache.cpp
+Line: 95 to 96
+Type: nitpick
+
+Comment:
+Consider using std::unordered_set instead of std::unordered_map.
+
+For tracking seen edges and vertices, std::unordered_set is semantically clearer and slightly more efficient since you only need to track existence, not a boolean value.
+
+
+
+
+🔎 Proposed fix
+
+-    std::unordered_map seenEdges;
+-    std::unordered_map seenVertices;
++    std::unordered_set seenEdges;
++    std::unordered_set seenVertices;
+
+
+Then update the usage:
+-                    seenEdges[edgeId] = true;
++                    seenEdges.insert(edgeId);
+
+-                if (seenVertices.find(vertexId) != seenVertices.end()) {
++                if (seenVertices.count(vertexId) > 0) {
+
+-                seenVertices[vertexId] = true;
++                seenVertices.insert(vertexId);
+
+
+Note: Add #include  at the top.
+
+Prompt for AI Agent:
+Replace the two existence-tracking maps with unordered_sets: change the types of seenEdges and seenVertices from std::unordered_map to std::unordered_set in TessellationCache.cpp, update any uses of seenEdges[...]=true / seenVertices[...]=true to insert(...) and replace checks that used count/value lookup (e.g., seenEdges.find(key) != end or seenEdges[key]) with set membership checks (seenEdges.find(key) != seenEdges.end() or seenEdges.count(key)), and add #include  at the top of the file.
+
+
+
+============================================================================
+File: src/render/tessellation/TessellationCache.cpp
+Line: 33 to 35
+Type: nitpick
+
+Comment:
+Consider checking mesh generation result.
+
+BRepMesh_IncrementalMesh::Perform() can fail. Consider checking mesher.IsDone() before proceeding to avoid processing an incomplete or failed tessellation.
+
+
+
+
+🔎 Proposed fix
+
+     BRepMesh_IncrementalMesh mesher(shape, settings_.linearDeflection,
+                                     settings_.parallel, settings_.angularDeflection, true);
+     mesher.Perform();
++    if (!mesher.IsDone()) {
++        return mesh;
++    }
+
+Prompt for AI Agent:
+BRepMesh_IncrementalMesh::Perform() can fail; after calling mesher.Perform() in TessellationCache.cpp, call mesher.IsDone() and handle the failure path (e.g., log an error via your logger, return an error/empty result, or throw an exception) instead of continuing to process an incomplete tessellation; update the code around the existing BRepMesh_IncrementalMesh mesher and mesher.Perform() calls to check mesher.IsDone() and bail out cleanly with a clear diagnostic if it returns false.
+
+
+
+============================================================================
+File: src/ui/selection/ModelPickerAdapter.cpp
+Line: 266 to 270
+Type: potential_issue
+
+Comment:
+Variable shadowing: screenPos shadows function parameter.
+
+The local QPointF screenPos on line 266 shadows the function parameter const QPoint& screenPos. This compiles but can lead to confusion during maintenance.
+
+
+
+🔎 Proposed fix
+
+                 for (const auto& vertexId : topo.vertexIds) {
+                     auto it = hitMesh->vertexMap.find(vertexId);
+                     if (it == hitMesh->vertexMap.end()) {
+                         continue;
+                     }
+-                    QPointF screenPos;
+-                    if (!projectToScreen(viewProjection, it->second, viewportSize, &screenPos)) {
++                    QPointF projectedPos;
++                    if (!projectToScreen(viewProjection, it->second, viewportSize, &projectedPos)) {
+                         continue;
+                     }
+-                    double dist = std::hypot(clickPoint.x() - screenPos.x(), clickPoint.y() - screenPos.y());
++                    double dist = std::hypot(clickPoint.x() - projectedPos.x(), clickPoint.y() - projectedPos.y());
+
+Prompt for AI Agent:
+The local variable QPointF screenPos declared in the loop shadows the function parameter const QPoint& screenPos; rename the local (e.g., projectedScreenPos or screenPosF) used with projectToScreen(viewProjection, it->second, viewportSize, &...) and update its usages (e.g., screenPos.x(), screenPos.y()) and the distance computation with clickPoint accordingly to avoid shadowing and confusion.
+
+
+
+============================================================================
+File: src/ui/selection/ModelPickerAdapter.cpp
+Line: 160 to 167
+Type: potential_issue
+
+Comment:
+Duplicate vertex IDs in faceCache.vertexIds.
+
+When multiple boundary edges share a vertex, that vertex ID is pushed into faceCache.vertexIds multiple times. This causes redundant proximity checks during picking and may affect selection behavior.
+
+
+
+🔎 Proposed fix using a set for deduplication
+
++                std::unordered_set addedVertices;
+                 for (const auto& [edgeId, count] : edges) {
+                     // ... existing edge processing ...
+                     
+                     std::string vA = vertexIdForIndex(a);
+                     std::string vB = vertexIdForIndex(b);
+                     cache.vertexMap[vA] = cache.vertices[a];
+                     cache.vertexMap[vB] = cache.vertices[b];
+                     cache.pickableVertices.insert(vA);
+                     cache.pickableVertices.insert(vB);
+-                    faceCache.vertexIds.push_back(vA);
+-                    faceCache.vertexIds.push_back(vB);
++                    if (addedVertices.insert(vA).second) {
++                        faceCache.vertexIds.push_back(vA);
++                    }
++                    if (addedVertices.insert(vB).second) {
++                        faceCache.vertexIds.push_back(vB);
++                    }
+                 }
+
+Prompt for AI Agent:
+Duplicate vertex IDs are being pushed into faceCache.vertexIds causing redundant work; deduplicate when adding by checking/inserting only new IDs. Modify the block that currently calls vertexIdForIndex(a)/vertexIdForIndex(b) and pushes into cache.vertexMap, cache.pickableVertices and faceCache.vertexIds so that before pushing into faceCache.vertexIds you test membership (e.g., use cache.vertexMap, cache.pickableVertices, or a local std::unordered_set) and only push vA or vB if not already present; ensure cache.vertexMap and cache.pickableVertices still get updated as before and reuse the same deduplication set when populating multiple edges for the same face (affecting functions/variables: vertexIdForIndex, cache.vertexMap, cache.pickableVertices, faceCache.vertexIds).
+
+
+
+============================================================================
+File: src/ui/viewport/Viewport.h
+Line: 97 to 98
+Type: nitpick
+
+Comment:
+Consider consistent parameter passing for vector parameters.
+
+Line 97 passes std::vector by value while line 98 passes by const reference. For consistency and to avoid accidental copies, consider using const reference for both unless you specifically need move semantics on line 97.
+
+
+
+
+🔎 Proposed fix (if move semantics not needed)
+
+-void setModelPickMeshes(std::vector meshes);
++void setModelPickMeshes(const std::vector& meshes);
+
+
+Alternatively, if you intend to move the vector into a member variable, make it explicit:
+
+-void setModelPickMeshes(std::vector meshes);
++void setModelPickMeshes(std::vector&& meshes);
+
+Prompt for AI Agent:
+The two setter signatures are inconsistent: setModelPickMeshes currently takes std::vector by value while setModelPreviewMeshes takes const std::vector&; change setModelPickMeshes to take const std::vector& to avoid accidental copies and match the preview setter, or if you intentionally want move semantics, change it to take std::vector&& and update callers to std::move the vector and the implementation to std::move into the member.
+
+
+
+============================================================================
+File: src/ui/selection/DeepSelectPopup.h
+Line: 4 to 5
+Type: nitpick
+
+Comment:
+Consider forward declaring QListWidget and adding missing type declarations.
+
+To reduce compilation dependencies and follow best practices:
+
+1. Forward declare QListWidget since it's only used as a pointer type in the private section
+2. Add explicit includes/forward declarations for types used in the public API:
+   - QStringList (used in setCandidateLabels)
+   - QPoint (used in showAt)  
+   - QHideEvent (used in hideEvent)
+
+While these types may be transitively included via QFrame headers, explicitly declaring dependencies makes the code more maintainable and less fragile to changes in Qt headers.
+
+
+
+
+🔎 Proposed improvements
+
+ #include 
+-#include 
++#include 
++
++class QListWidget;
++class QHideEvent;
++class QPoint;
+
+
+Note: Verify that QPoint can be forward declared, otherwise use #include .
+
+Prompt for AI Agent:
+Forward declare QListWidget in DeepSelectPopup.h and add explicit declarations for the public API types: ensure QStringList is declared or included for setCandidateLabels, ensure QPoint is forward-declared or included for showAt, and ensure QHideEvent is forward-declared or included for hideEvent; update the includes/forward declarations at the top of DeepSelectPopup.h and keep QListWidget as a pointer in the private section so the header reduces compilation dependencies while public methods (setCandidateLabels, showAt, hideEvent) reference the correct types.
+
+
+
+============================================================================
+File: src/render/tessellation/TessellationCache.cpp
+Line: 164 to 174
+Type: potential_issue
+
+Comment:
+Potential duplicate vertices when elementMap lookup fails.
+
+When a vertex has no elementMap ID, a new unknown ID is generated on each encounter (e.g., unknown_0, unknown_1). If the same physical vertex is shared by multiple edges, each encounter generates a different unknown ID, bypassing the seenVertices deduplication check and resulting in duplicate entries in topology.vertices.
+
+Consider using the vertex's hash or a shape-based key for deduplication when the elementMap lookup fails:
+
+
+
+
+🔎 Proposed fix using shape hash for deduplication
+
++    std::unordered_map vertexHashToId; // for unknown vertex deduplication
+     int unknownVertexCount = 0;
+
+
+Then in the vertex loop:
+
+                 std::string vertexId;
+                 auto vertexIds = elementMap.findIdsByShape(vertex);
+                 if (!vertexIds.empty()) {
+                     vertexId = vertexIds.front().value;
++                } else {
++                    int hash = vertex.HashCode(INT_MAX);
++                    auto it = vertexHashToId.find(hash);
++                    if (it != vertexHashToId.end()) {
++                        vertexId = it->second;
++                    } else {
++                        vertexId = bodyId + "/vertex/unknown_" + std::to_string(unknownVertexCount++);
++                        vertexHashToId[hash] = vertexId;
++                    }
+                 }
+-                if (vertexId.empty()) {
+-                    vertexId = bodyId + "/vertex/unknown_" + std::to_string(unknownVertexCount++);
+-                }
+
+Prompt for AI Agent:
+The code currently generates a new unknown ID each time elementMap.findIdsByShape(vertex) returns empty, causing distinct unknown_* IDs for the same physical vertex and bypassing the seenVertices check; update the logic in the vertex loop to compute a stable fallback key (e.g., hash the vertex shape or serialize its geometry) when vertexIds is empty, use that stable key to set vertexId (instead of incrementing unknownVertexCount each time), and ensure seenVertices and topology.vertices use that stable key so shared vertices deduplicate correctly while still falling back to generating a readable unknown ID only once (keep unknownVertexCount for uniqueness if hash collisions occur).
+
+
+
+============================================================================
+File: src/render/BodyRenderer.cpp
+Line: 112 to 127
+Type: nitpick
+
+Comment:
+Consider cleaning up triangle shader if edge shader initialization fails.
+
+If the edge shader fails to compile or link, m_triangleShader remains allocated while m_initialized stays false. While the unique_ptr will eventually clean it up, resetting it explicitly would leave the object in a cleaner state and be more consistent with the early-return pattern.
+
+
+
+
+🔎 Proposed fix
+
+     m_edgeShader = std::make_unique();
+     if (!m_edgeShader->addShaderFromSourceCode(QOpenGLShader::Vertex, kEdgeVertexShader)) {
+         qWarning() log();
+         m_edgeShader.reset();
++        m_triangleShader.reset();
+         return;
+     }
+     if (!m_edgeShader->addShaderFromSourceCode(QOpenGLShader::Fragment, kEdgeFragmentShader)) {
+         qWarning() log();
+         m_edgeShader.reset();
++        m_triangleShader.reset();
+         return;
+     }
+     if (!m_edgeShader->link()) {
+         qWarning() log();
+         m_edgeShader.reset();
++        m_triangleShader.reset();
+         return;
+     }
+
+Prompt for AI Agent:
+Edge shader failures leave m_triangleShader allocated; modify the failure paths in BodyRenderer (the blocks checking m_edgeShader->addShaderFromSourceCode and m_edgeShader->link) to explicitly reset m_triangleShader (call m_triangleShader.reset()) before returning so the object state is consistent and resources are released immediately when m_edgeShader initialization fails.
+
+
+
+============================================================================
+File: src/app/selection/SelectionManager.cpp
+Line: 96 to 111
+Type: potential_issue
+
+Comment:
+Logic flaw: emits hoverChanged when both hover states are nullopt.
+
+The method fails to handle the case where both hover_ and item are std::nullopt. In this scenario:
+- Line 97: false != false evaluates to false, skipping the early return
+- Line 102: false && false evaluates to false, skipping the comparison block  
+- Lines 109-110: Falls through and emits hoverChanged() even though no change occurred
+
+This causes unnecessary signal emissions when hover is already cleared and setHoverItem(std::nullopt) is called again.
+
+
+
+🔎 Proposed fix to handle both-nullopt case
+
+ void SelectionManager::setHoverItem(const std::optional& item) {
++    // Early return if both are nullopt (no change)
++    if (!hover_.has_value() && !item.has_value()) {
++        return;
++    }
++    
+     if (hover_.has_value() != item.has_value()) {
+         hover_ = item;
+         emit hoverChanged();
+         return;
+     }
++    
++    // At this point, both must have values
+     if (hover_.has_value() && item.has_value()) {
+         SelectionKey a{hover_->kind, hover_->id};
+         SelectionKey b{item->kind, item->id};
+         if (a == b) {
+             return;
+         }
+     }
++    
+     hover_ = item;
+     emit hoverChanged();
+ }
+
+Prompt for AI Agent:
+SelectionManager::setHoverItem emits hoverChanged even when both hover_ and item are std::nullopt; update the function to detect the both-nullopt case and return early without emitting. Specifically, in setHoverItem, after checking that hover_.has_value() == item.has_value(), add a guard that if both are false (both nullopt) simply return; otherwise keep the existing SelectionKey comparison (SelectionKey a{hover_->kind, hover_->id} / b{item->kind, item->id}) to avoid emitting when unchanged, and only set hover_ and emit hoverChanged when an actual change occurs.
+
+
+
+============================================================================
+File: src/ui/viewport/Viewport.cpp
+Line: 287 to 290
+Type: nitpick
+
+Comment:
+Consider deferring syncModelMeshes() call.
+
+The syncModelMeshes() call on line 289 occurs during OpenGL initialization, likely before m_document is set. While the implementation safely handles null documents (line 1919), this call is effectively a no-op at initialization time.
+
+Consider moving this call to setDocument() only, or add a comment explaining why it's called here.
+
+
+
+
+============================================================================
+File: src/render/BodyRenderer.cpp
+Line: 263 to 299
+Type: nitpick
+
+Comment:
+Consider using std::pair with a custom hash instead of string keys.
+
+The current approach of constructing string keys ("a_b") and then parsing them back with std::stoi is inefficient and adds unnecessary string allocations. Using std::pair with a hash function would be cleaner and faster.
+
+
+
+
+🔎 Proposed refactor
+
+         } else {
+-            std::unordered_map edgeCounts;
++            auto makeEdgeKey = [](int a, int b) -> std::pair {
++                return a & p) const {
++                    return std::hash()(p.first) ^ (std::hash()(p.second) , PairHash> seenEdges;
+             for (const auto& tri : mesh.triangles) {
+                 int indices[3] = {tri.i0, tri.i1, tri.i2};
+                 for (int i = 0; i  b) {
+-                        std::swap(a, b);
+-                    }
+-                    std::string key = std::to_string(a) + "_" + std::to_string(b);
+-                    edgeCounts[key]++;
++                    auto key = makeEdgeKey(a, b);
++                    if (seenEdges.count(key)) continue;
++                    seenEdges.insert(key);
++                    if (a (a) >= transformedVertices.size() ||
++                        static_cast(b) >= transformedVertices.size()) {
++                        continue;
++                    }
++                    const QVector3D& p0 = transformedVertices[a];
++                    const QVector3D& p1 = transformedVertices[b];
++                    outBuffers->edges.push_back(p0.x());
++                    outBuffers->edges.push_back(p0.y());
++                    outBuffers->edges.push_back(p0.z());
++                    outBuffers->edges.push_back(p1.x());
++                    outBuffers->edges.push_back(p1.y());
++                    outBuffers->edges.push_back(p1.z());
+                 }
+             }
+-            for (const auto& [key, count] : edgeCounts) {
+-                (void)count;
+-                size_t underscore = key.find('_');
+-                if (underscore == std::string::npos) {
+-                    continue;
+-                }
+-                int a = std::stoi(key.substr(0, underscore));
+-                int b = std::stoi(key.substr(underscore + 1));
+-                if (a (a) >= transformedVertices.size() ||
+-                    static_cast(b) >= transformedVertices.size()) {
+-                    continue;
+-                }
+-                const QVector3D& p0 = transformedVertices[a];
+-                const QVector3D& p1 = transformedVertices[b];
+-                outBuffers->edges.push_back(p0.x());
+-                outBuffers->edges.push_back(p0.y());
+-                outBuffers->edges.push_back(p0.z());
+-                outBuffers->edges.push_back(p1.x());
+-                outBuffers->edges.push_back(p1.y());
+-                outBuffers->edges.push_back(p1.z());
+-            }
+         }
+
+Prompt for AI Agent:
+The string-based edge key is inefficient; replace edgeCounts (currently std::unordered_map) with an unordered_map keyed by std::pair and a custom hash (e.g., struct PairHash) or use a single integer/uint64_t packed key. When building counts in the loop over mesh.triangles, insert/update using edgeCounts[{a,b}] instead of constructing "a_b"; ensure aedges. Add the PairHash and equality functors (or packing/unpacking helpers) and include any needed headers so compilation succeeds.
+
+
+
+============================================================================
+File: src/ui/viewport/Viewport.cpp
+Line: 1361 to 1371
+Type: nitpick
+
+Comment:
+Consider caching the active sketch ID mapping.
+
+The resolveActiveSketchId() method performs a linear search through all sketch IDs on each call. For documents with many sketches, this could be inefficient if called frequently (e.g., during picking).
+
+Consider caching the sketch-to-ID mapping or storing the ID alongside the sketch pointer when entering sketch mode.
+
+
+
+
+============================================================================
+File: src/app/selection/SelectionManager.cpp
+Line: 161 to 183
+Type: nitpick
+
+Comment:
+Consider extracting duplicate find-by-key logic.
+
+Both applySelectionToggle (lines 163-165) and applySelectionAdd (lines 176-178) contain nearly identical code to find an item in the selection by its SelectionKey. This duplication could be reduced by extracting a helper method.
+
+
+
+🔎 Proposed refactor to reduce duplication
+
+Add a private helper method to the class:
+
+// In header:
+private:
+    std::vector::iterator findInSelection(const SelectionKey& key);
+
+
+Implementation:
+
+std::vector::iterator 
+SelectionManager::findInSelection(const SelectionKey& key) {
+    return std::find_if(selection_.begin(), selection_.end(), 
+                       &key {
+                           return SelectionKey{entry.kind, entry.id} == key;
+                       });
+}
+
+
+Then simplify the methods:
+
+ void SelectionManager::applySelectionToggle(const SelectionItem& item) {
+     SelectionKey key{item.kind, item.id};
+-    auto it = std::find_if(selection_.begin(), selection_.end(), &key {
+-        return SelectionKey{entry.kind, entry.id} == key;
+-    });
++    auto it = findInSelection(key);
+     if (it != selection_.end()) {
+         selection_.erase(it);
+     } else {
+         selection_.push_back(item);
+     }
+     emit selectionChanged();
+ }
+
+ void SelectionManager::applySelectionAdd(const SelectionItem& item) {
+     SelectionKey key{item.kind, item.id};
+-    auto it = std::find_if(selection_.begin(), selection_.end(), &key {
+-        return SelectionKey{entry.kind, entry.id} == key;
+-    });
++    auto it = findInSelection(key);
+     if (it == selection_.end()) {
+         selection_.push_back(item);
+         emit selectionChanged();
+     }
+ }
+
+Prompt for AI Agent:
+The duplicate find-by-key logic in applySelectionToggle and applySelectionAdd should be extracted into a private helper; add a declaration like findInSelection(const SelectionKey& key) returning std::vector::iterator to the SelectionManager class, implement SelectionManager::findInSelection to wrap the std::find_if that compares SelectionKey{entry.kind, entry.id} to key, and replace the inline std::find_if calls in applySelectionToggle and applySelectionAdd with calls to findInSelection(key). Ensure the helper is used in both methods so they no longer duplicate the predicate.
+
+
+
+============================================================================
+File: src/app/selection/SelectionManager.cpp
+Line: 57 to 68
+Type: potential_issue
+
+Comment:
+Cycling logic uses stale candidates when scene changes between clicks.
+
+When detecting repeated clicks at the same location (line 58), the code cycles through lastClickCandidates_ without updating it to the current hits. If objects are added, removed, or moved between clicks, the cycling selection will reference stale objects that may no longer exist or may not be under the cursor.
+
+Example scenario:
+1. First click: 3 ambiguous hits [A, B, C] stored in lastClickCandidates_
+2. Object B is deleted or moved
+3. Second click at same location: new hits = [A, C], but code increments lastClickIndex_ to 1 and selects lastClickCandidates_[1] = B (stale)
+
+This could cause the application to select deleted objects or create inconsistent selection behavior.
+
+
+
+🔎 Proposed fix to refresh candidates while preserving cycle position
+
+ if (!deepSelectEnabled_ && isAmbiguous(hits)) {
+     if (sameClickLocation(screenPos) && !lastClickCandidates_.empty()) {
+-        lastClickIndex_ = (lastClickIndex_ + 1) % lastClickCandidates_.size();
++        // Update candidates but try to maintain cycle position
++        const SelectionItem& previousSelection = lastClickCandidates_[lastClickIndex_];
++        lastClickCandidates_ = hits;
++        
++        // Find if previous selection still exists in new hits
++        SelectionKey prevKey{previousSelection.kind, previousSelection.id};
++        auto it = std::find_if(hits.begin(), hits.end(), &prevKey {
++            return SelectionKey{item.kind, item.id} == prevKey;
++        });
++        
++        if (it != hits.end()) {
++            // Previous selection still exists, cycle from there
++            lastClickIndex_ = (std::distance(hits.begin(), it) + 1) % hits.size();
++        } else {
++            // Previous selection gone, restart from beginning
++            lastClickIndex_ = 0;
++        }
++        lastClickPos_ = screenPos;
+     } else {
+         lastClickCandidates_ = hits;
+         lastClickIndex_ = 0;
+         lastClickPos_ = screenPos;
+     }
+     applySelectionInternal(lastClickCandidates_[lastClickIndex_], modifiers);
+     action.selectionChanged = true;
+     return action;
+ }
+
+
+
+
+Review completed ✔

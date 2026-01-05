@@ -26,6 +26,7 @@ add_library(onecad_core STATIC
     loop/AdjacencyGraph.cpp
     loop/LoopDetector.cpp
     loop/FaceBuilder.cpp
+    loop/RegionUtils.cpp
 )
 
 target_include_directories(onecad_core
@@ -78,6 +79,7 @@ set(LOOP_HEADERS
     loop/AdjacencyGraph.h
     loop/LoopDetector.h
     loop/FaceBuilder.h
+    loop/RegionUtils.h
 )
 
 # Create a custom target to show headers in IDE

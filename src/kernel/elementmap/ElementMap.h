@@ -91,6 +91,7 @@ public:
     std::vector<ElementId> ids() const;
     std::vector<ElementId> findIdsByShape(const TopoDS_Shape& shape) const;
     void clear();
+    void removeElementsForBody(const std::string& bodyId);
 
     // Updates tracked shapes using the history from a boolean operation. Returns IDs that were deleted.
     std::vector<ElementId> update(BRepAlgoAPI_BooleanOperation& algo, const std::string& opId);
@@ -220,6 +221,24 @@ inline std::vector<ElementId> ElementMap::findIdsByShape(const TopoDS_Shape& sha
 inline void ElementMap::clear() {
     entries_.clear();
     shapeToIds_.Clear();
+}
+
+inline void ElementMap::removeElementsForBody(const std::string& bodyId) {
+    if (bodyId.empty()) {
+        return;
+    }
+    const std::string prefix = bodyId + "/";
+    for (auto it = entries_.begin(); it != entries_.end();) {
+        const std::string& id = it->first;
+        if (id == bodyId || id.rfind(prefix, 0) == 0) {
+            if (!it->second.shape.IsNull()) {
+                unbindShape(it->second.shape, it->second.id);
+            }
+            it = entries_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 inline bool ElementMap::DescriptorKey::operator<(const DescriptorKey& other) const {

@@ -35,6 +35,8 @@ signals:
     void itemSelected(const QString& itemId);
     void itemDoubleClicked(const QString& itemId);
     void editSketchRequested(const QString& sketchId);
+    void sketchSelected(const QString& sketchId);
+    void bodySelected(const QString& bodyId);
     void collapsedChanged(bool collapsed);
 
 public slots:
@@ -42,15 +44,29 @@ public slots:
     void onSketchAdded(const QString& id);
     void onSketchRemoved(const QString& id);
     void onSketchRenamed(const QString& id, const QString& newName);
+    void onBodyAdded(const QString& id);
+    void onBodyRemoved(const QString& id);
+    void onBodyRenamed(const QString& id, const QString& newName);
 
 private slots:
     void onItemClicked(QTreeWidgetItem* item, int column);
     void onItemDoubleClicked(QTreeWidgetItem* item, int column);
 
 private:
+    struct ItemCollection {
+        std::unordered_map<std::string, QTreeWidgetItem*>& items;
+        unsigned int& counter;
+        QTreeWidgetItem* root = nullptr;
+        QString namePrefix;
+        QString placeholderText;
+    };
+
     void setupUi();
     void createPlaceholderItems();
     void applyCollapseState(bool animate);
+    void addItem(ItemCollection& collection, const QString& id);
+    void removeItem(ItemCollection& collection, const QString& id);
+    void renameItem(ItemCollection& collection, const QString& id, const QString& newName);
 
     QFrame* m_panel = nullptr;
     QTreeWidget* m_treeWidget = nullptr;
@@ -63,9 +79,11 @@ private:
 
     // Map sketch IDs to tree items
     std::unordered_map<std::string, QTreeWidgetItem*> m_sketchItems;
+    std::unordered_map<std::string, QTreeWidgetItem*> m_bodyItems;
 
     // Counter for unique sketch naming
     unsigned int m_sketchCounter = 0;
+    unsigned int m_bodyCounter = 0;
 };
 
 } // namespace ui

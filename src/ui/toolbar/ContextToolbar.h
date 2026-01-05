@@ -36,6 +36,7 @@ signals:
     void newSketchRequested();
     void exitSketchRequested();
     void importRequested();
+    void debugBoxRequested();
     void lineToolActivated();
     void rectangleToolActivated();
     void circleToolActivated();
@@ -52,6 +53,7 @@ private:
     QVBoxLayout* m_layout = nullptr;
     SidebarToolButton* m_newSketchButton = nullptr;
     SidebarToolButton* m_importButton = nullptr;
+    SidebarToolButton* m_debugBoxButton = nullptr;
     SidebarToolButton* m_exitSketchButton = nullptr;
     SidebarToolButton* m_lineButton = nullptr;
     SidebarToolButton* m_rectangleButton = nullptr;

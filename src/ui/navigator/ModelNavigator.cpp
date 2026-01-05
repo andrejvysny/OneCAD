@@ -74,6 +74,50 @@ void ModelNavigator::createPlaceholderItems() {
     sketchPlaceholder->setForeground(0, QColor(128, 128, 128));
 }
 
+void ModelNavigator::addItem(ItemCollection& collection, const QString& id) {
+    if (collection.items.empty() && collection.root->childCount() > 0) {
+        QTreeWidgetItem* firstChild = collection.root->child(0);
+        if (firstChild && !(firstChild->flags() & Qt::ItemIsSelectable)) {
+            delete firstChild;
+        }
+    }
+
+    ++collection.counter;
+    auto* item = new QTreeWidgetItem(collection.root);
+    item->setText(0, collection.namePrefix.arg(collection.counter));
+    item->setData(0, Qt::UserRole, id);
+    item->setFlags(item->flags() | Qt::ItemIsSelectable);
+
+    collection.items[id.toStdString()] = item;
+    collection.root->setExpanded(true);
+}
+
+void ModelNavigator::removeItem(ItemCollection& collection, const QString& id) {
+    std::string stdId = id.toStdString();
+    auto it = collection.items.find(stdId);
+    if (it != collection.items.end()) {
+        delete it->second;
+        collection.items.erase(it);
+    }
+
+    if (collection.items.empty()) {
+        auto* placeholder = new QTreeWidgetItem(collection.root);
+        placeholder->setText(0, collection.placeholderText);
+        placeholder->setFlags(placeholder->flags() & ~Qt::ItemIsSelectable);
+        placeholder->setForeground(0, QColor(128, 128, 128));
+    }
+}
+
+void ModelNavigator::renameItem(ItemCollection& collection,
+                                const QString& id,
+                                const QString& newName) {
+    std::string stdId = id.toStdString();
+    auto it = collection.items.find(stdId);
+    if (it != collection.items.end()) {
+        it->second->setText(0, newName);
+    }
+}
+
 void ModelNavigator::setCollapsed(bool collapsed) {
     if (m_collapsed == collapsed) {
         return;
@@ -125,7 +169,18 @@ void ModelNavigator::applyCollapseState(bool animate) {
 void ModelNavigator::onItemClicked(QTreeWidgetItem* item, int column) {
     Q_UNUSED(column);
     if (item && item != m_bodiesRoot && item != m_sketchesRoot) {
-        emit itemSelected(item->data(0, Qt::UserRole).toString());
+        QString itemId = item->data(0, Qt::UserRole).toString();
+        emit itemSelected(itemId);
+
+        std::string stdId = itemId.toStdString();
+        auto sketchIt = m_sketchItems.find(stdId);
+        if (sketchIt != m_sketchItems.end() && sketchIt->second == item) {
+            emit sketchSelected(itemId);
+        }
+        auto bodyIt = m_bodyItems.find(stdId);
+        if (bodyIt != m_bodyItems.end() && bodyIt->second == item) {
+            emit bodySelected(itemId);
+        }
     }
 }
 
@@ -145,52 +200,39 @@ void ModelNavigator::onItemDoubleClicked(QTreeWidgetItem* item, int column) {
 }
 
 void ModelNavigator::onSketchAdded(const QString& id) {
-    std::string stdId = id.toStdString();
-
-    // Remove placeholder if this is the first sketch
-    if (m_sketchItems.empty() && m_sketchesRoot->childCount() > 0) {
-        QTreeWidgetItem* firstChild = m_sketchesRoot->child(0);
-        if (firstChild && !(firstChild->flags() & Qt::ItemIsSelectable)) {
-            delete firstChild;
-        }
-    }
-
-    // Use monotonically increasing counter for unique naming
-    ++m_sketchCounter;
-
-    // Create new tree item for this sketch
-    auto* item = new QTreeWidgetItem(m_sketchesRoot);
-    item->setText(0, QString("Sketch %1").arg(m_sketchCounter));
-    item->setData(0, Qt::UserRole, id);
-    item->setFlags(item->flags() | Qt::ItemIsSelectable);
-
-    m_sketchItems[stdId] = item;
-    m_sketchesRoot->setExpanded(true);
+    ItemCollection collection{m_sketchItems, m_sketchCounter, m_sketchesRoot,
+                              QStringLiteral("Sketch %1"), tr("(No sketches)")};
+    addItem(collection, id);
 }
 
 void ModelNavigator::onSketchRemoved(const QString& id) {
-    std::string stdId = id.toStdString();
-    auto it = m_sketchItems.find(stdId);
-    if (it != m_sketchItems.end()) {
-        delete it->second;
-        m_sketchItems.erase(it);
-    }
-
-    // Add placeholder back if no sketches left
-    if (m_sketchItems.empty()) {
-        auto* placeholder = new QTreeWidgetItem(m_sketchesRoot);
-        placeholder->setText(0, tr("(No sketches)"));
-        placeholder->setFlags(placeholder->flags() & ~Qt::ItemIsSelectable);
-        placeholder->setForeground(0, QColor(128, 128, 128));
-    }
+    ItemCollection collection{m_sketchItems, m_sketchCounter, m_sketchesRoot,
+                              QStringLiteral("Sketch %1"), tr("(No sketches)")};
+    removeItem(collection, id);
 }
 
 void ModelNavigator::onSketchRenamed(const QString& id, const QString& newName) {
-    std::string stdId = id.toStdString();
-    auto it = m_sketchItems.find(stdId);
-    if (it != m_sketchItems.end()) {
-        it->second->setText(0, newName);
-    }
+    ItemCollection collection{m_sketchItems, m_sketchCounter, m_sketchesRoot,
+                              QStringLiteral("Sketch %1"), tr("(No sketches)")};
+    renameItem(collection, id, newName);
+}
+
+void ModelNavigator::onBodyAdded(const QString& id) {
+    ItemCollection collection{m_bodyItems, m_bodyCounter, m_bodiesRoot,
+                              QStringLiteral("Body %1"), tr("(No bodies)")};
+    addItem(collection, id);
+}
+
+void ModelNavigator::onBodyRemoved(const QString& id) {
+    ItemCollection collection{m_bodyItems, m_bodyCounter, m_bodiesRoot,
+                              QStringLiteral("Body %1"), tr("(No bodies)")};
+    removeItem(collection, id);
+}
+
+void ModelNavigator::onBodyRenamed(const QString& id, const QString& newName) {
+    ItemCollection collection{m_bodyItems, m_bodyCounter, m_bodiesRoot,
+                              QStringLiteral("Body %1"), tr("(No bodies)")};
+    renameItem(collection, id, newName);
 }
 
 } // namespace ui

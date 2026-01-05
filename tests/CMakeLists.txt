@@ -80,3 +80,45 @@ target_link_libraries(test_compile
     Qt6::OpenGLWidgets
 )
 target_include_directories(test_compile PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+# Model Picker Prototype
+add_executable(proto_model_picker prototypes/proto_model_picker.cpp)
+target_link_libraries(proto_model_picker
+    PRIVATE
+    onecad_ui
+    onecad_app
+    Qt6::Gui
+    Qt6::Core
+)
+target_include_directories(proto_model_picker PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+# Tessellation Cache Prototype
+add_executable(proto_tessellation_cache prototypes/proto_tessellation_cache.cpp)
+target_link_libraries(proto_tessellation_cache
+    PRIVATE
+    onecad_app
+    Qt6::Core
+)
+target_include_directories(proto_tessellation_cache PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+# Pick Mesh Integration Prototype
+add_executable(proto_pickmesh_integration prototypes/proto_pickmesh_integration.cpp)
+target_link_libraries(proto_pickmesh_integration
+    PRIVATE
+    onecad_ui
+    onecad_app
+    Qt6::Core
+    Qt6::Gui
+)
+target_include_directories(proto_pickmesh_integration PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+# Pick Topology Promotion Prototype
+add_executable(proto_pick_topology_promotion prototypes/proto_pick_topology_promotion.cpp)
+target_link_libraries(proto_pick_topology_promotion
+    PRIVATE
+    onecad_ui
+    onecad_app
+    Qt6::Core
+    Qt6::Gui
+)
+target_include_directories(proto_pick_topology_promotion PRIVATE ${CMAKE_SOURCE_DIR}/src)

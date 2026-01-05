@@ -4,6 +4,7 @@
 #include "../../render/Camera3D.h"
 #include "../../core/sketch/Sketch.h"
 #include "../../core/sketch/tools/SketchToolManager.h"
+#include "../../app/commands/CommandProcessor.h"
 #include "../../app/document/Document.h"
 #include "../navigator/ModelNavigator.h"
 #include "../toolbar/ContextToolbar.h"
@@ -11,6 +12,7 @@
 #include "../sketch/SketchModePanel.h"
 #include "../../core/sketch/SketchRenderer.h"
 #include "../../core/sketch/SketchTypes.h"
+#include <BRepPrimAPI_MakeBox.hxx>
 
 #include <QMenuBar>
 #include <QStatusBar>
@@ -47,6 +49,7 @@ MainWindow::MainWindow(QWidget* parent)
 
     // Create document model (no Qt parent - unique_ptr manages lifetime)
     m_document = std::make_unique<app::Document>();
+    m_commandProcessor = std::make_unique<app::commands::CommandProcessor>();
 
     applyTheme();
     setupMenuBar();
@@ -61,6 +64,12 @@ MainWindow::MainWindow(QWidget* parent)
             m_navigator, &ModelNavigator::onSketchRemoved);
     connect(m_document.get(), &app::Document::sketchRenamed,
             m_navigator, &ModelNavigator::onSketchRenamed);
+    connect(m_document.get(), &app::Document::bodyAdded,
+            m_navigator, &ModelNavigator::onBodyAdded);
+    connect(m_document.get(), &app::Document::bodyRemoved,
+            m_navigator, &ModelNavigator::onBodyRemoved);
+    connect(m_document.get(), &app::Document::bodyRenamed,
+            m_navigator, &ModelNavigator::onBodyRenamed);
 
     loadSettings();
 }
@@ -115,8 +124,32 @@ void MainWindow::setupMenuBar() {
     
     // Edit menu
     QMenu* editMenu = menuBar->addMenu(tr("&Edit"));
-    editMenu->addAction(tr("&Undo"), QKeySequence::Undo, this, []() {});
-    editMenu->addAction(tr("&Redo"), QKeySequence::Redo, this, []() {});
+    m_undoAction = editMenu->addAction(tr("&Undo"), QKeySequence::Undo, this, [this]() {
+        if (m_commandProcessor) {
+            m_commandProcessor->undo();
+        }
+    });
+    m_redoAction = editMenu->addAction(tr("&Redo"), QKeySequence::Redo, this, [this]() {
+        if (m_commandProcessor) {
+            m_commandProcessor->redo();
+        }
+    });
+    if (m_undoAction) {
+        m_undoAction->setEnabled(false);
+    }
+    if (m_redoAction) {
+        m_redoAction->setEnabled(false);
+    }
+    if (m_commandProcessor) {
+        if (m_undoAction) {
+            connect(m_commandProcessor.get(), &app::commands::CommandProcessor::canUndoChanged,
+                    m_undoAction, &QAction::setEnabled);
+        }
+        if (m_redoAction) {
+            connect(m_commandProcessor.get(), &app::commands::CommandProcessor::canRedoChanged,
+                    m_redoAction, &QAction::setEnabled);
+        }
+    }
     editMenu->addSeparator();
     editMenu->addAction(tr("&Delete"), QKeySequence::Delete, this, []() {});
     editMenu->addAction(tr("Select &All"), QKeySequence::SelectAll, this, []() {});
@@ -148,7 +181,12 @@ void MainWindow::setupMenuBar() {
     viewMenu->addAction(tr("&Isometric"), QKeySequence(Qt::Key_7), this, [this]() {
         m_viewport->setIsometricView();
     });
+
     viewMenu->addSeparator();
+
+    // Debug menu
+    QMenu* debugMenu = menuBar->addMenu(tr("&Debug"));
+    debugMenu->addAction(tr("Add Debug Box"), this, &MainWindow::onAddDebugBox);
     viewMenu->addAction(tr("Toggle &Grid"), QKeySequence(Qt::Key_G), this, [this]() {
         m_viewport->toggleGrid();
     });
@@ -297,6 +335,8 @@ void MainWindow::setupToolBar() {
             this, &MainWindow::onExitSketch);
     connect(m_toolbar, &ContextToolbar::importRequested,
             this, &MainWindow::onImport);
+    connect(m_toolbar, &ContextToolbar::debugBoxRequested,
+            this, &MainWindow::onAddDebugBox);
 
     if (m_viewport) {
         connect(m_toolbar, &ContextToolbar::lineToolActivated,
@@ -412,6 +452,7 @@ void MainWindow::setupViewport() {
 
     // Set document for rendering sketches in 3D mode
     m_viewport->setDocument(m_document.get());
+    m_viewport->setCommandProcessor(m_commandProcessor.get());
 
     connect(m_viewport, &Viewport::mousePositionChanged,
             this, &MainWindow::onMousePositionChanged);
@@ -423,6 +464,12 @@ void MainWindow::setupViewport() {
             this, &MainWindow::onPlaneSelectionCancelled);
     connect(m_viewport, &Viewport::sketchUpdated,
             this, &MainWindow::onSketchUpdated);
+
+    connect(m_navigator, &ModelNavigator::sketchSelected, this, [this](const QString& id) {
+        if (m_viewport) {
+            m_viewport->setReferenceSketch(id);
+        }
+    });
 
     setupNavigatorOverlayButton();
 
@@ -631,6 +678,20 @@ void MainWindow::onImport() {
     if (!fileName.isEmpty()) {
         m_toolStatus->setText(tr("Importing: %1").arg(fileName));
         // TODO: Actual import
+    }
+}
+
+void MainWindow::onAddDebugBox() {
+    if (!m_document) {
+        return;
+    }
+    TopoDS_Shape shape = BRepPrimAPI_MakeBox(50.0, 30.0, 20.0).Shape();
+    m_document->addBody(shape);
+    if (m_viewport) {
+        m_viewport->update();
+    }
+    if (m_toolStatus) {
+        m_toolStatus->setText(tr("Debug box added"));
     }
 }
 

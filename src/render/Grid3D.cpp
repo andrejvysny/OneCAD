@@ -1,6 +1,7 @@
 #include "Grid3D.h"
 #include <QtMath>
 #include <QDebug>
+#include <cmath>
 
 namespace onecad {
 namespace render {
@@ -82,7 +83,7 @@ void Grid3D::initialize() {
     m_initialized = true;
     
     // Build initial grid
-    buildGrid(10.0f, 1000.0f);
+    buildGrid(10.0f, 50.0f, 1000.0f);
     
     qDebug() << "Grid3D: Initialized successfully with" << m_lineCount << "vertices";
 }
@@ -98,20 +99,47 @@ void Grid3D::cleanup() {
     m_initialized = false;
 }
 
-float Grid3D::calculateSpacing(float cameraDistance) const {
-    // Fixed 10mm grid spacing (per user requirement)
-    (void)cameraDistance; // Unused, kept for API compatibility
-    return 10.0f;
+float Grid3D::calculateSpacing(float pixelScale) const {
+    if (pixelScale <= 0.0f) {
+        return 10.0f;
+    }
+
+    const float targetMinor = pixelScale * 10.0f;
+    const float exponent = std::floor(std::log10(targetMinor));
+    const float base = std::pow(10.0f, exponent);
+    const float normalized = targetMinor / base;
+
+    float snapped = 1.0f;
+    if (normalized < 1.5f) {
+        snapped = 1.0f;
+    } else if (normalized < 3.5f) {
+        snapped = 2.0f;
+    } else if (normalized < 7.5f) {
+        snapped = 5.0f;
+    } else {
+        snapped = 10.0f;
+    }
+
+    return snapped * base;
 }
 
-void Grid3D::buildGrid(float spacing, float extent) {
+void Grid3D::buildGrid(float minorSpacing, float majorSpacing, float extent) {
     m_vertices.clear();
     m_colors.clear();
     m_lastExtent = extent;
-    
-    int lineCount = static_cast<int>(extent / spacing);
+
+    if (minorSpacing <= 0.0f) {
+        return;
+    }
+
+    int lineCount = static_cast<int>(extent / minorSpacing);
     // Limit line count to avoid excessive geometry
     lineCount = qMin(lineCount, 200);
+
+    int majorStep = 5;
+    if (majorSpacing > 0.0f) {
+        majorStep = qMax(1, static_cast<int>(std::round(majorSpacing / minorSpacing)));
+    }
     
     auto addLine = [this](float x1, float y1, float z1, 
                           float x2, float y2, float z2,
@@ -137,9 +165,9 @@ void Grid3D::buildGrid(float spacing, float extent) {
     
     // Grid lines parallel to X axis
     for (int i = -lineCount; i <= lineCount; ++i) {
-        float y = i * spacing;
-        bool isMajor = (i % 10 == 0);
-        float lineExtent = lineCount * spacing;
+        float y = i * minorSpacing;
+        bool isMajor = (i % majorStep == 0);
+        float lineExtent = lineCount * minorSpacing;
 
         if (i == 0) {
             // Coordinate Mapping: Geom X- aligns with User Y+
@@ -154,9 +182,9 @@ void Grid3D::buildGrid(float spacing, float extent) {
     
     // Grid lines parallel to Y axis
     for (int i = -lineCount; i <= lineCount; ++i) {
-        float x = i * spacing;
-        bool isMajor = (i % 10 == 0);
-        float lineExtent = lineCount * spacing;
+        float x = i * minorSpacing;
+        bool isMajor = (i % majorStep == 0);
+        float lineExtent = lineCount * minorSpacing;
 
         if (i == 0) {
             // Coordinate Mapping: Geom Y+ aligns with User X+
@@ -170,11 +198,11 @@ void Grid3D::buildGrid(float spacing, float extent) {
     }
     
     // Z axis (blue) - vertical line at origin
-    float zExtent = lineCount * spacing * 0.5f;
+    float zExtent = lineCount * minorSpacing * 0.5f;
     addLine(0, 0, 0, 0, 0, zExtent, m_zAxisColor);
     
     m_lineCount = static_cast<int>(m_vertices.size() / 3);
-    m_lastSpacing = spacing;
+    m_lastSpacing = minorSpacing;
     
     if (m_vertices.empty()) {
         qWarning() << "Grid3D: No vertices generated!";
@@ -217,21 +245,21 @@ void Grid3D::buildGrid(float spacing, float extent) {
     m_vao.release();
 }
 
-void Grid3D::render(const QMatrix4x4& viewProjection, float cameraDistance,
-                    const QVector3D& cameraPosition) {
+void Grid3D::render(const QMatrix4x4& viewProjection, float pixelScale, float viewExtent) {
     if (!m_visible || !m_initialized || m_lineCount == 0) return;
 
-    // Fixed 10mm spacing - rebuild only if forced (color change)
-    // Extent scales with camera for performance (cull distant lines)
-    float spacing = 10.0f;
-    if (m_lastSpacing < 0.0f) {  // Force rebuild flag
-        float extent = qMax(1000.0f, cameraDistance * 3.0f);
-        buildGrid(spacing, extent);
+    const float minorSpacing = calculateSpacing(pixelScale);
+    const float majorSpacing = minorSpacing * 5.0f;
+    const float extent = qMax(viewExtent, minorSpacing * 20.0f);
+
+    if (m_lastSpacing < 0.0f ||
+        std::abs(minorSpacing - m_lastSpacing) > 1e-4f ||
+        std::abs(extent - m_lastExtent) > 1e-3f) {
+        buildGrid(minorSpacing, majorSpacing, extent);
     }
     
     m_shader->bind();
     m_shader->setUniformValue("uMVP", viewProjection);
-    (void)cameraPosition;
     
     m_vao.bind();
     

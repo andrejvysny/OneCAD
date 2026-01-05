@@ -165,6 +165,16 @@ struct EntityRenderData {
 };
 
 /**
+ * @brief Hit result for entity picking
+ */
+struct EntityPickHit {
+    EntityID id;
+    EntityType type;
+    bool isConstruction = false;
+    double distance = 0.0;
+};
+
+/**
  * @brief Render data for a constraint icon
  */
 struct ConstraintRenderData {
@@ -444,6 +454,13 @@ public:
      * @return EntityID of nearest entity, or empty string if none
      */
     EntityID pickEntity(const Vec2d& screenPos, double tolerance = 5.0) const;
+    /**
+     * @brief Find all entities at screen position
+     * @param screenPos Position in screen coordinates
+     * @param tolerance Pick tolerance in pixels
+     * @return Vector of hits within tolerance, sorted by distance (nearest first)
+     */
+    std::vector<EntityPickHit> pickEntities(const Vec2d& screenPos, double tolerance = 5.0) const;
 
     /**
      * @brief Find constraint at screen position

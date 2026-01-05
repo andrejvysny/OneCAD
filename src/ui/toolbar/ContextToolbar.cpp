@@ -42,6 +42,9 @@ void ContextToolbar::setupUi() {
     m_importButton = new SidebarToolButton("📂", tr("Import STEP file"), this);
     connect(m_importButton, &SidebarToolButton::clicked, this, &ContextToolbar::importRequested);
 
+    m_debugBoxButton = new SidebarToolButton("📦", tr("Add debug box"), this);
+    connect(m_debugBoxButton, &SidebarToolButton::clicked, this, &ContextToolbar::debugBoxRequested);
+
     m_exitSketchButton = new SidebarToolButton("✓", tr("Exit sketch mode (Esc)"), this);
     connect(m_exitSketchButton, &SidebarToolButton::clicked, this, &ContextToolbar::exitSketchRequested);
 
@@ -68,6 +71,7 @@ void ContextToolbar::setupUi() {
 
     m_layout->addWidget(m_newSketchButton);
     m_layout->addWidget(m_importButton);
+    m_layout->addWidget(m_debugBoxButton);
     m_layout->addWidget(m_exitSketchButton);
     m_layout->addWidget(m_lineButton);
     m_layout->addWidget(m_rectangleButton);
@@ -92,6 +96,9 @@ void ContextToolbar::updateVisibleButtons() {
     }
     if (m_importButton) {
         m_importButton->setVisible(m_currentContext == Context::Default);
+    }
+    if (m_debugBoxButton) {
+        m_debugBoxButton->setVisible(m_currentContext == Context::Default);
     }
     if (m_exitSketchButton) {
         m_exitSketchButton->setVisible(inSketch);

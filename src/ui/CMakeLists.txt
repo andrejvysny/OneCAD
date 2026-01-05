@@ -7,9 +7,14 @@ add_library(onecad_ui STATIC
     viewcube/ViewCube.cpp
     navigator/ModelNavigator.cpp
     toolbar/ContextToolbar.cpp
+    tools/ModelingToolManager.cpp
+    tools/ExtrudeTool.cpp
     sketch/ConstraintPanel.cpp
     sketch/DimensionEditor.cpp
     sketch/SketchModePanel.cpp
+    selection/DeepSelectPopup.cpp
+    selection/SketchPickerAdapter.cpp
+    selection/ModelPickerAdapter.cpp
 )
 
 target_include_directories(onecad_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -23,4 +28,6 @@ target_link_libraries(onecad_ui
     Qt6::Widgets
     Qt6::OpenGLWidgets
     Qt6::Svg
+    PRIVATE
+    onecad_app
 )
