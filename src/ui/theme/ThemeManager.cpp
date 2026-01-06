@@ -187,11 +187,12 @@ QString ThemeManager::buildStyleSheet(const ThemeDefinition& theme) {
             color: @navigator-item-text@;
             border: none;
             outline: 0;
-            padding: 0px;
+            padding: 0px 3px;
         }
         QTreeWidget#NavigatorTree::item {
-            margin: 0px;
+            margin: 3px 0px;
             padding: 0px;
+            height: 32px;
         }
         QTreeWidget#NavigatorTree::item:selected,
         QTreeWidget#NavigatorTree::item:hover,
@@ -211,7 +212,7 @@ QString ThemeManager::buildStyleSheet(const ThemeDefinition& theme) {
         QWidget[nav-item="true"] {
             border-radius: 10px;
             background-color: transparent;
-            min-height: 40px;
+            min-height: 32px;
         }
         QWidget[nav-item="true"]:hover {
             background-color: @navigator-item-hover@;

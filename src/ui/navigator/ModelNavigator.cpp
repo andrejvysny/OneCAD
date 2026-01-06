@@ -139,7 +139,7 @@ QWidget* ModelNavigator::createItemWidget(ItemEntry& entry, const QString& text,
     auto* container = new QWidget();
     container->setProperty("nav-item", true);
     auto* layout = new QHBoxLayout(container);
-    layout->setContentsMargins(12, 6, 12, 6);
+    layout->setContentsMargins(8, 6, 8, 6);
     layout->setSpacing(8);
 
     entry.iconLabel = new QLabel(container);
@@ -238,7 +238,7 @@ void ModelNavigator::addItem(ItemCollection& collection, const QString& id) {
     item->setText(0, QString());
     item->setData(0, Qt::UserRole, id);
     item->setFlags(item->flags() | Qt::ItemIsSelectable);
-    item->setSizeHint(0, QSize(0, 48));
+    item->setSizeHint(0, QSize(0, 32));
 
     ItemEntry entry;
     entry.item = item;
