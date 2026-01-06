@@ -317,18 +317,18 @@ When user types a value with different unit than document default, the system au
 
 ## 5. Sketch System
 
-**IMPLEMENTATION STATUS: PHASE 2 COMPLETE** ✅ (Updated 2026-01-04 via comprehensive codebase audit)
+**IMPLEMENTATION STATUS: PHASE 2 COMPLETE** ✅ (Updated 2026-01-06)
 
 | Component | Lines of Code | Status | Verification |
 |-----------|---------------|--------|--------------|
-| **Sketch Core** | Sketch.h/cpp (1370) | ✅ Complete | Production-ready entity management |
+| **Sketch Core** | Sketch.h/cpp (1719) | ✅ Complete | Production-ready entity management |
 | **Entity Types** | Point (277), Line (350), Arc (477), Circle (282), Ellipse (414) | ✅ All 5 Complete | Non-copyable, movable, UUID-based |
-| **Constraints** | Constraints.h/cpp (1875) | ✅ 15 types Complete | Fixed, Midpoint, Coincident, H/V, Parallel, Perp, Tangent, Concentric, Equal, Distance, Angle, Radius, Diameter, PointOnCurve |
-| **PlaneGCS Solver** | ConstraintSolver.cpp (1450 total) | ✅ Complete | 42MB static lib, runtime verified, DogLeg+LM, DOF calc |
-| **Rendering** | SketchRenderer.cpp (1955) | ✅ Complete | VBO, adaptive tessellation, viewport culling, regions |
-| **Snap System** | SnapManager.cpp (1166) | ✅ Complete | 8 snap types, 2mm radius, priority-based |
-| **Auto-Constrainer** | AutoConstrainer.cpp (1091) | ✅ Complete | 7 inference rules, ±5° tolerance, confidence scoring |
-| **Loop Detection** | LoopDetector (1985), FaceBuilder (719) | ✅ Complete | DFS cycles, shoelace area, hole detection, OCCT bridge |
+| **Constraints** | Constraints.h/cpp (1315 cpp) | ✅ 15 types Complete | Fixed, Midpoint, Coincident, H/V, Parallel, Perp, Tangent, Concentric, Equal, Distance, Angle, Radius, Diameter, PointOnCurve |
+| **PlaneGCS Solver** | ConstraintSolver.cpp (1014) | ✅ Complete | 42MB static lib, runtime verified, DogLeg+LM, DOF calc |
+| **Rendering** | SketchRenderer (2472 total) | ✅ Complete | VBO, adaptive tessellation, viewport culling, regions |
+| **Snap System** | SnapManager (1166 total) | ✅ Complete | 8 snap types, 2mm radius, priority-based |
+| **Auto-Constrainer** | AutoConstrainer (1091 total) | ✅ Complete | 7 inference rules, ±5° tolerance, confidence scoring |
+| **Loop Detection** | LoopDetector (1506), FaceBuilder (524 cpp) | ✅ Complete | DFS cycles, shoelace area, hole detection, OCCT bridge |
 | **Tools** | Line (322), Circle (226), Rectangle (206), Arc (369), Ellipse (268), Trim (219), Mirror (444) | ✅ All 7 Complete | Total 2618 LOC, UI integrated |
 | **UI Integration** | ConstraintPanel (182), DimensionEditor (232), SketchModePanel (189), ContextToolbar (127) | ✅ Complete | All panels functional, math parser in DimensionEditor |
 
@@ -1223,7 +1223,7 @@ struct SketchPoint {
 
 ## 6. Construction Geometry & Face Creation
 
-**IMPLEMENTATION STATUS: PRODUCTION-READY** ✅ (Updated 2026-01-04)
+**IMPLEMENTATION STATUS: PRODUCTION-READY** ✅ (Updated 2026-01-06)
 
 | Component | Lines of Code | Status | Features |
 |-----------|---------------|--------|----------|
@@ -1375,7 +1375,7 @@ private:
 
 ## 7. Grid System
 
-**IMPLEMENTATION STATUS: INTEGRATED** (Updated 2026-01-05)
+**IMPLEMENTATION STATUS: COMPLETE** ✅ (Updated 2026-01-06)
 
 Grid3D now uses pixel-scale adaptive spacing:
 - **Target minor spacing**: ~10 px on screen
@@ -1421,6 +1421,18 @@ flowchart LR
 
 ## 8. 3D Modeling Operations
 
+**IMPLEMENTATION STATUS: PHASE 3 IN PROGRESS** (~25% complete, updated 2026-01-06)
+
+| Operation | Status | Notes |
+|-----------|--------|-------|
+| **Extrude v1a** | ✅ Complete (282 LOC) | SketchRegion input, preview, draft angle working |
+| **Extrude v1b** | ⏳ Planned | Face input, smart boolean |
+| **Revolve** | ❌ Not started | |
+| **Boolean Ops** | ❌ Not started | |
+| **Push/Pull** | ❌ Not started | |
+| **Fillet/Chamfer** | ❌ Not started | |
+| **Patterns** | ❌ Not started | |
+
 ### 8.1 Operations Overview — v1.0
 
 ```mermaid
@@ -1457,7 +1469,7 @@ mindmap
 | **Direction** | Positive normal to sketch plane (default) |
 | **Flip Direction** | Drag in opposite direction (negative distance) |
 | **Distance Input** | Drag with on-screen value + arrow; commit on mouse release; Esc cancels |
-| **Draft Angle** | Parameter stored; default 0° (UI later) |
+| **Draft Angle** | Fully working (BRepOffsetAPI_DraftAngle); default 0°; UI pending |
 | **Multi-step** | Tool stays active after commit; new selection changes the input |
 
 **v1a Limitation:** Only one sketch region is extruded per activation; multi-region extrude is planned.
@@ -1495,13 +1507,16 @@ Shapr3D-style automatic boolean determination:
 
 #### 8.2.4 Draft Angle
 
+**IMPLEMENTATION STATUS: WORKING** (via BRepOffsetAPI_DraftAngle)
+
 | Property | Specification |
 |----------|---------------|
 | Range | 0° to 89° |
 | Default | 0° (no draft) |
-| Input method | UI deferred; parameter stored in operation record |
+| Input method | Programmatic (UI slider pending); parameter stored in OperationRecord |
 | Positive angle | Tapers inward (for mold release) |
 | Negative angle | Tapers outward |
+| Algorithm | Side faces identified via normal dot product; draft applied per-face |
 
 #### 8.2.5 v2.0 Additions
 
@@ -2570,10 +2585,13 @@ class CommandProcessor {
     CommandProcessor --> ICommand
 ```
 
-**Implementation Status (2026-01-05):**
-- `CommandProcessor` implemented with execute/undo/redo and transaction hooks.
-- `AddBodyCommand` wired for Extrude commits; undo/redo preserves body IDs.
-- Additional commands and transaction grouping are planned.
+**IMPLEMENTATION STATUS: COMPLETE** (197 LOC, updated 2026-01-06)
+- ✅ `CommandProcessor` fully implemented with execute/undo/redo
+- ✅ Full transaction support: beginTransaction/endTransaction/cancelTransaction
+- ✅ `CommandGroup` for grouping multiple commands into single undo unit
+- ✅ `AddBodyCommand` wired for Extrude commits; undo/redo preserves body IDs
+- ✅ Qt signals for UI state updates (canUndoChanged, canRedoChanged)
+- ⏳ Additional modeling commands pending (Revolve, Boolean, Fillet, etc.)
 
 ### 16.2 Undo/Redo Specifications
 
@@ -2598,6 +2616,11 @@ Operations that create multiple internal commands appear as single undo:
 ---
 
 ## 17. File System
+
+**IMPLEMENTATION STATUS: NOT STARTED** (src/io/ directory empty, updated 2026-01-06)
+- ❌ Native format (.onecad): Not implemented
+- ❌ STEP import/export: Not implemented
+- ⚠️ Document has toJson/fromJson for internal serialization (not file I/O)
 
 ### 17.1 File Locations
 

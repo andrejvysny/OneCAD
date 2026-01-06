@@ -9,25 +9,26 @@
 
 **OneCAD** is a free, open-source 3D CAD application for makers and hobbyists. Sketch 2D geometry, add constraints, create faces, then extrude to 3D. Inspired by Shapr3D, built with C++20 + Qt6 + OpenCASCADE.
 
-### Current Status: Phase 2 Complete ✅
+### Current Status: Phase 2 Complete, Phase 3 In Progress
 
-- ✅ Full sketching engine (2600+ LOC)
+- ✅ Full sketching engine (~9,500 LOC)
 - ✅ 15 constraint types with automatic inference
-- ✅ PlaneGCS solver integration
-- 🚀 Phase 3 (3D modeling) in progress
+- ✅ PlaneGCS solver integration (1450 LOC)
+- ✅ Extrude v1a with draft angle working
+- 🚀 Phase 3 (3D modeling) ~25% complete
 
 ### Implementation Matrix (Implemented vs Planned)
 
 | Feature Area | Status | Notes |
 |--------------|--------|-------|
-| Sketching engine + constraints | ✅ Implemented | Tools, constraints, solver, loop detection |
+| Sketching engine + constraints | ✅ Implemented | 7 tools, 15 constraints, PlaneGCS solver, loop detection |
 | Selection & picking | ✅ Implemented | Deep select, click cycling, mesh-based 3D picking |
 | Rendering (Shaded + Edges) | ✅ Implemented | BodyRenderer + preview meshes |
 | Adaptive Grid3D | ✅ Implemented | Pixel-targeted spacing |
-| Extrude v1a | ✅ Implemented | SketchRegion only, drag-to-commit, preview + arrow |
+| Extrude v1a | ✅ Implemented | SketchRegion, drag-to-commit, preview, draft angle |
+| Command + Undo/Redo | ✅ Implemented | Full CommandProcessor with transactions |
 | Extrude v1b | ⏳ Planned | Face input, smart boolean, override badge |
 | Revolve / Booleans / Push-Pull | ⏳ Planned | Core Phase 3 tools |
-| Command + Undo/Redo | ⚠️ Partial | CommandProcessor + AddBodyCommand only |
 | Feature history / regen | ⏳ Planned | Operation replay + dependency graph |
 | Native save/load (.onecad) | ⏳ Planned | BREP + ElementMap + ops list |
 | STEP I/O | ⏳ Planned | Import/export pipeline |
@@ -63,11 +64,11 @@
 ## Key Features
 
 ### Sketching Engine
-- **8 geometry types**: Point, Line, Arc, Circle, Ellipse, Construction geometry
+- **5 entity types**: Point, Line, Arc, Circle, Ellipse (with construction geometry toggle)
 - **Constraint solver**: 15 constraint types (Horizontal, Vertical, Distance, Angle, Tangent, etc.)
 - **Automatic inference**: Detects and suggests constraints (±5° tolerance)
-- **Smart snapping**: Zoom-independent 2mm snap radius, 9 priority levels
-- **Loop detection**: Automatic region highlighting for face creation
+- **Smart snapping**: Zoom-independent 2mm snap radius, 8 snap types with priority
+- **Loop detection**: Automatic region highlighting for face creation (DFS-based)
 
 ### 3D Modeling (Phase 3)
 - **Extrude**: 1D → 2D → 3D
@@ -80,8 +81,8 @@
 - **Zero-friction startup**: Open to blank document
 - **Visual feedback**: Blue/green constraint states
 - **Contextual toolbars**: Predictive tool suggestions
-- **Real-time preview**: Immediate visual feedback
-- **Undo/redo**: Persistent history
+- **Real-time preview**: Immediate visual feedback (extrude preview)
+- **Undo/redo**: Full transaction support with command grouping
 
 ---
 
@@ -148,9 +149,9 @@ MIT or Apache 2.0 (to be determined)
 
 ## Project Status
 
-**Phase 2**: ✅ Complete (Sketching engine)  
-**Phase 3**: 🚀 In progress (3D modeling)  
-**Phase 4**: 📋 Planned (Advanced features)
+**Phase 2**: ✅ Complete (Sketching engine — 100%)
+**Phase 3**: 🚀 In progress (3D modeling — ~25%)
+**Phase 4**: 📋 Planned (Advanced features — 0%)
 
 See [docs/PHASES.md](docs/PHASES.md) for detailed roadmap.
 

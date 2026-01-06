@@ -2,7 +2,7 @@
 
 This document outlines the phased implementation strategy for OneCAD, ensuring a robust foundation before adding complexity.
 
-**Last Updated:** 2026-01-05
+**Last Updated:** 2026-01-06
 
 ---
 
@@ -11,20 +11,20 @@ This document outlines the phased implementation strategy for OneCAD, ensuring a
 | Phase | Status | Progress |
 |-------|--------|----------|
 | Phase 1.1 Project & Rendering | In Progress | ~95% |
-| Phase 1.2 OCCT Kernel | Partial | ~35% |
+| Phase 1.2 OCCT Kernel | Partial | ~40% |
 | Phase 1.3 Topological Naming | Substantial | ~90% |
-| Phase 1.4 Command & Document | In Progress | ~60% |
+| Phase 1.4 Command & Document | In Progress | ~75% |
 | Phase 2 Sketching Engine | **Complete** | **100%** |
-| Phase 3 Solid Modeling | In Progress | ~15% |
+| Phase 3 Solid Modeling | In Progress | ~25% |
 | Phase 4 Advanced Modeling | Not Started | 0% |
 | Phase 5 Optimization & Release | Not Started | 0% |
 
 **Key Achievements:**
 - ✅ PlaneGCS solver fully integrated (1450 LOC, all 15 constraint types working)
 - ✅ Loop detection complete (1985 LOC with DFS, shoelace area, hole detection)
-- ✅ FaceBuilder OCCT integration complete (719 LOC)
+- ✅ FaceBuilder OCCT integration complete (524 LOC cpp + 195 LOC header)
 - ✅ All 7 sketch tools production-ready (2618 LOC total)
-- ✅ SketchRenderer complete (1955 LOC with VBO, adaptive tessellation)
+- ✅ SketchRenderer complete (2472 LOC with VBO, adaptive tessellation)
 - ✅ SnapManager complete (1166 LOC, 8 snap types)
 - ✅ AutoConstrainer complete (1091 LOC, 7 inference rules)
 - ✅ UI integration complete (ContextToolbar, ConstraintPanel, DimensionEditor, ViewCube)
@@ -32,8 +32,8 @@ This document outlines the phased implementation strategy for OneCAD, ensuring a
 - ✅ Selection system with deep select + click cycling
 - ✅ Mesh-based picking + 3D selection overlays (face/edge/vertex/body)
 - ✅ SceneMeshStore + BodyRenderer (Shaded+Edges + preview meshes)
-- ✅ Extrude v1a (SketchRegion → new body, preview, draft param stored)
-- ✅ CommandProcessor + AddBodyCommand (undo/redo wired)
+- ✅ Extrude v1a complete (SketchRegion → new body, preview, draft angle working)
+- ✅ CommandProcessor with full transaction support (undo/redo/group commands)
 
 ---
 
@@ -73,7 +73,9 @@ This document outlines the phased implementation strategy for OneCAD, ensuring a
 ### 1.4 Command & Document Infrastructure
 - [~] **Document Model**: Owns sketches + bodies + operations list; persistence/history replay still pending.
 - [x] **Selection Manager**: Ray-casting picking, deep select, click cycling, hover/selection highlights.
-- [~] **Command Processor**: Execute/undo/redo + transaction hooks implemented; additional commands pending.
+- [x] **Command Processor**: Execute/undo/redo with full transaction support (begin/end/cancel, command grouping). 197 LOC.
+- [x] **AddBodyCommand**: Working command for adding bodies to document.
+- [~] **Additional Commands**: Only AddBodyCommand implemented; other modeling commands pending.
 
 ---
 
@@ -148,10 +150,16 @@ This document outlines the phased implementation strategy for OneCAD, ensuring a
 - [ ] **Regeneration Engine**: Replaying history on modification.
 
 ### 3.2 Core Operations
-- [~] **Extrude**:
-    - v1a implemented: SketchRegion → new body, preview + commit on drag release.
-    - Draft angle parameter stored (UI pending).
-    - Boolean options planned (enum exists; smart boolean deferred).
+- [x] **Extrude v1a** (282 LOC):
+    - SketchRegion → new body with preview + auto-commit on drag release.
+    - Draft angle fully working (BRepOffsetAPI_DraftAngle integration).
+    - Distance indicator with direction flip on negative drag.
+    - Uses FaceBuilder + BRepPrimAPI_MakePrism.
+    - Creates AddBodyCommand + OperationRecord.
+- [~] **Extrude v1b** (pending):
+    - Face input (not just SketchRegion).
+    - Smart boolean detection (Add/Cut based on direction).
+    - Boolean override UI badge.
 - [ ] **Revolve**: Axis selection, angle parameters.
 - [ ] **Boolean Operations**: Union, Subtract, Intersect (Multi-body).
 
@@ -238,11 +246,11 @@ This document outlines the phased implementation strategy for OneCAD, ensuring a
 10. ~~Add CommandProcessor~~ → **DONE** (execute/undo/redo + AddBodyCommand)
 
 ### Immediate Next Steps (High Priority for Phase 3)
-1. **Extrude v1b smart boolean** — Add/Cut detection + override enum plumbed to UI.
-2. **Face extrude path (same tool)** — Prepare face selection input + push/pull-style preview.
-3. **Feature History infrastructure** — Operation replay scaffold for native persistence.
-4. **Native `.onecad` save/load v0** — BREP + ElementMap + operation list.
-5. **Numeric entry for modeling tools** — Dimension label editing (distance + draft).
+1. **Extrude v1b smart boolean** — Add/Cut detection based on extrude direction + override enum plumbed to UI.
+2. **Face extrude input** — Extend ExtrudeTool to accept face selection (not just SketchRegion).
+3. **Revolve operation** — Axis selection + angle parameter + preview.
+4. **Boolean operations** — Union/Subtract/Intersect with multi-body selection.
+5. **Native `.onecad` save/load v0** — BREP + ElementMap + operation list serialization.
 
 ### Short-term (Medium Priority - UX Polish)
 1. Add Camera inertia physics and sticky pivot (270 LOC existing base).
@@ -251,14 +259,17 @@ This document outlines the phased implementation strategy for OneCAD, ensuring a
 4. Add contextual tool badges (boolean override, direction flip).
 
 ### Blocking Items for Phase 3
-- ✅ ~~MakeFace wrapper~~ → COMPLETE
-- ✅ ~~SketchRenderer~~ → COMPLETE
+- ✅ ~~MakeFace wrapper~~ → COMPLETE (FaceBuilder 524 LOC)
+- ✅ ~~SketchRenderer~~ → COMPLETE (2472 LOC)
 - ✅ ~~ElementMap Document integration~~ → COMPLETE
 - ✅ ~~Grid3D adaptive spacing~~ → COMPLETE
+- ✅ ~~Extrude v1a~~ → COMPLETE (282 LOC, draft angle working)
+- ✅ ~~CommandProcessor~~ → COMPLETE (197 LOC, transactions)
 - ⚠️ **History replay + persistence** → REQUIRED for robust parametric workflows
+- ⚠️ **I/O layer** → Not implemented (src/io/ empty)
 
 ---
 
-*Document Version: 4.1*
-*Last Updated: 2026-01-05*
-*Major Update: Selection/picking + rendering + extrude v1a integrated, adaptive grid complete*
+*Document Version: 4.2*
+*Last Updated: 2026-01-06*
+*Major Update: Verified Extrude v1a with draft angle, CommandProcessor with transactions, updated LOC counts*
