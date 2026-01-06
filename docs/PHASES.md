@@ -15,7 +15,12 @@ This document outlines the phased implementation strategy for OneCAD, ensuring a
 | Phase 1.3 Topological Naming | Substantial | ~90% |
 | Phase 1.4 Command & Document | In Progress | ~75% |
 | Phase 2 Sketching Engine | **Complete** | **100%** |
-| Phase 3 Solid Modeling | In Progress | ~25% |
+| **Phase 3 Solid Modeling** | **In Progress** | **~45%** |
+| ↳ 3.1 I/O Foundation | Not Started | 0% |
+| ↳ 3.2 Parametric Engine | Not Started | 0% |
+| ↳ 3.3 Modeling Operations | In Progress | ~60% |
+| ↳ 3.4 Pattern Operations | Not Started | 0% |
+| ↳ 3.5 UI Polish | Not Started | 0% |
 | Phase 4 Advanced Modeling | Not Started | 0% |
 | Phase 5 Optimization & Release | Not Started | 0% |
 
@@ -34,6 +39,9 @@ This document outlines the phased implementation strategy for OneCAD, ensuring a
 - ✅ SceneMeshStore + BodyRenderer (Shaded+Edges + preview meshes)
 - ✅ Extrude v1a complete (SketchRegion → new body, preview, draft angle working)
 - ✅ CommandProcessor with full transaction support (undo/redo/group commands)
+- ✅ Revolve tool complete (Profile+Axis, drag interaction, boolean mode)
+- ✅ Boolean operations (Union/Cut via BRepAlgoAPI)
+- ✅ ModifyBodyCommand for boolean result updates
 
 ---
 
@@ -141,33 +149,131 @@ This document outlines the phased implementation strategy for OneCAD, ensuring a
 ---
 
 ## Phase 3: Solid Modeling Operations
-**Focus:** Enabling 3D geometry creation and manipulation.
-**Status:** In Progress
+**Focus:** Enabling 3D geometry creation, manipulation, and file I/O.
+**Status:** In Progress (~45% Complete)
+**Estimated Remaining:** ~7,300 LOC across 5 sub-phases
 
-### 3.1 Feature Management
-- [ ] **Feature History Tree**: Parametric history management.
-- [ ] **Dependency Graph**: Tracking relationships between sketches and features.
-- [ ] **Regeneration Engine**: Replaying history on modification.
+### Implementation Status Summary
 
-### 3.2 Core Operations
-- [x] **Extrude v1a** (282 LOC):
-    - SketchRegion → new body with preview + auto-commit on drag release.
-    - Draft angle fully working (BRepOffsetAPI_DraftAngle integration).
-    - Distance indicator with direction flip on negative drag.
-    - Uses FaceBuilder + BRepPrimAPI_MakePrism.
-    - Creates AddBodyCommand + OperationRecord.
-- [~] **Extrude v1b** (pending):
-    - Face input (not just SketchRegion).
-    - Smart boolean detection (Add/Cut based on direction).
-    - Boolean override UI badge.
-- [ ] **Revolve**: Axis selection, angle parameters.
-- [ ] **Boolean Operations**: Union, Subtract, Intersect (Multi-body).
+| Sub-Phase | Focus | Status | Est. LOC |
+|-----------|-------|--------|----------|
+| **3.1 I/O Foundation** | Save/Load + STEP | Not Started | ~1,400 |
+| **3.2 Parametric Engine** | History Replay | Not Started | ~1,900 |
+| **3.3 Modeling Operations** | Fillet/Shell/Push-Pull | In Progress | ~1,600 |
+| **3.4 Pattern Operations** | Linear/Circular | Not Started | ~1,300 |
+| **3.5 UI Polish** | Command Search, Box Select | Not Started | ~1,100 |
 
-### 3.3 Direct Modeling (Hybrid)
-- [ ] **Push/Pull**:
-    - Face detection under cursor.
-    - Context-aware extrude/offset.
-- [ ] **Direct Face Manipulation**: Moving faces with valid topology.
+---
+
+### 3.1 I/O Foundation (Critical Path — P0)
+**Goal:** Enable save/load + STEP interoperability
+**Dependencies:** None (can start immediately)
+
+| Task | Files | Status | Est. LOC |
+|------|-------|--------|----------|
+| NativeFormat class | `src/io/native/NativeFormat.h/cpp` | [ ] | 400 |
+| Document JSON serialization | Uses `Document.toJson()` | [ ] | 100 |
+| BREP cache writer | `src/io/native/BrepCache.h/cpp` | [ ] | 200 |
+| STEP import | `src/io/step/StepImporter.h/cpp` | [ ] | 350 |
+| STEP export | `src/io/step/StepExporter.h/cpp` | [ ] | 250 |
+| Save/Open UI | MainWindow integration | [ ] | 100 |
+
+**File Format:** Hybrid (JSON operations + BREP cache)
+- Primary: JSON-based operation list (parametric, rebuildable)
+- Cache: BREP geometry for fast loading
+- Versioning: Prompt upgrade if newer version
+
+---
+
+### 3.2 Parametric Engine (Critical Path — P0)
+**Goal:** Enable edit-and-regenerate workflow
+**Dependencies:** Phase 3.1 (file format stores history)
+
+| Task | Files | Status | Est. LOC |
+|------|-------|--------|----------|
+| DependencyGraph | `src/app/history/DependencyGraph.h/cpp` | [ ] | 400 |
+| RegenerationEngine | `src/app/history/Regeneration.h/cpp` | [ ] | 600 |
+| FeatureHistory class | `src/app/history/FeatureHistory.h/cpp` | [ ] | 300 |
+| History UI panel | `src/ui/history/HistoryPanel.h/cpp` | [ ] | 400 |
+| Feature card widget | `src/ui/history/FeatureCard.h/cpp` | [ ] | 200 |
+
+**Behaviors:**
+- Regen failure → Rollback to last valid state
+- Feature suppression → Gray + skip in regen
+- Feature reorder → Not allowed (fixed creation order)
+- History edit → Double-click opens parameter dialog
+
+---
+
+### 3.3 Modeling Operations (High Priority — P1)
+**Goal:** Complete core v1.0 modeling operations
+**Dependencies:** EdgeChainer for fillet
+
+#### Completed Operations
+- [x] **Extrude v1a** (439 LOC): SketchRegion input, preview, draft angle
+- [x] **Revolve** (427 LOC): Profile+Axis selection, drag interaction, boolean mode
+- [x] **Boolean Union/Cut** (92 LOC): BRepAlgoAPI_Fuse/Cut working
+
+#### Remaining Operations
+
+| Task | Files | Status | Est. LOC | OCCT API |
+|------|-------|--------|----------|----------|
+| **Fillet/Chamfer Tool** | `src/ui/tools/FilletChamferTool.h/cpp` | [ ] | 450 | BRepFilletAPI |
+| Edge chaining selection | `src/app/selection/EdgeChainer.h/cpp` | [ ] | 200 | - |
+| Boolean Intersect | `BooleanOperation.cpp` | [ ] | 50 | BRepAlgoAPI_Common |
+| **Push/Pull Tool** | `src/ui/tools/PushPullTool.h/cpp` | [ ] | 350 | Offset+Boolean |
+| **Shell Tool** | `src/ui/tools/ShellTool.h/cpp` | [ ] | 300 | BRepOffsetAPI_MakeThickSolid |
+| Revolve axis UI | RevolveTool.cpp | [~] | 100 | - |
+
+**Fillet/Chamfer Behavior:**
+- Combined tool: Drag out = fillet, drag in = chamfer
+- Variable radius: Per-vertex using BRepFilletAPI::Add with setpoints
+- Edge chain: Auto-propagate tangent continuous edges
+- Limit handling: Clamp silently to max valid radius
+
+**Push/Pull Behavior:**
+- Auto-activates when user selects planar face
+- Drag arrow appears on face center immediately
+- Direction determines add (union) vs remove (cut)
+
+**Shell Behavior:**
+- Select body, then faces to open
+- Single thickness value for v1.0
+- OCCT: BRepOffsetAPI_MakeThickSolid
+
+---
+
+### 3.4 Pattern Operations (Medium Priority — P2)
+**Goal:** Linear and circular pattern support
+**Dependencies:** Phase 3.2 (patterns need history)
+
+| Task | Files | Status | Est. LOC |
+|------|-------|--------|----------|
+| PatternEngine base | `src/core/modeling/PatternEngine.h/cpp` | [ ] | 300 |
+| LinearPattern | `src/core/modeling/LinearPattern.h/cpp` | [ ] | 250 |
+| CircularPattern | `src/core/modeling/CircularPattern.h/cpp` | [ ] | 250 |
+| Pattern tool UI | `src/ui/tools/PatternTool.h/cpp` | [ ] | 300 |
+| Instance rendering | BodyRenderer updates | [ ] | 200 |
+
+**Pattern Behavior:**
+- Mode: Feature-level (parametric, in history)
+- Preview: All instances shown during drag
+- Input: Dialog for count + spacing
+- Circular axis: Click edge/line for linear reference
+
+---
+
+### 3.5 UI Polish (Low Priority — P3)
+**Goal:** UX refinements for v1.0
+
+| Task | Files | Status | Est. LOC |
+|------|-------|--------|----------|
+| Command search | `src/ui/search/CommandSearch.h/cpp` | [ ] | 350 |
+| PropertyInspector full | PropertyInspector.cpp | [ ] | 300 |
+| Camera inertia | Camera3D.cpp | [ ] | 150 |
+| Box selection | SelectionManager + Viewport | [ ] | 200 |
+| DOF color wiring | SketchRenderer + UI | [ ] | 100 |
+| Cursor mode feedback | Viewport overlay | [ ] | 50 |
 
 ---
 
@@ -175,20 +281,16 @@ This document outlines the phased implementation strategy for OneCAD, ensuring a
 **Focus:** Adding depth to modeling capabilities and UI polish.
 **Status:** Not Started
 
-### 4.1 Modification Tools
-- [ ] **Fillet/Chamfer**: Variable radius, edge chain selection.
-- [ ] **Shell**: Hollow solids with thickness.
-- [ ] **Patterns**: Linear and Circular duplication features.
+### 4.1 Advanced Features (v2.0)
+- [ ] **Extrude Advanced**: Symmetric, asymmetric, to face, through all
+- [ ] **Pattern Along Path**: Sweep-based duplication
+- [ ] **Spline/Bezier**: Complex curve sketching
+- [ ] **Text in Sketches**: DXF-style text entities
 
 ### 4.2 UI/UX Polish
-- [ ] **Contextual Toolbar**: Floating tool palette near selection.
-- [ ] **Property Inspector**: Fully functional attribute editor.
-- [ ] **Visual Styles**: Wireframe, Shaded, Shaded with Edges.
-- [ ] **Dark/Light Themes**: Full UI consistency.
-
-### 4.3 I/O & Persistence
-- [ ] **Native File Format**: Full serialization of Document, ElementMap, and History.
-- [ ] **STEP Support**: Import/Export with interoperability.
+- [ ] **Visual Styles**: Wireframe, Shaded, Shaded with Edges toggles
+- [ ] **Dark/Light Themes**: Full UI consistency
+- [ ] **Transform Gizmo**: Move/rotate/scale handles
 
 ---
 
