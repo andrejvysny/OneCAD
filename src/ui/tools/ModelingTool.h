@@ -6,6 +6,7 @@
 #define ONECAD_UI_TOOLS_MODELINGTOOL_H
 
 #include "../../app/selection/SelectionTypes.h"
+#include "../../app/document/OperationRecord.h"
 
 #include <QPoint>
 #include <QVector3D>
@@ -21,6 +22,7 @@ public:
         QVector3D direction;
         double distance = 0.0;
         bool showDistance = false;
+        app::BooleanMode booleanMode = app::BooleanMode::NewBody;
     };
 
     virtual ~ModelingTool() = default;

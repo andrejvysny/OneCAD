@@ -3,6 +3,7 @@
  */
 #include "ModelingToolManager.h"
 #include "ExtrudeTool.h"
+#include "RevolveTool.h"
 
 #include "../viewport/Viewport.h"
 
@@ -11,6 +12,7 @@ namespace onecad::ui::tools {
 ModelingToolManager::ModelingToolManager(Viewport* viewport, QObject* parent)
     : QObject(parent), viewport_(viewport) {
     extrudeTool_ = std::make_unique<ExtrudeTool>(viewport_, document_);
+    revolveTool_ = std::make_unique<RevolveTool>(viewport_, document_);
 }
 
 ModelingToolManager::~ModelingToolManager() = default;
@@ -20,12 +22,18 @@ void ModelingToolManager::setDocument(app::Document* document) {
     if (extrudeTool_) {
         extrudeTool_->setDocument(document_);
     }
+    if (revolveTool_) {
+        revolveTool_->setDocument(document_);
+    }
 }
 
 void ModelingToolManager::setCommandProcessor(app::commands::CommandProcessor* processor) {
     commandProcessor_ = processor;
     if (extrudeTool_) {
         extrudeTool_->setCommandProcessor(commandProcessor_);
+    }
+    if (revolveTool_) {
+        revolveTool_->setCommandProcessor(commandProcessor_);
     }
 }
 
@@ -46,9 +54,31 @@ void ModelingToolManager::activateExtrude(const app::selection::SelectionItem& s
     if (activeTool_ == extrudeTool_.get() && activeSelection_ == key && activeTool_->isActive()) {
         return;
     }
+    
+    // If we switch tools, cancel previous one
+    if (activeTool_ && activeTool_ != extrudeTool_.get()) {
+        activeTool_->cancel();
+    }
 
     activeSelection_ = key;
     activeTool_ = extrudeTool_.get();
+    activeTool_->begin(selection);
+}
+
+void ModelingToolManager::activateRevolve(const app::selection::SelectionItem& selection) {
+    if (!revolveTool_) return;
+
+    app::selection::SelectionKey key{selection.kind, selection.id};
+    if (activeTool_ == revolveTool_.get() && activeSelection_ == key && activeTool_->isActive()) {
+        return;
+    }
+
+    if (activeTool_ && activeTool_ != revolveTool_.get()) {
+        activeTool_->cancel();
+    }
+
+    activeSelection_ = key;
+    activeTool_ = revolveTool_.get();
     activeTool_->begin(selection);
 }
 
@@ -58,6 +88,12 @@ void ModelingToolManager::cancelActiveTool() {
     }
     activeTool_ = nullptr;
     activeSelection_ = {};
+}
+
+void ModelingToolManager::onSelectionChanged(const std::vector<app::selection::SelectionItem>& selection) {
+    if (activeTool_ == revolveTool_.get()) {
+        revolveTool_->onSelectionChanged(selection);
+    }
 }
 
 bool ModelingToolManager::handleMousePress(const QPoint& screenPos, Qt::MouseButton button) {

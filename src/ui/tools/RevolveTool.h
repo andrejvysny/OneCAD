@@ -1,20 +1,19 @@
 /**
- * @file ExtrudeTool.h
- * @brief Sketch region extrusion tool (modeling mode).
+ * @file RevolveTool.h
+ * @brief Tool for creating bodies by revolving a profile around an axis.
  */
-#ifndef ONECAD_UI_TOOLS_EXTRUDETOOL_H
-#define ONECAD_UI_TOOLS_EXTRUDETOOL_H
+#ifndef ONECAD_UI_TOOLS_REVOLVETOOL_H
+#define ONECAD_UI_TOOLS_REVOLVETOOL_H
 
 #include "ModelingTool.h"
 
 #include "../../render/tessellation/TessellationCache.h"
 #include "../../kernel/elementmap/ElementMap.h"
-#include "../../app/document/OperationRecord.h"
+#include "../../app/document/OperationRecord.h" // For BooleanMode
 
 #include <TopoDS_Face.hxx>
-#include <gp_Dir.hxx>
+#include <gp_Ax1.hxx>
 #include <gp_Pnt.hxx>
-#include <gp_Pln.hxx>
 #include <string>
 
 namespace onecad::app {
@@ -34,9 +33,9 @@ class Viewport;
 
 namespace onecad::ui::tools {
 
-class ExtrudeTool : public ModelingTool {
+class RevolveTool : public ModelingTool {
 public:
-    explicit ExtrudeTool(Viewport* viewport, app::Document* document);
+    explicit RevolveTool(Viewport* viewport, app::Document* document);
 
     void setDocument(app::Document* document);
     void setCommandProcessor(app::commands::CommandProcessor* processor);
@@ -51,29 +50,45 @@ public:
     bool handleMouseRelease(const QPoint& screenPos, Qt::MouseButton button) override;
     std::optional<Indicator> indicator() const override;
 
+    // Additional method to handle axis selection when in WaitingForAxis state
+    void onSelectionChanged(const std::vector<app::selection::SelectionItem>& selection);
+
 private:
-    bool prepareInput(const app::selection::SelectionItem& selection);
-    void updatePreview(double distance);
+    enum class State {
+        WaitingForProfile,
+        WaitingForAxis,
+        Dragging
+    };
+
+    bool prepareProfile(const app::selection::SelectionItem& selection);
+    bool setAxis(const app::selection::SelectionItem& selection);
+    
+    void updatePreview(double angle);
     void clearPreview();
-    TopoDS_Shape buildExtrudeShape(double distance) const;
-    void detectBooleanMode(double distance);
+    TopoDS_Shape buildRevolveShape(double angle) const;
+    void detectBooleanMode(double angle);
 
     Viewport* viewport_ = nullptr;
     app::Document* document_ = nullptr;
     app::commands::CommandProcessor* commandProcessor_ = nullptr;
-    app::selection::SelectionItem selection_{};
-    core::sketch::Sketch* sketch_ = nullptr; // Null if extruding a body face
-    std::string targetBodyId_; // ID of the body owning the selected face (if any)
+    
+    app::selection::SelectionItem profileSelection_{};
+    app::selection::SelectionItem axisSelection_{}; // Store axis selection
+    
+    core::sketch::Sketch* sketch_ = nullptr;
+    std::string targetBodyId_; // For boolean ops
+    
     TopoDS_Face baseFace_;
-    gp_Pnt baseCenter_;
-    gp_Dir direction_;
-    gp_Pln neutralPlane_;
-
+    gp_Ax1 axis_; // Revolution axis
+    gp_Pnt baseCenter_; // For indicator origin
+    bool axisValid_ = false;
+    
+    State state_ = State::WaitingForProfile;
     bool active_ = false;
     bool dragging_ = false;
     QPoint dragStart_;
-    double currentDistance_ = 0.0;
-    double draftAngleDeg_ = 0.0;
+    double dragStartAngle_ = 0.0;
+    double currentAngle_ = 0.0; // Degrees
     app::BooleanMode booleanMode_ = app::BooleanMode::NewBody;
 
     render::TessellationCache previewTessellator_;
@@ -82,4 +97,4 @@ private:
 
 } // namespace onecad::ui::tools
 
-#endif // ONECAD_UI_TOOLS_EXTRUDETOOL_H
+#endif // ONECAD_UI_TOOLS_REVOLVETOOL_H

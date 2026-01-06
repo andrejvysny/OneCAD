@@ -1,4 +1,4 @@
-.PHONY: init run test
+.PHONY: init run test icon
 
 UNAME_S := $(shell uname -s)
 CMAKE ?= cmake
@@ -41,3 +41,25 @@ test:
 	@$(BUILD_DIR)/tests/proto_custom_map
 	@$(BUILD_DIR)/tests/proto_tnaming
 	@$(BUILD_DIR)/tests/proto_elementmap_rigorous
+
+ICON_SRC ?= icon.png
+ICON_OUT := resources/AppIcon.icns
+ICONSET := resources/AppIcon.iconset
+
+icon:
+	@if [ ! -f "$(ICON_SRC)" ]; then echo "Error: $(ICON_SRC) not found"; exit 1; fi
+	@echo "Generating $(ICON_OUT) from $(ICON_SRC)"
+	@mkdir -p $(ICONSET)
+	@sips -z 16 16 $(ICON_SRC) --out $(ICONSET)/icon_16x16.png >/dev/null
+	@sips -z 32 32 $(ICON_SRC) --out $(ICONSET)/icon_16x16@2x.png >/dev/null
+	@sips -z 32 32 $(ICON_SRC) --out $(ICONSET)/icon_32x32.png >/dev/null
+	@sips -z 64 64 $(ICON_SRC) --out $(ICONSET)/icon_32x32@2x.png >/dev/null
+	@sips -z 128 128 $(ICON_SRC) --out $(ICONSET)/icon_128x128.png >/dev/null
+	@sips -z 256 256 $(ICON_SRC) --out $(ICONSET)/icon_128x128@2x.png >/dev/null
+	@sips -z 256 256 $(ICON_SRC) --out $(ICONSET)/icon_256x256.png >/dev/null
+	@sips -z 512 512 $(ICON_SRC) --out $(ICONSET)/icon_256x256@2x.png >/dev/null
+	@sips -z 512 512 $(ICON_SRC) --out $(ICONSET)/icon_512x512.png >/dev/null
+	@sips -z 1024 1024 $(ICON_SRC) --out $(ICONSET)/icon_512x512@2x.png >/dev/null
+	@iconutil -c icns $(ICONSET) -o $(ICON_OUT)
+	@rm -rf $(ICONSET)
+	@echo "Done: $(ICON_OUT)"

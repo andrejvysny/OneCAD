@@ -37,6 +37,15 @@ void ContextToolbar::setExtrudeActive(bool active) {
     m_extrudeButton->blockSignals(false);
 }
 
+void ContextToolbar::setRevolveActive(bool active) {
+    if (!m_revolveButton) {
+        return;
+    }
+    m_revolveButton->blockSignals(true);
+    m_revolveButton->setChecked(active);
+    m_revolveButton->blockSignals(false);
+}
+
 void ContextToolbar::setupUi() {
     m_layout = new QHBoxLayout(this);
     m_layout->setContentsMargins(12, 8, 12, 8);  // Better padding
@@ -51,6 +60,10 @@ void ContextToolbar::setupUi() {
     m_extrudeButton = SidebarToolButton::fromSvgIcon(":/icons/ic_extrude.svg", tr("Extrude (E)"), this);
     m_extrudeButton->setCheckable(true);
     connect(m_extrudeButton, &SidebarToolButton::clicked, this, &ContextToolbar::extrudeRequested);
+
+    m_revolveButton = SidebarToolButton::fromSvgIcon(":/icons/ic_revolve.svg", tr("Revolve"), this);
+    m_revolveButton->setCheckable(true);
+    connect(m_revolveButton, &SidebarToolButton::clicked, this, &ContextToolbar::revolveRequested);
 
     m_importButton = SidebarToolButton::fromSvgIcon(":/icons/ic_import.svg", tr("Import STEP file"), this);
     connect(m_importButton, &SidebarToolButton::clicked, this, &ContextToolbar::importRequested);
@@ -81,6 +94,7 @@ void ContextToolbar::setupUi() {
 
     m_layout->addWidget(m_newSketchButton);
     m_layout->addWidget(m_extrudeButton);
+    m_layout->addWidget(m_revolveButton);
     m_layout->addWidget(m_importButton);
     m_layout->addWidget(m_exitSketchButton);
     m_layout->addWidget(m_lineButton);
@@ -106,6 +120,9 @@ void ContextToolbar::updateVisibleButtons() {
     }
     if (m_extrudeButton) {
         m_extrudeButton->setVisible(!inSketch);
+    }
+    if (m_revolveButton) {
+        m_revolveButton->setVisible(!inSketch);
     }
     if (m_importButton) {
         m_importButton->setVisible(m_currentContext == Context::Default);

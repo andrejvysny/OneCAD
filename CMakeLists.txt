@@ -56,11 +56,21 @@ add_subdirectory(src/ui)
 add_subdirectory(src/io)
 add_subdirectory(tests)
 
+# --- macOS App Icon ---
+if(APPLE)
+    set(MACOSX_BUNDLE_ICON_FILE AppIcon.icns)
+    set(APP_ICON_MACOSX ${CMAKE_SOURCE_DIR}/resources/AppIcon.icns)
+    set_source_files_properties(${APP_ICON_MACOSX} PROPERTIES
+        MACOSX_PACKAGE_LOCATION "Resources"
+    )
+endif()
+
 # --- Main Executable ---
 
-add_executable(OneCAD 
+add_executable(OneCAD
     src/main.cpp
     resources/resources.qrc
+    ${APP_ICON_MACOSX}
 )
 
 # --- Linking ---
@@ -95,4 +105,5 @@ set_target_properties(OneCAD PROPERTIES
     MACOSX_BUNDLE_BUNDLE_NAME "OneCAD"
     MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
     MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+    MACOSX_BUNDLE_ICON_FILE "${MACOSX_BUNDLE_ICON_FILE}"
 )

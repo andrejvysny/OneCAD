@@ -114,6 +114,7 @@ signals:
     void planeSelectionCancelled();
     void sketchUpdated();  // Emitted when geometry/constraints change
     void extrudeToolActiveChanged(bool active);
+    void revolveToolActiveChanged(bool active);
 
 public slots:
     void beginPlaneSelection();
@@ -134,6 +135,7 @@ public slots:
     void deactivateTool();
     void setReferenceSketch(const QString& sketchId);
     bool activateExtrudeTool();
+    bool activateRevolveTool();
 
     // Views
     void setFrontView();
@@ -196,6 +198,7 @@ private:
     // Animation
     void animateCamera(const CameraState& targetState);
     void setExtrudeToolActive(bool active);
+    void setRevolveToolActive(bool active);
 
     std::unique_ptr<render::Camera3D> m_camera;
     std::unique_ptr<render::Grid3D> m_grid;
@@ -205,6 +208,7 @@ private:
     std::unique_ptr<ui::tools::ModelingToolManager> m_modelingToolManager;
     app::commands::CommandProcessor* m_commandProcessor = nullptr;
     bool m_extrudeToolActive = false;
+    bool m_revolveToolActive = false;
     ViewCube* m_viewCube = nullptr;
     DimensionEditor* m_dimensionEditor = nullptr;
     QVariantAnimation* m_cameraAnimation = nullptr;

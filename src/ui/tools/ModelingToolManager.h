@@ -25,6 +25,7 @@ class Viewport;
 namespace onecad::ui::tools {
 
 class ExtrudeTool;
+class RevolveTool;
 
 class ModelingToolManager : public QObject {
     Q_OBJECT
@@ -40,7 +41,11 @@ public:
     bool isDragging() const;
 
     void activateExtrude(const app::selection::SelectionItem& selection);
+    void activateRevolve(const app::selection::SelectionItem& selection);
     void cancelActiveTool();
+
+    // Pass selection changes to active tool (needed for Revolve's Axis selection)
+    void onSelectionChanged(const std::vector<app::selection::SelectionItem>& selection);
 
     bool handleMousePress(const QPoint& screenPos, Qt::MouseButton button);
     bool handleMouseMove(const QPoint& screenPos);
@@ -52,6 +57,7 @@ private:
     app::Document* document_ = nullptr;
     app::commands::CommandProcessor* commandProcessor_ = nullptr;
     std::unique_ptr<ExtrudeTool> extrudeTool_;
+    std::unique_ptr<RevolveTool> revolveTool_;
     ModelingTool* activeTool_ = nullptr;
     app::selection::SelectionKey activeSelection_{};
 };

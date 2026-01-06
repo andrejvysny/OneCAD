@@ -5,11 +5,13 @@ add_library(onecad_ui STATIC
     theme/ThemeConfig.cpp
     theme/ThemeManager.cpp
     viewport/Viewport.cpp
+    viewport/ViewportRevolve.cpp
     viewcube/ViewCube.cpp
     navigator/ModelNavigator.cpp
     toolbar/ContextToolbar.cpp
     tools/ModelingToolManager.cpp
     tools/ExtrudeTool.cpp
+    tools/RevolveTool.cpp
     sketch/ConstraintPanel.cpp
     sketch/DimensionEditor.cpp
     sketch/SketchModePanel.cpp

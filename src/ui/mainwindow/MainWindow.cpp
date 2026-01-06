@@ -362,6 +362,20 @@ void MainWindow::setupToolBar() {
             m_toolbar->setExtrudeActive(activated);
         }
     });
+    connect(m_toolbar, &ContextToolbar::revolveRequested, this, [this]() {
+        if (!m_viewport) {
+            return;
+        }
+        const bool activated = m_viewport->activateRevolveTool();
+        if (m_toolStatus) {
+            m_toolStatus->setText(activated
+                ? tr("Revolve tool active - Select axis")
+                : tr("Select a sketch region or face to revolve"));
+        }
+        if (m_toolbar) {
+            m_toolbar->setRevolveActive(activated);
+        }
+    });
     connect(m_toolbar, &ContextToolbar::exitSketchRequested,
             this, &MainWindow::onExitSketch);
     connect(m_toolbar, &ContextToolbar::importRequested,
@@ -385,6 +399,8 @@ void MainWindow::setupToolBar() {
 
         connect(m_viewport, &Viewport::extrudeToolActiveChanged,
                 m_toolbar, &ContextToolbar::setExtrudeActive);
+        connect(m_viewport, &Viewport::revolveToolActiveChanged,
+                m_toolbar, &ContextToolbar::setRevolveActive);
     }
 
     // Reposition toolbar when context changes (button visibility affects height)

@@ -27,6 +27,7 @@ add_library(onecad_core STATIC
     loop/LoopDetector.cpp
     loop/FaceBuilder.cpp
     loop/RegionUtils.cpp
+    modeling/BooleanOperation.cpp
 )
 
 target_include_directories(onecad_core

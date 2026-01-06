@@ -827,6 +827,11 @@ void Viewport::mouseReleaseEvent(QMouseEvent* event) {
 
     if (!m_inSketchMode && m_modelingToolManager && m_modelingToolManager->isDragging()) {
         if (m_modelingToolManager->handleMouseRelease(event->pos(), event->button())) {
+            if (!m_modelingToolManager->hasActiveTool()) {
+                m_modelingToolManager->cancelActiveTool();
+                setExtrudeToolActive(false);
+                setRevolveToolActive(false);
+            }
             update();
             return;
         }
@@ -993,6 +998,7 @@ void Viewport::beginPlaneSelection() {
         m_modelingToolManager->cancelActiveTool();
     }
     setExtrudeToolActive(false);
+    setRevolveToolActive(false);
     if (m_deepSelectPopup && m_deepSelectPopup->isVisible()) {
         m_deepSelectPopup->hide();
     }
@@ -1135,6 +1141,7 @@ void Viewport::enterSketchMode(sketch::Sketch* sketch) {
         m_modelingToolManager->cancelActiveTool();
     }
     setExtrudeToolActive(false);
+    setRevolveToolActive(false);
 
     m_activeSketch = sketch;
     m_activeSketchId.clear();
@@ -1292,6 +1299,7 @@ bool Viewport::activateExtrudeTool() {
     }
 
     if (m_extrudeToolActive) {
+        setRevolveToolActive(false);
         return true;
     }
 
@@ -1299,6 +1307,7 @@ bool Viewport::activateExtrudeTool() {
     if (selection.size() == 1 &&
         selection.front().kind == app::selection::SelectionKind::SketchRegion) {
         m_modelingToolManager->activateExtrude(selection.front());
+        setRevolveToolActive(false);
         setExtrudeToolActive(true);
         return true;
     }
@@ -1386,6 +1395,7 @@ void Viewport::keyPressEvent(QKeyEvent* event) {
         event->key() == Qt::Key_Escape) {
         m_modelingToolManager->cancelActiveTool();
         setExtrudeToolActive(false);
+        setRevolveToolActive(false);
         event->accept();
         return;
     }
@@ -1558,12 +1568,16 @@ void Viewport::handleModelSelectionChanged() {
     }
 
     const auto& selection = m_selectionManager->selection();
+    // Forward selection change to tool manager (e.g. for Revolve axis picking)
+    m_modelingToolManager->onSelectionChanged(selection);
+
     if (selection.size() == 1 &&
         selection.front().kind == app::selection::SelectionKind::SketchRegion &&
-        m_referenceSketch) {
+        m_referenceSketch && !m_revolveToolActive) {
+        // Only auto-activate Extrude if Revolve isn't active
         m_modelingToolManager->activateExtrude(selection.front());
         setExtrudeToolActive(true);
-    } else {
+    } else if (!m_revolveToolActive && !m_extrudeToolActive) {
         m_modelingToolManager->cancelActiveTool();
         setExtrudeToolActive(false);
     }
@@ -2264,6 +2278,9 @@ void Viewport::updateModelSelectionFilter() {
     };
     if (m_referenceSketch) {
         filter.allowedKinds.insert(app::selection::SelectionKind::SketchRegion);
+        if (m_revolveToolActive) {
+            filter.allowedKinds.insert(app::selection::SelectionKind::SketchEdge);
+        }
     }
     m_selectionManager->setFilter(filter);
 }

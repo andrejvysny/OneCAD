@@ -1,6 +1,7 @@
 add_library(onecad_app STATIC
     Application.cpp
     commands/AddBodyCommand.cpp
+    commands/ModifyBodyCommand.cpp
     commands/CommandProcessor.cpp
     document/Document.cpp
     selection/SelectionManager.cpp

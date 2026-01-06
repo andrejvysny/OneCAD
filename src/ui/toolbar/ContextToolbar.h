@@ -31,11 +31,13 @@ public:
 public slots:
     void setContext(Context context);
     void setExtrudeActive(bool active);
+    void setRevolveActive(bool active);
 
 signals:
     void contextChanged();
     void newSketchRequested();
     void extrudeRequested();
+    void revolveRequested();
     void exitSketchRequested();
     void importRequested();
     void lineToolActivated();
@@ -54,6 +56,7 @@ private:
     QHBoxLayout* m_layout = nullptr;
     SidebarToolButton* m_newSketchButton = nullptr;
     SidebarToolButton* m_extrudeButton = nullptr;
+    SidebarToolButton* m_revolveButton = nullptr;
     SidebarToolButton* m_importButton = nullptr;
     SidebarToolButton* m_exitSketchButton = nullptr;
     SidebarToolButton* m_lineButton = nullptr;
