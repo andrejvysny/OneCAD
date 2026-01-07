@@ -31,6 +31,7 @@ target_link_libraries(proto_sketch_geometry
     PRIVATE
     onecad_core
 )
+target_include_directories(proto_sketch_geometry PRIVATE ${CMAKE_SOURCE_DIR}/tests)
 
 # Sketch Constraints Prototype
 add_executable(proto_sketch_constraints prototypes/proto_sketch_constraints.cpp)
@@ -38,6 +39,7 @@ target_link_libraries(proto_sketch_constraints
     PRIVATE
     onecad_core
 )
+target_include_directories(proto_sketch_constraints PRIVATE ${CMAKE_SOURCE_DIR}/tests)
 
 # Sketch Solver Adapter Prototype
 add_executable(proto_sketch_solver prototypes/proto_sketch_solver.cpp)
@@ -45,6 +47,7 @@ target_link_libraries(proto_sketch_solver
     PRIVATE
     onecad_core
 )
+target_include_directories(proto_sketch_solver PRIVATE ${CMAKE_SOURCE_DIR}/tests)
 
 # PlaneGCS Integration Prototype
 add_executable(proto_planegcs_integration prototypes/proto_planegcs_integration.cpp)

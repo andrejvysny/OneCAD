@@ -1,28 +1,17 @@
+#include "test_harness/TestHarness.h"
 #include "sketch/Sketch.h"
 #include "sketch/constraints/Constraints.h"
 #include "sketch/solver/ConstraintSolver.h"
 #include "sketch/solver/SolverAdapter.h"
 
-#include <cassert>
 #include <cmath>
 #include <algorithm>
-#include <iostream>
 #include <numbers>
 
 using namespace onecad::core::sketch;
 using namespace onecad::core::sketch::constraints;
 
-namespace {
-
-bool approx(double a, double b, double tol = 1e-6) {
-    double diff = std::abs(a - b);
-    double scale = std::max(std::abs(a), std::abs(b));
-    return diff <= tol || diff <= tol * scale;
-}
-
-} // namespace
-
-int main() {
+TEST_CASE(Solver_basic_flow) {
     Sketch sketch;
 
     auto p1 = sketch.addPoint(0.0, 0.0);
@@ -38,28 +27,31 @@ int main() {
 
     auto distanceId = sketch.addDistance(p1, p2, 10.0);
     auto radiusId = sketch.addRadius(circle, 2.5);
-    assert(!distanceId.empty());
-    assert(!radiusId.empty());
+    EXPECT_FALSE(distanceId.empty());
+    EXPECT_FALSE(radiusId.empty());
 
     ConstraintSolver solver;
     SolverAdapter::populateSolver(sketch, solver);
 
     DOFResult dof = solver.calculateDOF();
     int expectedTotal = 10;
-    assert(dof.total == expectedTotal);
+    EXPECT_EQ(dof.total, expectedTotal);
 
     SolveResult solveResult = sketch.solve();
-    assert(solveResult.success);
+    EXPECT_TRUE(solveResult.success);
 
     Vec2d target{2.0, 3.0};
     SolveResult dragResult = sketch.solveWithDrag(p1, target);
-    assert(dragResult.success);
+    EXPECT_TRUE(dragResult.success);
 
     auto* p1Entity = sketch.getEntityAs<SketchPoint>(p1);
-    assert(p1Entity);
-    assert(approx(p1Entity->x(), target.x));
-    assert(approx(p1Entity->y(), target.y));
+    EXPECT_TRUE(p1Entity != nullptr);
+    if (p1Entity) {
+        EXPECT_NEAR(p1Entity->x(), target.x, 1e-6);
+        EXPECT_NEAR(p1Entity->y(), target.y, 1e-6);
+    }
+}
 
-    std::cout << "Sketch solver adapter prototype: OK" << std::endl;
-    return 0;
+int main() {
+    return onecad::test::runAllTests();
 }

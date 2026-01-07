@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ninja-build cmake \
+            qt6-base-dev qt6-base-dev-tools qt6-tools-dev qt6-tools-dev-tools libqt6svg6 libqt6svg6-dev \
+            libgl1-mesa-dev libx11-dev libxext-dev libxrandr-dev libxfixes-dev libxi-dev libxrender-dev libxkbcommon-dev \
+            libocct-foundation-dev libocct-modeling-data-dev libocct-modeling-algorithms-dev libocct-ocaf-dev libocct-visualization-dev libocct-draw-dev libocct-data-exchange-dev \
+            libeigen3-dev libvulkan-dev \
+            libboost-all-dev tk-dev tcl-dev libtbb-dev
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DQt6_DIR=/usr/lib/x86_64-linux-gnu/cmake/Qt6 \
+            -DOpenCASCADE_DIR=/usr/lib/x86_64-linux-gnu/cmake/opencascade \
+            -DCMAKE_PREFIX_PATH="/usr/lib/x86_64-linux-gnu/cmake;/usr/lib/cmake"
+
+      - name: Build prototypes
+        run: |
+          cmake --build build --target \
+            proto_sketch_geometry \
+            proto_sketch_constraints \
+            proto_sketch_solver \
+            proto_planegcs_integration \
+            proto_custom_map \
+            proto_face_builder \
+            proto_loop_detector \
+            proto_elementmap_rigorous \
+            proto_tnaming
+
+      - name: Run prototypes
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          cd build
+          ./tests/proto_sketch_geometry
+          ./tests/proto_sketch_constraints
+          ./tests/proto_sketch_solver
+          ./tests/proto_planegcs_integration
+          ./tests/proto_custom_map
+          ./tests/proto_face_builder
+          ./tests/proto_loop_detector
+          ./tests/proto_elementmap_rigorous
+          ./tests/proto_tnaming
