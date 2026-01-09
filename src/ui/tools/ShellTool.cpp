@@ -69,11 +69,14 @@ bool ShellTool::handleMousePress(const QPoint& screenPos, Qt::MouseButton button
     if (state_ == State::Dragging || state_ == State::WaitingForFaces) {
         // If in WaitingForFaces and clicking with no shift -> start dragging
         // This allows dragging immediately after body selection if no faces needed
-        dragStart_ = screenPos;
-        currentThickness_ = 0.0;
-        dragging_ = true;
-        state_ = State::Dragging;
-        return true;
+        // BUT only if clicking the indicator, as requested
+        if (viewport_ && viewport_->isMouseOverIndicator(screenPos)) {
+            dragStart_ = screenPos;
+            currentThickness_ = 0.0;
+            dragging_ = true;
+            state_ = State::Dragging;
+            return true;
+        }
     }
 
     return false;
@@ -303,6 +306,7 @@ std::optional<ModelingTool::Indicator> ShellTool::indicator() const {
     ind.distance = currentThickness_;
     ind.showDistance = dragging_ && currentThickness_ >= kMinThickness;
     ind.booleanMode = app::BooleanMode::NewBody;
+    ind.isDoubleSided = true; // Double arrow
     return ind;
 }
 

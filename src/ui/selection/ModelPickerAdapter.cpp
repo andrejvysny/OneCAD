@@ -283,6 +283,20 @@ app::selection::PickResult ModelPickerAdapter::pick(const QPoint& screenPos,
     const MeshCache* hitMesh = frontHit.mesh;
     const Triangle& hitTriangle = frontHit.triangle;
 
+    // Filter occluded faces from candidates
+    // We only consider faces that are very close to the front-most hit (e.g. coincident faces)
+    // Adjust epsilon based on scene scale if needed.
+    constexpr float kDepthEpsilon = 1e-4f;
+    float minT = frontHit.t;
+
+    std::vector<FaceHit> visibleHits;
+    visibleHits.reserve(faceHits.size());
+    for (const auto& hit : faceHits) {
+        if (hit.t <= minT + kDepthEpsilon) {
+            visibleHits.push_back(hit);
+        }
+    }
+
     QPointF clickPoint(screenPos);
     double bestVertexDistance = std::numeric_limits<double>::max();
     std::string bestVertexId;
@@ -439,7 +453,7 @@ app::selection::PickResult ModelPickerAdapter::pick(const QPoint& screenPos,
     std::unordered_map<std::string, QVector3D> bodyPoints;
     std::unordered_map<std::string, QVector3D> bodyNormals;
 
-    for (const auto& hit : faceHits) {
+    for (const auto& hit : visibleHits) {
         app::selection::SelectionItem faceItem;
         faceItem.kind = app::selection::SelectionKind::Face;
         std::string faceId = hit.triangle.faceId;

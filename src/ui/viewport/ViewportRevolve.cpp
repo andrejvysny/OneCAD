@@ -9,7 +9,6 @@ bool Viewport::activateRevolveTool() {
     if (m_inSketchMode || !m_selectionManager || !m_modelingToolManager) {
         setRevolveToolActive(false);
         setFilletToolActive(false);
-        setPushPullToolActive(false);
         setShellToolActive(false);
         return false;
     }
@@ -17,7 +16,6 @@ bool Viewport::activateRevolveTool() {
     if (m_revolveToolActive) {
         setExtrudeToolActive(false);
         setFilletToolActive(false);
-        setPushPullToolActive(false);
         setShellToolActive(false);
         return true;
     }
@@ -29,7 +27,6 @@ bool Viewport::activateRevolveTool() {
         m_modelingToolManager->activateRevolve(selection.front());
         setExtrudeToolActive(false);
         setFilletToolActive(false);
-        setPushPullToolActive(false);
         setShellToolActive(false);
         const bool activated = m_modelingToolManager->hasActiveTool();
         setRevolveToolActive(activated);
@@ -38,7 +35,6 @@ bool Viewport::activateRevolveTool() {
 
     setRevolveToolActive(false);
     setFilletToolActive(false);
-    setPushPullToolActive(false);
     setShellToolActive(false);
     return false;
 }

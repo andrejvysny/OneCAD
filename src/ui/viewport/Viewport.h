@@ -96,6 +96,7 @@ public:
     core::sketch::tools::SketchToolManager* toolManager() const;
     core::sketch::SketchRenderer* sketchRenderer() const;
     core::sketch::Vec2d screenToSketch(const QPoint& screenPos) const;
+    bool isMouseOverIndicator(const QPoint& screenPos) const;
 
     // Sketch update notification
     void notifySketchUpdated();
@@ -126,7 +127,6 @@ signals:
     void extrudeToolActiveChanged(bool active);
     void revolveToolActiveChanged(bool active);
     void filletToolActiveChanged(bool active);
-    void pushPullToolActiveChanged(bool active);
     void shellToolActiveChanged(bool active);
     void debugTogglesChanged(bool normals, bool depth, bool wireframe, bool disableGamma, bool matcap);
     void selectionContextChanged(int contextKind);  // 0=Default, 1=Edge, 2=Face, 3=Body
@@ -152,7 +152,6 @@ public slots:
     bool activateExtrudeTool();
     bool activateRevolveTool();
     bool activateFilletTool();
-    bool activatePushPullTool();
     bool activateShellTool();
     void setDebugToggles(bool normals, bool depth, bool wireframe, bool disableGamma, bool matcap);
     void setRenderLightRig(const QVector3D& keyDir,
@@ -249,7 +248,6 @@ private:
     bool m_extrudeToolActive = false;
     bool m_revolveToolActive = false;
     bool m_filletToolActive = false;
-    bool m_pushPullToolActive = false;
     bool m_shellToolActive = false;
     ViewCube* m_viewCube = nullptr;
     DimensionEditor* m_dimensionEditor = nullptr;
@@ -270,6 +268,7 @@ private:
     core::sketch::Sketch* m_referenceSketch = nullptr;
     std::string m_referenceSketchId;
     bool m_inSketchMode = false;
+    bool m_indicatorHovered = false;
     bool m_planeSelectionActive = false;
     int m_planeHoverIndex = -1;
 

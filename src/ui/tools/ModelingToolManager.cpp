@@ -5,7 +5,6 @@
 #include "ExtrudeTool.h"
 #include "RevolveTool.h"
 #include "FilletChamferTool.h"
-#include "PushPullTool.h"
 #include "ShellTool.h"
 
 #include "../viewport/Viewport.h"
@@ -17,7 +16,6 @@ ModelingToolManager::ModelingToolManager(Viewport* viewport, QObject* parent)
     extrudeTool_ = std::make_unique<ExtrudeTool>(viewport_, document_);
     revolveTool_ = std::make_unique<RevolveTool>(viewport_, document_);
     filletTool_ = std::make_unique<FilletChamferTool>(viewport_, document_);
-    pushPullTool_ = std::make_unique<PushPullTool>(viewport_, document_);
     shellTool_ = std::make_unique<ShellTool>(viewport_, document_);
 }
 
@@ -34,9 +32,6 @@ void ModelingToolManager::setDocument(app::Document* document) {
     if (filletTool_) {
         filletTool_->setDocument(document_);
     }
-    if (pushPullTool_) {
-        pushPullTool_->setDocument(document_);
-    }
     if (shellTool_) {
         shellTool_->setDocument(document_);
     }
@@ -52,9 +47,6 @@ void ModelingToolManager::setCommandProcessor(app::commands::CommandProcessor* p
     }
     if (filletTool_) {
         filletTool_->setCommandProcessor(commandProcessor_);
-    }
-    if (pushPullTool_) {
-        pushPullTool_->setCommandProcessor(commandProcessor_);
     }
     if (shellTool_) {
         shellTool_->setCommandProcessor(commandProcessor_);
@@ -120,23 +112,6 @@ void ModelingToolManager::activateFillet(const app::selection::SelectionItem& se
 
     activeSelection_ = key;
     activeTool_ = filletTool_.get();
-    activeTool_->begin(selection);
-}
-
-void ModelingToolManager::activatePushPull(const app::selection::SelectionItem& selection) {
-    if (!pushPullTool_) return;
-
-    app::selection::SelectionKey key{selection.kind, selection.id};
-    if (activeTool_ == pushPullTool_.get() && activeSelection_ == key && activeTool_->isActive()) {
-        return;
-    }
-
-    if (activeTool_ && activeTool_ != pushPullTool_.get()) {
-        activeTool_->cancel();
-    }
-
-    activeSelection_ = key;
-    activeTool_ = pushPullTool_.get();
     activeTool_->begin(selection);
 }
 

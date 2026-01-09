@@ -422,6 +422,7 @@ std::optional<ModelingTool::Indicator> RevolveTool::indicator() const {
     ind.origin = QVector3D(baseCenter_.X(), baseCenter_.Y(), baseCenter_.Z());
     ind.direction = QVector3D(axis_.Direction().X(), axis_.Direction().Y(), axis_.Direction().Z());
     ind.showDistance = false;
+    ind.isDoubleSided = true;
     ind.booleanMode = booleanMode_;
     return ind;
 }

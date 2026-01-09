@@ -28,7 +28,6 @@ namespace onecad::ui::tools {
 class ExtrudeTool;
 class RevolveTool;
 class FilletChamferTool;
-class PushPullTool;
 class ShellTool;
 
 class ModelingToolManager : public QObject {
@@ -47,7 +46,6 @@ public:
     void activateExtrude(const app::selection::SelectionItem& selection);
     void activateRevolve(const app::selection::SelectionItem& selection);
     void activateFillet(const app::selection::SelectionItem& selection);
-    void activatePushPull(const app::selection::SelectionItem& selection);
     void activateShell(const app::selection::SelectionItem& selection);
     void cancelActiveTool();
 
@@ -71,7 +69,6 @@ private:
     std::unique_ptr<ExtrudeTool> extrudeTool_;
     std::unique_ptr<RevolveTool> revolveTool_;
     std::unique_ptr<FilletChamferTool> filletTool_;
-    std::unique_ptr<PushPullTool> pushPullTool_;
     std::unique_ptr<ShellTool> shellTool_;
     ModelingTool* activeTool_ = nullptr;
     app::selection::SelectionKey activeSelection_{};

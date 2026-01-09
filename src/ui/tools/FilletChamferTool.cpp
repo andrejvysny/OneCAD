@@ -99,6 +99,12 @@ bool FilletChamferTool::handleMousePress(const QPoint& screenPos, Qt::MouseButto
     if (!active_ || button != Qt::LeftButton) {
         return false;
     }
+
+    // Only start dragging if the arrow indicator was clicked
+    if (!viewport_ || !viewport_->isMouseOverIndicator(screenPos)) {
+        return false;
+    }
+
     dragStart_ = screenPos;
     currentValue_ = 0.0;
     dragging_ = true;
@@ -396,6 +402,7 @@ std::optional<ModelingTool::Indicator> FilletChamferTool::indicator() const {
     ind.distance = currentValue_;
     ind.showDistance = dragging_ && currentValue_ >= kMinValue;
     ind.booleanMode = app::BooleanMode::NewBody;  // Not applicable
+    ind.isDoubleSided = true; // Use double arrow
     return ind;
 }
 

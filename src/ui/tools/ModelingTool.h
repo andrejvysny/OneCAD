@@ -22,6 +22,7 @@ public:
         QVector3D direction;
         double distance = 0.0;
         bool showDistance = false;
+        bool isDoubleSided = true;
         app::BooleanMode booleanMode = app::BooleanMode::NewBody;
     };
 

@@ -11,6 +11,7 @@
 #include "../../core/loop/FaceBuilder.h"
 #include "../../core/loop/RegionUtils.h"
 #include "../../core/modeling/BooleanOperation.h"
+#include "../../render/Camera3D.h"
 
 #include <BRepGProp.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -68,6 +69,12 @@ bool ExtrudeTool::handleMousePress(const QPoint& screenPos, Qt::MouseButton butt
     if (!active_ || button != Qt::LeftButton) {
         return false;
     }
+
+    // Only start dragging if the arrow indicator was clicked
+    if (!viewport_ || !viewport_->isMouseOverIndicator(screenPos)) {
+        return false;
+    }
+
     dragStart_ = screenPos;
     currentDistance_ = 0.0;
     dragging_ = true;
@@ -79,9 +86,56 @@ bool ExtrudeTool::handleMouseMove(const QPoint& screenPos) {
         return false;
     }
 
-    const double pixelScale = viewport_ ? viewport_->pixelScale() : 1.0;
-    const double deltaY = static_cast<double>(screenPos.y() - dragStart_.y());
-    const double distance = -deltaY * pixelScale;
+    // Vector Projection Logic for Dragging:
+    // 1. Get Camera matrices
+    if (!viewport_ || !viewport_->camera()) return false;
+    auto* camera = viewport_->camera();
+    float aspectRatio = static_cast<float>(viewport_->width()) / static_cast<float>(viewport_->height());
+    QMatrix4x4 viewProj = camera->projectionMatrix(aspectRatio) * camera->viewMatrix();
+
+    // 2. Project extrusion start (base center) and end (along normal) to screen
+    QVector3D startWorld(baseCenter_.X(), baseCenter_.Y(), baseCenter_.Z());
+    QVector3D endWorld = startWorld + QVector3D(direction_.X(), direction_.Y(), direction_.Z());
+
+    auto project = [&](const QVector3D& worldPos) -> std::optional<QVector2D> {
+        QVector4D clip = viewProj * QVector4D(worldPos, 1.0f);
+        if (clip.w() <= 1e-6f) return std::nullopt; // Behind camera
+        QVector3D ndc = clip.toVector3D() / clip.w();
+        float x = (ndc.x() * 0.5f + 0.5f) * viewport_->width();
+        float y = (1.0f - (ndc.y() * 0.5f + 0.5f)) * viewport_->height();
+        return QVector2D(x, y);
+    };
+
+    auto p0Opt = project(startWorld);
+    auto p1Opt = project(endWorld);
+
+    double distance = 0.0;
+    
+    // If projection failed or axis is perpendicular to view (degenerate 2D vector), fallback to pixel scaling directly
+    bool projectionValid = false;
+    if (p0Opt && p1Opt) {
+        QVector2D axis = *p1Opt - *p0Opt;
+        if (axis.lengthSquared() > 1e-4) {
+            axis.normalize();
+            QVector2D mouseDelta(screenPos.x() - dragStart_.x(), screenPos.y() - dragStart_.y());
+            
+            // Project mouse delta onto the visual axis
+            // If dragging in direction of arrow, dot product is positive -> positive extrusion
+            double pixelDelta = QVector2D::dotProduct(mouseDelta, axis);
+            
+            const double pixelScale = viewport_->pixelScale();
+            distance = pixelDelta * pixelScale;
+            projectionValid = true;
+        }
+    }
+
+    if (!projectionValid) {
+        // Fallback (e.g. looking straight down at the arrow)
+        // Just use Y delta inverted as a best guess standard
+        const double pixelScale = viewport_->pixelScale();
+        const double deltaY = static_cast<double>(screenPos.y() - dragStart_.y());
+        distance = -deltaY * pixelScale;
+    }
 
     if (std::abs(distance - currentDistance_) < 1e-6) {
         return true;
@@ -103,9 +157,55 @@ bool ExtrudeTool::handleMouseRelease(const QPoint& screenPos, Qt::MouseButton bu
         return false;
     }
 
-    const double pixelScale = viewport_ ? viewport_->pixelScale() : 1.0;
-    const double deltaY = static_cast<double>(screenPos.y() - dragStart_.y());
-    const double distance = -deltaY * pixelScale;
+    // Re-calculate distance one last time to match mouseMove logic precisely
+    double distance = currentDistance_;
+    // If needed we could re-run the projection logic here, but using the last cached valid distance 
+    // from mouseMove is usually safer and consistent (unless we want to support 'click-release' without move?).
+    // Just to be safe, let's re-run the basic projection if we moved.
+    
+    if (screenPos != dragStart_) {
+        // ... Duplicate projection logic or assume currentDistance_ is fresh from last specific move event move?
+        // Actually, handleMouseMove updates currentDistance_. If we released at a different spot,
+        // handleMouseMove might not have been called for that *exact* pixel if dropped quickly.
+        // Let's copy the robust logic to be sure.
+        
+        if (viewport_ && viewport_->camera()) {
+             auto* camera = viewport_->camera();
+            float aspectRatio = static_cast<float>(viewport_->width()) / static_cast<float>(viewport_->height());
+            QMatrix4x4 viewProj = camera->projectionMatrix(aspectRatio) * camera->viewMatrix();
+
+            QVector3D startWorld(baseCenter_.X(), baseCenter_.Y(), baseCenter_.Z());
+            QVector3D endWorld = startWorld + QVector3D(direction_.X(), direction_.Y(), direction_.Z());
+            
+            auto project = [&](const QVector3D& worldPos) -> std::optional<QVector2D> {
+                QVector4D clip = viewProj * QVector4D(worldPos, 1.0f);
+                if (clip.w() <= 1e-6f) return std::nullopt;
+                QVector3D ndc = clip.toVector3D() / clip.w();
+                float x = (ndc.x() * 0.5f + 0.5f) * viewport_->width();
+                float y = (1.0f - (ndc.y() * 0.5f + 0.5f)) * viewport_->height();
+                return QVector2D(x, y);
+            };
+
+            auto p0Opt = project(startWorld);
+            auto p1Opt = project(endWorld);
+            bool projectionValid = false;
+             if (p0Opt && p1Opt) {
+                QVector2D axis = *p1Opt - *p0Opt;
+                if (axis.lengthSquared() > 1e-4) {
+                    axis.normalize();
+                    QVector2D mouseDelta(screenPos.x() - dragStart_.x(), screenPos.y() - dragStart_.y());
+                    double pixelDelta = QVector2D::dotProduct(mouseDelta, axis);
+                    distance = pixelDelta * viewport_->pixelScale();
+                    projectionValid = true;
+                }
+            }
+            if (!projectionValid) {
+                const double deltaY = static_cast<double>(screenPos.y() - dragStart_.y());
+                distance = -deltaY * viewport_->pixelScale(); 
+            }
+        }
+    }
+    
     dragging_ = false;
 
     if (std::abs(distance) < kMinExtrudeDistance) {
@@ -117,9 +217,7 @@ bool ExtrudeTool::handleMouseRelease(const QPoint& screenPos, Qt::MouseButton bu
     detectBooleanMode(distance);
 
     TopoDS_Shape toolShape = buildExtrudeShape(distance);
-    TopoDS_Shape finalShape = toolShape;
     std::string resultBodyId;
-
     bool success = false;
 
     if (document_ && !toolShape.IsNull()) {
@@ -136,64 +234,27 @@ bool ExtrudeTool::handleMouseRelease(const QPoint& screenPos, Qt::MouseButton bu
                 resultBodyId = document_->addBody(toolShape);
                 success = !resultBodyId.empty();
             }
-        } else {
-            // Boolean Operation logic
-            // Find target shape
-            std::string targetId = targetBodyId_; 
-            // If targetBodyId_ is empty (sketch input), we might need to find which body we intersected
-            // But detectBooleanMode implies we found something.
-            // For now, let's assume we intersect the body we started from (if Face selection)
-            // or perform a global boolean search?
-            // "BooleanOperation::perform" takes a target.
-            
-            // NOTE: For v1b, if we started from a SKETCH, targetBodyId_ is empty.
-            // We need to identify the target.
-            // Simplified: Only support boolean ops if we have a valid target (e.g. from face selection or intersection).
-            // For now, let's rely on targetBodyId_ (Face selection) for Cut/Join.
-            // If Sketch selection, we default to NewBody unless we implement complex target picking.
-            
-            // Wait, detectBooleanMode sets the mode. If it detected Cut/Add, we must have a target.
-            // But I didn't store the detected target in detectBooleanMode.
-            // I should refine this.
-            
-            // For this implementation step, let's limit Boolean Ops to when we have a targetBodyId_ (Face input).
-            // Or if we are extruding a sketch, stick to NewBody for now unless we do global search.
-            
-            if (!targetId.empty()) {
-                const TopoDS_Shape* targetShape = document_->getBodyShape(targetId);
-                if (targetShape) {
-                    finalShape = core::modeling::BooleanOperation::perform(toolShape, *targetShape, booleanMode_);
-                    if (!finalShape.IsNull()) {
-                        if (commandProcessor_) {
-                            auto command = std::make_unique<app::commands::ModifyBodyCommand>(document_, targetId, finalShape);
-                            if (commandProcessor_->execute(std::move(command))) {
-                                resultBodyId = targetId;
-                                success = true;
-                            }
-                        } else {
-                            // Direct modification
-                            std::string name = document_->getBodyName(targetId);
-                            document_->removeBody(targetId);
-                            document_->addBodyWithId(targetId, finalShape, name);
-                            resultBodyId = targetId;
-                            success = true;
-                        }
-                    }
-                }
-            } else {
-                 // Fallback to NewBody if no target identified
-                 booleanMode_ = app::BooleanMode::NewBody;
-                 if (commandProcessor_) {
-                    auto command = std::make_unique<app::commands::AddBodyCommand>(document_, toolShape);
-                    auto* cmdPtr = command.get();
+        } else if (!targetBodyId_.empty() && !targetShape_.IsNull()) {
+            // Boolean Operation logic (Push/Pull)
+            TopoDS_Shape resultShape = core::modeling::BooleanOperation::perform(
+                toolShape, targetShape_, booleanMode_);
+
+            if (!resultShape.IsNull()) {
+                if (commandProcessor_) {
+                    auto command = std::make_unique<app::commands::ModifyBodyCommand>(
+                        document_, targetBodyId_, resultShape);
                     if (commandProcessor_->execute(std::move(command))) {
-                         resultBodyId = cmdPtr->bodyId();
-                         success = true;
+                        resultBodyId = targetBodyId_;
+                        success = true;
                     }
-                 } else {
-                     resultBodyId = document_->addBody(toolShape);
-                     success = !resultBodyId.empty();
-                 }
+                } else {
+                    // Direct modification fallback (should rarely be used if processor exists)
+                    std::string name = document_->getBodyName(targetBodyId_);
+                    document_->removeBody(targetBodyId_);
+                    document_->addBodyWithId(targetBodyId_, resultShape, name);
+                    resultBodyId = targetBodyId_;
+                    success = true;
+                }
             }
         }
 
@@ -233,6 +294,7 @@ bool ExtrudeTool::prepareInput(const app::selection::SelectionItem& selection) {
     baseFace_.Nullify();
     sketch_ = nullptr;
     targetBodyId_.clear();
+    targetShape_.Nullify();
 
     if (selection.kind == app::selection::SelectionKind::SketchRegion) {
         sketch_ = document_->getSketch(selection.id.ownerId);
@@ -258,24 +320,30 @@ bool ExtrudeTool::prepareInput(const app::selection::SelectionItem& selection) {
         
     } else if (selection.kind == app::selection::SelectionKind::Face) {
         targetBodyId_ = selection.id.ownerId;
+        const TopoDS_Shape* bodyShape = document_->getBodyShape(targetBodyId_);
+        if (!bodyShape || bodyShape->IsNull()) {
+            return false;
+        }
+        targetShape_ = *bodyShape;
+
         const auto* entry = document_->elementMap().find(kernel::elementmap::ElementId{selection.id.elementId});
         if (!entry || entry->kind != kernel::elementmap::ElementKind::Face || entry->shape.IsNull()) {
             return false;
         }
         baseFace_ = TopoDS::Face(entry->shape);
         
-        BRepAdaptor_Surface surface(baseFace_, true);
-        if (surface.GetType() == GeomAbs_Plane) {
-            gp_Pln plane = surface.Plane();
-            direction_ = plane.Axis().Direction();
-            if (baseFace_.Orientation() == TopAbs_REVERSED) {
-                direction_.Reverse();
-            }
-            neutralPlane_ = plane;
-        } else {
+        if (!isPlanarFace(baseFace_)) {
             // Only planar faces supported for now
             return false;
         }
+
+        BRepAdaptor_Surface surface(baseFace_, true);
+        gp_Pln plane = surface.Plane();
+        direction_ = plane.Axis().Direction();
+        if (baseFace_.Orientation() == TopAbs_REVERSED) {
+            direction_.Reverse();
+        }
+        neutralPlane_ = plane;
     } else {
         return false;
     }
@@ -289,40 +357,27 @@ bool ExtrudeTool::prepareInput(const app::selection::SelectionItem& selection) {
     return true;
 }
 
+bool ExtrudeTool::isPlanarFace(const TopoDS_Face& face) const {
+    if (face.IsNull()) {
+        return false;
+    }
+    BRepAdaptor_Surface surface(face, true);
+    return surface.GetType() == GeomAbs_Plane;
+}
+
 void ExtrudeTool::detectBooleanMode(double distance) {
     if (distance == 0.0) return;
 
-    // If extruding a face of a body, check direction relative to body
-    // If extruding a sketch, we might overlap.
-    
-    // For now, if we selected a Face, default to Union (Join) if pulling out, Cut if pushing in?
-    // Or simpler: Use BooleanOperation::detectMode
-    
-    TopoDS_Shape tool = buildExtrudeShape(distance);
-    if (tool.IsNull()) return;
-    
-    std::vector<TopoDS_Shape> targets;
-    if (!targetBodyId_.empty()) {
-        const TopoDS_Shape* body = document_->getBodyShape(targetBodyId_);
-        if (body) {
-            targets.push_back(*body);
-        }
+    if (!targetBodyId_.empty() && !targetShape_.IsNull()) {
+        // Face push/pull logic
+        // Pull out (positive along normal) = Add (Join)
+        // Push in (negative along normal) = Cut
+        booleanMode_ = (distance >= 0) ? app::BooleanMode::Add : app::BooleanMode::Cut;
     } else {
-        // Collect all bodies?
-        // For performance, maybe skip global check for now and stick to NewBody for Sketch extrudes
-        // unless they touch something.
-        // Let's keep it simple: Face selection -> interact with owner. Sketch -> NewBody.
-    }
-    
-    if (targets.empty()) {
+        // Sketch logic (NewBody by default)
+        // Future: Check for intersection with existing bodies
         booleanMode_ = app::BooleanMode::NewBody;
-        return;
     }
-    
-    gp_Dir extrudeDir = direction_;
-    if (distance < 0) extrudeDir.Reverse();
-    
-    booleanMode_ = core::modeling::BooleanOperation::detectMode(tool, targets, extrudeDir);
 }
 
 
@@ -335,13 +390,6 @@ void ExtrudeTool::updatePreview(double distance) {
         clearPreview();
         return;
     }
-    
-    // If Cut/Add, visualize the result? 
-    // Usually CAD shows the tool shape (translucent) + boolean indication.
-    // Or the full boolean result? Full boolean result is heavy for preview.
-    // Let's show the tool shape, but color it?
-    // Current renderer doesn't support custom colors per preview mesh easily yet (it takes Mesh struct).
-    // We can stick to showing the tool shape.
     
     render::SceneMeshStore::Mesh mesh = previewTessellator_.buildMesh("preview", tool, previewElementMap_);
     viewport_->setModelPreviewMeshes({std::move(mesh)});
@@ -422,9 +470,19 @@ std::optional<ModelingTool::Indicator> ExtrudeTool::indicator() const {
                                                              direction_.Z() * offset));
 
     QVector3D dir(direction_.X(), direction_.Y(), direction_.Z());
+    
+    // Always use forward direction for the indicator logic;
+    // visual rendering handles flipping or double-sided.
+    // The previous logic was flipping dir if dragging backwards, which is correct for 
+    // the single-sided arrow to point "backwards". 
+    // For double-sided arrow, we want the "axis".
+    // However, if we are dragging, we might want to emphasize the drag direction.
+    // But since the user asked for double arrow, let's keep it consistent.
+    
     if (dragging_ && currentDistance_ < 0.0) {
         dir = -dir;
     }
+    
     if (dir.lengthSquared() < 1e-6f) {
         return std::nullopt;
     }
@@ -432,9 +490,10 @@ std::optional<ModelingTool::Indicator> ExtrudeTool::indicator() const {
     Indicator indicator;
     indicator.origin = QVector3D(originPoint.X(), originPoint.Y(), originPoint.Z());
     indicator.direction = dir;
-    indicator.distance = currentDistance_;
+    indicator.distance = std::abs(currentDistance_);
     indicator.showDistance = dragging_ && std::abs(currentDistance_) >= kMinExtrudeDistance;
     indicator.booleanMode = booleanMode_;
+    indicator.isDoubleSided = true; // Always double sided for extrude
     return indicator;
 }
 

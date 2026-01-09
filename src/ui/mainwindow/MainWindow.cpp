@@ -426,20 +426,6 @@ void MainWindow::setupToolBar() {
             m_toolbar->setFilletActive(activated);
         }
     });
-    connect(m_toolbar, &ContextToolbar::pushPullRequested, this, [this]() {
-        if (!m_viewport) {
-            return;
-        }
-        const bool activated = m_viewport->activatePushPullTool();
-        if (m_toolStatus) {
-            m_toolStatus->setText(activated
-                ? tr("Push/Pull tool active - Drag to extrude face")
-                : tr("Select a planar face to push/pull"));
-        }
-        if (m_toolbar) {
-            m_toolbar->setPushPullActive(activated);
-        }
-    });
     connect(m_toolbar, &ContextToolbar::shellRequested, this, [this]() {
         if (!m_viewport) {
             return;
@@ -456,8 +442,6 @@ void MainWindow::setupToolBar() {
     });
     connect(m_toolbar, &ContextToolbar::exitSketchRequested,
             this, &MainWindow::onExitSketch);
-    connect(m_toolbar, &ContextToolbar::importRequested,
-            this, &MainWindow::onImport);
 
     if (m_viewport) {
         connect(m_toolbar, &ContextToolbar::lineToolActivated,
@@ -481,8 +465,6 @@ void MainWindow::setupToolBar() {
                 m_toolbar, &ContextToolbar::setRevolveActive);
         connect(m_viewport, &Viewport::filletToolActiveChanged,
                 m_toolbar, &ContextToolbar::setFilletActive);
-        connect(m_viewport, &Viewport::pushPullToolActiveChanged,
-                m_toolbar, &ContextToolbar::setPushPullActive);
         connect(m_viewport, &Viewport::shellToolActiveChanged,
                 m_toolbar, &ContextToolbar::setShellActive);
         connect(m_viewport, &Viewport::selectionContextChanged, this, [this](int context) {

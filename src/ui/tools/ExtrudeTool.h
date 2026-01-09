@@ -53,6 +53,7 @@ public:
 
 private:
     bool prepareInput(const app::selection::SelectionItem& selection);
+    bool isPlanarFace(const TopoDS_Face& face) const;
     void updatePreview(double distance);
     void clearPreview();
     TopoDS_Shape buildExtrudeShape(double distance) const;
@@ -64,6 +65,7 @@ private:
     app::selection::SelectionItem selection_{};
     core::sketch::Sketch* sketch_ = nullptr; // Null if extruding a body face
     std::string targetBodyId_; // ID of the body owning the selected face (if any)
+    TopoDS_Shape targetShape_; // The original shape of the body being modified (for boolean ops)
     TopoDS_Face baseFace_;
     gp_Pnt baseCenter_;
     gp_Dir direction_;

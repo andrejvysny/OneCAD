@@ -20,6 +20,8 @@
 
 #include <QKeyEvent>
 #include <QPainter>
+#include <QPainterPath>
+#include <QPainterPathStroker>
 #include <QPolygonF>
 #include <QString>
 #include <QMouseEvent>
@@ -655,6 +657,21 @@ void Viewport::mousePressEvent(QMouseEvent* event) {
         return;
     }
 
+    // Check for indicator drag FIRST, before generic model picking.
+    // This ensures that clicking "near" the arrow (tolerance zone) works even if
+    // hovering over empty space or unrelated faces.
+    if (!m_inSketchMode && !m_planeSelectionActive &&
+        m_modelingToolManager && m_modelingToolManager->hasActiveTool()) {
+        
+        if (isMouseOverIndicator(event->pos())) {
+            // Force start dragging
+            if (m_modelingToolManager->handleMousePress(event->pos(), event->button())) {
+                event->accept();
+                return;
+            }
+        }
+    }
+
     if (!m_inSketchMode && event->button() == Qt::LeftButton && !m_planeSelectionActive) {
         if (m_selectionManager && m_modelPicker) {
             app::selection::ClickModifiers modifiers;
@@ -772,6 +789,40 @@ void Viewport::mousePressEvent(QMouseEvent* event) {
 }
 
 void Viewport::mouseDoubleClickEvent(QMouseEvent* event) {
+    if (!m_inSketchMode) {
+        if (!m_selectionManager || !m_modelPicker) {
+            QOpenGLWidget::mouseDoubleClickEvent(event);
+            return;
+        }
+
+        // Handle double-click Body selection
+        if (event->button() == Qt::LeftButton) {
+            auto pickResult = m_referenceSketch
+                ? buildModelPickResult(event->pos())
+                : m_modelPicker->pick(event->pos(),
+                                      static_cast<double>(sketch::constants::PICK_TOLERANCE_PIXELS),
+                                      buildViewProjection(),
+                                      viewportSize());
+
+            auto topCandidate = m_selectionManager->topCandidate(pickResult);
+            if (topCandidate.has_value()) {
+                // Construct a Body selection item from the hit
+                app::selection::SelectionItem bodyItem;
+                bodyItem.kind = app::selection::SelectionKind::Body;
+                bodyItem.id = {topCandidate->id.ownerId, topCandidate->id.ownerId};
+                bodyItem.priority = topCandidate->priority; // Keep priority or set custom
+                bodyItem.depth = topCandidate->depth;
+                bodyItem.worldPos = topCandidate->worldPos;
+                
+                // Replace current selection with this body
+                app::selection::ClickModifiers modifiers;
+                m_selectionManager->applySelectionCandidate(bodyItem, modifiers, event->pos());
+                update();
+                return;
+            }
+        }
+    }
+
     if (!m_inSketchMode || !m_sketchRenderer || !m_activeSketch) {
         QOpenGLWidget::mouseDoubleClickEvent(event);
         return;
@@ -829,6 +880,7 @@ void Viewport::mouseMoveEvent(QMouseEvent* event) {
 
     if (!m_inSketchMode && m_modelingToolManager && m_modelingToolManager->isDragging() &&
         (event->buttons() & Qt::LeftButton)) {
+        setCursor(Qt::ClosedHandCursor);
         if (m_modelingToolManager->handleMouseMove(event->pos())) {
             update();
             return;
@@ -851,14 +903,33 @@ void Viewport::mouseMoveEvent(QMouseEvent* event) {
 
     if (!m_inSketchMode && !m_planeSelectionActive && !m_isOrbiting && !m_isPanning &&
         (!m_deepSelectPopup || !m_deepSelectPopup->isVisible())) {
-        if (m_selectionManager && m_modelPicker) {
-            auto pickResult = m_referenceSketch
-                ? buildModelPickResult(event->pos())
-                : m_modelPicker->pick(event->pos(),
-                                      static_cast<double>(sketch::constants::PICK_TOLERANCE_PIXELS),
-                                      buildViewProjection(),
-                                      viewportSize());
-            m_selectionManager->updateHover(pickResult);
+        
+        // Check if hovering over tool indicator
+        bool overIndicator = isMouseOverIndicator(event->pos());
+        if (m_indicatorHovered != overIndicator) {
+            m_indicatorHovered = overIndicator;
+            update();
+        }
+
+        if (overIndicator) {
+            setCursor(Qt::PointingHandCursor);
+            if (m_selectionManager) {
+                m_selectionManager->setHoverItem(std::nullopt);
+            }
+            update(); // Ensure redraw for color change
+        } else {
+            if (m_modelingToolManager && !m_modelingToolManager->isDragging()) {
+                setCursor(Qt::ArrowCursor);
+            }
+            if (m_selectionManager && m_modelPicker) {
+                auto pickResult = m_referenceSketch
+                    ? buildModelPickResult(event->pos())
+                    : m_modelPicker->pick(event->pos(),
+                                          static_cast<double>(sketch::constants::PICK_TOLERANCE_PIXELS),
+                                          buildViewProjection(),
+                                          viewportSize());
+                m_selectionManager->updateHover(pickResult);
+            }
         }
     }
 
@@ -897,7 +968,6 @@ void Viewport::mouseReleaseEvent(QMouseEvent* event) {
                 setExtrudeToolActive(false);
                 setRevolveToolActive(false);
                 setFilletToolActive(false);
-                setPushPullToolActive(false);
                 setShellToolActive(false);
             }
             update();
@@ -1068,10 +1138,6 @@ void Viewport::beginPlaneSelection() {
     setExtrudeToolActive(false);
     setRevolveToolActive(false);
     setFilletToolActive(false);
-    setPushPullToolActive(false);
-    setShellToolActive(false);
-    setFilletToolActive(false);
-    setPushPullToolActive(false);
     setShellToolActive(false);
     if (m_deepSelectPopup && m_deepSelectPopup->isVisible()) {
         m_deepSelectPopup->hide();
@@ -1415,7 +1481,6 @@ bool Viewport::activateExtrudeTool() {
     if (m_inSketchMode || !m_selectionManager || !m_modelingToolManager || !m_referenceSketch) {
         setExtrudeToolActive(false);
         setFilletToolActive(false);
-        setPushPullToolActive(false);
         setShellToolActive(false);
         return false;
     }
@@ -1423,7 +1488,6 @@ bool Viewport::activateExtrudeTool() {
     if (m_extrudeToolActive) {
         setRevolveToolActive(false);
         setFilletToolActive(false);
-        setPushPullToolActive(false);
         setShellToolActive(false);
         return true;
     }
@@ -1434,7 +1498,6 @@ bool Viewport::activateExtrudeTool() {
         m_modelingToolManager->activateExtrude(selection.front());
         setRevolveToolActive(false);
         setFilletToolActive(false);
-        setPushPullToolActive(false);
         setShellToolActive(false);
         const bool activated = m_modelingToolManager->hasActiveTool();
         setExtrudeToolActive(activated);
@@ -1443,7 +1506,6 @@ bool Viewport::activateExtrudeTool() {
 
     setExtrudeToolActive(false);
     setFilletToolActive(false);
-    setPushPullToolActive(false);
     setShellToolActive(false);
     return false;
 }
@@ -1576,7 +1638,6 @@ void Viewport::keyPressEvent(QKeyEvent* event) {
         setExtrudeToolActive(false);
         setRevolveToolActive(false);
         setFilletToolActive(false);
-        setPushPullToolActive(false);
         setShellToolActive(false);
         event->accept();
         return;
@@ -1798,14 +1859,19 @@ void Viewport::handleModelSelectionChanged() {
         }
     }
 
-    const bool canExtrude = selection.size() == 1 &&
-        selection.front().kind == app::selection::SelectionKind::SketchRegion &&
-        m_referenceSketch;
+    // Auto-activate Extrude if selection is valid (SketchRegion OR Face)
+    bool canExtrude = false;
+    if (selection.size() == 1) {
+        if (selection.front().kind == app::selection::SelectionKind::SketchRegion && m_referenceSketch) {
+            canExtrude = true;
+        } else if (selection.front().kind == app::selection::SelectionKind::Face) {
+            canExtrude = true;
+        }
+    }
 
     if (canExtrude) {
         m_modelingToolManager->activateExtrude(selection.front());
         setFilletToolActive(false);
-        setPushPullToolActive(false);
         setShellToolActive(false);
         setExtrudeToolActive(m_modelingToolManager->hasActiveTool());
         return;
@@ -1814,7 +1880,6 @@ void Viewport::handleModelSelectionChanged() {
     m_modelingToolManager->cancelActiveTool();
     setExtrudeToolActive(false);
     setFilletToolActive(false);
-    setPushPullToolActive(false);
     setShellToolActive(false);
 }
 
@@ -1832,14 +1897,6 @@ void Viewport::setFilletToolActive(bool active) {
     }
     m_filletToolActive = active;
     emit filletToolActiveChanged(active);
-}
-
-void Viewport::setPushPullToolActive(bool active) {
-    if (m_pushPullToolActive == active) {
-        return;
-    }
-    m_pushPullToolActive = active;
-    emit pushPullToolActiveChanged(active);
 }
 
 void Viewport::setShellToolActive(bool active) {
@@ -2262,6 +2319,116 @@ void Viewport::drawModelSelectionOverlay(const QMatrix4x4& viewProjection) {
     }
 }
 
+namespace {
+struct IndicatorGeometry {
+    QPainterPath path;
+    QPointF startScreen;
+    QPointF endScreen;
+    QPolygonF head;
+    QPolygonF backHead;
+    QPointF labelPos;
+    bool visible = false;
+};
+
+IndicatorGeometry calculateIndicatorGeometry(
+    const ui::tools::ModelingTool::Indicator& indicator,
+    const QMatrix4x4& viewProjection,
+    float width,
+    float height,
+    double pixelScale)
+{
+    IndicatorGeometry geo;
+    if (indicator.direction.lengthSquared() < 1e-6f) {
+        return geo;
+    }
+
+    QVector3D dir = indicator.direction.normalized();
+
+    const float visualLength = 30.0f; // 30 pixels per side (Compact)
+    
+    QPointF originScreen;
+    if (!projectToScreen(viewProjection, indicator.origin, width, height, &originScreen)) {
+        return geo;
+    }
+    
+    // Project direction to screen to get 2D orientation
+    QVector3D worldEnd = indicator.origin + dir * static_cast<float>(pixelScale * visualLength);
+    QPointF endScreen;
+    if (!projectToScreen(viewProjection, worldEnd, width, height, &endScreen)) {
+        return geo;
+    }
+
+    QVector2D screenDir(endScreen - originScreen);
+    if (screenDir.lengthSquared() < 1e-4f) {
+        return geo;
+    }
+    screenDir.normalize();
+    QVector2D perp(-screenDir.y(), screenDir.x());
+
+    // Arrow Head parameters (Thick and distinct)
+    const float headLength = 16.0f;
+    const float headWidth = 10.0f;
+    
+    // Calculate endpoints
+    geo.endScreen = originScreen + QPointF(screenDir.x() * visualLength, screenDir.y() * visualLength);
+    
+    // Front Head
+    {
+        QPointF headBase = geo.endScreen - QPointF(screenDir.x() * headLength, screenDir.y() * headLength);
+        QPointF left = headBase + QPointF(perp.x() * headWidth, perp.y() * headWidth);
+        QPointF right = headBase - QPointF(perp.x() * headWidth, perp.y() * headWidth);
+        geo.head << geo.endScreen << left << right;
+    }
+
+    if (indicator.isDoubleSided) {
+        geo.startScreen = originScreen - QPointF(screenDir.x() * visualLength, screenDir.y() * visualLength);
+        
+        // Back Head
+        QPointF backHeadBase = geo.startScreen + QPointF(screenDir.x() * headLength, screenDir.y() * headLength);
+        QPointF backLeft = backHeadBase + QPointF(perp.x() * headWidth, perp.y() * headWidth);
+        QPointF backRight = backHeadBase - QPointF(perp.x() * headWidth, perp.y() * headWidth);
+        geo.backHead << geo.startScreen << backLeft << backRight;
+    } else {
+        geo.startScreen = originScreen;
+    }
+
+    // Build the hit-test path
+    // 1. Line segment
+    QPainterPath linePath;
+    linePath.moveTo(geo.startScreen);
+    linePath.lineTo(geo.endScreen);
+    
+    // Use a stroker to make the line thick for hit testing
+    QPainterPathStroker stroker;
+    stroker.setWidth(60.0); // 60 pixel hit zone (Generous tolerance)
+    stroker.setCapStyle(Qt::RoundCap);
+    geo.path = stroker.createStroke(linePath);
+    
+    // 2. Add arrowheads to path
+    geo.path.addPolygon(geo.head);
+    if (!geo.backHead.isEmpty()) {
+        geo.path.addPolygon(geo.backHead);
+    }
+
+    geo.labelPos = geo.endScreen + QPointF(perp.x() * 20.0f, perp.y() * 20.0f);
+    geo.visible = true;
+    return geo;
+}
+} // namespace
+
+bool Viewport::isMouseOverIndicator(const QPoint& screenPos) const {
+    if (!m_modelingToolManager) return false;
+    auto indicator = m_modelingToolManager->activeIndicator();
+    if (!indicator.has_value()) return false;
+
+    QMatrix4x4 viewProjection = buildViewProjection();
+    IndicatorGeometry geo = calculateIndicatorGeometry(*indicator, viewProjection, 
+                                                     width(), height(), m_pixelScale);
+    if (!geo.visible) return false;
+
+    return geo.path.contains(QPointF(screenPos));
+}
+
 void Viewport::drawModelToolOverlay(const QMatrix4x4& viewProjection) {
     if (m_inSketchMode || !m_modelingToolManager) {
         return;
@@ -2272,57 +2439,50 @@ void Viewport::drawModelToolOverlay(const QMatrix4x4& viewProjection) {
         return;
     }
 
-    QVector3D dir = indicator->direction;
-    if (dir.lengthSquared() < 1e-6f) {
+    IndicatorGeometry geo = calculateIndicatorGeometry(*indicator, viewProjection, 
+                                                     width(), height(), m_pixelScale);
+    if (!geo.visible) {
         return;
     }
-    dir.normalize();
-
-    const double pixelScale = (m_pixelScale > 0.0) ? m_pixelScale : 1.0;
-    const float lengthWorld = static_cast<float>(pixelScale * 40.0);
-    const float offsetWorld = static_cast<float>(pixelScale * 6.0);
-
-    const QVector3D startWorld = indicator->origin + dir * offsetWorld;
-    const QVector3D endWorld = indicator->origin + dir * lengthWorld;
-
-    QPointF startScreen;
-    QPointF endScreen;
-    if (!projectToScreen(viewProjection, startWorld, static_cast<float>(m_width),
-                         static_cast<float>(m_height), &startScreen)) {
-        return;
-    }
-    if (!projectToScreen(viewProjection, endWorld, static_cast<float>(m_width),
-                         static_cast<float>(m_height), &endScreen)) {
-        return;
-    }
-
-    QVector2D screenDir(endScreen - startScreen);
-    if (screenDir.lengthSquared() < 1e-4f) {
-        return;
-    }
-    screenDir.normalize();
-    QVector2D perp(-screenDir.y(), screenDir.x());
-
-    const float headLength = 10.0f;
-    const float headWidth = 6.0f;
-    QPointF headBase = endScreen - QPointF(screenDir.x() * headLength,
-                                           screenDir.y() * headLength);
-    QPointF left = headBase + QPointF(perp.x() * headWidth, perp.y() * headWidth);
-    QPointF right = headBase - QPointF(perp.x() * headWidth, perp.y() * headWidth);
 
     const ThemeViewportOverlayColors& overlay =
         ThemeManager::instance().currentTheme().viewport.overlay;
-    QColor color = overlay.toolIndicator;
+    QColor color = overlay.toolIndicator; // Normal state
+
+    const bool isDragging = m_modelingToolManager->isDragging();
+    
+    if (isDragging) {
+        // Dragging state: High contrast (White)
+        color = Qt::white;
+    } else if (m_indicatorHovered) {
+        // Hover state: Brighter/Lighter
+        color = color.lighter(130);
+    }
 
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
-    painter.setPen(QPen(color, 2.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    painter.setBrush(color);
-    painter.drawLine(startScreen, endScreen);
 
-    QPolygonF head;
-    head << endScreen << left << right;
-    painter.drawPolygon(head);
+    // Draw White Border (Thickest)
+    QPen borderPen(Qt::white, 8.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+    painter.setPen(borderPen);
+    painter.setBrush(Qt::white);
+    
+    painter.drawLine(geo.startScreen, geo.endScreen);
+    painter.drawPolygon(geo.head);
+    if (!geo.backHead.isEmpty()) {
+        painter.drawPolygon(geo.backHead);
+    }
+
+    // Draw Inner Color (Thick)
+    QPen innerPen(color, 3.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+    painter.setPen(innerPen);
+    painter.setBrush(color);
+    
+    painter.drawLine(geo.startScreen, geo.endScreen);
+    painter.drawPolygon(geo.head);
+    if (!geo.backHead.isEmpty()) {
+        painter.drawPolygon(geo.backHead);
+    }
 
     if (indicator->showDistance) {
         const double distanceValue = std::abs(indicator->distance);
@@ -2336,10 +2496,9 @@ void Viewport::drawModelToolOverlay(const QMatrix4x4& viewProjection) {
         QColor textColor = overlay.toolLabelText;
         QColor bgColor = overlay.toolLabelBackground;
 
-        QPointF labelPos = endScreen + QPointF(perp.x() * 10.0f, perp.y() * 10.0f);
         QFontMetrics metrics(font);
         const int padding = 4;
-        QRectF labelRect(labelPos.x(), labelPos.y(),
+        QRectF labelRect(geo.labelPos.x(), geo.labelPos.y(),
                          metrics.horizontalAdvance(text) + padding * 2,
                          metrics.height() + padding * 2);
 

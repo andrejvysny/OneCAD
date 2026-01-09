@@ -55,15 +55,6 @@ void ContextToolbar::setFilletActive(bool active) {
     m_filletButton->blockSignals(false);
 }
 
-void ContextToolbar::setPushPullActive(bool active) {
-    if (!m_pushPullButton) {
-        return;
-    }
-    m_pushPullButton->blockSignals(true);
-    m_pushPullButton->setChecked(active);
-    m_pushPullButton->blockSignals(false);
-}
-
 void ContextToolbar::setShellActive(bool active) {
     if (!m_shellButton) {
         return;
@@ -96,16 +87,9 @@ void ContextToolbar::setupUi() {
     m_filletButton->setCheckable(true);
     connect(m_filletButton, &SidebarToolButton::clicked, this, &ContextToolbar::filletRequested);
 
-    m_pushPullButton = SidebarToolButton::fromSvgIcon(":/icons/ic_pushpull.svg", tr("Push/Pull (P)"), this);
-    m_pushPullButton->setCheckable(true);
-    connect(m_pushPullButton, &SidebarToolButton::clicked, this, &ContextToolbar::pushPullRequested);
-
     m_shellButton = SidebarToolButton::fromSvgIcon(":/icons/ic_shell.svg", tr("Shell (H)"), this);
     m_shellButton->setCheckable(true);
     connect(m_shellButton, &SidebarToolButton::clicked, this, &ContextToolbar::shellRequested);
-
-    m_importButton = SidebarToolButton::fromSvgIcon(":/icons/ic_import.svg", tr("Import STEP file"), this);
-    connect(m_importButton, &SidebarToolButton::clicked, this, &ContextToolbar::importRequested);
 
     m_exitSketchButton = SidebarToolButton::fromSvgIcon(":/icons/ic_close.svg", tr("Exit sketch mode (Esc)"), this);
     connect(m_exitSketchButton, &SidebarToolButton::clicked, this, &ContextToolbar::exitSketchRequested);
@@ -135,9 +119,7 @@ void ContextToolbar::setupUi() {
     m_layout->addWidget(m_extrudeButton);
     m_layout->addWidget(m_revolveButton);
     m_layout->addWidget(m_filletButton);
-    m_layout->addWidget(m_pushPullButton);
     m_layout->addWidget(m_shellButton);
-    m_layout->addWidget(m_importButton);
     m_layout->addWidget(m_exitSketchButton);
     m_layout->addWidget(m_lineButton);
     m_layout->addWidget(m_rectangleButton);
@@ -156,9 +138,6 @@ void ContextToolbar::setupUi() {
 
 void ContextToolbar::updateVisibleButtons() {
     const bool inSketch = (m_currentContext == Context::Sketch);
-    const bool isEdge = (m_currentContext == Context::Edge);
-    const bool isFace = (m_currentContext == Context::Face);
-    const bool isBody = (m_currentContext == Context::Body);
 
     if (m_newSketchButton) {
         m_newSketchButton->setVisible(!inSketch);
@@ -170,16 +149,10 @@ void ContextToolbar::updateVisibleButtons() {
         m_revolveButton->setVisible(!inSketch);
     }
     if (m_filletButton) {
-        m_filletButton->setVisible(isEdge);
-    }
-    if (m_pushPullButton) {
-        m_pushPullButton->setVisible(isFace);
+        m_filletButton->setVisible(!inSketch);
     }
     if (m_shellButton) {
-        m_shellButton->setVisible(isBody);
-    }
-    if (m_importButton) {
-        m_importButton->setVisible(m_currentContext == Context::Default);
+        m_shellButton->setVisible(!inSketch);
     }
     if (m_exitSketchButton) {
         m_exitSketchButton->setVisible(inSketch);
