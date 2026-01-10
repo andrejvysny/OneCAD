@@ -1,6 +1,7 @@
 #ifndef ONECAD_RENDER_GRID3D_H
 #define ONECAD_RENDER_GRID3D_H
 
+#include <QVector2D>
 #include <QVector3D>
 #include <QMatrix4x4>
 #include <QColor>
@@ -27,7 +28,11 @@ public:
     ~Grid3D();
 
     void initialize();
-    void render(const QMatrix4x4& viewProjection, float pixelScale, float viewExtent);
+    void render(const QMatrix4x4& viewProjection,
+                float pixelScale,
+                const QVector2D& viewMin,
+                const QVector2D& viewMax,
+                const QVector2D& fadeOrigin);
     void cleanup();
     
     // Appearance
@@ -42,11 +47,16 @@ public:
     bool isVisible() const { return m_visible; }
     
     // Force grid rebuild (e.g. after color change)
-    void forceUpdate() { m_lastSpacing = -1.0f; m_lastExtent = -1.0f; }
+    void forceUpdate() { m_lastSpacing = -1.0f; }
 
 private:
     float calculateSpacing(float pixelScale) const;
-    void buildGrid(float minorSpacing, float majorSpacing, float extent);
+    void buildGrid(float minorSpacing,
+                   float majorSpacing,
+                   float startX,
+                   float endX,
+                   float startY,
+                   float endY);
     
     bool m_initialized = false;
     bool m_visible = true;
@@ -67,7 +77,8 @@ private:
     int m_lineCount = 0;
     
     float m_lastSpacing = 0.0f;
-    float m_lastExtent = 0.0f;
+    QVector2D m_lastStart{0.0f, 0.0f};
+    QVector2D m_lastEnd{0.0f, 0.0f};
 };
 
 } // namespace render

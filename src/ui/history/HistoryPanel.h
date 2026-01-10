@@ -32,6 +32,7 @@ class CommandProcessor;
 namespace ui {
 
 class Viewport;
+class FeatureCard;
 
 /**
  * @brief Feature history panel showing parametric operation tree.
@@ -80,16 +81,14 @@ private slots:
     void onItemClicked(QTreeWidgetItem* item, int column);
     void onItemDoubleClicked(QTreeWidgetItem* item, int column);
     void onCustomContextMenu(const QPoint& pos);
+    void updateTheme();
 
 private:
     struct ItemEntry {
         std::string opId;
         app::OperationType type{};
         QTreeWidgetItem* item = nullptr;
-        QWidget* widget = nullptr;
-        QLabel* iconLabel = nullptr;
-        QLabel* textLabel = nullptr;
-        QToolButton* statusButton = nullptr;
+        FeatureCard* card = nullptr;
         bool failed = false;
         bool suppressed = false;
         std::string failureReason;
@@ -97,10 +96,12 @@ private:
 
     void setupUi();
     void applyCollapseState(bool animate);
-    QWidget* createItemWidget(ItemEntry& entry, const QString& text);
+    FeatureCard* createItemWidget(ItemEntry& entry);
     void updateItemState(ItemEntry& entry);
-    QString operationDisplayName(const app::OperationRecord& op) const;
-    QString operationIcon(app::OperationType type) const;
+    QWidget* createSectionHeader(const QString& text);
+    QString getOperationName(app::OperationType type) const;
+    QString getOperationDetails(const app::OperationRecord& op) const;
+    QString operationIconPath(app::OperationType type) const;
     bool isEditableType(app::OperationType type) const;
     ItemEntry* entryForItem(QTreeWidgetItem* item);
     ItemEntry* entryForId(const std::string& opId);
@@ -109,6 +110,8 @@ private:
 
     QFrame* panel_ = nullptr;
     QTreeWidget* treeWidget_ = nullptr;
+
+    
     app::Document* document_ = nullptr;
     Viewport* viewport_ = nullptr;
     app::commands::CommandProcessor* commandProcessor_ = nullptr;
@@ -117,6 +120,7 @@ private:
     QPropertyAnimation* widthAnimation_ = nullptr;
     int expandedWidth_ = 260;
     int collapsedWidth_ = 0;
+    QMetaObject::Connection themeConnection_;
 };
 
 } // namespace ui

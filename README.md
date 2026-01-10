@@ -7,6 +7,8 @@
 
 
 
+> **⚠️ Development Notice:** This project is under active development and contains multiple known bugs. Not all features work correctly — use at your own risk.
+
 > **⚠️ VibeCoding Alert**: Full codebase generated with AI. Project in active development—manual review & validation required.
 
 ![OneCAD screenshot](docs/screenshot.png)

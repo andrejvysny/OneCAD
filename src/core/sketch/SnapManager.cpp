@@ -32,7 +32,7 @@ constexpr double TWO_PI = 2.0 * PI;
 SnapManager::SnapManager() {
     // Initialize all snap types to enabled by default
     for (int i = static_cast<int>(SnapType::Vertex);
-         i <= static_cast<int>(SnapType::Vertical); ++i) {
+         i <= static_cast<int>(SnapType::ActiveLayer3D); ++i) {
         snapTypeEnabled_[static_cast<SnapType>(i)] = true;
     }
 }
@@ -51,6 +51,13 @@ void SnapManager::setAllSnapsEnabled(bool enabled) {
         state = enabled;
     }
     gridSnapEnabled_ = enabled;
+}
+
+void SnapManager::setExternalGeometry(const std::vector<Vec2d>& points,
+                                      const std::vector<std::pair<Vec2d, Vec2d>>& lines)
+{
+    extPoints_ = points;
+    extLines_ = lines;
 }
 
 SnapResult SnapManager::findBestSnap(
@@ -108,6 +115,9 @@ std::vector<SnapResult> SnapManager::findAllSnaps(
     }
     if (gridSnapEnabled_ && isSnapEnabled(SnapType::Grid)) {
         findGridSnaps(cursorPos, radiusSq, results);
+    }
+    if (isSnapEnabled(SnapType::ActiveLayer3D)) {
+        findExternalSnaps(cursorPos, radiusSq, results);
     }
 
     return results;
@@ -698,6 +708,39 @@ std::vector<Vec2d> SnapManager::circleCircleIntersection(
 }
 
 // ========== Helper for intersection finding ==========
+
+void SnapManager::findExternalSnaps(
+    const Vec2d& cursorPos,
+    double radiusSq,
+    std::vector<SnapResult>& results) const
+{
+    // Snap to 3D Points
+    for (const auto& pt : extPoints_) {
+        double distSq = distanceSquared(cursorPos, pt);
+        if (distSq <= radiusSq) {
+            results.push_back({
+                .snapped = true,
+                .type = SnapType::ActiveLayer3D,
+                .position = pt,
+                .distance = std::sqrt(distSq)
+            });
+        }
+    }
+
+    // Snap to 3D Lines/Edges
+    for (const auto& line : extLines_) {
+        Vec2d nearest = nearestPointOnLine(cursorPos, line.first, line.second);
+        double distSq = distanceSquared(cursorPos, nearest);
+        if (distSq <= radiusSq) {
+            results.push_back({
+                .snapped = true,
+                .type = SnapType::ActiveLayer3D,
+                .position = nearest,
+                .distance = std::sqrt(distSq)
+            });
+        }
+    }
+}
 
 std::vector<Vec2d> SnapManager::findEntityIntersections(
     const SketchEntity* e1,

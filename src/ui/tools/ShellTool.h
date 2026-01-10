@@ -53,8 +53,6 @@ public:
     std::optional<Indicator> indicator() const override;
 
     // For multi-face selection (Shift+click)
-    // TODO: Wire Shift+click in Viewport to call addOpenFace() when Shell tool is active
-    // TODO: Wire Enter key in Viewport::keyPressEvent to call confirmFaceSelection()
     bool addOpenFace(const app::selection::SelectionItem& selection);
     void clearOpenFaces();
     void confirmFaceSelection();  // Called when Enter is pressed
@@ -68,6 +66,7 @@ private:
     void updatePreview(double thickness);
     void clearPreview();
     TopoDS_Shape buildShellShape(double thickness) const;
+    void commitOperation(double thickness);
 
     Viewport* viewport_ = nullptr;
     app::Document* document_ = nullptr;

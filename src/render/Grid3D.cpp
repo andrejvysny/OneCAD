@@ -1,6 +1,7 @@
 #include "Grid3D.h"
 #include <QtMath>
 #include <QDebug>
+#include <algorithm>
 #include <cmath>
 
 namespace onecad {
@@ -15,20 +16,29 @@ layout(location = 1) in vec4 aColor;
 uniform mat4 uMVP;
 
 out vec4 vColor;
+out vec3 vWorldPos;
 
 void main() {
     gl_Position = uMVP * vec4(aPos, 1.0);
     vColor = aColor;
+    vWorldPos = aPos;
 }
 )";
 
 static const char* fragmentShaderSource = R"(
 #version 410 core
 in vec4 vColor;
+in vec3 vWorldPos;
 out vec4 FragColor;
 
+uniform vec3 uFadeOrigin;
+uniform float uFadeStart;
+uniform float uFadeEnd;
+
 void main() {
-    FragColor = vColor;
+    float dist = length(vWorldPos.xy - uFadeOrigin.xy);
+    float fade = 1.0 - smoothstep(uFadeStart, uFadeEnd, dist);
+    FragColor = vec4(vColor.rgb, vColor.a * fade);
 }
 )";
 
@@ -83,7 +93,7 @@ void Grid3D::initialize() {
     m_initialized = true;
     
     // Build initial grid
-    buildGrid(10.0f, 50.0f, 1000.0f);
+    buildGrid(10.0f, 50.0f, -500.0f, 500.0f, -500.0f, 500.0f);
     
     qDebug() << "Grid3D: Initialized successfully with" << m_lineCount << "vertices";
 }
@@ -104,7 +114,7 @@ float Grid3D::calculateSpacing(float pixelScale) const {
         return 10.0f;
     }
 
-    const float targetMinor = pixelScale * 10.0f;
+    const float targetMinor = pixelScale * 50.0f;
     const float exponent = std::floor(std::log10(targetMinor));
     const float base = std::pow(10.0f, exponent);
     const float normalized = targetMinor / base;
@@ -123,23 +133,36 @@ float Grid3D::calculateSpacing(float pixelScale) const {
     return snapped * base;
 }
 
-void Grid3D::buildGrid(float minorSpacing, float majorSpacing, float extent) {
+void Grid3D::buildGrid(float minorSpacing,
+                       float majorSpacing,
+                       float startX,
+                       float endX,
+                       float startY,
+                       float endY) {
     m_vertices.clear();
     m_colors.clear();
-    m_lastExtent = extent;
 
     if (minorSpacing <= 0.0f) {
         return;
     }
 
-    int lineCount = static_cast<int>(extent / minorSpacing);
-    // Limit line count to avoid excessive geometry
-    lineCount = qMin(lineCount, 200);
-
     int majorStep = 5;
     if (majorSpacing > 0.0f) {
         majorStep = qMax(1, static_cast<int>(std::round(majorSpacing / minorSpacing)));
     }
+
+    if (startX > endX) {
+        std::swap(startX, endX);
+    }
+    if (startY > endY) {
+        std::swap(startY, endY);
+    }
+
+    int lineCountX = static_cast<int>(std::round((endX - startX) / minorSpacing));
+    int lineCountY = static_cast<int>(std::round((endY - startY) / minorSpacing));
+
+    float lineExtentX = endX - startX;
+    float lineExtentY = endY - startY;
     
     auto addLine = [this](float x1, float y1, float z1, 
                           float x2, float y2, float z2,
@@ -163,46 +186,61 @@ void Grid3D::buildGrid(float minorSpacing, float majorSpacing, float extent) {
         m_colors.push_back(color.alphaF());
     };
     
-    // Grid lines parallel to X axis
-    for (int i = -lineCount; i <= lineCount; ++i) {
-        float y = i * minorSpacing;
-        bool isMajor = (i % majorStep == 0);
-        float lineExtent = lineCount * minorSpacing;
+    const bool originInX = (startX <= 0.0f && endX >= 0.0f);
+    const bool originInY = (startY <= 0.0f && endY >= 0.0f);
 
-        if (i == 0) {
+    // Grid lines parallel to X axis (varying Y)
+    for (int i = 0; i <= lineCountY; ++i) {
+        float y = startY + static_cast<float>(i) * minorSpacing;
+        int stepIndex = static_cast<int>(std::round(y / minorSpacing));
+        bool isMajor = (stepIndex % majorStep == 0);
+
+        if (qFuzzyIsNull(y) && originInY) {
             // Coordinate Mapping: Geom X- aligns with User Y+
             // Draw User Y Axis (Green) along negative Geom X
-            addLine(0, 0, 0, lineExtent, 0, 0, m_majorColor); // Geom X+ (Gray)
-            addLine(0, 0, 0, -lineExtent, 0, 0, m_yAxisColor); // Geom X- (Green)
+            if (endX > 0.0f) {
+                addLine(0.0f, 0.0f, 0.0f, endX, 0.0f, 0.0f, m_majorColor); // Geom X+ (Gray)
+            }
+            if (startX < 0.0f) {
+                addLine(0.0f, 0.0f, 0.0f, startX, 0.0f, 0.0f, m_yAxisColor); // Geom X- (Green)
+            }
         } else {
             QColor color = isMajor ? m_majorColor : m_minorColor;
-            addLine(-lineExtent, y, 0, lineExtent, y, 0, color);
+            addLine(startX, y, 0.0f, endX, y, 0.0f, color);
         }
     }
     
-    // Grid lines parallel to Y axis
-    for (int i = -lineCount; i <= lineCount; ++i) {
-        float x = i * minorSpacing;
-        bool isMajor = (i % majorStep == 0);
-        float lineExtent = lineCount * minorSpacing;
+    // Grid lines parallel to Y axis (varying X)
+    for (int i = 0; i <= lineCountX; ++i) {
+        float x = startX + static_cast<float>(i) * minorSpacing;
+        int stepIndex = static_cast<int>(std::round(x / minorSpacing));
+        bool isMajor = (stepIndex % majorStep == 0);
 
-        if (i == 0) {
+        if (qFuzzyIsNull(x) && originInX) {
             // Coordinate Mapping: Geom Y+ aligns with User X+
             // Draw User X Axis (Red) along positive Geom Y
-            addLine(0, -lineExtent, 0, 0, 0, 0, m_majorColor); // Geom Y- (Gray)
-            addLine(0, 0, 0, 0, lineExtent, 0, m_xAxisColor); // Geom Y+ (Red)
+            if (startY < 0.0f) {
+                addLine(0.0f, startY, 0.0f, 0.0f, 0.0f, 0.0f, m_majorColor); // Geom Y- (Gray)
+            }
+            if (endY > 0.0f) {
+                addLine(0.0f, 0.0f, 0.0f, 0.0f, endY, 0.0f, m_xAxisColor); // Geom Y+ (Red)
+            }
         } else {
             QColor color = isMajor ? m_majorColor : m_minorColor;
-            addLine(x, -lineExtent, 0, x, lineExtent, 0, color);
+            addLine(x, startY, 0.0f, x, endY, 0.0f, color);
         }
     }
     
     // Z axis (blue) - vertical line at origin
-    float zExtent = lineCount * minorSpacing * 0.5f;
-    addLine(0, 0, 0, 0, 0, zExtent, m_zAxisColor);
+    float zExtent = 0.5f * qMax(lineExtentX, lineExtentY);
+    if (originInX && originInY) {
+        addLine(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, zExtent, m_zAxisColor);
+    }
     
     m_lineCount = static_cast<int>(m_vertices.size() / 3);
     m_lastSpacing = minorSpacing;
+    m_lastStart = QVector2D(startX, startY);
+    m_lastEnd = QVector2D(endX, endY);
     
     if (m_vertices.empty()) {
         qWarning() << "Grid3D: No vertices generated!";
@@ -245,21 +283,74 @@ void Grid3D::buildGrid(float minorSpacing, float majorSpacing, float extent) {
     m_vao.release();
 }
 
-void Grid3D::render(const QMatrix4x4& viewProjection, float pixelScale, float viewExtent) {
+void Grid3D::render(const QMatrix4x4& viewProjection,
+                    float pixelScale,
+                    const QVector2D& viewMin,
+                    const QVector2D& viewMax,
+                    const QVector2D& fadeOrigin) {
     if (!m_visible || !m_initialized || m_lineCount == 0) return;
 
     const float minorSpacing = calculateSpacing(pixelScale);
     const float majorSpacing = minorSpacing * 5.0f;
-    const float extent = qMax(viewExtent, minorSpacing * 20.0f);
+
+    float minX = viewMin.x();
+    float maxX = viewMax.x();
+    float minY = viewMin.y();
+    float maxY = viewMax.y();
+    if (minX > maxX) {
+        std::swap(minX, maxX);
+    }
+    if (minY > maxY) {
+        std::swap(minY, maxY);
+    }
+
+    QVector2D center{(minX + maxX) * 0.5f, (minY + maxY) * 0.5f};
+    QVector2D half{(maxX - minX) * 0.5f, (maxY - minY) * 0.5f};
+    float viewHalf = qMax(half.x(), half.y());
+    viewHalf = qMax(viewHalf, minorSpacing * 2.0f);
+
+    float gridHalf = qMax(viewHalf * 3.5f, minorSpacing * 20.0f);
+    float gridMinX = center.x() - gridHalf;
+    float gridMaxX = center.x() + gridHalf;
+    float gridMinY = center.y() - gridHalf;
+    float gridMaxY = center.y() + gridHalf;
+
+    float startX = std::floor(gridMinX / minorSpacing) * minorSpacing;
+    float endX = std::ceil(gridMaxX / minorSpacing) * minorSpacing;
+    float startY = std::floor(gridMinY / minorSpacing) * minorSpacing;
+    float endY = std::ceil(gridMaxY / minorSpacing) * minorSpacing;
+
+    constexpr int kMaxLinesPerAxis = 600;
+    auto clampSpan = [&](float& start, float& end) {
+        float span = end - start;
+        float maxSpan = minorSpacing * static_cast<float>(kMaxLinesPerAxis);
+        if (span > maxSpan) {
+            float mid = (start + end) * 0.5f;
+            start = mid - maxSpan * 0.5f;
+            end = mid + maxSpan * 0.5f;
+        }
+    };
+    clampSpan(startX, endX);
+    clampSpan(startY, endY);
 
     if (m_lastSpacing < 0.0f ||
         std::abs(minorSpacing - m_lastSpacing) > 1e-4f ||
-        std::abs(extent - m_lastExtent) > 1e-3f) {
-        buildGrid(minorSpacing, majorSpacing, extent);
+        std::abs(startX - m_lastStart.x()) > 1e-3f ||
+        std::abs(startY - m_lastStart.y()) > 1e-3f ||
+        std::abs(endX - m_lastEnd.x()) > 1e-3f ||
+        std::abs(endY - m_lastEnd.y()) > 1e-3f) {
+        buildGrid(minorSpacing, majorSpacing, startX, endX, startY, endY);
     }
     
     m_shader->bind();
     m_shader->setUniformValue("uMVP", viewProjection);
+    m_shader->setUniformValue("uFadeOrigin", QVector3D(fadeOrigin.x(), fadeOrigin.y(), 0.0f));
+
+    float gridHalfSpan = 0.5f * qMax(endX - startX, endY - startY);
+    float fadeStart = qMax(viewHalf * 0.6f, minorSpacing * 12.0f);
+    float fadeEnd = qMax(gridHalfSpan * 3.0f, fadeStart + minorSpacing * 120.0f);
+    m_shader->setUniformValue("uFadeStart", fadeStart);
+    m_shader->setUniformValue("uFadeEnd", fadeEnd);
     
     m_vao.bind();
 

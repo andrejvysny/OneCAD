@@ -50,7 +50,6 @@ public:
 
     Mode currentMode() const { return mode_; }
     void toggleMode();  // Switch between fillet/chamfer
-    // TODO: Wire Tab key in Viewport::keyPressEvent to call toggleMode()
 
 private:
     bool prepareInput(const app::selection::SelectionItem& selection);

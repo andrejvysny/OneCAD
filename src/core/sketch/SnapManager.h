@@ -43,7 +43,9 @@ enum class SnapType {
     Perpendicular,// Perpendicular inference
     Tangent,      // Tangent inference
     Horizontal,   // Horizontal alignment inference
-    Vertical      // Vertical alignment inference
+    Vertical,     // Vertical alignment inference
+    SketchGuide,  // Guide lines/extensions
+    ActiveLayer3D // 3D Geometry (Vertices/Edges)
 };
 
 /**
@@ -99,6 +101,14 @@ public:
                             const std::unordered_set<EntityID>& excludeEntities = {}) const;
 
     /**
+     * @brief Set external 3D geometry for snapping
+     * @param points 3D points projected to sketch plane
+     * @param edges 3D edges projected to sketch plane lines/curves
+     */
+    void setExternalGeometry(const std::vector<Vec2d>& points,
+                             const std::vector<std::pair<Vec2d, Vec2d>>& lines);
+
+    /**
      * @brief Find all snap points near cursor (for UI feedback)
      */
     std::vector<SnapResult> findAllSnaps(const Vec2d& cursorPos,
@@ -142,6 +152,12 @@ public:
     void setEnabled(bool enabled) { enabled_ = enabled; }
     bool isEnabled() const { return enabled_; }
 
+    void setShowGuidePoints(bool show) { showGuidePoints_ = show; }
+    bool showGuidePoints() const { return showGuidePoints_; }
+
+    void setShowSnappingHints(bool show) { showSnappingHints_ = show; }
+    bool showSnappingHints() const { return showSnappingHints_; }
+
     /**
      * @brief Find intersections between two entities (public for IntersectionManager)
      */
@@ -155,6 +171,13 @@ private:
     bool gridSnapEnabled_ = true;
     bool enabled_ = true;
     std::unordered_map<SnapType, bool> snapTypeEnabled_;
+
+    bool showGuidePoints_ = true;
+    bool showSnappingHints_ = true;
+
+    // External geometry (projected 3D entities)
+    std::vector<Vec2d> extPoints_;
+    std::vector<std::pair<Vec2d, Vec2d>> extLines_;
 
     // ========== Individual Snap Type Finders ==========
 
@@ -227,6 +250,13 @@ private:
     void findGridSnaps(const Vec2d& cursorPos,
                        double radiusSq,
                        std::vector<SnapResult>& results) const;
+
+    /**
+     * @brief Find snap to external geometry (3D)
+     */
+    void findExternalSnaps(const Vec2d& cursorPos,
+                           double radiusSq,
+                           std::vector<SnapResult>& results) const;
 
     // ========== Geometry Helpers ==========
 

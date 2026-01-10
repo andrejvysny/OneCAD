@@ -127,47 +127,8 @@ bool ShellTool::handleMouseRelease(const QPoint& screenPos, Qt::MouseButton butt
     }
 
     const double finalThickness = std::clamp(thickness, kMinThickness, kMaxThickness);
-    TopoDS_Shape resultShape = buildShellShape(finalThickness);
-
-    if (resultShape.IsNull()) {
-        clearPreview();
-        state_ = State::WaitingForFaces;
-        return true;
-    }
-
-    if (document_ && !targetBodyId_.empty()) {
-        app::OperationRecord record;
-        record.opId = QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
-        record.type = app::OperationType::Shell;
-        record.input = app::BodyRef{targetBodyId_};
-
-        app::ShellParams params;
-        params.thickness = finalThickness;
-
-        // Collect open face IDs from ElementMap
-        for (const auto& face : openFaces_) {
-            auto ids = document_->elementMap().findIdsByShape(face);
-            if (!ids.empty()) {
-                params.openFaceIds.push_back(ids.front().value);
-            }
-        }
-
-        record.params = params;
-        record.resultBodyIds.push_back(targetBodyId_);
-
-        auto command = std::make_unique<app::commands::AddOperationCommand>(document_, record);
-        if (commandProcessor_) {
-            commandProcessor_->execute(std::move(command));
-        } else {
-            command->execute();
-        }
-    }
-
-    clearPreview();
-    currentThickness_ = 0.0;
-    active_ = false;
-    state_ = State::WaitingForBody;
-    openFaces_.clear();
+    
+    commitOperation(finalThickness);
     return true;
 }
 
@@ -249,9 +210,64 @@ void ShellTool::clearOpenFaces() {
 
 void ShellTool::confirmFaceSelection() {
     if (state_ == State::WaitingForFaces) {
-        // Ready to start dragging
-        // Face selection is confirmed, user can now drag for thickness
+        // If Enter is pressed, commit with default thickness if none set,
+        // or current thickness if we were somehow dragging without mouse release.
+        double thickness = currentThickness_;
+        if (thickness < kMinThickness) {
+            thickness = 1.0; // Default 1mm thickness on Enter
+        }
+        commitOperation(thickness);
     }
+}
+
+void ShellTool::commitOperation(double thickness) {
+    // Validate thickness
+    if (thickness < kMinThickness) {
+        clearPreview();
+        state_ = State::WaitingForFaces;
+        return;
+    }
+
+    TopoDS_Shape resultShape = buildShellShape(thickness);
+    if (resultShape.IsNull()) {
+        clearPreview();
+        state_ = State::WaitingForFaces;
+        return;
+    }
+
+    if (document_ && !targetBodyId_.empty()) {
+        app::OperationRecord record;
+        record.opId = QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
+        record.type = app::OperationType::Shell;
+        record.input = app::BodyRef{targetBodyId_};
+
+        app::ShellParams params;
+        params.thickness = thickness;
+
+        // Collect open face IDs from ElementMap
+        for (const auto& face : openFaces_) {
+            auto ids = document_->elementMap().findIdsByShape(face);
+            if (!ids.empty()) {
+                params.openFaceIds.push_back(ids.front().value);
+            }
+        }
+
+        record.params = params;
+        record.resultBodyIds.push_back(targetBodyId_);
+
+        auto command = std::make_unique<app::commands::AddOperationCommand>(document_, record);
+        if (commandProcessor_) {
+            commandProcessor_->execute(std::move(command));
+        } else {
+            command->execute();
+        }
+    }
+
+    clearPreview();
+    currentThickness_ = 0.0;
+    active_ = false;
+    state_ = State::WaitingForBody;
+    openFaces_.clear();
 }
 
 void ShellTool::updatePreview(double thickness) {

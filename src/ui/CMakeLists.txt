@@ -25,6 +25,7 @@ add_library(onecad_ui STATIC
     start/StartOverlay.cpp
     start/ProjectTile.cpp
     history/HistoryPanel.cpp
+    history/FeatureCard.cpp
     history/EditParameterDialog.cpp
     history/RegenFailureDialog.cpp
 )

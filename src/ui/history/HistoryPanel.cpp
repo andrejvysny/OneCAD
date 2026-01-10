@@ -3,11 +3,13 @@
  * @brief Implementation of feature history tree panel.
  */
 #include "HistoryPanel.h"
+#include "FeatureCard.h"
 #include "EditParameterDialog.h"
 #include "../../app/document/Document.h"
 #include "../../app/document/OperationRecord.h"
 #include "../../app/history/DependencyGraph.h"
 #include "../viewport/Viewport.h"
+#include "../theme/ThemeManager.h"
 
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
@@ -22,12 +24,16 @@
 #include <QFont>
 #include <QSizePolicy>
 #include <QEasingCurve>
+#include <QPainter>
 
 namespace onecad::ui {
 
 HistoryPanel::HistoryPanel(QWidget* parent)
     : QWidget(parent) {
     setupUi();
+    themeConnection_ = connect(&ThemeManager::instance(), &ThemeManager::themeChanged,
+                               this, &HistoryPanel::updateTheme, Qt::UniqueConnection);
+    updateTheme();
     applyCollapseState(false);
 }
 
@@ -40,52 +46,26 @@ void HistoryPanel::setupUi() {
 
     panel_ = new QFrame(this);
     panel_->setObjectName("historyPanel");
-    panel_->setStyleSheet(R"(
-        QFrame#historyPanel {
-            background-color: #2d2d30;
-            border-left: 1px solid #3e3e42;
-        }
-    )");
+    panel_->setFrameShape(QFrame::NoFrame);
 
     auto* panelLayout = new QVBoxLayout(panel_);
-    panelLayout->setContentsMargins(8, 8, 8, 8);
-    panelLayout->setSpacing(4);
+    panelLayout->setContentsMargins(12, 12, 12, 12);
+    panelLayout->setSpacing(10);
 
-    // Header
-    auto* headerWidget = new QWidget;
-    auto* headerLayout = new QHBoxLayout(headerWidget);
-    headerLayout->setContentsMargins(0, 0, 0, 4);
+    panelLayout->addWidget(treeWidget_);
 
-    auto* titleLabel = new QLabel("History");
-    titleLabel->setStyleSheet("font-weight: bold; color: #cccccc;");
-    headerLayout->addWidget(titleLabel);
-    headerLayout->addStretch();
-
-    panelLayout->addWidget(headerWidget);
-
-    // Tree widget
+    mainLayout->addWidget(panel_);
     treeWidget_ = new QTreeWidget;
+    treeWidget_->setObjectName("NavigatorTree");
     treeWidget_->setHeaderHidden(true);
-    treeWidget_->setIndentation(16);
+    treeWidget_->setIndentation(12);
     treeWidget_->setRootIsDecorated(true);
     treeWidget_->setContextMenuPolicy(Qt::CustomContextMenu);
-    treeWidget_->setStyleSheet(R"(
-        QTreeWidget {
-            background-color: #1e1e1e;
-            border: 1px solid #3e3e42;
-            color: #cccccc;
-        }
-        QTreeWidget::item {
-            height: 28px;
-            padding: 2px 4px;
-        }
-        QTreeWidget::item:selected {
-            background-color: #094771;
-        }
-        QTreeWidget::item:hover:!selected {
-            background-color: #2a2d2e;
-        }
-    )");
+    treeWidget_->setUniformRowHeights(true);
+    treeWidget_->setSelectionMode(QAbstractItemView::SingleSelection);
+    treeWidget_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    treeWidget_->setFocusPolicy(Qt::NoFocus);
+    treeWidget_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
     connect(treeWidget_, &QTreeWidget::itemClicked,
             this, &HistoryPanel::onItemClicked);
@@ -100,6 +80,70 @@ void HistoryPanel::setupUi() {
 
     setMinimumWidth(expandedWidth_);
     setMaximumWidth(expandedWidth_);
+}
+
+void HistoryPanel::updateTheme() {
+    const auto& theme = ThemeManager::instance().currentTheme();
+
+    panel_->setStyleSheet(QString("QFrame#historyPanel { background-color: %1; border-left: 1px solid %2; }")
+        .arg(theme.ui.panelBackground.name(QColor::HexArgb))
+        .arg(theme.ui.panelBorder.name(QColor::HexArgb)));
+
+    treeWidget_->setStyleSheet(QString(R"(
+        QTreeWidget {
+            background-color: %1;
+            border: none;
+            color: %2;
+        }
+        QTreeWidget::item {
+            height: 36px;
+            padding: 0px;
+        }
+        QTreeWidget::item:selected {
+            background-color: transparent; /* Widget handles selection */
+        }
+        QTreeWidget::item:hover:!selected {
+            background-color: transparent;
+        }
+    )")
+    .arg(theme.ui.treeBackground.name(QColor::HexArgb))
+    .arg(theme.ui.treeText.name(QColor::HexArgb)));
+
+    // Update Headers (items without widgets)
+    QTreeWidgetItemIterator it(treeWidget_);
+    while (*it) {
+        if (!treeWidget_->itemWidget(*it, 0)) {
+            (*it)->setForeground(0, theme.navigator.headerText);
+        }
+        ++it;
+    }
+
+    for (auto& entry : entries_) {
+        if (entry.card) {
+            entry.card->updateTheme();
+        }
+    }
+}
+
+QWidget* HistoryPanel::createSectionHeader(const QString& text) {
+    auto* label = new QLabel(text);
+    label->setProperty("nav-header", true);
+    label->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    
+    // Style it immediately
+    const auto& theme = ThemeManager::instance().currentTheme();
+    label->setStyleSheet(QString(
+        "QLabel[nav-header=\"true\"] { "
+        "  color: %1; "
+        "  font-weight: bold; "
+        "  font-size: 11px; "
+        "  text-transform: uppercase; "
+        "  padding: 8px 4px; "
+        "  background: transparent; "
+        "}"
+    ).arg(theme.navigator.headerText.name(QColor::HexArgb)));
+    
+    return label;
 }
 
 void HistoryPanel::setDocument(app::Document* doc) {
@@ -127,7 +171,7 @@ void HistoryPanel::rebuild() {
     if (ops.empty()) {
         auto* placeholder = new QTreeWidgetItem(treeWidget_);
         placeholder->setText(0, "No operations");
-        placeholder->setForeground(0, QColor("#666666"));
+        placeholder->setForeground(0, ThemeManager::instance().currentTheme().navigator.placeholderText);
         placeholder->setFlags(Qt::NoItemFlags);
         return;
     }
@@ -165,23 +209,35 @@ void HistoryPanel::rebuild() {
         }
 
         QTreeWidgetItem* parentItem = nullptr;
+        
+        // Group logic... (simplified for now to match old implementation structure)
+        // Note: The original implementation had grouping logic which we preserve
         if (std::holds_alternative<app::SketchRegionRef>(opRecord->input)) {
             const auto& ref = std::get<app::SketchRegionRef>(opRecord->input);
             auto sketchIt = sketchItems.find(ref.sketchId);
             if (sketchIt == sketchItems.end()) {
                 auto* sketchItem = new QTreeWidgetItem(treeWidget_);
-                QString sketchName = QString::fromStdString(document_->getSketchName(ref.sketchId));
-                sketchItem->setText(0, sketchName);
                 sketchItem->setFlags(Qt::ItemIsEnabled);
-                QFont font = sketchItem->font(0);
-                font.setBold(true);
-                sketchItem->setFont(0, font);
+                
+                // Use a widget for the header to match Navigator styling
+                QString sketchName = QString::fromStdString(document_->getSketchName(ref.sketchId));
+                QWidget* headerWidget = createSectionHeader(sketchName);
+                treeWidget_->setItemWidget(sketchItem, 0, headerWidget);
+                
                 sketchItems[ref.sketchId] = sketchItem;
                 parentItem = sketchItem;
             } else {
                 parentItem = sketchIt->second;
             }
-        } else if (std::holds_alternative<app::FaceRef>(opRecord->input)) {
+        } 
+        // ... rest of parenting logic preserved implicitly by iterating sorted list ...
+        // For simplicity and robustness, I'll just append to root if parent logic gets complex,
+        // but let's try to maintain the existing logic if possible.
+        // Actually, the previous implementation had logic to find parent item based on input.
+        // We'll keep it simple for this refactor and just list them, or use the same logic if we want nesting.
+        // Let's stick to flat list or minimal nesting for now to ensure robustness unless strict hierarchy is required.
+        // The previous code had nesting logic. Let's keep it.
+        else if (std::holds_alternative<app::FaceRef>(opRecord->input)) {
             const auto& ref = std::get<app::FaceRef>(opRecord->input);
             auto producerIt = bodyProducers.find(ref.bodyId);
             if (producerIt != bodyProducers.end()) {
@@ -200,7 +256,8 @@ void HistoryPanel::rebuild() {
                 }
             }
         }
-
+        
+        // Boolean check
         if (opRecord->type == app::OperationType::Boolean &&
             std::holds_alternative<app::BooleanParams>(opRecord->params)) {
             const auto& params = std::get<app::BooleanParams>(opRecord->params);
@@ -223,9 +280,8 @@ void HistoryPanel::rebuild() {
             entry.failureReason = document_->operationFailureReason(opId);
         }
 
-        QString displayName = operationDisplayName(*opRecord);
-        entry.widget = createItemWidget(entry, displayName);
-        treeWidget_->setItemWidget(entry.item, 0, entry.widget);
+        entry.card = createItemWidget(entry);
+        treeWidget_->setItemWidget(entry.item, 0, entry.card);
 
         opItems[opId] = entry.item;
         for (const auto& bodyId : opRecord->resultBodyIds) {
@@ -234,136 +290,141 @@ void HistoryPanel::rebuild() {
 
         entries_.push_back(std::move(entry));
     }
+    
+    // Expand all
+    treeWidget_->expandAll();
 }
 
-QWidget* HistoryPanel::createItemWidget(ItemEntry& entry, const QString& text) {
-    auto* widget = new QWidget;
-    auto* layout = new QHBoxLayout(widget);
-    layout->setContentsMargins(4, 2, 4, 2);
-    layout->setSpacing(6);
+FeatureCard* HistoryPanel::createItemWidget(ItemEntry& entry) {
+    auto* card = new FeatureCard;
+    
+    // Retrieve operation record to get details
+    const app::OperationRecord* opRecord = nullptr;
+    for (const auto& op : document_->operations()) {
+        if (op.opId == entry.opId) {
+            opRecord = &op;
+            break;
+        }
+    }
 
-    // Icon
-    entry.iconLabel = new QLabel;
-    entry.iconLabel->setFixedSize(16, 16);
-    layout->addWidget(entry.iconLabel);
+    if (opRecord) {
+        card->setName(getOperationName(entry.type));
+        card->setDetails(getOperationDetails(*opRecord));
+    } else {
+        card->setName("Unknown");
+    }
 
-    // Text
-    entry.textLabel = new QLabel(text);
-    layout->addWidget(entry.textLabel, 1);
-
-    // Status indicator
-    entry.statusButton = new QToolButton;
-    entry.statusButton->setFixedSize(16, 16);
-    entry.statusButton->setAutoRaise(true);
-    entry.statusButton->setVisible(false);
-    layout->addWidget(entry.statusButton);
+    card->setIconPath(operationIconPath(entry.type));
+    card->setFailed(entry.failed, QString::fromStdString(entry.failureReason));
+    card->setSuppressed(entry.suppressed);
+    
+    // Connect signals from card to panel actions
+    connect(card, &FeatureCard::menuRequested, this, [this, &entry]() {
+        showContextMenu(QCursor::pos(), entry.item);
+    });
+    
+    connect(card, &FeatureCard::suppressToggled, this, [this, &entry]() {
+        emit suppressRequested(QString::fromStdString(entry.opId), !entry.suppressed);
+    });
 
     updateItemState(entry);
-    return widget;
+    return card;
 }
 
 void HistoryPanel::updateItemState(ItemEntry& entry) {
-    QString textStyle = "color: #cccccc;";
-    QString iconText = operationIcon(entry.type);
-
-    if (entry.failed) {
-        textStyle = "color: #f48771; text-decoration: line-through;";
-        entry.statusButton->setText("⚠");
-        if (!entry.failureReason.empty()) {
-            entry.statusButton->setToolTip(QString::fromStdString(entry.failureReason));
-        } else {
-            entry.statusButton->setToolTip("Operation failed");
-        }
-        entry.statusButton->setVisible(true);
-    } else if (entry.suppressed) {
-        textStyle = "color: #666666; font-style: italic;";
-        entry.statusButton->setText("○");
-        entry.statusButton->setToolTip("Suppressed");
-        entry.statusButton->setVisible(true);
-    } else {
-        entry.statusButton->setVisible(false);
+    if (entry.card) {
+        entry.card->setFailed(entry.failed, QString::fromStdString(entry.failureReason));
+        entry.card->setSuppressed(entry.suppressed);
+        entry.card->setSelected(entry.item->isSelected());
     }
-
-    entry.textLabel->setStyleSheet(textStyle);
-    entry.iconLabel->setText(iconText);
-    entry.iconLabel->setStyleSheet("color: #888888;");
 }
 
-QString HistoryPanel::operationDisplayName(const app::OperationRecord& op) const {
-    QString typeName;
+QString HistoryPanel::getOperationName(app::OperationType type) const {
+    switch (type) {
+        case app::OperationType::Extrude: return "Extrude";
+        case app::OperationType::Revolve: return "Revolve";
+        case app::OperationType::Fillet: return "Fillet";
+        case app::OperationType::Chamfer: return "Chamfer";
+        case app::OperationType::Shell: return "Shell";
+        case app::OperationType::Boolean: return "Boolean";
+        default: return "Operation";
+    }
+}
+
+QString HistoryPanel::getOperationDetails(const app::OperationRecord& op) const {
     QString params;
 
     switch (op.type) {
         case app::OperationType::Extrude:
-            typeName = "Extrude";
             if (std::holds_alternative<app::ExtrudeParams>(op.params)) {
                 const auto& p = std::get<app::ExtrudeParams>(op.params);
-                params = QString(" (%1mm)").arg(p.distance, 0, 'f', 1);
+                params = QString("%1mm").arg(p.distance, 0, 'f', 1);
             }
             break;
         case app::OperationType::Revolve:
-            typeName = "Revolve";
             if (std::holds_alternative<app::RevolveParams>(op.params)) {
                 const auto& p = std::get<app::RevolveParams>(op.params);
-                params = QString(" (%1°)").arg(p.angleDeg, 0, 'f', 0);
+                params = QString("%1°").arg(p.angleDeg, 0, 'f', 0);
             }
             break;
         case app::OperationType::Fillet:
-            typeName = "Fillet";
             if (std::holds_alternative<app::FilletChamferParams>(op.params)) {
                 const auto& p = std::get<app::FilletChamferParams>(op.params);
-                params = QString(" (R%1)").arg(p.radius, 0, 'f', 1);
+                params = QString("R%1").arg(p.radius, 0, 'f', 1);
             }
             break;
         case app::OperationType::Chamfer:
-            typeName = "Chamfer";
             if (std::holds_alternative<app::FilletChamferParams>(op.params)) {
                 const auto& p = std::get<app::FilletChamferParams>(op.params);
-                params = QString(" (%1)").arg(p.radius, 0, 'f', 1);
+                params = QString("%1mm").arg(p.radius, 0, 'f', 1);
             }
             break;
         case app::OperationType::Shell:
-            typeName = "Shell";
             if (std::holds_alternative<app::ShellParams>(op.params)) {
                 const auto& p = std::get<app::ShellParams>(op.params);
-                params = QString(" (%1mm)").arg(p.thickness, 0, 'f', 1);
+                params = QString("%1mm").arg(p.thickness, 0, 'f', 1);
             }
             break;
         case app::OperationType::Boolean:
-            typeName = "Boolean";
             if (std::holds_alternative<app::BooleanParams>(op.params)) {
                 const auto& p = std::get<app::BooleanParams>(op.params);
                 switch (p.operation) {
-                    case app::BooleanParams::Op::Union: params = " (Union)"; break;
-                    case app::BooleanParams::Op::Cut: params = " (Cut)"; break;
-                    case app::BooleanParams::Op::Intersect: params = " (Intersect)"; break;
+                    case app::BooleanParams::Op::Union: params = "Union"; break;
+                    case app::BooleanParams::Op::Cut: params = "Cut"; break;
+                    case app::BooleanParams::Op::Intersect: params = "Intersect"; break;
                 }
             }
             break;
     }
 
-    return typeName + params;
+    return params;
 }
 
-QString HistoryPanel::operationIcon(app::OperationType type) const {
+QString HistoryPanel::operationIconPath(app::OperationType type) const {
     switch (type) {
-        case app::OperationType::Extrude: return "↑";
-        case app::OperationType::Revolve: return "↻";
-        case app::OperationType::Fillet: return "◠";
-        case app::OperationType::Chamfer: return "◿";
-        case app::OperationType::Shell: return "□";
-        case app::OperationType::Boolean: return "⊕";
-        default: return "⚙";
+        case app::OperationType::Extrude: return ":/icons/ic_extrude.svg";
+        case app::OperationType::Revolve: return ":/icons/ic_revolve.svg";
+        case app::OperationType::Fillet: return ":/icons/ic_fillet.svg";
+        case app::OperationType::Chamfer: return ":/icons/ic_chamfer.svg";
+        case app::OperationType::Shell: return ":/icons/ic_shell.svg";
+        case app::OperationType::Boolean: return ":/icons/ic_boolean_union.svg"; // Default generic boolean
+        default: return ":/icons/ic_settings.svg";
     }
 }
 
 bool HistoryPanel::isEditableType(app::OperationType type) const {
-    // v1: Only Extrude and Revolve are editable
     return type == app::OperationType::Extrude ||
            type == app::OperationType::Revolve;
 }
 
 void HistoryPanel::onItemClicked(QTreeWidgetItem* item, int) {
+    // Update selection state for all cards
+    for (auto& entry : entries_) {
+        if (entry.card && entry.item) {
+            entry.card->setSelected(entry.item->isSelected());
+        }
+    }
+
     auto* entry = entryForItem(item);
     if (entry) {
         emit operationSelected(QString::fromStdString(entry->opId));
@@ -374,7 +435,6 @@ void HistoryPanel::onItemDoubleClicked(QTreeWidgetItem* item, int) {
     auto* entry = entryForItem(item);
     if (!entry || !document_) return;
 
-    // Find the operation to check if editable
     for (const auto& op : document_->operations()) {
         if (op.opId == entry->opId) {
             if (isEditableType(op.type)) {
@@ -419,7 +479,7 @@ void HistoryPanel::showContextMenu(const QPoint& pos, QTreeWidgetItem* item) {
     QMenu menu;
 
     if (isEditableType(opRecord->type)) {
-        QAction* editAction = menu.addAction("Edit Parameters...");
+        QAction* editAction = menu.addAction(tr("Edit Parameters..."));
         connect(editAction, &QAction::triggered, this, [this, entry]() {
             showEditDialog(entry->opId);
         });
@@ -427,12 +487,12 @@ void HistoryPanel::showContextMenu(const QPoint& pos, QTreeWidgetItem* item) {
 
     menu.addSeparator();
 
-    QAction* rollbackAction = menu.addAction("Rollback to Here");
+    QAction* rollbackAction = menu.addAction(tr("Rollback to Here"));
     connect(rollbackAction, &QAction::triggered, this, [this, entry]() {
         emit rollbackRequested(QString::fromStdString(entry->opId));
     });
 
-    QString suppressText = entry->suppressed ? "Unsuppress" : "Suppress";
+    QString suppressText = entry->suppressed ? tr("Unsuppress") : tr("Suppress");
     QAction* suppressAction = menu.addAction(suppressText);
     connect(suppressAction, &QAction::triggered, this, [this, entry]() {
         emit suppressRequested(QString::fromStdString(entry->opId), !entry->suppressed);
@@ -440,7 +500,7 @@ void HistoryPanel::showContextMenu(const QPoint& pos, QTreeWidgetItem* item) {
 
     menu.addSeparator();
 
-    QAction* deleteAction = menu.addAction("Delete");
+    QAction* deleteAction = menu.addAction(tr("Delete"));
     deleteAction->setShortcut(QKeySequence::Delete);
     connect(deleteAction, &QAction::triggered, this, [this, entry]() {
         emit deleteRequested(QString::fromStdString(entry->opId));
@@ -513,7 +573,7 @@ void HistoryPanel::applyCollapseState(bool animate) {
 }
 
 void HistoryPanel::onOperationAdded(const QString& opId) {
-    rebuild();  // Full rebuild for now
+    rebuild();
 }
 
 void HistoryPanel::onOperationRemoved(const QString& opId) {
@@ -547,3 +607,4 @@ void HistoryPanel::onOperationSuppressed(const QString& opId, bool suppressed) {
 }
 
 } // namespace onecad::ui
+
