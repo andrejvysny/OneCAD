@@ -215,6 +215,11 @@ gp_Pnt2d FixedConstraint::getIconPosition(const Sketch& sketch) const {
     return pos;
 }
 
+void FixedConstraint::translate(double dx, double dy) {
+    m_fixedX += dx;
+    m_fixedY += dy;
+}
+
 //==============================================================================
 // MidpointConstraint
 //==============================================================================

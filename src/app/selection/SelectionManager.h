@@ -40,6 +40,9 @@ public:
 
     void clearSelection();
 
+    /** Replace selection with multiple items (e.g. whole region: all edges + points). */
+    void replaceSelection(const std::vector<SelectionItem>& items);
+
 signals:
     void selectionChanged();
     void hoverChanged();

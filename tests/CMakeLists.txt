@@ -67,6 +67,13 @@ target_link_libraries(proto_face_builder
     onecad_core
 )
 
+# Fixed constraint and translatePlaneInSketch prototype
+add_executable(proto_sketch_fixed_and_move prototypes/proto_sketch_fixed_and_move.cpp)
+target_link_libraries(proto_sketch_fixed_and_move
+    PRIVATE
+    onecad_core
+)
+
 # Viewport Compilation Test
 add_executable(test_compile test_compile.cpp)
 target_link_libraries(test_compile

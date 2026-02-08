@@ -14,8 +14,10 @@
 #include <QImage>
 #include "SnapSettingsPanel.h"
 #include "selection/ModelPickerAdapter.h"
+#include "../../core/sketch/SketchTypes.h"
 #include "../../render/scene/SceneMeshStore.h"
 #include "../../app/selection/SelectionTypes.h"
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -42,7 +44,6 @@ namespace core::sketch {
     class Sketch;
     class SketchRenderer;
     struct SketchPlane;
-    struct Vec2d;
     namespace tools {
         class SketchToolManager;
         enum class ToolType;
@@ -136,6 +137,8 @@ signals:
     void shellToolActiveChanged(bool active);
     void debugTogglesChanged(bool normals, bool depth, bool wireframe, bool disableGamma, bool matcap);
     void selectionContextChanged(int contextKind);  // 0=Default, 1=Edge, 2=Face, 3=Body
+    /** Request a temporary status bar message (e.g. "Point is fixed", solver error). */
+    void statusMessageRequested(const QString& message);
 
 public slots:
     void beginPlaneSelection();
@@ -170,6 +173,11 @@ public slots:
 
     // Snap settings
     void updateSnapSettings(const SnapSettingsPanel::SnapSettings& settings);
+
+    // Move Sketch mode (dedicated tool for translating sketch via plane origin)
+    void setMoveSketchMode(bool active);
+    bool isMoveSketchModeActive() const { return m_moveSketchModeActive; }
+    void setMoveSketchModeChangedCallback(std::function<void(bool)> callback);
 
     // Views
     void setFrontView();
@@ -283,6 +291,27 @@ private:
     bool m_indicatorHovered = false;
     bool m_planeSelectionActive = false;
     int m_planeHoverIndex = -1;
+
+    // Sketch interaction state (point drag / move sketch / region move)
+    enum class SketchInteractionState {
+        Idle,
+        PendingPointDrag,
+        PointDragging,
+        PendingSketchMove,
+        SketchMoving,
+        PendingRegionMove,
+        RegionMoving
+    };
+    static constexpr int kPointDragThresholdPixels = 4;
+    SketchInteractionState m_sketchInteractionState = SketchInteractionState::Idle;
+    QPoint m_sketchPressPos;
+    std::string m_pointDragCandidateId;
+    std::string m_selectedRegionId;
+    std::string m_regionMoveCandidateId;
+    bool m_moveSketchModeActive = false;
+    core::sketch::Vec2d m_moveSketchLastSketchPos{0.0, 0.0};
+    bool m_pointDragFailureFeedbackShown = false;
+    std::function<void(bool)> m_moveSketchModeChangedCallback;
 
     // Document for rendering all sketches
     app::Document* m_document = nullptr;

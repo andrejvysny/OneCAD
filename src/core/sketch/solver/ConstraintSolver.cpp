@@ -357,7 +357,8 @@ SolverResult ConstraintSolver::solve() {
     return result;
 }
 
-SolverResult ConstraintSolver::solveWithDrag(EntityID pointId, const Vec2d& targetPos) {
+SolverResult ConstraintSolver::solveWithDrag(EntityID pointId, const Vec2d& targetPos,
+                                             const std::unordered_set<EntityID>& pointIdsToFix) {
     auto it = pointsById_.find(pointId);
     if (it == pointsById_.end() || !it->second) {
         SolverResult result;
@@ -377,6 +378,34 @@ SolverResult ConstraintSolver::solveWithDrag(EntityID pointId, const Vec2d& targ
 
     constexpr int dragTag = -1;
     gcsSystem_->clearByTag(dragTag);
+
+    // Fix either:
+    // - all non-dragged points (legacy/default behavior when pointIdsToFix is empty), or
+    // - only the explicitly requested set.
+    struct FixedCoord {
+        double x;
+        double y;
+    };
+    std::unordered_map<EntityID, FixedCoord> fixedPositions;
+    const bool fixAllOtherPoints = pointIdsToFix.empty();
+    for (const auto& [id, point] : pointsById_) {
+        if (id == pointId || !point) {
+            continue;
+        }
+        if (!fixAllOtherPoints && pointIdsToFix.find(id) == pointIdsToFix.end()) {
+            continue;
+        }
+        fixedPositions[id] = {point->position().X(), point->position().Y()};
+    }
+    for (auto& [id, coord] : fixedPositions) {
+        auto pointIt = pointsById_.find(id);
+        if (pointIt == pointsById_.end() || !pointIt->second) {
+            continue;
+        }
+        GCS::Point gcsPoint = makePoint(pointIt->second);
+        gcsSystem_->addConstraintCoordinateX(gcsPoint, &coord.x, dragTag, true);
+        gcsSystem_->addConstraintCoordinateY(gcsPoint, &coord.y, dragTag, true);
+    }
 
     double targetX = targetPos.x;
     double targetY = targetPos.y;

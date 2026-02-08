@@ -27,6 +27,7 @@
 #include <memory>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <optional>
 
 // Forward declarations
@@ -319,8 +320,15 @@ public:
 
     /**
      * @brief Add fixed constraint to point
+     *
+     * Only point entities are accepted. Returns empty ID if entity is not a point.
      */
     ConstraintID addFixed(EntityID point);
+
+    /**
+     * @brief Check if a point has a Fixed constraint
+     */
+    bool hasFixedConstraint(EntityID pointId) const;
 
     /**
      * @brief Add point-on-curve constraint
@@ -372,6 +380,23 @@ public:
     SolveResult solveWithDrag(EntityID draggedPoint, const Vec2d& targetPos);
 
     /**
+     * @brief Start a point-drag session and compute point-fixing strategy.
+     */
+    void beginPointDrag(EntityID draggedPoint);
+
+    /**
+     * @brief End active point-drag session.
+     */
+    void endPointDrag();
+
+    /**
+     * @brief Get free direction(s) for a point for constrained drag (e.g. Shift-drag).
+     * @param pointId Point entity ID (must be a SketchPoint).
+     * @return Unit vectors along which the point can move; empty = fixed, 1 = line, 2 = plane.
+     */
+    std::vector<Vec2d> getPointFreeDirections(EntityID pointId) const;
+
+    /**
      * @brief Get total degrees of freedom
      *
      * Per SPECIFICATION.md §23.8:
@@ -408,6 +433,23 @@ public:
         plane_ = plane;
         invalidateSolver();
     }
+
+    /**
+     * @brief Translate the sketch plane origin by a delta in sketch coordinates.
+     * Entity coordinates and constraint values are unchanged; only plane.origin moves in world space.
+     */
+    void translatePlaneInSketch(const Vec2d& deltaSketch);
+
+    /**
+     * @brief Translate all sketch geometry by (dx, dy) in sketch coordinates.
+     * Updates every point position and every Fixed constraint's stored (x,y).
+     */
+    void translateSketch(double dx, double dy);
+
+    /**
+     * @brief Translate only the points (and their Fixed constraints) that belong to the given region.
+     */
+    void translateSketchRegion(const std::string& regionId, double dx, double dy);
 
     /**
      * @brief Convert 2D sketch point to 3D world
@@ -483,6 +525,10 @@ private:
     // Cached DOF calculation
     mutable int cachedDOF_ = -1;
     mutable bool dofDirty_ = true;
+
+    // Active point-drag session state
+    std::unordered_set<EntityID> activeDragFixedPoints_;
+    bool isDraggingPoint_ = false;
 
     /**
      * @brief Mark solver as needing rebuild

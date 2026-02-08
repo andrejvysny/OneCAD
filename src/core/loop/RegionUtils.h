@@ -61,6 +61,28 @@ std::optional<Face> resolveRegionFace(const sk::Sketch& sketch,
                                       const std::string& regionId,
                                       const LoopDetectorConfig& config);
 
+/**
+ * @brief Collect all entity IDs (points and edges) that belong to a region.
+ * Used for region selection and translateSketchRegion.
+ */
+std::vector<sk::EntityID> getEntityIdsInRegion(const sk::Sketch& sketch,
+                                                const std::string& regionId);
+
+/**
+ * @brief Return line-loop boundary point IDs in traversal order.
+ *
+ * For non-line loops or invalid topology returns an empty vector.
+ */
+std::vector<sk::EntityID> getOrderedBoundaryPointIds(const sk::Sketch& sketch,
+                                                      const Loop& loop);
+
+/**
+ * @brief Find the region ID that contains the given entity (edge or point).
+ * Returns the first region whose loop contains the entity.
+ */
+std::optional<std::string> getRegionIdContainingEntity(const sk::Sketch& sketch,
+                                                        const sk::EntityID& entityId);
+
 } // namespace onecad::core::loop
 
 #endif // ONECAD_CORE_LOOP_REGIONUTILS_H

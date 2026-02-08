@@ -2,6 +2,7 @@
 
 #include "../../core/sketch/Sketch.h"
 #include "../../core/sketch/SketchRenderer.h"
+#include "../../core/sketch/SketchTypes.h"
 
 namespace onecad::ui::selection {
 
@@ -53,7 +54,11 @@ PickResult SketchPickerAdapter::pick(const core::sketch::SketchRenderer& rendere
     (void)sketch;
     PickResult result;
     const double pixelScaleSafe = (pixelScale > 0.0) ? pixelScale : 1.0;
-    const double toleranceWorld = tolerancePixels * pixelScaleSafe;
+    double toleranceWorld = tolerancePixels * pixelScaleSafe;
+    const double minToleranceSketch = core::sketch::constants::SNAP_RADIUS_MM;
+    if (toleranceWorld < minToleranceSketch) {
+        toleranceWorld = minToleranceSketch;
+    }
     const std::string sketchIdStr(sketchId);
 
     if (options.allowConstraints) {

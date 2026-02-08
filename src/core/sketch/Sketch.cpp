@@ -2,6 +2,7 @@
 #include "constraints/Constraints.h"
 #include "solver/ConstraintSolver.h"
 #include "solver/SolverAdapter.h"
+#include "../loop/RegionUtils.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -549,8 +550,88 @@ ConstraintID Sketch::addAngle(EntityID line1, EntityID line2, double angleDegree
     return addConstraint(std::make_unique<constraints::AngleConstraint>(line1, line2, radians));
 }
 
-ConstraintID Sketch::addFixed(EntityID) {
-    return {};
+ConstraintID Sketch::addFixed(EntityID entityId) {
+    auto* point = getEntityAs<SketchPoint>(entityId);
+    if (!point) {
+        return {};
+    }
+    double x = point->position().X();
+    double y = point->position().Y();
+    return addConstraint(
+        std::make_unique<constraints::FixedConstraint>(entityId, x, y));
+}
+
+bool Sketch::hasFixedConstraint(EntityID pointId) const {
+    for (const auto& constraint : constraints_) {
+        if (constraint && constraint->type() == ConstraintType::Fixed &&
+            constraint->references(pointId)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void Sketch::translatePlaneInSketch(const Vec2d& deltaSketch) {
+    plane_.origin.x += deltaSketch.x * plane_.xAxis.x + deltaSketch.y * plane_.yAxis.x;
+    plane_.origin.y += deltaSketch.x * plane_.xAxis.y + deltaSketch.y * plane_.yAxis.y;
+    plane_.origin.z += deltaSketch.x * plane_.xAxis.z + deltaSketch.y * plane_.yAxis.z;
+}
+
+void Sketch::translateSketch(double dx, double dy) {
+    for (auto& entity : entities_) {
+        if (!entity) {
+            continue;
+        }
+        auto* point = dynamic_cast<SketchPoint*>(entity.get());
+        if (point) {
+            gp_Pnt2d p = point->position();
+            point->setPosition(p.X() + dx, p.Y() + dy);
+        }
+    }
+    for (auto& constraint : constraints_) {
+        if (constraint && constraint->type() == ConstraintType::Fixed) {
+            auto* fc = dynamic_cast<constraints::FixedConstraint*>(constraint.get());
+            if (fc) {
+                fc->translate(dx, dy);
+            }
+        }
+    }
+    invalidateSolver();
+    dofDirty_ = true;
+}
+
+void Sketch::translateSketchRegion(const std::string& regionId, double dx, double dy) {
+    if (regionId.empty()) {
+        return;
+    }
+    std::vector<EntityID> entityIds = onecad::core::loop::getEntityIdsInRegion(*this, regionId);
+    std::unordered_set<EntityID> pointIds;
+    for (const auto& id : entityIds) {
+        if (getEntityAs<SketchPoint>(id)) {
+            pointIds.insert(id);
+        }
+    }
+    for (auto& entity : entities_) {
+        if (!entity || pointIds.find(entity->id()) == pointIds.end()) {
+            continue;
+        }
+        auto* point = dynamic_cast<SketchPoint*>(entity.get());
+        if (point) {
+            gp_Pnt2d p = point->position();
+            point->setPosition(p.X() + dx, p.Y() + dy);
+        }
+    }
+    for (auto& constraint : constraints_) {
+        if (!constraint || constraint->type() != ConstraintType::Fixed) {
+            continue;
+        }
+        auto* fc = dynamic_cast<constraints::FixedConstraint*>(constraint.get());
+        if (fc && pointIds.find(fc->pointId()) != pointIds.end()) {
+            fc->translate(dx, dy);
+        }
+    }
+    invalidateSolver();
+    dofDirty_ = true;
 }
 
 ConstraintID Sketch::addPointOnCurve(EntityID pointId, EntityID curveId,
@@ -663,6 +744,61 @@ std::vector<SketchConstraint*> Sketch::getConstraintsForEntity(EntityID entityId
     return results;
 }
 
+std::vector<Vec2d> Sketch::getPointFreeDirections(EntityID pointId) const {
+    if (!getEntityAs<SketchPoint>(pointId)) {
+        return {};
+    }
+
+    bool removedX = false;
+    bool removedY = false;
+
+    // Constraints that reference the point directly
+    for (const auto& constraint : constraints_) {
+        if (!constraint || !constraint->references(pointId)) {
+            continue;
+        }
+        if (constraint->type() == ConstraintType::Fixed ||
+            constraint->type() == ConstraintType::Coincident) {
+            return {};  // 0 free DOF
+        }
+    }
+
+    // Line constraints (Horizontal/Vertical) that affect this point via a line endpoint
+    for (const auto& entity : entities_) {
+        if (!entity) {
+            continue;
+        }
+        auto* line = dynamic_cast<SketchLine*>(entity.get());
+        if (!line) {
+            continue;
+        }
+        if (line->startPointId() != pointId && line->endPointId() != pointId) {
+            continue;
+        }
+        for (const auto& constraint : constraints_) {
+            if (!constraint || !constraint->references(line->id())) {
+                continue;
+            }
+            if (constraint->type() == ConstraintType::Horizontal) {
+                removedY = true;  // line horizontal => point can only move in X
+            } else if (constraint->type() == ConstraintType::Vertical) {
+                removedX = true;  // line vertical => point can only move in Y
+            }
+        }
+    }
+
+    if (removedX && removedY) {
+        return {};
+    }
+    if (removedX && !removedY) {
+        return {{0.0, 1.0}};  // free along Y
+    }
+    if (!removedX && removedY) {
+        return {{1.0, 0.0}};  // free along X
+    }
+    return {{1.0, 0.0}, {0.0, 1.0}};  // full plane
+}
+
 SolveResult Sketch::solve() {
     SolveResult result;
 
@@ -688,6 +824,60 @@ SolveResult Sketch::solve() {
     result.conflictingConstraints = solverResult.conflictingConstraints;
     result.errorMessage = solverResult.errorMessage;
     return result;
+}
+
+void Sketch::beginPointDrag(EntityID draggedPoint) {
+    activeDragFixedPoints_.clear();
+    isDraggingPoint_ = false;
+
+    if (draggedPoint.empty() || !getEntityAs<SketchPoint>(draggedPoint)) {
+        return;
+    }
+
+    std::unordered_set<EntityID> allPointIds;
+    allPointIds.reserve(entities_.size());
+    for (const auto& entity : entities_) {
+        if (!entity) {
+            continue;
+        }
+        auto* point = dynamic_cast<SketchPoint*>(entity.get());
+        if (point) {
+            allPointIds.insert(point->id());
+        }
+    }
+
+    bool usedRectangleStrategy = false;
+    auto regionId = onecad::core::loop::getRegionIdContainingEntity(*this, draggedPoint);
+    if (regionId.has_value()) {
+        auto face = onecad::core::loop::resolveRegionFace(*this, *regionId);
+        if (face.has_value()) {
+            std::vector<EntityID> boundaryPointIds =
+                onecad::core::loop::getOrderedBoundaryPointIds(*this, face->outerLoop);
+            if (boundaryPointIds.size() == 4) {
+                auto pointIt = std::find(boundaryPointIds.begin(), boundaryPointIds.end(), draggedPoint);
+                if (pointIt != boundaryPointIds.end()) {
+                    size_t idx = static_cast<size_t>(std::distance(boundaryPointIds.begin(), pointIt));
+                    activeDragFixedPoints_.insert(boundaryPointIds[(idx + 2) % boundaryPointIds.size()]);
+                    usedRectangleStrategy = true;
+                }
+            }
+        }
+    }
+
+    if (!usedRectangleStrategy) {
+        for (const auto& pointId : allPointIds) {
+            if (pointId != draggedPoint) {
+                activeDragFixedPoints_.insert(pointId);
+            }
+        }
+    }
+
+    isDraggingPoint_ = true;
+}
+
+void Sketch::endPointDrag() {
+    activeDragFixedPoints_.clear();
+    isDraggingPoint_ = false;
 }
 
 SolveResult Sketch::solveWithDrag(EntityID draggedPoint, const Vec2d& targetPos) {
@@ -716,7 +906,11 @@ SolveResult Sketch::solveWithDrag(EntityID draggedPoint, const Vec2d& targetPos)
         return result;
     }
 
-    SolverResult solverResult = solver_->solveWithDrag(draggedPoint, targetPos);
+    static const std::unordered_set<EntityID> kNoFixedPoints;
+    const std::unordered_set<EntityID>& pointIdsToFix =
+        isDraggingPoint_ ? activeDragFixedPoints_ : kNoFixedPoints;
+
+    SolverResult solverResult = solver_->solveWithDrag(draggedPoint, targetPos, pointIdsToFix);
     result.success = solverResult.success;
     result.iterations = solverResult.iterations;
     result.residual = solverResult.residual;

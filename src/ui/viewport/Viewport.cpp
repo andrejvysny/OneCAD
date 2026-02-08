@@ -7,6 +7,7 @@
 #include "../../core/sketch/SketchConstraint.h"
 #include "../../core/sketch/constraints/Constraints.h"
 #include "../../core/sketch/tools/SketchToolManager.h"
+#include "../../core/loop/RegionUtils.h"
 #include "../../app/document/Document.h"
 #include "../../app/selection/SelectionManager.h"
 #include "../../app/selection/SelectionTypes.h"
@@ -771,6 +772,16 @@ void Viewport::mousePressEvent(QMouseEvent* event) {
         m_pendingShellFaceToggle = false;
     }
 
+    // Move Sketch mode: left press starts sketch move gesture
+    if (m_inSketchMode && m_moveSketchModeActive && event->button() == Qt::LeftButton &&
+        m_activeSketch && (!m_toolManager || !m_toolManager->hasActiveTool())) {
+        m_sketchInteractionState = SketchInteractionState::SketchMoving;
+        m_moveSketchLastSketchPos = screenToSketch(event->pos());
+        setCursor(Qt::SizeAllCursor);
+        update();
+        return;
+    }
+
     if (m_inSketchMode && m_sketchRenderer && event->button() == Qt::LeftButton &&
         (!m_toolManager || !m_toolManager->hasActiveTool())) {
         if (!m_selectionManager) {
@@ -794,7 +805,67 @@ void Viewport::mousePressEvent(QMouseEvent* event) {
             if (!m_pendingCandidates.empty()) {
                 m_selectionManager->setHoverItem(m_pendingCandidates.front());
             }
+            m_sketchInteractionState = SketchInteractionState::Idle;
+            m_pointDragCandidateId.clear();
             return;
+        }
+
+        // Candidate for point drag, region move, or sketch move
+        if (!m_moveSketchModeActive) {
+            auto top = m_selectionManager->topCandidate(pickResult);
+            std::optional<app::selection::SelectionItem> bestPointForDrag;
+            for (const auto& hit : pickResult.hits) {
+                if (hit.kind == app::selection::SelectionKind::SketchPoint) {
+                    if (!bestPointForDrag.has_value() ||
+                        hit.screenDistance < bestPointForDrag->screenDistance) {
+                        bestPointForDrag = hit;
+                    }
+                }
+            }
+
+            // Point drag takes priority over region move when clicking a corner/vertex.
+            if (bestPointForDrag.has_value()) {
+                m_sketchInteractionState = SketchInteractionState::PendingPointDrag;
+                m_sketchPressPos = event->pos();
+                m_pointDragCandidateId = bestPointForDrag->id.elementId;
+                m_pointDragFailureFeedbackShown = false;
+                m_selectedRegionId.clear();
+            } else {
+                bool hitInSelectedRegion = false;
+                bool hitSelectedRegionFill = false;
+                if (!m_selectedRegionId.empty() && top.has_value()) {
+                    if (top->kind == app::selection::SelectionKind::SketchEdge) {
+                        std::vector<sketch::EntityID> regionEntityIds =
+                            core::loop::getEntityIdsInRegion(*m_activeSketch, m_selectedRegionId);
+                        hitInSelectedRegion =
+                            std::find(regionEntityIds.begin(), regionEntityIds.end(), top->id.elementId) !=
+                            regionEntityIds.end();
+                    } else if (top->kind == app::selection::SelectionKind::SketchRegion &&
+                               top->id.elementId == m_selectedRegionId) {
+                        hitSelectedRegionFill = true;
+                    }
+                }
+
+                if (!m_selectedRegionId.empty() &&
+                    (!top.has_value() || hitInSelectedRegion || hitSelectedRegionFill)) {
+                    m_sketchInteractionState = SketchInteractionState::PendingRegionMove;
+                    m_sketchPressPos = event->pos();
+                    m_regionMoveCandidateId = m_selectedRegionId;
+                    m_pointDragCandidateId.clear();
+                } else if (!top.has_value()) {
+                    m_sketchInteractionState = SketchInteractionState::PendingSketchMove;
+                    m_sketchPressPos = event->pos();
+                    m_pointDragCandidateId.clear();
+                    m_selectedRegionId.clear();
+                } else {
+                    m_sketchInteractionState = SketchInteractionState::Idle;
+                    m_pointDragCandidateId.clear();
+                    m_selectedRegionId.clear();
+                }
+            }
+        } else {
+            m_sketchInteractionState = SketchInteractionState::Idle;
+            m_pointDragCandidateId.clear();
         }
 
         update();
@@ -1029,6 +1100,55 @@ void Viewport::mouseDoubleClickEvent(QMouseEvent* event) {
         }
     }
 
+    // Double-click on region fill, edge, or point: select whole region (all connected edges and vertices)
+    auto pickResult = buildSketchPickResult(event->pos());
+    auto top = m_selectionManager->topCandidate(pickResult);
+    std::string regionIdToSelect;
+    if (top.has_value() && top->kind == app::selection::SelectionKind::SketchRegion) {
+        regionIdToSelect = top->id.elementId;
+    } else if (top.has_value() &&
+               (top->kind == app::selection::SelectionKind::SketchEdge ||
+                top->kind == app::selection::SelectionKind::SketchPoint)) {
+        auto regionIdOpt = core::loop::getRegionIdContainingEntity(*m_activeSketch, top->id.elementId);
+        if (regionIdOpt.has_value()) {
+            regionIdToSelect = *regionIdOpt;
+        }
+    }
+    if (!regionIdToSelect.empty()) {
+        std::vector<sketch::EntityID> entityIds =
+            core::loop::getEntityIdsInRegion(*m_activeSketch, regionIdToSelect);
+        std::string sketchIdStr = resolveActiveSketchId();
+        std::vector<app::selection::SelectionItem> regionItems;
+        regionItems.reserve(entityIds.size());
+        for (const auto& eid : entityIds) {
+            const auto* entity = m_activeSketch->getEntity(eid);
+            if (!entity) {
+                continue;
+            }
+            app::selection::SelectionItem item;
+            item.id = {sketchIdStr, eid};
+            item.priority = (entity->type() == sketch::EntityType::Point) ? 0 : 1;
+            item.screenDistance = 0.0;
+            if (entity->type() == sketch::EntityType::Point) {
+                item.kind = app::selection::SelectionKind::SketchPoint;
+            } else {
+                item.kind = app::selection::SelectionKind::SketchEdge;
+            }
+            regionItems.push_back(item);
+        }
+        if (!regionItems.empty()) {
+            m_selectionManager->replaceSelection(regionItems);
+            m_selectedRegionId = regionIdToSelect;
+            if (m_sketchRenderer) {
+                m_sketchRenderer->clearRegionSelection();
+                m_sketchRenderer->toggleRegionSelection(regionIdToSelect);
+            }
+            updateSketchSelectionFromManager();
+            update();
+            return;
+        }
+    }
+
     QOpenGLWidget::mouseDoubleClickEvent(event);
 }
 
@@ -1045,6 +1165,40 @@ void Viewport::mouseMoveEvent(QMouseEvent* event) {
         }
     }
 
+    // Move Sketch gesture: translate all geometry by delta in sketch coordinates
+    if (m_inSketchMode && m_sketchInteractionState == SketchInteractionState::SketchMoving &&
+        m_activeSketch && (event->buttons() & Qt::LeftButton)) {
+        sketch::Vec2d currentSketch = screenToSketch(event->pos());
+        sketch::Vec2d delta;
+        delta.x = currentSketch.x - m_moveSketchLastSketchPos.x;
+        delta.y = currentSketch.y - m_moveSketchLastSketchPos.y;
+        m_activeSketch->translateSketch(delta.x, delta.y);
+        m_moveSketchLastSketchPos = currentSketch;
+        if (m_sketchRenderer) {
+            m_sketchRenderer->updateGeometry();
+            update();
+        }
+        notifySketchUpdated();
+        return;
+    }
+
+    // Move Region gesture: translate only the selected region
+    if (m_inSketchMode && m_sketchInteractionState == SketchInteractionState::RegionMoving &&
+        m_activeSketch && !m_regionMoveCandidateId.empty() && (event->buttons() & Qt::LeftButton)) {
+        sketch::Vec2d currentSketch = screenToSketch(event->pos());
+        sketch::Vec2d delta;
+        delta.x = currentSketch.x - m_moveSketchLastSketchPos.x;
+        delta.y = currentSketch.y - m_moveSketchLastSketchPos.y;
+        m_activeSketch->translateSketchRegion(m_regionMoveCandidateId, delta.x, delta.y);
+        m_moveSketchLastSketchPos = currentSketch;
+        if (m_sketchRenderer) {
+            m_sketchRenderer->updateGeometry();
+            update();
+        }
+        notifySketchUpdated();
+        return;
+    }
+
     // Forward to sketch tool if active
     if (m_inSketchMode && m_toolManager && m_toolManager->hasActiveTool()) {
         sketch::Vec2d sketchPos = screenToSketch(event->pos());
@@ -1054,9 +1208,96 @@ void Viewport::mouseMoveEvent(QMouseEvent* event) {
         }
     } else if (m_inSketchMode && m_sketchRenderer && !m_isOrbiting && !m_isPanning &&
                (!m_deepSelectPopup || !m_deepSelectPopup->isVisible())) {
-        auto pickResult = buildSketchPickResult(event->pos());
-        m_selectionManager->updateHover(pickResult);
-        update();
+        // Sketch move: transition from PendingSketchMove when drag past threshold
+        if (m_sketchInteractionState == SketchInteractionState::PendingSketchMove &&
+            m_activeSketch && (event->buttons() & Qt::LeftButton)) {
+            QPoint delta = event->pos() - m_sketchPressPos;
+            int distSq = delta.x() * delta.x() + delta.y() * delta.y();
+            if (distSq >= kPointDragThresholdPixels * kPointDragThresholdPixels) {
+                m_sketchInteractionState = SketchInteractionState::SketchMoving;
+                m_moveSketchLastSketchPos = screenToSketch(event->pos());
+                setCursor(Qt::SizeAllCursor);
+            }
+        }
+        // Region move: transition from PendingRegionMove when drag past threshold
+        if (m_sketchInteractionState == SketchInteractionState::PendingRegionMove &&
+            m_activeSketch && (event->buttons() & Qt::LeftButton)) {
+            QPoint delta = event->pos() - m_sketchPressPos;
+            int distSq = delta.x() * delta.x() + delta.y() * delta.y();
+            if (distSq >= kPointDragThresholdPixels * kPointDragThresholdPixels) {
+                m_sketchInteractionState = SketchInteractionState::RegionMoving;
+                m_moveSketchLastSketchPos = screenToSketch(event->pos());
+                setCursor(Qt::SizeAllCursor);
+            }
+        }
+        // Point drag state machine
+        if (m_sketchInteractionState == SketchInteractionState::PendingPointDrag &&
+            m_activeSketch && !m_pointDragCandidateId.empty()) {
+            QPoint delta = event->pos() - m_sketchPressPos;
+            int distSq = delta.x() * delta.x() + delta.y() * delta.y();
+            if (distSq >= kPointDragThresholdPixels * kPointDragThresholdPixels) {
+                if (m_activeSketch->hasFixedConstraint(m_pointDragCandidateId)) {
+                    emit statusMessageRequested(tr("Point is fixed"));
+                    m_sketchInteractionState = SketchInteractionState::Idle;
+                    m_pointDragCandidateId.clear();
+                } else {
+                    m_activeSketch->beginPointDrag(m_pointDragCandidateId);
+                    m_sketchInteractionState = SketchInteractionState::PointDragging;
+                    m_sketchRenderer->setEntitySelection(m_pointDragCandidateId,
+                        sketch::SelectionState::Dragging);
+                }
+            }
+        }
+        if (m_sketchInteractionState == SketchInteractionState::PointDragging &&
+            m_activeSketch && m_sketchRenderer && !m_pointDragCandidateId.empty()) {
+            sketch::Vec2d sketchPos = screenToSketch(event->pos());
+            sketch::Vec2d targetPos = sketchPos;
+            if (event->modifiers() & Qt::ShiftModifier) {
+                std::vector<sketch::Vec2d> freeDirs = m_activeSketch->getPointFreeDirections(m_pointDragCandidateId);
+                if (freeDirs.empty()) {
+                    update();
+                    return;
+                }
+                auto* pt = m_activeSketch->getEntityAs<sketch::SketchPoint>(m_pointDragCandidateId);
+                if (pt) {
+                    sketch::Vec2d currentPos{pt->position().X(), pt->position().Y()};
+                    sketch::Vec2d delta{sketchPos.x - currentPos.x, sketchPos.y - currentPos.y};
+                    sketch::Vec2d projectedDelta{0.0, 0.0};
+                    for (const auto& d : freeDirs) {
+                        double dot = delta.x * d.x + delta.y * d.y;
+                        projectedDelta.x += dot * d.x;
+                        projectedDelta.y += dot * d.y;
+                    }
+                    targetPos.x = currentPos.x + projectedDelta.x;
+                    targetPos.y = currentPos.y + projectedDelta.y;
+                }
+            }
+            auto result = m_activeSketch->solveWithDrag(m_pointDragCandidateId, targetPos);
+            if (result.success) {
+                m_sketchRenderer->updateGeometry();
+                updateSketchRenderingState();
+                update();
+            } else {
+                if (!m_pointDragFailureFeedbackShown) {
+                    m_pointDragFailureFeedbackShown = true;
+                    QString msg = result.errorMessage.empty()
+                        ? tr("Constrained or unsolved drag")
+                        : QString::fromStdString(result.errorMessage);
+                    emit statusMessageRequested(msg);
+                }
+                update();
+            }
+            return;
+        }
+        if (m_sketchInteractionState != SketchInteractionState::PointDragging &&
+            m_sketchInteractionState != SketchInteractionState::RegionMoving) {
+            if (m_moveSketchModeActive) {
+                setCursor(Qt::SizeAllCursor);
+            }
+            auto pickResult = buildSketchPickResult(event->pos());
+            m_selectionManager->updateHover(pickResult);
+            update();
+        }
     }
 
     if (!m_inSketchMode && !m_planeSelectionActive && !m_isOrbiting && !m_isPanning &&
@@ -1113,6 +1354,56 @@ void Viewport::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void Viewport::mouseReleaseEvent(QMouseEvent* event) {
+    // End Move Sketch gesture
+    if (m_inSketchMode && event->button() == Qt::LeftButton &&
+        m_sketchInteractionState == SketchInteractionState::SketchMoving) {
+        m_sketchInteractionState = SketchInteractionState::Idle;
+        m_moveSketchLastSketchPos = sketch::Vec2d{0.0, 0.0};
+        setCursor(Qt::ArrowCursor);
+        update();
+        return;
+    }
+
+    // End Move Region gesture
+    if (m_inSketchMode && event->button() == Qt::LeftButton &&
+        m_sketchInteractionState == SketchInteractionState::RegionMoving) {
+        m_sketchInteractionState = SketchInteractionState::Idle;
+        m_regionMoveCandidateId.clear();
+        m_moveSketchLastSketchPos = sketch::Vec2d{0.0, 0.0};
+        setCursor(Qt::ArrowCursor);
+        update();
+        return;
+    }
+
+    // Finalize point drag (sketch mode, no tool)
+    if (m_inSketchMode && event->button() == Qt::LeftButton &&
+        m_sketchInteractionState == SketchInteractionState::PointDragging) {
+        if (m_activeSketch) {
+            m_activeSketch->endPointDrag();
+        }
+        if (m_activeSketch && m_sketchRenderer && !m_pointDragCandidateId.empty()) {
+            m_activeSketch->solve();
+            m_sketchRenderer->updateGeometry();
+            m_sketchRenderer->updateConstraints();
+            updateSketchRenderingState();
+            updateSketchSelectionFromManager();
+            notifySketchUpdated();
+        }
+        m_sketchInteractionState = SketchInteractionState::Idle;
+        m_pointDragCandidateId.clear();
+        m_pointDragFailureFeedbackShown = false;
+        update();
+        return;
+    }
+    if (m_inSketchMode && event->button() == Qt::LeftButton &&
+        (m_sketchInteractionState == SketchInteractionState::PendingPointDrag ||
+         m_sketchInteractionState == SketchInteractionState::PendingSketchMove ||
+         m_sketchInteractionState == SketchInteractionState::PendingRegionMove)) {
+        m_sketchInteractionState = SketchInteractionState::Idle;
+        m_pointDragCandidateId.clear();
+        m_regionMoveCandidateId.clear();
+    }
+
     // Forward to sketch tool if active
     if (m_inSketchMode && m_toolManager && m_toolManager->hasActiveTool()) {
         sketch::Vec2d sketchPos = screenToSketch(event->pos());
@@ -1591,6 +1882,10 @@ void Viewport::enterSketchMode(sketch::Sketch* sketch) {
 void Viewport::exitSketchMode() {
     if (!m_inSketchMode) return;
 
+    if (m_activeSketch) {
+        m_activeSketch->endPointDrag();
+    }
+
     m_inSketchMode = false;
     m_activeSketch = nullptr;
     m_activeSketchId.clear();
@@ -1833,6 +2128,20 @@ void Viewport::keyPressEvent(QKeyEvent* event) {
         return;
     default:
         break;
+    }
+
+    // Esc exits Move Sketch mode (and cancels in-progress move)
+    if (m_inSketchMode && m_moveSketchModeActive && event->key() == Qt::Key_Escape) {
+        setMoveSketchMode(false);
+        event->accept();
+        return;
+    }
+
+    // G toggles Move Sketch mode when in sketch mode
+    if (m_inSketchMode && event->key() == Qt::Key_G) {
+        setMoveSketchMode(!m_moveSketchModeActive);
+        event->accept();
+        return;
     }
 
     // Forward to sketch tool if active
@@ -2809,42 +3118,49 @@ void Viewport::drawPlaneSelectionOverlay(const QMatrix4x4& viewProjection) {
 }
 
 void Viewport::activateLineTool() {
+    setMoveSketchMode(false);
     if (m_toolManager) {
         m_toolManager->activateTool(sketchTools::ToolType::Line);
     }
 }
 
 void Viewport::activateCircleTool() {
+    setMoveSketchMode(false);
     if (m_toolManager) {
         m_toolManager->activateTool(sketchTools::ToolType::Circle);
     }
 }
 
 void Viewport::activateRectangleTool() {
+    setMoveSketchMode(false);
     if (m_toolManager) {
         m_toolManager->activateTool(sketchTools::ToolType::Rectangle);
     }
 }
 
 void Viewport::activateArcTool() {
+    setMoveSketchMode(false);
     if (m_toolManager) {
         m_toolManager->activateTool(sketchTools::ToolType::Arc);
     }
 }
 
 void Viewport::activateEllipseTool() {
+    setMoveSketchMode(false);
     if (m_toolManager) {
         m_toolManager->activateTool(sketchTools::ToolType::Ellipse);
     }
 }
 
 void Viewport::activateTrimTool() {
+    setMoveSketchMode(false);
     if (m_toolManager) {
         m_toolManager->activateTool(sketchTools::ToolType::Trim);
     }
 }
 
 void Viewport::activateMirrorTool() {
+    setMoveSketchMode(false);
     if (m_toolManager) {
         m_toolManager->activateTool(sketchTools::ToolType::Mirror);
     }
@@ -3084,6 +3400,32 @@ void Viewport::syncModelMeshes() {
 
 void Viewport::notifySketchUpdated() {
     emit sketchUpdated();
+}
+
+void Viewport::setMoveSketchModeChangedCallback(std::function<void(bool)> callback) {
+    m_moveSketchModeChangedCallback = std::move(callback);
+}
+
+void Viewport::setMoveSketchMode(bool active) {
+    if (m_moveSketchModeActive == active) {
+        return;
+    }
+    m_moveSketchModeActive = active;
+    if (active) {
+        setCursor(Qt::SizeAllCursor);
+    } else {
+        if (m_activeSketch) {
+            m_activeSketch->endPointDrag();
+        }
+        m_sketchInteractionState = SketchInteractionState::Idle;
+        m_pointDragCandidateId.clear();
+        m_moveSketchLastSketchPos = sketch::Vec2d{0.0, 0.0};
+        setCursor(Qt::ArrowCursor);
+    }
+    if (m_moveSketchModeChangedCallback) {
+        m_moveSketchModeChangedCallback(m_moveSketchModeActive);
+    }
+    update();
 }
 
 void Viewport::updateSnapSettings(const SnapSettingsPanel::SnapSettings& settings) {

@@ -5,6 +5,10 @@
 #include "RegionUtils.h"
 
 #include "../sketch/Sketch.h"
+#include "../sketch/SketchArc.h"
+#include "../sketch/SketchCircle.h"
+#include "../sketch/SketchEllipse.h"
+#include "../sketch/SketchLine.h"
 #include "../sketch/SketchTypes.h"
 
 #include <algorithm>
@@ -50,6 +54,19 @@ bool polygonContainsPolygon(const std::vector<sk::Vec2d>& outer,
     }
 
     return true;
+}
+
+sk::EntityID toBaseEdgeId(const sk::EntityID& loopEdgeId) {
+    const size_t splitPos = loopEdgeId.find("#seg");
+    if (splitPos == std::string::npos) {
+        return loopEdgeId;
+    }
+    return loopEdgeId.substr(0, splitPos);
+}
+
+const sk::SketchEntity* resolveLoopEdgeEntity(const sk::Sketch& sketch,
+                                              const sk::EntityID& loopEdgeId) {
+    return sketch.getEntity(toBaseEdgeId(loopEdgeId));
 }
 
 } // namespace
@@ -211,6 +228,233 @@ std::optional<Face> resolveRegionFace(const sk::Sketch& sketch,
     face.outerLoop = region->outerLoop;
     face.innerLoops = std::move(region->holes);
     return face;
+}
+
+namespace {
+
+void collectPointIdsFromLoop(const sk::Sketch& sketch,
+                             const Loop& loop,
+                             std::unordered_set<sk::EntityID>& outPointIds) {
+    for (const auto& edgeId : loop.wire.edges) {
+        const auto* entity = resolveLoopEdgeEntity(sketch, edgeId);
+        if (!entity) {
+            continue;
+        }
+        if (auto* line = dynamic_cast<const sk::SketchLine*>(entity)) {
+            outPointIds.insert(line->startPointId());
+            outPointIds.insert(line->endPointId());
+        } else if (auto* arc = dynamic_cast<const sk::SketchArc*>(entity)) {
+            outPointIds.insert(arc->centerPointId());
+        } else if (auto* circle = dynamic_cast<const sk::SketchCircle*>(entity)) {
+            outPointIds.insert(circle->centerPointId());
+        } else if (auto* ellipse = dynamic_cast<const sk::SketchEllipse*>(entity)) {
+            outPointIds.insert(ellipse->centerPointId());
+        }
+    }
+}
+
+bool loopContainsEntity(const sk::Sketch& sketch,
+                        const Loop& loop,
+                        const sk::EntityID& entityId) {
+    const auto* entity = sketch.getEntity(entityId);
+    if (!entity) {
+        return false;
+    }
+    if (entity->type() == sk::EntityType::Point) {
+        for (const auto& edgeId : loop.wire.edges) {
+            const auto* edge = resolveLoopEdgeEntity(sketch, edgeId);
+            if (!edge) {
+                continue;
+            }
+            if (auto* line = dynamic_cast<const sk::SketchLine*>(edge)) {
+                if (line->startPointId() == entityId || line->endPointId() == entityId) {
+                    return true;
+                }
+            } else if (auto* arc = dynamic_cast<const sk::SketchArc*>(edge)) {
+                if (arc->centerPointId() == entityId) {
+                    return true;
+                }
+            } else if (auto* circle = dynamic_cast<const sk::SketchCircle*>(edge)) {
+                if (circle->centerPointId() == entityId) {
+                    return true;
+                }
+            } else if (auto* ellipse = dynamic_cast<const sk::SketchEllipse*>(edge)) {
+                if (ellipse->centerPointId() == entityId) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    sk::EntityID normalizedEntityId = toBaseEdgeId(entityId);
+    for (const auto& edgeId : loop.wire.edges) {
+        if (toBaseEdgeId(edgeId) == normalizedEntityId) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+std::vector<sk::EntityID> getEntityIdsInRegion(const sk::Sketch& sketch,
+                                                const std::string& regionId) {
+    std::vector<sk::EntityID> out;
+    LoopDetector detector;
+    detector.setConfig(makeRegionDetectionConfig());
+    auto result = detector.detect(sketch);
+    if (!result.success) {
+        return out;
+    }
+    auto region = findRegionDefinition(result, regionId, sk::constants::COINCIDENCE_TOLERANCE);
+    if (!region.has_value()) {
+        return out;
+    }
+    std::unordered_set<sk::EntityID> pointIds;
+    std::unordered_set<sk::EntityID> edgeIds;
+    collectPointIdsFromLoop(sketch, region->outerLoop, pointIds);
+    for (const auto& hole : region->holes) {
+        collectPointIdsFromLoop(sketch, hole, pointIds);
+    }
+    for (const auto& id : region->outerLoop.wire.edges) {
+        sk::EntityID baseId = toBaseEdgeId(id);
+        if (!baseId.empty()) {
+            edgeIds.insert(baseId);
+        }
+    }
+    for (const auto& hole : region->holes) {
+        for (const auto& id : hole.wire.edges) {
+            sk::EntityID baseId = toBaseEdgeId(id);
+            if (!baseId.empty()) {
+                edgeIds.insert(baseId);
+            }
+        }
+    }
+    out.reserve(pointIds.size() + edgeIds.size());
+    for (const auto& id : pointIds) {
+        out.push_back(id);
+    }
+    for (const auto& id : edgeIds) {
+        out.push_back(id);
+    }
+    return out;
+}
+
+std::vector<sk::EntityID> getOrderedBoundaryPointIds(const sk::Sketch& sketch,
+                                                      const Loop& loop) {
+    std::vector<sk::EntityID> ordered;
+    if (loop.wire.edges.empty()) {
+        return ordered;
+    }
+
+    struct Endpoints {
+        sk::EntityID a;
+        sk::EntityID b;
+    };
+    std::vector<Endpoints> edgeEndpoints;
+    edgeEndpoints.reserve(loop.wire.edges.size());
+    for (const auto& edgeId : loop.wire.edges) {
+        const auto* entity = resolveLoopEdgeEntity(sketch, edgeId);
+        auto* line = dynamic_cast<const sk::SketchLine*>(entity);
+        if (!line) {
+            return {};
+        }
+        if (line->startPointId().empty() || line->endPointId().empty()) {
+            return {};
+        }
+        edgeEndpoints.push_back({line->startPointId(), line->endPointId()});
+    }
+    if (edgeEndpoints.size() < 2) {
+        return {};
+    }
+
+    auto sharedEndpoint = [](const Endpoints& lhs, const Endpoints& rhs) -> std::optional<sk::EntityID> {
+        if (lhs.a == rhs.a || lhs.a == rhs.b) {
+            return lhs.a;
+        }
+        if (lhs.b == rhs.a || lhs.b == rhs.b) {
+            return lhs.b;
+        }
+        return std::nullopt;
+    };
+
+    sk::EntityID startPoint;
+    sk::EntityID currentPoint;
+
+    if (loop.wire.forward.size() == edgeEndpoints.size()) {
+        const auto& first = edgeEndpoints.front();
+        if (loop.wire.forward.front()) {
+            startPoint = first.a;
+            currentPoint = first.b;
+        } else {
+            startPoint = first.b;
+            currentPoint = first.a;
+        }
+    } else {
+        const auto& first = edgeEndpoints.front();
+        const auto& second = edgeEndpoints[1];
+        auto shared = sharedEndpoint(first, second);
+        if (!shared.has_value()) {
+            return {};
+        }
+        startPoint = (first.a == *shared) ? first.b : first.a;
+        currentPoint = *shared;
+    }
+
+    if (startPoint.empty() || currentPoint.empty()) {
+        return {};
+    }
+
+    ordered.reserve(edgeEndpoints.size());
+    ordered.push_back(startPoint);
+
+    for (size_t i = 1; i < edgeEndpoints.size(); ++i) {
+        const auto& edge = edgeEndpoints[i];
+        ordered.push_back(currentPoint);
+        if (currentPoint == edge.a) {
+            currentPoint = edge.b;
+        } else if (currentPoint == edge.b) {
+            currentPoint = edge.a;
+        } else {
+            return {};
+        }
+    }
+
+    if (currentPoint != startPoint) {
+        return {};
+    }
+
+    std::unordered_set<sk::EntityID> uniquePoints(ordered.begin(), ordered.end());
+    if (uniquePoints.size() != ordered.size()) {
+        return {};
+    }
+
+    return ordered;
+}
+
+std::optional<std::string> getRegionIdContainingEntity(const sk::Sketch& sketch,
+                                                        const sk::EntityID& entityId) {
+    if (entityId.empty()) {
+        return std::nullopt;
+    }
+    LoopDetector detector;
+    detector.setConfig(makeRegionDetectionConfig());
+    auto result = detector.detect(sketch);
+    if (!result.success) {
+        return std::nullopt;
+    }
+    auto regions = buildRegionDefinitions(result, sk::constants::COINCIDENCE_TOLERANCE);
+    for (const auto& region : regions) {
+        if (loopContainsEntity(sketch, region.outerLoop, entityId)) {
+            return region.id;
+        }
+        for (const auto& hole : region.holes) {
+            if (loopContainsEntity(sketch, hole, entityId)) {
+                return region.id;
+            }
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace onecad::core::loop

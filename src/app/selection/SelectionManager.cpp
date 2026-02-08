@@ -145,6 +145,11 @@ void SelectionManager::clearSelection() {
     emit selectionChanged();
 }
 
+void SelectionManager::replaceSelection(const std::vector<SelectionItem>& items) {
+    selection_ = items;
+    emit selectionChanged();
+}
+
 std::vector<SelectionItem> SelectionManager::filterHits(const PickResult& result) const {
     std::vector<SelectionItem> hits;
     hits.reserve(result.hits.size());

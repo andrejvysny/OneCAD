@@ -24,6 +24,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <functional>
 
@@ -243,13 +244,15 @@ public:
      * @brief Solve with a point being dragged
      * @param pointId Point being dragged by user
      * @param targetPos Target position
+     * @param pointIdsToFix If empty, fixes all non-dragged points. Otherwise fixes only points in this set.
      *
      * Per SPECIFICATION.md §5.13:
      * Implements rubber-band dragging with spring resistance
      *
      * Current implementation adds temporary coordinate constraints for the dragged point.
      */
-    SolverResult solveWithDrag(EntityID pointId, const Vec2d& targetPos);
+    SolverResult solveWithDrag(EntityID pointId, const Vec2d& targetPos,
+                               const std::unordered_set<EntityID>& pointIdsToFix = {});
 
     /**
      * @brief Apply solution from last successful solve

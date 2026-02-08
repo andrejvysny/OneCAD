@@ -22,9 +22,6 @@
       "openai": 3,
       "google": 5,
       "github-copilot": 5
-    },
-    "modelConcurrency": {
-      "github-copilot/claude-sonnet-4.5": 2
     }
   },
 
@@ -70,7 +67,7 @@
 
     // Geometry/kernel work
     "geometry-kernel": {
-      "model": "openai/gpt-5.2-codex",
+      "model": "openai/gpt-5.3-codex",
       "variant": "high",
       "temperature": 0.1,
       "prompt_append": "Geometry/kernel specialist:\n- OCCT BRep (TopoDS_*, BRepBuilderAPI_*, BRepAlgoAPI_*)\n- ElementMap topological naming (src/kernel/elementmap/)\n- Shape evolution (Modified/Generated/Deleted)\n- Boolean operations correctness\n- Always null-check Handle<> objects"
@@ -78,7 +75,7 @@
 
     // Sketch engine work
     "sketching": {
-      "model": "openai/gpt-5.2-codex",
+      "model": "openai/gpt-5.3-codex",
       "variant": "high",
       "temperature": 0.1,
       "prompt_append": "Sketching specialist:\n- PlaneGCS solver (src/core/sketch/solver/ConstraintSolver.cpp 1014 LOC)\n- 15 constraint types (src/core/sketch/constraints/Constraints.h)\n- SnapManager (2mm radius, priority: Vertex>Endpoint>Midpoint>Center>Quadrant>Intersection>Grid)\n- AutoConstrainer (±5° for H/V, 2mm for coincident)\n- CRITICAL: Non-standard SketchPlane::XY() mapping"
@@ -86,7 +83,7 @@
 
     // Rendering/viewport work
     "rendering": {
-      "model": "google/antigravity-claude-sonnet-4-5",
+      "model": "openai/gpt-5.3-codex",
       "temperature": 0.2,
       "prompt_append": "Rendering specialist:\n- OpenGL 4.1 Core Profile\n- Camera3D orbit/pan/zoom (missing inertia = known)\n- Grid3D (fixed 10mm, shader-based)\n- SketchRenderer (1903 LOC) + BodyRenderer (727 LOC)\n- Viewport picking and selection\n- Ensure GL state bind/unbind pairs"
     },
@@ -98,21 +95,21 @@
 
     // Performance profiling
     "perf-profiling": {
-      "model": "github-copilot/gpt-5-mini",
+      "model": "openai/gpt-5.1-codex-mini",
       "temperature": 0.1,
       "prompt_append": "OneCAD perf:\n- Viewport render loop frame-time\n- Avoid per-frame allocations\n- TessellationCache reuse\n- Solver hot paths\n- Evidence-based profiling"
     },
 
     // Build/CMake
     "build-cmake": {
-      "model": "github-copilot/gpt-5-mini",
+      "model": "openai/gpt-5.1-codex-mini",
       "temperature": 0.2,
       "prompt_append": "CMake specialist:\n- CMake 3.25+ C++20\n- Qt6 AUTOMOC/AUTORCC/AUTOUIC\n- OCCT and Eigen3 detection\n- Ninja generator + compile_commands.json\n- macOS bundle configuration"
     },
 
     // Tests
     "tests": {
-      "model": "github-copilot/gpt-5-mini",
+      "model": "openai/gpt-5.1-codex-mini",
       "temperature": 0.2,
       "prompt_append": "Test specialist:\n- Prototype executables (no ctest framework yet)\n- proto_elementmap_rigorous - REQUIRED for kernel changes\n- proto_sketch_geometry, proto_sketch_constraints, proto_sketch_solver\n- proto_loop_detector, proto_face_builder\n- proto_regeneration (10.8KB - extensive)"
     },

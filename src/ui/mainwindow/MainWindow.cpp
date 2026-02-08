@@ -545,20 +545,30 @@ void MainWindow::setupToolBar() {
             this, &MainWindow::onExitSketch);
 
     if (m_viewport) {
-        connect(m_toolbar, &ContextToolbar::lineToolActivated,
-                m_viewport, &Viewport::activateLineTool);
-        connect(m_toolbar, &ContextToolbar::circleToolActivated,
-                m_viewport, &Viewport::activateCircleTool);
-        connect(m_toolbar, &ContextToolbar::rectangleToolActivated,
-                m_viewport, &Viewport::activateRectangleTool);
-        connect(m_toolbar, &ContextToolbar::arcToolActivated,
-                m_viewport, &Viewport::activateArcTool);
-        connect(m_toolbar, &ContextToolbar::ellipseToolActivated,
-                m_viewport, &Viewport::activateEllipseTool);
-        connect(m_toolbar, &ContextToolbar::trimToolActivated,
-                m_viewport, &Viewport::activateTrimTool);
-        connect(m_toolbar, &ContextToolbar::mirrorToolActivated,
-                m_viewport, &Viewport::activateMirrorTool);
+        auto activateTool = [this](void (Viewport::*slot)()) {
+            (m_viewport->*slot)();
+        };
+        connect(m_toolbar, &ContextToolbar::lineToolActivated, this, [this, activateTool]() {
+            activateTool(&Viewport::activateLineTool);
+        });
+        connect(m_toolbar, &ContextToolbar::circleToolActivated, this, [this, activateTool]() {
+            activateTool(&Viewport::activateCircleTool);
+        });
+        connect(m_toolbar, &ContextToolbar::rectangleToolActivated, this, [this, activateTool]() {
+            activateTool(&Viewport::activateRectangleTool);
+        });
+        connect(m_toolbar, &ContextToolbar::arcToolActivated, this, [this, activateTool]() {
+            activateTool(&Viewport::activateArcTool);
+        });
+        connect(m_toolbar, &ContextToolbar::ellipseToolActivated, this, [this, activateTool]() {
+            activateTool(&Viewport::activateEllipseTool);
+        });
+        connect(m_toolbar, &ContextToolbar::trimToolActivated, this, [this, activateTool]() {
+            activateTool(&Viewport::activateTrimTool);
+        });
+        connect(m_toolbar, &ContextToolbar::mirrorToolActivated, this, [this, activateTool]() {
+            activateTool(&Viewport::activateMirrorTool);
+        });
 
         connect(m_viewport, &Viewport::extrudeToolActiveChanged,
                 m_toolbar, &ContextToolbar::setExtrudeActive);
@@ -951,6 +961,9 @@ void MainWindow::setupViewport() {
             this, &MainWindow::onSketchUpdated);
     connect(m_viewport, &Viewport::openSketchForEditRequested,
             this, &MainWindow::openSketchForEdit);
+    connect(m_viewport, &Viewport::statusMessageRequested, this, [this](const QString& message) {
+        statusBar()->showMessage(message, 4000);
+    });
 
     connect(m_navigator, &ModelNavigator::sketchSelected, this, [this](const QString& id) {
         if (m_viewport) {
@@ -1810,7 +1823,11 @@ void MainWindow::onConstraintRequested(core::sketch::ConstraintType constraintTy
             // Could optionally remove the constraint here if desired
         }
     } else {
-        m_toolStatus->setText(tr("Cannot apply constraint to selection"));
+        if (type == CT::Fixed && selected.size() == 1) {
+            m_toolStatus->setText(tr("Fixed requires a point (select a point, not an edge)"));
+        } else {
+            m_toolStatus->setText(tr("Cannot apply constraint to selection"));
+        }
     }
 }
 

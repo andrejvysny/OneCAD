@@ -53,6 +53,9 @@ public:
     const double& fixedXRef() const { return m_fixedX; }
     const double& fixedYRef() const { return m_fixedY; }
 
+    /** Add (dx, dy) to fixed position (e.g. when translating whole sketch). */
+    void translate(double dx, double dy);
+
 private:
     friend class onecad::core::sketch::ConstraintFactory;
     FixedConstraint() = default;
