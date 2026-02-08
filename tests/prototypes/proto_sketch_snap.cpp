@@ -217,6 +217,104 @@ TestResult testGridSnap() {
     return expectSnap(result, SnapType::Grid);
 }
 
+TestResult testPerpendicularSnapLine() {
+    Sketch sketch;
+    sketch.addLine(0.0, 0.0, 10.0, 0.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Perpendicular});
+    SnapResult result = manager.findBestSnap({5.0, 1.5}, sketch);
+    TestResult check = expectSnap(result, SnapType::Perpendicular);
+    if (!check.pass) {
+        return check;
+    }
+    if (!approx(result.position.x, 5.0, 0.01) || !approx(result.position.y, 0.0, 0.01)) {
+        return {false, "(5,0)", "(" + std::to_string(result.position.x) + "," + std::to_string(result.position.y) + ")"};
+    }
+    return {true, "", ""};
+}
+
+TestResult testPerpendicularSnapCircle() {
+    Sketch sketch;
+    EntityID center = sketch.addPoint(20.0, 20.0);
+    sketch.addCircle(center, 5.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Perpendicular});
+    SnapResult result = manager.findBestSnap({26.0, 20.0}, sketch);
+    TestResult check = expectSnap(result, SnapType::Perpendicular);
+    if (!check.pass) {
+        return check;
+    }
+    if (!approx(result.position.x, 25.0, 0.01) || !approx(result.position.y, 20.0, 0.01)) {
+        return {false, "(25,20)", "(" + std::to_string(result.position.x) + "," + std::to_string(result.position.y) + ")"};
+    }
+    return {true, "", ""};
+}
+
+TestResult testPerpendicularSnapArc() {
+    Sketch sketch;
+    EntityID center = sketch.addPoint(40.0, 40.0);
+    sketch.addArc(center, 3.0, 0.0, M_PI * 0.5);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Perpendicular});
+    SnapResult result = manager.findBestSnap({42.2, 42.2}, sketch);
+    TestResult check = expectSnap(result, SnapType::Perpendicular);
+    if (!check.pass) {
+        return check;
+    }
+
+    const double expected = 40.0 + (3.0 / std::sqrt(2.0));
+    if (!approx(result.position.x, expected, 0.01) || !approx(result.position.y, expected, 0.01)) {
+        return {false,
+                "(" + std::to_string(expected) + "," + std::to_string(expected) + ")",
+                "(" + std::to_string(result.position.x) + "," + std::to_string(result.position.y) + ")"};
+    }
+    return {true, "", ""};
+}
+
+TestResult testTangentSnapCircle() {
+    Sketch sketch;
+    EntityID center = sketch.addPoint(20.0, 20.0);
+    sketch.addCircle(center, 5.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Tangent});
+    manager.setSnapRadius(10.0);
+    SnapResult result = manager.findBestSnap({30.0, 20.0}, sketch);
+    TestResult check = expectSnap(result, SnapType::Tangent);
+    if (!check.pass) {
+        return check;
+    }
+
+    const Vec2d expected1{22.5, 20.0 + 2.5 * std::sqrt(3.0)};
+    const Vec2d expected2{22.5, 20.0 - 2.5 * std::sqrt(3.0)};
+    const bool matchFirst = approx(result.position.x, expected1.x, 0.01) && approx(result.position.y, expected1.y, 0.01);
+    const bool matchSecond = approx(result.position.x, expected2.x, 0.01) && approx(result.position.y, expected2.y, 0.01);
+    if (!matchFirst && !matchSecond) {
+        return {false,
+                "(22.5, 24.3301) or (22.5, 15.6699)",
+                "(" + std::to_string(result.position.x) + "," + std::to_string(result.position.y) + ")"};
+    }
+    return {true, "", ""};
+}
+
+TestResult testTangentSnapArc() {
+    Sketch sketch;
+    EntityID center = sketch.addPoint(40.0, 40.0);
+    sketch.addArc(center, 3.0, 0.0, M_PI * 0.5);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Tangent});
+    manager.setSnapRadius(5.0);
+    SnapResult result = manager.findBestSnap({45.0, 40.0}, sketch);
+    TestResult check = expectSnap(result, SnapType::Tangent);
+    if (!check.pass) {
+        return check;
+    }
+
+    if (!approx(result.position.x, 41.8, 0.01) || !approx(result.position.y, 42.4, 0.01)) {
+        return {false, "(41.8,42.4)", "(" + std::to_string(result.position.x) + "," + std::to_string(result.position.y) + ")"};
+    }
+    return {true, "", ""};
+}
+
 TestResult testPriorityOrder() {
     Sketch sketch = createTestSketch();
     SnapManager manager = createSnapManagerFor({SnapType::Vertex, SnapType::Endpoint});
@@ -367,6 +465,11 @@ int main(int argc, char** argv) {
         {"test_ellipse_line_intersection", testEllipseLineIntersection},
         {"test_ellipse_quadrant_rotated", testEllipseQuadrantRotated},
         {"test_grid_snap", testGridSnap},
+        {"test_perpendicular_snap_line", testPerpendicularSnapLine},
+        {"test_perpendicular_snap_circle", testPerpendicularSnapCircle},
+        {"test_perpendicular_snap_arc", testPerpendicularSnapArc},
+        {"test_tangent_snap_circle", testTangentSnapCircle},
+        {"test_tangent_snap_arc", testTangentSnapArc},
         {"test_priority_order", testPriorityOrder},
         {"test_spatial_hash_equivalent_to_bruteforce", testSpatialHashEquivalentToBruteforce}
     };

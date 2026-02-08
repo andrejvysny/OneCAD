@@ -131,6 +131,12 @@ std::vector<SnapResult> SnapManager::findAllSnaps(
     if (gridSnapEnabled_ && isSnapEnabled(SnapType::Grid)) {
         findGridSnaps(cursorPos, radiusSq, results);
     }
+    if (isSnapEnabled(SnapType::Perpendicular)) {
+        findPerpendicularSnaps(cursorPos, sketch, excludeEntities, radiusSq, results);
+    }
+    if (isSnapEnabled(SnapType::Tangent)) {
+        findTangentSnaps(cursorPos, sketch, excludeEntities, radiusSq, results);
+    }
     if (isSnapEnabled(SnapType::ActiveLayer3D)) {
         findExternalSnaps(cursorPos, radiusSq, results);
     }
@@ -654,6 +660,201 @@ void SnapManager::findGridSnaps(
             .position = gridPt,
             .distance = std::sqrt(distSq)
         });
+    }
+}
+
+void SnapManager::findPerpendicularSnaps(
+    const Vec2d& cursorPos,
+    const Sketch& sketch,
+    const std::unordered_set<EntityID>& excludeEntities,
+    double radiusSq,
+    std::vector<SnapResult>& results) const
+{
+    constexpr double kGeomEps = 1e-6;
+
+    for (const auto& entity : sketch.getAllEntities()) {
+        if (excludeEntities.count(entity->id())) continue;
+
+        Vec2d foot;
+        bool found = false;
+
+        if (entity->type() == EntityType::Line) {
+            const auto* line = static_cast<const SketchLine*>(entity.get());
+            const auto* startPt = sketch.getEntityAs<SketchPoint>(line->startPointId());
+            const auto* endPt = sketch.getEntityAs<SketchPoint>(line->endPointId());
+            if (!startPt || !endPt) continue;
+
+            const Vec2d startPos = toVec2d(startPt->position());
+            const Vec2d endPos = toVec2d(endPt->position());
+            const Vec2d lineDir{endPos.x - startPos.x, endPos.y - startPos.y};
+            const double len2 = lineDir.x * lineDir.x + lineDir.y * lineDir.y;
+            if (len2 < 1e-12) continue;
+
+            const double t = ((cursorPos.x - startPos.x) * lineDir.x +
+                              (cursorPos.y - startPos.y) * lineDir.y) / len2;
+            if (t < 0.0 || t > 1.0) continue;
+
+            foot = {
+                startPos.x + t * lineDir.x,
+                startPos.y + t * lineDir.y
+            };
+            found = true;
+        }
+        else if (entity->type() == EntityType::Circle) {
+            const auto* circle = static_cast<const SketchCircle*>(entity.get());
+            const auto* centerPt = sketch.getEntityAs<SketchPoint>(circle->centerPointId());
+            if (!centerPt) continue;
+
+            const double radius = circle->radius();
+            if (radius < kGeomEps) continue;
+
+            const Vec2d center = toVec2d(centerPt->position());
+            const double dx = cursorPos.x - center.x;
+            const double dy = cursorPos.y - center.y;
+            const double len2 = dx * dx + dy * dy;
+            if (len2 < 1e-12) continue;
+
+            const double len = std::sqrt(len2);
+            foot = {
+                center.x + radius * dx / len,
+                center.y + radius * dy / len
+            };
+            found = true;
+        }
+        else if (entity->type() == EntityType::Arc) {
+            const auto* arc = static_cast<const SketchArc*>(entity.get());
+            const auto* centerPt = sketch.getEntityAs<SketchPoint>(arc->centerPointId());
+            if (!centerPt) continue;
+
+            const double radius = arc->radius();
+            if (radius < kGeomEps) continue;
+
+            const Vec2d center = toVec2d(centerPt->position());
+            const double dx = cursorPos.x - center.x;
+            const double dy = cursorPos.y - center.y;
+            const double len2 = dx * dx + dy * dy;
+            if (len2 < 1e-12) continue;
+
+            const double len = std::sqrt(len2);
+            const Vec2d onCircle{
+                center.x + radius * dx / len,
+                center.y + radius * dy / len
+            };
+
+            const double angle = std::atan2(onCircle.y - center.y, onCircle.x - center.x);
+            if (!arc->containsAngle(angle)) continue;
+
+            foot = onCircle;
+            found = true;
+        }
+
+        if (!found) continue;
+
+        const double distSq = distanceSquared(cursorPos, foot);
+        if (distSq <= radiusSq) {
+            results.push_back({
+                .snapped = true,
+                .type = SnapType::Perpendicular,
+                .position = foot,
+                .entityId = entity->id(),
+                .distance = std::sqrt(distSq)
+            });
+        }
+    }
+}
+
+void SnapManager::findTangentSnaps(
+    const Vec2d& cursorPos,
+    const Sketch& sketch,
+    const std::unordered_set<EntityID>& excludeEntities,
+    double radiusSq,
+    std::vector<SnapResult>& results) const
+{
+    constexpr double kGeomEps = 1e-6;
+
+    for (const auto& entity : sketch.getAllEntities()) {
+        if (excludeEntities.count(entity->id())) continue;
+
+        Vec2d center;
+        double radius = 0.0;
+        bool isArc = false;
+        const SketchArc* arc = nullptr;
+
+        if (entity->type() == EntityType::Circle) {
+            const auto* circle = static_cast<const SketchCircle*>(entity.get());
+            const auto* centerPt = sketch.getEntityAs<SketchPoint>(circle->centerPointId());
+            if (!centerPt) continue;
+            center = toVec2d(centerPt->position());
+            radius = circle->radius();
+        }
+        else if (entity->type() == EntityType::Arc) {
+            arc = static_cast<const SketchArc*>(entity.get());
+            const auto* centerPt = sketch.getEntityAs<SketchPoint>(arc->centerPointId());
+            if (!centerPt) continue;
+            center = toVec2d(centerPt->position());
+            radius = arc->radius();
+            isArc = true;
+        }
+        else if (entity->type() == EntityType::Ellipse) {
+            // TODO: Add analytic tangent snap solving for ellipses.
+            continue;
+        }
+        else {
+            continue;
+        }
+
+        if (radius < kGeomEps) continue;
+
+        const Vec2d vp{cursorPos.x - center.x, cursorPos.y - center.y};
+        const double c2 = vp.x * vp.x + vp.y * vp.y;
+        const double r2 = radius * radius;
+        if (c2 <= r2 + 1e-12) continue;
+
+        const double discriminant = c2 - r2;
+        const double sqrtDisc = std::sqrt(discriminant);
+        const Vec2d offset{-vp.y, vp.x};
+        const double scale = radius * sqrtDisc / c2;
+        const Vec2d base{
+            center.x + vp.x * (r2 / c2),
+            center.y + vp.y * (r2 / c2)
+        };
+
+        const Vec2d tp1{base.x + offset.x * scale, base.y + offset.y * scale};
+        const Vec2d tp2{base.x - offset.x * scale, base.y - offset.y * scale};
+
+        auto isValidTangentPoint = [&](const Vec2d& point) {
+            if (!isArc) return true;
+            const double angle = std::atan2(point.y - center.y, point.x - center.x);
+            return arc->containsAngle(angle);
+        };
+
+        const bool tp1Valid = isValidTangentPoint(tp1);
+        const bool tp2Valid = isValidTangentPoint(tp2);
+        if (!tp1Valid && !tp2Valid) continue;
+
+        double bestDistSq = std::numeric_limits<double>::max();
+        Vec2d bestPoint;
+        if (tp1Valid) {
+            bestDistSq = distanceSquared(cursorPos, tp1);
+            bestPoint = tp1;
+        }
+        if (tp2Valid) {
+            const double distSq = distanceSquared(cursorPos, tp2);
+            if (distSq < bestDistSq) {
+                bestDistSq = distSq;
+                bestPoint = tp2;
+            }
+        }
+
+        if (bestDistSq <= radiusSq) {
+            results.push_back({
+                .snapped = true,
+                .type = SnapType::Tangent,
+                .position = bestPoint,
+                .entityId = entity->id(),
+                .distance = std::sqrt(bestDistSq)
+            });
+        }
     }
 }
 

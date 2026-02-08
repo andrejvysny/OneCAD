@@ -273,6 +273,24 @@ private:
                        std::vector<SnapResult>& results) const;
 
     /**
+     * @brief Find perpendicular inference snaps
+     */
+    void findPerpendicularSnaps(const Vec2d& cursorPos,
+                                const Sketch& sketch,
+                                const std::unordered_set<EntityID>& excludeEntities,
+                                double radiusSq,
+                                std::vector<SnapResult>& results) const;
+
+    /**
+     * @brief Find tangent inference snaps
+     */
+    void findTangentSnaps(const Vec2d& cursorPos,
+                          const Sketch& sketch,
+                          const std::unordered_set<EntityID>& excludeEntities,
+                          double radiusSq,
+                          std::vector<SnapResult>& results) const;
+
+    /**
      * @brief Find snap to external geometry (3D)
      */
     void findExternalSnaps(const Vec2d& cursorPos,
