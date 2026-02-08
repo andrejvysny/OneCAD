@@ -398,7 +398,10 @@ public:
      * Per SPECIFICATION.md §5.14:
      * Ghost icon showing snap type (vertex, grid, etc.)
      */
-    void showSnapIndicator(const Vec2d& pos, SnapType type);
+    void showSnapIndicator(const Vec2d& pos, SnapType type,
+                           const Vec2d& guideOrigin = {0.0, 0.0},
+                           bool hasGuide = false,
+                           const std::string& hintText = "");
 
     /**
      * @brief Hide snap indicator
@@ -497,6 +500,9 @@ private:
         bool active = false;
         Vec2d position{0.0, 0.0};
         SnapType type = SnapType::None;
+        Vec2d guideOrigin{0.0, 0.0};
+        bool hasGuide = false;
+        std::string hintText;
     } snapIndicator_;
 
     // Region data

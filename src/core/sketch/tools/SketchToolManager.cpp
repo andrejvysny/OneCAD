@@ -199,7 +199,16 @@ void SketchToolManager::renderPreview() {
 
     // Show snap indicator if snapped
     if (currentSnapResult_.snapped) {
-        renderer_->showSnapIndicator(currentSnapResult_.position, currentSnapResult_.type);
+        const bool showGuide = snapManager_.showGuidePoints() && currentSnapResult_.hasGuide;
+        const std::string hintText = snapManager_.showSnappingHints()
+            ? currentSnapResult_.hintText
+            : std::string();
+        renderer_->showSnapIndicator(
+            currentSnapResult_.position,
+            currentSnapResult_.type,
+            currentSnapResult_.guideOrigin,
+            showGuide,
+            hintText);
     } else {
         renderer_->hideSnapIndicator();
     }

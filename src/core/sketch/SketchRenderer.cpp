@@ -128,6 +128,31 @@ float lineWidthForState(SelectionState state, bool isConstruction,
     }
 }
 
+Vec3d snapColorForType(SnapType type) {
+    switch (type) {
+        case SnapType::Vertex:
+        case SnapType::Endpoint:
+        case SnapType::Midpoint:
+        case SnapType::Center:
+            return {0.2, 0.8, 0.3};
+        case SnapType::Quadrant:
+        case SnapType::Intersection:
+        case SnapType::OnCurve:
+            return {0.2, 0.7, 0.9};
+        case SnapType::Perpendicular:
+        case SnapType::Tangent:
+        case SnapType::SketchGuide:
+            return {0.9, 0.5, 0.1};
+        case SnapType::Horizontal:
+        case SnapType::Vertical:
+            return {0.3, 0.5, 0.9};
+        case SnapType::Grid:
+            return {0.6, 0.6, 0.6};
+        default:
+            return {0.9, 0.5, 0.1};
+    }
+}
+
 void appendSegment(std::vector<float>& data, const Vec2d& p1, const Vec2d& p2, const Vec3d& color) {
     data.push_back(static_cast<float>(p1.x));
     data.push_back(static_cast<float>(p1.y));
@@ -612,7 +637,9 @@ public:
                    bool snapActive,
                    const Vec2d& snapPos,
                    float snapSize,
-                   const Vec3d& snapColor);
+                   const Vec3d& snapColor,
+                   const Vec2d& snapGuideOrigin,
+                   bool snapHasGuide);
     void render(const QMatrix4x4& mvp, const SketchRenderStyle& style);
     void renderPoints(const QMatrix4x4& mvp);
     void renderPreview(const QMatrix4x4& mvp, const std::vector<Vec2d>& vertices,
@@ -631,6 +658,9 @@ public:
     std::unique_ptr<QOpenGLBuffer> highlightLineVBO_;
     std::unique_ptr<QOpenGLVertexArrayObject> highlightLineVAO_;
     int highlightLineVertexCount_ = 0;
+    std::unique_ptr<QOpenGLBuffer> guideLineVBO_;
+    std::unique_ptr<QOpenGLVertexArrayObject> guideLineVAO_;
+    int guideLineVertexCount_ = 0;
 
     // Region rendering
     std::unique_ptr<QOpenGLBuffer> regionVBO_;
@@ -663,6 +693,8 @@ bool SketchRendererImpl::initialize() {
         if (constructionLineVBO_ && constructionLineVBO_->isCreated()) constructionLineVBO_->destroy();
         if (highlightLineVAO_ && highlightLineVAO_->isCreated()) highlightLineVAO_->destroy();
         if (highlightLineVBO_ && highlightLineVBO_->isCreated()) highlightLineVBO_->destroy();
+        if (guideLineVAO_ && guideLineVAO_->isCreated()) guideLineVAO_->destroy();
+        if (guideLineVBO_ && guideLineVBO_->isCreated()) guideLineVBO_->destroy();
         if (regionVAO_ && regionVAO_->isCreated()) regionVAO_->destroy();
         if (regionVBO_ && regionVBO_->isCreated()) regionVBO_->destroy();
         if (pointVAO_ && pointVAO_->isCreated()) pointVAO_->destroy();
@@ -675,6 +707,8 @@ bool SketchRendererImpl::initialize() {
         constructionLineVBO_.reset();
         highlightLineVAO_.reset();
         highlightLineVBO_.reset();
+        guideLineVAO_.reset();
+        guideLineVBO_.reset();
         regionVAO_.reset();
         regionVBO_.reset();
         pointVAO_.reset();
@@ -735,6 +769,13 @@ bool SketchRendererImpl::initialize() {
         return false;
     }
 
+    guideLineVAO_ = std::make_unique<QOpenGLVertexArrayObject>();
+    guideLineVBO_ = std::make_unique<QOpenGLBuffer>(QOpenGLBuffer::VertexBuffer);
+    if (!guideLineVAO_->create() || !guideLineVBO_->create()) {
+        cleanupOnFailure();
+        return false;
+    }
+
     regionVAO_ = std::make_unique<QOpenGLVertexArrayObject>();
     regionVBO_ = std::make_unique<QOpenGLBuffer>(QOpenGLBuffer::VertexBuffer);
     if (!regionVAO_->create() || !regionVBO_->create()) {
@@ -759,6 +800,7 @@ bool SketchRendererImpl::initialize() {
     lineVBO_->setUsagePattern(QOpenGLBuffer::DynamicDraw);
     constructionLineVBO_->setUsagePattern(QOpenGLBuffer::DynamicDraw);
     highlightLineVBO_->setUsagePattern(QOpenGLBuffer::DynamicDraw);
+    guideLineVBO_->setUsagePattern(QOpenGLBuffer::DynamicDraw);
     regionVBO_->setUsagePattern(QOpenGLBuffer::DynamicDraw);
     pointVBO_->setUsagePattern(QOpenGLBuffer::DynamicDraw);
     previewVBO_->setUsagePattern(QOpenGLBuffer::DynamicDraw);
@@ -776,6 +818,8 @@ void SketchRendererImpl::cleanup() {
     if (constructionLineVBO_ && constructionLineVBO_->isCreated()) constructionLineVBO_->destroy();
     if (highlightLineVAO_ && highlightLineVAO_->isCreated()) highlightLineVAO_->destroy();
     if (highlightLineVBO_ && highlightLineVBO_->isCreated()) highlightLineVBO_->destroy();
+    if (guideLineVAO_ && guideLineVAO_->isCreated()) guideLineVAO_->destroy();
+    if (guideLineVBO_ && guideLineVBO_->isCreated()) guideLineVBO_->destroy();
     if (regionVAO_ && regionVAO_->isCreated()) regionVAO_->destroy();
     if (regionVBO_ && regionVBO_->isCreated()) regionVBO_->destroy();
     if (pointVAO_ && pointVAO_->isCreated()) pointVAO_->destroy();
@@ -804,7 +848,9 @@ void SketchRendererImpl::buildVBOs(
     bool snapActive,
     const Vec2d& snapPos,
     float snapSize,
-    const Vec3d& snapColor) {
+    const Vec3d& snapColor,
+    const Vec2d& snapGuideOrigin,
+    bool snapHasGuide) {
 
     // Region data: pos(2) + color(4) = 6 floats per vertex
     std::vector<float> regionData;
@@ -812,6 +858,7 @@ void SketchRendererImpl::buildVBOs(
     std::vector<float> lineData;
     std::vector<float> constructionLineData;
     std::vector<float> highlightLineData;
+    std::vector<float> guideLineData;
     // Point data: pos(2) + color(4) + size(1) = 7 floats per vertex
     std::vector<float> pointData;
 
@@ -951,6 +998,13 @@ void SketchRendererImpl::buildVBOs(
     }
 
     if (snapActive) {
+        if (snapHasGuide) {
+            const double guideDash = 2.0 * std::max(pixelScale, 1e-9);
+            const double guideGap = 2.0 * std::max(pixelScale, 1e-9);
+            appendDashedPolyline(guideLineData, {snapGuideOrigin, snapPos}, {0.9, 0.5, 0.1},
+                                 guideDash, guideGap);
+        }
+
         pointData.push_back(static_cast<float>(snapPos.x));
         pointData.push_back(static_cast<float>(snapPos.y));
         pointData.push_back(static_cast<float>(snapColor.x));
@@ -1032,6 +1086,23 @@ void SketchRendererImpl::buildVBOs(
         highlightLineVAO_->release();
     }
 
+    guideLineVertexCount_ = static_cast<int>(guideLineData.size() / 6);
+    if (!guideLineData.empty()) {
+        guideLineVAO_->bind();
+        guideLineVBO_->bind();
+        guideLineVBO_->allocate(guideLineData.data(),
+                                static_cast<int>(guideLineData.size() * sizeof(float)));
+
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 6 * sizeof(float), nullptr);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
+                              reinterpret_cast<void*>(2 * sizeof(float)));
+
+        guideLineVBO_->release();
+        guideLineVAO_->release();
+    }
+
     // Upload point data
     pointVertexCount_ = static_cast<int>(pointData.size() / 7);
     if (!pointData.empty()) {
@@ -1099,6 +1170,13 @@ void SketchRendererImpl::render(const QMatrix4x4& mvp, const SketchRenderStyle& 
         highlightLineVAO_->bind();
         glDrawArrays(GL_LINES, 0, highlightLineVertexCount_);
         highlightLineVAO_->release();
+    }
+
+    if (guideLineVertexCount_ > 0) {
+        glLineWidth(1.0f);
+        guideLineVAO_->bind();
+        glDrawArrays(GL_LINES, 0, guideLineVertexCount_);
+        guideLineVAO_->release();
     }
 
     glDisable(GL_LINE_SMOOTH);
@@ -1654,15 +1732,23 @@ void SketchRenderer::clearPreviewDimensions() {
     previewDimensions_.clear();
 }
 
-void SketchRenderer::showSnapIndicator(const Vec2d& pos, SnapType type) {
+void SketchRenderer::showSnapIndicator(const Vec2d& pos, SnapType type,
+                                       const Vec2d& guideOrigin,
+                                       bool hasGuide,
+                                       const std::string& hintText) {
     snapIndicator_.active = true;
     snapIndicator_.position = pos;
     snapIndicator_.type = type;
+    snapIndicator_.guideOrigin = guideOrigin;
+    snapIndicator_.hasGuide = hasGuide;
+    snapIndicator_.hintText = hintText;
     vboDirty_ = true;
 }
 
 void SketchRenderer::hideSnapIndicator() {
     snapIndicator_.active = false;
+    snapIndicator_.hasGuide = false;
+    snapIndicator_.hintText.clear();
     vboDirty_ = true;
 }
 
@@ -1900,11 +1986,15 @@ void SketchRenderer::buildVBOs() {
     bool snapActive = snapIndicator_.active;
     Vec2d snapPos = snapIndicator_.position;
     float snapSize = renderStyle.snapPointSize;
-    Vec3d snapColor = renderStyle.colors.constraintIcon;
+    Vec3d snapColor = snapActive ? snapColorForType(snapIndicator_.type)
+                                 : renderStyle.colors.constraintIcon;
+    Vec2d snapGuideOrigin = snapIndicator_.guideOrigin;
+    bool snapHasGuide = snapIndicator_.hasGuide;
     impl_->buildVBOs(entityRenderData_, regionRenderData_, renderStyle, entitySelections_,
                      selectedRegions_, hoverRegion_, hoverEntity_,
                      viewport_, pixelScale_, constraintRenderData_,
-                     ghostConstraints_, snapActive, snapPos, snapSize, snapColor);
+                     ghostConstraints_, snapActive, snapPos, snapSize, snapColor,
+                     snapGuideOrigin, snapHasGuide);
     vboDirty_ = false;
 }
 
