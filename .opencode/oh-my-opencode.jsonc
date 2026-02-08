@@ -1,30 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-opencode/master/assets/oh-my-opencode.schema.json",
 
-  // Sisyphus orchestration
-  "sisyphus_agent": {
-    "disabled": false,
-    "planner_enabled": true,
-    "replace_plan": true
-  },
-
-  // Git integration
-  "git_master": {
-    "commit_footer": false,
-    "include_co_authored_by": true
-  },
-
-  // Background concurrency (5 accounts)
-  "background_task": {
-    "defaultConcurrency": 5,
-    "providerConcurrency": {
-      "anthropic": 2,
-      "openai": 3,
-      "google": 5,
-      "github-copilot": 5
-    }
-  },
-
   // ═══════════════════════════════════════════
   // AGENT DOMAIN KNOWLEDGE (prompt_append only)
   // ═══════════════════════════════════════════

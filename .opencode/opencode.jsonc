@@ -1,12 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
 
-  // Project rules: AGENTS.md + documentation
-  "instructions": [
-    "AGENTS.md",
-    "src/**/AGENTS.md",
-    "docs/**/*.md"
-  ],
 
   // Permission configuration (safe-by-default for CAD)
   "permission": {
@@ -69,90 +63,6 @@
         ".hh"
       ]
     }
-  },
-
-  // CAD-specific custom commands
-  "command": {
-    "cfg": {
-      "description": "Configure via CMake (Ninja + compile_commands.json)",
-      "agent": "build",
-      "template": "Configure the project using CMake with Ninja generator and compile_commands.json export. Use CMakePresets.json if available, otherwise: cmake -B build -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_PREFIX_PATH=/opt/homebrew/opt/qt"
-    },
-    "build": {
-      "description": "Build OneCAD (fast)",
-      "agent": "build",
-      "template": "Build the OneCAD target with Ninja (cmake --build build). If build fails, analyze compiler errors and propose minimal fixes."
-    },
-    "proto": {
-      "description": "Build and run prototype executable",
-      "agent": "build",
-      "template": "Build the specified prototype target (e.g., proto_sketch_solver, proto_elementmap_rigorous) and run it. If no target specified, list available prototypes from tests/CMakeLists.txt."
-    },
-    "fmt": {
-      "description": "Format changed C/C++ files",
-      "agent": "build",
-      "template": "Run clang-format on changed C/C++ files (git diff --name-only | grep -E '\\.(cpp|h|hpp)$'). Do not reformat unrelated files. Use the project .clang-format configuration."
-    },
-    "tidy": {
-      "description": "clang-tidy on changed files",
-      "agent": "build",
-      "template": "Run clang-tidy on changed C/C++ files using compile_commands.json from build/. Focus on correctness and safety issues (OCCT handle usage, null checks). Skip style warnings."
-    },
-    "asan": {
-      "description": "ASAN build + run",
-      "agent": "build",
-      "template": "Configure and build with AddressSanitizer enabled (-DCMAKE_CXX_FLAGS=-fsanitize=address), then run the specified target or prototype."
-    },
-    "sketch-test": {
-      "description": "Run sketch engine prototypes",
-      "agent": "build",
-      "template": "Build and run all sketch-related prototypes in sequence: proto_sketch_geometry, proto_sketch_constraints, proto_sketch_solver, proto_loop_detector, proto_face_builder. Report any failures."
-    },
-    "elementmap-test": {
-      "description": "Run ElementMap validation",
-      "agent": "build",
-      "template": "Build and run proto_elementmap_rigorous to validate topological naming system. This is REQUIRED before merging any changes to src/kernel/elementmap/."
-    }
-  },
-
-  // Custom CAD-focused agents
-  "agent": {
-    "cad-architect": {
-      "description": "C++ CAD architecture reviewer (kernel/rendering/sketch boundaries)",
-      "prompt": "You are a senior C++ CAD software architect reviewing changes. Focus on:\n- Kernel/rendering/UI layer separation\n- OCCT Handle<> usage patterns (null checks, ownership)\n- Topological naming invariants (ElementMap)\n- PlaneGCS solver integration correctness\n- Sketch entity lifecycle and constraint consistency\n- OpenGL state management in viewport\n- Qt signal/slot thread safety\nBe strict about architectural boundaries. Flag any pattern violations."
-    },
-    "occt-expert": {
-      "description": "OpenCASCADE expert for BRep operations",
-      "prompt": "You are an OpenCASCADE (OCCT) expert. Focus on:\n- BRep topology (Vertex < Edge < Wire < Face < Shell < Solid)\n- Handle<> smart pointer patterns (null checks before dereference)\n- TopoDS_Shape ownership and modification\n- Boolean operations (BRepAlgoAPI_*)\n- Topological naming and shape evolution tracking\n- STEP I/O integration notes (currently placeholder; avoid assuming it exists)\nAlways validate that Handle<> objects are non-null before use."
-    },
-    "sketch-expert": {
-      "description": "Sketch engine specialist (PlaneGCS + constraints)",
-      "prompt": "You are the sketch engine specialist for this CAD system. Focus on:\n- PlaneGCS solver integration (direct parameter binding, DOF tracking)\n- 15 constraint types implementation and interaction\n- Sketch entity lifecycle (EntityID = UUID string)\n- SnapManager priority and 2mm radius rules\n- AutoConstrainer inference (±5° tolerance)\n- Loop detection and FaceBuilder OCCT bridge\n- Non-standard coordinate mapping (Sketch XY != World XY)\nEnsure solver constraints match entity state after any modification."
-    },
-    "rendering-expert": {
-      "description": "OpenGL/viewport rendering specialist",
-      "prompt": "You are the rendering specialist for OneCAD. Focus on:\n- OpenGL 4.1 Core Profile state management\n- Camera3D orbit/pan/zoom behavior\n- Grid3D fixed 10mm spacing and shader correctness\n- SketchRenderer and constraint visualization\n- BodyRenderer/SceneMeshStore mesh upload and draw calls\n- Viewport picking and selection highlighting\nAvoid GL state leaks; always pair binds with unbinds."
-    },
-    "ui-ux-expert": {
-      "description": "Qt6 Widgets UI/interaction specialist",
-      "prompt": "You are the UI/interaction specialist for OneCAD. Focus on:\n- MainWindow, Viewport, ModelNavigator layout\n- ContextToolbar, SketchModePanel, ConstraintPanel\n- DimensionEditor inline editing\n- ThemeManager/QSettings persistence\n- Qt signal/slot connection types and ownership\nPropertyInspector exists but is not wired into the app yet."
-    },
-    "build-expert": {
-      "description": "CMake/toolchain specialist",
-      "prompt": "You are the build specialist for OneCAD. Focus on:\n- CMake 3.25+ with C++20 enforcement\n- Qt6 AUTOUIC/AUTOMOC/AUTORCC integration\n- OCCT and Eigen3 detection\n- Ninja generator + compile_commands.json\n- macOS bundle configuration\nPrefer minimal CMake changes and keep dependencies reproducible."
-    },
-    "test-expert": {
-      "description": "Prototype test specialist",
-      "prompt": "You are the testing specialist for OneCAD. Focus on:\n- Prototype executables (no ctest yet)\n- Sketch engine: proto_sketch_geometry, proto_sketch_constraints, proto_sketch_solver\n- Loop/face validation: proto_loop_detector, proto_face_builder\n- ElementMap validation: proto_elementmap_rigorous\n- UI compile check: test_compile\nKeep tests deterministic and small."
-    },
-    "perf-profiler": {
-      "description": "Performance profiling specialist",
-      "prompt": "You are the performance specialist for OneCAD. Focus on:\n- Frame-time stability in the Viewport render loop\n- Avoid per-frame allocations in render/ and sketch/ hot paths\n- TessellationCache reuse and batch uploads\n- Solver hot paths during interactive tools\nPrefer evidence-based profiling recommendations."
-    }
-  },
-
-  // Enable dynamic context pruning for large files
-  "experimental": {
-    "dynamic_context_pruning": true
   }
+
 }
