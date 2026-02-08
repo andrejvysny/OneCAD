@@ -17,17 +17,13 @@ SketchModePanel::SketchModePanel(QWidget* parent)
 }
 
 void SketchModePanel::setupUi() {
+    setObjectName("ConstraintToolsPanel");
     setWindowFlag(Qt::FramelessWindowHint, true);
     setAttribute(Qt::WA_StyledBackground, true);
     setFixedWidth(180);
 
-    // Apply styling
+    // Container styling (background, border, radius) from ThemeManager#ConstraintToolsPanel
     setStyleSheet(R"(
-        SketchModePanel {
-            background-color: palette(window);
-            border: 1px solid palette(mid);
-            border-radius: 4px;
-        }
         QLabel#title {
             font-weight: bold;
             font-size: 11px;
@@ -64,11 +60,11 @@ void SketchModePanel::setupUi() {
     )");
 
     m_layout = new QVBoxLayout(this);
-    m_layout->setContentsMargins(4, 4, 4, 4);
+    m_layout->setContentsMargins(8, 8, 8, 8);
     m_layout->setSpacing(2);
 
     // Title
-    m_titleLabel = new QLabel(tr("CONSTRAINTS"), this);
+    m_titleLabel = new QLabel(tr("Constraint tools"), this);
     m_titleLabel->setObjectName("title");
     m_layout->addWidget(m_titleLabel);
 

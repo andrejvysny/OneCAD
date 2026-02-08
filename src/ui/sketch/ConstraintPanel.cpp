@@ -20,18 +20,14 @@ ConstraintPanel::ConstraintPanel(QWidget* parent)
 }
 
 void ConstraintPanel::setupUi() {
+    setObjectName("ConstraintListPanel");
     setWindowFlag(Qt::FramelessWindowHint, true);
     setAttribute(Qt::WA_StyledBackground, true);
     setFixedWidth(200);
     setMaximumHeight(300);
 
-    // Apply subtle styling
+    // Container styling (background, border, radius) from ThemeManager#ConstraintListPanel
     setStyleSheet(R"(
-        ConstraintPanel {
-            background-color: palette(window);
-            border: 1px solid palette(mid);
-            border-radius: 4px;
-        }
         QLabel#title {
             font-weight: bold;
             font-size: 11px;
@@ -46,6 +42,9 @@ void ConstraintPanel::setupUi() {
         QListWidget::item {
             padding: 4px 8px;
         }
+        QListWidget::item:hover {
+            background-color: palette(midlight);
+        }
         QListWidget::item:selected {
             background-color: palette(highlight);
             color: palette(highlighted-text);
@@ -53,11 +52,11 @@ void ConstraintPanel::setupUi() {
     )");
 
     m_layout = new QVBoxLayout(this);
-    m_layout->setContentsMargins(0, 0, 0, 0);
+    m_layout->setContentsMargins(8, 8, 8, 8);
     m_layout->setSpacing(0);
 
     // Title
-    m_titleLabel = new QLabel(tr("CONSTRAINTS"), this);
+    m_titleLabel = new QLabel(tr("Applied constraints"), this);
     m_titleLabel->setObjectName("title");
     m_layout->addWidget(m_titleLabel);
 

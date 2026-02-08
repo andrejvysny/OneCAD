@@ -260,7 +260,9 @@ QString ThemeManager::buildStyleSheet(const ThemeDefinition& theme) {
         }
         QDockWidget,
         QWidget#ContextToolbar,
-        QWidget#inspectorContainer {
+        QWidget#inspectorContainer,
+        QWidget#ConstraintListPanel,
+        QWidget#ConstraintToolsPanel {
             background-color: @panel-bg@;
             border: 1px solid @panel-border@;
             border-radius: 12px;
