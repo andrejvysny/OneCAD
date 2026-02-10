@@ -35,7 +35,8 @@ public:
     void onKeyPress(Qt::Key key) override;
     void cancel() override;
     void render(SketchRenderer& renderer) override;
-    std::string name() const override { return "Rectangle"; }
+    std::string name() const override;
+    std::optional<Vec2d> getReferencePoint() const override;
 
     /**
      * @brief Check if a rectangle was just created

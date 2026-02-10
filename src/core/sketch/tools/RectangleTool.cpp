@@ -13,6 +13,17 @@ namespace onecad::core::sketch::tools {
 
 RectangleTool::RectangleTool() = default;
 
+std::string RectangleTool::name() const {
+    return "Rectangle";
+}
+
+std::optional<Vec2d> RectangleTool::getReferencePoint() const {
+    if (state_ == State::FirstClick) {
+        return corner1_;
+    }
+    return std::nullopt;
+}
+
 void RectangleTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
     if (button == Qt::RightButton) {
         cancel();

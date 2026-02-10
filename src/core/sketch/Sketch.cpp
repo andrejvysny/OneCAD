@@ -829,6 +829,8 @@ SolveResult Sketch::solve() {
 void Sketch::beginPointDrag(EntityID draggedPoint) {
     activeDragFixedPoints_.clear();
     isDraggingPoint_ = false;
+    dragStartPositions_.clear();
+    dragSessionHadFailure_ = false;
 
     if (draggedPoint.empty() || !getEntityAs<SketchPoint>(draggedPoint)) {
         return;
@@ -872,10 +874,32 @@ void Sketch::beginPointDrag(EntityID draggedPoint) {
         }
     }
 
+    dragStartPositions_.reserve(allPointIds.size());
+    for (const auto& pointId : allPointIds) {
+        const auto* point = getEntityAs<SketchPoint>(pointId);
+        if (!point) {
+            continue;
+        }
+        dragStartPositions_[pointId] = Vec2d{point->position().X(), point->position().Y()};
+    }
+
     isDraggingPoint_ = true;
 }
 
 void Sketch::endPointDrag() {
+    if (dragSessionHadFailure_) {
+        for (const auto& [pointId, startPos] : dragStartPositions_) {
+            auto* point = getEntityAs<SketchPoint>(pointId);
+            if (!point) {
+                continue;
+            }
+            point->setPosition(startPos.x, startPos.y);
+        }
+        invalidateSolver();
+    }
+
+    dragStartPositions_.clear();
+    dragSessionHadFailure_ = false;
     activeDragFixedPoints_.clear();
     isDraggingPoint_ = false;
 }
@@ -916,6 +940,33 @@ SolveResult Sketch::solveWithDrag(EntityID draggedPoint, const Vec2d& targetPos)
     result.residual = solverResult.residual;
     result.conflictingConstraints = solverResult.conflictingConstraints;
     result.errorMessage = solverResult.errorMessage;
+
+    // Treat drag as failed if solver converged but cannot place dragged point
+    // near the requested target due to competing constraints.
+    if (result.success) {
+        constexpr double kDragTargetTolerance = 1e-4;
+        const auto* dragged = getEntityAs<SketchPoint>(draggedPoint);
+        if (!dragged) {
+            result.success = false;
+            result.errorMessage = "Dragged point not found after solve";
+        } else {
+            const double dx = dragged->position().X() - targetPos.x;
+            const double dy = dragged->position().Y() - targetPos.y;
+            const double err = std::sqrt(dx * dx + dy * dy);
+            if (err > kDragTargetTolerance) {
+                solver_->revertSolution();
+                result.success = false;
+                if (result.errorMessage.empty()) {
+                    result.errorMessage = "Dragged point cannot reach target";
+                }
+            }
+        }
+    }
+
+    if (isDraggingPoint_ && !result.success) {
+        dragSessionHadFailure_ = true;
+    }
+
     return result;
 }
 

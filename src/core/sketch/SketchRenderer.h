@@ -376,6 +376,14 @@ public:
     };
 
     /**
+     * @brief Guide line information for snap indicators
+     */
+    struct GuideLineInfo {
+        Vec2d origin;
+        Vec2d target;
+    };
+
+    /**
      * @brief Set preview dimensions
      */
     void setPreviewDimensions(const std::vector<PreviewDimension>& dimensions);
@@ -386,11 +394,21 @@ public:
     const std::vector<PreviewDimension>& getPreviewDimensions() const { return previewDimensions_; }
 
     /**
+     * @brief Get snap indicator state
+     */
+    const auto& getSnapIndicator() const { return snapIndicator_; }
+
+    /**
      * @brief Clear preview dimensions
      */
     void clearPreviewDimensions();
 
     // ========== Snap Indicators ==========
+
+    /**
+     * @brief Set active guide lines for snap indicators
+     */
+    void setActiveGuides(const std::vector<GuideLineInfo>& guides);
 
     /**
      * @brief Show snap indicator at point
@@ -504,6 +522,8 @@ private:
         bool hasGuide = false;
         std::string hintText;
     } snapIndicator_;
+
+    std::vector<GuideLineInfo> activeGuides_;
 
     // Region data
     struct RegionRenderData {

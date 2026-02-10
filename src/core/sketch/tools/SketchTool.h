@@ -13,6 +13,7 @@
 #include <Qt>
 #include <string>
 #include <vector>
+#include <optional>
 
 namespace onecad::core::sketch {
 
@@ -80,6 +81,11 @@ public:
      * @brief Get tool name for UI display
      */
     virtual std::string name() const = 0;
+
+    /**
+     * @brief Get reference point for snapping/inference (e.g. start point of line)
+     */
+    virtual std::optional<Vec2d> getReferencePoint() const { return std::nullopt; }
 
     /**
      * @brief Set the sketch this tool operates on

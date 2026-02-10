@@ -529,6 +529,8 @@ private:
     // Active point-drag session state
     std::unordered_set<EntityID> activeDragFixedPoints_;
     bool isDraggingPoint_ = false;
+    std::unordered_map<EntityID, Vec2d> dragStartPositions_;
+    bool dragSessionHadFailure_ = false;
 
     /**
      * @brief Mark solver as needing rebuild

@@ -14,6 +14,17 @@ namespace onecad::core::sketch::tools {
 
 LineTool::LineTool() = default;
 
+std::string LineTool::name() const {
+    return "Line";
+}
+
+std::optional<Vec2d> LineTool::getReferencePoint() const {
+    if (state_ == State::FirstClick) {
+        return startPoint_;
+    }
+    return std::nullopt;
+}
+
 void LineTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
     if (button == Qt::RightButton) {
         // Right-click finishes polyline
@@ -26,6 +37,7 @@ void LineTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
     }
 
     lineCreated_ = false;
+    lastRejectReason_ = RejectReason::None;
 
     if (state_ == State::Idle) {
         // First click - record start point
@@ -48,7 +60,7 @@ void LineTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
         double length = std::sqrt(dx * dx + dy * dy);
 
         if (length < constants::MIN_GEOMETRY_SIZE) {
-            // Too short, ignore
+            lastRejectReason_ = RejectReason::TooShort;
             return;
         }
 
@@ -64,7 +76,26 @@ void LineTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
             endId = sketch_->addPoint(pos.x, pos.y);
         }
 
-        if (startId.empty() || endId.empty() || startId == endId) {
+        if (startId.empty() || endId.empty()) {
+            lastRejectReason_ = RejectReason::InvalidEndpoints;
+            return;
+        }
+
+        // Guard against guide-driven endpoint collapse: if a guide snap reused
+        // the start point ID but the geometric end position is distinct,
+        // materialize a new endpoint at click position.
+        if (startId == endId) {
+            if (snapResult_.snapped && snapResult_.hasGuide) {
+                endId = sketch_->addPoint(pos.x, pos.y);
+            }
+            if (endId.empty() || startId == endId) {
+                lastRejectReason_ = RejectReason::SameEndpoint;
+                return;
+            }
+        }
+
+        if (startId.empty() || endId.empty()) {
+            lastRejectReason_ = RejectReason::InvalidEndpoints;
             return;
         }
 
@@ -110,6 +141,7 @@ void LineTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
             startPoint_ = pos;
             currentPoint_ = pos;
             // Stay in FirstClick state for polyline mode
+            lastRejectReason_ = RejectReason::None;
         }
     }
 }
@@ -224,6 +256,7 @@ void LineTool::cancel() {
     lastPointId_.clear();
     lastCreatedLineId_.clear();
     lineCreated_ = false;
+    lastRejectReason_ = RejectReason::None;
     inferredConstraints_.clear();
 }
 

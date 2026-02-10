@@ -22,6 +22,13 @@ namespace onecad::core::sketch::tools {
  */
 class LineTool : public SketchTool {
 public:
+    enum class RejectReason {
+        None,
+        TooShort,
+        InvalidEndpoints,
+        SameEndpoint
+    };
+
     LineTool();
     ~LineTool() override = default;
 
@@ -31,13 +38,15 @@ public:
     void onKeyPress(Qt::Key key) override;
     void cancel() override;
     void render(SketchRenderer& renderer) override;
-    std::string name() const override { return "Line"; }
+    std::string name() const override;
+    std::optional<Vec2d> getReferencePoint() const override;
 
     /**
      * @brief Check if a line was just created (for signal emission)
      */
     bool wasLineCreated() const { return lineCreated_; }
     void clearLineCreatedFlag() { lineCreated_ = false; }
+    RejectReason lastRejectReason() const { return lastRejectReason_; }
 
 private:
     /**
@@ -57,6 +66,7 @@ private:
     EntityID lastPointId_;         // For coincident constraint on polyline continuation
     EntityID lastCreatedLineId_;   // For polyline perpendicular inference
     bool lineCreated_ = false;
+    RejectReason lastRejectReason_ = RejectReason::None;
 };
 
 } // namespace onecad::core::sketch::tools

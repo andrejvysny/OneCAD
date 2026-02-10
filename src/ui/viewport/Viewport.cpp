@@ -706,6 +706,55 @@ void Viewport::paintGL() {
                 }
             }
         }
+
+        // Render snap hint overlay
+        const auto& snap = m_sketchRenderer->getSnapIndicator();
+        if (snap.active && !snap.hintText.empty()) {
+            QPainter painter(this);
+            painter.setRenderHint(QPainter::Antialiasing);
+            
+            const ThemeDefinition& theme = ThemeManager::instance().currentTheme();
+            QColor textColor = theme.viewport.overlay.previewDimensionText;
+            QColor bgColor = theme.viewport.overlay.previewDimensionBackground;
+            
+            QFont font = painter.font();
+            font.setPointSize(10);
+            font.setBold(true);
+            painter.setFont(font);
+
+            PlaneAxes axes = buildPlaneAxes(plane);
+            QVector3D origin(plane.origin.x, plane.origin.y, plane.origin.z);
+            
+            QVector3D worldPos = origin + 
+                               axes.xAxis * snap.position.x + 
+                               axes.yAxis * snap.position.y;
+            
+            QPointF screenPos;
+            if (projectToScreen(viewProjection, worldPos, 
+                              static_cast<float>(width()), 
+                              static_cast<float>(height()), 
+                              &screenPos)) {
+                
+                QString text = QString::fromStdString(snap.hintText);
+                QFontMetrics fm(font);
+                int textWidth = fm.horizontalAdvance(text);
+                int textHeight = fm.height();
+                int padding = 4;
+                
+                // Offset ~20px above snap point
+                QRectF bgRect(screenPos.x() - textWidth / 2 - padding, 
+                            screenPos.y() - textHeight / 2 - padding - 20, 
+                            textWidth + 2 * padding, 
+                            textHeight + 2 * padding);
+                
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(bgColor);
+                painter.drawRoundedRect(bgRect, 4, 4);
+                
+                painter.setPen(textColor);
+                painter.drawText(bgRect, Qt::AlignCenter, text);
+            }
+        }
     } else if (m_document && m_sketchRenderer) {
         // Not in sketch mode: render only the navigator-selected sketch (if any).
         if (m_referenceSketch) {

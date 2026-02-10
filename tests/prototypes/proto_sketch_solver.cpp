@@ -113,6 +113,44 @@ int main() {
     assert(approx(rp3After->x(), rp2After->x()));
     assert(approx(rp3After->y(), rp4After->y()));
 
+    // Drag rollback determinism regression:
+    // if a drag session has at least one failed solve after a successful move,
+    // endPointDrag() should rollback to drag-start pose.
+    Sketch dragRollback;
+    auto d1 = dragRollback.addPoint(0.0, 0.0);
+    auto d2 = dragRollback.addPoint(10.0, 0.0);
+    auto d3 = dragRollback.addPoint(10.0, 6.0);
+    auto d4 = dragRollback.addPoint(0.0, 6.0);
+    assert(!d1.empty() && !d2.empty() && !d3.empty() && !d4.empty());
+    assert(!dragRollback.addLine(d1, d2).empty());
+    assert(!dragRollback.addLine(d2, d3).empty());
+    assert(!dragRollback.addLine(d3, d4).empty());
+    assert(!dragRollback.addLine(d4, d1).empty());
+    assert(!dragRollback.addHorizontal(d1, d2).empty());
+    assert(!dragRollback.addHorizontal(d3, d4).empty());
+    assert(!dragRollback.addVertical(d2, d3).empty());
+    assert(!dragRollback.addVertical(d4, d1).empty());
+
+    auto* d1Start = dragRollback.getEntityAs<SketchPoint>(d1);
+    assert(d1Start);
+    const double dragStartX = d1Start->x();
+    const double dragStartY = d1Start->y();
+
+    dragRollback.beginPointDrag(d1);
+    SolveResult moveOk = dragRollback.solveWithDrag(d1, Vec2d{-2.0, -1.0});
+    assert(moveOk.success);
+
+    // Inject a hard lock after a successful move so next drag target is unsolved.
+    assert(!dragRollback.addFixed(d1).empty());
+    SolveResult moveFail = dragRollback.solveWithDrag(d1, Vec2d{-4.0, -3.0});
+    assert(!moveFail.success);
+    dragRollback.endPointDrag();
+
+    auto* d1Final = dragRollback.getEntityAs<SketchPoint>(d1);
+    assert(d1Final);
+    assert(approx(d1Final->x(), dragStartX));
+    assert(approx(d1Final->y(), dragStartY));
+
     std::cout << "Sketch solver adapter prototype: OK" << std::endl;
     return 0;
 }

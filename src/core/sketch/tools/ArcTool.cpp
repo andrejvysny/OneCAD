@@ -35,6 +35,19 @@ double angleToPoint(const Vec2d& center, const Vec2d& point) {
 
 ArcTool::ArcTool() = default;
 
+std::string ArcTool::name() const {
+    return "Arc";
+}
+
+std::optional<Vec2d> ArcTool::getReferencePoint() const {
+    if (state_ == State::FirstClick) {
+        return startPoint_;
+    } else if (state_ == State::Drawing && previewValid_) {
+        return previewCenter_;
+    }
+    return std::nullopt;
+}
+
 void ArcTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
     if (button == Qt::RightButton) {
         cancel();
