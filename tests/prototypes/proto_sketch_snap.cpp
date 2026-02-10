@@ -1,11 +1,15 @@
 #include "sketch/SnapManager.h"
 #include "sketch/Sketch.h"
+#include "sketch/SketchLine.h"
+#include "sketch/tools/SketchToolManager.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <functional>
 #include <iostream>
+#include <limits>
+#include <optional>
 #include <random>
 #include <string>
 #include <vector>
@@ -71,6 +75,65 @@ TestResult expectSnap(SnapResult result, SnapType type) {
     return {true, "", ""};
 }
 
+bool snapResultsEqual(const SnapResult& lhs, const SnapResult& rhs) {
+    return lhs.type == rhs.type &&
+           lhs.entityId == rhs.entityId &&
+           lhs.secondEntityId == rhs.secondEntityId &&
+           lhs.pointId == rhs.pointId &&
+           approx(lhs.position.x, rhs.position.x) &&
+           approx(lhs.position.y, rhs.position.y);
+}
+
+int countEntitiesOfType(const Sketch& sketch, EntityType type) {
+    int count = 0;
+    for (const auto& entity : sketch.getAllEntities()) {
+        if (entity && entity->type() == type) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+const SketchLine* findLastLine(const Sketch& sketch) {
+    const SketchLine* last = nullptr;
+    for (const auto& entity : sketch.getAllEntities()) {
+        if (entity && entity->type() == EntityType::Line) {
+            last = static_cast<const SketchLine*>(entity.get());
+        }
+    }
+    return last;
+}
+
+SnapResult selectEffectiveSnap(const SnapResult& bestSnap, const std::vector<SnapResult>& allSnaps) {
+    SnapResult bestGuide;
+    bestGuide.distance = std::numeric_limits<double>::max();
+    for (const auto& snap : allSnaps) {
+        if (snap.hasGuide && snap.snapped && snap.distance < bestGuide.distance) {
+            bestGuide = snap;
+        }
+    }
+    if (bestGuide.snapped) {
+        return bestGuide;
+    }
+    return bestSnap;
+}
+
+std::optional<SnapResult> findBestGuideCandidate(const std::vector<SnapResult>& snaps) {
+    SnapResult bestGuide;
+    bestGuide.distance = std::numeric_limits<double>::max();
+    bool found = false;
+    for (const auto& snap : snaps) {
+        if (snap.hasGuide && snap.snapped && snap.distance < bestGuide.distance) {
+            bestGuide = snap;
+            found = true;
+        }
+    }
+    if (found) {
+        return bestGuide;
+    }
+    return std::nullopt;
+}
+
 TestResult testVertexSnap() {
     Sketch sketch = createTestSketch();
     SnapManager manager = createSnapManagerFor({SnapType::Vertex});
@@ -85,11 +148,43 @@ TestResult testVertexSnap() {
     return {true, "", ""};
 }
 
+TestResult test_hinttext_vertex_snap() {
+    Sketch sketch;
+    sketch.addPoint(5.0, 5.0);
+    SnapManager manager = createSnapManagerFor({SnapType::Vertex});
+    SnapResult result = manager.findBestSnap({5.2, 5.1}, sketch);
+    TestResult check = expectSnap(result, SnapType::Vertex);
+    if (!check.pass) {
+        return check;
+    }
+    if (result.hintText != "PT") {
+        return {false, "PT", result.hintText};
+    }
+    return {true, "", ""};
+}
+
 TestResult testEndpointSnap() {
     Sketch sketch = createTestSketch();
     SnapManager manager = createSnapManagerFor({SnapType::Endpoint});
     SnapResult result = manager.findBestSnap({10.3, 0.2}, sketch);
     return expectSnap(result, SnapType::Endpoint);
+}
+
+TestResult test_hinttext_endpoint_snap() {
+    Sketch sketch;
+    EntityID start = sketch.addPoint(0.0, 0.0);
+    EntityID end = sketch.addPoint(10.0, 0.0);
+    sketch.addLine(start, end);
+    SnapManager manager = createSnapManagerFor({SnapType::Endpoint});
+    SnapResult result = manager.findBestSnap({10.3, 0.2}, sketch);
+    TestResult check = expectSnap(result, SnapType::Endpoint);
+    if (!check.pass) {
+        return check;
+    }
+    if (result.hintText != "END") {
+        return {false, "END", result.hintText};
+    }
+    return {true, "", ""};
 }
 
 TestResult testMidpointSnap() {
@@ -99,11 +194,42 @@ TestResult testMidpointSnap() {
     return expectSnap(result, SnapType::Midpoint);
 }
 
+TestResult test_hinttext_midpoint_snap() {
+    Sketch sketch;
+    EntityID start = sketch.addPoint(0.0, 0.0);
+    EntityID end = sketch.addPoint(10.0, 0.0);
+    sketch.addLine(start, end);
+    SnapManager manager = createSnapManagerFor({SnapType::Midpoint});
+    SnapResult result = manager.findBestSnap({5.2, 0.1}, sketch);
+    TestResult check = expectSnap(result, SnapType::Midpoint);
+    if (!check.pass) {
+        return check;
+    }
+    if (result.hintText != "MID") {
+        return {false, "MID", result.hintText};
+    }
+    return {true, "", ""};
+}
+
 TestResult testCenterSnap() {
     Sketch sketch = createTestSketch();
     SnapManager manager = createSnapManagerFor({SnapType::Center});
     SnapResult result = manager.findBestSnap({20.3, 20.2}, sketch);
     return expectSnap(result, SnapType::Center);
+}
+
+TestResult test_hinttext_center_snap() {
+    Sketch sketch = createTestSketch();
+    SnapManager manager = createSnapManagerFor({SnapType::Center});
+    SnapResult result = manager.findBestSnap({20.3, 20.2}, sketch);
+    TestResult check = expectSnap(result, SnapType::Center);
+    if (!check.pass) {
+        return check;
+    }
+    if (result.hintText != "CEN") {
+        return {false, "CEN", result.hintText};
+    }
+    return {true, "", ""};
 }
 
 TestResult testQuadrantSnap() {
@@ -217,6 +343,21 @@ TestResult testGridSnap() {
     return expectSnap(result, SnapType::Grid);
 }
 
+TestResult test_hinttext_grid_snap() {
+    Sketch sketch = createTestSketch();
+    SnapManager manager = createSnapManagerFor({SnapType::Grid});
+    manager.setGridSize(1.0);
+    SnapResult result = manager.findBestSnap({100.2, 100.2}, sketch);
+    TestResult check = expectSnap(result, SnapType::Grid);
+    if (!check.pass) {
+        return check;
+    }
+    if (result.hintText != "GRID") {
+        return {false, "GRID", result.hintText};
+    }
+    return {true, "", ""};
+}
+
 TestResult testPerpendicularSnapLine() {
     Sketch sketch;
     sketch.addLine(0.0, 0.0, 10.0, 0.0);
@@ -271,6 +412,30 @@ TestResult testPerpendicularSnapArc() {
     return {true, "", ""};
 }
 
+TestResult test_perpendicular_guide_metadata() {
+    Sketch sketch;
+    sketch.addLine(0.0, 0.0, 10.0, 0.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Perpendicular});
+    SnapResult result = manager.findBestSnap({5.0, 1.5}, sketch);
+    TestResult check = expectSnap(result, SnapType::Perpendicular);
+    if (!check.pass) {
+        return check;
+    }
+    if (result.hintText != "PERP") {
+        return {false, "PERP", result.hintText};
+    }
+    if (!result.hasGuide) {
+        return {false, "hasGuide=true", "hasGuide=false"};
+    }
+    if (!approx(result.guideOrigin.x, 5.0, 1e-6) || !approx(result.guideOrigin.y, 1.5, 1e-6)) {
+        return {false,
+                "guideOrigin=(5,1.5)",
+                "(" + std::to_string(result.guideOrigin.x) + "," + std::to_string(result.guideOrigin.y) + ")"};
+    }
+    return {true, "", ""};
+}
+
 TestResult testTangentSnapCircle() {
     Sketch sketch;
     EntityID center = sketch.addPoint(20.0, 20.0);
@@ -311,6 +476,27 @@ TestResult testTangentSnapArc() {
 
     if (!approx(result.position.x, 41.8, 0.01) || !approx(result.position.y, 42.4, 0.01)) {
         return {false, "(41.8,42.4)", "(" + std::to_string(result.position.x) + "," + std::to_string(result.position.y) + ")"};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_tangent_guide_metadata() {
+    Sketch sketch;
+    EntityID center = sketch.addPoint(20.0, 20.0);
+    sketch.addCircle(center, 5.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Tangent});
+    manager.setSnapRadius(10.0);
+    SnapResult result = manager.findBestSnap({30.0, 20.0}, sketch);
+    TestResult check = expectSnap(result, SnapType::Tangent);
+    if (!check.pass) {
+        return check;
+    }
+    if (result.hintText != "TAN") {
+        return {false, "TAN", result.hintText};
+    }
+    if (!result.hasGuide) {
+        return {false, "hasGuide=true", "hasGuide=false"};
     }
     return {true, "", ""};
 }
@@ -462,6 +648,42 @@ TestResult testAngularSnap45degExact() {
     return {true, "", ""};
 }
 
+TestResult test_angular_snap_50deg_reference() {
+    Sketch sketch;
+    SnapManager manager = createSnapManagerFor({SnapType::SketchGuide});
+
+    const double dist = 10.0;
+    const double angleRad = 50.0 * M_PI / 180.0;
+    const Vec2d cursor{dist * std::cos(angleRad), dist * std::sin(angleRad)};
+
+    SnapResult result = manager.findBestSnap(cursor, sketch, {}, Vec2d{0.0, 0.0});
+    TestResult check = expectSnap(result, SnapType::SketchGuide);
+    if (!check.pass) {
+        return check;
+    }
+
+    const double expectedAngleRad = 45.0 * M_PI / 180.0;
+    const Vec2d expected{dist * std::cos(expectedAngleRad), dist * std::sin(expectedAngleRad)};
+    if (!approx(result.position.x, expected.x, 1e-6) || !approx(result.position.y, expected.y, 1e-6)) {
+        return {false,
+                "snapped to 45deg",
+                "(" + std::to_string(result.position.x) + "," + std::to_string(result.position.y) + ")"};
+    }
+    if (!result.hasGuide) {
+        return {false, "hasGuide=true", "hasGuide=false"};
+    }
+    if (!approx(result.guideOrigin.x, 0.0, 1e-6) || !approx(result.guideOrigin.y, 0.0, 1e-6)) {
+        return {false,
+                "guideOrigin=(0,0)",
+                "(" + std::to_string(result.guideOrigin.x) + "," + std::to_string(result.guideOrigin.y) + ")"};
+    }
+    if (result.hintText != "45\xC2\xB0") {
+        return {false, "45deg", result.hintText};
+    }
+
+    return {true, "", ""};
+}
+
 TestResult testAngularSnapNoReference() {
     Sketch sketch;
     sketch.addLine(0.0, 0.0, 10.0, 0.0);
@@ -515,6 +737,36 @@ TestResult testPriorityOrder() {
     SnapManager manager = createSnapManagerFor({SnapType::Vertex, SnapType::Endpoint});
     SnapResult result = manager.findBestSnap({0.1, 0.1}, sketch);
     return expectSnap(result, SnapType::Vertex);
+}
+
+TestResult test_spatial_hash_after_geometry_move() {
+    Sketch sketch;
+    EntityID pointId = sketch.addPoint(5.0, 5.0);
+    SnapManager manager = createSnapManagerFor({SnapType::Vertex});
+
+    SnapResult initial = manager.findBestSnap({5.2, 5.1}, sketch);
+    TestResult firstCheck = expectSnap(initial, SnapType::Vertex);
+    if (!firstCheck.pass) {
+        return firstCheck;
+    }
+
+    SketchPoint* point = sketch.getEntityAs<SketchPoint>(pointId);
+    if (!point) {
+        return {false, "point exists", "nullptr"};
+    }
+    point->setPosition(50.0, 50.0);
+
+    SnapResult moved = manager.findBestSnap({50.2, 50.1}, sketch);
+    TestResult secondCheck = expectSnap(moved, SnapType::Vertex);
+    if (!secondCheck.pass) {
+        return secondCheck;
+    }
+    if (!approx(moved.position.x, 50.0) || !approx(moved.position.y, 50.0)) {
+        return {false,
+                "(50,50)",
+                "(" + std::to_string(moved.position.x) + "," + std::to_string(moved.position.y) + ")"};
+    }
+    return {true, "", ""};
 }
 
 TestResult testSpatialHashEquivalentToBruteforce() {
@@ -574,6 +826,480 @@ TestResult testSpatialHashEquivalentToBruteforce() {
                         ") vs (" + std::to_string(bruteResult.position.x) + "," + std::to_string(bruteResult.position.y) + ")"};
         }
     }
+
+    return {true, "", ""};
+}
+
+TestResult test_preserves_guides_when_vertex_wins() {
+    Sketch sketch;
+    sketch.addPoint(5.0, 5.0);
+    sketch.addPoint(10.0, 5.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Vertex, SnapType::Horizontal});
+    auto allSnaps = manager.findAllSnaps({5.01, 5.0}, sketch);
+
+    bool foundVertex = false;
+    bool foundGuide = false;
+
+    for (const auto& s : allSnaps) {
+        if (s.snapped && s.type == SnapType::Vertex) foundVertex = true;
+        if (s.hasGuide) foundGuide = true;
+    }
+
+    if (!foundVertex) return {false, "Vertex snap", "not found"};
+    if (!foundGuide) return {false, "Guide", "not found"};
+
+    return {true, "", ""};
+}
+
+TestResult test_perpendicular_guide_nonzero_length() {
+    Sketch sketch;
+    sketch.addLine(0.0, 0.0, 10.0, 0.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Perpendicular});
+    auto allSnaps = manager.findAllSnaps({5.0, 1.5}, sketch);
+
+    for (const auto& s : allSnaps) {
+        if (s.type == SnapType::Perpendicular) {
+            if (!s.hasGuide) return {false, "hasGuide=true", "false"};
+            double dist = std::sqrt(std::pow(s.guideOrigin.x - s.position.x, 2) + std::pow(s.guideOrigin.y - s.position.y, 2));
+            if (dist < 1e-6) return {false, "nonzero guide length", "zero"};
+            if (!approx(s.guideOrigin.x, 5.0) || !approx(s.guideOrigin.y, 1.5)) return {false, "guideOrigin=(5,1.5)", "got other"};
+            return {true, "", ""};
+        }
+    }
+    return {false, "Perpendicular snap", "not found"};
+}
+
+TestResult test_tangent_guide_nonzero_length() {
+    Sketch sketch;
+    EntityID center = sketch.addPoint(20.0, 20.0);
+    sketch.addCircle(center, 5.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Tangent});
+    manager.setSnapRadius(10.0);
+    auto allSnaps = manager.findAllSnaps({30.0, 20.0}, sketch);
+
+    for (const auto& s : allSnaps) {
+        if (s.type == SnapType::Tangent) {
+            if (!s.hasGuide) return {false, "hasGuide=true", "false"};
+            double dist = std::sqrt(std::pow(s.guideOrigin.x - s.position.x, 2) + std::pow(s.guideOrigin.y - s.position.y, 2));
+            if (dist < 1e-6) return {false, "nonzero guide length", "zero"};
+            if (!approx(s.guideOrigin.x, 30.0) || !approx(s.guideOrigin.y, 20.0)) return {false, "guideOrigin=(30,20)", "got other"};
+            return {true, "", ""};
+        }
+    }
+    return {false, "Tangent snap", "not found"};
+}
+
+TestResult test_clears_guides_when_no_snap() {
+    Sketch sketch;
+    sketch.addPoint(5.0, 5.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Vertex});
+    auto allSnaps = manager.findAllSnaps({100.0, 100.0}, sketch);
+
+    for (const auto& s : allSnaps) {
+        if (s.hasGuide) return {false, "no guides", "found guide"};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_guide_count_bounded() {
+    Sketch sketch;
+    for (int i = 0; i < 5; ++i) {
+        sketch.addLine(0.0, i * 2.0, 10.0, i * 2.0);
+        sketch.addPoint(5.0, i * 2.0 + 1.0);
+    }
+
+    SnapManager manager; // All enabled
+    auto allSnaps = manager.findAllSnaps({5.0, 5.0}, sketch);
+
+    int guideCount = 0;
+    for (const auto& s : allSnaps) {
+        if (s.hasGuide) guideCount++;
+    }
+
+    if (guideCount == 0) return {false, "some guides", "0"};
+    return {true, "", ""};
+}
+
+TestResult test_dedupe_collinear_guides() {
+    Sketch sketch;
+    sketch.addLine(0.0, 0.0, 4.0, 0.0);
+    sketch.addLine(6.0, 0.0, 10.0, 0.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::SketchGuide});
+    auto allSnaps = manager.findAllSnaps({5.0, 0.01}, sketch);
+
+    int guideCount = 0;
+    for (const auto& s : allSnaps) {
+        if (s.type == SnapType::SketchGuide && s.hasGuide) guideCount++;
+    }
+
+    if (guideCount < 2) return {false, "multiple extension guides", std::to_string(guideCount)};
+
+    return {true, "", ""};
+}
+
+TestResult test_effective_snap_prefers_guide_when_present() {
+    SnapResult winner;
+    winner.snapped = true;
+    winner.type = SnapType::Vertex;
+    winner.position = {5.0, 5.0};
+    winner.distance = 0.5;
+
+    SnapResult guide;
+    guide.snapped = true;
+    guide.type = SnapType::Perpendicular;
+    guide.position = {5.1, 5.0};
+    guide.distance = 0.8;
+    guide.hasGuide = true;
+
+    std::vector<SnapResult> allSnaps = {winner, guide};
+    SnapResult result = selectEffectiveSnap(winner, allSnaps);
+
+    if (!result.snapped) return {false, "snapped", "not snapped"};
+    if (result.type != SnapType::Perpendicular) return {false, "Perpendicular", std::to_string(static_cast<int>(result.type))};
+    if (!approx(result.position.x, guide.position.x, 1e-6) || !approx(result.position.y, guide.position.y, 1e-6)) {
+        return {false, "guide pos", "winner pos"};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_effective_snap_falls_back_when_no_guide() {
+    SnapResult winner;
+    winner.snapped = true;
+    winner.type = SnapType::Vertex;
+    winner.position = {5.0, 5.0};
+    winner.distance = 0.5;
+
+    SnapResult other;
+    other.snapped = true;
+    other.type = SnapType::Grid;
+    other.position = {4.9, 4.9};
+    other.distance = 0.4;
+
+    std::vector<SnapResult> allSnaps = {winner, other};
+    SnapResult result = selectEffectiveSnap(winner, allSnaps);
+
+    if (!result.snapped) return {false, "snapped", "not snapped"};
+    if (result.type != SnapType::Vertex) return {false, "Vertex", std::to_string(static_cast<int>(result.type))};
+    if (!approx(result.position.x, winner.position.x, 1e-6) || !approx(result.position.y, winner.position.y, 1e-6)) {
+        return {false, "winner pos", "guide pos"};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_effective_snap_nearest_guide_tiebreak() {
+    SnapResult winner;
+    winner.snapped = true;
+    winner.type = SnapType::Vertex;
+    winner.position = {5.0, 5.0};
+    winner.distance = 0.5;
+
+    SnapResult guideFar;
+    guideFar.snapped = true;
+    guideFar.type = SnapType::Horizontal;
+    guideFar.position = {6.0, 5.0};
+    guideFar.distance = 1.0;
+    guideFar.hasGuide = true;
+
+    SnapResult guideNear;
+    guideNear.snapped = true;
+    guideNear.type = SnapType::Horizontal;
+    guideNear.position = {5.2, 5.0};
+    guideNear.distance = 0.3;
+    guideNear.hasGuide = true;
+
+    std::vector<SnapResult> allSnaps = {winner, guideFar, guideNear};
+    SnapResult result = selectEffectiveSnap(winner, allSnaps);
+
+    if (!result.snapped) return {false, "snapped", "not snapped"};
+    if (result.type != SnapType::Horizontal) return {false, "Horizontal", std::to_string(static_cast<int>(result.type))};
+    if (!approx(result.position.x, guideNear.position.x, 1e-6) || !approx(result.position.y, guideNear.position.y, 1e-6)) {
+        return {false, "nearest guide", "far guide"};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_line_commit_prefers_explicit_endpoint_over_guide() {
+    Sketch sketch;
+
+    // Intentional insertion order: guide producer first, explicit target second.
+    EntityID guideAnchor = sketch.addPoint(10.0, 0.0);
+    EntityID startPoint = sketch.addPoint(0.0, 0.0);
+    EntityID explicitEndPoint = sketch.addPoint(20.0, 0.0);
+
+    tools::SketchToolManager manager;
+    manager.setSketch(&sketch);
+    manager.activateTool(tools::ToolType::Line);
+
+    SnapManager& snap = manager.snapManager();
+    snap.setAllSnapsEnabled(false);
+    snap.setEnabled(true);
+    snap.setSnapEnabled(SnapType::Vertex, true);
+    snap.setSnapEnabled(SnapType::Horizontal, true);
+    snap.setSnapRadius(2.0);
+
+    const int linesBefore = countEntitiesOfType(sketch, EntityType::Line);
+
+    manager.handleMousePress({0.2, 0.2}, Qt::LeftButton);
+    manager.handleMousePress({20.2, 0.2}, Qt::LeftButton);
+
+    const int linesAfter = countEntitiesOfType(sketch, EntityType::Line);
+    if (linesAfter != linesBefore + 1) {
+        return {false,
+                "line created from explicit endpoint commit",
+                "line not created"};
+    }
+
+    const SketchLine* line = findLastLine(sketch);
+    if (!line) {
+        return {false, "new line exists", "nullptr"};
+    }
+
+    const bool startMatches = (line->startPointId() == startPoint && line->endPointId() == explicitEndPoint);
+    const bool endMatches = (line->startPointId() == explicitEndPoint && line->endPointId() == startPoint);
+    if (!startMatches && !endMatches) {
+        return {false,
+                "line endpoints use explicit snapped points",
+                "line endpoints not explicit"};
+    }
+
+    if (line->startPointId() == guideAnchor || line->endPointId() == guideAnchor) {
+        return {false,
+                "guide anchor not used as commit endpoint",
+                "guide anchor endpoint used"};
+    }
+
+    return {true, "", ""};
+}
+
+TestResult test_overlap_axis_crossing_deterministic() {
+    Sketch sketch;
+    sketch.addLine(0.0, 0.0, 10.0, 0.0);
+    sketch.addLine(0.0, 0.0, 0.0, 10.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Endpoint, SnapType::Intersection});
+    auto allSnaps = manager.findAllSnaps({0.0, 0.0}, sketch);
+
+    bool hasIntersection = false;
+    for (const auto& snap : allSnaps) {
+        if (snap.snapped && snap.type == SnapType::Intersection) {
+            hasIntersection = true;
+            break;
+        }
+    }
+    if (!hasIntersection) {
+        return {false, "intersection snap", "missing"};
+    }
+
+    SnapResult reference;
+    bool capturedReference = false;
+    for (int i = 0; i < 10; ++i) {
+        SnapResult candidate = manager.findBestSnap({0.0, 0.0}, sketch);
+        if (!candidate.snapped) {
+            return {false, "snapped", "not snapped"};
+        }
+        if (candidate.type != SnapType::Endpoint) {
+            return {
+                false,
+                "Endpoint",
+                std::to_string(static_cast<int>(candidate.type))
+            };
+        }
+        if (!capturedReference) {
+            reference = candidate;
+            capturedReference = true;
+            continue;
+        }
+        if (!snapResultsEqual(candidate, reference)) {
+            return {false, "deterministic winner", "varying winner"};
+        }
+    }
+
+    return {true, "", ""};
+}
+
+TestResult test_overlap_point_beats_intersection() {
+    Sketch sketch;
+    EntityID standalone = sketch.addPoint(5.0, 5.0);
+    sketch.addLine(5.0, 5.0, 10.0, 5.0);
+    sketch.addLine(5.0, 5.0, 5.0, 10.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Vertex, SnapType::Endpoint, SnapType::Intersection});
+    SnapResult result = manager.findBestSnap({5.0, 5.0}, sketch);
+    TestResult check = expectSnap(result, SnapType::Vertex);
+    if (!check.pass) {
+        return check;
+    }
+    if (result.pointId != standalone) {
+        return {false, standalone, result.pointId};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_overlap_endpoint_beats_intersection_colocated() {
+    Sketch sketch;
+    sketch.addLine(0.0, 0.0, 10.0, 0.0);
+    sketch.addLine(10.0, 0.0, 10.0, 10.0);
+    sketch.addLine(0.0, -5.0, 20.0, 5.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Endpoint, SnapType::Intersection});
+    auto allSnaps = manager.findAllSnaps({10.0, 0.0}, sketch);
+
+    bool sawIntersection = false;
+    for (const auto& snap : allSnaps) {
+        if (snap.snapped && snap.type == SnapType::Intersection) {
+            sawIntersection = true;
+            break;
+        }
+    }
+    if (!sawIntersection) {
+        return {false, "intersection snap", "none"};
+    }
+
+    SnapResult result = manager.findBestSnap({10.0, 0.0}, sketch);
+    return expectSnap(result, SnapType::Endpoint);
+}
+
+TestResult test_overlap_repeated_runs_same_winner() {
+    Sketch sketch;
+    sketch.addLine(0.0, 0.0, 10.0, 0.0);
+    sketch.addLine(10.0, 0.0, 10.0, 10.0);
+    sketch.addLine(0.0, -5.0, 20.0, 5.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Endpoint, SnapType::Intersection});
+    Vec2d query{10.0, 0.0};
+    SnapResult baseline;
+    bool baselineCaptured = false;
+    for (int i = 0; i < 20; ++i) {
+        SnapResult candidate = manager.findBestSnap(query, sketch);
+        if (!candidate.snapped) {
+            return {false, "snapped", "not snapped"};
+        }
+        if (candidate.type != SnapType::Endpoint) {
+            return {
+                false,
+                "Endpoint",
+                std::to_string(static_cast<int>(candidate.type))
+            };
+        }
+        if (!baselineCaptured) {
+            baseline = candidate;
+            baselineCaptured = true;
+            continue;
+        }
+        if (!snapResultsEqual(candidate, baseline)) {
+            return {false, "consistent winner", "varying winner"};
+        }
+    }
+
+    return {true, "", ""};
+}
+
+TestResult test_parity_no_guide_overlap() {
+    Sketch sketch;
+    sketch.addPoint(5.0, 5.0);
+    sketch.addLine(0.0, 5.0, 10.0, 5.0);
+    sketch.addLine(5.0, 0.0, 5.0, 10.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Vertex, SnapType::Endpoint, SnapType::Intersection});
+    Vec2d query{5.0, 5.0};
+
+    SnapResult commit = manager.findBestSnap(query, sketch);
+    auto allSnaps = manager.findAllSnaps(query, sketch);
+    SnapResult preview = selectEffectiveSnap(commit, allSnaps);
+
+    if (!commit.snapped || !preview.snapped) {
+        return {false, "snapped", "not snapped"};
+    }
+    if (!snapResultsEqual(commit, preview)) {
+        return {false, "same winner", "different winner"};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_parity_guide_adjacent_to_overlap() {
+    Sketch sketch;
+    sketch.addPoint(5.0, 5.0);
+    sketch.addLine(0.0, 5.0, 10.0, 5.0);
+    sketch.addLine(5.0, 0.0, 5.0, 10.0);
+    sketch.addLine(0.0, 4.9, 10.0, 4.9);
+
+    SnapManager manager = createSnapManagerFor({
+        SnapType::Vertex,
+        SnapType::Endpoint,
+        SnapType::Intersection,
+        SnapType::Horizontal
+    });
+    Vec2d query{5.0, 4.8};
+
+    SnapResult commit = manager.findBestSnap(query, sketch);
+    auto allSnaps = manager.findAllSnaps(query, sketch);
+    auto guideCandidate = findBestGuideCandidate(allSnaps);
+    if (!guideCandidate.has_value()) {
+        return {false, "guide candidate", "missing"};
+    }
+
+    SnapResult preview = selectEffectiveSnap(commit, allSnaps);
+    if (!preview.snapped) {
+        return {false, "snapped", "not snapped"};
+    }
+    if (!preview.hasGuide) {
+        return {false, "guide preview", "no guide"};
+    }
+    if (!snapResultsEqual(preview, *guideCandidate)) {
+        return {false, "best guide", "not preview"};
+    }
+    if (snapResultsEqual(preview, commit)) {
+        return {false, "preview vs commit", "same winner"};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_parity_findBestSnap_stable_across_calls() {
+    Sketch sketch;
+    sketch.addPoint(5.0, 5.0);
+    sketch.addLine(0.0, 5.0, 10.0, 5.0);
+    sketch.addLine(5.0, 0.0, 5.0, 10.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Vertex, SnapType::Endpoint, SnapType::Intersection});
+    Vec2d query{5.0, 5.0};
+
+    SnapResult reference;
+    bool referenceCaptured = false;
+    for (int i = 0; i < 10; ++i) {
+        SnapResult candidate = manager.findBestSnap(query, sketch);
+        if (!candidate.snapped) {
+            return {false, "snapped", "not snapped"};
+        }
+        if (!referenceCaptured) {
+            reference = candidate;
+            referenceCaptured = true;
+            continue;
+        }
+        if (!snapResultsEqual(reference, candidate)) {
+            return {false, "consistent winner", "varying winner"};
+        }
+    }
+
+    return {true, "", ""};
+}
+
+TestResult test_ambiguity_hook_api() {
+    SnapManager manager;
+    if (manager.hasAmbiguity()) {
+        return {false, "no ambiguity on fresh manager", "has ambiguity"};
+    }
+    if (manager.ambiguityCandidateCount() != 0) {
+        return {false, "0 candidates on fresh manager", std::to_string(manager.ambiguityCandidateCount())};
+    }
+
+    // Verify cycling and clearing don't crash
+    manager.cycleAmbiguity();
+    manager.clearAmbiguity();
 
     return {true, "", ""};
 }
@@ -651,9 +1377,13 @@ int main(int argc, char** argv) {
 
     const std::vector<std::pair<std::string, std::function<TestResult()>>> tests = {
         {"test_vertex_snap", testVertexSnap},
+        {"test_hinttext_vertex_snap", test_hinttext_vertex_snap},
         {"test_endpoint_snap", testEndpointSnap},
+        {"test_hinttext_endpoint_snap", test_hinttext_endpoint_snap},
         {"test_midpoint_snap", testMidpointSnap},
+        {"test_hinttext_midpoint_snap", test_hinttext_midpoint_snap},
         {"test_center_snap", testCenterSnap},
+        {"test_hinttext_center_snap", test_hinttext_center_snap},
         {"test_quadrant_snap", testQuadrantSnap},
         {"test_intersection_snap", testIntersectionSnap},
         {"test_oncurve_snap", testOnCurveSnap},
@@ -663,22 +1393,45 @@ int main(int argc, char** argv) {
         {"test_ellipse_line_intersection", testEllipseLineIntersection},
         {"test_ellipse_quadrant_rotated", testEllipseQuadrantRotated},
         {"test_grid_snap", testGridSnap},
+        {"test_hinttext_grid_snap", test_hinttext_grid_snap},
         {"test_perpendicular_snap_line", testPerpendicularSnapLine},
         {"test_perpendicular_snap_circle", testPerpendicularSnapCircle},
         {"test_perpendicular_snap_arc", testPerpendicularSnapArc},
+        {"test_perpendicular_guide_metadata", test_perpendicular_guide_metadata},
         {"test_tangent_snap_circle", testTangentSnapCircle},
         {"test_tangent_snap_arc", testTangentSnapArc},
+        {"test_tangent_guide_metadata", test_tangent_guide_metadata},
         {"test_horizontal_alignment_snap", testHorizontalAlignmentSnap},
         {"test_vertical_alignment_snap", testVerticalAlignmentSnap},
         {"test_extension_snap_line", testExtensionSnapLine},
         {"test_extension_snap_no_arc", testExtensionSnapNoArc},
         {"test_angular_snap_15deg_rounding", testAngularSnap15degRounding},
         {"test_angular_snap_45deg_exact", testAngularSnap45degExact},
+        {"test_angular_snap_50deg_reference", test_angular_snap_50deg_reference},
         {"test_angular_snap_no_reference", testAngularSnapNoReference},
         {"test_toggle_suppression", testToggleSuppression},
         {"test_all_snap_types_combined", testAllSnapTypesCombined},
         {"test_priority_order", testPriorityOrder},
-        {"test_spatial_hash_equivalent_to_bruteforce", testSpatialHashEquivalentToBruteforce}
+        {"test_spatial_hash_after_geometry_move", test_spatial_hash_after_geometry_move},
+        {"test_spatial_hash_equivalent_to_bruteforce", testSpatialHashEquivalentToBruteforce},
+        {"test_preserves_guides_when_vertex_wins", test_preserves_guides_when_vertex_wins},
+        {"test_perpendicular_guide_nonzero_length", test_perpendicular_guide_nonzero_length},
+        {"test_tangent_guide_nonzero_length", test_tangent_guide_nonzero_length},
+        {"test_clears_guides_when_no_snap", test_clears_guides_when_no_snap},
+        {"test_guide_count_bounded", test_guide_count_bounded},
+        {"test_dedupe_collinear_guides", test_dedupe_collinear_guides},
+        {"test_effective_snap_prefers_guide_when_present", test_effective_snap_prefers_guide_when_present},
+        {"test_effective_snap_falls_back_when_no_guide", test_effective_snap_falls_back_when_no_guide},
+        {"test_effective_snap_nearest_guide_tiebreak", test_effective_snap_nearest_guide_tiebreak},
+        {"test_line_commit_prefers_explicit_endpoint_over_guide", test_line_commit_prefers_explicit_endpoint_over_guide},
+        {"test_overlap_axis_crossing_deterministic", test_overlap_axis_crossing_deterministic},
+        {"test_overlap_point_beats_intersection", test_overlap_point_beats_intersection},
+        {"test_overlap_endpoint_beats_intersection_colocated", test_overlap_endpoint_beats_intersection_colocated},
+        {"test_overlap_repeated_runs_same_winner", test_overlap_repeated_runs_same_winner},
+        {"test_parity_no_guide_overlap", test_parity_no_guide_overlap},
+        {"test_parity_guide_adjacent_to_overlap", test_parity_guide_adjacent_to_overlap},
+        {"test_parity_findBestSnap_stable_across_calls", test_parity_findBestSnap_stable_across_calls},
+        {"test_ambiguity_hook_api", test_ambiguity_hook_api}
     };
 
     int passed = 0;
