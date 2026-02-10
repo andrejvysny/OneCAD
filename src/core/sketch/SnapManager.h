@@ -13,6 +13,7 @@
 #include "SketchTypes.h"
 #include "SpatialHashGrid.h"
 #include <cstddef>
+#include <cmath>
 #include <limits>
 #include <optional>
 #include <string>
@@ -56,6 +57,8 @@ enum class SnapType {
  * @brief Result of a snap operation
  */
 struct SnapResult {
+    static constexpr double kOverlapEps = 1e-6;
+
     bool snapped = false;
     SnapType type = SnapType::None;
     Vec2d position{0.0, 0.0};
@@ -68,14 +71,68 @@ struct SnapResult {
     std::string hintText;         // Snap type label for rendering ("H", "V", etc.)
 
     /**
-     * @brief Comparison for priority sorting
-     * Lower type value = higher priority; on tie, closer distance wins
+     * @brief Comparison for deterministic overlap arbitration and priority sorting.
+     *
+     * Overlap Arbitration Contract:
+     * 1) Co-location epsilon: two candidates are co-located when both coordinates differ by
+     *    <= kOverlapEps (1e-6, sketch coordinates).
+     * 2) Co-located ranking: when candidates are co-located, rank by SnapType priority
+     *    (lower enum value wins): Vertex > Endpoint > Midpoint > Center > Quadrant >
+     *    Intersection > OnCurve > Grid.
+     * 3) Same-type co-located tie-break: when SnapType also matches, resolve ties in this exact
+     *    order: pointId < entityId < secondEntityId < position.x < position.y <
+     *    hasGuide (false wins) < guideOrigin < hintText.
+     * 4) Preview/commit parity: the same findBestSnap() winner must drive both preview and
+     *    commit. SketchToolManager::resolveSnapForInputEvent() must return the same winner for
+     *    mouse-move (preview) and mouse-press (commit) given identical cursor position and
+     *    sketch state.
+     * 5) Determinism guarantee: for identical input (cursor position, sketch state, exclude set),
+     *    findBestSnap() returns the same winner on every call, with no dependency on insertion
+     *    order or hash randomness.
+     *
+     * Current comparator implementation order:
+     * type < distance < pointId < entityId < secondEntityId < position < hasGuide(false first)
+     * < guideOrigin < hintText.
      */
     bool operator<(const SnapResult& other) const {
+        constexpr double kDistanceEps = 1e-9;
+        constexpr double kCoordEps = 1e-9;
+
         if (type != other.type) {
             return static_cast<int>(type) < static_cast<int>(other.type);
         }
-        return distance < other.distance;
+        if (std::abs(distance - other.distance) > kDistanceEps) {
+            return distance < other.distance;
+        }
+
+        if (pointId != other.pointId) {
+            return pointId < other.pointId;
+        }
+        if (entityId != other.entityId) {
+            return entityId < other.entityId;
+        }
+        if (secondEntityId != other.secondEntityId) {
+            return secondEntityId < other.secondEntityId;
+        }
+
+        if (std::abs(position.x - other.position.x) > kCoordEps) {
+            return position.x < other.position.x;
+        }
+        if (std::abs(position.y - other.position.y) > kCoordEps) {
+            return position.y < other.position.y;
+        }
+
+        if (hasGuide != other.hasGuide) {
+            return !hasGuide && other.hasGuide;
+        }
+        if (std::abs(guideOrigin.x - other.guideOrigin.x) > kCoordEps) {
+            return guideOrigin.x < other.guideOrigin.x;
+        }
+        if (std::abs(guideOrigin.y - other.guideOrigin.y) > kCoordEps) {
+            return guideOrigin.y < other.guideOrigin.y;
+        }
+
+        return hintText < other.hintText;
     }
 };
 
@@ -177,7 +234,39 @@ public:
                                                 const SketchEntity* e2,
                                                 const Sketch& sketch) const;
 
+    // ========== Ambiguity Hooks (Future Tab-cycle UX) ==========
+
+    /**
+     * @brief Check if multiple co-located candidates exist at last query position.
+     * Currently unused by production code; hook for future Tab-cycle UX.
+     */
+    bool hasAmbiguity() const;
+
+    /**
+     * @brief Get number of co-located candidates.
+     * Currently unused by production code; hook for future Tab-cycle UX.
+     */
+    size_t ambiguityCandidateCount() const;
+
+    /**
+     * @brief Cycle to next ambiguity candidate.
+     * Currently unused by production code; hook for future Tab-cycle UX.
+     */
+    void cycleAmbiguity() const;
+
+    /**
+     * @brief Reset ambiguity state.
+     * Currently unused by production code; hook for future Tab-cycle UX.
+     */
+    void clearAmbiguity() const;
+
 private:
+    struct AmbiguityState {
+        std::vector<SnapResult> candidates;
+        size_t selectedIndex = 0;
+        bool active = false;
+    };
+
     double snapRadius_ = constants::SNAP_RADIUS_MM;  // 2.0mm default
     double gridSize_ = 1.0;  // 1mm grid default
     bool gridSnapEnabled_ = true;
@@ -193,7 +282,7 @@ private:
     std::vector<std::pair<Vec2d, Vec2d>> extLines_;
 
     mutable SpatialHashGrid spatialHash_;
-    mutable size_t lastEntityCount_ = std::numeric_limits<size_t>::max();
+    mutable AmbiguityState ambiguityState_;
 
     void rebuildSpatialHash(const Sketch& sketch) const;
     bool shouldConsiderEntity(const EntityID& entityId,
