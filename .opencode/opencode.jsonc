@@ -5,6 +5,7 @@
   // Permission configuration (safe-by-default for CAD)
   "permission": {
     "*": "ask",
+    "read": "allow",
     "edit": "allow",
     "webfetch": "allow",
     "external_directory": "ask",

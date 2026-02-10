@@ -1,0 +1,39 @@
+[  0%] Built target planegcs_autogen_timestamp_deps
+[  0%] Built target planegcs_autogen
+[ 17%] Built target planegcs
+[ 17%] Built target onecad_core_autogen_timestamp_deps
+[ 21%] Built target onecad_core_autogen
+[ 91%] Built target onecad_core
+[ 91%] Built target proto_sketch_snap_autogen_timestamp_deps
+[ 91%] Built target proto_sketch_snap_autogen
+[100%] Built target proto_sketch_snap
+[  0%] Built target planegcs_autogen_timestamp_deps
+[  0%] Built target planegcs_autogen
+[ 17%] Built target planegcs
+[ 17%] Built target onecad_core_autogen_timestamp_deps
+[ 21%] Built target onecad_core_autogen
+[ 91%] Built target onecad_core
+[ 91%] Built target proto_sketch_solver_autogen_timestamp_deps
+[ 91%] Built target proto_sketch_solver_autogen
+[ 95%] Linking CXX executable proto_sketch_solver
+[100%] Built target proto_sketch_solver
+[  0%] Built target planegcs_autogen_timestamp_deps
+[  0%] Built target planegcs_autogen
+[ 17%] Built target planegcs
+[ 17%] Built target onecad_core_autogen_timestamp_deps
+[ 21%] Built target onecad_core_autogen
+[ 91%] Built target onecad_core
+[ 91%] Built target proto_sketch_geometry_autogen_timestamp_deps
+[ 91%] Built target proto_sketch_geometry_autogen
+[ 95%] Linking CXX executable proto_sketch_geometry
+[100%] Built target proto_sketch_geometry
+[  0%] Built target planegcs_autogen_timestamp_deps
+[  0%] Built target planegcs_autogen
+[ 17%] Built target planegcs
+[ 17%] Built target onecad_core_autogen_timestamp_deps
+[ 21%] Built target onecad_core_autogen
+[ 91%] Built target onecad_core
+[ 91%] Built target proto_sketch_constraints_autogen_timestamp_deps
+[ 95%] Built target proto_sketch_constraints_autogen
+[ 95%] Linking CXX executable proto_sketch_constraints
+[100%] Built target proto_sketch_constraints
