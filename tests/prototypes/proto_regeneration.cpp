@@ -12,12 +12,15 @@
 #include "app/document/Document.h"
 #include "app/history/DependencyGraph.h"
 #include "app/history/RegenerationEngine.h"
+#include "app/selection/SelectionManager.h"
 #include "core/loop/LoopDetector.h"
 #include "core/loop/RegionUtils.h"
 #include "core/sketch/Sketch.h"
+#include "io/HistoryIO.h"
 
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
 #include <GProp_GProps.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
@@ -28,6 +31,8 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <optional>
+#include <utility>
 
 using namespace onecad;
 
@@ -51,6 +56,43 @@ bool shapeValid(const TopoDS_Shape& shape) {
     if (shape.IsNull()) return false;
     BRepCheck_Analyzer analyzer(shape);
     return analyzer.IsValid();
+}
+
+std::vector<core::loop::RegionDefinition> detectRegions(core::sketch::Sketch& sketch) {
+    core::loop::LoopDetectorConfig config = core::loop::makeRegionDetectionConfig();
+    core::loop::LoopDetector detector(config);
+    auto loopResult = detector.detect(sketch);
+    assert(loopResult.success);
+    return core::loop::buildRegionDefinitions(loopResult, core::sketch::constants::COINCIDENCE_TOLERANCE);
+}
+
+std::string firstRegionId(core::sketch::Sketch& sketch) {
+    auto regions = detectRegions(sketch);
+    assert(!regions.empty());
+    return regions[0].id;
+}
+
+std::optional<std::pair<std::string, core::sketch::SketchPlane>>
+findTopPlanarFace(const app::Document& doc, const std::string& bodyId) {
+    std::optional<std::pair<std::string, core::sketch::SketchPlane>> best;
+    double bestNormalZ = -2.0;
+
+    for (const auto& id : doc.elementMap().ids()) {
+        const auto* entry = doc.elementMap().find(id);
+        if (!entry || entry->kind != kernel::elementmap::ElementKind::Face) {
+            continue;
+        }
+        auto plane = doc.getSketchPlaneForFace(bodyId, id.value);
+        if (!plane.has_value()) {
+            continue;
+        }
+        if (plane->normal.z > bestNormalZ) {
+            bestNormalZ = plane->normal.z;
+            best = std::make_pair(id.value, *plane);
+        }
+    }
+
+    return best;
 }
 
 } // namespace
@@ -334,6 +376,460 @@ void testGraphCycleDetection() {
     std::cout << " PASS\n";
 }
 
+void testSketchHostAttachmentRoundTrip() {
+    std::cout << "Test 7: Sketch host attachment JSON round-trip..." << std::flush;
+
+    core::sketch::Sketch sketch(core::sketch::SketchPlane::XY());
+    sketch.setHostFaceAttachment("body-A", "face-B");
+
+    auto restored = core::sketch::Sketch::fromJson(sketch.toJson());
+    assert(restored);
+    assert(restored->hasHostFaceAttachment());
+    assert(restored->hostFaceAttachment()->bodyId == "body-A");
+    assert(restored->hostFaceAttachment()->faceId == "face-B");
+
+    std::cout << " PASS\n";
+}
+
+void testHistoryTargetBodyRoundTrip() {
+    std::cout << "Test 8: History targetBodyId JSON round-trip..." << std::flush;
+
+    app::OperationRecord extrudeOp;
+    extrudeOp.opId = "extrude-op";
+    extrudeOp.type = app::OperationType::Extrude;
+    extrudeOp.input = app::SketchRegionRef{"sketch-1", "region-1"};
+    app::ExtrudeParams extrudeParams;
+    extrudeParams.distance = 10.0;
+    extrudeParams.booleanMode = app::BooleanMode::Add;
+    extrudeParams.targetBodyId = "body-target-1";
+    extrudeOp.params = extrudeParams;
+    extrudeOp.resultBodyIds.push_back("body-target-1");
+
+    QJsonObject extrudeJson = io::HistoryIO::serializeOperation(extrudeOp);
+    app::OperationRecord extrudeRoundTrip = io::HistoryIO::deserializeOperation(extrudeJson);
+    assert(std::holds_alternative<app::ExtrudeParams>(extrudeRoundTrip.params));
+    const auto& extrudeRoundTripParams = std::get<app::ExtrudeParams>(extrudeRoundTrip.params);
+    assert(extrudeRoundTripParams.targetBodyId == "body-target-1");
+
+    app::OperationRecord revolveOp;
+    revolveOp.opId = "revolve-op";
+    revolveOp.type = app::OperationType::Revolve;
+    revolveOp.input = app::SketchRegionRef{"sketch-2", "region-2"};
+    app::RevolveParams revolveParams;
+    revolveParams.angleDeg = 180.0;
+    revolveParams.booleanMode = app::BooleanMode::Cut;
+    revolveParams.targetBodyId = "body-target-2";
+    revolveParams.axis = app::SketchLineRef{"sketch-2", "line-1"};
+    revolveOp.params = revolveParams;
+    revolveOp.resultBodyIds.push_back("body-target-2");
+
+    QJsonObject revolveJson = io::HistoryIO::serializeOperation(revolveOp);
+    app::OperationRecord revolveRoundTrip = io::HistoryIO::deserializeOperation(revolveJson);
+    assert(std::holds_alternative<app::RevolveParams>(revolveRoundTrip.params));
+    const auto& revolveRoundTripParams = std::get<app::RevolveParams>(revolveRoundTrip.params);
+    assert(revolveRoundTripParams.targetBodyId == "body-target-2");
+
+    std::cout << " PASS\n";
+}
+
+void testAttachedSketchExtrudeAdd() {
+    std::cout << "Test 9: Attached sketch extrude Add targets host body..." << std::flush;
+
+    app::Document doc;
+    std::string bodyId = doc.addBody(BRepPrimAPI_MakeBox(20.0, 20.0, 10.0).Shape());
+    assert(!bodyId.empty());
+
+    const TopoDS_Shape* baseBody = doc.getBodyShape(bodyId);
+    assert(baseBody && !baseBody->IsNull());
+    const double baseVolume = shapeVolume(*baseBody);
+
+    auto topFace = findTopPlanarFace(doc, bodyId);
+    assert(topFace.has_value());
+
+    auto sketch = std::make_unique<core::sketch::Sketch>(topFace->second);
+    sketch->setHostFaceAttachment(bodyId, topFace->first);
+    const auto p1 = topFace->second.toSketch({8.0, 8.0, 10.0});
+    const auto p2 = topFace->second.toSketch({12.0, 8.0, 10.0});
+    const auto p3 = topFace->second.toSketch({12.0, 12.0, 10.0});
+    const auto p4 = topFace->second.toSketch({8.0, 12.0, 10.0});
+    auto e1 = sketch->addPoint(p1.x, p1.y);
+    auto e2 = sketch->addPoint(p2.x, p2.y);
+    auto e3 = sketch->addPoint(p3.x, p3.y);
+    auto e4 = sketch->addPoint(p4.x, p4.y);
+    sketch->addLine(e1, e2);
+    sketch->addLine(e2, e3);
+    sketch->addLine(e3, e4);
+    sketch->addLine(e4, e1);
+
+    std::string sketchId = doc.addSketch(std::move(sketch));
+    std::string regionId = firstRegionId(*doc.getSketch(sketchId));
+
+    app::OperationRecord op;
+    op.opId = newId();
+    op.type = app::OperationType::Extrude;
+    op.input = app::SketchRegionRef{sketchId, regionId};
+    app::ExtrudeParams params;
+    params.distance = 4.0;
+    params.booleanMode = app::BooleanMode::Add;
+    // Exercise legacy fallback path: resolve host body from sketch attachment metadata.
+    params.targetBodyId.clear();
+    op.params = params;
+    op.resultBodyIds.push_back(bodyId);
+    doc.addOperation(op);
+
+    app::history::RegenerationEngine engine(&doc);
+    auto result = engine.regenerateAll();
+    assert(result.status == app::history::RegenStatus::Success);
+
+    const TopoDS_Shape* updatedBody = doc.getBodyShape(bodyId);
+    assert(updatedBody && !updatedBody->IsNull());
+    assert(shapeValid(*updatedBody));
+    assert(shapeVolume(*updatedBody) > baseVolume + 1.0);
+
+    std::cout << " PASS\n";
+}
+
+void testAttachedSketchExtrudeCut() {
+    std::cout << "Test 10: Attached sketch extrude Cut targets host body..." << std::flush;
+
+    app::Document doc;
+    std::string bodyId = doc.addBody(BRepPrimAPI_MakeBox(20.0, 20.0, 10.0).Shape());
+    assert(!bodyId.empty());
+
+    const TopoDS_Shape* baseBody = doc.getBodyShape(bodyId);
+    assert(baseBody && !baseBody->IsNull());
+    const double baseVolume = shapeVolume(*baseBody);
+
+    auto topFace = findTopPlanarFace(doc, bodyId);
+    assert(topFace.has_value());
+
+    auto sketch = std::make_unique<core::sketch::Sketch>(topFace->second);
+    sketch->setHostFaceAttachment(bodyId, topFace->first);
+    const auto p1 = topFace->second.toSketch({8.0, 8.0, 10.0});
+    const auto p2 = topFace->second.toSketch({12.0, 8.0, 10.0});
+    const auto p3 = topFace->second.toSketch({12.0, 12.0, 10.0});
+    const auto p4 = topFace->second.toSketch({8.0, 12.0, 10.0});
+    auto e1 = sketch->addPoint(p1.x, p1.y);
+    auto e2 = sketch->addPoint(p2.x, p2.y);
+    auto e3 = sketch->addPoint(p3.x, p3.y);
+    auto e4 = sketch->addPoint(p4.x, p4.y);
+    sketch->addLine(e1, e2);
+    sketch->addLine(e2, e3);
+    sketch->addLine(e3, e4);
+    sketch->addLine(e4, e1);
+
+    std::string sketchId = doc.addSketch(std::move(sketch));
+    std::string regionId = firstRegionId(*doc.getSketch(sketchId));
+
+    app::OperationRecord op;
+    op.opId = newId();
+    op.type = app::OperationType::Extrude;
+    op.input = app::SketchRegionRef{sketchId, regionId};
+    app::ExtrudeParams params;
+    params.distance = -4.0;
+    params.booleanMode = app::BooleanMode::Cut;
+    params.targetBodyId = bodyId;
+    op.params = params;
+    op.resultBodyIds.push_back(bodyId);
+    doc.addOperation(op);
+
+    app::history::RegenerationEngine engine(&doc);
+    auto result = engine.regenerateAll();
+    assert(result.status == app::history::RegenStatus::Success);
+
+    const TopoDS_Shape* updatedBody = doc.getBodyShape(bodyId);
+    assert(updatedBody && !updatedBody->IsNull());
+    assert(shapeValid(*updatedBody));
+    assert(shapeVolume(*updatedBody) < baseVolume - 1.0);
+
+    std::cout << " PASS\n";
+}
+
+void testAttachedSketchRevolveAdd() {
+    std::cout << "Test 11: Attached sketch revolve targets host body..." << std::flush;
+
+    app::Document doc;
+    std::string bodyId = doc.addBody(BRepPrimAPI_MakeBox(20.0, 20.0, 10.0).Shape());
+    assert(!bodyId.empty());
+
+    const TopoDS_Shape* baseBody = doc.getBodyShape(bodyId);
+    assert(baseBody && !baseBody->IsNull());
+    const double baseVolume = shapeVolume(*baseBody);
+
+    auto topFace = findTopPlanarFace(doc, bodyId);
+    assert(topFace.has_value());
+
+    auto sketch = std::make_unique<core::sketch::Sketch>(topFace->second);
+    sketch->setHostFaceAttachment(bodyId, topFace->first);
+
+    const auto p1 = topFace->second.toSketch({9.0, 12.0, 10.0});
+    const auto p2 = topFace->second.toSketch({11.0, 12.0, 10.0});
+    const auto p3 = topFace->second.toSketch({11.0, 14.0, 10.0});
+    const auto p4 = topFace->second.toSketch({9.0, 14.0, 10.0});
+    auto e1 = sketch->addPoint(p1.x, p1.y);
+    auto e2 = sketch->addPoint(p2.x, p2.y);
+    auto e3 = sketch->addPoint(p3.x, p3.y);
+    auto e4 = sketch->addPoint(p4.x, p4.y);
+    sketch->addLine(e1, e2);
+    sketch->addLine(e2, e3);
+    sketch->addLine(e3, e4);
+    sketch->addLine(e4, e1);
+
+    const auto axisP1 = topFace->second.toSketch({0.0, 10.0, 10.0});
+    const auto axisP2 = topFace->second.toSketch({20.0, 10.0, 10.0});
+    auto axisStart = sketch->addPoint(axisP1.x, axisP1.y, true);
+    auto axisEnd = sketch->addPoint(axisP2.x, axisP2.y, true);
+    auto axisLineId = sketch->addLine(axisStart, axisEnd, true);
+
+    std::string sketchId = doc.addSketch(std::move(sketch));
+    std::string regionId = firstRegionId(*doc.getSketch(sketchId));
+
+    app::OperationRecord op;
+    op.opId = newId();
+    op.type = app::OperationType::Revolve;
+    op.input = app::SketchRegionRef{sketchId, regionId};
+    app::RevolveParams params;
+    params.angleDeg = 120.0;
+    params.axis = app::SketchLineRef{sketchId, axisLineId};
+    params.booleanMode = app::BooleanMode::Add;
+    params.targetBodyId = bodyId;
+    op.params = params;
+    op.resultBodyIds.push_back(bodyId);
+    doc.addOperation(op);
+
+    app::history::RegenerationEngine engine(&doc);
+    auto result = engine.regenerateAll();
+    assert(result.status == app::history::RegenStatus::Success);
+
+    const TopoDS_Shape* updatedBody = doc.getBodyShape(bodyId);
+    assert(updatedBody && !updatedBody->IsNull());
+    assert(shapeValid(*updatedBody));
+    assert(shapeVolume(*updatedBody) > baseVolume + 1.0);
+
+    std::cout << " PASS\n";
+}
+
+void testBooleanFailureOnMissingTargetBody() {
+    std::cout << "Test 12: Boolean op fails explicitly when target body is unresolved..." << std::flush;
+
+    app::Document doc;
+
+    auto sketch = std::make_unique<core::sketch::Sketch>(core::sketch::SketchPlane::XY());
+    auto p1 = sketch->addPoint(0.0, 0.0);
+    auto p2 = sketch->addPoint(10.0, 0.0);
+    auto p3 = sketch->addPoint(10.0, 10.0);
+    auto p4 = sketch->addPoint(0.0, 10.0);
+    sketch->addLine(p1, p2);
+    sketch->addLine(p2, p3);
+    sketch->addLine(p3, p4);
+    sketch->addLine(p4, p1);
+    std::string sketchId = doc.addSketch(std::move(sketch));
+    std::string regionId = firstRegionId(*doc.getSketch(sketchId));
+
+    app::OperationRecord op;
+    op.opId = newId();
+    op.type = app::OperationType::Extrude;
+    op.input = app::SketchRegionRef{sketchId, regionId};
+    app::ExtrudeParams params;
+    params.distance = 5.0;
+    params.booleanMode = app::BooleanMode::Add;
+    params.targetBodyId = "missing-body";
+    op.params = params;
+    op.resultBodyIds.push_back("missing-body");
+    doc.addOperation(op);
+
+    app::history::RegenerationEngine engine(&doc);
+    auto result = engine.regenerateAll();
+    assert(result.status != app::history::RegenStatus::Success);
+    assert(!result.failedOps.empty());
+    const std::string& error = result.failedOps.front().errorMessage;
+    assert(error.find("Target body not found: missing-body") != std::string::npos);
+
+    std::cout << " PASS\n";
+}
+
+void testFaceBoundaryProjectionPartitioning() {
+    std::cout << "Test 13: Host face projection partitions regions (square + circle)..." << std::flush;
+
+    app::Document doc;
+    std::string bodyId = doc.addBody(BRepPrimAPI_MakeBox(20.0, 20.0, 10.0).Shape());
+    assert(!bodyId.empty());
+
+    auto topFace = findTopPlanarFace(doc, bodyId);
+    assert(topFace.has_value());
+
+    auto sketch = std::make_unique<core::sketch::Sketch>(topFace->second);
+    sketch->setHostFaceAttachment(bodyId, topFace->first);
+
+    const auto center = topFace->second.toSketch({10.0, 10.0, 10.0});
+    sketch->addCircle(center.x, center.y, 4.0);
+
+    std::string sketchId = doc.addSketch(std::move(sketch));
+    core::sketch::Sketch* sketchPtr = doc.getSketch(sketchId);
+    assert(sketchPtr);
+
+    bool projected = doc.ensureHostFaceBoundariesProjected(sketchId);
+    assert(projected);
+    assert(sketchPtr->hasProjectedHostBoundaries());
+    assert(sketchPtr->projectedHostBoundariesVersion() == 1);
+
+    auto regions = detectRegions(*sketchPtr);
+    assert(regions.size() >= 2);
+
+    std::cout << " PASS\n";
+}
+
+void testLegacyHostBoundaryBackfillIdempotent() {
+    std::cout << "Test 14: Legacy host-boundary backfill is idempotent..." << std::flush;
+
+    app::Document doc;
+    std::string bodyId = doc.addBody(BRepPrimAPI_MakeBox(20.0, 20.0, 10.0).Shape());
+    assert(!bodyId.empty());
+
+    auto topFace = findTopPlanarFace(doc, bodyId);
+    assert(topFace.has_value());
+
+    auto sketch = std::make_unique<core::sketch::Sketch>(topFace->second);
+    sketch->setHostFaceAttachment(bodyId, topFace->first);
+    const auto center = topFace->second.toSketch({10.0, 10.0, 10.0});
+    sketch->addCircle(center.x, center.y, 4.0);
+
+    std::string sketchId = doc.addSketch(std::move(sketch));
+    core::sketch::Sketch* sketchPtr = doc.getSketch(sketchId);
+    assert(sketchPtr);
+    assert(!sketchPtr->hasProjectedHostBoundaries());
+    assert(sketchPtr->projectedHostBoundariesVersion() == 0);
+
+    const size_t countBefore = sketchPtr->getEntityCount();
+    bool first = doc.ensureHostFaceBoundariesProjected(sketchId);
+    const size_t countAfterFirst = sketchPtr->getEntityCount();
+    bool second = doc.ensureHostFaceBoundariesProjected(sketchId);
+    const size_t countAfterSecond = sketchPtr->getEntityCount();
+
+    assert(first);
+    assert(countAfterFirst > countBefore);
+    assert(sketchPtr->hasProjectedHostBoundaries());
+    assert(sketchPtr->projectedHostBoundariesVersion() == 1);
+    assert(!second);
+    assert(countAfterSecond == countAfterFirst);
+
+    std::cout << " PASS\n";
+}
+
+void testSketchHostProjectionVersionRequired() {
+    std::cout << "Test 15: Sketch host projection JSON requires projection version..." << std::flush;
+
+    core::sketch::Sketch sketch(core::sketch::SketchPlane::XY());
+    sketch.setHostFaceAttachment("body-A", "face-B");
+    sketch.setProjectedHostBoundariesVersion(1);
+
+    QJsonParseError parseError;
+    const QString jsonText = QString::fromStdString(sketch.toJson());
+    QJsonDocument docJson = QJsonDocument::fromJson(jsonText.toUtf8(), &parseError);
+    assert(parseError.error == QJsonParseError::NoError);
+    assert(docJson.isObject());
+
+    QJsonObject root = docJson.object();
+    assert(root.contains("hostFace"));
+    QJsonObject hostFace = root["hostFace"].toObject();
+    hostFace.remove("projectedBoundaryVersion");
+    root["hostFace"] = hostFace;
+
+    QJsonDocument withoutVersion(root);
+    auto restored = core::sketch::Sketch::fromJson(withoutVersion.toJson().toStdString());
+    assert(!restored);
+
+    std::cout << " PASS\n";
+}
+
+void testSelectionPriorityPrefersSketchRegion() {
+    std::cout << "Test 16: Selection priority prefers SketchRegion over Face..." << std::flush;
+
+    app::selection::SelectionManager manager;
+    manager.setMode(app::selection::SelectionMode::Model);
+
+    app::selection::PickResult pick;
+    app::selection::SelectionItem face;
+    face.kind = app::selection::SelectionKind::Face;
+    face.id = {"body-1", "face-1"};
+    face.priority = 2;
+    face.screenDistance = 0.5;
+    face.depth = 0.1;
+    pick.hits.push_back(face);
+
+    app::selection::SelectionItem sketchRegion;
+    sketchRegion.kind = app::selection::SelectionKind::SketchRegion;
+    sketchRegion.id = {"sketch-1", "region-1"};
+    sketchRegion.priority = -98; // Matches viewport sketch-priority boost behavior.
+    sketchRegion.screenDistance = 0.5;
+    sketchRegion.depth = 0.2;
+    pick.hits.push_back(sketchRegion);
+
+    app::selection::ClickModifiers modifiers;
+    auto action = manager.handleClick(pick, modifiers, QPoint(100, 100));
+    assert(action.selectionChanged);
+    auto selected = manager.selection();
+    assert(selected.size() == 1);
+    assert(selected[0].kind == app::selection::SelectionKind::SketchRegion);
+    assert(selected[0].id.ownerId == "sketch-1");
+    assert(selected[0].id.elementId == "region-1");
+
+    std::cout << " PASS\n";
+}
+
+void testProjectedReferenceGeometryIsLocked() {
+    std::cout << "Test 17: Projected host reference geometry is non-editable..." << std::flush;
+
+    app::Document doc;
+    std::string bodyId = doc.addBody(BRepPrimAPI_MakeBox(20.0, 20.0, 10.0).Shape());
+    assert(!bodyId.empty());
+
+    auto topFace = findTopPlanarFace(doc, bodyId);
+    assert(topFace.has_value());
+
+    auto sketch = std::make_unique<core::sketch::Sketch>(topFace->second);
+    sketch->setHostFaceAttachment(bodyId, topFace->first);
+    std::string sketchId = doc.addSketch(std::move(sketch));
+    core::sketch::Sketch* sketchPtr = doc.getSketch(sketchId);
+    assert(sketchPtr);
+    assert(doc.ensureHostFaceBoundariesProjected(sketchId));
+
+    std::string lockedPointId;
+    std::string lockedCurveId;
+    for (const auto& entity : sketchPtr->getAllEntities()) {
+        if (!entity || !entity->isReferenceLocked()) {
+            continue;
+        }
+        if (entity->type() == core::sketch::EntityType::Point && lockedPointId.empty()) {
+            lockedPointId = entity->id();
+        } else if (entity->type() != core::sketch::EntityType::Point && lockedCurveId.empty()) {
+            lockedCurveId = entity->id();
+        }
+    }
+
+    assert(!lockedPointId.empty());
+    assert(!lockedCurveId.empty());
+    assert(!sketchPtr->removeEntity(lockedCurveId));
+    assert(!sketchPtr->removeEntity(lockedPointId));
+
+    auto freePoint = sketchPtr->addPoint(100.0, 100.0);
+    assert(!freePoint.empty());
+    assert(sketchPtr->addCoincident(lockedPointId, freePoint).empty());
+
+    core::sketch::ConstraintID lockedFixedId;
+    for (const auto& c : sketchPtr->getAllConstraints()) {
+        if (c && c->type() == core::sketch::ConstraintType::Fixed &&
+            c->references(lockedPointId)) {
+            lockedFixedId = c->id();
+            break;
+        }
+    }
+    assert(!lockedFixedId.empty());
+    assert(!sketchPtr->removeConstraint(lockedFixedId));
+
+    std::cout << " PASS\n";
+}
+
 int main(int argc, char* argv[]) {
     QCoreApplication app(argc, argv);
 
@@ -345,6 +841,17 @@ int main(int argc, char* argv[]) {
     testSingleExtrude();
     testChainRegeneration();
     testRegenFailureOnMissingSketch();
+    testSketchHostAttachmentRoundTrip();
+    testHistoryTargetBodyRoundTrip();
+    testAttachedSketchExtrudeAdd();
+    testAttachedSketchExtrudeCut();
+    testAttachedSketchRevolveAdd();
+    testBooleanFailureOnMissingTargetBody();
+    testFaceBoundaryProjectionPartitioning();
+    testLegacyHostBoundaryBackfillIdempotent();
+    testSketchHostProjectionVersionRequired();
+    testSelectionPriorityPrefersSketchRegion();
+    testProjectedReferenceGeometryIsLocked();
 
     std::cout << "\n=== All tests passed! ===\n\n";
     return 0;

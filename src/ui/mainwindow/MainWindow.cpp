@@ -1093,12 +1093,43 @@ void MainWindow::setupStatusBar() {
 }
 
 void MainWindow::onNewSketch() {
-    // If already in sketch mode, exit first
+    // If already in sketch mode, exit first (then continue create flow).
     if (m_viewport->isInSketchMode()) {
         onExitSketch();
     }
 
     m_activeSketchId.clear();
+
+    const auto selection = m_viewport->modelSelection();
+    if (selection.size() == 1 && selection[0].kind == app::selection::SelectionKind::Face) {
+        const auto& selectedFace = selection[0];
+        auto plane = m_document->getSketchPlaneForFace(selectedFace.id.ownerId,
+                                                        selectedFace.id.elementId);
+        if (plane) {
+            auto sketch = std::make_unique<core::sketch::Sketch>(*plane);
+            sketch->setHostFaceAttachment(selectedFace.id.ownerId, selectedFace.id.elementId);
+            m_activeSketchId = m_document->addSketch(std::move(sketch));
+            if (!m_activeSketchId.empty()) {
+                m_document->ensureHostFaceBoundariesProjected(m_activeSketchId);
+            }
+            if (!m_activeSketchId.empty()) {
+                m_viewport->setReferenceSketch(QString::fromStdString(m_activeSketchId));
+            }
+
+            core::sketch::Sketch* sketchPtr = m_document->getSketch(m_activeSketchId);
+            if (sketchPtr) {
+                m_viewport->enterSketchMode(sketchPtr);
+                m_toolStatus->setText(tr("Sketch Mode - Selected Face"));
+                m_toolbar->setContext(ContextToolbar::Context::Sketch);
+                return;
+            }
+
+            m_activeSketchId.clear();
+            m_toolStatus->setText(tr("Ready"));
+            return;
+        }
+    }
+
     m_viewport->beginPlaneSelection();
     m_toolStatus->setText(tr("Select a plane to start sketch"));
 }
@@ -1124,6 +1155,9 @@ void MainWindow::onSketchPlanePicked(int planeIndex) {
 
     auto sketch = std::make_unique<core::sketch::Sketch>(plane);
     m_activeSketchId = m_document->addSketch(std::move(sketch));
+    if (!m_activeSketchId.empty()) {
+        m_viewport->setReferenceSketch(QString::fromStdString(m_activeSketchId));
+    }
 
     core::sketch::Sketch* sketchPtr = m_document->getSketch(m_activeSketchId);
     if (!sketchPtr) {

@@ -78,6 +78,7 @@ struct ExtrudeParams {
     double distance = 0.0;
     double draftAngleDeg = 0.0;
     BooleanMode booleanMode = BooleanMode::NewBody;
+    std::string targetBodyId;               // Optional explicit boolean target body
 };
 
 struct RevolveParams {
@@ -85,6 +86,7 @@ struct RevolveParams {
     using AxisRef = std::variant<std::monostate, SketchLineRef, EdgeRef>;
     AxisRef axis;
     BooleanMode booleanMode = BooleanMode::NewBody;
+    std::string targetBodyId;               // Optional explicit boolean target body
 };
 
 struct FilletChamferParams {

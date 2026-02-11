@@ -188,12 +188,15 @@ app::ExtrudeParams EditParameterDialog::getExtrudeParams() const {
     params.distance = distanceSpinbox_ ? distanceSpinbox_->value() : 0.0;
     params.draftAngleDeg = draftAngleSpinbox_ ? draftAngleSpinbox_->value() : 0.0;
     params.booleanMode = app::BooleanMode::NewBody;  // Preserve original mode
+    params.targetBodyId.clear();
 
-    // Find original to preserve boolean mode
+    // Find original to preserve boolean mode and target body
     if (document_) {
         for (const auto& op : document_->operations()) {
             if (op.opId == opId_ && std::holds_alternative<app::ExtrudeParams>(op.params)) {
-                params.booleanMode = std::get<app::ExtrudeParams>(op.params).booleanMode;
+                const auto& orig = std::get<app::ExtrudeParams>(op.params);
+                params.booleanMode = orig.booleanMode;
+                params.targetBodyId = orig.targetBodyId;
                 break;
             }
         }
@@ -205,14 +208,16 @@ app::RevolveParams EditParameterDialog::getRevolveParams() const {
     app::RevolveParams params;
     params.angleDeg = angleSpinbox_ ? angleSpinbox_->value() : 360.0;
     params.booleanMode = app::BooleanMode::NewBody;
+    params.targetBodyId.clear();
 
-    // Find original to preserve boolean mode and axis
+    // Find original to preserve boolean mode, axis, and target body
     if (document_) {
         for (const auto& op : document_->operations()) {
             if (op.opId == opId_ && std::holds_alternative<app::RevolveParams>(op.params)) {
                 const auto& orig = std::get<app::RevolveParams>(op.params);
                 params.booleanMode = orig.booleanMode;
                 params.axis = orig.axis;
+                params.targetBodyId = orig.targetBodyId;
                 break;
             }
         }

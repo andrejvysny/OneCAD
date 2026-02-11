@@ -207,11 +207,17 @@ QJsonObject HistoryIO::serializeOperation(const OperationRecord& op) {
         params["distance"] = p.distance;
         params["draftAngleDeg"] = p.draftAngleDeg;
         params["booleanMode"] = booleanModeToString(p.booleanMode);
+        if (!p.targetBodyId.empty()) {
+            params["targetBodyId"] = QString::fromStdString(p.targetBodyId);
+        }
     }
     else if (std::holds_alternative<RevolveParams>(op.params)) {
         const auto& p = std::get<RevolveParams>(op.params);
         params["angleDeg"] = p.angleDeg;
         params["booleanMode"] = booleanModeToString(p.booleanMode);
+        if (!p.targetBodyId.empty()) {
+            params["targetBodyId"] = QString::fromStdString(p.targetBodyId);
+        }
 
         // Serialize axis reference
         if (std::holds_alternative<SketchLineRef>(p.axis)) {
@@ -306,12 +312,18 @@ OperationRecord HistoryIO::deserializeOperation(const QJsonObject& json) {
         p.distance = params["distance"].toDouble();
         p.draftAngleDeg = params["draftAngleDeg"].toDouble();
         p.booleanMode = stringToBooleanMode(params["booleanMode"].toString());
+        if (params.contains("targetBodyId")) {
+            p.targetBodyId = params["targetBodyId"].toString().toStdString();
+        }
         op.params = p;
     }
     else if (op.type == OperationType::Revolve) {
         RevolveParams p;
         p.angleDeg = params["angleDeg"].toDouble();
         p.booleanMode = stringToBooleanMode(params["booleanMode"].toString());
+        if (params.contains("targetBodyId")) {
+            p.targetBodyId = params["targetBodyId"].toString().toStdString();
+        }
 
         if (params.contains("axisSketchLine")) {
             QJsonObject axisJson = params["axisSketchLine"].toObject();

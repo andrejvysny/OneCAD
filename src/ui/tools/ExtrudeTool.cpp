@@ -9,6 +9,7 @@
 #include "../../app/document/Document.h"
 #include "../../core/loop/FaceBuilder.h"
 #include "../../core/loop/RegionUtils.h"
+#include "../../core/modeling/BooleanOperation.h"
 #include "../../render/Camera3D.h"
 
 #include <BRepGProp.hxx>
@@ -32,6 +33,10 @@ namespace {
 constexpr double kMinExtrudeDistance = 1e-3;
 constexpr double kDraftAngleEpsilon = 1e-4;
 constexpr double kSideFaceDotThreshold = 0.9;
+
+app::BooleanMode signedBooleanMode(double distance) {
+    return distance >= 0.0 ? app::BooleanMode::Add : app::BooleanMode::Cut;
+}
 } // namespace
 
 ExtrudeTool::ExtrudeTool(Viewport* viewport, app::Document* document)
@@ -239,6 +244,7 @@ bool ExtrudeTool::handleMouseRelease(const QPoint& screenPos, Qt::MouseButton bu
             params.distance = distance;
             params.draftAngleDeg = draftAngleDeg_;
             params.booleanMode = booleanMode_;
+            params.targetBodyId = targetBodyId_;
             record.params = params;
 
             record.resultBodyIds.push_back(resultBodyId);
@@ -289,6 +295,15 @@ bool ExtrudeTool::prepareInput(const app::selection::SelectionItem& selection) {
         const auto& plane = sketch_->getPlane();
         direction_ = gp_Dir(plane.normal.x, plane.normal.y, plane.normal.z);
         neutralPlane_ = gp_Pln(gp_Pnt(plane.origin.x, plane.origin.y, plane.origin.z), direction_);
+
+        const auto& hostFace = sketch_->hostFaceAttachment();
+        if (hostFace && hostFace->isValid()) {
+            targetBodyId_ = hostFace->bodyId;
+            const TopoDS_Shape* bodyShape = document_->getBodyShape(targetBodyId_);
+            if (bodyShape && !bodyShape->IsNull()) {
+                targetShape_ = *bodyShape;
+            }
+        }
         
     } else if (selection.kind == app::selection::SelectionKind::Face) {
         targetBodyId_ = selection.id.ownerId;
@@ -340,16 +355,37 @@ bool ExtrudeTool::isPlanarFace(const TopoDS_Face& face) const {
 void ExtrudeTool::detectBooleanMode(double distance) {
     if (distance == 0.0) return;
 
-    if (!targetBodyId_.empty() && !targetShape_.IsNull()) {
-        // Face push/pull logic
-        // Pull out (positive along normal) = Add (Join)
-        // Push in (negative along normal) = Cut
-        booleanMode_ = (distance >= 0) ? app::BooleanMode::Add : app::BooleanMode::Cut;
-    } else {
-        // Sketch logic (NewBody by default)
-        // Future: Check for intersection with existing bodies
-        booleanMode_ = app::BooleanMode::NewBody;
+    if (!targetBodyId_.empty()) {
+        if (sketch_) {
+            // Sketch attached to a host body: prefer geometric detection, but never silently
+            // downgrade to NewBody.
+            if (!targetShape_.IsNull()) {
+                TopoDS_Shape tool = buildExtrudeShape(distance);
+                if (!tool.IsNull()) {
+                    booleanMode_ = core::modeling::BooleanOperation::detectMode(
+                        tool, {targetShape_}, direction_);
+                } else {
+                    booleanMode_ = app::BooleanMode::NewBody;
+                }
+                if (booleanMode_ == app::BooleanMode::NewBody) {
+                    booleanMode_ = signedBooleanMode(distance);
+                }
+                return;
+            }
+
+            // Host metadata exists but body is currently unresolved; keep host-targeted behavior
+            // so regeneration can report an explicit target resolution failure.
+            booleanMode_ = signedBooleanMode(distance);
+            return;
+        }
+
+        // Face push/pull behavior.
+        booleanMode_ = signedBooleanMode(distance);
+        return;
     }
+
+    // Unattached sketch region defaults to NewBody.
+    booleanMode_ = app::BooleanMode::NewBody;
 }
 
 

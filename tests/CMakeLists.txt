@@ -147,6 +147,7 @@ target_link_libraries(proto_regeneration
     PRIVATE
     onecad_app
     onecad_core
+    onecad_io
     Qt6::Core
 )
 target_include_directories(proto_regeneration PRIVATE ${CMAKE_SOURCE_DIR}/src)

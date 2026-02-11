@@ -193,6 +193,18 @@ private:
                                                          const std::string& regionId,
                                                          std::string& errorOut);
 
+    /**
+     * @brief Resolve legacy host body from a sketch-region input's attached sketch metadata.
+     */
+    std::string resolveLegacySketchHostBodyId(const OperationInput& input) const;
+
+    /**
+     * @brief Resolve boolean target body in priority order:
+     * params.targetBodyId -> FaceRef.bodyId -> sketch host body.
+     */
+    std::string resolveBooleanTargetBodyId(const OperationRecord& op,
+                                           const std::string& explicitTargetBodyId) const;
+
     // ─────────────────────────────────────────────────────────────────────────
     // State Management
     // ─────────────────────────────────────────────────────────────────────────

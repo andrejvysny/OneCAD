@@ -132,6 +132,19 @@ PlaneAxes buildPlaneAxes(const core::sketch::SketchPlane& plane) {
     return axes;
 }
 
+QMatrix4x4 buildPlaneModelMatrix(const core::sketch::SketchPlane& plane) {
+    PlaneAxes axes = buildPlaneAxes(plane);
+    QVector3D origin(plane.origin.x, plane.origin.y, plane.origin.z);
+
+    QMatrix4x4 matrix;
+    matrix.setToIdentity();
+    matrix.setColumn(0, QVector4D(axes.xAxis, 0.0f));
+    matrix.setColumn(1, QVector4D(axes.yAxis, 0.0f));
+    matrix.setColumn(2, QVector4D(axes.normal, 0.0f));
+    matrix.setColumn(3, QVector4D(origin, 1.0f));
+    return matrix;
+}
+
 sketch::Vec3d toVec3d(const QColor& color) {
     return {color.redF(), color.greenF(), color.blueF()};
 }
@@ -173,6 +186,32 @@ bool projectToScreen(const QMatrix4x4& viewProjection,
     return true;
 }
 
+bool intersectRayWithPlane(const QVector3D& origin,
+                           const QVector3D& direction,
+                           const QVector3D& planeOrigin,
+                           const QVector3D& planeNormal,
+                           QVector3D* outPoint,
+                           float* outDistance) {
+    constexpr float kEpsilon = 1e-6f;
+    float denom = QVector3D::dotProduct(direction, planeNormal);
+    if (std::abs(denom) < kEpsilon) {
+        return false;
+    }
+
+    float t = QVector3D::dotProduct(planeOrigin - origin, planeNormal) / denom;
+    if (t < 0.0f) {
+        return false;
+    }
+
+    if (outPoint) {
+        *outPoint = origin + direction * t;
+    }
+    if (outDistance) {
+        *outDistance = t;
+    }
+    return true;
+}
+
 bool intersectRayWithPlaneZ0(const QVector3D& origin,
                              const QVector3D& direction,
                              QVector3D* outPoint,
@@ -193,6 +232,64 @@ bool intersectRayWithPlaneZ0(const QVector3D& origin,
     if (outDistance) {
         *outDistance = t;
     }
+    return true;
+}
+
+bool computePlaneBoundsUV(const QMatrix4x4& viewProjection,
+                         const core::sketch::SketchPlane& plane,
+                         QRectF* outBounds) {
+    bool invertible = false;
+    QMatrix4x4 inverse = viewProjection.inverted(&invertible);
+    if (!invertible) {
+        return false;
+    }
+
+    PlaneAxes axes = buildPlaneAxes(plane);
+    QVector3D planeOrigin(plane.origin.x, plane.origin.y, plane.origin.z);
+
+    QVector2D minPoint(std::numeric_limits<float>::max(), std::numeric_limits<float>::max());
+    QVector2D maxPoint(-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max());
+    int hitCount = 0;
+
+    const float ndc[2] = {-1.0f, 1.0f};
+    for (float x : ndc) {
+        for (float y : ndc) {
+            QVector4D nearPoint = inverse * QVector4D(x, y, -1.0f, 1.0f);
+            QVector4D farPoint = inverse * QVector4D(x, y, 1.0f, 1.0f);
+            if (qFuzzyIsNull(nearPoint.w()) || qFuzzyIsNull(farPoint.w())) {
+                continue;
+            }
+
+            QVector3D p0 = nearPoint.toVector3D() / nearPoint.w();
+            QVector3D p1 = farPoint.toVector3D() / farPoint.w();
+            QVector3D dir = p1 - p0;
+
+            QVector3D hit;
+            if (!intersectRayWithPlane(p0, dir, planeOrigin, axes.normal, &hit, nullptr)) {
+                continue;
+            }
+
+            QVector3D rel = hit - planeOrigin;
+            float u = QVector3D::dotProduct(rel, axes.xAxis);
+            float v = QVector3D::dotProduct(rel, axes.yAxis);
+            if (!std::isfinite(u) || !std::isfinite(v)) {
+                continue;
+            }
+
+            minPoint.setX(std::min(minPoint.x(), u));
+            minPoint.setY(std::min(minPoint.y(), v));
+            maxPoint.setX(std::max(maxPoint.x(), u));
+            maxPoint.setY(std::max(maxPoint.y(), v));
+            ++hitCount;
+        }
+    }
+
+    if (hitCount < 4) {
+        return false;
+    }
+
+    *outBounds = QRectF(QPointF(minPoint.x(), minPoint.y()),
+                        QPointF(maxPoint.x(), maxPoint.y())).normalized();
     return true;
 }
 
@@ -527,53 +624,107 @@ void Viewport::paintGL() {
     QVector3D forward = m_camera->forward();
     QVector3D position = m_camera->position();
 
-    float planeDistance = dist;
-    QVector3D planeAnchor(target.x(), target.y(), 0.0f);
-    intersectRayWithPlaneZ0(position, forward, &planeAnchor, &planeDistance);
+    if (m_inSketchMode && m_activeSketch) {
+        const auto& sketchPlane = m_activeSketch->getPlane();
+        PlaneAxes axes = buildPlaneAxes(sketchPlane);
+        QVector3D planeOrigin(sketchPlane.origin.x, sketchPlane.origin.y, sketchPlane.origin.z);
 
-    float depthScale = 1.0f;
-    if (m_camera->projectionType() == render::Camera3D::ProjectionType::Perspective &&
-        dist > 1e-4f) {
-        depthScale = planeDistance / dist;
-    }
-    depthScale = std::clamp(depthScale, kGridDepthScaleMin, kGridDepthScaleMax);
+        float planeDistance = dist;
+        QVector3D planeAnchor = planeOrigin;
+        intersectRayWithPlane(position, forward, planeOrigin, axes.normal, &planeAnchor, &planeDistance);
 
-    float viewHalf = static_cast<float>(viewExtent) * depthScale;
-    QRectF fallbackBounds(QPointF(planeAnchor.x() - viewHalf, planeAnchor.y() - viewHalf),
-                          QPointF(planeAnchor.x() + viewHalf, planeAnchor.y() + viewHalf));
-
-    QRectF gridBounds = fallbackBounds;
-    QRectF frustumBounds;
-    bool hasFrustumBounds = computePlaneBoundsXY(viewProjection, &frustumBounds);
-    if (hasFrustumBounds) {
-        float maxHalf = 0.5f * static_cast<float>(qMax(frustumBounds.width(),
-                                                       frustumBounds.height()));
-        QVector2D anchor2d(planeAnchor.x(), planeAnchor.y());
-        QVector2D frustumCenter(static_cast<float>(frustumBounds.center().x()),
-                                static_cast<float>(frustumBounds.center().y()));
-        float centerDistance = (frustumCenter - anchor2d).length();
-        float maxAllowed = viewHalf * kGridBoundsMaxScale;
-
-        if (maxHalf > maxAllowed || centerDistance > maxAllowed) {
-            hasFrustumBounds = false;
+        float depthScale = 1.0f;
+        if (m_camera->projectionType() == render::Camera3D::ProjectionType::Perspective && dist > 1e-4f) {
+            depthScale = planeDistance / dist;
         }
+        depthScale = std::clamp(depthScale, kGridDepthScaleMin, kGridDepthScaleMax);
+
+        float viewHalf = static_cast<float>(viewExtent) * depthScale;
+        QVector3D anchorDelta = planeAnchor - planeOrigin;
+        QVector2D anchorUv(QVector3D::dotProduct(anchorDelta, axes.xAxis),
+                           QVector3D::dotProduct(anchorDelta, axes.yAxis));
+
+        QRectF fallbackBounds(QPointF(anchorUv.x() - viewHalf, anchorUv.y() - viewHalf),
+                              QPointF(anchorUv.x() + viewHalf, anchorUv.y() + viewHalf));
+
+        QRectF gridBounds = fallbackBounds;
+        QRectF frustumBounds;
+        bool hasFrustumBounds = computePlaneBoundsUV(viewProjection, sketchPlane, &frustumBounds);
+        if (hasFrustumBounds) {
+            float maxHalf = 0.5f * static_cast<float>(qMax(frustumBounds.width(),
+                                                           frustumBounds.height()));
+            QVector2D frustumCenter(static_cast<float>(frustumBounds.center().x()),
+                                    static_cast<float>(frustumBounds.center().y()));
+            float centerDistance = (frustumCenter - anchorUv).length();
+            float maxAllowed = viewHalf * kGridBoundsMaxScale;
+
+            if (maxHalf > maxAllowed || centerDistance > maxAllowed) {
+                hasFrustumBounds = false;
+            }
+        }
+        if (hasFrustumBounds) {
+            gridBounds = frustumBounds;
+        }
+
+        QVector3D cameraDelta = position - planeOrigin;
+        QVector2D fadeOrigin(QVector3D::dotProduct(cameraDelta, axes.xAxis),
+                             QVector3D::dotProduct(cameraDelta, axes.yAxis));
+
+        m_grid->render(viewProjection,
+                       static_cast<float>(pixelScale),
+                       QVector2D(static_cast<float>(gridBounds.left()), static_cast<float>(gridBounds.top())),
+                       QVector2D(static_cast<float>(gridBounds.right()), static_cast<float>(gridBounds.bottom())),
+                       fadeOrigin,
+                       buildPlaneModelMatrix(sketchPlane));
+    } else {
+        float planeDistance = dist;
+        QVector3D planeAnchor(target.x(), target.y(), 0.0f);
+        intersectRayWithPlaneZ0(position, forward, &planeAnchor, &planeDistance);
+
+        float depthScale = 1.0f;
+        if (m_camera->projectionType() == render::Camera3D::ProjectionType::Perspective &&
+            dist > 1e-4f) {
+            depthScale = planeDistance / dist;
+        }
+        depthScale = std::clamp(depthScale, kGridDepthScaleMin, kGridDepthScaleMax);
+
+        float viewHalf = static_cast<float>(viewExtent) * depthScale;
+        QRectF fallbackBounds(QPointF(planeAnchor.x() - viewHalf, planeAnchor.y() - viewHalf),
+                              QPointF(planeAnchor.x() + viewHalf, planeAnchor.y() + viewHalf));
+
+        QRectF gridBounds = fallbackBounds;
+        QRectF frustumBounds;
+        bool hasFrustumBounds = computePlaneBoundsXY(viewProjection, &frustumBounds);
+        if (hasFrustumBounds) {
+            float maxHalf = 0.5f * static_cast<float>(qMax(frustumBounds.width(),
+                                                           frustumBounds.height()));
+            QVector2D anchor2d(planeAnchor.x(), planeAnchor.y());
+            QVector2D frustumCenter(static_cast<float>(frustumBounds.center().x()),
+                                    static_cast<float>(frustumBounds.center().y()));
+            float centerDistance = (frustumCenter - anchor2d).length();
+            float maxAllowed = viewHalf * kGridBoundsMaxScale;
+
+            if (maxHalf > maxAllowed || centerDistance > maxAllowed) {
+                hasFrustumBounds = false;
+            }
+        }
+        if (hasFrustumBounds) {
+            gridBounds = frustumBounds;
+        }
+
+        float minX = static_cast<float>(gridBounds.left());
+        float maxX = static_cast<float>(gridBounds.right());
+        float minY = static_cast<float>(gridBounds.top());
+        float maxY = static_cast<float>(gridBounds.bottom());
+
+        QVector2D fadeOrigin(position.x(), position.y());
+
+        m_grid->render(viewProjection,
+                       static_cast<float>(pixelScale),
+                       QVector2D(minX, minY),
+                       QVector2D(maxX, maxY),
+                       fadeOrigin);
     }
-    if (hasFrustumBounds) {
-        gridBounds = frustumBounds;
-    }
-
-    float minX = static_cast<float>(gridBounds.left());
-    float maxX = static_cast<float>(gridBounds.right());
-    float minY = static_cast<float>(gridBounds.top());
-    float maxY = static_cast<float>(gridBounds.bottom());
-
-    QVector2D fadeOrigin(position.x(), position.y());
-
-    m_grid->render(viewProjection,
-                   static_cast<float>(pixelScale),
-                   QVector2D(minX, minY),
-                   QVector2D(maxX, maxY),
-                   fadeOrigin);
 
     if (m_bodyRenderer) {
         render::BodyRenderer::RenderStyle style;
@@ -1278,9 +1429,26 @@ void Viewport::mouseMoveEvent(QMouseEvent* event) {
             QPoint delta = event->pos() - m_sketchPressPos;
             int distSq = delta.x() * delta.x() + delta.y() * delta.y();
             if (distSq >= kPointDragThresholdPixels * kPointDragThresholdPixels) {
-                m_sketchInteractionState = SketchInteractionState::RegionMoving;
-                m_moveSketchLastSketchPos = screenToSketch(event->pos());
-                setCursor(Qt::SizeAllCursor);
+                bool regionContainsLockedReference = false;
+                if (!m_regionMoveCandidateId.empty()) {
+                    auto entityIds =
+                        core::loop::getEntityIdsInRegion(*m_activeSketch, m_regionMoveCandidateId);
+                    for (const auto& entityId : entityIds) {
+                        if (m_activeSketch->isEntityReferenceLocked(entityId)) {
+                            regionContainsLockedReference = true;
+                            break;
+                        }
+                    }
+                }
+                if (regionContainsLockedReference) {
+                    emit statusMessageRequested(tr("Reference geometry is locked"));
+                    m_sketchInteractionState = SketchInteractionState::Idle;
+                    m_regionMoveCandidateId.clear();
+                } else {
+                    m_sketchInteractionState = SketchInteractionState::RegionMoving;
+                    m_moveSketchLastSketchPos = screenToSketch(event->pos());
+                    setCursor(Qt::SizeAllCursor);
+                }
             }
         }
         // Point drag state machine
@@ -1289,7 +1457,11 @@ void Viewport::mouseMoveEvent(QMouseEvent* event) {
             QPoint delta = event->pos() - m_sketchPressPos;
             int distSq = delta.x() * delta.x() + delta.y() * delta.y();
             if (distSq >= kPointDragThresholdPixels * kPointDragThresholdPixels) {
-                if (m_activeSketch->hasFixedConstraint(m_pointDragCandidateId)) {
+                if (m_activeSketch->isEntityReferenceLocked(m_pointDragCandidateId)) {
+                    emit statusMessageRequested(tr("Reference geometry is locked"));
+                    m_sketchInteractionState = SketchInteractionState::Idle;
+                    m_pointDragCandidateId.clear();
+                } else if (m_activeSketch->hasFixedConstraint(m_pointDragCandidateId)) {
                     emit statusMessageRequested(tr("Point is fixed"));
                     m_sketchInteractionState = SketchInteractionState::Idle;
                     m_pointDragCandidateId.clear();
@@ -2594,6 +2766,11 @@ app::selection::PickResult Viewport::buildModelPickResult(const QPoint& screenPo
 
     if (m_referenceSketch) {
         auto sketchResult = buildReferenceSketchPickResult(screenPos);
+        // Prefer active reference-sketch entities/regions over coplanar model faces to avoid
+        // hide/unhide workflows for region operations on face-hosted sketches.
+        for (auto& hit : sketchResult.hits) {
+            hit.priority -= 100;
+        }
         result.hits.insert(result.hits.end(), sketchResult.hits.begin(), sketchResult.hits.end());
     }
 
@@ -3309,7 +3486,12 @@ void Viewport::setCommandProcessor(app::commands::CommandProcessor* processor) {
 
 void Viewport::setReferenceSketch(const QString& sketchId) {
     const std::string id = sketchId.toStdString();
-    if (id == m_referenceSketchId && m_referenceSketch) {
+    bool sketchBackfilled = false;
+    if (m_document && !id.empty()) {
+        sketchBackfilled = m_document->ensureHostFaceBoundariesProjected(id);
+    }
+
+    if (id == m_referenceSketchId && m_referenceSketch && !sketchBackfilled) {
         return;
     }
     m_referenceSketchId = id;
@@ -3351,6 +3533,13 @@ void Viewport::setModelPickMeshes(std::vector<selection::ModelPickerAdapter::Mes
     if (m_modelPicker) {
         m_modelPicker->setMeshes(std::move(meshes));
     }
+}
+
+std::vector<app::selection::SelectionItem> Viewport::modelSelection() const {
+    if (!m_selectionManager) {
+        return {};
+    }
+    return m_selectionManager->selection();
 }
 
 void Viewport::setModelPreviewMeshes(const std::vector<render::SceneMeshStore::Mesh>& meshes) {

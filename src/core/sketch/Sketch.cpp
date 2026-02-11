@@ -164,53 +164,57 @@ bool Sketch::removeEntity(EntityID id) {
     if (!entity) {
         return false;
     }
+    if (entity->isReferenceLocked()) {
+        return false;
+    }
 
     if (auto* point = dynamic_cast<SketchPoint*>(entity)) {
-        std::vector<EntityID> dependents;
+        std::unordered_set<EntityID> dependents;
         for (const auto& candidate : entities_) {
             if (!candidate) {
                 continue;
             }
             if (auto* line = dynamic_cast<SketchLine*>(candidate.get())) {
                 if (line->startPointId() == id || line->endPointId() == id) {
-                    dependents.push_back(line->id());
+                    dependents.insert(line->id());
                 }
             } else if (auto* arc = dynamic_cast<SketchArc*>(candidate.get())) {
                 if (arc->centerPointId() == id) {
-                    dependents.push_back(arc->id());
+                    dependents.insert(arc->id());
                 }
             } else if (auto* circle = dynamic_cast<SketchCircle*>(candidate.get())) {
                 if (circle->centerPointId() == id) {
-                    dependents.push_back(circle->id());
+                    dependents.insert(circle->id());
                 }
             } else if (auto* ellipse = dynamic_cast<SketchEllipse*>(candidate.get())) {
                 if (ellipse->centerPointId() == id) {
-                    dependents.push_back(ellipse->id());
+                    dependents.insert(ellipse->id());
                 }
+            }
+        }
+
+        for (const auto& entityId : point->connectedEntities()) {
+            if (!entityId.empty() && entityId != id) {
+                dependents.insert(entityId);
             }
         }
 
         for (const auto& depId : dependents) {
-            if (depId != id) {
-                removeEntity(depId);
+            if (depId == id) {
+                continue;
+            }
+            const SketchEntity* dependent = getEntity(depId);
+            if (dependent && dependent->isReferenceLocked()) {
+                return false;
             }
         }
 
-        if (!point->connectedEntities().empty()) {
-            for (const auto& entityId : point->connectedEntities()) {
-                auto* connected = getEntity(entityId);
-                if (!connected) {
-                    continue;
-                }
-                if (auto* line = dynamic_cast<SketchLine*>(connected)) {
-                    removeEntity(line->id());
-                } else if (auto* arc = dynamic_cast<SketchArc*>(connected)) {
-                    removeEntity(arc->id());
-                } else if (auto* circle = dynamic_cast<SketchCircle*>(connected)) {
-                    removeEntity(circle->id());
-                } else if (auto* ellipse = dynamic_cast<SketchEllipse*>(connected)) {
-                    removeEntity(ellipse->id());
-                }
+        for (const auto& depId : dependents) {
+            if (depId == id) {
+                continue;
+            }
+            if (getEntity(depId) && !removeEntity(depId)) {
+                return false;
             }
         }
     }
@@ -279,6 +283,9 @@ std::pair<EntityID, EntityID> Sketch::splitLineAt(EntityID lineId, const Vec2d& 
     if (!line) {
         return {{}, {}};
     }
+    if (line->isReferenceLocked()) {
+        return {{}, {}};
+    }
 
     auto* startPt = getEntityAs<SketchPoint>(line->startPointId());
     auto* endPt = getEntityAs<SketchPoint>(line->endPointId());
@@ -345,6 +352,9 @@ std::pair<EntityID, EntityID> Sketch::splitLineAt(EntityID lineId, const Vec2d& 
 std::pair<EntityID, EntityID> Sketch::splitArcAt(EntityID arcId, double splitAngle) {
     auto* arc = getEntityAs<SketchArc>(arcId);
     if (!arc) {
+        return {{}, {}};
+    }
+    if (arc->isReferenceLocked()) {
         return {{}, {}};
     }
 
@@ -433,6 +443,20 @@ const SketchEntity* Sketch::getEntity(EntityID id) const {
     return entities_[it->second].get();
 }
 
+bool Sketch::isEntityReferenceLocked(EntityID id) const {
+    const SketchEntity* entity = getEntity(id);
+    return entity && entity->isReferenceLocked();
+}
+
+bool Sketch::setEntityReferenceLocked(EntityID id, bool locked) {
+    SketchEntity* entity = getEntity(id);
+    if (!entity) {
+        return false;
+    }
+    entity->setReferenceLocked(locked);
+    return true;
+}
+
 std::vector<SketchEntity*> Sketch::getEntitiesByType(EntityType type) {
     std::vector<SketchEntity*> results;
     for (auto& entity : entities_) {
@@ -449,7 +473,11 @@ ConstraintID Sketch::addConstraint(std::unique_ptr<SketchConstraint> constraint)
     }
 
     for (const auto& entityId : constraint->referencedEntities()) {
-        if (entityId.empty() || !getEntity(entityId)) {
+        const SketchEntity* referenced = getEntity(entityId);
+        if (entityId.empty() || !referenced) {
+            return {};
+        }
+        if (referenced->isReferenceLocked() && constraint->type() != ConstraintType::Fixed) {
             return {};
         }
     }
@@ -583,7 +611,7 @@ void Sketch::translateSketch(double dx, double dy) {
             continue;
         }
         auto* point = dynamic_cast<SketchPoint*>(entity.get());
-        if (point) {
+        if (point && !point->isReferenceLocked()) {
             gp_Pnt2d p = point->position();
             point->setPosition(p.X() + dx, p.Y() + dy);
         }
@@ -591,7 +619,7 @@ void Sketch::translateSketch(double dx, double dy) {
     for (auto& constraint : constraints_) {
         if (constraint && constraint->type() == ConstraintType::Fixed) {
             auto* fc = dynamic_cast<constraints::FixedConstraint*>(constraint.get());
-            if (fc) {
+            if (fc && !isEntityReferenceLocked(fc->pointId())) {
                 fc->translate(dx, dy);
             }
         }
@@ -616,7 +644,7 @@ void Sketch::translateSketchRegion(const std::string& regionId, double dx, doubl
             continue;
         }
         auto* point = dynamic_cast<SketchPoint*>(entity.get());
-        if (point) {
+        if (point && !point->isReferenceLocked()) {
             gp_Pnt2d p = point->position();
             point->setPosition(p.X() + dx, p.Y() + dy);
         }
@@ -626,12 +654,29 @@ void Sketch::translateSketchRegion(const std::string& regionId, double dx, doubl
             continue;
         }
         auto* fc = dynamic_cast<constraints::FixedConstraint*>(constraint.get());
-        if (fc && pointIds.find(fc->pointId()) != pointIds.end()) {
+        if (fc &&
+            pointIds.find(fc->pointId()) != pointIds.end() &&
+            !isEntityReferenceLocked(fc->pointId())) {
             fc->translate(dx, dy);
         }
     }
     invalidateSolver();
     dofDirty_ = true;
+}
+
+void Sketch::setHostFaceAttachment(const std::string& bodyId, const std::string& faceId) {
+    if (bodyId.empty() || faceId.empty()) {
+        hostFaceAttachment_.reset();
+        return;
+    }
+    hostFaceAttachment_ = HostFaceAttachment{bodyId, faceId, 0};
+}
+
+void Sketch::setProjectedHostBoundariesVersion(int version) {
+    if (!hostFaceAttachment_) {
+        return;
+    }
+    hostFaceAttachment_->projectedBoundaryVersion = std::max(0, version);
 }
 
 ConstraintID Sketch::addPointOnCurve(EntityID pointId, EntityID curveId,
@@ -702,6 +747,16 @@ bool Sketch::removeConstraint(ConstraintID id) {
         it = constraintIndex_.find(id);
         if (it == constraintIndex_.end() || it->second >= constraints_.size()) {
             return false;
+        }
+    }
+
+    const auto* constraint = constraints_[it->second].get();
+    if (constraint) {
+        for (const auto& entityId : constraint->referencedEntities()) {
+            const SketchEntity* entity = getEntity(entityId);
+            if (entity && entity->isReferenceLocked()) {
+                return false;
+            }
         }
     }
 
@@ -913,6 +968,11 @@ SolveResult Sketch::solveWithDrag(EntityID draggedPoint, const Vec2d& targetPos)
         result.errorMessage = "Dragged point not found";
         return result;
     }
+    if (point->isReferenceLocked()) {
+        result.success = false;
+        result.errorMessage = "Point is locked";
+        return result;
+    }
 
     if (constraints_.empty()) {
         point->setPosition(targetPos.x, targetPos.y);
@@ -1092,6 +1152,14 @@ std::string Sketch::toJson() const {
     plane["normal"] = QJsonArray{plane_.normal.x, plane_.normal.y, plane_.normal.z};
     root["plane"] = plane;
 
+    if (hostFaceAttachment_ && hostFaceAttachment_->isValid()) {
+        QJsonObject hostFace;
+        hostFace["bodyId"] = QString::fromStdString(hostFaceAttachment_->bodyId);
+        hostFace["faceId"] = QString::fromStdString(hostFaceAttachment_->faceId);
+        hostFace["projectedBoundaryVersion"] = hostFaceAttachment_->projectedBoundaryVersion;
+        root["hostFace"] = hostFace;
+    }
+
     QJsonArray entityArray;
     for (const auto& entity : entities_) {
         if (!entity) {
@@ -1153,6 +1221,20 @@ std::unique_ptr<Sketch> Sketch::fromJson(const std::string& json) {
     }
 
     auto sketch = std::make_unique<Sketch>(plane);
+
+    if (root.contains("hostFace") && root["hostFace"].isObject()) {
+        const QJsonObject hostFace = root["hostFace"].toObject();
+        const QString bodyId = hostFace["bodyId"].toString();
+        const QString faceId = hostFace["faceId"].toString();
+        if (!bodyId.isEmpty() && !faceId.isEmpty()) {
+            if (!hostFace.contains("projectedBoundaryVersion") ||
+                !hostFace["projectedBoundaryVersion"].isDouble()) {
+                return nullptr;
+            }
+            sketch->setHostFaceAttachment(bodyId.toStdString(), faceId.toStdString());
+            sketch->setProjectedHostBoundariesVersion(hostFace["projectedBoundaryVersion"].toInt(0));
+        }
+    }
 
     if (root.contains("entities") && root["entities"].isArray()) {
         QJsonArray entities = root["entities"].toArray();

@@ -29,6 +29,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <optional>
+#include <string>
 
 // Forward declarations
 namespace GCS { class System; }
@@ -105,6 +106,16 @@ struct SketchPlane {
             rel.x * xAxis.x + rel.y * xAxis.y + rel.z * xAxis.z,
             rel.x * yAxis.x + rel.y * yAxis.y + rel.z * yAxis.z
         };
+    }
+};
+
+struct HostFaceAttachment {
+    std::string bodyId;
+    std::string faceId;
+    int projectedBoundaryVersion = 0;
+
+    bool isValid() const {
+        return !bodyId.empty() && !faceId.empty();
     }
 };
 
@@ -237,6 +248,16 @@ public:
      */
     SketchEntity* getEntity(EntityID id);
     const SketchEntity* getEntity(EntityID id) const;
+
+    /**
+     * @brief Check if a sketch entity is locked as host-face reference geometry.
+     */
+    bool isEntityReferenceLocked(EntityID id) const;
+
+    /**
+     * @brief Set or clear host-reference lock on a sketch entity.
+     */
+    bool setEntityReferenceLocked(EntityID id, bool locked);
 
     /**
      * @brief Get typed entity
@@ -451,6 +472,26 @@ public:
      */
     void translateSketchRegion(const std::string& regionId, double dx, double dy);
 
+    // ========== Optional Host Attachment ==========
+
+    const std::optional<HostFaceAttachment>& hostFaceAttachment() const { return hostFaceAttachment_; }
+
+    bool hasHostFaceAttachment() const { return hostFaceAttachment_.has_value(); }
+
+    void setHostFaceAttachment(const std::string& bodyId, const std::string& faceId);
+
+    bool hasProjectedHostBoundaries() const {
+        return hostFaceAttachment_.has_value() && hostFaceAttachment_->projectedBoundaryVersion > 0;
+    }
+
+    int projectedHostBoundariesVersion() const {
+        return hostFaceAttachment_ ? hostFaceAttachment_->projectedBoundaryVersion : 0;
+    }
+
+    void setProjectedHostBoundariesVersion(int version);
+
+    void clearHostFaceAttachment() { hostFaceAttachment_.reset(); }
+
     /**
      * @brief Convert 2D sketch point to 3D world
      */
@@ -510,6 +551,7 @@ public:
 
 private:
     SketchPlane plane_;
+    std::optional<HostFaceAttachment> hostFaceAttachment_;
 
     std::vector<std::unique_ptr<SketchEntity>> entities_;
     std::vector<std::unique_ptr<SketchConstraint>> constraints_;

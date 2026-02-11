@@ -7,6 +7,7 @@ add_library(onecad_core STATIC
     sketch/SketchArc.cpp
     sketch/SketchCircle.cpp
     sketch/SketchEllipse.cpp
+    sketch/FaceBoundaryProjector.cpp
     sketch/SketchConstraint.cpp
     sketch/SketchRenderer.cpp
     sketch/SnapManager.cpp
@@ -58,6 +59,7 @@ set(SKETCH_HEADERS
     sketch/SketchArc.h
     sketch/SketchCircle.h
     sketch/SketchEllipse.h
+    sketch/FaceBoundaryProjector.h
     sketch/SketchConstraint.h
     sketch/Sketch.h
     sketch/SketchRenderer.h

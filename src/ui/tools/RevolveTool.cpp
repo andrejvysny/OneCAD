@@ -35,6 +35,10 @@ constexpr double kMinRevolveAngle = 1e-3;
 constexpr double kMaxRevolveAngle = 360.0;
 constexpr double kDefaultRevolveAngle = 360.0;
 constexpr double kAnglePerPixel = 1.0;
+
+app::BooleanMode signedBooleanMode(double angle) {
+    return angle >= 0.0 ? app::BooleanMode::Add : app::BooleanMode::Cut;
+}
 } // namespace
 
 RevolveTool::RevolveTool(Viewport* viewport, app::Document* document)
@@ -186,6 +190,7 @@ bool RevolveTool::handleMouseRelease(const QPoint& screenPos, Qt::MouseButton bu
                 params.axis = app::EdgeRef{axisSelection_.id.ownerId, axisSelection_.id.elementId};
             }
             params.booleanMode = booleanMode_;
+            params.targetBodyId = targetBodyId_;
             record.params = params;
 
             record.resultBodyIds.push_back(resultBodyId);
@@ -238,6 +243,11 @@ bool RevolveTool::prepareProfile(const app::selection::SelectionItem& selection)
         if (!res.success) return false;
         
         baseFace_ = res.face;
+
+        const auto& hostFace = sketch_->hostFaceAttachment();
+        if (hostFace && hostFace->isValid()) {
+            targetBodyId_ = hostFace->bodyId;
+        }
         
     } else if (selection.kind == app::selection::SelectionKind::Face) {
         targetBodyId_ = selection.id.ownerId;
@@ -356,6 +366,32 @@ void RevolveTool::detectBooleanMode(double angle) {
     }
     if (!axisValid_ || std::abs(angle) < kMinRevolveAngle) {
         booleanMode_ = app::BooleanMode::NewBody;
+        return;
+    }
+
+    if (sketch_) {
+        if (targetBodyId_.empty()) {
+            booleanMode_ = app::BooleanMode::NewBody;
+            return;
+        }
+
+        const TopoDS_Shape* body = document_->getBodyShape(targetBodyId_);
+        if (body && !body->IsNull()) {
+            TopoDS_Shape tool = buildRevolveShape(angle);
+            if (!tool.IsNull()) {
+                booleanMode_ = core::modeling::BooleanOperation::detectMode(
+                    tool, {*body}, axis_.Direction());
+            } else {
+                booleanMode_ = app::BooleanMode::NewBody;
+            }
+        } else {
+            booleanMode_ = app::BooleanMode::NewBody;
+        }
+
+        if (booleanMode_ == app::BooleanMode::NewBody) {
+            // Keep attached sketches host-targeted unless explicitly set otherwise.
+            booleanMode_ = signedBooleanMode(angle);
+        }
         return;
     }
 

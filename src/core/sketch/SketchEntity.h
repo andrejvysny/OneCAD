@@ -114,6 +114,19 @@ public:
      */
     void setConstruction(bool value) { m_isConstruction = value; }
 
+    /**
+     * @brief Check whether this entity is a locked host-face reference.
+     *
+     * Locked reference entities are selectable, but sketch edit operations must not
+     * modify or delete them.
+     */
+    bool isReferenceLocked() const { return m_isReferenceLocked; }
+
+    /**
+     * @brief Set locked-reference state.
+     */
+    void setReferenceLocked(bool value) { m_isReferenceLocked = value; }
+
     //--------------------------------------------------------------------------
     // Geometry Interface
     //--------------------------------------------------------------------------
@@ -183,6 +196,7 @@ protected:
 
     EntityID m_id;
     bool m_isConstruction = true;  // Default: construction (per SPECIFICATION.md §6.1)
+    bool m_isReferenceLocked = false;
 };
 
 } // namespace onecad::core::sketch

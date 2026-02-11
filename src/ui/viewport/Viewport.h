@@ -118,6 +118,7 @@ public:
     void setDocument(app::Document* document);
     void setCommandProcessor(app::commands::CommandProcessor* processor);
     void setModelPickMeshes(std::vector<selection::ModelPickerAdapter::Mesh>&& meshes);
+    std::vector<app::selection::SelectionItem> modelSelection() const;
     void setModelPreviewMeshes(const std::vector<render::SceneMeshStore::Mesh>& meshes);
     void clearModelPreviewMeshes();
     void setPreviewHiddenBody(const std::string& bodyId);

@@ -92,6 +92,7 @@ void SketchLine::serialize(QJsonObject& json) const {
     json["id"] = QString::fromStdString(m_id);
     json["type"] = QString::fromStdString(typeName());
     json["construction"] = m_isConstruction;
+    json["referenceLocked"] = m_isReferenceLocked;
     json["start"] = QString::fromStdString(m_startPointId);
     json["end"] = QString::fromStdString(m_endPointId);
 }
@@ -112,6 +113,9 @@ bool SketchLine::deserialize(const QJsonObject& json) {
     if (json.contains("construction") && !json["construction"].isBool()) {
         return false;
     }
+    if (json.contains("referenceLocked") && !json["referenceLocked"].isBool()) {
+        return false;
+    }
 
     EntityID newId = json.contains("id")
                          ? json["id"].toString().toStdString()
@@ -119,11 +123,15 @@ bool SketchLine::deserialize(const QJsonObject& json) {
     bool newConstruction = json.contains("construction")
                                ? json["construction"].toBool()
                                : m_isConstruction;
+    bool newReferenceLocked = json.contains("referenceLocked")
+                                  ? json["referenceLocked"].toBool()
+                                  : m_isReferenceLocked;
     PointID startId = json["start"].toString().toStdString();
     PointID endId = json["end"].toString().toStdString();
 
     m_id = std::move(newId);
     m_isConstruction = newConstruction;
+    m_isReferenceLocked = newReferenceLocked;
     m_startPointId = std::move(startId);
     m_endPointId = std::move(endId);
     return true;

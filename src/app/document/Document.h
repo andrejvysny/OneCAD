@@ -9,6 +9,7 @@
 #include <QObject>
 #include <QString>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -17,13 +18,10 @@
 #include <TopoDS_Shape.hxx>
 
 #include "OperationRecord.h"
+#include "../../core/sketch/Sketch.h"
 #include "../../kernel/elementmap/ElementMap.h"
 #include "../../render/scene/SceneMeshStore.h"
 #include "../../render/tessellation/TessellationCache.h"
-
-namespace onecad::core::sketch {
-class Sketch;
-}
 
 namespace onecad::app {
 
@@ -104,6 +102,12 @@ public:
     bool updateBodyShape(const std::string& id, const TopoDS_Shape& shape,
                          bool emitSignal = true, const std::string& opId = {});
     const TopoDS_Shape* getBodyShape(const std::string& id) const;
+    std::optional<core::sketch::SketchPlane> getSketchPlaneForFace(const std::string& bodyId,
+                                                                    const std::string& faceId) const;
+    bool ensureHostFaceBoundariesProjected(const std::string& sketchId);
+    bool projectHostFaceBoundaries(core::sketch::Sketch& sketch,
+                                   const std::string& bodyId,
+                                   const std::string& faceId);
     std::vector<std::string> getBodyIds() const;
     bool removeBody(const std::string& id);
     bool removeBodyPreserveElementMap(const std::string& id);

@@ -191,6 +191,7 @@ void SketchEllipse::serialize(QJsonObject& json) const {
     json["id"] = QString::fromStdString(m_id);
     json["type"] = QString::fromStdString(typeName());
     json["construction"] = m_isConstruction;
+    json["referenceLocked"] = m_isReferenceLocked;
     json["center"] = QString::fromStdString(m_centerPointId);
     json["majorRadius"] = m_majorRadius;
     json["minorRadius"] = m_minorRadius;
@@ -215,6 +216,9 @@ bool SketchEllipse::deserialize(const QJsonObject& json) {
     if (json.contains("construction") && !json["construction"].isBool()) {
         return false;
     }
+    if (json.contains("referenceLocked") && !json["referenceLocked"].isBool()) {
+        return false;
+    }
 
     EntityID newId = json.contains("id")
                          ? json["id"].toString().toStdString()
@@ -222,6 +226,9 @@ bool SketchEllipse::deserialize(const QJsonObject& json) {
     bool newConstruction = json.contains("construction")
                                ? json["construction"].toBool()
                                : m_isConstruction;
+    bool newReferenceLocked = json.contains("referenceLocked")
+                                  ? json["referenceLocked"].toBool()
+                                  : m_isReferenceLocked;
     PointID newCenter = json["center"].toString().toStdString();
     double majorR = json["majorRadius"].toDouble();
     double minorR = json["minorRadius"].toDouble();
@@ -235,6 +242,7 @@ bool SketchEllipse::deserialize(const QJsonObject& json) {
 
     m_id = std::move(newId);
     m_isConstruction = newConstruction;
+    m_isReferenceLocked = newReferenceLocked;
     m_centerPointId = std::move(newCenter);
     m_majorRadius = majorR;
     m_minorRadius = minorR;

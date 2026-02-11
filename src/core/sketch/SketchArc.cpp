@@ -104,6 +104,7 @@ void SketchArc::serialize(QJsonObject& json) const {
     json["id"] = QString::fromStdString(m_id);
     json["type"] = QString::fromStdString(typeName());
     json["construction"] = m_isConstruction;
+    json["referenceLocked"] = m_isReferenceLocked;
     json["center"] = QString::fromStdString(m_centerPointId);
     json["radius"] = m_radius;
     json["startAngle"] = m_startAngle;
@@ -128,6 +129,9 @@ bool SketchArc::deserialize(const QJsonObject& json) {
     if (json.contains("construction") && !json["construction"].isBool()) {
         return false;
     }
+    if (json.contains("referenceLocked") && !json["referenceLocked"].isBool()) {
+        return false;
+    }
 
     EntityID newId = json.contains("id")
                          ? json["id"].toString().toStdString()
@@ -135,6 +139,9 @@ bool SketchArc::deserialize(const QJsonObject& json) {
     bool newConstruction = json.contains("construction")
                                ? json["construction"].toBool()
                                : m_isConstruction;
+    bool newReferenceLocked = json.contains("referenceLocked")
+                                  ? json["referenceLocked"].toBool()
+                                  : m_isReferenceLocked;
     PointID newCenter = json["center"].toString().toStdString();
     double radius = json["radius"].toDouble();
     if (radius < 0.0) {
@@ -146,6 +153,7 @@ bool SketchArc::deserialize(const QJsonObject& json) {
 
     m_id = std::move(newId);
     m_isConstruction = newConstruction;
+    m_isReferenceLocked = newReferenceLocked;
     m_centerPointId = std::move(newCenter);
     m_radius = radius;
     m_startAngle = startAngle;

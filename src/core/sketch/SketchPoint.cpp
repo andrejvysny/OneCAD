@@ -55,6 +55,7 @@ void SketchPoint::serialize(QJsonObject& json) const {
     json["id"] = QString::fromStdString(m_id);
     json["type"] = QString::fromStdString(typeName());
     json["construction"] = m_isConstruction;
+    json["referenceLocked"] = m_isReferenceLocked;
     json["x"] = m_position.X();
     json["y"] = m_position.Y();
 }
@@ -75,6 +76,9 @@ bool SketchPoint::deserialize(const QJsonObject& json) {
     if (json.contains("construction") && !json["construction"].isBool()) {
         return false;
     }
+    if (json.contains("referenceLocked") && !json["referenceLocked"].isBool()) {
+        return false;
+    }
 
     EntityID newId = json.contains("id")
                          ? json["id"].toString().toStdString()
@@ -82,10 +86,14 @@ bool SketchPoint::deserialize(const QJsonObject& json) {
     bool newConstruction = json.contains("construction")
                                ? json["construction"].toBool()
                                : m_isConstruction;
+    bool newReferenceLocked = json.contains("referenceLocked")
+                                  ? json["referenceLocked"].toBool()
+                                  : m_isReferenceLocked;
     gp_Pnt2d newPosition(json["x"].toDouble(), json["y"].toDouble());
 
     m_id = std::move(newId);
     m_isConstruction = newConstruction;
+    m_isReferenceLocked = newReferenceLocked;
     m_position = newPosition;
     return true;
 }

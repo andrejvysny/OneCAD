@@ -507,31 +507,33 @@ TopoDS_Shape RegenerationEngine::buildExtrude(const OperationRecord& op, std::st
 
     // Handle boolean mode
     if (params.booleanMode != BooleanMode::NewBody) {
-        // For Add/Cut, we need a target body
-        std::string targetBodyId;
-        if (std::holds_alternative<FaceRef>(op.input)) {
-            targetBodyId = std::get<FaceRef>(op.input).bodyId;
+        const std::string targetBodyId = resolveBooleanTargetBodyId(op, params.targetBodyId);
+        if (targetBodyId.empty()) {
+            errorOut = "Boolean target body is required for mode " +
+                       std::string(booleanModeName(params.booleanMode));
+            return {};
         }
 
-        if (!targetBodyId.empty()) {
-            auto targetOpt = resolveBody(targetBodyId);
-            if (targetOpt) {
-                if (params.booleanMode == BooleanMode::Add) {
-                    BRepAlgoAPI_Fuse fuse(*targetOpt, result);
-                    if (fuse.IsDone()) {
-                        result = fuse.Shape();
-                    }
-                } else if (params.booleanMode == BooleanMode::Cut) {
-                    BRepAlgoAPI_Cut cut(*targetOpt, result);
-                    if (cut.IsDone()) {
-                        result = cut.Shape();
-                    }
-                } else if (params.booleanMode == BooleanMode::Intersect) {
-                    BRepAlgoAPI_Common common(*targetOpt, result);
-                    if (common.IsDone()) {
-                        result = common.Shape();
-                    }
-                }
+        auto targetOpt = resolveBody(targetBodyId);
+        if (!targetOpt) {
+            errorOut = "Target body not found: " + targetBodyId;
+            return {};
+        }
+
+        if (params.booleanMode == BooleanMode::Add) {
+            BRepAlgoAPI_Fuse fuse(*targetOpt, result);
+            if (fuse.IsDone()) {
+                result = fuse.Shape();
+            }
+        } else if (params.booleanMode == BooleanMode::Cut) {
+            BRepAlgoAPI_Cut cut(*targetOpt, result);
+            if (cut.IsDone()) {
+                result = cut.Shape();
+            }
+        } else if (params.booleanMode == BooleanMode::Intersect) {
+            BRepAlgoAPI_Common common(*targetOpt, result);
+            if (common.IsDone()) {
+                result = common.Shape();
             }
         }
     }
@@ -638,30 +640,33 @@ TopoDS_Shape RegenerationEngine::buildRevolve(const OperationRecord& op, std::st
     TopoDS_Shape result = revol.Shape();
 
     if (params.booleanMode != BooleanMode::NewBody) {
-        std::string targetBodyId;
-        if (std::holds_alternative<FaceRef>(op.input)) {
-            targetBodyId = std::get<FaceRef>(op.input).bodyId;
+        const std::string targetBodyId = resolveBooleanTargetBodyId(op, params.targetBodyId);
+        if (targetBodyId.empty()) {
+            errorOut = "Boolean target body is required for mode " +
+                       std::string(booleanModeName(params.booleanMode));
+            return {};
         }
 
-        if (!targetBodyId.empty()) {
-            auto targetOpt = resolveBody(targetBodyId);
-            if (targetOpt) {
-                if (params.booleanMode == BooleanMode::Add) {
-                    BRepAlgoAPI_Fuse fuse(*targetOpt, result);
-                    if (fuse.IsDone()) {
-                        result = fuse.Shape();
-                    }
-                } else if (params.booleanMode == BooleanMode::Cut) {
-                    BRepAlgoAPI_Cut cut(*targetOpt, result);
-                    if (cut.IsDone()) {
-                        result = cut.Shape();
-                    }
-                } else if (params.booleanMode == BooleanMode::Intersect) {
-                    BRepAlgoAPI_Common common(*targetOpt, result);
-                    if (common.IsDone()) {
-                        result = common.Shape();
-                    }
-                }
+        auto targetOpt = resolveBody(targetBodyId);
+        if (!targetOpt) {
+            errorOut = "Target body not found: " + targetBodyId;
+            return {};
+        }
+
+        if (params.booleanMode == BooleanMode::Add) {
+            BRepAlgoAPI_Fuse fuse(*targetOpt, result);
+            if (fuse.IsDone()) {
+                result = fuse.Shape();
+            }
+        } else if (params.booleanMode == BooleanMode::Cut) {
+            BRepAlgoAPI_Cut cut(*targetOpt, result);
+            if (cut.IsDone()) {
+                result = cut.Shape();
+            }
+        } else if (params.booleanMode == BooleanMode::Intersect) {
+            BRepAlgoAPI_Common common(*targetOpt, result);
+            if (common.IsDone()) {
+                result = common.Shape();
             }
         }
     }
@@ -928,6 +933,41 @@ TopoDS_Shape RegenerationEngine::buildBoolean(const OperationRecord& op, std::st
     }
 
     return {};
+}
+
+std::string RegenerationEngine::resolveLegacySketchHostBodyId(const OperationInput& input) const {
+    if (!doc_ || !std::holds_alternative<SketchRegionRef>(input)) {
+        return {};
+    }
+
+    const auto& ref = std::get<SketchRegionRef>(input);
+    const core::sketch::Sketch* sketch = doc_->getSketch(ref.sketchId);
+    if (!sketch) {
+        return {};
+    }
+
+    const auto& hostFace = sketch->hostFaceAttachment();
+    if (!hostFace || !hostFace->isValid()) {
+        return {};
+    }
+
+    return hostFace->bodyId;
+}
+
+std::string RegenerationEngine::resolveBooleanTargetBodyId(const OperationRecord& op,
+                                                           const std::string& explicitTargetBodyId) const {
+    if (!explicitTargetBodyId.empty()) {
+        return explicitTargetBodyId;
+    }
+
+    if (std::holds_alternative<FaceRef>(op.input)) {
+        const auto& face = std::get<FaceRef>(op.input);
+        if (!face.bodyId.empty()) {
+            return face.bodyId;
+        }
+    }
+
+    return resolveLegacySketchHostBodyId(op.input);
 }
 
 std::optional<TopoDS_Face> RegenerationEngine::resolveFaceInput(const OperationInput& input, std::string& errorOut) {

@@ -250,8 +250,16 @@ void DependencyGraph::extractDependencies(const OperationRecord& op, FeatureNode
     }
 
     // Extract from params variant
-    if (std::holds_alternative<RevolveParams>(op.params)) {
+    if (std::holds_alternative<ExtrudeParams>(op.params)) {
+        const auto& p = std::get<ExtrudeParams>(op.params);
+        if (p.booleanMode != BooleanMode::NewBody && !p.targetBodyId.empty()) {
+            node.inputBodyIds.insert(p.targetBodyId);
+        }
+    } else if (std::holds_alternative<RevolveParams>(op.params)) {
         const auto& p = std::get<RevolveParams>(op.params);
+        if (p.booleanMode != BooleanMode::NewBody && !p.targetBodyId.empty()) {
+            node.inputBodyIds.insert(p.targetBodyId);
+        }
         if (std::holds_alternative<SketchLineRef>(p.axis)) {
             const auto& axis = std::get<SketchLineRef>(p.axis);
             node.inputSketchIds.insert(axis.sketchId);
