@@ -40,6 +40,12 @@ void RectangleTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
         // First click - record first corner
         corner1_ = pos;
         corner2_ = pos;
+        hasWidthLock_ = false;
+        lockedWidth_ = 0.0;
+        hasHeightLock_ = false;
+        lockedHeight_ = 0.0;
+        widthSign_ = 1.0;
+        heightSign_ = 1.0;
         state_ = State::FirstClick;
     } else if (state_ == State::FirstClick) {
         // Second click - create rectangle
@@ -47,26 +53,32 @@ void RectangleTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
             return;
         }
 
+        updateSecondCornerFromDraftLocks(pos);
+
         // Check minimum size
-        double width = std::abs(pos.x - corner1_.x);
-        double height = std::abs(pos.y - corner1_.y);
+        double width = std::abs(corner2_.x - corner1_.x);
+        double height = std::abs(corner2_.y - corner1_.y);
 
         if (width < constants::MIN_GEOMETRY_SIZE || height < constants::MIN_GEOMETRY_SIZE) {
             // Too small, ignore
             return;
         }
 
-        createRectangle(corner1_, pos);
+        createRectangle(corner1_, corner2_);
         rectangleCreated_ = true;
 
         // Return to idle state
         state_ = State::Idle;
+        hasWidthLock_ = false;
+        lockedWidth_ = 0.0;
+        hasHeightLock_ = false;
+        lockedHeight_ = 0.0;
     }
 }
 
 void RectangleTool::onMouseMove(const Vec2d& pos) {
     if (state_ == State::FirstClick) {
-        corner2_ = pos;
+        updateSecondCornerFromDraftLocks(pos);
     }
 }
 
@@ -82,6 +94,12 @@ void RectangleTool::onKeyPress(Qt::Key key) {
 
 void RectangleTool::cancel() {
     state_ = State::Idle;
+    hasWidthLock_ = false;
+    lockedWidth_ = 0.0;
+    hasHeightLock_ = false;
+    lockedHeight_ = 0.0;
+    widthSign_ = 1.0;
+    heightSign_ = 1.0;
     rectangleCreated_ = false;
 }
 
@@ -102,7 +120,7 @@ void RectangleTool::render(SketchRenderer& renderer) {
                 std::snprintf(buffer, sizeof(buffer), "%.2f", width);
                 double midX = (corner1_.x + corner2_.x) * 0.5;
                 double maxY = std::max(corner1_.y, corner2_.y);
-                dims.push_back({{midX, maxY}, std::string(buffer)});
+                dims.push_back({{midX, maxY}, std::string(buffer), "rect_width", width, "mm"});
             }
 
             // Height dimension (right edge)
@@ -110,7 +128,7 @@ void RectangleTool::render(SketchRenderer& renderer) {
                 std::snprintf(buffer, sizeof(buffer), "%.2f", height);
                 double maxX = std::max(corner1_.x, corner2_.x);
                 double midY = (corner1_.y + corner2_.y) * 0.5;
-                dims.push_back({{maxX, midY}, std::string(buffer)});
+                dims.push_back({{maxX, midY}, std::string(buffer), "rect_height", height, "mm"});
             }
 
             renderer.setPreviewDimensions(dims);
@@ -120,6 +138,55 @@ void RectangleTool::render(SketchRenderer& renderer) {
     } else {
         renderer.clearPreview();
     }
+}
+
+PreviewDimensionApplyResult RectangleTool::applyPreviewDimensionValue(const std::string& id, double value) {
+    if (state_ != State::FirstClick) {
+        return {false, "Set the rectangle first corner first"};
+    }
+    if (!std::isfinite(value)) {
+        return {false, "Value must be finite"};
+    }
+    if (value <= constants::MIN_GEOMETRY_SIZE) {
+        return {false, "Size must be greater than minimum geometry size"};
+    }
+
+    if (id == "rect_width") {
+        hasWidthLock_ = true;
+        lockedWidth_ = value;
+        updateSecondCornerFromDraftLocks(corner2_);
+        return {true, {}};
+    }
+    if (id == "rect_height") {
+        hasHeightLock_ = true;
+        lockedHeight_ = value;
+        updateSecondCornerFromDraftLocks(corner2_);
+        return {true, {}};
+    }
+
+    return {false, "Unknown rectangle draft parameter"};
+}
+
+void RectangleTool::updateSecondCornerFromDraftLocks(const Vec2d& cursorPos) {
+    if (state_ != State::FirstClick) {
+        return;
+    }
+
+    const double dx = cursorPos.x - corner1_.x;
+    const double dy = cursorPos.y - corner1_.y;
+
+    if (std::abs(dx) > constants::MIN_GEOMETRY_SIZE) {
+        widthSign_ = (dx >= 0.0) ? 1.0 : -1.0;
+    }
+    if (std::abs(dy) > constants::MIN_GEOMETRY_SIZE) {
+        heightSign_ = (dy >= 0.0) ? 1.0 : -1.0;
+    }
+
+    const double width = hasWidthLock_ ? lockedWidth_ : std::abs(dx);
+    const double height = hasHeightLock_ ? lockedHeight_ : std::abs(dy);
+
+    corner2_.x = corner1_.x + widthSign_ * width;
+    corner2_.y = corner1_.y + heightSign_ * height;
 }
 
 void RectangleTool::createRectangle(const Vec2d& c1, const Vec2d& c2) {

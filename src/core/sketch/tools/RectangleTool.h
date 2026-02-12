@@ -37,6 +37,8 @@ public:
     void render(SketchRenderer& renderer) override;
     std::string name() const override;
     std::optional<Vec2d> getReferencePoint() const override;
+    PreviewDimensionApplyResult applyPreviewDimensionValue(const std::string& id,
+                                                           double value) override;
 
     /**
      * @brief Check if a rectangle was just created
@@ -46,9 +48,16 @@ public:
 
 private:
     void createRectangle(const Vec2d& corner1, const Vec2d& corner2);
+    void updateSecondCornerFromDraftLocks(const Vec2d& cursorPos);
 
     Vec2d corner1_{0, 0};
     Vec2d corner2_{0, 0};
+    bool hasWidthLock_ = false;
+    double lockedWidth_ = 0.0;
+    bool hasHeightLock_ = false;
+    double lockedHeight_ = 0.0;
+    double widthSign_ = 1.0;
+    double heightSign_ = 1.0;
     bool rectangleCreated_ = false;
 };
 

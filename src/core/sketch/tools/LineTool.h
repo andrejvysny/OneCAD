@@ -40,6 +40,8 @@ public:
     void render(SketchRenderer& renderer) override;
     std::string name() const override;
     std::optional<Vec2d> getReferencePoint() const override;
+    PreviewDimensionApplyResult applyPreviewDimensionValue(const std::string& id,
+                                                           double value) override;
 
     /**
      * @brief Check if a line was just created (for signal emission)
@@ -49,6 +51,9 @@ public:
     RejectReason lastRejectReason() const { return lastRejectReason_; }
 
 private:
+    void updateCurrentPointFromDraftLocks(const Vec2d& cursorPos);
+    static double normalizeAngleDegrees(double angleDegrees);
+
     /**
      * @brief Apply inferred constraints to sketch
      */
@@ -65,6 +70,11 @@ private:
     EntityID startPointId_;       // Existing point for line start (if snapped)
     EntityID lastPointId_;         // For coincident constraint on polyline continuation
     EntityID lastCreatedLineId_;   // For polyline perpendicular inference
+    bool hasLengthLock_ = false;
+    double lockedLength_ = 0.0;
+    bool hasAngleLock_ = false;
+    double lockedAngleDeg_ = 0.0;
+    Vec2d fallbackDirection_{1.0, 0.0};
     bool lineCreated_ = false;
     RejectReason lastRejectReason_ = RejectReason::None;
 };

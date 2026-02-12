@@ -386,6 +386,9 @@ public:
     struct PreviewDimension {
         Vec2d position;  // Position in sketch coordinates
         std::string text;
+        std::string id;  // Stable id for editable draft dimensions (empty = read-only)
+        std::optional<double> value;  // Canonical numeric value for editor
+        std::string units;  // Display units for editor (e.g. mm, °)
         Vec3d color{0.0, 0.0, 0.0}; // Optional override, defaults to style
     };
 

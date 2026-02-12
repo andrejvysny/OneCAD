@@ -81,6 +81,13 @@ target_link_libraries(proto_sketch_fixed_and_move
     onecad_core
 )
 
+# Sketch draft tool dimension prototype
+add_executable(proto_sketch_tool_dimensions prototypes/proto_sketch_tool_dimensions.cpp)
+target_link_libraries(proto_sketch_tool_dimensions
+    PRIVATE
+    onecad_core
+)
+
 # Viewport Compilation Test
 add_executable(test_compile test_compile.cpp)
 target_link_libraries(test_compile

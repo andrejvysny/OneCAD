@@ -193,7 +193,11 @@ void SketchToolManager::handleMouseMove(const Vec2d& pos) {
         currentSnapResult_ = snapResolution.resolvedSnap;
 
         if (renderer_) {
-            renderer_->setActiveGuides(toRendererGuides(snapResolution.activeGuides));
+            if (snapManager_.showGuidePoints()) {
+                renderer_->setActiveGuides(toRendererGuides(snapResolution.activeGuides));
+            } else {
+                renderer_->setActiveGuides({});
+            }
         }
     } else {
         currentSnapResult_ = SnapResult{};

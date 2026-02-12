@@ -12,6 +12,7 @@
 #include <QStringList>
 #include <QSize>
 #include <QImage>
+#include <QRectF>
 #include "SnapSettingsPanel.h"
 #include "selection/ModelPickerAdapter.h"
 #include "../../core/sketch/SketchTypes.h"
@@ -20,6 +21,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <optional>
 #include <unordered_set>
 #include <vector>
 
@@ -261,6 +263,11 @@ private:
     QStringList buildDeepSelectLabels(const std::vector<app::selection::SelectionItem>& candidates) const;
     void applyPointDragSnapPreview(const core::sketch::tools::SnapInputResolution& snapResolution);
     void clearPointDragSnapPreview();
+    std::optional<int> draftDimensionIndexAt(const QPoint& screenPos) const;
+    bool openDraftDimensionEditorAtIndex(int index);
+    bool cycleDraftDimensionEditor(bool forward);
+    void closeDraftDimensionEditor(bool restoreViewportFocus);
+    void clearDraftDimensionInteraction();
     
     // Snap integration
     void updateSnapGeometry();
@@ -297,6 +304,18 @@ private:
     QPoint m_pendingClickPos;
     bool m_pendingShellFaceToggle = false;
     std::unordered_set<core::sketch::ConstraintID> m_suppressedConstraintMarkers;
+
+    struct DraftDimensionLabel {
+        std::string id;
+        QRectF rect;
+        QPoint anchorPos;
+        double value = 0.0;
+        bool hasValue = false;
+        QString units;
+        bool editable = false;
+    };
+    std::vector<DraftDimensionLabel> m_draftDimensionLabels;
+    std::string m_activeDraftDimensionId;
 
     // Sketch mode
     core::sketch::Sketch* m_activeSketch = nullptr;

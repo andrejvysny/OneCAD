@@ -31,6 +31,8 @@ public:
     void cancel() override;
     void render(SketchRenderer& renderer) override;
     std::string name() const override { return "Circle"; }
+    PreviewDimensionApplyResult applyPreviewDimensionValue(const std::string& id,
+                                                           double value) override;
 
     /**
      * @brief Check if a circle was just created
@@ -39,10 +41,15 @@ public:
     void clearCircleCreatedFlag() { circleCreated_ = false; }
 
 private:
+    void updatePreviewFromDraftRadius(const Vec2d& cursorPos);
+
     Vec2d centerPoint_{0, 0};
     Vec2d currentPoint_{0, 0};
     EntityID centerPointId_;
     double currentRadius_ = 0.0;
+    bool hasRadiusLock_ = false;
+    double lockedRadius_ = 0.0;
+    Vec2d fallbackDirection_{1.0, 0.0};
     bool circleCreated_ = false;
 };
 

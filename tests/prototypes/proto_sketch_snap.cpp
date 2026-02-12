@@ -1345,8 +1345,37 @@ TestResult test_shared_preview_vertex_priority_with_guides() {
     if (preview.resolvedSnap.type != SnapType::Vertex) {
         return {false, "Vertex", std::to_string(static_cast<int>(preview.resolvedSnap.type))};
     }
-    if (preview.activeGuides.empty()) {
-        return {false, "guide segment(s)", "none"};
+    if (!preview.activeGuides.empty()) {
+        return {false, "no guide segments", std::to_string(preview.activeGuides.size())};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_shared_preview_midpoint_suppresses_guides() {
+    Sketch sketch;
+    EntityID start = sketch.addPoint(0.0, 0.0);
+    EntityID end = sketch.addPoint(10.0, 0.0);
+    sketch.addLine(start, end);
+    sketch.addPoint(2.0, 0.0);  // Produces a horizontal guide candidate.
+
+    SnapManager manager = createSnapManagerFor({SnapType::Midpoint, SnapType::Horizontal});
+    const auto preview = tools::resolveSnapForInputEvent(
+        manager,
+        {5.05, 0.05},
+        sketch,
+        {},
+        std::nullopt,
+        false,
+        true);
+
+    if (!preview.resolvedSnap.snapped) {
+        return {false, "snapped", "not snapped"};
+    }
+    if (preview.resolvedSnap.type != SnapType::Midpoint) {
+        return {false, "Midpoint", std::to_string(static_cast<int>(preview.resolvedSnap.type))};
+    }
+    if (!preview.activeGuides.empty()) {
+        return {false, "no guide segments", std::to_string(preview.activeGuides.size())};
     }
     return {true, "", ""};
 }
@@ -1374,31 +1403,22 @@ TestResult test_shared_preview_intersection_guides_present() {
     if (!preview.resolvedSnap.snapped) {
         return {false, "snapped", "not snapped"};
     }
-    if (preview.resolvedSnap.type != SnapType::Intersection) {
-        return {false, "Intersection", std::to_string(static_cast<int>(preview.resolvedSnap.type))};
-    }
-    if (preview.activeGuides.size() < 2) {
-        return {false, ">=2 guide segments", std::to_string(preview.activeGuides.size())};
-    }
-
-    bool hasHorizontal = false;
-    bool hasVertical = false;
-    for (const auto& guide : preview.activeGuides) {
-        const double dx = guide.target.x - guide.origin.x;
-        const double dy = guide.target.y - guide.origin.y;
-        if (std::abs(dx) < 1e-9 && std::abs(dy) < 1e-9) {
-            continue;
-        }
-        if (std::abs(dy) <= std::abs(dx) * 0.2) {
-            hasHorizontal = true;
-        }
-        if (std::abs(dx) <= std::abs(dy) * 0.2) {
-            hasVertical = true;
+    const auto allSnaps = manager.findAllSnaps({5.1, 3.1}, sketch);
+    bool hasGuideIntersection = false;
+    for (const auto& snap : allSnaps) {
+        if (snap.snapped && snap.type == SnapType::Intersection && snap.hasGuide) {
+            hasGuideIntersection = true;
+            break;
         }
     }
-
-    if (!hasHorizontal || !hasVertical) {
-        return {false, "horizontal+vertical guide mix", "missing expected guide orientation"};
+    if (!hasGuideIntersection) {
+        return {false, "guide-based intersection candidate", "not found"};
+    }
+    if (preview.resolvedSnap.type == SnapType::Intersection) {
+        return {false, "nearest single-guide winner", "Intersection"};
+    }
+    if (preview.activeGuides.size() != 1) {
+        return {false, "1 guide segment", std::to_string(preview.activeGuides.size())};
     }
     return {true, "", ""};
 }
@@ -1426,62 +1446,396 @@ TestResult test_shared_preview_no_snap_clears_guides() {
     return {true, "", ""};
 }
 
-TestResult test_shared_preview_dedupe_collinear_and_cap() {
+TestResult test_shared_preview_single_nearest_guide() {
     SnapResult resolved;
     resolved.snapped = true;
-    resolved.type = SnapType::SketchGuide;
-    resolved.position = {10.0, 10.0};
+    resolved.type = SnapType::Horizontal;
+    resolved.position = {5.0, 5.0};
 
-    auto makeGuideSnap = [](Vec2d origin, Vec2d target) {
+    auto makeGuideSnap = [](Vec2d origin, Vec2d target, double distance) {
         SnapResult snap;
         snap.snapped = true;
-        snap.type = SnapType::SketchGuide;
+        snap.type = SnapType::Horizontal;
         snap.position = target;
+        snap.distance = distance;
         snap.guideOrigin = origin;
         snap.hasGuide = true;
         return snap;
     };
 
     const std::vector<SnapResult> allSnaps = {
-        makeGuideSnap({0.0, 0.0}, {10.0, 0.0}),   // horizontal
-        makeGuideSnap({5.0, 0.0}, {15.0, 0.0}),   // collinear duplicate
-        makeGuideSnap({0.0, 0.0}, {0.0, 10.0}),   // vertical
-        makeGuideSnap({0.0, 0.0}, {10.0, 10.0}),  // diagonal 1
-        makeGuideSnap({0.0, 0.0}, {-10.0, 10.0}), // diagonal 2
-        makeGuideSnap({0.0, 0.0}, {10.0, -10.0})  // diagonal 3 (trimmed by cap)
+        makeGuideSnap({0.0, 0.0}, {10.0, 0.0}, 1.5),
+        makeGuideSnap({1.0, 1.0}, {5.1, 5.0}, 0.3),  // nearest
+        makeGuideSnap({0.0, 0.0}, {0.0, 10.0}, 0.7)
     };
 
     const auto guides = tools::buildActiveGuidesForSnap(resolved, allSnaps);
-    if (guides.size() != 4) {
-        return {false, "4 guide segments", std::to_string(guides.size())};
+    if (guides.size() != 1) {
+        return {false, "1 guide segment", std::to_string(guides.size())};
     }
+    if (!approx(guides[0].origin.x, 1.0) || !approx(guides[0].origin.y, 1.0) ||
+        !approx(guides[0].target.x, 5.1) || !approx(guides[0].target.y, 5.0)) {
+        return {false,
+                "(1,1)->(5.1,5.0)",
+                "(" + std::to_string(guides[0].origin.x) + "," +
+                    std::to_string(guides[0].origin.y) + ")->(" +
+                    std::to_string(guides[0].target.x) + "," +
+                    std::to_string(guides[0].target.y) + ")"};
+    }
+    return {true, "", ""};
+}
 
-    auto isCollinear = [](const tools::GuideSegment& a, const tools::GuideSegment& b) {
-        double dirAx = a.target.x - a.origin.x;
-        double dirAy = a.target.y - a.origin.y;
-        double dirBx = b.target.x - b.origin.x;
-        double dirBy = b.target.y - b.origin.y;
-        const double lenA = std::sqrt((dirAx * dirAx) + (dirAy * dirAy));
-        const double lenB = std::sqrt((dirBx * dirBx) + (dirBy * dirBy));
-        if (lenA < 1e-6 || lenB < 1e-6) {
-            return true;
-        }
-        dirAx /= lenA;
-        dirAy /= lenA;
-        dirBx /= lenB;
-        dirBy /= lenB;
-        const double cross = std::abs((dirAx * dirBy) - (dirAy * dirBx));
-        return cross < 0.01;
+TestResult test_effective_snap_guide_crossing_nearest_intersection() {
+    SnapResult fallback;
+    fallback.snapped = true;
+    fallback.type = SnapType::OnCurve;
+    fallback.position = {0.0, 0.0};
+    fallback.distance = 0.9;
+
+    SnapResult guideNearH;
+    guideNearH.snapped = true;
+    guideNearH.type = SnapType::Horizontal;
+    guideNearH.position = {10.0, 5.0};
+    guideNearH.distance = 0.34;
+    guideNearH.guideOrigin = {0.0, 5.0};
+    guideNearH.hasGuide = true;
+
+    SnapResult guideNearV;
+    guideNearV.snapped = true;
+    guideNearV.type = SnapType::Vertical;
+    guideNearV.position = {5.0, 10.0};
+    guideNearV.distance = 0.35;
+    guideNearV.guideOrigin = {5.0, 0.0};
+    guideNearV.hasGuide = true;
+
+    SnapResult guideFarH;
+    guideFarH.snapped = true;
+    guideFarH.type = SnapType::Horizontal;
+    guideFarH.position = {10.0, 8.0};
+    guideFarH.distance = 0.70;
+    guideFarH.guideOrigin = {0.0, 8.0};
+    guideFarH.hasGuide = true;
+
+    SnapResult guideFarV;
+    guideFarV.snapped = true;
+    guideFarV.type = SnapType::Vertical;
+    guideFarV.position = {8.0, 10.0};
+    guideFarV.distance = 0.72;
+    guideFarV.guideOrigin = {8.0, 0.0};
+    guideFarV.hasGuide = true;
+
+    SnapResult crossingFar;
+    crossingFar.snapped = true;
+    crossingFar.type = SnapType::Intersection;
+    crossingFar.position = {8.0, 8.0};
+    crossingFar.distance = 0.8;
+    crossingFar.hasGuide = true;
+
+    SnapResult crossingNear;
+    crossingNear.snapped = true;
+    crossingNear.type = SnapType::Intersection;
+    crossingNear.position = {5.0, 5.0};
+    crossingNear.distance = 0.2;
+    crossingNear.hasGuide = true;
+
+    const std::vector<SnapResult> allSnaps = {
+        fallback,
+        guideNearH,
+        guideNearV,
+        guideFarH,
+        guideFarV,
+        crossingFar,
+        crossingNear
     };
+    const SnapResult result = tools::applyGuideFirstSnapPolicy(fallback, allSnaps);
 
-    for (size_t i = 0; i < guides.size(); ++i) {
-        for (size_t j = i + 1; j < guides.size(); ++j) {
-            if (isCollinear(guides[i], guides[j])) {
-                return {false, "no collinear duplicates", "found duplicate direction"};
-            }
-        }
+    if (!result.snapped) return {false, "snapped", "not snapped"};
+    if (result.type != SnapType::Intersection) {
+        return {false, "Intersection", std::to_string(static_cast<int>(result.type))};
+    }
+    if (!approx(result.position.x, 5.0, 1e-6) || !approx(result.position.y, 5.0, 1e-6)) {
+        return {false,
+                "(5,5)",
+                "(" + std::to_string(result.position.x) + "," + std::to_string(result.position.y) + ")"};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_effective_snap_grid_does_not_suppress_single_guide() {
+    SnapResult fallback;
+    fallback.snapped = true;
+    fallback.type = SnapType::Grid;
+    fallback.position = {5.0, 5.0};
+    fallback.distance = 0.05;
+
+    SnapResult singleGuide;
+    singleGuide.snapped = true;
+    singleGuide.type = SnapType::Horizontal;
+    singleGuide.position = {5.2, 5.0};
+    singleGuide.distance = 0.30;
+    singleGuide.guideOrigin = {1.0, 5.0};
+    singleGuide.hasGuide = true;
+
+    const std::vector<SnapResult> allSnaps = {fallback, singleGuide};
+    const SnapResult resolved = tools::applyGuideFirstSnapPolicy(fallback, allSnaps);
+    if (!resolved.snapped) return {false, "snapped", "not snapped"};
+    if (resolved.type != SnapType::Horizontal) {
+        return {false, "Horizontal", std::to_string(static_cast<int>(resolved.type))};
     }
 
+    const auto guides = tools::buildActiveGuidesForSnap(resolved, allSnaps);
+    if (guides.size() != 1) {
+        return {false, "1 guide segment", std::to_string(guides.size())};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_effective_snap_center_suppresses_guides() {
+    SnapResult fallback;
+    fallback.snapped = true;
+    fallback.type = SnapType::Center;
+    fallback.position = {5.0, 5.0};
+    fallback.distance = 0.04;
+
+    SnapResult singleGuide;
+    singleGuide.snapped = true;
+    singleGuide.type = SnapType::Horizontal;
+    singleGuide.position = {5.3, 5.0};
+    singleGuide.distance = 0.25;
+    singleGuide.guideOrigin = {0.0, 5.0};
+    singleGuide.hasGuide = true;
+
+    const std::vector<SnapResult> allSnaps = {fallback, singleGuide};
+    const SnapResult resolved = tools::applyGuideFirstSnapPolicy(fallback, allSnaps);
+    if (!resolved.snapped) return {false, "snapped", "not snapped"};
+    if (resolved.type != SnapType::Center) {
+        return {false, "Center", std::to_string(static_cast<int>(resolved.type))};
+    }
+
+    const auto guides = tools::buildActiveGuidesForSnap(resolved, allSnaps);
+    if (!guides.empty()) {
+        return {false, "no guide segments", std::to_string(guides.size())};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_effective_snap_single_guide_wins_when_crossing_farther() {
+    SnapResult fallback;
+    fallback.snapped = true;
+    fallback.type = SnapType::OnCurve;
+    fallback.position = {0.0, 0.0};
+    fallback.distance = 0.9;
+
+    SnapResult singleGuide;
+    singleGuide.snapped = true;
+    singleGuide.type = SnapType::Horizontal;
+    singleGuide.position = {5.0, 1.0};
+    singleGuide.distance = 0.20;
+    singleGuide.guideOrigin = {0.0, 1.0};
+    singleGuide.hasGuide = true;
+
+    SnapResult guideA;
+    guideA.snapped = true;
+    guideA.type = SnapType::Vertical;
+    guideA.position = {4.0, 5.0};
+    guideA.distance = 0.40;
+    guideA.guideOrigin = {4.0, 0.0};
+    guideA.hasGuide = true;
+
+    SnapResult guideB;
+    guideB.snapped = true;
+    guideB.type = SnapType::Horizontal;
+    guideB.position = {5.0, 4.0};
+    guideB.distance = 0.41;
+    guideB.guideOrigin = {0.0, 4.0};
+    guideB.hasGuide = true;
+
+    SnapResult crossing;
+    crossing.snapped = true;
+    crossing.type = SnapType::Intersection;
+    crossing.position = {4.0, 4.0};
+    crossing.distance = 0.50;
+    crossing.hasGuide = true;
+
+    const std::vector<SnapResult> allSnaps = {fallback, singleGuide, guideA, guideB, crossing};
+    const SnapResult resolved = tools::applyGuideFirstSnapPolicy(fallback, allSnaps);
+    if (!resolved.snapped) return {false, "snapped", "not snapped"};
+    if (resolved.type != SnapType::Horizontal) {
+        return {false, "Horizontal", std::to_string(static_cast<int>(resolved.type))};
+    }
+    if (!approx(resolved.position.x, singleGuide.position.x, 1e-6) ||
+        !approx(resolved.position.y, singleGuide.position.y, 1e-6)) {
+        return {false, "(5,1)", "(" + std::to_string(resolved.position.x) + "," +
+            std::to_string(resolved.position.y) + ")"};
+    }
+
+    const auto guides = tools::buildActiveGuidesForSnap(resolved, allSnaps);
+    if (guides.size() != 1) {
+        return {false, "1 guide segment", std::to_string(guides.size())};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_effective_snap_crossing_wins_when_closer() {
+    SnapResult fallback;
+    fallback.snapped = true;
+    fallback.type = SnapType::OnCurve;
+    fallback.position = {0.0, 0.0};
+    fallback.distance = 0.9;
+
+    SnapResult singleGuide;
+    singleGuide.snapped = true;
+    singleGuide.type = SnapType::Horizontal;
+    singleGuide.position = {5.0, 1.0};
+    singleGuide.distance = 0.35;
+    singleGuide.guideOrigin = {0.0, 1.0};
+    singleGuide.hasGuide = true;
+
+    SnapResult guideA;
+    guideA.snapped = true;
+    guideA.type = SnapType::Vertical;
+    guideA.position = {4.0, 5.0};
+    guideA.distance = 0.24;
+    guideA.guideOrigin = {4.0, 0.0};
+    guideA.hasGuide = true;
+
+    SnapResult guideB;
+    guideB.snapped = true;
+    guideB.type = SnapType::Horizontal;
+    guideB.position = {5.0, 4.0};
+    guideB.distance = 0.22;
+    guideB.guideOrigin = {0.0, 4.0};
+    guideB.hasGuide = true;
+
+    SnapResult crossing;
+    crossing.snapped = true;
+    crossing.type = SnapType::Intersection;
+    crossing.position = {4.0, 4.0};
+    crossing.distance = 0.15;
+    crossing.hasGuide = true;
+
+    const std::vector<SnapResult> allSnaps = {fallback, singleGuide, guideA, guideB, crossing};
+    const SnapResult resolved = tools::applyGuideFirstSnapPolicy(fallback, allSnaps);
+    if (!resolved.snapped) return {false, "snapped", "not snapped"};
+    if (resolved.type != SnapType::Intersection) {
+        return {false, "Intersection", std::to_string(static_cast<int>(resolved.type))};
+    }
+    if (!approx(resolved.position.x, 4.0, 1e-6) || !approx(resolved.position.y, 4.0, 1e-6)) {
+        return {false, "(4,4)", "(" + std::to_string(resolved.position.x) + "," +
+            std::to_string(resolved.position.y) + ")"};
+    }
+
+    const auto guides = tools::buildActiveGuidesForSnap(resolved, allSnaps);
+    if (guides.size() != 2) {
+        return {false, "2 guide segments", std::to_string(guides.size())};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_effective_snap_equal_distance_prefers_single_guide() {
+    SnapResult fallback;
+    fallback.snapped = true;
+    fallback.type = SnapType::OnCurve;
+    fallback.position = {0.0, 0.0};
+    fallback.distance = 0.9;
+
+    SnapResult singleGuide;
+    singleGuide.snapped = true;
+    singleGuide.type = SnapType::Horizontal;
+    singleGuide.position = {5.0, 1.0};
+    singleGuide.distance = 0.25;
+    singleGuide.guideOrigin = {0.0, 1.0};
+    singleGuide.hasGuide = true;
+
+    SnapResult guideA;
+    guideA.snapped = true;
+    guideA.type = SnapType::Vertical;
+    guideA.position = {4.0, 5.0};
+    guideA.distance = 0.26;
+    guideA.guideOrigin = {4.0, 0.0};
+    guideA.hasGuide = true;
+
+    SnapResult guideB;
+    guideB.snapped = true;
+    guideB.type = SnapType::Horizontal;
+    guideB.position = {5.0, 4.0};
+    guideB.distance = 0.27;
+    guideB.guideOrigin = {0.0, 4.0};
+    guideB.hasGuide = true;
+
+    SnapResult crossing;
+    crossing.snapped = true;
+    crossing.type = SnapType::Intersection;
+    crossing.position = {4.0, 4.0};
+    crossing.distance = 0.25;
+    crossing.hasGuide = true;
+
+    const std::vector<SnapResult> allSnaps = {fallback, singleGuide, guideA, guideB, crossing};
+    const SnapResult resolved = tools::applyGuideFirstSnapPolicy(fallback, allSnaps);
+    if (!resolved.snapped) return {false, "snapped", "not snapped"};
+    if (resolved.type != SnapType::Horizontal) {
+        return {false, "Horizontal", std::to_string(static_cast<int>(resolved.type))};
+    }
+
+    const auto guides = tools::buildActiveGuidesForSnap(resolved, allSnaps);
+    if (guides.size() != 1) {
+        return {false, "1 guide segment", std::to_string(guides.size())};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_effective_snap_skips_unresolvable_crossing() {
+    SnapResult fallback;
+    fallback.snapped = true;
+    fallback.type = SnapType::OnCurve;
+    fallback.position = {0.0, 0.0};
+    fallback.distance = 0.9;
+
+    SnapResult singleGuide;
+    singleGuide.snapped = true;
+    singleGuide.type = SnapType::Horizontal;
+    singleGuide.position = {5.0, 1.0};
+    singleGuide.distance = 0.31;
+    singleGuide.guideOrigin = {0.0, 1.0};
+    singleGuide.hasGuide = true;
+
+    SnapResult invalidCrossing;
+    invalidCrossing.snapped = true;
+    invalidCrossing.type = SnapType::Intersection;
+    invalidCrossing.position = {4.0, 4.0};
+    invalidCrossing.distance = 0.12;
+    invalidCrossing.hasGuide = true;
+
+    const std::vector<SnapResult> allSnaps = {fallback, singleGuide, invalidCrossing};
+    const SnapResult resolved = tools::applyGuideFirstSnapPolicy(fallback, allSnaps);
+    if (!resolved.snapped) return {false, "snapped", "not snapped"};
+    if (resolved.type != SnapType::Horizontal) {
+        return {false, "Horizontal", std::to_string(static_cast<int>(resolved.type))};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_shared_preview_unresolvable_crossing_falls_back_to_single_guide() {
+    SnapResult resolved;
+    resolved.snapped = true;
+    resolved.type = SnapType::Intersection;
+    resolved.position = {4.0, 4.0};
+    resolved.distance = 0.12;
+    resolved.hasGuide = true;
+
+    SnapResult singleGuide;
+    singleGuide.snapped = true;
+    singleGuide.type = SnapType::Horizontal;
+    singleGuide.position = {5.0, 1.0};
+    singleGuide.distance = 0.31;
+    singleGuide.guideOrigin = {0.0, 1.0};
+    singleGuide.hasGuide = true;
+
+    const std::vector<SnapResult> allSnaps = {singleGuide, resolved};
+    const auto guides = tools::buildActiveGuidesForSnap(resolved, allSnaps);
+    if (guides.size() != 1) {
+        return {false, "1 guide segment", std::to_string(guides.size())};
+    }
     return {true, "", ""};
 }
 
@@ -1706,9 +2060,18 @@ int main(int argc, char** argv) {
     {"test_parity_guide_adjacent_to_overlap", test_parity_guide_adjacent_to_overlap},
     {"test_parity_findBestSnap_stable_across_calls", test_parity_findBestSnap_stable_across_calls},
     {"test_shared_preview_vertex_priority_with_guides", test_shared_preview_vertex_priority_with_guides},
+    {"test_shared_preview_midpoint_suppresses_guides", test_shared_preview_midpoint_suppresses_guides},
     {"test_shared_preview_intersection_guides_present", test_shared_preview_intersection_guides_present},
     {"test_shared_preview_no_snap_clears_guides", test_shared_preview_no_snap_clears_guides},
-    {"test_shared_preview_dedupe_collinear_and_cap", test_shared_preview_dedupe_collinear_and_cap},
+    {"test_shared_preview_single_nearest_guide", test_shared_preview_single_nearest_guide},
+    {"test_effective_snap_guide_crossing_nearest_intersection", test_effective_snap_guide_crossing_nearest_intersection},
+    {"test_effective_snap_grid_does_not_suppress_single_guide", test_effective_snap_grid_does_not_suppress_single_guide},
+    {"test_effective_snap_center_suppresses_guides", test_effective_snap_center_suppresses_guides},
+    {"test_effective_snap_single_guide_wins_when_crossing_farther", test_effective_snap_single_guide_wins_when_crossing_farther},
+    {"test_effective_snap_crossing_wins_when_closer", test_effective_snap_crossing_wins_when_closer},
+    {"test_effective_snap_equal_distance_prefers_single_guide", test_effective_snap_equal_distance_prefers_single_guide},
+    {"test_effective_snap_skips_unresolvable_crossing", test_effective_snap_skips_unresolvable_crossing},
+    {"test_shared_preview_unresolvable_crossing_falls_back_to_single_guide", test_shared_preview_unresolvable_crossing_falls_back_to_single_guide},
     {"test_guide_crossing_snaps_to_intersection", test_guide_crossing_snaps_to_intersection},
     {"test_hv_guide_crossing_produces_intersection_candidate", test_hv_guide_crossing_produces_intersection_candidate},
     {"test_hv_guide_crossing_wins_over_individual_hv", test_hv_guide_crossing_wins_over_individual_hv},

@@ -27,6 +27,7 @@
 #include <QPainterPathStroker>
 #include <QPolygonF>
 #include <QRectF>
+#include <QPen>
 #include <QString>
 #include <QMouseEvent>
 #include <QWheelEvent>
@@ -433,6 +434,59 @@ Viewport::Viewport(QWidget* parent)
             emit sketchUpdated();
         }
     });
+    connect(m_dimensionEditor, &DimensionEditor::draftValueConfirmed,
+            this, [this](const QString& parameterId, double newValue) {
+        if (!m_inSketchMode || !m_toolManager || !m_toolManager->hasActiveTool()) {
+            closeDraftDimensionEditor(true);
+            return;
+        }
+
+        auto* activeTool = m_toolManager->activeTool();
+        if (!activeTool) {
+            closeDraftDimensionEditor(true);
+            return;
+        }
+
+        const auto applyResult = activeTool->applyPreviewDimensionValue(parameterId.toStdString(), newValue);
+        if (!applyResult.applied) {
+            const QString message = applyResult.errorMessage.empty()
+                ? tr("Invalid draft dimension value")
+                : QString::fromStdString(applyResult.errorMessage);
+            emit statusMessageRequested(message);
+
+            for (size_t i = 0; i < m_draftDimensionLabels.size(); ++i) {
+                const auto& label = m_draftDimensionLabels[i];
+                if (label.id == parameterId.toStdString()) {
+                    openDraftDimensionEditorAtIndex(static_cast<int>(i));
+                    update();
+                    return;
+                }
+            }
+
+            closeDraftDimensionEditor(true);
+            return;
+        }
+
+        closeDraftDimensionEditor(true);
+        update();
+    });
+    connect(m_dimensionEditor, &DimensionEditor::tabNavigationRequested,
+            this, [this](bool forward) {
+        if (!cycleDraftDimensionEditor(forward)) {
+            closeDraftDimensionEditor(true);
+        }
+        update();
+    });
+    connect(m_dimensionEditor, &DimensionEditor::editCancelled,
+            this, [this]() {
+        if (!m_activeDraftDimensionId.empty()) {
+            m_activeDraftDimensionId.clear();
+            if (m_inSketchMode) {
+                setFocus(Qt::OtherFocusReason);
+            }
+            update();
+        }
+    });
 
     // Theme integration
     m_themeConnection = connect(&ThemeManager::instance(), &ThemeManager::themeChanged,
@@ -819,106 +873,131 @@ void Viewport::paintGL() {
 
         m_sketchRenderer->render(view, projection);
 
-        // Render preview dimensions overlay
+        // Render draft preview dimensions and snap hint overlays in one pass.
         const auto& dims = m_sketchRenderer->getPreviewDimensions();
-        if (!dims.empty()) {
-            // Unbind GL context resources before QPainter to be safe
-            // QPainter painter(this) automatically handles GL state for the widget
+        const auto& snap = m_sketchRenderer->getSnapIndicator();
+        if (!dims.empty() || (snap.active && !snap.hintText.empty())) {
             QPainter painter(this);
             painter.setRenderHint(QPainter::Antialiasing);
-            
+
             const ThemeDefinition& theme = ThemeManager::instance().currentTheme();
             QColor textColor = theme.viewport.overlay.previewDimensionText;
             QColor bgColor = theme.viewport.overlay.previewDimensionBackground;
-            
+            QColor activeBg = bgColor.lighter(120);
+            QColor activeBorder = textColor;
+
             QFont font = painter.font();
             font.setPointSize(10);
             font.setBold(true);
             painter.setFont(font);
 
+            const QFontMetrics fm(font);
+            constexpr int kPadding = 4;
+
             PlaneAxes axes = buildPlaneAxes(plane);
             QVector3D origin(plane.origin.x, plane.origin.y, plane.origin.z);
 
-            for (const auto& dim : dims) {
-                // Calculate world position: origin + xAxis * x + yAxis * y
-                QVector3D worldPos = origin + 
-                                   axes.xAxis * dim.position.x + 
-                                   axes.yAxis * dim.position.y;
-                
-                QPointF screenPos;
-                if (projectToScreen(viewProjection, worldPos, 
-                                  static_cast<float>(width()), 
-                                  static_cast<float>(height()), 
-                                  &screenPos)) {
-                    
-                    QString text = QString::fromStdString(dim.text);
-                    QFontMetrics fm(font);
-                    int textWidth = fm.horizontalAdvance(text);
+            QRectF snapRect;
+            QString snapText;
+            bool hasSnapRect = false;
+            if (snap.active && !snap.hintText.empty()) {
+                QVector3D snapWorldPos = origin +
+                    axes.xAxis * snap.position.x +
+                    axes.yAxis * snap.position.y;
+                QPointF snapScreenPos;
+                if (projectToScreen(viewProjection, snapWorldPos,
+                                    static_cast<float>(width()),
+                                    static_cast<float>(height()),
+                                    &snapScreenPos)) {
+                    snapText = QString::fromStdString(snap.hintText);
+                    int textWidth = fm.horizontalAdvance(snapText);
                     int textHeight = fm.height();
-                    int padding = 4;
-                    
-                    QRectF bgRect(screenPos.x() - textWidth / 2 - padding, 
-                                screenPos.y() - textHeight / 2 - padding, 
-                                textWidth + 2 * padding, 
-                                textHeight + 2 * padding);
-                    
-                    painter.setPen(Qt::NoPen);
-                    painter.setBrush(bgColor);
-                    painter.drawRoundedRect(bgRect, 4, 4);
-                    
-                    painter.setPen(textColor);
-                    painter.drawText(bgRect, Qt::AlignCenter, text);
+                    snapRect = QRectF(snapScreenPos.x() - textWidth / 2 - kPadding,
+                                      snapScreenPos.y() - textHeight / 2 - kPadding - 20,
+                                      textWidth + 2 * kPadding,
+                                      textHeight + 2 * kPadding);
+                    hasSnapRect = true;
                 }
             }
-        }
 
-        // Render snap hint overlay
-        const auto& snap = m_sketchRenderer->getSnapIndicator();
-        if (snap.active && !snap.hintText.empty()) {
-            QPainter painter(this);
-            painter.setRenderHint(QPainter::Antialiasing);
-            
-            const ThemeDefinition& theme = ThemeManager::instance().currentTheme();
-            QColor textColor = theme.viewport.overlay.previewDimensionText;
-            QColor bgColor = theme.viewport.overlay.previewDimensionBackground;
-            
-            QFont font = painter.font();
-            font.setPointSize(10);
-            font.setBold(true);
-            painter.setFont(font);
+            std::vector<DraftDimensionLabel> nextLabels;
+            nextLabels.reserve(dims.size());
 
-            PlaneAxes axes = buildPlaneAxes(plane);
-            QVector3D origin(plane.origin.x, plane.origin.y, plane.origin.z);
-            
-            QVector3D worldPos = origin + 
-                               axes.xAxis * snap.position.x + 
-                               axes.yAxis * snap.position.y;
-            
-            QPointF screenPos;
-            if (projectToScreen(viewProjection, worldPos, 
-                              static_cast<float>(width()), 
-                              static_cast<float>(height()), 
-                              &screenPos)) {
-                
-                QString text = QString::fromStdString(snap.hintText);
-                QFontMetrics fm(font);
-                int textWidth = fm.horizontalAdvance(text);
-                int textHeight = fm.height();
-                int padding = 4;
-                
-                // Offset ~20px above snap point
-                QRectF bgRect(screenPos.x() - textWidth / 2 - padding, 
-                            screenPos.y() - textHeight / 2 - padding - 20, 
-                            textWidth + 2 * padding, 
-                            textHeight + 2 * padding);
-                
-                painter.setPen(Qt::NoPen);
-                painter.setBrush(bgColor);
+            const qreal overlapOffset = static_cast<qreal>(fm.height() + 10);
+            for (const auto& dim : dims) {
+                QVector3D worldPos = origin +
+                    axes.xAxis * dim.position.x +
+                    axes.yAxis * dim.position.y;
+
+                QPointF screenPos;
+                if (!projectToScreen(viewProjection, worldPos,
+                                     static_cast<float>(width()),
+                                     static_cast<float>(height()),
+                                     &screenPos)) {
+                    continue;
+                }
+
+                const QString text = QString::fromStdString(dim.text);
+                const int textWidth = fm.horizontalAdvance(text);
+                const int textHeight = fm.height();
+                QRectF bgRect(screenPos.x() - textWidth / 2 - kPadding,
+                              screenPos.y() - textHeight / 2 - kPadding,
+                              textWidth + 2 * kPadding,
+                              textHeight + 2 * kPadding);
+
+                if (hasSnapRect && bgRect.intersects(snapRect)) {
+                    QRectF shiftedUp = bgRect.translated(0.0, -overlapOffset);
+                    if (!shiftedUp.intersects(snapRect)) {
+                        bgRect = shiftedUp;
+                    } else {
+                        bgRect = bgRect.translated(0.0, overlapOffset);
+                    }
+                }
+
+                DraftDimensionLabel label;
+                label.id = dim.id;
+                label.rect = bgRect;
+                label.anchorPos = bgRect.center().toPoint();
+                label.value = dim.value.value_or(0.0);
+                label.hasValue = dim.value.has_value();
+                label.units = QString::fromStdString(dim.units);
+                label.editable = !dim.id.empty() && dim.value.has_value();
+                nextLabels.push_back(label);
+
+                const bool isActiveEditable = label.editable &&
+                    !m_activeDraftDimensionId.empty() &&
+                    label.id == m_activeDraftDimensionId;
+                painter.setPen(isActiveEditable ? QPen(activeBorder, 1.5) : Qt::NoPen);
+                painter.setBrush(isActiveEditable ? activeBg : bgColor);
                 painter.drawRoundedRect(bgRect, 4, 4);
-                
+
                 painter.setPen(textColor);
                 painter.drawText(bgRect, Qt::AlignCenter, text);
             }
+
+            m_draftDimensionLabels = std::move(nextLabels);
+
+            if (!m_activeDraftDimensionId.empty()) {
+                const bool activeStillVisible = std::any_of(
+                    m_draftDimensionLabels.begin(),
+                    m_draftDimensionLabels.end(),
+                    [this](const DraftDimensionLabel& label) {
+                        return label.editable && label.id == m_activeDraftDimensionId;
+                    });
+                if (!activeStillVisible) {
+                    closeDraftDimensionEditor(false);
+                }
+            }
+
+            if (hasSnapRect) {
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(bgColor);
+                painter.drawRoundedRect(snapRect, 4, 4);
+                painter.setPen(textColor);
+                painter.drawText(snapRect, Qt::AlignCenter, snapText);
+            }
+        } else {
+            clearDraftDimensionInteraction();
         }
     } else if (m_document && m_sketchRenderer) {
         // Not in sketch mode: render only the navigator-selected sketch (if any).
@@ -1211,6 +1290,19 @@ void Viewport::mousePressEvent(QMouseEvent* event) {
             m_pendingShellFaceToggle = false;
             update();
             return;
+        }
+    }
+
+    if (m_inSketchMode && m_toolManager && m_toolManager->hasActiveTool()) {
+        if (auto draftIndex = draftDimensionIndexAt(event->pos()); draftIndex.has_value()) {
+            if (event->button() == Qt::LeftButton) {
+                openDraftDimensionEditorAtIndex(*draftIndex);
+                event->accept();
+                return;
+            }
+        } else if (m_dimensionEditor && m_dimensionEditor->isVisible() &&
+                   m_dimensionEditor->mode() == DimensionEditor::Mode::DraftParameter) {
+            closeDraftDimensionEditor(false);
         }
     }
 
@@ -1554,7 +1646,7 @@ void Viewport::mouseMoveEvent(QMouseEvent* event) {
                     *m_activeSketch,
                     excludeFromSnap,
                     std::nullopt,
-                    false,
+                    true,
                     true);
                 if (snapResolution.resolvedSnap.snapped) {
                     dragTarget = snapResolution.resolvedSnap.position;
@@ -1954,6 +2046,103 @@ void Viewport::clearPointDragSnapPreview() {
     }
 }
 
+std::optional<int> Viewport::draftDimensionIndexAt(const QPoint& screenPos) const {
+    if (!m_inSketchMode || !m_toolManager || !m_toolManager->hasActiveTool()) {
+        return std::nullopt;
+    }
+
+    for (int i = static_cast<int>(m_draftDimensionLabels.size()) - 1; i >= 0; --i) {
+        const auto& label = m_draftDimensionLabels[static_cast<size_t>(i)];
+        if (label.editable && label.rect.contains(screenPos)) {
+            return i;
+        }
+    }
+
+    return std::nullopt;
+}
+
+bool Viewport::openDraftDimensionEditorAtIndex(int index) {
+    if (!m_dimensionEditor || !m_inSketchMode || !m_toolManager || !m_toolManager->hasActiveTool()) {
+        return false;
+    }
+    if (index < 0 || index >= static_cast<int>(m_draftDimensionLabels.size())) {
+        return false;
+    }
+
+    const auto& label = m_draftDimensionLabels[static_cast<size_t>(index)];
+    if (!label.editable || !label.hasValue) {
+        return false;
+    }
+
+    m_activeDraftDimensionId = label.id;
+    m_dimensionEditor->showForDraftParameter(QString::fromStdString(label.id),
+                                             label.value,
+                                             label.units,
+                                             label.anchorPos);
+    return true;
+}
+
+bool Viewport::cycleDraftDimensionEditor(bool forward) {
+    if (!m_inSketchMode || !m_toolManager || !m_toolManager->hasActiveTool()) {
+        return false;
+    }
+
+    std::vector<int> editableIndices;
+    editableIndices.reserve(m_draftDimensionLabels.size());
+    for (int i = 0; i < static_cast<int>(m_draftDimensionLabels.size()); ++i) {
+        if (m_draftDimensionLabels[static_cast<size_t>(i)].editable) {
+            editableIndices.push_back(i);
+        }
+    }
+    if (editableIndices.empty()) {
+        closeDraftDimensionEditor(false);
+        return false;
+    }
+
+    if (m_activeDraftDimensionId.empty()) {
+        const int target = forward ? editableIndices.front() : editableIndices.back();
+        return openDraftDimensionEditorAtIndex(target);
+    }
+
+    int activePos = -1;
+    for (int i = 0; i < static_cast<int>(editableIndices.size()); ++i) {
+        const auto& label = m_draftDimensionLabels[static_cast<size_t>(editableIndices[i])];
+        if (label.id == m_activeDraftDimensionId) {
+            activePos = i;
+            break;
+        }
+    }
+
+    if (activePos < 0) {
+        const int target = forward ? editableIndices.front() : editableIndices.back();
+        return openDraftDimensionEditorAtIndex(target);
+    }
+
+    const int nextPos = forward ? activePos + 1 : activePos - 1;
+    if (nextPos < 0 || nextPos >= static_cast<int>(editableIndices.size())) {
+        closeDraftDimensionEditor(true);
+        return true;
+    }
+
+    return openDraftDimensionEditorAtIndex(editableIndices[static_cast<size_t>(nextPos)]);
+}
+
+void Viewport::closeDraftDimensionEditor(bool restoreViewportFocus) {
+    if (m_dimensionEditor && m_dimensionEditor->isVisible() &&
+        m_dimensionEditor->mode() == DimensionEditor::Mode::DraftParameter) {
+        m_dimensionEditor->cancel();
+    }
+    m_activeDraftDimensionId.clear();
+    if (restoreViewportFocus && m_inSketchMode) {
+        setFocus(Qt::OtherFocusReason);
+    }
+}
+
+void Viewport::clearDraftDimensionInteraction() {
+    m_draftDimensionLabels.clear();
+    closeDraftDimensionEditor(false);
+}
+
 void Viewport::setDebugToggles(bool normals, bool depth, bool wireframe, bool disableGamma, bool matcap) {
     if (normals && depth) {
         depth = false;
@@ -2188,6 +2377,7 @@ void Viewport::enterSketchMode(sketch::Sketch* sketch) {
         m_suppressedConstraintMarkers.clear();
         syncSuppressedConstraintMarkers();
     }
+    clearDraftDimensionInteraction();
 
     // Initialize tool manager
     m_toolManager = std::make_unique<sketchTools::SketchToolManager>(this);
@@ -2206,6 +2396,10 @@ void Viewport::enterSketchMode(sketch::Sketch* sketch) {
     connect(m_toolManager.get(), &sketchTools::SketchToolManager::updateRequested, this, [this]() {
         update();
     });
+    connect(m_toolManager.get(), &sketchTools::SketchToolManager::toolChanged, this, [this](sketchTools::ToolType) {
+        clearDraftDimensionInteraction();
+        update();
+    });
 
     updateSnapGeometry();
 
@@ -2220,6 +2414,7 @@ void Viewport::exitSketchMode() {
         m_activeSketch->endPointDrag();
     }
     clearPointDragSnapPreview();
+    clearDraftDimensionInteraction();
 
     m_inSketchMode = false;
     m_activeSketch = nullptr;
@@ -2483,6 +2678,23 @@ void Viewport::keyPressEvent(QKeyEvent* event) {
 
     // Forward to sketch tool if active
     if (m_inSketchMode && m_toolManager && m_toolManager->hasActiveTool()) {
+        if (event->key() == Qt::Key_Escape &&
+            m_dimensionEditor && m_dimensionEditor->isVisible() &&
+            m_dimensionEditor->mode() == DimensionEditor::Mode::DraftParameter) {
+            closeDraftDimensionEditor(true);
+            event->accept();
+            return;
+        }
+
+        if (event->key() == Qt::Key_Tab) {
+            const bool forward = !(event->modifiers() & Qt::ShiftModifier);
+            if (!cycleDraftDimensionEditor(forward)) {
+                emit statusMessageRequested(tr("Select geometry preview to edit draft dimensions"));
+            }
+            event->accept();
+            return;
+        }
+
         m_toolManager->handleKeyPress(static_cast<Qt::Key>(event->key()));
         event->accept();
         return;
@@ -3891,16 +4103,16 @@ void Viewport::updateSnapSettings(const SnapSettingsPanel::SnapSettings& setting
     auto& sm = m_toolManager->snapManager();
     sm.setGridSnapEnabled(settings.grid);
     sm.setSnapEnabled(core::sketch::SnapType::SketchGuide, settings.sketchGuideLines);
-    // sm.setSnapEnabled(core::sketch::SnapType::Vertex, settings.sketchGuidePoints); // Vertex is fundamental, maybe dont disable?
-    // User requested "Sketch Guide Points" toggle. Let's assume it means Vertex/Endpoint/Midpoint etc?
-    // Or just "Points" (Vertex).
-    // Let's toggle Point-like snaps for "Sketch Guide Points"
+    sm.setSnapEnabled(core::sketch::SnapType::Horizontal, settings.sketchGuideLines);
+    sm.setSnapEnabled(core::sketch::SnapType::Vertical, settings.sketchGuideLines);
+    sm.setSnapEnabled(core::sketch::SnapType::Perpendicular, settings.sketchGuideLines);
+    sm.setSnapEnabled(core::sketch::SnapType::Tangent, settings.sketchGuideLines);
+
     sm.setSnapEnabled(core::sketch::SnapType::Vertex, settings.sketchGuidePoints);
     sm.setSnapEnabled(core::sketch::SnapType::Endpoint, settings.sketchGuidePoints);
     sm.setSnapEnabled(core::sketch::SnapType::Midpoint, settings.sketchGuidePoints);
     sm.setSnapEnabled(core::sketch::SnapType::Center, settings.sketchGuidePoints);
     sm.setSnapEnabled(core::sketch::SnapType::Quadrant, settings.sketchGuidePoints);
-    // Intersection?
     sm.setSnapEnabled(core::sketch::SnapType::Intersection, settings.sketchGuidePoints);
 
     sm.setSnapEnabled(core::sketch::SnapType::ActiveLayer3D, settings.activeLayer3DPoints || settings.activeLayer3DEdges);

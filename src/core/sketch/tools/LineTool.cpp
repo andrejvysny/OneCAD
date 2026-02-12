@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <string>
 #include <cmath>
+#include <numbers>
 
 namespace onecad::core::sketch::tools {
 
@@ -52,6 +53,10 @@ void LineTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
         // First click - record start point
         startPoint_ = pos;
         currentPoint_ = pos;
+        hasLengthLock_ = false;
+        lockedLength_ = 0.0;
+        hasAngleLock_ = false;
+        lockedAngleDeg_ = 0.0;
         startPointId_.clear();
         if (snapResult_.snapped && !snapResult_.pointId.empty()) {
             startPointId_ = snapResult_.pointId;
@@ -63,9 +68,12 @@ void LineTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
             return;
         }
 
+        const bool useDraftLockedEndpoint = hasLengthLock_ || hasAngleLock_;
+        Vec2d endPoint = useDraftLockedEndpoint ? currentPoint_ : pos;
+
         // Check minimum length to avoid degenerate geometry
-        double dx = pos.x - startPoint_.x;
-        double dy = pos.y - startPoint_.y;
+        double dx = endPoint.x - startPoint_.x;
+        double dy = endPoint.y - startPoint_.y;
         double length = std::sqrt(dx * dx + dy * dy);
 
         if (length < constants::MIN_GEOMETRY_SIZE) {
@@ -80,10 +88,10 @@ void LineTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
         }
 
         EntityID endId;
-        if (snapResult_.snapped && !snapResult_.pointId.empty()) {
+        if (!useDraftLockedEndpoint && snapResult_.snapped && !snapResult_.pointId.empty()) {
             endId = snapResult_.pointId;
         } else {
-            endId = sketch_->addPoint(pos.x, pos.y);
+            endId = sketch_->addPoint(endPoint.x, endPoint.y);
         }
 
         if (startId.empty() || endId.empty()) {
@@ -99,7 +107,7 @@ void LineTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
         // materialize a new endpoint at click position.
         if (startId == endId) {
             if (snapResult_.snapped && snapResult_.hasGuide) {
-                endId = sketch_->addPoint(pos.x, pos.y);
+                endId = sketch_->addPoint(endPoint.x, endPoint.y);
             }
             if (endId.empty() || startId == endId) {
                 qCDebug(logLineTool) << "reject:same-endpoint-after-guide";
@@ -142,11 +150,11 @@ void LineTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
                     context.activeEntity = lineId;
                     context.previousEntity = lastCreatedLineId_;
                     context.startPoint = startPoint_;
-                    context.currentPoint = pos;
+                    context.currentPoint = endPoint;
                     context.isPolylineMode = !lastCreatedLineId_.empty();
 
                     auto constraints = autoConstrainer_->inferLineConstraints(
-                        startPoint_, pos, lineId, *sketch_, context);
+                        startPoint_, endPoint, lineId, *sketch_, context);
 
                     // Filter and apply high-confidence constraints
                     auto toApply = autoConstrainer_->filterForAutoApply(constraints);
@@ -160,9 +168,17 @@ void LineTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
                 lastCreatedLineId_ = lineId;
             }
 
+            if (length > constants::MIN_GEOMETRY_SIZE) {
+                fallbackDirection_ = {dx / length, dy / length};
+            }
+
             // Continue polyline: new start = old end
-            startPoint_ = pos;
-            currentPoint_ = pos;
+            startPoint_ = endPoint;
+            currentPoint_ = endPoint;
+            hasLengthLock_ = false;
+            lockedLength_ = 0.0;
+            hasAngleLock_ = false;
+            lockedAngleDeg_ = 0.0;
             // Stay in FirstClick state for polyline mode
             lastRejectReason_ = RejectReason::None;
         }
@@ -170,7 +186,11 @@ void LineTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
 }
 
 void LineTool::onMouseMove(const Vec2d& pos) {
-    currentPoint_ = pos;
+    if (state_ == State::FirstClick) {
+        updateCurrentPointFromDraftLocks(pos);
+    } else {
+        currentPoint_ = pos;
+    }
 
     // Update preview constraints
     updateInferredConstraints();
@@ -287,11 +307,46 @@ void LineTool::onKeyPress(Qt::Key key) {
     }
 }
 
+PreviewDimensionApplyResult LineTool::applyPreviewDimensionValue(const std::string& id, double value) {
+    if (state_ != State::FirstClick) {
+        return {false, "Set the line start point first"};
+    }
+    if (!std::isfinite(value)) {
+        return {false, "Value must be finite"};
+    }
+
+    if (id == "line_length") {
+        if (value <= constants::MIN_GEOMETRY_SIZE) {
+            return {false, "Length must be greater than minimum geometry size"};
+        }
+        hasLengthLock_ = true;
+        lockedLength_ = value;
+        updateCurrentPointFromDraftLocks(currentPoint_);
+        updateInferredConstraints();
+        return {true, {}};
+    }
+
+    if (id == "line_angle") {
+        hasAngleLock_ = true;
+        lockedAngleDeg_ = normalizeAngleDegrees(value);
+        updateCurrentPointFromDraftLocks(currentPoint_);
+        updateInferredConstraints();
+        return {true, {}};
+    }
+
+    return {false, "Unknown line draft parameter"};
+}
+
 void LineTool::cancel() {
     state_ = State::Idle;
     startPointId_.clear();
     lastPointId_.clear();
     lastCreatedLineId_.clear();
+    hasLengthLock_ = false;
+    lockedLength_ = 0.0;
+    hasAngleLock_ = false;
+    lockedAngleDeg_ = 0.0;
+    fallbackDirection_ = {1.0, 0.0};
     lineCreated_ = false;
     lastRejectReason_ = RejectReason::None;
     inferredConstraints_.clear();
@@ -308,21 +363,92 @@ void LineTool::render(SketchRenderer& renderer) {
         double length = std::sqrt(dx * dx + dy * dy);
 
         if (length > constants::MIN_GEOMETRY_SIZE) {
+            std::vector<SketchRenderer::PreviewDimension> dims;
+            dims.reserve(2);
+
             char buffer[32];
             std::snprintf(buffer, sizeof(buffer), "%.2f", length);
-            
             Vec2d midPoint = {
                 (startPoint_.x + currentPoint_.x) * 0.5,
                 (startPoint_.y + currentPoint_.y) * 0.5
             };
+            dims.push_back({midPoint, std::string(buffer), "line_length", length, "mm"});
 
-            renderer.setPreviewDimensions({{midPoint, std::string(buffer)}});
+            const double angleDeg =
+                normalizeAngleDegrees(std::atan2(dy, dx) * 180.0 / std::numbers::pi);
+            char angleBuffer[32];
+            std::snprintf(angleBuffer, sizeof(angleBuffer), "%.1f\xC2\xB0", angleDeg);
+
+            Vec2d perp{-dy / length, dx / length};
+            Vec2d anglePos = {
+                startPoint_.x + dx * 0.35 + perp.x * 2.0,
+                startPoint_.y + dy * 0.35 + perp.y * 2.0
+            };
+            dims.push_back({anglePos, std::string(angleBuffer), "line_angle", angleDeg, "\xC2\xB0"});
+
+            renderer.setPreviewDimensions(dims);
         } else {
             renderer.clearPreviewDimensions();
         }
     } else {
         renderer.clearPreview();
     }
+}
+
+void LineTool::updateCurrentPointFromDraftLocks(const Vec2d& cursorPos) {
+    if (state_ != State::FirstClick) {
+        return;
+    }
+
+    if (!hasLengthLock_ && !hasAngleLock_) {
+        currentPoint_ = cursorPos;
+        return;
+    }
+
+    Vec2d direction = fallbackDirection_;
+    const double dx = cursorPos.x - startPoint_.x;
+    const double dy = cursorPos.y - startPoint_.y;
+    const double rawLength = std::sqrt(dx * dx + dy * dy);
+
+    if (rawLength > 1e-9) {
+        direction = {dx / rawLength, dy / rawLength};
+    }
+
+    if (hasAngleLock_) {
+        const double radians = lockedAngleDeg_ * std::numbers::pi / 180.0;
+        direction = {std::cos(radians), std::sin(radians)};
+    }
+
+    const double directionLength = std::sqrt(direction.x * direction.x + direction.y * direction.y);
+    if (directionLength > 1e-9) {
+        direction.x /= directionLength;
+        direction.y /= directionLength;
+        fallbackDirection_ = direction;
+    } else {
+        direction = {1.0, 0.0};
+        fallbackDirection_ = direction;
+    }
+
+    double length = rawLength;
+    if (hasLengthLock_) {
+        length = lockedLength_;
+    }
+
+    currentPoint_.x = startPoint_.x + direction.x * length;
+    currentPoint_.y = startPoint_.y + direction.y * length;
+}
+
+double LineTool::normalizeAngleDegrees(double angleDegrees) {
+    if (!std::isfinite(angleDegrees)) {
+        return 0.0;
+    }
+    double normalized = std::fmod(angleDegrees, 360.0);
+    if (normalized <= -180.0) {
+        normalized += 360.0;
+    } else if (normalized > 180.0) {
+        normalized -= 360.0;
+    }
+    return normalized;
 }
 
 } // namespace onecad::core::sketch::tools

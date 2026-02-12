@@ -33,6 +33,9 @@ void CircleTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
         centerPoint_ = pos;
         currentPoint_ = pos;
         currentRadius_ = 0.0;
+        hasRadiusLock_ = false;
+        lockedRadius_ = 0.0;
+        fallbackDirection_ = {1.0, 0.0};
         centerPointId_.clear();
         if (snapResult_.snapped && !snapResult_.pointId.empty()) {
             centerPointId_ = snapResult_.pointId;
@@ -44,10 +47,8 @@ void CircleTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
             return;
         }
 
-        // Calculate radius
-        double dx = pos.x - centerPoint_.x;
-        double dy = pos.y - centerPoint_.y;
-        double radius = std::sqrt(dx * dx + dy * dy);
+        updatePreviewFromDraftRadius(pos);
+        double radius = currentRadius_;
 
         if (radius < constants::MIN_GEOMETRY_SIZE) {
             // Too small, ignore
@@ -86,7 +87,7 @@ void CircleTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
                 DrawingContext context;
                 context.activeEntity = circleId;
                 context.startPoint = centerPoint_;
-                context.currentPoint = pos;
+                context.currentPoint = currentPoint_;
 
                 auto constraints = autoConstrainer_->inferCircleConstraints(
                     centerPoint_, radius, circleId, *sketch_, context);
@@ -121,17 +122,17 @@ void CircleTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
         state_ = State::Idle;
         currentRadius_ = 0.0;
         centerPointId_.clear();
+        hasRadiusLock_ = false;
+        lockedRadius_ = 0.0;
+        fallbackDirection_ = {1.0, 0.0};
     }
 }
 
 void CircleTool::onMouseMove(const Vec2d& pos) {
-    currentPoint_ = pos;
-
     if (state_ == State::FirstClick) {
-        // Calculate preview radius
-        double dx = pos.x - centerPoint_.x;
-        double dy = pos.y - centerPoint_.y;
-        currentRadius_ = std::sqrt(dx * dx + dy * dy);
+        updatePreviewFromDraftRadius(pos);
+    } else {
+        currentPoint_ = pos;
     }
 }
 
@@ -150,6 +151,9 @@ void CircleTool::cancel() {
     currentRadius_ = 0.0;
     circleCreated_ = false;
     centerPointId_.clear();
+    hasRadiusLock_ = false;
+    lockedRadius_ = 0.0;
+    fallbackDirection_ = {1.0, 0.0};
 }
 
 void CircleTool::render(SketchRenderer& renderer) {
@@ -165,11 +169,49 @@ void CircleTool::render(SketchRenderer& renderer) {
             (centerPoint_.x + currentPoint_.x) * 0.5,
             (centerPoint_.y + currentPoint_.y) * 0.5
         };
-        
-        renderer.setPreviewDimensions({{labelPos, std::string(buffer)}});
+
+        renderer.setPreviewDimensions({{labelPos,
+                                        std::string(buffer),
+                                        "circle_radius",
+                                        currentRadius_,
+                                        "mm"}});
     } else {
         renderer.clearPreview();
     }
+}
+
+PreviewDimensionApplyResult CircleTool::applyPreviewDimensionValue(const std::string& id, double value) {
+    if (state_ != State::FirstClick) {
+        return {false, "Set the circle center point first"};
+    }
+    if (id != "circle_radius") {
+        return {false, "Unknown circle draft parameter"};
+    }
+    if (!std::isfinite(value)) {
+        return {false, "Value must be finite"};
+    }
+    if (value <= constants::MIN_GEOMETRY_SIZE) {
+        return {false, "Radius must be greater than minimum geometry size"};
+    }
+
+    hasRadiusLock_ = true;
+    lockedRadius_ = value;
+    updatePreviewFromDraftRadius(currentPoint_);
+    return {true, {}};
+}
+
+void CircleTool::updatePreviewFromDraftRadius(const Vec2d& cursorPos) {
+    const double dx = cursorPos.x - centerPoint_.x;
+    const double dy = cursorPos.y - centerPoint_.y;
+    const double rawRadius = std::sqrt(dx * dx + dy * dy);
+
+    if (rawRadius > 1e-9) {
+        fallbackDirection_ = {dx / rawRadius, dy / rawRadius};
+    }
+
+    currentRadius_ = hasRadiusLock_ ? lockedRadius_ : rawRadius;
+    currentPoint_.x = centerPoint_.x + fallbackDirection_.x * currentRadius_;
+    currentPoint_.y = centerPoint_.y + fallbackDirection_.y * currentRadius_;
 }
 
 } // namespace onecad::core::sketch::tools

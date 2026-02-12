@@ -22,6 +22,11 @@ class SketchRenderer;
 
 namespace tools {
 
+struct PreviewDimensionApplyResult {
+    bool applied = false;
+    std::string errorMessage;
+};
+
 /**
  * @brief Abstract base class for sketch drawing tools
  *
@@ -81,6 +86,17 @@ public:
      * @brief Get tool name for UI display
      */
     virtual std::string name() const = 0;
+
+    /**
+     * @brief Apply value to an editable draft preview dimension field.
+     * @param id Stable preview dimension id (tool-defined)
+     * @param value Parsed numeric value from inline editor
+     * @return Result with success flag and optional error message
+     */
+    virtual PreviewDimensionApplyResult applyPreviewDimensionValue(const std::string& /*id*/,
+                                                                   double /*value*/) {
+        return {};
+    }
 
     /**
      * @brief Get reference point for snapping/inference (e.g. start point of line)

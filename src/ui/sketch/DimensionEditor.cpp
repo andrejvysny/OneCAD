@@ -26,11 +26,39 @@ DimensionEditor::DimensionEditor(QWidget* parent)
 
 void DimensionEditor::showForConstraint(const QString& constraintId, double currentValue,
                                          const QString& units, const QPoint& screenPos) {
-    m_constraintId = constraintId;
+    showEditorWithPolicy(Mode::Constraint,
+                         ValidationPolicy::PositiveOnly,
+                         constraintId,
+                         currentValue,
+                         units,
+                         screenPos);
+}
+
+void DimensionEditor::showForDraftParameter(const QString& parameterId, double currentValue,
+                                            const QString& units, const QPoint& screenPos) {
+    showEditorWithPolicy(Mode::DraftParameter,
+                         ValidationPolicy::AnyFinite,
+                         parameterId,
+                         currentValue,
+                         units,
+                         screenPos);
+}
+
+void DimensionEditor::showEditorWithPolicy(Mode mode, ValidationPolicy validationPolicy,
+                                           const QString& targetId, double currentValue,
+                                           const QString& units, const QPoint& screenPos) {
+    m_mode = mode;
+    m_validationPolicy = validationPolicy;
+    m_constraintId.clear();
+    m_draftParameterId.clear();
+    if (mode == Mode::Constraint) {
+        m_constraintId = targetId;
+    } else if (mode == Mode::DraftParameter) {
+        m_draftParameterId = targetId;
+    }
     m_originalValue = currentValue;
     m_units = units;
 
-    // Format value with 2 decimal places
     QString valueText = QString::number(currentValue, 'f', 2);
     if (!units.isEmpty()) {
         valueText += " " + units;
@@ -39,12 +67,9 @@ void DimensionEditor::showForConstraint(const QString& constraintId, double curr
     setText(valueText);
     selectAll();
 
-    // Position and size
     adjustSize();
     int editorWidth = qMax(width(), 100);
     int editorHeight = height();
-
-    // Center the editor on the position
     move(screenPos.x() - editorWidth / 2, screenPos.y() - editorHeight / 2);
 
     show();
@@ -53,7 +78,9 @@ void DimensionEditor::showForConstraint(const QString& constraintId, double curr
 }
 
 void DimensionEditor::cancel() {
+    m_mode = Mode::None;
     m_constraintId.clear();
+    m_draftParameterId.clear();
     m_originalValue = 0.0;
     hide();
     emit editCancelled();
@@ -62,6 +89,11 @@ void DimensionEditor::cancel() {
 void DimensionEditor::keyPressEvent(QKeyEvent* event) {
     if (event->key() == Qt::Key_Escape) {
         cancel();
+        return;
+    }
+    if (m_mode == Mode::DraftParameter && event->key() == Qt::Key_Tab) {
+        bool forward = !(event->modifiers() & Qt::ShiftModifier);
+        emit tabNavigationRequested(forward);
         return;
     }
     QLineEdit::keyPressEvent(event);
@@ -76,7 +108,7 @@ void DimensionEditor::focusOutEvent(QFocusEvent* event) {
 }
 
 void DimensionEditor::confirmValue() {
-    if (m_constraintId.isEmpty()) {
+    if (m_mode == Mode::None) {
         cancel();
         return;
     }
@@ -91,18 +123,36 @@ void DimensionEditor::confirmValue() {
 
     double newValue = parseExpression(input);
 
-    // Validate: reject NaN, Inf, and non-positive values
-    if (std::isnan(newValue) || std::isinf(newValue) || newValue <= 0.0) {
-        // Invalid expression or non-positive value - reset to original
-        showForConstraint(m_constraintId, m_originalValue, m_units, pos());
+    if (std::isnan(newValue) || std::isinf(newValue)) {
+        if (m_mode == Mode::Constraint) {
+            showForConstraint(m_constraintId, m_originalValue, m_units, pos());
+        } else {
+            showForDraftParameter(m_draftParameterId, m_originalValue, m_units, pos());
+        }
         return;
     }
 
-    QString constraintId = m_constraintId;
+    if (m_validationPolicy == ValidationPolicy::PositiveOnly && newValue <= 0.0) {
+        if (m_mode == Mode::Constraint) {
+            showForConstraint(m_constraintId, m_originalValue, m_units, pos());
+        } else {
+            showForDraftParameter(m_draftParameterId, m_originalValue, m_units, pos());
+        }
+        return;
+    }
+
+    QString targetId = (m_mode == Mode::Constraint) ? m_constraintId : m_draftParameterId;
+    Mode confirmedMode = m_mode;
+    m_mode = Mode::None;
     m_constraintId.clear();
+    m_draftParameterId.clear();
     hide();
 
-    emit valueConfirmed(constraintId, newValue);
+    if (confirmedMode == Mode::Constraint) {
+        emit valueConfirmed(targetId, newValue);
+    } else if (confirmedMode == Mode::DraftParameter) {
+        emit draftValueConfirmed(targetId, newValue);
+    }
 }
 
 double DimensionEditor::parseExpression(const QString& text) const {
