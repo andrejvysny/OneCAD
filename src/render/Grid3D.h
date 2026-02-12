@@ -32,8 +32,7 @@ public:
                 float pixelScale,
                 const QVector2D& viewMin,
                 const QVector2D& viewMax,
-                const QVector2D& fadeOrigin,
-                const QMatrix4x4& modelMatrix = QMatrix4x4());
+                const QVector2D& fadeOrigin);
     void cleanup();
     
     // Appearance

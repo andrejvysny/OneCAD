@@ -14,23 +14,21 @@ layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec4 aColor;
 
 uniform mat4 uMVP;
-uniform mat4 uModel;
 
 out vec4 vColor;
-out vec3 vPlanePos;
+out vec3 vWorldPos;
 
 void main() {
-    vec4 worldPos = uModel * vec4(aPos, 1.0);
-    gl_Position = uMVP * worldPos;
+    gl_Position = uMVP * vec4(aPos, 1.0);
     vColor = aColor;
-    vPlanePos = aPos;
+    vWorldPos = aPos;
 }
 )";
 
 static const char* fragmentShaderSource = R"(
 #version 410 core
 in vec4 vColor;
-in vec3 vPlanePos;
+in vec3 vWorldPos;
 out vec4 FragColor;
 
 uniform vec3 uFadeOrigin;
@@ -38,7 +36,7 @@ uniform float uFadeStart;
 uniform float uFadeEnd;
 
 void main() {
-    float dist = length(vPlanePos.xy - uFadeOrigin.xy);
+    float dist = length(vWorldPos.xy - uFadeOrigin.xy);
     float fade = 1.0 - smoothstep(uFadeStart, uFadeEnd, dist);
     FragColor = vec4(vColor.rgb, vColor.a * fade);
 }
@@ -289,8 +287,7 @@ void Grid3D::render(const QMatrix4x4& viewProjection,
                     float pixelScale,
                     const QVector2D& viewMin,
                     const QVector2D& viewMax,
-                    const QVector2D& fadeOrigin,
-                    const QMatrix4x4& modelMatrix) {
+                    const QVector2D& fadeOrigin) {
     if (!m_visible || !m_initialized || m_lineCount == 0) return;
 
     const float minorSpacing = calculateSpacing(pixelScale);
@@ -347,7 +344,6 @@ void Grid3D::render(const QMatrix4x4& viewProjection,
     
     m_shader->bind();
     m_shader->setUniformValue("uMVP", viewProjection);
-    m_shader->setUniformValue("uModel", modelMatrix);
     m_shader->setUniformValue("uFadeOrigin", QVector3D(fadeOrigin.x(), fadeOrigin.y(), 0.0f));
 
     float gridHalfSpan = 0.5f * qMax(endX - startX, endY - startY);
