@@ -20,6 +20,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace onecad {
@@ -120,6 +121,8 @@ public:
     void setCommandProcessor(app::commands::CommandProcessor* processor);
     void setModelPickMeshes(std::vector<selection::ModelPickerAdapter::Mesh>&& meshes);
     std::vector<app::selection::SelectionItem> modelSelection() const;
+    std::vector<app::selection::SelectionItem> sketchSelection() const;
+    int suppressedConstraintMarkerCount() const;
     void setModelPreviewMeshes(const std::vector<render::SceneMeshStore::Mesh>& meshes);
     void clearModelPreviewMeshes();
     void setPreviewHiddenBody(const std::string& bodyId);
@@ -132,6 +135,7 @@ signals:
     void sketchPlanePicked(int planeIndex);
     void planeSelectionCancelled();
     void sketchUpdated();  // Emitted when geometry/constraints change
+    void sketchSelectionChanged(); // Emitted when sketch-mode selection changes
     void openSketchForEditRequested(const QString& sketchId);
     void extrudeToolActiveChanged(bool active);
     void revolveToolActiveChanged(bool active);
@@ -141,6 +145,8 @@ signals:
     void selectionContextChanged(int contextKind);  // 0=Default, 1=Edge, 2=Face, 3=Body
     /** Request a temporary status bar message (e.g. "Point is fixed", solver error). */
     void statusMessageRequested(const QString& message);
+    void constraintDeleteRequested(const QString& constraintId);
+    void constraintSuppressRequested(const QString& constraintId);
 
 public slots:
     void beginPlaneSelection();
@@ -160,6 +166,10 @@ public slots:
     void activateMirrorTool();
     void deactivateTool();
     void setReferenceSketch(const QString& sketchId);
+    void selectSketchConstraint(const QString& constraintId);
+    void suppressConstraintMarker(const QString& constraintId);
+    void unsuppressConstraintMarker(const QString& constraintId);
+    void clearSuppressedConstraintMarkers();
     bool activateExtrudeTool();
     bool activateRevolveTool();
     bool activateFilletTool();
@@ -246,6 +256,7 @@ private:
     std::string resolveActiveSketchId() const;
     void updateSketchSelectionFromManager();
     void updateSketchHoverFromManager();
+    void syncSuppressedConstraintMarkers();
     app::selection::PickResult buildSketchPickResult(const QPoint& screenPos) const;
     QStringList buildDeepSelectLabels(const std::vector<app::selection::SelectionItem>& candidates) const;
     void applyPointDragSnapPreview(const core::sketch::tools::SnapInputResolution& snapResolution);
@@ -285,6 +296,7 @@ private:
     app::selection::ClickModifiers m_pendingModifiers;
     QPoint m_pendingClickPos;
     bool m_pendingShellFaceToggle = false;
+    std::unordered_set<core::sketch::ConstraintID> m_suppressedConstraintMarkers;
 
     // Sketch mode
     core::sketch::Sketch* m_activeSketch = nullptr;

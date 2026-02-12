@@ -184,6 +184,9 @@ struct ConstraintRenderData {
     Vec2d position;         // Icon position in sketch space
     bool isConflicting = false;
     bool isRedundant = false;
+    bool isSelected = false;
+    bool isHovered = false;
+    std::vector<EntityID> referencedEntities;
 
     // For dimensional constraints
     std::optional<double> value;
@@ -296,6 +299,17 @@ public:
      * @brief Set entities to highlight as conflicting
      */
     void setConflictingConstraints(const std::vector<ConstraintID>& ids);
+
+    /**
+     * @brief Set selected and hovered constraints for marker feedback.
+     */
+    void setSelectedConstraint(ConstraintID id);
+    void setHoverConstraint(ConstraintID id);
+
+    /**
+     * @brief Hide selected marker ids while keeping constraints active.
+     */
+    void setSuppressedConstraints(const std::vector<ConstraintID>& ids);
 
     // ========== Region Selection ==========
 
@@ -503,6 +517,9 @@ private:
     std::unordered_map<EntityID, SelectionState> entitySelections_;
     EntityID hoverEntity_;  // Empty string by default
     std::vector<ConstraintID> conflictingConstraints_;
+    ConstraintID selectedConstraint_;
+    ConstraintID hoverConstraint_;
+    std::unordered_set<ConstraintID> suppressedConstraints_;
 
     // Preview geometry
     struct {
@@ -579,6 +596,7 @@ private:
      * @brief Check if entity is visible in current viewport
      */
     bool isEntityVisible(const EntityRenderData& data) const;
+    bool shouldRenderConstraintMarker(const ConstraintRenderData& data) const;
 
     /**
      * @brief Calculate constraint icon position

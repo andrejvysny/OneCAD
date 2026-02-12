@@ -171,12 +171,18 @@ void SketchModePanel::setSketch(core::sketch::Sketch* sketch) {
     updateButtonStates();
 }
 
+void SketchModePanel::setApplicableConstraints(
+    const std::unordered_set<core::sketch::ConstraintType>& applicableConstraints) {
+    m_applicableConstraints = applicableConstraints;
+    updateButtonStates();
+}
+
 void SketchModePanel::updateButtonStates() {
-    // For now, enable all buttons
-    // In future, disable based on selection validity
     for (auto& cb : m_constraintButtons) {
         if (cb.button) {
-            cb.button->setEnabled(m_sketch != nullptr);
+            const bool enabled = (m_sketch != nullptr) &&
+                                 (m_applicableConstraints.find(cb.type) != m_applicableConstraints.end());
+            cb.button->setEnabled(enabled);
         }
     }
 }

@@ -962,14 +962,16 @@ void SketchRendererImpl::buildVBOs(
                 continue;
             }
         }
-        // Skip constraint icons drawn at line midpoints – we already draw one orange midpoint per line; avoids duplicate yellow dots. All of these use getIconPosition = line midpoint: Midpoint, Horizontal, Vertical, Angle, Parallel, Perpendicular, Equal.
-        if (icon.type == ConstraintType::Midpoint || icon.type == ConstraintType::Horizontal
-            || icon.type == ConstraintType::Vertical || icon.type == ConstraintType::Angle
-            || icon.type == ConstraintType::Parallel || icon.type == ConstraintType::Perpendicular
-            || icon.type == ConstraintType::Equal) {
-            continue;
-        }
         Vec3d color = icon.isConflicting ? style.colors.conflictHighlight : style.colors.constraintIcon;
+        if (icon.isSelected) {
+            color = style.colors.selectedGeometry;
+        } else if (icon.isHovered) {
+            color = {
+                style.colors.selectedGeometry.x * 0.7 + style.colors.constraintIcon.x * 0.3,
+                style.colors.selectedGeometry.y * 0.7 + style.colors.constraintIcon.y * 0.3,
+                style.colors.selectedGeometry.z * 0.7 + style.colors.constraintIcon.z * 0.3
+            };
+        }
         pointData.push_back(static_cast<float>(icon.position.x));
         pointData.push_back(static_cast<float>(icon.position.y));
         pointData.push_back(static_cast<float>(color.x));
@@ -1558,6 +1560,7 @@ void SketchRenderer::updateConstraints() {
         gp_Pnt2d iconPos = constraintPtr->getIconPosition(*sketch_);
         data.position = {iconPos.X(), iconPos.Y()};
         data.isConflicting = (conflicting.find(data.id) != conflicting.end());
+        data.referencedEntities = constraintPtr->referencedEntities();
 
         if (auto* dim = dynamic_cast<const DimensionalConstraint*>(constraintPtr.get())) {
             data.value = dim->value();
@@ -1817,6 +1820,31 @@ void SketchRenderer::setConflictingConstraints(const std::vector<ConstraintID>& 
     vboDirty_ = true;
 }
 
+void SketchRenderer::setSelectedConstraint(ConstraintID id) {
+    if (selectedConstraint_ == id) {
+        return;
+    }
+    selectedConstraint_ = std::move(id);
+    vboDirty_ = true;
+}
+
+void SketchRenderer::setHoverConstraint(ConstraintID id) {
+    if (hoverConstraint_ == id) {
+        return;
+    }
+    hoverConstraint_ = std::move(id);
+    vboDirty_ = true;
+}
+
+void SketchRenderer::setSuppressedConstraints(const std::vector<ConstraintID>& ids) {
+    std::unordered_set<ConstraintID> updated(ids.begin(), ids.end());
+    if (updated == suppressedConstraints_) {
+        return;
+    }
+    suppressedConstraints_ = std::move(updated);
+    vboDirty_ = true;
+}
+
 void SketchRenderer::setPreviewLine(const Vec2d& start, const Vec2d& end) {
     preview_.active = true;
     preview_.type = EntityType::Line;
@@ -2029,6 +2057,9 @@ ConstraintID SketchRenderer::pickConstraint(const Vec2d& screenPos,
     double minDist = tolerance;
 
     for (const auto& data : constraintRenderData_) {
+        if (!shouldRenderConstraintMarker(data)) {
+            continue;
+        }
         // Calculate distance from click to constraint icon position
         double dx = screenPos.x - data.position.x;
         double dy = screenPos.y - data.position.y;
@@ -2141,9 +2172,22 @@ void SketchRenderer::buildVBOs() {
                                  : renderStyle.colors.constraintIcon;
     Vec2d snapGuideOrigin = snapIndicator_.guideOrigin;
     bool snapHasGuide = snapIndicator_.hasGuide;
+
+    std::vector<ConstraintRenderData> visibleConstraints;
+    visibleConstraints.reserve(constraintRenderData_.size());
+    for (const auto& constraint : constraintRenderData_) {
+        if (!shouldRenderConstraintMarker(constraint)) {
+            continue;
+        }
+        ConstraintRenderData renderData = constraint;
+        renderData.isSelected = (constraint.id == selectedConstraint_);
+        renderData.isHovered = (constraint.id == hoverConstraint_);
+        visibleConstraints.push_back(std::move(renderData));
+    }
+
     impl_->buildVBOs(entityRenderData_, regionRenderData_, renderStyle, entitySelections_,
                      selectedRegions_, hoverRegion_, hoverEntity_,
-                     viewport_, pixelScale_, constraintRenderData_,
+                     viewport_, pixelScale_, visibleConstraints,
                      ghostConstraints_, snapActive, snapType, snapPos, snapSize, snapColor,
                      snapGuideOrigin, snapHasGuide, activeGuides_);
     vboDirty_ = false;
@@ -2151,6 +2195,59 @@ void SketchRenderer::buildVBOs() {
 
 bool SketchRenderer::isEntityVisible(const EntityRenderData& data) const {
     return viewport_.intersects(data.bounds[0], data.bounds[1]);
+}
+
+bool SketchRenderer::shouldRenderConstraintMarker(const ConstraintRenderData& data) const {
+    if (suppressedConstraints_.find(data.id) != suppressedConstraints_.end()) {
+        return false;
+    }
+
+    const bool isSelected = (data.id == selectedConstraint_);
+    const bool isHovered = (data.id == hoverConstraint_);
+    const bool hasEntitySelection = !entitySelections_.empty() || !hoverEntity_.empty();
+
+    bool referencesContext = false;
+    if (hasEntitySelection) {
+        if (!hoverEntity_.empty()) {
+            referencesContext = std::find(data.referencedEntities.begin(),
+                                          data.referencedEntities.end(),
+                                          hoverEntity_) != data.referencedEntities.end();
+        }
+        if (!referencesContext) {
+            for (const auto& referenced : data.referencedEntities) {
+                auto it = entitySelections_.find(referenced);
+                if (it == entitySelections_.end()) {
+                    continue;
+                }
+                if (it->second == SelectionState::Selected ||
+                    it->second == SelectionState::Dragging ||
+                    it->second == SelectionState::Hover) {
+                    referencesContext = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Selection-first visualization: if nothing in context references this constraint,
+    // do not render marker unless it is explicitly selected/hovered.
+    if (!isSelected && !isHovered && !referencesContext) {
+        return false;
+    }
+
+    // Keep historical midpoint-clutter reduction, except when actively focused.
+    const bool midpointType = data.type == ConstraintType::Midpoint ||
+                              data.type == ConstraintType::Horizontal ||
+                              data.type == ConstraintType::Vertical ||
+                              data.type == ConstraintType::Angle ||
+                              data.type == ConstraintType::Parallel ||
+                              data.type == ConstraintType::Perpendicular ||
+                              data.type == ConstraintType::Equal;
+    if (midpointType && !isSelected && !isHovered) {
+        return false;
+    }
+
+    return true;
 }
 
 Vec2d SketchRenderer::calculateConstraintIconPosition(

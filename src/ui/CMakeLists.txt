@@ -18,6 +18,7 @@ add_library(onecad_ui STATIC
     tools/FilletChamferTool.cpp
     tools/ShellTool.cpp
     sketch/ConstraintPanel.cpp
+    sketch/ConstraintApplicability.cpp
     sketch/DimensionEditor.cpp
     sketch/SketchModePanel.cpp
     selection/DeepSelectPopup.cpp

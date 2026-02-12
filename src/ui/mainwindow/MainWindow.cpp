@@ -20,9 +20,11 @@
 #include "../navigator/ModelNavigator.h"
 #include "../toolbar/ContextToolbar.h"
 #include "../sketch/ConstraintPanel.h"
+#include "../sketch/ConstraintApplicability.h"
 #include "../sketch/SketchModePanel.h"
 #include "../../core/sketch/SketchRenderer.h"
 #include "../../core/sketch/SketchTypes.h"
+#include "../../app/selection/SelectionTypes.h"
 #include <QMenuBar>
 #include <QStatusBar>
 #include <QLabel>
@@ -45,6 +47,7 @@
 #include <QShortcut>
 #include <QDebug>
 #include <algorithm>
+#include <unordered_set>
 
 #include "../../io/OneCADFileIO.h"
 #include "../../io/step/StepImporter.h"
@@ -959,11 +962,17 @@ void MainWindow::setupViewport() {
             this, &MainWindow::onPlaneSelectionCancelled);
     connect(m_viewport, &Viewport::sketchUpdated,
             this, &MainWindow::onSketchUpdated);
+    connect(m_viewport, &Viewport::sketchSelectionChanged,
+            this, &MainWindow::onSketchSelectionChanged);
     connect(m_viewport, &Viewport::openSketchForEditRequested,
             this, &MainWindow::openSketchForEdit);
     connect(m_viewport, &Viewport::statusMessageRequested, this, [this](const QString& message) {
         statusBar()->showMessage(message, 4000);
     });
+    connect(m_viewport, &Viewport::constraintDeleteRequested,
+            this, &MainWindow::onConstraintPanelDeleteRequested);
+    connect(m_viewport, &Viewport::constraintSuppressRequested,
+            this, &MainWindow::onConstraintPanelSuppressRequested);
 
     connect(m_navigator, &ModelNavigator::sketchSelected, this, [this](const QString& id) {
         if (m_viewport) {
@@ -985,6 +994,14 @@ void MainWindow::setupViewport() {
     // Create constraint panel (hidden initially)
     m_constraintPanel = new ConstraintPanel(m_viewport);
     m_constraintPanel->setVisible(false);
+    connect(m_constraintPanel, &ConstraintPanel::constraintSelected,
+            this, &MainWindow::onConstraintPanelConstraintSelected);
+    connect(m_constraintPanel, &ConstraintPanel::constraintDeleteRequested,
+            this, &MainWindow::onConstraintPanelDeleteRequested);
+    connect(m_constraintPanel, &ConstraintPanel::constraintSuppressRequested,
+            this, &MainWindow::onConstraintPanelSuppressRequested);
+    connect(m_constraintPanel, &ConstraintPanel::restoreSuppressedRequested,
+            this, &MainWindow::onConstraintPanelRestoreSuppressedRequested);
 
     // Create sketch mode panel (hidden initially)
     m_sketchModePanel = new SketchModePanel(m_viewport);
@@ -1224,28 +1241,23 @@ void MainWindow::onSketchModeChanged(bool inSketchMode) {
 
         updateDofStatus(activeSketch);
 
-        // Show constraint panel
         if (m_constraintPanel) {
             m_constraintPanel->setSketch(activeSketch);
             m_constraintPanel->setVisible(true);
             positionConstraintPanel();
         }
 
-        // Show sketch mode panel
         if (m_sketchModePanel) {
             m_sketchModePanel->setSketch(activeSketch);
-            m_sketchModePanel->setVisible(true);
-            positionSketchModePanel();
         }
+        updateSketchConstraintUi();
     } else {
         updateDofStatus(nullptr);
 
-        // Hide constraint panel
         if (m_constraintPanel) {
             m_constraintPanel->setVisible(false);
         }
 
-        // Hide sketch mode panel
         if (m_sketchModePanel) {
             m_sketchModePanel->setVisible(false);
         }
@@ -1695,11 +1707,121 @@ void MainWindow::onSketchUpdated() {
     if (!sketch) return;
 
     updateDofStatus(sketch);
+    updateSketchConstraintUi();
+}
 
-    // Refresh constraint panel
-    if (m_constraintPanel) {
-        m_constraintPanel->refresh();
+void MainWindow::onSketchSelectionChanged() {
+    updateSketchConstraintUi();
+}
+
+void MainWindow::updateSketchConstraintUi() {
+    if (!m_viewport || !m_viewport->isInSketchMode()) {
+        return;
     }
+
+    core::sketch::Sketch* sketch = m_viewport->activeSketch();
+    if (!sketch) {
+        return;
+    }
+
+    const auto selection = m_viewport->sketchSelection();
+    const auto applicability = evaluateConstraintApplicability(sketch, selection);
+
+    std::vector<std::string> selectedEntityIds;
+    selectedEntityIds.reserve(selection.size());
+    QString selectedConstraintId;
+    std::unordered_set<std::string> seenEntityIds;
+    for (const auto& item : selection) {
+        if (item.kind == app::selection::SelectionKind::SketchConstraint && selectedConstraintId.isEmpty()) {
+            selectedConstraintId = QString::fromStdString(item.id.elementId);
+            continue;
+        }
+        if (item.kind == app::selection::SelectionKind::SketchPoint ||
+            item.kind == app::selection::SelectionKind::SketchEdge) {
+            if (!item.id.elementId.empty() && seenEntityIds.insert(item.id.elementId).second) {
+                selectedEntityIds.push_back(item.id.elementId);
+            }
+        }
+    }
+
+    if (m_constraintPanel) {
+        const int conflicts = static_cast<int>(sketch->getConflictingConstraints().size());
+        const int suppressedCount = m_viewport->suppressedConstraintMarkerCount();
+        m_constraintPanel->setSketch(sketch);
+        m_constraintPanel->setContext(selectedEntityIds,
+                                      selectedConstraintId,
+                                      sketch->getDegreesOfFreedom(),
+                                      conflicts,
+                                      suppressedCount);
+        m_constraintPanel->setVisible(true);
+        positionConstraintPanel();
+    }
+
+    if (m_sketchModePanel) {
+        m_sketchModePanel->setSketch(sketch);
+        m_sketchModePanel->setApplicableConstraints(applicability.applicableConstraints);
+        const bool showTools = applicability.hasApplicableConstraints();
+        m_sketchModePanel->setVisible(showTools);
+        if (showTools) {
+            positionSketchModePanel();
+        } else if (m_toolStatus) {
+            m_toolStatus->setText(tr("Select geometry to constrain"));
+        }
+    }
+}
+
+void MainWindow::onConstraintPanelConstraintSelected(const QString& constraintId) {
+    if (!m_viewport || !m_viewport->isInSketchMode() || constraintId.isEmpty()) {
+        return;
+    }
+    m_viewport->selectSketchConstraint(constraintId);
+}
+
+void MainWindow::onConstraintPanelDeleteRequested(const QString& constraintId) {
+    if (!m_viewport || !m_viewport->isInSketchMode() || constraintId.isEmpty()) {
+        return;
+    }
+
+    core::sketch::Sketch* sketch = m_viewport->activeSketch();
+    auto* renderer = m_viewport->sketchRenderer();
+    if (!sketch || !renderer) {
+        return;
+    }
+
+    const bool removed = sketch->removeConstraint(constraintId.toStdString());
+    if (!removed) {
+        m_toolStatus->setText(tr("Constraint could not be removed"));
+        return;
+    }
+
+    m_viewport->unsuppressConstraintMarker(constraintId);
+
+    auto result = sketch->solve();
+    renderer->updateGeometry();
+    renderer->updateConstraints();
+    m_viewport->notifySketchUpdated();
+    m_viewport->update();
+    m_toolStatus->setText(result.success ? tr("Constraint removed")
+                                         : tr("Constraint removed - solver failed"));
+}
+
+void MainWindow::onConstraintPanelSuppressRequested(const QString& constraintId) {
+    if (!m_viewport || !m_viewport->isInSketchMode() || constraintId.isEmpty()) {
+        return;
+    }
+
+    m_viewport->suppressConstraintMarker(constraintId);
+    m_toolStatus->setText(tr("Constraint marker suppressed"));
+    updateSketchConstraintUi();
+}
+
+void MainWindow::onConstraintPanelRestoreSuppressedRequested() {
+    if (!m_viewport || !m_viewport->isInSketchMode()) {
+        return;
+    }
+    m_viewport->clearSuppressedConstraintMarkers();
+    m_toolStatus->setText(tr("Constraint markers restored"));
+    updateSketchConstraintUi();
 }
 
 void MainWindow::onConstraintRequested(core::sketch::ConstraintType constraintType) {
@@ -1867,6 +1989,8 @@ void MainWindow::onConstraintRequested(core::sketch::ConstraintType constraintTy
             m_toolStatus->setText(tr("Cannot apply constraint to selection"));
         }
     }
+
+    updateSketchConstraintUi();
 }
 
 void MainWindow::onDeleteItem(const QString& itemId) {

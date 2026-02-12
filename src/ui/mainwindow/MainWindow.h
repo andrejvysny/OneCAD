@@ -5,6 +5,7 @@
 #include <QStringList>
 #include <memory>
 #include <string>
+#include <vector>
 
 class QLabel;
 class QSlider;
@@ -72,7 +73,12 @@ private slots:
     void onImport();
     void onMousePositionChanged(double x, double y, double z);
     void onSketchUpdated();
+    void onSketchSelectionChanged();
     void onConstraintRequested(core::sketch::ConstraintType constraintType);
+    void onConstraintPanelConstraintSelected(const QString& constraintId);
+    void onConstraintPanelDeleteRequested(const QString& constraintId);
+    void onConstraintPanelSuppressRequested(const QString& constraintId);
+    void onConstraintPanelRestoreSuppressedRequested();
 
     // Navigator item actions
     void onDeleteItem(const QString& itemId);
@@ -89,6 +95,7 @@ private:
     void connectDocumentSignals();
     void updateDofStatus(core::sketch::Sketch* sketch);
     void applyDofStatusStyle();
+    void updateSketchConstraintUi();
     void positionToolbarOverlay();
     void setupHomeOverlayButton();
     void setupNavigatorOverlayButton();

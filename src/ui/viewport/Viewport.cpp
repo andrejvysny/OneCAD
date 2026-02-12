@@ -31,6 +31,7 @@
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QGestureEvent>
+#include <QMenu>
 #include <QPinchGesture>
 #include <QPanGesture>
 #include <QNativeGestureEvent>
@@ -985,6 +986,33 @@ void Viewport::mousePressEvent(QMouseEvent* event) {
         m_pendingShellFaceToggle = false;
     }
 
+    if (m_inSketchMode && event->button() == Qt::RightButton &&
+        m_selectionManager && (!m_toolManager || !m_toolManager->hasActiveTool())) {
+        auto pickResult = buildSketchPickResult(event->pos());
+        auto topCandidate = m_selectionManager->topCandidate(pickResult);
+        if (topCandidate.has_value() &&
+            topCandidate->kind == app::selection::SelectionKind::SketchConstraint &&
+            !topCandidate->id.elementId.empty()) {
+            const QString constraintId = QString::fromStdString(topCandidate->id.elementId);
+            selectSketchConstraint(constraintId);
+
+            QMenu menu(this);
+            QAction* inspectAction = menu.addAction(tr("Inspect"));
+            QAction* deleteAction = menu.addAction(tr("Delete"));
+            QAction* suppressAction = menu.addAction(tr("Suppress marker"));
+            QAction* selectedAction = menu.exec(mapToGlobal(event->pos() + QPoint(8, 8)));
+            if (selectedAction == deleteAction) {
+                emit constraintDeleteRequested(constraintId);
+            } else if (selectedAction == suppressAction) {
+                emit constraintSuppressRequested(constraintId);
+            } else if (selectedAction == inspectAction) {
+                emit sketchSelectionChanged();
+            }
+            event->accept();
+            return;
+        }
+    }
+
     // Move Sketch mode: left press starts sketch move gesture
     if (m_inSketchMode && m_moveSketchModeActive && event->button() == Qt::LeftButton &&
         m_activeSketch && (!m_toolManager || !m_toolManager->hasActiveTool())) {
@@ -1005,6 +1033,7 @@ void Viewport::mousePressEvent(QMouseEvent* event) {
         modifiers.toggle = event->modifiers() & (Qt::MetaModifier | Qt::ControlModifier);
 
         auto pickResult = buildSketchPickResult(event->pos());
+        auto topCandidate = m_selectionManager->topCandidate(pickResult);
 
         std::optional<app::selection::SelectionItem> bestPointForDrag;
         for (const auto& hit : pickResult.hits) {
@@ -1017,7 +1046,9 @@ void Viewport::mousePressEvent(QMouseEvent* event) {
         }
 
         // Point drag must win over deep-select ambiguity at line endpoints.
-        if (!m_moveSketchModeActive && bestPointForDrag.has_value()) {
+        const bool topIsConstraint = topCandidate.has_value() &&
+            topCandidate->kind == app::selection::SelectionKind::SketchConstraint;
+        if (!m_moveSketchModeActive && bestPointForDrag.has_value() && !topIsConstraint) {
             m_selectionManager->applySelectionCandidate(*bestPointForDrag, modifiers, event->pos());
             m_sketchInteractionState = SketchInteractionState::PendingPointDrag;
             m_sketchPressPos = event->pos();
@@ -1048,7 +1079,7 @@ void Viewport::mousePressEvent(QMouseEvent* event) {
 
         // Candidate for point drag, region move, or sketch move
         if (!m_moveSketchModeActive) {
-            auto top = m_selectionManager->topCandidate(pickResult);
+            auto top = topCandidate;
             bool hitInSelectedRegion = false;
             bool hitSelectedRegionFill = false;
             if (!m_selectedRegionId.empty() && top.has_value()) {
@@ -2154,6 +2185,8 @@ void Viewport::enterSketchMode(sketch::Sketch* sketch) {
         m_sketchRenderer->setSketch(sketch);
         m_sketchRenderer->updateGeometry();
         updateSketchRenderingState();
+        m_suppressedConstraintMarkers.clear();
+        syncSuppressedConstraintMarkers();
     }
 
     // Initialize tool manager
@@ -2208,6 +2241,8 @@ void Viewport::exitSketchMode() {
     // Rebind renderer to reference sketch (if any)
     if (m_sketchRenderer) {
         m_sketchRenderer->setSketch(m_referenceSketch);
+        m_suppressedConstraintMarkers.clear();
+        syncSuppressedConstraintMarkers();
     }
 
     // Mark document sketches dirty for rebuild
@@ -2620,6 +2655,7 @@ void Viewport::updateSketchSelectionFromManager() {
 
     m_sketchRenderer->clearSelection();
     m_sketchRenderer->clearRegionSelection();
+    m_sketchRenderer->setSelectedConstraint("");
 
     const bool hasSketchContext = m_inSketchMode || (m_referenceSketch != nullptr);
     if (!hasSketchContext || !m_selectionManager) {
@@ -2627,11 +2663,23 @@ void Viewport::updateSketchSelectionFromManager() {
         return;
     }
 
+    sketch::ConstraintID selectedConstraintId;
     for (const auto& item : m_selectionManager->selection()) {
         if (item.kind == app::selection::SelectionKind::SketchRegion) {
             m_sketchRenderer->toggleRegionSelection(item.id.elementId);
             continue;
         }
+
+        if (item.kind == app::selection::SelectionKind::SketchConstraint && m_inSketchMode && m_activeSketch) {
+            selectedConstraintId = item.id.elementId;
+            if (auto* constraint = m_activeSketch->getConstraint(selectedConstraintId)) {
+                for (const auto& entityId : constraint->referencedEntities()) {
+                    m_sketchRenderer->setEntitySelection(entityId, sketch::SelectionState::Selected);
+                }
+            }
+            continue;
+        }
+
         if (m_inSketchMode &&
             (item.kind == app::selection::SelectionKind::SketchPoint ||
              item.kind == app::selection::SelectionKind::SketchEdge)) {
@@ -2640,7 +2688,12 @@ void Viewport::updateSketchSelectionFromManager() {
         }
     }
 
+    if (m_inSketchMode) {
+        m_sketchRenderer->setSelectedConstraint(selectedConstraintId);
+    }
+
     update();
+    emit sketchSelectionChanged();
 }
 
 void Viewport::handleModelSelectionChanged() {
@@ -2752,6 +2805,7 @@ void Viewport::updateSketchHoverFromManager() {
 
     m_sketchRenderer->setHoverEntity("");
     m_sketchRenderer->clearRegionHover();
+    m_sketchRenderer->setHoverConstraint("");
 
     const bool hasSketchContext = m_inSketchMode || (m_referenceSketch != nullptr);
     if (!hasSketchContext || !m_selectionManager) {
@@ -2775,11 +2829,29 @@ void Viewport::updateSketchHoverFromManager() {
                 m_sketchRenderer->setHoverEntity(hover->id.elementId);
             }
             break;
+        case app::selection::SelectionKind::SketchConstraint:
+            if (m_inSketchMode) {
+                m_sketchRenderer->setHoverConstraint(hover->id.elementId);
+            }
+            break;
         default:
             break;
     }
 
     update();
+}
+
+void Viewport::syncSuppressedConstraintMarkers() {
+    if (!m_sketchRenderer) {
+        return;
+    }
+
+    std::vector<sketch::ConstraintID> ids;
+    ids.reserve(m_suppressedConstraintMarkers.size());
+    for (const auto& id : m_suppressedConstraintMarkers) {
+        ids.push_back(id);
+    }
+    m_sketchRenderer->setSuppressedConstraints(ids);
 }
 
 app::selection::PickResult Viewport::buildSketchPickResult(const QPoint& screenPos) const {
@@ -3585,6 +3657,50 @@ void Viewport::setReferenceSketch(const QString& sketchId) {
     update();
 }
 
+void Viewport::selectSketchConstraint(const QString& constraintId) {
+    if (!m_selectionManager || !m_inSketchMode || !m_activeSketch || constraintId.isEmpty()) {
+        return;
+    }
+
+    app::selection::SelectionItem item;
+    item.kind = app::selection::SelectionKind::SketchConstraint;
+    item.id = {resolveActiveSketchId(), constraintId.toStdString()};
+    item.priority = -1;
+    item.screenDistance = 0.0;
+    m_selectionManager->replaceSelection({item});
+}
+
+void Viewport::suppressConstraintMarker(const QString& constraintId) {
+    if (!m_inSketchMode || constraintId.isEmpty()) {
+        return;
+    }
+
+    if (m_suppressedConstraintMarkers.insert(constraintId.toStdString()).second) {
+        syncSuppressedConstraintMarkers();
+        update();
+    }
+}
+
+void Viewport::unsuppressConstraintMarker(const QString& constraintId) {
+    if (constraintId.isEmpty()) {
+        return;
+    }
+
+    if (m_suppressedConstraintMarkers.erase(constraintId.toStdString()) > 0) {
+        syncSuppressedConstraintMarkers();
+        update();
+    }
+}
+
+void Viewport::clearSuppressedConstraintMarkers() {
+    if (m_suppressedConstraintMarkers.empty()) {
+        return;
+    }
+    m_suppressedConstraintMarkers.clear();
+    syncSuppressedConstraintMarkers();
+    update();
+}
+
 void Viewport::updateModelSelectionFilter() {
     if (!m_selectionManager || m_inSketchMode) {
         return;
@@ -3617,6 +3733,27 @@ std::vector<app::selection::SelectionItem> Viewport::modelSelection() const {
         return {};
     }
     return m_selectionManager->selection();
+}
+
+std::vector<app::selection::SelectionItem> Viewport::sketchSelection() const {
+    if (!m_selectionManager) {
+        return {};
+    }
+
+    std::vector<app::selection::SelectionItem> result;
+    for (const auto& item : m_selectionManager->selection()) {
+        if (item.kind == app::selection::SelectionKind::SketchPoint ||
+            item.kind == app::selection::SelectionKind::SketchEdge ||
+            item.kind == app::selection::SelectionKind::SketchRegion ||
+            item.kind == app::selection::SelectionKind::SketchConstraint) {
+            result.push_back(item);
+        }
+    }
+    return result;
+}
+
+int Viewport::suppressedConstraintMarkerCount() const {
+    return static_cast<int>(m_suppressedConstraintMarkers.size());
 }
 
 void Viewport::setModelPreviewMeshes(const std::vector<render::SceneMeshStore::Mesh>& meshes) {

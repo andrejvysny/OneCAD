@@ -7,6 +7,7 @@
 #define ONECAD_UI_SKETCH_SKETCHMODEPANEL_H
 
 #include <QWidget>
+#include <unordered_set>
 #include <vector>
 
 class QPushButton;
@@ -37,6 +38,12 @@ public:
      * @brief Set the sketch to work with
      */
     void setSketch(core::sketch::Sketch* sketch);
+
+    /**
+     * @brief Set which constraint buttons are currently applicable for selection.
+     */
+    void setApplicableConstraints(
+        const std::unordered_set<core::sketch::ConstraintType>& applicableConstraints);
 
     /**
      * @brief Update button states based on current selection
@@ -70,6 +77,7 @@ private:
     core::sketch::Sketch* m_sketch = nullptr;
     QVBoxLayout* m_layout = nullptr;
     QLabel* m_titleLabel = nullptr;
+    std::unordered_set<core::sketch::ConstraintType> m_applicableConstraints;
 
     std::vector<ConstraintButton> m_constraintButtons;
 };
