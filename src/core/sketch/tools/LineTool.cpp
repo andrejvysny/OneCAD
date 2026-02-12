@@ -6,11 +6,16 @@
 #include "../SketchLine.h"
 #include "../SketchPoint.h"
 
+#include <QLoggingCategory>
+#include <QString>
+
 #include <cstdio>
 #include <string>
 #include <cmath>
 
 namespace onecad::core::sketch::tools {
+
+Q_LOGGING_CATEGORY(logLineTool, "onecad.core.sketchtool.line")
 
 LineTool::LineTool() = default;
 
@@ -26,6 +31,10 @@ std::optional<Vec2d> LineTool::getReferencePoint() const {
 }
 
 void LineTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
+    qCDebug(logLineTool) << "onMousePress" << "state=" << static_cast<int>(state_)
+                         << "pos=" << pos.x << pos.y << "button=" << static_cast<int>(button)
+                         << "snapType=" << static_cast<int>(snapResult_.type)
+                         << "snapped=" << snapResult_.snapped;
     if (button == Qt::RightButton) {
         // Right-click finishes polyline
         cancel();
@@ -60,6 +69,7 @@ void LineTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
         double length = std::sqrt(dx * dx + dy * dy);
 
         if (length < constants::MIN_GEOMETRY_SIZE) {
+            qCDebug(logLineTool) << "reject:too-short" << "length=" << length;
             lastRejectReason_ = RejectReason::TooShort;
             return;
         }
@@ -77,6 +87,9 @@ void LineTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
         }
 
         if (startId.empty() || endId.empty()) {
+            qCWarning(logLineTool) << "reject:invalid-endpoints"
+                                  << "startId=" << QString::fromStdString(startId)
+                                  << "endId=" << QString::fromStdString(endId);
             lastRejectReason_ = RejectReason::InvalidEndpoints;
             return;
         }
@@ -89,6 +102,7 @@ void LineTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
                 endId = sketch_->addPoint(pos.x, pos.y);
             }
             if (endId.empty() || startId == endId) {
+                qCDebug(logLineTool) << "reject:same-endpoint-after-guide";
                 lastRejectReason_ = RejectReason::SameEndpoint;
                 return;
             }
@@ -100,6 +114,11 @@ void LineTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
         }
 
         EntityID lineId = sketch_->addLine(startId, endId);
+
+        qCDebug(logLineTool) << "line-create-attempt"
+                             << "startId=" << QString::fromStdString(startId)
+                             << "endId=" << QString::fromStdString(endId)
+                             << "lineId=" << QString::fromStdString(lineId);
 
         if (!lineId.empty()) {
             lineCreated_ = true;
@@ -131,6 +150,10 @@ void LineTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
 
                     // Filter and apply high-confidence constraints
                     auto toApply = autoConstrainer_->filterForAutoApply(constraints);
+                    qCDebug(logLineTool) << "auto-constraints"
+                                         << "inferred=" << constraints.size()
+                                         << "toApply=" << toApply.size()
+                                         << "lineId=" << QString::fromStdString(lineId);
                     applyInferredConstraints(toApply, lineId);
                 }
 
@@ -154,6 +177,10 @@ void LineTool::onMouseMove(const Vec2d& pos) {
 }
 
 void LineTool::updateInferredConstraints() {
+    qCDebug(logLineTool) << "updateInferredConstraints"
+                         << "state=" << static_cast<int>(state_)
+                         << "hasAutoConstrainer=" << (autoConstrainer_ != nullptr)
+                         << "hasSketch=" << (sketch_ != nullptr);
     inferredConstraints_.clear();
 
     if (state_ != State::FirstClick || !autoConstrainer_ || !sketch_) {
@@ -170,16 +197,26 @@ void LineTool::updateInferredConstraints() {
     // Use empty lineId since line doesn't exist yet
     inferredConstraints_ = autoConstrainer_->inferLineConstraints(
         startPoint_, currentPoint_, {}, *sketch_, context);
+    qCDebug(logLineTool) << "updateInferredConstraints:done"
+                         << "count=" << inferredConstraints_.size();
 }
 
 void LineTool::applyInferredConstraints(const std::vector<InferredConstraint>& constraints,
                                          EntityID lineId) {
+    qCDebug(logLineTool) << "applyInferredConstraints"
+                         << "lineId=" << QString::fromStdString(lineId)
+                         << "count=" << constraints.size();
     if (!sketch_ || lineId.empty()) return;
 
     auto* line = sketch_->getEntityAs<SketchLine>(lineId);
     if (!line) return;
 
     for (const auto& constraint : constraints) {
+        qCDebug(logLineTool) << "applyInferredConstraints:item"
+                             << "type=" << static_cast<int>(constraint.type)
+                             << "entity1=" << QString::fromStdString(constraint.entity1)
+                             << "entity2=" << QString::fromStdString(constraint.entity2.value_or(std::string{}))
+                             << "confidence=" << constraint.confidence;
         switch (constraint.type) {
             case ConstraintType::Horizontal:
                 sketch_->addHorizontal(lineId);

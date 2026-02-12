@@ -10,11 +10,15 @@
 #include "SketchArc.h"
 #include "SketchCircle.h"
 #include "SketchEllipse.h"
+#include <QLoggingCategory>
+#include <QString>
 #include <algorithm>
 #include <cmath>
 #include <limits>
 
 namespace onecad::core::sketch {
+
+Q_LOGGING_CATEGORY(logSnapManager, "onecad.core.snap")
 
 namespace {
 // Helper to convert gp_Pnt2d to Vec2d
@@ -89,9 +93,14 @@ SnapResult SnapManager::findBestSnap(
     const std::unordered_set<EntityID>& excludeEntities,
     std::optional<Vec2d> referencePoint) const
 {
+    qCDebug(logSnapManager) << "findBestSnap:start"
+                            << "cursor=" << cursorPos.x << cursorPos.y
+                            << "excludeCount=" << excludeEntities.size()
+                            << "referencePointSet=" << referencePoint.has_value();
     clearAmbiguity();
 
     if (!enabled_) {
+        qCDebug(logSnapManager) << "findBestSnap:disabled";
         return SnapResult{};
     }
 
@@ -101,6 +110,7 @@ SnapResult SnapManager::findBestSnap(
 
     auto snaps = findAllSnaps(cursorPos, sketch, excludeEntities, referencePoint);
     if (snaps.empty()) {
+        qCDebug(logSnapManager) << "findBestSnap:no-candidates";
         return SnapResult{};
     }
 
@@ -122,9 +132,16 @@ SnapResult SnapManager::findBestSnap(
         ambiguityState_.candidates = coLocated;
         ambiguityState_.active = true;
         ambiguityState_.selectedIndex = 0;
+        qCDebug(logSnapManager) << "findBestSnap:ambiguity-detected"
+                                << "candidateCount=" << coLocated.size()
+                                << "bestType=" << static_cast<int>(best.type);
     }
 
     if (best.type != SnapType::Vertex) {
+        qCDebug(logSnapManager) << "findBestSnap:resolved"
+                                << "type=" << static_cast<int>(best.type)
+                                << "distance=" << best.distance
+                                << "entity=" << QString::fromStdString(best.entityId);
         return best;
     }
 
@@ -170,6 +187,11 @@ SnapResult SnapManager::findBestSnap(
         }
     }
 
+    qCDebug(logSnapManager) << "findBestSnap:resolved-vertex"
+                            << "distance=" << bestVertex->distance
+                            << "pointId=" << QString::fromStdString(bestVertex->pointId)
+                            << "entityId=" << QString::fromStdString(bestVertex->entityId);
+
     return *bestVertex;
 }
 
@@ -180,8 +202,14 @@ std::vector<SnapResult> SnapManager::findAllSnaps(
     std::optional<Vec2d> referencePoint) const
 {
     if (!enabled_) {
+        qCDebug(logSnapManager) << "findAllSnaps:disabled";
         return {};
     }
+
+    qCDebug(logSnapManager) << "findAllSnaps:start"
+                            << "cursor=" << cursorPos.x << cursorPos.y
+                            << "snapRadius=" << snapRadius_
+                            << "spatialHashEnabled=" << spatialHashEnabled_;
 
     std::unordered_set<EntityID> candidateSet;
     const std::unordered_set<EntityID>* candidateFilter = nullptr;
@@ -302,6 +330,8 @@ std::vector<SnapResult> SnapManager::findAllSnaps(
         findExternalSnaps(cursorPos, radiusSq, results);
     }
 
+    qCDebug(logSnapManager) << "findAllSnaps:done"
+                            << "candidateCount=" << results.size();
     return results;
 }
 

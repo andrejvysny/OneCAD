@@ -9,11 +9,15 @@
 #include "SketchLine.h"
 #include "SketchArc.h"
 #include "SketchCircle.h"
+#include <QLoggingCategory>
+#include <QString>
 #include <cmath>
 #include <algorithm>
 #include <limits>
 
 namespace onecad::core::sketch {
+
+Q_LOGGING_CATEGORY(logAutoConstrainer, "onecad.core.autoconstraint")
 
 namespace {
 constexpr double PI = 3.14159265358979323846;
@@ -71,8 +75,13 @@ std::vector<InferredConstraint> AutoConstrainer::inferConstraints(
     const DrawingContext& context) const
 {
     if (!config_.enabled) {
+        qCDebug(logAutoConstrainer) << "inferConstraints:disabled";
         return {};
     }
+
+    qCDebug(logAutoConstrainer) << "inferConstraints:start"
+                                << "point=" << point.x << point.y
+                                << "activeEntity=" << QString::fromStdString(context.activeEntity);
 
     std::vector<InferredConstraint> results;
 
@@ -83,6 +92,7 @@ std::vector<InferredConstraint> AutoConstrainer::inferConstraints(
         }
     }
 
+    qCDebug(logAutoConstrainer) << "inferConstraints:done" << "count=" << results.size();
     return results;
 }
 
@@ -94,12 +104,24 @@ std::vector<InferredConstraint> AutoConstrainer::inferLineConstraints(
     const DrawingContext& context) const
 {
     if (!config_.enabled) {
+        qCDebug(logAutoConstrainer) << "inferLineConstraints:disabled";
         return {};
     }
 
     std::vector<InferredConstraint> results;
     double length = distance(startPoint, endPoint);
+    qCDebug(logAutoConstrainer) << "inferLineConstraints:start"
+                                << "lineId=" << QString::fromStdString(lineId)
+                                << "start=" << startPoint.x << startPoint.y
+                                << "end=" << endPoint.x << endPoint.y
+                                << "length=" << length
+                                << "polylineMode=" << context.isPolylineMode
+                                << "previousEntity="
+                                << (context.previousEntity
+                                        ? QString::fromStdString(*context.previousEntity)
+                                        : QStringLiteral("<none>"));
     if (length < constants::MIN_GEOMETRY_SIZE) {
+        qCDebug(logAutoConstrainer) << "inferLineConstraints:skip-short" << length;
         return results;
     }
 
@@ -141,6 +163,7 @@ std::vector<InferredConstraint> AutoConstrainer::inferLineConstraints(
         }
     }
 
+    qCDebug(logAutoConstrainer) << "inferLineConstraints:done" << "count=" << results.size();
     return results;
 }
 
@@ -153,8 +176,14 @@ std::vector<InferredConstraint> AutoConstrainer::inferCircleConstraints(
 {
     (void)context;
     if (!config_.enabled) {
+        qCDebug(logAutoConstrainer) << "inferCircleConstraints:disabled";
         return {};
     }
+
+    qCDebug(logAutoConstrainer) << "inferCircleConstraints:start"
+                                << "circleId=" << QString::fromStdString(circleId)
+                                << "center=" << center.x << center.y
+                                << "radius=" << radius;
 
     std::vector<InferredConstraint> results;
 
@@ -179,6 +208,7 @@ std::vector<InferredConstraint> AutoConstrainer::inferCircleConstraints(
         }
     }
 
+    qCDebug(logAutoConstrainer) << "inferCircleConstraints:done" << "count=" << results.size();
     return results;
 }
 
@@ -192,8 +222,16 @@ std::vector<InferredConstraint> AutoConstrainer::inferArcConstraints(
     const DrawingContext& context) const
 {
     if (!config_.enabled) {
+        qCDebug(logAutoConstrainer) << "inferArcConstraints:disabled";
         return {};
     }
+
+    qCDebug(logAutoConstrainer) << "inferArcConstraints:start"
+                                << "arcId=" << QString::fromStdString(arcId)
+                                << "center=" << center.x << center.y
+                                << "radius=" << radius
+                                << "startAngle=" << startAngle
+                                << "endAngle=" << endAngle;
 
     std::vector<InferredConstraint> results;
 
@@ -224,6 +262,7 @@ std::vector<InferredConstraint> AutoConstrainer::inferArcConstraints(
         }
     }
 
+    qCDebug(logAutoConstrainer) << "inferArcConstraints:done" << "count=" << results.size();
     return results;
 }
 

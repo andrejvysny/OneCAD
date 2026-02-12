@@ -28,10 +28,15 @@ init:
 
 run:
 	@$(CMAKE) --build $(BUILD_DIR)
-	@if [ -x "$(BUILD_DIR)/OneCAD" ]; then \
-		"$(BUILD_DIR)/OneCAD"; \
+	@APP_BIN="$(BUILD_DIR)/OneCAD"; \
+	if [ ! -x "$$APP_BIN" ]; then \
+		APP_BIN="$(BUILD_DIR)/OneCAD.app/Contents/MacOS/OneCAD"; \
+	fi; \
+	if [ "$${ONECAD_HEADLESS:-0}" = "1" ] || [ "$${CI:-0}" = "1" ] || [ "$${CODEX_CI:-0}" = "1" ]; then \
+		ONECAD_HEADLESS_SMOKE="$${ONECAD_HEADLESS_SMOKE:-1}" \
+		QT_QPA_PLATFORM="$${QT_QPA_PLATFORM:-offscreen}" "$$APP_BIN"; \
 	else \
-		"$(BUILD_DIR)/OneCAD.app/Contents/MacOS/OneCAD"; \
+		"$$APP_BIN"; \
 	fi
 
 test:

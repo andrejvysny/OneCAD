@@ -8,12 +8,17 @@
 
 #include <GCS.h>
 
+#include <QLoggingCategory>
+#include <QString>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <limits>
 
 namespace onecad::core::sketch {
+
+Q_LOGGING_CATEGORY(logConstraintSolver, "onecad.core.constraintsolver")
 
 namespace {
 
@@ -149,6 +154,10 @@ void ConstraintSolver::setConfig(const SolverConfig& config) {
 }
 
 void ConstraintSolver::clear() {
+    qCDebug(logConstraintSolver) << "clear"
+                                 << "entities(points,lines,arcs,circles)="
+                                 << pointsById_.size() << linesById_.size() << arcsById_.size() << circlesById_.size()
+                                 << "constraints=" << constraints_.size();
     entityToGcsId_.clear();
     constraintToGcsTag_.clear();
     gcsTagToConstraint_.clear();
@@ -223,11 +232,21 @@ void ConstraintSolver::addCircle(SketchCircle* circle) {
 
 bool ConstraintSolver::addConstraint(SketchConstraint* constraint) {
     if (!constraint || !gcsSystem_) {
+        qCWarning(logConstraintSolver) << "addConstraint: invalid input"
+                                      << "constraintNull=" << (constraint == nullptr)
+                                      << "gcsNull=" << (gcsSystem_ == nullptr);
         return false;
     }
 
+    qCDebug(logConstraintSolver) << "addConstraint:start"
+                                 << "constraintId=" << QString::fromStdString(constraint->id())
+                                 << "type=" << static_cast<int>(constraint->type());
+
     int tagId = nextConstraintTag_;
     if (!translateConstraint(constraint, tagId)) {
+        qCWarning(logConstraintSolver) << "addConstraint: translation failed"
+                                      << "constraintId=" << QString::fromStdString(constraint->id())
+                                      << "tagId=" << tagId;
         return false;
     }
 
@@ -236,6 +255,10 @@ bool ConstraintSolver::addConstraint(SketchConstraint* constraint) {
     gcsTagToConstraint_[tagId] = constraint->id();
     nextConstraintTag_++;
     gcsSystem_->invalidatedDiagnosis();
+    qCDebug(logConstraintSolver) << "addConstraint:done"
+                                 << "constraintId=" << QString::fromStdString(constraint->id())
+                                 << "tagId=" << tagId
+                                 << "totalConstraints=" << constraints_.size();
     return true;
 }
 
@@ -283,10 +306,20 @@ SolverResult ConstraintSolver::solve() {
     SolverResult result;
     auto start = std::chrono::steady_clock::now();
 
+    qCDebug(logConstraintSolver) << "solve:start"
+                                 << "points=" << pointsById_.size()
+                                 << "lines=" << linesById_.size()
+                                 << "arcs=" << arcsById_.size()
+                                 << "circles=" << circlesById_.size()
+                                 << "constraints=" << constraints_.size()
+                                 << "parameters=" << parameters_.size()
+                                 << "algorithm=" << static_cast<int>(config_.algorithm);
+
     if (!gcsSystem_) {
         result.success = false;
         result.status = SolverResult::Status::InternalError;
         result.errorMessage = "PlaneGCS system not available";
+        qCCritical(logConstraintSolver) << "solve:missing-gcs-system";
         return result;
     }
 
@@ -300,6 +333,7 @@ SolverResult ConstraintSolver::solve() {
 
     int status = gcsSystem_->solve(true, alg, false);
     if (status == GCS::Failed && config_.algorithm == SolverConfig::Algorithm::DogLeg) {
+        qCWarning(logConstraintSolver) << "solve:dogleg-failed-fallback-to-lm";
         status = gcsSystem_->solve(true, GCS::LevenbergMarquardt, false);
     }
 
@@ -359,6 +393,10 @@ SolverResult ConstraintSolver::solve() {
 
 SolverResult ConstraintSolver::solveWithDrag(EntityID pointId, const Vec2d& targetPos,
                                              const std::unordered_set<EntityID>& pointIdsToFix) {
+    qCDebug(logConstraintSolver) << "solveWithDrag:start"
+                                 << "pointId=" << QString::fromStdString(pointId)
+                                 << "target=" << targetPos.x << targetPos.y
+                                 << "fixedPoints=" << pointIdsToFix.size();
     auto it = pointsById_.find(pointId);
     if (it == pointsById_.end() || !it->second) {
         SolverResult result;

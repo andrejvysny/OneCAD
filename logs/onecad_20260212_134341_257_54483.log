@@ -1,0 +1,12 @@
+2026-02-12T13:43:41.258 [WARN] [tid=0x1f807e240] [default] [/Users/andrejvysny/andrejvysny/OneCAD/src/app/Logging.cpp:284] [static bool onecad::app::Logging::initialize(const QString &, bool)] Failed to create log directory: /Users/andrejvysny/Library/Application Support/OneCAD/OneCAD/logs
+2026-02-12T13:43:41.258 [INFO] [tid=0x1f807e240] [default] [/Users/andrejvysny/andrejvysny/OneCAD/src/app/Logging.cpp:287] [static bool onecad::app::Logging::initialize(const QString &, bool)] Logging initialized logFile= /Users/andrejvysny/andrejvysny/OneCAD/logs/onecad_20260212_134341_257_54483.log logDir= /Users/andrejvysny/andrejvysny/OneCAD/logs debugBuild= true debugLogsEnabled= true
+2026-02-12T13:43:41.261 [INFO] [tid=0x1f807e240] [default] [/Users/andrejvysny/andrejvysny/OneCAD/src/app/Logging.cpp:299] [static bool onecad::app::Logging::initialize(const QString &, bool)] Log retention applied days= 30 maxFiles= 30
+2026-02-12T13:43:41.261 [INFO] [tid=0x1f807e240] [onecad.main] [/Users/andrejvysny/andrejvysny/OneCAD/src/main.cpp:159] [int main(int, char **)] Application startup initiated argc= 1 debugBuild= true
+2026-02-12T13:43:41.262 [DEBUG] [tid=0x1f807e240] [onecad.main] [/Users/andrejvysny/andrejvysny/OneCAD/src/main.cpp:174] [int main(int, char **)] OpenGL default format configured version= 4 . 1 profile= QSurfaceFormat::CoreProfile samples= 4 depthBufferSize= 24 stencilBufferSize= 8
+2026-02-12T13:43:41.270 [INFO] [tid=0x1f807e240] [qt.qpa] [<unknown>] [<unknown>] Loading macOS (Cocoa) platform plugin for Qt 6.9.2, running on macOS 15.7.3
+
+  Component     SDK version   Deployment target  
+ ------------- ------------- -------------------
+  Qt 6.9.2       15.4.0          14.0.0
+  Application     26.0.0          15.0.0
+

@@ -1,5 +1,6 @@
 add_library(onecad_app STATIC
     Application.cpp
+    Logging.cpp
     commands/AddBodyCommand.cpp
     commands/AddOperationCommand.cpp
     commands/DeleteBodyCommand.cpp

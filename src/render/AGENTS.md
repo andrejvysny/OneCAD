@@ -35,3 +35,16 @@
 
 ## Testing
 - After render/tessellation changes: build with test_compile. Run a quick viewport manual check (grid fade, edge overlay, preview opacity) to catch GL state regressions.
+
+## Logging & Debugging
+- Render stack currently relies mostly on startup and Qt warnings plus caller-side logs; when adding render diagnostics, use categories `onecad.render.<component>` (for example `onecad.render.grid`, `onecad.render.body`).
+- Log initialization/state transitions, not per-frame draw spam:
+- good: renderer init success/failure, mesh cache invalidation, topology cache rebuild reason
+- avoid: per-frame triangle/edge counts every paint call
+- In CI/headless/offscreen runs (`ONECAD_HEADLESS=1` or `CODEX_CI=1`), `QOpenGLWidget` context warnings are expected and should not be treated as renderer logic regressions by default.
+- When debugging rendering regressions, correlate:
+- `onecad.main` startup markers and GL format setup
+- Qt warnings about OpenGL context support
+- any `onecad.render.*` state transitions you add
+- Suggested triage command:
+- `rg -n "onecad\\.(main|render\\.)|QOpenGLWidget|createPlatformOpenGLContext" logs/<latest>.log`

@@ -38,3 +38,16 @@
 ## Testing
 - For any ElementMap change: run proto_elementmap_rigorous.
 - For descriptor or ID logic changes: also run proto_custom_map and proto_tnaming.
+
+## Logging & Debugging
+- Kernel is header-only and not wired into app runtime yet, so most diagnostics come from prototype binaries.
+- For future kernel logs, use categories under `onecad.kernel.*` (recommended: `onecad.kernel.elementmap`).
+- Log only key transitions to keep traces actionable:
+- descriptor creation failures or exceptional OCCT states
+- ID remap decisions in `rebindBody()` and `update()`
+- deleted/generated element summaries (counts + representative IDs)
+- Keep deterministic behavior: logging must not alter ordering, hashing inputs, or quantization paths.
+- Prototype triage pattern:
+- run relevant prototype
+- capture stdout/stderr plus current `logs/<latest>.log`
+- correlate failures with recent ID-remap/descriptor logs before changing scoring/quantization constants

@@ -51,6 +51,34 @@ Run with `./tests/<target_name>` after building.
 - Sketch/solver changes: run `proto_sketch_geometry`, `proto_sketch_constraints`, `proto_sketch_solver`, `proto_loop_detector`, `proto_face_builder`.
 - UI build breakage: `test_compile`.
 
+## Logging & Debugging Workflow
+- Central log setup lives in `src/app/Logging.cpp`; it is initialized in `src/main.cpp` before `QApplication`.
+- Use categorized Qt logging only: `Q_LOGGING_CATEGORY` + `qCDebug/qCInfo/qCWarning/qCCritical`. Avoid uncategorized `qDebug/qInfo/qWarning/qCritical` in new code.
+- Category naming convention: `onecad.<module>[.<subsystem>]` (for example `onecad.core.snap`, `onecad.main`, `onecad.ui.events`).
+- Current log format includes timestamp, level, thread id, category, file:line, function, and message.
+- Log file directory fallback order:
+- `ONECAD_LOG_DIR` (if set)
+- `QStandardPaths::AppLocalDataLocation/logs`
+- `./logs` (repo-local fallback)
+- `QStandardPaths::TempLocation/onecad/logs`
+- If file logging cannot be opened, startup must continue with console logging; do not make logging failures fatal.
+- Retention policy is enforced at startup: keep logs up to 30 days, cap to 30 files.
+- Runtime toggles:
+- `ONECAD_LOG_DEBUG=1` enables debug logs in non-debug builds.
+- `ONECAD_LOG_DEBUG_CATEGORIES` (comma-separated) selects release debug categories; default is `onecad.main,onecad.app,onecad.io`.
+- `ONECAD_LOG_QT_DEBUG=1` enables Qt internal debug categories when needed.
+- `ONECAD_LOG_UI_EVENTS=1` enables verbose UI event tracing (`onecad.ui.events`) when debug logging is active.
+- `ONECAD_HEADLESS=1` (or `CI=1` / `CODEX_CI=1`) runs `make run` using offscreen Qt platform.
+- `ONECAD_HEADLESS_SMOKE=1` exits event loop immediately after startup for headless validation.
+- Standard validation loop after implementation:
+- run `make run` and confirm startup/shutdown markers in logs (no `FATAL`, no unexpected `ERROR`)
+- run relevant prototype binaries for touched modules
+- inspect the newest log file under `logs/` when behavior diverges
+- Useful local triage commands:
+- `ls -lt logs | head`
+- `tail -n 200 logs/<latest>.log`
+- `rg -n "\\[(WARN|ERROR|FATAL)\\]|onecad\\.(core|ui|render|kernel)" logs/<latest>.log`
+
 ## Key Documents
 - `docs/SPECIFICATION.md`: product requirements and architecture targets.
 - `docs/PHASES.md`: roadmap/status (aspirational; code is behind 3D claims).

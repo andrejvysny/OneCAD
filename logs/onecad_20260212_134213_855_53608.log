@@ -1,0 +1,143 @@
+2026-02-12T13:42:13.855 [WARN] [tid=0x1f807e240] [default] [/Users/andrejvysny/andrejvysny/OneCAD/src/app/Logging.cpp:281] [static bool onecad::app::Logging::initialize(const QString &, bool)] Failed to create log directory: /Users/andrejvysny/Library/Application Support/OneCAD/OneCAD/logs
+2026-02-12T13:42:13.857 [INFO] [tid=0x1f807e240] [default] [/Users/andrejvysny/andrejvysny/OneCAD/src/app/Logging.cpp:284] [static bool onecad::app::Logging::initialize(const QString &, bool)] Logging initialized logFile= /Users/andrejvysny/andrejvysny/OneCAD/logs/onecad_20260212_134213_855_53608.log logDir= /Users/andrejvysny/andrejvysny/OneCAD/logs debugBuild= true debugLogsEnabled= true
+2026-02-12T13:42:13.862 [INFO] [tid=0x1f807e240] [default] [/Users/andrejvysny/andrejvysny/OneCAD/src/app/Logging.cpp:296] [static bool onecad::app::Logging::initialize(const QString &, bool)] Log retention applied days= 30 maxFiles= 30
+2026-02-12T13:42:13.862 [INFO] [tid=0x1f807e240] [onecad.main] [/Users/andrejvysny/andrejvysny/OneCAD/src/main.cpp:159] [int main(int, char **)] Application startup initiated argc= 1 debugBuild= true
+2026-02-12T13:42:13.862 [DEBUG] [tid=0x1f807e240] [onecad.main] [/Users/andrejvysny/andrejvysny/OneCAD/src/main.cpp:174] [int main(int, char **)] OpenGL default format configured version= 4 . 1 profile= QSurfaceFormat::CoreProfile samples= 4 depthBufferSize= 24 stencilBufferSize= 8
+2026-02-12T13:42:13.863 [DEBUG] [tid=0x1f807e240] [qt.highdpi] [<unknown>] [<unknown>] Initializing high-DPI scaling
+2026-02-12T13:42:13.863 [DEBUG] [tid=0x1f807e240] [qt.highdpi] [<unknown>] [<unknown>] environment variable set: QT_SCREEN_SCALE_FACTORS ""
+2026-02-12T13:42:13.863 [DEBUG] [tid=0x1f807e240] [qt.highdpi] [<unknown>] [<unknown>] Initialization done, high-DPI scaling is active
+2026-02-12T13:42:13.863 [DEBUG] [tid=0x1f807e240] [qt.qpa.plugin] [<unknown>] [<unknown>] init_platform called with pluginNamesWithArguments "cocoa" platformPluginPath "" platformThemeName ""
+2026-02-12T13:42:13.864 [DEBUG] [tid=0x1f807e240] [qt.core.plugin.factoryloader] [<unknown>] [<unknown>] checking directory path "/opt/homebrew/share/qt/plugins/platforms" ...
+2026-02-12T13:42:13.865 [DEBUG] [tid=0x1f807e240] [qt.core.plugin.factoryloader] [<unknown>] [<unknown>] looking at "libqoffscreen.dylib"
+2026-02-12T13:42:13.866 [DEBUG] [tid=0x1f807e240] [qt.core.plugin.loader] [<unknown>] [<unknown>] Found metadata in lib /opt/homebrew/Cellar/qt/6.9.2/share/qt/plugins/platforms/libqoffscreen.dylib, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "offscreen"
+        ]
+    },
+    "archlevel": 0,
+    "className": "QOffscreenIntegrationPlugin",
+    "debug": false,
+    "version": 395520
+}
+
+
+2026-02-12T13:42:13.866 [DEBUG] [tid=0x1f807e240] [qt.core.plugin.factoryloader] [<unknown>] [<unknown>] Got keys from plugin meta data QList("offscreen")
+2026-02-12T13:42:13.866 [DEBUG] [tid=0x1f807e240] [qt.core.plugin.factoryloader] [<unknown>] [<unknown>] looking at "libqminimal.dylib"
+2026-02-12T13:42:13.866 [DEBUG] [tid=0x1f807e240] [qt.core.plugin.loader] [<unknown>] [<unknown>] Found metadata in lib /opt/homebrew/Cellar/qt/6.9.2/share/qt/plugins/platforms/libqminimal.dylib, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "minimal"
+        ]
+    },
+    "archlevel": 0,
+    "className": "QMinimalIntegrationPlugin",
+    "debug": false,
+    "version": 395520
+}
+
+
+2026-02-12T13:42:13.866 [DEBUG] [tid=0x1f807e240] [qt.core.plugin.factoryloader] [<unknown>] [<unknown>] Got keys from plugin meta data QList("minimal")
+2026-02-12T13:42:13.867 [DEBUG] [tid=0x1f807e240] [qt.core.plugin.factoryloader] [<unknown>] [<unknown>] looking at "libqcocoa.dylib"
+2026-02-12T13:42:13.867 [DEBUG] [tid=0x1f807e240] [qt.core.plugin.loader] [<unknown>] [<unknown>] Found metadata in lib /opt/homebrew/Cellar/qt/6.9.2/share/qt/plugins/platforms/libqcocoa.dylib, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "cocoa"
+        ]
+    },
+    "archlevel": 0,
+    "className": "QCocoaIntegrationPlugin",
+    "debug": false,
+    "version": 395520
+}
+
+
+2026-02-12T13:42:13.867 [DEBUG] [tid=0x1f807e240] [qt.core.plugin.factoryloader] [<unknown>] [<unknown>] Got keys from plugin meta data QList("cocoa")
+2026-02-12T13:42:13.867 [DEBUG] [tid=0x1f807e240] [qt.core.plugin.factoryloader] [<unknown>] [<unknown>] checking directory path "/Users/andrejvysny/andrejvysny/OneCAD/build/OneCAD.app/Contents/MacOS/platforms" ...
+2026-02-12T13:42:13.868 [DEBUG] [tid=0x1f807e240] [qt.qpa.plugin] [<unknown>] [<unknown>] Attempting to load Qt platform plugin "cocoa" with arguments QList()
+2026-02-12T13:42:13.885 [DEBUG] [tid=0x1f807e240] [qt.core.library] [<unknown>] [<unknown>] "/opt/homebrew/Cellar/qt/6.9.2/share/qt/plugins/platforms/libqcocoa.dylib" loaded library
+2026-02-12T13:42:13.885 [DEBUG] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] PasteBoard: Error creating pasteboard: com.apple.pasteboard.clipboard [-4960]
+2026-02-12T13:42:13.885 [DEBUG] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] PasteBoard: Error creating pasteboard: com.apple.pasteboard.find [-4960]
+2026-02-12T13:42:13.887 [INFO] [tid=0x1f807e240] [qt.qpa] [<unknown>] [<unknown>] Loading macOS (Cocoa) platform plugin for Qt 6.9.2, running on macOS 15.7.3
+
+  Component     SDK version   Deployment target  
+ ------------- ------------- -------------------
+  Qt 6.9.2       15.4.0          14.0.0
+  Application     26.0.0          15.0.0
+
+2026-02-12T13:42:13.950 [DEBUG] [tid=0x1f807e240] [qt.qpa.input.methods] [<unknown>] [<unknown>] Input source supports (
+    sk,
+    asa,
+    bem,
+    bez,
+    ceb,
+    cgg,
+    cs,
+    dav,
+    de,
+    dsb,
+    en,
+    et,
+    ga,
+    gsw,
+    guz,
+    "hi_Latn",
+    hsb,
+    hu,
+    ia,
+    id,
+    ie,
+    io,
+    jbo,
+    jmc,
+    kaj,
+    kde,
+    kln,
+    ksb,
+    kw,
+    lmo,
+    lt,
+    luo,
+    luy,
+    lv,
+    mfe,
+    mgh,
+    mi,
+    ms,
+    nd,
+    nr,
+    nyn,
+    om,
+    pl,
+    pqm,
+    rn,
+    rof,
+    rw,
+    rwk,
+    saq,
+    sbp,
+    sl,
+    sn,
+    so,
+    ss,
+    st,
+    su,
+    "su_Latn",
+    sw,
+    teo,
+    tok,
+    trv,
+    ts,
+    vmw,
+    vun,
+    xh,
+    xog,
+    za,
+    zu
+)

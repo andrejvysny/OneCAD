@@ -50,3 +50,22 @@
 - Sketch/solver/constraints: proto_sketch_geometry, proto_sketch_constraints, proto_sketch_solver.
 - Loop/face bridge: proto_loop_detector, proto_face_builder.
 - Rendering compile guard: test_compile. Run relevant prototypes after changing tolerances, ordering, or binding logic.
+
+## Logging & Debugging
+- Core categories currently in use:
+- `onecad.core.sketch`
+- `onecad.core.snap`
+- `onecad.core.constraintsolver`
+- `onecad.core.autoconstraint`
+- `onecad.core.sketchtool`
+- `onecad.core.sketchtool.line`
+- Preserve start/decision/done logging shape for operations (for example `addConstraint:start` -> validation reason -> `addConstraint:done`).
+- Include stable IDs and counts in logs (`EntityID`, `ConstraintID`, entity/constraint totals, candidate counts) to support deterministic replay analysis.
+- Keep hot-path logs bounded: avoid per-frame/per-point spam unless explicitly gated by debug-only categories.
+- For constraint/snap regressions, inspect in this order:
+- `onecad.core.sketch` for entity/constraint creation and solver invalidation
+- `onecad.core.constraintsolver` for translation/solve fallback paths
+- `onecad.core.snap` for candidate generation and ambiguity resolution
+- `onecad.core.autoconstraint` and `onecad.core.sketchtool*` for inference + tool state transitions
+- Suggested triage command:
+- `rg -n "onecad\\.core\\.(sketch|snap|constraintsolver|autoconstraint|sketchtool)" logs/<latest>.log`

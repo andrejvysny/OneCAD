@@ -8,12 +8,16 @@
 #include "MirrorTool.h"
 #include "../Sketch.h"
 #include "../SketchRenderer.h"
+#include <QLoggingCategory>
+#include <QString>
 #include <cassert>
 #include <cmath>
 #include <limits>
 #include <vector>
 
 namespace onecad::core::sketch::tools {
+
+Q_LOGGING_CATEGORY(logSketchToolMgr, "onecad.core.sketchtool")
 
 namespace {
 
@@ -130,6 +134,7 @@ void SketchToolManager::setRenderer(SketchRenderer* renderer) {
 }
 
 void SketchToolManager::activateTool(ToolType type) {
+    qCDebug(logSketchToolMgr) << "activateTool" << static_cast<int>(type);
     if (type == currentType_ && activeTool_) {
         return; // Already active
     }
@@ -149,6 +154,7 @@ void SketchToolManager::activateTool(ToolType type) {
 }
 
 void SketchToolManager::deactivateTool() {
+    qCDebug(logSketchToolMgr) << "deactivateTool" << static_cast<int>(currentType_);
     if (activeTool_) {
         activeTool_->cancel();
         activeTool_.reset();
@@ -168,6 +174,7 @@ void SketchToolManager::deactivateTool() {
 }
 
 void SketchToolManager::handleMousePress(const Vec2d& pos, Qt::MouseButton button) {
+    qCDebug(logSketchToolMgr) << "mousePress" << "pos=" << pos.x << pos.y << "button=" << static_cast<int>(button);
     if (!activeTool_) {
         return;
     }
@@ -185,6 +192,11 @@ void SketchToolManager::handleMousePress(const Vec2d& pos, Qt::MouseButton butto
         currentSnapResult_ = SnapResult{};
     }
     activeTool_->setSnapResult(currentSnapResult_);
+    qCDebug(logSketchToolMgr) << "mousePress:snap"
+                              << "snapped=" << currentSnapResult_.snapped
+                              << "type=" << static_cast<int>(currentSnapResult_.type)
+                              << "distance=" << currentSnapResult_.distance
+                              << "entity=" << QString::fromStdString(currentSnapResult_.entityId);
     activeTool_->setInferredConstraints({});
 
     // Use snapped position for press
@@ -233,6 +245,7 @@ void SketchToolManager::handleMousePress(const Vec2d& pos, Qt::MouseButton butto
     }
 
     if (created) {
+        qCDebug(logSketchToolMgr) << "mousePress:geometryCreated";
         emit geometryCreated();
     }
 
@@ -240,6 +253,7 @@ void SketchToolManager::handleMousePress(const Vec2d& pos, Qt::MouseButton butto
 }
 
 void SketchToolManager::handleMouseMove(const Vec2d& pos) {
+    qCDebug(logSketchToolMgr) << "mouseMove" << pos.x << pos.y;
     rawCursorPos_ = pos;
 
     if (!activeTool_) {
@@ -333,6 +347,11 @@ void SketchToolManager::handleMouseMove(const Vec2d& pos) {
 
     // Pass snap result to tool
     activeTool_->setSnapResult(currentSnapResult_);
+    qCDebug(logSketchToolMgr) << "mouseMove:snap"
+                              << "snapped=" << currentSnapResult_.snapped
+                              << "type=" << static_cast<int>(currentSnapResult_.type)
+                              << "distance=" << currentSnapResult_.distance
+                              << "entity=" << QString::fromStdString(currentSnapResult_.entityId);
     activeTool_->setInferredConstraints({});
 
     // Get snapped position for tool
@@ -344,6 +363,7 @@ void SketchToolManager::handleMouseMove(const Vec2d& pos) {
 }
 
 void SketchToolManager::handleMouseRelease(const Vec2d& pos, Qt::MouseButton button) {
+    qCDebug(logSketchToolMgr) << "mouseRelease" << "pos=" << pos.x << pos.y << "button=" << static_cast<int>(button);
     if (!activeTool_) {
         return;
     }
@@ -361,6 +381,11 @@ void SketchToolManager::handleMouseRelease(const Vec2d& pos, Qt::MouseButton but
         currentSnapResult_ = SnapResult{};
     }
     activeTool_->setSnapResult(currentSnapResult_);
+    qCDebug(logSketchToolMgr) << "mouseRelease:snap"
+                              << "snapped=" << currentSnapResult_.snapped
+                              << "type=" << static_cast<int>(currentSnapResult_.type)
+                              << "distance=" << currentSnapResult_.distance
+                              << "entity=" << QString::fromStdString(currentSnapResult_.entityId);
     activeTool_->setInferredConstraints({});
 
     // Use snapped position for release

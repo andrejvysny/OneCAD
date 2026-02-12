@@ -1,0 +1,70 @@
+2026-02-12T13:45:08.360 [WARN] [tid=0x1f807e240] [default] [/Users/andrejvysny/andrejvysny/OneCAD/src/app/Logging.cpp:287] [static bool onecad::app::Logging::initialize(const QString &, bool)] Failed to create log directory: /Users/andrejvysny/Library/Application Support/OneCAD/OneCAD/logs
+2026-02-12T13:45:08.360 [INFO] [tid=0x1f807e240] [default] [/Users/andrejvysny/andrejvysny/OneCAD/src/app/Logging.cpp:290] [static bool onecad::app::Logging::initialize(const QString &, bool)] Logging initialized logFile= /Users/andrejvysny/andrejvysny/OneCAD/logs/onecad_20260212_134508_359_55912.log logDir= /Users/andrejvysny/andrejvysny/OneCAD/logs debugBuild= true debugLogsEnabled= true
+2026-02-12T13:45:08.363 [INFO] [tid=0x1f807e240] [default] [/Users/andrejvysny/andrejvysny/OneCAD/src/app/Logging.cpp:302] [static bool onecad::app::Logging::initialize(const QString &, bool)] Log retention applied days= 30 maxFiles= 30
+2026-02-12T13:45:08.363 [INFO] [tid=0x1f807e240] [onecad.main] [/Users/andrejvysny/andrejvysny/OneCAD/src/main.cpp:164] [int main(int, char **)] Application startup initiated argc= 1 debugBuild= true
+2026-02-12T13:45:08.363 [DEBUG] [tid=0x1f807e240] [onecad.main] [/Users/andrejvysny/andrejvysny/OneCAD/src/main.cpp:179] [int main(int, char **)] OpenGL default format configured version= 4 . 1 profile= QSurfaceFormat::CoreProfile samples= 4 depthBufferSize= 24 stencilBufferSize= 8
+2026-02-12T13:45:08.366 [DEBUG] [tid=0x1f807e240] [onecad.main] [/Users/andrejvysny/andrejvysny/OneCAD/src/main.cpp:196] [int main(int, char **)] UI event debug logger disabled
+2026-02-12T13:45:08.367 [INFO] [tid=0x1f807e240] [onecad.main] [/Users/andrejvysny/andrejvysny/OneCAD/src/main.cpp:199] [int main(int, char **)] QApplication created applicationDirPath= "/Users/andrejvysny/andrejvysny/OneCAD/build/OneCAD.app/Contents/MacOS" logFilePath= "/Users/andrejvysny/andrejvysny/OneCAD/logs/onecad_20260212_134508_359_55912.log"
+2026-02-12T13:45:08.367 [INFO] [tid=0x1f807e240] [onecad.app] [/Users/andrejvysny/andrejvysny/OneCAD/src/app/Application.cpp:31] [bool onecad::app::Application::initialize()] Initializing application metadata
+2026-02-12T13:45:08.367 [DEBUG] [tid=0x1f807e240] [onecad.app] [/Users/andrejvysny/andrejvysny/OneCAD/src/app/Application.cpp:38] [bool onecad::app::Application::initialize()] Application metadata set name= "OneCAD" version= "0.1.0" organization= "OneCAD" domain= "onecad.app"
+2026-02-12T13:45:08.367 [INFO] [tid=0x1f807e240] [onecad.app] [/Users/andrejvysny/andrejvysny/OneCAD/src/app/Application.cpp:45] [bool onecad::app::Application::initialize()] Application initialized
+2026-02-12T13:45:08.367 [INFO] [tid=0x1f807e240] [onecad.main] [/Users/andrejvysny/andrejvysny/OneCAD/src/main.cpp:210] [int main(int, char **)] Dependency versions occt= 7.9.1
+2026-02-12T13:45:08.452 [WARN] [tid=0x1f807e240] [qt.qpa.fonts] [<unknown>] [<unknown>] Populating font family aliases took 25 ms. Replace uses of missing font family "Sans Serif" with one that exists to avoid this cost. 
+2026-02-12T13:45:08.463 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget is not supported on this platform.
+2026-02-12T13:45:08.473 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QLayout: Cannot add a null widget to QVBoxLayout/
+2026-02-12T13:45:08.477 [DEBUG] [tid=0x1f807e240] [onecad.main] [/Users/andrejvysny/andrejvysny/OneCAD/src/main.cpp:214] [int main(int, char **)] MainWindow created
+2026-02-12T13:45:08.479 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.479 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.480 [INFO] [tid=0x1f807e240] [onecad.main] [/Users/andrejvysny/andrejvysny/OneCAD/src/main.cpp:216] [int main(int, char **)] MainWindow shown; entering event loop
+2026-02-12T13:45:08.494 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.494 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.497 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.497 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.500 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.501 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.520 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.520 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.520 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.520 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.543 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.543 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.543 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.544 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.549 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.550 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.550 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.550 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.568 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.568 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.569 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.569 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.583 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.583 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.584 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.584 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.599 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.599 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.600 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.600 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.616 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.616 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.616 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.617 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.630 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.631 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.631 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.631 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.648 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.648 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.648 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.649 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.662 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.663 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.663 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.663 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.678 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.678 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.679 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.679 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context
+2026-02-12T13:45:08.696 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] This plugin does not support createPlatformOpenGLContext!
+2026-02-12T13:45:08.696 [WARN] [tid=0x1f807e240] [default] [<unknown>] [<unknown>] QOpenGLWidget: Failed to create context

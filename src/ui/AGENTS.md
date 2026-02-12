@@ -54,3 +54,17 @@
 
 ## Testing
 - UI build sanity: test_compile. For interaction regressions, manual check viewport sketch mode (tool activation, constraint panels, snapping overlays) and modeling tool activation flows.
+
+## Logging & Debugging
+- UI startup/flow logs use `onecad.main`; optional high-volume interaction tracing uses `onecad.ui.events`.
+- `onecad.ui.events` is opt-in and only active when both conditions are true:
+- debug logging is enabled (`Debug` build or `ONECAD_LOG_DEBUG=1`)
+- `ONECAD_LOG_UI_EVENTS=1` is set
+- When adding new UI diagnostics, prefer dedicated categories (`onecad.ui.<component>`) over uncategorized Qt logging.
+- For event-handling bugs, capture logs around:
+- `Installed UI event debug logger`
+- `ui_event`, `ui_key`, `ui_mouse`, `ui_wheel`
+- window/show lifecycle markers in `onecad.main`
+- In headless/offscreen runs, repeated `QOpenGLWidget` context warnings are expected; treat them as environment limitations unless accompanied by app init failure.
+- Suggested triage command:
+- `rg -n "onecad\\.(main|ui\\.events|ui\\.)|QOpenGLWidget|QLayout" logs/<latest>.log`
