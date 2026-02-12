@@ -1,6 +1,7 @@
 #include "sketch/SnapManager.h"
 #include "sketch/Sketch.h"
 #include "sketch/SketchLine.h"
+#include "sketch/tools/SnapPreviewResolver.h"
 #include "sketch/tools/SketchToolManager.h"
 
 #include <algorithm>
@@ -1323,6 +1324,167 @@ TestResult test_parity_findBestSnap_stable_across_calls() {
     return {true, "", ""};
 }
 
+TestResult test_shared_preview_vertex_priority_with_guides() {
+    Sketch sketch;
+    sketch.addPoint(5.0, 5.0);
+    sketch.addPoint(10.0, 5.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Vertex, SnapType::Horizontal});
+    const auto preview = tools::resolveSnapForInputEvent(
+        manager,
+        {5.01, 5.0},
+        sketch,
+        {},
+        std::nullopt,
+        false,
+        true);
+
+    if (!preview.resolvedSnap.snapped) {
+        return {false, "snapped", "not snapped"};
+    }
+    if (preview.resolvedSnap.type != SnapType::Vertex) {
+        return {false, "Vertex", std::to_string(static_cast<int>(preview.resolvedSnap.type))};
+    }
+    if (preview.activeGuides.empty()) {
+        return {false, "guide segment(s)", "none"};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_shared_preview_intersection_guides_present() {
+    Sketch sketch;
+    sketch.addPoint(5.0, 0.0);
+    sketch.addPoint(0.0, 3.0);
+
+    SnapManager manager = createSnapManagerFor({
+        SnapType::Horizontal,
+        SnapType::Vertical,
+        SnapType::SketchGuide,
+        SnapType::Intersection
+    });
+    const auto preview = tools::resolveSnapForInputEvent(
+        manager,
+        {5.1, 3.1},
+        sketch,
+        {},
+        std::nullopt,
+        true,
+        true);
+
+    if (!preview.resolvedSnap.snapped) {
+        return {false, "snapped", "not snapped"};
+    }
+    if (preview.resolvedSnap.type != SnapType::Intersection) {
+        return {false, "Intersection", std::to_string(static_cast<int>(preview.resolvedSnap.type))};
+    }
+    if (preview.activeGuides.size() < 2) {
+        return {false, ">=2 guide segments", std::to_string(preview.activeGuides.size())};
+    }
+
+    bool hasHorizontal = false;
+    bool hasVertical = false;
+    for (const auto& guide : preview.activeGuides) {
+        const double dx = guide.target.x - guide.origin.x;
+        const double dy = guide.target.y - guide.origin.y;
+        if (std::abs(dx) < 1e-9 && std::abs(dy) < 1e-9) {
+            continue;
+        }
+        if (std::abs(dy) <= std::abs(dx) * 0.2) {
+            hasHorizontal = true;
+        }
+        if (std::abs(dx) <= std::abs(dy) * 0.2) {
+            hasVertical = true;
+        }
+    }
+
+    if (!hasHorizontal || !hasVertical) {
+        return {false, "horizontal+vertical guide mix", "missing expected guide orientation"};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_shared_preview_no_snap_clears_guides() {
+    Sketch sketch;
+    sketch.addPoint(0.0, 0.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Vertex});
+    const auto preview = tools::resolveSnapForInputEvent(
+        manager,
+        {100.0, 100.0},
+        sketch,
+        {},
+        std::nullopt,
+        false,
+        true);
+
+    if (preview.resolvedSnap.snapped) {
+        return {false, "not snapped", "snapped"};
+    }
+    if (!preview.activeGuides.empty()) {
+        return {false, "no guide segments", std::to_string(preview.activeGuides.size())};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_shared_preview_dedupe_collinear_and_cap() {
+    SnapResult resolved;
+    resolved.snapped = true;
+    resolved.type = SnapType::SketchGuide;
+    resolved.position = {10.0, 10.0};
+
+    auto makeGuideSnap = [](Vec2d origin, Vec2d target) {
+        SnapResult snap;
+        snap.snapped = true;
+        snap.type = SnapType::SketchGuide;
+        snap.position = target;
+        snap.guideOrigin = origin;
+        snap.hasGuide = true;
+        return snap;
+    };
+
+    const std::vector<SnapResult> allSnaps = {
+        makeGuideSnap({0.0, 0.0}, {10.0, 0.0}),   // horizontal
+        makeGuideSnap({5.0, 0.0}, {15.0, 0.0}),   // collinear duplicate
+        makeGuideSnap({0.0, 0.0}, {0.0, 10.0}),   // vertical
+        makeGuideSnap({0.0, 0.0}, {10.0, 10.0}),  // diagonal 1
+        makeGuideSnap({0.0, 0.0}, {-10.0, 10.0}), // diagonal 2
+        makeGuideSnap({0.0, 0.0}, {10.0, -10.0})  // diagonal 3 (trimmed by cap)
+    };
+
+    const auto guides = tools::buildActiveGuidesForSnap(resolved, allSnaps);
+    if (guides.size() != 4) {
+        return {false, "4 guide segments", std::to_string(guides.size())};
+    }
+
+    auto isCollinear = [](const tools::GuideSegment& a, const tools::GuideSegment& b) {
+        double dirAx = a.target.x - a.origin.x;
+        double dirAy = a.target.y - a.origin.y;
+        double dirBx = b.target.x - b.origin.x;
+        double dirBy = b.target.y - b.origin.y;
+        const double lenA = std::sqrt((dirAx * dirAx) + (dirAy * dirAy));
+        const double lenB = std::sqrt((dirBx * dirBx) + (dirBy * dirBy));
+        if (lenA < 1e-6 || lenB < 1e-6) {
+            return true;
+        }
+        dirAx /= lenA;
+        dirAy /= lenA;
+        dirBx /= lenB;
+        dirBy /= lenB;
+        const double cross = std::abs((dirAx * dirBy) - (dirAy * dirBx));
+        return cross < 0.01;
+    };
+
+    for (size_t i = 0; i < guides.size(); ++i) {
+        for (size_t j = i + 1; j < guides.size(); ++j) {
+            if (isCollinear(guides[i], guides[j])) {
+                return {false, "no collinear duplicates", "found duplicate direction"};
+            }
+        }
+    }
+
+    return {true, "", ""};
+}
+
 TestResult test_ambiguity_hook_api() {
     SnapManager manager;
     if (manager.hasAmbiguity()) {
@@ -1543,6 +1705,10 @@ int main(int argc, char** argv) {
     {"test_parity_no_guide_overlap", test_parity_no_guide_overlap},
     {"test_parity_guide_adjacent_to_overlap", test_parity_guide_adjacent_to_overlap},
     {"test_parity_findBestSnap_stable_across_calls", test_parity_findBestSnap_stable_across_calls},
+    {"test_shared_preview_vertex_priority_with_guides", test_shared_preview_vertex_priority_with_guides},
+    {"test_shared_preview_intersection_guides_present", test_shared_preview_intersection_guides_present},
+    {"test_shared_preview_no_snap_clears_guides", test_shared_preview_no_snap_clears_guides},
+    {"test_shared_preview_dedupe_collinear_and_cap", test_shared_preview_dedupe_collinear_and_cap},
     {"test_guide_crossing_snaps_to_intersection", test_guide_crossing_snaps_to_intersection},
     {"test_hv_guide_crossing_produces_intersection_candidate", test_hv_guide_crossing_produces_intersection_candidate},
     {"test_hv_guide_crossing_wins_over_individual_hv", test_hv_guide_crossing_wins_over_individual_hv},

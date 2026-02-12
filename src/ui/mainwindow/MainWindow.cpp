@@ -1218,6 +1218,10 @@ void MainWindow::onSketchModeChanged(bool inSketchMode) {
     }
 
     if (inSketchMode && activeSketch) {
+        if (m_viewport && m_snapSettingsPanel) {
+            m_viewport->updateSnapSettings(m_snapSettingsPanel->settings());
+        }
+
         updateDofStatus(activeSketch);
 
         // Show constraint panel

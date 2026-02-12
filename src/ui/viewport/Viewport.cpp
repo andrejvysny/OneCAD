@@ -7,6 +7,7 @@
 #include "../../core/sketch/SketchConstraint.h"
 #include "../../core/sketch/constraints/Constraints.h"
 #include "../../core/sketch/tools/SketchToolManager.h"
+#include "../../core/sketch/tools/SnapPreviewResolver.h"
 #include "../../core/loop/RegionUtils.h"
 #include "../../app/document/Document.h"
 #include "../../app/selection/SelectionManager.h"
@@ -45,6 +46,7 @@
 #include <cmath>
 #include <limits>
 #include <optional>
+#include <unordered_set>
 
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
@@ -61,6 +63,16 @@ namespace sketch = core::sketch;
 namespace sketchTools = core::sketch::tools;
 
 namespace {
+std::vector<sketch::SketchRenderer::GuideLineInfo> toRendererGuides(
+    const std::vector<sketchTools::GuideSegment>& guides) {
+    std::vector<sketch::SketchRenderer::GuideLineInfo> rendererGuides;
+    rendererGuides.reserve(guides.size());
+    for (const auto& guide : guides) {
+        rendererGuides.push_back({guide.origin, guide.target});
+    }
+    return rendererGuides;
+}
+
 constexpr float kOrbitSensitivity = 0.3f;
 constexpr float kTrackpadPanScale = 1.0f;
 constexpr float kTrackpadOrbitScale = 0.35f;
@@ -798,8 +810,9 @@ void Viewport::paintGL() {
         m_sketchRenderer->setViewport(sketchViewport);
         m_sketchRenderer->setPixelScale(pixelScale);
 
-        // Render tool preview
-        if (m_toolManager) {
+        // Render tool preview only when a sketch tool is active.
+        // Otherwise no-tool interactions (e.g. point drag) own snap/guide preview state.
+        if (m_toolManager && m_toolManager->hasActiveTool()) {
             m_toolManager->renderPreview();
         }
 
@@ -1461,10 +1474,12 @@ void Viewport::mouseMoveEvent(QMouseEvent* event) {
                     emit statusMessageRequested(tr("Reference geometry is locked"));
                     m_sketchInteractionState = SketchInteractionState::Idle;
                     m_pointDragCandidateId.clear();
+                    clearPointDragSnapPreview();
                 } else if (m_activeSketch->hasFixedConstraint(m_pointDragCandidateId)) {
                     emit statusMessageRequested(tr("Point is fixed"));
                     m_sketchInteractionState = SketchInteractionState::Idle;
                     m_pointDragCandidateId.clear();
+                    clearPointDragSnapPreview();
                 } else {
                     m_activeSketch->beginPointDrag(m_pointDragCandidateId);
                     m_sketchInteractionState = SketchInteractionState::PointDragging;
@@ -1480,6 +1495,7 @@ void Viewport::mouseMoveEvent(QMouseEvent* event) {
             if (event->modifiers() & Qt::ShiftModifier) {
                 std::vector<sketch::Vec2d> freeDirs = m_activeSketch->getPointFreeDirections(m_pointDragCandidateId);
                 if (freeDirs.empty()) {
+                    clearPointDragSnapPreview();
                     update();
                     return;
                 }
@@ -1497,7 +1513,27 @@ void Viewport::mouseMoveEvent(QMouseEvent* event) {
                     targetPos.y = currentPos.y + projectedDelta.y;
                 }
             }
-            auto result = m_activeSketch->solveWithDrag(m_pointDragCandidateId, targetPos);
+
+            sketch::Vec2d dragTarget = targetPos;
+            if (m_toolManager) {
+                std::unordered_set<sketch::EntityID> excludeFromSnap{m_pointDragCandidateId};
+                const auto snapResolution = sketchTools::resolveSnapForInputEvent(
+                    m_toolManager->snapManager(),
+                    targetPos,
+                    *m_activeSketch,
+                    excludeFromSnap,
+                    std::nullopt,
+                    false,
+                    true);
+                if (snapResolution.resolvedSnap.snapped) {
+                    dragTarget = snapResolution.resolvedSnap.position;
+                }
+                applyPointDragSnapPreview(snapResolution);
+            } else {
+                clearPointDragSnapPreview();
+            }
+
+            auto result = m_activeSketch->solveWithDrag(m_pointDragCandidateId, dragTarget);
             if (result.success) {
                 m_sketchRenderer->updateGeometry();
                 updateSketchRenderingState();
@@ -1617,6 +1653,7 @@ void Viewport::mouseReleaseEvent(QMouseEvent* event) {
         m_sketchInteractionState = SketchInteractionState::Idle;
         m_pointDragCandidateId.clear();
         m_pointDragFailureFeedbackShown = false;
+        clearPointDragSnapPreview();
         update();
         return;
     }
@@ -1627,6 +1664,7 @@ void Viewport::mouseReleaseEvent(QMouseEvent* event) {
         m_sketchInteractionState = SketchInteractionState::Idle;
         m_pointDragCandidateId.clear();
         m_regionMoveCandidateId.clear();
+        clearPointDragSnapPreview();
     }
 
     // Forward to sketch tool if active
@@ -1847,6 +1885,44 @@ void Viewport::updateSketchRenderingState() {
     m_sketchRenderer->updateConstraints();
 }
 
+void Viewport::applyPointDragSnapPreview(
+    const core::sketch::tools::SnapInputResolution& snapResolution) {
+    if (!m_sketchRenderer) {
+        return;
+    }
+
+    bool showGuidePoints = true;
+    bool showHints = true;
+    if (m_toolManager) {
+        const auto& snapManager = m_toolManager->snapManager();
+        showGuidePoints = snapManager.showGuidePoints();
+        showHints = snapManager.showSnappingHints();
+    }
+
+    const auto guides = showGuidePoints
+        ? toRendererGuides(snapResolution.activeGuides)
+        : std::vector<sketch::SketchRenderer::GuideLineInfo>{};
+    m_sketchRenderer->setActiveGuides(guides);
+
+    if (snapResolution.resolvedSnap.snapped) {
+        const bool showGuide = showGuidePoints && snapResolution.resolvedSnap.hasGuide;
+        const std::string hintText = showHints ? snapResolution.resolvedSnap.hintText : std::string();
+        m_sketchRenderer->showSnapIndicator(snapResolution.resolvedSnap.position,
+                                            snapResolution.resolvedSnap.type,
+                                            snapResolution.resolvedSnap.guideOrigin,
+                                            showGuide,
+                                            hintText);
+    } else {
+        m_sketchRenderer->hideSnapIndicator();
+    }
+}
+
+void Viewport::clearPointDragSnapPreview() {
+    if (m_sketchRenderer) {
+        m_sketchRenderer->hideSnapIndicator();
+    }
+}
+
 void Viewport::setDebugToggles(bool normals, bool depth, bool wireframe, bool disableGamma, bool matcap) {
     if (normals && depth) {
         depth = false;
@@ -2027,8 +2103,6 @@ void Viewport::enterSketchMode(sketch::Sketch* sketch) {
         m_toolManager->setRenderer(m_sketchRenderer.get());
     }
 
-    updateSnapGeometry();
-
     // Store current camera state
     m_savedCameraPosition = m_camera->position();
     m_savedCameraTarget = m_camera->target();
@@ -2100,6 +2174,8 @@ void Viewport::enterSketchMode(sketch::Sketch* sketch) {
         update();
     });
 
+    updateSnapGeometry();
+
     update();
     emit sketchModeChanged(true);
 }
@@ -2110,6 +2186,7 @@ void Viewport::exitSketchMode() {
     if (m_activeSketch) {
         m_activeSketch->endPointDrag();
     }
+    clearPointDragSnapPreview();
 
     m_inSketchMode = false;
     m_activeSketch = nullptr;
@@ -3659,6 +3736,7 @@ void Viewport::setMoveSketchMode(bool active) {
         if (m_activeSketch) {
             m_activeSketch->endPointDrag();
         }
+        clearPointDragSnapPreview();
         m_sketchInteractionState = SketchInteractionState::Idle;
         m_pointDragCandidateId.clear();
         m_moveSketchLastSketchPos = sketch::Vec2d{0.0, 0.0};

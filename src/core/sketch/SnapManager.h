@@ -83,9 +83,8 @@ struct SnapResult {
      *    order: pointId < entityId < secondEntityId < position.x < position.y <
      *    hasGuide (false wins) < guideOrigin < hintText.
      * 4) Preview/commit parity: the same findBestSnap() winner must drive both preview and
-     *    commit. SketchToolManager::resolveSnapForInputEvent() must return the same winner for
-     *    mouse-move (preview) and mouse-press (commit) given identical cursor position and
-     *    sketch state.
+     *    commit. tools::resolveSnapForInputEvent() must return the same winner for mouse-move
+     *    (preview) and mouse-press (commit) given identical cursor position and sketch state.
      * 5) Determinism guarantee: for identical input (cursor position, sketch state, exclude set),
      *    findBestSnap() returns the same winner on every call, with no dependency on insertion
      *    order or hash randomness.

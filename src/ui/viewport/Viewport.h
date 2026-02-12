@@ -46,6 +46,7 @@ namespace core::sketch {
     struct SketchPlane;
     namespace tools {
         class SketchToolManager;
+        struct SnapInputResolution;
         enum class ToolType;
     }
 }
@@ -247,6 +248,8 @@ private:
     void updateSketchHoverFromManager();
     app::selection::PickResult buildSketchPickResult(const QPoint& screenPos) const;
     QStringList buildDeepSelectLabels(const std::vector<app::selection::SelectionItem>& candidates) const;
+    void applyPointDragSnapPreview(const core::sketch::tools::SnapInputResolution& snapResolution);
+    void clearPointDragSnapPreview();
     
     // Snap integration
     void updateSnapGeometry();

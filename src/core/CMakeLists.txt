@@ -17,6 +17,7 @@ add_library(onecad_core STATIC
     sketch/constraints/Constraints.cpp
     sketch/solver/ConstraintSolver.cpp
     sketch/solver/SolverAdapter.cpp
+    sketch/tools/SnapPreviewResolver.cpp
     sketch/tools/SketchToolManager.cpp
     sketch/tools/LineTool.cpp
     sketch/tools/CircleTool.cpp
@@ -71,6 +72,7 @@ set(SKETCH_HEADERS
     sketch/solver/ConstraintSolver.h
     sketch/solver/SolverAdapter.h
     sketch/tools/SketchTool.h
+    sketch/tools/SnapPreviewResolver.h
     sketch/tools/SketchToolManager.h
     sketch/tools/LineTool.h
     sketch/tools/CircleTool.h
