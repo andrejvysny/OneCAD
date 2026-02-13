@@ -5,6 +5,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <algorithm>
 #include <cmath>
 #include <QUuid>
 
@@ -155,6 +156,7 @@ void Document::setModified(bool modified) {
 }
 
 void Document::clear() {
+    const std::size_t previousApplied = appliedOpCount_;
     sketches_.clear();
     sketchNames_.clear();
     sketchVisibility_.clear();
@@ -165,6 +167,11 @@ void Document::clear() {
     operations_.clear();
     suppressedOperations_.clear();
     operationFailures_.clear();
+    operationMetadata_.clear();
+    appliedOpCount_ = 0;
+    if (previousApplied != appliedOpCount_) {
+        emit appliedOpCountChanged(static_cast<qulonglong>(appliedOpCount_));
+    }
     elementMap_.clear();
     if (sceneMeshStore_) {
         sceneMeshStore_->clear();
@@ -564,7 +571,17 @@ bool Document::insertOperation(std::size_t index, const OperationRecord& record)
     if (index > operations_.size()) {
         return false;
     }
+    const std::size_t previousApplied = appliedOpCount_;
     operations_.insert(operations_.begin() + static_cast<std::ptrdiff_t>(index), record);
+    if (index <= appliedOpCount_) {
+        ++appliedOpCount_;
+    }
+    if (appliedOpCount_ > operations_.size()) {
+        appliedOpCount_ = operations_.size();
+    }
+    if (previousApplied != appliedOpCount_) {
+        emit appliedOpCountChanged(static_cast<qulonglong>(appliedOpCount_));
+    }
     setModified(true);
     emit operationAdded(QString::fromStdString(record.opId));
     return true;
@@ -583,14 +600,26 @@ bool Document::updateOperationParams(const std::string& opId, const OperationPar
 }
 
 bool Document::removeOperation(const std::string& opId) {
-    auto it = std::remove_if(operations_.begin(), operations_.end(),
-                             [&](const OperationRecord& op) { return op.opId == opId; });
-    if (it == operations_.end()) {
+    const int removedIndex = operationIndex(opId);
+    if (removedIndex < 0) {
         return false;
     }
+    const std::size_t previousApplied = appliedOpCount_;
+    auto it = std::remove_if(operations_.begin(), operations_.end(),
+                             [&](const OperationRecord& op) { return op.opId == opId; });
     operations_.erase(it, operations_.end());
     suppressedOperations_.erase(opId);
     operationFailures_.erase(opId);
+    operationMetadata_.erase(opId);
+    if (static_cast<std::size_t>(removedIndex) < appliedOpCount_ && appliedOpCount_ > 0) {
+        --appliedOpCount_;
+    }
+    if (appliedOpCount_ > operations_.size()) {
+        appliedOpCount_ = operations_.size();
+    }
+    if (previousApplied != appliedOpCount_) {
+        emit appliedOpCountChanged(static_cast<qulonglong>(appliedOpCount_));
+    }
     setModified(true);
     emit operationRemoved(QString::fromStdString(opId));
     return true;
@@ -700,6 +729,39 @@ std::string Document::operationFailureReason(const std::string& opId) const {
         return {};
     }
     return it->second;
+}
+
+bool Document::setOperationMetadata(const std::string& opId, const OperationMetadata& metadata) {
+    if (!findOperation(opId)) {
+        return false;
+    }
+    operationMetadata_[opId] = metadata;
+    return true;
+}
+
+std::optional<OperationMetadata> Document::operationMetadata(const std::string& opId) const {
+    const auto it = operationMetadata_.find(opId);
+    if (it == operationMetadata_.end()) {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
+void Document::clearOperationMetadata(const std::string& opId) {
+    operationMetadata_.erase(opId);
+}
+
+void Document::clearAllOperationMetadata() {
+    operationMetadata_.clear();
+}
+
+void Document::setAppliedOpCount(std::size_t count) {
+    const std::size_t clamped = std::min(count, operations_.size());
+    if (appliedOpCount_ == clamped) {
+        return;
+    }
+    appliedOpCount_ = clamped;
+    emit appliedOpCountChanged(static_cast<qulonglong>(appliedOpCount_));
 }
 
 // Visibility management

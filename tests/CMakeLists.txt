@@ -158,3 +158,34 @@ target_link_libraries(proto_regeneration
     Qt6::Core
 )
 target_include_directories(proto_regeneration PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+# History I/O Compatibility Prototype
+add_executable(proto_history_io_compat prototypes/proto_history_io_compat.cpp)
+target_link_libraries(proto_history_io_compat
+    PRIVATE
+    onecad_io
+    onecad_app
+    Qt6::Core
+)
+target_include_directories(proto_history_io_compat PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+# Document roundtrip compatibility Prototype
+add_executable(proto_document_roundtrip_compat prototypes/proto_document_roundtrip_compat.cpp)
+target_link_libraries(proto_document_roundtrip_compat
+    PRIVATE
+    onecad_io
+    onecad_app
+    onecad_core
+    Qt6::Core
+)
+target_include_directories(proto_document_roundtrip_compat PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+# Timeline rollback + dirty propagation prototype
+add_executable(proto_timeline_rollback_dirty prototypes/proto_timeline_rollback_dirty.cpp)
+target_link_libraries(proto_timeline_rollback_dirty
+    PRIVATE
+    onecad_app
+    onecad_core
+    Qt6::Core
+)
+target_include_directories(proto_timeline_rollback_dirty PRIVATE ${CMAKE_SOURCE_DIR}/src)

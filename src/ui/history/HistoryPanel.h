@@ -91,6 +91,7 @@ private:
         FeatureCard* card = nullptr;
         bool failed = false;
         bool suppressed = false;
+        bool dirty = false;
         std::string failureReason;
     };
 
@@ -103,6 +104,8 @@ private:
     QString getOperationDetails(const app::OperationRecord& op) const;
     QString operationIconPath(app::OperationType type) const;
     bool isEditableType(app::OperationType type) const;
+    bool isReplayOnly(const std::string& opId) const;
+    bool isDirty(const std::string& opId) const;
     ItemEntry* entryForItem(QTreeWidgetItem* item);
     ItemEntry* entryForId(const std::string& opId);
     void showContextMenu(const QPoint& pos, QTreeWidgetItem* item);

@@ -57,6 +57,15 @@ RegenerationEngine::RegenerationEngine(Document* doc)
 }
 
 RegenResult RegenerationEngine::regenerateAll() {
+    if (!doc_) {
+        RegenResult result;
+        result.status = RegenStatus::CriticalFailure;
+        return result;
+    }
+    return regenerateToAppliedCount(doc_->operations().size());
+}
+
+RegenResult RegenerationEngine::regenerateToAppliedCount(std::size_t appliedCount) {
     RegenResult result;
 
     if (!doc_) {
@@ -64,9 +73,17 @@ RegenResult RegenerationEngine::regenerateAll() {
         return result;
     }
 
+    const auto& operations = doc_->operations();
+    const std::size_t boundedAppliedCount = std::min(appliedCount, operations.size());
+    std::vector<OperationRecord> appliedOps;
+    appliedOps.reserve(boundedAppliedCount);
+    for (std::size_t i = 0; i < boundedAppliedCount; ++i) {
+        appliedOps.push_back(operations[i]);
+    }
+
     // Rebuild dependency graph from current operations
-    graph_.rebuildFromOperations(doc_->operations());
-    for (const auto& op : doc_->operations()) {
+    graph_.rebuildFromOperations(appliedOps);
+    for (const auto& op : appliedOps) {
         if (doc_->isOperationSuppressed(op.opId)) {
             graph_.setSuppressed(op.opId, true);
         }
@@ -83,8 +100,8 @@ RegenResult RegenerationEngine::regenerateAll() {
     }
 
     std::unordered_set<std::string> expectedBodies;
-    expectedBodies.reserve(doc_->operations().size());
-    for (const auto& op : doc_->operations()) {
+    expectedBodies.reserve(appliedOps.size());
+    for (const auto& op : appliedOps) {
         for (const auto& bodyId : op.resultBodyIds) {
             expectedBodies.insert(bodyId);
         }

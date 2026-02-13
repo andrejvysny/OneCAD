@@ -16,6 +16,7 @@
 #include "../../app/commands/SetOperationSuppressionCommand.h"
 #include "../../app/commands/ToggleVisibilityCommand.h"
 #include "../../app/document/Document.h"
+#include "../../app/history/KernelScheduler.h"
 #include "../../app/history/RegenerationEngine.h"
 #include "../navigator/ModelNavigator.h"
 #include "../toolbar/ContextToolbar.h"
@@ -46,7 +47,9 @@
 #include <QTimer>
 #include <QShortcut>
 #include <QDebug>
+#include <QLoggingCategory>
 #include <algorithm>
+#include <future>
 #include <unordered_set>
 
 #include "../../io/OneCADFileIO.h"
@@ -61,11 +64,67 @@
 namespace onecad {
 namespace ui {
 
+Q_LOGGING_CATEGORY(logMainWindow, "onecad.ui.mainwindow")
+
 namespace {
 // Default constraint values
 constexpr double kDefaultDistanceMm = 10.0;
 constexpr double kDefaultAngleDeg = 90.0;
 constexpr double kDefaultRadiusMm = 10.0;
+
+bool kernelSchedulerShadowEnabled() {
+    return qEnvironmentVariableIntValue("ONECAD_EXPERIMENTAL_KERNEL_SCHEDULER") == 1;
+}
+
+bool regenResultsEquivalent(const app::history::RegenResult& lhs,
+                            const app::history::RegenResult& rhs) {
+    if (lhs.status != rhs.status || lhs.succeededOps != rhs.succeededOps || lhs.skippedOps != rhs.skippedOps ||
+        lhs.failedOps.size() != rhs.failedOps.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < lhs.failedOps.size(); ++i) {
+        const auto& a = lhs.failedOps[i];
+        const auto& b = rhs.failedOps[i];
+        if (a.opId != b.opId || a.type != b.type || a.errorMessage != b.errorMessage ||
+            a.affectedDownstream != b.affectedDownstream) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void runSchedulerShadowComparison(app::Document* document) {
+    if (!document || !kernelSchedulerShadowEnabled()) {
+        return;
+    }
+
+    const std::size_t applied = document->appliedOpCount();
+    app::history::KernelScheduler scheduler;
+    std::promise<app::history::RegenJobResult> promise;
+    auto future = promise.get_future();
+    const app::history::JobId jobId = scheduler.submitRegen(
+        app::history::RegenRequest{document, applied, true},
+        [&promise](const app::history::RegenJobResult& result) {
+            promise.set_value(result);
+        });
+    if (jobId == 0) {
+        return;
+    }
+
+    const app::history::RegenJobResult shadow = future.get();
+    scheduler.shutdown();
+
+    app::history::RegenerationEngine legacy(document);
+    const app::history::RegenResult legacyResult = legacy.regenerateToAppliedCount(applied);
+
+    if (shadow.cancelled) {
+        qCWarning(logMainWindow) << "KernelScheduler shadow job was cancelled";
+        return;
+    }
+    if (!regenResultsEquivalent(shadow.result, legacyResult)) {
+        qCWarning(logMainWindow) << "KernelScheduler shadow mismatch; legacy result preserved";
+    }
+}
 
 QString formatOperationDisplayName(const app::OperationRecord& op) {
     QString typeName;
@@ -218,6 +277,12 @@ void MainWindow::connectDocumentSignals() {
                 m_historyPanel, &HistoryPanel::onOperationFailed);
         connect(m_document.get(), &app::Document::operationSucceeded,
                 m_historyPanel, &HistoryPanel::onOperationSucceeded);
+        connect(m_document.get(), &app::Document::appliedOpCountChanged,
+                m_historyPanel, [this](qulonglong) {
+                    if (m_historyPanel) {
+                        m_historyPanel->rebuild();
+                    }
+                });
     }
     connect(m_document.get(), &app::Document::documentCleared,
             m_navigator, [this]() { m_navigator->rebuild(m_document.get()); });
@@ -1419,6 +1484,7 @@ bool MainWindow::loadDocumentFromPath(const QString& fileName) {
         m_viewport->update();
     }
 
+    runSchedulerShadowComparison(m_document.get());
     handleRegenerationFailures();
 
     if (m_startOverlay && m_startOverlay->isVisible()) {
@@ -1477,8 +1543,12 @@ void MainWindow::handleRegenerationFailures() {
     }
 
     if (changed) {
-        app::history::RegenerationEngine regen(m_document.get());
-        regen.regenerateAll();
+        if (kernelSchedulerShadowEnabled()) {
+            runSchedulerShadowComparison(m_document.get());
+        } else {
+            app::history::RegenerationEngine regen(m_document.get());
+            regen.regenerateToAppliedCount(m_document->appliedOpCount());
+        }
         m_document->setModified(true);
         if (m_historyPanel) {
             m_historyPanel->rebuild();
@@ -2163,6 +2233,9 @@ void MainWindow::setupHistoryPanel() {
         auto cmd = std::make_unique<app::commands::RollbackCommand>(
             m_document.get(), opId.toStdString());
         m_commandProcessor->execute(std::move(cmd));
+        if (m_historyPanel) {
+            m_historyPanel->rebuild();
+        }
         if (m_viewport) {
             m_viewport->update();
         }

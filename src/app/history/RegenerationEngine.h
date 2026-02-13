@@ -76,6 +76,11 @@ public:
     RegenResult regenerateAll();
 
     /**
+     * @brief Regenerate a prefix of operations [0, appliedCount).
+     */
+    RegenResult regenerateToAppliedCount(std::size_t appliedCount);
+
+    /**
      * @brief Regenerate from a specific operation onwards.
      *
      * Rebuilds the specified op and all downstream dependents.

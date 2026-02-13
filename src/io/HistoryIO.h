@@ -7,12 +7,14 @@
 
 #include <QJsonObject>
 #include <QString>
+#include <limits>
 #include <unordered_map>
 #include <vector>
 
 namespace onecad::app {
 class Document;
 struct OperationRecord;
+struct OperationMetadata;
 }
 
 namespace onecad::io {
@@ -28,11 +30,17 @@ class Package;
 class HistoryIO {
 public:
     /**
+     * @brief Save operation history for a document.
+     */
+    static bool saveHistory(Package* package, const app::Document* document);
+
+    /**
      * @brief Save operation history to package
      */
     static bool saveHistory(Package* package,
                             const std::vector<app::OperationRecord>& operations,
-                            const std::unordered_map<std::string, bool>& suppressionState);
+                            const std::unordered_map<std::string, bool>& suppressionState,
+                            std::size_t appliedOpCount = std::numeric_limits<std::size_t>::max());
     
     /**
      * @brief Load operation history from package
@@ -44,7 +52,8 @@ public:
     /**
      * @brief Serialize single operation to JSON
      */
-    static QJsonObject serializeOperation(const app::OperationRecord& op);
+    static QJsonObject serializeOperation(const app::OperationRecord& op,
+                                          const app::OperationMetadata* metadata = nullptr);
     
     /**
      * @brief Deserialize JSON to operation record

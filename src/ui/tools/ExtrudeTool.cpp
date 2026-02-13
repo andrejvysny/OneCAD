@@ -255,6 +255,18 @@ bool ExtrudeTool::handleMouseRelease(const QPoint& screenPos, Qt::MouseButton bu
             } else {
                 success = command->execute();
             }
+            if (success && document_) {
+                app::OperationMetadata metadata;
+                metadata.recordSchemaVersion = 1;
+                metadata.stepIndex = static_cast<std::uint32_t>(
+                    document_->appliedOpCount() > 0 ? document_->appliedOpCount() - 1 : 0);
+                metadata.replayOnly = false;
+                metadata.determinism.parallel = false;
+                if (std::holds_alternative<app::FaceRef>(record.input)) {
+                    metadata.uiAlias = QStringLiteral("PushPull");
+                }
+                document_->setOperationMetadata(record.opId, metadata);
+            }
         }
     }
 

@@ -276,6 +276,7 @@ void HistoryPanel::rebuild() {
         entry.item = parentItem ? new QTreeWidgetItem(parentItem) : new QTreeWidgetItem(treeWidget_);
         entry.failed = document_->isOperationFailed(opId);
         entry.suppressed = document_->isOperationSuppressed(opId);
+        entry.dirty = isDirty(opId);
         if (entry.failed) {
             entry.failureReason = document_->operationFailureReason(opId);
         }
@@ -308,8 +309,24 @@ FeatureCard* HistoryPanel::createItemWidget(ItemEntry& entry) {
     }
 
     if (opRecord) {
-        card->setName(getOperationName(entry.type));
-        card->setDetails(getOperationDetails(*opRecord));
+        QString displayName = getOperationName(entry.type);
+        if (document_) {
+            const auto metadata = document_->operationMetadata(entry.opId);
+            if (metadata.has_value() && !metadata->uiAlias.isEmpty()) {
+                displayName = metadata->uiAlias;
+            }
+        }
+        card->setName(displayName);
+        QString details = getOperationDetails(*opRecord);
+        if (entry.dirty) {
+            details = details.isEmpty()
+                ? tr("Pending")
+                : QString("%1 • %2").arg(details, tr("Pending"));
+            card->setToolTip(tr("Pending regeneration: this step and later steps are not applied yet."));
+        } else {
+            card->setToolTip(QString());
+        }
+        card->setDetails(details);
     } else {
         card->setName("Unknown");
     }
@@ -417,6 +434,25 @@ bool HistoryPanel::isEditableType(app::OperationType type) const {
            type == app::OperationType::Revolve;
 }
 
+bool HistoryPanel::isReplayOnly(const std::string& opId) const {
+    if (!document_) {
+        return false;
+    }
+    const auto metadata = document_->operationMetadata(opId);
+    return metadata.has_value() && metadata->replayOnly;
+}
+
+bool HistoryPanel::isDirty(const std::string& opId) const {
+    if (!document_) {
+        return false;
+    }
+    const int index = document_->operationIndex(opId);
+    if (index < 0) {
+        return false;
+    }
+    return static_cast<std::size_t>(index) >= document_->appliedOpCount();
+}
+
 void HistoryPanel::onItemClicked(QTreeWidgetItem* item, int) {
     // Update selection state for all cards
     for (auto& entry : entries_) {
@@ -437,7 +473,7 @@ void HistoryPanel::onItemDoubleClicked(QTreeWidgetItem* item, int) {
 
     for (const auto& op : document_->operations()) {
         if (op.opId == entry->opId) {
-            if (isEditableType(op.type)) {
+            if (isEditableType(op.type) && !isReplayOnly(entry->opId) && !isDirty(entry->opId)) {
                 showEditDialog(entry->opId);
             }
             break;
@@ -478,11 +514,14 @@ void HistoryPanel::showContextMenu(const QPoint& pos, QTreeWidgetItem* item) {
 
     QMenu menu;
 
-    if (isEditableType(opRecord->type)) {
+    if (isEditableType(opRecord->type) && !isReplayOnly(entry->opId) && !isDirty(entry->opId)) {
         QAction* editAction = menu.addAction(tr("Edit Parameters..."));
         connect(editAction, &QAction::triggered, this, [this, entry]() {
             showEditDialog(entry->opId);
         });
+    } else if (isDirty(entry->opId)) {
+        QAction* pendingAction = menu.addAction(tr("Edit Parameters (Pending Regeneration)"));
+        pendingAction->setEnabled(false);
     }
 
     menu.addSeparator();
@@ -607,4 +646,3 @@ void HistoryPanel::onOperationSuppressed(const QString& opId, bool suppressed) {
 }
 
 } // namespace onecad::ui
-

@@ -17,7 +17,14 @@ RollbackCommand::RollbackCommand(Document* document, const std::string& targetOp
 bool RollbackCommand::execute() {
     if (!document_) return false;
 
+    const int targetIndex = document_->operationIndex(targetOpId_);
+    if (targetIndex < 0) {
+        return false;
+    }
+
     previousSuppression_.clear();
+    previousAppliedOpCount_ = document_->appliedOpCount();
+    targetAppliedOpCount_ = static_cast<std::size_t>(targetIndex) + 1;
 
     // Build dependency graph
     history::DependencyGraph graph;
@@ -33,8 +40,10 @@ bool RollbackCommand::execute() {
         document_->setOperationSuppressed(opId, true);
     }
 
+    document_->setAppliedOpCount(targetAppliedOpCount_);
+
     history::RegenerationEngine engine(document_);
-    engine.regenerateAll();
+    engine.regenerateToAppliedCount(document_->appliedOpCount());
 
     document_->setModified(true);
     return true;
@@ -48,8 +57,10 @@ bool RollbackCommand::undo() {
         document_->setOperationSuppressed(opId, wasSuppressed);
     }
 
+    document_->setAppliedOpCount(previousAppliedOpCount_);
+
     history::RegenerationEngine engine(document_);
-    engine.regenerateAll();
+    engine.regenerateToAppliedCount(document_->appliedOpCount());
 
     document_->setModified(true);
     return true;

@@ -2364,6 +2364,56 @@ std::string Viewport::resolveActiveSketchId() const {
     return {};
 }
 
+std::vector<app::selection::SelectionItem> Viewport::modelSelection() const {
+    std::vector<app::selection::SelectionItem> result;
+    if (!m_selectionManager) {
+        return result;
+    }
+
+    const auto& current = m_selectionManager->selection();
+    result.reserve(current.size());
+    for (const auto& item : current) {
+        switch (item.kind) {
+            case app::selection::SelectionKind::Vertex:
+            case app::selection::SelectionKind::Edge:
+            case app::selection::SelectionKind::Face:
+            case app::selection::SelectionKind::Body:
+                result.push_back(item);
+                break;
+            default:
+                break;
+        }
+    }
+    return result;
+}
+
+std::vector<app::selection::SelectionItem> Viewport::sketchSelection() const {
+    std::vector<app::selection::SelectionItem> result;
+    if (!m_selectionManager) {
+        return result;
+    }
+
+    const auto& current = m_selectionManager->selection();
+    result.reserve(current.size());
+    for (const auto& item : current) {
+        switch (item.kind) {
+            case app::selection::SelectionKind::SketchPoint:
+            case app::selection::SelectionKind::SketchEdge:
+            case app::selection::SelectionKind::SketchRegion:
+            case app::selection::SelectionKind::SketchConstraint:
+                result.push_back(item);
+                break;
+            default:
+                break;
+        }
+    }
+    return result;
+}
+
+int Viewport::suppressedConstraintMarkerCount() const {
+    return static_cast<int>(m_suppressedConstraintMarkers.size());
+}
+
 void Viewport::updateSketchSelectionFromManager() {
     if (!m_sketchRenderer) {
         return;
@@ -2371,6 +2421,8 @@ void Viewport::updateSketchSelectionFromManager() {
 
     m_sketchRenderer->clearSelection();
     m_sketchRenderer->clearRegionSelection();
+    m_sketchRenderer->setSelectedConstraint({});
+    syncSuppressedConstraintMarkers();
 
     const bool hasSketchContext = m_inSketchMode || (m_referenceSketch != nullptr);
     if (!hasSketchContext || !m_selectionManager) {
@@ -2381,6 +2433,10 @@ void Viewport::updateSketchSelectionFromManager() {
     for (const auto& item : m_selectionManager->selection()) {
         if (item.kind == app::selection::SelectionKind::SketchRegion) {
             m_sketchRenderer->toggleRegionSelection(item.id.elementId);
+            continue;
+        }
+        if (item.kind == app::selection::SelectionKind::SketchConstraint) {
+            m_sketchRenderer->setSelectedConstraint(item.id.elementId);
             continue;
         }
         if (m_inSketchMode &&
@@ -2502,6 +2558,7 @@ void Viewport::updateSketchHoverFromManager() {
     }
 
     m_sketchRenderer->setHoverEntity("");
+    m_sketchRenderer->setHoverConstraint({});
     m_sketchRenderer->clearRegionHover();
 
     const bool hasSketchContext = m_inSketchMode || (m_referenceSketch != nullptr);
@@ -2520,6 +2577,9 @@ void Viewport::updateSketchHoverFromManager() {
         case app::selection::SelectionKind::SketchRegion:
             m_sketchRenderer->setRegionHover(hover->id.elementId);
             break;
+        case app::selection::SelectionKind::SketchConstraint:
+            m_sketchRenderer->setHoverConstraint(hover->id.elementId);
+            break;
         case app::selection::SelectionKind::SketchPoint:
         case app::selection::SelectionKind::SketchEdge:
             if (m_inSketchMode) {
@@ -2531,6 +2591,64 @@ void Viewport::updateSketchHoverFromManager() {
     }
 
     update();
+}
+
+void Viewport::selectSketchConstraint(const QString& constraintId) {
+    if (!m_selectionManager || !m_sketchRenderer || !m_inSketchMode || constraintId.isEmpty()) {
+        return;
+    }
+
+    app::selection::SelectionItem item;
+    item.kind = app::selection::SelectionKind::SketchConstraint;
+    item.id.ownerId = resolveActiveSketchId();
+    item.id.elementId = constraintId.toStdString();
+    m_selectionManager->replaceSelection({item});
+    m_sketchRenderer->setSelectedConstraint(item.id.elementId);
+    update();
+}
+
+void Viewport::suppressConstraintMarker(const QString& constraintId) {
+    if (constraintId.isEmpty()) {
+        return;
+    }
+    m_suppressedConstraintMarkers.insert(constraintId.toStdString());
+    syncSuppressedConstraintMarkers();
+    emit sketchSelectionChanged();
+    update();
+}
+
+void Viewport::unsuppressConstraintMarker(const QString& constraintId) {
+    if (constraintId.isEmpty()) {
+        return;
+    }
+    m_suppressedConstraintMarkers.erase(constraintId.toStdString());
+    syncSuppressedConstraintMarkers();
+    emit sketchSelectionChanged();
+    update();
+}
+
+void Viewport::clearSuppressedConstraintMarkers() {
+    if (m_suppressedConstraintMarkers.empty()) {
+        return;
+    }
+    m_suppressedConstraintMarkers.clear();
+    syncSuppressedConstraintMarkers();
+    emit sketchSelectionChanged();
+    update();
+}
+
+void Viewport::syncSuppressedConstraintMarkers() {
+    if (!m_sketchRenderer) {
+        return;
+    }
+
+    std::vector<core::sketch::ConstraintID> suppressed;
+    suppressed.reserve(m_suppressedConstraintMarkers.size());
+    for (const auto& id : m_suppressedConstraintMarkers) {
+        suppressed.push_back(id);
+    }
+    std::sort(suppressed.begin(), suppressed.end());
+    m_sketchRenderer->setSuppressedConstraints(suppressed);
 }
 
 app::selection::PickResult Viewport::buildSketchPickResult(const QPoint& screenPos) const {

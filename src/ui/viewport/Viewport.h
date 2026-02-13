@@ -277,7 +277,6 @@ private:
     void setExtrudeToolActive(bool active);
     void setRevolveToolActive(bool active);
     void setFilletToolActive(bool active);
-    void setPushPullToolActive(bool active);
     void setShellToolActive(bool active);
 
     std::unique_ptr<render::Camera3D> m_camera;

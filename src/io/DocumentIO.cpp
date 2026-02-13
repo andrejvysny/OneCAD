@@ -77,8 +77,7 @@ bool DocumentIO::saveDocument(Package* package, const app::Document* document) {
     }
     
     // 5. Save operation history
-    if (!HistoryIO::saveHistory(package, document->operations(),
-                                document->operationSuppressionState())) {
+    if (!HistoryIO::saveHistory(package, document)) {
         return false;
     }
     
@@ -240,7 +239,7 @@ std::unique_ptr<app::Document> DocumentIO::loadDocument(Package* package,
         document->setBaseBodyIds(baseBodies);
 
         app::history::RegenerationEngine regen(document.get());
-        auto result = regen.regenerateAll();
+        auto result = regen.regenerateToAppliedCount(document->appliedOpCount());
 
         if (result.status == app::history::RegenStatus::CriticalFailure) {
             // All ops failed - store for UI to show RegenFailureDialog

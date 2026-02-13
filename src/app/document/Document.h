@@ -18,6 +18,7 @@
 #include <TopoDS_Shape.hxx>
 
 #include "OperationRecord.h"
+#include "OperationMetadata.h"
 #include "../../core/sketch/Sketch.h"
 #include "../../kernel/elementmap/ElementMap.h"
 #include "../../render/scene/SceneMeshStore.h"
@@ -138,6 +139,12 @@ public:
     const std::unordered_map<std::string, std::string>& operationFailures() const {
         return operationFailures_;
     }
+    bool setOperationMetadata(const std::string& opId, const OperationMetadata& metadata);
+    std::optional<OperationMetadata> operationMetadata(const std::string& opId) const;
+    void clearOperationMetadata(const std::string& opId);
+    void clearAllOperationMetadata();
+    void setAppliedOpCount(std::size_t count);
+    std::size_t appliedOpCount() const { return appliedOpCount_; }
     const std::vector<OperationRecord>& operations() const { return operations_; }
 
     // Visibility management
@@ -176,6 +183,7 @@ signals:
     void operationSuppressionChanged(const QString& opId, bool suppressed);
     void operationFailed(const QString& opId, const QString& reason);
     void operationSucceeded(const QString& opId);
+    void appliedOpCountChanged(qulonglong appliedOpCount);
 
 private:
     struct BodyEntry {
@@ -202,6 +210,8 @@ private:
     std::vector<OperationRecord> operations_;
     std::unordered_set<std::string> suppressedOperations_;
     std::unordered_map<std::string, std::string> operationFailures_;
+    std::unordered_map<std::string, OperationMetadata> operationMetadata_;
+    std::size_t appliedOpCount_ = 0;
     kernel::elementmap::ElementMap elementMap_;
     std::unique_ptr<render::SceneMeshStore> sceneMeshStore_;
     std::unique_ptr<render::TessellationCache> tessellationCache_;

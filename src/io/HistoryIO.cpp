@@ -13,6 +13,9 @@
 #include <QJsonArray>
 #include <QCryptographicHash>
 
+#include <algorithm>
+#include <optional>
+
 namespace onecad::io {
 
 using namespace app;
@@ -87,15 +90,136 @@ BooleanMode stringToBooleanMode(const QString& str) {
     return BooleanMode::NewBody;
 }
 
+QJsonObject serializeDeterminismSettings(const DeterminismSettings& settings) {
+    QJsonObject json;
+    json["parallel"] = settings.parallel;
+    if (!settings.occtOptionsHash.isEmpty()) {
+        json["occtOptionsHash"] = settings.occtOptionsHash;
+    }
+    if (!settings.tolerancePolicyHash.isEmpty()) {
+        json["tolerancePolicyHash"] = settings.tolerancePolicyHash;
+    }
+    if (!settings.solverPolicyHash.isEmpty()) {
+        json["solverPolicyHash"] = settings.solverPolicyHash;
+    }
+    return json;
+}
+
+QJsonObject serializeSelectionAnchor(const SelectionAnchor& anchor) {
+    QJsonObject json;
+    json["hasWorldPoint"] = anchor.hasWorldPoint;
+    if (anchor.hasWorldPoint) {
+        json["x"] = anchor.x;
+        json["y"] = anchor.y;
+        json["z"] = anchor.z;
+    }
+    json["hasUv"] = anchor.hasUv;
+    if (anchor.hasUv) {
+        json["u"] = anchor.u;
+        json["v"] = anchor.v;
+    }
+    return json;
+}
+
+QJsonObject serializeOperationMetadata(const OperationMetadata& metadata) {
+    QJsonObject json;
+    json["recordSchemaVersion"] = static_cast<int>(metadata.recordSchemaVersion);
+    json["stepIndex"] = static_cast<int>(metadata.stepIndex);
+    if (!metadata.uiAlias.isEmpty()) {
+        json["uiAlias"] = metadata.uiAlias;
+    }
+    json["replayOnly"] = metadata.replayOnly;
+    json["determinism"] = serializeDeterminismSettings(metadata.determinism);
+    json["anchor"] = serializeSelectionAnchor(metadata.anchor);
+    return json;
+}
+
+std::optional<OperationMetadata> deserializeOperationMetadata(const QJsonObject& json) {
+    if (!json.contains("meta") || !json["meta"].isObject()) {
+        return std::nullopt;
+    }
+
+    OperationMetadata metadata;
+    const QJsonObject meta = json["meta"].toObject();
+    metadata.recordSchemaVersion = static_cast<std::uint32_t>(
+        std::max(0, meta["recordSchemaVersion"].toInt(1)));
+    metadata.stepIndex = static_cast<std::uint32_t>(
+        std::max(0, meta["stepIndex"].toInt(0)));
+    metadata.uiAlias = meta["uiAlias"].toString();
+    metadata.replayOnly = meta["replayOnly"].toBool(false);
+
+    if (meta.contains("determinism") && meta["determinism"].isObject()) {
+        const QJsonObject det = meta["determinism"].toObject();
+        metadata.determinism.parallel = det["parallel"].toBool(false);
+        metadata.determinism.occtOptionsHash = det["occtOptionsHash"].toString();
+        metadata.determinism.tolerancePolicyHash = det["tolerancePolicyHash"].toString();
+        metadata.determinism.solverPolicyHash = det["solverPolicyHash"].toString();
+    }
+
+    if (meta.contains("anchor") && meta["anchor"].isObject()) {
+        const QJsonObject anchor = meta["anchor"].toObject();
+        metadata.anchor.hasWorldPoint = anchor["hasWorldPoint"].toBool(false);
+        metadata.anchor.x = anchor["x"].toDouble();
+        metadata.anchor.y = anchor["y"].toDouble();
+        metadata.anchor.z = anchor["z"].toDouble();
+        metadata.anchor.hasUv = anchor["hasUv"].toBool(false);
+        metadata.anchor.u = anchor["u"].toDouble();
+        metadata.anchor.v = anchor["v"].toDouble();
+    }
+
+    return metadata;
+}
+
 } // anonymous namespace
+
+bool HistoryIO::saveHistory(Package* package, const Document* document) {
+    if (!document) {
+        return false;
+    }
+
+    // Write ops.jsonl - one JSON object per line
+    QByteArray opsData;
+    for (const auto& op : document->operations()) {
+        const auto metadata = document->operationMetadata(op.opId);
+        QJsonObject opJson = serializeOperation(op, metadata ? &(*metadata) : nullptr);
+        QJsonDocument doc(opJson);
+        opsData.append(doc.toJson(QJsonDocument::Compact));
+        opsData.append('\n');
+    }
+
+    if (!package->writeFile("history/ops.jsonl", opsData)) {
+        return false;
+    }
+
+    QJsonObject stateJson;
+    QJsonObject cursor;
+    cursor["appliedOpCount"] = static_cast<int>(document->appliedOpCount());
+    if (document->appliedOpCount() > 0 && !document->operations().empty()) {
+        const std::size_t lastIndex = document->appliedOpCount() - 1;
+        if (lastIndex < document->operations().size()) {
+            cursor["lastAppliedOpId"] = QString::fromStdString(document->operations()[lastIndex].opId);
+        }
+    }
+    stateJson["cursor"] = cursor;
+    QJsonArray suppressedOps;
+    for (const auto& [opId, suppressed] : document->operationSuppressionState()) {
+        if (suppressed) {
+            suppressedOps.append(QString::fromStdString(opId));
+        }
+    }
+    stateJson["suppressedOps"] = suppressedOps;
+
+    return package->writeFile("history/state.json", JSONUtils::toCanonicalJson(stateJson));
+}
 
 bool HistoryIO::saveHistory(Package* package,
                             const std::vector<OperationRecord>& operations,
-                            const std::unordered_map<std::string, bool>& suppressionState) {
+                            const std::unordered_map<std::string, bool>& suppressionState,
+                            std::size_t appliedOpCount) {
     // Write ops.jsonl - one JSON object per line
     QByteArray opsData;
     for (const auto& op : operations) {
-        QJsonObject opJson = serializeOperation(op);
+        QJsonObject opJson = serializeOperation(op, nullptr);
         QJsonDocument doc(opJson);
         opsData.append(doc.toJson(QJsonDocument::Compact));
         opsData.append('\n');
@@ -108,9 +232,14 @@ bool HistoryIO::saveHistory(Package* package,
     // Write state.json - undo/redo cursor
     QJsonObject stateJson;
     QJsonObject cursor;
-    cursor["appliedOpCount"] = static_cast<int>(operations.size());
-    if (!operations.empty()) {
-        cursor["lastAppliedOpId"] = QString::fromStdString(operations.back().opId);
+    const std::size_t resolvedAppliedOpCount =
+        (appliedOpCount == std::numeric_limits<std::size_t>::max())
+            ? operations.size()
+            : std::min(appliedOpCount, operations.size());
+    cursor["appliedOpCount"] = static_cast<int>(resolvedAppliedOpCount);
+    if (resolvedAppliedOpCount > 0 && !operations.empty()) {
+        cursor["lastAppliedOpId"] =
+            QString::fromStdString(operations[resolvedAppliedOpCount - 1].opId);
     }
     stateJson["cursor"] = cursor;
     QJsonArray suppressedOps;
@@ -127,6 +256,7 @@ bool HistoryIO::saveHistory(Package* package,
 bool HistoryIO::loadHistory(Package* package,
                             Document* document,
                             QString& errorMessage) {
+    bool appliedCursorLoaded = false;
     // Read ops.jsonl
     QByteArray opsData = package->readFile("history/ops.jsonl");
     if (opsData.isEmpty()) {
@@ -148,6 +278,16 @@ bool HistoryIO::loadHistory(Package* package,
         
         OperationRecord op = deserializeOperation(doc.object());
         document->addOperation(op);
+        auto metadata = deserializeOperationMetadata(doc.object());
+        if (metadata.has_value()) {
+            document->setOperationMetadata(op.opId, *metadata);
+        } else if (op.type == OperationType::Shell) {
+            // Legacy shell operations are replay-only.
+            OperationMetadata fallback;
+            fallback.uiAlias = QStringLiteral("Shell");
+            fallback.replayOnly = true;
+            document->setOperationMetadata(op.opId, fallback);
+        }
     }
 
     // Read state.json (suppression + cursor)
@@ -164,13 +304,27 @@ bool HistoryIO::loadHistory(Package* package,
                 suppressionState[opVal.toString().toStdString()] = true;
             }
             document->setOperationSuppressionState(suppressionState);
+
+            if (stateJson.contains("cursor") && stateJson["cursor"].isObject()) {
+                const QJsonObject cursor = stateJson["cursor"].toObject();
+                const std::size_t applied = static_cast<std::size_t>(
+                    std::max(0, cursor["appliedOpCount"].toInt(static_cast<int>(document->operations().size()))));
+                document->setAppliedOpCount(applied);
+                appliedCursorLoaded = true;
+            }
         }
+    }
+
+    if (!appliedCursorLoaded && document->appliedOpCount() == 0 && !document->operations().empty()) {
+        // Legacy state files may omit cursor; default remains "all applied".
+        document->setAppliedOpCount(document->operations().size());
     }
     
     return true;
 }
 
-QJsonObject HistoryIO::serializeOperation(const OperationRecord& op) {
+QJsonObject HistoryIO::serializeOperation(const OperationRecord& op,
+                                          const OperationMetadata* metadata) {
     QJsonObject json;
     
     json["opId"] = QString::fromStdString(op.opId);
@@ -271,6 +425,10 @@ QJsonObject HistoryIO::serializeOperation(const OperationRecord& op) {
         resultBodies.append(QString::fromStdString(bodyId));
     }
     json["resultBodyIds"] = resultBodies;
+
+    if (metadata) {
+        json["meta"] = serializeOperationMetadata(*metadata);
+    }
     
     return json;
 }

@@ -15,7 +15,7 @@ inline bool regenerateDocument(Document* document) {
         return false;
     }
     history::RegenerationEngine engine(document);
-    auto result = engine.regenerateAll();
+    auto result = engine.regenerateToAppliedCount(document->appliedOpCount());
     return result.status != history::RegenStatus::CriticalFailure;
 }
 
