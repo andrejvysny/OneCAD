@@ -16,27 +16,27 @@ layout(location = 1) in vec4 aColor;
 uniform mat4 uMVP;
 
 out vec4 vColor;
-out vec3 vWorldPos;
+out vec2 vPlanePos;
 
 void main() {
     gl_Position = uMVP * vec4(aPos, 1.0);
     vColor = aColor;
-    vWorldPos = aPos;
+    vPlanePos = aPos.xy;
 }
 )";
 
 static const char* fragmentShaderSource = R"(
 #version 410 core
 in vec4 vColor;
-in vec3 vWorldPos;
+in vec2 vPlanePos;
 out vec4 FragColor;
 
-uniform vec3 uFadeOrigin;
+uniform vec2 uFadeOriginPlane;
 uniform float uFadeStart;
 uniform float uFadeEnd;
 
 void main() {
-    float dist = length(vWorldPos.xy - uFadeOrigin.xy);
+    float dist = length(vPlanePos - uFadeOriginPlane);
     float fade = 1.0 - smoothstep(uFadeStart, uFadeEnd, dist);
     FragColor = vec4(vColor.rgb, vColor.a * fade);
 }
@@ -196,13 +196,12 @@ void Grid3D::buildGrid(float minorSpacing,
         bool isMajor = (stepIndex % majorStep == 0);
 
         if (qFuzzyIsNull(y) && originInY) {
-            // Coordinate Mapping: Geom X- aligns with User Y+
-            // Draw User Y Axis (Green) along negative Geom X
-            if (endX > 0.0f) {
-                addLine(0.0f, 0.0f, 0.0f, endX, 0.0f, 0.0f, m_majorColor); // Geom X+ (Gray)
-            }
+            // Local +X axis is red, local -X remains major grid color.
             if (startX < 0.0f) {
-                addLine(0.0f, 0.0f, 0.0f, startX, 0.0f, 0.0f, m_yAxisColor); // Geom X- (Green)
+                addLine(0.0f, 0.0f, 0.0f, startX, 0.0f, 0.0f, m_majorColor);
+            }
+            if (endX > 0.0f) {
+                addLine(0.0f, 0.0f, 0.0f, endX, 0.0f, 0.0f, m_xAxisColor);
             }
         } else {
             QColor color = isMajor ? m_majorColor : m_minorColor;
@@ -217,13 +216,12 @@ void Grid3D::buildGrid(float minorSpacing,
         bool isMajor = (stepIndex % majorStep == 0);
 
         if (qFuzzyIsNull(x) && originInX) {
-            // Coordinate Mapping: Geom Y+ aligns with User X+
-            // Draw User X Axis (Red) along positive Geom Y
+            // Local +Y axis is green, local -Y remains major grid color.
             if (startY < 0.0f) {
-                addLine(0.0f, startY, 0.0f, 0.0f, 0.0f, 0.0f, m_majorColor); // Geom Y- (Gray)
+                addLine(0.0f, startY, 0.0f, 0.0f, 0.0f, 0.0f, m_majorColor);
             }
             if (endY > 0.0f) {
-                addLine(0.0f, 0.0f, 0.0f, 0.0f, endY, 0.0f, m_xAxisColor); // Geom Y+ (Red)
+                addLine(0.0f, 0.0f, 0.0f, 0.0f, endY, 0.0f, m_yAxisColor);
             }
         } else {
             QColor color = isMajor ? m_majorColor : m_minorColor;
@@ -283,20 +281,20 @@ void Grid3D::buildGrid(float minorSpacing,
     m_vao.release();
 }
 
-void Grid3D::render(const QMatrix4x4& viewProjection,
+void Grid3D::render(const QMatrix4x4& mvp,
                     float pixelScale,
-                    const QVector2D& viewMin,
-                    const QVector2D& viewMax,
-                    const QVector2D& fadeOrigin) {
+                    const QVector2D& planeMin,
+                    const QVector2D& planeMax,
+                    const QVector2D& fadeOriginPlane) {
     if (!m_visible || !m_initialized || m_lineCount == 0) return;
 
     const float minorSpacing = calculateSpacing(pixelScale);
     const float majorSpacing = minorSpacing * 5.0f;
 
-    float minX = viewMin.x();
-    float maxX = viewMax.x();
-    float minY = viewMin.y();
-    float maxY = viewMax.y();
+    float minX = planeMin.x();
+    float maxX = planeMax.x();
+    float minY = planeMin.y();
+    float maxY = planeMax.y();
     if (minX > maxX) {
         std::swap(minX, maxX);
     }
@@ -343,8 +341,8 @@ void Grid3D::render(const QMatrix4x4& viewProjection,
     }
     
     m_shader->bind();
-    m_shader->setUniformValue("uMVP", viewProjection);
-    m_shader->setUniformValue("uFadeOrigin", QVector3D(fadeOrigin.x(), fadeOrigin.y(), 0.0f));
+    m_shader->setUniformValue("uMVP", mvp);
+    m_shader->setUniformValue("uFadeOriginPlane", fadeOriginPlane);
 
     float gridHalfSpan = 0.5f * qMax(endX - startX, endY - startY);
     float fadeStart = qMax(viewHalf * 0.6f, minorSpacing * 12.0f);

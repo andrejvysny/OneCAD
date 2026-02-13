@@ -17,7 +17,7 @@ namespace render {
 /**
  * @brief Adaptive 3D grid for CAD viewport.
  * 
- * Renders XY plane grid with:
+ * Renders a plane-local grid with:
  * - Auto-spacing based on camera distance (per spec section 7.2)
  * - Major/minor line distinction
  * - Origin axes in RGB colors
@@ -28,11 +28,11 @@ public:
     ~Grid3D();
 
     void initialize();
-    void render(const QMatrix4x4& viewProjection,
+    void render(const QMatrix4x4& mvp,
                 float pixelScale,
-                const QVector2D& viewMin,
-                const QVector2D& viewMax,
-                const QVector2D& fadeOrigin);
+                const QVector2D& planeMin,
+                const QVector2D& planeMax,
+                const QVector2D& fadeOriginPlane);
     void cleanup();
     
     // Appearance

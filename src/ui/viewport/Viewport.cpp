@@ -173,16 +173,19 @@ bool projectToScreen(const QMatrix4x4& viewProjection,
     return true;
 }
 
-bool intersectRayWithPlaneZ0(const QVector3D& origin,
-                             const QVector3D& direction,
-                             QVector3D* outPoint,
-                             float* outDistance) {
+bool intersectRayWithPlane(const QVector3D& origin,
+                           const QVector3D& direction,
+                           const QVector3D& planeOrigin,
+                           const QVector3D& planeNormal,
+                           QVector3D* outPoint,
+                           float* outDistance) {
     constexpr float kEpsilon = 1e-6f;
-    if (std::abs(direction.z()) < kEpsilon) {
+    float denom = QVector3D::dotProduct(direction, planeNormal);
+    if (std::abs(denom) < kEpsilon) {
         return false;
     }
 
-    float t = (0.0f - origin.z()) / direction.z();
+    float t = QVector3D::dotProduct(planeOrigin - origin, planeNormal) / denom;
     if (t < 0.0f) {
         return false;
     }
@@ -196,7 +199,35 @@ bool intersectRayWithPlaneZ0(const QVector3D& origin,
     return true;
 }
 
-bool computePlaneBoundsXY(const QMatrix4x4& viewProjection, QRectF* outBounds) {
+QVector2D worldToPlaneCoords(const QVector3D& worldPoint,
+                             const QVector3D& planeOrigin,
+                             const QVector3D& planeXAxis,
+                             const QVector3D& planeYAxis) {
+    QVector3D relative = worldPoint - planeOrigin;
+    return {
+        QVector3D::dotProduct(relative, planeXAxis),
+        QVector3D::dotProduct(relative, planeYAxis)
+    };
+}
+
+QMatrix4x4 buildPlaneModelMatrix(const QVector3D& planeOrigin,
+                                 const QVector3D& planeXAxis,
+                                 const QVector3D& planeYAxis,
+                                 const QVector3D& planeNormal) {
+    QMatrix4x4 model;
+    model.setColumn(0, QVector4D(planeXAxis, 0.0f));
+    model.setColumn(1, QVector4D(planeYAxis, 0.0f));
+    model.setColumn(2, QVector4D(planeNormal, 0.0f));
+    model.setColumn(3, QVector4D(planeOrigin, 1.0f));
+    return model;
+}
+
+bool computePlaneBoundsOnPlane(const QMatrix4x4& viewProjection,
+                               const QVector3D& planeOrigin,
+                               const QVector3D& planeNormal,
+                               const QVector3D& planeXAxis,
+                               const QVector3D& planeYAxis,
+                               QRectF* outBounds) {
     bool invertible = false;
     QMatrix4x4 inverse = viewProjection.inverted(&invertible);
     if (!invertible) {
@@ -207,7 +238,6 @@ bool computePlaneBoundsXY(const QMatrix4x4& viewProjection, QRectF* outBounds) {
     QVector2D maxPoint(-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max());
     int hitCount = 0;
 
-    constexpr float kPlaneZ = 0.0f;
     constexpr float kEpsilon = 1e-6f;
     const float ndc[2] = { -1.0f, 1.0f };
 
@@ -224,11 +254,12 @@ bool computePlaneBoundsXY(const QMatrix4x4& viewProjection, QRectF* outBounds) {
             QVector3D p1 = farPoint.toVector3D() / farPoint.w();
             QVector3D dir = p1 - p0;
 
-            if (std::abs(dir.z()) < kEpsilon) {
+            float denom = QVector3D::dotProduct(dir, planeNormal);
+            if (std::abs(denom) < kEpsilon) {
                 continue;
             }
 
-            float t = (kPlaneZ - p0.z()) / dir.z();
+            float t = QVector3D::dotProduct(planeOrigin - p0, planeNormal) / denom;
             if (t < 0.0f) {
                 continue;
             }
@@ -237,10 +268,11 @@ bool computePlaneBoundsXY(const QMatrix4x4& viewProjection, QRectF* outBounds) {
             if (!std::isfinite(hit.x()) || !std::isfinite(hit.y()) || !std::isfinite(hit.z())) {
                 continue;
             }
-            minPoint.setX(std::min(minPoint.x(), hit.x()));
-            minPoint.setY(std::min(minPoint.y(), hit.y()));
-            maxPoint.setX(std::max(maxPoint.x(), hit.x()));
-            maxPoint.setY(std::max(maxPoint.y(), hit.y()));
+            QVector2D planePoint = worldToPlaneCoords(hit, planeOrigin, planeXAxis, planeYAxis);
+            minPoint.setX(std::min(minPoint.x(), planePoint.x()));
+            minPoint.setY(std::min(minPoint.y(), planePoint.y()));
+            maxPoint.setX(std::max(maxPoint.x(), planePoint.x()));
+            maxPoint.setY(std::max(maxPoint.y(), planePoint.y()));
             ++hitCount;
         }
     }
@@ -523,13 +555,33 @@ void Viewport::paintGL() {
     const double viewExtent = 0.5 * maxDimension * ratio * pixelScale;
 
     // Render grid
+    sketch::SketchPlane gridPlane =
+        (m_inSketchMode && m_activeSketch) ? m_activeSketch->getPlane() : sketch::SketchPlane::XY();
+    PlaneAxes gridAxes = buildPlaneAxes(gridPlane);
+    QVector3D gridOrigin(gridPlane.origin.x, gridPlane.origin.y, gridPlane.origin.z);
+    QVector3D gridNormal = gridAxes.normal;
+    QVector3D gridXAxis = gridAxes.xAxis;
+    QVector3D gridYAxis = gridAxes.yAxis;
+
+    QMatrix4x4 gridModel = buildPlaneModelMatrix(gridOrigin, gridXAxis, gridYAxis, gridNormal);
+    QMatrix4x4 gridMvp = viewProjection * gridModel;
+
     QVector3D target = m_camera->target();
     QVector3D forward = m_camera->forward();
     QVector3D position = m_camera->position();
 
     float planeDistance = dist;
-    QVector3D planeAnchor(target.x(), target.y(), 0.0f);
-    intersectRayWithPlaneZ0(position, forward, &planeAnchor, &planeDistance);
+    QVector3D planeAnchorWorld = gridOrigin;
+    bool hasPlaneHit = intersectRayWithPlane(position,
+                                             forward,
+                                             gridOrigin,
+                                             gridNormal,
+                                             &planeAnchorWorld,
+                                             &planeDistance);
+    if (!hasPlaneHit) {
+        float targetSignedDistance = QVector3D::dotProduct(target - gridOrigin, gridNormal);
+        planeAnchorWorld = target - gridNormal * targetSignedDistance;
+    }
 
     float depthScale = 1.0f;
     if (m_camera->projectionType() == render::Camera3D::ProjectionType::Perspective &&
@@ -538,13 +590,19 @@ void Viewport::paintGL() {
     }
     depthScale = std::clamp(depthScale, kGridDepthScaleMin, kGridDepthScaleMax);
 
+    QVector2D planeAnchor = worldToPlaneCoords(planeAnchorWorld, gridOrigin, gridXAxis, gridYAxis);
     float viewHalf = static_cast<float>(viewExtent) * depthScale;
     QRectF fallbackBounds(QPointF(planeAnchor.x() - viewHalf, planeAnchor.y() - viewHalf),
                           QPointF(planeAnchor.x() + viewHalf, planeAnchor.y() + viewHalf));
 
     QRectF gridBounds = fallbackBounds;
     QRectF frustumBounds;
-    bool hasFrustumBounds = computePlaneBoundsXY(viewProjection, &frustumBounds);
+    bool hasFrustumBounds = computePlaneBoundsOnPlane(viewProjection,
+                                                      gridOrigin,
+                                                      gridNormal,
+                                                      gridXAxis,
+                                                      gridYAxis,
+                                                      &frustumBounds);
     if (hasFrustumBounds) {
         float maxHalf = 0.5f * static_cast<float>(qMax(frustumBounds.width(),
                                                        frustumBounds.height()));
@@ -567,13 +625,13 @@ void Viewport::paintGL() {
     float minY = static_cast<float>(gridBounds.top());
     float maxY = static_cast<float>(gridBounds.bottom());
 
-    QVector2D fadeOrigin(position.x(), position.y());
+    QVector2D fadeOriginPlane = worldToPlaneCoords(position, gridOrigin, gridXAxis, gridYAxis);
 
-    m_grid->render(viewProjection,
+    m_grid->render(gridMvp,
                    static_cast<float>(pixelScale),
                    QVector2D(minX, minY),
                    QVector2D(maxX, maxY),
-                   fadeOrigin);
+                   fadeOriginPlane);
 
     if (m_bodyRenderer) {
         render::BodyRenderer::RenderStyle style;
