@@ -4,6 +4,7 @@
 #include <QKeyEvent>
 #include <QLoggingCategory>
 #include <QMouseEvent>
+#include <QNativeGestureEvent>
 #include <QObject>
 #include <QSurfaceFormat>
 #include <QTimer>
@@ -40,6 +41,10 @@ QString eventTypeName(QEvent::Type type) {
             return QStringLiteral("MouseMove");
         case QEvent::Wheel:
             return QStringLiteral("Wheel");
+        case QEvent::Gesture:
+            return QStringLiteral("Gesture");
+        case QEvent::NativeGesture:
+            return QStringLiteral("NativeGesture");
         case QEvent::KeyPress:
             return QStringLiteral("KeyPress");
         case QEvent::KeyRelease:
@@ -138,6 +143,15 @@ protected:
                 << "angleDeltaY=" << wheelEvent->angleDelta().y()
                 << "phase=" << static_cast<int>(wheelEvent->phase())
                 << "inverted=" << wheelEvent->inverted();
+        } else if (type == QEvent::NativeGesture) {
+            const auto* nativeEvent = static_cast<QNativeGestureEvent*>(event);
+            qCDebug(logUiEvents).noquote()
+                << "ui_native_gesture"
+                << "gestureType=" << static_cast<int>(nativeEvent->gestureType())
+                << "fingers=" << nativeEvent->fingerCount()
+                << "value=" << nativeEvent->value()
+                << "deltaX=" << nativeEvent->delta().x()
+                << "deltaY=" << nativeEvent->delta().y();
         }
 
         return QObject::eventFilter(watched, event);

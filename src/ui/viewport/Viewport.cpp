@@ -34,6 +34,7 @@
 #include <QPanGesture>
 #include <QNativeGestureEvent>
 #include <QApplication>
+#include <QLoggingCategory>
 #include <QOpenGLContext>
 #include <QSizePolicy>
 #include <QVector2D>
@@ -59,6 +60,7 @@ namespace ui {
 
 namespace sketch = core::sketch;
 namespace sketchTools = core::sketch::tools;
+Q_LOGGING_CATEGORY(logUiInput, "onecad.ui.input")
 
 namespace {
 constexpr float kOrbitSensitivity = 0.3f;
@@ -67,13 +69,28 @@ constexpr float kTrackpadOrbitScale = 0.35f;
 constexpr float kPinchZoomScale = 1000.0f;
 constexpr float kWheelZoomShiftScale = 0.2f;
 constexpr float kAngleDeltaToPixels = 1.0f / 8.0f;
-constexpr qint64 kNativeZoomPanSuppressMs = 120;
+constexpr qint64 kNativeZoomPostSuppressMs = 120;
+constexpr qint64 kNativeZoomActiveTimeoutMs = 250;
+constexpr float kNativeZoomMinFactor = 0.7f;
+constexpr float kNativeZoomMaxFactor = 1.3f;
+constexpr qreal kNativeZoomScaleValueMin = 0.5;
+constexpr qreal kNativeZoomScaleValueMax = 1.5;
 constexpr float kPlaneSelectSize = 120.0f;
 constexpr float kPlaneSelectHalf = kPlaneSelectSize * 0.5f;
 constexpr float kThumbnailCameraAngle = 45.0f;
 constexpr float kGridDepthScaleMin = 1.0f;
 constexpr float kGridDepthScaleMax = 8.0f;
 constexpr float kGridBoundsMaxScale = 6.0f;
+constexpr std::array<sketch::SnapType, 8> kPointDragSnapTypes = {
+    sketch::SnapType::Vertex,
+    sketch::SnapType::Endpoint,
+    sketch::SnapType::Midpoint,
+    sketch::SnapType::Center,
+    sketch::SnapType::Quadrant,
+    sketch::SnapType::Intersection,
+    sketch::SnapType::OnCurve,
+    sketch::SnapType::Grid
+};
 } // namespace
 
 namespace {
@@ -305,11 +322,17 @@ Viewport::Viewport(QWidget* parent)
     // Prevent partial updates which can cause compositing artifacts on macOS
     setUpdateBehavior(QOpenGLWidget::NoPartialUpdate);
     
-    // Enable gesture recognition for trackpad
+    // Gesture handling:
+    // - macOS: rely on NativeGesture to avoid duplicate pinch streams
+    // - other platforms: keep pinch/pan gesture recognizers
+#if defined(Q_OS_MACOS)
+    qCDebug(logUiInput) << "Using macOS native gesture pipeline";
+#else
     grabGesture(Qt::PinchGesture);
     grabGesture(Qt::PanGesture);
+#endif
 
-    m_nativeZoomTimer.start();
+    m_nativeGestureTimer.start();
 
     // Setup navigation quality timer (debounce end of navigation)
     m_navigationTimer = new QTimer(this);
@@ -1080,6 +1103,7 @@ void Viewport::mousePressEvent(QMouseEvent* event) {
     // Forward to sketch tool if active and left-click (or right-click for cancel)
     if (m_inSketchMode && m_toolManager && m_toolManager->hasActiveTool()) {
         if (event->button() == Qt::LeftButton || event->button() == Qt::RightButton) {
+            syncSnapGridSizeFromCamera();
             sketch::Vec2d sketchPos = screenToSketch(event->pos());
             m_toolManager->handleMousePress(sketchPos, event->button());
             // Still allow right-click to orbit if tool is in Idle state
@@ -1312,6 +1336,7 @@ void Viewport::mouseMoveEvent(QMouseEvent* event) {
 
     // Forward to sketch tool if active
     if (m_inSketchMode && m_toolManager && m_toolManager->hasActiveTool()) {
+        syncSnapGridSizeFromCamera();
         sketch::Vec2d sketchPos = screenToSketch(event->pos());
         m_toolManager->handleMouseMove(sketchPos);
         if (m_selectionManager) {
@@ -1363,7 +1388,8 @@ void Viewport::mouseMoveEvent(QMouseEvent* event) {
             m_activeSketch && m_sketchRenderer && !m_pointDragCandidateId.empty()) {
             sketch::Vec2d sketchPos = screenToSketch(event->pos());
             sketch::Vec2d targetPos = sketchPos;
-            if (event->modifiers() & Qt::ShiftModifier) {
+            const bool shiftConstrainedDrag = (event->modifiers() & Qt::ShiftModifier);
+            if (shiftConstrainedDrag) {
                 std::vector<sketch::Vec2d> freeDirs = m_activeSketch->getPointFreeDirections(m_pointDragCandidateId);
                 if (freeDirs.empty()) {
                     update();
@@ -1381,6 +1407,30 @@ void Viewport::mouseMoveEvent(QMouseEvent* event) {
                     }
                     targetPos.x = currentPos.x + projectedDelta.x;
                     targetPos.y = currentPos.y + projectedDelta.y;
+                }
+            } else if (m_toolManager) {
+                syncSnapGridSizeFromCamera();
+                const auto& baseSnapManager = m_toolManager->snapManager();
+                if (baseSnapManager.isEnabled()) {
+                    sketch::SnapManager dragSnapManager;
+                    dragSnapManager.setAllSnapsEnabled(false);
+                    dragSnapManager.setEnabled(baseSnapManager.isEnabled());
+                    dragSnapManager.setSnapRadius(baseSnapManager.getSnapRadius());
+                    dragSnapManager.setGridSize(baseSnapManager.getGridSize());
+                    dragSnapManager.setGridSnapEnabled(baseSnapManager.isGridSnapEnabled() &&
+                                                       baseSnapManager.isSnapEnabled(sketch::SnapType::Grid));
+                    dragSnapManager.setSpatialHashEnabled(baseSnapManager.isSpatialHashEnabled());
+
+                    for (const auto type : kPointDragSnapTypes) {
+                        dragSnapManager.setSnapEnabled(type, baseSnapManager.isSnapEnabled(type));
+                    }
+
+                    std::unordered_set<sketch::EntityID> excludeFromDragSnap{m_pointDragCandidateId};
+                    const sketch::SnapResult dragSnap = dragSnapManager.findBestSnap(
+                        sketchPos, *m_activeSketch, excludeFromDragSnap);
+                    if (dragSnap.snapped) {
+                        targetPos = dragSnap.position;
+                    }
                 }
             }
             auto result = m_activeSketch->solveWithDrag(m_pointDragCandidateId, targetPos);
@@ -1517,6 +1567,7 @@ void Viewport::mouseReleaseEvent(QMouseEvent* event) {
 
     // Forward to sketch tool if active
     if (m_inSketchMode && m_toolManager && m_toolManager->hasActiveTool()) {
+        syncSnapGridSizeFromCamera();
         sketch::Vec2d sketchPos = screenToSketch(event->pos());
         m_toolManager->handleMouseRelease(sketchPos, event->button());
     }
@@ -1553,12 +1604,15 @@ void Viewport::wheelEvent(QWheelEvent* event) {
     const QPoint angleDelta = event->angleDelta();
     const bool hasPixelDelta = !pixelDelta.isNull();
     const bool hasAngleDelta = !angleDelta.isNull();
-    const bool isTrackpad = (event->phase() != Qt::NoScrollPhase) ||
-        (hasPixelDelta && !hasAngleDelta);
+    const bool isTrackpad = isTrackpadScrollEvent(event);
     const bool pinchActive = m_pinchActive || isNativeZoomActive();
-    const bool zoomModifier = event->modifiers() & Qt::ControlModifier;
+    const bool zoomModifier = (event->modifiers() & Qt::ControlModifier) != 0;
 
     if (isTrackpad && pinchActive) {
+        qCDebug(logUiInput) << "wheel_suppressed_during_zoom"
+                            << "phase=" << static_cast<int>(event->phase())
+                            << "pixelDelta=" << pixelDelta
+                            << "angleDelta=" << angleDelta;
         event->accept();
         return;
     }
@@ -1568,7 +1622,6 @@ void Viewport::wheelEvent(QWheelEvent* event) {
             ? QPointF(pixelDelta)
             : QPointF(angleDelta) * kAngleDeltaToPixels;
         handleZoom(static_cast<float>(delta.y()));
-        m_lastNativeZoomMs = m_nativeZoomTimer.elapsed();
         event->accept();
         return;
     }
@@ -1617,20 +1670,70 @@ void Viewport::leaveEvent(QEvent* event) {
 
 bool Viewport::event(QEvent* event) {
     if (event->type() == QEvent::NativeGesture) {
-        QNativeGestureEvent* gestureEvent = static_cast<QNativeGestureEvent*>(event);
+        auto* gestureEvent = static_cast<QNativeGestureEvent*>(event);
+        const Qt::NativeGestureType gestureType = gestureEvent->gestureType();
 
-        if (gestureEvent->gestureType() == Qt::ZoomNativeGesture && !m_pinchActive) {
-            qreal value = gestureEvent->value();
-            if (value > 0.5 && value < 1.5) {
-                value -= 1.0;
+#if defined(Q_OS_MACOS)
+        if (gestureType == Qt::BeginNativeGesture) {
+            m_nativeGestureSequenceActive = true;
+            m_nativeZoomSuppressUntilMs = -1;
+            qCDebug(logUiInput) << "native_gesture_begin"
+                                << "fingers=" << gestureEvent->fingerCount();
+            return true;
+        }
+
+        if (gestureType == Qt::EndNativeGesture) {
+            m_nativeGestureSequenceActive = false;
+            if (m_nativeZoomActive && m_nativeGestureTimer.isValid()) {
+                m_nativeZoomActive = false;
+                m_nativeZoomSuppressUntilMs =
+                    m_nativeGestureTimer.elapsed() + kNativeZoomPostSuppressMs;
+                clearZoomAnchor();
+                qCDebug(logUiInput) << "native_zoom_end"
+                                    << "suppressUntilMs=" << m_nativeZoomSuppressUntilMs;
             }
-            handleZoom(static_cast<float>(value * kPinchZoomScale));
-            m_lastNativeZoomMs = m_nativeZoomTimer.elapsed();
+            return true;
+        }
+#endif
+
+        if (gestureType == Qt::ZoomNativeGesture && !m_pinchActive) {
+            if (!m_nativeGestureTimer.isValid()) {
+                m_nativeGestureTimer.start();
+            }
+            if (!m_nativeGestureSequenceActive) {
+                // Some drivers skip explicit BeginNativeGesture.
+                m_nativeGestureSequenceActive = true;
+            }
+
+            if (!m_nativeZoomActive) {
+                m_nativeZoomActive = true;
+                m_nativeZoomSuppressUntilMs = -1;
+                m_lastNativeZoomEventMs = m_nativeGestureTimer.elapsed();
+                initializeZoomAnchor(gestureEvent->position());
+                qCDebug(logUiInput) << "native_zoom_start"
+                                    << "position=" << gestureEvent->position()
+                                    << "rawValue=" << gestureEvent->value();
+            } else {
+                m_lastNativeZoomEventMs = m_nativeGestureTimer.elapsed();
+            }
+
+            float factor = 1.0f;
+            if (!normalizeNativeZoomFactor(gestureEvent->value(), &factor)) {
+                return true;
+            }
+
+            applyAnchoredZoomFactor(factor, gestureEvent->position());
+            qCDebug(logUiInput) << "native_zoom_update"
+                                << "factor=" << factor
+                                << "position=" << gestureEvent->position();
             return true;
         }
     }
 
     if (event->type() == QEvent::Gesture) {
+#if defined(Q_OS_MACOS)
+        return QOpenGLWidget::event(event);
+#else
         QGestureEvent* gestureEvent = static_cast<QGestureEvent*>(event);
         
         // Handle pinch gesture (zoom)
@@ -1680,6 +1783,7 @@ bool Viewport::event(QEvent* event) {
             
             return true;
         }
+#endif
     }
     
     return QOpenGLWidget::event(event);
@@ -1789,19 +1893,202 @@ void Viewport::handleOrbit(float dx, float dy) {
 }
 
 void Viewport::handleZoom(float delta) {
+    applyZoomFactor(1.0f - delta * 0.001f);
+}
+
+void Viewport::applyZoomFactor(float factor) {
+    if (!m_camera || !std::isfinite(factor) || factor <= 0.0f) {
+        return;
+    }
+
     m_isNavigating = true;
     m_navigationTimer->start(150);  // 150ms debounce
-    m_camera->zoom(delta);
+    m_camera->zoomByFactor(factor);
     update();
     emit cameraChanged();
 }
 
+void Viewport::applyAnchoredZoomFactor(float factor, const QPointF& screenPos) {
+    if (!m_camera || !std::isfinite(factor) || factor <= 0.0f) {
+        return;
+    }
+
+    m_isNavigating = true;
+    m_navigationTimer->start(150);  // 150ms debounce
+    QVector3D preZoomPoint;
+    bool preZoomValid = false;
+
+    if (!m_zoomAnchor.valid) {
+        initializeZoomAnchor(screenPos);
+    }
+    if (m_zoomAnchor.valid) {
+        preZoomValid = intersectScreenPointWithZoomPlane(screenPos, &preZoomPoint);
+    }
+
+    m_camera->zoomByFactor(factor);
+
+    if (preZoomValid) {
+        QVector3D postZoomPoint;
+        if (intersectScreenPointWithZoomPlane(screenPos, &postZoomPoint)) {
+            const QVector3D correction = preZoomPoint - postZoomPoint;
+            if (std::isfinite(correction.x()) &&
+                std::isfinite(correction.y()) &&
+                std::isfinite(correction.z())) {
+                m_camera->setPosition(m_camera->position() + correction);
+                m_camera->setTarget(m_camera->target() + correction);
+                qCDebug(logUiInput) << "zoom_anchor_correction"
+                                    << "magnitude=" << correction.length();
+            }
+        }
+    }
+
+    update();
+    emit cameraChanged();
+}
+
+bool Viewport::isTrackpadScrollEvent(const QWheelEvent* event) const {
+    if (!event) {
+        return false;
+    }
+    const bool hasPixelDelta = !event->pixelDelta().isNull();
+    const bool hasAngleDelta = !event->angleDelta().isNull();
+    return (event->phase() != Qt::NoScrollPhase) || (hasPixelDelta && !hasAngleDelta);
+}
+
 bool Viewport::isNativeZoomActive() const {
-    if (!m_nativeZoomTimer.isValid() || m_lastNativeZoomMs < 0) {
+    if (!m_nativeGestureTimer.isValid()) {
         return false;
     }
 
-    return (m_nativeZoomTimer.elapsed() - m_lastNativeZoomMs) < kNativeZoomPanSuppressMs;
+    const qint64 now = m_nativeGestureTimer.elapsed();
+    const bool active = m_nativeZoomActive &&
+        m_lastNativeZoomEventMs >= 0 &&
+        (now - m_lastNativeZoomEventMs) < kNativeZoomActiveTimeoutMs;
+    const bool suppressing = m_nativeZoomSuppressUntilMs >= 0 &&
+        now < m_nativeZoomSuppressUntilMs;
+
+    return active || suppressing;
+}
+
+bool Viewport::normalizeNativeZoomFactor(qreal rawValue, float* outFactor) const {
+    if (!outFactor || !std::isfinite(rawValue)) {
+        return false;
+    }
+
+    qreal normalized = rawValue;
+    if (rawValue > kNativeZoomScaleValueMin && rawValue < kNativeZoomScaleValueMax) {
+        normalized = rawValue - 1.0;
+    }
+
+    float factor = static_cast<float>(1.0 - normalized);
+    factor = std::clamp(factor, kNativeZoomMinFactor, kNativeZoomMaxFactor);
+    *outFactor = factor;
+    return true;
+}
+
+bool Viewport::initializeZoomAnchor(const QPointF& screenPos) {
+    if (!m_camera) {
+        clearZoomAnchor();
+        return false;
+    }
+
+    QVector3D planePoint;
+    QVector3D planeNormal;
+
+    if (m_inSketchMode && m_activeSketch) {
+        const auto& plane = m_activeSketch->getPlane();
+        planePoint = QVector3D(plane.origin.x, plane.origin.y, plane.origin.z);
+        planeNormal = QVector3D(plane.normal.x, plane.normal.y, plane.normal.z);
+    } else {
+        planePoint = m_camera->target();
+        planeNormal = m_camera->forward();
+    }
+
+    if (planeNormal.lengthSquared() < 1e-8f) {
+        clearZoomAnchor();
+        return false;
+    }
+    planeNormal.normalize();
+
+    QVector3D intersection;
+    if (!intersectScreenPointWithPlane(screenPos, planePoint, planeNormal, &intersection)) {
+        clearZoomAnchor();
+        return false;
+    }
+
+    m_zoomAnchor.valid = true;
+    m_zoomAnchor.planePoint = intersection;
+    m_zoomAnchor.planeNormal = planeNormal;
+    return true;
+}
+
+bool Viewport::intersectScreenPointWithZoomPlane(const QPointF& screenPos, QVector3D* outPoint) const {
+    if (!m_zoomAnchor.valid) {
+        return false;
+    }
+    return intersectScreenPointWithPlane(screenPos,
+                                         m_zoomAnchor.planePoint,
+                                         m_zoomAnchor.planeNormal,
+                                         outPoint);
+}
+
+bool Viewport::intersectScreenPointWithPlane(const QPointF& screenPos,
+                                             const QVector3D& planePoint,
+                                             const QVector3D& planeNormal,
+                                             QVector3D* outPoint) const {
+    if (!m_camera || !outPoint || m_width <= 0 || m_height <= 0) {
+        return false;
+    }
+
+    QVector3D normalizedNormal = planeNormal;
+    if (normalizedNormal.lengthSquared() < 1e-8f) {
+        return false;
+    }
+    normalizedNormal.normalize();
+
+    const float aspectRatio = static_cast<float>(m_width) / static_cast<float>(m_height);
+    const QMatrix4x4 view = m_camera->viewMatrix();
+    const QMatrix4x4 projection = m_camera->projectionMatrix(aspectRatio);
+    const QMatrix4x4 viewProjection = projection * view;
+
+    bool invertible = false;
+    const QMatrix4x4 inverse = viewProjection.inverted(&invertible);
+    if (!invertible) {
+        return false;
+    }
+
+    const float ndcX = (2.0f * static_cast<float>(screenPos.x()) / static_cast<float>(m_width)) - 1.0f;
+    const float ndcY = 1.0f - (2.0f * static_cast<float>(screenPos.y()) / static_cast<float>(m_height));
+    const QVector4D nearPoint = inverse * QVector4D(ndcX, ndcY, -1.0f, 1.0f);
+    const QVector4D farPoint = inverse * QVector4D(ndcX, ndcY, 1.0f, 1.0f);
+    if (std::abs(nearPoint.w()) < 1e-8f || std::abs(farPoint.w()) < 1e-8f) {
+        return false;
+    }
+
+    const QVector3D rayOrigin = nearPoint.toVector3D() / nearPoint.w();
+    const QVector3D rayEnd = farPoint.toVector3D() / farPoint.w();
+    const QVector3D rayDir = (rayEnd - rayOrigin).normalized();
+    const float denom = QVector3D::dotProduct(rayDir, normalizedNormal);
+    if (std::abs(denom) < 1e-8f) {
+        return false;
+    }
+
+    const float t = QVector3D::dotProduct(planePoint - rayOrigin, normalizedNormal) / denom;
+    if (!std::isfinite(t) || t < 0.0f) {
+        return false;
+    }
+
+    const QVector3D hit = rayOrigin + rayDir * t;
+    if (!std::isfinite(hit.x()) || !std::isfinite(hit.y()) || !std::isfinite(hit.z())) {
+        return false;
+    }
+
+    *outPoint = hit;
+    return true;
+}
+
+void Viewport::clearZoomAnchor() {
+    m_zoomAnchor = {};
 }
 
 void Viewport::animateCamera(const CameraState& targetState) {
@@ -1913,8 +2200,6 @@ void Viewport::enterSketchMode(sketch::Sketch* sketch) {
         m_toolManager->setRenderer(m_sketchRenderer.get());
     }
 
-    updateSnapGeometry();
-
     // Store current camera state
     m_savedCameraPosition = m_camera->position();
     m_savedCameraTarget = m_camera->target();
@@ -1972,6 +2257,8 @@ void Viewport::enterSketchMode(sketch::Sketch* sketch) {
     m_toolManager = std::make_unique<sketchTools::SketchToolManager>(this);
     m_toolManager->setSketch(sketch);
     m_toolManager->setRenderer(m_sketchRenderer.get());
+    syncSnapGridSizeFromCamera();
+    updateSnapGeometry();
 
     // Connect tool signals
     connect(m_toolManager.get(), &sketchTools::SketchToolManager::geometryCreated, this, [this]() {
@@ -3657,6 +3944,49 @@ void Viewport::setMoveSketchMode(bool active) {
     update();
 }
 
+double Viewport::currentPixelScaleForSnapping() const {
+    if (!m_camera) {
+        return 1.0;
+    }
+
+    const int viewportHeight = (m_height > 0) ? m_height : height();
+    const qreal ratio = devicePixelRatio();
+    if (viewportHeight <= 0 || ratio <= 0.0) {
+        return 1.0;
+    }
+
+    double pixelScale = 1.0;
+    if (m_camera->projectionType() == render::Camera3D::ProjectionType::Orthographic) {
+        const double worldHeight = static_cast<double>(m_camera->orthoScale());
+        pixelScale = worldHeight / (static_cast<double>(viewportHeight) * ratio);
+    } else {
+        const double halfFov = qDegreesToRadians(m_camera->fov() * 0.5f);
+        const double worldHeight = 2.0 * static_cast<double>(m_camera->distance()) * std::tan(halfFov);
+        pixelScale = worldHeight / (static_cast<double>(viewportHeight) * ratio);
+    }
+
+    if (!std::isfinite(pixelScale) || pixelScale <= 0.0) {
+        return 1.0;
+    }
+    return pixelScale;
+}
+
+void Viewport::syncSnapGridSizeFromCamera() {
+    if (!m_toolManager) {
+        return;
+    }
+
+    const double pixelScale = currentPixelScaleForSnapping();
+    m_pixelScale = pixelScale;
+
+    const float gridSpacing = render::Grid3D::adaptiveSpacing(static_cast<float>(pixelScale));
+    if (!std::isfinite(gridSpacing) || gridSpacing <= 0.0f) {
+        return;
+    }
+
+    m_toolManager->snapManager().setGridSize(static_cast<double>(gridSpacing));
+}
+
 void Viewport::updateSnapSettings(const SnapSettingsPanel::SnapSettings& settings) {
     if (!m_toolManager) return;
 
@@ -3681,6 +4011,7 @@ void Viewport::updateSnapSettings(const SnapSettingsPanel::SnapSettings& setting
     
     sm.setShowGuidePoints(settings.showGuidePoints);
     sm.setShowSnappingHints(settings.showSnappingHints);
+    syncSnapGridSizeFromCamera();
     
     update();
 }

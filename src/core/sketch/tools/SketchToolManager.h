@@ -170,6 +170,10 @@ private:
     SnapResult currentSnapResult_;
     std::vector<InferredConstraint> currentInferredConstraints_;
     Vec2d rawCursorPos_{0, 0};
+    bool hasRawCursorSample_ = false;
+    Vec2d previewCursorPos_{0, 0};
+    bool hasPreviewCursorSample_ = false;
+    bool previewHadGridConflict_ = false;
     std::unordered_set<EntityID> excludeFromSnap_;
 };
 

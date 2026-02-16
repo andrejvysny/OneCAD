@@ -4,6 +4,7 @@
 #include <QOpenGLWidget>
 #include <QOpenGLFunctions>
 #include <QPoint>
+#include <QPointF>
 #include <QElapsedTimer>
 #include <QTimer>
 #include <QMatrix4x4>
@@ -246,7 +247,18 @@ private:
     void handlePan(float dx, float dy);
     void handleOrbit(float dx, float dy);
     void handleZoom(float delta);
+    void applyZoomFactor(float factor);
+    void applyAnchoredZoomFactor(float factor, const QPointF& screenPos);
+    bool isTrackpadScrollEvent(const QWheelEvent* event) const;
     bool isNativeZoomActive() const;
+    bool normalizeNativeZoomFactor(qreal rawValue, float* outFactor) const;
+    bool initializeZoomAnchor(const QPointF& screenPos);
+    bool intersectScreenPointWithZoomPlane(const QPointF& screenPos, QVector3D* outPoint) const;
+    bool intersectScreenPointWithPlane(const QPointF& screenPos,
+                                       const QVector3D& planePoint,
+                                       const QVector3D& planeNormal,
+                                       QVector3D* outPoint) const;
+    void clearZoomAnchor();
     void updatePlaneSelectionHover(const QPoint& screenPos);
     bool pickPlaneSelection(const QPoint& screenPos, int* outIndex) const;
     void drawPlaneSelectionOverlay(const QMatrix4x4& viewProjection);
@@ -268,6 +280,8 @@ private:
     bool cycleDraftDimensionEditor(bool forward);
     void closeDraftDimensionEditor(bool restoreViewportFocus);
     void clearDraftDimensionInteraction();
+    double currentPixelScaleForSnapping() const;
+    void syncSnapGridSizeFromCamera();
     
     // Snap integration
     void updateSnapGeometry();
@@ -364,10 +378,19 @@ private:
     bool m_isOrbiting = false;
     
     // Gesture state
+    struct ZoomAnchorState {
+        bool valid = false;
+        QVector3D planePoint;
+        QVector3D planeNormal;
+    };
     qreal m_lastPinchScale = 1.0;
     bool m_pinchActive = false;
-    QElapsedTimer m_nativeZoomTimer;
-    qint64 m_lastNativeZoomMs = -1;
+    ZoomAnchorState m_zoomAnchor;
+    QElapsedTimer m_nativeGestureTimer;
+    bool m_nativeGestureSequenceActive = false;
+    bool m_nativeZoomActive = false;
+    qint64 m_lastNativeZoomEventMs = -1;
+    qint64 m_nativeZoomSuppressUntilMs = -1;
     
     // Viewport size
     int m_width = 1;

@@ -2,6 +2,7 @@
 
 #include "../Sketch.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <limits>
@@ -16,6 +17,8 @@ constexpr double kGuideLengthEpsSq = 1e-12;
 constexpr double kGuideCollinearCrossEps = 0.01;
 constexpr double kGuideDistanceTieEps = 1e-9;
 constexpr double kGuideIntersectionMatchEps = 1e-5;
+constexpr double kHvGuideAngleThresholdRad = 7.5 * (3.14159265358979323846 / 180.0);
+constexpr double kAxisReferenceEpsSq = 1e-12;
 
 bool sameResolvedSnap(const SnapResult& a, const SnapResult& b) {
     return a.snapped == b.snapped
@@ -28,6 +31,8 @@ bool sameResolvedSnap(const SnapResult& a, const SnapResult& b) {
         && a.hasGuide == b.hasGuide
         && std::abs(a.guideOrigin.x - b.guideOrigin.x) <= 1e-9
         && std::abs(a.guideOrigin.y - b.guideOrigin.y) <= 1e-9
+        && a.gridKind == b.gridKind
+        && a.guideIntersectionKind == b.guideIntersectionKind
         && a.hintText == b.hintText;
 }
 
@@ -44,8 +49,41 @@ bool isGuideSuppressedPointSnapType(SnapType type) {
     }
 }
 
-bool isValidGuideCandidate(const SnapResult& snap) {
+bool isAxisInferenceType(SnapType type) {
+    return type == SnapType::Horizontal || type == SnapType::Vertical;
+}
+
+bool isRenderableGuideType(SnapType type) {
+    return type != SnapType::Grid;
+}
+
+bool passesAxisInferenceGate(const SnapResult& snap, std::optional<Vec2d> referencePoint) {
+    if (!isAxisInferenceType(snap.type)) {
+        return true;
+    }
+    if (!referencePoint.has_value()) {
+        return false;
+    }
+
+    const double dx = snap.position.x - referencePoint->x;
+    const double dy = snap.position.y - referencePoint->y;
+    const double lenSq = (dx * dx) + (dy * dy);
+    if (lenSq <= kAxisReferenceEpsSq) {
+        return false;
+    }
+
+    const double maxOffAxis = std::sqrt(lenSq) * std::sin(kHvGuideAngleThresholdRad);
+    if (snap.type == SnapType::Horizontal) {
+        return std::abs(dy) <= maxOffAxis;
+    }
+    return std::abs(dx) <= maxOffAxis;
+}
+
+bool isValidGuideCandidate(const SnapResult& snap, bool includeNonRenderableGuides) {
     if (!snap.snapped || !snap.hasGuide || snap.type == SnapType::Intersection) {
+        return false;
+    }
+    if (!includeNonRenderableGuides && !isRenderableGuideType(snap.type)) {
         return false;
     }
     const double dx = snap.position.x - snap.guideOrigin.x;
@@ -95,23 +133,6 @@ struct GuideCandidate {
     double distance = 0.0;
     size_t sourceIndex = 0;
 };
-
-std::vector<GuideCandidate> collectGuideCandidates(const std::vector<SnapResult>& allSnaps) {
-    std::vector<GuideCandidate> candidates;
-    candidates.reserve(allSnaps.size());
-    for (size_t i = 0; i < allSnaps.size(); ++i) {
-        const auto& snap = allSnaps[i];
-        if (!isValidGuideCandidate(snap)) {
-            continue;
-        }
-        candidates.push_back({
-            .segment = {snap.guideOrigin, snap.position},
-            .distance = snap.distance,
-            .sourceIndex = i
-        });
-    }
-    return candidates;
-}
 
 bool isGuideIntersectionSnap(const SnapResult& snap) {
     return snap.snapped && snap.type == SnapType::Intersection && snap.hasGuide;
@@ -180,6 +201,96 @@ bool hasResolvableGuidePairAt(const std::vector<GuideCandidate>& candidates, con
     return pickGuidePairForIntersection(candidates, pos).has_value();
 }
 
+bool hasNonGridGuidePairAt(const std::vector<SnapResult>& allSnaps,
+                           const std::vector<GuideCandidate>& candidates,
+                           const Vec2d& pos) {
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        for (size_t j = i + 1; j < candidates.size(); ++j) {
+            if (isCollinear(candidates[i].segment, candidates[j].segment)) {
+                continue;
+            }
+
+            const auto intersection =
+                infiniteLineIntersection(candidates[i].segment, candidates[j].segment);
+            if (!intersection.has_value()) {
+                continue;
+            }
+            if (!samePosition(*intersection, pos, kGuideIntersectionMatchEps)) {
+                continue;
+            }
+
+            const auto typeA = allSnaps[candidates[i].sourceIndex].type;
+            const auto typeB = allSnaps[candidates[j].sourceIndex].type;
+            if (typeA == SnapType::Grid && typeB == SnapType::Grid) {
+                continue;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+SnapResult selectBestSnapDeterministically(const SnapManager& snapManager,
+                                           const Vec2d& pos,
+                                           const std::vector<SnapResult>& snaps,
+                                           const Sketch& sketch) {
+    return snapManager.selectBestSnapFromCandidates(pos, sketch, snaps);
+}
+
+std::vector<GuideCandidate> collectGuideCandidates(
+    const std::vector<SnapResult>& allSnaps,
+    bool includeNonRenderableGuides) {
+    std::vector<GuideCandidate> candidates;
+    candidates.reserve(allSnaps.size());
+    for (size_t i = 0; i < allSnaps.size(); ++i) {
+        const auto& snap = allSnaps[i];
+        if (!isValidGuideCandidate(snap, includeNonRenderableGuides)) {
+            continue;
+        }
+        candidates.push_back({
+            .segment = {snap.guideOrigin, snap.position},
+            .distance = snap.distance,
+            .sourceIndex = i
+        });
+    }
+    return candidates;
+}
+
+std::vector<SnapResult> filterSnapsForInputContext(const std::vector<SnapResult>& allSnaps,
+                                                   std::optional<Vec2d> referencePoint) {
+    std::vector<SnapResult> filtered;
+    filtered.reserve(allSnaps.size());
+
+    for (const auto& snap : allSnaps) {
+        if (!snap.snapped) {
+            continue;
+        }
+        if (snap.type != SnapType::Intersection || !snap.hasGuide) {
+            if (!passesAxisInferenceGate(snap, referencePoint)) {
+                continue;
+            }
+        }
+        filtered.push_back(snap);
+    }
+
+    if (filtered.empty()) {
+        return filtered;
+    }
+
+    const auto allGuideCandidates = collectGuideCandidates(filtered, true);
+    std::vector<SnapResult> stabilized;
+    stabilized.reserve(filtered.size());
+    for (const auto& snap : filtered) {
+        if (snap.type == SnapType::Intersection && snap.hasGuide &&
+            !hasNonGridGuidePairAt(filtered, allGuideCandidates, snap.position)) {
+            continue;
+        }
+        stabilized.push_back(snap);
+    }
+
+    return stabilized;
+}
+
 std::optional<size_t> pickNearestGuideIntersectionSnapIndex(
     const std::vector<SnapResult>& allSnaps,
     const std::vector<GuideCandidate>& candidates) {
@@ -211,7 +322,7 @@ SnapResult applyGuideFirstSnapPolicy(const SnapResult& fallbackSnap,
         return fallbackSnap;
     }
 
-    const auto guideCandidates = collectGuideCandidates(allSnaps);
+    const auto guideCandidates = collectGuideCandidates(allSnaps, false);
     const auto bestSingleGuide = pickNearestGuideCandidateIndex(guideCandidates);
     const auto bestGuideIntersection =
         pickNearestGuideIntersectionSnapIndex(allSnaps, guideCandidates);
@@ -243,7 +354,7 @@ std::vector<GuideSegment> buildActiveGuidesForSnap(const SnapResult& resolvedSna
         return activeGuides;
     }
 
-    const auto candidates = collectGuideCandidates(allSnaps);
+    const auto candidates = collectGuideCandidates(allSnaps, false);
     if (candidates.empty()) {
         return activeGuides;
     }
@@ -284,15 +395,26 @@ SnapInputResolution resolveSnapForInputEvent(
     bool preferGuide,
     bool collectGuideData) {
     SnapInputResolution resolution;
-    resolution.bestSnap = snapManager.findBestSnap(pos, sketch, excludeFromSnap, referencePoint);
+    resolution.allSnaps = snapManager.findAllSnaps(pos, sketch, excludeFromSnap, referencePoint);
+    resolution.allSnaps = filterSnapsForInputContext(resolution.allSnaps, referencePoint);
+    resolution.bestSnap = selectBestSnapDeterministically(
+        snapManager,
+        pos,
+        resolution.allSnaps,
+        sketch);
+    resolution.gridConflict = snapManager.lastGridConflictDetected();
+    resolution.allowPreviewCommitMismatch = resolution.gridConflict;
     resolution.resolvedSnap = resolution.bestSnap;
 
-    const bool requiresAllSnaps = preferGuide || collectGuideData;
-    if (!requiresAllSnaps) {
+    if (resolution.allSnaps.empty()) {
         return resolution;
     }
 
-    resolution.allSnaps = snapManager.findAllSnaps(pos, sketch, excludeFromSnap, referencePoint);
+    const bool requiresGuideResolution = preferGuide || collectGuideData;
+    if (!requiresGuideResolution) {
+        return resolution;
+    }
+
     const SnapResult guideResolvedSnap =
         applyGuideFirstSnapPolicy(resolution.bestSnap, resolution.allSnaps);
 

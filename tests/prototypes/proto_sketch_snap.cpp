@@ -3,6 +3,8 @@
 #include "sketch/SketchLine.h"
 #include "sketch/tools/SnapPreviewResolver.h"
 #include "sketch/tools/SketchToolManager.h"
+#include "sketch/tools/CircleTool.h"
+#include "sketch/tools/EllipseTool.h"
 
 #include <algorithm>
 #include <chrono>
@@ -360,6 +362,363 @@ TestResult test_hinttext_grid_snap() {
     }
     if (result.hintText != "GRID") {
         return {false, "GRID", result.hintText};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_grid_axis_x_snap() {
+    Sketch sketch;
+    SnapManager manager = createSnapManagerFor({SnapType::Grid});
+    manager.setGridSize(10.0);
+
+    // Axis-only case: X in radius, Y outside radius.
+    const Vec2d query{10.9, 3.2};
+    const SnapResult result = manager.findBestSnap(query, sketch);
+    TestResult check = expectSnap(result, SnapType::Grid);
+    if (!check.pass) {
+        return check;
+    }
+    if (!approx(result.position.x, 10.0, 1e-6) || !approx(result.position.y, query.y, 1e-6)) {
+        return {false,
+                "(10.0,query.y)",
+                "(" + std::to_string(result.position.x) + "," + std::to_string(result.position.y) + ")"};
+    }
+    if (!result.hasGuide) {
+        return {false, "hasGuide=true", "hasGuide=false"};
+    }
+    if (result.gridKind != SnapResult::GridCandidateKind::AxisX) {
+        return {false, "AxisX", std::to_string(static_cast<int>(result.gridKind))};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_grid_axis_y_snap() {
+    Sketch sketch;
+    SnapManager manager = createSnapManagerFor({SnapType::Grid});
+    manager.setGridSize(10.0);
+
+    // Axis-only case: Y in radius, X outside radius.
+    const Vec2d query{3.2, 10.9};
+    const SnapResult result = manager.findBestSnap(query, sketch);
+    TestResult check = expectSnap(result, SnapType::Grid);
+    if (!check.pass) {
+        return check;
+    }
+    if (!approx(result.position.x, query.x, 1e-6) || !approx(result.position.y, 10.0, 1e-6)) {
+        return {false,
+                "(query.x,10.0)",
+                "(" + std::to_string(result.position.x) + "," + std::to_string(result.position.y) + ")"};
+    }
+    if (!result.hasGuide) {
+        return {false, "hasGuide=true", "hasGuide=false"};
+    }
+    if (result.gridKind != SnapResult::GridCandidateKind::AxisY) {
+        return {false, "AxisY", std::to_string(static_cast<int>(result.gridKind))};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_grid_crossing_preferred_when_near() {
+    Sketch sketch;
+    SnapManager manager = createSnapManagerFor({SnapType::Grid});
+    manager.setGridSize(1.0);
+
+    const Vec2d query{5.22, 3.18};
+    const SnapResult result = manager.findBestSnap(query, sketch);
+    TestResult check = expectSnap(result, SnapType::Grid);
+    if (!check.pass) {
+        return check;
+    }
+    if (!approx(result.position.x, 5.0, 1e-6) || !approx(result.position.y, 3.0, 1e-6)) {
+        return {false,
+                "(5.0,3.0)",
+                "(" + std::to_string(result.position.x) + "," + std::to_string(result.position.y) + ")"};
+    }
+    if (result.hasGuide) {
+        return {false, "hasGuide=false", "hasGuide=true"};
+    }
+    if (result.gridKind != SnapResult::GridCandidateKind::Crossing) {
+        return {false, "Crossing", std::to_string(static_cast<int>(result.gridKind))};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_horizontal_guide_plus_grid_vertical_composition() {
+    Sketch sketch;
+    sketch.addPoint(2.0, 3.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Horizontal, SnapType::Grid, SnapType::Intersection});
+    manager.setGridSize(1.0);
+    const Vec2d query{6.12, 3.08};
+
+    auto allSnaps = manager.findAllSnaps(query, sketch);
+    bool sawComposedIntersection = false;
+    for (const auto& snap : allSnaps) {
+        if (snap.snapped && snap.type == SnapType::Intersection &&
+            approx(snap.position.x, 6.0, 1e-6) && approx(snap.position.y, 3.0, 1e-6)) {
+            sawComposedIntersection = true;
+            break;
+        }
+    }
+    if (!sawComposedIntersection) {
+        return {false, "composed intersection at (6,3)", "missing"};
+    }
+
+    const SnapResult best = manager.findBestSnap(query, sketch);
+    TestResult check = expectSnap(best, SnapType::Grid);
+    if (!check.pass) {
+        return check;
+    }
+    if (!approx(best.position.x, 6.0, 1e-6) || !approx(best.position.y, 3.0, 1e-6)) {
+        return {false,
+                "(6,3)",
+                "(" + std::to_string(best.position.x) + "," + std::to_string(best.position.y) + ")"};
+    }
+    if (best.gridKind != SnapResult::GridCandidateKind::Crossing) {
+        return {false, "Crossing", std::to_string(static_cast<int>(best.gridKind))};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_grid_dual_axis_crossing_gate() {
+    Sketch sketch;
+
+    {
+        SnapManager manager = createSnapManagerFor({SnapType::Grid});
+        manager.setGridSize(10.0);
+        const SnapResult crossing = manager.findBestSnap({10.9, 11.8}, sketch);
+        TestResult check = expectSnap(crossing, SnapType::Grid);
+        if (!check.pass) {
+            return check;
+        }
+        if (crossing.gridKind != SnapResult::GridCandidateKind::Crossing) {
+            return {false, "Crossing", std::to_string(static_cast<int>(crossing.gridKind))};
+        }
+    }
+
+    {
+        SnapManager manager = createSnapManagerFor({SnapType::Grid});
+        manager.setGridSize(10.0);
+        const SnapResult axisOnly = manager.findBestSnap({10.9, 12.2}, sketch);
+        TestResult check = expectSnap(axisOnly, SnapType::Grid);
+        if (!check.pass) {
+            return check;
+        }
+        if (axisOnly.gridKind != SnapResult::GridCandidateKind::AxisX) {
+            return {false, "AxisX", std::to_string(static_cast<int>(axisOnly.gridKind))};
+        }
+    }
+
+    return {true, "", ""};
+}
+
+TestResult test_point_snap_beats_grid_crossing_overlap() {
+    Sketch sketch;
+    sketch.addPoint(6.0, 3.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Vertex, SnapType::Grid});
+    manager.setGridSize(1.0);
+
+    const SnapResult best = manager.findBestSnap({6.12, 3.08}, sketch);
+    TestResult check = expectSnap(best, SnapType::Vertex);
+    if (!check.pass) {
+        return check;
+    }
+    if (!approx(best.position.x, 6.0, 1e-6) || !approx(best.position.y, 3.0, 1e-6)) {
+        return {false,
+                "(6,3)",
+                "(" + std::to_string(best.position.x) + "," + std::to_string(best.position.y) + ")"};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_real_intersection_beats_grid_crossing() {
+    Sketch sketch;
+    sketch.addLine(4.0, 3.0, 8.0, 3.0);
+    sketch.addLine(6.0, 1.0, 6.0, 5.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Intersection, SnapType::Grid});
+    manager.setGridSize(1.0);
+
+    const SnapResult best = manager.findBestSnap({6.12, 3.08}, sketch);
+    TestResult check = expectSnap(best, SnapType::Intersection);
+    if (!check.pass) {
+        return check;
+    }
+    if (!approx(best.position.x, 6.0, 1e-6) || !approx(best.position.y, 3.0, 1e-6)) {
+        return {false,
+                "(6,3)",
+                "(" + std::to_string(best.position.x) + "," + std::to_string(best.position.y) + ")"};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_oncurve_beats_grid_crossing() {
+    Sketch sketch;
+    EntityID center = sketch.addPoint(6.0, 3.0);
+    sketch.addCircle(center, 1.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::OnCurve, SnapType::Grid});
+    manager.setGridSize(1.0);
+
+    const SnapResult best = manager.findBestSnap({7.12, 3.08}, sketch);
+    TestResult check = expectSnap(best, SnapType::OnCurve);
+    if (!check.pass) {
+        return check;
+    }
+    return {true, "", ""};
+}
+
+TestResult test_extension_guide_beats_grid_crossing() {
+    Sketch sketch;
+    sketch.addLine(0.0, 0.0, 4.0, 0.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::SketchGuide, SnapType::Grid});
+    manager.setGridSize(1.0);
+    manager.setSnapRadius(2.0);
+
+    const SnapResult best = manager.findBestSnap({6.1, 0.1}, sketch);
+    TestResult check = expectSnap(best, SnapType::SketchGuide);
+    if (!check.pass) {
+        return check;
+    }
+    if (best.hintText != "EXT") {
+        return {false, "EXT", best.hintText};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_grid_beats_active_layer_3d() {
+    Sketch sketch;
+    SnapManager manager = createSnapManagerFor({SnapType::Grid, SnapType::ActiveLayer3D});
+    manager.setGridSize(1.0);
+    manager.setExternalGeometry({{5.12, 3.08}}, {});
+
+    const SnapResult best = manager.findBestSnap({5.12, 3.08}, sketch);
+    TestResult check = expectSnap(best, SnapType::Grid);
+    if (!check.pass) {
+        return check;
+    }
+    if (best.gridKind != SnapResult::GridCandidateKind::Crossing) {
+        return {false, "Crossing", std::to_string(static_cast<int>(best.gridKind))};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_grid_hysteresis_base_acquire_and_release() {
+    Sketch sketch;
+    SnapManager manager = createSnapManagerFor({SnapType::Grid});
+    manager.setGridSize(10.0);
+    manager.setSnapRadius(2.0);
+
+    const SnapResult acquired = manager.findBestSnap({10.4, 10.3}, sketch);
+    TestResult acquiredCheck = expectSnap(acquired, SnapType::Grid);
+    if (!acquiredCheck.pass) {
+        return acquiredCheck;
+    }
+    if (acquired.gridKind != SnapResult::GridCandidateKind::Crossing) {
+        return {false, "Crossing", std::to_string(static_cast<int>(acquired.gridKind))};
+    }
+
+    // Beyond acquisition radius but within release radius (2.7mm).
+    const SnapResult held = manager.findBestSnap({12.6, 12.6}, sketch);
+    TestResult heldCheck = expectSnap(held, SnapType::Grid);
+    if (!heldCheck.pass) {
+        return heldCheck;
+    }
+    if (!approx(held.position.x, 10.0, 1e-6) || !approx(held.position.y, 10.0, 1e-6)) {
+        return {false,
+                "(10,10) held by hysteresis",
+                "(" + std::to_string(held.position.x) + "," + std::to_string(held.position.y) + ")"};
+    }
+
+    // Outside release radius -> snap must drop.
+    const SnapResult released = manager.findBestSnap({12.8, 12.8}, sketch);
+    if (released.snapped) {
+        return {false, "not snapped after release threshold", "still snapped"};
+    }
+
+    return {true, "", ""};
+}
+
+TestResult test_grid_axis_tie_memory_005mm_and_reset() {
+    Sketch sketch;
+    SnapManager manager = createSnapManagerFor({SnapType::Grid});
+    manager.setGridSize(10.0);
+    manager.setSnapRadius(2.0);
+
+    auto axisSnap = [](SnapResult::GridCandidateKind kind, double distance, const Vec2d& pos) {
+        SnapResult snap;
+        snap.snapped = true;
+        snap.type = SnapType::Grid;
+        snap.position = pos;
+        snap.distance = distance;
+        snap.hasGuide = true;
+        snap.hintText = "GRID";
+        snap.gridKind = kind;
+        return snap;
+    };
+
+    const std::vector<SnapResult> firstPass = {
+        axisSnap(SnapResult::GridCandidateKind::AxisX, 1.00, {10.0, 2.0}),
+        axisSnap(SnapResult::GridCandidateKind::AxisY, 1.03, {2.0, 10.0})
+    };
+    const SnapResult selectedFirst = manager.selectBestSnapFromCandidates({0.0, 0.0}, sketch, firstPass);
+    if (!selectedFirst.snapped || selectedFirst.gridKind != SnapResult::GridCandidateKind::AxisX) {
+        return {false, "AxisX first selection", std::to_string(static_cast<int>(selectedFirst.gridKind))};
+    }
+
+    // Within 0.05mm tie epsilon, memory should retain AxisX even if AxisY is slightly closer.
+    const std::vector<SnapResult> secondPass = {
+        axisSnap(SnapResult::GridCandidateKind::AxisX, 1.03, {10.0, 2.0}),
+        axisSnap(SnapResult::GridCandidateKind::AxisY, 1.00, {2.0, 10.0})
+    };
+    const SnapResult selectedSecond =
+        manager.selectBestSnapFromCandidates({20.0, 20.0}, sketch, secondPass);
+    if (!selectedSecond.snapped ||
+        selectedSecond.gridKind != SnapResult::GridCandidateKind::AxisX) {
+        return {false, "AxisX retained by tie memory", std::to_string(static_cast<int>(selectedSecond.gridKind))};
+    }
+
+    manager.resetGridSnapState();
+    const SnapResult selectedAfterReset =
+        manager.selectBestSnapFromCandidates({20.0, 20.0}, sketch, secondPass);
+    if (!selectedAfterReset.snapped ||
+        selectedAfterReset.gridKind != SnapResult::GridCandidateKind::AxisY) {
+        return {false, "AxisY after reset", std::to_string(static_cast<int>(selectedAfterReset.gridKind))};
+    }
+
+    return {true, "", ""};
+}
+
+TestResult test_grid_axis_memory_fallback_when_preferred_unavailable() {
+    Sketch sketch;
+    SnapManager manager = createSnapManagerFor({SnapType::Grid});
+
+    auto axisSnap = [](SnapResult::GridCandidateKind kind, double distance, const Vec2d& pos) {
+        SnapResult snap;
+        snap.snapped = true;
+        snap.type = SnapType::Grid;
+        snap.position = pos;
+        snap.distance = distance;
+        snap.hasGuide = true;
+        snap.hintText = "GRID";
+        snap.gridKind = kind;
+        return snap;
+    };
+
+    const std::vector<SnapResult> seedMemory = {
+        axisSnap(SnapResult::GridCandidateKind::AxisX, 1.00, {10.0, 2.0}),
+        axisSnap(SnapResult::GridCandidateKind::AxisY, 1.03, {2.0, 10.0})
+    };
+    (void)manager.selectBestSnapFromCandidates({0.0, 0.0}, sketch, seedMemory);
+
+    const std::vector<SnapResult> onlyY = {
+        axisSnap(SnapResult::GridCandidateKind::AxisY, 1.20, {2.0, 10.0})
+    };
+    const SnapResult selected = manager.selectBestSnapFromCandidates({20.0, 20.0}, sketch, onlyY);
+    if (!selected.snapped || selected.gridKind != SnapResult::GridCandidateKind::AxisY) {
+        return {false, "AxisY fallback", std::to_string(static_cast<int>(selected.gridKind))};
     }
     return {true, "", ""};
 }
@@ -1324,6 +1683,150 @@ TestResult test_parity_findBestSnap_stable_across_calls() {
     return {true, "", ""};
 }
 
+TestResult test_parity_preview_commit_grid_guide_composition() {
+    Sketch sketch;
+    sketch.addPoint(2.0, 3.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Horizontal, SnapType::Grid, SnapType::Intersection});
+    manager.setGridSize(1.0);
+    const Vec2d query{6.12, 3.08};
+
+    const auto move = tools::resolveSnapForInputEvent(
+        manager,
+        query,
+        sketch,
+        {},
+        Vec2d{2.0, 3.0},
+        false,
+        true);
+    const auto commit = tools::resolveSnapForInputEvent(
+        manager,
+        query,
+        sketch,
+        {},
+        Vec2d{2.0, 3.0},
+        false,
+        false);
+
+    if (!move.resolvedSnap.snapped || !commit.resolvedSnap.snapped) {
+        return {false, "both snapped", "missing snap"};
+    }
+    if (!move.allowPreviewCommitMismatch || !commit.allowPreviewCommitMismatch) {
+        return {false, "grid conflict mismatch allowance enabled", "disabled"};
+    }
+    if (!snapResultsEqual(move.resolvedSnap, commit.resolvedSnap)) {
+        return {false, "same winner in identical grid-conflict query", "different winner"};
+    }
+    if (move.resolvedSnap.type != SnapType::Grid) {
+        return {false, "Grid", std::to_string(static_cast<int>(move.resolvedSnap.type))};
+    }
+    if (move.resolvedSnap.gridKind != SnapResult::GridCandidateKind::Crossing) {
+        return {false, "Crossing", std::to_string(static_cast<int>(move.resolvedSnap.gridKind))};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_grid_conflict_mismatch_allowance_flag() {
+    Sketch sketch;
+    sketch.addPoint(2.0, 3.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Horizontal, SnapType::Grid, SnapType::Intersection});
+    manager.setGridSize(1.0);
+
+    const auto resolution = tools::resolveSnapForInputEvent(
+        manager,
+        {6.12, 3.08},
+        sketch,
+        {},
+        Vec2d{2.0, 3.0},
+        false,
+        true);
+
+    if (!resolution.gridConflict) {
+        return {false, "gridConflict=true", "false"};
+    }
+    if (!resolution.allowPreviewCommitMismatch) {
+        return {false, "allowPreviewCommitMismatch=true", "false"};
+    }
+    if (!resolution.resolvedSnap.snapped || resolution.resolvedSnap.type != SnapType::Grid) {
+        return {false, "resolved Grid snap", "non-grid"};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_non_grid_parity_strict_without_grid_conflict() {
+    Sketch sketch;
+    sketch.addPoint(5.0, 5.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Vertex});
+    const Vec2d query{5.05, 5.02};
+
+    const auto move = tools::resolveSnapForInputEvent(
+        manager,
+        query,
+        sketch,
+        {},
+        std::nullopt,
+        false,
+        true);
+    const auto commit = tools::resolveSnapForInputEvent(
+        manager,
+        query,
+        sketch,
+        {},
+        std::nullopt,
+        false,
+        false);
+
+    if (move.allowPreviewCommitMismatch || commit.allowPreviewCommitMismatch) {
+        return {false, "preview/commit mismatch disallowed", "allowed"};
+    }
+    if (!snapResultsEqual(move.resolvedSnap, commit.resolvedSnap)) {
+        return {false, "strict parity", "mismatch"};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_point_priority_over_grid_guide_composition() {
+    Sketch sketch;
+    sketch.addPoint(6.0, 3.0);
+    sketch.addPoint(2.0, 3.0);
+
+    SnapManager manager = createSnapManagerFor({
+        SnapType::Vertex,
+        SnapType::Horizontal,
+        SnapType::Grid,
+        SnapType::Intersection
+    });
+    manager.setGridSize(1.0);
+    const Vec2d query{6.05, 3.04};
+
+    auto allSnaps = manager.findAllSnaps(query, sketch);
+    bool sawComposedIntersection = false;
+    for (const auto& snap : allSnaps) {
+        if (snap.snapped && snap.type == SnapType::Intersection &&
+            approx(snap.position.x, 6.0, 1e-6) && approx(snap.position.y, 3.0, 1e-6)) {
+            sawComposedIntersection = true;
+            break;
+        }
+    }
+    if (!sawComposedIntersection) {
+        return {false, "composed intersection candidate", "missing"};
+    }
+
+    const SnapResult best = manager.findBestSnap(query, sketch);
+    TestResult check = expectSnap(best, SnapType::Vertex);
+    if (!check.pass) {
+        return check;
+    }
+    if (!approx(best.position.x, 6.0, 1e-6) || !approx(best.position.y, 3.0, 1e-6)) {
+        return {false,
+                "(6,3)",
+                "(" + std::to_string(best.position.x) + "," + std::to_string(best.position.y) + ")"};
+    }
+    return {true, "", ""};
+}
+
 TestResult test_shared_preview_vertex_priority_with_guides() {
     Sketch sketch;
     sketch.addPoint(5.0, 5.0);
@@ -1380,7 +1883,7 @@ TestResult test_shared_preview_midpoint_suppresses_guides() {
     return {true, "", ""};
 }
 
-TestResult test_shared_preview_intersection_guides_present() {
+TestResult test_shared_preview_hv_requires_reference_anchor() {
     Sketch sketch;
     sketch.addPoint(5.0, 0.0);
     sketch.addPoint(0.0, 3.0);
@@ -1400,25 +1903,127 @@ TestResult test_shared_preview_intersection_guides_present() {
         true,
         true);
 
+    if (preview.resolvedSnap.snapped) {
+        return {false, "no snap without reference anchor", "snapped"};
+    }
+    if (!preview.activeGuides.empty()) {
+        return {false, "no guides without reference anchor",
+                std::to_string(preview.activeGuides.size())};
+    }
+
+    const auto anchored = tools::resolveSnapForInputEvent(
+        manager,
+        {5.1, 3.1},
+        sketch,
+        {},
+        Vec2d{5.0, 3.0},
+        true,
+        true);
+    if (!anchored.resolvedSnap.snapped) {
+        return {false, "snapped with reference anchor", "not snapped"};
+    }
+    if (anchored.resolvedSnap.type == SnapType::Intersection) {
+        return {false, "nearest single-guide winner", "Intersection"};
+    }
+    if (anchored.activeGuides.size() != 1) {
+        return {false, "1 guide segment with reference anchor",
+                std::to_string(anchored.activeGuides.size())};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_shared_preview_grid_snap_hides_guides() {
+    Sketch sketch;
+
+    SnapManager manager = createSnapManagerFor({SnapType::Grid});
+    manager.setGridSize(1.0);
+
+    const auto preview = tools::resolveSnapForInputEvent(
+        manager,
+        {5.1, 3.37},
+        sketch,
+        {},
+        std::nullopt,
+        false,
+        true);
+
     if (!preview.resolvedSnap.snapped) {
         return {false, "snapped", "not snapped"};
     }
-    const auto allSnaps = manager.findAllSnaps({5.1, 3.1}, sketch);
-    bool hasGuideIntersection = false;
-    for (const auto& snap : allSnaps) {
-        if (snap.snapped && snap.type == SnapType::Intersection && snap.hasGuide) {
-            hasGuideIntersection = true;
-            break;
-        }
+    if (preview.resolvedSnap.type != SnapType::Grid) {
+        return {false, "Grid", std::to_string(static_cast<int>(preview.resolvedSnap.type))};
     }
-    if (!hasGuideIntersection) {
-        return {false, "guide-based intersection candidate", "not found"};
+    if (!preview.activeGuides.empty()) {
+        return {false, "no rendered guide segments for grid snap",
+                std::to_string(preview.activeGuides.size())};
     }
-    if (preview.resolvedSnap.type == SnapType::Intersection) {
-        return {false, "nearest single-guide winner", "Intersection"};
+    return {true, "", ""};
+}
+
+TestResult test_shared_preview_grid_composition_renders_only_non_grid_guide() {
+    Sketch sketch;
+    sketch.addPoint(2.0, 3.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Horizontal, SnapType::Grid, SnapType::Intersection});
+    manager.setGridSize(1.0);
+
+    const auto preview = tools::resolveSnapForInputEvent(
+        manager,
+        {6.12, 3.08},
+        sketch,
+        {},
+        Vec2d{2.0, 3.0},
+        false,
+        true);
+
+    if (!preview.resolvedSnap.snapped) {
+        return {false, "snapped", "not snapped"};
+    }
+    if (preview.resolvedSnap.type != SnapType::Grid) {
+        return {false, "Grid", std::to_string(static_cast<int>(preview.resolvedSnap.type))};
+    }
+    if (!approx(preview.resolvedSnap.position.x, 6.0, 1e-6) ||
+        !approx(preview.resolvedSnap.position.y, 3.0, 1e-6)) {
+        return {false,
+                "(6,3)",
+                "(" + std::to_string(preview.resolvedSnap.position.x) + "," +
+                    std::to_string(preview.resolvedSnap.position.y) + ")"};
     }
     if (preview.activeGuides.size() != 1) {
-        return {false, "1 guide segment", std::to_string(preview.activeGuides.size())};
+        return {false, "1 rendered non-grid guide segment",
+                std::to_string(preview.activeGuides.size())};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_shared_preview_no_reference_disables_hv_grid_composition() {
+    Sketch sketch;
+    sketch.addPoint(2.0, 3.0);
+
+    SnapManager manager = createSnapManagerFor({SnapType::Horizontal, SnapType::Grid, SnapType::Intersection});
+    manager.setGridSize(1.0);
+
+    const auto preview = tools::resolveSnapForInputEvent(
+        manager,
+        {6.12, 3.08},
+        sketch,
+        {},
+        std::nullopt,
+        false,
+        true);
+
+    if (!preview.resolvedSnap.snapped) {
+        return {false, "snapped", "not snapped"};
+    }
+    if (preview.resolvedSnap.type == SnapType::Intersection ||
+        preview.resolvedSnap.type == SnapType::Horizontal ||
+        preview.resolvedSnap.type == SnapType::Vertical) {
+        return {false, "non-H/V non-intersection snap without reference anchor",
+                std::to_string(static_cast<int>(preview.resolvedSnap.type))};
+    }
+    if (!preview.activeGuides.empty()) {
+        return {false, "no guides without reference anchor",
+                std::to_string(preview.activeGuides.size())};
     }
     return {true, "", ""};
 }
@@ -1839,6 +2444,44 @@ TestResult test_shared_preview_unresolvable_crossing_falls_back_to_single_guide(
     return {true, "", ""};
 }
 
+TestResult test_circle_reference_anchor_first_click() {
+    tools::CircleTool tool;
+    tool.onMousePress({12.0, 7.0}, Qt::LeftButton);
+    const auto ref = tool.getReferencePoint();
+    if (!ref.has_value()) {
+        return {false, "reference point present", "missing"};
+    }
+    if (!approx(ref->x, 12.0, 1e-6) || !approx(ref->y, 7.0, 1e-6)) {
+        return {false,
+                "(12,7)",
+                "(" + std::to_string(ref->x) + "," + std::to_string(ref->y) + ")"};
+    }
+    return {true, "", ""};
+}
+
+TestResult test_ellipse_reference_anchor_firstclick_and_drawing() {
+    tools::EllipseTool tool;
+    tool.onMousePress({8.0, 6.0}, Qt::LeftButton);   // Idle -> FirstClick
+    const auto first = tool.getReferencePoint();
+    if (!first.has_value()) {
+        return {false, "reference point in FirstClick", "missing"};
+    }
+
+    tool.onMousePress({11.0, 6.0}, Qt::LeftButton);  // FirstClick -> Drawing
+    const auto drawing = tool.getReferencePoint();
+    if (!drawing.has_value()) {
+        return {false, "reference point in Drawing", "missing"};
+    }
+
+    if (!approx(first->x, 8.0, 1e-6) || !approx(first->y, 6.0, 1e-6) ||
+        !approx(drawing->x, 8.0, 1e-6) || !approx(drawing->y, 6.0, 1e-6)) {
+        return {false,
+                "center anchor persisted",
+                "changed anchor"};
+    }
+    return {true, "", ""};
+}
+
 TestResult test_ambiguity_hook_api() {
     SnapManager manager;
     if (manager.hasAmbiguity()) {
@@ -2022,6 +2665,19 @@ int main(int argc, char** argv) {
         {"test_ellipse_quadrant_rotated", testEllipseQuadrantRotated},
         {"test_grid_snap", testGridSnap},
         {"test_hinttext_grid_snap", test_hinttext_grid_snap},
+        {"test_grid_axis_x_snap", test_grid_axis_x_snap},
+        {"test_grid_axis_y_snap", test_grid_axis_y_snap},
+        {"test_grid_crossing_preferred_when_near", test_grid_crossing_preferred_when_near},
+        {"test_horizontal_guide_plus_grid_vertical_composition", test_horizontal_guide_plus_grid_vertical_composition},
+        {"test_grid_dual_axis_crossing_gate", test_grid_dual_axis_crossing_gate},
+        {"test_point_snap_beats_grid_crossing_overlap", test_point_snap_beats_grid_crossing_overlap},
+        {"test_real_intersection_beats_grid_crossing", test_real_intersection_beats_grid_crossing},
+        {"test_oncurve_beats_grid_crossing", test_oncurve_beats_grid_crossing},
+        {"test_extension_guide_beats_grid_crossing", test_extension_guide_beats_grid_crossing},
+        {"test_grid_beats_active_layer_3d", test_grid_beats_active_layer_3d},
+        {"test_grid_hysteresis_base_acquire_and_release", test_grid_hysteresis_base_acquire_and_release},
+        {"test_grid_axis_tie_memory_005mm_and_reset", test_grid_axis_tie_memory_005mm_and_reset},
+        {"test_grid_axis_memory_fallback_when_preferred_unavailable", test_grid_axis_memory_fallback_when_preferred_unavailable},
         {"test_perpendicular_snap_line", testPerpendicularSnapLine},
         {"test_perpendicular_snap_circle", testPerpendicularSnapCircle},
         {"test_perpendicular_snap_arc", testPerpendicularSnapArc},
@@ -2059,9 +2715,18 @@ int main(int argc, char** argv) {
     {"test_parity_no_guide_overlap", test_parity_no_guide_overlap},
     {"test_parity_guide_adjacent_to_overlap", test_parity_guide_adjacent_to_overlap},
     {"test_parity_findBestSnap_stable_across_calls", test_parity_findBestSnap_stable_across_calls},
+    {"test_parity_preview_commit_grid_guide_composition", test_parity_preview_commit_grid_guide_composition},
+    {"test_grid_conflict_mismatch_allowance_flag", test_grid_conflict_mismatch_allowance_flag},
+    {"test_non_grid_parity_strict_without_grid_conflict", test_non_grid_parity_strict_without_grid_conflict},
+    {"test_point_priority_over_grid_guide_composition", test_point_priority_over_grid_guide_composition},
     {"test_shared_preview_vertex_priority_with_guides", test_shared_preview_vertex_priority_with_guides},
     {"test_shared_preview_midpoint_suppresses_guides", test_shared_preview_midpoint_suppresses_guides},
-    {"test_shared_preview_intersection_guides_present", test_shared_preview_intersection_guides_present},
+    {"test_shared_preview_hv_requires_reference_anchor", test_shared_preview_hv_requires_reference_anchor},
+    {"test_shared_preview_grid_snap_hides_guides", test_shared_preview_grid_snap_hides_guides},
+    {"test_shared_preview_grid_composition_renders_only_non_grid_guide",
+     test_shared_preview_grid_composition_renders_only_non_grid_guide},
+    {"test_shared_preview_no_reference_disables_hv_grid_composition",
+     test_shared_preview_no_reference_disables_hv_grid_composition},
     {"test_shared_preview_no_snap_clears_guides", test_shared_preview_no_snap_clears_guides},
     {"test_shared_preview_single_nearest_guide", test_shared_preview_single_nearest_guide},
     {"test_effective_snap_guide_crossing_nearest_intersection", test_effective_snap_guide_crossing_nearest_intersection},
@@ -2076,6 +2741,8 @@ int main(int argc, char** argv) {
     {"test_hv_guide_crossing_produces_intersection_candidate", test_hv_guide_crossing_produces_intersection_candidate},
     {"test_hv_guide_crossing_wins_over_individual_hv", test_hv_guide_crossing_wins_over_individual_hv},
     {"test_hv_guide_crossing_loses_to_vertex", test_hv_guide_crossing_loses_to_vertex},
+    {"test_circle_reference_anchor_first_click", test_circle_reference_anchor_first_click},
+    {"test_ellipse_reference_anchor_firstclick_and_drawing", test_ellipse_reference_anchor_firstclick_and_drawing},
     {"test_near_parallel_guides_no_spurious_intersection", test_near_parallel_guides_no_spurious_intersection},
     {"test_ambiguity_hook_api", test_ambiguity_hook_api}
     };

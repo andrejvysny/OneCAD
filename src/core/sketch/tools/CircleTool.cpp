@@ -16,6 +16,13 @@ namespace onecad::core::sketch::tools {
 
 CircleTool::CircleTool() = default;
 
+std::optional<Vec2d> CircleTool::getReferencePoint() const {
+    if (state_ == State::FirstClick) {
+        return centerPoint_;
+    }
+    return std::nullopt;
+}
+
 void CircleTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
     if (button == Qt::RightButton) {
         cancel();

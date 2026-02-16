@@ -12,6 +12,7 @@
 
 #include "SketchTypes.h"
 #include "SpatialHashGrid.h"
+#include <algorithm>
 #include <cstddef>
 #include <cmath>
 #include <limits>
@@ -59,6 +60,19 @@ enum class SnapType {
 struct SnapResult {
     static constexpr double kOverlapEps = 1e-6;
 
+    enum class GridCandidateKind {
+        None = 0,
+        Crossing,
+        AxisX,
+        AxisY
+    };
+
+    enum class GuideIntersectionKind {
+        None = 0,
+        PureGuides,
+        MixedWithGrid
+    };
+
     bool snapped = false;
     SnapType type = SnapType::None;
     Vec2d position{0.0, 0.0};
@@ -69,6 +83,8 @@ struct SnapResult {
     Vec2d guideOrigin{0.0, 0.0};  // Reference point for guide line rendering
     bool hasGuide = false;        // Whether to render a guide line
     std::string hintText;         // Snap type label for rendering ("H", "V", etc.)
+    GridCandidateKind gridKind = GridCandidateKind::None;
+    GuideIntersectionKind guideIntersectionKind = GuideIntersectionKind::None;
 
     /**
      * @brief Comparison for deterministic overlap arbitration and priority sorting.
@@ -81,17 +97,14 @@ struct SnapResult {
      *    Intersection > OnCurve > Grid.
      * 3) Same-type co-located tie-break: when SnapType also matches, resolve ties in this exact
      *    order: pointId < entityId < secondEntityId < position.x < position.y <
-     *    hasGuide (false wins) < guideOrigin < hintText.
-     * 4) Preview/commit parity: the same findBestSnap() winner must drive both preview and
-     *    commit. tools::resolveSnapForInputEvent() must return the same winner for mouse-move
-     *    (preview) and mouse-press (commit) given identical cursor position and sketch state.
-     * 5) Determinism guarantee: for identical input (cursor position, sketch state, exclude set),
+     *    hasGuide (false wins) < guideOrigin < gridKind < guideIntersectionKind < hintText.
+     * 4) Determinism guarantee: for identical input (cursor position, sketch state, exclude set),
      *    findBestSnap() returns the same winner on every call, with no dependency on insertion
      *    order or hash randomness.
      *
      * Current comparator implementation order:
-     * type < distance < pointId < entityId < secondEntityId < position < hasGuide(false first)
-     * < guideOrigin < hintText.
+     * type < distance < pointId < entityId < secondEntityId < position <
+     * hasGuide(false first) < guideOrigin < gridKind < guideIntersectionKind < hintText.
      */
     bool operator<(const SnapResult& other) const {
         constexpr double kDistanceEps = 1e-9;
@@ -100,6 +113,7 @@ struct SnapResult {
         if (type != other.type) {
             return static_cast<int>(type) < static_cast<int>(other.type);
         }
+
         if (std::abs(distance - other.distance) > kDistanceEps) {
             return distance < other.distance;
         }
@@ -129,6 +143,13 @@ struct SnapResult {
         }
         if (std::abs(guideOrigin.y - other.guideOrigin.y) > kCoordEps) {
             return guideOrigin.y < other.guideOrigin.y;
+        }
+        if (gridKind != other.gridKind) {
+            return static_cast<int>(gridKind) < static_cast<int>(other.gridKind);
+        }
+        if (guideIntersectionKind != other.guideIntersectionKind) {
+            return static_cast<int>(guideIntersectionKind) <
+                   static_cast<int>(other.guideIntersectionKind);
         }
 
         return hintText < other.hintText;
@@ -180,6 +201,19 @@ public:
                                           const std::unordered_set<EntityID>& excludeEntities = {},
                                           std::optional<Vec2d> referencePoint = std::nullopt) const;
 
+    /**
+     * @brief Select deterministic best snap from a prepared candidate list.
+     */
+    SnapResult selectBestSnapFromCandidates(
+        const Vec2d& cursorPos,
+        const Sketch& sketch,
+        const std::vector<SnapResult>& candidates) const;
+
+    /**
+     * @brief Last winner-arbitration grid conflict status.
+     */
+    bool lastGridConflictDetected() const { return lastGridConflictDetected_; }
+
     // ========== Configuration ==========
 
     /**
@@ -202,7 +236,7 @@ public:
     /**
      * @brief Enable/disable grid snapping
      */
-    void setGridSnapEnabled(bool enabled) { gridSnapEnabled_ = enabled; }
+    void setGridSnapEnabled(bool enabled);
     bool isGridSnapEnabled() const { return gridSnapEnabled_; }
 
     /**
@@ -259,6 +293,11 @@ public:
      */
     void clearAmbiguity() const;
 
+    /**
+     * @brief Clear grid-only snapping state (hysteresis + axis memory)
+     */
+    void resetGridSnapState() const;
+
 private:
     struct AmbiguityState {
         std::vector<SnapResult> candidates;
@@ -282,10 +321,40 @@ private:
 
     mutable SpatialHashGrid spatialHash_;
     mutable AmbiguityState ambiguityState_;
+    mutable bool lastGridConflictDetected_ = false;
+
+    struct GridStickyState {
+        SnapResult::GridCandidateKind kind = SnapResult::GridCandidateKind::None;
+        double gridX = 0.0;
+        double gridY = 0.0;
+    };
+
+    mutable std::optional<GridStickyState> gridStickyState_;
+    mutable SnapResult::GridCandidateKind axisTieMemory_ = SnapResult::GridCandidateKind::None;
+
+    static constexpr double kGridAxisTieEpsilonMM = 0.05;
+    static constexpr double kGridReleaseRadiusMultiplier = 1.35;
 
     void rebuildSpatialHash(const Sketch& sketch) const;
     bool shouldConsiderEntity(const EntityID& entityId,
                               const std::unordered_set<EntityID>* candidateSet) const;
+    std::optional<SnapResult> pickBestGridCandidate(
+        const Vec2d& cursorPos,
+        const std::vector<SnapResult>& snaps) const;
+    std::optional<SnapResult> buildStickyGridCandidate(const Vec2d& cursorPos) const;
+    bool isGridConflict(const std::vector<SnapResult>& snaps,
+                        const SnapResult& selectedGrid) const;
+    static bool isPointType(SnapType type);
+    static bool isNonGridGeometryType(const SnapResult& snap);
+    static bool isMixedGridGuideIntersection(const SnapResult& snap);
+    SnapResult selectBestSnapCandidate(
+        const Vec2d& cursorPos,
+        const Sketch& sketch,
+        const std::vector<SnapResult>& snaps) const;
+    static void applyGridStickyStateFromSelection(
+        const SnapResult& selected,
+        std::optional<GridStickyState>& stickyState,
+        SnapResult::GridCandidateKind& axisTieMemory);
 
     // ========== Individual Snap Type Finders ==========
 
@@ -363,7 +432,6 @@ private:
      * @brief Find snap to grid
      */
     void findGridSnaps(const Vec2d& cursorPos,
-                       double radiusSq,
                        std::vector<SnapResult>& results) const;
 
     /**

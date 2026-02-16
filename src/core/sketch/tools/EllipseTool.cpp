@@ -11,6 +11,13 @@ namespace onecad::core::sketch::tools {
 
 EllipseTool::EllipseTool() = default;
 
+std::optional<Vec2d> EllipseTool::getReferencePoint() const {
+    if (state_ == State::FirstClick || state_ == State::Drawing) {
+        return centerPoint_;
+    }
+    return std::nullopt;
+}
+
 void EllipseTool::onMousePress(const Vec2d& pos, Qt::MouseButton button) {
     if (button == Qt::RightButton) {
         cancel();

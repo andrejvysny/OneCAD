@@ -1,5 +1,6 @@
 #include "Camera3D.h"
 #include <QtMath>
+#include <cmath>
 
 namespace onecad {
 namespace render {
@@ -79,8 +80,18 @@ void Camera3D::pan(float deltaX, float deltaY) {
 }
 
 void Camera3D::zoom(float delta) {
+    zoomByFactor(1.0f - delta * 0.001f);
+}
+
+void Camera3D::zoomByFactor(float factor) {
+    if (!std::isfinite(factor)) {
+        return;
+    }
+
+    factor = qBound(0.01f, factor, 100.0f);
+
     if (m_projectionType == ProjectionType::Orthographic) {
-        float newScale = m_orthoScale - delta * m_orthoScale * 0.001f;
+        float newScale = m_orthoScale * factor;
         float minScale = 2.0f * MIN_DISTANCE *
             qTan(qDegreesToRadians(MIN_PERSPECTIVE_FOV * 0.5f));
         float maxScale = 2.0f * MAX_DISTANCE *
@@ -90,7 +101,7 @@ void Camera3D::zoom(float delta) {
     }
 
     float dist = distance();
-    float newDist = dist - delta * dist * 0.001f;
+    float newDist = dist * factor;
 
     // Clamp distance
     newDist = qBound(MIN_DISTANCE, newDist, MAX_DISTANCE);

@@ -11,6 +11,7 @@
 #include "../SketchRenderer.h"
 #include <QLoggingCategory>
 #include <QString>
+#include <cmath>
 #include <vector>
 
 namespace onecad::core::sketch::tools {
@@ -27,6 +28,12 @@ std::vector<SketchRenderer::GuideLineInfo> toRendererGuides(
         guides.push_back({guide.origin, guide.target});
     }
     return guides;
+}
+
+bool sameCursorSample(const Vec2d& a, const Vec2d& b) {
+    constexpr double kCursorMatchEps = 1e-6;
+    return std::abs(a.x - b.x) <= kCursorMatchEps &&
+           std::abs(a.y - b.y) <= kCursorMatchEps;
 }
 
 } // namespace
@@ -65,6 +72,11 @@ void SketchToolManager::activateTool(ToolType type) {
         activeTool_->setAutoConstrainer(&autoConstrainer_);
         activeTool_->setSnapManager(&snapManager_);
         currentType_ = type;
+        currentSnapResult_ = SnapResult{};
+        currentInferredConstraints_.clear();
+        hasPreviewCursorSample_ = false;
+        previewHadGridConflict_ = false;
+        snapManager_.resetGridSnapState();
         emit toolChanged(type);
     }
 }
@@ -78,6 +90,10 @@ void SketchToolManager::deactivateTool() {
     currentType_ = ToolType::None;
     currentSnapResult_ = SnapResult{};
     currentInferredConstraints_.clear();
+    hasPreviewCursorSample_ = false;
+    previewHadGridConflict_ = false;
+    hasRawCursorSample_ = false;
+    snapManager_.resetGridSnapState();
 
     // Clear any preview
     if (renderer_) {
@@ -96,6 +112,8 @@ void SketchToolManager::handleMousePress(const Vec2d& pos, Qt::MouseButton butto
     }
 
     rawCursorPos_ = pos;
+    hasRawCursorSample_ = true;
+    const bool previousPreviewHadGridConflict = previewHadGridConflict_;
     if (sketch_) {
         const SnapInputResolution snapResolution = resolveSnapForInputEvent(
             snapManager_,
@@ -105,9 +123,28 @@ void SketchToolManager::handleMousePress(const Vec2d& pos, Qt::MouseButton butto
             activeTool_->getReferencePoint(),
             false,
             false);
-        currentSnapResult_ = snapResolution.resolvedSnap;
+        const bool canReusePreviewSnap =
+            hasPreviewCursorSample_ &&
+            sameCursorSample(previewCursorPos_, pos) &&
+            !snapResolution.allowPreviewCommitMismatch;
+        previewHadGridConflict_ = snapResolution.gridConflict;
+        if (!canReusePreviewSnap) {
+            currentSnapResult_ = snapResolution.resolvedSnap;
+        }
+        hasPreviewCursorSample_ = true;
+        previewCursorPos_ = pos;
+
+        qCDebug(logSketchToolMgr) << "mousePress:resolution"
+                                  << "previousPreviewGridConflict="
+                                  << previousPreviewHadGridConflict
+                                  << "gridConflict=" << snapResolution.gridConflict
+                                  << "allowPreviewCommitMismatch="
+                                  << snapResolution.allowPreviewCommitMismatch
+                                  << "reusePreviewSnap=" << canReusePreviewSnap;
     } else {
         currentSnapResult_ = SnapResult{};
+        previewHadGridConflict_ = false;
+        hasPreviewCursorSample_ = false;
     }
     activeTool_->setSnapResult(currentSnapResult_);
     qCDebug(logSketchToolMgr) << "mousePress:snap"
@@ -167,16 +204,22 @@ void SketchToolManager::handleMousePress(const Vec2d& pos, Qt::MouseButton butto
         emit geometryCreated();
     }
 
+    snapManager_.resetGridSnapState();
     emit updateRequested();
 }
 
 void SketchToolManager::handleMouseMove(const Vec2d& pos) {
     qCDebug(logSketchToolMgr) << "mouseMove" << pos.x << pos.y;
     rawCursorPos_ = pos;
+    hasRawCursorSample_ = true;
+    previewCursorPos_ = pos;
+    hasPreviewCursorSample_ = true;
 
     if (!activeTool_) {
         currentSnapResult_ = SnapResult{};
         currentInferredConstraints_.clear();
+        previewHadGridConflict_ = false;
+        hasPreviewCursorSample_ = false;
         return;
     }
 
@@ -188,9 +231,10 @@ void SketchToolManager::handleMouseMove(const Vec2d& pos) {
             *sketch_,
             excludeFromSnap_,
             activeTool_->getReferencePoint(),
-            true,
+            false,
             renderer_ != nullptr);
         currentSnapResult_ = snapResolution.resolvedSnap;
+        previewHadGridConflict_ = snapResolution.gridConflict;
 
         if (renderer_) {
             if (snapManager_.showGuidePoints()) {
@@ -201,6 +245,7 @@ void SketchToolManager::handleMouseMove(const Vec2d& pos) {
         }
     } else {
         currentSnapResult_ = SnapResult{};
+        previewHadGridConflict_ = false;
         if (renderer_) {
             renderer_->setActiveGuides({});
         }
@@ -230,6 +275,7 @@ void SketchToolManager::handleMouseRelease(const Vec2d& pos, Qt::MouseButton but
     }
 
     rawCursorPos_ = pos;
+    hasRawCursorSample_ = true;
     if (sketch_) {
         const SnapInputResolution snapResolution = resolveSnapForInputEvent(
             snapManager_,
@@ -240,8 +286,12 @@ void SketchToolManager::handleMouseRelease(const Vec2d& pos, Qt::MouseButton but
             false,
             false);
         currentSnapResult_ = snapResolution.resolvedSnap;
+        previewHadGridConflict_ = snapResolution.gridConflict;
+        hasPreviewCursorSample_ = true;
+        previewCursorPos_ = pos;
     } else {
         currentSnapResult_ = SnapResult{};
+        previewHadGridConflict_ = false;
     }
     activeTool_->setSnapResult(currentSnapResult_);
     qCDebug(logSketchToolMgr) << "mouseRelease:snap"
@@ -265,6 +315,11 @@ void SketchToolManager::handleKeyPress(Qt::Key key) {
     }
 
     activeTool_->onKeyPress(key);
+    if (key == Qt::Key_Escape) {
+        snapManager_.resetGridSnapState();
+        hasPreviewCursorSample_ = false;
+        previewHadGridConflict_ = false;
+    }
     emit updateRequested();
 }
 
@@ -278,7 +333,9 @@ void SketchToolManager::renderPreview() {
 
     // Show snap indicator if snapped
     if (currentSnapResult_.snapped) {
-        bool showGuide = snapManager_.showGuidePoints() && currentSnapResult_.hasGuide;
+        const bool showGuide = snapManager_.showGuidePoints() &&
+            currentSnapResult_.hasGuide &&
+            currentSnapResult_.type != SnapType::Grid;
         std::string hintText = snapManager_.showSnappingHints()
             ? currentSnapResult_.hintText
             : std::string();
@@ -289,7 +346,17 @@ void SketchToolManager::renderPreview() {
             showGuide,
             hintText);
     } else {
-        renderer_->hideSnapIndicator();
+        const auto anchor = activeTool_->isActive() ? activeTool_->getReferencePoint()
+                                                    : std::optional<Vec2d>{};
+        if (anchor.has_value()) {
+            // Preserve first-click anchors for multi-step tools.
+            renderer_->showSnapIndicator(anchor.value(), SnapType::None);
+        } else if (hasRawCursorSample_) {
+            // Keep unsnapped cursor feedback visible while sketch tool is active.
+            renderer_->showSnapIndicator(rawCursorPos_, SnapType::None);
+        } else {
+            renderer_->hideSnapIndicator();
+        }
     }
 
     // Show ghost constraints (inferred constraints during drawing)

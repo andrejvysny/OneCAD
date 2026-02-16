@@ -31,6 +31,7 @@ public:
     void cancel() override;
     void render(SketchRenderer& renderer) override;
     std::string name() const override { return "Circle"; }
+    std::optional<Vec2d> getReferencePoint() const override;
     PreviewDimensionApplyResult applyPreviewDimensionValue(const std::string& id,
                                                            double value) override;
 

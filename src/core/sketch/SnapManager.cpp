@@ -78,6 +78,16 @@ void SnapManager::setAllSnapsEnabled(bool enabled) {
         state = enabled;
     }
     gridSnapEnabled_ = enabled;
+    if (!enabled) {
+        resetGridSnapState();
+    }
+}
+
+void SnapManager::setGridSnapEnabled(bool enabled) {
+    gridSnapEnabled_ = enabled;
+    if (!enabled) {
+        resetGridSnapState();
+    }
 }
 
 void SnapManager::setExternalGeometry(const std::vector<Vec2d>& points,
@@ -109,15 +119,11 @@ SnapResult SnapManager::findBestSnap(
     }
 
     auto snaps = findAllSnaps(cursorPos, sketch, excludeEntities, referencePoint);
-    if (snaps.empty()) {
+    const SnapResult best = selectBestSnapCandidate(cursorPos, sketch, snaps);
+    if (!best.snapped) {
         qCDebug(logSnapManager) << "findBestSnap:no-candidates";
-        return SnapResult{};
+        return best;
     }
-
-    // Sort by priority (type first, then distance)
-    std::sort(snaps.begin(), snaps.end());
-
-    const SnapResult& best = snaps.front();
 
     // Detect ambiguity: co-located candidates within kOverlapEps
     std::vector<SnapResult> coLocated;
@@ -126,6 +132,9 @@ SnapResult SnapManager::findBestSnap(
             std::abs(snap.position.y - best.position.y) <= SnapResult::kOverlapEps) {
             coLocated.push_back(snap);
         }
+    }
+    if (coLocated.empty()) {
+        coLocated.push_back(best);
     }
 
     if (coLocated.size() > 1) {
@@ -137,62 +146,12 @@ SnapResult SnapManager::findBestSnap(
                                 << "bestType=" << static_cast<int>(best.type);
     }
 
-    if (best.type != SnapType::Vertex) {
-        qCDebug(logSnapManager) << "findBestSnap:resolved"
-                                << "type=" << static_cast<int>(best.type)
-                                << "distance=" << best.distance
-                                << "entity=" << QString::fromStdString(best.entityId);
-        return best;
-    }
-
-    constexpr double kDistanceEps = 1e-9;
-    const auto isOverlapping = [&](const SnapResult& snap) {
-        return std::abs(snap.position.x - best.position.x) <= SnapResult::kOverlapEps &&
-               std::abs(snap.position.y - best.position.y) <= SnapResult::kOverlapEps;
-    };
-
-    std::unordered_map<EntityID, size_t> pointOrder;
-    pointOrder.reserve(sketch.getEntityCount());
-    size_t pointIndex = 0;
-    for (const auto& entity : sketch.getAllEntities()) {
-        if (entity->type() != EntityType::Point) {
-            continue;
-        }
-        pointOrder.emplace(entity->id(), pointIndex++);
-    }
-
-    auto pointOrderOf = [&](const SnapResult& snap) {
-        const EntityID& pointKey = snap.pointId.empty() ? snap.entityId : snap.pointId;
-        auto it = pointOrder.find(pointKey);
-        return it != pointOrder.end() ? it->second : std::numeric_limits<size_t>::max();
-    };
-
-    const SnapResult* bestVertex = &best;
-    for (const auto& snap : snaps) {
-        if (snap.type != SnapType::Vertex) {
-            continue;
-        }
-        if (std::abs(snap.distance - best.distance) > kDistanceEps) {
-            continue;
-        }
-        if (!isOverlapping(snap)) {
-            continue;
-        }
-
-        const size_t currentOrder = pointOrderOf(*bestVertex);
-        const size_t candidateOrder = pointOrderOf(snap);
-        if (candidateOrder < currentOrder ||
-            (candidateOrder == currentOrder && snap < *bestVertex)) {
-            bestVertex = &snap;
-        }
-    }
-
-    qCDebug(logSnapManager) << "findBestSnap:resolved-vertex"
-                            << "distance=" << bestVertex->distance
-                            << "pointId=" << QString::fromStdString(bestVertex->pointId)
-                            << "entityId=" << QString::fromStdString(bestVertex->entityId);
-
-    return *bestVertex;
+    qCDebug(logSnapManager) << "findBestSnap:resolved"
+                            << "type=" << static_cast<int>(best.type)
+                            << "distance=" << best.distance
+                            << "gridConflict=" << lastGridConflictDetected_
+                            << "entity=" << QString::fromStdString(best.entityId);
+    return best;
 }
 
 std::vector<SnapResult> SnapManager::findAllSnaps(
@@ -246,7 +205,7 @@ std::vector<SnapResult> SnapManager::findAllSnaps(
         findOnCurveSnaps(cursorPos, sketch, excludeEntities, candidateFilter, radiusSq, results);
     }
     if (gridSnapEnabled_ && isSnapEnabled(SnapType::Grid)) {
-        findGridSnaps(cursorPos, radiusSq, results);
+        findGridSnaps(cursorPos, results);
     }
     if (isSnapEnabled(SnapType::Perpendicular)) {
         findPerpendicularSnaps(cursorPos, sketch, excludeEntities, radiusSq, results);
@@ -265,64 +224,75 @@ std::vector<SnapResult> SnapManager::findAllSnaps(
         if (referencePoint.has_value()) {
             findAngularSnap(cursorPos, referencePoint.value(), radiusSq, results);
         }
+    }
 
-        if (isSnapEnabled(SnapType::Intersection)) {
-            std::vector<SnapResult> guideCandidates;
-            guideCandidates.reserve(results.size());
-            for (const auto& snap : results) {
-                if (!snap.snapped || !snap.hasGuide) {
-                    continue;
-                }
-                if (distanceSquared(snap.guideOrigin, snap.position) < 1e-12) {
-                    continue;
-                }
-                guideCandidates.push_back(snap);
+    if (isSnapEnabled(SnapType::Intersection)) {
+        std::vector<SnapResult> guideCandidates;
+        guideCandidates.reserve(results.size());
+        for (const auto& snap : results) {
+            if (!snap.snapped || !snap.hasGuide) {
+                continue;
             }
+            if (distanceSquared(snap.guideOrigin, snap.position) < 1e-12) {
+                continue;
+            }
+            guideCandidates.push_back(snap);
+        }
 
-            auto alreadyHasIntersectionAt = [&](const Vec2d& pos) {
-                for (const auto& snap : results) {
-                    if (!snap.snapped || snap.type != SnapType::Intersection) {
-                        continue;
-                    }
-                    if (std::abs(snap.position.x - pos.x) <= SnapResult::kOverlapEps &&
-                        std::abs(snap.position.y - pos.y) <= SnapResult::kOverlapEps) {
-                        return true;
-                    }
+        auto alreadyHasIntersectionAt = [&](const Vec2d& pos) {
+            for (const auto& snap : results) {
+                if (!snap.snapped || snap.type != SnapType::Intersection) {
+                    continue;
                 }
-                return false;
-            };
-
-            for (size_t i = 0; i < guideCandidates.size(); ++i) {
-                for (size_t j = i + 1; j < guideCandidates.size(); ++j) {
-                    const auto intersection = infiniteLineIntersection(
-                        guideCandidates[i].guideOrigin,
-                        guideCandidates[i].position,
-                        guideCandidates[j].guideOrigin,
-                        guideCandidates[j].position);
-                    if (!intersection.has_value()) {
-                        continue;
-                    }
-
-                    const double distSq = distanceSquared(cursorPos, *intersection);
-                    if (distSq > radiusSq) {
-                        continue;
-                    }
-                    if (alreadyHasIntersectionAt(*intersection)) {
-                        continue;
-                    }
-
-                    results.push_back({
-                        .snapped = true,
-                        .type = SnapType::Intersection,
-                        .position = *intersection,
-                        .entityId = guideCandidates[i].entityId,
-                        .secondEntityId = guideCandidates[j].entityId,
-                        .distance = std::sqrt(distSq),
-                        .guideOrigin = guideCandidates[i].guideOrigin,
-                        .hasGuide = true,
-                        .hintText = "X"
-                    });
+                if (std::abs(snap.position.x - pos.x) <= SnapResult::kOverlapEps &&
+                    std::abs(snap.position.y - pos.y) <= SnapResult::kOverlapEps) {
+                    return true;
                 }
+            }
+            return false;
+        };
+
+        for (size_t i = 0; i < guideCandidates.size(); ++i) {
+            for (size_t j = i + 1; j < guideCandidates.size(); ++j) {
+                // Keep plain grid snapping as Grid semantics; only compose
+                // grid guides with non-grid visual/inference guides.
+                const bool firstIsGrid = guideCandidates[i].type == SnapType::Grid;
+                const bool secondIsGrid = guideCandidates[j].type == SnapType::Grid;
+                if (firstIsGrid && secondIsGrid) {
+                    continue;
+                }
+
+                const auto intersection = infiniteLineIntersection(
+                    guideCandidates[i].guideOrigin,
+                    guideCandidates[i].position,
+                    guideCandidates[j].guideOrigin,
+                    guideCandidates[j].position);
+                if (!intersection.has_value()) {
+                    continue;
+                }
+
+                const double distSq = distanceSquared(cursorPos, *intersection);
+                if (distSq > radiusSq) {
+                    continue;
+                }
+                if (alreadyHasIntersectionAt(*intersection)) {
+                    continue;
+                }
+
+                results.push_back({
+                    .snapped = true,
+                    .type = SnapType::Intersection,
+                    .position = *intersection,
+                    .entityId = guideCandidates[i].entityId,
+                    .secondEntityId = guideCandidates[j].entityId,
+                    .distance = std::sqrt(distSq),
+                    .guideOrigin = guideCandidates[i].guideOrigin,
+                    .hasGuide = true,
+                    .hintText = "X",
+                    .guideIntersectionKind = (firstIsGrid || secondIsGrid)
+                        ? SnapResult::GuideIntersectionKind::MixedWithGrid
+                        : SnapResult::GuideIntersectionKind::PureGuides
+                });
             }
         }
     }
@@ -333,6 +303,13 @@ std::vector<SnapResult> SnapManager::findAllSnaps(
     qCDebug(logSnapManager) << "findAllSnaps:done"
                             << "candidateCount=" << results.size();
     return results;
+}
+
+SnapResult SnapManager::selectBestSnapFromCandidates(
+    const Vec2d& cursorPos,
+    const Sketch& sketch,
+    const std::vector<SnapResult>& candidates) const {
+    return selectBestSnapCandidate(cursorPos, sketch, candidates);
 }
 
 bool SnapManager::hasAmbiguity() const {
@@ -354,6 +331,375 @@ void SnapManager::clearAmbiguity() const {
     ambiguityState_.candidates.clear();
     ambiguityState_.selectedIndex = 0;
     ambiguityState_.active = false;
+}
+
+void SnapManager::resetGridSnapState() const {
+    gridStickyState_.reset();
+    axisTieMemory_ = SnapResult::GridCandidateKind::None;
+    lastGridConflictDetected_ = false;
+}
+
+bool SnapManager::isPointType(SnapType type) {
+    switch (type) {
+        case SnapType::Vertex:
+        case SnapType::Endpoint:
+        case SnapType::Midpoint:
+        case SnapType::Center:
+        case SnapType::Quadrant:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool SnapManager::isNonGridGeometryType(const SnapResult& snap) {
+    if (!snap.snapped) {
+        return false;
+    }
+    if (snap.type == SnapType::OnCurve) {
+        return true;
+    }
+    return snap.type == SnapType::Intersection && !snap.hasGuide;
+}
+
+bool SnapManager::isMixedGridGuideIntersection(const SnapResult& snap) {
+    return snap.snapped &&
+           snap.type == SnapType::Intersection &&
+           snap.hasGuide &&
+           snap.guideIntersectionKind == SnapResult::GuideIntersectionKind::MixedWithGrid;
+}
+
+void SnapManager::applyGridStickyStateFromSelection(
+    const SnapResult& selected,
+    std::optional<GridStickyState>& stickyState,
+    SnapResult::GridCandidateKind& axisTieMemory) {
+    if (selected.type != SnapType::Grid) {
+        return;
+    }
+    if (selected.gridKind == SnapResult::GridCandidateKind::None) {
+        return;
+    }
+
+    GridStickyState state;
+    state.kind = selected.gridKind;
+    state.gridX = selected.position.x;
+    state.gridY = selected.position.y;
+    stickyState = state;
+
+    if (selected.gridKind == SnapResult::GridCandidateKind::AxisX ||
+        selected.gridKind == SnapResult::GridCandidateKind::AxisY) {
+        axisTieMemory = selected.gridKind;
+    }
+}
+
+std::optional<SnapResult> SnapManager::buildStickyGridCandidate(const Vec2d& cursorPos) const {
+    if (!gridStickyState_.has_value()) {
+        return std::nullopt;
+    }
+    if (!gridSnapEnabled_ || !isSnapEnabled(SnapType::Grid)) {
+        return std::nullopt;
+    }
+    if (gridSize_ <= 0.0) {
+        return std::nullopt;
+    }
+
+    const GridStickyState state = *gridStickyState_;
+    const double releaseRadius = snapRadius_ * kGridReleaseRadiusMultiplier;
+    const double guideStep = std::max(gridSize_, 1e-6);
+
+    switch (state.kind) {
+        case SnapResult::GridCandidateKind::Crossing: {
+            const double dx = std::abs(cursorPos.x - state.gridX);
+            const double dy = std::abs(cursorPos.y - state.gridY);
+            if (dx > releaseRadius || dy > releaseRadius) {
+                return std::nullopt;
+            }
+            return SnapResult{
+                .snapped = true,
+                .type = SnapType::Grid,
+                .position = {state.gridX, state.gridY},
+                .distance = std::sqrt((dx * dx) + (dy * dy)),
+                .hintText = "GRID",
+                .gridKind = SnapResult::GridCandidateKind::Crossing
+            };
+        }
+        case SnapResult::GridCandidateKind::AxisX: {
+            const double dx = std::abs(cursorPos.x - state.gridX);
+            if (dx > releaseRadius) {
+                return std::nullopt;
+            }
+            return SnapResult{
+                .snapped = true,
+                .type = SnapType::Grid,
+                .position = {state.gridX, cursorPos.y},
+                .distance = dx,
+                .guideOrigin = {state.gridX, cursorPos.y - guideStep},
+                .hasGuide = true,
+                .hintText = "GRID",
+                .gridKind = SnapResult::GridCandidateKind::AxisX
+            };
+        }
+        case SnapResult::GridCandidateKind::AxisY: {
+            const double dy = std::abs(cursorPos.y - state.gridY);
+            if (dy > releaseRadius) {
+                return std::nullopt;
+            }
+            return SnapResult{
+                .snapped = true,
+                .type = SnapType::Grid,
+                .position = {cursorPos.x, state.gridY},
+                .distance = dy,
+                .guideOrigin = {cursorPos.x - guideStep, state.gridY},
+                .hasGuide = true,
+                .hintText = "GRID",
+                .gridKind = SnapResult::GridCandidateKind::AxisY
+            };
+        }
+        case SnapResult::GridCandidateKind::None:
+        default:
+            break;
+    }
+    return std::nullopt;
+}
+
+std::optional<SnapResult> SnapManager::pickBestGridCandidate(
+    const Vec2d& cursorPos,
+    const std::vector<SnapResult>& snaps) const {
+    auto classifyGridKind = [&](const SnapResult& snap) {
+        if (snap.gridKind != SnapResult::GridCandidateKind::None) {
+            return snap.gridKind;
+        }
+        if (!snap.hasGuide) {
+            return SnapResult::GridCandidateKind::Crossing;
+        }
+        const double dx = std::abs(snap.position.x - cursorPos.x);
+        const double dy = std::abs(snap.position.y - cursorPos.y);
+        return dx > dy ? SnapResult::GridCandidateKind::AxisX
+                       : SnapResult::GridCandidateKind::AxisY;
+    };
+
+    std::optional<SnapResult> crossing;
+    std::optional<SnapResult> axisX;
+    std::optional<SnapResult> axisY;
+
+    for (const auto& snap : snaps) {
+        if (!snap.snapped || snap.type != SnapType::Grid) {
+            continue;
+        }
+
+        SnapResult normalized = snap;
+        normalized.gridKind = classifyGridKind(snap);
+
+        auto updateBest = [&](std::optional<SnapResult>& current) {
+            if (!current.has_value() || normalized < *current) {
+                current = normalized;
+            }
+        };
+
+        switch (normalized.gridKind) {
+            case SnapResult::GridCandidateKind::Crossing:
+                updateBest(crossing);
+                break;
+            case SnapResult::GridCandidateKind::AxisX:
+                updateBest(axisX);
+                break;
+            case SnapResult::GridCandidateKind::AxisY:
+                updateBest(axisY);
+                break;
+            case SnapResult::GridCandidateKind::None:
+            default:
+                break;
+        }
+    }
+
+    std::optional<SnapResult> baseSelection;
+    if (crossing.has_value()) {
+        baseSelection = crossing;
+    } else if (axisX.has_value() && axisY.has_value()) {
+        const double delta = std::abs(axisX->distance - axisY->distance);
+        if (delta <= kGridAxisTieEpsilonMM) {
+            if (axisTieMemory_ == SnapResult::GridCandidateKind::AxisX) {
+                baseSelection = axisX;
+            } else if (axisTieMemory_ == SnapResult::GridCandidateKind::AxisY) {
+                baseSelection = axisY;
+            }
+        }
+        if (!baseSelection.has_value()) {
+            baseSelection = axisX->distance <= axisY->distance ? axisX : axisY;
+        }
+    } else if (axisX.has_value()) {
+        baseSelection = axisX;
+    } else if (axisY.has_value()) {
+        baseSelection = axisY;
+    }
+
+    const std::optional<SnapResult> stickyCandidate = buildStickyGridCandidate(cursorPos);
+    if (gridStickyState_.has_value() && !stickyCandidate.has_value()) {
+        gridStickyState_.reset();
+    }
+
+    if (!stickyCandidate.has_value()) {
+        return baseSelection;
+    }
+    if (!baseSelection.has_value()) {
+        return stickyCandidate;
+    }
+    if (stickyCandidate->gridKind == SnapResult::GridCandidateKind::Crossing) {
+        return stickyCandidate;
+    }
+    if (baseSelection->gridKind == SnapResult::GridCandidateKind::Crossing) {
+        return baseSelection;
+    }
+    return stickyCandidate;
+}
+
+bool SnapManager::isGridConflict(const std::vector<SnapResult>& snaps,
+                                 const SnapResult& selectedGrid) const {
+    if (!selectedGrid.snapped || selectedGrid.type != SnapType::Grid ||
+        selectedGrid.gridKind != SnapResult::GridCandidateKind::Crossing) {
+        return false;
+    }
+
+    auto classifyGridKind = [&](const SnapResult& snap) {
+        if (snap.gridKind != SnapResult::GridCandidateKind::None) {
+            return snap.gridKind;
+        }
+        if (!snap.hasGuide) {
+            return SnapResult::GridCandidateKind::Crossing;
+        }
+        const double dx = std::abs(snap.position.x - selectedGrid.position.x);
+        const double dy = std::abs(snap.position.y - selectedGrid.position.y);
+        return dx > dy ? SnapResult::GridCandidateKind::AxisX
+                       : SnapResult::GridCandidateKind::AxisY;
+    };
+
+    for (const auto& snap : snaps) {
+        if (!snap.snapped) {
+            continue;
+        }
+        if (snap.type == SnapType::Grid) {
+            if (classifyGridKind(snap) != SnapResult::GridCandidateKind::Crossing) {
+                return true;
+            }
+            continue;
+        }
+        if (isPointType(snap.type) ||
+            isNonGridGeometryType(snap) ||
+            isMixedGridGuideIntersection(snap) ||
+            snap.type == SnapType::SketchGuide ||
+            snap.type == SnapType::Horizontal ||
+            snap.type == SnapType::Vertical ||
+            snap.type == SnapType::ActiveLayer3D) {
+            return true;
+        }
+    }
+    return false;
+}
+
+SnapResult SnapManager::selectBestSnapCandidate(const Vec2d& cursorPos,
+                                                const Sketch& sketch,
+                                                const std::vector<SnapResult>& snaps) const {
+    auto pickDeterministic = [&](const std::vector<SnapResult>& candidates) {
+        if (candidates.empty()) {
+            return SnapResult{};
+        }
+
+        std::vector<SnapResult> sorted = candidates;
+        std::sort(sorted.begin(), sorted.end());
+        const SnapResult& best = sorted.front();
+        if (best.type != SnapType::Vertex) {
+            return best;
+        }
+
+        std::unordered_map<EntityID, size_t> pointOrder;
+        pointOrder.reserve(sketch.getEntityCount());
+        size_t pointIndex = 0;
+        for (const auto& entity : sketch.getAllEntities()) {
+            if (entity->type() != EntityType::Point) {
+                continue;
+            }
+            pointOrder.emplace(entity->id(), pointIndex++);
+        }
+
+        auto pointOrderOf = [&](const SnapResult& snap) {
+            const EntityID& pointKey = snap.pointId.empty() ? snap.entityId : snap.pointId;
+            auto it = pointOrder.find(pointKey);
+            return it != pointOrder.end() ? it->second : std::numeric_limits<size_t>::max();
+        };
+
+        constexpr double kDistanceEps = 1e-9;
+        const auto isOverlapping = [&](const SnapResult& snap) {
+            return std::abs(snap.position.x - best.position.x) <= SnapResult::kOverlapEps &&
+                   std::abs(snap.position.y - best.position.y) <= SnapResult::kOverlapEps;
+        };
+
+        const SnapResult* bestVertex = &best;
+        for (const auto& snap : sorted) {
+            if (snap.type != SnapType::Vertex) {
+                continue;
+            }
+            if (std::abs(snap.distance - best.distance) > kDistanceEps) {
+                continue;
+            }
+            if (!isOverlapping(snap)) {
+                continue;
+            }
+            const size_t currentOrder = pointOrderOf(*bestVertex);
+            const size_t candidateOrder = pointOrderOf(snap);
+            if (candidateOrder < currentOrder ||
+                (candidateOrder == currentOrder && snap < *bestVertex)) {
+                bestVertex = &snap;
+            }
+        }
+        return *bestVertex;
+    };
+
+    std::vector<SnapResult> nonGridCandidates;
+    nonGridCandidates.reserve(snaps.size());
+    for (const auto& snap : snaps) {
+        if (!snap.snapped || snap.type == SnapType::Grid) {
+            continue;
+        }
+        nonGridCandidates.push_back(snap);
+    }
+
+    std::optional<SnapResult> nonGridBest;
+    if (!nonGridCandidates.empty()) {
+        nonGridBest = pickDeterministic(nonGridCandidates);
+    }
+    const std::optional<SnapResult> gridBest = pickBestGridCandidate(cursorPos, snaps);
+
+    SnapResult selected;
+    if (gridBest.has_value() && nonGridBest.has_value()) {
+        if (gridBest->gridKind == SnapResult::GridCandidateKind::Crossing) {
+            if (isPointType(nonGridBest->type) ||
+                isNonGridGeometryType(*nonGridBest) ||
+                nonGridBest->type == SnapType::SketchGuide) {
+                selected = *nonGridBest;
+            } else if (isMixedGridGuideIntersection(*nonGridBest) ||
+                       nonGridBest->type == SnapType::Horizontal ||
+                       nonGridBest->type == SnapType::Vertical ||
+                       nonGridBest->type == SnapType::ActiveLayer3D) {
+                selected = *gridBest;
+            } else {
+                selected = (*nonGridBest < *gridBest) ? *nonGridBest : *gridBest;
+            }
+        } else {
+            selected = (*nonGridBest < *gridBest) ? *nonGridBest : *gridBest;
+        }
+    } else if (gridBest.has_value()) {
+        selected = *gridBest;
+    } else if (nonGridBest.has_value()) {
+        selected = *nonGridBest;
+    } else {
+        selected = SnapResult{};
+    }
+
+    if (selected.snapped) {
+        applyGridStickyStateFromSelection(selected, gridStickyState_, axisTieMemory_);
+    }
+    lastGridConflictDetected_ = isGridConflict(snaps, selected);
+    return selected;
 }
 
 void SnapManager::rebuildSpatialHash(const Sketch& sketch) const {
@@ -861,24 +1207,54 @@ void SnapManager::findOnCurveSnaps(
 
 void SnapManager::findGridSnaps(
     const Vec2d& cursorPos,
-    double radiusSq,
     std::vector<SnapResult>& results) const
 {
-    if (gridSize_ <= 0) return;
+    if (gridSize_ <= 0.0) {
+        return;
+    }
 
-    // Find nearest grid point
-    double gx = std::round(cursorPos.x / gridSize_) * gridSize_;
-    double gy = std::round(cursorPos.y / gridSize_) * gridSize_;
-    Vec2d gridPt = {gx, gy};
+    const double snapRadius = snapRadius_;
+    const double gx = std::round(cursorPos.x / gridSize_) * gridSize_;
+    const double gy = std::round(cursorPos.y / gridSize_) * gridSize_;
+    const double dx = std::abs(cursorPos.x - gx);
+    const double dy = std::abs(cursorPos.y - gy);
+    const double guideStep = std::max(gridSize_, 1e-6);
 
-    double distSq = distanceSquared(cursorPos, gridPt);
-    if (distSq <= radiusSq) {
+    // Crossing eligibility uses independent per-axis gate instead of radial distance.
+    if (dx <= snapRadius && dy <= snapRadius) {
         results.push_back({
             .snapped = true,
             .type = SnapType::Grid,
-            .position = gridPt,
-            .distance = std::sqrt(distSq),
-            .hintText = "GRID"
+            .position = {gx, gy},
+            .distance = std::sqrt((dx * dx) + (dy * dy)),
+            .hintText = "GRID",
+            .gridKind = SnapResult::GridCandidateKind::Crossing
+        });
+    }
+
+    if (dx <= snapRadius) {
+        results.push_back({
+            .snapped = true,
+            .type = SnapType::Grid,
+            .position = {gx, cursorPos.y},
+            .distance = dx,
+            .guideOrigin = {gx, cursorPos.y - guideStep},
+            .hasGuide = true,
+            .hintText = "GRID",
+            .gridKind = SnapResult::GridCandidateKind::AxisX
+        });
+    }
+
+    if (dy <= snapRadius) {
+        results.push_back({
+            .snapped = true,
+            .type = SnapType::Grid,
+            .position = {cursorPos.x, gy},
+            .distance = dy,
+            .guideOrigin = {cursorPos.x - guideStep, gy},
+            .hasGuide = true,
+            .hintText = "GRID",
+            .gridKind = SnapResult::GridCandidateKind::AxisY
         });
     }
 }

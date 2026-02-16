@@ -47,6 +47,7 @@ public:
     void orbit(float deltaYaw, float deltaPitch);
     void pan(float deltaX, float deltaY);
     void zoom(float delta);
+    void zoomByFactor(float factor);
     
     // Reset to default isometric view
     void reset();

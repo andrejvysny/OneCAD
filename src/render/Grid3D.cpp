@@ -109,7 +109,7 @@ void Grid3D::cleanup() {
     m_initialized = false;
 }
 
-float Grid3D::calculateSpacing(float pixelScale) const {
+float Grid3D::adaptiveSpacing(float pixelScale) {
     if (pixelScale <= 0.0f) {
         return 10.0f;
     }
@@ -288,7 +288,7 @@ void Grid3D::render(const QMatrix4x4& mvp,
                     const QVector2D& fadeOriginPlane) {
     if (!m_visible || !m_initialized || m_lineCount == 0) return;
 
-    const float minorSpacing = calculateSpacing(pixelScale);
+    const float minorSpacing = adaptiveSpacing(pixelScale);
     const float majorSpacing = minorSpacing * 5.0f;
 
     float minX = planeMin.x();

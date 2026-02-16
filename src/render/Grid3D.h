@@ -34,6 +34,9 @@ public:
                 const QVector2D& planeMax,
                 const QVector2D& fadeOriginPlane);
     void cleanup();
+
+    // Shared adaptive spacing used by both rendered grid and snap grid.
+    static float adaptiveSpacing(float pixelScale);
     
     // Appearance
     void setMajorColor(const QColor& color) { m_majorColor = color; }
@@ -50,7 +53,6 @@ public:
     void forceUpdate() { m_lastSpacing = -1.0f; }
 
 private:
-    float calculateSpacing(float pixelScale) const;
     void buildGrid(float minorSpacing,
                    float majorSpacing,
                    float startX,

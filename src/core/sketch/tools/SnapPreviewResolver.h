@@ -34,6 +34,8 @@ struct SnapInputResolution {
     SnapResult resolvedSnap;
     std::vector<SnapResult> allSnaps;
     std::vector<GuideSegment> activeGuides;
+    bool gridConflict = false;
+    bool allowPreviewCommitMismatch = false;
 };
 
 /**
