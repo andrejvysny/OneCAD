@@ -1,7 +1,7 @@
 #include "SketchEllipse.h"
 
-#include <QDebug>
 #include <QJsonObject>
+#include <QLoggingCategory>
 #include <QString>
 
 #include <algorithm>
@@ -10,6 +10,8 @@
 #include <utility>
 
 namespace onecad::core::sketch {
+
+Q_LOGGING_CATEGORY(logSketchEllipse, "onecad.core.sketch.ellipse")
 
 namespace {
 constexpr double TWO_PI = 2.0 * std::numbers::pi;
@@ -32,7 +34,7 @@ SketchEllipse::SketchEllipse(const PointID& centerPointId, double majorRadius,
         m_rotation += std::numbers::pi / 2.0;  // Rotate 90° to maintain orientation
     }
     if (majorRadius < 0.0 || minorRadius < 0.0) {
-        qWarning() << "SketchEllipse: negative radius; clamping to 0.0";
+        qCWarning(logSketchEllipse) << "ctor:negative-radius-clamped";
     }
 }
 
@@ -217,6 +219,7 @@ bool SketchEllipse::deserialize(const QJsonObject& json) {
         return false;
     }
     if (json.contains("referenceLocked") && !json["referenceLocked"].isBool()) {
+        qCWarning(logSketchEllipse) << "deserialize:invalid-referenceLocked-type";
         return false;
     }
 
@@ -235,7 +238,7 @@ bool SketchEllipse::deserialize(const QJsonObject& json) {
     double rot = json.contains("rotation") ? json["rotation"].toDouble() : 0.0;
 
     if (majorR < 0.0 || minorR < 0.0) {
-        qWarning() << "SketchEllipse: negative radius in JSON; clamping to 0.0";
+        qCWarning(logSketchEllipse) << "deserialize:negative-radius-clamped";
         majorR = std::max(0.0, majorR);
         minorR = std::max(0.0, minorR);
     }
@@ -254,6 +257,12 @@ bool SketchEllipse::deserialize(const QJsonObject& json) {
         m_rotation += std::numbers::pi / 2.0;
     }
 
+    qCDebug(logSketchEllipse) << "deserialize:done"
+                              << "id=" << QString::fromStdString(m_id)
+                              << "referenceLocked=" << m_isReferenceLocked
+                              << "center=" << QString::fromStdString(m_centerPointId)
+                              << "majorRadius=" << m_majorRadius
+                              << "minorRadius=" << m_minorRadius;
     return true;
 }
 

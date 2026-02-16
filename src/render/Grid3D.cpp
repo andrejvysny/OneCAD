@@ -1,11 +1,13 @@
 #include "Grid3D.h"
 #include <QtMath>
-#include <QDebug>
+#include <QLoggingCategory>
 #include <algorithm>
 #include <cmath>
 
 namespace onecad {
 namespace render {
+
+Q_LOGGING_CATEGORY(logGrid3D, "onecad.render.grid")
 
 // Use GLSL 410 core for macOS compatibility (Metal backend)
 static const char* vertexShaderSource = R"(
@@ -61,30 +63,29 @@ void Grid3D::initialize() {
     m_shader = new QOpenGLShaderProgram();
     
     if (!m_shader->addShaderFromSourceCode(QOpenGLShader::Vertex, vertexShaderSource)) {
-        qWarning() << "Grid3D: Vertex shader compile error:" << m_shader->log();
+        qCWarning(logGrid3D) << "initialize:vertex-shader-compile-error" << m_shader->log();
         return;
     }
     
     if (!m_shader->addShaderFromSourceCode(QOpenGLShader::Fragment, fragmentShaderSource)) {
-        qWarning() << "Grid3D: Fragment shader compile error:" << m_shader->log();
+        qCWarning(logGrid3D) << "initialize:fragment-shader-compile-error" << m_shader->log();
         return;
     }
     
     if (!m_shader->link()) {
-        qWarning() << "Grid3D: Shader link error:" << m_shader->log();
+        qCWarning(logGrid3D) << "initialize:shader-link-error" << m_shader->log();
         return;
     }
-    
-    qDebug() << "Grid3D: Shaders compiled and linked successfully";
+    qCDebug(logGrid3D) << "initialize:shader-ready";
     
     // Create buffers
     if (!m_vao.create()) {
-        qWarning() << "Grid3D: Failed to create VAO";
+        qCWarning(logGrid3D) << "initialize:failed-create-vao";
         return;
     }
     
     if (!m_vertexBuffer.create()) {
-        qWarning() << "Grid3D: Failed to create vertex buffer";
+        qCWarning(logGrid3D) << "initialize:failed-create-vertex-buffer";
         return;
     }
     
@@ -95,7 +96,7 @@ void Grid3D::initialize() {
     // Build initial grid
     buildGrid(10.0f, 50.0f, -500.0f, 500.0f, -500.0f, 500.0f);
     
-    qDebug() << "Grid3D: Initialized successfully with" << m_lineCount << "vertices";
+    qCInfo(logGrid3D) << "initialize:done" << "lineVertices=" << m_lineCount;
 }
 
 void Grid3D::cleanup() {
@@ -241,7 +242,7 @@ void Grid3D::buildGrid(float minorSpacing,
     m_lastEnd = QVector2D(endX, endY);
     
     if (m_vertices.empty()) {
-        qWarning() << "Grid3D: No vertices generated!";
+        qCWarning(logGrid3D) << "buildGrid:no-vertices";
         return;
     }
     

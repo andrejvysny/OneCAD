@@ -4,10 +4,15 @@
  */
 #include "DependencyGraph.h"
 
+#include <QLoggingCategory>
+#include <QString>
+
 #include <algorithm>
 #include <queue>
 
 namespace onecad::app::history {
+
+Q_LOGGING_CATEGORY(logDependencyGraph, "onecad.app.history.dependency")
 
 void DependencyGraph::clear() {
     nodes_.clear();
@@ -18,6 +23,7 @@ void DependencyGraph::clear() {
 }
 
 void DependencyGraph::rebuildFromOperations(const std::vector<OperationRecord>& ops) {
+    qCDebug(logDependencyGraph) << "rebuildFromOperations:start" << "operationCount=" << ops.size();
     clear();
     for (const auto& op : ops) {
         FeatureNode node;
@@ -33,9 +39,17 @@ void DependencyGraph::rebuildFromOperations(const std::vector<OperationRecord>& 
         creationOrder_.push_back(op.opId);
     }
     rebuildEdges();
+    qCDebug(logDependencyGraph) << "rebuildFromOperations:done"
+                                << "nodeCount=" << nodes_.size()
+                                << "forwardEdgeCount=" << forwardEdges_.size()
+                                << "backwardEdgeCount=" << backwardEdges_.size();
 }
 
 void DependencyGraph::addOperation(const OperationRecord& op) {
+    qCDebug(logDependencyGraph) << "addOperation"
+                                << "opId=" << QString::fromStdString(op.opId)
+                                << "type=" << static_cast<int>(op.type)
+                                << "outputs=" << op.resultBodyIds.size();
     FeatureNode node;
     node.opId = op.opId;
     node.type = op.type;
@@ -254,11 +268,19 @@ void DependencyGraph::extractDependencies(const OperationRecord& op, FeatureNode
         const auto& p = std::get<ExtrudeParams>(op.params);
         if (p.booleanMode != BooleanMode::NewBody && !p.targetBodyId.empty()) {
             node.inputBodyIds.insert(p.targetBodyId);
+            qCDebug(logDependencyGraph) << "extractDependencies:extrude-target-body"
+                                        << "opId=" << QString::fromStdString(op.opId)
+                                        << "targetBodyId=" << QString::fromStdString(p.targetBodyId)
+                                        << "mode=" << static_cast<int>(p.booleanMode);
         }
     } else if (std::holds_alternative<RevolveParams>(op.params)) {
         const auto& p = std::get<RevolveParams>(op.params);
         if (p.booleanMode != BooleanMode::NewBody && !p.targetBodyId.empty()) {
             node.inputBodyIds.insert(p.targetBodyId);
+            qCDebug(logDependencyGraph) << "extractDependencies:revolve-target-body"
+                                        << "opId=" << QString::fromStdString(op.opId)
+                                        << "targetBodyId=" << QString::fromStdString(p.targetBodyId)
+                                        << "mode=" << static_cast<int>(p.booleanMode);
         }
         if (std::holds_alternative<SketchLineRef>(p.axis)) {
             const auto& axis = std::get<SketchLineRef>(p.axis);

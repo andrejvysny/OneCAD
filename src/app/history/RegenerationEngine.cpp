@@ -12,6 +12,9 @@
 #include "../../core/sketch/SketchLine.h"
 #include "../../core/sketch/SketchPoint.h"
 
+#include <QLoggingCategory>
+#include <QString>
+
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Common.hxx>
@@ -37,6 +40,8 @@
 
 namespace onecad::app::history {
 
+Q_LOGGING_CATEGORY(logRegen, "onecad.app.history.regeneration")
+
 namespace {
 constexpr double kDraftAngleEpsilon = 1e-4;
 constexpr double kSideFaceDotThreshold = 0.9;
@@ -46,6 +51,7 @@ constexpr double kMinAngleDeg = 1e-3;
 
 RegenerationEngine::RegenerationEngine(Document* doc)
     : doc_(doc), graph_() {
+    qCDebug(logRegen) << "RegenerationEngine:ctor" << "hasDocument=" << (doc_ != nullptr);
     if (doc_) {
         graph_.rebuildFromOperations(doc_->operations());
         for (const auto& op : doc_->operations()) {
@@ -67,8 +73,10 @@ RegenResult RegenerationEngine::regenerateAll() {
 
 RegenResult RegenerationEngine::regenerateToAppliedCount(std::size_t appliedCount) {
     RegenResult result;
+    qCInfo(logRegen) << "regenerateAll:start";
 
     if (!doc_) {
+        qCCritical(logRegen) << "regenerateAll:no-document";
         result.status = RegenStatus::CriticalFailure;
         return result;
     }
@@ -95,6 +103,8 @@ RegenResult RegenerationEngine::regenerateToAppliedCount(std::size_t appliedCoun
     std::vector<std::string> order = graph_.topologicalSort();
     if (order.empty() && graph_.size() > 0) {
         // Cycle detected
+        qCCritical(logRegen) << "regenerateAll:dependency-cycle-detected"
+                             << "graphSize=" << graph_.size();
         result.status = RegenStatus::CriticalFailure;
         return result;
     }
@@ -126,6 +136,8 @@ RegenResult RegenerationEngine::regenerateToAppliedCount(std::size_t appliedCoun
 
         // Skip suppressed operations
         if (graph_.isSuppressed(opId)) {
+            qCDebug(logRegen) << "regenerateAll:skip-suppressed"
+                              << QString::fromStdString(opId);
             result.skippedOps.push_back(opId);
             doc_->clearOperationFailed(opId);
             continue;
@@ -135,6 +147,8 @@ RegenResult RegenerationEngine::regenerateToAppliedCount(std::size_t appliedCoun
         const OperationRecord* opRecord = doc_->findOperation(opId);
 
         if (!opRecord) {
+            qCWarning(logRegen) << "regenerateAll:missing-operation-record"
+                                << QString::fromStdString(opId);
             result.skippedOps.push_back(opId);
             continue;
         }
@@ -149,6 +163,8 @@ RegenResult RegenerationEngine::regenerateToAppliedCount(std::size_t appliedCoun
         }
 
         if (upstreamFailed) {
+            qCWarning(logRegen) << "regenerateAll:skip-upstream-failed"
+                                << QString::fromStdString(opId);
             graph_.setFailed(opId, true, "Upstream operation failed");
             doc_->setOperationFailed(opId, "Upstream operation failed");
             result.skippedOps.push_back(opId);
@@ -160,12 +176,17 @@ RegenResult RegenerationEngine::regenerateToAppliedCount(std::size_t appliedCoun
         bool success = executeOperation(*opRecord, errorMsg);
 
         if (success) {
+            qCDebug(logRegen) << "regenerateAll:operation-succeeded"
+                              << QString::fromStdString(opId);
             result.succeededOps.push_back(opId);
             doc_->clearOperationFailed(opId);
             for (const auto& bodyId : opRecord->resultBodyIds) {
                 updatedBodies.insert(bodyId);
             }
         } else {
+            qCWarning(logRegen) << "regenerateAll:operation-failed"
+                                << "opId=" << QString::fromStdString(opId)
+                                << "error=" << QString::fromStdString(errorMsg);
             graph_.setFailed(opId, true, errorMsg);
             doc_->setOperationFailed(opId, errorMsg);
             FailedOp failedOp;
@@ -196,6 +217,12 @@ RegenResult RegenerationEngine::regenerateToAppliedCount(std::size_t appliedCoun
             doc_->removeBodyPreserveElementMap(bodyId);
         }
     }
+
+    qCInfo(logRegen) << "regenerateAll:done"
+                     << "status=" << static_cast<int>(result.status)
+                     << "succeeded=" << result.succeededOps.size()
+                     << "failed=" << result.failedOps.size()
+                     << "skipped=" << result.skippedOps.size();
 
     return result;
 }
@@ -401,6 +428,10 @@ std::optional<TopoDS_Shape> RegenerationEngine::resolveBody(const std::string& b
 }
 
 bool RegenerationEngine::executeOperation(const OperationRecord& op, std::string& errorOut) {
+    qCDebug(logRegen) << "executeOperation:start"
+                      << "opId=" << QString::fromStdString(op.opId)
+                      << "type=" << static_cast<int>(op.type)
+                      << "outputs=" << op.resultBodyIds.size();
     TopoDS_Shape result;
 
     switch (op.type) {
@@ -431,6 +462,9 @@ bool RegenerationEngine::executeOperation(const OperationRecord& op, std::string
         if (errorOut.empty()) {
             errorOut = "Operation produced null shape";
         }
+        qCWarning(logRegen) << "executeOperation:null-shape"
+                            << "opId=" << QString::fromStdString(op.opId)
+                            << "error=" << QString::fromStdString(errorOut);
         return false;
     }
 
@@ -439,6 +473,8 @@ bool RegenerationEngine::executeOperation(const OperationRecord& op, std::string
         applyBodyResult(bodyId, result, op.opId);
     }
 
+    qCDebug(logRegen) << "executeOperation:done"
+                      << "opId=" << QString::fromStdString(op.opId);
     return true;
 }
 
@@ -528,12 +564,18 @@ TopoDS_Shape RegenerationEngine::buildExtrude(const OperationRecord& op, std::st
         if (targetBodyId.empty()) {
             errorOut = "Boolean target body is required for mode " +
                        std::string(booleanModeName(params.booleanMode));
+            qCWarning(logRegen) << "buildExtrude:missing-boolean-target"
+                                << "opId=" << QString::fromStdString(op.opId)
+                                << "mode=" << static_cast<int>(params.booleanMode);
             return {};
         }
 
         auto targetOpt = resolveBody(targetBodyId);
         if (!targetOpt) {
             errorOut = "Target body not found: " + targetBodyId;
+            qCWarning(logRegen) << "buildExtrude:boolean-target-not-found"
+                                << "opId=" << QString::fromStdString(op.opId)
+                                << "targetBodyId=" << QString::fromStdString(targetBodyId);
             return {};
         }
 
@@ -661,12 +703,18 @@ TopoDS_Shape RegenerationEngine::buildRevolve(const OperationRecord& op, std::st
         if (targetBodyId.empty()) {
             errorOut = "Boolean target body is required for mode " +
                        std::string(booleanModeName(params.booleanMode));
+            qCWarning(logRegen) << "buildRevolve:missing-boolean-target"
+                                << "opId=" << QString::fromStdString(op.opId)
+                                << "mode=" << static_cast<int>(params.booleanMode);
             return {};
         }
 
         auto targetOpt = resolveBody(targetBodyId);
         if (!targetOpt) {
             errorOut = "Target body not found: " + targetBodyId;
+            qCWarning(logRegen) << "buildRevolve:boolean-target-not-found"
+                                << "opId=" << QString::fromStdString(op.opId)
+                                << "targetBodyId=" << QString::fromStdString(targetBodyId);
             return {};
         }
 
@@ -960,31 +1008,53 @@ std::string RegenerationEngine::resolveLegacySketchHostBodyId(const OperationInp
     const auto& ref = std::get<SketchRegionRef>(input);
     const core::sketch::Sketch* sketch = doc_->getSketch(ref.sketchId);
     if (!sketch) {
+        qCWarning(logRegen) << "resolveLegacySketchHostBodyId:sketch-not-found"
+                            << QString::fromStdString(ref.sketchId);
         return {};
     }
 
     const auto& hostFace = sketch->hostFaceAttachment();
     if (!hostFace || !hostFace->isValid()) {
+        qCDebug(logRegen) << "resolveLegacySketchHostBodyId:no-host-face"
+                          << QString::fromStdString(ref.sketchId);
         return {};
     }
 
+    qCDebug(logRegen) << "resolveLegacySketchHostBodyId:resolved"
+                      << "sketchId=" << QString::fromStdString(ref.sketchId)
+                      << "bodyId=" << QString::fromStdString(hostFace->bodyId);
     return hostFace->bodyId;
 }
 
 std::string RegenerationEngine::resolveBooleanTargetBodyId(const OperationRecord& op,
                                                            const std::string& explicitTargetBodyId) const {
     if (!explicitTargetBodyId.empty()) {
+        qCDebug(logRegen) << "resolveBooleanTargetBodyId:explicit"
+                          << "opId=" << QString::fromStdString(op.opId)
+                          << "targetBodyId=" << QString::fromStdString(explicitTargetBodyId);
         return explicitTargetBodyId;
     }
 
     if (std::holds_alternative<FaceRef>(op.input)) {
         const auto& face = std::get<FaceRef>(op.input);
         if (!face.bodyId.empty()) {
+            qCDebug(logRegen) << "resolveBooleanTargetBodyId:from-face-input"
+                              << "opId=" << QString::fromStdString(op.opId)
+                              << "targetBodyId=" << QString::fromStdString(face.bodyId);
             return face.bodyId;
         }
     }
 
-    return resolveLegacySketchHostBodyId(op.input);
+    const std::string legacyBody = resolveLegacySketchHostBodyId(op.input);
+    if (!legacyBody.empty()) {
+        qCDebug(logRegen) << "resolveBooleanTargetBodyId:from-legacy-host-face"
+                          << "opId=" << QString::fromStdString(op.opId)
+                          << "targetBodyId=" << QString::fromStdString(legacyBody);
+    } else {
+        qCDebug(logRegen) << "resolveBooleanTargetBodyId:unresolved"
+                          << "opId=" << QString::fromStdString(op.opId);
+    }
+    return legacyBody;
 }
 
 std::optional<TopoDS_Face> RegenerationEngine::resolveFaceInput(const OperationInput& input, std::string& errorOut) {

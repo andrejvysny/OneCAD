@@ -24,10 +24,14 @@
 #include <gp_Vec.hxx>
 
 #include <QUuid>
+#include <QLoggingCategory>
+#include <QString>
 #include <QVector3D>
 #include <QtMath>
 
 namespace onecad::ui::tools {
+
+Q_LOGGING_CATEGORY(logExtrudeTool, "onecad.ui.tools.extrude")
 
 namespace {
 constexpr double kMinExtrudeDistance = 1e-3;
@@ -52,12 +56,17 @@ void ExtrudeTool::setCommandProcessor(app::commands::CommandProcessor* processor
 }
 
 void ExtrudeTool::begin(const app::selection::SelectionItem& selection) {
+    qCDebug(logExtrudeTool) << "begin"
+                            << "selectionKind=" << static_cast<int>(selection.kind)
+                            << "ownerId=" << QString::fromStdString(selection.id.ownerId)
+                            << "elementId=" << QString::fromStdString(selection.id.elementId);
     selection_ = selection;
     dragging_ = false;
     currentDistance_ = 0.0;
     booleanMode_ = app::BooleanMode::NewBody;
     active_ = prepareInput(selection);
     if (!active_) {
+        qCWarning(logExtrudeTool) << "begin:prepare-input-failed";
         clearPreview();
     }
 }
@@ -246,6 +255,12 @@ bool ExtrudeTool::handleMouseRelease(const QPoint& screenPos, Qt::MouseButton bu
             params.booleanMode = booleanMode_;
             params.targetBodyId = targetBodyId_;
             record.params = params;
+            qCInfo(logExtrudeTool) << "handleMouseRelease:commit-operation"
+                                   << "opId=" << QString::fromStdString(record.opId)
+                                   << "distance=" << distance
+                                   << "booleanMode=" << static_cast<int>(params.booleanMode)
+                                   << "targetBodyId=" << QString::fromStdString(params.targetBodyId)
+                                   << "resultBodyId=" << QString::fromStdString(resultBodyId);
 
             record.resultBodyIds.push_back(resultBodyId);
 
@@ -277,6 +292,7 @@ bool ExtrudeTool::handleMouseRelease(const QPoint& screenPos, Qt::MouseButton bu
 
 bool ExtrudeTool::prepareInput(const app::selection::SelectionItem& selection) {
     if (!document_) {
+        qCWarning(logExtrudeTool) << "prepareInput:no-document";
         return false;
     }
     
@@ -289,17 +305,23 @@ bool ExtrudeTool::prepareInput(const app::selection::SelectionItem& selection) {
     if (selection.kind == app::selection::SelectionKind::SketchRegion) {
         sketch_ = document_->getSketch(selection.id.ownerId);
         if (!sketch_) {
+            qCWarning(logExtrudeTool) << "prepareInput:sketch-not-found"
+                                      << QString::fromStdString(selection.id.ownerId);
             return false;
         }
 
         auto faceOpt = core::loop::resolveRegionFace(*sketch_, selection.id.elementId);
         if (!faceOpt.has_value()) {
+            qCWarning(logExtrudeTool) << "prepareInput:region-not-found"
+                                      << QString::fromStdString(selection.id.elementId);
             return false;
         }
 
         core::loop::FaceBuilder builder;
         auto faceResult = builder.buildFace(faceOpt.value(), *sketch_);
         if (!faceResult.success) {
+            qCWarning(logExtrudeTool) << "prepareInput:face-build-failed"
+                                      << QString::fromStdString(faceResult.errorMessage);
             return false;
         }
 
@@ -311,6 +333,9 @@ bool ExtrudeTool::prepareInput(const app::selection::SelectionItem& selection) {
         const auto& hostFace = sketch_->hostFaceAttachment();
         if (hostFace && hostFace->isValid()) {
             targetBodyId_ = hostFace->bodyId;
+            qCDebug(logExtrudeTool) << "prepareInput:host-face-attachment"
+                                    << "bodyId=" << QString::fromStdString(hostFace->bodyId)
+                                    << "faceId=" << QString::fromStdString(hostFace->faceId);
             const TopoDS_Shape* bodyShape = document_->getBodyShape(targetBodyId_);
             if (bodyShape && !bodyShape->IsNull()) {
                 targetShape_ = *bodyShape;
@@ -321,18 +346,23 @@ bool ExtrudeTool::prepareInput(const app::selection::SelectionItem& selection) {
         targetBodyId_ = selection.id.ownerId;
         const TopoDS_Shape* bodyShape = document_->getBodyShape(targetBodyId_);
         if (!bodyShape || bodyShape->IsNull()) {
+            qCWarning(logExtrudeTool) << "prepareInput:target-body-missing-or-null"
+                                      << QString::fromStdString(targetBodyId_);
             return false;
         }
         targetShape_ = *bodyShape;
 
         const auto* entry = document_->elementMap().find(kernel::elementmap::ElementId{selection.id.elementId});
         if (!entry || entry->kind != kernel::elementmap::ElementKind::Face || entry->shape.IsNull()) {
+            qCWarning(logExtrudeTool) << "prepareInput:face-entry-invalid"
+                                      << QString::fromStdString(selection.id.elementId);
             return false;
         }
         baseFace_ = TopoDS::Face(entry->shape);
         
         if (!isPlanarFace(baseFace_)) {
             // Only planar faces supported for now
+            qCWarning(logExtrudeTool) << "prepareInput:non-planar-face";
             return false;
         }
 
@@ -344,6 +374,8 @@ bool ExtrudeTool::prepareInput(const app::selection::SelectionItem& selection) {
         }
         neutralPlane_ = plane;
     } else {
+        qCWarning(logExtrudeTool) << "prepareInput:unsupported-selection-kind"
+                                  << static_cast<int>(selection.kind);
         return false;
     }
 
@@ -353,6 +385,9 @@ bool ExtrudeTool::prepareInput(const app::selection::SelectionItem& selection) {
     if (props.Mass() > 0.0) {
         baseCenter_ = props.CentreOfMass();
     }
+    qCDebug(logExtrudeTool) << "prepareInput:done"
+                            << "hasTargetBody=" << !targetBodyId_.empty()
+                            << "hasTargetShape=" << !targetShape_.IsNull();
     return true;
 }
 
@@ -382,22 +417,33 @@ void ExtrudeTool::detectBooleanMode(double distance) {
                 if (booleanMode_ == app::BooleanMode::NewBody) {
                     booleanMode_ = signedBooleanMode(distance);
                 }
+                qCDebug(logExtrudeTool) << "detectBooleanMode:host-sketch-with-target-shape"
+                                        << "distance=" << distance
+                                        << "mode=" << static_cast<int>(booleanMode_);
                 return;
             }
 
             // Host metadata exists but body is currently unresolved; keep host-targeted behavior
             // so regeneration can report an explicit target resolution failure.
             booleanMode_ = signedBooleanMode(distance);
+            qCDebug(logExtrudeTool) << "detectBooleanMode:host-sketch-without-shape"
+                                    << "distance=" << distance
+                                    << "mode=" << static_cast<int>(booleanMode_);
             return;
         }
 
         // Face push/pull behavior.
         booleanMode_ = signedBooleanMode(distance);
+        qCDebug(logExtrudeTool) << "detectBooleanMode:face-push-pull"
+                                << "distance=" << distance
+                                << "mode=" << static_cast<int>(booleanMode_);
         return;
     }
 
     // Unattached sketch region defaults to NewBody.
     booleanMode_ = app::BooleanMode::NewBody;
+    qCDebug(logExtrudeTool) << "detectBooleanMode:new-body"
+                            << "distance=" << distance;
 }
 
 

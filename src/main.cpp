@@ -4,10 +4,8 @@
 #include <QKeyEvent>
 #include <QLoggingCategory>
 #include <QMouseEvent>
-#include <QNativeGestureEvent>
 #include <QObject>
 #include <QSurfaceFormat>
-#include <QTimer>
 #include <QWheelEvent>
 
 #include "app/Application.h"
@@ -26,11 +24,6 @@ Q_LOGGING_CATEGORY(logUiEvents, "onecad.ui.events")
 
 namespace {
 
-bool isEnabledFlag(const QString& value) {
-    const QString normalized = value.trimmed().toLower();
-    return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
-}
-
 QString eventTypeName(QEvent::Type type) {
     switch (type) {
         case QEvent::MouseButtonPress:
@@ -41,10 +34,6 @@ QString eventTypeName(QEvent::Type type) {
             return QStringLiteral("MouseMove");
         case QEvent::Wheel:
             return QStringLiteral("Wheel");
-        case QEvent::Gesture:
-            return QStringLiteral("Gesture");
-        case QEvent::NativeGesture:
-            return QStringLiteral("NativeGesture");
         case QEvent::KeyPress:
             return QStringLiteral("KeyPress");
         case QEvent::KeyRelease:
@@ -143,15 +132,6 @@ protected:
                 << "angleDeltaY=" << wheelEvent->angleDelta().y()
                 << "phase=" << static_cast<int>(wheelEvent->phase())
                 << "inverted=" << wheelEvent->inverted();
-        } else if (type == QEvent::NativeGesture) {
-            const auto* nativeEvent = static_cast<QNativeGestureEvent*>(event);
-            qCDebug(logUiEvents).noquote()
-                << "ui_native_gesture"
-                << "gestureType=" << static_cast<int>(nativeEvent->gestureType())
-                << "fingers=" << nativeEvent->fingerCount()
-                << "value=" << nativeEvent->value()
-                << "deltaX=" << nativeEvent->delta().x()
-                << "deltaY=" << nativeEvent->delta().y();
         }
 
         return QObject::eventFilter(watched, event);
@@ -201,14 +181,9 @@ int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
 
     UserActionEventFilter debugEventFilter;
-    const bool uiEventLoggingEnabled =
-        onecad::app::Logging::isDebugLoggingEnabled() &&
-        isEnabledFlag(qEnvironmentVariable("ONECAD_LOG_UI_EVENTS"));
-    if (uiEventLoggingEnabled) {
+    if (onecad::app::Logging::isDebugLoggingEnabled()) {
         app.installEventFilter(&debugEventFilter);
         qCInfo(logMain) << "Installed UI event debug logger";
-    } else {
-        qCDebug(logMain) << "UI event debug logger disabled";
     }
 
     qCInfo(logMain) << "QApplication created"
@@ -229,11 +204,6 @@ int main(int argc, char* argv[]) {
     qCDebug(logMain) << "MainWindow created";
     window.show();
     qCInfo(logMain) << "MainWindow shown; entering event loop";
-
-    if (isEnabledFlag(qEnvironmentVariable("ONECAD_HEADLESS_SMOKE"))) {
-        qCInfo(logMain) << "Headless smoke mode enabled; exiting event loop immediately";
-        QTimer::singleShot(0, &app, &QApplication::quit);
-    }
 
     const int result = app.exec();
     qCInfo(logMain) << "Qt event loop exited" << "exitCode=" << result;

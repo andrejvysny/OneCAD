@@ -1,7 +1,7 @@
 #include "SketchArc.h"
 
-#include <QDebug>
 #include <QJsonObject>
+#include <QLoggingCategory>
 #include <QString>
 
 #include <algorithm>
@@ -10,6 +10,8 @@
 #include <utility>
 
 namespace onecad::core::sketch {
+
+Q_LOGGING_CATEGORY(logSketchArc, "onecad.core.sketch.arc")
 
 namespace {
 
@@ -36,7 +38,7 @@ SketchArc::SketchArc(const PointID& centerPointId, double radius,
       m_startAngle(normalizeAngle(startAngle)),
       m_endAngle(normalizeAngle(endAngle)) {
     if (radius < 0.0) {
-        qWarning() << "SketchArc: negative radius; clamping to 0.0";
+        qCWarning(logSketchArc) << "ctor:negative-radius-clamped";
     }
 }
 
@@ -130,6 +132,7 @@ bool SketchArc::deserialize(const QJsonObject& json) {
         return false;
     }
     if (json.contains("referenceLocked") && !json["referenceLocked"].isBool()) {
+        qCWarning(logSketchArc) << "deserialize:invalid-referenceLocked-type";
         return false;
     }
 
@@ -145,7 +148,7 @@ bool SketchArc::deserialize(const QJsonObject& json) {
     PointID newCenter = json["center"].toString().toStdString();
     double radius = json["radius"].toDouble();
     if (radius < 0.0) {
-        qWarning() << "SketchArc: negative radius in JSON; clamping to 0.0";
+        qCWarning(logSketchArc) << "deserialize:negative-radius-clamped";
         radius = 0.0;
     }
     double startAngle = normalizeAngle(json["startAngle"].toDouble());
@@ -158,6 +161,11 @@ bool SketchArc::deserialize(const QJsonObject& json) {
     m_radius = radius;
     m_startAngle = startAngle;
     m_endAngle = endAngle;
+    qCDebug(logSketchArc) << "deserialize:done"
+                          << "id=" << QString::fromStdString(m_id)
+                          << "referenceLocked=" << m_isReferenceLocked
+                          << "center=" << QString::fromStdString(m_centerPointId)
+                          << "radius=" << m_radius;
     return true;
 }
 

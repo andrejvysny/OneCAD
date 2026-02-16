@@ -8,6 +8,8 @@
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepTools_WireExplorer.hxx>
 #include <GeomAbs_CurveType.hxx>
+#include <QLoggingCategory>
+#include <QString>
 #include <TopAbs.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
@@ -21,6 +23,8 @@
 #include <vector>
 
 namespace onecad::core::sketch {
+
+Q_LOGGING_CATEGORY(logFaceBoundaryProjector, "onecad.core.faceboundary")
 
 namespace {
 
@@ -265,15 +269,23 @@ FaceBoundaryProjector::ProjectionResult FaceBoundaryProjector::projectFaceBounda
     Sketch& sketch,
     const Options& options) {
     ProjectionResult result;
+    qCDebug(logFaceBoundaryProjector) << "projectFaceBoundaries:start"
+                                      << "existingEntityCount=" << sketch.getAllEntities().size()
+                                      << "preferExactPrimitives=" << options.preferExactPrimitives
+                                      << "lockInsertedBoundaryPoints=" << options.lockInsertedBoundaryPoints
+                                      << "fallbackSegmentsPerCurve=" << options.fallbackSegmentsPerCurve;
 
     if (face.IsNull()) {
         result.errorMessage = "Face is null";
+        qCWarning(logFaceBoundaryProjector) << "projectFaceBoundaries:face-null";
         return result;
     }
 
     std::unordered_set<EntityID> pointsToFix;
+    int wireCount = 0;
 
     for (TopExp_Explorer wireExp(face, TopAbs_WIRE); wireExp.More(); wireExp.Next()) {
+        ++wireCount;
         const TopoDS_Wire wire = TopoDS::Wire(wireExp.Current());
         const bool wireIsClosed = wire.Closed();
         BRepTools_WireExplorer edgeExp(wire, face);
@@ -282,6 +294,9 @@ FaceBoundaryProjector::ProjectionResult FaceBoundaryProjector::projectFaceBounda
         EntityID lastPointId;
         int wireCurveCount = 0;
         bool wireClosedByCircle = false;
+        qCDebug(logFaceBoundaryProjector) << "projectFaceBoundaries:wire-start"
+                                          << "wireIndex=" << wireCount
+                                          << "wireClosed=" << wireIsClosed;
 
         while (edgeExp.More()) {
             const TopoDS_Edge edge = edgeExp.Current();
@@ -453,6 +468,12 @@ FaceBoundaryProjector::ProjectionResult FaceBoundaryProjector::projectFaceBounda
                     (!firstPointId.empty() && firstPointId == lastPointId))) {
             result.hasClosedBoundary = true;
         }
+        qCDebug(logFaceBoundaryProjector) << "projectFaceBoundaries:wire-done"
+                                          << "wireIndex=" << wireCount
+                                          << "wireCurveCount=" << wireCurveCount
+                                          << "wireClosedByCircle=" << wireClosedByCircle
+                                          << "firstPointId=" << QString::fromStdString(firstPointId)
+                                          << "lastPointId=" << QString::fromStdString(lastPointId);
     }
 
     if (options.lockInsertedBoundaryPoints) {
@@ -469,8 +490,18 @@ FaceBoundaryProjector::ProjectionResult FaceBoundaryProjector::projectFaceBounda
     result.success = result.hasClosedBoundary || result.insertedCurves > 0;
     if (!result.success && result.errorMessage.empty()) {
         result.errorMessage = "No host face boundary geometry was projected";
+        qCWarning(logFaceBoundaryProjector) << "projectFaceBoundaries:no-geometry-projected"
+                                            << "entityCount=" << sketch.getAllEntities().size();
     }
 
+    qCInfo(logFaceBoundaryProjector) << "projectFaceBoundaries:done"
+                                     << "entityCount=" << sketch.getAllEntities().size()
+                                     << "wireCount=" << wireCount
+                                     << "success=" << result.success
+                                     << "hasClosedBoundary=" << result.hasClosedBoundary
+                                     << "insertedPoints=" << result.insertedPoints
+                                     << "insertedCurves=" << result.insertedCurves
+                                     << "insertedFixedConstraints=" << result.insertedFixedConstraints;
     return result;
 }
 

@@ -1,6 +1,7 @@
 #include "SketchPoint.h"
 
 #include <QJsonObject>
+#include <QLoggingCategory>
 #include <QString>
 
 #include <algorithm>
@@ -8,6 +9,8 @@
 #include <utility>
 
 namespace onecad::core::sketch {
+
+Q_LOGGING_CATEGORY(logSketchPoint, "onecad.core.sketch.point")
 
 SketchPoint::SketchPoint()
     : SketchEntity(),
@@ -77,6 +80,7 @@ bool SketchPoint::deserialize(const QJsonObject& json) {
         return false;
     }
     if (json.contains("referenceLocked") && !json["referenceLocked"].isBool()) {
+        qCWarning(logSketchPoint) << "deserialize:invalid-referenceLocked-type";
         return false;
     }
 
@@ -95,6 +99,9 @@ bool SketchPoint::deserialize(const QJsonObject& json) {
     m_isConstruction = newConstruction;
     m_isReferenceLocked = newReferenceLocked;
     m_position = newPosition;
+    qCDebug(logSketchPoint) << "deserialize:done"
+                            << "id=" << QString::fromStdString(m_id)
+                            << "referenceLocked=" << m_isReferenceLocked;
     return true;
 }
 

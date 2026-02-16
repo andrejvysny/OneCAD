@@ -19,8 +19,11 @@
 #include <QFormLayout>
 #include <QPushButton>
 #include <QDialogButtonBox>
+#include <QLoggingCategory>
 
 namespace onecad::ui {
+
+Q_LOGGING_CATEGORY(logEditParamsDialog, "onecad.ui.history.editparams")
 
 namespace {
 constexpr int kDebounceMs = 100;
@@ -197,6 +200,8 @@ app::ExtrudeParams EditParameterDialog::getExtrudeParams() const {
                 const auto& orig = std::get<app::ExtrudeParams>(op.params);
                 params.booleanMode = orig.booleanMode;
                 params.targetBodyId = orig.targetBodyId;
+                qCDebug(logEditParamsDialog) << "getExtrudeParams:preserved-target"
+                                             << QString::fromStdString(params.targetBodyId);
                 break;
             }
         }
@@ -218,6 +223,8 @@ app::RevolveParams EditParameterDialog::getRevolveParams() const {
                 params.booleanMode = orig.booleanMode;
                 params.axis = orig.axis;
                 params.targetBodyId = orig.targetBodyId;
+                qCDebug(logEditParamsDialog) << "getRevolveParams:preserved-target"
+                                             << QString::fromStdString(params.targetBodyId);
                 break;
             }
         }
@@ -232,6 +239,8 @@ void EditParameterDialog::onValueChanged() {
 
 void EditParameterDialog::updatePreview() {
     if (!document_ || !viewport_) return;
+    qCDebug(logEditParamsDialog) << "updatePreview:start"
+                                 << "opId=" << QString::fromStdString(opId_);
 
     // Create temporary params variant
     app::OperationParams newParams;
@@ -244,6 +253,8 @@ void EditParameterDialog::updatePreview() {
     auto previewDoc = makePreviewDocument(*document_);
     auto* op = previewDoc->findOperation(opId_);
     if (!op) {
+        qCWarning(logEditParamsDialog) << "updatePreview:operation-not-found"
+                                       << QString::fromStdString(opId_);
         return;
     }
     op->params = newParams;
@@ -251,6 +262,8 @@ void EditParameterDialog::updatePreview() {
     app::history::RegenerationEngine engine(previewDoc.get());
     auto result = engine.regenerateAll();
     if (result.status == app::history::RegenStatus::CriticalFailure) {
+        qCWarning(logEditParamsDialog) << "updatePreview:critical-regeneration-failure"
+                                       << "opId=" << QString::fromStdString(opId_);
         clearPreview();
         return;
     }
@@ -265,6 +278,9 @@ void EditParameterDialog::updatePreview() {
         meshes.push_back(tessellator.buildMesh(bodyId, *shape, previewDoc->elementMap()));
     }
     viewport_->setModelPreviewMeshes(meshes);
+    qCDebug(logEditParamsDialog) << "updatePreview:done"
+                                 << "opId=" << QString::fromStdString(opId_)
+                                 << "meshCount=" << meshes.size();
 
     emit previewRequested(QString::fromStdString(opId_));
 }

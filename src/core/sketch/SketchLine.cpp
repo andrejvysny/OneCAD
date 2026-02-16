@@ -1,6 +1,7 @@
 #include "SketchLine.h"
 
 #include <QJsonObject>
+#include <QLoggingCategory>
 #include <QString>
 
 #include <algorithm>
@@ -9,6 +10,8 @@
 #include <utility>
 
 namespace onecad::core::sketch {
+
+Q_LOGGING_CATEGORY(logSketchLine, "onecad.core.sketch.line")
 
 SketchLine::SketchLine()
     : SketchEntity() {
@@ -114,6 +117,7 @@ bool SketchLine::deserialize(const QJsonObject& json) {
         return false;
     }
     if (json.contains("referenceLocked") && !json["referenceLocked"].isBool()) {
+        qCWarning(logSketchLine) << "deserialize:invalid-referenceLocked-type";
         return false;
     }
 
@@ -134,6 +138,11 @@ bool SketchLine::deserialize(const QJsonObject& json) {
     m_isReferenceLocked = newReferenceLocked;
     m_startPointId = std::move(startId);
     m_endPointId = std::move(endId);
+    qCDebug(logSketchLine) << "deserialize:done"
+                           << "id=" << QString::fromStdString(m_id)
+                           << "referenceLocked=" << m_isReferenceLocked
+                           << "start=" << QString::fromStdString(m_startPointId)
+                           << "end=" << QString::fromStdString(m_endPointId);
     return true;
 }
 

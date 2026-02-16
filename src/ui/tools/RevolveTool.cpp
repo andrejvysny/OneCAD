@@ -26,9 +26,13 @@
 #include <gp_Lin.hxx>
 #include <gp_Vec.hxx>
 #include <QUuid>
+#include <QLoggingCategory>
+#include <QString>
 #include <QtMath>
 
 namespace onecad::ui::tools {
+
+Q_LOGGING_CATEGORY(logRevolveTool, "onecad.ui.tools.revolve")
 
 namespace {
 constexpr double kMinRevolveAngle = 1e-3;
@@ -54,6 +58,10 @@ void RevolveTool::setCommandProcessor(app::commands::CommandProcessor* processor
 }
 
 void RevolveTool::begin(const app::selection::SelectionItem& selection) {
+    qCDebug(logRevolveTool) << "begin"
+                            << "selectionKind=" << static_cast<int>(selection.kind)
+                            << "ownerId=" << QString::fromStdString(selection.id.ownerId)
+                            << "elementId=" << QString::fromStdString(selection.id.elementId);
     // If selection is a region or face, we accept it as profile
     // and move to WaitingForAxis state.
     clearPreview();
@@ -73,6 +81,7 @@ void RevolveTool::begin(const app::selection::SelectionItem& selection) {
         profileSelection_ = selection;
         // Prompt user to select axis (UI feedback would go here)
     } else {
+        qCWarning(logRevolveTool) << "begin:prepare-profile-failed";
         cancel();
     }
 }
@@ -192,6 +201,12 @@ bool RevolveTool::handleMouseRelease(const QPoint& screenPos, Qt::MouseButton bu
             params.booleanMode = booleanMode_;
             params.targetBodyId = targetBodyId_;
             record.params = params;
+            qCInfo(logRevolveTool) << "handleMouseRelease:commit-operation"
+                                   << "opId=" << QString::fromStdString(record.opId)
+                                   << "angleDeg=" << currentAngle_
+                                   << "booleanMode=" << static_cast<int>(params.booleanMode)
+                                   << "targetBodyId=" << QString::fromStdString(params.targetBodyId)
+                                   << "resultBodyId=" << QString::fromStdString(resultBodyId);
 
             record.resultBodyIds.push_back(resultBodyId);
             auto command = std::make_unique<app::commands::AddOperationCommand>(document_, record);
@@ -225,7 +240,10 @@ void RevolveTool::onSelectionChanged(const std::vector<app::selection::Selection
 }
 
 bool RevolveTool::prepareProfile(const app::selection::SelectionItem& selection) {
-    if (!document_) return false;
+    if (!document_) {
+        qCWarning(logRevolveTool) << "prepareProfile:no-document";
+        return false;
+    }
     
     sketch_ = nullptr;
     targetBodyId_.clear();
@@ -233,20 +251,35 @@ bool RevolveTool::prepareProfile(const app::selection::SelectionItem& selection)
 
     if (selection.kind == app::selection::SelectionKind::SketchRegion) {
         sketch_ = document_->getSketch(selection.id.ownerId);
-        if (!sketch_) return false;
+        if (!sketch_) {
+            qCWarning(logRevolveTool) << "prepareProfile:sketch-not-found"
+                                      << QString::fromStdString(selection.id.ownerId);
+            return false;
+        }
         
         auto faceOpt = core::loop::resolveRegionFace(*sketch_, selection.id.elementId);
-        if (!faceOpt) return false;
+        if (!faceOpt) {
+            qCWarning(logRevolveTool) << "prepareProfile:region-not-found"
+                                      << QString::fromStdString(selection.id.elementId);
+            return false;
+        }
         
         core::loop::FaceBuilder builder;
         auto res = builder.buildFace(*faceOpt, *sketch_);
-        if (!res.success) return false;
+        if (!res.success) {
+            qCWarning(logRevolveTool) << "prepareProfile:face-build-failed"
+                                      << QString::fromStdString(res.errorMessage);
+            return false;
+        }
         
         baseFace_ = res.face;
 
         const auto& hostFace = sketch_->hostFaceAttachment();
         if (hostFace && hostFace->isValid()) {
             targetBodyId_ = hostFace->bodyId;
+            qCDebug(logRevolveTool) << "prepareProfile:host-face-attachment"
+                                    << "bodyId=" << QString::fromStdString(hostFace->bodyId)
+                                    << "faceId=" << QString::fromStdString(hostFace->faceId);
         }
         
     } else if (selection.kind == app::selection::SelectionKind::Face) {
@@ -254,14 +287,19 @@ bool RevolveTool::prepareProfile(const app::selection::SelectionItem& selection)
         // Retrieve face from ElementMap
         const auto* entry = document_->elementMap().find(kernel::elementmap::ElementId{selection.id.elementId});
         if (!entry || entry->kind != kernel::elementmap::ElementKind::Face || entry->shape.IsNull()) {
+            qCWarning(logRevolveTool) << "prepareProfile:face-entry-invalid"
+                                      << QString::fromStdString(selection.id.elementId);
             return false;
         }
         baseFace_ = TopoDS::Face(entry->shape);
         BRepAdaptor_Surface surface(baseFace_, true);
         if (surface.GetType() != GeomAbs_Plane) {
+            qCWarning(logRevolveTool) << "prepareProfile:non-planar-face";
             return false;
         }
     } else {
+        qCWarning(logRevolveTool) << "prepareProfile:unsupported-selection-kind"
+                                  << static_cast<int>(selection.kind);
         return false;
     }
     
@@ -272,6 +310,8 @@ bool RevolveTool::prepareProfile(const app::selection::SelectionItem& selection)
     if (props.Mass() > 0.0) {
         baseCenter_ = props.CentreOfMass();
     }
+    qCDebug(logRevolveTool) << "prepareProfile:done"
+                            << "hasTargetBody=" << !targetBodyId_.empty();
     
     return true;
 }
@@ -372,6 +412,8 @@ void RevolveTool::detectBooleanMode(double angle) {
     if (sketch_) {
         if (targetBodyId_.empty()) {
             booleanMode_ = app::BooleanMode::NewBody;
+            qCDebug(logRevolveTool) << "detectBooleanMode:host-sketch-without-target"
+                                    << "angleDeg=" << angle;
             return;
         }
 
@@ -392,6 +434,10 @@ void RevolveTool::detectBooleanMode(double angle) {
             // Keep attached sketches host-targeted unless explicitly set otherwise.
             booleanMode_ = signedBooleanMode(angle);
         }
+        qCDebug(logRevolveTool) << "detectBooleanMode:host-sketch"
+                                << "angleDeg=" << angle
+                                << "mode=" << static_cast<int>(booleanMode_)
+                                << "targetBodyId=" << QString::fromStdString(targetBodyId_);
         return;
     }
 
@@ -411,10 +457,16 @@ void RevolveTool::detectBooleanMode(double angle) {
 
     if (targets.empty()) {
         booleanMode_ = app::BooleanMode::NewBody;
+        qCDebug(logRevolveTool) << "detectBooleanMode:no-targets"
+                                << "angleDeg=" << angle;
         return;
     }
 
     booleanMode_ = core::modeling::BooleanOperation::detectMode(tool, targets, axis_.Direction());
+    qCDebug(logRevolveTool) << "detectBooleanMode:model-target"
+                            << "angleDeg=" << angle
+                            << "mode=" << static_cast<int>(booleanMode_)
+                            << "targetCount=" << targets.size();
 }
 
 std::optional<ModelingTool::Indicator> RevolveTool::indicator() const {

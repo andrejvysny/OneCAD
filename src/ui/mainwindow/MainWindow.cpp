@@ -1175,16 +1175,22 @@ void MainWindow::setupStatusBar() {
 }
 
 void MainWindow::onNewSketch() {
+    qCInfo(logMainWindow) << "onNewSketch:start";
     // If already in sketch mode, exit first (then continue create flow).
     if (m_viewport->isInSketchMode()) {
+        qCDebug(logMainWindow) << "onNewSketch:exiting-existing-sketch-mode";
         onExitSketch();
     }
 
     m_activeSketchId.clear();
 
     const auto selection = m_viewport->modelSelection();
+    qCDebug(logMainWindow) << "onNewSketch:modelSelectionCount=" << selection.size();
     if (selection.size() == 1 && selection[0].kind == app::selection::SelectionKind::Face) {
         const auto& selectedFace = selection[0];
+        qCDebug(logMainWindow) << "onNewSketch:face-selected"
+                               << "bodyId=" << QString::fromStdString(selectedFace.id.ownerId)
+                               << "faceId=" << QString::fromStdString(selectedFace.id.elementId);
         auto plane = m_document->getSketchPlaneForFace(selectedFace.id.ownerId,
                                                         selectedFace.id.elementId);
         if (plane) {
@@ -1192,7 +1198,10 @@ void MainWindow::onNewSketch() {
             sketch->setHostFaceAttachment(selectedFace.id.ownerId, selectedFace.id.elementId);
             m_activeSketchId = m_document->addSketch(std::move(sketch));
             if (!m_activeSketchId.empty()) {
-                m_document->ensureHostFaceBoundariesProjected(m_activeSketchId);
+                const bool projected = m_document->ensureHostFaceBoundariesProjected(m_activeSketchId);
+                qCDebug(logMainWindow) << "onNewSketch:host-boundary-projection"
+                                       << "sketchId=" << QString::fromStdString(m_activeSketchId)
+                                       << "projected=" << projected;
             }
             if (!m_activeSketchId.empty()) {
                 m_viewport->setReferenceSketch(QString::fromStdString(m_activeSketchId));
@@ -1203,17 +1212,25 @@ void MainWindow::onNewSketch() {
                 m_viewport->enterSketchMode(sketchPtr);
                 m_toolStatus->setText(tr("Sketch Mode - Selected Face"));
                 m_toolbar->setContext(ContextToolbar::Context::Sketch);
+                qCInfo(logMainWindow) << "onNewSketch:entered-face-sketch-mode"
+                                      << "sketchId=" << QString::fromStdString(m_activeSketchId);
                 return;
             }
 
+            qCWarning(logMainWindow) << "onNewSketch:created-sketch-missing-after-insert"
+                                     << QString::fromStdString(m_activeSketchId);
             m_activeSketchId.clear();
             m_toolStatus->setText(tr("Ready"));
             return;
         }
+        qCWarning(logMainWindow) << "onNewSketch:failed-to-resolve-face-plane"
+                                 << "bodyId=" << QString::fromStdString(selectedFace.id.ownerId)
+                                 << "faceId=" << QString::fromStdString(selectedFace.id.elementId);
     }
 
     m_viewport->beginPlaneSelection();
     m_toolStatus->setText(tr("Select a plane to start sketch"));
+    qCInfo(logMainWindow) << "onNewSketch:plane-selection-started";
 }
 
 void MainWindow::onSketchPlanePicked(int planeIndex) {
@@ -1239,10 +1256,15 @@ void MainWindow::onSketchPlanePicked(int planeIndex) {
     m_activeSketchId = m_document->addSketch(std::move(sketch));
     if (!m_activeSketchId.empty()) {
         m_viewport->setReferenceSketch(QString::fromStdString(m_activeSketchId));
+        qCDebug(logMainWindow) << "onSketchPlanePicked:reference-sketch-set"
+                               << "planeIndex=" << planeIndex
+                               << "sketchId=" << QString::fromStdString(m_activeSketchId);
     }
 
     core::sketch::Sketch* sketchPtr = m_document->getSketch(m_activeSketchId);
     if (!sketchPtr) {
+        qCWarning(logMainWindow) << "onSketchPlanePicked:sketch-not-found-after-create"
+                                 << "planeIndex=" << planeIndex;
         m_activeSketchId.clear();
         m_toolStatus->setText(tr("Ready"));
         return;
@@ -1251,6 +1273,9 @@ void MainWindow::onSketchPlanePicked(int planeIndex) {
     m_viewport->enterSketchMode(sketchPtr);
     m_toolStatus->setText(tr("Sketch Mode - %1 Plane").arg(planeName));
     m_toolbar->setContext(ContextToolbar::Context::Sketch);
+    qCInfo(logMainWindow) << "onSketchPlanePicked:entered-sketch-mode"
+                          << "plane=" << planeName
+                          << "sketchId=" << QString::fromStdString(m_activeSketchId);
 }
 
 void MainWindow::onPlaneSelectionCancelled() {
