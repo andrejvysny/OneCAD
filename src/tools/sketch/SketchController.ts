@@ -23,6 +23,7 @@ import { toolStore } from "@/stores/toolStore";
 import { viewportStore, type Projection } from "@/stores/viewportStore";
 import { documentStore, docSketchStatus, nextSketchName } from "@/stores/documentStore";
 import { selectionStore } from "@/stores/selectionStore";
+import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
 import { settingsStore } from "@/stores/settingsStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { toolChipStore } from "@/stores/toolChipStore";
@@ -113,6 +114,7 @@ export class SketchController {
   private async enter(): Promise<void> {
     if (this.entering) return;
     this.entering = true;
+    sketchSelectionStore.getState().clear();
     try {
       // setMode('sketch') fires the mode subscription BEFORE it assigns
       // activeSketchId; yield one microtask so we read the real target.
@@ -226,6 +228,7 @@ export class SketchController {
   }
 
   private exit(): void {
+    sketchSelectionStore.getState().clear();
     this.endPlanePick();
     this.machine = null;
     this.machineState = null;

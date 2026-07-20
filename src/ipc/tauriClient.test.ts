@@ -328,8 +328,12 @@ describe("tauriClient getSketch (pure read)", () => {
 
     expect(args).toEqual({ sketchId: "sketch2" });
     expect(session.plane.kind).toBe("XZ");
-    expect(session.entities.map((e) => e.id).sort()).toEqual(["l1", "p1", "p2"]);
-    expect(session.constraints).toEqual([{ id: "co", type: "Coincident", entities: ["p1", "p2"] }]);
+    // BUG-5: p1/p2 are l1's endpoints (owned) — no stray Point entities on re-entry.
+    expect(session.entities.map((e) => e.id).sort()).toEqual(["l1"]);
+    // The Coincident's point uuids remap to their owner line + position.
+    expect(session.constraints).toEqual([
+      { id: "co", type: "Coincident", entities: ["l1", "l1"], positions: ["Start", "End"] },
+    ]);
     // Pure read: no AddSketch (apply_edit_command) and no enter_sketch fired.
     expect(seen).toContain("get_sketch");
     expect(seen).not.toContain("apply_edit_command");
@@ -391,9 +395,12 @@ describe("tauriClient enter persisted sketch (re-entry hydration)", () => {
     // …and NO AddSketch fired (no duplicate empty sketch created).
     expect(seen).not.toContain("apply_edit_command");
     expect(seen).toContain("enter_sketch");
-    // Real geometry hydrated (not an empty duplicate).
-    expect([...session.entities.map((e) => e.id)].sort()).toEqual(["l1", "p1", "p2"]);
-    expect(session.constraints).toEqual([{ id: "co", type: "Coincident", entities: ["p1", "p2"] }]);
+    // Real geometry hydrated (not an empty duplicate). BUG-5: p1/p2 are l1's
+    // endpoints (owned) — no stray Points; the Coincident remaps to owner + position.
+    expect([...session.entities.map((e) => e.id)].sort()).toEqual(["l1"]);
+    expect(session.constraints).toEqual([
+      { id: "co", type: "Coincident", entities: ["l1", "l1"], positions: ["Start", "End"] },
+    ]);
 
     // A re-upsert of the SAME hydrated entities marshals to ZERO ops (id-map seeded).
     await client.sketchUpsert("sketch2", session.entities, session.constraints);

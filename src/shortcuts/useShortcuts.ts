@@ -56,10 +56,13 @@ export function runAction(action: ShortcutAction): void {
     case "finishSketch":
       if (tool.mode === "sketch") {
         // Hand the just-finished sketch to the model layer to auto-arm extrude
-        // (Shapr3D flow). The ModelToolController consumes this on mode → model.
+        // (Shapr3D flow). Mode must flip FIRST: the ModelToolController consumes
+        // pendingExtrudeSketch from a viewportStore subscription that guards on
+        // mode === "model", so setting the pending id while still in sketch mode
+        // would be observed once, dropped, and never re-delivered.
         const sketchId = viewportStore.getState().activeSketchId;
-        if (sketchId) viewportStore.getState().setPendingExtrude(sketchId);
         tool.setMode("model");
+        if (sketchId) viewportStore.getState().setPendingExtrude(sketchId);
       }
       break;
     case "cancel":

@@ -87,8 +87,12 @@ add_test(
 )
 
 # --- W-WP3b: solver-lane verb fixtures (SCHEMA §7.4) ---
+# sketch_redundant / sketch_overconstrained_full / sketch_fully_constrained pin
+# the OverConstrained state + "redundant" drag status (benign DOF-preserving
+# redundancy) and the clean-dof-0 FullyConstrained regression.
 foreach(_fx sketch_upsert sketch_gesture sketch_conflicting sketch_regions
-            sketch_unknown_gesture sketch_latest_wins)
+            sketch_unknown_gesture sketch_latest_wins
+            sketch_redundant sketch_overconstrained_full sketch_fully_constrained)
     add_test(
         NAME harness_${_fx}
         COMMAND worker_harness

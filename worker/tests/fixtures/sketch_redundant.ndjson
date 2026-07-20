@@ -1,0 +1,17 @@
+# Redundant-but-consistent sketch (SCHEMA §7.4). A line pinned at one end (Fixed)
+# with a DUPLICATE Horizontal constraint: the second Horizontal removes no DOF
+# (PlaneGCS flags it redundant), so the sketch is solvable yet OverConstrained —
+# NOT Conflicting (a solution exists) and NOT FullyConstrained (dof 1, p2.x free).
+# SketchUpsert => state "OverConstrained"; a SolveDrag along the reachable
+# horizontal succeeds => status "redundant" (the inherent redundancy diagnosed at
+# BeginGesture, distinct from the drag-pin redundancy). EndGesture keeps it.
+# Consume the unsolicited hello (SCHEMA §6) first.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"SketchUpsert","args":{"sketchId":"rd","plane":{"kind":"XY"},"entities":[{"id":"p1","type":"Point","at":[0,0]},{"id":"p2","type":"Point","at":[10,0]},{"id":"L","type":"Line","p0Ref":"p1","p1Ref":"p2"}],"constraints":[{"id":"fx","type":"Fixed","entities":["p1"]},{"id":"h1","type":"Horizontal","entities":["L"]},{"id":"h2","type":"Horizontal","entities":["L"]}]}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"upserted":true,"sketchRevision":1,"state":"OverConstrained"}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"BeginGesture","args":{"sketchId":"rd","sketchRevision":1,"gestureId":7,"drag":{"pointId":"p2"}}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"result":{"gestureId":7,"ready":true}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"SolveDrag","args":{"gestureId":7,"seq":1,"pointId":"p2","target":[25,0]}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"result":{"gestureId":7,"seq":1,"status":"redundant"}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"EndGesture","args":{"gestureId":7}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"gestureId":7,"status":"redundant"}}}

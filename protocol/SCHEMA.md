@@ -725,11 +725,28 @@ the full authoritative sketch so replay is deterministic.
   `{x:(−1,0,0), y:(0,0,1), n:(0,1,0)}`. Producers MUST send these exact bases for
   the named planes; readers MUST lock-test them.
 - `entities[].type` ∈ `Point` | `Line` | `Arc` | `Circle` | `Ellipse` | `Spline`.
+  - **Solver-lane entity support (§7.4).** The sketch solver lane materializes
+    only `Point` | `Line` | `Arc` | `Circle`. `Ellipse` and `Spline` are
+    **UNSUPPORTED** on the solver lane: a `SketchUpsert`/gesture carrying either
+    fails wire translation (recoverable `OP_FAILED`, "unsupported entity type").
+    They remain valid in the frozen Sketch op geometry for future solver support.
+  - A `Circle`/`Arc` returned by the solver lane (`enter_sketch`/`get_sketch`
+    return wire) carries an **optional `centerRef`** — the backend point-entity
+    uuid of its center — alongside the inlined `center` coordinate. Producers of
+    the return wire SHOULD emit it so re-entry hydration can re-own the center
+    point (avoiding orphaned child Points); readers MUST treat it as optional.
+    It is informational on the *inbound* solver-sync wire (the worker resolves
+    the center from `center` coords and ignores `centerRef`).
 - `constraints[].type` ∈ the 18 kinds (verbatim from OneCAD-CPP
   `SketchTypes.h ConstraintType`): `Coincident`, `Horizontal`, `Vertical`,
   `Fixed`, `Midpoint`, `OnCurve`, `Parallel`, `Perpendicular`, `Tangent`,
   `Concentric`, `Equal`, `Distance`, `HorizontalDistance`, `VerticalDistance`,
   `Angle`, `Radius`, `Diameter`, `Symmetric`.
+  - **Units.** The `Angle` constraint's `value` is in **radians** on the wire
+    (parity with OneCAD-CPP `AngleConstraint`/PlaneGCS and Rust
+    `Constraint::Angle`), distinct from op-param angles (`angleDeg`,
+    `draftAngleDeg`) which are degrees. UI layers author/display degrees and
+    MUST convert at the wire boundary.
 
 **Extrude** (`op.extrude`) — end conditions `Blind` / `ThroughAll` / `Symmetric`
 / `ToNext` / `ToFace`, optional two directions. Field names ported from
@@ -899,6 +916,17 @@ Upserts the authoritative sketch (plane + entities + constraints). Increments
   "state": "UnderConstrained" }   // state ∈ UnderConstrained|FullyConstrained|OverConstrained|Conflicting
 ```
 
+The `state` is computed after a full solve, by descending priority:
+**`Conflicting`** (PlaneGCS reports genuinely conflicting constraints — no
+solution) → **`OverConstrained`** (solvable but PlaneGCS reports one or more
+*benign, DOF-preserving redundant* constraints, e.g. a duplicate dimension;
+`!conflicting`) → **`FullyConstrained`** (`dof == 0`, no redundancy) →
+**`UnderConstrained`**. `OverConstrained` deliberately outranks
+`FullyConstrained`: a redundant constraint removes no DOF, so a fully-determined
+sketch (dof 0) carrying one still reports `OverConstrained` — a *warning* the
+frontend/dto and the dimension tool treat as a reject signal, never a hard error
+(a solution exists).
+
 #### BeginGesture
 Opens a drag gesture against a specific sketch revision.
 
@@ -926,6 +954,15 @@ newest `seq` per gesture must resolve.
   "solveMicros": 1840
 }
 ```
+
+`status` by descending priority: **`conflicting`** (the drag solve or the
+gesture's committed sketch reports conflicting constraints) → **`redundant`**
+(the solve succeeded and the committed sketch carries benign redundant
+constraints, as diagnosed at `BeginGesture`) → **`success`** (converged, no
+redundancy) → **`partial`** (did not converge). Redundancy is a fixed property
+of the committed sketch for the whole gesture; it is NOT re-derived per drag
+step (a drag pins the non-dragged points, which would spuriously flag the
+committed constraints as redundant). `EndGesture` uses the same precedence.
 
 #### EndGesture
 Pointer-up: performs the final **exact** solve (Rust commits one undo command from
@@ -1375,6 +1412,34 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-07-20 — Solver lane emits the full §7.4 status vocabulary:
+  `OverConstrained` state + `redundant` drag status** (AC-USABILITY W-WP1;
+  orchestrator SIGNED OFF). [§7.3](#73-op-payload-schemas-vertical-slice),
+  [§7.4](#74-sketch-solver-lane). The C++ worker now surfaces PlaneGCS
+  **benign, DOF-preserving redundancy** (redundant constraints that remove no
+  DOF — e.g. a duplicate dimension) that earlier revisions collapsed into
+  `FullyConstrained` (the "documented deviation" citing corpus g is retired —
+  the redundant system IS what §7.4 means by `OverConstrained`).
+  `SketchUpsert`/gesture `state` gains the 4th value with priority
+  `Conflicting > OverConstrained > FullyConstrained > UnderConstrained`;
+  `SolveDrag`/`EndGesture` `status` gains `redundant` with priority
+  `conflicting > redundant > success`, derived from the redundancy diagnosed
+  once at `BeginGesture` (not the drag-polluted per-solve result). New
+  `Sketch::hasRedundantConstraints()` accessor mirrors `isOverConstrained()`.
+  Rust dto (`SketchSolveStatus::OverConstrained`, free-string drag status) +
+  frontend `isConflictStatus` already parse both — worker-emission fix, no
+  wire-shape/key change (byte-stable envelope). Also pins Ellipse/Spline as
+  solver-lane `UNSUPPORTED` (§7.3). No canonical `protocol/fixtures/` change.
+- **2026-07-20 — Solver-lane return wire: optional `centerRef` on Circle/Arc +
+  Angle radians units note** (AC-USABILITY F-WP-S0; orchestrator SIGNED OFF).
+  [§7.3](#73-op-payload-schemas-vertical-slice). `enter_sketch`/`get_sketch`
+  return-wire Circle/Arc entities carry an optional `centerRef` (backend
+  center-point uuid) alongside the inlined `center` coords, so re-entry
+  hydration can re-own child points (fixes orphaned-Point hydration and makes
+  a reopened circle/arc center draggable). Additive + optional: absent on
+  legacy producers, ignored on the inbound wire, core serde untouched, no
+  fixture change. Angle `value` documented as radians on the wire (UI converts
+  deg↔rad at the boundary — fixes the silent degrees-as-radians defect).
 - **2026-07-19 — M6a: breadth ops Shell / LinearPattern / CircularPattern /
   MirrorBody implemented (worker + Rust wire)** (§7.3; **orchestrator sign-off
   PENDING**). [§7.3](#73-op-payload-schemas-vertical-slice), [§8](#8-error-taxonomy).

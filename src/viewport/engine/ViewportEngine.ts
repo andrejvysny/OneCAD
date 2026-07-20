@@ -28,13 +28,14 @@ import { palette } from "./palette";
 import { Picker, linePickThreshold, type PickHit, type PickModifiers } from "./Picker";
 import { HighlightLayer } from "./HighlightLayer";
 import { SketchStaticLayer } from "./SketchStaticLayer";
+import { RegionPickLayer } from "./RegionPickLayer";
 import { flushDisposals } from "../mesh/meshRegistry";
 import type { MeshEntry } from "../mesh/meshRegistry";
 import type { EntityRef } from "@/stores/selectionStore";
 import { SketchObject } from "./SketchObject";
 import { SnapIndicator } from "./SnapIndicator";
 import { planeGeometry, worldToPlanePoint, type Point2 } from "./sketchBasis";
-import type { SketchEntity, SketchPlane, SketchSolveStatus } from "@/ipc/types";
+import type { SketchEntity, SketchPlane, SketchRegion, SketchSolveStatus } from "@/ipc/types";
 import type { SnapResult } from "@/tools/sketch/snapEngine";
 import type { DraftEntity } from "@/tools/sketch/toolMachine";
 import { PreviewMesh } from "./PreviewMesh";
@@ -109,6 +110,7 @@ export class ViewportEngine {
   private dragHandle: DragHandle | null = null;
   private revolvePreview: RevolvePreview | null = null; // L1 lathe + axis picker
   private ghostLayer: GhostLayer | null = null; // L1 pattern / mirror clones
+  private regionPickLayer: RegionPickLayer | null = null; // multi-region extrude/revolve pick
   private planePicker: PlanePicker | null = null; // origin-plane pick gizmo
   private previewMaterials: BodyMaterials | null = null;
   private previewBody: BodyObjectHandle | null = null;
@@ -533,6 +535,10 @@ export class ViewportEngine {
     this.sketch?.setSelection(ids);
   }
 
+  setSketchHover(ids: Iterable<string>): void {
+    this.sketch?.setHover(ids);
+  }
+
   setSketchSnap(snap: SnapResult | null, showHints: boolean): void {
     if (!this.snapIndicator) return;
     if (snap) this.snapIndicator.show(snap, showHints);
@@ -935,6 +941,49 @@ export class ViewportEngine {
     this.highlights?.refresh();
   }
 
+  // ---- Region pick (multi-region extrude/revolve selection) ----
+  //
+  // When a finished sketch yields several closed regions, the ModelToolController
+  // shows one translucent fill per region on the sketch plane and hover/click-picks
+  // one. Hit-testing is pure (tools/preview/regionPick) — the controller raycasts the
+  // plane and resolves (u,v) → regionId, so this facade is show / tint / hide only.
+
+  private ensureRegionPickLayer(): RegionPickLayer {
+    if (!this.regionPickLayer) {
+      this.regionPickLayer = new RegionPickLayer({
+        root: this.interactionRoot,
+        invalidate: () => this.invalidate(),
+      });
+    }
+    return this.regionPickLayer;
+  }
+
+  /** Show the multi-region pick fills on `plane` (one translucent mesh per region). */
+  showRegionPick(plane: SketchPlane, regions: SketchRegion[]): void {
+    if (this.disposed) return;
+    const layer = this.ensureRegionPickLayer();
+    layer.setPlane(plane);
+    layer.setRegions(regions);
+    layer.setHover(null);
+    layer.setVisible(true);
+  }
+
+  /** Tint the hovered region (or clear when null). */
+  setRegionHover(id: string | null): void {
+    this.regionPickLayer?.setHover(id);
+  }
+
+  /** True while the region-pick layer is visible (gate/introspection probe). */
+  isRegionPickVisible(): boolean {
+    return this.regionPickLayer?.visible ?? false;
+  }
+
+  /** Hide the region-pick layer (kept for reuse; disposed with the engine). */
+  hideRegionPick(): void {
+    this.regionPickLayer?.setVisible(false);
+    this.regionPickLayer?.setHover(null);
+  }
+
   // ---- Teardown ----
 
   dispose(): void {
@@ -975,6 +1024,8 @@ export class ViewportEngine {
     this.revolvePreview = null;
     this.ghostLayer?.dispose();
     this.ghostLayer = null;
+    this.regionPickLayer?.dispose();
+    this.regionPickLayer = null;
     this.planePicker?.dispose();
     this.planePicker = null;
     if (this.previewBody) this.previewRoot.remove(this.previewBody.group);

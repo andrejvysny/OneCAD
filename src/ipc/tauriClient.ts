@@ -476,7 +476,7 @@ export function createTauriClient(): CadClient {
     // Re-entry hydration: the backend returns the sketch's real constraints in the
     // worker-wire form (Rust `wire_constraint`, field-identical to SketchConstraint);
     // reverse-map them so the inspector shows live constraints (kills the []-seam).
-    const constraints = frontendConstraintsFromDto(dto.constraints);
+    const constraints = frontendConstraintsFromDto(dto.constraints, dto.entities);
     // Seed the id-map from the returned wire so the NEXT upsert diffs against the
     // real geometry (zero add ops) instead of re-adding every entity. Idempotent +
     // a no-op for a fresh sketch (empty entities/constraints).
@@ -537,7 +537,7 @@ export function createTauriClient(): CadClient {
       sketchId,
       plane: dto.plane,
       entities: frontendEntitiesFromDto(dto.entities),
-      constraints: frontendConstraintsFromDto(dto.constraints),
+      constraints: frontendConstraintsFromDto(dto.constraints, dto.entities),
       dof: dto.dof,
       status: dto.status,
     };

@@ -1,0 +1,9 @@
+# Clean fully-constrained sketch (SCHEMA §7.4) — REGRESSION PIN for the 4-state
+# rule: a dof-0 sketch with NO redundant constraint must still report
+# "FullyConstrained", never flip to "OverConstrained". p1 Fixed at (0,0);
+# Horizontal fixes p2.y; Distance(10) fixes p2.x — exactly determined, no
+# redundancy (this is the m2_gate rectangle class: clean dof 0). Consume the
+# unsolicited hello (SCHEMA §6) first.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"SketchUpsert","args":{"sketchId":"fc","plane":{"kind":"XY"},"entities":[{"id":"p1","type":"Point","at":[0,0]},{"id":"p2","type":"Point","at":[10,0]},{"id":"L","type":"Line","p0Ref":"p1","p1Ref":"p2"}],"constraints":[{"id":"fx","type":"Fixed","entities":["p1"]},{"id":"h1","type":"Horizontal","entities":["L"]},{"id":"cd","type":"Distance","entities":["L"],"value":10.0}]}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"upserted":true,"sketchRevision":1,"dof":0,"state":"FullyConstrained"}}}

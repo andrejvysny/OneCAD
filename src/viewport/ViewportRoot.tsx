@@ -22,6 +22,7 @@ import { viewportStore } from "@/stores/viewportStore";
 import { settingsStore } from "@/stores/settingsStore";
 import { toolStore } from "@/stores/toolStore";
 import { selectionStore, topoRefId, type EntityRef } from "@/stores/selectionStore";
+import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
 import { createClient } from "@/ipc/client";
 import {
   emitMockDocumentChanged,
@@ -232,6 +233,16 @@ export function ViewportRoot({ className }: { className?: string }) {
         };
         applyHighlight();
         cleanups.push(selectionStore.subscribe(applyHighlight));
+
+        // ── Sketch selection store → live SketchObject (edit-mode recolor) ──
+        // No-op off sketch mode (setSketch* are guarded on the sketch presence).
+        const applySketchSelection = () => {
+          const s = sketchSelectionStore.getState();
+          engine.setSketchSelection(s.selected.map((sel) => sel.entityId));
+          engine.setSketchHover(s.hover ? [s.hover.entityId] : []);
+        };
+        applySketchSelection();
+        cleanups.push(sketchSelectionStore.subscribe(applySketchSelection));
 
         // ?vpdemo — drive the mock box through the FULL onDocumentChanged path.
         if (hasFlag("vpdemo")) {

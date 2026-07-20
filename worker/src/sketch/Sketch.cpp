@@ -1585,6 +1585,22 @@ bool Sketch::isOverConstrained() const {
     return naiveDegreesOfFreedom() < 0;
 }
 
+bool Sketch::hasRedundantConstraints() const {
+    if (!hasSolverUnsupportedEntities()) {
+        auto* self = const_cast<Sketch*>(this);
+        if (self->solverDirty_ || !self->solver_) {
+            self->rebuildSolver();
+        }
+        if (self->solver_) {
+            self->solver_->diagnose();
+            return self->solver_->hasRedundant();
+        }
+    }
+    // No solver diagnosis available (ellipses / no solver): redundancy is a
+    // PlaneGCS notion, so we cannot assert it — report none.
+    return false;
+}
+
 std::vector<ConstraintID> Sketch::getConflictingConstraints() const {
     return lastConflictingConstraints_;
 }

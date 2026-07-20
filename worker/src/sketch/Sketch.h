@@ -495,6 +495,17 @@ public:
     bool isOverConstrained() const;
 
     /**
+     * @brief Check if the sketch carries benign, DOF-preserving redundant
+     *        constraints (e.g. a duplicate dimension) per PlaneGCS diagnosis.
+     *
+     * Distinct from isOverConstrained() (genuine conflicts, no solution): a
+     * redundant sketch still has a valid solution — the extra constraint removes
+     * no degree of freedom. Mirrors isOverConstrained()'s diagnosis path; returns
+     * false when the sketch is not fully solver-representable (ellipses).
+     */
+    bool hasRedundantConstraints() const;
+
+    /**
      * @brief Get list of conflicting constraints if over-constrained
      */
     std::vector<ConstraintID> getConflictingConstraints() const;

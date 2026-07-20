@@ -104,6 +104,22 @@ Tracks: W = C++ worker, R = Rust core, F = frontend. Gates in **bold**.
 - [x] Picking: Picker onHover/onPick carry coords + secondaryHoverKey (hover-key coalescing across sketches); ViewportRoot empty-click fallback → {kind:"sketch"} selection → feeds EXISTING armExtrude/RevolveFromSelection. BONUS FIX: Picker traverse→traverseVisible — hidden bodies were pickable (own-flag check missed group-level hide; walkthrough-caught)
 - [x] Verify: FE 632/632 + build; Rust 68/68 + clippy; browser walkthrough — seeded sketches render (curves+dots), viewport edge-click selects "Sketch 2" w/ real DOF, tree syncs. USER gate: real app draw → finish → sketch visible w/ fill → click → Extrude
 
+## AC-USABILITY — sketch/extrude gap-closure (plan approved 2026-07-20, `~/.claude/plans/act-as-senior-software-twinkling-pony.md`; Codex plan-review "revise" → deltas folded)
+Target: AC1 sketch-on-plane, AC2 shapes+constraints+dims (legacy parity), AC3 extrude. Bugs: BUG-1 Tangent wire-dropped, BUG-2 angle deg/rad ×3 sites, BUG-3 OverConstrained never emitted, BUG-4 orphan points on delete, BUG-5 re-entry representation split.
+- [x] F-WP-S0 re-entry hydration + centerRef + angle canonicalization (2026-07-20): centerRef emitted in wire_entity (NOT core serde — core Circle.center already an EntityId ref; fixtures untouched), ownershipFromWire (child points skipped as entities, `${id}.Center` seeded, constraint refs remapped to {entityId,position}), angleUnits.ts deg↔rad at toWireConstraint + setDimension + hydration (constraintValue cache UI-domain), marshalUpsert child-point removal (absorbed BUG-4 fix), sketch_reentry.rs real-worker gate (center drag (20,20)→(25,35) proven, orphan-free delete dof-parity, angle π/2→edit π/4 round-trip) — GATE PASSED (orchestrator-verified)
+- [x] F-WP-S1 sketchSelectionStore + sketchHitTest (pickDimensionTarget delegates, behavior-preserving) + SketchObject hover mat (selected>hover>construction>status) + engine.setSketchHover + ViewportRoot subscription + enter/exit clear — GATE PASSED
+- [x] F-WP-S4a constraintTarget.ts (toConstraintTarget/resolveTargetPoint, Point-alias normalize) + constraintApplicability.ts (verbatim C++ matrix, hasLineBetweenPoints=coord-coincidence returning joining-line target, WIRE_ENCODABLE pre-filter, deterministic order) 51 tests — GATE PASSED. Equal/Midpoint/Tangent user-apply deferred (C++ parity)
+- [x] F-WP-M1 regionPick (2026-07-20): controller FSM state + armGen generation guard after every await, pickable=profileFromRegion filter, single-region + re-edit paths byte-identical, RegionPickLayer engine object (plane-basis fills, token tints), pure regionAtPoint hit-test, orbit suppressed + capture-phase Esc, picked regionId → draft/commit (extrude :330, revolve :516) — GATE PASSED
+- [x] W-WP1 4-state upsert_state (Conflicting>OverConstrained>FullyConstrained>UnderConstrained) + redundant drag/end status (gesture-fixed at BeginGesture — drag pins would false-flag), Sketch::hasRedundantConstraints(), 3 new fixtures, ctest 64/64 + m2_gate 2/2 vs new binary; SCHEMA §7.3/§7.4/§14 integrated + sidecar restaged — GATE PASSED
+- [x] T-WP-scaffold Playwright harness (chromium+swiftshader, serial, port 4177 default — 1420 = Tauri dev collision found+fixed) + line/rect/circle/arc specs via REAL plane-picker path, 0 app-code changes, 4/4 ×2 — GATE PASSED. FOUND REAL BUG: Enter finish-sketch never auto-armed extrude (setPendingExtrude before setMode("model") → consumer guard dropped it) — fixed inline (useShortcuts.ts order swap), 7/7
+- [ ] F-WP-S3 delete entities/constraints + orphan-point marshal fix (after S0)
+- [ ] F-WP-S2 select tool: click/drag-via-gesture-lane/Esc/Delete (after S1+S3)
+- [ ] F-WP-S4b applyConstraint + wire ext 5 kinds (BUG-1) + toolbar group + context chips (after S0/S1/S4a)
+- [ ] F-WP-S5 per-row ConstraintList (after S1+S3)
+- [ ] F-WP-S6 Trim (after S3) + Mirror entity-matrix, arc copy-only (after S4b)
+- [ ] T-WP hole-extrude ctest + sketch_edit.rs/sketch_reentry.rs + AC e2e flow + non-first-region e2e
+- [ ] Manual Mac gate: AC1/AC2/AC3 + re-entry lifecycle + undo sweep
+
 ## Wave plan (user-approved 2026-07-17; pause LIFTED — "continue autonomously, implement full plan")
 - Autonomous run to full plan: W-WP6-R ∥ R-WP11 ∥ repair.rs scoringVersion fix → R-WP12 solver bridge ∥ F-WP8 → M2 gate → /codex-implementation-review → M3 packaging → M4 → M5 → M6.
 - Wave A (parallel): W-WP5-R independent review + R-WP10 app shell.

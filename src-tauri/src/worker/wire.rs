@@ -1319,9 +1319,13 @@ fn wire_entity(sketch: &Sketch, e: &SketchEntity) -> Option<Value> {
             construction,
         } => {
             let c = point_pos(sketch, *center)?;
+            // `centerRef` carries the center point's uuid alongside the inlined coords
+            // so re-entry hydration can re-own the center Point (BUG-5). The worker
+            // ignores the extra key; the frontend consumes it (`sketchWireMap.ts`).
             json!({
                 "id": id.to_string(), "type": "Circle",
-                "center": c, "radius": radius, "construction": construction,
+                "center": c, "centerRef": center.to_string(),
+                "radius": radius, "construction": construction,
             })
         }
         SketchEntity::Arc {
@@ -1335,7 +1339,7 @@ fn wire_entity(sketch: &Sketch, e: &SketchEntity) -> Option<Value> {
             let c = point_pos(sketch, *center)?;
             json!({
                 "id": id.to_string(), "type": "Arc",
-                "center": c, "radius": radius,
+                "center": c, "centerRef": center.to_string(), "radius": radius,
                 "startAngle": start_angle, "endAngle": end_angle, "construction": construction,
             })
         }
@@ -1836,6 +1840,9 @@ mod solver_wire_tests {
         assert_eq!(ci["type"], "Circle");
         assert_eq!(ci["center"], json!([10.0, 10.0]));
         assert_eq!(ci["radius"], json!(3.0));
+        // BUG-5: the center point uuid rides alongside the inlined coords so re-entry
+        // hydration can re-own the center Point (frontend `sketchWireMap.ts`).
+        assert_eq!(ci["centerRef"], json!(c.to_string()));
 
         let cons = constraints.as_array().unwrap();
         let h = cons

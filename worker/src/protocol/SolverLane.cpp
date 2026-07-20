@@ -86,12 +86,25 @@ std::vector<std::string> map_conflicting(const wire::WireIndex& index,
     return out;
 }
 
-// SketchUpsert state ∈ UnderConstrained|FullyConstrained|OverConstrained|Conflicting.
-// The ported PlaneGCS wrapper distinguishes genuine conflicts and DOF; benign
-// redundancy is DOF-preserving (corpus g), so OverConstrained is not surfaced
-// here (documented deviation) — only the three states below.
-std::string upsert_state(int dof, bool conflicting) {
+// SketchUpsert / gesture state ∈ UnderConstrained|FullyConstrained|OverConstrained|Conflicting
+// (SCHEMA §7.4). PlaneGCS distinguishes genuine conflicts (no solution) from
+// benign redundancy — extra constraints that remove no DOF (corpus g), e.g. a
+// duplicate dimension. Priority, highest first:
+//   Conflicting                    — genuine conflict (no solution exists)
+//   OverConstrained  (redundant && !conflicting) — solvable but carries a benign
+//                                     redundant constraint; a warning, not an error
+//   FullyConstrained (dof == 0)    — exactly determined, no redundancy
+//   UnderConstrained               — remaining DOF
+// OverConstrained deliberately outranks FullyConstrained: a solvable sketch with
+// one redundant dimension is DOF-preserving (its dof may still be 0), and the
+// warning must surface (Rust/dto + the dimension tool treat OverConstrained like
+// Conflicting for auto-reject). HISTORY: earlier revisions collapsed redundancy
+// into FullyConstrained and cited corpus g as a reason to hide OverConstrained;
+// that "documented deviation" is retired — the redundant system IS what §7.4
+// means by OverConstrained, so it is now surfaced.
+std::string upsert_state(int dof, bool conflicting, bool redundant) {
     if (conflicting) return "Conflicting";
+    if (redundant) return "OverConstrained";
     if (dof == 0) return "FullyConstrained";
     return "UnderConstrained";
 }
@@ -247,7 +260,8 @@ Envelope SolverLane::on_upsert(const Envelope& req) {
     tr.sketch->solve();  // full solve so dof/state reflect the solved system
     const int dof = tr.sketch->getDegreesOfFreedom();
     const auto conflicting = tr.sketch->getConflictingConstraints();
-    const std::string state = upsert_state(dof, !conflicting.empty());
+    const bool redundant = tr.sketch->hasRedundantConstraints();
+    const std::string state = upsert_state(dof, !conflicting.empty(), redundant);
 
     const std::uint64_t revision = store_.upsert(sketch_id, args);
 
@@ -293,10 +307,16 @@ Envelope SolverLane::on_begin(const Envelope& req) {
         return err(req, "REF_UNRESOLVED", "BeginGesture: unknown drag point '" + point_id + "'");
     }
 
-    // Build + diagnose the GCS system ONCE.
+    // Build + diagnose the GCS system ONCE. Capture the sketch's inherent
+    // redundancy HERE, before beginPointDrag() adds drag-fix constraints: a drag
+    // pins every non-dragged point, which makes the committed constraints look
+    // redundant against those pins, so the per-drag solve cannot tell inherent
+    // redundancy apart from drag-induced redundancy. The committed sketch's
+    // redundancy is fixed for the whole gesture (same as g.conflicting).
     tr.sketch->solve();
     const int dof = tr.sketch->getDegreesOfFreedom();
     const auto conflicting_internal = tr.sketch->getConflictingConstraints();
+    const bool redundant = tr.sketch->hasRedundantConstraints();
 
     tr.sketch->beginPointDrag(drag_internal);  // drag-fix strategy + rollback snapshot
 
@@ -306,6 +326,7 @@ Envelope SolverLane::on_begin(const Envelope& req) {
     g.sketch_revision = stored->revision;
     g.drag_point = drag_internal;
     g.dof = dof;
+    g.redundant = redundant;
     g.conflicting = map_conflicting(tr.index, conflicting_internal);
     g.baseline = collect_positions(*tr.sketch);
     g.last_reported = g.baseline;
@@ -342,6 +363,11 @@ Envelope SolverLane::on_drag(const Envelope& req) {
 
     const auto cur = collect_positions(*g.sketch);
 
+    // Status precedence (SCHEMA §7.4: success | partial | conflicting | redundant):
+    // conflicting > redundant > success, with partial for a non-converged solve.
+    // Redundancy is the gesture-fixed g.redundant diagnosed at BeginGesture, NOT
+    // r.redundantConstraints (drag pins make the committed constraints look
+    // redundant — see on_begin).
     std::string status;
     std::vector<std::string> conflicting;
     if (!r.conflictingConstraints.empty()) {
@@ -351,7 +377,7 @@ Envelope SolverLane::on_drag(const Envelope& req) {
         status = "conflicting";
         conflicting = g.conflicting;
     } else if (r.success) {
-        status = "success";
+        status = g.redundant ? "redundant" : "success";
     } else {
         status = "partial";
     }
@@ -405,9 +431,11 @@ Envelope SolverLane::on_end(const Envelope& req) {
     const int dof = g.dof;
     const auto cur = collect_positions(*g.sketch);
 
+    // Status precedence matches on_drag (SCHEMA §7.4): conflicting > redundant >
+    // success; partial otherwise. Redundancy is the gesture-fixed g.redundant.
     std::string status;
     if (!r.conflictingConstraints.empty() || !g.conflicting.empty()) status = "conflicting";
-    else if (r.success) status = "success";
+    else if (r.success) status = g.redundant ? "redundant" : "success";
     else status = "partial";
 
     // Commit into the session store: bump revision + write back solved positions.

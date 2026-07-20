@@ -1,0 +1,11 @@
+# Flagship OverConstrained case (SCHEMA §7.4): a FULLY-constrained line (dof 0)
+# that ALSO carries a benign redundant dimension. p1 Fixed at (0,0); Horizontal +
+# Distance(10) already determine p2 exactly (dof 0); the extra HorizontalDistance
+# (p1,p2,10) is DOF-preserving redundant. The system is solvable, dof == 0, yet
+# the state is "OverConstrained", NOT "FullyConstrained" — OverConstrained
+# outranks FullyConstrained so the benign-redundancy warning surfaces (the design
+# claim: a fully-constrained sketch with one redundant dimension reports
+# OverConstrained). Consume the unsolicited hello (SCHEMA §6) first.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"SketchUpsert","args":{"sketchId":"ocf","plane":{"kind":"XY"},"entities":[{"id":"p1","type":"Point","at":[0,0]},{"id":"p2","type":"Point","at":[10,0]},{"id":"L","type":"Line","p0Ref":"p1","p1Ref":"p2"}],"constraints":[{"id":"fx","type":"Fixed","entities":["p1"]},{"id":"h1","type":"Horizontal","entities":["L"]},{"id":"cd","type":"Distance","entities":["L"],"value":10.0},{"id":"hd","type":"HorizontalDistance","entities":["p1","p2"],"value":10.0}]}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"upserted":true,"sketchRevision":1,"dof":0,"state":"OverConstrained"}}}

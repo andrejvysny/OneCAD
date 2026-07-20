@@ -27,6 +27,8 @@ import type {
   PreviewSession,
   SemanticRef,
   SketchPlane,
+  SketchRegion,
+  SketchSession,
 } from "@/ipc/types";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import { updateScalarParamsCommand } from "@/ipc/tauriCommandMap";
@@ -39,6 +41,7 @@ import { documentStore, type FeatureMeta } from "@/stores/documentStore";
 import { selectionStore, type EntityRef } from "@/stores/selectionStore";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { profileFromRegion, profileBounds, type PrismProfile } from "@/tools/preview/prismPreview";
+import { regionAtPoint } from "@/tools/preview/regionPick";
 import { axisDepthFromRay, normalize, type Vec3 } from "@/tools/preview/depthProjection";
 import { radiusFromDrag, radiusFromValueText } from "@/tools/preview/filletRadius";
 import { axisSplitsRegion, type LatheAxis } from "@/tools/preview/lathePreview";
@@ -107,6 +110,25 @@ interface AxisCandidate {
   b: [number, number];
 }
 
+/**
+ * In-flight multi-region pick (extrude OR revolve). Entered when the arm path gets
+ * more than one closed region; the controller owns the pointer (orbit suppressed)
+ * until the user clicks a region or Esc cancels. `session` is captured up-front so
+ * the resolved region flows straight into the armed state (revolve reuses its
+ * entities for axis candidates) with no second `enterSketch`.
+ */
+interface RegionPickState {
+  opType: "extrude" | "revolve";
+  sketchId: string;
+  plane: SketchPlane;
+  /** Pickable regions (those with an extrudable profile), rendered + hit-tested. */
+  regions: SketchRegion[];
+  session: SketchSession;
+  editFeatureId?: string;
+  /** The armed tool's seed value (extrude depth / revolve angle). */
+  startValue: number;
+}
+
 export class ModelToolController {
   private extrude: ExtrudeFsm = extrudeInit();
   private fillet: FilletFsm = filletInit();
@@ -125,6 +147,12 @@ export class ModelToolController {
   private normal: Vec3 = [0, 0, 1];
   private lastArmedSketch: string | null = null;
   private previewMeshRev = 0;
+
+  // Multi-region pick (extrude/revolve). `armGen` is bumped on every arm request +
+  // every tool/mode change, so a finishSketch/enterSketch result that returns AFTER
+  // the user re-triggered (or cancelled) is dropped instead of clobbering state.
+  private armGen = 0;
+  private regionPick: RegionPickState | null = null;
 
   // Fillet context.
   private filletEdges: EntityRef[] = [];
@@ -223,7 +251,10 @@ export class ModelToolController {
   // ── tool arming ────────────────────────────────────────────────────────────
 
   private onToolChange(tool: string): void {
-    // Any tool switch cleans up the previous tool's transient state first.
+    // Any tool switch invalidates a pending arm (drop a late finishSketch result) and
+    // cleans up the previous tool's transient state first.
+    this.invalidateArm();
+    this.cancelRegionPick();
     this.cancelPreview();
     this.cancelFillet();
     this.cancelBoolean();
@@ -249,7 +280,15 @@ export class ModelToolController {
   }
 
   private async armExtrude(sketchId: string, editFeatureId?: string, startDepth = DEFAULT_EXTRUDE_DEPTH): Promise<void> {
+    const gen = ++this.armGen;
     const finish = await this.deps.client.finishSketch(sketchId);
+    if (gen !== this.armGen) return; // superseded while finishSketch was in flight
+    // Multiple regions (fresh arm only) → let the user pick which one; a re-edit is
+    // param-only and keeps its stored region, so it skips the pick.
+    if (finish.regions.length > 1 && !editFeatureId) {
+      await this.enterRegionPick("extrude", sketchId, finish.regions, editFeatureId, startDepth, gen);
+      return;
+    }
     const region = finish.regions[0];
     const profile = region ? profileFromRegion(region) : null;
     if (!region || !profile) {
@@ -258,7 +297,20 @@ export class ModelToolController {
       return;
     }
     const session = await this.deps.client.enterSketch(sketchId); // plane only
-    this.plane = session.plane;
+    if (gen !== this.armGen) return; // superseded while enterSketch was in flight
+    await this.beginExtrudeArmed(sketchId, region, profile, session.plane, editFeatureId, startDepth);
+  }
+
+  /** Arm the extrude tool on a chosen region + plane (the single-region + region-pick tail). */
+  private async beginExtrudeArmed(
+    sketchId: string,
+    region: SketchRegion,
+    profile: PrismProfile,
+    plane: SketchPlane,
+    editFeatureId?: string,
+    startDepth = DEFAULT_EXTRUDE_DEPTH,
+  ): Promise<void> {
+    this.plane = plane;
     this.lastArmedSketch = sketchId;
 
     const b = profileBounds(profile);
@@ -306,6 +358,108 @@ export class ModelToolController {
     this.sendPreview(v);
   }
 
+  // ── multi-region pick (extrude / revolve) ────────────────────────────────────
+  //
+  // Shared between extrude + revolve. A single region keeps the instant auto-arm
+  // path (this block is never entered); >1 region hands pointer ownership to the
+  // controller (orbit suppressed) and hover/click-picks a region, which then flows
+  // straight into the armed state with THAT regionId in the draft/commit payload.
+
+  /** Bump the arm generation so any in-flight finishSketch/enterSketch result is dropped. */
+  private invalidateArm(): void {
+    this.armGen++;
+  }
+
+  private async enterRegionPick(
+    opType: "extrude" | "revolve",
+    sketchId: string,
+    regions: SketchRegion[],
+    editFeatureId: string | undefined,
+    startValue: number,
+    gen: number,
+  ): Promise<void> {
+    const session = await this.deps.client.enterSketch(sketchId); // plane (+ entities for revolve)
+    if (gen !== this.armGen) return; // superseded while enterSketch was in flight
+    const noun = opType === "extrude" ? "extrude" : "revolve";
+    // Only regions with an extrudable profile are pickable (others can't be built).
+    const pickable = regions.filter((r) => profileFromRegion(r) !== null);
+    if (pickable.length === 0) {
+      viewportStore.getState().setStatusHint(`No closed region to ${noun}`);
+      toolStore.getState().setTool("select");
+      return;
+    }
+    if (pickable.length === 1) {
+      // Only one region is actually extrudable — arm it directly (no pointless pick).
+      this.armPickedRegion(opType, sketchId, pickable[0], session, editFeatureId, startValue);
+      return;
+    }
+    this.regionPick = { opType, sketchId, plane: session.plane, regions: pickable, session, editFeatureId, startValue };
+    this.engine.showRegionPick(session.plane, pickable);
+    this.engine.setOrbitSuppressed(true); // modal: click picks a region, not orbit
+    viewportStore.getState().setStatusHint(`Select a region to ${noun}`);
+    this.updateDebug();
+  }
+
+  /** Arm the picked op on `region`, threading its id into the draft/commit payload. */
+  private armPickedRegion(
+    opType: "extrude" | "revolve",
+    sketchId: string,
+    region: SketchRegion,
+    session: SketchSession,
+    editFeatureId: string | undefined,
+    startValue: number,
+  ): void {
+    const profile = profileFromRegion(region);
+    if (!profile) {
+      viewportStore.getState().setStatusHint(`No closed region to ${opType === "extrude" ? "extrude" : "revolve"}`);
+      toolStore.getState().setTool("select");
+      return;
+    }
+    if (opType === "extrude") {
+      void this.beginExtrudeArmed(sketchId, region, profile, session.plane, editFeatureId, startValue);
+    } else {
+      void this.beginRevolveArmed(sketchId, region, profile, session, editFeatureId, startValue);
+    }
+  }
+
+  /** Pointer hover during region pick: tint the region under the pointer. */
+  private updateRegionHover(clientX: number, clientY: number): void {
+    const ctx = this.regionPick;
+    if (!ctx) return;
+    const p = this.deps.engine.screenToPlaneOn(ctx.plane, clientX, clientY);
+    const id = p ? regionAtPoint(ctx.regions, p.x, p.y) : null;
+    this.deps.engine.setRegionHover(id);
+  }
+
+  /** Pointer click during region pick: resolve the region under the pointer (if any). */
+  private tryPickRegion(clientX: number, clientY: number): void {
+    const ctx = this.regionPick;
+    if (!ctx) return;
+    const p = this.deps.engine.screenToPlaneOn(ctx.plane, clientX, clientY);
+    if (!p) return;
+    const id = regionAtPoint(ctx.regions, p.x, p.y);
+    if (id) this.resolveRegionPick(id);
+  }
+
+  private resolveRegionPick(regionId: string): void {
+    const ctx = this.regionPick;
+    if (!ctx) return;
+    const region = ctx.regions.find((r) => r.regionId === regionId);
+    if (!region) return;
+    this.regionPick = null;
+    this.deps.engine.hideRegionPick();
+    this.deps.engine.setOrbitSuppressed(false);
+    this.armPickedRegion(ctx.opType, ctx.sketchId, region, ctx.session, ctx.editFeatureId, ctx.startValue);
+  }
+
+  /** Tear down an in-flight region pick (Esc / tool switch); restores orbit. */
+  private cancelRegionPick(): void {
+    if (!this.regionPick) return;
+    this.regionPick = null;
+    this.deps.engine.hideRegionPick();
+    this.deps.engine.setOrbitSuppressed(false);
+  }
+
   // ── revolve ────────────────────────────────────────────────────────────────
 
   private armRevolveFromSelection(): void {
@@ -315,15 +469,21 @@ export class ModelToolController {
   }
 
   /**
-   * Arm the revolve tool on a sketch: resolve its profile + candidate axis lines,
-   * then enter axis-pick (fresh) or go straight to armed (re-edit, `editFeatureId`).
+   * Arm the revolve tool on a sketch. A single region goes straight to axis-pick; >1
+   * region (fresh arm) first runs the region pick, THEN axis-pick on the chosen one.
    */
   private async armRevolve(
     sketchId: string,
     editFeatureId?: string,
     startAngle = DEFAULT_REVOLVE_ANGLE,
   ): Promise<void> {
+    const gen = ++this.armGen;
     const finish = await this.deps.client.finishSketch(sketchId);
+    if (gen !== this.armGen) return; // superseded while finishSketch was in flight
+    if (finish.regions.length > 1 && !editFeatureId) {
+      await this.enterRegionPick("revolve", sketchId, finish.regions, editFeatureId, startAngle, gen);
+      return;
+    }
     const region = finish.regions[0];
     const profile = region ? profileFromRegion(region) : null;
     if (!region || !profile) {
@@ -332,6 +492,23 @@ export class ModelToolController {
       return;
     }
     const session = await this.deps.client.enterSketch(sketchId); // plane + entities
+    if (gen !== this.armGen) return; // superseded while enterSketch was in flight
+    await this.beginRevolveArmed(sketchId, region, profile, session, editFeatureId, startAngle);
+  }
+
+  /**
+   * Arm the revolve tool on a chosen region + session: resolve candidate axis lines,
+   * then enter axis-pick (fresh) or go straight to armed (re-edit, `editFeatureId`).
+   * Shared by the single-region + region-pick paths.
+   */
+  private async beginRevolveArmed(
+    sketchId: string,
+    region: SketchRegion,
+    profile: PrismProfile,
+    session: SketchSession,
+    editFeatureId?: string,
+    startAngle = DEFAULT_REVOLVE_ANGLE,
+  ): Promise<void> {
     this.plane = session.plane;
     this.lastArmedSketch = sketchId;
     this.revolveProfile = profile;
@@ -1010,6 +1187,11 @@ export class ModelToolController {
     if (Math.abs(e.clientX - this.downX) > DRAG_PX || Math.abs(e.clientY - this.downY) > DRAG_PX) {
       this.moved = true;
     }
+    // Region pick owns the pointer: hover-tint the region under it, nothing else.
+    if (this.regionPick) {
+      this.updateRegionHover(e.clientX, e.clientY);
+      return;
+    }
     if (this.dragging === "extrude") {
       const ray = this.engine.screenRay(e.clientX, e.clientY);
       if (!ray) return;
@@ -1048,6 +1230,12 @@ export class ModelToolController {
       this.downButton === 0 && e.button === 0 && !this.moved &&
       Math.abs(e.clientX - this.downX) <= DRAG_PX && Math.abs(e.clientY - this.downY) <= DRAG_PX;
     this.downButton = -1;
+
+    // Region pick owns the pointer: a click resolves the region under it.
+    if (this.regionPick) {
+      if (wasClick) this.tryPickRegion(e.clientX, e.clientY);
+      return;
+    }
 
     if (this.dragging === "extrude") {
       this.dragging = null;
@@ -1455,6 +1643,16 @@ export class ModelToolController {
   // ── keyboard ──────────────────────────────────────────────────────────────────
 
   private onKeyDown = (e: KeyboardEvent): void => {
+    // Esc during region pick cancels cleanly back to idle (restore orbit), and owns
+    // the key so the global Esc-ladder does not also fire.
+    if (e.key === "Escape" && this.regionPick) {
+      e.preventDefault();
+      e.stopPropagation();
+      this.cancelRegionPick();
+      viewportStore.getState().setStatusHint(null);
+      toolStore.getState().setTool("select");
+      return;
+    }
     if (e.key === "Alt") {
       this.altHeld = true;
       if (this.dragging === "extrude") {
@@ -1551,6 +1749,8 @@ export class ModelToolController {
   }
 
   private cancelAll(): void {
+    this.invalidateArm();
+    this.cancelRegionPick();
     this.cancelPreview();
     this.cancelFillet();
     this.cancelBoolean();

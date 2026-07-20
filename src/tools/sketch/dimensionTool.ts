@@ -22,8 +22,8 @@
  */
 import type { ConstraintPosition, SketchConstraint, SketchEntity, SketchSolveStatus } from "@/ipc/types";
 import type { Point2 } from "@/viewport/engine/sketchBasis";
-import { nearestOnCurve } from "./snapEngine";
 import { entityPoints } from "./autoConstrain";
+import { hitTestSketch } from "./sketchHitTest";
 
 /** A pick the dimension tool consumes — an entity body or a named snap point. */
 export type DimPick =
@@ -207,38 +207,31 @@ export function isConflictStatus(status: SketchSolveStatus): boolean {
  *   2. the entity whose curve the click lands on within `tolWorld` → an entity
  *      pick (line length / circle diameter / arc radius).
  * Returns null when nothing is close enough.
+ *
+ * Delegates the priority + nearest resolution to the shared `hitTestSketch`,
+ * then thickens the lean `SketchSel` back into the coord-carrying `DimPick`.
  */
 export function pickDimensionTarget(
   raw: Point2,
   entities: SketchEntity[],
   tolWorld: number,
 ): DimPick | null {
-  // 1. Named points (higher priority — vertices win over the body).
-  let bestPt: { d: number; pick: DimPick } | null = null;
-  for (const e of entities) {
-    for (const p of entityPoints(e)) {
-      const d = Math.hypot(raw.x - p.coord[0], raw.y - p.coord[1]);
-      if (d <= tolWorld && (!bestPt || d < bestPt.d)) {
-        bestPt = { d, pick: { on: "point", id: p.entityId, position: p.position, coord: p.coord } };
-      }
-    }
-  }
-  if (bestPt) return bestPt.pick;
+  const sel = hitTestSketch(raw, entities, tolWorld);
+  if (!sel) return null;
+  const e = entities.find((x) => x.id === sel.entityId);
+  if (!e) return null;
 
-  // 2. Entity body under the cursor.
-  let bestBody: { d: number; pick: DimPick } | null = null;
-  for (const e of entities) {
-    const near = nearestOnCurve(raw, e);
-    if (!near) continue;
-    const d = Math.hypot(raw.x - near.x, raw.y - near.y);
-    if (d > tolWorld) continue;
-    let pick: DimPick | null = null;
-    if (e.type === "Line" && e.p0 && e.p1) pick = { on: "line", id: e.id, p0: e.p0, p1: e.p1 };
-    else if (e.type === "Circle" && e.center && e.radius !== undefined)
-      pick = { on: "circle", id: e.id, center: e.center, radius: e.radius };
-    else if (e.type === "Arc" && e.center && e.radius !== undefined)
-      pick = { on: "arc", id: e.id, center: e.center, radius: e.radius };
-    if (pick && (!bestBody || d < bestBody.d)) bestBody = { d, pick };
+  // Point pick (a named vertex): re-derive its coord from the entity.
+  if (sel.point) {
+    const pt = entityPoints(e).find((p) => p.position === sel.point);
+    return pt ? { on: "point", id: e.id, position: pt.position, coord: pt.coord } : null;
   }
-  return bestBody?.pick ?? null;
+
+  // Body pick.
+  if (e.type === "Line" && e.p0 && e.p1) return { on: "line", id: e.id, p0: e.p0, p1: e.p1 };
+  if (e.type === "Circle" && e.center && e.radius !== undefined)
+    return { on: "circle", id: e.id, center: e.center, radius: e.radius };
+  if (e.type === "Arc" && e.center && e.radius !== undefined)
+    return { on: "arc", id: e.id, center: e.center, radius: e.radius };
+  return null;
 }

@@ -102,12 +102,14 @@ export class SketchObject {
   private entities: SketchEntity[] = [];
   private status: SketchSolveStatus = "UnderConstrained";
   private selected = new Set<string>();
+  private hovered = new Set<string>();
 
   // Shared line materials, by state.
   private readonly matUnder: LineMaterial;
   private readonly matFull: LineMaterial;
   private readonly matConflict: LineMaterial;
   private readonly matSelected: LineMaterial;
+  private readonly matHover: LineMaterial;
   private readonly matConstruction: LineMaterial;
   private readonly matPreview: LineMaterial;
   private readonly allMaterials: LineMaterial[];
@@ -153,6 +155,7 @@ export class SketchObject {
     this.matFull = mk(palette.sketchFull());
     this.matConflict = mk(palette.sketchConflict());
     this.matSelected = mk(palette.sketchSelected());
+    this.matHover = mk(palette.hoverAccent());
     this.matConstruction = mk(palette.sketchConstruction(), { dashed: true, dashSize: 3, gapSize: 2 });
     this.matPreview = mk(palette.sketchUnder(), { linewidth: PREVIEW_WIDTH, transparent: true, opacity: 0.9 });
     this.allMaterials = [
@@ -160,6 +163,7 @@ export class SketchObject {
       this.matFull,
       this.matConflict,
       this.matSelected,
+      this.matHover,
       this.matConstruction,
       this.matPreview,
     ];
@@ -212,6 +216,13 @@ export class SketchObject {
     this.deps.invalidate();
   }
 
+  /** Recolor from the current hover (sketch entity ids). Selection wins over hover. */
+  setHover(hoveredIds: Iterable<string>): void {
+    this.hovered = new Set(hoveredIds);
+    this.rebuildEntities();
+    this.deps.invalidate();
+  }
+
   private statusMaterial(): LineMaterial {
     switch (this.status) {
       case "FullyConstrained":
@@ -237,9 +248,11 @@ export class SketchObject {
       if (positions.length < 6) continue;
       const mat = this.selected.has(e.id)
         ? this.matSelected
-        : e.construction
-          ? this.matConstruction
-          : statusMat;
+        : this.hovered.has(e.id)
+          ? this.matHover
+          : e.construction
+            ? this.matConstruction
+            : statusMat;
       this.entityGroup.add(this.buildLine(positions, mat));
     }
   }

@@ -52,6 +52,7 @@ private:
         wire::WireIndex index;
         core::sketch::EntityID drag_point;
         int dof = 0;
+        bool redundant = false;  // benign DOF-preserving redundancy (diagnosed at begin)
         std::vector<std::string> conflicting;  // wire constraint ids (structural)
         PosMap baseline;       // positions at BeginGesture
         PosMap last_reported;  // for incremental deltas

@@ -37,6 +37,7 @@ import type {
   SketchPlaneKind,
 } from "./types";
 import { planeFor } from "./mockSketch";
+import { fromWireDimensionValue, toWireDimensionValue } from "./angleUnits";
 
 /** The 18 constraint-type tokens the worker wire emits (== `SketchConstraintType`). */
 const CONSTRAINT_TYPES: ReadonlySet<string> = new Set<SketchConstraintType>([
@@ -265,7 +266,8 @@ const DIMENSIONAL: ReadonlySet<SketchConstraintType> = new Set([
 function toWireConstraint(map: SketchIdMap, c: SketchConstraint, id: string): WireConstraint | null {
   const pos = c.positions ?? [];
   const ref = (i: number): string | null => resolveRef(map, c.entities[i], pos[i]);
-  const val: WireScalar = { value: c.value ?? 0 };
+  // Dimensional value crosses in the WIRE domain (Angle: deg→rad; BUG-2).
+  const val: WireScalar = { value: toWireDimensionValue(c.type, c.value ?? 0) };
 
   switch (c.type) {
     case "Coincident": {
@@ -363,7 +365,20 @@ export function marshalUpsert(
     if (!liveEntities.has(fid)) {
       ops.push({ op: "removeEntity", entity: uuid });
       map.entity.delete(fid);
-      for (const k of [...map.point.keys()]) if (k.startsWith(`${fid}.`)) map.point.delete(k);
+      // BUG-5: also drop the entity's synthesized child points (line endpoints /
+      // circle-arc center). The core `RemoveEntity` cascade drops constraints + curves
+      // that REFERENCE a removed point, but a point is never a dependent of its owning
+      // curve — so without this the child points orphan as stray dots on re-entry.
+      const dropped = new Set<string>([uuid]);
+      for (const k of [...map.point.keys()]) {
+        if (!k.startsWith(`${fid}.`)) continue;
+        const childUuid = map.point.get(k)!;
+        map.point.delete(k);
+        if (!dropped.has(childUuid)) {
+          dropped.add(childUuid);
+          ops.push({ op: "removeEntity", entity: childUuid });
+        }
+      }
     }
   }
   const liveConstraints = new Set(next.constraints.map((c) => c.id));
@@ -391,9 +406,14 @@ export function marshalUpsert(
       // Unmappable constraints (e.g. arc-endpoint coincidence) are skipped — the
       // solver still runs on the geometry; documented M2 seam.
     } else if (isDimensional(c.type) && map.constraintValue.get(c.id) !== c.value) {
-      // In-place dimension edit (the DimensionInput chip / editConstraintValue).
+      // In-place dimension edit (the DimensionInput chip / editConstraintValue). The
+      // cache holds UI-domain values; the wire carries the wire domain (Angle: deg→rad).
       map.constraintValue.set(c.id, c.value);
-      ops.push({ op: "setDimension", constraint: map.constraint.get(c.id)!, value: { value: c.value ?? 0 } });
+      ops.push({
+        op: "setDimension",
+        constraint: map.constraint.get(c.id)!,
+        value: { value: toWireDimensionValue(c.type, c.value ?? 0) },
+      });
     }
   }
 
@@ -470,10 +490,55 @@ interface WireDtoEntity {
   p0Ref?: string;
   p1Ref?: string;
   center?: [number, number];
+  /** Backend point uuid of a circle/arc center (BUG-5: the ownership link the wire
+   *  now carries alongside the inlined `center` coords; absent on a legacy worker). */
+  centerRef?: string;
   radius?: number;
   startAngle?: number;
   endAngle?: number;
   construction?: boolean;
+}
+
+/** A backend point uuid's owner: the entity that carries it as `position`. */
+interface PointOwner {
+  entityId: string;
+  position: ConstraintPosition;
+}
+
+/**
+ * Map every backend point uuid on the wire to its OWNER entity + position (BUG-5):
+ *   - a Line's `p0Ref`/`p1Ref` → `(lineId, Start|End)`;
+ *   - a Circle/Arc's `centerRef` → `(id, Center)`;
+ *   - a free-standing Point (NOT referenced by any of the above) → `(id, Start)`.
+ * `ownedChildIds` is the subset of point uuids OWNED by a line/circle/arc — these
+ * are NOT hydrated as independent frontend entities (their coords ride on the owner).
+ */
+function ownershipFromWire(wire: WireDtoEntity[]): {
+  owners: Map<string, PointOwner>;
+  ownedChildIds: Set<string>;
+} {
+  const owners = new Map<string, PointOwner>();
+  const ownedChildIds = new Set<string>();
+  for (const e of wire) {
+    if (!e || typeof e.id !== "string") continue;
+    if (e.type === "Line" && e.p0Ref && e.p1Ref) {
+      owners.set(e.p0Ref, { entityId: e.id, position: "Start" });
+      owners.set(e.p1Ref, { entityId: e.id, position: "End" });
+      ownedChildIds.add(e.p0Ref);
+      ownedChildIds.add(e.p1Ref);
+    } else if ((e.type === "Circle" || e.type === "Arc") && e.centerRef) {
+      owners.set(e.centerRef, { entityId: e.id, position: "Center" });
+      ownedChildIds.add(e.centerRef);
+    }
+  }
+  // Free-standing points key to THEMSELVES (position Start, matching entityPoints)
+  // — but only when no line/circle/arc already owns them.
+  for (const e of wire) {
+    if (e && e.type === "Point" && typeof e.id === "string" && e.at && !ownedChildIds.has(e.id)) {
+      owners.set(e.id, { entityId: e.id, position: "Start" });
+    }
+  }
+  return { owners, ownedChildIds };
 }
 
 /**
@@ -487,12 +552,16 @@ export function frontendEntitiesFromDto(dtoEntities: unknown): SketchEntity[] {
   const wire = dtoEntities as WireDtoEntity[];
   const pointAt = new Map<string, [number, number]>();
   for (const e of wire) if (e.type === "Point" && e.at) pointAt.set(e.id, e.at);
+  // BUG-5: a point OWNED by a line endpoint / circle-arc center is NOT a
+  // free-standing entity — its coords ride on the owner (no stray dots on re-entry).
+  const { ownedChildIds } = ownershipFromWire(wire);
 
   const out: SketchEntity[] = [];
   for (const e of wire) {
     switch (e.type) {
       case "Point":
-        if (e.at) out.push({ id: e.id, type: "Point", p0: e.at, construction: e.construction });
+        if (e.at && !ownedChildIds.has(e.id))
+          out.push({ id: e.id, type: "Point", p0: e.at, construction: e.construction });
         break;
       case "Line": {
         const p0 = e.p0Ref ? pointAt.get(e.p0Ref) : undefined;
@@ -637,24 +706,39 @@ interface WireDtoConstraint {
  * summarizes constraints by type, and the marshaller only re-adds constraints it
  * has NOT already seen, so re-entry constraints hydrate the panel without churn.
  */
-export function frontendConstraintsFromDto(dtoConstraints: unknown): SketchConstraint[] {
+export function frontendConstraintsFromDto(
+  dtoConstraints: unknown,
+  dtoEntities?: unknown,
+): SketchConstraint[] {
   if (!Array.isArray(dtoConstraints)) return [];
+  // BUG-5: the wire references POINTS by backend uuid; a fresh sketch references the
+  // OWNER entity + position (`{entityId, position}`). Remap every point uuid back to
+  // its owner so the hydrated constraints land in the same shape as a fresh sketch
+  // (and don't dangle now that child points aren't independent entities).
+  const owners = Array.isArray(dtoEntities)
+    ? ownershipFromWire(dtoEntities as WireDtoEntity[]).owners
+    : null;
   const out: SketchConstraint[] = [];
   for (const raw of dtoConstraints as WireDtoConstraint[]) {
     if (!raw || typeof raw.id !== "string" || !CONSTRAINT_TYPES.has(raw.type)) continue;
     if (!Array.isArray(raw.entities)) continue;
-    const c: SketchConstraint = {
-      id: raw.id,
-      type: raw.type as SketchConstraintType,
-      entities: raw.entities,
-    };
-    if (Array.isArray(raw.positions)) {
+    const type = raw.type as SketchConstraintType;
+    const c: SketchConstraint = { id: raw.id, type, entities: raw.entities };
+    if (owners && raw.entities.some((e) => owners.has(e))) {
+      // Remap owned point refs → owner entity id; non-point refs (lines/circles) stay.
+      c.entities = raw.entities.map((e) => owners.get(e)?.entityId ?? e);
+      // A `""` slot is falsy, so `resolveRef` resolves it as an ENTITY ref (matches a
+      // direct line/circle operand, e.g. Midpoint's line or Symmetric's axis).
+      const positions = raw.entities.map((e) => owners.get(e)?.position ?? "");
+      if (positions.some((p) => p !== "")) c.positions = positions as ConstraintPosition[];
+    } else if (Array.isArray(raw.positions)) {
       c.positions = raw.positions.filter(
         (p): p is ConstraintPosition =>
           p === "Start" || p === "End" || p === "Center" || p === "Midpoint",
       );
     }
-    if (typeof raw.value === "number") c.value = raw.value;
+    // Dimensional value arrives in the WIRE domain (Angle: rad→deg; BUG-2).
+    if (typeof raw.value === "number") c.value = fromWireDimensionValue(type, raw.value);
     out.push(c);
   }
   return out;
@@ -701,12 +785,16 @@ export function seedIdMapFromWire(
     // `frontendEntitiesFromDto`'s `pointAt` gate so the seeded set stays aligned).
     const hasPoint = new Set<string>();
     for (const e of wire) if (e && e.type === "Point" && e.at) hasPoint.add(e.id);
+    // BUG-5: a point owned by a line/circle/arc is NOT a free-standing entity — it is
+    // reachable ONLY via its owner's `${ownerId}.${position}` key (seeded below), so
+    // it must NOT be seeded as an entity (mirrors `frontendEntitiesFromDto`).
+    const { ownedChildIds } = ownershipFromWire(wire);
 
     for (const e of wire) {
       if (!e || typeof e.id !== "string") continue;
       switch (e.type) {
         case "Point":
-          if (!e.at) continue;
+          if (!e.at || ownedChildIds.has(e.id)) continue;
           map.entity.set(e.id, e.id);
           map.point.set(pointKey(e.id, "Start"), e.id);
           map.point.set(pointKey(e.id, "Center"), e.id);
@@ -721,7 +809,11 @@ export function seedIdMapFromWire(
         case "Arc":
           if (!e.center || e.radius === undefined) continue;
           map.entity.set(e.id, e.id);
-          // No center point id on the wire (inlined coords) → `.Center` unseeded.
+          // BUG-5: the wire now carries the center point uuid (`centerRef`) alongside
+          // the inlined coords, so `.Center` resolves to the backend point on re-entry
+          // (a re-entry circle/arc center is now directly draggable). Absent on a
+          // legacy worker → unseeded (the prior documented seam).
+          if (e.centerRef) map.point.set(pointKey(e.id, "Center"), e.centerRef);
           break;
       }
     }
@@ -732,7 +824,13 @@ export function seedIdMapFromWire(
       if (!raw || typeof raw.id !== "string") continue;
       if (!CONSTRAINT_TYPES.has(raw.type) || !Array.isArray(raw.entities)) continue;
       map.constraint.set(raw.id, raw.id);
-      map.constraintValue.set(raw.id, typeof raw.value === "number" ? raw.value : undefined);
+      // BUG-2: the cache holds UI-domain values (Angle: rad→deg), so the first marshal
+      // after re-entry does NOT emit a spurious SetDimension for every Angle.
+      const value =
+        typeof raw.value === "number"
+          ? fromWireDimensionValue(raw.type as SketchConstraintType, raw.value)
+          : undefined;
+      map.constraintValue.set(raw.id, value);
     }
   }
 }
