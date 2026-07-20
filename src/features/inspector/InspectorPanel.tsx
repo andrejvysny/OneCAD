@@ -131,7 +131,7 @@ function SelectionState({
 }) {
   const isBody = sel.kind === "body";
   const name = bodies[sel.id]?.name ?? sketches[sel.id]?.name ?? "";
-  const statusName = isBody ? "Solid body · 6 faces" : "Sketch · 2 profiles";
+  const statusName = isBody ? "Solid body" : "Sketch";
   // Body → its full lineage (Sketch 1 / Extrude / Fillet); sketch → the extrude
   // that consumed it (prototype's two hardcoded HISTORY arrays).
   const history = isBody

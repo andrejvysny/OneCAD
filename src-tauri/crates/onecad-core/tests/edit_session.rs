@@ -957,3 +957,101 @@ fn session_snapshot_after_scripted_sequence() {
 
     insta::assert_json_snapshot!("session_after_sequence", sess.document());
 }
+
+// ── Frontend wire pin: the TS `buildAddSketch` JSON must deserialize ─────────
+//
+// The frontend creates new sketches (plane-picker flow) by POSTing exactly this
+// JSON shape through `apply_edit_command`. `SketchData.plane` has NO serde
+// default — a payload without it fails before the command handler runs (that
+// gap shipped once; this pin keeps the TS shape and the Rust serde in lockstep).
+// Mirror of src/ipc/sketchWireMap.ts `buildAddSketch` — change both together.
+
+#[test]
+fn frontend_build_add_sketch_wire_deserializes_and_applies() {
+    let wire = r#"{
+        "cmd": "addSketch",
+        "sketch": {
+            "id": "8f9e0d1c-2b3a-4c5d-8e7f-0a1b2c3d4e5f",
+            "name": "Sketch 1",
+            "plane": {
+                "origin": [0, 0, 0],
+                "xAxis": [0, 1, 0],
+                "yAxis": [0, 0, 1],
+                "normal": [1, 0, 0]
+            },
+            "attachment": { "kind": "world", "plane": "XZ" }
+        }
+    }"#;
+
+    let cmd: EditCommand = serde_json::from_str(wire).expect("frontend AddSketch wire must parse");
+    let EditCommand::AddSketch { ref sketch } = cmd else {
+        panic!("expected AddSketch, got {cmd:?}");
+    };
+    assert_eq!(sketch.plane, onecad_core::sketch::SketchPlane::xz());
+
+    let mut sess = DocumentSession::new(base_document());
+    sess.apply(cmd).unwrap();
+    let sid: SketchId = "8f9e0d1c-2b3a-4c5d-8e7f-0a1b2c3d4e5f".parse().unwrap();
+    assert!(
+        sess.document().sketches.contains_key(&sid),
+        "sketch must land in the document"
+    );
+
+    // The plane field is REQUIRED: the same payload without it must NOT parse.
+    let no_plane = wire.replace(
+        r#""plane": {
+                "origin": [0, 0, 0],
+                "xAxis": [0, 1, 0],
+                "yAxis": [0, 0, 1],
+                "normal": [1, 0, 0]
+            },
+            "#,
+        "",
+    );
+    assert!(
+        no_plane.len() < wire.len(),
+        "replace must have removed the plane field"
+    );
+    assert!(
+        serde_json::from_str::<EditCommand>(&no_plane).is_err(),
+        "AddSketch without plane must fail (frontend MUST send it)"
+    );
+}
+
+// ── Frontend wire pin #2: `sketch_upsert` ops (TS `marshalUpsert` output) ────
+//
+// Same contract class as the AddSketch pin above: the TS mapper authors these
+// internally-tagged `op`/`kind` payloads and Tauri deserializes them STRAIGHT
+// into `Vec<SketchEditOp>` (api::sketch_upsert). Mirror of the op/entity/
+// constraint unions in src/ipc/sketchWireMap.ts — change both together.
+
+#[test]
+fn frontend_sketch_upsert_ops_wire_deserializes() {
+    let uid = |n: u8| format!("00000000-0000-4000-8000-0000000000{n:02x}");
+    let wire = serde_json::json!([
+        { "op": "addEntity", "entity": { "kind": "point", "id": uid(1), "at": [0.0, 0.0] } },
+        { "op": "addEntity", "entity": { "kind": "point", "id": uid(2), "at": [60.0, 0.0], "construction": false } },
+        { "op": "addEntity", "entity": { "kind": "line", "id": uid(3), "start": uid(1), "end": uid(2) } },
+        { "op": "addEntity", "entity": { "kind": "circle", "id": uid(4), "center": uid(1), "radius": 12.5 } },
+        { "op": "addEntity", "entity": { "kind": "arc", "id": uid(5), "center": uid(2), "radius": 8.0,
+                                          "startAngle": 0.0, "endAngle": 1.25, "construction": true } },
+        { "op": "addConstraint", "constraint": { "kind": "coincident", "id": uid(6), "point1": uid(1), "point2": uid(2) } },
+        { "op": "addConstraint", "constraint": { "kind": "horizontal", "id": uid(7), "line": uid(3) } },
+        { "op": "addConstraint", "constraint": { "kind": "distance", "id": uid(8), "entity1": uid(1), "entity2": uid(2),
+                                                  "value": { "value": 60.0 } } },
+        { "op": "addConstraint", "constraint": { "kind": "radius", "id": uid(9), "entity": uid(4),
+                                                  "value": { "value": 12.5 } } },
+        { "op": "setDimension", "constraint": uid(8), "value": { "value": 42.0 } },
+        { "op": "setEntityPositions", "positions": [[uid(1), [1.0, 2.0]], [uid(2), [3.0, 4.0]]] },
+        { "op": "removeConstraint", "constraint": uid(7) },
+        { "op": "removeEntity", "entity": uid(5) }
+    ]);
+
+    let ops: Vec<SketchEditOp> =
+        serde_json::from_value(wire).expect("frontend sketch_upsert ops must parse");
+    assert_eq!(ops.len(), 13);
+    assert!(matches!(ops[0], SketchEditOp::AddEntity { .. }));
+    assert!(matches!(ops[9], SketchEditOp::SetDimension { .. }));
+    assert!(matches!(ops[10], SketchEditOp::SetEntityPositions { .. }));
+    assert!(matches!(ops[12], SketchEditOp::RemoveEntity { .. }));
+}

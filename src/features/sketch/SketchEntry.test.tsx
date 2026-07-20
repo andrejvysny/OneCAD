@@ -9,23 +9,27 @@ import { resetStores } from "@/test/resetStores";
 
 /**
  * F-WP6 sketch-entry-from-toolbar flow: clicking the model "New sketch" tool
- * enters sketch mode, targets the active sketch, selects it (tree/inspector
- * coherence) and swaps the toolbar to the sketch tool set with Line armed. The
- * SketchController then picks this up (browser only) to open the mock session.
+ * enters sketch mode with NO target (bare intent) — activeSketchId stays null so
+ * the controller shows the plane picker — and swaps the toolbar to the sketch
+ * tool set with Line armed. The SketchController then picks this up (browser
+ * only) to run the plane-pick → open-session flow.
  */
 describe("sketch entry from the toolbar", () => {
   beforeEach(() => resetStores());
 
-  it("enters sketch mode and targets the active sketch", async () => {
+  it("enters sketch mode with no target (plane-pick phase)", async () => {
     const user = userEvent.setup();
     render(<FloatingToolbar />);
     expect(toolStore.getState().mode).toBe("model");
+    const before = selectionStore.getState().selected;
 
     await user.click(screen.getByRole("button", { name: "New sketch" }));
 
     expect(toolStore.getState().mode).toBe("sketch");
-    expect(viewportStore.getState().activeSketchId).toBe("sketch2");
-    expect(selectionStore.getState().selected).toEqual([{ kind: "sketch", id: "sketch2" }]);
+    // Bare entry → no active sketch yet (the controller will show the picker).
+    expect(viewportStore.getState().activeSketchId).toBeNull();
+    // Selection is untouched by a bare entry (only an explicit id selects).
+    expect(selectionStore.getState().selected).toBe(before);
     // Sketch tool set is shown, Line armed by default.
     expect(screen.getByRole("button", { name: "Line" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.queryByRole("button", { name: "Extrude" })).toBeNull();

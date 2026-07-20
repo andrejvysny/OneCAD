@@ -7,7 +7,9 @@ import { useDocumentStore } from "@/stores/documentStore";
 import { sketchStatusText } from "./constraintStatus";
 
 /**
- * Floating sketch chrome pill (prototype 1c), shown only in sketch mode.
+ * Floating sketch chrome pill (prototype 1c), shown only in sketch mode. Two
+ * variants: before a sketch exists (no activeSketchId) a "Select a sketch plane"
+ * prompt with Cancel; once entered, the editing pill (name + DOF + Finish).
  * Cancel / Finish both exit to model mode (matching Esc / Enter). Compact
  * layout per 1c — no flex spacer (that is the docked-bar 1d variant).
  */
@@ -21,10 +23,27 @@ export function SketchChromeBar() {
 
   if (mode !== "sketch") return null;
 
+  const exit = () => setMode("model");
+
+  // Plane-pick phase: no sketch yet — prompt for a plane; Cancel returns to model.
+  if (!activeSketchId) {
+    return (
+      <div className="absolute left-1/2 top-[62px] z-[29] flex h-[38px] -translate-x-1/2 items-center gap-2.5 rounded-md border border-sketch-chrome-border bg-sketch-chrome pl-3.5 pr-1.5 shadow-sketch-pill">
+        <Icon name="penEdit" size={15} strokeWidth={1.8} className="text-accent" />
+        <span className="text-[12.5px] font-semibold text-sel-text">
+          Select a sketch plane
+        </span>
+        <Button size="sm" variant="secondary" className="text-ink-3" onClick={exit}>
+          <Icon name="x" size={11} strokeWidth={2.2} />
+          Cancel
+        </Button>
+      </div>
+    );
+  }
+
   const name = sketch?.name ?? "Sketch";
   const dof = sketch?.dof ?? 0;
   const { label, tone } = sketchStatusText(sketch?.status ?? "under", dof);
-  const exit = () => setMode("model");
 
   return (
     <div className="absolute left-1/2 top-[62px] z-[29] flex h-[38px] -translate-x-1/2 items-center gap-2.5 rounded-md border border-sketch-chrome-border bg-sketch-chrome pl-3.5 pr-1.5 shadow-sketch-pill">

@@ -158,6 +158,7 @@ pub fn run() {
             api::get_projection,
             api::get_mesh,
             api::enter_sketch,
+            api::get_sketch,
             api::sketch_upsert,
             api::begin_gesture,
             api::solve_drag,

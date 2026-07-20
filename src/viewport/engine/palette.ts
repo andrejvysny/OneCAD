@@ -16,20 +16,26 @@ import * as THREE from "three";
 export type TokenName =
   | "--color-border"
   | "--color-border-strong"
-  | "--color-canvas-model"
+  | "--color-canvas"
   | "--color-canvas-sketch"
   | "--color-ink"
   | "--color-ink-5"
   | "--color-accent"
   | "--color-sel-bg"
   | "--color-sel-text"
-  | "--color-warn";
+  | "--color-warn"
+  | "--color-axis-x"
+  | "--color-axis-y"
+  | "--color-axis-z"
+  | "--color-plane-xy"
+  | "--color-plane-xz"
+  | "--color-plane-yz";
 
 // rgb() mirrors of the token values in tokens.css (non-browser fallback only).
 const FALLBACK: Record<TokenName, string> = {
   "--color-border": "rgb(226, 228, 232)",
   "--color-border-strong": "rgb(216, 219, 224)",
-  "--color-canvas-model": "rgb(238, 240, 243)",
+  "--color-canvas": "rgb(234, 236, 239)",
   "--color-canvas-sketch": "rgb(244, 247, 252)",
   "--color-ink": "rgb(27, 29, 33)",
   "--color-ink-5": "rgb(138, 145, 156)",
@@ -37,6 +43,12 @@ const FALLBACK: Record<TokenName, string> = {
   "--color-sel-bg": "rgb(225, 235, 251)",
   "--color-sel-text": "rgb(29, 79, 168)",
   "--color-warn": "rgb(178, 107, 16)",
+  "--color-axis-x": "rgb(196, 92, 92)",
+  "--color-axis-y": "rgb(92, 160, 92)",
+  "--color-axis-z": "rgb(80, 120, 190)",
+  "--color-plane-xy": "rgb(80, 120, 190)",
+  "--color-plane-xz": "rgb(217, 134, 60)",
+  "--color-plane-yz": "rgb(92, 160, 92)",
 };
 
 let cache: Map<TokenName, THREE.Color> | null = null;
@@ -67,8 +79,8 @@ export const palette = {
   gridMinor: () => tokenColor("--color-border"),
   /** Grid major lines. */
   gridMajor: () => tokenColor("--color-border-strong"),
-  /** Renderer clear color = model-canvas background. */
-  clear: () => tokenColor("--color-canvas-model"),
+  /** Renderer clear color = base viewport canvas background. */
+  clear: () => tokenColor("--color-canvas"),
   /** Neutral body face material. */
   bodyNeutral: () => tokenColor("--color-ink-5"),
   /** Body edge lines. */
@@ -93,6 +105,22 @@ export const palette = {
   sketchConflict: () => tokenColor("--color-warn"),
   /** Sketch plane tint quad + sketch canvas background. */
   sketchPlane: () => tokenColor("--color-canvas-sketch"),
+
+  // ── Origin axis triad (always-visible XYZ at the origin) ──
+  /** +X axis leg. */
+  axisX: () => tokenColor("--color-axis-x"),
+  /** +Y axis leg. */
+  axisY: () => tokenColor("--color-axis-y"),
+  /** +Z axis leg. */
+  axisZ: () => tokenColor("--color-axis-z"),
+
+  // ── Sketch plane picker (origin-plane quads, pre-sketch plane-select gizmo) ──
+  /** XY plane quad. */
+  planeXY: () => tokenColor("--color-plane-xy"),
+  /** XZ plane quad. */
+  planeXZ: () => tokenColor("--color-plane-xz"),
+  /** YZ plane quad. */
+  planeYZ: () => tokenColor("--color-plane-yz"),
 };
 
 /** Test / theme-change seam: drop the cache so colors re-read from the DOM. */

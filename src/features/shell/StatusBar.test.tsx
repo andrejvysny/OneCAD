@@ -10,7 +10,7 @@ describe("StatusBar", () => {
 
   it("shows DOF for a selected sketch, — for a body, and the mono read-out", () => {
     render(<StatusBar />);
-    expect(screen.getByText("DOF: 3")).toBeInTheDocument();
+    expect(screen.getByText("DOF: 0")).toBeInTheDocument();
     expect(screen.getByText(/273\.00/)).toBeInTheDocument();
 
     act(() => selectionStore.getState().set([{ kind: "body", id: "body1" }]));

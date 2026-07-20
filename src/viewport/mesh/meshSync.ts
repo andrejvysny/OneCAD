@@ -65,6 +65,14 @@ export class MeshIngest {
         }
       }),
     );
+
+    // Initial sweep: bodies already in the store at attach time (open/new/recover
+    // populate the projection before the viewport engine exists) never fire a
+    // document-changed or visibility-flip event, so bootstrap them here. Idempotent
+    // via loadSeq (a later document-changed for the same body just supersedes it).
+    for (const [id, meta] of Object.entries(documentStore.getState().bodies)) {
+      if (meta.visible) void this.loadBody(id, DEFAULT_LOD);
+    }
   }
 
   private onDocumentChanged(change: DocumentChange): void {
@@ -101,6 +109,9 @@ export class MeshIngest {
     const buffer = await this.client.getBodyMesh(bodyId, lod);
     // Discard if detached or superseded by a newer fetch for this body.
     if (this.detached || this.loadSeq.get(bodyId) !== token) return;
+    // Empty = the mesh isn't regenerated/cached yet (Rust get_mesh miss); the
+    // later document-changed event re-triggers this fetch once it is published.
+    if (buffer.byteLength === 0) return;
 
     const view = parseMeshPayload(buffer);
     const entry = buildBodyObjects(view, bodyId, ++this.meshRev);

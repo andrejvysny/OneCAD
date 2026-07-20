@@ -114,6 +114,41 @@ describe("MeshIngest onDocumentChanged", () => {
   });
 });
 
+describe("MeshIngest initial sweep (bodies already in the store at attach)", () => {
+  it("loads only the visible pre-seeded bodies on attach, before any event fires", async () => {
+    setBodies({ body1: true, body2: false });
+    const engine = fakeEngine();
+    const { client, getMesh } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+
+    await tick();
+
+    expect(getMesh).toHaveBeenCalledTimes(1);
+    expect(getMesh).toHaveBeenCalledWith("body1", "coarse");
+    expect(reg.getEntry("body1")).toBeDefined();
+    expect(reg.getEntry("body2")).toBeUndefined();
+    expect(engine.bodiesRoot.children.length).toBe(1);
+  });
+});
+
+describe("MeshIngest empty mesh response (not yet regenerated)", () => {
+  it("does not swap/mutate the scene when getBodyMesh resolves an empty buffer, and does not throw", async () => {
+    setBodies({ body1: true });
+    const engine = fakeEngine();
+    const { client, emit } = fakeClient(vi.fn(async () => new ArrayBuffer(0)));
+    ingest = new MeshIngest();
+    ingest.attach(engine, client); // initial sweep also resolves empty — same guard
+
+    emit(changed("body1"));
+    await tick();
+
+    expect(reg.getEntry("body1")).toBeUndefined();
+    expect(engine.bodiesRoot.children.length).toBe(0);
+    expect(engine.refreshHighlights).not.toHaveBeenCalled();
+  });
+});
+
 describe("MeshIngest visibility + detach", () => {
   it("lazy-loads a body the first time it becomes visible", async () => {
     setBodies({ body1: false });

@@ -29,12 +29,12 @@ export function resetStores(): void {
   viewportStore.setState({
     projection: "persp",
     displayMode: "shaded",
-    gridVisible: false,
+    gridVisible: true,
     activeSketchId: null,
     cameraViewLabel: "TOP",
     fov: 76,
     cursor: { x: 273, y: 210, z: 0 },
-    dofBadge: 3,
+    dofBadge: null,
     statusHint: null,
     pendingExtrudeSketch: null,
   });

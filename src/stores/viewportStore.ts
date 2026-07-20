@@ -53,15 +53,14 @@ export interface ViewportState {
 export const viewportStore = createStore<ViewportState>()((set) => ({
   projection: "persp",
   displayMode: "shaded",
-  // Off by default so the grid button matches the prototype's neutral state; the
-  // pressed (accent) treatment appears when toggled on. The viewport WP may flip
-  // this default once a real grid renders.
-  gridVisible: false,
+  // On by default: the grid renders (GridPlane) so the viewport never looks
+  // empty; the grid button shows the pressed (accent) treatment to match.
+  gridVisible: true,
   activeSketchId: null,
   cameraViewLabel: "TOP",
   fov: 76,
   cursor: { x: 273, y: 210, z: 0 },
-  dofBadge: 3,
+  dofBadge: null,
   statusHint: null,
   pendingExtrudeSketch: null,
 

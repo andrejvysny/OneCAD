@@ -91,6 +91,12 @@ export interface LocalSolverLane {
   beginGesture(sketchId: string, dragPointId: string): Promise<BeginGestureResult>;
   solveDrag(target: [number, number]): Promise<DragSolveResult | null>;
   endGesture(finalTarget?: [number, number]): Promise<SketchUpsertResult>;
+  /** True if a lane session already exists for this sketch id (mock re-entry parity). */
+  hasSession(sketchId: string): boolean;
+  /** Read-only clone of a live lane session (always-visible static layer read), or null. */
+  peekSession(sketchId: string): SketchSession | null;
+  /** Drop a single sketch's lane session + revision (mock DeleteSketch compensation). */
+  dropSession(sketchId: string): void;
   beginPreview(draft: PreviewDraft): Promise<PreviewSession>;
   updatePreview(sessionId: string, params: PreviewParams, epoch: number): void;
   endPreview(sessionId: string, commit: boolean): Promise<ApplyOperationResult | null>;
@@ -366,6 +372,20 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
 
     resolveExtrudeInput,
     resolveSketchLine,
+
+    hasSession(sketchId: string): boolean {
+      return sketchSessions.has(sketchId);
+    },
+
+    peekSession(sketchId: string): SketchSession | null {
+      const s = sketchSessions.get(sketchId);
+      return s ? cloneSession(s) : null;
+    },
+
+    dropSession(sketchId: string): void {
+      sketchSessions.delete(sketchId);
+      sketchRevisions.delete(sketchId);
+    },
 
     cacheSketchPlane(sketchId: string, plane: SketchPlane): void {
       const existing = sketchSessions.get(sketchId);

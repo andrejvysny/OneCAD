@@ -131,8 +131,16 @@ export interface PickerDeps {
   invalidate: () => void;
   /** Picking is only live in this mode (model + select); returns false in sketch mode. */
   isActive: () => boolean;
-  onHover: (hit: PickHit | null) => void;
-  onPick: (hit: PickHit | null, mods: PickModifiers) => void;
+  /** Hover changed (carries the pointer's client coords for a secondary hit-test). */
+  onHover: (hit: PickHit | null, clientX: number, clientY: number) => void;
+  /** Click (carries the pointer's client coords for a secondary hit-test). */
+  onPick: (hit: PickHit | null, mods: PickModifiers, clientX: number, clientY: number) => void;
+  /**
+   * Secondary hover token (e.g. a sketch id under the pointer), consulted ONLY when
+   * there is no body hit. Folded into the hover key so hover fires when moving
+   * between secondary targets in empty space — the body pick path is unchanged.
+   */
+  secondaryHoverKey?: (clientX: number, clientY: number) => string | null;
 }
 
 export class Picker {
@@ -206,13 +214,15 @@ export class Picker {
     this.downButton = -1;
     if (!wasClick || !this.deps.isActive()) return;
     const hit = this.pickAt(e.clientX, e.clientY);
-    this.deps.onPick(hit, { shift: e.shiftKey, meta: e.metaKey || e.ctrlKey });
+    this.deps.onPick(hit, { shift: e.shiftKey, meta: e.metaKey || e.ctrlKey }, e.clientX, e.clientY);
   };
 
-  private onPointerLeave = (): void => {
+  private onPointerLeave = (e: PointerEvent): void => {
     if (this.lastHoverKey !== null) {
       this.lastHoverKey = null;
-      this.deps.onHover(null);
+      // Pointer left the canvas: coords are off-canvas so the secondary hit-test
+      // clears too (the handler resolves nothing under an out-of-bounds point).
+      this.deps.onHover(null, e.clientX, e.clientY);
       this.deps.invalidate();
     }
   };
@@ -221,11 +231,20 @@ export class Picker {
 
   private updateHover(clientX: number, clientY: number): void {
     const hit = this.pickAt(clientX, clientY);
-    const key = pickKey(hit);
+    // No body hit ⇒ fold the secondary (sketch) token into the key so hover fires
+    // when moving between sketches in empty space, but stays quiet over one sketch.
+    const key = hit
+      ? pickKey(hit)
+      : this.secondaryKey(clientX, clientY);
     if (key === this.lastHoverKey) return; // unchanged ⇒ no repaint (idle stays quiet)
     this.lastHoverKey = key;
-    this.deps.onHover(hit);
+    this.deps.onHover(hit, clientX, clientY);
     this.deps.invalidate();
+  }
+
+  private secondaryKey(clientX: number, clientY: number): string | null {
+    const token = this.deps.secondaryHoverKey?.(clientX, clientY);
+    return token ? `sk:${token}` : null;
   }
 
   private pickAt(clientX: number, clientY: number): PickHit | null {
@@ -255,8 +274,9 @@ export class Picker {
 
     const faceObjects: THREE.Object3D[] = [];
     const edgeObjects: THREE.Object3D[] = [];
-    this.deps.getRoot().traverse((o) => {
-      if (!o.visible) return;
+    // traverseVisible: an own-flag check misses meshes inside a HIDDEN body
+    // group (children keep visible=true) — hidden bodies must not be pickable.
+    this.deps.getRoot().traverseVisible((o) => {
       if (o.userData.kind === "face") faceObjects.push(o);
       else if (o.userData.kind === "edge") edgeObjects.push(o);
     });

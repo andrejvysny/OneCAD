@@ -6,11 +6,14 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   applySolvedPositions,
   buildAddSketch,
+  buildDeleteSketch,
   createIdMap,
+  frontendConstraintsFromDto,
   frontendEntitiesFromDto,
   frontendSolvedPositions,
   isDimensional,
   marshalUpsert,
+  seedIdMapFromWire,
 } from "./sketchWireMap";
 import type { SketchConstraint, SketchEntity } from "./types";
 
@@ -113,12 +116,27 @@ describe("marshalUpsert — constraints", () => {
 });
 
 describe("buildAddSketch / frontendEntitiesFromDto / isDimensional", () => {
-  it("builds a minimal world-plane AddSketch (custom → XY)", () => {
+  it("builds a minimal world-plane AddSketch w/ REQUIRED plane basis (custom → XY)", () => {
+    // Rust SketchData has NO serde default for `plane` — omitting it fails
+    // deserialization before the command handler runs (the picker-flow bug).
     expect(buildAddSketch("id-1", "Sketch 1", "XZ")).toEqual({
       cmd: "addSketch",
-      sketch: { id: "id-1", name: "Sketch 1", attachment: { kind: "world", plane: "XZ" } },
+      sketch: {
+        id: "id-1",
+        name: "Sketch 1",
+        plane: { origin: [0, 0, 0], xAxis: [0, 1, 0], yAxis: [0, 0, 1], normal: [1, 0, 0] },
+        attachment: { kind: "world", plane: "XZ" },
+      },
     });
-    expect(buildAddSketch("id-1", "S", "custom").sketch.attachment.plane).toBe("XY");
+    const custom = buildAddSketch("id-1", "S", "custom").sketch;
+    expect(custom.attachment.plane).toBe("XY");
+    // Canonical (non-standard) XY basis — must match Rust SketchPlane::xy().
+    expect(custom.plane).toEqual({
+      origin: [0, 0, 0],
+      xAxis: [0, 1, 0],
+      yAxis: [-1, 0, 0],
+      normal: [0, 0, 1],
+    });
   });
 
   it("reverse-maps worker-wire entities to the frontend inlined form; [] for empty", () => {
@@ -139,6 +157,15 @@ describe("buildAddSketch / frontendEntitiesFromDto / isDimensional", () => {
     expect(isDimensional("Distance")).toBe(true);
     expect(isDimensional("Horizontal")).toBe(false);
     expect(isDimensional("Coincident")).toBe(false);
+  });
+
+  it("builds a DeleteSketch EditCommand with a bare SketchId string on `sketch`", () => {
+    // Rust `EditCommand::DeleteSketch { sketch: SketchId }` — internally tagged
+    // `cmd`, camelCase; SketchId serde is transparent over a uuid → a bare string.
+    expect(buildDeleteSketch("11111111-2222-3333-4444-555555555555")).toEqual({
+      cmd: "deleteSketch",
+      sketch: "11111111-2222-3333-4444-555555555555",
+    });
   });
 });
 
@@ -167,6 +194,78 @@ describe("frontendSolvedPositions — re-key backend point UUIDs", () => {
     const map = createIdMap("sk", "XY");
     expect(frontendSolvedPositions(map, null)).toEqual({});
     expect(frontendSolvedPositions(map, undefined)).toEqual({});
+  });
+});
+
+// ── Re-entry hydration: seed the id-map from the enter_sketch wire ────────────
+
+describe("seedIdMapFromWire — hydrate the id-map on re-entry", () => {
+  // The worker-wire shape `enter_sketch` returns (Point + p0Ref/p1Ref line, inlined
+  // circle center); wire ids ARE the authoritative backend ids (mapped 1:1).
+  const wireEntities = [
+    { id: "p1", type: "Point", at: [0, 0] },
+    { id: "p2", type: "Point", at: [40, 0] },
+    { id: "l1", type: "Line", p0Ref: "p1", p1Ref: "p2" },
+    { id: "cc", type: "Circle", center: [10, 10], radius: 3 },
+  ];
+  const wireConstraints = [
+    { id: "k1", type: "Coincident", entities: ["p1", "p2"] },
+    { id: "k2", type: "Radius", entities: ["cc"], value: 3 },
+  ];
+
+  it("maps entity/point/constraint ids 1:1 mirroring addEntityOps' key scheme", () => {
+    const map = createIdMap("sk-backend", "XY");
+    seedIdMapFromWire(map, wireEntities, wireConstraints);
+    // Entities map to themselves (the wire id IS the backend id).
+    expect(map.entity.get("l1")).toBe("l1");
+    expect(map.entity.get("cc")).toBe("cc");
+    expect(map.entity.get("p1")).toBe("p1");
+    // Line endpoints resolve to the backend point ids (p0Ref/p1Ref).
+    expect(map.point.get("l1.Start")).toBe("p1");
+    expect(map.point.get("l1.End")).toBe("p2");
+    // A Point entity keys under BOTH Start + Center → its own id (addEntityOps).
+    expect(map.point.get("p1.Start")).toBe("p1");
+    expect(map.point.get("p1.Center")).toBe("p1");
+    // Constraints map 1:1 + their value primes the SetDimension cache.
+    expect(map.constraint.get("k1")).toBe("k1");
+    expect(map.constraint.get("k2")).toBe("k2");
+    expect(map.constraintValue.get("k2")).toBe(3);
+  });
+
+  it("makes a re-marshal of the SAME hydrated arrays emit ZERO ops", () => {
+    const map = createIdMap("sk-backend", "XY");
+    seedIdMapFromWire(map, wireEntities, wireConstraints);
+    const entities = frontendEntitiesFromDto(wireEntities);
+    const constraints = frontendConstraintsFromDto(wireConstraints);
+    expect(marshalUpsert(map, { entities, constraints }, mint)).toEqual([]);
+  });
+
+  it("marshals ONLY a newly-added entity after seeding (hydrated geometry untouched)", () => {
+    const map = createIdMap("sk", "XY");
+    seedIdMapFromWire(map, wireEntities, []);
+    const entities = [...frontendEntitiesFromDto(wireEntities), circle("e9", [5, 5], 2)];
+    const ops = marshalUpsert(map, { entities, constraints: [] }, mint);
+    // Only e9's synthesized center point + the circle — nothing for p1/p2/l1/cc.
+    expect(ops).toEqual([
+      { op: "addEntity", entity: { kind: "point", id: "uuid-1", at: [5, 5] } },
+      { op: "addEntity", entity: { kind: "circle", id: "uuid-2", center: "uuid-1", radius: 2 } },
+    ]);
+  });
+
+  it("seeds point-ref keys so a gesture-style lookup finds the backend point id", () => {
+    const map = createIdMap("sk", "XY");
+    seedIdMapFromWire(map, wireEntities, []);
+    // beginGesture resolves "l1.Start" → the backend point uuid (mirrors tauriClient).
+    const dragPoint = map.point.get("l1.Start") ?? map.entity.get("l1.Start") ?? "l1.Start";
+    expect(dragPoint).toBe("p1");
+  });
+
+  it("is a no-op for a fresh sketch (empty wire) and tolerates non-arrays", () => {
+    const map = createIdMap("sk", "XY");
+    seedIdMapFromWire(map, [], []);
+    seedIdMapFromWire(map, null, undefined);
+    expect(map.entity.size).toBe(0);
+    expect(map.constraint.size).toBe(0);
   });
 });
 

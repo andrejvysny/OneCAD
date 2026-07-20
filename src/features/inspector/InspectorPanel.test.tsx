@@ -25,7 +25,7 @@ describe("InspectorPanel", () => {
   it("shows the SELECTION state for the default sketch selection", () => {
     render(<InspectorPanel />);
     expect(screen.getByText("Sketch 2")).toBeInTheDocument();
-    expect(screen.getByText("Sketch · 2 profiles")).toBeInTheDocument();
+    expect(screen.getByText("Sketch")).toBeInTheDocument();
     expect(screen.getByText("Under-constrained · DOF 3")).toBeInTheDocument();
     expect(screen.getByText("History")).toBeInTheDocument();
     expect(screen.getByText("83.3 mm")).toBeInTheDocument();
@@ -36,7 +36,7 @@ describe("InspectorPanel", () => {
     act(() => selectionStore.getState().set([{ kind: "body", id: "body1" }]));
 
     expect(screen.getByText("Body 1")).toBeInTheDocument();
-    expect(screen.getByText("Solid body · 6 faces")).toBeInTheDocument();
+    expect(screen.getByText("Solid body")).toBeInTheDocument();
     expect(screen.getByText("Sketch 1")).toBeInTheDocument();
     expect(screen.getByText("Fillet")).toBeInTheDocument();
     expect(screen.getByText("2.0 mm")).toBeInTheDocument();
@@ -53,7 +53,7 @@ describe("InspectorPanel", () => {
   it("shows the SKETCH state (DOF card + live constraints) in sketch mode", () => {
     render(<InspectorPanel />);
     act(() => {
-      toolStore.getState().setMode("sketch");
+      toolStore.getState().setMode("sketch", "sketch2");
       // Live sketch session drives the CONSTRAINTS panel (no hardcoded demo data).
       sketchStore.getState().setSession(
         sessionWithConstraints([
@@ -81,7 +81,7 @@ describe("InspectorPanel", () => {
   it("shows the empty-constraints hint when the sketch has none", () => {
     render(<InspectorPanel />);
     act(() => {
-      toolStore.getState().setMode("sketch");
+      toolStore.getState().setMode("sketch", "sketch2");
       sketchStore.getState().setSession(sessionWithConstraints([]));
     });
     expect(screen.getByText("No constraints yet.")).toBeInTheDocument();

@@ -16,11 +16,13 @@
 import type { CadClient } from "@/ipc/client";
 import type { EnterSketchTarget, SketchConstraint, SketchEntity, SketchSession } from "@/ipc/types";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
+import type { PickablePlane } from "@/viewport/engine/PlanePicker";
 import type { Point2 } from "@/viewport/engine/sketchBasis";
 import { chooseGridStep } from "@/viewport/engine/GridPlane";
 import { toolStore } from "@/stores/toolStore";
 import { viewportStore, type Projection } from "@/stores/viewportStore";
-import { documentStore, docSketchStatus } from "@/stores/documentStore";
+import { documentStore, docSketchStatus, nextSketchName } from "@/stores/documentStore";
+import { selectionStore } from "@/stores/selectionStore";
 import { settingsStore } from "@/stores/settingsStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { toolChipStore } from "@/stores/toolChipStore";
@@ -64,6 +66,9 @@ export class SketchController {
   private dimState: DimState = dimensionInit();
   private priorProjection: Projection | null = null;
   private entering = false;
+  // Plane-pick phase: bare sketch entry shows the plane picker; a click on a
+  // quad creates the sketch on that plane and opens the normal session.
+  private planePicking = false;
 
   private downX = 0;
   private downY = 0;
@@ -113,31 +118,115 @@ export class SketchController {
       // activeSketchId; yield one microtask so we read the real target.
       await Promise.resolve();
       if (toolStore.getState().mode !== "sketch") return;
-      const activeId = viewportStore.getState().activeSketchId ?? "sketch";
-      const target: EnterSketchTarget = activeId;
-      let session: SketchSession;
-      try {
-        session = await this.deps.client.enterSketch(target);
-      } catch (e) {
-        viewportStore.getState().setStatusHint(`Enter sketch failed: ${sketchErr(e)}`);
+      const activeId = viewportStore.getState().activeSketchId;
+      // No target ⇒ bare "new sketch" intent: pick a plane first.
+      if (!activeId) {
+        this.beginPlanePick();
         return;
       }
-      if (toolStore.getState().mode !== "sketch") return; // exited during await
+      const opened = await this.openSession(activeId);
+      if (!opened && toolStore.getState().mode === "sketch") {
+        // Existing-sketch entry failed: fall back to model mode instead of
+        // stranding sketch chrome with no session. exit() clears the status
+        // hint, so re-set the failure message after the mode flip.
+        const hint = viewportStore.getState().statusHint;
+        toolStore.getState().setMode("model");
+        viewportStore.getState().setStatusHint(hint);
+      }
+    } finally {
+      this.entering = false;
+    }
+  }
 
-      sketchStore.getState().setSession(session);
-      this.pushSolve(session.sketchId, session.dof, session.status);
+  /** Enter the client session for `target` and wire it into the stores + engine.
+   *  Returns false when the client rejected (session not opened). */
+  private async openSession(target: EnterSketchTarget): Promise<boolean> {
+    let session: SketchSession;
+    try {
+      session = await this.deps.client.enterSketch(target);
+    } catch (e) {
+      console.error("[sketch] enterSketch failed", target, e);
+      viewportStore.getState().setStatusHint(`Enter sketch failed: ${sketchErr(e)}`);
+      return false;
+    }
+    if (toolStore.getState().mode !== "sketch") {
+      // The user Esc'd / left model-side during the deferred enter: the backend
+      // session is live but there is no UI to drive it. Cancel it, and — for a
+      // FRESH create (plane pick, target is not an existing id) — also delete the
+      // empty sketch it just minted so it doesn't orphan in the tree. (Creations
+      // are serialized by the controller's `entering` flag, so this fires once.)
+      void this.deps.client.cancelSketch(session.sketchId);
+      if (typeof target !== "string") {
+        void this.deps.client
+          .deleteSketch(session.sketchId)
+          .catch((e) => console.error("[sketch] orphan cleanup failed", e));
+      }
+      return true; // the session opened; the user just left
+    }
 
-      this.priorProjection = viewportStore.getState().projection;
-      this.deps.engine.enterSketch(session.plane, session.entities, session.status);
-      viewportStore.getState().setProjection("ortho");
+    // A freshly created sketch (plane pick) isn't in the tree yet — register it,
+    // then make it the active + selected sketch so the chrome + inspector bind.
+    viewportStore.getState().setActiveSketch(session.sketchId);
+    const sketches = documentStore.getState().sketches;
+    if (!sketches[session.sketchId]) {
+      documentStore.getState().addSketch({
+        id: session.sketchId,
+        name: nextSketchName(sketches),
+        visible: true,
+        dof: session.dof,
+        status: docSketchStatus(session.status),
+      });
+    }
+    selectionStore.getState().set([{ kind: "sketch", id: session.sketchId }]);
 
-      this.selectMachine(toolStore.getState().sketchTool);
+    sketchStore.getState().setSession(session);
+    this.pushSolve(session.sketchId, session.dof, session.status);
+
+    this.priorProjection = viewportStore.getState().projection;
+    this.deps.engine.enterSketch(session.plane, session.entities, session.status);
+    viewportStore.getState().setProjection("ortho");
+
+    this.selectMachine(toolStore.getState().sketchTool);
+    return true;
+  }
+
+  /** Show the plane picker and prompt; a quad click resolves via confirmPlanePick. */
+  private beginPlanePick(): void {
+    this.planePicking = true;
+    this.deps.engine.setPlanePickerVisible(true);
+    viewportStore.getState().setStatusHint("Select a plane to start the sketch — Esc to cancel");
+  }
+
+  /** Reverse beginPlanePick (idempotent): hide the picker + clear its hint. */
+  private endPlanePick(): void {
+    if (!this.planePicking) return;
+    this.planePicking = false;
+    this.deps.engine.setPlanePickerVisible(false);
+    viewportStore.getState().setStatusHint(null);
+  }
+
+  /** A plane was clicked: leave pick mode and open a fresh sketch on it. On a
+   *  client failure the picker comes back (with the error in the status bar) so
+   *  the user can retry or Esc out — never stranded in pick chrome w/o quads. */
+  private async confirmPlanePick(kind: PickablePlane): Promise<void> {
+    if (this.entering) return; // a double-click must not create two sketches
+    this.entering = true;
+    try {
+      this.endPlanePick();
+      const opened = await this.openSession({ newOnPlane: kind });
+      if (!opened && toolStore.getState().mode === "sketch") {
+        // Re-show the quads but keep the failure hint visible (don't overwrite
+        // the statusHint openSession just set).
+        this.planePicking = true;
+        this.deps.engine.setPlanePickerVisible(true);
+      }
     } finally {
       this.entering = false;
     }
   }
 
   private exit(): void {
+    this.endPlanePick();
     this.machine = null;
     this.machineState = null;
     this.lastSnap = null;
@@ -159,6 +248,7 @@ export class SketchController {
   }
 
   private selectMachine(tool: string): void {
+    if (this.planePicking) return; // no drawing tool while picking a plane
     // Leaving the dimension tool tears down any in-flight chip/pick.
     if (this.dimensionActive && tool !== "dimension") this.cancelDimension();
 
@@ -204,6 +294,11 @@ export class SketchController {
   }
 
   private onPointerMove = (e: PointerEvent): void => {
+    // Plane-pick phase owns the pointer: highlight the plane under the cursor.
+    if (this.planePicking) {
+      this.deps.engine.planePickerHover(e.clientX, e.clientY);
+      return;
+    }
     if (!this.machine && !this.dimensionActive) return;
     this.pendingMove = e;
     if (e.buttons !== 0 && this.downButton === 0) this.moved = true;
@@ -244,6 +339,11 @@ export class SketchController {
       Math.abs(e.clientY - this.downY) <= DRAG_PX;
     this.downButton = -1;
     if (!wasClick) return;
+    if (this.planePicking) {
+      const kind = this.deps.engine.planePickerHitTest(e.clientX, e.clientY);
+      if (kind) void this.confirmPlanePick(kind);
+      return;
+    }
     if (this.dimensionActive) {
       this.handleDimensionClick(e.clientX, e.clientY);
       return;
@@ -385,6 +485,13 @@ export class SketchController {
   // ── keyboard (Alt suppress + Esc ends chain) ──────────────────────────────
 
   private onKeyDown = (e: KeyboardEvent): void => {
+    if (e.key === "Escape" && this.planePicking) {
+      // Cancel plane pick → back to model mode (exit() hides the picker).
+      toolStore.getState().setMode("model");
+      e.stopPropagation();
+      e.preventDefault();
+      return;
+    }
     if (e.key === "Alt") this.altHeld = true;
     if (e.key === "Escape" && this.dimensionActive && (this.dimState.ready || this.dimState.pending)) {
       // Cancel the in-flight dimension here; don't let the global Esc ladder run.
@@ -410,6 +517,7 @@ export class SketchController {
   };
 
   dispose(): void {
+    this.endPlanePick();
     const c = this.deps.container;
     c.removeEventListener("pointerdown", this.onPointerDown);
     c.removeEventListener("pointermove", this.onPointerMove);

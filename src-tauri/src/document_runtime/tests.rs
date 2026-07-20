@@ -724,6 +724,57 @@ fn point_at(rt: &DocumentRuntime, sid: SketchId, p: EntityId) -> [f64; 2] {
     }
 }
 
+#[test]
+fn get_sketch_reads_geometry_without_a_worker_call() {
+    // Sync fn, no `.await` — the signature itself proves get_sketch cannot reach
+    // the solver (SolverEngine's methods are all async). Never entered/upserted ⇒
+    // the "not yet solved" default (dof:0/UnderConstrained), mirroring the
+    // SketchSolveStatus::parse fallback.
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sk, _point) = sketch_with_point();
+    let sid = sk.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap();
+
+    let session = rt.get_sketch(sid).unwrap();
+    assert_eq!(session.sketch_id, sid.to_string());
+    assert!(
+        matches!(session.entities, serde_json::Value::Array(ref a) if !a.is_empty()),
+        "entities carry the added point"
+    );
+    assert_eq!(session.dof, 0);
+    assert_eq!(session.status, SketchSolveStatus::UnderConstrained);
+}
+
+#[tokio::test]
+async fn get_sketch_reflects_the_last_solver_lane_solve() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sk, _point) = sketch_with_point();
+    let sid = sk.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap();
+
+    // Enter runs a real solve and caches dof/status (FakeBackend's SolverEngine
+    // reports FullyConstrained ⇒ dof 0 — see the `enter_sketch` test above).
+    rt.enter_sketch(sid).await.unwrap();
+
+    let session = rt.get_sketch(sid).unwrap();
+    assert_eq!(session.dof, 0);
+    assert_eq!(session.status, SketchSolveStatus::FullyConstrained);
+}
+
+#[test]
+fn get_sketch_unknown_id_is_a_recoverable_error() {
+    let rt = runtime_with(Arc::new(FakeBackend::new()));
+    let err = rt
+        .get_sketch(SketchId(Uuid::from_u128(0xDEAD)))
+        .unwrap_err();
+    match err {
+        EngineError::OpFailed { message, .. } => {
+            assert!(message.contains("getSketch"), "{message}");
+        }
+        other => panic!("expected OpFailed, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn sketch_gesture_commits_exactly_one_undo_command() {
     let mut rt = runtime_with(Arc::new(FakeBackend::new()));

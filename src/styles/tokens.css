@@ -35,6 +35,16 @@
   /* Start-screen desktop behind the card (prototype 1a, line 40). */
   --color-canvas-start: #eceef1;
 
+  /* ---- Origin axis triad (viewport, always-visible XYZ at the origin) ---- */
+  --color-axis-x: #c45c5c;
+  --color-axis-y: #5ca05c;
+  --color-axis-z: #5078be;
+
+  /* ---- Sketch plane picker ---- */
+  --color-plane-xy: #5078be;
+  --color-plane-xz: #d9863c;
+  --color-plane-yz: #5ca05c;
+
   /* ---- Chrome surfaces ---- */
   --color-panel: #fafafb;
   --color-statusbar: #fbfbfc;

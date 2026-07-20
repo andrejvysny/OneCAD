@@ -7,7 +7,7 @@
  * without a real Tauri runtime. The 278 mock-driven tests default to the mock
  * because they never install the IPC bridge.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
 import { createTauriClient, __setRegenTimeoutForTests, __lastSketchSolvedForTests } from "./tauriClient";
@@ -297,6 +297,258 @@ describe("tauriClient enter_sketch constraints", () => {
       { id: "cc", type: "Coincident", entities: ["p1", "p2"] },
       { id: "cd", type: "Distance", entities: ["p1", "p2"], value: 90 },
     ]);
+  });
+});
+
+// ── get_sketch: pure read for the always-visible sketch layer ─────────────────
+
+describe("tauriClient getSketch (pure read)", () => {
+  it("invokes get_sketch with { sketchId }, maps the DTO, and opens NO session", async () => {
+    const seen: string[] = [];
+    let args: unknown;
+    mockIPC((cmd, payload) => {
+      seen.push(cmd);
+      if (cmd === "get_sketch") {
+        args = payload;
+        return {
+          sketchId: (payload as { sketchId: string }).sketchId,
+          plane: XZ_PLANE,
+          entities: [
+            { id: "p1", type: "Point", at: [0, 0] },
+            { id: "p2", type: "Point", at: [40, 0] },
+            { id: "l1", type: "Line", p0Ref: "p1", p1Ref: "p2" },
+          ],
+          constraints: [{ id: "co", type: "Coincident", entities: ["p1", "p2"] }],
+          dof: 2,
+          status: "UnderConstrained",
+        };
+      }
+    });
+    const session = await createTauriClient().getSketch("sketch2");
+
+    expect(args).toEqual({ sketchId: "sketch2" });
+    expect(session.plane.kind).toBe("XZ");
+    expect(session.entities.map((e) => e.id).sort()).toEqual(["l1", "p1", "p2"]);
+    expect(session.constraints).toEqual([{ id: "co", type: "Coincident", entities: ["p1", "p2"] }]);
+    // Pure read: no AddSketch (apply_edit_command) and no enter_sketch fired.
+    expect(seen).toContain("get_sketch");
+    expect(seen).not.toContain("apply_edit_command");
+    expect(seen).not.toContain("enter_sketch");
+  });
+
+  it("surfaces a rejected get_sketch as an Error with the ApiError kind", async () => {
+    mockIPC((cmd) => (cmd === "get_sketch" ? Promise.reject({ kind: "notFound", message: "no sketch" }) : undefined));
+    await expect(createTauriClient().getSketch("ghost")).rejects.toThrow(/notFound: no sketch/);
+  });
+});
+
+// ── Re-entry after reopen: enter a PERSISTED sketch without duplicating it ────
+
+describe("tauriClient enter persisted sketch (re-entry hydration)", () => {
+  it("enters a persisted document sketch WITHOUT AddSketch and seeds the id-map", async () => {
+    const seen: string[] = [];
+    let enterSketchId: string | undefined;
+    let upsertOps: unknown[] | undefined;
+    mockIPC(
+      (cmd, payload) => {
+        seen.push(cmd);
+        if (cmd === "apply_edit_command") return readyProjection(1);
+        if (cmd === "enter_sketch") {
+          enterSketchId = (payload as { sketchId: string }).sketchId;
+          return {
+            sketchId: enterSketchId,
+            plane: XZ_PLANE,
+            // Real stored geometry (a line + its two backing points) + a constraint.
+            entities: [
+              { id: "p1", type: "Point", at: [0, 0] },
+              { id: "p2", type: "Point", at: [40, 0] },
+              { id: "l1", type: "Line", p0Ref: "p1", p1Ref: "p2" },
+            ],
+            constraints: [{ id: "co", type: "Coincident", entities: ["p1", "p2"] }],
+            dof: 2,
+            status: "UnderConstrained",
+          };
+        }
+        if (cmd === "sketch_upsert") {
+          upsertOps = (payload as { ops: unknown[] }).ops;
+          return {
+            sketchId: (payload as { sketchId: string }).sketchId,
+            sketchRevision: 2,
+            dof: 2,
+            status: "UnderConstrained",
+            solvedPositions: {},
+          };
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    // "sketch2" is a persisted document sketch (seedMockDocument) with no in-memory map.
+    const client = createTauriClient();
+    const session = await client.enterSketch("sketch2");
+
+    // The persisted id IS the backend SketchId — enter_sketch targets it directly…
+    expect(enterSketchId).toBe("sketch2");
+    // …and NO AddSketch fired (no duplicate empty sketch created).
+    expect(seen).not.toContain("apply_edit_command");
+    expect(seen).toContain("enter_sketch");
+    // Real geometry hydrated (not an empty duplicate).
+    expect([...session.entities.map((e) => e.id)].sort()).toEqual(["l1", "p1", "p2"]);
+    expect(session.constraints).toEqual([{ id: "co", type: "Coincident", entities: ["p1", "p2"] }]);
+
+    // A re-upsert of the SAME hydrated entities marshals to ZERO ops (id-map seeded).
+    await client.sketchUpsert("sketch2", session.entities, session.constraints);
+    expect(upsertOps).toEqual([]);
+  });
+});
+
+// ── enter_sketch({newOnPlane}) w/o sketchId: minted id IS the backend SketchId ─
+
+describe("tauriClient enter_sketch minted id (no explicit sketchId)", () => {
+  it("adopts the minted frontend id as the backend SketchId, so AddSketch, enter_sketch and the returned session.sketchId all agree", async () => {
+    let addSketchId: string | undefined;
+    let enterSketchId: string | undefined;
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "apply_edit_command") {
+          const command = (payload as { command: { sketch: { id: string } } }).command;
+          addSketchId = command.sketch.id;
+          return readyProjection(1);
+        }
+        if (cmd === "enter_sketch") {
+          enterSketchId = (payload as { sketchId: string }).sketchId;
+          return { sketchId: enterSketchId, plane: XZ_PLANE, entities: [], constraints: [], dof: 0, status: "FullyConstrained" };
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const session = await createTauriClient().enterSketch({ newOnPlane: "XZ" });
+
+    // Both wire calls carried the SAME minted id — a real UUID, not "sk-N".
+    expect(addSketchId).toBeDefined();
+    expect(addSketchId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+    expect(enterSketchId).toBe(addSketchId);
+    // …and the session id returned to the caller matches too (projection-store key).
+    expect(session.sketchId).toBe(addSketchId);
+  });
+
+  it("explicit sketchId (newOnPlane w/ sketchId) still mints a SEPARATE backend UUID (unchanged)", async () => {
+    let addSketchId: string | undefined;
+    let enterSketchId: string | undefined;
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "apply_edit_command") {
+          const command = (payload as { command: { sketch: { id: string } } }).command;
+          addSketchId = command.sketch.id;
+          return readyProjection(1);
+        }
+        if (cmd === "enter_sketch") {
+          enterSketchId = (payload as { sketchId: string }).sketchId;
+          return { sketchId: enterSketchId, plane: XZ_PLANE, entities: [], constraints: [], dof: 0, status: "FullyConstrained" };
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const session = await createTauriClient().enterSketch({ newOnPlane: "XZ", sketchId: "sk" });
+
+    expect(addSketchId).toBeDefined();
+    expect(addSketchId).not.toBe("sk"); // backend id is a minted UUID, distinct from the frontend id
+    expect(enterSketchId).toBe(addSketchId);
+    expect(session.sketchId).toBe("sk"); // frontend id kept as the session id, as before
+  });
+});
+
+// ── enter_sketch failure → AWAITED DeleteSketch compensation (orphan cleanup) ─
+
+interface WireCmd {
+  cmd: string;
+  sketch?: string | { id: string; name: string };
+}
+
+describe("tauriClient enterSketch orphan cleanup (DeleteSketch compensation)", () => {
+  it("deletes the just-created sketch when enter_sketch rejects, cleans the map, and rethrows the ORIGINAL error", async () => {
+    const commands: WireCmd[] = [];
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "apply_edit_command") {
+          commands.push((payload as { command: WireCmd }).command);
+          return readyProjection(1);
+        }
+        if (cmd === "enter_sketch") return Promise.reject({ kind: "workerDown", message: "no worker" });
+      },
+      { shouldMockEvents: true },
+    );
+    const client = createTauriClient();
+
+    // First attempt: AddSketch commits, enter_sketch rejects → DeleteSketch fires.
+    await expect(client.enterSketch({ newOnPlane: "XZ", sketchId: "sk" })).rejects.toThrow(/workerDown: no worker/);
+    expect(commands.map((c) => c.cmd)).toEqual(["addSketch", "deleteSketch"]);
+    const add1 = commands[0].sketch as { id: string };
+    // The DeleteSketch targets the SAME backend SketchId AddSketch minted.
+    expect(commands[1].sketch).toBe(add1.id);
+
+    // Retry: the map was cleaned, so a fresh AddSketch fires with a DISTINCT id
+    // (had the map leaked, ensureBackendSketch would reuse it and skip AddSketch).
+    await expect(client.enterSketch({ newOnPlane: "XZ", sketchId: "sk" })).rejects.toThrow(/workerDown/);
+    expect(commands.map((c) => c.cmd)).toEqual(["addSketch", "deleteSketch", "addSketch", "deleteSketch"]);
+    const add2 = commands[2].sketch as { id: string };
+    expect(add2.id).not.toBe(add1.id);
+  });
+
+  it("suffixes the error when the DeleteSketch compensation ALSO rejects", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "apply_edit_command") {
+          const command = (payload as { command: WireCmd }).command;
+          if (command.cmd === "deleteSketch") return Promise.reject({ kind: "opFailed", message: "delete boom" });
+          return readyProjection(1);
+        }
+        if (cmd === "enter_sketch") return Promise.reject({ kind: "workerDown", message: "no worker" });
+      },
+      { shouldMockEvents: true },
+    );
+    await expect(createTauriClient().enterSketch({ newOnPlane: "XZ" })).rejects.toThrow(
+      /workerDown: no worker \(cleanup failed — empty sketch left in tree\)$/,
+    );
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+});
+
+// ── Unique sketch names via nextSketchName (single source: the projection store) ─
+
+describe("tauriClient fresh-sketch naming", () => {
+  it("names a new plane-picked sketch via nextSketchName off the live store (Sketch 1 → Sketch 2)", async () => {
+    documentStore.getState().applySnapshot({
+      status: "ready",
+      revision: 1,
+      title: "D",
+      dirty: false,
+      bodies: {},
+      sketches: { s1: { id: "s1", name: "Sketch 1", visible: true, dof: 0, status: "ok" } },
+      features: [],
+    });
+    let addName: string | undefined;
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "apply_edit_command") {
+          addName = (payload as { command: { sketch: { name: string } } }).command.sketch.name;
+          return readyProjection(1);
+        }
+        if (cmd === "enter_sketch")
+          return {
+            sketchId: (payload as { sketchId: string }).sketchId,
+            plane: XZ_PLANE,
+            entities: [],
+            constraints: [],
+            dof: 0,
+            status: "FullyConstrained",
+          };
+      },
+      { shouldMockEvents: true },
+    );
+    await createTauriClient().enterSketch({ newOnPlane: "XZ" });
+    expect(addName).toBe("Sketch 2");
   });
 });
 
@@ -811,6 +1063,47 @@ describe("tauriClient projection hydration", () => {
     expect(documentStore.getState().title).toBe("Opened");
 
     unsub();
+  });
+});
+
+// ── getProjection (one-shot authoritative pull; missed-event race recovery) ───
+
+describe("tauriClient getProjection", () => {
+  it("invokes get_projection and hydrates documentStore through applyProjectionToStore", async () => {
+    documentStore.getState().applySnapshot({ ...seedMockDocument(), revision: 2 });
+    const seen: string[] = [];
+    mockIPC((cmd) => {
+      seen.push(cmd);
+      if (cmd === "get_projection") {
+        return {
+          status: "ready",
+          revision: 6,
+          title: "Recovered",
+          dirty: false,
+          bodies: { b1: { id: "b1", name: "B1", visible: true } },
+          sketches: {},
+          features: [],
+        };
+      }
+    });
+    const client = createTauriClient();
+    const p = await client.getProjection();
+    expect(seen).toContain("get_projection");
+    expect(p.revision).toBe(6);
+    expect(documentStore.getState().revision).toBe(6);
+    expect(documentStore.getState().title).toBe("Recovered");
+    expect(documentStore.getState().bodies.b1?.name).toBe("B1");
+  });
+
+  it("drops a stale (lower-revision) projection without clobbering newer state", async () => {
+    documentStore.getState().applySnapshot({ ...seedMockDocument(), revision: 9 });
+    mockIPC((cmd) =>
+      cmd === "get_projection"
+        ? { status: "ready", revision: 3, title: "STALE", dirty: false, bodies: {}, sketches: {}, features: [] }
+        : undefined,
+    );
+    await createTauriClient().getProjection();
+    expect(documentStore.getState().revision).toBe(9);
   });
 });
 

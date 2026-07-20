@@ -133,8 +133,26 @@ export interface CadClient {
   /** Compute the closed profile regions for a sketch (extrude/revolve input). */
   finishSketch(sketchId: string): Promise<FinishSketchResult>;
 
+  /**
+   * Read a sketch's authoritative geometry WITHOUT opening an edit session — a
+   * pure read for the always-visible sketch layer (no session opened, no cleanup).
+   * Same wire shape as `enterSketch` (plane + entities + constraints + dof/status).
+   * An unknown sketch id rejects.
+   */
+  getSketch(sketchId: string): Promise<SketchSession>;
+
   /** Discard the in-flight sketch edit session (no geometry change). */
   cancelSketch(sketchId: string): Promise<void>;
+
+  /**
+   * Remove a sketch feature from the document (a `DeleteSketch` EditCommand).
+   * This is a COMPENSATION / cleanup verb, not part of normal editing: it undoes a
+   * just-committed AddSketch whose follow-up `enter_sketch` rejected (an orphaned
+   * empty sketch), or the fresh sketch a plane-pick created when the user cancelled
+   * during the deferred enter. The real client routes to `apply_edit_command`; the
+   * mock drops the store row + the local solver-lane session.
+   */
+  deleteSketch(sketchId: string): Promise<void>;
 
   // ── Sketch drag gesture (SCHEMA §7.4) ──────────────────────────────────────
   // A point drag: beginGesture → many solveDrag (latest-wins) → endGesture (ONE
@@ -241,6 +259,17 @@ export interface CadClient {
    * the mock is a no-op (it seeds + mutates its projection stores directly).
    */
   onProjectionUpdated(cb: (projection: DocumentProjectionWire) => void): Unsubscribe;
+
+  /**
+   * Pull the current authoritative projection directly (SCHEMA §7.2), instead of
+   * waiting for the next `projection-updated` event. Used once on viewport mount to
+   * recover bodies/sketches/features that were published BEFORE the listeners
+   * attached (open/new/recover populate the document before the viewport wires up).
+   * The real client hydrates `documentStore` as a side effect (revision-reconciled,
+   * same as the event path); the mock derives the same shape from its already-
+   * hydrated stores (a no-op read).
+   */
+  getProjection(): Promise<DocumentProjectionWire>;
 
   /** Undo the last committed op → new revision + changed/removed bodies + timeline. */
   undo(): Promise<ApplyOperationResult>;

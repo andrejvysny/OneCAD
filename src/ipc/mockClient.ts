@@ -17,6 +17,7 @@ import type {
   DocumentChange,
   DocumentProjectionWire,
   DocumentSnapshot,
+  EnterSketchTarget,
   FeatureRecord,
   Lod,
   NeedsRepairEvent,
@@ -28,6 +29,8 @@ import type {
   ResolveCandidate,
   ResolveRefRequest,
   ResolveRefResult,
+  SketchEntity,
+  SketchSession,
   Unsubscribe,
   WorkerStatus,
 } from "./types";
@@ -36,6 +39,8 @@ import { wireParamsOf } from "./tauriCommandMap";
 import { makeBoxMesh, makeCylinderMesh, makeExtrudeBodyMesh, makeRevolveBodyMesh } from "./mockMeshes";
 import type { LatheAxis } from "@/tools/preview/lathePreview";
 import { createLocalSolverLane } from "./localSolver";
+import { planeFor, solveDof } from "./mockSketch";
+import { documentStore } from "@/stores/documentStore";
 
 const LATENCY_MS = 120;
 const MESH_LATENCY_MS = 30;
@@ -552,6 +557,33 @@ async function mockApplyEditCommand(command: WireEditCommand): Promise<ApplyOper
 //    client uses). Commit routes into the local document model above. ──────────
 const lane = createLocalSolverLane({ commit: commitAndEmit, latencyMs: () => mockLatency });
 
+/** A deterministic 60×40 rectangle used to hydrate a re-entered document sketch,
+ *  so a reopened persisted sketch shows real geometry (parity with the real client
+ *  reading the backend's stored entities) instead of a silent empty session. */
+function seededSketchRectangle(): SketchEntity[] {
+  return [
+    { id: "e1", type: "Line", p0: [-30, -20], p1: [30, -20] },
+    { id: "e2", type: "Line", p0: [30, -20], p1: [30, 20] },
+    { id: "e3", type: "Line", p0: [30, 20], p1: [-30, 20] },
+    { id: "e4", type: "Line", p0: [-30, 20], p1: [-30, -20] },
+  ];
+}
+
+/**
+ * Enter a sketch, hydrating a persisted document sketch on first entry (re-entry
+ * parity with the real client). A string target that names a sketch in the
+ * projection store but has no live lane session gets a deterministic rectangle
+ * seeded before delegating. An unknown id (not in the document) is left untouched —
+ * it opens an empty session, exactly as before.
+ */
+async function enterSketchWithHydration(target: EnterSketchTarget): Promise<SketchSession> {
+  if (typeof target === "string" && documentStore.getState().sketches[target] && !lane.hasSession(target)) {
+    await lane.enterSketch(target);
+    await lane.sketchUpsert(target, seededSketchRectangle(), []);
+  }
+  return lane.enterSketch(target);
+}
+
 /** Test seam: forget all sketch state so a fresh sketch starts empty. */
 export function resetMockSketches(): void {
   lane.resetSketches();
@@ -654,6 +686,21 @@ export const mockClient: CadClient = {
     return () => {};
   },
 
+  // The mock's documentStore is already hydrated synchronously (no backend round
+  // trip), so a one-shot pull is just a snapshot of current state — no store writes.
+  async getProjection(): Promise<DocumentProjectionWire> {
+    const s = documentStore.getState();
+    return {
+      status: s.status,
+      revision: s.revision,
+      title: s.title,
+      dirty: s.dirty,
+      bodies: { ...s.bodies },
+      sketches: { ...s.sketches },
+      features: s.features.map((f) => ({ ...f })),
+    };
+  },
+
   // Deterministic mock promotion (Invariant 1: same pick → same id).
   async promoteSelection(bodyId: string, picks: PromotePick[]): Promise<PromotedElement[]> {
     await wait(MESH_LATENCY_MS);
@@ -728,10 +775,31 @@ export const mockClient: CadClient = {
 
   // ── Sketch solver lane + two-level preview (shared local lane) ─────────────
 
-  enterSketch: lane.enterSketch,
+  enterSketch: enterSketchWithHydration,
   sketchUpsert: lane.sketchUpsert,
   finishSketch: lane.finishSketch,
+  // Pure read for the always-visible sketch layer (no session opened). A live lane
+  // session wins; else a persisted document sketch returns the deterministic seeded
+  // rectangle (parity with the real client reading stored entities); unknown → reject.
+  async getSketch(sketchId: string): Promise<SketchSession> {
+    await wait(MESH_LATENCY_MS);
+    const peeked = lane.peekSession(sketchId);
+    if (peeked) return peeked;
+    if (documentStore.getState().sketches[sketchId]) {
+      const entities = seededSketchRectangle();
+      const { dof, status } = solveDof(entities, []);
+      return { sketchId, plane: planeFor("XY"), entities, constraints: [], dof, status };
+    }
+    throw new Error(`getSketch: unknown sketch ${sketchId}`);
+  },
   cancelSketch: lane.cancelSketch,
+  // Compensation: drop the document row + the local lane session so a re-enter of
+  // the same id opens a fresh empty session (no longer a document sketch, so the
+  // hydration seed no longer fires).
+  async deleteSketch(id: string): Promise<void> {
+    documentStore.getState().removeSketch(id);
+    lane.dropSession(id);
+  },
   beginGesture: lane.beginGesture,
   solveDrag: lane.solveDrag,
   endGesture: lane.endGesture,

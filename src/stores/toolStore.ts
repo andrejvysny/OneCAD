@@ -9,6 +9,10 @@
  * the `S` shortcut, a tree double-click, and the sketch chrome bar all route
  * through it, so entering/exiting sketch mode stays consistent (activeSketchId
  * + default tool + selection all move together).
+ *
+ * Bare `setMode('sketch')` (no id) is the "start a new sketch" intent: it leaves
+ * activeSketchId null so the controller shows the plane picker; a tree/chrome
+ * re-edit passes an explicit id and targets that existing sketch directly.
  */
 import { createStore, useStore } from "zustand";
 import { viewportStore } from "./viewportStore";
@@ -49,9 +53,6 @@ export type InteractionPhase =
   | "previewing"
   | "committing";
 
-/** Default active sketch when entering sketch mode without a target. */
-const DEFAULT_SKETCH_ID = "sketch2";
-
 function phaseFor(tool: Tool): InteractionPhase {
   return tool === "select" ? "idle" : "armed";
 }
@@ -61,7 +62,8 @@ export interface ToolState {
   modelTool: ModelTool;
   sketchTool: SketchTool;
   phase: InteractionPhase;
-  /** Enter/exit a mode. Entering sketch targets `sketchId` (default Sketch 2). */
+  /** Enter/exit a mode. `sketchId` targets an existing sketch; omit it to start
+   *  a new sketch (activeSketchId stays null → the controller shows the plane picker). */
   setMode(mode: EditorMode, sketchId?: string): void;
   /** Set the active tool for the *current* mode. */
   setTool(tool: Tool): void;
@@ -75,11 +77,13 @@ export const toolStore = createStore<ToolState>()((set, get) => ({
 
   setMode(mode, sketchId) {
     if (mode === "sketch") {
-      const targetId = sketchId ?? viewportStore.getState().activeSketchId ?? DEFAULT_SKETCH_ID;
+      // No id ⇒ new-sketch intent: leave activeSketchId null so the controller
+      // shows the plane picker. An explicit id targets that existing sketch.
+      const targetId = sketchId ?? null;
       set({ mode: "sketch", sketchTool: "line", phase: "idle" });
       viewportStore.getState().setActiveSketch(targetId);
       // Selecting the sketch keeps tree + inspector coherent with the chrome bar.
-      if (documentStore.getState().sketches[targetId]) {
+      if (targetId && documentStore.getState().sketches[targetId]) {
         selectionStore.getState().set([{ kind: "sketch", id: targetId }]);
       }
     } else {

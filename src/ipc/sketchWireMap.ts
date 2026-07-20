@@ -36,6 +36,7 @@ import type {
   SketchEntity,
   SketchPlaneKind,
 } from "./types";
+import { planeFor } from "./mockSketch";
 
 /** The 18 constraint-type tokens the worker wire emits (== `SketchConstraintType`). */
 const CONSTRAINT_TYPES: ReadonlySet<string> = new Set<SketchConstraintType>([
@@ -402,25 +403,61 @@ export function marshalUpsert(
 // ── AddSketch payload (create the backend sketch before enter_sketch) ─────────
 
 /** The minimal Rust `Sketch` (SketchData serde) for a fresh world-plane sketch —
- *  `entities`/`constraints`/`regions` default to `[]`. */
+ *  `entities`/`constraints`/`regions` default to `[]`, but `plane` is REQUIRED
+ *  (Rust `SketchPlane`: origin/xAxis/yAxis/normal as `[x,y,z]` arrays, carried
+ *  verbatim — omitting it fails deserialization before the command handler runs). */
 export interface WireAddSketch {
   cmd: "addSketch";
   sketch: {
     id: string;
     name: string;
+    plane: {
+      origin: [number, number, number];
+      xAxis: [number, number, number];
+      yAxis: [number, number, number];
+      normal: [number, number, number];
+    };
     attachment: { kind: "world"; plane: "XY" | "XZ" | "YZ" };
   };
 }
 
 /** Build the `AddSketch` EditCommand for a new world-plane sketch. `custom` planes
- *  fall back to XY (host-face/datum attachment is an M2+ concern). */
+ *  fall back to XY (host-face/datum attachment is an M2+ concern). The plane basis
+ *  is the SCHEMA §7.3 canonical basis for the kind (same table Rust's
+ *  `SketchPlane::xy/xz/yz()` carry — `planeFor` mirrors it verbatim). */
 export function buildAddSketch(
   backendSketchId: string,
   name: string,
   planeKind: SketchPlaneKind,
 ): WireAddSketch {
   const plane = planeKind === "XZ" || planeKind === "YZ" ? planeKind : "XY";
-  return { cmd: "addSketch", sketch: { id: backendSketchId, name, attachment: { kind: "world", plane } } };
+  const { origin, xAxis, yAxis, normal } = planeFor(plane);
+  return {
+    cmd: "addSketch",
+    sketch: {
+      id: backendSketchId,
+      name,
+      plane: { origin, xAxis, yAxis, normal },
+      attachment: { kind: "world", plane },
+    },
+  };
+}
+
+// ── DeleteSketch payload (compensation: remove a sketch from the document) ────
+
+/** The `DeleteSketch` EditCommand wire shape (Rust `EditCommand::DeleteSketch`,
+ *  internally tagged `cmd`, camelCase). `sketch` is a BARE `SketchId` uuid string —
+ *  `SketchId` serde is `#[serde(transparent)]` over a `Uuid` (command.rs). */
+export interface WireDeleteSketch {
+  cmd: "deleteSketch";
+  sketch: string;
+}
+
+/** Build the `DeleteSketch` EditCommand for `sketchId` — the compensation/cleanup
+ *  verb that removes a sketch feature from the document (e.g. the empty sketch left
+ *  behind when `enter_sketch` rejects right after its AddSketch committed). */
+export function buildDeleteSketch(sketchId: string): WireDeleteSketch {
+  return { cmd: "deleteSketch", sketch: sketchId };
 }
 
 // ── Reverse map: SketchSessionDto (worker wire) → frontend SketchSession ──────
@@ -621,4 +658,81 @@ export function frontendConstraintsFromDto(dtoConstraints: unknown): SketchConst
     out.push(c);
   }
   return out;
+}
+
+// ── Re-entry hydration: seed the id-map from the enter_sketch wire ────────────
+//
+// After a reopen the in-memory id-map is empty, but `enter_sketch` returns the
+// sketch's REAL geometry. Without seeding, the next `marshalUpsert` would treat
+// every hydrated entity/constraint as new and re-emit it as an Add op (SCHEMA
+// §7.4) — duplicating the sketch. This seeds the map so a re-marshal of the same
+// hydrated arrays diffs to ZERO ops. The wire ids ARE the authoritative backend
+// ids, so everything maps 1:1 (unlike the frontend-authoring path, which mints).
+//
+// The inclusion tests MIRROR `frontendEntitiesFromDto`/`frontendConstraintsFromDto`
+// exactly: only entities/constraints that reverse-map into the frontend session
+// are seeded, so the seeded set == the live frontend set (else marshalUpsert would
+// spuriously Remove a seeded-but-absent id). Pure: no store access.
+
+/**
+ * Seed `map` from the worker-wire entities + constraints `enter_sketch` returns,
+ * mirroring `addEntityOps`' key/value conventions with the wire (backend) ids:
+ *   - every entity id → itself (`map.entity`, 1:1);
+ *   - Point   → `${id}.Start` + `${id}.Center` → its own id (points key under both);
+ *   - Line    → `${id}.Start`/`${id}.End` → the `p0Ref`/`p1Ref` backend point ids;
+ *   - Circle/Arc → the wire inlines the center as COORDS (no center point id), so
+ *     `${id}.Center` cannot be keyed to a backend point uuid here; the center Point
+ *     is emitted separately in the entities list and seeded via its own id (a
+ *     re-entry circle/arc center is not directly draggable until the wire carries
+ *     the center ref — documented seam);
+ *   - every constraint id → itself (`map.constraint`) + its value into the
+ *     `constraintValue` cache, so an in-place `SetDimension` diff is a no-op.
+ * Idempotent (re-seeding the same wire is harmless) and a no-op for a fresh sketch
+ * (empty entities/constraints).
+ */
+export function seedIdMapFromWire(
+  map: SketchIdMap,
+  dtoEntities: unknown,
+  dtoConstraints: unknown,
+): void {
+  if (Array.isArray(dtoEntities)) {
+    const wire = dtoEntities as WireDtoEntity[];
+    // Point ids that carry a position back a resolvable line endpoint (matches
+    // `frontendEntitiesFromDto`'s `pointAt` gate so the seeded set stays aligned).
+    const hasPoint = new Set<string>();
+    for (const e of wire) if (e && e.type === "Point" && e.at) hasPoint.add(e.id);
+
+    for (const e of wire) {
+      if (!e || typeof e.id !== "string") continue;
+      switch (e.type) {
+        case "Point":
+          if (!e.at) continue;
+          map.entity.set(e.id, e.id);
+          map.point.set(pointKey(e.id, "Start"), e.id);
+          map.point.set(pointKey(e.id, "Center"), e.id);
+          break;
+        case "Line":
+          if (!e.p0Ref || !e.p1Ref || !hasPoint.has(e.p0Ref) || !hasPoint.has(e.p1Ref)) continue;
+          map.entity.set(e.id, e.id);
+          map.point.set(pointKey(e.id, "Start"), e.p0Ref);
+          map.point.set(pointKey(e.id, "End"), e.p1Ref);
+          break;
+        case "Circle":
+        case "Arc":
+          if (!e.center || e.radius === undefined) continue;
+          map.entity.set(e.id, e.id);
+          // No center point id on the wire (inlined coords) → `.Center` unseeded.
+          break;
+      }
+    }
+  }
+
+  if (Array.isArray(dtoConstraints)) {
+    for (const raw of dtoConstraints as WireDtoConstraint[]) {
+      if (!raw || typeof raw.id !== "string") continue;
+      if (!CONSTRAINT_TYPES.has(raw.type) || !Array.isArray(raw.entities)) continue;
+      map.constraint.set(raw.id, raw.id);
+      map.constraintValue.set(raw.id, typeof raw.value === "number" ? raw.value : undefined);
+    }
+  }
 }

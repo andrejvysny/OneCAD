@@ -64,16 +64,25 @@ sidecar next to the main `onecad` executable:
 
 ### How the app finds the worker
 
-`src-tauri/src/worker/mod.rs::resolve_worker_path` walks a fixed precedence chain
-so the same binary works in dev and packaged environments:
+`src-tauri/src/worker/mod.rs::resolve_worker_path` walks a build-mode-aware
+precedence chain so the same binary works in dev and packaged environments:
 
 1. `ONECAD_WORKER_PATH` env override — if it names an existing file (tests, CI);
-2. `<exe_dir>/onecad-worker` (`.exe` on Windows) — the bundled sidecar location;
-3. `../worker/build/onecad-worker` — the dev-tree fallback (relative to `src-tauri/`).
+   wins in both build modes;
+2. **release builds**: `<exe_dir>/onecad-worker` (`.exe` on Windows) — the
+   bundled sidecar location — then `../worker/build/onecad-worker` (dev-tree
+   fallback, relative to `src-tauri/`);
+3. **debug builds**: the dev-tree build FIRST, then `<exe_dir>/onecad-worker`.
+   Rationale: `tauri dev` copies the staged `src-tauri/binaries/` sidecar beside
+   the debug executable, and that staged copy drifts stale silently (it is only
+   refreshed by `scripts/build-worker.sh`) — the dev-tree build is the source of
+   truth. When the dev build shadows a staged sidecar, a debug-only warning logs
+   both paths.
 
 If none exist the app boots with `PendingBackend` rather than spawning a missing
 binary. The resolution core (`resolve_worker_path_from`) is a pure function with
-unit tests covering each rung.
+unit tests pinning both precedence orders (env-wins ×2, dev-over-bundled in
+debug, bundled-over-dev in release, dev-missing fallback, none-exist ×2).
 
 ## 3. macOS dylib bundling
 

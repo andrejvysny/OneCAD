@@ -15,6 +15,7 @@ import { cn } from "@/ui/cn";
 import { ViewportEngine } from "./engine/ViewportEngine";
 import type { PickHit } from "./engine/Picker";
 import { MeshIngest } from "./mesh/meshSync";
+import { SketchStaticSync } from "./sketchStaticSync";
 import { setViewportEngine } from "./engineBridge";
 import { viewLabelForDirection } from "@/features/viewcube/ViewCube";
 import { viewportStore } from "@/stores/viewportStore";
@@ -128,6 +129,41 @@ export function ViewportRoot({ className }: { className?: string }) {
         meshIngest.attach(engine, client);
         cleanups.push(() => meshIngest.detach());
 
+        // ── Always-visible document sketches in MODEL mode (Fusion-style) ──
+        const sketchStaticSync = new SketchStaticSync();
+        sketchStaticSync.attach(engine, client);
+        cleanups.push(() => sketchStaticSync.detach());
+
+        // Missed-event race: projection-updated may fire before these listeners
+        // attach (open/new/recover populate the doc before the viewport wires up) —
+        // one authoritative pull recovers it; applyProjectionToStore reconciles by
+        // revision, so a stale response here can never clobber newer state.
+        void client.getProjection().catch(() => {});
+
+        // Auto-fit the camera once, the first time a body finishes loading.
+        let fitted = false;
+        cleanups.push(
+          meshIngest.onBodyLoaded(() => {
+            if (!fitted) {
+              fitted = true;
+              engine.fitView();
+            }
+          }),
+        );
+
+        // Wake-up repaint: on-demand rendering means a tab/window that was hidden
+        // or a compositor that dropped the last frame shows stale/blank content
+        // until something invalidates — repaint on visibility/focus return.
+        const onWake = () => {
+          if (!document.hidden) engine.invalidate();
+        };
+        document.addEventListener("visibilitychange", onWake);
+        window.addEventListener("focus", onWake);
+        cleanups.push(() => {
+          document.removeEventListener("visibilitychange", onWake);
+          window.removeEventListener("focus", onWake);
+        });
+
         // ── Sketch mode drawing tools + snapping (F-WP6) ──
         const sketchController = new SketchController({ engine, client, container });
         cleanups.push(() => sketchController.dispose());
@@ -153,10 +189,28 @@ export function ViewportRoot({ className }: { className?: string }) {
         };
         engine.configurePicking({
           isActive: isPickingActive,
-          onHover: (hit) => selectionStore.getState().setHover(hit ? refFromHit(hit) : null),
-          onPick: (hit, mods) => {
+          onHover: (hit, x, y) => {
+            const sel = selectionStore.getState();
+            if (hit) {
+              sel.setHover(refFromHit(hit));
+              return;
+            }
+            // No body hit → an always-visible sketch under the pointer (or nothing).
+            const sid = engine.sketchStaticHitTest(x, y);
+            sel.setHover(sid ? { kind: "sketch", id: sid } : null);
+          },
+          onPick: (hit, mods, x, y) => {
             const sel = selectionStore.getState();
             if (!hit) {
+              // Empty click over a sketch selects it (feeds the extrude/revolve flow);
+              // truly empty clears.
+              const sid = engine.sketchStaticHitTest(x, y);
+              if (sid) {
+                const ref: EntityRef = { kind: "sketch", id: sid };
+                if (mods.shift || mods.meta) sel.toggle(ref);
+                else sel.set([ref]);
+                return;
+              }
               sel.clear();
               return;
             }
@@ -188,11 +242,12 @@ export function ViewportRoot({ className }: { className?: string }) {
           });
         }
 
-        // ?sketchdemo — enter sketch mode on a fresh empty XY sketch (no backend;
-        // the mock enterSketch does it). Proves the whole sketch UX end to end.
+        // ?sketchdemo — enter sketch mode on the seeded XY sketch (no backend;
+        // the mock enterSketch does it). Pass an explicit id (skip the plane
+        // picker) so the demo is deterministic. Proves the sketch UX end to end.
         if (hasFlag("sketchdemo")) {
           resetMockSketches();
-          toolStore.getState().setMode("sketch");
+          toolStore.getState().setMode("sketch", "sketch2");
         }
 
         // ?toolsdemo — seed a finished rectangle sketch + a window harness so the
@@ -300,7 +355,7 @@ export function ViewportRoot({ className }: { className?: string }) {
       // NOTE: `className` supplies the positioning (absolute inset…). It already
       // establishes a containing block for the engine's absolute canvas, so do
       // NOT add `relative` here — it would conflict and collapse the height.
-      className={cn("overflow-hidden bg-canvas-model", className)}
+      className={cn("overflow-hidden bg-canvas", className)}
     >
       {/* The engine appends its own <canvas> here (absolute, inset-0). */}
       <div

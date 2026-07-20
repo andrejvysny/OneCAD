@@ -70,6 +70,8 @@ export interface DocumentState extends DocumentProjection {
   setVisibility(id: string, visible: boolean): void;
   /** Register a sketch (e.g. a freshly created one) in the tree/registry. */
   addSketch(meta: SketchMeta): void;
+  /** Remove a sketch from the tree/registry (idempotent; no-op when absent). */
+  removeSketch(id: string): void;
   /** Push a solver result onto a sketch (drives chrome bar + inspector DOF). */
   setSketchSolve(id: string, dof: number, status: SketchStatus): void;
 }
@@ -88,6 +90,20 @@ export function docSketchStatus(
     default:
       return "under";
   }
+}
+
+/**
+ * Next free "Sketch N" name — one past the highest existing `Sketch <n>` index
+ * (min "Sketch 1"). Names that don't match the pattern are ignored, so a
+ * freshly plane-picked sketch always gets a distinct, monotonic tree name.
+ */
+export function nextSketchName(sketches: Record<string, SketchMeta>): string {
+  let max = 0;
+  for (const s of Object.values(sketches)) {
+    const m = /^Sketch (\d+)$/.exec(s.name);
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return `Sketch ${max + 1}`;
 }
 
 /**
@@ -171,6 +187,15 @@ export const documentStore = createStore<DocumentState>()((set) => ({
 
   addSketch(meta) {
     set((s) => ({ sketches: { ...s.sketches, [meta.id]: meta } }));
+  },
+
+  removeSketch(id) {
+    set((s) => {
+      if (!s.sketches[id]) return {};
+      const sketches = { ...s.sketches };
+      delete sketches[id];
+      return { sketches };
+    });
   },
 
   setSketchSolve(id, dof, status) {

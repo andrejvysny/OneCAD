@@ -72,15 +72,18 @@ import { createLocalSolverLane } from "./localSolver";
 import { operationToEditCommand, opLabelFor, editCommandLabel, type WireEditCommand } from "./tauriCommandMap";
 import {
   buildAddSketch,
+  buildDeleteSketch,
   createIdMap,
   frontendConstraintsFromDto,
   frontendEntitiesFromDto,
   frontendSolvedPositions,
   marshalUpsert,
   mintUuid,
+  seedIdMapFromWire,
   type SketchIdMap,
 } from "./sketchWireMap";
 import { applyProjectionToStore } from "./projectionHydration";
+import { documentStore, nextSketchName } from "@/stores/documentStore";
 
 // ── Command + event names (must match src-tauri/src/api + events.rs) ──────────
 const CMD = {
@@ -97,11 +100,13 @@ const CMD = {
   openFileDialog: "open_file_dialog",
   saveFileDialog: "save_file_dialog",
   getMesh: "get_mesh",
+  getProjection: "get_projection",
   applyEditCommand: "apply_edit_command",
   getOperationParams: "get_operation_params",
   undo: "undo",
   redo: "redo",
   enterSketch: "enter_sketch",
+  getSketch: "get_sketch",
   sketchUpsert: "sketch_upsert",
   finishSketch: "finish_sketch",
   cancelSketch: "cancel_sketch",
@@ -367,27 +372,41 @@ export function createTauriClient(): CadClient {
 
   // ── Sketch solver lane state (frontend id ↔ backend UUID via sketchWireMap) ──
   const sketchMaps = new Map<string, SketchIdMap>();
-  let sketchNameSeq = 1;
 
-  /** The frontend-facing id for an enter target (kept as the session id). */
+  /** The frontend-facing id for an enter target (kept as the session id). With no
+   *  explicit `sketchId`, mint a real UUID up front (not a display-only `sk-N`) so
+   *  it can double as the backend `SketchId` — see `ensureBackendSketch`'s `adoptId`. */
   function frontendIdFor(target: EnterSketchTarget): string {
     if (typeof target === "string") return target;
-    return target.sketchId ?? `sk-${sketchNameSeq}`;
+    return target.sketchId ?? mintUuid();
   }
 
-  /** Resolve (or lazily create) the backend sketch for a frontend id + plane. */
-  async function ensureBackendSketch(frontendId: string, planeKind: SketchPlaneKind): Promise<SketchIdMap> {
+  /** Resolve (or lazily create) the backend sketch for a frontend id + plane.
+   *  `adoptId`, when given, IS used as the backend `SketchId` instead of minting a
+   *  second UUID — the `{newOnPlane}`-without-`sketchId` lane passes its already-
+   *  minted `frontendId` here so `session.sketchId` matches the projection-store
+   *  key (Rust keys sketches by backend UUID). The explicit-`sketchId` lane passes
+   *  no `adoptId` and keeps minting a separate backend UUID, unchanged. */
+  async function ensureBackendSketch(
+    frontendId: string,
+    planeKind: SketchPlaneKind,
+    adoptId?: string,
+  ): Promise<SketchIdMap> {
     const existing = sketchMaps.get(frontendId);
     if (existing) return existing;
-    // New sketch: mint a real SketchId, register it via AddSketch, then enter.
-    const backendSketchId = mintUuid();
+    // New sketch: mint a real SketchId (or adopt the caller's), register it via
+    // AddSketch, then enter.
+    const backendSketchId = adoptId ?? mintUuid();
     const map = createIdMap(backendSketchId, planeKind);
     sketchMaps.set(frontendId, map);
     // Create the backend sketch (a fresh world-plane sketch; SketchData defaults).
     // NOTE: this fires an edit + regen; the sketch appears in the tree via
     // projection-updated hydration. (custom/host-face planes → M2+; see M2 notes.)
     await call<DocumentProjectionDto>(CMD.applyEditCommand, {
-      command: buildAddSketch(backendSketchId, `Sketch ${sketchNameSeq++}`, planeKind),
+      // Single source of truth for tree names: derive the next free "Sketch N" from
+      // the live projection store (kills the duplicate-name drift a private counter
+      // caused after reopen/undo).
+      command: buildAddSketch(backendSketchId, nextSketchName(documentStore.getState().sketches), planeKind),
     });
     return map;
   }
@@ -403,13 +422,65 @@ export function createTauriClient(): CadClient {
     await ensureEvents();
     const frontendId = frontendIdFor(target);
     const planeKind: SketchPlaneKind = typeof target === "string" ? "XY" : target.newOnPlane;
-    const map = await ensureBackendSketch(frontendId, planeKind);
-    const dto = await call<SketchSessionDto>(CMD.enterSketch, { sketchId: map.backendSketchId });
+    // Re-entry after reopen: a persisted sketch id is present in the projection
+    // store but the in-memory id-map is empty (documentStore.sketches keys ARE valid
+    // backend SketchId strings — the Rust projection uses `id.to_string()`). Adopt
+    // the id AS the backend SketchId and enter it directly — do NOT mint a new id /
+    // fire AddSketch, which would create a duplicate EMPTY sketch beside the real one.
+    // Plane "XY" is only the map's bookkeeping default; the real plane comes back in
+    // the enter_sketch DTO.
+    let map: SketchIdMap;
+    // Track whether THIS call committed a fresh AddSketch (a new backend sketch that
+    // will be orphaned if the follow-up enter_sketch rejects). Creations are
+    // serialized upstream by the SketchController's `entering` flag, so no concurrent
+    // AddSketch races this bookkeeping.
+    let firedAddSketch = false;
+    if (
+      typeof target === "string" &&
+      !sketchMaps.has(frontendId) &&
+      documentStore.getState().sketches[frontendId]
+    ) {
+      map = createIdMap(frontendId, "XY");
+      sketchMaps.set(frontendId, map);
+    } else {
+      // No explicit sketchId → frontendId is a freshly minted UUID (frontendIdFor);
+      // adopt it as the backend SketchId too so the created sketch's session.sketchId
+      // (== frontendId, returned below) matches the projection-store key.
+      const adoptId = typeof target !== "string" && target.sketchId === undefined ? frontendId : undefined;
+      // ensureBackendSketch fires AddSketch ONLY when there is no existing map.
+      firedAddSketch = !sketchMaps.has(frontendId);
+      map = await ensureBackendSketch(frontendId, planeKind, adoptId);
+    }
+    let dto: SketchSessionDto;
+    try {
+      dto = await call<SketchSessionDto>(CMD.enterSketch, { sketchId: map.backendSketchId });
+    } catch (e) {
+      // The AddSketch already committed but enter_sketch rejected (e.g. worker down):
+      // the empty sketch is orphaned in the document, and every retry would mint
+      // another. AWAIT a DeleteSketch compensation to remove it before rethrowing so
+      // the tree stays clean and the id-map doesn't leak.
+      if (firedAddSketch) {
+        try {
+          await deleteSketch(frontendId);
+        } catch (cleanupErr) {
+          // eslint-disable-next-line no-console
+          console.error("[sketch] enterSketch orphan cleanup (DeleteSketch) failed", cleanupErr);
+          const orig = e instanceof Error ? e : new Error(String(e));
+          orig.message = `${orig.message} (cleanup failed — empty sketch left in tree)`;
+          throw orig;
+        }
+      }
+      throw e;
+    }
     const entities = frontendEntitiesFromDto(dto.entities);
     // Re-entry hydration: the backend returns the sketch's real constraints in the
     // worker-wire form (Rust `wire_constraint`, field-identical to SketchConstraint);
     // reverse-map them so the inspector shows live constraints (kills the []-seam).
     const constraints = frontendConstraintsFromDto(dto.constraints);
+    // Seed the id-map from the returned wire so the NEXT upsert diffs against the
+    // real geometry (zero add ops) instead of re-adding every entity. Idempotent +
+    // a no-op for a fresh sketch (empty entities/constraints).
+    seedIdMapFromWire(map, dto.entities, dto.constraints);
     // Feed the plane into the local preview lane so beginPreview resolves it.
     lane.cacheSketchPlane(frontendId, dto.plane);
     return {
@@ -457,10 +528,37 @@ export function createTauriClient(): CadClient {
     return { regions };
   }
 
+  /** Pure read of a sketch's authoritative geometry (always-visible layer). Does NOT
+   *  open a session / fire AddSketch / seed the id-map — the frozen `get_sketch`
+   *  contract returns the SAME wire shape as `enter_sketch`; unknown ids reject. */
+  async function getSketch(sketchId: string): Promise<SketchSession> {
+    const dto = await call<SketchSessionDto>(CMD.getSketch, { sketchId });
+    return {
+      sketchId,
+      plane: dto.plane,
+      entities: frontendEntitiesFromDto(dto.entities),
+      constraints: frontendConstraintsFromDto(dto.constraints),
+      dof: dto.dof,
+      status: dto.status,
+    };
+  }
+
   async function cancelSketch(sketchId: string): Promise<void> {
     const map = sketchMaps.get(sketchId);
     if (!map) return; // never entered — nothing to cancel
     await call<void>(CMD.cancelSketch, { sketchId: map.backendSketchId });
+  }
+
+  /** Compensation/cleanup: remove a sketch from the document via a `DeleteSketch`
+   *  EditCommand (same invoke shape as AddSketch — returns the pre-regen projection).
+   *  Drops the local id-map entry ONLY after the command resolves, so a rejected
+   *  delete leaves the map (and the sketch) intact for the caller to react to. */
+  async function deleteSketch(sketchId: string): Promise<void> {
+    const backendSketchId = sketchMaps.get(sketchId)?.backendSketchId ?? sketchId;
+    await call<DocumentProjectionDto>(CMD.applyEditCommand, {
+      command: buildDeleteSketch(backendSketchId),
+    });
+    sketchMaps.delete(sketchId);
   }
 
   // ── Sketch drag gesture (latest-wins) ─────────────────────────────────────
@@ -634,6 +732,14 @@ export function createTauriClient(): CadClient {
       return () => projectionListeners.delete(cb);
     },
 
+    async getProjection(): Promise<DocumentProjectionWire> {
+      // One-shot authoritative pull (missed-event race on mount); reconciled by
+      // revision exactly like the projection-updated event path.
+      const p = await call<DocumentProjectionDto>(CMD.getProjection);
+      applyProjectionToStore(p);
+      return p;
+    },
+
     applyOperation,
 
     async undo(): Promise<ApplyOperationResult> {
@@ -645,9 +751,11 @@ export function createTauriClient(): CadClient {
 
     // ── Sketch solver lane + drag gesture + promotion (REAL commands) ─────────
     enterSketch,
+    getSketch,
     sketchUpsert,
     finishSketch,
     cancelSketch,
+    deleteSketch,
     beginGesture,
     solveDrag,
     endGesture,

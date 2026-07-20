@@ -471,6 +471,23 @@ pub async fn enter_sketch(
     Ok(session)
 }
 
+/// Reads a sketch's current geometry as a static snapshot — no solver call, no
+/// session state, no events (`CadClient.getSketch`; the model-mode display-layer
+/// read). Returns the same [`SketchSessionDto`] shape as [`enter_sketch`], with
+/// `dof`/`status` from the last solver-lane solve (or the "never solved" default).
+#[tauri::command]
+pub async fn get_sketch(
+    state: State<'_, AppState>,
+    sketch_id: String,
+) -> Result<SketchSessionDto, ApiError> {
+    let id = parse_sketch_id(&sketch_id)?;
+    let guard = state.runtime.lock().await;
+    let rt = guard
+        .as_ref()
+        .ok_or_else(|| ApiError::NoDocument("getSketch".into()))?;
+    Ok(rt.get_sketch(id)?)
+}
+
 /// Applies sketch edits (add/move/delete entities+constraints) then re-solves for
 /// live dof/status (`CadClient.sketchUpsert`).
 #[tauri::command]

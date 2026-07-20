@@ -22,10 +22,12 @@ import { createRenderer, type RendererHandle } from "./renderer";
 import { CameraRig, type ProjectionKind } from "./CameraRig";
 import { CadOrbitControls } from "./CadOrbitControls";
 import { GridPlane } from "./GridPlane";
+import { OriginTriad } from "./OriginTriad";
 import { HtmlOverlayDriver } from "./HtmlOverlayDriver";
 import { palette } from "./palette";
-import { Picker, type PickHit, type PickModifiers } from "./Picker";
+import { Picker, linePickThreshold, type PickHit, type PickModifiers } from "./Picker";
 import { HighlightLayer } from "./HighlightLayer";
+import { SketchStaticLayer } from "./SketchStaticLayer";
 import { flushDisposals } from "../mesh/meshRegistry";
 import type { MeshEntry } from "../mesh/meshRegistry";
 import type { EntityRef } from "@/stores/selectionStore";
@@ -38,6 +40,7 @@ import type { DraftEntity } from "@/tools/sketch/toolMachine";
 import { PreviewMesh } from "./PreviewMesh";
 import { DragHandle } from "./DragHandle";
 import { RevolvePreview, type AxisCandidate } from "./RevolvePreview";
+import { PlanePicker, type PickablePlane } from "./PlanePicker";
 import { GhostLayer } from "./GhostLayer";
 import type { LatheAxis } from "@/tools/preview/lathePreview";
 import type { GhostTransform } from "@/tools/preview/patternPreview";
@@ -58,11 +61,13 @@ export interface EngineInitOptions {
 export interface PickHandlers {
   /** Picking is live only when this returns true (model + select mode). */
   isActive: () => boolean;
-  onHover: (hit: PickHit | null) => void;
-  onPick: (hit: PickHit | null, mods: PickModifiers) => void;
+  onHover: (hit: PickHit | null, clientX: number, clientY: number) => void;
+  onPick: (hit: PickHit | null, mods: PickModifiers, clientX: number, clientY: number) => void;
 }
 
 const MAX_DPR = 2;
+/** Generous pick radius for always-visible sketch curves (easier than body edges). */
+const SKETCH_PICK_PX = 8;
 const Z0_PLANE = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
 
 export class ViewportEngine {
@@ -77,12 +82,21 @@ export class ViewportEngine {
   private canvas: HTMLCanvasElement | null = null;
   private rendererHandle: RendererHandle | null = null;
   isWebGPU = false;
+  // Context-loss recovery (WKWebView drops GL contexts on GPU switch/sleep):
+  // preventDefault on loss is REQUIRED for the browser to ever restore it.
+  private readonly onContextLost = (e: Event): void => {
+    if (!this.disposed) e.preventDefault();
+  };
+  private readonly onContextRestored = (): void => {
+    this.invalidate();
+  };
 
   // Scene graph
   private scene = new THREE.Scene();
   private rig = new CameraRig(76);
   private controls: CadOrbitControls | null = null;
   private grid: GridPlane | null = null;
+  private triad: OriginTriad | null = null;
   private readonly overlayDriver = new HtmlOverlayDriver();
   readonly bodiesRoot = new THREE.Group();
   readonly sketchRoot = new THREE.Group();
@@ -95,6 +109,7 @@ export class ViewportEngine {
   private dragHandle: DragHandle | null = null;
   private revolvePreview: RevolvePreview | null = null; // L1 lathe + axis picker
   private ghostLayer: GhostLayer | null = null; // L1 pattern / mirror clones
+  private planePicker: PlanePicker | null = null; // origin-plane pick gizmo
   private previewMaterials: BodyMaterials | null = null;
   private previewBody: BodyObjectHandle | null = null;
 
@@ -102,6 +117,9 @@ export class ViewportEngine {
   private picker: Picker | null = null;
   private highlights: HighlightLayer | null = null;
   private pickHandlers: PickHandlers | null = null;
+
+  // Always-visible document sketches in MODEL mode (Fusion-style static layer).
+  private sketchStatic: SketchStaticLayer | null = null;
 
   // Sketch mode (F-WP6).
   private overlayEl: HTMLElement | null = null;
@@ -147,6 +165,8 @@ export class ViewportEngine {
     this.container = container;
     this.overlayEl = overlayEl;
     this.canvas = this.createCanvas(container);
+    this.canvas.addEventListener("webglcontextlost", this.onContextLost);
+    this.canvas.addEventListener("webglcontextrestored", this.onContextRestored);
     this.debug = opts.debug ?? false;
 
     this.buildScene();
@@ -170,6 +190,11 @@ export class ViewportEngine {
     this.grid.setVisible(opts.gridVisible ?? false);
     this.scene.add(this.grid.object3D);
 
+    // Always visible — NOT gated by gridVisible, so the viewport never loses
+    // its sense of orientation.
+    this.triad = new OriginTriad({ x: palette.axisX(), y: palette.axisY(), z: palette.axisZ() });
+    this.scene.add(this.triad.object3D);
+
     this.controls = new CadOrbitControls({
       rig: this.rig,
       element: this.canvas,
@@ -177,7 +202,10 @@ export class ViewportEngine {
       getBounds: this.getSceneBounds,
       // Orbit gating: an LMB drag that STARTS on pickable geometry (or the
       // extrude drag handle) selects/drags (no orbit); empty space orbits.
-      hitTest: (x, y) => (this.picker?.hasHitAt(x, y) ?? false) || this.hitExtrudeHandle(x, y),
+      hitTest: (x, y) =>
+        (this.picker?.hasHitAt(x, y) ?? false) ||
+        this.hitExtrudeHandle(x, y) ||
+        (this.planePicker?.visible === true && this.planePickerHitTest(x, y) !== null),
     });
 
     this.highlights = new HighlightLayer({
@@ -192,8 +220,11 @@ export class ViewportEngine {
       getFocusDistance: () => this.controls?.getDistance() ?? 260,
       invalidate: () => this.invalidate(),
       isActive: () => this.pickHandlers?.isActive() ?? false,
-      onHover: (hit) => this.pickHandlers?.onHover(hit),
-      onPick: (hit, mods) => this.pickHandlers?.onPick(hit, mods),
+      onHover: (hit, x, y) => this.pickHandlers?.onHover(hit, x, y),
+      onPick: (hit, mods, x, y) => this.pickHandlers?.onPick(hit, mods, x, y),
+      // Secondary hover token: the always-visible sketch under the pointer (only
+      // consulted when there is no body hit).
+      secondaryHoverKey: (x, y) => this.sketchStaticHitTest(x, y),
     });
 
     if (this.debug) this.setupDebugOverlay(overlayEl);
@@ -314,6 +345,9 @@ export class ViewportEngine {
     if (this.grid) {
       this.grid.update(this.controls.getTarget(), this.controls.getDistance());
     }
+    if (this.triad) {
+      this.triad.update(this.controls.getDistance());
+    }
 
     const { width, height } = this.viewportSize();
     if (this.sketch) {
@@ -398,6 +432,13 @@ export class ViewportEngine {
 
   getCameraDistance(): number {
     return this.controls?.getDistance() ?? 260;
+  }
+
+  /** True when the camera looks nearly straight down a world axis (e.g. TOP). */
+  private isViewAxisAligned(thresholdDeg = 5): boolean {
+    const dir = this.getViewDirection(); // unit vector already
+    const m = Math.max(Math.abs(dir.x), Math.abs(dir.y), Math.abs(dir.z));
+    return m >= Math.cos((thresholdDeg * Math.PI) / 180);
   }
 
   // ---- Public actions (bridge / shell) ----
@@ -720,6 +761,58 @@ export class ViewportEngine {
     return this.ghostLayer?.visible ?? false;
   }
 
+  // ---- Sketch plane picker (origin-plane pick gizmo, before entering a sketch) ----
+
+  /**
+   * Show/hide the three origin-plane pick quads. Lazy-constructs on first
+   * show. If the camera is nearly axis-aligned (e.g. TOP view — a plane would
+   * be edge-on / invisible) it nudges to the iso home view so all three
+   * planes are visible.
+   */
+  setPlanePickerVisible(visible: boolean): void {
+    if (this.disposed) return;
+    if (visible) {
+      if (!this.overlayEl) return; // not initialized yet
+      if (!this.planePicker) {
+        this.planePicker = new PlanePicker({
+          root: this.interactionRoot,
+          overlay: this.overlayDriver,
+          overlayEl: this.overlayEl,
+          invalidate: () => this.invalidate(),
+        });
+      }
+      if (this.isViewAxisAligned()) this.controls?.homeView(true);
+      this.planePicker.setVisible(true);
+    } else {
+      this.planePicker?.setHover(null);
+      this.planePicker?.setVisible(false);
+    }
+    this.invalidate();
+  }
+
+  /** Hover the plane under a client point (updates the highlight + label chip). */
+  planePickerHover(clientX: number, clientY: number): PickablePlane | null {
+    if (!this.planePicker) return null;
+    const ndc = this.clientToNdc(clientX, clientY);
+    if (!ndc) {
+      this.planePicker.setHover(null);
+      return null;
+    }
+    this.raycaster.setFromCamera(ndc, this.rig.getCamera());
+    const hit = this.planePicker.hitTest(this.raycaster);
+    this.planePicker.setHover(hit);
+    return hit?.kind ?? null;
+  }
+
+  /** Pure hit-test at a client point (no hover mutation) — also the orbit-gate probe. */
+  planePickerHitTest(clientX: number, clientY: number): PickablePlane | null {
+    if (!this.planePicker) return null;
+    const ndc = this.clientToNdc(clientX, clientY);
+    if (!ndc) return null;
+    this.raycaster.setFromCamera(ndc, this.rig.getCamera());
+    return this.planePicker.hitTest(this.raycaster)?.kind ?? null;
+  }
+
   /** Raycast a client point onto an ARBITRARY sketch plane → plane (u,v). */
   screenToPlaneOn(plane: SketchPlane, clientX: number, clientY: number): Point2 | null {
     const ndc = this.clientToNdc(clientX, clientY);
@@ -798,6 +891,33 @@ export class ViewportEngine {
     this.invalidate();
   }
 
+  // ---- Always-visible sketch layer (Fusion-style static sketches, MODEL mode) ----
+
+  /** The static sketch layer (lazy). The sketchStaticSync controller drives it. */
+  getSketchStaticLayer(): SketchStaticLayer {
+    if (!this.sketchStatic) {
+      this.sketchStatic = new SketchStaticLayer({
+        sketchRoot: this.sketchRoot,
+        invalidate: () => this.invalidate(),
+      });
+    }
+    return this.sketchStatic;
+  }
+
+  /** Sketch id under a client point (curves + fill), or null. Deliberately NOT in the
+   *  orbit gate — clicking empty space near a sketch still orbits. */
+  sketchStaticHitTest(clientX: number, clientY: number): string | null {
+    if (!this.sketchStatic) return null;
+    const ndc = this.clientToNdc(clientX, clientY);
+    if (!ndc || Math.abs(ndc.x) > 1 || Math.abs(ndc.y) > 1) return null;
+    const camera = this.rig.getCamera();
+    this.raycaster.setFromCamera(ndc, camera);
+    this.raycaster.params.Line = {
+      threshold: linePickThreshold(camera, this.viewportSize().height, this.getCameraDistance(), SKETCH_PICK_PX),
+    };
+    return this.sketchStatic.hitTest(this.raycaster);
+  }
+
   // ---- Picking / highlighting (F-WP5) ----
 
   /** Wire picking to the store-facing handlers (viewport bridge supplies these). */
@@ -843,6 +963,9 @@ export class ViewportEngine {
     this.highlights?.dispose();
     this.highlights = null;
 
+    this.sketchStatic?.dispose();
+    this.sketchStatic = null;
+
     // Model-tool previews.
     this.previewMesh?.dispose();
     this.previewMesh = null;
@@ -852,6 +975,8 @@ export class ViewportEngine {
     this.revolvePreview = null;
     this.ghostLayer?.dispose();
     this.ghostLayer = null;
+    this.planePicker?.dispose();
+    this.planePicker = null;
     if (this.previewBody) this.previewRoot.remove(this.previewBody.group);
     this.previewBody = null;
     this.previewMaterials?.dispose();
@@ -863,6 +988,9 @@ export class ViewportEngine {
     this.grid?.dispose();
     this.grid = null;
 
+    this.triad?.dispose();
+    this.triad = null;
+
     this.overlayDriver.clear();
     this.cameraListeners.clear();
 
@@ -870,6 +998,8 @@ export class ViewportEngine {
     this.rendererHandle = null;
 
     // Discard the owned canvas so a remount starts from a fresh context.
+    this.canvas?.removeEventListener("webglcontextlost", this.onContextLost);
+    this.canvas?.removeEventListener("webglcontextrestored", this.onContextRestored);
     this.canvas?.remove();
     this.canvas = null;
     this.container = null;

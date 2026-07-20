@@ -1006,6 +1006,34 @@ impl DocumentRuntime {
         })
     }
 
+    /// Reads a sketch's current geometry as a static snapshot — no worker call, no
+    /// session/gesture state, no mutation (`getSketch`; the model-mode display-layer
+    /// read). Returns the same [`SketchSessionDto`] shape as
+    /// [`enter_sketch`](Self::enter_sketch), but `dof`/`status` come from the
+    /// `sketch_solve` cache of the last solver-lane solve rather than a fresh solve;
+    /// a sketch that has never been entered/upserted reads `dof:0`/`UnderConstrained`
+    /// (the same "not yet solved" fallback [`SketchSolveStatus::parse`] documents).
+    ///
+    /// # Errors
+    /// [`EngineError`] on an unknown sketch.
+    pub fn get_sketch(&self, sketch_id: SketchId) -> Result<SketchSessionDto, EngineError> {
+        let sketch = self.sketch_or_err(sketch_id, "getSketch")?;
+        let (plane, entities, constraints) = crate::worker::wire::sketch_wire(&sketch);
+        let (dof, status) = self
+            .sketch_solve
+            .get(&sketch_id)
+            .copied()
+            .unwrap_or((0, SketchSolveStatus::UnderConstrained));
+        Ok(SketchSessionDto {
+            sketch_id: sketch_id.to_string(),
+            plane,
+            entities,
+            constraints,
+            dof,
+            status,
+        })
+    }
+
     /// Applies a batch of sketch edits authoritatively (one undoable
     /// [`EditCommand::SketchEdit`]) then re-solves on the worker for live dof/status
     /// (SCHEMA §7.4). A non-drag upsert is an identity solve (no coordinate
