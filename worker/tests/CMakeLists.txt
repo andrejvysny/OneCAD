@@ -54,6 +54,12 @@ add_executable(test_m6a_ops test_m6a_ops.cpp)
 target_link_libraries(test_m6a_ops PRIVATE worker_core)
 add_test(NAME m6a_ops COMMAND test_m6a_ops)
 
+# --- Region-with-hole extrude: volume-checked (GProp) hole subtraction, incl. a
+#     no-hole negative control (in-process, real OCCT). ---
+add_executable(test_hole_extrude test_hole_extrude.cpp)
+target_link_libraries(test_hole_extrude PRIVATE worker_core)
+add_test(NAME hole_extrude COMMAND test_hole_extrude)
+
 # Harness-driven ExecutePlan / session fixtures (NDJSON send/expect flows).
 foreach(_fx executeplan_happy executeplan_fail_step executeplan_needsrepair
             executeplan_fencing executeplan_discard double_executeplan session_reset

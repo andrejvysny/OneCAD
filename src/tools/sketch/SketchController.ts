@@ -38,9 +38,10 @@ import { applySolvedPositions } from "@/ipc/sketchWireMap";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
 import { computeSnap, type SnapResult } from "./snapEngine";
 import { inferConstraints, entityPoints } from "./autoConstrain";
-import { commitDimensionConstraint } from "./sketchService";
+import { commitDimensionConstraint, deleteEntities } from "./sketchService";
 import { hitTestSketch } from "./sketchHitTest";
 import { clickSelection, dragIntent, shouldApplyDrag, type DragIntent } from "./selectGesture";
+import { mirrorEntities } from "./mirrorMath";
 import {
   dimensionInit,
   dimensionStep,
@@ -86,6 +87,11 @@ export class SketchController {
   private moved = false;
   private pendingMove: PointerEvent | null = null;
   private moveScheduled = false;
+
+  // Trim / Mirror tools (non-drawing, click-only). Parallel lanes to `selectActive`,
+  // each gated STRICTLY on its tool id so the select/draw/dimension paths are untouched.
+  private trimActive = false;
+  private mirrorActive = false;
 
   // Select tool (non-drawing): click-select + point-handle drag via the gesture
   // lane. A parallel path to `dimensionActive`, gated STRICTLY on tool === "select".
@@ -264,6 +270,8 @@ export class SketchController {
     this.dimensionActive = false;
     this.resetDrag();
     this.selectActive = false;
+    this.trimActive = false;
+    this.mirrorActive = false;
     this.deps.engine.setSketchDrawingActive(false);
     this.deps.engine.setSketchPreview([]);
     this.deps.engine.setSketchSnap(null, false);
@@ -289,12 +297,19 @@ export class SketchController {
       this.resetDrag();
       sketchSelectionStore.getState().clear();
     }
+    // Leaving the mirror tool drops its in-progress pick set (the mirror phase is
+    // derived from the sketch selection — a stale set would leak into the next tool).
+    if (this.mirrorActive && tool !== "mirror") {
+      sketchSelectionStore.getState().clear();
+    }
 
     const m = TOOL_MACHINES[tool] ?? null;
     this.machine = m;
     this.machineState = m ? m.init() : null;
     this.dimensionActive = tool === "dimension";
     this.selectActive = tool === "select";
+    this.trimActive = tool === "trim";
+    this.mirrorActive = tool === "mirror";
     // The dimension tool owns the pointer (no orbit) so clicks pick entities.
     this.deps.engine.setSketchDrawingActive(!!m || this.dimensionActive);
     this.deps.engine.setSketchPreview([]);
@@ -306,9 +321,15 @@ export class SketchController {
       viewportStore.getState().setStatusHint("Dimension — click a line, circle, arc, or two points");
       return;
     }
-    // trim/mirror remain stubs (buttons exist, no behaviour yet).
-    const stub = tool === "trim" || tool === "mirror";
-    viewportStore.getState().setStatusHint(stub ? `${cap(tool)} — not yet implemented` : null);
+    if (this.trimActive) {
+      viewportStore.getState().setStatusHint("Click an entity to delete · Esc to exit");
+      return;
+    }
+    if (this.mirrorActive) {
+      this.updateMirrorHint();
+      return;
+    }
+    viewportStore.getState().setStatusHint(null);
   }
 
   // ── pointer handling ────────────────────────────────────────────────────
@@ -340,6 +361,14 @@ export class SketchController {
     }
     if (this.selectActive) {
       this.onSelectPointerMove(e);
+      return;
+    }
+    // Trim / Mirror are click tools; a move past DRAG_PX with LMB held is an orbit,
+    // not a click — track it so pointerup doesn't fire a stray delete/pick.
+    if (this.trimActive || this.mirrorActive) {
+      const far =
+        Math.abs(e.clientX - this.downX) > DRAG_PX || Math.abs(e.clientY - this.downY) > DRAG_PX;
+      if (this.downButton === 0 && (e.buttons & 1) !== 0 && far) this.moved = true;
       return;
     }
     if (!this.machine && !this.dimensionActive) return;
@@ -394,6 +423,14 @@ export class SketchController {
     }
     if (this.dimensionActive) {
       this.handleDimensionClick(e.clientX, e.clientY);
+      return;
+    }
+    if (this.trimActive) {
+      this.handleTrimClick(e.clientX, e.clientY);
+      return;
+    }
+    if (this.mirrorActive) {
+      this.handleMirrorClick(e.clientX, e.clientY, e.shiftKey || e.metaKey);
       return;
     }
     if (!this.machine || !this.machineState) return;
@@ -518,6 +555,113 @@ export class SketchController {
     if (this.dimensionActive) {
       viewportStore.getState().setStatusHint("Dimension — click a line, circle, arc, or two points");
     }
+  }
+
+  // ── Trim tool ────────────────────────────────────────────────────────────────
+  //
+  // Click-to-delete (ports OneCAD-CPP TrimTool: "click to delete entire entity").
+  // A click that hits an entity (body OR point pick) deletes that entity via the
+  // shared `deleteEntities` service (which cascades its referencing constraints);
+  // a miss is a no-op. Esc falls through to the global ladder → back to select.
+
+  private handleTrimClick(clientX: number, clientY: number): void {
+    const hit = this.hitAt(clientX, clientY);
+    if (!hit) return; // miss → no-op
+    void deleteEntities(this.deps.client, [hit.entityId]);
+  }
+
+  // ── Mirror tool ──────────────────────────────────────────────────────────────
+  //
+  // Two-phase FSM keyed off the sketch selection (no separate phase field):
+  //   Phase A (selection empty) — clicks SELECT entities to mirror (select-tool
+  //     `clickSelection` semantics: plain replaces, Shift/Meta toggles, miss clears).
+  //   Phase B (selection non-empty) — a Shift/Meta click keeps editing the set; a
+  //     plain click that hits a LINE body NOT in the set is the mirror axis and
+  //     performs the mirror; any other plain click is a no-op (never clears).
+  // After a mirror the selection switches to the new copies (repeatable); Esc exits
+  // via the global ladder (→ select), which clears the set on the tool change.
+
+  private handleMirrorClick(clientX: number, clientY: number, additive: boolean): void {
+    const session = sketchStore.getState().session;
+    if (!session) return;
+    const hit = this.hitAt(clientX, clientY);
+    const selected = sketchSelectionStore.getState().selected;
+
+    // Phase A, or an additive click in Phase B: keep building the mirror set.
+    if (selected.length === 0 || additive) {
+      sketchSelectionStore.getState().set(clickSelection(selected, hit, additive));
+      this.updateMirrorHint();
+      return;
+    }
+
+    // Phase B plain click: the axis is a LINE body-pick NOT already in the set.
+    const selectedIds = new Set(selected.map((s) => s.entityId));
+    if (!hit || hit.point || selectedIds.has(hit.entityId)) return; // no-op (incl. axis-in-selection)
+    const axis = session.entities.find((e) => e.id === hit.entityId);
+    if (!axis || axis.type !== "Line") return; // only a line can be a mirror axis
+    const sources = [...selectedIds]
+      .map((id) => session.entities.find((e) => e.id === id))
+      .filter((e): e is SketchEntity => !!e);
+    if (sources.length === 0) return;
+    void this.performMirror(sources, axis);
+  }
+
+  /** Phase-appropriate mirror status hint (derived from the current selection). */
+  private updateMirrorHint(): void {
+    const empty = sketchSelectionStore.getState().selected.length === 0;
+    viewportStore
+      .getState()
+      .setStatusHint(
+        empty ? "Select entities to mirror first" : "Click the mirror axis line · Esc to exit",
+      );
+  }
+
+  /** Reflect `sources` across the axis line, then ONE sketchUpsert (session + copies,
+   *  session constraints + the new Symmetric/Equal). Selection moves to the copies. */
+  private async performMirror(sources: SketchEntity[], axis: SketchEntity): Promise<void> {
+    const session = sketchStore.getState().session;
+    if (!session || !axis.p0 || !axis.p1) return;
+    const { entities: mirrored, constraints: mirrorCons } = mirrorEntities(
+      sources,
+      axis.id,
+      axis.p0,
+      axis.p1,
+      {
+        entityId: () => sketchStore.getState().nextEntityId(),
+        constraintId: () => sketchStore.getState().nextConstraintId(),
+      },
+    );
+    if (mirrored.length === 0) return;
+
+    const entities = [...session.entities, ...mirrored];
+    const constraints = [...session.constraints, ...mirrorCons];
+    let result;
+    try {
+      result = await this.deps.client.sketchUpsert(session.sketchId, entities, constraints);
+    } catch (e) {
+      viewportStore.getState().setStatusHint(`Mirror failed: ${sketchErr(e)}`);
+      return;
+    }
+    if (!sketchStore.getState().session) return; // exited during await
+
+    const solvedEntities = applySolvedPositions(entities, result.solvedPositions ?? {});
+    const next: SketchSession = {
+      ...session,
+      entities: solvedEntities,
+      constraints,
+      dof: result.dof,
+      status: result.status,
+    };
+    sketchStore.getState().setSession(next);
+    this.deps.engine.updateSketchSession(next.plane, solvedEntities, next.status);
+    this.pushSolve(session.sketchId, result.dof, result.status);
+    // Selection switches to the mirrored copies (body picks) → back in Phase B, repeatable.
+    sketchSelectionStore.getState().set(mirrored.map((e) => ({ entityId: e.id })));
+    viewportStore
+      .getState()
+      .setStatusHint(
+        `Mirrored ${sources.length} ${sources.length === 1 ? "entity" : "entities"} · click another axis or Esc to exit`,
+      );
   }
 
   // ── Select tool ─────────────────────────────────────────────────────────────
@@ -790,8 +934,6 @@ export class SketchController {
     this.unsubs.length = 0;
   }
 }
-
-const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 
 /** Human message from a rejected backend sketch call. */
 function sketchErr(e: unknown): string {

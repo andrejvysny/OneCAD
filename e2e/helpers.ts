@@ -20,15 +20,35 @@ import { type Page, type Locator, expect } from "@playwright/test";
 
 export const CANVAS = '[data-testid="viewport-canvas"]';
 
-export type SketchToolLabel = "Line" | "Rectangle" | "Circle" | "Arc";
+export type SketchToolLabel = "Line" | "Rectangle" | "Circle" | "Arc" | "Select";
 
-/** Start screen → new document → live editor with a ready WebGL engine. */
-export async function openEditor(page: Page): Promise<void> {
-  await page.goto("/");
+async function bootEditor(page: Page, path: string): Promise<void> {
+  await page.goto(path);
   await page.getByRole("button", { name: "New project" }).click();
   // The editor shell (and thus the viewport canvas) only mounts after the mock
   // newDocument() resolves and appStore flips screen → editor.
   await expect(page.locator(`${CANVAS} canvas`)).toBeVisible();
+}
+
+/** Start screen → new document → live editor with a ready WebGL engine. */
+export async function openEditor(page: Page): Promise<void> {
+  await bootEditor(page, "/");
+}
+
+/**
+ * Same boot, but with `?vpdebug` in the URL so `ViewportEngine` exposes
+ * `window.__vpEngine` (its own `debug` gate — see ViewportEngine.ts /
+ * ViewportRoot.tsx `hasFlag("vpdebug")`). Committing an extrude round-trips
+ * through a REAL drag on the 3D depth handle (`ModelToolController` only calls
+ * `commitExtrude` from its pointer-up "release" branch — typing a chip value
+ * alone just updates the live preview depth, see `onExtrudeChip`), and the
+ * handle's on-screen position depends on the camera + sketch plane with no
+ * closed-form pixel offset. `findExtrudeHandle` below hit-scans the canvas
+ * through the engine's OWN `hitExtrudeHandle` raycast to find a real client
+ * point to click — this flag is what exposes that raycast to the page.
+ */
+export async function openEditorDebug(page: Page): Promise<void> {
+  await bootEditor(page, "/?vpdebug");
 }
 
 /** The viewport container's bounding box (the canvas fills the same rect). */
@@ -123,4 +143,253 @@ export async function enterSketchViaPlanePicker(page: Page): Promise<void> {
     "aria-pressed",
     "true",
   );
+}
+
+/** Body rows in the model tree (mirrors sketchOptions — ModelTreePanel's "Bodies" listbox). */
+export function bodyOptions(page: Page): Locator {
+  return page.getByRole("listbox", { name: "Bodies" }).getByRole("option");
+}
+
+/**
+ * The persistent sketch constraint toolbar (SketchConstraintToolbar.tsx —
+ * role="toolbar" aria-label="Constraints"). ConstraintContextChips renders a
+ * SECOND floating row with the exact same button labels near the selection
+ * centroid whenever the applicable set is non-empty, so any geometric/
+ * dimensional constraint button lookup MUST be scoped to this toolbar —
+ * an unscoped `getByRole("button", { name: "Horizontal" })` resolves to two
+ * elements (strict-mode violation) as soon as something is selected.
+ */
+export function constraintToolbar(page: Page): Locator {
+  return page.getByRole("toolbar", { name: "Constraints" });
+}
+
+/**
+ * Wait for the orbit camera's tween to finish (CadOrbitControls — a 250ms
+ * `animateTo`). TWO separate spots kick off an ANIMATED camera move around
+ * plane-picker entry: `ViewportEngine.setPlanePickerVisible` re-homes with
+ * `homeView(true)` when the picker opens, and — once the plane is actually
+ * picked — `ViewportEngine.enterSketch` saves the current view then calls
+ * `controls.viewAlongNormal(..., true)` to look straight at the new sketch
+ * plane. `screenToPlane`/`planePointToClient` both depend on the camera's
+ * CURRENT matrices, so a click or projection issued mid-tween reads/targets a
+ * moving pose — confirmed as the root cause of an intermittent miss in a real
+ * run (a `screenToPlaneOn` round-trip matched the source point exactly on
+ * settled runs, and was off by 10+ plane units on racing ones). A single
+ * "is `tween` null right now" check is not enough: it can land in the narrow
+ * gap between the FIRST tween finishing and the SECOND one starting, so this
+ * requires `tween` to read null continuously for a window comfortably longer
+ * than one tween (350ms > CadOrbitControls' 250ms) before returning — any
+ * tween observed during that window resets the wait. Call this once right
+ * after `enterSketchViaPlanePicker`, before any select-tool click or
+ * `planePointToClient` projection.
+ */
+export async function waitForCameraSettled(page: Page): Promise<void> {
+  const STABLE_WINDOW_MS = 350;
+  const isSettled = (): Promise<boolean> =>
+    page.evaluate(() => {
+      const engine = (window as unknown as { __vpEngine?: { controls?: { tween: unknown } | null } }).__vpEngine;
+      return !engine?.controls?.tween;
+    });
+
+  await expect(async () => {
+    const stableSince = Date.now();
+    while (Date.now() - stableSince < STABLE_WINDOW_MS) {
+      expect(await isSettled()).toBe(true);
+    }
+  }).toPass({ timeout: 10_000, intervals: [50, 100, 200] });
+}
+
+/**
+ * Hit-scan the canvas for the real extrude-depth drag handle in CLIENT (page)
+ * pixel space, via the engine's OWN `hitExtrudeHandle` raycast exposed at
+ * `window.__vpEngine` (see openEditorDebug). The handle is a small 3D gizmo
+ * anchored at the region centroid, pointing along the sketch-plane normal —
+ * its screen position depends on the camera + plane with no closed-form pixel
+ * offset, so scanning with the exact method the real pointer handlers use is
+ * the only robust way to find a genuine click target. Wrapped in `toPass` so
+ * the first attempt can land before the handle's first post-arm render (the
+ * engine is render-on-demand — see ViewportEngine `invalidate()`).
+ */
+export async function findExtrudeHandle(page: Page): Promise<{ x: number; y: number }> {
+  let found: { x: number; y: number } | null = null;
+  await expect(async () => {
+    found = await page.evaluate(() => {
+      const engine = (window as unknown as { __vpEngine?: { hitExtrudeHandle(x: number, y: number): boolean } })
+        .__vpEngine;
+      const canvas = document.querySelector('[data-testid="viewport-canvas"] canvas') as HTMLCanvasElement | null;
+      if (!engine || !canvas) return null;
+      const rect = canvas.getBoundingClientRect();
+      const step = 6;
+      for (let y = rect.top; y <= rect.bottom; y += step) {
+        for (let x = rect.left; x <= rect.right; x += step) {
+          if (engine.hitExtrudeHandle(x, y)) return { x, y };
+        }
+      }
+      return null;
+    });
+    expect(found).not.toBeNull();
+  }).toPass({ timeout: 10_000, intervals: [100, 200, 400, 800] });
+  return found as unknown as { x: number; y: number };
+}
+
+// ── Precise plane→screen targeting (select-tool / region-pick clicks) ────────
+//
+// A canvas-center-relative pixel OFFSET only pins a point exactly for the ONE
+// click that produced it (`screenToPlane` is a real perspective raycast onto
+// the sketch plane, not an affine map) — you cannot linearly combine two such
+// offsets to predict a THIRD point's screen position (e.g. "the other corner",
+// an edge midpoint, a shape's centroid). Verified empirically: an initial
+// version of these specs guessed those points from pixel-offset arithmetic and
+// silently missed every hit-test. The robust fix reads the REAL entity
+// coordinates back from the live sketch session (`window.__stores.sketch`,
+// always exposed in dev — see main.tsx) and projects any derived plane point to
+// a real client pixel through the SAME camera the engine uses
+// (`window.__vpEngine`, exposed under `?vpdebug` — see openEditorDebug), i.e.
+// the exact inverse of `screenToPlane`.
+
+export interface SketchPlaneSnapshot {
+  kind: string;
+  origin: [number, number, number];
+  xAxis: [number, number, number];
+  yAxis: [number, number, number];
+  normal: [number, number, number];
+}
+export interface SketchLineSnapshot {
+  p0: [number, number];
+  p1: [number, number];
+}
+
+/**
+ * Read the live sketch session's plane + Line entities. MUST be called while
+ * still in sketch mode — SketchController clears `sketchStore.session` once the
+ * mode leaves "sketch" (finishing / cancelling), so snapshot BEFORE pressing
+ * Enter if a later step (e.g. a region-pick click) needs a plane point computed
+ * from this sketch's geometry.
+ */
+export async function getSketchSnapshot(
+  page: Page,
+): Promise<{ plane: SketchPlaneSnapshot; lines: SketchLineSnapshot[] }> {
+  return page.evaluate(() => {
+    const w = window as unknown as {
+      __stores?: {
+        sketch: {
+          getState(): {
+            session: {
+              plane: SketchPlaneSnapshot;
+              entities: Array<{ type: string; p0?: [number, number]; p1?: [number, number] }>;
+            } | null;
+          };
+        };
+      };
+    };
+    const session = w.__stores?.sketch.getState().session;
+    if (!session) throw new Error("getSketchSnapshot: no live sketch session (call before finishing the sketch)");
+    const lines: SketchLineSnapshot[] = [];
+    for (const e of session.entities) {
+      if (e.type === "Line" && e.p0 && e.p1) lines.push({ p0: e.p0, p1: e.p1 });
+    }
+    const { kind, origin, xAxis, yAxis, normal } = session.plane;
+    return { plane: { kind, origin, xAxis, yAxis, normal }, lines };
+  });
+}
+
+/**
+ * Project a sketch-plane (u,v) coordinate to a CLIENT (page) pixel through the
+ * live camera — the exact inverse of the engine's `screenToPlane` raycast.
+ * Requires `window.__vpEngine` (see openEditorDebug). Plain mat4 math (world =
+ * plane basis * (u,v); clip = projectionMatrix * matrixWorldInverse * world;
+ * NDC = clip / w; pixel = NDC via the canvas rect) — `CameraRig.apply()` keeps
+ * `matrixWorldInverse` synchronously current on every camera move, so no
+ * render-frame wait is needed here (unlike `findExtrudeHandle`'s raycast, which
+ * hits a mesh whose OWN world matrix only updates on the next render).
+ */
+export async function planePointToClient(
+  page: Page,
+  plane: SketchPlaneSnapshot,
+  point: { x: number; y: number },
+): Promise<{ x: number; y: number }> {
+  return page.evaluate(
+    ({ plane, point }) => {
+      const w = window as unknown as {
+        __vpEngine?: {
+          rig: {
+            getCamera(): {
+              matrixWorldInverse: { elements: number[] };
+              projectionMatrix: { elements: number[] };
+            };
+          };
+        };
+      };
+      const engine = w.__vpEngine;
+      if (!engine) throw new Error("planePointToClient: window.__vpEngine missing (use openEditorDebug)");
+      const [ox, oy, oz] = plane.origin;
+      const [xx, xy, xz] = plane.xAxis;
+      const [yx, yy, yz] = plane.yAxis;
+      const wx = ox + point.x * xx + point.y * yx;
+      const wy = oy + point.x * xy + point.y * yy;
+      const wz = oz + point.x * xz + point.y * yz;
+
+      const camera = engine.rig.getCamera();
+      const m = camera.matrixWorldInverse.elements; // column-major 4x4
+      const pm = camera.projectionMatrix.elements;
+
+      const vx = m[0] * wx + m[4] * wy + m[8] * wz + m[12];
+      const vy = m[1] * wx + m[5] * wy + m[9] * wz + m[13];
+      const vz = m[2] * wx + m[6] * wy + m[10] * wz + m[14];
+      const vw = m[3] * wx + m[7] * wy + m[11] * wz + m[15];
+
+      const cx = pm[0] * vx + pm[4] * vy + pm[8] * vz + pm[12] * vw;
+      const cy = pm[1] * vx + pm[5] * vy + pm[9] * vz + pm[13] * vw;
+      const cw = pm[3] * vx + pm[7] * vy + pm[11] * vz + pm[15] * vw;
+
+      const ndcX = cx / cw;
+      const ndcY = cy / cw;
+
+      const canvas = document.querySelector('[data-testid="viewport-canvas"] canvas') as HTMLCanvasElement | null;
+      if (!canvas) throw new Error("planePointToClient: viewport canvas missing");
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: rect.left + ((ndcX + 1) / 2) * rect.width,
+        y: rect.top + ((1 - ndcY) / 2) * rect.height,
+      };
+    },
+    { plane, point },
+  );
+}
+
+/**
+ * A deliberate click (move → down → up, no drag) at ABSOLUTE client coordinates
+ * — same tap shape as `clickAt`, for points obtained from `planePointToClient`
+ * rather than a canvas-center-relative offset.
+ */
+export async function clickAtClient(page: Page, x: number, y: number): Promise<void> {
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.up();
+}
+
+/**
+ * Drag-commit the armed extrude at its real handle: grab, nudge, release.
+ * This is the ONLY path that fires `commitExtrude` — `ModelToolController`
+ * commits from `onPointerUp`'s "dragging" branch only, reached by a pointerdown
+ * that hits the handle (typing a value into the depth chip just updates the
+ * live preview, it never commits on its own).
+ */
+export async function commitExtrudeAtHandle(page: Page): Promise<void> {
+  // The whole grab→drag→release gesture is wrapped in a retry: an occasional miss
+  // (the scan and the real pointerdown are a frame apart — a render-on-demand
+  // engine can re-render the handle into its final pose in between) leaves the
+  // tool silently still armed rather than raising an error, so the only reliable
+  // signal is the durable side effect of a REAL commit: ModelToolController's
+  // finishExtrude() flips the Extrude toolbar button back to unpressed (and only
+  // on success — a missed grab leaves it pressed indefinitely).
+  const extrudeBtn = page.getByRole("button", { name: "Extrude", exact: true });
+  await expect(async () => {
+    const { x, y } = await findExtrudeHandle(page);
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x, y + 12, { steps: 4 });
+    await page.mouse.up();
+    await expect(extrudeBtn).not.toHaveAttribute("aria-pressed", "true", { timeout: 1_500 });
+  }).toPass({ timeout: 20_000, intervals: [200, 500, 1_000] });
 }
