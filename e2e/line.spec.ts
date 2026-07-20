@@ -39,5 +39,7 @@ test("line tool draws a 3-segment chain with autoconstraint feedback", async ({ 
   // from autoconstrain (chained endpoints snapped exactly onto each other).
   // (chrome bar + inspector card both render the status; either is a valid signal)
   await expect(page.getByText(/^Under-constrained · DOF [1-9]/).first()).toBeVisible();
-  await expect(page.getByText("Coincident", { exact: true })).toBeVisible();
+  // Per-row ConstraintList: a 3-segment chain infers one Coincident per shared
+  // endpoint, so assert at least one row rather than exact-single text.
+  await expect(page.getByText("Coincident", { exact: true }).first()).toBeVisible();
 });

@@ -36,27 +36,25 @@ export interface ApplicableConstraint {
 
 /**
  * Wire-encodability per constraint type (mirrors `toWireConstraint`,
- * src/ipc/sketchWireMap.ts:265-333). All 18 `SketchConstraintType` kinds are
- * listed: the 13 kinds `toWireConstraint` maps today are `true`; the 5 it
- * currently returns `null` for (Fixed/OnCurve/Tangent/Concentric/Symmetric —
- * `toWireConstraint`'s trailing comment, sketchWireMap.ts:328-330) are ALSO
- * `true` here, flagged `// pending S4b wire extension` — a parallel WP is
- * wiring them in, and this table is the flip-ready target state so that WP
- * flips nothing here. `evaluateApplicability` filters its output through this
- * table (never offer what the wire can't send); a test pins the invariant that
- * every type the matrix can ever emit is `true`.
+ * src/ipc/sketchWireMap.ts). All 18 `SketchConstraintType` kinds are mapped by
+ * `toWireConstraint` (the last 5 — Fixed/OnCurve/Tangent/Concentric/Symmetric —
+ * landed with the constraint-apply WP), so every entry is `true` today. The
+ * table stays as the guard: `evaluateApplicability` filters its output through
+ * it (never offer what the wire can't send), and a test pins the invariant that
+ * every type the matrix can ever emit is `true`. Flip an entry to `false` only
+ * if its wire mapping is ever removed.
  */
 export const WIRE_ENCODABLE: Record<SketchConstraintType, boolean> = {
   Coincident: true,
   Horizontal: true,
   Vertical: true,
-  Fixed: true, // pending S4b wire extension
-  Midpoint: true, // pending S4b wire extension — never emitted by evaluateApplicability (excluded, mirrors C++)
-  OnCurve: true, // pending S4b wire extension
+  Fixed: true,
+  Midpoint: true, // never emitted by evaluateApplicability (excluded, mirrors C++)
+  OnCurve: true,
   Parallel: true,
   Perpendicular: true,
-  Tangent: true, // pending S4b wire extension — never emitted (no Tangent rule in the C++ matrix)
-  Concentric: true, // pending S4b wire extension
+  Tangent: true, // never emitted (no Tangent rule in the C++ matrix)
+  Concentric: true,
   Equal: true, // never emitted by evaluateApplicability — deliberately excluded, mirrors C++
   Distance: true,
   HorizontalDistance: true,
@@ -64,7 +62,7 @@ export const WIRE_ENCODABLE: Record<SketchConstraintType, boolean> = {
   Angle: true,
   Radius: true,
   Diameter: true,
-  Symmetric: true, // pending S4b wire extension
+  Symmetric: true,
 };
 
 /** Mirrors `isDimensional` (sketchWireMap.ts:254-261/336-338); duplicated (not

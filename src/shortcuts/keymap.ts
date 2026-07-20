@@ -19,6 +19,7 @@ export type ShortcutAction =
   | { type: "tool"; tool: Tool }
   | { type: "enterSketch" }
   | { type: "finishSketch" }
+  | { type: "deleteSketchSelection" }
   | { type: "cancel" }
   | { type: "zoomFit" }
   | { type: "home" };
@@ -54,6 +55,11 @@ export const SKETCH_KEYS: KeyBinding[] = [
   { key: "d", action: { type: "tool", tool: "dimension" } },
   { key: "t", action: { type: "tool", tool: "trim" } },
   { key: "m", action: { type: "tool", tool: "mirror" } },
+  // Delete/Backspace remove the current sketch selection. Sketch-scoped only;
+  // in model mode they fall through (no binding). The handler additionally lets
+  // the key fall through when nothing is selected (see useShortcuts).
+  { key: "Delete", action: { type: "deleteSketchSelection" } },
+  { key: "Backspace", action: { type: "deleteSketchSelection" } },
 ];
 
 export const GLOBAL_KEYS: KeyBinding[] = [

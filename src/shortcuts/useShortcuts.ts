@@ -7,7 +7,10 @@
 import { useEffect } from "react";
 import { toolStore, activeTool } from "@/stores/toolStore";
 import { selectionStore } from "@/stores/selectionStore";
+import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
 import { viewportStore } from "@/stores/viewportStore";
+import { createClient } from "@/ipc/client";
+import { deleteEntities } from "@/tools/sketch/sketchService";
 import { getModelToolController } from "@/tools/modelTools/modelToolBridge";
 import {
   openDocumentDialog,
@@ -44,6 +47,22 @@ function runCancel(): void {
   }
 }
 
+/**
+ * Delete the current sketch selection. Point-picks delete their OWNING entity (a
+ * `{entityId, point}` pick deletes the whole entity — V1 semantics), so collect
+ * the distinct entity ids and hand them to `deleteEntities` (which also cascades
+ * the referencing constraints). Selection is cleared once the delete settles.
+ * Constraint deletion is NOT keyboard-driven here (a later WP wires the list).
+ */
+function runDeleteSketchSelection(): void {
+  const sel = sketchSelectionStore.getState();
+  const entityIds = [...new Set(sel.selected.map((s) => s.entityId))];
+  if (entityIds.length === 0) return;
+  void deleteEntities(createClient(), entityIds).then(() => {
+    sketchSelectionStore.getState().clear();
+  });
+}
+
 export function runAction(action: ShortcutAction): void {
   const tool = toolStore.getState();
   switch (action.type) {
@@ -64,6 +83,9 @@ export function runAction(action: ShortcutAction): void {
         tool.setMode("model");
         if (sketchId) viewportStore.getState().setPendingExtrude(sketchId);
       }
+      break;
+    case "deleteSketchSelection":
+      runDeleteSketchSelection();
       break;
     case "cancel":
       runCancel();
@@ -113,6 +135,14 @@ export function useShortcuts(): void {
       if (e.repeat) return;
       const action = resolveBinding(e.key, e.shiftKey, toolStore.getState().mode);
       if (!action) return;
+      // Delete/Backspace only swallow the key when a sketch entity is selected;
+      // an empty selection falls through so the key keeps its default meaning.
+      if (
+        action.type === "deleteSketchSelection" &&
+        sketchSelectionStore.getState().selected.length === 0
+      ) {
+        return;
+      }
       e.preventDefault();
       runAction(action);
     };

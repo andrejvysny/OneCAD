@@ -107,9 +107,15 @@ export type WireConstraint =
   | { kind: "vertical"; id: string; line: string }
   | { kind: "fixed"; id: string; point: string; at: [number, number] }
   | { kind: "midpoint"; id: string; point: string; line: string }
+  // OnCurve `position` is the Rust `CurvePosition` (camelCase); OMITTED here so it
+  // defaults to `Arbitrary` (the applicability path never pins an endpoint).
+  | { kind: "onCurve"; id: string; point: string; curve: string; position?: "start" | "end" }
   | { kind: "parallel"; id: string; line1: string; line2: string }
   | { kind: "perpendicular"; id: string; line1: string; line2: string }
+  | { kind: "tangent"; id: string; entity1: string; entity2: string }
+  | { kind: "concentric"; id: string; entity1: string; entity2: string }
   | { kind: "equal"; id: string; entity1: string; entity2: string }
+  | { kind: "symmetric"; id: string; point1: string; point2: string; axis: string }
   | { kind: "distance"; id: string; entity1: string; entity2: string; value: WireScalar }
   | { kind: "horizontalDistance"; id: string; point1: string; point2: string; value: WireScalar }
   | { kind: "verticalDistance"; id: string; point1: string; point2: string; value: WireScalar }
@@ -252,6 +258,36 @@ function resolveRef(
   return map.entity.get(entityId) ?? null;
 }
 
+/** Current plane coord of a point ref (entity + optional position) — the `at` a
+ *  `Fixed` constraint pins to. Mirrors `resolveTargetPoint` (constraintTarget.ts)
+ *  over the frontend inlined-coordinate entities; kept local so this ipc-layer
+ *  module stays free of a `tools/sketch` import. */
+function pointCoord(
+  entities: SketchEntity[],
+  entityId: string,
+  position?: ConstraintPosition,
+): [number, number] | null {
+  const e = entities.find((x) => x.id === entityId);
+  if (!e) return null;
+  switch (e.type) {
+    case "Point":
+      return e.p0 ?? null;
+    case "Line":
+      if (position === "End") return e.p1 ?? null;
+      if (position === "Midpoint" && e.p0 && e.p1)
+        return [(e.p0[0] + e.p1[0]) / 2, (e.p0[1] + e.p1[1]) / 2];
+      return e.p0 ?? null; // Start (default)
+    case "Circle":
+      return e.center ?? null;
+    case "Arc":
+      if (position === "Start") return e.start ?? null;
+      if (position === "End") return e.end ?? null;
+      return e.center ?? null;
+    default:
+      return null;
+  }
+}
+
 const DIMENSIONAL: ReadonlySet<SketchConstraintType> = new Set([
   "Distance",
   "HorizontalDistance",
@@ -262,8 +298,16 @@ const DIMENSIONAL: ReadonlySet<SketchConstraintType> = new Set([
 ]);
 
 /** Map one frontend constraint to a Rust `WireConstraint` (or `null` if it cannot
- *  be expressed — e.g. an arc-endpoint Coincident, reported as an M2 seam). */
-function toWireConstraint(map: SketchIdMap, c: SketchConstraint, id: string): WireConstraint | null {
+ *  be expressed — e.g. an arc-endpoint Coincident, reported as an M2 seam).
+ *
+ *  `entities` is the FULL authoritative entity array (needed only for `Fixed`,
+ *  whose wire shape carries the point's CURRENT plane coords as `at`). */
+function toWireConstraint(
+  map: SketchIdMap,
+  c: SketchConstraint,
+  id: string,
+  entities: SketchEntity[],
+): WireConstraint | null {
   const pos = c.positions ?? [];
   const ref = (i: number): string | null => resolveRef(map, c.entities[i], pos[i]);
   // Dimensional value crosses in the WIRE domain (Angle: deg→rad; BUG-2).
@@ -327,8 +371,36 @@ function toWireConstraint(map: SketchIdMap, c: SketchConstraint, id: string): Wi
       const entity = map.entity.get(c.entities[0]);
       return entity ? { kind: "diameter", id, entity, value: val } : null;
     }
-    // Fixed / OnCurve / Tangent / Concentric / Symmetric need point coords or
-    // curve refs the frontend authoring path does not yet produce in the slice.
+    // ── S4b wire extension: the 5 user-applicable geometric kinds ──────────────
+    // Point slots resolve position-aware via `ref`; whole-entity slots (curve /
+    // axis / circle-arc) resolve directly through `map.entity`.
+    case "Fixed": {
+      const point = ref(0);
+      const at = pointCoord(entities, c.entities[0], pos[0]);
+      return point && at ? { kind: "fixed", id, point, at } : null;
+    }
+    case "OnCurve": {
+      const point = ref(0);
+      const curve = map.entity.get(c.entities[1]);
+      // Authored from applicability ⇒ Arbitrary position (omit `position`).
+      return point && curve ? { kind: "onCurve", id, point, curve } : null;
+    }
+    case "Tangent":
+    case "Concentric": {
+      const e1 = map.entity.get(c.entities[0]);
+      const e2 = map.entity.get(c.entities[1]);
+      return e1 && e2
+        ? { kind: c.type.toLowerCase() as "tangent" | "concentric", id, entity1: e1, entity2: e2 }
+        : null;
+    }
+    case "Symmetric": {
+      const point1 = ref(0);
+      const point2 = ref(1);
+      const axis = map.entity.get(c.entities[2]);
+      return point1 && point2 && axis
+        ? { kind: "symmetric", id, point1, point2, axis }
+        : null;
+    }
     default:
       return null;
   }
@@ -397,7 +469,7 @@ export function marshalUpsert(
   for (const c of next.constraints) {
     if (!map.constraint.has(c.id)) {
       const id = mint();
-      const wire = toWireConstraint(map, c, id);
+      const wire = toWireConstraint(map, c, id, next.entities);
       if (wire) {
         map.constraint.set(c.id, id);
         map.constraintValue.set(c.id, c.value);

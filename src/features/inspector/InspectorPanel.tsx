@@ -20,13 +20,22 @@ import { useHistoryStore } from "@/stores/historyStore";
 import { documentStore } from "@/stores/documentStore";
 import { getModelToolController } from "@/tools/modelTools/modelToolBridge";
 import { HistoryList, type HistoryRowActions } from "./HistoryList";
-import { ConstraintList, summarizeConstraints } from "./ConstraintList";
+import { ConstraintList } from "./ConstraintList";
 import { RepairPanel } from "@/features/repair/RepairPanel";
 import { suppressFeature, rollToIndex, deleteFeature } from "./historyActions";
 import { cn } from "@/ui/cn";
 import { sketchStatusText, sketchStatusSentence } from "@/features/sketch/constraintStatus";
+import { createClient } from "@/ipc/client";
+import { deleteConstraints } from "@/tools/sketch/sketchService";
 import type { SketchStatus } from "@/stores/documentStore";
 import type { SketchConstraint } from "@/ipc/types";
+
+/** Delete one constraint (row × button) — fire-and-forget, mirrors useShortcuts'
+ * deleteEntities call: the service re-solves + writes the session back, so the
+ * list re-renders off the live sketchStore subscription. */
+function deleteConstraint(id: string): void {
+  void deleteConstraints(createClient(), [id]);
+}
 
 /** Click a history chip → select that feature; double-click → parametric re-edit. */
 function selectFeature(id: string): void {
@@ -218,7 +227,6 @@ function SketchState({
 }) {
   const { label, tone } = sketchStatusText(status, dof);
   const solved = status === "ok";
-  const rows = summarizeConstraints(constraints);
   return (
     <>
       <div className="text-[15px] font-semibold text-ink">{sketchName}</div>
@@ -239,8 +247,8 @@ function SketchState({
       </div>
 
       <SectionLabel className="pb-1.5 pt-4">Constraints</SectionLabel>
-      {rows.length > 0 ? (
-        <ConstraintList items={rows} />
+      {constraints.length > 0 ? (
+        <ConstraintList constraints={constraints} onDelete={deleteConstraint} />
       ) : (
         <div className="text-[12px] leading-normal text-ink-6">
           No constraints yet.

@@ -14,7 +14,14 @@
  *     geometry + DOF badges.
  */
 import type { CadClient } from "@/ipc/client";
-import type { EnterSketchTarget, SketchConstraint, SketchEntity, SketchSession } from "@/ipc/types";
+import type {
+  EnterSketchTarget,
+  SketchConstraint,
+  SketchEntity,
+  SketchPlane,
+  SketchSession,
+  SketchSolveStatus,
+} from "@/ipc/types";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import type { PickablePlane } from "@/viewport/engine/PlanePicker";
 import type { Point2 } from "@/viewport/engine/sketchBasis";
@@ -23,15 +30,17 @@ import { toolStore } from "@/stores/toolStore";
 import { viewportStore, type Projection } from "@/stores/viewportStore";
 import { documentStore, docSketchStatus, nextSketchName } from "@/stores/documentStore";
 import { selectionStore } from "@/stores/selectionStore";
-import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
+import { sketchSelectionStore, type SketchSel } from "@/stores/sketchSelectionStore";
 import { settingsStore } from "@/stores/settingsStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { applySolvedPositions } from "@/ipc/sketchWireMap";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
 import { computeSnap, type SnapResult } from "./snapEngine";
-import { inferConstraints } from "./autoConstrain";
+import { inferConstraints, entityPoints } from "./autoConstrain";
 import { commitDimensionConstraint } from "./sketchService";
+import { hitTestSketch } from "./sketchHitTest";
+import { clickSelection, dragIntent, shouldApplyDrag, type DragIntent } from "./selectGesture";
 import {
   dimensionInit,
   dimensionStep,
@@ -77,6 +86,24 @@ export class SketchController {
   private moved = false;
   private pendingMove: PointerEvent | null = null;
   private moveScheduled = false;
+
+  // Select tool (non-drawing): click-select + point-handle drag via the gesture
+  // lane. A parallel path to `dimensionActive`, gated STRICTLY on tool === "select".
+  private selectActive = false;
+  // Set on a pointerdown that lands on a draggable handle (orbit suppressed then);
+  // the gesture only OPENS once the pointer passes DRAG_PX (else it collapses to a click).
+  private dragArmed: DragIntent | null = null;
+  private dragStarting = false; // beginGesture in flight (first move past DRAG_PX)
+  private dragging = false; // gesture open (solveDrag lane live)
+  private dragBase: SketchEntity[] = []; // pre-drag entities (latest-wins applies onto this)
+  private dragPlane: SketchPlane | null = null;
+  private dragStatus: SketchSolveStatus = "UnderConstrained";
+  private dragLastSeq = 0; // highest applied solveDrag seq (stale-drop)
+  private pendingTarget: [number, number] | null = null; // coalesced latest drag target
+  private solveScheduled = false;
+  // A pointerup / Esc that arrived while beginGesture was still in flight — its end
+  // is deferred here so a fast flick never double-commits the gesture.
+  private dragEndPending: { target?: [number, number]; restore: boolean } | null = null;
 
   private readonly unsubs: Array<() => void> = [];
 
@@ -235,6 +262,8 @@ export class SketchController {
     this.lastSnap = null;
     if (this.dimensionActive) this.cancelDimension();
     this.dimensionActive = false;
+    this.resetDrag();
+    this.selectActive = false;
     this.deps.engine.setSketchDrawingActive(false);
     this.deps.engine.setSketchPreview([]);
     this.deps.engine.setSketchSnap(null, false);
@@ -254,11 +283,18 @@ export class SketchController {
     if (this.planePicking) return; // no drawing tool while picking a plane
     // Leaving the dimension tool tears down any in-flight chip/pick.
     if (this.dimensionActive && tool !== "dimension") this.cancelDimension();
+    // Leaving the select tool aborts any drag + clears the sketch selection (the
+    // enter/exit clears cover mode changes; this covers a same-mode tool switch).
+    if (this.selectActive && tool !== "select") {
+      this.resetDrag();
+      sketchSelectionStore.getState().clear();
+    }
 
     const m = TOOL_MACHINES[tool] ?? null;
     this.machine = m;
     this.machineState = m ? m.init() : null;
     this.dimensionActive = tool === "dimension";
+    this.selectActive = tool === "select";
     // The dimension tool owns the pointer (no orbit) so clicks pick entities.
     this.deps.engine.setSketchDrawingActive(!!m || this.dimensionActive);
     this.deps.engine.setSketchPreview([]);
@@ -302,6 +338,10 @@ export class SketchController {
       this.deps.engine.planePickerHover(e.clientX, e.clientY);
       return;
     }
+    if (this.selectActive) {
+      this.onSelectPointerMove(e);
+      return;
+    }
     if (!this.machine && !this.dimensionActive) return;
     this.pendingMove = e;
     if (e.buttons !== 0 && this.downButton === 0) this.moved = true;
@@ -331,9 +371,14 @@ export class SketchController {
     this.downY = e.clientY;
     this.downButton = e.button;
     this.moved = false;
+    if (this.selectActive) this.onSelectPointerDown(e);
   };
 
   private onPointerUp = (e: PointerEvent): void => {
+    if (this.selectActive) {
+      this.onSelectPointerUp(e);
+      return;
+    }
     const wasClick =
       this.downButton === 0 &&
       e.button === 0 &&
@@ -475,6 +520,213 @@ export class SketchController {
     }
   }
 
+  // ── Select tool ─────────────────────────────────────────────────────────────
+  //
+  // FLOW. pointerdown resolves a hit; a DRAGGABLE handle arms a drag (and suppresses
+  // LMB orbit); anything else stays a candidate click. On pointerup:
+  //   - a real click (< DRAG_PX, no move) → click-select (Shift/Meta toggles, plain
+  //     replaces, a miss clears);
+  //   - a drag past DRAG_PX on an armed handle → beginGesture → solveDrag (fire-and-
+  //     forget, latest-wins by seq) → endGesture (ONE undo) + the selection stays.
+  // Esc mid-drag ends the gesture at the ORIGINAL point + restores pre-drag geometry.
+
+  /** hitTest the current session at a client point (same 8px reach the dimension tool uses). */
+  private hitAt(clientX: number, clientY: number): SketchSel | null {
+    const session = sketchStore.getState().session;
+    if (!session) return null;
+    const raw = this.deps.engine.screenToPlane(clientX, clientY);
+    if (!raw) return null;
+    const tol = 8 * this.deps.engine.planePixelWorld();
+    return hitTestSketch(raw, session.entities, tol);
+  }
+
+  private onSelectPointerDown = (e: PointerEvent): void => {
+    if (e.button !== 0) return;
+    const session = sketchStore.getState().session;
+    const hit = this.hitAt(e.clientX, e.clientY);
+    const intent = dragIntent(hit, session?.entities ?? []);
+    this.dragArmed = intent;
+    // Suppress LMB orbit for a potential handle drag; a plain click restores it on up.
+    if (intent) this.deps.engine.setSketchDrawingActive(true);
+  };
+
+  private onSelectPointerMove = (e: PointerEvent): void => {
+    // Only care about a primary-button drag (LMB held) initiated in the viewport.
+    if (this.downButton !== 0 || (e.buttons & 1) === 0) return;
+    const far =
+      Math.abs(e.clientX - this.downX) > DRAG_PX || Math.abs(e.clientY - this.downY) > DRAG_PX;
+    if (far) this.moved = true;
+    if (this.dragging || this.dragStarting) {
+      this.scheduleSelectSolve(e.clientX, e.clientY);
+      return;
+    }
+    if (this.dragArmed && far) void this.beginSelectDrag(e.clientX, e.clientY);
+  };
+
+  private onSelectPointerUp = (e: PointerEvent): void => {
+    const button = this.downButton;
+    this.downButton = -1;
+    if (this.dragging) {
+      const pt = this.deps.engine.screenToPlane(e.clientX, e.clientY);
+      void this.finishDrag(pt ? [pt.x, pt.y] : undefined, false);
+      return;
+    }
+    if (this.dragStarting) {
+      // beginGesture still in flight: defer the commit until it resolves.
+      const pt = this.deps.engine.screenToPlane(e.clientX, e.clientY);
+      this.dragEndPending = { target: pt ? [pt.x, pt.y] : undefined, restore: false };
+      return;
+    }
+    // Not a drag: restore orbit if a handle armed it, then click-select if it was a click.
+    if (this.dragArmed) {
+      this.deps.engine.setSketchDrawingActive(false);
+      this.dragArmed = null;
+    }
+    const wasClick =
+      button === 0 &&
+      e.button === 0 &&
+      !this.moved &&
+      Math.abs(e.clientX - this.downX) <= DRAG_PX &&
+      Math.abs(e.clientY - this.downY) <= DRAG_PX;
+    if (!wasClick) return;
+    const hit = this.hitAt(e.clientX, e.clientY);
+    const additive = e.shiftKey || e.metaKey;
+    const current = sketchSelectionStore.getState().selected;
+    sketchSelectionStore.getState().set(clickSelection(current, hit, additive));
+  };
+
+  /** First move past DRAG_PX on an armed handle: open the backend gesture. */
+  private async beginSelectDrag(clientX: number, clientY: number): Promise<void> {
+    const session = sketchStore.getState().session;
+    const armed = this.dragArmed;
+    if (!session || !armed || this.dragStarting || this.dragging) return;
+    this.dragStarting = true;
+    this.dragBase = session.entities;
+    this.dragPlane = session.plane;
+    this.dragStatus = session.status;
+    this.dragLastSeq = 0;
+    try {
+      await this.deps.client.beginGesture(session.sketchId, armed.pointRef);
+    } catch (err) {
+      viewportStore.getState().setStatusHint(`Drag failed: ${sketchErr(err)}`);
+      this.resetDrag();
+      this.deps.engine.setSketchDrawingActive(false);
+      return;
+    }
+    // A tool/mode change during the await tore the gesture down: close it cleanly.
+    if (!this.selectActive || this.dragArmed !== armed) {
+      void this.deps.client.endGesture().catch(() => {});
+      return;
+    }
+    this.dragStarting = false;
+    this.dragging = true;
+    // A pointerup / Esc that landed before begin resolved deferred its end to here.
+    const pending = this.dragEndPending;
+    if (pending) {
+      this.dragEndPending = null;
+      void this.finishDrag(pending.target, pending.restore);
+      return;
+    }
+    this.scheduleSelectSolve(clientX, clientY); // seed the first solve at the current pointer
+  }
+
+  /** Coalesce the latest drag target and fire one solveDrag per frame (latest-wins). */
+  private scheduleSelectSolve(clientX: number, clientY: number): void {
+    const pt = this.deps.engine.screenToPlane(clientX, clientY);
+    if (!pt) return;
+    this.pendingTarget = [pt.x, pt.y];
+    if (this.solveScheduled) return;
+    this.solveScheduled = true;
+    requestAnimationFrame(() => {
+      this.solveScheduled = false;
+      const target = this.pendingTarget;
+      this.pendingTarget = null;
+      if (!target || !this.dragging) return;
+      void this.fireSolve(target);
+    });
+  }
+
+  /** One incremental drag solve; drop null/stale-seq responses, else preview the delta. */
+  private async fireSolve(target: [number, number]): Promise<void> {
+    let res;
+    try {
+      res = await this.deps.client.solveDrag(target);
+    } catch {
+      return;
+    }
+    if (!this.dragging || !shouldApplyDrag(this.dragLastSeq, res)) return;
+    this.dragLastSeq = res!.seq;
+    if (this.dragPlane) {
+      const moved = applySolvedPositions(this.dragBase, res!.positions);
+      this.deps.engine.updateSketchSession(this.dragPlane, moved, this.dragStatus);
+    }
+  }
+
+  /** Esc mid-drag: end the gesture at the ORIGINAL position (no explicit cancel verb
+   *  on the wire — endGesture always commits ONE step) and restore pre-drag geometry. */
+  private cancelSelectDrag(): void {
+    const orig = this.draggedPointCoord();
+    if (this.dragging) {
+      void this.finishDrag(orig, true);
+    } else if (this.dragStarting) {
+      this.dragEndPending = { target: orig, restore: true };
+    }
+  }
+
+  /** Plane coord of the dragged point in the pre-drag base (for the Esc restore target). */
+  private draggedPointCoord(): [number, number] | undefined {
+    const sel = this.dragArmed?.sel;
+    if (!sel || !sel.point) return undefined;
+    const e = this.dragBase.find((x) => x.id === sel.entityId);
+    if (!e) return undefined;
+    return entityPoints(e).find((p) => p.position === sel.point)?.coord;
+  }
+
+  /** Commit (or cancel-restore) the drag: endGesture → apply final positions to the
+   *  session + engine + DOF badge; the selection stays on the dragged entity. */
+  private async finishDrag(finalTarget: [number, number] | undefined, restore: boolean): Promise<void> {
+    const sel = this.dragArmed?.sel ?? null;
+    const base = this.dragBase;
+    const plane = this.dragPlane;
+    this.resetDrag();
+    this.deps.engine.setSketchDrawingActive(false); // restore LMB orbit
+
+    let result;
+    try {
+      result = await this.deps.client.endGesture(finalTarget);
+    } catch (err) {
+      viewportStore.getState().setStatusHint(`Drag failed: ${sketchErr(err)}`);
+    }
+    const session = sketchStore.getState().session;
+    if (!session || !plane) return;
+
+    // On a cancel (Esc) restore the pre-drag geometry; else apply the committed delta.
+    const positions = restore ? {} : result?.solvedPositions ?? {};
+    const entities = applySolvedPositions(base, positions);
+    const next: SketchSession = {
+      ...session,
+      entities,
+      dof: result?.dof ?? session.dof,
+      status: result?.status ?? session.status,
+    };
+    sketchStore.getState().setSession(next);
+    this.deps.engine.updateSketchSession(next.plane, entities, next.status);
+    if (result) this.pushSolve(session.sketchId, result.dof, result.status);
+    if (sel) sketchSelectionStore.getState().set([sel]);
+  }
+
+  /** Drop all in-flight drag state (idempotent). A pending solve rAF no-ops on `!dragging`. */
+  private resetDrag(): void {
+    this.dragArmed = null;
+    this.dragStarting = false;
+    this.dragging = false;
+    this.dragLastSeq = 0;
+    this.dragBase = [];
+    this.dragPlane = null;
+    this.pendingTarget = null;
+    this.dragEndPending = null;
+  }
+
   private updateGhost(preview: DraftEntity[], cursor: Point2): void {
     const line = preview.find((d) => d.type === "Line" && !d.construction && d.p0 && d.p1);
     if (!line || !line.p0 || !line.p1) {
@@ -496,6 +748,13 @@ export class SketchController {
       return;
     }
     if (e.key === "Alt") this.altHeld = true;
+    if (e.key === "Escape" && this.selectActive && (this.dragging || this.dragStarting)) {
+      // Cancel the in-flight drag here; don't let the global Esc ladder run.
+      this.cancelSelectDrag();
+      e.stopPropagation();
+      e.preventDefault();
+      return;
+    }
     if (e.key === "Escape" && this.dimensionActive && (this.dimState.ready || this.dimState.pending)) {
       // Cancel the in-flight dimension here; don't let the global Esc ladder run.
       this.cancelDimension();

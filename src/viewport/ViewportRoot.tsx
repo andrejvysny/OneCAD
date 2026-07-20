@@ -23,6 +23,7 @@ import { settingsStore } from "@/stores/settingsStore";
 import { toolStore } from "@/stores/toolStore";
 import { selectionStore, topoRefId, type EntityRef } from "@/stores/selectionStore";
 import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
+import { sketchStore } from "@/stores/sketchStore";
 import { createClient } from "@/ipc/client";
 import {
   emitMockDocumentChanged,
@@ -236,10 +237,25 @@ export function ViewportRoot({ className }: { className?: string }) {
 
         // ── Sketch selection store → live SketchObject (edit-mode recolor) ──
         // No-op off sketch mode (setSketch* are guarded on the sketch presence).
+        // Hover union rule: entity hover (`s.hover`, set by pointer-hover over
+        // canvas geometry) and constraint-row hover (`s.constraintHover`, set by
+        // ConstraintList mouseenter) can both be live at once — deterministically,
+        // entity hover WINS when both are set (it is the more specific, pointer-
+        // driven signal); constraint hover only drives the highlight when there is
+        // no entity hover. The constraint's entity ids are resolved from the LIVE
+        // sketchStore session (not a stale snapshot) each time either store fires.
         const applySketchSelection = () => {
           const s = sketchSelectionStore.getState();
           engine.setSketchSelection(s.selected.map((sel) => sel.entityId));
-          engine.setSketchHover(s.hover ? [s.hover.entityId] : []);
+          if (s.hover) {
+            engine.setSketchHover([s.hover.entityId]);
+          } else if (s.constraintHover) {
+            const session = sketchStore.getState().session;
+            const constraint = session?.constraints.find((c) => c.id === s.constraintHover);
+            engine.setSketchHover(constraint?.entities ?? []);
+          } else {
+            engine.setSketchHover([]);
+          }
         };
         applySketchSelection();
         cleanups.push(sketchSelectionStore.subscribe(applySketchSelection));

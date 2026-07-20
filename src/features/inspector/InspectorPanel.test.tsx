@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { render, screen, act } from "@testing-library/react";
+import { render, screen, act, fireEvent } from "@testing-library/react";
 import { InspectorPanel } from "./InspectorPanel";
 import { selectionStore } from "@/stores/selectionStore";
 import { toolStore } from "@/stores/toolStore";
@@ -18,6 +18,8 @@ function sessionWithConstraints(constraints: SketchConstraint[]): SketchSession 
     status: "UnderConstrained",
   };
 }
+
+const flush = () => new Promise((r) => setTimeout(r, 0));
 
 describe("InspectorPanel", () => {
   beforeEach(() => resetStores());
@@ -50,7 +52,7 @@ describe("InspectorPanel", () => {
     expect(screen.getByText("Nothing selected")).toBeInTheDocument();
   });
 
-  it("shows the SKETCH state (DOF card + live constraints) in sketch mode", () => {
+  it("shows the SKETCH state (DOF card + one row per live constraint) in sketch mode", () => {
     render(<InspectorPanel />);
     act(() => {
       toolStore.getState().setMode("sketch", "sketch2");
@@ -63,6 +65,7 @@ describe("InspectorPanel", () => {
           { id: "c4", type: "Coincident", entities: ["p7", "p8"] },
           { id: "c5", type: "Horizontal", entities: ["l1"] },
           { id: "c6", type: "Distance", entities: ["p1", "p2"], value: 90 },
+          { id: "c7", type: "Angle", entities: ["l1", "l2"], value: 30 },
         ]),
       );
     });
@@ -70,9 +73,15 @@ describe("InspectorPanel", () => {
     expect(screen.getByText("Sketch 2")).toBeInTheDocument();
     expect(screen.getByText("Under-constrained · DOF 3")).toBeInTheDocument();
     expect(screen.getByText("Constraints")).toBeInTheDocument();
-    expect(screen.getByText("Coincident")).toBeInTheDocument();
-    expect(screen.getByText("×4")).toBeInTheDocument();
-    expect(screen.getByText("Distance 90.00")).toBeInTheDocument();
+    // One row per constraint now (grouping/counting is gone) — 4 Coincident rows
+    // plus Horizontal/Distance/Angle, each its own row with its own value column.
+    expect(screen.getAllByTestId(/^constraint-row-/)).toHaveLength(7);
+    expect(screen.getAllByText("Coincident")).toHaveLength(4);
+    expect(screen.getByText("Horizontal")).toBeInTheDocument();
+    expect(screen.getByText("Distance")).toBeInTheDocument();
+    expect(screen.getByText("90.0")).toBeInTheDocument();
+    expect(screen.getByText("Angle")).toBeInTheDocument();
+    expect(screen.getByText("30.0°")).toBeInTheDocument();
     expect(
       screen.getByText(/degrees of freedom remain/),
     ).toBeInTheDocument();
@@ -86,5 +95,27 @@ describe("InspectorPanel", () => {
     });
     expect(screen.getByText("No constraints yet.")).toBeInTheDocument();
     expect(screen.queryByText("Coincident")).toBeNull();
+  });
+
+  it("wires each row's delete button to deleteConstraints (re-solves + drops the row)", async () => {
+    render(<InspectorPanel />);
+    act(() => {
+      toolStore.getState().setMode("sketch", "sketch2");
+      sketchStore.getState().setSession(
+        sessionWithConstraints([
+          { id: "c1", type: "Coincident", entities: ["p1", "p2"] },
+          { id: "c2", type: "Horizontal", entities: ["l1"] },
+        ]),
+      );
+    });
+    expect(screen.getByTestId("constraint-row-c2")).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("constraint-delete-c2"));
+      await flush();
+    });
+
+    expect(sketchStore.getState().session!.constraints.map((c) => c.id)).toEqual(["c1"]);
+    expect(screen.queryByTestId("constraint-row-c2")).toBeNull();
   });
 });

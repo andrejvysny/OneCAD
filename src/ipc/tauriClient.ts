@@ -587,13 +587,17 @@ export function createTauriClient(): CadClient {
     const dto = await call<DragSolveDto>(CMD.solveDrag, { target });
     if (dto.superseded || dto.seq <= dragMaxSeq) return null; // stale — drop
     dragMaxSeq = dto.seq;
+    // Reverse-map backend point UUIDs → frontend `entityId.point` keys, same as
+    // endGesture — the drag PREVIEW consumes these per frame, and unmapped keys
+    // would silently move nothing against the real worker.
+    const map = dragSketchId ? sketchMaps.get(dragSketchId) : undefined;
     return {
       gestureId: dto.gestureId,
       seq: dto.seq,
       status: dto.status,
       dof: dto.dof,
       conflicting: dto.conflicting,
-      positions: dto.positions,
+      positions: map ? frontendSolvedPositions(map, dto.positions) : dto.positions,
       solveMicros: dto.solveMicros,
       superseded: dto.superseded,
     };
