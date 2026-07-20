@@ -1,4 +1,18 @@
-# OneCAD-Tauri — Current State (2026-07-19)
+# OneCAD-Tauri — Current State (2026-07-20, AC-USABILITY shipped)
+
+## AC-USABILITY (2026-07-20) — sketch/extrude usability gap-closure, 3 waves, all gates passed
+Frontend interaction layer completed: sketch entity selection+hover, select tool
+w/ point-handle drag via the real gesture lane, entity+constraint deletion
+(Delete key + per-row ConstraintList), user-applicable constraints (toolbar pill
++ context chips, applicability matrix ported from C++), Trim + Mirror tools,
+multi-region extrude/revolve pick. Five cross-layer bugs fixed: Tangent
+wire-dropped, angle deg/rad (3 sites), OverConstrained never emitted,
+orphan points on delete, re-entry representation split (centerRef ownership).
+Plus: extrude auto-arm ordering, real-worker drag-preview reverse map, e2e port
+collision. New proofs: sketch_reentry/sketch_edit/sketch_constraints real-worker
+gates, hole-extrude volume ctest, Playwright e2e 6 specs (harness net-new).
+Suites: FE 832 vitest, Rust workspace green vs real worker, ctest 65, e2e 6/6.
+REMAINING: user manual Mac gate (`npm run tauri dev` — TODO.md checklist).
 
 Non-destructive migration of OneCAD-CPP (~69k LOC C++20 Qt6+OCCT) into a 4-layer
 Tauri app per NEW_SPEC.md. Tracker: `TODO.md` (per-WP gates + flags). OneCAD-CPP
