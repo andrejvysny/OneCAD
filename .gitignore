@@ -41,3 +41,6 @@ blob-report/
 *.njsproj
 *.sln
 *.sw?
+
+# graphify knowledge graph (rebuild locally: /graphify .)
+graphify-out/
