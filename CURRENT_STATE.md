@@ -1,4 +1,25 @@
-# OneCAD-Tauri — Current State (2026-07-20, AC-USABILITY shipped)
+# OneCAD-Tauri — Current State (2026-07-22, SKETCH-HARDEN shipped)
+
+## SKETCH-HARDEN (2026-07-21/22) — sketch production hardening + UX, 6 waves, all gates passed
+Plan Codex-reviewed (terra/high, "revise" → all findings folded). W0: Rust
+squash-at-finish txn (whole sketch session = ONE model undo step), FE mutation
+coordinator (generation fencing, transactional id-map, finish flush barrier),
+sketch-scoped ⌘Z (snapshot stack, coalesced dim edits), dimension validation
+(FE+Rust, H/V-Distance stays signed), zoom-normalized degeneracy guards,
+dispose parity. W1 (protocol, signed off): per-constraint conflict ids on every
+solve surface incl. session re-enter — rows/badges tint, reject hints name the
+clashing constraint; fixed latent solveDrag raw-UUID bug. W2: Finish≠Cancel,
+statusHint severity/sticky/4s auto-dismiss (all ~76 sites classified), line
+chain Enter-end + click-first-close, formatDimensionValue 3dp, badge stagger,
+glyph single-source, bodies dim 0.35 in sketch, crosshair cursors, mirror
+hover. W3 (reviewed, APPROVE): REAL parametric trim (param-space crossings,
+doomed-piece destructive hover ghost, whole-delete fallback). W4: snap
+candidate cache (O(n²) intersections once per edit, equivalence-proven).
+W5: draw-path integration tests, +5 e2e specs (23 total), angleUnits tests,
+flake root-cause fix, stale-comment/debt cleanup.
+Suites: FE 1065 vitest, Rust 406 vs real worker, ctest 65, e2e 23/23, clippy/
+fmt/hex clean. Commits f8deef1→d619f53 (5 wave gates).
+REMAINING: user manual Mac gate — TODO.md SKETCH-HARDEN checklist.
 
 ## AC-USABILITY (2026-07-20) — sketch/extrude usability gap-closure, 3 waves, all gates passed
 Frontend interaction layer completed: sketch entity selection+hover, select tool
