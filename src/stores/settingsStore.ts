@@ -5,6 +5,7 @@
  */
 import { createStore, useStore } from "zustand";
 import { persist } from "zustand/middleware";
+import type { DevicePref } from "@/viewport/engine/navInput";
 
 export interface SnapSettings {
   grid: boolean;
@@ -25,6 +26,17 @@ export interface ShowSettings {
   snappingHints: boolean;
 }
 
+export interface NavigationSettings {
+  /**
+   * How wheel events are routed. "auto" runs the best-effort trackpad/mouse
+   * heuristic; the explicit values pin it when the heuristic guesses wrong.
+   * Only the PREFERENCE is persisted — the live detection is runtime state on
+   * viewportStore, because persisting a heuristic result across sessions would
+   * reintroduce the stale-classification bug it exists to avoid.
+   */
+  inputDevice: DevicePref;
+}
+
 export type SnapKey = keyof SnapSettings;
 export type ShowKey = keyof ShowSettings;
 
@@ -36,9 +48,11 @@ export interface SettingsState {
    * false — WebGL is the tested path. Gates the WebGPU code path in renderer.ts.
    */
   experimentalWebGpu: boolean;
+  navigation: NavigationSettings;
   setSnap(key: SnapKey, value: boolean): void;
   setShow(key: ShowKey, value: boolean): void;
   setExperimentalWebGpu(value: boolean): void;
+  setInputDevice(value: DevicePref): void;
 }
 
 /** Versioned localStorage key (bump `version` on a breaking shape change). */
@@ -62,6 +76,7 @@ export const settingsStore = createStore<SettingsState>()(
         snappingHints: true,
       },
       experimentalWebGpu: false,
+      navigation: { inputDevice: "auto" },
       setSnap(key, value) {
         set((s) => ({ snapTo: { ...s.snapTo, [key]: value } }));
       },
@@ -71,13 +86,17 @@ export const settingsStore = createStore<SettingsState>()(
       setExperimentalWebGpu(value) {
         set({ experimentalWebGpu: value });
       },
+      setInputDevice(value) {
+        set((s) => ({ navigation: { ...s.navigation, inputDevice: value } }));
+      },
     }),
     {
       name: STORAGE_KEY,
-      version: 2,
+      version: 3,
       // v1 → v2 added the M6c snap types (quadrant / intersection / onCurve).
       // A v1 blob has no keys for them; backfill the on-by-default values so an
       // existing user's popover shows them enabled (parity with a fresh install).
+      // v2 → v3 added the navigation section.
       migrate: (persisted, version) => {
         const s = persisted as Partial<SettingsState>;
         if (s && version < 2) {
@@ -87,6 +106,9 @@ export const settingsStore = createStore<SettingsState>()(
             onCurve: true,
             ...(s.snapTo as Partial<SnapSettings>),
           } as SnapSettings;
+        }
+        if (s && version < 3) {
+          s.navigation = { inputDevice: "auto", ...(s.navigation as Partial<NavigationSettings>) };
         }
         return s as unknown as SettingsState;
       },

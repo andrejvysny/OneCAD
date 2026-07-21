@@ -8,6 +8,7 @@
  */
 import { createStore, useStore } from "zustand";
 import { getViewportEngine } from "@/viewport/engineBridge";
+import type { InputDevice } from "@/viewport/engine/navInput";
 
 export type Projection = "persp" | "ortho";
 export type DisplayMode = "shaded" | "shadedEdges" | "wireframe";
@@ -26,6 +27,13 @@ export interface ViewportState {
   gridVisible: boolean;
   activeSketchId: string | null;
   cameraViewLabel: string;
+  /**
+   * What the wheel heuristic currently believes the input device is. RUNTIME
+   * ONLY — never persisted (a stale classification is exactly the bug the
+   * per-segment classifier avoids). Shown as the "Auto" sublabel so a wrong
+   * guess is visible instead of mysterious.
+   */
+  detectedInputDevice: InputDevice;
   fov: number;
   cursor: CursorCoords;
   /** Current DOF count the shell displays (mirrors the active sketch solver). */
@@ -43,6 +51,7 @@ export interface ViewportState {
   setCursor(c: CursorCoords): void;
   /** Engine → store: canonical view name (TOP/FRONT/…/ISO/—). */
   setCameraViewLabel(label: string): void;
+  setDetectedInputDevice(device: InputDevice): void;
   /** Set/clear a transient status-bar hint. */
   setStatusHint(hint: string | null): void;
   /** Dispatch to the live viewport engine (no-op until it mounts). */
@@ -58,6 +67,7 @@ export const viewportStore = createStore<ViewportState>()((set) => ({
   gridVisible: true,
   activeSketchId: null,
   cameraViewLabel: "TOP",
+  detectedInputDevice: "mouse",
   fov: 76,
   cursor: { x: 273, y: 210, z: 0 },
   dofBadge: null,
@@ -91,6 +101,9 @@ export const viewportStore = createStore<ViewportState>()((set) => ({
     set({ cursor: c });
   },
 
+  setDetectedInputDevice(device) {
+    set({ detectedInputDevice: device });
+  },
   setCameraViewLabel(label) {
     set({ cameraViewLabel: label });
   },

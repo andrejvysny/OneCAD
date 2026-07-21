@@ -35,6 +35,7 @@ export function resetStores(): void {
     fov: 76,
     cursor: { x: 273, y: 210, z: 0 },
     dofBadge: null,
+    detectedInputDevice: "mouse",
     statusHint: null,
     pendingExtrudeSketch: null,
   });
@@ -51,6 +52,7 @@ export function resetStores(): void {
       distantEdges: false,
     },
     show: { guidePoints: true, snappingHints: true },
+    navigation: { inputDevice: "auto" },
   });
   sketchStore.getState().reset();
   toolChipStore.getState().clear();

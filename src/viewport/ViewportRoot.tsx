@@ -21,6 +21,7 @@ import { viewLabelForDirection } from "@/features/viewcube/ViewCube";
 import { viewportStore } from "@/stores/viewportStore";
 import { settingsStore } from "@/stores/settingsStore";
 import { toolStore } from "@/stores/toolStore";
+import { installInputProbe } from "./debug/inputProbe";
 import { selectionStore, topoRefId, type EntityRef } from "@/stores/selectionStore";
 import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
 import { sketchStore } from "@/stores/sketchStore";
@@ -116,6 +117,15 @@ export function ViewportRoot({ className }: { className?: string }) {
         experimentalWebGpu: settingsStore.getState().experimentalWebGpu,
         debug: hasFlag("vpdebug"),
         gridVisible: viewportStore.getState().gridVisible,
+        // Read live so a preference change takes effect without a remount.
+        getDevicePref: () => settingsStore.getState().navigation.inputDevice,
+        // Model-tool drags (extrude depth, fillet radius, revolve angle) project
+        // the pointer against the current camera, so a wheel-orbit mid-drag
+        // would make the dragged value jump. Sketch drags re-raycast the plane
+        // each move and are unaffected, so they are deliberately not gated.
+        isDragActive: () => toolStore.getState().phase === "dragging",
+        onDeviceChange: (device) =>
+          viewportStore.getState().setDetectedInputDevice(device),
       })
       .then(() => {
         if (cancelled) {
@@ -129,6 +139,11 @@ export function ViewportRoot({ className }: { className?: string }) {
         const client = createClient();
         const meshIngest = new MeshIngest();
         meshIngest.attach(engine, client);
+        // ?inputprobe — TEMPORARY wheel/gesture diagnostic. Remove with the probe.
+        if (hasFlag("inputprobe")) {
+          cleanups.push(installInputProbe(container));
+        }
+
         cleanups.push(() => meshIngest.detach());
 
         // ── Always-visible document sketches in MODEL mode (Fusion-style) ──

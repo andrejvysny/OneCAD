@@ -1,12 +1,26 @@
 /*
  * CadOrbitControls — a small custom orbit controller (no three examples dep).
  *
- *   LMB / 1-finger drag  = turntable orbit: yaw about WORLD Z, pitch clamped to
+ * MOUSE
+ *   LMB drag             = turntable orbit: yaw about WORLD Z, pitch clamped to
  *                          ±(90° − ε). Orbit is SUPPRESSED when the drag starts on
  *                          pickable geometry (that gesture is a selection click);
  *                          dragging from empty space orbits (`hitTest` seam).
- *   MMB / 2-finger drag  = pan in the view plane.
- *   Wheel / pinch        = zoom-to-cursor dolly (persp) / frustum zoom (ortho).
+ *   MMB / RMB drag       = pan in the view plane.
+ *   Wheel                = zoom-to-cursor dolly (persp) / frustum zoom (ortho).
+ *
+ * TRACKPAD (macOS + Windows precision touchpads — the Fusion 360 convention)
+ *   two-finger scroll         = pan
+ *   shift + two-finger scroll = orbit
+ *   pinch                     = zoom-to-cursor
+ *
+ * Touch: 1-finger drag orbits, 2-finger drag pans + pinch-zooms.
+ *
+ * Wheel and WebKit gesture events carry no device identity, so all routing —
+ * trackpad-vs-mouse detection, gesture segmentation, modifier latching and
+ * pinch-source arbitration — lives in the pure `navInput` reducer. This class
+ * is only an adapter: DOM event → NavEvent → navReduce → apply the NavOp.
+ *
  *   Home                 = animated iso view (250ms).
  *   Fit                  = frame the scene bbox (animated).
  *
@@ -15,6 +29,25 @@
  */
 import * as THREE from "three";
 import type { CameraRig } from "./CameraRig";
+import {
+  navInit,
+  navReduce,
+  type DevicePref,
+  type InputDevice,
+  type NavEvent,
+  type NavState,
+} from "./navInput";
+
+/**
+ * WebKit's proprietary pinch/rotate gesture events (Safari + WKWebView, which is
+ * what Tauri embeds on macOS). Not in lib.dom, so declare the shape we read.
+ */
+interface WebKitGestureEvent extends UIEvent {
+  readonly scale: number;
+  readonly rotation: number;
+  readonly clientX: number;
+  readonly clientY: number;
+}
 
 // ---- Pure math helpers (unit-tested) -------------------------------------
 
@@ -68,11 +101,29 @@ export function easeInOutCubic(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 }
 
+/**
+ * Heading a TOP/BOTTOM view snaps to. Looking straight down a pole the offset
+ * has no horizontal component, so yaw carries no information — `atan2(0, 0)`
+ * would silently pick 0 and give a sideways TOP. −90° is the conventional CAD
+ * top: X to the right, Y up.
+ */
+const CANONICAL_POLE_YAW = -Math.PI / 2;
+/** Below this horizontal component, a direction counts as straight down a pole. */
+const POLE_EPS = 1e-6;
+
+/**
+ * Yaw for a target→camera direction. Falls back to the canonical heading only
+ * when the direction is an exact pole, where yaw is undefined — an ordinary
+ * near-pole orbit still uses its real yaw and is never re-aligned.
+ */
+export function yawForDirection(d: THREE.Vector3): number {
+  return Math.hypot(d.x, d.y) < POLE_EPS ? CANONICAL_POLE_YAW : Math.atan2(d.y, d.x);
+}
+
 // ---- Controller ----------------------------------------------------------
 
 const ORBIT_SPEED = 0.008;
 const PAN_SENS = 1.4;
-const ZOOM_SENS = 0.0015;
 const TWEEN_MS = 250;
 const ISO_YAW = -Math.PI / 4;
 const ISO_PITCH = Math.atan(1 / Math.SQRT2); // ~35.26°
@@ -103,6 +154,20 @@ export interface OrbitOptions {
    * click). Absent ⇒ LMB always orbits (previous behaviour).
    */
   hitTest?: (clientX: number, clientY: number) => boolean;
+  /** User's input-device preference. Absent ⇒ "auto". */
+  getDevicePref?: () => DevicePref;
+  /**
+   * True while a tool drag is IN FLIGHT (extrude depth, fillet radius, revolve
+   * angle…). Those drags project the pointer against the current camera, so
+   * moving it mid-drag makes the value jump — wheel-orbit is gated on this.
+   *
+   * Deliberately NOT `lmbOrbitSuppressed`: that flag is also set while a tool is
+   * merely ARMED, and orbiting to look around while armed is expected CAD
+   * behaviour that must keep working.
+   */
+  isDragActive?: () => boolean;
+  /** Fires only when the detected device changes (drives the "Auto" label). */
+  onDeviceChange?: (device: InputDevice) => void;
 }
 
 export class CadOrbitControls {
@@ -111,6 +176,9 @@ export class CadOrbitControls {
   private readonly onChange: () => void;
   private readonly getBounds: () => THREE.Box3 | null;
   private readonly hitTest: ((x: number, y: number) => boolean) | null;
+  private readonly getDevicePref: () => DevicePref;
+  private readonly isDragActive: () => boolean;
+  private readonly onDeviceChange: ((device: InputDevice) => void) | null;
 
   target = new THREE.Vector3(0, 0, 0);
   yaw = ISO_YAW;
@@ -118,6 +186,8 @@ export class CadOrbitControls {
   distance = 260;
 
   private readonly pointers = new Map<number, THREE.Vector2>();
+  /** Last seen pointer position — the pinch-origin fallback. */
+  private lastPointer: { x: number; y: number } | null = null;
   private button = -1;
   private lastPinch = 0;
   private tween: Tween | null = null;
@@ -125,6 +195,9 @@ export class CadOrbitControls {
   private orbitSuppressed = false;
   /** Sticky suppression of LMB orbit (sketch drawing tools own LMB). */
   private lmbOrbitSuppressed = false;
+  /** Pure reducer state for wheel + gesture routing. */
+  private nav: NavState = navInit();
+  private lastDevice: InputDevice | null = null;
 
   constructor(opts: OrbitOptions) {
     this.rig = opts.rig;
@@ -132,12 +205,20 @@ export class CadOrbitControls {
     this.onChange = opts.onChange;
     this.getBounds = opts.getBounds;
     this.hitTest = opts.hitTest ?? null;
+    this.getDevicePref = opts.getDevicePref ?? (() => "auto");
+    this.isDragActive = opts.isDragActive ?? (() => false);
+    this.onDeviceChange = opts.onDeviceChange ?? null;
     this.el.addEventListener("pointerdown", this.onPointerDown);
     this.el.addEventListener("pointermove", this.onPointerMove);
     this.el.addEventListener("pointerup", this.onPointerUp);
     this.el.addEventListener("pointercancel", this.onPointerUp);
     this.el.addEventListener("wheel", this.onWheel, { passive: false });
     this.el.addEventListener("contextmenu", this.preventContext);
+    // WebKit pinch (Safari / WKWebView — i.e. Tauri on macOS). preventDefault on
+    // these is what stops the webview magnifying the whole page.
+    this.el.addEventListener("gesturestart", this.onGesture, { passive: false });
+    this.el.addEventListener("gesturechange", this.onGesture, { passive: false });
+    this.el.addEventListener("gestureend", this.onGesture, { passive: false });
   }
 
   getDistance(): number {
@@ -180,6 +261,7 @@ export class CadOrbitControls {
   };
 
   private onPointerMove = (e: PointerEvent): void => {
+    this.lastPointer = { x: e.clientX, y: e.clientY };
     const prev = this.pointers.get(e.pointerId);
     if (!prev) return;
     const dx = e.clientX - prev.x;
@@ -191,8 +273,8 @@ export class CadOrbitControls {
       this.applyPinchZoom(this.pinchDistance());
       return;
     }
-    // Middle button pans; left button orbits.
-    if (this.button === 1) this.pan(dx, dy);
+    // Middle and right buttons pan (CAD convention); left button orbits.
+    if (this.button === 1 || this.button === 2) this.pan(dx, dy);
     else this.orbit(dx, dy);
   };
 
@@ -209,10 +291,75 @@ export class CadOrbitControls {
   };
 
   private onWheel = (e: WheelEvent): void => {
-    e.preventDefault();
-    const factor = clampFactor(Math.exp(e.deltaY * ZOOM_SENS));
-    this.zoomAtScreen(e.clientX, e.clientY, factor);
+    if (e.cancelable) e.preventDefault();
+    this.dispatchNav({
+      type: "wheel",
+      deltaX: e.deltaX,
+      deltaY: e.deltaY,
+      deltaMode: e.deltaMode,
+      ctrlKey: e.ctrlKey,
+      shiftKey: e.shiftKey,
+      clientX: e.clientX,
+      clientY: e.clientY,
+      t: e.timeStamp,
+    });
   };
+
+  /** WebKit `gesturestart`/`gesturechange`/`gestureend` — macOS trackpad pinch. */
+  private onGesture = (e: Event): void => {
+    if (e.cancelable) e.preventDefault();
+    const g = e as WebKitGestureEvent;
+    if (e.type === "gestureend") {
+      this.dispatchNav({ type: "gestureend", t: e.timeStamp });
+      return;
+    }
+    // If the embedded webview ever omits coordinates, fall back to the last
+    // pointer position so pinch still zooms somewhere sensible rather than (0,0).
+    const at = this.gestureOrigin(g);
+    this.dispatchNav({
+      type: e.type === "gesturestart" ? "gesturestart" : "gesturechange",
+      scale: g.scale,
+      clientX: at.x,
+      clientY: at.y,
+      t: e.timeStamp,
+    });
+  };
+
+  private gestureOrigin(g: WebKitGestureEvent): { x: number; y: number } {
+    if (Number.isFinite(g.clientX) && Number.isFinite(g.clientY) && (g.clientX || g.clientY)) {
+      return { x: g.clientX, y: g.clientY };
+    }
+    if (this.lastPointer) return { x: this.lastPointer.x, y: this.lastPointer.y };
+    const rect = this.el.getBoundingClientRect();
+    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  }
+
+  /** Feed the reducer and apply whatever operation it returns. */
+  private dispatchNav(ev: NavEvent): void {
+    const { state, op, detected } = navReduce(this.nav, ev, {
+      pref: this.getDevicePref(),
+      viewportH: this.el.clientHeight,
+    });
+    this.nav = state;
+    if (detected !== this.lastDevice) {
+      this.lastDevice = detected;
+      this.onDeviceChange?.(detected);
+    }
+    if (!op) return;
+    switch (op.kind) {
+      case "pan":
+        // Wheel deltas are scroll-direction; pan() takes drag-direction.
+        this.pan(-op.dx, -op.dy);
+        break;
+      case "orbit":
+        // A camera move mid-drag would make the dragged value jump.
+        if (!this.isDragActive()) this.applyOrbit(op.dx, op.dy);
+        break;
+      case "zoom":
+        this.zoomAtScreen(op.clientX, op.clientY, op.factor);
+        break;
+    }
+  }
 
   private preventContext = (e: Event): void => e.preventDefault();
 
@@ -223,10 +370,20 @@ export class CadOrbitControls {
     this.lmbOrbitSuppressed = suppressed;
   }
 
+  /** LMB-drag orbit — gated by the pointer-gesture suppression flags. */
   private orbit(dx: number, dy: number): void {
     if (this.orbitSuppressed || this.lmbOrbitSuppressed) return; // gesture started on geometry / sketch tool
-    this.yaw -= dx * ORBIT_SPEED;
-    this.pitch = clampPitch(this.pitch + dy * ORBIT_SPEED);
+    this.applyOrbit(dx, dy);
+  }
+
+  /**
+   * The orbit math itself, ungated. Shift+scroll orbit routes here directly: the
+   * suppression flags above exist to stop an LMB DRAG from orbiting while a tool
+   * owns the pointer, and a wheel gesture cannot collide with a pointer drag.
+   */
+  private applyOrbit(dx: number, dy: number): void {
+    this.yaw += dx * ORBIT_SPEED;
+    this.pitch = clampPitch(this.pitch - dy * ORBIT_SPEED);
     this.commit();
   }
 
@@ -331,7 +488,7 @@ export class CadOrbitControls {
   /** Snap to a canonical view given a target→camera direction (ViewCube). */
   snapToViewDirection(dir: THREE.Vector3): void {
     const d = dir.clone().normalize();
-    const yaw = Math.atan2(d.y, d.x);
+    const yaw = yawForDirection(d);
     const pitch = clampPitch(Math.asin(Math.max(-1, Math.min(1, d.z))));
     this.animateTo({ yaw, pitch, distance: this.distance, target: this.target.clone() });
   }
@@ -354,7 +511,7 @@ export class CadOrbitControls {
    */
   viewAlongNormal(normal: THREE.Vector3, target: THREE.Vector3, distance: number, animated = true): void {
     const d = normal.clone().normalize();
-    const yaw = Math.atan2(d.y, d.x);
+    const yaw = yawForDirection(d);
     const pitch = clampPitch(Math.asin(Math.max(-1, Math.min(1, d.z))));
     this.setView({ yaw, pitch, distance, target: target.clone() }, animated);
   }
@@ -400,7 +557,13 @@ export class CadOrbitControls {
     this.el.removeEventListener("pointercancel", this.onPointerUp);
     this.el.removeEventListener("wheel", this.onWheel);
     this.el.removeEventListener("contextmenu", this.preventContext);
+    this.el.removeEventListener("gesturestart", this.onGesture);
+    this.el.removeEventListener("gesturechange", this.onGesture);
+    this.el.removeEventListener("gestureend", this.onGesture);
     this.pointers.clear();
+    this.lastPointer = null;
+    this.nav = navInit();
+    this.lastDevice = null;
     this.tween = null;
   }
 }

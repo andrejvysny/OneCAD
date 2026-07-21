@@ -10,12 +10,14 @@ if (import.meta.env.DEV) {
     import("./stores/sketchStore"),
     import("./stores/viewportStore"),
     import("./stores/toolStore"),
-  ]).then(([doc, sketch, viewport, tool]) => {
+    import("./stores/settingsStore"),
+  ]).then(([doc, sketch, viewport, tool, settings]) => {
     (window as unknown as Record<string, unknown>).__stores = {
       document: doc.documentStore,
       sketch: sketch.sketchStore,
       viewport: viewport.viewportStore,
       tool: tool.toolStore,
+      settings: settings.settingsStore,
     };
   });
 }

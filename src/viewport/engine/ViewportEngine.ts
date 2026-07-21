@@ -21,6 +21,7 @@ import * as THREE from "three";
 import { createRenderer, type RendererHandle } from "./renderer";
 import { CameraRig, type ProjectionKind } from "./CameraRig";
 import { CadOrbitControls } from "./CadOrbitControls";
+import type { DevicePref, InputDevice } from "./navInput";
 import { GridPlane } from "./GridPlane";
 import { OriginTriad } from "./OriginTriad";
 import { HtmlOverlayDriver } from "./HtmlOverlayDriver";
@@ -56,6 +57,10 @@ export interface EngineInitOptions {
   /** ?vpdebug — expose window.__vpFrames + a debug overlay label. */
   debug?: boolean;
   gridVisible?: boolean;
+  /** Navigation seams — supplied by the bridge so the engine stays store-agnostic. */
+  getDevicePref?: () => DevicePref;
+  isDragActive?: () => boolean;
+  onDeviceChange?: (device: InputDevice) => void;
 }
 
 /** Store-wiring seam the viewport bridge supplies for picking (engine stays store-agnostic). */
@@ -208,6 +213,9 @@ export class ViewportEngine {
         (this.picker?.hasHitAt(x, y) ?? false) ||
         this.hitExtrudeHandle(x, y) ||
         (this.planePicker?.visible === true && this.planePickerHitTest(x, y) !== null),
+      getDevicePref: opts.getDevicePref,
+      isDragActive: opts.isDragActive,
+      onDeviceChange: opts.onDeviceChange,
     });
 
     this.highlights = new HighlightLayer({
@@ -272,6 +280,9 @@ export class ViewportEngine {
     canvas.style.width = "100%";
     canvas.style.height = "100%";
     canvas.style.display = "block";
+    // Without this the browser may claim touch pan/pinch before pointer events
+    // fire, fighting the controller's own 2-pointer handling.
+    canvas.style.touchAction = "none";
     container.appendChild(canvas);
     return canvas;
   }
