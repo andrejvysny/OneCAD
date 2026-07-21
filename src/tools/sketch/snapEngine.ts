@@ -80,6 +80,37 @@ export interface SnapOptions {
   suppress: boolean;
   /** Extra reference points for H/V alignment (e.g. the current chain anchor). */
   recentPoints?: Point2[];
+  /**
+   * Precomputed entity-derived candidates from `buildSnapCache(entities)`. When
+   * present, `computeSnap` skips re-deriving guide/quadrant/intersection points
+   * from `entities` (the O(n²) all-pairs intersection scan in particular) and
+   * threshold-filters the cached lists instead — per-category, so the enable*
+   * toggles still gate exactly as they do without a cache. `onCurve` is cursor-
+   * dependent and always recomputed live, cache or not. Omitting this leaves
+   * behavior byte-identical to computing everything fresh every call.
+   */
+  cache?: SnapCandidateCache;
+}
+
+type CachedPointKind = "endpoint" | "midpoint" | "center" | "quadrant";
+
+interface CachedPointCandidate {
+  point: Point2;
+  kind: CachedPointKind;
+}
+
+/** Entity-derived snap candidates, precomputable once per sketch edit (the
+ *  entity arrays are replaced immutably on every commit — see `buildSnapCache`).
+ *  Everything here depends only on `entities`, never on the cursor. */
+export interface SnapCandidateCache {
+  /** Guide points (endpoint/midpoint/center) and quadrant points, kinds kept
+   *  distinct so per-category enable* toggles still gate correctly. */
+  points: CachedPointCandidate[];
+  /** All-pairs entity-entity intersection points (the O(n²) part). */
+  intersections: Point2[];
+  /** Entity-derived reference points for H/V alignment guides (recentPoints,
+   *  being cursor/chain-dependent, are never part of the cache). */
+  refs: Point2[];
 }
 
 /** Point-snap reach in screen pixels (the pixel-space analogue of the C++ 2mm
@@ -357,36 +388,57 @@ interface Ranked {
   tier: number;
 }
 
-function collectPointCandidates(raw: Point2, entities: SketchEntity[], opts: SnapOptions, threshold: number): Ranked[] {
+function collectPointCandidates(
+  raw: Point2,
+  entities: SketchEntity[],
+  opts: SnapOptions,
+  threshold: number,
+): Ranked[] {
   const out: Ranked[] = [];
   const consider = (point: Point2, kind: Ranked["kind"]): void => {
     const d = dist(raw, point);
     if (d <= threshold) out.push({ point, kind, d, tier: KIND_TIER[kind] });
   };
 
-  // endpoint / midpoint / center (gated by sketch-guide-points).
-  if (opts.enableGuidePoints) {
-    for (const e of entities) for (const c of entitySnapPoints(e)) consider(c.point, c.kind);
-  }
-  // quadrant.
-  if (opts.enableQuadrant ?? true) {
-    for (const e of entities) {
-      if (e.type === "Circle" && e.center && e.radius !== undefined) {
-        for (const q of circleQuadrantPoints(e.center, e.radius)) consider(q, "quadrant");
-      } else if (e.type === "Arc" && e.center && e.radius !== undefined && e.start && e.end) {
-        for (const q of arcQuadrantPoints(e.center, e.radius, e.start, e.end)) consider(q, "quadrant");
+  const cache = opts.cache;
+  if (cache) {
+    // endpoint / midpoint / center (gated by sketch-guide-points).
+    if (opts.enableGuidePoints) {
+      for (const c of cache.points) if (c.kind !== "quadrant") consider(c.point, c.kind);
+    }
+    // quadrant.
+    if (opts.enableQuadrant ?? true) {
+      for (const c of cache.points) if (c.kind === "quadrant") consider(c.point, "quadrant");
+    }
+    // intersection (all pairs, precomputed; only crossings near the cursor survive).
+    if (opts.enableIntersection ?? true) {
+      for (const p of cache.intersections) consider(p, "intersection");
+    }
+  } else {
+    // endpoint / midpoint / center (gated by sketch-guide-points).
+    if (opts.enableGuidePoints) {
+      for (const e of entities) for (const c of entitySnapPoints(e)) consider(c.point, c.kind);
+    }
+    // quadrant.
+    if (opts.enableQuadrant ?? true) {
+      for (const e of entities) {
+        if (e.type === "Circle" && e.center && e.radius !== undefined) {
+          for (const q of circleQuadrantPoints(e.center, e.radius)) consider(q, "quadrant");
+        } else if (e.type === "Arc" && e.center && e.radius !== undefined && e.start && e.end) {
+          for (const q of arcQuadrantPoints(e.center, e.radius, e.start, e.end)) consider(q, "quadrant");
+        }
+      }
+    }
+    // intersection (all pairs; only crossings near the cursor survive the threshold).
+    if (opts.enableIntersection ?? true) {
+      for (let i = 0; i < entities.length; i++) {
+        for (let j = i + 1; j < entities.length; j++) {
+          for (const p of entityIntersections(entities[i], entities[j])) consider(p, "intersection");
+        }
       }
     }
   }
-  // intersection (all pairs; only crossings near the cursor survive the threshold).
-  if (opts.enableIntersection ?? true) {
-    for (let i = 0; i < entities.length; i++) {
-      for (let j = i + 1; j < entities.length; j++) {
-        for (const p of entityIntersections(entities[i], entities[j])) consider(p, "intersection");
-      }
-    }
-  }
-  // onCurve (lowest point tier).
+  // onCurve (lowest point tier) — cursor-dependent, always live regardless of cache.
   if (opts.enableOnCurve ?? true) {
     for (const e of entities) {
       const p = nearestOnCurve(raw, e);
@@ -394,6 +446,40 @@ function collectPointCandidates(raw: Point2, entities: SketchEntity[], opts: Sna
     }
   }
   return out;
+}
+
+/**
+ * Precompute the entity-derived snap candidates once per sketch edit — guide
+ * points, quadrant points, and the O(n²) all-pairs intersection scan. Pass the
+ * result as `opts.cache` to `computeSnap` on every subsequent pointer move
+ * until `entities` changes (session entity arrays are replaced immutably on
+ * every commit, so reference equality is a valid invalidation key — see
+ * `SketchController.snapAt`). `onCurve` is intentionally excluded: it depends
+ * on the live cursor position and is recomputed every call either way.
+ */
+export function buildSnapCache(entities: SketchEntity[]): SnapCandidateCache {
+  const points: CachedPointCandidate[] = [];
+  const refs: Point2[] = [];
+  for (const e of entities) {
+    for (const c of entitySnapPoints(e)) {
+      points.push(c);
+      refs.push(c.point);
+    }
+  }
+  for (const e of entities) {
+    if (e.type === "Circle" && e.center && e.radius !== undefined) {
+      for (const q of circleQuadrantPoints(e.center, e.radius)) points.push({ point: q, kind: "quadrant" });
+    } else if (e.type === "Arc" && e.center && e.radius !== undefined && e.start && e.end) {
+      for (const q of arcQuadrantPoints(e.center, e.radius, e.start, e.end)) points.push({ point: q, kind: "quadrant" });
+    }
+  }
+  const intersections: Point2[] = [];
+  for (let i = 0; i < entities.length; i++) {
+    for (let j = i + 1; j < entities.length; j++) {
+      intersections.push(...entityIntersections(entities[i], entities[j]));
+    }
+  }
+  return { points, intersections, refs };
 }
 
 export function computeSnap(
@@ -419,7 +505,7 @@ export function computeSnap(
 
   // 3. H/V alignment guides from reference points.
   if (opts.enableGuideLines) {
-    const refs = referencePoints(entities, opts.recentPoints);
+    const refs = referencePoints(entities, opts.recentPoints, opts.cache);
     let vGuide: number | null = null; // constant x
     let hGuide: number | null = null; // constant y
     let vBest = threshold;
@@ -465,7 +551,8 @@ function xy(p: [number, number]): Point2 {
   return { x: p[0], y: p[1] };
 }
 
-function referencePoints(entities: SketchEntity[], recent: Point2[] = []): Point2[] {
+function referencePoints(entities: SketchEntity[], recent: Point2[] = [], cache?: SnapCandidateCache): Point2[] {
+  if (cache) return [...recent, ...cache.refs];
   const refs: Point2[] = [...recent];
   for (const e of entities) {
     for (const c of entitySnapPoints(e)) refs.push(c.point);

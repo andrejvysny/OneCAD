@@ -36,7 +36,7 @@ import { sketchStore } from "@/stores/sketchStore";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { applySolvedPositions } from "@/ipc/sketchWireMap";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
-import { computeSnap, SNAP_PX, type SnapResult } from "./snapEngine";
+import { buildSnapCache, computeSnap, SNAP_PX, type SnapCandidateCache, type SnapResult } from "./snapEngine";
 import { inferConstraints, inferHV, entityPoints } from "./autoConstrain";
 import { commitDimensionConstraint, enqueueSketchMutation, trimEntity } from "./sketchService";
 import type { SketchSnapshot } from "@/stores/sketchStore";
@@ -87,6 +87,14 @@ export class SketchController {
   private machineState: ToolState | null = null;
   private lastSnap: SnapResult | null = null;
   private altHeld = false;
+
+  // Entity-derived snap candidates (guide/quadrant/intersection points), rebuilt
+  // only when the session's entity array reference changes — session arrays are
+  // replaced immutably on every commit, so `!==` is a valid, cheap invalidation
+  // check that turns the O(n²) intersection scan from "every pointer move" into
+  // "once per sketch edit" (perf; see snapAt).
+  private snapCacheKey: SketchEntity[] | null = null;
+  private snapCache: SnapCandidateCache | null = null;
 
   // Dimension tool (non-drawing): a pick-accumulator FSM + its open chip.
   private dimensionActive = false;
@@ -297,6 +305,8 @@ export class SketchController {
     this.machine = null;
     this.machineState = null;
     this.lastSnap = null;
+    this.snapCache = null;
+    this.snapCacheKey = null;
     if (this.dimensionActive) this.cancelDimension();
     this.dimensionActive = false;
     this.resetDrag();
@@ -392,8 +402,16 @@ export class SketchController {
     const raw = this.deps.engine.screenToPlane(clientX, clientY);
     if (!raw) return null;
     const session = sketchStore.getState().session;
+    const sessionEntities = session?.entities ?? null;
+    // Reference-equality cache: a commit replaces the array (applySolvedPositions
+    // returns the SAME reference iff nothing moved), so this rebuilds only on an
+    // actual sketch edit, not on every rAF move.
+    if (sessionEntities !== this.snapCacheKey) {
+      this.snapCache = buildSnapCache(sessionEntities ?? []);
+      this.snapCacheKey = sessionEntities;
+    }
     const settings = settingsStore.getState();
-    return computeSnap(raw, session?.entities ?? [], {
+    return computeSnap(raw, sessionEntities ?? [], {
       gridStep: chooseGridStep(this.deps.engine.getCameraDistance()).minor,
       pixelWorld: this.deps.engine.planePixelWorld(),
       enableGrid: settings.snapTo.grid,
@@ -404,6 +422,7 @@ export class SketchController {
       enableOnCurve: settings.snapTo.onCurve,
       suppress: this.altHeld,
       recentPoints: this.machineState?.anchors ?? [],
+      cache: this.snapCache ?? undefined,
     });
   }
 
@@ -1111,6 +1130,8 @@ export class SketchController {
 
   dispose(): void {
     this.disposed = true; // set FIRST: guards every pending rAF + queued write-back
+    this.snapCache = null;
+    this.snapCacheKey = null;
     this.endPlanePick();
     sketchSelectionStore.getState().clear();
     if (this.dimensionActive) this.cancelDimension();

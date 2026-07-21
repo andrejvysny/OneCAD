@@ -991,6 +991,12 @@ pub fn sketch_upsert_args(sketch: &Sketch) -> Value {
 
 /// `BeginGesture.args` (SCHEMA §7.4). `drag_point` is the point entity being
 /// dragged — its wire handle is its uuid (points register under their id).
+///
+/// `solver_policy_hash` is RESERVED wire plumbing: always `""` today (the sole
+/// caller, `DocumentRuntime::begin_gesture`, hard-codes it) and never read by the
+/// worker's `SolverLane::on_begin`. Kept for future solver-policy pinning
+/// (client/worker solver-version mismatch guard) — do not remove; the wire slot
+/// is part of the §7.4 args shape. Tracked backlog item, no consumer yet.
 #[must_use]
 pub fn begin_gesture_args(
     sketch_id: &str,

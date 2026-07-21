@@ -1124,6 +1124,7 @@ impl DocumentRuntime {
                 solved.sketch_revision,
                 gesture_id,
                 drag_point,
+                // solverPolicyHash: reserved, always "" — see wire::begin_gesture_args.
                 "",
             )
             .await?;

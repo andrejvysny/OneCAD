@@ -294,6 +294,24 @@ export async function getSketchSnapshot(
 }
 
 /**
+ * Total entity count in the live sketch session, ANY type (Line/Rect-lines/
+ * Circle/Arc/Point) — unlike `getSketchSnapshot`, which only surfaces Lines.
+ * For degenerate-input specs that just need "did anything commit", regardless
+ * of which tool was armed. Same live-session requirement as `getSketchSnapshot`
+ * (call before leaving sketch mode).
+ */
+export async function getSketchEntityCount(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const w = window as unknown as {
+      __stores?: { sketch: { getState(): { session: { entities: unknown[] } | null } } };
+    };
+    const session = w.__stores?.sketch.getState().session;
+    if (!session) throw new Error("getSketchEntityCount: no live sketch session (call before finishing the sketch)");
+    return session.entities.length;
+  });
+}
+
+/**
  * Project a sketch-plane (u,v) coordinate to a CLIENT (page) pixel through the
  * live camera — the exact inverse of the engine's `screenToPlane` raycast.
  * Requires `window.__vpEngine` (see openEditorDebug). Plain mat4 math (world =

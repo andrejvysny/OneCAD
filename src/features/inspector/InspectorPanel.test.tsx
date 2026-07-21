@@ -5,6 +5,7 @@ import { selectionStore } from "@/stores/selectionStore";
 import { toolStore } from "@/stores/toolStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { resetStores } from "@/test/resetStores";
+import { flushSketchMutations } from "@/tools/sketch/sketchService";
 import type { SketchConstraint, SketchSession } from "@/ipc/types";
 
 /** A live sketch session carrying the constraints the inspector summarizes. */
@@ -18,8 +19,6 @@ function sessionWithConstraints(constraints: SketchConstraint[]): SketchSession 
     status: "UnderConstrained",
   };
 }
-
-const flush = () => new Promise((r) => setTimeout(r, 0));
 
 describe("InspectorPanel", () => {
   beforeEach(() => resetStores());
@@ -112,7 +111,9 @@ describe("InspectorPanel", () => {
 
     await act(async () => {
       fireEvent.click(screen.getByTestId("constraint-delete-c2"));
-      await flush();
+      // Drain the ACTUAL mutation queue rather than racing a fixed macrotask
+      // (flaky under parallel worker-pool load — see useShortcuts.test.tsx).
+      await flushSketchMutations();
     });
 
     expect(sketchStore.getState().session!.constraints.map((c) => c.id)).toEqual(["c1"]);

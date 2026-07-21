@@ -1,18 +1,19 @@
 /*
- * localSolver — the shared, in-memory sketch-solver + two-level-preview lane.
+ * localSolver — the mock sketch lane + the (still-shared) op-preview lane.
  *
- * ── Why this module exists (the F-WP8 seam) ──────────────────────────────────
- * The real backend (R-WP10/11) does NOT yet speak the sketch SOLVER lane or the
- * drag-time exact PREVIEW lane — those land with the worker's PlaneGCS actor +
- * gesture verbs in R-WP12 (SCHEMA §7.4 BeginGesture/SolveDrag). So BOTH the mock
- * client AND the real `tauriClient` route sketch-solve / snap-echo / drag-preview
- * interactions through this ONE local module. Extract-don't-duplicate: the mock's
- * lane logic lives here so the two clients evolve together and stay identical.
+ * ── Current role (post R-WP12/F-WP9 — the sketch half is MOCK-ONLY) ──────────
+ * The real solver lane is LIVE: `tauriClient` dispatches sketch verbs
+ * (enter/upsert/finish/BeginGesture/SolveDrag/EndGesture, SCHEMA §7.4) as real
+ * Tauri commands through Rust → the worker's PlaneGCS actor, and does NOT route
+ * them through this module. The sketch functions here (identity-echo solve, DOF
+ * heuristic via mockSketch.solveDof) serve ONLY the mock client — browser demos,
+ * vitest, and the Playwright mock lane.
  *
- *   R-WP12 replaces this lane with real solver-lane verbs (enter/upsert/finish
- *   become BeginGesture + SolveDrag round-trips; updatePreview streams to the
- *   worker's scratch preview job). Until then this deterministic stand-in keeps
- *   the whole sketch + extrude-drag UX working with no backend.
+ * What IS still shared by both clients:
+ *   - the op PREVIEW lane (beginPreview/updatePreview/endPreview — drag-time
+ *     extrude L1/L2 mesh; no backend preview verb exists yet, seam-marked), and
+ *   - the plane/region cache seams (cacheSketchPlane/cacheFinishedRegions) the
+ *     tauri client feeds so beginPreview can resolve profiles.
  *
  * The ONE thing that differs between mock and tauri is COMMIT: materializing a
  * previewed op. The mock commits into its local document model; the tauri client

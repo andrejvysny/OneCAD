@@ -12,9 +12,11 @@ import {
   segCircleIntersections,
   circleCircleIntersections,
   entityIntersections,
+  buildSnapCache,
   type SnapOptions,
 } from "./snapEngine";
 import type { SketchEntity } from "@/ipc/types";
+import type { Point2 } from "@/viewport/engine/sketchBasis";
 
 const base: SnapOptions = {
   gridStep: 10,
@@ -307,4 +309,68 @@ describe("computeSnap — extended priority ladder", () => {
     const r = computeSnap({ x: 15, y: 6 }, [hLine], { ...base, enableOnCurve: false, enableGrid: false });
     expect(r.kind).not.toBe("onCurve");
   });
+});
+
+// ── perf: precomputed cache must be byte-identical to the live path ───────────
+// (snap-engine perf work — buildSnapCache(entities) precomputes the entity-derived
+// candidates once per sketch edit; SketchController passes it through opts.cache.
+// The only contract that matters is: with or without a cache, computeSnap returns
+// the exact same SnapResult for the exact same inputs.)
+
+describe("computeSnap — cache equivalence (buildSnapCache)", () => {
+  const line1: SketchEntity = { id: "l1", type: "Line", p0: [-30, 5], p1: [30, 5] };
+  const line2: SketchEntity = { id: "l2", type: "Line", p0: [5, -30], p1: [5, 30] };
+  const circ: SketchEntity = { id: "c1", type: "Circle", center: [0, 0], radius: 20 };
+  const smallCirc: SketchEntity = { id: "c2", type: "Circle", center: [0, 0], radius: 3 };
+  const arc: SketchEntity = { id: "a1", type: "Arc", center: [0, 0], radius: 10, start: [10, 0], end: [0, 10] };
+  const dot: SketchEntity = { id: "d1", type: "Line", p0: [5, 5], p1: [5, 5] };
+
+  const entitySets: Record<string, SketchEntity[]> = {
+    empty: [],
+    singleLine: [line1],
+    twoCrossingLines: [line1, line2],
+    circleAndLine: [circ, line1],
+    circleAndArc: [circ, arc],
+    mixedWithDegenerate: [line1, line2, circ, smallCirc, arc, dot],
+  };
+
+  const rawPoints: Point2[] = [
+    { x: 41, y: 1 },
+    { x: 21, y: 1 },
+    { x: 5, y: 5 },
+    { x: 6, y: 6 },
+    { x: 15, y: 6 },
+    { x: 1, y: 0 },
+    { x: 3, y: 4 },
+    { x: 0, y: 0 },
+    { x: 10.2, y: 60 },
+  ];
+
+  const toggleCombos: Array<Partial<SnapOptions>> = [
+    {},
+    { enableGuidePoints: false },
+    { enableQuadrant: false },
+    { enableIntersection: false },
+    { enableOnCurve: false },
+    { enableGuideLines: false, enableGrid: false },
+    { enableGuidePoints: false, enableQuadrant: false, enableIntersection: false, enableOnCurve: false },
+  ];
+
+  for (const [name, entities] of Object.entries(entitySets)) {
+    it(`matches computeSnap without a cache — entities: ${name}`, () => {
+      const cache = buildSnapCache(entities);
+      for (const raw of rawPoints) {
+        for (const toggles of toggleCombos) {
+          const opts: SnapOptions = {
+            ...base,
+            ...toggles,
+            recentPoints: [{ x: 10, y: 0 }, { x: 0, y: 20 }],
+          };
+          const withoutCache = computeSnap(raw, entities, opts);
+          const withCache = computeSnap(raw, entities, { ...opts, cache });
+          expect(withCache).toEqual(withoutCache);
+        }
+      }
+    });
+  }
 });

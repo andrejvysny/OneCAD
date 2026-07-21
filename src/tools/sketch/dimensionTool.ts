@@ -186,13 +186,13 @@ export function dimensionSuffix(kind: DimensionKind): string {
 
 // ── over-constraint decision (pure) ──────────────────────────────────────────
 //
-// The mock solver's `solveDof` reports OverConstrained when a constraint pushes
-// the signed DOF surplus below zero, and never distinguishes a strictly redundant
-// constraint from a genuinely conflicting one (it does not detect contradictory
-// equations — see mockSketch.ts). So "reject on conflict" keys off the two solver
-// states that mean "this dimension broke the sketch": OverConstrained and
-// Conflicting. When the real PlaneGCS lane lands it will additionally surface a
-// distinct `redundant` signal per constraint; widen this then (seam).
+// "Reject on conflict" keys off the two solver states that mean "this dimension
+// broke the sketch": OverConstrained and Conflicting. The REAL PlaneGCS lane is
+// live and additionally surfaces per-constraint `conflicting` ids on every solve
+// surface (SCHEMA §7.4, SKETCH-HARDEN W1) — the reject hint names the clashing
+// constraint from that list. The MOCK lane's `solveDof` still reports only the
+// aggregate status (never Conflicting, no ids — see mockSketch.ts), so this
+// aggregate gate stays the common denominator across both clients.
 
 export function isConflictStatus(status: SketchSolveStatus): boolean {
   return status === "OverConstrained" || status === "Conflicting";

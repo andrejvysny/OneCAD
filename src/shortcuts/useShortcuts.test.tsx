@@ -9,7 +9,7 @@ import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
 import { planeFor } from "@/ipc/mockSketch";
 import type { SketchEntity } from "@/ipc/types";
 import { resetStores } from "@/test/resetStores";
-import { redoSketch, undoSketch } from "@/tools/sketch/sketchService";
+import { flushSketchMutations, redoSketch, undoSketch } from "@/tools/sketch/sketchService";
 import { setModelToolController } from "@/tools/modelTools/modelToolBridge";
 import type { ModelToolController } from "@/tools/modelTools/ModelToolController";
 
@@ -142,7 +142,10 @@ describe("useShortcuts", () => {
     let ev!: KeyboardEvent;
     await act(async () => {
       ev = press("Delete");
-      await flush();
+      // Drain the ACTUAL mutation queue rather than racing a fixed macrotask
+      // (flaky under parallel worker-pool load — deleteEntities's sketchUpsert
+      // await can settle after an arbitrary single setTimeout(0)).
+      await flushSketchMutations();
     });
     expect(ev.defaultPrevented).toBe(true); // swallowed (selection present)
     expect(sketchStore.getState().session!.entities.map((e) => e.id)).toEqual(["e2"]);
