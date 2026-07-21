@@ -59,6 +59,8 @@ export function constraintFreedom(c: SketchConstraint): number {
     case "Coincident":
     case "Fixed":
     case "Symmetric":
+    case "Concentric":
+    case "Midpoint":
       return 2;
     default:
       return 1;

@@ -1173,3 +1173,47 @@ describe("tauriClient sketch-solved + errors", () => {
     ).rejects.toThrow(/opFailed: solve boom/);
   });
 });
+
+// ── Transactional id-map: a rejected upsert leaves the live map untouched ──────
+
+describe("tauriClient sketchUpsert transactional id-map", () => {
+  type Op = { op: string; entity?: { kind: string } };
+  const points = (ops: Op[]): Op[] => ops.filter((o) => o.op === "addEntity" && o.entity?.kind === "point");
+
+  it("re-emits the full add ops after a rejected upsert (map not mutated), then dedups once committed", async () => {
+    const seenOps: Op[][] = [];
+    let failNext = true;
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "apply_edit_command") return readyProjection(1);
+        if (cmd === "enter_sketch")
+          return { sketchId: (payload as { sketchId: string }).sketchId, plane: XZ_PLANE, entities: [], constraints: [], dof: 4, status: "UnderConstrained" };
+        if (cmd === "sketch_upsert") {
+          seenOps.push((payload as { ops: Op[] }).ops);
+          if (failNext) {
+            failNext = false;
+            return Promise.reject({ kind: "opFailed", message: "solve boom" });
+          }
+          return { sketchId: (payload as { sketchId: string }).sketchId, sketchRevision: 1, dof: 3, status: "UnderConstrained", solvedPositions: {} };
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const client = createTauriClient();
+    await client.enterSketch({ newOnPlane: "XZ", sketchId: "sk" });
+    const line = [{ id: "e1", type: "Line" as const, p0: [0, 0] as [number, number], p1: [40, 0] as [number, number] }];
+
+    // 1) REJECTED upsert of the line.
+    await expect(client.sketchUpsert("sk", line, [])).rejects.toThrow(/opFailed/);
+    // 2) The SAME line again SUCCEEDS — because the rejected call left the id-map
+    //    untouched, this still marshals the full add ops (2 synth points + line).
+    await client.sketchUpsert("sk", line, []);
+    // 3) A THIRD upsert of the SAME line now diffs to ZERO adds — the clone committed.
+    await client.sketchUpsert("sk", line, []);
+
+    expect(seenOps).toHaveLength(3);
+    expect(points(seenOps[0])).toHaveLength(2); // rejected attempt marshalled 2 points
+    expect(points(seenOps[1])).toHaveLength(2); // NOT deduped → map untouched by (1)
+    expect(seenOps[2]).toEqual([]); // committed after (2) → no re-add
+  });
+});

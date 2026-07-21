@@ -6,6 +6,7 @@ import {
   detectRegions,
   orderedClosedLoop,
   mockRegionId,
+  constraintFreedom,
 } from "./mockSketch";
 import type { SketchConstraint, SketchEntity } from "./types";
 
@@ -45,6 +46,15 @@ describe("solveDof — naive mock heuristic", () => {
       entities: ["e1"],
     }));
     expect(solveDof([rect[0]], cs).status).toBe("OverConstrained");
+  });
+});
+
+describe("constraintFreedom — worker DOF table parity", () => {
+  it("Concentric removes 2 dof (pairing, like Coincident)", () => {
+    expect(constraintFreedom({ id: "c1", type: "Concentric", entities: ["e1", "e2"] })).toBe(2);
+  });
+  it("Midpoint removes 2 dof (pairing, like Coincident)", () => {
+    expect(constraintFreedom({ id: "c1", type: "Midpoint", entities: ["e1", "e2"] })).toBe(2);
   });
 });
 

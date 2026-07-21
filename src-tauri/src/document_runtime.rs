@@ -203,6 +203,17 @@ struct ActiveGesture {
     next_seq: u64,
 }
 
+/// The pre-session state captured on [`DocumentRuntime::enter_sketch`] so
+/// finish/cancel can collapse every in-session granular edit into ONE net
+/// undoable command (Codex-review B1 squash). `prior` is the exact sketch to
+/// restore on undo of the squashed command; `undo_watermark` is the undo depth at
+/// entry — the steps committed since is what gets squashed.
+struct SketchSession {
+    sketch_id: SketchId,
+    prior: Sketch,
+    undo_watermark: usize,
+}
+
 /// The per-document runtime (V1 single writer).
 pub struct DocumentRuntime {
     session: DocumentSession,
@@ -226,6 +237,9 @@ pub struct DocumentRuntime {
     sketch_solve: BTreeMap<SketchId, (u32, SketchSolveStatus)>,
     /// The active drag gesture, if the pointer is down mid-drag.
     active_gesture: Option<ActiveGesture>,
+    /// The open sketch-edit session watermark (B1 squash), set on `enter_sketch`
+    /// and consumed on `finish_sketch`/`cancel_sketch`. `None` outside a session.
+    sketch_session: Option<SketchSession>,
     /// Monotonic gesture id allocator (SCHEMA §7.4 `gestureId`).
     gesture_seq: u64,
     /// Rust-owned promotion cache `(body, topoKey) → ElementId` so re-picking the
@@ -343,6 +357,7 @@ impl DocumentRuntime {
             job_seq: 0,
             sketch_solve: BTreeMap::new(),
             active_gesture: None,
+            sketch_session: None,
             gesture_seq: 0,
             promoted: HashMap::new(),
             checkpoints: InMemoryCheckpointStore::new(),
@@ -362,6 +377,13 @@ impl DocumentRuntime {
     #[must_use]
     pub fn document_id(&self) -> String {
         self.session.document().id.to_string()
+    }
+
+    /// Current undo depth (committed steps). Used by tests / diagnostics; the B1
+    /// sketch-session squash is asserted against it.
+    #[must_use]
+    pub fn undo_depth(&self) -> usize {
+        self.session.undo_depth()
     }
 
     /// The current document revision.
@@ -993,6 +1015,14 @@ impl DocumentRuntime {
         sketch_id: SketchId,
     ) -> Result<SketchSessionDto, EngineError> {
         let sketch = self.sketch_or_err(sketch_id, "enterSketch")?;
+        // B1 squash: remember the pre-session sketch + undo watermark so
+        // finish/cancel can collapse every in-session granular edit into ONE net
+        // undoable command.
+        self.sketch_session = Some(SketchSession {
+            sketch_id,
+            prior: sketch.clone(),
+            undo_watermark: self.session.undo_depth(),
+        });
         let (plane, entities, constraints) = crate::worker::wire::sketch_wire(&sketch);
         let solved = self.solver.sketch_upsert(&sketch).await?;
         self.record_solve(sketch_id, &solved);
@@ -1166,7 +1196,7 @@ impl DocumentRuntime {
     ///
     /// # Errors
     /// Never fails hard; a best-effort worker `EndGesture` (no commit) is ignored.
-    pub async fn cancel_sketch(&mut self, _sketch_id: SketchId) -> Result<(), EngineError> {
+    pub async fn cancel_sketch(&mut self, sketch_id: SketchId) -> Result<(), EngineError> {
         if let Some(g) = self.active_gesture.take() {
             // Best-effort: end the worker gesture so it does not leak (no commit).
             let _ = self
@@ -1174,6 +1204,11 @@ impl DocumentRuntime {
                 .end_gesture(&g.sketch_id.to_string(), g.gesture_id, None)
                 .await;
         }
+        // B1 squash: the in-flight worker gesture is discarded, but any granular
+        // sketch_upsert edits committed during the session collapse into one net
+        // undoable command (same as finish) so the user reverts the whole session
+        // with a single undo.
+        self.squash_sketch_session(sketch_id);
         Ok(())
     }
 
@@ -1193,6 +1228,8 @@ impl DocumentRuntime {
         let solved = self.solver.sketch_upsert(&sketch).await?;
         self.record_solve(sketch_id, &solved);
         let regions = self.solver.sketch_regions(&sketch_id.to_string()).await?;
+        // B1 squash: collapse every in-session granular edit into ONE net command.
+        self.squash_sketch_session(sketch_id);
         Ok(FinishSketchDto { regions })
     }
 
@@ -1317,6 +1354,27 @@ impl DocumentRuntime {
             .sketch(id)
             .cloned()
             .ok_or_else(|| op_failed(format!("{verb}: unknown sketch {id}")))
+    }
+
+    /// Collapses all in-session granular sketch edits into ONE net undoable
+    /// command (B1). Consumes the [`SketchSession`] watermark set by
+    /// [`enter_sketch`](Self::enter_sketch) and asks the session to squash every
+    /// undo step committed since. A crash between enter and finish/cancel leaves
+    /// the granular steps (acceptable — no squash without a live watermark).
+    fn squash_sketch_session(&mut self, sketch_id: SketchId) {
+        match self.sketch_session.as_ref() {
+            // Only the matching session is consumed; a different sketch's open
+            // session (a frontend ordering bug) is left intact.
+            Some(session) if session.sketch_id == sketch_id => {}
+            _ => return,
+        }
+        let session = self.sketch_session.take().expect("checked Some above");
+        let count = self
+            .session
+            .undo_depth()
+            .saturating_sub(session.undo_watermark);
+        self.session
+            .squash_sketch_session(sketch_id, session.prior, count);
     }
 
     fn record_solve(&mut self, sketch: SketchId, solved: &SketchUpsertDto) {

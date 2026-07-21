@@ -10,7 +10,12 @@ import { selectionStore } from "@/stores/selectionStore";
 import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { createClient } from "@/ipc/client";
-import { deleteEntities } from "@/tools/sketch/sketchService";
+import {
+  deleteEntities,
+  flushSketchMutations,
+  redoSketch,
+  undoSketch,
+} from "@/tools/sketch/sketchService";
 import { getModelToolController } from "@/tools/modelTools/modelToolBridge";
 import {
   openDocumentDialog,
@@ -63,6 +68,25 @@ function runDeleteSketchSelection(): void {
   });
 }
 
+/**
+ * Finish the active sketch → hand it to the model layer to auto-arm extrude
+ * (Shapr3D flow). DRAIN the sketch mutation queue FIRST: a still-in-flight upsert
+ * (fast last click / dimension edit) must settle before regions are computed, else
+ * the profile is captured from a stale sketch. THEN flip mode — mode must flip
+ * before setting the pending id: the ModelToolController consumes
+ * pendingExtrudeSketch from a viewportStore subscription that guards on
+ * mode === "model", so setting it while still in sketch mode would be observed
+ * once, dropped, and never re-delivered.
+ */
+async function finishSketchAction(): Promise<void> {
+  await flushSketchMutations();
+  const tool = toolStore.getState();
+  if (tool.mode !== "sketch") return; // left sketch mode while the queue drained
+  const sketchId = viewportStore.getState().activeSketchId;
+  tool.setMode("model");
+  if (sketchId) viewportStore.getState().setPendingExtrude(sketchId);
+}
+
 export function runAction(action: ShortcutAction): void {
   const tool = toolStore.getState();
   switch (action.type) {
@@ -73,16 +97,7 @@ export function runAction(action: ShortcutAction): void {
       if (tool.mode === "model") tool.setMode("sketch");
       break;
     case "finishSketch":
-      if (tool.mode === "sketch") {
-        // Hand the just-finished sketch to the model layer to auto-arm extrude
-        // (Shapr3D flow). Mode must flip FIRST: the ModelToolController consumes
-        // pendingExtrudeSketch from a viewportStore subscription that guards on
-        // mode === "model", so setting the pending id while still in sketch mode
-        // would be observed once, dropped, and never re-delivered.
-        const sketchId = viewportStore.getState().activeSketchId;
-        tool.setMode("model");
-        if (sketchId) viewportStore.getState().setPendingExtrude(sketchId);
-      }
+      if (tool.mode === "sketch") void finishSketchAction();
       break;
     case "deleteSketchSelection":
       runDeleteSketchSelection();
@@ -102,18 +117,27 @@ export function runAction(action: ShortcutAction): void {
 export function useShortcuts(): void {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      // Undo / redo own the ⌘Z / ⇧⌘Z (and Ctrl+Y) chords (F-WP7).
+      // Undo / redo own the ⌘Z / ⇧⌘Z (and Ctrl+Y) chords (F-WP7). In SKETCH mode
+      // they drive the sketch-scoped undo (sketchService); in model mode, the
+      // ModelToolController history — mode-gated so the two never cross-fire.
       const mod = e.metaKey || e.ctrlKey;
+      const inSketch = toolStore.getState().mode === "sketch";
       if (mod && (e.key === "z" || e.key === "Z")) {
         e.preventDefault();
-        const ctrl = getModelToolController();
-        if (e.shiftKey) void ctrl?.redo();
-        else void ctrl?.undo();
+        if (inSketch) {
+          if (e.shiftKey) void redoSketch(createClient());
+          else void undoSketch(createClient());
+        } else {
+          const ctrl = getModelToolController();
+          if (e.shiftKey) void ctrl?.redo();
+          else void ctrl?.undo();
+        }
         return;
       }
       if (mod && (e.key === "y" || e.key === "Y")) {
         e.preventDefault();
-        void getModelToolController()?.redo();
+        if (inSketch) void redoSketch(createClient());
+        else void getModelToolController()?.redo();
         return;
       }
       // File chords own ⌘S (Save) / ⇧⌘S (Save As) / ⌘O (Open) in every mode; they

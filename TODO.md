@@ -132,6 +132,16 @@ Target: AC1 sketch-on-plane, AC2 shapes+constraints+dims (legacy parity), AC3 ex
 - D1 APPROVED: worker-minted deterministic BodyIds `body_<opId>` (splits later `body_<opId>:<k>`); Rust adopts from bodyEvents + validates; SCHEMA amendment in Wave A.
 - D2: ExportStep lands in W-WP6 (M2 needs it). D3: primary.topoKey removed in W-WP6.
 
+## SKETCH-HARDEN — production hardening + UX (plan approved 2026-07-21, `~/.claude/plans/act-as-senior-software-cryptic-taco.md`; Codex plan-review terra/high "revise" → B1/B2/B3+H1/H2+M1-M3 all folded)
+Waves: W0 correctness (C0 Rust squash txn, C1 mutation coordinator, C2 FE sketch undo, C3 dimension validation, C4 degeneracy minSize, C5 dispose parity, C6 mock DOF, P2 hover rAF, T1 dedup) → W1 conflict-ids protocol change (RISKY) → W2 UX (finish/cancel, statusHint, chain close, badges/format/glyphs, dim bodies, cursors) → W3 real trim (RISKY) → W4 snap cache → W5 tests+debt. Commit per wave.
+- [x] W0 correctness gate (2026-07-21): C0 Rust squash txn (undo.rs squash + squash_sketch_session full-replace forward / RestoreSketch exact inverse; enter/finish/cancel watermark wiring; sketch_squash.rs 3/3 real-worker) + C3-Rust positivity guard (Distance/Radius/Diameter only, H/V signed non-regression pinned); C1 mutation coordinator (exported queue + flushSketchMutations, sessionGeneration fence after every await, transactional id-map clone-commit in tauriClient.sketchUpsert, finishSketch drains queue); C2 FE sketch undo (snapshot stacks cap 50, ⌘Z mode-gated, editConstraintValue coalescing; orchestrator fix: failed undo/redo un-pops stacks); C3-UI kind-aware DimensionInput validation (no-kind path byte-identical); C4 minSize=4px zoom-normalized degeneracy (line/rect/circle/arc); C5 dispose parity + disposed rAF guards; C6 mock DOF Concentric/Midpoint=2; P2 hover rAF coalescing; T1 SNAP_PX export + inferHV dedup. Suites: FE 956/92 files, build clean, e2e 17/17, Rust 402/0 + clippy/fmt clean. Hex-gate hit = pre-existing inputProbe.ts (tracked :125).
+- [ ] W1 conflict feedback gate (SCHEMA §7.4+§14 + fixtures + sign-off)
+- [ ] W2 UX gate
+- [ ] W3 real trim gate
+- [ ] W4 perf gate
+- [ ] W5 tests+debt gate + full-suite final gate
+- [ ] Manual Mac gate additions: trim segment on crossings, ⌘Z sweep in-sketch + one-step model undo post-finish, conflict tint incl. re-enter, dimming restore, cursors, chain close
+
 ## Execution rules
 - Orchestrator: decisions/review only. WPs → Opus 4.8 subagents.
 - RISKY WP = extra independent review pass.

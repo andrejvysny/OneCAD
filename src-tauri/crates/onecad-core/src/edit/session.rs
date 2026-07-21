@@ -213,6 +213,62 @@ impl DocumentSession {
         }
     }
 
+    /// Collapses the newest `count` committed undo steps of an in-progress sketch
+    /// session into ONE net [`EditCommand::SketchEdit`] (Codex-review B1 squash).
+    ///
+    /// The document is **not** mutated — it already holds the final sketch; only
+    /// the undo stack is rewritten so the whole session undoes/redoes as one step:
+    ///
+    /// * undo restores `prior` **verbatim** (via [`Inverse::RestoreSketch`]) —
+    ///   exact for entities, constraints and positions regardless of the forward
+    ///   ops (the net command's inverse never depends on a diff);
+    /// * redo replays the net `SketchEdit`, whose ops full-replace the sketch body
+    ///   (remove every prior entity — cascading its constraints — then re-add the
+    ///   final entities and constraints in order), reconstructing the final sketch
+    ///   exactly. A full replace via existing variants is chosen over a minimal
+    ///   diff because it guarantees an order-exact redo without fragile per-field
+    ///   diffing (the brief's blessed "remove-all + re-add" alternative).
+    ///
+    /// A net-zero session (final sketch == `prior`, or the sketch no longer
+    /// exists) pops the granular steps and pushes nothing. `count == 0` is a no-op
+    /// (a crash between enter and finish/cancel leaves the granular steps).
+    pub fn squash_sketch_session(&mut self, sketch: SketchId, prior: Sketch, count: usize) {
+        if count == 0 {
+            return;
+        }
+        let Some(final_sketch) = self.document.sketches.get(&sketch) else {
+            // Sketch deleted mid-session (unexpected): leave the granular steps.
+            return;
+        };
+        let net_zero = final_sketch.entities() == prior.entities()
+            && final_sketch.constraints() == prior.constraints();
+        if net_zero {
+            self.undo.squash(count, None);
+            return;
+        }
+        let mut ops: Vec<SketchEditOp> = Vec::new();
+        for e in prior.entities() {
+            ops.push(SketchEditOp::RemoveEntity { entity: e.id() });
+        }
+        for e in final_sketch.entities() {
+            ops.push(SketchEditOp::AddEntity { entity: e.clone() });
+        }
+        for c in final_sketch.constraints() {
+            ops.push(SketchEditOp::AddConstraint {
+                constraint: c.clone(),
+            });
+        }
+        let edit = AppliedEdit {
+            forward: EditCommand::SketchEdit { sketch, ops },
+            inverse: Inverse::RestoreSketch {
+                id: sketch,
+                prior: Some(Box::new(prior)),
+            },
+        };
+        let label = edit.forward.label().to_string();
+        self.undo.squash(count, Some(Txn::single(label, edit)));
+    }
+
     /// Undoes the newest committed transaction (applies its inverses in reverse
     /// and moves it to the redo stack). Ignored while a transaction is open
     /// (C++ `CommandProcessor::undo`). Returns `true` if a step was undone.
@@ -1148,7 +1204,10 @@ fn apply_sketch_ops(prior: &Sketch, ops: &[SketchEditOp]) -> Result<Sketch, Doma
             SketchEditOp::RemoveEntity { entity } => {
                 entities = cascade_remove_entity(&entities, &mut constraints, *entity);
             }
-            SketchEditOp::AddConstraint { constraint } => constraints.push(constraint.clone()),
+            SketchEditOp::AddConstraint { constraint } => {
+                validate_positive_dimension(constraint)?;
+                constraints.push(constraint.clone());
+            }
             SketchEditOp::RemoveConstraint { constraint } => {
                 constraints.retain(|c| c.id() != *constraint);
             }
@@ -1159,9 +1218,11 @@ fn apply_sketch_ops(prior: &Sketch, ops: &[SketchEditOp]) -> Result<Sketch, Doma
                     .ok_or_else(|| {
                         DomainError::Validation(format!("constraint {constraint} not found"))
                     })?;
-                *c = constraint_with_value(c, value.clone()).ok_or_else(|| {
+                let next = constraint_with_value(c, value.clone()).ok_or_else(|| {
                     DomainError::Validation(format!("constraint {constraint} is not dimensional"))
                 })?;
+                validate_positive_dimension(&next)?;
+                *c = next;
             }
             SketchEditOp::SetEntityPositions { positions } => {
                 for (eid, at) in positions {
@@ -1235,6 +1296,25 @@ fn sketch_err(e: SketchError) -> DomainError {
     DomainError::Validation(e.to_string())
 }
 
+/// Rejects a non-positive or non-finite value for the **strictly-positive**
+/// dimensional kinds (Distance, Radius, Diameter). `HorizontalDistance` /
+/// `VerticalDistance` are SIGNED (`x2−x1` / `y2−y1`) and `Angle` is a UI-domain
+/// value, so none of those is guarded (see [`crate::sketch::constraint`]).
+fn validate_positive_dimension(c: &Constraint) -> Result<(), DomainError> {
+    let (kind, v) = match c {
+        Constraint::Distance { value, .. } => ("distance", value.value),
+        Constraint::Radius { value, .. } => ("radius", value.value),
+        Constraint::Diameter { value, .. } => ("diameter", value.value),
+        _ => return Ok(()),
+    };
+    if !v.is_finite() || v <= 0.0 {
+        return Err(DomainError::Validation(format!(
+            "{kind} must be positive (got {v})"
+        )));
+    }
+    Ok(())
+}
+
 /// Returns a clone of `c` with its dimensional value replaced, or `None` for a
 /// geometric constraint.
 fn constraint_with_value(c: &Constraint, value: Scalar) -> Option<Constraint> {
@@ -1303,5 +1383,135 @@ fn entity_with_position(e: &SketchEntity, at: Vec2) -> Option<SketchEntity> {
             reference_locked: *reference_locked,
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ids::{ConstraintId, EntityId};
+    use crate::sketch::WorldPlane;
+    use uuid::Uuid;
+
+    fn sid() -> SketchId {
+        SketchId(Uuid::from_u128(1))
+    }
+    fn eid(n: u128) -> EntityId {
+        EntityId(Uuid::from_u128(n))
+    }
+    fn cid(n: u128) -> ConstraintId {
+        ConstraintId(Uuid::from_u128(n))
+    }
+
+    /// Two free points + a circle centered on the first — enough to hang a
+    /// Radius/Distance dimension off.
+    fn base_sketch() -> Sketch {
+        let mut s = Sketch::on_world_plane(sid(), "T", WorldPlane::XY);
+        s.add_entity(SketchEntity::point(
+            eid(1),
+            Vec2::new_unchecked(0.0, 0.0),
+            false,
+            false,
+        ))
+        .unwrap();
+        s.add_entity(SketchEntity::point(
+            eid(2),
+            Vec2::new_unchecked(10.0, 0.0),
+            false,
+            false,
+        ))
+        .unwrap();
+        s.add_entity(SketchEntity::circle(eid(3), eid(1), 5.0, false).unwrap())
+            .unwrap();
+        s
+    }
+
+    #[test]
+    fn add_constraint_rejects_non_positive_radius() {
+        let s = base_sketch();
+        // value == 0.0 is rejected (strictly positive).
+        let zero = vec![SketchEditOp::AddConstraint {
+            constraint: Constraint::Radius {
+                id: cid(1),
+                entity: eid(3),
+                value: Scalar::new(0.0),
+            },
+        }];
+        assert!(matches!(
+            apply_sketch_ops(&s, &zero),
+            Err(DomainError::Validation(_))
+        ));
+        // a negative radius is likewise rejected.
+        let neg = vec![SketchEditOp::AddConstraint {
+            constraint: Constraint::Radius {
+                id: cid(1),
+                entity: eid(3),
+                value: Scalar::new(-2.0),
+            },
+        }];
+        assert!(matches!(
+            apply_sketch_ops(&s, &neg),
+            Err(DomainError::Validation(_))
+        ));
+        // a positive radius is accepted.
+        let ok = vec![SketchEditOp::AddConstraint {
+            constraint: Constraint::Radius {
+                id: cid(1),
+                entity: eid(3),
+                value: Scalar::new(5.0),
+            },
+        }];
+        assert!(apply_sketch_ops(&s, &ok).is_ok());
+    }
+
+    #[test]
+    fn set_dimension_rejects_non_positive_distance() {
+        let mut s = base_sketch();
+        s.add_constraint(Constraint::Distance {
+            id: cid(1),
+            entity1: eid(1),
+            entity2: eid(2),
+            value: Scalar::new(10.0),
+        })
+        .unwrap();
+        // driving the Distance to <= 0 is rejected.
+        let ops = vec![SketchEditOp::SetDimension {
+            constraint: cid(1),
+            value: Scalar::new(-3.0),
+        }];
+        assert!(matches!(
+            apply_sketch_ops(&s, &ops),
+            Err(DomainError::Validation(_))
+        ));
+        // a positive re-dimension is accepted.
+        let ok = vec![SketchEditOp::SetDimension {
+            constraint: cid(1),
+            value: Scalar::new(25.0),
+        }];
+        assert!(apply_sketch_ops(&s, &ok).is_ok());
+    }
+
+    #[test]
+    fn horizontal_distance_accepts_negative_value() {
+        let s = base_sketch();
+        // HorizontalDistance is SIGNED (x2 − x1): a negative value is legal on both
+        // AddConstraint and SetDimension (non-regression for the positive guard).
+        let add = vec![SketchEditOp::AddConstraint {
+            constraint: Constraint::HorizontalDistance {
+                id: cid(1),
+                point1: eid(1),
+                point2: eid(2),
+                value: Scalar::new(-10.0),
+            },
+        }];
+        let out = apply_sketch_ops(&s, &add).expect("negative HorizontalDistance accepted");
+        let set = vec![SketchEditOp::SetDimension {
+            constraint: cid(1),
+            value: Scalar::new(-20.0),
+        }];
+        assert!(
+            apply_sketch_ops(&out, &set).is_ok(),
+            "negative signed distance via SetDimension stays accepted"
+        );
     }
 }

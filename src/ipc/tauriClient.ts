@@ -73,6 +73,7 @@ import { operationToEditCommand, opLabelFor, editCommandLabel, type WireEditComm
 import {
   buildAddSketch,
   buildDeleteSketch,
+  cloneIdMap,
   createIdMap,
   frontendConstraintsFromDto,
   frontendEntitiesFromDto,
@@ -500,8 +501,14 @@ export function createTauriClient(): CadClient {
   ): Promise<SketchUpsertResult> {
     const map = sketchMaps.get(sketchId);
     if (!map) throw new Error(`sketchUpsert: unknown sketch ${sketchId} (enter first)`);
-    const ops = marshalUpsert(map, { entities, constraints });
+    // Transactional: marshal against a CLONE so the id-map bookkeeping (minted /
+    // dropped ids) is only committed onto the live map AFTER the RPC resolves. A
+    // rejected upsert throws below and leaves the live map untouched, so the next
+    // upsert faithfully re-adds the entities the backend never accepted.
+    const draft = cloneIdMap(map);
+    const ops = marshalUpsert(draft, { entities, constraints });
     const dto = await call<SketchUpsertDto>(CMD.sketchUpsert, { sketchId: map.backendSketchId, ops });
+    sketchMaps.set(sketchId, draft); // commit the clone (only on success)
     return {
       sketchId, // frontend id
       sketchRevision: dto.sketchRevision,
@@ -509,8 +516,8 @@ export function createTauriClient(): CadClient {
       status: dto.status,
       // F-WP9 fix: the worker keys solvedPositions by backend POINT-entity UUID;
       // reverse-map them to the frontend `entityId.point` keys the SketchController
-      // applies (via sketchWireMap's id-map). Unknown keys are dropped.
-      solvedPositions: frontendSolvedPositions(map, dto.solvedPositions),
+      // applies (via the COMMITTED clone's id-map). Unknown keys are dropped.
+      solvedPositions: frontendSolvedPositions(draft, dto.solvedPositions),
     };
   }
 

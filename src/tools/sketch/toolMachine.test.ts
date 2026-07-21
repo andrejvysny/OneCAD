@@ -84,6 +84,43 @@ describe("arcTool — center → start → end (center-start-end)", () => {
   });
 });
 
+describe("degeneracy guards — minSize context (C4)", () => {
+  const ctx = { minSize: 4 };
+
+  it("lineTool ignores a click within minSize of the last anchor, commits a far one", () => {
+    const armed = lineTool.step(lineTool.init(), { kind: "click", pt: { x: 0, y: 0 } });
+    const tooClose = lineTool.step(armed.state, { kind: "click", pt: { x: 2, y: 0 } }, ctx);
+    expect(tooClose.committed).toBeUndefined();
+    expect(tooClose.state.anchors).toEqual([{ x: 0, y: 0 }]); // still armed at the anchor
+    const far = lineTool.step(armed.state, { kind: "click", pt: { x: 10, y: 0 } }, ctx);
+    expect(far.committed).toEqual([{ type: "Line", p0: { x: 0, y: 0 }, p1: { x: 10, y: 0 } }]);
+  });
+
+  it("rectTool ignores a corner with a sub-minSize extent on either axis", () => {
+    const armed = rectTool.step(rectTool.init(), { kind: "click", pt: { x: 0, y: 0 } });
+    const thin = rectTool.step(armed.state, { kind: "click", pt: { x: 2, y: 50 } }, ctx); // dx < 4
+    expect(thin.committed).toBeUndefined();
+    const ok = rectTool.step(armed.state, { kind: "click", pt: { x: 40, y: 20 } }, ctx);
+    expect(ok.committed).toHaveLength(4);
+  });
+
+  it("circleTool ignores a radius below minSize", () => {
+    const armed = circleTool.step(circleTool.init(), { kind: "click", pt: { x: 0, y: 0 } });
+    const tiny = circleTool.step(armed.state, { kind: "click", pt: { x: 2, y: 0 } }, ctx); // r = 2 < 4
+    expect(tiny.committed).toBeUndefined();
+    const ok = circleTool.step(armed.state, { kind: "click", pt: { x: 0, y: 5 } }, ctx);
+    expect(ok.committed).toEqual([{ type: "Circle", center: { x: 0, y: 0 }, radius: 5 }]);
+  });
+
+  it("arcTool ignores a start click within minSize of the center", () => {
+    const armed = arcTool.step(arcTool.init(), { kind: "click", pt: { x: 0, y: 0 } }); // center
+    const tiny = arcTool.step(armed.state, { kind: "click", pt: { x: 2, y: 0 } }, ctx); // r < 4
+    expect(tiny.state.anchors).toHaveLength(1); // start rejected — only center anchored
+    const ok = arcTool.step(armed.state, { kind: "click", pt: { x: 10, y: 0 } }, ctx);
+    expect(ok.state.anchors).toHaveLength(2); // start accepted
+  });
+});
+
 describe("draftToEntityFields", () => {
   it("flattens Point2 coords into [u,v] pairs", () => {
     const f = draftToEntityFields({ type: "Line", p0: { x: 1, y: 2 }, p1: { x: 3, y: 4 } });

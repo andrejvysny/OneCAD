@@ -8,7 +8,7 @@ import type { SketchConstraint, SketchEntity, SketchSession } from "@/ipc/types"
 import { getViewportEngine } from "@/viewport/engineBridge";
 import { documentStore, docSketchStatus } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
-import { sketchStore } from "@/stores/sketchStore";
+import { sketchStore, type SketchSnapshot } from "@/stores/sketchStore";
 import { applySolvedPositions } from "@/ipc/sketchWireMap";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
@@ -17,18 +17,44 @@ import type { ApplicableConstraint } from "./constraintApplicability";
 import { buildAppliedConstraint, buildAppliedDimension } from "./constraintAuthoring";
 
 /*
- * ALL exported session mutators are serialized through one promise chain. Each
- * reads `sketchStore.session` INSIDE its queued turn, so a second user action
- * fired before the first `sketchUpsert` resolves rebases on the settled result
- * instead of capturing the same stale arrays (which would make `marshalUpsert`'s
- * shared id-map diff synthesize a removal of the first action's constraint and
- * let either response clobber the store).
+ * ALL session mutators are serialized through one promise chain. Each reads
+ * `sketchStore.session` INSIDE its queued turn, so a second user action fired before
+ * the first `sketchUpsert` resolves rebases on the settled result instead of
+ * capturing the same stale arrays (which would make `marshalUpsert`'s shared id-map
+ * diff synthesize a removal of the first action's constraint and let either response
+ * clobber the store). The SketchController wraps its own commit/mirror/drag write-
+ * backs through the SAME queue (it imports `enqueueSketchMutation`), so drawing and
+ * constraint edits share one ordering.
  */
 let sketchMutationChain: Promise<unknown> = Promise.resolve();
-function enqueueSketchMutation<T>(fn: () => Promise<T>): Promise<T> {
+export function enqueueSketchMutation<T>(fn: () => Promise<T>): Promise<T> {
   const run = sketchMutationChain.then(fn, fn);
   sketchMutationChain = run.catch(() => undefined);
   return run;
+}
+
+/**
+ * Resolve once the CURRENT mutation chain settles (drawing, constraint edits, undo).
+ * `finishSketch` awaits this before flipping to model mode + computing regions so a
+ * still-in-flight upsert can't publish geometry after the profile was captured. The
+ * queue is NEVER cleared as a cancellation signal — this only drains what's pending.
+ */
+export function flushSketchMutations(): Promise<void> {
+  return sketchMutationChain.then(
+    () => undefined,
+    () => undefined,
+  );
+}
+
+/**
+ * Fencing gate (see sketchStore.sessionGeneration). A queued mutation captures the
+ * generation at its turn start and calls this after every await: a bumped generation
+ * (a newer setSession superseded it) or a torn-down session (null) means the write
+ * must be silently dropped. Subsumes the old `if (!session) return` post-await guard.
+ */
+function sessionSuperseded(gen: number): boolean {
+  const s = sketchStore.getState();
+  return s.session === null || s.sessionGeneration !== gen;
 }
 
 /** Edit a dimensional constraint's value → re-solve → refresh geometry + DOF. */
@@ -45,19 +71,32 @@ async function editConstraintValueNow(
   constraintId: string,
   value: number,
 ): Promise<void> {
+  const gen = sketchStore.getState().sessionGeneration;
   const session = sketchStore.getState().session;
   if (!session) return;
+  const before: SketchSnapshot = { entities: session.entities, constraints: session.constraints };
   const constraints = session.constraints.map((c) =>
     c.id === constraintId ? { ...c, value } : c,
   );
   const result = await client.sketchUpsert(session.sketchId, session.entities, constraints);
-  if (!sketchStore.getState().session) return; // exited during await
+  if (sessionSuperseded(gen)) return;
 
   const next = { ...session, constraints, dof: result.dof, status: result.status };
   sketchStore.getState().setSession(next);
   getViewportEngine()?.updateSketchSession(next.plane, next.entities, next.status);
   documentStore.getState().setSketchSolve(session.sketchId, result.dof, docSketchStatus(result.status));
   viewportStore.setState({ dofBadge: result.dof });
+
+  // COALESCE consecutive edits of the SAME constraint into one undo entry: if the
+  // top undo snapshot was pushed by an edit to this constraint, keep it (undo returns
+  // to the value BEFORE the run of edits). An intervening op / undo resets provenance.
+  const store = sketchStore.getState();
+  const last = store.lastUndoPush;
+  const coalesce =
+    last?.kind === "editConstraintValue" &&
+    last.constraintId === constraintId &&
+    store.undoStack.length > 0;
+  if (!coalesce) store.pushUndoSnapshot(before, { kind: "editConstraintValue", constraintId });
 }
 
 /**
@@ -78,23 +117,25 @@ async function commitDimensionConstraintNow(
   client: CadClient,
   constraint: SketchConstraint,
 ): Promise<{ rejected: boolean }> {
+  const gen = sketchStore.getState().sessionGeneration;
   const session = sketchStore.getState().session;
   if (!session) return { rejected: false };
+  const before: SketchSnapshot = { entities: session.entities, constraints: session.constraints };
 
   const constraints = [...session.constraints, constraint];
   const result = await client.sketchUpsert(session.sketchId, session.entities, constraints);
-  if (!sketchStore.getState().session) return { rejected: false }; // exited during await
+  if (sessionSuperseded(gen)) return { rejected: false };
 
   if (isConflictStatus(result.status)) {
     // Reject-on-conflict: drop the dimension and restore the previous solve.
     const restore = await client.sketchUpsert(session.sketchId, session.entities, session.constraints);
-    if (!sketchStore.getState().session) return { rejected: true };
+    if (sessionSuperseded(gen)) return { rejected: true };
     const reverted = { ...session, dof: restore.dof, status: restore.status };
     sketchStore.getState().setSession(reverted);
     getViewportEngine()?.updateSketchSession(reverted.plane, reverted.entities, reverted.status);
     documentStore.getState().setSketchSolve(session.sketchId, restore.dof, docSketchStatus(restore.status));
     viewportStore.setState({ dofBadge: restore.dof });
-    return { rejected: true };
+    return { rejected: true }; // rejected: no undo snapshot pushed
   }
 
   const solvedEntities = applySolvedPositions(session.entities, result.solvedPositions ?? {});
@@ -103,6 +144,7 @@ async function commitDimensionConstraintNow(
   getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status);
   documentStore.getState().setSketchSolve(session.sketchId, result.dof, docSketchStatus(result.status));
   viewportStore.setState({ dofBadge: result.dof });
+  sketchStore.getState().pushUndoSnapshot(before, { kind: "commitDimension" });
   return { rejected: false };
 }
 
@@ -123,6 +165,7 @@ export function deleteEntities(client: CadClient, ids: string[]): Promise<void> 
 
 async function deleteEntitiesNow(client: CadClient, ids: string[]): Promise<void> {
   if (ids.length === 0) return;
+  const gen = sketchStore.getState().sessionGeneration;
   const session = sketchStore.getState().session;
   if (!session) return;
   const doomed = new Set(ids);
@@ -131,7 +174,10 @@ async function deleteEntitiesNow(client: CadClient, ids: string[]): Promise<void
   if (entities.length === session.entities.length && constraints.length === session.constraints.length) {
     return; // no live id matched — nothing to solve
   }
-  await commitReducedSketch(client, session, entities, constraints);
+  const before: SketchSnapshot = { entities: session.entities, constraints: session.constraints };
+  if (await commitReducedSketch(client, session, entities, constraints, gen)) {
+    sketchStore.getState().pushUndoSnapshot(before, { kind: "deleteEntities" });
+  }
 }
 
 /**
@@ -145,12 +191,16 @@ export function deleteConstraints(client: CadClient, ids: string[]): Promise<voi
 
 async function deleteConstraintsNow(client: CadClient, ids: string[]): Promise<void> {
   if (ids.length === 0) return;
+  const gen = sketchStore.getState().sessionGeneration;
   const session = sketchStore.getState().session;
   if (!session) return;
   const doomed = new Set(ids);
   const constraints = session.constraints.filter((c) => !doomed.has(c.id));
   if (constraints.length === session.constraints.length) return; // nothing matched
-  await commitReducedSketch(client, session, session.entities, constraints);
+  const before: SketchSnapshot = { entities: session.entities, constraints: session.constraints };
+  if (await commitReducedSketch(client, session, session.entities, constraints, gen)) {
+    sketchStore.getState().pushUndoSnapshot(before, { kind: "deleteConstraints" });
+  }
 }
 
 /**
@@ -165,16 +215,18 @@ async function commitReducedSketch(
   session: SketchSession,
   entities: SketchEntity[],
   constraints: SketchConstraint[],
-): Promise<void> {
+  gen: number,
+): Promise<boolean> {
   let result;
   try {
     result = await client.sketchUpsert(session.sketchId, entities, constraints);
   } catch (e) {
+    if (sessionSuperseded(gen)) return false; // superseded — don't surface a stale hint
     const msg = e instanceof Error ? e.message : String(e);
     viewportStore.getState().setStatusHint(`Sketch delete failed: ${msg}`);
-    return;
+    return false;
   }
-  if (!sketchStore.getState().session) return; // exited during await
+  if (sessionSuperseded(gen)) return false;
 
   const solvedEntities = applySolvedPositions(entities, result.solvedPositions ?? {});
   const next = { ...session, entities: solvedEntities, constraints, dof: result.dof, status: result.status };
@@ -182,6 +234,7 @@ async function commitReducedSketch(
   getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status);
   documentStore.getState().setSketchSolve(session.sketchId, result.dof, docSketchStatus(result.status));
   viewportStore.setState({ dofBadge: result.dof });
+  return true;
 }
 
 // ── User-applied constraints (S4b: toolbar + context chips) ───────────────────
@@ -211,6 +264,7 @@ async function applyConstraintNow(
   client: CadClient,
   applicable: ApplicableConstraint,
 ): Promise<{ rejected: boolean }> {
+  const gen = sketchStore.getState().sessionGeneration;
   const session = sketchStore.getState().session;
   if (!session) return { rejected: false };
 
@@ -223,21 +277,22 @@ async function applyConstraintNow(
   const constraint = buildAppliedConstraint(applicable, id);
   if (!constraint) return { rejected: false };
 
+  const before: SketchSnapshot = { entities: session.entities, constraints: session.constraints };
   const constraints = [...session.constraints, constraint];
   const result = await client.sketchUpsert(session.sketchId, session.entities, constraints);
-  if (!sketchStore.getState().session) return { rejected: false }; // exited during await
+  if (sessionSuperseded(gen)) return { rejected: false };
 
   if (isConflictStatus(result.status)) {
     // Reject-on-conflict: drop the constraint and restore the previous solve.
     const restore = await client.sketchUpsert(session.sketchId, session.entities, session.constraints);
-    if (!sketchStore.getState().session) return { rejected: true };
+    if (sessionSuperseded(gen)) return { rejected: true };
     const reverted = { ...session, dof: restore.dof, status: restore.status };
     sketchStore.getState().setSession(reverted);
     getViewportEngine()?.updateSketchSession(reverted.plane, reverted.entities, reverted.status);
     documentStore.getState().setSketchSolve(session.sketchId, restore.dof, docSketchStatus(restore.status));
     viewportStore.setState({ dofBadge: restore.dof });
     viewportStore.getState().setStatusHint("Constraint removed — it would over-constrain the sketch");
-    return { rejected: true };
+    return { rejected: true }; // rejected: no undo snapshot pushed
   }
 
   const solvedEntities = applySolvedPositions(session.entities, result.solvedPositions ?? {});
@@ -246,6 +301,7 @@ async function applyConstraintNow(
   getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status);
   documentStore.getState().setSketchSolve(session.sketchId, result.dof, docSketchStatus(result.status));
   viewportStore.setState({ dofBadge: result.dof });
+  sketchStore.getState().pushUndoSnapshot(before, { kind: "applyConstraint" });
   return { rejected: false };
 }
 
@@ -274,4 +330,62 @@ function openAppliedDimensionChip(client: CadClient, applicable: ApplicableConst
     },
     () => toolChipStore.getState().clear(),
   );
+}
+
+// ── Sketch-scoped undo / redo (C2) ────────────────────────────────────────────
+//
+// Independent of the model history. Both flip through the SAME serialized mutation
+// queue + generation fence as every other edit, so an undo racing a live edit is
+// ordered and last-write-wins. Works standalone — it does not depend on any backend
+// history-squash landing separately (the mock/real `sketchUpsert` just re-solves the
+// restored arrays). The write-back tail matches `commitReducedSketch`.
+
+/** Undo the last confirmed sketch edit (pop the undo stack, re-solve, refresh). */
+export function undoSketch(client: CadClient): Promise<void> {
+  return enqueueSketchMutation(() => undoRedoNow(client, "undo"));
+}
+
+/** Redo the last undone sketch edit. */
+export function redoSketch(client: CadClient): Promise<void> {
+  return enqueueSketchMutation(() => undoRedoNow(client, "redo"));
+}
+
+async function undoRedoNow(client: CadClient, dir: "undo" | "redo"): Promise<void> {
+  const gen = sketchStore.getState().sessionGeneration;
+  const session = sketchStore.getState().session;
+  if (!session) return;
+  // Move the CURRENT arrays onto the opposite stack and take the target snapshot.
+  const current: SketchSnapshot = { entities: session.entities, constraints: session.constraints };
+  const store = sketchStore.getState();
+  const snapshot = dir === "undo" ? store.popUndo(current) : store.popRedo(current);
+  if (!snapshot) return; // nothing to undo/redo
+
+  let result;
+  try {
+    result = await client.sketchUpsert(session.sketchId, snapshot.entities, snapshot.constraints);
+  } catch (e) {
+    // Un-pop: geometry didn't change, so the stacks must not lose the entry
+    // (popUndo/popRedo already swapped `current` onto the opposite stack).
+    if (!sessionSuperseded(gen)) {
+      if (dir === "undo") sketchStore.getState().popRedo(snapshot);
+      else sketchStore.getState().popUndo(snapshot);
+      const msg = e instanceof Error ? e.message : String(e);
+      viewportStore.getState().setStatusHint(`Sketch ${dir} failed: ${msg}`);
+    }
+    return;
+  }
+  if (sessionSuperseded(gen)) return;
+
+  const solvedEntities = applySolvedPositions(snapshot.entities, result.solvedPositions ?? {});
+  const next = {
+    ...session,
+    entities: solvedEntities,
+    constraints: snapshot.constraints,
+    dof: result.dof,
+    status: result.status,
+  };
+  sketchStore.getState().setSession(next);
+  getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status);
+  documentStore.getState().setSketchSolve(session.sketchId, result.dof, docSketchStatus(result.status));
+  viewportStore.setState({ dofBadge: result.dof });
 }

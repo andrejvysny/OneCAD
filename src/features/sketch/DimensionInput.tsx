@@ -10,6 +10,7 @@
  * whole pick, not just reset the text.
  */
 import { useEffect, useRef, useState } from "react";
+import type { SketchConstraintType } from "@/ipc/types";
 
 export interface DimensionInputProps {
   value: number;
@@ -21,6 +22,29 @@ export interface DimensionInputProps {
   onCancel?: () => void;
   /** Focus + select the field on mount (the dimension tool opens ready to type). */
   autoFocus?: boolean;
+  /**
+   * Constraint kind driving the badge (ConstraintBadgeLayer only). When present,
+   * enables constraint-specific range validation on commit (below). Absent ⇒ the
+   * legacy finite-only check (model-tool chips have no constraint kind).
+   */
+  kind?: SketchConstraintType;
+}
+
+const ERROR_FLASH_MS = 400;
+
+/** Constraint-specific commit-value validity. Caller has already checked finite. */
+function isValidForKind(kind: SketchConstraintType, n: number): boolean {
+  switch (kind) {
+    case "Distance":
+    case "Radius":
+    case "Diameter":
+      return n > 0;
+    case "Angle":
+      return n > 0 && n < 360;
+    default:
+      // HorizontalDistance/VerticalDistance are signed — any finite value is legal.
+      return true;
+  }
 }
 
 export function DimensionInput({
@@ -30,9 +54,12 @@ export function DimensionInput({
   commitOnBlur = true,
   onCancel,
   autoFocus = false,
+  kind,
 }: DimensionInputProps) {
   const [text, setText] = useState(() => value.toFixed(1));
+  const [isError, setIsError] = useState(false);
   const ref = useRef<HTMLInputElement>(null);
+  const errorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     setText(value.toFixed(1));
@@ -45,25 +72,61 @@ export function DimensionInput({
     }
   }, [autoFocus]);
 
-  const commit = () => {
+  useEffect(() => {
+    return () => {
+      if (errorTimer.current) clearTimeout(errorTimer.current);
+    };
+  }, []);
+
+  const flashError = () => {
+    setIsError(true);
+    if (errorTimer.current) clearTimeout(errorTimer.current);
+    errorTimer.current = setTimeout(() => setIsError(false), ERROR_FLASH_MS);
+  };
+
+  /**
+   * Returns whether the commit went through (or was a no-op legacy reset) —
+   * callers use this to decide whether it's safe to blur the field. A kind-
+   * validation reject must NOT blur: the chip stays open + focused so the
+   * user can correct the value in place.
+   */
+  const commit = (): boolean => {
     const n = Number.parseFloat(text);
-    if (Number.isFinite(n) && n !== value) onCommit(n);
+    if (!Number.isFinite(n)) {
+      if (kind) {
+        flashError();
+        return false;
+      }
+      // No kind ⇒ legacy finite-only behavior, unchanged (model-tool chips).
+      setText(value.toFixed(1));
+      return true;
+    }
+    if (kind && !isValidForKind(kind, n)) {
+      flashError();
+      return false;
+    }
+    if (n !== value) onCommit(n);
     else setText(value.toFixed(1));
+    return true;
   };
 
   return (
-    <span className="pointer-events-auto inline-flex items-center gap-0.5 rounded-sm border border-accent bg-white px-1 font-mono text-[11px] text-sel-text shadow-ctrl">
+    <span
+      className={`pointer-events-auto inline-flex items-center gap-0.5 rounded-sm border bg-white px-1 font-mono text-[11px] text-sel-text shadow-ctrl ${
+        isError ? "border-traffic-close" : "border-accent"
+      }`}
+    >
       <input
         ref={ref}
         aria-label="Dimension value"
-        className="w-9 bg-transparent text-right outline-none"
+        aria-invalid={isError}
+        className={`w-9 bg-transparent text-right outline-none ${isError ? "text-traffic-close" : ""}`}
         value={text}
         inputMode="decimal"
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
-            commit();
-            ref.current?.blur();
+            if (commit()) ref.current?.blur();
           } else if (e.key === "Escape") {
             if (onCancel) {
               onCancel();
@@ -75,7 +138,9 @@ export function DimensionInput({
           e.stopPropagation();
         }}
         onBlur={() => {
-          if (commitOnBlur) commit();
+          if (commitOnBlur) {
+            if (!commit()) ref.current?.focus();
+          }
         }}
       />
       {suffix && <span className="text-ink-5">{suffix}</span>}

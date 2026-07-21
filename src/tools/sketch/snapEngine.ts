@@ -82,7 +82,10 @@ export interface SnapOptions {
   recentPoints?: Point2[];
 }
 
-const SNAP_PX = 8;
+/** Point-snap reach in screen pixels (the pixel-space analogue of the C++ 2mm
+ *  sketch-coord radius). Shared with the controller's hit/dimension tolerances so a
+ *  single constant governs the on-screen reach of every point-like pick. */
+export const SNAP_PX = 8;
 const EPS = 1e-9;
 const TWO_PI = Math.PI * 2;
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, act } from "@testing-library/react";
 import { resolveBinding } from "./keymap";
 import { useShortcuts } from "./useShortcuts";
@@ -9,11 +9,22 @@ import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
 import { planeFor } from "@/ipc/mockSketch";
 import type { SketchEntity } from "@/ipc/types";
 import { resetStores } from "@/test/resetStores";
+import { redoSketch, undoSketch } from "@/tools/sketch/sketchService";
+import { setModelToolController } from "@/tools/modelTools/modelToolBridge";
+import type { ModelToolController } from "@/tools/modelTools/ModelToolController";
 
-function press(key: string, opts: { shift?: boolean } = {}): KeyboardEvent {
+// Spy the sketch undo/redo verbs (keep the rest of the module real: deleteEntities +
+// flushSketchMutations are used elsewhere in this file).
+vi.mock("@/tools/sketch/sketchService", async (importActual) => {
+  const actual = await importActual<typeof import("@/tools/sketch/sketchService")>();
+  return { ...actual, undoSketch: vi.fn(() => Promise.resolve()), redoSketch: vi.fn(() => Promise.resolve()) };
+});
+
+function press(key: string, opts: { shift?: boolean; meta?: boolean } = {}): KeyboardEvent {
   const ev = new KeyboardEvent("keydown", {
     key,
     shiftKey: opts.shift ?? false,
+    metaKey: opts.meta ?? false,
     bubbles: true,
     cancelable: true,
   });
@@ -84,11 +95,16 @@ describe("useShortcuts", () => {
     expect(toolStore.getState().sketchTool).toBe("rect");
   });
 
-  it("enters sketch mode on S and finishes on Enter", () => {
+  it("enters sketch mode on S and finishes on Enter", async () => {
     render(<Harness />);
     press("s");
     expect(toolStore.getState().mode).toBe("sketch");
-    press("Enter");
+    // finishSketch now DRAINS the sketch mutation queue before flipping mode, so the
+    // flip lands on a microtask — await the queue before asserting.
+    await act(async () => {
+      press("Enter");
+      await flush();
+    });
     expect(toolStore.getState().mode).toBe("model");
   });
 
@@ -156,5 +172,48 @@ describe("useShortcuts", () => {
       );
     });
     expect(toolStore.getState().modelTool).toBe("select");
+  });
+});
+
+describe("useShortcuts — undo/redo routing (mode-gated)", () => {
+  let ctrl: { undo: ReturnType<typeof vi.fn>; redo: ReturnType<typeof vi.fn> };
+
+  beforeEach(() => {
+    resetStores();
+    vi.mocked(undoSketch).mockClear();
+    vi.mocked(redoSketch).mockClear();
+    ctrl = { undo: vi.fn(() => Promise.resolve()), redo: vi.fn(() => Promise.resolve()) };
+    setModelToolController(ctrl as unknown as ModelToolController);
+  });
+
+  it("⌘Z in SKETCH mode drives the sketch undo (not the model history)", () => {
+    render(<Harness />);
+    act(() => toolStore.getState().setMode("sketch"));
+    press("z", { meta: true });
+    expect(undoSketch).toHaveBeenCalledTimes(1);
+    expect(ctrl.undo).not.toHaveBeenCalled();
+  });
+
+  it("⇧⌘Z in SKETCH mode drives the sketch redo", () => {
+    render(<Harness />);
+    act(() => toolStore.getState().setMode("sketch"));
+    press("z", { meta: true, shift: true });
+    expect(redoSketch).toHaveBeenCalledTimes(1);
+    expect(ctrl.redo).not.toHaveBeenCalled();
+  });
+
+  it("⌘Z in MODEL mode drives the model history (not the sketch undo)", () => {
+    render(<Harness />);
+    press("z", { meta: true });
+    expect(ctrl.undo).toHaveBeenCalledTimes(1);
+    expect(undoSketch).not.toHaveBeenCalled();
+  });
+
+  it("Ctrl+Y in SKETCH mode drives the sketch redo", () => {
+    render(<Harness />);
+    act(() => toolStore.getState().setMode("sketch"));
+    press("y", { meta: true });
+    expect(redoSketch).toHaveBeenCalledTimes(1);
+    expect(ctrl.redo).not.toHaveBeenCalled();
   });
 });

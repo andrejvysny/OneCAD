@@ -256,6 +256,24 @@ impl UndoStack {
         self.enforce_cap();
     }
 
+    /// Replaces the newest `count` committed steps with `replacement` (undo-stack
+    /// surgery for the sketch-session squash — see
+    /// [`DocumentSession::squash_sketch_session`]). Pops `count` (clamped to the
+    /// current depth) **without applying** their inverses — the document already
+    /// holds the net result — then pushes `replacement` (if any), clears the redo
+    /// stack (a fresh committed step), and re-caps.
+    ///
+    /// [`DocumentSession::squash_sketch_session`]: crate::edit::DocumentSession::squash_sketch_session
+    pub fn squash(&mut self, count: usize, replacement: Option<Txn>) {
+        let keep = self.undo.len().saturating_sub(count);
+        self.undo.truncate(keep);
+        if let Some(txn) = replacement {
+            self.undo.push(txn);
+        }
+        self.redo.clear();
+        self.enforce_cap();
+    }
+
     /// Pops the newest undo transaction (the session applies its inverses).
     pub fn pop_for_undo(&mut self) -> Option<Txn> {
         self.undo.pop()

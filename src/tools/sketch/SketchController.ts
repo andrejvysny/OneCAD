@@ -36,9 +36,10 @@ import { sketchStore } from "@/stores/sketchStore";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { applySolvedPositions } from "@/ipc/sketchWireMap";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
-import { computeSnap, type SnapResult } from "./snapEngine";
-import { inferConstraints, entityPoints } from "./autoConstrain";
-import { commitDimensionConstraint, deleteEntities } from "./sketchService";
+import { computeSnap, SNAP_PX, type SnapResult } from "./snapEngine";
+import { inferConstraints, inferHV, entityPoints } from "./autoConstrain";
+import { commitDimensionConstraint, deleteEntities, enqueueSketchMutation } from "./sketchService";
+import type { SketchSnapshot } from "@/stores/sketchStore";
 import { hitTestSketch } from "./sketchHitTest";
 import { clickSelection, dragIntent, shouldApplyDrag, type DragIntent } from "./selectGesture";
 import { mirrorEntities } from "./mirrorMath";
@@ -67,6 +68,9 @@ export interface SketchControllerDeps {
 }
 
 export class SketchController {
+  // Set FIRST in dispose(); every rAF callback + queued write-back bails on it so a
+  // late frame / settled RPC never touches a torn-down controller.
+  private disposed = false;
   private machine: ToolMachine | null = null;
   private machineState: ToolState | null = null;
   private lastSnap: SnapResult | null = null;
@@ -87,6 +91,10 @@ export class SketchController {
   private moved = false;
   private pendingMove: PointerEvent | null = null;
   private moveScheduled = false;
+  // Idle-hover hit-test (select tool): rAF-coalesced so a fast mouse only raycasts
+  // once per frame (P2). Carries the latest client point; the flag gates scheduling.
+  private pendingHover: { x: number; y: number } | null = null;
+  private hoverScheduled = false;
 
   // Trim / Mirror tools (non-drawing, click-only). Parallel lanes to `selectActive`,
   // each gated STRICTLY on its tool id so the select/draw/dimension paths are untouched.
@@ -220,6 +228,7 @@ export class SketchController {
     selectionStore.getState().set([{ kind: "sketch", id: session.sketchId }]);
 
     sketchStore.getState().setSession(session);
+    sketchStore.getState().clearSketchUndo(); // fresh session ⇒ no carried-over history
     this.pushSolve(session.sketchId, session.dof, session.status);
 
     this.priorProjection = viewportStore.getState().projection;
@@ -287,6 +296,7 @@ export class SketchController {
       viewportStore.getState().setProjection(this.priorProjection);
       this.priorProjection = null;
     }
+    sketchStore.getState().clearSketchUndo();
     const session = sketchStore.getState().session;
     if (session) void this.deps.client.cancelSketch(session.sketchId);
     sketchStore.getState().setSession(null);
@@ -339,6 +349,21 @@ export class SketchController {
 
   // ── pointer handling ────────────────────────────────────────────────────
 
+  /** Fencing gate for the controller's own queued write-backs (commit / mirror /
+   *  drag). A bumped session generation (a newer setSession superseded this turn), a
+   *  torn-down session, or a disposed controller ⇒ silently drop the write. */
+  private sessionStale(gen: number): boolean {
+    if (this.disposed) return true;
+    const s = sketchStore.getState();
+    return s.session === null || s.sessionGeneration !== gen;
+  }
+
+  /** Degeneracy context for the tool machines: reject a click/drag below ~4px of
+   *  world so tiny/zero-extent geometry never commits, constant on screen at any zoom. */
+  private stepCtx(): { minSize: number } {
+    return { minSize: 4 * this.deps.engine.planePixelWorld() };
+  }
+
   private snapAt(clientX: number, clientY: number): SnapResult | null {
     const raw = this.deps.engine.screenToPlane(clientX, clientY);
     if (!raw) return null;
@@ -382,6 +407,7 @@ export class SketchController {
     if (this.moveScheduled) return;
     this.moveScheduled = true;
     requestAnimationFrame(() => {
+      if (this.disposed) return;
       this.moveScheduled = false;
       const ev = this.pendingMove;
       this.pendingMove = null;
@@ -393,7 +419,7 @@ export class SketchController {
       this.deps.engine.setSketchSnap(snap, showHints);
       // Dimension mode: the indicator aids aiming; there is no rubber-band preview.
       if (!this.machine || !this.machineState) return;
-      const stepped = this.machine.step(this.machineState, { kind: "move", pt: snap.point });
+      const stepped = this.machine.step(this.machineState, { kind: "move", pt: snap.point }, this.stepCtx());
       this.machineState = stepped.state;
       this.deps.engine.setSketchPreview(stepped.preview);
       this.updateGhost(stepped.preview, snap.point);
@@ -441,7 +467,7 @@ export class SketchController {
     if (!this.machine || !this.machineState) return;
     const snap = this.snapAt(e.clientX, e.clientY) ?? this.lastSnap;
     if (!snap) return;
-    const stepped = this.machine.step(this.machineState, { kind: "click", pt: snap.point });
+    const stepped = this.machine.step(this.machineState, { kind: "click", pt: snap.point }, this.stepCtx());
     this.machineState = stepped.state;
     this.deps.engine.setSketchPreview(stepped.preview);
     if (stepped.committed && stepped.committed.length > 0) {
@@ -452,13 +478,23 @@ export class SketchController {
 
   // ── commit round-trip ─────────────────────────────────────────────────────
 
-  private async commit(committed: DraftEntity[]): Promise<void> {
-    const store = sketchStore.getState();
-    const session = store.session;
+  /** Public thin wrapper: serialize the commit through the shared mutation queue so
+   *  a burst of clicks (fast polyline) rebases each segment on the settled prior one. */
+  private commit(committed: DraftEntity[]): Promise<void> {
+    return enqueueSketchMutation(() => this.commitNow(committed));
+  }
+
+  private async commitNow(committed: DraftEntity[]): Promise<void> {
+    if (this.disposed) return;
+    const gen = sketchStore.getState().sessionGeneration;
+    // Re-read the session INSIDE the queued turn and rebase the committed drafts onto
+    // it (id-assign here too) so a prior queued commit's result is already folded in.
+    const session = sketchStore.getState().session;
     if (!session) return;
+    const before: SketchSnapshot = { entities: session.entities, constraints: session.constraints };
 
     const newEntities: SketchEntity[] = committed.map((d) => ({
-      id: store.nextEntityId(),
+      id: sketchStore.getState().nextEntityId(),
       ...draftToEntityFields(d),
     }));
     const newConstraints: SketchConstraint[] = inferConstraints(newEntities, session.entities, {
@@ -472,11 +508,12 @@ export class SketchController {
     try {
       result = await this.deps.client.sketchUpsert(session.sketchId, entities, constraints);
     } catch (e) {
+      if (this.sessionStale(gen)) return;
       viewportStore.getState().setStatusHint(`Sketch solve failed: ${sketchErr(e)}`);
       return;
     }
-    // A late exit could have cleared the session mid-await.
-    if (!sketchStore.getState().session) return;
+    // A late exit / newer session could have superseded this turn mid-await.
+    if (this.sessionStale(gen)) return;
 
     // F-WP9: the solver may have MOVED points (constraint-driven); write the
     // solved positions back into the geometry (backend point UUIDs were already
@@ -488,6 +525,7 @@ export class SketchController {
     sketchStore.getState().setSession(next);
     this.deps.engine.updateSketchSession(next.plane, solvedEntities, next.status);
     this.pushSolve(session.sketchId, result.dof, result.status);
+    sketchStore.getState().pushUndoSnapshot(before, { kind: "commit" });
   }
 
   private pushSolve(id: string, dof: number, status: SketchSession["status"]): void {
@@ -503,7 +541,7 @@ export class SketchController {
     if (!session) return;
     const raw = this.deps.engine.screenToPlane(clientX, clientY);
     if (!raw) return;
-    const tol = 8 * this.deps.engine.planePixelWorld(); // same 8px reach as snapping
+    const tol = SNAP_PX * this.deps.engine.planePixelWorld(); // same reach as snapping
     const target = pickDimensionTarget(raw, session.entities, tol);
     if (!target) {
       // A click on empty space cancels a half-made pick (but leaves an open chip).
@@ -621,11 +659,19 @@ export class SketchController {
       );
   }
 
+  /** Public thin wrapper: serialize the mirror through the shared mutation queue. */
+  private performMirror(sources: SketchEntity[], axis: SketchEntity): Promise<void> {
+    return enqueueSketchMutation(() => this.performMirrorNow(sources, axis));
+  }
+
   /** Reflect `sources` across the axis line, then ONE sketchUpsert (session + copies,
    *  session constraints + the new Symmetric/Equal). Selection moves to the copies. */
-  private async performMirror(sources: SketchEntity[], axis: SketchEntity): Promise<void> {
+  private async performMirrorNow(sources: SketchEntity[], axis: SketchEntity): Promise<void> {
+    if (this.disposed) return;
+    const gen = sketchStore.getState().sessionGeneration;
     const session = sketchStore.getState().session;
     if (!session || !axis.p0 || !axis.p1) return;
+    const before: SketchSnapshot = { entities: session.entities, constraints: session.constraints };
     const { entities: mirrored, constraints: mirrorCons } = mirrorEntities(
       sources,
       axis.id,
@@ -644,10 +690,11 @@ export class SketchController {
     try {
       result = await this.deps.client.sketchUpsert(session.sketchId, entities, constraints);
     } catch (e) {
+      if (this.sessionStale(gen)) return;
       viewportStore.getState().setStatusHint(`Mirror failed: ${sketchErr(e)}`);
       return;
     }
-    if (!sketchStore.getState().session) return; // exited during await
+    if (this.sessionStale(gen)) return; // exited / superseded during await
 
     const solvedEntities = applySolvedPositions(entities, result.solvedPositions ?? {});
     const next: SketchSession = {
@@ -660,6 +707,7 @@ export class SketchController {
     sketchStore.getState().setSession(next);
     this.deps.engine.updateSketchSession(next.plane, solvedEntities, next.status);
     this.pushSolve(session.sketchId, result.dof, result.status);
+    sketchStore.getState().pushUndoSnapshot(before, { kind: "mirror" });
     // Selection switches to the mirrored copies (body picks) → back in Phase B, repeatable.
     sketchSelectionStore.getState().set(mirrored.map((e) => ({ entityId: e.id })));
     viewportStore
@@ -685,7 +733,7 @@ export class SketchController {
     if (!session) return null;
     const raw = this.deps.engine.screenToPlane(clientX, clientY);
     if (!raw) return null;
-    const tol = 8 * this.deps.engine.planePixelWorld();
+    const tol = SNAP_PX * this.deps.engine.planePixelWorld();
     return hitTestSketch(raw, session.entities, tol);
   }
 
@@ -702,13 +750,9 @@ export class SketchController {
   private onSelectPointerMove = (e: PointerEvent): void => {
     // Idle move (no primary button): live hover feedback — the engine hover
     // recolor is driven from sketchSelectionStore via the ViewportRoot bridge.
+    // Coalesced to one raycast per frame (P2).
     if ((e.buttons & 1) === 0) {
-      const hit = this.hitAt(e.clientX, e.clientY);
-      const store = sketchSelectionStore.getState();
-      const same =
-        (hit === null && store.hover === null) ||
-        (hit !== null && store.hover !== null && sameSketchSel(hit, store.hover));
-      if (!same) store.setHover(hit);
+      this.scheduleHoverHit(e.clientX, e.clientY);
       return;
     }
     // Only care about a primary-button drag (LMB held) initiated in the viewport.
@@ -722,6 +766,27 @@ export class SketchController {
     }
     if (this.dragArmed && far) void this.beginSelectDrag(e.clientX, e.clientY);
   };
+
+  /** Coalesce idle-hover hit-tests to ONE raycast per frame (P2). The engine hover
+   *  recolor is driven from sketchSelectionStore via the ViewportRoot bridge. */
+  private scheduleHoverHit(clientX: number, clientY: number): void {
+    this.pendingHover = { x: clientX, y: clientY };
+    if (this.hoverScheduled) return;
+    this.hoverScheduled = true;
+    requestAnimationFrame(() => {
+      this.hoverScheduled = false;
+      if (this.disposed) return;
+      const pt = this.pendingHover;
+      this.pendingHover = null;
+      if (!pt) return;
+      const hit = this.hitAt(pt.x, pt.y);
+      const store = sketchSelectionStore.getState();
+      const same =
+        (hit === null && store.hover === null) ||
+        (hit !== null && store.hover !== null && sameSketchSel(hit, store.hover));
+      if (!same) store.setHover(hit);
+    });
+  }
 
   private onSelectPointerUp = (e: PointerEvent): void => {
     const button = this.downButton;
@@ -800,6 +865,7 @@ export class SketchController {
     this.solveScheduled = true;
     requestAnimationFrame(() => {
       this.solveScheduled = false;
+      if (this.disposed) return;
       const target = this.pendingTarget;
       this.pendingTarget = null;
       if (!target || !this.dragging) return;
@@ -847,6 +913,13 @@ export class SketchController {
   /** Commit (or cancel-restore) the drag: endGesture → apply final positions to the
    *  session + engine + DOF badge; the selection stays on the dragged entity. */
   private async finishDrag(finalTarget: [number, number] | undefined, restore: boolean): Promise<void> {
+    const gen = sketchStore.getState().sessionGeneration;
+    const startSession = sketchStore.getState().session;
+    // Pre-drag snapshot for undo (the store still holds the pre-drag arrays — the drag
+    // preview only moved the engine, never setSession). A cancel (Esc) does NOT push.
+    const before: SketchSnapshot | null = startSession
+      ? { entities: startSession.entities, constraints: startSession.constraints }
+      : null;
     const sel = this.dragArmed?.sel ?? null;
     const base = this.dragBase;
     const plane = this.dragPlane;
@@ -859,6 +932,7 @@ export class SketchController {
     } catch (err) {
       viewportStore.getState().setStatusHint(`Drag failed: ${sketchErr(err)}`);
     }
+    if (this.sessionStale(gen)) return; // exited / superseded / disposed during await
     const session = sketchStore.getState().session;
     if (!session || !plane) return;
 
@@ -875,6 +949,7 @@ export class SketchController {
     this.deps.engine.updateSketchSession(next.plane, entities, next.status);
     if (result) this.pushSolve(session.sketchId, result.dof, result.status);
     if (sel) sketchSelectionStore.getState().set([sel]);
+    if (!restore && before) sketchStore.getState().pushUndoSnapshot(before, { kind: "drag" });
   }
 
   /** Drop all in-flight drag state (idempotent). A pending solve rAF no-ops on `!dragging`. */
@@ -927,7 +1002,7 @@ export class SketchController {
     if (e.key === "Escape" && this.machine && this.machineState && this.machineState.anchors.length > 0) {
       // A gesture is in progress: end the chain here, and DON'T let the global
       // Esc ladder also switch tools (capture-phase intercept).
-      const stepped = this.machine.step(this.machineState, { kind: "esc" });
+      const stepped = this.machine.step(this.machineState, { kind: "esc" }, this.stepCtx());
       this.machineState = stepped.state;
       this.deps.engine.setSketchPreview([]);
       this.deps.engine.setSketchGhost(null, null);
@@ -941,7 +1016,20 @@ export class SketchController {
   };
 
   dispose(): void {
+    this.disposed = true; // set FIRST: guards every pending rAF + queued write-back
     this.endPlanePick();
+    sketchSelectionStore.getState().clear();
+    if (this.dimensionActive) this.cancelDimension();
+    // An in-flight drag gesture must be closed on the wire (endGesture always commits
+    // ONE step; there is no cancel verb) so the worker doesn't leak an open gesture.
+    if (this.dragging || this.dragStarting) void this.deps.client.endGesture().catch(() => {});
+    this.resetDrag();
+    sketchStore.getState().clearSketchUndo();
+    const session = sketchStore.getState().session;
+    if (session) {
+      void this.deps.client.cancelSketch(session.sketchId);
+      sketchStore.getState().setSession(null);
+    }
     const c = this.deps.container;
     c.removeEventListener("pointerdown", this.onPointerDown);
     c.removeEventListener("pointermove", this.onPointerMove);
@@ -958,14 +1046,9 @@ function sketchErr(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-/** Local H/V inference for the ghost glyph (mirrors autoConstrain thresholds). */
+/** H/V inference for the ghost glyph — delegates to the shared `inferHV` (one source
+ *  of truth for the ±5° tolerance) and maps its tokens to the glyph's short codes. */
 function inferHVDraft(p0: Point2, p1: Point2): "H" | "V" | null {
-  const HV = (5 * Math.PI) / 180;
-  if (p0.x === p1.x && p0.y === p1.y) return null;
-  const a = Math.atan2(p1.y - p0.y, p1.x - p0.x);
-  const hDev = Math.min(Math.abs(a), Math.abs(Math.abs(a) - Math.PI));
-  if (hDev <= HV) return "H";
-  const vDev = Math.abs(Math.abs(a) - Math.PI / 2);
-  if (vDev <= HV) return "V";
-  return null;
+  const hv = inferHV([p0.x, p0.y], [p1.x, p1.y]);
+  return hv === "Horizontal" ? "H" : hv === "Vertical" ? "V" : null;
 }

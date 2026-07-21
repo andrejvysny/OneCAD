@@ -72,6 +72,7 @@ export function ConstraintBadgeLayer() {
               <DimensionInput
                 value={b.value}
                 suffix={b.kind === "Angle" ? "" : "mm"}
+                kind={b.kind}
                 onCommit={(v) => {
                   if (clientRef.current) void editConstraintValue(clientRef.current, b.id, v);
                 }}

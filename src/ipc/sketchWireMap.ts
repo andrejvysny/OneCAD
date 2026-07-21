@@ -160,6 +160,24 @@ export function createIdMap(backendSketchId: string, planeKind: SketchPlaneKind)
   };
 }
 
+/**
+ * Deep-clone a per-sketch id map (the 4 id maps duplicated; scalar fields copied).
+ * The upsert marshaller MUTATES the map it diffs against as it mints/drops ids, so an
+ * upsert works on a CLONE and the caller commits it onto the live map ONLY after the
+ * RPC resolves — a rejected upsert then leaves the live map byte-for-byte unchanged
+ * (transactional), instead of stranding half-applied add/remove bookkeeping.
+ */
+export function cloneIdMap(map: SketchIdMap): SketchIdMap {
+  return {
+    backendSketchId: map.backendSketchId,
+    planeKind: map.planeKind,
+    entity: new Map(map.entity),
+    point: new Map(map.point),
+    constraint: new Map(map.constraint),
+    constraintValue: new Map(map.constraintValue),
+  };
+}
+
 const pointKey = (entityId: string, position: ConstraintPosition): string =>
   `${entityId}.${position}`;
 

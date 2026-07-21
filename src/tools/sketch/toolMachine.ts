@@ -36,6 +36,18 @@ export type ToolEvent =
   | { kind: "move"; pt: Point2 }
   | { kind: "esc" };
 
+/** Optional per-step context. `minSize` is the smallest accepted feature extent in
+ *  PLANE (world) units — a click/drag below it is a degenerate no-op. The controller
+ *  passes a screen-scaled value (≈4px worth of world) so the reject radius is
+ *  constant on screen at any zoom; the default keeps the machines usable bare. */
+export interface ToolContext {
+  minSize?: number;
+}
+
+/** Fallback minimum feature size when no context is supplied (numerically tiny —
+ *  rejects only truly coincident points). */
+const DEFAULT_MIN_SIZE = 1e-9;
+
 /** Accumulated anchor points placed so far + the live cursor. */
 export interface ToolState {
   anchors: Point2[];
@@ -53,20 +65,21 @@ export interface ToolStep {
 export interface ToolMachine {
   readonly id: string;
   init(): ToolState;
-  step(state: ToolState, event: ToolEvent): ToolStep;
+  step(state: ToolState, event: ToolEvent, ctx?: ToolContext): ToolStep;
 }
 
 const emptyState = (): ToolState => ({ anchors: [], cursor: null });
 
 const asPair = (p: Point2): [number, number] => [p.x, p.y];
 const line = (a: Point2, b: Point2): DraftEntity => ({ type: "Line", p0: a, p1: b });
+const dist = (a: Point2, b: Point2): number => Math.hypot(a.x - b.x, a.y - b.y);
 
 // ── Line tool: click-click chaining, Esc ends the chain ──────────────────────
 
 export const lineTool: ToolMachine = {
   id: "line",
   init: emptyState,
-  step(state, event) {
+  step(state, event, ctx) {
     if (event.kind === "esc") {
       return { state: emptyState(), preview: [], done: true };
     }
@@ -76,7 +89,11 @@ export const lineTool: ToolMachine = {
       return { state: next, preview: last ? [line(last, event.pt)] : [] };
     }
     // click
+    const minSize = ctx?.minSize ?? DEFAULT_MIN_SIZE;
     const last = state.anchors[state.anchors.length - 1] ?? null;
+    // Degenerate segment (a click on / next to the previous anchor): ignore it and
+    // keep the chain armed. (A later work item rewrites this branch to end-chain.)
+    if (last && dist(last, event.pt) < minSize) return { state, preview: [] };
     const anchors = [...state.anchors, event.pt];
     const next: ToolState = { anchors: [event.pt], cursor: event.pt };
     if (last) return { state: next, preview: [], committed: [line(last, event.pt)] };
@@ -97,16 +114,18 @@ function rectLines(a: Point2, b: Point2): DraftEntity[] {
 export const rectTool: ToolMachine = {
   id: "rect",
   init: emptyState,
-  step(state, event) {
+  step(state, event, ctx) {
     if (event.kind === "esc") return { state: emptyState(), preview: [], done: true };
     if (event.kind === "move") {
       const corner = state.anchors[0] ?? null;
       return { state: { ...state, cursor: event.pt }, preview: corner ? rectLines(corner, event.pt) : [] };
     }
+    const minSize = ctx?.minSize ?? DEFAULT_MIN_SIZE;
     const corner = state.anchors[0] ?? null;
     if (!corner) return { state: { anchors: [event.pt], cursor: event.pt }, preview: [] };
-    if (event.pt.x === corner.x || event.pt.y === corner.y) {
-      // Degenerate rectangle — ignore this click, keep waiting for a real corner.
+    if (Math.abs(event.pt.x - corner.x) < minSize || Math.abs(event.pt.y - corner.y) < minSize) {
+      // Degenerate rectangle (zero-extent on either axis) — ignore this click, keep
+      // waiting for a real corner.
       return { state: { anchors: [corner], cursor: event.pt }, preview: [] };
     }
     return { state: emptyState(), preview: [], committed: rectLines(corner, event.pt), done: true };
@@ -120,7 +139,7 @@ const radiusOf = (c: Point2, edge: Point2): number => Math.hypot(edge.x - c.x, e
 export const circleTool: ToolMachine = {
   id: "circle",
   init: emptyState,
-  step(state, event) {
+  step(state, event, ctx) {
     if (event.kind === "esc") return { state: emptyState(), preview: [], done: true };
     if (event.kind === "move") {
       const center = state.anchors[0] ?? null;
@@ -129,10 +148,11 @@ export const circleTool: ToolMachine = {
         preview: center ? [{ type: "Circle", center, radius: radiusOf(center, event.pt) }] : [],
       };
     }
+    const minSize = ctx?.minSize ?? DEFAULT_MIN_SIZE;
     const center = state.anchors[0] ?? null;
     if (!center) return { state: { anchors: [event.pt], cursor: event.pt }, preview: [] };
     const radius = radiusOf(center, event.pt);
-    if (radius <= 1e-9) return { state: { anchors: [center], cursor: event.pt }, preview: [] };
+    if (radius < minSize) return { state: { anchors: [center], cursor: event.pt }, preview: [] };
     return {
       state: emptyState(),
       preview: [],
@@ -157,8 +177,9 @@ function projectToCircle(center: Point2, radius: number, toward: Point2): Point2
 export const arcTool: ToolMachine = {
   id: "arc",
   init: emptyState,
-  step(state, event) {
+  step(state, event, ctx) {
     if (event.kind === "esc") return { state: emptyState(), preview: [], done: true };
+    const minSize = ctx?.minSize ?? DEFAULT_MIN_SIZE;
     const [center, start] = state.anchors;
     if (event.kind === "move") {
       if (center && start) {
@@ -178,7 +199,7 @@ export const arcTool: ToolMachine = {
     // click
     if (!center) return { state: { anchors: [event.pt], cursor: event.pt }, preview: [] };
     if (!start) {
-      if (radiusOf(center, event.pt) <= 1e-9) return { state: { anchors: [center], cursor: event.pt }, preview: [] };
+      if (radiusOf(center, event.pt) < minSize) return { state: { anchors: [center], cursor: event.pt }, preview: [] };
       return { state: { anchors: [center, event.pt], cursor: event.pt }, preview: [] };
     }
     const radius = radiusOf(center, start);
