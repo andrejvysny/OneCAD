@@ -41,6 +41,7 @@ function makeEngineMock(hit: () => PickablePlane | null) {
     setSketchDrawingActive: vi.fn(),
     setSketchPreview: vi.fn(),
     setSketchGhost: vi.fn(),
+    setSketchTrimGhost: vi.fn(),
     setSketchSnap: vi.fn(),
   };
 }

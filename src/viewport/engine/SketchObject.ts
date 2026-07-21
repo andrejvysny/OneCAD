@@ -31,6 +31,7 @@ import type { DraftEntity } from "@/tools/sketch/toolMachine";
 const ARC_SEGMENTS = 64;
 const LINE_WIDTH = 2;
 const PREVIEW_WIDTH = 1.5;
+const TRIM_GHOST_WIDTH = 3.5;
 
 /** Flat local xyz (z=0) polyline for an entity, in plane coords. */
 export function entityPolyline(e: {
@@ -93,6 +94,8 @@ export class SketchObject {
   private readonly planeGroup = new THREE.Group();
   private readonly entityGroup = new THREE.Group();
   private readonly previewGroup = new THREE.Group();
+  // Destructive doomed-piece overlay (Trim tool hover), above committed entities.
+  private readonly trimGhostGroup = new THREE.Group();
   private readonly grid: GridPlane;
   private readonly tint: THREE.Mesh;
   private readonly points: THREE.Points;
@@ -112,6 +115,7 @@ export class SketchObject {
   private readonly matHover: LineMaterial;
   private readonly matConstruction: LineMaterial;
   private readonly matPreview: LineMaterial;
+  private readonly matTrimGhost: LineMaterial;
   private readonly allMaterials: LineMaterial[];
 
   private readonly _basis = new THREE.Matrix4();
@@ -119,7 +123,7 @@ export class SketchObject {
 
   constructor(private readonly deps: SketchObjectDeps) {
     this.planeGroup.name = "sketchPlane";
-    this.planeGroup.add(this.entityGroup, this.previewGroup);
+    this.planeGroup.add(this.entityGroup, this.previewGroup, this.trimGhostGroup);
     deps.sketchRoot.add(this.planeGroup);
 
     // Plane tint quad (large, low alpha) + adaptive grid, both plane-local.
@@ -158,6 +162,7 @@ export class SketchObject {
     this.matHover = mk(palette.hoverAccent());
     this.matConstruction = mk(palette.sketchConstruction(), { dashed: true, dashSize: 3, gapSize: 2 });
     this.matPreview = mk(palette.sketchUnder(), { linewidth: PREVIEW_WIDTH, transparent: true, opacity: 0.9 });
+    this.matTrimGhost = mk(palette.destructive(), { linewidth: TRIM_GHOST_WIDTH, transparent: true, opacity: 0.95 });
     this.allMaterials = [
       this.matUnder,
       this.matFull,
@@ -166,6 +171,7 @@ export class SketchObject {
       this.matHover,
       this.matConstruction,
       this.matPreview,
+      this.matTrimGhost,
     ];
   }
 
@@ -205,6 +211,29 @@ export class SketchObject {
       if (positions.length < 6) continue;
       const line = this.buildLine(positions, d.construction ? this.matConstruction : this.matPreview);
       this.previewGroup.add(line);
+    }
+    this.deps.invalidate();
+  }
+
+  /** Replace the destructive trim-ghost overlay (the doomed piece), or clear it. */
+  setTrimGhost(draft: DraftEntity | null): void {
+    for (const c of [...this.trimGhostGroup.children]) this.disposeLine(c);
+    this.trimGhostGroup.clear();
+    if (draft) {
+      const positions = entityPolyline({
+        type: draft.type,
+        p0: draft.p0 ? [draft.p0.x, draft.p0.y] : undefined,
+        p1: draft.p1 ? [draft.p1.x, draft.p1.y] : undefined,
+        center: draft.center ? [draft.center.x, draft.center.y] : undefined,
+        radius: draft.radius,
+        start: draft.start ? [draft.start.x, draft.start.y] : undefined,
+        end: draft.end ? [draft.end.x, draft.end.y] : undefined,
+      });
+      if (positions.length >= 6) {
+        const line = this.buildLine(positions, this.matTrimGhost);
+        line.renderOrder = 5; // above committed entities (3) + markers (4)
+        this.trimGhostGroup.add(line);
+      }
     }
     this.deps.invalidate();
   }
@@ -292,6 +321,7 @@ export class SketchObject {
   dispose(): void {
     for (const c of [...this.entityGroup.children]) if (c !== this.points) this.disposeLine(c);
     for (const c of [...this.previewGroup.children]) this.disposeLine(c);
+    for (const c of [...this.trimGhostGroup.children]) this.disposeLine(c);
     this.points.geometry.dispose();
     this.pointsMat.dispose();
     (this.tint.geometry as THREE.BufferGeometry).dispose();

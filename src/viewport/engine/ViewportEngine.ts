@@ -540,11 +540,19 @@ export class ViewportEngine {
   updateSketchSession(plane: SketchPlane, entities: SketchEntity[], status: SketchSolveStatus): void {
     this.sketchPlane = plane;
     this.sketch?.setSession(plane, entities, status);
+    // A committed edit invalidates any hover-time doomed-piece ghost (it was drawn
+    // against the pre-edit geometry) — clear it so it never lingers stale.
+    this.sketch?.setTrimGhost(null);
     this.snapIndicator?.setPlane(plane);
   }
 
   setSketchPreview(drafts: DraftEntity[]): void {
     this.sketch?.setPreview(drafts);
+  }
+
+  /** Show/clear the destructive trim doomed-piece ghost (Trim tool hover). */
+  setSketchTrimGhost(draft: DraftEntity | null): void {
+    this.sketch?.setTrimGhost(draft);
   }
 
   setSketchSelection(ids: Iterable<string>): void {

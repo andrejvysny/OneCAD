@@ -42,6 +42,7 @@ function makeEngineMock() {
     setSketchDrawingActive: vi.fn(),
     setSketchPreview: vi.fn(),
     setSketchGhost: vi.fn(),
+    setSketchTrimGhost: vi.fn(),
     setSketchSnap: vi.fn(),
     updateSketchSession: vi.fn(),
     screenToPlane: vi.fn((x: number, y: number) => ({ x, y })),
@@ -129,6 +130,11 @@ describe("SketchController — Trim + Mirror", () => {
     mouse("pointerup", x, y, 0, 0, mods);
   };
   const selected = () => sketchSelectionStore.getState().selected;
+  /** Last argument passed to the trim-ghost engine channel. */
+  const lastTrimGhost = (): unknown => {
+    const calls = engineMock.setSketchTrimGhost.mock.calls;
+    return calls.length ? calls[calls.length - 1][0] : undefined;
+  };
 
   // ── Trim ──────────────────────────────────────────────────────────────────
   describe("Trim", () => {
@@ -137,8 +143,37 @@ describe("SketchController — Trim + Mirror", () => {
       await flush();
     });
 
-    it("a click on an entity deletes it (one upsert, entity removed)", async () => {
-      click(10, 10); // on the e1 line body (midpoint region)
+    // Cross geometry for a real (piece-producing) trim: B is trimmed between A and C.
+    function seedCrossingSession(): void {
+      const s = sketchStore.getState().session!;
+      sketchStore.getState().setSession({
+        ...s,
+        entities: [
+          { id: "eA", type: "Line", p0: [5, -50], p1: [5, 50] }, // vertical x=5
+          { id: "eB", type: "Line", p0: [-50, 0], p1: [50, 0] }, // horizontal y=0 (target)
+          { id: "eC", type: "Line", p0: [15, -50], p1: [15, 50] }, // vertical x=15
+        ],
+        constraints: [],
+      });
+    }
+
+    it("a click on a segment trims it into pieces (one upsert; target gone, 2 pieces)", async () => {
+      seedCrossingSession();
+      click(10, 0); // on eB between the x=5 and x=15 crossings
+      await flush();
+      expect(clientMock.sketchUpsert).toHaveBeenCalledTimes(1);
+      const [, entities] = clientMock.sketchUpsert.mock.calls[0];
+      const ids = (entities as SketchEntity[]).map((e) => e.id);
+      expect(ids).not.toContain("eB"); // target trimmed away
+      expect(ids).toContain("eA");
+      expect(ids).toContain("eC");
+      // A,C kept + 2 surviving pieces of B.
+      expect((entities as SketchEntity[]).length).toBe(4);
+    });
+
+    it("a click on an entity with no crossings falls back to whole-entity delete", async () => {
+      // e1/e2 are parallel horizontals → no crossings → whole delete.
+      click(10, 10); // on the e1 line body
       await flush();
       expect(clientMock.sketchUpsert).toHaveBeenCalledTimes(1);
       const [, entities] = clientMock.sketchUpsert.mock.calls[0];
@@ -153,12 +188,33 @@ describe("SketchController — Trim + Mirror", () => {
     });
 
     it("shows the trim hint on arming", () => {
-      expect(viewportStore.getState().statusHint?.message).toContain("Click an entity to delete");
+      expect(viewportStore.getState().statusHint?.message).toContain("Click a segment to trim");
     });
 
-    it("idle mouse move does NOT set hover (trim hover ships in a later wave)", () => {
-      mouse("pointermove", 10, 10, 0, 0); // idle move over the e1 line body
+    it("idle mouse move sets hover + a destructive doomed-piece ghost", () => {
+      seedCrossingSession();
+      mouse("pointermove", 10, 0, 0, 0); // idle move over eB's mid span
+      expect(sketchSelectionStore.getState().hover).toEqual({ entityId: "eB" });
+      // The doomed middle piece is a Line draft (not null / not the whole entity).
+      const lastGhost = lastTrimGhost() as { type: string; p0?: unknown };
+      expect(lastGhost).toMatchObject({ type: "Line" });
+      expect(lastGhost.p0).toBeDefined();
+    });
+
+    it("a miss clears the trim ghost", () => {
+      seedCrossingSession();
+      mouse("pointermove", 10, 0, 0, 0); // hit → ghost set
+      mouse("pointermove", 300, 300, 0, 0); // miss → ghost cleared
+      expect(lastTrimGhost()).toBeNull();
       expect(sketchSelectionStore.getState().hover).toBeNull();
+    });
+
+    it("switching away from trim clears the ghost", () => {
+      seedCrossingSession();
+      mouse("pointermove", 10, 0, 0, 0); // ghost set
+      engineMock.setSketchTrimGhost.mockClear();
+      toolStore.getState().setTool("select");
+      expect(engineMock.setSketchTrimGhost).toHaveBeenCalledWith(null);
     });
   });
 

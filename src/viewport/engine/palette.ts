@@ -29,7 +29,8 @@ export type TokenName =
   | "--color-axis-z"
   | "--color-plane-xy"
   | "--color-plane-xz"
-  | "--color-plane-yz";
+  | "--color-plane-yz"
+  | "--color-traffic-close";
 
 // rgb() mirrors of the token values in tokens.css (non-browser fallback only).
 const FALLBACK: Record<TokenName, string> = {
@@ -49,6 +50,8 @@ const FALLBACK: Record<TokenName, string> = {
   "--color-plane-xy": "rgb(80, 120, 190)",
   "--color-plane-xz": "rgb(217, 134, 60)",
   "--color-plane-yz": "rgb(92, 160, 92)",
+  // Traffic-light close (see tokens.css) — the destructive trim-ghost color.
+  "--color-traffic-close": "rgb(255, 95, 87)",
 };
 
 let cache: Map<TokenName, THREE.Color> | null = null;
@@ -105,6 +108,8 @@ export const palette = {
   sketchConflict: () => tokenColor("--color-warn"),
   /** Sketch plane tint quad + sketch canvas background. */
   sketchPlane: () => tokenColor("--color-canvas-sketch"),
+  /** Destructive overlay (trim doomed-piece ghost). */
+  destructive: () => tokenColor("--color-traffic-close"),
 
   // ── Origin axis triad (always-visible XYZ at the origin) ──
   /** +X axis leg. */

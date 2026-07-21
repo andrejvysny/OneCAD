@@ -34,6 +34,7 @@ function makeEngineMock() {
     setSketchDrawingActive: vi.fn(),
     setSketchPreview: vi.fn(),
     setSketchGhost: vi.fn(),
+    setSketchTrimGhost: vi.fn(),
     setSketchSnap: vi.fn(),
     updateSketchSession: vi.fn(),
     // 1:1 mapping so client coords equal plane coords.

@@ -25,6 +25,7 @@ function makeEngineMock() {
     setSketchDrawingActive: vi.fn(),
     setSketchPreview: vi.fn(),
     setSketchGhost: vi.fn(),
+    setSketchTrimGhost: vi.fn(),
     setSketchSnap: vi.fn(),
     updateSketchSession: vi.fn(),
     screenToPlane: vi.fn((x: number, y: number) => ({ x, y })),

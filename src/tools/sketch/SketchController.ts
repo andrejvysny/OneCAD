@@ -38,11 +38,12 @@ import { applySolvedPositions } from "@/ipc/sketchWireMap";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
 import { computeSnap, SNAP_PX, type SnapResult } from "./snapEngine";
 import { inferConstraints, inferHV, entityPoints } from "./autoConstrain";
-import { commitDimensionConstraint, deleteEntities, enqueueSketchMutation } from "./sketchService";
+import { commitDimensionConstraint, enqueueSketchMutation, trimEntity } from "./sketchService";
 import type { SketchSnapshot } from "@/stores/sketchStore";
 import { hitTestSketch } from "./sketchHitTest";
 import { clickSelection, dragIntent, shouldApplyDrag, type DragIntent } from "./selectGesture";
 import { mirrorEntities } from "./mirrorMath";
+import { trimPreview, entityToDraft } from "./trimMath";
 import {
   dimensionInit,
   dimensionStep,
@@ -307,6 +308,7 @@ export class SketchController {
     this.deps.engine.setSketchPreview([]);
     this.deps.engine.setSketchSnap(null, false);
     this.deps.engine.setSketchGhost(null, null);
+    this.deps.engine.setSketchTrimGhost(null);
     this.deps.engine.exitSketch();
     viewportStore.getState().setStatusHint(null);
     if (this.priorProjection) {
@@ -346,6 +348,7 @@ export class SketchController {
     this.deps.engine.setSketchDrawingActive(!!m || this.dimensionActive);
     this.deps.engine.setSketchPreview([]);
     this.deps.engine.setSketchGhost(null, null);
+    this.deps.engine.setSketchTrimGhost(null); // drop any lingering trim doomed-piece ghost
     if (!m && !this.dimensionActive) this.deps.engine.setSketchSnap(null, false);
     // Set AFTER the planePicking early-return above, so the pick phase keeps the
     // default arrow; set before the per-tool hint branches below so every tool
@@ -358,7 +361,7 @@ export class SketchController {
       return;
     }
     if (this.trimActive) {
-      viewportStore.getState().setStatusHint("Click an entity to delete · Esc to exit", { sticky: true });
+      viewportStore.getState().setStatusHint("Click a segment to trim · Esc to exit", { sticky: true });
       return;
     }
     if (this.mirrorActive) {
@@ -418,9 +421,9 @@ export class SketchController {
     // not a click — track it so pointerup doesn't fire a stray delete/pick.
     if (this.trimActive || this.mirrorActive) {
       if ((e.buttons & 1) === 0) {
-        // Idle move: Mirror gets live hover tint (trim's hover lands in a later
-        // wave — its click semantics are still a straight hit-test).
-        if (this.mirrorActive) this.scheduleHoverHit(e.clientX, e.clientY);
+        // Idle move: both Mirror (hover tint) and Trim (hover tint + destructive
+        // doomed-piece ghost) get live feedback, coalesced to one raycast/frame.
+        if (this.mirrorActive || this.trimActive) this.scheduleHoverHit(e.clientX, e.clientY);
         return;
       }
       const far =
@@ -630,15 +633,27 @@ export class SketchController {
 
   // ── Trim tool ────────────────────────────────────────────────────────────────
   //
-  // Click-to-delete (ports OneCAD-CPP TrimTool: "click to delete entire entity").
-  // A click that hits an entity (body OR point pick) deletes that entity via the
-  // shared `deleteEntities` service (which cascades its referencing constraints);
-  // a miss is a no-op. Esc falls through to the global ladder → back to select.
+  // Parametric trim: a click on an entity removes the SPAN between the entity's two
+  // nearest crossings with other entities (the clicked segment), leaving the
+  // surviving pieces (`trimEntity` → `trimPieces`). An entity with no qualifying
+  // crossings falls back to whole-entity delete. A miss is a no-op. Esc falls
+  // through to the global ladder → back to select. Hover shows a destructive
+  // doomed-piece ghost (see `renderTrimGhost`).
 
   private handleTrimClick(clientX: number, clientY: number): void {
-    const hit = this.hitAt(clientX, clientY);
+    const session = sketchStore.getState().session;
+    if (!session) return;
+    const raw = this.deps.engine.screenToPlane(clientX, clientY);
+    if (!raw) return;
+    const tol = SNAP_PX * this.deps.engine.planePixelWorld();
+    const hit = hitTestSketch(raw, session.entities, tol);
     if (!hit) return; // miss → no-op
-    void deleteEntities(this.deps.client, [hit.entityId]);
+    // Drop the hover ghost immediately; the write-back's updateSketchSession also
+    // clears it, but this makes the click feel instant.
+    this.deps.engine.setSketchTrimGhost(null);
+    void trimEntity(this.deps.client, hit.entityId, [raw.x, raw.y], {
+      minSize: 4 * this.deps.engine.planePixelWorld(),
+    });
   }
 
   // ── Mirror tool ──────────────────────────────────────────────────────────────
@@ -815,7 +830,31 @@ export class SketchController {
         (hit === null && store.hover === null) ||
         (hit !== null && store.hover !== null && sameSketchSel(hit, store.hover));
       if (!same) store.setHover(hit);
+      // Trim tool: overlay the destructive doomed-piece ghost for the hovered entity
+      // (a miss / off-entity hover clears it).
+      if (this.trimActive) this.renderTrimGhost(pt.x, pt.y, hit);
     });
+  }
+
+  /** Draw the destructive trim ghost for the entity under the cursor (Trim hover):
+   *  the doomed sub-piece the click would remove, or the whole entity when there is
+   *  nothing to trim (no qualifying crossings). Cleared on a miss. */
+  private renderTrimGhost(clientX: number, clientY: number, hit: SketchSel | null): void {
+    if (!hit) {
+      this.deps.engine.setSketchTrimGhost(null);
+      return;
+    }
+    const session = sketchStore.getState().session;
+    const raw = this.deps.engine.screenToPlane(clientX, clientY);
+    const target = session?.entities.find((e) => e.id === hit.entityId);
+    if (!session || !raw || !target) {
+      this.deps.engine.setSketchTrimGhost(null);
+      return;
+    }
+    const others = session.entities.filter((e) => e.id !== target.id);
+    const doomed = trimPreview(target, raw, others, { minSize: 4 * this.deps.engine.planePixelWorld() });
+    // null ⇒ the whole entity is doomed: ghost its own polyline.
+    this.deps.engine.setSketchTrimGhost(doomed ?? entityToDraft(target));
   }
 
   private onSelectPointerUp = (e: PointerEvent): void => {

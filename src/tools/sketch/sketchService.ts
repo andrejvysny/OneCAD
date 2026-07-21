@@ -15,6 +15,8 @@ import { planePointToWorld } from "@/viewport/engine/sketchBasis";
 import { isConflictStatus } from "./dimensionTool";
 import type { ApplicableConstraint } from "./constraintApplicability";
 import { buildAppliedConstraint, buildAppliedDimension } from "./constraintAuthoring";
+import { trimPieces } from "./trimMath";
+import { draftToEntityFields } from "./toolMachine";
 
 /*
  * ALL session mutators are serialized through one promise chain. Each reads
@@ -203,6 +205,60 @@ async function deleteEntitiesNow(client: CadClient, ids: string[]): Promise<void
   const before: SketchSnapshot = { entities: session.entities, constraints: session.constraints };
   if (await commitReducedSketch(client, session, entities, constraints, gen)) {
     sketchStore.getState().pushUndoSnapshot(before, { kind: "deleteEntities" });
+  }
+}
+
+/**
+ * Parametric trim: replace `entityId` with the pieces that survive removing the
+ * span the click landed in (`trimPieces`). Builds the reduced authoritative
+ * arrays — session entities minus the target PLUS the fresh surviving pieces
+ * (ids minted from `sketchStore`, DraftEntity → wire fields via the SAME
+ * `draftToEntityFields` mapping the draw tools use), and constraints cascade-
+ * filtered by the SAME predicate as `deleteEntitiesNow` (drop any constraint
+ * referencing the target). One `sketchUpsert`; write-back tail identical to
+ * `commitReducedSketch`. Pieces inherit NO constraints (V1; endpoints are exact
+ * on the intersections). When `trimPieces` returns null (no qualifying crossings)
+ * the pieces set is empty ⇒ this degenerates to the whole-entity delete (the
+ * legacy trim behavior). `clickPt` is a plane (u,v) point; `minSize` is the
+ * caller's screen-scaled degeneracy floor (short surviving pieces are dropped).
+ */
+export function trimEntity(
+  client: CadClient,
+  entityId: string,
+  clickPt: [number, number],
+  opts: { minSize: number },
+): Promise<void> {
+  return enqueueSketchMutation(() => trimEntityNow(client, entityId, clickPt, opts));
+}
+
+async function trimEntityNow(
+  client: CadClient,
+  entityId: string,
+  clickPt: [number, number],
+  opts: { minSize: number },
+): Promise<void> {
+  const gen = sketchStore.getState().sessionGeneration;
+  const session = sketchStore.getState().session;
+  if (!session) return;
+  const target = session.entities.find((e) => e.id === entityId);
+  if (!target) return;
+
+  const others = session.entities.filter((e) => e.id !== entityId);
+  const result = trimPieces(target, { x: clickPt[0], y: clickPt[1] }, others, opts);
+  // null ⇒ nothing to trim → whole-entity delete (empty pieces set).
+  const pieceDrafts = result?.pieces ?? [];
+  const pieces: SketchEntity[] = pieceDrafts.map((d) => ({
+    id: sketchStore.getState().nextEntityId(),
+    ...draftToEntityFields(d),
+  }));
+
+  const doomed = new Set([entityId]);
+  const entities = [...session.entities.filter((e) => !doomed.has(e.id)), ...pieces];
+  const constraints = session.constraints.filter((c) => !c.entities.some((r) => doomed.has(r)));
+
+  const before: SketchSnapshot = { entities: session.entities, constraints: session.constraints };
+  if (await commitReducedSketch(client, session, entities, constraints, gen)) {
+    sketchStore.getState().pushUndoSnapshot(before, { kind: "trim" });
   }
 }
 
