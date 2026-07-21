@@ -57,6 +57,27 @@ function sessionSuperseded(gen: number): boolean {
   return s.session === null || s.sessionGeneration !== gen;
 }
 
+/**
+ * Build a reject hint that NAMES the constraint the rejected one clashed with. The
+ * solve's `conflicting` ids (frontend ids) resolve against `constraints` (the array
+ * INCLUDING the just-authored one); the authored id is excluded so the hint points
+ * at the OTHER party. Falls back to the generic over-constrain text when no
+ * conflicting id is available (e.g. the mock lane, which never reports ids).
+ */
+function rejectConflictHint(
+  constraints: SketchConstraint[],
+  conflicting: string[] | undefined,
+  authoredId: string,
+  noun: "Constraint" | "Dimension",
+): string {
+  const generic = `${noun} removed — it would over-constrain the sketch`;
+  const ids = conflicting ?? [];
+  const pick = ids.find((id) => id !== authoredId) ?? ids[0];
+  if (!pick) return generic;
+  const type = constraints.find((c) => c.id === pick)?.type ?? "constraint";
+  return `${noun} removed — conflicts with ${type} (${pick})`;
+}
+
 /** Edit a dimensional constraint's value → re-solve → refresh geometry + DOF. */
 export function editConstraintValue(
   client: CadClient,
@@ -83,6 +104,7 @@ async function editConstraintValueNow(
 
   const next = { ...session, constraints, dof: result.dof, status: result.status };
   sketchStore.getState().setSession(next);
+  sketchStore.getState().setConflicting(result.conflicting ?? []);
   getViewportEngine()?.updateSketchSession(next.plane, next.entities, next.status);
   documentStore.getState().setSketchSolve(session.sketchId, result.dof, docSketchStatus(result.status));
   viewportStore.setState({ dofBadge: result.dof });
@@ -109,14 +131,14 @@ async function editConstraintValueNow(
 export function commitDimensionConstraint(
   client: CadClient,
   constraint: SketchConstraint,
-): Promise<{ rejected: boolean }> {
+): Promise<{ rejected: boolean; hint?: string }> {
   return enqueueSketchMutation(() => commitDimensionConstraintNow(client, constraint));
 }
 
 async function commitDimensionConstraintNow(
   client: CadClient,
   constraint: SketchConstraint,
-): Promise<{ rejected: boolean }> {
+): Promise<{ rejected: boolean; hint?: string }> {
   const gen = sketchStore.getState().sessionGeneration;
   const session = sketchStore.getState().session;
   if (!session) return { rejected: false };
@@ -127,20 +149,24 @@ async function commitDimensionConstraintNow(
   if (sessionSuperseded(gen)) return { rejected: false };
 
   if (isConflictStatus(result.status)) {
-    // Reject-on-conflict: drop the dimension and restore the previous solve.
+    // Reject-on-conflict: name the clashing constraint from the failed solve BEFORE
+    // dropping the dimension and restoring the previous solve.
+    const hint = rejectConflictHint(constraints, result.conflicting, constraint.id, "Dimension");
     const restore = await client.sketchUpsert(session.sketchId, session.entities, session.constraints);
-    if (sessionSuperseded(gen)) return { rejected: true };
+    if (sessionSuperseded(gen)) return { rejected: true, hint };
     const reverted = { ...session, dof: restore.dof, status: restore.status };
     sketchStore.getState().setSession(reverted);
+    sketchStore.getState().setConflicting(restore.conflicting ?? []);
     getViewportEngine()?.updateSketchSession(reverted.plane, reverted.entities, reverted.status);
     documentStore.getState().setSketchSolve(session.sketchId, restore.dof, docSketchStatus(restore.status));
     viewportStore.setState({ dofBadge: restore.dof });
-    return { rejected: true }; // rejected: no undo snapshot pushed
+    return { rejected: true, hint }; // rejected: no undo snapshot pushed
   }
 
   const solvedEntities = applySolvedPositions(session.entities, result.solvedPositions ?? {});
   const next = { ...session, entities: solvedEntities, constraints, dof: result.dof, status: result.status };
   sketchStore.getState().setSession(next);
+  sketchStore.getState().setConflicting(result.conflicting ?? []);
   getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status);
   documentStore.getState().setSketchSolve(session.sketchId, result.dof, docSketchStatus(result.status));
   viewportStore.setState({ dofBadge: result.dof });
@@ -231,6 +257,7 @@ async function commitReducedSketch(
   const solvedEntities = applySolvedPositions(entities, result.solvedPositions ?? {});
   const next = { ...session, entities: solvedEntities, constraints, dof: result.dof, status: result.status };
   sketchStore.getState().setSession(next);
+  sketchStore.getState().setConflicting(result.conflicting ?? []);
   getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status);
   documentStore.getState().setSketchSolve(session.sketchId, result.dof, docSketchStatus(result.status));
   viewportStore.setState({ dofBadge: result.dof });
@@ -283,21 +310,24 @@ async function applyConstraintNow(
   if (sessionSuperseded(gen)) return { rejected: false };
 
   if (isConflictStatus(result.status)) {
-    // Reject-on-conflict: drop the constraint and restore the previous solve.
+    // Reject-on-conflict: name the clashing constraint, then drop this one + restore.
+    const hint = rejectConflictHint(constraints, result.conflicting, constraint.id, "Constraint");
     const restore = await client.sketchUpsert(session.sketchId, session.entities, session.constraints);
     if (sessionSuperseded(gen)) return { rejected: true };
     const reverted = { ...session, dof: restore.dof, status: restore.status };
     sketchStore.getState().setSession(reverted);
+    sketchStore.getState().setConflicting(restore.conflicting ?? []);
     getViewportEngine()?.updateSketchSession(reverted.plane, reverted.entities, reverted.status);
     documentStore.getState().setSketchSolve(session.sketchId, restore.dof, docSketchStatus(restore.status));
     viewportStore.setState({ dofBadge: restore.dof });
-    viewportStore.getState().setStatusHint("Constraint removed — it would over-constrain the sketch");
+    viewportStore.getState().setStatusHint(hint);
     return { rejected: true }; // rejected: no undo snapshot pushed
   }
 
   const solvedEntities = applySolvedPositions(session.entities, result.solvedPositions ?? {});
   const next = { ...session, entities: solvedEntities, constraints, dof: result.dof, status: result.status };
   sketchStore.getState().setSession(next);
+  sketchStore.getState().setConflicting(result.conflicting ?? []);
   getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status);
   documentStore.getState().setSketchSolve(session.sketchId, result.dof, docSketchStatus(result.status));
   viewportStore.setState({ dofBadge: result.dof });
@@ -322,10 +352,10 @@ function openAppliedDimensionChip(client: CadClient, applicable: ApplicableConst
       const cid = sketchStore.getState().nextConstraintId();
       const constraint = dim.build(v, cid);
       toolChipStore.getState().clear();
-      void commitDimensionConstraint(client, constraint).then(({ rejected }) => {
+      void commitDimensionConstraint(client, constraint).then(({ rejected, hint }) => {
         viewportStore
           .getState()
-          .setStatusHint(rejected ? "Dimension removed — it would over-constrain the sketch" : null);
+          .setStatusHint(rejected ? hint ?? "Dimension removed — it would over-constrain the sketch" : null);
       });
     },
     () => toolChipStore.getState().clear(),
@@ -385,6 +415,7 @@ async function undoRedoNow(client: CadClient, dir: "undo" | "redo"): Promise<voi
     status: result.status,
   };
   sketchStore.getState().setSession(next);
+  sketchStore.getState().setConflicting(result.conflicting ?? []);
   getViewportEngine()?.updateSketchSession(next.plane, solvedEntities, next.status);
   documentStore.getState().setSketchSolve(session.sketchId, result.dof, docSketchStatus(result.status));
   viewportStore.setState({ dofBadge: result.dof });

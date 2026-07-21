@@ -21,6 +21,7 @@ import { DimensionInput } from "./DimensionInput";
 export function ConstraintBadgeLayer() {
   const mode = useToolStore((s) => s.mode);
   const session = useSketchStore((s) => s.session);
+  const conflictingIds = useSketchStore((s) => s.conflictingIds);
   const engine = useViewportEngine();
   const clientRef = useRef<ReturnType<typeof createClient> | null>(null);
   if (!clientRef.current) {
@@ -32,6 +33,8 @@ export function ConstraintBadgeLayer() {
   }
 
   const badges = useMemo(() => layoutBadges(session), [session]);
+  // Constraint ids the solver reports in conflict (SCHEMA §7.4) — tint their badges.
+  const conflicting = useMemo(() => new Set(conflictingIds), [conflictingIds]);
   const plane = session?.plane ?? null;
   const refs = useRef(new Map<string, HTMLDivElement>());
 
@@ -59,35 +62,44 @@ export function ConstraintBadgeLayer() {
       data-testid="constraint-badges"
       className="pointer-events-none absolute inset-x-0 bottom-[34px] top-0 z-[3] overflow-hidden"
     >
-      {badges.map((b) => (
-        <div
-          key={b.id}
-          ref={(el) => {
-            if (el) refs.current.set(b.id, el);
-            else refs.current.delete(b.id);
-          }}
-        >
-          {b.editable && b.value !== undefined ? (
-            <span className="inline-block -translate-y-4 translate-x-2">
-              <DimensionInput
-                value={b.value}
-                suffix={b.kind === "Angle" ? "" : "mm"}
-                kind={b.kind}
-                onCommit={(v) => {
-                  if (clientRef.current) void editConstraintValue(clientRef.current, b.id, v);
-                }}
-              />
-            </span>
-          ) : (
-            <span
-              title={b.kind}
-              className="inline-flex h-4 min-w-4 -translate-y-3.5 translate-x-2 items-center justify-center rounded-sm border border-border bg-white px-1 text-[10px] font-semibold leading-none text-accent shadow-ctrl"
-            >
-              {b.glyph}
-            </span>
-          )}
-        </div>
-      ))}
+      {badges.map((b) => {
+        const isConflicting = conflicting.has(b.id);
+        return (
+          <div
+            key={b.id}
+            ref={(el) => {
+              if (el) refs.current.set(b.id, el);
+              else refs.current.delete(b.id);
+            }}
+          >
+            {b.editable && b.value !== undefined ? (
+              <span
+                className={`inline-block -translate-y-4 translate-x-2${
+                  isConflicting ? " rounded-sm border border-traffic-close" : ""
+                }`}
+              >
+                <DimensionInput
+                  value={b.value}
+                  suffix={b.kind === "Angle" ? "" : "mm"}
+                  kind={b.kind}
+                  onCommit={(v) => {
+                    if (clientRef.current) void editConstraintValue(clientRef.current, b.id, v);
+                  }}
+                />
+              </span>
+            ) : (
+              <span
+                title={b.kind}
+                className={`inline-flex h-4 min-w-4 -translate-y-3.5 translate-x-2 items-center justify-center rounded-sm border bg-white px-1 text-[10px] font-semibold leading-none shadow-ctrl ${
+                  isConflicting ? "border-traffic-close text-traffic-close" : "border-border text-accent"
+                }`}
+              >
+                {b.glyph}
+              </span>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

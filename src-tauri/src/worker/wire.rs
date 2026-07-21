@@ -1064,6 +1064,9 @@ pub fn parse_sketch_upsert(sketch_id: &str, result: &Value) -> SketchUpsertDto {
             .unwrap_or(0),
         dof,
         status,
+        // SketchUpsert + EndGesture both carry `conflicting` (SCHEMA §7.4); absent
+        // (legacy worker) ⇒ empty, strict back/forward compat.
+        conflicting: str_array(result.get("conflicting")),
         solved_positions: parse_positions(result.get("positions")),
     }
 }
@@ -1896,6 +1899,26 @@ mod solver_wire_tests {
         assert_eq!(d.status, SketchSolveStatus::FullyConstrained);
         assert_eq!(d.sketch_revision, 5);
         assert_eq!(d.solved_positions.len(), 1);
+    }
+
+    #[test]
+    fn sketch_upsert_parses_conflicting_present_and_absent() {
+        // Conflicting upsert: the constraint ids ride the `conflicting` field.
+        let up = json!({ "sketchId": "sk_1", "sketchRevision": 3, "dof": 0,
+            "state": "Conflicting", "conflicting": ["c-a", "c-b"] });
+        let d = parse_sketch_upsert("sk_1", &up);
+        assert_eq!(d.status, SketchSolveStatus::Conflicting);
+        assert_eq!(d.conflicting, vec!["c-a".to_string(), "c-b".to_string()]);
+        // Absent field (legacy worker / clean sketch) ⇒ empty, no panic.
+        let clean = json!({ "sketchId": "sk_1", "sketchRevision": 4, "dof": 2, "state": "UnderConstrained" });
+        assert!(parse_sketch_upsert("sk_1", &clean).conflicting.is_empty());
+        // EndGesture carries it too (same parser).
+        let end = json!({ "gestureId": 51, "status": "conflicting", "dof": 0,
+            "conflicting": ["c-x"], "positions": {}, "sketchRevision": 6 });
+        assert_eq!(
+            parse_sketch_upsert("sk_1", &end).conflicting,
+            vec!["c-x".to_string()]
+        );
     }
 
     #[test]

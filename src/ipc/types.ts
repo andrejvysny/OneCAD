@@ -172,6 +172,9 @@ export interface SketchSession {
   constraints: SketchConstraint[];
   dof: number;
   status: SketchSolveStatus;
+  /** Constraint ids in conflict (SCHEMA §7.4; FRONTEND ids, unknown dropped by the
+   *  client). Seeds the sketch store's `conflictingIds` on session enter. Absent ⇒ []. */
+  conflicting?: string[];
 }
 
 /** `enterSketch` target: an existing sketch id, or a fresh sketch on a plane. */
@@ -185,6 +188,10 @@ export interface SketchUpsertResult {
   sketchRevision: number;
   dof: number;
   status: SketchSolveStatus;
+  /** Constraint ids in conflict (SCHEMA §7.4; FRONTEND ids, unknown dropped by the
+   *  client). Every solve write-back REPLACES the store's `conflictingIds` from this.
+   *  Absent ⇒ []. */
+  conflicting?: string[];
   /** CHANGED point coordinates after the solve, keyed `entityId.point`. */
   solvedPositions?: Record<string, [number, number]>;
 }

@@ -75,6 +75,7 @@ import {
   buildDeleteSketch,
   cloneIdMap,
   createIdMap,
+  frontendConflictingIds,
   frontendConstraintsFromDto,
   frontendEntitiesFromDto,
   frontendSolvedPositions,
@@ -163,12 +164,16 @@ interface SketchSessionDto {
   constraints: unknown;
   dof: number;
   status: SketchSolveStatus;
+  /** Backend constraint uuids in conflict (SCHEMA §7.4); mapped to frontend ids. */
+  conflicting?: string[];
 }
 interface SketchUpsertDto {
   sketchId: string;
   sketchRevision: number;
   dof: number;
   status: SketchSolveStatus;
+  /** Backend constraint uuids in conflict (SCHEMA §7.4); mapped to frontend ids. */
+  conflicting?: string[];
   solvedPositions: Record<string, [number, number]>;
 }
 interface BeginGestureDto {
@@ -491,6 +496,9 @@ export function createTauriClient(): CadClient {
       constraints,
       dof: dto.dof,
       status: dto.status,
+      // Map the entering solve's conflicting uuids → frontend ids (after seeding the
+      // id-map so map.constraint is populated). Seeds the store's conflictingIds.
+      conflicting: frontendConflictingIds(map, dto.conflicting),
     };
   }
 
@@ -514,6 +522,8 @@ export function createTauriClient(): CadClient {
       sketchRevision: dto.sketchRevision,
       dof: dto.dof,
       status: dto.status,
+      // Map conflicting constraint uuids → frontend ids against the COMMITTED clone.
+      conflicting: frontendConflictingIds(draft, dto.conflicting),
       // F-WP9 fix: the worker keys solvedPositions by backend POINT-entity UUID;
       // reverse-map them to the frontend `entityId.point` keys the SketchController
       // applies (via the COMMITTED clone's id-map). Unknown keys are dropped.
@@ -547,6 +557,9 @@ export function createTauriClient(): CadClient {
       constraints: frontendConstraintsFromDto(dto.constraints, dto.entities),
       dof: dto.dof,
       status: dto.status,
+      // A pure static read opens no session + seeds no id-map, so backend uuids can't
+      // be mapped; the display layer carries no conflict tint (backend returns []).
+      conflicting: [],
     };
   }
 
@@ -603,7 +616,9 @@ export function createTauriClient(): CadClient {
       seq: dto.seq,
       status: dto.status,
       dof: dto.dof,
-      conflicting: dto.conflicting,
+      // BUG fix: the worker keys `conflicting` by backend constraint UUID; map them to
+      // frontend ids (previously passed raw UUIDs the UI could never match to a row).
+      conflicting: map ? frontendConflictingIds(map, dto.conflicting) : [],
       positions: map ? frontendSolvedPositions(map, dto.positions) : dto.positions,
       solveMicros: dto.solveMicros,
       superseded: dto.superseded,
@@ -621,6 +636,8 @@ export function createTauriClient(): CadClient {
       sketchRevision: dto.sketchRevision,
       dof: dto.dof,
       status: dto.status,
+      // Map conflicting constraint uuids → frontend ids (unknown dropped).
+      conflicting: map ? frontendConflictingIds(map, dto.conflicting) : [],
       // Reverse-map backend point UUIDs → frontend `entityId.point` keys (F-WP9).
       solvedPositions: map ? frontendSolvedPositions(map, dto.solvedPositions) : dto.solvedPositions,
     };

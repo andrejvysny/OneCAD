@@ -913,8 +913,14 @@ Upserts the authoritative sketch (plane + entities + constraints). Increments
   "entities": [ … ], "constraints": [ … ] }
 // result
 { "sketchId": "sk_1", "sketchRevision": 4, "dof": 2,
-  "state": "UnderConstrained" }   // state ∈ UnderConstrained|FullyConstrained|OverConstrained|Conflicting
+  "state": "UnderConstrained",    // state ∈ UnderConstrained|FullyConstrained|OverConstrained|Conflicting
+  "conflicting": [] }             // constraint ids in conflict (non-empty iff state=Conflicting); absent ⇒ []
 ```
+
+`conflicting` lists the constraint ids PlaneGCS reports as mutually unsatisfiable
+(the same id set `SolveDrag`/`EndGesture` emit); it is non-empty exactly when
+`state == "Conflicting"` and empty otherwise. It is **optional/additive** — an
+absent field parses as `[]` (all parsers tolerate the missing/unknown key).
 
 The `state` is computed after a full solve, by descending priority:
 **`Conflicting`** (PlaneGCS reports genuinely conflicting constraints — no
@@ -973,9 +979,14 @@ its result).
 { "gestureId": 51 }
 // result
 { "gestureId": 51, "status": "success", "dof": 0,
+  "conflicting": [],   // constraint ids in conflict (non-empty iff status=conflicting); absent ⇒ []
   "positions": { /* final exact positions, changed since BeginGesture */ },
   "sketchRevision": 5 }
 ```
+
+`conflicting` follows the same precedence as `SolveDrag`: the final exact solve's
+conflicts, else the gesture-fixed set diagnosed at `BeginGesture`. Optional/additive
+(absent ⇒ `[]`).
 
 #### SketchRegions
 Computes closed profile regions for a sketch (for extrude/revolve selection and
@@ -1412,6 +1423,24 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-07-21 — Per-constraint conflict ids on every solve surface**
+  (SKETCH-HARDEN W1; **orchestrator SIGNED OFF** after independent adversarial
+  review APPROVE-WITH-FIXES — fixes applied: unconditional endGesture conflict
+  write-back, clean-sketch emptiness pinned in `sketch_conflicts.rs`).
+  [§7.4](#74-sketch-solver-lane).
+  `SketchUpsert` and `EndGesture` results now carry `conflicting: string[]` — the
+  constraint ids PlaneGCS reports as mutually unsatisfiable — matching the field
+  `SolveDrag` already emitted, so the conflict id set is available on *every* solve
+  surface (upsert, drag, end-gesture, and the Rust session-enter DTO that threads
+  the `SketchUpsert` list through). **Additive + optional**: an absent field parses
+  as `[]` — all parsers tolerate the missing/unknown key (Rust `str_array` defaults
+  empty; the frontend types it `conflicting?: string[]`; the C++ subset-matcher
+  fixtures tolerate presence-only). The tauri client maps the backend constraint
+  uuids back to frontend constraint ids (unknown ids dropped). No `protocolVersion`
+  bump (still 1 — pre-implementation contract refinement). Fixtures:
+  `worker/tests/fixtures/sketch_conflicting.ndjson` (upsert + SolveDrag + EndGesture
+  each assert a non-empty `conflicting`), `sketch_upsert.ndjson` (clean sketch ⇒
+  empty `conflicting`). No canonical `protocol/fixtures/` change.
 - **2026-07-20 — Solver lane emits the full §7.4 status vocabulary:
   `OverConstrained` state + `redundant` drag status** (AC-USABILITY W-WP1;
   orchestrator SIGNED OFF). [§7.3](#73-op-payload-schemas-vertical-slice),

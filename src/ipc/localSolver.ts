@@ -219,6 +219,7 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
           constraints: [],
           dof: 0,
           status: "FullyConstrained",
+          conflicting: [], // mock lane never conflicts (deterministic)
         };
         sketchSessions.set(id, session);
         sketchRevisions.set(id, 0);
@@ -247,7 +248,7 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
       const rev = (sketchRevisions.get(sketchId) ?? 0) + 1;
       sketchRevisions.set(sketchId, rev);
       // The local solver is an identity solve (echoes positions) — nothing moved.
-      return { sketchId, sketchRevision: rev, dof, status, solvedPositions: {} };
+      return { sketchId, sketchRevision: rev, dof, status, conflicting: [], solvedPositions: {} };
     },
 
     async finishSketch(sketchId: string): Promise<{ regions: SketchRegion[] }> {
@@ -302,6 +303,7 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
         sketchRevision: rev,
         dof: session?.dof ?? 0,
         status: session?.status ?? "FullyConstrained",
+        conflicting: [], // mock lane never conflicts (deterministic)
         solvedPositions: g && finalTarget ? { [g.dragPointId]: finalTarget } : {},
       };
     },

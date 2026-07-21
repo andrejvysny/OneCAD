@@ -48,6 +48,11 @@ export interface SketchState {
   session: SketchSession | null;
   /** Bumped on EVERY setSession — the fencing token queued mutations check. */
   sessionGeneration: number;
+  /** FRONTEND constraint ids the solver reports in conflict (SCHEMA §7.4). ONE
+   *  owner: every successful solve write-back REPLACES it (`setConflicting`); session
+   *  enter SEEDS it from `session.conflicting`; exit/dispose/session-swap CLEAR it
+   *  (setSession(null)). The inspector + badge layer tint these ids red. */
+  conflictingIds: string[];
   entitySeq: number;
   constraintSeq: number;
   undoStack: SketchSnapshot[];
@@ -55,6 +60,9 @@ export interface SketchState {
   /** Provenance of the top undo snapshot (for edit coalescing). Null after a pop. */
   lastUndoPush: UndoProvenance | null;
   setSession(session: SketchSession | null): void;
+  /** REPLACE the conflicting-id set (every solve write-back / session-enter seed).
+   *  Short-circuits when unchanged so live drag solves don't churn subscribers. */
+  setConflicting(ids: string[]): void;
   /** Mint the next entity id (`e1`, `e2`, …) and advance the counter. */
   nextEntityId(): string;
   /** Mint the next constraint id (`c1`, `c2`, …) and advance the counter. */
@@ -73,6 +81,7 @@ export interface SketchState {
 export const sketchStore = createStore<SketchState>()((set, get) => ({
   session: null,
   sessionGeneration: 0,
+  conflictingIds: [],
   entitySeq: 0,
   constraintSeq: 0,
   undoStack: [],
@@ -80,7 +89,23 @@ export const sketchStore = createStore<SketchState>()((set, get) => ({
   lastUndoPush: null,
 
   setSession(session) {
-    set((s) => ({ session, sessionGeneration: s.sessionGeneration + 1 }));
+    // Tearing down (session === null: exit / dispose / session-swap) clears the
+    // conflicting-id set; a live session leaves it to the write-back's setConflicting.
+    set((s) => ({
+      session,
+      sessionGeneration: s.sessionGeneration + 1,
+      ...(session === null ? { conflictingIds: [] } : {}),
+    }));
+  },
+
+  setConflicting(ids) {
+    set((s) => {
+      const cur = s.conflictingIds;
+      // Skip the write (keep the array ref) when unchanged — subscribers don't churn
+      // on repeated live drag solves that report the same (usually empty) set.
+      if (cur.length === ids.length && cur.every((v, i) => v === ids[i])) return {};
+      return { conflictingIds: ids };
+    });
   },
 
   nextEntityId() {
@@ -135,6 +160,7 @@ export const sketchStore = createStore<SketchState>()((set, get) => ({
     set({
       session: null,
       sessionGeneration: 0,
+      conflictingIds: [],
       entitySeq: 0,
       constraintSeq: 0,
       undoStack: [],

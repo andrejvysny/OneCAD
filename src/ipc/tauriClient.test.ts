@@ -991,6 +991,71 @@ describe("tauriClient drag gesture (latest-wins)", () => {
   });
 });
 
+// ── Conflict-id mapping (SCHEMA §7.4 `conflicting[]`) ─────────────────────────
+
+describe("tauriClient conflicting-id mapping (backend uuid → frontend id)", () => {
+  it("sketchUpsert maps the solve's conflicting uuids back to frontend constraint ids", async () => {
+    let constraintUuid: string | undefined;
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "apply_edit_command") return readyProjection(1);
+        if (cmd === "enter_sketch")
+          return { sketchId: (payload as { sketchId: string }).sketchId, plane: XZ_PLANE, entities: [], constraints: [], dof: 4, status: "UnderConstrained", conflicting: [] };
+        if (cmd === "sketch_upsert") {
+          const ops = (payload as { ops: { op: string; constraint?: { id: string } }[] }).ops ?? [];
+          const addC = ops.find((o) => o.op === "addConstraint");
+          if (addC?.constraint) constraintUuid = addC.constraint.id;
+          // The worker reports the just-minted constraint uuid as conflicting.
+          return { sketchId: (payload as { sketchId: string }).sketchId, sketchRevision: 1, dof: 0, status: "Conflicting", conflicting: constraintUuid ? [constraintUuid] : [], solvedPositions: {} };
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const client = createTauriClient();
+    await client.enterSketch({ newOnPlane: "XZ", sketchId: "sk" });
+    const up = await client.sketchUpsert(
+      "sk",
+      [{ id: "e1", type: "Line", p0: [0, 0], p1: [40, 0] }],
+      [{ id: "c1", type: "Horizontal", entities: ["e1"] }],
+    );
+    // The raw backend uuid was reverse-mapped to the FRONTEND constraint id "c1".
+    expect(up.conflicting).toEqual(["c1"]);
+    expect(up.conflicting).not.toContain(constraintUuid);
+  });
+
+  it("solveDrag maps conflicting uuids to frontend ids (no longer raw uuids)", async () => {
+    let constraintUuid: string | undefined;
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "apply_edit_command") return readyProjection(1);
+        if (cmd === "enter_sketch")
+          return { sketchId: (payload as { sketchId: string }).sketchId, plane: XZ_PLANE, entities: [], constraints: [], dof: 4, status: "UnderConstrained", conflicting: [] };
+        if (cmd === "sketch_upsert") {
+          const ops = (payload as { ops: { op: string; constraint?: { id: string } }[] }).ops ?? [];
+          const addC = ops.find((o) => o.op === "addConstraint");
+          if (addC?.constraint) constraintUuid = addC.constraint.id;
+          return { sketchId: (payload as { sketchId: string }).sketchId, sketchRevision: 1, dof: 3, status: "UnderConstrained", conflicting: [], solvedPositions: {} };
+        }
+        if (cmd === "begin_gesture") return { gestureId: 7, ready: true };
+        if (cmd === "solve_drag")
+          return { gestureId: 7, seq: 1, status: "conflicting", dof: 1, conflicting: constraintUuid ? [constraintUuid] : [], positions: {}, solveMicros: 0, superseded: false };
+      },
+      { shouldMockEvents: true },
+    );
+    const client = createTauriClient();
+    await client.enterSketch({ newOnPlane: "XZ", sketchId: "sk" });
+    await client.sketchUpsert(
+      "sk",
+      [{ id: "e1", type: "Line", p0: [0, 0], p1: [40, 0] }],
+      [{ id: "c1", type: "Horizontal", entities: ["e1"] }],
+    );
+    await client.beginGesture("sk", "e1.Start");
+    const res = await client.solveDrag([5, 5]);
+    expect(res?.conflicting).toEqual(["c1"]);
+    expect(res?.conflicting).not.toContain(constraintUuid);
+  });
+});
+
 // ── Promotion (pick → ElementId) ──────────────────────────────────────────────
 
 describe("tauriClient promoteSelection", () => {

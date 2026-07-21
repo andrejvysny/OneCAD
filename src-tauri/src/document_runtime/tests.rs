@@ -269,6 +269,7 @@ impl SolverEngine for FakeBackend {
             sketch_revision: 1,
             dof: 0,
             status: SketchSolveStatus::FullyConstrained,
+            conflicting: vec![],
             solved_positions: std::collections::BTreeMap::new(),
         })
     }
@@ -336,6 +337,7 @@ impl SolverEngine for FakeBackend {
             sketch_revision: 2,
             dof: 0,
             status: SketchSolveStatus::FullyConstrained,
+            conflicting: vec![],
             solved_positions: solved,
         })
     }

@@ -1033,6 +1033,9 @@ impl DocumentRuntime {
             constraints,
             dof: solved.dof,
             status: solved.status,
+            // Surface the entering solve's conflicting constraints (SCHEMA §7.4) so
+            // re-entering a conflicting sketch tints the offending constraints.
+            conflicting: solved.conflicting,
         })
     }
 
@@ -1061,6 +1064,9 @@ impl DocumentRuntime {
             constraints,
             dof,
             status,
+            // A static read carries no live solve — the sketch_solve cache stores only
+            // (dof, status), so there is no conflicting-id evidence to surface here.
+            conflicting: Vec::new(),
         })
     }
 

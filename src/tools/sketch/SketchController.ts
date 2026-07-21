@@ -229,6 +229,7 @@ export class SketchController {
 
     sketchStore.getState().setSession(session);
     sketchStore.getState().clearSketchUndo(); // fresh session ⇒ no carried-over history
+    sketchStore.getState().setConflicting(session.conflicting ?? []); // seed from the enter solve
     this.pushSolve(session.sketchId, session.dof, session.status);
 
     this.priorProjection = viewportStore.getState().projection;
@@ -523,6 +524,7 @@ export class SketchController {
 
     const next: SketchSession = { ...session, entities: solvedEntities, constraints, dof: result.dof, status: result.status };
     sketchStore.getState().setSession(next);
+    sketchStore.getState().setConflicting(result.conflicting ?? []);
     this.deps.engine.updateSketchSession(next.plane, solvedEntities, next.status);
     this.pushSolve(session.sketchId, result.dof, result.status);
     sketchStore.getState().pushUndoSnapshot(before, { kind: "commit" });
@@ -582,10 +584,10 @@ export class SketchController {
     const id = sketchStore.getState().nextConstraintId();
     const constraint = buildDimensionConstraint(step.emit, id);
     try {
-      const { rejected } = await commitDimensionConstraint(this.deps.client, constraint);
+      const { rejected, hint } = await commitDimensionConstraint(this.deps.client, constraint);
       viewportStore
         .getState()
-        .setStatusHint(rejected ? "Dimension removed — it would over-constrain the sketch" : null);
+        .setStatusHint(rejected ? hint ?? "Dimension removed — it would over-constrain the sketch" : null);
     } catch (e) {
       viewportStore.getState().setStatusHint(`Dimension failed: ${sketchErr(e)}`);
     }
@@ -705,6 +707,7 @@ export class SketchController {
       status: result.status,
     };
     sketchStore.getState().setSession(next);
+    sketchStore.getState().setConflicting(result.conflicting ?? []);
     this.deps.engine.updateSketchSession(next.plane, solvedEntities, next.status);
     this.pushSolve(session.sketchId, result.dof, result.status);
     sketchStore.getState().pushUndoSnapshot(before, { kind: "mirror" });
@@ -883,6 +886,8 @@ export class SketchController {
     }
     if (!this.dragging || !shouldApplyDrag(this.dragLastSeq, res)) return;
     this.dragLastSeq = res!.seq;
+    // Live conflict tint during the drag (store short-circuits when unchanged).
+    sketchStore.getState().setConflicting(res!.conflicting ?? []);
     if (this.dragPlane) {
       this.dragAccum = { ...this.dragAccum, ...res!.positions };
       const moved = applySolvedPositions(this.dragBase, this.dragAccum);
@@ -946,6 +951,10 @@ export class SketchController {
       status: result?.status ?? session.status,
     };
     sketchStore.getState().setSession(next);
+    // Unconditional: a failed endGesture reverts geometry to the pre-drag base, so a
+    // conflict set left over from fireSolve's live frames would tint constraints that
+    // are not conflicting in the DISPLAYED state.
+    sketchStore.getState().setConflicting(result?.conflicting ?? []);
     this.deps.engine.updateSketchSession(next.plane, entities, next.status);
     if (result) this.pushSolve(session.sketchId, result.dof, result.status);
     if (sel) sketchSelectionStore.getState().set([sel]);

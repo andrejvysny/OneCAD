@@ -788,7 +788,7 @@ export const mockClient: CadClient = {
     if (documentStore.getState().sketches[sketchId]) {
       const entities = seededSketchRectangle();
       const { dof, status } = solveDof(entities, []);
-      return { sketchId, plane: planeFor("XY"), entities, constraints: [], dof, status };
+      return { sketchId, plane: planeFor("XY"), entities, constraints: [], dof, status, conflicting: [] };
     }
     throw new Error(`getSketch: unknown sketch ${sketchId}`);
   },

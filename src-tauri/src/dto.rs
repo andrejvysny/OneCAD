@@ -250,6 +250,11 @@ pub struct SketchSessionDto {
     pub constraints: serde_json::Value,
     pub dof: u32,
     pub status: SketchSolveStatus,
+    /// Constraint ids in conflict (SCHEMA §7.4; empty when the sketch is solvable).
+    /// Threaded from the entering `SketchUpsert` solve so re-entering a conflicting
+    /// sketch surfaces the offending constraints. Always serialized (no skip), so
+    /// the frontend sees an explicit `conflicting: []` on a clean sketch.
+    pub conflicting: Vec<String>,
 }
 
 /// A re-solve result (`sketchUpsert`/`endGesture`; `types.ts SketchUpsertResult`).
@@ -260,6 +265,11 @@ pub struct SketchUpsertDto {
     pub sketch_revision: u64,
     pub dof: u32,
     pub status: SketchSolveStatus,
+    /// Constraint ids in conflict (SCHEMA §7.4; empty when the sketch is solvable).
+    /// The worker `SketchUpsert`/`EndGesture` result carries these; absent ⇒ empty
+    /// at the wire parse (`str_array`, strict back/forward compat). Always
+    /// serialized (no skip) so the frontend sees an explicit `conflicting: []`.
+    pub conflicting: Vec<String>,
     /// CHANGED point coordinates after the solve, keyed by the point entity id.
     pub solved_positions: std::collections::BTreeMap<String, [f64; 2]>,
 }
@@ -666,6 +676,43 @@ mod tests {
         let op = extrude(25.0);
         assert_eq!(feature_kind(&op), FeatureKind::Extrude);
         assert_eq!(feature_value_text(&op), "25.0 mm");
+    }
+
+    #[test]
+    fn sketch_upsert_dto_serializes_conflicting_ids() {
+        let dto = SketchUpsertDto {
+            sketch_id: "sk_1".into(),
+            sketch_revision: 3,
+            dof: 0,
+            status: SketchSolveStatus::Conflicting,
+            conflicting: vec!["c-a".into(), "c-b".into()],
+            solved_positions: std::collections::BTreeMap::new(),
+        };
+        let v = serde_json::to_value(&dto).unwrap();
+        assert_eq!(v["conflicting"], serde_json::json!(["c-a", "c-b"]));
+
+        // Empty is still emitted as `[]` (frontend types it optional; absent ⇒ []).
+        let clean = SketchUpsertDto {
+            conflicting: vec![],
+            ..dto
+        };
+        let v = serde_json::to_value(&clean).unwrap();
+        assert_eq!(v["conflicting"], serde_json::json!([]));
+
+        // SketchSessionDto surfaces it too (session-enter surface).
+        let session = SketchSessionDto {
+            sketch_id: "sk_1".into(),
+            plane: serde_json::json!({}),
+            entities: serde_json::json!([]),
+            constraints: serde_json::json!([]),
+            dof: 0,
+            status: SketchSolveStatus::Conflicting,
+            conflicting: vec!["c-a".into()],
+        };
+        assert_eq!(
+            serde_json::to_value(&session).unwrap()["conflicting"],
+            serde_json::json!(["c-a"])
+        );
     }
 
     #[test]

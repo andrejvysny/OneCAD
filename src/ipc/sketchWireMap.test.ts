@@ -8,6 +8,7 @@ import {
   buildAddSketch,
   buildDeleteSketch,
   createIdMap,
+  frontendConflictingIds,
   frontendConstraintsFromDto,
   frontendEntitiesFromDto,
   frontendSolvedPositions,
@@ -518,5 +519,36 @@ describe("hydration round-trip — marshal fresh → wire → hydrate → re-mar
 
     // 4. Re-marshal the hydrated arrays — a faithful reopen diffs to ZERO ops.
     expect(marshalUpsert(map2, { entities, constraints }, mint)).toEqual([]);
+  });
+});
+
+describe("frontendConflictingIds — reverse map.constraint (backend uuid → frontend id)", () => {
+  it("maps known backend uuids to frontend ids and DROPS unknown", () => {
+    const map = createIdMap("sk", "XY");
+    map.constraint.set("c1", "uuid-c1");
+    map.constraint.set("c2", "uuid-c2");
+    // "uuid-x" is not in the map ⇒ dropped; order is preserved for the known ids.
+    expect(frontendConflictingIds(map, ["uuid-c2", "uuid-x", "uuid-c1"])).toEqual(["c2", "c1"]);
+  });
+
+  it("returns [] for empty / undefined / all-unknown input", () => {
+    const map = createIdMap("sk", "XY");
+    map.constraint.set("c1", "uuid-c1");
+    expect(frontendConflictingIds(map, undefined)).toEqual([]);
+    expect(frontendConflictingIds(map, [])).toEqual([]);
+    expect(frontendConflictingIds(map, ["nope"])).toEqual([]);
+  });
+
+  it("dedupes repeated ids", () => {
+    const map = createIdMap("sk", "XY");
+    map.constraint.set("c1", "uuid-c1");
+    expect(frontendConflictingIds(map, ["uuid-c1", "uuid-c1"])).toEqual(["c1"]);
+  });
+
+  it("round-trips a re-entry sketch where frontend id == backend uuid", () => {
+    // seedIdMapFromWire seeds map.constraint[raw.id] = raw.id (uuid == frontend id).
+    const map = createIdMap("sk", "XY");
+    seedIdMapFromWire(map, [], [{ id: "backend-uuid-1", type: "Horizontal", entities: ["e1"] }]);
+    expect(frontendConflictingIds(map, ["backend-uuid-1"])).toEqual(["backend-uuid-1"]);
   });
 });

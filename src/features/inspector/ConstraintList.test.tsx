@@ -63,4 +63,23 @@ describe("ConstraintList", () => {
     render(<ConstraintList constraints={[]} onDelete={() => {}} />);
     expect(screen.queryByTestId(/constraint-row-/)).toBeNull();
   });
+
+  it("tints a conflicting row with the traffic-close token; clean rows are untinted", () => {
+    render(<ConstraintList constraints={constraints} onDelete={() => {}} conflictingIds={["c1"]} />);
+    const conflicting = screen.getByTestId("constraint-row-c1");
+    expect(conflicting).toHaveAttribute("data-conflicting", "true");
+    // The glyph + type label carry the traffic-close class (no raw hex).
+    expect(conflicting.querySelector(".text-traffic-close")).not.toBeNull();
+    // An unrelated row is not tinted.
+    const clean = screen.getByTestId("constraint-row-c2");
+    expect(clean).not.toHaveAttribute("data-conflicting");
+    expect(clean.querySelector(".text-traffic-close")).toBeNull();
+  });
+
+  it("no rows are tinted when conflictingIds is empty / omitted", () => {
+    render(<ConstraintList constraints={constraints} onDelete={() => {}} />);
+    for (const c of constraints) {
+      expect(screen.getByTestId(`constraint-row-${c.id}`)).not.toHaveAttribute("data-conflicting");
+    }
+  });
 });

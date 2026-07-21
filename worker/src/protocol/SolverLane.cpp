@@ -271,6 +271,9 @@ Envelope SolverLane::on_upsert(const Envelope& req) {
         {"sketchRevision", revision},
         {"dof", dof},
         {"state", state},
+        // Per-constraint conflict ids (SCHEMA §7.4): the constraints PlaneGCS reports
+        // as mutually unsatisfiable, wire-mapped (empty when the sketch is solvable).
+        {"conflicting", map_conflicting(tr.index, conflicting)},
     };
     return Envelope::ok_response(req.id, std::move(result));
 }
@@ -438,6 +441,13 @@ Envelope SolverLane::on_end(const Envelope& req) {
     else if (r.success) status = g.redundant ? "redundant" : "success";
     else status = "partial";
 
+    // Per-constraint conflict ids (SCHEMA §7.4), same precedence on_drag uses: the
+    // final drag solve's conflicts, else the gesture-fixed set diagnosed at
+    // BeginGesture (g.conflicting is already wire-mapped, empty when none).
+    std::vector<std::string> conflicting = !r.conflictingConstraints.empty()
+                                               ? map_conflicting(g.index, r.conflictingConstraints)
+                                               : g.conflicting;
+
     // Commit into the session store: bump revision + write back solved positions.
     const std::uint64_t new_rev = g.sketch_revision + 1;
     if (std::optional<session::StoredSketch> s = store_.snapshot(g.sketch_id)) {
@@ -449,6 +459,7 @@ Envelope SolverLane::on_end(const Envelope& req) {
         {"gestureId", gesture_id},
         {"status", status},
         {"dof", dof},
+        {"conflicting", conflicting},
         {"positions", changed_positions(g.baseline, cur, g.index)},
         {"sketchRevision", new_rev},
     };

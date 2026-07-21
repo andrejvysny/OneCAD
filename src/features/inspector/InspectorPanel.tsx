@@ -81,6 +81,7 @@ export function InspectorPanel() {
   const features = useDocumentStore((s) => s.features);
   const activeSketchId = useViewportStore((s) => s.activeSketchId);
   const constraints = useSketchStore((s) => s.session?.constraints);
+  const conflictingIds = useSketchStore((s) => s.conflictingIds);
   const repairPanelOpen = useRepairStore((s) => s.panelOpen);
   const repairItemCount = useRepairStore((s) => s.items.length);
 
@@ -99,6 +100,7 @@ export function InspectorPanel() {
           dof={sketches[activeSketchId ?? ""]?.dof ?? 0}
           status={sketches[activeSketchId ?? ""]?.status ?? "under"}
           constraints={constraints ?? []}
+          conflictingIds={conflictingIds}
         />
       ) : showRepair ? (
         <RepairPanel />
@@ -219,11 +221,13 @@ function SketchState({
   dof,
   status,
   constraints,
+  conflictingIds,
 }: {
   sketchName: string;
   dof: number;
   status: SketchStatus;
   constraints: SketchConstraint[];
+  conflictingIds: string[];
 }) {
   const { label, tone } = sketchStatusText(status, dof);
   const solved = status === "ok";
@@ -248,7 +252,7 @@ function SketchState({
 
       <SectionLabel className="pb-1.5 pt-4">Constraints</SectionLabel>
       {constraints.length > 0 ? (
-        <ConstraintList constraints={constraints} onDelete={deleteConstraint} />
+        <ConstraintList constraints={constraints} onDelete={deleteConstraint} conflictingIds={conflictingIds} />
       ) : (
         <div className="text-[12px] leading-normal text-ink-6">
           No constraints yet.

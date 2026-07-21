@@ -724,6 +724,33 @@ export function frontendSolvedPositions(
 }
 
 /**
+ * Re-key backend-UUID conflicting constraint ids (SCHEMA §7.4 `conflicting[]`,
+ * emitted by SketchUpsert/SolveDrag/EndGesture) to the FRONTEND constraint ids the
+ * inspector/badges render, by reversing `map.constraint` (frontend id → backend
+ * UUID). Ids not in the id-map are DROPPED (a constraint the frontend never
+ * authored/hydrated has nothing to tint). Pure; order-preserving; deduped.
+ */
+export function frontendConflictingIds(
+  map: SketchIdMap,
+  ids: string[] | undefined | null,
+): string[] {
+  if (!ids || ids.length === 0) return [];
+  // Reverse map.constraint: backend UUID → frontend id (first wins on a dup value).
+  const byUuid = new Map<string, string>();
+  for (const [frontendId, uuid] of map.constraint) if (!byUuid.has(uuid)) byUuid.set(uuid, frontendId);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const uuid of ids) {
+    const fid = byUuid.get(uuid);
+    if (fid && !seen.has(fid)) {
+      seen.add(fid);
+      out.push(fid);
+    }
+  }
+  return out;
+}
+
+/**
  * Apply frontend-keyed (`"entityId.Position"`) solved positions to the sketch
  * entities, moving each entity's geometry per kind (Line Start/End → p0/p1;
  * Circle/Arc Center → center; Point Start/Center → p0). Pure: returns a NEW array

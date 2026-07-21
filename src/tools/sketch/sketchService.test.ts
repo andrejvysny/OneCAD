@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { commitDimensionConstraint, deleteConstraints, deleteEntities } from "./sketchService";
+import { commitDimensionConstraint, deleteConstraints, deleteEntities, editConstraintValue } from "./sketchService";
 import { mockClient, resetMockSketches } from "@/ipc/mockClient";
 import { planeFor } from "@/ipc/mockSketch";
 import { sketchStore } from "@/stores/sketchStore";
@@ -156,6 +156,76 @@ describe("deleteEntities — cascade the referencing constraints", () => {
     await deleteEntities(failing, ["e1"]);
     expect(sketchStore.getState().session).toBe(before); // unchanged
     expect(viewportStore.getState().statusHint).toContain("boom");
+  });
+});
+
+// ── conflictingIds ownership (SCHEMA §7.4) ────────────────────────────────────
+
+describe("conflictingIds — solve write-back REPLACES, exit CLEARS, reject-hint names", () => {
+  beforeEach(() => {
+    resetMockSketches();
+    sketchStore.getState().reset();
+  });
+
+  it("a solve write-back REPLACES the store's conflictingIds from the result", async () => {
+    seedSession([{ id: "c1", type: "Coincident", entities: ["e1", "e1"], positions: ["Start", "End"] }]);
+    // A fake client whose solve reports c1 in conflict.
+    const client = {
+      sketchUpsert: () =>
+        Promise.resolve({
+          sketchId: "sk-dim",
+          sketchRevision: 2,
+          dof: 1,
+          status: "UnderConstrained" as const,
+          conflicting: ["c1"],
+          solvedPositions: {},
+        }),
+    } as unknown as CadClient;
+    await editConstraintValue(client, "c1", 5);
+    expect(sketchStore.getState().conflictingIds).toEqual(["c1"]);
+  });
+
+  it("a clean solve REPLACES conflictingIds back to []", async () => {
+    seedSession([{ id: "c1", type: "Coincident", entities: ["e1", "e1"], positions: ["Start", "End"] }]);
+    sketchStore.getState().setConflicting(["c1"]); // stale set from a prior solve
+    // The mock lane always reports conflicting: [] — the write-back must clear it.
+    await editConstraintValue(mockClient, "c1", 5);
+    expect(sketchStore.getState().conflictingIds).toEqual([]);
+  });
+
+  it("setSession(null) (exit / dispose) CLEARS conflictingIds", () => {
+    seedSession([]);
+    sketchStore.getState().setConflicting(["c1", "c2"]);
+    sketchStore.getState().setSession(null);
+    expect(sketchStore.getState().conflictingIds).toEqual([]);
+  });
+
+  it("a rejected applied constraint names the clashing constraint in the hint", async () => {
+    // Two Coincidents fully constrain the line; a third geometric constraint that the
+    // fake client rejects (Conflicting) with c1 as the conflicting id.
+    seedSession([
+      { id: "c1", type: "Coincident", entities: ["e1", "e1"], positions: ["Start", "End"] },
+    ]);
+    const client = {
+      // First call (with the new constraint) → Conflicting, blames c1; restore → clean.
+      sketchUpsert: (() => {
+        let n = 0;
+        return () => {
+          n += 1;
+          return Promise.resolve(
+            n === 1
+              ? { sketchId: "sk-dim", sketchRevision: 2, dof: 0, status: "Conflicting" as const, conflicting: ["c1"], solvedPositions: {} }
+              : { sketchId: "sk-dim", sketchRevision: 3, dof: 0, status: "FullyConstrained" as const, conflicting: [], solvedPositions: {} },
+          );
+        };
+      })(),
+    } as unknown as CadClient;
+    const dim: SketchConstraint = { id: "c2", type: "Distance", entities: ["e1", "e1"], positions: ["Start", "End"], value: 40 };
+    const { rejected, hint } = await commitDimensionConstraint(client, dim);
+    expect(rejected).toBe(true);
+    expect(hint).toBe("Dimension removed — conflicts with Coincident (c1)");
+    // The restore solve cleared the conflicting set.
+    expect(sketchStore.getState().conflictingIds).toEqual([]);
   });
 });
 
