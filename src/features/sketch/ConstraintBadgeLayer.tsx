@@ -64,6 +64,12 @@ export function ConstraintBadgeLayer() {
     >
       {badges.map((b) => {
         const isConflicting = conflicting.has(b.id);
+        // Co-anchored badges (same quantized anchor point, U9) stagger into a
+        // row via offsetIndex instead of stacking directly on top of each
+        // other — the overlay driver owns `transform` on the wrapper div
+        // below (per-frame world→screen), so the stagger lives on the inner
+        // span as a plain marginLeft that composes with it untouched.
+        const staggerStyle = b.offsetIndex > 0 ? { marginLeft: b.offsetIndex * 16 } : undefined;
         return (
           <div
             key={b.id}
@@ -74,6 +80,7 @@ export function ConstraintBadgeLayer() {
           >
             {b.editable && b.value !== undefined ? (
               <span
+                style={staggerStyle}
                 className={`inline-block -translate-y-4 translate-x-2${
                   isConflicting ? " rounded-sm border border-traffic-close" : ""
                 }`}
@@ -90,6 +97,7 @@ export function ConstraintBadgeLayer() {
             ) : (
               <span
                 title={b.kind}
+                style={staggerStyle}
                 className={`inline-flex h-4 min-w-4 -translate-y-3.5 translate-x-2 items-center justify-center rounded-sm border bg-white px-1 text-[10px] font-semibold leading-none shadow-ctrl ${
                   isConflicting ? "border-traffic-close text-traffic-close" : "border-border text-accent"
                 }`}

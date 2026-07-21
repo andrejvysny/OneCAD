@@ -9,6 +9,7 @@ import { MeshIngest } from "./meshSync";
 import * as reg from "./meshRegistry";
 import { makeBoxMesh } from "@/ipc/mockMeshes";
 import { documentStore } from "@/stores/documentStore";
+import { toolStore } from "@/stores/toolStore";
 import type { CadClient } from "@/ipc/client";
 import type { DocumentChange } from "@/ipc/types";
 import type { ViewportEngine } from "../engine/ViewportEngine";
@@ -24,6 +25,7 @@ function fakeEngine() {
     setHighlightState: vi.fn(),
   } as unknown as ViewportEngine & {
     bodiesRoot: THREE.Group;
+    invalidate: ReturnType<typeof vi.fn>;
     refreshHighlights: ReturnType<typeof vi.fn>;
     setHighlightState: ReturnType<typeof vi.fn>;
   };
@@ -53,6 +55,13 @@ const changed = (bodyId: string): DocumentChange => ({
   removedBodies: [],
 });
 
+/** Pull the shared face material off the first loaded body's scene group. */
+function faceMaterial(engine: ReturnType<typeof fakeEngine>): THREE.MeshStandardMaterial {
+  const group = engine.bodiesRoot.children[0] as THREE.Group;
+  const mesh = group.children.find((c) => c.userData.kind === "face") as THREE.Mesh;
+  return mesh.material as THREE.MeshStandardMaterial;
+}
+
 let ingest: MeshIngest | null = null;
 
 beforeEach(() => {
@@ -62,6 +71,7 @@ beforeEach(() => {
 afterEach(() => {
   ingest?.detach();
   ingest = null;
+  toolStore.getState().setMode("model"); // dimming tests flip this; keep the file isolated
 });
 
 describe("MeshIngest onDocumentChanged", () => {
@@ -183,5 +193,87 @@ describe("MeshIngest visibility + detach", () => {
     expect(reg.registrySize()).toBe(0);
     expect(engine.bodiesRoot.children.length).toBe(0);
     expect(engine.setHighlightState).toHaveBeenCalledWith(null, []);
+  });
+});
+
+describe("MeshIngest sketch-mode dimming", () => {
+  it("dims the shared face material on mode -> sketch (edge material untouched)", async () => {
+    setBodies({ body1: true });
+    const engine = fakeEngine();
+    const { client, emit } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    emit(changed("body1"));
+    await tick();
+
+    const mat = faceMaterial(engine);
+    const versionBefore = mat.version;
+
+    toolStore.getState().setMode("sketch");
+
+    expect(mat.transparent).toBe(true);
+    expect(mat.opacity).toBe(0.35);
+    expect(mat.version).toBeGreaterThan(versionBefore); // needsUpdate was set
+    expect(engine.invalidate).toHaveBeenCalled();
+  });
+
+  it("restores the EXACT prior face material state on mode -> model", async () => {
+    setBodies({ body1: true });
+    const engine = fakeEngine();
+    const { client, emit } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    emit(changed("body1"));
+    await tick();
+
+    // Unusual priors — deliberately far from MeshStandardMaterial defaults, so a
+    // restore that hardcodes reset values (rather than replaying the save) fails.
+    const mat = faceMaterial(engine);
+    mat.transparent = true;
+    mat.opacity = 0.62;
+    mat.depthWrite = false;
+
+    toolStore.getState().setMode("sketch");
+    expect(mat.opacity).toBe(0.35); // dimmed
+
+    toolStore.getState().setMode("model");
+    expect(mat.transparent).toBe(true);
+    expect(mat.opacity).toBe(0.62);
+    expect(mat.depthWrite).toBe(false);
+  });
+
+  it("applies the dim immediately when attach() happens while already in sketch mode", async () => {
+    toolStore.getState().setMode("sketch");
+    setBodies({ body1: true });
+    const engine = fakeEngine();
+    const { client, emit } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    emit(changed("body1"));
+    await tick();
+
+    expect(faceMaterial(engine).transparent).toBe(true);
+    expect(faceMaterial(engine).opacity).toBe(0.35);
+  });
+
+  it("detach unsubscribes from toolStore — a later mode flip is a no-op", async () => {
+    setBodies({ body1: true });
+    const engine = fakeEngine();
+    const { client, emit } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    emit(changed("body1"));
+    await tick();
+
+    const mat = faceMaterial(engine);
+    const opacityBefore = mat.opacity;
+    const invalidateCallsBeforeDetach = engine.invalidate.mock.calls.length;
+
+    ingest.detach();
+    ingest = null;
+
+    expect(() => toolStore.getState().setMode("sketch")).not.toThrow();
+    expect(mat.opacity).toBe(opacityBefore); // detached ingest no longer touches it
+    expect(engine.invalidate.mock.calls.length).toBe(invalidateCallsBeforeDetach);
   });
 });

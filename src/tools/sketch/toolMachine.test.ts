@@ -87,11 +87,12 @@ describe("arcTool — center → start → end (center-start-end)", () => {
 describe("degeneracy guards — minSize context (C4)", () => {
   const ctx = { minSize: 4 };
 
-  it("lineTool ignores a click within minSize of the last anchor, commits a far one", () => {
+  it("lineTool ends the chain on a click within minSize of the last anchor, commits a far one", () => {
     const armed = lineTool.step(lineTool.init(), { kind: "click", pt: { x: 0, y: 0 } });
-    const tooClose = lineTool.step(armed.state, { kind: "click", pt: { x: 2, y: 0 } }, ctx);
-    expect(tooClose.committed).toBeUndefined();
-    expect(tooClose.state.anchors).toEqual([{ x: 0, y: 0 }]); // still armed at the anchor
+    const ended = lineTool.step(armed.state, { kind: "click", pt: { x: 2, y: 0 } }, ctx);
+    expect(ended.committed).toBeUndefined();
+    expect(ended.done).toBe(true);
+    expect(ended.state.anchors).toEqual([]); // chain ended, not still armed
     const far = lineTool.step(armed.state, { kind: "click", pt: { x: 10, y: 0 } }, ctx);
     expect(far.committed).toEqual([{ type: "Line", p0: { x: 0, y: 0 }, p1: { x: 10, y: 0 } }]);
   });
@@ -118,6 +119,62 @@ describe("degeneracy guards — minSize context (C4)", () => {
     expect(tiny.state.anchors).toHaveLength(1); // start rejected — only center anchored
     const ok = arcTool.step(armed.state, { kind: "click", pt: { x: 10, y: 0 } }, ctx);
     expect(ok.state.anchors).toHaveLength(2); // start accepted
+  });
+});
+
+describe("lineTool — chain end / close semantics (U4)", () => {
+  it("anchors accumulate the whole chain, not just the last segment", () => {
+    const steps = run(lineTool, [
+      ["click", { x: 0, y: 0 }],
+      ["click", { x: 40, y: 0 }],
+      ["click", { x: 40, y: 40 }],
+    ]);
+    expect(steps[2].state.anchors).toEqual([
+      { x: 0, y: 0 },
+      { x: 40, y: 0 },
+      { x: 40, y: 40 },
+    ]);
+  });
+
+  it("a 3-click open chain, then a click at the first anchor, closes the loop", () => {
+    const steps = run(lineTool, [
+      ["click", { x: 0, y: 0 }], // p0
+      ["click", { x: 40, y: 0 }], // p1 — commits p0→p1
+      ["click", { x: 40, y: 40 }], // p2 — commits p1→p2
+      ["click", { x: 0, y: 0 }], // back to p0 — closes the loop
+    ]);
+    expect(steps[3].committed).toEqual([
+      { type: "Line", p0: { x: 40, y: 40 }, p1: { x: 0, y: 0 } },
+    ]);
+    expect(steps[3].done).toBe(true);
+    expect(steps[3].state.anchors).toEqual([]);
+  });
+
+  it("a click at the same point as the last anchor ends the chain without committing", () => {
+    const ctx = { minSize: 4 };
+    const armed = lineTool.step(lineTool.init(), { kind: "click", pt: { x: 0, y: 0 } }, ctx); // p0
+    const afterFirstSeg = lineTool.step(armed.state, { kind: "click", pt: { x: 40, y: 0 } }, ctx); // p1 — commits p0→p1
+    expect(afterFirstSeg.committed).toEqual([{ type: "Line", p0: { x: 0, y: 0 }, p1: { x: 40, y: 0 } }]);
+    // Click within minSize of the just-placed last anchor — ends the chain.
+    const ended = lineTool.step(afterFirstSeg.state, { kind: "click", pt: { x: 41, y: 0 } }, ctx);
+    expect(ended.committed).toBeUndefined();
+    expect(ended.done).toBe(true);
+    expect(ended.state.anchors).toEqual([]);
+  });
+
+  it("a double-click (two pointerups at the same snapped point) ends the chain after committing the segment", () => {
+    const ctx = { minSize: 4 };
+    let state = lineTool.init();
+    let step = lineTool.step(state, { kind: "click", pt: { x: 0, y: 0 } }, ctx); // p0
+    state = step.state;
+    step = lineTool.step(state, { kind: "click", pt: { x: 40, y: 0 } }, ctx); // p1 — commits p0→p1
+    state = step.state;
+    expect(step.committed).toEqual([{ type: "Line", p0: { x: 0, y: 0 }, p1: { x: 40, y: 0 } }]);
+    // Second pointerup of the double-click lands on the same snapped point.
+    step = lineTool.step(state, { kind: "click", pt: { x: 40, y: 0 } }, ctx);
+    expect(step.committed).toBeUndefined();
+    expect(step.done).toBe(true);
+    expect(step.state.anchors).toEqual([]);
   });
 });
 

@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { render, screen, act } from "@testing-library/react";
+import { render, screen, act, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SketchChromeBar } from "./SketchChromeBar";
 import { toolStore } from "@/stores/toolStore";
+import { viewportStore } from "@/stores/viewportStore";
 import { resetStores } from "@/test/resetStores";
 
 describe("SketchChromeBar", () => {
@@ -32,7 +33,7 @@ describe("SketchChromeBar", () => {
     expect(toolStore.getState().mode).toBe("model");
   });
 
-  it("shows the editing pill for a targeted sketch and Finish exits to model", async () => {
+  it("shows the editing pill for a targeted sketch and Finish drains the queue, exits to model, and arms extrude", async () => {
     const user = userEvent.setup();
     render(<SketchChromeBar />);
     act(() => toolStore.getState().setMode("sketch", "sketch2"));
@@ -40,16 +41,19 @@ describe("SketchChromeBar", () => {
     expect(screen.getByText("Editing Sketch 2")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Finish sketch/ }));
 
-    expect(toolStore.getState().mode).toBe("model");
-    expect(screen.queryByText(/Editing/)).toBeNull();
+    // finishSketch (runAction) awaits the sketch mutation queue before flipping
+    // mode + arming extrude — assert post-drain, not synchronously.
+    await waitFor(() => expect(toolStore.getState().mode).toBe("model"));
+    expect(viewportStore.getState().pendingExtrudeSketch).toBe("sketch2");
   });
 
-  it("Cancel in the editing phase exits to model", async () => {
+  it("Cancel in the editing phase exits to model without arming extrude", async () => {
     const user = userEvent.setup();
     render(<SketchChromeBar />);
     act(() => toolStore.getState().setMode("sketch", "sketch2"));
 
     await user.click(screen.getByRole("button", { name: /Cancel/ }));
     expect(toolStore.getState().mode).toBe("model");
+    expect(viewportStore.getState().pendingExtrudeSketch).toBeNull();
   });
 });

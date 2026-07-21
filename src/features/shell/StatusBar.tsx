@@ -45,7 +45,9 @@ export function StatusBar() {
       {statusHint && (
         <>
           <span aria-hidden="true" className="h-[14px] w-px bg-border" />
-          <span className="text-ink-5">{statusHint}</span>
+          <span className={statusHint.severity === "error" ? "text-traffic-close" : "text-ink-5"}>
+            {statusHint.message}
+          </span>
         </>
       )}
       <WorkerStatusIndicator state={workerState} />

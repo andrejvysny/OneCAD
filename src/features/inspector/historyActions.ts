@@ -48,8 +48,14 @@ function toFeatureMeta(f: {
   return { id: f.id, kind: f.kind, label: f.label, valueText: f.valueText, status: f.status };
 }
 
+/** Transient success confirmation (auto-dismisses). */
 function hint(text: string): void {
   viewportStore.getState().setStatusHint(text);
+}
+
+/** Sticky error hint — stays until the next status change so it stays readable. */
+function errorHint(text: string): void {
+  viewportStore.getState().setStatusHint(text, { severity: "error", sticky: true });
 }
 
 function errMessage(e: unknown): string {
@@ -67,7 +73,7 @@ export async function suppressFeature(opId: string, suppressed: boolean): Promis
     hint(suppressed ? "Feature suppressed" : "Feature unsuppressed");
   } catch (e) {
     historyStore.getState().setSuppressed(opId, !suppressed); // revert optimistic
-    hint(`Suppress failed: ${errMessage(e)}`);
+    errorHint(`Suppress failed: ${errMessage(e)}`);
   }
 }
 
@@ -82,7 +88,7 @@ export async function rollToIndex(index: number): Promise<void> {
     applyEditResult(res);
     hint("Rolled timeline");
   } catch (e) {
-    hint(`Rollback failed: ${errMessage(e)}`);
+    errorHint(`Rollback failed: ${errMessage(e)}`);
   }
 }
 
@@ -94,7 +100,7 @@ export async function deleteFeature(opId: string): Promise<void> {
     historyStore.getState().setSuppressed(opId, false); // drop any stale overlay
     hint("Feature deleted");
   } catch (e) {
-    hint(`Delete failed: ${errMessage(e)}`);
+    errorHint(`Delete failed: ${errMessage(e)}`);
   }
 }
 
@@ -133,7 +139,7 @@ export async function rebindCandidate(
 ): Promise<boolean> {
   const bodyId = deriveOperatedBody();
   if (!bodyId) {
-    hint("Cannot repair: no body to bind against");
+    errorHint("Cannot repair: no body to bind against");
     return false;
   }
   const index = parseRefId(item.refId)?.index ?? 0;
@@ -143,7 +149,7 @@ export async function rebindCandidate(
       { topoKey: candidate.topoKey, anchor: { worldPoint: candidate.worldPos } },
     ]);
     if (!promoted) {
-      hint("Repair failed: could not promote candidate");
+      errorHint("Repair failed: could not promote candidate");
       return false;
     }
     const ref = edgeElementRef(promoted.bodyId, promoted.elementId, candidate.worldPos);
@@ -152,7 +158,7 @@ export async function rebindCandidate(
     hint("Reference repaired");
     return true;
   } catch (e) {
-    hint(`Repair failed: ${errMessage(e)}`);
+    errorHint(`Repair failed: ${errMessage(e)}`);
     return false;
   }
 }

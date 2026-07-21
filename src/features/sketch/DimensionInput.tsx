@@ -11,6 +11,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import type { SketchConstraintType } from "@/ipc/types";
+import { formatDimensionValue } from "./dimensionFormat";
 
 export interface DimensionInputProps {
   value: number;
@@ -56,13 +57,13 @@ export function DimensionInput({
   autoFocus = false,
   kind,
 }: DimensionInputProps) {
-  const [text, setText] = useState(() => value.toFixed(1));
+  const [text, setText] = useState(() => formatDimensionValue(value));
   const [isError, setIsError] = useState(false);
   const ref = useRef<HTMLInputElement>(null);
   const errorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    setText(value.toFixed(1));
+    setText(formatDimensionValue(value));
   }, [value]);
 
   useEffect(() => {
@@ -98,15 +99,19 @@ export function DimensionInput({
         return false;
       }
       // No kind ⇒ legacy finite-only behavior, unchanged (model-tool chips).
-      setText(value.toFixed(1));
+      setText(formatDimensionValue(value));
       return true;
     }
     if (kind && !isValidForKind(kind, n)) {
       flashError();
       return false;
     }
-    if (n !== value) onCommit(n);
-    else setText(value.toFixed(1));
+    // Compare formatted strings, not raw floats: an untouched blur of a value
+    // that displays truncated (e.g. 12.345 → "12.345" already exact, but a
+    // value like 12.3456 rendering as "12.346") must not spuriously re-commit
+    // the rounded display value as if the user had typed something new.
+    if (formatDimensionValue(n) !== formatDimensionValue(value)) onCommit(n);
+    else setText(formatDimensionValue(value));
     return true;
   };
 
@@ -131,7 +136,7 @@ export function DimensionInput({
             if (onCancel) {
               onCancel();
             } else {
-              setText(value.toFixed(1));
+              setText(formatDimensionValue(value));
               ref.current?.blur();
             }
           }

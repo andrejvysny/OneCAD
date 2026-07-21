@@ -124,7 +124,13 @@ test("full acceptance ribbon: plane picker → constrain → dimension → delet
   await expect(rows()).toHaveCount(rowsBeforeDistance + 1);
   const distanceRow = rows().last();
   await expect(distanceRow).toContainText("Distance");
-  await expect(distanceRow).toContainText(typedValue.toFixed(1));
+  // Row values render via formatDimensionValue (≤3 decimals, trailing zeros
+  // trimmed) — mirror that formatting rather than toFixed(1).
+  const shownValue = typedValue
+    .toFixed(3)
+    .replace(/(\.\d*?)0+$/, "$1")
+    .replace(/\.$/, "");
+  await expect(distanceRow).toContainText(shownValue);
 
   // ── (d) delete round-trip ────────────────────────────────────────────────
   const dofBeforeDelete = (await dofPill(page).textContent()) ?? "";

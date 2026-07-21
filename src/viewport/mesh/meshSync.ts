@@ -16,6 +16,7 @@
 import type { CadClient } from "@/ipc/client";
 import type { DocumentChange, Lod } from "@/ipc/types";
 import { documentStore } from "@/stores/documentStore";
+import { toolStore } from "@/stores/toolStore";
 import type { ViewportEngine } from "../engine/ViewportEngine";
 import {
   buildBodyObject,
@@ -32,6 +33,10 @@ export class MeshIngest {
   private engine: ViewportEngine | null = null;
   private client: CadClient | null = null;
   private materials: BodyMaterials | null = null;
+  private dimmed = false;
+  /** Face material state saved just before dimming, reapplied verbatim on restore. */
+  private savedFaceState: { transparent: boolean; opacity: number; depthWrite: boolean } | null =
+    null;
   private readonly bodyObjects = new Map<string, BodyObjectHandle>();
   private readonly unsubs: Array<() => void> = [];
   private meshRev = 0;
@@ -52,6 +57,8 @@ export class MeshIngest {
     this.client = client;
     this.materials = createBodyMaterials();
     this.detached = false;
+    this.dimmed = false;
+    this.savedFaceState = null;
 
     this.unsubs.push(client.onDocumentChanged((c) => this.onDocumentChanged(c)));
 
@@ -65,6 +72,20 @@ export class MeshIngest {
         }
       }),
     );
+
+    // Dim the shared body face material while sketching (focus cue), restore on
+    // exit. Covers attaching mid-sketch (e.g. a re-mount) by applying immediately
+    // rather than waiting for the next mode transition.
+    let prevMode = toolStore.getState().mode;
+    this.unsubs.push(
+      toolStore.subscribe((s) => {
+        if (s.mode !== prevMode) {
+          this.setDimmed(s.mode === "sketch");
+          prevMode = s.mode;
+        }
+      }),
+    );
+    if (prevMode === "sketch") this.setDimmed(true);
 
     // Initial sweep: bodies already in the store at attach time (open/new/recover
     // populate the projection before the viewport engine exists) never fire a
@@ -130,6 +151,37 @@ export class MeshIngest {
     for (const cb of [...this.bodyLoadedListeners]) cb(bodyId);
   }
 
+  /**
+   * Dim (sketch mode) or restore (model mode) the shared face material — a focus
+   * cue so the body isn't visually competing with the sketch on top of it. Edge
+   * material is left untouched so silhouettes stay crisp. Saves the material's
+   * PRIOR state before dimming and reapplies it verbatim on restore rather than
+   * hardcoding reset values, so a future change to the default face styling
+   * can't drift out of sync with what "restore" means here.
+   */
+  private setDimmed(dimmed: boolean): void {
+    if (!this.materials || this.dimmed === dimmed) return;
+    this.dimmed = dimmed;
+    const face = this.materials.face;
+    if (dimmed) {
+      this.savedFaceState = {
+        transparent: face.transparent,
+        opacity: face.opacity,
+        depthWrite: face.depthWrite,
+      };
+      face.transparent = true;
+      face.opacity = 0.35;
+      face.needsUpdate = true;
+    } else if (this.savedFaceState) {
+      face.transparent = this.savedFaceState.transparent;
+      face.opacity = this.savedFaceState.opacity;
+      face.depthWrite = this.savedFaceState.depthWrite;
+      face.needsUpdate = true;
+      this.savedFaceState = null;
+    }
+    this.engine?.invalidate();
+  }
+
   private dropBody(bodyId: string): void {
     const handle = this.bodyObjects.get(bodyId);
     if (handle) {
@@ -156,6 +208,8 @@ export class MeshIngest {
     disposeAll(); // registry empty + leak tripwire
     this.materials?.dispose();
     this.materials = null;
+    this.dimmed = false;
+    this.savedFaceState = null;
     this.engine = null;
     this.client = null;
   }

@@ -15,7 +15,7 @@ beforeEach(() => {
 });
 afterEach(() => vi.restoreAllMocks());
 
-const hint = () => viewportStore.getState().statusHint;
+const hint = () => viewportStore.getState().statusHint?.message ?? null;
 
 describe("fileActions", () => {
   it("Save shows a transient 'Saved ⟨name⟩' hint on success", async () => {

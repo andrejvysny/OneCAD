@@ -34,13 +34,13 @@ describe("ConstraintList", () => {
 
   it("shows a value column for dimensional kinds, Angle in degrees with °", () => {
     render(<ConstraintList constraints={constraints} onDelete={() => {}} />);
-    expect(screen.getByText("90.0")).toBeInTheDocument();
-    expect(screen.getByText("45.0°")).toBeInTheDocument();
+    expect(screen.getByText("90")).toBeInTheDocument();
+    expect(screen.getByText("45°")).toBeInTheDocument();
   });
 
   it("does not render a value for non-dimensional kinds", () => {
     render(<ConstraintList constraints={[constraints[0]]} onDelete={() => {}} />);
-    expect(screen.queryByText(/^\d+\.\d$/)).toBeNull();
+    expect(screen.queryByText(/^-?\d+(\.\d+)?°?$/)).toBeNull();
   });
 
   it("row mouseenter/mouseleave drive sketchSelectionStore.constraintHover", () => {

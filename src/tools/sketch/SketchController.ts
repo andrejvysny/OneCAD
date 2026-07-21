@@ -61,6 +61,17 @@ import {
 
 const DRAG_PX = 4;
 
+/** Per-tool container cursor (U8). Draw tools show a crosshair for aiming; pick
+ *  tools (select/trim/mirror) keep the default arrow — omitted here since the
+ *  `?? "default"` fallback covers them identically. */
+const CURSOR_BY_TOOL: Record<string, string> = {
+  line: "crosshair",
+  rect: "crosshair",
+  circle: "crosshair",
+  arc: "crosshair",
+  dimension: "crosshair",
+};
+
 export interface SketchControllerDeps {
   engine: ViewportEngine;
   client: CadClient;
@@ -177,9 +188,13 @@ export class SketchController {
         // Existing-sketch entry failed: fall back to model mode instead of
         // stranding sketch chrome with no session. exit() clears the status
         // hint, so re-set the failure message after the mode flip.
-        const hint = viewportStore.getState().statusHint;
+        const prev = viewportStore.getState().statusHint;
         toolStore.getState().setMode("model");
-        viewportStore.getState().setStatusHint(hint);
+        if (prev) {
+          viewportStore.getState().setStatusHint(prev.message, { severity: prev.severity, sticky: prev.sticky });
+        } else {
+          viewportStore.getState().setStatusHint(null);
+        }
       }
     } finally {
       this.entering = false;
@@ -194,7 +209,7 @@ export class SketchController {
       session = await this.deps.client.enterSketch(target);
     } catch (e) {
       console.error("[sketch] enterSketch failed", target, e);
-      viewportStore.getState().setStatusHint(`Enter sketch failed: ${sketchErr(e)}`);
+      viewportStore.getState().setStatusHint(`Enter sketch failed: ${sketchErr(e)}`, { severity: "error", sticky: true });
       return false;
     }
     if (toolStore.getState().mode !== "sketch") {
@@ -244,7 +259,7 @@ export class SketchController {
   private beginPlanePick(): void {
     this.planePicking = true;
     this.deps.engine.setPlanePickerVisible(true);
-    viewportStore.getState().setStatusHint("Select a plane to start the sketch — Esc to cancel");
+    viewportStore.getState().setStatusHint("Select a plane to start the sketch — Esc to cancel", { sticky: true });
   }
 
   /** Reverse beginPlanePick (idempotent): hide the picker + clear its hint. */
@@ -287,6 +302,7 @@ export class SketchController {
     this.selectActive = false;
     this.trimActive = false;
     this.mirrorActive = false;
+    this.deps.container.style.cursor = "";
     this.deps.engine.setSketchDrawingActive(false);
     this.deps.engine.setSketchPreview([]);
     this.deps.engine.setSketchSnap(null, false);
@@ -331,14 +347,18 @@ export class SketchController {
     this.deps.engine.setSketchPreview([]);
     this.deps.engine.setSketchGhost(null, null);
     if (!m && !this.dimensionActive) this.deps.engine.setSketchSnap(null, false);
+    // Set AFTER the planePicking early-return above, so the pick phase keeps the
+    // default arrow; set before the per-tool hint branches below so every tool
+    // (including their early returns) gets a cursor.
+    this.deps.container.style.cursor = CURSOR_BY_TOOL[tool] ?? "default";
 
     if (this.dimensionActive) {
       this.dimState = dimensionInit();
-      viewportStore.getState().setStatusHint("Dimension — click a line, circle, arc, or two points");
+      viewportStore.getState().setStatusHint("Dimension — click a line, circle, arc, or two points", { sticky: true });
       return;
     }
     if (this.trimActive) {
-      viewportStore.getState().setStatusHint("Click an entity to delete · Esc to exit");
+      viewportStore.getState().setStatusHint("Click an entity to delete · Esc to exit", { sticky: true });
       return;
     }
     if (this.mirrorActive) {
@@ -397,6 +417,12 @@ export class SketchController {
     // Trim / Mirror are click tools; a move past DRAG_PX with LMB held is an orbit,
     // not a click — track it so pointerup doesn't fire a stray delete/pick.
     if (this.trimActive || this.mirrorActive) {
+      if ((e.buttons & 1) === 0) {
+        // Idle move: Mirror gets live hover tint (trim's hover lands in a later
+        // wave — its click semantics are still a straight hit-test).
+        if (this.mirrorActive) this.scheduleHoverHit(e.clientX, e.clientY);
+        return;
+      }
       const far =
         Math.abs(e.clientX - this.downX) > DRAG_PX || Math.abs(e.clientY - this.downY) > DRAG_PX;
       if (this.downButton === 0 && (e.buttons & 1) !== 0 && far) this.moved = true;
@@ -510,7 +536,7 @@ export class SketchController {
       result = await this.deps.client.sketchUpsert(session.sketchId, entities, constraints);
     } catch (e) {
       if (this.sessionStale(gen)) return;
-      viewportStore.getState().setStatusHint(`Sketch solve failed: ${sketchErr(e)}`);
+      viewportStore.getState().setStatusHint(`Sketch solve failed: ${sketchErr(e)}`, { severity: "error", sticky: true });
       return;
     }
     // A late exit / newer session could have superseded this turn mid-await.
@@ -555,7 +581,7 @@ export class SketchController {
     if (this.dimState.ready) this.openDimensionChip();
     else {
       toolChipStore.getState().clear();
-      viewportStore.getState().setStatusHint("Dimension — pick a second point");
+      viewportStore.getState().setStatusHint("Dimension — pick a second point", { sticky: true });
     }
   }
 
@@ -589,7 +615,7 @@ export class SketchController {
         .getState()
         .setStatusHint(rejected ? hint ?? "Dimension removed — it would over-constrain the sketch" : null);
     } catch (e) {
-      viewportStore.getState().setStatusHint(`Dimension failed: ${sketchErr(e)}`);
+      viewportStore.getState().setStatusHint(`Dimension failed: ${sketchErr(e)}`, { severity: "error", sticky: true });
     }
   }
 
@@ -598,7 +624,7 @@ export class SketchController {
     this.dimState = dimensionInit();
     toolChipStore.getState().clear();
     if (this.dimensionActive) {
-      viewportStore.getState().setStatusHint("Dimension — click a line, circle, arc, or two points");
+      viewportStore.getState().setStatusHint("Dimension — click a line, circle, arc, or two points", { sticky: true });
     }
   }
 
@@ -658,6 +684,7 @@ export class SketchController {
       .getState()
       .setStatusHint(
         empty ? "Select entities to mirror first" : "Click the mirror axis line · Esc to exit",
+        { sticky: true },
       );
   }
 
@@ -693,7 +720,7 @@ export class SketchController {
       result = await this.deps.client.sketchUpsert(session.sketchId, entities, constraints);
     } catch (e) {
       if (this.sessionStale(gen)) return;
-      viewportStore.getState().setStatusHint(`Mirror failed: ${sketchErr(e)}`);
+      viewportStore.getState().setStatusHint(`Mirror failed: ${sketchErr(e)}`, { severity: "error", sticky: true });
       return;
     }
     if (this.sessionStale(gen)) return; // exited / superseded during await
@@ -837,7 +864,7 @@ export class SketchController {
     try {
       await this.deps.client.beginGesture(session.sketchId, armed.pointRef);
     } catch (err) {
-      viewportStore.getState().setStatusHint(`Drag failed: ${sketchErr(err)}`);
+      viewportStore.getState().setStatusHint(`Drag failed: ${sketchErr(err)}`, { severity: "error", sticky: true });
       this.resetDrag();
       this.deps.engine.setSketchDrawingActive(false);
       return;
@@ -935,7 +962,7 @@ export class SketchController {
     try {
       result = await this.deps.client.endGesture(finalTarget);
     } catch (err) {
-      viewportStore.getState().setStatusHint(`Drag failed: ${sketchErr(err)}`);
+      viewportStore.getState().setStatusHint(`Drag failed: ${sketchErr(err)}`, { severity: "error", sticky: true });
     }
     if (this.sessionStale(gen)) return; // exited / superseded / disposed during await
     const session = sketchStore.getState().session;
@@ -983,7 +1010,7 @@ export class SketchController {
     this.deps.engine.setSketchGhost(hv, hv ? cursor : null);
   }
 
-  // ── keyboard (Alt suppress + Esc ends chain) ──────────────────────────────
+  // ── keyboard (Alt suppress + Enter/Esc end chain) ─────────────────────────
 
   private onKeyDown = (e: KeyboardEvent): void => {
     if (e.key === "Escape" && this.planePicking) {
@@ -1004,6 +1031,25 @@ export class SketchController {
     if (e.key === "Escape" && this.dimensionActive && (this.dimState.ready || this.dimState.pending)) {
       // Cancel the in-flight dimension here; don't let the global Esc ladder run.
       this.cancelDimension();
+      e.stopPropagation();
+      e.preventDefault();
+      return;
+    }
+    if (e.key === "Enter" && this.machine && this.machineState && this.machineState.anchors.length > 0) {
+      // A text input (e.g. the open dimension chip) owns its own Enter; this
+      // handler is capture-phase on window so it would otherwise see the key
+      // before the input's own onKeyDown ever runs. Mirrors isEditableTarget
+      // in useShortcuts.ts.
+      if (e.target instanceof HTMLElement && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")) {
+        return;
+      }
+      // A chain is in progress: Enter ends it here (mirrors the Esc-chain branch
+      // below). No anchors ⇒ this branch is skipped and the global finishSketch
+      // shortcut (useShortcuts) handles Enter instead.
+      const stepped = this.machine.step(this.machineState, { kind: "esc" }, this.stepCtx());
+      this.machineState = stepped.state;
+      this.deps.engine.setSketchPreview([]);
+      this.deps.engine.setSketchGhost(null, null);
       e.stopPropagation();
       e.preventDefault();
       return;
@@ -1040,6 +1086,7 @@ export class SketchController {
       sketchStore.getState().setSession(null);
     }
     const c = this.deps.container;
+    c.style.cursor = "";
     c.removeEventListener("pointerdown", this.onPointerDown);
     c.removeEventListener("pointermove", this.onPointerMove);
     c.removeEventListener("pointerup", this.onPointerUp);

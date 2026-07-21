@@ -102,3 +102,27 @@ describe("DimensionInput — kind-aware validation", () => {
     expect(onCommit).toHaveBeenCalledWith(0);
   });
 });
+
+describe("DimensionInput — formatted no-op commit gate", () => {
+  it("untouched blur of 12.345 does not call onCommit (no-op gate)", () => {
+    const onCommit = vi.fn();
+    render(<DimensionInput value={12.345} kind="Distance" onCommit={onCommit} />);
+    fireEvent.blur(input());
+    expect(onCommit).not.toHaveBeenCalled();
+  });
+
+  it("untouched blur when the display value is rounded (12.3456 → \"12.346\") does not spuriously re-commit the rounded string as a new value", () => {
+    const onCommit = vi.fn();
+    render(<DimensionInput value={12.3456} kind="Distance" onCommit={onCommit} />);
+    expect(input().value).toBe("12.346");
+    fireEvent.blur(input());
+    expect(onCommit).not.toHaveBeenCalled();
+  });
+
+  it("a real edit that only changes precision beyond 3 decimals still commits the typed value", () => {
+    const onCommit = vi.fn();
+    render(<DimensionInput value={12.345} kind="Distance" onCommit={onCommit} />);
+    typeAndEnter("12.7");
+    expect(onCommit).toHaveBeenCalledWith(12.7);
+  });
+});

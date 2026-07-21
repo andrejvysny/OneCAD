@@ -249,7 +249,7 @@ async function commitReducedSketch(
   } catch (e) {
     if (sessionSuperseded(gen)) return false; // superseded — don't surface a stale hint
     const msg = e instanceof Error ? e.message : String(e);
-    viewportStore.getState().setStatusHint(`Sketch delete failed: ${msg}`);
+    viewportStore.getState().setStatusHint(`Sketch delete failed: ${msg}`, { severity: "error", sticky: true });
     return false;
   }
   if (sessionSuperseded(gen)) return false;
@@ -400,7 +400,7 @@ async function undoRedoNow(client: CadClient, dir: "undo" | "redo"): Promise<voi
       if (dir === "undo") sketchStore.getState().popRedo(snapshot);
       else sketchStore.getState().popUndo(snapshot);
       const msg = e instanceof Error ? e.message : String(e);
-      viewportStore.getState().setStatusHint(`Sketch ${dir} failed: ${msg}`);
+      viewportStore.getState().setStatusHint(`Sketch ${dir} failed: ${msg}`, { severity: "error", sticky: true });
     }
     return;
   }

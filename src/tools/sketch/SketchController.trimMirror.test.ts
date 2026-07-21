@@ -153,7 +153,12 @@ describe("SketchController — Trim + Mirror", () => {
     });
 
     it("shows the trim hint on arming", () => {
-      expect(viewportStore.getState().statusHint).toContain("Click an entity to delete");
+      expect(viewportStore.getState().statusHint?.message).toContain("Click an entity to delete");
+    });
+
+    it("idle mouse move does NOT set hover (trim hover ships in a later wave)", () => {
+      mouse("pointermove", 10, 10, 0, 0); // idle move over the e1 line body
+      expect(sketchSelectionStore.getState().hover).toBeNull();
     });
   });
 
@@ -210,6 +215,13 @@ describe("SketchController — Trim + Mirror", () => {
       expect(selected()).toHaveLength(1);
       toolStore.getState().setTool("select");
       expect(selected()).toEqual([]);
+    });
+
+    it("idle mouse move sets sketchSelectionStore hover (on hit, cleared on miss)", () => {
+      mouse("pointermove", 10, 10, 0, 0); // idle move over the e1 line body
+      expect(sketchSelectionStore.getState().hover).toEqual({ entityId: "e1" });
+      mouse("pointermove", 300, 300, 0, 0); // empty space
+      expect(sketchSelectionStore.getState().hover).toBeNull();
     });
 
     it("Esc (global ladder) returns to the select tool", async () => {

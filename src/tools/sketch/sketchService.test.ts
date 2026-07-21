@@ -155,7 +155,7 @@ describe("deleteEntities — cascade the referencing constraints", () => {
     } as unknown as CadClient;
     await deleteEntities(failing, ["e1"]);
     expect(sketchStore.getState().session).toBe(before); // unchanged
-    expect(viewportStore.getState().statusHint).toContain("boom");
+    expect(viewportStore.getState().statusHint?.message).toContain("boom");
   });
 });
 

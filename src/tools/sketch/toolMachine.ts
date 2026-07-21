@@ -75,6 +75,17 @@ const line = (a: Point2, b: Point2): DraftEntity => ({ type: "Line", p0: a, p1: 
 const dist = (a: Point2, b: Point2): number => Math.hypot(a.x - b.x, a.y - b.y);
 
 // ── Line tool: click-click chaining, Esc ends the chain ──────────────────────
+//
+// Anchors ACCUMULATE the whole chain (not just the last segment) so the
+// controller's snap engine sees every placed vertex as an H/V guide reference.
+// A click reuses one of three outcomes, checked in this order:
+//   1. within minSize of the LAST anchor  → END CHAIN (no commit). Covers the
+//      1-anchor case too (first === last), and makes a double-click at the same
+//      point end the chain right after the first click of the pair committed
+//      the segment.
+//   2. within minSize of the FIRST anchor (chain has ≥2 anchors) → CLOSE LOOP:
+//      commit the closing segment back to the first anchor.
+//   3. otherwise → commit last→pt and keep chaining.
 
 export const lineTool: ToolMachine = {
   id: "line",
@@ -91,13 +102,22 @@ export const lineTool: ToolMachine = {
     // click
     const minSize = ctx?.minSize ?? DEFAULT_MIN_SIZE;
     const last = state.anchors[state.anchors.length - 1] ?? null;
-    // Degenerate segment (a click on / next to the previous anchor): ignore it and
-    // keep the chain armed. (A later work item rewrites this branch to end-chain.)
-    if (last && dist(last, event.pt) < minSize) return { state, preview: [] };
-    const anchors = [...state.anchors, event.pt];
-    const next: ToolState = { anchors: [event.pt], cursor: event.pt };
-    if (last) return { state: next, preview: [], committed: [line(last, event.pt)] };
-    return { state: { anchors, cursor: event.pt }, preview: [] };
+    if (!last) {
+      // First anchor of a fresh chain.
+      return { state: { anchors: [event.pt], cursor: event.pt }, preview: [] };
+    }
+    if (dist(last, event.pt) < minSize) {
+      return { state: emptyState(), preview: [], done: true };
+    }
+    const first = state.anchors[0];
+    if (state.anchors.length > 1 && dist(first, event.pt) < minSize) {
+      return { state: emptyState(), preview: [], committed: [line(last, first)], done: true };
+    }
+    return {
+      state: { anchors: [...state.anchors, event.pt], cursor: event.pt },
+      preview: [],
+      committed: [line(last, event.pt)],
+    };
   },
 };
 

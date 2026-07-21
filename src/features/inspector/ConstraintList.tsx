@@ -1,6 +1,8 @@
 import { MonoValue } from "@/ui/MonoValue";
 import { Icon } from "@/icons/Icon";
 import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
+import { CONSTRAINT_PRESENTATION } from "@/features/sketch/constraintCatalog";
+import { formatDimensionValue } from "@/features/sketch/dimensionFormat";
 import type { SketchConstraint, SketchConstraintType } from "@/ipc/types";
 
 /** Dimensional constraint kinds that carry a `value` column. */
@@ -13,36 +15,6 @@ const DIMENSIONAL: ReadonlySet<SketchConstraintType> = new Set([
   "Diameter",
 ]);
 
-/**
- * Row glyph per constraint kind — mirrors the ConstraintBadgeLayer conventions
- * (src/features/sketch/badgeLayout.ts GLYPH table) so the in-canvas badge and the
- * inspector row read as the same vocabulary. Duplicated locally rather than
- * imported: badgeLayout.ts is owned by a parallel WP and out of scope here.
- * Extended with Horizontal/Vertical/Coincident (badges glyph those inline) and
- * the dimensional kinds (badges glyph those with the live value instead, since
- * the row already has a separate value column).
- */
-const GLYPH: Record<SketchConstraintType, string> = {
-  Horizontal: "H",
-  Vertical: "V",
-  Coincident: "•",
-  Parallel: "∥",
-  Perpendicular: "⟂",
-  Tangent: "T",
-  Concentric: "◎",
-  Equal: "=",
-  Midpoint: "M",
-  OnCurve: "⌒",
-  Symmetric: "⋈",
-  Fixed: "⚓",
-  Distance: "↔",
-  HorizontalDistance: "H↔",
-  VerticalDistance: "V↔",
-  Angle: "∠",
-  Radius: "R",
-  Diameter: "⌀",
-};
-
 /** Compact entity reference summary: "e1, e2" (≤2) or "e1 +2" (more). */
 function entitySummary(entities: string[]): string {
   if (entities.length === 0) return "";
@@ -53,7 +25,7 @@ function entitySummary(entities: string[]): string {
 /** Dimensional value text — Angle is UI-domain degrees already (angleUnits.ts). */
 function valueText(c: SketchConstraint): string | null {
   if (!DIMENSIONAL.has(c.type) || typeof c.value !== "number") return null;
-  return c.type === "Angle" ? `${c.value.toFixed(1)}°` : c.value.toFixed(1);
+  return c.type === "Angle" ? `${formatDimensionValue(c.value)}°` : formatDimensionValue(c.value);
 }
 
 /** Small icon-only delete affordance — same shape as HistoryList's RowIconButton. */
@@ -104,7 +76,7 @@ function ConstraintRow({
       className="group mb-1 flex h-[30px] items-center gap-2 rounded-sm bg-chip px-2.5 hover:bg-hover-2"
     >
       <span className={`w-4 shrink-0 text-center text-[12px] ${glyphTone}`}>
-        {GLYPH[constraint.type]}
+        {CONSTRAINT_PRESENTATION[constraint.type].glyph}
       </span>
       <span className={`flex-1 truncate text-[12.5px] ${typeTone}`}>{constraint.type}</span>
       <MonoValue className="shrink-0 text-[11px] text-ink-6">

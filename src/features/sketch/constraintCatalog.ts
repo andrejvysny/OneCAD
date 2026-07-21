@@ -1,15 +1,15 @@
 /*
- * Shared presentation catalog for constraint kinds — the glyph + label both
- * constraint UIs (toolbar + context chips) render. Glyphs are plain Unicode
- * (reused from the badge vocabulary, `badgeLayout.ts GLYPH`); no icon-path entries
- * exist for constraints in `@/icons/paths`, and text glyphs keep the surface
- * token-only (no raw colors). The record covers all 18 kinds so the context chips
+ * Shared presentation catalog for constraint kinds — the SINGLE glyph + label
+ * source for every constraint UI (toolbar, context chips, sketch canvas
+ * badges via badgeLayout.ts, and the inspector's ConstraintList). No other
+ * module defines its own glyph table; text glyphs keep the surface
+ * token-only (no raw colors). The record covers all 18 kinds so any consumer
  * can label anything the applicability matrix emits (incl. H-/V-Distance).
  */
 import type { SketchConstraintType } from "@/ipc/types";
 
 export const CONSTRAINT_PRESENTATION: Record<SketchConstraintType, { glyph: string; label: string }> = {
-  Coincident: { glyph: "⌖", label: "Coincident" },
+  Coincident: { glyph: "•", label: "Coincident" },
   Horizontal: { glyph: "H", label: "Horizontal" },
   Vertical: { glyph: "V", label: "Vertical" },
   Fixed: { glyph: "⚓", label: "Fixed" },
@@ -21,8 +21,8 @@ export const CONSTRAINT_PRESENTATION: Record<SketchConstraintType, { glyph: stri
   Concentric: { glyph: "◎", label: "Concentric" },
   Equal: { glyph: "=", label: "Equal" },
   Distance: { glyph: "↔", label: "Distance" },
-  HorizontalDistance: { glyph: "↔", label: "Horizontal distance" },
-  VerticalDistance: { glyph: "↕", label: "Vertical distance" },
+  HorizontalDistance: { glyph: "H↔", label: "Horizontal distance" },
+  VerticalDistance: { glyph: "V↔", label: "Vertical distance" },
   Angle: { glyph: "∠", label: "Angle" },
   Radius: { glyph: "R", label: "Radius" },
   Diameter: { glyph: "⌀", label: "Diameter" },

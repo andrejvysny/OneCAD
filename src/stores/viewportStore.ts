@@ -13,6 +13,21 @@ import type { InputDevice } from "@/viewport/engine/navInput";
 export type Projection = "persp" | "ortho";
 export type DisplayMode = "shaded" | "shadedEdges" | "wireframe";
 
+export type StatusSeverity = "info" | "error";
+
+/**
+ * A status-bar hint carries its own presentation policy:
+ *   - `severity` picks the text treatment (`error` renders red).
+ *   - `sticky` hints persist until superseded/cleared (tool prompts + errors);
+ *     non-sticky hints auto-dismiss after {@link AUTO_DISMISS_MS} (success/reject
+ *     confirmations).
+ */
+export interface StatusHint {
+  message: string;
+  severity: StatusSeverity;
+  sticky: boolean;
+}
+
 export interface CursorCoords {
   x: number;
   y: number;
@@ -20,6 +35,24 @@ export interface CursorCoords {
 }
 
 const DISPLAY_CYCLE: DisplayMode[] = ["shaded", "shadedEdges", "wireframe"];
+
+/** Non-sticky hints self-clear after this long. */
+export const AUTO_DISMISS_MS = 4000;
+
+// Auto-dismiss lives in the module (not React): each `setStatusHint` bumps a token
+// and, for a non-sticky hint, arms one timer keyed to that token. The timer clears
+// the hint only if its token is still current (latest-wins), so a newer hint that
+// re-armed the timer is never clobbered by a stale one. Every set/clear cancels the
+// outstanding timer first, so a sticky hint or an explicit clear stops the clock.
+let dismissTimer: ReturnType<typeof setTimeout> | null = null;
+let hintToken = 0;
+
+function cancelDismiss(): void {
+  if (dismissTimer !== null) {
+    clearTimeout(dismissTimer);
+    dismissTimer = null;
+  }
+}
 
 export interface ViewportState {
   projection: Projection;
@@ -38,8 +71,8 @@ export interface ViewportState {
   cursor: CursorCoords;
   /** Current DOF count the shell displays (mirrors the active sketch solver). */
   dofBadge: number | null;
-  /** Transient status-bar hint (e.g. an unimplemented tool notice). */
-  statusHint: string | null;
+  /** Status-bar hint (tool prompt, error, or transient confirmation). */
+  statusHint: StatusHint | null;
   /** Finish-sketch → auto-arm extrude handoff: the sketch just finished (F-WP7). */
   pendingExtrudeSketch: string | null;
   setPendingExtrude(sketchId: string | null): void;
@@ -52,8 +85,12 @@ export interface ViewportState {
   /** Engine → store: canonical view name (TOP/FRONT/…/ISO/—). */
   setCameraViewLabel(label: string): void;
   setDetectedInputDevice(device: InputDevice): void;
-  /** Set/clear a transient status-bar hint. */
-  setStatusHint(hint: string | null): void;
+  /**
+   * Set (or clear, with `null`) the status-bar hint. Plain `setStatusHint(msg)`
+   * shows a non-sticky info hint that auto-dismisses; pass `opts` to raise the
+   * severity or make it sticky. Every call cancels any pending auto-dismiss.
+   */
+  setStatusHint(message: string | null, opts?: { severity?: StatusSeverity; sticky?: boolean }): void;
   /** Dispatch to the live viewport engine (no-op until it mounts). */
   zoomFit(): void;
   homeView(): void;
@@ -108,8 +145,23 @@ export const viewportStore = createStore<ViewportState>()((set) => ({
     set({ cameraViewLabel: label });
   },
 
-  setStatusHint(hint) {
-    set({ statusHint: hint });
+  setStatusHint(message, opts) {
+    const token = ++hintToken;
+    cancelDismiss();
+    if (message === null) {
+      set({ statusHint: null });
+      return;
+    }
+    const severity = opts?.severity ?? "info";
+    const sticky = opts?.sticky ?? false;
+    set({ statusHint: { message, severity, sticky } });
+    if (!sticky) {
+      dismissTimer = setTimeout(() => {
+        dismissTimer = null;
+        if (hintToken !== token) return; // superseded by a newer hint — leave it
+        set({ statusHint: null });
+      }, AUTO_DISMISS_MS);
+    }
   },
 
   // Dispatch to the live engine via the bridge; no-op before it mounts.

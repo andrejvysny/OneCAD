@@ -4,14 +4,17 @@ import { cn } from "@/ui/cn";
 import { useToolStore } from "@/stores/toolStore";
 import { useViewportStore } from "@/stores/viewportStore";
 import { useDocumentStore } from "@/stores/documentStore";
+import { runAction } from "@/shortcuts/useShortcuts";
 import { sketchStatusText } from "./constraintStatus";
 
 /**
  * Floating sketch chrome pill (prototype 1c), shown only in sketch mode. Two
  * variants: before a sketch exists (no activeSketchId) a "Select a sketch plane"
  * prompt with Cancel; once entered, the editing pill (name + DOF + Finish).
- * Cancel / Finish both exit to model mode (matching Esc / Enter). Compact
- * layout per 1c — no flex spacer (that is the docked-bar 1d variant).
+ * Cancel discards straight to model mode (matching Esc). Finish routes through
+ * the same `finishSketch` shortcut action as Enter: it drains the sketch
+ * mutation queue first, then flips mode and auto-arms extrude. Compact layout
+ * per 1c — no flex spacer (that is the docked-bar 1d variant).
  */
 export function SketchChromeBar() {
   const mode = useToolStore((s) => s.mode);
@@ -23,7 +26,8 @@ export function SketchChromeBar() {
 
   if (mode !== "sketch") return null;
 
-  const exit = () => setMode("model");
+  const cancel = () => setMode("model");
+  const finish = () => runAction({ type: "finishSketch" });
 
   // Plane-pick phase: no sketch yet — prompt for a plane; Cancel returns to model.
   if (!activeSketchId) {
@@ -33,7 +37,7 @@ export function SketchChromeBar() {
         <span className="text-[12.5px] font-semibold text-sel-text">
           Select a sketch plane
         </span>
-        <Button size="sm" variant="secondary" className="text-ink-3" onClick={exit}>
+        <Button size="sm" variant="secondary" className="text-ink-3" onClick={cancel}>
           <Icon name="x" size={11} strokeWidth={2.2} />
           Cancel
         </Button>
@@ -54,11 +58,11 @@ export function SketchChromeBar() {
       <span className={cn("text-[12px] font-medium", tone === "ok" ? "text-ink-4" : "text-warn")}>
         {label}
       </span>
-      <Button size="sm" variant="secondary" className="text-ink-3" onClick={exit}>
+      <Button size="sm" variant="secondary" className="text-ink-3" onClick={cancel}>
         <Icon name="x" size={11} strokeWidth={2.2} />
         Cancel
       </Button>
-      <Button size="sm" variant="primary" onClick={exit}>
+      <Button size="sm" variant="primary" onClick={finish}>
         <Icon name="check" size={12} strokeWidth={2.4} />
         Finish sketch
       </Button>

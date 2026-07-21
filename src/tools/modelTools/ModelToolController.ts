@@ -276,7 +276,7 @@ export class ModelToolController {
   private armExtrudeFromSelection(): void {
     const sketch = selectionStore.getState().selected.find((r) => r.kind === "sketch");
     if (sketch) void this.armExtrude(sketch.id);
-    else viewportStore.getState().setStatusHint("Select a sketch to extrude");
+    else viewportStore.getState().setStatusHint("Select a sketch to extrude", { sticky: true });
   }
 
   private async armExtrude(sketchId: string, editFeatureId?: string, startDepth = DEFAULT_EXTRUDE_DEPTH): Promise<void> {
@@ -292,7 +292,7 @@ export class ModelToolController {
     const region = finish.regions[0];
     const profile = region ? profileFromRegion(region) : null;
     if (!region || !profile) {
-      viewportStore.getState().setStatusHint("No closed region to extrude");
+      viewportStore.getState().setStatusHint("No closed region to extrude", { severity: "error", sticky: true });
       toolStore.getState().setTool("select");
       return;
     }
@@ -333,7 +333,7 @@ export class ModelToolController {
     this.throttle.reset();
     this.extrude = extrudeStep(extrudeInit(), { kind: "arm", depth: startDepth }).state;
     toolStore.setState({ phase: "armed" });
-    viewportStore.getState().setStatusHint("Drag the arrow to set depth, or type a value");
+    viewportStore.getState().setStatusHint("Drag the arrow to set depth, or type a value", { sticky: true });
 
     const chipWorld = this.chipWorld();
     toolChipStore.getState().showExtrude(startDepth, chipWorld, (v) => this.onExtrudeChip(v));
@@ -384,7 +384,7 @@ export class ModelToolController {
     // Only regions with an extrudable profile are pickable (others can't be built).
     const pickable = regions.filter((r) => profileFromRegion(r) !== null);
     if (pickable.length === 0) {
-      viewportStore.getState().setStatusHint(`No closed region to ${noun}`);
+      viewportStore.getState().setStatusHint(`No closed region to ${noun}`, { severity: "error", sticky: true });
       toolStore.getState().setTool("select");
       return;
     }
@@ -396,7 +396,7 @@ export class ModelToolController {
     this.regionPick = { opType, sketchId, plane: session.plane, regions: pickable, session, editFeatureId, startValue };
     this.engine.showRegionPick(session.plane, pickable);
     this.engine.setOrbitSuppressed(true); // modal: click picks a region, not orbit
-    viewportStore.getState().setStatusHint(`Select a region to ${noun}`);
+    viewportStore.getState().setStatusHint(`Select a region to ${noun}`, { sticky: true });
     this.updateDebug();
   }
 
@@ -411,7 +411,7 @@ export class ModelToolController {
   ): void {
     const profile = profileFromRegion(region);
     if (!profile) {
-      viewportStore.getState().setStatusHint(`No closed region to ${opType === "extrude" ? "extrude" : "revolve"}`);
+      viewportStore.getState().setStatusHint(`No closed region to ${opType === "extrude" ? "extrude" : "revolve"}`, { severity: "error", sticky: true });
       toolStore.getState().setTool("select");
       return;
     }
@@ -465,7 +465,7 @@ export class ModelToolController {
   private armRevolveFromSelection(): void {
     const sketch = selectionStore.getState().selected.find((r) => r.kind === "sketch");
     if (sketch) void this.armRevolve(sketch.id);
-    else viewportStore.getState().setStatusHint("Select a sketch to revolve");
+    else viewportStore.getState().setStatusHint("Select a sketch to revolve", { sticky: true });
   }
 
   /**
@@ -487,7 +487,7 @@ export class ModelToolController {
     const region = finish.regions[0];
     const profile = region ? profileFromRegion(region) : null;
     if (!region || !profile) {
-      viewportStore.getState().setStatusHint("No closed region to revolve");
+      viewportStore.getState().setStatusHint("No closed region to revolve", { severity: "error", sticky: true });
       toolStore.getState().setTool("select");
       return;
     }
@@ -545,7 +545,7 @@ export class ModelToolController {
       this.deps.engine.setOrbitSuppressed(true);
       this.deps.engine.showRevolvePreview(this.plane, profile.ring, this.revolveAxis, startAngle);
       toolStore.setState({ phase: "armed" });
-      viewportStore.getState().setStatusHint("Drag to set angle, or type a value");
+      viewportStore.getState().setStatusHint("Drag to set angle, or type a value", { sticky: true });
       toolChipStore.getState().showRevolve(
         startAngle,
         this.revolveChipWorld(),
@@ -565,6 +565,7 @@ export class ModelToolController {
         this.revolveAxisCandidates.length
           ? "Pick axis line"
           : "Draw a sketch line to use as the revolve axis",
+        { sticky: true },
       );
     }
     this.updateDebug();
@@ -601,7 +602,7 @@ export class ModelToolController {
       );
     }
     toolChipStore.getState().clear();
-    viewportStore.getState().setStatusHint("Pick axis line");
+    viewportStore.getState().setStatusHint("Pick axis line", { sticky: true });
     toolStore.setState({ phase: "armed" });
   }
 
@@ -630,7 +631,7 @@ export class ModelToolController {
     this.revolve = revolveStep(this.revolve, { kind: "pickAxis", lineId: cand.id, valid }).state;
     if (!valid) {
       this.deps.engine.setRevolveAxisHover(null);
-      viewportStore.getState().setStatusHint("Axis can't cross the profile — pick another line");
+      viewportStore.getState().setStatusHint("Axis can't cross the profile — pick another line", { severity: "error", sticky: true });
       return;
     }
     this.revolveAxis = { a: cand.a, b: cand.b };
@@ -643,7 +644,7 @@ export class ModelToolController {
       (v) => this.onRevolveChip(v),
       () => this.resetRevolveAxis(),
     );
-    viewportStore.getState().setStatusHint("Drag to set angle, click to revolve 360°, or type a value");
+    viewportStore.getState().setStatusHint("Drag to set angle, click to revolve 360°, or type a value", { sticky: true });
     toolStore.setState({ phase: "armed" });
     this.updateDebug();
   }
@@ -720,7 +721,7 @@ export class ModelToolController {
       }
     } catch (e) {
       this.finishRevolve(null);
-      viewportStore.getState().setStatusHint(`Revolve failed: ${errMessage(e)}`);
+      viewportStore.getState().setStatusHint(`Revolve failed: ${errMessage(e)}`, { severity: "error", sticky: true });
     }
   }
 
@@ -748,14 +749,14 @@ export class ModelToolController {
   private armFilletFromSelection(): void {
     const edges = selectionStore.getState().selected.filter((r) => r.kind === "edge");
     if (edges.length === 0) {
-      viewportStore.getState().setStatusHint("Select edges, then Fillet");
+      viewportStore.getState().setStatusHint("Select edges, then Fillet", { sticky: true });
       return;
     }
     this.filletEdges = edges;
     this.fillet = filletStep(filletInit(), { kind: "arm", edgeCount: edges.length, radius: DEFAULT_FILLET_RADIUS }).state;
     toolStore.setState({ phase: "armed" });
     this.deps.engine.setOrbitSuppressed(true); // modal: drag adjusts radius, not orbit
-    viewportStore.getState().setStatusHint(`Fillet ${edges.length} edge${edges.length > 1 ? "s" : ""} — drag or type radius`);
+    viewportStore.getState().setStatusHint(`Fillet ${edges.length} edge${edges.length > 1 ? "s" : ""} — drag or type radius`, { sticky: true });
     const anchor = edges[0].anchor?.worldPoint ?? [0, 0, 0];
     toolChipStore.getState().showFillet(DEFAULT_FILLET_RADIUS, anchor, (v) => this.onFilletChip(v));
     this.updateDebug();
@@ -769,12 +770,12 @@ export class ModelToolController {
   private startBooleanFromSelection(): void {
     const body = selectionStore.getState().selected.find((r) => r.kind === "body");
     if (!body) {
-      viewportStore.getState().setStatusHint("Select the target body, then pick the tool body");
+      viewportStore.getState().setStatusHint("Select the target body, then pick the tool body", { sticky: true });
       return;
     }
     this.boolean = booleanStep(booleanInit(), { kind: "start", targetBodyId: body.id }).state;
     toolStore.setState({ phase: "armed" });
-    viewportStore.getState().setStatusHint("Pick the tool body to combine");
+    viewportStore.getState().setStatusHint("Pick the tool body to combine", { sticky: true });
     this.updateDebug();
   }
 
@@ -787,7 +788,7 @@ export class ModelToolController {
   private armShellFromSelection(): void {
     const faces = selectionStore.getState().selected.filter((r) => r.kind === "face");
     if (faces.length === 0) {
-      viewportStore.getState().setStatusHint("Select faces to remove, then Shell");
+      viewportStore.getState().setStatusHint("Select faces to remove, then Shell", { sticky: true });
       return;
     }
     this.armShell(faces);
@@ -810,6 +811,7 @@ export class ModelToolController {
       editFeatureId
         ? "Edit shell thickness — drag or type, Enter to apply"
         : `Shell ${n} face${n > 1 ? "s" : ""} — drag or type thickness`,
+      { sticky: true },
     );
     const anchor = faces[0]?.anchor?.worldPoint ?? [0, 0, 0];
     if (editFeatureId) {
@@ -863,7 +865,7 @@ export class ModelToolController {
       this.applyResult(res);
       viewportStore.getState().setStatusHint(editFeatureId ? "Shell thickness updated" : "Shelled");
     } catch (e) {
-      viewportStore.getState().setStatusHint(`Shell failed: ${errMessage(e)}`);
+      viewportStore.getState().setStatusHint(`Shell failed: ${errMessage(e)}`, { severity: "error", sticky: true });
     }
     this.shell = shellInit();
     this.shellFaces = [];
@@ -895,7 +897,7 @@ export class ModelToolController {
   private armLinearFromSelection(): void {
     const bodyId = this.firstSelectedBodyId();
     if (!bodyId) {
-      viewportStore.getState().setStatusHint("Select a body to pattern");
+      viewportStore.getState().setStatusHint("Select a body to pattern", { sticky: true });
       return;
     }
     this.armLinear(bodyId);
@@ -905,7 +907,7 @@ export class ModelToolController {
     this.patternEditFeatureId = editFeatureId;
     this.linear = linearPatternStep(linearPatternInit(), { kind: "arm", bodyId, count: seedCount }).state;
     toolStore.setState({ phase: "armed" });
-    viewportStore.getState().setStatusHint("Pick axis + count + spacing, then Apply");
+    viewportStore.getState().setStatusHint("Pick axis + count + spacing, then Apply", { sticky: true });
     this.rebuildLinearGhost();
     toolChipStore.getState().showLinearPattern(this.linear.axis, this.linear.count, this.linear.spacing, this.bodyCenter(bodyId), {
       onAxis: (a) => this.onLinearAxis(a),
@@ -961,7 +963,7 @@ export class ModelToolController {
   private armCircularFromSelection(): void {
     const bodyId = this.firstSelectedBodyId();
     if (!bodyId) {
-      viewportStore.getState().setStatusHint("Select a body to pattern");
+      viewportStore.getState().setStatusHint("Select a body to pattern", { sticky: true });
       return;
     }
     this.armCircular(bodyId);
@@ -971,7 +973,7 @@ export class ModelToolController {
     this.patternEditFeatureId = editFeatureId;
     this.circular = circularPatternStep(circularPatternInit(), { kind: "arm", bodyId, count: seedCount }).state;
     toolStore.setState({ phase: "armed" });
-    viewportStore.getState().setStatusHint("Pick axis + count + angle, then Apply");
+    viewportStore.getState().setStatusHint("Pick axis + count + angle, then Apply", { sticky: true });
     this.rebuildCircularGhost();
     toolChipStore.getState().showCircularPattern(this.circular.axis, this.circular.count, this.circular.angle, this.bodyCenter(bodyId), {
       onAxis: (a) => this.onCircularAxis(a),
@@ -1034,7 +1036,7 @@ export class ModelToolController {
   private armMirrorFromSelection(): void {
     const bodyId = this.firstSelectedBodyId();
     if (!bodyId) {
-      viewportStore.getState().setStatusHint("Select a body to mirror");
+      viewportStore.getState().setStatusHint("Select a body to mirror", { sticky: true });
       return;
     }
     this.armMirror(bodyId);
@@ -1044,7 +1046,7 @@ export class ModelToolController {
     this.patternEditFeatureId = editFeatureId;
     this.mirror = mirrorStep(mirrorInit(), { kind: "arm", bodyId, plane: seedPlane }).state;
     toolStore.setState({ phase: "armed" });
-    viewportStore.getState().setStatusHint("Pick a mirror plane, then Apply");
+    viewportStore.getState().setStatusHint("Pick a mirror plane, then Apply", { sticky: true });
     this.rebuildMirrorGhost();
     toolChipStore.getState().showMirror(this.mirror.plane, this.bodyCenter(bodyId), {
       onPlane: (p) => this.onMirrorPlane(p),
@@ -1095,7 +1097,7 @@ export class ModelToolController {
       selectionStore.getState().set([{ kind: "body", id: bodyId }]);
       viewportStore.getState().setStatusHint(doneHint);
     } catch (e) {
-      viewportStore.getState().setStatusHint(`Pattern failed: ${errMessage(e)}`);
+      viewportStore.getState().setStatusHint(`Pattern failed: ${errMessage(e)}`, { severity: "error", sticky: true });
     }
     this.linear = linearPatternInit();
     this.circular = circularPatternInit();
@@ -1135,7 +1137,7 @@ export class ModelToolController {
     const feat = documentStore.getState().features.find((f) => f.id === featureId);
     if (!feat || feat.kind !== kind) return null;
     const bodyId = this.firstSelectedBodyId() ?? Object.keys(documentStore.getState().bodies)[0] ?? null;
-    if (!bodyId) viewportStore.getState().setStatusHint("No body to re-pattern");
+    if (!bodyId) viewportStore.getState().setStatusHint("No body to re-pattern", { severity: "error", sticky: true });
     return bodyId;
   }
 
@@ -1376,7 +1378,7 @@ export class ModelToolController {
       res = await this.client.endPreview(sessionId, true);
     } catch (e) {
       this.finishExtrude(null);
-      viewportStore.getState().setStatusHint(`Extrude failed: ${errMessage(e)}`);
+      viewportStore.getState().setStatusHint(`Extrude failed: ${errMessage(e)}`, { severity: "error", sticky: true });
       return;
     }
     if (!res || !res.changedBodies[0]) {
@@ -1449,7 +1451,7 @@ export class ModelToolController {
           : `Filleted ${edges.length} edge${edges.length > 1 ? "s" : ""}`,
       );
     } catch (e) {
-      viewportStore.getState().setStatusHint(`Fillet failed: ${errMessage(e)}`);
+      viewportStore.getState().setStatusHint(`Fillet failed: ${errMessage(e)}`, { severity: "error", sticky: true });
     }
     this.fillet = filletInit();
     this.filletEditFeatureId = undefined;
@@ -1479,7 +1481,7 @@ export class ModelToolController {
     this.fillet = filletStep(filletInit(), { kind: "arm", edgeCount: 1, radius }).state;
     toolStore.setState({ phase: "armed" });
     this.deps.engine.setOrbitSuppressed(true); // modal: drag adjusts radius, not orbit
-    viewportStore.getState().setStatusHint("Edit fillet radius — drag or type, Enter to apply");
+    viewportStore.getState().setStatusHint("Edit fillet radius — drag or type, Enter to apply", { sticky: true });
     toolChipStore.getState().showFillet(radius, [0, 0, 0], (v) => {
       this.onFilletChip(v);
       void this.commitFillet(); // chip Enter/blur commits the radius-only edit
@@ -1505,7 +1507,7 @@ export class ModelToolController {
       (op) => this.setBooleanOp(op),
       () => void this.commitBoolean(),
     );
-    viewportStore.getState().setStatusHint("Choose Union / Cut / Intersect, then Apply");
+    viewportStore.getState().setStatusHint("Choose Union / Cut / Intersect, then Apply", { sticky: true });
     this.updateDebug();
   }
 
@@ -1534,7 +1536,7 @@ export class ModelToolController {
       selectionStore.getState().set([{ kind: "body", id: targetBodyId }]);
       viewportStore.getState().setStatusHint(`${operation} applied`);
     } catch (e) {
-      viewportStore.getState().setStatusHint(`${operation} failed: ${errMessage(e)}`);
+      viewportStore.getState().setStatusHint(`${operation} failed: ${errMessage(e)}`, { severity: "error", sticky: true });
     }
     this.boolean = booleanInit();
     toolStore.getState().setTool("select");
@@ -1571,7 +1573,7 @@ export class ModelToolController {
     if (!feat || feat.kind !== "extrude") return;
     const sketchId = this.lastArmedSketch ?? Object.keys(documentStore.getState().sketches)[0];
     if (!sketchId) {
-      viewportStore.getState().setStatusHint("No sketch to re-edit");
+      viewportStore.getState().setStatusHint("No sketch to re-edit", { severity: "error", sticky: true });
       return;
     }
     const depth = parseFloat(feat.valueText) || DEFAULT_EXTRUDE_DEPTH;
@@ -1585,7 +1587,7 @@ export class ModelToolController {
     if (!feat || feat.kind !== "revolve") return;
     const sketchId = this.lastArmedSketch ?? Object.keys(documentStore.getState().sketches)[0];
     if (!sketchId) {
-      viewportStore.getState().setStatusHint("No sketch to re-edit");
+      viewportStore.getState().setStatusHint("No sketch to re-edit", { severity: "error", sticky: true });
       return;
     }
     const angle = angleFromValueText(feat.valueText);

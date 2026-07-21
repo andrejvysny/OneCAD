@@ -39,6 +39,9 @@ export function resetStores(): void {
     statusHint: null,
     pendingExtrudeSketch: null,
   });
+  // Go through the action too, to cancel any pending auto-dismiss timer the
+  // previous test armed (setState alone would leave the module timer running).
+  viewportStore.getState().setStatusHint(null);
   documentStore.setState(seedMockDocument());
   settingsStore.setState({
     snapTo: {

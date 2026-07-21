@@ -40,7 +40,7 @@ describe("ModelToolChips (M6b)", () => {
   it("shell chip renders a mm dimension input", () => {
     render(<ModelToolChips />);
     act(() => toolChipStore.getState().showShell(2, WORLD, vi.fn()));
-    expect(screen.getByLabelText("Dimension value")).toHaveValue("2.0");
+    expect(screen.getByLabelText("Dimension value")).toHaveValue("2");
     expect(screen.getByText("mm")).toBeInTheDocument();
   });
 
@@ -67,7 +67,7 @@ describe("ModelToolChips (M6b)", () => {
     expect(onCount).toHaveBeenCalledWith(2);
 
     // Spacing input present + Apply commits.
-    expect(screen.getByLabelText("Dimension value")).toHaveValue("20.0");
+    expect(screen.getByLabelText("Dimension value")).toHaveValue("20");
     fireEvent.click(screen.getByRole("button", { name: "Apply" }));
     expect(onApply).toHaveBeenCalledTimes(1);
   });
@@ -77,7 +77,7 @@ describe("ModelToolChips (M6b)", () => {
     render(<ModelToolChips />);
     act(() => toolChipStore.getState().showCircularPattern("Z", 4, 360, WORLD, handlers));
     expect(screen.getByRole("button", { name: "Z" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByLabelText("Dimension value")).toHaveValue("360.0");
+    expect(screen.getByLabelText("Dimension value")).toHaveValue("360");
     expect(screen.getByText("°")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Apply" }));
     expect(handlers.onApply).toHaveBeenCalled();

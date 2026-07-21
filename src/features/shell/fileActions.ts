@@ -12,30 +12,14 @@ import { appStore } from "@/stores/appStore";
 
 const client = createClient();
 
-/** Transient-hint lifetime (ms) before it clears itself (if still showing). */
-const TRANSIENT_MS = 2500;
-
-let hintTimer: ReturnType<typeof setTimeout> | null = null;
-
-/** Show a self-clearing success hint (does not stomp a newer hint on clear). */
+/** Show a self-clearing success hint (the store auto-dismisses non-sticky hints). */
 function transientHint(message: string): void {
   viewportStore.getState().setStatusHint(message);
-  if (hintTimer) clearTimeout(hintTimer);
-  hintTimer = setTimeout(() => {
-    hintTimer = null;
-    if (viewportStore.getState().statusHint === message) {
-      viewportStore.getState().setStatusHint(null);
-    }
-  }, TRANSIENT_MS);
 }
 
-/** Surface a recoverable failure (stays until the next status change). */
+/** Surface a recoverable failure — sticky, so it stays until the next status change. */
 function errorHint(message: string): void {
-  if (hintTimer) {
-    clearTimeout(hintTimer);
-    hintTimer = null;
-  }
-  viewportStore.getState().setStatusHint(message);
+  viewportStore.getState().setStatusHint(message, { severity: "error", sticky: true });
 }
 
 function message(e: unknown): string {

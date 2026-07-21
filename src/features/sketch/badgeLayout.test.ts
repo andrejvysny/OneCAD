@@ -54,7 +54,7 @@ describe("layoutBadges", () => {
     const d = badges.find((b) => b.id === "k3")!;
     expect(d.editable).toBe(true);
     expect(d.value).toBe(40);
-    expect(d.glyph).toBe("40.0");
+    expect(d.glyph).toBe("40");
     const r = badges.find((b) => b.id === "k4")!;
     expect(r.editable).toBe(true);
     expect(r.at).toEqual({ x: 10, y: 10 });
@@ -62,6 +62,77 @@ describe("layoutBadges", () => {
 
   it("returns [] for a null session", () => {
     expect(layoutBadges(null)).toEqual([]);
+  });
+
+  it("assigns offsetIndex 0/1 to k1+k3, which co-anchor at e1's midpoint", () => {
+    const h = badges.find((b) => b.id === "k1")!;
+    const d = badges.find((b) => b.id === "k3")!;
+    expect(h.at).toEqual(d.at);
+    expect(h.offsetIndex).toBe(0);
+    expect(d.offsetIndex).toBe(1);
+  });
+
+  it("a badge with no co-anchored sibling gets offsetIndex 0", () => {
+    const c = badges.find((b) => b.id === "k2")!;
+    const r = badges.find((b) => b.id === "k4")!;
+    expect(c.offsetIndex).toBe(0);
+    expect(r.offsetIndex).toBe(0);
+  });
+});
+
+describe("layoutBadges — offsetIndex stagger (U9)", () => {
+  it("two constraints anchored at the same point get offsetIndex 0 and 1, sorted by constraint id", () => {
+    const s: SketchSession = {
+      sketchId: "sk",
+      plane: planeFor("XY"),
+      entities: [{ id: "e1", type: "Line", p0: [0, 0], p1: [40, 0] }],
+      constraints: [
+        // Registered in reverse-id order to prove the sort is by id, not insertion order.
+        { id: "zz", type: "Horizontal", entities: ["e1"] },
+        { id: "aa", type: "Fixed", entities: ["e1"] },
+      ],
+      dof: 0,
+      status: "FullyConstrained",
+    };
+    const badges = layoutBadges(s);
+    const aa = badges.find((b) => b.id === "aa")!;
+    const zz = badges.find((b) => b.id === "zz")!;
+    expect(aa.at).toEqual(zz.at);
+    expect(aa.offsetIndex).toBe(0);
+    expect(zz.offsetIndex).toBe(1);
+  });
+
+  it("a lone badge (no co-anchored sibling) gets offsetIndex 0", () => {
+    const s: SketchSession = {
+      sketchId: "sk",
+      plane: planeFor("XY"),
+      entities: [{ id: "e1", type: "Line", p0: [0, 0], p1: [40, 0] }],
+      constraints: [{ id: "k1", type: "Horizontal", entities: ["e1"] }],
+      dof: 0,
+      status: "FullyConstrained",
+    };
+    const badges = layoutBadges(s);
+    expect(badges[0].offsetIndex).toBe(0);
+  });
+
+  it("two distinct anchors each get offsetIndex 0 — grouping is per-anchor, not global", () => {
+    const s: SketchSession = {
+      sketchId: "sk",
+      plane: planeFor("XY"),
+      entities: [
+        { id: "e1", type: "Line", p0: [0, 0], p1: [40, 0] },
+        { id: "e2", type: "Line", p0: [0, 100], p1: [40, 100] },
+      ],
+      constraints: [
+        { id: "k1", type: "Horizontal", entities: ["e1"] },
+        { id: "k2", type: "Horizontal", entities: ["e2"] },
+      ],
+      dof: 0,
+      status: "FullyConstrained",
+    };
+    const badges = layoutBadges(s);
+    expect(badges.find((b) => b.id === "k1")!.offsetIndex).toBe(0);
+    expect(badges.find((b) => b.id === "k2")!.offsetIndex).toBe(0);
   });
 });
 
@@ -98,6 +169,6 @@ describe("layoutBadges — M6c constraint glyph coverage", () => {
     const an = badges.find((b) => b.id === "an1")!;
     expect(an.editable).toBe(true);
     expect(an.value).toBe(90);
-    expect(an.glyph).toBe("90.0°");
+    expect(an.glyph).toBe("90°");
   });
 });
