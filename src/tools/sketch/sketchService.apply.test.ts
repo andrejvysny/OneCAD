@@ -130,3 +130,47 @@ describe("applyConstraint — dimensional route (chip flow)", () => {
     expect(toolChipStore.getState().kind).toBe("none"); // chip cleared on commit
   });
 });
+
+describe("applyConstraint — serialization of rapid applies", () => {
+  beforeEach(() => {
+    resetMockSketches();
+    sketchStore.getState().reset();
+    toolChipStore.getState().clear();
+  });
+
+  it("two applies fired before the first upsert resolves BOTH persist (queued rebase)", async () => {
+    const entities = [line("e1", [0, 0], [40, 0]), line("e2", [0, 10], [40, 12])];
+    seed(entities, []);
+    const targets = targetsFor(entities, { entityId: "e1" }, { entityId: "e2" });
+    const offered = evaluateApplicability(targets, entities);
+    const parallel = offered.find((a) => a.type === "Parallel")!;
+    const angle = offered.find((a) => a.type === "Perpendicular")!;
+    expect(parallel).toBeDefined();
+    expect(angle).toBeDefined();
+
+    // Delay the FIRST sketchUpsert so the second apply fires while it is
+    // in flight — without the mutation queue both captured the same stale
+    // session and the second diff removed the first's constraint.
+    const realUpsert = mockClient.sketchUpsert.bind(mockClient);
+    let delayed = false;
+    const delayedClient = {
+      ...mockClient,
+      sketchUpsert: (async (...args: Parameters<typeof mockClient.sketchUpsert>) => {
+        if (!delayed) {
+          delayed = true;
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        return realUpsert(...args);
+      }) as typeof mockClient.sketchUpsert,
+    };
+
+    const p1 = applyConstraint(delayedClient, parallel);
+    const p2 = applyConstraint(delayedClient, angle);
+    await Promise.all([p1, p2]);
+    await flush();
+
+    const s = sketchStore.getState().session!;
+    const kinds = s.constraints.map((c) => c.type).sort();
+    expect(kinds).toEqual(["Parallel", "Perpendicular"]);
+  });
+});

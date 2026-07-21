@@ -2,11 +2,13 @@
  * Prism preview geometry (PURE math, plane-local coords) — the shared core of
  * the two-level extrude preview (NEW_SPEC §15).
  *
- * A finished sketch region carries a fan triangulation in plane (u,v):
- * `previewTriangles.positions` = [centroidU, centroidV, ring0U, ring0V, …] and
- * `indices` fan the ring around the centroid (see mockSketch). We lift that flat
- * profile into a 3D prism authored in PLANE-LOCAL coordinates (x=u, y=v, z=w
- * along the plane normal):
+ * A finished sketch region carries a triangulation in plane (u,v) whose LAYOUT
+ * differs by producer: the mock lane emits a fan (positions[0..1] = centroid
+ * hub + ordered ring), the real worker lane (SolverLane ear_clip) emits the
+ * outer-loop polygon vertices with ear-clip indices and NO hub. The profile
+ * ring is therefore derived from triangulation topology (boundary edges), never
+ * from a layout convention. We lift that flat profile into a 3D prism authored
+ * in PLANE-LOCAL coordinates (x=u, y=v, z=w along the plane normal):
  *
  *   - L1 (engine): a UNIT prism (cap at w=1) built once; a group carrying the
  *     plane basis scales `z` by the live depth, so the drag runs zero-allocation.
@@ -36,19 +38,104 @@ export interface RegionBounds {
 }
 
 /**
- * Extract the prism profile from a region's `previewTriangles`. Returns null when
- * the region has no triangulation (nothing to extrude). The ring is the cap
- * vertices AFTER the centroid (index 0), matching the fan layout.
+ * Extract the prism profile from a region's `previewTriangles`.
+ *
+ * The two producers emit DIFFERENT triangulation layouts:
+ *   - mock lane: a fan — positions[0..1] is a centroid hub, the rest is the
+ *     ordered boundary ring;
+ *   - real worker lane (SolverLane ear_clip): positions are the outer-loop
+ *     polygon vertices in loop order with NO hub, indices are ear-clip triples.
+ * So the ring must be derived from the triangulation TOPOLOGY, not a layout
+ * convention: boundary edges (used by exactly one triangle) chained into a loop
+ * and oriented CCW. Works for both layouts. Returns null when the region has no
+ * usable triangulation (nothing to extrude).
  */
 export function profileFromRegion(region: SketchRegion): PrismProfile | null {
   const tris = region.previewTriangles;
-  if (!tris || tris.positions.length < 8) return null; // need centroid + ≥3 ring pts
-  const ring: [number, number][] = [];
-  for (let i = 2; i + 1 < tris.positions.length; i += 2) {
-    ring.push([tris.positions[i], tris.positions[i + 1]]);
+  if (!tris || tris.positions.length < 6 || tris.indices.length < 3) return null;
+
+  // 1) Boundary edges: count undirected edge uses; keep the DIRECTED form of
+  //    the single-use ones (triangle winding gives the loop direction).
+  const uses = new Map<string, { a: number; b: number; count: number }>();
+  for (let i = 0; i + 2 < tris.indices.length; i += 3) {
+    const t = [tris.indices[i], tris.indices[i + 1], tris.indices[i + 2]];
+    for (let k = 0; k < 3; k++) {
+      const a = t[k];
+      const b = t[(k + 1) % 3];
+      const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+      const e = uses.get(key);
+      if (e) e.count++;
+      else uses.set(key, { a, b, count: 1 });
+    }
   }
-  if (ring.length < 3) return null;
+  const next = new Map<number, number>();
+  for (const e of uses.values()) {
+    if (e.count === 1) next.set(e.a, e.b);
+  }
+  if (next.size < 3) return null;
+
+  // 2) Chain the directed boundary edges into a loop. Multiple loops (holes)
+  //    resolve to the largest-|area| one — the outer boundary.
+  const visited = new Set<number>();
+  let best: number[] | null = null;
+  let bestArea = 0;
+  for (const start of next.keys()) {
+    if (visited.has(start)) continue;
+    const loop: number[] = [];
+    let cur: number | undefined = start;
+    while (cur !== undefined && !visited.has(cur)) {
+      visited.add(cur);
+      loop.push(cur);
+      cur = next.get(cur);
+    }
+    if (cur !== start || loop.length < 3) continue; // open chain / degenerate
+    let area = 0;
+    for (let i = 0; i < loop.length; i++) {
+      const [ax, ay] = pointAt(tris.positions, loop[i]);
+      const [bx, by] = pointAt(tris.positions, loop[(i + 1) % loop.length]);
+      area += ax * by - bx * ay;
+    }
+    area /= 2;
+    if (Math.abs(area) > Math.abs(bestArea)) {
+      bestArea = area;
+      best = loop;
+    }
+  }
+  if (!best) return null;
+  if (bestArea < 0) best.reverse(); // prismLocal assumes a CCW ring
+
+  const ring: [number, number][] = best.map((idx) => pointAt(tris.positions, idx));
   return { ring, cap: { positions: [...tris.positions], indices: [...tris.indices] } };
+}
+
+function pointAt(positions: number[], idx: number): [number, number] {
+  return [positions[idx * 2], positions[idx * 2 + 1]];
+}
+
+/** Polygon area centroid of the ring (layout-agnostic — no fan-hub assumption). */
+export function ringCentroid(ring: [number, number][]): [number, number] {
+  let a2 = 0; // 2×signed area
+  let cx = 0;
+  let cy = 0;
+  for (let i = 0; i < ring.length; i++) {
+    const [x0, y0] = ring[i];
+    const [x1, y1] = ring[(i + 1) % ring.length];
+    const cross = x0 * y1 - x1 * y0;
+    a2 += cross;
+    cx += (x0 + x1) * cross;
+    cy += (y0 + y1) * cross;
+  }
+  if (Math.abs(a2) < 1e-12) {
+    // Degenerate polygon — fall back to the vertex mean.
+    let mx = 0;
+    let my = 0;
+    for (const [x, y] of ring) {
+      mx += x;
+      my += y;
+    }
+    return [mx / ring.length, my / ring.length];
+  }
+  return [cx / (3 * a2), cy / (3 * a2)];
 }
 
 /** (u,v) bounds + centroid of a profile. */
@@ -63,9 +150,9 @@ export function profileBounds(profile: PrismProfile): RegionBounds {
     if (v < minV) minV = v;
     if (v > maxV) maxV = v;
   }
-  // Centroid = cap vertex 0 (the fan hub), which mockSketch places at the mean.
-  const centroidU = profile.cap.positions[0];
-  const centroidV = profile.cap.positions[1];
+  // Area centroid of the ring — cap.positions[0] is a centroid hub ONLY in the
+  // mock fan layout; on the real (ear-clip) lane it is an arbitrary corner.
+  const [centroidU, centroidV] = ringCentroid(profile.ring);
   return { minU, maxU, minV, maxV, centroidU, centroidV };
 }
 
@@ -126,12 +213,14 @@ export function prismLocal(profile: PrismProfile, depth: number): PrismLocal {
     ]);
   }
 
-  // 3) side verts: per ring vertex a bottom+top duplicate with a radial normal.
+  // 3) side verts: per ring vertex a bottom+top duplicate with a radial normal
+  //    (radiating from the ring's area centroid — layout-agnostic).
+  const [hubU, hubV] = ringCentroid(profile.ring);
   const sideBase = positions.length / 3;
   for (let j = 0; j < ringN; j++) {
     const [u, v] = profile.ring[j];
-    const nu = u - profile.cap.positions[0];
-    const nv = v - profile.cap.positions[1];
+    const nu = u - hubU;
+    const nv = v - hubV;
     const len = Math.hypot(nu, nv) || 1;
     const rx = nu / len;
     const ry = nv / len;

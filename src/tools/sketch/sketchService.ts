@@ -16,8 +16,31 @@ import { isConflictStatus } from "./dimensionTool";
 import type { ApplicableConstraint } from "./constraintApplicability";
 import { buildAppliedConstraint, buildAppliedDimension } from "./constraintAuthoring";
 
+/*
+ * ALL exported session mutators are serialized through one promise chain. Each
+ * reads `sketchStore.session` INSIDE its queued turn, so a second user action
+ * fired before the first `sketchUpsert` resolves rebases on the settled result
+ * instead of capturing the same stale arrays (which would make `marshalUpsert`'s
+ * shared id-map diff synthesize a removal of the first action's constraint and
+ * let either response clobber the store).
+ */
+let sketchMutationChain: Promise<unknown> = Promise.resolve();
+function enqueueSketchMutation<T>(fn: () => Promise<T>): Promise<T> {
+  const run = sketchMutationChain.then(fn, fn);
+  sketchMutationChain = run.catch(() => undefined);
+  return run;
+}
+
 /** Edit a dimensional constraint's value → re-solve → refresh geometry + DOF. */
-export async function editConstraintValue(
+export function editConstraintValue(
+  client: CadClient,
+  constraintId: string,
+  value: number,
+): Promise<void> {
+  return enqueueSketchMutation(() => editConstraintValueNow(client, constraintId, value));
+}
+
+async function editConstraintValueNow(
   client: CadClient,
   constraintId: string,
   value: number,
@@ -44,7 +67,14 @@ export async function editConstraintValue(
  * (`{ rejected: true }`). The solver's status is the only signal the mock lane
  * exposes — see `isConflictStatus` for the granularity seam.
  */
-export async function commitDimensionConstraint(
+export function commitDimensionConstraint(
+  client: CadClient,
+  constraint: SketchConstraint,
+): Promise<{ rejected: boolean }> {
+  return enqueueSketchMutation(() => commitDimensionConstraintNow(client, constraint));
+}
+
+async function commitDimensionConstraintNow(
   client: CadClient,
   constraint: SketchConstraint,
 ): Promise<{ rejected: boolean }> {
@@ -87,7 +117,11 @@ export async function commitDimensionConstraint(
  * Distance) is covered by the same predicate. No-op on empty `ids` / no session /
  * nothing matched; a solve failure surfaces a status hint and leaves state intact.
  */
-export async function deleteEntities(client: CadClient, ids: string[]): Promise<void> {
+export function deleteEntities(client: CadClient, ids: string[]): Promise<void> {
+  return enqueueSketchMutation(() => deleteEntitiesNow(client, ids));
+}
+
+async function deleteEntitiesNow(client: CadClient, ids: string[]): Promise<void> {
   if (ids.length === 0) return;
   const session = sketchStore.getState().session;
   if (!session) return;
@@ -105,7 +139,11 @@ export async function deleteEntities(client: CadClient, ids: string[]): Promise<
  * constraint array (entities untouched) and re-solves. No-op on empty `ids` / no
  * session / nothing matched; a solve failure surfaces a status hint.
  */
-export async function deleteConstraints(client: CadClient, ids: string[]): Promise<void> {
+export function deleteConstraints(client: CadClient, ids: string[]): Promise<void> {
+  return enqueueSketchMutation(() => deleteConstraintsNow(client, ids));
+}
+
+async function deleteConstraintsNow(client: CadClient, ids: string[]): Promise<void> {
   if (ids.length === 0) return;
   const session = sketchStore.getState().session;
   if (!session) return;
@@ -162,7 +200,14 @@ async function commitReducedSketch(
  *     Conflicting/OverConstrained, the constraint is dropped and the prior solve
  *     restored (generalizes `commitDimensionConstraint`'s pattern).
  */
-export async function applyConstraint(
+export function applyConstraint(
+  client: CadClient,
+  applicable: ApplicableConstraint,
+): Promise<{ rejected: boolean }> {
+  return enqueueSketchMutation(() => applyConstraintNow(client, applicable));
+}
+
+async function applyConstraintNow(
   client: CadClient,
   applicable: ApplicableConstraint,
 ): Promise<{ rejected: boolean }> {

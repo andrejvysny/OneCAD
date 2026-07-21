@@ -181,6 +181,46 @@ describe("SketchController select tool", () => {
     expect(selected()).toEqual([{ entityId: "e1", point: "Start" }]);
   });
 
+  it("accumulates incremental solve deltas — a point omitted from a later response stays moved", async () => {
+    // Real-worker shape: each response carries only points changed since the
+    // PREVIOUS response. Response 1 moves Start AND drags coupled End; response 2
+    // moves Start only — End must NOT snap back to its pre-drag pose.
+    const responses = [
+      { "e1.Start": [10, 0] as [number, number], "e1.End": [50, 0] as [number, number] },
+      { "e1.Start": [20, 0] as [number, number] },
+    ];
+    let seq = 0;
+    clientMock.solveDrag.mockImplementation(() =>
+      Promise.resolve({
+        gestureId: 1,
+        seq: ++seq,
+        status: "success",
+        dof: 2,
+        conflicting: [],
+        positions: responses[Math.min(seq - 1, responses.length - 1)],
+        solveMicros: 0,
+        superseded: false,
+      }),
+    );
+    mouse("pointerdown", 0, 0, 0, 1);
+    mouse("pointermove", 10, 0, 0, 1);
+    await flush();
+    mouse("pointermove", 20, 0, 0, 1);
+    await flush();
+
+    const calls = engineMock.updateSketchSession.mock.calls;
+    const preview = calls[calls.length - 1][1] as SketchEntity[];
+    expect(preview[0].p0).toEqual([20, 0]); // latest delta
+    expect(preview[0].p1).toEqual([50, 0]); // response-1 coupled move retained
+  });
+
+  it("idle pointer moves drive hover (set on hit, cleared on miss)", () => {
+    mouse("pointermove", 0, 0, 0, 0); // no button — over e1.Start
+    expect(sketchSelectionStore.getState().hover).toEqual({ entityId: "e1", point: "Start" });
+    mouse("pointermove", 200, 200, 0, 0); // empty space
+    expect(sketchSelectionStore.getState().hover).toBeNull();
+  });
+
   it("Esc mid-drag ends the gesture and restores pre-drag geometry", async () => {
     mouse("pointerdown", 0, 0, 0, 1);
     mouse("pointermove", 30, 0, 0, 1);

@@ -30,7 +30,7 @@ import { toolStore } from "@/stores/toolStore";
 import { viewportStore, type Projection } from "@/stores/viewportStore";
 import { documentStore, docSketchStatus, nextSketchName } from "@/stores/documentStore";
 import { selectionStore } from "@/stores/selectionStore";
-import { sketchSelectionStore, type SketchSel } from "@/stores/sketchSelectionStore";
+import { sketchSelectionStore, sameSketchSel, type SketchSel } from "@/stores/sketchSelectionStore";
 import { settingsStore } from "@/stores/settingsStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { toolChipStore } from "@/stores/toolChipStore";
@@ -105,6 +105,11 @@ export class SketchController {
   private dragPlane: SketchPlane | null = null;
   private dragStatus: SketchSolveStatus = "UnderConstrained";
   private dragLastSeq = 0; // highest applied solveDrag seq (stale-drop)
+  // Worker SolveDrag positions are INCREMENTAL — each response carries only the
+  // points that changed since the PREVIOUS response (SolverLane g.last_reported).
+  // Accumulate them across the gesture; rendering each response alone onto
+  // dragBase would snap earlier-moved coupled points back to their pre-drag pose.
+  private dragAccum: Record<string, [number, number]> = {};
   private pendingTarget: [number, number] | null = null; // coalesced latest drag target
   private solveScheduled = false;
   // A pointerup / Esc that arrived while beginGesture was still in flight — its end
@@ -695,8 +700,19 @@ export class SketchController {
   };
 
   private onSelectPointerMove = (e: PointerEvent): void => {
+    // Idle move (no primary button): live hover feedback — the engine hover
+    // recolor is driven from sketchSelectionStore via the ViewportRoot bridge.
+    if ((e.buttons & 1) === 0) {
+      const hit = this.hitAt(e.clientX, e.clientY);
+      const store = sketchSelectionStore.getState();
+      const same =
+        (hit === null && store.hover === null) ||
+        (hit !== null && store.hover !== null && sameSketchSel(hit, store.hover));
+      if (!same) store.setHover(hit);
+      return;
+    }
     // Only care about a primary-button drag (LMB held) initiated in the viewport.
-    if (this.downButton !== 0 || (e.buttons & 1) === 0) return;
+    if (this.downButton !== 0) return;
     const far =
       Math.abs(e.clientX - this.downX) > DRAG_PX || Math.abs(e.clientY - this.downY) > DRAG_PX;
     if (far) this.moved = true;
@@ -749,6 +765,7 @@ export class SketchController {
     this.dragPlane = session.plane;
     this.dragStatus = session.status;
     this.dragLastSeq = 0;
+    this.dragAccum = {};
     try {
       await this.deps.client.beginGesture(session.sketchId, armed.pointRef);
     } catch (err) {
@@ -801,7 +818,8 @@ export class SketchController {
     if (!this.dragging || !shouldApplyDrag(this.dragLastSeq, res)) return;
     this.dragLastSeq = res!.seq;
     if (this.dragPlane) {
-      const moved = applySolvedPositions(this.dragBase, res!.positions);
+      this.dragAccum = { ...this.dragAccum, ...res!.positions };
+      const moved = applySolvedPositions(this.dragBase, this.dragAccum);
       this.deps.engine.updateSketchSession(this.dragPlane, moved, this.dragStatus);
     }
   }
