@@ -347,13 +347,18 @@ export class ViewportEngine {
     if (this.grid) {
       this.grid.update(this.controls.getTarget(), this.controls.getDistance());
     }
-    if (this.triad) {
-      this.triad.update(this.controls.getDistance());
-    }
 
     const { width, height } = this.viewportSize();
+    const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
+    if (this.triad) {
+      // Constant on-screen size: the triad reads the camera itself (its own
+      // depth from the origin, which orbit distance does not give once panned).
+      this.triad.update(camera, width, height, dpr);
+    }
+    if (this.planePicker?.visible) {
+      this.planePicker.update(camera, height);
+    }
     if (this.sketch) {
-      const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
       this.sketch.update(width * dpr, height * dpr, this.controls.getTarget(), this.controls.getDistance());
     }
     // Keep the extrude handle a constant screen size across zoom/orbit.
@@ -789,6 +794,9 @@ export class ViewportEngine {
       }
       if (this.isViewAxisAligned()) this.controls?.homeView(true);
       this.planePicker.setVisible(true);
+      // Size the quads now, not on the next frame: a hover/click can raycast
+      // them before the render loop runs, and the quads ARE the hit geometry.
+      this.planePicker.update(this.rig.getCamera(), this.viewportSize().height);
     } else {
       this.planePicker?.setHover(null);
       this.planePicker?.setVisible(false);

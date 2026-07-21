@@ -58,6 +58,37 @@ describe("PlanePicker", () => {
     expect(hitX?.kind).toBe("XZ");
   });
 
+  it("holds a constant on-screen quad size across zoom, and the hit target with it", () => {
+    const { picker, root } = makePicker();
+    picker.setVisible(true);
+    const pickerGroup = root.children[0];
+
+    const camAt = (d: number): THREE.PerspectiveCamera => {
+      const cam = new THREE.PerspectiveCamera(76, 4 / 3, 0.1, 10_000);
+      cam.position.set(0, 0, d);
+      cam.lookAt(0, 0, 0);
+      cam.updateMatrixWorld(true);
+      return cam;
+    };
+
+    picker.update(camAt(100), 800);
+    const near = pickerGroup.scale.x;
+    picker.update(camAt(400), 800);
+    const far = pickerGroup.scale.x;
+    // Linear in camera depth — 4x the distance, 4x the world size, same pixels.
+    expect(far / near).toBeCloseTo(4, 6);
+
+    // The quads ARE the raycast geometry, so the scaled hit target must follow:
+    // a ray just outside the near-zoom quad edge misses, and hits once scaled up.
+    const halfWorldNear = 120 * near * 0.5;
+    const justOutside = halfWorldNear * 1.5;
+    const ray = new THREE.Raycaster(new THREE.Vector3(0, justOutside, 50), new THREE.Vector3(0, 0, -1));
+    expect(picker.hitTest(ray)).not.toBeNull(); // still scaled up (far)
+
+    picker.update(camAt(100), 800);
+    expect(picker.hitTest(ray)).toBeNull(); // shrunk back — now outside the quad
+  });
+
   it("hitTest returns null while not visible", () => {
     const { picker } = makePicker();
     const fromZ = new THREE.Raycaster(new THREE.Vector3(0, 0, 50), new THREE.Vector3(0, 0, -1));

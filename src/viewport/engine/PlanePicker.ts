@@ -16,6 +16,7 @@ import type { SketchPlaneKind } from "@/ipc/types";
 import { planeFor } from "@/ipc/mockSketch";
 import { planeBasisMatrix } from "./sketchBasis";
 import { palette } from "./palette";
+import { worldPerPixel } from "./screenScale";
 import type { HtmlOverlayDriver } from "./HtmlOverlayDriver";
 
 export type PickablePlane = Exclude<SketchPlaneKind, "custom">;
@@ -33,8 +34,15 @@ export interface PlaneHit {
 }
 
 const KINDS: PickablePlane[] = ["XY", "XZ", "YZ"];
+/** Quad edge in world units, authored once; `update()` rescales it per frame. */
 const SIZE = 120;
 const HALF = SIZE / 2;
+/**
+ * Quad edge in CSS px, held constant across zoom. Matches what SIZE used to
+ * cover at the default framing, so the gizmo looks unchanged when you open it
+ * and simply stops swelling as you zoom in.
+ */
+const PLANE_PX = 240;
 const OPACITY_BASE = 0.16;
 const OPACITY_HOVER = 0.35;
 const OUTLINE_OPACITY = 0.5;
@@ -145,6 +153,20 @@ export class PlanePicker {
     this.group.visible = visible;
     if (!visible) this.setHover(null);
     this.deps.invalidate();
+  }
+
+  /**
+   * Per-frame: rescale the quads so their edge spans PLANE_PX on screen, the
+   * same constant-size rule the origin triad uses. This also keeps the CLICK
+   * TARGET a fixed size — the quads are the raycast geometry, so a world-sized
+   * gizmo would shrink out of reach when zoomed out and swallow the viewport
+   * when zoomed in. `height` is the viewport height in CSS px.
+   */
+  update(camera: THREE.Camera, height: number): void {
+    // The picker sits at the world origin (the origin planes' shared point).
+    const scale = (worldPerPixel(camera, this.group.position, height) * PLANE_PX) / SIZE;
+    this.group.scale.setScalar(scale);
+    this.group.updateMatrixWorld(true);
   }
 
   get visible(): boolean {
