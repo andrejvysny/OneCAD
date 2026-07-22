@@ -294,6 +294,46 @@ export async function getSketchSnapshot(
 }
 
 /**
+ * The document projection's feature-timeline labels (`__stores.document`). The
+ * inspector's on-screen HISTORY is a capped, selection-dependent slice (a BODY
+ * selection shows only `features.slice(0,3)`), so a committed op's timeline row is
+ * asserted against the projection, not the DOM.
+ */
+export async function getFeatureLabels(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const w = window as unknown as {
+      __stores?: { document: { getState(): { features: Array<{ label: string }> } } };
+    };
+    return (w.__stores?.document.getState().features ?? []).map((f) => f.label);
+  });
+}
+
+/**
+ * Read the live sketch session's first Circle entity (plane-local center +
+ * radius). Same live-session requirement as `getSketchSnapshot` — call BEFORE
+ * finishing the sketch. Used to toggle a circle region in the multi-select flow
+ * (its centroid isn't recoverable from a screen offset once the camera restores).
+ */
+export async function getSketchCircle(page: Page): Promise<{ center: [number, number]; radius: number }> {
+  return page.evaluate(() => {
+    const w = window as unknown as {
+      __stores?: {
+        sketch: {
+          getState(): {
+            session: { entities: Array<{ type: string; center?: [number, number]; radius?: number }> } | null;
+          };
+        };
+      };
+    };
+    const session = w.__stores?.sketch.getState().session;
+    if (!session) throw new Error("getSketchCircle: no live sketch session (call before finishing the sketch)");
+    const circle = session.entities.find((e) => e.type === "Circle" && e.center && typeof e.radius === "number");
+    if (!circle?.center || typeof circle.radius !== "number") throw new Error("getSketchCircle: no circle in the session");
+    return { center: circle.center, radius: circle.radius };
+  });
+}
+
+/**
  * Total entity count in the live sketch session, ANY type (Line/Rect-lines/
  * Circle/Arc/Point) — unlike `getSketchSnapshot`, which only surfaces Lines.
  * For degenerate-input specs that just need "did anything commit", regardless

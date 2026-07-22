@@ -116,6 +116,12 @@ export class RevolvePreview {
     this.deps.invalidate();
   }
 
+  /** Recolor the lathe shell: destructive (Cut boolean) vs the normal accent (Wave 2). */
+  setTint(cut: boolean): void {
+    this.meshMat.color.copy(cut ? palette.destructive() : palette.hoverAccent());
+    this.deps.invalidate();
+  }
+
   clearLathe(): void {
     if (this.mesh) {
       this.group.remove(this.mesh);

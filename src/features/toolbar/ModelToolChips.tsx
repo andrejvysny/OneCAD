@@ -22,12 +22,19 @@ import { DimensionInput } from "@/features/sketch/DimensionInput";
 import { useToolChipStore, toolChipStore } from "@/stores/toolChipStore";
 import { useViewportEngine } from "@/viewport/engineBridge";
 import type { BooleanOperation } from "@/ipc/types";
-import type { PatternAxis, MirrorPlane } from "@/tools/modelTools/modelToolMachine";
+import type { PatternAxis, MirrorPlane, BooleanMode } from "@/tools/modelTools/modelToolMachine";
 
 const CHIP_ID = "__model_tool_chip";
 const BOOLEAN_OPS: BooleanOperation[] = ["Union", "Cut", "Intersect"];
 const PATTERN_AXES: PatternAxis[] = ["X", "Y", "Z"];
 const MIRROR_PLANES: MirrorPlane[] = ["XY", "XZ", "YZ"];
+
+/** The armed-cluster boolean segments: New Body / Add / Cut (Wave 2). */
+const BOOLEAN_MODES: { mode: BooleanMode; label: string; testid: string }[] = [
+  { mode: "NewBody", label: "New Body", testid: "chip-bool-newbody" },
+  { mode: "Add", label: "Add", testid: "chip-bool-add" },
+  { mode: "Cut", label: "Cut", testid: "chip-bool-cut" },
+];
 
 /** A segmented toggle row (axis / plane pickers), styled like the boolean op row. */
 function SegmentToggle<T extends string>({
@@ -150,6 +157,48 @@ function SymmetricToggle({ pressed, onToggle }: { pressed: boolean; onToggle: ()
   );
 }
 
+/**
+ * The New Body / Add / Cut segment group on the armed extrude/revolve cluster
+ * (Wave 2). Disabled (all three) when no existing body can be a boolean target;
+ * the disabled group carries the "Needs an existing body" title.
+ */
+function BooleanModeSegments({
+  active,
+  canBoolean,
+  onPick,
+}: {
+  active: BooleanMode;
+  canBoolean: boolean;
+  onPick: (mode: BooleanMode) => void;
+}) {
+  return (
+    <div
+      className="flex overflow-hidden rounded-sm"
+      role="group"
+      aria-label="Boolean mode"
+      title={canBoolean ? undefined : "Needs an existing body"}
+    >
+      {BOOLEAN_MODES.map((b) => (
+        <button
+          key={b.mode}
+          type="button"
+          data-testid={b.testid}
+          aria-pressed={b.mode === active}
+          disabled={!canBoolean && b.mode !== "NewBody"}
+          onClick={() => onPick(b.mode)}
+          className={cn(
+            "px-2 py-1 text-[11.5px] font-medium",
+            b.mode === active ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
+            !canBoolean && b.mode !== "NewBody" && "cursor-not-allowed opacity-40 hover:bg-chip",
+          )}
+        >
+          {b.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function ModelToolChips() {
   const engine = useViewportEngine();
   const kind = useToolChipStore((s) => s.kind);
@@ -160,6 +209,9 @@ export function ModelToolChips() {
   const op = useToolChipStore((s) => s.op);
   const symmetric = useToolChipStore((s) => s.symmetric);
   const showSymmetric = useToolChipStore((s) => s.showSymmetric);
+  const booleanMode = useToolChipStore((s) => s.booleanMode);
+  const canBoolean = useToolChipStore((s) => s.canBoolean);
+  const showBooleanSegments = useToolChipStore((s) => s.showBooleanSegments);
   const suffix = useToolChipStore((s) => s.suffix);
   const worldPos = useToolChipStore((s) => s.worldPos);
   // A plain DOM host, created once; the engine owns its DOM position.
@@ -207,6 +259,13 @@ export function ModelToolChips() {
       onCancel={() => toolChipStore.getState().onCancel?.()}
     />
   );
+  const booleanSegments = showBooleanSegments ? (
+    <BooleanModeSegments
+      active={booleanMode}
+      canBoolean={canBoolean}
+      onPick={(m) => toolChipStore.getState().onBooleanMode?.(m)}
+    />
+  ) : null;
 
   let content: React.ReactNode;
   if (kind === "extrudeDepth") {
@@ -219,6 +278,7 @@ export function ModelToolChips() {
             onToggle={() => toolChipStore.getState().onSymmetric?.(!symmetric)}
           />
         )}
+        {booleanSegments}
         {confirmButtons}
       </>,
     );
@@ -233,7 +293,24 @@ export function ModelToolChips() {
         >
           Axis
         </button>
+        {booleanSegments}
         {confirmButtons}
+      </>,
+    );
+  } else if (kind === "regionSelect") {
+    // Multi-region select chip: `[ N regions ✓ ✕ ]` at the sketch centroid.
+    content = panel(
+      <>
+        <span
+          data-testid="chip-region-count"
+          className="px-2 py-1 text-[11.5px] font-medium text-ink-2"
+        >
+          {count} region{count === 1 ? "" : "s"}
+        </span>
+        <ConfirmButtons
+          onConfirm={() => toolChipStore.getState().onConfirm?.()}
+          onCancel={() => toolChipStore.getState().onCancel?.()}
+        />
       </>,
     );
   } else if (kind === "filletRadius" || kind === "shellThickness") {

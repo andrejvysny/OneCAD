@@ -71,6 +71,9 @@ test("revolve: axis pick → armed 360° → drag angle → release stays armed 
   await expect(page.getByText(/Drag to set angle/)).toBeVisible();
   expect((await extrudeDebug(page))?.revolvePhase).toBe("armed");
   await expect(page.getByLabel("Dimension value")).toHaveValue("360");
+  // Wave 2: an existing body (the mock's seeded Body 1) offers the boolean segments
+  // on the armed revolve cluster.
+  await expect(page.getByTestId("chip-bool-cut")).toBeVisible();
 
   // Drag the angle, then release — the tool must STAY armed (no implicit commit).
   const box = await page.locator(CANVAS).boundingBox();

@@ -7,7 +7,7 @@
  * bodies. The writer lays present sections in ascending `type` order (== ascending
  * offset), each 4-byte aligned — matching the worked example in §5 verbatim.
  */
-import { FLAG, SEC } from "@/viewport/mesh/parseMeshPayload";
+import { FLAG, SEC, parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
 import { prismLocal, type PrismProfile } from "@/tools/preview/prismPreview";
 import { latheLocal, type LatheAxis } from "@/tools/preview/lathePreview";
 import type { SketchPlane } from "./types";
@@ -427,6 +427,63 @@ export function makeExtrudeBodyMesh(
   }));
 
   return encodeMesh1({ positions: worldPositions, normals: worldNormals, faces, edges, lod });
+}
+
+// ── Naive mesh concat (mock boolean Add) ──────────────────────────────────────
+
+/**
+ * Merge two MESH1 blobs into one (Wave 2 mock boolean Add). This is a NAIVE
+ * visual concat — the two solids' vertices/faces/edges are placed side by side
+ * with no CSG (no shared-boundary removal). It exists only so the mock's "Add"
+ * body visibly grows; the e2e specs assert history rows / body-diff, never CSG.
+ * Face/edge ids are namespaced (`a:`/`b:`) so they stay unique in the merged mesh.
+ */
+export function concatMesh1(a: ArrayBuffer, b: ArrayBuffer): ArrayBuffer {
+  const va = parseMeshPayload(a);
+  const vb = parseMeshPayload(b);
+
+  const positions = [...va.positions, ...vb.positions];
+  const bothHaveNormals = va.normals !== null && vb.normals !== null;
+  const normals = bothHaveNormals ? [...va.normals!, ...vb.normals!] : undefined;
+
+  const faces: FaceSource[] = [];
+  const pushFaces = (
+    v: ReturnType<typeof parseMeshPayload>,
+    base: number,
+    prefix: string,
+  ): void => {
+    for (let f = 0; f < v.faceCount; f++) {
+      const firstTri = v.faceRanges[f * 2];
+      const triCount = v.faceRanges[f * 2 + 1];
+      const triangles: [number, number, number][] = [];
+      for (let t = 0; t < triCount; t++) {
+        const i = (firstTri + t) * 3;
+        triangles.push([v.indices[i] + base, v.indices[i + 1] + base, v.indices[i + 2] + base]);
+      }
+      faces.push({ triangles, id: `${prefix}f:${f}` });
+    }
+  };
+  pushFaces(va, 0, "a:");
+  pushFaces(vb, va.vertexCount, "b:");
+
+  const edges: EdgeSource[] = [];
+  const pushEdges = (v: ReturnType<typeof parseMeshPayload>, prefix: string): void => {
+    if (!v.edgeRanges || !v.edgePositions) return;
+    for (let e = 0; e < v.edgeCount; e++) {
+      const firstPoint = v.edgeRanges[e * 2];
+      const pointCount = v.edgeRanges[e * 2 + 1];
+      const points: [number, number, number][] = [];
+      for (let p = 0; p < pointCount; p++) {
+        const pi = (firstPoint + p) * 3;
+        points.push([v.edgePositions[pi], v.edgePositions[pi + 1], v.edgePositions[pi + 2]]);
+      }
+      edges.push({ points, id: `${prefix}e:${e}` });
+    }
+  };
+  pushEdges(va, "a:");
+  pushEdges(vb, "b:");
+
+  return encodeMesh1({ positions, normals, faces, edges });
 }
 
 // ── Revolve body (profile ring swept around an in-plane axis) — the mock L2 body ─

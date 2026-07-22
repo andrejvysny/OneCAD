@@ -20,7 +20,8 @@ import { palette } from "./palette";
 import { RENDER_ORDER } from "./renderOrder";
 
 const FILL_OPACITY = 0.2;
-const FILL_OPACITY_ACTIVE = 0.42;
+const FILL_OPACITY_HOVER = 0.32;
+const FILL_OPACITY_SELECTED = 0.42;
 
 export interface RegionPickDeps {
   root: THREE.Object3D; // interactionRoot
@@ -54,7 +55,7 @@ export class RegionPickLayer {
   private readonly group = new THREE.Group();
   private readonly entries = new Map<string, RegionEntry>();
   private hoverId: string | null = null;
-  private selectedId: string | null = null;
+  private readonly selectedIds = new Set<string>();
   private readonly _basis = new THREE.Matrix4();
 
   constructor(private readonly deps: RegionPickDeps) {
@@ -93,7 +94,7 @@ export class RegionPickLayer {
       this.entries.set(r.regionId, { mesh, mat });
     }
     this.hoverId = null;
-    this.selectedId = null;
+    this.selectedIds.clear();
     this.applyTints();
     this.group.updateMatrixWorld(true);
     this.deps.invalidate();
@@ -107,10 +108,15 @@ export class RegionPickLayer {
     this.deps.invalidate();
   }
 
-  /** Tint the selected region (or clear when null). */
-  setSelected(id: string | null): void {
-    if (this.selectedId === id) return;
-    this.selectedId = id;
+  /**
+   * Tint the selected regions (multi-select — Wave 2). Replaces the whole set;
+   * an empty array clears all selection tints.
+   */
+  setSelected(ids: string[]): void {
+    const next = new Set(ids);
+    if (next.size === this.selectedIds.size && ids.every((id) => this.selectedIds.has(id))) return;
+    this.selectedIds.clear();
+    for (const id of ids) this.selectedIds.add(id);
     this.applyTints();
     this.deps.invalidate();
   }
@@ -131,12 +137,13 @@ export class RegionPickLayer {
 
   private applyTints(): void {
     for (const [id, e] of this.entries) {
-      const selected = id === this.selectedId;
+      const selected = this.selectedIds.has(id);
       const hovered = id === this.hoverId;
+      // Selected wins over hover (a selected region stays highlighted while hovered).
       e.mat.color.copy(
         selected ? palette.selectedEdge() : hovered ? palette.hoverAccent() : palette.bodyNeutral(),
       );
-      e.mat.opacity = selected || hovered ? FILL_OPACITY_ACTIVE : FILL_OPACITY;
+      e.mat.opacity = selected ? FILL_OPACITY_SELECTED : hovered ? FILL_OPACITY_HOVER : FILL_OPACITY;
     }
   }
 

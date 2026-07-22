@@ -71,10 +71,14 @@ function makeEngineMock() {
     // directly in pointer space.
     screenToPlaneOn: vi.fn((_plane: SketchPlane, x: number, y: number) => ({ x, y })),
     setOrbitSuppressed: vi.fn(),
+    setRegionSelected: vi.fn(),
     planePixelWorld: vi.fn(() => 1),
+    probePick: vi.fn(() => null),
     // Extrude preview.
     showExtrudePreview: vi.fn(),
+    showExtrudePreviews: vi.fn(),
     setExtrudeDepth: vi.fn(),
+    setExtrudePreviewTint: vi.fn(),
     setExtrudeHandleHover: vi.fn(),
     hitExtrudeHandle: vi.fn(() => false),
     screenRay: vi.fn(() => null),
@@ -154,7 +158,7 @@ describe("ModelToolController region pick", () => {
     pointer("pointerup", x, y, 0, 0);
   }
 
-  it("(a) two regions → region pick; clicking region 2 arms extrude with regions[1].regionId in the draft", async () => {
+  it("(a) two regions → MULTI-select; toggling region 2 then Enter arms extrude with regions[1].regionId", async () => {
     build(() => Promise.resolve({ regions: [R0, R1] }));
     toolStore.getState().setTool("extrude");
     await flush();
@@ -169,9 +173,14 @@ describe("ModelToolController region pick", () => {
     pointer("pointermove", 130, 110, 0, 0);
     expect(engineMock.setRegionHover).toHaveBeenLastCalledWith("r1");
 
-    // Click region 2 → arms extrude; the draft (the region-binding payload sent on
-    // beginPreview / carried to commit) uses regions[1].regionId, NOT regions[0].
+    // Wave 2: a click TOGGLES membership (does NOT arm) — the selection retints r1.
     click(130, 110);
+    await flush();
+    expect(clientMock.beginPreview).not.toHaveBeenCalled();
+    expect(engineMock.setRegionSelected).toHaveBeenLastCalledWith(["r1"]);
+
+    // Enter confirms the selection → arms extrude with regions[1].regionId in the draft.
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
     await flush();
 
     expect(engineMock.hideRegionPick).toHaveBeenCalled();
@@ -183,14 +192,51 @@ describe("ModelToolController region pick", () => {
     expect(controller.extrudeActive).toBe(true);
   });
 
-  it("(a2) revolve two regions → pick region 2 → axis pick → 360° commit sends regions[1].regionId", async () => {
+  it("(a-multi) toggling BOTH regions then Enter arms N=2 extrude sessions (one per region)", async () => {
+    build(() => Promise.resolve({ regions: [R0, R1] }));
+    toolStore.getState().setTool("extrude");
+    await flush();
+
+    click(10, 10); // r0
+    await flush();
+    click(130, 110); // r1
+    await flush();
+    expect(engineMock.setRegionSelected).toHaveBeenLastCalledWith(["r0", "r1"]);
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await flush();
+
+    // One preview session per region — regionIds preserved in click order.
+    expect(clientMock.beginPreview).toHaveBeenCalledTimes(2);
+    const drafts = clientMock.beginPreview.mock.calls.map((c) => c[0].regionId);
+    expect(drafts).toEqual(["r0", "r1"]);
+    expect(controller.extrudeActive).toBe(true);
+  });
+
+  it("(a-dblclick) a double-click on a region = select-only-it + confirm (accelerator)", async () => {
+    build(() => Promise.resolve({ regions: [R0, R1] }));
+    toolStore.getState().setTool("extrude");
+    await flush();
+
+    // First toggles r0 IN; the immediate second click (same region) confirms r0 alone.
+    click(10, 10);
+    click(10, 10);
+    await flush();
+    expect(clientMock.beginPreview).toHaveBeenCalledTimes(1);
+    expect(clientMock.beginPreview.mock.calls[0][0].regionId).toBe("r0");
+    expect(controller.extrudeActive).toBe(true);
+  });
+
+  it("(a2) revolve two regions → toggle region 2 + Enter → axis pick → 360° commit sends regions[1].regionId", async () => {
     build(() => Promise.resolve({ regions: [R0, R1] }));
     toolStore.getState().setTool("revolve");
     await flush();
     expect(engineMock.showRegionPick).toHaveBeenCalledTimes(1);
 
-    // Pick region 2 → enters axis-pick (region pick precedes the axis phase).
+    // Toggle region 2 + Enter → enters axis-pick (region pick precedes the axis phase).
     click(130, 110);
+    await flush();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
     await flush();
     expect(engineMock.showRevolveAxisCandidates).toHaveBeenCalledTimes(1);
 

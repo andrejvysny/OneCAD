@@ -65,6 +65,69 @@ describe("mockClient operations", () => {
     expect(res.features).toHaveLength(5);
   });
 
+  it("Extrude (Add) grows the target body's mesh, creates no new body, labels the feature", async () => {
+    const regionId = await seedRegion();
+    const target = (await mockClient.applyOperation(extrudeOp("skA", regionId, 20))).changedBodies[0].bodyId;
+    const before = (await mockClient.getBodyMesh(target, "coarse")).byteLength;
+
+    const res = await mockClient.applyOperation({
+      opType: "Extrude",
+      sketchId: "skA",
+      regionId,
+      params: { distance: 15, booleanMode: "Add", targetBodyId: target },
+    });
+    // Feature-mode Add: changed = [target], NO new body (the mock has no CSG).
+    expect(res.changedBodies.map((b) => b.bodyId)).toEqual([target]);
+    expect(res.features.some((f) => f.kind === "extrude" && f.label === "Extrude (Add)")).toBe(true);
+    // Naive concat grows the target mesh.
+    const after = (await mockClient.getBodyMesh(target, "coarse")).byteLength;
+    expect(after).toBeGreaterThan(before);
+  });
+
+  it("Extrude (Cut) targets the body, geometry unchanged, feature labeled", async () => {
+    const regionId = await seedRegion();
+    const target = (await mockClient.applyOperation(extrudeOp("skA", regionId, 20))).changedBodies[0].bodyId;
+    const before = (await mockClient.getBodyMesh(target, "coarse")).byteLength;
+
+    const res = await mockClient.applyOperation({
+      opType: "Extrude",
+      sketchId: "skA",
+      regionId,
+      params: { distance: 15, booleanMode: "Cut", targetBodyId: target },
+    });
+    expect(res.changedBodies.map((b) => b.bodyId)).toEqual([target]);
+    expect(res.features.some((f) => f.kind === "extrude" && f.label === "Extrude (Cut)")).toBe(true);
+    // Cut is a geometry no-op in the mock (documented) — the target mesh is unchanged.
+    const after = (await mockClient.getBodyMesh(target, "coarse")).byteLength;
+    expect(after).toBe(before);
+  });
+
+  it("Revolve (Cut) targets the body, no new body, feature labeled", async () => {
+    const regionId = await seedRegion();
+    const target = (await mockClient.applyOperation(extrudeOp("skA", regionId, 20))).changedBodies[0].bodyId;
+    const res = await mockClient.applyOperation({
+      opType: "Revolve",
+      sketchId: "skA",
+      regionId,
+      params: { angleDeg: 180, booleanMode: "Cut", targetBodyId: target },
+    });
+    expect(res.changedBodies.map((b) => b.bodyId)).toEqual([target]);
+    expect(res.features.some((f) => f.kind === "revolve" && f.label === "Revolve (Cut)")).toBe(true);
+  });
+
+  it("Add against a missing/invisible target falls back to NewBody (no crash)", async () => {
+    const regionId = await seedRegion();
+    const res = await mockClient.applyOperation({
+      opType: "Extrude",
+      sketchId: "skA",
+      regionId,
+      params: { distance: 10, booleanMode: "Add", targetBodyId: "nope" },
+    });
+    // No such body → the mock treats it as a fresh NewBody extrude.
+    expect(res.changedBodies).toHaveLength(1);
+    expect(res.features.some((f) => f.kind === "extrude" && f.label === "Extrude")).toBe(true);
+  });
+
   it("Boolean removes the tool body and keeps the target", async () => {
     const regionId = await seedRegion();
     const b1 = (await mockClient.applyOperation(extrudeOp("skA", regionId, 10))).changedBodies[0].bodyId;

@@ -14,12 +14,14 @@ import { createStore, useStore } from "zustand";
 import type { BooleanOperation } from "@/ipc/types";
 import type { PatternAxis, MirrorPlane, BooleanMode } from "@/tools/modelTools/modelToolMachine";
 
-/** Handlers the armed extrude cluster wires (MODEL-HARDEN Wave 1). */
+/** Handlers the armed extrude cluster wires (MODEL-HARDEN Wave 1 + 2). */
 export interface ExtrudeChipHandlers {
   onValue: (v: number) => void;
   onSymmetric: (symmetric: boolean) => void;
   onConfirm: () => void;
   onCancel: () => void;
+  /** Boolean segment picked (New Body / Add / Cut — Wave 2). */
+  onBooleanMode?: (mode: BooleanMode) => void;
 }
 
 /** Extra armed-cluster options (symmetric seed; hide the ⇔ toggle in re-edit). */
@@ -27,12 +29,35 @@ export interface ExtrudeChipOpts {
   symmetric?: boolean;
   /** Re-edit shows value + ✓/✕ only — no symmetric toggle (default true). */
   showSymmetric?: boolean;
+  /** Seed the boolean mode segment (Wave 2; default NewBody). */
+  booleanMode?: BooleanMode;
+  /** Whether ≥1 existing body offers a boolean target (Wave 2; default false). */
+  canBoolean?: boolean;
+  /** Whether to render the New Body / Add / Cut segment group (fresh arm only). */
+  showBooleanSegments?: boolean;
+  /** How many regions the armed op covers (Wave 2; default 1). */
+  regionCount?: number;
 }
 
-/** Handlers the armed revolve cluster wires (MODEL-HARDEN Wave 1). */
+/** Handlers the armed revolve cluster wires (MODEL-HARDEN Wave 1 + 2). */
 export interface RevolveChipHandlers {
   onValue: (v: number) => void;
   onResetAxis: () => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+  /** Boolean segment picked (New Body / Add / Cut — Wave 2). */
+  onBooleanMode?: (mode: BooleanMode) => void;
+}
+
+/** Extra armed-revolve-cluster options (boolean segments — Wave 2). */
+export interface RevolveChipOpts {
+  booleanMode?: BooleanMode;
+  canBoolean?: boolean;
+  showBooleanSegments?: boolean;
+}
+
+/** Handlers the region-select chip wires (Wave 2 multi-region). */
+export interface RegionSelectChipHandlers {
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -47,6 +72,7 @@ export type ChipKind =
   | "linearPattern"
   | "circularPattern"
   | "mirror"
+  | "regionSelect"
   | "dimension";
 
 export interface ToolChipState {
@@ -65,11 +91,13 @@ export interface ToolChipState {
   symmetric: boolean;
   /** Whether the armed extrude cluster renders the ⇔ toggle (hidden in re-edit). */
   showSymmetric: boolean;
-  /** Feature boolean mode — typed now, consumed by the Wave 2 boolean segments. */
+  /** Feature boolean mode — drives the Wave 2 New Body / Add / Cut segment group. */
   booleanMode: BooleanMode;
   /** Whether a boolean picker is offered (≥1 existing body) — Wave 2. */
   canBoolean: boolean;
-  /** How many regions the armed op covers (1 in Wave 1's single-region path). */
+  /** Whether the armed cluster renders the boolean segment group (fresh arm only). */
+  showBooleanSegments: boolean;
+  /** How many regions the armed op covers (1 in the single-region path). */
   regionCount: number;
   /** Unit suffix for the numeric chip (mm / ° — sketch dimension chip). */
   suffix: string;
@@ -83,8 +111,10 @@ export interface ToolChipState {
   onConfirm: (() => void) | null;
   /** Esc / cancel from the dimension chip, or ✕ from the armed cluster. */
   onCancel: (() => void) | null;
-  /** Boolean op selected. */
+  /** Boolean op selected (standalone Boolean tool). */
   onOp: ((op: BooleanOperation) => void) | null;
+  /** Boolean mode segment picked (armed extrude/revolve cluster — Wave 2). */
+  onBooleanMode: ((mode: BooleanMode) => void) | null;
   /** Apply pressed (boolean / pattern / mirror chip). */
   onApply: (() => void) | null;
   /** Axis-reset pressed (revolve chip). */
@@ -103,7 +133,18 @@ export interface ToolChipState {
     opts?: ExtrudeChipOpts,
   ): void;
   showFillet(value: number, worldPos: [number, number, number], onValue: (v: number) => void): void;
-  showRevolve(value: number, worldPos: [number, number, number], handlers: RevolveChipHandlers): void;
+  showRevolve(
+    value: number,
+    worldPos: [number, number, number],
+    handlers: RevolveChipHandlers,
+    opts?: RevolveChipOpts,
+  ): void;
+  /** Show the multi-region select chip `[ N regions ✓ ✕ ]` at the sketch centroid. */
+  showRegionSelect(
+    count: number,
+    worldPos: [number, number, number],
+    handlers: RegionSelectChipHandlers,
+  ): void;
   showBoolean(
     op: BooleanOperation,
     worldPos: [number, number, number],
@@ -160,6 +201,8 @@ export interface ToolChipState {
   setOp(op: BooleanOperation): void;
   /** Update just the armed extrude symmetric toggle (Alt-drag / ⇔ toggle). */
   setSymmetric(symmetric: boolean): void;
+  /** Update just the armed cluster boolean mode (New Body / Add / Cut — Wave 2). */
+  setBooleanMode(mode: BooleanMode): void;
   clear(): void;
 }
 
@@ -174,6 +217,7 @@ const CLEARED = {
   showSymmetric: true,
   booleanMode: "NewBody" as BooleanMode,
   canBoolean: false,
+  showBooleanSegments: false,
   regionCount: 1,
   suffix: "",
   worldPos: null,
@@ -182,6 +226,7 @@ const CLEARED = {
   onConfirm: null,
   onCancel: null,
   onOp: null,
+  onBooleanMode: null,
   onApply: null,
   onResetAxis: null,
   onAxis: null,
@@ -200,23 +245,42 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
       worldPos,
       symmetric: opts?.symmetric ?? false,
       showSymmetric: opts?.showSymmetric ?? true,
+      booleanMode: opts?.booleanMode ?? "NewBody",
+      canBoolean: opts?.canBoolean ?? false,
+      showBooleanSegments: opts?.showBooleanSegments ?? false,
+      regionCount: opts?.regionCount ?? 1,
       onValue: handlers.onValue,
       onSymmetric: handlers.onSymmetric,
       onConfirm: handlers.onConfirm,
       onCancel: handlers.onCancel,
+      onBooleanMode: handlers.onBooleanMode ?? null,
     });
   },
   showFillet(value, worldPos, onValue) {
     set({ ...CLEARED, kind: "filletRadius", value, worldPos, onValue });
   },
-  showRevolve(value, worldPos, handlers) {
+  showRevolve(value, worldPos, handlers, opts) {
     set({
       ...CLEARED,
       kind: "revolveAngle",
       value,
       worldPos,
+      booleanMode: opts?.booleanMode ?? "NewBody",
+      canBoolean: opts?.canBoolean ?? false,
+      showBooleanSegments: opts?.showBooleanSegments ?? false,
       onValue: handlers.onValue,
       onResetAxis: handlers.onResetAxis,
+      onConfirm: handlers.onConfirm,
+      onCancel: handlers.onCancel,
+      onBooleanMode: handlers.onBooleanMode ?? null,
+    });
+  },
+  showRegionSelect(count, worldPos, handlers) {
+    set({
+      ...CLEARED,
+      kind: "regionSelect",
+      count,
+      worldPos,
       onConfirm: handlers.onConfirm,
       onCancel: handlers.onCancel,
     });
@@ -278,6 +342,9 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
   },
   setSymmetric(symmetric) {
     set({ symmetric });
+  },
+  setBooleanMode(booleanMode) {
+    set({ booleanMode });
   },
   clear() {
     set({ ...CLEARED });

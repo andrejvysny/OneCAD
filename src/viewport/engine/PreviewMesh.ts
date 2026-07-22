@@ -21,7 +21,9 @@ export interface PreviewMeshDeps {
 export class PreviewMesh {
   private readonly group = new THREE.Group();
   private readonly material: THREE.MeshBasicMaterial;
-  private mesh: THREE.Mesh | null = null;
+  // One unit prism per armed region (N==1 in the single-region path; N in Wave 2's
+  // multi-select). All share the one material, so a tint / depth write hits them all.
+  private meshes: THREE.Mesh[] = [];
   private readonly _basis = new THREE.Matrix4();
 
   constructor(private readonly deps: PreviewMeshDeps) {
@@ -37,16 +39,24 @@ export class PreviewMesh {
     deps.root.add(this.group);
   }
 
-  /** Build the unit prism for a profile on `plane` (rebuild only when the profile changes). */
+  /** Single-region convenience: build one unit prism (delegates to setProfiles). */
   setProfile(plane: SketchPlane, profile: PrismProfile): void {
-    this.disposeMesh();
-    const { positions, indices } = unitPrismGeometry(profile);
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    geo.setIndex(new THREE.BufferAttribute(indices, 1));
-    this.mesh = new THREE.Mesh(geo, this.material);
-    this.mesh.renderOrder = RENDER_ORDER.PREVIEW_MESH; // over bodies + highlights
-    this.group.add(this.mesh);
+    this.setProfiles(plane, [profile]);
+  }
+
+  /** Build one unit prism per profile on `plane` (rebuild only when the set changes). */
+  setProfiles(plane: SketchPlane, profiles: PrismProfile[]): void {
+    this.disposeMeshes();
+    for (const profile of profiles) {
+      const { positions, indices } = unitPrismGeometry(profile);
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      geo.setIndex(new THREE.BufferAttribute(indices, 1));
+      const mesh = new THREE.Mesh(geo, this.material);
+      mesh.renderOrder = RENDER_ORDER.PREVIEW_MESH; // over bodies + highlights
+      this.group.add(mesh);
+      this.meshes.push(mesh);
+    }
 
     planeBasisMatrix(plane, this._basis);
     this.group.matrix.copy(this._basis);
@@ -55,19 +65,27 @@ export class PreviewMesh {
   }
 
   /**
-   * Set the live depth. Symmetric grows both ways (span 2·|depth|, centred on the
-   * plane); a negative depth extrudes the other side (drag-through-zero flip).
+   * Set the live depth on every prism. Symmetric grows both ways (span 2·|depth|,
+   * centred on the plane); a negative depth extrudes the other side (drag-through-
+   * zero flip).
    */
   setDepth(depth: number, symmetric: boolean): void {
-    if (!this.mesh) return;
-    if (symmetric) {
-      const h = Math.abs(depth) || 1e-4;
-      this.mesh.scale.z = 2 * h;
-      this.mesh.position.z = -h;
-    } else {
-      this.mesh.scale.z = Math.abs(depth) < 1e-4 ? 1e-4 : depth;
-      this.mesh.position.z = 0;
+    for (const mesh of this.meshes) {
+      if (symmetric) {
+        const h = Math.abs(depth) || 1e-4;
+        mesh.scale.z = 2 * h;
+        mesh.position.z = -h;
+      } else {
+        mesh.scale.z = Math.abs(depth) < 1e-4 ? 1e-4 : depth;
+        mesh.position.z = 0;
+      }
     }
+    this.deps.invalidate();
+  }
+
+  /** Recolor the prisms: destructive (Cut boolean) vs the normal accent (Wave 2). */
+  setTint(cut: boolean): void {
+    this.material.color.copy(cut ? palette.destructive() : palette.hoverAccent());
     this.deps.invalidate();
   }
 
@@ -77,19 +95,19 @@ export class PreviewMesh {
   }
 
   get visible(): boolean {
-    return this.group.visible && this.mesh !== null;
+    return this.group.visible && this.meshes.length > 0;
   }
 
-  private disposeMesh(): void {
-    if (this.mesh) {
-      this.group.remove(this.mesh);
-      this.mesh.geometry.dispose();
-      this.mesh = null;
+  private disposeMeshes(): void {
+    for (const mesh of this.meshes) {
+      this.group.remove(mesh);
+      mesh.geometry.dispose();
     }
+    this.meshes = [];
   }
 
   dispose(): void {
-    this.disposeMesh();
+    this.disposeMeshes();
     this.material.dispose();
     this.deps.root.remove(this.group);
   }

@@ -74,11 +74,14 @@ import {
   circularPatternStep,
   mirrorInit,
   mirrorStep,
+  regionSelectInit,
+  regionSelectStep,
   DEFAULT_EXTRUDE_DEPTH,
   DEFAULT_FILLET_RADIUS,
   DEFAULT_REVOLVE_ANGLE,
   DEFAULT_SHELL_THICKNESS,
   type BooleanFsm,
+  type BooleanMode,
   type ExtrudeFsm,
   type FilletFsm,
   type RevolveFsm,
@@ -88,7 +91,9 @@ import {
   type MirrorFsm,
   type PatternAxis,
   type MirrorPlane,
+  type RegionSelectState,
 } from "./modelToolMachine";
+import type { FeatureBooleanMode } from "@/ipc/types";
 
 const DRAG_PX = 4;
 
@@ -113,9 +118,13 @@ interface AxisCandidate {
 /**
  * In-flight multi-region pick (extrude OR revolve). Entered when the arm path gets
  * more than one closed region; the controller owns the pointer (orbit suppressed)
- * until the user clicks a region or Esc cancels. `session` is captured up-front so
- * the resolved region flows straight into the armed state (revolve reuses its
+ * until the user confirms a selection or Esc cancels. `session` is captured up-front
+ * so the resolved region(s) flow straight into the armed state (revolve reuses its
  * entities for axis candidates) with no second `enterSketch`.
+ *
+ * Wave 2: this is now a MULTI-select — the user toggles N regions (each becomes a
+ * separate op) and confirms via Enter / the region chip ✓ / a double-click on one
+ * region (select-only + confirm accelerator). `select` is the pure reducer state.
  */
 interface RegionPickState {
   opType: "extrude" | "revolve";
@@ -127,6 +136,24 @@ interface RegionPickState {
   editFeatureId?: string;
   /** The armed tool's seed value (extrude depth / revolve angle). */
   startValue: number;
+  /** Multi-select reducer state (ordered, deduped region ids). */
+  select: RegionSelectState;
+  /** Sketch-centroid world anchor for the region-select chip. */
+  chipWorld: Vec3;
+}
+
+/**
+ * One armed extrude preview session (Wave 2 multi-select). N==1 in the single-
+ * region path. Each region gets its own lane preview session + L1 prism; the
+ * commit loop materializes each as a separate op.
+ */
+interface ExtrudeSession {
+  session: PreviewSession;
+  draft: PreviewDraft;
+  region: SketchRegion;
+  profile: PrismProfile;
+  /** Newest L2 epoch applied for THIS session (drops out-of-order per-session results). */
+  lastAppliedEpoch: number;
 }
 
 export class ModelToolController {
@@ -140,16 +167,19 @@ export class ModelToolController {
   private mirror: MirrorFsm = mirrorInit();
   private readonly throttle = new PreviewThrottle<{ distance: number }>({ trailingMs: 80 });
 
-  // Extrude preview context.
-  private session: PreviewSession | null = null;
-  /** The draft the armed extrude was begun with — replayed to re-arm on a failed
-   *  commit so the user's work is never lost (MODEL-HARDEN Wave 1). */
-  private extrudeDraft: PreviewDraft | null = null;
+  // Extrude preview context. One session per armed region (N==1 single-region;
+  // N in Wave 2 multi-select). The first session paces the shared throttle.
+  private extrudeSessions: ExtrudeSession[] = [];
   private plane: SketchPlane | null = null;
   private centroidWorld: Vec3 = [0, 0, 0];
   private normal: Vec3 = [0, 0, 1];
   private lastArmedSketch: string | null = null;
   private previewMeshRev = 0;
+  /** One-shot "choose Cut" hint fired on the first depth sign-flip while bodies exist. */
+  private negativeDragHintShown = false;
+  /** Double-click accelerator bookkeeping (region multi-select: same region twice). */
+  private lastRegionClickId: string | null = null;
+  private lastRegionClickAt = 0;
 
   // Multi-region pick (extrude/revolve). `armGen` is bumped on every arm request +
   // every tool/mode change, so a finishSketch/enterSketch result that returns AFTER
@@ -190,8 +220,12 @@ export class ModelToolController {
   // Pattern / mirror context (chip-driven; ghost clones of the source body).
   private patternEditFeatureId: string | undefined;
 
-  // Revolve context.
+  // Revolve context. `revolveProfile`/`revolveRegionId` are the PRIMARY region
+  // (drives the L1 lathe preview); the arrays carry ALL selected regions for the
+  // multi-region commit loop + all-regions axis validity (Wave 2). N==1 single-region.
   private revolveProfile: PrismProfile | null = null;
+  private revolveProfiles: PrismProfile[] = [];
+  private revolveRegionIds: string[] = [];
   private revolveSketchId: string | null = null;
   private revolveRegionId: string | null = null;
   private revolveEditFeatureId: string | undefined;
@@ -324,49 +358,67 @@ export class ModelToolController {
     // undo entry into (MODEL-HARDEN W0.5). getSketch returns the same DTO shape.
     const session = await this.deps.client.getSketch(sketchId); // plane only
     if (gen !== this.armGen) return; // superseded while getSketch was in flight
-    await this.beginExtrudeArmed(sketchId, region, profile, session.plane, editFeatureId, startDepth);
+    await this.beginExtrudeArmed(sketchId, [region], [profile], session.plane, editFeatureId, startDepth);
   }
 
-  /** Arm the extrude tool on a chosen region + plane (the single-region + region-pick tail). */
+  /**
+   * Arm the extrude tool on N chosen regions + plane (single-region path passes
+   * `[region]`/`[profile]`; the region multi-select passes N). One lane preview
+   * session + L1 prism per region; ONE drag handle at the combined centroid; the
+   * commit loop materializes each region as its own op (Wave 2).
+   */
   private async beginExtrudeArmed(
     sketchId: string,
-    region: SketchRegion,
-    profile: PrismProfile,
+    regions: SketchRegion[],
+    profiles: PrismProfile[],
     plane: SketchPlane,
     editFeatureId?: string,
     startDepth = DEFAULT_EXTRUDE_DEPTH,
   ): Promise<void> {
+    const gen = this.armGen;
     this.plane = plane;
     this.lastArmedSketch = sketchId;
+    this.negativeDragHintShown = false;
 
-    const b = profileBounds(profile);
-    const c = planePointToWorld(this.plane, { x: b.centroidU, y: b.centroidV });
-    this.centroidWorld = [c.x, c.y, c.z];
+    const centroid = combinedCentroidWorld(plane, profiles);
+    this.centroidWorld = centroid;
     this.normal = normalize(this.plane.normal as Vec3);
 
-    this.engine.showExtrudePreview(this.plane, profile, this.centroidWorld, this.normal);
+    this.engine.showExtrudePreviews(this.plane, profiles, this.centroidWorld, this.normal);
     this.engine.setExtrudeDepth(startDepth, false);
 
-    const params: PreviewParams = {
-      distance: startDepth,
-      extrudeMode: "Blind",
-      booleanMode: "NewBody",
-    };
-    if (editFeatureId) params.featureId = editFeatureId;
-    const draft: PreviewDraft = { opType: "Extrude", sketchId, regionId: region.regionId, params };
-    this.extrudeDraft = draft;
-    this.session = await this.deps.client.beginPreview(draft);
+    // Open one preview session per region. A superseded arm (gen bumped mid-await)
+    // tears its own sessions down so no lane session leaks.
+    const sessions: ExtrudeSession[] = [];
+    for (let i = 0; i < regions.length; i++) {
+      const params: PreviewParams = { distance: startDepth, extrudeMode: "Blind", booleanMode: "NewBody" };
+      if (editFeatureId) params.featureId = editFeatureId;
+      const draft: PreviewDraft = { opType: "Extrude", sketchId, regionId: regions[i].regionId, params };
+      const session = await this.deps.client.beginPreview(draft);
+      if (gen !== this.armGen) {
+        void this.deps.client.endPreview(session.sessionId, false);
+        for (const s of sessions) void this.deps.client.endPreview(s.session.sessionId, false);
+        return;
+      }
+      sessions.push({ session, draft, region: regions[i], profile: profiles[i], lastAppliedEpoch: 0 });
+    }
+    this.extrudeSessions = sessions;
 
     this.throttle.reset();
     this.extrude = extrudeStep(extrudeInit(), { kind: "arm", depth: startDepth }).state;
+    this.engine.setExtrudePreviewTint("normal");
     toolStore.setState({ phase: "armed" });
+    const n = regions.length;
     viewportStore.getState().setStatusHint(
       editFeatureId
         ? "Drag the arrow or type a depth · Enter to apply"
-        : "Drag the arrow to set depth · Enter, ✓, or click away to confirm",
+        : n > 1
+          ? `Drag the arrow to set depth for ${n} regions · Enter, ✓, or click away to confirm`
+          : "Drag the arrow to set depth · Enter, ✓, or click away to confirm",
       { sticky: true },
     );
 
+    const { canBoolean } = this.resolveBooleanTarget();
     const chipWorld = this.chipWorld();
     toolChipStore.getState().showExtrude(
       startDepth,
@@ -376,12 +428,21 @@ export class ModelToolController {
         onSymmetric: (sym) => this.setExtrudeSymmetric(sym),
         onConfirm: () => void this.confirmExtrude(),
         onCancel: () => toolStore.getState().setTool("select"),
+        onBooleanMode: (mode) => this.onExtrudeBooleanMode(mode),
       },
-      // Re-edit is param-only (angle/depth) → value + ✓/✕ only, no symmetric toggle.
-      { symmetric: false, showSymmetric: !editFeatureId },
+      // Re-edit is param-only (depth) → value + ✓/✕ only, no symmetric toggle, no
+      // boolean segments (fresh arms only).
+      {
+        symmetric: false,
+        showSymmetric: !editFeatureId,
+        showBooleanSegments: !editFeatureId,
+        canBoolean,
+        booleanMode: "NewBody",
+        regionCount: n,
+      },
     );
 
-    this.sendPreview(startDepth); // initial exact L2
+    this.sendPreview(startDepth); // initial exact L2 (all sessions)
     this.updateDebug();
   }
 
@@ -408,6 +469,116 @@ export class ModelToolController {
     this.engine.setExtrudeDepth(this.extrude.depth, symmetric);
     toolChipStore.getState().setSymmetric(symmetric);
     this.sendPreview(this.extrude.depth);
+  }
+
+  // ── boolean modes (extrude/revolve New Body / Add / Cut — Wave 2) ─────────────
+
+  /**
+   * Resolve the boolean target from the current VISIBLE bodies (documentStore,
+   * `visible !== false`, preview ids excluded): 0 → no boolean; 1 → auto-target
+   * that body; >1 → a target must be picked. Drives the chip's canBoolean + the
+   * Add/Cut → armed vs targetPick decision.
+   */
+  private resolveBooleanTarget(): { canBoolean: boolean; count: number; autoTargetId: string | null } {
+    const bodies = documentStore.getState().bodies;
+    const visible = Object.values(bodies)
+      .filter((b) => b.visible !== false && !b.id.startsWith("preview:"))
+      .map((b) => b.id);
+    return { canBoolean: visible.length > 0, count: visible.length, autoTargetId: visible.length === 1 ? visible[0] : null };
+  }
+
+  /** Boolean segment picked on the armed EXTRUDE cluster. */
+  private onExtrudeBooleanMode(mode: BooleanMode): void {
+    if (this.extrude.phase !== "armed" && this.extrude.phase !== "targetPick") return;
+    const { canBoolean, count, autoTargetId } = this.resolveBooleanTarget();
+    if (mode !== "NewBody" && !canBoolean) return; // segment disabled — no existing body
+    if (mode === "NewBody") {
+      this.extrude = extrudeStep(this.extrude, { kind: "setBooleanMode", mode }).state;
+    } else if (count === 1) {
+      this.extrude = extrudeStep(this.extrude, { kind: "setBooleanMode", mode, targetBodyId: autoTargetId }).state;
+    } else {
+      this.extrude = extrudeStep(this.extrude, { kind: "setBooleanMode", mode, needsPick: true }).state;
+    }
+    this.applyBooleanState(this.extrude.booleanMode, this.extrude.phase === "targetPick", "extrude");
+  }
+
+  /** Boolean segment picked on the armed REVOLVE cluster (mirrors the extrude path). */
+  private onRevolveBooleanMode(mode: BooleanMode): void {
+    if (this.revolve.phase !== "armed" && this.revolve.phase !== "targetPick") return;
+    const { canBoolean, count, autoTargetId } = this.resolveBooleanTarget();
+    if (mode !== "NewBody" && !canBoolean) return;
+    if (mode === "NewBody") {
+      this.revolve = revolveStep(this.revolve, { kind: "setBooleanMode", mode }).state;
+    } else if (count === 1) {
+      this.revolve = revolveStep(this.revolve, { kind: "setBooleanMode", mode, targetBodyId: autoTargetId }).state;
+    } else {
+      this.revolve = revolveStep(this.revolve, { kind: "setBooleanMode", mode, needsPick: true }).state;
+    }
+    this.applyBooleanState(this.revolve.booleanMode, this.revolve.phase === "targetPick", "revolve");
+  }
+
+  /** Shared side effects of a boolean-mode change: chip + Cut tint + hint. */
+  private applyBooleanState(mode: BooleanMode, targetPick: boolean, tool: "extrude" | "revolve"): void {
+    toolChipStore.getState().setBooleanMode(mode);
+    this.engine.setExtrudePreviewTint(mode === "Cut" ? "cut" : "normal");
+    if (targetPick) {
+      const verb = mode === "Cut" ? "Cut from" : "Add to";
+      viewportStore.getState().setStatusHint(`Click a body to ${verb} · Esc for New Body`, { sticky: true });
+    } else {
+      viewportStore.getState().setStatusHint(this.armHintFor(tool), { sticky: true });
+    }
+    this.updateDebug();
+  }
+
+  /** The standard "drag/confirm" arm hint for a tool (restored after a target pick). */
+  private armHintFor(tool: "extrude" | "revolve"): string {
+    if (tool === "extrude") {
+      return this.extrudeSessions.length > 1
+        ? `Drag the arrow to set depth for ${this.extrudeSessions.length} regions · Enter, ✓, or click away to confirm`
+        : "Drag the arrow to set depth · Enter, ✓, or click away to confirm";
+    }
+    return "Drag to set angle · Enter, ✓, or click away to revolve";
+  }
+
+  /** A body pick during targetPick (extrude): probe → adopt as the boolean target. */
+  private tryPickExtrudeTarget(clientX: number, clientY: number): void {
+    if (this.extrude.phase !== "targetPick") return;
+    const hit = this.engine.probePick(clientX, clientY);
+    if (!hit || hit.bodyId.startsWith("preview:")) return; // reject preview bodies
+    this.extrude = extrudeStep(this.extrude, { kind: "pickTarget", bodyId: hit.bodyId }).state;
+    this.applyBooleanState(this.extrude.booleanMode, false, "extrude");
+  }
+
+  /** A body pick during targetPick (revolve). */
+  private tryPickRevolveTarget(clientX: number, clientY: number): void {
+    if (this.revolve.phase !== "targetPick") return;
+    const hit = this.engine.probePick(clientX, clientY);
+    if (!hit || hit.bodyId.startsWith("preview:")) return;
+    this.revolve = revolveStep(this.revolve, { kind: "pickTarget", bodyId: hit.bodyId }).state;
+    this.applyBooleanState(this.revolve.booleanMode, false, "revolve");
+  }
+
+  /**
+   * One-shot hint on the first depth sign-flip (negative drag) while a boolean
+   * target exists and the mode is still NewBody — nudges toward Cut. Non-sticky.
+   */
+  private maybeNegativeDragHint(depth: number): void {
+    if (this.negativeDragHintShown || depth >= 0) return;
+    if (this.extrude.booleanMode !== "NewBody") return;
+    if (!this.resolveBooleanTarget().canBoolean) return;
+    this.negativeDragHintShown = true;
+    viewportStore.getState().setStatusHint("Tip: choose Cut to remove material");
+  }
+
+  /** Esc during targetPick: revert to armed(NewBody), clear the Cut tint. */
+  private cancelTargetPick(): void {
+    if (this.extrude.phase === "targetPick") {
+      this.extrude = extrudeStep(this.extrude, { kind: "cancelTargetPick" }).state;
+      this.applyBooleanState("NewBody", false, "extrude");
+    } else if (this.revolve.phase === "targetPick") {
+      this.revolve = revolveStep(this.revolve, { kind: "cancelTargetPick" }).state;
+      this.applyBooleanState("NewBody", false, "revolve");
+    }
   }
 
   // ── multi-region pick (extrude / revolve) ────────────────────────────────────
@@ -443,35 +614,59 @@ export class ModelToolController {
     }
     if (pickable.length === 1) {
       // Only one region is actually extrudable — arm it directly (no pointless pick).
-      this.armPickedRegion(opType, sketchId, pickable[0], session, editFeatureId, startValue);
+      this.armPickedRegions(opType, sketchId, [pickable[0]], session, editFeatureId, startValue);
       return;
     }
-    this.regionPick = { opType, sketchId, plane: session.plane, regions: pickable, session, editFeatureId, startValue };
+    // Wave 2: >1 region → MULTI-select. Toggle membership; Enter / chip ✓ / a
+    // double-click on one region confirms; Esc cancels.
+    const chipWorld = regionsCentroidWorld(session.plane, pickable);
+    this.regionPick = {
+      opType,
+      sketchId,
+      plane: session.plane,
+      regions: pickable,
+      session,
+      editFeatureId,
+      startValue,
+      select: regionSelectStep(regionSelectInit(), { kind: "enter" }).state,
+      chipWorld,
+    };
+    this.lastRegionClickId = null;
     this.engine.showRegionPick(session.plane, pickable);
-    this.engine.setOrbitSuppressed(true); // modal: click picks a region, not orbit
-    viewportStore.getState().setStatusHint(`Select a region to ${noun}`, { sticky: true });
+    this.engine.setRegionSelected([]);
+    this.engine.setOrbitSuppressed(true); // modal: click toggles a region, not orbit
+    viewportStore.getState().setStatusHint(
+      `Select regions to ${noun} — click to toggle · Enter to confirm`,
+      { sticky: true },
+    );
+    toolChipStore.getState().showRegionSelect(0, chipWorld, {
+      onConfirm: () => this.confirmRegionSelect(),
+      onCancel: () => toolStore.getState().setTool("select"),
+    });
     this.updateDebug();
   }
 
-  /** Arm the picked op on `region`, threading its id into the draft/commit payload. */
-  private armPickedRegion(
+  /** Arm the picked op on the chosen region(s), threading their ids into each payload. */
+  private armPickedRegions(
     opType: "extrude" | "revolve",
     sketchId: string,
-    region: SketchRegion,
+    regions: SketchRegion[],
     session: SketchSession,
     editFeatureId: string | undefined,
     startValue: number,
   ): void {
-    const profile = profileFromRegion(region);
-    if (!profile) {
+    const profiles = regions.map((r) => profileFromRegion(r));
+    const valid = regions.filter((_, i) => profiles[i] !== null);
+    const validProfiles = profiles.filter((p): p is PrismProfile => p !== null);
+    if (valid.length === 0) {
       viewportStore.getState().setStatusHint(`No closed region to ${opType === "extrude" ? "extrude" : "revolve"}`, { severity: "error", sticky: true });
       toolStore.getState().setTool("select");
       return;
     }
     if (opType === "extrude") {
-      void this.beginExtrudeArmed(sketchId, region, profile, session.plane, editFeatureId, startValue);
+      void this.beginExtrudeArmed(sketchId, valid, validProfiles, session.plane, editFeatureId, startValue);
     } else {
-      void this.beginRevolveArmed(sketchId, region, profile, session, editFeatureId, startValue);
+      void this.beginRevolveArmed(sketchId, valid, validProfiles, session, editFeatureId, startValue);
     }
   }
 
@@ -484,32 +679,60 @@ export class ModelToolController {
     this.deps.engine.setRegionHover(id);
   }
 
-  /** Pointer click during region pick: resolve the region under the pointer (if any). */
+  /** Pointer click during region pick: toggle the region under the pointer (multi-select). */
   private tryPickRegion(clientX: number, clientY: number): void {
     const ctx = this.regionPick;
     if (!ctx) return;
     const p = this.deps.engine.screenToPlaneOn(ctx.plane, clientX, clientY);
     if (!p) return;
     const id = regionAtPoint(ctx.regions, p.x, p.y);
-    if (id) this.resolveRegionPick(id);
+    if (!id) return;
+    // Double-click accelerator: a second click on the SAME region within the window
+    // = select only it + confirm immediately.
+    const now = performance.now();
+    if (this.lastRegionClickId === id && now - this.lastRegionClickAt < 350) {
+      this.lastRegionClickId = null;
+      this.resolveRegionPick([id]);
+      return;
+    }
+    this.lastRegionClickId = id;
+    this.lastRegionClickAt = now;
+    ctx.select = regionSelectStep(ctx.select, { kind: "toggle", id }).state;
+    this.engine.setRegionSelected(ctx.select.selected);
+    toolChipStore.getState().setCount(ctx.select.selected.length);
+    this.updateDebug();
   }
 
-  private resolveRegionPick(regionId: string): void {
+  /** Enter / region chip ✓: confirm the current multi-selection (≥1 region). */
+  private confirmRegionSelect(): void {
     const ctx = this.regionPick;
     if (!ctx) return;
-    const region = ctx.regions.find((r) => r.regionId === regionId);
-    if (!region) return;
+    const step = regionSelectStep(ctx.select, { kind: "confirm" });
+    if (step.effect !== "confirm") return; // empty selection — ignore
+    this.resolveRegionPick(step.state.selected);
+  }
+
+  private resolveRegionPick(regionIds: string[]): void {
+    const ctx = this.regionPick;
+    if (!ctx) return;
+    const regions = regionIds
+      .map((id) => ctx.regions.find((r) => r.regionId === id))
+      .filter((r): r is SketchRegion => r !== undefined);
+    if (regions.length === 0) return;
     this.regionPick = null;
     this.deps.engine.hideRegionPick();
     this.deps.engine.setOrbitSuppressed(false);
-    this.armPickedRegion(ctx.opType, ctx.sketchId, region, ctx.session, ctx.editFeatureId, ctx.startValue);
+    toolChipStore.getState().clear();
+    this.armPickedRegions(ctx.opType, ctx.sketchId, regions, ctx.session, ctx.editFeatureId, ctx.startValue);
   }
 
   /** Tear down an in-flight region pick (Esc / tool switch); restores orbit. */
   private cancelRegionPick(): void {
     if (!this.regionPick) return;
     this.regionPick = null;
+    this.lastRegionClickId = null;
     this.deps.engine.hideRegionPick();
+    this.deps.engine.setRegionSelected([]);
     this.deps.engine.setOrbitSuppressed(false);
   }
 
@@ -548,25 +771,31 @@ export class ModelToolController {
     // axis candidates read `session.entities`, which getSketch returns verbatim.
     const session = await this.deps.client.getSketch(sketchId); // plane + entities
     if (gen !== this.armGen) return; // superseded while getSketch was in flight
-    await this.beginRevolveArmed(sketchId, region, profile, session, editFeatureId, startAngle);
+    await this.beginRevolveArmed(sketchId, [region], [profile], session, editFeatureId, startAngle);
   }
 
   /**
-   * Arm the revolve tool on a chosen region + session: resolve candidate axis lines,
+   * Arm the revolve tool on N chosen regions + session: resolve candidate axis lines,
    * then enter axis-pick (fresh) or go straight to armed (re-edit, `editFeatureId`).
-   * Shared by the single-region + region-pick paths.
+   * Shared by the single-region + region multi-select paths. The PRIMARY region
+   * (regions[0]) drives the L1 lathe preview; the arrays carry all regions for the
+   * commit loop + all-regions axis validity (Wave 2).
    */
   private async beginRevolveArmed(
     sketchId: string,
-    region: SketchRegion,
-    profile: PrismProfile,
+    regions: SketchRegion[],
+    profiles: PrismProfile[],
     session: SketchSession,
     editFeatureId?: string,
     startAngle = DEFAULT_REVOLVE_ANGLE,
   ): Promise<void> {
+    const region = regions[0];
+    const profile = profiles[0];
     this.plane = session.plane;
     this.lastArmedSketch = sketchId;
     this.revolveProfile = profile;
+    this.revolveProfiles = profiles;
+    this.revolveRegionIds = regions.map((r) => r.regionId);
     this.revolveSketchId = sketchId;
     this.revolveRegionId = region.regionId;
     this.revolveEditFeatureId = editFeatureId;
@@ -650,6 +879,7 @@ export class ModelToolController {
     if (this.dragging === "revolve") this.dragging = null;
     this.deps.engine.setOrbitSuppressed(false);
     this.deps.engine.hideRevolvePreview();
+    this.engine.setExtrudePreviewTint("normal");
     if (this.plane) {
       this.deps.engine.showRevolveAxisCandidates(
         this.plane,
@@ -674,7 +904,10 @@ export class ModelToolController {
     this.deps.engine.setRevolveAxisHover({ a: c.a, b: c.b });
   }
 
-  /** Axis-pick click: choose the nearest line, rejecting one that crosses the profile. */
+  /**
+   * Axis-pick click: choose the nearest line, rejecting one that crosses ANY of the
+   * selected regions' profiles (Wave 2 — the single axis must be valid for ALL).
+   */
   private tryPickRevolveAxis(clientX: number, clientY: number): void {
     if (!this.plane || !this.revolveProfile) return;
     const p = this.deps.engine.screenToPlaneOn(this.plane, clientX, clientY);
@@ -682,27 +915,38 @@ export class ModelToolController {
     const idx = this.nearestAxisCandidate(p.x, p.y);
     if (idx < 0) return;
     const cand = this.revolveAxisCandidates[idx];
-    const valid = !axisSplitsRegion(cand.a, cand.b, this.revolveProfile.ring);
+    const profiles = this.revolveProfiles.length ? this.revolveProfiles : [this.revolveProfile];
+    const failing = profiles.filter((pr) => axisSplitsRegion(cand.a, cand.b, pr.ring)).length;
+    const valid = failing === 0;
     this.revolve = revolveStep(this.revolve, { kind: "pickAxis", lineId: cand.id, valid }).state;
     if (!valid) {
       this.deps.engine.setRevolveAxisHover(null);
-      viewportStore.getState().setStatusHint("Axis can't cross the profile — pick another line", { severity: "error", sticky: true });
+      const msg =
+        profiles.length > 1
+          ? `Axis can't cross the profile — ${failing} of ${profiles.length} regions fail · pick another line`
+          : "Axis can't cross the profile — pick another line";
+      viewportStore.getState().setStatusHint(msg, { severity: "error", sticky: true });
       return;
     }
     this.revolveAxis = { a: cand.a, b: cand.b };
     this.revolveAxisLineId = cand.id;
     this.deps.engine.setOrbitSuppressed(true);
     this.deps.engine.showRevolvePreview(this.plane, this.revolveProfile.ring, this.revolveAxis, this.revolve.angle);
-    toolChipStore.getState().showRevolve(this.revolve.angle, this.revolveChipWorld(), {
-      onValue: (v) => this.onRevolveChip(v),
-      onResetAxis: () => this.resetRevolveAxis(),
-      onConfirm: () => void this.confirmRevolve(),
-      onCancel: () => toolStore.getState().setTool("select"),
-    });
-    viewportStore.getState().setStatusHint(
-      "Drag to set angle · Enter, ✓, or click away to revolve",
-      { sticky: true },
+    this.engine.setExtrudePreviewTint("normal");
+    const { canBoolean } = this.resolveBooleanTarget();
+    toolChipStore.getState().showRevolve(
+      this.revolve.angle,
+      this.revolveChipWorld(),
+      {
+        onValue: (v) => this.onRevolveChip(v),
+        onResetAxis: () => this.resetRevolveAxis(),
+        onConfirm: () => void this.confirmRevolve(),
+        onCancel: () => toolStore.getState().setTool("select"),
+        onBooleanMode: (mode) => this.onRevolveBooleanMode(mode),
+      },
+      { showBooleanSegments: true, canBoolean, booleanMode: "NewBody" },
     );
+    viewportStore.getState().setStatusHint(this.armHintFor("revolve"), { sticky: true });
     toolStore.setState({ phase: "armed" });
     this.updateDebug();
   }
@@ -733,18 +977,26 @@ export class ModelToolController {
   }
 
   /**
-   * Commit the armed revolve (Enter / chip-✓ / click-away — MODEL-HARDEN Wave 1).
-   * On a failed commit the tool stays ARMED (lathe preview kept) with a named error
-   * hint, so the user's work is never silently lost. A commitGen token guards every
-   * await so a canceled / switched arm can't resurrect.
+   * Commit the armed revolve (Enter / chip-✓ / click-away — MODEL-HARDEN Wave 1+2).
+   * A re-edit is an angle-only deep-merge on the stored params; a fresh revolve loops
+   * `applyOperation` once per selected region (N==1 single-region), each with the same
+   * axis / angle / boolean mode + target. STOP ON FIRST FAILURE: committed regions
+   * stay (real rows), the tool returns to armed (lathe preview kept) with a named
+   * hint, and the committed regions are dropped so a re-confirm retries only the rest.
+   * On full success the tool waits for ALL bodies, selects them, and auto-hides the
+   * consumed sketch. A commitGen token guards every await.
    */
   private async confirmRevolve(): Promise<void> {
     if (this.revolve.phase !== "armed") return;
     const angle = this.revolve.angle;
     const sketchId = this.revolveSketchId;
-    const regionId = this.revolveRegionId;
-    if (!sketchId || !regionId || !this.revolveProfile) {
-      this.finishRevolve(null);
+    const regionIds = this.revolveRegionIds.length
+      ? this.revolveRegionIds
+      : this.revolveRegionId
+        ? [this.revolveRegionId]
+        : [];
+    if (!sketchId || regionIds.length === 0 || !this.revolveProfile) {
+      this.finishRevolve([]);
       return;
     }
     const gen = ++this.commitGen;
@@ -753,61 +1005,129 @@ export class ModelToolController {
     const axis: AxisRef | undefined = this.revolveAxisLineId
       ? { kind: "sketchLine", sketchId, lineId: this.revolveAxisLineId }
       : undefined;
-    const op: OperationOp = {
-      opType: "Revolve",
-      sketchId,
-      regionId,
-      featureId: this.revolveEditFeatureId,
-      inputs: [{ primary: { bodyId: "", kind: "face" }, anchor: {} }],
-      params: { angleDeg: angle, axis, booleanMode: "NewBody" },
-    };
-    try {
-      // A re-edit changes ONLY the angle: deep-merge into the stored params so the
-      // user-picked axis / profile / target survive (a whole-params replace would drop
-      // them). A fresh revolve (or a re-edit whose params fetch failed) commits the op.
-      const res =
-        this.revolveEditFeatureId && this.revolveStoredParams
-          ? await this.client.applyEditCommand(
-              updateScalarParamsCommand(this.revolveEditFeatureId, "Revolve", this.revolveStoredParams, {
-                angleDeg: { value: angle },
-              }),
-            )
-          : await this.client.applyOperation(op);
-      if (gen !== this.commitGen) return; // superseded (canceled / tool switched)
-      this.applyResult(res);
-      const bodyId = res.changedBodies[0]?.bodyId ?? null;
-      if (bodyId) {
-        // Drop L1 only once the exact body enters the scene (mirror the extrude reconcile).
-        this.commitRevolveBodyUnsub = this.deps.onBodyLoaded((loaded) => {
-          if (loaded !== bodyId) return;
+    const booleanMode = this.revolve.booleanMode as FeatureBooleanMode;
+    const targetBodyId = this.revolve.targetBodyId ?? undefined;
+
+    // Subscribe before committing so an early body (async doc-changed → mesh-ingest)
+    // isn't missed while a later region is still committing (mirrors confirmExtrude).
+    const loaded = new Set<string>();
+    this.commitRevolveBodyUnsub?.();
+    this.commitRevolveBodyUnsub = this.deps.onBodyLoaded((id) => loaded.add(id));
+
+    // Re-edit path: angle-only deep-merge (single region, keeps the axis + target).
+    if (this.revolveEditFeatureId && this.revolveStoredParams) {
+      try {
+        const res = await this.client.applyEditCommand(
+          updateScalarParamsCommand(this.revolveEditFeatureId, "Revolve", this.revolveStoredParams, {
+            angleDeg: { value: angle },
+          }),
+        );
+        if (gen !== this.commitGen) return;
+        this.applyResult(res);
+        const bodyId = res.changedBodies[0]?.bodyId;
+        if (bodyId) this.finishRevolveAll([bodyId], gen, loaded);
+        else {
           this.commitRevolveBodyUnsub?.();
           this.commitRevolveBodyUnsub = null;
-          if (gen !== this.commitGen) return;
-          this.finishRevolve(bodyId);
-        });
-      } else {
-        this.onRevolveCommitFailed(res.errorMessage ?? "Revolve failed");
+          this.onRevolveCommitFailed(0, 1, res.errorMessage ?? "Revolve failed");
+        }
+      } catch (e) {
+        if (gen !== this.commitGen) return;
+        this.commitRevolveBodyUnsub?.();
+        this.commitRevolveBodyUnsub = null;
+        this.onRevolveCommitFailed(0, 1, errMessage(e));
       }
-    } catch (e) {
-      if (gen !== this.commitGen) return;
-      this.onRevolveCommitFailed(errMessage(e));
+      return;
     }
+
+    const total = regionIds.length;
+    const committedBodyIds: string[] = [];
+    for (let k = 0; k < total; k++) {
+      const op: OperationOp = {
+        opType: "Revolve",
+        sketchId,
+        regionId: regionIds[k],
+        inputs: [{ primary: { bodyId: "", kind: "face" }, anchor: {} }],
+        params: { angleDeg: angle, axis, booleanMode, ...(targetBodyId ? { targetBodyId } : {}) },
+      };
+      let res: ApplyOperationResult;
+      try {
+        res = await this.client.applyOperation(op);
+      } catch (e) {
+        if (gen !== this.commitGen) return;
+        this.commitRevolveBodyUnsub?.();
+        this.commitRevolveBodyUnsub = null;
+        this.onRevolveCommitFailed(k, total, errMessage(e));
+        return;
+      }
+      if (gen !== this.commitGen) return;
+      const bodyId = res.changedBodies[0]?.bodyId;
+      if (!bodyId) {
+        this.commitRevolveBodyUnsub?.();
+        this.commitRevolveBodyUnsub = null;
+        this.onRevolveCommitFailed(k, total, res.errorMessage ?? "Revolve failed");
+        return;
+      }
+      this.applyResult(res);
+      committedBodyIds.push(bodyId);
+    }
+    this.finishRevolveAll(committedBodyIds, gen, loaded);
   }
 
-  /** A failed revolve commit: back to armed (lathe preview kept), named error hint. */
-  private onRevolveCommitFailed(reason: string): void {
+  /** Wait for ALL committed revolve bodies to enter the scene, then teardown + select. */
+  private finishRevolveAll(bodyIds: string[], gen: number, loaded: Set<string>): void {
+    const pending = new Set(bodyIds.filter((id) => !loaded.has(id)));
+    const done = (): void => {
+      this.commitRevolveBodyUnsub?.();
+      this.commitRevolveBodyUnsub = null;
+      if (gen !== this.commitGen) return;
+      this.finishRevolve(bodyIds);
+    };
+    if (pending.size === 0) {
+      done();
+      return;
+    }
+    this.commitRevolveBodyUnsub?.();
+    this.commitRevolveBodyUnsub = this.deps.onBodyLoaded((id) => {
+      if (!pending.has(id)) return;
+      pending.delete(id);
+      if (pending.size === 0) done();
+    });
+  }
+
+  /**
+   * A failed revolve commit at region k of `total`: back to armed (lathe preview
+   * kept), named error hint, committed regions dropped so a re-confirm retries only
+   * the failed + remaining.
+   */
+  private onRevolveCommitFailed(k: number, total: number, reason: string): void {
     this.revolve = revolveStep(this.revolve, { kind: "commitFailed" }).state; // committing → armed
     toolStore.setState({ phase: "armed" });
-    viewportStore.getState().setStatusHint(`Revolve failed: ${reason}`, { severity: "error", sticky: true });
+    const msg =
+      total > 1
+        ? `Revolve ${k + 1} of ${total} failed: ${reason} — remaining kept`
+        : `Revolve failed: ${reason}`;
+    viewportStore.getState().setStatusHint(msg, { severity: "error", sticky: true });
+    if (this.revolveRegionIds.length) {
+      this.revolveRegionIds = this.revolveRegionIds.slice(k);
+      this.revolveProfiles = this.revolveProfiles.slice(k);
+      this.revolveRegionId = this.revolveRegionIds[0] ?? this.revolveRegionId;
+      this.revolveProfile = this.revolveProfiles[0] ?? this.revolveProfile;
+    }
     this.updateDebug();
   }
 
-  private finishRevolve(bodyId: string | null): void {
+  private finishRevolve(bodyIds: string[]): void {
     this.deps.engine.hideRevolvePreview();
     this.deps.engine.setOrbitSuppressed(false);
+    this.engine.setExtrudePreviewTint("normal");
     toolChipStore.getState().clear();
     this.revolve = revolveStep(this.revolve, { kind: "settle" }).state;
+    const consumedSketch = this.lastArmedSketch;
+    const wasReedit = this.revolveEditFeatureId !== undefined;
     this.revolveProfile = null;
+    this.revolveProfiles = [];
+    this.revolveRegionIds = [];
     this.revolveAxis = null;
     this.revolveAxisLineId = null;
     this.revolveAxisCandidates = [];
@@ -815,9 +1135,11 @@ export class ModelToolController {
     this.revolveStoredParams = undefined;
     this.revolveArmedDown = false;
     if (this.dragging === "revolve") this.dragging = null;
-    if (bodyId) {
-      selectionStore.getState().set([{ kind: "body", id: bodyId }]);
-      viewportStore.getState().setStatusHint("Revolved");
+    const unique = bodyIds.filter((id, i, a) => a.indexOf(id) === i);
+    if (unique.length > 0) {
+      selectionStore.getState().set(unique.map((id) => ({ kind: "body" as const, id })));
+      viewportStore.getState().setStatusHint(unique.length > 1 ? `Revolved ${unique.length} bodies` : "Revolved");
+      if (consumedSketch && !wasReedit) documentStore.getState().setVisibility(consumedSketch, false);
     }
     toolStore.getState().setTool("select");
     this.updateDebug();
@@ -1279,6 +1601,7 @@ export class ModelToolController {
       this.engine.setExtrudeDepth(this.extrude.depth, this.extrude.symmetric);
       toolChipStore.getState().setValue(this.extrude.depth);
       toolChipStore.getState().setSymmetric(this.extrude.symmetric); // Alt-drag syncs the ⇔ toggle
+      this.maybeNegativeDragHint(this.extrude.depth);
       this.sendPreview(this.extrude.depth);
     } else if (this.dragging === "fillet") {
       const dy = this.filletDownY - e.clientY; // up-drag grows the radius
@@ -1363,6 +1686,15 @@ export class ModelToolController {
     if (wasClick && this.boolean.phase === "pickTool") {
       const hit = this.engine.probePick(e.clientX, e.clientY);
       if (hit && hit.bodyId !== this.boolean.targetBodyId) this.pickBooleanTool(hit.bodyId);
+      return;
+    }
+    // Boolean target-body pick during an Add/Cut with >1 candidate (a click).
+    if (wasClick && this.extrude.phase === "targetPick") {
+      this.tryPickExtrudeTarget(e.clientX, e.clientY);
+      return;
+    }
+    if (wasClick && this.revolve.phase === "targetPick") {
+      this.tryPickRevolveTarget(e.clientX, e.clientY);
     }
   };
 
@@ -1422,9 +1754,9 @@ export class ModelToolController {
     );
   }
 
-  /** Every open preview session (single in Wave 1; N in Wave 2's multi-select). */
+  /** Every open preview session (N in Wave 2's multi-select; 1 single-region). */
   private openPreviewSessions(): PreviewSession[] {
-    return this.session ? [this.session] : [];
+    return this.extrudeSessions.map((e) => e.session);
   }
 
   private get engine(): ViewportEngine {
@@ -1456,9 +1788,9 @@ export class ModelToolController {
   }
 
   private sendPreview(depth: number): void {
-    if (!this.session) return;
+    if (this.extrudeSessions.length === 0) return;
     const send = this.throttle.request({ distance: depth }, performance.now());
-    if (send) this.client.updatePreview(this.session.sessionId, { distance: send.params.distance }, send.epoch);
+    if (send) for (const es of this.extrudeSessions) this.client.updatePreview(es.session.sessionId, { distance: send.params.distance }, send.epoch);
     this.scheduleTrailing();
   }
 
@@ -1467,33 +1799,45 @@ export class ModelToolController {
     if (this.trailingTimer) return;
     this.trailingTimer = setTimeout(() => {
       this.trailingTimer = null;
-      if (!this.session) return;
+      if (this.extrudeSessions.length === 0) return;
       const send = this.throttle.tick(performance.now());
       if (send) {
-        this.client.updatePreview(this.session.sessionId, { distance: send.params.distance }, send.epoch);
+        for (const es of this.extrudeSessions) this.client.updatePreview(es.session.sessionId, { distance: send.params.distance }, send.epoch);
         this.scheduleTrailing();
       }
     }, 90);
   }
 
   private onPreviewResult(r: PreviewResult): void {
-    if (!this.session || r.sessionId !== this.session.sessionId) return;
+    const idx = this.extrudeSessions.findIndex((e) => e.session.sessionId === r.sessionId);
+    if (idx < 0) return;
+    const es = this.extrudeSessions[idx];
     const now = performance.now();
     if (r.committed) {
       this.committedEpoch = r.epoch;
       this.updateDebug();
       return;
     }
-    const fresh = this.throttle.onResponse(r.epoch, now);
-    if (!fresh) return; // stale drag result — discard
-    this.applyPreviewBody(r);
-    this.lastL2Epoch = r.epoch;
-    const send = this.throttle.tick(now);
-    if (send) this.client.updatePreview(this.session.sessionId, { distance: send.params.distance }, send.epoch);
-    this.updateDebug();
+    if (r.epoch < es.lastAppliedEpoch) return; // per-session out-of-order — drop
+    if (idx === 0) {
+      // The primary session paces the shared throttle (leading-edge + ≤1 in flight).
+      const fresh = this.throttle.onResponse(r.epoch, now);
+      if (!fresh) return; // stale drag result — discard
+      this.applyPreviewBody(r);
+      es.lastAppliedEpoch = r.epoch;
+      this.lastL2Epoch = r.epoch;
+      const send = this.throttle.tick(now);
+      if (send) for (const e of this.extrudeSessions) this.client.updatePreview(e.session.sessionId, { distance: send.params.distance }, send.epoch);
+      this.updateDebug();
+    } else {
+      // Secondary sessions don't touch the throttle; per-session lastAppliedEpoch
+      // is the only staleness guard (they follow the primary's epochs).
+      this.applyPreviewBody(r);
+      es.lastAppliedEpoch = r.epoch;
+    }
   }
 
-  /** Swap the exact L2 body underneath L1 (reuses the meshSync double-buffer). */
+  /** Swap the exact L2 body underneath its L1 prism (reuses the meshSync double-buffer). */
   private applyPreviewBody(r: PreviewResult): void {
     const view = parseMeshPayload(r.mesh);
     const entry = buildBodyObjects(view, r.bodyId, ++this.previewMeshRev);
@@ -1502,99 +1846,162 @@ export class ModelToolController {
   }
 
   /**
-   * Commit the armed extrude (Enter / chip-✓ / click-away — MODEL-HARDEN Wave 1).
-   * Forces the final params out as the newest epoch, then `endPreview(commit)`.
-   * On a throw OR an empty result the tool stays ARMED: a named error hint is shown
-   * and the preview is RE-ARMED (fresh `beginPreview` under the same draft) so the
-   * user's work is never silently lost. A commitGen token guards every await.
+   * Commit the armed extrude (Enter / chip-✓ / click-away — MODEL-HARDEN Wave 1+2).
+   * Sequential per-region loop (N==1 single-region): each session gets its final
+   * params (distance + symmetric + boolean mode/target) as the newest epoch, then
+   * `endPreview(commit)`. The commitGen token is re-checked after EVERY await.
+   *
+   * STOP ON FIRST FAILURE: already-committed regions stay (real rows), the tool
+   * returns to armed, a named hint says which of N failed, and the failed +
+   * remaining regions are re-armed (live preview) so the work is never lost.
+   * On full success the tool waits for ALL new bodies to enter the scene, then
+   * tears down, selects them, and auto-hides the consumed sketch.
    */
   private async confirmExtrude(): Promise<void> {
-    if (!this.session || this.extrude.phase !== "armed") return;
+    if (this.extrudeSessions.length === 0 || this.extrude.phase !== "armed") return;
     const gen = ++this.commitGen;
-    const sessionId = this.session.sessionId;
-    const stalePreviewBodyId = this.session.previewBodyId;
-    const draft = this.extrudeDraft;
     this.extrude = extrudeStep(this.extrude, { kind: "confirm" }).state; // → committing
     toolStore.setState({ phase: "committing" });
-    const now = performance.now();
     const finalDepth = this.extrude.depth;
     const symmetric = this.extrude.symmetric;
+    const booleanMode = this.extrude.booleanMode as FeatureBooleanMode;
+    const targetBodyId = this.extrude.targetBodyId ?? undefined;
+    const total = this.extrudeSessions.length;
+    const committedBodyIds: string[] = [];
 
-    // Force the final params out as the newest epoch, then commit.
-    this.throttle.request({ distance: finalDepth }, now);
-    const send = this.throttle.flush(now);
-    this.commitFinalEpoch = send ? send.epoch : this.throttle.epoch;
-    this.client.updatePreview(sessionId, { distance: finalDepth, extrudeMode: symmetric ? "Symmetric" : "Blind" }, this.commitFinalEpoch);
+    // Subscribe to onBodyLoaded BEFORE committing: a body can enter the scene while
+    // a LATER session is still committing (the doc-changed → mesh-ingest is async),
+    // so a subscription opened only after the loop would miss an early body and hang.
+    const loaded = new Set<string>();
+    this.commitBodyUnsub?.();
+    this.commitBodyUnsub = this.deps.onBodyLoaded((id) => loaded.add(id));
 
-    let res: ApplyOperationResult | null;
-    try {
-      res = await this.client.endPreview(sessionId, true);
-    } catch (e) {
-      if (gen !== this.commitGen) return; // superseded (canceled / tool switched)
-      this.onExtrudeCommitFailed(errMessage(e), stalePreviewBodyId, draft, gen);
-      return;
-    }
-    if (gen !== this.commitGen) return;
-    if (!res || !res.changedBodies[0]) {
-      this.onExtrudeCommitFailed(res?.errorMessage, stalePreviewBodyId, draft, gen);
-      return;
-    }
-    const bodyId = res.changedBodies[0].bodyId;
-    this.commitBodyId = bodyId;
-    this.applyResult(res);
-    // Drop L1 only once the exact body is present in the scene (matching epoch).
-    this.commitBodyUnsub = this.deps.onBodyLoaded((loaded) => {
-      if (loaded !== bodyId) return;
-      this.commitBodyUnsub?.();
-      this.commitBodyUnsub = null;
+    for (let k = 0; k < this.extrudeSessions.length; k++) {
+      const es = this.extrudeSessions[k];
+      // Force this session's final params out as the newest epoch, then commit.
+      const now = performance.now();
+      this.throttle.request({ distance: finalDepth }, now);
+      const send = this.throttle.flush(now);
+      this.commitFinalEpoch = send ? send.epoch : this.throttle.epoch;
+      const params: PreviewParams = { distance: finalDepth, extrudeMode: symmetric ? "Symmetric" : "Blind", booleanMode };
+      if (targetBodyId) params.targetBodyId = targetBodyId;
+      this.client.updatePreview(es.session.sessionId, params, this.commitFinalEpoch);
+
+      let res: ApplyOperationResult | null;
+      try {
+        res = await this.client.endPreview(es.session.sessionId, true);
+      } catch (e) {
+        if (gen !== this.commitGen) return; // superseded (canceled / tool switched)
+        this.commitBodyUnsub?.();
+        this.commitBodyUnsub = null;
+        this.onExtrudeCommitFailed(k, total, errMessage(e), gen);
+        return;
+      }
       if (gen !== this.commitGen) return;
-      this.finishExtrude(bodyId);
-    });
+      if (!res || !res.changedBodies[0]) {
+        this.commitBodyUnsub?.();
+        this.commitBodyUnsub = null;
+        this.onExtrudeCommitFailed(k, total, res?.errorMessage, gen);
+        return;
+      }
+      this.applyResult(res);
+      committedBodyIds.push(res.changedBodies[0].bodyId);
+    }
+    this.finishExtrudeAll(committedBodyIds, gen, loaded);
   }
 
-  /** A failed extrude commit: back to armed, named hint, re-arm the preview. */
-  private onExtrudeCommitFailed(
-    reason: string | undefined,
-    stalePreviewBodyId: string,
-    draft: PreviewDraft | null,
-    gen: number,
-  ): void {
+  /**
+   * A failed extrude commit at region k of `total`: back to armed, named hint, and
+   * re-arm the failed + remaining regions (the committed ones [0..k-1] are dropped).
+   */
+  private onExtrudeCommitFailed(k: number, total: number, reason: string | undefined, gen: number): void {
     this.extrude = extrudeStep(this.extrude, { kind: "commitFailed" }).state; // committing → armed
     toolStore.setState({ phase: "armed" });
-    viewportStore.getState().setStatusHint(
-      reason ? `Extrude failed: ${reason}` : "Extrude failed",
-      { severity: "error", sticky: true },
-    );
-    if (draft) void this.rearmExtrudePreview(draft, stalePreviewBodyId, gen);
+    const msg =
+      total > 1
+        ? `Extrude ${k + 1} of ${total} failed: ${reason ?? "unknown"} — remaining previews kept`
+        : reason
+          ? `Extrude failed: ${reason}`
+          : "Extrude failed";
+    viewportStore.getState().setStatusHint(msg, { severity: "error", sticky: true });
+    void this.rearmRemainingExtrude(k, gen);
     this.updateDebug();
   }
 
-  /** Re-open a preview session under `draft` so a failed commit keeps the work. */
-  private async rearmExtrudePreview(draft: PreviewDraft, stalePreviewBodyId: string, gen: number): Promise<void> {
-    const session = await this.deps.client.beginPreview(draft);
+  /**
+   * Re-arm the failed + remaining regions after a stop-on-failure commit. Sessions
+   * [0..k-1] committed (drop their L1 meshes); session k's lane session was consumed
+   * by `endPreview`, so re-begin a fresh preview for it; [k+1..] keep live sessions.
+   */
+  private async rearmRemainingExtrude(k: number, gen: number): Promise<void> {
+    if (!this.plane) return;
+    for (let i = 0; i < k; i++) removeMesh(this.extrudeSessions[i].session.previewBodyId);
+    const failed = this.extrudeSessions[k];
+    removeMesh(failed.session.previewBodyId);
+    const remaining = this.extrudeSessions.slice(k + 1);
+
+    const freshSession = await this.deps.client.beginPreview(failed.draft);
     if (gen !== this.commitGen) {
-      void this.deps.client.endPreview(session.sessionId, false); // superseded — don't leak
+      void this.deps.client.endPreview(freshSession.sessionId, false); // superseded — don't leak
       return;
     }
-    if (stalePreviewBodyId && stalePreviewBodyId !== session.previewBodyId) removeMesh(stalePreviewBodyId);
-    this.session = session;
+    this.extrudeSessions = [{ ...failed, session: freshSession, lastAppliedEpoch: 0 }, ...remaining];
+
+    const profiles = this.extrudeSessions.map((e) => e.profile);
+    this.centroidWorld = combinedCentroidWorld(this.plane, profiles);
+    this.engine.showExtrudePreviews(this.plane, profiles, this.centroidWorld, this.normal);
+    this.engine.setExtrudeDepth(this.extrude.depth, this.extrude.symmetric);
+    this.engine.setExtrudePreviewTint(this.extrude.booleanMode === "Cut" ? "cut" : "normal");
     this.throttle.reset();
     this.sendPreview(this.extrude.depth);
     this.updateDebug();
   }
 
-  private finishExtrude(bodyId: string | null): void {
+  /**
+   * Wait for ALL committed bodies to enter the scene, then teardown + select.
+   * `loaded` carries the bodies that already arrived DURING the commit loop (via the
+   * pre-loop subscription); the same subscription now also drives completion.
+   */
+  private finishExtrudeAll(bodyIds: string[], gen: number, loaded: Set<string>): void {
+    this.commitBodyId = bodyIds[bodyIds.length - 1] ?? null;
+    const pending = new Set(bodyIds.filter((id) => !loaded.has(id)));
+    const done = (): void => {
+      this.commitBodyUnsub?.();
+      this.commitBodyUnsub = null;
+      if (gen !== this.commitGen) return;
+      this.finishExtrude(bodyIds);
+    };
+    if (pending.size === 0) {
+      done();
+      return;
+    }
+    // Re-point the live subscription at the completion check (it kept filling `loaded`).
+    this.commitBodyUnsub?.();
+    this.commitBodyUnsub = this.deps.onBodyLoaded((id) => {
+      if (!pending.has(id)) return;
+      pending.delete(id);
+      if (pending.size === 0) done();
+    });
+  }
+
+  private finishExtrude(bodyIds: string[]): void {
     this.engine.hideExtrudePreview();
-    if (this.session) removeMesh(this.session.previewBodyId);
+    for (const es of this.extrudeSessions) removeMesh(es.session.previewBodyId);
     this.engine.clearPreviewBody();
     toolChipStore.getState().clear();
-    this.session = null;
-    this.extrudeDraft = null;
+    const consumedSketch = this.lastArmedSketch;
+    const wasReedit = this.extrudeSessions.some((e) => e.draft.params.featureId !== undefined);
+    this.extrudeSessions = [];
     this.extrude = extrudeStep(this.extrude, { kind: "settle" }).state;
+    this.engine.setExtrudePreviewTint("normal");
     this.throttle.reset();
-    if (bodyId) {
-      selectionStore.getState().set([{ kind: "body", id: bodyId }]);
-      viewportStore.getState().setStatusHint("Extruded");
+    this.negativeDragHintShown = false;
+    const uniqueBodyIds = bodyIds.filter((id, i, a) => a.indexOf(id) === i);
+    if (uniqueBodyIds.length > 0) {
+      selectionStore.getState().set(uniqueBodyIds.map((id) => ({ kind: "body" as const, id })));
+      viewportStore.getState().setStatusHint(uniqueBodyIds.length > 1 ? `Extruded ${uniqueBodyIds.length} bodies` : "Extruded");
+      // Consumed sketch auto-hides (Wave 2) — a FRESH arm only (a re-edit keeps it).
+      if (consumedSketch && !wasReedit) documentStore.getState().setVisibility(consumedSketch, false);
     }
     toolStore.getState().setTool("select");
     this.commitBodyId = null;
@@ -1825,7 +2232,11 @@ export class ModelToolController {
       symmetric: this.extrude.symmetric,
       depth: this.extrude.depth,
       angle: this.revolve.angle,
-      sessionId: this.session?.sessionId ?? null,
+      // Wave 2 debug surface: boolean mode + multi-region context.
+      booleanTargetId: this.extrude.targetBodyId ?? this.revolve.targetBodyId ?? null,
+      regionCount: this.extrudeSessions.length || this.revolveRegionIds.length || 1,
+      selectedRegionIds: this.regionPick ? [...this.regionPick.select.selected] : [],
+      sessionId: this.extrudeSessions[0]?.session.sessionId ?? null,
       commitBodyId: this.commitBodyId,
       lastL2Epoch: this.lastL2Epoch,
       finalEpoch: this.commitFinalEpoch,
@@ -1846,6 +2257,20 @@ export class ModelToolController {
       this.cancelRegionPick();
       viewportStore.getState().setStatusHint(null);
       toolStore.getState().setTool("select");
+      return;
+    }
+    // Esc during a boolean target pick steps back to armed(NewBody) — NOT the whole
+    // tool (the Esc ladder tail). Own the key so the global cancel doesn't also fire.
+    if (e.key === "Escape" && (this.extrude.phase === "targetPick" || this.revolve.phase === "targetPick")) {
+      e.preventDefault();
+      e.stopPropagation();
+      this.cancelTargetPick();
+      return;
+    }
+    // Enter during a multi-region select confirms the current selection (≥1).
+    if (e.key === "Enter" && this.regionPick && !isEditableTarget(e.target)) {
+      e.preventDefault();
+      this.confirmRegionSelect();
       return;
     }
     // Enter confirms the armed extrude/revolve (capture phase). Skipped when a chip
@@ -1892,18 +2317,18 @@ export class ModelToolController {
 
   private cancelPreview(): void {
     // Cancel every open extrude preview session (tool switched / Esc). N-session
-    // teardown loops so no lane session leaks (single session in Wave 1's single-
-    // region path; the loop is ready for Wave 2's multi-select N sessions).
+    // teardown loops so no lane session leaks (Wave 2 multi-select; 1 single-region).
     for (const s of this.openPreviewSessions()) {
       void this.client.endPreview(s.sessionId, false);
       removeMesh(s.previewBodyId);
     }
-    this.session = null;
-    this.extrudeDraft = null;
+    this.extrudeSessions = [];
+    this.negativeDragHintShown = false;
     this.commitBodyUnsub?.();
     this.commitBodyUnsub = null;
     this.engine.hideExtrudePreview();
     this.engine.clearPreviewBody();
+    this.engine.setExtrudePreviewTint("normal");
     this.throttle.reset();
     this.extrude = extrudeInit();
     this.dragging = null;
@@ -1951,8 +2376,11 @@ export class ModelToolController {
     this.commitRevolveBodyUnsub = null;
     this.deps.engine.setOrbitSuppressed(false);
     this.engine.hideRevolvePreview();
+    this.engine.setExtrudePreviewTint("normal");
     this.revolve = revolveInit();
     this.revolveProfile = null;
+    this.revolveProfiles = [];
+    this.revolveRegionIds = [];
     this.revolveAxis = null;
     this.revolveAxisLineId = null;
     this.revolveAxisCandidates = [];
@@ -1990,7 +2418,7 @@ export class ModelToolController {
     if (this.trailingTimer) clearTimeout(this.trailingTimer);
     this.commitBodyUnsub?.();
     this.commitRevolveBodyUnsub?.();
-    if (this.session) removeMesh(this.session.previewBodyId);
+    for (const es of this.extrudeSessions) removeMesh(es.session.previewBodyId);
     for (const u of this.unsubs) u();
     this.unsubs.length = 0;
   }
@@ -2010,6 +2438,41 @@ function isEditableTarget(el: EventTarget | null): boolean {
   if (!(el instanceof HTMLElement)) return false;
   const tag = el.tagName;
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
+}
+
+/**
+ * World centroid the drag handle + chip anchor to. A single profile keeps its area
+ * centroid (byte-identical single-region); N profiles use the combined (u,v) bbox
+ * midpoint so the ONE handle sits between all the prisms (Wave 2 multi-select).
+ */
+function combinedCentroidWorld(plane: SketchPlane, profiles: PrismProfile[]): Vec3 {
+  if (profiles.length === 0) return [0, 0, 0];
+  if (profiles.length === 1) {
+    const b = profileBounds(profiles[0]);
+    const c = planePointToWorld(plane, { x: b.centroidU, y: b.centroidV });
+    return [c.x, c.y, c.z];
+  }
+  let minU = Infinity;
+  let maxU = -Infinity;
+  let minV = Infinity;
+  let maxV = -Infinity;
+  for (const p of profiles) {
+    const b = profileBounds(p);
+    if (b.minU < minU) minU = b.minU;
+    if (b.maxU > maxU) maxU = b.maxU;
+    if (b.minV < minV) minV = b.minV;
+    if (b.maxV > maxV) maxV = b.maxV;
+  }
+  const c = planePointToWorld(plane, { x: (minU + maxU) / 2, y: (minV + maxV) / 2 });
+  return [c.x, c.y, c.z];
+}
+
+/** World centroid over N pickable regions (the region-select chip anchor). */
+function regionsCentroidWorld(plane: SketchPlane, regions: SketchRegion[]): Vec3 {
+  const profiles = regions
+    .map((r) => profileFromRegion(r))
+    .filter((p): p is PrismProfile => p !== null);
+  return combinedCentroidWorld(plane, profiles);
 }
 
 /** Perpendicular distance from a plane point (u,v) to the segment a→b. */

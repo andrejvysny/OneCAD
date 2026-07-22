@@ -85,16 +85,21 @@ test("multi-region sketch: picking the non-first region (the rectangle) arms and
 
   const bodiesBefore = await bodyOptions(page).count();
 
-  // Finish → 2 regions (circle + rectangle) → region pick, NOT an instant arm.
+  // Finish → 2 regions (circle + rectangle) → MULTI-select region pick (Wave 2),
+  // NOT an instant arm.
   await page.keyboard.press("Enter");
-  await expect(page.getByText("Select a region to extrude")).toBeVisible();
+  await expect(page.getByText(/^Select regions to extrude/)).toBeVisible();
   // exitSketch() animates the camera BACK to its pre-sketch pose — settle before
   // projecting the click point through it (see the camera-settle note above).
   await waitForCameraSettled(page);
 
-  // Click inside the rectangle's fill → resolves regions[1] (the non-first region).
+  // Click inside the rectangle's fill → TOGGLES regions[1] (the non-first region);
+  // the region-select chip reflects the single selection.
   const clientPt = await planePointToClient(page, snap.plane, centroid);
   await clickAtClient(page, clientPt.x, clientPt.y);
+  await expect(page.getByTestId("chip-region-count")).toHaveText("1 region");
+  // Enter confirms the selection → arms the extrude on that one region.
+  await page.keyboard.press("Enter");
   await expect(page.getByText(/^Drag the arrow to set depth/)).toBeVisible();
 
   // Wave 1 gesture: drag the handle, release (stays armed), Enter confirms.

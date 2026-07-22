@@ -118,7 +118,10 @@ export class ViewportEngine {
   private regionPickLayer: RegionPickLayer | null = null; // multi-region extrude/revolve pick
   private planePicker: PlanePicker | null = null; // origin-plane pick gizmo
   private previewMaterials: BodyMaterials | null = null;
-  private previewBody: BodyObjectHandle | null = null;
+  // One L2 preview body per armed region, keyed by bodyId (N==1 single-region;
+  // N in Wave 2 multi-select). The materials are shared, so a Cut tint hits all.
+  private previewBodies = new Map<string, BodyObjectHandle>();
+  private extrudePreviewCut = false; // Cut tint sticks across preview-body swaps
 
   // Picking + highlighting (mesh ingestion F-WP5).
   private picker: Picker | null = null;
@@ -672,11 +675,20 @@ export class ViewportEngine {
   // ---- Model-tool previews (F-WP7) ----
 
   /**
-   * Show the extrude L1 preview + drag handle for a region: the unit prism on
-   * `plane`, positioned at `centroid` pointing along `normal`. Idempotent — reuses
-   * the objects across arms.
+   * Show the extrude L1 preview + drag handle for a single region: the unit prism
+   * on `plane`, positioned at `centroid` pointing along `normal`. Idempotent —
+   * reuses the objects across arms. Delegates to the plural form (Wave 2).
    */
   showExtrudePreview(plane: SketchPlane, profile: PrismProfile, centroid: Vec3, normal: Vec3): void {
+    this.showExtrudePreviews(plane, [profile], centroid, normal);
+  }
+
+  /**
+   * Show the extrude L1 preview + drag handle for N regions (Wave 2 multi-select):
+   * one unit prism per profile on `plane`, ONE drag handle at the combined
+   * `centroid` pointing along `normal`. Idempotent — reuses the objects across arms.
+   */
+  showExtrudePreviews(plane: SketchPlane, profiles: PrismProfile[], centroid: Vec3, normal: Vec3): void {
     if (this.disposed) return;
     if (!this.previewMesh) {
       this.previewMesh = new PreviewMesh({ root: this.interactionRoot, invalidate: () => this.invalidate() });
@@ -684,7 +696,8 @@ export class ViewportEngine {
     if (!this.dragHandle) {
       this.dragHandle = new DragHandle({ root: this.interactionRoot, invalidate: () => this.invalidate() });
     }
-    this.previewMesh.setProfile(plane, profile);
+    this.previewMesh.setProfiles(plane, profiles);
+    this.previewMesh.setTint(this.extrudePreviewCut);
     this.previewMesh.setVisible(true);
     this.dragHandle.setAnchor(new THREE.Vector3().fromArray(centroid), new THREE.Vector3().fromArray(normal));
     this.dragHandle.setScale(this.planePixelWorld());
@@ -692,9 +705,27 @@ export class ViewportEngine {
     this.invalidate();
   }
 
-  /** Set the live extrude depth on the L1 prism (symmetric grows both ways). */
+  /** Set the live extrude depth on the L1 prism(s) (symmetric grows both ways). */
   setExtrudeDepth(depth: number, symmetric: boolean): void {
     this.previewMesh?.setDepth(depth, symmetric);
+  }
+
+  /**
+   * Tint the extrude/revolve preview (Wave 2 boolean modes): "cut" recolors the L1
+   * prism(s) / lathe shell AND the shared L2 preview-body face material to the
+   * destructive token; "normal" restores the accent. Sticky across preview swaps —
+   * `setPreviewBody` re-applies it. Only one preview kind is live at a time, so
+   * tinting both here is harmless.
+   */
+  setExtrudePreviewTint(tint: "normal" | "cut"): void {
+    const cut = tint === "cut";
+    this.extrudePreviewCut = cut;
+    this.previewMesh?.setTint(cut);
+    this.revolvePreview?.setTint(cut);
+    if (this.previewMaterials) {
+      this.previewMaterials.face.color.copy(cut ? palette.destructive() : palette.bodyNeutral());
+    }
+    this.invalidate();
   }
 
   /** Hover state on the drag handle (does not affect the prism). */
@@ -886,22 +917,27 @@ export class ViewportEngine {
     );
   }
 
-  /** Swap the single L2 preview body (built from a registry entry) under previewRoot. */
+  /**
+   * Swap the L2 preview body for `entry.bodyId` under previewRoot (keyed by bodyId
+   * so Wave 2's N regions each keep their own preview body). Re-applies the current
+   * Cut tint via the shared preview material.
+   */
   setPreviewBody(entry: MeshEntry): void {
     if (this.disposed) return;
     if (!this.previewMaterials) this.previewMaterials = createBodyMaterials();
-    if (this.previewBody) this.previewRoot.remove(this.previewBody.group);
-    this.previewBody = buildBodyObject(entry, this.previewMaterials);
-    this.previewRoot.add(this.previewBody.group);
+    const prev = this.previewBodies.get(entry.bodyId);
+    if (prev) this.previewRoot.remove(prev.group);
+    const handle = buildBodyObject(entry, this.previewMaterials);
+    this.previewBodies.set(entry.bodyId, handle);
+    this.previewRoot.add(handle.group);
+    if (this.extrudePreviewCut) this.previewMaterials.face.color.copy(palette.destructive());
     this.invalidate();
   }
 
-  /** Remove the L2 preview body from the scene (registry entry dropped by the caller). */
+  /** Remove ALL L2 preview bodies from the scene (registry entries dropped by the caller). */
   clearPreviewBody(): void {
-    if (this.previewBody) {
-      this.previewRoot.remove(this.previewBody.group);
-      this.previewBody = null;
-    }
+    for (const handle of this.previewBodies.values()) this.previewRoot.remove(handle.group);
+    this.previewBodies.clear();
     this.invalidate();
   }
 
@@ -1000,6 +1036,11 @@ export class ViewportEngine {
     this.regionPickLayer?.setHover(id);
   }
 
+  /** Tint the currently-selected regions (Wave 2 multi-select; empty clears). */
+  setRegionSelected(ids: string[]): void {
+    this.regionPickLayer?.setSelected(ids);
+  }
+
   /** True while the region-pick layer is visible (gate/introspection probe). */
   isRegionPickVisible(): boolean {
     return this.regionPickLayer?.visible ?? false;
@@ -1055,8 +1096,8 @@ export class ViewportEngine {
     this.regionPickLayer = null;
     this.planePicker?.dispose();
     this.planePicker = null;
-    if (this.previewBody) this.previewRoot.remove(this.previewBody.group);
-    this.previewBody = null;
+    for (const handle of this.previewBodies.values()) this.previewRoot.remove(handle.group);
+    this.previewBodies.clear();
     this.previewMaterials?.dispose();
     this.previewMaterials = null;
 

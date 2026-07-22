@@ -147,6 +147,60 @@ describe("ModelToolChips (M6b)", () => {
     expect(h.onConfirm).toHaveBeenCalledTimes(1); // then confirm, exactly once
   });
 
+  // ── Wave 2: the New Body / Add / Cut segment group ──────────────────────────
+
+  it("renders the boolean segment group and fires onBooleanMode on a pick", () => {
+    const h = { ...extrudeHandlers(), onBooleanMode: vi.fn() };
+    render(<ModelToolChips />);
+    act(() =>
+      toolChipStore.getState().showExtrude(10, WORLD, h, {
+        showBooleanSegments: true,
+        canBoolean: true,
+        booleanMode: "NewBody",
+      }),
+    );
+
+    expect(screen.getByTestId("chip-bool-newbody")).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByTestId("chip-bool-cut"));
+    expect(h.onBooleanMode).toHaveBeenCalledWith("Cut");
+  });
+
+  it("disables Add/Cut (title 'Needs an existing body') when no boolean target exists", () => {
+    render(<ModelToolChips />);
+    act(() =>
+      toolChipStore.getState().showExtrude(10, WORLD, { ...extrudeHandlers(), onBooleanMode: vi.fn() }, {
+        showBooleanSegments: true,
+        canBoolean: false,
+      }),
+    );
+    expect(screen.getByTestId("chip-bool-add")).toBeDisabled();
+    expect(screen.getByTestId("chip-bool-cut")).toBeDisabled();
+    expect(screen.getByTestId("chip-bool-newbody")).not.toBeDisabled();
+    expect(screen.getByRole("group", { name: "Boolean mode" })).toHaveAttribute("title", "Needs an existing body");
+  });
+
+  it("omits the boolean segment group in a re-edit cluster (showBooleanSegments off)", () => {
+    render(<ModelToolChips />);
+    act(() => toolChipStore.getState().showExtrude(10, WORLD, extrudeHandlers(), { showBooleanSegments: false }));
+    expect(screen.queryByTestId("chip-bool-cut")).toBeNull();
+  });
+
+  it("region-select chip renders the count + confirm / cancel", () => {
+    const onConfirm = vi.fn();
+    const onCancel = vi.fn();
+    render(<ModelToolChips />);
+    act(() => toolChipStore.getState().showRegionSelect(2, WORLD, { onConfirm, onCancel }));
+
+    expect(screen.getByTestId("chip-region-count")).toHaveTextContent("2 regions");
+    act(() => toolChipStore.getState().setCount(1));
+    expect(screen.getByTestId("chip-region-count")).toHaveTextContent("1 region");
+
+    fireEvent.click(screen.getByTestId("chip-confirm"));
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByTestId("chip-cancel"));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
   it("armed revolve cluster: degree value + Axis reset + ✓/✕ dispatch through the handlers", () => {
     const h = { onValue: vi.fn(), onResetAxis: vi.fn(), onConfirm: vi.fn(), onCancel: vi.fn() };
     render(<ModelToolChips />);

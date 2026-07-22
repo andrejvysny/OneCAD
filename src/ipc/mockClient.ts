@@ -36,7 +36,7 @@ import type {
 } from "./types";
 import type { WireEditCommand } from "./tauriCommandMap";
 import { wireParamsOf } from "./tauriCommandMap";
-import { makeBoxMesh, makeCylinderMesh, makeExtrudeBodyMesh, makeRevolveBodyMesh } from "./mockMeshes";
+import { concatMesh1, makeBoxMesh, makeCylinderMesh, makeExtrudeBodyMesh, makeRevolveBodyMesh } from "./mockMeshes";
 import type { LatheAxis } from "@/tools/preview/lathePreview";
 import { createLocalSolverLane } from "./localSolver";
 import { planeFor, solveDof } from "./mockSketch";
@@ -247,6 +247,32 @@ function fallbackRevolveAxis(ring: [number, number][]): LatheAxis {
   return { a: [x, minV], b: [x, maxV] };
 }
 
+/**
+ * Boolean-mode suffix for a feature-mode Add/Cut/Intersect extrude/revolve label
+ * ("Extrude (Cut)" etc). NewBody → no suffix.
+ *
+ * MOCK BOOLEAN LIMIT (documented honestly): the mock has no CSG. "Add" is a NAIVE
+ * VISUAL CONCAT — the new prism/lathe mesh is appended to the target body's mesh
+ * (concatMesh1), so the target visibly grows but no shared boundary is removed.
+ * "Cut"/"Intersect" are geometry NO-OPS — the target mesh is left unchanged and
+ * only a feature row is added. Every boolean mode reports `changedBodies:[target]`
+ * and creates NO new body. The e2e specs assert history rows + body-diff, never
+ * the resulting geometry, so this stand-in is sufficient (real CSG is OCCT's job).
+ */
+function booleanSuffix(mode: string | undefined): string {
+  return mode === "Add" || mode === "Cut" || mode === "Intersect" ? ` (${mode})` : "";
+}
+
+/**
+ * Whether a boolean target id names a body the mock knows — either a mock-synthesized
+ * body (created via a prior op) OR a projection body (e.g. the seeded Body 1). A
+ * synthetic mesh is required only for an Add concat; a Cut/Intersect no-op just needs
+ * a valid id. An unknown id falls back to a fresh NewBody op.
+ */
+function booleanTargetKnown(target: string | undefined): target is string {
+  return !!target && (syntheticBodies.has(target) || documentStore.getState().bodies[target] !== undefined);
+}
+
 /** Apply one op forward (mutates features + bodies); returns the body diff. */
 function mutateOp(op: OperationOp): {
   changed: string[];
@@ -257,6 +283,22 @@ function mutateOp(op: OperationOp): {
   if (op.opType === "Extrude") {
     const { plane, profile } = lane.resolveExtrudeInput(op.sketchId, op.regionId);
     const distance = op.params.distance ?? 10;
+    const booleanMode = op.params.booleanMode ?? "NewBody";
+    const target = op.params.targetBodyId;
+    // Feature-mode boolean (Add/Cut/Intersect against an existing body): changes the
+    // TARGET, creates no new body (mock CSG limit — see booleanSuffix).
+    if (booleanMode !== "NewBody" && booleanTargetKnown(target)) {
+      // Add grows the target mesh (naive concat) IF the target has a synthetic mesh;
+      // Cut/Intersect leave geometry untouched.
+      if (booleanMode === "Add" && syntheticBodies.has(target)) {
+        syntheticBodies.set(target, concatMesh1(syntheticBodies.get(target)!, makeExtrudeBodyMesh(profile, plane, distance)));
+      }
+      const featureId = op.featureId ?? nextFeatureId();
+      const label = `Extrude${booleanSuffix(booleanMode)}`;
+      const valueText = `${Math.abs(distance).toFixed(1)} mm`;
+      mockFeatures = [...mockFeatures, { id: featureId, kind: "extrude", label, valueText, status: "ok" }];
+      return { changed: [target], removed: [], label, featureId };
+    }
     const editing = op.featureId !== undefined && featureBodies.has(op.featureId);
     const featureId = op.featureId ?? nextFeatureId();
     const bodyId = editing ? featureBodies.get(featureId)! : nextBodyId();
@@ -280,6 +322,19 @@ function mutateOp(op: OperationOp): {
     // Fall back to a vertical axis just left of the profile so a body still forms
     // (re-edit carries no axis; the mock only needs a deterministic revolve).
     const axis = axisLine ?? fallbackRevolveAxis(profile.ring);
+    const booleanMode = op.params.booleanMode ?? "NewBody";
+    const target = op.params.targetBodyId;
+    // Feature-mode boolean revolve (see the Extrude branch + booleanSuffix).
+    if (booleanMode !== "NewBody" && booleanTargetKnown(target)) {
+      if (booleanMode === "Add" && syntheticBodies.has(target)) {
+        syntheticBodies.set(target, concatMesh1(syntheticBodies.get(target)!, makeRevolveBodyMesh(profile.ring, axis, plane, angle)));
+      }
+      const featureId = op.featureId ?? nextFeatureId();
+      const label = `Revolve${booleanSuffix(booleanMode)}`;
+      const valueText = `${Math.round(Math.abs(angle))}°`;
+      mockFeatures = [...mockFeatures, { id: featureId, kind: "revolve", label, valueText, status: "ok" }];
+      return { changed: [target], removed: [], label, featureId };
+    }
     const editing = op.featureId !== undefined && featureBodies.has(op.featureId);
     const featureId = op.featureId ?? nextFeatureId();
     const bodyId = editing ? featureBodies.get(featureId)! : nextBodyId();

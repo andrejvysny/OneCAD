@@ -91,8 +91,22 @@ describe("RegionPickLayer tint", () => {
     expect(mat("r1").color.getHex()).toBe(palette.hoverAccent().getHex());
     expect(mat("r1").opacity).toBeGreaterThan(mat("r0").opacity);
 
-    layer.setSelected("r0");
+    layer.setSelected(["r0"]);
     expect(mat("r0").color.getHex()).toBe(palette.selectedEdge().getHex());
+  });
+
+  it("tints MULTIPLE selected regions (Wave 2 multi-select)", () => {
+    const { layer, root } = makeLayer();
+    layer.setPlane(IDENTITY_PLANE);
+    layer.setRegions([R0, R1]);
+    const mat = (id: string) => meshFor(root, id).material as THREE.MeshBasicMaterial;
+
+    layer.setSelected(["r0", "r1"]);
+    expect(mat("r0").color.getHex()).toBe(palette.selectedEdge().getHex());
+    expect(mat("r1").color.getHex()).toBe(palette.selectedEdge().getHex());
+
+    layer.setSelected([]); // clears back to neutral
+    expect(mat("r0").color.getHex()).toBe(palette.bodyNeutral().getHex());
   });
 });
 
