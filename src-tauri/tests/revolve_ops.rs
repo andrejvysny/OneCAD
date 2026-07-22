@@ -1,0 +1,829 @@
+//! MODEL-HARDEN W3 Revolve wire gate against the REAL C++ OCCT worker, driven
+//! through the app's [`DocumentRuntime`] exactly like `wire_contract.rs` /
+//! `breadth_ops.rs`.
+//!
+//! First-ever real-worker Rust integration coverage for Revolve — proves the whole
+//! Rust wire → worker dispatch → OCCT → adoption/mesh path for every Revolve shape:
+//! * `revolve_new_body_pappus_volume` — 360° NewBody, a 10×10 rect at radius 15 from
+//!   a sketch-line axis ⇒ exactly 1 body, Pappus volume 2π·15·100 ≈ 9424.78.
+//! * `revolve_partial_angle_half_volume` — the same profile at 180° ⇒ half the
+//!   Pappus volume, with the swept solid sitting on ONE side of the axis-normal
+//!   (a half-revolution's sign structure).
+//! * `revolve_cut_split_children_adopted` — a boolean-mode Revolve Cut whose result
+//!   is a two-solid compound mints deterministic split children `body_<opId>:<k>`,
+//!   both adopted (D1), parent consumed; exact 8000 / 8800 box arithmetic; ids +
+//!   volumes stable across a replay.
+//! * `revolve_stale_axis_fails_loud` — a nonexistent axis lineId ⇒ NO silent body,
+//!   NO panic: the revolve step's timeline state is `Error` and its projection
+//!   `FeatureDto` carries the worker's axis message (`statusMessage`, W0.5 contract).
+//! * `revolve_region_binding_explicit_and_fallback` — one revolve bound to an
+//!   explicit normative `regionId` (fetched from the solver lane, the exact source
+//!   `finish_sketch` reads) and one bound to `""` (first-region fallback) both
+//!   publish a body.
+//!
+//! The revolve mesh-volume expectations for the CURVED solids (Pappus / half) are
+//! FINE-lod faceting bounds, NOT exactness assertions — BRep-exact volume lives in
+//! the worker ctest (`test_wp6_ops` / `test_revolve_split`, `ShapeMetrics`); the
+//! Rust-side mesh assertion proves the wire/adoption path, not tessellation
+//! accuracy. The split children are PLANAR boxes, so their mesh volume IS exact.
+//!
+//! Provenance: Pappus numbers cite `worker/tests/test_wp6_ops.cpp:165-201`; the
+//! Cut-split geometry + frame mapping + child volumes cite
+//! `worker/tests/test_revolve_split.cpp` (reused verbatim).
+//!
+//! Gated on `ONECAD_WORKER_PATH` (else the dev-tree fallback); a missing binary
+//! skips cleanly unless `ONECAD_REQUIRE_WORKER=1` (CI hard-fails).
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use uuid::Uuid;
+
+use onecad_core::document::body::split_child_uuid;
+use onecad_core::document::record::{
+    BooleanMode, ExtrudeMode, ExtrudeParams, KnownOperation, Operation, OperationRecord, PlaneKind,
+    RevolveParams, SketchOpParams, SketchPlaneRef,
+};
+use onecad_core::document::refs::{AxisRef, SketchRegionRef};
+use onecad_core::document::variables::Scalar;
+use onecad_core::edit::EditCommand;
+use onecad_core::ids::{BodyId, ConstraintId, EntityId, RecordId, RegionId, SketchId};
+use onecad_core::math::{Vec2, Vec3};
+use onecad_core::regen::{CancelToken, GeometryEngine, Lod, ModelSnapshot, Outcome, RegenRequest};
+use onecad_core::sketch::{Constraint, Sketch, SketchEntity, WorldPlane};
+
+use onecad_lib::document_runtime::{DocumentRuntime, RegenReport};
+use onecad_lib::dto::FeatureStatus;
+use onecad_lib::worker::manager::SupervisorConfig;
+use onecad_lib::worker::wire::sketch_wire;
+use onecad_lib::worker::{resolve_worker_path, MeshProvider, SolverEngine, WorkerManager};
+
+use onecad_protocol::mesh::{f32_le, u32_le, validate_mesh_blob, MeshHeaderView};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Harness (mirrors wire_contract.rs / breadth_ops.rs)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn real_worker() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("ONECAD_WORKER_PATH") {
+        let path = PathBuf::from(&p);
+        assert!(
+            path.is_file(),
+            "ONECAD_WORKER_PATH={p:?} is set but no worker binary exists there \
+             (misconfiguration — refusing to skip as green)"
+        );
+        return Some(path);
+    }
+    if let Some(path) = resolve_worker_path() {
+        return Some(path);
+    }
+    assert!(
+        std::env::var("ONECAD_REQUIRE_WORKER").as_deref() != Ok("1"),
+        "ONECAD_REQUIRE_WORKER=1 but no worker binary resolved (CI must hard-fail here)"
+    );
+    None
+}
+
+async fn spawn_worker(bin: PathBuf) -> WorkerManager {
+    let wm = WorkerManager::spawn(SupervisorConfig::production(bin));
+    assert!(
+        wm.wait_ready(Duration::from_secs(10)).await,
+        "real worker must connect + handshake + OpenSession"
+    );
+    wm
+}
+
+fn runtime_over(wm: &WorkerManager) -> DocumentRuntime {
+    let engine: Arc<dyn GeometryEngine> = Arc::new(wm.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
+    DocumentRuntime::new_blank(engine, meshes, solver)
+}
+
+fn add_op(rt: &mut DocumentRuntime, record: OperationRecord) {
+    rt.apply(EditCommand::AddOperation {
+        record,
+        at_cursor: true,
+    })
+    .expect("AddOperation");
+}
+
+async fn regen_all(rt: &mut DocumentRuntime) -> RegenReport {
+    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await
+}
+
+fn published<'a>(report: &'a RegenReport, what: &str) -> &'a Arc<ModelSnapshot> {
+    match &report.outcome {
+        Outcome::Published(s) => s,
+        other => panic!("{what}: expected Published, got {other:?}"),
+    }
+}
+
+fn body_of(rec: u128) -> BodyId {
+    BodyId(Uuid::from_u128(rec))
+}
+
+// Fixed record ids.
+const SKETCH_A: u128 = 0xA00; // box A / profile sketch
+const EXTRUDE_A: u128 = 0xA01; // box A body producer
+const SKETCH_TOOL: u128 = 0xB00; // revolve tool sketch (Cut test)
+const REVOLVE: u128 = 0xB01; // the revolve op
+const REVOLVE_2: u128 = 0xB02; // a second revolve (region-binding test)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sketch plane refs. The worker's `parse_plane` (WireSketch.cpp:107-110) uses its
+// OWN canonical frame for a NAMED plane kind and ignores the explicit axes — so
+// only `kind` is load-bearing on the wire. The axes below are the matching
+// canonical frames (documentation), verified against test_revolve_split.cpp:
+//   XY: toWorld(u,v) = (-v,  u, 0)   XZ: toWorld(u,v) = (0, u, v)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn xy_plane_ref() -> SketchPlaneRef {
+    SketchPlaneRef {
+        kind: PlaneKind::Xy,
+        origin: Vec3::new_unchecked(0.0, 0.0, 0.0),
+        x_axis: Vec3::new_unchecked(0.0, 1.0, 0.0),
+        y_axis: Vec3::new_unchecked(-1.0, 0.0, 0.0),
+        normal: Vec3::new_unchecked(0.0, 0.0, 1.0),
+        extra: Default::default(),
+    }
+}
+
+fn xz_plane_ref() -> SketchPlaneRef {
+    SketchPlaneRef {
+        kind: PlaneKind::Xz,
+        origin: Vec3::new_unchecked(0.0, 0.0, 0.0),
+        x_axis: Vec3::new_unchecked(0.0, 1.0, 0.0),
+        y_axis: Vec3::new_unchecked(0.0, 0.0, 1.0),
+        normal: Vec3::new_unchecked(1.0, 0.0, 0.0),
+        extra: Default::default(),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sketch + op record builders (rect_sketch verbatim from wire_contract.rs)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A fully-constrained (dof 0) rectangle at sketch-space `(x0, y0)`, size `w × h`,
+/// built the marshaller way (8 points, 4 lines, coincident corners, H/V, a Fixed
+/// anchor, H/V dimensions). Identical to `wire_contract::rect_sketch`.
+fn rect_sketch(sid: SketchId, base: u128, x0: f64, y0: f64, w: f64, h: f64) -> Sketch {
+    let e = |n: u128| EntityId(Uuid::from_u128(base + n));
+    let c = |n: u128| ConstraintId(Uuid::from_u128(base + 0x40 + n));
+    let (p0s, p0e) = (e(0), e(1));
+    let (p1s, p1e) = (e(2), e(3));
+    let (p2s, p2e) = (e(4), e(5));
+    let (p3s, p3e) = (e(6), e(7));
+    let (l0, l1, l2, l3) = (e(0x10), e(0x11), e(0x12), e(0x13));
+
+    let mut sk = Sketch::on_world_plane(sid, "Rect", WorldPlane::XY);
+    let pt = |sk: &mut Sketch, id: EntityId, x: f64, y: f64| {
+        sk.add_entity(SketchEntity::point(
+            id,
+            Vec2::new_unchecked(x, y),
+            false,
+            false,
+        ))
+        .unwrap();
+    };
+    pt(&mut sk, p0s, x0, y0);
+    pt(&mut sk, p0e, x0 + w, y0);
+    pt(&mut sk, p1s, x0 + w, y0);
+    pt(&mut sk, p1e, x0 + w, y0 + h);
+    pt(&mut sk, p2s, x0 + w, y0 + h);
+    pt(&mut sk, p2e, x0, y0 + h);
+    pt(&mut sk, p3s, x0, y0 + h);
+    pt(&mut sk, p3e, x0, y0);
+    sk.add_entity(SketchEntity::line(l0, p0s, p0e, false))
+        .unwrap();
+    sk.add_entity(SketchEntity::line(l1, p1s, p1e, false))
+        .unwrap();
+    sk.add_entity(SketchEntity::line(l2, p2s, p2e, false))
+        .unwrap();
+    sk.add_entity(SketchEntity::line(l3, p3s, p3e, false))
+        .unwrap();
+
+    let coincident = |sk: &mut Sketch, id, a, b| {
+        sk.add_constraint(Constraint::Coincident {
+            id,
+            point1: a,
+            point2: b,
+        })
+        .unwrap();
+    };
+    coincident(&mut sk, c(1), p0e, p1s);
+    coincident(&mut sk, c(2), p1e, p2s);
+    coincident(&mut sk, c(3), p2e, p3s);
+    coincident(&mut sk, c(4), p3e, p0s);
+    sk.add_constraint(Constraint::Horizontal { id: c(5), line: l0 })
+        .unwrap();
+    sk.add_constraint(Constraint::Horizontal { id: c(6), line: l2 })
+        .unwrap();
+    sk.add_constraint(Constraint::Vertical { id: c(7), line: l1 })
+        .unwrap();
+    sk.add_constraint(Constraint::Vertical { id: c(8), line: l3 })
+        .unwrap();
+    sk.add_constraint(Constraint::Fixed {
+        id: c(9),
+        point: p0s,
+        at: Vec2::new_unchecked(x0, y0),
+    })
+    .unwrap();
+    sk.add_constraint(Constraint::HorizontalDistance {
+        id: c(10),
+        point1: p0s,
+        point2: p0e,
+        value: Scalar::new(w),
+    })
+    .unwrap();
+    sk.add_constraint(Constraint::VerticalDistance {
+        id: c(11),
+        point1: p1s,
+        point2: p1e,
+        value: Scalar::new(h),
+    })
+    .unwrap();
+    sk
+}
+
+/// A `rect_sketch` PLUS a separate, fully-fixed revolve axis line at constant
+/// sketch-`u` `ax_u`, spanning `v ∈ [ax_v0, ax_v1]`. The axis is a plain (open)
+/// line: it participates in NO closed loop, so region detection ignores it (proven
+/// in `test_revolve_split.cpp`, where `taxis` is likewise a plain line), yet it is
+/// still a resolvable `SketchLine` for the revolve axis. Returns `(sketch, axis
+/// line EntityId)` for `AxisRef::SketchLine`. `axis` is `(ax_u, ax_v0, ax_v1)` — a
+/// constant-`u` line spanning `v ∈ [ax_v0, ax_v1]`.
+fn rect_with_axis_sketch(
+    sid: SketchId,
+    base: u128,
+    x0: f64,
+    y0: f64,
+    w: f64,
+    h: f64,
+    axis: (f64, f64, f64),
+) -> (Sketch, EntityId) {
+    let (ax_u, ax_v0, ax_v1) = axis;
+    let mut sk = rect_sketch(sid, base, x0, y0, w, h);
+    let e = |n: u128| EntityId(Uuid::from_u128(base + n));
+    let c = |n: u128| ConstraintId(Uuid::from_u128(base + 0x40 + n));
+    let (a_s, a_e, a_line) = (e(0x20), e(0x21), e(0x22));
+    sk.add_entity(SketchEntity::point(
+        a_s,
+        Vec2::new_unchecked(ax_u, ax_v0),
+        false,
+        false,
+    ))
+    .unwrap();
+    sk.add_entity(SketchEntity::point(
+        a_e,
+        Vec2::new_unchecked(ax_u, ax_v1),
+        false,
+        false,
+    ))
+    .unwrap();
+    sk.add_entity(SketchEntity::line(a_line, a_s, a_e, false))
+        .unwrap();
+    // Pin both endpoints so the worker's solve places the axis deterministically.
+    sk.add_constraint(Constraint::Fixed {
+        id: c(0x20),
+        point: a_s,
+        at: Vec2::new_unchecked(ax_u, ax_v0),
+    })
+    .unwrap();
+    sk.add_constraint(Constraint::Fixed {
+        id: c(0x21),
+        point: a_e,
+        at: Vec2::new_unchecked(ax_u, ax_v1),
+    })
+    .unwrap();
+    (sk, a_line)
+}
+
+fn sketch_record(rec: u128, sk: &Sketch, plane: SketchPlaneRef) -> OperationRecord {
+    let (_plane, entities, constraints) = sketch_wire(sk);
+    let params = SketchOpParams {
+        sketch: sk.id,
+        plane,
+        entities: entities.as_array().cloned().unwrap_or_default(),
+        constraints: constraints.as_array().cloned().unwrap_or_default(),
+        extra: Default::default(),
+    };
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "Sketch",
+        Operation::Known(KnownOperation::Sketch(params)),
+    )
+}
+
+fn extrude_record(rec: u128, sketch: SketchId, dist: f64) -> OperationRecord {
+    let params = ExtrudeParams {
+        profile: Some(SketchRegionRef {
+            sketch,
+            region: RegionId::new(""), // first-region fallback
+            extra: Default::default(),
+        }),
+        distance: Scalar::new(dist),
+        draft_angle_deg: Scalar::new(0.0),
+        mode: ExtrudeMode::Blind,
+        boolean_mode: BooleanMode::NewBody,
+        target_body: None,
+        target_face: None,
+        two_directions: false,
+        mode2: ExtrudeMode::Blind,
+        distance2: Scalar::new(0.0),
+        target_face2: None,
+        extra: Default::default(),
+    };
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "Extrude",
+        Operation::Known(KnownOperation::Extrude(params)),
+    )
+}
+
+/// A Revolve op. `region` is `""` for the first-region fallback or a normative
+/// `regionId`; `axis_line` is the axis `SketchLine`'s lineId inside `sketch`.
+fn revolve_record(
+    rec: u128,
+    sketch: SketchId,
+    region: &str,
+    angle_deg: f64,
+    axis_line: EntityId,
+    boolean: BooleanMode,
+    target: Option<BodyId>,
+) -> OperationRecord {
+    let params = RevolveParams {
+        profile: Some(SketchRegionRef {
+            sketch,
+            region: RegionId::new(region),
+            extra: Default::default(),
+        }),
+        angle_deg: Scalar::new(angle_deg),
+        axis: Some(AxisRef::SketchLine {
+            sketch,
+            line: axis_line,
+            extra: Default::default(),
+        }),
+        boolean_mode: boolean,
+        target_body: target,
+        extra: Default::default(),
+    };
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "Revolve",
+        Operation::Known(KnownOperation::Revolve(params)),
+    )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MESH1 geometry helpers (from wire_contract.rs)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SEC_POSITIONS: u32 = 1;
+const SEC_INDICES: u32 = 3;
+
+fn vertex(blob: &[u8], pbase: usize, i: usize) -> [f64; 3] {
+    let o = pbase + i * 12;
+    [
+        f32_le(blob, o) as f64,
+        f32_le(blob, o + 4) as f64,
+        f32_le(blob, o + 8) as f64,
+    ]
+}
+
+/// Signed volume via the divergence theorem — EXACT for a closed, planar-faced
+/// polyhedron; for a faceted CURVED solid it is the inscribed-mesh volume (an
+/// under-estimate of the true BRep volume).
+fn mesh_volume(view: &MeshHeaderView, blob: &[u8]) -> f64 {
+    let pos = view.section(SEC_POSITIONS).expect("POSITIONS");
+    let idx = view.section(SEC_INDICES).expect("INDICES");
+    let (pbase, ibase) = (pos.offset as usize, idx.offset as usize);
+    let mut vol6 = 0.0f64;
+    for t in 0..view.triangle_count as usize {
+        let o = ibase + t * 12;
+        let a = vertex(blob, pbase, u32_le(blob, o) as usize);
+        let b = vertex(blob, pbase, u32_le(blob, o + 4) as usize);
+        let c = vertex(blob, pbase, u32_le(blob, o + 8) as usize);
+        vol6 += a[0] * (b[1] * c[2] - b[2] * c[1])
+            + a[1] * (b[2] * c[0] - b[0] * c[2])
+            + a[2] * (b[0] * c[1] - b[1] * c[0]);
+    }
+    (vol6 / 6.0).abs()
+}
+
+fn bbox_dims(view: &MeshHeaderView) -> [f64; 3] {
+    [
+        f64::from(view.bbox_max[0] - view.bbox_min[0]),
+        f64::from(view.bbox_max[1] - view.bbox_min[1]),
+        f64::from(view.bbox_max[2] - view.bbox_min[2]),
+    ]
+}
+
+async fn body_mesh(rt: &mut DocumentRuntime, body: BodyId, lod: Lod) -> Arc<Vec<u8>> {
+    rt.get_mesh(body, lod, None).await.expect("fetch body mesh")
+}
+
+async fn mesh_vol(rt: &mut DocumentRuntime, body: BodyId, lod: Lod) -> f64 {
+    let mesh = body_mesh(rt, body, lod).await;
+    let view = validate_mesh_blob(&mesh).expect("child MESH1 validates");
+    mesh_volume(&view, &mesh)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. NewBody Pappus volume — 10×10 rect at radius 15, 360° ⇒ 2π·15·100 ≈ 9424.78.
+//    (Provenance: worker/tests/test_wp6_ops.cpp:165-199.)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revolve_new_body_pappus_volume() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    // XY plane toWorld(u,v)=(-v,u,0): rect u∈[10,20] v∈[0,10] → world x∈[-10,0],
+    // y∈[10,20], z=0 (area 100, centroid world-y = 15 ⇒ radius 15 from the u=0
+    // axis, which maps to the world X-axis). 360° ⇒ V = 2π·15·100 = 9424.78.
+    let sid = SketchId(Uuid::from_u128(0xA));
+    let (sk, axis) = rect_with_axis_sketch(sid, 0x1000, 10.0, 0.0, 10.0, 10.0, (0.0, -5.0, 15.0));
+    add_op(&mut rt, sketch_record(SKETCH_A, &sk, xy_plane_ref()));
+    add_op(
+        &mut rt,
+        revolve_record(REVOLVE, sid, "", 360.0, axis, BooleanMode::NewBody, None),
+    );
+
+    let rep = regen_all(&mut rt).await;
+    let snap = published(&rep, "pappus revolve");
+    assert_eq!(
+        snap.bodies.len(),
+        1,
+        "360° NewBody revolve = exactly 1 body"
+    );
+
+    // FINE lod (0.5% linear / 0.2 rad angular, Tessellate.cpp:44). This asserts the
+    // wire/adoption path, NOT tessellation accuracy: a revolved (curved) solid's
+    // faceted mesh UNDER-estimates the true volume (inscribed facets). BRep-exact
+    // volume is ctest's job (test_wp6_ops, ShapeMetrics, ±30 on 9424.78). The bound
+    // below carries ≥2× headroom over the observed fine-mesh faceting deficit:
+    // observed vol 9409.161 ⇒ deficit 15.617 (0.17%), so 40.0 is ≈2.6× — tight
+    // enough to still fail a real regression (a 1% volume error = ~94 > 40).
+    const PAPPUS: f64 = 9424.778; // 2π·15·100
+    let vol = mesh_vol(&mut rt, body_of(REVOLVE), Lod::Fine).await;
+    eprintln!(
+        "pappus 360°: fine-mesh volume {vol:.3} vs BRep {PAPPUS:.3} (faceting deficit {:.3})",
+        PAPPUS - vol
+    );
+    assert!(
+        (vol - PAPPUS).abs() < 40.0,
+        "fine-mesh revolve volume within faceting tolerance of Pappus 9424.78, got {vol}"
+    );
+
+    wm.shutdown().await;
+    eprintln!("Revolve NewBody PASS: 1 body, fine-mesh volume {vol:.3} ≈ Pappus 9424.78");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2. Partial 180° ⇒ half the Pappus volume; the swept solid is ONE-SIDED along the
+//    axis-normal it sweeps into (a half-revolution's sign structure).
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revolve_partial_angle_half_volume() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    // Same profile as the Pappus test; 180° ⇒ V = π·15·100 = 4712.39. The profile
+    // sits in the world z=0 plane at world-y ∈ [10,20], revolved about the world
+    // X-axis: at angle θ a profile point (y₀, z=0) maps to (y₀·cosθ, y₀·sinθ). Over
+    // θ∈[0,180°] cosθ spans [-1,1] ⇒ Y is FULL/symmetric [±20]; sinθ ≥ 0 ⇒ Z is
+    // ONE-SIDED (only [0,20] or, if the axis direction flips the sweep, [-20,0]).
+    let sid = SketchId(Uuid::from_u128(0xA));
+    let (sk, axis) = rect_with_axis_sketch(sid, 0x1000, 10.0, 0.0, 10.0, 10.0, (0.0, -5.0, 15.0));
+    add_op(&mut rt, sketch_record(SKETCH_A, &sk, xy_plane_ref()));
+    add_op(
+        &mut rt,
+        revolve_record(REVOLVE, sid, "", 180.0, axis, BooleanMode::NewBody, None),
+    );
+
+    let rep = regen_all(&mut rt).await;
+    let snap = published(&rep, "half revolve");
+    assert_eq!(
+        snap.bodies.len(),
+        1,
+        "180° NewBody revolve = exactly 1 body"
+    );
+
+    let mesh = body_mesh(&mut rt, body_of(REVOLVE), Lod::Fine).await;
+    let view = validate_mesh_blob(&mesh).expect("half-revolve MESH1 validates");
+    let vol = mesh_volume(&view, &mesh);
+    let dims = bbox_dims(&view);
+    let (ymin, ymax) = (f64::from(view.bbox_min[1]), f64::from(view.bbox_max[1]));
+    let (zmin, zmax) = (f64::from(view.bbox_min[2]), f64::from(view.bbox_max[2]));
+
+    // Half the Pappus volume, same fine-mesh faceting regime. Observed vol 4704.823
+    // ⇒ deficit 7.566 (0.16%), so 20.0 is ≈2.6× headroom (same regime as the 360°).
+    const HALF_PAPPUS: f64 = 4712.389; // π·15·100
+    eprintln!(
+        "half 180°: fine-mesh volume {vol:.3} vs BRep {HALF_PAPPUS:.3} (deficit {:.3}); \
+         bbox y[{ymin:.2},{ymax:.2}] z[{zmin:.2},{zmax:.2}] dims {dims:?}",
+        HALF_PAPPUS - vol
+    );
+    assert!(
+        (vol - HALF_PAPPUS).abs() < 20.0,
+        "fine-mesh half-revolve volume within faceting tolerance of π·15·100, got {vol}"
+    );
+
+    // Y is (nearly) symmetric about the axis: [-20, +20].
+    assert!(
+        (ymin + 20.0).abs() < 2.0 && (ymax - 20.0).abs() < 2.0,
+        "the profile-containing axis-normal (world Y) spans the full ±20, got [{ymin},{ymax}]"
+    );
+    // Z is ONE-SIDED: one bound sits on the profile plane (≈0), the other at ≈±20 —
+    // the swept solid never crosses to the opposite half of the axis-normal.
+    let z_one_sided = (zmin.abs() < 1.5 && (zmax - 20.0).abs() < 2.0)
+        || (zmax.abs() < 1.5 && (zmin + 20.0).abs() < 2.0);
+    assert!(
+        z_one_sided,
+        "a 180° sweep is one-sided along the swept axis-normal (world Z): one bound ≈0, \
+         the other ≈±20, got z[{zmin},{zmax}]"
+    );
+
+    wm.shutdown().await;
+    eprintln!("Revolve partial PASS: 180° volume {vol:.3} ≈ half-Pappus; bbox one-sided in Z");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3. Cut-split children adopted — a boolean-mode Revolve Cut that bisects a box
+//    mints deterministic split children body_<opId>:0/:1 (D1), both adopted, parent
+//    consumed. Exact box arithmetic 8000 / 8800; ids + volumes stable on replay.
+//    (Provenance: worker/tests/test_revolve_split.cpp — geometry reused verbatim.)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revolve_cut_split_children_adopted() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    // Box A (XY, rect u∈[0,40] v∈[0,20], Blind +Z 25): world x∈[-20,0], y∈[0,40],
+    // z∈[0,25], vol 20000.
+    let sa = SketchId(Uuid::from_u128(0xA));
+    add_op(
+        &mut rt,
+        sketch_record(
+            SKETCH_A,
+            &rect_sketch(sa, 0x1000, 0.0, 0.0, 40.0, 20.0),
+            xy_plane_ref(),
+        ),
+    );
+    add_op(&mut rt, extrude_record(EXTRUDE_A, sa, 25.0));
+
+    // Tool (XZ sketch, 360° revolve): profile rect u∈[-9,60] v∈[10,14]; axis line at
+    // u=-10 (outside the profile footprint, -10 < -9). r(x,y)=√(x²+(y+10)²); the
+    // profile spans r∈[1,70] ⇒ a 360° washer (z-slab z∈[10,14]) that fully covers
+    // box A's cross-section (box r∈[10,53.85] ⊂ [1,70]) ⇒ Cut splits A into two exact
+    // box children: bottom z∈[0,10] = 8000 (:0) and top z∈[14,25] = 8800 (:1).
+    let st = SketchId(Uuid::from_u128(0xB));
+    let (tool_sk, axis) =
+        rect_with_axis_sketch(st, 0x3000, -9.0, 10.0, 69.0, 4.0, (-10.0, 0.0, 20.0));
+    add_op(
+        &mut rt,
+        sketch_record(SKETCH_TOOL, &tool_sk, xz_plane_ref()),
+    );
+    add_op(
+        &mut rt,
+        revolve_record(
+            REVOLVE,
+            st,
+            "",
+            360.0,
+            axis,
+            BooleanMode::Cut,
+            Some(body_of(EXTRUDE_A)),
+        ),
+    );
+
+    // Deterministic split-child ids (D1): body_<revolveOpId>:0/:1 adopted as
+    // BodyId(split_child_uuid(revolveUuid, k)).
+    let child0 = BodyId(split_child_uuid(Uuid::from_u128(REVOLVE), 0));
+    let child1 = BodyId(split_child_uuid(Uuid::from_u128(REVOLVE), 1));
+
+    let rep = regen_all(&mut rt).await;
+    let snap = published(&rep, "revolve cut split");
+    let head: std::collections::HashSet<BodyId> = snap.bodies.iter().map(|b| b.body).collect();
+    assert_eq!(
+        head.len(),
+        2,
+        "the Cut consumed box A into exactly two split children, got {head:?}"
+    );
+    assert!(
+        !head.contains(&body_of(EXTRUDE_A)),
+        "parent body (box A) removed from head"
+    );
+    assert!(
+        head.contains(&child0) && head.contains(&child1),
+        "head is exactly {{body_<op>:0, body_<op>:1}}, got {head:?}"
+    );
+
+    // Planar box children ⇒ mesh volume is EXACT (divergence theorem); tight bound.
+    // Volume-ascending ordering: :0 = bottom slab 8000, :1 = top slab 8800.
+    let v0 = mesh_vol(&mut rt, child0, Lod::Coarse).await;
+    let v1 = mesh_vol(&mut rt, child1, Lod::Coarse).await;
+    assert!(
+        (v0 - 8000.0).abs() < 1.0,
+        "child :0 = bottom slab 40·20·10 = 8000, got {v0}"
+    );
+    assert!(
+        (v1 - 8800.0).abs() < 1.0,
+        "child :1 = top slab 40·20·11 = 8800, got {v1}"
+    );
+
+    // Ids + volumes stable across a second from-0 regen (pure fn of opId + ordinal).
+    let rep2 = regen_all(&mut rt).await;
+    let snap2 = published(&rep2, "revolve cut split replay");
+    let head2: std::collections::HashSet<BodyId> = snap2.bodies.iter().map(|b| b.body).collect();
+    assert_eq!(head, head2, "split child ids identical across a replay");
+    let v0b = mesh_vol(&mut rt, child0, Lod::Coarse).await;
+    let v1b = mesh_vol(&mut rt, child1, Lod::Coarse).await;
+    assert!(
+        (v0b - 8000.0).abs() < 1.0 && (v1b - 8800.0).abs() < 1.0,
+        "replay child volumes stable, got {v0b} / {v1b}"
+    );
+
+    wm.shutdown().await;
+    eprintln!(
+        "Revolve Cut-split PASS: parent consumed, children :0={v0} :1={v1}, ids + volumes stable"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4. Stale axis fails loud — a nonexistent axis lineId ⇒ NO silent body, NO panic:
+//    the revolve step is Error and its projection FeatureDto carries the worker's
+//    axis message (W0.5 statusMessage contract).
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revolve_stale_axis_fails_loud() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    // A valid profile (so the profile builds and the axis is the ONLY failure point:
+    // execute_revolve resolves the profile BEFORE the axis, RevolveOp.cpp:154-175),
+    // then a revolve whose axis references a lineId that does not exist in the sketch.
+    let sid = SketchId(Uuid::from_u128(0xA));
+    add_op(
+        &mut rt,
+        sketch_record(
+            SKETCH_A,
+            &rect_sketch(sid, 0x1000, 10.0, 0.0, 10.0, 10.0),
+            xy_plane_ref(),
+        ),
+    );
+    let bogus_axis = EntityId(Uuid::from_u128(0xDEAD_BEEF));
+    add_op(
+        &mut rt,
+        revolve_record(
+            REVOLVE,
+            sid,
+            "",
+            360.0,
+            bogus_axis,
+            BooleanMode::NewBody,
+            None,
+        ),
+    );
+
+    // A per-op failure is a Published snapshot with the failed step marked Error
+    // (executor.rs:668; PlanExecutor stoppedReason=opFailed, last_valid_step=m-1) —
+    // NOT an EngineFailed. No revolve body is created (a sketch mints none either).
+    let rep = regen_all(&mut rt).await;
+    let snap = published(&rep, "stale axis revolve");
+    assert!(
+        snap.bodies.is_empty(),
+        "the failed revolve minted NO body (no silent body), got {:?}",
+        snap.bodies.iter().map(|b| b.body).collect::<Vec<_>>()
+    );
+
+    // The projection surfaces the failure: the revolve FeatureDto is Error and its
+    // statusMessage carries the worker's axis message
+    // (RevolveOp.cpp:86 "Revolve: axis line '<id>' not found in sketch").
+    let proj = rt.projection();
+    let rev_id = RecordId(Uuid::from_u128(REVOLVE)).to_string();
+    let feat = proj
+        .features
+        .iter()
+        .find(|f| f.id == rev_id)
+        .expect("the revolve feature is projected");
+    assert_eq!(
+        feat.status,
+        FeatureStatus::Error,
+        "the stale-axis revolve step is Error, got {:?}",
+        feat.status
+    );
+    let msg = feat
+        .status_message
+        .as_deref()
+        .expect("an errored feature carries a statusMessage (W0.5)");
+    eprintln!("stale-axis: revolve statusMessage = {msg:?}");
+    assert!(
+        msg.contains("not found in sketch"),
+        "statusMessage carries the worker's axis-not-found message, got {msg:?}"
+    );
+
+    wm.shutdown().await;
+    eprintln!("Revolve stale-axis PASS: 0 bodies, revolve step Error, statusMessage surfaced");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. Region binding — an explicit normative regionId AND the "" first-region
+//    fallback both publish a body. The explicit id is fetched from the solver lane
+//    (SketchUpsert + SketchRegions), the exact source finish_sketch reads; a wrong
+//    non-empty id would fail loudly (strict M4a rule), so a publish proves the bind.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revolve_region_binding_explicit_and_fallback() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+
+    let sid = SketchId(Uuid::from_u128(0xA));
+    // The plan sketch (rect + axis). The rect's outer-loop member ids are the sole
+    // input to the normative FNV regionId (derive_region_id); the dangling axis line
+    // is not part of any loop, so a PLAIN rect (same rect line ids) yields the SAME
+    // regionId while sidestepping any solver-lane region-detection quirk on the open
+    // line. Fetch it via the solver lane — exactly what finish_sketch does.
+    let (plan_sk, axis) =
+        rect_with_axis_sketch(sid, 0x1000, 10.0, 0.0, 10.0, 10.0, (0.0, -5.0, 15.0));
+    let plain_rect = rect_sketch(sid, 0x1000, 10.0, 0.0, 10.0, 10.0);
+    let _ = SolverEngine::sketch_upsert(&wm, &plain_rect)
+        .await
+        .expect("upsert sketch to solver lane");
+    let regions = SolverEngine::sketch_regions(&wm, &sid.to_string())
+        .await
+        .expect("solver-lane sketch regions");
+    assert!(!regions.is_empty(), "the rect yields ≥1 closed region");
+    let region_id = regions[0].region_id.clone();
+    assert!(
+        region_id.starts_with("r_"),
+        "a normative FNV regionId (SCHEMA §7.4), got {region_id:?}"
+    );
+
+    let mut rt = runtime_over(&wm);
+    add_op(&mut rt, sketch_record(SKETCH_A, &plan_sk, xy_plane_ref()));
+    // Revolve 1: explicit, valid regionId. Revolve 2: "" first-region fallback.
+    add_op(
+        &mut rt,
+        revolve_record(
+            REVOLVE,
+            sid,
+            &region_id,
+            360.0,
+            axis,
+            BooleanMode::NewBody,
+            None,
+        ),
+    );
+    add_op(
+        &mut rt,
+        revolve_record(REVOLVE_2, sid, "", 360.0, axis, BooleanMode::NewBody, None),
+    );
+
+    let rep = regen_all(&mut rt).await;
+    let snap = published(&rep, "revolve region binding");
+    let head: std::collections::HashSet<BodyId> = snap.bodies.iter().map(|b| b.body).collect();
+    assert_eq!(
+        head.len(),
+        2,
+        "the explicit-region revolve AND the fallback revolve both publish, got {head:?}"
+    );
+    assert!(
+        head.contains(&body_of(REVOLVE)) && head.contains(&body_of(REVOLVE_2)),
+        "both revolve bodies present, got {head:?}"
+    );
+
+    wm.shutdown().await;
+    eprintln!(
+        "Revolve region-binding PASS: explicit regionId {region_id} + \"\" fallback both published"
+    );
+}

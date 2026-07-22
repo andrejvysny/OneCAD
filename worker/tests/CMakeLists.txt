@@ -49,6 +49,12 @@ foreach(_t wp6_ladder wp6_ops wp6_extrude wp6_faststode wp6_exportstep wp6_meshe
     add_test(NAME ${_t} COMMAND test_${_t})
 endforeach()
 
+# --- MODEL-HARDEN W3: Revolve boolean-mode multi-solid split-children parity
+#     (`body_<opId>:<k>`, SCHEMA §7.2) — in-process, real OCCT. ---
+add_executable(test_revolve_split test_revolve_split.cpp)
+target_link_libraries(test_revolve_split PRIVATE worker_core)
+add_test(NAME revolve_split COMMAND test_revolve_split)
+
 # --- M6a: breadth ops (Shell / Linear+Circular pattern / MirrorBody) numerics. ---
 add_executable(test_m6a_ops test_m6a_ops.cpp)
 target_link_libraries(test_m6a_ops PRIVATE worker_core)

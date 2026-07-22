@@ -1423,6 +1423,28 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-07-22 — Revolve boolean-mode multi-solid results split into deterministic
+  `body_<opId>:<k>` children** (MODEL-HARDEN W3 worker parity fix; **orchestrator
+  sign-off 2026-07-22** — fixture assessment verified: no revolve/ExecutePlan payloads
+  in canonical fixtures, no bump). [§7.2](#72-regen--executeplan),
+  [§2](#2-identifier--scalar-types). `RevolveOp` previously committed a boolean result
+  with a direct in-place `bodies.create(target_id, …)`, so a Revolve `Cut` that
+  bisected a body kept two disconnected solids under **one** body id — asymmetric with
+  `Extrude`/`Boolean`, which already fan out via `publish_boolean_result`. The revolve
+  boolean tail now calls the SAME `publish_boolean_result(ctx, op_id, target_id,
+  br.shape, builder.get(), out)`: a single-solid result modifies the target in place
+  (BodyId preserved), a multi-solid result deletes the parent and mints ordered
+  children `body_<opId>:<k>`. The M5a minting / adoption / derived-uuid contract (the
+  2026-07-19 entry below) applies **verbatim** — adoption keys on plan op ids and is
+  op-agnostic, so there is **no Rust change**. The NewBody path is unchanged. *Tests:*
+  worker `test_revolve_split` (in-process 360° revolve `Cut` — an annular disc slab cut
+  clean through a box → 2 deterministically-ordered children, exact volumes 8000 / 8800,
+  ids stable across a replay). **No canonical `protocol/fixtures/` change** — the
+  fixtures carry no `ExecutePlan` / revolve / multi-solid-boolean payloads (verified:
+  only `hello` + `echo_error`), so there is nothing to bump per
+  [§13](#13-versioningchange-policy); this is a truthful widening of an existing split
+  rule, wire-compatible (`protocolVersion` stays **1**).
+
 - **2026-07-21 — Per-constraint conflict ids on every solve surface**
   (SKETCH-HARDEN W1; **orchestrator SIGNED OFF** after independent adversarial
   review APPROVE-WITH-FIXES — fixes applied: unconditional endGesture conflict
@@ -1535,11 +1557,15 @@ sign-off) once fixtures exist.
 - **2026-07-19 — M5a: boolean split children `body_<opId>:<k>` are minted, adopted +
   fenced; the Rust `BodyId` is a deterministic derived uuid** (D1 extension;
   **orchestrator-approved 2026-07-19**). [§2](#2-identifier--scalar-types), [§7.2](#72-regen--executeplan).
-  When a Boolean (or a boolean-mode Extrude **Cut**) yields **multiple solids**, the
-  worker deletes the parent + tool and mints a deterministic child `body_<opId>:<k>`
+  When a Boolean op — or a boolean-mode **Extrude** or **Revolve** (any non-NewBody
+  mode: `Add`/`Cut`/`Intersect`; the split fires whenever the boolean result is
+  multi-solid, in practice a `Cut`/`Intersect` that bisects a body) — yields
+  **multiple solids**, the worker deletes the parent (and, for a standalone Boolean
+  op, the consumed tool body) and mints a deterministic child `body_<opId>:<k>`
   per solid, ordered by a **quantized geometric key** (volume, then centroid x/y/z,
   then face count, at 1e-6 — never unordered `TopExp` iteration), emitting a `Created`
-  `bodyEvent` per child. Rust **adopts** them at `AcceptPrepared` (`validate_created`):
+  `bodyEvent` per child. (Extrude gained this at M5a via `publish_boolean_result`;
+  Revolve at MODEL-HARDEN W3 — see the 2026-07-22 entry.) Rust **adopts** them at `AcceptPrepared` (`validate_created`):
   the wire id parses to `(opId, k)`, `opId` must be a **known op in the plan**, the
   per-op ordinals must be **contiguous from 0**, and the id must be **unique** (else
   `PROTOCOL_ERROR`, discard). **Rust-side representation (flagged for sign-off):**
