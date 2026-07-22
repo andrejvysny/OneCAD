@@ -1,4 +1,31 @@
-# OneCAD-Tauri — Current State (2026-07-22, SKETCH-HARDEN shipped)
+# OneCAD-Tauri — Current State (2026-07-22, MODEL-HARDEN shipped)
+
+## MODEL-HARDEN (2026-07-22) — Extrude/Revolve commit fix + professional UX, 6 gates
+Root-caused USER-REPORTED "extrude preview vanishes on tool close": append-at-end
+AddOperation returned RegenHint::None and the planner clamps to the applied cursor
+prefix — **no fresh op commit EVER regened in the real app** (HISTORY row real,
+geometry never computed, silent teardown; every UI suite runs the mock lane, every
+integration test drove regen explicitly — new coverage class closes this forever).
+Plan Codex-reviewed (terra/high, "revise" → all 10 findings folded). W0: frontier
+append joins applied prefix (core cursor promotion; redo-draft regression pinned),
+production-driver test seam (regen_driver_with_emitter) + scheduler_commit.rs vs
+real worker. W0.5: squash all-or-nothing guard (stray finish_sketch can't pop a
+model op's undo entry), model-mode arms → pure getSketch, regen completion carries
+sourceRevision (exact per-commit correlation under rapid commits; superseded
+ignored), FeatureDto.statusMessage → HistoryList tint+tooltip, legacy-draft open
+hint. W1: armed-commit gesture — release keeps tool ARMED w/ live preview + chip
+cluster [value|⇔|✓|✕]; Enter / ✓ / click-away commits, Esc cancels; failed commits
+re-arm + name the reason. W2: boolean picker [New Body|Add|Cut] (auto-target or
+click-to-pick, Cut tint), multi-select regions → N sequential ops (stop-on-first-
+failure, previews kept), sketch auto-hide on success; revolve parity (N-op loop,
+all-regions axis validity; quickCommit → click-away 360°). W3: worker RevolveOp
+boolean split-children parity (publish_boolean_result; SCHEMA §7.2/§14 signed off,
+no fixture bump) + revolve_ops.rs — FIRST real-worker Revolve wire coverage
+(Pappus, 180°, Cut split adoption, stale-axis loud, region binding).
+Suites: FE 1108/105 · cargo 423/0 vs real worker · ctest 66/66 · e2e 29/29 ·
+clippy/fmt/hex clean. Commits d190d6a→(final). REMAINING: user manual Mac gate —
+TODO.md MODEL-HARDEN checklist.
+
 
 ## SKETCH-HARDEN (2026-07-21/22) — sketch production hardening + UX, 6 waves, all gates passed
 Plan Codex-reviewed (terra/high, "revise" → all findings folded). W0: Rust
