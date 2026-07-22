@@ -211,6 +211,9 @@ export function filletStep(s: FilletFsm, e: FilletEvent): FilletStep {
 
 export const DEFAULT_REVOLVE_ANGLE = 360;
 
+/** A confirm below this (degrees) is a degenerate revolve — the machine ignores it. */
+export const REVOLVE_MIN_ANGLE = 0.5;
+
 export type RevolvePhase = "idle" | "axisPick" | "armed" | "dragging" | "targetPick" | "committing";
 
 export interface RevolveFsm {
@@ -310,6 +313,8 @@ export function revolveStep(s: RevolveFsm, e: RevolveEvent): RevolveStep {
       return { state: { ...s, phase: "armed", booleanMode: "NewBody", targetBodyId: null }, effect: "update" };
     case "confirm":
       if (s.phase !== "armed") return { state: s, effect: "none" };
+      // Degenerate at ~0°: no transition — the controller nudges "Set a non-zero angle".
+      if (Math.abs(s.angle) < REVOLVE_MIN_ANGLE) return { state: s, effect: "none" };
       return { state: { ...s, phase: "committing" }, effect: "commit" };
     case "commitFailed":
       if (s.phase !== "committing") return { state: s, effect: "none" };

@@ -55,6 +55,13 @@ add_executable(test_revolve_split test_revolve_split.cpp)
 target_link_libraries(test_revolve_split PRIVATE worker_core)
 add_test(NAME revolve_split COMMAND test_revolve_split)
 
+# --- MODEL-HARDEN review follow-up: Revolve boolean-mode SINGLE-solid branches of
+#     publish_boolean_result (Add/Cut-miss/Intersect) — the counterpart to
+#     test_revolve_split's multi-solid Cut. In-process, real OCCT. ---
+add_executable(test_revolve_boolean_modes test_revolve_boolean_modes.cpp)
+target_link_libraries(test_revolve_boolean_modes PRIVATE worker_core)
+add_test(NAME revolve_boolean_modes COMMAND test_revolve_boolean_modes)
+
 # --- M6a: breadth ops (Shell / Linear+Circular pattern / MirrorBody) numerics. ---
 add_executable(test_m6a_ops test_m6a_ops.cpp)
 target_link_libraries(test_m6a_ops PRIVATE worker_core)

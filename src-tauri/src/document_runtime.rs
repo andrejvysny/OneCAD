@@ -44,6 +44,7 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
+use onecad_core::document::body::{BodyLifecycleEvent, BodyRegistry};
 use onecad_core::document::element_index::ElementEntry;
 use onecad_core::document::record::{ExtrudeMode, KnownOperation, Operation, OperationRecord};
 use onecad_core::document::refs::{AnchorIntent, ElementRef};
@@ -72,7 +73,7 @@ use onecad_core::sketch::Sketch;
 use crate::dto::{
     default_label, feature_kind, feature_status, feature_status_message, feature_value_text,
     needs_repair_item_dto, BodyDto, BodyMeshRef, DocStatus, DocumentChange, DocumentProjection,
-    FeatureDto, FinishSketchDto, NeedsRepairItemDto, PromotedElementDto, SketchDto,
+    FailedStep, FeatureDto, FinishSketchDto, NeedsRepairItemDto, PromotedElementDto, SketchDto,
     SketchSessionDto, SketchSolveStatus, SketchStatus, SketchUpsertDto,
 };
 use crate::mesh_cache::MeshCache;
@@ -154,6 +155,15 @@ pub struct RegenReport {
     /// candidate evidence via `resolveRefs`. Populated only for a **published** regen
     /// (a superseded/failed/no-op regen leaves the live repair state unchanged).
     pub needs_repair: Vec<NeedsRepairItemDto>,
+    /// Timeline records left in `StepState::Error` by a PUBLISHED regen (MODEL-HARDEN
+    /// finding 1). Empty on a clean publish and on every non-published outcome. Threaded
+    /// into `regen-finished` `failedSteps` so a from-0 regen that publishes sibling
+    /// bodies but fails the newly-committed op is not mistaken for a commit success.
+    pub failed_steps: Vec<FailedStep>,
+    /// Per-record-id, the bodies each op CREATED or MODIFIED in this PUBLISHED regen
+    /// (`document-changed` wire form). Empty on non-published outcomes. Threaded into
+    /// `regen-finished` `affectedBodies` for precise per-commit correlation.
+    pub affected_bodies: BTreeMap<String, Vec<String>>,
 }
 
 impl RegenReport {
@@ -231,6 +241,11 @@ struct SketchSession {
     sketch_id: SketchId,
     prior: Sketch,
     undo_watermark: usize,
+    /// The undo-stack eviction count at enter (finding 3). If it moves before
+    /// finish/cancel, the depth-based `undo_watermark` no longer addresses the
+    /// session's steps (the stack bottom shifted out past the cap), so the squash is
+    /// refused wholesale — the granular steps stay (safe, noisier stack).
+    evicted_at_enter: u64,
 }
 
 /// The per-document runtime (V1 single writer).
@@ -485,6 +500,7 @@ impl DocumentRuntime {
         let undone = self.session.undo();
         if undone {
             self.after_mutation();
+            self.drop_stale_sketch_session();
         }
         undone
     }
@@ -500,8 +516,23 @@ impl DocumentRuntime {
         let redone = self.session.redo()?;
         if redone {
             self.after_mutation();
+            self.drop_stale_sketch_session();
         }
         Ok(redone)
+    }
+
+    /// Drops an open sketch session whose enter watermark now EXCEEDS the (shrunk)
+    /// undo depth (finding 2a). A document undo/redo that pops below the session's
+    /// enter point invalidates the depth-based watermark: a later finish/cancel would
+    /// squash a range that no longer maps to the session's steps. Dropping the session
+    /// keeps the granular steps (safe: no squash, just a noisier stack). Called after
+    /// every depth-shrinking runtime mutation (undo/redo).
+    fn drop_stale_sketch_session(&mut self) {
+        if let Some(s) = &self.sketch_session {
+            if s.undo_watermark > self.session.undo_depth() {
+                self.sketch_session = None;
+            }
+        }
     }
 
     /// After any structural mutation: re-mirror the timeline (all Dirty pending
@@ -535,21 +566,32 @@ impl DocumentRuntime {
     /// inert here by construction.
     pub async fn run_regen(&mut self, request: RegenRequest, cancel: CancelToken) -> RegenReport {
         let Some(prepared) = self.begin_regen(request) else {
-            let rev = self.fencing.revision().0;
-            return RegenReport {
-                outcome: Outcome::NoOp,
-                revision: rev,
-                // Empty plan: no fencing was captured, so the source is the current
-                // revision (nothing older to correlate against).
-                source_revision: rev,
-                snapshot_id: 0,
-                changed: Vec::new(),
-                removed: Vec::new(),
-                needs_repair: Vec::new(),
-            };
+            return self.noop_report();
         };
         let driven = prepared.drive(cancel).await;
         self.finish_regen(driven)
+    }
+
+    /// A `NoOp` [`RegenReport`] stamped at the current revision — shared by the inline
+    /// [`run_regen`](Self::run_regen) empty-plan path and the production driver's
+    /// empty-plan branch (`lib.rs`), so a no-op-producing request STILL emits exactly
+    /// one completion and the frontend awaiter's `regen-finished{noop}` anti-hang
+    /// terminal fires in production (MODEL-HARDEN finding 4). No plan was compiled, so
+    /// `source_revision` is the current revision — nothing older to correlate against.
+    #[must_use]
+    pub fn noop_report(&self) -> RegenReport {
+        let rev = self.fencing.revision().0;
+        RegenReport {
+            outcome: Outcome::NoOp,
+            revision: rev,
+            source_revision: rev,
+            snapshot_id: 0,
+            changed: Vec::new(),
+            removed: Vec::new(),
+            needs_repair: Vec::new(),
+            failed_steps: Vec::new(),
+            affected_bodies: BTreeMap::new(),
+        }
     }
 
     /// Phase 1 (**locked**): compile the plan against the current timeline, capture
@@ -643,6 +685,12 @@ impl DocumentRuntime {
                 // per-item set drives the `needs-repair` event (empty ⇒ repairs
                 // cleared → banner drop).
                 let needs_repair = self.needs_repair_items();
+                // Finding 1: a from-0 regen can PUBLISH sibling bodies while leaving the
+                // newly-committed op in Error (stale axis/region). Derive the per-record
+                // failure + created/modified-body maps from the just-committed regen
+                // mirror so the frontend correlates its own commit's recordId precisely.
+                let failed_steps = failed_steps_of(&self.regen.timeline);
+                let affected_bodies = affected_bodies_of(&self.regen.timeline, &self.regen.bodies);
                 return RegenReport {
                     outcome,
                     revision: self.fencing.revision().0,
@@ -651,6 +699,8 @@ impl DocumentRuntime {
                     changed,
                     removed,
                     needs_repair,
+                    failed_steps,
+                    affected_bodies,
                 };
             }
             // Window race: worker accepted lock-free but the document advanced.
@@ -662,8 +712,22 @@ impl DocumentRuntime {
                 changed: Vec::new(),
                 removed: Vec::new(),
                 needs_repair: Vec::new(),
+                failed_steps: Vec::new(),
+                affected_bodies: BTreeMap::new(),
             };
         }
+        // Finding 5: an `EngineFailed` outcome whose fencing tokens MOVED since
+        // `begin_regen` is really a supersede — a later covering regen is already on the
+        // way — so reporting `failed` here would send a spurious failure to a commit that
+        // is about to be resolved by that covering regen. Downgrade it to `Superseded`
+        // (a hard failure with UNCHANGED fencing is still reported as `failed`). Cancelled
+        // and NoOp keep their own terminal.
+        let outcome =
+            if matches!(outcome, Outcome::EngineFailed(_)) && self.fencing.get() != expected {
+                Outcome::Superseded
+            } else {
+                outcome
+            };
         RegenReport {
             outcome,
             revision: self.fencing.revision().0,
@@ -672,6 +736,8 @@ impl DocumentRuntime {
             changed: Vec::new(),
             removed: Vec::new(),
             needs_repair: Vec::new(),
+            failed_steps: Vec::new(),
+            affected_bodies: BTreeMap::new(),
         }
     }
 
@@ -1051,26 +1117,32 @@ impl DocumentRuntime {
         sketch_id: SketchId,
     ) -> Result<SketchSessionDto, EngineError> {
         let sketch = self.sketch_or_err(sketch_id, "enterSketch")?;
-        // B1 squash: remember the pre-session sketch + undo watermark so
-        // finish/cancel can collapse every in-session granular edit into ONE net
-        // undoable command. If a session for the SAME sketch is already open (a
-        // double-enter / a model-mode read that forgot to close), KEEP the older
-        // watermark + prior so the squash still covers the whole range — resetting
-        // to a later point would strand the earlier granular steps.
-        let already_open_same_sketch = matches!(
+        // B1 squash: remember the pre-session sketch + undo watermark so finish/cancel
+        // can collapse every in-session granular edit into ONE net undoable command. If
+        // a session for the SAME sketch is already open (a double-enter / a model-mode
+        // read that forgot to close), KEEP the older watermark + prior so the squash
+        // still covers the whole range — resetting to a later point would strand the
+        // earlier granular steps. But REFUSE the keep when the stack has since shrunk
+        // below the stored watermark (finding 2b — a document undo popped below the
+        // enter point): that watermark is stale, so fall through to a fresh session.
+        let keep_existing = matches!(
             &self.sketch_session,
-            Some(s) if s.sketch_id == sketch_id
+            Some(s) if s.sketch_id == sketch_id && s.undo_watermark <= self.session.undo_depth()
         );
-        if !already_open_same_sketch {
+        let (plane, entities, constraints) = crate::worker::wire::sketch_wire(&sketch);
+        // The FALLIBLE solve happens BEFORE opening the session (finding 2c): a worker
+        // error must not leave a stale open session (`?` returns with the session
+        // untouched). Only after it succeeds do we open/keep the watermark.
+        let solved = self.solver.sketch_upsert(&sketch).await?;
+        self.record_solve(sketch_id, &solved);
+        if !keep_existing {
             self.sketch_session = Some(SketchSession {
                 sketch_id,
                 prior: sketch.clone(),
                 undo_watermark: self.session.undo_depth(),
+                evicted_at_enter: self.session.evictions(),
             });
         }
-        let (plane, entities, constraints) = crate::worker::wire::sketch_wire(&sketch);
-        let solved = self.solver.sketch_upsert(&sketch).await?;
-        self.record_solve(sketch_id, &solved);
         Ok(SketchSessionDto {
             sketch_id: sketch_id.to_string(),
             plane,
@@ -1421,6 +1493,15 @@ impl DocumentRuntime {
             _ => return,
         }
         let session = self.sketch_session.take().expect("checked Some above");
+        // Finding 3: an eviction past the undo cap since enter shifted the stack bottom,
+        // so the depth-based watermark no longer addresses the session's steps. Refuse
+        // the squash wholesale — the granular steps stay (safe, noisier stack). The core
+        // squash's contiguity guard can't catch this: the newest `count` may still all be
+        // sketch edits, but `count` now under-counts the session and would strand its
+        // earliest edits below the net-inverse.
+        if self.session.evictions() != session.evicted_at_enter {
+            return;
+        }
         let count = self
             .session
             .undo_depth()
@@ -1516,6 +1597,63 @@ fn reintern_split_children(bodies: &[onecad_core::document::body::BodyMeta]) {
             );
         }
     }
+}
+
+/// The timeline records left in `StepState::Error` after a regen, as
+/// `(recordId, reason)` [`FailedStep`]s — the frontend `failedSteps` correlation
+/// source (MODEL-HARDEN finding 1). A published from-0 regen can leave the newly
+/// committed op in Error while republishing OTHER bodies; without this the awaiter
+/// would read that as a blanket commit success.
+fn failed_steps_of(timeline: &Timeline) -> Vec<FailedStep> {
+    timeline
+        .records()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, rec)| match timeline.state(i) {
+            Some(StepState::Error { reason }) => Some(FailedStep {
+                record_id: rec.record_id.to_string(),
+                message: reason.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Per-record-id, the bodies an op CREATED or MODIFIED in the committed regen —
+/// derived from the body lifecycle log folded during THIS regen (finding 1). Created
+/// (incl. split children `body_<opId>:<k>`, mapped to their derived uuids), Modified
+/// (Add/Cut in-place target), Split children and a Merge winner all count; a Deleted
+/// parent contributes nothing. Body ids render in the SAME wire form as
+/// `document-changed`'s `changedBodies` (`BodyId` Display) so the frontend can match a
+/// commit's recordId to a real published body. An op that only deleted a body yields
+/// no entry (empty vecs are never inserted).
+fn affected_bodies_of(timeline: &Timeline, bodies: &BodyRegistry) -> BTreeMap<String, Vec<String>> {
+    let records = timeline.records();
+    let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for entry in bodies.log() {
+        let Some(rec) = records.get(entry.step_index) else {
+            continue;
+        };
+        let touched: Vec<BodyId> = match &entry.event {
+            BodyLifecycleEvent::Created { body } | BodyLifecycleEvent::Modified { body } => {
+                vec![*body]
+            }
+            BodyLifecycleEvent::Split { children, .. } => children.clone(),
+            BodyLifecycleEvent::Merged { winner, .. } => vec![*winner],
+            BodyLifecycleEvent::Deleted { .. } => Vec::new(),
+        };
+        if touched.is_empty() {
+            continue;
+        }
+        let slot = map.entry(rec.record_id.to_string()).or_default();
+        for b in touched {
+            let wire = b.to_string();
+            if !slot.contains(&wire) {
+                slot.push(wire);
+            }
+        }
+    }
+    map
 }
 
 /// Renders a [`MeshKey`] as the `"<bodyId>:<lod>:<generation>"` string the

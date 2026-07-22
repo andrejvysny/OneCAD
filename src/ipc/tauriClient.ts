@@ -245,19 +245,26 @@ export function createTauriClient(): CadClient {
   // fetched mesh was tessellated at (Invariant 4). Starts at 0 (nothing published).
   let currentSnapshotId = 0;
 
-  // ── Commit-result correlation (MODEL-HARDEN W0.5, Codex MAJOR-3) ─────────────
-  // An awaiter for a commit whose post-apply projection revision is R resolves on:
-  //   • document-changed{revision >= R}               → the covering publish (bodies);
-  //   • regen-finished{failed, sourceRevision >= R}   → failure (empty + message);
-  //   • regen-finished{noop,   sourceRevision >= R}   → empty (anti-hang);
-  //   • regen-finished{superseded|cancelled}          → IGNORED (a newer regen covers R);
-  //   • regen-finished{published}                     → IGNORED (document-changed, emitted
-  //                                                     first, carries the bodies);
-  //   • the safety timeout                            → null (fall back to the pre-regen
-  //                                                     projection revision).
+  // ── Commit-result correlation (MODEL-HARDEN W0.5 + hardening) ────────────────
+  // An awaiter for a commit whose post-apply projection revision is R resolves on the
+  // completion that covers R. There are TWO awaiter classes:
+  //
+  //  • NON-recordId (undo / redo / raw EditCommand): resolves on the FIRST covering
+  //    signal — document-changed{revision >= R} (bodies) or regen-finished{failed|noop}
+  //    (empty/message). published document-changed carries the bodies, so a published
+  //    regen-finished is ignored for this class.
+  //
+  //  • recordId (a fresh AddOperation via applyOperation): a published regen can contain
+  //    THIS op's FAILED step while still publishing OTHER records' bodies via
+  //    document-changed. So this class NEVER settles off document-changed alone — it
+  //    buffers the covering change and settles on the covering regen-finished sibling,
+  //    which is authoritative: `failedSteps` containing our recordId ⇒ FAILURE (empty +
+  //    that step's message) even though bodies were published; otherwise SUCCESS scoped
+  //    to `affectedBodies[recordId]` (finding 1 + 2). Exactly-once: a recordId-awaiter
+  //    settles only in resolveRegenFinished; document-changed only buffers it.
+  //
   // Under rapid commits a stale earlier report can never resolve a LATER commit: its
-  // `sourceRevision` is below that commit's R (or it is superseded and ignored), so
-  // commit B never resolves off commit A's superseded report (the reported bug).
+  // `sourceRevision` is below that commit's R (or it is superseded and ignored).
   interface Resolved {
     change: DocumentChange | null;
     revision: number;
@@ -265,6 +272,8 @@ export function createTauriClient(): CadClient {
   }
   interface Awaiter {
     targetRev: number | null; // R; null until the command returns its projection
+    recordId?: string; // set for a fresh AddOperation commit (finding 1/2 scoping)
+    pendingChange: DocumentChange | null; // buffered covering change (recordId path)
     resolve(r: Resolved | null): void;
     timer: ReturnType<typeof setTimeout>;
   }
@@ -279,28 +288,81 @@ export function createTauriClient(): CadClient {
     a.resolve(r);
   }
 
-  /** A published document-changed resolves every awaiter whose target it covers. */
+  /**
+   * Scope a covering change to ONLY this record's bodies (finding 2). With
+   * `affectedBodies[recordId]` present, changedBodies becomes exactly those ids —
+   * mapped to their meshKey-bearing ref from the document-changed payload (or a
+   * synthesized ref when the id is not in it). Absent ⇒ the full change (mock lane).
+   */
+  function scopeChange(
+    change: DocumentChange | null,
+    ids: string[] | undefined,
+    revision: number,
+  ): DocumentChange | null {
+    if (ids === undefined) return change; // fallback: today's full list
+    const changedBodies = ids.map(
+      (id) => change?.changedBodies.find((b) => b.bodyId === id) ?? { bodyId: id, meshKey: id },
+    );
+    return { revision, changedBodies, removedBodies: change?.removedBodies ?? [] };
+  }
+
+  /** A published document-changed. NON-recordId awaiters settle off it; recordId
+   *  awaiters only BUFFER it (they settle on the regen-finished sibling). */
   function resolvePublished(change: DocumentChange): void {
     for (const a of [...awaiters]) {
-      if (a.targetRev !== null && change.revision >= a.targetRev) {
+      if (a.targetRev === null || change.revision < a.targetRev) continue;
+      if (a.recordId !== undefined) {
+        a.pendingChange = change; // authoritative outcome comes with regen-finished
+      } else {
         settle(a, { change, revision: change.revision });
       }
     }
   }
 
-  /** A regen-finished terminal. superseded/cancelled/published never resolve here
-   *  (a newer regen — or the document-changed sibling — carries the result); a
-   *  failed/noop resolves the awaiters it covers by `sourceRevision`. */
+  /** A regen-finished terminal. superseded/cancelled are ignored for every awaiter
+   *  (a newer regen covers R). For a NON-recordId awaiter, published is ignored too
+   *  (its document-changed sibling carries the bodies). A recordId awaiter settles
+   *  here on ANY covering completion: failedSteps ⇒ failure, else scoped success. */
   function resolveRegenFinished(rf: RegenFinished): void {
-    if (rf.outcome === "superseded" || rf.outcome === "cancelled" || rf.outcome === "published") {
-      return;
-    }
+    if (rf.outcome === "superseded" || rf.outcome === "cancelled") return;
     const source = rf.sourceRevision ?? rf.revision;
-    const errorMessage = rf.outcome === "failed" ? rf.message : undefined;
     for (const a of [...awaiters]) {
-      if (a.targetRev !== null && source >= a.targetRev) {
-        settle(a, { change: null, revision: rf.revision, errorMessage });
+      if (a.targetRev === null || source < a.targetRev) continue;
+      if (a.recordId !== undefined) {
+        const failed = rf.failedSteps?.find((s) => s.recordId === a.recordId);
+        if (failed || rf.outcome === "failed") {
+          // This op's step errored (even if the regen published other bodies), or the
+          // whole regen failed ⇒ FAILURE: empty bodies + the reason.
+          settle(a, { change: null, revision: rf.revision, errorMessage: failed?.message ?? rf.message });
+        } else {
+          // Success — scope to this op's own bodies (incl. split children).
+          const change = a.pendingChange ?? lastPublishedChange;
+          settle(a, {
+            change: scopeChange(change, rf.affectedBodies?.[a.recordId], rf.revision),
+            revision: rf.revision,
+          });
+        }
+      } else if (rf.outcome !== "published") {
+        // failed / noop for a raw command → empty bodies (+ message on failure).
+        settle(a, {
+          change: null,
+          revision: rf.revision,
+          errorMessage: rf.outcome === "failed" ? rf.message : undefined,
+        });
       }
+    }
+  }
+
+  /** Document replacement (new/open/import/recover): drop every buffered change +
+   *  pending awaiter so the NEW document's first commit can never settle off the
+   *  OLD document's state (finding 3). */
+  function resetCorrelation(): void {
+    lastPublishedChange = null;
+    currentSnapshotId = 0;
+    for (const a of [...awaiters]) {
+      clearTimeout(a.timer);
+      awaiters.delete(a);
+      a.resolve(null);
     }
   }
 
@@ -331,8 +393,9 @@ export function createTauriClient(): CadClient {
 
   /** Await the correlated regen completion for a commit. Register BEFORE invoking
    *  (so no event is missed), then `setTarget(R)` once the projection revision is
-   *  known. Resolves to null on the safety timeout. */
-  function awaitNextChange(): {
+   *  known. `recordId` (a fresh AddOperation) opts into the failedSteps / affectedBodies
+   *  scoping path. Resolves to null on the safety timeout. */
+  function awaitNextChange(recordId?: string): {
     promise: Promise<Resolved | null>;
     setTarget(rev: number): void;
     cancel(): void;
@@ -343,7 +406,7 @@ export function createTauriClient(): CadClient {
         awaiters.delete(awaiter);
         resolve(null);
       }, regenTimeoutMs);
-      awaiter = { targetRev: null, resolve, timer };
+      awaiter = { targetRev: null, recordId, pendingChange: null, resolve, timer };
       awaiters.add(awaiter);
     });
     return {
@@ -353,10 +416,12 @@ export function createTauriClient(): CadClient {
         // Missed-event race: a covering publish may already have arrived between the
         // command returning and this call — reconcile against the buffer.
         if (lastPublishedChange && lastPublishedChange.revision >= rev) {
-          settle(awaiter, {
-            change: lastPublishedChange,
-            revision: lastPublishedChange.revision,
-          });
+          if (awaiter.recordId !== undefined) {
+            // recordId path settles on the regen-finished sibling — buffer only.
+            awaiter.pendingChange = lastPublishedChange;
+          } else {
+            settle(awaiter, { change: lastPublishedChange, revision: lastPublishedChange.revision });
+          }
         }
       },
       cancel() {
@@ -390,20 +455,44 @@ export function createTauriClient(): CadClient {
     }
   }
 
-  /** Run an edit command and correlate its regen into an ApplyOperationResult. */
+  /** Run an edit command and correlate its regen into an ApplyOperationResult.
+   *  `recordId` (a fresh AddOperation's minted id) opts the awaiter into the
+   *  failedSteps / affectedBodies scoping path (findings 1/2). */
   async function applyEdit(
     cmd: string,
     args: Record<string, unknown>,
     opLabel: string | undefined,
+    recordId?: string,
   ): Promise<ApplyOperationResult> {
     await ensureEvents();
-    const awaiter = awaitNextChange();
+    const awaiter = awaitNextChange(recordId);
     let projection: DocumentProjectionDto;
     try {
       projection = await call<DocumentProjectionDto>(cmd, args);
     } catch (e) {
       awaiter.cancel();
       throw e;
+    }
+    // Finding 4: a fresh op appended while the timeline is rolled back joins the
+    // timeline as a DRAFT beyond the rollback bar (appliedOps < totalOps) — no regen
+    // fires for it, so waiting would stall on the safety timeout. Detect it from the
+    // returned projection and resolve immediately as a (soft) failure the controller
+    // surfaces.
+    if (
+      recordId !== undefined &&
+      typeof projection.appliedOps === "number" &&
+      typeof projection.totalOps === "number" &&
+      projection.appliedOps < projection.totalOps
+    ) {
+      awaiter.cancel();
+      return {
+        revision: projection.revision,
+        changedBodies: [],
+        removedBodies: [],
+        features: projection.features,
+        opLabel,
+        errorMessage: "Operation added while history is rolled back — roll forward to apply",
+      };
     }
     // Correlate the regen against THIS commit's post-apply revision R (exact under
     // rapid commits — see the awaiter table). Synchronous right after the await, so
@@ -427,7 +516,11 @@ export function createTauriClient(): CadClient {
 
   async function applyOperation(op: OperationOp): Promise<ApplyOperationResult> {
     const command = operationToEditCommand(op);
-    return applyEdit(CMD.applyEditCommand, { command }, opLabelFor(op));
+    // A fresh op mints a recordId (addOperation); a parametric re-edit
+    // (updateOperationParams) targets an existing record and does NOT — only the
+    // former opts into failedSteps / affectedBodies correlation.
+    const recordId = command.cmd === "addOperation" ? command.record.recordId : undefined;
+    return applyEdit(CMD.applyEditCommand, { command }, opLabelFor(op), recordId);
   }
 
   // ── Sketch solver lane state (frontend id ↔ backend UUID via sketchWireMap) ──
@@ -744,19 +837,27 @@ export function createTauriClient(): CadClient {
       return call<RecentProject[]>(CMD.listRecents);
     },
     async newDocument(): Promise<DocumentSnapshot> {
-      return call<DocumentSnapshotDto>(CMD.newDocument);
+      const snap = await call<DocumentSnapshotDto>(CMD.newDocument);
+      resetCorrelation(); // drop the OLD document's buffered change + pending awaiters
+      return snap;
     },
     async openDocument(path: string): Promise<DocumentSnapshot> {
-      return call<DocumentSnapshotDto>(CMD.openDocument, { path });
+      const snap = await call<DocumentSnapshotDto>(CMD.openDocument, { path });
+      resetCorrelation();
+      return snap;
     },
     async importStep(path: string): Promise<DocumentSnapshot> {
-      return call<DocumentSnapshotDto>(CMD.importStep, { path });
+      const snap = await call<DocumentSnapshotDto>(CMD.importStep, { path });
+      resetCorrelation();
+      return snap;
     },
     async checkRecovery(): Promise<RecoveryInfo | null> {
       return call<RecoveryInfoDto | null>(CMD.checkRecovery);
     },
     async recoverDocument(accept: boolean): Promise<DocumentSnapshot | null> {
-      return call<DocumentSnapshotDto | null>(CMD.recoverDocument, { accept });
+      const snap = await call<DocumentSnapshotDto | null>(CMD.recoverDocument, { accept });
+      if (accept) resetCorrelation(); // a discard (accept:false) opens no new document
+      return snap;
     },
     async openFileDialog(): Promise<string | null> {
       return call<string | null>(CMD.openFileDialog);

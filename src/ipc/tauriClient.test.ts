@@ -713,11 +713,14 @@ describe("tauriClient edit + correlation", () => {
         if (cmd === "apply_edit_command") {
           command = (payload as { command: { cmd?: string } }).command;
           setTimeout(() => {
+            // Real backend order: document-changed (bodies), then the regen-finished
+            // sibling. A fresh AddOperation (recordId) settles on the latter.
             void emit("document-changed", {
               revision: 6,
               changedBodies: [{ bodyId: "nb", meshKey: "nb:coarse:6" }],
               removedBodies: [],
             });
+            void emit("regen-finished", { revision: 6, sourceRevision: 5, outcome: "published" });
           }, 0);
           return readyProjection(5, [
             { id: "f", kind: "extrude", label: "Extrude", valueText: "25.0 mm", status: "dirty" },
@@ -876,6 +879,7 @@ describe("tauriClient preview seam (local) + commit delegation", () => {
               changedBodies: [{ bodyId: "b9", meshKey: "b9:coarse:9" }],
               removedBodies: [],
             });
+            void emit("regen-finished", { revision: 9, sourceRevision: 8, outcome: "published" });
           }, 0);
           return readyProjection(8);
         }
@@ -1207,7 +1211,8 @@ describe("tauriClient regen-finished correlation", () => {
   it("IGNORES a superseded regen-finished and resolves off the covering publish (rapid-commit)", async () => {
     // A stale superseded report (sourceRevision below our commit's R) must NOT
     // resolve the awaiter with empty bodies — the reported cross-commit bug. The
-    // from-0 publish that covers R (revision >= R) resolves it with the real body.
+    // from-0 regen that covers R (source >= R) publishes the body via document-changed
+    // and settles the commit on its regen-finished sibling.
     mockIPC(
       (cmd) => {
         if (cmd === "apply_edit_command") {
@@ -1218,6 +1223,7 @@ describe("tauriClient regen-finished correlation", () => {
               changedBodies: [{ bodyId: "b8", meshKey: "b8:coarse:8" }],
               removedBodies: [],
             });
+            void emit("regen-finished", { revision: 8, sourceRevision: 8, outcome: "published" });
           }, 0);
           return readyProjection(5); // R = 5
         }
@@ -1226,7 +1232,7 @@ describe("tauriClient regen-finished correlation", () => {
     );
     __setRegenTimeoutForTests(300);
     const res = await createTauriClient().applyOperation(op);
-    expect(res.revision).toBe(8); // resolved off the publish, not the superseded report
+    expect(res.revision).toBe(8); // resolved off the covering publish, not the superseded report
     expect(res.changedBodies).toEqual([{ bodyId: "b8", meshKey: "b8:coarse:8" }]);
     expect(res.errorMessage).toBeUndefined();
   });
@@ -1277,6 +1283,137 @@ describe("tauriClient regen-finished correlation", () => {
     expect(res.revision).toBe(7); // fell back to the pre-regen projection revision
     expect(res.changedBodies).toEqual([]);
     expect(res.errorMessage).toBeUndefined(); // the stale failure never resolved us
+  });
+
+  it("a published regen whose failedSteps names THIS op's recordId resolves as FAILURE, not success (finding 1)", async () => {
+    // The regen PUBLISHES other records' bodies (document-changed) but THIS op's step
+    // errored — the awaiter must correlate to the regen-finished sibling and fail with
+    // empty bodies + the step message, NOT settle success off the document-changed.
+    let recordId: string | undefined;
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "apply_edit_command") {
+          recordId = (payload as { command: { record: { recordId: string } } }).command.record.recordId;
+          setTimeout(() => {
+            void emit("document-changed", {
+              revision: 10,
+              changedBodies: [{ bodyId: "other", meshKey: "other#10" }], // OTHER records' body
+              removedBodies: [],
+            });
+            void emit("regen-finished", {
+              revision: 10,
+              sourceRevision: 9,
+              outcome: "published",
+              failedSteps: [{ recordId: recordId as string, message: "extrude self-intersects" }],
+            });
+          }, 0);
+          return readyProjection(9); // R = 9
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    __setRegenTimeoutForTests(300);
+    const res = await createTauriClient().applyOperation(op);
+    expect(res.changedBodies).toEqual([]); // NOT the published "other" body
+    expect(res.errorMessage).toBe("extrude self-intersects");
+    expect(res.revision).toBe(10);
+  });
+
+  it("scopes changedBodies to affectedBodies[recordId] — the op's own bodies + split children (finding 2)", async () => {
+    let recordId: string | undefined;
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "apply_edit_command") {
+          recordId = (payload as { command: { record: { recordId: string } } }).command.record.recordId;
+          setTimeout(() => {
+            void emit("document-changed", {
+              revision: 12,
+              changedBodies: [
+                { bodyId: "other", meshKey: "other#12" }, // a sibling record's body
+                { bodyId: "mine:0", meshKey: "mine0#12" },
+                { bodyId: "mine:1", meshKey: "mine1#12" }, // split child
+              ],
+              removedBodies: [],
+            });
+            void emit("regen-finished", {
+              revision: 12,
+              sourceRevision: 11,
+              outcome: "published",
+              affectedBodies: { [recordId as string]: ["mine:0", "mine:1"] },
+            });
+          }, 0);
+          return readyProjection(11);
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    __setRegenTimeoutForTests(300);
+    const res = await createTauriClient().applyOperation(op);
+    // ONLY this op's bodies, mapped to their document-changed meshKeys (not "other").
+    expect(res.changedBodies).toEqual([
+      { bodyId: "mine:0", meshKey: "mine0#12" },
+      { bodyId: "mine:1", meshKey: "mine1#12" },
+    ]);
+    expect(res.errorMessage).toBeUndefined();
+  });
+
+  it("resolves immediately (no 8s stall) when a fresh op appends a draft while rolled back (finding 4)", async () => {
+    mockIPC(
+      (cmd) => {
+        // A draft append fires NO regen events; appliedOps < totalOps flags it.
+        if (cmd === "apply_edit_command") return { ...(readyProjection(5) as object), appliedOps: 2, totalOps: 3 };
+      },
+      { shouldMockEvents: true },
+    );
+    __setRegenTimeoutForTests(5000); // long: the immediate resolve must win, not the timeout
+    const start = Date.now();
+    const res = await createTauriClient().applyOperation(op);
+    expect(Date.now() - start).toBeLessThan(1000); // did not wait on the safety timeout
+    expect(res.changedBodies).toEqual([]);
+    expect(res.errorMessage).toMatch(/rolled back/);
+    expect(res.revision).toBe(5);
+  });
+});
+
+// ── Correlation reset on document replacement (finding 3) ─────────────────────
+
+describe("tauriClient correlation reset on document replacement", () => {
+  const op: OperationOp = {
+    opType: "Boolean",
+    params: { operation: "Union", targetBodyId: "t", toolBodyId: "u" },
+  } as OperationOp;
+
+  it("open(docB) drops docA's buffered publish so docB's first commit can't settle off it", async () => {
+    mockIPC(
+      (cmd) => {
+        if (cmd === "open_document") return { documentId: "docB", title: "B" };
+        if (cmd === "apply_edit_command") {
+          // docB's first commit is a NOOP (only a regen-finished, no document-changed):
+          // its success bodies must come from nothing, not docA's stale buffer.
+          setTimeout(() => void emit("regen-finished", { revision: 2, sourceRevision: 1, outcome: "noop" }), 0);
+          return readyProjection(1); // docB R = 1
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    __setRegenTimeoutForTests(300);
+    const client = createTauriClient();
+    const unsub = client.onDocumentChanged(() => {});
+    await tick(); // start the listeners
+    // Buffer a HIGH-revision docA publish.
+    await emit("document-changed", {
+      revision: 999,
+      changedBodies: [{ bodyId: "b_docA", meshKey: "bA#999" }],
+      removedBodies: [],
+    });
+    await tick();
+    await client.openDocument("/docB.onecad"); // resets the correlation buffers
+
+    // Without the reset, setTarget(1) would buffer docA's rev-999 change and the noop
+    // regen-finished would settle docB's commit with docA's body.
+    const res = await client.applyOperation(op);
+    expect(res.changedBodies).toEqual([]);
+    unsub();
   });
 });
 

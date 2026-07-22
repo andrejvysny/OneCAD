@@ -395,6 +395,21 @@ export interface RegenFinished {
   outcome: string;
   /** Failure reason for `outcome === "failed"` (SCHEMA §8). Absent otherwise. */
   message?: string;
+  /**
+   * Records whose POST-regen step state is Error, even when the regen itself
+   * published (other steps' geometry). A commit correlated to this completion whose
+   * own `recordId` appears here is a FAILURE (empty bodies + the step message) — it
+   * must NOT correlate as success off the sibling `document-changed` (MODEL-HARDEN).
+   * Present only when non-empty; the mock lane omits it.
+   */
+  failedSteps?: Array<{ recordId: string; message: string }>;
+  /**
+   * Per record-id, the body ids that op created (incl. split children) or modified
+   * in THIS published regen. Lets a correlated commit scope its result bodies to
+   * ONLY its own op's bodies (MODEL-HARDEN); absent ⇒ fall back to the full
+   * `document-changed` list (mock lane).
+   */
+  affectedBodies?: Record<string, string[]>;
 }
 
 /**

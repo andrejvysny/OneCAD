@@ -35,12 +35,25 @@ async function armExtrude(page: import("@playwright/test").Page): Promise<void> 
   await expect(page.getByText(/^Drag the arrow to set depth/)).toBeVisible();
 }
 
-/** Drag the depth handle and release (which now KEEPS the tool armed). */
+/**
+ * Drag the depth handle and release (which now KEEPS the tool armed). The grab must
+ * actually land — the handle scan and the real pointerdown are a frame apart, so a
+ * miss would leave the tool armed the WHOLE time and make "release keeps armed" pass
+ * vacuously (finding 15). Assert the phase became "dragging" mid-drag; a single-frame
+ * miss re-scans + re-grabs, a persistent miss fails loudly.
+ */
 async function dragReleaseHandle(page: import("@playwright/test").Page): Promise<void> {
-  const { x, y } = await findExtrudeHandle(page);
-  await page.mouse.move(x, y);
-  await page.mouse.down();
-  await page.mouse.move(x, y + 12, { steps: 4 });
+  await expect(async () => {
+    const { x, y } = await findExtrudeHandle(page);
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x, y + 12, { steps: 4 });
+    const phase = (await extrudeDebug(page))?.phase;
+    if (phase !== "dragging") {
+      await page.mouse.up(); // release the missed grab before retrying
+      throw new Error(`extrude grab missed — phase was ${String(phase)}`);
+    }
+  }).toPass({ timeout: 10_000, intervals: [200, 400, 800] });
   await page.mouse.up();
 }
 

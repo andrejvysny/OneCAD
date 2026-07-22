@@ -239,6 +239,21 @@ describe("revolve FSM", () => {
     expect(revolveStep(axisPick, { kind: "confirm" }).effect).toBe("none");
   });
 
+  it("ignores a confirm at a ~0° angle (degenerate revolve guard — finding 13)", () => {
+    const armed = revolveStep(
+      revolveStep(revolveInit(), { kind: "arm", angle: 360 }).state,
+      { kind: "pickAxis", lineId: "L1", valid: true },
+    ).state;
+    // Set a sub-epsilon angle, then confirm → no transition (stays armed, no commit).
+    const tiny = revolveStep(armed, { kind: "setAngle", angle: 0.3 }).state;
+    const step = revolveStep(tiny, { kind: "confirm" });
+    expect(step.effect).toBe("none");
+    expect(step.state.phase).toBe("armed");
+    // Below the 0.5° threshold is refused; at/above it commits (strict `< MIN`).
+    expect(revolveStep(revolveStep(armed, { kind: "setAngle", angle: 0.49 }).state, { kind: "confirm" }).effect).toBe("none");
+    expect(revolveStep(revolveStep(armed, { kind: "setAngle", angle: 0.5 }).state, { kind: "confirm" }).effect).toBe("commit");
+  });
+
   it("commitFailed returns committing → armed (controller keeps the lathe preview)", () => {
     const committing = revolveStep(
       revolveStep(

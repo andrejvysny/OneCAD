@@ -97,6 +97,17 @@ import type { FeatureBooleanMode } from "@/ipc/types";
 
 const DRAG_PX = 4;
 
+/**
+ * How long a commit waits for its new bodies to enter the scene (onBodyLoaded)
+ * before finishing anyway. A committed body that never ingests — e.g. a hidden body
+ * whose mesh is never fetched — must not hang the tool open forever (finding 8).
+ */
+let bodyLoadTimeoutMs = 4000;
+/** Test seam: shrink the commit body-load wait so a never-loading body resolves fast. */
+export function __setBodyLoadTimeoutForTests(ms: number): void {
+  bodyLoadTimeoutMs = ms;
+}
+
 export interface ModelToolDeps {
   engine: ViewportEngine;
   client: CadClient;
@@ -246,6 +257,9 @@ export class ModelToolController {
   private committedEpoch = 0;
   private lastL2Epoch = 0;
   private commitBodyUnsub: (() => void) | null = null;
+  /** Bounded-wait timers for the commit body-load reconcile (finding 8). */
+  private commitBodyTimer: ReturnType<typeof setTimeout> | null = null;
+  private commitRevolveBodyTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Pointer bookkeeping.
   private downX = 0;
@@ -789,6 +803,7 @@ export class ModelToolController {
     editFeatureId?: string,
     startAngle = DEFAULT_REVOLVE_ANGLE,
   ): Promise<void> {
+    const gen = this.armGen;
     const region = regions[0];
     const profile = profiles[0];
     this.plane = session.plane;
@@ -804,6 +819,9 @@ export class ModelToolController {
     this.revolveStoredParams = editFeatureId
       ? await this.deps.client.getOperationParams(editFeatureId).catch(() => undefined)
       : undefined;
+    // Guard the unawaited state below: a tool switch / re-arm during getOperationParams
+    // must NOT let a superseded re-edit arm resurrect the revolve preview + chip.
+    if (gen !== this.armGen) return;
     this.revolveAxisCandidates = session.entities
       .filter((e) => e.type === "Line" && e.p0 && e.p1)
       .map((e) => ({ id: e.id, a: e.p0 as [number, number], b: e.p1 as [number, number] }));
@@ -988,6 +1006,13 @@ export class ModelToolController {
    */
   private async confirmRevolve(): Promise<void> {
     if (this.revolve.phase !== "armed") return;
+    // Degenerate-angle guard (finding 13): the machine refuses a confirm at ~0° — stay
+    // armed and nudge the user instead of committing a zero-thickness revolve.
+    const step = revolveStep(this.revolve, { kind: "confirm" });
+    if (step.effect !== "commit") {
+      viewportStore.getState().setStatusHint("Set a non-zero angle", { severity: "error", sticky: true });
+      return;
+    }
     const angle = this.revolve.angle;
     const sketchId = this.revolveSketchId;
     const regionIds = this.revolveRegionIds.length
@@ -1000,7 +1025,7 @@ export class ModelToolController {
       return;
     }
     const gen = ++this.commitGen;
-    this.revolve = revolveStep(this.revolve, { kind: "confirm" }).state; // → committing
+    this.revolve = step.state; // → committing
     toolStore.setState({ phase: "committing" });
     const axis: AxisRef | undefined = this.revolveAxisLineId
       ? { kind: "sketchLine", sketchId, lineId: this.revolveAxisLineId }
@@ -1024,8 +1049,10 @@ export class ModelToolController {
         );
         if (gen !== this.commitGen) return;
         this.applyResult(res);
-        const bodyId = res.changedBodies[0]?.bodyId;
-        if (bodyId) this.finishRevolveAll([bodyId], gen, loaded);
+        // Op-scoped bodies (finding 2): a re-edit's result is already this record's
+        // own bodies — take ALL of them (a Cut re-edit yields split children).
+        const bodyIds = res.changedBodies.map((b) => b.bodyId);
+        if (bodyIds.length > 0) this.finishRevolveAll(bodyIds, gen, loaded);
         else {
           this.commitRevolveBodyUnsub?.();
           this.commitRevolveBodyUnsub = null;
@@ -1061,15 +1088,16 @@ export class ModelToolController {
         return;
       }
       if (gen !== this.commitGen) return;
-      const bodyId = res.changedBodies[0]?.bodyId;
-      if (!bodyId) {
+      if (res.changedBodies.length === 0) {
         this.commitRevolveBodyUnsub?.();
         this.commitRevolveBodyUnsub = null;
         this.onRevolveCommitFailed(k, total, res.errorMessage ?? "Revolve failed");
         return;
       }
       this.applyResult(res);
-      committedBodyIds.push(bodyId);
+      // Op-scoped bodies (finding 2): each region's op result carries only its own
+      // bodies (incl. split children) — collect them all across the loop.
+      for (const b of res.changedBodies) committedBodyIds.push(b.bodyId);
     }
     this.finishRevolveAll(committedBodyIds, gen, loaded);
   }
@@ -1078,6 +1106,10 @@ export class ModelToolController {
   private finishRevolveAll(bodyIds: string[], gen: number, loaded: Set<string>): void {
     const pending = new Set(bodyIds.filter((id) => !loaded.has(id)));
     const done = (): void => {
+      if (this.commitRevolveBodyTimer) {
+        clearTimeout(this.commitRevolveBodyTimer);
+        this.commitRevolveBodyTimer = null;
+      }
       this.commitRevolveBodyUnsub?.();
       this.commitRevolveBodyUnsub = null;
       if (gen !== this.commitGen) return;
@@ -1093,6 +1125,9 @@ export class ModelToolController {
       pending.delete(id);
       if (pending.size === 0) done();
     });
+    // Bounded wait (finding 8): a committed body that never ingests (e.g. hidden ⇒ no
+    // mesh) must not hang the tool — finish with whatever loaded after the timeout.
+    this.commitRevolveBodyTimer = setTimeout(done, bodyLoadTimeoutMs);
   }
 
   /**
@@ -1113,6 +1148,11 @@ export class ModelToolController {
       this.revolveProfiles = this.revolveProfiles.slice(k);
       this.revolveRegionId = this.revolveRegionIds[0] ?? this.revolveRegionId;
       this.revolveProfile = this.revolveProfiles[0] ?? this.revolveProfile;
+    }
+    // Rebuild the lathe preview for the NEW primary (first REMAINING) region — the
+    // already-committed region's shell would otherwise linger (finding 12).
+    if (this.plane && this.revolveProfile && this.revolveAxis) {
+      this.deps.engine.showRevolvePreview(this.plane, this.revolveProfile.ring, this.revolveAxis, this.revolve.angle);
     }
     this.updateDebug();
   }
@@ -1563,6 +1603,7 @@ export class ModelToolController {
       this.extrude = extrudeStep(this.extrude, { kind: "grab" }).state;
       this.engine.setExtrudeHandleHover(true);
       toolStore.setState({ phase: "dragging" });
+      this.updateDebug(); // publish the live "dragging" phase to the debug surface
     } else if (this.fillet.phase === "armed") {
       this.dragging = "fillet";
       this.filletDownY = e.clientY;
@@ -1603,6 +1644,7 @@ export class ModelToolController {
       toolChipStore.getState().setSymmetric(this.extrude.symmetric); // Alt-drag syncs the ⇔ toggle
       this.maybeNegativeDragHint(this.extrude.depth);
       this.sendPreview(this.extrude.depth);
+      this.updateDebug(); // publish live phase ("dragging") + depth to the debug surface
     } else if (this.dragging === "fillet") {
       const dy = this.filletDownY - e.clientY; // up-drag grows the radius
       const radius = radiusFromDrag(this.filletStartRadius, dy, { worldPerPx: this.engine.planePixelWorld() });
@@ -1744,11 +1786,13 @@ export class ModelToolController {
     return false;
   }
 
-  /** Chip / toolbar / input / overlay targets never trigger a click-away commit. */
+  /** Chip / toolbar / input / overlay targets never trigger a click-away commit.
+   *  Accepts any Element incl. SVGElement (a toolbar icon click lands on an <svg>/
+   *  <path>, which is NOT an HTMLElement) — walk up via `.closest()` so an icon-inside-
+   *  button still resolves to its excluded ancestor (finding 5). */
   private isExcludedClickAwayTarget(target: EventTarget | null): boolean {
-    if (!(target instanceof HTMLElement)) return false;
-    const tag = target.tagName;
-    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable) return true;
+    if (!(target instanceof Element)) return false;
+    if (target.closest("input,textarea,select,[contenteditable]")) return true;
     return !!target.closest(
       '[data-testid="model-tool-chip"],[role="toolbar"],[role="listbox"],[role="dialog"],button',
     );
@@ -1898,14 +1942,17 @@ export class ModelToolController {
         return;
       }
       if (gen !== this.commitGen) return;
-      if (!res || !res.changedBodies[0]) {
+      if (!res || res.changedBodies.length === 0) {
         this.commitBodyUnsub?.();
         this.commitBodyUnsub = null;
         this.onExtrudeCommitFailed(k, total, res?.errorMessage, gen);
         return;
       }
       this.applyResult(res);
-      committedBodyIds.push(res.changedBodies[0].bodyId);
+      // Op-scoped bodies (finding 2): res.changedBodies now carries ONLY this region's
+      // op bodies (incl. split children) — collect them all, not just [0]. The union
+      // is deduped + selected in finishExtrude.
+      for (const b of res.changedBodies) committedBodyIds.push(b.bodyId);
     }
     this.finishExtrudeAll(committedBodyIds, gen, loaded);
   }
@@ -1935,6 +1982,11 @@ export class ModelToolController {
    */
   private async rearmRemainingExtrude(k: number, gen: number): Promise<void> {
     if (!this.plane) return;
+    // Drop the committed + failed sessions' STALE L2 preview bodies. removeMesh only
+    // clears the mesh registry; the engine's scene handles linger (finding 11), so
+    // clear every live L2 handle here — the surviving sessions re-render theirs via the
+    // sendPreview below (only they keep a lane session).
+    this.engine.clearPreviewBody();
     for (let i = 0; i < k; i++) removeMesh(this.extrudeSessions[i].session.previewBodyId);
     const failed = this.extrudeSessions[k];
     removeMesh(failed.session.previewBodyId);
@@ -1945,7 +1997,13 @@ export class ModelToolController {
       void this.deps.client.endPreview(freshSession.sessionId, false); // superseded — don't leak
       return;
     }
-    this.extrudeSessions = [{ ...failed, session: freshSession, lastAppliedEpoch: 0 }, ...remaining];
+    // Reset per-session lastAppliedEpoch (finding 9): the throttle.reset() below restarts
+    // epochs from a lower value; a surviving session that kept a LARGE lastAppliedEpoch
+    // would stale-drop every new (lower) L2 epoch, freezing its preview. Zero them all.
+    this.extrudeSessions = [
+      { ...failed, session: freshSession, lastAppliedEpoch: 0 },
+      ...remaining.map((s) => ({ ...s, lastAppliedEpoch: 0 })),
+    ];
 
     const profiles = this.extrudeSessions.map((e) => e.profile);
     this.centroidWorld = combinedCentroidWorld(this.plane, profiles);
@@ -1966,6 +2024,10 @@ export class ModelToolController {
     this.commitBodyId = bodyIds[bodyIds.length - 1] ?? null;
     const pending = new Set(bodyIds.filter((id) => !loaded.has(id)));
     const done = (): void => {
+      if (this.commitBodyTimer) {
+        clearTimeout(this.commitBodyTimer);
+        this.commitBodyTimer = null;
+      }
       this.commitBodyUnsub?.();
       this.commitBodyUnsub = null;
       if (gen !== this.commitGen) return;
@@ -1982,6 +2044,9 @@ export class ModelToolController {
       pending.delete(id);
       if (pending.size === 0) done();
     });
+    // Bounded wait (finding 8): a committed body that never ingests (e.g. hidden ⇒ no
+    // mesh) must not hang the tool — finish with whatever loaded after the timeout.
+    this.commitBodyTimer = setTimeout(done, bodyLoadTimeoutMs);
   }
 
   private finishExtrude(bodyIds: string[]): void {
@@ -2171,6 +2236,10 @@ export class ModelToolController {
       return;
     }
     const depth = parseFloat(feat.valueText) || DEFAULT_EXTRUDE_DEPTH;
+    // If the extrude tool is ALREADY armed, setTool("extrude") is a no-op and skips the
+    // onToolChange → cancelPreview that would end the open lane sessions — so end them
+    // explicitly here or the re-edit arm leaks them (finding 10).
+    if (toolStore.getState().modelTool === "extrude") this.cancelPreview();
     toolStore.getState().setTool("extrude");
     void this.armExtrude(sketchId, featureId, depth);
   }
@@ -2326,6 +2395,10 @@ export class ModelToolController {
     this.negativeDragHintShown = false;
     this.commitBodyUnsub?.();
     this.commitBodyUnsub = null;
+    if (this.commitBodyTimer) {
+      clearTimeout(this.commitBodyTimer);
+      this.commitBodyTimer = null;
+    }
     this.engine.hideExtrudePreview();
     this.engine.clearPreviewBody();
     this.engine.setExtrudePreviewTint("normal");
@@ -2374,6 +2447,10 @@ export class ModelToolController {
   private cancelRevolve(): void {
     this.commitRevolveBodyUnsub?.();
     this.commitRevolveBodyUnsub = null;
+    if (this.commitRevolveBodyTimer) {
+      clearTimeout(this.commitRevolveBodyTimer);
+      this.commitRevolveBodyTimer = null;
+    }
     this.deps.engine.setOrbitSuppressed(false);
     this.engine.hideRevolvePreview();
     this.engine.setExtrudePreviewTint("normal");
@@ -2416,9 +2493,18 @@ export class ModelToolController {
     window.removeEventListener("pointerdown", this.onWindowPointerDown, true);
     window.removeEventListener("pointerup", this.onWindowPointerUp, true);
     if (this.trailingTimer) clearTimeout(this.trailingTimer);
+    if (this.commitBodyTimer) clearTimeout(this.commitBodyTimer);
+    if (this.commitRevolveBodyTimer) clearTimeout(this.commitRevolveBodyTimer);
     this.commitBodyUnsub?.();
     this.commitRevolveBodyUnsub?.();
-    for (const es of this.extrudeSessions) removeMesh(es.session.previewBodyId);
+    // End every OPEN preview lane session (finding 6): a viewport remount disposes the
+    // controller while an extrude is armed — without this the lane sessions leak.
+    // Fire-and-forget with a disposed-guard catch (the result is irrelevant post-dispose).
+    for (const es of this.extrudeSessions) {
+      void this.deps.client.endPreview(es.session.sessionId, false).catch(() => {});
+      removeMesh(es.session.previewBodyId);
+    }
+    this.extrudeSessions = [];
     for (const u of this.unsubs) u();
     this.unsubs.length = 0;
   }

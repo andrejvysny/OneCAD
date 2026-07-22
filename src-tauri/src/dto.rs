@@ -501,6 +501,18 @@ fn candidate_dto(c: onecad_core::document::repair::RepairCandidate) -> ResolveCa
     }
 }
 
+/// One timeline record left in `StepState::Error` by a published regen — the
+/// `failedSteps` correlation entry (MODEL-HARDEN finding 1). Its `recordId` lets the
+/// frontend awaiter detect that ITS committed op failed even though the surrounding
+/// from-0 regen published OTHER bodies (which would otherwise read as a blanket
+/// commit success). `message` is the worker's failure reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FailedStep {
+    pub record_id: String,
+    pub message: String,
+}
+
 /// The `regen-finished` event payload so the frontend correlation resolves
 /// promptly without the 8 s fallback (F-WP8 flag 3). `sourceRevision` is the
 /// fencing revision the regen was PREPARED for (Codex MAJOR-3 commit provenance):
@@ -519,6 +531,20 @@ pub struct RegenFinished {
     /// surfaces WHY. Absent for any other outcome.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Per-record failure detail for a PUBLISHED regen that nonetheless left one or
+    /// more timeline steps in `Error` (MODEL-HARDEN finding 1). Empty (omitted) on a
+    /// clean publish and on every non-published outcome. The frontend awaiter checks
+    /// its commit's `recordId` against this so a failed op is never mistaken for a
+    /// commit success just because sibling bodies republished.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_steps: Vec<FailedStep>,
+    /// Per-record-id, the body ids an op CREATED or MODIFIED in THIS published regen
+    /// (created incl. split children mapped to their derived uuids, plus modified
+    /// Add/Cut targets), rendered in the same wire form as `document-changed`'s
+    /// `changedBodies`. Lets a correlated apply resolve its own body precisely rather
+    /// than off the whole republished set. Empty (omitted) on failed/superseded/noop.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub affected_bodies: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// One entry in the `needs-repair` event — a **lean** summary of a step left in
@@ -804,6 +830,44 @@ mod tests {
         let v = serde_json::to_value(&errored).unwrap();
         assert_eq!(v["status"], "error");
         assert_eq!(v["statusMessage"], "boom");
+    }
+
+    #[test]
+    fn regen_finished_failed_steps_and_affected_bodies_serialize_additively() {
+        // A clean publish carries neither field on the wire (old payloads parse).
+        let clean = RegenFinished {
+            revision: 7,
+            source_revision: 7,
+            outcome: "published".into(),
+            message: None,
+            failed_steps: Vec::new(),
+            affected_bodies: std::collections::BTreeMap::new(),
+        };
+        let v = serde_json::to_value(&clean).unwrap();
+        assert_eq!(v["outcome"], "published");
+        assert!(v.get("failedSteps").is_none(), "empty ⇒ omitted");
+        assert!(v.get("affectedBodies").is_none(), "empty ⇒ omitted");
+        assert!(v.get("message").is_none());
+
+        // A published-with-failure carries both, camelCase, keyed by recordId.
+        let mut affected = std::collections::BTreeMap::new();
+        affected.insert("rec-extrude".to_string(), vec!["body-1".to_string()]);
+        let with = RegenFinished {
+            outcome: "published".into(),
+            failed_steps: vec![FailedStep {
+                record_id: "rec-revolve".into(),
+                message: "axis not found".into(),
+            }],
+            affected_bodies: affected,
+            ..clean
+        };
+        let v = serde_json::to_value(&with).unwrap();
+        assert_eq!(v["failedSteps"][0]["recordId"], "rec-revolve");
+        assert_eq!(v["failedSteps"][0]["message"], "axis not found");
+        assert_eq!(
+            v["affectedBodies"]["rec-extrude"],
+            serde_json::json!(["body-1"])
+        );
     }
 
     // ── M4a deliverable 3: the un-lossy resolve_refs DTO mapping ──────────────

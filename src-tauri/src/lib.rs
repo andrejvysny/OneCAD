@@ -73,16 +73,26 @@ pub fn regen_driver_with_emitter(
         let emit = emit.clone();
         let autosave_tick = autosave_tick.clone();
         Box::pin(async move {
-            // Phase 1 (locked): compile the plan + clone the scratch session.
+            // Phase 1 (locked): compile the plan + clone the scratch session. An EMPTY
+            // plan (a no-op-producing request — a rolled-back append, an already-current
+            // timeline) still emits exactly ONE NoOp completion so the frontend awaiter's
+            // `regen-finished{noop}` anti-hang terminal fires in production (finding 4):
+            // returning silently here would strand the awaiter until its 8 s fallback.
             let prepared = {
                 let mut guard = runtime.lock().await;
                 let Some(rt) = guard.as_mut() else {
                     return Outcome::NoOp; // document closed while the job was queued.
                 };
-                rt.begin_regen(directive.request)
-            };
-            let Some(prepared) = prepared else {
-                return Outcome::NoOp; // empty plan.
+                match rt.begin_regen(directive.request) {
+                    Some(prepared) => prepared,
+                    None => {
+                        let report = rt.noop_report();
+                        let projection = rt.projection();
+                        drop(guard);
+                        emit(&report, &projection);
+                        return Outcome::NoOp;
+                    }
+                }
             };
             // Phase 2 (UNLOCKED): drive the worker; concurrent edits may supersede.
             let driven = prepared.drive(directive.cancel).await;

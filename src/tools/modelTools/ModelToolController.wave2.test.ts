@@ -5,7 +5,7 @@
  * surface (deps.debug) exposes the FSM phase / boolean target for assertions.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { ModelToolController } from "./ModelToolController";
+import { ModelToolController, __setBodyLoadTimeoutForTests } from "./ModelToolController";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import type { CadClient } from "@/ipc/client";
 import type {
@@ -309,5 +309,214 @@ describe("ModelToolController Wave 2", () => {
       return op.regionId;
     });
     expect(regionIds).toEqual(["r0", "r1"]);
+  });
+
+  // ── MODEL-HARDEN findings ─────────────────────────────────────────────────────
+
+  const waitMs = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+  it("selects the UNION of an op's scoped bodies incl split children (finding 2)", async () => {
+    documentStore.getState().addSketch({ id: "sk", name: "Sketch X", visible: true, dof: 0, status: "ok" });
+    // A single region whose op returns TWO bodies (a Cut split child).
+    build({
+      finish: () => Promise.resolve({ regions: [R0] }),
+      endResults: [
+        {
+          revision: 1,
+          features: [],
+          changedBodies: [
+            { bodyId: "s0", meshKey: "s0#1" },
+            { bodyId: "s1", meshKey: "s1#1" },
+          ],
+          removedBodies: [],
+        },
+      ],
+    });
+    await armExtrude();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })); // confirm single region
+    await flush();
+    bodyCbs.forEach((cb) => {
+      cb("s0");
+      cb("s1");
+    });
+    await flush();
+    expect(controller.extrudeActive).toBe(false);
+    expect(selectionStore.getState().selected).toEqual([
+      { kind: "body", id: "s0" },
+      { kind: "body", id: "s1" },
+    ]);
+  });
+
+  it("a click-away on an SVG target inside a toolbar button does NOT commit (finding 5)", async () => {
+    build({ finish: () => Promise.resolve({ regions: [R0] }) });
+    await armExtrude();
+    expect(debug().phase).toBe("armed");
+
+    // A toolbar icon: an <svg>/<path> (NOT an HTMLElement) inside a <button>.
+    const button = document.createElement("button");
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    svg.appendChild(path);
+    button.appendChild(svg);
+    document.body.appendChild(button);
+
+    // A true click targeting the SVG path — the OLD instanceof-HTMLElement gate let this
+    // through and committed; `.closest("button")` now excludes it.
+    path.dispatchEvent(new MouseEvent("pointerdown", { button: 0, clientX: 5, clientY: 5, bubbles: true }));
+    path.dispatchEvent(new MouseEvent("pointerup", { button: 0, clientX: 5, clientY: 5, bubbles: true }));
+    await flush();
+
+    expect(clientMock.endPreview).not.toHaveBeenCalled();
+    expect(debug().phase).toBe("armed");
+    button.remove();
+  });
+
+  it("dispose ends the single open preview session with endPreview(false) (finding 6, N=1)", async () => {
+    build({ finish: () => Promise.resolve({ regions: [R0] }) });
+    await armExtrude();
+    clientMock.endPreview.mockClear();
+    controller.dispose();
+    expect(clientMock.endPreview).toHaveBeenCalledTimes(1);
+    expect((clientMock.endPreview.mock.calls[0] as unknown[])[1]).toBe(false);
+  });
+
+  it("dispose ends EVERY open preview session with endPreview(false) (finding 6, N sessions)", async () => {
+    build({ finish: () => Promise.resolve({ regions: [R0, R1, R2] }) });
+    await armExtrude();
+    click(10, 10);
+    await flush();
+    click(130, 110);
+    await flush();
+    click(210, 210);
+    await flush();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })); // confirm selection → 3 sessions
+    await flush();
+    expect(clientMock.beginPreview).toHaveBeenCalledTimes(3);
+    clientMock.endPreview.mockClear();
+    controller.dispose();
+    expect(clientMock.endPreview).toHaveBeenCalledTimes(3);
+    for (const call of clientMock.endPreview.mock.calls) expect((call as unknown[])[1]).toBe(false);
+  });
+
+  it("a superseded re-edit revolve arm does NOT resurrect the preview after getOperationParams (finding 7)", async () => {
+    selectionStore.getState().set([]); // no sketch selected → setTool('revolve') won't fresh-arm
+    documentStore.setState({
+      features: [{ id: "rev-1", kind: "revolve", label: "Revolve", valueText: "90°", status: "ok" }],
+    });
+    build({ finish: () => Promise.resolve({ regions: [R0] }), entities: [AXIS_OK] });
+    let resolveParams!: (v: Record<string, unknown>) => void;
+    clientMock.getOperationParams.mockReturnValue(new Promise((r) => (resolveParams = r)));
+
+    controller.editRevolveFeature("rev-1");
+    await flush(); // finishSketch + getSketch resolve; paused at the getOperationParams await
+    toolStore.getState().setTool("select"); // supersede: invalidateArm() bumps armGen + cancelRevolve
+    await flush();
+    resolveParams({}); // the stale params resolve LATE
+    await flush();
+
+    // The guard after the await must have dropped the stale arm — no lathe preview, not armed.
+    expect(engineMock.showRevolvePreview).not.toHaveBeenCalled();
+    expect(debug().revolvePhase).not.toBe("armed");
+  });
+
+  it("finishes after the bounded wait when a committed body never loads (finding 8)", async () => {
+    __setBodyLoadTimeoutForTests(10);
+    try {
+      build({ finish: () => Promise.resolve({ regions: [R0] }), endResults: [ok("never-loads")] });
+      await armExtrude();
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })); // confirm
+      await flush();
+      // The body never fires onBodyLoaded — the tool is still committing.
+      expect(toolStore.getState().modelTool).toBe("extrude");
+      await waitMs(30); // past the bounded wait
+      expect(toolStore.getState().modelTool).toBe("select"); // finished anyway (no hang)
+      expect(selectionStore.getState().selected).toEqual([{ kind: "body", id: "never-loads" }]);
+    } finally {
+      __setBodyLoadTimeoutForTests(4000);
+    }
+  });
+
+  it("editExtrudeFeature while already armed ends the open lane session before re-arming (finding 10)", async () => {
+    build({ finish: () => Promise.resolve({ regions: [R0] }) });
+    documentStore.setState({
+      features: [{ id: "ex-1", kind: "extrude", label: "Extrude", valueText: "20 mm", status: "ok" }],
+    });
+    await armExtrude(); // one open preview session
+    expect(clientMock.beginPreview).toHaveBeenCalledTimes(1);
+    clientMock.endPreview.mockClear();
+
+    controller.editExtrudeFeature("ex-1"); // tool is ALREADY extrude → setTool is a no-op
+    await flush();
+    // The prior session was ended (finding 10 — no leak), and a fresh one armed.
+    expect(clientMock.endPreview).toHaveBeenCalledWith(expect.any(String), false);
+    expect(clientMock.beginPreview).toHaveBeenCalledTimes(2);
+  });
+
+  it("clears stale L2 preview bodies before re-arming after a partial failure (finding 11)", async () => {
+    build({
+      finish: () => Promise.resolve({ regions: [R0, R1, R2] }),
+      endResults: [ok("body-a"), fail("boom")],
+    });
+    await armExtrude();
+    click(10, 10);
+    await flush();
+    click(130, 110);
+    await flush();
+    click(210, 210);
+    await flush();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })); // confirm selection
+    await flush();
+    engineMock.clearPreviewBody.mockClear();
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })); // confirm → region1 fails
+    await flush();
+    await flush(); // let the re-arm resolve
+
+    // The committed + failed sessions' stale L2 handles were cleared before re-arming.
+    expect(engineMock.clearPreviewBody).toHaveBeenCalled();
+    expect(controller.extrudeActive).toBe(true); // re-armed
+  });
+
+  it("revolve partial failure rebuilds the lathe preview for the REMAINING region (finding 12)", async () => {
+    build({
+      finish: () => Promise.resolve({ regions: [R0, R1] }),
+      entities: [AXIS_OK, AXIS_BAD],
+      applyResults: [ok("rev-a"), fail("boom")],
+    });
+    toolStore.getState().setTool("revolve");
+    await flush();
+    click(10, 10);
+    await flush();
+    click(130, 110);
+    await flush();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })); // confirm 2 regions
+    await flush();
+    click(50, 50); // valid axis → armed (first showRevolvePreview)
+    await flush();
+    expect(engineMock.showRevolvePreview).toHaveBeenCalledTimes(1);
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })); // confirm → region0 ok, region1 fails
+    await flush();
+    // The stop-on-failure path re-armed and rebuilt the lathe preview for the remaining region.
+    expect(engineMock.showRevolvePreview).toHaveBeenCalledTimes(2);
+    expect(viewportStore.getState().statusHint?.message).toMatch(/Revolve 2 of 2 failed/);
+  });
+
+  it("confirmRevolve at a ~0° angle is refused with a 'non-zero angle' hint (finding 13)", async () => {
+    build({ finish: () => Promise.resolve({ regions: [R0] }), entities: [AXIS_OK] });
+    toolStore.getState().setTool("revolve");
+    await flush();
+    click(50, 50); // pick the valid axis → armed at 360°
+    await flush();
+    expect(debug().revolvePhase).toBe("armed");
+
+    // Drive the angle to ~0 via the chip, then confirm (Enter).
+    toolChipStore.getState().onValue?.(0.2);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await flush();
+
+    expect(clientMock.applyOperation).not.toHaveBeenCalled(); // no commit
+    expect(debug().revolvePhase).toBe("armed"); // stays armed
+    expect(viewportStore.getState().statusHint?.message).toMatch(/non-zero angle/i);
   });
 });

@@ -804,6 +804,11 @@ pub fn emit_regen_events(app: &AppHandle, report: &RegenReport, projection: &Doc
             source_revision: report.source_revision,
             outcome: report.outcome_str().to_string(),
             message: report.failure_message(),
+            // Finding 1: a published-but-partially-failed regen carries per-record
+            // failure + created/modified-body maps so a correlated apply resolves its
+            // own commit precisely (never mistaking sibling republishes for success).
+            failed_steps: report.failed_steps.clone(),
+            affected_bodies: report.affected_bodies.clone(),
         },
     );
     if report.published() {

@@ -569,12 +569,20 @@ Per-step `event`s (`event:"planStep"`), one per executed step:
   (no collision with a session body or a duplicate earlier in the same plan); a
   malformed or colliding id **rejects** the prepared plan (the worker's terminal is
   treated as `PROTOCOL_ERROR`, the scratch is **discarded, never published**).
-  `modified`/`deleted`/`split`/`merged` events reference bodies that already exist
-  (a split's surviving child keeps the parent id; new split children `body_<opId>:<k>`
-  are deferred). This is a normative refinement of the §2 `BodyId` "Rust-minted"
-  note: for NewBody the worker mints and Rust adopts+fences, rather than Rust
-  pre-minting (split/merge body counts are unknowable before OCCT executes, so
-  pre-minting could never cover them anyway).
+  `modified`/`deleted` events reference bodies that already exist. A **boolean split**
+  (a boolean-mode op — Boolean, or boolean-mode Extrude/Revolve — whose result is
+  **multi-solid**, in practice a Cut/Intersect that bisects a body) **deletes the
+  parent** (a `deleted` event) and mints ordered split children `body_<opId>:<k>`, each
+  emitted as its **own `created` event** and adopted + fenced under the **same** D1
+  rules above (the `body_` prefix + `<opId>` a known plan op, the `:<k>` ordinals
+  contiguous from 0, ids unique — else the plan is rejected). A **single-solid**
+  boolean result instead emits a `modified` on the surviving target (its `BodyId`
+  preserved). See the 2026-07-19 (M5a) and 2026-07-22 (Revolve parity) changelog
+  entries for the shipped derived-uuid representation + interner. This is a normative
+  refinement of the §2 `BodyId` "Rust-minted" note: for NewBody and split children the
+  worker mints and Rust adopts+fences, rather than Rust pre-minting (split/merge body
+  counts are unknowable before OCCT executes, so pre-minting could never cover them
+  anyway).
 
 Terminal resp — `PlanPrepared`:
 
@@ -1422,6 +1430,18 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-07-22 — §7.2 split-child wording aligned with shipped M5a/W3 behavior**
+  (MODEL-HARDEN review fix; **text-only, no wire change, no fixture bump**). The §7.2
+  `bodyEvents` normative prose still said a split's surviving child keeps the parent id
+  and that split children `body_<opId>:<k>` were "deferred" — contradicting the shipped
+  M5a (2026-07-19) + Revolve-parity (2026-07-22) behavior, where a boolean split
+  **deletes the parent** and mints `created` children `body_<opId>:<k>` in the same
+  `planStep`. The prose now describes the shipped grammar (deleted-parent event +
+  created-child events; single-solid results emit `modified` on the preserved target).
+  Adoption rules are unchanged (D1 — known `opId`, contiguous ordinals, uniqueness).
+  No `protocolVersion` change; the wire form and fixtures are untouched (fixtures carry
+  no split payloads). [§7.2](#72-regen--executeplan), [§2](#2-identifier--scalar-types).
 
 - **2026-07-22 — Revolve boolean-mode multi-solid results split into deterministic
   `body_<opId>:<k>` children** (MODEL-HARDEN W3 worker parity fix; **orchestrator

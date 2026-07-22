@@ -13,13 +13,14 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use onecad_core::document::body::BodyLifecycleEvent;
+use onecad_core::document::body::{BodyLifecycleEvent, BodyRegistry};
 use onecad_core::document::record::{
     BooleanMode, ExtrudeMode, ExtrudeParams, FilletParams, KnownOperation, Operation,
     OperationRecord, RevolveParams,
 };
 use onecad_core::document::variables::Scalar;
-use onecad_core::edit::EditCommand;
+use onecad_core::edit::{EditCommand, RegenHint, SketchEditOp};
+use onecad_core::history::{StepState, Timeline};
 use onecad_core::ids::{
     BodyId, DocumentId, DocumentRevision, JobId, RecordId, SnapshotId, WorkerEpoch,
 };
@@ -58,21 +59,51 @@ struct FakeBackend {
     /// Per-step created-body overrides; a step without an entry creates one body
     /// `BodyId(opId.uuid)` (the deterministic D1 id).
     body_overrides: HashMap<usize, Vec<BodyId>>,
+    /// When set, the solver lane (`sketch_upsert`) hard-fails — models a worker error
+    /// on `enter_sketch` (finding 2c: a failed enter must open NO session).
+    solver_fails: bool,
+    /// When set, `execute_plan` emits a single `Failed` terminal — models a hard regen
+    /// failure (finding 5: EngineFailed-while-superseded downgrades to Superseded).
+    plan_fails: bool,
     state: Mutex<FakeState>,
+}
+
+impl Default for FakeBackend {
+    fn default() -> Self {
+        Self {
+            body_overrides: HashMap::new(),
+            solver_fails: false,
+            plan_fails: false,
+            state: Mutex::new(FakeState::default()),
+        }
+    }
 }
 
 impl FakeBackend {
     fn new() -> Self {
-        Self {
-            body_overrides: HashMap::new(),
-            state: Mutex::new(FakeState::default()),
-        }
+        Self::default()
     }
 
     fn with_overrides(overrides: HashMap<usize, Vec<BodyId>>) -> Self {
         Self {
             body_overrides: overrides,
-            state: Mutex::new(FakeState::default()),
+            ..Self::default()
+        }
+    }
+
+    /// A backend whose solver lane fails every `sketch_upsert`.
+    fn with_failing_solver() -> Self {
+        Self {
+            solver_fails: true,
+            ..Self::default()
+        }
+    }
+
+    /// A backend whose `execute_plan` hard-fails (a `Failed` terminal).
+    fn with_failing_plan() -> Self {
+        Self {
+            plan_fails: true,
+            ..Self::default()
         }
     }
 
@@ -109,7 +140,14 @@ fn echo_hash(request: &PlanRequest, last_valid: Option<usize>) -> HistoryPrefixH
 #[async_trait]
 impl GeometryEngine for FakeBackend {
     async fn execute_plan(&self, request: PlanRequest) -> mpsc::Receiver<PlanEvent> {
-        let (events, ()) = {
+        // Finding 5: a hard regen failure — a single `Failed` terminal, no steps.
+        let events = if self.plan_fails {
+            vec![PlanEvent::Failed(EngineError::OpFailed {
+                code: OpFailureCode::OpFailed,
+                recoverable: false,
+                message: "fake plan failure".into(),
+            })]
+        } else {
             let mut st = self.state.lock().unwrap();
             st.snapshot_counter += 1;
             let snapshot_id = SnapshotId(5000 + st.snapshot_counter);
@@ -150,7 +188,7 @@ impl GeometryEngine for FakeBackend {
                 per_step,
                 history_prefix_hash: echo_hash(&request, last_valid),
             }));
-            (events, ())
+            events
         };
 
         let (tx, rx) = mpsc::channel(64);
@@ -264,6 +302,13 @@ impl MeshProvider for FakeBackend {
 #[async_trait]
 impl SolverEngine for FakeBackend {
     async fn sketch_upsert(&self, sketch: &Sketch) -> Result<SketchUpsertDto, EngineError> {
+        if self.solver_fails {
+            return Err(EngineError::OpFailed {
+                code: OpFailureCode::OpFailed,
+                recoverable: true,
+                message: "fake solver failure".into(),
+            });
+        }
         Ok(SketchUpsertDto {
             sketch_id: sketch.id.to_string(),
             sketch_revision: 1,
@@ -956,4 +1001,315 @@ async fn anchor_carries_through_promotion() {
         .unwrap();
     assert_eq!(ids.len(), 1);
     assert!(ids[0].element_id.starts_with("el_"));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODEL-HARDEN finding 1 — regen-finished failedSteps / affectedBodies derivation
+// (pure functions over the committed regen mirror). A published from-0 regen can
+// republish sibling bodies while leaving the newly-committed op in Error, so the
+// per-record maps must let the frontend correlate its OWN commit precisely.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn failed_steps_maps_errored_records_with_their_reason() {
+    let ok = extrude_record(0xA0, 5.0);
+    let bad = revolve_record(0xB0, 90.0, 0x11);
+    let mut timeline = Timeline::from_records(vec![ok.clone(), bad.clone()]);
+    timeline.mark_state(0, StepState::Valid).unwrap();
+    timeline
+        .mark_state(
+            1,
+            StepState::Error {
+                reason: "revolve axis lineId not found".into(),
+            },
+        )
+        .unwrap();
+    let failed = failed_steps_of(&timeline);
+    assert_eq!(
+        failed.len(),
+        1,
+        "only the errored step lands in failedSteps"
+    );
+    assert_eq!(failed[0].record_id, bad.record_id.to_string());
+    assert_eq!(failed[0].message, "revolve axis lineId not found");
+}
+
+#[test]
+fn affected_bodies_maps_a_newbody_extrude_to_its_body() {
+    let ext = extrude_record(0xE1, 8.0);
+    // D1: a NewBody body is `BodyId(opId.uuid)`.
+    let body = BodyId(ext.record_id.as_uuid());
+    let timeline = Timeline::from_records(vec![ext.clone()]);
+    let mut bodies = BodyRegistry::new();
+    bodies.fold(0, ext.record_id, BodyLifecycleEvent::Created { body });
+    let map = affected_bodies_of(&timeline, &bodies);
+    assert_eq!(map.len(), 1);
+    assert_eq!(
+        map[&ext.record_id.to_string()],
+        vec![body.to_string()],
+        "the extrude's recordId maps to the body it created (document-changed wire form)"
+    );
+}
+
+#[test]
+fn affected_bodies_maps_a_boolean_op_to_its_modified_target() {
+    let base = extrude_record(0xE2, 8.0); // creates the target
+    let boolean = extrude_record(0xE3, 4.0); // stands in for an Add/Cut op modifying it
+    let target = BodyId(base.record_id.as_uuid());
+    let timeline = Timeline::from_records(vec![base.clone(), boolean.clone()]);
+    let mut bodies = BodyRegistry::new();
+    bodies.fold(
+        0,
+        base.record_id,
+        BodyLifecycleEvent::Created { body: target },
+    );
+    bodies.fold(
+        1,
+        boolean.record_id,
+        BodyLifecycleEvent::Modified { body: target },
+    );
+    let map = affected_bodies_of(&timeline, &bodies);
+    // The boolean op MODIFIED the target in place → its recordId maps to the target.
+    assert_eq!(
+        map[&boolean.record_id.to_string()],
+        vec![target.to_string()]
+    );
+    // The base op created it → still mapped (both ops touched the same body id).
+    assert_eq!(map[&base.record_id.to_string()], vec![target.to_string()]);
+}
+
+#[test]
+fn affected_bodies_skips_a_delete_only_op() {
+    let base = extrude_record(0xE4, 8.0);
+    let del = extrude_record(0xE5, 4.0);
+    let target = BodyId(base.record_id.as_uuid());
+    let timeline = Timeline::from_records(vec![base.clone(), del.clone()]);
+    let mut bodies = BodyRegistry::new();
+    bodies.fold(
+        0,
+        base.record_id,
+        BodyLifecycleEvent::Created { body: target },
+    );
+    bodies.fold(
+        1,
+        del.record_id,
+        BodyLifecycleEvent::Deleted { body: target },
+    );
+    let map = affected_bodies_of(&timeline, &bodies);
+    assert!(
+        !map.contains_key(&del.record_id.to_string()),
+        "a delete-only op creates/modifies nothing ⇒ no affectedBodies entry"
+    );
+    assert!(map.contains_key(&base.record_id.to_string()));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODEL-HARDEN finding 2 — sketch-session hygiene across worker failure + undo
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn enter_sketch_solver_error_leaves_no_session() {
+    // (2c) The fallible solve runs BEFORE the session opens, so a worker error leaves
+    // no stale open session (which a later stray finish would try to squash).
+    let mut rt = runtime_with(Arc::new(FakeBackend::with_failing_solver()));
+    let (sk, _p) = sketch_with_point();
+    let sid = sk.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap();
+
+    let err = rt.enter_sketch(sid).await.unwrap_err();
+    assert!(
+        matches!(err, EngineError::OpFailed { .. }),
+        "the solver error propagates, got {err:?}"
+    );
+    assert!(
+        rt.sketch_session.is_none(),
+        "a failed enter opens NO session"
+    );
+}
+
+#[tokio::test]
+async fn undo_below_watermark_drops_the_sketch_session() {
+    // (2a) A document undo that pops below the session's enter watermark drops the
+    // stale session — a later finish then squashes nothing.
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sk, _p) = sketch_with_point();
+    let sid = sk.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap(); // depth 1
+    rt.apply(add_extrude(0xE0, 5.0)).unwrap(); // depth 2
+
+    rt.enter_sketch(sid).await.unwrap(); // watermark = 2
+    assert!(rt.sketch_session.is_some(), "enter opened a session");
+
+    // Undo the extrude → depth 1 < watermark 2 (the stack shrank below enter).
+    assert!(rt.undo(), "the extrude undoes");
+    assert!(
+        rt.sketch_session.is_none(),
+        "an undo below the watermark drops the stale session (no squash)"
+    );
+
+    // A later finish squashes nothing — the undo depth is untouched by it.
+    let depth = rt.session.undo_depth();
+    rt.finish_sketch(sid).await.unwrap();
+    assert_eq!(
+        rt.session.undo_depth(),
+        depth,
+        "finish over a dropped session squashes nothing"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODEL-HARDEN finding 3 — UNDO_CAP eviction invalidates the depth watermark
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn eviction_during_session_refuses_the_squash() {
+    // Watermark 150, then 60 session edits ⇒ the stack overflows UNDO_CAP (200) and
+    // evicts the bottom 10. The depth-based `count = 200 − 150 = 50` no longer
+    // addresses the 60 session steps, so a squash would strand the earliest 10 below
+    // the net-inverse. The eviction guard refuses the squash entirely.
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sk, _p) = sketch_with_point();
+    let sid = sk.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap(); // depth 1
+    for i in 0..149u128 {
+        rt.apply(add_extrude(0x1000 + i, 5.0)).unwrap(); // → depth 150
+    }
+    assert_eq!(rt.session.undo_depth(), 150);
+
+    rt.enter_sketch(sid).await.unwrap(); // watermark 150, evicted_at_enter 0
+
+    for i in 0..60u128 {
+        let point = SketchEntity::point(
+            EntityId(Uuid::from_u128(0x9000 + i)),
+            Vec2::new_unchecked(i as f64, 0.0),
+            false,
+            false,
+        );
+        rt.sketch_upsert(sid, vec![SketchEditOp::AddEntity { entity: point }])
+            .await
+            .unwrap();
+    }
+    // Capped at 200; 10 evictions happened during the session.
+    assert_eq!(rt.session.undo_depth(), 200);
+    assert_eq!(rt.session.evictions(), 10, "the bottom 10 steps evicted");
+
+    rt.finish_sketch(sid).await.unwrap();
+    assert_eq!(
+        rt.session.undo_depth(),
+        200,
+        "the eviction guard REFUSED the squash — the granular steps stay (no collapse)"
+    );
+    assert!(rt.sketch_session.is_none(), "the session is consumed");
+    // Undo stays monotonic (each pop reverts exactly one step).
+    assert!(rt.undo());
+    assert_eq!(rt.session.undo_depth(), 199);
+}
+
+#[tokio::test]
+async fn below_cap_session_still_squashes() {
+    // Control: a below-cap session (no eviction) squashes as before — the guard does
+    // not over-refuse.
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sk, _p) = sketch_with_point();
+    let sid = sk.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap(); // depth 1
+    rt.enter_sketch(sid).await.unwrap(); // watermark 1
+
+    for i in 0..3u128 {
+        let point = SketchEntity::point(
+            EntityId(Uuid::from_u128(0xA000 + i)),
+            Vec2::new_unchecked(i as f64, 0.0),
+            false,
+            false,
+        );
+        rt.sketch_upsert(sid, vec![SketchEditOp::AddEntity { entity: point }])
+            .await
+            .unwrap();
+    }
+    assert_eq!(rt.session.undo_depth(), 4); // AddSketch + 3 edits
+    assert_eq!(rt.session.evictions(), 0);
+
+    rt.finish_sketch(sid).await.unwrap();
+    assert_eq!(
+        rt.session.undo_depth(),
+        2,
+        "the 3 contiguous sketch edits collapse into ONE net command (AddSketch + squash)"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODEL-HARDEN finding 8 — a rolled-back (draft) append leaves applied < total, so
+// the frontend can detect the stalled-awaiter case from the projection alone.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn draft_append_leaves_applied_ops_below_total_ops() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let mk = |seed| EditCommand::AddOperation {
+        record: extrude_record(seed, 5.0),
+        at_cursor: false,
+    };
+    rt.apply(mk(0xA0)).unwrap(); // frontier append → applied; cursor 1, len 1
+    rt.apply(mk(0xA1)).unwrap(); // frontier append → applied; cursor 2, len 2
+                                 // Roll the applied bar back to just after A0.
+    rt.apply(EditCommand::SetRollback { cursor: 1 }).unwrap(); // cursor 1, len 2
+                                                               // A commit at the END while rolled back is a DRAFT (RegenHint::None) — the reported
+                                                               // 8 s stall: no regen scheduled, so no completion ever fires.
+    let outcome = rt.apply(mk(0xA2)).unwrap(); // draft; cursor 1, len 3
+    assert_eq!(
+        outcome.regen,
+        RegenHint::None,
+        "a rolled-back append stays a draft (no regen)"
+    );
+
+    let proj = rt.projection();
+    assert!(
+        proj.applied_ops < proj.total_ops,
+        "a draft append leaves applied_ops({}) < total_ops({}) — the frontend short-circuits on it",
+        proj.applied_ops,
+        proj.total_ops
+    );
+    assert_eq!(proj.applied_ops, 1);
+    assert_eq!(proj.total_ops, 3);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODEL-HARDEN finding 5 — an EngineFailed regen whose fencing MOVED during the
+// unlocked worker IO downgrades to Superseded (a covering regen is coming) instead of
+// sending a spurious `failed` to a commit that regen will resolve.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn engine_failure_with_moved_fencing_reports_superseded() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::with_failing_plan()));
+    rt.apply(add_extrude(0xF0, 5.0)).unwrap();
+    let prepared = rt
+        .begin_regen(RegenRequest::ToEnd { from: 0 })
+        .expect("non-empty plan");
+    // An edit lands during the (unlocked) worker IO → bumps the fencing revision.
+    rt.apply(add_extrude(0xF1, 6.0)).unwrap();
+    let driven = prepared.drive(CancelToken::new()).await;
+    let report = rt.finish_regen(driven);
+    assert_eq!(
+        report.outcome_str(),
+        "superseded",
+        "a fail-while-superseded downgrades to Superseded (no spurious failure)"
+    );
+    assert!(
+        report.failure_message().is_none(),
+        "the downgraded report carries no failure message"
+    );
+}
+
+#[tokio::test]
+async fn engine_failure_without_moved_fencing_reports_failed() {
+    // Control: a hard failure with UNCHANGED fencing is still `failed` — `run_regen`
+    // holds the lock throughout, so no edit can move fencing.
+    let mut rt = runtime_with(Arc::new(FakeBackend::with_failing_plan()));
+    rt.apply(add_extrude(0xF2, 5.0)).unwrap();
+    let report = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert_eq!(report.outcome_str(), "failed");
+    assert!(report.failure_message().is_some());
 }

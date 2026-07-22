@@ -215,6 +215,11 @@ impl Txn {
 pub struct UndoStack {
     undo: Vec<Txn>,
     redo: Vec<Txn>,
+    /// Monotonic count of committed steps EVICTED past [`UNDO_CAP`] since this
+    /// stack was created. A depth-based watermark (the sketch-session squash) is
+    /// only valid while this is unchanged: once the bottom shifts out, a
+    /// `undo_depth − watermark` count no longer addresses the session's steps.
+    evicted: u64,
 }
 
 impl UndoStack {
@@ -246,6 +251,14 @@ impl UndoStack {
     #[must_use]
     pub fn redo_depth(&self) -> usize {
         self.redo.len()
+    }
+
+    /// The monotonic count of committed steps evicted past [`UNDO_CAP`]. The
+    /// sketch-session squash records this at enter and REFUSES the squash if it has
+    /// moved since (the bottom shifted out, so the depth watermark is stale).
+    #[must_use]
+    pub fn evictions(&self) -> u64 {
+        self.evicted
     }
 
     /// Records a newly committed transaction: clears the redo stack and evicts
@@ -326,6 +339,7 @@ impl UndoStack {
     fn enforce_cap(&mut self) {
         while self.undo.len() > UNDO_CAP {
             self.undo.remove(0);
+            self.evicted += 1;
         }
     }
 }
@@ -391,6 +405,43 @@ mod tests {
             edits: vec![],
         });
         assert!(!s.can_redo(), "redo cleared on new apply");
+    }
+
+    #[test]
+    fn enforce_cap_counts_evictions_monotonically() {
+        let mut s = UndoStack::new();
+        assert_eq!(s.evictions(), 0, "a fresh stack evicted nothing");
+        // Fill exactly to the cap — no eviction yet.
+        for i in 0..UNDO_CAP {
+            s.push_committed(Txn {
+                label: format!("t{i}"),
+                edits: vec![],
+            });
+        }
+        assert_eq!(s.evictions(), 0, "at the cap nothing is evicted");
+        // Five more push the bottom out one-for-one.
+        for i in 0..5 {
+            s.push_committed(Txn {
+                label: format!("x{i}"),
+                edits: vec![],
+            });
+        }
+        assert_eq!(s.undo_depth(), UNDO_CAP, "still capped");
+        assert_eq!(
+            s.evictions(),
+            5,
+            "five committed steps evicted the bottom five"
+        );
+        // redo re-push (push_redone) also enforces the cap and counts.
+        let t = s.pop_for_undo().unwrap();
+        s.push_undone(t);
+        let t = s.pop_for_redo().unwrap();
+        s.push_redone(t); // back to full — no new eviction (depth was one below cap)
+        assert_eq!(
+            s.evictions(),
+            5,
+            "a redo that does not overflow evicts nothing new"
+        );
     }
 
     #[test]

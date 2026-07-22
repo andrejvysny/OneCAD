@@ -187,10 +187,14 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
       typeof s.latestParams.featureId === "string" ? s.latestParams.featureId : undefined;
     // Pass the boolean mode + target through from the drag params (Wave 2): the
     // controller sends them on the final updatePreview so the committed op carries
-    // them. Default NewBody; targetBodyId only when a non-empty string was set.
-    const booleanMode = (typeof s.latestParams.booleanMode === "string"
-      ? s.latestParams.booleanMode
-      : "NewBody") as ExtrudeParams["booleanMode"];
+    // them. Whitelist the mode (an unknown value ⇒ NewBody) — the params are loosely
+    // typed on the wire, so a stray value must not reach the op via an unchecked cast.
+    // Default NewBody; targetBodyId only when a non-empty string was set.
+    const rawMode = s.latestParams.booleanMode;
+    const booleanMode: ExtrudeParams["booleanMode"] =
+      rawMode === "NewBody" || rawMode === "Add" || rawMode === "Cut" || rawMode === "Intersect"
+        ? rawMode
+        : "NewBody";
     const targetBodyId =
       typeof s.latestParams.targetBodyId === "string" && s.latestParams.targetBodyId
         ? s.latestParams.targetBodyId

@@ -549,3 +549,47 @@ async fn rapid_double_commit_correlates_exactly() {
         report_a.revision
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (4) MODEL-HARDEN finding 4: an empty-plan (no-op) request STILL emits exactly one
+// completion through the production driver — the awaiter's anti-hang terminal.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A `ToEnd` request on the op-less (empty) document compiles to an EMPTY plan →
+/// `begin_regen` yields `None`. Before the fix the driver returned `NoOp` WITHOUT
+/// emitting, so the frontend's `regen-finished{noop}` anti-hang terminal never fired
+/// in production (the 8 s stall). Now the empty-plan branch synthesizes + emits a NoOp
+/// completion. We assert exactly ONE completion, outcome `noop`, no publish.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_plan_request_still_emits_one_noop_completion() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let (_runtime, sched, mut rx) = wire(&wm).await;
+
+    sched.request(RegenRequest::ToEnd { from: 0 });
+    let (outcome_str, change, proj) = recv(&mut rx).await;
+    assert_eq!(
+        outcome_str, "noop",
+        "an empty-plan request emits a NoOp completion (not silence)"
+    );
+    assert!(change.is_none(), "a NoOp publishes nothing");
+    assert_eq!(
+        proj.total_ops, 0,
+        "the projection reflects the op-less document"
+    );
+
+    // Exactly one: no second completion arrives for a single no-op request.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), rx.recv())
+            .await
+            .is_err(),
+        "exactly one completion emitted for a single no-op request"
+    );
+
+    sched.shutdown();
+    wm.shutdown().await;
+    eprintln!("EMPTY-PLAN NOOP PASS: one noop completion emitted (anti-hang terminal fires)");
+}

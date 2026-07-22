@@ -19,7 +19,9 @@
 //! * `revolve_region_binding_explicit_and_fallback` — one revolve bound to an
 //!   explicit normative `regionId` (fetched from the solver lane, the exact source
 //!   `finish_sketch` reads) and one bound to `""` (first-region fallback) both
-//!   publish a body.
+//!   publish a body; a THIRD bound to a WRONG regionId is a deterministic OP_FAILED
+//!   whose message names the requested + available ids (proves the id reaches the
+//!   worker — an id-dropping marshalling regression would hide behind the fallback).
 //!
 //! The revolve mesh-volume expectations for the CURVED solids (Pappus / half) are
 //! FINE-lod faceting bounds, NOT exactness assertions — BRep-exact volume lives in
@@ -131,6 +133,7 @@ const EXTRUDE_A: u128 = 0xA01; // box A body producer
 const SKETCH_TOOL: u128 = 0xB00; // revolve tool sketch (Cut test)
 const REVOLVE: u128 = 0xB01; // the revolve op
 const REVOLVE_2: u128 = 0xB02; // a second revolve (region-binding test)
+const REVOLVE_3: u128 = 0xB03; // a third revolve — WRONG regionId (region-binding test)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sketch plane refs. The worker's `parse_plane` (WireSketch.cpp:107-110) uses its
@@ -822,8 +825,62 @@ async fn revolve_region_binding_explicit_and_fallback() {
         "both revolve bodies present, got {head:?}"
     );
 
+    // Finding 7: a WRONG (non-empty, non-matching) regionId is a deterministic HARD
+    // FAILURE whose message names BOTH the requested id and the available ids — proof
+    // the regionId actually reaches the worker. Without this case the explicit-region
+    // test is indistinguishable from the "" fallback under an id-DROPPING marshalling
+    // regression (both would still publish a first-region body).
+    let bogus = "r_deadbeefdeadbeef";
+    add_op(
+        &mut rt,
+        revolve_record(
+            REVOLVE_3,
+            sid,
+            bogus,
+            360.0,
+            axis,
+            BooleanMode::NewBody,
+            None,
+        ),
+    );
+    let rep = regen_all(&mut rt).await;
+    // A per-op failure still Publishes the valid prefix (the two good revolves); the
+    // wrong-region step is Error with NO body of its own (mirrors the stale-axis case).
+    let snap = published(&rep, "wrong-region revolve");
+    let head: std::collections::HashSet<BodyId> = snap.bodies.iter().map(|b| b.body).collect();
+    assert!(
+        !head.contains(&body_of(REVOLVE_3)),
+        "the wrong-region revolve minted NO body, got {head:?}"
+    );
+    let proj = rt.projection();
+    let rev3 = RecordId(Uuid::from_u128(REVOLVE_3)).to_string();
+    let feat = proj
+        .features
+        .iter()
+        .find(|f| f.id == rev3)
+        .expect("the wrong-region revolve feature is projected");
+    assert_eq!(
+        feat.status,
+        FeatureStatus::Error,
+        "a non-matching regionId is a deterministic OP_FAILED, got {:?}",
+        feat.status
+    );
+    let msg = feat
+        .status_message
+        .as_deref()
+        .expect("an errored feature carries a statusMessage (W0.5)");
+    assert!(
+        msg.contains(bogus),
+        "the message names the REQUESTED regionId (proves it reached the worker), got {msg:?}"
+    );
+    assert!(
+        msg.contains("available") && msg.contains(&region_id),
+        "the message names the AVAILABLE region ids, got {msg:?}"
+    );
+
     wm.shutdown().await;
     eprintln!(
-        "Revolve region-binding PASS: explicit regionId {region_id} + \"\" fallback both published"
+        "Revolve region-binding PASS: explicit regionId {region_id} + \"\" fallback both published; \
+         wrong regionId '{bogus}' ⇒ OP_FAILED naming requested + available — {msg}"
     );
 }

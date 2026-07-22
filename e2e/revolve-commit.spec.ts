@@ -81,8 +81,14 @@ test("revolve: axis pick → armed 360° → drag angle → release stays armed 
   const sy = (box?.y ?? 0) + (box?.height ?? 0) / 2 + 130;
   await page.mouse.move(sx, sy);
   await page.mouse.down();
-  await page.mouse.move(sx + 90, sy, { steps: 5 }); // horizontal → angle change
+  // Drag LEFT: a rightward drag from the 360° default clamps and stays 360 (an inert
+  // drag that would make the "stays armed" check pass vacuously). Leftward decreases it.
+  await page.mouse.move(sx - 90, sy, { steps: 5 });
   await page.mouse.up();
+  // The debug `angle` updates on release — assert the drag actually moved it off 360
+  // before the armed / commit assertions (finding 16).
+  const draggedAngle = (await extrudeDebug(page))?.angle as number;
+  expect(draggedAngle).not.toBe(360);
   expect((await extrudeDebug(page))?.revolvePhase).toBe("armed");
   await expect(bodyOptions(page)).toHaveCount(bodiesBefore); // nothing committed yet
 

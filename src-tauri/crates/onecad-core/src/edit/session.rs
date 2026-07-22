@@ -134,6 +134,15 @@ impl DocumentSession {
         self.undo.undo_depth()
     }
 
+    /// The monotonic count of undo steps evicted past the cap since open. The
+    /// sketch-session squash records this at enter and refuses the squash if it
+    /// has moved (an eviction shifted the stack bottom, invalidating the
+    /// depth-based watermark).
+    #[must_use]
+    pub fn evictions(&self) -> u64 {
+        self.undo.evictions()
+    }
+
     /// Applies a command: validates, mutates the document, captures a memento
     /// inverse, and records it on the open transaction (or as a singleton undo
     /// step). Returns the per-command [`CommandOutcome`].

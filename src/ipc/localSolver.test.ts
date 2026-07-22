@@ -45,4 +45,28 @@ describe("localSolver buildOpFromSession boolean pass-through", () => {
     expect(op.params.booleanMode).toBe("NewBody");
     expect(op.params.targetBodyId).toBeUndefined();
   });
+
+  it("whitelists booleanMode — an unknown value falls back to NewBody (finding 14)", async () => {
+    const { lane, commit } = makeLane();
+    const s = await lane.beginPreview({ opType: "Extrude", sketchId: "sk", regionId: "r", params: { distance: 5 } });
+    // PreviewParams is loosely typed on the wire; a stray value must not reach the op.
+    lane.updatePreview(s.sessionId, { distance: 8, booleanMode: "Bogus" as never }, 1);
+    await lane.endPreview(s.sessionId, true);
+
+    const op = commit.mock.calls[0][0];
+    if (op.opType !== "Extrude") throw new Error("expected Extrude");
+    expect(op.params.booleanMode).toBe("NewBody");
+  });
+
+  it("passes each valid FeatureBooleanMode through verbatim (finding 14)", async () => {
+    for (const mode of ["NewBody", "Add", "Cut", "Intersect"] as const) {
+      const { lane, commit } = makeLane();
+      const s = await lane.beginPreview({ opType: "Extrude", sketchId: "sk", regionId: "r", params: { distance: 5 } });
+      lane.updatePreview(s.sessionId, { distance: 8, booleanMode: mode, targetBodyId: "b" }, 1);
+      await lane.endPreview(s.sessionId, true);
+      const op = commit.mock.calls[0][0];
+      if (op.opType !== "Extrude") throw new Error("expected Extrude");
+      expect(op.params.booleanMode).toBe(mode);
+    }
+  });
 });
