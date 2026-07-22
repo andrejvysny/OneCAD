@@ -11,7 +11,8 @@
 //! | command | dirty span | [`RegenHint`] |
 //! |---|---|---|
 //! | `AddOperation` (at cursor) | `[insertIndex, len)` | `ToEnd` |
-//! | `AddOperation` (append draft) | `[index, len)` | `ToEnd` if applied, else `None` |
+//! | `AddOperation` (frontier append, `cursor == len`) | `[index, len)` | `ToEnd` (joins the applied prefix) |
+//! | `AddOperation` (rolled-back append, `cursor < len`) | `[index, len)` | `None` (stays a draft) |
 //! | `UpdateOperationParams` | `[step, len)` | `ToEnd` |
 //! | `EditOperationInput` | `[step, len)` | `ToEnd` |
 //! | `RemoveOperation` | `[removedIndex, len)` | `ToEnd` |
@@ -409,11 +410,23 @@ impl DocumentSession {
         recs.insert(insert_index, record.clone());
         self.validate_temporal(&recs, id, &record.op.derive_inputs().bodies)?;
 
+        // A **frontier append** (`!at_cursor` and the cursor already sits at
+        // `len == insert_index`) joins the applied prefix — the C++ `addOperation`
+        // parity `setAppliedOpCount(insertIndex + 1)` — so a fresh commit at the
+        // timeline end regens (the `index < cursor` check below yields `ToEnd`). A
+        // **rolled-back append** (`cursor < len`) restores the old cursor and stays
+        // a draft (`RegenHint::None`), the documented C++ draft semantic.
+        let cursor_before = self.document.timeline.cursor();
+        let frontier_append = !at_cursor && cursor_before == insert_index;
         let index = if at_cursor {
             self.document.timeline.insert_at_cursor(record)
         } else {
-            let cursor = self.document.timeline.cursor();
-            insert_record_at(&mut self.document.timeline, insert_index, record, cursor);
+            let restore = if frontier_append {
+                cursor_before + 1
+            } else {
+                cursor_before
+            };
+            insert_record_at(&mut self.document.timeline, insert_index, record, restore);
             insert_index
         };
         self.rebuild_graph();
@@ -426,7 +439,7 @@ impl DocumentSession {
             RegenHint::None
         };
         let mut delta = ProjectionDelta::timeline();
-        delta.cursor_changed = at_cursor;
+        delta.cursor_changed = at_cursor || frontier_append;
         Ok((
             CommandOutcome {
                 projection_delta: delta,

@@ -976,6 +976,10 @@ impl DocumentRuntime {
             bodies,
             sketches,
             features,
+            // Timeline cursor + length drive the legacy-draft recovery hint
+            // (`appliedOps < totalOps` ⇒ ops sit beyond the rollback bar).
+            applied_ops: doc.timeline.cursor(),
+            total_ops: doc.timeline.len(),
         }
     }
 

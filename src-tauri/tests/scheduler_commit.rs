@@ -1,0 +1,428 @@
+//! Production scheduler/driver commit gate (MODEL-HARDEN W0) against the REAL C++
+//! OCCT/PlaneGCS worker.
+//!
+//! This is the **new coverage class** the reported P0 defect slipped through: every
+//! prior worker-backed test drives regen explicitly (`rt.run_regen(...)`), so none
+//! ever exercised the apply → `RegenScheduler::handle` → driver → publish chain the
+//! real app uses. Here we wire the ACTUAL production driver
+//! ([`regen_driver_with_emitter`], the body `make_regen_driver` now delegates to)
+//! behind a real [`RegenScheduler`] over an `Arc<Mutex<Option<DocumentRuntime>>>`,
+//! exactly as `lib.rs` does, and drive the EXACT frontend commit shape
+//! (`AddOperation { at_cursor: false }`) through it. The emitter is a plain channel
+//! sink (no `AppHandle`) so the completion is assertable without a webview.
+//!
+//! * `frontend_shape_commit_publishes_via_scheduler` — a fresh commit at the applied
+//!   frontier publishes exactly one body via the scheduler; the undo entry survives
+//!   the regen. Before the W0 core fix the frontier append stayed a permanent draft,
+//!   the planner clamped it out (`NoOp`), and nothing ever published — this test
+//!   would have caught it.
+//! * `undo_redo_reconverge_via_scheduler` — undo → `ToEnd{from:0}` republishes with
+//!   zero bodies; redo → `ToEnd{from:0}` republishes the body (pins the redo-draft
+//!   regression: a re-applied commit must re-join the applied prefix, not become a
+//!   draft the from-0 regen clamps away).
+//!
+//! Gated on `ONECAD_WORKER_PATH` (else the dev-tree fallback); `ONECAD_REQUIRE_WORKER=1`
+//! hard-fails a missing binary (CI). A missing worker is a quiet local-dev skip.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use uuid::Uuid;
+
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio::sync::{watch, Mutex};
+
+use onecad_core::document::record::{
+    BooleanMode, ExtrudeMode, ExtrudeParams, KnownOperation, Operation, OperationRecord, PlaneKind,
+    SketchOpParams, SketchPlaneRef,
+};
+use onecad_core::document::refs::SketchRegionRef;
+use onecad_core::document::variables::Scalar;
+use onecad_core::edit::{CommandOutcome, EditCommand, RegenHint};
+use onecad_core::ids::{ConstraintId, EntityId, RecordId, RegionId, SketchId};
+use onecad_core::math::{Vec2, Vec3};
+use onecad_core::regen::{GeometryEngine, RegenRequest, RegenScheduler, SchedulerHandle};
+use onecad_core::sketch::{Constraint, Sketch, SketchEntity, WorldPlane};
+
+use onecad_lib::document_runtime::{DocumentRuntime, RegenReport};
+use onecad_lib::dto::{DocumentChange, DocumentProjection};
+use onecad_lib::worker::manager::SupervisorConfig;
+use onecad_lib::worker::wire::sketch_wire;
+use onecad_lib::worker::{resolve_worker_path, MeshProvider, SolverEngine, WorkerManager};
+use onecad_lib::{regen_driver_with_emitter, RegenEmitter};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Harness (mirrors wire_contract.rs / m2_gate.rs)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn real_worker() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("ONECAD_WORKER_PATH") {
+        let path = PathBuf::from(&p);
+        assert!(
+            path.is_file(),
+            "ONECAD_WORKER_PATH={p:?} is set but no worker binary exists there \
+             (misconfiguration — refusing to skip as green)"
+        );
+        return Some(path);
+    }
+    if let Some(path) = resolve_worker_path() {
+        return Some(path);
+    }
+    assert!(
+        std::env::var("ONECAD_REQUIRE_WORKER").as_deref() != Ok("1"),
+        "ONECAD_REQUIRE_WORKER=1 but no worker binary resolved (CI must hard-fail here)"
+    );
+    None
+}
+
+async fn spawn_worker(bin: PathBuf) -> WorkerManager {
+    let wm = WorkerManager::spawn(SupervisorConfig::production(bin));
+    assert!(
+        wm.wait_ready(Duration::from_secs(10)).await,
+        "real worker must connect + handshake + OpenSession"
+    );
+    wm
+}
+
+fn runtime_over(wm: &WorkerManager) -> DocumentRuntime {
+    let engine: Arc<dyn GeometryEngine> = Arc::new(wm.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
+    DocumentRuntime::new_blank(engine, meshes, solver)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sketch + op record builders (rectangle → first-region extrude, as wire_contract)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SKETCH_A: u128 = 0xA00;
+const EXTRUDE_A: u128 = 0xA01;
+
+fn xy_plane_ref() -> SketchPlaneRef {
+    SketchPlaneRef {
+        kind: PlaneKind::Xy,
+        origin: Vec3::new_unchecked(0.0, 0.0, 0.0),
+        x_axis: Vec3::new_unchecked(0.0, 1.0, 0.0),
+        y_axis: Vec3::new_unchecked(-1.0, 0.0, 0.0),
+        normal: Vec3::new_unchecked(0.0, 0.0, 1.0),
+        extra: Default::default(),
+    }
+}
+
+/// A fully-constrained (dof 0) rectangle at sketch-space `(x0, y0)`, size `w × h`,
+/// built the marshaller way (8 points, 4 lines, coincident corners, H/V, a Fixed
+/// anchor, H/V dimensions). Identical to `wire_contract::rect_sketch`.
+fn rect_sketch(sid: SketchId, base: u128, x0: f64, y0: f64, w: f64, h: f64) -> Sketch {
+    let e = |n: u128| EntityId(Uuid::from_u128(base + n));
+    let c = |n: u128| ConstraintId(Uuid::from_u128(base + 0x40 + n));
+    let (p0s, p0e) = (e(0), e(1));
+    let (p1s, p1e) = (e(2), e(3));
+    let (p2s, p2e) = (e(4), e(5));
+    let (p3s, p3e) = (e(6), e(7));
+    let (l0, l1, l2, l3) = (e(0x10), e(0x11), e(0x12), e(0x13));
+
+    let mut sk = Sketch::on_world_plane(sid, "Rect", WorldPlane::XY);
+    let pt = |sk: &mut Sketch, id: EntityId, x: f64, y: f64| {
+        sk.add_entity(SketchEntity::point(
+            id,
+            Vec2::new_unchecked(x, y),
+            false,
+            false,
+        ))
+        .unwrap();
+    };
+    pt(&mut sk, p0s, x0, y0);
+    pt(&mut sk, p0e, x0 + w, y0);
+    pt(&mut sk, p1s, x0 + w, y0);
+    pt(&mut sk, p1e, x0 + w, y0 + h);
+    pt(&mut sk, p2s, x0 + w, y0 + h);
+    pt(&mut sk, p2e, x0, y0 + h);
+    pt(&mut sk, p3s, x0, y0 + h);
+    pt(&mut sk, p3e, x0, y0);
+    sk.add_entity(SketchEntity::line(l0, p0s, p0e, false))
+        .unwrap();
+    sk.add_entity(SketchEntity::line(l1, p1s, p1e, false))
+        .unwrap();
+    sk.add_entity(SketchEntity::line(l2, p2s, p2e, false))
+        .unwrap();
+    sk.add_entity(SketchEntity::line(l3, p3s, p3e, false))
+        .unwrap();
+
+    let coincident = |sk: &mut Sketch, id, a, b| {
+        sk.add_constraint(Constraint::Coincident {
+            id,
+            point1: a,
+            point2: b,
+        })
+        .unwrap();
+    };
+    coincident(&mut sk, c(1), p0e, p1s);
+    coincident(&mut sk, c(2), p1e, p2s);
+    coincident(&mut sk, c(3), p2e, p3s);
+    coincident(&mut sk, c(4), p3e, p0s);
+    sk.add_constraint(Constraint::Horizontal { id: c(5), line: l0 })
+        .unwrap();
+    sk.add_constraint(Constraint::Horizontal { id: c(6), line: l2 })
+        .unwrap();
+    sk.add_constraint(Constraint::Vertical { id: c(7), line: l1 })
+        .unwrap();
+    sk.add_constraint(Constraint::Vertical { id: c(8), line: l3 })
+        .unwrap();
+    sk.add_constraint(Constraint::Fixed {
+        id: c(9),
+        point: p0s,
+        at: Vec2::new_unchecked(x0, y0),
+    })
+    .unwrap();
+    sk.add_constraint(Constraint::HorizontalDistance {
+        id: c(10),
+        point1: p0s,
+        point2: p0e,
+        value: Scalar::new(w),
+    })
+    .unwrap();
+    sk.add_constraint(Constraint::VerticalDistance {
+        id: c(11),
+        point1: p1s,
+        point2: p1e,
+        value: Scalar::new(h),
+    })
+    .unwrap();
+    sk
+}
+
+fn sketch_record(rec: u128, sk: &Sketch) -> OperationRecord {
+    let (_plane, entities, constraints) = sketch_wire(sk);
+    let params = SketchOpParams {
+        sketch: sk.id,
+        plane: xy_plane_ref(),
+        entities: entities.as_array().cloned().unwrap_or_default(),
+        constraints: constraints.as_array().cloned().unwrap_or_default(),
+        extra: Default::default(),
+    };
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "Sketch",
+        Operation::Known(KnownOperation::Sketch(params)),
+    )
+}
+
+fn extrude_record(rec: u128, sketch: SketchId, dist: f64) -> OperationRecord {
+    let params = ExtrudeParams {
+        profile: Some(SketchRegionRef {
+            sketch,
+            region: RegionId::new(""), // empty ⇒ the worker's V1 first-region fallback
+            extra: Default::default(),
+        }),
+        distance: Scalar::new(dist),
+        draft_angle_deg: Scalar::new(0.0),
+        mode: ExtrudeMode::Blind,
+        boolean_mode: BooleanMode::NewBody,
+        target_body: None,
+        target_face: None,
+        two_directions: false,
+        mode2: ExtrudeMode::Blind,
+        distance2: Scalar::new(0.0),
+        target_face2: None,
+        extra: Default::default(),
+    };
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "Extrude",
+        Operation::Known(KnownOperation::Extrude(params)),
+    )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Production wiring (Arc<Mutex<Option<DocumentRuntime>>> + real scheduler/driver)
+// ─────────────────────────────────────────────────────────────────────────────
+
+type Runtime = Arc<Mutex<Option<DocumentRuntime>>>;
+/// What the emitter captures per completion: `(outcome_str, document_change, projection)`.
+type Emit = (String, Option<DocumentChange>, DocumentProjection);
+
+/// Builds the exact `lib.rs` wiring: the runtime behind the shared mutex, the real
+/// production driver ([`regen_driver_with_emitter`]) with a channel emitter, and a
+/// spawned [`RegenScheduler`].
+async fn wire(wm: &WorkerManager) -> (Runtime, SchedulerHandle, UnboundedReceiver<Emit>) {
+    let runtime: Runtime = Arc::new(Mutex::new(Some(runtime_over(wm))));
+    let (tx, rx) = unbounded_channel::<Emit>();
+    let emit: RegenEmitter = Arc::new(
+        move |report: &RegenReport, projection: &DocumentProjection| {
+            let _ = tx.send((
+                report.outcome_str().to_string(),
+                report.document_change(),
+                projection.clone(),
+            ));
+        },
+    );
+    let autosave_tick = Arc::new(watch::channel(0u64).0);
+    let driver = regen_driver_with_emitter(runtime.clone(), emit, autosave_tick);
+    let (scheduler, sched) = RegenScheduler::new(driver);
+    tokio::spawn(scheduler.run());
+    (runtime, sched, rx)
+}
+
+/// Applies a sketch op then the extrude op — both the EXACT frontend wire shape
+/// (`at_cursor: false`) — and returns the extrude's [`CommandOutcome`] (whose
+/// [`RegenHint`] `apply_edit_command` feeds to `sched.handle`).
+async fn commit_extrude(runtime: &Runtime) -> CommandOutcome {
+    let mut guard = runtime.lock().await;
+    let rt = guard.as_mut().expect("document open");
+    let sa = SketchId(Uuid::from_u128(0xA));
+    rt.apply(EditCommand::AddOperation {
+        record: sketch_record(SKETCH_A, &rect_sketch(sa, 0x1000, 0.0, 0.0, 40.0, 20.0)),
+        at_cursor: false,
+    })
+    .expect("add sketch op (frontier append)");
+    rt.apply(EditCommand::AddOperation {
+        record: extrude_record(EXTRUDE_A, sa, 25.0),
+        at_cursor: false, // the reported frontend commit shape
+    })
+    .expect("add extrude op (frontier append)")
+}
+
+async fn undo_depth(runtime: &Runtime) -> usize {
+    runtime.lock().await.as_ref().expect("open").undo_depth()
+}
+
+/// Awaits the next emitter completion (15 s ceiling — a worker regen is well under).
+async fn recv(rx: &mut UnboundedReceiver<Emit>) -> Emit {
+    tokio::time::timeout(Duration::from_secs(15), rx.recv())
+        .await
+        .expect("regen completion emitted within 15s")
+        .expect("emitter channel stayed open")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (1) The exact reported bug: a fresh commit publishes through the real scheduler
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn frontend_shape_commit_publishes_via_scheduler() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let (runtime, sched, mut rx) = wire(&wm).await;
+
+    let outcome = commit_extrude(&runtime).await;
+    // The core fix in action: a frontier `at_cursor:false` append regens (`ToEnd`),
+    // not `None` — the mapping `sched.handle` relies on to enqueue any work at all.
+    assert_eq!(
+        outcome.regen,
+        RegenHint::ToEnd,
+        "a fresh frontier commit must regen ToEnd (was None before W0 — never scheduled)"
+    );
+
+    let undo_before = undo_depth(&runtime).await;
+    // Mirror api::apply_edit_command :363-365 — hand the outcome to the scheduler.
+    sched.handle(&outcome);
+
+    let (outcome_str, change, _proj) = recv(&mut rx).await;
+    assert_eq!(
+        outcome_str, "published",
+        "the commit published a snapshot through the production scheduler/driver"
+    );
+    let change = change.expect("a published regen carries a document_change");
+    assert_eq!(
+        change.changed_bodies.len(),
+        1,
+        "exactly one new body from the extrude, got {:?}",
+        change.changed_bodies
+    );
+
+    let undo_after = undo_depth(&runtime).await;
+    assert_eq!(
+        undo_after, undo_before,
+        "the regen must not touch the undo stack (the commit's undo entry survives)"
+    );
+
+    sched.shutdown();
+    wm.shutdown().await;
+    eprintln!("COMMIT-VIA-SCHEDULER PASS: at_cursor:false → published 1 body; undo depth intact");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (2) Undo → from-0 reconverge (0 bodies); redo → republish (redo-draft regression)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn undo_redo_reconverge_via_scheduler() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let (runtime, sched, mut rx) = wire(&wm).await;
+
+    // Baseline commit → published, one body.
+    let outcome = commit_extrude(&runtime).await;
+    sched.handle(&outcome);
+    let (s, change, _) = recv(&mut rx).await;
+    assert_eq!(s, "published", "baseline commit published");
+    assert_eq!(
+        change
+            .expect("baseline document_change")
+            .changed_bodies
+            .len(),
+        1,
+        "baseline: one extrude body"
+    );
+
+    // Undo the extrude, reconverge from 0 (mirrors api::undo :384-387).
+    {
+        let mut guard = runtime.lock().await;
+        assert!(
+            guard.as_mut().expect("open").undo(),
+            "undo pops the extrude commit"
+        );
+    }
+    sched.request(RegenRequest::ToEnd { from: 0 });
+    let (s, change, _) = recv(&mut rx).await;
+    assert_eq!(
+        s, "published",
+        "undo reconverges (sketch-only regen publishes)"
+    );
+    let change = change.expect("undo document_change");
+    assert_eq!(
+        change.changed_bodies.len(),
+        0,
+        "no body remains after undo, got {:?}",
+        change.changed_bodies
+    );
+    assert_eq!(
+        change.removed_bodies.len(),
+        1,
+        "the extrude body was removed by the reconverge"
+    );
+
+    // Redo the extrude, reconverge from 0 → the body must republish. Before W0 the
+    // redo re-created a permanent draft that `ToEnd{from:0}` clamped out, so the body
+    // never came back — this pins that regression.
+    {
+        let mut guard = runtime.lock().await;
+        assert!(
+            guard.as_mut().expect("open").redo().expect("redo ok"),
+            "redo re-applies the extrude commit"
+        );
+    }
+    sched.request(RegenRequest::ToEnd { from: 0 });
+    let (s, change, _) = recv(&mut rx).await;
+    assert_eq!(s, "published", "redo republishes via the scheduler");
+    assert_eq!(
+        change.expect("redo document_change").changed_bodies.len(),
+        1,
+        "the extrude body republished (redo re-joined the applied prefix, not a draft)"
+    );
+
+    sched.shutdown();
+    wm.shutdown().await;
+    eprintln!(
+        "UNDO/REDO-RECONVERGE PASS: undo → 0 bodies, redo → 1 body (redo-draft regression pinned)"
+    );
+}

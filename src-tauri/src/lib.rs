@@ -35,14 +35,24 @@ use tokio::sync::{watch, Mutex};
 
 use onecad_core::regen::{Outcome, RegenDirective, RegenScheduler};
 
-use crate::document_runtime::DocumentRuntime;
+use crate::document_runtime::{DocumentRuntime, RegenReport};
+use crate::dto::DocumentProjection;
 use crate::state::AppState;
 
 /// The boxed future the regen driver hands the scheduler (the driver closure is a
 /// distinct type per call, so it is type-erased for the scheduler's `select!`).
-type BoxFut = Pin<Box<dyn Future<Output = Outcome> + Send>>;
+pub type BoxFut = Pin<Box<dyn Future<Output = Outcome> + Send>>;
 
-/// Builds the app-layer regen driver (plan "app layer runs the executor").
+/// A post-regen completion sink: called once per finished regen with the
+/// [`RegenReport`] + refreshed [`DocumentProjection`]. The production wrapper
+/// forwards to the Tauri event bus ([`api::emit_regen_events`], which needs an
+/// [`AppHandle`]); tests inject a plain channel sink so a worker-backed regen can
+/// be asserted through the **real** scheduler/driver wiring without a webview
+/// (Codex MINOR-10 — the driver seam must not require an `AppHandle`).
+pub type RegenEmitter = Arc<dyn Fn(&RegenReport, &DocumentProjection) + Send + Sync>;
+
+/// Builds the app-layer regen driver over an explicit completion [`RegenEmitter`]
+/// (plan "app layer runs the executor").
 ///
 /// **Fencing goes live (R-WP11):** the driver holds the single-writer lock only
 /// for the two short phases that mutate the document — phase 1
@@ -53,14 +63,14 @@ type BoxFut = Pin<Box<dyn Future<Output = Outcome> + Send>>;
 /// with the lock **released**, so an edit can land during it, advance the fencing
 /// tokens, and supersede the stale prepare via the executor's revision gate.
 /// Debounce/coalesce/preview-priority stay in the [`RegenScheduler`] (policy only).
-fn make_regen_driver(
+pub fn regen_driver_with_emitter(
     runtime: Arc<Mutex<Option<DocumentRuntime>>>,
-    app: AppHandle,
+    emit: RegenEmitter,
     autosave_tick: Arc<watch::Sender<u64>>,
 ) -> impl Fn(RegenDirective) -> BoxFut + Send + Sync + 'static {
     move |directive: RegenDirective| {
         let runtime = runtime.clone();
-        let app = app.clone();
+        let emit = emit.clone();
         let autosave_tick = autosave_tick.clone();
         Box::pin(async move {
             // Phase 1 (locked): compile the plan + clone the scratch session.
@@ -86,7 +96,7 @@ fn make_regen_driver(
                 let projection = rt.projection();
                 (report, projection)
             };
-            api::emit_regen_events(&app, &report, &projection);
+            emit(&report, &projection);
             // A published regen produced new geometry outputs worth autosaving
             // (the debounce coalesces the edit-tick + this publish-tick).
             if report.published() {
@@ -95,6 +105,22 @@ fn make_regen_driver(
             report.outcome
         })
     }
+}
+
+/// The production regen driver: a thin [`regen_driver_with_emitter`] wrapper whose
+/// emitter forwards each completion to the Tauri event bus
+/// ([`api::emit_regen_events`]). ZERO behavior change from the pre-seam driver.
+fn make_regen_driver(
+    runtime: Arc<Mutex<Option<DocumentRuntime>>>,
+    app: AppHandle,
+    autosave_tick: Arc<watch::Sender<u64>>,
+) -> impl Fn(RegenDirective) -> BoxFut + Send + Sync + 'static {
+    let emit: RegenEmitter = Arc::new(
+        move |report: &RegenReport, projection: &DocumentProjection| {
+            api::emit_regen_events(&app, report, projection);
+        },
+    );
+    regen_driver_with_emitter(runtime, emit, autosave_tick)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

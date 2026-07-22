@@ -663,6 +663,151 @@ fn regen_hint_and_dirty_range_table() {
     );
 }
 
+// ── Frontier-append promotion (MODEL-HARDEN W0) ──────────────────────────────
+//
+// The frontend always commits with `at_cursor:false`; a fresh commit at the
+// applied frontier (`cursor == len`) must JOIN the applied prefix so it regens
+// (`ToEnd`), not sit as a permanent draft (the reported P0 defect). A rolled-back
+// append (`cursor < len`) stays a draft (`RegenHint::None`).
+
+#[test]
+fn add_operation_append_at_frontier_is_applied_and_regens_to_end() {
+    let base = base_document();
+    let len = base.timeline.len(); // 5, cursor at the end (all applied)
+    assert_eq!(base.timeline.cursor(), len, "base is fully applied");
+    let mut sess = DocumentSession::new(base);
+
+    let out = sess
+        .apply(EditCommand::AddOperation {
+            record: extrude_newbody(rid(0x99), 3.0, bid(0x99)),
+            at_cursor: false, // the exact frontend wire shape
+        })
+        .unwrap();
+
+    assert_eq!(out.regen, RegenHint::ToEnd, "frontier append regens to end");
+    assert_eq!(
+        out.dirty,
+        Some(DirtyRange::new(len, len + 1)),
+        "dirties exactly the appended step"
+    );
+    assert_eq!(
+        sess.document().timeline.cursor(),
+        len + 1,
+        "the record joined the applied prefix (cursor advanced)"
+    );
+    assert!(
+        out.projection_delta.cursor_changed,
+        "frontier append moves the cursor ⇒ cursor_changed"
+    );
+}
+
+#[test]
+fn add_operation_append_while_rolled_back_stays_draft() {
+    let base = base_document();
+    let len = base.timeline.len(); // 5
+    let mut sess = DocumentSession::new(base);
+    // Roll back to k=2 (a real rollback: ops 2..len become drafts).
+    sess.apply(EditCommand::SetRollback { cursor: 2 }).unwrap();
+    assert_eq!(sess.document().timeline.cursor(), 2);
+
+    let out = sess
+        .apply(EditCommand::AddOperation {
+            record: extrude_newbody(rid(0x99), 3.0, bid(0x99)),
+            at_cursor: false,
+        })
+        .unwrap();
+
+    assert_eq!(
+        out.regen,
+        RegenHint::None,
+        "a rolled-back append stays a draft (no regen)"
+    );
+    assert!(
+        !out.projection_delta.cursor_changed,
+        "the draft append does not move the cursor"
+    );
+    assert_eq!(
+        sess.document().timeline.cursor(),
+        2,
+        "cursor is unchanged (record sits beyond the rollback bar)"
+    );
+    assert_eq!(
+        sess.document().timeline.len(),
+        len + 1,
+        "the draft record is still stored"
+    );
+}
+
+#[test]
+fn append_undo_redo_cursor_roundtrip() {
+    let base = base_document();
+    let len = base.timeline.len(); // 5
+    let mut sess = DocumentSession::new(base);
+
+    // Frontier append → the record joins the applied prefix.
+    sess.apply(EditCommand::AddOperation {
+        record: extrude_newbody(rid(0x99), 3.0, bid(0x99)),
+        at_cursor: false,
+    })
+    .unwrap();
+    assert!(sess.document().timeline.record_by_id(rid(0x99)).is_some());
+    assert_eq!(sess.document().timeline.cursor(), len + 1);
+
+    // Undo: the record is gone and the cursor steps back into the prefix.
+    assert!(sess.undo(), "undo the append");
+    assert!(
+        sess.document().timeline.record_by_id(rid(0x99)).is_none(),
+        "undo removed the appended record"
+    );
+    assert_eq!(sess.document().timeline.len(), len, "back to base length");
+    assert_eq!(
+        sess.document().timeline.cursor(),
+        len,
+        "undo restored the applied cursor"
+    );
+
+    // Redo re-runs the (fixed) forward command: the record re-joins the applied
+    // prefix (pins the redo-draft regression — a re-applied commit must not become
+    // a permanent draft).
+    assert!(sess.redo().unwrap(), "redo the append");
+    assert!(
+        sess.document().timeline.record_by_id(rid(0x99)).is_some(),
+        "redo re-added the record"
+    );
+    assert_eq!(
+        sess.document().timeline.cursor(),
+        len + 1,
+        "redo re-advanced the cursor (record applied again, not a draft)"
+    );
+}
+
+#[test]
+fn frontier_append_persists_applied_cursor_across_roundtrip() {
+    // A frontier-appended commit that joined the applied prefix must SURVIVE a
+    // save/reopen with `cursor == len` (Timeline persists `{records, cursor}`;
+    // document/mod.rs). A document saved under the old draft bug keeps `cursor < len`
+    // and is intentionally NOT auto-promoted on load (indistinguishable from a real
+    // rollback) — this pins the fixed-path persistence, not legacy recovery.
+    let base = base_document();
+    let len = base.timeline.len(); // 5
+    let mut sess = DocumentSession::new(base);
+    sess.apply(EditCommand::AddOperation {
+        record: extrude_newbody(rid(0x99), 3.0, bid(0x99)),
+        at_cursor: false,
+    })
+    .unwrap();
+    assert_eq!(sess.document().timeline.cursor(), len + 1);
+
+    let wire = serde_json::to_value(sess.document()).unwrap();
+    let reloaded: Document = serde_json::from_value(wire).unwrap();
+    assert_eq!(reloaded.timeline.len(), len + 1, "record persisted");
+    assert_eq!(
+        reloaded.timeline.cursor(),
+        reloaded.timeline.len(),
+        "reopened cursor == len (the appended op stays applied)"
+    );
+}
+
 // ── (c) transactions ─────────────────────────────────────────────────────────
 
 #[test]

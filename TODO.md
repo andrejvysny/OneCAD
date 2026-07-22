@@ -143,6 +143,16 @@ Waves: W0 correctness (C0 Rust squash txn, C1 mutation coordinator, C2 FE sketch
 - [x] FINAL GATE (2026-07-22): FE 1065/102 · build clean · cargo 406/0 vs real worker · fmt+clippy clean · ctest 65/65 · e2e 23/23 · hex gate 0 (sole hit = pre-existing inputProbe.ts, tracked :125)
 - [ ] Manual Mac gate additions (USER, `bun run tauri dev`): trim a segment on crossing lines + hover shows red doomed-piece ghost; ⌘Z sweep inside sketch (draw/dim/drag/trim each one step) + AFTER finish exactly ONE model undo step reverts whole sketch session; over-constrain a dimension → reject hint NAMES the clashing constraint + re-enter conflicting sketch → rows/badges tinted red; bodies dim ~35% in sketch and restore exactly on exit; crosshair cursor on draw/dimension tools; line chain: Enter ends, click-first-point closes loop; dimension input rejects ≤0 radius/distance + >3-decimal display trimmed; status errors red + transient hints self-clear ~4s
 
+## MODEL-HARDEN — Extrude/Revolve commit fix + professional UX (plan approved 2026-07-22, `~/.claude/plans/act-as-senior-software-parsed-sunbeam.md`; Codex plan-review terra/high "revise" → all 10 findings folded)
+Root cause: append-at-end AddOperation → RegenHint::None → no regen ever scheduled in real app (HISTORY row real, geometry never computed; silent teardown). Waves: W0 regen root fix (core cursor promotion + scheduler_commit.rs) → W0.5 undo hygiene + correlation provenance + error surfacing → W1 commit-gesture rework (release keeps armed, Enter/✓/click-away) → W2 booleans + multi-select→N ops → W3 revolve full (worker split fix + SCHEMA §7.2 amendment + revolve_ops.rs) → W4 final gate.
+- [x] W0 regen root fix (2026-07-22): frontier append joins applied prefix (session.rs cursor promotion, cursor_changed delta, header table), rolled-back append stays draft; lib.rs pub regen_driver_with_emitter seam (RegenEmitter, zero app behavior change); DocumentProjection +appliedOps/totalOps (additive, TS optional mirror); 4 core tests + scheduler_commit.rs 2/2 REAL worker through PRODUCTION driver (would have caught the defect; redo-draft regression pinned). Gate A: cargo 412/0 + clippy/fmt clean, FE 1065 — GATE PASSED (orchestrator-verified)
+- [ ] W0.5 hygiene + correlation + error surfacing — gate: cargo + vitest
+- [ ] W1 commit-gesture UX (single region) — gate: vitest + e2e migrated
+- [ ] W2 booleans + multi-select — gate: vitest + new e2e
+- [ ] W3 revolve (worker + wire tests + FE) — gate: ctest + cargo + vitest + e2e
+- [ ] W4 final: docs + full suites + clippy/fmt + hex
+- [ ] Manual Mac gate (USER, `bun run tauri dev`): triangle sketch → Finish → extrude drag → release stays armed w/ chip cluster → Enter → body PERSISTS after tool close AND save/reopen; ⌘Z once = extrude gone, twice = sketch session; rect+circle sketch → multi-select both regions → confirm → drag → Enter → 2 bodies + 2 rows; Cut on existing body subtracts; revolve triangle edge 360° Enter; stale-region error = named hint, never silence
+
 ## Execution rules
 - Orchestrator: decisions/review only. WPs → Opus 4.8 subagents.
 - RISKY WP = extra independent review pass.

@@ -105,6 +105,12 @@ pub struct DocumentProjection {
     pub bodies: std::collections::BTreeMap<String, BodyDto>,
     pub sketches: std::collections::BTreeMap<String, SketchDto>,
     pub features: Vec<FeatureDto>,
+    /// Applied op count (timeline cursor): `features[0, appliedOps)` are applied,
+    /// `[appliedOps, totalOps)` are drafts beyond the rollback bar. Drives the
+    /// legacy-draft recovery hint (`appliedOps < totalOps` ⇒ "N ops not applied").
+    pub applied_ops: usize,
+    /// Total op count (timeline length).
+    pub total_ops: usize,
 }
 
 impl DocumentProjection {
@@ -119,6 +125,8 @@ impl DocumentProjection {
             bodies: std::collections::BTreeMap::new(),
             sketches: std::collections::BTreeMap::new(),
             features: Vec::new(),
+            applied_ops: 0,
+            total_ops: 0,
         }
     }
 }
@@ -661,6 +669,8 @@ mod tests {
                 value_text: "25.0 mm".into(),
                 status: FeatureStatus::Ok,
             }],
+            applied_ops: 1,
+            total_ops: 1,
         };
         let v = serde_json::to_value(&proj).unwrap();
         assert_eq!(v["status"], "ready");
@@ -669,6 +679,8 @@ mod tests {
         assert_eq!(v["features"][0]["kind"], "extrude");
         assert_eq!(v["features"][0]["valueText"], "25.0 mm");
         assert_eq!(v["features"][0]["status"], "ok");
+        assert_eq!(v["appliedOps"], 1);
+        assert_eq!(v["totalOps"], 1);
     }
 
     #[test]

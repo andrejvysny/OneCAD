@@ -373,6 +373,15 @@ export interface DocumentProjectionWire {
   bodies: Record<string, BodyProjection>;
   sketches: Record<string, SketchProjection>;
   features: FeatureRecord[];
+  /**
+   * Applied op count (timeline cursor): `features[0, appliedOps)` are applied,
+   * `[appliedOps, totalOps)` are drafts beyond the rollback bar. Optional — the
+   * backend always sends both; no frontend consumer wired yet (MODEL-HARDEN W0
+   * seam for the legacy-draft recovery hint).
+   */
+  appliedOps?: number;
+  /** Total op count (timeline length). See {@link appliedOps}. */
+  totalOps?: number;
 }
 
 /** The `regen-finished` payload (`{revision, outcome}`; F-WP8 flag 3). */
