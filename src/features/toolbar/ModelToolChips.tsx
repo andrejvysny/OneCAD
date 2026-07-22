@@ -104,6 +104,52 @@ function ApplyButton() {
   );
 }
 
+/** The shared ✓/✕ commit/cancel pair on the armed extrude / revolve cluster. */
+function ConfirmButtons({ onConfirm, onCancel }: { onConfirm?: () => void; onCancel?: () => void }) {
+  return (
+    <>
+      <button
+        type="button"
+        data-testid="chip-confirm"
+        aria-label="Confirm"
+        onClick={() => onConfirm?.()}
+        className="rounded-sm bg-accent px-2 py-1 text-[11.5px] font-medium text-white hover:opacity-90"
+      >
+        ✓
+      </button>
+      <button
+        type="button"
+        data-testid="chip-cancel"
+        aria-label="Cancel"
+        onClick={() => onCancel?.()}
+        className="rounded-sm bg-chip px-2 py-1 text-[11.5px] font-medium text-ink-3 hover:bg-hover-2"
+      >
+        ✕
+      </button>
+    </>
+  );
+}
+
+/** The ⇔ symmetric toggle on the armed extrude cluster (Alt-drag syncs it). */
+function SymmetricToggle({ pressed, onToggle }: { pressed: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      data-testid="chip-symmetric"
+      aria-label="Symmetric"
+      aria-pressed={pressed}
+      title="Symmetric (hold Alt while dragging)"
+      onClick={onToggle}
+      className={cn(
+        "rounded-sm px-2 py-1 text-[11.5px] font-medium",
+        pressed ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
+      )}
+    >
+      ⇔
+    </button>
+  );
+}
+
 export function ModelToolChips() {
   const engine = useViewportEngine();
   const kind = useToolChipStore((s) => s.kind);
@@ -112,6 +158,8 @@ export function ModelToolChips() {
   const axis = useToolChipStore((s) => s.axis);
   const plane = useToolChipStore((s) => s.plane);
   const op = useToolChipStore((s) => s.op);
+  const symmetric = useToolChipStore((s) => s.symmetric);
+  const showSymmetric = useToolChipStore((s) => s.showSymmetric);
   const suffix = useToolChipStore((s) => s.suffix);
   const worldPos = useToolChipStore((s) => s.worldPos);
   // A plain DOM host, created once; the engine owns its DOM position.
@@ -142,11 +190,42 @@ export function ModelToolChips() {
     </div>
   );
 
+  // The armed extrude / revolve cluster commits on chip-input Enter via `onConfirm`
+  // (apply typed value THEN confirm — single fire; the input stops propagation so
+  // the controller's capture-phase Enter never double-fires).
+  const clusterInput = (unit: string) => (
+    <DimensionInput
+      value={value}
+      suffix={unit}
+      onCommit={(v) => toolChipStore.getState().onValue?.(v)}
+      onConfirm={() => toolChipStore.getState().onConfirm?.()}
+    />
+  );
+  const confirmButtons = (
+    <ConfirmButtons
+      onConfirm={() => toolChipStore.getState().onConfirm?.()}
+      onCancel={() => toolChipStore.getState().onCancel?.()}
+    />
+  );
+
   let content: React.ReactNode;
-  if (kind === "revolveAngle") {
-    content = (
-      <div className="pointer-events-auto inline-flex items-center gap-1">
-        {numericChip("°")}
+  if (kind === "extrudeDepth") {
+    content = panel(
+      <>
+        {clusterInput("mm")}
+        {showSymmetric && (
+          <SymmetricToggle
+            pressed={symmetric}
+            onToggle={() => toolChipStore.getState().onSymmetric?.(!symmetric)}
+          />
+        )}
+        {confirmButtons}
+      </>,
+    );
+  } else if (kind === "revolveAngle") {
+    content = panel(
+      <>
+        {clusterInput("°")}
         <button
           type="button"
           onClick={() => toolChipStore.getState().onResetAxis?.()}
@@ -154,9 +233,10 @@ export function ModelToolChips() {
         >
           Axis
         </button>
-      </div>
+        {confirmButtons}
+      </>,
     );
-  } else if (kind === "extrudeDepth" || kind === "filletRadius" || kind === "shellThickness") {
+  } else if (kind === "filletRadius" || kind === "shellThickness") {
     content = numericChip("mm");
   } else if (kind === "dimension") {
     // Sketch Dimension tool: seeded + auto-focused; Enter commits, Esc cancels,

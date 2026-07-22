@@ -12,7 +12,30 @@
  */
 import { createStore, useStore } from "zustand";
 import type { BooleanOperation } from "@/ipc/types";
-import type { PatternAxis, MirrorPlane } from "@/tools/modelTools/modelToolMachine";
+import type { PatternAxis, MirrorPlane, BooleanMode } from "@/tools/modelTools/modelToolMachine";
+
+/** Handlers the armed extrude cluster wires (MODEL-HARDEN Wave 1). */
+export interface ExtrudeChipHandlers {
+  onValue: (v: number) => void;
+  onSymmetric: (symmetric: boolean) => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
+/** Extra armed-cluster options (symmetric seed; hide the ⇔ toggle in re-edit). */
+export interface ExtrudeChipOpts {
+  symmetric?: boolean;
+  /** Re-edit shows value + ✓/✕ only — no symmetric toggle (default true). */
+  showSymmetric?: boolean;
+}
+
+/** Handlers the armed revolve cluster wires (MODEL-HARDEN Wave 1). */
+export interface RevolveChipHandlers {
+  onValue: (v: number) => void;
+  onResetAxis: () => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
 
 export type ChipKind =
   | "none"
@@ -38,13 +61,27 @@ export interface ToolChipState {
   plane: MirrorPlane;
   /** Selected boolean operation (booleanOp chip). */
   op: BooleanOperation;
+  /** Symmetric extrude toggle state (armed extrude cluster; Alt-drag syncs it). */
+  symmetric: boolean;
+  /** Whether the armed extrude cluster renders the ⇔ toggle (hidden in re-edit). */
+  showSymmetric: boolean;
+  /** Feature boolean mode — typed now, consumed by the Wave 2 boolean segments. */
+  booleanMode: BooleanMode;
+  /** Whether a boolean picker is offered (≥1 existing body) — Wave 2. */
+  canBoolean: boolean;
+  /** How many regions the armed op covers (1 in Wave 1's single-region path). */
+  regionCount: number;
   /** Unit suffix for the numeric chip (mm / ° — sketch dimension chip). */
   suffix: string;
   /** World anchor for the overlay driver, or null. */
   worldPos: [number, number, number] | null;
   /** Committed value from the editable chip (Enter/blur). */
   onValue: ((v: number) => void) | null;
-  /** Esc / cancel from the dimension chip. */
+  /** Symmetric toggled (armed extrude cluster). */
+  onSymmetric: ((symmetric: boolean) => void) | null;
+  /** Commit the armed op (chip ✓ / chip-input Enter). */
+  onConfirm: (() => void) | null;
+  /** Esc / cancel from the dimension chip, or ✕ from the armed cluster. */
   onCancel: (() => void) | null;
   /** Boolean op selected. */
   onOp: ((op: BooleanOperation) => void) | null;
@@ -59,14 +96,14 @@ export interface ToolChipState {
   /** Instance count stepped (pattern chips). */
   onCount: ((count: number) => void) | null;
 
-  showExtrude(value: number, worldPos: [number, number, number], onValue: (v: number) => void): void;
-  showFillet(value: number, worldPos: [number, number, number], onValue: (v: number) => void): void;
-  showRevolve(
+  showExtrude(
     value: number,
     worldPos: [number, number, number],
-    onValue: (v: number) => void,
-    onResetAxis: () => void,
+    handlers: ExtrudeChipHandlers,
+    opts?: ExtrudeChipOpts,
   ): void;
+  showFillet(value: number, worldPos: [number, number, number], onValue: (v: number) => void): void;
+  showRevolve(value: number, worldPos: [number, number, number], handlers: RevolveChipHandlers): void;
   showBoolean(
     op: BooleanOperation,
     worldPos: [number, number, number],
@@ -121,6 +158,8 @@ export interface ToolChipState {
   setPlane(plane: MirrorPlane): void;
   /** Update just the boolean op. */
   setOp(op: BooleanOperation): void;
+  /** Update just the armed extrude symmetric toggle (Alt-drag / ⇔ toggle). */
+  setSymmetric(symmetric: boolean): void;
   clear(): void;
 }
 
@@ -131,9 +170,16 @@ const CLEARED = {
   axis: "X" as PatternAxis,
   plane: "XY" as MirrorPlane,
   op: "Union" as BooleanOperation,
+  symmetric: false,
+  showSymmetric: true,
+  booleanMode: "NewBody" as BooleanMode,
+  canBoolean: false,
+  regionCount: 1,
   suffix: "",
   worldPos: null,
   onValue: null,
+  onSymmetric: null,
+  onConfirm: null,
   onCancel: null,
   onOp: null,
   onApply: null,
@@ -146,14 +192,34 @@ const CLEARED = {
 export const toolChipStore = createStore<ToolChipState>()((set) => ({
   ...CLEARED,
 
-  showExtrude(value, worldPos, onValue) {
-    set({ ...CLEARED, kind: "extrudeDepth", value, worldPos, onValue });
+  showExtrude(value, worldPos, handlers, opts) {
+    set({
+      ...CLEARED,
+      kind: "extrudeDepth",
+      value,
+      worldPos,
+      symmetric: opts?.symmetric ?? false,
+      showSymmetric: opts?.showSymmetric ?? true,
+      onValue: handlers.onValue,
+      onSymmetric: handlers.onSymmetric,
+      onConfirm: handlers.onConfirm,
+      onCancel: handlers.onCancel,
+    });
   },
   showFillet(value, worldPos, onValue) {
     set({ ...CLEARED, kind: "filletRadius", value, worldPos, onValue });
   },
-  showRevolve(value, worldPos, onValue, onResetAxis) {
-    set({ ...CLEARED, kind: "revolveAngle", value, worldPos, onValue, onResetAxis });
+  showRevolve(value, worldPos, handlers) {
+    set({
+      ...CLEARED,
+      kind: "revolveAngle",
+      value,
+      worldPos,
+      onValue: handlers.onValue,
+      onResetAxis: handlers.onResetAxis,
+      onConfirm: handlers.onConfirm,
+      onCancel: handlers.onCancel,
+    });
   },
   showBoolean(op, worldPos, onOp, onApply) {
     set({ ...CLEARED, kind: "booleanOp", op, worldPos, onOp, onApply });
@@ -209,6 +275,9 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
   },
   setOp(op) {
     set({ op });
+  },
+  setSymmetric(symmetric) {
+    set({ symmetric });
   },
   clear() {
     set({ ...CLEARED });

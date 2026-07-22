@@ -18,14 +18,29 @@ export type ModelPhase = "idle" | "armed" | "dragging" | "committing";
 export type ToolEffect = "none" | "begin" | "update" | "commit" | "cancel" | "ghost";
 
 // ── Extrude ──────────────────────────────────────────────────────────────────
+//
+// MODEL-HARDEN Wave 1 — the commit gesture is now professional: a pointer
+// RELEASE keeps the tool ARMED (live preview + editable chip), and commit is an
+// explicit `confirm` (Enter / chip-✓ / click-away). `commitFailed` returns the
+// machine to `armed` so a failed commit never silently loses the user's work.
+// `targetPick`/`setBooleanMode`/`pickTarget` are implemented now (pure + tested)
+// but only wired to the UI in Wave 2 (single-region boolean modes).
 
 export const DEFAULT_EXTRUDE_DEPTH = 10;
 
+/** Boolean fusion mode the extrude/revolve commit carries (Wave 2 UI). */
+export type BooleanMode = "NewBody" | "Add" | "Cut";
+
+export type ExtrudePhase = "idle" | "armed" | "dragging" | "targetPick" | "committing";
+
 export interface ExtrudeFsm {
-  phase: ModelPhase;
+  phase: ExtrudePhase;
   depth: number;
   symmetric: boolean;
   hasRegion: boolean;
+  booleanMode: BooleanMode;
+  /** The body an Add/Cut targets (null for NewBody, or until a target is picked). */
+  targetBodyId: string | null;
 }
 
 export type ExtrudeEvent =
@@ -33,7 +48,14 @@ export type ExtrudeEvent =
   | { kind: "grab" }
   | { kind: "drag"; depth: number; symmetric?: boolean }
   | { kind: "setDepth"; depth: number }
+  | { kind: "setSymmetric"; symmetric: boolean }
   | { kind: "release" }
+  // Add|Cut with a resolvable auto-target → armed; with `needsPick` → targetPick.
+  | { kind: "setBooleanMode"; mode: BooleanMode; targetBodyId?: string | null; needsPick?: boolean }
+  | { kind: "pickTarget"; bodyId: string }
+  | { kind: "cancelTargetPick" }
+  | { kind: "confirm" }
+  | { kind: "commitFailed" }
   | { kind: "settle" }
   | { kind: "cancel" };
 
@@ -43,14 +65,28 @@ export interface ExtrudeStep {
 }
 
 export function extrudeInit(): ExtrudeFsm {
-  return { phase: "idle", depth: DEFAULT_EXTRUDE_DEPTH, symmetric: false, hasRegion: false };
+  return {
+    phase: "idle",
+    depth: DEFAULT_EXTRUDE_DEPTH,
+    symmetric: false,
+    hasRegion: false,
+    booleanMode: "NewBody",
+    targetBodyId: null,
+  };
 }
 
 export function extrudeStep(s: ExtrudeFsm, e: ExtrudeEvent): ExtrudeStep {
   switch (e.kind) {
     case "arm":
       return {
-        state: { phase: "armed", depth: e.depth ?? DEFAULT_EXTRUDE_DEPTH, symmetric: false, hasRegion: true },
+        state: {
+          phase: "armed",
+          depth: e.depth ?? DEFAULT_EXTRUDE_DEPTH,
+          symmetric: false,
+          hasRegion: true,
+          booleanMode: "NewBody",
+          targetBodyId: null,
+        },
         effect: "begin",
       };
     case "grab":
@@ -65,9 +101,41 @@ export function extrudeStep(s: ExtrudeFsm, e: ExtrudeEvent): ExtrudeStep {
     case "setDepth":
       if (s.phase !== "armed" && s.phase !== "dragging") return { state: s, effect: "none" };
       return { state: { ...s, depth: e.depth }, effect: "update" };
+    case "setSymmetric":
+      if (s.phase !== "armed" && s.phase !== "dragging") return { state: s, effect: "none" };
+      return { state: { ...s, symmetric: e.symmetric }, effect: "update" };
     case "release":
+      // The professional gesture: release does NOT commit — it keeps the tool
+      // armed with the final depth so the user can tweak / confirm explicitly.
       if (s.phase !== "dragging") return { state: s, effect: "none" };
+      return { state: { ...s, phase: "armed" }, effect: "update" };
+    case "setBooleanMode": {
+      if (s.phase !== "armed" && s.phase !== "targetPick") return { state: s, effect: "none" };
+      if (e.mode === "NewBody") {
+        return { state: { ...s, phase: "armed", booleanMode: "NewBody", targetBodyId: null }, effect: "update" };
+      }
+      if (e.needsPick) {
+        return { state: { ...s, phase: "targetPick", booleanMode: e.mode, targetBodyId: null }, effect: "none" };
+      }
+      return {
+        state: { ...s, phase: "armed", booleanMode: e.mode, targetBodyId: e.targetBodyId ?? null },
+        effect: "update",
+      };
+    }
+    case "pickTarget":
+      if (s.phase !== "targetPick") return { state: s, effect: "none" };
+      return { state: { ...s, phase: "armed", targetBodyId: e.bodyId }, effect: "update" };
+    case "cancelTargetPick":
+      if (s.phase !== "targetPick") return { state: s, effect: "none" };
+      return { state: { ...s, phase: "armed", booleanMode: "NewBody", targetBodyId: null }, effect: "update" };
+    case "confirm":
+      if (s.phase !== "armed") return { state: s, effect: "none" };
       return { state: { ...s, phase: "committing" }, effect: "commit" };
+    case "commitFailed":
+      // The commit threw / returned no body — back to armed so the controller can
+      // re-arm the preview (work preserved) and surface the reason.
+      if (s.phase !== "committing") return { state: s, effect: "none" };
+      return { state: { ...s, phase: "armed" }, effect: "none" };
     case "settle":
       return { state: extrudeInit(), effect: "none" };
     case "cancel":
@@ -135,12 +203,15 @@ export function filletStep(s: FilletFsm, e: FilletEvent): FilletStep {
 // ── Revolve ──────────────────────────────────────────────────────────────────
 //
 // Revolve adds an `axisPick` phase before the angle drag: the user first clicks a
-// sketch LINE to set the axis of revolution, then drags to sweep 0–360°. A plain
-// click after the axis is chosen commits the default full 360° (quickCommit).
+// sketch LINE to set the axis of revolution, then the tool arms at 360°. A pointer
+// RELEASE from an angle drag keeps the tool armed (MODEL-HARDEN Wave 1); commit is
+// the explicit `confirm` (Enter / chip-✓ / click-away). The old `quickCommit`
+// (plain-click → 360°) is DELETED — the controller now confirms an armed revolve
+// on click-away, which reproduces the old muscle memory at the 360° default.
 
 export const DEFAULT_REVOLVE_ANGLE = 360;
 
-export type RevolvePhase = "idle" | "axisPick" | "armed" | "dragging" | "committing";
+export type RevolvePhase = "idle" | "axisPick" | "armed" | "dragging" | "targetPick" | "committing";
 
 export interface RevolveFsm {
   phase: RevolvePhase;
@@ -149,6 +220,9 @@ export interface RevolveFsm {
   hasRegion: boolean;
   /** The chosen sketch-line axis id (null until an axis is picked). */
   axisLineId: string | null;
+  booleanMode: BooleanMode;
+  /** The body an Add/Cut targets (null for NewBody, or until a target is picked). */
+  targetBodyId: string | null;
 }
 
 export type RevolveEvent =
@@ -158,8 +232,12 @@ export type RevolveEvent =
   | { kind: "grab" }
   | { kind: "drag"; angle: number }
   | { kind: "setAngle"; angle: number }
-  | { kind: "quickCommit" }
   | { kind: "release" }
+  | { kind: "setBooleanMode"; mode: BooleanMode; targetBodyId?: string | null; needsPick?: boolean }
+  | { kind: "pickTarget"; bodyId: string }
+  | { kind: "cancelTargetPick" }
+  | { kind: "confirm" }
+  | { kind: "commitFailed" }
   | { kind: "settle" }
   | { kind: "cancel" };
 
@@ -169,7 +247,14 @@ export interface RevolveStep {
 }
 
 export function revolveInit(): RevolveFsm {
-  return { phase: "idle", angle: DEFAULT_REVOLVE_ANGLE, hasRegion: false, axisLineId: null };
+  return {
+    phase: "idle",
+    angle: DEFAULT_REVOLVE_ANGLE,
+    hasRegion: false,
+    axisLineId: null,
+    booleanMode: "NewBody",
+    targetBodyId: null,
+  };
 }
 
 export function revolveStep(s: RevolveFsm, e: RevolveEvent): RevolveStep {
@@ -177,14 +262,12 @@ export function revolveStep(s: RevolveFsm, e: RevolveEvent): RevolveStep {
     case "arm": {
       if (e.hasRegion === false) return { state: revolveInit(), effect: "none" };
       const angle = e.angle ?? DEFAULT_REVOLVE_ANGLE;
+      const base = { angle, hasRegion: true, booleanMode: "NewBody" as BooleanMode, targetBodyId: null };
       // A re-edit seeds an existing axis (param-only edit) → skip axis-pick.
       if (e.hasAxis) {
-        return {
-          state: { phase: "armed", angle, hasRegion: true, axisLineId: e.axisLineId ?? null },
-          effect: "begin",
-        };
+        return { state: { ...base, phase: "armed", axisLineId: e.axisLineId ?? null }, effect: "begin" };
       }
-      return { state: { phase: "axisPick", angle, hasRegion: true, axisLineId: null }, effect: "none" };
+      return { state: { ...base, phase: "axisPick", axisLineId: null }, effect: "none" };
     }
     case "pickAxis":
       if (s.phase !== "axisPick") return { state: s, effect: "none" };
@@ -202,17 +285,87 @@ export function revolveStep(s: RevolveFsm, e: RevolveEvent): RevolveStep {
     case "setAngle":
       if (s.phase !== "armed" && s.phase !== "dragging") return { state: s, effect: "none" };
       return { state: { ...s, angle: e.angle }, effect: "update" };
-    case "quickCommit":
+    case "release":
+      // Release keeps the tool armed at the final angle (no implicit commit).
+      if (s.phase !== "dragging") return { state: s, effect: "none" };
+      return { state: { ...s, phase: "armed" }, effect: "update" };
+    case "setBooleanMode": {
+      if (s.phase !== "armed" && s.phase !== "targetPick") return { state: s, effect: "none" };
+      if (e.mode === "NewBody") {
+        return { state: { ...s, phase: "armed", booleanMode: "NewBody", targetBodyId: null }, effect: "update" };
+      }
+      if (e.needsPick) {
+        return { state: { ...s, phase: "targetPick", booleanMode: e.mode, targetBodyId: null }, effect: "none" };
+      }
+      return {
+        state: { ...s, phase: "armed", booleanMode: e.mode, targetBodyId: e.targetBodyId ?? null },
+        effect: "update",
+      };
+    }
+    case "pickTarget":
+      if (s.phase !== "targetPick") return { state: s, effect: "none" };
+      return { state: { ...s, phase: "armed", targetBodyId: e.bodyId }, effect: "update" };
+    case "cancelTargetPick":
+      if (s.phase !== "targetPick") return { state: s, effect: "none" };
+      return { state: { ...s, phase: "armed", booleanMode: "NewBody", targetBodyId: null }, effect: "update" };
+    case "confirm":
       if (s.phase !== "armed") return { state: s, effect: "none" };
       return { state: { ...s, phase: "committing" }, effect: "commit" };
-    case "release":
-      if (s.phase !== "dragging") return { state: s, effect: "none" };
-      return { state: { ...s, phase: "committing" }, effect: "commit" };
+    case "commitFailed":
+      if (s.phase !== "committing") return { state: s, effect: "none" };
+      return { state: { ...s, phase: "armed" }, effect: "none" };
     case "settle":
       return { state: revolveInit(), effect: "none" };
     case "cancel":
       if (s.phase === "idle") return { state: s, effect: "none" };
       return { state: revolveInit(), effect: "cancel" };
+  }
+}
+
+// ── Region multi-select (Wave 2 wiring; pure + tested now) ────────────────────
+//
+// A finished sketch with several closed regions lets the user select N of them,
+// each committed as a separate op (Wave 2). This is the pure ordered/dedup
+// selection reducer the controller will drive; exported + tested now so the
+// Wave 2 controller wiring lands against a proven core.
+
+export interface RegionSelectState {
+  active: boolean;
+  /** Selected region ids, in click order, deduped. */
+  selected: string[];
+}
+
+export type RegionSelectEvent =
+  | { kind: "enter" }
+  | { kind: "toggle"; id: string }
+  | { kind: "confirm" }
+  | { kind: "cancel" };
+
+export interface RegionSelectStep {
+  state: RegionSelectState;
+  /** `confirm` fires only with ≥1 region selected; `cancel` always resets. */
+  effect: "none" | "confirm" | "cancel";
+}
+
+export function regionSelectInit(): RegionSelectState {
+  return { active: false, selected: [] };
+}
+
+export function regionSelectStep(s: RegionSelectState, e: RegionSelectEvent): RegionSelectStep {
+  switch (e.kind) {
+    case "enter":
+      return { state: { active: true, selected: [] }, effect: "none" };
+    case "toggle": {
+      if (!s.active) return { state: s, effect: "none" };
+      const has = s.selected.includes(e.id);
+      const selected = has ? s.selected.filter((x) => x !== e.id) : [...s.selected, e.id];
+      return { state: { ...s, selected }, effect: "none" };
+    }
+    case "confirm":
+      if (!s.active || s.selected.length === 0) return { state: s, effect: "none" };
+      return { state: s, effect: "confirm" };
+    case "cancel":
+      return { state: regionSelectInit(), effect: "cancel" };
   }
 }
 

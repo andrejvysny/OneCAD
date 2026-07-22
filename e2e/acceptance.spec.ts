@@ -51,9 +51,10 @@ const mid = (l: SketchLineSnapshot): { x: number; y: number } => ({
  * never auto-applied, so it is guaranteed novel (confirmed against
  * `evaluateApplicability`/`constraintApplicability.ts`).
  *
- * Extrude commit caveat: ModelToolController only calls `commitExtrude` from a
- * real drag-release on the 3D depth handle (see helpers.ts `commitExtrudeAtHandle`
- * doc) — typing a value into the chip only updates the live preview depth.
+ * Extrude commit caveat (MODEL-HARDEN Wave 1): a drag-release on the 3D depth
+ * handle now KEEPS the tool armed (sets the depth); the commit is an explicit
+ * Enter (see helpers.ts `commitExtrudeAtHandle`, which drags, releases, asserts
+ * the tool stayed armed via the debug surface, then presses Enter).
  */
 test("full acceptance ribbon: plane picker → constrain → dimension → delete → extrude", async ({ page }) => {
   await openEditorDebug(page);
@@ -155,8 +156,9 @@ test("full acceptance ribbon: plane picker → constrain → dimension → delet
 
   const bodiesBefore = await bodyOptions(page).count();
   await page.keyboard.press("Enter"); // finish → single region → auto-arms extrude directly
-  await expect(page.getByText("Drag the arrow to set depth, or type a value")).toBeVisible();
+  await expect(page.getByText(/^Drag the arrow to set depth/)).toBeVisible();
 
+  // Wave 1 gesture: drag the handle, release (stays armed), Enter confirms.
   await commitExtrudeAtHandle(page);
   // "Extruded" is a transient statusHint (ModelToolController.finishExtrude) that
   // can already be gone by the time we poll — the durable proof of a successful

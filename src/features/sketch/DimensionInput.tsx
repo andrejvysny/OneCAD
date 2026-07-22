@@ -17,6 +17,13 @@ export interface DimensionInputProps {
   value: number;
   suffix?: string;
   onCommit(value: number): void;
+  /**
+   * Enter contract for the armed model-tool cluster (MODEL-HARDEN Wave 1): when
+   * provided, a valid Enter applies the typed value (via `onCommit`) and THEN
+   * confirms the op, instead of just blurring. The input stops propagation so the
+   * controller's capture-phase Enter handler never double-fires (single confirm).
+   */
+  onConfirm?: () => void;
   /** Commit the current text when the input loses focus (default true). */
   commitOnBlur?: boolean;
   /** Esc handler — when provided, Esc calls this instead of resetting the text. */
@@ -52,6 +59,7 @@ export function DimensionInput({
   value,
   suffix = "",
   onCommit,
+  onConfirm,
   commitOnBlur = true,
   onCancel,
   autoFocus = false,
@@ -131,7 +139,12 @@ export function DimensionInput({
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
-            if (commit()) ref.current?.blur();
+            // Apply the typed value, THEN confirm the op (armed cluster) — else
+            // just blur (legacy dimension chips / fillet / shell).
+            if (commit()) {
+              if (onConfirm) onConfirm();
+              else ref.current?.blur();
+            }
           } else if (e.key === "Escape") {
             if (onCancel) {
               onCancel();

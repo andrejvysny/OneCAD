@@ -40,7 +40,7 @@ test("rectangle draws a closed region and arms extrude from the finished sketch"
   await sketchOptions(page).last().click();
   await page.getByRole("button", { name: "Extrude", exact: true }).click();
 
-  await expect(page.getByText("Drag the arrow to set depth, or type a value")).toBeVisible();
+  await expect(page.getByText(/^Drag the arrow to set depth/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Extrude", exact: true })).toHaveAttribute(
     "aria-pressed",
     "true",

@@ -94,4 +94,72 @@ describe("ModelToolChips (M6b)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Apply" }));
     expect(onApply).toHaveBeenCalled();
   });
+
+  // ── MODEL-HARDEN Wave 1: the armed extrude / revolve commit cluster ─────────
+
+  const extrudeHandlers = () => ({
+    onValue: vi.fn(),
+    onSymmetric: vi.fn(),
+    onConfirm: vi.fn(),
+    onCancel: vi.fn(),
+  });
+
+  it("armed extrude cluster: value + ⇔ toggle + ✓/✕ dispatch through the handlers", () => {
+    const h = extrudeHandlers();
+    render(<ModelToolChips />);
+    act(() => toolChipStore.getState().showExtrude(24.5, WORLD, h, { symmetric: false }));
+
+    expect(screen.getByLabelText("Dimension value")).toHaveValue("24.5");
+    expect(screen.getByText("mm")).toBeInTheDocument();
+
+    const sym = screen.getByTestId("chip-symmetric");
+    expect(sym).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(sym);
+    expect(h.onSymmetric).toHaveBeenCalledWith(true);
+
+    fireEvent.click(screen.getByTestId("chip-confirm"));
+    expect(h.onConfirm).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByTestId("chip-cancel"));
+    expect(h.onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("⇔ toggle reflects a pressed seed; re-edit (showSymmetric:false) hides it", () => {
+    render(<ModelToolChips />);
+    act(() => toolChipStore.getState().showExtrude(10, WORLD, extrudeHandlers(), { symmetric: true }));
+    expect(screen.getByTestId("chip-symmetric")).toHaveAttribute("aria-pressed", "true");
+
+    act(() => toolChipStore.getState().showExtrude(10, WORLD, extrudeHandlers(), { showSymmetric: false }));
+    expect(screen.queryByTestId("chip-symmetric")).toBeNull();
+    // ✓ / ✕ still present in a re-edit cluster.
+    expect(screen.getByTestId("chip-confirm")).toBeInTheDocument();
+  });
+
+  it("chip-input Enter applies the typed value THEN confirms, firing onConfirm once", () => {
+    const h = extrudeHandlers();
+    render(<ModelToolChips />);
+    act(() => toolChipStore.getState().showExtrude(10, WORLD, h));
+
+    const input = screen.getByLabelText("Dimension value");
+    fireEvent.change(input, { target: { value: "25" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(h.onValue).toHaveBeenCalledWith(25); // typed value applied first
+    expect(h.onConfirm).toHaveBeenCalledTimes(1); // then confirm, exactly once
+  });
+
+  it("armed revolve cluster: degree value + Axis reset + ✓/✕ dispatch through the handlers", () => {
+    const h = { onValue: vi.fn(), onResetAxis: vi.fn(), onConfirm: vi.fn(), onCancel: vi.fn() };
+    render(<ModelToolChips />);
+    act(() => toolChipStore.getState().showRevolve(360, WORLD, h));
+
+    expect(screen.getByLabelText("Dimension value")).toHaveValue("360");
+    expect(screen.getByText("°")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Axis" }));
+    expect(h.onResetAxis).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByTestId("chip-confirm"));
+    expect(h.onConfirm).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByTestId("chip-cancel"));
+    expect(h.onCancel).toHaveBeenCalledTimes(1);
+  });
 });

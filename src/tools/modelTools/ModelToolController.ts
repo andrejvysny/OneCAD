@@ -142,6 +142,9 @@ export class ModelToolController {
 
   // Extrude preview context.
   private session: PreviewSession | null = null;
+  /** The draft the armed extrude was begun with — replayed to re-arm on a failed
+   *  commit so the user's work is never lost (MODEL-HARDEN Wave 1). */
+  private extrudeDraft: PreviewDraft | null = null;
   private plane: SketchPlane | null = null;
   private centroidWorld: Vec3 = [0, 0, 0];
   private normal: Vec3 = [0, 0, 1];
@@ -153,6 +156,20 @@ export class ModelToolController {
   // the user re-triggered (or cancelled) is dropped instead of clobbering state.
   private armGen = 0;
   private regionPick: RegionPickState | null = null;
+
+  // Commit-generation token (MODEL-HARDEN Wave 1). Bumped at every confirm start,
+  // cancel, tool switch, and mode change; every await in a confirm sequence
+  // re-checks it so a superseded commit can never resurrect (finishExtrude a body
+  // or re-arm a preview) after the tool moved on. Extends the armGen discipline
+  // into commit time.
+  private commitGen = 0;
+
+  // Click-away commit (MODEL-HARDEN Wave 1). A window-level capture pointerdown/up
+  // pair confirms an armed extrude/revolve on a true click outside the chip /
+  // toolbar / inputs and off the depth/angle handle (an orbit drag never commits).
+  private clickAwayArmed = false;
+  private clickAwayDownX = 0;
+  private clickAwayDownY = 0;
 
   // Fillet context.
   private filletEdges: EntityRef[] = [];
@@ -213,6 +230,10 @@ export class ModelToolController {
     c.addEventListener("pointerup", this.onPointerUp);
     window.addEventListener("keydown", this.onKeyDown, true);
     window.addEventListener("keyup", this.onKeyUp, true);
+    // Click-away commit — window capture so a click on ANY chrome (or empty space)
+    // outside the container is seen; the handlers gate on the armed phase + target.
+    window.addEventListener("pointerdown", this.onWindowPointerDown, true);
+    window.addEventListener("pointerup", this.onWindowPointerUp, true);
 
     this.unsubs.push(deps.client.onPreviewResult((r) => this.onPreviewResult(r)));
 
@@ -252,8 +273,10 @@ export class ModelToolController {
 
   private onToolChange(tool: string): void {
     // Any tool switch invalidates a pending arm (drop a late finishSketch result) and
-    // cleans up the previous tool's transient state first.
+    // a pending commit (so it can't resurrect on the new tool), and cleans up the
+    // previous tool's transient state first.
     this.invalidateArm();
+    this.commitGen++;
     this.cancelRegionPick();
     this.cancelPreview();
     this.cancelFillet();
@@ -331,15 +354,32 @@ export class ModelToolController {
     };
     if (editFeatureId) params.featureId = editFeatureId;
     const draft: PreviewDraft = { opType: "Extrude", sketchId, regionId: region.regionId, params };
+    this.extrudeDraft = draft;
     this.session = await this.deps.client.beginPreview(draft);
 
     this.throttle.reset();
     this.extrude = extrudeStep(extrudeInit(), { kind: "arm", depth: startDepth }).state;
     toolStore.setState({ phase: "armed" });
-    viewportStore.getState().setStatusHint("Drag the arrow to set depth, or type a value", { sticky: true });
+    viewportStore.getState().setStatusHint(
+      editFeatureId
+        ? "Drag the arrow or type a depth · Enter to apply"
+        : "Drag the arrow to set depth · Enter, ✓, or click away to confirm",
+      { sticky: true },
+    );
 
     const chipWorld = this.chipWorld();
-    toolChipStore.getState().showExtrude(startDepth, chipWorld, (v) => this.onExtrudeChip(v));
+    toolChipStore.getState().showExtrude(
+      startDepth,
+      chipWorld,
+      {
+        onValue: (v) => this.onExtrudeChip(v),
+        onSymmetric: (sym) => this.setExtrudeSymmetric(sym),
+        onConfirm: () => void this.confirmExtrude(),
+        onCancel: () => toolStore.getState().setTool("select"),
+      },
+      // Re-edit is param-only (angle/depth) → value + ✓/✕ only, no symmetric toggle.
+      { symmetric: false, showSymmetric: !editFeatureId },
+    );
 
     this.sendPreview(startDepth); // initial exact L2
     this.updateDebug();
@@ -359,6 +399,15 @@ export class ModelToolController {
     this.engine.setExtrudeDepth(v, this.extrude.symmetric);
     toolChipStore.getState().setValue(v);
     this.sendPreview(v);
+  }
+
+  /** ⇔ toggle on the armed cluster: mirror Alt-during-drag onto the live preview. */
+  private setExtrudeSymmetric(symmetric: boolean): void {
+    if (this.extrude.phase !== "armed" && this.extrude.phase !== "dragging") return;
+    this.extrude = extrudeStep(this.extrude, { kind: "setSymmetric", symmetric }).state;
+    this.engine.setExtrudeDepth(this.extrude.depth, symmetric);
+    toolChipStore.getState().setSymmetric(symmetric);
+    this.sendPreview(this.extrude.depth);
   }
 
   // ── multi-region pick (extrude / revolve) ────────────────────────────────────
@@ -551,13 +600,13 @@ export class ModelToolController {
       this.deps.engine.setOrbitSuppressed(true);
       this.deps.engine.showRevolvePreview(this.plane, profile.ring, this.revolveAxis, startAngle);
       toolStore.setState({ phase: "armed" });
-      viewportStore.getState().setStatusHint("Drag to set angle, or type a value", { sticky: true });
-      toolChipStore.getState().showRevolve(
-        startAngle,
-        this.revolveChipWorld(),
-        (v) => this.onRevolveChip(v),
-        () => this.resetRevolveAxis(),
-      );
+      viewportStore.getState().setStatusHint("Drag or type an angle · Enter to apply", { sticky: true });
+      toolChipStore.getState().showRevolve(startAngle, this.revolveChipWorld(), {
+        onValue: (v) => this.onRevolveChip(v),
+        onResetAxis: () => this.resetRevolveAxis(),
+        onConfirm: () => void this.confirmRevolve(),
+        onCancel: () => toolStore.getState().setTool("select"),
+      });
     } else {
       this.revolveAxis = null;
       this.revolveAxisLineId = null;
@@ -644,13 +693,16 @@ export class ModelToolController {
     this.revolveAxisLineId = cand.id;
     this.deps.engine.setOrbitSuppressed(true);
     this.deps.engine.showRevolvePreview(this.plane, this.revolveProfile.ring, this.revolveAxis, this.revolve.angle);
-    toolChipStore.getState().showRevolve(
-      this.revolve.angle,
-      this.revolveChipWorld(),
-      (v) => this.onRevolveChip(v),
-      () => this.resetRevolveAxis(),
+    toolChipStore.getState().showRevolve(this.revolve.angle, this.revolveChipWorld(), {
+      onValue: (v) => this.onRevolveChip(v),
+      onResetAxis: () => this.resetRevolveAxis(),
+      onConfirm: () => void this.confirmRevolve(),
+      onCancel: () => toolStore.getState().setTool("select"),
+    });
+    viewportStore.getState().setStatusHint(
+      "Drag to set angle · Enter, ✓, or click away to revolve",
+      { sticky: true },
     );
-    viewportStore.getState().setStatusHint("Drag to set angle, click to revolve 360°, or type a value", { sticky: true });
     toolStore.setState({ phase: "armed" });
     this.updateDebug();
   }
@@ -680,7 +732,14 @@ export class ModelToolController {
     toolChipStore.getState().setValue(angle);
   }
 
-  private async commitRevolve(): Promise<void> {
+  /**
+   * Commit the armed revolve (Enter / chip-✓ / click-away — MODEL-HARDEN Wave 1).
+   * On a failed commit the tool stays ARMED (lathe preview kept) with a named error
+   * hint, so the user's work is never silently lost. A commitGen token guards every
+   * await so a canceled / switched arm can't resurrect.
+   */
+  private async confirmRevolve(): Promise<void> {
+    if (this.revolve.phase !== "armed") return;
     const angle = this.revolve.angle;
     const sketchId = this.revolveSketchId;
     const regionId = this.revolveRegionId;
@@ -688,6 +747,8 @@ export class ModelToolController {
       this.finishRevolve(null);
       return;
     }
+    const gen = ++this.commitGen;
+    this.revolve = revolveStep(this.revolve, { kind: "confirm" }).state; // → committing
     toolStore.setState({ phase: "committing" });
     const axis: AxisRef | undefined = this.revolveAxisLineId
       ? { kind: "sketchLine", sketchId, lineId: this.revolveAxisLineId }
@@ -712,6 +773,7 @@ export class ModelToolController {
               }),
             )
           : await this.client.applyOperation(op);
+      if (gen !== this.commitGen) return; // superseded (canceled / tool switched)
       this.applyResult(res);
       const bodyId = res.changedBodies[0]?.bodyId ?? null;
       if (bodyId) {
@@ -720,15 +782,24 @@ export class ModelToolController {
           if (loaded !== bodyId) return;
           this.commitRevolveBodyUnsub?.();
           this.commitRevolveBodyUnsub = null;
+          if (gen !== this.commitGen) return;
           this.finishRevolve(bodyId);
         });
       } else {
-        this.finishRevolve(null);
+        this.onRevolveCommitFailed(res.errorMessage ?? "Revolve failed");
       }
     } catch (e) {
-      this.finishRevolve(null);
-      viewportStore.getState().setStatusHint(`Revolve failed: ${errMessage(e)}`, { severity: "error", sticky: true });
+      if (gen !== this.commitGen) return;
+      this.onRevolveCommitFailed(errMessage(e));
     }
+  }
+
+  /** A failed revolve commit: back to armed (lathe preview kept), named error hint. */
+  private onRevolveCommitFailed(reason: string): void {
+    this.revolve = revolveStep(this.revolve, { kind: "commitFailed" }).state; // committing → armed
+    toolStore.setState({ phase: "armed" });
+    viewportStore.getState().setStatusHint(`Revolve failed: ${reason}`, { severity: "error", sticky: true });
+    this.updateDebug();
   }
 
   private finishRevolve(bodyId: string | null): void {
@@ -1207,6 +1278,7 @@ export class ModelToolController {
       this.extrude = extrudeStep(this.extrude, { kind: "drag", depth, symmetric: this.altHeld }).state;
       this.engine.setExtrudeDepth(this.extrude.depth, this.extrude.symmetric);
       toolChipStore.getState().setValue(this.extrude.depth);
+      toolChipStore.getState().setSymmetric(this.extrude.symmetric); // Alt-drag syncs the ⇔ toggle
       this.sendPreview(this.extrude.depth);
     } else if (this.dragging === "fillet") {
       const dy = this.filletDownY - e.clientY; // up-drag grows the radius
@@ -1246,10 +1318,14 @@ export class ModelToolController {
     }
 
     if (this.dragging === "extrude") {
+      // MODEL-HARDEN Wave 1: release KEEPS the tool armed (no implicit commit).
+      // Flush the trailing L2 at the final depth; the chip cluster stays editable.
       this.dragging = null;
       this.engine.setExtrudeHandleHover(false);
-      this.extrude = extrudeStep(this.extrude, { kind: "release" }).state;
-      void this.commitExtrude();
+      this.extrude = extrudeStep(this.extrude, { kind: "release" }).state; // → armed
+      toolStore.setState({ phase: "armed" });
+      this.sendPreview(this.extrude.depth);
+      this.updateDebug();
       return;
     }
     if (this.dragging === "fillet") {
@@ -1265,19 +1341,18 @@ export class ModelToolController {
       return;
     }
     if (this.dragging === "revolve") {
+      // Release keeps the revolve armed at the final angle (no implicit commit);
+      // Enter / chip-✓ / click-away confirm.
       this.dragging = null;
       this.revolveArmedDown = false;
-      this.revolve = revolveStep(this.revolve, { kind: "release" }).state;
-      void this.commitRevolve();
+      this.revolve = revolveStep(this.revolve, { kind: "release" }).state; // → armed
+      toolStore.setState({ phase: "armed" });
+      this.updateDebug();
       return;
     }
-    // Plain click after an axis is chosen commits the default full 360°.
-    if (wasClick && this.revolveArmedDown && this.revolve.phase === "armed") {
-      this.revolveArmedDown = false;
-      this.revolve = revolveStep(this.revolve, { kind: "quickCommit" }).state;
-      void this.commitRevolve();
-      return;
-    }
+    // A plain click while the revolve is armed is handled by the window-level
+    // click-away commit (confirmRevolve at the current angle, 360° default) — the
+    // old quickCommit branch is removed. Just drop the armed-down flag here.
     this.revolveArmedDown = false;
     // Revolve axis-pick (a click, not a drag).
     if (wasClick && this.revolve.phase === "axisPick") {
@@ -1290,6 +1365,67 @@ export class ModelToolController {
       if (hit && hit.bodyId !== this.boolean.targetBodyId) this.pickBooleanTool(hit.bodyId);
     }
   };
+
+  // ── click-away commit (window capture — MODEL-HARDEN Wave 1) ─────────────────
+  //
+  // The controller's own pointer listeners are container-local, so a click OUTSIDE
+  // the container (or on empty 3D space) can't reach them. A window-capture pair
+  // confirms an armed extrude/revolve on a TRUE click (within DRAG_PX of the press,
+  // so an orbit drag never commits) that lands off the chip / toolbar / inputs and
+  // does not grab the depth/angle handle. Disabled during axis / target / region
+  // pick (those phases are not `armed`).
+
+  private onWindowPointerDown = (e: PointerEvent): void => {
+    this.clickAwayArmed = false;
+    if (e.button !== 0 || !this.isArmedForClickAway()) return;
+    if (this.isExcludedClickAwayTarget(e.target)) return;
+    if (this.pressGrabsHandle(e.clientX, e.clientY)) return; // a re-drag, not a click-away
+    this.clickAwayArmed = true;
+    this.clickAwayDownX = e.clientX;
+    this.clickAwayDownY = e.clientY;
+  };
+
+  private onWindowPointerUp = (e: PointerEvent): void => {
+    if (!this.clickAwayArmed) return;
+    this.clickAwayArmed = false;
+    if (e.button !== 0) return;
+    const moved =
+      Math.abs(e.clientX - this.clickAwayDownX) > DRAG_PX ||
+      Math.abs(e.clientY - this.clickAwayDownY) > DRAG_PX;
+    if (moved) return; // an orbit / angle drag — never commits
+    if (this.isExcludedClickAwayTarget(e.target)) return;
+    if (this.extrude.phase === "armed") void this.confirmExtrude();
+    else if (this.revolve.phase === "armed") void this.confirmRevolve();
+  };
+
+  /** True while an extrude/revolve is armed and no modal pick owns the pointer. */
+  private isArmedForClickAway(): boolean {
+    if (this.regionPick) return false;
+    return this.extrude.phase === "armed" || this.revolve.phase === "armed";
+  }
+
+  /** A press that grabs the depth handle is a re-drag, not a click-away (extrude). */
+  private pressGrabsHandle(x: number, y: number): boolean {
+    if (this.extrude.phase === "armed") return this.engine.hitExtrudeHandle(x, y);
+    // Revolve: any press is a potential angle drag — the moved-check decides commit
+    // vs drag on release, so never suppress the click-away arm here.
+    return false;
+  }
+
+  /** Chip / toolbar / input / overlay targets never trigger a click-away commit. */
+  private isExcludedClickAwayTarget(target: EventTarget | null): boolean {
+    if (!(target instanceof HTMLElement)) return false;
+    const tag = target.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable) return true;
+    return !!target.closest(
+      '[data-testid="model-tool-chip"],[role="toolbar"],[role="listbox"],[role="dialog"],button',
+    );
+  }
+
+  /** Every open preview session (single in Wave 1; N in Wave 2's multi-select). */
+  private openPreviewSessions(): PreviewSession[] {
+    return this.session ? [this.session] : [];
+  }
 
   private get engine(): ViewportEngine {
     return this.deps.engine;
@@ -1365,9 +1501,20 @@ export class ModelToolController {
     this.engine.setPreviewBody(entry);
   }
 
-  private async commitExtrude(): Promise<void> {
-    if (!this.session) return;
+  /**
+   * Commit the armed extrude (Enter / chip-✓ / click-away — MODEL-HARDEN Wave 1).
+   * Forces the final params out as the newest epoch, then `endPreview(commit)`.
+   * On a throw OR an empty result the tool stays ARMED: a named error hint is shown
+   * and the preview is RE-ARMED (fresh `beginPreview` under the same draft) so the
+   * user's work is never silently lost. A commitGen token guards every await.
+   */
+  private async confirmExtrude(): Promise<void> {
+    if (!this.session || this.extrude.phase !== "armed") return;
+    const gen = ++this.commitGen;
     const sessionId = this.session.sessionId;
+    const stalePreviewBodyId = this.session.previewBodyId;
+    const draft = this.extrudeDraft;
+    this.extrude = extrudeStep(this.extrude, { kind: "confirm" }).state; // → committing
     toolStore.setState({ phase: "committing" });
     const now = performance.now();
     const finalDepth = this.extrude.depth;
@@ -1383,12 +1530,13 @@ export class ModelToolController {
     try {
       res = await this.client.endPreview(sessionId, true);
     } catch (e) {
-      this.finishExtrude(null);
-      viewportStore.getState().setStatusHint(`Extrude failed: ${errMessage(e)}`, { severity: "error", sticky: true });
+      if (gen !== this.commitGen) return; // superseded (canceled / tool switched)
+      this.onExtrudeCommitFailed(errMessage(e), stalePreviewBodyId, draft, gen);
       return;
     }
+    if (gen !== this.commitGen) return;
     if (!res || !res.changedBodies[0]) {
-      this.finishExtrude(null);
+      this.onExtrudeCommitFailed(res?.errorMessage, stalePreviewBodyId, draft, gen);
       return;
     }
     const bodyId = res.changedBodies[0].bodyId;
@@ -1399,8 +1547,40 @@ export class ModelToolController {
       if (loaded !== bodyId) return;
       this.commitBodyUnsub?.();
       this.commitBodyUnsub = null;
+      if (gen !== this.commitGen) return;
       this.finishExtrude(bodyId);
     });
+  }
+
+  /** A failed extrude commit: back to armed, named hint, re-arm the preview. */
+  private onExtrudeCommitFailed(
+    reason: string | undefined,
+    stalePreviewBodyId: string,
+    draft: PreviewDraft | null,
+    gen: number,
+  ): void {
+    this.extrude = extrudeStep(this.extrude, { kind: "commitFailed" }).state; // committing → armed
+    toolStore.setState({ phase: "armed" });
+    viewportStore.getState().setStatusHint(
+      reason ? `Extrude failed: ${reason}` : "Extrude failed",
+      { severity: "error", sticky: true },
+    );
+    if (draft) void this.rearmExtrudePreview(draft, stalePreviewBodyId, gen);
+    this.updateDebug();
+  }
+
+  /** Re-open a preview session under `draft` so a failed commit keeps the work. */
+  private async rearmExtrudePreview(draft: PreviewDraft, stalePreviewBodyId: string, gen: number): Promise<void> {
+    const session = await this.deps.client.beginPreview(draft);
+    if (gen !== this.commitGen) {
+      void this.deps.client.endPreview(session.sessionId, false); // superseded — don't leak
+      return;
+    }
+    if (stalePreviewBodyId && stalePreviewBodyId !== session.previewBodyId) removeMesh(stalePreviewBodyId);
+    this.session = session;
+    this.throttle.reset();
+    this.sendPreview(this.extrude.depth);
+    this.updateDebug();
   }
 
   private finishExtrude(bodyId: string | null): void {
@@ -1409,6 +1589,7 @@ export class ModelToolController {
     this.engine.clearPreviewBody();
     toolChipStore.getState().clear();
     this.session = null;
+    this.extrudeDraft = null;
     this.extrude = extrudeStep(this.extrude, { kind: "settle" }).state;
     this.throttle.reset();
     if (bodyId) {
@@ -1637,7 +1818,13 @@ export class ModelToolController {
     (window as unknown as { __extrudePreview?: unknown }).__extrudePreview = {
       l1Present: this.engine.isExtrudePreviewVisible(),
       phase: this.extrude.phase,
+      // Revolve phase so e2e can assert armed-after-release for the revolve gesture
+      // (MODEL-HARDEN Wave 1 debug surface extension).
+      revolvePhase: this.revolve.phase,
+      booleanMode: this.extrude.booleanMode,
+      symmetric: this.extrude.symmetric,
       depth: this.extrude.depth,
+      angle: this.revolve.angle,
       sessionId: this.session?.sessionId ?? null,
       commitBodyId: this.commitBodyId,
       lastL2Epoch: this.lastL2Epoch,
@@ -1661,11 +1848,27 @@ export class ModelToolController {
       toolStore.getState().setTool("select");
       return;
     }
+    // Enter confirms the armed extrude/revolve (capture phase). Skipped when a chip
+    // input has focus — DimensionInput consumes Enter itself and stops propagation,
+    // so this only fires for a canvas-focused Enter (no double-commit).
+    if (e.key === "Enter" && !isEditableTarget(e.target)) {
+      if (this.extrude.phase === "armed") {
+        e.preventDefault();
+        void this.confirmExtrude();
+        return;
+      }
+      if (this.revolve.phase === "armed") {
+        e.preventDefault();
+        void this.confirmRevolve();
+        return;
+      }
+    }
     if (e.key === "Alt") {
       this.altHeld = true;
       if (this.dragging === "extrude") {
         this.extrude = extrudeStep(this.extrude, { kind: "drag", depth: this.extrude.depth, symmetric: true }).state;
         this.engine.setExtrudeDepth(this.extrude.depth, true);
+        toolChipStore.getState().setSymmetric(true);
       } else if (this.dragging === "revolve") {
         this.applyRevolveDrag(this.revolveLastX); // re-evaluate the snap without Alt
       }
@@ -1678,6 +1881,7 @@ export class ModelToolController {
       if (this.dragging === "extrude") {
         this.extrude = extrudeStep(this.extrude, { kind: "drag", depth: this.extrude.depth, symmetric: false }).state;
         this.engine.setExtrudeDepth(this.extrude.depth, false);
+        toolChipStore.getState().setSymmetric(false);
       } else if (this.dragging === "revolve") {
         this.applyRevolveDrag(this.revolveLastX); // re-apply the 45° snap
       }
@@ -1687,12 +1891,15 @@ export class ModelToolController {
   // ── cancel / teardown ──────────────────────────────────────────────────────────
 
   private cancelPreview(): void {
-    // Cancel an in-flight extrude preview (tool switched away).
-    if (this.session) {
-      void this.client.endPreview(this.session.sessionId, false);
-      removeMesh(this.session.previewBodyId);
-      this.session = null;
+    // Cancel every open extrude preview session (tool switched / Esc). N-session
+    // teardown loops so no lane session leaks (single session in Wave 1's single-
+    // region path; the loop is ready for Wave 2's multi-select N sessions).
+    for (const s of this.openPreviewSessions()) {
+      void this.client.endPreview(s.sessionId, false);
+      removeMesh(s.previewBodyId);
     }
+    this.session = null;
+    this.extrudeDraft = null;
     this.commitBodyUnsub?.();
     this.commitBodyUnsub = null;
     this.engine.hideExtrudePreview();
@@ -1758,6 +1965,7 @@ export class ModelToolController {
 
   private cancelAll(): void {
     this.invalidateArm();
+    this.commitGen++;
     this.cancelRegionPick();
     this.cancelPreview();
     this.cancelFillet();
@@ -1777,6 +1985,8 @@ export class ModelToolController {
     c.removeEventListener("pointerup", this.onPointerUp);
     window.removeEventListener("keydown", this.onKeyDown, true);
     window.removeEventListener("keyup", this.onKeyUp, true);
+    window.removeEventListener("pointerdown", this.onWindowPointerDown, true);
+    window.removeEventListener("pointerup", this.onWindowPointerUp, true);
     if (this.trailingTimer) clearTimeout(this.trailingTimer);
     this.commitBodyUnsub?.();
     this.commitRevolveBodyUnsub?.();
@@ -1793,6 +2003,13 @@ function toFeatureMeta(f: FeatureRecord): FeatureMeta {
 /** Human message from a rejected backend call (ApiError → JS Error message). */
 function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/** True when a keyboard event targets a text field (skip the capture-Enter commit). */
+function isEditableTarget(el: EventTarget | null): boolean {
+  if (!(el instanceof HTMLElement)) return false;
+  const tag = el.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
 }
 
 /** Perpendicular distance from a plane point (u,v) to the segment a→b. */

@@ -38,10 +38,10 @@ export async function openEditor(page: Page): Promise<void> {
 /**
  * Same boot, but with `?vpdebug` in the URL so `ViewportEngine` exposes
  * `window.__vpEngine` (its own `debug` gate — see ViewportEngine.ts /
- * ViewportRoot.tsx `hasFlag("vpdebug")`). Committing an extrude round-trips
- * through a REAL drag on the 3D depth handle (`ModelToolController` only calls
- * `commitExtrude` from its pointer-up "release" branch — typing a chip value
- * alone just updates the live preview depth, see `onExtrudeChip`), and the
+ * ViewportRoot.tsx `hasFlag("vpdebug")`) AND `ModelToolController` exposes its
+ * `window.__extrudePreview` debug surface (`phase`/`revolvePhase`). The Wave 1
+ * extrude commit is a REAL drag on the 3D depth handle (to set depth) followed by
+ * an explicit confirm (Enter) — release alone now keeps the tool armed. The
  * handle's on-screen position depends on the camera + sketch plane with no
  * closed-form pixel offset. `findExtrudeHandle` below hit-scans the canvas
  * through the engine's OWN `hitExtrudeHandle` raycast to find a real client
@@ -386,28 +386,36 @@ export async function clickAtClient(page: Page, x: number, y: number): Promise<v
   await page.mouse.up();
 }
 
+/** Read the model-tool debug surface (`?vpdebug`) — `phase`, `revolvePhase`, … */
+export async function extrudeDebug(page: Page): Promise<Record<string, unknown> | null> {
+  return page.evaluate(
+    () => (window as unknown as { __extrudePreview?: Record<string, unknown> }).__extrudePreview ?? null,
+  );
+}
+
 /**
- * Drag-commit the armed extrude at its real handle: grab, nudge, release.
- * This is the ONLY path that fires `commitExtrude` — `ModelToolController`
- * commits from `onPointerUp`'s "dragging" branch only, reached by a pointerdown
- * that hits the handle (typing a value into the depth chip just updates the
- * live preview, it never commits on its own).
+ * Drive the MODEL-HARDEN Wave 1 commit gesture on the armed extrude: grab the real
+ * depth handle, drag, RELEASE (which now KEEPS the tool armed — no implicit
+ * commit), assert it stayed armed via the debug surface, then press Enter to
+ * confirm. `ModelToolController` commits only on this explicit confirm (Enter /
+ * chip-✓ / click-away); a release alone just sets the depth and stays armed.
  */
 export async function commitExtrudeAtHandle(page: Page): Promise<void> {
-  // The whole grab→drag→release gesture is wrapped in a retry: an occasional miss
-  // (the scan and the real pointerdown are a frame apart — a render-on-demand
-  // engine can re-render the handle into its final pose in between) leaves the
-  // tool silently still armed rather than raising an error, so the only reliable
-  // signal is the durable side effect of a REAL commit: ModelToolController's
-  // finishExtrude() flips the Extrude toolbar button back to unpressed (and only
-  // on success — a missed grab leaves it pressed indefinitely).
+  // The whole gesture is wrapped in a retry: an occasional handle-scan miss (the
+  // scan and the real pointerdown are a frame apart — a render-on-demand engine can
+  // re-render the handle in between) leaves the tool armed rather than erroring, so
+  // the only reliable signal is the durable side effect of a REAL commit:
+  // finishExtrude() flips the Extrude toolbar button back to unpressed on success.
   const extrudeBtn = page.getByRole("button", { name: "Extrude", exact: true });
   await expect(async () => {
     const { x, y } = await findExtrudeHandle(page);
     await page.mouse.move(x, y);
     await page.mouse.down();
     await page.mouse.move(x, y + 12, { steps: 4 });
-    await page.mouse.up();
+    await page.mouse.up(); // release → stays armed (no implicit commit)
+    // Debug surface: the tool must remain armed after the release.
+    expect((await extrudeDebug(page))?.phase).toBe("armed");
+    await page.keyboard.press("Enter"); // explicit confirm → commit
     await expect(extrudeBtn).not.toHaveAttribute("aria-pressed", "true", { timeout: 1_500 });
   }).toPass({ timeout: 20_000, intervals: [200, 500, 1_000] });
 }

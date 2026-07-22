@@ -16,6 +16,8 @@ import {
   circularPatternStep,
   mirrorInit,
   mirrorStep,
+  regionSelectInit,
+  regionSelectStep,
   DEFAULT_EXTRUDE_DEPTH,
   DEFAULT_REVOLVE_ANGLE,
   DEFAULT_SHELL_THICKNESS,
@@ -30,9 +32,11 @@ import {
 } from "./modelToolMachine";
 
 describe("extrude FSM", () => {
-  it("runs the full pointer script arm → grab → drag → release → settle", () => {
+  it("runs the Wave 1 gesture arm → grab → drag → release(armed) → confirm → settle", () => {
     let s = extrudeInit();
     expect(s.phase).toBe("idle");
+    expect(s.booleanMode).toBe("NewBody");
+    expect(s.targetBodyId).toBeNull();
 
     let step = extrudeStep(s, { kind: "arm" });
     expect(step.effect).toBe("begin");
@@ -49,7 +53,15 @@ describe("extrude FSM", () => {
     expect(step.state.symmetric).toBe(true);
     s = step.state;
 
+    // MODEL-HARDEN Wave 1: release KEEPS the tool armed (effect update, NOT commit).
     step = extrudeStep(s, { kind: "release" });
+    expect(step.effect).toBe("update");
+    expect(step.state.phase).toBe("armed");
+    expect(step.state.depth).toBe(25); // final depth preserved
+    s = step.state;
+
+    // Explicit confirm → committing (commit effect).
+    step = extrudeStep(s, { kind: "confirm" });
     expect(step.effect).toBe("commit");
     expect(step.state.phase).toBe("committing");
     s = step.state;
@@ -58,12 +70,74 @@ describe("extrude FSM", () => {
     expect(s.phase).toBe("idle");
   });
 
-  it("drag is ignored unless dragging; setDepth works while armed", () => {
+  it("release is a no-op unless dragging; confirm only from armed", () => {
+    const armed: ExtrudeFsm = extrudeStep(extrudeInit(), { kind: "arm" }).state;
+    expect(extrudeStep(armed, { kind: "release" }).effect).toBe("none");
+    const committing = extrudeStep(armed, { kind: "confirm" }).state;
+    // confirm from committing is a no-op (guards a double-confirm).
+    expect(extrudeStep(committing, { kind: "confirm" }).effect).toBe("none");
+  });
+
+  it("commitFailed returns committing → armed with no effect (controller re-arms)", () => {
+    const committing = extrudeStep(
+      extrudeStep(extrudeInit(), { kind: "arm", depth: 8 }).state,
+      { kind: "confirm" },
+    ).state;
+    const step = extrudeStep(committing, { kind: "commitFailed" });
+    expect(step.effect).toBe("none");
+    expect(step.state.phase).toBe("armed");
+    expect(step.state.depth).toBe(8); // depth preserved so re-arm keeps the work
+    // commitFailed is only legal from committing.
+    const armed = extrudeStep(extrudeInit(), { kind: "arm" }).state;
+    expect(extrudeStep(armed, { kind: "commitFailed" }).effect).toBe("none");
+  });
+
+  it("drag is ignored unless dragging; setDepth + setSymmetric work while armed", () => {
     const armed: ExtrudeFsm = extrudeStep(extrudeInit(), { kind: "arm" }).state;
     expect(extrudeStep(armed, { kind: "drag", depth: 9 }).effect).toBe("none");
     const set = extrudeStep(armed, { kind: "setDepth", depth: 12 });
     expect(set.effect).toBe("update");
     expect(set.state.depth).toBe(12);
+    const sym = extrudeStep(armed, { kind: "setSymmetric", symmetric: true });
+    expect(sym.effect).toBe("update");
+    expect(sym.state.symmetric).toBe(true);
+  });
+
+  it("setBooleanMode: NewBody clears the target; Add with an auto target arms; Add needing a pick → targetPick", () => {
+    const armed: ExtrudeFsm = extrudeStep(extrudeInit(), { kind: "arm" }).state;
+    // Auto-target: stays armed, target adopted.
+    const auto = extrudeStep(armed, { kind: "setBooleanMode", mode: "Add", targetBodyId: "b1" });
+    expect(auto.state.phase).toBe("armed");
+    expect(auto.state.booleanMode).toBe("Add");
+    expect(auto.state.targetBodyId).toBe("b1");
+    // NewBody clears the target back out.
+    const back = extrudeStep(auto.state, { kind: "setBooleanMode", mode: "NewBody" });
+    expect(back.state.booleanMode).toBe("NewBody");
+    expect(back.state.targetBodyId).toBeNull();
+    // needsPick → targetPick (no target yet).
+    const pick = extrudeStep(armed, { kind: "setBooleanMode", mode: "Cut", needsPick: true });
+    expect(pick.state.phase).toBe("targetPick");
+    expect(pick.state.booleanMode).toBe("Cut");
+    expect(pick.state.targetBodyId).toBeNull();
+  });
+
+  it("pickTarget arms with the body; cancelTargetPick reverts to NewBody", () => {
+    const targetPick = extrudeStep(
+      extrudeStep(extrudeInit(), { kind: "arm" }).state,
+      { kind: "setBooleanMode", mode: "Cut", needsPick: true },
+    ).state;
+    const picked = extrudeStep(targetPick, { kind: "pickTarget", bodyId: "b7" });
+    expect(picked.state.phase).toBe("armed");
+    expect(picked.state.booleanMode).toBe("Cut");
+    expect(picked.state.targetBodyId).toBe("b7");
+
+    const canceled = extrudeStep(targetPick, { kind: "cancelTargetPick" });
+    expect(canceled.state.phase).toBe("armed");
+    expect(canceled.state.booleanMode).toBe("NewBody");
+    expect(canceled.state.targetBodyId).toBeNull();
+    // pickTarget is ignored outside targetPick.
+    const armed = extrudeStep(extrudeInit(), { kind: "arm" }).state;
+    expect(extrudeStep(armed, { kind: "pickTarget", bodyId: "x" }).effect).toBe("none");
   });
 
   it("cancel from any active phase resets + emits cancel", () => {
@@ -99,10 +173,11 @@ describe("fillet FSM", () => {
 });
 
 describe("revolve FSM", () => {
-  it("runs arm → axisPick → pickAxis → grab → drag → release → settle", () => {
+  it("runs arm → axisPick → pickAxis → grab → drag → release(armed) → confirm → settle", () => {
     let s: RevolveFsm = revolveInit();
     expect(s.phase).toBe("idle");
     expect(s.angle).toBe(DEFAULT_REVOLVE_ANGLE);
+    expect(s.booleanMode).toBe("NewBody");
 
     let step = revolveStep(s, { kind: "arm" });
     expect(step.effect).toBe("none"); // no axis yet → axis-pick, no preview
@@ -123,7 +198,14 @@ describe("revolve FSM", () => {
     expect(step.state.angle).toBe(90);
     s = step.state;
 
+    // Wave 1: release keeps the tool armed (no implicit commit).
     step = revolveStep(s, { kind: "release" });
+    expect(step.effect).toBe("update");
+    expect(step.state.phase).toBe("armed");
+    expect(step.state.angle).toBe(90);
+    s = step.state;
+
+    step = revolveStep(s, { kind: "confirm" });
     expect(step.effect).toBe("commit");
     expect(step.state.phase).toBe("committing");
     s = step.state;
@@ -139,19 +221,35 @@ describe("revolve FSM", () => {
     expect(step.state.axisLineId).toBeNull();
   });
 
-  it("plain click after axis-pick commits the default 360° (quickCommit)", () => {
+  it("has NO quickCommit event; confirm from armed commits at the 360° default", () => {
     const armed = revolveStep(
       revolveStep(revolveInit(), { kind: "arm" }).state,
       { kind: "pickAxis", lineId: "L1", valid: true },
     ).state;
     expect(armed.angle).toBe(360);
-    const step = revolveStep(armed, { kind: "quickCommit" });
+    // The deleted quickCommit event is unknown to the reducer — a plain click
+    // now confirms via the controller's click-away path; the machine confirms
+    // through `confirm`.
+    const step = revolveStep(armed, { kind: "confirm" });
     expect(step.effect).toBe("commit");
     expect(step.state.phase).toBe("committing");
     expect(step.state.angle).toBe(360);
-    // quickCommit is only legal from armed (not from axis-pick).
+    // confirm is only legal from armed (not from axis-pick).
     const axisPick = revolveStep(revolveInit(), { kind: "arm" }).state;
-    expect(revolveStep(axisPick, { kind: "quickCommit" }).effect).toBe("none");
+    expect(revolveStep(axisPick, { kind: "confirm" }).effect).toBe("none");
+  });
+
+  it("commitFailed returns committing → armed (controller keeps the lathe preview)", () => {
+    const committing = revolveStep(
+      revolveStep(
+        revolveStep(revolveInit(), { kind: "arm" }).state,
+        { kind: "pickAxis", lineId: "L1", valid: true },
+      ).state,
+      { kind: "confirm" },
+    ).state;
+    const step = revolveStep(committing, { kind: "commitFailed" });
+    expect(step.effect).toBe("none");
+    expect(step.state.phase).toBe("armed");
   });
 
   it("re-edit arms straight into armed with the seeded angle (skips axis-pick)", () => {
@@ -174,8 +272,9 @@ describe("revolve FSM", () => {
     const reset = revolveStep(set.state, { kind: "resetAxis" });
     expect(reset.state.phase).toBe("axisPick");
     expect(reset.state.axisLineId).toBeNull();
-    // drag/quickCommit are ignored back in axis-pick.
+    // drag/confirm are ignored back in axis-pick.
     expect(revolveStep(reset.state, { kind: "drag", angle: 10 }).effect).toBe("none");
+    expect(revolveStep(reset.state, { kind: "confirm" }).effect).toBe("none");
   });
 
   it("cancel from any active phase resets; idle cancel is a no-op", () => {
@@ -342,5 +441,45 @@ describe("mirror FSM", () => {
     const s = mirrorStep(mirrorInit(), { kind: "arm", bodyId: "b" }).state;
     expect(mirrorStep(s, { kind: "cancel" }).effect).toBe("cancel");
     expect(mirrorStep(mirrorInit(), { kind: "cancel" }).effect).toBe("none");
+  });
+});
+
+describe("regionSelect reducer (Wave 2 wiring; pure now)", () => {
+  it("enter activates; toggle adds ordered + deduped, re-toggle removes", () => {
+    let s = regionSelectInit();
+    expect(s.active).toBe(false);
+    s = regionSelectStep(s, { kind: "enter" }).state;
+    expect(s.active).toBe(true);
+    expect(s.selected).toEqual([]);
+
+    s = regionSelectStep(s, { kind: "toggle", id: "r1" }).state;
+    s = regionSelectStep(s, { kind: "toggle", id: "r2" }).state;
+    expect(s.selected).toEqual(["r1", "r2"]); // click order preserved
+
+    // re-toggling r1 removes it (idempotent membership, no dup).
+    s = regionSelectStep(s, { kind: "toggle", id: "r1" }).state;
+    expect(s.selected).toEqual(["r2"]);
+    // toggling before enter is inert.
+    expect(regionSelectStep(regionSelectInit(), { kind: "toggle", id: "x" }).effect).toBe("none");
+  });
+
+  it("confirm fires only with ≥1 region; empty selection is rejected", () => {
+    const empty = regionSelectStep(regionSelectInit(), { kind: "enter" }).state;
+    expect(regionSelectStep(empty, { kind: "confirm" }).effect).toBe("none");
+
+    const one = regionSelectStep(empty, { kind: "toggle", id: "r1" }).state;
+    const confirmed = regionSelectStep(one, { kind: "confirm" });
+    expect(confirmed.effect).toBe("confirm");
+    expect(confirmed.state.selected).toEqual(["r1"]); // retained for the controller
+  });
+
+  it("cancel always resets to inactive/empty", () => {
+    const one = regionSelectStep(
+      regionSelectStep(regionSelectInit(), { kind: "enter" }).state,
+      { kind: "toggle", id: "r1" },
+    ).state;
+    const canceled = regionSelectStep(one, { kind: "cancel" });
+    expect(canceled.effect).toBe("cancel");
+    expect(canceled.state).toEqual({ active: false, selected: [] });
   });
 });

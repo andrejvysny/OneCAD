@@ -95,8 +95,9 @@ test("multi-region sketch: picking the non-first region (the rectangle) arms and
   // Click inside the rectangle's fill → resolves regions[1] (the non-first region).
   const clientPt = await planePointToClient(page, snap.plane, centroid);
   await clickAtClient(page, clientPt.x, clientPt.y);
-  await expect(page.getByText("Drag the arrow to set depth, or type a value")).toBeVisible();
+  await expect(page.getByText(/^Drag the arrow to set depth/)).toBeVisible();
 
+  // Wave 1 gesture: drag the handle, release (stays armed), Enter confirms.
   await commitExtrudeAtHandle(page);
   // "Extruded" is a transient statusHint (ModelToolController.finishExtrude) that
   // can already be gone by the time we poll — the durable proof of a successful
