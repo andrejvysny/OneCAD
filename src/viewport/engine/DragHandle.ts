@@ -7,6 +7,7 @@
  */
 import * as THREE from "three";
 import { palette } from "./palette";
+import { RENDER_ORDER } from "./renderOrder";
 
 const SHAFT_PX = 46; // handle length in screen pixels
 const SHAFT_RADIUS_PX = 2.2;
@@ -34,7 +35,9 @@ export class DragHandle {
     this.group.name = "extrudeHandle";
     this.group.visible = false;
     this.matNormal = new THREE.MeshBasicMaterial({ color: palette.hoverAccent(), depthTest: false, transparent: true, opacity: 0.9 });
-    this.matHover = new THREE.MeshBasicMaterial({ color: palette.selectedEdge(), depthTest: false });
+    // transparent keeps the hover state in the same (transparent) render list
+    // as matNormal — an opaque hover material would drop under all fills.
+    this.matHover = new THREE.MeshBasicMaterial({ color: palette.selectedEdge(), depthTest: false, transparent: true });
 
     // Geometry authored pointing +Y, sized in "px units" (scaled per frame).
     this.shaft = new THREE.Mesh(
@@ -52,9 +55,9 @@ export class DragHandle {
     this.hitCyl.userData.extrudeHandle = true;
 
     this.group.add(this.shaft, this.cone, this.hitCyl);
-    this.group.renderOrder = 7;
-    this.shaft.renderOrder = 7;
-    this.cone.renderOrder = 7;
+    this.group.renderOrder = RENDER_ORDER.DRAG_HANDLE;
+    this.shaft.renderOrder = RENDER_ORDER.DRAG_HANDLE;
+    this.cone.renderOrder = RENDER_ORDER.DRAG_HANDLE;
     deps.root.add(this.group);
   }
 

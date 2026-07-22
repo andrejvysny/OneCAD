@@ -16,6 +16,7 @@ import type { SketchPlaneKind } from "@/ipc/types";
 import { planeFor } from "@/ipc/mockSketch";
 import { planeBasisMatrix } from "./sketchBasis";
 import { palette } from "./palette";
+import { RENDER_ORDER } from "./renderOrder";
 import { worldPerPixel } from "./screenScale";
 import type { HtmlOverlayDriver } from "./HtmlOverlayDriver";
 
@@ -124,7 +125,7 @@ export class PlanePicker {
       side: THREE.DoubleSide,
     });
     const mesh = new THREE.Mesh(new THREE.PlaneGeometry(SIZE, SIZE), mat);
-    mesh.renderOrder = -2;
+    mesh.renderOrder = RENDER_ORDER.PLANE_PICK_FILL;
     mesh.userData.kind = kind;
 
     const outlineMat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: OUTLINE_OPACITY });
@@ -135,7 +136,7 @@ export class PlanePicker {
       new THREE.Vector3(-HALF, HALF, 0),
     ]);
     const outline = new THREE.LineLoop(outlineGeo, outlineMat);
-    outline.renderOrder = -1;
+    outline.renderOrder = RENDER_ORDER.PLANE_PICK_OUTLINE;
 
     const group = new THREE.Group();
     group.name = `planePick_${kind}`;

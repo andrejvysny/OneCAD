@@ -16,6 +16,7 @@ import * as THREE from "three";
 import type { EntityRef } from "@/stores/selectionStore";
 import { getEntry, type MeshEntry } from "../mesh/meshRegistry";
 import { palette } from "./palette";
+import { RENDER_ORDER } from "./renderOrder";
 
 // ── Pure drawRange math (unit-tested) ───────────────────────────────────────
 
@@ -131,7 +132,7 @@ export class HighlightLayer {
     const { start, count } = faceDrawRange(entry.view.faceRanges, ord);
     g.setDrawRange(start, count);
     const mesh = new THREE.Mesh(g, isHover ? this.hoverFaceMat : this.selFaceMat);
-    mesh.renderOrder = 2;
+    mesh.renderOrder = RENDER_ORDER.HIGHLIGHT_FACE;
     return mesh;
   }
 
@@ -144,7 +145,7 @@ export class HighlightLayer {
     const { start, count } = edgeDrawRange(entry.edgeSegmentRanges, ord);
     g.setDrawRange(start, count);
     const line = new THREE.LineSegments(g, isHover ? this.hoverEdgeMat : this.selEdgeMat);
-    line.renderOrder = 3;
+    line.renderOrder = RENDER_ORDER.HIGHLIGHT_EDGE;
     return line;
   }
 
@@ -152,7 +153,7 @@ export class HighlightLayer {
     const g = this.shareIndexed(entry.geometry);
     g.setDrawRange(0, entry.view.indices.length); // all faces
     const mesh = new THREE.Mesh(g, isHover ? this.hoverFaceMat : this.selFaceMat);
-    mesh.renderOrder = 2;
+    mesh.renderOrder = RENDER_ORDER.HIGHLIGHT_FACE;
     return mesh;
   }
 

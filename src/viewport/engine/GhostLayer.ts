@@ -18,6 +18,7 @@ import * as THREE from "three";
 import type { MeshEntry } from "../mesh/meshRegistry";
 import type { GhostTransform } from "@/tools/preview/patternPreview";
 import { palette } from "./palette";
+import { RENDER_ORDER } from "./renderOrder";
 
 export interface GhostLayerDeps {
   root: THREE.Object3D; // interactionRoot
@@ -79,7 +80,7 @@ export class GhostLayer {
       const mesh = new THREE.Mesh(entry.geometry, this.material);
       mesh.matrixAutoUpdate = false;
       mesh.matrix.copy(ghostMatrix(t));
-      mesh.renderOrder = 6;
+      mesh.renderOrder = RENDER_ORDER.GHOST;
       this.group.add(mesh);
       this.meshes.push(mesh);
     }

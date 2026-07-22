@@ -7,6 +7,7 @@
  * chosen adaptively from the camera distance on a 1/5/10 decade progression.
  */
 import * as THREE from "three";
+import { RENDER_ORDER } from "./renderOrder";
 
 export interface GridStep {
   /** Minor line spacing in world units (mm). */
@@ -56,7 +57,7 @@ export class GridPlane {
     this.object3D = new THREE.Group();
     this.object3D.name = "gridPlane";
     // Grid lives on Z=0; render behind geometry.
-    this.object3D.renderOrder = -1;
+    this.object3D.renderOrder = RENDER_ORDER.GRID;
   }
 
   setVisible(visible: boolean): void {
@@ -111,16 +112,20 @@ export class GridPlane {
     minorGeo.setAttribute("color", new THREE.Float32BufferAttribute(minorCol, 3));
     majorGeo.setAttribute("position", new THREE.Float32BufferAttribute(majorPos, 3));
 
+    // depthWrite MUST stay false: the grid is coplanar with sketch content at
+    // Z=0. A depth-writing grid punches stippled holes through everything drawn
+    // later on the same plane (per-pixel line-vs-triangle depth deltas). The
+    // grid is painted first and never occludes anything (see renderOrder.ts).
     this.minorSeg = new THREE.LineSegments(
       minorGeo,
-      new THREE.LineBasicMaterial({ vertexColors: true }),
+      new THREE.LineBasicMaterial({ vertexColors: true, depthWrite: false }),
     );
     this.majorSeg = new THREE.LineSegments(
       majorGeo,
-      new THREE.LineBasicMaterial({ color: this.colors.major }),
+      new THREE.LineBasicMaterial({ color: this.colors.major, depthWrite: false }),
     );
-    this.minorSeg.renderOrder = -1;
-    this.majorSeg.renderOrder = -1;
+    this.minorSeg.renderOrder = RENDER_ORDER.GRID;
+    this.majorSeg.renderOrder = RENDER_ORDER.GRID;
     this.object3D.add(this.minorSeg, this.majorSeg);
   }
 

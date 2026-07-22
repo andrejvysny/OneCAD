@@ -23,6 +23,7 @@ import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { worldPerPixel } from "./screenScale";
+import { RENDER_ORDER } from "./renderOrder";
 
 interface TriadColors {
   x: THREE.Color;
@@ -45,7 +46,7 @@ export class OriginTriad {
     this.object3D = new THREE.Group();
     this.object3D.name = "originTriad";
     // Draw after the grid (renderOrder -1) but still behind solid geometry.
-    this.object3D.renderOrder = 0;
+    this.object3D.renderOrder = RENDER_ORDER.TRIAD;
 
     this.material = new LineMaterial({
       linewidth: TRIAD_WIDTH,
@@ -71,7 +72,7 @@ export class OriginTriad {
     geo.setColors(col);
 
     this.seg = new LineSegments2(geo, this.material);
-    this.seg.renderOrder = 0;
+    this.seg.renderOrder = RENDER_ORDER.TRIAD;
     // Tiny, always at the origin, and the bounding sphere ignores the group
     // scale — culling it is never a win and can wrongly drop it.
     this.seg.frustumCulled = false;

@@ -16,6 +16,7 @@ import type { SketchPlane } from "@/ipc/types";
 import type { HtmlOverlayDriver } from "./HtmlOverlayDriver";
 import type { SnapResult } from "@/tools/sketch/snapEngine";
 import { palette } from "./palette";
+import { RENDER_ORDER } from "./renderOrder";
 import { planeBasisMatrix, planePointToWorld } from "./sketchBasis";
 
 const GUIDE_EXTENT = 5000;
@@ -124,7 +125,7 @@ export class SnapIndicator {
       new THREE.BufferGeometry().setAttribute("position", new THREE.Float32BufferAttribute([0, 0, 0], 3)),
       this.markerMat,
     );
-    this.marker.renderOrder = 6;
+    this.marker.renderOrder = RENDER_ORDER.SNAP_MARKER;
     this.group.add(this.marker);
     this.setGlyph("dot");
 
@@ -137,7 +138,7 @@ export class SnapIndicator {
       opacity: 0.75,
     });
     this.guides = new THREE.LineSegments(new THREE.BufferGeometry(), this.guideMat);
-    this.guides.renderOrder = 5;
+    this.guides.renderOrder = RENDER_ORDER.SNAP_GUIDES;
     this.group.add(this.guides);
 
     this.hintEl = document.createElement("div");

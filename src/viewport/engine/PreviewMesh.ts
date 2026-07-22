@@ -11,6 +11,7 @@ import type { SketchPlane } from "@/ipc/types";
 import { planeBasisMatrix } from "./sketchBasis";
 import { unitPrismGeometry, type PrismProfile } from "@/tools/preview/prismPreview";
 import { palette } from "./palette";
+import { RENDER_ORDER } from "./renderOrder";
 
 export interface PreviewMeshDeps {
   root: THREE.Object3D; // interactionRoot
@@ -44,7 +45,7 @@ export class PreviewMesh {
     geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
     geo.setIndex(new THREE.BufferAttribute(indices, 1));
     this.mesh = new THREE.Mesh(geo, this.material);
-    this.mesh.renderOrder = 6; // over bodies + highlights
+    this.mesh.renderOrder = RENDER_ORDER.PREVIEW_MESH; // over bodies + highlights
     this.group.add(this.mesh);
 
     planeBasisMatrix(plane, this._basis);

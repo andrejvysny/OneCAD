@@ -32,6 +32,32 @@ Inputs that must repaint call `invalidate()` (or go through the controls'
 `onChange`, which does). `ResizeObserver` is devicePixelRatio-aware (capped at
 2×) for crisp output on HiDPI displays.
 
+## Render order & depth contract — `renderOrder.ts`
+
+`renderOrder.ts` holds the ONE painter's ladder (`RENDER_ORDER`) every layer
+uses; no raw `renderOrder` numbers appear anywhere else. Two hard rules:
+
+1. **The grid never occludes anything.** Both grids (ground + sketch-plane, the
+   same `GridPlane` class) are opaque, painted first (`RENDER_ORDER.GRID`) and
+   have `depthWrite: false`. Bodies simply overpaint them; sketch content blends
+   over them. A depth-writing grid coplanar with sketch geometry punches
+   stippled holes through fills and curves (line vs. triangle rasterization
+   yields per-pixel depth deltas at Z=0) — the exact bug this contract exists
+   to prevent.
+2. **All in-plane sketch content renders in the transparent pass with
+   `depthWrite: false`.** Tint, fills, curves, markers and ghosts are coplanar —
+   the depth buffer cannot layer them; only the ladder can. Fully-opaque-looking
+   curves/points still set `transparent: true` (alpha 1) so they live in the
+   same render list as the fills below them — an opaque curve would be painted
+   BEFORE every translucent fill and get tinted/stippled by it. Depth TEST stays
+   on everywhere, so solid bodies (opaque pass, depth-written, `polygonOffset`
+   pushes faces back) still occlude sketch content behind them.
+
+Consequences to preserve when adding a layer: pick a slot in `renderOrder.ts`,
+never write depth from coplanar-plane content, and never mix a `depthTest:
+false` overlay material with an opaque one for the same object's states (the
+object would hop between the opaque and transparent lists — see `DragHandle`).
+
 ## Lifecycle — StrictMode-safe
 
 `init()` and `dispose()` are idempotent. React 19 StrictMode double-invokes mount

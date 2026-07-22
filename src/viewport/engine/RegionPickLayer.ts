@@ -17,6 +17,7 @@ import * as THREE from "three";
 import type { SketchPlane, SketchRegion } from "@/ipc/types";
 import { planeBasisMatrix } from "./sketchBasis";
 import { palette } from "./palette";
+import { RENDER_ORDER } from "./renderOrder";
 
 const FILL_OPACITY = 0.2;
 const FILL_OPACITY_ACTIVE = 0.42;
@@ -86,7 +87,7 @@ export class RegionPickLayer {
         side: THREE.DoubleSide,
       });
       const mesh = new THREE.Mesh(geo, mat);
-      mesh.renderOrder = 5;
+      mesh.renderOrder = RENDER_ORDER.REGION_FILL;
       mesh.userData.regionId = r.regionId;
       this.group.add(mesh);
       this.entries.set(r.regionId, { mesh, mat });

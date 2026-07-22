@@ -25,6 +25,7 @@ import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import type { SketchEntity, SketchPlane, SketchSolveStatus } from "@/ipc/types";
 import { GridPlane } from "./GridPlane";
 import { palette } from "./palette";
+import { RENDER_ORDER } from "./renderOrder";
 import { planeBasisMatrix, worldToPlanePoint } from "./sketchBasis";
 import type { DraftEntity } from "@/tools/sketch/toolMachine";
 
@@ -137,24 +138,35 @@ export class SketchObject {
         side: THREE.DoubleSide,
       }),
     );
-    this.tint.renderOrder = -3;
+    this.tint.renderOrder = RENDER_ORDER.SKETCH_TINT;
     this.planeGroup.add(this.tint);
 
     this.grid = new GridPlane({ minor: palette.gridMinor(), major: palette.gridMajor(), clear: palette.sketchPlane() });
     this.grid.setVisible(true);
     this.planeGroup.add(this.grid.object3D);
 
+    // All in-plane content is coplanar: it renders in the TRANSPARENT pass with
+    // depthWrite off, layered by RENDER_ORDER only (see renderOrder.ts). Depth
+    // TEST stays on so solid bodies still occlude sketch content behind them.
     this.pointsMat = new THREE.PointsMaterial({
       color: palette.sketchFull(),
       size: 5,
       sizeAttenuation: false,
+      transparent: true,
+      depthWrite: false,
     });
     this.points = new THREE.Points(new THREE.BufferGeometry(), this.pointsMat);
-    this.points.renderOrder = 4;
+    this.points.renderOrder = RENDER_ORDER.SKETCH_POINTS;
     this.entityGroup.add(this.points);
 
     const mk = (color: THREE.Color, opts: Partial<ConstructorParameters<typeof LineMaterial>[0]> = {}) =>
-      new LineMaterial({ color: color.getHex(), linewidth: LINE_WIDTH, ...opts });
+      new LineMaterial({
+        color: color.getHex(),
+        linewidth: LINE_WIDTH,
+        transparent: true,
+        depthWrite: false,
+        ...opts,
+      });
     this.matUnder = mk(palette.sketchUnder());
     this.matFull = mk(palette.sketchFull());
     this.matConflict = mk(palette.sketchConflict());
@@ -231,7 +243,7 @@ export class SketchObject {
       });
       if (positions.length >= 6) {
         const line = this.buildLine(positions, this.matTrimGhost);
-        line.renderOrder = 5; // above committed entities (3) + markers (4)
+        line.renderOrder = RENDER_ORDER.TRIM_GHOST; // above committed entities + markers
         this.trimGhostGroup.add(line);
       }
     }
@@ -299,7 +311,7 @@ export class SketchObject {
     geo.setPositions(positions);
     const line = new Line2(geo, mat);
     if (mat.dashed) line.computeLineDistances();
-    line.renderOrder = 3;
+    line.renderOrder = RENDER_ORDER.SKETCH_CURVES;
     return line;
   }
 

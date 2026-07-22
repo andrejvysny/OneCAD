@@ -24,6 +24,7 @@ import type { SketchEntity, SketchPlane, SketchRegion } from "@/ipc/types";
 import { entityPolyline } from "./SketchObject";
 import { planeBasisMatrix } from "./sketchBasis";
 import { palette } from "./palette";
+import { RENDER_ORDER } from "./renderOrder";
 
 const FILL_OPACITY = 0.18;
 const FILL_OPACITY_ACTIVE = 0.3;
@@ -155,20 +156,28 @@ export class SketchStaticLayer {
         side: THREE.DoubleSide,
       });
       fill = new THREE.Mesh(fillGeo, fillMat);
-      fill.renderOrder = 1;
+      fill.renderOrder = RENDER_ORDER.STATIC_FILL;
       fill.userData.sketchId = id;
       group.add(fill);
     }
 
-    // Curves.
+    // Curves + dots are coplanar with the fill (and with the ground grid when
+    // the sketch sits on Z=0): render everything in the transparent pass with
+    // depthWrite off so layering is purely RENDER_ORDER (see renderOrder.ts) —
+    // an opaque curve would otherwise be painted BEFORE the fill and get
+    // tinted/stippled by it. Depth test stays on: bodies still occlude.
     const segPos: number[] = [];
     for (const e of entities) polylineToSegments(entityPolyline(e), segPos);
     const lineGeo = new THREE.BufferGeometry();
     lineGeo.setAttribute("position", new THREE.Float32BufferAttribute(segPos, 3));
     lineGeo.computeBoundingSphere();
-    const lineMat = new THREE.LineBasicMaterial({ color: palette.sketchFull() });
+    const lineMat = new THREE.LineBasicMaterial({
+      color: palette.sketchFull(),
+      transparent: true,
+      depthWrite: false,
+    });
     const lines = new THREE.LineSegments(lineGeo, lineMat);
-    lines.renderOrder = 2;
+    lines.renderOrder = RENDER_ORDER.STATIC_CURVES;
     lines.userData.sketchId = id;
     group.add(lines);
 
@@ -178,9 +187,15 @@ export class SketchStaticLayer {
     const ptGeo = new THREE.BufferGeometry();
     ptGeo.setAttribute("position", new THREE.Float32BufferAttribute(dotPos, 3));
     ptGeo.computeBoundingSphere();
-    const pointsMat = new THREE.PointsMaterial({ color: palette.sketchFull(), size: DOT_SIZE, sizeAttenuation: false });
+    const pointsMat = new THREE.PointsMaterial({
+      color: palette.sketchFull(),
+      size: DOT_SIZE,
+      sizeAttenuation: false,
+      transparent: true,
+      depthWrite: false,
+    });
     const points = new THREE.Points(ptGeo, pointsMat);
-    points.renderOrder = 3;
+    points.renderOrder = RENDER_ORDER.STATIC_POINTS;
     group.add(points);
 
     this.root.add(group);

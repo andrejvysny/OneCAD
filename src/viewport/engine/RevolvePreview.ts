@@ -16,6 +16,7 @@ import * as THREE from "three";
 import type { SketchPlane } from "@/ipc/types";
 import { planeBasisMatrix } from "./sketchBasis";
 import { palette } from "./palette";
+import { RENDER_ORDER } from "./renderOrder";
 import { latheLocal, type LatheAxis } from "@/tools/preview/lathePreview";
 
 export interface RevolvePreviewDeps {
@@ -52,12 +53,13 @@ export class RevolvePreview {
       side: THREE.DoubleSide,
     });
     this.candMat = new THREE.LineBasicMaterial({ color: palette.bodyNeutral(), transparent: true, opacity: 0.85, depthTest: false });
-    this.hoverMat = new THREE.LineBasicMaterial({ color: palette.selectedEdge(), depthTest: false });
+    // transparent keeps the hover line in the same render list as the candidates.
+    this.hoverMat = new THREE.LineBasicMaterial({ color: palette.selectedEdge(), depthTest: false, transparent: true });
 
     this.candidates = new THREE.LineSegments(new THREE.BufferGeometry(), this.candMat);
-    this.candidates.renderOrder = 7;
+    this.candidates.renderOrder = RENDER_ORDER.REVOLVE_CANDIDATES;
     this.hoverLine = new THREE.LineSegments(new THREE.BufferGeometry(), this.hoverMat);
-    this.hoverLine.renderOrder = 8;
+    this.hoverLine.renderOrder = RENDER_ORDER.REVOLVE_HOVER;
     this.hoverLine.visible = false;
 
     this.group.add(this.candidates, this.hoverLine);
@@ -108,7 +110,7 @@ export class RevolvePreview {
       this.mesh.geometry = geo;
     } else {
       this.mesh = new THREE.Mesh(geo, this.meshMat);
-      this.mesh.renderOrder = 6;
+      this.mesh.renderOrder = RENDER_ORDER.REVOLVE_SHELL;
       this.group.add(this.mesh);
     }
     this.deps.invalidate();
