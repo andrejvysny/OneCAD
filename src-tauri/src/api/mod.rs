@@ -801,7 +801,9 @@ pub fn emit_regen_events(app: &AppHandle, report: &RegenReport, projection: &Doc
         events::REGEN_FINISHED,
         crate::dto::RegenFinished {
             revision: report.revision,
+            source_revision: report.source_revision,
             outcome: report.outcome_str().to_string(),
+            message: report.failure_message(),
         },
     );
     if report.published() {

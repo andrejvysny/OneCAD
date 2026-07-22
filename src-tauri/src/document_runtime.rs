@@ -70,10 +70,10 @@ use onecad_core::regen::{
 use onecad_core::sketch::Sketch;
 
 use crate::dto::{
-    default_label, feature_kind, feature_status, feature_value_text, needs_repair_item_dto,
-    BodyDto, BodyMeshRef, DocStatus, DocumentChange, DocumentProjection, FeatureDto,
-    FinishSketchDto, NeedsRepairItemDto, PromotedElementDto, SketchDto, SketchSessionDto,
-    SketchSolveStatus, SketchStatus, SketchUpsertDto,
+    default_label, feature_kind, feature_status, feature_status_message, feature_value_text,
+    needs_repair_item_dto, BodyDto, BodyMeshRef, DocStatus, DocumentChange, DocumentProjection,
+    FeatureDto, FinishSketchDto, NeedsRepairItemDto, PromotedElementDto, SketchDto,
+    SketchSessionDto, SketchSolveStatus, SketchStatus, SketchUpsertDto,
 };
 use crate::mesh_cache::MeshCache;
 use crate::worker::{lod_str, AdoptingEngine, MeshProvider, SolverEngine};
@@ -133,6 +133,14 @@ pub struct RegenReport {
     pub outcome: Outcome,
     /// The document revision the regen was fenced against.
     pub revision: u64,
+    /// The fencing `documentRevision` captured at [`begin_regen`](DocumentRuntime::begin_regen)
+    /// — the revision this regen was PREPARED for (commit-correlation provenance,
+    /// Codex MAJOR-3). Unlike [`revision`](Self::revision) (the CURRENT revision at
+    /// finish, which a later edit may have advanced), this pins which edit the regen
+    /// covers, so the frontend awaiter resolves the exact commit under rapid edits: a
+    /// `superseded` report carries `source_revision < revision` and is ignored, while
+    /// a later from-0 publish covering the commit resolves it.
+    pub source_revision: u64,
     /// The published snapshot id (`0` when nothing was published). Shared by all
     /// bodies/maps/meshes of this regen (Invariant 4); the frontend forwards it to
     /// `promoteSelection` so picks resolve against the exact snapshot.
@@ -166,6 +174,17 @@ impl RegenReport {
             Outcome::EngineFailed(_) => "failed",
             Outcome::Cancelled => "cancelled",
             Outcome::NoOp => "noop",
+        }
+    }
+
+    /// The human-facing failure message for a hard-failed regen (SCHEMA §8 — the
+    /// worker's error), or `None` for any other terminal. Threaded into the
+    /// `regen-finished` `message` so a correlated apply surfaces WHY it failed.
+    #[must_use]
+    pub fn failure_message(&self) -> Option<String> {
+        match &self.outcome {
+            Outcome::EngineFailed(e) => Some(e.to_string()),
+            _ => None,
         }
     }
 
@@ -516,9 +535,13 @@ impl DocumentRuntime {
     /// inert here by construction.
     pub async fn run_regen(&mut self, request: RegenRequest, cancel: CancelToken) -> RegenReport {
         let Some(prepared) = self.begin_regen(request) else {
+            let rev = self.fencing.revision().0;
             return RegenReport {
                 outcome: Outcome::NoOp,
-                revision: self.fencing.revision().0,
+                revision: rev,
+                // Empty plan: no fencing was captured, so the source is the current
+                // revision (nothing older to correlate against).
+                source_revision: rev,
                 snapshot_id: 0,
                 changed: Vec::new(),
                 removed: Vec::new(),
@@ -609,6 +632,9 @@ impl DocumentRuntime {
             expected,
             lod,
         } = driven;
+        // The revision this regen was PREPARED for (fenced at begin_regen). Threaded
+        // into EVERY outcome — including Superseded/Failed — for commit correlation.
+        let source_revision = expected.0 .0;
         if let Outcome::Published(snap) = &outcome {
             if self.fencing.get() == expected {
                 let snapshot_id = snap.id.0;
@@ -620,6 +646,7 @@ impl DocumentRuntime {
                 return RegenReport {
                     outcome,
                     revision: self.fencing.revision().0,
+                    source_revision,
                     snapshot_id,
                     changed,
                     removed,
@@ -630,6 +657,7 @@ impl DocumentRuntime {
             return RegenReport {
                 outcome: Outcome::Superseded,
                 revision: self.fencing.revision().0,
+                source_revision,
                 snapshot_id: 0,
                 changed: Vec::new(),
                 removed: Vec::new(),
@@ -639,6 +667,7 @@ impl DocumentRuntime {
         RegenReport {
             outcome,
             revision: self.fencing.revision().0,
+            source_revision,
             snapshot_id: 0,
             changed: Vec::new(),
             removed: Vec::new(),
@@ -1002,6 +1031,9 @@ impl DocumentRuntime {
             label,
             value_text: feature_value_text(&rec.op),
             status: feature_status(&state),
+            // Surface a step's worker failure reason (`StepState::Error{reason}`) so
+            // the HistoryList row can tint + tooltip it end-to-end (Codex MAJOR-4).
+            status_message: feature_status_message(&state),
         }
     }
 
@@ -1021,12 +1053,21 @@ impl DocumentRuntime {
         let sketch = self.sketch_or_err(sketch_id, "enterSketch")?;
         // B1 squash: remember the pre-session sketch + undo watermark so
         // finish/cancel can collapse every in-session granular edit into ONE net
-        // undoable command.
-        self.sketch_session = Some(SketchSession {
-            sketch_id,
-            prior: sketch.clone(),
-            undo_watermark: self.session.undo_depth(),
-        });
+        // undoable command. If a session for the SAME sketch is already open (a
+        // double-enter / a model-mode read that forgot to close), KEEP the older
+        // watermark + prior so the squash still covers the whole range — resetting
+        // to a later point would strand the earlier granular steps.
+        let already_open_same_sketch = matches!(
+            &self.sketch_session,
+            Some(s) if s.sketch_id == sketch_id
+        );
+        if !already_open_same_sketch {
+            self.sketch_session = Some(SketchSession {
+                sketch_id,
+                prior: sketch.clone(),
+                undo_watermark: self.session.undo_depth(),
+            });
+        }
         let (plane, entities, constraints) = crate::worker::wire::sketch_wire(&sketch);
         let solved = self.solver.sketch_upsert(&sketch).await?;
         self.record_solve(sketch_id, &solved);

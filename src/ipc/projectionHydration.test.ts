@@ -62,4 +62,28 @@ describe("applyProjectionToStore", () => {
     const store = projectionToStore(proj(1, { sketches: { x: { id: "x", name: "X", visible: true, dof: 1, status: "weird" } } }));
     expect(store.sketches.x.status).toBe("under");
   });
+
+  it("carries a feature's statusMessage through to the store (error surfacing)", () => {
+    documentStore.getState().applySnapshot({ ...seedMockDocument(), revision: 2 });
+    applyProjectionToStore(
+      proj(5, {
+        features: [
+          {
+            id: "f1",
+            kind: "revolve",
+            label: "Revolve",
+            valueText: "360.0°",
+            status: "error",
+            statusMessage: "revolve axis lineId not found",
+          },
+          { id: "f2", kind: "extrude", label: "Extrude", valueText: "10.0 mm", status: "ok" },
+        ],
+      }),
+    );
+    const feats = documentStore.getState().features;
+    expect(feats[0].status).toBe("error");
+    expect(feats[0].statusMessage).toBe("revolve axis lineId not found");
+    // A non-error feature carries no message.
+    expect(feats[1].statusMessage).toBeUndefined();
+  });
 });

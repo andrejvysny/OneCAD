@@ -237,6 +237,29 @@ impl DocumentSession {
         if count == 0 {
             return;
         }
+        // B1 guard — **all-or-nothing, never a clamp**. Squash ONLY when the entire
+        // watermark→head range (`count` newest steps) is a contiguous run of txns
+        // whose *every* edit is a `SketchEdit`/`SketchDragGesture` for THIS sketch.
+        // Any interleaved model op (or edit of another sketch) stops the trailing run
+        // short (`< count`), so the granular steps are kept untouched: a clamped
+        // squash would pair a shortened pop-count with the FULL prior-restore inverse
+        // and corrupt undo (`Sketch A → model op → Sketch B` would restore pre-A
+        // state while leaving the model op). Mixed txns are atomic — one non-matching
+        // edit disqualifies the whole txn.
+        let is_this_sketch_edit = |cmd: &EditCommand| {
+            matches!(
+                cmd,
+                EditCommand::SketchEdit { sketch: s, .. }
+                | EditCommand::SketchDragGesture { sketch: s, .. }
+                    if *s == sketch
+            )
+        };
+        let contiguous = self.undo.trailing_run(count, |txn| {
+            txn.edits.iter().all(|e| is_this_sketch_edit(&e.forward))
+        });
+        if contiguous != count {
+            return; // interleaved non-sketch work — keep the granular txns.
+        }
         let Some(final_sketch) = self.document.sketches.get(&sketch) else {
             // Sketch deleted mid-session (unexpected): leave the granular steps.
             return;
@@ -1502,6 +1525,67 @@ mod tests {
             value: Scalar::new(25.0),
         }];
         assert!(apply_sketch_ops(&s, &ok).is_ok());
+    }
+
+    #[test]
+    fn squash_skipped_when_run_not_contiguous() {
+        use crate::document::Document;
+        use crate::ids::DocumentId;
+
+        let mut session = DocumentSession::new(Document::new(DocumentId(Uuid::from_u128(1))));
+        session
+            .apply(EditCommand::AddSketch {
+                sketch: base_sketch(),
+            })
+            .unwrap();
+        // Snapshot the pre-session sketch + watermark (as the runtime would on enter).
+        let prior = session.document().sketch(sid()).unwrap().clone();
+        let watermark = session.undo_depth();
+
+        let add_point = |sk: SketchId, id: u128, x: f64, y: f64| EditCommand::SketchEdit {
+            sketch: sk,
+            ops: vec![SketchEditOp::AddEntity {
+                entity: SketchEntity::point(eid(id), Vec2::new_unchecked(x, y), false, false),
+            }],
+        };
+
+        // (1) a sketch edit for THIS sketch …
+        session.apply(add_point(sid(), 50, 1.0, 1.0)).unwrap();
+        // (2) … an INTERLEAVED model op (a different sketch add — not a SketchEdit
+        //     for sid(), so the pred rejects it) …
+        session
+            .apply(EditCommand::AddSketch {
+                sketch: Sketch::on_world_plane(
+                    SketchId(Uuid::from_u128(2)),
+                    "Other",
+                    WorldPlane::XY,
+                ),
+            })
+            .unwrap();
+        // (3) … then another sketch edit for THIS sketch.
+        session.apply(add_point(sid(), 51, 2.0, 2.0)).unwrap();
+
+        let count = session.undo_depth() - watermark; // 3
+        let depth_before = session.undo_depth();
+        session.squash_sketch_session(sid(), prior, count);
+        assert_eq!(
+            session.undo_depth(),
+            depth_before,
+            "the interleaved model op breaks the trailing run — NO squash, granular steps kept"
+        );
+
+        // The critical property: undo of the HEAD sketch edit reverts only that edit
+        // (entity 51), NOT the whole session — the granular inverses stay sound.
+        assert!(session.undo(), "undo the head sketch edit");
+        let s = session.document().sketch(sid()).unwrap();
+        assert!(
+            s.entities().iter().any(|e| e.id() == eid(50)),
+            "the first in-session edit survives (no spurious pre-session restore)"
+        );
+        assert!(
+            !s.entities().iter().any(|e| e.id() == eid(51)),
+            "only the head edit was undone"
+        );
     }
 
     #[test]

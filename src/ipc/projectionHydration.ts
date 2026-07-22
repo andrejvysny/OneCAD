@@ -12,6 +12,7 @@
  * revision 0 — emitted on close) always resets the store.
  */
 import { documentStore, type DocumentProjection, type SketchStatus } from "@/stores/documentStore";
+import { viewportStore } from "@/stores/viewportStore";
 import type { DocumentProjectionWire, FeatureRecord } from "./types";
 
 /** Coerce a wire sketch status token to the store's `SketchStatus`. */
@@ -31,6 +32,9 @@ export function projectionToStore(p: DocumentProjectionWire): DocumentProjection
     label: f.label,
     valueText: f.valueText,
     status: f.status,
+    // Carry the worker failure reason through to the store so the HistoryList row
+    // tooltips it (MODEL-HARDEN W0.5). `undefined` for any non-error feature.
+    statusMessage: f.statusMessage,
   }));
   return {
     status: p.status,
@@ -44,6 +48,24 @@ export function projectionToStore(p: DocumentProjectionWire): DocumentProjection
 }
 
 /**
+ * On the transition into a FRESHLY-OPENED document (store was empty → now ready),
+ * surface a one-shot info hint when ops sit beyond the rollback bar
+ * (`appliedOps < totalOps`) — the legacy-draft recovery affordance (MODEL-HARDEN
+ * W0 bug: documents saved under the append-draft defect reopen with unapplied ops).
+ * Guarded to the open transition so a normal post-edit snapshot never hints.
+ */
+function maybeHintUnappliedDrafts(p: DocumentProjectionWire): void {
+  const applied = p.appliedOps;
+  const total = p.totalOps;
+  if (applied === undefined || total === undefined || applied >= total) return;
+  const n = total - applied;
+  viewportStore.getState().setStatusHint(
+    `${n} operation${n === 1 ? "" : "s"} not applied — use history roll-to-here to apply`,
+    { severity: "info" },
+  );
+}
+
+/**
  * Apply an authoritative projection to `documentStore`, reconciling by revision.
  * The empty projection (close) always resets; otherwise a payload is written only
  * when it is newer-or-equal to the store's revision. Returns whether it applied.
@@ -52,6 +74,8 @@ export function applyProjectionToStore(p: DocumentProjectionWire): boolean {
   const store = documentStore.getState();
   const isEmpty = p.status === "empty";
   if (!isEmpty && p.revision < store.revision) return false; // stale — drop
+  const wasEmpty = store.status === "empty"; // the fresh-open transition detector
   store.applySnapshot(projectionToStore(p));
+  if (!isEmpty && wasEmpty) maybeHintUnappliedDrafts(p);
   return true;
 }

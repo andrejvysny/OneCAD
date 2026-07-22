@@ -42,7 +42,9 @@ use onecad_core::document::variables::Scalar;
 use onecad_core::edit::{CommandOutcome, EditCommand, RegenHint};
 use onecad_core::ids::{ConstraintId, EntityId, RecordId, RegionId, SketchId};
 use onecad_core::math::{Vec2, Vec3};
-use onecad_core::regen::{GeometryEngine, RegenRequest, RegenScheduler, SchedulerHandle};
+use onecad_core::regen::{
+    CancelToken, GeometryEngine, RegenRequest, RegenScheduler, SchedulerHandle,
+};
 use onecad_core::sketch::{Constraint, Sketch, SketchEntity, WorldPlane};
 
 use onecad_lib::document_runtime::{DocumentRuntime, RegenReport};
@@ -98,6 +100,8 @@ fn runtime_over(wm: &WorkerManager) -> DocumentRuntime {
 
 const SKETCH_A: u128 = 0xA00;
 const EXTRUDE_A: u128 = 0xA01;
+const SKETCH_B: u128 = 0xB00;
+const EXTRUDE_B: u128 = 0xB01;
 
 fn xy_plane_ref() -> SketchPlaneRef {
     SketchPlaneRef {
@@ -424,5 +428,124 @@ async fn undo_redo_reconverge_via_scheduler() {
     wm.shutdown().await;
     eprintln!(
         "UNDO/REDO-RECONVERGE PASS: undo → 0 bodies, redo → 1 body (redo-draft regression pinned)"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (3) MODEL-HARDEN W0.5: rapid double commit correlates exactly (source_revision)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The rapid-commit safety Codex MAJOR-3 folded in: commit A then immediately
+/// commit B, so A's in-flight regen is superseded by B. We drive the begin/finish
+/// phases DIRECTLY (like `document_runtime::edit_during_regen_supersedes_via_live_fencing`)
+/// to force the Superseded terminal deterministically, then assert the correlation
+/// provenance: A's superseded report is stamped with A's (older) `source_revision`
+/// — so the frontend awaiter for A never resolves off it — and the final publish
+/// covers BOTH ops' bodies (the from-0 regen covering both commits).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rapid_double_commit_correlates_exactly() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    let sa = SketchId(Uuid::from_u128(0xA));
+    let sb = SketchId(Uuid::from_u128(0xB));
+
+    // Commit A: sketch + extrude — the exact frontend shape (`at_cursor:false`).
+    rt.apply(EditCommand::AddOperation {
+        record: sketch_record(SKETCH_A, &rect_sketch(sa, 0x1000, 0.0, 0.0, 40.0, 20.0)),
+        at_cursor: false,
+    })
+    .expect("add sketch A");
+    rt.apply(EditCommand::AddOperation {
+        record: extrude_record(EXTRUDE_A, sa, 25.0),
+        at_cursor: false,
+    })
+    .expect("add extrude A");
+    let rev_a = rt.revision().0;
+
+    // Prepare A's regen (fenced at rev_a) — but do NOT finish it yet.
+    let prepared_a = rt
+        .begin_regen(RegenRequest::ToEnd { from: 0 })
+        .expect("non-empty plan A");
+
+    // Commit B lands DURING A's in-flight regen → bumps the shared fencing revision,
+    // superseding A. A second sketch far from the first ⇒ a distinct second body.
+    rt.apply(EditCommand::AddOperation {
+        record: sketch_record(SKETCH_B, &rect_sketch(sb, 0x2000, 100.0, 0.0, 40.0, 20.0)),
+        at_cursor: false,
+    })
+    .expect("add sketch B");
+    rt.apply(EditCommand::AddOperation {
+        record: extrude_record(EXTRUDE_B, sb, 30.0),
+        at_cursor: false,
+    })
+    .expect("add extrude B");
+    let rev_b = rt.revision().0;
+    assert!(
+        rev_b > rev_a,
+        "commit B advanced the fencing revision past A"
+    );
+
+    // Drive + finish A → Superseded, stamped with A's (older) source revision.
+    let driven_a = prepared_a.drive(CancelToken::new()).await;
+    let report_a = rt.finish_regen(driven_a);
+    assert_eq!(
+        report_a.outcome_str(),
+        "superseded",
+        "A's regen was superseded by B"
+    );
+    assert_eq!(
+        report_a.source_revision, rev_a,
+        "the superseded report is stamped with A's PREPARED revision"
+    );
+    assert!(
+        report_a.source_revision < report_a.revision,
+        "superseded source_revision ({}) < the current/final revision ({})",
+        report_a.source_revision,
+        report_a.revision
+    );
+    assert!(
+        report_a.document_change().is_none(),
+        "a superseded regen publishes nothing (empty changedBodies for the awaiter)"
+    );
+
+    // B's regen (from 0) publishes — covering BOTH ops' bodies. The frontend awaiter
+    // for commit A (revision rev_a) IGNORES A's superseded report and resolves off
+    // THIS publish (revision >= rev_a, which includes A's body); B's awaiter (rev_b)
+    // resolves off it too — each commit gets its own body.
+    let report_b = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert_eq!(
+        report_b.outcome_str(),
+        "published",
+        "the from-0 regen at B publishes"
+    );
+    assert_eq!(
+        report_b.source_revision, rev_b,
+        "the publish is stamped with B's revision"
+    );
+    assert!(
+        report_b.source_revision >= rev_a,
+        "the final publish covers commit A (source_revision >= rev_a)"
+    );
+    let change_b = report_b
+        .document_change()
+        .expect("a published regen carries a document_change");
+    assert_eq!(
+        change_b.changed_bodies.len(),
+        2,
+        "the final publish covers BOTH extrude bodies, got {:?}",
+        change_b.changed_bodies
+    );
+
+    wm.shutdown().await;
+    eprintln!(
+        "RAPID-DOUBLE-COMMIT PASS: A superseded (source {rev_a} < final {}); final publish covers both bodies",
+        report_a.revision
     );
 }

@@ -240,54 +240,83 @@ export function createTauriClient(): CadClient {
   const projectionListeners = new Set<(p: DocumentProjectionWire) => void>();
   const workerStatusListeners = new Set<(s: WorkerStatus) => void>();
   const needsRepairListeners = new Set<(e: NeedsRepairEvent) => void>();
-  // Latest authoritative revision (cached from any event).
-  let latestRevision = 0;
   // Latest published snapshot id for promote_selection — carried by every
   // `document-changed` event (SCHEMA §7.5). Picks resolve against the snapshot the
   // fetched mesh was tessellated at (Invariant 4). Starts at 0 (nothing published).
   let currentSnapshotId = 0;
 
-  // Correlation awaiters: resolved by the next document-changed / regen-finished
-  // with a higher revision than the edit's base.
+  // ── Commit-result correlation (MODEL-HARDEN W0.5, Codex MAJOR-3) ─────────────
+  // An awaiter for a commit whose post-apply projection revision is R resolves on:
+  //   • document-changed{revision >= R}               → the covering publish (bodies);
+  //   • regen-finished{failed, sourceRevision >= R}   → failure (empty + message);
+  //   • regen-finished{noop,   sourceRevision >= R}   → empty (anti-hang);
+  //   • regen-finished{superseded|cancelled}          → IGNORED (a newer regen covers R);
+  //   • regen-finished{published}                     → IGNORED (document-changed, emitted
+  //                                                     first, carries the bodies);
+  //   • the safety timeout                            → null (fall back to the pre-regen
+  //                                                     projection revision).
+  // Under rapid commits a stale earlier report can never resolve a LATER commit: its
+  // `sourceRevision` is below that commit's R (or it is superseded and ignored), so
+  // commit B never resolves off commit A's superseded report (the reported bug).
   interface Resolved {
     change: DocumentChange | null;
     revision: number;
+    errorMessage?: string;
   }
   interface Awaiter {
-    baseRev: number;
+    targetRev: number | null; // R; null until the command returns its projection
     resolve(r: Resolved | null): void;
     timer: ReturnType<typeof setTimeout>;
   }
   const awaiters = new Set<Awaiter>();
+  // The newest published change — buffered so a covering publish landing in the
+  // window between the command returning and `setTarget` still resolves the awaiter.
+  let lastPublishedChange: DocumentChange | null = null;
 
-  /** Resolve every awaiter whose edit base is below `resolved.revision`. */
-  function resolveAwaiters(resolved: Resolved): void {
+  function settle(a: Awaiter, r: Resolved): void {
+    clearTimeout(a.timer);
+    awaiters.delete(a);
+    a.resolve(r);
+  }
+
+  /** A published document-changed resolves every awaiter whose target it covers. */
+  function resolvePublished(change: DocumentChange): void {
     for (const a of [...awaiters]) {
-      if (resolved.revision > a.baseRev) {
-        clearTimeout(a.timer);
-        awaiters.delete(a);
-        a.resolve(resolved);
+      if (a.targetRev !== null && change.revision >= a.targetRev) {
+        settle(a, { change, revision: change.revision });
+      }
+    }
+  }
+
+  /** A regen-finished terminal. superseded/cancelled/published never resolve here
+   *  (a newer regen — or the document-changed sibling — carries the result); a
+   *  failed/noop resolves the awaiters it covers by `sourceRevision`. */
+  function resolveRegenFinished(rf: RegenFinished): void {
+    if (rf.outcome === "superseded" || rf.outcome === "cancelled" || rf.outcome === "published") {
+      return;
+    }
+    const source = rf.sourceRevision ?? rf.revision;
+    const errorMessage = rf.outcome === "failed" ? rf.message : undefined;
+    for (const a of [...awaiters]) {
+      if (a.targetRev !== null && source >= a.targetRev) {
+        settle(a, { change: null, revision: rf.revision, errorMessage });
       }
     }
   }
 
   function onDocumentChangedEvent(change: DocumentChange): void {
-    latestRevision = Math.max(latestRevision, change.revision);
     // Adopt the published snapshot id so promoteSelection scopes picks correctly.
     if (change.snapshotId && change.snapshotId > 0) currentSnapshotId = change.snapshotId;
+    lastPublishedChange = change;
     for (const cb of [...docChangeListeners]) cb(change);
-    resolveAwaiters({ change, revision: change.revision });
+    resolvePublished(change);
   }
 
   function onRegenFinishedEvent(rf: RegenFinished): void {
-    latestRevision = Math.max(latestRevision, rf.revision);
-    // Resolve any edit awaiting this regen that no document-changed already
-    // resolved (the noop / no-geometry-change case → prompt, no 8 s wait).
-    resolveAwaiters({ change: null, revision: rf.revision });
+    resolveRegenFinished(rf);
   }
 
   function onProjectionUpdatedEvent(p: DocumentProjectionWire): void {
-    latestRevision = Math.max(latestRevision, p.revision);
     applyProjectionToStore(p); // hydrate documentStore (revision-reconciled)
     for (const cb of [...projectionListeners]) cb(p);
   }
@@ -297,23 +326,39 @@ export function createTauriClient(): CadClient {
   }
 
   function onNeedsRepairEvent(e: NeedsRepairEvent): void {
-    latestRevision = Math.max(latestRevision, e.revision);
     for (const cb of [...needsRepairListeners]) cb(e);
   }
 
-  /** Await the next regen publish (or null on the safety timeout). Register BEFORE invoking. */
-  function awaitNextChange(baseRev: number): { promise: Promise<Resolved | null>; cancel(): void } {
+  /** Await the correlated regen completion for a commit. Register BEFORE invoking
+   *  (so no event is missed), then `setTarget(R)` once the projection revision is
+   *  known. Resolves to null on the safety timeout. */
+  function awaitNextChange(): {
+    promise: Promise<Resolved | null>;
+    setTarget(rev: number): void;
+    cancel(): void;
+  } {
     let awaiter!: Awaiter;
     const promise = new Promise<Resolved | null>((resolve) => {
       const timer = setTimeout(() => {
         awaiters.delete(awaiter);
         resolve(null);
       }, regenTimeoutMs);
-      awaiter = { baseRev, resolve, timer };
+      awaiter = { targetRev: null, resolve, timer };
       awaiters.add(awaiter);
     });
     return {
       promise,
+      setTarget(rev: number) {
+        awaiter.targetRev = rev;
+        // Missed-event race: a covering publish may already have arrived between the
+        // command returning and this call — reconcile against the buffer.
+        if (lastPublishedChange && lastPublishedChange.revision >= rev) {
+          settle(awaiter, {
+            change: lastPublishedChange,
+            revision: lastPublishedChange.revision,
+          });
+        }
+      },
       cancel() {
         clearTimeout(awaiter.timer);
         awaiters.delete(awaiter);
@@ -352,8 +397,7 @@ export function createTauriClient(): CadClient {
     opLabel: string | undefined,
   ): Promise<ApplyOperationResult> {
     await ensureEvents();
-    const baseRev = latestRevision;
-    const awaiter = awaitNextChange(baseRev);
+    const awaiter = awaitNextChange();
     let projection: DocumentProjectionDto;
     try {
       projection = await call<DocumentProjectionDto>(cmd, args);
@@ -361,14 +405,24 @@ export function createTauriClient(): CadClient {
       awaiter.cancel();
       throw e;
     }
+    // Correlate the regen against THIS commit's post-apply revision R (exact under
+    // rapid commits — see the awaiter table). Synchronous right after the await, so
+    // no event can interleave before the target is set.
+    awaiter.setTarget(projection.revision);
     const resolved = await awaiter.promise;
-    return {
+    const result: ApplyOperationResult = {
       revision: resolved?.revision ?? projection.revision,
       changedBodies: resolved?.change?.changedBodies ?? [],
       removedBodies: resolved?.change?.removedBodies ?? [],
+      // Features stay sourced from the pre-regen command projection: the
+      // projection-updated listener hydrates the store with the post-regen timeline
+      // independently, and the mock lane resolves synchronously (no post-regen
+      // projection to swap in). A correlated FAILURE additionally threads its reason.
       features: projection.features,
       opLabel,
     };
+    if (resolved?.errorMessage) result.errorMessage = resolved.errorMessage;
+    return result;
   }
 
   async function applyOperation(op: OperationOp): Promise<ApplyOperationResult> {
@@ -550,6 +604,11 @@ export function createTauriClient(): CadClient {
    *  contract returns the SAME wire shape as `enter_sketch`; unknown ids reject. */
   async function getSketch(sketchId: string): Promise<SketchSession> {
     const dto = await call<SketchSessionDto>(CMD.getSketch, { sketchId });
+    // Feed the plane into the local preview lane so a following beginPreview resolves
+    // it — exactly as enterSketch does (:491). Model-mode arms now read via getSketch
+    // (MODEL-HARDEN W0.5); without this an L2 extrude/revolve preview would fall back
+    // to the XY plane.
+    lane.cacheSketchPlane(sketchId, dto.plane);
     return {
       sketchId,
       plane: dto.plane,

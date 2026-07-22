@@ -296,8 +296,11 @@ export class ModelToolController {
       toolStore.getState().setTool("select");
       return;
     }
-    const session = await this.deps.client.enterSketch(sketchId); // plane only
-    if (gen !== this.armGen) return; // superseded while enterSketch was in flight
+    // Pure read (no backend sketch session opened) — a model-mode arm must not
+    // leave a stray watermark that a later stray finish could squash a model op's
+    // undo entry into (MODEL-HARDEN W0.5). getSketch returns the same DTO shape.
+    const session = await this.deps.client.getSketch(sketchId); // plane only
+    if (gen !== this.armGen) return; // superseded while getSketch was in flight
     await this.beginExtrudeArmed(sketchId, region, profile, session.plane, editFeatureId, startDepth);
   }
 
@@ -378,8 +381,9 @@ export class ModelToolController {
     startValue: number,
     gen: number,
   ): Promise<void> {
-    const session = await this.deps.client.enterSketch(sketchId); // plane (+ entities for revolve)
-    if (gen !== this.armGen) return; // superseded while enterSketch was in flight
+    // Pure read (no session opened) — see armExtrude (MODEL-HARDEN W0.5).
+    const session = await this.deps.client.getSketch(sketchId); // plane (+ entities for revolve)
+    if (gen !== this.armGen) return; // superseded while getSketch was in flight
     const noun = opType === "extrude" ? "extrude" : "revolve";
     // Only regions with an extrudable profile are pickable (others can't be built).
     const pickable = regions.filter((r) => profileFromRegion(r) !== null);
@@ -491,8 +495,10 @@ export class ModelToolController {
       toolStore.getState().setTool("select");
       return;
     }
-    const session = await this.deps.client.enterSketch(sketchId); // plane + entities
-    if (gen !== this.armGen) return; // superseded while enterSketch was in flight
+    // Pure read (no session opened) — see armExtrude (MODEL-HARDEN W0.5). The revolve
+    // axis candidates read `session.entities`, which getSketch returns verbatim.
+    const session = await this.deps.client.getSketch(sketchId); // plane + entities
+    if (gen !== this.armGen) return; // superseded while getSketch was in flight
     await this.beginRevolveArmed(sketchId, region, profile, session, editFeatureId, startAngle);
   }
 

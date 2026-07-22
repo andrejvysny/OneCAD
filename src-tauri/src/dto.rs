@@ -89,6 +89,11 @@ pub struct FeatureDto {
     /// Mono value shown on the right of the history chip (e.g. `"25.0 mm"`).
     pub value_text: String,
     pub status: FeatureStatus,
+    /// The worker failure reason for an errored step (`StepState::Error{reason}`),
+    /// surfaced to the HistoryList row tooltip (Codex MAJOR-4). Absent for any
+    /// non-error status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_message: Option<String>,
 }
 
 /// The full document projection (`documentStore.ts` `DocumentProjection`).
@@ -496,14 +501,24 @@ fn candidate_dto(c: onecad_core::document::repair::RepairCandidate) -> ResolveCa
     }
 }
 
-/// The `regen-finished` event payload (`{revision, outcome}`) so the frontend
-/// correlation resolves promptly without the 8 s fallback (F-WP8 flag 3).
+/// The `regen-finished` event payload so the frontend correlation resolves
+/// promptly without the 8 s fallback (F-WP8 flag 3). `sourceRevision` is the
+/// fencing revision the regen was PREPARED for (Codex MAJOR-3 commit provenance):
+/// the awaiter for a commit at revision R resolves a `failed`/`noop` completion
+/// only when `sourceRevision >= R`, and IGNORES a `superseded` one, so a stale
+/// report from an earlier commit can never resolve a later one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RegenFinished {
     pub revision: u64,
+    /// The revision this regen was fenced against at `begin_regen`.
+    pub source_revision: u64,
     /// `published` | `superseded` | `failed` | `cancelled` | `noop`.
     pub outcome: String,
+    /// The failure reason for a `failed` regen (SCHEMA §8), so a correlated apply
+    /// surfaces WHY. Absent for any other outcome.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// One entry in the `needs-repair` event — a **lean** summary of a step left in
@@ -619,6 +634,17 @@ pub fn feature_status(state: &StepState) -> FeatureStatus {
     }
 }
 
+/// The worker failure reason for an errored step (`StepState::Error{reason}`),
+/// or `None` for any other state — the [`FeatureDto::status_message`] source
+/// (Codex MAJOR-4 error surfacing).
+#[must_use]
+pub fn feature_status_message(state: &StepState) -> Option<String> {
+    match state {
+        StepState::Error { reason } => Some(reason.clone()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -668,6 +694,7 @@ mod tests {
                 label: "Extrude".into(),
                 value_text: "25.0 mm".into(),
                 status: FeatureStatus::Ok,
+                status_message: None,
             }],
             applied_ops: 1,
             total_ops: 1,
@@ -741,6 +768,42 @@ mod tests {
             }),
             FeatureStatus::Error
         );
+    }
+
+    #[test]
+    fn step_error_maps_to_status_message() {
+        // Only an errored step carries a reason; every other state ⇒ None (skipped).
+        assert_eq!(
+            feature_status_message(&StepState::Error {
+                reason: "revolve axis lineId not found".into()
+            }),
+            Some("revolve axis lineId not found".to_string())
+        );
+        assert_eq!(feature_status_message(&StepState::Valid), None);
+        assert_eq!(feature_status_message(&StepState::Dirty), None);
+        assert_eq!(feature_status_message(&StepState::NeedsRepair), None);
+
+        // The DTO omits `statusMessage` entirely when absent, and carries it verbatim
+        // (camelCase) when present.
+        let ok = FeatureDto {
+            id: "f1".into(),
+            kind: FeatureKind::Extrude,
+            label: "Extrude".into(),
+            value_text: "25.0 mm".into(),
+            status: FeatureStatus::Ok,
+            status_message: None,
+        };
+        let v = serde_json::to_value(&ok).unwrap();
+        assert!(v.get("statusMessage").is_none(), "absent ⇒ omitted");
+
+        let errored = FeatureDto {
+            status: FeatureStatus::Error,
+            status_message: Some("boom".into()),
+            ..ok
+        };
+        let v = serde_json::to_value(&errored).unwrap();
+        assert_eq!(v["status"], "error");
+        assert_eq!(v["statusMessage"], "boom");
     }
 
     // ── M4a deliverable 3: the un-lossy resolve_refs DTO mapping ──────────────

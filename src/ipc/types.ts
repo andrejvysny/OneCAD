@@ -384,11 +384,17 @@ export interface DocumentProjectionWire {
   totalOps?: number;
 }
 
-/** The `regen-finished` payload (`{revision, outcome}`; F-WP8 flag 3). */
+/** The `regen-finished` payload (F-WP8 flag 3). `sourceRevision` is the revision
+ *  the regen was fenced against at `begin_regen` (MODEL-HARDEN W0.5 commit
+ *  provenance); the mock lane may omit it (then it falls back to `revision`). */
 export interface RegenFinished {
   revision: number;
+  /** The revision this regen was PREPARED for (rapid-commit correlation). */
+  sourceRevision?: number;
   /** `published` | `superseded` | `failed` | `cancelled` | `noop`. */
   outcome: string;
+  /** Failure reason for `outcome === "failed"` (SCHEMA §8). Absent otherwise. */
+  message?: string;
 }
 
 /**
@@ -632,6 +638,9 @@ export interface FeatureRecord {
   label: string;
   valueText: string;
   status: "ok" | "dirty" | "error" | "needsRepair";
+  /** Worker failure reason for an errored step (`status === "error"`), surfaced as
+   *  the HistoryList row tooltip (MODEL-HARDEN W0.5). Absent for any other status. */
+  statusMessage?: string;
 }
 
 /** `applyOperation` / `endPreview(commit)` / `undo` / `redo` result. */
@@ -643,6 +652,11 @@ export interface ApplyOperationResult {
   features: FeatureRecord[];
   /** Human label of the op just applied/undone, for a status hint ("Extrude"). */
   opLabel?: string;
+  /** Set ONLY when the correlated regen FAILED (`regen-finished{outcome:"failed"}`)
+   *  — the worker's reason, so a caller can surface WHY without inspecting geometry
+   *  (MODEL-HARDEN W0.5). Empty changedBodies + this ⇒ a hard failure, not a no-op.
+   *  The mock lane never sets it. */
+  errorMessage?: string;
 }
 
 // ── Two-level preview (NEW_SPEC §15) ─────────────────────────────────────────

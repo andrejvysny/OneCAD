@@ -48,6 +48,9 @@ export interface FeatureMeta {
   /** Mono value shown on the right of the history chip, e.g. "83.3 mm". */
   valueText: string;
   status: FeatureStatus;
+  /** Worker failure reason for an errored feature (`status === "error"`), shown as
+   *  the HistoryList row tooltip (MODEL-HARDEN W0.5). Absent for any other status. */
+  statusMessage?: string;
 }
 
 /** The full document projection (everything the chrome renders from). */

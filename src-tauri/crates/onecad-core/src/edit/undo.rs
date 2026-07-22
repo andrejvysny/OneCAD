@@ -274,6 +274,27 @@ impl UndoStack {
         self.enforce_cap();
     }
 
+    /// The length of the **trailing run** (capped at `max`) of committed
+    /// transactions, counting from the newest, that satisfy `pred`.
+    ///
+    /// Used by the sketch-session squash (B1) to decide *all-or-nothing*: it may
+    /// squash the newest `count` steps ONLY when `trailing_run(count, pred) ==
+    /// count` — i.e. the whole watermark→head range is one contiguous run of
+    /// same-sketch edits. The first non-matching txn (e.g. an interleaved model op)
+    /// stops the count, so a clamped/partial squash (which would pair a shortened
+    /// pop-count with the full prior-restore inverse and corrupt undo) is refused.
+    #[must_use]
+    pub fn trailing_run(&self, max: usize, pred: impl Fn(&Txn) -> bool) -> usize {
+        let mut run = 0;
+        for txn in self.undo.iter().rev() {
+            if run >= max || !pred(txn) {
+                break;
+            }
+            run += 1;
+        }
+        run
+    }
+
     /// Pops the newest undo transaction (the session applies its inverses).
     pub fn pop_for_undo(&mut self) -> Option<Txn> {
         self.undo.pop()
@@ -370,6 +391,30 @@ mod tests {
             edits: vec![],
         });
         assert!(!s.can_redo(), "redo cleared on new apply");
+    }
+
+    #[test]
+    fn trailing_run_counts_the_contiguous_matching_suffix() {
+        let mut s = UndoStack::new();
+        let txn = |label: &str| Txn {
+            label: label.to_string(),
+            edits: vec![],
+        };
+        // model, sk, sk  (newest last)
+        s.push_committed(txn("model"));
+        s.push_committed(txn("sk1"));
+        s.push_committed(txn("sk2"));
+        let pred = |t: &Txn| t.label.starts_with("sk");
+        assert_eq!(
+            s.trailing_run(10, pred),
+            2,
+            "sk2 + sk1 are the trailing run"
+        );
+        assert_eq!(s.trailing_run(1, pred), 1, "capped at max");
+        assert_eq!(s.trailing_run(0, pred), 0, "max 0 counts nothing");
+        // A non-matching head breaks the run entirely.
+        s.push_committed(txn("model2"));
+        assert_eq!(s.trailing_run(10, pred), 0, "head is non-matching");
     }
 
     #[test]

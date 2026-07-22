@@ -20,8 +20,13 @@ use std::time::Duration;
 use serde_json::Value;
 use uuid::Uuid;
 
+use onecad_core::document::record::{
+    BooleanMode, ExtrudeMode, ExtrudeParams, KnownOperation, Operation, OperationRecord,
+};
+use onecad_core::document::refs::SketchRegionRef;
+use onecad_core::document::variables::Scalar;
 use onecad_core::edit::{EditCommand, SketchEditOp};
-use onecad_core::ids::{ConstraintId, EntityId, SketchId};
+use onecad_core::ids::{ConstraintId, EntityId, RecordId, RegionId, SketchId};
 use onecad_core::math::Vec2;
 use onecad_core::regen::GeometryEngine;
 use onecad_core::sketch::{Constraint, Sketch, SketchEntity, WorldPlane};
@@ -82,6 +87,37 @@ fn cid(n: u128) -> ConstraintId {
 
 fn entity_count(v: &Value) -> usize {
     v.as_array().map_or(0, Vec::len)
+}
+
+/// A minimal NewBody extrude op referencing `sketch`'s first region — a valid
+/// timeline `AddOperation` (reference existence is a regen-time concern, so the
+/// command commits without a solved region). Used to interleave a MODEL op into a
+/// sketch session (the reported undo-corruption repro).
+fn extrude_record(rec: u128, sketch: SketchId) -> OperationRecord {
+    let params = ExtrudeParams {
+        profile: Some(SketchRegionRef {
+            sketch,
+            region: RegionId::new(""),
+            extra: Default::default(),
+        }),
+        distance: Scalar::new(25.0),
+        draft_angle_deg: Scalar::new(0.0),
+        mode: ExtrudeMode::Blind,
+        boolean_mode: BooleanMode::NewBody,
+        target_body: None,
+        target_face: None,
+        two_directions: false,
+        mode2: ExtrudeMode::Blind,
+        distance2: Scalar::new(0.0),
+        target_face2: None,
+        extra: Default::default(),
+    };
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "Extrude",
+        Operation::Known(KnownOperation::Extrude(params)),
+    )
 }
 
 /// Runs a 3-upsert session (2 points → a line → a Horizontal constraint) so the
@@ -263,6 +299,147 @@ async fn empty_session_adds_no_command() {
         "a session with no edits pushes nothing onto the undo stack"
     );
     eprintln!("EMPTY-SESSION PASS: enter → finish with no edits adds nothing");
+
+    wm.shutdown().await;
+}
+
+// ── (d) MODEL-HARDEN W0.5: a stray finish must NOT eat a model op's undo entry ──
+//
+// The exact reported corruption: an arm path re-opens a sketch session (enterSketch,
+// never closed), a MODEL op commits into that watermark range, then a stray
+// finish_sketch (a SketchStaticSync refetch) squashes — the OLD net-zero branch
+// popped the extrude's own undo entry with no replacement. The B1 all-or-nothing
+// guard refuses: the trailing run from head is the extrude, not a same-sketch edit.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stray_finish_after_model_op_preserves_op_undo_entry() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    let sid = SketchId(Uuid::from_u128(0x5A_10));
+    rt.apply(EditCommand::AddSketch {
+        sketch: Sketch::on_world_plane(sid, "Sq", WorldPlane::XY),
+    })
+    .expect("AddSketch");
+    let base_depth = rt.undo_depth(); // 1 (the AddSketch — not a timeline op)
+
+    // Arm path re-opens a sketch session it never closes (the bug's entry point).
+    rt.enter_sketch(sid).await.expect("enter_sketch");
+    // A MODEL op commits INTO that still-open session's watermark range.
+    rt.apply(EditCommand::AddOperation {
+        record: extrude_record(0xE_10, sid),
+        at_cursor: false,
+    })
+    .expect("extrude commit");
+    assert_eq!(
+        rt.undo_depth(),
+        base_depth + 1,
+        "the extrude committed exactly one undo step"
+    );
+    assert_eq!(
+        rt.projection().features.len(),
+        1,
+        "the extrude is a timeline op"
+    );
+
+    // The stray finish MUST NOT squash away the extrude.
+    rt.finish_sketch(sid).await.expect("stray finish_sketch");
+    assert_eq!(
+        rt.undo_depth(),
+        base_depth + 1,
+        "the stray finish did NOT pop the extrude's undo entry (B1 guard held)"
+    );
+
+    // ONE undo removes the EXTRUDE (not the sketch).
+    assert!(rt.undo(), "undo pops the extrude");
+    assert_eq!(rt.undo_depth(), base_depth, "back to just the AddSketch");
+    assert_eq!(
+        rt.projection().features.len(),
+        0,
+        "the extrude op is gone from the timeline"
+    );
+    assert!(rt.get_sketch(sid).is_ok(), "the sketch itself survives");
+    eprintln!("STRAY-FINISH PASS: model op's undo entry survives a stray finish; undo removes the extrude");
+
+    wm.shutdown().await;
+}
+
+// ── (e) Interleaved sketch→op→sketch: edits stay granular; the op survives ──────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interleaved_session_keeps_edits_granular_and_op_survives() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    let sid = SketchId(Uuid::from_u128(0x5A_11));
+    rt.apply(EditCommand::AddSketch {
+        sketch: Sketch::on_world_plane(sid, "Sq", WorldPlane::XY),
+    })
+    .expect("AddSketch");
+    let base_depth = rt.undo_depth();
+
+    rt.enter_sketch(sid).await.expect("enter_sketch");
+    // (1) in-session sketch edit …
+    rt.sketch_upsert(
+        sid,
+        vec![SketchEditOp::AddEntity {
+            entity: SketchEntity::point(eid(P0), Vec2::new_unchecked(0.0, 0.0), false, false),
+        }],
+    )
+    .await
+    .expect("upsert 1 (P0)");
+    // (2) … an INTERLEAVED model op …
+    rt.apply(EditCommand::AddOperation {
+        record: extrude_record(0xE_11, sid),
+        at_cursor: false,
+    })
+    .expect("extrude commit");
+    // (3) … then another in-session sketch edit.
+    rt.sketch_upsert(
+        sid,
+        vec![SketchEditOp::AddEntity {
+            entity: SketchEntity::point(eid(P1), Vec2::new_unchecked(40.0, 0.0), false, false),
+        }],
+    )
+    .await
+    .expect("upsert 2 (P1)");
+    assert_eq!(
+        rt.undo_depth(),
+        base_depth + 3,
+        "3 granular steps landed: edit, extrude, edit"
+    );
+
+    // Stray finish: the interleaved extrude breaks the trailing run → NO squash.
+    rt.finish_sketch(sid).await.expect("stray finish_sketch");
+    assert_eq!(
+        rt.undo_depth(),
+        base_depth + 3,
+        "no squash across the interleaved op — the sketch edits stay granular"
+    );
+
+    // Undo reverts ONLY the head sketch edit (P1), never the whole session; the
+    // interleaved extrude survives (this is the correctness the clamp would break).
+    assert!(rt.undo(), "undo the head sketch edit");
+    let s = rt.get_sketch(sid).expect("get_sketch after undo");
+    assert_eq!(
+        entity_count(&s.entities),
+        1,
+        "only P1 reverted; P0 survives (no spurious pre-session restore)"
+    );
+    assert_eq!(
+        rt.projection().features.len(),
+        1,
+        "the interleaved extrude op survives the sketch-edit undo"
+    );
+    eprintln!("INTERLEAVED PASS: sketch→op→sketch stays granular; op survives");
 
     wm.shutdown().await;
 }

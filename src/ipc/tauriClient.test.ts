@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
 import { createTauriClient, __setRegenTimeoutForTests, __lastSketchSolvedForTests } from "./tauriClient";
+import * as localSolverModule from "./localSolver";
 import { createClient } from "./client";
 import { mockClient } from "./mockClient";
 import { operationToEditCommand } from "./tauriCommandMap";
@@ -1182,6 +1183,11 @@ describe("tauriClient getProjection", () => {
 // ── regen-finished correlation (prompt, no 8 s wait) ──────────────────────────
 
 describe("tauriClient regen-finished correlation", () => {
+  const op: OperationOp = {
+    opType: "Boolean",
+    params: { operation: "Union", targetBodyId: "t", toolBodyId: "u" },
+  } as OperationOp;
+
   it("resolves a no-geometry edit from regen-finished (not the timeout)", async () => {
     mockIPC(
       (cmd) => {
@@ -1193,12 +1199,119 @@ describe("tauriClient regen-finished correlation", () => {
       { shouldMockEvents: true },
     );
     __setRegenTimeoutForTests(5000); // long: regen-finished must win, not the timeout
-    const res = await createTauriClient().applyOperation({
-      opType: "Boolean",
-      params: { operation: "Union", targetBodyId: "t", toolBodyId: "u" },
-    } as OperationOp);
+    const res = await createTauriClient().applyOperation(op);
     expect(res.revision).toBe(12); // from regen-finished, not the pre-regen 11
     expect(res.changedBodies).toEqual([]); // noop → no body delta
+  });
+
+  it("IGNORES a superseded regen-finished and resolves off the covering publish (rapid-commit)", async () => {
+    // A stale superseded report (sourceRevision below our commit's R) must NOT
+    // resolve the awaiter with empty bodies — the reported cross-commit bug. The
+    // from-0 publish that covers R (revision >= R) resolves it with the real body.
+    mockIPC(
+      (cmd) => {
+        if (cmd === "apply_edit_command") {
+          setTimeout(() => {
+            void emit("regen-finished", { revision: 8, sourceRevision: 3, outcome: "superseded" });
+            void emit("document-changed", {
+              revision: 8,
+              changedBodies: [{ bodyId: "b8", meshKey: "b8:coarse:8" }],
+              removedBodies: [],
+            });
+          }, 0);
+          return readyProjection(5); // R = 5
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    __setRegenTimeoutForTests(300);
+    const res = await createTauriClient().applyOperation(op);
+    expect(res.revision).toBe(8); // resolved off the publish, not the superseded report
+    expect(res.changedBodies).toEqual([{ bodyId: "b8", meshKey: "b8:coarse:8" }]);
+    expect(res.errorMessage).toBeUndefined();
+  });
+
+  it("resolves a failed regen-finished as a failure carrying the worker message", async () => {
+    mockIPC(
+      (cmd) => {
+        if (cmd === "apply_edit_command") {
+          setTimeout(
+            () =>
+              void emit("regen-finished", {
+                revision: 12,
+                sourceRevision: 12,
+                outcome: "failed",
+                message: "worker crashed: boom",
+              }),
+            0,
+          );
+          return readyProjection(11); // R = 11
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    __setRegenTimeoutForTests(300);
+    const res = await createTauriClient().applyOperation(op);
+    expect(res.revision).toBe(12);
+    expect(res.changedBodies).toEqual([]); // failure → empty bodies (no throw)
+    expect(res.errorMessage).toBe("worker crashed: boom");
+  });
+
+  it("does NOT resolve off a regen-finished whose sourceRevision is below the commit's R", async () => {
+    // A failed report for an EARLIER commit (sourceRevision < R) must be ignored;
+    // the awaiter falls through to the safety timeout (null → pre-regen projection).
+    mockIPC(
+      (cmd) => {
+        if (cmd === "apply_edit_command") {
+          setTimeout(
+            () => void emit("regen-finished", { revision: 4, sourceRevision: 2, outcome: "failed", message: "old" }),
+            0,
+          );
+          return readyProjection(7); // R = 7 > sourceRevision 2
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    __setRegenTimeoutForTests(40);
+    const res = await createTauriClient().applyOperation(op);
+    expect(res.revision).toBe(7); // fell back to the pre-regen projection revision
+    expect(res.changedBodies).toEqual([]);
+    expect(res.errorMessage).toBeUndefined(); // the stale failure never resolved us
+  });
+});
+
+// ── getSketch feeds the preview lane the plane (MODEL-HARDEN W0.5) ─────────────
+
+describe("tauriClient getSketch preview-lane plane seam", () => {
+  it("caches the get_sketch plane into the local preview lane", async () => {
+    let capturedLane: ReturnType<typeof localSolverModule.createLocalSolverLane> | undefined;
+    const realCreate = localSolverModule.createLocalSolverLane;
+    const spy = vi
+      .spyOn(localSolverModule, "createLocalSolverLane")
+      .mockImplementation((deps) => {
+        const lane = realCreate(deps);
+        vi.spyOn(lane, "cacheSketchPlane");
+        capturedLane = lane;
+        return lane;
+      });
+    mockIPC((cmd, payload) => {
+      if (cmd === "get_sketch")
+        return {
+          sketchId: (payload as { sketchId: string }).sketchId,
+          plane: XZ_PLANE,
+          entities: [],
+          constraints: [],
+          dof: 0,
+          status: "FullyConstrained",
+        };
+    });
+    const client = createTauriClient();
+    await client.getSketch("sk-plane");
+    expect(capturedLane?.cacheSketchPlane).toHaveBeenCalledWith(
+      "sk-plane",
+      expect.objectContaining({ kind: "XZ" }),
+    );
+    spy.mockRestore();
   });
 });
 

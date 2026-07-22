@@ -43,12 +43,16 @@ function FeatureRow({
   const interactive = Boolean(onSelect || onEdit);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const suppressed = actions?.suppressed ?? false;
+  // An errored feature (regen failure) tints red + tooltips the worker reason
+  // (MODEL-HARDEN W0.5). Selection styling still wins so a selected row stays legible.
+  const isError = item.status === "error";
 
   return (
     <div
       role={interactive ? "button" : undefined}
       tabIndex={interactive ? 0 : undefined}
       data-testid={`history-row-${item.id}`}
+      title={isError ? item.statusMessage : undefined}
       onClick={() => onSelect?.(item.id)}
       onDoubleClick={() => onEdit?.(item)}
       className={cn(
@@ -62,12 +66,12 @@ function FeatureRow({
         name={FEATURE_ICON[item.kind]}
         size={14}
         strokeWidth={1.7}
-        className={selected ? "text-sel-text" : "text-ink-4"}
+        className={selected ? "text-sel-text" : isError ? "text-traffic-close" : "text-ink-4"}
       />
       <span
         className={cn(
           "flex-1 text-[12.5px]",
-          selected ? "text-sel-text" : "text-ink-2",
+          selected ? "text-sel-text" : isError ? "text-traffic-close" : "text-ink-2",
           suppressed && "line-through",
         )}
       >

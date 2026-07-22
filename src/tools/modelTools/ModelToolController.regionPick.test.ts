@@ -97,6 +97,8 @@ function makeClientMock(finish: () => Promise<FinishSketchResult>) {
   return {
     onPreviewResult: vi.fn(() => () => {}),
     finishSketch: vi.fn(finish),
+    // Model-mode arms read the sketch via getSketch (pure read; MODEL-HARDEN W0.5).
+    getSketch: vi.fn(() => Promise.resolve(makeSession())),
     enterSketch: vi.fn(() => Promise.resolve(makeSession())),
     beginPreview: vi.fn((_draft: PreviewDraft) => Promise.resolve({ sessionId: "sess", previewBodyId: "pb" })),
     updatePreview: vi.fn(),
