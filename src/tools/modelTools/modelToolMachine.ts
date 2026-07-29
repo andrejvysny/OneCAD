@@ -31,7 +31,31 @@ export const DEFAULT_EXTRUDE_DEPTH = 10;
 /** Boolean fusion mode the extrude/revolve commit carries (Wave 2 UI). */
 export type BooleanMode = "NewBody" | "Add" | "Cut";
 
-export type ExtrudePhase = "idle" | "armed" | "dragging" | "targetPick" | "committing";
+export type ExtrudePhase =
+  | "idle"
+  | "armed"
+  | "dragging"
+  | "targetPick"
+  | "facePick"
+  | "committing";
+
+/**
+ * End condition for one extrude direction (MODEL-OPS W1). The worker has always
+ * implemented all of these (`ExtrudeOp.cpp` `effective_distance`) and the wire
+ * type has always carried `extrudeMode`; the tool only ever authored the
+ * distance-driven ones.
+ *
+ * `Symmetric` is deliberately NOT a member: it stays the existing `symmetric`
+ * toggle (Alt during the drag, or the chip switch) so there is exactly ONE
+ * representation of it. The marshaller folds the two back together —
+ * `extrudeMode = symmetric ? "Symmetric" : endCondition`.
+ */
+export type ExtrudeEndCondition = "Blind" | "ThroughAll" | "ToNext" | "ToFace";
+
+/** Whether an end condition is driven by a dragged distance. */
+export function isDistanceDriven(end: ExtrudeEndCondition): boolean {
+  return end === "Blind";
+}
 
 export interface ExtrudeFsm {
   phase: ExtrudePhase;
@@ -41,6 +65,25 @@ export interface ExtrudeFsm {
   booleanMode: BooleanMode;
   /** The body an Add/Cut targets (null for NewBody, or until a target is picked). */
   targetBodyId: string | null;
+  /** Direction-1 end condition. */
+  endCondition: ExtrudeEndCondition;
+  /** Draft angle in DEGREES (0 = no draft). */
+  draftAngleDeg: number;
+  /** Extrude both ways from the sketch plane. Mutually exclusive with `symmetric`. */
+  twoDirections: boolean;
+  /** Direction-2 end condition (only meaningful when `twoDirections`). */
+  endCondition2: ExtrudeEndCondition;
+  /** Direction-2 blind distance. */
+  depth2: number;
+  /**
+   * `ToFace` targets, as OPAQUE semantic-ref payloads the controller supplies and
+   * the marshaller forwards verbatim. The reducer never inspects them — keeping
+   * it free of `@/ipc/types` and trivially testable.
+   */
+  targetFace: unknown | null;
+  targetFace2: unknown | null;
+  /** Which direction's `ToFace` target is being picked (null outside `facePick`). */
+  facePickFor: 1 | 2 | null;
 }
 
 export type ExtrudeEvent =
@@ -54,6 +97,14 @@ export type ExtrudeEvent =
   | { kind: "setBooleanMode"; mode: BooleanMode; targetBodyId?: string | null; needsPick?: boolean }
   | { kind: "pickTarget"; bodyId: string }
   | { kind: "cancelTargetPick" }
+  // MODEL-OPS W1 end conditions. `ToFace` enters `facePick` unless a ref is
+  // supplied outright (the re-edit path, which already has the stored target).
+  | { kind: "setEndCondition"; end: ExtrudeEndCondition; direction?: 1 | 2; targetFace?: unknown }
+  | { kind: "setDraftAngle"; deg: number }
+  | { kind: "setTwoDirections"; on: boolean }
+  | { kind: "setDepth2"; depth: number }
+  | { kind: "pickFace"; ref: unknown }
+  | { kind: "cancelFacePick" }
   | { kind: "confirm" }
   | { kind: "commitFailed" }
   | { kind: "settle" }
@@ -72,6 +123,14 @@ export function extrudeInit(): ExtrudeFsm {
     hasRegion: false,
     booleanMode: "NewBody",
     targetBodyId: null,
+    endCondition: "Blind",
+    draftAngleDeg: 0,
+    twoDirections: false,
+    endCondition2: "Blind",
+    depth2: DEFAULT_EXTRUDE_DEPTH,
+    targetFace: null,
+    targetFace2: null,
+    facePickFor: null,
   };
 }
 
@@ -79,14 +138,7 @@ export function extrudeStep(s: ExtrudeFsm, e: ExtrudeEvent): ExtrudeStep {
   switch (e.kind) {
     case "arm":
       return {
-        state: {
-          phase: "armed",
-          depth: e.depth ?? DEFAULT_EXTRUDE_DEPTH,
-          symmetric: false,
-          hasRegion: true,
-          booleanMode: "NewBody",
-          targetBodyId: null,
-        },
+        state: { ...extrudeInit(), phase: "armed", depth: e.depth ?? DEFAULT_EXTRUDE_DEPTH, hasRegion: true },
         effect: "begin",
       };
     case "grab":
@@ -103,7 +155,13 @@ export function extrudeStep(s: ExtrudeFsm, e: ExtrudeEvent): ExtrudeStep {
       return { state: { ...s, depth: e.depth }, effect: "update" };
     case "setSymmetric":
       if (s.phase !== "armed" && s.phase !== "dragging") return { state: s, effect: "none" };
-      return { state: { ...s, symmetric: e.symmetric }, effect: "update" };
+      // The worker REJECTS Symmetric combined with two directions
+      // (`ExtrudeOp.cpp` "Symmetric is not valid with two directions"), so the two
+      // controls are mutually exclusive here rather than failing at commit.
+      return {
+        state: { ...s, symmetric: e.symmetric, twoDirections: e.symmetric ? false : s.twoDirections },
+        effect: "update",
+      };
     case "release":
       // The professional gesture: release does NOT commit — it keeps the tool
       // armed with the final depth so the user can tweak / confirm explicitly.
@@ -128,6 +186,60 @@ export function extrudeStep(s: ExtrudeFsm, e: ExtrudeEvent): ExtrudeStep {
     case "cancelTargetPick":
       if (s.phase !== "targetPick") return { state: s, effect: "none" };
       return { state: { ...s, phase: "armed", booleanMode: "NewBody", targetBodyId: null }, effect: "update" };
+    case "setEndCondition": {
+      if (s.phase !== "armed" && s.phase !== "facePick") return { state: s, effect: "none" };
+      const dir = e.direction ?? 1;
+      const face = e.targetFace ?? null;
+      // ToFace needs a target: enter facePick unless the caller already has one
+      // (the re-edit path re-arms with the stored ref).
+      if (e.end === "ToFace" && face === null) {
+        return {
+          state: {
+            ...s,
+            phase: "facePick",
+            facePickFor: dir,
+            ...(dir === 1 ? { endCondition: "ToFace" as const } : { endCondition2: "ToFace" as const }),
+          },
+          effect: "none",
+        };
+      }
+      const next: ExtrudeFsm =
+        dir === 1
+          ? { ...s, phase: "armed", facePickFor: null, endCondition: e.end, targetFace: face }
+          : { ...s, phase: "armed", facePickFor: null, endCondition2: e.end, targetFace2: face };
+      return { state: next, effect: "update" };
+    }
+    case "setDraftAngle":
+      if (s.phase !== "armed" && s.phase !== "dragging") return { state: s, effect: "none" };
+      return { state: { ...s, draftAngleDeg: e.deg }, effect: "update" };
+    case "setTwoDirections":
+      if (s.phase !== "armed" && s.phase !== "dragging") return { state: s, effect: "none" };
+      // Mutually exclusive with `symmetric` — see `setSymmetric`.
+      return {
+        state: { ...s, twoDirections: e.on, symmetric: e.on ? false : s.symmetric },
+        effect: "update",
+      };
+    case "setDepth2":
+      if (s.phase !== "armed" && s.phase !== "dragging") return { state: s, effect: "none" };
+      return { state: { ...s, depth2: e.depth }, effect: "update" };
+    case "pickFace": {
+      if (s.phase !== "facePick") return { state: s, effect: "none" };
+      const next: ExtrudeFsm =
+        s.facePickFor === 2
+          ? { ...s, phase: "armed", facePickFor: null, endCondition2: "ToFace", targetFace2: e.ref }
+          : { ...s, phase: "armed", facePickFor: null, endCondition: "ToFace", targetFace: e.ref };
+      return { state: next, effect: "update" };
+    }
+    case "cancelFacePick": {
+      if (s.phase !== "facePick") return { state: s, effect: "none" };
+      // Abandoning the pick falls back to Blind for THAT direction — never leave
+      // a ToFace armed with no target, which the worker would reject at commit.
+      const next: ExtrudeFsm =
+        s.facePickFor === 2
+          ? { ...s, phase: "armed", facePickFor: null, endCondition2: "Blind", targetFace2: null }
+          : { ...s, phase: "armed", facePickFor: null, endCondition: "Blind", targetFace: null };
+      return { state: next, effect: "update" };
+    }
     case "confirm":
       if (s.phase !== "armed") return { state: s, effect: "none" };
       return { state: { ...s, phase: "committing" }, effect: "commit" };
@@ -199,6 +311,19 @@ export function filletStep(s: FilletFsm, e: FilletEvent): FilletStep {
       return { state: filletInit(), effect: "cancel" };
   }
 }
+
+// ── Chamfer ─────────────────────────────────────────────────────────────────
+//
+// Chamfer has NO reducer of its own: it is the same edge-selection + drag-to-size
+// gesture as Fillet, so the controller drives ONE edge-op lane over `FilletFsm`
+// with a `kind` discriminator. Two byte-identical reducers would only be two
+// places to drift. The worker has always implemented it
+// (`FilletChamferOp.cpp execute_chamfer`, sharing `FilletChamferParams` with
+// Fillet and distinguished by `mode`); only the tool was missing.
+//
+// A chamfer distance is not a fillet radius, hence its own default.
+
+export const DEFAULT_CHAMFER_DISTANCE = 1;
 
 // ── Revolve ──────────────────────────────────────────────────────────────────
 //

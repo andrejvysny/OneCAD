@@ -498,3 +498,104 @@ describe("regionSelect reducer (Wave 2 wiring; pure now)", () => {
     expect(canceled.state).toEqual({ active: false, selected: [] });
   });
 });
+
+// ── MODEL-OPS W1: extrude end conditions ────────────────────────────────────
+describe("extrude end conditions", () => {
+  const armed = () => extrudeStep(extrudeInit(), { kind: "arm" }).state;
+
+  it("defaults to Blind with no draft and one direction", () => {
+    const s = armed();
+    expect(s.endCondition).toBe("Blind");
+    expect(s.draftAngleDeg).toBe(0);
+    expect(s.twoDirections).toBe(false);
+    expect(s.targetFace).toBeNull();
+  });
+
+  it("applies a non-ToFace end condition immediately", () => {
+    const r = extrudeStep(armed(), { kind: "setEndCondition", end: "ThroughAll" });
+    expect(r.state.phase).toBe("armed");
+    expect(r.state.endCondition).toBe("ThroughAll");
+    expect(r.effect).toBe("update");
+  });
+
+  it("ToFace with no target enters facePick and emits no effect", () => {
+    const r = extrudeStep(armed(), { kind: "setEndCondition", end: "ToFace" });
+    expect(r.state.phase).toBe("facePick");
+    expect(r.state.facePickFor).toBe(1);
+    expect(r.state.endCondition).toBe("ToFace");
+    expect(r.effect).toBe("none"); // nothing to preview until a face is picked
+  });
+
+  it("ToFace WITH a supplied target skips the pick (the re-edit path)", () => {
+    const ref = { primary: { bodyId: "b1", kind: "face" } };
+    const r = extrudeStep(armed(), { kind: "setEndCondition", end: "ToFace", targetFace: ref });
+    expect(r.state.phase).toBe("armed");
+    expect(r.state.targetFace).toBe(ref);
+    expect(r.effect).toBe("update");
+  });
+
+  it("picking a face leaves facePick and stores the ref", () => {
+    const picking = extrudeStep(armed(), { kind: "setEndCondition", end: "ToFace" }).state;
+    const ref = { primary: { bodyId: "b1", elementId: "el_1", kind: "face" } };
+    const r = extrudeStep(picking, { kind: "pickFace", ref });
+    expect(r.state.phase).toBe("armed");
+    expect(r.state.targetFace).toBe(ref);
+    expect(r.state.facePickFor).toBeNull();
+  });
+
+  it("abandoning the face pick falls back to Blind, never an unreachable ToFace", () => {
+    const picking = extrudeStep(armed(), { kind: "setEndCondition", end: "ToFace" }).state;
+    const r = extrudeStep(picking, { kind: "cancelFacePick" });
+    expect(r.state.phase).toBe("armed");
+    expect(r.state.endCondition).toBe("Blind");
+    expect(r.state.targetFace).toBeNull();
+  });
+
+  it("a face pick outside facePick is ignored", () => {
+    const s = armed();
+    expect(extrudeStep(s, { kind: "pickFace", ref: {} }).state).toEqual(s);
+  });
+
+  it("direction 2 has its own end condition and target", () => {
+    let s = extrudeStep(armed(), { kind: "setTwoDirections", on: true }).state;
+    s = extrudeStep(s, { kind: "setEndCondition", end: "ThroughAll", direction: 2 }).state;
+    expect(s.endCondition).toBe("Blind"); // direction 1 untouched
+    expect(s.endCondition2).toBe("ThroughAll");
+    s = extrudeStep(s, { kind: "setEndCondition", end: "ToFace", direction: 2 }).state;
+    expect(s.phase).toBe("facePick");
+    expect(s.facePickFor).toBe(2);
+    const ref = { primary: { bodyId: "b2", kind: "face" } };
+    s = extrudeStep(s, { kind: "pickFace", ref }).state;
+    expect(s.targetFace2).toBe(ref);
+    expect(s.targetFace).toBeNull(); // direction 1's target is NOT clobbered
+  });
+
+  // The worker rejects the combination outright ("Symmetric is not valid with two
+  // directions"), so the reducer makes it unrepresentable rather than letting a
+  // doomed op reach commit.
+  it("two directions and symmetric are mutually exclusive", () => {
+    let s = extrudeStep(armed(), { kind: "setSymmetric", symmetric: true }).state;
+    expect(s.symmetric).toBe(true);
+    s = extrudeStep(s, { kind: "setTwoDirections", on: true }).state;
+    expect(s.twoDirections).toBe(true);
+    expect(s.symmetric).toBe(false);
+    s = extrudeStep(s, { kind: "setSymmetric", symmetric: true }).state;
+    expect(s.symmetric).toBe(true);
+    expect(s.twoDirections).toBe(false);
+  });
+
+  it("carries a draft angle and a second distance", () => {
+    let s = extrudeStep(armed(), { kind: "setDraftAngle", deg: 7 }).state;
+    expect(s.draftAngleDeg).toBe(7);
+    s = extrudeStep(s, { kind: "setDepth2", depth: 4 }).state;
+    expect(s.depth2).toBe(4);
+  });
+
+  it("re-arming clears every end-condition field", () => {
+    let s = extrudeStep(armed(), { kind: "setEndCondition", end: "ThroughAll" }).state;
+    s = extrudeStep(s, { kind: "setDraftAngle", deg: 9 }).state;
+    s = extrudeStep(s, { kind: "arm" }).state;
+    expect(s.endCondition).toBe("Blind");
+    expect(s.draftAngleDeg).toBe(0);
+  });
+});

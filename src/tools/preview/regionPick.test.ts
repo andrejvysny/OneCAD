@@ -72,3 +72,53 @@ describe("regionAtPoint", () => {
     expect(regionAtPoint([empty, R0], 5, 3)).toBe("r0");
   });
 });
+
+// A hole is absent from the triangulation (the producer subtracts it), so the
+// hit-test misses inside it for free — no hole-aware code path here. Before the
+// fill subtracted holes, clicking the middle of a hole selected the region,
+// which then extruded a profile the user never pointed at.
+const RING: SketchRegion = {
+  regionId: "r_ring",
+  outerLoop: [],
+  holes: [[]],
+  previewTriangles: (() => {
+    const outer: [number, number][] = [
+      [0, 0],
+      [40, 0],
+      [40, 20],
+      [0, 20],
+    ];
+    const hole: [number, number][] = [
+      [15, 5],
+      [25, 5],
+      [25, 15],
+      [15, 15],
+    ];
+    const positions = [...outer.flat(), ...hole.flat()];
+    const indices: number[] = [];
+    for (let i = 0; i < 4; i++) {
+      const o0 = i;
+      const o1 = (i + 1) % 4;
+      indices.push(o0, o1, 4 + i);
+      indices.push(o1, 4 + ((i + 1) % 4), 4 + i);
+    }
+    return { positions, indices };
+  })(),
+};
+
+describe("regionAtPoint over a region with a hole", () => {
+  it("hits the material between the outer boundary and the hole", () => {
+    expect(regionAtPoint([RING], 5, 10)).toBe("r_ring"); // left of the hole
+    expect(regionAtPoint([RING], 35, 10)).toBe("r_ring"); // right of the hole
+    expect(regionAtPoint([RING], 20, 2)).toBe("r_ring"); // below the hole
+  });
+
+  it("MISSES inside the hole", () => {
+    expect(regionAtPoint([RING], 20, 10)).toBeNull(); // dead centre of the hole
+    expect(regionAtPoint([RING], 16, 6)).toBeNull();
+  });
+
+  it("still misses outside the outer boundary", () => {
+    expect(regionAtPoint([RING], -5, 10)).toBeNull();
+  });
+});

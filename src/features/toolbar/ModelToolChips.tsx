@@ -22,7 +22,12 @@ import { DimensionInput } from "@/features/sketch/DimensionInput";
 import { useToolChipStore, toolChipStore } from "@/stores/toolChipStore";
 import { useViewportEngine } from "@/viewport/engineBridge";
 import type { BooleanOperation } from "@/ipc/types";
-import type { PatternAxis, MirrorPlane, BooleanMode } from "@/tools/modelTools/modelToolMachine";
+import type {
+  PatternAxis,
+  MirrorPlane,
+  BooleanMode,
+  ExtrudeEndCondition,
+} from "@/tools/modelTools/modelToolMachine";
 
 const CHIP_ID = "__model_tool_chip";
 const BOOLEAN_OPS: BooleanOperation[] = ["Union", "Cut", "Intersect"];
@@ -35,6 +40,64 @@ const BOOLEAN_MODES: { mode: BooleanMode; label: string; testid: string }[] = [
   { mode: "Add", label: "Add", testid: "chip-bool-add" },
   { mode: "Cut", label: "Cut", testid: "chip-bool-cut" },
 ];
+
+/**
+ * The armed-extrude end-condition segments (MODEL-OPS W1). `Symmetric` is NOT
+ * here — it stays the ⇔ toggle, so there is one control per concept.
+ * `ToNext`/`ToFace` need an existing body to reach, so they disable at zero
+ * bodies rather than being offered and failing at commit.
+ */
+const END_CONDITIONS: {
+  end: ExtrudeEndCondition;
+  label: string;
+  testid: string;
+  needsBody: boolean;
+}[] = [
+  { end: "Blind", label: "Blind", testid: "chip-end-blind", needsBody: false },
+  { end: "ThroughAll", label: "Through all", testid: "chip-end-throughall", needsBody: true },
+  { end: "ToNext", label: "To next", testid: "chip-end-tonext", needsBody: true },
+  { end: "ToFace", label: "To face", testid: "chip-end-toface", needsBody: true },
+];
+
+function EndConditionSegments({
+  active,
+  canUseBodyEnds,
+  onPick,
+}: {
+  active: ExtrudeEndCondition;
+  canUseBodyEnds: boolean;
+  onPick: (end: ExtrudeEndCondition) => void;
+}) {
+  return (
+    <div
+      className="flex overflow-hidden rounded-sm"
+      role="group"
+      aria-label="End condition"
+      title={canUseBodyEnds ? undefined : "Through all / To next / To face need an existing body"}
+    >
+      {END_CONDITIONS.map((c) => {
+        const disabled = c.needsBody && !canUseBodyEnds;
+        return (
+          <button
+            key={c.end}
+            type="button"
+            data-testid={c.testid}
+            aria-pressed={c.end === active}
+            disabled={disabled}
+            onClick={() => onPick(c.end)}
+            className={cn(
+              "px-2 py-1 text-[11.5px] font-medium",
+              c.end === active ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
+              disabled && "cursor-not-allowed opacity-40 hover:bg-chip",
+            )}
+          >
+            {c.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 /** A segmented toggle row (axis / plane pickers), styled like the boolean op row. */
 function SegmentToggle<T extends string>({
@@ -212,6 +275,9 @@ export function ModelToolChips() {
   const booleanMode = useToolChipStore((s) => s.booleanMode);
   const canBoolean = useToolChipStore((s) => s.canBoolean);
   const showBooleanSegments = useToolChipStore((s) => s.showBooleanSegments);
+  const endCondition = useToolChipStore((s) => s.endCondition);
+  const canUseBodyEnds = useToolChipStore((s) => s.canUseBodyEnds);
+  const showEndConditions = useToolChipStore((s) => s.showEndConditions);
   const suffix = useToolChipStore((s) => s.suffix);
   const worldPos = useToolChipStore((s) => s.worldPos);
   // A plain DOM host, created once; the engine owns its DOM position.
@@ -267,12 +333,24 @@ export function ModelToolChips() {
     />
   ) : null;
 
+  const endConditionSegments = showEndConditions ? (
+    <EndConditionSegments
+      active={endCondition}
+      canUseBodyEnds={canUseBodyEnds}
+      onPick={(c) => toolChipStore.getState().onEndCondition?.(c)}
+    />
+  ) : null;
+
   let content: React.ReactNode;
   if (kind === "extrudeDepth") {
     content = panel(
       <>
-        {clusterInput("mm")}
-        {showSymmetric && (
+        {/* A distance is meaningless for the non-Blind end conditions — the
+            kernel derives it — so the numeric input hides rather than showing a
+            value that does not drive the result. */}
+        {endCondition === "Blind" && clusterInput("mm")}
+        {endConditionSegments}
+        {showSymmetric && endCondition === "Blind" && (
           <SymmetricToggle
             pressed={symmetric}
             onToggle={() => toolChipStore.getState().onSymmetric?.(!symmetric)}

@@ -37,6 +37,9 @@ export const MODEL_KEYS: KeyBinding[] = [
   { key: "e", action: { type: "tool", tool: "extrude" } },
   { key: "r", action: { type: "tool", tool: "revolve" } },
   { key: "f", action: { type: "tool", tool: "fillet" } },
+  // H for cHamfer: F is taken by fillet and ⇧F by zoom-fit, and C/M are already
+  // spoken for by the pattern/mirror tools.
+  { key: "h", action: { type: "tool", tool: "chamfer" } },
   { key: "b", action: { type: "tool", tool: "boolean" } },
   // M6b model ops (K/P/C/M are free in model mode; C/M also serve sketch tools
   // in sketch mode, resolved by `mode` exactly as R does — revolve vs rectangle).

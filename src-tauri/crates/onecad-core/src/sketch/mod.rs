@@ -28,7 +28,7 @@ use crate::math::Vec2;
 
 pub use constraint::{Constraint, CurvePosition};
 pub use entity::SketchEntity;
-pub use plane::SketchPlane;
+pub use plane::{plane_from_point_normal, SketchPlane};
 
 /// A named world reference plane (SCHEMA §7.3 `plane.kind` ∈ `XY`|`XZ`|`YZ`).
 /// The concrete basis is [`SketchPlane::xy`]/[`xz`](SketchPlane::xz)/
@@ -162,9 +162,18 @@ pub fn derive_region_id(members: &[EntityId], winding: Winding) -> RegionId {
 ///
 /// **CACHE, NOT AUTHORITATIVE.** Regions are derived by the worker's
 /// `SketchRegions` (SCHEMA §7.4) from the entities/constraints; this is a
-/// rebuildable projection stored for fast lookup and preview, never a source of
-/// truth. On any entity/constraint edit it must be recomputed (see
-/// [`Sketch::set_regions`]).
+/// rebuildable projection, never a source of truth.
+///
+/// **NOT POPULATED IN V2.** Nothing in the shipped pipeline writes this — the
+/// only caller of [`Sketch::set_regions`] is the serde freeze test. Every region
+/// consumer asks the worker live instead: `finish_sketch` issues `SketchRegions`
+/// per call and hands the result straight to the DTO, and the modelling tools
+/// re-fetch on every arm (`ModelToolController`), so a persisted copy would only
+/// be a second, staler source of truth for something already content-addressed
+/// by `regionId`. The field and setter are retained because the document serde
+/// schema is FROZEN (`tests/sketch_freeze.rs`) and v1 corpus samples carry the
+/// key — removing it would be a schema change with no functional gain. Populate
+/// it only alongside a decision about who invalidates it on edit.
 ///
 /// **DISCREPANCY** (report): SCHEMA §7.4 `SketchRegions` names the wire fields
 /// `regionId` / `outerLoop` / `holes`; this cache uses `id` / `outer` / `holes`
@@ -481,7 +490,8 @@ impl Sketch {
     }
 
     /// Replaces the region cache (recomputed by the worker's `SketchRegions`).
-    /// Regions are a cache, never authoritative — see [`RegionInfo`].
+    /// Regions are a cache, never authoritative — see [`RegionInfo`], which also
+    /// records why nothing in the shipped pipeline calls this.
     pub fn set_regions(&mut self, regions: Vec<RegionInfo>) {
         self.regions = regions;
     }

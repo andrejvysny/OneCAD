@@ -12,7 +12,12 @@
  */
 import { createStore, useStore } from "zustand";
 import type { BooleanOperation } from "@/ipc/types";
-import type { PatternAxis, MirrorPlane, BooleanMode } from "@/tools/modelTools/modelToolMachine";
+import type {
+  PatternAxis,
+  MirrorPlane,
+  BooleanMode,
+  ExtrudeEndCondition,
+} from "@/tools/modelTools/modelToolMachine";
 
 /** Handlers the armed extrude cluster wires (MODEL-HARDEN Wave 1 + 2). */
 export interface ExtrudeChipHandlers {
@@ -22,11 +27,23 @@ export interface ExtrudeChipHandlers {
   onCancel: () => void;
   /** Boolean segment picked (New Body / Add / Cut — Wave 2). */
   onBooleanMode?: (mode: BooleanMode) => void;
+  /** End condition picked (Blind / Through all / To next / To face — W1). */
+  onEndCondition?: (end: ExtrudeEndCondition) => void;
 }
 
 /** Extra armed-cluster options (symmetric seed; hide the ⇔ toggle in re-edit). */
 export interface ExtrudeChipOpts {
   symmetric?: boolean;
+  /** Seed the end-condition segment (W1; default Blind). */
+  endCondition?: ExtrudeEndCondition;
+  /**
+   * Whether to offer the end conditions that REQUIRE an existing body. The worker
+   * fails ToNext/ToFace outright without one ("ToNext requires an existing target
+   * body"), so with zero bodies they are not offered rather than offered-and-doomed.
+   */
+  canUseBodyEnds?: boolean;
+  /** Whether to render the end-condition segment group at all (fresh arm only). */
+  showEndConditions?: boolean;
   /** Re-edit shows value + ✓/✕ only — no symmetric toggle (default true). */
   showSymmetric?: boolean;
   /** Seed the boolean mode segment (Wave 2; default NewBody). */
@@ -89,6 +106,10 @@ export interface ToolChipState {
   op: BooleanOperation;
   /** Symmetric extrude toggle state (armed extrude cluster; Alt-drag syncs it). */
   symmetric: boolean;
+  /** Armed extrude end condition (W1). */
+  endCondition: ExtrudeEndCondition;
+  canUseBodyEnds: boolean;
+  showEndConditions: boolean;
   /** Whether the armed extrude cluster renders the ⇔ toggle (hidden in re-edit). */
   showSymmetric: boolean;
   /** Feature boolean mode — drives the Wave 2 New Body / Add / Cut segment group. */
@@ -107,6 +128,7 @@ export interface ToolChipState {
   onValue: ((v: number) => void) | null;
   /** Symmetric toggled (armed extrude cluster). */
   onSymmetric: ((symmetric: boolean) => void) | null;
+  onEndCondition: ((end: ExtrudeEndCondition) => void) | null;
   /** Commit the armed op (chip ✓ / chip-input Enter). */
   onConfirm: (() => void) | null;
   /** Esc / cancel from the dimension chip, or ✕ from the armed cluster. */
@@ -214,6 +236,10 @@ const CLEARED = {
   plane: "XY" as MirrorPlane,
   op: "Union" as BooleanOperation,
   symmetric: false,
+  endCondition: "Blind" as ExtrudeEndCondition,
+  canUseBodyEnds: false,
+  showEndConditions: false,
+  onEndCondition: null,
   showSymmetric: true,
   booleanMode: "NewBody" as BooleanMode,
   canBoolean: false,
@@ -244,6 +270,10 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
       value,
       worldPos,
       symmetric: opts?.symmetric ?? false,
+      endCondition: opts?.endCondition ?? "Blind",
+      canUseBodyEnds: opts?.canUseBodyEnds ?? false,
+      showEndConditions: opts?.showEndConditions ?? false,
+      onEndCondition: handlers.onEndCondition ?? null,
       showSymmetric: opts?.showSymmetric ?? true,
       booleanMode: opts?.booleanMode ?? "NewBody",
       canBoolean: opts?.canBoolean ?? false,

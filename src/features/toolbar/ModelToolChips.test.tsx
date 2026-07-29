@@ -217,3 +217,75 @@ describe("ModelToolChips (M6b)", () => {
     expect(h.onCancel).toHaveBeenCalledTimes(1);
   });
 });
+
+// ── MODEL-OPS W1: end-condition segments ────────────────────────────────────
+describe("extrude end-condition segments", () => {
+  beforeEach(() => {
+    setViewportEngine(fakeEngine());
+    toolChipStore.getState().clear();
+  });
+
+  const showExtrude = (opts: Record<string, unknown>, onEndCondition = vi.fn()) => {
+    act(() => {
+      toolChipStore.getState().showExtrude(
+        10,
+        WORLD,
+        {
+          onValue: vi.fn(),
+          onSymmetric: vi.fn(),
+          onConfirm: vi.fn(),
+          onCancel: vi.fn(),
+          onEndCondition,
+        },
+        { showEndConditions: true, ...opts },
+      );
+    });
+    return onEndCondition;
+  };
+
+  it("is absent unless the arm asks for it (re-edit shows value + ✓/✕ only)", () => {
+    render(<ModelToolChips />);
+    showExtrude({ showEndConditions: false });
+    expect(screen.queryByTestId("chip-end-blind")).toBeNull();
+  });
+
+  // ThroughAll / ToNext / ToFace all need something to reach; the worker fails
+  // them outright with no body ("ToNext requires an existing target body"), so
+  // they are not offered rather than offered-and-doomed.
+  it("disables the body-reaching conditions when no body exists", () => {
+    render(<ModelToolChips />);
+    showExtrude({ canUseBodyEnds: false });
+    expect(screen.getByTestId("chip-end-blind")).toBeEnabled();
+    expect(screen.getByTestId("chip-end-throughall")).toBeDisabled();
+    expect(screen.getByTestId("chip-end-tonext")).toBeDisabled();
+    expect(screen.getByTestId("chip-end-toface")).toBeDisabled();
+  });
+
+  it("enables them once a body exists and dispatches the pick", () => {
+    render(<ModelToolChips />);
+    const onEnd = showExtrude({ canUseBodyEnds: true });
+    expect(screen.getByTestId("chip-end-tonext")).toBeEnabled();
+    fireEvent.click(screen.getByTestId("chip-end-tonext"));
+    expect(onEnd).toHaveBeenCalledWith("ToNext");
+  });
+
+  it("marks the active condition pressed", () => {
+    render(<ModelToolChips />);
+    showExtrude({ canUseBodyEnds: true, endCondition: "ThroughAll" });
+    expect(screen.getByTestId("chip-end-throughall")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("chip-end-blind")).toHaveAttribute("aria-pressed", "false");
+  });
+
+  // A distance is meaningless for the derived end conditions — the kernel computes
+  // it — so the numeric input and the symmetric toggle hide rather than showing a
+  // value that does not drive the result.
+  it("hides the distance input and the ⇔ toggle for a non-Blind condition", () => {
+    render(<ModelToolChips />);
+    showExtrude({ canUseBodyEnds: true, endCondition: "Blind" });
+    expect(screen.queryByRole("button", { name: /symmetric/i })).not.toBeNull();
+    act(() => {
+      toolChipStore.setState({ endCondition: "ThroughAll" });
+    });
+    expect(screen.queryByRole("button", { name: /symmetric/i })).toBeNull();
+  });
+});

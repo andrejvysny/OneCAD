@@ -27,6 +27,7 @@ export type ModelTool =
   | "extrude"
   | "revolve"
   | "fillet"
+  | "chamfer"
   | "boolean"
   | "shell"
   | "linearPattern"

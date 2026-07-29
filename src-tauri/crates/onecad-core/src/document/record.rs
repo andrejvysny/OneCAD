@@ -314,6 +314,37 @@ pub struct OpaqueOperation {
 }
 
 impl Operation {
+    /// The `opType` tag this operation serializes under (SCHEMA §7.3). For an
+    /// [`Operation::Opaque`] node it is whatever tag the frozen JSON carried, or
+    /// `"Opaque"` when it had none.
+    #[must_use]
+    pub fn op_type(&self) -> &str {
+        match self {
+            Operation::Known(k) => match k {
+                KnownOperation::Sketch(_) => "Sketch",
+                KnownOperation::Extrude(_) => "Extrude",
+                KnownOperation::Revolve(_) => "Revolve",
+                KnownOperation::Fillet(_) => "Fillet",
+                KnownOperation::Chamfer(_) => "Chamfer",
+                KnownOperation::Shell(_) => "Shell",
+                KnownOperation::Boolean(_) => "Boolean",
+                KnownOperation::LinearPattern(_) => "LinearPattern",
+                KnownOperation::CircularPattern(_) => "CircularPattern",
+                KnownOperation::Loft(_) => "Loft",
+                KnownOperation::Sweep(_) => "Sweep",
+                KnownOperation::MirrorBody(_) => "MirrorBody",
+            },
+            // The frozen node keeps its original tag inside `raw`; report it so a
+            // future opType is not mislabelled as one of the known ops.
+            Operation::Opaque(o) => o
+                .raw
+                .get("opType")
+                .and_then(serde_json::Value::as_str)
+                .filter(|t| !t.is_empty())
+                .unwrap_or("Opaque"),
+        }
+    }
+
     /// Derives the uniform input view, mirroring OneCAD-CPP
     /// `DependencyGraph::extractDependencies` (`DependencyGraph.cpp:252-332`)
     /// including param-embedded dependencies. See per-arm comments for the

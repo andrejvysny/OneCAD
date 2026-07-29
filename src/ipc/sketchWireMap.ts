@@ -527,12 +527,20 @@ export interface WireAddSketch {
       yAxis: [number, number, number];
       normal: [number, number, number];
     };
-    attachment: { kind: "world"; plane: "XY" | "XZ" | "YZ" };
+    attachment:
+      | { kind: "world"; plane: "XY" | "XZ" | "YZ" }
+      | { kind: "hostFace"; face: WireFaceRef; projectedBoundaryVersion: number };
   };
 }
 
+/** The typed `ElementRef` a host-face attachment carries (Rust `ElementRef`). */
+export interface WireFaceRef {
+  primary?: { bodyId: string; elementId: string; kind: "face" };
+  anchor?: { worldPoint: [number, number, number] };
+}
+
 /** Build the `AddSketch` EditCommand for a new world-plane sketch. `custom` planes
- *  fall back to XY (host-face/datum attachment is an M2+ concern). The plane basis
+ *  fall back to XY (a custom basis needs `buildAddSketchOnFace`). The plane basis
  *  is the SCHEMA §7.3 canonical basis for the kind (same table Rust's
  *  `SketchPlane::xy/xz/yz()` carry — `planeFor` mirrors it verbatim). */
 export function buildAddSketch(
@@ -549,6 +557,53 @@ export function buildAddSketch(
       name,
       plane: { origin, xAxis, yAxis, normal },
       attachment: { kind: "world", plane },
+    },
+  };
+}
+
+/**
+ * Build the `AddSketch` EditCommand for a sketch placed on a model FACE
+ * (MODEL-OPS W2).
+ *
+ * The basis is NOT computed here — it comes from the backend's
+ * `face_sketch_plane`, which reads the kernel's own face descriptor and applies
+ * the lock-tested `plane_from_point_normal` rule. Rust owns identity, and the
+ * frame is frozen with the sketch, so deriving it from a tessellated triangle
+ * normal on this side would be both less accurate and non-authoritative.
+ *
+ * No worker change is needed for this to work: `plane_kind_str` already maps a
+ * `hostFace` attachment to wire kind `"custom"`, and `WireSketch::parse_plane`
+ * has always accepted an arbitrary `custom` origin/xAxis/yAxis/normal — the
+ * attachment simply had no producer.
+ *
+ * **V1 policy: the frame is FROZEN at creation.** Editing an upstream feature
+ * leaves the sketch where it was rather than moving it; re-deriving it needs the
+ * dormant `UpdateSketchAttachment` command plus a regen-epilogue resolve, which
+ * is a separate WP. This matches the OneCAD-CPP oracle (`document/datum.rs`: a
+ * sketch on a datum "copies the resolved frame at creation (frozen, like
+ * sketch-on-face)").
+ */
+export function buildAddSketchOnFace(
+  backendSketchId: string,
+  name: string,
+  plane: WireAddSketch["sketch"]["plane"],
+  face: WireFaceRef,
+): WireAddSketch {
+  return {
+    cmd: "addSketch",
+    sketch: {
+      id: backendSketchId,
+      name,
+      plane: {
+        origin: plane.origin,
+        xAxis: plane.xAxis,
+        yAxis: plane.yAxis,
+        normal: plane.normal,
+      },
+      // 0 = the host face's boundary has not been projected into the sketch yet
+      // (projection is not implemented anywhere — the field is a version counter
+      // with no producer, mirrored faithfully from the C++ struct).
+      attachment: { kind: "hostFace", face, projectedBoundaryVersion: 0 },
     },
   };
 }

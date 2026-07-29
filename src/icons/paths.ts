@@ -28,6 +28,8 @@ export const ICON_PATHS = {
   extrude: "M12 10V3.5M9.2 5.8L12 3.5l2.8 2.3M5.5 13.5h13v6.5h-13z",
   revolve: "M19.3 13a7.3 7.3 0 1 1-2-6M19.5 4v3.5H16",
   fillet: "M4.5 19.5V11a6.5 6.5 0 0 1 6.5-6.5h8.5",
+  // Chamfer = the fillet corner with a straight bevel instead of the arc.
+  chamfer: "M4.5 19.5V11l6.5-6.5h8.5",
   boolean: "M14 12a4.3 4.3 0 1 1-8.6 0 4.3 4.3 0 0 1 8.6 0zM18.6 12a4.3 4.3 0 1 1-8.6 0 4.3 4.3 0 0 1 8.6 0z",
 
   // ---- Sketch toolbar tools (SK table, lines 512-523) ----

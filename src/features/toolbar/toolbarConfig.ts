@@ -30,6 +30,7 @@ export const MODEL_TOOLS: ToolEntry[] = [
   { id: "extrude", icon: "extrude", label: "Extrude", shortcut: "E" },
   { id: "revolve", icon: "revolve", label: "Revolve", shortcut: "R" },
   { id: "fillet", icon: "fillet", label: "Fillet", shortcut: "F" },
+  { id: "chamfer", icon: "chamfer", label: "Chamfer", shortcut: "H" },
   { id: "boolean", icon: "boolean", label: "Combine", shortcut: "B" },
   { sep: true },
   { id: "shell", icon: "shell", label: "Shell", shortcut: "K" },

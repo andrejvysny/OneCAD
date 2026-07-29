@@ -130,6 +130,67 @@ impl SketchPlane {
     }
 }
 
+/// Builds a sketch plane from a point on the plane and its normal, choosing the
+/// in-plane axes by a **fixed, deterministic rule**.
+///
+/// This is the frame a sketch placed on a model FACE or a datum plane freezes at
+/// creation (MODEL-OPS W2). Determinism is load-bearing, not cosmetic: the frame
+/// is persisted with the sketch and every entity coordinate is expressed in it, so
+/// if the rule ever produced a different basis for the same normal, reopening a
+/// document would silently rotate the sketch inside its own plane. The rule is
+/// therefore lock-tested exactly like the named-plane bases in SCHEMA §7.3.
+///
+/// **The rule.** `x = normalize(seed × n)` where the seed is world **+Z**, falling
+/// back to world **+X** when `n` is (anti)parallel to +Z and the cross product
+/// would vanish; then `y = n × x`. So:
+/// * a face whose normal is +Z (a top face) uses the +X fallback and lands on
+///   `x=(0,1,0)`, `y=(-1,0,0)` — the SAME basis as the named XY plane, so a sketch
+///   on a flat top face is oriented like a sketch on XY;
+/// * any other face gets a horizontal `x`, i.e. the sketch's local +X is level in
+///   the world, which reads the right way up for a user.
+///
+/// `normal` is normalized here; a zero/non-finite normal falls back to XY rather
+/// than producing NaNs.
+#[must_use]
+pub fn plane_from_point_normal(origin: Vec3, normal: Vec3) -> SketchPlane {
+    let norm = |v: [f64; 3]| -> Option<[f64; 3]> {
+        let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        if !len.is_finite() || len < 1e-12 {
+            return None;
+        }
+        Some([v[0] / len, v[1] / len, v[2] / len])
+    };
+    let cross = |a: [f64; 3], b: [f64; 3]| -> [f64; 3] {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+
+    let Some(n) = norm([normal.x, normal.y, normal.z]) else {
+        return SketchPlane::xy();
+    };
+
+    // Seed +Z (`x = z × n`); when the normal is (anti)parallel to +Z the cross
+    // product vanishes, so fall back to the +X seed with the operands ORDERED
+    // `n × x` — that ordering is what makes a +Z normal reproduce the named XY
+    // basis exactly (`z × n` would give x = (0,-1,0), the XY basis mirrored).
+    let z_seed = [0.0, 0.0, 1.0];
+    let x = match norm(cross(z_seed, n)) {
+        Some(v) => v,
+        None => norm(cross(n, [1.0, 0.0, 0.0])).unwrap_or([1.0, 0.0, 0.0]),
+    };
+    let y = cross(n, x);
+
+    SketchPlane {
+        origin,
+        x_axis: Vec3::new_unchecked(x[0], x[1], x[2]),
+        y_axis: Vec3::new_unchecked(y[0], y[1], y[2]),
+        normal: Vec3::new_unchecked(n[0], n[1], n[2]),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,5 +320,131 @@ mod tests {
         });
         let back: SketchPlane = serde_json::from_value(schema_plane).unwrap();
         assert_eq!(back, SketchPlane::xy());
+    }
+
+    // ── plane_from_point_normal — LOCK TESTS ────────────────────────────────
+    //
+    // The basis is frozen with every face-hosted / datum sketch and every entity
+    // coordinate is expressed in it, so a change to this rule silently rotates
+    // existing sketches inside their own plane on reopen. Treat these exactly like
+    // the named-plane basis locks above.
+
+    #[test]
+    fn face_normal_plus_z_matches_the_named_xy_basis() {
+        // +Z is the seed direction, so the +X fallback fires. Landing on the SAME
+        // basis as the named XY plane means a sketch on a flat top face is
+        // oriented like a sketch on XY.
+        let p = plane_from_point_normal(
+            Vec3::new_unchecked(1.0, 2.0, 3.0),
+            Vec3::new_unchecked(0.0, 0.0, 1.0),
+        );
+        assert_eq!(p.origin, Vec3::new_unchecked(1.0, 2.0, 3.0));
+        assert_eq!(p.x_axis, SketchPlane::xy().x_axis);
+        assert_eq!(p.y_axis, SketchPlane::xy().y_axis);
+        assert_eq!(p.normal, Vec3::new_unchecked(0.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn face_normal_minus_z_uses_the_same_fallback_seed() {
+        let p = plane_from_point_normal(
+            Vec3::new_unchecked(0.0, 0.0, 0.0),
+            Vec3::new_unchecked(0.0, 0.0, -1.0),
+        );
+        // Same +X fallback, mirrored by the flipped normal:
+        // x = normalize(-Z × +X) = (0,-1,0); y = -Z × (0,-1,0) = (-1,0,0).
+        assert_eq!(p.x_axis, Vec3::new_unchecked(0.0, -1.0, 0.0));
+        assert_eq!(p.y_axis, Vec3::new_unchecked(-1.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn a_vertical_face_gets_a_level_x_axis() {
+        // Normal +X (a side face): x = normalize(+Z × +X) = (0,1,0) — horizontal,
+        // so the sketch's local +X is level in the world.
+        let p = plane_from_point_normal(
+            Vec3::new_unchecked(0.0, 0.0, 0.0),
+            Vec3::new_unchecked(1.0, 0.0, 0.0),
+        );
+        assert_eq!(p.x_axis, Vec3::new_unchecked(0.0, 1.0, 0.0));
+        assert_eq!(p.y_axis, Vec3::new_unchecked(0.0, 0.0, 1.0));
+        assert!((p.x_axis.z).abs() < 1e-12, "x is level");
+    }
+
+    #[test]
+    fn the_basis_is_orthonormal_and_right_handed_for_arbitrary_normals() {
+        let normals = [
+            [1.0, 2.0, 3.0],
+            [-4.0, 0.5, 2.0],
+            [0.0, 1.0, 0.0],
+            [0.3, -0.7, 0.1],
+            [0.0, 0.0, 7.0],
+        ];
+        for n in normals {
+            let p = plane_from_point_normal(
+                Vec3::new_unchecked(0.0, 0.0, 0.0),
+                Vec3::new_unchecked(n[0], n[1], n[2]),
+            );
+            let dot = |a: Vec3, b: Vec3| a.x * b.x + a.y * b.y + a.z * b.z;
+            let len = |v: Vec3| dot(v, v).sqrt();
+            assert!((len(p.x_axis) - 1.0).abs() < 1e-12, "x unit for {n:?}");
+            assert!((len(p.y_axis) - 1.0).abs() < 1e-12, "y unit for {n:?}");
+            assert!((len(p.normal) - 1.0).abs() < 1e-12, "n unit for {n:?}");
+            assert!(dot(p.x_axis, p.y_axis).abs() < 1e-12, "x ⟂ y for {n:?}");
+            assert!(dot(p.x_axis, p.normal).abs() < 1e-12, "x ⟂ n for {n:?}");
+            assert!(dot(p.y_axis, p.normal).abs() < 1e-12, "y ⟂ n for {n:?}");
+            // Right-handed: x × y == n.
+            let cx = Vec3::new_unchecked(
+                p.x_axis.y * p.y_axis.z - p.x_axis.z * p.y_axis.y,
+                p.x_axis.z * p.y_axis.x - p.x_axis.x * p.y_axis.z,
+                p.x_axis.x * p.y_axis.y - p.x_axis.y * p.y_axis.x,
+            );
+            assert!((cx.x - p.normal.x).abs() < 1e-12, "right-handed for {n:?}");
+            assert!((cx.y - p.normal.y).abs() < 1e-12, "right-handed for {n:?}");
+            assert!((cx.z - p.normal.z).abs() < 1e-12, "right-handed for {n:?}");
+        }
+    }
+
+    #[test]
+    fn the_rule_is_deterministic_and_scale_invariant() {
+        let o = Vec3::new_unchecked(0.0, 0.0, 0.0);
+        let a = plane_from_point_normal(o, Vec3::new_unchecked(1.0, 2.0, 3.0));
+        let b = plane_from_point_normal(o, Vec3::new_unchecked(1.0, 2.0, 3.0));
+        // Identical input ⇒ BITWISE identical frame. This is the property replay
+        // depends on, and it is exact.
+        assert_eq!(a, b);
+
+        // A scaled normal gives the same frame to floating-point tolerance — the
+        // division by a different magnitude perturbs the last ulp, so this one is
+        // deliberately NOT an equality assertion.
+        let scaled = plane_from_point_normal(o, Vec3::new_unchecked(10.0, 20.0, 30.0));
+        let close = |x: Vec3, y: Vec3| {
+            (x.x - y.x).abs() < 1e-12 && (x.y - y.y).abs() < 1e-12 && (x.z - y.z).abs() < 1e-12
+        };
+        assert!(
+            close(a.x_axis, scaled.x_axis),
+            "x: {:?} vs {:?}",
+            a.x_axis,
+            scaled.x_axis
+        );
+        assert!(
+            close(a.y_axis, scaled.y_axis),
+            "y: {:?} vs {:?}",
+            a.y_axis,
+            scaled.y_axis
+        );
+        assert!(
+            close(a.normal, scaled.normal),
+            "n: {:?} vs {:?}",
+            a.normal,
+            scaled.normal
+        );
+    }
+
+    #[test]
+    fn a_degenerate_normal_falls_back_to_xy_rather_than_nan() {
+        let p = plane_from_point_normal(
+            Vec3::new_unchecked(0.0, 0.0, 0.0),
+            Vec3::new_unchecked(0.0, 0.0, 0.0),
+        );
+        assert_eq!(p, SketchPlane::xy());
     }
 }

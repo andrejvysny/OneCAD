@@ -30,8 +30,8 @@ use crate::dto::WorkerStatusDto;
 use crate::events;
 use crate::export::GeometryExporter;
 use crate::worker::{
-    resolve_worker_path, MeshProvider, PendingBackend, SolverEngine, SupervisorConfig,
-    WorkerLifecycle, WorkerManager, WorkerState,
+    resolve_worker_path, ElementQuery, MeshProvider, PendingBackend, PreviewEngine, SolverEngine,
+    SupervisorConfig, WorkerLifecycle, WorkerManager, WorkerState,
 };
 
 /// The geometry backend split into its three facets (the executor drives the
@@ -50,6 +50,8 @@ pub type BackendBundle = (
     Arc<dyn MeshProvider>,
     Arc<dyn SolverEngine>,
     Arc<dyn GeometryExporter>,
+    Arc<dyn ElementQuery>,
+    Arc<dyn PreviewEngine>,
 );
 
 /// Builds a fresh backend bundle for a newly opened document.
@@ -86,6 +88,11 @@ pub struct AppState {
     /// backend uses, or [`PendingBackend`] when no worker). Swapped by
     /// [`make_backend`](AppState::make_backend) on every new/open.
     exporter: RwLock<Arc<dyn GeometryExporter>>,
+    /// The current document's element-geometry reader (same `WorkerManager` Arc),
+    /// used by `face_sketch_plane`. Swapped alongside the exporter.
+    element_query: RwLock<Arc<dyn ElementQuery>>,
+    /// The current document's drag-time preview engine (same `WorkerManager` Arc).
+    preview: RwLock<Arc<dyn PreviewEngine>>,
     backend_factory: BackendFactory,
 }
 
@@ -101,6 +108,8 @@ impl AppState {
             autosave_tick: Arc::new(watch::channel(0u64).0),
             pending_recovery: StdMutex::new(None),
             exporter: RwLock::new(Arc::new(PendingBackend)),
+            element_query: RwLock::new(Arc::new(PendingBackend)),
+            preview: RwLock::new(Arc::new(PendingBackend)),
             backend_factory,
         }
     }
@@ -116,9 +125,15 @@ impl AppState {
     /// worker.
     #[must_use]
     pub fn make_backend(&self) -> BackendPair {
-        let (engine, meshes, solver, exporter) = (self.backend_factory)();
+        let (engine, meshes, solver, exporter, elements, preview) = (self.backend_factory)();
         if let Ok(mut slot) = self.exporter.write() {
             *slot = exporter;
+        }
+        if let Ok(mut slot) = self.element_query.write() {
+            *slot = elements;
+        }
+        if let Ok(mut slot) = self.preview.write() {
+            *slot = preview;
         }
         (engine, meshes, solver)
     }
@@ -127,6 +142,18 @@ impl AppState {
     #[must_use]
     pub fn exporter(&self) -> Arc<dyn GeometryExporter> {
         self.exporter.read().unwrap().clone()
+    }
+
+    /// The current document's element-geometry reader (see [`make_backend`](Self::make_backend)).
+    #[must_use]
+    pub fn element_query(&self) -> Arc<dyn ElementQuery> {
+        self.element_query.read().unwrap().clone()
+    }
+
+    /// The current document's preview engine (see [`make_backend`](Self::make_backend)).
+    #[must_use]
+    pub fn preview(&self) -> Arc<dyn PreviewEngine> {
+        self.preview.read().unwrap().clone()
     }
 }
 
@@ -143,6 +170,8 @@ impl Default for AppState {
             autosave_tick: Arc::new(watch::channel(0u64).0),
             pending_recovery: StdMutex::new(None),
             exporter: RwLock::new(Arc::new(PendingBackend)),
+            element_query: RwLock::new(Arc::new(PendingBackend)),
+            preview: RwLock::new(Arc::new(PendingBackend)),
             backend_factory,
         }
     }
@@ -182,16 +211,20 @@ fn real_worker_factory(
             let engine: Arc<dyn GeometryEngine> = Arc::new(wm.clone());
             let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
             let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
-            let exporter: Arc<dyn GeometryExporter> = Arc::new(wm);
-            (engine, meshes, solver, exporter)
+            let exporter: Arc<dyn GeometryExporter> = Arc::new(wm.clone());
+            let elements: Arc<dyn ElementQuery> = Arc::new(wm.clone());
+            let preview: Arc<dyn PreviewEngine> = Arc::new(wm);
+            (engine, meshes, solver, exporter, elements, preview)
         }
         None => {
             let backend = Arc::new(PendingBackend);
             let engine: Arc<dyn GeometryEngine> = backend.clone();
             let meshes: Arc<dyn MeshProvider> = backend.clone();
             let solver: Arc<dyn SolverEngine> = backend.clone();
-            let exporter: Arc<dyn GeometryExporter> = backend;
-            (engine, meshes, solver, exporter)
+            let exporter: Arc<dyn GeometryExporter> = backend.clone();
+            let elements: Arc<dyn ElementQuery> = backend.clone();
+            let preview: Arc<dyn PreviewEngine> = backend;
+            (engine, meshes, solver, exporter, elements, preview)
         }
     })
 }
