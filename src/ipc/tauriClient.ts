@@ -69,9 +69,16 @@ import type {
   WorkerStatus,
 } from "./types";
 import { createLocalSolverLane } from "./localSolver";
-import { operationToEditCommand, opLabelFor, editCommandLabel, type WireEditCommand } from "./tauriCommandMap";
+import {
+  operationToEditCommand,
+  opLabelFor,
+  editCommandLabel,
+  wireOperation,
+  type WireEditCommand,
+} from "./tauriCommandMap";
 import {
   buildAddSketch,
+  buildAddSketchOnFace,
   buildDeleteSketch,
   cloneIdMap,
   createIdMap,
@@ -109,6 +116,7 @@ const CMD = {
   redo: "redo",
   enterSketch: "enter_sketch",
   getSketch: "get_sketch",
+  getSketchRegions: "get_sketch_regions",
   sketchUpsert: "sketch_upsert",
   finishSketch: "finish_sketch",
   cancelSketch: "cancel_sketch",
@@ -116,6 +124,8 @@ const CMD = {
   solveDrag: "solve_drag",
   endGesture: "end_gesture",
   promoteSelection: "promote_selection",
+  faceSketchPlane: "face_sketch_plane",
+  previewOp: "preview_op",
   resolveRefs: "resolve_refs",
 } as const;
 
@@ -128,7 +138,7 @@ const EVT = {
   needsRepair: "needs-repair",
 } as const;
 
-/** L2 preview pacing for the local seam (snappy; there is no backend preview verb). */
+/** Local lane bookkeeping latency; exact Tauri L2 geometry comes from PreviewOp. */
 const PREVIEW_LATENCY_MS = 16;
 
 /**
@@ -194,7 +204,7 @@ interface SketchRegionDto {
   regionId: string;
   outerLoop: string[];
   holes: string[][];
-  previewTriangles?: { positions: number[]; indices: number[] };
+  previewTriangles?: { positions: number[]; indices: number[]; holesSubtracted?: number };
 }
 interface FinishSketchDto {
   regions: SketchRegionDto[];
@@ -544,6 +554,7 @@ export function createTauriClient(): CadClient {
     frontendId: string,
     planeKind: SketchPlaneKind,
     adoptId?: string,
+    host?: { bodyId: string; elementId: string; plane: SketchPlane; worldPoint?: [number, number, number] },
   ): Promise<SketchIdMap> {
     const existing = sketchMaps.get(frontendId);
     if (existing) return existing;
@@ -552,29 +563,69 @@ export function createTauriClient(): CadClient {
     const backendSketchId = adoptId ?? mintUuid();
     const map = createIdMap(backendSketchId, planeKind);
     sketchMaps.set(frontendId, map);
-    // Create the backend sketch (a fresh world-plane sketch; SketchData defaults).
-    // NOTE: this fires an edit + regen; the sketch appears in the tree via
-    // projection-updated hydration. (custom/host-face planes → M2+; see M2 notes.)
-    await call<DocumentProjectionDto>(CMD.applyEditCommand, {
-      // Single source of truth for tree names: derive the next free "Sketch N" from
-      // the live projection store (kills the duplicate-name drift a private counter
-      // caused after reopen/undo).
-      command: buildAddSketch(backendSketchId, nextSketchName(documentStore.getState().sketches), planeKind),
-    });
+    const name = nextSketchName(documentStore.getState().sketches);
+    // Create the backend sketch. This fires an edit + regen; the sketch appears in
+    // the tree via projection-updated hydration.
+    //
+    // A HOST-FACE sketch carries the backend-resolved basis plus the typed face
+    // ref, and rides the wire as `plane.kind: "custom"` — `plane_kind_str` has
+    // always mapped a hostFace attachment that way and `WireSketch::parse_plane`
+    // has always accepted an arbitrary custom basis, so no worker change is
+    // involved. The basis is FROZEN here (V1 policy — see `buildAddSketchOnFace`).
+    const command = host
+      ? buildAddSketchOnFace(backendSketchId, name, host.plane, {
+          primary: {
+            // The core EditCommand serde wants the BARE uuid (`BodyId` is
+            // transparent); promote/pick hand us the `body_<uuid>` worker form.
+            bodyId: host.bodyId.startsWith("body_") ? host.bodyId.slice("body_".length) : host.bodyId,
+            elementId: host.elementId,
+            kind: "face",
+          },
+          ...(host.worldPoint ? { anchor: { worldPoint: host.worldPoint } } : {}),
+        })
+      : buildAddSketch(backendSketchId, name, planeKind);
+    await call<DocumentProjectionDto>(CMD.applyEditCommand, { command });
     return map;
   }
 
-  // The two-level PREVIEW lane stays LOCAL (no backend preview verb — see header).
-  // Commit routes a previewed op through the REAL apply_edit_command path above.
+  // One preview lane owns pacing/session state. Exact meshes come from PreviewOp;
+  // commit routes the same candidate through apply_edit_command.
   const lane = createLocalSolverLane({
     commit: applyOperation,
     latencyMs: () => PREVIEW_LATENCY_MS,
+    // MODEL-OPS W3: the drag-time exact mesh now comes from the REAL kernel.
+    // Nothing is committed — the worker runs the op on a throwaway copy of its
+    // head — so a Cut preview actually subtracts and every op is previewable.
+    previewOp: async (op, sketchId) => {
+      const res = await call<{
+        snapshotId: number;
+        bodies: { bodyId: string; mesh: number[] | ArrayBuffer }[];
+        changedBodies?: string[];
+        deletedBodies?: string[];
+        needsRepair?: unknown[];
+      }>(CMD.previewOp, {
+        op: wireOperation(op),
+        sketchId: sketchId ?? null,
+        lod: "coarse",
+        expectedSnapshotId: currentSnapshotId || null,
+      });
+      return {
+        bodies: res.bodies.map((b) => ({
+          bodyId: b.bodyId,
+          mesh: b.mesh instanceof ArrayBuffer ? b.mesh : new Uint8Array(b.mesh).buffer,
+        })),
+        changedBodies: res.changedBodies,
+        deletedBodies: res.deletedBodies,
+        needsRepair: res.needsRepair,
+      };
+    },
   });
 
   async function enterSketch(target: EnterSketchTarget): Promise<SketchSession> {
     await ensureEvents();
     const frontendId = frontendIdFor(target);
-    const planeKind: SketchPlaneKind = typeof target === "string" ? "XY" : target.newOnPlane;
+    const planeKind: SketchPlaneKind =
+      typeof target === "string" ? "XY" : "newOnFace" in target ? "custom" : target.newOnPlane;
     // Re-entry after reopen: a persisted sketch id is present in the projection
     // store but the in-memory id-map is empty (documentStore.sketches keys ARE valid
     // backend SketchId strings — the Rust projection uses `id.to_string()`). Adopt
@@ -602,7 +653,16 @@ export function createTauriClient(): CadClient {
       const adoptId = typeof target !== "string" && target.sketchId === undefined ? frontendId : undefined;
       // ensureBackendSketch fires AddSketch ONLY when there is no existing map.
       firedAddSketch = !sketchMaps.has(frontendId);
-      map = await ensureBackendSketch(frontendId, planeKind, adoptId);
+      const host =
+        typeof target !== "string" && "newOnFace" in target
+          ? {
+              bodyId: target.newOnFace.bodyId,
+              elementId: target.newOnFace.elementId,
+              worldPoint: target.newOnFace.worldPoint,
+              plane: target.plane,
+            }
+          : undefined;
+      map = await ensureBackendSketch(frontendId, planeKind, adoptId, host);
     }
     let dto: SketchSessionDto;
     try {
@@ -682,13 +742,27 @@ export function createTauriClient(): CadClient {
     const map = sketchMaps.get(sketchId);
     if (!map) throw new Error(`finishSketch: unknown sketch ${sketchId} (enter first)`);
     const dto = await call<FinishSketchDto>(CMD.finishSketch, { sketchId: map.backendSketchId });
-    const regions: SketchRegion[] = dto.regions.map((r) => ({
+    const regions = dto.regions.map((r): SketchRegion => ({
       regionId: r.regionId,
       outerLoop: r.outerLoop,
       holes: r.holes,
       previewTriangles: r.previewTriangles,
     }));
     lane.cacheFinishedRegions(sketchId, regions); // feed the local L2 preview
+    return { regions };
+  }
+
+  /** Read-only region derivation for model-mode selection and unopened sketches. */
+  async function getSketchRegions(sketchId: string): Promise<FinishSketchResult> {
+    const backendSketchId = sketchMaps.get(sketchId)?.backendSketchId ?? sketchId;
+    const dto = await call<FinishSketchDto>(CMD.getSketchRegions, { sketchId: backendSketchId });
+    const regions = dto.regions.map((r): SketchRegion => ({
+      regionId: r.regionId,
+      outerLoop: r.outerLoop,
+      holes: r.holes,
+      previewTriangles: r.previewTriangles,
+    }));
+    lane.cacheFinishedRegions(sketchId, regions);
     return { regions };
   }
 
@@ -820,6 +894,30 @@ export function createTauriClient(): CadClient {
   }
 
   // ── Promotion (pick → ElementId) ──────────────────────────────────────────
+  /**
+   * Resolve a picked planar face to its sketch plane. The backend reads the
+   * KERNEL's face descriptor (`QueryElement`) and applies the lock-tested
+   * in-plane axis rule, so the basis is authoritative and replay-stable — a
+   * frame derived here from a tessellated triangle normal would be neither.
+   * A non-planar face is rejected by the backend, surfacing as an ApiError.
+   */
+  async function faceSketchPlane(bodyId: string, elementId: string): Promise<SketchPlane> {
+    // Same `body_<uuid>` wire form promoteSelection uses (document-changed hands
+    // the frontend a bare uuid).
+    const wireBodyId = bodyId.startsWith("body_") ? bodyId : `body_${bodyId}`;
+    const dto = await call<{
+      origin: [number, number, number];
+      xAxis: [number, number, number];
+      yAxis: [number, number, number];
+      normal: [number, number, number];
+    }>(CMD.faceSketchPlane, {
+      snapshotId: currentSnapshotId,
+      bodyId: wireBodyId,
+      elementId,
+    });
+    return { kind: "custom", ...dto };
+  }
+
   async function promoteSelection(bodyId: string, picks: PromotePick[]): Promise<PromotedElement[]> {
     // promote_selection wants the `body_<uuid>` wire form; document-changed hands
     // the frontend a bare uuid, so prefix it here (get_mesh keeps the bare form).
@@ -940,6 +1038,7 @@ export function createTauriClient(): CadClient {
     // ── Sketch solver lane + drag gesture + promotion (REAL commands) ─────────
     enterSketch,
     getSketch,
+    getSketchRegions,
     sketchUpsert,
     finishSketch,
     cancelSketch,
@@ -948,6 +1047,7 @@ export function createTauriClient(): CadClient {
     solveDrag,
     endGesture,
     promoteSelection,
+    faceSketchPlane,
     resolveRefs,
     applyEditCommand,
     getOperationParams,

@@ -7,6 +7,7 @@ import * as THREE from "three";
 import {
   linePickThreshold,
   choosePreferredHit,
+  secondaryHitWins,
   resolvePick,
   pickKey,
 } from "./Picker";
@@ -70,6 +71,20 @@ describe("choosePreferredHit — edge wins within tolerance, loses when occluded
   });
 });
 
+describe("secondaryHitWins — sketch/body depth arbitration", () => {
+  it("lets a numerically coplanar profile win over its host face", () => {
+    expect(secondaryHitWins(100, 100.0005)).toBe(true);
+  });
+
+  it("does not select a profile through an occluding body", () => {
+    expect(secondaryHitWins(100, 100.01)).toBe(false);
+  });
+
+  it("lets a profile in front of a body win", () => {
+    expect(secondaryHitWins(100, 99)).toBe(true);
+  });
+});
+
 describe("resolvePick — intersection → PickHit via the registry", () => {
   const entry = boxEntry();
   const lookup = (id: string) => (id === "body1" ? entry : undefined);
@@ -80,6 +95,7 @@ describe("resolvePick — intersection → PickHit via the registry", () => {
     expect(hit!.kind).toBe("face");
     expect(hit!.topoKey).toBe("f:0");
     expect(hit!.elementId).toBeUndefined(); // pure TopoKeys (no IDS_HAVE_ELEMENTIDS)
+    expect(hit!.distance).toBe(10);
     expect(hit!.worldPos.x).toBe(40);
     expect(hit!.surfaceHint?.normal).toEqual([1, 0, 0]);
   });

@@ -6,11 +6,13 @@
 #include <cmath>
 #include <cstring>
 #include <optional>
+#include <unordered_set>
 #include <utility>
 
 #include "loop/LoopDetector.h"
+#include "loop/PolygonFill.h"
+#include "loop/RegionTable.h"
 #include "loop/RegionUtils.h"
-#include "sketch/RegionId.h"
 #include "sketch/SketchPoint.h"
 
 namespace onecad::protocol {
@@ -109,87 +111,10 @@ std::string upsert_state(int dof, bool conflicting, bool redundant) {
     return "UnderConstrained";
 }
 
-// --- preview triangulation (ear clipping over the outer loop polygon) --------
-
-std::string strip_seg(const std::string& id) {
-    const std::size_t at = id.find("#seg");
-    return at == std::string::npos ? id : id.substr(0, at);
-}
-
-double signed_area(const std::vector<sk::Vec2d>& poly) {
-    double a = 0.0;
-    for (std::size_t i = 0, n = poly.size(); i < n; ++i) {
-        const auto& p = poly[i];
-        const auto& q = poly[(i + 1) % n];
-        a += p.x * q.y - q.x * p.y;
-    }
-    return 0.5 * a;
-}
-
-bool point_in_triangle(double px, double py, const sk::Vec2d& a, const sk::Vec2d& b,
-                       const sk::Vec2d& c) {
-    const double d1 = (px - b.x) * (a.y - b.y) - (a.x - b.x) * (py - b.y);
-    const double d2 = (px - c.x) * (b.y - c.y) - (b.x - c.x) * (py - c.y);
-    const double d3 = (px - a.x) * (c.y - a.y) - (c.x - a.x) * (py - a.y);
-    const bool has_neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
-    const bool has_pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
-    return !(has_neg && has_pos);
-}
-
-// Ear-clip a simple polygon (assumed non-self-intersecting). Emits triangle
-// index triples into the polygon's own vertex list. Holes are NOT subtracted
-// (documented V1 limitation — see SolverLane region docs).
-std::vector<std::uint32_t> ear_clip(const std::vector<sk::Vec2d>& poly_in) {
-    std::vector<std::uint32_t> tris;
-    std::vector<sk::Vec2d> poly = poly_in;
-    // Drop a trailing point coincident with the first.
-    if (poly.size() >= 2) {
-        const auto& f = poly.front();
-        const auto& l = poly.back();
-        if (std::abs(f.x - l.x) < 1e-12 && std::abs(f.y - l.y) < 1e-12) poly.pop_back();
-    }
-    const std::size_t n = poly.size();
-    if (n < 3) return tris;
-
-    std::vector<std::uint32_t> v(n);
-    for (std::size_t i = 0; i < n; ++i) v[i] = static_cast<std::uint32_t>(i);
-    if (signed_area(poly) < 0.0) std::reverse(v.begin(), v.end());  // force CCW
-
-    std::size_t guard = 0;
-    const std::size_t guard_max = n * n + 8;
-    while (v.size() > 2 && guard++ < guard_max) {
-        bool clipped = false;
-        const std::size_t m = v.size();
-        for (std::size_t i = 0; i < m; ++i) {
-            const std::uint32_t ia = v[(i + m - 1) % m];
-            const std::uint32_t ib = v[i];
-            const std::uint32_t ic = v[(i + 1) % m];
-            const sk::Vec2d& a = poly[ia];
-            const sk::Vec2d& b = poly[ib];
-            const sk::Vec2d& c = poly[ic];
-            const double cross = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
-            if (cross <= 0.0) continue;  // reflex or degenerate (CCW convex ear needs >0)
-            bool contains = false;
-            for (std::size_t k = 0; k < m; ++k) {
-                const std::uint32_t iv = v[k];
-                if (iv == ia || iv == ib || iv == ic) continue;
-                if (point_in_triangle(poly[iv].x, poly[iv].y, a, b, c)) {
-                    contains = true;
-                    break;
-                }
-            }
-            if (contains) continue;
-            tris.push_back(ia);
-            tris.push_back(ib);
-            tris.push_back(ic);
-            v.erase(v.begin() + static_cast<long>(i));
-            clipped = true;
-            break;
-        }
-        if (!clipped) break;  // no ear found (degenerate) — stop
-    }
-    return tris;
-}
+// Preview triangulation lives in loop/PolygonFill.{h,cpp} — holes ARE subtracted
+// so the fill matches the solid the kernel builds from the same region. See that
+// header for the bridge/shared-index invariant the frontend ring derivation
+// depends on.
 
 void append_f32(std::vector<std::uint8_t>& buf, float f) {
     std::uint8_t tmp[4];
@@ -201,18 +126,6 @@ void append_u32(std::vector<std::uint8_t>& buf, std::uint32_t u) {
     std::uint8_t tmp[4];
     std::memcpy(tmp, &u, 4);
     buf.insert(buf.end(), tmp, tmp + 4);
-}
-
-// Map a loop's internal edge ids to wire ids (dedup consecutive #seg splits).
-std::vector<std::string> loop_wire_edges(const loop::Loop& lp, const wire::WireIndex& index) {
-    std::vector<std::string> out;
-    for (const auto& e : lp.wire.edges) {
-        const std::string base = strip_seg(e);
-        auto it = index.internal_edge_to_wire.find(base);
-        const std::string wid = it != index.internal_edge_to_wire.end() ? it->second : base;
-        if (out.empty() || out.back() != wid) out.push_back(wid);
-    }
-    return out;
 }
 
 }  // namespace
@@ -257,13 +170,17 @@ Envelope SolverLane::on_upsert(const Envelope& req) {
     wire::TranslateResult tr = wire::translate(args);
     if (!tr.ok) return err(req, "OP_FAILED", "SketchUpsert: " + tr.error);
 
-    tr.sketch->solve();  // full solve so dof/state reflect the solved system
+    const sk::SolveResult solve = tr.sketch->solve();
     const int dof = tr.sketch->getDegreesOfFreedom();
     const auto conflicting = tr.sketch->getConflictingConstraints();
     const bool redundant = tr.sketch->hasRedundantConstraints();
     const std::string state = upsert_state(dof, !conflicting.empty(), redundant);
 
-    const std::uint64_t revision = store_.upsert(sketch_id, args);
+    json stored_args = args;
+    if (solve.success) {
+        wire::apply_solved_positions(stored_args, *tr.sketch, tr.index);
+    }
+    const std::uint64_t revision = store_.upsert(sketch_id, std::move(stored_args));
 
     json result = {
         {"upserted", true},
@@ -476,57 +393,84 @@ Envelope SolverLane::on_regions(const Envelope& req) {
 
     wire::TranslateResult tr = wire::translate(stored->wire_args);
     if (!tr.ok) return err(req, "OP_FAILED", "SketchRegions: " + tr.error);
+    const sk::SolveResult solve = tr.sketch->solve();
+    if (!solve.success) {
+        const std::string detail =
+            solve.errorMessage.empty() ? "constraint solve did not converge" : solve.errorMessage;
+        return err(req, "OP_FAILED", "SketchRegions: solve failed: " + detail);
+    }
 
     loop::LoopDetector detector;
     detector.setConfig(loop::makeRegionDetectionConfig());
     const loop::LoopDetectionResult det = detector.detect(*tr.sketch);
+    const auto map_edge = [&](const sk::EntityID& internalId) {
+        const auto it = tr.index.internal_edge_to_wire.find(internalId);
+        return it != tr.index.internal_edge_to_wire.end() ? it->second : internalId;
+    };
+    const loop::RegionTable table = loop::buildRegionTable(
+        det, map_edge, sk::constants::COINCIDENCE_TOLERANCE);
+    if (!table.success) {
+        return err(req, "OP_FAILED", "SketchRegions: " + table.errorMessage);
+    }
 
     json regions = json::array();
     std::vector<std::uint8_t> tail;
     json bin_sections = json::array();
+    std::unordered_set<std::string> section_names;
 
-    // One region per detected FACE (outer loop + hole loops) — matches the
-    // LoopDetector face semantics (corpus i: square-with-hole => 1 region, 1 hole).
-    for (const auto& face : det.faces) {
-        const std::vector<std::string> outer = loop_wire_edges(face.outerLoop, tr.index);
-        const std::string region_id =
-            onecad::region::derive_region_id(outer, onecad::region::Winding::Ccw);
-
+    for (const loop::RegionDefinition& region_def : table.regions) {
         json holes = json::array();
-        for (const auto& hole : face.innerLoops) {
-            holes.push_back(loop_wire_edges(hole, tr.index));
+        for (const std::vector<std::string>& hole : region_def.holeWireEdges) {
+            holes.push_back(hole);
         }
 
-        // previewTriangles: f32 xyz positions (z = 0, sketch-local) then u32
-        // indices. Holes are NOT subtracted from the fill (V1 limitation).
-        const std::vector<sk::Vec2d>& poly = face.outerLoop.polygon;
-        const std::vector<std::uint32_t> indices = ear_clip(poly);
-        const std::size_t vertex_count =
-            (poly.size() >= 2 && std::abs(poly.front().x - poly.back().x) < 1e-12 &&
-             std::abs(poly.front().y - poly.back().y) < 1e-12)
-                ? poly.size() - 1
-                : poly.size();
+        std::vector<std::vector<sk::Vec2d>> hole_polys;
+        hole_polys.reserve(region_def.holes.size());
+        for (const loop::Loop& hole : region_def.holes) {
+            hole_polys.push_back(hole.polygon);
+        }
+
+        const loop::RegionFill fill =
+            loop::fill_region(region_def.outerLoop.polygon, hole_polys);
+        if (fill.holes_subtracted != region_def.holes.size()) {
+            return err(req, "OP_FAILED",
+                       "SketchRegions: failed to triangulate every hole for region " +
+                           region_def.id);
+        }
+        // Fail closed on a stalled ear clip: a partial triangle list reads as a
+        // wrong boundary downstream (the frontend recovers extrusion rings from
+        // single-use triangulation edges), never publish it.
+        if (!fill.complete) {
+            return err(req, "OP_FAILED",
+                       "SketchRegions: incomplete triangulation for region " + region_def.id);
+        }
+        const std::vector<std::uint32_t>& indices = fill.indices;
+        const std::size_t vertex_count = fill.verts.size();
 
         const std::uint64_t off = tail.size();
         for (std::size_t i = 0; i < vertex_count; ++i) {
-            append_f32(tail, static_cast<float>(poly[i].x));
-            append_f32(tail, static_cast<float>(poly[i].y));
+            append_f32(tail, static_cast<float>(fill.verts[i].x));
+            append_f32(tail, static_cast<float>(fill.verts[i].y));
             append_f32(tail, 0.0f);
         }
         for (std::uint32_t idx : indices) append_u32(tail, idx);
         const std::uint64_t len = tail.size() - off;
 
-        const std::string section = "region:" + region_id;
+        const std::string section = "region:" + region_def.id;
+        if (!section_names.insert(section).second) {
+            return err(req, "OP_FAILED", "SketchRegions: duplicate binary section " + section);
+        }
         bin_sections.push_back({{"name", section}, {"off", off}, {"len", len}});
 
         json region = {
-            {"regionId", region_id},
-            {"outerLoop", outer},
+            {"regionId", region_def.id},
+            {"outerLoop", region_def.outerWireEdges},
             {"holes", holes},
             {"previewTriangles",
              {{"format", "f32xyz+u32idx"},
               {"vertexCount", vertex_count},
               {"triangleCount", indices.size() / 3},
+              {"holesSubtracted", fill.holes_subtracted},
               {"bin", section}}},
         };
         regions.push_back(std::move(region));

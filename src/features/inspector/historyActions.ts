@@ -41,11 +41,20 @@ function applyEditResult(res: ApplyOperationResult): void {
 function toFeatureMeta(f: {
   id: string;
   kind: FeatureMeta["kind"];
+  opType?: string;
   label: string;
   valueText: string;
   status: FeatureMeta["status"];
 }): FeatureMeta {
-  return { id: f.id, kind: f.kind, label: f.label, valueText: f.valueText, status: f.status };
+  return {
+    id: f.id,
+    kind: f.kind,
+    // Re-edits route on the exact authored opType, not the folded `kind` bucket.
+    opType: f.opType,
+    label: f.label,
+    valueText: f.valueText,
+    status: f.status,
+  };
 }
 
 /** Transient success confirmation (auto-dismisses). */

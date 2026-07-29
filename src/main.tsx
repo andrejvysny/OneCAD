@@ -11,13 +11,15 @@ if (import.meta.env.DEV) {
     import("./stores/viewportStore"),
     import("./stores/toolStore"),
     import("./stores/settingsStore"),
-  ]).then(([doc, sketch, viewport, tool, settings]) => {
+    import("./stores/selectionStore"),
+  ]).then(([doc, sketch, viewport, tool, settings, selection]) => {
     (window as unknown as Record<string, unknown>).__stores = {
       document: doc.documentStore,
       sketch: sketch.sketchStore,
       viewport: viewport.viewportStore,
       tool: tool.toolStore,
       settings: settings.settingsStore,
+      selection: selection.selectionStore,
     };
   });
 }

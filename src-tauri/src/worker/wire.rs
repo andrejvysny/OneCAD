@@ -67,7 +67,7 @@ use super::lod_str;
 // map (identical strings ⇒ identical uuids ⇒ identical strings), so it is self-healing
 // across reopen and cannot be cross-contaminated between documents/tests.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{OnceLock, RwLock};
 
 use onecad_core::document::body::split_child_uuid;
@@ -230,35 +230,53 @@ pub fn execute_plan_args(req: &PlanRequest) -> Value {
 /// uuid, but the worker keys its `BodyStore` by `body_<opId>`, so a bare uuid would
 /// never resolve (REF_UNRESOLVED / "target body not found").
 fn wire_op(op: &PlannedOp) -> Value {
-    let op_val = serde_json::to_value(&op.operation).unwrap_or(Value::Null);
-    let (op_type, mut params) = match &op.operation {
+    let mut wire = lower_operation(&op.operation, &op.inputs, &op.record_id.to_string());
+    wire["stepIndex"] = json!(op.step_index);
+    wire["determinism"] = serde_json::to_value(&op.determinism).unwrap_or(Value::Null);
+    wire
+}
+
+/// Canonical worker operation for drag preview.
+///
+/// Preview and ExecutePlan MUST lower the typed core [`Operation`] through this
+/// same path. In particular, this lifts `profile` to flat `sketchId`/`regionId`,
+/// rewrites every body-bearing UUID to `body_<uuid>`, and derives the same
+/// semantic `inputs[]` a committed operation carries.
+#[must_use]
+pub fn preview_wire_op(operation: &Operation, op_id: &str) -> Value {
+    lower_operation(operation, &operation.derive_inputs(), op_id)
+}
+
+/// Shared typed-operation lowering used by both ExecutePlan and PreviewOp.
+fn lower_operation(
+    operation: &Operation,
+    inputs: &onecad_core::document::record::OperationInputs,
+    op_id: &str,
+) -> Value {
+    let op_val = serde_json::to_value(operation).unwrap_or(Value::Null);
+    let (op_type, mut params) = split_operation(operation, op_val);
+    to_wire_body_form(&mut params);
+    lift_profile_to_params(&mut params);
+    json!({
+        "opType": op_type,
+        "opId": op_id,
+        "inputs": wire_op_inputs(operation, inputs),
+        "params": params,
+    })
+}
+
+fn split_operation(operation: &Operation, op_val: Value) -> (Value, Value) {
+    match operation {
         Operation::Known(_) => (
             op_val.get("opType").cloned().unwrap_or(Value::Null),
             op_val.get("params").cloned().unwrap_or(Value::Null),
         ),
         Operation::Opaque(_) => {
             let mut obj = op_val.as_object().cloned().unwrap_or_default();
-            let t = obj.remove("opType").unwrap_or(Value::Null);
-            (t, Value::Object(obj))
+            let op_type = obj.remove("opType").unwrap_or(Value::Null);
+            (op_type, Value::Object(obj))
         }
-    };
-    to_wire_body_form(&mut params);
-    lift_profile_to_params(&mut params);
-    json!({
-        "opType": op_type,
-        "opId": op.record_id.to_string(),
-        // The op's TIMELINE step index (SCHEMA §7.3). Load-bearing for an INCREMENTAL
-        // plan (start_step > 0): the worker keys `lastValidStep` / `perStepResults` on
-        // it, and Rust's prefix-echo verification maps `lastValidStep` back through
-        // `planned_steps`. Omitting it made the worker fall back to the execution-order
-        // index (0-based), so an incremental plan mis-reported its last valid step (a
-        // from-0 plan's exec index equals its step index, so the bug was latent until
-        // checkpoints enabled incremental plans, M5a).
-        "stepIndex": op.step_index,
-        "inputs": wire_op_inputs(op),
-        "params": params,
-        "determinism": serde_json::to_value(&op.determinism).unwrap_or(Value::Null),
-    })
+    }
 }
 
 /// Lifts the Rust-core `profile` (`{sketchId, regionId}`, a `SketchRegionRef`) to
@@ -349,13 +367,16 @@ fn to_wire_body_form(value: &mut Value) {
 /// `bodyId` is rendered in the worker's `body_<uuid>` wire form (SCHEMA §2). The
 /// extrude *profile* rides in `params` (`sketchId`/first region) — the worker reads
 /// it there — so a Blind/NewBody extrude carries no `inputs`.
-fn wire_op_inputs(op: &PlannedOp) -> Value {
-    let refs: Vec<Value> = match &op.operation {
+fn wire_op_inputs(
+    operation: &Operation,
+    inputs: &onecad_core::document::record::OperationInputs,
+) -> Value {
+    let refs: Vec<Value> = match operation {
         Operation::Known(KnownOperation::Fillet(p)) => {
-            edge_input_refs(&p.edges, &p.edge_ids, &op.inputs.bodies)
+            edge_input_refs(&p.edges, &p.edge_ids, &inputs.bodies)
         }
         Operation::Known(KnownOperation::Chamfer(p)) => {
-            edge_input_refs(&p.edges, &p.edge_ids, &op.inputs.bodies)
+            edge_input_refs(&p.edges, &p.edge_ids, &inputs.bodies)
         }
         Operation::Known(KnownOperation::Boolean(p)) => {
             vec![body_input_ref(p.target_body), body_input_ref(p.tool_body)]
@@ -365,7 +386,7 @@ fn wire_op_inputs(op: &PlannedOp) -> Value {
         // bare-`edge_ids` fallback); the worker resolves each through the ladder or its
         // partition-tracked binding (§10). The shelled body rides in `params`.
         Operation::Known(KnownOperation::Shell(p)) => {
-            face_input_refs(&p.open_faces, &op.inputs.bodies)
+            face_input_refs(&p.open_faces, &inputs.bodies)
         }
         // Linear/Circular pattern + MirrorBody: a whole-body ref to the SOURCE body
         // (the axis/plane/spacing ride in `params`; §7.3). Mirrors Boolean's body refs;
@@ -938,6 +959,7 @@ pub fn map_error(err: &ErrorObject) -> EngineError {
         ErrorCode::RefUnresolved => op(OpFailureCode::RefUnresolved),
         ErrorCode::GeometryInvalid => op(OpFailureCode::GeometryInvalid),
         ErrorCode::Unsupported => op(OpFailureCode::Unsupported),
+        ErrorCode::StalePreview => op(OpFailureCode::StalePreview),
         ErrorCode::Cancelled => EngineError::Cancelled,
         ErrorCode::ProtocolError => EngineError::Protocol {
             message: err.message.clone(),
@@ -1103,37 +1125,138 @@ pub fn parse_solve_drag(result: &Value) -> DragSolveDto {
 }
 
 /// Parses a `SketchRegions` result + its response binary tail into region DTOs.
-/// `previewTriangles` bins are decoded from the tail (f32 xyz then u32 indices;
-/// SCHEMA §7.4) into `(u,v)` positions the frontend fill consumes.
-#[must_use]
+/// Malformed metadata or geometry is a protocol failure, never an empty/partial
+/// successful result.
+///
+/// # Errors
+/// A protocol-contract reason for missing fields, invalid bins, or invalid
+/// triangulation.
 pub fn parse_sketch_regions(
+    expected_sketch_id: &str,
     result: &Value,
     bin_sections: &[BinSection],
     tail: &[u8],
-) -> Vec<SketchRegionDto> {
-    let Some(arr) = result.get("regions").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    arr.iter()
-        .map(|r| SketchRegionDto {
-            region_id: r
-                .get("regionId")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            outer_loop: str_array(r.get("outerLoop")),
-            holes: r
-                .get("holes")
-                .and_then(Value::as_array)
-                .map(|hs| hs.iter().map(|h| str_array(Some(h))).collect())
-                .unwrap_or_default(),
-            preview_triangles: parse_preview_triangles(
-                r.get("previewTriangles"),
-                bin_sections,
-                tail,
-            ),
+) -> Result<Vec<SketchRegionDto>, String> {
+    validate_sketch_region_header(expected_sketch_id, result)?;
+    let regions = result
+        .get("regions")
+        .and_then(Value::as_array)
+        .ok_or("SketchRegions: missing/invalid regions array")?;
+    if regions.is_empty() {
+        if bin_sections.is_empty() && tail.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Err("SketchRegions: empty regions must have empty binary data".into());
+    }
+
+    let sections = validate_bin_sections("SketchRegions", bin_sections, tail)?;
+    let mut region_ids = HashSet::with_capacity(regions.len());
+    let mut referenced_bins = HashSet::with_capacity(regions.len());
+    let mut parsed = Vec::with_capacity(regions.len());
+    for (index, region) in regions.iter().enumerate() {
+        let (dto, bin) = parse_sketch_region(index, region, &sections, tail)?;
+        if !region_ids.insert(dto.region_id.clone()) {
+            return Err(format!(
+                "SketchRegions: duplicate regionId {:?}",
+                dto.region_id
+            ));
+        }
+        if !referenced_bins.insert(bin.clone()) {
+            return Err(format!("SketchRegions: binary section {bin:?} reused"));
+        }
+        parsed.push(dto);
+    }
+    reject_unreferenced_sections("SketchRegions", &sections, &referenced_bins)?;
+    Ok(parsed)
+}
+
+fn validate_sketch_region_header(expected_sketch_id: &str, result: &Value) -> Result<(), String> {
+    let sketch_id = result
+        .get("sketchId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or("SketchRegions: missing/invalid sketchId")?;
+    if sketch_id != expected_sketch_id {
+        return Err(format!(
+            "SketchRegions: sketchId mismatch; expected {expected_sketch_id:?}, got {sketch_id:?}"
+        ));
+    }
+    result
+        .get("sketchRevision")
+        .and_then(Value::as_u64)
+        .ok_or("SketchRegions: missing/invalid sketchRevision")?;
+    Ok(())
+}
+
+fn parse_sketch_region(
+    index: usize,
+    region: &Value,
+    sections: &HashMap<&str, &BinSection>,
+    tail: &[u8],
+) -> Result<(SketchRegionDto, String), String> {
+    let context = format!("SketchRegions: region[{index}]");
+    let region_id = required_nonempty_string(region.get("regionId"), &context, "regionId")?;
+    let outer_loop =
+        required_nonempty_string_array(region.get("outerLoop"), &context, "outerLoop")?;
+    let holes = parse_region_holes(region.get("holes"), &context)?;
+    let (triangles, bin) = parse_preview_triangles(
+        region.get("previewTriangles"),
+        holes.len(),
+        sections,
+        tail,
+        &context,
+    )?;
+    Ok((
+        SketchRegionDto {
+            region_id,
+            outer_loop,
+            holes,
+            preview_triangles: Some(triangles),
+        },
+        bin,
+    ))
+}
+
+fn parse_region_holes(value: Option<&Value>, context: &str) -> Result<Vec<Vec<String>>, String> {
+    let holes = value
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{context}: missing/invalid holes array"))?;
+    holes
+        .iter()
+        .enumerate()
+        .map(|(index, hole)| {
+            required_nonempty_string_array(Some(hole), context, &format!("holes[{index}]"))
         })
         .collect()
+}
+
+fn required_nonempty_string_array(
+    value: Option<&Value>,
+    context: &str,
+    field: &str,
+) -> Result<Vec<String>, String> {
+    let values = value
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{context}: missing/invalid {field} array"))?;
+    if values.is_empty() {
+        return Err(format!("{context}: {field} must not be empty"));
+    }
+    values
+        .iter()
+        .map(|value| required_nonempty_string(Some(value), context, field))
+        .collect()
+}
+
+fn required_nonempty_string(
+    value: Option<&Value>,
+    context: &str,
+    field: &str,
+) -> Result<String, String> {
+    value
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("{context}: missing/invalid {field} string"))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1158,6 +1281,64 @@ pub fn acquire_element_ids_args(req: &AcquireRequest) -> Value {
         "snapshotId": req.snapshot_id.0,
         "bodyId": body_id_wire(req.body),
         "picks": picks,
+    })
+}
+
+/// `QueryElement` args (SCHEMA §7.5) — look an element up inside a snapshot.
+#[must_use]
+pub fn query_element_args(snapshot: SnapshotId, body: BodyId, element: &str) -> Value {
+    json!({
+        "snapshotId": snapshot.0,
+        // The worker's BodyStore is keyed `body_<uuid>` — the same wire-form rule
+        // every other body-bearing param follows (M2-R).
+        "bodyId": body_id_wire(body),
+        "elementId": element,
+    })
+}
+
+/// Parses a `QueryElement` result. `None` when the element is absent from the
+/// snapshot (`present: false`), so a stale pick reads as "gone", not as a face at
+/// the origin.
+#[must_use]
+pub fn parse_query_element(result: &Value) -> Option<crate::dto::ElementInfoDto> {
+    if result.get("present").and_then(Value::as_bool) == Some(false) {
+        return None;
+    }
+    let d = result.get("descriptor");
+    let vec3 = |key: &str, fallback: [f64; 3]| -> [f64; 3] {
+        d.and_then(|d| d.get(key))
+            .and_then(Value::as_array)
+            .filter(|a| a.len() >= 3)
+            .map(|a| {
+                let g = |i: usize| a[i].as_f64().unwrap_or(0.0);
+                [g(0), g(1), g(2)]
+            })
+            .unwrap_or(fallback)
+    };
+    let str_at = |key: &str| {
+        result
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    Some(crate::dto::ElementInfoDto {
+        element_id: str_at("elementId"),
+        topo_key: str_at("topoKey"),
+        body_id: str_at("bodyId"),
+        kind: str_at("kind"),
+        surface_type: d
+            .and_then(|d| d.get("surfaceType"))
+            .and_then(Value::as_i64)
+            // -1, not 0: 0 IS `GeomAbs_Plane`, so a missing descriptor must never
+            // read as "this is a plane".
+            .unwrap_or(-1),
+        center: vec3("center", [0.0, 0.0, 0.0]),
+        normal: vec3("normal", [0.0, 0.0, 1.0]),
+        has_normal: d
+            .and_then(|d| d.get("hasNormal"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -1493,38 +1674,222 @@ fn parse_positions(v: Option<&Value>) -> BTreeMap<String, [f64; 2]> {
         .collect()
 }
 
-/// Decodes one region's `previewTriangles` bin (f32 xyz vertices then u32
-/// indices) into `(u,v)` positions + triangle indices.
+/// Validates the frame-level binary section table shared by region and mesh
+/// parsers. Alignment gaps are permitted; duplicate names, overlap, overflow,
+/// and out-of-tail sections are not.
+pub(super) fn validate_bin_sections<'a>(
+    context: &str,
+    sections: &'a [BinSection],
+    tail: &[u8],
+) -> Result<HashMap<&'a str, &'a BinSection>, String> {
+    if sections.is_empty() && !tail.is_empty() {
+        return Err(format!(
+            "{context}: binary tail present without named sections"
+        ));
+    }
+    let mut by_name = HashMap::with_capacity(sections.len());
+    let mut intervals = Vec::with_capacity(sections.len());
+    for section in sections {
+        if section.name.is_empty() {
+            return Err(format!("{context}: empty binary section name"));
+        }
+        if by_name.insert(section.name.as_str(), section).is_some() {
+            return Err(format!(
+                "{context}: duplicate binary section {:?}",
+                section.name
+            ));
+        }
+        let start = section.off as usize;
+        let end = start
+            .checked_add(section.len as usize)
+            .ok_or_else(|| format!("{context}: binary section range overflow"))?;
+        if end > tail.len() {
+            return Err(format!(
+                "{context}: binary section {:?} out of bounds",
+                section.name
+            ));
+        }
+        intervals.push((start, end, section.name.as_str()));
+    }
+    intervals.sort_unstable_by_key(|interval| interval.0);
+    for pair in intervals.windows(2) {
+        if pair[1].0 < pair[0].1 {
+            return Err(format!(
+                "{context}: binary sections {:?} and {:?} overlap",
+                pair[0].2, pair[1].2
+            ));
+        }
+    }
+    Ok(by_name)
+}
+
+pub(super) fn reject_unreferenced_sections(
+    context: &str,
+    sections: &HashMap<&str, &BinSection>,
+    referenced: &HashSet<String>,
+) -> Result<(), String> {
+    let mut unreferenced: Vec<&str> = sections
+        .keys()
+        .copied()
+        .filter(|name| !referenced.contains(*name))
+        .collect();
+    unreferenced.sort_unstable();
+    if unreferenced.is_empty() && referenced.len() == sections.len() {
+        return Ok(());
+    }
+    Err(format!(
+        "{context}: unreferenced/unexpected binary sections {unreferenced:?}"
+    ))
+}
+
+/// Decodes one required region `previewTriangles` section (f32 xyz vertices then
+/// u32 indices) into planar `(u,v)` positions + triangle indices.
 fn parse_preview_triangles(
     v: Option<&Value>,
-    bin_sections: &[BinSection],
+    hole_count: usize,
+    sections: &HashMap<&str, &BinSection>,
     tail: &[u8],
-) -> Option<PreviewTrianglesDto> {
-    let pt = v?;
-    let section_name = pt.get("bin").and_then(Value::as_str)?;
-    let vertex_count = pt.get("vertexCount").and_then(Value::as_u64).unwrap_or(0) as usize;
-    let triangle_count = pt.get("triangleCount").and_then(Value::as_u64).unwrap_or(0) as usize;
-    let section = bin_sections.iter().find(|s| s.name == section_name)?;
+    context: &str,
+) -> Result<(PreviewTrianglesDto, String), String> {
+    let pt = v
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("{context}: missing/invalid previewTriangles object"))?;
+    if pt.get("format").and_then(Value::as_str) != Some("f32xyz+u32idx") {
+        return Err(format!("{context}: invalid previewTriangles format"));
+    }
+    let section_name = required_nonempty_string(pt.get("bin"), context, "previewTriangles.bin")?;
+    let vertex_count = required_nonzero_count(pt.get("vertexCount"), context, "vertexCount")?;
+    let triangle_count = required_nonzero_count(pt.get("triangleCount"), context, "triangleCount")?;
+    let holes_subtracted = required_holes_subtracted(pt.get("holesSubtracted"), context)?;
+    if holes_subtracted as usize != hole_count {
+        return Err(format!(
+            "{context}: holesSubtracted {holes_subtracted} != holes.len() {hole_count}"
+        ));
+    }
+    let section = sections
+        .get(section_name.as_str())
+        .copied()
+        .ok_or_else(|| format!("{context}: missing binary section {section_name:?}"))?;
+    let expected_len = preview_triangle_payload_len(vertex_count, triangle_count, context)?;
+    if section.len as usize != expected_len {
+        return Err(format!(
+            "{context}: binary section length {} != expected {expected_len}",
+            section.len
+        ));
+    }
     let start = section.off as usize;
-    let end = start + section.len as usize;
-    let bytes = tail.get(start..end)?;
+    let bytes = tail
+        .get(start..start + expected_len)
+        .ok_or_else(|| format!("{context}: binary section out of bounds"))?;
+    let positions = decode_region_positions(bytes, vertex_count, context)?;
+    let indices = decode_region_indices(bytes, vertex_count, triangle_count, context)?;
+    Ok((
+        PreviewTrianglesDto {
+            positions,
+            indices,
+            holes_subtracted,
+        },
+        section_name,
+    ))
+}
 
+fn required_nonzero_count(
+    value: Option<&Value>,
+    context: &str,
+    field: &str,
+) -> Result<usize, String> {
+    let raw = value
+        .and_then(Value::as_u64)
+        .filter(|count| *count > 0)
+        .ok_or_else(|| format!("{context}: missing/invalid nonzero {field}"))?;
+    usize::try_from(raw).map_err(|_| format!("{context}: {field} exceeds usize"))
+}
+
+fn required_holes_subtracted(value: Option<&Value>, context: &str) -> Result<u32, String> {
+    let raw = value
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("{context}: missing/invalid holesSubtracted"))?;
+    u32::try_from(raw).map_err(|_| format!("{context}: holesSubtracted exceeds u32"))
+}
+
+fn preview_triangle_payload_len(
+    vertex_count: usize,
+    triangle_count: usize,
+    context: &str,
+) -> Result<usize, String> {
+    let vertex_bytes = vertex_count
+        .checked_mul(12)
+        .ok_or_else(|| format!("{context}: vertex byte count overflow"))?;
+    let index_bytes = triangle_count
+        .checked_mul(3)
+        .and_then(|count| count.checked_mul(4))
+        .ok_or_else(|| format!("{context}: index byte count overflow"))?;
+    vertex_bytes
+        .checked_add(index_bytes)
+        .ok_or_else(|| format!("{context}: triangle payload length overflow"))
+}
+
+fn decode_region_positions(
+    bytes: &[u8],
+    vertex_count: usize,
+    context: &str,
+) -> Result<Vec<f64>, String> {
     let mut positions = Vec::with_capacity(vertex_count * 2);
-    for i in 0..vertex_count {
-        // xyz f32 per vertex; keep (x, y) — the sketch fill is planar (z == 0).
-        let base = i * 12;
-        let x = f32::from_le_bytes(bytes.get(base..base + 4)?.try_into().ok()?);
-        let y = f32::from_le_bytes(bytes.get(base + 4..base + 8)?.try_into().ok()?);
-        positions.push(f64::from(x));
-        positions.push(f64::from(y));
+    for index in 0..vertex_count {
+        let base = index * 12;
+        let xyz = [
+            read_f32(bytes, base, context)?,
+            read_f32(bytes, base + 4, context)?,
+            read_f32(bytes, base + 8, context)?,
+        ];
+        if xyz.iter().any(|value| !value.is_finite()) {
+            return Err(format!("{context}: vertex[{index}] is non-finite"));
+        }
+        if xyz[2] != 0.0 {
+            return Err(format!("{context}: vertex[{index}] is not plane-local"));
+        }
+        positions.extend([f64::from(xyz[0]), f64::from(xyz[1])]);
     }
-    let idx_base = vertex_count * 12;
-    let mut indices = Vec::with_capacity(triangle_count * 3);
-    for i in 0..(triangle_count * 3) {
-        let o = idx_base + i * 4;
-        indices.push(u32::from_le_bytes(bytes.get(o..o + 4)?.try_into().ok()?));
+    Ok(positions)
+}
+
+fn decode_region_indices(
+    bytes: &[u8],
+    vertex_count: usize,
+    triangle_count: usize,
+    context: &str,
+) -> Result<Vec<u32>, String> {
+    let index_count = triangle_count * 3;
+    let index_base = vertex_count * 12;
+    let mut indices = Vec::with_capacity(index_count);
+    for position in 0..index_count {
+        let index = read_u32(bytes, index_base + position * 4, context)?;
+        if index as u64 >= vertex_count as u64 {
+            return Err(format!(
+                "{context}: triangle index {index} outside vertexCount {vertex_count}"
+            ));
+        }
+        indices.push(index);
     }
-    Some(PreviewTrianglesDto { positions, indices })
+    Ok(indices)
+}
+
+fn read_f32(bytes: &[u8], offset: usize, context: &str) -> Result<f32, String> {
+    let raw: [u8; 4] = bytes
+        .get(offset..offset + 4)
+        .ok_or_else(|| format!("{context}: truncated f32"))?
+        .try_into()
+        .map_err(|_| format!("{context}: invalid f32 width"))?;
+    Ok(f32::from_le_bytes(raw))
+}
+
+fn read_u32(bytes: &[u8], offset: usize, context: &str) -> Result<u32, String> {
+    let raw: [u8; 4] = bytes
+        .get(offset..offset + 4)
+        .ok_or_else(|| format!("{context}: truncated u32"))?
+        .try_into()
+        .map_err(|_| format!("{context}: invalid u32 width"))?;
+    Ok(u32::from_le_bytes(raw))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1784,6 +2149,47 @@ mod solver_wire_tests {
         ConstraintId(Uuid::from_u128(n))
     }
 
+    fn valid_region_response() -> (Value, Vec<BinSection>, Vec<u8>) {
+        let mut tail = Vec::new();
+        for xyz in [[0.0_f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+            for value in xyz {
+                tail.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        for index in [0_u32, 1, 2] {
+            tail.extend_from_slice(&index.to_le_bytes());
+        }
+        let sections = vec![BinSection {
+            name: "region:r0".into(),
+            off: 0,
+            len: tail.len() as u32,
+        }];
+        let result = json!({
+            "sketchId": "sk_1",
+            "sketchRevision": 1,
+            "regions": [{
+                "regionId": "r0",
+                "outerLoop": ["outer"],
+                "holes": [],
+                "previewTriangles": {
+                    "format": "f32xyz+u32idx",
+                    "bin": "region:r0",
+                    "vertexCount": 3,
+                    "triangleCount": 1,
+                    "holesSubtracted": 0
+                }
+            }]
+        });
+        (result, sections, tail)
+    }
+
+    fn assert_region_parse_error(result: &Value, sections: &[BinSection], tail: &[u8]) {
+        assert!(
+            parse_sketch_regions("sk_1", result, sections, tail).is_err(),
+            "malformed SketchRegions response must fail closed"
+        );
+    }
+
     /// A point-referenced line + a circle (center inlined) + two constraints,
     /// translated to the worker `WireSketch` shapes (SCHEMA §7.3/§7.4).
     #[test]
@@ -1925,6 +2331,176 @@ mod solver_wire_tests {
             parse_sketch_upsert("sk_1", &end).conflicting,
             vec!["c-x".to_string()]
         );
+    }
+
+    #[test]
+    fn sketch_regions_preserve_holes_subtracted_evidence() {
+        let mut tail = Vec::new();
+        for xyz in [[0.0_f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+            for value in xyz {
+                tail.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        for index in [0_u32, 1, 2] {
+            tail.extend_from_slice(&index.to_le_bytes());
+        }
+        let sections = vec![BinSection {
+            name: "region:r0".into(),
+            off: 0,
+            len: tail.len() as u32,
+        }];
+        let result = json!({
+            "sketchId": "sk_1",
+            "sketchRevision": 1,
+            "regions": [{
+                "regionId": "r0",
+                "outerLoop": ["outer"],
+                "holes": [["inner"]],
+                "previewTriangles": {
+                    "format": "f32xyz+u32idx",
+                    "bin": "region:r0",
+                    "vertexCount": 3,
+                    "triangleCount": 1,
+                    "holesSubtracted": 1
+                }
+            }]
+        });
+
+        let regions = parse_sketch_regions("sk_1", &result, &sections, &tail).unwrap();
+        let triangles = regions[0].preview_triangles.as_ref().unwrap();
+        assert_eq!(triangles.holes_subtracted, 1);
+        assert_eq!(triangles.indices, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn sketch_regions_require_response_and_region_structure() {
+        let (result, sections, tail) = valid_region_response();
+        for field in ["sketchId", "sketchRevision", "regions"] {
+            let mut malformed = result.clone();
+            malformed.as_object_mut().unwrap().remove(field);
+            assert_region_parse_error(&malformed, &sections, &tail);
+        }
+        let mut wrong_sketch = result.clone();
+        wrong_sketch["sketchId"] = json!("sk_other");
+        assert_region_parse_error(&wrong_sketch, &sections, &tail);
+
+        for field in ["regionId", "outerLoop", "holes", "previewTriangles"] {
+            let mut malformed = result.clone();
+            malformed["regions"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert_region_parse_error(&malformed, &sections, &tail);
+        }
+        let empty = json!({"sketchId": "sk_1", "sketchRevision": 1, "regions": []});
+        assert!(parse_sketch_regions("sk_1", &empty, &[], &[])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn sketch_regions_reject_invalid_loops_holes_and_duplicates() {
+        let (result, sections, tail) = valid_region_response();
+        for invalid_outer in [json!([]), json!([""])] {
+            let mut malformed = result.clone();
+            malformed["regions"][0]["outerLoop"] = invalid_outer;
+            assert_region_parse_error(&malformed, &sections, &tail);
+        }
+        for invalid_holes in [json!([[]]), json!(["not-an-array"]), json!([[""]])] {
+            let mut malformed = result.clone();
+            malformed["regions"][0]["holes"] = invalid_holes;
+            assert_region_parse_error(&malformed, &sections, &tail);
+        }
+        let mut duplicate_region = result.clone();
+        let copy = duplicate_region["regions"][0].clone();
+        duplicate_region["regions"]
+            .as_array_mut()
+            .unwrap()
+            .push(copy);
+        assert_region_parse_error(&duplicate_region, &sections, &tail);
+
+        let mut reused_bin = result.clone();
+        let mut second = reused_bin["regions"][0].clone();
+        second["regionId"] = json!("r1");
+        reused_bin["regions"].as_array_mut().unwrap().push(second);
+        assert_region_parse_error(&reused_bin, &sections, &tail);
+    }
+
+    #[test]
+    fn sketch_regions_reject_invalid_triangle_metadata() {
+        let (result, sections, tail) = valid_region_response();
+        for (field, value) in [
+            ("format", json!("other")),
+            ("vertexCount", json!(0)),
+            ("triangleCount", json!(0)),
+            ("holesSubtracted", json!(1)),
+        ] {
+            let mut malformed = result.clone();
+            malformed["regions"][0]["previewTriangles"][field] = value;
+            assert_region_parse_error(&malformed, &sections, &tail);
+        }
+        for field in ["bin", "vertexCount", "triangleCount", "holesSubtracted"] {
+            let mut malformed = result.clone();
+            malformed["regions"][0]["previewTriangles"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert_region_parse_error(&malformed, &sections, &tail);
+        }
+        let mut wrong_count = result.clone();
+        wrong_count["regions"][0]["previewTriangles"]["triangleCount"] = json!(2);
+        assert_region_parse_error(&wrong_count, &sections, &tail);
+    }
+
+    #[test]
+    fn sketch_regions_reject_invalid_binary_geometry() {
+        let (result, sections, tail) = valid_region_response();
+        let mut bad_index = tail.clone();
+        bad_index[36..40].copy_from_slice(&3_u32.to_le_bytes());
+        assert_region_parse_error(&result, &sections, &bad_index);
+        let mut nonfinite = tail.clone();
+        nonfinite[0..4].copy_from_slice(&f32::NAN.to_le_bytes());
+        assert_region_parse_error(&result, &sections, &nonfinite);
+        let mut off_plane = tail.clone();
+        off_plane[8..12].copy_from_slice(&1_f32.to_le_bytes());
+        assert_region_parse_error(&result, &sections, &off_plane);
+
+        let mut short = sections.clone();
+        short[0].len -= 1;
+        assert_region_parse_error(&result, &short, &tail);
+        let mut out_of_bounds = sections.clone();
+        out_of_bounds[0].off = tail.len() as u32;
+        assert_region_parse_error(&result, &out_of_bounds, &tail);
+    }
+
+    #[test]
+    fn sketch_regions_reject_bad_section_tables_but_allow_alignment_gaps() {
+        let (result, sections, tail) = valid_region_response();
+        let mut duplicate = sections.clone();
+        duplicate.push(sections[0].clone());
+        assert_region_parse_error(&result, &duplicate, &tail);
+        let mut overlap = sections.clone();
+        overlap.push(BinSection {
+            name: "extra".into(),
+            off: 4,
+            len: 4,
+        });
+        assert_region_parse_error(&result, &overlap, &tail);
+        let mut tail_with_extra = tail.clone();
+        tail_with_extra.extend_from_slice(&[0; 4]);
+        let mut unexpected = sections.clone();
+        unexpected.push(BinSection {
+            name: "extra".into(),
+            off: tail.len() as u32,
+            len: 4,
+        });
+        assert_region_parse_error(&result, &unexpected, &tail_with_extra);
+
+        let mut aligned_tail = vec![0; 4];
+        aligned_tail.extend_from_slice(&tail);
+        let mut aligned = sections;
+        aligned[0].off = 4;
+        assert!(parse_sketch_regions("sk_1", &result, &aligned, &aligned_tail).is_ok());
     }
 
     #[test]
@@ -2280,6 +2856,37 @@ mod body_wire_tests {
             w["params"].get("regionId").is_none(),
             "empty regionId is not forwarded (first-region fallback)"
         );
+    }
+
+    #[test]
+    fn preview_and_commit_share_profile_and_body_lowering() {
+        use onecad_core::document::refs::SketchRegionRef;
+        use onecad_core::ids::{RegionId, SketchId};
+
+        let target = BodyId(Uuid::from_u128(0x88));
+        let mut params = extrude_cut(target);
+        params.profile = Some(SketchRegionRef {
+            sketch: SketchId(Uuid::from_u128(0x99)),
+            region: RegionId::new("r_non_first"),
+            extra: Default::default(),
+        });
+        let operation = Operation::Known(KnownOperation::Extrude(params));
+        let planned = planned(operation.clone(), operation.derive_inputs());
+        let committed = wire_op(&planned);
+        let previewed = preview_wire_op(&operation, &planned.record_id.to_string());
+
+        for key in ["opType", "opId", "inputs", "params"] {
+            assert_eq!(
+                previewed[key], committed[key],
+                "PreviewOp and ExecutePlan diverged at {key}"
+            );
+        }
+        assert_eq!(
+            previewed["params"]["targetBodyId"],
+            json!(body_id_wire(target))
+        );
+        assert_eq!(previewed["params"]["regionId"], json!("r_non_first"));
+        assert!(previewed["params"].get("profile").is_none());
     }
 
     #[test]

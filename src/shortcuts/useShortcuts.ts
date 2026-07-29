@@ -69,7 +69,7 @@ function runDeleteSketchSelection(): void {
 }
 
 /**
- * Finish the active sketch → hand it to the model layer to auto-arm extrude
+ * Finish the active sketch → hand it to the model layer for profile selection
  * (Shapr3D flow). DRAIN the sketch mutation queue FIRST: a still-in-flight upsert
  * (fast last click / dimension edit) must settle before regions are computed, else
  * the profile is captured from a stale sketch. THEN flip mode — mode must flip

@@ -41,15 +41,65 @@ function deleteConstraint(id: string): void {
 function selectFeature(id: string): void {
   selectionStore.getState().set([{ kind: "feature", id }]);
 }
+/**
+ * Route a re-edit on the feature's exact `opType`, falling back to the coarse
+ * `kind` for a projection emitted before `opType` existed. The backend folds
+ * Chamfer+Shell into kind `fillet` and the pattern/mirror ops into `boolean`
+ * (`dto.rs feature_kind`), so routing on `kind` alone sent a Chamfer into the
+ * fillet editor and left Shell/patterns/Mirror unreachable on the real lane.
+ */
 function editFeature(item: FeatureMeta): void {
   const c = getModelToolController();
-  if (item.kind === "extrude") c?.editExtrudeFeature(item.id);
-  else if (item.kind === "revolve") c?.editRevolveFeature(item.id);
-  else if (item.kind === "fillet") void c?.editFilletFeature(item.id);
-  else if (item.kind === "shell") void c?.editShellFeature(item.id);
-  else if (item.kind === "linearPattern") c?.editLinearPatternFeature(item.id);
-  else if (item.kind === "circularPattern") c?.editCircularPatternFeature(item.id);
-  else if (item.kind === "mirror") c?.editMirrorFeature(item.id);
+  const what = item.opType ?? kindFallback(item.kind);
+  switch (what) {
+    case "Extrude":
+      c?.editExtrudeFeature(item.id);
+      return;
+    case "Revolve":
+      c?.editRevolveFeature(item.id);
+      return;
+    case "Fillet":
+    case "Chamfer":
+      void c?.editEdgeOpFeature(item.id, what);
+      return;
+    case "Shell":
+      void c?.editShellFeature(item.id);
+      return;
+    case "LinearPattern":
+      c?.editLinearPatternFeature(item.id);
+      return;
+    case "CircularPattern":
+      c?.editCircularPatternFeature(item.id);
+      return;
+    case "MirrorBody":
+      c?.editMirrorFeature(item.id);
+      return;
+    default:
+      // Sketch/Boolean/opaque rows have no parametric editor yet.
+      return;
+  }
+}
+
+/** Best-effort opType for a legacy projection that carries only `kind`. */
+function kindFallback(kind: FeatureMeta["kind"]): string {
+  switch (kind) {
+    case "extrude":
+      return "Extrude";
+    case "revolve":
+      return "Revolve";
+    case "fillet":
+      return "Fillet";
+    case "shell":
+      return "Shell";
+    case "linearPattern":
+      return "LinearPattern";
+    case "circularPattern":
+      return "CircularPattern";
+    case "mirror":
+      return "MirrorBody";
+    default:
+      return "";
+  }
 }
 
 /** Build the per-row history affordances (suppress / roll-to-here / delete). */
@@ -141,15 +191,16 @@ function SelectionState({
   features: FeatureMeta[];
 }) {
   const isBody = sel.kind === "body";
-  const name = bodies[sel.id]?.name ?? sketches[sel.id]?.name ?? "";
-  const statusName = isBody ? "Solid body" : "Sketch";
+  const sketchId = sel.kind === "sketchRegion" ? sel.sketchId : sel.id;
+  const name = bodies[sel.id]?.name ?? sketches[sketchId]?.name ?? "";
+  const statusName = isBody ? "Solid body" : sel.kind === "sketchRegion" ? "Sketch profile" : "Sketch";
   // Body → its full lineage (Sketch 1 / Extrude / Fillet); sketch → the extrude
   // that consumed it (prototype's two hardcoded HISTORY arrays).
   const history = isBody
     ? features.slice(0, 3)
     : features.filter((f) => f.kind === "extrude").slice(0, 1);
   const showDof = !isBody;
-  const dof = sketches[sel.id]?.dof ?? 0;
+  const dof = sketches[sketchId]?.dof ?? 0;
 
   return (
     <>

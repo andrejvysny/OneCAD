@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use onecad_core::document::body::BodyLifecycleEvent;
+use onecad_core::document::record::Operation;
 use onecad_core::ids::{BodyId, DocumentId, JobId, SnapshotId, WorkerEpoch};
 use onecad_core::regen::{
     AcceptResult, AcquireRequest, CheckpointArtifacts, EngineError, Fencing, GeometryEngine, Lod,
@@ -201,6 +202,65 @@ pub trait SolverEngine: Send + Sync {
         &self,
         sketch_id: &str,
     ) -> Result<Vec<crate::dto::SketchRegionDto>, EngineError>;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Face-geometry seam (SCHEMA §7.5 `QueryElement`)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Reads a bound element's geometric evidence out of a published snapshot.
+///
+/// A separate seam rather than a [`GeometryEngine`] method for the same reason
+/// [`MeshProvider`] is: the core trait models the REGEN contract (plan → snapshot),
+/// and this is a read-only side query that neither mutates nor fences anything.
+/// The verb itself (`QueryElement`) has existed on the worker since W-WP6 but had
+/// no Rust caller at all.
+///
+/// MODEL-OPS W2 uses it to derive a sketch plane from a picked face: the element
+/// descriptor carries `surfaceType`, `center` and `normal`
+/// (`worker/src/elementmap/ElementMapPartition.cpp descriptor_to_json`), and for a
+/// PLANAR face the bounding-box centre lies on the plane, so `{center, normal}`
+/// defines it exactly.
+#[async_trait]
+pub trait ElementQuery: Send + Sync {
+    /// `QueryElement` (SCHEMA §7.5) — the element's current binding + descriptor.
+    /// `Ok(None)` when the element is not present in the snapshot.
+    async fn query_element(
+        &self,
+        snapshot: SnapshotId,
+        body: BodyId,
+        element: &str,
+    ) -> Result<Option<crate::dto::ElementInfoDto>, EngineError>;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Drag-time preview seam (SCHEMA §7.6 `PreviewOp`)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Runs ONE candidate op against a throwaway copy of the worker's head and
+/// returns the resulting MESH1 blobs.
+///
+/// Deliberately NOT a [`GeometryEngine`] method: the core trait models the regen
+/// contract (plan → prepared snapshot → accept), and a preview participates in
+/// none of it — it never fences, never prepares, never commits, and is invisible
+/// to the head hash/snapshot/epoch (see `worker/src/session/PreviewOp.h`).
+///
+/// Callers MUST NOT hold the `DocumentRuntime` lock across this call: it is a
+/// worker round-trip on the kernel lane, and holding the single writer across
+/// worker IO is the anti-pattern R-WP11 fixed for regen.
+#[async_trait]
+pub trait PreviewEngine: Send + Sync {
+    /// `PreviewOp` (SCHEMA §7.6). `operation` is the typed core candidate; the
+    /// implementation lowers it through the same wire mapper as ExecutePlan.
+    /// `sketch_id` names the profile sketch to seed from the committed store.
+    async fn preview_op(
+        &self,
+        operation: Operation,
+        op_id: String,
+        sketch_id: Option<String>,
+        expected_snapshot: Option<SnapshotId>,
+        lod: Lod,
+    ) -> Result<crate::dto::PreviewResultDto, EngineError>;
 }
 
 /// The full geometry backend: a [`GeometryEngine`] plus its [`MeshProvider`].
@@ -504,6 +564,32 @@ impl MeshProvider for PendingBackend {
         _lod: Lod,
         _snapshot: SnapshotId,
     ) -> Result<Vec<u8>, EngineError> {
+        Err(Self::not_ready())
+    }
+}
+
+#[async_trait]
+impl PreviewEngine for PendingBackend {
+    async fn preview_op(
+        &self,
+        _operation: Operation,
+        _op_id: String,
+        _sketch_id: Option<String>,
+        _expected_snapshot: Option<SnapshotId>,
+        _lod: Lod,
+    ) -> Result<crate::dto::PreviewResultDto, EngineError> {
+        Err(Self::not_ready())
+    }
+}
+
+#[async_trait]
+impl ElementQuery for PendingBackend {
+    async fn query_element(
+        &self,
+        _snapshot: SnapshotId,
+        _body: BodyId,
+        _element: &str,
+    ) -> Result<Option<crate::dto::ElementInfoDto>, EngineError> {
         Err(Self::not_ready())
     }
 }

@@ -32,8 +32,10 @@ use onecad_core::regen::{
     StoppedReason, TessellateRequest, TessellateResult, WorkerElementEvidence, WorkerHead,
 };
 
-use onecad_core::document::refs::{AnchorIntent, AxisRef, ElementKind, ElementRef, PrimaryRef};
-use onecad_core::ids::{ElementId, EntityId, SketchId, TopoKey};
+use onecad_core::document::refs::{
+    AnchorIntent, AxisRef, ElementKind, ElementRef, PrimaryRef, SketchRegionRef,
+};
+use onecad_core::ids::{ElementId, EntityId, RegionId, SketchId, TopoKey};
 use onecad_core::math::{Vec2, Vec3};
 use onecad_core::sketch::{Sketch, SketchEntity, WorldPlane};
 
@@ -792,6 +794,55 @@ fn get_sketch_reads_geometry_without_a_worker_call() {
     assert_eq!(session.status, SketchSolveStatus::UnderConstrained);
 }
 
+#[test]
+fn projection_sketch_geometry_token_tracks_only_authoritative_geometry() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sk, _) = sketch_with_point();
+    let sid = sk.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap();
+
+    let initial = rt.projection().sketches[&sid.to_string()]
+        .geometry_token
+        .clone();
+    assert_eq!(initial.len(), 64, "SHA-256 token is lowercase hex");
+
+    rt.apply(EditCommand::RenameSketch {
+        sketch: sid,
+        name: "Renamed".into(),
+    })
+    .unwrap();
+    assert_eq!(
+        rt.projection().sketches[&sid.to_string()].geometry_token,
+        initial,
+        "metadata-only edits do not invalidate static geometry"
+    );
+
+    rt.apply(EditCommand::SketchEdit {
+        sketch: sid,
+        ops: vec![SketchEditOp::AddEntity {
+            entity: SketchEntity::point(
+                EntityId(Uuid::from_u128(0x101)),
+                Vec2::new_unchecked(2.0, 3.0),
+                false,
+                false,
+            ),
+        }],
+    })
+    .unwrap();
+    assert_ne!(
+        rt.projection().sketches[&sid.to_string()].geometry_token,
+        initial,
+        "geometry edits invalidate the profile cache"
+    );
+
+    assert!(rt.undo());
+    assert_eq!(
+        rt.projection().sketches[&sid.to_string()].geometry_token,
+        initial,
+        "undo restores the deterministic geometry token"
+    );
+}
+
 #[tokio::test]
 async fn get_sketch_reflects_the_last_solver_lane_solve() {
     let mut rt = runtime_with(Arc::new(FakeBackend::new()));
@@ -820,6 +871,31 @@ fn get_sketch_unknown_id_is_a_recoverable_error() {
         }
         other => panic!("expected OpFailed, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn persisted_region_query_does_not_finish_the_edit_session() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sk, _) = sketch_with_point();
+    let sid = sk.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap();
+    rt.enter_sketch(sid).await.unwrap();
+    let depth = rt.undo_depth();
+    let revision = rt.revision();
+
+    let regions = rt
+        .prepare_sketch_regions(sid)
+        .unwrap()
+        .drive()
+        .await
+        .unwrap();
+    assert!(regions.regions.is_empty());
+    assert!(
+        rt.sketch_session.is_some(),
+        "read-only query keeps session open"
+    );
+    assert_eq!(rt.undo_depth(), depth);
+    assert_eq!(rt.revision(), revision);
 }
 
 #[tokio::test]
@@ -866,6 +942,49 @@ async fn sketch_gesture_commits_exactly_one_undo_command() {
         [0.0, 0.0],
         "undo reverts the drag"
     );
+}
+
+#[tokio::test]
+async fn sketch_mutations_expose_regen_outcomes_to_the_scheduler() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sk, point) = sketch_with_point();
+    let sid = sk.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap();
+
+    let mut dependent = extrude_record(0xE11, 5.0);
+    let Operation::Known(KnownOperation::Extrude(params)) = &mut dependent.op else {
+        unreachable!();
+    };
+    params.profile = Some(SketchRegionRef {
+        sketch: sid,
+        region: RegionId::new("r_profile"),
+        extra: Default::default(),
+    });
+    dependent.inputs = dependent.op.derive_inputs();
+    rt.apply(EditCommand::AddOperation {
+        record: dependent,
+        at_cursor: false,
+    })
+    .unwrap();
+
+    let added = SketchEntity::point(
+        EntityId(Uuid::from_u128(0xE12)),
+        Vec2::new_unchecked(2.0, 3.0),
+        false,
+        false,
+    );
+    let (_, upsert_outcome) = rt
+        .sketch_upsert_with_outcome(sid, vec![SketchEditOp::AddEntity { entity: added }])
+        .await
+        .unwrap();
+    assert!(matches!(
+        upsert_outcome.map(|outcome| outcome.regen),
+        Some(RegenHint::ToEnd)
+    ));
+
+    rt.begin_gesture(sid, point).await.unwrap();
+    let (_, gesture_outcome) = rt.end_gesture_with_outcome(Some([4.0, 5.0])).await.unwrap();
+    assert_eq!(gesture_outcome.regen, RegenHint::ToEnd);
 }
 
 #[tokio::test]

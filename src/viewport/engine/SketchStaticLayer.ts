@@ -2,7 +2,7 @@
  * SketchStaticLayer — always-visible, NON-editable presence of every document
  * sketch in MODEL mode (Fusion-style). One group per sketch id, keyed under a
  * root group in `sketchRoot`:
- *   - fill   : translucent triangulated profile (region previewTriangles, u,v),
+ *   - fills  : one selectable mesh per triangulated profile region,
  *   - curves : thin LineSegments for the entity outlines,
  *   - dots   : constant-size THREE.Points at entity vertices.
  *
@@ -12,8 +12,8 @@
  * `entityPolyline` + palette + planeBasisMatrix only.
  *
  * State it renders: per-sketch visibility (tree eye), the ONE sketch being edited
- * (hidden — the live SketchObject owns it), hover + selection tint. Picking is via
- * `hitTest(raycaster)` → sketch id (the engine plumbs ndc + the Line threshold).
+ * (hidden — the live SketchObject owns it), hover + selection tint. Picking
+ * distinguishes exact filled regions from sketch curves.
  *
  * matrixAutoUpdate is off (static geometry); the group world matrices are flushed
  * once after each build AND at the top of hitTest (stale-matrix lesson), so a
@@ -36,9 +36,27 @@ export interface SketchStaticData {
   regions: SketchRegion[];
 }
 
+export type SketchStaticTarget =
+  | { kind: "sketch"; sketchId: string }
+  | { kind: "sketchRegion"; sketchId: string; regionId: string };
+
+export type SketchStaticHit = SketchStaticTarget & { distance: number };
+
+/** Stable hover-change key; identity fields remain explicit on the hit itself. */
+export function sketchStaticHitKey(hit: SketchStaticTarget): string {
+  return hit.kind === "sketch"
+    ? JSON.stringify(["sketch", hit.sketchId])
+    : JSON.stringify(["sketchRegion", hit.sketchId, hit.regionId]);
+}
+
 interface SketchStaticDeps {
   sketchRoot: THREE.Object3D;
   invalidate: () => void;
+}
+
+interface StaticFill {
+  mesh: THREE.Mesh;
+  mat: THREE.MeshBasicMaterial;
 }
 
 interface StaticEntry {
@@ -47,8 +65,7 @@ interface StaticEntry {
   lineMat: THREE.LineBasicMaterial;
   points: THREE.Points;
   pointsMat: THREE.PointsMaterial;
-  fill: THREE.Mesh | null;
-  fillMat: THREE.MeshBasicMaterial | null;
+  fills: Map<string, StaticFill>;
   /** Intended (tree) visibility, before the editing-hide override. */
   visible: boolean;
 }
@@ -82,25 +99,22 @@ function collectDots(e: SketchEntity, out: number[]): void {
   }
 }
 
-/** Merge every region's plane-local (u,v) triangles into one indexed geometry. */
-function buildFillGeometry(regions: SketchRegion[]): THREE.BufferGeometry | null {
-  const positions: number[] = [];
-  const indices: number[] = [];
-  let base = 0;
-  for (const r of regions) {
-    const t = r.previewTriangles;
-    if (!t || t.positions.length < 6 || t.indices.length < 3) continue;
-    const vcount = t.positions.length / 2;
-    for (let i = 0; i < vcount; i++) {
-      positions.push(t.positions[i * 2], t.positions[i * 2 + 1], 0); // (u,v) → (x,y,0)
-    }
-    for (const idx of t.indices) indices.push(base + idx);
-    base += vcount;
+/** One region's plane-local (u,v) triangles as an indexed local XY geometry. */
+function buildFillGeometry(region: SketchRegion): THREE.BufferGeometry | null {
+  const triangles = region.previewTriangles;
+  if (!triangles || triangles.positions.length < 6 || triangles.indices.length < 3) {
+    return null;
   }
-  if (positions.length === 0) return null;
+  if ((triangles.holesSubtracted ?? 0) < region.holes.length) return null;
+  const positions = new Float32Array((triangles.positions.length / 2) * 3);
+  for (let i = 0; i < triangles.positions.length / 2; i++) {
+    positions[i * 3] = triangles.positions[i * 2];
+    positions[i * 3 + 1] = triangles.positions[i * 2 + 1];
+    positions[i * 3 + 2] = 0;
+  }
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-  geo.setIndex(indices);
+  geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geo.setIndex(triangles.indices.slice());
   geo.computeBoundingSphere();
   return geo;
 }
@@ -109,8 +123,8 @@ export class SketchStaticLayer {
   private readonly root = new THREE.Group();
   private readonly entries = new Map<string, StaticEntry>();
   private editingId: string | null = null;
-  private hoverId: string | null = null;
-  private selectedIds = new Set<string>();
+  private hover: SketchStaticTarget | null = null;
+  private selectedKeys = new Set<string>();
   private readonly _basis = new THREE.Matrix4();
 
   constructor(private readonly deps: SketchStaticDeps) {
@@ -143,22 +157,28 @@ export class SketchStaticLayer {
     group.matrix.copy(this._basis);
     group.matrixWorldNeedsUpdate = true;
 
-    // Fill (translucent profile) — rendered first so curves sit on top.
-    let fill: THREE.Mesh | null = null;
-    let fillMat: THREE.MeshBasicMaterial | null = null;
-    const fillGeo = buildFillGeometry(regions);
-    if (fillGeo) {
-      fillMat = new THREE.MeshBasicMaterial({
+    // One fill per exact planar cell. Hit-testing still gives a coplanar curve
+    // within the line threshold priority, so boundaries remain sketch targets.
+    const fills = new Map<string, StaticFill>();
+    for (const region of regions) {
+      if (fills.has(region.regionId)) continue;
+      const fillGeo = buildFillGeometry(region);
+      if (!fillGeo) continue;
+      const fillMat = new THREE.MeshBasicMaterial({
         color: palette.hoverAccent(),
         transparent: true,
         opacity: FILL_OPACITY,
         depthWrite: false,
         side: THREE.DoubleSide,
       });
-      fill = new THREE.Mesh(fillGeo, fillMat);
+      const fill = new THREE.Mesh(fillGeo, fillMat);
+      fill.name = `sketchStaticRegion_${region.regionId}`;
       fill.renderOrder = RENDER_ORDER.STATIC_FILL;
       fill.userData.sketchId = id;
+      fill.userData.regionId = region.regionId;
+      fill.userData.sketchStaticKind = "sketchRegion";
       group.add(fill);
+      fills.set(region.regionId, { mesh: fill, mat: fillMat });
     }
 
     // Curves + dots are coplanar with the fill (and with the ground grid when
@@ -179,6 +199,7 @@ export class SketchStaticLayer {
     const lines = new THREE.LineSegments(lineGeo, lineMat);
     lines.renderOrder = RENDER_ORDER.STATIC_CURVES;
     lines.userData.sketchId = id;
+    lines.userData.sketchStaticKind = "sketch";
     group.add(lines);
 
     // Vertex dots.
@@ -200,7 +221,7 @@ export class SketchStaticLayer {
 
     this.root.add(group);
     group.updateMatrixWorld(true);
-    return { group, lines, lineMat, points, pointsMat, fill, fillMat, visible: true };
+    return { group, lines, lineMat, points, pointsMat, fills, visible: true };
   }
 
   removeSketch(id: string): void {
@@ -229,15 +250,17 @@ export class SketchStaticLayer {
     this.deps.invalidate();
   }
 
-  setHover(id: string | null): void {
-    if (this.hoverId === id) return;
-    this.hoverId = id;
+  setHover(hit: SketchStaticTarget | null): void {
+    const before = this.hover ? sketchStaticHitKey(this.hover) : null;
+    const next = hit ? sketchStaticHitKey(hit) : null;
+    if (before === next) return;
+    this.hover = hit;
     for (const key of this.entries.keys()) this.applyTint(key);
     this.deps.invalidate();
   }
 
-  setSelected(ids: string[]): void {
-    this.selectedIds = new Set(ids);
+  setSelected(hits: readonly SketchStaticTarget[]): void {
+    this.selectedKeys = new Set(hits.map(sketchStaticHitKey));
     for (const key of this.entries.keys()) this.applyTint(key);
     this.deps.invalidate();
   }
@@ -251,16 +274,27 @@ export class SketchStaticLayer {
   private applyTint(id: string): void {
     const e = this.entries.get(id);
     if (!e) return;
-    const selected = this.selectedIds.has(id);
-    const hovered = this.hoverId === id;
-    const color = selected
+    const sketchKey = sketchStaticHitKey({ kind: "sketch", sketchId: id });
+    const sketchSelected = this.selectedKeys.has(sketchKey);
+    const sketchHovered = this.hover?.kind === "sketch" && this.hover.sketchId === id;
+    const color = sketchSelected
       ? palette.sketchSelected()
-      : hovered
+      : sketchHovered
         ? palette.hoverAccent()
         : palette.sketchFull();
     e.lineMat.color.copy(color);
     e.pointsMat.color.copy(color);
-    if (e.fillMat) e.fillMat.opacity = selected || hovered ? FILL_OPACITY_ACTIVE : FILL_OPACITY;
+    for (const [regionId, fill] of e.fills) {
+      const regionKey = sketchStaticHitKey({ kind: "sketchRegion", sketchId: id, regionId });
+      const selected = sketchSelected || this.selectedKeys.has(regionKey);
+      const hovered =
+        sketchHovered ||
+        (this.hover?.kind === "sketchRegion" &&
+          this.hover.sketchId === id &&
+          this.hover.regionId === regionId);
+      fill.mat.color.copy(selected ? palette.sketchSelected() : palette.hoverAccent());
+      fill.mat.opacity = selected || hovered ? FILL_OPACITY_ACTIVE : FILL_OPACITY;
+    }
   }
 
   /**
@@ -268,17 +302,32 @@ export class SketchStaticLayer {
    * caller sets `raycaster.params.Line.threshold` (px→world). Flushes the group
    * world matrices first so a raycast right after setSketch resolves.
    */
-  hitTest(raycaster: THREE.Raycaster): string | null {
+  hitTest(raycaster: THREE.Raycaster): SketchStaticHit | null {
     this.root.updateMatrixWorld(true);
-    const targets: THREE.Object3D[] = [];
+    const fills: THREE.Object3D[] = [];
+    const lines: THREE.Object3D[] = [];
     for (const e of this.entries.values()) {
       if (!e.group.visible) continue;
-      if (e.fill) targets.push(e.fill);
-      targets.push(e.lines);
+      for (const fill of e.fills.values()) fills.push(fill.mesh);
+      lines.push(e.lines);
     }
-    if (targets.length === 0) return null;
-    const hit = raycaster.intersectObjects(targets, false)[0];
-    return (hit?.object.userData.sketchId as string | undefined) ?? null;
+    const fillHit = raycaster.intersectObjects(fills, false)[0];
+    const lineHit = raycaster.intersectObjects(lines, false)[0];
+    const coplanarEpsilon = Math.max(1, fillHit?.distance ?? 0, lineHit?.distance ?? 0) * 1e-7;
+    const hit =
+      lineHit && (!fillHit || lineHit.distance <= fillHit.distance + coplanarEpsilon)
+        ? lineHit
+        : fillHit;
+    if (!hit) return null;
+    const sketchId = hit.object.userData.sketchId as string | undefined;
+    if (!sketchId) return null;
+    if (hit.object.userData.sketchStaticKind === "sketchRegion") {
+      const regionId = hit.object.userData.regionId as string | undefined;
+      return regionId
+        ? { kind: "sketchRegion", sketchId, regionId, distance: hit.distance }
+        : null;
+    }
+    return { kind: "sketch", sketchId, distance: hit.distance };
   }
 
   private disposeEntry(e: StaticEntry): void {
@@ -286,8 +335,11 @@ export class SketchStaticLayer {
     e.lineMat.dispose();
     e.points.geometry.dispose();
     e.pointsMat.dispose();
-    e.fill?.geometry.dispose();
-    e.fillMat?.dispose();
+    for (const fill of e.fills.values()) {
+      fill.mesh.geometry.dispose();
+      fill.mat.dispose();
+    }
+    e.fills.clear();
   }
 
   dispose(): void {

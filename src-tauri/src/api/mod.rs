@@ -14,6 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
 
+use onecad_core::document::record::Operation;
 use onecad_core::document::refs::{AnchorIntent, ElementRef};
 use onecad_core::edit::{EditCommand, SketchEditOp};
 use onecad_core::ids::{BodyId, EntityId, RecordId, SketchId, SnapshotId, TopoKey};
@@ -488,6 +489,24 @@ pub async fn get_sketch(
     Ok(rt.get_sketch(id)?)
 }
 
+/// Rebuilds the closed regions of a persisted sketch without opening, finishing,
+/// squashing or otherwise mutating its edit session.
+#[tauri::command]
+pub async fn get_sketch_regions(
+    state: State<'_, AppState>,
+    sketch_id: String,
+) -> Result<FinishSketchDto, ApiError> {
+    let id = parse_sketch_id(&sketch_id)?;
+    let prepared = {
+        let guard = state.runtime.lock().await;
+        let rt = guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("getSketchRegions".into()))?;
+        rt.prepare_sketch_regions(id)?
+    };
+    Ok(prepared.drive().await?)
+}
+
 /// Applies sketch edits (add/move/delete entities+constraints) then re-solves for
 /// live dof/status (`CadClient.sketchUpsert`).
 #[tauri::command]
@@ -498,17 +517,22 @@ pub async fn sketch_upsert(
     ops: Vec<SketchEditOp>,
 ) -> Result<SketchUpsertDto, ApiError> {
     let id = parse_sketch_id(&sketch_id)?;
-    let (result, projection) = {
+    let (result, outcome, projection) = {
         let mut guard = state.runtime.lock().await;
         let rt = guard
             .as_mut()
             .ok_or_else(|| ApiError::NoDocument("sketchUpsert".into()))?;
-        let result = rt.sketch_upsert(id, ops).await?;
-        (result, rt.projection())
+        let (result, outcome) = rt.sketch_upsert_with_outcome(id, ops).await?;
+        (result, outcome, rt.projection())
     };
     let _ = app.emit(events::SKETCH_SOLVED, &result);
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
-    state.note_mutation();
+    if let Some(outcome) = outcome {
+        if let Some(sched) = state.scheduler.get() {
+            sched.handle(&outcome);
+        }
+        state.note_mutation();
+    }
     Ok(result)
 }
 
@@ -549,16 +573,19 @@ pub async fn end_gesture(
     app: AppHandle,
     final_target: Option<[f64; 2]>,
 ) -> Result<SketchUpsertDto, ApiError> {
-    let (result, projection) = {
+    let (result, outcome, projection) = {
         let mut guard = state.runtime.lock().await;
         let rt = guard
             .as_mut()
             .ok_or_else(|| ApiError::NoDocument("endGesture".into()))?;
-        let result = rt.end_gesture(final_target).await?;
-        (result, rt.projection())
+        let (result, outcome) = rt.end_gesture_with_outcome(final_target).await?;
+        (result, outcome, rt.projection())
     };
     let _ = app.emit(events::SKETCH_SOLVED, &result);
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
+    if let Some(sched) = state.scheduler.get() {
+        sched.handle(&outcome);
+    }
     state.note_mutation();
     Ok(result)
 }
@@ -639,6 +666,159 @@ pub async fn promote_selection(
     };
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
     Ok(ids)
+}
+
+/// Drag-time preview: run ONE candidate op against a throwaway copy of the
+/// worker's head and return the resulting MESH1 blobs (SCHEMA §7.6 `PreviewOp`).
+///
+/// This replaces a client-side stand-in. The "exact" mesh shown during an extrude
+/// drag used to be synthesized in JavaScript by the same function the MOCK client
+/// uses, so a Cut preview never subtracted and Fillet/Shell/Revolve had no preview
+/// at all — the commit could produce something the preview had never shown.
+///
+/// Nothing is committed: the worker runs the op on a copy and drops it, so the
+/// head bodies, history hash, snapshot id, revision and epoch are untouched and
+/// the preview is invisible to fencing. The runtime lock is taken only to confirm
+/// a document is open, never across the worker round-trip.
+///
+/// `op` is the core `{opType, params}` shape used by AddOperation, optionally
+/// carrying a stable `opId` that commit reuses as its RecordId. Rust deserializes
+/// it to [`Operation`] and performs all worker-wire lowering; raw worker params
+/// are never accepted. `expected_snapshot_id` rejects stale drag candidates.
+#[tauri::command]
+pub async fn preview_op(
+    state: State<'_, AppState>,
+    op: serde_json::Value,
+    sketch_id: Option<String>,
+    expected_snapshot_id: Option<u64>,
+    lod: Option<String>,
+) -> Result<crate::dto::PreviewResultDto, ApiError> {
+    {
+        let guard = state.runtime.lock().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("previewOp".into()))?;
+    }
+    let lod = match lod.as_deref() {
+        Some("fine") => onecad_core::regen::Lod::Fine,
+        Some("medium") => onecad_core::regen::Lod::Medium,
+        _ => onecad_core::regen::Lod::Coarse,
+    };
+    let (operation, op_id) = parse_preview_operation(op)?;
+    let result = state
+        .preview()
+        .preview_op(
+            operation,
+            op_id,
+            sketch_id,
+            expected_snapshot_id.map(SnapshotId),
+            lod,
+        )
+        .await;
+    match result {
+        Err(onecad_core::regen::EngineError::OpFailed {
+            code: onecad_core::regen::OpFailureCode::StalePreview,
+            message,
+            ..
+        }) => Err(ApiError::StalePreview(message)),
+        Err(error) => Err(error.into()),
+        Ok(preview) => Ok(preview),
+    }
+}
+
+fn parse_preview_operation(mut raw: serde_json::Value) -> Result<(Operation, String), ApiError> {
+    let object = raw
+        .as_object_mut()
+        .ok_or_else(|| ApiError::InvalidCommand("preview operation must be an object".into()))?;
+    let op_id = match object.remove("opId") {
+        // Compatibility with W3 callers predating stable frontend preview ids.
+        // Keep the fallback deterministic across drag frames while preserving
+        // the body_<RecordId> identity shape required by NewBody lowering.
+        None => RecordId::from_uuid(uuid::Uuid::nil()).to_string(),
+        Some(serde_json::Value::String(id)) => RecordId::from_str(&id)
+            .map(|record| record.to_string())
+            .map_err(|e| ApiError::InvalidCommand(format!("bad preview opId {id:?}: {e}")))?,
+        Some(_) => {
+            return Err(ApiError::InvalidCommand(
+                "preview opId must be a RecordId string".into(),
+            ));
+        }
+    };
+    let operation = serde_json::from_value(raw)
+        .map_err(|e| ApiError::InvalidCommand(format!("bad preview operation: {e}")))?;
+    Ok((operation, op_id))
+}
+
+/// Resolve a picked FACE to the sketch plane a sketch placed on it would freeze
+/// (MODEL-OPS W2 sketch-on-face).
+///
+/// Rust owns identity, so the plane is derived HERE rather than from the
+/// frontend's tessellated triangle normal: `QueryElement` (SCHEMA §7.5) returns
+/// the kernel's own descriptor, and for a planar face its bounding-box centre
+/// lies on the plane, so `{center, normal}` defines it exactly. The in-plane axes
+/// come from the deterministic, lock-tested
+/// [`plane_from_point_normal`](onecad_core::sketch::plane_from_point_normal) rule —
+/// the frame is frozen with the sketch, so a non-deterministic basis would rotate
+/// existing sketches on reopen.
+///
+/// FAILS LOUDLY for a non-planar face rather than approximating one: a cylinder's
+/// descriptor normal is not a plane normal, and silently sketching on a made-up
+/// plane is exactly the class of "silent wrong bind" this codebase refuses.
+/// Worker IO runs OUTSIDE the runtime lock (the lock is taken only to read the
+/// head snapshot id).
+#[tauri::command]
+pub async fn face_sketch_plane(
+    state: State<'_, AppState>,
+    snapshot_id: u64,
+    body_id: String,
+    element_id: String,
+) -> Result<crate::dto::SketchPlaneDto, ApiError> {
+    let body = wire::parse_body_id(&body_id).map_err(ApiError::InvalidCommand)?;
+    {
+        // Presence check only — the runtime lock is NOT held across the worker
+        // round-trip below (the R-WP11 rule; a held lock makes fencing inert).
+        let guard = state.runtime.lock().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("faceSketchPlane".into()))?;
+    }
+    // The caller supplies the snapshot its pick was made against — the same
+    // contract `promoteSelection` uses, so a TopoKey/ElementId resolves against
+    // the exact snapshot the mesh was tessellated at (Invariant 4).
+    let info = state
+        .element_query()
+        .query_element(SnapshotId(snapshot_id), body, &element_id)
+        .await?
+        .ok_or_else(|| {
+            ApiError::InvalidCommand(format!(
+                "faceSketchPlane: element {element_id} is not present in the current snapshot"
+            ))
+        })?;
+
+    if info.kind != "face" {
+        return Err(ApiError::InvalidCommand(format!(
+            "faceSketchPlane: element {element_id} is a {}, not a face",
+            info.kind
+        )));
+    }
+    // `GeomAbs_Plane` is OCCT's FIRST surface-type enumerator, i.e. 0.
+    const GEOM_ABS_PLANE: i64 = 0;
+    if info.surface_type != GEOM_ABS_PLANE || !info.has_normal {
+        return Err(ApiError::InvalidCommand(
+            "faceSketchPlane: only a planar face can host a sketch".into(),
+        ));
+    }
+
+    let plane = onecad_core::sketch::plane_from_point_normal(
+        onecad_core::math::Vec3::new_unchecked(info.center[0], info.center[1], info.center[2]),
+        onecad_core::math::Vec3::new_unchecked(info.normal[0], info.normal[1], info.normal[2]),
+    );
+    Ok(crate::dto::SketchPlaneDto {
+        origin: [plane.origin.x, plane.origin.y, plane.origin.z],
+        x_axis: [plane.x_axis.x, plane.x_axis.y, plane.x_axis.z],
+        y_axis: [plane.y_axis.x, plane.y_axis.y, plane.y_axis.z],
+        normal: [plane.normal.x, plane.normal.y, plane.normal.z],
+    })
 }
 
 /// Dry-run ladder resolution for repair dialogs (`ResolveRefs`; SCHEMA §7.5) —
@@ -891,5 +1071,64 @@ mod tests {
         let s = now_rfc3339();
         assert_eq!(s.len(), 20, "YYYY-MM-DDThh:mm:ssZ");
         assert!(s.ends_with('Z') && s.contains('T'));
+    }
+
+    #[test]
+    fn preview_operation_is_typed_and_preserves_the_draft_id() {
+        let op_id = uuid::Uuid::from_u128(0xCAFE).to_string();
+        let sketch_id = uuid::Uuid::from_u128(0xBEEF).to_string();
+        let raw = serde_json::json!({
+            "opType": "Extrude",
+            "opId": op_id,
+            "params": {
+                "profile": { "sketchId": sketch_id, "regionId": "r_second" },
+                "distance": { "value": 5.0 },
+                "draftAngleDeg": { "value": 0.0 },
+                "extrudeMode": "Blind",
+                "booleanMode": "NewBody",
+                "twoDirections": false,
+                "extrudeMode2": "Blind",
+                "distance2": { "value": 0.0 }
+            }
+        });
+        let (operation, parsed_id) = parse_preview_operation(raw).unwrap();
+        assert_eq!(parsed_id, op_id);
+        let Operation::Known(onecad_core::document::record::KnownOperation::Extrude(params)) =
+            operation
+        else {
+            panic!("expected typed Extrude");
+        };
+        assert_eq!(
+            params.profile.unwrap().region.as_str(),
+            "r_second",
+            "exact selected region survives typed deserialization"
+        );
+    }
+
+    #[test]
+    fn malformed_known_preview_operation_is_rejected() {
+        let raw = serde_json::json!({
+            "opType": "Extrude",
+            "params": { "distance": "five" }
+        });
+        assert!(matches!(
+            parse_preview_operation(raw),
+            Err(ApiError::InvalidCommand(_))
+        ));
+
+        let bad_id = serde_json::json!({ "opType": "FutureOp", "opId": "not-a-record-id" });
+        assert!(matches!(
+            parse_preview_operation(bad_id),
+            Err(ApiError::InvalidCommand(_))
+        ));
+    }
+
+    #[test]
+    fn preview_operation_without_id_uses_a_canonical_stable_fallback() {
+        let raw = serde_json::json!({ "opType": "FutureOp", "params": {} });
+        let (_, first) = parse_preview_operation(raw.clone()).unwrap();
+        let (_, second) = parse_preview_operation(raw).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(RecordId::from_str(&first).unwrap().to_string(), first);
     }
 }

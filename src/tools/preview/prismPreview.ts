@@ -19,11 +19,17 @@
  */
 import type { SketchRegion } from "@/ipc/types";
 
-/** Boundary ring (u,v) + cap fan triangulation, extracted from a region. */
+/** Boundary rings (u,v) + cap triangulation, extracted from a region. */
 export interface PrismProfile {
-  /** Boundary ring in plane (u,v), CCW, no repeated closing point. */
+  /** OUTER boundary ring in plane (u,v), CCW, no repeated closing point. */
   ring: [number, number][];
-  /** Fan cap: `positions` = flat (u,v) pairs (index 0 = centroid), `indices` = triples. */
+  /**
+   * Hole boundary rings, each CW (opposite the outer ring) so the shared wall
+   * builder emits inward-facing triangles without a special case. Empty when the
+   * region has no holes, or when the producer does not subtract them.
+   */
+  holes: [number, number][][];
+  /** Cap triangulation: `positions` = flat (u,v) pairs, `indices` = triples. */
   cap: { positions: number[]; indices: number[] };
 }
 
@@ -53,6 +59,9 @@ export interface RegionBounds {
 export function profileFromRegion(region: SketchRegion): PrismProfile | null {
   const tris = region.previewTriangles;
   if (!tris || tris.positions.length < 6 || tris.indices.length < 3) return null;
+  // A partial fill is not the selected planar cell. Showing/extruding it would
+  // silently add material inside a declared hole, so fail closed.
+  if ((tris.holesSubtracted ?? 0) < region.holes.length) return null;
 
   // 1) Boundary edges: count undirected edge uses; keep the DIRECTED form of
   //    the single-use ones (triangle winding gives the loop direction).
@@ -74,11 +83,14 @@ export function profileFromRegion(region: SketchRegion): PrismProfile | null {
   }
   if (next.size < 3) return null;
 
-  // 2) Chain the directed boundary edges into a loop. Multiple loops (holes)
-  //    resolve to the largest-|area| one — the outer boundary.
+  // 2) Chain the directed boundary edges into loops. The largest-|area| loop is
+  //    the OUTER boundary; the rest are holes. A hole-subtracting producer (the
+  //    real SolverLane fill) yields one loop per hole here — which is exactly why
+  //    its bridge segments must stay INTERIOR to the triangulation (see
+  //    worker/src/loop/PolygonFill.h): a bridge counted as a boundary edge would
+  //    chain into a spurious loop and fabricate a wall that is not there.
   const visited = new Set<number>();
-  let best: number[] | null = null;
-  let bestArea = 0;
+  const loops: { indices: number[]; area: number }[] = [];
   for (const start of next.keys()) {
     if (visited.has(start)) continue;
     const loop: number[] = [];
@@ -95,17 +107,28 @@ export function profileFromRegion(region: SketchRegion): PrismProfile | null {
       const [bx, by] = pointAt(tris.positions, loop[(i + 1) % loop.length]);
       area += ax * by - bx * ay;
     }
-    area /= 2;
-    if (Math.abs(area) > Math.abs(bestArea)) {
-      bestArea = area;
-      best = loop;
-    }
+    loops.push({ indices: loop, area: area / 2 });
   }
-  if (!best) return null;
-  if (bestArea < 0) best.reverse(); // prismLocal assumes a CCW ring
+  if (loops.length === 0) return null;
 
-  const ring: [number, number][] = best.map((idx) => pointAt(tris.positions, idx));
-  return { ring, cap: { positions: [...tris.positions], indices: [...tris.indices] } };
+  let outerIdx = 0;
+  for (let i = 1; i < loops.length; i++) {
+    if (Math.abs(loops[i].area) > Math.abs(loops[outerIdx].area)) outerIdx = i;
+  }
+  const outer = loops[outerIdx];
+  if (outer.area < 0) outer.indices.reverse(); // prismLocal assumes a CCW ring
+
+  const holes: [number, number][][] = [];
+  for (let i = 0; i < loops.length; i++) {
+    if (i === outerIdx) continue;
+    const h = loops[i];
+    if (h.area > 0) h.indices.reverse(); // holes wind CW, opposite the outer ring
+    holes.push(h.indices.map((idx) => pointAt(tris.positions, idx)));
+  }
+  if (holes.length !== region.holes.length) return null;
+
+  const ring: [number, number][] = outer.indices.map((idx) => pointAt(tris.positions, idx));
+  return { ring, holes, cap: { positions: [...tris.positions], indices: [...tris.indices] } };
 }
 
 function pointAt(positions: number[], idx: number): [number, number] {
@@ -175,8 +198,7 @@ export interface PrismLocal {
  * CCW in (u,v), so the top cap fan is +z and the bottom is the reversed winding.
  */
 export function prismLocal(profile: PrismProfile, depth: number): PrismLocal {
-  const capPairs = profile.cap.positions.length / 2; // centroid + ring
-  const ringN = profile.ring.length;
+  const capPairs = profile.cap.positions.length / 2; // every cap vertex
   const positions: number[] = [];
   const normals: number[] = [];
 
@@ -214,45 +236,56 @@ export function prismLocal(profile: PrismProfile, depth: number): PrismLocal {
   }
 
   // 3) side verts: per ring vertex a bottom+top duplicate with a radial normal
-  //    (radiating from the ring's area centroid — layout-agnostic).
-  const [hubU, hubV] = ringCentroid(profile.ring);
-  const sideBase = positions.length / 3;
-  for (let j = 0; j < ringN; j++) {
-    const [u, v] = profile.ring[j];
-    const nu = u - hubU;
-    const nv = v - hubV;
-    const len = Math.hypot(nu, nv) || 1;
-    const rx = nu / len;
-    const ry = nv / len;
-    pushV(u, v, 0, rx, ry, 0); // bottom dup, even index
-    pushV(u, v, depth, rx, ry, 0); // top dup, odd index
-  }
+  //    (radiating from the ring's area centroid — layout-agnostic). Hole rings
+  //    wind CW, so following ring order flips the triangle winding for free; the
+  //    normal is negated so it points INTO the hole (away from the material).
   const sideTris: [number, number, number][] = [];
-  for (let j = 0; j < ringN; j++) {
-    const b0 = sideBase + j * 2;
-    const t0 = b0 + 1;
-    const jn = (j + 1) % ringN;
-    const b1 = sideBase + jn * 2;
-    const t1 = b1 + 1;
-    sideTris.push([b0, b1, t1]);
-    sideTris.push([b0, t1, t0]);
-  }
+  const edges: number[][] = [];
 
-  // Edges: bottom ring loop, top ring loop (closed), + verticals for small rings.
-  const bottomLoop: number[] = [];
-  const topLoop: number[] = [];
-  for (let j = 0; j < ringN; j++) {
-    bottomLoop.push(sideBase + j * 2);
-    topLoop.push(sideBase + j * 2 + 1);
-  }
-  bottomLoop.push(sideBase); // close
-  topLoop.push(sideBase + 1);
-  const edges: number[][] = [bottomLoop, topLoop];
-  if (ringN <= 12) {
-    for (let j = 0; j < ringN; j++) edges.push([sideBase + j * 2, sideBase + j * 2 + 1]);
-  } else {
-    edges.push([sideBase, sideBase + 1]); // a single seam for round profiles
-  }
+  const addWall = (ring: [number, number][], outward: boolean): void => {
+    const n = ring.length;
+    if (n < 3) return;
+    const [hubU, hubV] = ringCentroid(ring);
+    const base = positions.length / 3;
+    const sign = outward ? 1 : -1;
+    for (let j = 0; j < n; j++) {
+      const [u, v] = ring[j];
+      const nu = u - hubU;
+      const nv = v - hubV;
+      const len = Math.hypot(nu, nv) || 1;
+      const rx = (sign * nu) / len;
+      const ry = (sign * nv) / len;
+      pushV(u, v, 0, rx, ry, 0); // bottom dup, even index
+      pushV(u, v, depth, rx, ry, 0); // top dup, odd index
+    }
+    for (let j = 0; j < n; j++) {
+      const b0 = base + j * 2;
+      const t0 = b0 + 1;
+      const jn = (j + 1) % n;
+      const b1 = base + jn * 2;
+      const t1 = b1 + 1;
+      sideTris.push([b0, b1, t1]);
+      sideTris.push([b0, t1, t0]);
+    }
+    // Edges: bottom loop, top loop (closed), + verticals for small rings.
+    const bottomLoop: number[] = [];
+    const topLoop: number[] = [];
+    for (let j = 0; j < n; j++) {
+      bottomLoop.push(base + j * 2);
+      topLoop.push(base + j * 2 + 1);
+    }
+    bottomLoop.push(base); // close
+    topLoop.push(base + 1);
+    edges.push(bottomLoop, topLoop);
+    if (n <= 12) {
+      for (let j = 0; j < n; j++) edges.push([base + j * 2, base + j * 2 + 1]);
+    } else {
+      edges.push([base, base + 1]); // a single seam for round profiles
+    }
+  };
+
+  addWall(profile.ring, true);
+  for (const hole of profile.holes) addWall(hole, false);
 
   return {
     positions,

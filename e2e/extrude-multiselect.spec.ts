@@ -9,32 +9,25 @@ import {
   clickAtAwaitingDofChange,
   dofPill,
   bodyOptions,
-  sketchOptions,
   getSketchSnapshot,
   getSketchCircle,
-  getFeatureLabels,
   planePointToClient,
-  commitExtrudeAtHandle,
 } from "./helpers";
 
 /*
- * MODEL-HARDEN Wave 2 — multi-region extrude → N separate ops (mock lane).
- *
- * A finished sketch with a rectangle AND a circle detects as TWO regions. Wave 2
- * turns that into a MULTI-select: each region is toggled on, the region-select chip
- * counts them, Enter confirms, ONE drag sets the shared depth, and a final Enter
- * commits N separate extrude ops (N history rows, N bodies). The consumed sketch
- * auto-hides after all commits succeed.
- *
- * Region + camera targeting follows multiregion.spec.ts: read the real geometry
- * BEFORE finishing (session clears on exit) and project each region's centroid
- * through the SETTLED camera — a pixel-offset guess for a point never directly
- * clicked is unreliable against the perspective raycast.
+ * V1 Extrude is intentionally single-profile. Persistent region selection may
+ * contain several cells, but invoking Extrude must reject that ambiguity rather
+ * than choosing the first cell or authoring hidden N-operation behavior.
  */
-test("multi-region: toggle both regions → one drag → Enter commits 2 bodies + auto-hides the sketch", async ({
+test("multiple selected regions are rejected without preview or commit", async ({
   page,
 }) => {
   await openEditorDebug(page);
+  await bodyOptions(page).first().getByRole("switch").click();
+  const visibleSeedSketches = page
+    .getByRole("listbox", { name: "Sketches" })
+    .locator('[role="switch"][aria-checked="true"]');
+  while ((await visibleSeedSketches.count()) > 0) await visibleSeedSketches.first().click();
   await enterSketchViaPlanePicker(page);
   await waitForCameraSettled(page);
 
@@ -63,30 +56,29 @@ test("multi-region: toggle both regions → one drag → Enter commits 2 bodies 
   const circleCentroid = { x: circle.center[0], y: circle.center[1] };
 
   const bodiesBefore = await bodyOptions(page).count();
-  const featuresBefore = (await getFeatureLabels(page)).length;
 
-  // Finish → 2 regions → multi-select.
   await page.keyboard.press("Enter");
-  await expect(page.getByText(/^Select regions to extrude/)).toBeVisible();
   await waitForCameraSettled(page);
 
-  // Toggle BOTH regions; the chip counts the growing selection.
   const rectPt = await planePointToClient(page, snap.plane, rectCentroid);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        ({ x, y }) => Boolean((window as unknown as { __vpEngine?: { sketchStaticHitTest(x: number, y: number): unknown } })
+          .__vpEngine?.sketchStaticHitTest(x, y)),
+        rectPt,
+      ),
+    )
+    .toBe(true);
   await clickAtClient(page, rectPt.x, rectPt.y);
-  await expect(page.getByTestId("chip-region-count")).toHaveText("1 region");
+
   const circlePt = await planePointToClient(page, snap.plane, circleCentroid);
+  await page.keyboard.down("Shift");
   await clickAtClient(page, circlePt.x, circlePt.y);
-  await expect(page.getByTestId("chip-region-count")).toHaveText("2 regions");
+  await page.keyboard.up("Shift");
 
-  // Enter confirms the selection → arms the 2-region extrude (one shared handle).
-  await page.keyboard.press("Enter");
-  await expect(page.getByText(/^Drag the arrow to set depth/)).toBeVisible();
-
-  // One drag + Enter commits both regions.
-  await commitExtrudeAtHandle(page);
-
-  // Two new bodies + two new timeline rows; the consumed sketch is hidden in the tree.
-  await expect(bodyOptions(page)).toHaveCount(bodiesBefore + 2);
-  await expect.poll(async () => (await getFeatureLabels(page)).length).toBe(featuresBefore + 2);
-  await expect(sketchOptions(page).last().getByRole("switch")).toHaveAttribute("aria-checked", "false");
+  await page.getByRole("button", { name: "Extrude", exact: true }).click();
+  await expect(page.getByText("Select exactly one closed sketch region to extrude")).toBeVisible();
+  await expect(page.getByText(/^Drag the arrow to set depth/)).toHaveCount(0);
+  await expect(bodyOptions(page)).toHaveCount(bodiesBefore);
 });

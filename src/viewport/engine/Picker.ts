@@ -25,6 +25,8 @@ export interface PickHit {
   kind: "face" | "edge";
   topoKey: string;
   elementId?: string;
+  /** Camera-ray distance used to arbitrate against coplanar sketch profiles. */
+  distance: number;
   worldPos: THREE.Vector3;
   /** Local hint for previews/promotion (face normal in world space). */
   surfaceHint?: { normal?: [number, number, number] };
@@ -75,6 +77,22 @@ export function choosePreferredHit(
   return null;
 }
 
+/**
+ * Whether a secondary sketch hit is in front of, or numerically coplanar with,
+ * a body hit. A farther sketch never selects through an occluding body.
+ */
+export function secondaryHitWins(
+  bodyDistance: number,
+  sketchDistance: number,
+  relativeEpsilon = 1e-5,
+): boolean {
+  if (!Number.isFinite(sketchDistance)) return false;
+  if (!Number.isFinite(bodyDistance)) return true;
+  const tolerance =
+    Math.max(1, Math.abs(bodyDistance), Math.abs(sketchDistance)) * relativeEpsilon;
+  return sketchDistance <= bodyDistance + tolerance;
+}
+
 /** Resolve a chosen intersection into a PickHit via the mesh registry. */
 export function resolvePick(
   hit: THREE.Intersection,
@@ -110,6 +128,7 @@ export function resolvePick(
     kind,
     topoKey: id,
     elementId: isElementId ? id : undefined,
+    distance: hit.distance,
     worldPos: hit.point.clone(),
     surfaceHint,
   };

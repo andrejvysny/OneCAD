@@ -84,6 +84,9 @@ pub enum ErrorCode {
     GeometryInvalid,
     /// Known verb, unsupported op/param.
     Unsupported,
+    /// PreviewOp-only: `expectedSnapshotId` no longer matches the session head.
+    /// Recoverable; the caller re-previews against the fresh snapshot.
+    StalePreview,
     /// Cooperative cancellation (terminal frame is never dropped).
     Cancelled,
     /// Protocol violation. Framing sub-case tears down; well-framed-illegal
@@ -427,6 +430,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(ErrorCode::RefUnresolved).unwrap(),
             json!("REF_UNRESOLVED")
+        );
+        assert_eq!(
+            serde_json::to_value(ErrorCode::StalePreview).unwrap(),
+            json!("STALE_PREVIEW")
         );
         assert_eq!(
             serde_json::to_value(ErrorCode::GeometryInvalid).unwrap(),

@@ -14,14 +14,11 @@ import {
 } from "./helpers";
 
 /*
- * Non-first-region extrude (mock lane): a sketch with a separated rectangle AND
- * a circle detects as TWO regions, so finishing the sketch hands pointer
- * ownership to a region pick instead of auto-arming ("Select a region to
- * extrude" — ModelToolController.enterRegionPick). Clicking a region resolves
- * that SPECIFIC regionId into the extrude draft (see
- * ModelToolController.regionPick.test.ts "clicking region 2 arms extrude with
- * regions[1].regionId in the draft") — this spec proves the picked, non-first
- * region flows all the way through to a committed body.
+ * Non-first-region extrude (mock lane): a separated circle is published first
+ * and the rectangle second. This selects the rectangle's persistent fill,
+ * invokes Extrude, then proves the committed mesh has the rectangle's exact
+ * plane-local bounds. A body-count-only assertion would miss a first-region
+ * fallback.
  *
  * ADAPTATION vs the original design note ("click inside the circle"): verified
  * against `detectRegions` (src/ipc/mockSketch.ts) — it scans ALL entities for
@@ -33,7 +30,7 @@ import {
  * circle would exercise the already-well-covered first-region path, so this
  * spec clicks the RECTANGLE instead to genuinely prove the non-first pick.
  *
- * Targeting note: the click point is the rectangle's centroid computed from its
+ * Targeting: the click point is the rectangle's centroid computed from its
  * REAL line entities (`getSketchSnapshot`, read BEFORE finishing — the session
  * clears on leaving sketch mode) and projected through the live camera
  * (`planePointToClient`), not a guessed canvas-relative offset — `screenToPlane`
@@ -41,7 +38,7 @@ import {
  * never directly clicked (like a shape's centroid) is unreliable (verified
  * empirically against an earlier, offset-based version of this spec).
  *
- * Camera-settle note (two DIFFERENT tweens, both confirmed the hard way):
+ * Camera-settle note (two different tweens):
  * entering the plane picker kicks off an animated re-home, so drawing must not
  * race it (`waitForCameraSettled` right after `enterSketchViaPlanePicker`).
  * SEPARATELY, `ViewportEngine.exitSketch()` — run when Enter finishes the sketch
@@ -52,10 +49,102 @@ import {
  * pose and clicking after the restore targets the wrong screen point. Hence
  * `waitForCameraSettled` again after Enter, before `planePointToClient`.
  */
+
+interface PlaneBounds {
+  minU: number;
+  maxU: number;
+  minV: number;
+  maxV: number;
+}
+
+async function documentBodyIds(page: import("@playwright/test").Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const store = (window as unknown as {
+      __stores?: { document: { getState(): { bodies: Record<string, unknown> } } };
+    }).__stores?.document;
+    if (!store) throw new Error("document store unavailable");
+    return Object.keys(store.getState().bodies);
+  });
+}
+
+async function committedBodyPlaneBounds(
+  page: import("@playwright/test").Page,
+  previousBodyIds: string[],
+  plane: {
+    origin: [number, number, number];
+    xAxis: [number, number, number];
+    yAxis: [number, number, number];
+  },
+): Promise<PlaneBounds> {
+  let bounds: PlaneBounds | null = null;
+  await expect(async () => {
+    bounds = await page.evaluate(
+      ({ previousBodyIds, plane }) => {
+        const w = window as unknown as {
+          __stores?: { document: { getState(): { bodies: Record<string, unknown> } } };
+          __vpEngine?: {
+            bodiesRoot: {
+              children: Array<{
+                userData: { bodyId?: string };
+                children: Array<{
+                  geometry?: { attributes?: { position?: { array: ArrayLike<number> } } };
+                  matrixWorld: { elements: number[] };
+                  updateMatrixWorld(force: boolean): void;
+                }>;
+              }>;
+            };
+          };
+        };
+        const ids = Object.keys(w.__stores?.document.getState().bodies ?? {});
+        const bodyId = ids.find((id) => !previousBodyIds.includes(id));
+        const group = w.__vpEngine?.bodiesRoot.children.find((child) => child.userData.bodyId === bodyId);
+        const mesh = group?.children.find((child) => child.geometry?.attributes?.position);
+        const positions = mesh?.geometry?.attributes?.position?.array;
+        if (!mesh || !positions) return null;
+        mesh.updateMatrixWorld(true);
+        const m = mesh.matrixWorld.elements;
+        const [ox, oy, oz] = plane.origin;
+        const [xx, xy, xz] = plane.xAxis;
+        const [yx, yy, yz] = plane.yAxis;
+        let minU = Infinity;
+        let maxU = -Infinity;
+        let minV = Infinity;
+        let maxV = -Infinity;
+        for (let i = 0; i < positions.length; i += 3) {
+          const px = Number(positions[i]);
+          const py = Number(positions[i + 1]);
+          const pz = Number(positions[i + 2]);
+          const wx = m[0] * px + m[4] * py + m[8] * pz + m[12];
+          const wy = m[1] * px + m[5] * py + m[9] * pz + m[13];
+          const wz = m[2] * px + m[6] * py + m[10] * pz + m[14];
+          const dx = wx - ox;
+          const dy = wy - oy;
+          const dz = wz - oz;
+          const u = dx * xx + dy * xy + dz * xz;
+          const v = dx * yx + dy * yy + dz * yz;
+          minU = Math.min(minU, u);
+          maxU = Math.max(maxU, u);
+          minV = Math.min(minV, v);
+          maxV = Math.max(maxV, v);
+        }
+        return { minU, maxU, minV, maxV };
+      },
+      { previousBodyIds, plane },
+    );
+    expect(bounds).not.toBeNull();
+  }).toPass({ timeout: 10_000, intervals: [100, 200, 400] });
+  return bounds as unknown as PlaneBounds;
+}
+
 test("multi-region sketch: picking the non-first region (the rectangle) arms and commits an extrude", async ({
   page,
 }) => {
   await openEditorDebug(page);
+  await bodyOptions(page).first().getByRole("switch").click();
+  const visibleSeedSketches = page
+    .getByRole("listbox", { name: "Sketches" })
+    .locator('[role="switch"][aria-checked="true"]');
+  while ((await visibleSeedSketches.count()) > 0) await visibleSeedSketches.first().click();
   await enterSketchViaPlanePicker(page);
   await waitForCameraSettled(page);
 
@@ -82,31 +171,56 @@ test("multi-region sketch: picking the non-first region (the rectangle) arms and
     { x: 0, y: 0 },
   );
   const centroid = { x: sum.x / (snap.lines.length * 2), y: sum.y / (snap.lines.length * 2) };
+  const rectangleBounds: PlaneBounds = {
+    minU: Math.min(...snap.lines.flatMap((line) => [line.p0[0], line.p1[0]])),
+    maxU: Math.max(...snap.lines.flatMap((line) => [line.p0[0], line.p1[0]])),
+    minV: Math.min(...snap.lines.flatMap((line) => [line.p0[1], line.p1[1]])),
+    maxV: Math.max(...snap.lines.flatMap((line) => [line.p0[1], line.p1[1]])),
+  };
 
   const bodiesBefore = await bodyOptions(page).count();
+  const bodyIdsBefore = await documentBodyIds(page);
 
-  // Finish → 2 regions (circle + rectangle) → MULTI-select region pick (Wave 2),
-  // NOT an instant arm.
+  // Finish leaves model Select active. Static fill publication is asynchronous.
   await page.keyboard.press("Enter");
-  await expect(page.getByText(/^Select regions to extrude/)).toBeVisible();
-  // exitSketch() animates the camera BACK to its pre-sketch pose — settle before
-  // projecting the click point through it (see the camera-settle note above).
   await waitForCameraSettled(page);
 
-  // Click inside the rectangle's fill → TOGGLES regions[1] (the non-first region);
-  // the region-select chip reflects the single selection.
   const clientPt = await planePointToClient(page, snap.plane, centroid);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        ({ x, y }) => Boolean((window as unknown as { __vpEngine?: { sketchStaticHitTest(x: number, y: number): unknown } })
+          .__vpEngine?.sketchStaticHitTest(x, y)),
+        clientPt,
+      ),
+    )
+    .toBe(true);
   await clickAtClient(page, clientPt.x, clientPt.y);
-  await expect(page.getByTestId("chip-region-count")).toHaveText("1 region");
-  // Enter confirms the selection → arms the extrude on that one region.
-  await page.keyboard.press("Enter");
+  const selectedRegion = await page.evaluate(() => {
+    const selection = (window as unknown as {
+      __stores?: {
+        selection: {
+          getState(): {
+            selected: Array<{ kind: string; sketchId?: string; regionId?: string }>;
+          };
+        };
+      };
+    }).__stores?.selection.getState().selected;
+    return selection?.[0] ?? null;
+  });
+  expect(selectedRegion?.kind).toBe("sketchRegion");
+  expect(selectedRegion?.sketchId).toBeTruthy();
+  expect(selectedRegion?.regionId).toBeTruthy();
+  await page.getByRole("button", { name: "Extrude", exact: true }).click();
   await expect(page.getByText(/^Drag the arrow to set depth/)).toBeVisible();
 
-  // Wave 1 gesture: drag the handle, release (stays armed), Enter confirms.
   await commitExtrudeAtHandle(page);
-  // "Extruded" is a transient statusHint (ModelToolController.finishExtrude) that
-  // can already be gone by the time we poll — the durable proof of a successful
-  // commit is the new Body row, which finishExtrude also selects.
   await expect(bodyOptions(page)).toHaveCount(bodiesBefore + 1);
   await expect(bodyOptions(page).last()).toHaveAttribute("aria-selected", "true");
+
+  const committed = await committedBodyPlaneBounds(page, bodyIdsBefore, snap.plane);
+  expect(committed.minU).toBeCloseTo(rectangleBounds.minU, 3);
+  expect(committed.maxU).toBeCloseTo(rectangleBounds.maxU, 3);
+  expect(committed.minV).toBeCloseTo(rectangleBounds.minV, 3);
+  expect(committed.maxV).toBeCloseTo(rectangleBounds.maxV, 3);
 });

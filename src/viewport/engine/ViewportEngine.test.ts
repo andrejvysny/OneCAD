@@ -29,6 +29,10 @@ const mocks = vi.hoisted(() => {
 vi.mock("./renderer", () => ({ createRenderer: mocks.createRenderer }));
 
 import { ViewportEngine } from "./ViewportEngine";
+import * as THREE from "three";
+import { makeBoxMesh } from "@/ipc/mockMeshes";
+import { buildBodyObjects } from "../mesh/meshRegistry";
+import { parseMeshPayload } from "../mesh/parseMeshPayload";
 
 let rafCbs: FrameRequestCallback[] = [];
 function flushFrame(t = 16): void {
@@ -128,6 +132,46 @@ describe("ViewportEngine lifecycle", () => {
     flushFrame();
     expect(engine.frameCount).toBe(before + 1);
 
+    engine.dispose();
+  });
+
+  it("renders every split preview body and restores every hidden head body", () => {
+    const engine = new ViewportEngine();
+    const target = new THREE.Group();
+    target.userData.bodyId = "target";
+    const untouched = new THREE.Group();
+    untouched.userData.bodyId = "untouched";
+    engine.bodiesRoot.add(target, untouched);
+    const first = buildBodyObjects(parseMeshPayload(makeBoxMesh()), "preview-a", 1);
+    const second = buildBodyObjects(parseMeshPayload(makeBoxMesh()), "preview-b", 2);
+
+    engine.setPreviewBody(first);
+    engine.setPreviewBody(second);
+    engine.setPreviewReplacedBodyIds(["target"]);
+    expect(engine.previewRoot.children).toHaveLength(2);
+    expect(target.visible).toBe(false);
+    expect(untouched.visible).toBe(true);
+
+    engine.clearPreviewBody();
+    expect(engine.previewRoot.children).toHaveLength(0);
+    expect(target.visible).toBe(true);
+    expect(untouched.visible).toBe(true);
+    first.dispose();
+    second.dispose();
+    engine.dispose();
+  });
+
+  it("hides a fully deleted Cut target even when the candidate has no bodies", () => {
+    const engine = new ViewportEngine();
+    const target = new THREE.Group();
+    target.userData.bodyId = "target";
+    engine.bodiesRoot.add(target);
+
+    engine.setPreviewReplacedBodyIds(["target"]);
+    expect(engine.previewRoot.children).toHaveLength(0);
+    expect(target.visible).toBe(false);
+    engine.clearPreviewBody();
+    expect(target.visible).toBe(true);
     engine.dispose();
   });
 });

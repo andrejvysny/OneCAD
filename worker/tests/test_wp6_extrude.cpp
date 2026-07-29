@@ -6,6 +6,7 @@
 #include <utility>
 #include <vector>
 
+#include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -151,6 +152,55 @@ void test_to_next() {
                    "toNext: stops at nearest face z=20 → volume 2000");
 }
 
+// ToNext against a body the profile NEVER reaches (laterally offset pillar) must
+// fail loudly — the legacy nearest-ray-PLANE rule bound its z=20 plane and
+// silently extruded 2000 (review defect b).
+void test_to_next_miss_fails() {
+    const TopoDS_Shape target = BRepPrimAPI_MakeBox(gp_Pnt(50, 50, 20), 10.0, 10.0, 10.0).Shape();
+    BodyStore bodies;
+    bodies.create("body_target", "op_t", target);
+    em::ElementMapPartition part;
+    Ctx c;
+    c.sketches.push_back({"sk1", rect_sketch("sk1", 10, 10)});
+    c.last_sketch = "sk1";
+    ops::OpContext ctx = c.make(bodies, part);
+    json op = {{"opType", "Extrude"}, {"opId", "ope"},
+               {"params", {{"sketchId", "sk1"}, {"extrudeMode", "ToNext"}, {"booleanMode", "NewBody"},
+                           {"targetBodyId", "body_target"}}}};
+    ops::OpOutcome oc = ops::execute_extrude(ctx, op, "ope");
+    check(oc.status != ops::OpOutcome::Status::Ok, "toNext miss: fails, never a plane bind");
+    check(!bodies.contains("body_ope"), "toNext miss: no body created");
+    check(oc.error_message.find("no face found ahead") != std::string::npos,
+          "toNext miss: names the reason (got '" + oc.error_message + "')");
+}
+
+// ToNext with a NEARER face the profile misses laterally: the bound distance must
+// come from the face the profile actually reaches (z=8), not the nearer plane
+// (z=5) of a face it never crosses.
+void test_to_next_skips_missed_nearer_face() {
+    const TopoDS_Shape near_missed =
+        BRepPrimAPI_MakeBox(gp_Pnt(30, 0, 5), 10.0, 10.0, 10.0).Shape();
+    const TopoDS_Shape covering =
+        BRepPrimAPI_MakeBox(gp_Pnt(-10, 0, 8), 10.0, 10.0, 10.0).Shape();
+    const TopoDS_Shape target = BRepAlgoAPI_Fuse(near_missed, covering).Shape();
+    BodyStore bodies;
+    bodies.create("body_target", "op_t", target);
+    em::ElementMapPartition part;
+    Ctx c;
+    c.sketches.push_back({"sk1", rect_sketch("sk1", 10, 10)});
+    c.last_sketch = "sk1";
+    ops::OpContext ctx = c.make(bodies, part);
+    json op = {{"opType", "Extrude"}, {"opId", "ope"},
+               {"params", {{"sketchId", "sk1"}, {"extrudeMode", "ToNext"}, {"booleanMode", "NewBody"},
+                           {"targetBodyId", "body_target"}}}};
+    ops::OpOutcome oc = ops::execute_extrude(ctx, op, "ope");
+    check(oc.status == ops::OpOutcome::Status::Ok, "toNext skip: Ok");
+    check(bodies.contains("body_ope"), "toNext skip: NewBody created");
+    if (bodies.contains("body_ope"))
+        check_near(onecad::session::shape_volume(bodies.get("body_ope")->geom), 800.0, 1.0,
+                   "toNext skip: binds the face the profile reaches (z=8), not the nearer plane");
+}
+
 // Draft: a 10×10 profile extruded 10mm with a 10° draft tapers the side faces
 // inward ⇒ volume strictly below the 1000 straight prism.
 void test_draft() {
@@ -233,6 +283,8 @@ int main() {
     test_to_face();
     test_to_face_unresolved_needs_repair();
     test_to_next();
+    test_to_next_miss_fails();
+    test_to_next_skips_missed_nearer_face();
     test_draft();
     test_boolean_target_from_body_ref();
     test_boolean_ignores_face_ref_at_input0();

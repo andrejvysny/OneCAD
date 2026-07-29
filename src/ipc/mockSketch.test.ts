@@ -99,3 +99,91 @@ describe("orderedClosedLoop + mockRegionId", () => {
     expect(mockRegionId(["e1"])).toMatch(/^r_[0-9a-f]{8}$/);
   });
 });
+
+// Nesting: each bounded planar cell is selectable. A contained circle is both a
+// disc region and the hole boundary of the surrounding annulus.
+describe("detectRegions — nested circle creates two cells", () => {
+  const inner: SketchEntity = { id: "c", type: "Circle", center: [20, 10], radius: 4 };
+
+  it("publishes the inner disc and surrounding annulus independently", () => {
+    const regions = detectRegions([...rect, inner]);
+    expect(regions).toHaveLength(2);
+    expect(regions[0].outerLoop).toEqual(["c"]);
+    expect(regions[0].holes).toEqual([]);
+    expect(regions[1].outerLoop).toEqual(["e1", "e2", "e3", "e4"]);
+    expect(regions[1].holes).toEqual([["c"]]);
+    expect(regions[1].regionId).not.toBe(detectRegions(rect)[0].regionId);
+  });
+
+  it("subtracts the hole from the fill (area 800 − π·4² ≈ 749.7)", () => {
+    const annulus = detectRegions([...rect, inner]).find((region) => region.holes.length > 0)!;
+    const tris = annulus.previewTriangles!;
+    let area = 0;
+    for (let i = 0; i + 2 < tris.indices.length; i += 3) {
+      const [a, b, c] = [tris.indices[i], tris.indices[i + 1], tris.indices[i + 2]];
+      const ax = tris.positions[a * 2];
+      const ay = tris.positions[a * 2 + 1];
+      const bx = tris.positions[b * 2];
+      const by = tris.positions[b * 2 + 1];
+      const cx = tris.positions[c * 2];
+      const cy = tris.positions[c * 2 + 1];
+      area += Math.abs(((bx - ax) * (cy - ay) - (by - ay) * (cx - ax)) / 2);
+    }
+    // 32-gon slightly under-approximates the disc; a FILLED hole would be 800.
+    expect(area).toBeGreaterThan(745);
+    expect(area).toBeLessThan(755);
+  });
+
+  it("keeps a SEPARATED circle as its own region (e2e/multiregion.spec.ts)", () => {
+    const outside: SketchEntity = { id: "c", type: "Circle", center: [200, 200], radius: 5 };
+    const regions = detectRegions([...rect, outside]);
+    expect(regions).toHaveLength(2);
+    expect(regions[0].outerLoop).toEqual(["c"]); // circles first, then the loop
+    expect(regions[1].holes).toEqual([]);
+  });
+
+  it("keeps a circle that CROSSES the loop as its own region", () => {
+    // Centre inside, but the disc pokes through the boundary ⇒ invalid nesting.
+    const crossing: SketchEntity = { id: "c", type: "Circle", center: [20, 10], radius: 15 };
+    const regions = detectRegions([...rect, crossing]);
+    expect(regions).toHaveLength(2);
+    expect(regions[1].holes).toEqual([]);
+  });
+
+  it("omits an enclosing cell when the mock cannot subtract every hole", () => {
+    const regions = detectRegions([
+      ...rect,
+      { id: "c1", type: "Circle", center: [10, 10], radius: 3 },
+      { id: "c2", type: "Circle", center: [30, 10], radius: 3 },
+    ]);
+    expect(regions).toHaveLength(2);
+    expect(regions.every((region) => region.holes.length === 0)).toBe(true);
+  });
+});
+
+// The mock's fill has to satisfy the SAME topology contract as the worker's:
+// the only single-use edges are the outer and hole boundaries, so the extrude
+// preview recovers both rings and grows an inner wall.
+describe("detectRegions hole fill → profileFromRegion", () => {
+  it("yields one outer ring and one hole ring", async () => {
+    const { profileFromRegion } = await import("@/tools/preview/prismPreview");
+    const region = detectRegions([
+      ...rect,
+      { id: "c", type: "Circle", center: [20, 10], radius: 4 },
+    ]).find((candidate) => candidate.holes.length > 0)!;
+    const p = profileFromRegion(region)!;
+    expect(p).not.toBeNull();
+    expect(p.holes).toHaveLength(1);
+    // The outer ring keeps the rectangle's silhouette: extremes at the corners.
+    const us = p.ring.map(([u]) => u);
+    const vs = p.ring.map(([, v]) => v);
+    expect(Math.min(...us)).toBeCloseTo(0, 9);
+    expect(Math.max(...us)).toBeCloseTo(40, 9);
+    expect(Math.min(...vs)).toBeCloseTo(0, 9);
+    expect(Math.max(...vs)).toBeCloseTo(20, 9);
+    // The hole ring stays within the circle's bounds.
+    for (const [u, v] of p.holes[0]) {
+      expect(Math.hypot(u - 20, v - 10)).toBeLessThanOrEqual(4 + 1e-9);
+    }
+  });
+});

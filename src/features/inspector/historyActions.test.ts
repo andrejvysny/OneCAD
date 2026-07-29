@@ -33,6 +33,20 @@ describe("historyActions — command mapping", () => {
     apply.mockRestore();
   });
 
+  it("hydrates the feature timeline with the authored opType (re-edit routing)", async () => {
+    const apply = vi.spyOn(mockClient, "applyEditCommand").mockResolvedValue({
+      revision: 9,
+      features: [
+        { id: "f-ch", kind: "fillet", opType: "Chamfer", label: "Chamfer", valueText: "1.0 mm", status: "ok" },
+      ],
+      changedBodies: [],
+      removedBodies: [],
+    });
+    await rollToIndex(0);
+    expect(documentStore.getState().features[0].opType).toBe("Chamfer");
+    apply.mockRestore();
+  });
+
   it("deleteFeature sends RemoveOperation and drops the feature from the store", async () => {
     const apply = vi.spyOn(mockClient, "applyEditCommand");
     expect(documentStore.getState().features.some((f) => f.id === "f3")).toBe(true);

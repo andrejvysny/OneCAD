@@ -7,6 +7,7 @@
  */
 import { createStore, useStore } from "zustand";
 import { createClient } from "@/ipc/client";
+import { resetDocumentScopedUi } from "@/ipc/documentLifecycle";
 import type { DocumentSnapshot, RecentProject, RecoveryInfo } from "@/ipc/types";
 
 const client = createClient();
@@ -39,6 +40,13 @@ export const appStore = createStore<AppState>()((set, get) => {
   const enter = (document: DocumentSnapshot) =>
     set({ screen: "editor", document });
 
+  // Only an ALREADY-OPEN document has UI identities to invalidate. The first
+  // entry must not clobber boot-seeded state (the mock lane opens with the
+  // prototype's Sketch 2 selection).
+  const resetIfReplacing = () => {
+    if (get().document) resetDocumentScopedUi();
+  };
+
   return {
     screen: "start",
     recents: [],
@@ -54,10 +62,14 @@ export const appStore = createStore<AppState>()((set, get) => {
     },
 
     async newProject() {
+      // Reset BEFORE the swap: mounted controllers must cancel their preview
+      // sessions while the outgoing document's refs still resolve.
+      resetIfReplacing();
       enter(await client.newDocument());
     },
 
     async openProject(path) {
+      resetIfReplacing();
       enter(await client.openDocument(path));
       // The backend recorded this open in the recents store; refresh so the
       // start-screen list reflects it (newest first) next time it renders.
@@ -66,14 +78,17 @@ export const appStore = createStore<AppState>()((set, get) => {
 
     async openDialogAndOpen() {
       const path = await client.openFileDialog();
-      if (!path) return; // cancelled
+      if (!path) return; // cancelled — nothing swapped, so nothing to invalidate
+      resetIfReplacing();
       enter(await client.openDocument(path));
       void get().loadRecents();
     },
 
     async importStep() {
       const path = await client.openFileDialog();
-      if (path) enter(await client.importStep(path));
+      if (!path) return; // cancelled
+      resetIfReplacing();
+      enter(await client.importStep(path));
     },
 
     async checkRecovery() {
@@ -83,6 +98,7 @@ export const appStore = createStore<AppState>()((set, get) => {
     },
 
     async recoverDocument() {
+      resetIfReplacing();
       const snap = await client.recoverDocument(true);
       set({ recovery: null, recoveryStatus: "ready" });
       if (snap) enter(snap);

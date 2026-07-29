@@ -26,6 +26,7 @@ import type {
   PreviewResult,
   PreviewSession,
   PromotedElement,
+  SketchPlane,
   PromotePick,
   RecentProject,
   RecoveryInfo,
@@ -134,6 +135,12 @@ export interface CadClient {
   finishSketch(sketchId: string): Promise<FinishSketchResult>;
 
   /**
+   * Recompute closed regions without ending/squashing an edit session. This is
+   * the model-mode/static-layer read and works for persisted unopened sketches.
+   */
+  getSketchRegions(sketchId: string): Promise<FinishSketchResult>;
+
+  /**
    * Read a sketch's authoritative geometry WITHOUT opening an edit session — a
    * pure read for the always-visible sketch layer (no session opened, no cleanup).
    * Same wire shape as `enterSketch` (plane + entities + constraints + dof/status).
@@ -181,6 +188,14 @@ export interface CadClient {
    * deterministic ids. Promoted ids flow back into the selection refs.
    */
   promoteSelection(bodyId: string, picks: PromotePick[]): Promise<PromotedElement[]>;
+
+  /**
+   * Resolve a picked planar FACE to the sketch plane a sketch on it would freeze
+   * (MODEL-OPS W2). REJECTS a non-planar face rather than approximating one —
+   * silently sketching on a made-up plane is the "silent wrong bind" class this
+   * codebase refuses. The mock derives an equivalent frame locally.
+   */
+  faceSketchPlane(bodyId: string, elementId: string): Promise<SketchPlane>;
 
   // ── Topology repair (SCHEMA §9; M4b) ──────────────────────────────────────
 

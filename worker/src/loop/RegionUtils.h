@@ -22,9 +22,12 @@ namespace onecad::core::loop {
  */
 struct RegionDefinition {
     std::string id;
+    std::string legacyId;
     std::string signature;
     Loop outerLoop;
     std::vector<Loop> holes;
+    std::vector<std::string> outerWireEdges;
+    std::vector<std::vector<std::string>> holeWireEdges;
 };
 
 /**

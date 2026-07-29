@@ -553,8 +553,9 @@ FaceBuildResult FaceBuilder::buildFace(const Face& face, const sk::Sketch& sketc
             Loop orientedHole = orientLoop(hole, false);
             auto holeWireResult = buildWire(orientedHole, sketch, plane);
             if (!holeWireResult.success) {
-                result.warnings.push_back("Failed to build hole wire: " + holeWireResult.errorMessage);
-                continue;
+                result.errorMessage =
+                    "Failed to build hole wire: " + holeWireResult.errorMessage;
+                return result;
             }
             result.warnings.insert(result.warnings.end(),
                                    holeWireResult.warnings.begin(),
@@ -566,7 +567,8 @@ FaceBuildResult FaceBuilder::buildFace(const Face& face, const sk::Sketch& sketc
             if (faceWithHole.IsDone()) {
                 topoFace = faceWithHole.Face();
             } else {
-                result.warnings.push_back("Failed to add hole to face");
+                result.errorMessage = "Failed to add hole to face";
+                return result;
             }
         }
 

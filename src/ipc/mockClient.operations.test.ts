@@ -43,6 +43,22 @@ describe("mockClient operations", () => {
     expect(mesh.byteLength).toBeGreaterThan(64);
   });
 
+  it("repeated persisted-sketch region reads stay exact after plane caching", async () => {
+    const first = await mockClient.getSketchRegions("sketch2");
+    const second = await mockClient.getSketchRegions("sketch2");
+    expect(first.regions.length).toBeGreaterThan(0);
+    expect(second.regions.map((region) => region.regionId)).toEqual(
+      first.regions.map((region) => region.regionId),
+    );
+    const session = await mockClient.beginPreview({
+      opType: "Extrude",
+      sketchId: "sketch2",
+      regionId: second.regions[0].regionId,
+      params: { distance: 5 },
+    });
+    await mockClient.endPreview(session.sessionId, false);
+  });
+
   it("undo removes the body + feature; redo restores them", async () => {
     const regionId = await seedRegion();
     const applied = await mockClient.applyOperation(extrudeOp("skA", regionId, 12));

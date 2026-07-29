@@ -13,7 +13,7 @@
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/ui/cn";
 import { ViewportEngine } from "./engine/ViewportEngine";
-import type { PickHit } from "./engine/Picker";
+import { secondaryHitWins, type PickHit } from "./engine/Picker";
 import { MeshIngest } from "./mesh/meshSync";
 import { SketchStaticSync } from "./sketchStaticSync";
 import { setViewportEngine } from "./engineBridge";
@@ -22,7 +22,12 @@ import { viewportStore } from "@/stores/viewportStore";
 import { settingsStore } from "@/stores/settingsStore";
 import { toolStore } from "@/stores/toolStore";
 import { installInputProbe } from "./debug/inputProbe";
-import { selectionStore, topoRefId, type EntityRef } from "@/stores/selectionStore";
+import {
+  selectionStore,
+  sketchRegionRef,
+  topoRefId,
+  type EntityRef,
+} from "@/stores/selectionStore";
 import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { createClient } from "@/ipc/client";
@@ -38,6 +43,7 @@ import { documentStore } from "@/stores/documentStore";
 import { SketchController } from "@/tools/sketch/SketchController";
 import { ModelToolController } from "@/tools/modelTools/ModelToolController";
 import { setModelToolController } from "@/tools/modelTools/modelToolBridge";
+import type { SketchStaticHit } from "./engine/SketchStaticLayer";
 
 /** A face/edge PickHit → a selection ref (carries the anchor for AcquireElementIds). */
 function refFromHit(hit: PickHit): EntityRef {
@@ -49,6 +55,25 @@ function refFromHit(hit: PickHit): EntityRef {
     elementId: hit.elementId,
     anchor: { worldPoint: [hit.worldPos.x, hit.worldPos.y, hit.worldPos.z] },
   };
+}
+
+function refFromSketchStaticHit(hit: SketchStaticHit): EntityRef {
+  return hit.kind === "sketchRegion"
+    ? sketchRegionRef(hit.sketchId, hit.regionId)
+    : { kind: "sketch", id: hit.sketchId };
+}
+
+function refFromModelHits(
+  bodyHit: PickHit | null,
+  sketchHit: SketchStaticHit | null,
+): EntityRef | null {
+  if (
+    sketchHit &&
+    (!bodyHit || secondaryHitWins(bodyHit.distance, sketchHit.distance))
+  ) {
+    return refFromSketchStaticHit(sketchHit);
+  }
+  return bodyHit ? refFromHit(bodyHit) : null;
 }
 
 /**
@@ -208,30 +233,17 @@ export function ViewportRoot({ className }: { className?: string }) {
           isActive: isPickingActive,
           onHover: (hit, x, y) => {
             const sel = selectionStore.getState();
-            if (hit) {
-              sel.setHover(refFromHit(hit));
-              return;
-            }
-            // No body hit → an always-visible sketch under the pointer (or nothing).
-            const sid = engine.sketchStaticHitTest(x, y);
-            sel.setHover(sid ? { kind: "sketch", id: sid } : null);
+            const sketchHit = engine.sketchStaticHitTest(x, y);
+            sel.setHover(refFromModelHits(hit, sketchHit));
           },
           onPick: (hit, mods, x, y) => {
             const sel = selectionStore.getState();
-            if (!hit) {
-              // Empty click over a sketch selects it (feeds the extrude/revolve flow);
-              // truly empty clears.
-              const sid = engine.sketchStaticHitTest(x, y);
-              if (sid) {
-                const ref: EntityRef = { kind: "sketch", id: sid };
-                if (mods.shift || mods.meta) sel.toggle(ref);
-                else sel.set([ref]);
-                return;
-              }
+            const sketchHit = engine.sketchStaticHitTest(x, y);
+            const ref = refFromModelHits(hit, sketchHit);
+            if (!ref) {
               sel.clear();
               return;
             }
-            const ref = refFromHit(hit);
             if (mods.shift || mods.meta) sel.toggle(ref);
             else sel.set([ref]);
             // Promote face/edge picks to a persistent ElementId (mock mints ids;
@@ -298,6 +310,7 @@ export function ViewportRoot({ className }: { className?: string }) {
           resetMockSketches();
           resetMockDocument();
           const sid = "toolsketch";
+          let regionRef: EntityRef | null = null;
           const rect: SketchEntity[] = [
             { id: "e1", type: "Line", p0: [-30, -20], p1: [30, -20] },
             { id: "e2", type: "Line", p0: [30, -20], p1: [30, 20] },
@@ -307,8 +320,18 @@ export function ViewportRoot({ className }: { className?: string }) {
           void (async () => {
             await client.enterSketch({ newOnPlane: "XY", sketchId: sid });
             await client.sketchUpsert(sid, rect, []);
-            await client.finishSketch(sid);
-            documentStore.getState().addSketch({ id: sid, name: "Sketch T", visible: true, dof: 0, status: "ok" });
+            const finish = await client.finishSketch(sid);
+            if (finish.regions[0]) {
+              regionRef = sketchRegionRef(sid, finish.regions[0].regionId);
+            }
+            documentStore.getState().addSketch({
+              id: sid,
+              name: "Sketch T",
+              visible: true,
+              dof: 0,
+              status: "ok",
+              geometryToken: `mock:${sid}:v1`,
+            });
           })();
           (window as unknown as { __toolsGate?: unknown }).__toolsGate = {
             setLatency: (ms: number) => setMockLatency(ms),
@@ -318,7 +341,8 @@ export function ViewportRoot({ className }: { className?: string }) {
             client,
             stores: { selectionStore, toolStore, documentStore },
             arm: () => {
-              selectionStore.getState().set([{ kind: "sketch", id: sid }]);
+              if (!regionRef) return;
+              selectionStore.getState().set([regionRef]);
               toolStore.getState().setTool("extrude");
             },
           };

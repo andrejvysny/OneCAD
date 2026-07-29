@@ -203,7 +203,6 @@ OpDeterminism read_determinism(const json& op) {
     return d;
 }
 
-enum class StepKind { Ok, Failed, NeedsRepair };
 enum class ExecStatus { Completed, Cancelled };
 
 struct ExecResult {
@@ -243,6 +242,85 @@ ops::OpOutcome run_single_op(ScratchJob& job, const json& op, const std::string&
     return ops::OpOutcome::unsupported("unsupported opType: " + op_type);
 }
 
+struct CandidateSnapshot {
+    BodyStore bodies;
+    em::ElementMapPartition partition;
+    std::size_t sketch_count = 0;
+    std::string last_sketch_id;
+};
+
+CandidateSnapshot snapshot_candidate(const ScratchJob& job,
+                                     const std::string& last_sketch_id) {
+    return CandidateSnapshot{job.bodies, job.partition, job.sketches.size(),
+                             last_sketch_id};
+}
+
+void merge_outcome(CandidateResult& result, ops::OpOutcome outcome) {
+    result.error_code = std::move(outcome.error_code);
+    result.error_message = std::move(outcome.error_message);
+    result.body_events = std::move(outcome.body_events);
+    result.body_ids = std::move(outcome.body_ids);
+    for (auto& entry : outcome.delta.added) result.delta.added.push_back(std::move(entry));
+    for (auto& entry : outcome.delta.relabeled) result.delta.relabeled.push_back(std::move(entry));
+    for (auto& id : outcome.delta.removed) result.delta.removed.push_back(std::move(id));
+    for (auto& repair : outcome.needs_repair) {
+        result.needs_repair.push_back(std::move(repair));
+    }
+    if (outcome.status == ops::OpOutcome::Status::Ok) {
+        result.status = result.needs_repair.empty()
+                            ? CandidateResult::Status::Ok
+                            : CandidateResult::Status::NeedsRepair;
+    } else if (outcome.status == ops::OpOutcome::Status::Failed) {
+        result.status = CandidateResult::Status::Failed;
+    } else if (outcome.status == ops::OpOutcome::Status::Unsupported) {
+        result.status = CandidateResult::Status::Unsupported;
+    } else {
+        result.status = CandidateResult::Status::Cancelled;
+    }
+}
+
+void rollback_candidate(ScratchJob& job, std::string& last_sketch_id,
+                        CandidateResult& result, CandidateSnapshot snapshot) {
+    job.bodies = std::move(snapshot.bodies);
+    job.partition = std::move(snapshot.partition);
+    job.sketches.resize(snapshot.sketch_count);
+    last_sketch_id = std::move(snapshot.last_sketch_id);
+    result.body_events.clear();
+    result.body_ids.clear();
+    result.delta = em::ElementMapDelta{};
+}
+
+}  // namespace
+
+CandidateResult execute_candidate_op(ScratchJob& job, const json& op,
+                                     const std::string& op_id,
+                                     std::string& last_sketch_id,
+                                     const onecad::CancelToken& cancel) {
+    CandidateResult result;
+    result.ref_bindings = collect_ref_bindings(op, op_id);
+    if (cancel.cancelled()) {
+        result.status = CandidateResult::Status::Cancelled;
+        return result;
+    }
+
+    CandidateSnapshot snapshot = snapshot_candidate(job, last_sketch_id);
+
+    resolve_input_refs(job, op, op_id, result.delta, result.needs_repair);
+    if (result.needs_repair.empty()) {
+        merge_outcome(
+            result, run_single_op(job, op, op_id, last_sketch_id, cancel));
+    } else {
+        result.status = CandidateResult::Status::NeedsRepair;
+    }
+
+    if (result.status != CandidateResult::Status::Ok) {
+        rollback_candidate(job, last_sketch_id, result, std::move(snapshot));
+    }
+    return result;
+}
+
+namespace {
+
 // Drive the ordered op slice into `job`, streaming one planStep per executed step
 // and stopping at the first failure / NeedsRepair (SCHEMA §7.2).
 ExecResult execute_ops(ScratchJob& job, const json& ops, std::uint64_t job_id, std::uint64_t req_id,
@@ -271,93 +349,60 @@ ExecResult execute_ops(ScratchJob& job, const json& ops, std::uint64_t job_id, s
         }
         if (ctx.cancel.cancelled()) { res.status = ExecStatus::Cancelled; return res; }
 
-        std::vector<RefBinding> ref_bindings = collect_ref_bindings(op, op_id);
-        em::ElementMapDelta delta;
-        json needs_repair = json::array();
         json diagnostics = json::array();
-
-        StepKind kind = StepKind::Ok;
-        std::vector<BodyEvent> body_events;
-        std::vector<std::string> body_ids;
-
-        // Snapshot before the op so a Failed / NeedsRepair step publishes m-1
-        // (Invariant 6 / SCHEMA §8): the op's geometry mutation + minted deltas are
-        // reverted, and the failed/needsRepair step's planStep carries no geometry.
-        // BodyStore + partition are value copies (cheap TopoDS handle copies).
-        BodyStore bodies_before = job.bodies;
-        em::ElementMapPartition partition_before = job.partition;
+        CandidateResult candidate;
 
         if (op_id.find("__fail") != std::string::npos) {
-            kind = StepKind::Failed;
-            diagnostics.push_back(fail_diagnostic("STUB_FORCED_FAIL", "forced op failure (__fail hook)"));
+            candidate.status = CandidateResult::Status::Failed;
+            candidate.error_code = "STUB_FORCED_FAIL";
+            candidate.error_message = "forced op failure (__fail hook)";
+            candidate.ref_bindings = collect_ref_bindings(op, op_id);
         } else if (op_id.find("__needsrepair") != std::string::npos) {
-            kind = StepKind::NeedsRepair;
-            needs_repair.push_back(make_needs_repair(op, op_id));
+            candidate.status = CandidateResult::Status::NeedsRepair;
+            candidate.needs_repair.push_back(make_needs_repair(op, op_id));
+            candidate.ref_bindings = collect_ref_bindings(op, op_id);
         } else {
-            // Resolve referenced sub-element inputs via the ladder (descriptor +
-            // anchor), minting confident bindings (delta.added) at the PREDECESSOR
-            // snapshot. Any unresolved ref ⇒ NeedsRepair — the op does NOT run
-            // (prepare m−1, never a wrong bind). Then execute the op (its own
-            // relabeled/removed deltas + operand resolution + geometry).
-            std::vector<json> input_repairs;
-            resolve_input_refs(job, op, op_id, delta, input_repairs);
-            if (!input_repairs.empty()) {
-                for (auto& nr : input_repairs) needs_repair.push_back(std::move(nr));
-                kind = StepKind::NeedsRepair;
-            } else {
-                ops::OpOutcome oc = run_single_op(job, op, op_id, last_sketch_id, ctx.cancel);
-                for (auto& e : oc.delta.added) delta.added.push_back(std::move(e));
-                for (auto& e : oc.delta.relabeled) delta.relabeled.push_back(std::move(e));
-                for (auto& id : oc.delta.removed) delta.removed.push_back(std::move(id));
-
-                switch (oc.status) {
-                    case ops::OpOutcome::Status::Cancelled:
-                        res.status = ExecStatus::Cancelled;
-                        return res;
-                    case ops::OpOutcome::Status::Failed:
-                    case ops::OpOutcome::Status::Unsupported:
-                        kind = StepKind::Failed;
-                        diagnostics.push_back(fail_diagnostic(oc.error_code, oc.error_message));
-                        break;
-                    case ops::OpOutcome::Status::Ok:
-                        body_events = std::move(oc.body_events);
-                        body_ids = std::move(oc.body_ids);
-                        for (auto& nr : oc.needs_repair) needs_repair.push_back(std::move(nr));
-                        kind = needs_repair.empty() ? StepKind::Ok : StepKind::NeedsRepair;
-                        break;
-                }
-            }
+            candidate = execute_candidate_op(job, op, op_id, last_sketch_id, ctx.cancel);
         }
 
-        if (kind == StepKind::Ok) {
-            emit_plan_step(ctx, req_id, job_id, step_index, body_events, delta.to_json(), needs_repair,
-                           signatures_json(job.bodies, body_events, ref_bindings), diagnostics);
+        if (candidate.status == CandidateResult::Status::Cancelled) {
+            res.status = ExecStatus::Cancelled;
+            return res;
+        }
+        if (candidate.status == CandidateResult::Status::Failed ||
+            candidate.status == CandidateResult::Status::Unsupported) {
+            diagnostics.push_back(
+                fail_diagnostic(candidate.error_code, candidate.error_message));
+        }
+
+        if (candidate.status == CandidateResult::Status::Ok) {
+            emit_plan_step(ctx, req_id, job_id, step_index, candidate.body_events,
+                           candidate.delta.to_json(), candidate.needs_repair,
+                           signatures_json(job.bodies, candidate.body_events,
+                                           candidate.ref_bindings),
+                           diagnostics);
             StepResult r;
             r.step_index = step_index;
             r.status = "ok";
-            r.body_ids = std::move(body_ids);
+            r.body_ids = std::move(candidate.body_ids);
             job.per_step.push_back(std::move(r));
             last_ok_step = step_index;
             res.last_ok_exec_idx = exec_idx;
-        } else if (kind == StepKind::NeedsRepair) {
-            // Revert the op's geometry + minted deltas: the prepared snapshot is m-1
-            // (SCHEMA §8). The step's planStep carries only the needsRepair payload.
-            job.bodies = std::move(bodies_before);
-            job.partition = std::move(partition_before);
+        } else if (candidate.status == CandidateResult::Status::NeedsRepair) {
             emit_plan_step(ctx, req_id, job_id, step_index, /*events=*/{},
-                           em::ElementMapDelta{}.to_json(), needs_repair,
-                           signatures_json(job.bodies, /*events=*/{}, ref_bindings), diagnostics);
+                           em::ElementMapDelta{}.to_json(), candidate.needs_repair,
+                           signatures_json(job.bodies, /*events=*/{},
+                                           candidate.ref_bindings),
+                           diagnostics);
             StepResult r;
             r.step_index = step_index;
             r.status = "needsRepair";
-            r.ref_count = needs_repair.size();
+            r.ref_count = candidate.needs_repair.size();
             job.per_step.push_back(std::move(r));
             job.stopped_reason = "needsRepair";
-            job.last_valid_step = last_ok_step;  // prepare m-1 (SCHEMA §8)
+            job.last_valid_step = last_ok_step;  // prepare m−1 (SCHEMA §8)
             return res;
-        } else {  // Failed — revert to m-1; NO planStep event for the failed step.
-            job.bodies = std::move(bodies_before);
-            job.partition = std::move(partition_before);
+        } else {  // Failed — revert to m−1; NO planStep event for the failed step.
             StepResult r;
             r.step_index = step_index;
             r.status = "opFailed";

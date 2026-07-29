@@ -24,11 +24,21 @@ function sketchStatus(s: string): SketchStatus {
 export function projectionToStore(p: DocumentProjectionWire): DocumentProjection {
   const sketches: DocumentProjection["sketches"] = {};
   for (const [id, s] of Object.entries(p.sketches)) {
-    sketches[id] = { id: s.id, name: s.name, visible: s.visible, dof: s.dof, status: sketchStatus(s.status) };
+    sketches[id] = {
+      id: s.id,
+      name: s.name,
+      visible: s.visible,
+      dof: s.dof,
+      status: sketchStatus(s.status),
+      geometryToken: s.geometryToken,
+    };
   }
   const features = p.features.map((f: FeatureRecord) => ({
     id: f.id,
     kind: f.kind,
+    // Re-edits route on the exact authored opType, not the coarse `kind` bucket
+    // (the backend folds Chamfer into "fillet", patterns/mirror into "boolean").
+    opType: f.opType,
     label: f.label,
     valueText: f.valueText,
     status: f.status,

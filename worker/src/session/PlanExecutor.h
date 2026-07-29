@@ -26,11 +26,33 @@
 //                                     cooperative cancellation).
 #pragma once
 
+#include "ops/OpTypes.h"
 #include "protocol/Dispatcher.h"  // HandlerContext
 #include "protocol/Envelope.h"
 #include "session/Session.h"
 
 namespace onecad::session {
+
+// Result of executing one candidate step against scratch state. Failed,
+// cancelled, and NeedsRepair candidates are rolled back before this is returned.
+struct CandidateResult {
+    enum class Status { Ok, Failed, Unsupported, NeedsRepair, Cancelled };
+    Status status = Status::Ok;
+    std::string error_code;
+    std::string error_message;
+    std::vector<BodyEvent> body_events;
+    std::vector<std::string> body_ids;
+    elementmap::ElementMapDelta delta;
+    std::vector<nlohmann::json> needs_repair;
+    std::vector<RefBinding> ref_bindings;
+};
+
+// Execute one complete candidate step: predecessor input resolution, operation,
+// NeedsRepair handling, and rollback. ExecutePlan and PreviewOp both use this.
+CandidateResult execute_candidate_op(ScratchJob& job, const nlohmann::json& op,
+                                     const std::string& op_id,
+                                     std::string& last_sketch_id,
+                                     const onecad::CancelToken& cancel);
 
 // ExecutePlan (kernel lane): fence → execute into scratch (streaming planStep
 // events via ctx.emit) → terminal PlanPrepared / PROTOCOL_ERROR / CANCELLED.

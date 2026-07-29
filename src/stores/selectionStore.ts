@@ -11,6 +11,7 @@ import { createStore, useStore } from "zustand";
 export type EntityKind =
   | "body"
   | "sketch"
+  | "sketchRegion"
   | "feature"
   | "face"
   | "edge"
@@ -26,8 +27,7 @@ export interface SelectionAnchor {
   surfaceUv?: [number, number];
 }
 
-export interface EntityRef {
-  kind: EntityKind;
+interface EntityRefBase {
   /** Stable id. For face/edge this is the composite `${bodyId}#${topoKey}`. */
   id: string;
   /** Owning body (face/edge picks). */
@@ -40,8 +40,36 @@ export interface EntityRef {
   anchor?: SelectionAnchor;
 }
 
+export interface SketchRegionRef extends EntityRefBase {
+  kind: "sketchRegion";
+  /** Owning sketch. Kept explicit: callers must never recover it by parsing `id`. */
+  sketchId: string;
+  /** Exact worker-authored planar-cell identity. */
+  regionId: string;
+}
+
+interface NonRegionEntityRef extends EntityRefBase {
+  kind: Exclude<EntityKind, "sketchRegion">;
+}
+
+export type EntityRef = SketchRegionRef | NonRegionEntityRef;
+
 export function sameRef(a: EntityRef, b: EntityRef): boolean {
   return a.kind === b.kind && a.id === b.id;
+}
+
+/** Collision-free local identity only; consumers use the explicit sketch/region fields. */
+export function sketchRegionRefId(sketchId: string, regionId: string): string {
+  return JSON.stringify([sketchId, regionId]);
+}
+
+export function sketchRegionRef(sketchId: string, regionId: string): SketchRegionRef {
+  return {
+    kind: "sketchRegion",
+    id: sketchRegionRefId(sketchId, regionId),
+    sketchId,
+    regionId,
+  };
 }
 
 /** Composite id for a face/edge ref: `${bodyId}#${topoKey}`. */

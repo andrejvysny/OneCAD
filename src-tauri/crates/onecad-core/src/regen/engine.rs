@@ -400,6 +400,9 @@ pub enum OpFailureCode {
     /// `UNSUPPORTED` — a known verb with an unsupported param (e.g. `Loft`
     /// before Loft ships); Rust freezes the node.
     Unsupported,
+    /// `STALE_PREVIEW` — PreviewOp-only: the caller's `expectedSnapshotId` no
+    /// longer matches the session head. Recoverable by re-previewing.
+    StalePreview,
 }
 
 /// The hard-failure taxonomy (SCHEMA §8; migration-plan error taxonomy).

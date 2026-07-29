@@ -28,10 +28,17 @@ const RECT: SketchEntity[] = [
 
 // A square profile fill covering the origin (two triangles), plane-local (u,v).
 const REGION: SketchRegion = {
-  regionId: "r",
+  regionId: "r0",
   outerLoop: [],
   holes: [],
   previewTriangles: { positions: [-10, -10, 10, -10, 10, 10, -10, 10], indices: [0, 1, 2, 0, 2, 3] },
+};
+
+const REGION_RIGHT: SketchRegion = {
+  regionId: "r1",
+  outerLoop: [],
+  holes: [],
+  previewTriangles: { positions: [20, -10, 40, -10, 40, 10, 20, 10], indices: [0, 1, 2, 0, 2, 3] },
 };
 
 function makeLayer() {
@@ -55,25 +62,36 @@ function groupFor(sketchRoot: THREE.Group, id: string): THREE.Group {
 const childOfType = <T extends THREE.Object3D>(g: THREE.Object3D, type: string): T | undefined =>
   g.children.find((c) => c.type === type) as T | undefined;
 
+function fillFor(g: THREE.Object3D, regionId: string): THREE.Mesh {
+  const fill = g.children.find((c) => c.userData.regionId === regionId);
+  if (!fill) throw new Error(`no fill for ${regionId}`);
+  return fill as THREE.Mesh;
+}
+
 describe("SketchStaticLayer.setSketch", () => {
-  it("builds curves + dots + fill and applies the plane basis matrix", () => {
+  it("builds curves + dots + one fill per region and applies the plane basis matrix", () => {
     const { layer, sketchRoot } = makeLayer();
-    layer.setSketch("s1", { plane: planeFor("XZ"), entities: RECT, regions: [REGION] });
+    layer.setSketch("s1", {
+      plane: planeFor("XZ"),
+      entities: RECT,
+      regions: [REGION, REGION_RIGHT],
+    });
 
     const g = groupFor(sketchRoot, "s1");
     const lines = childOfType<THREE.LineSegments>(g, "LineSegments");
     const points = childOfType<THREE.Points>(g, "Points");
-    const fill = childOfType<THREE.Mesh>(g, "Mesh");
+    const fills = g.children.filter((c) => c.type === "Mesh") as THREE.Mesh[];
     expect(lines).toBeDefined();
     expect(points).toBeDefined();
-    expect(fill).toBeDefined();
+    expect(fills).toHaveLength(2);
+    expect(fills.map((fill) => fill.userData.regionId)).toEqual(["r0", "r1"]);
 
     // 4 lines → 4 segments → 8 vertices; 8 endpoints (2 per line).
     expect(lines!.geometry.getAttribute("position").count).toBe(8);
     expect(points!.geometry.getAttribute("position").count).toBe(8);
-    // Fill: 4 verts (u,v)→(x,y,0), 2 triangles.
-    expect(fill!.geometry.getAttribute("position").count).toBe(4);
-    expect(fill!.geometry.getIndex()!.count).toBe(6);
+    // Each fill: 4 verts (u,v)→(x,y,0), 2 triangles.
+    expect(fills[0].geometry.getAttribute("position").count).toBe(4);
+    expect(fills[0].geometry.getIndex()!.count).toBe(6);
 
     // Local x/y map to the plane's world xAxis/yAxis (basis applied).
     const plane = planeFor("XZ");
@@ -88,17 +106,53 @@ describe("SketchStaticLayer.setSketch", () => {
     layer.setSketch("s1", { plane: IDENTITY_PLANE, entities: RECT, regions: [] });
     expect(childOfType(groupFor(sketchRoot, "s1"), "Mesh")).toBeUndefined();
   });
+
+  it("omits a region whose fill did not subtract every declared hole", () => {
+    const { layer, sketchRoot } = makeLayer();
+    const incomplete: SketchRegion = {
+      ...REGION,
+      holes: [["hole"]],
+      previewTriangles: { ...REGION.previewTriangles!, holesSubtracted: 0 },
+    };
+    layer.setSketch("s1", {
+      plane: IDENTITY_PLANE,
+      entities: RECT,
+      regions: [incomplete],
+    });
+    expect(childOfType(groupFor(sketchRoot, "s1"), "Mesh")).toBeUndefined();
+  });
 });
 
 describe("SketchStaticLayer.hitTest", () => {
-  it("resolves the sketch id from a fill raycast immediately (no manual updateMatrixWorld)", () => {
+  it("resolves the exact region from a fill immediately (no manual updateMatrixWorld)", () => {
     const { layer } = makeLayer();
     layer.setSketch("s1", { plane: IDENTITY_PLANE, entities: RECT, regions: [REGION] });
     const ray = new THREE.Raycaster(new THREE.Vector3(0, 0, 50), new THREE.Vector3(0, 0, -1));
-    expect(layer.hitTest(ray)).toBe("s1");
+    expect(layer.hitTest(ray)).toEqual({
+      kind: "sketchRegion",
+      sketchId: "s1",
+      regionId: "r0",
+      distance: 50,
+    });
   });
 
-  it("resolves a curve hit within the Line threshold when there is no fill", () => {
+  it("returns a non-first region's exact identity", () => {
+    const { layer } = makeLayer();
+    layer.setSketch("s1", {
+      plane: IDENTITY_PLANE,
+      entities: RECT,
+      regions: [REGION, REGION_RIGHT],
+    });
+    const ray = new THREE.Raycaster(new THREE.Vector3(30, 0, 50), new THREE.Vector3(0, 0, -1));
+    expect(layer.hitTest(ray)).toEqual({
+      kind: "sketchRegion",
+      sketchId: "s1",
+      regionId: "r1",
+      distance: 50,
+    });
+  });
+
+  it("resolves a whole-sketch curve hit within the Line threshold when there is no fill", () => {
     const { layer } = makeLayer();
     layer.setSketch("s1", {
       plane: IDENTITY_PLANE,
@@ -107,7 +161,18 @@ describe("SketchStaticLayer.hitTest", () => {
     });
     const ray = new THREE.Raycaster(new THREE.Vector3(0, 0, 50), new THREE.Vector3(0, 0, -1));
     ray.params.Line = { threshold: 1 };
-    expect(layer.hitTest(ray)).toBe("s1");
+    expect(layer.hitTest(ray)).toEqual({ kind: "sketch", sketchId: "s1", distance: 50 });
+  });
+
+  it("keeps a closed profile boundary selectable as the whole sketch", () => {
+    const { layer } = makeLayer();
+    layer.setSketch("s1", { plane: IDENTITY_PLANE, entities: RECT, regions: [REGION] });
+    const ray = new THREE.Raycaster(
+      new THREE.Vector3(-10, 0, 50),
+      new THREE.Vector3(0, 0, -1),
+    );
+    ray.params.Line = { threshold: 1 };
+    expect(layer.hitTest(ray)).toEqual({ kind: "sketch", sketchId: "s1", distance: 50 });
   });
 
   it("returns null when nothing is under the ray", () => {
@@ -127,27 +192,41 @@ describe("SketchStaticLayer.hitTest", () => {
 });
 
 describe("SketchStaticLayer tint", () => {
-  it("tints curves + fill on hover and selection (selection wins)", () => {
+  it("tints exact regions independently; whole-sketch selection still tints all", () => {
     const { layer, sketchRoot } = makeLayer();
-    layer.setSketch("s1", { plane: IDENTITY_PLANE, entities: RECT, regions: [REGION] });
+    layer.setSketch("s1", {
+      plane: IDENTITY_PLANE,
+      entities: RECT,
+      regions: [REGION, REGION_RIGHT],
+    });
     const g = groupFor(sketchRoot, "s1");
     const mat = (childOfType<THREE.LineSegments>(g, "LineSegments")!.material as THREE.LineBasicMaterial);
-    const fillMat = (childOfType<THREE.Mesh>(g, "Mesh")!.material as THREE.MeshBasicMaterial);
+    const fill0 = fillFor(g, "r0").material as THREE.MeshBasicMaterial;
+    const fill1 = fillFor(g, "r1").material as THREE.MeshBasicMaterial;
 
     expect(mat.color.getHex()).toBe(palette.sketchFull().getHex());
-    expect(fillMat.opacity).toBeCloseTo(0.18, 5);
+    expect(fill0.opacity).toBeCloseTo(0.18, 5);
+    expect(fill1.opacity).toBeCloseTo(0.18, 5);
 
-    layer.setHover("s1");
-    expect(mat.color.getHex()).toBe(palette.hoverAccent().getHex());
-    expect(fillMat.opacity).toBeCloseTo(0.3, 5);
+    layer.setHover({ kind: "sketchRegion", sketchId: "s1", regionId: "r1" });
+    expect(mat.color.getHex()).toBe(palette.sketchFull().getHex());
+    expect(fill0.opacity).toBeCloseTo(0.18, 5);
+    expect(fill1.opacity).toBeCloseTo(0.3, 5);
 
-    layer.setSelected(["s1"]);
-    expect(mat.color.getHex()).toBe(palette.sketchSelected().getHex()); // selection wins over hover
+    layer.setSelected([{ kind: "sketchRegion", sketchId: "s1", regionId: "r0" }]);
+    expect(fill0.color.getHex()).toBe(palette.sketchSelected().getHex());
+    expect(fill1.color.getHex()).toBe(palette.hoverAccent().getHex());
 
     layer.setHover(null);
     layer.setSelected([]);
     expect(mat.color.getHex()).toBe(palette.sketchFull().getHex());
-    expect(fillMat.opacity).toBeCloseTo(0.18, 5);
+    expect(fill0.opacity).toBeCloseTo(0.18, 5);
+    expect(fill1.opacity).toBeCloseTo(0.18, 5);
+
+    layer.setSelected([{ kind: "sketch", sketchId: "s1" }]);
+    expect(mat.color.getHex()).toBe(palette.sketchSelected().getHex());
+    expect(fill0.color.getHex()).toBe(palette.sketchSelected().getHex());
+    expect(fill1.color.getHex()).toBe(palette.sketchSelected().getHex());
   });
 });
 

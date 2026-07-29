@@ -5,7 +5,11 @@
  * surface (deps.debug) exposes the FSM phase / boolean target for assertions.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { ModelToolController, __setBodyLoadTimeoutForTests } from "./ModelToolController";
+import {
+  ModelToolController,
+  __setBodyLoadTimeoutForTests,
+  __setExactPreviewTimeoutForTests,
+} from "./ModelToolController";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import type { CadClient } from "@/ipc/client";
 import type {
@@ -104,13 +108,20 @@ describe("ModelToolController Wave 2", () => {
     return {
       onPreviewResult: vi.fn(() => () => {}),
       finishSketch: vi.fn(opts.finish),
+      getSketchRegions: vi.fn(opts.finish),
       getSketch: vi.fn(() => Promise.resolve(makeSession(opts.entities))),
       beginPreview: vi.fn((_d: PreviewDraft) => Promise.resolve({ sessionId: `pv-${++seq}`, previewBodyId: `pb-${seq}` })),
       updatePreview: vi.fn(),
       endPreview: vi.fn(() => Promise.resolve(opts.endResults ? opts.endResults[endCall++] ?? ok(`b${endCall}`) : ok(`b${endCall++}`))),
       applyOperation: vi.fn((_op: OperationOp) => Promise.resolve(opts.applyResults ? opts.applyResults[applyCall++] ?? ok(`rv${applyCall}`) : ok(`rv${applyCall++}`))),
       applyEditCommand: vi.fn(() => Promise.resolve(ok("edit"))),
-      getOperationParams: vi.fn(() => Promise.resolve({})),
+      getOperationParams: vi.fn(
+        (): Promise<Record<string, unknown>> =>
+          Promise.resolve({
+          profile: { sketchId: "sk", regionId: "r0" },
+          distance: { value: 10 },
+          }),
+      ),
     };
   }
 
@@ -132,7 +143,12 @@ describe("ModelToolController Wave 2", () => {
 
   beforeEach(() => {
     resetStores();
-    selectionStore.getState().set([{ kind: "sketch", id: "sk" }]);
+    // No preview results are delivered here (onPreviewResult is a bare stub), so
+    // collapse the commit-time exact-preview barrier to one macrotask.
+    __setExactPreviewTimeoutForTests(0);
+    selectionStore.getState().set([
+      { kind: "sketchRegion", id: "r0-ref", sketchId: "sk", regionId: "r0" },
+    ]);
     // One visible body by default (seedMockDocument gives body1) → boolean available.
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -141,6 +157,7 @@ describe("ModelToolController Wave 2", () => {
   afterEach(() => {
     controller?.dispose();
     container.remove();
+    __setExactPreviewTimeoutForTests(4000);
   });
 
   function click(x: number, y: number): void {
@@ -200,65 +217,47 @@ describe("ModelToolController Wave 2", () => {
     expect(debug().booleanTargetId).toBeNull();
   });
 
-  // ── multi-region N-op commit, stop-on-failure ─────────────────────────────────
+  // ── exact single-region commit, stop-on-failure ───────────────────────────────
 
-  it("commits N regions sequentially; a mid-loop failure keeps the committed ones and re-arms the rest", async () => {
-    // endPreview: region0 ok, region1 FAILS, region2 never reached.
+  it("a failed exact-region commit re-arms the same region", async () => {
     build({
       finish: () => Promise.resolve({ regions: [R0, R1, R2] }),
-      endResults: [ok("body-a"), fail("worker exploded")],
+      endResults: [fail("worker exploded")],
     });
     await armExtrude();
-    // Multi-select: toggle all three, then Enter confirms the selection.
-    click(10, 10);
-    await flush();
-    click(130, 110);
-    await flush();
-    click(210, 210);
-    await flush();
-    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
-    await flush();
-    expect(clientMock.beginPreview).toHaveBeenCalledTimes(3); // one session per region
-
-    // Confirm the armed 3-region extrude.
+    expect(clientMock.beginPreview).toHaveBeenCalledTimes(1);
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
     await flush();
     await flush(); // let the re-arm beginPreview resolve
 
-    // Stopped after the 2nd endPreview (region1 failed) — region2 never committed.
-    expect(clientMock.endPreview).toHaveBeenCalledTimes(2);
-    expect(controller.extrudeActive).toBe(true); // re-armed (work kept)
+    expect(clientMock.endPreview).toHaveBeenCalledTimes(1);
+    expect(controller.extrudeActive).toBe(true);
     const hint = viewportStore.getState().statusHint;
     expect(hint?.severity).toBe("error");
-    expect(hint?.message).toMatch(/Extrude 2 of 3 failed: worker exploded/);
-    // Committed region0 dropped; failed region1 re-begun (4th beginPreview), region2 kept.
-    expect(clientMock.beginPreview).toHaveBeenCalledTimes(4);
-    expect(clientMock.beginPreview.mock.calls[3][0].regionId).toBe("r1");
-    expect(debug().regionCount).toBe(2);
+    expect(hint?.message).toMatch(/Extrude failed: worker exploded/);
+    expect(clientMock.beginPreview).toHaveBeenCalledTimes(2);
+    expect(clientMock.beginPreview.mock.calls[1][0].regionId).toBe("r0");
+    expect(debug().regionCount).toBe(1);
   });
 
-  it("commits N regions and, on full success, selects all bodies + auto-hides the sketch", async () => {
-    // Register the sketch in the tree so the auto-hide has something to flip.
-    documentStore.getState().addSketch({ id: "sk", name: "Sketch X", visible: true, dof: 0, status: "ok" });
-    build({ finish: () => Promise.resolve({ regions: [R0, R1] }), endResults: [ok("body-a"), ok("body-b")] });
+  it("commits one exact region, selects the result, and auto-hides the sketch", async () => {
+    documentStore.getState().addSketch({
+      id: "sk",
+      name: "Sketch X",
+      visible: true,
+      dof: 0,
+      status: "ok",
+      geometryToken: "sk:v1",
+    });
+    build({ finish: () => Promise.resolve({ regions: [R0, R1] }), endResults: [ok("body-a")] });
     await armExtrude();
-    click(10, 10);
-    await flush();
-    click(130, 110);
-    await flush();
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
     await flush();
-    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })); // confirm
-    await flush();
 
-    // Both committed → the reconcile waits for both bodies to load.
-    bodyCbs.forEach((cb) => { cb("body-a"); cb("body-b"); });
+    bodyCbs.forEach((cb) => cb("body-a"));
     await flush();
     expect(controller.extrudeActive).toBe(false);
-    expect(selectionStore.getState().selected).toEqual([
-      { kind: "body", id: "body-a" },
-      { kind: "body", id: "body-b" },
-    ]);
+    expect(selectionStore.getState().selected).toEqual([{ kind: "body", id: "body-a" }]);
     expect(documentStore.getState().sketches.sk.visible).toBe(false); // consumed sketch hidden
   });
 
@@ -266,6 +265,7 @@ describe("ModelToolController Wave 2", () => {
 
   it("revolve: an axis that splits ONE selected region is rejected (all-regions validity)", async () => {
     build({ finish: () => Promise.resolve({ regions: [R0, R1] }), entities: [AXIS_OK, AXIS_BAD] });
+    selectionStore.getState().set([{ kind: "sketch", id: "sk" }]);
     toolStore.getState().setTool("revolve");
     await flush();
     click(10, 10);
@@ -285,6 +285,7 @@ describe("ModelToolController Wave 2", () => {
 
   it("revolve: a valid axis arms, then confirm loops one applyOperation per region", async () => {
     build({ finish: () => Promise.resolve({ regions: [R0, R1] }), entities: [AXIS_OK, AXIS_BAD] });
+    selectionStore.getState().set([{ kind: "sketch", id: "sk" }]);
     toolStore.getState().setTool("revolve");
     await flush();
     click(10, 10);
@@ -316,7 +317,14 @@ describe("ModelToolController Wave 2", () => {
   const waitMs = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
   it("selects the UNION of an op's scoped bodies incl split children (finding 2)", async () => {
-    documentStore.getState().addSketch({ id: "sk", name: "Sketch X", visible: true, dof: 0, status: "ok" });
+    documentStore.getState().addSketch({
+      id: "sk",
+      name: "Sketch X",
+      visible: true,
+      dof: 0,
+      status: "ok",
+      geometryToken: "sk:v1",
+    });
     // A single region whose op returns TWO bodies (a Cut split child).
     build({
       finish: () => Promise.resolve({ regions: [R0] }),
@@ -383,18 +391,10 @@ describe("ModelToolController Wave 2", () => {
   it("dispose ends EVERY open preview session with endPreview(false) (finding 6, N sessions)", async () => {
     build({ finish: () => Promise.resolve({ regions: [R0, R1, R2] }) });
     await armExtrude();
-    click(10, 10);
-    await flush();
-    click(130, 110);
-    await flush();
-    click(210, 210);
-    await flush();
-    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })); // confirm selection → 3 sessions
-    await flush();
-    expect(clientMock.beginPreview).toHaveBeenCalledTimes(3);
+    expect(clientMock.beginPreview).toHaveBeenCalledTimes(1);
     clientMock.endPreview.mockClear();
     controller.dispose();
-    expect(clientMock.endPreview).toHaveBeenCalledTimes(3);
+    expect(clientMock.endPreview).toHaveBeenCalledTimes(1);
     for (const call of clientMock.endPreview.mock.calls) expect((call as unknown[])[1]).toBe(false);
   });
 
@@ -455,20 +455,12 @@ describe("ModelToolController Wave 2", () => {
   it("clears stale L2 preview bodies before re-arming after a partial failure (finding 11)", async () => {
     build({
       finish: () => Promise.resolve({ regions: [R0, R1, R2] }),
-      endResults: [ok("body-a"), fail("boom")],
+      endResults: [fail("boom")],
     });
     await armExtrude();
-    click(10, 10);
-    await flush();
-    click(130, 110);
-    await flush();
-    click(210, 210);
-    await flush();
-    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })); // confirm selection
-    await flush();
     engineMock.clearPreviewBody.mockClear();
 
-    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })); // confirm → region1 fails
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })); // confirm fails
     await flush();
     await flush(); // let the re-arm resolve
 
@@ -483,6 +475,7 @@ describe("ModelToolController Wave 2", () => {
       entities: [AXIS_OK, AXIS_BAD],
       applyResults: [ok("rev-a"), fail("boom")],
     });
+    selectionStore.getState().set([{ kind: "sketch", id: "sk" }]);
     toolStore.getState().setTool("revolve");
     await flush();
     click(10, 10);
@@ -504,6 +497,7 @@ describe("ModelToolController Wave 2", () => {
 
   it("confirmRevolve at a ~0° angle is refused with a 'non-zero angle' hint (finding 13)", async () => {
     build({ finish: () => Promise.resolve({ regions: [R0] }), entities: [AXIS_OK] });
+    selectionStore.getState().set([{ kind: "sketch", id: "sk" }]);
     toolStore.getState().setTool("revolve");
     await flush();
     click(50, 50); // pick the valid axis → armed at 360°

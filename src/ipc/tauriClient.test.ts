@@ -43,6 +43,16 @@ afterEach(() => {
 
 /** A full SketchPlane payload (XZ) an `enter_sketch` mock returns. */
 const XZ_PLANE = { kind: "XZ", origin: [0, 0, 0], xAxis: [0, 1, 0], yAxis: [0, 0, 1], normal: [1, 0, 0] };
+const PREVIEW_REGION = {
+  regionId: "r",
+  outerLoop: [],
+  holes: [],
+  previewTriangles: {
+    positions: [0, 0, 10, 0, 10, 10, 0, 10],
+    indices: [0, 1, 2, 0, 2, 3],
+    holesSubtracted: 0,
+  },
+};
 
 // ── Runtime selection ─────────────────────────────────────────────────────────
 
@@ -533,7 +543,16 @@ describe("tauriClient fresh-sketch naming", () => {
       title: "D",
       dirty: false,
       bodies: {},
-      sketches: { s1: { id: "s1", name: "Sketch 1", visible: true, dof: 0, status: "ok" } },
+      sketches: {
+        s1: {
+          id: "s1",
+          name: "Sketch 1",
+          visible: true,
+          dof: 0,
+          status: "ok",
+          geometryToken: "geometry-s1",
+        },
+      },
       features: [],
     });
     let addName: string | undefined;
@@ -867,11 +886,68 @@ describe("tauriClient sketch solver lane (real commands)", () => {
 });
 
 describe("tauriClient preview seam (local) + commit delegation", () => {
+  it("propagates PreviewOp NeedsRepair evidence as a structural preview failure", async () => {
+    mockIPC((cmd) => {
+      if (cmd === "get_sketch") {
+        return {
+          sketchId: "sk",
+          plane: XZ_PLANE,
+          entities: [],
+          constraints: [],
+          dof: 0,
+          status: "FullyConstrained",
+        };
+      }
+      if (cmd === "get_sketch_regions") return { regions: [PREVIEW_REGION] };
+      if (cmd === "preview_op") {
+        return {
+          snapshotId: 7,
+          bodies: [],
+          bodyEvents: [],
+          changedBodies: [],
+          deletedBodies: [],
+          needsRepair: [{ refId: "op.input0", reason: "ambiguous" }],
+        };
+      }
+    });
+    const client = createTauriClient();
+    await client.getSketch("sk");
+    await client.getSketchRegions("sk");
+    const seen: Array<{ error?: { kind: string; structural: boolean; evidence?: unknown[] } }> = [];
+    const unsub = client.onPreviewResult((result) => seen.push(result));
+    const session = await client.beginPreview({
+      opType: "Extrude",
+      sketchId: "sk",
+      regionId: "r",
+      params: { distance: 10 },
+    });
+    client.updatePreview(session.sessionId, { distance: 20 }, 1);
+    await tick();
+
+    expect(seen[0]?.error).toMatchObject({
+      kind: "needsRepair",
+      structural: true,
+      evidence: [{ refId: "op.input0", reason: "ambiguous" }],
+    });
+    unsub();
+  });
+
   it("endPreview(commit) materializes the op through apply_edit_command", async () => {
     const cmds: string[] = [];
     mockIPC(
       (cmd) => {
         cmds.push(cmd);
+        if (cmd === "get_sketch") {
+          return {
+            sketchId: "sk",
+            plane: XZ_PLANE,
+            entities: [],
+            constraints: [],
+            dof: 0,
+            status: "FullyConstrained",
+          };
+        }
+        if (cmd === "get_sketch_regions") return { regions: [PREVIEW_REGION] };
         if (cmd === "apply_edit_command") {
           setTimeout(() => {
             void emit("document-changed", {
@@ -888,6 +964,8 @@ describe("tauriClient preview seam (local) + commit delegation", () => {
     );
     __setRegenTimeoutForTests(300);
     const client = createTauriClient();
+    await client.getSketch("sk");
+    await client.getSketchRegions("sk");
     const session = await client.beginPreview({
       opType: "Extrude",
       sketchId: "sk",
@@ -905,9 +983,22 @@ describe("tauriClient preview seam (local) + commit delegation", () => {
     const cmds: string[] = [];
     mockIPC((cmd) => {
       cmds.push(cmd);
+      if (cmd === "get_sketch") {
+        return {
+          sketchId: "sk",
+          plane: XZ_PLANE,
+          entities: [],
+          constraints: [],
+          dof: 0,
+          status: "FullyConstrained",
+        };
+      }
+      if (cmd === "get_sketch_regions") return { regions: [PREVIEW_REGION] };
       return undefined;
     });
     const client = createTauriClient();
+    await client.getSketch("sk");
+    await client.getSketchRegions("sk");
     const session = await client.beginPreview({
       opType: "Extrude",
       sketchId: "sk",

@@ -1,17 +1,17 @@
 /*
  * SketchStaticSync store wiring: initial sweep fetches visible sketches (skips
  * invisible), visibility flips + removals reach the layer, entering/exiting sketch
- * mode toggles the editing hide + refetches, and a finishSketch rejection degrades
- * to empty regions. The engine + layer + client are fakes.
+ * mode toggles the editing hide + refetches, and a getSketchRegions rejection
+ * degrades to empty regions. The engine + layer + client are fakes.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { SketchStaticSync } from "./sketchStaticSync";
 import { documentStore, type SketchMeta } from "@/stores/documentStore";
 import { toolStore } from "@/stores/toolStore";
 import { viewportStore } from "@/stores/viewportStore";
-import { selectionStore } from "@/stores/selectionStore";
+import { selectionStore, sketchRegionRef } from "@/stores/selectionStore";
 import type { CadClient } from "@/ipc/client";
-import type { SketchSession } from "@/ipc/types";
+import type { SketchRegion, SketchSession } from "@/ipc/types";
 import type { ViewportEngine } from "./engine/ViewportEngine";
 import type { SketchStaticLayer } from "./engine/SketchStaticLayer";
 
@@ -25,10 +25,21 @@ const PLANE: SketchSession["plane"] = {
   normal: [0, 0, 1],
 };
 
-function meta(id: string, visible: boolean): SketchMeta {
-  return { id, name: id, visible, dof: 0, status: "ok" };
+function meta(id: string, visible: boolean, geometryToken = "geometry-v1"): SketchMeta {
+  return { id, name: id, visible, dof: 0, status: "ok", geometryToken };
 }
 
+const REGION: SketchRegion = {
+  regionId: "r-keep",
+  outerLoop: [],
+  holes: [],
+  previewTriangles: {
+    positions: [0, 0, 10, 0, 0, 10],
+    indices: [0, 1, 2],
+  },
+};
+
+/** Plain vi.fn bag — kept UNcast so the specs can assert/mockClear on each spy. */
 function fakeLayer() {
   return {
     setSketch: vi.fn(),
@@ -37,14 +48,16 @@ function fakeLayer() {
     setEditingSketch: vi.fn(),
     setSelected: vi.fn(),
     setHover: vi.fn(),
-  } as unknown as SketchStaticLayer & Record<string, ReturnType<typeof vi.fn>>;
+  };
 }
 
-function fakeEngine(layer: SketchStaticLayer) {
-  return { getSketchStaticLayer: () => layer } as unknown as ViewportEngine;
+function fakeEngine(layer: ReturnType<typeof fakeLayer>) {
+  return {
+    getSketchStaticLayer: () => layer as unknown as SketchStaticLayer,
+  } as unknown as ViewportEngine;
 }
 
-function fakeClient() {
+function fakeClient(regions: SketchRegion[] = []) {
   const getSketch = vi.fn(
     async (sketchId: string): Promise<SketchSession> => ({
       sketchId,
@@ -55,10 +68,10 @@ function fakeClient() {
       status: "FullyConstrained",
     }),
   );
-  const finishSketch = vi.fn(async () => ({ regions: [] }));
-  return { getSketch, finishSketch } as unknown as CadClient & {
+  const getSketchRegions = vi.fn(async () => ({ regions }));
+  return { getSketch, getSketchRegions } as unknown as CadClient & {
     getSketch: typeof getSketch;
-    finishSketch: typeof finishSketch;
+    getSketchRegions: typeof getSketchRegions;
   };
 }
 
@@ -133,6 +146,84 @@ describe("SketchStaticSync document diff", () => {
     await tick();
     expect(client.getSketch).toHaveBeenCalledWith("s1");
   });
+
+  it("rebuilds a same-id visible sketch when its geometry token changes", async () => {
+    documentStore.setState({ sketches: { s1: meta("s1", true, "geometry-v1") } });
+    const layer = fakeLayer();
+    const client = fakeClient([REGION]);
+    sync = new SketchStaticSync();
+    sync.attach(fakeEngine(layer), client);
+    await tick();
+    client.getSketch.mockClear();
+    client.getSketchRegions.mockClear();
+    layer.setSketch.mockClear();
+    layer.removeSketch.mockClear();
+
+    documentStore.setState({
+      sketches: {
+        s1: { ...meta("s1", true, "geometry-v2"), dof: 1 },
+      },
+    });
+    await tick();
+
+    expect(layer.removeSketch).toHaveBeenCalledWith("s1");
+    expect(client.getSketch).toHaveBeenCalledOnce();
+    expect(client.getSketchRegions).toHaveBeenCalledOnce();
+    expect(layer.setSketch).toHaveBeenCalledOnce();
+  });
+
+  it("does not refetch when a same-id sketch keeps its geometry token", async () => {
+    documentStore.setState({ sketches: { s1: meta("s1", true, "geometry-v1") } });
+    const layer = fakeLayer();
+    const client = fakeClient();
+    sync = new SketchStaticSync();
+    sync.attach(fakeEngine(layer), client);
+    await tick();
+    client.getSketch.mockClear();
+    client.getSketchRegions.mockClear();
+    layer.setSketch.mockClear();
+
+    documentStore.setState({
+      sketches: {
+        s1: {
+          ...meta("s1", true, "geometry-v1"),
+          name: "Renamed",
+          dof: 4,
+          status: "under",
+        },
+      },
+    });
+    await tick();
+
+    expect(client.getSketch).not.toHaveBeenCalled();
+    expect(client.getSketchRegions).not.toHaveBeenCalled();
+    expect(layer.setSketch).not.toHaveBeenCalled();
+  });
+
+  it("retains valid region refs and clears stale refs after a token refresh", async () => {
+    documentStore.setState({ sketches: { s1: meta("s1", true, "geometry-v1") } });
+    const layer = fakeLayer();
+    const client = fakeClient([REGION]);
+    sync = new SketchStaticSync();
+    sync.attach(fakeEngine(layer), client);
+    await tick();
+
+    const kept = sketchRegionRef("s1", "r-keep");
+    const stale = sketchRegionRef("s1", "r-stale");
+    selectionStore.getState().set([kept, stale, { kind: "body", id: "b1" }]);
+    selectionStore.getState().setHover(stale);
+
+    documentStore.setState({
+      sketches: { s1: meta("s1", true, "geometry-v2") },
+    });
+    await tick();
+
+    expect(selectionStore.getState().selected).toEqual([
+      kept,
+      { kind: "body", id: "b1" },
+    ]);
+    expect(selectionStore.getState().hover).toBeNull();
+  });
 });
 
 describe("SketchStaticSync editing (mode enter/exit)", () => {
@@ -156,11 +247,11 @@ describe("SketchStaticSync editing (mode enter/exit)", () => {
 });
 
 describe("SketchStaticSync fill degradation + selection mirror", () => {
-  it("still builds the sketch with empty regions when finishSketch rejects", async () => {
+  it("still builds the sketch with empty regions when getSketchRegions rejects", async () => {
     documentStore.setState({ sketches: { s1: meta("s1", true) } });
     const layer = fakeLayer();
     const client = fakeClient();
-    client.finishSketch.mockRejectedValueOnce(new Error("no regions"));
+    client.getSketchRegions.mockRejectedValueOnce(new Error("no regions"));
     sync = new SketchStaticSync();
     sync.attach(fakeEngine(layer), client);
     await tick();
@@ -176,9 +267,21 @@ describe("SketchStaticSync fill degradation + selection mirror", () => {
     await tick();
 
     selectionStore.getState().set([{ kind: "sketch", id: "s1" }]);
-    expect(layer.setSelected).toHaveBeenLastCalledWith(["s1"]);
+    expect(layer.setSelected).toHaveBeenLastCalledWith([{ kind: "sketch", sketchId: "s1" }]);
     selectionStore.getState().setHover({ kind: "sketch", id: "s1" });
-    expect(layer.setHover).toHaveBeenLastCalledWith("s1");
+    expect(layer.setHover).toHaveBeenLastCalledWith({ kind: "sketch", sketchId: "s1" });
+
+    selectionStore.getState().set([sketchRegionRef("s1", "r1")]);
+    expect(layer.setSelected).toHaveBeenLastCalledWith([
+      { kind: "sketchRegion", sketchId: "s1", regionId: "r1" },
+    ]);
+    selectionStore.getState().setHover(sketchRegionRef("s1", "r0"));
+    expect(layer.setHover).toHaveBeenLastCalledWith({
+      kind: "sketchRegion",
+      sketchId: "s1",
+      regionId: "r0",
+    });
+
     selectionStore.getState().setHover({ kind: "face", id: "body#f:1" });
     expect(layer.setHover).toHaveBeenLastCalledWith(null);
   });

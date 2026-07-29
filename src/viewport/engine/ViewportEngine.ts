@@ -28,7 +28,11 @@ import { HtmlOverlayDriver } from "./HtmlOverlayDriver";
 import { palette } from "./palette";
 import { Picker, linePickThreshold, type PickHit, type PickModifiers } from "./Picker";
 import { HighlightLayer } from "./HighlightLayer";
-import { SketchStaticLayer } from "./SketchStaticLayer";
+import {
+  SketchStaticLayer,
+  sketchStaticHitKey,
+  type SketchStaticHit,
+} from "./SketchStaticLayer";
 import { RegionPickLayer } from "./RegionPickLayer";
 import { flushDisposals } from "../mesh/meshRegistry";
 import type { MeshEntry } from "../mesh/meshRegistry";
@@ -121,6 +125,8 @@ export class ViewportEngine {
   // One L2 preview body per armed region, keyed by bodyId (N==1 single-region;
   // N in Wave 2 multi-select). The materials are shared, so a Cut tint hits all.
   private previewBodies = new Map<string, BodyObjectHandle>();
+  /** Committed body groups temporarily hidden under exact replacement previews. */
+  private previewHiddenBodies = new Map<THREE.Object3D, boolean>();
   private extrudePreviewCut = false; // Cut tint sticks across preview-body swaps
 
   // Picking + highlighting (mesh ingestion F-WP5).
@@ -237,7 +243,10 @@ export class ViewportEngine {
       onPick: (hit, mods, x, y) => this.pickHandlers?.onPick(hit, mods, x, y),
       // Secondary hover token: the always-visible sketch under the pointer (only
       // consulted when there is no body hit).
-      secondaryHoverKey: (x, y) => this.sketchStaticHitTest(x, y),
+      secondaryHoverKey: (x, y) => {
+        const hit = this.sketchStaticHitTest(x, y);
+        return hit ? sketchStaticHitKey(hit) : null;
+      },
     });
 
     if (this.debug) this.setupDebugOverlay(overlayEl);
@@ -934,10 +943,28 @@ export class ViewportEngine {
     this.invalidate();
   }
 
+  /** Hide committed bodies replaced/deleted by the exact candidate operation. */
+  setPreviewReplacedBodyIds(bodyIds: string[]): void {
+    this.restorePreviewHiddenBodies();
+    const ids = new Set(bodyIds);
+    for (const child of this.bodiesRoot.children) {
+      if (!ids.has(String(child.userData.bodyId ?? ""))) continue;
+      this.previewHiddenBodies.set(child, child.visible);
+      child.visible = false;
+    }
+    this.invalidate();
+  }
+
+  private restorePreviewHiddenBodies(): void {
+    for (const [body, visible] of this.previewHiddenBodies) body.visible = visible;
+    this.previewHiddenBodies.clear();
+  }
+
   /** Remove ALL L2 preview bodies from the scene (registry entries dropped by the caller). */
   clearPreviewBody(): void {
     for (const handle of this.previewBodies.values()) this.previewRoot.remove(handle.group);
     this.previewBodies.clear();
+    this.restorePreviewHiddenBodies();
     this.invalidate();
   }
 
@@ -973,9 +1000,9 @@ export class ViewportEngine {
     return this.sketchStatic;
   }
 
-  /** Sketch id under a client point (curves + fill), or null. Deliberately NOT in the
-   *  orbit gate — clicking empty space near a sketch still orbits. */
-  sketchStaticHitTest(clientX: number, clientY: number): string | null {
+  /** Exact region/whole-sketch target under a client point, or null. Deliberately
+   *  NOT in the orbit gate — clicking empty space near a sketch still orbits. */
+  sketchStaticHitTest(clientX: number, clientY: number): SketchStaticHit | null {
     if (!this.sketchStatic) return null;
     const ndc = this.clientToNdc(clientX, clientY);
     if (!ndc || Math.abs(ndc.x) > 1 || Math.abs(ndc.y) > 1) return null;
@@ -1098,6 +1125,7 @@ export class ViewportEngine {
     this.planePicker = null;
     for (const handle of this.previewBodies.values()) this.previewRoot.remove(handle.group);
     this.previewBodies.clear();
+    this.restorePreviewHiddenBodies();
     this.previewMaterials?.dispose();
     this.previewMaterials = null;
 

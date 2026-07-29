@@ -187,8 +187,12 @@ export class SketchController {
       await Promise.resolve();
       if (toolStore.getState().mode !== "sketch") return;
       const activeId = viewportStore.getState().activeSketchId;
-      // No target ⇒ bare "new sketch" intent: pick a plane first.
+      // No target ⇒ bare "new sketch" intent. A selected model FACE is a
+      // sketch plane too (MODEL-OPS W2), so honour it before falling back to
+      // the three world quads — that is the whole point of sketch-on-face: a
+      // part is built by sketching on what you already made.
       if (!activeId) {
+        if (await this.tryEnterOnSelectedFace()) return;
         this.beginPlanePick();
         return;
       }
@@ -247,6 +251,7 @@ export class SketchController {
         visible: true,
         dof: session.dof,
         status: docSketchStatus(session.status),
+        geometryToken: `pending:${session.sketchId}`,
       });
     }
     selectionStore.getState().set([{ kind: "sketch", id: session.sketchId }]);
@@ -262,6 +267,58 @@ export class SketchController {
 
     this.selectMachine(toolStore.getState().sketchTool);
     return true;
+  }
+
+  /**
+   * If a single model FACE is selected, start the sketch ON it.
+   *
+   * The basis comes from the BACKEND (`faceSketchPlane` → the kernel's own face
+   * descriptor + the lock-tested in-plane axis rule), never from the picked
+   * triangle's normal: the frame is frozen with the sketch and every entity
+   * coordinate is expressed in it, so it has to be authoritative and
+   * replay-stable. A non-planar face is refused by the backend and reported,
+   * rather than sketching on an approximated plane.
+   *
+   * Returns false when there is nothing usable selected, so the caller falls
+   * through to the world-plane picker.
+   */
+  private async tryEnterOnSelectedFace(): Promise<boolean> {
+    const faces = selectionStore.getState().selected.filter((r) => r.kind === "face");
+    if (faces.length !== 1) return false;
+    const face = faces[0];
+    const bodyId = face.bodyId;
+    if (!bodyId) return false;
+
+    // A pick is promoted to a minted ElementId by ViewportRoot; if that has not
+    // landed yet, promote here rather than sending a snapshot-scoped TopoKey the
+    // attachment could not survive an edit with.
+    let elementId = face.elementId;
+    if (!elementId && face.topoKey) {
+      const promoted = await this.deps.client
+        .promoteSelection(bodyId, [{ topoKey: face.topoKey, anchor: face.anchor }])
+        .catch(() => null);
+      elementId = promoted?.[0]?.elementId;
+    }
+    if (!elementId) return false;
+
+    let plane: SketchPlane;
+    try {
+      plane = await this.deps.client.faceSketchPlane(bodyId, elementId);
+    } catch (e) {
+      viewportStore.getState().setStatusHint(
+        `Cannot sketch on that face: ${e instanceof Error ? e.message : String(e)}`,
+        { severity: "error", sticky: true },
+      );
+      // Fall back to the world planes so the user is not stuck.
+      return false;
+    }
+    if (toolStore.getState().mode !== "sketch") return false;
+
+    const opened = await this.openSession({
+      newOnFace: { bodyId, elementId, worldPoint: face.anchor?.worldPoint },
+      plane,
+    });
+    return opened;
   }
 
   /** Show the plane picker and prompt; a quad click resolves via confirmPlanePick. */

@@ -26,6 +26,8 @@ export interface SketchMeta {
   visible: boolean;
   dof: number;
   status: SketchStatus;
+  /** Stable authoritative geometry identity; metadata-only changes preserve it. */
+  geometryToken: string;
 }
 
 export type FeatureKind =
@@ -44,6 +46,8 @@ export type FeatureStatus = "ok" | "dirty" | "error" | "needsRepair";
 export interface FeatureMeta {
   id: string;
   kind: FeatureKind;
+  /** Exact authored `opType` — see `FeatureRecord.opType`; re-edits route on it. */
+  opType?: string;
   label: string;
   /** Mono value shown on the right of the history chip, e.g. "83.3 mm". */
   valueText: string;
@@ -127,9 +131,30 @@ export function seedMockDocument(): DocumentProjection {
       body1: { id: "body1", name: "Body 1", visible: true },
     },
     sketches: {
-      sketch2: { id: "sketch2", name: "Sketch 2", visible: true, dof: 3, status: "under" },
-      sketch4: { id: "sketch4", name: "Sketch 4", visible: true, dof: 0, status: "ok" },
-      sketch5: { id: "sketch5", name: "Sketch 5", visible: false, dof: 0, status: "ok" },
+      sketch2: {
+        id: "sketch2",
+        name: "Sketch 2",
+        visible: true,
+        dof: 3,
+        status: "under",
+        geometryToken: "mock:sketch2:v1",
+      },
+      sketch4: {
+        id: "sketch4",
+        name: "Sketch 4",
+        visible: true,
+        dof: 0,
+        status: "ok",
+        geometryToken: "mock:sketch4:v1",
+      },
+      sketch5: {
+        id: "sketch5",
+        name: "Sketch 5",
+        visible: false,
+        dof: 0,
+        status: "ok",
+        geometryToken: "mock:sketch5:v1",
+      },
     },
     features: [
       { id: "f1", kind: "sketch", label: "Sketch 1", valueText: "", status: "ok" },

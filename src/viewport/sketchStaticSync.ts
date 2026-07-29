@@ -3,9 +3,8 @@
  * (SketchStaticLayer) in step with the stores, mirroring the MeshIngest pattern.
  *
  * Flow:
- *   - documentStore.sketches → diff added / removed / visibility → for each visible
- *     sketch fetch `getSketch(id)` (geometry) + `finishSketch(id)` (fill regions,
- *     graceful-degraded to none) → layer.setSketch.
+ *   - documentStore.sketches → diff added / removed / visibility / geometry token
+ *     → for each visible sketch fetch `getSketch(id)` + read-only regions.
  *   - toolStore.mode + viewportStore.activeSketchId → hide the ONE sketch being
  *     edited (its live SketchObject owns it) and REFETCH it on exit (geometry likely
  *     changed while editing).
@@ -21,15 +20,30 @@ import { toolStore } from "@/stores/toolStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { selectionStore } from "@/stores/selectionStore";
 import type { ViewportEngine } from "./engine/ViewportEngine";
-import type { SketchStaticLayer } from "./engine/SketchStaticLayer";
+import type { SketchStaticLayer, SketchStaticTarget } from "./engine/SketchStaticLayer";
+
+function staticHitForSelection(
+  ref: ReturnType<typeof selectionStore.getState>["selected"][number],
+): SketchStaticTarget | null {
+  if (ref.kind === "sketch") return { kind: "sketch", sketchId: ref.id };
+  if (ref.kind === "sketchRegion") {
+    return {
+      kind: "sketchRegion",
+      sketchId: ref.sketchId,
+      regionId: ref.regionId,
+    };
+  }
+  return null;
+}
 
 export class SketchStaticSync {
   private client: CadClient | null = null;
   private layer: SketchStaticLayer | null = null;
   private detached = false;
   private readonly unsubs: Array<() => void> = [];
-  /** Per-sketch monotonic fetch token (latest-wins). */
+  /** Per-sketch latest global fetch token (latest-wins, safe across remove/re-add). */
   private readonly fetchSeq = new Map<string, number>();
+  private fetchCounter = 0;
   /** Sketch ids currently built into the layer. */
   private readonly loaded = new Set<string>();
 
@@ -78,8 +92,12 @@ export class SketchStaticSync {
     // fed by both tree clicks and viewport picks).
     const applySelection = (): void => {
       const sel = selectionStore.getState();
-      this.layer?.setSelected(sel.selected.filter((r) => r.kind === "sketch").map((r) => r.id));
-      this.layer?.setHover(sel.hover?.kind === "sketch" ? sel.hover.id : null);
+      this.layer?.setSelected(
+        sel.selected
+          .map(staticHitForSelection)
+          .filter((hit): hit is SketchStaticTarget => hit !== null),
+      );
+      this.layer?.setHover(sel.hover ? staticHitForSelection(sel.hover) : null);
     };
     applySelection();
     this.unsubs.push(selectionStore.subscribe(applySelection));
@@ -94,12 +112,19 @@ export class SketchStaticSync {
         this.layer?.removeSketch(id);
         this.loaded.delete(id);
         this.fetchSeq.delete(id);
+        this.reconcileRegionRefs(id, new Set());
       }
     }
     for (const [id, meta] of Object.entries(next)) {
       const before = prev[id];
       if (!before) {
         if (meta.visible) void this.loadSketch(id);
+      } else if (before.geometryToken !== meta.geometryToken) {
+        // Never leave old fills pickable while the replacement is in flight.
+        this.layer?.removeSketch(id);
+        this.loaded.delete(id);
+        this.fetchSeq.delete(id);
+        if (meta.visible && !this.isEditing(id)) void this.loadSketch(id);
       } else if (before.visible !== meta.visible) {
         if (this.loaded.has(id)) this.layer?.setVisible(id, meta.visible);
         else if (meta.visible) void this.loadSketch(id); // lazy-load on first show
@@ -110,7 +135,7 @@ export class SketchStaticSync {
   private async loadSketch(id: string): Promise<void> {
     const client = this.client;
     if (!client || this.detached) return;
-    const token = (this.fetchSeq.get(id) ?? 0) + 1;
+    const token = ++this.fetchCounter;
     this.fetchSeq.set(id, token);
 
     let session;
@@ -122,9 +147,13 @@ export class SketchStaticSync {
     if (this.detached || this.fetchSeq.get(id) !== token) return;
 
     // Fill is best-effort: a reject or zero regions degrades to curves-only.
-    const finish = await client.finishSketch(id).catch(() => ({ regions: [] }));
+    const finish = await client.getSketchRegions(id).catch(() => ({ regions: [] }));
     if (this.detached || this.fetchSeq.get(id) !== token) return;
 
+    this.reconcileRegionRefs(
+      id,
+      new Set(finish.regions.map((region) => region.regionId)),
+    );
     this.loaded.add(id);
     this.layer?.setSketch(id, { plane: session.plane, entities: session.entities, regions: finish.regions });
     // Re-assert the current tree visibility (the editing-hide override is applied by
@@ -134,7 +163,34 @@ export class SketchStaticSync {
 
   /** Refetch a sketch's geometry (e.g. after exiting its edit session). */
   private refetch(id: string): void {
-    if (documentStore.getState().sketches[id]) void this.loadSketch(id);
+    if (documentStore.getState().sketches[id]?.visible) void this.loadSketch(id);
+  }
+
+  private isEditing(id: string): boolean {
+    return (
+      toolStore.getState().mode === "sketch" &&
+      viewportStore.getState().activeSketchId === id
+    );
+  }
+
+  /** Drop only exact region refs that the refreshed sketch no longer publishes. */
+  private reconcileRegionRefs(id: string, available: ReadonlySet<string>): void {
+    const selection = selectionStore.getState();
+    const next = selection.selected.filter(
+      (ref) =>
+        ref.kind !== "sketchRegion" ||
+        ref.sketchId !== id ||
+        available.has(ref.regionId),
+    );
+    if (next.length !== selection.selected.length) selection.set(next);
+    const hover = selectionStore.getState().hover;
+    if (
+      hover?.kind === "sketchRegion" &&
+      hover.sketchId === id &&
+      !available.has(hover.regionId)
+    ) {
+      selectionStore.getState().setHover(null);
+    }
   }
 
   private applyEditing(mode: string, activeId: string | null): void {
@@ -145,6 +201,7 @@ export class SketchStaticSync {
     this.detached = true;
     for (const u of this.unsubs.splice(0)) u();
     this.fetchSeq.clear();
+    this.fetchCounter = 0;
     this.loaded.clear();
     // The engine owns the layer's disposal (engine.dispose); nothing to free here.
     this.layer = null;

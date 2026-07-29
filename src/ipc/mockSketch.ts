@@ -89,10 +89,16 @@ export function solveDof(
 // ── Region detection (MOCK — single closed loop, or circles) ─────────────────
 //
 // LIMITS: detects (a) each Circle as its own region and (b) a SINGLE closed loop
-// of lines/arcs (every vertex degree 2, connected). No hole/nesting detection,
-// no self-intersection handling. The real worker computes proper regions with
-// holes (SCHEMA §7.4 SketchRegions). regionId here is a mock hash, NOT the
-// normative FNV-1a-64 over 16-byte UUIDs the worker/Rust agree on.
+// of lines/arcs (every vertex degree 2, connected). No self-intersection
+// handling. The real worker computes proper regions via LoopDetector
+// (SCHEMA §7.4 SketchRegions). regionId here is a mock hash, NOT the normative
+// FNV-1a-64 over 16-byte UUIDs the worker/Rust agree on.
+//
+// NESTING (mock subset): a Circle whose disc lies wholly INSIDE the closed loop
+// creates TWO selectable planar cells: the circle disc, plus the enclosing loop
+// with the circle as a hole. This matches CAD profile semantics: clicking the
+// disc extrudes a cylinder; clicking the surrounding material extrudes a tube.
+// A circle that is separated from, or crosses, the loop stays its own region.
 
 const QUANT = 1e6; // 1e-6 endpoint-match tolerance
 const key = (p: [number, number]): string =>
@@ -183,6 +189,150 @@ function polygonTriangles(points: [number, number][]): { positions: number[]; in
   return { positions, indices };
 }
 
+/** Signed area of a polygon (CCW positive). */
+function signedArea(pts: [number, number][]): number {
+  let a = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const [x0, y0] = pts[i];
+    const [x1, y1] = pts[(i + 1) % pts.length];
+    a += x0 * y1 - x1 * y0;
+  }
+  return a / 2;
+}
+
+/** Ray-cast point-in-polygon. */
+function pointInPolygon(p: [number, number], poly: [number, number][]): boolean {
+  let inside = false;
+  for (let i = 0; i < poly.length; i++) {
+    const [ax, ay] = poly[i];
+    const [bx, by] = poly[(i + 1) % poly.length];
+    if (ay > p[1] !== by > p[1]) {
+      const t = (p[1] - ay) / (by - ay);
+      if (p[0] < ax + t * (bx - ax)) inside = !inside;
+    }
+  }
+  return inside;
+}
+
+/** Shortest distance from `p` to the polygon's boundary. */
+function distanceToBoundary(p: [number, number], poly: [number, number][]): number {
+  let best = Infinity;
+  for (let i = 0; i < poly.length; i++) {
+    const [ax, ay] = poly[i];
+    const [bx, by] = poly[(i + 1) % poly.length];
+    const dx = bx - ax;
+    const dy = by - ay;
+    const len2 = dx * dx + dy * dy;
+    const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, ((p[0] - ax) * dx + (p[1] - ay) * dy) / len2));
+    best = Math.min(best, Math.hypot(p[0] - (ax + t * dx), p[1] - (ay + t * dy)));
+  }
+  return best;
+}
+
+/** Sample a circle into a CCW polygon. */
+function circlePolygon(center: [number, number], radius: number, segments = 32): [number, number][] {
+  const pts: [number, number][] = [];
+  for (let i = 0; i < segments; i++) {
+    const a = (i / segments) * Math.PI * 2;
+    pts.push([center[0] + radius * Math.cos(a), center[1] + radius * Math.sin(a)]);
+  }
+  return pts;
+}
+
+/**
+ * Triangulate the annulus between an outer ring and ONE hole ring by stitching
+ * them into a strip ordered by ANGLE about the hole's centre: both rings are
+ * traversed CCW and whichever has the angularly-nearer next vertex advances.
+ * Every connecting edge is shared by two triangles, so the only single-use edges
+ * are the real outer and hole boundaries — the topology
+ * `prismPreview.profileFromRegion` needs to recover both rings. Each emitted
+ * triangle is normalized to CCW, which orients the recovered outer loop CCW and
+ * the hole loop CW.
+ *
+ * Angle order (not normalized ring parameter) is what makes the strip
+ * non-overlapping: a 4-vertex rectangle and a 32-vertex circle have wildly
+ * different parameter spacing, and a parameter-based stitch produces crossing
+ * triangles whose areas then double-count.
+ *
+ * MOCK LIMIT: exactly one hole, and both rings must be star-shaped about the
+ * hole's centre (true for the rectangle + inner circle the mock lane draws). The
+ * worker uses proper bridge-based ear clipping (`worker/src/loop/PolygonFill.cpp`).
+ */
+function annulusTriangles(
+  outerIn: [number, number][],
+  holeIn: [number, number][],
+): { positions: number[]; indices: number[] } {
+  const outer = signedArea(outerIn) < 0 ? [...outerIn].reverse() : outerIn;
+  const hole = signedArea(holeIn) < 0 ? [...holeIn].reverse() : holeIn;
+  const m = hole.length;
+
+  const cx = hole.reduce((s, p) => s + p[0], 0) / m;
+  const cy = hole.reduce((s, p) => s + p[1], 0) / m;
+  const TWO_PI = Math.PI * 2;
+
+  // Every direction in which EITHER ring has a vertex. Sampling both rings at
+  // this shared, sorted direction set gives two rings with equal vertex counts
+  // whose k-th vertices lie on the same ray — so the quad strip between them is
+  // non-overlapping by construction, and both rings keep their original corners.
+  const dirs: number[] = [];
+  for (const p of [...outer, ...hole]) {
+    const a = Math.atan2(p[1] - cy, p[0] - cx);
+    dirs.push(((a % TWO_PI) + TWO_PI) % TWO_PI);
+  }
+  dirs.sort((a, b) => a - b);
+  const uniq = dirs.filter((a, k) => k === 0 || a - dirs[k - 1] > 1e-12);
+
+  // Farthest ray/boundary hit from the centre — exact at a vertex the ray passes
+  // through, so corners survive sampling.
+  const rayHit = (theta: number, poly: [number, number][]): [number, number] => {
+    const dx = Math.cos(theta);
+    const dy = Math.sin(theta);
+    let best = 0;
+    for (let k = 0; k < poly.length; k++) {
+      const [ax, ay] = poly[k];
+      const [bx, by] = poly[(k + 1) % poly.length];
+      const ex = bx - ax;
+      const ey = by - ay;
+      const den = dx * ey - dy * ex;
+      if (Math.abs(den) < 1e-15) continue;
+      const s = ((ax - cx) * ey - (ay - cy) * ex) / den; // along the ray
+      const t = ((ax - cx) * dy - (ay - cy) * dx) / den; // along the edge
+      if (s > 0 && t >= -1e-12 && t <= 1 + 1e-12) best = Math.max(best, s);
+    }
+    return [cx + best * dx, cy + best * dy];
+  };
+
+  const positions: number[] = [];
+  for (const t of uniq) {
+    const [x, y] = rayHit(t, outer);
+    positions.push(x, y);
+  }
+  for (const t of uniq) {
+    const [x, y] = rayHit(t, hole);
+    positions.push(x, y);
+  }
+
+  const k = uniq.length;
+  const oi = (i: number): number => i % k;
+  const hi = (j: number): number => k + (j % k);
+  const indices: number[] = [];
+  const push = (a: number, b: number, c: number): void => {
+    const ax = positions[a * 2];
+    const ay = positions[a * 2 + 1];
+    const cross =
+      (positions[b * 2] - ax) * (positions[c * 2 + 1] - ay) -
+      (positions[b * 2 + 1] - ay) * (positions[c * 2] - ax);
+    if (Math.abs(cross) < 1e-12) return; // degenerate
+    if (cross > 0) indices.push(a, b, c);
+    else indices.push(a, c, b);
+  };
+  for (let i = 0; i < k; i++) {
+    push(oi(i), oi(i + 1), hi(i));
+    push(oi(i + 1), hi(i + 1), hi(i));
+  }
+  return { positions, indices };
+}
+
 /** Fan-triangulate a circle into plane-local (u,v) preview tris. */
 function circleTriangles(center: [number, number], radius: number, segments = 32): {
   positions: number[];
@@ -200,25 +350,49 @@ function circleTriangles(center: [number, number], radius: number, segments = 32
 
 export function detectRegions(entities: SketchEntity[]): SketchRegion[] {
   const regions: SketchRegion[] = [];
+  const live = entities.filter((e) => !e.construction);
+  const loop = orderedClosedLoop(live);
 
-  for (const e of entities) {
-    if (e.type === "Circle" && e.center && e.radius && !e.construction) {
-      regions.push({
-        regionId: mockRegionId([e.id]),
-        outerLoop: [e.id],
-        holes: [],
-        previewTriangles: circleTriangles(e.center, e.radius),
-      });
-    }
+  // A circle wholly inside the closed loop is both a selectable disc cell and a
+  // hole boundary of the enclosing cell. "Wholly inside" = centre inside AND
+  // the disc clear of the boundary, so a crossing circle stays independent.
+  const holeEntities: SketchEntity[] = [];
+  const freeCircles: SketchEntity[] = [];
+  for (const e of live) {
+    if (e.type !== "Circle" || !e.center || !e.radius) continue;
+    const nested =
+      loop !== null &&
+      pointInPolygon(e.center, loop.points) &&
+      distanceToBoundary(e.center, loop.points) > e.radius;
+    (nested ? holeEntities : freeCircles).push(e);
   }
 
-  const loop = orderedClosedLoop(entities.filter((e) => !e.construction));
-  if (loop) {
+  for (const e of [...freeCircles, ...holeEntities]) {
     regions.push({
-      regionId: mockRegionId(loop.ids),
-      outerLoop: loop.ids,
+      regionId: mockRegionId([e.id]),
+      outerLoop: [e.id],
       holes: [],
-      previewTriangles: polygonTriangles(loop.points),
+      previewTriangles: { ...circleTriangles(e.center!, e.radius!), holesSubtracted: 0 },
+    });
+  }
+
+  if (loop && holeEntities.length <= 1) {
+    // MOCK LIMIT: annulusTriangles supports one hole. With multiple holes, omit
+    // the enclosing cell instead of publishing fill geometry for different
+    // material than the declared profile.
+    const first = holeEntities[0];
+    regions.push({
+      // A cell's identity includes its material boundary, not only its outer
+      // wire. Adding/removing a hole must invalidate an armed profile.
+      regionId: mockRegionId([...loop.ids, ...holeEntities.map((hole) => hole.id)]),
+      outerLoop: loop.ids,
+      holes: holeEntities.map((h) => [h.id]),
+      previewTriangles: {
+        ...(first
+          ? annulusTriangles(loop.points, circlePolygon(first.center!, first.radius!))
+          : polygonTriangles(loop.points)),
+        holesSubtracted: first ? 1 : 0,
+      },
     });
   }
 

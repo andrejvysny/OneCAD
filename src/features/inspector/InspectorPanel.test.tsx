@@ -1,9 +1,12 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, act, fireEvent } from "@testing-library/react";
 import { InspectorPanel } from "./InspectorPanel";
 import { selectionStore } from "@/stores/selectionStore";
 import { toolStore } from "@/stores/toolStore";
 import { sketchStore } from "@/stores/sketchStore";
+import { documentStore } from "@/stores/documentStore";
+import { setModelToolController } from "@/tools/modelTools/modelToolBridge";
+import type { ModelToolController } from "@/tools/modelTools/ModelToolController";
 import { resetStores } from "@/test/resetStores";
 import { flushSketchMutations } from "@/tools/sketch/sketchService";
 import type { SketchConstraint, SketchSession } from "@/ipc/types";
@@ -43,6 +46,24 @@ describe("InspectorPanel", () => {
     expect(screen.getByText("2.0 mm")).toBeInTheDocument();
     // A body is fully defined — no DOF line.
     expect(screen.queryByText("Under-constrained · DOF 3")).toBeNull();
+  });
+
+  it("shows the owning sketch when a filled region is selected", () => {
+    render(<InspectorPanel />);
+    act(() =>
+      selectionStore.getState().set([
+        {
+          kind: "sketchRegion",
+          id: '["sketch2","r_profile"]',
+          sketchId: "sketch2",
+          regionId: "r_profile",
+        },
+      ]),
+    );
+
+    expect(screen.getByText("Sketch 2")).toBeInTheDocument();
+    expect(screen.getByText("Sketch profile")).toBeInTheDocument();
+    expect(screen.getByText("Under-constrained · DOF 3")).toBeInTheDocument();
   });
 
   it("shows the EMPTY state when nothing is selected", () => {
@@ -94,6 +115,34 @@ describe("InspectorPanel", () => {
     });
     expect(screen.getByText("No constraints yet.")).toBeInTheDocument();
     expect(screen.queryByText("Coincident")).toBeNull();
+  });
+
+  /**
+   * Re-edit routing runs off the authored `opType`, not `kind` — the backend folds
+   * Chamfer into kind "fillet", so routing on `kind` alone opened a Chamfer in the
+   * FILLET editor. Both rows below share kind "fillet" and must diverge here.
+   */
+  it("routes a history double-click on opType, so a Chamfer opens the chamfer editor", () => {
+    const editEdgeOpFeature = vi.fn(() => Promise.resolve());
+    setModelToolController({ editEdgeOpFeature } as unknown as ModelToolController);
+    try {
+      documentStore.setState({
+        features: [
+          { id: "f-ch", kind: "fillet", opType: "Chamfer", label: "Chamfer", valueText: "1.0 mm", status: "ok" },
+          { id: "f-fi", kind: "fillet", opType: "Fillet", label: "Fillet", valueText: "2.0 mm", status: "ok" },
+        ],
+      });
+      render(<InspectorPanel />);
+      act(() => selectionStore.getState().set([{ kind: "body", id: "body1" }]));
+
+      fireEvent.doubleClick(screen.getByTestId("history-row-f-ch"));
+      expect(editEdgeOpFeature).toHaveBeenCalledWith("f-ch", "Chamfer");
+
+      fireEvent.doubleClick(screen.getByTestId("history-row-f-fi"));
+      expect(editEdgeOpFeature).toHaveBeenLastCalledWith("f-fi", "Fillet");
+    } finally {
+      setModelToolController(null);
+    }
   });
 
   it("wires each row's delete button to deleteConstraints (re-solves + drops the row)", async () => {

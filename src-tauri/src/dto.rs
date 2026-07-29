@@ -55,6 +55,10 @@ pub struct SketchDto {
     pub visible: bool,
     pub dof: u32,
     pub status: SketchStatus,
+    /// Deterministic hash of plane, attachment, entities, and constraints. The
+    /// frontend uses it to invalidate static profile fills without rebuilding
+    /// every sketch for unrelated document revisions.
+    pub geometry_token: String,
 }
 
 /// Feature-timeline entry kind (`documentStore.ts` `FeatureKind`).
@@ -85,6 +89,12 @@ pub enum FeatureStatus {
 pub struct FeatureDto {
     pub id: String,
     pub kind: FeatureKind,
+    /// The exact `opType` this feature was authored as (`"Extrude"`, `"Chamfer"`,
+    /// …). [`FeatureKind`] is a coarse icon bucket that cannot distinguish
+    /// Fillet from Chamfer or a Linear Pattern from a Boolean, so a re-edit
+    /// cannot route on it. Additive; consumers that only draw an icon may ignore
+    /// it. `"Opaque"` for a frozen unknown node.
+    pub op_type: String,
     pub label: String,
     /// Mono value shown on the right of the history chip (e.g. `"25.0 mm"`).
     pub value_text: String,
@@ -331,6 +341,77 @@ pub struct SketchRegionDto {
 pub struct PreviewTrianglesDto {
     pub positions: Vec<f64>,
     pub indices: Vec<u32>,
+    /// Number of required region holes actually removed from this fill. The
+    /// frontend rejects a fill when this differs from `holes.len()`.
+    pub holes_subtracted: u32,
+}
+
+/// One element's geometric evidence from `QueryElement` (SCHEMA §7.5).
+///
+/// `surface_type` is OCCT's `GeomAbs_SurfaceType` ordinal, where **0 == plane**
+/// (`GeomAbs_Plane` is the first enumerator). Consumers that need a planar face —
+/// sketch-on-face, the Extrude `ToFace` target — MUST check it rather than
+/// assuming: a cylinder's `normal` is meaningless as a plane normal.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElementInfoDto {
+    pub element_id: String,
+    pub topo_key: String,
+    pub body_id: String,
+    /// `"face"` | `"edge"` | `"vertex"` | `"body"`.
+    pub kind: String,
+    pub surface_type: i64,
+    /// Bounding-box centre. For a PLANAR face this lies ON the plane (every point
+    /// of the face is coplanar, so the box centre is too), which is what makes it
+    /// a usable plane origin.
+    pub center: [f64; 3],
+    pub normal: [f64; 3],
+    /// Whether the descriptor actually carries a normal (`hasNormal`).
+    pub has_normal: bool,
+}
+
+/// One previewed body's mesh (`PreviewOp` result → `types.ts PreviewResult`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewBodyDto {
+    pub body_id: String,
+    /// The assembled MESH1 blob for this body.
+    pub mesh: Vec<u8>,
+}
+
+/// One lifecycle event produced by a throwaway preview candidate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewBodyEventDto {
+    /// `"created"` | `"modified"` | `"deleted"`.
+    pub kind: String,
+    pub body_id: String,
+}
+
+/// `preview_op` result — the bodies the candidate op created or changed.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewResultDto {
+    /// The HEAD snapshot the preview ran against. A preview creates no snapshot
+    /// of its own, so this is the current head's id, not a new one.
+    pub snapshot_id: u64,
+    pub bodies: Vec<PreviewBodyDto>,
+    pub body_events: Vec<PreviewBodyEventDto>,
+    pub changed_bodies: Vec<String>,
+    pub deleted_bodies: Vec<String>,
+    /// Successful NeedsRepair state (never a protocol error).
+    pub needs_repair: Vec<serde_json::Value>,
+}
+
+/// A resolved sketch plane basis (`types.ts SketchPlane`) — what the frontend
+/// needs to place a sketch on a picked face or a datum.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchPlaneDto {
+    pub origin: [f64; 3],
+    pub x_axis: [f64; 3],
+    pub y_axis: [f64; 3],
+    pub normal: [f64; 3],
 }
 
 /// `finishSketch` result (`types.ts FinishSketchResult`).
@@ -638,13 +719,35 @@ pub fn feature_value_text(op: &Operation) -> String {
 
 /// The default label for a feature kind (used when a record carries no name).
 #[must_use]
-pub fn default_label(kind: FeatureKind) -> &'static str {
-    match kind {
-        FeatureKind::Sketch => "Sketch",
-        FeatureKind::Extrude => "Extrude",
-        FeatureKind::Revolve => "Revolve",
-        FeatureKind::Fillet => "Fillet",
-        FeatureKind::Boolean => "Boolean",
+pub fn op_type_name(op: &Operation) -> String {
+    op.op_type().to_string()
+}
+
+/// The default history-tree label for an operation.
+#[must_use]
+pub fn default_label(op: &Operation) -> &'static str {
+    // Keyed off the OPERATION, not [`feature_kind`]. `FeatureKind` is a coarse
+    // icon/grouping bucket that folds Chamfer+Shell into `Fillet` and the
+    // pattern/mirror ops into `Boolean`; labelling from it made a Chamfer read
+    // "Fillet" and a Linear Pattern read "Boolean" in the history tree.
+    match op {
+        Operation::Known(k) => match k {
+            KnownOperation::Sketch(_) => "Sketch",
+            KnownOperation::Extrude(_) => "Extrude",
+            KnownOperation::Revolve(_) => "Revolve",
+            KnownOperation::Fillet(_) => "Fillet",
+            KnownOperation::Chamfer(_) => "Chamfer",
+            KnownOperation::Shell(_) => "Shell",
+            KnownOperation::Boolean(_) => "Boolean",
+            KnownOperation::LinearPattern(_) => "Linear Pattern",
+            KnownOperation::CircularPattern(_) => "Circular Pattern",
+            KnownOperation::MirrorBody(_) => "Mirror",
+            KnownOperation::Loft(_) => "Loft",
+            KnownOperation::Sweep(_) => "Sweep",
+        },
+        // A frozen unknown node keeps its opType as the label rather than
+        // masquerading as an Extrude.
+        Operation::Opaque(_) => "Feature",
     }
 }
 
@@ -715,6 +818,7 @@ mod tests {
             bodies,
             sketches: std::collections::BTreeMap::new(),
             features: vec![FeatureDto {
+                op_type: "Extrude".into(),
                 id: "f1".into(),
                 kind: FeatureKind::Extrude,
                 label: "Extrude".into(),
@@ -812,6 +916,7 @@ mod tests {
         // The DTO omits `statusMessage` entirely when absent, and carries it verbatim
         // (camelCase) when present.
         let ok = FeatureDto {
+            op_type: "Extrude".into(),
             id: "f1".into(),
             kind: FeatureKind::Extrude,
             label: "Extrude".into(),

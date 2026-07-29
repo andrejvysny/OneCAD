@@ -1,4 +1,90 @@
-# OneCAD-Tauri — Current State (2026-07-22, MODEL-HARDEN shipped)
+# OneCAD-Tauri — Current State (2026-07-29, EXTRUDE-REGION-PARITY shipped)
+
+## EXTRUDE-REGION-PARITY (2026-07-29) — exact selected profile, preview == commit
+User-reported: extrude previewed/committed the WRONG sketch region and was
+preview-only. Root cause: the live Tauri preview bypassed Rust's typed operation
+lowering — the frontend sent nested `params.profile.regionId`, C++ expected flat
+`params.regionId`, received none, and extruded the FIRST region; the commit used
+the correct mapper, so preview and commit diverged. Implemented across a Codex
+CLI session (P1 worker + P2 Rust + most of P3 FE; died on its usage limit
+mid-hardening) and a same-day Claude continuation (P3 gaps, adversarial-review
+defects, proofs, gate).
+**Architecture**: one worker-authoritative `RegionTable` per solved sketch feeds
+BOTH `SketchRegions` publication and modeling profile lookup — nested cells
+(annulus + inner disk) and intersection fragments are independently selectable,
+holes participate in region identity (`cell-v2` canonical signature under the
+stable `r_<16hex>` wire shape; legacy outer-only ids resolve only when unique,
+else loud failure listing candidates). `PreviewOp` consumes the SAME canonical
+worker operation as `ExecutePlan` via one shared Rust lowering; typed
+`sketchRegion` selection + full-FSM param snapshots (stable opId = commit
+recordId) close the frontend end. `geometryToken` invalidates stale profiles
+across undo/reopen — including a NEW proactive cancel of an armed extrude when
+its sketch is edited underneath.
+**Continuation hardening**: commit BARRIER — confirm flushes the final params as
+the newest preview epoch and holds `endPreview(true)` until that exact candidate
+answers (failure → re-armed, work kept; 4s timeout proceeds, backend re-validates
+authoritatively). Partial ear-clip now fails `SketchRegions` closed (exact
+`loop−2` triangle-count law) instead of publishing incomplete material. `ToNext`
+casts rays from profile vertices + centroid against BOUNDED faces
+(`IntCurvesFace_ShapeIntersector`) — the legacy nearest-ray-PLANE rule could bind
+a face plane the profile never crosses. `STALE_PREVIEW` structured error code
+replaces message-text sniffing (SCHEMA §8). `opType` reaches FeatureMeta on the
+real lane (Chamfer re-edit opened the FILLET editor). Document-scoped UI resets
+on new/open/import/recover when replacing an open document.
+**Proofs** (real worker): inner disk by exact id — preview == commit volume ±1
+(≈π·25·7); annulus binds independently; save → FRESH worker reopen → identical
+hash chain + identical region-id set from the read-only query; ToNext
+laterally-missed pillar FAILS loudly, nearer-missed-face is skipped (binds z=8
+not z=5, vol 800 exact). e2e: commit-barrier epoch equality, multiregion,
+hole-extrude, booleans.
+Suites at gate (2026-07-29): ctest 70/70 · cargo 486/0 vs real worker ·
+clippy/fmt clean · tsc 0 · FE 1205/107 · build · e2e 35/35 · hex 1 pre-existing
+(inputProbe). REMAINING: user
+manual Tauri gate (TODO.md); backlog — revolve region-parity (+ reopened-sketch
+revolve is broken on the real lane), analytic fragment wires (chord V1
+limitation), `PreparedSketchRegions` vs live-gesture race, coplanar-fill pick
+precedence, `historyActions` statusMessage drop.
+
+## MODEL-OPS (2026-07-26) — sketch-based modeling correctness + breadth, 4 waves
+Goal: make the sketch-driven feature set correct and reachable. The backend was
+far ahead of the frontend, and one shipped behaviour was silently wrong.
+**W0 profile correctness**: `SolverLane` ear-clipped a region's OUTER loop only
+while `FaceBuilder` builds the face WITH hole wires — a rect+inner-circle
+previewed as a slab and committed as a tube, and a click INSIDE a hole selected
+the region. New `loop/PolygonFill.{h,cpp}`: bridge-merged holes with SHARED
+vertex indices so bridges stay interior — load-bearing, because the frontend
+recovers extrusion rings from single-use-edge topology. FE `PrismProfile.holes` +
+inner walls; mock `detectRegions` learned the worker's containment rule (so the
+e2e lane can even see a tube). SCHEMA §7.3 profile-binding prose corrected — it
+documented an `inputs[]` semantic ref **no layer has ever produced or consumed**.
+**W1 extrude end conditions + Chamfer**: the worker has implemented
+ThroughAll/ToNext/ToFace + two-direction + draft since W-WP6 and the wire carried
+the fields; the tool authored only Blind/Symmetric. Chamfer was absent from BOTH
+the `ModelTool` and authorable `WireOperation` unions despite a shipping
+`execute_chamfer`. Fixed, plus two latent defects: `default_label` keyed off the
+coarse `FeatureKind` bucket (a Chamfer read "Fillet", a pattern read "Boolean"),
+and re-edits routed on `kind`, so Chamfer opened the fillet editor and
+Shell/patterns/Mirror were unreachable on the real lane.
+**W2 sketch-on-face**: `SketchAttachment::HostFace` was typed in Rust AND C++
+since M1 with ZERO constructors — every sketch that ever reached the worker was a
+world plane. No worker change was needed (`parse_plane` always accepted a custom
+basis); it needed a producer. `QueryElement` got its first Rust caller ever
+(`ElementQuery` seam → `face_sketch_plane`, which refuses a non-planar face), and
+`plane_from_point_normal` is lock-tested because the frame is frozen with the
+sketch. Datum resolution (`resolve_datum`) landed pure + tested; datum
+CREATION UI did not.
+**W3 backend preview verb**: the drag-time "exact" mesh was synthesized in
+JavaScript by the same function the mock uses, so Cut never subtracted. New
+kernel-lane `PreviewOp` runs the candidate op through the same executor a plan
+step uses, over a throwaway head copy — invisible to fencing (no fence, no
+prepare, no scratch). **Proven: preview Cut = 7500 while the real body stays
+8000, and committing the same op lands on 7500.**
+Suites: FE 1162/105 · cargo 461/0 vs real worker · ctest 69/69 · e2e 32/32 ·
+clippy/fmt/hex clean. OUT OF SCOPE by user decision: Loft/Sweep.
+REMAINING: preview latency gate, worker-side preview coalescing, Fillet/Shell/
+Revolve preview sessions, datum creation UI, user manual Mac gate (TODO.md).
+
+# OneCAD-Tauri — MODEL-HARDEN (2026-07-22)
 
 ## MODEL-HARDEN (2026-07-22) — Extrude/Revolve commit fix + professional UX, 6 gates
 Root-caused USER-REPORTED "extrude preview vanishes on tool close": append-at-end

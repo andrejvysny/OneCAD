@@ -17,8 +17,10 @@ import {
   editCommandLabel,
   operationToEditCommand,
   opLabelFor,
+  wireOperation,
   type CurrentFilletParams,
   type WireElementRef,
+  type WireEditCommand,
 } from "./tauriCommandMap";
 import type { OperationOp } from "./types";
 
@@ -266,6 +268,22 @@ describe("history-affordance command mapping", () => {
 // Scalar wire form is `{value}`; Vec3 wire form is the `[x,y,z]` array; count is
 // a BARE number (u32), not a Scalar.
 describe("operationToEditCommand — M6b op wire mappings", () => {
+  it("reuses one stable opId for PreviewOp and the committed operation record", () => {
+    const opId = "11111111-1111-4111-8111-111111111111";
+    const op: OperationOp = {
+      opType: "Extrude",
+      opId,
+      sketchId: "sk",
+      regionId: "r",
+      params: { distance: 5 },
+    };
+    expect(wireOperation(op).opId).toBe(opId);
+    const command = operationToEditCommand(op);
+    if (command.cmd !== "addOperation") throw new Error("expected addOperation");
+    expect(command.record.recordId).toBe(opId);
+    expect("opId" in command.record).toBe(false);
+  });
+
   it("Shell maps thickness (Scalar) + openFaces + targetBodyId", () => {
     const op: OperationOp = {
       opType: "Shell",
@@ -355,5 +373,97 @@ describe("operationToEditCommand — M6b op wire mappings", () => {
     expect(opLabelFor({ opType: "MirrorBody", params: { planePoint: [0, 0, 0], planeNormal: [1, 0, 0] } })).toBe(
       "Mirror",
     );
+  });
+});
+
+/**
+ * Narrow an `addOperation` command to its record. A bare cast is unsound here —
+ * the `WireEditCommand` union's `updateOperationParams` arm types `record` as a
+ * string — so the assertion is a real check, not a `as unknown as` escape hatch.
+ */
+function addedRecord(cmd: WireEditCommand): { opType: string; params: Record<string, unknown> } {
+  if (cmd.cmd !== "addOperation") throw new Error(`expected addOperation, got ${cmd.cmd}`);
+  // The wire params are a union of closed interfaces (no index signature), so the
+  // read-only view goes through the record's own JSON shape.
+  return {
+    opType: cmd.record.opType,
+    params: cmd.record.params as unknown as Record<string, unknown>,
+  };
+}
+
+// ── MODEL-OPS W1: end conditions + Chamfer on the wire ──────────────────────
+describe("extrude end conditions marshalling", () => {
+  const base = { opType: "Extrude" as const, sketchId: "sk", regionId: "r" };
+  const faceRef = {
+    primary: { bodyId: "body_11111111-1111-1111-1111-111111111111", elementId: "el_9", kind: "face" as const },
+    anchor: { worldPoint: [1, 2, 3] as [number, number, number] },
+  };
+
+  it("sends the authored extrudeMode through unchanged", () => {
+    const cmd = operationToEditCommand({ ...base, params: { distance: 5, extrudeMode: "ThroughAll" } });
+    const op = addedRecord(cmd).params;
+    expect(op.extrudeMode).toBe("ThroughAll");
+  });
+
+  it("marshals a ToFace target as a TYPED ref with a bare-uuid body", () => {
+    const cmd = operationToEditCommand({
+      ...base,
+      params: { distance: 5, extrudeMode: "ToFace", targetFace: faceRef },
+    });
+    const p = addedRecord(cmd).params;
+    expect(p.targetFace).toEqual({
+      // `body_<uuid>` is the worker/promote form; the core EditCommand serde takes
+      // the BARE uuid, so it must be stripped exactly as the fillet edges are.
+      primary: { bodyId: "11111111-1111-1111-1111-111111111111", elementId: "el_9", kind: "face" },
+      anchor: { worldPoint: [1, 2, 3] },
+    });
+  });
+
+  // SCHEMA §7.3: "Absent for non-ToFace extrudes" — a mode switch away from ToFace
+  // must not leave a stale target behind for the worker to resolve.
+  it("omits targetFace when the mode is not ToFace", () => {
+    const cmd = operationToEditCommand({
+      ...base,
+      params: { distance: 5, extrudeMode: "Blind", targetFace: faceRef },
+    });
+    const p = addedRecord(cmd).params;
+    expect(p.targetFace).toBeUndefined();
+  });
+
+  it("omits targetFace2 unless BOTH twoDirections and ToFace are set", () => {
+    const one = operationToEditCommand({
+      ...base,
+      params: { distance: 5, extrudeMode2: "ToFace", targetFace2: faceRef },
+    });
+    expect(addedRecord(one).params.targetFace2).toBeUndefined();
+    const both = operationToEditCommand({
+      ...base,
+      params: { distance: 5, twoDirections: true, extrudeMode2: "ToFace", targetFace2: faceRef },
+    });
+    expect(addedRecord(both).params.targetFace2).toBeDefined();
+  });
+
+  it("carries the draft angle and the second direction's distance", () => {
+    const cmd = operationToEditCommand({
+      ...base,
+      params: { distance: 5, draftAngleDeg: 8, twoDirections: true, distance2: 3 },
+    });
+    const p = addedRecord(cmd).params;
+    expect(p.draftAngleDeg).toEqual({ value: 8 });
+    expect(p.twoDirections).toBe(true);
+    expect(p.distance2).toEqual({ value: 3 });
+  });
+});
+
+describe("Chamfer marshalling", () => {
+  it("authors opType Chamfer over the shared FilletChamferParams", () => {
+    const cmd = operationToEditCommand({
+      opType: "Chamfer",
+      params: { mode: "Chamfer", radius: 1.5, edgeIds: ["e:1"] },
+    });
+    const rec = addedRecord(cmd);
+    expect(rec.opType).toBe("Chamfer");
+    expect(rec.params.radius).toEqual({ value: 1.5 });
+    expect(rec.params.edgeIds).toEqual(["e:1"]);
   });
 });

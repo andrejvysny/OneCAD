@@ -40,6 +40,7 @@ use onecad_protocol::ProtocolError;
 
 use onecad_core::document::body::{BodyMeta, BodyRegistry};
 use onecad_core::document::element_index::ElementIndex;
+use onecad_core::document::record::Operation;
 use onecad_core::ids::{
     BodyId, DocumentId, DocumentRevision, EntityId, JobId, RecordId, SnapshotId, WorkerEpoch,
 };
@@ -849,7 +850,7 @@ impl SolverEngine for WorkerManager {
         let (resp, tail) = inflight.response_with_bin().await.map_err(protocol_err)?;
         let sections = resp.bin.clone().unwrap_or_default();
         let result = ok_result(resp)?;
-        Ok(wire::parse_sketch_regions(&result, &sections, &tail))
+        wire::parse_sketch_regions(sketch_id, &result, &sections, &tail).map_err(|e| protocol(&e))
     }
 }
 
@@ -1074,6 +1075,239 @@ impl StreamAcc {
             self.buf.truncate(t as usize);
         }
         Ok((self.buf, self.total_bytes, self.sha256))
+    }
+}
+
+fn parse_preview_result(
+    result: &Value,
+    sections: &[onecad_protocol::messages::BinSection],
+    tail: &[u8],
+) -> Result<crate::dto::PreviewResultDto, EngineError> {
+    let snapshot_id = result
+        .get("snapshotId")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| protocol("PreviewOp: missing/invalid snapshotId"))?;
+    let body_events = parse_preview_body_events(result.get("bodyEvents"))?;
+    let changed_bodies = preview_body_id_array(result.get("changedBodies"), "changedBodies")?;
+    let deleted_bodies = preview_body_id_array(result.get("deletedBodies"), "deletedBodies")?;
+    let needs_repair = preview_value_array(result.get("needsRepair"), "needsRepair")?;
+    let section_table =
+        wire::validate_bin_sections("PreviewOp", sections, tail).map_err(|e| protocol(&e))?;
+    let (bodies, referenced) = parse_preview_meshes(result.get("meshes"), &section_table, tail)?;
+    wire::reject_unreferenced_sections("PreviewOp", &section_table, &referenced)
+        .map_err(|e| protocol(&e))?;
+    validate_preview_body_sets(&body_events, &changed_bodies, &deleted_bodies, &bodies)?;
+    Ok(crate::dto::PreviewResultDto {
+        snapshot_id,
+        bodies,
+        body_events,
+        changed_bodies,
+        deleted_bodies,
+        needs_repair,
+    })
+}
+
+fn preview_value_array(value: Option<&Value>, field: &str) -> Result<Vec<Value>, EngineError> {
+    match value {
+        Some(Value::Array(items)) => Ok(items.clone()),
+        _ => Err(protocol(&format!(
+            "PreviewOp: missing/invalid {field} array"
+        ))),
+    }
+}
+
+fn preview_body_id_array(value: Option<&Value>, field: &str) -> Result<Vec<String>, EngineError> {
+    preview_value_array(value, field)?
+        .into_iter()
+        .map(|item| {
+            let id = item.as_str().filter(|id| !id.is_empty()).ok_or_else(|| {
+                protocol(&format!(
+                    "PreviewOp: {field} contains a non-string/empty id"
+                ))
+            })?;
+            normalize_preview_body_id(id, field)
+        })
+        .collect()
+}
+
+fn parse_preview_body_events(
+    value: Option<&Value>,
+) -> Result<Vec<crate::dto::PreviewBodyEventDto>, EngineError> {
+    preview_value_array(value, "bodyEvents")?
+        .into_iter()
+        .map(|event| {
+            let kind = event.get("kind").and_then(Value::as_str).unwrap_or("");
+            let body_id = event.get("bodyId").and_then(Value::as_str).unwrap_or("");
+            if !matches!(kind, "created" | "modified" | "deleted") || body_id.is_empty() {
+                return Err(protocol("PreviewOp: malformed bodyEvents entry"));
+            }
+            Ok(crate::dto::PreviewBodyEventDto {
+                kind: kind.to_string(),
+                body_id: normalize_preview_body_id(body_id, "bodyEvents")?,
+            })
+        })
+        .collect()
+}
+
+fn normalize_preview_body_id(body_id: &str, field: &str) -> Result<String, EngineError> {
+    wire::parse_body_id(body_id)
+        .map(|id| id.to_string())
+        .map_err(|e| protocol(&format!("PreviewOp: invalid {field} body id: {e}")))
+}
+
+fn parse_preview_meshes<'a>(
+    value: Option<&Value>,
+    sections: &HashMap<&'a str, &'a onecad_protocol::messages::BinSection>,
+    tail: &[u8],
+) -> Result<(Vec<crate::dto::PreviewBodyDto>, HashSet<String>), EngineError> {
+    let meshes = preview_value_array(value, "meshes")?;
+    let mut referenced = HashSet::with_capacity(meshes.len());
+    let mut parsed = Vec::with_capacity(meshes.len());
+    for mesh in meshes {
+        let (body, section) = parse_preview_mesh(&mesh, sections, tail)?;
+        if !referenced.insert(section.clone()) {
+            return Err(protocol(&format!(
+                "PreviewOp: binary section {section:?} reused"
+            )));
+        }
+        parsed.push(body);
+    }
+    Ok((parsed, referenced))
+}
+
+fn parse_preview_mesh<'a>(
+    mesh: &Value,
+    sections: &HashMap<&'a str, &'a onecad_protocol::messages::BinSection>,
+    tail: &[u8],
+) -> Result<(crate::dto::PreviewBodyDto, String), EngineError> {
+    let body_id = mesh
+        .get("bodyId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| protocol("PreviewOp: mesh missing bodyId"))?;
+    let section_name = mesh
+        .get("bin")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| protocol("PreviewOp: mesh missing bin"))?;
+    let section = sections
+        .get(section_name)
+        .copied()
+        .ok_or_else(|| protocol("PreviewOp: mesh bin section missing"))?;
+    let start = section.off as usize;
+    let end = start
+        .checked_add(section.len as usize)
+        .ok_or_else(|| protocol("PreviewOp: mesh section range overflow"))?;
+    let bytes = tail
+        .get(start..end)
+        .ok_or_else(|| protocol("PreviewOp: mesh section out of range"))?;
+    onecad_protocol::mesh::validate_mesh_blob(bytes)
+        .map_err(|e| protocol(&format!("PreviewOp: invalid MESH1 for {body_id}: {e}")))?;
+    Ok((
+        crate::dto::PreviewBodyDto {
+            body_id: normalize_preview_body_id(body_id, "meshes")?,
+            mesh: bytes.to_vec(),
+        },
+        section_name.to_string(),
+    ))
+}
+
+fn validate_preview_body_sets(
+    events: &[crate::dto::PreviewBodyEventDto],
+    changed: &[String],
+    deleted: &[String],
+    bodies: &[crate::dto::PreviewBodyDto],
+) -> Result<(), EngineError> {
+    let changed_set: HashSet<&str> = changed.iter().map(String::as_str).collect();
+    let deleted_set: HashSet<&str> = deleted.iter().map(String::as_str).collect();
+    let mesh_set: HashSet<&str> = bodies.iter().map(|body| body.body_id.as_str()).collect();
+    if changed_set.len() != changed.len()
+        || deleted_set.len() != deleted.len()
+        || mesh_set.len() != bodies.len()
+    {
+        return Err(protocol("PreviewOp: duplicate body id"));
+    }
+    if !changed_set.is_disjoint(&deleted_set) {
+        return Err(protocol("PreviewOp: body is both changed and deleted"));
+    }
+    if changed_set != mesh_set {
+        return Err(protocol("PreviewOp: changedBodies/meshes mismatch"));
+    }
+    let mut event_ids = HashSet::new();
+    let mut event_changed = HashSet::new();
+    let mut event_deleted = HashSet::new();
+    for event in events {
+        if !event_ids.insert(event.body_id.as_str()) {
+            return Err(protocol("PreviewOp: duplicate/contradictory bodyEvent"));
+        }
+        match event.kind.as_str() {
+            "created" | "modified" => {
+                event_changed.insert(event.body_id.as_str());
+            }
+            "deleted" => {
+                event_deleted.insert(event.body_id.as_str());
+            }
+            _ => unreachable!("body event kind validated while parsing"),
+        }
+    }
+    if event_changed != changed_set || event_deleted != deleted_set {
+        return Err(protocol("PreviewOp: bodyEvents/lifecycle arrays mismatch"));
+    }
+    Ok(())
+}
+
+#[async_trait]
+impl crate::worker::PreviewEngine for WorkerManager {
+    async fn preview_op(
+        &self,
+        operation: Operation,
+        op_id: String,
+        sketch_id: Option<String>,
+        expected_snapshot: Option<SnapshotId>,
+        lod: Lod,
+    ) -> Result<crate::dto::PreviewResultDto, EngineError> {
+        let client = self.client_or_err()?;
+        let op = wire::preview_wire_op(&operation, &op_id);
+        let mut args = serde_json::json!({ "op": op, "lod": crate::worker::lod_str(lod) });
+        if let Some(sid) = sketch_id {
+            args["sketchId"] = Value::String(sid);
+        }
+        if let Some(snapshot) = expected_snapshot {
+            args["expectedSnapshotId"] = json!(snapshot.0);
+        }
+        // Preview meshes ride INLINE in the response tail (coarse LOD, only the
+        // bodies the op touched), so there is no bulk-chunk lane to drain here —
+        // unlike `fetch_mesh`, which serves arbitrary-size document meshes.
+        let (resp, tail) = client
+            .start_request("PreviewOp", args, Lane::Control)
+            .await
+            .map_err(protocol_err)?
+            .response_with_bin()
+            .await
+            .map_err(protocol_err)?;
+        let sections = resp.bin.clone().unwrap_or_default();
+        let result = ok_result(resp)?;
+        parse_preview_result(&result, &sections, &tail)
+    }
+}
+
+#[async_trait]
+impl crate::worker::ElementQuery for WorkerManager {
+    async fn query_element(
+        &self,
+        snapshot: SnapshotId,
+        body: BodyId,
+        element: &str,
+    ) -> Result<Option<crate::dto::ElementInfoDto>, EngineError> {
+        let client = self.client_or_err()?;
+        let resp = client
+            .request(
+                "QueryElement",
+                wire::query_element_args(snapshot, body, element),
+            )
+            .await
+            .map_err(protocol_err)?;
+        ok_result(resp).map(|r| wire::parse_query_element(&r))
     }
 }
 
@@ -1313,5 +1547,161 @@ fn ok_result(resp: onecad_protocol::messages::RespFrame) -> Result<Value, Engine
             .error
             .as_ref()
             .map_or_else(|| protocol("resp ok=false without error"), wire::map_error))
+    }
+}
+
+#[cfg(test)]
+mod preview_parse_tests {
+    use super::*;
+
+    fn wire_body(seed: u128) -> String {
+        format!("body_{}", uuid::Uuid::from_u128(seed))
+    }
+
+    fn empty_mesh_blob() -> Vec<u8> {
+        let mut blob = vec![0; onecad_protocol::mesh::MESH_HEADER_LEN];
+        blob[0..4].copy_from_slice(&onecad_protocol::mesh::MESH_MAGIC_LE.to_le_bytes());
+        blob[4..6].copy_from_slice(&onecad_protocol::mesh::MESH_VERSION.to_le_bytes());
+        blob
+    }
+
+    fn base_result() -> Value {
+        json!({
+            "snapshotId": 7,
+            "bodyEvents": [],
+            "changedBodies": [],
+            "deletedBodies": [],
+            "needsRepair": [],
+            "meshes": []
+        })
+    }
+
+    fn assert_protocol_error(result: Result<crate::dto::PreviewResultDto, EngineError>) {
+        assert!(matches!(result, Err(EngineError::Protocol { .. })));
+    }
+
+    #[test]
+    fn malformed_preview_body_event_is_not_silently_dropped() {
+        let mut result = base_result();
+        result["bodyEvents"] = json!([{ "kind": "modified" }]);
+        assert_protocol_error(parse_preview_result(&result, &[], &[]));
+    }
+
+    #[test]
+    fn malformed_preview_mesh_handle_is_not_silently_dropped() {
+        let mut result = base_result();
+        result["changedBodies"] = json!(["body_preview"]);
+        result["meshes"] = json!([{ "bodyId": "body_preview" }]);
+        assert_protocol_error(parse_preview_result(&result, &[], &[]));
+    }
+
+    #[test]
+    fn missing_preview_mesh_section_is_a_protocol_error() {
+        let mut result = base_result();
+        result["changedBodies"] = json!(["body_preview"]);
+        result["meshes"] = json!([{ "bodyId": "body_preview", "bin": "mesh:body_preview" }]);
+        assert_protocol_error(parse_preview_result(&result, &[], &[]));
+    }
+
+    #[test]
+    fn preview_lifecycle_arrays_must_match_body_events() {
+        let mut result = base_result();
+        result["bodyEvents"] = json!([{ "kind": "deleted", "bodyId": "body_old" }]);
+        assert_protocol_error(parse_preview_result(&result, &[], &[]));
+    }
+
+    #[test]
+    fn duplicate_preview_body_events_are_rejected() {
+        let mut result = base_result();
+        result["bodyEvents"] = json!([
+            { "kind": "modified", "bodyId": "body_same" },
+            { "kind": "deleted", "bodyId": "body_same" }
+        ]);
+        result["deletedBodies"] = json!(["body_same"]);
+        assert_protocol_error(parse_preview_result(&result, &[], &[]));
+    }
+
+    #[test]
+    fn preview_body_ids_are_normalized_and_deletion_only_is_preserved() {
+        let body = wire_body(0x123);
+        let bare = uuid::Uuid::from_u128(0x123).to_string();
+        let mut result = base_result();
+        result["bodyEvents"] = json!([{ "kind": "deleted", "bodyId": body }]);
+        result["deletedBodies"] = json!([body]);
+
+        let parsed = parse_preview_result(&result, &[], &[]).unwrap();
+        assert_eq!(parsed.deleted_bodies, [bare.as_str()]);
+        assert_eq!(parsed.body_events[0].body_id, bare);
+        assert!(parsed.bodies.is_empty());
+    }
+
+    #[test]
+    fn preview_mesh_body_id_and_lifecycle_keep_the_same_normalized_id() {
+        let body = wire_body(0x456);
+        let bare = uuid::Uuid::from_u128(0x456).to_string();
+        let mesh = empty_mesh_blob();
+        let sections = [onecad_protocol::messages::BinSection {
+            name: "mesh:candidate".into(),
+            off: 0,
+            len: mesh.len() as u32,
+        }];
+        let mut result = base_result();
+        result["bodyEvents"] = json!([{ "kind": "modified", "bodyId": body }]);
+        result["changedBodies"] = json!([body]);
+        result["meshes"] = json!([{ "bodyId": body, "bin": "mesh:candidate" }]);
+
+        let parsed = parse_preview_result(&result, &sections, &mesh).unwrap();
+        assert_eq!(parsed.changed_bodies, [bare.as_str()]);
+        assert_eq!(parsed.body_events[0].body_id, bare);
+        assert_eq!(parsed.bodies[0].body_id, parsed.changed_bodies[0]);
+    }
+
+    #[test]
+    fn preview_rejects_duplicate_overlapping_and_unreferenced_sections() {
+        let result = base_result();
+        let tail = vec![0; 128];
+        let section = |name: &str, off, len| onecad_protocol::messages::BinSection {
+            name: name.into(),
+            off,
+            len,
+        };
+        assert_protocol_error(parse_preview_result(
+            &result,
+            &[section("same", 0, 64), section("same", 64, 64)],
+            &tail,
+        ));
+        assert_protocol_error(parse_preview_result(
+            &result,
+            &[section("a", 0, 64), section("b", 32, 64)],
+            &tail,
+        ));
+        assert_protocol_error(parse_preview_result(
+            &result,
+            &[section("unexpected", 0, 64)],
+            &tail,
+        ));
+    }
+
+    #[test]
+    fn preview_rejects_a_binary_section_reused_by_two_meshes() {
+        let first = wire_body(0xA);
+        let second = wire_body(0xB);
+        let mesh = empty_mesh_blob();
+        let sections = [onecad_protocol::messages::BinSection {
+            name: "mesh:shared".into(),
+            off: 0,
+            len: mesh.len() as u32,
+        }];
+        let mut result = base_result();
+        result["bodyEvents"] = json!([
+            { "kind": "modified", "bodyId": first },
+            { "kind": "modified", "bodyId": second }
+        ]);
+        result["changedBodies"] = json!([first, second]);
+        result["meshes"] = json!([
+            { "bodyId": first, "bin": "mesh:shared" },
+            { "bodyId": second, "bin": "mesh:shared" }
+        ]);
+        assert_protocol_error(parse_preview_result(&result, &sections, &mesh));
     }
 }

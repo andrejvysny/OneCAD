@@ -726,7 +726,10 @@ the full authoritative sketch so replay is deterministic.
 }
 ```
 
-- `plane.kind` ∈ `XY` | `XZ` | `YZ` | `custom`. **Hard invariant — non-standard
+- `plane.kind` ∈ `XY` | `XZ` | `YZ` | `custom`. A `custom` plane carries an arbitrary
+  `origin`/`xAxis`/`yAxis`/`normal` and is what a sketch attached to a DATUM or a
+  model FACE sends (the attachment itself is core-owned and never crosses the
+  wire — see the 2026-07-26 changelog entry). **Hard invariant — non-standard
   XY basis** (ported verbatim from OneCAD-CPP `Sketch.h` `SketchPlane::XY()`):
   `xAxis = (0,1,0)`, `yAxis = (−1,0,0)`, `normal = (0,0,1)` (User X → World Y+,
   User Y → World X−). `XZ` = `{x:(0,1,0), y:(0,0,1), n:(1,0,0)}`; `YZ` =
@@ -761,9 +764,11 @@ the full authoritative sketch so replay is deterministic.
 OneCAD-CPP `ExtrudeParams`.
 
 ```json
-// inputs: [ semanticRef to a SketchRegion (kind "face"/region) ]
+// inputs: [] — the profile does NOT ride in inputs[]; see "Profile binding" below
 // params
 {
+  "sketchId": "sk_1",             // profile sketch (see "Profile binding")
+  "regionId": "r_ac127d8846949…", // omitted ⇒ first-region fallback
   "distance": 25.0,
   "draftAngleDeg": 0.0,
   "extrudeMode": "Blind",         // Blind | ThroughAll | Symmetric | ToNext | ToFace
@@ -789,12 +794,34 @@ OneCAD-CPP `ExtrudeParams`.
   **un-repairable** across parametric edits, violating Invariants 2/3; the typed
   ref lets the resolution ladder rebind it. Absent for non-`ToFace` extrudes.
 
+**Profile binding (NORMATIVE, Extrude / Revolve / Sweep).** The sketch profile is
+carried as **flat `params.sketchId` + `params.regionId`**, NOT as a semantic ref
+in `inputs[]`. A region is identified by the derived `regionId` (§7.4), which is
+already a stable, content-addressed identity — it needs no anchor/intent evidence
+and no ladder, so the semantic-ref machinery does not apply to it. Rust's core
+`ExtrudeParams`/`RevolveParams` hold a typed `profile { sketchId, regionId }`
+object; the wire layer FLATTENS it (`src-tauri/src/worker/wire.rs`
+`lift_profile_to_params`) and the worker reads the flat keys
+(`worker/src/ops/OpCommon.cpp` `build_profile_face`). Producers MUST send the
+flat form; a nested `params.profile` is not consumed by the worker.
+
+`inputs[]` still carries genuine semantic refs for elements that DO need the
+ladder — the Extrude `ToFace` target face, fillet/chamfer edges, shell open
+faces. For a plain `Blind` extrude `inputs[]` is empty; Revolve's `inputs[]` is
+always empty (its axis rides in `params.axis`).
+
+Corrected 2026-07-26 — see [Changelog](#14-changelog). The earlier prose here
+described a `SketchRegion` semantic ref in `inputs[]` that no layer has ever
+produced or consumed.
+
 **Revolve** (`op.revolve`) — field names from OneCAD-CPP `RevolveParams`.
 
 ```json
-// inputs: [ semanticRef to a SketchRegion ]
+// inputs: [] — profile is flat params.sketchId/regionId (see "Profile binding")
 // params
 {
+  "sketchId": "sk_1",
+  "regionId": "r_ac127d8846949…",
   "angleDeg": 360.0,
   "axis": { "kind": "sketchLine", "sketchId": "sk_1", "lineId": "e1" },
               // axis.kind ∈ "sketchLine" {sketchId,lineId} | "edge" {bodyId,edgeId} | "none"
@@ -1012,26 +1039,78 @@ preview fill).
       "outerLoop": ["e1", "e2", "e3"],
       "holes": [ ["e4"] ],
       "previewTriangles": { "format": "f32xyz+u32idx", "vertexCount": 8,
-        "triangleCount": 6, "bin": "region:r0" }
+        "triangleCount": 8, "holesSubtracted": 1, "bin": "region:r0" }
     }
   ]
 }
 // bin: [ { "name": "region:r0", "off": 0, "len": … } ]  // f32 positions then u32 indices
 ```
 
-- **`regionId` derivation is NORMATIVE** (worker and Rust core MUST agree so a
-  region id is reproducible from loop membership alone, without shared mutable
-  state). It is **FNV-1a-64** (offset `0xcbf29ce484222325`, prime
-  `0x100000001b3`) over: each loop-member entity UUID as its **16 raw bytes**,
-  taken in **ascending sorted order of the 16-byte arrays** (so the id is
-  independent of member ordering), followed by **one winding byte**
-  (`0` = CCW / outer, `1` = CW / hole). The 64-bit result is rendered
-  `"r_%016x"` (lowercase hex, e.g. `"r_0123456789abcdef"`). The examples above
-  use short placeholders (`"r0"`) for readability. The C++ worker MUST produce
-  byte-identical ids; the reference implementation is onecad-core
-  `sketch/mod.rs::derive_region_id` (Rust). Regions are a rebuildable cache, not
-  authoritative identity — a hash collision only costs a recomputed cache entry,
-  never correctness.
+- **`regionId` derivation is NORMATIVE and cell-complete.** A region is one
+  bounded planar **cell**, not merely one detector face: every closed loop is an
+  independently selectable outer boundary and its immediate contained children
+  are that cell's holes. A rectangle containing a circle therefore publishes
+  both the rectangle-minus-circle cell and the circle-disc cell.
+
+  A hole-free, unsplit cell retains the original byte-compatible algorithm:
+  **FNV-1a-64** (offset `0xcbf29ce484222325`, prime `0x100000001b3`) over each
+  outer-loop entity UUID as its 16 raw bytes in ascending order, then winding
+  byte `0`, rendered `"r_%016x"`.
+
+  A cell with holes or an intersected source entity hashes one canonical UTF-8
+  member string, then winding byte `0`, through the same FNV/rendering rule. The
+  string is `cell-v2|outer{L}|holes{H...}`:
+
+  - `L` is the lexicographically smallest cyclic rotation of the oriented loop's
+    length-prefixed tokens (outer normalized CCW; holes CW).
+  - A token is the mapped base wire UUID, followed by `#segN_pM` when that base
+    entity was subdivided by an intersection, then `:f` or `:r` for traversal.
+  - Each hole loop is canonicalized independently; the resulting hole strings
+    are sorted and length-prefixed before concatenation.
+
+  The worker MUST reject duplicate canonical ids instead of publishing ambiguous
+  regions or duplicate binary section names. An older outer-only id may resolve
+  only when it matches exactly one current cell; zero matches is stale and
+  multiple matches is ambiguous/`NeedsRepair`. Neither case may choose the first
+  cell. The Rust `derive_region_id` reference remains byte-authoritative for the
+  unchanged hole-free/unsplit form; the worker `RegionTable` owns the extended
+  cell form.
+
+- **`previewTriangles` SUBTRACTS the region's holes** (changed 2026-07-26 — see
+  [Changelog](#14-changelog)). The fill MUST cover exactly the material the
+  kernel builds a face from, because it is the geometry consumers use both to
+  draw the extrude/revolve preview and to hit-test a region: filling a hole made
+  the preview disagree with the committed solid AND made a click inside a hole
+  select the enclosing region. `vertexCount` therefore covers the outer loop's
+  vertices followed by each subtracted hole's vertices.
+
+  **Triangulation topology is normative for consumers that recover rings.** Any
+  internal bridging a producer uses to merge holes into one loop MUST leave every
+  bridge segment shared by exactly two triangles, so the only edges used by
+  exactly ONE triangle are the real outer and hole boundaries. Consumers derive
+  the extrusion rings from that property (`prismPreview.profileFromRegion`); a
+  bridge that read as a boundary edge would fabricate a wall. The reference
+  implementation is `worker/src/loop/PolygonFill.cpp`.
+
+- `holesSubtracted` (additive, optional for compatibility) reports how many
+  holes the fill removed. Producers MUST NOT publish a region when the value
+  would be below `holes.length`; required-hole triangulation/build failure is an
+  operation failure. Consumers that receive the field MUST reject an incomplete
+  fill rather than preview or hit-test different material.
+
+  **A producer MUST fail closed on a partial triangulation.** An ear-clip (or
+  equivalent) pass that stalls on a degenerate loop and cannot consume the whole
+  merged boundary MUST fail the `SketchRegions` request rather than publish the
+  partial triangle list — a partial fill reads as a wrong boundary to the
+  ring-recovery consumers above.
+
+- **Known V1 limitation — intersection-fragment boundaries are chords.** Cells
+  produced by curve-curve intersection splitting (fragment edges, e.g. the lens
+  and crescents of two overlapping circles) currently build their committed
+  faces from the planarized polygon (chord approximation of arcs), not trimmed
+  analytic curves; the polygon fill visually agrees with the committed solid.
+  Plain and nested (hole-bearing) cells are exact. Lifting fragments to analytic
+  trimmed wires is tracked in `TODO.md` backlog.
 
 ### 7.5 Element identity
 
@@ -1082,6 +1161,62 @@ without binding anything.
 `outcome` ∈ `autoBind` | `needsRepair` | `unchanged`.
 
 ### 7.6 Geometry
+
+#### PreviewOp
+**Drag-time preview.** Runs ONE candidate op against a **throwaway copy** of the
+session head and returns the resulting bodies' MESH1. Nothing is committed.
+
+```json
+// req.args
+{ "op": { "opType": "Extrude", "opId": "preview_cut", "inputs": [ … ],
+          "params": { "sketchId": "sk_1", "regionId": "r_…", … } },
+  "sketchId": "sk_1",          // optional: seed this profile sketch (see below)
+  "expectedSnapshotId": 5012,  // optional stale-head guard
+  "lod": "coarse" }
+// result
+{ "snapshotId": 5012,          // the HEAD's id — a preview creates no snapshot
+  "bodyEvents": [ { "kind": "modified", "bodyId": "body_3" } ],
+  "changedBodies": ["body_3"],
+  "deletedBodies": [],
+  "needsRepair": [],
+  "meshes": [ { "bodyId": "body_3", "bin": "mesh:body_3", … } ] }   // §7.6 handles
+```
+
+- `op` is the same **canonical worker operation** used inside `ExecutePlan`:
+  profile binding is flat `params.sketchId`/`params.regionId`, body-bearing
+  fields use worker `body_<uuid>` form, and inputs have already passed the shared
+  Rust lowering. Preview callers MUST NOT maintain a second ad-hoc mapper.
+- When supplied, `expectedSnapshotId` MUST equal the current head snapshot or the
+  preview fails recoverably with `error.code:"STALE_PREVIEW"` ([§8](#8-error-taxonomy)).
+  The code is normative — consumers MUST route on it, never on the message text.
+  This prevents an old drag response from rendering against a newer document head.
+- **A preview is INVISIBLE to fencing.** It MUST NOT fence, prepare, accept or
+  discard: the head bodies, element-map partition, `historyPrefixHash`,
+  `snapshotId`, `documentRevision` and `workerEpoch` are all unchanged
+  afterwards, and no scratch is left behind. Implementations take the
+  fencing-free head copy (the same one the §7.5 identity verbs use), **not** the
+  `ExecutePlan` fence-and-clone path — that reserves a prepared snapshot id.
+- `snapshotId` echoes the CURRENT head. A preview has no snapshot of its own, and
+  reporting a fresh id would name something no other verb knows.
+- **Only the bodies the op created or modified** are tessellated and returned.
+  `bodyEvents` carries the full candidate lifecycle; `deletedBodies` names
+  deletions that cannot have a mesh. A drag re-issues this per frame, so
+  re-shipping untouched bodies is not allowed.
+- `sketchId` seeds the profile sketch from the committed sketch store. A real
+  plan materializes its profile from its own preceding `Sketch` op; a preview has
+  no plan, so the caller names it. Absent/unknown ⇒ `REF_UNRESOLVED`.
+- Candidate execution uses the same input-resolution, operation,
+  `NeedsRepair`, cancellation and rollback routine as an `ExecutePlan` step.
+  `NeedsRepair` returns an otherwise-empty successful result with evidence;
+  other failures are normal errors (`OP_FAILED` / `UNSUPPORTED` /
+  `GEOMETRY_INVALID`), never partial mutation. Callers may retain the last good
+  mesh for a transient geometric miss, but structural binding failures must be
+  surfaced and must disable commit.
+- **Lane.** This is kernel-lane work; it shares the OCCT single-writer thread
+  with `ExecutePlan`. It deliberately does NOT ride the solver lane, whose
+  latest-wins coalescing is specific to `SolveDrag`. Callers are expected to bound
+  their own in-flight previews (the reference client keeps ≤1 per preview session
+  and discards stale epochs).
 
 #### Tessellate
 Produces MESH1 meshes; large meshes stream on the bulk lane
@@ -1240,6 +1375,7 @@ Errors are returned in a terminal `resp` with `ok:false` and an `error` object:
 | Reference unresolved | `REF_UNRESOLVED` | scratch only | as above (distinct from NeedsRepair — this is a hard resolve failure, e.g. input body missing) |
 | Invalid geometry produced | `GEOMETRY_INVALID` | scratch only | as above |
 | Unsupported op/param (known verb) | `UNSUPPORTED` | none | Rust falls back / freezes node (the remaining un-shipped ops `opType:"Loft"` / `"Sweep"`; the M6a breadth ops Shell/LinearPattern/CircularPattern/MirrorBody are now supported, [§7.3](#73-op-payload-schemas-vertical-slice)) |
+| Stale preview base (`PreviewOp` only) | `STALE_PREVIEW` | none — head untouched | caller re-previews against the fresh head snapshot ([§7.6](#76-meshes--previews)) |
 | Cooperative cancellation | `CANCELLED` | in-flight job dropped; session intact | terminal frame always sent ([§3.5](#35-cancel-rust--worker)) |
 | Protocol violation | `PROTOCOL_ERROR` | fatal | **restart worker** (no resync) |
 | Worker crash / abnormal exit | *(no frame)* | fatal | **restart + replay** from last checkpoint/head; crash **circuit breaker** on repeated `(historyPrefixHash, opId, occtFingerprint)` |
@@ -1263,8 +1399,9 @@ Errors are returned in a terminal `resp` with `ok:false` and an `error` object:
   coarser LOD.
 - Hung worker: ping every **5 s**, ×2 misses → `SIGKILL` → restart.
 
-**`OP_FAILED`, `REF_UNRESOLVED`, `GEOMETRY_INVALID`, `UNSUPPORTED` are
-*recoverable*: the worker's active session is untouched (all work was in scratch).
+**`OP_FAILED`, `REF_UNRESOLVED`, `GEOMETRY_INVALID`, `UNSUPPORTED`, and
+`STALE_PREVIEW` are *recoverable*: the worker's active session is untouched (all
+work was in scratch, or — for a preview — never touched the head at all).
 Rust reports the failure and the document stays editable.**
 
 **NeedsRepair is NOT an error.** It is per-step **state** inside `PlanPrepared`
@@ -1430,6 +1567,83 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-07-29 (b) — §8 new error code `STALE_PREVIEW`; §7.4 fail-closed partial
+  triangulation + chord-limitation note; §7.3 `ToNext` binds bounded faces**
+  (EXTRUDE-REGION-PARITY hardening; worker + Rust + frontend sign-off, no fixture
+  bump — error path + op semantics only, no canonical fixture carries them).
+  `PreviewOp` stale-base rejection now carries `error.code:"STALE_PREVIEW"` so
+  Rust routes on the code instead of sniffing message text. A stalled ear clip
+  fails the `SketchRegions` request instead of publishing partial material.
+  `ToNext` resolves the extrude distance against bounded faces the profile
+  actually reaches (rays from profile vertices + centroid); the legacy
+  nearest-ray-PLANE rule could bind a face plane the profile never crosses.
+  Intersection-fragment chord approximation documented as a V1 limitation.
+
+- **2026-07-29 — §7.4 selectable planar cells + collision-safe region identity;
+  §7.6 canonical preview lowering** (EXTRUDE-REGION-PARITY; worker + Rust +
+  frontend sign-off). `SketchRegions` and modeling profile lookup now consume one
+  solved region table. Every bounded cell is selectable, complete material
+  boundaries (including holes/intersection fragments) participate in identity,
+  duplicate canonical ids are fatal, and legacy outer-only ids resolve only
+  when unique. Required holes fail closed. `PreviewOp` receives the same
+  canonical worker operation form as `ExecutePlan`; missing explicit region/body
+  bindings may no longer fall back. The worker sketch-region fixture and
+  cross-layer non-first-region preview/commit tests cover the changed semantics;
+  no existing canonical `protocol/fixtures/` payload carried these shapes.
+
+- **2026-07-26 — §7.6 new verb `PreviewOp`** (MODEL-OPS W3; **additive — a new
+  verb, no existing shape changed, no fixture bump**). Before it, the "exact"
+  drag-time mesh was synthesized CLIENT-SIDE by the same function the mock client
+  uses, so a `Cut` preview never subtracted and Revolve/Fillet/Shell had no
+  preview at all — the commit could produce something the preview had never
+  shown. The verb runs the candidate op through the same executor a real plan step
+  uses, over a throwaway copy of the head, and returns MESH1 for only the bodies
+  it touched. Its load-bearing guarantee is that it is invisible to fencing: no
+  fence, no prepare, no accept, no scratch, head tokens unchanged. Kernel lane
+  (OCCT stays single-writer); in-flight bounding is the caller's job.
+  [§7.6](#76-geometry).
+
+- **2026-07-26 — §7.3 `plane.kind: "custom"` provenance documented** (MODEL-OPS
+  W2; **text-only, NO wire change, no fixture bump**). A sketch's wire `plane`
+  carries only a resolved basis; the ATTACHMENT that justifies it
+  (`world` / `datum` / `hostFace`) is core-owned state that never crosses the
+  wire, and `plane_kind_str` collapses both non-world attachments to `custom`.
+  That was already true and already implemented on both sides
+  (`WireSketch::parse_plane` has always accepted an arbitrary custom
+  origin/xAxis/yAxis/normal) — it simply had no producer until sketch-on-face
+  landed, and no prose said where a `custom` basis legitimately comes from.
+  Recorded now so a reader does not mistake `custom` for "unknown/legacy".
+  [§7.3](#73-operation-payloads).
+
+- **2026-07-26 — §7.4 `previewTriangles` now SUBTRACTS holes** (MODEL-OPS W0;
+  **behavioural change to the fill, no wire-shape change, no fixture bump** —
+  canonical fixtures carry no hole-bearing region). The solver lane previously
+  ear-clipped a region's outer loop only, so a region with a hole was served as a
+  solid fill while `FaceBuilder` built (and the kernel extruded) a face WITH the
+  hole. The drag preview therefore disagreed with the committed solid, and a
+  click inside a hole hit-tested as the enclosing region. Holes are now merged
+  into the outer loop with bridges and the whole thing ear-clipped
+  (`worker/src/loop/PolygonFill.cpp`). Two normative consequences: `vertexCount`
+  now spans the outer loop plus every subtracted hole's vertices; and a
+  producer's bridge segments MUST stay shared by two triangles, since consumers
+  recover the extrusion rings from single-use-edge topology. Additive optional
+  `previewTriangles.holesSubtracted` reports how many holes were actually
+  removed (a lower value = degraded fill, never a corrupt one).
+  [§7.4](#74-sketch--solver-lane).
+
+- **2026-07-26 — §7.3 profile-binding prose corrected to match every shipped
+  layer** (MODEL-OPS W0; **text-only, no wire change, no fixture bump**). The
+  Extrude and Revolve payload blocks documented the sketch profile as a
+  `SketchRegion` semantic ref in `inputs[]`. No layer has ever produced or
+  consumed that: Rust's core holds a typed `profile {sketchId, regionId}`, the
+  wire layer flattens it (`wire.rs lift_profile_to_params`), and the worker reads
+  flat `params.sketchId`/`params.regionId` (`OpCommon.cpp build_profile_face`).
+  A `regionId` is content-addressed identity (§7.4) and needs no anchor/intent
+  evidence, so the semantic-ref/ladder machinery does not apply to it. The prose
+  now states the flat form as normative and records what `inputs[]` genuinely
+  carries (ToFace target face, fillet/chamfer edges, shell open faces).
+  [§7.3](#73-operation-payloads).
 
 - **2026-07-22 — §7.2 split-child wording aligned with shipped M5a/W3 behavior**
   (MODEL-HARDEN review fix; **text-only, no wire change, no fixture bump**). The §7.2

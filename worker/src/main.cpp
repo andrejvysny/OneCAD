@@ -29,6 +29,7 @@
 #include "protocol/SolverLane.h"
 #include "session/ElementIdentity.h"
 #include "session/PlanExecutor.h"
+#include "session/PreviewOp.h"
 #include "session/Session.h"
 #include "tess/MeshHandle.h"
 #include "tess/Tessellate.h"
@@ -251,6 +252,13 @@ void register_verbs(Dispatcher& dispatcher, SolverLane& solver_lane, Session& se
             return onecad::session::handle_discard_prepared(session, r);
         });
     // --- W-WP5: geometry + element identity (SCHEMA §7.5/§7.6) ---
+    // MODEL-OPS W3: drag-time preview. Kernel lane (OCCT single-writer), no
+    // fencing, no scratch — see session/PreviewOp.h.
+    dispatcher.register_verb(
+        "PreviewOp",
+        [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext& ctx) {
+            return onecad::session::handle_preview_op(session, r, ctx.cancel);
+        });
     dispatcher.register_verb(
         "Tessellate",
         [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {

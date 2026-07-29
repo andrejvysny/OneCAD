@@ -10,6 +10,23 @@ add_executable(test_region_id test_region_id.cpp)
 target_link_libraries(test_region_id PRIVATE worker_core)
 add_test(NAME region_id_crosscheck COMMAND test_region_id)
 
+# --- Canonical selectable planar cells + strict region/profile identity. ---
+add_executable(test_region_table test_region_table.cpp)
+target_link_libraries(test_region_table PRIVATE worker_core)
+add_test(NAME region_table COMMAND test_region_table)
+
+# --- Region preview fill: holes subtracted + the bridge-interiority invariant
+#     the frontend ring derivation depends on (pure 2D, no OCCT). ---
+add_executable(test_polygon_fill test_polygon_fill.cpp)
+target_link_libraries(test_polygon_fill PRIVATE worker_core)
+add_test(NAME polygon_fill COMMAND test_polygon_fill)
+
+# --- MODEL-OPS W3: drag-time preview verb — exactness + the "leaves no trace"
+#     invariant (in-process, real OCCT). ---
+add_executable(test_preview_op test_preview_op.cpp)
+target_link_libraries(test_preview_op PRIVATE worker_core)
+add_test(NAME preview_op COMMAND test_preview_op)
+
 # --- W-WP3b: solver-lane latest-wins mailbox (drives the real worker) ---
 add_executable(test_solver_latest_wins test_solver_latest_wins.cpp)
 target_link_libraries(test_solver_latest_wins PRIVATE worker_core)

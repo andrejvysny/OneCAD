@@ -56,6 +56,7 @@ add_library(worker_core STATIC
     src/session/ShapeMetrics.cpp
     src/session/Signatures.cpp
     src/session/PlanExecutor.cpp
+    src/session/PreviewOp.cpp
     # --- W-WP5: REAL OCCT ops + ElementMap V2 + tessellation ---
     src/elementmap/ElementMapPartition.cpp
     # --- W-WP6: resolution ladder (scoring / min-cost assignment / orchestration) ---
@@ -105,6 +106,8 @@ add_library(worker_core STATIC
     src/loop/AdjacencyGraph.cpp
     src/loop/FaceBuilder.cpp
     src/loop/LoopDetector.cpp
+    src/loop/PolygonFill.cpp
+    src/loop/RegionTable.cpp
     src/loop/RegionUtils.cpp
     # --- W-WP3a: boolean op (W-WP2 copied, now compiled; include repointed to
     #     worker-local modeling/BooleanMode.h for app::BooleanMode) ---

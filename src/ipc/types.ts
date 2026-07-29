@@ -180,7 +180,18 @@ export interface SketchSession {
 /** `enterSketch` target: an existing sketch id, or a fresh sketch on a plane. */
 export type EnterSketchTarget =
   | string
-  | { newOnPlane: SketchPlaneKind; sketchId?: string };
+  | { newOnPlane: SketchPlaneKind; sketchId?: string }
+  /**
+   * A new sketch placed on a model FACE (MODEL-OPS W2). The basis comes from the
+   * backend (`face_sketch_plane` → the kernel's own face descriptor + the
+   * lock-tested in-plane axis rule), never from a tessellated triangle normal.
+   * V1 policy: the frame is FROZEN at creation.
+   */
+  | {
+      newOnFace: { bodyId: string; elementId: string; worldPoint?: [number, number, number] };
+      plane: SketchPlane;
+      sketchId?: string;
+    };
 
 /** `sketchUpsert` result (SCHEMA §7.4 SketchUpsert result + solved coords). */
 export interface SketchUpsertResult {
@@ -205,7 +216,12 @@ export interface SketchRegion {
    * Optional triangulated fill in **plane (u,v) coordinates**: flat `positions`
    * (u,v pairs) + `indices` (triangle triples). Consumers apply the plane basis.
    */
-  previewTriangles?: { positions: number[]; indices: number[] };
+  previewTriangles?: {
+    positions: number[];
+    indices: number[];
+    /** Number of declared holes actually removed from this fill. */
+    holesSubtracted?: number;
+  };
 }
 
 /** `finishSketch` result — the profiles an extrude/revolve can consume. */
@@ -362,6 +378,8 @@ export interface SketchProjection {
   dof: number;
   /** `ok` | `under` | `over` | `error`. */
   status: string;
+  /** Deterministic identity of authoritative plane/entities/constraints. */
+  geometryToken: string;
 }
 
 /** The `projection-updated` payload (mirrors `documentStore.DocumentProjection`). */
@@ -475,6 +493,14 @@ export interface ExtrudeParams {
   twoDirections?: boolean;
   extrudeMode2?: ExtrudeMode;
   distance2?: number;
+  /**
+   * `ToFace` end-condition targets (SCHEMA §7.3 typed semantic refs — a bare face
+   * id would carry no anchor/intent and could not be rebound by the resolution
+   * ladder after a parametric edit). Marshalled ONLY when the matching
+   * `extrudeMode`/`extrudeMode2` is `ToFace`.
+   */
+  targetFace?: SemanticRef;
+  targetFace2?: SemanticRef;
 }
 
 /**
@@ -597,6 +623,15 @@ export type OperationOp =
       inputs?: SemanticRef[];
       params: FilletParams;
     }
+  // Chamfer shares FilletChamferParams with Fillet (C++ + SCHEMA §7.3); `mode`
+  // on the params distinguishes them.
+  | {
+      opType: "Chamfer";
+      opId?: string;
+      featureId?: string;
+      inputs?: SemanticRef[];
+      params: FilletParams;
+    }
   | {
       opType: "Boolean";
       opId?: string;
@@ -650,6 +685,14 @@ export interface FeatureRecord {
     | "linearPattern"
     | "circularPattern"
     | "mirror";
+  /**
+   * The exact `opType` the feature was authored as (`"Extrude"`, `"Chamfer"`, …).
+   * `kind` is a coarse icon bucket that the backend folds Chamfer+Shell into
+   * `fillet` and the pattern/mirror ops into `boolean`, so a re-edit must route
+   * on THIS. Optional for backwards compatibility with a projection emitted
+   * before the field existed.
+   */
+  opType?: string;
   label: string;
   valueText: string;
   status: "ok" | "dirty" | "error" | "needsRepair";
@@ -683,6 +726,8 @@ export type PreviewParams = Partial<ExtrudeParams> &
 
 /** `beginPreview` draft — the base op the drag will refine. */
 export interface PreviewDraft {
+  /** Stable RecordId reused by exact preview and commit. Minted when absent. */
+  opId?: string;
   opType: OpType;
   sketchId?: string;
   regionId?: string;
@@ -695,17 +740,39 @@ export interface PreviewSession {
   previewBodyId: string;
 }
 
+/** Backend preview failure. Stale snapshots are transient; repair failures are structural. */
+export interface PreviewFailure {
+  kind:
+    | "opFailed"
+    | "invalidCommand"
+    | "worker"
+    | "noDocument"
+    | "needsRepair"
+    | "stalePreview"
+    | "unknown";
+  message: string;
+  structural: boolean;
+  /** Backend repair evidence retained for the future repair UI. */
+  evidence?: unknown[];
+}
+
 /**
  * An exact L2 preview result (NEW_SPEC §15 "Replace preview with exact result").
  * Carries its `epoch` so the frontend can reconcile against the latest params it
  * sent and discard stale responses (Invariant: L1 removed only after the matching
- * epoch arrives). The mesh is a full MESH1 blob (same path as a committed body).
+ * epoch arrives). A success carries a full MESH1 blob; a failure carries the
+ * backend's typed reason and leaves the last valid mesh visible.
  */
 export interface PreviewResult {
   sessionId: string;
   epoch: number;
   bodyId: string;
-  mesh: ArrayBuffer;
+  mesh?: ArrayBuffer;
+  /** All exact candidate bodies. Cut/split operations may return more than one. */
+  bodies?: { bodyId: string; mesh: ArrayBuffer }[];
+  /** Committed head bodies hidden while their candidate replacements are shown. */
+  replacedBodyIds?: string[];
+  error?: PreviewFailure;
   /** True for the final exact mesh delivered on commit. */
   committed?: boolean;
 }

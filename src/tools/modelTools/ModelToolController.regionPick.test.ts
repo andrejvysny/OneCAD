@@ -22,6 +22,7 @@ import type {
 } from "@/ipc/types";
 import { toolStore } from "@/stores/toolStore";
 import { selectionStore } from "@/stores/selectionStore";
+import { viewportStore } from "@/stores/viewportStore";
 import { resetStores } from "@/test/resetStores";
 
 const PLANE: SketchPlane = {
@@ -101,6 +102,7 @@ function makeClientMock(finish: () => Promise<FinishSketchResult>) {
   return {
     onPreviewResult: vi.fn(() => () => {}),
     finishSketch: vi.fn(finish),
+    getSketchRegions: vi.fn(finish),
     // Model-mode arms read the sketch via getSketch (pure read; MODEL-HARDEN W0.5).
     getSketch: vi.fn(() => Promise.resolve(makeSession())),
     enterSketch: vi.fn(() => Promise.resolve(makeSession())),
@@ -138,7 +140,9 @@ describe("ModelToolController region pick", () => {
 
   beforeEach(() => {
     resetStores();
-    selectionStore.getState().set([{ kind: "sketch", id: "sk" }]);
+    selectionStore.getState().set([
+      { kind: "sketchRegion", id: "r0-ref", sketchId: "sk", regionId: "r0" },
+    ]);
     container = document.createElement("div");
     document.body.appendChild(container);
   });
@@ -158,33 +162,15 @@ describe("ModelToolController region pick", () => {
     pointer("pointerup", x, y, 0, 0);
   }
 
-  it("(a) two regions → MULTI-select; toggling region 2 then Enter arms extrude with regions[1].regionId", async () => {
+  it("(a) exact persistent region selection arms the non-first region directly", async () => {
     build(() => Promise.resolve({ regions: [R0, R1] }));
+    selectionStore.getState().set([
+      { kind: "sketchRegion", id: "r1-ref", sketchId: "sk", regionId: "r1" },
+    ]);
     toolStore.getState().setTool("extrude");
     await flush();
 
-    // Region pick is active: layer shown, orbit suppressed, NOT yet armed.
-    expect(engineMock.showRegionPick).toHaveBeenCalledTimes(1);
-    expect(engineMock.showRegionPick.mock.calls[0][1]).toEqual([R0, R1]);
-    expect(engineMock.setOrbitSuppressed).toHaveBeenLastCalledWith(true);
-    expect(clientMock.beginPreview).not.toHaveBeenCalled();
-
-    // Hover tints the region under the pointer.
-    pointer("pointermove", 130, 110, 0, 0);
-    expect(engineMock.setRegionHover).toHaveBeenLastCalledWith("r1");
-
-    // Wave 2: a click TOGGLES membership (does NOT arm) — the selection retints r1.
-    click(130, 110);
-    await flush();
-    expect(clientMock.beginPreview).not.toHaveBeenCalled();
-    expect(engineMock.setRegionSelected).toHaveBeenLastCalledWith(["r1"]);
-
-    // Enter confirms the selection → arms extrude with regions[1].regionId in the draft.
-    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
-    await flush();
-
-    expect(engineMock.hideRegionPick).toHaveBeenCalled();
-    expect(engineMock.setOrbitSuppressed).toHaveBeenLastCalledWith(false);
+    expect(engineMock.showRegionPick).not.toHaveBeenCalled();
     expect(clientMock.beginPreview).toHaveBeenCalledTimes(1);
     const draft = clientMock.beginPreview.mock.calls[0][0];
     expect(draft.opType).toBe("Extrude");
@@ -192,43 +178,34 @@ describe("ModelToolController region pick", () => {
     expect(controller.extrudeActive).toBe(true);
   });
 
-  it("(a-multi) toggling BOTH regions then Enter arms N=2 extrude sessions (one per region)", async () => {
+  it("(a-multi) multiple selected regions are rejected instead of guessed or batched", async () => {
     build(() => Promise.resolve({ regions: [R0, R1] }));
+    selectionStore.getState().set([
+      { kind: "sketchRegion", id: "r0-ref", sketchId: "sk", regionId: "r0" },
+      { kind: "sketchRegion", id: "r1-ref", sketchId: "sk", regionId: "r1" },
+    ]);
     toolStore.getState().setTool("extrude");
     await flush();
 
-    click(10, 10); // r0
-    await flush();
-    click(130, 110); // r1
-    await flush();
-    expect(engineMock.setRegionSelected).toHaveBeenLastCalledWith(["r0", "r1"]);
-
-    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
-    await flush();
-
-    // One preview session per region — regionIds preserved in click order.
-    expect(clientMock.beginPreview).toHaveBeenCalledTimes(2);
-    const drafts = clientMock.beginPreview.mock.calls.map((c) => c[0].regionId);
-    expect(drafts).toEqual(["r0", "r1"]);
-    expect(controller.extrudeActive).toBe(true);
+    expect(clientMock.beginPreview).not.toHaveBeenCalled();
+    expect(controller.extrudeActive).toBe(false);
+    expect(viewportStore.getState().statusHint?.message).toMatch(/exactly one/);
   });
 
-  it("(a-dblclick) a double-click on a region = select-only-it + confirm (accelerator)", async () => {
+  it("(a-whole) whole-sketch selection never falls back to the first region", async () => {
     build(() => Promise.resolve({ regions: [R0, R1] }));
+    selectionStore.getState().set([{ kind: "sketch", id: "sk" }]);
     toolStore.getState().setTool("extrude");
     await flush();
 
-    // First toggles r0 IN; the immediate second click (same region) confirms r0 alone.
-    click(10, 10);
-    click(10, 10);
-    await flush();
-    expect(clientMock.beginPreview).toHaveBeenCalledTimes(1);
-    expect(clientMock.beginPreview.mock.calls[0][0].regionId).toBe("r0");
-    expect(controller.extrudeActive).toBe(true);
+    expect(clientMock.getSketchRegions).not.toHaveBeenCalled();
+    expect(clientMock.beginPreview).not.toHaveBeenCalled();
+    expect(viewportStore.getState().statusHint?.message).toMatch(/exactly one/);
   });
 
   it("(a2) revolve two regions → toggle region 2 + Enter → axis pick → 360° commit sends regions[1].regionId", async () => {
     build(() => Promise.resolve({ regions: [R0, R1] }));
+    selectionStore.getState().set([{ kind: "sketch", id: "sk" }]);
     toolStore.getState().setTool("revolve");
     await flush();
     expect(engineMock.showRegionPick).toHaveBeenCalledTimes(1);
@@ -256,7 +233,7 @@ describe("ModelToolController region pick", () => {
     expect(op.regionId).toBe("r1");
   });
 
-  it("(b) single region keeps the instant auto-arm path (no region pick)", async () => {
+  it("(b) one selected region arms without a transient region picker", async () => {
     build(() => Promise.resolve({ regions: [R0] }));
     toolStore.getState().setTool("extrude");
     await flush();
@@ -270,7 +247,8 @@ describe("ModelToolController region pick", () => {
 
   it("(c) Esc during region pick cancels cleanly and restores orbit", async () => {
     build(() => Promise.resolve({ regions: [R0, R1] }));
-    toolStore.getState().setTool("extrude");
+    selectionStore.getState().set([{ kind: "sketch", id: "sk" }]);
+    toolStore.getState().setTool("revolve");
     await flush();
     expect(engineMock.showRegionPick).toHaveBeenCalledTimes(1);
 
@@ -283,7 +261,7 @@ describe("ModelToolController region pick", () => {
     // A later click resolves nothing (pick torn down) — no arm.
     click(130, 110);
     await flush();
-    expect(clientMock.beginPreview).not.toHaveBeenCalled();
+    expect(clientMock.applyOperation).not.toHaveBeenCalled();
   });
 
   it("(d) a stale finishSketch result (arm re-triggered) is dropped — no second region pick", async () => {
@@ -297,14 +275,15 @@ describe("ModelToolController region pick", () => {
       return call === 1 ? firstFinish : Promise.resolve({ regions: [R0, R1] });
     });
 
+    selectionStore.getState().set([{ kind: "sketch", id: "sk" }]);
     // Arm 1: finishSketch is in flight.
-    toolStore.getState().setTool("extrude");
+    toolStore.getState().setTool("revolve");
     await flush();
     expect(engineMock.showRegionPick).not.toHaveBeenCalled();
 
     // Re-trigger the arm (select → extrude) while arm 1 is still pending.
     toolStore.getState().setTool("select");
-    toolStore.getState().setTool("extrude");
+    toolStore.getState().setTool("revolve");
     await flush(); // arm 2: finishSketch resolved → enterSketch → region pick
     await flush();
     expect(engineMock.showRegionPick).toHaveBeenCalledTimes(1);

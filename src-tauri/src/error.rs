@@ -22,6 +22,9 @@ pub enum ApiError {
     InvalidCommand(String),
     /// A recoverable geometry-op failure — the document stays editable.
     OpFailed(String),
+    /// The preview candidate targeted an older published snapshot. The caller
+    /// should drop it and issue a fresh candidate, not surface a tool failure.
+    StalePreview(String),
     /// A protocol / crash-class failure — R-WP11 restarts the worker.
     Worker(String),
     /// Filesystem / container IO failure (open/save).
@@ -36,6 +39,7 @@ impl std::fmt::Display for ApiError {
             Self::NoDocument(m) => write!(f, "no document open: {m}"),
             Self::InvalidCommand(m) => write!(f, "invalid command: {m}"),
             Self::OpFailed(m) => write!(f, "operation failed: {m}"),
+            Self::StalePreview(m) => write!(f, "stale preview: {m}"),
             Self::Worker(m) => write!(f, "worker error: {m}"),
             Self::Io(m) => write!(f, "io error: {m}"),
             Self::Internal(m) => write!(f, "internal error: {m}"),
@@ -66,5 +70,17 @@ impl From<EngineError> for ApiError {
             | EngineError::Timeout { .. } => ApiError::Worker(e.to_string()),
             EngineError::Cancelled => ApiError::OpFailed("cancelled".into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_preview_is_a_distinct_frontend_error_kind() {
+        let value = serde_json::to_value(ApiError::StalePreview("snapshot moved".into())).unwrap();
+        assert_eq!(value["kind"], "stalePreview");
+        assert_eq!(value["message"], "snapshot moved");
     }
 }

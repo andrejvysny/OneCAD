@@ -30,8 +30,8 @@ const mid = (l: SketchLineSnapshot): { x: number; y: number } => ({
  *         a new dimensional row carrying that value.
  *   (d) — delete round-trip: select the rectangle's entities → Delete → DOF +
  *         constraint rows change.
- *   (e) — redraw the closed region → Enter → AC3: extrude auto-arms, and a
- *         real drag-commit on the depth handle produces a Body.
+ *   (e) — redraw and finish the closed region → select its fill → Extrude → a
+ *         real drag-confirm on the depth handle produces a Body.
  *
  * Targeting note: every select-tool click below targets a point read back from
  * the LIVE sketch entities (`getSketchSnapshot`) and projected through the real
@@ -58,6 +58,11 @@ const mid = (l: SketchLineSnapshot): { x: number; y: number } => ({
  */
 test("full acceptance ribbon: plane picker → constrain → dimension → delete → extrude", async ({ page }) => {
   await openEditorDebug(page);
+  await bodyOptions(page).first().getByRole("switch").click();
+  const visibleSeedSketches = page
+    .getByRole("listbox", { name: "Sketches" })
+    .locator('[role="switch"][aria-checked="true"]');
+  while ((await visibleSeedSketches.count()) > 0) await visibleSeedSketches.first().click();
   await enterSketchViaPlanePicker(page); // AC1
   // Entering the plane picker kicks off an animated camera re-home
   // (CadOrbitControls, 250ms) — settle before any click/projection races it
@@ -148,14 +153,33 @@ test("full acceptance ribbon: plane picker → constrain → dimension → delet
   await expect(dofPill(page)).toHaveText("DOF: 0"); // sketch is empty again
   await expect(page.getByText("No constraints yet.")).toBeVisible();
 
-  // ── (e) redraw the closed region, finish → AC3 auto-arms extrude ────────
+  // ── (e) redraw, finish, select the exact cell, then Extrude ─────────────
   await selectSketchTool(page, "Rectangle");
   await clickAt(page, -150, -100);
   await clickAt(page, 150, 100);
   await expect(dofPill(page)).toHaveText(/^DOF: [1-9]\d*$/);
+  const redraw = await getSketchSnapshot(page);
+  const xs = redraw.lines.flatMap((line) => [line.p0[0], line.p1[0]]);
+  const ys = redraw.lines.flatMap((line) => [line.p0[1], line.p1[1]]);
 
   const bodiesBefore = await bodyOptions(page).count();
-  await page.keyboard.press("Enter"); // finish → single region → auto-arms extrude directly
+  await page.keyboard.press("Enter");
+  await waitForCameraSettled(page);
+  const regionClient = await planePointToClient(page, redraw.plane, {
+    x: (Math.min(...xs) + Math.max(...xs)) / 2,
+    y: (Math.min(...ys) + Math.max(...ys)) / 2,
+  });
+  await expect
+    .poll(() =>
+      page.evaluate(
+        ({ x, y }) => Boolean((window as unknown as { __vpEngine?: { sketchStaticHitTest(x: number, y: number): unknown } })
+          .__vpEngine?.sketchStaticHitTest(x, y)),
+        regionClient,
+      ),
+    )
+    .toBe(true);
+  await clickAtClient(page, regionClient.x, regionClient.y);
+  await page.getByRole("button", { name: "Extrude", exact: true }).click();
   await expect(page.getByText(/^Drag the arrow to set depth/)).toBeVisible();
 
   // Wave 1 gesture: drag the handle, release (stays armed), Enter confirms.

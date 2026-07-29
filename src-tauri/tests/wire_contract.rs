@@ -24,7 +24,7 @@
 //! Gated on `ONECAD_WORKER_PATH` (else the dev-tree fallback); a missing binary skips
 //! the worker-backed tests cleanly. The pure hash test always runs.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,7 +32,7 @@ use uuid::Uuid;
 
 use onecad_core::document::body::split_child_uuid;
 use onecad_core::document::record::{
-    BooleanMode, BooleanOp, BooleanParams, ExtrudeMode, ExtrudeParams, FilletParams,
+    BooleanMode, BooleanOp, BooleanParams, ChamferParams, ExtrudeMode, ExtrudeParams, FilletParams,
     KnownOperation, Operation, OperationRecord, PlaneKind, SketchOpParams, SketchPlaneRef,
 };
 use onecad_core::document::refs::{
@@ -105,6 +105,13 @@ fn runtime_over(wm: &WorkerManager) -> DocumentRuntime {
     let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
     let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
     DocumentRuntime::new_blank(engine, meshes, solver)
+}
+
+fn open_runtime_over(wm: &WorkerManager, path: &Path) -> DocumentRuntime {
+    let engine: Arc<dyn GeometryEngine> = Arc::new(wm.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
+    DocumentRuntime::open(path, engine, meshes, solver).expect("reopen saved container")
 }
 
 fn add_op(rt: &mut DocumentRuntime, record: OperationRecord) {
@@ -238,6 +245,34 @@ fn rect_sketch(sid: SketchId, base: u128, x0: f64, y0: f64, w: f64, h: f64) -> S
     })
     .unwrap();
     sk
+}
+
+fn two_rect_sketch(sid: SketchId) -> Sketch {
+    let mut sketch = rect_sketch(sid, 0x7000, 0.0, 0.0, 40.0, 20.0);
+    let second = rect_sketch(sid, 0x8000, 60.0, 0.0, 10.0, 10.0);
+    for entity in second.entities().iter().cloned() {
+        sketch.add_entity(entity).unwrap();
+    }
+    for constraint in second.constraints().iter().cloned() {
+        sketch.add_constraint(constraint).unwrap();
+    }
+    sketch
+}
+
+fn region_triangle_area(region: &onecad_lib::dto::SketchRegionDto) -> f64 {
+    let triangles = region.preview_triangles.as_ref().expect("region fill");
+    triangles
+        .indices
+        .chunks_exact(3)
+        .map(|triangle| {
+            let point = |index: u32| {
+                let offset = index as usize * 2;
+                [triangles.positions[offset], triangles.positions[offset + 1]]
+            };
+            let [a, b, c] = [point(triangle[0]), point(triangle[1]), point(triangle[2])];
+            ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs() * 0.5
+        })
+        .sum()
 }
 
 fn sketch_record(rec: u128, sk: &Sketch) -> OperationRecord {
@@ -1138,3 +1173,813 @@ fn planner_hash_decoupled_from_wire_body_form() {
 /// body form into the hash) is caught.
 const GOLDEN_BOOLEAN_PREFIX_HASH: &str =
     "bed9be34040605a6cf938f215234353381931643fe23351618b1875c77bcbb5d";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODEL-OPS W1 — the extrude end conditions the FRONTEND can now author.
+//
+// The worker has always implemented `ThroughAll` / `ToNext` / two-direction /
+// draft (`ExtrudeOp.cpp effective_distance`), and `ExtrudeParams` has always
+// carried the fields, but no tool ever authored them — so nothing exercised the
+// wire path end-to-end. These pin the geometry each one produces, exactly the
+// way `standalone_boolean_*` pins the boolean modes.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// An extrude with an explicit mode + optional second direction / draft.
+#[allow(clippy::too_many_arguments)]
+fn extrude_mode_record(
+    rec: u128,
+    sketch: SketchId,
+    dist: f64,
+    mode: ExtrudeMode,
+    boolean: BooleanMode,
+    target: Option<BodyId>,
+    two_dirs: bool,
+    mode2: ExtrudeMode,
+    dist2: f64,
+    draft_deg: f64,
+) -> OperationRecord {
+    let params = ExtrudeParams {
+        profile: Some(SketchRegionRef {
+            sketch,
+            region: RegionId::new(""), // empty ⇒ V1 first-region fallback
+            extra: Default::default(),
+        }),
+        distance: Scalar::new(dist),
+        draft_angle_deg: Scalar::new(draft_deg),
+        mode,
+        boolean_mode: boolean,
+        target_body: target,
+        target_face: None,
+        two_directions: two_dirs,
+        mode2,
+        distance2: Scalar::new(dist2),
+        target_face2: None,
+        extra: Default::default(),
+    };
+    OperationRecord::new(
+        RecordId(Uuid::from_u128(rec)),
+        0,
+        "Extrude",
+        Operation::Known(KnownOperation::Extrude(params)),
+    )
+}
+
+/// Build a 40×20 base block, then run `tail` against it and return its volume.
+async fn base_block_then(tail: impl FnOnce(SketchId) -> OperationRecord) -> f64 {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return f64::NAN;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    // Base: 40×20 rect extruded 10 ⇒ 8000.
+    let sa = SketchId(Uuid::from_u128(SKETCH_A));
+    let sketch_a = rect_sketch(sa, 0x1000, 0.0, 0.0, 40.0, 20.0);
+    add_op(&mut rt, sketch_record(SKETCH_A, &sketch_a));
+    rt.apply(EditCommand::AddSketch {
+        sketch: sketch_a.clone(),
+    })
+    .expect("AddSketch A");
+    add_op(
+        &mut rt,
+        extrude_record(EXTRUDE_A, sa, 10.0, BooleanMode::NewBody, None),
+    );
+
+    // Tail sketch: a 10×10 square sitting inside the block's footprint.
+    let sb = SketchId(Uuid::from_u128(SKETCH_B));
+    let sketch_b = rect_sketch(sb, 0x2000, 10.0, 5.0, 10.0, 10.0);
+    add_op(&mut rt, sketch_record(SKETCH_B, &sketch_b));
+    rt.apply(EditCommand::AddSketch {
+        sketch: sketch_b.clone(),
+    })
+    .expect("AddSketch B");
+    add_op(&mut rt, tail(sb));
+
+    let report = regen_all(&mut rt).await;
+    let _snap = published(&report, "end-condition tail");
+    let mesh = body_mesh(&mut rt, body_of(EXTRUDE_A)).await;
+    let view = validate_mesh_blob(&mesh).expect("result MESH1 validates");
+    let vol = mesh_volume(&view, &mesh);
+    wm.shutdown().await;
+    vol
+}
+
+/// `ThroughAll` Cut punches the full depth regardless of the authored distance.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn extrude_through_all_cut() {
+    let vol = base_block_then(|sb| {
+        extrude_mode_record(
+            OP_TAIL,
+            sb,
+            // A deliberately TINY distance: ThroughAll must ignore it and cut the
+            // whole 10-thick block. If the mode were dropped on the wire this would
+            // barely scratch the block and the volume would land near 8000.
+            0.1,
+            ExtrudeMode::ThroughAll,
+            BooleanMode::Cut,
+            Some(body_of(EXTRUDE_A)),
+            false,
+            ExtrudeMode::Blind,
+            0.0,
+            0.0,
+        )
+    })
+    .await;
+    if vol.is_nan() {
+        return;
+    }
+    // 40·20·10 − 10·10·10 = 8000 − 1000 = 7000.
+    assert!(
+        (vol - 7000.0).abs() < 1.0,
+        "ThroughAll Cut removes the FULL 10-thick prism (8000 − 1000 = 7000), got {vol}"
+    );
+    eprintln!("ThroughAll Cut PASS: volume {vol} == 7000");
+}
+
+/// `ToNext` Cut stops at the next face ahead — here the block's far side, so it
+/// is a through pocket of exactly the block depth.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn extrude_to_next_cut() {
+    let vol = base_block_then(|sb| {
+        extrude_mode_record(
+            OP_TAIL,
+            sb,
+            0.1, // ignored — ToNext derives the distance from the target body
+            ExtrudeMode::ToNext,
+            BooleanMode::Cut,
+            Some(body_of(EXTRUDE_A)),
+            false,
+            ExtrudeMode::Blind,
+            0.0,
+            0.0,
+        )
+    })
+    .await;
+    if vol.is_nan() {
+        return;
+    }
+    assert!(
+        (vol - 7000.0).abs() < 1.0,
+        "ToNext Cut reaches the next face (8000 − 1000 = 7000), got {vol}"
+    );
+    eprintln!("ToNext Cut PASS: volume {vol} == 7000");
+}
+
+/// A two-direction Add grows the block on BOTH sides of the sketch plane.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn extrude_two_directions_add() {
+    let vol = base_block_then(|sb| {
+        extrude_mode_record(
+            OP_TAIL,
+            sb,
+            6.0, // +Z
+            ExtrudeMode::Blind,
+            BooleanMode::Add,
+            Some(body_of(EXTRUDE_A)),
+            true,
+            ExtrudeMode::Blind,
+            4.0, // −Z
+            0.0,
+        )
+    })
+    .await;
+    if vol.is_nan() {
+        return;
+    }
+    // The 10×10 column spans z ∈ [−4, +6]; the block occupies z ∈ [0, 10], so the
+    // union adds only the part OUTSIDE the block: the −4..0 stub = 10·10·4 = 400.
+    // (The +Z half lies inside the block and contributes nothing.)
+    assert!(
+        (vol - 8400.0).abs() < 1.0,
+        "two-direction Add contributes the below-plane stub (8000 + 400 = 8400), got {vol}"
+    );
+    eprintln!("two-direction Add PASS: volume {vol} == 8400");
+}
+
+/// A drafted Cut removes LESS than a straight one — the pocket tapers inward.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn extrude_draft_angle_cut() {
+    let straight = base_block_then(|sb| {
+        extrude_mode_record(
+            OP_TAIL,
+            sb,
+            5.0,
+            ExtrudeMode::Blind,
+            BooleanMode::Cut,
+            Some(body_of(EXTRUDE_A)),
+            false,
+            ExtrudeMode::Blind,
+            0.0,
+            0.0,
+        )
+    })
+    .await;
+    if straight.is_nan() {
+        return;
+    }
+    let drafted = base_block_then(|sb| {
+        extrude_mode_record(
+            OP_TAIL,
+            sb,
+            5.0,
+            ExtrudeMode::Blind,
+            BooleanMode::Cut,
+            Some(body_of(EXTRUDE_A)),
+            false,
+            ExtrudeMode::Blind,
+            0.0,
+            10.0, // 10° draft
+        )
+    })
+    .await;
+
+    // Straight pocket: 10·10·5 = 500 removed ⇒ 7500.
+    assert!(
+        (straight - 7500.0).abs() < 1.0,
+        "straight Cut removes 500 (8000 − 500 = 7500), got {straight}"
+    );
+    // The draft tapers the pocket, so LESS material is removed and the body is
+    // heavier. A dropped draftAngleDeg would make the two identical.
+    assert!(
+        drafted > straight + 1.0,
+        "a 10° draft must remove LESS than the straight cut \
+         (straight {straight}, drafted {drafted}) — a dropped draft angle makes them equal"
+    );
+    eprintln!("draft PASS: straight {straight} < drafted {drafted}");
+}
+
+/// Chamfer over the wire — the tool now authors it, and it must reach the worker's
+/// `execute_chamfer` and change the body, not silently no-op or fail.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chamfer_reaches_the_worker() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    let sa = SketchId(Uuid::from_u128(SKETCH_A));
+    let sketch_a = rect_sketch(sa, 0x1000, 0.0, 0.0, 40.0, 20.0);
+    add_op(&mut rt, sketch_record(SKETCH_A, &sketch_a));
+    rt.apply(EditCommand::AddSketch {
+        sketch: sketch_a.clone(),
+    })
+    .expect("AddSketch A");
+    add_op(
+        &mut rt,
+        extrude_record(EXTRUDE_A, sa, 10.0, BooleanMode::NewBody, None),
+    );
+    let before = regen_all(&mut rt).await;
+    published(&before, "base block");
+    let plain = body_mesh(&mut rt, body_of(EXTRUDE_A)).await;
+    let plain_view = validate_mesh_blob(&plain).expect("base MESH1");
+    let plain_faces = plain_view.face_count;
+    let plain_vol = mesh_volume(&plain_view, &plain);
+
+    // Chamfer one edge, built exactly like `fillet_body_context`'s ref: the body
+    // rides on `primary`, the anchor near a real edge, so the ladder can bind it.
+    let (_top_key, centroid) = top_face_pick(&plain_view, &plain);
+    let edge_el = ElementId::new("el_chamfer_edge");
+    let edge_ref = ElementRef {
+        primary: Some(PrimaryRef {
+            body: body_of(EXTRUDE_A),
+            element: edge_el.clone(),
+            kind: ElementKind::Edge,
+            extra: Default::default(),
+        }),
+        intent: None,
+        anchor: Some(AnchorIntent {
+            world_point: Vec3::new_unchecked(centroid.x, centroid.y, centroid.z),
+            surface_uv: None,
+            local_frame: None,
+            adjacency_hint: None,
+            extra: Default::default(),
+        }),
+        extra: Default::default(),
+    };
+    add_op(
+        &mut rt,
+        OperationRecord::new(
+            RecordId(Uuid::from_u128(OP_TAIL)),
+            0,
+            "Chamfer",
+            // Chamfer carries its OWN params struct (split from Fillet in
+            // R-WP2.1) with an identical shape.
+            Operation::Known(KnownOperation::Chamfer(ChamferParams {
+                radius: Scalar::new(2.0),
+                edge_ids: vec![edge_el],
+                edges: vec![edge_ref],
+                chain_tangent_edges: false,
+                extra: Default::default(),
+            })),
+        ),
+    );
+    let after = regen_all(&mut rt).await;
+    published(&after, "chamfer");
+
+    let snap = published(&after, "chamfer");
+    if snap.repair_summary.needs_repair_count > 0 {
+        // Clean NeedsRepair: the Chamfer op DID reach the worker and its body input
+        // resolved — the coarse anchor simply did not bind an edge confidently. The
+        // pre-W1 failure mode was different and total: `opType: "Chamfer"` was not in
+        // the authorable wire union at all.
+        eprintln!("Chamfer PASS: reached execute_chamfer → clean NeedsRepair");
+        wm.shutdown().await;
+        return;
+    }
+
+    let cut = body_mesh(&mut rt, body_of(EXTRUDE_A)).await;
+    let cut_view = validate_mesh_blob(&cut).expect("chamfered MESH1");
+    let cut_vol = mesh_volume(&cut_view, &cut);
+
+    // A chamfer bevels a corner: one NEW planar face, and material removed.
+    assert!(
+        cut_view.face_count > plain_faces,
+        "the chamfer adds a face ({plain_faces} → {})",
+        cut_view.face_count
+    );
+    assert!(
+        cut_vol < plain_vol,
+        "the chamfer removes material ({plain_vol} → {cut_vol})"
+    );
+    eprintln!(
+        "Chamfer PASS: faces {plain_faces} → {}, volume {plain_vol} → {cut_vol}",
+        cut_view.face_count
+    );
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODEL-OPS W3 — the drag-time preview verb, over the real wire.
+//
+// The whole point is that a preview shows what a COMMIT would produce. Before
+// this verb the "exact" drag mesh was synthesized in JavaScript by the same
+// function the mock client uses, so a Cut preview never subtracted at all.
+// `test_preview_op` pins the worker-side semantics in-process; this pins the
+// Rust plumbing end-to-end: the verb reaches the worker, returns a valid MESH1,
+// AGREES with what committing the same op produces, and leaves the session
+// completely untouched.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preview_matches_the_commit_and_leaves_no_trace() {
+    use onecad_lib::worker::PreviewEngine;
+
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    // Base: a 40×20 rect extruded 10 ⇒ 8000, plus a 10×10 sketch inside it.
+    let sa = SketchId(Uuid::from_u128(SKETCH_A));
+    let sketch_a = rect_sketch(sa, 0x1000, 0.0, 0.0, 40.0, 20.0);
+    add_op(&mut rt, sketch_record(SKETCH_A, &sketch_a));
+    rt.apply(EditCommand::AddSketch {
+        sketch: sketch_a.clone(),
+    })
+    .expect("AddSketch A");
+    add_op(
+        &mut rt,
+        extrude_record(EXTRUDE_A, sa, 10.0, BooleanMode::NewBody, None),
+    );
+
+    let sb = SketchId(Uuid::from_u128(SKETCH_B));
+    let sketch_b = rect_sketch(sb, 0x2000, 10.0, 5.0, 10.0, 10.0);
+    add_op(&mut rt, sketch_record(SKETCH_B, &sketch_b));
+    rt.apply(EditCommand::AddSketch {
+        sketch: sketch_b.clone(),
+    })
+    .expect("AddSketch B");
+    published(&regen_all(&mut rt).await, "base");
+
+    // The sketch must be in the worker's SketchStore for the preview to seed it.
+    // `enter_sketch` pushes the already-authored sketch there (the entities were
+    // registered by AddSketch, so re-upserting them would be a duplicate-id
+    // rejection) — exactly the state a real drag is in when it previews.
+    rt.enter_sketch(sb).await.expect("enter_sketch B");
+
+    let head_before = rt.projection().revision;
+    let base_vol = {
+        let mesh = body_mesh(&mut rt, body_of(EXTRUDE_A)).await;
+        let view = validate_mesh_blob(&mesh).expect("base MESH1");
+        mesh_volume(&view, &mesh)
+    };
+    assert!(
+        (base_vol - 8000.0).abs() < 1.0,
+        "base is 8000, got {base_vol}"
+    );
+
+    // PREVIEW a Cut of the 10×10 profile, 5 deep. The candidate is the exact
+    // typed core operation later committed; Rust owns all worker-wire lowering.
+    let candidate = extrude_mode_record(
+        OP_TAIL,
+        sb,
+        5.0,
+        ExtrudeMode::Blind,
+        BooleanMode::Cut,
+        Some(body_of(EXTRUDE_A)),
+        false,
+        ExtrudeMode::Blind,
+        0.0,
+        0.0,
+    );
+    let preview = wm
+        .preview_op(
+            candidate.op.clone(),
+            candidate.record_id.to_string(),
+            Some(sb.0.to_string()),
+            None,
+            Lod::Coarse,
+        )
+        .await
+        .expect("PreviewOp reaches the worker");
+    assert_eq!(
+        preview.bodies.len(),
+        1,
+        "a Cut modifies the target, so exactly that body comes back"
+    );
+    let pv = {
+        let blob = &preview.bodies[0].mesh;
+        let view = validate_mesh_blob(blob).expect("preview MESH1 validates");
+        mesh_volume(&view, blob)
+    };
+    // THE assertion: the preview already shows 8000 − 500 = 7500. The pre-W3
+    // client-side stand-in showed the un-subtracted prism instead.
+    eprintln!("preview Cut volume = {pv} (base {base_vol})");
+    assert!(
+        (pv - 7500.0).abs() < 1.0,
+        "the preview must SUBTRACT (8000 − 500 = 7500), got {pv}"
+    );
+
+    // And the document is exactly where it was: same revision, same geometry.
+    assert_eq!(
+        rt.projection().revision,
+        head_before,
+        "a preview must not bump the document revision"
+    );
+    let after_vol = {
+        let mesh = body_mesh(&mut rt, body_of(EXTRUDE_A)).await;
+        let view = validate_mesh_blob(&mesh).expect("post-preview MESH1");
+        mesh_volume(&view, &mesh)
+    };
+    assert!(
+        (after_vol - 8000.0).abs() < 1.0,
+        "the real body is untouched by the preview (8000), got {after_vol}"
+    );
+
+    // Committing the SAME op must now land on the volume the preview promised.
+    add_op(&mut rt, candidate);
+    published(&regen_all(&mut rt).await, "commit after preview");
+    let committed = {
+        let mesh = body_mesh(&mut rt, body_of(EXTRUDE_A)).await;
+        let view = validate_mesh_blob(&mesh).expect("committed MESH1");
+        mesh_volume(&view, &mesh)
+    };
+    assert!(
+        (committed - pv).abs() < 1.0,
+        "preview {pv} and commit {committed} must agree — that is the entire point"
+    );
+    eprintln!("preview/commit agreement PASS: {pv} == {committed}");
+    wm.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preview_binds_the_non_first_region_and_rejects_stale_inputs() {
+    use onecad_lib::worker::PreviewEngine;
+
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let sid = SketchId(Uuid::from_u128(0xD00));
+    let sketch = two_rect_sketch(sid);
+    add_op(&mut rt, sketch_record(0xD00, &sketch));
+    rt.apply(EditCommand::AddSketch {
+        sketch: sketch.clone(),
+    })
+    .expect("AddSketch");
+    published(&regen_all(&mut rt).await, "two-region sketch");
+
+    rt.enter_sketch(sid).await.expect("sync sketch");
+    let regions = rt.finish_sketch(sid).await.expect("derive regions").regions;
+    assert_eq!(regions.len(), 2, "both disjoint cells must be selectable");
+    let first_area = region_triangle_area(&regions[0]);
+    let selected_area = region_triangle_area(&regions[1]);
+    assert!(
+        (first_area - selected_area).abs() > 100.0,
+        "fixture regions must be unequal ({first_area} vs {selected_area})"
+    );
+
+    let mut candidate = extrude_mode_record(
+        0xD01,
+        sid,
+        7.0,
+        ExtrudeMode::Blind,
+        BooleanMode::NewBody,
+        None,
+        false,
+        ExtrudeMode::Blind,
+        0.0,
+        0.0,
+    );
+    let Operation::Known(KnownOperation::Extrude(params)) = &mut candidate.op else {
+        unreachable!();
+    };
+    params.profile.as_mut().unwrap().region = RegionId::new(regions[1].region_id.clone());
+    candidate.inputs = candidate.op.derive_inputs();
+
+    let preview = wm
+        .preview_op(
+            candidate.op.clone(),
+            candidate.record_id.to_string(),
+            Some(sid.to_string()),
+            None,
+            Lod::Coarse,
+        )
+        .await
+        .expect("explicit non-first region previews");
+    assert_eq!(preview.bodies.len(), 1);
+    // Preview body ids are Rust-domain (bare uuid, like document-changed BodyMeshRef) —
+    // the FE matches them against the committed mesh registry, not the worker wire form.
+    assert_eq!(preview.changed_bodies, vec![body_of(0xD01).to_string()]);
+    let preview_blob = &preview.bodies[0].mesh;
+    let preview_view = validate_mesh_blob(preview_blob).expect("preview MESH1");
+    let preview_volume = mesh_volume(&preview_view, preview_blob);
+    assert!(
+        (preview_volume - selected_area * 7.0).abs() < 1.0,
+        "preview used selected region: volume {preview_volume}, expected {}",
+        selected_area * 7.0
+    );
+
+    let mut stale_region = candidate.op.clone();
+    let Operation::Known(KnownOperation::Extrude(params)) = &mut stale_region else {
+        unreachable!();
+    };
+    params.profile.as_mut().unwrap().region = RegionId::new("r_stale");
+    let stale_error = wm
+        .preview_op(
+            stale_region,
+            Uuid::from_u128(0xD02).to_string(),
+            Some(sid.to_string()),
+            Some(SnapshotId(preview.snapshot_id)),
+            Lod::Coarse,
+        )
+        .await
+        .expect_err("stale region must not fall back to the first cell");
+    assert!(
+        stale_error.to_string().contains("r_stale"),
+        "error identifies stale region: {stale_error}"
+    );
+
+    let mut missing_target = candidate.op.clone();
+    let Operation::Known(KnownOperation::Extrude(params)) = &mut missing_target else {
+        unreachable!();
+    };
+    params.boolean_mode = BooleanMode::Cut;
+    params.target_body = Some(BodyId(Uuid::from_u128(0xDEAD)));
+    let target_error = wm
+        .preview_op(
+            missing_target,
+            Uuid::from_u128(0xD03).to_string(),
+            Some(sid.to_string()),
+            Some(SnapshotId(preview.snapshot_id)),
+            Lod::Coarse,
+        )
+        .await
+        .expect_err("Cut with a missing target must fail");
+    assert!(
+        target_error.to_string().contains("target body"),
+        "error identifies missing Cut target: {target_error}"
+    );
+
+    let fence_error = wm
+        .preview_op(
+            candidate.op.clone(),
+            candidate.record_id.to_string(),
+            Some(sid.to_string()),
+            Some(SnapshotId(preview.snapshot_id + 1)),
+            Lod::Coarse,
+        )
+        .await
+        .expect_err("stale snapshot must be rejected");
+    assert!(
+        matches!(
+            &fence_error,
+            onecad_core::regen::EngineError::OpFailed {
+                code: onecad_core::regen::OpFailureCode::StalePreview,
+                ..
+            }
+        ),
+        "stale snapshot carries the structured STALE_PREVIEW code: {fence_error}"
+    );
+    assert!(
+        rt.projection().bodies.is_empty(),
+        "all previews leave the head untouched"
+    );
+
+    add_op(&mut rt, candidate);
+    published(&regen_all(&mut rt).await, "commit selected region");
+    let committed = body_mesh(&mut rt, body_of(0xD01)).await;
+    let committed_view = validate_mesh_blob(&committed).expect("committed MESH1");
+    let committed_volume = mesh_volume(&committed_view, &committed);
+    assert!(
+        (committed_volume - preview_volume).abs() < 1.0,
+        "preview {preview_volume} and commit {committed_volume} must match"
+    );
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EXTRUDE-REGION-PARITY P4 proof: NESTED cell binding + reopen stability.
+// The earlier non-first-region tests use two DISJOINT rects; this pins the
+// nested case (annulus + inner disk share every outer curve) end-to-end:
+// preview == commit for the inner disk by exact id, the annulus binds
+// independently, and a save → fresh-worker reopen replays byte-identically
+// with the SAME region ids answering a read-only query.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `two_rect_sketch`'s nested sibling: the 40×20 rect with an r=5 circle at its
+/// centre — one annulus cell + one disk cell.
+fn nested_sketch(sid: SketchId) -> Sketch {
+    let mut sketch = rect_sketch(sid, 0x7000, 0.0, 0.0, 40.0, 20.0);
+    let center = EntityId(Uuid::from_u128(0x9000));
+    sketch
+        .add_entity(SketchEntity::point(
+            center,
+            Vec2::new_unchecked(20.0, 10.0),
+            false,
+            false,
+        ))
+        .unwrap();
+    sketch
+        .add_entity(
+            SketchEntity::circle(EntityId(Uuid::from_u128(0x9001)), center, 5.0, false)
+                .expect("circle"),
+        )
+        .unwrap();
+    sketch
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nested_inner_disk_parity_and_reopen_stability() {
+    use onecad_lib::worker::PreviewEngine;
+
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin.clone()).await;
+    let mut rt = runtime_over(&wm);
+    let sid = SketchId(Uuid::from_u128(0xE00));
+    let sketch = nested_sketch(sid);
+    add_op(&mut rt, sketch_record(0xE00, &sketch));
+    rt.apply(EditCommand::AddSketch {
+        sketch: sketch.clone(),
+    })
+    .expect("AddSketch");
+    published(&regen_all(&mut rt).await, "nested sketch");
+
+    rt.enter_sketch(sid).await.expect("sync sketch");
+    let regions = rt.finish_sketch(sid).await.expect("derive regions").regions;
+    assert_eq!(regions.len(), 2, "annulus + inner disk: {regions:#?}");
+    let disk = regions
+        .iter()
+        .find(|region| region.holes.is_empty())
+        .expect("inner disk cell");
+    let annulus = regions
+        .iter()
+        .find(|region| !region.holes.is_empty())
+        .expect("annulus cell");
+    let disk_area = region_triangle_area(disk);
+    assert!(
+        (disk_area - std::f64::consts::PI * 25.0).abs() < 2.0,
+        "disk fill ≈ π·25 (tessellated): {disk_area}"
+    );
+
+    // Inner disk by exact id — preview then commit, volumes must agree.
+    let mut candidate = extrude_mode_record(
+        0xE01,
+        sid,
+        7.0,
+        ExtrudeMode::Blind,
+        BooleanMode::NewBody,
+        None,
+        false,
+        ExtrudeMode::Blind,
+        0.0,
+        0.0,
+    );
+    let Operation::Known(KnownOperation::Extrude(params)) = &mut candidate.op else {
+        unreachable!();
+    };
+    params.profile.as_mut().unwrap().region = RegionId::new(disk.region_id.clone());
+    candidate.inputs = candidate.op.derive_inputs();
+
+    let preview = wm
+        .preview_op(
+            candidate.op.clone(),
+            candidate.record_id.to_string(),
+            Some(sid.to_string()),
+            None,
+            Lod::Coarse,
+        )
+        .await
+        .expect("disk previews by exact id");
+    assert_eq!(preview.bodies.len(), 1);
+    let preview_view = validate_mesh_blob(&preview.bodies[0].mesh).expect("preview MESH1");
+    let preview_volume = mesh_volume(&preview_view, &preview.bodies[0].mesh);
+    let disk_want = std::f64::consts::PI * 25.0 * 7.0;
+    assert!(
+        (preview_volume - disk_want).abs() < disk_want * 0.03,
+        "disk preview volume ≈ π·25·7: {preview_volume} vs {disk_want}"
+    );
+
+    add_op(&mut rt, candidate);
+    published(&regen_all(&mut rt).await, "commit disk extrude");
+    let committed = body_mesh(&mut rt, body_of(0xE01)).await;
+    let committed_view = validate_mesh_blob(&committed).expect("committed MESH1");
+    let committed_volume = mesh_volume(&committed_view, &committed);
+    assert!(
+        (committed_volume - preview_volume).abs() < 1.0,
+        "disk preview {preview_volume} and commit {committed_volume} must agree"
+    );
+
+    // The annulus sibling binds independently by ITS id (holes are identity).
+    let mut annulus_rec = extrude_mode_record(
+        0xE02,
+        sid,
+        4.0,
+        ExtrudeMode::Blind,
+        BooleanMode::NewBody,
+        None,
+        false,
+        ExtrudeMode::Blind,
+        0.0,
+        0.0,
+    );
+    let Operation::Known(KnownOperation::Extrude(annulus_params)) = &mut annulus_rec.op else {
+        unreachable!();
+    };
+    annulus_params.profile.as_mut().unwrap().region = RegionId::new(annulus.region_id.clone());
+    annulus_rec.inputs = annulus_rec.op.derive_inputs();
+    add_op(&mut rt, annulus_rec);
+    published(&regen_all(&mut rt).await, "commit annulus extrude");
+    let annulus_mesh = body_mesh(&mut rt, body_of(0xE02)).await;
+    let annulus_view = validate_mesh_blob(&annulus_mesh).expect("annulus MESH1");
+    let annulus_volume = mesh_volume(&annulus_view, &annulus_mesh);
+    let annulus_want = (800.0 - std::f64::consts::PI * 25.0) * 4.0;
+    assert!(
+        (annulus_volume - annulus_want).abs() < annulus_want * 0.03,
+        "annulus volume ≈ (800−π·25)·4: {annulus_volume} vs {annulus_want}"
+    );
+
+    // Save → reopen in a FRESH worker process: replay is deterministic and the
+    // read-only region query answers with the SAME ids (no edit session opened).
+    let head1 = wm.get_worker_head().await.expect("worker 1 head");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("nested_parity.onecad");
+    rt.save(
+        &path,
+        SaveMeta {
+            app_version: "wire-contract".into(),
+            occt_fingerprint: None,
+            created: "2026-07-29T00:00:00Z".into(),
+            modified: "2026-07-29T00:00:00Z".into(),
+        },
+    )
+    .expect("save container");
+
+    let wm2 = spawn_worker(bin).await;
+    let mut rt2 = open_runtime_over(&wm2, &path);
+    published(&regen_all(&mut rt2).await, "reopen replay");
+    let head2 = wm2.get_worker_head().await.expect("worker 2 head");
+    assert_eq!(
+        head1.history_prefix_hash, head2.history_prefix_hash,
+        "identical hash chain across two fresh worker processes"
+    );
+
+    let reopened = rt2
+        .prepare_sketch_regions(sid)
+        .expect("read-only region query on a reopened document")
+        .drive()
+        .await
+        .expect("regions")
+        .regions;
+    let before: std::collections::BTreeSet<&str> =
+        regions.iter().map(|r| r.region_id.as_str()).collect();
+    let after: std::collections::BTreeSet<&str> =
+        reopened.iter().map(|r| r.region_id.as_str()).collect();
+    assert_eq!(
+        before, after,
+        "region ids are stable across save/reopen/fresh-worker"
+    );
+
+    wm.shutdown().await;
+    wm2.shutdown().await;
+}

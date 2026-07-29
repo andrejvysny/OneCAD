@@ -33,7 +33,7 @@ describe("SketchChromeBar", () => {
     expect(toolStore.getState().mode).toBe("model");
   });
 
-  it("shows the editing pill for a targeted sketch and Finish drains the queue, exits to model, and arms extrude", async () => {
+  it("shows the editing pill and Finish drains the queue before requesting profile selection", async () => {
     const user = userEvent.setup();
     render(<SketchChromeBar />);
     act(() => toolStore.getState().setMode("sketch", "sketch2"));

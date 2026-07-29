@@ -57,6 +57,14 @@ interface WireExtrudeParams {
   twoDirections: boolean;
   extrudeMode2: ExtrudeMode;
   distance2: WireScalar;
+  /**
+   * `ToFace` targets — TYPED semantic refs (SCHEMA §7.3, amended 2026-07-16), not
+   * bare ids: a bare `targetFaceId` carries no anchor/intent, so a ToFace target
+   * would be un-repairable across parametric edits (Invariants 2/3). Absent for
+   * every non-`ToFace` extrude.
+   */
+  targetFace?: WireElementRef;
+  targetFace2?: WireElementRef;
 }
 
 /** Rust `AxisRef` (serde internally-tagged on `kind`, camelCase fields). */
@@ -147,15 +155,17 @@ interface WireMirrorBodyParams {
 }
 
 /** A known op on the wire — adjacently tagged `{opType, params}` (SCHEMA §7.3). */
-type WireOperation =
+type WireOperation = (
   | { opType: "Extrude"; params: WireExtrudeParams }
   | { opType: "Revolve"; params: WireRevolveParams }
   | { opType: "Fillet"; params: WireFilletParams }
+  | { opType: "Chamfer"; params: WireFilletParams }
   | { opType: "Boolean"; params: WireBooleanParams }
   | { opType: "Shell"; params: WireShellParams }
   | { opType: "LinearPattern"; params: WireLinearPatternParams }
   | { opType: "CircularPattern"; params: WireCircularPatternParams }
-  | { opType: "MirrorBody"; params: WireMirrorBodyParams };
+  | { opType: "MirrorBody"; params: WireMirrorBodyParams }
+) & { opId?: string };
 
 /** A minimal real `OperationRecord` (every other field defaults on the Rust side). */
 interface WireOperationRecord {
@@ -204,7 +214,7 @@ export function bareBodyId(id: string): string {
 }
 
 /** Mint a client-side record id (real UUID; V1 has no server-side pre-mint step). */
-function mintRecordId(): string {
+export function mintRecordId(): string {
   const c = globalThis.crypto;
   if (c && typeof c.randomUUID === "function") return c.randomUUID();
   // Fallback (jsdom without randomUUID): RFC-4122 v4 from getRandomValues.
@@ -226,7 +236,36 @@ function extrudeParams(p: ExtrudeParams): WireExtrudeParams {
     distance2: scalar(p.distance2 ?? 0),
   };
   if (p.targetBodyId !== undefined) wire.targetBodyId = p.targetBodyId;
+  // ToFace targets only — a non-ToFace extrude must carry no target face at all
+  // (SCHEMA §7.3 "Absent for non-ToFace extrudes"), so a mode switch away from
+  // ToFace cannot leave a stale ref behind to be silently resolved.
+  if (p.extrudeMode === "ToFace" && p.targetFace) {
+    wire.targetFace = faceElementRef(p.targetFace);
+  }
+  if (p.twoDirections && p.extrudeMode2 === "ToFace" && p.targetFace2) {
+    wire.targetFace2 = faceElementRef(p.targetFace2);
+  }
   return wire;
+}
+
+/**
+ * A picked FACE as the typed `ElementRef` the wire carries. Mirrors
+ * [`edgeElementRef`] — same bare-uuid body normalization, since a promoted pick
+ * returns the worker `body_<uuid>` form that the core `EditCommand` serde rejects.
+ */
+export function faceElementRef(ref: SemanticRef): WireElementRef {
+  const out: WireElementRef = {
+    primary: {
+      bodyId: bareBodyId(ref.primary.bodyId),
+      elementId: ref.primary.elementId ?? "",
+      kind: "face",
+    },
+  };
+  if (ref.anchor?.worldPoint) {
+    out.anchor = { worldPoint: ref.anchor.worldPoint };
+    if (ref.anchor.surfaceUv) out.anchor.surfaceUv = ref.anchor.surfaceUv;
+  }
+  return out;
 }
 
 function axisRef(a: AxisRef): WireAxisRef {
@@ -326,7 +365,8 @@ function mirrorBodyParams(p: MirrorBodyParams): WireMirrorBodyParams {
 }
 
 /** Build the `{opType, params}` wire op for an OperationOp (no ids yet). */
-function wireOperation(op: OperationOp): WireOperation {
+export function wireOperation(op: OperationOp): WireOperation {
+  const identity = op.opId ? { opId: op.opId } : {};
   switch (op.opType) {
     case "Extrude": {
       const params = extrudeParams(op.params);
@@ -334,7 +374,7 @@ function wireOperation(op: OperationOp): WireOperation {
       if (op.sketchId && op.regionId) {
         params.profile = { sketchId: op.sketchId, regionId: op.regionId };
       }
-      return { opType: "Extrude", params };
+      return { ...identity, opType: "Extrude", params };
     }
     case "Revolve": {
       const params = revolveParams(op.params);
@@ -342,20 +382,25 @@ function wireOperation(op: OperationOp): WireOperation {
       if (op.sketchId && op.regionId) {
         params.profile = { sketchId: op.sketchId, regionId: op.regionId };
       }
-      return { opType: "Revolve", params };
+      return { ...identity, opType: "Revolve", params };
     }
     case "Fillet":
-      return { opType: "Fillet", params: filletParams(op.params, op.inputs) };
+      return { ...identity, opType: "Fillet", params: filletParams(op.params, op.inputs) };
+    // Chamfer shares FilletChamferParams in C++ / SCHEMA §7.3 and has always been
+    // implemented in the worker (`execute_chamfer`); `mode` on the frontend params
+    // is what distinguishes the two authoring paths.
+    case "Chamfer":
+      return { ...identity, opType: "Chamfer", params: filletParams(op.params, op.inputs) };
     case "Boolean":
-      return { opType: "Boolean", params: booleanParams(op.params) };
+      return { ...identity, opType: "Boolean", params: booleanParams(op.params) };
     case "Shell":
-      return { opType: "Shell", params: shellParams(op.params) };
+      return { ...identity, opType: "Shell", params: shellParams(op.params) };
     case "LinearPattern":
-      return { opType: "LinearPattern", params: linearPatternParams(op.params) };
+      return { ...identity, opType: "LinearPattern", params: linearPatternParams(op.params) };
     case "CircularPattern":
-      return { opType: "CircularPattern", params: circularPatternParams(op.params) };
+      return { ...identity, opType: "CircularPattern", params: circularPatternParams(op.params) };
     case "MirrorBody":
-      return { opType: "MirrorBody", params: mirrorBodyParams(op.params) };
+      return { ...identity, opType: "MirrorBody", params: mirrorBodyParams(op.params) };
   }
 }
 
@@ -366,12 +411,14 @@ function wireOperation(op: OperationOp): WireOperation {
  */
 export function operationToEditCommand(op: OperationOp): WireEditCommand {
   const operation = wireOperation(op);
+  const committedOperation = { ...operation };
+  delete committedOperation.opId;
   if (op.featureId !== undefined) {
-    return { cmd: "updateOperationParams", record: op.featureId, op: operation };
+    return { cmd: "updateOperationParams", record: op.featureId, op: committedOperation };
   }
   return {
     cmd: "addOperation",
-    record: { recordId: mintRecordId(), ...operation },
+    record: { recordId: op.opId ?? mintRecordId(), ...committedOperation },
     atCursor: false,
   };
 }

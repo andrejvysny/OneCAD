@@ -23,6 +23,7 @@ import type {
   NeedsRepairEvent,
   OperationOp,
   PromotedElement,
+  SketchPlane,
   PromotePick,
   RecentProject,
   RecoveryInfo,
@@ -39,7 +40,7 @@ import { wireParamsOf } from "./tauriCommandMap";
 import { concatMesh1, makeBoxMesh, makeCylinderMesh, makeExtrudeBodyMesh, makeRevolveBodyMesh } from "./mockMeshes";
 import type { LatheAxis } from "@/tools/preview/lathePreview";
 import { createLocalSolverLane } from "./localSolver";
-import { planeFor, solveDof } from "./mockSketch";
+import { detectRegions, planeFor, solveDof } from "./mockSketch";
 import { documentStore } from "@/stores/documentStore";
 
 const LATENCY_MS = 120;
@@ -296,7 +297,7 @@ function mutateOp(op: OperationOp): {
       const featureId = op.featureId ?? nextFeatureId();
       const label = `Extrude${booleanSuffix(booleanMode)}`;
       const valueText = `${Math.abs(distance).toFixed(1)} mm`;
-      mockFeatures = [...mockFeatures, { id: featureId, kind: "extrude", label, valueText, status: "ok" }];
+      mockFeatures = [...mockFeatures, { id: featureId, kind: "extrude", opType: "Extrude", label, valueText, status: "ok" }];
       return { changed: [target], removed: [], label, featureId };
     }
     const editing = op.featureId !== undefined && featureBodies.has(op.featureId);
@@ -308,7 +309,7 @@ function mutateOp(op: OperationOp): {
     if (editing) {
       mockFeatures = mockFeatures.map((f) => (f.id === featureId ? { ...f, valueText } : f));
     } else {
-      mockFeatures = [...mockFeatures, { id: featureId, kind: "extrude", label: "Extrude", valueText, status: "ok" }];
+      mockFeatures = [...mockFeatures, { id: featureId, kind: "extrude", opType: "Extrude", label: "Extrude", valueText, status: "ok" }];
     }
     return { changed: [bodyId], removed: [], label: "Extrude", featureId };
   }
@@ -332,7 +333,7 @@ function mutateOp(op: OperationOp): {
       const featureId = op.featureId ?? nextFeatureId();
       const label = `Revolve${booleanSuffix(booleanMode)}`;
       const valueText = `${Math.round(Math.abs(angle))}°`;
-      mockFeatures = [...mockFeatures, { id: featureId, kind: "revolve", label, valueText, status: "ok" }];
+      mockFeatures = [...mockFeatures, { id: featureId, kind: "revolve", opType: "Revolve", label, valueText, status: "ok" }];
       return { changed: [target], removed: [], label, featureId };
     }
     const editing = op.featureId !== undefined && featureBodies.has(op.featureId);
@@ -344,17 +345,25 @@ function mutateOp(op: OperationOp): {
     if (editing) {
       mockFeatures = mockFeatures.map((f) => (f.id === featureId ? { ...f, valueText } : f));
     } else {
-      mockFeatures = [...mockFeatures, { id: featureId, kind: "revolve", label: "Revolve", valueText, status: "ok" }];
+      mockFeatures = [...mockFeatures, { id: featureId, kind: "revolve", opType: "Revolve", label: "Revolve", valueText, status: "ok" }];
     }
     return { changed: [bodyId], removed: [], label: "Revolve", featureId };
   }
-  if (op.opType === "Fillet") {
-    // MOCK LIMIT: no real rounding — re-emit the target body + add a feature.
+  if (op.opType === "Fillet" || op.opType === "Chamfer") {
+    // MOCK LIMIT: no real rounding/bevelling — re-emit the target body + add a
+    // feature. Chamfer shares FilletChamferParams, so the two differ only in the
+    // label; a re-edit (featureId of an existing one) updates the value text.
+    const label = op.opType;
     const bodyId = op.inputs?.[0]?.primary.bodyId ?? "body1";
     const featureId = op.featureId ?? nextFeatureId();
     const valueText = `${op.params.radius.toFixed(1)} mm`;
-    mockFeatures = [...mockFeatures, { id: featureId, kind: "fillet", label: "Fillet", valueText, status: "ok" }];
-    return { changed: [bodyId], removed: [], label: "Fillet", featureId };
+    const editing = op.featureId !== undefined && mockFeatures.some((f) => f.id === featureId);
+    if (editing) {
+      mockFeatures = mockFeatures.map((f) => (f.id === featureId ? { ...f, valueText } : f));
+    } else {
+      mockFeatures = [...mockFeatures, { id: featureId, kind: "fillet", opType: op.opType, label, valueText, status: "ok" }];
+    }
+    return { changed: [bodyId], removed: [], label, featureId };
   }
   if (op.opType === "Shell") {
     // MOCK LIMIT: no real hollowing — re-emit the shelled body + a feature. A
@@ -366,7 +375,7 @@ function mutateOp(op: OperationOp): {
     if (editing) {
       mockFeatures = mockFeatures.map((f) => (f.id === featureId ? { ...f, valueText } : f));
     } else {
-      mockFeatures = [...mockFeatures, { id: featureId, kind: "shell", label: "Shell", valueText, status: "ok" }];
+      mockFeatures = [...mockFeatures, { id: featureId, kind: "shell", opType: "Shell", label: "Shell", valueText, status: "ok" }];
     }
     return { changed: [bodyId], removed: [], label: "Shell", featureId };
   }
@@ -381,7 +390,7 @@ function mutateOp(op: OperationOp): {
     } else {
       mockFeatures = [
         ...mockFeatures,
-        { id: featureId, kind: "linearPattern", label: "Linear Pattern", valueText, status: "ok" },
+        { id: featureId, kind: "linearPattern", opType: "LinearPattern", label: "Linear Pattern", valueText, status: "ok" },
       ];
     }
     return { changed: [bodyId], removed: [], label: "Linear Pattern", featureId };
@@ -396,7 +405,7 @@ function mutateOp(op: OperationOp): {
     } else {
       mockFeatures = [
         ...mockFeatures,
-        { id: featureId, kind: "circularPattern", label: "Circular Pattern", valueText, status: "ok" },
+        { id: featureId, kind: "circularPattern", opType: "CircularPattern", label: "Circular Pattern", valueText, status: "ok" },
       ];
     }
     return { changed: [bodyId], removed: [], label: "Circular Pattern", featureId };
@@ -409,7 +418,7 @@ function mutateOp(op: OperationOp): {
     if (editing) {
       mockFeatures = mockFeatures.map((f) => (f.id === featureId ? { ...f, valueText } : f));
     } else {
-      mockFeatures = [...mockFeatures, { id: featureId, kind: "mirror", label: "Mirror", valueText, status: "ok" }];
+      mockFeatures = [...mockFeatures, { id: featureId, kind: "mirror", opType: "MirrorBody", label: "Mirror", valueText, status: "ok" }];
     }
     return { changed: [bodyId], removed: [], label: "Mirror", featureId };
   }
@@ -419,7 +428,7 @@ function mutateOp(op: OperationOp): {
   const featureId = op.featureId ?? nextFeatureId();
   mockFeatures = [
     ...mockFeatures,
-    { id: featureId, kind: "boolean", label: operation, valueText: "", status: "ok" },
+    { id: featureId, kind: "boolean", opType: "Boolean", label: operation, valueText: "", status: "ok" },
   ];
   return { changed: [targetBodyId], removed: [toolBodyId], label: operation, featureId };
 }
@@ -756,6 +765,19 @@ export const mockClient: CadClient = {
     };
   },
 
+  /**
+   * MOCK LIMIT: no kernel to query, so the frame is synthesized from the mock
+   * body's world position rather than a real face descriptor — a +Z-facing plane
+   * at the picked point. It applies the SAME in-plane axis rule as the backend
+   * (`plane_from_point_normal`: a +Z normal falls back to the +X seed and lands
+   * on the named XY basis), so the mock lane and the real lane agree on
+   * orientation even though they disagree on which face was picked.
+   */
+  async faceSketchPlane(_bodyId: string, _elementId: string): Promise<SketchPlane> {
+    await wait(MESH_LATENCY_MS);
+    return { ...planeFor("XY"), kind: "custom" };
+  },
+
   // Deterministic mock promotion (Invariant 1: same pick → same id).
   async promoteSelection(bodyId: string, picks: PromotePick[]): Promise<PromotedElement[]> {
     await wait(MESH_LATENCY_MS);
@@ -846,6 +868,24 @@ export const mockClient: CadClient = {
       return { sketchId, plane: planeFor("XY"), entities, constraints: [], dof, status, conflicting: [] };
     }
     throw new Error(`getSketch: unknown sketch ${sketchId}`);
+  },
+  async getSketchRegions(sketchId: string) {
+    await wait(MESH_LATENCY_MS);
+    const session = lane.peekSession(sketchId);
+    if (session) {
+      const regions = detectRegions(session.entities);
+      lane.cacheSketchPlane(sketchId, session.plane);
+      lane.cacheFinishedRegions(sketchId, regions);
+      return { regions };
+    }
+    if (documentStore.getState().sketches[sketchId]) {
+      const plane = planeFor("XY");
+      const regions = detectRegions(seededSketchRectangle());
+      lane.cacheSketchPlane(sketchId, plane);
+      lane.cacheFinishedRegions(sketchId, regions);
+      return { regions };
+    }
+    throw new Error(`getSketchRegions: unknown sketch ${sketchId}`);
   },
   cancelSketch: lane.cancelSketch,
   // Compensation: drop the document row + the local lane session so a re-enter of

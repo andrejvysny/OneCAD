@@ -16,7 +16,14 @@ const TAURI = "__TAURI_INTERNALS__";
 function sketchesNamed(...names: string[]): Record<string, SketchMeta> {
   const out: Record<string, SketchMeta> = {};
   names.forEach((name, i) => {
-    out[`s${i}`] = { id: `s${i}`, name, visible: true, dof: 0, status: "ok" };
+    out[`s${i}`] = {
+      id: `s${i}`,
+      name,
+      visible: true,
+      dof: 0,
+      status: "ok",
+      geometryToken: `geometry-${i}`,
+    };
   });
   return out;
 }

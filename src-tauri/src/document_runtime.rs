@@ -42,6 +42,7 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use onecad_core::document::body::{BodyLifecycleEvent, BodyRegistry};
@@ -72,9 +73,10 @@ use onecad_core::sketch::Sketch;
 
 use crate::dto::{
     default_label, feature_kind, feature_status, feature_status_message, feature_value_text,
-    needs_repair_item_dto, BodyDto, BodyMeshRef, DocStatus, DocumentChange, DocumentProjection,
-    FailedStep, FeatureDto, FinishSketchDto, NeedsRepairItemDto, PromotedElementDto, SketchDto,
-    SketchSessionDto, SketchSolveStatus, SketchStatus, SketchUpsertDto,
+    needs_repair_item_dto, op_type_name, BodyDto, BodyMeshRef, DocStatus, DocumentChange,
+    DocumentProjection, FailedStep, FeatureDto, FinishSketchDto, NeedsRepairItemDto,
+    PromotedElementDto, SketchDto, SketchSessionDto, SketchSolveStatus, SketchStatus,
+    SketchUpsertDto,
 };
 use crate::mesh_cache::MeshCache;
 use crate::worker::{lod_str, AdoptingEngine, MeshProvider, SolverEngine};
@@ -246,6 +248,26 @@ struct SketchSession {
     /// session's steps (the stack bottom shifted out past the cap), so the squash is
     /// refused wholesale — the granular steps stay (safe, noisier stack).
     evicted_at_enter: u64,
+}
+
+/// Immutable input for a read-only sketch-region query. Prepared under the
+/// runtime lock, then driven without it so solver/worker IO cannot block edits.
+pub struct PreparedSketchRegions {
+    sketch: Sketch,
+    solver: Arc<dyn SolverEngine>,
+}
+
+impl PreparedSketchRegions {
+    /// Syncs the authoritative sketch into the rebuildable solver cache and
+    /// derives its closed regions. Document/session/undo state is untouched.
+    pub async fn drive(self) -> Result<FinishSketchDto, EngineError> {
+        self.solver.sketch_upsert(&self.sketch).await?;
+        let regions = self
+            .solver
+            .sketch_regions(&self.sketch.id.to_string())
+            .await?;
+        Ok(FinishSketchDto { regions })
+    }
 }
 
 /// The per-document runtime (V1 single writer).
@@ -1051,6 +1073,7 @@ impl DocumentRuntime {
                     visible: doc.sketch_visible(*id),
                     dof,
                     status,
+                    geometry_token: sketch_geometry_token(sk),
                 },
             );
         }
@@ -1081,7 +1104,7 @@ impl DocumentRuntime {
     fn feature_dto(&self, index: usize, rec: &OperationRecord) -> FeatureDto {
         let kind = feature_kind(&rec.op);
         let label = if rec.name.is_empty() {
-            default_label(kind).to_string()
+            default_label(&rec.op).to_string()
         } else {
             rec.name.clone()
         };
@@ -1094,6 +1117,7 @@ impl DocumentRuntime {
         FeatureDto {
             id: rec.record_id.to_string(),
             kind,
+            op_type: op_type_name(&rec.op),
             label,
             value_text: feature_value_text(&rec.op),
             status: feature_status(&state),
@@ -1187,6 +1211,21 @@ impl DocumentRuntime {
         })
     }
 
+    /// Captures an immutable, read-only region query for a persisted sketch.
+    ///
+    /// The returned query is driven after releasing the runtime lock. Unlike
+    /// [`finish_sketch`](Self::finish_sketch), it never squashes or closes an
+    /// edit session and never changes document/undo state.
+    pub fn prepare_sketch_regions(
+        &self,
+        sketch_id: SketchId,
+    ) -> Result<PreparedSketchRegions, EngineError> {
+        Ok(PreparedSketchRegions {
+            sketch: self.sketch_or_err(sketch_id, "getSketchRegions")?,
+            solver: self.solver.clone(),
+        })
+    }
+
     /// Applies a batch of sketch edits authoritatively (one undoable
     /// [`EditCommand::SketchEdit`]) then re-solves on the worker for live dof/status
     /// (SCHEMA §7.4). A non-drag upsert is an identity solve (no coordinate
@@ -1199,20 +1238,36 @@ impl DocumentRuntime {
         sketch_id: SketchId,
         ops: Vec<SketchEditOp>,
     ) -> Result<SketchUpsertDto, EngineError> {
+        self.sketch_upsert_with_outcome(sketch_id, ops)
+            .await
+            .map(|(solved, _)| solved)
+    }
+
+    /// [`sketch_upsert`](Self::sketch_upsert) plus the exact edit outcome the app
+    /// scheduler must consume. `None` means the upsert only refreshed the solve.
+    pub async fn sketch_upsert_with_outcome(
+        &mut self,
+        sketch_id: SketchId,
+        ops: Vec<SketchEditOp>,
+    ) -> Result<(SketchUpsertDto, Option<CommandOutcome>), EngineError> {
         if self.read_only {
             return Err(op_failed("sketchUpsert: read-only document"));
         }
-        if !ops.is_empty() {
-            self.apply(EditCommand::SketchEdit {
-                sketch: sketch_id,
-                ops,
-            })
-            .map_err(|e| op_failed(format!("sketchUpsert edit: {e}")))?;
-        }
+        let outcome = if ops.is_empty() {
+            None
+        } else {
+            Some(
+                self.apply(EditCommand::SketchEdit {
+                    sketch: sketch_id,
+                    ops,
+                })
+                .map_err(|e| op_failed(format!("sketchUpsert edit: {e}")))?,
+            )
+        };
         let sketch = self.sketch_or_err(sketch_id, "sketchUpsert")?;
         let solved = self.solver.sketch_upsert(&sketch).await?;
         self.record_solve(sketch_id, &solved);
-        Ok(solved)
+        Ok((solved, outcome))
     }
 
     /// Opens a drag gesture on `drag_point` (SCHEMA §7.4 `BeginGesture`). Snapshots
@@ -1291,6 +1346,17 @@ impl DocumentRuntime {
         &mut self,
         final_target: Option<[f64; 2]>,
     ) -> Result<SketchUpsertDto, EngineError> {
+        self.end_gesture_with_outcome(final_target)
+            .await
+            .map(|(solved, _)| solved)
+    }
+
+    /// [`end_gesture`](Self::end_gesture) plus the exact edit outcome the app
+    /// scheduler must consume.
+    pub async fn end_gesture_with_outcome(
+        &mut self,
+        final_target: Option<[f64; 2]>,
+    ) -> Result<(SketchUpsertDto, CommandOutcome), EngineError> {
         let gesture = self
             .active_gesture
             .take()
@@ -1305,14 +1371,15 @@ impl DocumentRuntime {
             .await?;
         let mut after = gesture.before.clone();
         after.apply_solved_positions(&typed_positions(&solved.solved_positions));
-        self.apply(EditCommand::SketchDragGesture {
-            sketch: gesture.sketch_id,
-            before: gesture.before,
-            after,
-        })
-        .map_err(|e| op_failed(format!("endGesture commit: {e}")))?;
+        let outcome = self
+            .apply(EditCommand::SketchDragGesture {
+                sketch: gesture.sketch_id,
+                before: gesture.before,
+                after,
+            })
+            .map_err(|e| op_failed(format!("endGesture commit: {e}")))?;
         self.record_solve(gesture.sketch_id, &solved);
-        Ok(solved)
+        Ok((solved, outcome))
     }
 
     /// Exits sketch mode / cancels an in-flight gesture without committing (SCHEMA
@@ -1654,6 +1721,23 @@ fn affected_bodies_of(timeline: &Timeline, bodies: &BodyRegistry) -> BTreeMap<St
         }
     }
     map
+}
+
+/// Stable geometry identity for one sketch projection. Deliberately excludes
+/// name, visibility, solver status, and the non-authoritative region cache:
+/// changing those must not force a profile refetch. Authoritative ordered
+/// geometry and constraints are serde-stable and finite by domain invariant.
+fn sketch_geometry_token(sketch: &Sketch) -> String {
+    let geometry = (
+        "onecad-sketch-geometry-v1",
+        &sketch.plane,
+        &sketch.attachment,
+        sketch.entities(),
+        sketch.constraints(),
+    );
+    let bytes = serde_json::to_vec(&geometry)
+        .expect("validated sketch geometry must serialize deterministically");
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 /// Renders a [`MeshKey`] as the `"<bodyId>:<lod>:<generation>"` string the

@@ -13,7 +13,7 @@ import { sketchStatusText } from "./constraintStatus";
  * prompt with Cancel; once entered, the editing pill (name + DOF + Finish).
  * Cancel discards straight to model mode (matching Esc). Finish routes through
  * the same `finishSketch` shortcut action as Enter: it drains the sketch
- * mutation queue first, then flips mode and auto-arms extrude. Compact layout
+ * mutation queue first, then returns to model selection and prompts for a profile. Compact layout
  * per 1c — no flex spacer (that is the docked-bar 1d variant).
  */
 export function SketchChromeBar() {
