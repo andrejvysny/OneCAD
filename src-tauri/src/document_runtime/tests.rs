@@ -1266,13 +1266,14 @@ async fn undo_below_watermark_drops_the_sketch_session() {
         "an undo below the watermark drops the stale session (no squash)"
     );
 
-    // A later finish squashes nothing — the undo depth is untouched by it.
+    // A later finish squashes nothing — only the sketch-record upsert (its own
+    // undoable command) moves the depth.
     let depth = rt.session.undo_depth();
     rt.finish_sketch(sid).await.unwrap();
     assert_eq!(
         rt.session.undo_depth(),
-        depth,
-        "finish over a dropped session squashes nothing"
+        depth + 1,
+        "finish over a dropped session squashes nothing (the +1 is the minted Sketch record)"
     );
 }
 
@@ -1351,8 +1352,9 @@ async fn below_cap_session_still_squashes() {
     rt.finish_sketch(sid).await.unwrap();
     assert_eq!(
         rt.session.undo_depth(),
-        2,
-        "the 3 contiguous sketch edits collapse into ONE net command (AddSketch + squash)"
+        3,
+        "the 3 contiguous sketch edits collapse into ONE net command \
+         (AddSketch + squash + the minted Sketch record)"
     );
 }
 

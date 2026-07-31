@@ -518,7 +518,9 @@ async fn multi_region_extrude_binds_by_region_id() {
     );
     eprintln!("multi-region: regionIds = {region_ids:?}");
 
-    add_op(&mut rt, sketch_record(&sketch));
+    // finish_sketch minted the sketch's timeline record (production shape) — a
+    // manual add here would create a DUPLICATE Sketch step for the same sketch,
+    // something the app can never produce.
 
     // Extrude each region BY ID → collect the footprint volume.
     let mut vols_by_region: Vec<f64> = Vec::new();
@@ -1061,7 +1063,8 @@ async fn stale_region_id_after_sketch_edit_fails_deterministically() {
     );
 
     // Extrude region A by its real id → binds cleanly, produces a body.
-    add_op(&mut rt, sketch_record(&sketch_a));
+    // (finish_sketch minted the sketch's timeline record — production shape;
+    // a manual sketch_record here would be an impossible duplicate step.)
     add_op(&mut rt, extrude_record(sid, &region_a, 25.0));
     let ok = regen_all(&mut rt).await;
     let _ = published(&ok, "region A extrude");
@@ -1074,9 +1077,19 @@ async fn stale_region_id_after_sketch_edit_fails_deterministically() {
     // DESTRUCTIVE edit: replace the sketch's edges (base 0x9000 ⇒ new entity UUIDs ⇒ a
     // NEW region id — region ids hash entity ids, not positions), so the extrude's
     // stored `region_a` is now STALE (delete-and-replace-the-line, corpus e spirit).
+    // The target is the MINTED record — fetch its id from the projection.
+    let minted_sketch_record = {
+        let feature = rt
+            .projection()
+            .features
+            .into_iter()
+            .find(|f| f.op_type == "Sketch")
+            .expect("finish minted the Sketch timeline record");
+        RecordId(Uuid::parse_str(&feature.id).expect("record id parses"))
+    };
     let sketch_b = rect_at(sid, 0x9000, 0.0, 0.0, 40.0, 20.0);
     rt.apply(EditCommand::UpdateOperationParams {
-        record: RecordId(Uuid::from_u128(SKETCH_REC)),
+        record: minted_sketch_record,
         op: sketch_record(&sketch_b).op,
     })
     .expect("edit sketch (replace edges)");

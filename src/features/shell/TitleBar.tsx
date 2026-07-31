@@ -1,19 +1,23 @@
-import { SegmentedToggle } from "@/ui/SegmentedToggle";
 import { useDocumentStore } from "@/stores/documentStore";
-import { useToolStore, type EditorMode } from "@/stores/toolStore";
 import { FileMenu } from "./FileMenu";
+import { closeProject } from "./fileActions";
+import { Icon } from "@/icons/Icon";
 
 /**
  * 44px overlay title bar (prototype 1c). Reserves the left inset for the native
  * macOS traffic lights (Tauri titleBarStyle Overlay draws them over the webview,
  * so the app does not paint its own) and is a drag region. Centered-left doc
- * title + dirty dot; right-aligned Model⇄Sketch toggle.
+ * title + dirty dot. There is deliberately NO mode toggle: the editor mode
+ * follows the picked tool + context (AUTO-MODE, see tools/activateTool.ts);
+ * the StatusBar shows the current mode as an indicator.
+ *
+ * Tauri V2 drag: `data-tauri-drag-region` attribute on every element in the bar.
+ * Interactive elements (FileMenu button) have their own click handlers so they
+ * remain clickable within the drag surface.
  */
 export function TitleBar() {
   const title = useDocumentStore((s) => s.title);
   const dirty = useDocumentStore((s) => s.dirty);
-  const mode = useToolStore((s) => s.mode);
-  const setMode = useToolStore((s) => s.setMode);
 
   return (
     <div
@@ -36,16 +40,14 @@ export function TitleBar() {
         )}
       </span>
       <span data-tauri-drag-region className="flex-1" />
-      <SegmentedToggle
-        ariaLabel="Editing mode"
-        size="md"
-        value={mode}
-        onChange={(m: EditorMode) => setMode(m)}
-        options={[
-          { value: "model", label: "Model" },
-          { value: "sketch", label: "Sketch" },
-        ]}
-      />
+      <button
+        type="button"
+        onClick={() => void closeProject()}
+        aria-label="Close project"
+        className="flex h-[26px] w-[26px] cursor-pointer items-center justify-center rounded-sm text-ink-4 hover:bg-hover hover:text-ink-2"
+      >
+        <Icon name="x" size={14} strokeWidth={2} />
+      </button>
     </div>
   );
 }

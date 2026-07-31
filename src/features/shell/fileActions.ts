@@ -113,3 +113,12 @@ export async function openDocumentDialog(): Promise<void> {
     errorHint(`Open failed: ${message(e)}`);
   }
 }
+
+/** ⌘W: close the open project and return to the start screen. */
+export async function closeProject(): Promise<void> {
+  try {
+    await appStore.getState().closeProject();
+  } catch (e) {
+    errorHint(`Close failed: ${message(e)}`);
+  }
+}

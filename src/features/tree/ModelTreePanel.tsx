@@ -8,7 +8,7 @@ import { useToolStore } from "@/stores/toolStore";
 import { TreeRow } from "./TreeRow";
 
 /**
- * Floating model tree (prototype 1c): BODIES + SKETCHES sections driven by the
+ * Docked model tree: BODIES + SKETCHES sections driven by the
  * document projection. Click selects; double-clicking a sketch enters sketch
  * mode; the eye toggles visibility in the document store.
  */
@@ -24,7 +24,7 @@ export function ModelTreePanel() {
     selected.some((r) => r.kind === kind && r.id === id);
 
   return (
-    <div className="absolute bottom-24 left-3 top-3 z-20 w-[220px] overflow-auto rounded-md border border-border bg-white pb-1.5 shadow-panel">
+    <div className="absolute bottom-[34px] left-0 top-0 z-20 w-[220px] overflow-auto border-r border-border bg-panel pb-1.5">
       <SectionLabel className="px-[14px] pb-1 pt-3">Bodies</SectionLabel>
       <div role="listbox" aria-label="Bodies">
         {Object.values(bodies).map((b) => (

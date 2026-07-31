@@ -110,6 +110,7 @@ function makeClientMock(
     endPreview: vi.fn(() => Promise.resolve(endResult())),
     applyOperation: vi.fn(() => Promise.resolve(okResult())),
     applyEditCommand: vi.fn(() => Promise.resolve(okResult())),
+    undo: vi.fn(() => Promise.resolve(okResult())),
     getOperationParams: vi.fn(() =>
       Promise.resolve({
         profile: { sketchId: "sk", regionId: "r0" },
@@ -204,9 +205,12 @@ describe("ModelToolController commit gesture (Wave 1)", () => {
     expect(clientMock.endPreview).not.toHaveBeenCalled();
     input.remove();
 
-    // Canvas Enter (target = window) confirms → endPreview(commit).
+    // Canvas Enter (target = window) confirms → endPreview(commit). The confirm
+    // first awaits the profile-record guarantee (finishSketch), so settle twice.
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
     await flush();
+    await flush();
+    expect(clientMock.finishSketch).toHaveBeenCalledWith("sk"); // record guarantee
     expect(clientMock.endPreview).toHaveBeenCalledTimes(1);
     expect(clientMock.endPreview).toHaveBeenCalledWith(expect.any(String), true);
   });
@@ -227,12 +231,32 @@ describe("ModelToolController commit gesture (Wave 1)", () => {
     const hint = viewportStore.getState().statusHint;
     expect(hint?.severity).toBe("error");
     expect(hint?.message).toContain("worker exploded"); // reason named
+    // The applied-but-failed command is rolled back so a retried ✓ cannot stack
+    // duplicate errored records (observed: 20 stacked failed Extrudes).
+    expect(clientMock.undo).toHaveBeenCalledTimes(1);
+  });
+
+  it("a retried confirm after a failure never stacks records (one rollback per attempt)", async () => {
+    build(failResult);
+    await armExtrude();
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await flush();
+    await flush();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await flush();
+    await flush();
+
+    expect(clientMock.endPreview).toHaveBeenCalledTimes(2);
+    expect(clientMock.undo).toHaveBeenCalledTimes(2); // every applied-but-failed commit rolled back
+    expect(toolStore.getState().phase).toBe("armed"); // still armed, work kept
   });
 
   it("a successful confirm tears down and selects the new body once it loads", async () => {
     build();
     await armExtrude();
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await flush();
     await flush();
     expect(clientMock.endPreview).toHaveBeenCalledWith(expect.any(String), true);
 
@@ -255,6 +279,7 @@ describe("ModelToolController commit gesture (Wave 1)", () => {
     await armExtrude();
     toolChipStore.getState().onBooleanMode?.("Cut");
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await flush();
     await flush();
 
     expect(clientMock.endPreview).toHaveBeenCalledWith(expect.any(String), true);
@@ -314,6 +339,7 @@ describe("ModelToolController commit gesture (Wave 1)", () => {
       replacedBodyIds: ["body1"],
     });
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await flush();
     await flush();
     expect(clientMock.endPreview).toHaveBeenCalledWith(sessionId, true);
   });

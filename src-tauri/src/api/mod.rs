@@ -352,20 +352,49 @@ pub async fn apply_edit_command(
     app: AppHandle,
     command: EditCommand,
 ) -> Result<DocumentProjection, ApiError> {
+    let summary = edit_command_summary(&command);
+    tracing::info!("apply_edit_command: {summary}");
     let (outcome, projection) = {
         let mut guard = state.runtime.lock().await;
         let rt = guard
             .as_mut()
             .ok_or_else(|| ApiError::NoDocument("apply".into()))?;
-        let outcome = rt.apply(command)?;
+        let outcome = rt.apply(command).inspect_err(|e| {
+            tracing::warn!("apply_edit_command: {summary} REJECTED: {e}");
+        })?;
         (outcome, rt.projection())
     };
+    tracing::info!(
+        "apply_edit_command: {summary} applied rev={} appliedOps={}/{}",
+        projection.revision,
+        projection.applied_ops,
+        projection.total_ops
+    );
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
     if let Some(sched) = state.scheduler.get() {
         sched.handle(&outcome);
     }
     state.note_mutation();
     Ok(projection)
+}
+
+/// One-line `EditCommand` digest for tracing: the serde `cmd` tag plus the ids
+/// that identify the target (never the full payload — sketch ops are huge).
+fn edit_command_summary(command: &EditCommand) -> String {
+    match command {
+        EditCommand::AddOperation { record, at_cursor } => format!(
+            "addOperation name={} record={} atCursor={at_cursor}",
+            record.name, record.record_id
+        ),
+        EditCommand::UpdateOperationParams { record, .. } => {
+            format!("updateOperationParams record={record}")
+        }
+        EditCommand::RemoveOperation { record } => format!("removeOperation record={record}"),
+        other => serde_json::to_value(other)
+            .ok()
+            .and_then(|v| v.get("cmd").and_then(|c| c.as_str()).map(String::from))
+            .unwrap_or_else(|| "unknown".into()),
+    }
 }
 
 /// Undoes the last committed edit (`CadClient.undo`).
@@ -594,6 +623,7 @@ pub async fn end_gesture(
 #[tauri::command]
 pub async fn cancel_sketch(state: State<'_, AppState>, sketch_id: String) -> Result<(), ApiError> {
     let id = parse_sketch_id(&sketch_id)?;
+    tracing::info!("cancel_sketch: sketch={id} (squash-only exit — NO timeline record minted)");
     let mut guard = state.runtime.lock().await;
     let rt = guard
         .as_mut()
@@ -607,14 +637,34 @@ pub async fn cancel_sketch(state: State<'_, AppState>, sketch_id: String) -> Res
 #[tauri::command]
 pub async fn finish_sketch(
     state: State<'_, AppState>,
+    app: AppHandle,
     sketch_id: String,
 ) -> Result<FinishSketchDto, ApiError> {
     let id = parse_sketch_id(&sketch_id)?;
-    let mut guard = state.runtime.lock().await;
-    let rt = guard
-        .as_mut()
-        .ok_or_else(|| ApiError::NoDocument("finishSketch".into()))?;
-    Ok(rt.finish_sketch(id).await?)
+    let (dto, outcome, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("finishSketch".into()))?;
+        let (dto, outcome) = rt.finish_sketch_with_outcome(id).await?;
+        (dto, outcome, rt.projection())
+    };
+    tracing::info!(
+        "finish_sketch: sketch={id} regions={} recordOutcome={}",
+        dto.regions.len(),
+        outcome.is_some()
+    );
+    // The finish may have appended/refreshed the sketch's timeline record: the
+    // new feature row must reach the frontend and the regen scheduler must see
+    // the outcome, or the record stays an unregenerated draft.
+    let _ = app.emit(events::PROJECTION_UPDATED, &projection);
+    if let Some(outcome) = outcome {
+        if let Some(sched) = state.scheduler.get() {
+            sched.handle(&outcome);
+        }
+        state.note_mutation();
+    }
+    Ok(dto)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -705,6 +755,7 @@ pub async fn preview_op(
         _ => onecad_core::regen::Lod::Coarse,
     };
     let (operation, op_id) = parse_preview_operation(op)?;
+    let op_id_log = op_id.clone();
     let result = state
         .preview()
         .preview_op(
@@ -720,8 +771,14 @@ pub async fn preview_op(
             code: onecad_core::regen::OpFailureCode::StalePreview,
             message,
             ..
-        }) => Err(ApiError::StalePreview(message)),
-        Err(error) => Err(error.into()),
+        }) => {
+            tracing::debug!("preview_op: op={op_id_log} STALE: {message}");
+            Err(ApiError::StalePreview(message))
+        }
+        Err(error) => {
+            tracing::warn!("preview_op: op={op_id_log} FAILED: {error}");
+            Err(error.into())
+        }
         Ok(preview) => Ok(preview),
     }
 }
@@ -973,6 +1030,23 @@ async fn pick_mesh_save(app: AppHandle, label: &str, extensions: &[&str]) -> Opt
 /// M4a). A superseded/failed/no-op regen leaves the live repair state unchanged, so
 /// no `needs-repair` is emitted for those.
 pub fn emit_regen_events(app: &AppHandle, report: &RegenReport, projection: &DocumentProjection) {
+    tracing::info!(
+        "regen: outcome={} rev={} srcRev={} snapshot={} changed={} removed={} failedSteps={}",
+        report.outcome_str(),
+        report.revision,
+        report.source_revision,
+        report.snapshot_id,
+        report.changed.len(),
+        report.removed.len(),
+        report.failed_steps.len()
+    );
+    for step in &report.failed_steps {
+        tracing::warn!(
+            "regen: FAILED step record={} reason={}",
+            step.record_id,
+            step.message
+        );
+    }
     if let Some(change) = report.document_change() {
         let _ = app.emit(events::DOCUMENT_CHANGED, change);
     }

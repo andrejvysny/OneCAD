@@ -79,6 +79,19 @@ describe("keymap resolveBinding", () => {
     expect(resolveBinding("Delete", false, "model")).toBeNull();
     expect(resolveBinding("Backspace", false, "model")).toBeNull();
   });
+
+  it("AUTO-MODE: a key bound only in the other mode resolves cross-mode (tool actions)", () => {
+    // L is sketch-only, E is model-only — both cross the boundary.
+    expect(resolveBinding("l", false, "model")).toEqual({ type: "tool", tool: "line" });
+    expect(resolveBinding("e", false, "sketch")).toEqual({ type: "tool", tool: "extrude" });
+    // Shared letters NEVER cross: the current mode's claim wins.
+    expect(resolveBinding("r", false, "sketch")).toEqual({ type: "tool", tool: "rect" });
+    expect(resolveBinding("r", false, "model")).toEqual({ type: "tool", tool: "revolve" });
+    expect(resolveBinding("m", false, "sketch")).toEqual({ type: "tool", tool: "mirror" });
+    expect(resolveBinding("m", false, "model")).toEqual({ type: "tool", tool: "mirror" });
+    // Non-tool sketch-only actions (Delete) still cannot cross into model mode.
+    expect(resolveBinding("Delete", false, "model")).toBeNull();
+  });
 });
 
 describe("useShortcuts", () => {

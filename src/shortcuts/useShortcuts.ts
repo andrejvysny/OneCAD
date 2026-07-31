@@ -17,7 +17,9 @@ import {
   undoSketch,
 } from "@/tools/sketch/sketchService";
 import { getModelToolController } from "@/tools/modelTools/modelToolBridge";
+import { activateTool } from "@/tools/activateTool";
 import {
+  closeProject,
   openDocumentDialog,
   saveDocument,
   saveDocumentAs,
@@ -91,7 +93,9 @@ export function runAction(action: ShortcutAction): void {
   const tool = toolStore.getState();
   switch (action.type) {
     case "tool":
-      tool.setTool(action.tool);
+      // AUTO-MODE: a tool key can cross the mode boundary (L in model mode
+      // enters a sketch; E in sketch mode finishes + arms Extrude).
+      void activateTool(action.tool);
       break;
     case "enterSketch":
       if (tool.mode === "model") tool.setMode("sketch");
@@ -151,6 +155,11 @@ export function useShortcuts(): void {
       if (mod && !e.shiftKey && (e.key === "o" || e.key === "O")) {
         e.preventDefault();
         void openDocumentDialog();
+        return;
+      }
+      if (mod && !e.shiftKey && (e.key === "w" || e.key === "W")) {
+        e.preventDefault();
+        void closeProject();
         return;
       }
       // Leave remaining OS / app chords (Cmd/Ctrl/Alt) to their owners; Shift ok.

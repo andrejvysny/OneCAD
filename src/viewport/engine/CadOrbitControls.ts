@@ -382,8 +382,8 @@ export class CadOrbitControls {
    * owns the pointer, and a wheel gesture cannot collide with a pointer drag.
    */
   private applyOrbit(dx: number, dy: number): void {
-    this.yaw += dx * ORBIT_SPEED;
-    this.pitch = clampPitch(this.pitch - dy * ORBIT_SPEED);
+    this.yaw -= dx * ORBIT_SPEED;
+    this.pitch = clampPitch(this.pitch + dy * ORBIT_SPEED);
     this.commit();
   }
 

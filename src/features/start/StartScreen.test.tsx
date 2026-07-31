@@ -73,8 +73,9 @@ describe("StartScreen", () => {
 
     await user.click(screen.getByRole("button", { name: /New project/ }));
 
-    // Editor shell (F-WP3) mounts — its Model⇄Sketch toggle is a stable marker.
-    expect(await screen.findByRole("tab", { name: "Model" })).toBeInTheDocument();
+    // Editor shell (F-WP3) mounts — its titlebar File menu is a stable marker
+    // (AUTO-MODE deleted the Model⇄Sketch toggle; the mode is tool-derived now).
+    expect(await screen.findByRole("button", { name: "File" })).toBeInTheDocument();
   });
 
   it("shows the recovery card and Restore enters the editor", async () => {

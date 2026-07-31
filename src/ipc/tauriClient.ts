@@ -37,6 +37,7 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { trace, traceWarn } from "@/debug/trace";
 import type { CadClient } from "./client";
 import type {
   ApplyOperationResult,
@@ -100,6 +101,7 @@ const CMD = {
   newDocument: "new_document",
   openDocument: "open_document",
   importStep: "import_step",
+  closeDocument: "close_document",
   checkRecovery: "check_recovery",
   recoverDocument: "recover_document",
   saveDocument: "save_document",
@@ -377,6 +379,11 @@ export function createTauriClient(): CadClient {
   }
 
   function onDocumentChangedEvent(change: DocumentChange): void {
+    trace(
+      "ipc",
+      `document-changed: rev=${change.revision} changed=[${change.changedBodies.map((b) => b.bodyId).join(", ")}] ` +
+        `removed=[${change.removedBodies.join(", ")}]`,
+    );
     // Adopt the published snapshot id so promoteSelection scopes picks correctly.
     if (change.snapshotId && change.snapshotId > 0) currentSnapshotId = change.snapshotId;
     lastPublishedChange = change;
@@ -385,6 +392,20 @@ export function createTauriClient(): CadClient {
   }
 
   function onRegenFinishedEvent(rf: RegenFinished): void {
+    const failed = rf.failedSteps ?? [];
+    if (failed.length > 0 || rf.outcome === "failed") {
+      traceWarn(
+        "ipc",
+        `regen-finished: outcome=${rf.outcome} rev=${rf.revision} srcRev=${rf.sourceRevision ?? "?"} ` +
+          `message=${rf.message ?? "none"} failedSteps=${failed.length}`,
+        failed,
+      );
+    } else {
+      trace(
+        "ipc",
+        `regen-finished: outcome=${rf.outcome} rev=${rf.revision} srcRev=${rf.sourceRevision ?? "?"}`,
+      );
+    }
     resolveRegenFinished(rf);
   }
 
@@ -475,12 +496,14 @@ export function createTauriClient(): CadClient {
     recordId?: string,
   ): Promise<ApplyOperationResult> {
     await ensureEvents();
+    trace("ipc", `applyEdit: cmd=${cmd} record=${recordId ?? "none"} label=${opLabel ?? "?"}`);
     const awaiter = awaitNextChange(recordId);
     let projection: DocumentProjectionDto;
     try {
       projection = await call<DocumentProjectionDto>(cmd, args);
     } catch (e) {
       awaiter.cancel();
+      traceWarn("ipc", `applyEdit: cmd=${cmd} record=${recordId ?? "none"} invoke THREW`, e);
       throw e;
     }
     // Finding 4: a fresh op appended while the timeline is rolled back joins the
@@ -495,6 +518,11 @@ export function createTauriClient(): CadClient {
       projection.appliedOps < projection.totalOps
     ) {
       awaiter.cancel();
+      traceWarn(
+        "ipc",
+        `applyEdit: cmd=${cmd} record=${recordId ?? "none"} added while ROLLED BACK ` +
+          `(appliedOps=${projection.appliedOps}/${projection.totalOps}) — no regen fires`,
+      );
       return {
         revision: projection.revision,
         changedBodies: [],
@@ -509,6 +537,18 @@ export function createTauriClient(): CadClient {
     // no event can interleave before the target is set.
     awaiter.setTarget(projection.revision);
     const resolved = await awaiter.promise;
+    if (resolved === null) {
+      traceWarn(
+        "ipc",
+        `applyEdit: cmd=${cmd} record=${recordId ?? "none"} correlation TIMED OUT (rev=${projection.revision})`,
+      );
+    } else {
+      trace(
+        "ipc",
+        `applyEdit: cmd=${cmd} record=${recordId ?? "none"} resolved rev=${resolved.revision} ` +
+          `changed=${resolved.change?.changedBodies.length ?? 0} error=${resolved.errorMessage ?? "none"}`,
+      );
+    }
     const result: ApplyOperationResult = {
       revision: resolved?.revision ?? projection.revision,
       changedBodies: resolved?.change?.changedBodies ?? [],
@@ -739,9 +779,11 @@ export function createTauriClient(): CadClient {
   }
 
   async function finishSketch(sketchId: string): Promise<FinishSketchResult> {
-    const map = sketchMaps.get(sketchId);
-    if (!map) throw new Error(`finishSketch: unknown sketch ${sketchId} (enter first)`);
-    const dto = await call<FinishSketchDto>(CMD.finishSketch, { sketchId: map.backendSketchId });
+    // No id-map entry ⇒ a sketch never ENTERED this session (reopened document /
+    // model-mode record guarantee). Its store key IS the backend UUID (projection
+    // hydration), so use it directly — same fallback as getSketchRegions.
+    const backendSketchId = sketchMaps.get(sketchId)?.backendSketchId ?? sketchId;
+    const dto = await call<FinishSketchDto>(CMD.finishSketch, { sketchId: backendSketchId });
     const regions = dto.regions.map((r): SketchRegion => ({
       regionId: r.regionId,
       outerLoop: r.outerLoop,
@@ -948,6 +990,10 @@ export function createTauriClient(): CadClient {
       const snap = await call<DocumentSnapshotDto>(CMD.importStep, { path });
       resetCorrelation();
       return snap;
+    },
+    async closeDocument(): Promise<void> {
+      await call<void>(CMD.closeDocument);
+      resetCorrelation();
     },
     async checkRecovery(): Promise<RecoveryInfo | null> {
       return call<RecoveryInfoDto | null>(CMD.checkRecovery);

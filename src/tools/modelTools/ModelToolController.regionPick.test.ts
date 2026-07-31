@@ -178,7 +178,7 @@ describe("ModelToolController region pick", () => {
     expect(controller.extrudeActive).toBe(true);
   });
 
-  it("(a-multi) multiple selected regions are rejected instead of guessed or batched", async () => {
+  it("(a-multi) multiple selected regions are rejected (extrude is single-profile)", async () => {
     build(() => Promise.resolve({ regions: [R0, R1] }));
     selectionStore.getState().set([
       { kind: "sketchRegion", id: "r0-ref", sketchId: "sk", regionId: "r0" },
@@ -192,15 +192,36 @@ describe("ModelToolController region pick", () => {
     expect(viewportStore.getState().statusHint?.message).toMatch(/exactly one/);
   });
 
-  it("(a-whole) whole-sketch selection never falls back to the first region", async () => {
+  it("(a-whole) whole-sketch selection opens the region PICK — never a guessed profile", async () => {
     build(() => Promise.resolve({ regions: [R0, R1] }));
     selectionStore.getState().set([{ kind: "sketch", id: "sk" }]);
     toolStore.getState().setTool("extrude");
     await flush();
+    await flush();
 
-    expect(clientMock.getSketchRegions).not.toHaveBeenCalled();
+    // Tool-first: the pick UI opens over BOTH regions; nothing armed, nothing guessed.
+    expect(clientMock.getSketchRegions).toHaveBeenCalledWith("sk");
+    expect(engineMock.showRegionPick).toHaveBeenCalled();
     expect(clientMock.beginPreview).not.toHaveBeenCalled();
-    expect(viewportStore.getState().statusHint?.message).toMatch(/exactly one/);
+    expect(controller.extrudeActive).toBe(false);
+  });
+
+  it("(a-whole-click) a click on a region during the extrude pick arms it immediately", async () => {
+    build(() => Promise.resolve({ regions: [R0, R1] }));
+    selectionStore.getState().set([{ kind: "sketch", id: "sk" }]);
+    toolStore.getState().setTool("extrude");
+    await flush();
+    await flush();
+    expect(engineMock.showRegionPick).toHaveBeenCalled();
+
+    click(120, 120); // inside R1's fixture square (identity screen→plane mapping)
+    await flush();
+    await flush();
+
+    expect(controller.extrudeActive).toBe(true);
+    expect(clientMock.beginPreview).toHaveBeenCalledTimes(1);
+    const draft = clientMock.beginPreview.mock.calls[0][0];
+    expect(draft.regionId).toBe("r1"); // the CLICKED region, not the first
   });
 
   it("(a2) revolve two regions → toggle region 2 + Enter → axis pick → 360° commit sends regions[1].regionId", async () => {

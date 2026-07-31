@@ -44,6 +44,7 @@ import { hitTestSketch } from "./sketchHitTest";
 import { clickSelection, dragIntent, shouldApplyDrag, type DragIntent } from "./selectGesture";
 import { mirrorEntities } from "./mirrorMath";
 import { trimPreview, entityToDraft } from "./trimMath";
+import { trace } from "@/debug/trace";
 import {
   dimensionInit,
   dimensionStep,
@@ -324,6 +325,9 @@ export class SketchController {
   /** Show the plane picker and prompt; a quad click resolves via confirmPlanePick. */
   private beginPlanePick(): void {
     this.planePicking = true;
+    // Default arrow while picking (a tool preserved across an auto-switch entry
+    // may have set a drawing cursor before the picker appeared).
+    this.deps.container.style.cursor = "default";
     this.deps.engine.setPlanePickerVisible(true);
     viewportStore.getState().setStatusHint("Select a plane to start the sketch — Esc to cancel", { sticky: true });
   }
@@ -384,7 +388,25 @@ export class SketchController {
     }
     sketchStore.getState().clearSketchUndo();
     const session = sketchStore.getState().session;
-    if (session) void this.deps.client.cancelSketch(session.sketchId);
+    if (session) {
+      // EXTRUDE-COMMIT-FIX: every keep-exit must mint/refresh the sketch's `Sketch`
+      // TIMELINE record — the regen planner resolves modeling-op profiles ONLY from
+      // it, and only `finishSketch` authors it (a cancel-only exit left every
+      // interactive sketch recordless, failing every later extrude commit with
+      // "profile sketch not found in plan"). Sequence: cancel FIRST (best-effort
+      // worker-gesture teardown + session squash — take-once, so the finish's
+      // squash is a no-op), then finish (solve + regions + record upsert).
+      const sketchId = session.sketchId;
+      trace("sketch", `exit: cancel+finish ${sketchId} (mint/refresh Sketch timeline record)`);
+      void (async () => {
+        try {
+          await this.deps.client.cancelSketch(sketchId);
+          await this.deps.client.finishSketch(sketchId);
+        } catch (e) {
+          console.error("[sketch] exit: finishSketch failed (record may be missing)", e);
+        }
+      })();
+    }
     sketchStore.getState().setSession(null);
   }
 

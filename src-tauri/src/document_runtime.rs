@@ -47,7 +47,10 @@ use uuid::Uuid;
 
 use onecad_core::document::body::{BodyLifecycleEvent, BodyRegistry};
 use onecad_core::document::element_index::ElementEntry;
-use onecad_core::document::record::{ExtrudeMode, KnownOperation, Operation, OperationRecord};
+use onecad_core::document::record::{
+    ExtrudeMode, KnownOperation, Operation, OperationRecord, PlaneKind, SketchOpParams,
+    SketchPlaneRef,
+};
 use onecad_core::document::refs::{AnchorIntent, ElementRef};
 use onecad_core::document::repair::RepairItem;
 use onecad_core::document::Document;
@@ -69,7 +72,7 @@ use onecad_core::regen::{
     Pick, PlanArtifacts, PlanContext, PlanRequest, PolicyVersions, RefResolution, RegenExecutor,
     RegenPlanner, RegenRequest, RegenSession, ResolveRequest, SnapshotPublisher, TessellateSpec,
 };
-use onecad_core::sketch::Sketch;
+use onecad_core::sketch::{Sketch, SketchAttachment, WorldPlane};
 
 use crate::dto::{
     default_label, feature_kind, feature_status, feature_status_message, feature_value_text,
@@ -372,7 +375,7 @@ impl DocumentRuntime {
     }
 
     fn from_document(
-        doc: Document,
+        mut doc: Document,
         title: String,
         path: Option<PathBuf>,
         read_only: bool,
@@ -380,6 +383,11 @@ impl DocumentRuntime {
         meshes: Arc<dyn MeshProvider>,
         solver: Arc<dyn SolverEngine>,
     ) -> Self {
+        // Legacy containers may carry sketches with no Sketch timeline record
+        // (pre-fix interactive saves); without one every extrude commit fails
+        // "profile sketch not found in plan". Backfill before anything reads
+        // the timeline (regen mirror seed included).
+        backfill_missing_sketch_records(&mut doc);
         // Seed the regen mirror from the (possibly persisted) geometry outputs so
         // the tree renders saved bodies immediately, before the first regen.
         let regen = RegenSession {
@@ -637,6 +645,7 @@ impl DocumentRuntime {
             &ctx,
         );
         if plan.is_empty() {
+            tracing::info!("begin_regen: EMPTY plan (noop)");
             self.last_regen_used_checkpoint = false;
             return None;
         }
@@ -663,6 +672,16 @@ impl DocumentRuntime {
         // D1: worker-minted `created` ids must match a known op in this plan and be
         // unique. Replay-from-0 base is empty, so collisions are in-plan.
         let known_ops: HashSet<Uuid> = plan_req.ops.iter().map(|o| o.record_id.as_uuid()).collect();
+        tracing::info!(
+            "begin_regen: job={job:?} rev={} steps=[{}]",
+            plan_rev.0,
+            plan_req
+                .ops
+                .iter()
+                .map(|o| format!("{}:{}", o.operation.op_type(), o.record_id))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         let prior: Vec<BodyId> = self
             .latest_snapshot
             .as_ref()
@@ -1400,6 +1419,7 @@ impl DocumentRuntime {
         // undoable command (same as finish) so the user reverts the whole session
         // with a single undo.
         self.squash_sketch_session(sketch_id);
+        tracing::info!("cancel_sketch: sketch={sketch_id} squashed (no timeline record)");
         Ok(())
     }
 
@@ -1415,13 +1435,80 @@ impl DocumentRuntime {
         &mut self,
         sketch_id: SketchId,
     ) -> Result<FinishSketchDto, EngineError> {
+        self.finish_sketch_with_outcome(sketch_id)
+            .await
+            .map(|(dto, _)| dto)
+    }
+
+    /// [`finish_sketch`](Self::finish_sketch) plus the timeline-record outcome the
+    /// api layer must forward to the regen scheduler (mirrors
+    /// [`sketch_upsert_with_outcome`](Self::sketch_upsert_with_outcome)).
+    pub async fn finish_sketch_with_outcome(
+        &mut self,
+        sketch_id: SketchId,
+    ) -> Result<(FinishSketchDto, Option<CommandOutcome>), EngineError> {
         let sketch = self.sketch_or_err(sketch_id, "finishSketch")?;
         let solved = self.solver.sketch_upsert(&sketch).await?;
         self.record_solve(sketch_id, &solved);
         let regions = self.solver.sketch_regions(&sketch_id.to_string()).await?;
         // B1 squash: collapse every in-session granular edit into ONE net command.
         self.squash_sketch_session(sketch_id);
-        Ok(FinishSketchDto { regions })
+        // The regen plan resolves a modeling op's profile ONLY from a preceding
+        // Sketch step, so the finished sketch must own an up-to-date timeline
+        // record — without it every extrude off this sketch fails with "profile
+        // sketch not found in plan" (the interactive flow authored none before).
+        let outcome = self
+            .upsert_sketch_record(sketch_id)
+            .map_err(|e| op_failed(format!("finishSketch: sketch record: {e}")))?;
+        Ok((FinishSketchDto { regions }, outcome))
+    }
+
+    /// Creates or refreshes the sketch's `Sketch` timeline record from the
+    /// current authoritative sketch. Unchanged content is a no-op so an
+    /// edit-free finish never dirties regen.
+    fn upsert_sketch_record(
+        &mut self,
+        sketch_id: SketchId,
+    ) -> Result<Option<CommandOutcome>, DomainError> {
+        let Some(sketch) = self.session.document().sketch(sketch_id).cloned() else {
+            return Ok(None);
+        };
+        let op = sketch_record_op(&sketch);
+        let existing = self
+            .session
+            .document()
+            .timeline
+            .records()
+            .iter()
+            .find_map(|r| match &r.op {
+                Operation::Known(KnownOperation::Sketch(p)) if p.sketch == sketch_id => {
+                    Some((r.record_id, r.op.clone()))
+                }
+                _ => None,
+            });
+        match existing {
+            None => {
+                let record = OperationRecord::new(RecordId(Uuid::new_v4()), 0, "Sketch", op);
+                tracing::info!(
+                    "sketch record: MINT sketch={sketch_id} record={}",
+                    record.record_id
+                );
+                self.apply(EditCommand::AddOperation {
+                    record,
+                    at_cursor: true,
+                })
+                .map(Some)
+            }
+            Some((record, old)) if old != op => {
+                tracing::info!("sketch record: REFRESH sketch={sketch_id} record={record}");
+                self.apply(EditCommand::UpdateOperationParams { record, op })
+                    .map(Some)
+            }
+            Some(_) => {
+                tracing::debug!("sketch record: unchanged sketch={sketch_id}");
+                Ok(None)
+            }
+        }
     }
 
     // ── Element identity (SCHEMA §7.5) ───────────────────────────────────────
@@ -1743,6 +1830,93 @@ fn sketch_geometry_token(sketch: &Sketch) -> String {
 /// Renders a [`MeshKey`] as the `"<bodyId>:<lod>:<generation>"` string the
 /// frontend `document-changed` payload carries (matches the mock's `mockMeshKey`).
 #[must_use]
+/// Builds the `Sketch` operation mirroring a sketch's current authoritative
+/// content — shared by the finish-time upsert and the open-time backfill so a
+/// record minted on either path is identical for the same sketch.
+fn sketch_record_op(sketch: &Sketch) -> Operation {
+    let (_, entities, constraints) = crate::worker::wire::sketch_wire(sketch);
+    Operation::Known(KnownOperation::Sketch(SketchOpParams {
+        sketch: sketch.id,
+        plane: plane_ref_of(sketch),
+        entities: entities.as_array().cloned().unwrap_or_default(),
+        constraints: constraints.as_array().cloned().unwrap_or_default(),
+        extra: Default::default(),
+    }))
+}
+
+/// Legacy-container backfill. Documents saved before `finish_sketch` minted the
+/// sketch's timeline record carry sketches with NO matching `Sketch` record, so
+/// the regen planner cannot resolve any modeling op's profile ("profile sketch
+/// not found in plan") and EVERY extrude off such a sketch fails at commit
+/// (observed: a user document with 20 Extrude records and zero Sketch records).
+/// Insert the missing records at the FRONT of the timeline — sketches have no
+/// dependencies — preserving the persisted rollback cursor (every pre-existing
+/// record shifts by `k`). In-memory only; the next save persists them. Record
+/// ids are fresh (never referenced by any other op), and the insertion is
+/// fixed-point: a re-saved container already carries the records, so reopening
+/// backfills nothing.
+fn backfill_missing_sketch_records(doc: &mut Document) {
+    let missing: Vec<SketchId> = doc
+        .sketches
+        .keys()
+        .filter(|sid| {
+            !doc.timeline.records().iter().any(|r| {
+                matches!(&r.op, Operation::Known(KnownOperation::Sketch(p)) if &p.sketch == *sid)
+            })
+        })
+        .copied()
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        "backfill: minting {} missing Sketch timeline record(s) at open (legacy container)",
+        missing.len()
+    );
+    let shift = missing.len();
+    let old_cursor = doc.timeline.cursor();
+    let mut records: Vec<OperationRecord> = missing
+        .into_iter()
+        .map(|sid| {
+            OperationRecord::new(
+                RecordId(Uuid::new_v4()),
+                0,
+                "Sketch",
+                sketch_record_op(&doc.sketches[&sid]),
+            )
+        })
+        .collect();
+    records.extend_from_slice(doc.timeline.records());
+    // `from_records` marks every step Dirty — already the just-loaded state —
+    // and places the cursor at the end; restore the persisted applied prefix
+    // (shifted past the inserted records).
+    let mut timeline = Timeline::from_records(records);
+    timeline.set_cursor(old_cursor + shift);
+    doc.timeline = timeline;
+}
+
+/// The timeline-record plane ref for a sketch's frozen frame. World attachments
+/// keep their named kind; host-face / datum frames serialize the resolved
+/// custom basis (the frame is frozen with the sketch — MODEL-OPS W2 policy).
+fn plane_ref_of(sketch: &Sketch) -> SketchPlaneRef {
+    let kind = match &sketch.attachment {
+        SketchAttachment::World { plane } => match plane {
+            WorldPlane::XY => PlaneKind::Xy,
+            WorldPlane::XZ => PlaneKind::Xz,
+            WorldPlane::YZ => PlaneKind::Yz,
+        },
+        _ => PlaneKind::Custom,
+    };
+    SketchPlaneRef {
+        kind,
+        origin: sketch.plane.origin,
+        x_axis: sketch.plane.x_axis,
+        y_axis: sketch.plane.y_axis,
+        normal: sketch.plane.normal,
+        extra: Default::default(),
+    }
+}
+
 pub fn mesh_key_string(key: MeshKey) -> String {
     format!("{}:{}:{}", key.body, lod_str(key.lod), key.generation)
 }

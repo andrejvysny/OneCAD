@@ -53,6 +53,12 @@ export interface CadClient {
   /** Import a STEP file at `path` into a new document. */
   importStep(path: string): Promise<DocumentSnapshot>;
   /**
+   * Close the open document, dropping the runtime + caches and returning to the
+   * start screen. The backend emits an empty projection so the editor clears.
+   * Safe to call when no document is open (no-op).
+   */
+  closeDocument(): Promise<void>;
+  /**
    * Show a native file-open dialog and resolve to the chosen path (or null if
    * cancelled). Rust owns the real dialog (tauri-plugin-dialog Rust API — the
    * webview gets zero fs/dialog capability); the mock returns a fake path.

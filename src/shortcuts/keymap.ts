@@ -12,6 +12,10 @@
  * is resolved by `mode`, not by a chord. `F` collides between the Fillet tool
  * (model toolbar) and zoom-to-fit (nav pill): the toolbar tool wins plain `F`
  * and zoom-to-fit moves to Shift+F. See the WP report's collision note.
+ *
+ * AUTO-MODE: a key bound only in the OTHER mode resolves cross-mode (tool
+ * actions only) so shortcuts drive the automatic mode switch — see
+ * `resolveBinding` and `tools/activateTool.ts`.
  */
 import type { EditorMode, Tool } from "@/stores/toolStore";
 
@@ -79,6 +83,14 @@ export function modeKeys(mode: EditorMode): KeyBinding[] {
 /**
  * Resolve a raw key + shift + mode to an action. Mode bindings win over global
  * ones so tool letters take precedence. Returns null when nothing matches.
+ *
+ * AUTO-MODE cross-mode fallback: a key bound ONLY in the other mode's table
+ * resolves to its *tool* action — the dispatcher (`activateTool`) performs the
+ * mode switch (L in model mode starts a sketch with Line; E in sketch mode
+ * finishes and arms Extrude). Shared letters never leak: the current mode's
+ * table already claimed them (R = rect in sketch, revolve in model). Fallback
+ * is restricted to `tool` actions, so sketch-only Delete/Backspace semantics
+ * can never fire in model mode.
  */
 export function resolveBinding(
   key: string,
@@ -86,9 +98,9 @@ export function resolveBinding(
   mode: EditorMode,
 ): ShortcutAction | null {
   const norm = key.length === 1 ? key.toLowerCase() : key;
-  const candidates = [...modeKeys(mode), ...GLOBAL_KEYS];
-  const hit = candidates.find(
-    (b) => b.key === norm && Boolean(b.shift) === shift,
-  );
-  return hit ? hit.action : null;
+  const same = (b: KeyBinding) => b.key === norm && Boolean(b.shift) === shift;
+  const hit = [...modeKeys(mode), ...GLOBAL_KEYS].find(same);
+  if (hit) return hit.action;
+  const cross = modeKeys(mode === "sketch" ? "model" : "sketch").find(same);
+  return cross && cross.action.type === "tool" ? cross.action : null;
 }

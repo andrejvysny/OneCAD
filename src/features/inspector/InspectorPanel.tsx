@@ -143,7 +143,7 @@ export function InspectorPanel() {
   const showRepair = !sketching && repairItemCount > 0 && (repairPanelOpen || selFeatureNeedsRepair);
 
   return (
-    <div className="absolute right-3 top-3 z-20 box-border w-[260px] rounded-md border border-border bg-white p-4 shadow-panel">
+    <div className="absolute bottom-[34px] right-0 top-0 z-20 box-border w-[260px] overflow-auto border-l border-border bg-panel p-4">
       {sketching ? (
         <SketchState
           sketchName={sketches[activeSketchId ?? ""]?.name ?? "Sketch"}

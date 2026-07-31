@@ -38,7 +38,7 @@ export function NavPill() {
   const homeView = useViewportStore((s) => s.homeView);
 
   return (
-    <div className="absolute bottom-[46px] left-3 z-[25] flex gap-0.5 rounded-md border border-border bg-white p-[3px] shadow-ctrl">
+    <div className="absolute bottom-[46px] left-[228px] z-[25] flex gap-0.5 rounded-md border border-border bg-white p-[3px] shadow-ctrl">
       <NavButton icon="home" label="Home view (H)" onClick={homeView} />
       <NavButton icon="fit" label="Zoom to fit (⇧F)" onClick={zoomFit} />
       <NavButton

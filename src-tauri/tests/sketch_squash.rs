@@ -190,8 +190,9 @@ async fn finish_squashes_session_into_one_command() {
     rt.finish_sketch(sid).await.expect("finish_sketch");
     assert_eq!(
         rt.undo_depth(),
-        base_depth + 1,
-        "finish collapses the 3 granular steps into exactly ONE net command"
+        base_depth + 2,
+        "finish collapses the 3 granular steps into exactly ONE net command \
+         (+1 = the minted Sketch timeline record)"
     );
 
     // The net command sits over the final sketch (3 entities, 1 constraint).
@@ -199,7 +200,9 @@ async fn finish_squashes_session_into_one_command() {
     assert_eq!(entity_count(&done.entities), 3, "P0,P1,L0 present");
     assert_eq!(entity_count(&done.constraints), 1, "Horizontal present");
 
-    // ONE undo reverts the WHOLE session — sketch back to the pre-session state.
+    // The newest entry is the minted Sketch record; beneath it ONE undo reverts
+    // the WHOLE session — sketch back to the pre-session state.
+    assert!(rt.undo(), "undo the minted sketch record");
     assert!(rt.undo(), "undo the net sketch command");
     assert_eq!(rt.undo_depth(), base_depth, "back to just the AddSketch");
     let reverted = rt.get_sketch(sid).expect("get_sketch after undo");
@@ -295,10 +298,19 @@ async fn empty_session_adds_no_command() {
     rt.finish_sketch(sid).await.expect("finish_sketch");
     assert_eq!(
         rt.undo_depth(),
-        base_depth,
-        "a session with no edits pushes nothing onto the undo stack"
+        base_depth + 1,
+        "a session with no edits squashes nothing; the single push is the sketch's \
+         FIRST-finish timeline record (a re-finish with no changes adds nothing)"
     );
-    eprintln!("EMPTY-SESSION PASS: enter → finish with no edits adds nothing");
+    let depth_after_first = rt.undo_depth();
+    rt.enter_sketch(sid).await.expect("re-enter");
+    rt.finish_sketch(sid).await.expect("re-finish");
+    assert_eq!(
+        rt.undo_depth(),
+        depth_after_first,
+        "an unchanged re-finish pushes nothing (record upsert is a no-op)"
+    );
+    eprintln!("EMPTY-SESSION PASS: only the first finish mints the record; re-finish adds nothing");
 
     wm.shutdown().await;
 }
@@ -346,15 +358,17 @@ async fn stray_finish_after_model_op_preserves_op_undo_entry() {
         "the extrude is a timeline op"
     );
 
-    // The stray finish MUST NOT squash away the extrude.
+    // The stray finish MUST NOT squash away the extrude. (+1 = the sketch's
+    // first-finish timeline record; the extrude's entry survives beneath it.)
     rt.finish_sketch(sid).await.expect("stray finish_sketch");
     assert_eq!(
         rt.undo_depth(),
-        base_depth + 1,
+        base_depth + 2,
         "the stray finish did NOT pop the extrude's undo entry (B1 guard held)"
     );
 
-    // ONE undo removes the EXTRUDE (not the sketch).
+    // Undo order: newest first — the minted Sketch record, THEN the extrude.
+    assert!(rt.undo(), "undo pops the sketch record");
     assert!(rt.undo(), "undo pops the extrude");
     assert_eq!(rt.undo_depth(), base_depth, "back to just the AddSketch");
     assert_eq!(
@@ -418,15 +432,17 @@ async fn interleaved_session_keeps_edits_granular_and_op_survives() {
     );
 
     // Stray finish: the interleaved extrude breaks the trailing run → NO squash.
+    // (+1 = the sketch's first-finish timeline record on top.)
     rt.finish_sketch(sid).await.expect("stray finish_sketch");
     assert_eq!(
         rt.undo_depth(),
-        base_depth + 3,
+        base_depth + 4,
         "no squash across the interleaved op — the sketch edits stay granular"
     );
 
     // Undo reverts ONLY the head sketch edit (P1), never the whole session; the
     // interleaved extrude survives (this is the correctness the clamp would break).
+    assert!(rt.undo(), "undo the minted sketch record");
     assert!(rt.undo(), "undo the head sketch edit");
     let s = rt.get_sketch(sid).expect("get_sketch after undo");
     assert_eq!(

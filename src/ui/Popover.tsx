@@ -85,7 +85,7 @@ export function Popover({
       role="dialog"
       style={{ position: "fixed", left: pos.left, top: pos.top, width }}
       className={cn(
-        "rounded-md border border-border bg-white font-ui shadow-popover",
+        "z-[100] rounded-md border border-border bg-white font-ui shadow-popover",
         className,
       )}
     >

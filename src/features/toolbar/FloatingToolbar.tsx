@@ -1,25 +1,24 @@
 import { cn } from "@/ui/cn";
 import { useToolStore, activeTool, type Tool } from "@/stores/toolStore";
+import { activateTool } from "@/tools/activateTool";
 import { ToolButton } from "./ToolButton";
 import { toolsForMode, isSeparator } from "./toolbarConfig";
 
 /**
  * Centered floating tool pill (prototype 1c). Swaps its tool set with the mode
- * and tints its background in sketch mode (toolbar-sketch token). The Model
- * "New sketch" tool enters sketch mode (same as the S shortcut); every other
- * tool just arms itself.
+ * and tints its background in sketch mode (toolbar-sketch token). Every pick
+ * routes through `activateTool` — AUTO-MODE: picking a tool can itself cross
+ * the mode boundary (a sketch tool from model mode starts a sketch; a model
+ * tool from sketch mode finishes it), there is no manual mode toggle.
  */
 export function FloatingToolbar() {
   const mode = useToolStore((s) => s.mode);
   const current = useToolStore(activeTool);
-  const setTool = useToolStore((s) => s.setTool);
-  const setMode = useToolStore((s) => s.setMode);
 
   const entries = toolsForMode(mode);
 
   const pick = (id: Tool) => {
-    if (mode === "model" && id === "sketch") setMode("sketch");
-    else setTool(id);
+    void activateTool(id);
   };
 
   return (

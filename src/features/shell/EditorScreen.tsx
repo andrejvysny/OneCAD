@@ -19,10 +19,11 @@ import { SketchConstraintToolbar } from "@/features/sketch/SketchConstraintToolb
 import { ViewportRoot } from "@/viewport/ViewportRoot";
 
 /**
- * Editor shell (design variant 1c) — the full floating chrome over the live
- * Three.js viewport (ViewportRoot). ViewportRoot renders the real canvas and
- * falls back to a hatched placeholder while the engine loads. The status-bar
- * strip occupies the bottom 34px, so the viewport sits above it.
+ * Editor shell — docked sidebars (left model tree, right inspector) with
+ * floating chrome (centered toolbar, status bar, nav pill, corner cluster)
+ * over the live Three.js viewport (ViewportRoot). ViewportRoot renders the
+ * real canvas and falls back to a hatched placeholder while the engine loads.
+ * The status-bar strip occupies the bottom 34px, so the viewport sits above it.
  */
 export function EditorScreen() {
   useShortcuts();

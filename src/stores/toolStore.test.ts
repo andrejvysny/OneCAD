@@ -35,3 +35,32 @@ describe("toolStore.setMode (sketch entry)", () => {
     expect(viewportStore.getState().activeSketchId).toBeNull();
   });
 });
+
+describe("toolStore.setMode opts.tool (AUTO-MODE preserve)", () => {
+  beforeEach(() => resetStores());
+
+  it("sketch entry keeps the caller-chosen tool instead of the line default", () => {
+    toolStore.getState().setMode("sketch", undefined, { tool: "circle" });
+
+    const s = toolStore.getState();
+    expect(s.mode).toBe("sketch");
+    expect(s.sketchTool).toBe("circle");
+    expect(s.phase).toBe("armed");
+  });
+
+  it("model entry keeps the caller-chosen tool instead of the select default", () => {
+    toolStore.getState().setMode("sketch", "sketch2");
+    toolStore.getState().setMode("model", undefined, { tool: "extrude" });
+
+    const s = toolStore.getState();
+    expect(s.mode).toBe("model");
+    expect(s.modelTool).toBe("extrude");
+    expect(s.phase).toBe("armed");
+    expect(viewportStore.getState().activeSketchId).toBeNull();
+  });
+
+  it("select as an explicit tool keeps the idle phase", () => {
+    toolStore.getState().setMode("sketch", undefined, { tool: "select" });
+    expect(toolStore.getState().phase).toBe("idle");
+  });
+});

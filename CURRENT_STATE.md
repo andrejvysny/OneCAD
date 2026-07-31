@@ -1,3 +1,48 @@
+# OneCAD-Tauri — Current State (2026-07-30, EXTRUDE-COMMIT-FIX shipped)
+
+## EXTRUDE-COMMIT-FIX (2026-07-30) — select+drag worked, apply silently failed
+User-reported: region select + drag preview OK, committing the extrusion did
+NOTHING. Root cause (two halves): (1) the interactive flow never authored a
+sketch's `Sketch` TIMELINE record — only tests did — so the regen planner could
+not resolve any modeling op's profile and every extrude commit failed "profile
+sketch not found in plan" (autosave forensics: 20 Extrude records, 0 Sketch
+records; each failed ✓ stacked a duplicate errored record). (2) documents saved
+BEFORE the half-1 fix carry no records either, so reopening stayed broken.
+Shipped (all in the working tree's AUTO-MODE batch + this session):
+`finish_sketch` mints/refreshes the record (+ outcome → scheduler, feature row),
+failed commits roll back their errored record (no more retry stacking), and NEW
+this session — `from_document` BACKFILLS missing Sketch records at the timeline
+front on open/recover (cursor shifted, in-memory until next save, fixed-point
+proven). Real-worker repro: legacy container (sketch, zero records) → open →
+pure region read → exact-region `at_cursor:false` commit → publishes 1 body;
+red-first proven (kill-switch run fails). Suites: cargo workspace green vs real
+worker (scheduler_commit 6/6 incl. both repros, m2_gate, wire_contract,
+topology_rebind, sketch_squash) · clippy/fmt clean · tsc/build clean · FE
+1232/1232 (stale StartScreen marker updated for the deleted mode toggle) ·
+e2e 38/38. REMAINING: user manual Tauri gate — reopen the broken document,
+✓-commit an extrude, then delete the legacy stacked errored rows.
+
+# OneCAD-Tauri — Current State (2026-07-29, AUTO-MODE shipped)
+
+## AUTO-MODE (2026-07-29) — tool+context-driven mode switching; titlebar toggle DELETED
+Mode is now derived intent: `toolStore.mode` remains the single state (all
+consumers untouched), but only tools/context set it — never the user. New
+`src/tools/activateTool.ts` dispatcher (toolbar + shortcuts both route through
+it): a sketch-only tool from model mode enters sketch mode WITH that tool
+preserved (`setMode` gained `opts.tool`); a model-only tool from sketch mode
+finishes through the SAME drained-squash path as Enter (one undo step) and arms
+the tool — Extrude rides the existing pendingExtrude region-pick handoff
+byte-identical. keymap `resolveBinding` gained a cross-mode fallback (tool
+actions only — L in model mode starts a sketch with Line; shared letters
+R/C/M/H stay context-local; Delete can't cross). Viewport double-click on a
+static sketch (model mode + select tool) re-enters its edit session, mirroring
+the tree. Design approved via 4 user decisions; an auto-arm-on-single-region
+prototype was CUT after e2e exposed it breaking the pinned multi-region
+rejection flow (picking is select-tool-gated; an early arm locks selection and
+turns region clicks into click-away commits). Suites: tsc 0 · FE 1230/109 ·
+build clean · e2e 38/38 (+3 auto-mode) · hex 1 pre-existing (inputProbe).
+REMAINING: user manual Tauri gate (TODO.md AUTO-MODE checklist).
+
 # OneCAD-Tauri — Current State (2026-07-29, EXTRUDE-REGION-PARITY shipped)
 
 ## EXTRUDE-REGION-PARITY (2026-07-29) — exact selected profile, preview == commit

@@ -39,8 +39,10 @@ use onecad_core::document::record::{
 };
 use onecad_core::document::refs::SketchRegionRef;
 use onecad_core::document::variables::Scalar;
+use onecad_core::document::Document;
 use onecad_core::edit::{CommandOutcome, EditCommand, RegenHint};
-use onecad_core::ids::{ConstraintId, EntityId, RecordId, RegionId, SketchId};
+use onecad_core::ids::{ConstraintId, DocumentId, EntityId, RecordId, RegionId, SketchId};
+use onecad_core::io::container::{ContainerCaches, ContainerWriter, SaveMeta};
 use onecad_core::math::{Vec2, Vec3};
 use onecad_core::regen::{
     CancelToken, GeometryEngine, RegenRequest, RegenScheduler, SchedulerHandle,
@@ -252,7 +254,12 @@ type Emit = (String, Option<DocumentChange>, DocumentProjection);
 /// production driver ([`regen_driver_with_emitter`]) with a channel emitter, and a
 /// spawned [`RegenScheduler`].
 async fn wire(wm: &WorkerManager) -> (Runtime, SchedulerHandle, UnboundedReceiver<Emit>) {
-    let runtime: Runtime = Arc::new(Mutex::new(Some(runtime_over(wm))));
+    wire_with(Arc::new(Mutex::new(Some(runtime_over(wm))))).await
+}
+
+/// [`wire`] over an already-constructed runtime (e.g. one OPENED from a
+/// container instead of blank).
+async fn wire_with(runtime: Runtime) -> (Runtime, SchedulerHandle, UnboundedReceiver<Emit>) {
     let (tx, rx) = unbounded_channel::<Emit>();
     let emit: RegenEmitter = Arc::new(
         move |report: &RegenReport, projection: &DocumentProjection| {
@@ -592,4 +599,253 @@ async fn empty_plan_request_still_emits_one_noop_completion() {
     sched.shutdown();
     wm.shutdown().await;
     eprintln!("EMPTY-PLAN NOOP PASS: one noop completion emitted (anti-hang terminal fires)");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (5) THE USER-REPORTED GAP: the INTERACTIVE flow (AddSketch → enter → upsert →
+// finish) must mint the sketch's timeline record. No production path authored
+// one before (only tests did), so every extrude off an interactively drawn
+// sketch failed "profile sketch not found in plan" — autosave forensics of the
+// user's document showed 20 Extrude records and ZERO Sketch records.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_sketch_flow_mints_the_timeline_record_and_extrude_commits() {
+    use onecad_core::edit::SketchEditOp;
+
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let (runtime, sched, mut rx) = wire(&wm).await;
+    let sid = SketchId(Uuid::from_u128(0xF00));
+
+    // 1. Interactive create + draw + finish — the app path, NO manual sketch_record.
+    let (regions, finish_outcome) = {
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut().expect("open");
+        rt.apply(EditCommand::AddSketch {
+            sketch: Sketch::on_world_plane(sid, "Sketch 1", WorldPlane::XY),
+        })
+        .expect("AddSketch");
+        rt.enter_sketch(sid).await.expect("enter");
+        let drawn = rect_sketch(sid, 0x1000, 0.0, 0.0, 40.0, 20.0);
+        let ops: Vec<SketchEditOp> = drawn
+            .entities()
+            .iter()
+            .cloned()
+            .map(|entity| SketchEditOp::AddEntity { entity })
+            .chain(
+                drawn
+                    .constraints()
+                    .iter()
+                    .cloned()
+                    .map(|constraint| SketchEditOp::AddConstraint { constraint }),
+            )
+            .collect();
+        rt.sketch_upsert(sid, ops).await.expect("upsert");
+        let (dto, outcome) = rt.finish_sketch_with_outcome(sid).await.expect("finish");
+        let features = rt.projection().features;
+        assert_eq!(
+            features.iter().filter(|f| f.op_type == "Sketch").count(),
+            1,
+            "finish minted exactly ONE Sketch timeline record: {features:#?}"
+        );
+        (
+            dto.regions,
+            outcome.expect("first finish appends the record ⇒ Some(outcome)"),
+        )
+    };
+    assert!(!regions.is_empty(), "rect derives a region");
+    sched.handle(&finish_outcome);
+    let (outcome_str, _, _) = recv(&mut rx).await;
+    assert_eq!(outcome_str, "published", "sketch-only regen publishes");
+
+    // 2. Extrude binding the EXACT region id from finish — the frontend commit shape.
+    let extrude_outcome = {
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut().expect("open");
+        let mut record = extrude_record(0xF01, sid, 25.0);
+        let Operation::Known(KnownOperation::Extrude(p)) = &mut record.op else {
+            unreachable!();
+        };
+        p.profile.as_mut().unwrap().region = RegionId::new(regions[0].region_id.clone());
+        rt.apply(EditCommand::AddOperation {
+            record,
+            at_cursor: false,
+        })
+        .expect("extrude commit")
+    };
+    sched.handle(&extrude_outcome);
+    let (outcome_str, change, _) = recv(&mut rx).await;
+    assert_eq!(outcome_str, "published");
+    assert_eq!(
+        change.expect("published change").changed_bodies.len(),
+        1,
+        "extrude off an interactively drawn sketch produces its body"
+    );
+
+    // 3. Re-finish WITHOUT edits: record unchanged ⇒ no outcome, no dirty regen.
+    {
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut().expect("open");
+        rt.enter_sketch(sid).await.expect("re-enter");
+        let (_, outcome) = rt
+            .finish_sketch_with_outcome(sid)
+            .await
+            .expect("no-op finish");
+        assert!(
+            outcome.is_none(),
+            "an edit-free finish must not dirty regen"
+        );
+    }
+
+    // 4. Re-finish WITH an edit: the record REFRESHES in place (never duplicates).
+    let refresh_outcome = {
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut().expect("open");
+        rt.enter_sketch(sid).await.expect("re-enter 2");
+        let extra = SketchEntity::point(
+            EntityId(Uuid::from_u128(0x9F9F)),
+            Vec2::new_unchecked(70.0, 70.0),
+            false,
+            false,
+        );
+        rt.sketch_upsert(sid, vec![SketchEditOp::AddEntity { entity: extra }])
+            .await
+            .expect("edit");
+        let (_, outcome) = rt
+            .finish_sketch_with_outcome(sid)
+            .await
+            .expect("refresh finish");
+        let features = rt.projection().features;
+        assert_eq!(
+            features.iter().filter(|f| f.op_type == "Sketch").count(),
+            1,
+            "refresh must UPDATE the record, never duplicate it"
+        );
+        outcome.expect("changed content refreshes the record")
+    };
+    sched.handle(&refresh_outcome);
+    let (outcome_str, _, _) = recv(&mut rx).await;
+    assert_eq!(
+        outcome_str, "published",
+        "refreshed sketch replays and the downstream extrude re-runs"
+    );
+
+    sched.shutdown();
+    wm.shutdown().await;
+    eprintln!("INTERACTIVE-FLOW PASS: finish mints/refreshes the Sketch record; extrude commits");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (6) LEGACY-CONTAINER BACKFILL: documents saved BEFORE finish_sketch minted the
+// sketch's timeline record carry sketches with ZERO Sketch records — the exact
+// user forensics (20 Extrude records, 0 Sketch records) — and every extrude
+// commit off them failed "profile sketch not found in plan". Opening must
+// backfill the missing records so a reopened document extrudes.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// [`ContainerWriter::save`] metadata (mirrors container.rs's test `meta()`).
+fn save_meta() -> SaveMeta {
+    SaveMeta {
+        app_version: "0.1.0-test".into(),
+        occt_fingerprint: Some("occt-7.9.3".into()),
+        created: "2026-07-30T00:00:00Z".into(),
+        modified: "2026-07-30T00:00:00Z".into(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_container_without_sketch_records_extrudes_after_open() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let sid = SketchId(Uuid::from_u128(0xC00));
+
+    // 1. Author the pre-fix container shape: a sketch in the sketches map and an
+    //    EMPTY timeline (the interactive flow never authored a Sketch record).
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("legacy.onecad");
+    let mut doc = Document::new(DocumentId::new());
+    doc.sketches
+        .insert(sid, rect_sketch(sid, 0xC000, 0.0, 0.0, 40.0, 20.0));
+    ContainerWriter::save(&path, &doc, &ContainerCaches::none(), &save_meta()).unwrap();
+
+    // 2. Open through the production path — the backfill runs inside.
+    let engine: Arc<dyn GeometryEngine> = Arc::new(wm.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
+    let rt = DocumentRuntime::open(&path, engine, meshes, solver).expect("open legacy");
+    let features = rt.projection().features;
+    assert_eq!(
+        features.iter().filter(|f| f.op_type == "Sketch").count(),
+        1,
+        "open backfilled exactly ONE Sketch timeline record: {features:#?}"
+    );
+
+    // 3. The frontend arm + commit shape: a PURE region read (no session), then
+    //    an `at_cursor: false` AddOperation binding the EXACT region id. Before
+    //    the backfill the regen step failed "profile sketch not found in plan".
+    let regions = rt
+        .prepare_sketch_regions(sid)
+        .expect("prepare regions")
+        .drive()
+        .await
+        .expect("regions")
+        .regions;
+    assert!(!regions.is_empty(), "rect derives a region");
+
+    let runtime: Runtime = Arc::new(Mutex::new(Some(rt)));
+    let (runtime, sched, mut rx) = wire_with(runtime).await;
+    let outcome = {
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut().expect("open");
+        let mut record = extrude_record(0xC01, sid, 25.0);
+        let Operation::Known(KnownOperation::Extrude(p)) = &mut record.op else {
+            unreachable!();
+        };
+        p.profile.as_mut().unwrap().region = RegionId::new(regions[0].region_id.clone());
+        rt.apply(EditCommand::AddOperation {
+            record,
+            at_cursor: false, // the frontend commit shape
+        })
+        .expect("extrude commit on reopened legacy doc")
+    };
+    sched.handle(&outcome);
+    let (outcome_str, change, _) = recv(&mut rx).await;
+    assert_eq!(outcome_str, "published");
+    assert_eq!(
+        change.expect("published change").changed_bodies.len(),
+        1,
+        "extrude off a backfilled legacy sketch produces its body"
+    );
+
+    // 4. Fixed-point: save the opened document and reopen — the persisted record
+    //    means the backfill inserts NOTHING (record count stays exactly one).
+    let path2 = tmp.path().join("resaved.onecad");
+    {
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut().expect("open");
+        rt.save(&path2, save_meta()).expect("resave");
+    }
+    let engine: Arc<dyn GeometryEngine> = Arc::new(wm.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
+    let rt2 = DocumentRuntime::open(&path2, engine, meshes, solver).expect("reopen resaved");
+    let features2 = rt2.projection().features;
+    assert_eq!(
+        features2.iter().filter(|f| f.op_type == "Sketch").count(),
+        1,
+        "a resaved container already carries the record — backfill is a no-op: {features2:#?}"
+    );
+
+    sched.shutdown();
+    wm.shutdown().await;
+    eprintln!(
+        "LEGACY-BACKFILL PASS: open backfills the Sketch record; extrude commits; fixed-point"
+    );
 }

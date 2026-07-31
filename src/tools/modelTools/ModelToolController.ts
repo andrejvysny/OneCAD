@@ -37,6 +37,7 @@ import { planePointToWorld } from "@/viewport/engine/sketchBasis";
 import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
 import { buildBodyObjects, getEntry, remove as removeMesh, swap as swapMesh } from "@/viewport/mesh/meshRegistry";
 import { toolStore } from "@/stores/toolStore";
+import { trace, traceWarn } from "@/debug/trace";
 import { viewportStore } from "@/stores/viewportStore";
 import { documentStore, type FeatureMeta, type SketchMeta } from "@/stores/documentStore";
 import { selectionStore, type EntityRef } from "@/stores/selectionStore";
@@ -155,6 +156,8 @@ interface AxisCandidate {
  * region (select-only + confirm accelerator). `select` is the pure reducer state.
  */
 interface RegionPickState {
+  /** Which tool consumes the confirmed regions. */
+  kind: "extrude" | "revolve";
   sketchId: string;
   plane: SketchPlane;
   /** Pickable regions (those with an extrudable profile), rendered + hit-tested. */
@@ -411,17 +414,66 @@ export class ModelToolController {
     const regions = selectionStore
       .getState()
       .selected.filter((ref) => ref.kind === "sketchRegion");
-    if (regions.length !== 1) {
+    if (regions.length === 1) {
+      void this.armExtrude(regions[0].sketchId, regions[0].regionId);
+      return;
+    }
+    if (regions.length > 1) {
+      // Extrude is single-profile by design (EXTRUDE-REGION-PARITY): the boundary
+      // rejects >1, so refuse here with the actionable message.
       viewportStore
         .getState()
-        .setStatusHint("Select exactly one closed sketch region to extrude", {
-          severity: regions.length > 1 ? "error" : "info",
+        .setStatusHint("Extrude takes exactly one region — deselect down to one", {
+          severity: "error",
           sticky: true,
         });
       return;
     }
-    void this.armExtrude(regions[0].sketchId, regions[0].regionId);
+    // Nothing selected: tool-first UX. A selected sketch (or the document's sole
+    // visible sketch) opens the region PICK — never a guessed profile, and never a
+    // dead-end where the pressed tool ignores every click.
+    const sketchId = this.pickTargetSketchId();
+    if (sketchId) {
+      void this.armExtrudePick(sketchId);
+      return;
+    }
+    viewportStore
+      .getState()
+      .setStatusHint("Select a sketch region (or a sketch) to extrude", {
+        severity: "info",
+        sticky: true,
+      });
   }
+
+  /** The sketch a region pick targets when no region is selected yet: an explicitly
+   *  selected sketch wins; else the document's SOLE visible sketch; else null. */
+  private pickTargetSketchId(): string | null {
+    const selected = selectionStore.getState().selected.find((r) => r.kind === "sketch");
+    if (selected) return selected.id;
+    const visible = Object.values(documentStore.getState().sketches).filter((s) => s.visible);
+    return visible.length === 1 ? visible[0].id : null;
+  }
+
+  /** Tool-first entry: fetch the sketch's regions and open the extrude region pick. */
+  private async armExtrudePick(sketchId: string): Promise<void> {
+    const gen = ++this.armGen;
+    let finish: { regions: SketchRegion[] };
+    try {
+      finish = await this.deps.client.getSketchRegions(sketchId);
+    } catch (error) {
+      if (gen !== this.armGen) return;
+      viewportStore
+        .getState()
+        .setStatusHint(`Cannot read sketch regions: ${errMessage(error)}`, {
+          severity: "error",
+          sticky: true,
+        });
+      return;
+    }
+    if (gen !== this.armGen) return;
+    await this.enterRegionPick("extrude", sketchId, finish.regions, undefined, DEFAULT_EXTRUDE_DEPTH, gen);
+  }
+
 
   private async armExtrude(
     sketchId: string,
@@ -806,6 +858,7 @@ export class ModelToolController {
   }
 
   private async enterRegionPick(
+    kind: "extrude" | "revolve",
     sketchId: string,
     regions: SketchRegion[],
     editFeatureId: string | undefined,
@@ -815,7 +868,7 @@ export class ModelToolController {
     // Pure read (no session opened) — see armExtrude (MODEL-HARDEN W0.5).
     const session = await this.deps.client.getSketch(sketchId); // plane (+ entities for revolve)
     if (gen !== this.armGen) return; // superseded while getSketch was in flight
-    const noun = "revolve";
+    const noun = kind;
     // Only regions with an extrudable profile are pickable (others can't be built).
     const pickable = regions.filter((r) => profileFromRegion(r) !== null);
     if (pickable.length === 0) {
@@ -825,13 +878,14 @@ export class ModelToolController {
     }
     if (pickable.length === 1) {
       // Only one region is actually extrudable — arm it directly (no pointless pick).
-      this.armPickedRevolveRegions(sketchId, [pickable[0]], session, editFeatureId, startValue);
+      this.armPickedRegions(kind, sketchId, [pickable[0]], session, editFeatureId, startValue);
       return;
     }
     // Wave 2: >1 region → MULTI-select. Toggle membership; Enter / chip ✓ / a
     // double-click on one region confirms; Esc cancels.
     const chipWorld = regionsCentroidWorld(session.plane, pickable);
     this.regionPick = {
+      kind,
       sketchId,
       plane: session.plane,
       regions: pickable,
@@ -844,20 +898,29 @@ export class ModelToolController {
     this.lastRegionClickId = null;
     this.engine.showRegionPick(session.plane, pickable);
     this.engine.setRegionSelected([]);
-    this.engine.setOrbitSuppressed(true); // modal: click toggles a region, not orbit
-    viewportStore.getState().setStatusHint(
-      `Select regions to ${noun} — click to toggle · Enter to confirm`,
-      { sticky: true },
-    );
-    toolChipStore.getState().showRegionSelect(0, chipWorld, {
-      onConfirm: () => this.confirmRegionSelect(),
-      onCancel: () => toolStore.getState().setTool("select"),
-    });
+    this.engine.setOrbitSuppressed(true); // modal: click picks a region, not orbit
+    if (kind === "extrude") {
+      // Extrude is single-profile: the first region click arms it directly — no
+      // toggle set, no confirm chip (tryPickRegion short-circuits on kind).
+      viewportStore
+        .getState()
+        .setStatusHint("Click the region to extrude · Esc cancels", { sticky: true });
+    } else {
+      viewportStore.getState().setStatusHint(
+        `Select regions to ${noun} — click to toggle · Enter to confirm`,
+        { sticky: true },
+      );
+      toolChipStore.getState().showRegionSelect(0, chipWorld, {
+        onConfirm: () => this.confirmRegionSelect(),
+        onCancel: () => toolStore.getState().setTool("select"),
+      });
+    }
     this.updateDebug();
   }
 
-  /** Arm Revolve on the chosen region(s), threading exact ids into each payload. */
-  private armPickedRevolveRegions(
+  /** Arm the picking tool on the chosen region(s), threading exact ids into each payload. */
+  private armPickedRegions(
+    kind: "extrude" | "revolve",
     sketchId: string,
     regions: SketchRegion[],
     session: SketchSession,
@@ -868,8 +931,20 @@ export class ModelToolController {
     const valid = regions.filter((_, i) => profiles[i] !== null);
     const validProfiles = profiles.filter((p): p is PrismProfile => p !== null);
     if (valid.length === 0) {
-      viewportStore.getState().setStatusHint("No closed region to revolve", { severity: "error", sticky: true });
+      viewportStore.getState().setStatusHint(`No closed region to ${kind}`, { severity: "error", sticky: true });
       toolStore.getState().setTool("select");
+      return;
+    }
+    if (kind === "extrude") {
+      // Single-profile boundary — the pick hands over exactly one region.
+      void this.beginExtrudeArmed(
+        sketchId,
+        [valid[0]],
+        [validProfiles[0]],
+        session.plane,
+        editFeatureId,
+        startValue,
+      );
       return;
     }
     void this.beginRevolveArmed(sketchId, valid, validProfiles, session, editFeatureId, startValue);
@@ -892,6 +967,12 @@ export class ModelToolController {
     if (!p) return;
     const id = regionAtPoint(ctx.regions, p.x, p.y);
     if (!id) return;
+    // Extrude is single-profile: the first region click resolves the pick.
+    if (ctx.kind === "extrude") {
+      this.lastRegionClickId = null;
+      this.resolveRegionPick([id]);
+      return;
+    }
     // Double-click accelerator: a second click on the SAME region within the window
     // = select only it + confirm immediately.
     const now = performance.now();
@@ -928,7 +1009,7 @@ export class ModelToolController {
     this.deps.engine.hideRegionPick();
     this.deps.engine.setOrbitSuppressed(false);
     toolChipStore.getState().clear();
-    this.armPickedRevolveRegions(ctx.sketchId, regions, ctx.session, ctx.editFeatureId, ctx.startValue);
+    this.armPickedRegions(ctx.kind, ctx.sketchId, regions, ctx.session, ctx.editFeatureId, ctx.startValue);
   }
 
   /** Tear down an in-flight region pick (Esc / tool switch); restores orbit. */
@@ -944,8 +1025,10 @@ export class ModelToolController {
   // ── revolve ────────────────────────────────────────────────────────────────
 
   private armRevolveFromSelection(): void {
-    const sketch = selectionStore.getState().selected.find((r) => r.kind === "sketch");
-    if (sketch) void this.armRevolve(sketch.id);
+    // Same tool-first ladder as extrude: explicit sketch selection wins, else the
+    // document's sole visible sketch, else a hint.
+    const sketchId = this.pickTargetSketchId();
+    if (sketchId) void this.armRevolve(sketchId);
     else viewportStore.getState().setStatusHint("Select a sketch to revolve", { sticky: true });
   }
 
@@ -962,7 +1045,7 @@ export class ModelToolController {
     const finish = await this.deps.client.finishSketch(sketchId);
     if (gen !== this.armGen) return; // superseded while finishSketch was in flight
     if (finish.regions.length > 1 && !editFeatureId) {
-      await this.enterRegionPick(sketchId, finish.regions, editFeatureId, startAngle, gen);
+      await this.enterRegionPick("revolve", sketchId, finish.regions, editFeatureId, startAngle, gen);
       return;
     }
     const region = finish.regions[0];
@@ -1247,6 +1330,8 @@ export class ModelToolController {
         else {
           this.commitRevolveBodyUnsub?.();
           this.commitRevolveBodyUnsub = null;
+          await this.rollbackFailedCommit();
+          if (gen !== this.commitGen) return;
           this.onRevolveCommitFailed(0, 1, res.errorMessage ?? "Revolve failed");
         }
       } catch (e) {
@@ -1282,6 +1367,8 @@ export class ModelToolController {
       if (res.changedBodies.length === 0) {
         this.commitRevolveBodyUnsub?.();
         this.commitRevolveBodyUnsub = null;
+        await this.rollbackFailedCommit();
+        if (gen !== this.commitGen) return;
         this.onRevolveCommitFailed(k, total, res.errorMessage ?? "Revolve failed");
         return;
       }
@@ -2149,6 +2236,7 @@ export class ModelToolController {
   }
 
   private onPreviewFailure(error: PreviewFailure): void {
+    traceWarn("extrude", `preview failure (kind=${error.kind}): ${error.message}`);
     this.previewFailure = error;
     if (error.kind === "stalePreview" && !this.stalePreviewRetryAttempted) {
       this.stalePreviewRetryAttempted = true;
@@ -2221,8 +2309,15 @@ export class ModelToolController {
    * cannot reconstruct the feature's predecessor. Every await is generation-gated.
    */
   private async confirmExtrude(): Promise<void> {
-    if (this.extrudeSessions.length === 0 || this.extrude.phase !== "armed") return;
+    if (this.extrudeSessions.length === 0 || this.extrude.phase !== "armed") {
+      trace(
+        "extrude",
+        `confirm IGNORED: sessions=${this.extrudeSessions.length} phase=${this.extrude.phase}`,
+      );
+      return;
+    }
     if (this.previewFailure) {
+      traceWarn("extrude", `confirm BLOCKED by preview failure: ${this.previewFailure.message}`);
       viewportStore
         .getState()
         .setStatusHint(`Cannot confirm invalid preview: ${this.previewFailure.message}`, {
@@ -2232,11 +2327,41 @@ export class ModelToolController {
       return;
     }
     const gen = ++this.commitGen;
+    trace(
+      "extrude",
+      `confirm START: gen=${gen} sessions=${this.extrudeSessions.length} depth=${this.extrude.depth} ` +
+        `end=${this.extrude.endCondition} boolean=${this.extrude.booleanMode} symmetric=${this.extrude.symmetric} ` +
+        `sketch=${this.lastArmedSketch ?? "?"}`,
+    );
     this.extrude = extrudeStep(this.extrude, { kind: "confirm" }).state; // → committing
     toolStore.setState({ phase: "committing" });
     const finalDepth = this.extrude.depth;
     const total = this.extrudeSessions.length;
     const committedBodyIds: string[] = [];
+
+    // Profile-record guarantee (EXTRUDE-COMMIT-FIX): the regen planner resolves the
+    // profile ONLY from the sketch's `Sketch` timeline record, and no interactive
+    // path is obligated to have minted one (an Esc exit, a legacy in-session doc).
+    // finishSketch is idempotent — unchanged content upserts nothing — so ensure it
+    // here, at the exact boundary that needs it. Failure keeps the armed preview
+    // (sessions untouched) so a retry is possible.
+    const profileSketchId = this.extrudeSessions[0].draft.sketchId ?? this.lastArmedSketch;
+    try {
+      if (profileSketchId) await this.client.finishSketch(profileSketchId);
+    } catch (e) {
+      if (gen !== this.commitGen) return;
+      traceWarn("extrude", `commit: profile-record guarantee FAILED: ${errMessage(e)}`);
+      this.extrude = extrudeStep(this.extrude, { kind: "commitFailed" }).state; // → armed
+      toolStore.setState({ phase: "armed" });
+      viewportStore
+        .getState()
+        .setStatusHint(`Extrude failed: cannot record profile sketch: ${errMessage(e)}`, {
+          severity: "error",
+          sticky: true,
+        });
+      return;
+    }
+    if (gen !== this.commitGen) return;
 
     // Subscribe to onBodyLoaded BEFORE committing: a body can enter the scene while
     // a LATER session is still committing (the doc-changed → mesh-ingest is async),
@@ -2261,11 +2386,23 @@ export class ModelToolController {
 
       const editFeatureId =
         typeof es.draft.params.featureId === "string" ? es.draft.params.featureId : undefined;
+      trace(
+        "extrude",
+        `commit ${k + 1}/${total}: session=${es.session.sessionId} region=${es.draft.regionId} ` +
+          `finalEpoch=${this.commitFinalEpoch} edit=${editFeatureId ?? "no"}`,
+      );
       // A re-edit runs L1-only (the lane short-circuits updatePreview on featureId
       // and never emits a candidate), so only a fresh session has a barrier to wait on.
       if (!editFeatureId) {
         const exact = await this.waitForExactPreview(es.session.sessionId);
-        if (gen !== this.commitGen) return;
+        if (gen !== this.commitGen) {
+          trace("extrude", `commit ${k + 1}/${total}: superseded during exact-preview barrier`);
+          return;
+        }
+        trace(
+          "extrude",
+          `commit ${k + 1}/${total}: exact-preview barrier → ${exact.ok ? "ok" : `FAILED: ${exact.error.message}`}`,
+        );
         if (!exact.ok) {
           // Nothing consumed this lane session yet — release it so the re-arm below
           // does not leak it.
@@ -2294,15 +2431,31 @@ export class ModelToolController {
         }
       } catch (e) {
         if (gen !== this.commitGen) return; // superseded (canceled / tool switched)
+        traceWarn("extrude", `commit ${k + 1}/${total}: apply THREW: ${errMessage(e)}`);
         this.commitBodyUnsub?.();
         this.commitBodyUnsub = null;
         this.onExtrudeCommitFailed(k, total, errMessage(e), gen);
         return;
       }
       if (gen !== this.commitGen) return;
+      trace(
+        "extrude",
+        `commit ${k + 1}/${total}: apply result rev=${res?.revision ?? "?"} ` +
+          `changed=[${res?.changedBodies.map((b) => b.bodyId).join(", ") ?? ""}] ` +
+          `removed=[${res?.removedBodies.join(", ") ?? ""}] error=${res?.errorMessage ?? "none"}`,
+      );
       if (!res || (res.changedBodies.length === 0 && res.removedBodies.length === 0)) {
+        traceWarn(
+          "extrude",
+          `commit ${k + 1}/${total}: REGEN FAILED (no changed bodies) — rolling back errored record: ` +
+            `${res?.errorMessage ?? "no error message"}`,
+        );
         this.commitBodyUnsub?.();
         this.commitBodyUnsub = null;
+        // The command applied but its regen failed — pop the errored record so a
+        // retried ✓ replaces it instead of stacking a duplicate.
+        await this.rollbackFailedCommit();
+        if (gen !== this.commitGen) return;
         this.onExtrudeCommitFailed(k, total, res?.errorMessage, gen);
         return;
       }
@@ -2315,8 +2468,28 @@ export class ModelToolController {
     this.finishExtrudeAll(committedBodyIds, gen, loaded);
   }
 
+  /**
+   * A commit whose edit command WAS applied but whose regen step failed leaves an
+   * errored record on the timeline while the tool re-arms with the same intent —
+   * retrying ✓ would stack a duplicate failed op per click (observed: 20 stacked
+   * failed Extrudes in one document). Undo exactly that one command; the armed
+   * preview still carries the user's parameters, so no work is lost.
+   */
+  private async rollbackFailedCommit(): Promise<void> {
+    try {
+      const res = await this.client.undo();
+      trace("extrude", `rollback: undid errored record, rev=${res.revision}`);
+      this.applyResult(res);
+    } catch (e) {
+      // A failed rollback leaves the errored row visible — still recoverable by
+      // hand (⌘Z / delete row), never worth masking the ORIGINAL failure hint.
+      traceWarn("extrude", `rollback FAILED (errored row stays): ${errMessage(e)}`);
+    }
+  }
+
   /** A failed exact-region commit returns to armed and recreates its lane session. */
   private onExtrudeCommitFailed(k: number, total: number, reason: string | undefined, gen: number): void {
+    traceWarn("extrude", `commit ${k + 1}/${total} FAILED → re-arming: ${reason ?? "unknown reason"}`);
     this.extrude = extrudeStep(this.extrude, { kind: "commitFailed" }).state; // committing → armed
     toolStore.setState({ phase: "armed" });
     const msg =
@@ -2374,6 +2547,10 @@ export class ModelToolController {
   private finishExtrudeAll(bodyIds: string[], gen: number, loaded: Set<string>): void {
     this.commitBodyId = bodyIds[bodyIds.length - 1] ?? null;
     const pending = new Set(bodyIds.filter((id) => !loaded.has(id)));
+    trace(
+      "extrude",
+      `commit COMPLETE: bodies=[${bodyIds.join(", ")}] awaiting mesh ingest for ${pending.size}`,
+    );
     const done = (): void => {
       if (this.commitBodyTimer) {
         clearTimeout(this.commitBodyTimer);
@@ -2401,6 +2578,7 @@ export class ModelToolController {
   }
 
   private finishExtrude(bodyIds: string[]): void {
+    trace("extrude", `finish: teardown + select bodies=[${bodyIds.join(", ")}]`);
     const wasCut = this.extrude.booleanMode === "Cut";
     this.engine.hideExtrudePreview();
     for (const es of this.extrudeSessions) this.removeExactPreviewMeshes(es);

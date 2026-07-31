@@ -5,14 +5,20 @@
  * minimal interaction-FSM phase (only idle/armed are exercised now; the drag /
  * preview / commit phases arrive with the tool-machine WP).
  *
- * `setMode` is the single mode-transition entry point — the titlebar toggle,
- * the `S` shortcut, a tree double-click, and the sketch chrome bar all route
- * through it, so entering/exiting sketch mode stays consistent (activeSketchId
- * + default tool + selection all move together).
+ * `setMode` is the single mode-transition entry point — the `S` shortcut, a
+ * tree double-click, the sketch chrome bar, and `activateTool` (AUTO-MODE: the
+ * mode follows the picked tool + context, there is no manual mode toggle) all
+ * route through it, so entering/exiting sketch mode stays consistent
+ * (activeSketchId + default tool + selection all move together).
  *
  * Bare `setMode('sketch')` (no id) is the "start a new sketch" intent: it leaves
  * activeSketchId null so the controller shows the plane picker; a tree/chrome
  * re-edit passes an explicit id and targets that existing sketch directly.
+ *
+ * `opts.tool` preserves a caller-chosen tool across the transition (auto-switch:
+ * picking Circle in model mode enters sketch mode WITH Circle armed, not the
+ * default Line; picking Extrude in sketch mode finishes back to model mode WITH
+ * Extrude armed). Omit it for the legacy defaults (line / select).
  */
 import { createStore, useStore } from "zustand";
 import { viewportStore } from "./viewportStore";
@@ -64,8 +70,10 @@ export interface ToolState {
   sketchTool: SketchTool;
   phase: InteractionPhase;
   /** Enter/exit a mode. `sketchId` targets an existing sketch; omit it to start
-   *  a new sketch (activeSketchId stays null → the controller shows the plane picker). */
-  setMode(mode: EditorMode, sketchId?: string): void;
+   *  a new sketch (activeSketchId stays null → the controller shows the plane picker).
+   *  `opts.tool` keeps a caller-chosen tool across the transition (auto-switch);
+   *  omitted ⇒ the mode default (line / select). */
+  setMode(mode: EditorMode, sketchId?: string, opts?: { tool?: Tool }): void;
   /** Set the active tool for the *current* mode. */
   setTool(tool: Tool): void;
 }
@@ -76,19 +84,21 @@ export const toolStore = createStore<ToolState>()((set, get) => ({
   sketchTool: "line",
   phase: "idle",
 
-  setMode(mode, sketchId) {
+  setMode(mode, sketchId, opts) {
     if (mode === "sketch") {
       // No id ⇒ new-sketch intent: leave activeSketchId null so the controller
       // shows the plane picker. An explicit id targets that existing sketch.
       const targetId = sketchId ?? null;
-      set({ mode: "sketch", sketchTool: "line", phase: "idle" });
+      const tool = (opts?.tool ?? "line") as SketchTool;
+      set({ mode: "sketch", sketchTool: tool, phase: opts?.tool ? phaseFor(tool) : "idle" });
       viewportStore.getState().setActiveSketch(targetId);
       // Selecting the sketch keeps tree + inspector coherent with the chrome bar.
       if (targetId && documentStore.getState().sketches[targetId]) {
         selectionStore.getState().set([{ kind: "sketch", id: targetId }]);
       }
     } else {
-      set({ mode: "model", modelTool: "select", phase: "idle" });
+      const tool = (opts?.tool ?? "select") as ModelTool;
+      set({ mode: "model", modelTool: tool, phase: opts?.tool ? phaseFor(tool) : "idle" });
       viewportStore.getState().setActiveSketch(null);
     }
   },

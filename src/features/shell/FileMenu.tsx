@@ -3,6 +3,7 @@ import { Icon } from "@/icons/Icon";
 import { Popover } from "@/ui/Popover";
 import { MonoValue } from "@/ui/MonoValue";
 import {
+  closeProject,
   exportObj,
   exportStep,
   exportStl,
@@ -28,12 +29,11 @@ export function FileMenu() {
   };
 
   return (
-    // Not a drag region (no data-tauri-drag-region), so the trigger stays clickable
-    // inside the title bar's drag surface.
-    <div className="relative">
+    <div data-tauri-drag-region className="relative">
       <button
         ref={btn}
         type="button"
+        data-tauri-drag-region
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="menu"
         aria-expanded={open}
@@ -54,6 +54,8 @@ export function FileMenu() {
         <MenuItem label="Open…" shortcut="⌘O" onClick={() => run(openDocumentDialog)} />
         <MenuItem label="Save" shortcut="⌘S" onClick={() => run(saveDocument)} />
         <MenuItem label="Save As…" shortcut="⇧⌘S" onClick={() => run(saveDocumentAs)} />
+        <div aria-hidden="true" className="my-1 h-px bg-border" />
+        <MenuItem label="Close Project" shortcut="⌘W" onClick={() => run(closeProject)} />
         <div aria-hidden="true" className="my-1 h-px bg-border" />
         <MenuItem label="Export STEP…" onClick={() => run(exportStep)} />
         <MenuItem label="Export STL…" onClick={() => run(exportStl)} />

@@ -41,7 +41,7 @@ import { concatMesh1, makeBoxMesh, makeCylinderMesh, makeExtrudeBodyMesh, makeRe
 import type { LatheAxis } from "@/tools/preview/lathePreview";
 import { createLocalSolverLane } from "./localSolver";
 import { detectRegions, planeFor, solveDof } from "./mockSketch";
-import { documentStore } from "@/stores/documentStore";
+import { documentStore, emptyDocument } from "@/stores/documentStore";
 
 const LATENCY_MS = 120;
 const MESH_LATENCY_MS = 30;
@@ -685,6 +685,10 @@ export const mockClient: CadClient = {
   async importStep(path) {
     await wait();
     return snapshot(basename(path));
+  },
+  async closeDocument() {
+    await wait();
+    documentStore.getState().applySnapshot(emptyDocument());
   },
   async checkRecovery() {
     await wait();

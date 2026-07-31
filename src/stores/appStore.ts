@@ -8,6 +8,7 @@
 import { createStore, useStore } from "zustand";
 import { createClient } from "@/ipc/client";
 import { resetDocumentScopedUi } from "@/ipc/documentLifecycle";
+import { documentStore, emptyDocument } from "@/stores/documentStore";
 import type { DocumentSnapshot, RecentProject, RecoveryInfo } from "@/ipc/types";
 
 const client = createClient();
@@ -31,6 +32,7 @@ export interface AppState {
   openProject(path: string): Promise<void>;
   openDialogAndOpen(): Promise<void>;
   importStep(): Promise<void>;
+  closeProject(): Promise<void>;
   checkRecovery(): Promise<void>;
   recoverDocument(): Promise<void>;
   discardRecovery(): Promise<void>;
@@ -89,6 +91,15 @@ export const appStore = createStore<AppState>()((set, get) => {
       if (!path) return; // cancelled
       resetIfReplacing();
       enter(await client.importStep(path));
+    },
+
+    async closeProject() {
+      if (!get().document) return; // nothing open
+      resetDocumentScopedUi();
+      documentStore.getState().applySnapshot(emptyDocument());
+      await client.closeDocument();
+      set({ screen: "start", document: null });
+      void get().loadRecents();
     },
 
     async checkRecovery() {

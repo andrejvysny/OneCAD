@@ -78,7 +78,7 @@ test("multiple selected regions are rejected without preview or commit", async (
   await page.keyboard.up("Shift");
 
   await page.getByRole("button", { name: "Extrude", exact: true }).click();
-  await expect(page.getByText("Select exactly one closed sketch region to extrude")).toBeVisible();
+  await expect(page.getByText("Extrude takes exactly one region — deselect down to one")).toBeVisible();
   await expect(page.getByText(/^Drag the arrow to set depth/)).toHaveCount(0);
   await expect(bodyOptions(page)).toHaveCount(bodiesBefore);
 });

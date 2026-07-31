@@ -254,6 +254,19 @@ export function ViewportRoot({ className }: { className?: string }) {
         });
         cleanups.push(() => engine.configurePicking(null));
 
+        // ── Double-click a static sketch → edit it (AUTO-MODE; mirrors the
+        // tree row double-click). Model mode + select tool only, so it never
+        // fights armed model tools or the region-pick double-click accelerator
+        // (those run while a model tool is active, not "select"). ──
+        const onDblClick = (e: MouseEvent) => {
+          const s = toolStore.getState();
+          if (s.mode !== "model" || s.modelTool !== "select") return;
+          const hit = engine.sketchStaticHitTest(e.clientX, e.clientY);
+          if (hit) s.setMode("sketch", hit.sketchId);
+        };
+        container.addEventListener("dblclick", onDblClick);
+        cleanups.push(() => container.removeEventListener("dblclick", onDblClick));
+
         // ── Selection store → highlight layer (tree ↔ viewport sync) ──
         const applyHighlight = () => {
           const s = selectionStore.getState();

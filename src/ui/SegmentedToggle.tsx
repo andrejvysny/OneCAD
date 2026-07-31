@@ -76,6 +76,7 @@ export function SegmentedToggle<T extends string>({
       ref={ref}
       role="tablist"
       aria-label={ariaLabel}
+      data-tauri-drag-region
       className={cn("inline-flex bg-canvas font-ui", WELL[size], className)}
     >
       {options.map((opt, i) => {
@@ -90,6 +91,7 @@ export function SegmentedToggle<T extends string>({
             role="tab"
             aria-selected={selected}
             tabIndex={selected ? 0 : -1}
+            data-tauri-drag-region
             onClick={() => onChange(opt.value)}
             onKeyDown={onKeyDown}
             className={cn(

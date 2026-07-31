@@ -127,7 +127,7 @@ export function ViewCube() {
       <div
         role="group"
         aria-label={`ViewCube (${label})`}
-        className="relative h-[62px] w-[62px]"
+        className="relative h-[60px] w-[60px] mt-3 mb-5"
         style={{ perspective: "260px" }}
       >
         <div
@@ -161,7 +161,9 @@ export function ViewCube() {
                 WebkitBackfaceVisibility: "hidden",
               }}
             >
-              {f.name}
+              <span style={{ display: 'inline-block', transform: 'scaleY(-1)' }}>
+                {f.name}
+              </span>
             </button>
           ))}
         </div>

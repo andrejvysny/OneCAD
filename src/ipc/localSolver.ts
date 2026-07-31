@@ -44,6 +44,7 @@ import { makeExtrudeBodyMesh } from "./mockMeshes";
 import { detectRegions, planeFor, solveDof } from "./mockSketch";
 import { profileFromRegion, type PrismProfile } from "@/tools/preview/prismPreview";
 import { mintRecordId } from "./tauriCommandMap";
+import { trace } from "@/debug/trace";
 
 /** Simulated latency for sketch enter/finish round-trips (independent of the doc latency). */
 const SKETCH_LATENCY_MS = 30;
@@ -463,9 +464,15 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
     async finishSketch(sketchId: string): Promise<{ regions: SketchRegion[] }> {
       await wait(SKETCH_LATENCY_MS);
       const session = sketchSessions.get(sketchId);
-      const regions = session ? detectRegions(session.entities) : [];
-      finishedRegions.set(sketchId, regions); // cache for extrude synthesis
-      return { regions };
+      if (session) {
+        const regions = detectRegions(session.entities);
+        finishedRegions.set(sketchId, regions); // cache for extrude synthesis
+        return { regions };
+      }
+      // Sessionless finish (the model-mode record guarantee): answer from the
+      // cache instead of clobbering it with [] — the armed preview lane still
+      // resolves its profile from finishedRegions on a re-arm.
+      return { regions: finishedRegions.get(sketchId) ?? [] };
     },
 
     async cancelSketch(_sketchId: string): Promise<void> {
@@ -589,7 +596,18 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
         throw new Error("Feature re-edit must use a scalar update command");
       }
       const op = buildOpFromSession(s);
+      trace(
+        "lane",
+        `endPreview COMMIT: session=${sessionId} op=${op.opType} opId=${op.opId ?? "?"} ` +
+          `sketch=${"sketchId" in op ? op.sketchId : "?"} region=${"regionId" in op ? op.regionId : "?"}`,
+        op.params,
+      );
       const res = await deps.commit(op);
+      trace(
+        "lane",
+        `endPreview COMMIT result: rev=${res.revision} changed=${res.changedBodies.length} ` +
+          `removed=${res.removedBodies.length} error=${res.errorMessage ?? "none"}`,
+      );
       // Deliver a committed signal under the FINAL epoch so the tool reconciles
       // (drops L1 once the matching-epoch result exists). The controller reads
       // only `epoch` for a committed result — the real body mesh flows through the
