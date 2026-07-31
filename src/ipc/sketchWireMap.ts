@@ -931,8 +931,22 @@ export function frontendConstraintsFromDto(
 // spuriously Remove a seeded-but-absent id). Pure: no store access.
 
 /**
- * Seed `map` from the worker-wire entities + constraints `enter_sketch` returns,
- * mirroring `addEntityOps`' key/value conventions with the wire (backend) ids:
+ * REBASE `map`'s id bindings onto the worker-wire entities + constraints
+ * `enter_sketch` returns — an authoritative REPLACE, not a merge.
+ *
+ * The wire is the whole truth for this sketch, and the frontend session is
+ * rebuilt from it (`frontendEntitiesFromDto`), so every id the previous session
+ * minted (`e1`, `c1`, …) is gone from the live arrays the moment the session
+ * re-opens. Leaving those bindings behind made `marshalUpsert`'s removals-first
+ * diff read them as "present in the map, absent from `next`" and emit a
+ * `removeEntity` for each — so the FIRST edit after re-entering a sketch deleted
+ * everything drawn in the previous session (the user-visible "only the
+ * latest-drawn object survives"). Clearing first is what makes the map describe
+ * the sketch that actually exists.
+ *
+ * `backendSketchId` / `planeKind` are session-independent and survive.
+ *
+ * Key/value conventions mirror `addEntityOps`, with the wire (backend) ids:
  *   - every entity id → itself (`map.entity`, 1:1);
  *   - Point   → `${id}.Start` + `${id}.Center` → its own id (points key under both);
  *   - Line    → `${id}.Start`/`${id}.End` → the `p0Ref`/`p1Ref` backend point ids;
@@ -943,14 +957,22 @@ export function frontendConstraintsFromDto(
  *     the center ref — documented seam);
  *   - every constraint id → itself (`map.constraint`) + its value into the
  *     `constraintValue` cache, so an in-place `SetDimension` diff is a no-op.
- * Idempotent (re-seeding the same wire is harmless) and a no-op for a fresh sketch
- * (empty entities/constraints).
+ * Idempotent (re-seeding the same wire is harmless); an EMPTY wire (a fresh
+ * sketch) leaves the map empty — which is the point: nothing exists to bind.
  */
 export function seedIdMapFromWire(
   map: SketchIdMap,
   dtoEntities: unknown,
   dtoConstraints: unknown,
 ): void {
+  // Authoritative rebase: drop every binding from a prior session BEFORE seeding
+  // (see the block comment above — stale ids marshal as removals and delete the
+  // geometry they name).
+  map.entity.clear();
+  map.point.clear();
+  map.constraint.clear();
+  map.constraintValue.clear();
+
   if (Array.isArray(dtoEntities)) {
     const wire = dtoEntities as WireDtoEntity[];
     // Point ids that carry a position back a resolvable line endpoint (matches

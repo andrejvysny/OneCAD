@@ -298,6 +298,30 @@ describe("seedIdMapFromWire — hydrate the id-map on re-entry", () => {
     expect(map.entity.size).toBe(0);
     expect(map.constraint.size).toBe(0);
   });
+
+  it("REBASES: a prior session's frontend ids are dropped, never marshalled as removals", () => {
+    // Session 1: the frontend authored `e1` (a line) and minted backend ids for it.
+    const map = createIdMap("sk", "XY");
+    marshalUpsert(map, { entities: [line("e1", [0, 0], [40, 0])], constraints: [] }, mint);
+    expect(map.entity.has("e1")).toBe(true);
+
+    // Session 2: `enter_sketch` returns that same geometry under its BACKEND ids.
+    // Re-seeding must leave NO trace of `e1` — otherwise the next marshal reads it
+    // as "mapped but absent from next" and emits removeEntity for the real uuid,
+    // deleting everything the previous session drew.
+    seedIdMapFromWire(map, wireEntities, wireConstraints);
+    expect(map.entity.has("e1")).toBe(false);
+    expect(map.point.has("e1.Start")).toBe(false);
+    expect(map.backendSketchId).toBe("sk"); // session-independent fields survive
+
+    const hydrated = frontendEntitiesFromDto(wireEntities);
+    const ops = marshalUpsert(
+      map,
+      { entities: [...hydrated, line("e2", [80, 60], [120, 60])], constraints: [] },
+      mint,
+    );
+    expect(ops.filter((o) => o.op === "removeEntity")).toEqual([]);
+  });
 });
 
 describe("applySolvedPositions — move geometry per entity kind", () => {
