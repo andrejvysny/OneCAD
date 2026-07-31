@@ -63,17 +63,27 @@ function refFromSketchStaticHit(hit: SketchStaticHit): EntityRef {
     : { kind: "sketch", id: hit.sketchId };
 }
 
-function refFromModelHits(
+/**
+ * Arbitrate a body-face/edge hit against a coplanar sketch fill under the same
+ * pointer. Default: the sketch wins a numeric tie (`secondaryHitWins`) so a
+ * sketch lying flush on a body face stays the easier target. `pickThrough`
+ * (Alt held) suppresses that tie-break — the body wins outright, and the
+ * sketch is only used when there is no body hit at all (W0.4).
+ */
+export function refFromModelHits(
   bodyHit: PickHit | null,
   sketchHit: SketchStaticHit | null,
+  pickThrough: boolean,
 ): EntityRef | null {
   if (
+    !pickThrough &&
     sketchHit &&
     (!bodyHit || secondaryHitWins(bodyHit.distance, sketchHit.distance))
   ) {
     return refFromSketchStaticHit(sketchHit);
   }
-  return bodyHit ? refFromHit(bodyHit) : null;
+  if (bodyHit) return refFromHit(bodyHit);
+  return sketchHit ? refFromSketchStaticHit(sketchHit) : null;
 }
 
 /**
@@ -231,15 +241,15 @@ export function ViewportRoot({ className }: { className?: string }) {
         };
         engine.configurePicking({
           isActive: isPickingActive,
-          onHover: (hit, x, y) => {
+          onHover: (hit, x, y, alt) => {
             const sel = selectionStore.getState();
             const sketchHit = engine.sketchStaticHitTest(x, y);
-            sel.setHover(refFromModelHits(hit, sketchHit));
+            sel.setHover(refFromModelHits(hit, sketchHit, alt));
           },
           onPick: (hit, mods, x, y) => {
             const sel = selectionStore.getState();
             const sketchHit = engine.sketchStaticHitTest(x, y);
-            const ref = refFromModelHits(hit, sketchHit);
+            const ref = refFromModelHits(hit, sketchHit, mods.alt);
             if (!ref) {
               sel.clear();
               return;

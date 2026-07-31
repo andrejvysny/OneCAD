@@ -35,6 +35,8 @@ export interface PickHit {
 export interface PickModifiers {
   shift: boolean;
   meta: boolean;
+  /** Pick-through: body face/edge wins over a coplanar sketch fill lying on it. */
+  alt: boolean;
 }
 
 const EDGE_PICK_PX = 6;
@@ -150,8 +152,11 @@ export interface PickerDeps {
   invalidate: () => void;
   /** Picking is only live in this mode (model + select); returns false in sketch mode. */
   isActive: () => boolean;
-  /** Hover changed (carries the pointer's client coords for a secondary hit-test). */
-  onHover: (hit: PickHit | null, clientX: number, clientY: number) => void;
+  /**
+   * Hover changed (carries the pointer's client coords for a secondary hit-test,
+   * plus the live Alt state so the hover tint can match what a click would select).
+   */
+  onHover: (hit: PickHit | null, clientX: number, clientY: number, alt: boolean) => void;
   /** Click (carries the pointer's client coords for a secondary hit-test). */
   onPick: (hit: PickHit | null, mods: PickModifiers, clientX: number, clientY: number) => void;
   /**
@@ -212,7 +217,7 @@ export class Picker {
       const ev = this.pendingMove;
       this.pendingMove = null;
       if (!ev || !this.deps.isActive()) return;
-      this.updateHover(ev.clientX, ev.clientY);
+      this.updateHover(ev.clientX, ev.clientY, ev.altKey);
     });
   };
 
@@ -233,7 +238,12 @@ export class Picker {
     this.downButton = -1;
     if (!wasClick || !this.deps.isActive()) return;
     const hit = this.pickAt(e.clientX, e.clientY);
-    this.deps.onPick(hit, { shift: e.shiftKey, meta: e.metaKey || e.ctrlKey }, e.clientX, e.clientY);
+    this.deps.onPick(
+      hit,
+      { shift: e.shiftKey, meta: e.metaKey || e.ctrlKey, alt: e.altKey },
+      e.clientX,
+      e.clientY,
+    );
   };
 
   private onPointerLeave = (e: PointerEvent): void => {
@@ -241,14 +251,14 @@ export class Picker {
       this.lastHoverKey = null;
       // Pointer left the canvas: coords are off-canvas so the secondary hit-test
       // clears too (the handler resolves nothing under an out-of-bounds point).
-      this.deps.onHover(null, e.clientX, e.clientY);
+      this.deps.onHover(null, e.clientX, e.clientY, e.altKey);
       this.deps.invalidate();
     }
   };
 
   // ── raycasting ──
 
-  private updateHover(clientX: number, clientY: number): void {
+  private updateHover(clientX: number, clientY: number, alt: boolean): void {
     const hit = this.pickAt(clientX, clientY);
     // No body hit ⇒ fold the secondary (sketch) token into the key so hover fires
     // when moving between sketches in empty space, but stays quiet over one sketch.
@@ -257,7 +267,7 @@ export class Picker {
       : this.secondaryKey(clientX, clientY);
     if (key === this.lastHoverKey) return; // unchanged ⇒ no repaint (idle stays quiet)
     this.lastHoverKey = key;
-    this.deps.onHover(hit, clientX, clientY);
+    this.deps.onHover(hit, clientX, clientY, alt);
     this.deps.invalidate();
   }
 

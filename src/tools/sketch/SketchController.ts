@@ -38,7 +38,12 @@ import { applySolvedPositions } from "@/ipc/sketchWireMap";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
 import { buildSnapCache, computeSnap, SNAP_PX, type SnapCandidateCache, type SnapResult } from "./snapEngine";
 import { inferConstraints, inferHV, entityPoints } from "./autoConstrain";
-import { commitDimensionConstraint, enqueueSketchMutation, trimEntity } from "./sketchService";
+import {
+  commitDimensionConstraint,
+  enqueueSketchMutation,
+  flushSketchMutations,
+  trimEntity,
+} from "./sketchService";
 import type { SketchSnapshot } from "@/stores/sketchStore";
 import { hitTestSketch } from "./sketchHitTest";
 import { clickSelection, dragIntent, shouldApplyDrag, type DragIntent } from "./selectGesture";
@@ -102,6 +107,12 @@ export class SketchController {
   private dimState: DimState = dimensionInit();
   private priorProjection: Projection | null = null;
   private entering = false;
+  // A sketch→sketch retarget that landed while an enter/switch was still in flight
+  // (latest-wins). Drained once the in-flight open settles.
+  private pendingSwitchId: string | null = null;
+  // Set ONLY while openSession writes activeSketchId itself: that write echoes the
+  // session the controller just opened, it is never a user retarget.
+  private selfActiveSketchWrite = false;
   // Plane-pick phase: bare sketch entry shows the plane picker; a click on a
   // quad creates the sketch on that plane and opens the normal session.
   private planePicking = false;
@@ -172,6 +183,18 @@ export class SketchController {
       }),
     );
 
+    // React to a sketch→sketch retarget (tree activate / chrome) while ALREADY in
+    // sketch mode: the mode subscription above never fires for it, so without this
+    // the chrome shows B while the controller keeps writing into A.
+    let lastActiveSketchId = viewportStore.getState().activeSketchId;
+    this.unsubs.push(
+      viewportStore.subscribe((s) => {
+        if (s.activeSketchId === lastActiveSketchId) return;
+        lastActiveSketchId = s.activeSketchId;
+        this.onActiveSketchChanged(s.activeSketchId);
+      }),
+    );
+
     // Enter immediately if we mount already in sketch mode (e.g. ?sketchdemo).
     if (toolStore.getState().mode === "sketch") void this.enter();
   }
@@ -198,20 +221,107 @@ export class SketchController {
         return;
       }
       const opened = await this.openSession(activeId);
-      if (!opened && toolStore.getState().mode === "sketch") {
-        // Existing-sketch entry failed: fall back to model mode instead of
-        // stranding sketch chrome with no session. exit() clears the status
-        // hint, so re-set the failure message after the mode flip.
-        const prev = viewportStore.getState().statusHint;
-        toolStore.getState().setMode("model");
-        if (prev) {
-          viewportStore.getState().setStatusHint(prev.message, { severity: prev.severity, sticky: prev.sticky });
-        } else {
-          viewportStore.getState().setStatusHint(null);
-        }
-      }
+      if (!opened) this.failOutOfSketchMode();
     } finally {
       this.entering = false;
+      this.drainPendingSwitch();
+    }
+  }
+
+  /** An existing-sketch open failed: fall back to model mode instead of stranding
+   *  sketch chrome with no session. exit() clears the status hint, so re-set the
+   *  failure message (set by openSession) after the mode flip. */
+  private failOutOfSketchMode(): void {
+    if (toolStore.getState().mode !== "sketch") return;
+    const prev = viewportStore.getState().statusHint;
+    toolStore.getState().setMode("model");
+    if (prev) {
+      viewportStore.getState().setStatusHint(prev.message, { severity: prev.severity, sticky: prev.sticky });
+    } else {
+      viewportStore.getState().setStatusHint(null);
+    }
+  }
+
+  /**
+   * `viewportStore.activeSketchId` moved while the controller is live.
+   *
+   * The decision is made ONLY against the controller's own OPEN SESSION, never
+   * against a last-seen store value: `setMode` writes the id AFTER enter() has
+   * already started and openSession echoes it back, so a last-seen diff would
+   * self-switch on every normal entry.
+   */
+  private onActiveSketchChanged(id: string | null): void {
+    if (id === null) return; // a mode exit cleared it — exit() owns that teardown
+    if (this.selfActiveSketchWrite) return; // openSession echoing its own session
+    if (toolStore.getState().mode !== "sketch") return;
+    if (this.entering) {
+      this.pendingSwitchId = id; // latest-wins; drained when the open settles
+      return;
+    }
+    const openId = sketchStore.getState().session?.sketchId ?? null;
+    if (openId === id) return; // already the open session
+    // No session and no picker up ⇒ enter() owns this id, this is not a retarget.
+    if (openId === null && !this.planePicking) return;
+    void this.switchTo(id);
+  }
+
+  /**
+   * Retarget the controller at another sketch WITHOUT leaving sketch mode.
+   *
+   * The backend holds ONE sketch-session slot, so A must be CLOSED before B opens —
+   * hence the awaited cancel→finish (the same pair exit() uses: cancel squashes the
+   * worker gesture + session, finish mints/refreshes A's `Sketch` timeline record).
+   * The projection is deliberately NOT restored: sketch→sketch stays ortho and the
+   * projection saved at the ORIGINAL entry must survive to the eventual exit.
+   */
+  private async switchTo(newId: string): Promise<void> {
+    this.entering = true;
+    try {
+      const closing = this.teardownSession({ restoreProjection: false });
+      sketchStore.getState().setSession(null);
+      if (closing) {
+        trace("sketch", `switch: close ${closing.sketchId} → open ${newId}`);
+        await flushSketchMutations();
+        try {
+          await this.deps.client.cancelSketch(closing.sketchId);
+          await this.deps.client.finishSketch(closing.sketchId);
+        } catch (e) {
+          console.error("[sketch] switch: closing the previous sketch failed", e);
+        }
+      }
+      // Superseded mid-close: a mode exit already tore everything down, or a newer
+      // target landed (the drain below runs it instead).
+      if (this.disposed || toolStore.getState().mode !== "sketch") return;
+      if (this.pendingSwitchId !== null && this.pendingSwitchId !== newId) return;
+      this.pendingSwitchId = null;
+      const opened = await this.openSession(newId);
+      if (!opened) this.failOutOfSketchMode(); // never strand chrome on a dead session
+    } finally {
+      this.entering = false;
+      this.drainPendingSwitch();
+    }
+  }
+
+  /** Run the retarget that arrived while an enter/switch was in flight. A target that
+   *  matches the session that just opened is that open's OWN echo, not a user
+   *  retarget — drop it. */
+  private drainPendingSwitch(): void {
+    const pending = this.pendingSwitchId;
+    this.pendingSwitchId = null;
+    if (pending === null || this.disposed) return;
+    if (pending === sketchStore.getState().session?.sketchId) return;
+    if (toolStore.getState().mode !== "sketch") return;
+    void this.switchTo(pending);
+  }
+
+  /** openSession's own activeSketchId write, bracketed so the retarget subscription
+   *  reads it as an echo rather than a user switch. */
+  private setActiveSketchSelf(id: string): void {
+    this.selfActiveSketchWrite = true;
+    try {
+      viewportStore.getState().setActiveSketch(id);
+    } finally {
+      this.selfActiveSketchWrite = false;
     }
   }
 
@@ -243,7 +353,7 @@ export class SketchController {
 
     // A freshly created sketch (plane pick) isn't in the tree yet — register it,
     // then make it the active + selected sketch so the chrome + inspector bind.
-    viewportStore.getState().setActiveSketch(session.sketchId);
+    this.setActiveSketchSelf(session.sketchId);
     const sketches = documentStore.getState().sketches;
     if (!sketches[session.sketchId]) {
       documentStore.getState().addSketch({
@@ -262,7 +372,10 @@ export class SketchController {
     sketchStore.getState().setConflicting(session.conflicting ?? []); // seed from the enter solve
     this.pushSolve(session.sketchId, session.dof, session.status);
 
-    this.priorProjection = viewportStore.getState().projection;
+    // Capture the pre-sketch projection ONCE per sketch-mode visit: a sketch→sketch
+    // switch re-opens a session while already ortho, and overwriting here would make
+    // the eventual exit "restore" ortho instead of the user's real projection.
+    this.priorProjection ??= viewportStore.getState().projection;
     this.deps.engine.enterSketch(session.plane, session.entities, session.status);
     viewportStore.getState().setProjection("ortho");
 
@@ -357,10 +470,19 @@ export class SketchController {
       }
     } finally {
       this.entering = false;
+      this.drainPendingSwitch();
     }
   }
 
-  private exit(): void {
+  /**
+   * Shared session teardown for exit() and switchTo(): drop every tool / preview /
+   * drag lane and the engine's sketch overlay. Returns the session that was open and
+   * leaves it in the store — the CALLER runs its own close sequence against it and
+   * nulls it, so the ordering both paths need stays theirs.
+   *
+   * `restoreProjection` is false for a sketch→sketch switch (see switchTo).
+   */
+  private teardownSession(opts: { restoreProjection: boolean }): SketchSession | null {
     sketchSelectionStore.getState().clear();
     this.endPlanePick();
     this.machine = null;
@@ -382,12 +504,16 @@ export class SketchController {
     this.deps.engine.setSketchTrimGhost(null);
     this.deps.engine.exitSketch();
     viewportStore.getState().setStatusHint(null);
-    if (this.priorProjection) {
+    if (opts.restoreProjection && this.priorProjection) {
       viewportStore.getState().setProjection(this.priorProjection);
       this.priorProjection = null;
     }
     sketchStore.getState().clearSketchUndo();
-    const session = sketchStore.getState().session;
+    return sketchStore.getState().session;
+  }
+
+  private exit(): void {
+    const session = this.teardownSession({ restoreProjection: true });
     if (session) {
       // EXTRUDE-COMMIT-FIX: every keep-exit must mint/refresh the sketch's `Sketch`
       // TIMELINE record — the regen planner resolves modeling-op profiles ONLY from
@@ -1211,6 +1337,7 @@ export class SketchController {
     this.disposed = true; // set FIRST: guards every pending rAF + queued write-back
     this.snapCache = null;
     this.snapCacheKey = null;
+    this.pendingSwitchId = null;
     this.endPlanePick();
     sketchSelectionStore.getState().clear();
     if (this.dimensionActive) this.cancelDimension();

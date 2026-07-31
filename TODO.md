@@ -227,6 +227,36 @@ Goal: kill silent-wrong-behavior class + commit-blindness. User decisions: all-5
 - Follow-ups (accepted V1): rollbackFailedCommit trace tag hardcodes "extrude" (cosmetic); Apply-button e2e click flake worked around by coordinates (root cause unpinned); preview p95 latency budget in solverbench still unpinned (TODO.md:178 flag stands); worker-side PreviewOp coalescing deferred (cancel-frame groundwork = ctest case 14)
 - [ ] Manual Tauri gate (USER): fillet radius to OCCT refusal → ✓ blocked with named reason; shell preview hollow; boolean 3 modes preview == commit; revolve Cut subtracts in preview AND commit; suppress feature #2 of N → downstream cascade-suppressed not errored; tree rename/hide survives save/reopen; close with unsaved changes prompts
 
+## SKETCH-MULTI-OBJECT (2026-07-31, SHIPPED 267af13)
+- [x] USER-REPORTED: only latest-drawn object survived Finish — root cause `seedIdMapFromWire` merge-not-rebase → first post-re-entry upsert emitted removeEntity for all prior geometry; fixed (clear before seed), red-first, 4-lane pins (unit / full-stack vitest / e2e / real-worker)
+- [ ] USER manual check: rect → Finish → re-enter → line → Finish → re-enter — both persist
+- [ ] Flagged latent (next wave): `tauriClient.getSketch` passes raw frontend id (siblings resolve `backendSketchId ?? id`); tree sketch-switch while in sketch mode = controller no-op (chrome/new vs controller/old session)
+
+## SKETCH-POWER wave (plan approved 2026-07-31, `~/.claude/plans/do-thorough-exploration-and-rosy-lollipop.md`; internal adversarial review REVISE → 2 MAJOR + 2 MINOR all folded; Codex gate dead until Aug 5)
+Scope (user decisions): construction toggle + T/E/M constraints + point + shapes (centerRect/slot/polygon) + marquee + ellipse; 5 verified latents = Wave 0; manual Tauri gates run by user in parallel (fallout = interrupt work).
+### Wave 0 — latent fixes (all red-first) — SHIPPED 2026-07-31
+- [x] W0.1 `tauriClient.getSketch` resolves `backendSketchId ?? sketchId` (sibling parity; red-first: raw frontend id pinned on the wire)
+- [x] W0.2 sketch→sketch tree switch: `switchTo` = teardown → awaited flush→cancel(A)→finish(A) → supersession check → openSession(B); SELF-SWITCH GUARD (decision vs OPEN SESSION only + `selfActiveSketchWrite` bracket around openSession's echo — without it test [d] unpassable), `pendingSwitchId` latest-wins drained post-open (just-opened target dropped), `teardownSession` factor (exit byte-identical; returns session, caller nulls — preserves cancel-before-null order), `priorProjection ??=` (original entry's projection survives to eventual exit), rejected re-open → `failOutOfSketchMode`. 10 tests, 4 red-first (wrong-sketch upsert pin incl.)
+- [x] W0.3 `prepare_sketch_regions` REFUSES during same-sketch drag (`op_failed` recoverable, names sketch + "retry after pointer-up"; other-sketch gesture unblocked); `finish_sketch` take-once clears `active_gesture` scoped to finishing sketch + best-effort worker `end_gesture` (Enter-mid-drag race + orphaned worker gesture both killed). 6 stub unit (red-first) + 2 real-worker (sketch_regions 7/7)
+- [x] W0.4 Alt pick-through: `refFromModelHits(body, sketch, pickThrough)` — Alt suppresses sketch tie-break, body wins, sketch only when no body hit; no-Alt path proven byte-identical (new sketch fallback unreachable); engine hover/pick mods gain `alt` append-only; hover tint follows next pointermove (mods-less hover architecture, keydown listener deliberately not added). Picker.test tie pin untouched
+- [x] W0.5 history icons: `OPTYPE_ICON[item.opType ?? ""] ?? FEATURE_ICON[item.kind]` — opType strings verified vs `Operation::op_type()` (record.rs:321); Chamfer/Shell/patterns/Mirror rows now correct on real lane. Red-first render pins
+- [x] **Gate W0 PASSED** (2026-07-31): tsc 0 · FE 1426/121 · cargo 534/0 vs real worker (REQUIRE_WORKER) · clippy/fmt clean · ctest 70/70 · e2e 61/61 · hex clean (inputProbe pre-existing)
+- Flagged (accepted): `sketchStaticSync` refetches only on sketch→model — after A→B switch, A's static layer relies on the real lane's geometryToken bump from finish(A) to self-heal (mock lane may show stale until exit); follow-up if manual gate shows it
+### Wave 1 — construction geometry toggle
+- [ ] W1-A backend: SCHEMA §7.3/§7.4 `entities[].construction` + §14 (no fixture bump); worker `WireSketch` reads flag (red-first ctest: all-construction rect → 0 regions; id-stability pin); core `SketchEditOp::SetEntityConstruction` (inverse free via RestoreSketch memento; squash pin); real-worker `sketch_construction.rs`
+- [ ] W1-B frontend: `SketchIdMap.entityConstruction` cache (5 touchpoints) + `marshalUpsert` diff branch; X toggle (selection flip / sticky draw-mode) + chrome button; construction-axis revolve pin; e2e
+### Wave 2 — FE-only tools batch (order: A→B→C→D; polygon circumcircle DEPENDS on W1-A)
+- [ ] W2-A Tangent/Equal/Midpoint user-apply (applicability rows + catalog + authoring; matrix bounded by ConstraintSolver.cpp; dup → existing reject-on-conflict)
+- [ ] W2-B point tool (7-edit template, key P)
+- [ ] W2-C centerRect (⇧R) → slot (S; Tangent×4+Equal only — arc-endpoint Coincidents UNMAPPABLE, real-lane DOF ≈13 documented) → polygon (G, digits 3-9, construction circumcircle)
+- [ ] W2-D marquee box select (rightward=window/leftward=crossing; snapEngine math reuse; lmbOrbitSuppressed restored on EVERY teardown path)
+### Wave 3 — ellipse end-to-end (protocol change)
+- [ ] P0 SCHEMA: un-UNSUPPORT Ellipse, wire `{center, centerRef?, majorR, minorR, rotation, construction}`, naive-DOF §7.4 note, §14
+- [ ] P1 worker red-first fixtures → WireSketch Ellipse branch (normalization trap: minor>major swap)
+- [ ] P2 Rust wire.rs:1537 arm + real-worker (regions corpus cite, extrude ≈ π·a·b·h pure loop)
+- [ ] P3 FE: ellipseTool 3-click (key O — NOT e, extrude handoff), render/snap/marshal/mock parity, trim=delete, mirror=copy-only
+- [ ] P4 gate: 4 suites; retire TODO:26 "ellipse untranslated" flag; graphify update
+
 ## Execution rules
 - Orchestrator: decisions/review only. WPs → Opus 4.8 subagents.
 - RISKY WP = extra independent review pass.

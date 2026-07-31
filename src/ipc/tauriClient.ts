@@ -835,7 +835,12 @@ export function createTauriClient(): CadClient {
    *  open a session / fire AddSketch / seed the id-map — the frozen `get_sketch`
    *  contract returns the SAME wire shape as `enter_sketch`; unknown ids reject. */
   async function getSketch(sketchId: string): Promise<SketchSession> {
-    const dto = await call<SketchSessionDto>(CMD.getSketch, { sketchId });
+    // Same frontend-id → backend-UUID resolution as finishSketch / getSketchRegions /
+    // deleteSketch: an ENTERED sketch's frontend id is NOT a backend SketchId. The
+    // `?? sketchId` fallback covers a never-entered sketch, whose store key IS the
+    // backend UUID (projection hydration).
+    const backendSketchId = sketchMaps.get(sketchId)?.backendSketchId ?? sketchId;
+    const dto = await call<SketchSessionDto>(CMD.getSketch, { sketchId: backendSketchId });
     // Feed the plane into the local preview lane so a following beginPreview resolves
     // it — exactly as enterSketch does (:491). Model-mode arms now read via getSketch
     // (MODEL-HARDEN W0.5); without this an L2 extrude/revolve preview would fall back

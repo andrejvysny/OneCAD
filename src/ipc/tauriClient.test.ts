@@ -355,6 +355,49 @@ describe("tauriClient getSketch (pure read)", () => {
     mockIPC((cmd) => (cmd === "get_sketch" ? Promise.reject({ kind: "notFound", message: "no sketch" }) : undefined));
     await expect(createTauriClient().getSketch("ghost")).rejects.toThrow(/notFound: no sketch/);
   });
+
+  it("resolves an ENTERED sketch's frontend id to its backend UUID (like its siblings)", async () => {
+    // The explicit-`sketchId` enter lane keeps minting a SEPARATE backend UUID, so
+    // the frontend id is NOT a valid backend SketchId; sending it raw makes the
+    // Rust side reject (or, worse, read a different sketch).
+    let enteredBackendId: string | undefined;
+    let getArgs: unknown;
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "apply_edit_command") return readyProjection(1);
+        if (cmd === "enter_sketch") {
+          enteredBackendId = (payload as { sketchId: string }).sketchId;
+          return {
+            sketchId: enteredBackendId,
+            plane: XZ_PLANE,
+            entities: [],
+            constraints: [],
+            dof: 0,
+            status: "UnderConstrained",
+          };
+        }
+        if (cmd === "get_sketch") {
+          getArgs = payload;
+          return {
+            sketchId: (payload as { sketchId: string }).sketchId,
+            plane: XZ_PLANE,
+            entities: [],
+            constraints: [],
+            dof: 0,
+            status: "UnderConstrained",
+          };
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const client = createTauriClient();
+    await client.enterSketch({ newOnPlane: "XZ", sketchId: "sk-front" });
+    expect(enteredBackendId).toBeDefined();
+    expect(enteredBackendId).not.toBe("sk-front"); // the two id spaces really differ
+
+    await client.getSketch("sk-front");
+    expect(getArgs).toEqual({ sketchId: enteredBackendId });
+  });
 });
 
 // ── Re-entry after reopen: enter a PERSISTED sketch without duplicating it ────

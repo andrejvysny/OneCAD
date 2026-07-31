@@ -17,6 +17,27 @@ const FEATURE_ICON: Record<FeatureKind, IconName> = {
   mirror: "mirrorBody",
 };
 
+/**
+ * Icon keyed by the exact authored `opType` (dto.rs `feature_kind` — see
+ * op_type()/feature_kind() there for the source strings), not the coarse
+ * `FeatureKind` bucket. `FeatureKind` folds Chamfer+Shell into "fillet" and the
+ * pattern/mirror ops into "boolean", so a row keyed only on `kind` shows the
+ * wrong icon for those (a Chamfer row would show the Fillet icon). Identity
+ * entries kept for the un-folded kinds for symmetry / a future direct lookup.
+ */
+const OPTYPE_ICON: Record<string, IconName> = {
+  Sketch: "pen",
+  Extrude: "extrude",
+  Revolve: "revolve",
+  Fillet: "fillet",
+  Chamfer: "chamfer",
+  Shell: "shell",
+  Boolean: "boolean",
+  LinearPattern: "linearPattern",
+  CircularPattern: "circularPattern",
+  MirrorBody: "mirrorBody",
+};
+
 /** Per-row history affordances (M4b): suppress toggle · roll-to-here · delete. */
 export interface HistoryRowActions {
   /** Whether this feature is suppressed — dims the row + icon. Sourced from the
@@ -64,7 +85,7 @@ function FeatureRow({
       )}
     >
       <Icon
-        name={FEATURE_ICON[item.kind]}
+        name={OPTYPE_ICON[item.opType ?? ""] ?? FEATURE_ICON[item.kind]}
         size={14}
         strokeWidth={1.7}
         className={selected ? "text-sel-text" : isError ? "text-traffic-close" : "text-ink-4"}

@@ -71,7 +71,7 @@ export interface EngineInitOptions {
 export interface PickHandlers {
   /** Picking is live only when this returns true (model + select mode). */
   isActive: () => boolean;
-  onHover: (hit: PickHit | null, clientX: number, clientY: number) => void;
+  onHover: (hit: PickHit | null, clientX: number, clientY: number, alt: boolean) => void;
   onPick: (hit: PickHit | null, mods: PickModifiers, clientX: number, clientY: number) => void;
 }
 
@@ -239,7 +239,7 @@ export class ViewportEngine {
       getFocusDistance: () => this.controls?.getDistance() ?? 260,
       invalidate: () => this.invalidate(),
       isActive: () => this.pickHandlers?.isActive() ?? false,
-      onHover: (hit, x, y) => this.pickHandlers?.onHover(hit, x, y),
+      onHover: (hit, x, y, alt) => this.pickHandlers?.onHover(hit, x, y, alt),
       onPick: (hit, mods, x, y) => this.pickHandlers?.onPick(hit, mods, x, y),
       // Secondary hover token: the always-visible sketch under the pointer (only
       // consulted when there is no body hit).

@@ -1,4 +1,20 @@
-# OneCAD-Tauri — Current State (2026-07-31, TRUST + PREVIEW waves shipped)
+# OneCAD-Tauri — Current State (2026-07-31, TRUST + PREVIEW waves + multi-object sketch fix shipped)
+
+## SKETCH-MULTI-OBJECT (2026-07-31, commit 267af13) — re-entry deleted prior objects
+USER-REPORTED: rect + disconnected line in one sketch → only latest survived
+Finish. Root cause: `seedIdMapFromWire` MERGED the enter_sketch wire into the
+per-sketch id-map instead of REBASING — stale frontend ids from the previous
+session made `marshalUpsert`'s removals-first diff emit `removeEntity` for every
+previously drawn object's backend uuid on the FIRST edit after re-entry (12 ops
+for a rect); viewport rendered from the untouched local session so loss showed
+only after Finish. Fix: clear entity/point/constraint/constraintValue before
+seeding (backendSketchId/planeKind survive). Red-first proven; pins in 4 lanes
+(sketchWireMap unit, sketchMultiObject full-stack vitest, e2e, real-worker
+sketch_multi_object.rs asserting document sketch + timeline record + re-entry
+union). Suites: FE 1407/119 · e2e 61/61 · cargo workspace green · clean.
+ADJACENT LATENT (flagged, unfixed): tauriClient.getSketch passes raw frontend id
+(siblings resolve backendSketchId); tree sketch-switch while already in sketch
+mode is a controller no-op (chrome points at new sketch, controller edits old).
 
 ## TRUST + PREVIEW (2026-07-31) — silent-wrong-behavior class killed + all-op kernel preview
 Two waves in one day (plan `mossy-foraging-muffin.md`, internal adversarial

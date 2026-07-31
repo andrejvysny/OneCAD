@@ -1036,6 +1036,148 @@ async fn solve_drag_without_gesture_is_recoverable_error() {
     assert!(matches!(err, EngineError::OpFailed { .. }));
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Mid-gesture solver-cache clobber guard — prepare_sketch_regions must refuse
+// while a drag is live on the SAME sketch (drive() would re-upsert stale
+// pre-drag geometry into the worker's solver cache, corrupting the live drag);
+// finish_sketch must clear a dangling gesture the same way cancel_sketch does.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A second, minimal sketch (no entities needed — prepare/drive only touch the
+/// FakeBackend, which is content-agnostic).
+fn other_sketch(sid_seed: u128) -> Sketch {
+    Sketch::on_world_plane(SketchId(Uuid::from_u128(sid_seed)), "Other", WorldPlane::XY)
+}
+
+#[tokio::test]
+async fn prepare_sketch_regions_refuses_during_a_live_gesture_on_the_same_sketch() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sk, point) = sketch_with_point();
+    let sid = sk.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap();
+    rt.enter_sketch(sid).await.unwrap();
+
+    rt.begin_gesture(sid, point).await.unwrap();
+
+    // `PreparedSketchRegions` has no `Debug` impl, so match manually instead of
+    // `expect_err`/`unwrap_err` (both require `T: Debug` for their panic path).
+    let err = match rt.prepare_sketch_regions(sid) {
+        Err(e) => e,
+        Ok(_) => panic!("a live gesture on the SAME sketch must refuse the region snapshot"),
+    };
+    match err {
+        EngineError::OpFailed {
+            message,
+            recoverable,
+            ..
+        } => {
+            assert!(recoverable, "must be recoverable — the session stays open");
+            assert!(message.contains(&sid.to_string()), "{message}");
+            assert!(message.contains("active drag gesture"), "{message}");
+        }
+        other => panic!("expected OpFailed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn prepare_sketch_regions_allows_a_different_sketch_during_a_live_gesture() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sk, point) = sketch_with_point();
+    let sid_a = sk.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap();
+    rt.enter_sketch(sid_a).await.unwrap();
+
+    let sk_b = other_sketch(0x5d);
+    let sid_b = sk_b.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk_b }).unwrap();
+
+    rt.begin_gesture(sid_a, point).await.unwrap();
+
+    // Sketch B carries no gesture — A's drag must not block it.
+    rt.prepare_sketch_regions(sid_b)
+        .expect("a different sketch's gesture must not block")
+        .drive()
+        .await
+        .expect("drive succeeds");
+}
+
+#[tokio::test]
+async fn prepare_sketch_regions_ok_again_after_gesture_ends() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sk, point) = sketch_with_point();
+    let sid = sk.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap();
+    rt.enter_sketch(sid).await.unwrap();
+
+    rt.begin_gesture(sid, point).await.unwrap();
+    assert!(
+        rt.prepare_sketch_regions(sid).is_err(),
+        "blocked mid-gesture"
+    );
+
+    rt.end_gesture(Some([1.0, 1.0])).await.unwrap();
+    rt.prepare_sketch_regions(sid)
+        .expect("an ended gesture unblocks prepare")
+        .drive()
+        .await
+        .expect("drive succeeds");
+}
+
+#[tokio::test]
+async fn prepare_sketch_regions_ok_again_after_cancel() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sk, point) = sketch_with_point();
+    let sid = sk.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap();
+    rt.enter_sketch(sid).await.unwrap();
+
+    rt.begin_gesture(sid, point).await.unwrap();
+    assert!(
+        rt.prepare_sketch_regions(sid).is_err(),
+        "blocked mid-gesture"
+    );
+
+    rt.cancel_sketch(sid).await.unwrap();
+    rt.prepare_sketch_regions(sid)
+        .expect("a cancelled gesture unblocks prepare")
+        .drive()
+        .await
+        .expect("drive succeeds");
+}
+
+#[tokio::test]
+async fn finish_sketch_mid_gesture_clears_active_gesture() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sk, point) = sketch_with_point();
+    let sid = sk.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap();
+    rt.enter_sketch(sid).await.unwrap();
+
+    rt.begin_gesture(sid, point).await.unwrap();
+    assert!(rt.active_gesture.is_some(), "gesture is live");
+
+    // The Enter/E finish handoff: the frontend's pointer-up cancel lost the
+    // race, so finish_sketch is reached while the gesture is still open.
+    rt.finish_sketch(sid).await.unwrap();
+
+    assert!(
+        rt.active_gesture.is_none(),
+        "finish_sketch must clear the dangling gesture (same as cancel_sketch)"
+    );
+    rt.prepare_sketch_regions(sid)
+        .expect("gesture cleared by finish ⇒ prepare unblocked")
+        .drive()
+        .await
+        .expect("drive succeeds");
+
+    // A stray late SolveDrag/EndGesture for the now-dead gesture is a
+    // recoverable error, not a panic.
+    let err = rt.solve_drag([9.0, 9.0]).await.unwrap_err();
+    assert!(matches!(err, EngineError::OpFailed { .. }));
+    let err = rt.end_gesture(None).await.unwrap_err();
+    assert!(matches!(err, EngineError::OpFailed { .. }));
+}
+
 #[tokio::test]
 async fn promote_selection_mints_ids_and_is_stable() {
     let mut rt = runtime_with(Arc::new(FakeBackend::new()));

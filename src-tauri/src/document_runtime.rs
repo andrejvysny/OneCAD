@@ -1405,6 +1405,19 @@ impl DocumentRuntime {
         &self,
         sketch_id: SketchId,
     ) -> Result<PreparedSketchRegions, EngineError> {
+        // `drive()` runs unlocked and re-upserts this snapshot into the worker's
+        // solver cache; mid-gesture that would clobber the live drag with
+        // pre-drag geometry, so subsequent SolveDrag replies apply onto stale
+        // state. Refuse loudly instead — a different sketch's gesture is fine.
+        if self
+            .active_gesture
+            .as_ref()
+            .is_some_and(|g| g.sketch_id == sketch_id)
+        {
+            return Err(op_failed(format!(
+                "getSketchRegions: sketch {sketch_id} has an active drag gesture — retry after pointer-up"
+            )));
+        }
         Ok(PreparedSketchRegions {
             sketch: self.sketch_or_err(sketch_id, "getSketchRegions")?,
             solver: self.solver.clone(),
@@ -1617,6 +1630,23 @@ impl DocumentRuntime {
         let solved = self.solver.sketch_upsert(&sketch).await?;
         self.record_solve(sketch_id, &solved);
         let regions = self.solver.sketch_regions(&sketch_id.to_string()).await?;
+        // The Enter/E finish handoff can land while a drag is still live (the
+        // frontend's pointer-up cancel lost the race) — clear the dangling
+        // gesture here too (cancel_sketch's take-once, scoped to this sketch)
+        // so it cannot forever block prepare_sketch_regions's guard above nor
+        // leak an orphaned gesture on the worker.
+        if self
+            .active_gesture
+            .as_ref()
+            .is_some_and(|g| g.sketch_id == sketch_id)
+        {
+            if let Some(g) = self.active_gesture.take() {
+                let _ = self
+                    .solver
+                    .end_gesture(&g.sketch_id.to_string(), g.gesture_id, None)
+                    .await;
+            }
+        }
         // B1 squash: collapse every in-session granular edit into ONE net command.
         self.squash_sketch_session(sketch_id);
         // The regen plan resolves a modeling op's profile ONLY from a preceding

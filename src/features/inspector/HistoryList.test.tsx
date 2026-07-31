@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { HistoryList, type HistoryRowActions } from "./HistoryList";
 import type { FeatureMeta } from "@/stores/documentStore";
+import { ICON_PATHS } from "@/icons/paths";
 
 const items: FeatureMeta[] = [
   { id: "f1", kind: "sketch", label: "Sketch 1", valueText: "", status: "ok" },
@@ -95,5 +96,53 @@ describe("HistoryList row affordances (M4b)", () => {
     render(<HistoryList items={items} onSelect={onSelect} rowActions={actions()} />);
     fireEvent.click(screen.getByTestId("history-roll-f2"));
     expect(onSelect).not.toHaveBeenCalled();
+  });
+});
+
+describe("HistoryList icons — opType-first lookup (W0.5)", () => {
+  // FeatureKind folds Chamfer/Shell into "fillet" and pattern/mirror ops into
+  // "boolean" (dto.rs feature_kind) so the icon must key off the exact authored
+  // `opType` first, falling back to the coarse `kind` bucket only when absent.
+  function iconPathOf(testId: string): string | null {
+    return screen.getByTestId(testId).querySelector("path")?.getAttribute("d") ?? null;
+  }
+
+  it("a folded Chamfer row (kind: fillet) shows the chamfer icon, not the fillet icon", () => {
+    const chamferRow: FeatureMeta = {
+      id: "c1",
+      kind: "fillet",
+      opType: "Chamfer",
+      label: "Chamfer",
+      valueText: "2.0 mm",
+      status: "ok",
+    };
+    render(<HistoryList items={[chamferRow]} />);
+    expect(iconPathOf("history-row-c1")).toBe(ICON_PATHS.chamfer);
+    expect(iconPathOf("history-row-c1")).not.toBe(ICON_PATHS.fillet);
+  });
+
+  it("a folded MirrorBody row (kind: boolean) shows the mirror icon", () => {
+    const mirrorRow: FeatureMeta = {
+      id: "m1",
+      kind: "boolean",
+      opType: "MirrorBody",
+      label: "Mirror",
+      valueText: "",
+      status: "ok",
+    };
+    render(<HistoryList items={[mirrorRow]} />);
+    expect(iconPathOf("history-row-m1")).toBe(ICON_PATHS.mirrorBody);
+  });
+
+  it("a row without opType falls back to the kind icon", () => {
+    const noOpTypeRow: FeatureMeta = {
+      id: "n1",
+      kind: "fillet",
+      label: "Fillet",
+      valueText: "2.0 mm",
+      status: "ok",
+    };
+    render(<HistoryList items={[noOpTypeRow]} />);
+    expect(iconPathOf("history-row-n1")).toBe(ICON_PATHS.fillet);
   });
 });
