@@ -257,6 +257,17 @@ export function extrudeStep(s: ExtrudeFsm, e: ExtrudeEvent): ExtrudeStep {
 }
 
 // ── Fillet ───────────────────────────────────────────────────────────────────
+//
+// EDGE-OP PREVIEW wave: the edge ops join the professional commit gesture the
+// extrude/revolve lanes already use. A pointer RELEASE keeps the tool ARMED (the
+// live kernel preview + the editable chip stay), and commit is an EXPLICIT
+// `confirm` (Enter / chip-✓). `commitFailed` returns the machine to `armed` so an
+// OCCT-refused radius never loses the user's edge selection.
+//
+// Click-away is deliberately NOT part of this gesture for fillet/shell: the armed
+// tool claims EVERY left press in the viewport as a value drag (there is no
+// handle hit-test to distinguish "grabbed the gizmo" from "clicked away"), so a
+// click-away confirm would be indistinguishable from a zero-distance drag.
 
 export const DEFAULT_FILLET_RADIUS = 2;
 
@@ -272,6 +283,8 @@ export type FilletEvent =
   | { kind: "drag"; radius: number }
   | { kind: "setRadius"; radius: number }
   | { kind: "release" }
+  | { kind: "confirm" }
+  | { kind: "commitFailed" }
   | { kind: "settle" }
   | { kind: "cancel" };
 
@@ -302,8 +315,18 @@ export function filletStep(s: FilletFsm, e: FilletEvent): FilletStep {
       if (s.phase !== "armed" && s.phase !== "dragging") return { state: s, effect: "none" };
       return { state: { ...s, radius: e.radius }, effect: "update" };
     case "release":
+      // Release does NOT commit — it keeps the tool armed at the dragged size so
+      // the kernel preview stays live and the user confirms explicitly.
       if (s.phase !== "dragging") return { state: s, effect: "none" };
+      return { state: { ...s, phase: "armed" }, effect: "update" };
+    case "confirm":
+      if (s.phase !== "armed") return { state: s, effect: "none" };
       return { state: { ...s, phase: "committing" }, effect: "commit" };
+    case "commitFailed":
+      // The kernel refused the op — back to armed so the edge selection + size
+      // survive and the controller can re-arm the preview and name the reason.
+      if (s.phase !== "committing") return { state: s, effect: "none" };
+      return { state: { ...s, phase: "armed" }, effect: "none" };
     case "settle":
       return { state: filletInit(), effect: "none" };
     case "cancel":
@@ -555,8 +578,11 @@ export function booleanStep(s: BooleanFsm, e: BooleanEvent): BooleanStep {
 //
 // Shell mirrors Fillet: it arms from a FACE selection (the selected faces are the
 // removed/open faces), then a vertical drag (or the mm chip) sets the wall
-// thickness, and release commits. There is no cheap L1 preview (hollowing needs
-// OCCT), so it is chip + status-hint driven — the exact body arrives on commit.
+// thickness. Release keeps the tool ARMED; commit is the explicit `confirm`
+// (Enter / chip-✓) — see the Fillet block for why click-away is excluded.
+//
+// There is still no cheap L1 preview (hollowing needs OCCT); the visible preview
+// is the kernel's exact candidate from the shared PreviewOp lane.
 
 export const DEFAULT_SHELL_THICKNESS = 2;
 
@@ -572,6 +598,8 @@ export type ShellEvent =
   | { kind: "drag"; thickness: number }
   | { kind: "setThickness"; thickness: number }
   | { kind: "release" }
+  | { kind: "confirm" }
+  | { kind: "commitFailed" }
   | { kind: "settle" }
   | { kind: "cancel" };
 
@@ -602,8 +630,15 @@ export function shellStep(s: ShellFsm, e: ShellEvent): ShellStep {
       if (s.phase !== "armed" && s.phase !== "dragging") return { state: s, effect: "none" };
       return { state: { ...s, thickness: e.thickness }, effect: "update" };
     case "release":
+      // Release keeps the tool armed at the dragged thickness (no implicit commit).
       if (s.phase !== "dragging") return { state: s, effect: "none" };
+      return { state: { ...s, phase: "armed" }, effect: "update" };
+    case "confirm":
+      if (s.phase !== "armed") return { state: s, effect: "none" };
       return { state: { ...s, phase: "committing" }, effect: "commit" };
+    case "commitFailed":
+      if (s.phase !== "committing") return { state: s, effect: "none" };
+      return { state: { ...s, phase: "armed" }, effect: "none" };
     case "settle":
       return { state: shellInit(), effect: "none" };
     case "cancel":

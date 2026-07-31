@@ -79,6 +79,17 @@ export interface RegionSelectChipHandlers {
   onCancel: () => void;
 }
 
+/**
+ * The ✓/✕ pair the armed FILLET / CHAMFER / SHELL chip wires (edge-op preview
+ * wave). Optional so the parametric RE-EDIT chip — which commits straight out of
+ * its numeric input and has no live preview session to confirm — keeps rendering
+ * as the bare numeric chip it always was.
+ */
+export interface ValueChipHandlers {
+  onConfirm?: () => void;
+  onCancel?: () => void;
+}
+
 export type ChipKind =
   | "none"
   | "extrudeDepth"
@@ -154,7 +165,12 @@ export interface ToolChipState {
     handlers: ExtrudeChipHandlers,
     opts?: ExtrudeChipOpts,
   ): void;
-  showFillet(value: number, worldPos: [number, number, number], onValue: (v: number) => void): void;
+  showFillet(
+    value: number,
+    worldPos: [number, number, number],
+    onValue: (v: number) => void,
+    handlers?: ValueChipHandlers,
+  ): void;
   showRevolve(
     value: number,
     worldPos: [number, number, number],
@@ -173,7 +189,12 @@ export interface ToolChipState {
     onOp: (op: BooleanOperation) => void,
     onApply: () => void,
   ): void;
-  showShell(value: number, worldPos: [number, number, number], onValue: (v: number) => void): void;
+  showShell(
+    value: number,
+    worldPos: [number, number, number],
+    onValue: (v: number) => void,
+    handlers?: ValueChipHandlers,
+  ): void;
   showLinearPattern(
     axis: PatternAxis,
     count: number,
@@ -286,8 +307,16 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
       onBooleanMode: handlers.onBooleanMode ?? null,
     });
   },
-  showFillet(value, worldPos, onValue) {
-    set({ ...CLEARED, kind: "filletRadius", value, worldPos, onValue });
+  showFillet(value, worldPos, onValue, handlers) {
+    set({
+      ...CLEARED,
+      kind: "filletRadius",
+      value,
+      worldPos,
+      onValue,
+      onConfirm: handlers?.onConfirm ?? null,
+      onCancel: handlers?.onCancel ?? null,
+    });
   },
   showRevolve(value, worldPos, handlers, opts) {
     set({
@@ -318,8 +347,16 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
   showBoolean(op, worldPos, onOp, onApply) {
     set({ ...CLEARED, kind: "booleanOp", op, worldPos, onOp, onApply });
   },
-  showShell(value, worldPos, onValue) {
-    set({ ...CLEARED, kind: "shellThickness", value, worldPos, onValue });
+  showShell(value, worldPos, onValue, handlers) {
+    set({
+      ...CLEARED,
+      kind: "shellThickness",
+      value,
+      worldPos,
+      onValue,
+      onConfirm: handlers?.onConfirm ?? null,
+      onCancel: handlers?.onCancel ?? null,
+    });
   },
   showLinearPattern(axis, count, spacing, worldPos, handlers) {
     set({

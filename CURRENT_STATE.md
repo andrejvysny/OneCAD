@@ -1,4 +1,50 @@
-# OneCAD-Tauri — Current State (2026-07-30, EXTRUDE-COMMIT-FIX shipped)
+# OneCAD-Tauri — Current State (2026-07-31, TRUST + PREVIEW waves shipped)
+
+## TRUST + PREVIEW (2026-07-31) — silent-wrong-behavior class killed + all-op kernel preview
+Two waves in one day (plan `mossy-foraging-muffin.md`, internal adversarial
+review substituting the Codex gate; dual review REVISE → all 5 blockers +
+16 majors across both cycles fixed red-first).
+**TRUST (commit 49089bc)**: Suppression was geometrically INERT (record flag
+never reached StepState; deeper: `OperationRecord::outputs` never populated in
+production → dependency graph had ZERO body edges → cascade AND anti-time-travel
+validation silently dead) — now real: one predicate (records), hash filter
+(repairs latent checkpoint mismatch), cascade-on-suppress-only, all-suppressed
+publishes a Clear, executed-scoped outputs sync (checkpoint regen must not wipe
+the prefix). Body name/visible durable (adopt+overlay+save-merge; DeleteBody on
+timeline bodies rejected; suppressed body leaves the tree). Revolve got extrude's
+parity: stored-profile re-edit (exact regionId, volume-proven), pure-read arm,
+commit-boundary record guarantee (NEGATIVE tripwire vs real worker), stored-axis
+restore, geometryToken cancel. Pattern/Mirror/Shell re-edit was DEAD on the real
+lane (kind-guards vs folded FeatureKind; mock emitted nonexistent kinds — the
+postmortem false-green class) — opType-gated now, sourced from stored params,
+loud refusals. Boolean op-swap re-edit. Tree: context menu, F2 inline rename,
+backend-backed visibility over a no-awaiter metadata transport (sketch delete
+excluded — ToEnd). Optimistic suppress overlay DELETED (un-suppress after reopen
+was impossible: `!undefined→true` lock). Unsaved-changes guard on every close
+path incl. start screen + ⌘Q (ExitGuard self-healing; Don't-Save-quit no longer
+resurrects discarded work as crash recovery). statusMessage no longer dropped by
+history actions; doc-lifecycle store resets; trace.ts dev/?trace-gated.
+**PREVIEW (this tree)**: PreviewOp exercised by ALL op types — one shared
+builder table (previewOps.ts), each builder fixture-pinned byte-equal to its
+commit call-site; controller session infra generalized behavior-preserving
+(extrude parity pins untouched, e2e 50/50 before wiring). Revolve previews the
+real kernel result during drag (Cut actually subtracts); Fillet/Chamfer/Shell
+moved to armed-commit gesture (Enter/✓/Esc; NO click-away — armed tools claim
+every press as a value drag) with kernel preview and OCCT-refusal BLOCKING ✓
+with the named reason; Boolean previews the fused/cut candidate with both
+sources hidden. preview==commit proven per op vs real worker (revolve 2352.411 /
+cut 9502.555 / fillet 19981.229 / chamfer 19960 / shell 2224 / union 30000 /
+cut 10000 — all exact), head fingerprint + revision untouched by every preview.
+Latent bugs killed en route: trailing-throttle >90ms froze coalesced previews;
+progress hint buried error hints; test-fixture record-plane≠document-plane
+diverged preview vs commit. SCHEMA §14 doc-only entry (no wire change).
+Suites at Wave-2 gate: FE 1404+ · cargo workspace green vs real worker (+~35
+tests: suppression 8, body_metadata 7, preview_revolve 2, preview_edge_shell 4,
+preview_boolean 2, revolve_ops 8, dto/wire pins) · ctest test_preview_op 14
+cases · e2e 60/60 · clippy/fmt/tsc/hex clean.
+REMAINING: USER manual Tauri gates (TODO.md — Wave 1 + Wave 2 checklists, plus
+the older AUTO-MODE/EXTRUDE-COMMIT-FIX ones); preview p95 latency budget
+unpinned; worker-side preview coalescing deferred (cancel groundwork in ctest).
 
 ## EXTRUDE-COMMIT-FIX (2026-07-30) — select+drag worked, apply silently failed
 User-reported: region select + drag preview OK, committing the extrusion did

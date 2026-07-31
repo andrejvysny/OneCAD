@@ -151,7 +151,12 @@ describe("extrude FSM", () => {
 });
 
 describe("fillet FSM", () => {
-  it("arms only with ≥1 edge, then drags radius to commit", () => {
+  // EDGE-OP PREVIEW wave: release no longer commits. The three assertions below
+  // that changed are the whole behaviour change — a released drag stays ARMED (so
+  // the kernel preview stays live and the chip stays editable), `confirm` is the
+  // only path to `committing`, and `commitFailed` returns to armed with the user's
+  // radius + edge selection intact.
+  it("arms only with ≥1 edge, then drags radius; release stays ARMED", () => {
     expect(filletStep(filletInit(), { kind: "arm", edgeCount: 0 }).state.phase).toBe("idle");
 
     let s: FilletFsm = filletStep(filletInit(), { kind: "arm", edgeCount: 2, radius: 3 }).state;
@@ -166,9 +171,34 @@ describe("fillet FSM", () => {
     expect(dragged.effect).toBe("update");
     expect(dragged.state.radius).toBe(4.5);
 
-    const committed = filletStep(dragged.state, { kind: "release" });
-    expect(committed.effect).toBe("commit");
-    expect(committed.state.phase).toBe("committing");
+    const released = filletStep(dragged.state, { kind: "release" });
+    expect(released.effect).toBe("update"); // flush the final radius, do NOT commit
+    expect(released.state.phase).toBe("armed");
+    expect(released.state.radius).toBe(4.5); // the dragged size survives
+  });
+
+  it("confirm is the only commit path, and a failed commit returns to armed", () => {
+    const armed = filletStep(filletInit(), { kind: "arm", edgeCount: 1, radius: 2 }).state;
+
+    const committing = filletStep(armed, { kind: "confirm" });
+    expect(committing.effect).toBe("commit");
+    expect(committing.state.phase).toBe("committing");
+
+    // A second confirm while committing is inert (no double-write).
+    expect(filletStep(committing.state, { kind: "confirm" }).effect).toBe("none");
+    // Confirm from a DRAG is inert too — the release must land first.
+    const dragging = filletStep(armed, { kind: "grabEdge" }).state;
+    expect(filletStep(dragging, { kind: "confirm" }).effect).toBe("none");
+
+    const failed = filletStep(committing.state, { kind: "commitFailed" });
+    expect(failed.effect).toBe("none");
+    expect(failed.state.phase).toBe("armed");
+    expect(failed.state.radius).toBe(2); // work preserved for the retry
+    expect(failed.state.edgeCount).toBe(1);
+    // commitFailed outside `committing` is inert.
+    expect(filletStep(armed, { kind: "commitFailed" }).state.phase).toBe("armed");
+
+    expect(filletStep(committing.state, { kind: "settle" }).state.phase).toBe("idle");
   });
 });
 
@@ -334,7 +364,9 @@ describe("boolean FSM", () => {
 });
 
 describe("shell FSM", () => {
-  it("arms only with ≥1 face, then drags thickness to commit", () => {
+  // Same behaviour change as the fillet FSM above (release → armed, explicit
+  // confirm, commitFailed → armed) — one gesture across both value-drag tools.
+  it("arms only with ≥1 face, then drags thickness; release stays ARMED", () => {
     expect(shellStep(shellInit(), { kind: "arm", faceCount: 0 }).state.phase).toBe("idle");
 
     let s: ShellFsm = shellStep(shellInit(), { kind: "arm", faceCount: 2, thickness: 3 }).state;
@@ -349,11 +381,29 @@ describe("shell FSM", () => {
     expect(dragged.effect).toBe("update");
     expect(dragged.state.thickness).toBe(4.5);
 
-    const committed = shellStep(dragged.state, { kind: "release" });
-    expect(committed.effect).toBe("commit");
-    expect(committed.state.phase).toBe("committing");
+    const released = shellStep(dragged.state, { kind: "release" });
+    expect(released.effect).toBe("update"); // flush the final thickness, no commit
+    expect(released.state.phase).toBe("armed");
+    expect(released.state.thickness).toBe(4.5);
+  });
 
-    expect(shellStep(committed.state, { kind: "settle" }).state.phase).toBe("idle");
+  it("confirm is the only commit path, and a failed commit returns to armed", () => {
+    const armed = shellStep(shellInit(), { kind: "arm", faceCount: 2, thickness: 3 }).state;
+
+    const committing = shellStep(armed, { kind: "confirm" });
+    expect(committing.effect).toBe("commit");
+    expect(committing.state.phase).toBe("committing");
+    expect(shellStep(committing.state, { kind: "confirm" }).effect).toBe("none");
+    expect(shellStep(shellStep(armed, { kind: "grab" }).state, { kind: "confirm" }).effect).toBe("none");
+
+    const failed = shellStep(committing.state, { kind: "commitFailed" });
+    expect(failed.effect).toBe("none");
+    expect(failed.state.phase).toBe("armed");
+    expect(failed.state.thickness).toBe(3); // work preserved for the retry
+    expect(failed.state.faceCount).toBe(2);
+    expect(shellStep(armed, { kind: "commitFailed" }).state.phase).toBe("armed");
+
+    expect(shellStep(committing.state, { kind: "settle" }).state.phase).toBe("idle");
   });
 
   it("defaults the thickness + honors setThickness while armed", () => {

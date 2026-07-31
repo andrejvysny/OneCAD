@@ -13,7 +13,7 @@
  * pattern/mirror ops into kind `boolean`, so the guard is on `opType`.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { ModelToolController } from "./ModelToolController";
+import { ModelToolController, __setExactPreviewTimeoutForTests } from "./ModelToolController";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import type { CadClient } from "@/ipc/client";
 import type { ApplyOperationResult } from "@/ipc/types";
@@ -40,7 +40,7 @@ function makeEngineMock() {
     probePick: vi.fn(() => null),
     hideExtrudePreview: vi.fn(),
     clearPreviewBody: vi.fn(),
-    setExtrudePreviewTint: vi.fn(),
+    setPreviewTint: vi.fn(),
     setOrbitSuppressed: vi.fn(),
     hideRevolvePreview: vi.fn(),
     hideRegionPick: vi.fn(),
@@ -56,11 +56,20 @@ const STORED_UNION = {
 };
 
 function makeClientMock() {
+  let seq = 0;
   return {
     onPreviewResult: vi.fn(() => () => {}),
     applyOperation: vi.fn(() => Promise.resolve(okResult())),
     applyEditCommand: vi.fn(() => Promise.resolve(okResult())),
     getOperationParams: vi.fn(() => Promise.resolve({ ...STORED_UNION }) as Promise<Record<string, unknown>>),
+    // A FRESH boolean commit now routes through the kernel-preview lane (mirrors
+    // extrude); a RE-EDIT never opens one, so these three are unused by every spec
+    // above except the trailing "tool switch mid-edit" one.
+    beginPreview: vi.fn(() =>
+      Promise.resolve({ sessionId: `pv-${++seq}`, previewBodyId: `pb-${seq}` }),
+    ),
+    updatePreview: vi.fn(),
+    endPreview: vi.fn(() => Promise.resolve(okResult())),
   };
 }
 
@@ -94,6 +103,10 @@ describe("ModelToolController boolean re-edit (operation swap only)", () => {
 
   beforeEach(() => {
     resetStores();
+    // A FRESH boolean commit waits for the exact-preview barrier (mirrors extrude);
+    // these specs assert MUTATION SEQUENCING, not the barrier itself, so collapse
+    // it to one macrotask.
+    __setExactPreviewTimeoutForTests(0);
     container = document.createElement("div");
     document.body.appendChild(container);
     // Only the TARGET survives a committed boolean — the tool body is consumed.
@@ -106,6 +119,7 @@ describe("ModelToolController boolean re-edit (operation swap only)", () => {
   afterEach(() => {
     controller?.dispose();
     container.remove();
+    __setExactPreviewTimeoutForTests(4000);
   });
 
   it("arms chip-only on a RETIRED tool body: no body highlight, no re-pick offered", async () => {
@@ -230,7 +244,7 @@ describe("ModelToolController boolean re-edit (operation swap only)", () => {
     expect(toolStore.getState().modelTool).not.toBe("boolean");
   });
 
-  it("a tool switch mid-edit drops the edit id, so the next boolean commit APPENDS instead of editing", async () => {
+  it("a tool switch mid-edit drops the edit id, so the next boolean commit is a FRESH kernel-preview commit, not an edit", async () => {
     build();
 
     await controller.editBooleanFeature("feat-bool");
@@ -248,14 +262,26 @@ describe("ModelToolController boolean re-edit (operation swap only)", () => {
     selectionStore.getState().set([{ kind: "body", id: "body1" }]);
     toolStore.getState().setTool("boolean");
     controller.forceBooleanPick("body3");
+    await flush(); // let the pick's beginPreview open the lane session
+
+    expect(clientMock.beginPreview).toHaveBeenCalledWith({
+      opType: "Boolean",
+      inputs: [
+        { primary: { bodyId: "body1", kind: "body" } },
+        { primary: { bodyId: "body3", kind: "body" } },
+      ],
+      params: { operation: "Union", targetBodyId: "body1", toolBodyId: "body3" },
+    });
+
     toolChipStore.getState().onApply?.();
     await flush();
+    await flush(); // exact-preview barrier (collapsed to one macrotask) + endPreview
 
-    expect(clientMock.applyOperation).toHaveBeenCalledWith(
-      expect.objectContaining({
-        opType: "Boolean",
-        params: { operation: "Union", targetBodyId: "body1", toolBodyId: "body3" },
-      }),
-    );
+    // A FRESH commit routes through the SAME lane session as its preview — never a
+    // second `applyOperation` (which the old direct-commit path used) and never an
+    // `applyEditCommand` against the stale (now-cleared) edit feature id.
+    expect(clientMock.applyOperation).not.toHaveBeenCalled();
+    expect(clientMock.applyEditCommand).not.toHaveBeenCalled();
+    expect(clientMock.endPreview).toHaveBeenCalledWith(expect.any(String), true);
   });
 });

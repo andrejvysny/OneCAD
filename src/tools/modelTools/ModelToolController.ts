@@ -20,6 +20,7 @@ import type {
   AxisRef,
   BooleanOperation,
   FeatureRecord,
+  FilletParams,
   OperationOp,
   PreviewDraft,
   PreviewFailure,
@@ -27,6 +28,7 @@ import type {
   PreviewResult,
   PreviewSession,
   SemanticRef,
+  ShellParams,
   SketchPlane,
   SketchRegion,
   SketchSession,
@@ -104,6 +106,19 @@ import type { FeatureBooleanMode } from "@/ipc/types";
 const DRAG_PX = 4;
 
 /**
+ * Preview trailing floors, per OP COST (`PreviewThrottle.setTrailingMs`). One
+ * throttle serves every tool, but a fillet rebuild and a shell hollowing are far
+ * dearer than the prism sweep the 80ms default was tuned for, so each owner sets
+ * its own floor at arm time. The edge-op DRAG floor drops back to the default
+ * while the pointer owns the value (the user is watching it move), and is
+ * restored on release.
+ */
+const EDGE_OP_TRAILING_MS = 160;
+const EDGE_OP_DRAG_TRAILING_MS = 80;
+/** Shell hollows the whole solid — the dearest of the three; one floor, no drag tier. */
+const SHELL_TRAILING_MS = 200;
+
+/**
  * How long a commit waits for its new bodies to enter the scene (onBodyLoaded)
  * before finishing anyway. A committed body that never ingests — e.g. a hidden body
  * whose mesh is never fetched — must not hang the tool open forever (finding 8).
@@ -114,6 +129,14 @@ export function __setBodyLoadTimeoutForTests(ms: number): void {
   bodyLoadTimeoutMs = ms;
 }
 
+/**
+ * Trailing-send floor for the Revolve lane. A revolve rebuild costs roughly what an
+ * extrude prism does (one sweep on a throwaway head), so it keeps the throttle's own
+ * 80 ms default — set EXPLICITLY at arm time because the throttle is shared and a
+ * previous owner may have re-tuned it for a more expensive op.
+ */
+const REVOLVE_PREVIEW_TRAILING_MS = 80;
+
 let exactPreviewTimeoutMs = 4000;
 /** Test seam: shrink the final exact-preview barrier timeout. */
 export function __setExactPreviewTimeoutForTests(ms: number): void {
@@ -121,6 +144,16 @@ export function __setExactPreviewTimeoutForTests(ms: number): void {
 }
 
 type ExactPreviewOutcome = { ok: true } | { ok: false; error: PreviewFailure };
+
+/**
+ * Result of the shared previewed-commit sequence (fillet/chamfer + shell).
+ * `superseded` is NOT a failure: the tool moved on mid-await (cancel / tool
+ * switch / dispose), so the caller must touch nothing.
+ */
+type PreviewCommitOutcome =
+  | { kind: "ok"; res: ApplyOperationResult }
+  | { kind: "failed"; reason: string }
+  | { kind: "superseded" };
 
 interface ExactPreviewWaiter {
   timer: ReturnType<typeof setTimeout>;
@@ -175,18 +208,29 @@ interface RegionPickState {
 }
 
 /**
- * The one exact sketch region consumed by an armed Extrude.
+ * One open kernel-preview lane session, owned by whichever tool armed it
+ * (`previewOwner`). Everything here is opType-BLIND: the session is keyed by its
+ * lane `sessionId`, and the exact candidate bodies it publishes are ingested the
+ * same way whatever op produced them.
+ *
+ * `region`/`profile` are the PROFILE-based ops' extras (Extrude/Revolve bind one
+ * sketch region each, and the L1 prism/lathe is drawn from the profile). An op
+ * that operates on existing solids — Fillet/Chamfer/Shell/Boolean — carries
+ * neither, which is why both are optional.
  */
-interface ExtrudeSession {
+interface ToolPreviewSession {
   session: PreviewSession;
   draft: PreviewDraft;
-  region: SketchRegion;
-  profile: PrismProfile;
+  region?: SketchRegion;
+  profile?: PrismProfile;
   /** Newest L2 epoch applied for THIS session (drops out-of-order per-session results). */
   lastAppliedEpoch: number;
   /** Mesh-registry ids for every exact candidate body in the newest result. */
   previewBodyIds: string[];
 }
+
+/** Which tool owns the currently open preview sessions (drives hints + params). */
+type PreviewOwner = "extrude" | "revolve" | "edgeOp" | "shell" | "boolean";
 
 export class ModelToolController {
   private extrude: ExtrudeFsm = extrudeInit();
@@ -206,9 +250,33 @@ export class ModelToolController {
   private mirror: MirrorFsm = mirrorInit();
   private readonly throttle = new PreviewThrottle<PreviewParams>({ trailingMs: 80 });
 
-  // Extrude preview context. One session per armed region (N==1 single-region;
-  // N in Wave 2 multi-select). The first session paces the shared throttle.
-  private extrudeSessions: ExtrudeSession[] = [];
+  // Kernel-preview context. One session per armed target (Extrude: one per region
+  // — N==1 single-region, N in Wave 2 multi-select). The first session paces the
+  // shared throttle. Only ONE tool owns the lane at a time.
+  private previewSessions: ToolPreviewSession[] = [];
+  /** The tool that armed the open sessions; null when none are open. */
+  private previewOwner: PreviewOwner | null = null;
+  /**
+   * The owner's params snapshotter. `sendPreview` is opType-blind: it asks for the
+   * CURRENT complete params here instead of taking a tool-specific argument, so a
+   * new tool joins the lane by binding this at arm time and nothing else.
+   */
+  private previewParamsFn: (() => PreviewParams) | null = null;
+  /**
+   * True between an arm's first exact-preview request and its first answer
+   * (result OR failure). Only set for owners with NO local L1 synthesis — an
+   * extrude already shows its prism immediately, so a "Computing preview…" hint
+   * there would contradict what the user is looking at.
+   */
+  private previewPending = false;
+  /** True while OUR "Computing preview…" hint owns the status line (so we restore it). */
+  private previewPendingHint = false;
+  /**
+   * The arm hint to restore when the "Computing preview…" state clears, for the
+   * owners that have no `armHintFor` entry (edgeOp / shell). Set at arm time,
+   * dropped with the sessions.
+   */
+  private previewArmHint: string | null = null;
   private plane: SketchPlane | null = null;
   private centroidWorld: Vec3 = [0, 0, 0];
   private normal: Vec3 = [0, 0, 1];
@@ -349,6 +417,19 @@ export class ModelToolController {
     // sessions reference, so the arm is dropped instead of committing stale profiles.
     this.unsubs.push(documentStore.subscribe((s) => this.onSketchGeometryChanged(s.sketches)));
 
+    // An armed EDGE OP / SHELL is bound to snapshot-scoped TopoKeys on the CURRENT
+    // head. Any document change re-snapshots the model, so those keys may silently
+    // designate different topology — fail closed and drop the arm (mirrors the
+    // geometryToken guard above, which covers only the sketch-bound tools).
+    let lastRevision = documentStore.getState().revision;
+    this.unsubs.push(
+      documentStore.subscribe((s) => {
+        if (s.revision === lastRevision) return;
+        lastRevision = s.revision;
+        this.onDocumentRevisionChanged();
+      }),
+    );
+
     let lastPending = viewportStore.getState().pendingExtrudeSketch;
     this.unsubs.push(
       viewportStore.subscribe((s) => {
@@ -392,7 +473,7 @@ export class ModelToolController {
         });
       return;
     }
-    if (this.extrudeSessions.length === 0) return;
+    if (this.previewSessions.length === 0) return;
     if (this.extrude.phase !== "armed" && this.extrude.phase !== "dragging") return;
     this.cancelPreview();
     toolStore.getState().setTool("select"); // Esc-ladder tail (also bumps commitGen)
@@ -402,6 +483,44 @@ export class ModelToolController {
         severity: "info",
         sticky: true,
       });
+  }
+
+  /**
+   * Drop an armed edge op / shell when the DOCUMENT moved underneath it.
+   *
+   * Both tools bind their selection as snapshot-scoped `TopoKey`s (`"e:5"` /
+   * `"f:22"`) captured off the head that was on screen when the user picked. Any
+   * committed edit, undo or redo re-snapshots the model and those indices can
+   * designate entirely different topology — the exact silent-mis-bind the whole
+   * migration exists to eliminate. So this fails CLOSED: cancel the arm and ask
+   * for a fresh pick rather than preview (and then commit) against keys that may
+   * no longer mean what the user clicked.
+   *
+   * A COMMITTING op is excluded: its own commit is what bumped the revision, and
+   * it is already generation-gated. A parametric RE-EDIT is excluded too — it
+   * carries no TopoKeys of its own (the stored params hold the original refs) and
+   * transitions to `committing` before applying, for exactly this reason.
+   */
+  private onDocumentRevisionChanged(): void {
+    const filletArmed = this.fillet.phase === "armed" || this.fillet.phase === "dragging";
+    const shellArmed = this.shell.phase === "armed" || this.shell.phase === "dragging";
+    if (filletArmed && !this.filletEditFeatureId) {
+      this.cancelFillet();
+      toolStore.getState().setTool("select"); // Esc-ladder tail; also clears the hint
+      viewportStore
+        .getState()
+        .setStatusHint("Model changed — re-select edges", { severity: "info", sticky: true });
+      this.updateDebug();
+      return;
+    }
+    if (shellArmed && !this.shellEditFeatureId) {
+      this.cancelShell();
+      toolStore.getState().setTool("select");
+      viewportStore
+        .getState()
+        .setStatusHint("Model changed — re-select faces", { severity: "info", sticky: true });
+      this.updateDebug();
+    }
   }
 
   // ── tool arming ────────────────────────────────────────────────────────────
@@ -422,10 +541,10 @@ export class ModelToolController {
     toolChipStore.getState().clear();
     if (tool === "extrude") this.armExtrudeFromSelection();
     else if (tool === "revolve") this.armRevolveFromSelection();
-    else if (tool === "fillet") this.armEdgeOpFromSelection("Fillet");
-    else if (tool === "chamfer") this.armEdgeOpFromSelection("Chamfer");
+    else if (tool === "fillet") void this.armEdgeOpFromSelection("Fillet");
+    else if (tool === "chamfer") void this.armEdgeOpFromSelection("Chamfer");
     else if (tool === "boolean") this.startBooleanFromSelection();
-    else if (tool === "shell") this.armShellFromSelection();
+    else if (tool === "shell") void this.armShellFromSelection();
     else if (tool === "linearPattern") this.armLinearFromSelection();
     else if (tool === "circularPattern") this.armCircularFromSelection();
     else if (tool === "mirror") this.armMirrorFromSelection();
@@ -577,7 +696,7 @@ export class ModelToolController {
 
     // Open one preview session per region. A superseded arm (gen bumped mid-await)
     // tears its own sessions down so no lane session leaks.
-    const sessions: ExtrudeSession[] = [];
+    const sessions: ToolPreviewSession[] = [];
     for (let i = 0; i < regions.length; i++) {
       const params = this.extrudePreviewParams(startDepth);
       if (editFeatureId) params.featureId = editFeatureId;
@@ -614,10 +733,15 @@ export class ModelToolController {
         previewBodyIds: [],
       });
     }
-    this.extrudeSessions = sessions;
+    this.previewSessions = sessions;
+    // Claim the shared lane: from here `sendPreview()` reads the extrude params
+    // through this closure and needs no extrude-specific argument.
+    this.previewOwner = "extrude";
+    this.previewParamsFn = () => this.extrudePreviewParams(this.extrude.depth);
+    this.previewPending = false;
 
     this.throttle.reset();
-    this.engine.setExtrudePreviewTint("normal");
+    this.engine.setPreviewTint("normal");
     toolStore.setState({ phase: "armed" });
     const n = regions.length;
     viewportStore.getState().setStatusHint(
@@ -659,7 +783,7 @@ export class ModelToolController {
       },
     );
 
-    this.sendPreview(startDepth); // initial exact L2 (all sessions)
+    this.sendPreview(); // initial exact L2 (all sessions)
     this.updateDebug();
   }
 
@@ -676,7 +800,7 @@ export class ModelToolController {
     this.extrude = extrudeStep(this.extrude, { kind: "setDepth", depth: v }).state;
     this.engine.setExtrudeDepth(v, this.extrude.symmetric);
     toolChipStore.getState().setValue(v);
-    this.sendPreview(v);
+    this.sendPreview();
   }
 
   /** ⇔ toggle on the armed cluster: mirror Alt-during-drag onto the live preview. */
@@ -685,7 +809,7 @@ export class ModelToolController {
     this.extrude = extrudeStep(this.extrude, { kind: "setSymmetric", symmetric }).state;
     this.engine.setExtrudeDepth(this.extrude.depth, symmetric);
     toolChipStore.getState().setSymmetric(symmetric);
-    this.sendPreview(this.extrude.depth);
+    this.sendPreview();
   }
 
   // ── boolean modes (extrude/revolve New Body / Add / Cut — Wave 2) ─────────────
@@ -717,7 +841,7 @@ export class ModelToolController {
       this.extrude = extrudeStep(this.extrude, { kind: "setBooleanMode", mode, needsPick: true }).state;
     }
     this.applyBooleanState(this.extrude.booleanMode, this.extrude.phase === "targetPick", "extrude");
-    if (this.extrude.phase === "armed") this.sendPreview(this.extrude.depth);
+    if (this.extrude.phase === "armed") this.sendPreview();
   }
 
   /**
@@ -739,7 +863,7 @@ export class ModelToolController {
     } else {
       this.engine.setOrbitSuppressed(false);
       viewportStore.getState().setStatusHint(this.armHintFor("extrude"), { sticky: true });
-      this.sendPreview(this.extrude.depth);
+      this.sendPreview();
     }
     this.updateDebug();
   }
@@ -773,7 +897,7 @@ export class ModelToolController {
     this.extrude = extrudeStep(this.extrude, { kind: "pickFace", ref }).state;
     this.engine.setOrbitSuppressed(false);
     viewportStore.getState().setStatusHint(this.armHintFor("extrude"), { sticky: true });
-    this.sendPreview(this.extrude.depth);
+    this.sendPreview();
     this.updateDebug();
   }
 
@@ -784,7 +908,7 @@ export class ModelToolController {
     toolChipStore.setState({ endCondition: this.extrude.endCondition });
     this.engine.setOrbitSuppressed(false);
     viewportStore.getState().setStatusHint(this.armHintFor("extrude"), { sticky: true });
-    this.sendPreview(this.extrude.depth);
+    this.sendPreview();
     this.updateDebug();
   }
 
@@ -801,12 +925,15 @@ export class ModelToolController {
       this.revolve = revolveStep(this.revolve, { kind: "setBooleanMode", mode, needsPick: true }).state;
     }
     this.applyBooleanState(this.revolve.booleanMode, this.revolve.phase === "targetPick", "revolve");
+    // A mode change rewrites the candidate op (Cut/Add bind a target body), so the
+    // exact preview must follow it — this is the frame where a Cut starts SUBTRACTING.
+    if (this.revolve.phase === "armed") this.sendPreview();
   }
 
   /** Shared side effects of a boolean-mode change: chip + Cut tint + hint. */
   private applyBooleanState(mode: BooleanMode, targetPick: boolean, tool: "extrude" | "revolve"): void {
     toolChipStore.getState().setBooleanMode(mode);
-    this.engine.setExtrudePreviewTint(mode === "Cut" ? "cut" : "normal");
+    this.engine.setPreviewTint(mode === "Cut" ? "cut" : "normal");
     if (targetPick) {
       const verb = mode === "Cut" ? "Cut from" : "Add to";
       viewportStore.getState().setStatusHint(`Click a body to ${verb} · Esc for New Body`, { sticky: true });
@@ -819,8 +946,8 @@ export class ModelToolController {
   /** The standard "drag/confirm" arm hint for a tool (restored after a target pick). */
   private armHintFor(tool: "extrude" | "revolve"): string {
     if (tool === "extrude") {
-      return this.extrudeSessions.length > 1
-        ? `Drag the arrow to set depth for ${this.extrudeSessions.length} regions · Enter, ✓, or click away to confirm`
+      return this.previewSessions.length > 1
+        ? `Drag the arrow to set depth for ${this.previewSessions.length} regions · Enter, ✓, or click away to confirm`
         : "Drag the arrow to set depth · Enter, ✓, or click away to confirm";
     }
     return "Drag to set angle · Enter, ✓, or click away to revolve";
@@ -833,7 +960,7 @@ export class ModelToolController {
     if (!hit || hit.bodyId.startsWith("preview:")) return; // reject preview bodies
     this.extrude = extrudeStep(this.extrude, { kind: "pickTarget", bodyId: hit.bodyId }).state;
     this.applyBooleanState(this.extrude.booleanMode, false, "extrude");
-    this.sendPreview(this.extrude.depth);
+    this.sendPreview();
   }
 
   /** A body pick during targetPick (revolve). */
@@ -843,6 +970,7 @@ export class ModelToolController {
     if (!hit || hit.bodyId.startsWith("preview:")) return;
     this.revolve = revolveStep(this.revolve, { kind: "pickTarget", bodyId: hit.bodyId }).state;
     this.applyBooleanState(this.revolve.booleanMode, false, "revolve");
+    this.sendPreview();
   }
 
   /**
@@ -862,10 +990,11 @@ export class ModelToolController {
     if (this.extrude.phase === "targetPick") {
       this.extrude = extrudeStep(this.extrude, { kind: "cancelTargetPick" }).state;
       this.applyBooleanState("NewBody", false, "extrude");
-      this.sendPreview(this.extrude.depth);
+      this.sendPreview();
     } else if (this.revolve.phase === "targetPick") {
       this.revolve = revolveStep(this.revolve, { kind: "cancelTargetPick" }).state;
       this.applyBooleanState("NewBody", false, "revolve");
+      this.sendPreview();
     }
   }
 
@@ -1260,19 +1389,23 @@ export class ModelToolController {
       this.deps.engine.setRevolveAngle(this.revolveProfile.ring, this.revolveAxis, angle);
     }
     toolChipStore.getState().setValue(angle);
+    this.sendPreview();
   }
 
   /** Chip "Axis" affordance: drop the chosen axis and return to axis-pick. */
   private resetRevolveAxis(): void {
     if (this.revolve.phase !== "armed" && this.revolve.phase !== "dragging") return;
     this.revolve = revolveStep(this.revolve, { kind: "resetAxis" }).state;
+    // No axis ⇒ no well-formed candidate: release the lane rather than leave sessions
+    // open on a draft the builder would refuse (they re-open on the next axis pick).
+    this.closePreviewSessions();
     this.revolveAxis = null;
     this.revolveAxisLineId = null;
     this.revolveArmedDown = false;
     if (this.dragging === "revolve") this.dragging = null;
     this.deps.engine.setOrbitSuppressed(false);
     this.deps.engine.hideRevolvePreview();
-    this.engine.setExtrudePreviewTint("normal");
+    this.engine.setPreviewTint("normal");
     if (this.plane) {
       this.deps.engine.showRevolveAxisCandidates(
         this.plane,
@@ -1282,6 +1415,7 @@ export class ModelToolController {
     toolChipStore.getState().clear();
     viewportStore.getState().setStatusHint("Pick axis line", { sticky: true });
     toolStore.setState({ phase: "armed" });
+    this.updateDebug();
   }
 
   /** Axis-pick hover: highlight the nearest candidate line under the pointer. */
@@ -1325,7 +1459,7 @@ export class ModelToolController {
     this.revolveAxisLineId = cand.id;
     this.deps.engine.setOrbitSuppressed(true);
     this.deps.engine.showRevolvePreview(this.plane, this.revolveProfile.ring, this.revolveAxis, this.revolve.angle);
-    this.engine.setExtrudePreviewTint("normal");
+    this.engine.setPreviewTint("normal");
     const { canBoolean } = this.resolveBooleanTarget();
     toolChipStore.getState().showRevolve(
       this.revolve.angle,
@@ -1341,6 +1475,116 @@ export class ModelToolController {
     );
     viewportStore.getState().setStatusHint(this.armHintFor("revolve"), { sticky: true });
     toolStore.setState({ phase: "armed" });
+    // The op is well-formed the moment an axis exists — open the kernel-preview
+    // sessions now. Fire-and-forget: the arm itself is already complete + usable
+    // (L1 lathe on screen), and the async half is armGen-guarded.
+    void this.openRevolvePreviewSessions();
+    this.updateDebug();
+  }
+
+  /**
+   * The revolve's CURRENT complete params snapshot — the lane's `previewParamsFn`.
+   *
+   * Mirrors `confirmRevolve`'s op params FIELD-FOR-FIELD (which is also what the
+   * `previewOps.ts` Revolve builder reconstructs), so the candidate the kernel
+   * previews and the op the commit materializes are the same op. `axis` is
+   * `undefined` until a line is picked — a state in which no session is open at
+   * all, since axis-choice is exactly what makes the op well-formed.
+   */
+  private revolvePreviewParams(): PreviewParams {
+    const sketchId = this.revolveSketchId;
+    const axis: AxisRef | undefined =
+      sketchId && this.revolveAxisLineId
+        ? { kind: "sketchLine", sketchId, lineId: this.revolveAxisLineId }
+        : undefined;
+    const params: PreviewParams = {
+      angleDeg: this.revolve.angle,
+      axis,
+      booleanMode: this.revolve.booleanMode as FeatureBooleanMode,
+    };
+    // `setBooleanMode NewBody` clears the target in the FSM, so this is set exactly
+    // when the commit would set it (confirmRevolve reads the same two fields).
+    const targetBodyId = this.revolve.targetBodyId ?? undefined;
+    if (targetBodyId) params.targetBodyId = targetBodyId;
+    return params;
+  }
+
+  /**
+   * Open one kernel-preview session per armed region and claim the shared lane —
+   * the Revolve half of `beginExtrudeArmed`'s session loop, run at the moment the
+   * op becomes WELL-FORMED (an axis was chosen). Until then a Revolve draft has no
+   * axis and the builder would refuse it.
+   *
+   * The L1 lathe stays underneath (extrude parity: L1 owns the drag handle + the
+   * instant feedback); the exact L2 mesh swaps in beneath it, which is what makes a
+   * Cut revolve finally SHOW the subtraction instead of a solid shell.
+   *
+   * A RE-EDIT opens none: `PreviewOp` runs against the current HEAD, so previewing
+   * a feature's edit would double-apply that feature — the lane rejects an
+   * `editFeatureId` draft structurally and the re-edit stays chip-driven L1.
+   *
+   * `armGen` guards every await exactly as the extrude loop does: a superseded arm
+   * tears its OWN sessions down so no lane session leaks.
+   */
+  private async openRevolvePreviewSessions(): Promise<void> {
+    if (this.revolveEditFeatureId) return; // re-edit: L1 only (see above)
+    const sketchId = this.revolveSketchId;
+    const regionIds = this.revolveRegionIds.length
+      ? this.revolveRegionIds
+      : this.revolveRegionId
+        ? [this.revolveRegionId]
+        : [];
+    if (!sketchId || regionIds.length === 0) return;
+    const gen = this.armGen;
+    const sessions: ToolPreviewSession[] = [];
+    for (let i = 0; i < regionIds.length; i++) {
+      const draft: PreviewDraft = {
+        opType: "Revolve",
+        sketchId,
+        regionId: regionIds[i],
+        params: this.revolvePreviewParams(),
+      };
+      let session: PreviewSession;
+      try {
+        session = await this.deps.client.beginPreview(draft);
+      } catch (error) {
+        for (const opened of sessions) {
+          void this.deps.client.endPreview(opened.session.sessionId, false);
+        }
+        if (gen === this.armGen) {
+          // The L1 lathe stays: a preview that could not open is not a reason to
+          // drop the user's armed revolve, only to say so.
+          viewportStore
+            .getState()
+            .setStatusHint(`Revolve preview failed: ${errMessage(error)}`, {
+              severity: "error",
+              sticky: true,
+            });
+        }
+        return;
+      }
+      if (gen !== this.armGen) {
+        void this.deps.client.endPreview(session.sessionId, false);
+        for (const s of sessions) void this.deps.client.endPreview(s.session.sessionId, false);
+        return;
+      }
+      sessions.push({
+        session,
+        draft,
+        profile: this.revolveProfiles[i],
+        lastAppliedEpoch: 0,
+        previewBodyIds: [],
+      });
+    }
+    this.previewSessions = sessions;
+    // Claim the shared lane: from here `sendPreview()` reads the revolve params
+    // through this closure and needs no revolve-specific argument.
+    this.previewOwner = "revolve";
+    this.previewParamsFn = () => this.revolvePreviewParams();
+    this.previewPending = false;
+    this.throttle.reset();
+    this.throttle.setTrailingMs(REVOLVE_PREVIEW_TRAILING_MS);
+    this.sendPreview(); // initial exact L2 (all sessions)
     this.updateDebug();
   }
 
@@ -1367,6 +1611,8 @@ export class ModelToolController {
     this.revolve = revolveStep(this.revolve, { kind: "drag", angle }).state;
     this.deps.engine.setRevolveAngle(this.revolveProfile.ring, this.revolveAxis, angle);
     toolChipStore.getState().setValue(angle);
+    this.sendPreview(); // exact L2 under the L1 lathe (throttled)
+    this.updateDebug(); // publish the live angle + throttle epoch (extrude parity)
   }
 
   /**
@@ -1386,6 +1632,18 @@ export class ModelToolController {
     const step = revolveStep(this.revolve, { kind: "confirm" });
     if (step.effect !== "commit") {
       viewportStore.getState().setStatusHint("Set a non-zero angle", { severity: "error", sticky: true });
+      return;
+    }
+    // SCHEMA §7.6: a structural preview failure must DISABLE commit (extrude parity).
+    // Scoped to a revolve-owned lane so a stale failure from another tool can't wedge it.
+    if (this.previewOwner === "revolve" && this.previewFailure) {
+      traceWarn("revolve", `confirm BLOCKED by preview failure: ${this.previewFailure.message}`);
+      viewportStore
+        .getState()
+        .setStatusHint(`Cannot confirm invalid preview: ${this.previewFailure.message}`, {
+          severity: "error",
+          sticky: true,
+        });
       return;
     }
     const angle = this.revolve.angle;
@@ -1457,13 +1715,13 @@ export class ModelToolController {
           this.commitRevolveBodyUnsub = null;
           await this.rollbackFailedCommit();
           if (gen !== this.commitGen) return;
-          this.onRevolveCommitFailed(0, 1, res.errorMessage ?? "Revolve failed");
+          this.onRevolveCommitFailed(0, 1, res.errorMessage ?? "Revolve failed", gen);
         }
       } catch (e) {
         if (gen !== this.commitGen) return;
         this.commitRevolveBodyUnsub?.();
         this.commitRevolveBodyUnsub = null;
-        this.onRevolveCommitFailed(0, 1, errMessage(e));
+        this.onRevolveCommitFailed(0, 1, errMessage(e), gen);
       }
       return;
     }
@@ -1471,30 +1729,75 @@ export class ModelToolController {
     const total = regionIds.length;
     const committedBodyIds: string[] = [];
     for (let k = 0; k < total; k++) {
-      const op: OperationOp = {
-        opType: "Revolve",
-        sketchId,
-        regionId: regionIds[k],
-        inputs: [{ primary: { bodyId: "", kind: "face" }, anchor: {} }],
-        params: { angleDeg: angle, axis, booleanMode, ...(targetBodyId ? { targetBodyId } : {}) },
-      };
-      let res: ApplyOperationResult;
-      try {
-        res = await this.client.applyOperation(op);
-      } catch (e) {
+      // The open lane session for THIS region. Sessions are opened in `regionIds`
+      // order at axis pick and sliced in lockstep by `onRevolveCommitFailed`, so the
+      // index correspondence holds across a partial failure. `undefined` only when
+      // `beginPreview` itself failed — the commit then still materializes the SAME op
+      // through `applyOperation` rather than refusing what the user armed.
+      const es = this.previewSessions[k];
+      let res: ApplyOperationResult | null;
+      if (es) {
+        // Push this session's FINAL params as the newest epoch, wait for the matching
+        // exact candidate, then commit THAT candidate — preview and commit are one op
+        // (same `opId`, same params), which is the whole point of the lane.
+        const now = performance.now();
+        const params = this.revolvePreviewParams();
+        this.throttle.request(params, now);
+        const send = this.throttle.flush(now);
+        this.commitFinalEpoch = send ? send.epoch : this.throttle.epoch;
+        this.client.updatePreview(
+          es.session.sessionId,
+          send?.params ?? params,
+          this.commitFinalEpoch,
+        );
+
+        const exact = await this.waitForExactPreview(es.session.sessionId);
         if (gen !== this.commitGen) return;
-        this.commitRevolveBodyUnsub?.();
-        this.commitRevolveBodyUnsub = null;
-        this.onRevolveCommitFailed(k, total, errMessage(e));
-        return;
+        if (!exact.ok) {
+          // Nothing consumed this lane session yet — release it so the re-arm below
+          // does not leak it.
+          void this.client.endPreview(es.session.sessionId, false);
+          this.commitRevolveBodyUnsub?.();
+          this.commitRevolveBodyUnsub = null;
+          this.onRevolveCommitFailed(k, total, exact.error.message, gen);
+          return;
+        }
+        try {
+          res = await this.client.endPreview(es.session.sessionId, true);
+        } catch (e) {
+          if (gen !== this.commitGen) return;
+          this.commitRevolveBodyUnsub?.();
+          this.commitRevolveBodyUnsub = null;
+          this.onRevolveCommitFailed(k, total, errMessage(e), gen);
+          return;
+        }
+      } else {
+        const op: OperationOp = {
+          opType: "Revolve",
+          sketchId,
+          regionId: regionIds[k],
+          inputs: [{ primary: { bodyId: "", kind: "face" }, anchor: {} }],
+          params: { angleDeg: angle, axis, booleanMode, ...(targetBodyId ? { targetBodyId } : {}) },
+        };
+        try {
+          res = await this.client.applyOperation(op);
+        } catch (e) {
+          if (gen !== this.commitGen) return;
+          this.commitRevolveBodyUnsub?.();
+          this.commitRevolveBodyUnsub = null;
+          this.onRevolveCommitFailed(k, total, errMessage(e), gen);
+          return;
+        }
       }
       if (gen !== this.commitGen) return;
-      if (res.changedBodies.length === 0) {
+      // Extrude parity: a removal-ONLY result is a SUCCESS (a Cut revolve that
+      // consumes its target entirely changes no body but removes one).
+      if (!res || (res.changedBodies.length === 0 && res.removedBodies.length === 0)) {
         this.commitRevolveBodyUnsub?.();
         this.commitRevolveBodyUnsub = null;
         await this.rollbackFailedCommit();
         if (gen !== this.commitGen) return;
-        this.onRevolveCommitFailed(k, total, res.errorMessage ?? "Revolve failed");
+        this.onRevolveCommitFailed(k, total, res?.errorMessage ?? "Revolve failed", gen);
         return;
       }
       this.applyResult(res);
@@ -1538,7 +1841,8 @@ export class ModelToolController {
    * kept), named error hint, committed regions dropped so a re-confirm retries only
    * the failed + remaining.
    */
-  private onRevolveCommitFailed(k: number, total: number, reason: string): void {
+  private onRevolveCommitFailed(k: number, total: number, reason: string, gen: number): void {
+    traceWarn("revolve", `commit ${k + 1}/${total} FAILED → re-arming: ${reason}`);
     this.revolve = revolveStep(this.revolve, { kind: "commitFailed" }).state; // committing → armed
     toolStore.setState({ phase: "armed" });
     const msg =
@@ -1557,13 +1861,76 @@ export class ModelToolController {
     if (this.plane && this.revolveProfile && this.revolveAxis) {
       this.deps.engine.showRevolvePreview(this.plane, this.revolveProfile.ring, this.revolveAxis, this.revolve.angle);
     }
+    void this.rearmRemainingRevolve(k, gen);
+    this.updateDebug();
+  }
+
+  /**
+   * Re-open the failed region's lane session after a partial revolve commit, so the
+   * user's work is never lost (`rearmRemainingExtrude`'s revolve twin). The already
+   * COMMITTED sessions [0,k) were consumed by `endPreview(true)` and the failed one
+   * was released, so only their stale L2 meshes need dropping; the survivors keep
+   * their sessions and re-render from the `sendPreview()` below.
+   */
+  private async rearmRemainingRevolve(k: number, gen: number): Promise<void> {
+    if (this.previewSessions.length === 0) return; // no lane in play (fallback commit)
+    this.engine.clearPreviewBody();
+    for (let i = 0; i < k; i++) this.removeExactPreviewMeshes(this.previewSessions[i]);
+    const failed = this.previewSessions[k];
+    const remaining = this.previewSessions.slice(k + 1);
+    if (!failed) {
+      this.previewSessions = remaining.map((s) => ({ ...s, lastAppliedEpoch: 0 }));
+      this.throttle.reset();
+      this.sendPreview();
+      return;
+    }
+    this.removeExactPreviewMeshes(failed);
+    let freshSession: PreviewSession;
+    try {
+      freshSession = await this.deps.client.beginPreview(failed.draft);
+    } catch {
+      // The lane could not be re-opened: the L1 lathe + the armed FSM still carry the
+      // user's parameters, and a re-confirm falls back to `applyOperation`.
+      this.previewSessions = remaining.map((s) => ({ ...s, lastAppliedEpoch: 0 }));
+      this.previewOwner = this.previewSessions.length > 0 ? this.previewOwner : null;
+      this.previewParamsFn = this.previewSessions.length > 0 ? this.previewParamsFn : null;
+      return;
+    }
+    if (gen !== this.commitGen) {
+      void this.deps.client.endPreview(freshSession.sessionId, false); // superseded — don't leak
+      return;
+    }
+    // Reset every per-session lastAppliedEpoch: the throttle.reset() below restarts
+    // epochs from a lower value, and a survivor holding a LARGE epoch would stale-drop
+    // every new result and freeze its preview (extrude finding 9).
+    this.previewSessions = [
+      { ...failed, session: freshSession, lastAppliedEpoch: 0 },
+      ...remaining.map((s) => ({ ...s, lastAppliedEpoch: 0 })),
+    ];
+    this.throttle.reset();
+    this.throttle.setTrailingMs(REVOLVE_PREVIEW_TRAILING_MS);
+    this.sendPreview();
     this.updateDebug();
   }
 
   private finishRevolve(bodyIds: string[]): void {
     this.deps.engine.hideRevolvePreview();
     this.deps.engine.setOrbitSuppressed(false);
-    this.engine.setExtrudePreviewTint("normal");
+    // The lane sessions were CONSUMED by the commit (endPreview(true)) — drop their
+    // exact candidate meshes and release ownership so a later sendPreview() cannot
+    // fire against a tool that is no longer armed (finishExtrude parity; no
+    // endPreview here, which would be a second call on a consumed session).
+    for (const es of this.previewSessions) this.removeExactPreviewMeshes(es);
+    this.engine.clearPreviewBody();
+    this.previewSessions = [];
+    this.previewOwner = null;
+    this.previewParamsFn = null;
+    this.previewPending = false;
+    this.previewPendingHint = false;
+    this.previewFailure = null;
+    this.clearExactPreviewWaiters();
+    this.throttle.reset();
+    this.engine.setPreviewTint("normal");
     toolChipStore.getState().clear();
     this.revolve = revolveStep(this.revolve, { kind: "settle" }).state;
     const consumedSketch = this.lastArmedSketch;
@@ -1592,31 +1959,104 @@ export class ModelToolController {
     this.updateDebug();
   }
 
-  private armEdgeOpFromSelection(kind: "Fillet" | "Chamfer"): void {
+  private async armEdgeOpFromSelection(kind: "Fillet" | "Chamfer"): Promise<void> {
     const edges = selectionStore.getState().selected.filter((r) => r.kind === "edge");
     if (edges.length === 0) {
       viewportStore.getState().setStatusHint(`Select edges, then ${kind}`, { sticky: true });
       return;
     }
+    const gen = ++this.armGen;
     this.edgeOpKind = kind;
     this.filletEdges = edges;
+    this.filletEditFeatureId = undefined;
     const size = kind === "Chamfer" ? DEFAULT_CHAMFER_DISTANCE : DEFAULT_FILLET_RADIUS;
     this.fillet = filletStep(filletInit(), { kind: "arm", edgeCount: edges.length, radius: size }).state;
     toolStore.setState({ phase: "armed" });
     this.deps.engine.setOrbitSuppressed(true); // modal: drag adjusts the size, not orbit
     const noun = kind === "Chamfer" ? "distance" : "radius";
-    viewportStore.getState().setStatusHint(
-      `${kind} ${edges.length} edge${edges.length > 1 ? "s" : ""} — drag or type ${noun}`,
-      { sticky: true },
-    );
+    const hint = `${kind} ${edges.length} edge${edges.length > 1 ? "s" : ""} — drag or type ${noun} · Enter or ✓ to apply`;
+    this.previewArmHint = hint;
+    viewportStore.getState().setStatusHint(hint, { sticky: true });
     const anchor = edges[0].anchor?.worldPoint ?? [0, 0, 0];
-    toolChipStore.getState().showFillet(size, anchor, (v) => this.onFilletChip(v));
+    toolChipStore.getState().showFillet(size, anchor, (v) => this.onFilletChip(v), {
+      onConfirm: () => void this.commitFillet(),
+      onCancel: () => toolStore.getState().setTool("select"),
+    });
     this.updateDebug();
+    await this.openEdgeOpPreview(gen);
+  }
+
+  /**
+   * Open the ONE kernel-preview session an armed edge op drives.
+   *
+   * DUAL-FIELD LOCKSTEP (`ipc/previewOps.ts edgeOpBuilder` REFUSES a mismatch, and
+   * `tauriCommandMap.filletParams` silently drops the typed `params.edges` on one):
+   * the draft's `inputs` and `params.edgeIds` are both derived from `this.filletEdges`,
+   * in that array's order, by the two helpers below and nowhere else.
+   */
+  private async openEdgeOpPreview(gen: number): Promise<void> {
+    const draft: PreviewDraft = {
+      opType: this.edgeOpKind,
+      inputs: this.edgeOpInputs(),
+      params: this.edgeOpPreviewParams(),
+    };
+    let session: PreviewSession;
+    try {
+      session = await this.deps.client.beginPreview(draft);
+    } catch (error) {
+      if (gen !== this.armGen) return;
+      // The chip stays armed and usable: commitEdgeOp falls back to a plain
+      // applyOperation when no session exists, so a lane refusal costs the
+      // preview, never the tool.
+      traceWarn("extrude", `${this.edgeOpKind} preview session failed: ${errMessage(error)}`);
+      return;
+    }
+    if (gen !== this.armGen) {
+      void this.deps.client.endPreview(session.sessionId, false);
+      return;
+    }
+    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [] }];
+    this.previewOwner = "edgeOp";
+    this.previewParamsFn = () => this.edgeOpPreviewParams();
+    this.previewPending = false;
+    this.previewFailure = null;
+    this.stalePreviewRetryAttempted = false;
+    this.throttle.reset();
+    // A fillet/chamfer rebuild is dearer than a prism sweep — pace the armed lane
+    // slower than the 80ms drag floor (restored on every release).
+    this.throttle.setTrailingMs(EDGE_OP_TRAILING_MS);
+    this.sendPreview();
+    this.updateDebug();
+  }
+
+  /** The typed per-edge refs — SAME array, SAME order as {@link edgeOpPreviewParams}. */
+  private edgeOpInputs(): SemanticRef[] {
+    return this.filletEdges.map((e) => this.semanticRefFor(e));
+  }
+
+  /**
+   * Complete canonical edge-op params for both exact preview and commit — ONE
+   * derivation of `edgeIds`, from the same `filletEdges` array `edgeOpInputs`
+   * reads, so the two can never drift out of lockstep.
+   */
+  private edgeOpParams(radius = this.fillet.radius): FilletParams {
+    return {
+      mode: this.edgeOpKind,
+      radius,
+      edgeIds: this.filletEdges.map((e) => e.topoKey ?? e.id),
+      chainTangentEdges: true,
+    };
+  }
+
+  /** The same params as a lane {@link PreviewParams} (which carries an index signature). */
+  private edgeOpPreviewParams(radius = this.fillet.radius): PreviewParams {
+    return { ...this.edgeOpParams(radius) };
   }
 
   private onFilletChip(v: number): void {
     this.fillet = filletStep(this.fillet, { kind: "setRadius", radius: v }).state;
     toolChipStore.getState().setValue(v);
+    this.sendPreview();
   }
 
   private startBooleanFromSelection(): void {
@@ -1634,19 +2074,25 @@ export class ModelToolController {
   // ── shell ──────────────────────────────────────────────────────────────────
   //
   // Shell mirrors fillet: it arms from a FACE selection (selected faces = removed
-  // faces), a vertical drag (or the mm chip) sets the wall thickness, and release
-  // commits. No cheap L1 mesh (hollowing needs OCCT) — chip + status-hint only.
+  // faces) and a vertical drag (or the mm chip) sets the wall thickness. Release
+  // keeps it ARMED; Enter / chip-✓ commits. There is no cheap L1 mesh (hollowing
+  // needs OCCT) — the visible preview is the kernel's exact candidate.
 
-  private armShellFromSelection(): void {
+  private async armShellFromSelection(): Promise<void> {
     const faces = selectionStore.getState().selected.filter((r) => r.kind === "face");
     if (faces.length === 0) {
       viewportStore.getState().setStatusHint("Select faces to remove, then Shell", { sticky: true });
       return;
     }
-    this.armShell(faces);
+    await this.armShell(faces);
   }
 
-  private armShell(faces: EntityRef[], editFeatureId?: string, startThickness = DEFAULT_SHELL_THICKNESS): void {
+  private async armShell(
+    faces: EntityRef[],
+    editFeatureId?: string,
+    startThickness = DEFAULT_SHELL_THICKNESS,
+  ): Promise<void> {
+    const gen = ++this.armGen;
     this.shellFaces = faces;
     this.shellEditFeatureId = editFeatureId;
     this.shell = shellStep(shellInit(), {
@@ -1659,12 +2105,11 @@ export class ModelToolController {
     toolStore.setState({ phase: "armed" });
     this.deps.engine.setOrbitSuppressed(true); // modal: drag adjusts thickness, not orbit
     const n = faces.length;
-    viewportStore.getState().setStatusHint(
-      editFeatureId
-        ? "Edit shell thickness — drag or type, Enter to apply"
-        : `Shell ${n} face${n > 1 ? "s" : ""} — drag or type thickness`,
-      { sticky: true },
-    );
+    const hint = editFeatureId
+      ? "Edit shell thickness — drag or type, Enter to apply"
+      : `Shell ${n} face${n > 1 ? "s" : ""} — drag or type thickness · Enter or ✓ to apply`;
+    this.previewArmHint = editFeatureId ? null : hint;
+    viewportStore.getState().setStatusHint(hint, { sticky: true });
     const anchor = faces[0]?.anchor?.worldPoint ?? [0, 0, 0];
     if (editFeatureId) {
       toolChipStore.getState().showShell(startThickness, anchor, (v) => {
@@ -1672,50 +2117,153 @@ export class ModelToolController {
         void this.commitShell(); // chip Enter/blur commits the thickness-only re-edit
       });
     } else {
-      toolChipStore.getState().showShell(startThickness, anchor, (v) => this.onShellChip(v));
+      toolChipStore.getState().showShell(startThickness, anchor, (v) => this.onShellChip(v), {
+        onConfirm: () => void this.commitShell(),
+        onCancel: () => toolStore.getState().setTool("select"),
+      });
     }
     this.updateDebug();
+    // A re-edit runs L1-only: PreviewOp executes against the CURRENT head, so
+    // previewing an existing feature would double-apply it (the extrude re-edit
+    // rule, applied here too).
+    if (!editFeatureId) await this.openShellPreview(gen);
+  }
+
+  /**
+   * Open the ONE kernel-preview session an armed shell drives. The open faces and
+   * the shelled body both come from `this.shellFaces` — `inputs` is passed through
+   * for symmetry but never reaches the wire for a Shell (`wireOperation` drops an
+   * op's top-level inputs; Rust's `derive_inputs` mints them from
+   * `params.targetBodyId` / `params.openFaces`). See `ipc/previewOps.ts`.
+   */
+  private async openShellPreview(gen: number): Promise<void> {
+    const draft: PreviewDraft = {
+      opType: "Shell",
+      inputs: this.shellFaces.map((f) => this.semanticRefFor(f)),
+      params: this.shellPreviewParams(),
+    };
+    let session: PreviewSession;
+    try {
+      session = await this.deps.client.beginPreview(draft);
+    } catch (error) {
+      if (gen !== this.armGen) return;
+      traceWarn("extrude", `Shell preview session failed: ${errMessage(error)}`);
+      return;
+    }
+    if (gen !== this.armGen) {
+      void this.deps.client.endPreview(session.sessionId, false);
+      return;
+    }
+    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [] }];
+    this.previewOwner = "shell";
+    this.previewParamsFn = () => this.shellPreviewParams();
+    this.previewPending = false;
+    this.previewFailure = null;
+    this.stalePreviewRetryAttempted = false;
+    this.throttle.reset();
+    this.throttle.setTrailingMs(SHELL_TRAILING_MS);
+    this.sendPreview();
+    this.updateDebug();
+  }
+
+  /** Complete canonical Shell params for both exact preview and commit. */
+  private shellParams(thickness = this.shell.thickness): ShellParams {
+    return {
+      thickness,
+      openFaces: this.shellFaces.map((f) => f.elementId ?? f.topoKey ?? f.id),
+      targetBodyId: this.shellFaces[0]?.bodyId ?? "",
+    };
+  }
+
+  private shellPreviewParams(thickness = this.shell.thickness): PreviewParams {
+    return { ...this.shellParams(thickness) };
   }
 
   private onShellChip(v: number): void {
     this.shell = shellStep(this.shell, { kind: "setThickness", thickness: v }).state;
     toolChipStore.getState().setValue(v);
+    this.sendPreview();
   }
 
+  /**
+   * Apply the armed shell. The RE-EDIT path is unchanged (a thickness-only
+   * scalar merge, no lane session); a FRESH shell runs the previewed-commit
+   * sequence so a kernel refusal blocks the write instead of leaving an errored
+   * row on the timeline.
+   */
   private async commitShell(): Promise<void> {
-    const thickness = this.shell.thickness;
-    const faces = this.shellFaces;
     const editFeatureId = this.shellEditFeatureId;
-    if (faces.length === 0 && !editFeatureId) {
-      this.cancelShell();
+    if (editFeatureId) {
+      await this.commitShellEdit(editFeatureId);
       return;
     }
-    const bodyId = faces[0]?.bodyId;
-    const op: OperationOp = {
-      opType: "Shell",
-      featureId: editFeatureId, // parametric re-edit → UpdateOperationParams
-      inputs: faces.map((f) => this.semanticRefFor(f)),
-      params: {
-        thickness,
-        openFaces: faces.map((f) => f.elementId ?? f.topoKey ?? f.id),
-        targetBodyId: bodyId,
-      },
-    };
+    if (this.shellFaces.length === 0) {
+      this.cancelShell();
+      toolStore.getState().setTool("select");
+      return;
+    }
+    if (this.shell.phase !== "armed") return;
+    if (this.previewFailure) {
+      viewportStore
+        .getState()
+        .setStatusHint(`Cannot apply invalid preview: ${this.previewFailure.message}`, {
+          severity: "error",
+          sticky: true,
+        });
+      return;
+    }
+    const step = shellStep(this.shell, { kind: "confirm" });
+    if (step.effect !== "commit") return;
+    this.shell = step.state; // → committing (also excludes us from the stale-arm guard)
+    toolStore.setState({ phase: "committing" });
+    const gen = ++this.commitGen;
+    const params = this.shellParams();
+    const outcome = await this.commitPreviewedOp(
+      { opType: "Shell", inputs: this.shellFaces.map((f) => this.semanticRefFor(f)), params },
+      gen,
+    );
+    if (outcome.kind === "superseded") return;
+    if (outcome.kind === "failed") {
+      this.shell = shellStep(this.shell, { kind: "commitFailed" }).state; // → armed
+      toolStore.setState({ phase: "armed" });
+      viewportStore
+        .getState()
+        .setStatusHint(`Shell failed: ${outcome.reason}`, { severity: "error", sticky: true });
+      await this.openShellPreview(this.armGen); // re-arm the preview (work kept)
+      this.updateDebug();
+      return;
+    }
+    this.applyResult(outcome.res);
+    this.teardownPreviewedTool();
+    this.shell = shellInit();
+    this.shellFaces = [];
+    this.shellEditFeatureId = undefined;
+    this.shellStoredParams = undefined;
+    toolStore.getState().setTool("select");
+    viewportStore.getState().setStatusHint("Shelled");
+    this.updateDebug();
+  }
+
+  /** Thickness-only parametric re-edit — deep-merges into the stored params. */
+  private async commitShellEdit(editFeatureId: string): Promise<void> {
+    const thickness = this.shell.thickness;
+    // Move to `committing` so the document-revision bump this commit causes does
+    // not read as an external model change and cancel our own arm.
+    const step = shellStep(this.shell, { kind: "confirm" });
+    if (step.effect === "commit") this.shell = step.state;
     this.deps.engine.setOrbitSuppressed(false);
     toolChipStore.getState().clear();
     try {
       // A re-edit changes ONLY the thickness: deep-merge into the stored params so the
       // shell's open faces + target survive (a whole-params replace would wipe them).
-      const res =
-        editFeatureId && this.shellStoredParams
-          ? await this.client.applyEditCommand(
-              updateScalarParamsCommand(editFeatureId, "Shell", this.shellStoredParams, {
-                thickness: { value: thickness },
-              }),
-            )
-          : await this.client.applyOperation(op);
+      if (!this.shellStoredParams) throw new Error("Stored Shell parameters are unavailable");
+      const res = await this.client.applyEditCommand(
+        updateScalarParamsCommand(editFeatureId, "Shell", this.shellStoredParams, {
+          thickness: { value: thickness },
+        }),
+      );
       this.applyResult(res);
-      viewportStore.getState().setStatusHint(editFeatureId ? "Shell thickness updated" : "Shelled");
+      viewportStore.getState().setStatusHint("Shell thickness updated");
     } catch (e) {
       viewportStore.getState().setStatusHint(`Shell failed: ${errMessage(e)}`, { severity: "error", sticky: true });
     }
@@ -1740,7 +2288,7 @@ export class ModelToolController {
     const stored = await this.deps.client.getOperationParams(featureId).catch(() => undefined);
     toolStore.getState().setTool("shell"); // fires cancelShell (clears shellStoredParams)
     this.shellStoredParams = stored; // set AFTER the tool-change cancel
-    this.armShell([], featureId, thickness);
+    await this.armShell([], featureId, thickness);
   }
 
   // ── linear pattern ───────────────────────────────────────────────────────
@@ -2114,18 +2662,25 @@ export class ModelToolController {
       this.engine.setExtrudeHandleHover(true);
       toolStore.setState({ phase: "dragging" });
       this.updateDebug(); // publish the live "dragging" phase to the debug surface
-    } else if (this.fillet.phase === "armed") {
+    } else if (this.fillet.phase === "armed" && !this.isExcludedClickAwayTarget(e.target)) {
+      // An armed edge op claims EVERY viewport press as a value drag (there is no
+      // handle to hit-test) — which is exactly why it has no click-away commit.
+      // The chip lives inside the container's overlay, so a press ON the chip must
+      // NOT be swallowed as a drag: excluding it is what makes the ✓ clickable.
       this.dragging = "fillet";
       this.filletDownY = e.clientY;
       this.filletStartRadius = this.fillet.radius;
       this.fillet = filletStep(this.fillet, { kind: "grabEdge" }).state;
       toolStore.setState({ phase: "dragging" });
-    } else if (this.shell.phase === "armed") {
+      this.throttle.setTrailingMs(EDGE_OP_DRAG_TRAILING_MS); // live while the pointer owns it
+      this.updateDebug();
+    } else if (this.shell.phase === "armed" && !this.isExcludedClickAwayTarget(e.target)) {
       this.dragging = "shell";
       this.shellDownY = e.clientY;
       this.shellStartThickness = this.shell.thickness;
       this.shell = shellStep(this.shell, { kind: "grab" }).state;
       toolStore.setState({ phase: "dragging" });
+      this.updateDebug();
     } else if (this.revolve.phase === "armed") {
       // Defer grab to the first move: a plain click (no move) commits 360° instead.
       this.revolveArmedDown = true;
@@ -2153,18 +2708,20 @@ export class ModelToolController {
       toolChipStore.getState().setValue(this.extrude.depth);
       toolChipStore.getState().setSymmetric(this.extrude.symmetric); // Alt-drag syncs the ⇔ toggle
       this.maybeNegativeDragHint(this.extrude.depth);
-      this.sendPreview(this.extrude.depth);
+      this.sendPreview();
       this.updateDebug(); // publish live phase ("dragging") + depth to the debug surface
     } else if (this.dragging === "fillet") {
       const dy = this.filletDownY - e.clientY; // up-drag grows the radius
       const radius = radiusFromDrag(this.filletStartRadius, dy, { worldPerPx: this.engine.planePixelWorld() });
       this.fillet = filletStep(this.fillet, { kind: "drag", radius }).state;
       toolChipStore.getState().setValue(radius);
+      this.sendPreview();
     } else if (this.dragging === "shell") {
       const dy = this.shellDownY - e.clientY; // up-drag grows the thickness
       const thickness = radiusFromDrag(this.shellStartThickness, dy, { worldPerPx: this.engine.planePixelWorld() });
       this.shell = shellStep(this.shell, { kind: "drag", thickness }).state;
       toolChipStore.getState().setValue(thickness);
+      this.sendPreview();
     } else if (this.dragging === "revolve") {
       this.applyRevolveDrag(e.clientX);
     } else if (this.revolveArmedDown && this.moved && this.downButton === 0 && this.revolve.phase === "armed") {
@@ -2199,20 +2756,27 @@ export class ModelToolController {
       this.engine.setExtrudeHandleHover(false);
       this.extrude = extrudeStep(this.extrude, { kind: "release" }).state; // → armed
       toolStore.setState({ phase: "armed" });
-      this.sendPreview(this.extrude.depth);
+      this.sendPreview();
       this.updateDebug();
       return;
     }
     if (this.dragging === "fillet") {
+      // Release KEEPS the tool armed at the dragged size (no implicit commit) —
+      // the live kernel preview + editable chip stay, Enter / ✓ applies.
       this.dragging = null;
-      this.fillet = filletStep(this.fillet, { kind: "release" }).state;
-      void this.commitFillet();
+      this.fillet = filletStep(this.fillet, { kind: "release" }).state; // → armed
+      toolStore.setState({ phase: "armed" });
+      this.throttle.setTrailingMs(EDGE_OP_TRAILING_MS); // back to the armed floor
+      this.sendPreview();
+      this.updateDebug();
       return;
     }
     if (this.dragging === "shell") {
       this.dragging = null;
-      this.shell = shellStep(this.shell, { kind: "release" }).state;
-      void this.commitShell();
+      this.shell = shellStep(this.shell, { kind: "release" }).state; // → armed
+      toolStore.setState({ phase: "armed" });
+      this.sendPreview();
+      this.updateDebug();
       return;
     }
     if (this.dragging === "revolve") {
@@ -2367,21 +2931,74 @@ export class ModelToolController {
     ) {
       params.targetFace2 = this.extrude.targetFace2 as SemanticRef;
     }
-    const featureId = this.extrudeSessions[0]?.draft.params.featureId;
+    const featureId = this.previewSessions[0]?.draft.params.featureId;
     if (typeof featureId === "string") params.featureId = featureId;
     return params;
   }
 
-  private sendPreview(depth: number, staleRetry = false): void {
-    if (this.extrudeSessions.length === 0) return;
+  /**
+   * Push the owner's CURRENT params to every open lane session, paced by the shared
+   * throttle. OpType-blind by construction: the params come from `previewParamsFn`
+   * (bound at arm time), never from a tool-specific argument, so every tool on the
+   * lane shares one pacing path.
+   */
+  private sendPreview(staleRetry = false): void {
+    if (this.previewSessions.length === 0) return;
+    const paramsFn = this.previewParamsFn;
+    if (!paramsFn) return;
     if (!staleRetry) this.stalePreviewRetryAttempted = false;
-    const send = this.throttle.request(this.extrudePreviewParams(depth), performance.now());
+    const send = this.throttle.request(paramsFn(), performance.now());
     if (send) {
-      for (const es of this.extrudeSessions) {
+      for (const es of this.previewSessions) {
         this.client.updatePreview(es.session.sessionId, send.params, send.epoch);
       }
+      this.markPreviewPending();
     }
     this.scheduleTrailing();
+  }
+
+  /**
+   * Enter the "computing" state for an owner that has NO local L1 to look at while
+   * the kernel works. Extrude and Revolve are deliberately excluded: the extrude's
+   * unit prism and the revolve's lathe shell are already on screen at the current
+   * depth/angle, so a "Computing preview…" hint would report a wait the user cannot
+   * see and would fight the arm hint for the status line on every drag frame.
+   */
+  private markPreviewPending(): void {
+    if (this.previewOwner === null) return;
+    if (this.previewOwner === "extrude" || this.previewOwner === "revolve") return;
+    if (this.previewPending) return;
+    this.previewPending = true;
+    // Only announce a wait the user would otherwise see nothing for — and NEVER
+    // over an error. A re-armed preview after a failed commit fires this within
+    // the same tick as the "X failed: <reason>" hint, and a progress message that
+    // buried the reason would hide the only explanation the user gets.
+    const hasMesh = this.previewSessions.some((es) => es.previewBodyIds.length > 0);
+    const showing = viewportStore.getState().statusHint;
+    if (!hasMesh && showing?.severity !== "error") {
+      viewportStore.getState().setStatusHint("Computing preview…", { sticky: true });
+      this.previewPendingHint = true;
+    }
+    this.updateDebug();
+  }
+
+  /** The kernel answered (result or failure): leave the pending state, restore the line. */
+  private clearPreviewPending(): void {
+    if (!this.previewPending) return;
+    this.previewPending = false;
+    if (!this.previewPendingHint) return; // never took the status line
+    this.previewPendingHint = false;
+    // Hand the line back to the owner's arm hint where one exists; otherwise just
+    // stop claiming a computation that has finished.
+    if (this.previewOwner === "extrude" || this.previewOwner === "revolve") {
+      viewportStore.getState().setStatusHint(this.armHintFor(this.previewOwner), { sticky: true });
+    } else if (this.previewArmHint) {
+      // edgeOp / shell: no `armHintFor` entry, so the owner parks its own arm hint
+      // here at arm time and gets the status line back verbatim.
+      viewportStore.getState().setStatusHint(this.previewArmHint, { sticky: true });
+    } else {
+      viewportStore.getState().setStatusHint(null);
+    }
   }
 
   private trailingTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2389,12 +3006,19 @@ export class ModelToolController {
     if (this.trailingTimer) return;
     this.trailingTimer = setTimeout(() => {
       this.trailingTimer = null;
-      if (this.extrudeSessions.length === 0) return;
+      if (this.previewSessions.length === 0) return;
       const send = this.throttle.tick(performance.now());
       if (send) {
-        for (const es of this.extrudeSessions) {
+        for (const es of this.previewSessions) {
           this.client.updatePreview(es.session.sessionId, send.params, send.epoch);
         }
+        this.scheduleTrailing();
+      } else if (this.throttle.pending && this.throttle.inFlight === null) {
+        // The poke period (90ms) is FIXED but the trailing floor is per-owner and
+        // can be larger (edge ops 160ms, shell 200ms). With coalesced params and a
+        // FREE in-flight slot, only the time floor is holding the send back — so
+        // re-poke, or the newest params would sit there until the next user input.
+        // (An in-flight epoch needs no poke: `onPreviewResult` pumps the queue.)
         this.scheduleTrailing();
       }
     }, 90);
@@ -2402,9 +3026,10 @@ export class ModelToolController {
 
   private onPreviewResult(r: PreviewResult): void {
     this.resolveExactPreviewWaiter(r);
-    const idx = this.extrudeSessions.findIndex((e) => e.session.sessionId === r.sessionId);
+    const idx = this.previewSessions.findIndex((e) => e.session.sessionId === r.sessionId);
     if (idx < 0) return;
-    const es = this.extrudeSessions[idx];
+    const es = this.previewSessions[idx];
+    this.clearPreviewPending(); // the kernel answered — whatever it said
     const now = performance.now();
     if (r.committed) {
       this.committedEpoch = r.epoch;
@@ -2424,11 +3049,19 @@ export class ModelToolController {
         this.stalePreviewRetryAttempted = false;
         this.applyPreviewBodies(es, r);
         this.lastL2Epoch = r.epoch;
-        viewportStore.getState().setStatusHint(this.armHintFor("extrude"), { sticky: true });
+        // Restore the OWNER's arm hint (a session exists ⇒ the owner is set). A
+        // recovered candidate MUST take the line back: otherwise the previous
+        // "… preview failed" stays on screen contradicting a preview that now
+        // works, and the user has no signal that ✓ is unblocked again.
+        if (this.previewOwner === "extrude" || this.previewOwner === "revolve") {
+          viewportStore.getState().setStatusHint(this.armHintFor(this.previewOwner), { sticky: true });
+        } else if (this.previewArmHint) {
+          viewportStore.getState().setStatusHint(this.previewArmHint, { sticky: true });
+        }
       }
       const send = this.throttle.tick(now);
       if (send) {
-        for (const e of this.extrudeSessions) {
+        for (const e of this.previewSessions) {
           this.client.updatePreview(e.session.sessionId, send.params, send.epoch);
         }
       }
@@ -2443,7 +3076,7 @@ export class ModelToolController {
   }
 
   /** Replace every exact candidate body; a Cut may split into multiple solids. */
-  private applyPreviewBodies(es: ExtrudeSession, result: PreviewResult): void {
+  private applyPreviewBodies(es: ToolPreviewSession, result: PreviewResult): void {
     const bodies =
       result.bodies ??
       (result.mesh ? [{ bodyId: result.bodyId, mesh: result.mesh }] : []);
@@ -2461,16 +3094,34 @@ export class ModelToolController {
     }
   }
 
+  /** The armed op's display noun — the prefix on every preview-lane message. */
+  private previewOwnerNoun(): string {
+    switch (this.previewOwner) {
+      case "revolve":
+        return "Revolve";
+      // Fillet and Chamfer share one lane; `edgeOpKind` is the authored opType.
+      case "edgeOp":
+        return this.edgeOpKind;
+      case "shell":
+        return "Shell";
+      case "boolean":
+        return "Boolean";
+      default:
+        return "Extrude";
+    }
+  }
+
   private onPreviewFailure(error: PreviewFailure): void {
     traceWarn("extrude", `preview failure (kind=${error.kind}): ${error.message}`);
     this.previewFailure = error;
+    this.clearPreviewPending();
     if (error.kind === "stalePreview" && !this.stalePreviewRetryAttempted) {
       this.stalePreviewRetryAttempted = true;
-      this.sendPreview(this.extrude.depth, true);
+      this.sendPreview(true);
     }
     viewportStore
       .getState()
-      .setStatusHint(`Extrude preview failed: ${error.message}`, {
+      .setStatusHint(`${this.previewOwnerNoun()} preview failed: ${error.message}`, {
         severity: "error",
         sticky: true,
       });
@@ -2522,7 +3173,7 @@ export class ModelToolController {
     this.exactPreviewWaiters.clear();
   }
 
-  private removeExactPreviewMeshes(es: ExtrudeSession): void {
+  private removeExactPreviewMeshes(es: ToolPreviewSession): void {
     removeMesh(es.session.previewBodyId);
     for (const id of es.previewBodyIds) removeMesh(id);
     es.previewBodyIds = [];
@@ -2535,10 +3186,10 @@ export class ModelToolController {
    * cannot reconstruct the feature's predecessor. Every await is generation-gated.
    */
   private async confirmExtrude(): Promise<void> {
-    if (this.extrudeSessions.length === 0 || this.extrude.phase !== "armed") {
+    if (this.previewSessions.length === 0 || this.extrude.phase !== "armed") {
       trace(
         "extrude",
-        `confirm IGNORED: sessions=${this.extrudeSessions.length} phase=${this.extrude.phase}`,
+        `confirm IGNORED: sessions=${this.previewSessions.length} phase=${this.extrude.phase}`,
       );
       return;
     }
@@ -2555,14 +3206,14 @@ export class ModelToolController {
     const gen = ++this.commitGen;
     trace(
       "extrude",
-      `confirm START: gen=${gen} sessions=${this.extrudeSessions.length} depth=${this.extrude.depth} ` +
+      `confirm START: gen=${gen} sessions=${this.previewSessions.length} depth=${this.extrude.depth} ` +
         `end=${this.extrude.endCondition} boolean=${this.extrude.booleanMode} symmetric=${this.extrude.symmetric} ` +
         `sketch=${this.lastArmedSketch ?? "?"}`,
     );
     this.extrude = extrudeStep(this.extrude, { kind: "confirm" }).state; // → committing
     toolStore.setState({ phase: "committing" });
     const finalDepth = this.extrude.depth;
-    const total = this.extrudeSessions.length;
+    const total = this.previewSessions.length;
     const committedBodyIds: string[] = [];
 
     // Profile-record guarantee (EXTRUDE-COMMIT-FIX): the regen planner resolves the
@@ -2571,7 +3222,7 @@ export class ModelToolController {
     // finishSketch is idempotent — unchanged content upserts nothing — so ensure it
     // here, at the exact boundary that needs it. Failure keeps the armed preview
     // (sessions untouched) so a retry is possible.
-    const profileSketchId = this.extrudeSessions[0].draft.sketchId ?? this.lastArmedSketch;
+    const profileSketchId = this.previewSessions[0].draft.sketchId ?? this.lastArmedSketch;
     try {
       if (profileSketchId) await this.client.finishSketch(profileSketchId);
     } catch (e) {
@@ -2596,8 +3247,8 @@ export class ModelToolController {
     this.commitBodyUnsub?.();
     this.commitBodyUnsub = this.deps.onBodyLoaded((id) => loaded.add(id));
 
-    for (let k = 0; k < this.extrudeSessions.length; k++) {
-      const es = this.extrudeSessions[k];
+    for (let k = 0; k < this.previewSessions.length; k++) {
+      const es = this.previewSessions[k];
       // Force this session's final params out as the newest epoch, then commit.
       const now = performance.now();
       const params = this.extrudePreviewParams(finalDepth);
@@ -2737,10 +3388,10 @@ export class ModelToolController {
     // clear every live L2 handle here — the surviving sessions re-render theirs via the
     // sendPreview below (only they keep a lane session).
     this.engine.clearPreviewBody();
-    for (let i = 0; i < k; i++) this.removeExactPreviewMeshes(this.extrudeSessions[i]);
-    const failed = this.extrudeSessions[k];
+    for (let i = 0; i < k; i++) this.removeExactPreviewMeshes(this.previewSessions[i]);
+    const failed = this.previewSessions[k];
     this.removeExactPreviewMeshes(failed);
-    const remaining = this.extrudeSessions.slice(k + 1);
+    const remaining = this.previewSessions.slice(k + 1);
 
     const freshSession = await this.deps.client.beginPreview(failed.draft);
     if (gen !== this.commitGen) {
@@ -2750,18 +3401,22 @@ export class ModelToolController {
     // Reset per-session lastAppliedEpoch (finding 9): the throttle.reset() below restarts
     // epochs from a lower value; a surviving session that kept a LARGE lastAppliedEpoch
     // would stale-drop every new (lower) L2 epoch, freezing its preview. Zero them all.
-    this.extrudeSessions = [
+    this.previewSessions = [
       { ...failed, session: freshSession, lastAppliedEpoch: 0 },
       ...remaining.map((s) => ({ ...s, lastAppliedEpoch: 0 })),
     ];
 
-    const profiles = this.extrudeSessions.map((e) => e.profile);
+    // Every session on this path is an Extrude arm, so each carries its profile;
+    // the filter is the type-level restatement of that, not a new tolerance.
+    const profiles = this.previewSessions
+      .map((e) => e.profile)
+      .filter((p): p is PrismProfile => p !== undefined);
     this.centroidWorld = combinedCentroidWorld(this.plane, profiles);
     this.engine.showExtrudePreviews(this.plane, profiles, this.centroidWorld, this.normal);
     this.engine.setExtrudeDepth(this.extrude.depth, this.extrude.symmetric);
-    this.engine.setExtrudePreviewTint(this.extrude.booleanMode === "Cut" ? "cut" : "normal");
+    this.engine.setPreviewTint(this.extrude.booleanMode === "Cut" ? "cut" : "normal");
     this.throttle.reset();
-    this.sendPreview(this.extrude.depth);
+    this.sendPreview();
     this.updateDebug();
   }
 
@@ -2807,14 +3462,20 @@ export class ModelToolController {
     trace("extrude", `finish: teardown + select bodies=[${bodyIds.join(", ")}]`);
     const wasCut = this.extrude.booleanMode === "Cut";
     this.engine.hideExtrudePreview();
-    for (const es of this.extrudeSessions) this.removeExactPreviewMeshes(es);
+    for (const es of this.previewSessions) this.removeExactPreviewMeshes(es);
     this.engine.clearPreviewBody();
     toolChipStore.getState().clear();
     const consumedSketch = this.lastArmedSketch;
-    const wasReedit = this.extrudeSessions.some((e) => e.draft.params.featureId !== undefined);
-    this.extrudeSessions = [];
+    const wasReedit = this.previewSessions.some((e) => e.draft.params.featureId !== undefined);
+    // The lane sessions were consumed by the commit — release ownership so a later
+    // sendPreview() cannot fire against a tool that is no longer armed.
+    this.previewSessions = [];
+    this.previewOwner = null;
+    this.previewParamsFn = null;
+    this.previewPending = false;
+    this.previewPendingHint = false;
     this.extrude = extrudeStep(this.extrude, { kind: "settle" }).state;
-    this.engine.setExtrudePreviewTint("normal");
+    this.engine.setPreviewTint("normal");
     this.throttle.reset();
     this.negativeDragHintShown = false;
     const uniqueBodyIds = bodyIds.filter((id, i, a) => a.indexOf(id) === i);
@@ -2840,43 +3501,187 @@ export class ModelToolController {
     this.updateDebug();
   }
 
-  // ── fillet commit ────────────────────────────────────────────────────────────
+  // ── edge-op (fillet / chamfer) + shell previewed commit ──────────────────────
 
+  /**
+   * The shared FRESH-commit sequence for the two value-drag preview tools
+   * (fillet/chamfer + shell). Mirrors one iteration of `confirmExtrude`'s loop:
+   * flush the FINAL params as the newest epoch, hold the exact-preview barrier so
+   * an in-flight kernel refusal is seen BEFORE anything reaches the timeline, then
+   * materialize the session through `endPreview(true)`.
+   *
+   * The barrier is what turns "commit blind, discover the refusal as an errored
+   * history row" into "the ✓ is blocked and says why". Neither op binds a sketch,
+   * so there is no profile-record guarantee here, and both are single-session, so
+   * there is no per-region loop.
+   *
+   * `fallback` is committed directly when NO lane session is open (a `beginPreview`
+   * the backend refused at arm time) — a missing preview must cost the preview,
+   * never the tool.
+   */
+  private async commitPreviewedOp(
+    fallback: OperationOp,
+    gen: number,
+  ): Promise<PreviewCommitOutcome> {
+    const es = this.previewSessions[0];
+    if (!es) {
+      try {
+        const res = await this.client.applyOperation(fallback);
+        if (gen !== this.commitGen) return { kind: "superseded" };
+        if (res.changedBodies.length === 0 && res.removedBodies.length === 0) {
+          await this.rollbackFailedCommit();
+          if (gen !== this.commitGen) return { kind: "superseded" };
+          return { kind: "failed", reason: res.errorMessage ?? "no body changed" };
+        }
+        return { kind: "ok", res };
+      } catch (e) {
+        if (gen !== this.commitGen) return { kind: "superseded" };
+        return { kind: "failed", reason: errMessage(e) };
+      }
+    }
+    const now = performance.now();
+    this.throttle.request(fallback.params as PreviewParams, now);
+    const send = this.throttle.flush(now);
+    this.commitFinalEpoch = send ? send.epoch : this.throttle.epoch;
+    this.client.updatePreview(
+      es.session.sessionId,
+      send?.params ?? (fallback.params as PreviewParams),
+      this.commitFinalEpoch,
+    );
+    const exact = await this.waitForExactPreview(es.session.sessionId);
+    if (gen !== this.commitGen) return { kind: "superseded" };
+    if (!exact.ok) {
+      // Nothing consumed the lane session — release it so the re-arm cannot leak it.
+      void this.client.endPreview(es.session.sessionId, false);
+      this.releaseCommittedSession(es);
+      return { kind: "failed", reason: exact.error.message };
+    }
+    let res: ApplyOperationResult | null;
+    try {
+      res = await this.client.endPreview(es.session.sessionId, true);
+    } catch (e) {
+      this.releaseCommittedSession(es);
+      if (gen !== this.commitGen) return { kind: "superseded" };
+      return { kind: "failed", reason: errMessage(e) };
+    }
+    this.releaseCommittedSession(es);
+    if (gen !== this.commitGen) return { kind: "superseded" };
+    if (!res || (res.changedBodies.length === 0 && res.removedBodies.length === 0)) {
+      // The command applied but its regen failed — pop the errored record so a
+      // retried ✓ replaces it instead of stacking a duplicate (extrude's rule).
+      await this.rollbackFailedCommit();
+      if (gen !== this.commitGen) return { kind: "superseded" };
+      return { kind: "failed", reason: res?.errorMessage ?? "no body changed" };
+    }
+    return { kind: "ok", res };
+  }
+
+  /** Drop a consumed/released lane session + its candidate meshes (no endPreview). */
+  private releaseCommittedSession(es: ToolPreviewSession): void {
+    this.removeExactPreviewMeshes(es);
+    this.engine.clearPreviewBody();
+    this.previewSessions = this.previewSessions.filter((s) => s !== es);
+  }
+
+  /** Release the lane after a successful fillet/chamfer/shell commit. */
+  private teardownPreviewedTool(): void {
+    this.deps.engine.setOrbitSuppressed(false);
+    toolChipStore.getState().clear();
+    this.closePreviewSessions();
+    this.previewArmHint = null;
+    this.dragging = null;
+  }
+
+  /**
+   * Apply the armed edge op. The RE-EDIT path is unchanged (a size-only scalar
+   * merge, no lane session); a FRESH fillet/chamfer runs the previewed-commit
+   * sequence so an OCCT-refused radius blocks the ✓ with the kernel's reason
+   * instead of committing an errored row.
+   */
   private async commitFillet(): Promise<void> {
-    const radius = this.fillet.radius;
-    const edges = this.filletEdges;
     const editFeatureId = this.filletEditFeatureId;
-    if (edges.length === 0 && !editFeatureId) {
-      this.cancelFillet();
+    if (editFeatureId) {
+      await this.commitEdgeOpEdit(editFeatureId);
       return;
     }
     const kind = this.edgeOpKind;
-    const op: OperationOp = {
-      opType: kind,
-      featureId: editFeatureId, // parametric re-edit → UpdateOperationParams
-      inputs: edges.map((e) => this.semanticRefFor(e)),
-      params: { mode: kind, radius, edgeIds: edges.map((e) => e.topoKey ?? e.id), chainTangentEdges: true },
-    };
+    if (this.filletEdges.length === 0) {
+      this.cancelFillet();
+      toolStore.getState().setTool("select");
+      return;
+    }
+    if (this.fillet.phase !== "armed") return;
+    if (this.previewFailure) {
+      traceWarn("extrude", `${kind} confirm BLOCKED by preview failure: ${this.previewFailure.message}`);
+      viewportStore
+        .getState()
+        .setStatusHint(`Cannot apply invalid preview: ${this.previewFailure.message}`, {
+          severity: "error",
+          sticky: true,
+        });
+      return;
+    }
+    const step = filletStep(this.fillet, { kind: "confirm" });
+    if (step.effect !== "commit") return;
+    this.fillet = step.state; // → committing (also excludes us from the stale-arm guard)
+    toolStore.setState({ phase: "committing" });
+    const gen = ++this.commitGen;
+    const edgeCount = this.filletEdges.length;
+    const outcome = await this.commitPreviewedOp(
+      { opType: kind, inputs: this.edgeOpInputs(), params: this.edgeOpParams() },
+      gen,
+    );
+    if (outcome.kind === "superseded") return;
+    if (outcome.kind === "failed") {
+      this.fillet = filletStep(this.fillet, { kind: "commitFailed" }).state; // → armed
+      toolStore.setState({ phase: "armed" });
+      viewportStore
+        .getState()
+        .setStatusHint(`${kind} failed: ${outcome.reason}`, { severity: "error", sticky: true });
+      await this.openEdgeOpPreview(this.armGen); // re-arm the preview (work kept)
+      this.updateDebug();
+      return;
+    }
+    this.applyResult(outcome.res);
+    this.teardownPreviewedTool();
+    this.fillet = filletInit();
+    this.filletEditFeatureId = undefined;
+    this.filletStoredParams = undefined;
+    this.filletEdges = [];
+    toolStore.getState().setTool("select");
+    viewportStore
+      .getState()
+      .setStatusHint(
+        `${kind === "Chamfer" ? "Chamfered" : "Filleted"} ${edgeCount} edge${edgeCount > 1 ? "s" : ""}`,
+      );
+    this.updateDebug();
+  }
+
+  /** Size-only parametric re-edit — deep-merges into the stored params. */
+  private async commitEdgeOpEdit(editFeatureId: string): Promise<void> {
+    const kind = this.edgeOpKind;
+    const radius = this.fillet.radius;
+    // Move to `committing` so the document-revision bump this commit causes does
+    // not read as an external model change and cancel our own arm.
+    const step = filletStep(this.fillet, { kind: "confirm" });
+    if (step.effect === "commit") this.fillet = step.state;
     this.deps.engine.setOrbitSuppressed(false);
     toolChipStore.getState().clear();
     try {
       // A re-edit changes ONLY the radius: deep-merge into the stored params so the
-      // fillet's edgeIds + typed edges survive (a whole-params replace would drop
-      // them). A fresh fillet commits the op (its typed edges ride via inputs).
-      const res =
-        editFeatureId && this.filletStoredParams
-          ? await this.client.applyEditCommand(
-              updateScalarParamsCommand(editFeatureId, kind, this.filletStoredParams, {
-                radius: { value: radius },
-              }),
-            )
-          : await this.client.applyOperation(op);
-      this.applyResult(res);
-      viewportStore.getState().setStatusHint(
-        editFeatureId
-          ? `${kind} ${kind === "Chamfer" ? "distance" : "radius"} updated`
-          : `${kind === "Chamfer" ? "Chamfered" : "Filleted"} ${edges.length} edge${edges.length > 1 ? "s" : ""}`,
+      // fillet's edgeIds + typed edges survive (a whole-params replace would drop them).
+      if (!this.filletStoredParams) {
+        throw new Error(`Stored ${kind} parameters are unavailable`);
+      }
+      const res = await this.client.applyEditCommand(
+        updateScalarParamsCommand(editFeatureId, kind, this.filletStoredParams, {
+          radius: { value: radius },
+        }),
       );
+      this.applyResult(res);
+      viewportStore
+        .getState()
+        .setStatusHint(`${kind} ${kind === "Chamfer" ? "distance" : "radius"} updated`);
     } catch (e) {
       viewportStore.getState().setStatusHint(`${kind} failed: ${errMessage(e)}`, { severity: "error", sticky: true });
     }
@@ -2896,6 +3701,12 @@ export class ModelToolController {
   async editEdgeOpFeature(featureId: string, kind: "Fillet" | "Chamfer" = "Fillet"): Promise<void> {
     const feat = documentStore.getState().features.find((f) => f.id === featureId);
     if (!feat || feat.kind !== "fillet") return;
+    // `dto.rs feature_kind` folds Shell into the SAME `fillet` bucket (that is why
+    // `editShellFeature` gates on opType), so the coarse kind alone would let a
+    // Shell row arm the edge-op tool and commit a radius patch against shell
+    // params. Reject on the exact authored opType whenever the projection carries
+    // one; a payload without `opType` keeps the legacy kind-only behaviour.
+    if (feat.opType && feat.opType !== "Fillet" && feat.opType !== "Chamfer") return;
     const radius = radiusFromValueText(feat.valueText);
     // Fetch the stored params so the size-only commit deep-merges instead of
     // dropping the edgeIds + typed edges (the projection does not expose them).
@@ -2928,8 +3739,10 @@ export class ModelToolController {
   private pickBooleanTool(toolBodyId: string): void {
     this.boolean = booleanStep(this.boolean, { kind: "pickTool", toolBodyId }).state;
     if (this.boolean.phase !== "armed") return;
-    // Ghost: highlight both bodies translucently (documented; a dedicated ghost
-    // material lands with the design's combine dialog).
+    // Fallback highlight while the kernel preview is still pending (mock lane: the
+    // ONLY feedback, since it never produces a candidate mesh — real lane: replaced
+    // the moment the exact candidate + `replacedBodyIds` hide land, since those
+    // bodies then render nothing to highlight anyway).
     selectionStore.getState().set([
       { kind: "body", id: this.boolean.targetBodyId! },
       { kind: "body", id: toolBodyId },
@@ -2941,55 +3754,237 @@ export class ModelToolController {
       (op) => this.setBooleanOp(op),
       () => void this.commitBoolean(),
     );
-    viewportStore.getState().setStatusHint("Choose Union / Cut / Intersect, then Apply", { sticky: true });
+    // `previewArmHint` is what `clearPreviewPending`/`onPreviewResult` restore the
+    // status line to once the kernel answers (boolean has no `armHintFor` entry —
+    // same seam edgeOp/shell use).
+    const hint = "Choose Union / Cut / Intersect, then Apply";
+    this.previewArmHint = hint;
+    viewportStore.getState().setStatusHint(hint, { sticky: true });
     this.updateDebug();
+    void this.armBooleanPreview();
   }
 
   private setBooleanOp(op: BooleanOperation): void {
     this.boolean = booleanStep(this.boolean, { kind: "setOp", op }).state;
     toolChipStore.getState().setOp(op);
+    this.engine.setPreviewTint(op === "Cut" ? "cut" : "normal");
+    this.sendPreview();
+  }
+
+  /** Complete canonical Boolean params for both exact preview and commit — the
+   *  op-swap analog of `extrudePreviewParams`, reading the FSM live so a chip op
+   *  change is picked up by whichever send fires next. */
+  private booleanPreviewParams(): PreviewParams {
+    return {
+      operation: this.boolean.op,
+      targetBodyId: this.boolean.targetBodyId ?? undefined,
+      toolBodyId: this.boolean.toolBodyId ?? undefined,
+    };
+  }
+
+  /** The two body inputs a Boolean draft/commit carries, synthesized from the
+   *  armed target/tool exactly as the wire op does (`ipc/previewOps.ts booleanOp`). */
+  private booleanPreviewDraft(): PreviewDraft {
+    return {
+      opType: "Boolean",
+      inputs: [
+        { primary: { bodyId: this.boolean.targetBodyId!, kind: "body" } },
+        { primary: { bodyId: this.boolean.toolBodyId!, kind: "body" } },
+      ],
+      params: this.booleanPreviewParams(),
+    };
+  }
+
+  /**
+   * Open the kernel-preview lane for the just-armed Boolean (target+tool picked):
+   * the candidate mesh replaces the translucent two-body highlight with the real
+   * fused/cut result once it lands. `armGen`-guarded — a superseded arm (Esc, tool
+   * switch, or an `editBooleanFeature` re-edit landing mid-await) tears its own
+   * session down instead of leaking or clobbering newer state.
+   */
+  private async armBooleanPreview(): Promise<void> {
+    if (this.boolean.phase !== "armed") return;
+    const gen = this.armGen;
+    const draft = this.booleanPreviewDraft();
+    let session: PreviewSession;
+    try {
+      session = await this.deps.client.beginPreview(draft);
+    } catch (error) {
+      if (gen !== this.armGen) return;
+      viewportStore
+        .getState()
+        .setStatusHint(`Boolean preview failed: ${errMessage(error)}`, {
+          severity: "error",
+          sticky: true,
+        });
+      return;
+    }
+    if (gen !== this.armGen) {
+      void this.deps.client.endPreview(session.sessionId, false); // superseded — don't leak
+      return;
+    }
+    this.openBooleanPreviewSession(session, draft);
+  }
+
+  /** Wire a freshly opened Boolean session into the shared preview lane and send
+   *  the first exact request. Shared by the initial arm and a post-failure re-arm. */
+  private openBooleanPreviewSession(session: PreviewSession, draft: PreviewDraft): void {
+    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [] }];
+    this.previewOwner = "boolean";
+    this.previewParamsFn = () => this.booleanPreviewParams();
+    this.previewFailure = null;
+    this.stalePreviewRetryAttempted = false;
+    // No drag on this lane (a chip op-swap, not a continuous gesture) — every send
+    // should go out at its own leading edge rather than sit behind the drag floor.
+    this.throttle.setTrailingMs(0);
+    this.throttle.reset();
+    this.engine.setPreviewTint(this.boolean.op === "Cut" ? "cut" : "normal");
+    this.sendPreview();
+    this.updateDebug();
   }
 
   private async commitBoolean(): Promise<void> {
     if (this.boolean.phase !== "armed" || !this.boolean.targetBodyId || !this.boolean.toolBodyId) return;
-    const { targetBodyId, toolBodyId, op } = this.boolean;
+    const { targetBodyId, op: operation } = this.boolean;
     const editFeatureId = this.booleanEditFeatureId;
     const storedParams = this.booleanStoredParams;
-    this.boolean = booleanStep(this.boolean, { kind: "apply" }).state;
-    toolChipStore.getState().clear();
-    const operation = op;
-    const cmd: OperationOp = {
-      opType: "Boolean",
-      inputs: [
-        { primary: { bodyId: targetBodyId, kind: "body" } },
-        { primary: { bodyId: toolBodyId, kind: "body" } },
-      ],
-      params: { operation, targetBodyId, toolBodyId },
-    };
-    try {
-      // A re-edit changes ONLY the operation: merge it into the stored params so the
-      // committed target/tool body ids survive VERBATIM. Re-sending them from the FSM
-      // would be a fresh authoring of consumed inputs — and `applyOperation` would
-      // append a SECOND boolean instead of editing the existing record.
-      const res =
-        editFeatureId && storedParams
-          ? await this.client.applyEditCommand(
-              updateScalarParamsCommand(editFeatureId, "Boolean", storedParams, { operation }),
-            )
-          : await this.client.applyOperation(cmd);
-      this.applyResult(res);
-      selectionStore.getState().set([{ kind: "body", id: targetBodyId }]);
-      viewportStore.getState().setStatusHint(
-        editFeatureId ? `Boolean changed to ${operation}` : `${operation} applied`,
-      );
-    } catch (e) {
-      viewportStore.getState().setStatusHint(`${operation} failed: ${errMessage(e)}`, { severity: "error", sticky: true });
+
+    // RE-EDIT (operation swap only, wave-1): `editBooleanFeature` never opens a
+    // preview session (the tool body is normally already consumed, so there is
+    // nothing honest to preview) — commit straight through the scalar update,
+    // preserving the stored target/tool ids VERBATIM. Re-sending them from the FSM
+    // would be a fresh authoring of consumed inputs, and `applyOperation` would
+    // append a SECOND boolean instead of editing the existing record.
+    if (editFeatureId && storedParams) {
+      this.boolean = booleanStep(this.boolean, { kind: "apply" }).state;
+      toolChipStore.getState().clear();
+      try {
+        const res = await this.client.applyEditCommand(
+          updateScalarParamsCommand(editFeatureId, "Boolean", storedParams, { operation }),
+        );
+        this.applyResult(res);
+        selectionStore.getState().set([{ kind: "body", id: targetBodyId }]);
+        viewportStore.getState().setStatusHint(`Boolean changed to ${operation}`);
+      } catch (e) {
+        viewportStore
+          .getState()
+          .setStatusHint(`${operation} failed: ${errMessage(e)}`, { severity: "error", sticky: true });
+      }
+      this.boolean = booleanInit();
+      this.booleanEditFeatureId = undefined;
+      this.booleanStoredParams = undefined;
+      toolStore.getState().setTool("select");
+      this.updateDebug();
+      return;
     }
+
+    // FRESH path: commit through the kernel-preview lane — the previewed candidate
+    // and the committed op must be the exact same op (SCHEMA §7.6), so this mirrors
+    // confirmExtrude's barrier: flush the final params as the newest epoch, wait for
+    // the matching exact candidate, then commit that same lane session.
+    if (this.previewFailure) {
+      viewportStore
+        .getState()
+        .setStatusHint(`Cannot confirm invalid preview: ${this.previewFailure.message}`, {
+          severity: "error",
+          sticky: true,
+        });
+      return;
+    }
+    const session = this.previewSessions[0];
+    if (!session) {
+      trace("boolean", "commit IGNORED: no open preview session yet");
+      return;
+    }
+    const gen = ++this.commitGen;
+    this.boolean = booleanStep(this.boolean, { kind: "apply" }).state;
+    toolStore.setState({ phase: "committing" });
+    toolChipStore.getState().clear();
+
+    const now = performance.now();
+    const params = this.booleanPreviewParams();
+    this.throttle.request(params, now);
+    const send = this.throttle.flush(now);
+    this.commitFinalEpoch = send ? send.epoch : this.throttle.epoch;
+    this.client.updatePreview(session.session.sessionId, send?.params ?? params, this.commitFinalEpoch);
+
+    const exact = await this.waitForExactPreview(session.session.sessionId);
+    if (gen !== this.commitGen) return;
+    if (!exact.ok) {
+      void this.client.endPreview(session.session.sessionId, false);
+      this.onBooleanCommitFailed(exact.error.message, gen);
+      return;
+    }
+
+    let res: ApplyOperationResult | null;
+    try {
+      res = await this.client.endPreview(session.session.sessionId, true);
+    } catch (e) {
+      if (gen !== this.commitGen) return;
+      this.onBooleanCommitFailed(errMessage(e), gen);
+      return;
+    }
+    if (gen !== this.commitGen) return;
+    if (!res || (res.changedBodies.length === 0 && res.removedBodies.length === 0)) {
+      // Applied but the regen failed: pop the errored record so a retried Apply
+      // cannot stack a duplicate (the same defect class extrude's rollback closes).
+      await this.rollbackFailedCommit();
+      if (gen !== this.commitGen) return;
+      this.onBooleanCommitFailed(res?.errorMessage, gen);
+      return;
+    }
+    this.applyResult(res);
+    for (const es of this.previewSessions) this.removeExactPreviewMeshes(es);
+    this.previewSessions = [];
+    this.previewOwner = null;
+    this.previewParamsFn = null;
+    this.previewFailure = null;
+    this.previewArmHint = null;
+    this.engine.clearPreviewBody();
+    this.engine.setPreviewTint("normal");
+    this.throttle.reset();
+    selectionStore.getState().set([{ kind: "body", id: targetBodyId }]);
+    viewportStore.getState().setStatusHint(`${operation} applied`);
     this.boolean = booleanInit();
     this.booleanEditFeatureId = undefined;
     this.booleanStoredParams = undefined;
     toolStore.getState().setTool("select");
     this.updateDebug();
+  }
+
+  /** A failed exact-preview barrier or a failed/regen-failing commit returns the
+   *  Boolean to armed and re-opens a fresh lane session (mirrors onExtrudeCommitFailed). */
+  private onBooleanCommitFailed(reason: string | undefined, gen: number): void {
+    traceWarn("boolean", `commit FAILED → re-arming: ${reason ?? "unknown reason"}`);
+    const operation = this.boolean.op;
+    this.boolean = { ...this.boolean, phase: "armed" };
+    toolStore.setState({ phase: "armed" });
+    viewportStore
+      .getState()
+      .setStatusHint(`${operation} failed: ${reason ?? "unknown reason"}`, {
+        severity: "error",
+        sticky: true,
+      });
+    void this.rearmBooleanPreview(gen);
+    this.updateDebug();
+  }
+
+  /** Re-open the lane session after `onBooleanCommitFailed` consumed the failed one. */
+  private async rearmBooleanPreview(gen: number): Promise<void> {
+    if (this.boolean.phase !== "armed") return;
+    for (const es of this.previewSessions) this.removeExactPreviewMeshes(es);
+    this.engine.clearPreviewBody();
+    this.previewSessions = [];
+    this.previewOwner = null;
+    this.previewParamsFn = null;
+
+    const draft = this.booleanPreviewDraft();
+    const session = await this.deps.client.beginPreview(draft);
+    if (gen !== this.commitGen) {
+      void this.deps.client.endPreview(session.sessionId, false); // superseded — don't leak
+      return;
+    }
+    this.openBooleanPreviewSession(session, draft);
   }
 
   /**
@@ -3196,12 +4191,24 @@ export class ModelToolController {
 
   private updateDebug(): void {
     if (!this.deps.debug) return;
+    // Only the PROFILE-based sessions carry a region + profile. Extrude arms every
+    // session with both, so for the extrude surface below this is the same list —
+    // the narrowing is the type-level restatement of that, not a new tolerance.
+    const profiled = this.previewSessions.filter(
+      (e): e is ToolPreviewSession & { region: SketchRegion; profile: PrismProfile } =>
+        e.region !== undefined && e.profile !== undefined,
+    );
     (window as unknown as { __extrudePreview?: unknown }).__extrudePreview = {
       l1Present: this.engine.isExtrudePreviewVisible(),
       phase: this.extrude.phase,
       // Revolve phase so e2e can assert armed-after-release for the revolve gesture
       // (MODEL-HARDEN Wave 1 debug surface extension).
       revolvePhase: this.revolve.phase,
+      // Edge-op + shell phases: e2e asserts armed-after-release for their commit
+      // gesture the same way (they have no 3D handle to scan for).
+      filletPhase: this.fillet.phase,
+      edgeOpKind: this.edgeOpKind,
+      shellPhase: this.shell.phase,
       booleanMode: this.extrude.booleanMode,
       symmetric: this.extrude.symmetric,
       endCondition: this.extrude.endCondition,
@@ -3212,17 +4219,25 @@ export class ModelToolController {
       angle: this.revolve.angle,
       // Boolean state plus exact Extrude/Revolve region context.
       booleanTargetId: this.extrude.targetBodyId ?? this.revolve.targetBodyId ?? null,
-      regionCount: this.extrudeSessions.length || this.revolveRegionIds.length || 1,
+      regionCount: this.previewSessions.length || this.revolveRegionIds.length || 1,
       selectedRegionIds: this.regionPick
         ? [...this.regionPick.select.selected]
-        : this.extrudeSessions.map((entry) => entry.region.regionId),
+        : profiled.map((entry) => entry.region.regionId),
       sketchId: this.lastArmedSketch,
-      regionIds: this.extrudeSessions.map((entry) => entry.region.regionId),
-      profileBounds: this.extrudeSessions.map((entry) => profileBounds(entry.profile)),
+      regionIds: profiled.map((entry) => entry.region.regionId),
+      profileBounds: profiled.map((entry) => profileBounds(entry.profile)),
       candidateParams:
-        this.extrudeSessions.length > 0 ? this.extrudePreviewParams() : null,
+        this.previewSessions.length > 0 ? this.extrudePreviewParams() : null,
       previewError: this.previewFailure,
-      sessionId: this.extrudeSessions[0]?.session.sessionId ?? null,
+      // Which tool owns the open lane sessions (null when the lane is free), and
+      // whether an exact preview is outstanding with nothing yet drawn for it.
+      // Extrude never reports pending — its L1 prism is already on screen.
+      previewOwner: this.previewOwner,
+      previewPending: this.previewPending,
+      sessionId: this.previewSessions[0]?.session.sessionId ?? null,
+      // How many lane sessions are OPEN right now. Distinct from `regionCount`,
+      // which falls back to the armed region count when the lane is closed.
+      previewSessionCount: this.previewSessions.length,
       commitBodyId: this.commitBodyId,
       lastL2Epoch: this.lastL2Epoch,
       finalEpoch: this.commitFinalEpoch,
@@ -3233,7 +4248,7 @@ export class ModelToolController {
       // subtracts a hole yields a second recovered ring here, which is what makes
       // the extrude preview a tube instead of a slab — the only externally
       // observable difference, so e2e asserts on it.
-      profileHoleCounts: this.extrudeSessions.map((s) => s.profile.holes.length),
+      profileHoleCounts: profiled.map((s) => s.profile.holes.length),
     };
   }
 
@@ -3284,6 +4299,18 @@ export class ModelToolController {
         void this.confirmRevolve();
         return;
       }
+      // Edge ops + shell join the same explicit gesture: release keeps them armed,
+      // Enter (or the chip ✓) is what writes to the timeline.
+      if (this.fillet.phase === "armed") {
+        e.preventDefault();
+        void this.commitFillet();
+        return;
+      }
+      if (this.shell.phase === "armed") {
+        e.preventDefault();
+        void this.commitShell();
+        return;
+      }
     }
     if (e.key === "Alt") {
       this.altHeld = true;
@@ -3291,7 +4318,7 @@ export class ModelToolController {
         this.extrude = extrudeStep(this.extrude, { kind: "drag", depth: this.extrude.depth, symmetric: true }).state;
         this.engine.setExtrudeDepth(this.extrude.depth, true);
         toolChipStore.getState().setSymmetric(true);
-        this.sendPreview(this.extrude.depth);
+        this.sendPreview();
       } else if (this.dragging === "revolve") {
         this.applyRevolveDrag(this.revolveLastX); // re-evaluate the snap without Alt
       }
@@ -3305,7 +4332,7 @@ export class ModelToolController {
         this.extrude = extrudeStep(this.extrude, { kind: "drag", depth: this.extrude.depth, symmetric: false }).state;
         this.engine.setExtrudeDepth(this.extrude.depth, false);
         toolChipStore.getState().setSymmetric(false);
-        this.sendPreview(this.extrude.depth);
+        this.sendPreview();
       } else if (this.dragging === "revolve") {
         this.applyRevolveDrag(this.revolveLastX); // re-apply the 45° snap
       }
@@ -3314,17 +4341,41 @@ export class ModelToolController {
 
   // ── cancel / teardown ──────────────────────────────────────────────────────────
 
-  private cancelPreview(): void {
-    // Cancel the exact-region Extrude preview session (tool switched / Esc).
-    for (const es of this.extrudeSessions) {
-      void this.client.endPreview(es.session.sessionId, false);
+  /**
+   * Release the shared kernel-preview lane: end every open session, drop its exact
+   * candidate meshes, and clear everything keyed to those sessions (commit
+   * barriers, the failure latch, the pending flag, the throttle + its trailing
+   * timer). OWNER-AGNOSTIC on purpose — the extrude-specific engine teardown (the
+   * L1 prism, the depth handle, the Cut tint, the FSM reset) stays in
+   * `cancelPreview`, so a future tool's cancel path can reuse this half as-is.
+   */
+  private closePreviewSessions(): void {
+    for (const es of this.previewSessions) {
+      // `Promise.resolve(...)` normalizes a lane that returns nothing and keeps the
+      // post-dispose rejection guard the old dispose() path had (finding 6).
+      void Promise.resolve(this.client.endPreview(es.session.sessionId, false)).catch(() => {});
       this.removeExactPreviewMeshes(es);
     }
-    this.extrudeSessions = [];
+    this.previewSessions = [];
+    this.previewOwner = null;
+    this.previewParamsFn = null;
+    this.previewPending = false;
+    this.previewPendingHint = false;
     this.clearExactPreviewWaiters();
-    this.negativeDragHintShown = false;
     this.previewFailure = null;
     this.stalePreviewRetryAttempted = false;
+    this.engine.clearPreviewBody();
+    this.throttle.reset();
+    if (this.trailingTimer) {
+      clearTimeout(this.trailingTimer);
+      this.trailingTimer = null;
+    }
+  }
+
+  private cancelPreview(): void {
+    // Cancel the exact-region Extrude preview session (tool switched / Esc).
+    this.closePreviewSessions();
+    this.negativeDragHintShown = false;
     this.extrudeStoredParams = undefined;
     this.commitBodyUnsub?.();
     this.commitBodyUnsub = null;
@@ -3333,28 +4384,37 @@ export class ModelToolController {
       this.commitBodyTimer = null;
     }
     this.engine.hideExtrudePreview();
-    this.engine.clearPreviewBody();
-    this.engine.setExtrudePreviewTint("normal");
-    this.throttle.reset();
+    this.engine.setPreviewTint("normal");
     this.extrude = extrudeInit();
     this.dragging = null;
-    if (this.trailingTimer) {
-      clearTimeout(this.trailingTimer);
-      this.trailingTimer = null;
-    }
   }
 
   private cancelFillet(): void {
+    // Release any open edge-op lane session FIRST (Esc / tool switch / a stale-model
+    // cancel all land here): every session is ended with endPreview(false) and its
+    // candidate meshes dropped, so no lane session can leak past the arm.
+    this.closePreviewSessions();
+    this.previewArmHint = null;
     this.deps.engine.setOrbitSuppressed(false);
     this.fillet = filletInit();
     this.edgeOpKind = "Fillet";
     this.filletEdges = [];
     this.filletEditFeatureId = undefined;
     this.filletStoredParams = undefined;
+    if (this.dragging === "fillet") this.dragging = null;
     toolChipStore.getState().clear();
+    this.updateDebug(); // republish the now-idle phase (a tool switch has no other hook)
   }
 
   private cancelBoolean(): void {
+    // Release any open Boolean lane session FIRST: this also restores the
+    // target/tool bodies `setPreviewReplacedBodyIds` hid once a candidate mesh
+    // landed (`closePreviewSessions` → `engine.clearPreviewBody` →
+    // `restorePreviewHiddenBodies`), so an Esc mid-preview leaves the scene exactly
+    // as it was before the pick — a no-op when boolean never opened one (onToolChange
+    // already tore it down via `cancelPreview`, or the tool never reached `armed`).
+    this.closePreviewSessions();
+    this.previewArmHint = null;
     this.boolean = booleanInit();
     this.booleanEditFeatureId = undefined;
     this.booleanStoredParams = undefined;
@@ -3362,6 +4422,9 @@ export class ModelToolController {
   }
 
   private cancelShell(): void {
+    // Release any open shell lane session FIRST (see cancelFillet).
+    this.closePreviewSessions();
+    this.previewArmHint = null;
     this.deps.engine.setOrbitSuppressed(false);
     this.shell = shellInit();
     this.shellFaces = [];
@@ -3369,6 +4432,7 @@ export class ModelToolController {
     this.shellStoredParams = undefined;
     if (this.dragging === "shell") this.dragging = null;
     toolChipStore.getState().clear();
+    this.updateDebug(); // republish the now-idle phase (a tool switch has no other hook)
   }
 
   private cancelPattern(): void {
@@ -3381,6 +4445,10 @@ export class ModelToolController {
   }
 
   private cancelRevolve(): void {
+    // Release the shared lane FIRST (Esc / tool switch / a geometryToken bump under an
+    // armed revolve all land here): every open session is ended with endPreview(false)
+    // and its candidate meshes dropped, so no lane session leaks.
+    this.closePreviewSessions();
     this.commitRevolveBodyUnsub?.();
     this.commitRevolveBodyUnsub = null;
     if (this.commitRevolveBodyTimer) {
@@ -3389,7 +4457,7 @@ export class ModelToolController {
     }
     this.deps.engine.setOrbitSuppressed(false);
     this.engine.hideRevolvePreview();
-    this.engine.setExtrudePreviewTint("normal");
+    this.engine.setPreviewTint("normal");
     this.revolve = revolveInit();
     this.revolveProfile = null;
     this.revolveProfiles = [];
@@ -3402,6 +4470,7 @@ export class ModelToolController {
     this.revolveArmedDown = false;
     if (this.dragging === "revolve") this.dragging = null;
     toolChipStore.getState().clear();
+    this.updateDebug();
   }
 
   private cancelAll(): void {
@@ -3437,14 +4506,9 @@ export class ModelToolController {
     this.commitBodyUnsub?.();
     this.commitRevolveBodyUnsub?.();
     // End every OPEN preview lane session (finding 6): a viewport remount disposes the
-    // controller while an extrude is armed — without this the lane sessions leak.
+    // controller while a tool is armed — without this the lane sessions leak.
     // Fire-and-forget with a disposed-guard catch (the result is irrelevant post-dispose).
-    for (const es of this.extrudeSessions) {
-      void this.deps.client.endPreview(es.session.sessionId, false).catch(() => {});
-      this.removeExactPreviewMeshes(es);
-    }
-    this.extrudeSessions = [];
-    this.clearExactPreviewWaiters();
+    this.closePreviewSessions();
     for (const u of this.unsubs) u();
     this.unsubs.length = 0;
   }

@@ -8,7 +8,7 @@
  * only the methods the controller drives are stubbed.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { ModelToolController } from "./ModelToolController";
+import { ModelToolController, __setExactPreviewTimeoutForTests } from "./ModelToolController";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import type { CadClient } from "@/ipc/client";
 import type {
@@ -79,7 +79,7 @@ function makeEngineMock() {
     showExtrudePreview: vi.fn(),
     showExtrudePreviews: vi.fn(),
     setExtrudeDepth: vi.fn(),
-    setExtrudePreviewTint: vi.fn(),
+    setPreviewTint: vi.fn(),
     setExtrudeHandleHover: vi.fn(),
     hitExtrudeHandle: vi.fn(() => false),
     screenRay: vi.fn(() => null),
@@ -140,6 +140,9 @@ describe("ModelToolController region pick", () => {
 
   beforeEach(() => {
     resetStores();
+    // No preview results are delivered here (onPreviewResult is a bare stub), so
+    // collapse the commit-time exact-preview barrier to one macrotask.
+    __setExactPreviewTimeoutForTests(0);
     selectionStore.getState().set([
       { kind: "sketchRegion", id: "r0-ref", sketchId: "sk", regionId: "r0" },
     ]);
@@ -150,6 +153,7 @@ describe("ModelToolController region pick", () => {
   afterEach(() => {
     controller?.dispose();
     container.remove();
+    __setExactPreviewTimeoutForTests(4000);
   });
 
   function pointer(type: string, x: number, y: number, button: number, buttons: number): void {
@@ -224,7 +228,7 @@ describe("ModelToolController region pick", () => {
     expect(draft.regionId).toBe("r1"); // the CLICKED region, not the first
   });
 
-  it("(a2) revolve two regions → toggle region 2 + Enter → axis pick → 360° commit sends regions[1].regionId", async () => {
+  it("(a2) revolve two regions → toggle region 2 + Enter → axis pick opens the lane on regions[1] → 360° commit", async () => {
     build(() => Promise.resolve({ regions: [R0, R1] }));
     selectionStore.getState().set([{ kind: "sketch", id: "sk" }]);
     toolStore.getState().setTool("revolve");
@@ -238,20 +242,26 @@ describe("ModelToolController region pick", () => {
     await flush();
     expect(engineMock.showRevolveAxisCandidates).toHaveBeenCalledTimes(1);
 
-    // Pick the axis line (click near it), then a plain click commits the default 360°.
+    // Pick the axis line (click near it) → the arm ALSO opens the kernel-preview lane
+    // session, bound to the exact picked region.
     click(95, 120);
     await flush();
+    await flush();
     expect(engineMock.showRevolvePreview).toHaveBeenCalledTimes(1);
+    expect(clientMock.beginPreview).toHaveBeenCalledTimes(1);
+    const draft = clientMock.beginPreview.mock.calls[0][0];
+    expect(draft.opType).toBe("Revolve");
+    expect(draft.regionId).toBe("r1"); // the TOGGLED region, not the first
 
+    // A plain click away commits the default 360° — through the lane session, so the
+    // previewed candidate IS what materializes (never a second ad-hoc op).
     click(200, 200);
     await flush();
+    await flush();
+    await flush();
 
-    expect(clientMock.applyOperation).toHaveBeenCalledTimes(1);
-    const op = clientMock.applyOperation.mock.calls[0][0];
-    expect(op.opType).toBe("Revolve");
-    // Narrow the OperationOp union to the Revolve variant (which carries regionId).
-    if (op.opType !== "Revolve") throw new Error("expected a Revolve op");
-    expect(op.regionId).toBe("r1");
+    expect(clientMock.applyOperation).not.toHaveBeenCalled();
+    expect(clientMock.endPreview).toHaveBeenCalledWith("sess", true);
   });
 
   it("(b) one selected region arms without a transient region picker", async () => {

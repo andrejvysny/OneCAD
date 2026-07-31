@@ -25,7 +25,7 @@ export interface ThrottleSend<P> {
 export const DEFAULT_TRAILING_MS = 80;
 
 export class PreviewThrottle<P> {
-  private readonly trailingMs: number;
+  private trailingMs: number;
   private epochCounter = 0;
   private inFlightEpoch: number | null = null;
   private lastSentAt = Number.NEGATIVE_INFINITY;
@@ -34,6 +34,18 @@ export class PreviewThrottle<P> {
 
   constructor(opts: { trailingMs?: number } = {}) {
     this.trailingMs = Math.max(0, opts.trailingMs ?? DEFAULT_TRAILING_MS);
+  }
+
+  /**
+   * Re-tune the trailing floor for the op now on the lane. One throttle is shared
+   * by every tool that opens preview sessions, but "≥80ms" is a pacing choice per
+   * OP COST, not a global constant: a cheap prism preview and an expensive
+   * shell/boolean rebuild want different floors. Owners set this at arm time; the
+   * constructor default is unchanged, so a caller that never calls this behaves
+   * exactly as before.
+   */
+  setTrailingMs(ms: number): void {
+    this.trailingMs = Math.max(0, ms);
   }
 
   /** Latest epoch minted (the newest params committed to the wire). */

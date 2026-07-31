@@ -17,7 +17,7 @@
  *   (g) a geometryToken bump under an armed revolve cancels it with a hint.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { ModelToolController } from "./ModelToolController";
+import { ModelToolController, __setExactPreviewTimeoutForTests } from "./ModelToolController";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import type { CadClient } from "@/ipc/client";
 import type {
@@ -106,7 +106,7 @@ function makeEngineMock() {
     showExtrudePreview: vi.fn(),
     showExtrudePreviews: vi.fn(),
     setExtrudeDepth: vi.fn(),
-    setExtrudePreviewTint: vi.fn(),
+    setPreviewTint: vi.fn(),
     setExtrudeHandleHover: vi.fn(),
     hitExtrudeHandle: vi.fn(() => false),
     screenRay: vi.fn(() => ({ origin: [0, 0, 100] as const, dir: [0, 0, -1] as const })),
@@ -212,6 +212,9 @@ describe("ModelToolController revolve re-edit (REVOLVE-REGION-PARITY)", () => {
 
   beforeEach(() => {
     resetStores();
+    // No preview results are delivered here (onPreviewResult is a bare stub), so
+    // collapse the fresh-commit exact-preview barrier to one macrotask.
+    __setExactPreviewTimeoutForTests(0);
     selectionStore.getState().set([]); // no selection → setTool('revolve') can't fresh-arm
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -220,6 +223,7 @@ describe("ModelToolController revolve re-edit (REVOLVE-REGION-PARITY)", () => {
   afterEach(() => {
     controller?.dispose();
     container.remove();
+    __setExactPreviewTimeoutForTests(4000);
   });
 
   // ── (a) the stored sketch wins over lastArmedSketch / the first document key ──
@@ -366,16 +370,24 @@ describe("ModelToolController revolve re-edit (REVOLVE-REGION-PARITY)", () => {
       new MouseEvent("pointerup", { button: 0, clientX: -50, clientY: 100, bubbles: true }),
     );
     await flush();
+    await flush();
     expect(engineMock.showRevolvePreview).toHaveBeenCalledTimes(1);
     expect(clientMock.finishSketch).not.toHaveBeenCalled();
+    // Axis chosen ⇒ the op is well-formed ⇒ the kernel-preview session opens (and
+    // arming STILL authors no timeline record — beginPreview is not finishSketch).
+    expect(clientMock.beginPreview).toHaveBeenCalledTimes(1);
 
     toolChipStore.getState().onConfirm?.();
+    await flush();
+    await flush();
     await flush();
     await flush();
 
     expect(clientMock.finishSketch).toHaveBeenCalledTimes(1);
     expect(clientMock.finishSketch).toHaveBeenCalledWith("sk-2");
-    expect(clientMock.applyOperation).toHaveBeenCalledTimes(1);
+    // The commit materializes the PREVIEWED candidate, not a second ad-hoc op.
+    expect(clientMock.applyOperation).not.toHaveBeenCalled();
+    expect(clientMock.endPreview).toHaveBeenCalledWith("pv-1", true);
   });
 
   it("a failed record guarantee returns to armed with a named hint and commits nothing", async () => {

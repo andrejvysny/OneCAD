@@ -17,6 +17,10 @@
 #include <vector>
 
 #include "BRepPrimAPI_MakeBox.hxx"
+#include "TopExp.hxx"
+#include "TopTools_IndexedMapOfShape.hxx"
+#include "TopoDS_Shape.hxx"
+#include "elementmap/ElementMapPartition.h"
 #include "nlohmann/json.hpp"
 #include "session/PreviewOp.h"
 #include "session/HistoryHash.h"
@@ -80,6 +84,46 @@ Envelope preview_req(json args) {
     req.id = 42;
     req.args = std::move(args);
     return req;
+}
+
+namespace em = onecad::elementmap;
+namespace km = onecad::kernel::elementmap;
+
+/// The sub-shape of `type` whose descriptor centre is nearest (cx,cy,cz).
+/// Fillet/Shell bind their inputs through the resolution LADDER, so a preview of
+/// either needs a ref that actually resolves — this picks the real edge/face the
+/// user would have clicked, exactly as `test_m6a_ops.cpp` does.
+TopoDS_Shape sub_shape_by_center(const TopoDS_Shape& shape, TopAbs_ShapeEnum type, double cx,
+                                 double cy, double cz) {
+    TopTools_IndexedMapOfShape map;
+    TopExp::MapShapes(shape, type, map);
+    TopoDS_Shape best;
+    double best_d2 = -1.0;
+    for (int i = 1; i <= map.Extent(); ++i) {
+        const km::ElementDescriptor d = em::ElementMapPartition::describe(map(i));
+        const double dx = d.center.X() - cx, dy = d.center.Y() - cy, dz = d.center.Z() - cz;
+        const double d2 = dx * dx + dy * dy + dz * dz;
+        if (best_d2 < 0.0 || d2 < best_d2) { best_d2 = d2; best = map(i); }
+    }
+    return best;
+}
+
+/// A typed input ref carrying the element's frozen descriptor + a world anchor —
+/// the shape a real UI pick lowers to (SCHEMA §7.3 `inputs[]`).
+json element_input(const std::string& body_id, const std::string& elem_id, const char* kind,
+                   const TopoDS_Shape& sub, double ax, double ay, double az) {
+    return json{{"primary", {{"bodyId", body_id}, {"elementId", elem_id}, {"kind", kind}}},
+                {"intent",
+                 {{"kind", kind},
+                  {"descriptor",
+                   em::ElementMapPartition::descriptor_to_json(em::ElementMapPartition::describe(sub))}}},
+                {"anchor", {{"worldPoint", {ax, ay, az}}}}};
+}
+
+double body_volume(Session& s, const std::string& body_id) {
+    const onecad::session::BodyStore bodies = s.bodies_copy();
+    const onecad::session::BodyRecord* rec = bodies.get(body_id);
+    return rec ? onecad::session::shape_volume(rec->geom) : -1.0;
 }
 
 /// Everything about the session a preview must NOT move.
@@ -350,6 +394,92 @@ int main() {
         CHECK(resp.error->message.find("PreviewOp: stale snapshot; expected ") == 0);
         CHECK(resp.out_bin.empty());
         check_head_untouched(session, base, "stale snapshot");
+    }
+
+    // ── 12. Fillet previews the ROUNDED body, and the head keeps its sharp edge ─
+    //
+    // The edge ops used to commit blind: the user dragged a radius, released, and
+    // learned whether OCCT accepted it from the history row that appeared. These
+    // two cases are the kernel half of the fix — a fillet/shell candidate that is
+    // real geometry (so the UI can show it and block ✓ when it fails) and still
+    // leaves the session exactly where it was.
+    const TopoDS_Shape box_a =
+        BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 10.0, 10.0, 10.0).Shape();
+    {
+        // The top edge running along X at y=0, z=10 — anchored on its midpoint, so
+        // the ladder binds it outright rather than tying with its neighbours.
+        const TopoDS_Shape edge = sub_shape_by_center(box_a, TopAbs_EDGE, 5, 0, 10);
+        json op = {{"opType", "Fillet"},
+                   {"opId", "op_fillet"},
+                   {"inputs", json::array({element_input("body_a", "el_edge", "edge", edge, 5, 0,
+                                                         10)})},
+                   {"params",
+                    {{"radius", 2.0}, {"edgeIds", json::array({"el_edge"})},
+                     {"chainTangentEdges", false}}}};
+        Envelope resp =
+            onecad::session::handle_preview_op(session, preview_req(json{{"op", op}}));
+        CHECK(!resp.error.has_value());
+        CHECK(resp.result["needsRepair"].empty());
+        CHECK(resp.result["changedBodies"].size() == 1);
+        CHECK(resp.result["changedBodies"][0] == "body_a");
+        CHECK(resp.result["bodyEvents"].size() == 1);
+        CHECK(resp.result["bodyEvents"][0]["kind"] == "modified");
+        CHECK(resp.result["deletedBodies"].empty());
+        CHECK(resp.result["meshes"].size() == 1);
+        CHECK(!resp.out_bin.empty());
+        // The REAL body is still the sharp 1000 cube — check_head_untouched proves
+        // the total, this names the one body the op claimed to modify.
+        CHECK(std::abs(body_volume(session, "body_a") - 1000.0) < 1e-6);
+        std::fprintf(stderr, "preview Fillet: %zu mesh(es), %zu bin bytes\n",
+                     resp.result["meshes"].size(), resp.out_bin.size());
+        check_head_untouched(session, base, "Fillet");
+    }
+
+    // ── 13. Shell previews the hollowed body; the head stays solid ─────────────
+    {
+        const TopoDS_Shape top = sub_shape_by_center(box_a, TopAbs_FACE, 5, 5, 10);
+        json op = {{"opType", "Shell"},
+                   {"opId", "op_shell"},
+                   {"inputs", json::array({element_input("body_a", "el_top", "face", top, 5, 5,
+                                                         10)})},
+                   {"params",
+                    {{"thickness", 1.0}, {"targetBodyId", "body_a"},
+                     {"openFaces", json::array({"el_top"})}}}};
+        Envelope resp =
+            onecad::session::handle_preview_op(session, preview_req(json{{"op", op}}));
+        CHECK(!resp.error.has_value());
+        CHECK(resp.result["needsRepair"].empty());
+        CHECK(resp.result["changedBodies"].size() == 1);
+        CHECK(resp.result["changedBodies"][0] == "body_a");
+        CHECK(resp.result["bodyEvents"].size() == 1);
+        CHECK(resp.result["bodyEvents"][0]["kind"] == "modified");
+        CHECK(resp.result["meshes"].size() == 1);
+        CHECK(!resp.out_bin.empty());
+        CHECK(std::abs(body_volume(session, "body_a") - 1000.0) < 1e-6);
+        std::fprintf(stderr, "preview Shell: %zu bin bytes\n", resp.out_bin.size());
+        check_head_untouched(session, base, "Shell");
+    }
+
+    // ── 14. A cancelled edge-op preview is CANCELLED, never a partial candidate ─
+    //
+    // Case 9 pins this for Extrude; repeating it for the ladder-resolving ops is
+    // the groundwork for coalescing drag-time previews (a superseded frame must
+    // be abandonable at any point without leaving scratch behind).
+    {
+        const TopoDS_Shape edge = sub_shape_by_center(box_a, TopAbs_EDGE, 5, 0, 10);
+        json op = {{"opType", "Fillet"},
+                   {"opId", "op_fillet_cancel"},
+                   {"inputs", json::array({element_input("body_a", "el_edge", "edge", edge, 5, 0,
+                                                         10)})},
+                   {"params", {{"radius", 2.0}, {"edgeIds", json::array({"el_edge"})}}}};
+        onecad::CancelToken cancel;
+        cancel.cancel();
+        Envelope resp = onecad::session::handle_preview_op(
+            session, preview_req(json{{"op", op}}), cancel);
+        CHECK(resp.error.has_value());
+        CHECK(resp.error->code == "CANCELLED");
+        CHECK(resp.out_bin.empty());
+        check_head_untouched(session, base, "cancelled fillet");
     }
 
     if (g_failures == 0) std::fprintf(stderr, "preview_op: all checks passed\n");

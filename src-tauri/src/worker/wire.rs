@@ -2858,29 +2858,120 @@ mod body_wire_tests {
         );
     }
 
+    /// PreviewOp and ExecutePlan MUST lower the SAME typed `Operation` to the SAME
+    /// wire op — for EVERY op the frontend can open a preview session on, not just
+    /// Extrude (`src/ipc/previewOps.ts` `OP_BUILDERS`). Both sides go through
+    /// `lower_operation`, so this is a regression fence around that single seam:
+    /// any future opType-specific branch on either path breaks it here first.
     #[test]
     fn preview_and_commit_share_profile_and_body_lowering() {
+        use onecad_core::document::record::{ChamferParams, ShellParams};
         use onecad_core::document::refs::SketchRegionRef;
         use onecad_core::ids::{RegionId, SketchId};
 
         let target = BodyId(Uuid::from_u128(0x88));
-        let mut params = extrude_cut(target);
-        params.profile = Some(SketchRegionRef {
+        let tool = BodyId(Uuid::from_u128(0x89));
+        let edge_body = BodyId(Uuid::from_u128(0x8a));
+        let profile = SketchRegionRef {
             sketch: SketchId(Uuid::from_u128(0x99)),
             region: RegionId::new("r_non_first"),
             extra: Default::default(),
-        });
-        let operation = Operation::Known(KnownOperation::Extrude(params));
-        let planned = planned(operation.clone(), operation.derive_inputs());
-        let committed = wire_op(&planned);
-        let previewed = preview_wire_op(&operation, &planned.record_id.to_string());
+        };
+        let edge_ref = |body: BodyId, element: &str| ElementRef {
+            primary: Some(PrimaryRef {
+                body,
+                element: ElementId::new(element),
+                kind: ElementKind::Edge,
+                extra: Default::default(),
+            }),
+            intent: None,
+            anchor: None,
+            extra: Default::default(),
+        };
 
-        for key in ["opType", "opId", "inputs", "params"] {
-            assert_eq!(
-                previewed[key], committed[key],
-                "PreviewOp and ExecutePlan diverged at {key}"
-            );
+        let mut extrude = extrude_cut(target);
+        extrude.profile = Some(profile.clone());
+
+        let cases: Vec<(&str, Operation)> = vec![
+            (
+                "Extrude",
+                Operation::Known(KnownOperation::Extrude(extrude)),
+            ),
+            (
+                "Revolve",
+                Operation::Known(KnownOperation::Revolve(RevolveParams {
+                    profile: Some(profile.clone()),
+                    angle_deg: Scalar::new(90.0),
+                    axis: Some(AxisRef::Element {
+                        body: target,
+                        edge: ElementId::new("e:2"),
+                        extra: Default::default(),
+                    }),
+                    boolean_mode: BooleanMode::Cut,
+                    target_body: Some(target),
+                    extra: Default::default(),
+                })),
+            ),
+            (
+                "Fillet",
+                Operation::Known(KnownOperation::Fillet(FilletParams {
+                    radius: Scalar::new(2.0),
+                    edge_ids: vec![ElementId::new("e:14"), ElementId::new("e:15")],
+                    edges: vec![edge_ref(edge_body, "e:14"), edge_ref(edge_body, "e:15")],
+                    chain_tangent_edges: true,
+                    extra: Default::default(),
+                })),
+            ),
+            (
+                "Chamfer",
+                Operation::Known(KnownOperation::Chamfer(ChamferParams {
+                    radius: Scalar::new(1.0),
+                    edge_ids: vec![ElementId::new("e:16")],
+                    edges: vec![edge_ref(edge_body, "e:16")],
+                    chain_tangent_edges: true,
+                    extra: Default::default(),
+                })),
+            ),
+            (
+                "Shell",
+                Operation::Known(KnownOperation::Shell(ShellParams {
+                    thickness: Scalar::new(1.5),
+                    open_faces: vec![ElementId::new("el_f1")],
+                    target_body: Some(target),
+                    extra: Default::default(),
+                })),
+            ),
+            (
+                "Boolean",
+                Operation::Known(KnownOperation::Boolean(BooleanParams {
+                    operation: BooleanOp::Cut,
+                    target_body: target,
+                    tool_body: tool,
+                    extra: Default::default(),
+                })),
+            ),
+        ];
+
+        for (name, operation) in cases {
+            let planned = planned(operation.clone(), operation.derive_inputs());
+            let committed = wire_op(&planned);
+            let previewed = preview_wire_op(&operation, &planned.record_id.to_string());
+            assert_eq!(previewed["opType"], json!(name), "{name}: opType tag");
+            for key in ["opType", "opId", "inputs", "params"] {
+                assert_eq!(
+                    previewed[key], committed[key],
+                    "{name}: PreviewOp and ExecutePlan diverged at {key}"
+                );
+            }
         }
+
+        // Extrude keeps its named pins (EXTRUDE-REGION-PARITY): the boolean target
+        // renders in worker body form, a non-first region survives, and the
+        // core-only `profile` wrapper is gone.
+        let mut params = extrude_cut(target);
+        params.profile = Some(profile);
+        let operation = Operation::Known(KnownOperation::Extrude(params));
+        let previewed = preview_wire_op(&operation, "op-1");
         assert_eq!(
             previewed["params"]["targetBodyId"],
             json!(body_id_wire(target))

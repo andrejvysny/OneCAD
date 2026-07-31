@@ -72,7 +72,7 @@ function makeEngineMock() {
     showExtrudePreview: vi.fn(),
     showExtrudePreviews: vi.fn(),
     setExtrudeDepth: vi.fn(),
-    setExtrudePreviewTint: vi.fn(),
+    setPreviewTint: vi.fn(),
     setRegionSelected: vi.fn(),
     setExtrudeHandleHover: vi.fn(),
     hitExtrudeHandle: vi.fn(() => false),

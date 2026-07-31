@@ -41,7 +41,7 @@ function makeEngineMock() {
     probePick: vi.fn(() => null),
     hideExtrudePreview: vi.fn(),
     clearPreviewBody: vi.fn(),
-    setExtrudePreviewTint: vi.fn(),
+    setPreviewTint: vi.fn(),
     setOrbitSuppressed: vi.fn(),
     hideRevolvePreview: vi.fn(),
     hideRegionPick: vi.fn(),

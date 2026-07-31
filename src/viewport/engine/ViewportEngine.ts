@@ -720,13 +720,15 @@ export class ViewportEngine {
   }
 
   /**
-   * Tint the extrude/revolve preview (Wave 2 boolean modes): "cut" recolors the L1
-   * prism(s) / lathe shell AND the shared L2 preview-body face material to the
-   * destructive token; "normal" restores the accent. Sticky across preview swaps —
+   * Tint the LIVE op preview (Wave 2 boolean modes): "cut" recolors the L1 prism(s)
+   * / lathe shell AND the shared L2 preview-body face material to the destructive
+   * token; "normal" restores the accent. Sticky across preview swaps —
    * `setPreviewBody` re-applies it. Only one preview kind is live at a time, so
-   * tinting both here is harmless.
+   * tinting every surface here is harmless — which is why this is `setPreviewTint`
+   * and not an extrude-specific seam: it already served the lathe and the shared
+   * L2 body before any other tool joined the kernel-preview lane.
    */
-  setExtrudePreviewTint(tint: "normal" | "cut"): void {
+  setPreviewTint(tint: "normal" | "cut"): void {
     const cut = tint === "cut";
     this.extrudePreviewCut = cut;
     this.previewMesh?.setTint(cut);

@@ -452,6 +452,9 @@ export type OpType =
   | "Extrude"
   | "Revolve"
   | "Fillet"
+  // Chamfer shares FilletChamferParams with Fillet (SCHEMA §7.3) but is its OWN
+  // `opType` on the wire, so a preview draft must be able to name it.
+  | "Chamfer"
   | "Boolean"
   | "Shell"
   | "LinearPattern"
@@ -722,9 +725,15 @@ export interface ApplyOperationResult {
 
 // ── Two-level preview (NEW_SPEC §15) ─────────────────────────────────────────
 
-/** Params a preview update carries (opType-specific; loosely typed for the wire). */
+/**
+ * Params a preview update carries (opType-specific; loosely typed for the wire).
+ * One union per previewable opType — the `ipc/previewOps.ts` builders narrow it
+ * back down and reject anything that does not belong to the op being previewed.
+ */
 export type PreviewParams = Partial<ExtrudeParams> &
+  Partial<RevolveParams> &
   Partial<FilletParams> &
+  Partial<ShellParams> &
   Partial<BooleanParams> & { [k: string]: unknown };
 
 /** `beginPreview` draft — the base op the drag will refine. */
@@ -734,6 +743,14 @@ export interface PreviewDraft {
   opType: OpType;
   sketchId?: string;
   regionId?: string;
+  /**
+   * Typed op inputs, carried verbatim into the session. Load-bearing for
+   * Fillet/Chamfer ONLY — `wireOperation` drops an op's top-level inputs
+   * everywhere else, and `filletParams` synthesizes the typed `params.edges` from
+   * these (in lockstep with `params.edgeIds`). Shell/Boolean bodies ride
+   * `params.targetBodyId`/`toolBodyId`. See `ipc/previewOps.ts`.
+   */
+  inputs?: SemanticRef[];
   params: PreviewParams;
 }
 

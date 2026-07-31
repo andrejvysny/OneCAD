@@ -1568,6 +1568,17 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-07-31 — PREVIEW wave: §7.6 `PreviewOp` now exercised by ALL op types**
+  (Revolve/Fillet/Chamfer/Shell/Boolean joined Extrude). **No wire change** — the
+  verb, envelope, and op payloads were already generic; this entry records that
+  the "preview callers MUST NOT maintain a second ad-hoc mapper" rule is now
+  enforced client-side by a single shared builder table (`previewOps.ts`
+  `OP_BUILDERS`, mirrored by the Rust lowering-equality test over all six
+  opTypes) and proven per-op by real-worker preview==commit volume tests
+  (`preview_revolve.rs`, `preview_edge_shell.rs`, `preview_boolean.rs`, worker
+  `test_preview_op` cases 12–14 incl. a pre-cancelled-token `CANCELLED`
+  terminal). No fixture bump (no shape moved).
+
 - **2026-07-29 (b) — §8 new error code `STALE_PREVIEW`; §7.4 fail-closed partial
   triangulation + chord-limitation note; §7.3 `ToNext` binds bounded faces**
   (EXTRUDE-REGION-PARITY hardening; worker + Rust + frontend sign-off, no fixture

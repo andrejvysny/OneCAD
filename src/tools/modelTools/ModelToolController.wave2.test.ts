@@ -66,7 +66,7 @@ function makeEngineMock(probeBodyId: string | null = null) {
     showExtrudePreview: vi.fn(),
     showExtrudePreviews: vi.fn(),
     setExtrudeDepth: vi.fn(),
-    setExtrudePreviewTint: vi.fn(),
+    setPreviewTint: vi.fn(),
     setExtrudeHandleHover: vi.fn(),
     hitExtrudeHandle: vi.fn(() => false),
     screenRay: vi.fn(() => ({ origin: [0, 0, 100] as const, dir: [0, 0, -1] as const })),
@@ -184,9 +184,9 @@ describe("ModelToolController Wave 2", () => {
     expect(debug().booleanTargetId).toBe("body1");
 
     controllerBoolean("Cut");
-    expect(engineMock.setExtrudePreviewTint).toHaveBeenCalledWith("cut");
+    expect(engineMock.setPreviewTint).toHaveBeenCalledWith("cut");
     controllerBoolean("NewBody");
-    expect(engineMock.setExtrudePreviewTint).toHaveBeenLastCalledWith("normal");
+    expect(engineMock.setPreviewTint).toHaveBeenLastCalledWith("normal");
     expect(debug().booleanTargetId).toBeNull();
   });
 
@@ -283,7 +283,7 @@ describe("ModelToolController Wave 2", () => {
     expect(viewportStore.getState().statusHint?.message).toMatch(/1 of 2 regions fail/);
   });
 
-  it("revolve: a valid axis arms, then confirm loops one applyOperation per region", async () => {
+  it("revolve: a valid axis arms + opens one lane session per region, then confirm commits each", async () => {
     build({ finish: () => Promise.resolve({ regions: [R0, R1] }), entities: [AXIS_OK, AXIS_BAD] });
     selectionStore.getState().set([{ kind: "sketch", id: "sk" }]);
     toolStore.getState().setTool("revolve");
@@ -295,21 +295,26 @@ describe("ModelToolController Wave 2", () => {
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
     await flush();
 
-    // The valid axis (u=50) arms both regions.
+    // The valid axis (u=50) arms both regions AND opens their preview sessions —
+    // the op is well-formed exactly when an axis exists.
     click(50, 50);
     await flush();
+    await flush();
     expect(engineMock.showRevolvePreview).toHaveBeenCalledTimes(1);
+    expect(clientMock.beginPreview).toHaveBeenCalledTimes(2);
+    const drafts = clientMock.beginPreview.mock.calls.map((c) => c[0]);
+    expect(drafts.map((d) => d.opType)).toEqual(["Revolve", "Revolve"]);
+    expect(drafts.map((d) => d.regionId)).toEqual(["r0", "r1"]);
 
-    // Confirm → one Revolve op per region, same axis + angle.
+    // Confirm → each region commits its OWN previewed candidate (no ad-hoc second op).
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
     await flush();
-    expect(clientMock.applyOperation).toHaveBeenCalledTimes(2);
-    const regionIds = clientMock.applyOperation.mock.calls.map((c) => {
-      const op = c[0];
-      if (op.opType !== "Revolve") throw new Error("expected Revolve");
-      return op.regionId;
-    });
-    expect(regionIds).toEqual(["r0", "r1"]);
+    await flush();
+    await flush();
+    await flush();
+    expect(clientMock.applyOperation).not.toHaveBeenCalled();
+    const committed = (clientMock.endPreview.mock.calls as unknown[][]).filter((c) => c[1] === true);
+    expect(committed.map((c) => c[0])).toEqual(["pv-1", "pv-2"]);
   });
 
   // ── MODEL-HARDEN findings ─────────────────────────────────────────────────────
@@ -473,7 +478,7 @@ describe("ModelToolController Wave 2", () => {
     build({
       finish: () => Promise.resolve({ regions: [R0, R1] }),
       entities: [AXIS_OK, AXIS_BAD],
-      applyResults: [ok("rev-a"), fail("boom")],
+      endResults: [ok("rev-a"), fail("boom")],
     });
     selectionStore.getState().set([{ kind: "sketch", id: "sk" }]);
     toolStore.getState().setTool("revolve");
@@ -484,15 +489,22 @@ describe("ModelToolController Wave 2", () => {
     await flush();
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })); // confirm 2 regions
     await flush();
-    click(50, 50); // valid axis → armed (first showRevolvePreview)
+    click(50, 50); // valid axis → armed (first showRevolvePreview) + 2 lane sessions
+    await flush();
     await flush();
     expect(engineMock.showRevolvePreview).toHaveBeenCalledTimes(1);
+    expect(clientMock.beginPreview).toHaveBeenCalledTimes(2);
 
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })); // confirm → region0 ok, region1 fails
+    await flush();
+    await flush();
+    await flush();
     await flush();
     // The stop-on-failure path re-armed and rebuilt the lathe preview for the remaining region.
     expect(engineMock.showRevolvePreview).toHaveBeenCalledTimes(2);
     expect(viewportStore.getState().statusHint?.message).toMatch(/Revolve 2 of 2 failed/);
+    // …and re-opened the FAILED region's lane session so the work is never lost.
+    expect(clientMock.beginPreview).toHaveBeenCalledTimes(3);
   });
 
   it("confirmRevolve at a ~0° angle is refused with a 'non-zero angle' hint (finding 13)", async () => {

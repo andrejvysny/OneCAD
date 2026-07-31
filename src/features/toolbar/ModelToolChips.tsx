@@ -280,6 +280,8 @@ export function ModelToolChips() {
   const showEndConditions = useToolChipStore((s) => s.showEndConditions);
   const suffix = useToolChipStore((s) => s.suffix);
   const worldPos = useToolChipStore((s) => s.worldPos);
+  /** Whether the armed owner wired a ✓ (fillet/shell: fresh arm yes, re-edit no). */
+  const hasConfirm = useToolChipStore((s) => s.onConfirm !== null);
   // A plain DOM host, created once; the engine owns its DOM position.
   const [host] = useState(() => {
     const el = document.createElement("div");
@@ -392,7 +394,19 @@ export function ModelToolChips() {
       </>,
     );
   } else if (kind === "filletRadius" || kind === "shellThickness") {
-    content = numericChip("mm");
+    // Edge-op preview wave: a FRESH fillet/chamfer/shell arm wires ✓/✕ and gets
+    // the same armed cluster the extrude/revolve chips use — release no longer
+    // commits, so the visible confirm is the only way out other than Enter. The
+    // parametric RE-EDIT chip wires no ✓ (it commits from its own input) and
+    // keeps rendering as the bare numeric chip it always was.
+    content = hasConfirm
+      ? panel(
+          <>
+            {clusterInput("mm")}
+            {confirmButtons}
+          </>,
+        )
+      : numericChip("mm");
   } else if (kind === "dimension") {
     // Sketch Dimension tool: seeded + auto-focused; Enter commits, Esc cancels,
     // and a canvas click must NOT blur-commit (a 2nd line click upgrades a length

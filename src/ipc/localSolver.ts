@@ -24,7 +24,6 @@ import type {
   ApplyOperationResult,
   BeginGestureResult,
   DragSolveResult,
-  ExtrudeParams,
   EnterSketchTarget,
   OperationOp,
   PreviewDraft,
@@ -43,6 +42,7 @@ import type {
 import { makeExtrudeBodyMesh } from "./mockMeshes";
 import { detectRegions, planeFor, solveDof } from "./mockSketch";
 import { profileFromRegion, type PrismProfile } from "@/tools/preview/prismPreview";
+import { buildPreviewOp, supportsPreview, type PreviewSessionState } from "./previewOps";
 import { mintRecordId } from "./tauriCommandMap";
 import { trace } from "@/debug/trace";
 
@@ -80,16 +80,17 @@ function cloneSession(s: SketchSession): SketchSession {
   return JSON.parse(JSON.stringify(s)) as SketchSession;
 }
 
-interface PreviewSessionState {
-  opId: string;
-  opType: PreviewDraft["opType"];
-  editFeatureId?: string;
+/**
+ * One live preview session. Extends the builder-visible {@link PreviewSessionState}
+ * (`ipc/previewOps.ts`, the single op mapper) with this lane's transport
+ * bookkeeping. `plane`/`profile` are the MOCK lane's local-synthesis inputs and
+ * exist only for the profile-based ops (Extrude/Revolve) — the backend lane never
+ * reads them.
+ */
+interface LaneSession extends PreviewSessionState {
   previewBodyId: string;
-  sketchId?: string;
-  regionId?: string;
-  plane: SketchPlane;
-  profile: PrismProfile;
-  latestParams: PreviewParams;
+  plane?: SketchPlane;
+  profile?: PrismProfile;
   lastEpoch: number;
   previewInFlight: boolean;
   queuedPreview: { params: PreviewParams; epoch: number } | null;
@@ -131,7 +132,7 @@ export interface LocalSolverDeps {
 
 /**
  * The public lane surface — exactly the CadClient sketch + preview methods, plus
- * `resolveExtrudeInput` (so a caller's own op-commit path can reuse the finished
+ * `resolveProfileInput` (so a caller's own op-commit path can reuse the finished
  * region → {plane, profile}) and split reset seams.
  */
 export interface LocalSolverLane {
@@ -156,7 +157,12 @@ export interface LocalSolverLane {
   updatePreview(sessionId: string, params: PreviewParams, epoch: number): void;
   endPreview(sessionId: string, commit: boolean): Promise<ApplyOperationResult | null>;
   onPreviewResult(cb: (r: PreviewResult) => void): Unsubscribe;
-  /** Resolve a finished sketch region → the {plane, profile} an extrude consumes. */
+  /** Resolve a finished sketch region → the {plane, profile} a profile-based op consumes. */
+  resolveProfileInput(
+    sketchId: string | undefined,
+    regionId: string | undefined,
+  ): { plane: SketchPlane; profile: PrismProfile };
+  /** @deprecated Alias of {@link resolveProfileInput} kept for existing callers (mockClient). */
   resolveExtrudeInput(
     sketchId: string | undefined,
     regionId: string | undefined,
@@ -189,7 +195,7 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
   let activeGesture: { sketchId: string; dragPointId: string; nextSeq: number } | null = null;
 
   // Preview-lane state.
-  const previewSessions = new Map<string, PreviewSessionState>();
+  const previewSessions = new Map<string, LaneSession>();
   const previewListeners = new Set<(r: PreviewResult) => void>();
   let nextSessionSeq = 1;
 
@@ -213,12 +219,12 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
     return `Preview needs repair${ref}: ${reason}`;
   }
 
-  function resolveExtrudeInput(
+  function resolveProfileInput(
     sketchId: string | undefined,
     regionId: string | undefined,
   ): { plane: SketchPlane; profile: PrismProfile } {
-    if (!sketchId) throw new Error("Extrude preview requires sketchId");
-    if (!regionId) throw new Error("Extrude preview requires regionId");
+    if (!sketchId) throw new Error("Profile preview requires sketchId");
+    if (!regionId) throw new Error("Profile preview requires regionId");
     const regions = finishedRegions.get(sketchId);
     if (!regions) {
       throw new Error(`No solved regions cached for sketch ${sketchId}`);
@@ -248,89 +254,9 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
     return { a: line.p0, b: line.p1 };
   }
 
-  /** Build the concrete Extrude op a committed preview session materializes. */
-  function buildOpFromSession(s: PreviewSessionState): OperationOp {
-    if (!s.sketchId) throw new Error("Extrude operation requires sketchId");
-    if (!s.regionId) throw new Error("Extrude operation requires regionId");
-    const distance = Number(s.latestParams.distance);
-    if (!Number.isFinite(distance)) throw new Error("Extrude distance must be finite");
-    const rawMode = s.latestParams.booleanMode;
-    if (
-      rawMode !== undefined &&
-      rawMode !== "NewBody" &&
-      rawMode !== "Add" &&
-      rawMode !== "Cut" &&
-      rawMode !== "Intersect"
-    ) {
-      throw new Error(`Unsupported Extrude booleanMode ${String(rawMode)}`);
-    }
-    const booleanMode: ExtrudeParams["booleanMode"] = rawMode ?? "NewBody";
-    const targetBodyId =
-      typeof s.latestParams.targetBodyId === "string" && s.latestParams.targetBodyId
-        ? s.latestParams.targetBodyId
-        : undefined;
-    if (booleanMode !== "NewBody" && !targetBodyId) {
-      throw new Error(`${booleanMode} Extrude requires targetBodyId`);
-    }
-
-    const END_MODES = ["Blind", "ThroughAll", "Symmetric", "ToNext", "ToFace"] as const;
-    const rawEnd = s.latestParams.extrudeMode ?? "Blind";
-    if (!END_MODES.includes(rawEnd as (typeof END_MODES)[number])) {
-      throw new Error(`Unsupported Extrude mode ${String(rawEnd)}`);
-    }
-    const extrudeMode = rawEnd as (typeof END_MODES)[number];
-    const rawEnd2 = s.latestParams.extrudeMode2 ?? "Blind";
-    if (!END_MODES.includes(rawEnd2 as (typeof END_MODES)[number])) {
-      throw new Error(`Unsupported second Extrude mode ${String(rawEnd2)}`);
-    }
-    const extrudeMode2 = rawEnd2 as (typeof END_MODES)[number];
-    const twoDirections = s.latestParams.twoDirections === true;
-    const draftAngleDeg = Number(s.latestParams.draftAngleDeg ?? 0);
-    if (!Number.isFinite(draftAngleDeg)) throw new Error("Extrude draft angle must be finite");
-    const distance2 = Number(s.latestParams.distance2 ?? 0);
-    if (twoDirections && !Number.isFinite(distance2)) {
-      throw new Error("Second Extrude distance must be finite");
-    }
-    if (extrudeMode === "Symmetric" && twoDirections) {
-      throw new Error("Symmetric Extrude cannot use two directions");
-    }
-    if (extrudeMode === "ToFace" && !s.latestParams.targetFace) {
-      throw new Error("ToFace Extrude requires targetFace");
-    }
-    if (twoDirections && extrudeMode2 === "ToFace" && !s.latestParams.targetFace2) {
-      throw new Error("Second ToFace Extrude requires targetFace2");
-    }
-
-    const params: ExtrudeParams = {
-      distance,
-      extrudeMode,
-      booleanMode,
-      draftAngleDeg,
-      twoDirections,
-      extrudeMode2,
-      distance2,
-    };
-    if (targetBodyId) params.targetBodyId = targetBodyId;
-    if (twoDirections && extrudeMode2 === "ToFace") {
-      params.targetFace2 = s.latestParams.targetFace2 as ExtrudeParams["targetFace2"];
-    }
-    if (extrudeMode === "ToFace") {
-      params.targetFace = s.latestParams.targetFace as ExtrudeParams["targetFace"];
-    }
-    return {
-      opType: "Extrude",
-      opId: s.opId,
-      sketchId: s.sketchId,
-      regionId: s.regionId,
-      featureId: s.editFeatureId,
-      inputs: [{ primary: { bodyId: "", kind: "face" }, anchor: {} }],
-      params,
-    };
-  }
-
   function dispatchBackendPreview(
     sessionId: string,
-    s: PreviewSessionState,
+    s: LaneSession,
     params: PreviewParams,
     epoch: number,
   ): void {
@@ -339,7 +265,7 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
     const bodyId = s.previewBodyId;
     let op: OperationOp;
     try {
-      op = buildOpFromSession({ ...s, latestParams: { ...params } });
+      op = buildPreviewOp({ ...s, latestParams: { ...params } });
     } catch (error) {
       s.previewInFlight = false;
       emitPreviewResult({ sessionId, epoch, bodyId, error: previewFailure(error) });
@@ -527,10 +453,18 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
     async beginPreview(draft: PreviewDraft): Promise<PreviewSession> {
       const sessionId = `pv-${nextSessionSeq++}`;
       const previewBodyId = `preview:${sessionId}`;
-      if (draft.opType !== "Extrude") {
+      // Support IS builder membership (ipc/previewOps.ts) — no opType branch here.
+      if (!supportsPreview(draft.opType)) {
         throw new Error(`Preview session does not support ${draft.opType}`);
       }
-      const { plane, profile } = resolveExtrudeInput(draft.sketchId, draft.regionId);
+      // Only the PROFILE-based ops bind a sketch region up-front. Fillet/Chamfer/
+      // Shell/Boolean operate on existing solids and carry no {plane, profile}, so
+      // resolving one for them would reject every legitimate draft.
+      let plane: SketchPlane | undefined;
+      let profile: PrismProfile | undefined;
+      if (draft.opType === "Extrude" || draft.opType === "Revolve") {
+        ({ plane, profile } = resolveProfileInput(draft.sketchId, draft.regionId));
+      }
       previewSessions.set(sessionId, {
         opId: draft.opId ?? mintRecordId(),
         opType: draft.opType,
@@ -539,6 +473,7 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
         previewBodyId,
         sketchId: draft.sketchId,
         regionId: draft.regionId,
+        inputs: draft.inputs,
         plane,
         profile,
         latestParams: { ...draft.params },
@@ -573,15 +508,43 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
         return;
       }
 
-      // LOCAL fallback (the mock client — no worker to ask). Only Extrude produces
-      // a drag-time L2 mesh here; every other op shows its L1 preview only.
-      if (s.opType !== "Extrude") return;
-      const distance = Number(s.latestParams.distance ?? 0);
+      // LOCAL fallback (the mock client — no worker to ask). The lane NEVER fakes
+      // geometry it cannot honestly synthesize: an op with no local synthesis
+      // publishes an EMPTY, non-committed result under the same epoch instead of
+      // going silent, so a caller's per-epoch bookkeeping (commit barrier, the
+      // "computing preview" pending flag) still settles. The visible preview stays
+      // whatever L1 the tool draws itself (revolve's lathe, the pattern ghosts).
       const bodyId = s.previewBodyId;
+      const { plane, profile } = s;
+      // Extrude: the one op with a real local prism synthesis.
+      if (s.opType === "Extrude" && plane && profile) {
+        const distance = Number(s.latestParams.distance ?? 0);
+        setTimeout(() => {
+          if (!previewSessions.has(sessionId)) return; // session ended → drop stale
+          const mesh = makeExtrudeBodyMesh(profile, plane, distance);
+          emitPreviewResult({ sessionId, epoch, bodyId, mesh });
+        }, deps.latencyMs());
+        return;
+      }
+      // Boolean: no mock CSG, but half the preview IS expressible without geometry
+      // — the tool body is consumed. Publish that hide truthfully, with no mesh.
+      if (s.opType === "Boolean") {
+        const toolBodyId =
+          typeof s.latestParams.toolBodyId === "string" && s.latestParams.toolBodyId
+            ? [s.latestParams.toolBodyId]
+            : [];
+        setTimeout(() => {
+          if (!previewSessions.has(sessionId)) return;
+          emitPreviewResult({ sessionId, epoch, bodyId, bodies: [], replacedBodyIds: toolBodyId });
+        }, deps.latencyMs());
+        return;
+      }
+      // Revolve / Fillet / Chamfer / Shell: no local synthesis. Revolve already has
+      // its L1 lathe (and the lane holds no axis to build one from anyway); the edge
+      // and shell ops have no mock kernel at all. Settle the epoch, show nothing.
       setTimeout(() => {
-        if (!previewSessions.has(sessionId)) return; // session ended → drop stale
-        const mesh = makeExtrudeBodyMesh(s.profile, s.plane, distance);
-        emitPreviewResult({ sessionId, epoch, bodyId, mesh });
+        if (!previewSessions.has(sessionId)) return;
+        emitPreviewResult({ sessionId, epoch, bodyId });
       }, deps.latencyMs());
     },
 
@@ -595,7 +558,7 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
       if (s.editFeatureId) {
         throw new Error("Feature re-edit must use a scalar update command");
       }
-      const op = buildOpFromSession(s);
+      const op = buildPreviewOp(s);
       trace(
         "lane",
         `endPreview COMMIT: session=${sessionId} op=${op.opType} opId=${op.opId ?? "?"} ` +
@@ -630,7 +593,9 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
       return () => previewListeners.delete(cb);
     },
 
-    resolveExtrudeInput,
+    resolveProfileInput,
+    // Legacy name kept as an alias — mockClient's op-commit path calls it.
+    resolveExtrudeInput: resolveProfileInput,
     resolveSketchLine,
 
     hasSession(sketchId: string): boolean {
