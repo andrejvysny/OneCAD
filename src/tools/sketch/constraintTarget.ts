@@ -42,13 +42,24 @@ export interface SketchConstraintTargetArc {
   kind: "arc";
   entityId: string;
 }
+/** An ellipse CURVE body pick. Resolved (rather than dropped) so
+ *  `evaluateApplicability` can see it and offer NOTHING — legacy parity, see
+ *  `worker/tests/prototypes/proto_sketch_constraint_applicability.cpp:62-67`, where
+ *  point+ellipse has no applicable constraints at all (not even OnCurve). Dropping
+ *  it instead would silently degrade a 2-pick selection to a 1-pick one and start
+ *  offering the OTHER pick's single-target constraints. */
+export interface SketchConstraintTargetEllipse {
+  kind: "ellipse";
+  entityId: string;
+}
 
 /** The shared target vocabulary (selection ref + entity lookup, resolved). */
 export type SketchConstraintTarget =
   | SketchConstraintTargetPoint
   | SketchConstraintTargetLine
   | SketchConstraintTargetCircle
-  | SketchConstraintTargetArc;
+  | SketchConstraintTargetArc
+  | SketchConstraintTargetEllipse;
 
 /** Named positions each entity type resolves (mirrors `entityPoints()` in
  *  autoConstrain.ts, plus Line's virtual "Midpoint" for the Midpoint constraint's
@@ -60,6 +71,8 @@ const VALID_POSITIONS: Record<SketchEntityType, ReadonlySet<ConstraintPosition>>
   Line: new Set<ConstraintPosition>(["Start", "End", "Midpoint"]),
   Circle: new Set<ConstraintPosition>(["Center"]),
   Arc: new Set<ConstraintPosition>(["Center", "Start", "End"]),
+  // An Ellipse's only named point is its centre (the one minted wire point).
+  Ellipse: new Set<ConstraintPosition>(["Center"]),
 };
 
 /**
@@ -88,6 +101,8 @@ export function toConstraintTarget(
         return { kind: "circle", entityId: entity.id };
       case "Arc":
         return { kind: "arc", entityId: entity.id };
+      case "Ellipse":
+        return { kind: "ellipse", entityId: entity.id };
       default:
         return null;
     }
@@ -121,6 +136,7 @@ export function resolveTargetPoint(
       }
       return null;
     case "Circle":
+    case "Ellipse":
       return target.position === "Center" ? (entity.center ?? null) : null;
     case "Arc":
       if (target.position === "Center") return entity.center ?? null;

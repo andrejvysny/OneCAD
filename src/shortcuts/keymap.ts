@@ -4,8 +4,8 @@
  * Model:  V select · S new-sketch (enters sketch mode) · E extrude · R revolve
  *         · F fillet · B combine/boolean
  * Sketch: V select · L line · R rectangle · ⇧R center-rectangle · C circle
- *         · A arc · G polygon · S slot · P point · D dimension · T trim
- *         · M mirror · X construction (flip selection / sticky mode)
+ *         · O ellipse · A arc · G polygon · S slot · P point · D dimension
+ *         · T trim · M mirror · X construction (flip selection / sticky mode)
  * Global: Esc cancel-ladder · Enter finish-sketch (sketch mode) · H home (stub)
  *         · Shift+F zoom-to-fit
  *
@@ -24,6 +24,10 @@
  *     cross-mode fallback could never have claimed sketch `S` anyway.
  *   - `G` was free in both modes; sketch owns it (Polygon) and model mode reaches
  *     it through the normal cross-mode fallback.
+ *   - `O` (Ellipse, W3 P3) was likewise free in BOTH tables, so sketch owns it and
+ *     model mode reaches it cross-mode. Deliberately NOT `E`: that letter is the
+ *     model Extrude binding, i.e. the cross-mode "finish this sketch and extrude"
+ *     handoff — rebinding it in sketch mode would shadow the handoff.
  *
  * AUTO-MODE: a key bound only in the OTHER mode resolves cross-mode (tool
  * actions only) so shortcuts drive the automatic mode switch — see
@@ -74,6 +78,7 @@ export const SKETCH_KEYS: KeyBinding[] = [
   // because `resolveBinding` compares `Boolean(b.shift) === shift`.
   { key: "r", shift: true, action: { type: "tool", tool: "centerRect" } },
   { key: "c", action: { type: "tool", tool: "circle" } },
+  { key: "o", action: { type: "tool", tool: "ellipse" } },
   { key: "a", action: { type: "tool", tool: "arc" } },
   { key: "g", action: { type: "tool", tool: "polygon" } },
   { key: "s", action: { type: "tool", tool: "slot" } },

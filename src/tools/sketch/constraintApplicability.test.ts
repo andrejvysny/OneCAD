@@ -4,9 +4,10 @@ import { toConstraintTarget, type SketchConstraintTarget } from "./constraintTar
 import type { ConstraintPosition, SketchConstraintType, SketchEntity } from "@/ipc/types";
 
 // Fixture mirrors the C++ prototype test's sketch 1:1
-// (worker/tests/prototypes/proto_sketch_constraint_applicability.cpp:26-39),
-// minus the Ellipse (out of scope — no "Ellipse" `SketchEntityType` in the
-// frontend wire slice; the ellipse assertions there have no TS equivalent).
+// (worker/tests/prototypes/proto_sketch_constraint_applicability.cpp:26-41),
+// INCLUDING the ellipse (W3 P3 landed "Ellipse" in `SketchEntityType`, so
+// cpp:62-67's "an ellipse curve grants nothing" assertions now have a TS
+// equivalent — see the Ellipse describe block at the bottom of this file).
 const entities: SketchEntity[] = [
   { id: "p1", type: "Point", p0: [0, 0] },
   { id: "p2", type: "Point", p0: [10, 0] },
@@ -18,6 +19,9 @@ const entities: SketchEntity[] = [
   { id: "circle", type: "Circle", center: [5, 5], radius: 2.5 },
   { id: "arcCenter", type: "Point", p0: [12, 5] },
   { id: "arc", type: "Arc", center: [12, 5], radius: 2.5, start: [14.5, 5], end: [13.3508, 7.1035] },
+  // cpp:40-41 — `addPoint(20, 5)` + `addEllipse(ellipseCenter, 5.0, 2.0)`.
+  { id: "ellipseCenter", type: "Point", p0: [20, 5] },
+  { id: "ellipse", type: "Ellipse", center: [20, 5], majorR: 5, minorR: 2, rotation: 0 },
   // Added for the Tangent/Equal/Midpoint frontend-extension coverage below —
   // a second circle + arc (for circle×circle / arc×arc pairs).
   { id: "circle2", type: "Circle", center: [30, 5], radius: 4 },
@@ -404,5 +408,58 @@ describe("encodability invariant (S4b design item 3)", () => {
     expect(MATRIX_EMITTABLE_TYPES).toContain("Midpoint");
     expect(MATRIX_EMITTABLE_TYPES).toContain("Tangent");
     expect(MATRIX_EMITTABLE_TYPES).toHaveLength(18);
+  });
+});
+
+// ── W3 P3: an ellipse CURVE grants NO constraints (legacy parity) ─────────────
+//
+// `worker/tests/prototypes/proto_sketch_constraint_applicability.cpp:62-67`:
+//   auto pointEllipse = evaluateConstraintApplicability(
+//       &sketch, {selection(SketchPoint, p1), selection(SketchEdge, ellipse)});
+//   assert(!pointEllipse.isApplicable(ConstraintType::Distance));
+//   assert(!pointEllipse.isApplicable(ConstraintType::OnCurve));
+//   assert(!pointEllipse.hasApplicableConstraints());
+// Note the CONTRAST with the circle two lines above it (cpp:55-60): point+circle
+// DOES offer OnCurve. The legacy matrix simply never treats an ellipse as a curve.
+
+describe("Ellipse curve — no applicable constraints (cpp:62-67)", () => {
+  it("point + ellipse ⇒ nothing at all (not Distance, not OnCurve)", () => {
+    expect(evaluateApplicability([T("p1"), T("ellipse")], entities)).toEqual([]);
+  });
+
+  it("…while the sibling point + CIRCLE case still offers OnCurve (cpp:55-60)", () => {
+    expect(typesOf(evaluateApplicability([T("p1"), T("circle")], entities))).toContain("OnCurve");
+  });
+
+  it("a lone ellipse offers no Radius/Diameter (unlike a circle or an arc)", () => {
+    expect(evaluateApplicability([T("ellipse")], entities)).toEqual([]);
+    expect(typesOf(evaluateApplicability([T("circle")], entities))).toEqual(["Radius", "Diameter"]);
+  });
+
+  it("ellipse + circle / ellipse + arc ⇒ no Concentric, Tangent or Equal", () => {
+    expect(evaluateApplicability([T("ellipse"), T("circle")], entities)).toEqual([]);
+    expect(evaluateApplicability([T("ellipse"), T("arc")], entities)).toEqual([]);
+  });
+
+  it("ellipse + line ⇒ nothing (no Tangent, no Distance)", () => {
+    expect(evaluateApplicability([T("ellipse"), T("line")], entities)).toEqual([]);
+  });
+
+  it("an ellipse anywhere in a 3-pick selection kills the Symmetric offer too", () => {
+    expect(evaluateApplicability([T("p1"), T("p3"), T("ellipse")], entities)).toEqual([]);
+  });
+
+  it("the ellipse's CENTRE is a normal point target and keeps full point behavior", () => {
+    const center = T("ellipse", "Center");
+    expect(center).toEqual({ kind: "point", entityId: "ellipse", position: "Center", isFreePoint: false });
+    expect(typesOf(evaluateApplicability([center], entities))).toEqual(["Fixed"]);
+    expect(typesOf(evaluateApplicability([center, T("p1")], entities))).toEqual([
+      "Distance",
+      "Coincident",
+      "HorizontalDistance",
+      "VerticalDistance",
+    ]);
+    // …and it can be pinned to a line's midpoint (it marshals as a real wire point).
+    expect(typesOf(evaluateApplicability([center, T("line")], entities))).toContain("Midpoint");
   });
 });

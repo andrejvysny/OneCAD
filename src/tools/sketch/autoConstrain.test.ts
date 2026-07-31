@@ -11,6 +11,7 @@ import {
   PERPENDICULAR_TOLERANCE_RAD,
   PARALLEL_TOLERANCE_RAD,
   TANGENT_TOLERANCE_RAD,
+  entityPoints,
 } from "./autoConstrain";
 import type { SketchEntity } from "@/ipc/types";
 
@@ -191,5 +192,46 @@ describe("inferConstraints — perpendicular / parallel / tangent + precedence",
     expect(tan!.entities).toEqual(["A", "L"]);
     // The arc START also lands on the line END ⇒ a Coincident is inferred too.
     expect(cs.some((c) => c.type === "Coincident")).toBe(true);
+  });
+});
+
+// ── W3 P3: an Ellipse contributes its CENTRE (and nothing else) ──────────────
+
+/** Deterministic constraint-id minter (mirrors the local helpers above). */
+function ids(): () => string {
+  let n = 0;
+  return () => `c${++n}`;
+}
+
+describe("entityPoints / inferConstraints — Ellipse", () => {
+  const ell: SketchEntity = {
+    id: "el1",
+    type: "Ellipse",
+    center: [10, 0],
+    majorR: 8,
+    minorR: 3,
+    rotation: 0.5,
+  };
+
+  it("exposes exactly one constrainable point: its Center", () => {
+    expect(entityPoints(ell)).toEqual([{ entityId: "el1", position: "Center", coord: [10, 0] }]);
+  });
+
+  it("auto-coincides its centre with an existing endpoint it was snapped to", () => {
+    const existing: SketchEntity[] = [{ id: "l1", type: "Line", p0: [0, 0], p1: [10, 0] }];
+    const out = inferConstraints([ell], existing, { nextConstraintId: ids() });
+    expect(out).toEqual([
+      {
+        id: "c1",
+        type: "Coincident",
+        entities: ["el1", "l1"],
+        positions: ["Center", "End"],
+      },
+    ]);
+  });
+
+  it("infers nothing from the ellipse CURVE (no H/V, no Tangent, no Parallel)", () => {
+    const existing: SketchEntity[] = [{ id: "l1", type: "Line", p0: [0, 50], p1: [40, 50] }];
+    expect(inferConstraints([ell], existing, { nextConstraintId: ids() })).toEqual([]);
   });
 });

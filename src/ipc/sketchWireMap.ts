@@ -25,9 +25,12 @@
  * each line its OWN endpoints tied by Coincident (matches the Rust separate-point
  * + Coincident model, so it is faithful); (b) an Arc's Rust form references only
  * its `center` point (endpoints are derived from angles), so a Coincident on an
- * arc START/END has no point id — skipped with a note; (c) Ellipse is outside the
- * slice. These only surface for arc-heavy sketches; the M2 slice (line/rect/circle
- * profiles → extrude) is fully covered.
+ * arc START/END has no point id — skipped with a note; (c) an Ellipse (W3 P3)
+ * marshals exactly like a Circle — one synthesized `Center` point plus
+ * `majorR`/`minorR`/`rotation` scalars — so its centre is a real solver handle
+ * and its CURVE carries no constraints at all (legacy parity). These only surface
+ * for arc-heavy sketches; the M2 slice (line/rect/circle profiles → extrude) is
+ * fully covered.
  */
 import type {
   ConstraintPosition,
@@ -97,7 +100,19 @@ interface WireArc {
   endAngle: number;
   construction?: boolean;
 }
-export type WireSketchEntity = WirePoint | WireLine | WireCircle | WireArc;
+/** Rust `SketchEntity::Ellipse` (W3 P3). `rotation` is RADIANS; `majorR ≥ minorR`
+ *  is guaranteed by the FRONTEND (`normalizeEllipse`, ellipseMath.ts) — the tool is
+ *  the single normalization site, so the wire never carries minor > major. */
+interface WireEllipse {
+  kind: "ellipse";
+  id: string;
+  center: string;
+  majorR: number;
+  minorR: number;
+  rotation: number;
+  construction?: boolean;
+}
+export type WireSketchEntity = WirePoint | WireLine | WireCircle | WireArc | WireEllipse;
 
 /** A Rust `Constraint` (internally tagged `"kind"`, camelCase). Only the kinds the
  *  vertical-slice tools author are modeled; others route through a best-effort. */
@@ -251,6 +266,25 @@ function addEntityOps(map: SketchIdMap, e: SketchEntity, mint: () => string): Sk
       ops.push({ op: "addEntity", entity: { kind: "circle", id, center, radius: e.radius, construction } });
       return ops;
     }
+    case "Ellipse": {
+      if (!e.center || e.majorR === undefined || e.minorR === undefined) return [];
+      const center = mintPoint("Center", e.center);
+      const id = mint();
+      bind(id);
+      ops.push({
+        op: "addEntity",
+        entity: {
+          kind: "ellipse",
+          id,
+          center,
+          majorR: e.majorR,
+          minorR: e.minorR,
+          rotation: e.rotation ?? 0,
+          construction,
+        },
+      });
+      return ops;
+    }
     case "Arc": {
       if (!e.center || e.radius === undefined) return [];
       const center = mintPoint("Center", e.center);
@@ -313,6 +347,7 @@ function pointCoord(
         return [(e.p0[0] + e.p1[0]) / 2, (e.p0[1] + e.p1[1]) / 2];
       return e.p0 ?? null; // Start (default)
     case "Circle":
+    case "Ellipse":
       return e.center ?? null;
     case "Arc":
       if (position === "Start") return e.start ?? null;
@@ -660,17 +695,22 @@ export function buildDeleteSketch(sketchId: string): WireDeleteSketch {
 /** One entity from the worker wire form (`enter_sketch` returns these). */
 interface WireDtoEntity {
   id: string;
-  type: "Point" | "Line" | "Circle" | "Arc";
+  type: "Point" | "Line" | "Circle" | "Arc" | "Ellipse";
   at?: [number, number];
   p0Ref?: string;
   p1Ref?: string;
   center?: [number, number];
-  /** Backend point uuid of a circle/arc center (BUG-5: the ownership link the wire
-   *  now carries alongside the inlined `center` coords; absent on a legacy worker). */
+  /** Backend point uuid of a circle/arc/ellipse center (BUG-5: the ownership link
+   *  the wire now carries alongside the inlined `center` coords; absent on a legacy
+   *  worker). */
   centerRef?: string;
   radius?: number;
   startAngle?: number;
   endAngle?: number;
+  /** Ellipse semi-axes + rotation (radians). */
+  majorR?: number;
+  minorR?: number;
+  rotation?: number;
   construction?: boolean;
 }
 
@@ -683,10 +723,11 @@ interface PointOwner {
 /**
  * Map every backend point uuid on the wire to its OWNER entity + position (BUG-5):
  *   - a Line's `p0Ref`/`p1Ref` → `(lineId, Start|End)`;
- *   - a Circle/Arc's `centerRef` → `(id, Center)`;
+ *   - a Circle/Arc/Ellipse's `centerRef` → `(id, Center)`;
  *   - a free-standing Point (NOT referenced by any of the above) → `(id, Start)`.
- * `ownedChildIds` is the subset of point uuids OWNED by a line/circle/arc — these
- * are NOT hydrated as independent frontend entities (their coords ride on the owner).
+ * `ownedChildIds` is the subset of point uuids OWNED by a line/circle/arc/ellipse —
+ * these are NOT hydrated as independent frontend entities (their coords ride on the
+ * owner).
  */
 function ownershipFromWire(wire: WireDtoEntity[]): {
   owners: Map<string, PointOwner>;
@@ -701,7 +742,7 @@ function ownershipFromWire(wire: WireDtoEntity[]): {
       owners.set(e.p1Ref, { entityId: e.id, position: "End" });
       ownedChildIds.add(e.p0Ref);
       ownedChildIds.add(e.p1Ref);
-    } else if ((e.type === "Circle" || e.type === "Arc") && e.centerRef) {
+    } else if ((e.type === "Circle" || e.type === "Arc" || e.type === "Ellipse") && e.centerRef) {
       owners.set(e.centerRef, { entityId: e.id, position: "Center" });
       ownedChildIds.add(e.centerRef);
     }
@@ -747,6 +788,18 @@ export function frontendEntitiesFromDto(dtoEntities: unknown): SketchEntity[] {
       case "Circle":
         if (e.center && e.radius !== undefined)
           out.push({ id: e.id, type: "Circle", center: e.center, radius: e.radius, construction: e.construction });
+        break;
+      case "Ellipse":
+        if (e.center && e.majorR !== undefined && e.minorR !== undefined)
+          out.push({
+            id: e.id,
+            type: "Ellipse",
+            center: e.center,
+            majorR: e.majorR,
+            minorR: e.minorR,
+            rotation: e.rotation ?? 0,
+            construction: e.construction,
+          });
         break;
       case "Arc":
         if (e.center && e.radius !== undefined) {
@@ -883,6 +936,7 @@ function moveEntity(e: SketchEntity, g: Record<string, [number, number]>): Sketc
     }
     case "Circle":
     case "Arc":
+    case "Ellipse":
       return g.Center ? { ...e, center: g.Center } : e;
     default:
       return e;
@@ -985,6 +1039,8 @@ export function frontendConstraintsFromDto(
  *     is emitted separately in the entities list and seeded via its own id (a
  *     re-entry circle/arc center is not directly draggable until the wire carries
  *     the center ref — documented seam);
+ *   - Ellipse → identical to Circle/Arc: the id maps 1:1 and `${id}.Center` binds
+ *     to the wire's `centerRef` (W3 P3);
  *   - every constraint id → itself (`map.constraint`) + its value into the
  *     `constraintValue` cache, so an in-place `SetDimension` diff is a no-op.
  * Idempotent (re-seeding the same wire is harmless); an EMPTY wire (a fresh
@@ -1029,6 +1085,13 @@ export function seedIdMapFromWire(
           map.entity.set(e.id, e.id);
           map.point.set(pointKey(e.id, "Start"), e.p0Ref);
           map.point.set(pointKey(e.id, "End"), e.p1Ref);
+          break;
+        case "Ellipse":
+          // Mirrors `frontendEntitiesFromDto`'s Ellipse gate (centre + both radii),
+          // so the seeded set stays exactly the hydrated set.
+          if (!e.center || e.majorR === undefined || e.minorR === undefined) continue;
+          map.entity.set(e.id, e.id);
+          if (e.centerRef) map.point.set(pointKey(e.id, "Center"), e.centerRef);
           break;
         case "Circle":
         case "Arc":

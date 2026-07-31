@@ -102,12 +102,12 @@ export interface SketchPlane {
 }
 
 /** Entity kinds the vertical-slice tools author (subset of §7.3's six). */
-export type SketchEntityType = "Point" | "Line" | "Arc" | "Circle";
+export type SketchEntityType = "Point" | "Line" | "Arc" | "Circle" | "Ellipse";
 
 /**
  * One sketch entity in **plane (u,v) coordinates**. Only the fields relevant to
  * `type` are populated (Line → p0/p1; Circle → center/radius; Arc →
- * center/radius/start/end; Point → p0).
+ * center/radius/start/end; Ellipse → center/majorR/minorR/rotation; Point → p0).
  */
 export interface SketchEntity {
   id: string;
@@ -120,6 +120,14 @@ export interface SketchEntity {
   radius?: number;
   start?: [number, number];
   end?: [number, number];
+  /** Ellipse semi-major axis (always ≥ `minorR` — normalized by the tool). */
+  majorR?: number;
+  /** Ellipse semi-minor axis. */
+  minorR?: number;
+  /** Ellipse major-axis rotation, RADIANS CCW from plane +X, in [0, 2π).
+   *  (Unlike sketch dimension VALUES, this is never a UI-domain degree — it is
+   *  geometry, carried in the wire domain end to end; see `angleUnits.ts`.) */
+  rotation?: number;
 }
 
 /** The 18 constraint kinds (SCHEMA §7.3, verbatim from SketchTypes.h). */

@@ -79,6 +79,11 @@ export const ICON_PATHS = {
   polygon: "M12 4L18.9 8V16L12 20L5.1 16V8Z", // regular hexagon (default 6 sides)
   slot: "M8.5 7.5h7a4.5 4.5 0 0 1 0 9h-7a4.5 4.5 0 0 1 0-9z", // stadium: 2 walls + 2 caps
   point: "M13.5 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zM12 4.5v3M12 16.5v3M4.5 12h3M16.5 12h3", // dot + crosshair ticks
+
+  // ---- W3 P3 ellipse tool (authored for this WP, NOT from the prototype) ----
+  // The `circle` glyph's two-arc construction with rx=8, ry=5 (a wide ellipse
+  // reads unambiguously against the circle at 14–15px).
+  ellipse: "M20 12a8 5 0 1 1-16 0 8 5 0 0 1 16 0z",
 } as const;
 
 export type IconName = keyof typeof ICON_PATHS;

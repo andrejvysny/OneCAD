@@ -187,3 +187,71 @@ describe("detectRegions hole fill → profileFromRegion", () => {
     }
   });
 });
+
+// ── W3 P3: Ellipse parity — 5 DOF, own region, nests as a hole like a circle ──
+
+describe("Ellipse — mock solver + region parity", () => {
+  const ell = (
+    id: string,
+    center: [number, number],
+    majorR: number,
+    minorR: number,
+    rotation = 0,
+  ): SketchEntity => ({ id, type: "Ellipse", center, majorR, minorR, rotation });
+
+  it("contributes 5 free DOF (centre 2 + majorR/minorR/rotation 3)", () => {
+    expect(freeDegrees([ell("el1", [0, 0], 10, 4)])).toBe(5);
+    expect(solveDof([ell("el1", [0, 0], 10, 4)], [])).toEqual({ dof: 5, status: "UnderConstrained" });
+  });
+
+  it("is its own region, with a fill of area ≈ πab", () => {
+    const regions = detectRegions([ell("el1", [0, 0], 10, 4, 0.7)]);
+    expect(regions).toHaveLength(1);
+    expect(regions[0].outerLoop).toEqual(["el1"]);
+    expect(regions[0].holes).toEqual([]);
+    const tris = regions[0].previewTriangles!;
+    let area = 0;
+    for (let i = 0; i + 2 < tris.indices.length; i += 3) {
+      const [a, b, c] = [tris.indices[i], tris.indices[i + 1], tris.indices[i + 2]];
+      area += Math.abs(
+        ((tris.positions[b * 2] - tris.positions[a * 2]) *
+          (tris.positions[c * 2 + 1] - tris.positions[a * 2 + 1]) -
+          (tris.positions[b * 2 + 1] - tris.positions[a * 2 + 1]) *
+            (tris.positions[c * 2] - tris.positions[a * 2])) /
+          2,
+      );
+    }
+    // 32-gon slightly under-approximates π·10·4 ≈ 125.7 (same as the circle case).
+    expect(area).toBeGreaterThan(120);
+    expect(area).toBeLessThan(126);
+  });
+
+  it("is EXCLUDED from region detection when it is construction geometry", () => {
+    expect(detectRegions([{ ...ell("el1", [0, 0], 10, 4), construction: true }])).toEqual([]);
+  });
+
+  it("nested inside a closed loop yields the disc cell AND the loop-with-hole cell", () => {
+    const regions = detectRegions([...rect, ell("el1", [20, 10], 8, 3)]);
+    expect(regions).toHaveLength(2);
+    expect(regions[0].outerLoop).toEqual(["el1"]);
+    expect(regions[1].outerLoop).toEqual(["e1", "e2", "e3", "e4"]);
+    expect(regions[1].holes).toEqual([["el1"]]);
+  });
+
+  it("stays its own region when it CROSSES the loop (semi-major reaches out)", () => {
+    // Centre inside, but a = 15 pokes through the rect's 10-unit half-height.
+    const regions = detectRegions([...rect, ell("el1", [20, 10], 15, 2)]);
+    expect(regions).toHaveLength(2);
+    expect(regions[1].holes).toEqual([]);
+  });
+
+  it("never closes a line loop by itself (no endpoints to walk)", () => {
+    expect(orderedClosedLoop([ell("el1", [0, 0], 10, 4)])).toBeNull();
+  });
+
+  it("does not change the circle path — a nested circle still yields the same fill", () => {
+    const regions = detectRegions([...rect, { id: "c", type: "Circle", center: [20, 10], radius: 4 }]);
+    expect(regions).toHaveLength(2);
+    expect(regions[1].holes).toEqual([["c"]]);
+  });
+});

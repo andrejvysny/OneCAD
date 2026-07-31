@@ -71,3 +71,36 @@ describe("hitTestSketch — empty result", () => {
     expect(hitTestSketch({ x: 0, y: 0 }, [], 5)).toBeNull();
   });
 });
+
+// ── W3 P3: an Ellipse is pickable by its CURVE and by its CENTRE handle ───────
+
+describe("hitTestSketch — Ellipse", () => {
+  const entities: SketchEntity[] = [
+    { id: "el1", type: "Ellipse", center: [0, 0], majorR: 20, minorR: 5, rotation: 0 },
+  ];
+
+  it("hits the curve at the minor-axis end (a circle test would miss it)", () => {
+    expect(hitTestSketch({ x: 0, y: 5.5 }, entities, 1)).toEqual({ entityId: "el1" });
+  });
+
+  it("hits the curve at the major-axis end", () => {
+    expect(hitTestSketch({ x: 20.4, y: 0 }, entities, 1)).toEqual({ entityId: "el1" });
+  });
+
+  it("does NOT hit where only the bounding circle would be", () => {
+    expect(hitTestSketch({ x: 0, y: 20 }, entities, 1)).toBeNull();
+  });
+
+  it("prefers the CENTRE handle over the body when the click is near the centre", () => {
+    expect(hitTestSketch({ x: 0.3, y: 0.2 }, entities, 2)).toEqual({ entityId: "el1", point: "Center" });
+  });
+
+  it("resolves a ROTATED ellipse against the rotated curve", () => {
+    const rotated: SketchEntity[] = [
+      { id: "el2", type: "Ellipse", center: [0, 0], majorR: 20, minorR: 5, rotation: Math.PI / 2 },
+    ];
+    // Major axis now points along +Y.
+    expect(hitTestSketch({ x: 0, y: 20.2 }, rotated, 1)).toEqual({ entityId: "el2" });
+    expect(hitTestSketch({ x: 20, y: 0 }, rotated, 1)).toBeNull();
+  });
+});

@@ -25,6 +25,7 @@ export type SketchToolLabel =
   | "Rectangle"
   | "Center rectangle"
   | "Circle"
+  | "Ellipse"
   | "Arc"
   | "Polygon"
   | "Slot"
@@ -339,6 +340,49 @@ export async function getSketchCircle(page: Page): Promise<{ center: [number, nu
     const circle = session.entities.find((e) => e.type === "Circle" && e.center && typeof e.radius === "number");
     if (!circle?.center || typeof circle.radius !== "number") throw new Error("getSketchCircle: no circle in the session");
     return { center: circle.center, radius: circle.radius };
+  });
+}
+
+/**
+ * Read the live sketch session's first Ellipse entity (plane-local centre +
+ * semi-axes + rotation). Same live-session requirement as `getSketchSnapshot` —
+ * call BEFORE finishing the sketch. The centre is the region-pick target for the
+ * ellipse's own fill cell (an offset guess is unreliable: `screenToPlane` is a
+ * perspective raycast, and the camera restores on finish).
+ */
+export async function getSketchEllipse(page: Page): Promise<{
+  center: [number, number];
+  majorR: number;
+  minorR: number;
+  rotation: number;
+}> {
+  return page.evaluate(() => {
+    const w = window as unknown as {
+      __stores?: {
+        sketch: {
+          getState(): {
+            session: {
+              entities: Array<{
+                type: string;
+                center?: [number, number];
+                majorR?: number;
+                minorR?: number;
+                rotation?: number;
+              }>;
+            } | null;
+          };
+        };
+      };
+    };
+    const session = w.__stores?.sketch.getState().session;
+    if (!session) throw new Error("getSketchEllipse: no live sketch session (call before finishing the sketch)");
+    const e = session.entities.find(
+      (x) => x.type === "Ellipse" && x.center && typeof x.majorR === "number" && typeof x.minorR === "number",
+    );
+    if (!e?.center || typeof e.majorR !== "number" || typeof e.minorR !== "number") {
+      throw new Error("getSketchEllipse: no ellipse in the session");
+    }
+    return { center: e.center, majorR: e.majorR, minorR: e.minorR, rotation: e.rotation ?? 0 };
   });
 }
 

@@ -374,3 +374,55 @@ describe("computeSnap — cache equivalence (buildSnapCache)", () => {
     });
   }
 });
+
+// ── W3 P3: Ellipse — centre snap + nearest-on-curve (no quadrant/intersection) ─
+
+describe("Ellipse snap surface", () => {
+  const ell: SketchEntity = {
+    id: "el1",
+    type: "Ellipse",
+    center: [0, 0],
+    majorR: 20,
+    minorR: 5,
+    rotation: 0,
+  };
+
+  it("offers its CENTRE as a `center` candidate, like a circle", () => {
+    expect(entitySnapPoints(ell)).toEqual([{ point: { x: 0, y: 0 }, kind: "center" }]);
+  });
+
+  it("snaps the cursor to the centre at tier `center`", () => {
+    const res = computeSnap({ x: 0.4, y: -0.3 }, [ell], {
+      gridStep: 10,
+      pixelWorld: 1,
+      enableGrid: true,
+      enableGuideLines: true,
+      enableGuidePoints: true,
+      suppress: false,
+    });
+    expect(res.kind).toBe("center");
+    expect(res.point).toEqual({ x: 0, y: 0 });
+  });
+
+  it("nearestOnCurve lands ON the ellipse (not on its bounding circle)", () => {
+    const p = nearestOnCurve({ x: 0, y: 40 }, ell)!;
+    expect(p.x).toBeCloseTo(0, 6);
+    expect(p.y).toBeCloseTo(5, 6); // the minor-axis end, NOT y = 20
+  });
+
+  it("nearestOnCurve returns null for an incomplete ellipse", () => {
+    expect(nearestOnCurve({ x: 0, y: 0 }, { id: "x", type: "Ellipse", center: [0, 0] })).toBeNull();
+  });
+
+  it("contributes NO intersection snaps — no closed-form ellipse×line math (seam)", () => {
+    const l: SketchEntity = { id: "l1", type: "Line", p0: [-50, 0], p1: [50, 0] };
+    expect(entityIntersections(ell, l)).toEqual([]);
+    expect(entityIntersections(l, ell)).toEqual([]);
+  });
+
+  it("contributes no quadrant points to the snap cache (centre only)", () => {
+    const cache = buildSnapCache([ell]);
+    expect(cache.points).toEqual([{ point: { x: 0, y: 0 }, kind: "center" }]);
+    expect(cache.intersections).toEqual([]);
+  });
+});

@@ -1,0 +1,19 @@
+# Plan-time profile derivation over an ELLIPSE (REAL OCCT). ops/OpCommon.cpp's
+# build_profile_face shares `wire::translate` with the solver lane, so the single
+# WireSketch ellipse branch unlocks both: a Sketch op carrying one ellipse
+# (center 0,0, majorR 6, minorR 3, rotation 0.25) yields exactly one region, and
+# Extrude Blind 10 builds a NewBody from a TRUE Geom_Ellipse boundary
+# (FaceBuilder's Ellipse case, not a chord polygon). The exact volume
+# (pi*6*3*10 = 565.4867) is pinned by the Rust real-worker test
+# src-tauri/tests/wire_contract.rs — the harness matcher has no tolerance form.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_el","documentRevision":0,"workerEpoch":1,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"ExecutePlan","args":{"jobId":7,"documentRevision":1,"workerEpoch":1,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["1111111111111111111111111111111111111111111111111111111111111111","2222222222222222222222222222222222222222222222222222222222222222"],"targetStep":1,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"skE","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Ellipse","center":[0,0],"majorR":6.0,"minorR":3.0,"rotation":0.25,"construction":false}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"inputs":[],"params":{"sketchId":"skE","distance":10.0,"extrudeMode":"Blind","booleanMode":"NewBody"}}]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":0,"jobId":7,"payload":{"stepIndex":0,"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","id":2,"event":"planStep","stepIndex":1,"jobId":7,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}],"signatures":{"geometry":"$hex64"}}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"jobId":7,"result":{"planPrepared":true,"lastValidStep":1,"stoppedReason":"completed","perStepResults":[{"stepIndex":0,"status":"ok"},{"stepIndex":1,"status":"ok","bodyIds":["body_op1"]}]}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"AcceptPrepared","args":{"jobId":7,"documentRevision":1,"workerEpoch":1}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":7,"result":{"accepted":true,"snapshotId":1,"documentRevision":1}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"goodbye":true}}}

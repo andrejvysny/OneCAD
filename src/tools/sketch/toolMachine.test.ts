@@ -4,6 +4,8 @@ import {
   rectTool,
   centerRectTool,
   circleTool,
+  ellipseTool,
+  ellipseDraft,
   arcTool,
   pointTool,
   polygonTool,
@@ -103,6 +105,126 @@ describe("arcTool — center → start → end (center-start-end)", () => {
   });
 });
 
+describe("ellipseTool — centre → major-axis end → minor extent (3 clicks)", () => {
+  const C = { x: 0, y: 0 };
+
+  it("previews a CIRCLE while the major axis is being aimed (oracle parity)", () => {
+    const steps = run(ellipseTool, [
+      ["click", C],
+      ["move", { x: 30, y: 40 }],
+    ]);
+    expect(steps[0].preview).toEqual([]);
+    expect(steps[1].preview).toEqual([{ type: "Circle", center: C, radius: 50 }]);
+    expect(steps[1].committed).toBeUndefined();
+  });
+
+  it("seeds minor = major·0.5 in the preview emitted by the SECOND click", () => {
+    const steps = run(ellipseTool, [
+      ["click", C],
+      ["click", { x: 10, y: 0 }],
+    ]);
+    expect(steps[1].committed).toBeUndefined();
+    expect(steps[1].state.anchors).toHaveLength(2);
+    expect(steps[1].preview).toEqual([
+      { type: "Ellipse", center: C, majorR: 10, minorR: 5, rotation: 0 },
+    ]);
+  });
+
+  it("tracks the minor as the PERPENDICULAR distance to the major axis", () => {
+    const steps = run(ellipseTool, [
+      ["click", C],
+      ["click", { x: 20, y: 0 }], // major along +X, a = 20
+      ["move", { x: 5, y: -7 }], // perpendicular distance 7 (sign-free)
+    ]);
+    expect(steps[2].preview).toEqual([
+      { type: "Ellipse", center: C, majorR: 20, minorR: 7, rotation: 0 },
+    ]);
+  });
+
+  it("commits the ellipse on the third click and resets", () => {
+    const steps = run(ellipseTool, [
+      ["click", C],
+      ["click", { x: 0, y: 12 }], // major along +Y ⇒ rotation π/2
+      ["click", { x: 4, y: 3 }], // perpendicular distance 4
+    ]);
+    const [committed] = steps[2].committed!;
+    expect(committed.type).toBe("Ellipse");
+    expect(committed.center).toEqual(C);
+    expect(committed.majorR).toBe(12);
+    expect(committed.minorR).toBe(4);
+    expect(committed.rotation).toBeCloseTo(Math.PI / 2, 12);
+    expect(steps[2].done).toBe(true);
+    expect(steps[2].state.anchors).toEqual([]);
+    expect(steps[2].preview).toEqual([]);
+  });
+
+  it("applies the swap-normalization LIVE — the preview equals what commits", () => {
+    // Major aimed along +X with a = 10; the cursor is 25 away perpendicular, so the
+    // "minor" exceeds the "major" and the axes swap (oracle EllipseTool.cpp:151-169).
+    const armedSteps = run(ellipseTool, [
+      ["click", C],
+      ["click", { x: 10, y: 0 }],
+    ]);
+    const armed = armedSteps[armedSteps.length - 1].state;
+    const far = { x: 3, y: 25 };
+    const moved = ellipseTool.step(armed, { kind: "move", pt: far });
+    const clicked = ellipseTool.step(armed, { kind: "click", pt: far });
+    const preview = moved.preview[0];
+    expect(preview.majorR).toBe(25);
+    expect(preview.minorR).toBe(10);
+    expect(preview.rotation).toBeCloseTo(Math.PI / 2, 12);
+    // Byte-for-byte identical: what the user sees is exactly what lands.
+    expect(clicked.committed).toEqual([preview]);
+  });
+
+  it("never authors tool constraints (the ellipse CURVE takes none)", () => {
+    const steps = run(ellipseTool, [
+      ["click", C],
+      ["click", { x: 8, y: 0 }],
+      ["click", { x: 0, y: 3 }],
+    ]);
+    expect(steps[2].committedConstraints).toBeUndefined();
+  });
+
+  it("Esc resets from any phase", () => {
+    for (const clicks of [1, 2]) {
+      let state = ellipseTool.init();
+      for (let i = 0; i < clicks; i++) {
+        state = ellipseTool.step(state, { kind: "click", pt: { x: 10 * i, y: 0 } }).state;
+      }
+      const esc = ellipseTool.step(state, { kind: "esc" });
+      expect(esc.state.anchors).toEqual([]);
+      expect(esc.done).toBe(true);
+      expect(esc.committed).toBeUndefined();
+    }
+  });
+
+  it("normalizes the rotation into [0, 2π) for a major axis aimed below +X", () => {
+    const steps = run(ellipseTool, [
+      ["click", C],
+      ["click", { x: 10, y: -10 }], // atan2 ⇒ −π/4
+      ["click", { x: 1, y: 1 }],
+    ]);
+    const rot = steps[2].committed![0].rotation!;
+    expect(rot).toBeGreaterThanOrEqual(0);
+    expect(rot).toBeLessThan(Math.PI * 2);
+    expect(rot).toBeCloseTo(Math.PI * 2 - Math.PI / 4, 12);
+  });
+});
+
+describe("ellipseDraft", () => {
+  it("derives majorR/rotation from the centre→endpoint vector", () => {
+    const d = ellipseDraft({ x: 2, y: 2 }, { x: 2, y: 8 }, 3);
+    expect(d).toEqual({
+      type: "Ellipse",
+      center: { x: 2, y: 2 },
+      majorR: 6,
+      minorR: 3,
+      rotation: Math.PI / 2,
+    });
+  });
+});
+
 describe("degeneracy guards — minSize context (C4)", () => {
   const ctx = { minSize: 4 };
 
@@ -130,6 +252,20 @@ describe("degeneracy guards — minSize context (C4)", () => {
     expect(tiny.committed).toBeUndefined();
     const ok = circleTool.step(armed.state, { kind: "click", pt: { x: 0, y: 5 } }, ctx);
     expect(ok.committed).toEqual([{ type: "Circle", center: { x: 0, y: 0 }, radius: 5 }]);
+  });
+
+  it("ellipseTool rejects a sub-minSize major AND a sub-minSize minor", () => {
+    const armed = ellipseTool.step(ellipseTool.init(), { kind: "click", pt: { x: 0, y: 0 } });
+    const tinyMajor = ellipseTool.step(armed.state, { kind: "click", pt: { x: 2, y: 0 } }, ctx);
+    expect(tinyMajor.state.anchors).toHaveLength(1); // still armed on the centre only
+
+    const withMajor = ellipseTool.step(armed.state, { kind: "click", pt: { x: 20, y: 0 } }, ctx);
+    expect(withMajor.state.anchors).toHaveLength(2);
+    const tinyMinor = ellipseTool.step(withMajor.state, { kind: "click", pt: { x: 5, y: 1 } }, ctx);
+    expect(tinyMinor.committed).toBeUndefined();
+    expect(tinyMinor.state.anchors).toHaveLength(2); // stays armed for a real third click
+    const ok = ellipseTool.step(withMajor.state, { kind: "click", pt: { x: 5, y: 9 } }, ctx);
+    expect(ok.committed).toHaveLength(1);
   });
 
   it("arcTool ignores a start click within minSize of the center", () => {
@@ -461,7 +597,7 @@ describe("polygonTool — center → vertex, sides 3-12", () => {
 
 describe("sides events are ignored by every non-polygon machine", () => {
   it("leaves the state untouched", () => {
-    for (const m of [lineTool, rectTool, centerRectTool, circleTool, arcTool, slotTool, pointTool]) {
+    for (const m of [lineTool, rectTool, centerRectTool, circleTool, ellipseTool, arcTool, slotTool, pointTool]) {
       const armed = m.step(m.init(), { kind: "click", pt: { x: 0, y: 0 } });
       const ignored = m.step(armed.state, { kind: "sides", n: 5 });
       expect(ignored.state).toBe(armed.state);

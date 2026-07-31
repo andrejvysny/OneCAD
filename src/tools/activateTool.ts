@@ -2,8 +2,8 @@
  * activateTool — AUTO-MODE tool dispatcher. The editor mode is DERIVED from the
  * user's intent (tool + context), never toggled by hand:
  *
- *   model mode + sketch-only tool (line/rect/centerRect/circle/arc/polygon/slot/
- *     point/dimension/trim)
+ *   model mode + sketch-only tool (line/rect/centerRect/circle/ellipse/arc/polygon/
+ *     slot/point/dimension/trim)
  *     ⇒ enter sketch mode WITH that tool armed (no active sketch ⇒ the usual
  *       entry flow: selected face → sketch-on-face, else the plane picker).
  *   sketch mode + model-only tool (extrude/revolve/fillet/chamfer/boolean/shell/
@@ -28,6 +28,7 @@ const SKETCH_ONLY: ReadonlySet<Tool> = new Set([
   "rect",
   "centerRect",
   "circle",
+  "ellipse",
   "arc",
   "polygon",
   "slot",

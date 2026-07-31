@@ -46,6 +46,7 @@ export const SKETCH_TOOLS: ToolEntry[] = [
   { id: "rect", icon: "rect", label: "Rectangle", shortcut: "R" },
   { id: "centerRect", icon: "centerRect", label: "Center rectangle", shortcut: "⇧R" },
   { id: "circle", icon: "circle", label: "Circle", shortcut: "C" },
+  { id: "ellipse", icon: "ellipse", label: "Ellipse", shortcut: "O" },
   { id: "arc", icon: "arc", label: "Arc", shortcut: "A" },
   { sep: true },
   { id: "polygon", icon: "polygon", label: "Polygon", shortcut: "G" },

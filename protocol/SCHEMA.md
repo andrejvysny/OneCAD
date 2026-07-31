@@ -716,7 +716,8 @@ the full authoritative sketch so replay is deterministic.
     { "id": "e1", "type": "Line",   "p0": [0,0], "p1": [40,0] },
     { "id": "e2", "type": "Line",   "p0": [40,0], "p1": [40,20] },
     { "id": "e3", "type": "Arc",    "center": [0,20], "radius": 40, "start": [40,20], "end": [0,60] },
-    { "id": "e4", "type": "Circle", "center": [10,10], "radius": 3 }
+    { "id": "e4", "type": "Circle", "center": [10,10], "radius": 3 },
+    { "id": "e5", "type": "Ellipse", "center": [20,10], "majorR": 6, "minorR": 3, "rotation": 0.25 }
   ],
   "constraints": [
     { "id": "c1", "type": "Horizontal", "entities": ["e1"] },
@@ -737,17 +738,36 @@ the full authoritative sketch so replay is deterministic.
   the named planes; readers MUST lock-test them.
 - `entities[].type` ∈ `Point` | `Line` | `Arc` | `Circle` | `Ellipse` | `Spline`.
   - **Solver-lane entity support (§7.4).** The sketch solver lane materializes
-    only `Point` | `Line` | `Arc` | `Circle`. `Ellipse` and `Spline` are
-    **UNSUPPORTED** on the solver lane: a `SketchUpsert`/gesture carrying either
-    fails wire translation (recoverable `OP_FAILED`, "unsupported entity type").
-    They remain valid in the frozen Sketch op geometry for future solver support.
-  - A `Circle`/`Arc` returned by the solver lane (`enter_sketch`/`get_sketch`
-    return wire) carries an **optional `centerRef`** — the backend point-entity
-    uuid of its center — alongside the inlined `center` coordinate. Producers of
-    the return wire SHOULD emit it so re-entry hydration can re-own the center
-    point (avoiding orphaned child Points); readers MUST treat it as optional.
-    It is informational on the *inbound* solver-sync wire (the worker resolves
-    the center from `center` coords and ignores `centerRef`).
+    `Point` | `Line` | `Arc` | `Circle` | `Ellipse`. `Spline` is **UNSUPPORTED**
+    on the solver lane: a `SketchUpsert`/gesture carrying one fails wire
+    translation (recoverable `OP_FAILED`, "unsupported entity type"). It remains
+    valid in the frozen Sketch op geometry for future solver support.
+  - An **`Ellipse`** carries its center INLINE exactly like `Circle`, plus the
+    three shape scalars:
+
+    ```json
+    { "id": "e5", "type": "Ellipse", "center": [0,0], "centerRef": "<uuid>",
+      "majorR": 6.0, "minorR": 3.0, "rotation": 0.25, "construction": false }
+    ```
+
+    `majorR`/`minorR` are the semi-axes in mm; `rotation` is the major axis's
+    angle from the sketch +X axis in **radians** (optional, default `0`), the
+    same wire-domain rule the `Angle` constraint follows. The reader mints the
+    center `Point` itself and registers the `<id>.center` handle (the `Circle`
+    contract), so the center is addressable as a `SolveDrag` `pointId`.
+    **Parameter normalization**: a reader MAY enforce `majorR >= minorR` by
+    swapping the radii and adding π/2 to `rotation` (the reference implementation
+    does — `Sketch::addEllipse`). A reader that normalizes MUST echo the
+    normalized `majorR`/`minorR`/`rotation` on its return wire, so a producer
+    never re-sends parameters the reader does not hold.
+  - A `Circle`/`Arc`/`Ellipse` returned by the solver lane
+    (`enter_sketch`/`get_sketch` return wire) carries an **optional `centerRef`**
+    — the backend point-entity uuid of its center — alongside the inlined
+    `center` coordinate. Producers of the return wire SHOULD emit it so re-entry
+    hydration can re-own the center point (avoiding orphaned child Points);
+    readers MUST treat it as optional. It is informational on the *inbound*
+    solver-sync wire (the worker resolves the center from `center` coords and
+    ignores `centerRef`).
 - `entities[].construction` (bool, **optional**, default `false`) — reference-only
   geometry (construction/centerline). Readers MUST default an absent field to
   `false`; producers SHOULD emit it explicitly. Construction entities are
@@ -980,6 +1000,29 @@ sketch (dof 0) carrying one still reports `OverConstrained` — a *warning* the
 frontend/dto and the dimension tool treat as a reject signal, never a hard error
 (a solution exists).
 
+**Documented deviation — an `Ellipse` forces NAIVE dof counting.** An ellipse is
+materialized like any other entity but is **not registered with the constraint
+solver** (parity with OneCAD-CPP, whose solver has no ellipse binding). A sketch
+containing at least one ellipse therefore reports `dof` from a static count —
+Σ entity DOF (`Point` 2, `Line` 0, `Arc` 3, `Circle` 1, `Ellipse` 3, each
+inline-minted center Point a further 2) − Σ constraint arity — instead of a
+PlaneGCS diagnosis. Consequences, all normative:
+* **Redundancy is unreported.** `OverConstrained` is a PlaneGCS notion; on the
+  naive path the state can only be `Conflicting` (never, since no solve
+  diagnoses), `FullyConstrained` (naive count == 0) or `UnderConstrained`. The
+  SAME redundant constraint pair that reports `OverConstrained` without an
+  ellipse reports nothing with one.
+* **A redundant constraint still subtracts**, so the reported `dof` can read
+  lower than the true remaining freedom (it is `max(count, 0)`).
+* **`OverConstrained` from a naive count** means `count < 0` only — i.e. more
+  constraint arity than entity DOF.
+No constraint may reference an ellipse *entity*: every curve-taking kind
+(`Radius`, `Diameter`, `Concentric`, `Tangent`, `Equal`, `OnCurve`) accepts only
+lines/arcs/circles, so an ellipse operand is an unsupported-constraint failure
+and the naive count never has to model one. A constraint on the ellipse's center
+**Point** (e.g. `Fixed`, `Coincident`) is ordinary and does subtract. Lifting the
+ellipse into PlaneGCS is deferred past V1.
+
 #### BeginGesture
 Opens a drag gesture against a specific sketch revision.
 
@@ -1127,8 +1170,14 @@ preview fill).
   and crescents of two overlapping circles) currently build their committed
   faces from the planarized polygon (chord approximation of arcs), not trimmed
   analytic curves; the polygon fill visually agrees with the committed solid.
-  Plain and nested (hole-bearing) cells are exact. Lifting fragments to analytic
-  trimmed wires is tracked in `TODO.md` backlog.
+  Plain and nested (hole-bearing) cells are exact. **This applies to `Ellipse`
+  fragment cells identically**: a PURE (unsplit) ellipse loop builds an exact
+  `Geom_Ellipse` edge — an extrude of one is analytic, with a single lateral
+  face and volume π·`majorR`·`minorR`·distance — but an ellipse cut by another
+  curve contributes chord fragments like any arc. `previewTriangles` is a
+  tessellation in **both** cases (region area/fill for an ellipse is a sampled
+  polygon and therefore slightly under-reports the analytic π·a·b). Lifting
+  fragments to analytic trimmed wires is tracked in `TODO.md` backlog.
 
 ### 7.5 Element identity
 
@@ -1585,6 +1634,47 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-01 — §7.3 `Ellipse` is SUPPORTED on the solver lane (wire entity
+  shape pinned); §7.4 naive-dof deviation + ellipse fragment note** (W3 ellipse
+  backend; **additive entity type, no existing shape moved, no fixture bump**).
+  `Ellipse` was pinned UNSUPPORTED by the 2026-07-20 entry, but the only thing
+  actually missing was one branch in the worker's `WireSketch::translate` (and
+  the matching arm in Rust's `wire_entity`, which skipped the variant to match):
+  `SketchEllipse`, `LoopDetector`'s ellipse tessellation, `FaceBuilder`'s true
+  `Geom_Ellipse` edge, the `RegionTable` signature (type-agnostic — loop edge
+  tokens only) and the solver-unsupported naive-dof fallback all already existed.
+  Because plan-time profile derivation (`ops/OpCommon.cpp`) shares that same
+  translate, the one branch unlocks BOTH lanes: an ellipse now solves, forms a
+  region, and extrudes.
+  * **Wire shape** (§7.3): `{ id, type:"Ellipse", center:[cx,cy], centerRef?,
+    majorR, minorR, rotation?, construction? }` — center INLINE exactly like
+    `Circle` (the reader mints the center `Point` and registers `<id>.center`,
+    so it is draggable); `rotation` in **radians**, optional, default `0`;
+    `centerRef` extended to `Ellipse` on the return wire (informational inbound).
+  * **Normalization echo** (§7.3): a reader MAY enforce `majorR >= minorR` (the
+    reference `Sketch::addEllipse` swaps and adds π/2 to `rotation`) and MUST
+    then echo the normalized triple, so a producer never re-sends parameters the
+    reader does not hold.
+  * **Naive-dof deviation** (§7.4): an ellipse is not registered with PlaneGCS
+    (legacy parity — the OneCAD-CPP oracle solver has no ellipse binding), so an
+    ellipse-bearing sketch reports statically-counted dof; redundancy goes
+    unreported and `OverConstrained` means `count < 0`.
+  * **Fragments** (§7.4): a PURE ellipse loop is exact (3-face analytic prism,
+    volume π·a·b·h); an ellipse split by another curve falls under the existing
+    chord-fragment V1 limitation like any arc.
+  `Spline` REMAINS UNSUPPORTED. Core serde untouched (the `Ellipse` variant was
+  already complete and golden-pinned). Worker + Rust + frontend sign-off. No
+  canonical `protocol/fixtures/` bump — those payloads (`hello`, `echo_error`)
+  carry no sketch entities — and every existing wire shape is byte-stable
+  (region ids unchanged: pinned by worker `test_sketch_ellipse`). Fixtures:
+  `worker/tests/fixtures/sketch_ellipse_upsert.ndjson` (naive dof 5, then 3 with
+  a Fixed centre), `sketch_ellipse_regions.ndjson` (corpus `regions_ellipse`, one
+  cell), `sketch_ellipse_gesture.ndjson` (drag `<id>.center`),
+  `executeplan_ellipse_extrude.ndjson` (real-OCCT plan profile). Tests: worker
+  `sketch_ellipse` (+ the corpus area oracle and the normalization echo) and Rust
+  real-worker `sketch_regions.rs`, `sketch_edit.rs`, `wire_contract.rs`,
+  `sketch_reentry.rs`.
 
 - **2026-07-31 (b) — §7.3 `entities[].construction` documented AND honored; §7.4
   construction exclusion stated** (W1-A construction geometry; **additive

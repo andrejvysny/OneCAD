@@ -20,10 +20,11 @@ import { sameSketchSel } from "@/stores/sketchSelectionStore";
 
 /**
  * A named point handle is draggable iff the worker owns it as a movable point:
- *   - Line   → Start / End
- *   - Circle → Center
- *   - Arc    → Center only (Start/End are derived from center + angles)
- *   - Point  → Start (a free point)
+ *   - Line    → Start / End
+ *   - Circle  → Center
+ *   - Ellipse → Center (its only minted wire point; the radii/rotation are scalars)
+ *   - Arc     → Center only (Start/End are derived from center + angles)
+ *   - Point   → Start (a free point)
  * A body pick (no `position`) is never a drag handle.
  */
 export function isDraggableHandle(
@@ -35,6 +36,8 @@ export function isDraggableHandle(
     case "Line":
       return position === "Start" || position === "End";
     case "Circle":
+      return position === "Center";
+    case "Ellipse":
       return position === "Center";
     case "Arc":
       return position === "Center";

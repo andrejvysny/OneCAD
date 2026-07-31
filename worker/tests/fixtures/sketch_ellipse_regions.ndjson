@@ -1,0 +1,12 @@
+# SketchRegions over the corpus (i) `regions_ellipse` case — center (0,0), rx 6,
+# ry 3, rotation 0.25 => exactly ONE selectable cell with no holes. Provenance:
+# corpus/cases/i_multiregion_loop_detection.json (OneCAD-CPP tests/prototypes/
+# proto_loop_detector.cpp:80-94, asserts area() > 50.0; pi*6*3 = 56.549). The
+# harness subset matcher cannot express a tolerance — the numeric area/1% band is
+# pinned by ctest `sketch_ellipse` (test_sketch_ellipse.cpp) instead.
+# Consume the unsolicited hello (SCHEMA §6) first.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"SketchUpsert","args":{"sketchId":"elr","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Ellipse","center":[0,0],"majorR":6.0,"minorR":3.0,"rotation":0.25}],"constraints":[]}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"upserted":true,"sketchRevision":1}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"SketchRegions","args":{"sketchId":"elr"}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"result":{"sketchId":"elr","regions":[{"regionId":"$any","outerLoop":["e1"],"holes":[],"previewTriangles":{"format":"f32xyz+u32idx","triangleCount":"$any"}}]}}}

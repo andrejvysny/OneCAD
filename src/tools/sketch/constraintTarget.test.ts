@@ -3,8 +3,8 @@ import { toConstraintTarget, resolveTargetPoint, type SketchConstraintTargetPoin
 import type { SketchEntity } from "@/ipc/types";
 
 // Fixture mirrors the C++ prototype test's sketch (proto_sketch_constraint_
-// applicability.cpp:26-39), minus the Ellipse (out of scope — `SketchEntityType`
-// has no "Ellipse" variant in the frontend wire slice).
+// applicability.cpp:26-41), INCLUDING the ellipse (W3 P3 added the "Ellipse"
+// `SketchEntityType` variant).
 const entities: SketchEntity[] = [
   { id: "p1", type: "Point", p0: [0, 0] },
   { id: "p2", type: "Point", p0: [10, 0] },
@@ -16,6 +16,8 @@ const entities: SketchEntity[] = [
   { id: "circle", type: "Circle", center: [5, 5], radius: 2.5 },
   { id: "arcCenter", type: "Point", p0: [12, 5] },
   { id: "arc", type: "Arc", center: [12, 5], radius: 2.5, start: [14.5, 5], end: [13.3508, 7.1035] },
+  { id: "ellipseCenter", type: "Point", p0: [20, 5] },
+  { id: "ellipse", type: "Ellipse", center: [20, 5], majorR: 5, minorR: 2, rotation: 0 },
 ];
 
 describe("toConstraintTarget", () => {
@@ -135,5 +137,45 @@ describe("resolveTargetPoint", () => {
   it("returns null for a Circle's Start (not a valid field on a circle)", () => {
     const bad: SketchConstraintTargetPoint = { kind: "point", entityId: "circle", position: "Start", isFreePoint: false };
     expect(resolveTargetPoint(bad, entities)).toBeNull();
+  });
+});
+
+// ── W3 P3: Ellipse target vocabulary ─────────────────────────────────────────
+
+describe("toConstraintTarget — Ellipse", () => {
+  it("a body pick resolves to its OWN `ellipse` kind (not `circle`, not dropped)", () => {
+    expect(toConstraintTarget({ entityId: "ellipse" }, entities)).toEqual({
+      kind: "ellipse",
+      entityId: "ellipse",
+    });
+  });
+
+  it("Center is its only valid named position", () => {
+    expect(toConstraintTarget({ entityId: "ellipse", point: "Center" }, entities)).toEqual({
+      kind: "point",
+      entityId: "ellipse",
+      position: "Center",
+      isFreePoint: false,
+    });
+    expect(toConstraintTarget({ entityId: "ellipse", point: "Start" }, entities)).toBeNull();
+    expect(toConstraintTarget({ entityId: "ellipse", point: "End" }, entities)).toBeNull();
+    expect(toConstraintTarget({ entityId: "ellipse", point: "Midpoint" }, entities)).toBeNull();
+  });
+});
+
+describe("resolveTargetPoint — Ellipse", () => {
+  const center: SketchConstraintTargetPoint = {
+    kind: "point",
+    entityId: "ellipse",
+    position: "Center",
+    isFreePoint: false,
+  };
+
+  it("resolves the Center to the ellipse's centre coord", () => {
+    expect(resolveTargetPoint(center, entities)).toEqual([20, 5]);
+  });
+
+  it("resolves nothing for any other position", () => {
+    expect(resolveTargetPoint({ ...center, position: "Start" }, entities)).toBeNull();
   });
 });

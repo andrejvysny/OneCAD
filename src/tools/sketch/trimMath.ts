@@ -27,6 +27,11 @@
  * A line/arc with no qualifying crossings (or a circle with <2) returns null —
  * the caller falls back to whole-entity delete.
  *
+ * An ELLIPSE is never parametrically trimmed: `curveOf` does not model it, so
+ * `trimPieces` returns null and the caller whole-DELETES it. That is exact legacy
+ * parity — `OneCAD-CPP/src/core/sketch/tools/TrimTool.cpp:298-299` dispatches
+ * `EntityType::Ellipse` straight to `sketch.removeEntity(entityId)`.
+ *
  * Pure ⇒ every edge is unit-tested by data (see trimMath.test.ts). Intersection
  * math is implemented here (param-returning) rather than reusing snapEngine's
  * point-returning helpers; the tests cross-check a few points against those.
@@ -358,6 +363,9 @@ export function entityToDraft(e: SketchEntity): DraftEntity {
     ...(e.radius !== undefined ? { radius: e.radius } : {}),
     ...(e.start ? { start: pt(e.start) } : {}),
     ...(e.end ? { end: pt(e.end) } : {}),
+    ...(e.majorR !== undefined ? { majorR: e.majorR } : {}),
+    ...(e.minorR !== undefined ? { minorR: e.minorR } : {}),
+    ...(e.rotation !== undefined ? { rotation: e.rotation } : {}),
   };
 }
 

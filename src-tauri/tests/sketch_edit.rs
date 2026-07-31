@@ -369,3 +369,124 @@ async fn remove_unknown_constraint_is_noop() {
 
     wm.shutdown().await;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (d) W3 — an ELLIPSE upserts, and its presence switches the whole sketch onto
+//     the NAIVE dof path (SCHEMA §7.4 deviation).
+//
+// `SolverAdapter::populateSolver` deliberately skips ellipses (legacy parity —
+// the OneCAD-CPP oracle solver has zero ellipse references), so
+// `Sketch::hasSolverUnsupportedEntities()` routes `getDegreesOfFreedom()` /
+// `isOverConstrained()` / `hasRedundantConstraints()` to static counting. The
+// observable consequence, pinned here: the SAME redundant constraint pair that
+// reports `OverConstrained` on a pure line/point sketch reports nothing once an
+// ellipse joins it. That is a documented deviation, not a regression.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const PE: u128 = 0x120; // ellipse centre
+const ELL: u128 = 0x400;
+const C_H2: u128 = 0x302; // the DUPLICATE Horizontal(L0)
+const C_FIX: u128 = 0x303; // Fixed(P0)
+
+/// The `sketch_redundant.ndjson` shape in core terms: a line anchored at one end
+/// with a DUPLICATE Horizontal — solvable, but PlaneGCS flags the second
+/// Horizontal as benign redundancy ⇒ `OverConstrained`.
+fn redundant_line_sketch(sid: SketchId) -> Sketch {
+    let mut sk = horizontal_line_sketch(sid);
+    sk.add_constraint(Constraint::Fixed {
+        id: cid(C_FIX),
+        point: eid(P0),
+        at: Vec2::new_unchecked(0.0, 0.0),
+    })
+    .unwrap();
+    sk.add_constraint(Constraint::Horizontal {
+        id: cid(C_H2),
+        line: eid(L0),
+    })
+    .unwrap();
+    sk
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_ellipse_switches_the_sketch_onto_the_naive_dof_path() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+
+    // (1) Baseline — no ellipse: PlaneGCS diagnoses the duplicate Horizontal.
+    let mut rt = runtime_over(&wm);
+    let sid = SketchId(Uuid::from_u128(0xED_04));
+    rt.apply(EditCommand::AddSketch {
+        sketch: Sketch::on_world_plane(sid, "Redundant", WorldPlane::XY),
+    })
+    .expect("AddSketch");
+    rt.enter_sketch(sid).await.expect("enter_sketch");
+    let baseline = rt
+        .sketch_upsert(sid, edit_ops(&redundant_line_sketch(sid)))
+        .await
+        .expect("sketch_upsert (baseline)");
+    assert_eq!(
+        baseline.status,
+        SketchSolveStatus::OverConstrained,
+        "PlaneGCS reports the duplicate Horizontal as benign redundancy"
+    );
+
+    // (2) The same sketch plus a disjoint ellipse.
+    let mut rt2 = runtime_over(&wm);
+    let sid2 = SketchId(Uuid::from_u128(0xED_05));
+    let mut with_ellipse = redundant_line_sketch(sid2);
+    point(&mut with_ellipse, PE, 100.0, 100.0);
+    with_ellipse
+        .add_entity(
+            SketchEntity::ellipse(eid(ELL), eid(PE), 6.0, 3.0, 0.25, false).expect("ellipse"),
+        )
+        .unwrap();
+
+    rt2.apply(EditCommand::AddSketch {
+        sketch: Sketch::on_world_plane(sid2, "RedundantEllipse", WorldPlane::XY),
+    })
+    .expect("AddSketch");
+    rt2.enter_sketch(sid2).await.expect("enter_sketch");
+    let solved = rt2
+        .sketch_upsert(sid2, edit_ops(&with_ellipse))
+        .await
+        .expect("an ellipse-bearing sketch upserts (it used to fail wire translation)");
+
+    assert_ne!(
+        solved.status,
+        SketchSolveStatus::OverConstrained,
+        "SCHEMA §7.4: redundancy is a PlaneGCS notion and goes UNREPORTED on the \
+         naive path an ellipse forces"
+    );
+    assert_eq!(
+        solved.status,
+        SketchSolveStatus::UnderConstrained,
+        "naive dof > 0 ⇒ UnderConstrained"
+    );
+
+    // Naive arithmetic, entity by entity: P0,P1 (4) + line (0) + the core centre
+    // Point (2) + the centre the worker mints from the inlined `center` (2) +
+    // ellipse shape (3) = 11, minus Fixed (2) and two Horizontals (1 each) = 7.
+    // The redundant Horizontal still subtracts here — that is exactly the
+    // documented naive-count inaccuracy.
+    assert_eq!(
+        solved.dof, 7,
+        "naive dof = 11 entity DOF − 4 constraint arity"
+    );
+    // The contrast that proves the two paths are genuinely different: naive
+    // counting on the BASELINE would give 4 − 4 = 0 (FullyConstrained), because
+    // the redundant Horizontal subtracts a DOF it does not actually remove.
+    // PlaneGCS knows better and reports 1.
+    assert_eq!(
+        baseline.dof, 1,
+        "the ellipse-free sketch is diagnosed by PlaneGCS, not counted"
+    );
+    eprintln!(
+        "ELLIPSE-DOF PASS: baseline status={:?} dof={}, with-ellipse status={:?} dof={}",
+        baseline.status, baseline.dof, solved.status, solved.dof
+    );
+
+    wm.shutdown().await;
+}

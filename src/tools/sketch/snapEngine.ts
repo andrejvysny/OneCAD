@@ -15,7 +15,7 @@
  *   1. Alt held           → no snap (raw point)                        [suppress]
  *   2. endpoint (tier 0)   line/arc endpoints                          [nearest]
  *   3. midpoint (tier 1)   line/arc midpoints
- *   4. center   (tier 2)   circle/arc centers
+ *   4. center   (tier 2)   circle/arc/ellipse centers
  *   5. quadrant (tier 3)   circle/arc 0/90/180/270° points (arc: in-extent only)
  *   6. intersection (t4)   line-line / line-circle / circle-circle crossings
  *   7. onCurve  (tier 5)   nearest point ON a line/circle/arc          [lowest point tier]
@@ -33,6 +33,7 @@
  */
 import type { SketchEntity } from "@/ipc/types";
 import type { Point2 } from "@/viewport/engine/sketchBasis";
+import { ellipseParams, nearestOnEllipse } from "./ellipseMath";
 
 export type SnapKind =
   | "none"
@@ -136,7 +137,11 @@ export function entitySnapPoints(e: SketchEntity): PointCandidate[] {
     out.push({ point: xy(e.p1), kind: "endpoint" });
     out.push({ point: { x: (e.p0[0] + e.p1[0]) / 2, y: (e.p0[1] + e.p1[1]) / 2 }, kind: "midpoint" });
   }
-  if (e.type === "Circle" && e.center) out.push({ point: xy(e.center), kind: "center" });
+  // An Ellipse offers its CENTRE only (like a Circle). Its quadrant points are the
+  // axis endpoints, which the legacy SnapManager never emitted for an ellipse —
+  // adding them would be an invention, so they stay out (documented seam).
+  if ((e.type === "Circle" || e.type === "Ellipse") && e.center)
+    out.push({ point: xy(e.center), kind: "center" });
   if (e.type === "Arc") {
     if (e.center) out.push({ point: xy(e.center), kind: "center" });
     if (e.start) out.push({ point: xy(e.start), kind: "endpoint" });
@@ -345,8 +350,22 @@ export function entityIntersections(e1: SketchEntity, e2: SketchEntity): Point2[
   return raw.filter((p) => onCurveAngleOk(c1, p) && onCurveAngleOk(c2, p));
 }
 
-/** Nearest point ON an entity's curve (segment / circle / arc). */
+/**
+ * Nearest point ON an entity's curve (segment / circle / arc / ellipse).
+ *
+ * The Ellipse branch is deliberately OUTSIDE `curveOf`: that structure feeds
+ * `entityIntersections` (and, by the same shape, `trimMath`'s own `curveOf`), and
+ * neither has closed-form ellipse intersection math. Keeping the ellipse out of
+ * `CurveInfo` means it contributes no intersection snaps and no parametric trim —
+ * both legacy-correct (the oracle's `TrimTool.cpp:298-299` whole-DELETES an
+ * ellipse) — while still being hoverable/pickable through `nearestOnCurve`, which
+ * is what `hitTestSketch` resolves bodies with.
+ */
 export function nearestOnCurve(p: Point2, e: SketchEntity): Point2 | null {
+  if (e.type === "Ellipse") {
+    const params = ellipseParams(e);
+    return params ? nearestOnEllipse(p, params) : null;
+  }
   const c = curveOf(e);
   if (!c) return null;
   if (c.kind === "line") return nearestOnSegment(p, c.a!, c.b!);

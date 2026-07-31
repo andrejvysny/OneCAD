@@ -14,6 +14,8 @@
  *   - rect      : 2 clicks (corner→corner) commit 4 lines, then reset for the next.
  *   - centerRect: 2 clicks (center→corner) commit the 4 mirrored lines, then reset.
  *   - circle    : 2 clicks (center→radius) commit one circle, then reset.
+ *   - ellipse   : 3 clicks (center→major-axis end→minor extent) commit one
+ *                 ellipse, then reset.
  *   - arc       : 3 clicks (center→start→end) commit one arc, then reset.
  *   - polygon   : 2 clicks (center→vertex) commit n lines + a construction
  *                 circumcircle; the side count is sticky across commits.
@@ -35,6 +37,7 @@ import type {
   SketchEntityType,
 } from "@/ipc/types";
 import type { Point2 } from "@/viewport/engine/sketchBasis";
+import { normalizeEllipse } from "./ellipseMath";
 
 /** A draft entity in plane coords (no id yet — the controller assigns on commit). */
 export interface DraftEntity {
@@ -46,6 +49,11 @@ export interface DraftEntity {
   radius?: number;
   start?: Point2;
   end?: Point2;
+  /** Ellipse semi-major / semi-minor / rotation (radians, [0, 2π)). Always
+   *  normalized to `majorR ≥ minorR` by `ellipseTool` before they appear here. */
+  majorR?: number;
+  minorR?: number;
+  rotation?: number;
 }
 
 export type ToolEvent =
@@ -229,6 +237,95 @@ export const circleTool: ToolMachine = {
       state: emptyState(),
       preview: [],
       committed: [{ type: "Circle", center, radius }],
+      done: true,
+    };
+  },
+};
+
+// ── Ellipse tool: center → major-axis endpoint → minor extent ────────────────
+//
+// Ported from the oracle `OneCAD-CPP/src/core/sketch/tools/EllipseTool.cpp:28-171`
+// (3-click FSM, Esc cancels):
+//   click 1  centre. While placing the major axis, the rubber-band is a CIRCLE of
+//            radius |cursor − centre| (EllipseTool.cpp:130-136: `minorRadius_ =
+//            majorRadius_` "circle preview until second point").
+//   click 2  the major-axis ENDPOINT. `majorR = |cursor − centre|` (rejected below
+//            `ctx.minSize`), `rotation = atan2(Δy, Δx)`. The very first preview after
+//            this click uses `minorR = majorR · 0.5` (EllipseTool.cpp:63).
+//   move     `minorR` = the PERPENDICULAR distance from the cursor to the major-axis
+//            line (`perpDistance`, shared with the slot tool).
+//   click 3  commits (rejected below `ctx.minSize`).
+//
+// LIVE SWAP-NORMALIZATION. The oracle applies the SAME major≥minor swap to the
+// preview as to the commit ("Apply same swap logic as final creation for consistent
+// preview", EllipseTool.cpp:151) — so dragging the cursor past the major radius
+// visibly re-labels the axes instead of drawing an impossible minor>major ellipse,
+// and what is on screen is byte-for-byte what commits. `normalizeEllipse`
+// (ellipseMath.ts) is the single implementation of that rule, called on every
+// preview AND on the commit.
+//
+// The ellipse authors NO tool constraints: its CURVE takes none (legacy parity —
+// `worker/tests/prototypes/proto_sketch_constraint_applicability.cpp:62-67` grants an
+// ellipse curve no constraints at all), and its CENTRE gets the generic Coincident
+// inference for free like a circle's.
+
+/** The single ellipse draft for a centre + major-axis endpoint + RAW minor extent
+ *  (normalized: `majorR ≥ minorR`, `rotation` folded into [0, 2π)). */
+export function ellipseDraft(center: Point2, majorEnd: Point2, minorRaw: number): DraftEntity {
+  const { majorR, minorR, rotation } = normalizeEllipse(
+    radiusOf(center, majorEnd),
+    minorRaw,
+    Math.atan2(majorEnd.y - center.y, majorEnd.x - center.x),
+  );
+  return { type: "Ellipse", center, majorR, minorR, rotation };
+}
+
+export const ellipseTool: ToolMachine = {
+  id: "ellipse",
+  init: emptyState,
+  step(state, event, ctx) {
+    if (event.kind === "esc") return { state: emptyState(), preview: [], done: true };
+    if (event.kind === "sides") return ignoreSides(state);
+    const [center, majorEnd] = state.anchors;
+
+    if (event.kind === "move") {
+      if (center && majorEnd) {
+        return {
+          state: { ...state, cursor: event.pt },
+          preview: [ellipseDraft(center, majorEnd, perpDistance(center, majorEnd, event.pt))],
+        };
+      }
+      if (center) {
+        // Circle rubber-band while the major axis is being aimed (oracle parity).
+        return {
+          state: { ...state, cursor: event.pt },
+          preview: [{ type: "Circle", center, radius: radiusOf(center, event.pt) }],
+        };
+      }
+      return { state: { ...state, cursor: event.pt }, preview: [] };
+    }
+
+    // click
+    const minSize = ctx?.minSize ?? DEFAULT_MIN_SIZE;
+    if (!center) return { state: { anchors: [event.pt], cursor: event.pt }, preview: [] };
+    if (!majorEnd) {
+      if (radiusOf(center, event.pt) < minSize) {
+        return { state: { anchors: [center], cursor: event.pt }, preview: [] };
+      }
+      // Seed the minor at half the major so the ellipse reads as one immediately.
+      return {
+        state: { anchors: [center, event.pt], cursor: event.pt },
+        preview: [ellipseDraft(center, event.pt, radiusOf(center, event.pt) * 0.5)],
+      };
+    }
+    const minorRaw = perpDistance(center, majorEnd, event.pt);
+    if (minorRaw < minSize) {
+      return { state: { anchors: [center, majorEnd], cursor: event.pt }, preview: [] };
+    }
+    return {
+      state: emptyState(),
+      preview: [],
+      committed: [ellipseDraft(center, majorEnd, minorRaw)],
       done: true,
     };
   },
@@ -567,6 +664,7 @@ export const TOOL_MACHINES: Record<string, ToolMachine> = {
   rect: rectTool,
   centerRect: centerRectTool,
   circle: circleTool,
+  ellipse: ellipseTool,
   arc: arcTool,
   polygon: polygonTool,
   slot: slotTool,
@@ -583,6 +681,9 @@ export function draftToEntityFields(d: DraftEntity): {
   radius?: number;
   start?: [number, number];
   end?: [number, number];
+  majorR?: number;
+  minorR?: number;
+  rotation?: number;
 } {
   return {
     type: d.type,
@@ -593,6 +694,11 @@ export function draftToEntityFields(d: DraftEntity): {
     ...(d.radius !== undefined ? { radius: d.radius } : {}),
     ...(d.start ? { start: asPair(d.start) } : {}),
     ...(d.end ? { end: asPair(d.end) } : {}),
+    ...(d.majorR !== undefined ? { majorR: d.majorR } : {}),
+    ...(d.minorR !== undefined ? { minorR: d.minorR } : {}),
+    // `rotation: 0` is meaningful (an axis-aligned ellipse) — emit it whenever the
+    // draft carries one, unlike the coordinate fields whose absence means "n/a".
+    ...(d.rotation !== undefined ? { rotation: d.rotation } : {}),
   };
 }
 

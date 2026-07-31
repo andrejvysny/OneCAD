@@ -13,15 +13,21 @@
 //   * Line    entity `l` (p0Ref/p1Ref) -> aliases "l.p0"/"l.p1"/... resolve to the
 //                                         referenced Point entities (whose primary
 //                                         handle stays the referenced point id)
-//   * Circle/Arc entity `c`         -> "c.center"
+//   * Circle/Arc/Ellipse entity `c` -> "c.center"
 // Arc start/end are derived (center + radius + angles), not independent points,
 // so they are NOT draggable handles (documented limitation carried from the port).
 //
 // Accepted wire entity shapes (superset of SCHEMA §7.3 to also accept the corpus
 // author-form):  Point {at|p|pos:[x,y]} ; Line {p0,p1:[x,y]} OR {p0Ref,p1Ref:id} ;
 // Circle {center:[x,y], radius} ; Arc {center:[x,y], radius, start,end:[x,y]} OR
-// {center,radius,startAngle,endAngle}. Dimensional constraint values accept a
-// bare number OR a {value, expr?} object (SCHEMA §7.3 scalar rule).
+// {center,radius,startAngle,endAngle} ; Ellipse {center:[x,y], majorR, minorR,
+// rotation?}. Dimensional constraint values accept a bare number OR a
+// {value, expr?} object (SCHEMA §7.3 scalar rule).
+//
+// An Ellipse is NOT registered with PlaneGCS (`SolverAdapter` skips it — legacy
+// parity), so a sketch carrying one reports DOF from `naiveDegreesOfFreedom()`
+// (SCHEMA §7.4). It is still materialized, tessellated by `LoopDetector`, and
+// built as a true `Geom_Ellipse` edge by `FaceBuilder`.
 #pragma once
 
 #include <memory>
@@ -69,9 +75,10 @@ TranslateResult translate(const nlohmann::json& args);
 
 // Overwrite the coordinate fields of a stored wire `args` in place from the
 // solved positions of `sketch` (used after EndGesture to keep the pre-session
-// store consistent). Points, line endpoints, and circle/arc centers + radii are
-// written back; arc start/end arrays are recomputed from angles. Silently skips
-// anything it cannot map.
+// store consistent). Points, line endpoints, and circle/arc/ellipse centers +
+// radii are written back; arc start/end arrays are recomputed from angles, and an
+// ellipse echoes the NORMALIZED majorR/minorR/rotation `addEllipse` settled on.
+// Silently skips anything it cannot map.
 void apply_solved_positions(nlohmann::json& args, const sk::Sketch& sketch,
                             const WireIndex& index);
 

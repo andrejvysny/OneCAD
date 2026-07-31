@@ -177,3 +177,60 @@ describe("marqueeHits — degenerate rect", () => {
     expect(marqueeHits(entities, R(-40, -40, -40, -40), "crossing")).toEqual([]);
   });
 });
+
+// ── W3 P3: Ellipse — rotated-bbox containment + sampled-chord crossing ────────
+
+describe("marquee — Ellipse", () => {
+  // a = 20 along +X, b = 5 along +Y ⇒ exact bbox x ∈ [-20,20], y ∈ [-5,5].
+  const ell: SketchEntity = {
+    id: "el1",
+    type: "Ellipse",
+    center: [0, 0],
+    majorR: 20,
+    minorR: 5,
+    rotation: 0,
+  };
+
+  it("WINDOW selects only when the rotated bbox is fully contained", () => {
+    expect(marqueeHits([ell], marqueeRectFrom(-21, -6, 21, 6), "window")).toEqual(["el1"]);
+    // One unit short on the major axis ⇒ not contained.
+    expect(marqueeHits([ell], marqueeRectFrom(-19, -6, 21, 6), "window")).toEqual([]);
+  });
+
+  it("WINDOW uses the ROTATED extents, not the unrotated (a, b) box", () => {
+    const rot: SketchEntity = { ...ell, id: "el2", rotation: Math.PI / 2 };
+    // Rotated 90° the ellipse is 5 wide × 20 tall.
+    expect(marqueeHits([rot], marqueeRectFrom(-6, -21, 6, 21), "window")).toEqual(["el2"]);
+    expect(marqueeHits([rot], marqueeRectFrom(-21, -6, 21, 6), "window")).toEqual([]);
+  });
+
+  it("CROSSING catches a rect that only clips one end of the curve", () => {
+    const rect = marqueeRectFrom(15, -3, 30, 3);
+    expect(marqueeHits([ell], rect, "window")).toEqual([]);
+    expect(marqueeHits([ell], rect, "crossing")).toEqual(["el1"]);
+  });
+
+  it("CROSSING selects nothing for a rect wholly INSIDE the ellipse", () => {
+    // Fully interior (|x| ≤ 2, |y| ≤ 1 is well inside): no curve, no boundary hit.
+    expect(marqueeHits([ell], marqueeRectFrom(-2, -1, 2, 1), "crossing")).toEqual([]);
+  });
+
+  it("CROSSING selects nothing for a rect wholly OUTSIDE and clear of the curve", () => {
+    expect(marqueeHits([ell], marqueeRectFrom(100, 100, 120, 120), "crossing")).toEqual([]);
+  });
+
+  it("CROSSING falls through to the WINDOW hit when the ellipse is fully inside", () => {
+    expect(marqueeHits([ell], marqueeRectFrom(-50, -50, 50, 50), "crossing")).toEqual(["el1"]);
+  });
+
+  it("a rect in the bbox CORNER (outside the curve) is not a crossing hit", () => {
+    // Near (20, 5): inside the axis-aligned bbox, but the curve is far away there.
+    expect(marqueeHits([ell], marqueeRectFrom(18, 4, 19.5, 4.9), "crossing")).toEqual([]);
+  });
+
+  it("never selects an ellipse missing its radii", () => {
+    const broken: SketchEntity = { id: "bad", type: "Ellipse", center: [0, 0] };
+    expect(marqueeHits([broken], marqueeRectFrom(-99, -99, 99, 99), "window")).toEqual([]);
+    expect(marqueeHits([broken], marqueeRectFrom(-99, -99, 99, 99), "crossing")).toEqual([]);
+  });
+});

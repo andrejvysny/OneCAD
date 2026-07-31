@@ -27,6 +27,13 @@ beforeEach(() => {
 
 const line = (id: string, p0: [number, number], p1: [number, number]): SketchEntity => ({ id, type: "Line", p0, p1 });
 const circle = (id: string, center: [number, number], radius: number): SketchEntity => ({ id, type: "Circle", center, radius });
+const ellipse = (
+  id: string,
+  center: [number, number],
+  majorR: number,
+  minorR: number,
+  rotation: number,
+): SketchEntity => ({ id, type: "Ellipse", center, majorR, minorR, rotation });
 
 describe("marshalUpsert — entities", () => {
   it("marshals a Line into two synthesized Points + a point-referenced Line", () => {
@@ -495,6 +502,7 @@ function wireFromOps(ops: ReturnType<typeof marshalUpsert>) {
       else if (e.kind === "line") entities.push({ id: e.id, type: "Line", p0Ref: e.start, p1Ref: e.end });
       else if (e.kind === "circle") entities.push({ id: e.id, type: "Circle", center: at.get(e.center), centerRef: e.center, radius: e.radius });
       else if (e.kind === "arc") entities.push({ id: e.id, type: "Arc", center: at.get(e.center), centerRef: e.center, radius: e.radius, startAngle: e.startAngle, endAngle: e.endAngle });
+      else if (e.kind === "ellipse") entities.push({ id: e.id, type: "Ellipse", center: at.get(e.center), centerRef: e.center, majorR: e.majorR, minorR: e.minorR, rotation: e.rotation });
     } else if (op.op === "addConstraint") {
       const c = op.constraint;
       const type = PASCAL[c.kind];
@@ -519,6 +527,7 @@ describe("hydration round-trip — marshal fresh → wire → hydrate → re-mar
         line("l2", [40, 0], [40, 40]),
         circle("c1", [10, 20], 3),
         arc("a1", [60, 10], 5, [65, 10], [60, 15]),
+        ellipse("el1", [-20, -30], 9, 4, 1.25),
       ],
       constraints: [
         { id: "k1", type: "Coincident", entities: ["l1", "l2"], positions: ["End", "Start"] },
@@ -541,13 +550,116 @@ describe("hydration round-trip — marshal fresh → wire → hydrate → re-mar
     const constraints = frontendConstraintsFromDto(wire.constraints, wire.entities);
     seedIdMapFromWire(map2, wire.entities, wire.constraints);
 
-    // No stray child points (2 lines + circle + arc = 4 entities; no endpoint/center dots).
-    expect(entities).toHaveLength(4);
+    // No stray child points (2 lines + circle + arc + ellipse = 5 entities; no
+    // endpoint/center dots).
+    expect(entities).toHaveLength(5);
     // The Angle hydrated back to degrees.
     expect(constraints.find((c) => c.type === "Angle")?.value).toBeCloseTo(90, 10);
 
     // 4. Re-marshal the hydrated arrays — a faithful reopen diffs to ZERO ops.
     expect(marshalUpsert(map2, { entities, constraints }, mint)).toEqual([]);
+  });
+});
+
+// ── W3 P3: Ellipse marshals exactly like a Circle (one minted Center point) ──
+
+describe("Ellipse — marshal / hydrate / seed", () => {
+  it("mints a Center point then the core-serde `ellipse` AddEntity op", () => {
+    const map = createIdMap("sk-uuid", "XY");
+    const ops = marshalUpsert(
+      map,
+      { entities: [ellipse("e1", [3, 4], 10, 4, 1.5)], constraints: [] },
+      mint,
+    );
+    expect(ops).toEqual([
+      { op: "addEntity", entity: { kind: "point", id: "uuid-1", at: [3, 4] } },
+      {
+        op: "addEntity",
+        entity: { kind: "ellipse", id: "uuid-2", center: "uuid-1", majorR: 10, minorR: 4, rotation: 1.5 },
+      },
+    ]);
+    expect(map.entity.get("e1")).toBe("uuid-2");
+    expect(map.point.get("e1.Center")).toBe("uuid-1");
+  });
+
+  it("defaults a missing rotation to 0 and carries the construction flag inline", () => {
+    const map = createIdMap("sk-uuid", "XY");
+    const e: SketchEntity = { id: "e1", type: "Ellipse", center: [0, 0], majorR: 5, minorR: 2, construction: true };
+    const ops = marshalUpsert(map, { entities: [e], constraints: [] }, mint);
+    expect(ops[1]).toEqual({
+      op: "addEntity",
+      entity: { kind: "ellipse", id: "uuid-2", center: "uuid-1", majorR: 5, minorR: 2, rotation: 0, construction: true },
+    });
+  });
+
+  it("emits nothing for an ellipse missing a radius (never a half-formed op)", () => {
+    const map = createIdMap("sk-uuid", "XY");
+    const broken = { id: "e1", type: "Ellipse", center: [0, 0], majorR: 5 } as SketchEntity;
+    expect(marshalUpsert(map, { entities: [broken], constraints: [] }, mint)).toEqual([]);
+    expect(map.entity.has("e1")).toBe(false);
+  });
+
+  it("removes the ellipse AND its child centre point", () => {
+    const map = createIdMap("sk-uuid", "XY");
+    marshalUpsert(map, { entities: [ellipse("e1", [0, 0], 5, 2, 0)], constraints: [] }, mint);
+    const ops = marshalUpsert(map, { entities: [], constraints: [] }, mint);
+    expect(ops).toEqual([
+      { op: "removeEntity", entity: "uuid-2" },
+      { op: "removeEntity", entity: "uuid-1" },
+    ]);
+  });
+
+  it("hydrates from the dto wire shape, keeping the centre point non-free-standing", () => {
+    const wire = [
+      { id: "p1", type: "Point", at: [3, 4] },
+      { id: "el1", type: "Ellipse", center: [3, 4], centerRef: "p1", majorR: 10, minorR: 4, rotation: 1.5 },
+    ];
+    expect(frontendEntitiesFromDto(wire)).toEqual([
+      { id: "el1", type: "Ellipse", center: [3, 4], majorR: 10, minorR: 4, rotation: 1.5, construction: undefined },
+    ]);
+  });
+
+  it("drops an incomplete dto ellipse rather than hydrating a half entity", () => {
+    expect(frontendEntitiesFromDto([{ id: "el1", type: "Ellipse", center: [0, 0], majorR: 3 }])).toEqual([]);
+  });
+
+  it("seeds `${id}.Center` from centerRef so the re-entry centre is draggable", () => {
+    const map = createIdMap("sk", "XY");
+    seedIdMapFromWire(
+      map,
+      [
+        { id: "p1", type: "Point", at: [3, 4] },
+        { id: "el1", type: "Ellipse", center: [3, 4], centerRef: "p1", majorR: 10, minorR: 4, rotation: 0 },
+      ],
+      [],
+    );
+    expect(map.entity.get("el1")).toBe("el1");
+    expect(map.point.get("el1.Center")).toBe("p1");
+    expect(map.entity.has("p1")).toBe(false); // owned child, not a free-standing entity
+  });
+
+  it("moves the centre on a solved Center position", () => {
+    const moved = applySolvedPositions([ellipse("e1", [0, 0], 5, 2, 0.4)], { "e1.Center": [11, -7] });
+    expect(moved[0].center).toEqual([11, -7]);
+    expect(moved[0].majorR).toBe(5);
+    expect(moved[0].rotation).toBe(0.4);
+  });
+
+  it("resolves a Fixed constraint's `at` from the ellipse centre", () => {
+    const map = createIdMap("sk", "XY");
+    const entities = [ellipse("e1", [8, 9], 5, 2, 0)];
+    const ops = marshalUpsert(
+      map,
+      {
+        entities,
+        constraints: [{ id: "k1", type: "Fixed", entities: ["e1"], positions: ["Center"] }],
+      },
+      mint,
+    );
+    expect(ops[ops.length - 1]).toEqual({
+      op: "addConstraint",
+      constraint: { kind: "fixed", id: "uuid-3", point: "uuid-1", at: [8, 9] },
+    });
   });
 });
 

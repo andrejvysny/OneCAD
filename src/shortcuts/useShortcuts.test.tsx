@@ -77,6 +77,15 @@ describe("keymap resolveBinding", () => {
 
     expect(resolveBinding("g", false, "sketch")).toEqual({ type: "tool", tool: "polygon" });
     expect(resolveBinding("g", false, "model")).toEqual({ type: "tool", tool: "polygon" });
+  });
+
+  it("O is the sketch Ellipse in BOTH modes (free in model → cross-mode fallback)", () => {
+    // Deliberately NOT `E`: that stays the model Extrude binding, i.e. the
+    // cross-mode "finish the sketch and extrude" handoff (keymap.ts header).
+    expect(resolveBinding("o", false, "sketch")).toEqual({ type: "tool", tool: "ellipse" });
+    expect(resolveBinding("o", false, "model")).toEqual({ type: "tool", tool: "ellipse" });
+    expect(resolveBinding("e", false, "sketch")).toEqual({ type: "tool", tool: "extrude" });
+    expect(resolveBinding("e", false, "model")).toEqual({ type: "tool", tool: "extrude" });
 
     // Sketch S = slot; model S stays the new-sketch intent (mode bindings win).
     expect(resolveBinding("s", false, "sketch")).toEqual({ type: "tool", tool: "slot" });

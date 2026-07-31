@@ -73,7 +73,11 @@ export function entityPoints(e: SketchEntity): EntPoint[] {
     if (e.p0) out.push({ entityId: e.id, position: "Start", coord: e.p0 });
     if (e.p1) out.push({ entityId: e.id, position: "End", coord: e.p1 });
   }
-  if (e.type === "Circle" && e.center) out.push({ entityId: e.id, position: "Center", coord: e.center });
+  // An Ellipse contributes its CENTRE exactly like a Circle — that centre IS a
+  // minted wire point (`sketchWireMap.addEntityOps`), so it selects, drags and
+  // auto-coincides for free. Its CURVE contributes nothing (legacy parity).
+  if ((e.type === "Circle" || e.type === "Ellipse") && e.center)
+    out.push({ entityId: e.id, position: "Center", coord: e.center });
   if (e.type === "Arc") {
     if (e.center) out.push({ entityId: e.id, position: "Center", coord: e.center });
     if (e.start) out.push({ entityId: e.id, position: "Start", coord: e.start });

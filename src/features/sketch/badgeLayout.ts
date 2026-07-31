@@ -45,7 +45,8 @@ export function entityPointCoord(e: SketchEntity, position: ConstraintPosition):
 /** Representative anchor for a badge on an entity (line midpoint / circle center). */
 export function entityAnchor(e: SketchEntity): Point2 | null {
   if (e.type === "Line" && e.p0 && e.p1) return mid(e.p0, e.p1);
-  if ((e.type === "Circle" || e.type === "Arc") && e.center) return { x: e.center[0], y: e.center[1] };
+  if ((e.type === "Circle" || e.type === "Arc" || e.type === "Ellipse") && e.center)
+    return { x: e.center[0], y: e.center[1] };
   if (e.type === "Point" && e.p0) return { x: e.p0[0], y: e.p0[1] };
   return null;
 }

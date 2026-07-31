@@ -88,7 +88,7 @@ function collectDots(e: SketchEntity, out: number[]): void {
   if (e.type === "Line") {
     add(e.p0);
     add(e.p1);
-  } else if (e.type === "Circle") {
+  } else if (e.type === "Circle" || e.type === "Ellipse") {
     add(e.center);
   } else if (e.type === "Arc") {
     add(e.center);

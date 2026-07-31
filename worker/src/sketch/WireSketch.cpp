@@ -7,6 +7,7 @@
 
 #include "sketch/SketchArc.h"
 #include "sketch/SketchCircle.h"
+#include "sketch/SketchEllipse.h"
 #include "sketch/SketchLine.h"
 #include "sketch/SketchPoint.h"
 #include "sketch/constraints/Constraints.h"
@@ -181,7 +182,7 @@ TranslateResult translate(const json& args) {
         reg_handle(id, pid, /*primary=*/true);
     }
 
-    // Pass 2: Line / Arc / Circle entities.
+    // Pass 2: Line / Arc / Circle / Ellipse entities.
     for (const json& e : entities) {
         const std::string type = e.value("type", std::string{});
         if (type == "Point") continue;
@@ -272,6 +273,29 @@ TranslateResult translate(const json& args) {
             }
             idx.wire_to_internal[id] = aid;
             idx.internal_edge_to_wire[aid] = id;
+        } else if (type == "Ellipse") {
+            // Same shape as Circle: the center rides INLINE and the worker mints
+            // the Point itself (an inbound `centerRef` is informational — SCHEMA
+            // §7.3 — and deliberately ignored here). `addEllipse` NORMALIZES
+            // (swaps radii + rotates pi/2 when minor > major); the raw wire values
+            // go in unchanged and `apply_solved_positions` echoes what it settled on.
+            double cx, cy, major, minor;
+            if (!e.contains("center") || !read_vec2(e["center"], cx, cy) ||
+                !scalar_field(e, {"majorR"}, major) || !scalar_field(e, {"minorR"}, minor)) {
+                result.error = "ellipse '" + id + "' missing center/majorR/minorR";
+                return result;
+            }
+            double rotation = 0.0;
+            scalar_field(e, {"rotation"}, rotation);  // optional, default 0
+            const sk::EntityID cp = sketch->addPoint(cx, cy, construction);
+            reg_handle(id + ".center", cp, true);
+            const sk::EntityID eid = sketch->addEllipse(cp, major, minor, rotation, construction);
+            if (eid.empty()) {
+                result.error = "ellipse '" + id + "' could not be created";
+                return result;
+            }
+            idx.wire_to_internal[id] = eid;
+            idx.internal_edge_to_wire[eid] = id;
         } else {
             result.error = "unsupported entity type '" + type + "'";
             return result;
@@ -452,6 +476,21 @@ void apply_solved_positions(json& args, const sk::Sketch& sketch, const WireInde
             if (it != index.wire_to_internal.end()) {
                 if (const auto* c = sketch.getEntityAs<sk::SketchCircle>(it->second)) {
                     e["radius"] = c->radius();
+                }
+            }
+        } else if (type == "Ellipse") {
+            const sk::EntityID cp = index.resolve_point(id, "center");
+            if (!cp.empty() && point_pos(cp, x, y)) e["center"] = json::array({x, y});
+            const auto it = index.wire_to_internal.find(id);
+            if (it != index.wire_to_internal.end()) {
+                if (const auto* el = sketch.getEntityAs<sk::SketchEllipse>(it->second)) {
+                    // Echo the NORMALIZED parameters `addEllipse` settled on (it
+                    // swaps major/minor and adds pi/2 when minor > major). Echoing
+                    // the request's own values instead would store parameters the
+                    // worker does not hold, re-dirtying the sketch on every diff.
+                    e["majorR"] = el->majorRadius();
+                    e["minorR"] = el->minorRadius();
+                    e["rotation"] = el->rotation();
                 }
             }
         } else if (type == "Arc") {

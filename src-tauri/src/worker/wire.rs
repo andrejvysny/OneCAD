@@ -976,11 +976,15 @@ pub fn map_error(err: &ErrorObject) -> EngineError {
 /// constraint shapes, §7.4 solver lane).
 ///
 /// The core model references points **by id** (a [`Line`](SketchEntity::Line)
-/// stores its two endpoint ids, an [`Arc`](SketchEntity::Arc)/[`Circle`](SketchEntity::Circle)
-/// its center id); this maps 1:1 onto the worker's `p0Ref`/`p1Ref` line form and
-/// (for arc/circle) an inlined center coordinate resolved from the center point.
-/// [`Ellipse`](SketchEntity::Ellipse) is not translated (the worker's `WireSketch`
-/// has no ellipse case — documented V1 limit; ellipses are outside the slice).
+/// stores its two endpoint ids, an [`Arc`](SketchEntity::Arc)/[`Circle`](SketchEntity::Circle)/
+/// [`Ellipse`](SketchEntity::Ellipse) its center id); this maps 1:1 onto the
+/// worker's `p0Ref`/`p1Ref` line form and (for arc/circle/ellipse) an inlined
+/// center coordinate resolved from the center point.
+///
+/// An ellipse is **not** registered with PlaneGCS by the worker (deliberate
+/// legacy parity), so an ellipse-bearing sketch reports naively-counted DOF —
+/// see SCHEMA §7.4. It still forms regions and extrudes with a true
+/// `Geom_Ellipse` boundary.
 #[must_use]
 pub fn sketch_wire(sketch: &Sketch) -> (Value, Value, Value) {
     let plane = json!({
@@ -1533,8 +1537,26 @@ fn wire_entity(sketch: &Sketch, e: &SketchEntity) -> Option<Value> {
                 "startAngle": start_angle, "endAngle": end_angle, "construction": construction,
             })
         }
-        // No worker `WireSketch` ellipse case — skip (documented V1 limit).
-        SketchEntity::Ellipse { .. } => return None,
+        SketchEntity::Ellipse {
+            id,
+            center,
+            major_r,
+            minor_r,
+            rotation,
+            construction,
+        } => {
+            let c = point_pos(sketch, *center)?;
+            // Same shape as Circle: inlined center coords + the informational
+            // `centerRef` uuid so re-entry hydration re-owns the center Point.
+            // `rotation` is RADIANS on the wire (core stores radians too — the
+            // UI converts at its own boundary via `angleUnits.ts`).
+            json!({
+                "id": id.to_string(), "type": "Ellipse",
+                "center": c, "centerRef": center.to_string(),
+                "majorR": major_r, "minorR": minor_r, "rotation": rotation,
+                "construction": construction,
+            })
+        }
     })
 }
 
@@ -2271,6 +2293,78 @@ mod solver_wire_tests {
             .unwrap();
         assert_eq!(d["entities"], json!([p0.to_string(), p1.to_string()]));
         assert_eq!(d["value"], json!(40.0));
+    }
+
+    /// An ellipse renders exactly like a circle plus the three shape scalars —
+    /// inlined `center`, informational `centerRef`, `majorR`/`minorR`/`rotation`
+    /// verbatim from the core fields (SCHEMA §7.3). Before W3 this entity was
+    /// dropped on the floor, so an ellipse never reached the worker at all.
+    #[test]
+    fn sketch_wire_renders_ellipse_with_inline_center_and_scalars() {
+        let sid = SketchId(Uuid::from_u128(2));
+        let (c, ellipse) = (eid(0x30), eid(0x31));
+        let mut sk = Sketch::on_world_plane(sid, "S", WorldPlane::XY);
+        sk.add_entity(SketchEntity::point(
+            c,
+            Vec2::new_unchecked(-2.5, 4.0),
+            false,
+            false,
+        ))
+        .unwrap();
+        sk.add_entity(SketchEntity::ellipse(ellipse, c, 6.0, 3.0, 0.25, false).unwrap())
+            .unwrap();
+
+        let (_, entities, _) = sketch_wire(&sk);
+        let ents = entities.as_array().unwrap();
+        assert_eq!(
+            ents.len(),
+            2,
+            "the center Point and the Ellipse both render"
+        );
+        let e = ents
+            .iter()
+            .find(|e| e["id"] == json!(ellipse.to_string()))
+            .expect("the ellipse is no longer skipped");
+        assert_eq!(e["type"], "Ellipse");
+        assert_eq!(e["center"], json!([-2.5, 4.0]));
+        assert_eq!(e["centerRef"], json!(c.to_string()));
+        assert_eq!(e["majorR"], json!(6.0));
+        assert_eq!(e["minorR"], json!(3.0));
+        // Radians on the wire, not degrees.
+        assert_eq!(e["rotation"], json!(0.25));
+        assert_eq!(e["construction"], json!(false));
+    }
+
+    /// The construction flag rides through to the wire, where the worker's
+    /// synthesized center Point inherits it. (The "center missing" arm of
+    /// `wire_entity` is unreachable through the public API — core rejects a
+    /// dangling center with `DanglingEntityRef` at `add_entity` — so the `?` on
+    /// `point_pos` is a defensive belt, matching circle/arc.)
+    #[test]
+    fn sketch_wire_ellipse_carries_construction_flag() {
+        let sid = SketchId(Uuid::from_u128(3));
+        let (c, ellipse) = (eid(0x40), eid(0x41));
+        let mut sk = Sketch::on_world_plane(sid, "S", WorldPlane::XY);
+        sk.add_entity(SketchEntity::point(
+            c,
+            Vec2::new_unchecked(0.0, 0.0),
+            true,
+            false,
+        ))
+        .unwrap();
+        sk.add_entity(SketchEntity::ellipse(ellipse, c, 5.0, 5.0, 0.0, true).unwrap())
+            .unwrap();
+        let (_, entities, _) = sketch_wire(&sk);
+        let ents = entities.as_array().unwrap();
+        let e = ents
+            .iter()
+            .find(|e| e["id"] == json!(ellipse.to_string()))
+            .unwrap();
+        assert_eq!(e["construction"], json!(true));
+        // A circular ellipse (major == minor) still renders both scalars — the
+        // worker's `addEllipse` normalization is a no-op here.
+        assert_eq!(e["majorR"], json!(5.0));
+        assert_eq!(e["minorR"], json!(5.0));
     }
 
     #[test]

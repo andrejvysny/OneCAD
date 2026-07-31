@@ -145,3 +145,69 @@ describe("mirrorEntities — aggregation", () => {
     expect(entities[0].construction).toBe(true);
   });
 });
+
+// ── W3 P3: Ellipse — copy only, rotation' = 2φ − rotation ────────────────────
+
+describe("mirrorEntity — Ellipse", () => {
+  const src: SketchEntity = {
+    id: "el1",
+    type: "Ellipse",
+    center: [10, 5],
+    majorR: 8,
+    minorR: 3,
+    rotation: Math.PI / 6,
+  };
+
+  it("reflects the centre, keeps the radii, and maps rotation θ → 2φ − θ", () => {
+    // Axis = the X axis (φ = 0) ⇒ rotation −π/6, folded into [0, 2π).
+    const r = mirrorEntity(src, "ax", [0, 0], [1, 0], minters())!;
+    expect(r.entity.type).toBe("Ellipse");
+    expect(r.entity.center).toEqual([10, -5]);
+    expect(r.entity.majorR).toBe(8);
+    expect(r.entity.minorR).toBe(3);
+    expect(r.entity.rotation).toBeCloseTo(2 * Math.PI - Math.PI / 6, 12);
+  });
+
+  it("maps rotation across a 45° axis (φ = π/4 ⇒ θ → π/2 − θ)", () => {
+    const r = mirrorEntity(src, "ax", [0, 0], [1, 1], minters())!;
+    expect(r.entity.rotation).toBeCloseTo(Math.PI / 2 - Math.PI / 6, 12);
+  });
+
+  it("authors NO constraints (no constraint ties two ellipses' rotations)", () => {
+    expect(mirrorEntity(src, "ax", [0, 0], [1, 0], minters())!.constraints).toEqual([]);
+  });
+
+  it("preserves the construction flag", () => {
+    const r = mirrorEntity({ ...src, construction: true }, "ax", [0, 0], [1, 0], minters())!;
+    expect(r.entity.construction).toBe(true);
+  });
+
+  it("keeps the rotation untouched for a DEGENERATE axis (identity reflection)", () => {
+    const r = mirrorEntity(src, "ax", [3, 3], [3, 3], minters())!;
+    expect(r.entity.center).toEqual([10, 5]);
+    expect(r.entity.rotation).toBeCloseTo(Math.PI / 6, 12);
+  });
+
+  it("returns null for an ellipse missing a radius", () => {
+    expect(
+      mirrorEntity({ id: "bad", type: "Ellipse", center: [0, 0], majorR: 4 }, "ax", [0, 0], [1, 0], minters()),
+    ).toBeNull();
+  });
+
+  it("mirrors the SAME point set — reflecting the major-axis end lands on the copy", () => {
+    const r = mirrorEntity(src, "ax", [0, 0], [1, 0], minters())!;
+    const e = r.entity;
+    // Source major-axis end, reflected across y = 0.
+    const srcEnd: [number, number] = [
+      src.center![0] + src.majorR! * Math.cos(src.rotation!),
+      src.center![1] + src.majorR! * Math.sin(src.rotation!),
+    ];
+    const expected = reflectPoint(srcEnd, [0, 0], [1, 0]);
+    const copyEnd = [
+      e.center![0] + e.majorR! * Math.cos(e.rotation!),
+      e.center![1] + e.majorR! * Math.sin(e.rotation!),
+    ];
+    expect(copyEnd[0]).toBeCloseTo(expected[0], 10);
+    expect(copyEnd[1]).toBeCloseTo(expected[1], 10);
+  });
+});

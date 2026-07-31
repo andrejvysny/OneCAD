@@ -122,6 +122,7 @@ function marshalsAsPoint(position: ConstraintPosition, entityKind: SketchEntityT
       return position === "Start" || position === "End";
     case "Circle":
     case "Arc":
+    case "Ellipse":
       return position === "Center";
     default:
       return false;
@@ -185,6 +186,7 @@ function targetKey(t: SketchConstraintTarget): string {
  *
  * Ported control flow (ConstraintApplicability.cpp:54-170):
  *   - dedup selection by target identity (cpp:62-75), empty ⇒ `[]` (cpp:78-80)
+ *   - any ELLIPSE CURVE target ⇒ `[]` (W3 P3 — see the inline citation)
  *   - abort ⇒ `[]` if any target's entity is missing from `entities`
  *     (cpp:84-90: `if (!entity) return result;`)
  *   - 1 target  (cpp:92-107): line → Horizontal, Vertical; point → Fixed;
@@ -224,6 +226,16 @@ export function evaluateApplicability(
 
   const count = deduped.length;
   if (count === 0) return [];
+
+  // An ELLIPSE CURVE anywhere in the selection kills the whole set (W3 P3, legacy
+  // parity). `worker/tests/prototypes/proto_sketch_constraint_applicability.cpp:62-67`
+  // asserts point+ellipse has NO applicable constraints — not even the OnCurve a
+  // point+circle gets — so the legacy matrix never treats an ellipse as a curve or
+  // as a circular. Bailing on the whole selection (rather than filtering the
+  // ellipse out) is what keeps a co-selected point from silently falling back to
+  // its single-target constraints. The ellipse's CENTRE is a point target, not an
+  // `ellipse` target, so it is unaffected and keeps full point behavior.
+  if (deduped.some((t) => t.kind === "ellipse")) return [];
 
   const liveIds = new Set(entities.map((e) => e.id));
   for (const t of deduped) if (!liveIds.has(t.entityId)) return [];

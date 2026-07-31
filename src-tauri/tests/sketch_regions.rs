@@ -637,3 +637,85 @@ async fn finish_sketch_mid_gesture_clears_it_so_regions_succeed() {
 
     wm.shutdown().await;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// W3 — ELLIPSE regions. Before this the whole chain was closed by ONE line in
+// the worker's `WireSketch::translate` ("unsupported entity type 'Ellipse'"),
+// even though `LoopDetector` has always tessellated ellipses and `FaceBuilder`
+// has always built a true `Geom_Ellipse` edge for them. Rust's `wire_entity`
+// skipped the variant to match. Both are wired now.
+//
+// Oracle: corpus/cases/i_multiregion_loop_detection.json case `regions_ellipse`
+// — center (0,0), rx 6, ry 3, rotation 0.25 ⇒ 1 region, 0 holes, area > 50
+// (provenance OneCAD-CPP tests/prototypes/proto_loop_detector.cpp:80-94, which
+// asserts only `area() > 50.0`; π·6·3 = 56.549 is the analytic value).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const PE: u128 = 0x120; // ellipse centre
+const ELL: u128 = 0x400;
+const MAJOR_R: f64 = 6.0;
+const MINOR_R: f64 = 3.0;
+const ROTATION: f64 = 0.25; // radians on the wire
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_standalone_ellipse_publishes_one_region_matching_the_corpus_oracle() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    let sid = SketchId(Uuid::from_u128(0x9E30));
+    let mut sk = Sketch::on_world_plane(sid, "Ellipse", WorldPlane::XY);
+    point(&mut sk, PE, 0.0, 0.0);
+    sk.add_entity(
+        SketchEntity::ellipse(eid(ELL), eid(PE), MAJOR_R, MINOR_R, ROTATION, false)
+            .expect("ellipse"),
+    )
+    .unwrap();
+
+    rt.apply(EditCommand::AddSketch {
+        sketch: Sketch::on_world_plane(sid, "Ellipse", WorldPlane::XY),
+    })
+    .expect("AddSketch");
+    rt.enter_sketch(sid).await.expect("enter_sketch");
+    let upsert = rt
+        .sketch_upsert(sid, edit_ops(&sk))
+        .await
+        .expect("an ellipse now survives wire translation");
+    // SCHEMA §7.4 deviation: the solver lane cannot represent an ellipse, so DOF
+    // is counted naively. 7 = the core centre Point (2, sent as its own wire
+    // `Point` entity) + the centre the worker mints from the inlined `center`
+    // (2) + the ellipse's own shape DOF (3). The double-minted centre is the
+    // EXISTING Circle/Arc behavior verbatim (`centerRef` exists precisely so the
+    // frontend can re-own the real one) — the ellipse does not introduce it.
+    assert_eq!(
+        upsert.dof, 7,
+        "naive DOF for a free ellipse authored through core"
+    );
+
+    let regions = rt.finish_sketch(sid).await.expect("finish_sketch").regions;
+    assert_eq!(
+        regions.len(),
+        1,
+        "a standalone closed ellipse is exactly ONE selectable cell, got {regions:#?}"
+    );
+    assert!(regions[0].holes.is_empty(), "the ellipse cell has no holes");
+
+    let tris = regions[0]
+        .preview_triangles
+        .as_ref()
+        .expect("the ellipse region carries a preview fill");
+    let got = fill_area(tris);
+    let analytic = std::f64::consts::PI * MAJOR_R * MINOR_R; // 56.549
+    eprintln!("ellipse fill area = {got:.4} (analytic {analytic:.4})");
+    assert!(got > 50.0, "corpus oracle: area > 50.0, got {got:.4}");
+    assert!(
+        (got - analytic).abs() / analytic < 0.01,
+        "fill area {got:.4} within 1% of π·a·b = {analytic:.4} \
+         (the fill is a tessellation, hence the band)"
+    );
+
+    wm.shutdown().await;
+}

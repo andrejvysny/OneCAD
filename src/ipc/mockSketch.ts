@@ -14,6 +14,7 @@ import type {
   SketchRegion,
   SketchSolveStatus,
 } from "./types";
+import { ellipseParams, sampleEllipse } from "@/tools/sketch/ellipseMath";
 
 // ── Canonical planes — SCHEMA §7.3 EXACT bases (non-standard XY basis) ───────
 
@@ -46,6 +47,8 @@ export function entityFreedom(e: SketchEntity): number {
       return 4; // 2 endpoints
     case "Circle":
       return 3; // center (2) + radius (1)
+    case "Ellipse":
+      return 5; // center (2) + majorR + minorR + rotation (3)
     case "Arc":
       return 5; // center (2) + radius (1) + 2 sweep angles
     default:
@@ -88,17 +91,21 @@ export function solveDof(
 
 // ── Region detection (MOCK — single closed loop, or circles) ─────────────────
 //
-// LIMITS: detects (a) each Circle as its own region and (b) a SINGLE closed loop
-// of lines/arcs (every vertex degree 2, connected). No self-intersection
-// handling. The real worker computes proper regions via LoopDetector
-// (SCHEMA §7.4 SketchRegions). regionId here is a mock hash, NOT the normative
-// FNV-1a-64 over 16-byte UUIDs the worker/Rust agree on.
+// LIMITS: detects (a) each SELF-CLOSED curve (Circle or Ellipse) as its own
+// region and (b) a SINGLE closed loop of lines/arcs (every vertex degree 2,
+// connected). No self-intersection handling. The real worker computes proper
+// regions via LoopDetector (SCHEMA §7.4 SketchRegions). regionId here is a mock
+// hash, NOT the normative FNV-1a-64 over 16-byte UUIDs the worker/Rust agree on.
 //
-// NESTING (mock subset): a Circle whose disc lies wholly INSIDE the closed loop
-// creates TWO selectable planar cells: the circle disc, plus the enclosing loop
-// with the circle as a hole. This matches CAD profile semantics: clicking the
-// disc extrudes a cylinder; clicking the surrounding material extrudes a tube.
-// A circle that is separated from, or crosses, the loop stays its own region.
+// NESTING (mock subset): a self-closed curve whose interior lies wholly INSIDE
+// the closed loop creates TWO selectable planar cells: the disc, plus the
+// enclosing loop with it as a hole. This matches CAD profile semantics: clicking
+// the disc extrudes a cylinder; clicking the surrounding material extrudes a
+// tube. One that is separated from, or crosses, the loop stays its own region.
+//
+// An Ellipse is treated exactly like a Circle here (W3 P3): it is closed, its
+// sampled polygon has area πab, and it is star-shaped about its centre — the two
+// properties the fill + nesting code actually depend on.
 
 const QUANT = 1e6; // 1e-6 endpoint-match tolerance
 const key = (p: [number, number]): string =>
@@ -333,19 +340,46 @@ function annulusTriangles(
   return { positions, indices };
 }
 
-/** Fan-triangulate a circle into plane-local (u,v) preview tris. */
-function circleTriangles(center: [number, number], radius: number, segments = 32): {
+/** Fan-triangulate a closed ring about an interior `center` into plane-local
+ *  (u,v) preview tris. Valid for any ring star-shaped about that centre — true
+ *  for both a sampled circle and a sampled ellipse. */
+function fanTriangles(center: [number, number], ring: [number, number][]): {
   positions: number[];
   indices: number[];
 } {
   const positions = [center[0], center[1]];
-  for (let i = 0; i < segments; i++) {
-    const a = (i / segments) * Math.PI * 2;
-    positions.push(center[0] + radius * Math.cos(a), center[1] + radius * Math.sin(a));
-  }
+  for (const p of ring) positions.push(p[0], p[1]);
   const indices: number[] = [];
-  for (let i = 0; i < segments; i++) indices.push(0, 1 + i, 1 + ((i + 1) % segments));
+  for (let i = 0; i < ring.length; i++) indices.push(0, 1 + i, 1 + ((i + 1) % ring.length));
   return { positions, indices };
+}
+
+/**
+ * A SELF-CLOSED curve entity (Circle or Ellipse) — one that bounds a cell all by
+ * itself, unlike a line/arc which only closes a loop with its neighbours.
+ * `reach` is the largest distance from `center` to the curve (radius / semi-major):
+ * the conservative clearance used by the nesting test.
+ */
+interface ClosedCurve {
+  entity: SketchEntity;
+  center: [number, number];
+  polygon: [number, number][];
+  reach: number;
+}
+
+function closedCurveOf(e: SketchEntity): ClosedCurve | null {
+  if (e.type === "Circle") {
+    if (!e.center || !e.radius) return null;
+    return { entity: e, center: e.center, polygon: circlePolygon(e.center, e.radius), reach: e.radius };
+  }
+  if (e.type === "Ellipse") {
+    const p = ellipseParams(e);
+    if (!p || p.majorR <= 0 || p.minorR <= 0) return null;
+    // 32 samples, matching `circlePolygon` — the fill/containment resolution the
+    // rest of this mock is tuned for (the RENDERER samples at 72; this is fill only).
+    return { entity: e, center: p.center, polygon: sampleEllipse(p, 32), reach: p.majorR };
+  }
+  return null;
 }
 
 export function detectRegions(entities: SketchEntity[]): SketchRegion[] {
@@ -353,44 +387,45 @@ export function detectRegions(entities: SketchEntity[]): SketchRegion[] {
   const live = entities.filter((e) => !e.construction);
   const loop = orderedClosedLoop(live);
 
-  // A circle wholly inside the closed loop is both a selectable disc cell and a
-  // hole boundary of the enclosing cell. "Wholly inside" = centre inside AND
-  // the disc clear of the boundary, so a crossing circle stays independent.
-  const holeEntities: SketchEntity[] = [];
-  const freeCircles: SketchEntity[] = [];
+  // A self-closed curve (circle OR ellipse) wholly inside the closed loop is both a
+  // selectable disc cell and a hole boundary of the enclosing cell. "Wholly inside"
+  // = centre inside AND the whole curve clear of the boundary, so a crossing one
+  // stays independent. `reach` (radius / semi-major) makes that clearance test
+  // conservative for a rotated ellipse without sampling the boundary distance.
+  const holes: ClosedCurve[] = [];
+  const free: ClosedCurve[] = [];
   for (const e of live) {
-    if (e.type !== "Circle" || !e.center || !e.radius) continue;
+    const curve = closedCurveOf(e);
+    if (!curve) continue;
     const nested =
       loop !== null &&
-      pointInPolygon(e.center, loop.points) &&
-      distanceToBoundary(e.center, loop.points) > e.radius;
-    (nested ? holeEntities : freeCircles).push(e);
+      pointInPolygon(curve.center, loop.points) &&
+      distanceToBoundary(curve.center, loop.points) > curve.reach;
+    (nested ? holes : free).push(curve);
   }
 
-  for (const e of [...freeCircles, ...holeEntities]) {
+  for (const c of [...free, ...holes]) {
     regions.push({
-      regionId: mockRegionId([e.id]),
-      outerLoop: [e.id],
+      regionId: mockRegionId([c.entity.id]),
+      outerLoop: [c.entity.id],
       holes: [],
-      previewTriangles: { ...circleTriangles(e.center!, e.radius!), holesSubtracted: 0 },
+      previewTriangles: { ...fanTriangles(c.center, c.polygon), holesSubtracted: 0 },
     });
   }
 
-  if (loop && holeEntities.length <= 1) {
+  if (loop && holes.length <= 1) {
     // MOCK LIMIT: annulusTriangles supports one hole. With multiple holes, omit
     // the enclosing cell instead of publishing fill geometry for different
     // material than the declared profile.
-    const first = holeEntities[0];
+    const first = holes[0];
     regions.push({
       // A cell's identity includes its material boundary, not only its outer
       // wire. Adding/removing a hole must invalidate an armed profile.
-      regionId: mockRegionId([...loop.ids, ...holeEntities.map((hole) => hole.id)]),
+      regionId: mockRegionId([...loop.ids, ...holes.map((hole) => hole.entity.id)]),
       outerLoop: loop.ids,
-      holes: holeEntities.map((h) => [h.id]),
+      holes: holes.map((h) => [h.entity.id]),
       previewTriangles: {
-        ...(first
-          ? annulusTriangles(loop.points, circlePolygon(first.center!, first.radius!))
-          : polygonTriangles(loop.points)),
+        ...(first ? annulusTriangles(loop.points, first.polygon) : polygonTriangles(loop.points)),
         holesSubtracted: first ? 1 : 0,
       },
     });

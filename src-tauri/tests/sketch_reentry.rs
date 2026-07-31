@@ -456,3 +456,101 @@ async fn sketch_reentry_angle_is_radians() {
 
     wm.shutdown().await;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// W3 — an ELLIPSE survives a full re-entry round trip.
+//
+// Same BUG-5 ownership contract as circle/arc: the re-entry wire carries the
+// ellipse's `centerRef` (its backend center-point uuid) alongside the inlined
+// `center`, so hydration re-owns the child Point instead of leaking a stray one,
+// and the center stays draggable through the gesture verbs. The three shape
+// scalars (`majorR`/`minorR`/`rotation`) ride back verbatim — an ellipse is not
+// registered with PlaneGCS, so nothing may silently rewrite them.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const ESID: u128 = 0x5e50;
+const ECENTER: u128 = 0x140; // ellipse center (12,8) ← dragged
+const ELL: u128 = 0x230;
+
+fn ellipse_reentry_sketch(sid: SketchId) -> Sketch {
+    let mut sk = Sketch::on_world_plane(sid, "EllipseReEntry", WorldPlane::XY);
+    sk.add_entity(SketchEntity::point(
+        eid(ECENTER),
+        Vec2::new_unchecked(12.0, 8.0),
+        false,
+        false,
+    ))
+    .unwrap();
+    sk.add_entity(
+        SketchEntity::ellipse(eid(ELL), eid(ECENTER), 6.0, 3.0, 0.25, false).expect("ellipse"),
+    )
+    .unwrap();
+    sk
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ellipse_reentry_carries_center_ref_and_drags() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    let sid = SketchId(Uuid::from_u128(ESID));
+    rt.apply(EditCommand::AddSketch {
+        sketch: Sketch::on_world_plane(sid, "EllipseReEntry", WorldPlane::XY),
+    })
+    .expect("AddSketch");
+    rt.enter_sketch(sid).await.expect("enter_sketch");
+    rt.sketch_upsert(sid, edit_ops(&ellipse_reentry_sketch(sid)))
+        .await
+        .expect("sketch_upsert (build) — an ellipse now survives wire translation");
+
+    // ── EXIT + RE-ENTER: ownership + shape scalars ride back. ───────────────────
+    let session = rt.enter_sketch(sid).await.expect("re-enter_sketch");
+    let ell_id = eid(ELL).to_string();
+    let ell = entity_by_id(&session.entities, &ell_id).expect("ellipse on re-entry");
+    assert_eq!(ell["type"], "Ellipse");
+    assert_eq!(
+        ell["centerRef"].as_str(),
+        Some(eid(ECENTER).to_string().as_str()),
+        "BUG-5 parity: the re-entry ellipse carries its center point uuid"
+    );
+    assert_eq!(xy(&ell["center"]), [12.0, 8.0]);
+    assert_eq!(ell["majorR"].as_f64(), Some(6.0));
+    assert_eq!(ell["minorR"].as_f64(), Some(3.0));
+    assert_eq!(
+        ell["rotation"].as_f64(),
+        Some(0.25),
+        "rotation crosses the wire in RADIANS, unrewritten"
+    );
+    assert!(
+        point_ids(&session.entities).contains(&eid(ECENTER).to_string()),
+        "the center Point rides on the wire so hydration can re-own it"
+    );
+
+    // ── DRAG the center by its Point uuid — the ELLIPSE relocates. ──────────────
+    drag(&mut rt, sid, eid(ECENTER), [30.0, 22.0]).await;
+    let after = rt.enter_sketch(sid).await.expect("re-enter after drag");
+    let moved = entity_by_id(&after.entities, &ell_id).expect("ellipse after drag");
+    let now = xy(&moved["center"]);
+    assert!(
+        (now[0] - 30.0).abs() < 1.0 && (now[1] - 22.0).abs() < 1.0,
+        "dragging the center relocated the ELLIPSE to ~(30,22), got {now:?}"
+    );
+    assert_eq!(
+        moved["centerRef"].as_str(),
+        Some(eid(ECENTER).to_string().as_str()),
+        "ownership survives the drag"
+    );
+    // The drag must not perturb the shape — the gesture only moves the center.
+    assert_eq!(moved["majorR"].as_f64(), Some(6.0));
+    assert_eq!(moved["minorR"].as_f64(), Some(3.0));
+    assert_eq!(moved["rotation"].as_f64(), Some(0.25));
+
+    eprintln!(
+        "ELLIPSE RE-ENTRY PASS: centerRef preserved, center dragged to {now:?}, shape intact"
+    );
+    wm.shutdown().await;
+}

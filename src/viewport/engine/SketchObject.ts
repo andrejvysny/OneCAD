@@ -28,6 +28,7 @@ import { palette } from "./palette";
 import { RENDER_ORDER } from "./renderOrder";
 import { planeBasisMatrix, worldToPlanePoint } from "./sketchBasis";
 import type { DraftEntity } from "@/tools/sketch/toolMachine";
+import { ellipseParams, sampleEllipse } from "@/tools/sketch/ellipseMath";
 
 const ARC_SEGMENTS = 64;
 const LINE_WIDTH = 2;
@@ -43,8 +44,24 @@ export function entityPolyline(e: {
   radius?: number;
   start?: [number, number];
   end?: [number, number];
+  majorR?: number;
+  minorR?: number;
+  rotation?: number;
 }): number[] {
   if (e.type === "Line" && e.p0 && e.p1) return [e.p0[0], e.p0[1], 0, e.p1[0], e.p1[1], 0];
+  if (e.type === "Ellipse") {
+    // Sampled parametric polyline, CLOSED (the first sample is repeated last) so the
+    // Line2 strip meets itself — same shape as the Circle branch above.
+    const params = ellipseParams(e);
+    if (!params) return [];
+    const ring = sampleEllipse(params);
+    const out: number[] = [];
+    for (let i = 0; i <= ring.length; i++) {
+      const p = ring[i % ring.length];
+      out.push(p[0], p[1], 0);
+    }
+    return out;
+  }
   if (e.type === "Circle" && e.center && e.radius !== undefined) {
     const out: number[] = [];
     for (let i = 0; i <= ARC_SEGMENTS; i++) {
@@ -74,7 +91,7 @@ function entityMarkers(e: SketchEntity): number[] {
   if (e.type === "Line") {
     add(e.p0);
     add(e.p1);
-  } else if (e.type === "Circle") {
+  } else if (e.type === "Circle" || e.type === "Ellipse") {
     add(e.center);
   } else if (e.type === "Arc") {
     add(e.center);
@@ -219,6 +236,9 @@ export class SketchObject {
         radius: d.radius,
         start: d.start ? [d.start.x, d.start.y] : undefined,
         end: d.end ? [d.end.x, d.end.y] : undefined,
+        majorR: d.majorR,
+        minorR: d.minorR,
+        rotation: d.rotation,
       });
       if (positions.length < 6) continue;
       const line = this.buildLine(positions, d.construction ? this.matConstruction : this.matPreview);
@@ -240,6 +260,9 @@ export class SketchObject {
         radius: draft.radius,
         start: draft.start ? [draft.start.x, draft.start.y] : undefined,
         end: draft.end ? [draft.end.x, draft.end.y] : undefined,
+        majorR: draft.majorR,
+        minorR: draft.minorR,
+        rotation: draft.rotation,
       });
       if (positions.length >= 6) {
         const line = this.buildLine(positions, this.matTrimGhost);

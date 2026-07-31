@@ -135,3 +135,35 @@ describe("shouldApplyDrag", () => {
     expect(shouldApplyDrag(0, undefined)).toBe(false);
   });
 });
+
+// ── W3 P3: an Ellipse's CENTRE is a real drag handle ─────────────────────────
+
+describe("isDraggableHandle / dragIntent — Ellipse", () => {
+  const ell: SketchEntity = {
+    id: "el1",
+    type: "Ellipse",
+    center: [5, 5],
+    majorR: 10,
+    minorR: 3,
+    rotation: 0,
+  };
+
+  it("Center is draggable; nothing else is", () => {
+    expect(isDraggableHandle("Ellipse", "Center")).toBe(true);
+    expect(isDraggableHandle("Ellipse", "Start")).toBe(false);
+    expect(isDraggableHandle("Ellipse", "End")).toBe(false);
+    expect(isDraggableHandle("Ellipse", "Midpoint")).toBe(false);
+    expect(isDraggableHandle("Ellipse", undefined)).toBe(false);
+  });
+
+  it("a Center hit arms a drag with the `<id>.Center` point ref", () => {
+    expect(dragIntent({ entityId: "el1", point: "Center" }, [ell])).toEqual({
+      sel: { entityId: "el1", point: "Center" },
+      pointRef: "el1.Center",
+    });
+  });
+
+  it("a BODY hit is click-select, never a drag", () => {
+    expect(dragIntent({ entityId: "el1" }, [ell])).toBeNull();
+  });
+});

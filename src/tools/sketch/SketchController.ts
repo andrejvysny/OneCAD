@@ -86,6 +86,7 @@ const CURSOR_BY_TOOL: Record<string, string> = {
   rect: "crosshair",
   centerRect: "crosshair",
   circle: "crosshair",
+  ellipse: "crosshair",
   arc: "crosshair",
   polygon: "crosshair",
   slot: "crosshair",

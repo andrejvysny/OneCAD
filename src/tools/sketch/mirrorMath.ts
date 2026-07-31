@@ -14,6 +14,13 @@
  *            center + angles (not draggable solver points; see selectGesture's
  *            `isDraggableHandle`), so there is no point id to make symmetric — a
  *            documented V1 seam, matching sketchWireMap's arc-endpoint limitation.
+ *   Ellipse → Ellipse COPY ONLY — follows the Arc precedent. Its centre IS a real
+ *            wire point, but Symmetric alone would not hold the copy mirrored: the
+ *            solver has no constraint that ties two ellipses' ROTATIONS (an Equal on
+ *            an ellipse pair is not offered — the ellipse curve takes no constraints
+ *            at all, see constraintApplicability.ts). Authoring only the centre
+ *            Symmetric would produce a copy that drifts out of mirror on the first
+ *            solve, which is worse than an honest unconstrained copy.
  *
  * ── Winding ──────────────────────────────────────────────────────────────────────
  * Frontend arcs sweep CCW from `start` to `end` (snapEngine.arcContainsAngle /
@@ -28,6 +35,7 @@
  * commit) so this module stays free of store access and is unit-tested by data.
  */
 import type { SketchConstraint, SketchEntity } from "@/ipc/types";
+import { normalizeEllipse } from "./ellipseMath";
 
 export type XY = [number, number];
 
@@ -123,6 +131,32 @@ export function mirrorEntity(
           ...construction,
         },
         constraints: [], // arc endpoints aren't solver handles — copy only (V1 seam)
+      };
+    }
+    case "Ellipse": {
+      if (!src.center || src.majorR === undefined || src.minorR === undefined) return null;
+      const id = m.entityId();
+      // Reflecting across an axis at angle φ maps a direction at angle θ to 2φ−θ, so
+      // the mirrored major axis points at 2φ − rotation. Radii are unchanged (a
+      // reflection is an isometry); `normalizeEllipse` folds the result back into
+      // [0, 2π) — no swap can trigger here since major ≥ minor is preserved.
+      // A degenerate axis reflects to identity (see `reflectPoint`) — keep the
+      // rotation untouched there rather than folding it through a meaningless φ=0.
+      const degenerate = Math.hypot(b[0] - a[0], b[1] - a[1]) < 1e-6;
+      const phi = Math.atan2(b[1] - a[1], b[0] - a[0]);
+      const rot = degenerate ? (src.rotation ?? 0) : 2 * phi - (src.rotation ?? 0);
+      const mirrored = normalizeEllipse(src.majorR, src.minorR, rot);
+      return {
+        entity: {
+          id,
+          type: "Ellipse",
+          center: R(src.center),
+          majorR: mirrored.majorR,
+          minorR: mirrored.minorR,
+          rotation: mirrored.rotation,
+          ...construction,
+        },
+        constraints: [], // no constraint ties two ellipses' rotations — copy only
       };
     }
     default:

@@ -1983,3 +1983,140 @@ async fn nested_inner_disk_parity_and_reopen_stability() {
     wm.shutdown().await;
     wm2.shutdown().await;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// W3 — extruding an ELLIPSE profile end to end.
+//
+// The whole chain (Rust `wire_entity` → worker `WireSketch::translate` →
+// `LoopDetector` → `FaceBuilder` → `BRepPrimAPI_MakePrism`) now carries an
+// ellipse. The proof that the boundary is a TRUE `Geom_Ellipse` and not the
+// planarized chord polygon is the FACE COUNT: an analytic elliptical prism has
+// exactly three faces (bottom cap, top cap, one lateral surface). A chord
+// approximation would publish one planar lateral face per tessellation segment.
+//
+// Analytic volume: area(ellipse) · height = π·a·b·h = π·6·3·10 = 565.4867.
+// (Provenance: the ellipse area formula; the corpus `regions_ellipse` case only
+// pins area > 50 — corpus/cases/i_multiregion_loop_detection.json.)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const ELL_MAJOR_R: f64 = 6.0;
+const ELL_MINOR_R: f64 = 3.0;
+const ELL_HEIGHT: f64 = 10.0;
+
+/// A single free ellipse (centre point + ellipse) — one closed curve, one region.
+fn ellipse_sketch(sid: SketchId, base: u128, cx: f64, cy: f64) -> Sketch {
+    let e = |n: u128| EntityId(Uuid::from_u128(base + n));
+    let mut sk = Sketch::on_world_plane(sid, "Ellipse", WorldPlane::XY);
+    sk.add_entity(SketchEntity::point(
+        e(0),
+        Vec2::new_unchecked(cx, cy),
+        false,
+        false,
+    ))
+    .unwrap();
+    sk.add_entity(
+        SketchEntity::ellipse(e(0x10), e(0), ELL_MAJOR_R, ELL_MINOR_R, 0.25, false)
+            .expect("ellipse"),
+    )
+    .unwrap();
+    sk
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn extrude_of_a_pure_ellipse_loop_is_analytic() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    let se = SketchId(Uuid::from_u128(0xE1));
+    add_op(
+        &mut rt,
+        sketch_record(SKETCH_A, &ellipse_sketch(se, 0x3000, 0.0, 0.0)),
+    );
+    add_op(
+        &mut rt,
+        extrude_record(EXTRUDE_A, se, ELL_HEIGHT, BooleanMode::NewBody, None),
+    );
+
+    let report = regen_all(&mut rt).await;
+    let snap = published(&report, "ellipse extrude");
+    assert_eq!(snap.bodies.len(), 1, "one NewBody from the ellipse profile");
+
+    // FINE lod: the mesh is a chord tessellation of the analytic lateral surface
+    // and always UNDER-estimates a convex solid, so the coarse tier lands ~2.5%
+    // low. The fine tier is what makes a 1% analytic band meaningful.
+    let mesh = rt
+        .get_mesh(body_of(EXTRUDE_A), Lod::Fine, None)
+        .await
+        .expect("fetch fine ellipse mesh");
+    let view = validate_mesh_blob(&mesh).expect("ellipse prism MESH1 validates");
+
+    // A PURE (unfragmented) ellipse loop builds analytic geometry — three faces,
+    // not 2 + one-per-chord. This is what separates it from the §7.4 V1
+    // intersection-fragment limitation.
+    assert_eq!(
+        view.face_count, 3,
+        "an analytic elliptical prism has 3 faces (2 caps + 1 lateral); a chord \
+         polygon would publish one lateral face per segment"
+    );
+
+    let vol = mesh_volume(&view, &mesh);
+    let analytic = std::f64::consts::PI * ELL_MAJOR_R * ELL_MINOR_R * ELL_HEIGHT;
+    assert!(
+        (vol - analytic).abs() / analytic < 0.01,
+        "ellipse prism volume {vol} within 1% of π·a·b·h = {analytic} \
+         (the MESH is a tessellation of the analytic surface, hence the band)"
+    );
+
+    // Extent from the VERTEX buffer, not `view.bbox_*` — the header box comes from
+    // `BRepBndLib::Add`, which inflates by OCCT's gap, so it cannot pin a dimension.
+    let pos = view.section(SEC_POSITIONS).expect("POSITIONS");
+    let pbase = pos.offset as usize;
+    let mut lo = [f64::MAX; 3];
+    let mut hi = [f64::MIN; 3];
+    for i in 0..view.vertex_count as usize {
+        let v = vertex(&mesh, pbase, i);
+        for axis in 0..3 {
+            lo[axis] = lo[axis].min(v[axis]);
+            hi[axis] = hi[axis].max(v[axis]);
+        }
+    }
+    assert!(
+        (hi[2] - lo[2] - ELL_HEIGHT).abs() < 1e-4,
+        "the prism is exactly {ELL_HEIGHT} tall, got {}",
+        hi[2] - lo[2]
+    );
+    // A rotated ellipse spans 2·√(a²sin²θ + b²cos²θ) along one plane axis and
+    // 2·√(a²cos²θ + b²sin²θ) along the other — the proof that `rotation` really
+    // crossed the wire and reached `gp_Elips`'s major direction. (Sketch user X
+    // maps to world Y on the non-standard XY basis, hence the axis pairing.)
+    let (cos_r, sin_r) = (0.25f64.cos(), 0.25f64.sin());
+    let across =
+        2.0 * (ELL_MAJOR_R.powi(2) * sin_r.powi(2) + ELL_MINOR_R.powi(2) * cos_r.powi(2)).sqrt();
+    let along =
+        2.0 * (ELL_MAJOR_R.powi(2) * cos_r.powi(2) + ELL_MINOR_R.powi(2) * sin_r.powi(2)).sqrt();
+    assert!(
+        (hi[0] - lo[0] - across).abs() / across < 0.01,
+        "world-X span {} vs rotated-ellipse {across} (rotation 0.25 rad reached the kernel)",
+        hi[0] - lo[0]
+    );
+    assert!(
+        (hi[1] - lo[1] - along).abs() / along < 0.01,
+        "world-Y span {} vs rotated-ellipse {along}",
+        hi[1] - lo[1]
+    );
+    // Sanity that this is not a circle in disguise: the two spans differ.
+    assert!(
+        (along - across).abs() > 1.0,
+        "the profile is genuinely elliptical (spans {along} vs {across})"
+    );
+
+    wm.shutdown().await;
+    eprintln!(
+        "ellipse extrude PASS: volume {vol:.4} == π·6·3·10 ({analytic:.4}), faces {} (analytic)",
+        view.face_count
+    );
+}

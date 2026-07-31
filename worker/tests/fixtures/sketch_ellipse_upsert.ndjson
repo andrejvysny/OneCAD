@@ -1,0 +1,14 @@
+# Ellipse on the solver lane (SCHEMA §7.3 entity shape, §7.4 naive-DOF deviation).
+# The wire carries the ellipse's center INLINE (like Circle) plus majorR/minorR/
+# rotation; the worker mints the center Point itself and registers `<id>.center`.
+# DOF comes from NAIVE counting, not PlaneGCS: SolverAdapter deliberately skips
+# ellipses (legacy parity), so `Sketch::hasSolverUnsupportedEntities()` routes
+# `getDegreesOfFreedom()` to `naiveDegreesOfFreedom()` — ellipse 3 + center 2.
+#   (a) lone ellipse            => dof 5, UnderConstrained
+#   (b) + Fixed on `el.center`  => dof 3 (Fixed removes both center DOF)
+# Consume the unsolicited hello (SCHEMA §6) first.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"SketchUpsert","args":{"sketchId":"el","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Ellipse","center":[0,0],"majorR":6.0,"minorR":3.0,"rotation":0.25,"construction":false}],"constraints":[]}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"seq":"$any","result":{"upserted":true,"sketchId":"el","sketchRevision":1,"dof":5,"state":"UnderConstrained","conflicting":[]}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"SketchUpsert","args":{"sketchId":"el","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Ellipse","center":[0,0],"majorR":6.0,"minorR":3.0,"rotation":0.25,"construction":false}],"constraints":[{"id":"cF","type":"Fixed","entities":["e1"],"positions":["center"]}]}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"result":{"upserted":true,"sketchId":"el","sketchRevision":2,"dof":3,"state":"UnderConstrained","conflicting":[]}}}

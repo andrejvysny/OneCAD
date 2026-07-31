@@ -12,6 +12,7 @@ import {
   type DimStep,
 } from "./dimensionTool";
 import type { SketchEntity } from "@/ipc/types";
+import { hitTestSketch } from "./sketchHitTest";
 
 const line = (id: string, p0: [number, number], p1: [number, number]): DimPick => ({ on: "line", id, p0, p1 });
 const circle = (id: string, center: [number, number], radius: number): DimPick => ({ on: "circle", id, center, radius });
@@ -190,5 +191,43 @@ describe("pickDimensionTarget", () => {
 
   it("returns null when nothing is within tolerance", () => {
     expect(pickDimensionTarget({ x: 500, y: 500 }, entities, 5)).toBeNull();
+  });
+});
+
+// ── W3 P3: an ellipse CURVE offers no dimension; its CENTRE behaves normally ──
+
+describe("pickDimensionTarget — Ellipse", () => {
+  const entities: SketchEntity[] = [
+    { id: "el1", type: "Ellipse", center: [0, 0], majorR: 20, minorR: 5, rotation: 0 },
+    { id: "p1", type: "Point", p0: [50, 0] },
+  ];
+
+  it("a click on the CURVE resolves to no pick — never a Radius/Diameter", () => {
+    // The hit-test DOES resolve the body (hover/selection work); the dimension
+    // tool simply has no ellipse dimension to offer, so the pick is dropped.
+    expect(hitTestSketch({ x: 20.2, y: 0 }, entities, 1)).toEqual({ entityId: "el1" });
+    expect(pickDimensionTarget({ x: 20.2, y: 0 }, entities, 1)).toBeNull();
+  });
+
+  it("a click on the CENTRE resolves to a normal point pick", () => {
+    expect(pickDimensionTarget({ x: 0.2, y: 0 }, entities, 2)).toEqual({
+      on: "point",
+      id: "el1",
+      position: "Center",
+      coord: [0, 0],
+    });
+  });
+
+  it("the centre can partner a second point into a Distance", () => {
+    let s = dimensionInit();
+    s = dimensionStep(s, { kind: "pick", target: pickDimensionTarget({ x: 0, y: 0 }, entities, 2)! }).state;
+    s = dimensionStep(s, { kind: "pick", target: pickDimensionTarget({ x: 50, y: 0 }, entities, 2)! }).state;
+    expect(s.ready).toEqual({
+      kind: "Distance",
+      entities: ["el1", "p1"],
+      positions: ["Center", "Start"],
+      value: 50,
+      anchor: { x: 25, y: 0 },
+    });
   });
 });

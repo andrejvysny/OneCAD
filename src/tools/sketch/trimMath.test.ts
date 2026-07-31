@@ -263,3 +263,42 @@ describe("trimPreview / entityToDraft", () => {
     near(cd.center, 1, 2);
   });
 });
+
+// ── W3 P3: an ellipse is never parametrically trimmed (whole-DELETE) ─────────
+//
+// Legacy parity: `OneCAD-CPP/src/core/sketch/tools/TrimTool.cpp:298-299` routes
+// `EntityType::Ellipse` straight to `sketch.removeEntity(entityId)`. Here the
+// signal is `trimPieces === null`, which the service's trim path already reads as
+// "nothing to trim → whole-entity delete" (sketchService.trimEntityNow).
+
+describe("trimPieces — Ellipse whole-delete fallback", () => {
+  const ell: SketchEntity = {
+    id: "el1",
+    type: "Ellipse",
+    center: [0, 0],
+    majorR: 20,
+    minorR: 5,
+    rotation: 0,
+  };
+
+  it("returns null even when a line crosses it twice", () => {
+    const crossing: SketchEntity = { id: "l1", type: "Line", p0: [0, -50], p1: [0, 50] };
+    expect(trimPieces(ell, { x: 20, y: 0 }, [crossing], { minSize: 0.1 })).toBeNull();
+    expect(trimPreview(ell, { x: 20, y: 0 }, [crossing], { minSize: 0.1 })).toBeNull();
+  });
+
+  it("an ellipse never cuts OTHER entities either (no ellipse×line crossings)", () => {
+    const l: SketchEntity = { id: "l1", type: "Line", p0: [-50, 0], p1: [50, 0] };
+    expect(trimPieces(l, { x: 0, y: 0 }, [ell], { minSize: 0.1 })).toBeNull();
+  });
+
+  it("entityToDraft carries the ellipse fields so the doomed ghost renders", () => {
+    expect(entityToDraft(ell)).toEqual({
+      type: "Ellipse",
+      center: { x: 0, y: 0 },
+      majorR: 20,
+      minorR: 5,
+      rotation: 0,
+    });
+  });
+});

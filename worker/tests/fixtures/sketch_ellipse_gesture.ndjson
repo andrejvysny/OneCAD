@@ -1,0 +1,15 @@
+# Dragging an ellipse's center through the gesture verbs (SCHEMA §7.4). The wire
+# ellipse owns no Point entity of its own — WireSketch mints one and registers
+# `<id>.center` as its PRIMARY handle (the Circle/Arc contract), which is exactly
+# what makes the center addressable as a drag `pointId` and what the position
+# echo keys on. Without the primary registration the drag would resolve nothing
+# (REF_UNRESOLVED) or echo an unaddressable internal uuid.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"SketchUpsert","args":{"sketchId":"eg","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Ellipse","center":[0,0],"majorR":6.0,"minorR":3.0,"rotation":0.0}],"constraints":[]}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"upserted":true,"sketchRevision":1,"dof":5}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"BeginGesture","args":{"sketchId":"eg","sketchRevision":1,"gestureId":9,"drag":{"pointId":"e1.center"}}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"result":{"gestureId":9,"ready":true}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"SolveDrag","args":{"gestureId":9,"seq":1,"pointId":"e1.center","target":[4,7]}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"result":{"gestureId":9,"seq":1,"status":"success","dof":5,"positions":{"e1.center":[4.0,7.0]}}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"EndGesture","args":{"gestureId":9}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"gestureId":9,"status":"success","sketchRevision":2,"positions":{"e1.center":[4.0,7.0]}}}}

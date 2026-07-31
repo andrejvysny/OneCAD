@@ -31,7 +31,8 @@
  * SketchController.planeMarqueeRect and its AABB approximation note).
  */
 import type { SketchEntity } from "@/ipc/types";
-import { arcQuadrantPoints, entityIntersections } from "./snapEngine";
+import { arcQuadrantPoints, entityIntersections, segSegIntersection } from "./snapEngine";
+import { ellipseExtents, ellipseParams, sampleEllipse } from "./ellipseMath";
 
 export type MarqueeMode = "window" | "crossing";
 
@@ -81,6 +82,8 @@ export function rectContains(rect: MarqueeRect, p: readonly [number, number]): b
  *   - Point  → its position,
  *   - Line   → both endpoints,
  *   - Circle → the two opposite corners of its `center ± radius` bbox,
+ *   - Ellipse → the two opposite corners of its ROTATED bbox `center ± (ex, ey)`
+ *     (`ellipseExtents` — the exact support extents, not a sampled approximation),
  *   - Arc    → its endpoints plus the axis extrema that lie ON the sweep.
  * `null` ⇒ the entity is missing the fields it needs and can never be selected.
  */
@@ -97,6 +100,15 @@ function containmentPoints(e: SketchEntity): Array<[number, number]> | null {
       return [
         [cx - r, cy - r],
         [cx + r, cy + r],
+      ];
+    }
+    case "Ellipse": {
+      const p = ellipseParams(e);
+      if (!p) return null;
+      const { ex, ey } = ellipseExtents(p);
+      return [
+        [p.center[0] - ex, p.center[1] - ey],
+        [p.center[0] + ex, p.center[1] + ey],
       ];
     }
     case "Arc": {
@@ -139,9 +151,31 @@ function rectEdges(rect: MarqueeRect): SketchEntity[] {
   }));
 }
 
-/** CROSSING test: a window hit, or the curve meets the rect boundary anywhere. */
+/**
+ * CROSSING test: a window hit, or the curve meets the rect boundary anywhere.
+ *
+ * An Ellipse takes the SAMPLED path — `entityIntersections` has no closed-form
+ * ellipse×line math (deliberately, see `snapEngine.nearestOnCurve`) — testing each
+ * chord of its sampled ring against the same synthetic rect edges. The sampling is
+ * inscribed, so the only error is a rect that clips a sliver strictly between two
+ * adjacent samples and touches no sample point; at 72 segments that sliver is
+ * sub-pixel at any usable zoom.
+ */
 export function crossingTouches(e: SketchEntity, rect: MarqueeRect, edges: SketchEntity[]): boolean {
   if (windowContains(e, rect)) return true;
+  if (e.type === "Ellipse") {
+    const p = ellipseParams(e);
+    if (!p) return false;
+    const ring = sampleEllipse(p);
+    for (let i = 0; i < ring.length; i++) {
+      const a = ring[i];
+      const b = ring[(i + 1) % ring.length];
+      for (const edge of edges) {
+        if (edge.p0 && edge.p1 && segSegIntersection(a, b, edge.p0, edge.p1)) return true;
+      }
+    }
+    return false;
+  }
   return edges.some((edge) => entityIntersections(e, edge).length > 0);
 }
 
