@@ -179,6 +179,12 @@ protected:
     static EntityID generateId();
 
     EntityID m_id;
+    // TRAP: this member default is the OPPOSITE of the wire default (SCHEMA §7.3
+    // `construction` absent ⇒ false). Every Sketch::add* takes an explicit
+    // `construction` argument and calls setConstruction(), so the default is
+    // unreachable on the wire path — but any FUTURE entity built outside add*
+    // would silently default to construction and vanish from every region
+    // (LoopDetector skips isConstruction()). Set it explicitly there.
     bool m_isConstruction = true;  // Default: construction (per SPECIFICATION.md §6.1)
     bool m_isReferenceLocked = false;
 };

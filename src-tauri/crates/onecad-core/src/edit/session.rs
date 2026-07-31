@@ -1370,6 +1370,16 @@ fn apply_sketch_ops(prior: &Sketch, ops: &[SketchEditOp]) -> Result<Sketch, Doma
                     })?;
                 }
             }
+            SketchEditOp::SetEntityConstruction {
+                entity,
+                construction,
+            } => {
+                let e = entities
+                    .iter_mut()
+                    .find(|e| e.id() == *entity)
+                    .ok_or_else(|| DomainError::Validation(format!("entity {entity} not found")))?;
+                *e = entity_with_construction(e, *construction);
+            }
         }
     }
     rebuild_sketch(prior, entities, constraints)
@@ -1519,6 +1529,69 @@ fn entity_with_position(e: &SketchEntity, at: Vec2) -> Option<SketchEntity> {
     }
 }
 
+/// Returns a clone of `e` with its construction flag replaced. Total over all
+/// five entity kinds — construction is a property of every entity, unlike
+/// position (points only), so there is no `None` arm.
+fn entity_with_construction(e: &SketchEntity, construction: bool) -> SketchEntity {
+    match e {
+        SketchEntity::Point {
+            id,
+            at,
+            reference_locked,
+            ..
+        } => SketchEntity::Point {
+            id: *id,
+            at: *at,
+            construction,
+            reference_locked: *reference_locked,
+        },
+        SketchEntity::Line { id, start, end, .. } => SketchEntity::Line {
+            id: *id,
+            start: *start,
+            end: *end,
+            construction,
+        },
+        SketchEntity::Arc {
+            id,
+            center,
+            radius,
+            start_angle,
+            end_angle,
+            ..
+        } => SketchEntity::Arc {
+            id: *id,
+            center: *center,
+            radius: *radius,
+            start_angle: *start_angle,
+            end_angle: *end_angle,
+            construction,
+        },
+        SketchEntity::Circle {
+            id, center, radius, ..
+        } => SketchEntity::Circle {
+            id: *id,
+            center: *center,
+            radius: *radius,
+            construction,
+        },
+        SketchEntity::Ellipse {
+            id,
+            center,
+            major_r,
+            minor_r,
+            rotation,
+            ..
+        } => SketchEntity::Ellipse {
+            id: *id,
+            center: *center,
+            major_r: *major_r,
+            minor_r: *minor_r,
+            rotation: *rotation,
+            construction,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1622,6 +1695,142 @@ mod tests {
             value: Scalar::new(25.0),
         }];
         assert!(apply_sketch_ops(&s, &ok).is_ok());
+    }
+
+    #[test]
+    fn set_entity_construction_flips_only_the_named_entity() {
+        let s = base_sketch();
+        assert!(s.entities().iter().all(|e| !e.is_construction()));
+
+        let flip = vec![SketchEditOp::SetEntityConstruction {
+            entity: eid(3), // the circle
+            construction: true,
+        }];
+        let out = apply_sketch_ops(&s, &flip).expect("flip accepted");
+        assert!(
+            out.get_entity(eid(3)).unwrap().is_construction(),
+            "the named entity became construction"
+        );
+        assert!(
+            !out.get_entity(eid(1)).unwrap().is_construction()
+                && !out.get_entity(eid(2)).unwrap().is_construction(),
+            "no other entity is touched — not even the circle's own center point"
+        );
+        // Entity order and the rest of the shape survive the rebuild.
+        assert_eq!(
+            out.entities()
+                .iter()
+                .map(SketchEntity::id)
+                .collect::<Vec<_>>(),
+            s.entities()
+                .iter()
+                .map(SketchEntity::id)
+                .collect::<Vec<_>>()
+        );
+
+        // …and flipping back is exact.
+        let back = apply_sketch_ops(
+            &out,
+            &[SketchEditOp::SetEntityConstruction {
+                entity: eid(3),
+                construction: false,
+            }],
+        )
+        .expect("flip back accepted");
+        assert_eq!(back.entities(), s.entities());
+    }
+
+    #[test]
+    fn set_entity_construction_rejects_an_unknown_entity() {
+        let s = base_sketch();
+        let ops = vec![SketchEditOp::SetEntityConstruction {
+            entity: eid(999),
+            construction: true,
+        }];
+        assert!(matches!(
+            apply_sketch_ops(&s, &ops),
+            Err(DomainError::Validation(_))
+        ));
+    }
+
+    /// The `SketchEdit` memento (`Inverse::RestoreSketch`) makes the inverse free
+    /// — no per-op undo arm is needed for the new op.
+    #[test]
+    fn set_entity_construction_undo_restores_via_the_memento() {
+        use crate::document::Document;
+        use crate::ids::DocumentId;
+
+        let mut session = DocumentSession::new(Document::new(DocumentId(Uuid::from_u128(1))));
+        session
+            .apply(EditCommand::AddSketch {
+                sketch: base_sketch(),
+            })
+            .unwrap();
+        session
+            .apply(EditCommand::SketchEdit {
+                sketch: sid(),
+                ops: vec![SketchEditOp::SetEntityConstruction {
+                    entity: eid(3),
+                    construction: true,
+                }],
+            })
+            .unwrap();
+        assert!(session
+            .document()
+            .sketch(sid())
+            .unwrap()
+            .get_entity(eid(3))
+            .unwrap()
+            .is_construction());
+
+        assert!(session.undo(), "undo available");
+        assert!(
+            !session
+                .document()
+                .sketch(sid())
+                .unwrap()
+                .get_entity(eid(3))
+                .unwrap()
+                .is_construction(),
+            "undo restores the prior sketch verbatim"
+        );
+        assert!(session.redo().unwrap(), "redo available");
+        assert!(session
+            .document()
+            .sketch(sid())
+            .unwrap()
+            .get_entity(eid(3))
+            .unwrap()
+            .is_construction());
+    }
+
+    /// Wire pin — the exact JSON the frontend will author (mirror in
+    /// `src/ipc/sketchWireMap.ts` when W1-B wires the UI).
+    #[test]
+    fn set_entity_construction_wire_shape() {
+        let uid = "00000000-0000-0000-0000-000000000003";
+        let wire = serde_json::json!({
+            "op": "setEntityConstruction", "entity": uid, "construction": true
+        });
+        let op: SketchEditOp = serde_json::from_value(wire.clone()).expect("op parses");
+        let SketchEditOp::SetEntityConstruction {
+            entity,
+            construction,
+        } = op
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(entity, eid(3));
+        assert!(construction);
+        assert_eq!(
+            serde_json::to_value(SketchEditOp::SetEntityConstruction {
+                entity: eid(3),
+                construction: true
+            })
+            .unwrap(),
+            wire,
+            "serialization is byte-stable against the documented shape"
+        );
     }
 
     #[test]

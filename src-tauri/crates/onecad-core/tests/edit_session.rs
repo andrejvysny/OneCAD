@@ -345,6 +345,10 @@ fn all_variant_commands() -> Vec<(&'static str, EditCommand)> {
                             false,
                         ),
                     },
+                    SketchEditOp::SetEntityConstruction {
+                        entity: eid(1),
+                        construction: true,
+                    },
                 ],
             },
         ),

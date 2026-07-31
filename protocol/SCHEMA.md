@@ -748,6 +748,18 @@ the full authoritative sketch so replay is deterministic.
     point (avoiding orphaned child Points); readers MUST treat it as optional.
     It is informational on the *inbound* solver-sync wire (the worker resolves
     the center from `center` coords and ignores `centerRef`).
+- `entities[].construction` (bool, **optional**, default `false`) — reference-only
+  geometry (construction/centerline). Readers MUST default an absent field to
+  `false`; producers SHOULD emit it explicitly. Construction entities are
+  **EXCLUDED from loop/region detection** — both `SketchRegions` (§7.4) and
+  plan-time profile derivation — so flipping the flag changes the region set
+  exactly as REMOVING the entity would, while the ids of the remaining regions
+  are **unchanged** (a region signature derives only from its loop's edge ids,
+  §7.4). Construction entities are nevertheless **still materialized in the
+  solver**: they carry DOF and constraints referencing them participate in every
+  solve, exactly like real geometry. A child point synthesized by a reader for an
+  inline-coordinate parent (line endpoints, arc/circle centers) inherits that
+  parent's flag.
 - `constraints[].type` ∈ the 18 kinds (verbatim from OneCAD-CPP
   `SketchTypes.h ConstraintType`): `Coincident`, `Horizontal`, `Vertical`,
   `Fixed`, `Midpoint`, `OnCurve`, `Parallel`, `Perpendicular`, `Tangent`,
@@ -1075,6 +1087,12 @@ preview fill).
   cell. The Rust `derive_region_id` reference remains byte-authoritative for the
   unchanged hole-free/unsplit form; the worker `RegionTable` owns the extended
   cell form.
+
+- **Construction geometry never bounds a region.** Entities carrying
+  `construction: true` (§7.3) are dropped before any loop is formed, so they
+  appear in no `outerLoop`/`holes`, publish no cell of their own, and perturb no
+  other cell's `regionId`. The same exclusion applies to plan-time profile
+  derivation, so a region selectable here is exactly a region an op can extrude.
 
 - **`previewTriangles` SUBTRACTS the region's holes** (changed 2026-07-26 — see
   [Changelog](#14-changelog)). The fill MUST cover exactly the material the
@@ -1567,6 +1585,23 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-07-31 (b) — §7.3 `entities[].construction` documented AND honored; §7.4
+  construction exclusion stated** (W1-A construction geometry; **additive
+  optional field, no shape moved, no fixture bump**). The Rust producer has
+  emitted `construction` on every sketch entity since the wire existed, but the
+  worker's `WireSketch` hardcoded `false` and dropped it — so `LoopDetector`'s
+  construction filters were dead code and a closed construction rectangle still
+  published a region and still extruded. The worker now reads the flag
+  (absent ⇒ `false`) and honors it on BOTH consumers of loop detection
+  (`SketchRegions` and plan-time profile derivation); synthesized child points
+  (inline line endpoints, arc/circle centers) inherit their parent's flag.
+  Construction geometry remains fully solved. Core gains
+  `SketchEditOp::SetEntityConstruction` to flip one entity's flag. Worker + Rust
+  + frontend sign-off. No fixture bump: no canonical `protocol/fixtures/` payload
+  carries sketch entities, and every non-construction region id is byte-unchanged
+  (signatures derive only from loop edge ids — pinned by worker
+  `test_sketch_construction` and `src-tauri/tests/sketch_construction.rs`).
 
 - **2026-07-31 — PREVIEW wave: §7.6 `PreviewOp` now exercised by ALL op types**
   (Revolve/Fillet/Chamfer/Shell/Boolean joined Extrude). **No wire change** — the

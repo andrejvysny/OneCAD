@@ -257,6 +257,15 @@ pub enum SketchEditOp {
         /// `(point entity, new position)` pairs.
         positions: Vec<(EntityId, Vec2)>,
     },
+    /// Flip one entity between real and construction (reference-only) geometry
+    /// (order-preserving). Construction geometry is still solved but is excluded
+    /// from loop/region detection (SCHEMA §7.3 `entities[].construction`).
+    SetEntityConstruction {
+        /// Target entity (any kind).
+        entity: EntityId,
+        /// New flag value.
+        construction: bool,
+    },
 }
 
 /// A typed path to one input reference inside an op's params (extensible).

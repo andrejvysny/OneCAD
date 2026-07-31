@@ -62,6 +62,14 @@ bool scalar_field(const json& c, std::initializer_list<const char*> keys, double
     return false;
 }
 
+// SCHEMA §7.3: `construction` is optional, absent ⇒ false. Reference-only
+// geometry — still solved, but excluded from loop/region detection by
+// `LoopDetector`.
+bool is_construction(const json& e) {
+    const auto it = e.find("construction");
+    return it != e.end() && it->is_boolean() && it->get<bool>();
+}
+
 // Position of a Point entity from any of the accepted coordinate keys.
 bool read_point_pos(const json& e, double& x, double& y) {
     for (const char* k : {"at", "p", "pos", "position", "xy", "p0"}) {
@@ -168,7 +176,7 @@ TranslateResult translate(const json& args) {
             result.error = "point '" + id + "' missing position";
             return result;
         }
-        const sk::EntityID pid = sketch->addPoint(x, y, /*construction=*/false);
+        const sk::EntityID pid = sketch->addPoint(x, y, is_construction(e));
         idx.wire_to_internal[id] = pid;
         reg_handle(id, pid, /*primary=*/true);
     }
@@ -182,6 +190,9 @@ TranslateResult translate(const json& args) {
             result.error = "entity missing id";
             return result;
         }
+        // Synthesized child points (inline line endpoints, arc/circle centers)
+        // INHERIT the parent's flag — they exist only to carry it.
+        const bool construction = is_construction(e);
 
         if (type == "Line") {
             sk::EntityID sp, ep;
@@ -201,8 +212,8 @@ TranslateResult translate(const json& args) {
                     result.error = "line '" + id + "' missing p0/p1";
                     return result;
                 }
-                sp = sketch->addPoint(x0, y0, false);
-                ep = sketch->addPoint(x1, y1, false);
+                sp = sketch->addPoint(x0, y0, construction);
+                ep = sketch->addPoint(x1, y1, construction);
                 reg_handle(id + ".p0", sp, true);
                 reg_handle(id + ".p1", ep, true);
             }
@@ -211,7 +222,7 @@ TranslateResult translate(const json& args) {
             reg_handle(id + ".start", sp, false);
             reg_handle(id + ".p1", ep, false);
             reg_handle(id + ".end", ep, false);
-            const sk::EntityID lid = sketch->addLine(sp, ep, false);
+            const sk::EntityID lid = sketch->addLine(sp, ep, construction);
             if (lid.empty()) {
                 result.error = "line '" + id + "' could not be created";
                 return result;
@@ -225,9 +236,9 @@ TranslateResult translate(const json& args) {
                 result.error = "circle '" + id + "' missing center/radius";
                 return result;
             }
-            const sk::EntityID cp = sketch->addPoint(cx, cy, false);
+            const sk::EntityID cp = sketch->addPoint(cx, cy, construction);
             reg_handle(id + ".center", cp, true);
-            const sk::EntityID cid = sketch->addCircle(cp, radius, false);
+            const sk::EntityID cid = sketch->addCircle(cp, radius, construction);
             if (cid.empty()) {
                 result.error = "circle '" + id + "' could not be created";
                 return result;
@@ -251,9 +262,10 @@ TranslateResult translate(const json& args) {
                 scalar_field(e, {"startAngle"}, start_angle);
                 scalar_field(e, {"endAngle"}, end_angle);
             }
-            const sk::EntityID cp = sketch->addPoint(cx, cy, false);
+            const sk::EntityID cp = sketch->addPoint(cx, cy, construction);
             reg_handle(id + ".center", cp, true);
-            const sk::EntityID aid = sketch->addArc(cp, radius, start_angle, end_angle, false);
+            const sk::EntityID aid =
+                sketch->addArc(cp, radius, start_angle, end_angle, construction);
             if (aid.empty()) {
                 result.error = "arc '" + id + "' could not be created";
                 return result;

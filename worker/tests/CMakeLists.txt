@@ -15,6 +15,11 @@ add_executable(test_region_table test_region_table.cpp)
 target_link_libraries(test_region_table PRIVATE worker_core)
 add_test(NAME region_table COMMAND test_region_table)
 
+# --- Construction geometry is solved but never bounds a region (SCHEMA §7.3). ---
+add_executable(test_sketch_construction test_sketch_construction.cpp)
+target_link_libraries(test_sketch_construction PRIVATE worker_core)
+add_test(NAME sketch_construction COMMAND test_sketch_construction)
+
 # --- Region preview fill: holes subtracted + the bridge-interiority invariant
 #     the frontend ring derivation depends on (pure 2D, no OCCT). ---
 add_executable(test_polygon_fill test_polygon_fill.cpp)

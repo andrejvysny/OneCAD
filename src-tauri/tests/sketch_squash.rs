@@ -89,6 +89,21 @@ fn entity_count(v: &Value) -> usize {
     v.as_array().map_or(0, Vec::len)
 }
 
+/// The `construction` flag the wire carries for `id` (SCHEMA §7.3), or `None` if
+/// the entity is absent.
+fn construction_flag(entities: &Value, id: EntityId) -> Option<bool> {
+    let want = id.to_string();
+    entities
+        .as_array()?
+        .iter()
+        .find(|e| e.get("id").and_then(Value::as_str) == Some(want.as_str()))
+        .map(|e| {
+            e.get("construction")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+}
+
 /// A minimal NewBody extrude op referencing `sketch`'s first region — a valid
 /// timeline `AddOperation` (reference existence is a regen-time concern, so the
 /// command commits without a solved region). Used to interleave a MODEL op into a
@@ -378,6 +393,88 @@ async fn stray_finish_after_model_op_preserves_op_undo_entry() {
     );
     assert!(rt.get_sketch(sid).is_ok(), "the sketch itself survives");
     eprintln!("STRAY-FINISH PASS: model op's undo entry survives a stray finish; undo removes the extrude");
+
+    wm.shutdown().await;
+}
+
+// ── (f) The construction flag survives the squash replay ─────────────────────
+//
+// B1 squash rebuilds the net session as whole-entity `AddEntity` ops (every prior
+// entity removed, every final entity re-added). Nothing there is aware of
+// `SetEntityConstruction`, so the flag survives only because it rides ON the
+// entity. If the replay ever loses it, a construction line silently becomes real
+// geometry and starts bounding regions again — pinned here end-to-end.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn construction_flag_survives_the_session_squash() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    let sid = SketchId(Uuid::from_u128(0x5A_12));
+    rt.apply(EditCommand::AddSketch {
+        sketch: Sketch::on_world_plane(sid, "Sq", WorldPlane::XY),
+    })
+    .expect("AddSketch");
+    let base_depth = rt.undo_depth();
+
+    rt.enter_sketch(sid).await.expect("enter_sketch");
+    run_three_upserts(&mut rt, sid).await;
+    // A 4th in-session edit flips the line to construction geometry.
+    rt.sketch_upsert(
+        sid,
+        vec![SketchEditOp::SetEntityConstruction {
+            entity: eid(L0),
+            construction: true,
+        }],
+    )
+    .await
+    .expect("upsert 4 (setEntityConstruction)");
+    assert_eq!(
+        construction_flag(&rt.get_sketch(sid).expect("get_sketch").entities, eid(L0)),
+        Some(true),
+        "the flip reaches the wire the worker consumes"
+    );
+    assert_eq!(rt.undo_depth(), base_depth + 4, "4 granular steps landed");
+
+    rt.finish_sketch(sid).await.expect("finish_sketch");
+    assert_eq!(
+        rt.undo_depth(),
+        base_depth + 2,
+        "the 4 granular steps collapse into ONE net command (+1 timeline record)"
+    );
+    let done = rt.get_sketch(sid).expect("get_sketch after finish");
+    assert_eq!(
+        construction_flag(&done.entities, eid(L0)),
+        Some(true),
+        "the squash replay (whole-entity AddEntity) preserved the construction flag"
+    );
+    assert_eq!(
+        construction_flag(&done.entities, eid(P0)),
+        Some(false),
+        "the untouched endpoints stay real geometry"
+    );
+
+    // Undo the whole session, then redo it: the flag round-trips through the
+    // memento AND the replayed net command.
+    assert!(rt.undo(), "undo the minted sketch record");
+    assert!(rt.undo(), "undo the net sketch command");
+    let reverted = rt.get_sketch(sid).expect("get_sketch after undo");
+    assert_eq!(
+        entity_count(&reverted.entities),
+        0,
+        "session fully reverted"
+    );
+    assert!(rt.redo().expect("redo"), "redo the net sketch command");
+    assert_eq!(
+        construction_flag(&rt.get_sketch(sid).expect("get_sketch").entities, eid(L0)),
+        Some(true),
+        "redo restores the construction flag too"
+    );
+    eprintln!("SQUASH-CONSTRUCTION PASS: flag survives squash + undo/redo");
 
     wm.shutdown().await;
 }
