@@ -1,4 +1,57 @@
-# OneCAD-Tauri — Current State (2026-07-31, TRUST + PREVIEW waves + multi-object sketch fix shipped)
+# OneCAD-Tauri — Current State (2026-08-01, SKETCH-POWER wave shipped)
+
+## SKETCH-POWER (2026-07-31→08-01, commits 130854b→b191ed2) — sketch expressiveness wave
+Plan `~/.claude/plans/do-thorough-exploration-and-rosy-lollipop.md` (internal
+adversarial review REVISE → 2 MAJOR + 2 MINOR folded pre-approval; Codex gate
+dead until Aug 5). Four waves, 5 gate commits, every gate 4-suite green vs real
+worker.
+**W0 latents (130854b, all red-first)**: tree sketch-switch while IN sketch mode
+retargets the controller (was silent wrong-sketch writes; self-switch guard vs
+open session + openSession-echo bracket — naive subscription self-switched every
+entry); `prepare_sketch_regions` refuses during same-sketch drag +
+`finish_sketch` clears the dangling gesture (Enter-mid-drag race); Alt
+pick-through (face under coplanar sketch fill selectable, default path
+byte-identical); `getSketch` backend-id resolve; history icons opType-first.
+**W1 construction geometry (c2566e8 + 27db309)**: worker `WireSketch` now READS
+the flag Rust always emitted (hardcoded false before — LoopDetector's filters
+were dead code; an all-construction rect published a region+extruded, ctest bug
+pin); SCHEMA §7.3/§7.4 documented, no fixture bump (remaining region ids
+byte-stable, runtime-baseline-pinned); core `SetEntityConstruction` (memento
+inverse free, squash-safe); FE: X = selection flip (mixed rule
+`!every(construction)`) / sticky draw mode + chrome button; `marshalUpsert` flip
+branch over a last-SENT cache (flip emitted ZERO ops before); construction
+centerline as revolve axis pinned both lanes.
+**W2 tools batch (2626e46, FE-only verified)**: Tangent/Equal/Midpoint
+user-apply (solver-bounded matrix; Midpoint gated on `marshalsAsPoint` — arc
+endpoints would marshal null + silently drop; dups → existing
+reject-on-conflict); point (P) / centerRect (⇧R) / slot (S) / polygon (G,
+digits 3-9, construction circumcircle, DOF 4 any n) via new `ToolConstraintSpec`
+(tool-authored constraints, intra-batch inference suppressed); slot ships
+Tangent×4+Equal ONLY (arc-endpoint Coincidents unmappable — real-lane DOF ≈13
+documented, mock e2e labeled); marquee box select (rightward=window true
+containment / leftward=crossing touch — the semantics legacy UI promised but its
+findInRect never had; 8 teardown paths restore LMB orbit; plane-AABB =
+conservative superset off-normal).
+**W3 ellipse (b191ed2, protocol change)**: SCHEMA un-UNSUPPORTs Ellipse w/
+normative normalization-echo; ONE WireSketch branch unlocks both lanes (5
+red-first fixtures failed "unsupported entity type" incl. the plan-profile lane);
+solver-free legacy parity (naive DOF, PlaneGCS registration deliberately
+skipped — vendored GCS has full ellipse support, backlogged); true Geom_Ellipse
+extrude (vol 0.19% off π·a·b·h); FE 3-click tool (key O — e is the extrude
+handoff) w/ live swap-normalization, applicability BAILS on ellipse targets
+(oracle-parity), trim=whole-delete, mirror=copy-only.
+Suites at final gate: tsc 0 · FE 1660/126 · ctest 76/76 · cargo 547/0 vs real
+worker · e2e 76/76 · clippy/fmt/hex clean. Delegation: 9 implementation agents
+(3 parallel max), every diff orchestrator-reviewed, every gate
+orchestrator-re-verified.
+LATENTS FLAGGED (accepted): `sketchStaticSync` A→B switch relies on real-lane
+geometryToken bump (mock may show stale until exit); `enterRegionPick`
+hint-clobber (pre-existing — "No closed region" never visible, setTool clears
+it); FE full-suite exit-1-with-all-passing observed once (teardown flake class);
+`bbox_dims` exactness tests inflate ~0.35mm (BRepBndLib gap).
+REMAINING: USER manual Tauri gate (TODO.md SKETCH-POWER checklist) + the older
+TRUST/PREVIEW/AUTO-MODE manual gates still open.
+
 
 ## SKETCH-MULTI-OBJECT (2026-07-31, commit 267af13) — re-entry deleted prior objects
 USER-REPORTED: rect + disconnected line in one sketch → only latest survived
