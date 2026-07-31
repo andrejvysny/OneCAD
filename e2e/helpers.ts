@@ -20,7 +20,16 @@ import { type Page, type Locator, expect } from "@playwright/test";
 
 export const CANVAS = '[data-testid="viewport-canvas"]';
 
-export type SketchToolLabel = "Line" | "Rectangle" | "Circle" | "Arc" | "Select";
+export type SketchToolLabel =
+  | "Line"
+  | "Rectangle"
+  | "Center rectangle"
+  | "Circle"
+  | "Arc"
+  | "Polygon"
+  | "Slot"
+  | "Point"
+  | "Select";
 
 async function bootEditor(page: Page, path: string): Promise<void> {
   await page.goto(path);

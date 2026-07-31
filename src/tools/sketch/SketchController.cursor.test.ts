@@ -85,9 +85,18 @@ describe("SketchController — per-tool cursor (U8)", () => {
     container.remove();
   });
 
-  it("draw tools (line/rect/circle/arc/dimension) show a crosshair", async () => {
+  it("draw tools (line/rect/centerRect/circle/arc/polygon/slot/point/dimension) show a crosshair", async () => {
     expect(container.style.cursor).toBe("crosshair"); // default tool = line
-    for (const tool of ["rect", "circle", "arc", "dimension"] as SketchTool[]) {
+    for (const tool of [
+      "rect",
+      "centerRect",
+      "circle",
+      "arc",
+      "polygon",
+      "slot",
+      "point",
+      "dimension",
+    ] as SketchTool[]) {
       toolStore.getState().setTool(tool);
       await flush();
       expect(container.style.cursor).toBe("crosshair");

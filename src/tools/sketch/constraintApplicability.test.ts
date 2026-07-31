@@ -18,6 +18,10 @@ const entities: SketchEntity[] = [
   { id: "circle", type: "Circle", center: [5, 5], radius: 2.5 },
   { id: "arcCenter", type: "Point", p0: [12, 5] },
   { id: "arc", type: "Arc", center: [12, 5], radius: 2.5, start: [14.5, 5], end: [13.3508, 7.1035] },
+  // Added for the Tangent/Equal/Midpoint frontend-extension coverage below —
+  // a second circle + arc (for circle×circle / arc×arc pairs).
+  { id: "circle2", type: "Circle", center: [30, 5], radius: 4 },
+  { id: "arc2", type: "Arc", center: [40, 5], radius: 2.5, start: [42.5, 5], end: [41.3508, 7.1035] },
 ];
 
 /** Resolve a fixture ref via the real adapter — throws if the fixture is wrong. */
@@ -58,35 +62,194 @@ describe("evaluateApplicability — 2 targets (mirrors the prototype test 1:1)",
     expect(typesOf(rs)).toEqual(["Distance", "Coincident", "HorizontalDistance", "VerticalDistance"]);
   });
 
-  // proto_sketch_constraint_applicability.cpp:50-54 (pointLine)
-  it("point & line ⇒ Distance, OnCurve", () => {
+  // proto_sketch_constraint_applicability.cpp:50-54 (pointLine), extended by the
+  // Midpoint frontend addition: a free point + a Line now also offers Midpoint
+  // (after OnCurve — see the module header / evaluateApplicability doc).
+  it("point & line ⇒ Distance, OnCurve, Midpoint", () => {
     const rs = evaluateApplicability([T("p1"), T("line")], entities);
-    expect(typesOf(rs)).toEqual(["Distance", "OnCurve"]);
+    expect(typesOf(rs)).toEqual(["Distance", "OnCurve", "Midpoint"]);
   });
 
-  // proto_sketch_constraint_applicability.cpp:56-60 (pointCircle)
-  it("point & circle ⇒ OnCurve only (NOT Distance)", () => {
+  // proto_sketch_constraint_applicability.cpp:56-60 (pointCircle) — Midpoint is
+  // Line-only, so a point + Circle stays OnCurve-only (frontend addition doesn't
+  // reach here).
+  it("point & circle ⇒ OnCurve only (NOT Distance, NOT Midpoint)", () => {
     const rs = evaluateApplicability([T("p1"), T("circle")], entities);
     expect(typesOf(rs)).toEqual(["OnCurve"]);
   });
 
+  // point & arc — same reasoning as point & circle (Midpoint never offered for
+  // an Arc curve target).
+  it("point & arc ⇒ OnCurve only (NOT Midpoint)", () => {
+    const rs = evaluateApplicability([T("p1"), T("arc")], entities);
+    expect(typesOf(rs)).toEqual(["OnCurve"]);
+  });
+
   // proto_sketch_constraint_applicability.cpp:69-73 (lineCircle) — neither is a
-  // point, and a circle is not a `line`, so NOTHING applies.
-  it("line & circle ⇒ empty (neither Distance, Parallel, nor anything else)", () => {
+  // point, and a circle is not a `line`, so the PORTED matrix offers nothing;
+  // the Tangent frontend addition now offers exactly Tangent for this pair.
+  it("line & circle ⇒ Tangent only (frontend addition; no Distance/Parallel/etc.)", () => {
     const rs = evaluateApplicability([T("line"), T("circle")], entities);
-    expect(rs).toEqual([]);
+    expect(typesOf(rs)).toEqual(["Tangent"]);
   });
 
-  // proto_sketch_constraint_applicability.cpp:75-78 (circleArc)
-  it("circle & arc ⇒ Concentric only", () => {
+  it("line & arc ⇒ Tangent only", () => {
+    const rs = evaluateApplicability([T("line"), T("arc")], entities);
+    expect(typesOf(rs)).toEqual(["Tangent"]);
+  });
+
+  // proto_sketch_constraint_applicability.cpp:75-78 (circleArc), extended by the
+  // Tangent/Equal frontend additions (both circular×circular pairs).
+  it("circle & arc ⇒ Concentric, Tangent, Equal", () => {
     const rs = evaluateApplicability([T("circle"), T("arc")], entities);
-    expect(typesOf(rs)).toEqual(["Concentric"]);
+    expect(typesOf(rs)).toEqual(["Concentric", "Tangent", "Equal"]);
   });
 
-  // proto_sketch_constraint_applicability.cpp:80-86 (lineLine)
-  it("line & line ⇒ Distance, Parallel, Perpendicular, Angle", () => {
+  it("circle & circle ⇒ Concentric, Tangent, Equal", () => {
+    const rs = evaluateApplicability([T("circle"), T("circle2")], entities);
+    expect(typesOf(rs)).toEqual(["Concentric", "Tangent", "Equal"]);
+  });
+
+  it("arc & arc ⇒ Concentric, Tangent, Equal", () => {
+    const rs = evaluateApplicability([T("arc"), T("arc2")], entities);
+    expect(typesOf(rs)).toEqual(["Concentric", "Tangent", "Equal"]);
+  });
+
+  // proto_sketch_constraint_applicability.cpp:80-86 (lineLine), extended by the
+  // Equal frontend addition (after Angle).
+  it("line & line ⇒ Distance, Parallel, Perpendicular, Angle, Equal", () => {
     const rs = evaluateApplicability([T("line"), T("line2")], entities);
-    expect(typesOf(rs)).toEqual(["Distance", "Parallel", "Perpendicular", "Angle"]);
+    expect(typesOf(rs)).toEqual(["Distance", "Parallel", "Perpendicular", "Angle", "Equal"]);
+  });
+});
+
+describe("Tangent — frontend extension (evaluateApplicability header)", () => {
+  it("offered pairs: line+circle, line+arc, circle+circle, circle+arc, arc+arc", () => {
+    const pairs: [string, string][] = [
+      ["line", "circle"],
+      ["line", "arc"],
+      ["circle", "circle2"],
+      ["circle", "arc"],
+      ["arc", "arc2"],
+    ];
+    for (const [x, y] of pairs) {
+      const rs = evaluateApplicability([T(x), T(y)], entities);
+      expect(rs.some((r) => r.type === "Tangent")).toBe(true);
+    }
+  });
+
+  it("never offered for line+line", () => {
+    const rs = evaluateApplicability([T("line"), T("line2")], entities);
+    expect(rs.some((r) => r.type === "Tangent")).toBe(false);
+  });
+
+  it("never offered when either target is a point", () => {
+    expect(evaluateApplicability([T("p1"), T("circle")], entities).some((r) => r.type === "Tangent")).toBe(false);
+    expect(evaluateApplicability([T("p1"), T("arc")], entities).some((r) => r.type === "Tangent")).toBe(false);
+    expect(evaluateApplicability([T("p1"), T("p3")], entities).some((r) => r.type === "Tangent")).toBe(false);
+  });
+
+  it("targets carry the selection order (any order accepted)", () => {
+    const rs = evaluateApplicability([T("circle"), T("line")], entities);
+    const tangent = rs.find((r) => r.type === "Tangent")!;
+    expect(tangent.targets).toEqual([T("circle"), T("line")]);
+  });
+
+  it("appears after Concentric in the circular×circular branch", () => {
+    const rs = evaluateApplicability([T("circle"), T("arc")], entities);
+    expect(typesOf(rs).indexOf("Tangent")).toBeGreaterThan(typesOf(rs).indexOf("Concentric"));
+  });
+});
+
+describe("Equal — frontend extension (evaluateApplicability header)", () => {
+  it("offered pairs: line+line, circle+circle, circle+arc, arc+arc", () => {
+    const pairs: [string, string][] = [
+      ["line", "line2"],
+      ["circle", "circle2"],
+      ["circle", "arc"],
+      ["arc", "arc2"],
+    ];
+    for (const [x, y] of pairs) {
+      const rs = evaluateApplicability([T(x), T(y)], entities);
+      expect(rs.some((r) => r.type === "Equal")).toBe(true);
+    }
+  });
+
+  it("never offered for a mixed line×circular pair", () => {
+    expect(evaluateApplicability([T("line"), T("circle")], entities).some((r) => r.type === "Equal")).toBe(false);
+    expect(evaluateApplicability([T("line"), T("arc")], entities).some((r) => r.type === "Equal")).toBe(false);
+  });
+
+  it("never offered for a 3-target selection (Equal is 2-target only)", () => {
+    const rs = evaluateApplicability([T("line"), T("line2"), T("circle")], entities);
+    expect(rs.some((r) => r.type === "Equal")).toBe(false);
+  });
+
+  it("appears after Angle in the line×line branch", () => {
+    const rs = evaluateApplicability([T("line"), T("line2")], entities);
+    expect(typesOf(rs).indexOf("Equal")).toBeGreaterThan(typesOf(rs).indexOf("Angle"));
+  });
+
+  it("appears after Tangent in the circular×circular branch", () => {
+    const rs = evaluateApplicability([T("circle"), T("arc")], entities);
+    expect(typesOf(rs).indexOf("Equal")).toBeGreaterThan(typesOf(rs).indexOf("Tangent"));
+  });
+});
+
+describe("Midpoint — frontend extension (evaluateApplicability header)", () => {
+  it("a free Point + a Line ⇒ offered, ordered [point, line]", () => {
+    const rs = evaluateApplicability([T("p1"), T("line")], entities);
+    const mid = rs.find((r) => r.type === "Midpoint")!;
+    expect(mid).toBeDefined();
+    expect(mid.targets).toEqual([T("p1"), T("line")]);
+  });
+
+  it("order-normalized even when the Line is selected FIRST", () => {
+    const rs = evaluateApplicability([T("line2"), T("p3")], entities);
+    const mid = rs.find((r) => r.type === "Midpoint")!;
+    expect(mid.targets).toEqual([T("p3"), T("line2")]);
+  });
+
+  it("a Line's own Start/End (as a named point) + a DIFFERENT line ⇒ offered", () => {
+    const rs = evaluateApplicability([T("line", "Start"), T("line2")], entities);
+    expect(rs.some((r) => r.type === "Midpoint")).toBe(true);
+  });
+
+  it("a Circle's Center (as a named point) + a Line ⇒ offered", () => {
+    const rs = evaluateApplicability([T("circle", "Center"), T("line")], entities);
+    expect(rs.some((r) => r.type === "Midpoint")).toBe(true);
+  });
+
+  it("an Arc's Center (as a named point) + a Line ⇒ offered", () => {
+    const rs = evaluateApplicability([T("arc", "Center"), T("line")], entities);
+    expect(rs.some((r) => r.type === "Midpoint")).toBe(true);
+  });
+
+  it("EXCLUDED: an Arc's Start/End (unmappable — no synthesized wire point) + a Line", () => {
+    const rs = evaluateApplicability([T("arc", "Start"), T("line")], entities);
+    expect(rs.some((r) => r.type === "Midpoint")).toBe(false);
+    const rsEnd = evaluateApplicability([T("arc", "End"), T("line")], entities);
+    expect(rsEnd.some((r) => r.type === "Midpoint")).toBe(false);
+  });
+
+  it("EXCLUDED: a Line's own virtual Midpoint position + a DIFFERENT line", () => {
+    const rs = evaluateApplicability([T("line", "Midpoint"), T("line2")], entities);
+    expect(rs.some((r) => r.type === "Midpoint")).toBe(false);
+  });
+
+  it("EXCLUDED: a line's own endpoint + that SAME line (degenerate same-entity pair)", () => {
+    const rs = evaluateApplicability([T("line", "Start"), T("line")], entities);
+    expect(rs.some((r) => r.type === "Midpoint")).toBe(false);
+  });
+
+  it("EXCLUDED: point + Circle/Arc (Midpoint is Line-only)", () => {
+    expect(evaluateApplicability([T("p1"), T("circle")], entities).some((r) => r.type === "Midpoint")).toBe(false);
+    expect(evaluateApplicability([T("p1"), T("arc")], entities).some((r) => r.type === "Midpoint")).toBe(false);
+  });
+
+  it("appears after OnCurve in the point×line branch", () => {
+    const rs = evaluateApplicability([T("p1"), T("line")], entities);
+    expect(typesOf(rs).indexOf("Midpoint")).toBeGreaterThan(typesOf(rs).indexOf("OnCurve"));
   });
 });
 
@@ -176,10 +339,11 @@ describe("entity-existence guard (ConstraintApplicability.cpp:84-90: `if (!entit
 });
 
 describe("encodability invariant (S4b design item 3)", () => {
-  // The exhaustive set of types the matrix (ConstraintApplicability.cpp:92-169)
-  // can EVER emit — every row exercised by the scenarios above. Kept as a static
-  // list (not accumulated across tests) so this test is self-contained and does
-  // not depend on suite execution order.
+  // The exhaustive set of types the matrix (ConstraintApplicability.cpp:92-169,
+  // PLUS the Tangent/Equal/Midpoint frontend-extension rules — see this module's
+  // header) can EVER emit — every row exercised by the scenarios above. Kept as a
+  // static list (not accumulated across tests) so this test is self-contained and
+  // does not depend on suite execution order. Now covers all 18 kinds.
   const MATRIX_EMITTABLE_TYPES: SketchConstraintType[] = [
     "Horizontal",
     "Vertical",
@@ -196,6 +360,9 @@ describe("encodability invariant (S4b design item 3)", () => {
     "Angle",
     "OnCurve",
     "Symmetric",
+    "Tangent",
+    "Equal",
+    "Midpoint",
   ];
 
   it("WIRE_ENCODABLE defines all 18 SketchConstraintType kinds", () => {
@@ -228,9 +395,14 @@ describe("encodability invariant (S4b design item 3)", () => {
     expect([...seen].sort()).toEqual([...MATRIX_EMITTABLE_TYPES].sort());
   });
 
-  it("Equal, Midpoint, and Tangent are never emitted (deliberately excluded, mirrors C++)", () => {
-    expect(MATRIX_EMITTABLE_TYPES).not.toContain("Equal");
-    expect(MATRIX_EMITTABLE_TYPES).not.toContain("Midpoint");
-    expect(MATRIX_EMITTABLE_TYPES).not.toContain("Tangent");
+  it("all 18 SketchConstraintType kinds are represented in MATRIX_EMITTABLE_TYPES", () => {
+    // Tangent/Equal/Midpoint are frontend-extension rules (not ported from the
+    // C++ matrix — see the module header) but are now offered like every other
+    // kind, so the matrix's emittable set covers the FULL SketchConstraintType
+    // vocabulary.
+    expect(MATRIX_EMITTABLE_TYPES).toContain("Equal");
+    expect(MATRIX_EMITTABLE_TYPES).toContain("Midpoint");
+    expect(MATRIX_EMITTABLE_TYPES).toContain("Tangent");
+    expect(MATRIX_EMITTABLE_TYPES).toHaveLength(18);
   });
 });

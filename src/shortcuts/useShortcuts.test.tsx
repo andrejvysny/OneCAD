@@ -68,6 +68,25 @@ describe("keymap resolveBinding", () => {
     expect(resolveBinding("f", true, "model")).toEqual({ type: "zoomFit" });
   });
 
+  it("W2-B/C: binds the four new sketch draw tools without breaking the model table", () => {
+    // ⇧R is an EXACT shift match — plain R still resolves to rect.
+    expect(resolveBinding("r", true, "sketch")).toEqual({ type: "tool", tool: "centerRect" });
+    expect(resolveBinding("r", false, "sketch")).toEqual({ type: "tool", tool: "rect" });
+    // Model mode has no ⇧R, so it reaches centerRect via the cross-mode fallback.
+    expect(resolveBinding("r", true, "model")).toEqual({ type: "tool", tool: "centerRect" });
+
+    expect(resolveBinding("g", false, "sketch")).toEqual({ type: "tool", tool: "polygon" });
+    expect(resolveBinding("g", false, "model")).toEqual({ type: "tool", tool: "polygon" });
+
+    // Sketch S = slot; model S stays the new-sketch intent (mode bindings win).
+    expect(resolveBinding("s", false, "sketch")).toEqual({ type: "tool", tool: "slot" });
+    expect(resolveBinding("s", false, "model")).toEqual({ type: "enterSketch" });
+
+    // Sketch P = point, deliberately SHADOWING the cross-mode linearPattern.
+    expect(resolveBinding("p", false, "sketch")).toEqual({ type: "tool", tool: "point" });
+    expect(resolveBinding("p", false, "model")).toEqual({ type: "tool", tool: "linearPattern" });
+  });
+
   it("binds Delete/Backspace to delete-sketch-selection (sketch mode only)", () => {
     expect(resolveBinding("Delete", false, "sketch")).toEqual({
       type: "deleteSketchSelection",

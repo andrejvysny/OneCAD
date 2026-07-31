@@ -40,6 +40,9 @@ export const GEOMETRIC_TYPES: SketchConstraintType[] = [
   "Symmetric",
   "Fixed",
   "OnCurve",
+  "Tangent",
+  "Equal",
+  "Midpoint",
 ];
 
 /** Ordered dimensional kinds the toolbar surfaces (each opens the Dimension chip). */

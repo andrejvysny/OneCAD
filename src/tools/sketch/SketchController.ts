@@ -47,6 +47,13 @@ import {
 import type { SketchSnapshot } from "@/stores/sketchStore";
 import { hitTestSketch } from "./sketchHitTest";
 import { clickSelection, dragIntent, shouldApplyDrag, type DragIntent } from "./selectGesture";
+import {
+  marqueeHits,
+  marqueeModeFor,
+  marqueeRectFrom,
+  type MarqueeMode,
+  type MarqueeRect,
+} from "./marqueeSelect";
 import { mirrorEntities } from "./mirrorMath";
 import { trimPreview, entityToDraft } from "./trimMath";
 import { trace } from "@/debug/trace";
@@ -59,9 +66,12 @@ import {
   type DimState,
 } from "./dimensionTool";
 import {
+  DEFAULT_POLYGON_SIDES,
   TOOL_MACHINES,
   draftToEntityFields,
+  resolveToolConstraints,
   type DraftEntity,
+  type ToolConstraintSpec,
   type ToolMachine,
   type ToolState,
 } from "./toolMachine";
@@ -74,10 +84,17 @@ const DRAG_PX = 4;
 const CURSOR_BY_TOOL: Record<string, string> = {
   line: "crosshair",
   rect: "crosshair",
+  centerRect: "crosshair",
   circle: "crosshair",
   arc: "crosshair",
+  polygon: "crosshair",
+  slot: "crosshair",
+  point: "crosshair",
   dimension: "crosshair",
 };
+
+/** Digit keys the polygon tool consumes as a side count (W2-C). */
+const POLYGON_SIDES_KEY = /^[3-9]$/;
 
 export interface SketchControllerDeps {
   engine: ViewportEngine;
@@ -156,6 +173,16 @@ export class SketchController {
   // is deferred here so a fast flick never double-commits the gesture.
   private dragEndPending: { target?: [number, number]; restore: boolean } | null = null;
 
+  // Marquee / box select (W2-D). `armed` on an empty-space LMB down (which CLAIMS the
+  // gesture from LMB orbit); `active` once it passes DRAG_PX. Mutually exclusive with
+  // `dragArmed` — a down either lands on a draggable handle or it does not.
+  private marqueeArmed = false;
+  private marqueeActive = false;
+  private marqueeMode: MarqueeMode = "window";
+  private marqueeEl: HTMLDivElement | null = null;
+  private pendingMarquee: { x: number; y: number } | null = null;
+  private marqueeScheduled = false;
+
   private readonly unsubs: Array<() => void> = [];
 
   constructor(private readonly deps: SketchControllerDeps) {
@@ -163,6 +190,13 @@ export class SketchController {
     c.addEventListener("pointerdown", this.onPointerDown);
     c.addEventListener("pointermove", this.onPointerMove);
     c.addEventListener("pointerup", this.onPointerUp);
+    // Marquee safety net: a box drag that RELEASES outside the viewport (over a
+    // floating panel, or off the window) never reaches the container's own pointerup,
+    // which would strand the overlay AND leave LMB orbit suppressed. These run after
+    // the container handler (bubble → window), so a normal in-viewport release has
+    // already finished the marquee and they no-op.
+    window.addEventListener("pointerup", this.onWindowPointerUp);
+    window.addEventListener("pointercancel", this.onWindowPointerCancel);
     window.addEventListener("keydown", this.onKeyDown, true);
     window.addEventListener("keyup", this.onKeyUp, true);
 
@@ -493,6 +527,7 @@ export class SketchController {
     if (this.dimensionActive) this.cancelDimension();
     this.dimensionActive = false;
     this.resetDrag();
+    this.cancelMarquee(); // before setSketchDrawingActive(false) below — idempotent
     this.selectActive = false;
     this.trimActive = false;
     this.mirrorActive = false;
@@ -544,6 +579,10 @@ export class SketchController {
     // enter/exit clears cover mode changes; this covers a same-mode tool switch).
     if (this.selectActive && tool !== "select") {
       this.resetDrag();
+      // A tool switch mid-marquee (keyboard shortcut / toolbar click while the button
+      // is still down) must drop the overlay AND give LMB orbit back — the flag is
+      // shared with the armed draw tools, so a leak here silently kills orbit.
+      this.cancelMarquee();
       sketchSelectionStore.getState().clear();
     }
     // Leaving the mirror tool drops its in-progress pick set (the mirror phase is
@@ -583,7 +622,17 @@ export class SketchController {
       this.updateMirrorHint();
       return;
     }
+    if (m?.id === "polygon") {
+      this.updatePolygonHint();
+      return;
+    }
     viewportStore.getState().setStatusHint(null);
+  }
+
+  /** Polygon status hint — carries the live side count + how to change it. */
+  private updatePolygonHint(): void {
+    const n = this.machineState?.sides ?? DEFAULT_POLYGON_SIDES;
+    viewportStore.getState().setStatusHint(`Polygon — ${n} sides · 3–9 to change`, { sticky: true });
   }
 
   // ── pointer handling ────────────────────────────────────────────────────
@@ -728,7 +777,7 @@ export class SketchController {
     this.machineState = stepped.state;
     this.deps.engine.setSketchPreview(this.decorate(stepped.preview));
     if (stepped.committed && stepped.committed.length > 0) {
-      void this.commit(this.decorate(stepped.committed));
+      void this.commit(this.decorate(stepped.committed), stepped.committedConstraints);
     }
     if (stepped.done) this.deps.engine.setSketchGhost(null, null);
   };
@@ -736,12 +785,13 @@ export class SketchController {
   // ── commit round-trip ─────────────────────────────────────────────────────
 
   /** Public thin wrapper: serialize the commit through the shared mutation queue so
-   *  a burst of clicks (fast polyline) rebases each segment on the settled prior one. */
-  private commit(committed: DraftEntity[]): Promise<void> {
-    return enqueueSketchMutation(() => this.commitNow(committed));
+   *  a burst of clicks (fast polyline) rebases each segment on the settled prior one.
+   *  `specs` are the tool's OWN constraints over `committed` (slot / polygon). */
+  private commit(committed: DraftEntity[], specs?: ToolConstraintSpec[]): Promise<void> {
+    return enqueueSketchMutation(() => this.commitNow(committed, specs));
   }
 
-  private async commitNow(committed: DraftEntity[]): Promise<void> {
+  private async commitNow(committed: DraftEntity[], specs?: ToolConstraintSpec[]): Promise<void> {
     if (this.disposed) return;
     const gen = sketchStore.getState().sessionGeneration;
     // Re-read the session INSIDE the queued turn and rebase the committed drafts onto
@@ -754,9 +804,16 @@ export class SketchController {
       id: sketchStore.getState().nextEntityId(),
       ...draftToEntityFields(d),
     }));
-    const newConstraints: SketchConstraint[] = inferConstraints(newEntities, session.entities, {
+    // Tool-authored constraints (slot tangency / polygon regularity) resolve their
+    // index refs against the id-assigned entities and SUPPRESS the intra-batch half
+    // of the inference — see `resolveToolConstraints` for why the draw path cannot
+    // afford a duplicated constraint.
+    const inferred = inferConstraints(newEntities, session.entities, {
       nextConstraintId: () => sketchStore.getState().nextConstraintId(),
     });
+    const newConstraints: SketchConstraint[] = resolveToolConstraints(specs, newEntities, inferred, () =>
+      sketchStore.getState().nextConstraintId(),
+    );
 
     const entities = [...session.entities, ...newEntities];
     const constraints = [...session.constraints, ...newConstraints];
@@ -996,7 +1053,8 @@ export class SketchController {
   //   - a real click (< DRAG_PX, no move) → click-select (Shift/Meta toggles, plain
   //     replaces, a miss clears);
   //   - a drag past DRAG_PX on an armed handle → beginGesture → solveDrag (fire-and-
-  //     forget, latest-wins by seq) → endGesture (ONE undo) + the selection stays.
+  //     forget, latest-wins by seq) → endGesture (ONE undo) + the selection stays;
+  //   - a drag past DRAG_PX from EMPTY space → marquee / box select (W2-D, below).
   // Esc mid-drag ends the gesture at the ORIGINAL point + restores pre-drag geometry.
 
   /** hitTest the current session at a client point (same 8px reach the dimension tool uses). */
@@ -1011,12 +1069,26 @@ export class SketchController {
 
   private onSelectPointerDown = (e: PointerEvent): void => {
     if (e.button !== 0) return;
+    // Self-heal: a previous gesture whose release we never saw (shouldn't happen —
+    // the window pointerup net covers it — but a stuck overlay is worse than a
+    // redundant reset).
+    this.cancelMarquee();
     const session = sketchStore.getState().session;
     const hit = this.hitAt(e.clientX, e.clientY);
     const intent = dragIntent(hit, session?.entities ?? []);
     this.dragArmed = intent;
     // Suppress LMB orbit for a potential handle drag; a plain click restores it on up.
-    if (intent) this.deps.engine.setSketchDrawingActive(true);
+    if (intent) {
+      this.deps.engine.setSketchDrawingActive(true);
+      return;
+    }
+    // Empty space: arm a marquee. This DELIBERATELY claims the empty-space LMB drag
+    // from orbit (RMB pan + Shift/two-finger orbit are untouched). A sub-threshold
+    // release collapses back to the ordinary click-clear path.
+    if (hit === null && session) {
+      this.marqueeArmed = true;
+      this.deps.engine.setSketchDrawingActive(true);
+    }
   };
 
   private onSelectPointerMove = (e: PointerEvent): void => {
@@ -1036,7 +1108,14 @@ export class SketchController {
       this.scheduleSelectSolve(e.clientX, e.clientY);
       return;
     }
-    if (this.dragArmed && far) void this.beginSelectDrag(e.clientX, e.clientY);
+    if (this.dragArmed && far) {
+      void this.beginSelectDrag(e.clientX, e.clientY);
+      return;
+    }
+    if (this.marqueeActive || (this.marqueeArmed && far)) {
+      this.marqueeActive = true;
+      this.scheduleMarquee(e.clientX, e.clientY);
+    }
   };
 
   /** Coalesce idle-hover hit-tests to ONE raycast per frame (P2). The engine hover
@@ -1098,6 +1177,13 @@ export class SketchController {
       this.dragEndPending = { target: pt ? [pt.x, pt.y] : undefined, restore: false };
       return;
     }
+    // Marquee past DRAG_PX → resolve the box; sub-threshold → tear it down and fall
+    // through to the unchanged click path (which clears / toggles as before).
+    if (this.marqueeActive) {
+      this.finishMarquee(e);
+      return;
+    }
+    if (this.marqueeArmed) this.cancelMarquee();
     // Not a drag: restore orbit if a handle armed it, then click-select if it was a click.
     if (this.dragArmed) {
       this.deps.engine.setSketchDrawingActive(false);
@@ -1266,6 +1352,148 @@ export class SketchController {
     this.dragEndPending = null;
   }
 
+  // ── Marquee / box select (W2-D) ─────────────────────────────────────────────
+  //
+  // Rightward drag = WINDOW (full containment, solid border); leftward = CROSSING
+  // (touch, dashed border). See marqueeSelect.ts for the geometry + the legacy
+  // divergence note.
+  //
+  // TEARDOWN. `setSketchDrawingActive` is a SHARED LMB-orbit suppression flag (armed
+  // draw tools + modal model drags use it too), so every exit path below funnels
+  // through `cancelMarquee` — pointerup (in-viewport and the window net), Esc,
+  // pointercancel, a tool switch (`selectMachine`), session teardown, and dispose.
+  // Missing one restores neither orbit nor the overlay, silently.
+
+  /** rAF-coalesced overlay update: one DOM write per frame, mode re-derived live. */
+  private scheduleMarquee(clientX: number, clientY: number): void {
+    this.pendingMarquee = { x: clientX, y: clientY };
+    if (this.marqueeScheduled) return;
+    this.marqueeScheduled = true;
+    requestAnimationFrame(() => {
+      this.marqueeScheduled = false;
+      if (this.disposed) return;
+      const pt = this.pendingMarquee;
+      this.pendingMarquee = null;
+      if (!pt || !this.marqueeActive) return;
+      this.marqueeMode = marqueeModeFor(this.downX, pt.x);
+      this.drawMarquee(pt.x, pt.y);
+    });
+  }
+
+  /** Position + restyle the overlay div for the current screen rect. */
+  private drawMarquee(clientX: number, clientY: number): void {
+    const el = this.ensureMarqueeOverlay();
+    const box = this.deps.container.getBoundingClientRect();
+    const left = Math.min(this.downX, clientX) - box.left;
+    const top = Math.min(this.downY, clientY) - box.top;
+    const s = el.style;
+    s.left = `${left}px`;
+    s.top = `${top}px`;
+    s.width = `${Math.abs(clientX - this.downX)}px`;
+    s.height = `${Math.abs(clientY - this.downY)}px`;
+    s.borderStyle = this.marqueeMode === "crossing" ? "dashed" : "solid";
+    el.dataset.marqueeMode = this.marqueeMode;
+  }
+
+  /** Lazily create the marquee div. Styling is tokens-only (no raw hex, no new
+   *  tokens): accent border + an accent-derived translucent fill via `color-mix`. */
+  private ensureMarqueeOverlay(): HTMLDivElement {
+    if (this.marqueeEl) return this.marqueeEl;
+    const el = document.createElement("div");
+    el.dataset.sketchMarquee = "1";
+    const s = el.style;
+    s.position = "absolute";
+    s.pointerEvents = "none";
+    s.zIndex = "2"; // above the engine canvas (z0) and the HTML overlay layer (z1)
+    s.boxSizing = "border-box";
+    s.borderWidth = "1px";
+    s.borderStyle = "solid";
+    s.borderColor = "var(--color-accent)";
+    s.backgroundColor = "color-mix(in srgb, var(--color-accent) 12%, transparent)";
+    this.deps.container.appendChild(el);
+    this.marqueeEl = el;
+    return el;
+  }
+
+  /**
+   * Map the drag's four SCREEN corners onto the sketch plane and take their AABB.
+   *
+   * APPROXIMATION. In the normal sketch pose (ortho, camera down the plane normal,
+   * up = plane +Y — what `enterSketch`'s `viewAlongNormal` establishes) a screen rect
+   * maps to an exactly axis-aligned plane rect, so the AABB is exact. If the user
+   * orbits off-normal the rect maps to a general quadrilateral and the AABB is its
+   * CONSERVATIVE superset — the box can then select slightly more than it visually
+   * covers. Deliberate: a superset is recoverable (Shift-click off / re-drag), a
+   * subset silently loses picks. Returns null when a corner does not hit the plane
+   * (grazing ray / no live plane).
+   */
+  private planeMarqueeRect(upX: number, upY: number): MarqueeRect | null {
+    const corners: Array<[number, number]> = [
+      [this.downX, this.downY],
+      [upX, this.downY],
+      [upX, upY],
+      [this.downX, upY],
+    ];
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const [cx, cy] of corners) {
+      const p = this.deps.engine.screenToPlane(cx, cy);
+      if (!p) return null;
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x);
+      maxY = Math.max(maxY, p.y);
+    }
+    return marqueeRectFrom(minX, minY, maxX, maxY);
+  }
+
+  /** Release past DRAG_PX: resolve the box → selection (plain replaces, Shift/Meta
+   *  UNIONs — never toggles, a box is an additive gesture), then tear down. */
+  private finishMarquee(e: { clientX: number; clientY: number; shiftKey: boolean; metaKey: boolean }): void {
+    const additive = e.shiftKey || e.metaKey;
+    const session = sketchStore.getState().session;
+    const rect = this.planeMarqueeRect(e.clientX, e.clientY);
+    const mode = marqueeModeFor(this.downX, e.clientX);
+    this.cancelMarquee(); // overlay gone + orbit restored before any store write
+    if (!session || !rect) return;
+    const picked: SketchSel[] = marqueeHits(session.entities, rect, mode).map((entityId) => ({ entityId }));
+    const store = sketchSelectionStore.getState();
+    if (!additive) {
+      store.set(picked);
+      return;
+    }
+    const current = store.selected;
+    const added = picked.filter((p) => !current.some((s) => sameSketchSel(s, p)));
+    if (added.length > 0) store.set([...current, ...added]);
+  }
+
+  /** Drop the marquee (idempotent): overlay removed + LMB orbit restored. */
+  private cancelMarquee(): void {
+    if (!this.marqueeArmed && !this.marqueeActive) return;
+    this.marqueeArmed = false;
+    this.marqueeActive = false;
+    this.pendingMarquee = null;
+    this.marqueeEl?.remove();
+    this.marqueeEl = null;
+    this.deps.engine.setSketchDrawingActive(false);
+  }
+
+  /** Window-level release net — see the constructor comment. No-ops when the
+   *  container's own pointerup already finished the marquee. */
+  private onWindowPointerUp = (e: PointerEvent): void => {
+    if (!this.marqueeArmed && !this.marqueeActive) return;
+    this.downButton = -1;
+    if (this.marqueeActive) this.finishMarquee(e);
+    else this.cancelMarquee();
+  };
+
+  /** OS/browser-level pointer loss (touch cancel, capture stolen): drop the box. */
+  private onWindowPointerCancel = (): void => {
+    this.cancelMarquee();
+  };
+
   /**
    * W1-B: apply the sticky construction draw modifier to a tool machine's output.
    * The machines are mode-blind (they already mark their OWN helper drafts, e.g. the
@@ -1300,6 +1528,30 @@ export class SketchController {
       return;
     }
     if (e.key === "Alt") this.altHeld = true;
+    // Polygon side count: 3-9 belong to the armed polygon machine, so they are
+    // claimed HERE (capture phase) before the global keymap ladder ever sees them.
+    if (
+      this.machine?.id === "polygon" &&
+      this.machineState &&
+      POLYGON_SIDES_KEY.test(e.key) &&
+      !isEditableKeyTarget(e.target)
+    ) {
+      const stepped = this.machine.step(this.machineState, { kind: "sides", n: Number(e.key) }, this.stepCtx());
+      this.machineState = stepped.state;
+      this.deps.engine.setSketchPreview(this.decorate(stepped.preview));
+      this.updatePolygonHint();
+      e.stopPropagation();
+      e.preventDefault();
+      return;
+    }
+    if (e.key === "Escape" && this.selectActive && (this.marqueeActive || this.marqueeArmed)) {
+      // Cancel the in-flight box select here (overlay + orbit restored); don't let the
+      // global Esc ladder also switch tools / leave sketch mode.
+      this.cancelMarquee();
+      e.stopPropagation();
+      e.preventDefault();
+      return;
+    }
     if (e.key === "Escape" && this.selectActive && (this.dragging || this.dragStarting)) {
       // Cancel the in-flight drag here; don't let the global Esc ladder run.
       this.cancelSelectDrag();
@@ -1317,11 +1569,8 @@ export class SketchController {
     if (e.key === "Enter" && this.machine && this.machineState && this.machineState.anchors.length > 0) {
       // A text input (e.g. the open dimension chip) owns its own Enter; this
       // handler is capture-phase on window so it would otherwise see the key
-      // before the input's own onKeyDown ever runs. Mirrors isEditableTarget
-      // in useShortcuts.ts.
-      if (e.target instanceof HTMLElement && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")) {
-        return;
-      }
+      // before the input's own onKeyDown ever runs.
+      if (isEditableKeyTarget(e.target)) return;
       // A chain is in progress: Enter ends it here (mirrors the Esc-chain branch
       // below). No anchors ⇒ this branch is skipped and the global finishSketch
       // shortcut (useShortcuts) handles Enter instead.
@@ -1361,6 +1610,9 @@ export class SketchController {
     // ONE step; there is no cancel verb) so the worker doesn't leak an open gesture.
     if (this.dragging || this.dragStarting) void this.deps.client.endGesture().catch(() => {});
     this.resetDrag();
+    this.cancelMarquee();
+    this.marqueeEl?.remove(); // belt-and-braces: an overlay with no live marquee
+    this.marqueeEl = null;
     sketchStore.getState().clearSketchUndo();
     const session = sketchStore.getState().session;
     if (session) {
@@ -1372,11 +1624,23 @@ export class SketchController {
     c.removeEventListener("pointerdown", this.onPointerDown);
     c.removeEventListener("pointermove", this.onPointerMove);
     c.removeEventListener("pointerup", this.onPointerUp);
+    window.removeEventListener("pointerup", this.onWindowPointerUp);
+    window.removeEventListener("pointercancel", this.onWindowPointerCancel);
     window.removeEventListener("keydown", this.onKeyDown, true);
     window.removeEventListener("keyup", this.onKeyUp, true);
     for (const u of this.unsubs) u();
     this.unsubs.length = 0;
   }
+}
+
+/** A key event aimed at a text field. The controller's keydown is CAPTURE-phase on
+ *  window, so it would otherwise swallow keys before the input's own handler runs.
+ *  Mirrors `isEditableTarget` in useShortcuts.ts. */
+function isEditableKeyTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof HTMLElement &&
+    (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
+  );
 }
 
 /** Human message from a rejected backend sketch call. */

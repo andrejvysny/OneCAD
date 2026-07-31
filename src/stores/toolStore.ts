@@ -44,8 +44,12 @@ export type SketchTool =
   | "select"
   | "line"
   | "rect"
+  | "centerRect"
   | "circle"
   | "arc"
+  | "polygon"
+  | "slot"
+  | "point"
   | "dimension"
   | "trim"
   | "mirror";

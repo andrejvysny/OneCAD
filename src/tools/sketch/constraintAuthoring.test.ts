@@ -7,7 +7,7 @@
 import { describe, it, expect } from "vitest";
 import type { ConstraintPosition, SketchConstraintType, SketchEntity } from "@/ipc/types";
 import { toConstraintTarget, type SketchConstraintTarget } from "./constraintTarget";
-import { evaluateApplicability } from "./constraintApplicability";
+import { evaluateApplicability, type ApplicableConstraint } from "./constraintApplicability";
 import { buildAppliedConstraint, buildAppliedDimension } from "./constraintAuthoring";
 
 const entities: SketchEntity[] = [
@@ -18,6 +18,7 @@ const entities: SketchEntity[] = [
   { id: "axis", type: "Line", p0: [5, -10], p1: [5, 10] },
   { id: "c1", type: "Circle", center: [0, 0], radius: 5 },
   { id: "c2", type: "Circle", center: [20, 0], radius: 3 },
+  { id: "arc1", type: "Arc", center: [40, 0], radius: 2, start: [42, 0], end: [40, 2] },
 ];
 
 function T(entityId: string, point?: ConstraintPosition): SketchConstraintTarget {
@@ -102,6 +103,70 @@ describe("buildAppliedConstraint — geometric", () => {
 
   it("returns null for a dimensional applicable (routed through the chip)", () => {
     expect(buildAppliedConstraint(pick([T("c1")], "Radius"), "cX")).toBeNull();
+  });
+
+  it("Tangent (line + circle) → entities in order, no positions", () => {
+    expect(buildAppliedConstraint(pick([T("lh"), T("c1")], "Tangent"), "cX")).toEqual({
+      id: "cX",
+      type: "Tangent",
+      entities: ["lh", "c1"],
+    });
+  });
+
+  it("Tangent (circle + arc)", () => {
+    expect(buildAppliedConstraint(pick([T("c1"), T("arc1")], "Tangent"), "cX")).toEqual({
+      id: "cX",
+      type: "Tangent",
+      entities: ["c1", "arc1"],
+    });
+  });
+
+  it("Equal (two lines) → entities in order, no positions", () => {
+    expect(buildAppliedConstraint(pick([T("lh"), T("lv")], "Equal"), "cX")).toEqual({
+      id: "cX",
+      type: "Equal",
+      entities: ["lh", "lv"],
+    });
+  });
+
+  it("Equal (two circles)", () => {
+    expect(buildAppliedConstraint(pick([T("c1"), T("c2")], "Equal"), "cX")).toEqual({
+      id: "cX",
+      type: "Equal",
+      entities: ["c1", "c2"],
+    });
+  });
+
+  it("Midpoint (free point + line) → [point, line] entities + point's position", () => {
+    expect(buildAppliedConstraint(pick([T("p1"), T("axis")], "Midpoint"), "cX")).toEqual({
+      id: "cX",
+      type: "Midpoint",
+      entities: ["p1", "axis"],
+      positions: ["Start"],
+    });
+  });
+
+  it("Midpoint builder defensively normalizes point-first even if targets ever arrived line-first", () => {
+    // evaluateApplicability already orders Midpoint targets [point, line] (unlike
+    // OnCurve), so this constructs the reversed shape directly to prove the
+    // builder's OWN `find`-based normalization (mirrors the OnCurve case) rather
+    // than merely re-testing evaluateApplicability's ordering.
+    const reversed: ApplicableConstraint = { type: "Midpoint", targets: [T("axis"), T("p2")], dimensional: false };
+    expect(buildAppliedConstraint(reversed, "cX")).toEqual({
+      id: "cX",
+      type: "Midpoint",
+      entities: ["p2", "axis"],
+      positions: ["Start"],
+    });
+  });
+
+  it("Midpoint (circle Center as point + a line)", () => {
+    expect(buildAppliedConstraint(pick([T("c1", "Center"), T("axis")], "Midpoint"), "cX")).toEqual({
+      id: "cX",
+      type: "Midpoint",
+      entities: ["c1", "axis"],
+      positions: ["Center"],
+    });
   });
 });
 

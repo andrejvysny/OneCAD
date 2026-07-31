@@ -1,5 +1,24 @@
 import { describe, it, expect } from "vitest";
-import { lineTool, rectTool, circleTool, arcTool, draftToEntityFields, type ToolMachine, type ToolStep } from "./toolMachine";
+import {
+  lineTool,
+  rectTool,
+  centerRectTool,
+  circleTool,
+  arcTool,
+  pointTool,
+  polygonTool,
+  slotTool,
+  clampSides,
+  draftToEntityFields,
+  perpDistance,
+  polygonVertices,
+  resolveToolConstraints,
+  DEFAULT_POLYGON_SIDES,
+  type DraftEntity,
+  type ToolMachine,
+  type ToolStep,
+} from "./toolMachine";
+import type { SketchConstraint, SketchEntity } from "@/ipc/types";
 import type { Point2 } from "@/viewport/engine/sketchBasis";
 
 function run(m: ToolMachine, events: Array<["click" | "move", Point2] | ["esc"]>): ToolStep[] {
@@ -175,6 +194,340 @@ describe("lineTool — chain end / close semantics (U4)", () => {
     expect(step.committed).toBeUndefined();
     expect(step.done).toBe(true);
     expect(step.state.anchors).toEqual([]);
+  });
+});
+
+// ── W2-B/C: point / centerRect / slot / polygon ──────────────────────────────
+
+describe("pointTool — one click commits and re-arms", () => {
+  it("commits a Point on every click and resets immediately", () => {
+    const steps = run(pointTool, [
+      ["move", { x: 5, y: 5 }],
+      ["click", { x: 5, y: 5 }],
+      ["click", { x: 20, y: 30 }],
+    ]);
+    expect(steps[0].preview).toEqual([]); // no rubber-band for a point
+    expect(steps[0].committed).toBeUndefined();
+    expect(steps[1].committed).toEqual([{ type: "Point", p0: { x: 5, y: 5 } }]);
+    expect(steps[1].done).toBe(true);
+    expect(steps[1].state.anchors).toEqual([]); // re-armed, not chained
+    expect(steps[2].committed).toEqual([{ type: "Point", p0: { x: 20, y: 30 } }]);
+  });
+
+  it("Esc resets without committing", () => {
+    const steps = run(pointTool, [["move", { x: 1, y: 1 }], ["esc"]]);
+    expect(steps[1].committed).toBeUndefined();
+    expect(steps[1].done).toBe(true);
+    expect(steps[1].state).toEqual({ anchors: [], cursor: null });
+  });
+});
+
+describe("centerRectTool — center → corner", () => {
+  it("commits the 4 lines mirrored about the center", () => {
+    const steps = run(centerRectTool, [["click", { x: 0, y: 0 }], ["click", { x: 40, y: 20 }]]);
+    expect(steps[1].done).toBe(true);
+    // Opposite corner is the reflection of the click through the centre.
+    expect(steps[1].committed).toEqual([
+      { type: "Line", p0: { x: -40, y: -20 }, p1: { x: 40, y: -20 } },
+      { type: "Line", p0: { x: 40, y: -20 }, p1: { x: 40, y: 20 } },
+      { type: "Line", p0: { x: 40, y: 20 }, p1: { x: -40, y: 20 } },
+      { type: "Line", p0: { x: -40, y: 20 }, p1: { x: -40, y: -20 } },
+    ]);
+    // NO tool-authored constraints — standard inference only (documented V1).
+    expect(steps[1].committedConstraints).toBeUndefined();
+  });
+
+  it("previews the mirrored rectangle while moving", () => {
+    const steps = run(centerRectTool, [["click", { x: 0, y: 0 }], ["move", { x: 10, y: 5 }]]);
+    expect(steps[1].preview).toHaveLength(4);
+    expect(steps[1].preview[0].p0).toEqual({ x: -10, y: -5 });
+  });
+
+  it("rejects a corner whose HALF-extent is below minSize on either axis", () => {
+    const ctx = { minSize: 4 };
+    const armed = centerRectTool.step(centerRectTool.init(), { kind: "click", pt: { x: 0, y: 0 } }, ctx);
+    const thin = centerRectTool.step(armed.state, { kind: "click", pt: { x: 2, y: 50 } }, ctx);
+    expect(thin.committed).toBeUndefined();
+    expect(thin.state.anchors).toEqual([{ x: 0, y: 0 }]); // still armed on the centre
+    const ok = centerRectTool.step(armed.state, { kind: "click", pt: { x: 40, y: 20 } }, ctx);
+    expect(ok.committed).toHaveLength(4);
+  });
+
+  it("Esc mid-gesture drops the centre anchor", () => {
+    const armed = centerRectTool.step(centerRectTool.init(), { kind: "click", pt: { x: 0, y: 0 } });
+    const escaped = centerRectTool.step(armed.state, { kind: "esc" });
+    expect(escaped.done).toBe(true);
+    expect(escaped.state.anchors).toEqual([]);
+    expect(escaped.committed).toBeUndefined();
+  });
+});
+
+describe("slotTool — centerline → width", () => {
+  const ctx = { minSize: 4 };
+
+  /** The CCW sweep midpoint of a center-start-end arc draft. */
+  function sweepMidpoint(a: DraftEntity): Point2 {
+    const c = a.center!;
+    const r = a.radius!;
+    const a0 = Math.atan2(a.start!.y - c.y, a.start!.x - c.x);
+    const a1 = Math.atan2(a.end!.y - c.y, a.end!.x - c.x);
+    let sweep = a1 - a0;
+    while (sweep <= 0) sweep += 2 * Math.PI;
+    const m = a0 + sweep / 2;
+    return { x: c.x + r * Math.cos(m), y: c.y + r * Math.sin(m) };
+  }
+
+  it("commits [wall, wall, cap@p1, cap@p0] with exact geometry", () => {
+    const steps = run(slotTool, [
+      ["click", { x: 0, y: 0 }],
+      ["click", { x: 100, y: 0 }],
+      ["click", { x: 50, y: 20 }], // perpendicular distance 20 ⇒ r = 20
+    ]);
+    const c = steps[2].committed!;
+    expect(steps[2].done).toBe(true);
+    expect(c).toHaveLength(4);
+    expect(c[0]).toEqual({ type: "Line", p0: { x: 0, y: 20 }, p1: { x: 100, y: 20 } });
+    expect(c[1]).toEqual({ type: "Line", p0: { x: 0, y: -20 }, p1: { x: 100, y: -20 } });
+    expect(c[2]).toMatchObject({ type: "Arc", center: { x: 100, y: 0 }, radius: 20 });
+    expect(c[3]).toMatchObject({ type: "Arc", center: { x: 0, y: 0 }, radius: 20 });
+    expect(c[2].start).toEqual({ x: 100, y: -20 });
+    expect(c[2].end).toEqual({ x: 100, y: 20 });
+    expect(c[3].start).toEqual({ x: 0, y: 20 });
+    expect(c[3].end).toEqual({ x: 0, y: -20 });
+  });
+
+  it("each cap sweeps 180° over the OUTSIDE of the slot (6dp)", () => {
+    // Vertical centerline so the check is not trivially axis-symmetric.
+    const steps = run(slotTool, [
+      ["click", { x: 0, y: 0 }],
+      ["click", { x: 0, y: 100 }],
+      ["click", { x: 30, y: 50 }], // r = 30
+    ]);
+    const [, , capP1, capP0] = steps[2].committed!;
+    // Beyond p1 (+d) and beyond p0 (−d), not doubling back into the slot.
+    const m1 = sweepMidpoint(capP1);
+    expect(m1.x).toBeCloseTo(0, 6);
+    expect(m1.y).toBeCloseTo(130, 6);
+    const m0 = sweepMidpoint(capP0);
+    expect(m0.x).toBeCloseTo(0, 6);
+    expect(m0.y).toBeCloseTo(-30, 6);
+    // Exactly 180° of sweep, and endpoints exactly on the wall ends.
+    expect(capP1.start).toEqual({ x: 30, y: 100 });
+    expect(capP1.end).toEqual({ x: -30, y: 100 });
+    expect(capP0.start).toEqual({ x: -30, y: 0 });
+    expect(capP0.end).toEqual({ x: 30, y: 0 });
+  });
+
+  it("authors Tangent ×4 (wall × cap) + Equal ×1 (cap ↔ cap), all entity-level", () => {
+    const steps = run(slotTool, [
+      ["click", { x: 0, y: 0 }],
+      ["click", { x: 100, y: 0 }],
+      ["click", { x: 50, y: 20 }],
+    ]);
+    expect(steps[2].committedConstraints).toEqual([
+      { type: "Tangent", refs: [0, 2] },
+      { type: "Tangent", refs: [0, 3] },
+      { type: "Tangent", refs: [1, 2] },
+      { type: "Tangent", refs: [1, 3] },
+      { type: "Equal", refs: [2, 3] },
+    ]);
+    // No arc-endpoint Coincidents: they would be silently dropped by the marshaller.
+    expect(steps[2].committedConstraints!.some((c) => c.type === "Coincident")).toBe(false);
+  });
+
+  it("rejects a sub-minSize centerline and a sub-minSize width", () => {
+    const p0 = slotTool.step(slotTool.init(), { kind: "click", pt: { x: 0, y: 0 } }, ctx);
+    const tinyLine = slotTool.step(p0.state, { kind: "click", pt: { x: 2, y: 0 } }, ctx);
+    expect(tinyLine.state.anchors).toHaveLength(1); // centerline rejected
+    const p1 = slotTool.step(p0.state, { kind: "click", pt: { x: 100, y: 0 } }, ctx);
+    expect(p1.state.anchors).toHaveLength(2);
+    const tinyWidth = slotTool.step(p1.state, { kind: "click", pt: { x: 50, y: 2 } }, ctx);
+    expect(tinyWidth.committed).toBeUndefined();
+    expect(tinyWidth.state.anchors).toHaveLength(2); // still armed on the centerline
+  });
+
+  it("previews the centerline as construction, then the full slot", () => {
+    const p0 = slotTool.step(slotTool.init(), { kind: "click", pt: { x: 0, y: 0 } }, ctx);
+    const rubber = slotTool.step(p0.state, { kind: "move", pt: { x: 100, y: 0 } }, ctx);
+    expect(rubber.preview).toEqual([
+      { type: "Line", p0: { x: 0, y: 0 }, p1: { x: 100, y: 0 }, construction: true },
+    ]);
+    const p1 = slotTool.step(p0.state, { kind: "click", pt: { x: 100, y: 0 } }, ctx);
+    const full = slotTool.step(p1.state, { kind: "move", pt: { x: 50, y: 20 } }, ctx);
+    expect(full.preview).toHaveLength(4);
+    expect(full.preview.filter((d) => d.type === "Arc")).toHaveLength(2);
+  });
+
+  it("Esc mid-gesture drops both anchors", () => {
+    const p0 = slotTool.step(slotTool.init(), { kind: "click", pt: { x: 0, y: 0 } }, ctx);
+    const p1 = slotTool.step(p0.state, { kind: "click", pt: { x: 100, y: 0 } }, ctx);
+    const escaped = slotTool.step(p1.state, { kind: "esc" }, ctx);
+    expect(escaped.done).toBe(true);
+    expect(escaped.state.anchors).toEqual([]);
+    expect(escaped.committed).toBeUndefined();
+  });
+
+  it("perpDistance measures the offset from the infinite centerline", () => {
+    expect(perpDistance({ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 300, y: -7 })).toBeCloseTo(7, 9);
+    expect(perpDistance({ x: 0, y: 0 }, { x: 0, y: 0 }, { x: 3, y: 4 })).toBe(0); // degenerate
+  });
+});
+
+describe("polygonTool — center → vertex, sides 3-12", () => {
+  const ctx = { minSize: 4 };
+
+  it("defaults to 6 sides and commits n lines + a construction circumcircle", () => {
+    const armed = polygonTool.step(polygonTool.init(), { kind: "click", pt: { x: 0, y: 0 } }, ctx);
+    expect(armed.state.sides).toBe(DEFAULT_POLYGON_SIDES);
+    const done = polygonTool.step(armed.state, { kind: "click", pt: { x: 50, y: 0 } }, ctx);
+    const c = done.committed!;
+    expect(c).toHaveLength(7); // 6 ring lines + 1 circle
+    expect(c.slice(0, 6).every((d) => d.type === "Line" && !d.construction)).toBe(true);
+    expect(c[6]).toEqual({ type: "Circle", center: { x: 0, y: 0 }, radius: 50, construction: true });
+    // The ring closes: line k's End is line k+1's Start.
+    for (let k = 0; k < 6; k++) {
+      const next = c[(k + 1) % 6];
+      expect(c[k].p1!.x).toBeCloseTo(next.p0!.x, 9);
+      expect(c[k].p1!.y).toBeCloseTo(next.p0!.y, 9);
+    }
+  });
+
+  it("authors Coincident ×n + OnCurve ×n + Equal ×(n−1) — DOF (4n+3)−2n−n−(n−1) = 4", () => {
+    const armed = polygonTool.step(polygonTool.init(), { kind: "click", pt: { x: 0, y: 0 } }, ctx);
+    const done = polygonTool.step(armed.state, { kind: "click", pt: { x: 50, y: 0 } }, ctx);
+    const specs = done.committedConstraints!;
+    const n = 6;
+    expect(specs.filter((s) => s.type === "Coincident")).toHaveLength(n);
+    expect(specs.filter((s) => s.type === "OnCurve")).toHaveLength(n);
+    expect(specs.filter((s) => s.type === "Equal")).toHaveLength(n - 1);
+    // Coincident chain wraps: the last line's End meets the first line's Start.
+    expect(specs[n - 1]).toEqual({ type: "Coincident", refs: [n - 1, 0], positions: ["End", "Start"] });
+    // OnCurve points every line's Start at the circumcircle (index n, entity-level).
+    for (const s of specs.filter((x) => x.type === "OnCurve")) {
+      expect(s.refs[1]).toBe(n);
+      expect(s.positions).toEqual(["Start", undefined]);
+    }
+  });
+
+  it("a sides event re-previews at the new count and sticks across commits", () => {
+    let step = polygonTool.step(polygonTool.init(), { kind: "sides", n: 5 }, ctx);
+    expect(step.state.sides).toBe(5);
+    step = polygonTool.step(step.state, { kind: "click", pt: { x: 0, y: 0 } }, ctx);
+    const moved = polygonTool.step(step.state, { kind: "move", pt: { x: 50, y: 0 } }, ctx);
+    expect(moved.preview).toHaveLength(6); // 5 lines + circumcircle
+    const resized = polygonTool.step(moved.state, { kind: "sides", n: 8 }, ctx);
+    expect(resized.preview).toHaveLength(9); // re-previewed at the live cursor
+    const done = polygonTool.step(resized.state, { kind: "click", pt: { x: 50, y: 0 } }, ctx);
+    expect(done.committed).toHaveLength(9);
+    expect(done.state.sides).toBe(8); // sticky after the commit
+    expect(polygonTool.step(done.state, { kind: "esc" }, ctx).state.sides).toBe(8); // and after Esc
+  });
+
+  it("clamps the side count to [3, 12]", () => {
+    expect(clampSides(1)).toBe(3);
+    expect(clampSides(2)).toBe(3);
+    expect(clampSides(3)).toBe(3);
+    expect(clampSides(12)).toBe(12);
+    expect(clampSides(99)).toBe(12);
+    expect(clampSides(6.4)).toBe(6);
+    expect(clampSides(Number.NaN)).toBe(DEFAULT_POLYGON_SIDES);
+    expect(polygonTool.step(polygonTool.init(), { kind: "sides", n: 40 }, ctx).state.sides).toBe(12);
+  });
+
+  it("rejects a vertex within minSize of the center", () => {
+    const armed = polygonTool.step(polygonTool.init(), { kind: "click", pt: { x: 0, y: 0 } }, ctx);
+    const tiny = polygonTool.step(armed.state, { kind: "click", pt: { x: 2, y: 0 } }, ctx);
+    expect(tiny.committed).toBeUndefined();
+    expect(tiny.state.anchors).toEqual([{ x: 0, y: 0 }]);
+  });
+
+  it("places the first vertex under the cursor and spaces the rest by 2π/n", () => {
+    const v = polygonVertices({ x: 0, y: 0 }, { x: 0, y: 10 }, 4);
+    expect(v[0].x).toBeCloseTo(0, 9);
+    expect(v[0].y).toBeCloseTo(10, 9);
+    expect(v[1].x).toBeCloseTo(-10, 9);
+    expect(v[1].y).toBeCloseTo(0, 9);
+    expect(v[2].x).toBeCloseTo(0, 9);
+    expect(v[2].y).toBeCloseTo(-10, 9);
+  });
+
+  it("Esc mid-gesture drops the center anchor", () => {
+    const armed = polygonTool.step(polygonTool.init(), { kind: "click", pt: { x: 0, y: 0 } }, ctx);
+    const escaped = polygonTool.step(armed.state, { kind: "esc" }, ctx);
+    expect(escaped.done).toBe(true);
+    expect(escaped.state.anchors).toEqual([]);
+  });
+});
+
+describe("sides events are ignored by every non-polygon machine", () => {
+  it("leaves the state untouched", () => {
+    for (const m of [lineTool, rectTool, centerRectTool, circleTool, arcTool, slotTool, pointTool]) {
+      const armed = m.step(m.init(), { kind: "click", pt: { x: 0, y: 0 } });
+      const ignored = m.step(armed.state, { kind: "sides", n: 5 });
+      expect(ignored.state).toBe(armed.state);
+      expect(ignored.committed).toBeUndefined();
+    }
+  });
+});
+
+describe("resolveToolConstraints — index refs → real ids + inference filter", () => {
+  const ent = (id: string): SketchEntity => ({ id, type: "Line", p0: [0, 0], p1: [1, 0] });
+  const ids = (): (() => string) => {
+    let n = 0;
+    return () => `c${++n}`;
+  };
+
+  it("returns the inference untouched when a tool authored nothing", () => {
+    const inferred: SketchConstraint[] = [{ id: "c1", type: "Horizontal", entities: ["e1"] }];
+    expect(resolveToolConstraints(undefined, [ent("e1")], inferred, ids())).toBe(inferred);
+    expect(resolveToolConstraints([], [ent("e1")], inferred, ids())).toBe(inferred);
+  });
+
+  it("resolves refs positionally against the id-assigned committed entities", () => {
+    const out = resolveToolConstraints(
+      [
+        { type: "Tangent", refs: [0, 2] },
+        { type: "Coincident", refs: [0, 1], positions: ["End", "Start"] },
+        { type: "OnCurve", refs: [1, 2], positions: ["Start", undefined] },
+      ],
+      [ent("e7"), ent("e8"), ent("e9")],
+      [],
+      ids(),
+    );
+    expect(out).toEqual([
+      { id: "c1", type: "Tangent", entities: ["e7", "e9"] },
+      { id: "c2", type: "Coincident", entities: ["e7", "e8"], positions: ["End", "Start"] },
+      // `undefined` marshals as "" — falsy, so resolveRef treats it as an ENTITY ref.
+      { id: "c3", type: "OnCurve", entities: ["e8", "e9"], positions: ["Start", ""] },
+    ]);
+  });
+
+  it("drops a spec whose ref is out of range instead of mis-binding it", () => {
+    const out = resolveToolConstraints(
+      [{ type: "Equal", refs: [0, 5] }, { type: "Equal", refs: [0, 1] }],
+      [ent("e1"), ent("e2")],
+      [],
+      ids(),
+    );
+    expect(out).toEqual([{ id: "c1", type: "Equal", entities: ["e1", "e2"] }]);
+  });
+
+  it("keeps only inferences touching a PRE-EXISTING entity when specs are present", () => {
+    const inferred: SketchConstraint[] = [
+      { id: "i1", type: "Horizontal", entities: ["e1"] }, // intra-batch → dropped
+      { id: "i2", type: "Coincident", entities: ["e1", "e2"] }, // intra-batch → dropped
+      { id: "i3", type: "Coincident", entities: ["e2", "old1"] }, // touches existing → kept
+    ];
+    const out = resolveToolConstraints(
+      [{ type: "Equal", refs: [0, 1] }],
+      [ent("e1"), ent("e2")],
+      inferred,
+      ids(),
+    );
+    expect(out).toEqual([
+      { id: "c1", type: "Equal", entities: ["e1", "e2"] },
+      { id: "i3", type: "Coincident", entities: ["e2", "old1"] },
+    ]);
   });
 });
 

@@ -71,6 +71,14 @@ export const ICON_PATHS = {
   linearPattern: "M4 8h4v4H4zM10 8h4v4h-4zM16 8h4v4h-4z", // three instances in a row
   circularPattern: "M18 12a6 6 0 1 1-12 0 6 6 0 0 1 12 0zM11 5h2v2h-2zM5.8 14h2v2h-2zM16.2 14h2v2h-2z", // instances around a circle
   mirrorBody: "M12 4v16M4 9h4v6H4zM16 9h4v6h-4z", // a body + its reflection across a plane
+
+  // ---- W2-B/C sketch tools (authored for this WP, NOT from the prototype) ----
+  // Same conventions as the prototype glyphs: 24×24 grid, single stroked path,
+  // fill none, round caps/joins, weights read cleanly at 14–15px.
+  centerRect: "M5 6.5h14v11H5zM10 12h4M12 10v4", // the rect glyph + its centre mark
+  polygon: "M12 4L18.9 8V16L12 20L5.1 16V8Z", // regular hexagon (default 6 sides)
+  slot: "M8.5 7.5h7a4.5 4.5 0 0 1 0 9h-7a4.5 4.5 0 0 1 0-9z", // stadium: 2 walls + 2 caps
+  point: "M13.5 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zM12 4.5v3M12 16.5v3M4.5 12h3M16.5 12h3", // dot + crosshair ticks
 } as const;
 
 export type IconName = keyof typeof ICON_PATHS;

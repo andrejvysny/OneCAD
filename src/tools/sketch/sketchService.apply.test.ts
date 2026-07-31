@@ -83,6 +83,35 @@ describe("applyConstraint — geometric author + reject-on-conflict", () => {
     expect(s.dof).toBe(0);
   });
 
+  it("rejects + reverts a duplicate Tangent that over-constrains the sketch", async () => {
+    // line (4 DOF) + circle (3 DOF) = 7 total, fully consumed by 4 pre-seeded
+    // constraints (Fixed × 2 on the line's endpoints + Fixed on the circle's
+    // center + Radius) — mirrors the real-world case this design targets:
+    // autoConstrain.ts already infers a Tangent for an arc-start-on-line, so a
+    // user re-applying Tangent on an already-fully-constrained pair is a
+    // redundant duplicate the worker reports as OverConstrained.
+    const entities = [line("e1", [0, 0], [40, 0]), circle("e2", [60, 0], 10)];
+    seed(entities, [
+      { id: "k1", type: "Fixed", entities: ["e1"], positions: ["Start"] },
+      { id: "k2", type: "Fixed", entities: ["e1"], positions: ["End"] },
+      { id: "k3", type: "Fixed", entities: ["e2"], positions: ["Center"] },
+      { id: "k4", type: "Radius", entities: ["e2"], value: 10 },
+    ]);
+    const tangent = evaluateApplicability(targetsFor(entities, { entityId: "e1" }, { entityId: "e2" }), entities).find(
+      (a) => a.type === "Tangent",
+    )!;
+    expect(tangent).toBeDefined();
+
+    const { rejected } = await applyConstraint(mockClient, tangent);
+    expect(rejected).toBe(true);
+
+    const s = sketchStore.getState().session!;
+    expect(s.constraints.some((c) => c.type === "Tangent")).toBe(false);
+    expect(s.constraints).toHaveLength(4);
+    expect(s.status).toBe("FullyConstrained");
+    expect(s.dof).toBe(0);
+  });
+
   it("is a no-op with no active session", async () => {
     const { rejected } = await applyConstraint(mockClient, {
       type: "Parallel",

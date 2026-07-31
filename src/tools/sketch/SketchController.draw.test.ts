@@ -24,6 +24,8 @@ import type {
 import { toolStore, type SketchTool } from "@/stores/toolStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { settingsStore } from "@/stores/settingsStore";
+import { viewportStore } from "@/stores/viewportStore";
+import { solveDof } from "@/ipc/mockSketch";
 import { resetStores } from "@/test/resetStores";
 import { flushSketchMutations } from "./sketchService";
 
@@ -257,6 +259,119 @@ describe("SketchController draw tools (pointer path)", () => {
 
     expect(entities()).toHaveLength(1); // unchanged — no stray commit
     expect(internals().machineState?.anchors).toEqual([]);
+  });
+
+  // ── W2-B/C: tool-authored constraints reach the session with REAL ids ───────
+
+  it("slot: 3 clicks commit 2 walls + 2 cap arcs with Tangent ×4 + Equal ×1", async () => {
+    await setTool("slot");
+    click(0, 0); // p0
+    click(100, 0); // p1 — centerline
+    click(50, 20); // width point ⇒ r = 20
+    await flushSketchMutations();
+
+    const ents = entities();
+    expect(ents).toHaveLength(4);
+    expect(ents.map((e) => e.type)).toEqual(["Line", "Line", "Arc", "Arc"]);
+    expect(ents[2]).toMatchObject({ center: [100, 0], radius: 20 });
+    expect(ents[3]).toMatchObject({ center: [0, 0], radius: 20 });
+
+    const cons = session().constraints;
+    const tangents = cons.filter((c) => c.type === "Tangent");
+    const equals = cons.filter((c) => c.type === "Equal");
+    expect(tangents).toHaveLength(4);
+    expect(equals).toHaveLength(1);
+    // The index refs resolved to the REAL minted ids of this batch.
+    const [w1, w2, capP1, capP0] = ents.map((e) => e.id);
+    expect(tangents.map((c) => c.entities)).toEqual([
+      [w1, capP1],
+      [w1, capP0],
+      [w2, capP1],
+      [w2, capP0],
+    ]);
+    expect(equals[0].entities).toEqual([capP1, capP0]);
+    // Intra-batch inference is suppressed: no duplicate Tangent/Coincident/H-V.
+    expect(cons).toHaveLength(5);
+
+    // MOCK-ONLY DOF (mockSketch's coarse table, NOT a real solver rank):
+    // 2 lines (4 each) + 2 arcs (5 each) = 18 − 4 Tangent − 1 Equal = 13.
+    expect(solveDof(ents, cons).dof).toBe(13);
+  });
+
+  it("polygon: commits n lines + a CONSTRUCTION circumcircle with the regularity set", async () => {
+    await setTool("polygon");
+    click(0, 0); // center
+    click(50, 0); // vertex ⇒ r = 50
+    await flushSketchMutations();
+
+    const ents = entities();
+    expect(ents).toHaveLength(7); // 6 ring lines + circumcircle
+    expect(ents.slice(0, 6).every((e) => e.type === "Line" && !e.construction)).toBe(true);
+    const circle = ents[6];
+    expect(circle).toMatchObject({ type: "Circle", center: [0, 0], construction: true });
+    expect(circle.radius).toBeCloseTo(50, 9);
+
+    const cons = session().constraints;
+    expect(cons.filter((c) => c.type === "Coincident")).toHaveLength(6);
+    expect(cons.filter((c) => c.type === "OnCurve")).toHaveLength(6);
+    expect(cons.filter((c) => c.type === "Equal")).toHaveLength(5);
+    expect(cons).toHaveLength(17); // nothing else — intra-batch inference dropped
+    // Every OnCurve pins a line Start to the circumcircle (entity-level 2nd slot).
+    for (const c of cons.filter((x) => x.type === "OnCurve")) {
+      expect(c.entities[1]).toBe(circle.id);
+      expect(c.positions).toEqual(["Start", ""]);
+    }
+
+    // MOCK-ONLY DOF: (4n + 3) − 2n − n − (n − 1) = 4.
+    expect(solveDof(ents, cons).dof).toBe(4);
+  });
+
+  it("polygon: a digit key changes the side count + the status hint", async () => {
+    await setTool("polygon");
+    expect(viewportStore.getState().statusHint?.message).toBe("Polygon — 6 sides · 3–9 to change");
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "5", bubbles: true, cancelable: true }));
+    expect(viewportStore.getState().statusHint?.message).toBe("Polygon — 5 sides · 3–9 to change");
+
+    click(0, 0);
+    click(50, 0);
+    await flushSketchMutations();
+
+    const ents = entities();
+    expect(ents).toHaveLength(6); // 5 ring lines + circumcircle
+    expect(session().constraints.filter((c) => c.type === "Equal")).toHaveLength(4);
+    // The count is sticky — the tool re-arms at 5 sides.
+    expect(viewportStore.getState().statusHint?.message).toBe("Polygon — 5 sides · 3–9 to change");
+  });
+
+  it("point: each click commits a Point; a repeat click auto-constrains Coincident", async () => {
+    await setTool("point");
+    click(0, 0);
+    await flushSketchMutations();
+    expect(entities()).toHaveLength(1);
+    expect(entities()[0]).toMatchObject({ type: "Point", p0: [0, 0] });
+
+    click(0, 0); // exactly on the first point ⇒ Coincident inferred
+    await flushSketchMutations();
+    expect(entities()).toHaveLength(2);
+    expect(session().constraints.filter((c) => c.type === "Coincident")).toHaveLength(1);
+  });
+
+  it("centerRect: center + corner commit the 4 mirrored lines", async () => {
+    await setTool("centerRect");
+    click(0, 0);
+    click(50, 25);
+    await flushSketchMutations();
+
+    const ents = entities();
+    expect(ents).toHaveLength(4);
+    expect(ents[0]).toMatchObject({ type: "Line", p0: [-50, -25], p1: [50, -25] });
+    expect(ents[2]).toMatchObject({ type: "Line", p0: [50, 25], p1: [-50, 25] });
+    // No tool-authored set ⇒ the standard inference still fires (H/V + corners).
+    const cons = session().constraints;
+    expect(cons.some((c) => c.type === "Horizontal")).toBe(true);
+    expect(cons.some((c) => c.type === "Vertical")).toBe(true);
+    expect(cons.some((c) => c.type === "Coincident")).toBe(true);
   });
 
   it("minSize scales with planePixelWorld (screen-constant reject radius)", async () => {

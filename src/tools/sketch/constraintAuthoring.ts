@@ -88,9 +88,19 @@ export function buildAppliedConstraint(
       return { id, type: a.type, entities: [t[0].entityId] };
     case "Parallel":
     case "Perpendicular":
+    case "Tangent":
+    case "Equal":
       return { id, type: a.type, entities: [t[0].entityId, t[1].entityId] };
     case "Concentric":
       return { id, type: "Concentric", entities: [t[0].entityId, t[1].entityId] };
+    case "Midpoint": {
+      // evaluateApplicability already orders these [point, line], but normalize
+      // defensively (mirrors the OnCurve case just below).
+      const point = t.find((x) => x.kind === "point");
+      const line = t.find((x) => x.kind === "line");
+      if (!point || !line) return null;
+      return { id, type: "Midpoint", entities: [point.entityId, line.entityId], positions: [posOf(point)] };
+    }
     case "Fixed": {
       const p = t[0];
       return { id, type: "Fixed", entities: [p.entityId], positions: [posOf(p)] };

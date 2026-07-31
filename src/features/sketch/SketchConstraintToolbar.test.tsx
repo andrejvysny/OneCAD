@@ -43,12 +43,14 @@ describe("SketchConstraintToolbar", () => {
     expect(screen.queryByRole("toolbar", { name: "Constraints" })).toBeNull();
   });
 
-  it("renders all 13 constraint buttons, all disabled with no selection", () => {
+  it("renders all 16 constraint buttons, all disabled with no selection", () => {
+    // 12 geometric (GEOMETRIC_TYPES — includes the Tangent/Equal/Midpoint
+    // frontend-extension additions) + 4 dimensional (DIMENSIONAL_TYPES).
     render(<SketchConstraintToolbar />);
     enterSketch(twoLines, []);
     const bar = screen.getByRole("toolbar", { name: "Constraints" });
     const buttons = bar.querySelectorAll("button");
-    expect(buttons).toHaveLength(13);
+    expect(buttons).toHaveLength(16);
     buttons.forEach((b) => expect(b).toBeDisabled());
   });
 

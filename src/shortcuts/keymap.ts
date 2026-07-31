@@ -3,15 +3,27 @@
  *
  * Model:  V select · S new-sketch (enters sketch mode) · E extrude · R revolve
  *         · F fillet · B combine/boolean
- * Sketch: V select · L line · R rectangle · C circle · A arc · D dimension
- *         · T trim · M mirror · X construction (flip selection / sticky mode)
+ * Sketch: V select · L line · R rectangle · ⇧R center-rectangle · C circle
+ *         · A arc · G polygon · S slot · P point · D dimension · T trim
+ *         · M mirror · X construction (flip selection / sticky mode)
  * Global: Esc cancel-ladder · Enter finish-sketch (sketch mode) · H home (stub)
  *         · Shift+F zoom-to-fit
  *
- * `R` intentionally means different tools per mode (revolve vs rectangle) — that
- * is resolved by `mode`, not by a chord. `F` collides between the Fillet tool
- * (model toolbar) and zoom-to-fit (nav pill): the toolbar tool wins plain `F`
- * and zoom-to-fit moves to Shift+F. See the WP report's collision note.
+ * COLLISIONS (all deliberate, all resolved by `mode` or by a chord — never by
+ * guessing):
+ *   - `R` means different tools per mode (revolve vs rectangle).
+ *   - `⇧R` (exact shift match) is the sketch center-rectangle. Model mode has no
+ *     ⇧R of its own, so it falls through cross-mode and starts a sketch with it.
+ *   - `F` collides between the Fillet tool (model toolbar) and zoom-to-fit (nav
+ *     pill): the toolbar tool wins plain `F`, zoom-to-fit moves to ⇧F.
+ *   - `P` in SKETCH mode is the Point tool, which SHADOWS the cross-mode fallback
+ *     to model `P` = Linear pattern (W2-B, deliberate: a draw tool must beat a
+ *     mode-crossing model op while the user is drawing). Model `P` is unchanged.
+ *   - `S` in SKETCH mode is the Slot tool. Model `S` = new-sketch stays intact
+ *     because mode bindings win, and `enterSketch` is not a `tool` action, so the
+ *     cross-mode fallback could never have claimed sketch `S` anyway.
+ *   - `G` was free in both modes; sketch owns it (Polygon) and model mode reaches
+ *     it through the normal cross-mode fallback.
  *
  * AUTO-MODE: a key bound only in the OTHER mode resolves cross-mode (tool
  * actions only) so shortcuts drive the automatic mode switch — see
@@ -58,8 +70,14 @@ export const SKETCH_KEYS: KeyBinding[] = [
   { key: "v", action: { type: "tool", tool: "select" } },
   { key: "l", action: { type: "tool", tool: "line" } },
   { key: "r", action: { type: "tool", tool: "rect" } },
+  // W2-B: exact-match shift chord — plain `r` above still resolves to `rect`
+  // because `resolveBinding` compares `Boolean(b.shift) === shift`.
+  { key: "r", shift: true, action: { type: "tool", tool: "centerRect" } },
   { key: "c", action: { type: "tool", tool: "circle" } },
   { key: "a", action: { type: "tool", tool: "arc" } },
+  { key: "g", action: { type: "tool", tool: "polygon" } },
+  { key: "s", action: { type: "tool", tool: "slot" } },
+  { key: "p", action: { type: "tool", tool: "point" } },
   { key: "d", action: { type: "tool", tool: "dimension" } },
   { key: "t", action: { type: "tool", tool: "trim" } },
   { key: "m", action: { type: "tool", tool: "mirror" } },
