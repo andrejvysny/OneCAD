@@ -40,6 +40,10 @@ export function EditorScreen() {
     return createClient().onNeedsRepair((e) => repairStore.getState().applyEvent(e));
   }, []);
 
+  // NOTE: the `close-requested` subscription + <UnsavedChangesDialog/> live in
+  // App.tsx, NOT here — the start screen must hear the event too, else the Rust
+  // ExitGuard latches on the first attempt and the app becomes unclosable.
+
   return (
     <div className="flex h-full w-full select-none flex-col overflow-hidden bg-white font-ui">
       <TitleBar />

@@ -104,6 +104,11 @@ pub struct FeatureDto {
     /// non-error status.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_message: Option<String>,
+    /// Whether the op is suppressed — an axis ORTHOGONAL to [`FeatureStatus`],
+    /// sourced from the RECORD flag (`OperationRecord::suppressed`), never from a
+    /// [`StepState`]. Always serialized so the frontend can drop its optimistic
+    /// suppression overlay and read the backend truth.
+    pub suppressed: bool,
 }
 
 /// The full document projection (`documentStore.ts` `DocumentProjection`).
@@ -713,6 +718,9 @@ pub fn feature_value_text(op: &Operation) -> String {
         KnownOperation::Fillet(p) => format!("{:.1} mm", p.radius.value),
         KnownOperation::Chamfer(p) => format!("{:.1} mm", p.radius.value),
         KnownOperation::Shell(p) => format!("{:.1} mm", p.thickness.value),
+        // The operation IS a boolean row's one editable parameter — without it a
+        // re-edit op swap has no visible projection signal at all.
+        KnownOperation::Boolean(p) => format!("{:?}", p.operation),
         _ => String::new(),
     }
 }
@@ -752,6 +760,12 @@ pub fn default_label(op: &Operation) -> &'static str {
 }
 
 /// Maps a regen [`StepState`] to a frontend feature status.
+///
+/// Suppression is an **orthogonal axis** and rides [`FeatureDto::suppressed`]
+/// (sourced from the record flag), not this status: `StepState::Suppressed` keeps
+/// folding into `Dirty` here — a skipped step has no regen result, which is exactly
+/// what "awaiting regen" renders as — while the dedicated flag tells the frontend
+/// *why*.
 #[must_use]
 pub fn feature_status(state: &StepState) -> FeatureStatus {
     match state {
@@ -825,6 +839,7 @@ mod tests {
                 value_text: "25.0 mm".into(),
                 status: FeatureStatus::Ok,
                 status_message: None,
+                suppressed: false,
             }],
             applied_ops: 1,
             total_ops: 1,
@@ -845,6 +860,52 @@ mod tests {
         let op = extrude(25.0);
         assert_eq!(feature_kind(&op), FeatureKind::Extrude);
         assert_eq!(feature_value_text(&op), "25.0 mm");
+    }
+
+    /// PIN (frontend contract): the projection folds the pattern/mirror ops into
+    /// `kind: "boolean"` and Shell into `kind: "fillet"`, so `kind` can NEVER be
+    /// the routing key for a parametric re-edit — only `opType` can. The frontend
+    /// re-edit guards (`ModelToolController.editLinearPatternFeature` et al.) gate
+    /// on exactly these `opType` strings; changing either side breaks re-edit
+    /// silently (the guard just returns), which is why both are pinned together.
+    #[test]
+    fn folded_kinds_keep_their_authored_op_type() {
+        use onecad_core::document::record::{LinearPatternParams, ShellParams};
+        use onecad_core::math::Vec3;
+
+        let lp = Operation::Known(KnownOperation::LinearPattern(LinearPatternParams {
+            source_body: None,
+            direction: Vec3::new(1.0, 0.0, 0.0).unwrap(),
+            spacing: Scalar::new(20.0),
+            count: 4,
+            fuse_result: true,
+            extra: Default::default(),
+        }));
+        // A LinearPattern record's FeatureDto: kind Boolean, opType "LinearPattern".
+        let dto = FeatureDto {
+            id: "f7".into(),
+            kind: feature_kind(&lp),
+            op_type: op_type_name(&lp),
+            label: "Linear Pattern".into(),
+            value_text: feature_value_text(&lp),
+            status: FeatureStatus::Ok,
+            status_message: None,
+            suppressed: false,
+        };
+        assert_eq!(dto.kind, FeatureKind::Boolean);
+        assert_eq!(dto.op_type, "LinearPattern");
+        let v = serde_json::to_value(&dto).unwrap();
+        assert_eq!(v["kind"], "boolean");
+        assert_eq!(v["opType"], "LinearPattern");
+
+        let shell = Operation::Known(KnownOperation::Shell(ShellParams {
+            thickness: Scalar::new(2.0),
+            open_faces: Vec::new(),
+            target_body: None,
+            extra: Default::default(),
+        }));
+        assert_eq!(feature_kind(&shell), FeatureKind::Fillet);
+        assert_eq!(op_type_name(&shell), "Shell");
     }
 
     #[test]
@@ -923,9 +984,14 @@ mod tests {
             value_text: "25.0 mm".into(),
             status: FeatureStatus::Ok,
             status_message: None,
+            suppressed: false,
         };
         let v = serde_json::to_value(&ok).unwrap();
         assert!(v.get("statusMessage").is_none(), "absent ⇒ omitted");
+        assert_eq!(
+            v["suppressed"], false,
+            "`suppressed` is a plain bool, ALWAYS on the wire"
+        );
 
         let errored = FeatureDto {
             status: FeatureStatus::Error,

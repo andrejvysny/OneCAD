@@ -11,13 +11,37 @@
  * lower-revision projection is dropped). The empty projection (status "empty",
  * revision 0 — emitted on close) always resets the store.
  */
-import { documentStore, type DocumentProjection, type SketchStatus } from "@/stores/documentStore";
+import { documentStore, type DocumentProjection, type FeatureMeta, type SketchStatus } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
 import type { DocumentProjectionWire, FeatureRecord } from "./types";
 
 /** Coerce a wire sketch status token to the store's `SketchStatus`. */
 function sketchStatus(s: string): SketchStatus {
   return s === "ok" || s === "under" || s === "over" || s === "error" ? s : "under";
+}
+
+/**
+ * The ONE `FeatureRecord` (wire) → `FeatureMeta` (store) mapping — every site that
+ * hydrates a feature timeline (projection snapshot, `ApplyOperationResult` in
+ * `historyActions`, `ModelToolController.applyResult`) must go through this so a
+ * field added to one never silently drops out of another (a past bug: two
+ * hand-rolled copies dropped `statusMessage`).
+ */
+export function toFeatureMeta(f: FeatureRecord): FeatureMeta {
+  return {
+    id: f.id,
+    kind: f.kind,
+    // Re-edits route on the exact authored opType, not the coarse `kind` bucket
+    // (the backend folds Chamfer into "fillet", patterns/mirror into "boolean").
+    opType: f.opType,
+    label: f.label,
+    valueText: f.valueText,
+    status: f.status,
+    // Carry the worker failure reason through to the store so the HistoryList row
+    // tooltips it (MODEL-HARDEN W0.5). `undefined` for any non-error feature.
+    statusMessage: f.statusMessage,
+    suppressed: f.suppressed,
+  };
 }
 
 /** Map the wire projection to the store projection (field-identical shapes). */
@@ -33,19 +57,7 @@ export function projectionToStore(p: DocumentProjectionWire): DocumentProjection
       geometryToken: s.geometryToken,
     };
   }
-  const features = p.features.map((f: FeatureRecord) => ({
-    id: f.id,
-    kind: f.kind,
-    // Re-edits route on the exact authored opType, not the coarse `kind` bucket
-    // (the backend folds Chamfer into "fillet", patterns/mirror into "boolean").
-    opType: f.opType,
-    label: f.label,
-    valueText: f.valueText,
-    status: f.status,
-    // Carry the worker failure reason through to the store so the HistoryList row
-    // tooltips it (MODEL-HARDEN W0.5). `undefined` for any non-error feature.
-    statusMessage: f.statusMessage,
-  }));
+  const features = p.features.map(toFeatureMeta);
   return {
     status: p.status,
     revision: p.revision,

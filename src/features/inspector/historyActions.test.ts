@@ -5,24 +5,78 @@
  */
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { suppressFeature, rollToIndex, deleteFeature, rebindCandidate } from "./historyActions";
+import { toFeatureMeta } from "@/ipc/projectionHydration";
 import { mockClient } from "@/ipc/mockClient";
-import { historyStore } from "@/stores/historyStore";
 import { documentStore } from "@/stores/documentStore";
+import { selectionStore } from "@/stores/selectionStore";
+import { viewportStore } from "@/stores/viewportStore";
 import { resetStores } from "@/test/resetStores";
-import type { NeedsRepairItem, ResolveCandidate } from "@/ipc/types";
+import type { FeatureRecord, NeedsRepairItem, ResolveCandidate } from "@/ipc/types";
 
 beforeEach(() => resetStores());
 
+describe("toFeatureMeta", () => {
+  it("carries statusMessage and suppressed through (the shared mapping historyActions and ModelToolController both use)", () => {
+    const record: FeatureRecord = {
+      id: "f9",
+      kind: "revolve",
+      opType: "Revolve",
+      label: "Revolve",
+      valueText: "90°",
+      status: "error",
+      statusMessage: "revolve axis lineId not found",
+      suppressed: true,
+    };
+    expect(toFeatureMeta(record)).toEqual({
+      id: "f9",
+      kind: "revolve",
+      opType: "Revolve",
+      label: "Revolve",
+      valueText: "90°",
+      status: "error",
+      statusMessage: "revolve axis lineId not found",
+      suppressed: true,
+    });
+  });
+});
+
 describe("historyActions — command mapping", () => {
-  it("suppressFeature sends SetOperationSuppression + optimistically dims", async () => {
+  it("suppressFeature cascades when SUPPRESSING + dims from the RESULT projection (no overlay)", async () => {
     const apply = vi.spyOn(mockClient, "applyEditCommand");
     await suppressFeature("f3", true);
-    expect(apply.mock.calls[0][0]).toMatchObject({
+    expect(apply.mock.calls[0][0]).toEqual({
       cmd: "setOperationSuppression",
       record: "f3",
       suppressed: true,
+      cascade: true,
     });
-    expect(historyStore.getState().suppressed.f3).toBe(true);
+    // The dim state IS the projection: the backend-authoritative `suppressed` flag
+    // hydrated from the returned features array, not a frontend overlay.
+    expect(documentStore.getState().features.find((f) => f.id === "f3")?.suppressed).toBe(true);
+    apply.mockRestore();
+  });
+
+  it("suppressFeature does NOT cascade when UN-suppressing (never resurrects deliberately-suppressed dependents)", async () => {
+    const apply = vi.spyOn(mockClient, "applyEditCommand");
+    await suppressFeature("f3", true);
+    await suppressFeature("f3", false);
+    expect(apply.mock.calls[1][0]).toEqual({
+      cmd: "setOperationSuppression",
+      record: "f3",
+      suppressed: false,
+      cascade: false,
+    });
+    expect(documentStore.getState().features.find((f) => f.id === "f3")?.suppressed).toBe(false);
+    apply.mockRestore();
+  });
+
+  it("a FAILED suppress leaves the projection untouched (nothing optimistic to revert)", async () => {
+    const apply = vi
+      .spyOn(mockClient, "applyEditCommand")
+      .mockRejectedValue(new Error("regen refused"));
+    await suppressFeature("f3", true);
+    expect(documentStore.getState().features.find((f) => f.id === "f3")?.suppressed).toBeUndefined();
+    expect(viewportStore.getState().statusHint?.severity).toBe("error");
     apply.mockRestore();
   });
 
@@ -91,6 +145,43 @@ describe("historyActions — rebind flow (promote → EditOperationInput)", () =
     expect((cmd as { reference: { element: { primary: { kind: string } } } }).reference.element.primary.kind).toBe(
       "edge",
     );
+    promote.mockRestore();
+    apply.mockRestore();
+  });
+
+  it("refuses with a sticky ambiguity hint when >1 body and none/many are selected (never guesses)", async () => {
+    documentStore.setState({
+      bodies: {
+        body1: { id: "body1", name: "Body 1", visible: true },
+        body2: { id: "body2", name: "Body 2", visible: true },
+      },
+    });
+    selectionStore.getState().clear(); // no explicit user statement
+    const promote = vi.spyOn(mockClient, "promoteSelection");
+    const ok = await rebindCandidate(item, candidate);
+    expect(ok).toBe(false);
+    expect(promote).not.toHaveBeenCalled();
+    const hint = viewportStore.getState().statusHint;
+    expect(hint?.severity).toBe("error");
+    expect(hint?.message).toBe(
+      "Cannot repair: operated body is ambiguous (2 bodies). Select the body this feature operated on first.",
+    );
+    promote.mockRestore();
+  });
+
+  it("honors an explicit single-body selection as the operated body when >1 body exists", async () => {
+    documentStore.setState({
+      bodies: {
+        body1: { id: "body1", name: "Body 1", visible: true },
+        body2: { id: "body2", name: "Body 2", visible: true },
+      },
+    });
+    selectionStore.getState().set([{ kind: "body", id: "body2" }]);
+    const promote = vi.spyOn(mockClient, "promoteSelection");
+    const apply = vi.spyOn(mockClient, "applyEditCommand");
+    const ok = await rebindCandidate(item, candidate);
+    expect(ok).toBe(true);
+    expect(promote.mock.calls[0][0]).toBe("body2"); // the explicitly-selected body, not a guess
     promote.mockRestore();
     apply.mockRestore();
   });

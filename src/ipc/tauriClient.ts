@@ -129,6 +129,8 @@ const CMD = {
   faceSketchPlane: "face_sketch_plane",
   previewOp: "preview_op",
   resolveRefs: "resolve_refs",
+  confirmExit: "confirm_exit",
+  cancelExit: "cancel_exit",
 } as const;
 
 const EVT = {
@@ -138,10 +140,25 @@ const EVT = {
   sketchSolved: "sketch-solved",
   workerStatus: "worker-status",
   needsRepair: "needs-repair",
+  closeRequested: "close-requested",
 } as const;
 
 /** Local lane bookkeeping latency; exact Tauri L2 geometry comes from PreviewOp. */
 const PREVIEW_LATENCY_MS = 16;
+
+/**
+ * `EditCommand`s that mutate body/sketch METADATA only. Rust maps every one of
+ * them to `RegenHint::None` (edit/session.rs), so no regen runs, no
+ * `document-changed` / `regen-finished` ever arrives, and the normal correlation
+ * awaiter would sit out the full safety timeout. `applyEditCommand` takes the
+ * command's own projection as the result instead. Keep this list in lockstep with
+ * the `RegenHint::None` rows of that table.
+ */
+const METADATA_ONLY_CMDS: ReadonlySet<string> = new Set([
+  "setVisibility",
+  "renameBody",
+  "renameSketch",
+]);
 
 /**
  * Ultimate fallback for a regen's correlation if NEITHER `document-changed` nor
@@ -252,6 +269,7 @@ export function createTauriClient(): CadClient {
   const projectionListeners = new Set<(p: DocumentProjectionWire) => void>();
   const workerStatusListeners = new Set<(s: WorkerStatus) => void>();
   const needsRepairListeners = new Set<(e: NeedsRepairEvent) => void>();
+  const closeRequestedListeners = new Set<() => void>();
   // Latest published snapshot id for promote_selection — carried by every
   // `document-changed` event (SCHEMA §7.5). Picks resolve against the snapshot the
   // fetched mesh was tessellated at (Invariant 4). Starts at 0 (nothing published).
@@ -422,6 +440,10 @@ export function createTauriClient(): CadClient {
     for (const cb of [...needsRepairListeners]) cb(e);
   }
 
+  function onCloseRequestedEvent(): void {
+    for (const cb of [...closeRequestedListeners]) cb();
+  }
+
   /** Await the correlated regen completion for a commit. Register BEFORE invoking
    *  (so no event is missed), then `setTarget(R)` once the projection revision is
    *  known. `recordId` (a fresh AddOperation) opts into the failedSteps / affectedBodies
@@ -479,6 +501,7 @@ export function createTauriClient(): CadClient {
         }),
         await listen<WorkerStatus>(EVT.workerStatus, (e) => onWorkerStatusEvent(e.payload)),
         await listen<NeedsRepairEvent>(EVT.needsRepair, (e) => onNeedsRepairEvent(e.payload)),
+        await listen<void>(EVT.closeRequested, () => onCloseRequestedEvent()),
       );
     } catch {
       // A missing event bridge must not break command-only flows.
@@ -926,6 +949,22 @@ export function createTauriClient(): CadClient {
   }
 
   async function applyEditCommand(command: WireEditCommand): Promise<ApplyOperationResult> {
+    if (METADATA_ONLY_CMDS.has(command.cmd)) {
+      // Metadata-only: `RegenHint::None` on the Rust side (edit/session.rs dirty/regen
+      // table), so `apply_edit_command` publishes a projection and NO regen ever runs.
+      // Registering a correlation awaiter would therefore stall on the 8 s safety
+      // timeout for every eye click. Take the pre-regen projection as the whole answer
+      // — the same shape `deleteSketch` uses. NOTE: DeleteSketch is deliberately NOT in
+      // this set: it dirties the timeline (`ToEnd`) and must stay correlated.
+      const projection = await call<DocumentProjectionDto>(CMD.applyEditCommand, { command });
+      return {
+        revision: projection.revision,
+        changedBodies: [],
+        removedBodies: [],
+        features: projection.features,
+        opLabel: editCommandLabel(command),
+      };
+    }
     return applyEdit(CMD.applyEditCommand, { command }, editCommandLabel(command));
   }
 
@@ -1044,6 +1083,19 @@ export function createTauriClient(): CadClient {
       void ensureEvents();
       needsRepairListeners.add(cb);
       return () => needsRepairListeners.delete(cb);
+    },
+
+    onCloseRequested(cb: () => void): () => void {
+      void ensureEvents();
+      closeRequestedListeners.add(cb);
+      return () => closeRequestedListeners.delete(cb);
+    },
+
+    async confirmExit(): Promise<void> {
+      await call<void>(CMD.confirmExit);
+    },
+    async cancelExit(): Promise<void> {
+      await call<void>(CMD.cancelExit);
     },
 
     async getBodyMesh(bodyId: string, lod: Lod): Promise<ArrayBuffer> {

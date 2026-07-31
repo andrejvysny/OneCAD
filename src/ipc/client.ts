@@ -313,6 +313,33 @@ export interface CadClient {
    * recovered document (returns a snapshot); `accept:false` discards it (returns null).
    */
   recoverDocument(accept: boolean): Promise<DocumentSnapshot | null>;
+
+  // ── Close/quit confirmation (unsaved-changes guard) ────────────────────────
+  // Rust intercepts BOTH the native window-close button AND an app-level exit
+  // request (⌘Q), preventing either server-side so the frontend always gets a
+  // chance to prompt for unsaved changes first. Both funnel into ONE event.
+
+  /**
+   * Subscribe to backend `close-requested` events — the native window-close
+   * button or an app-level exit request (e.g. ⌘Q), either already prevented
+   * server-side pending this decision (`appStore.requestClose("quit")`). The
+   * mock never emits (there is no native window/process to close).
+   */
+  onCloseRequested(cb: () => void): Unsubscribe;
+
+  /**
+   * Resolve a pending close/quit prompt by proceeding: clears the backend's
+   * re-entrancy guard and exits the app. A no-op in the mock (Playwright-over-vite
+   * has no app process to exit).
+   */
+  confirmExit(): Promise<void>;
+
+  /**
+   * Resolve a pending close/quit prompt by cancelling: clears the backend's
+   * re-entrancy guard WITHOUT exiting, so a later attempt prompts again. A no-op
+   * in the mock.
+   */
+  cancelExit(): Promise<void>;
 }
 
 /**

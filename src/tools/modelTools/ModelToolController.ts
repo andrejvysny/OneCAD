@@ -33,13 +33,15 @@ import type {
 } from "@/ipc/types";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import { updateScalarParamsCommand } from "@/ipc/tauriCommandMap";
+import { toFeatureMeta } from "@/ipc/projectionHydration";
+import { setSketchVisible } from "@/features/tree/treeActions";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
 import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
 import { buildBodyObjects, getEntry, remove as removeMesh, swap as swapMesh } from "@/viewport/mesh/meshRegistry";
 import { toolStore } from "@/stores/toolStore";
 import { trace, traceWarn } from "@/debug/trace";
 import { viewportStore } from "@/stores/viewportStore";
-import { documentStore, type FeatureMeta, type SketchMeta } from "@/stores/documentStore";
+import { documentStore, type SketchMeta } from "@/stores/documentStore";
 import { selectionStore, type EntityRef } from "@/stores/selectionStore";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { profileFromRegion, profileBounds, type PrismProfile } from "@/tools/preview/prismPreview";
@@ -267,6 +269,11 @@ export class ModelToolController {
   // Pattern / mirror context (chip-driven; ghost clones of the source body).
   private patternEditFeatureId: string | undefined;
 
+  // Boolean re-edit context (operation swap only — the tool body is consumed).
+  private booleanEditFeatureId: string | undefined;
+  /** Stored params of the boolean being re-edited (target/tool ids survive the swap). */
+  private booleanStoredParams: Record<string, unknown> | undefined;
+
   // Revolve context. `revolveProfile`/`revolveRegionId` are the PRIMARY region
   // (drives the L1 lathe preview); the arrays carry ALL selected regions for the
   // multi-region commit loop + all-regions axis validity (Wave 2). N==1 single-region.
@@ -360,9 +367,9 @@ export class ModelToolController {
   }
 
   /**
-   * Drop an armed/dragging extrude whose source sketch was edited underneath it.
-   * A committing extrude is left alone — it is already generation-gated and the
-   * backend re-validates it authoritatively.
+   * Drop an armed/dragging extrude — or an armed/dragging/axis-picking revolve —
+   * whose source sketch was edited underneath it. A COMMITTING op is left alone:
+   * it is already generation-gated and the backend re-validates it authoritatively.
    */
   private onSketchGeometryChanged(sketches: Record<string, SketchMeta>): void {
     const id = this.lastArmedSketch;
@@ -370,6 +377,21 @@ export class ModelToolController {
     const token = sketches[id]?.geometryToken;
     if (token === undefined || token === this.armedSketchToken) return;
     this.armedSketchToken = token;
+    // Revolve binds the same sketch geometry TWICE (the profile ring and the axis
+    // line entity), so an edit underneath it invalidates both — drop the arm instead
+    // of committing a stale profile / vanished axis (extrude parity).
+    const revolvePhase = this.revolve.phase;
+    if (revolvePhase === "armed" || revolvePhase === "dragging" || revolvePhase === "axisPick") {
+      this.cancelRevolve();
+      toolStore.getState().setTool("select"); // Esc-ladder tail; also clears the hint
+      viewportStore
+        .getState()
+        .setStatusHint("Sketch changed — revolve preview cancelled", {
+          severity: "info",
+          sticky: true,
+        });
+      return;
+    }
     if (this.extrudeSessions.length === 0) return;
     if (this.extrude.phase !== "armed" && this.extrude.phase !== "dragging") return;
     this.cancelPreview();
@@ -947,7 +969,7 @@ export class ModelToolController {
       );
       return;
     }
-    void this.beginRevolveArmed(sketchId, valid, validProfiles, session, editFeatureId, startValue);
+    this.beginRevolveArmed(sketchId, valid, validProfiles, session, editFeatureId, startValue);
   }
 
   /** Pointer hover during region pick: tint the region under the pointer. */
@@ -1035,31 +1057,84 @@ export class ModelToolController {
   /**
    * Arm the revolve tool on a sketch. A single region goes straight to axis-pick; >1
    * region (fresh arm) first runs the region pick, THEN axis-pick on the chosen one.
+   *
+   * REVOLVE-REGION-PARITY: the region read is the PURE `getSketchRegions`, never
+   * `finishSketch`. `finishSketch` opens/squashes a session AND mints the sketch's
+   * timeline record as a side effect — arming must do neither (MODEL-HARDEN W0.5);
+   * the record is guaranteed at the COMMIT boundary instead (`confirmRevolve`).
+   *
+   * `regionId` (re-edit) binds that EXACT stored region — a miss fails loudly with
+   * the available ids and never silently falls back to `regions[0]`. An EMPTY stored
+   * id is the wire's legitimate V1 first-region fallback, so it takes the same path
+   * as a fresh single-region arm.
    */
   private async armRevolve(
     sketchId: string,
     editFeatureId?: string,
     startAngle = DEFAULT_REVOLVE_ANGLE,
+    regionId?: string,
+    storedParams?: Record<string, unknown>,
   ): Promise<void> {
     const gen = ++this.armGen;
-    const finish = await this.deps.client.finishSketch(sketchId);
-    if (gen !== this.armGen) return; // superseded while finishSketch was in flight
-    if (finish.regions.length > 1 && !editFeatureId) {
-      await this.enterRegionPick("revolve", sketchId, finish.regions, editFeatureId, startAngle, gen);
+    let read: { regions: SketchRegion[] };
+    try {
+      read = await this.deps.client.getSketchRegions(sketchId);
+    } catch (error) {
+      if (gen !== this.armGen) return;
+      viewportStore
+        .getState()
+        .setStatusHint(`Cannot read sketch regions: ${errMessage(error)}`, {
+          severity: "error",
+          sticky: true,
+        });
       return;
     }
-    const region = finish.regions[0];
+    if (gen !== this.armGen) return; // superseded while getSketchRegions was in flight
+
+    if (regionId) {
+      const bound = read.regions.find((candidate) => candidate.regionId === regionId);
+      const boundProfile = bound ? profileFromRegion(bound) : null;
+      if (!bound || !boundProfile) {
+        const available = read.regions.map((candidate) => candidate.regionId).join(", ") || "none";
+        toolStore.getState().setTool("select"); // clears the hint — re-set it after
+        viewportStore
+          .getState()
+          .setStatusHint(`Revolve region ${regionId} is stale or invalid; available: ${available}`, {
+            severity: "error",
+            sticky: true,
+          });
+        return;
+      }
+      // Pure read (no session opened) — see armExtrude (MODEL-HARDEN W0.5). The revolve
+      // axis candidates read `session.entities`, which getSketch returns verbatim.
+      const editSession = await this.deps.client.getSketch(sketchId); // plane + entities
+      if (gen !== this.armGen) return; // superseded while getSketch was in flight
+      this.beginRevolveArmed(
+        sketchId,
+        [bound],
+        [boundProfile],
+        editSession,
+        editFeatureId,
+        startAngle,
+        storedParams,
+      );
+      return;
+    }
+
+    if (read.regions.length > 1 && !editFeatureId) {
+      await this.enterRegionPick("revolve", sketchId, read.regions, editFeatureId, startAngle, gen);
+      return;
+    }
+    const region = read.regions[0];
     const profile = region ? profileFromRegion(region) : null;
     if (!region || !profile) {
+      toolStore.getState().setTool("select"); // clears the hint — re-set it after
       viewportStore.getState().setStatusHint("No closed region to revolve", { severity: "error", sticky: true });
-      toolStore.getState().setTool("select");
       return;
     }
-    // Pure read (no session opened) — see armExtrude (MODEL-HARDEN W0.5). The revolve
-    // axis candidates read `session.entities`, which getSketch returns verbatim.
     const session = await this.deps.client.getSketch(sketchId); // plane + entities
     if (gen !== this.armGen) return; // superseded while getSketch was in flight
-    await this.beginRevolveArmed(sketchId, [region], [profile], session, editFeatureId, startAngle);
+    this.beginRevolveArmed(sketchId, [region], [profile], session, editFeatureId, startAngle, storedParams);
   }
 
   /**
@@ -1069,36 +1144,61 @@ export class ModelToolController {
    * (regions[0]) drives the L1 lathe preview; the arrays carry all regions for the
    * commit loop + all-regions axis validity (Wave 2).
    */
-  private async beginRevolveArmed(
+  private beginRevolveArmed(
     sketchId: string,
     regions: SketchRegion[],
     profiles: PrismProfile[],
     session: SketchSession,
     editFeatureId?: string,
     startAngle = DEFAULT_REVOLVE_ANGLE,
-  ): Promise<void> {
-    const gen = this.armGen;
+    storedParams?: Record<string, unknown>,
+  ): void {
     const region = regions[0];
     const profile = profiles[0];
+    const candidates: AxisCandidate[] = session.entities
+      .filter((e) => e.type === "Line" && e.p0 && e.p1)
+      .map((e) => ({ id: e.id, a: e.p0 as [number, number], b: e.p1 as [number, number] }));
+
+    // Re-edit: seed the axis from the STORED lineId. A stored id that no longer
+    // resolves is a REFUSAL, never a substitution — silently re-binding a different
+    // line would make the preview lie about what the commit re-targets. Resolved
+    // BEFORE any controller state is written so a refusal leaves nothing armed.
+    const storedAxisLineId = editFeatureId ? axisLineIdFromParams(storedParams) : null;
+    let seedAxis: AxisCandidate | null = null;
+    if (editFeatureId) {
+      if (storedAxisLineId) {
+        seedAxis = candidates.find((c) => c.id === storedAxisLineId) ?? null;
+        if (!seedAxis) {
+          toolStore.getState().setTool("select"); // clears the hint — re-set it after
+          viewportStore
+            .getState()
+            .setStatusHint(`Revolve axis line ${storedAxisLineId} no longer exists in the sketch`, {
+              severity: "error",
+              sticky: true,
+            });
+          return;
+        }
+      } else {
+        // No stored axis (legacy record): the first candidate only renders the L1
+        // shell; the commit's deep-merge keeps whatever the record already holds.
+        seedAxis = candidates[0] ?? null;
+      }
+    }
+
     this.plane = session.plane;
     this.lastArmedSketch = sketchId;
+    this.armedSketchToken = documentStore.getState().sketches[sketchId]?.geometryToken ?? null;
     this.revolveProfile = profile;
     this.revolveProfiles = profiles;
     this.revolveRegionIds = regions.map((r) => r.regionId);
     this.revolveSketchId = sketchId;
     this.revolveRegionId = region.regionId;
     this.revolveEditFeatureId = editFeatureId;
-    // Re-edit: fetch the stored params so the angle-only commit deep-merges instead of
+    // Re-edit: the CALLER owns the stored-params fetch (it also owns the profile
+    // binding read from them), so the angle-only commit deep-merges instead of
     // clobbering the user-picked axis (the projection does not expose it).
-    this.revolveStoredParams = editFeatureId
-      ? await this.deps.client.getOperationParams(editFeatureId).catch(() => undefined)
-      : undefined;
-    // Guard the unawaited state below: a tool switch / re-arm during getOperationParams
-    // must NOT let a superseded re-edit arm resurrect the revolve preview + chip.
-    if (gen !== this.armGen) return;
-    this.revolveAxisCandidates = session.entities
-      .filter((e) => e.type === "Line" && e.p0 && e.p1)
-      .map((e) => ({ id: e.id, a: e.p0 as [number, number], b: e.p1 as [number, number] }));
+    this.revolveStoredParams = editFeatureId ? storedParams : undefined;
+    this.revolveAxisCandidates = candidates;
 
     const b = profileBounds(profile);
     const c = planePointToWorld(this.plane, { x: b.centroidU, y: b.centroidV });
@@ -1107,9 +1207,10 @@ export class ModelToolController {
     this.revolveArmedDown = false;
 
     if (editFeatureId) {
-      // Re-edit is param-only (angle) — skip axis-pick; use the first candidate (or
-      // a fallback) purely so the L1 shell renders. The commit re-targets by id.
-      const cand = this.revolveAxisCandidates[0] ?? null;
+      // Re-edit is param-only (angle) — skip axis-pick and render the L1 shell around
+      // the STORED axis (resolved above); only a record with no stored axis at all
+      // falls back to the first candidate. The commit re-targets by id.
+      const cand = seedAxis;
       this.revolveAxis = cand ? { a: cand.a, b: cand.b } : fallbackAxis(profile.ring);
       this.revolveAxisLineId = cand?.id ?? null;
       this.revolve = revolveStep(revolveInit(), {
@@ -1307,6 +1408,30 @@ export class ModelToolController {
     const booleanMode = this.revolve.booleanMode as FeatureBooleanMode;
     const targetBodyId = this.revolve.targetBodyId ?? undefined;
 
+    // Profile-record guarantee (EXTRUDE-COMMIT-FIX, extended to Revolve): the regen
+    // planner resolves the profile ONLY from the sketch's `Sketch` timeline record,
+    // and arming is now a PURE read (`getSketchRegions`) that authors none — so the
+    // record must be guaranteed HERE, at the exact boundary that needs it, above BOTH
+    // the re-edit branch and the fresh loop. finishSketch is idempotent (unchanged
+    // content upserts nothing). Failure returns to armed with a named hint and never
+    // touches sessions, so a retry is possible.
+    try {
+      await this.client.finishSketch(sketchId);
+    } catch (e) {
+      if (gen !== this.commitGen) return;
+      traceWarn("revolve", `commit: profile-record guarantee FAILED: ${errMessage(e)}`);
+      this.revolve = revolveStep(this.revolve, { kind: "commitFailed" }).state; // → armed
+      toolStore.setState({ phase: "armed" });
+      viewportStore
+        .getState()
+        .setStatusHint(`Revolve failed: cannot record profile sketch: ${errMessage(e)}`, {
+          severity: "error",
+          sticky: true,
+        });
+      return;
+    }
+    if (gen !== this.commitGen) return;
+
     // Subscribe before committing so an early body (async doc-changed → mesh-ingest)
     // isn't missed while a later region is still committing (mirrors confirmExtrude).
     const loaded = new Set<string>();
@@ -1457,7 +1582,11 @@ export class ModelToolController {
     if (unique.length > 0) {
       selectionStore.getState().set(unique.map((id) => ({ kind: "body" as const, id })));
       viewportStore.getState().setStatusHint(unique.length > 1 ? `Revolved ${unique.length} bodies` : "Revolved");
-      if (consumedSketch && !wasReedit) documentStore.getState().setVisibility(consumedSketch, false);
+      // Consumed sketch auto-hides. Backend-backed (TRUST wave): a local flip pops
+      // back visible on the next projection. Issued from `finishRevolve`, i.e. only
+      // after the WHOLE commit loop terminated — `rollbackFailedCommit` never reaches
+      // here, so an extra undo step is the only cost.
+      if (consumedSketch && !wasReedit) void setSketchVisible(consumedSketch, false);
     }
     toolStore.getState().setTool("select");
     this.updateDebug();
@@ -1601,7 +1730,10 @@ export class ModelToolController {
   /** Re-arm the shell tool on an existing shell feature (thickness re-edit seed). */
   async editShellFeature(featureId: string): Promise<void> {
     const feat = documentStore.getState().features.find((f) => f.id === featureId);
-    if (!feat || feat.kind !== "shell") return;
+    // Gate on `opType`, NEVER `kind`: `dto.rs feature_kind` folds Shell into the
+    // `fillet` bucket, so a `kind === "shell"` guard is unsatisfiable on the real
+    // Tauri lane and silently killed shell re-edit there.
+    if (!feat || feat.opType !== "Shell") return;
     const thickness = thicknessFromValueText(feat.valueText);
     // Fetch the stored params so the thickness-only commit deep-merges instead of
     // wiping the shell's open faces + target (the projection does not expose them).
@@ -1626,9 +1758,21 @@ export class ModelToolController {
     this.armLinear(bodyId);
   }
 
-  private armLinear(bodyId: string, editFeatureId?: string, seedCount?: number): void {
+  private armLinear(
+    bodyId: string,
+    editFeatureId?: string,
+    seedCount?: number,
+    seedAxis?: PatternAxis,
+    seedSpacing?: number,
+  ): void {
     this.patternEditFeatureId = editFeatureId;
-    this.linear = linearPatternStep(linearPatternInit(), { kind: "arm", bodyId, count: seedCount }).state;
+    this.linear = linearPatternStep(linearPatternInit(), {
+      kind: "arm",
+      bodyId,
+      count: seedCount,
+      axis: seedAxis,
+      spacing: seedSpacing,
+    }).state;
     toolStore.setState({ phase: "armed" });
     viewportStore.getState().setStatusHint("Pick axis + count + spacing, then Apply", { sticky: true });
     this.rebuildLinearGhost();
@@ -1692,9 +1836,21 @@ export class ModelToolController {
     this.armCircular(bodyId);
   }
 
-  private armCircular(bodyId: string, editFeatureId?: string, seedCount?: number): void {
+  private armCircular(
+    bodyId: string,
+    editFeatureId?: string,
+    seedCount?: number,
+    seedAxis?: PatternAxis,
+    seedAngle?: number,
+  ): void {
     this.patternEditFeatureId = editFeatureId;
-    this.circular = circularPatternStep(circularPatternInit(), { kind: "arm", bodyId, count: seedCount }).state;
+    this.circular = circularPatternStep(circularPatternInit(), {
+      kind: "arm",
+      bodyId,
+      count: seedCount,
+      axis: seedAxis,
+      angle: seedAngle,
+    }).state;
     toolStore.setState({ phase: "armed" });
     viewportStore.getState().setStatusHint("Pick axis + count + angle, then Apply", { sticky: true });
     this.rebuildCircularGhost();
@@ -1830,42 +1986,112 @@ export class ModelToolController {
     this.updateDebug();
   }
 
-  /** Re-arm a pattern/mirror tool on an existing feature (seeds count/plane). */
-  editLinearPatternFeature(featureId: string): void {
-    const bodyId = this.reeditSourceBody(featureId, "linearPattern");
+  /**
+   * Re-arm the linear-pattern tool on an existing feature (parametric edit; mirrors
+   * `beginExtrudeFeatureEdit`). The source body comes from the STORED `sourceBodyId`
+   * — never a selection/first-body guess (a wrong silent bind would re-pattern the
+   * wrong body) — and the FULL stored shape (axis + spacing + count) is seeded, not
+   * just count, so a re-edit no longer silently resets the axis/spacing to defaults.
+   * A missing/foreign source body, or a stored direction that is not one of the
+   * three world axes the FSM offers, refuses with a sticky hint rather than guess.
+   */
+  async editLinearPatternFeature(featureId: string): Promise<void> {
+    const feat = documentStore.getState().features.find((f) => f.id === featureId);
+    // Gate on `opType`, NEVER `kind` — see `editShellFeature`: `dto.rs
+    // feature_kind` folds LinearPattern/CircularPattern/MirrorBody into `boolean`.
+    if (!feat || feat.opType !== "LinearPattern") return;
+    const requestGen = ++this.armGen;
+    const stored = await this.client.getOperationParams(featureId).catch(() => undefined);
+    if (requestGen !== this.armGen) return; // superseded while getOperationParams was in flight
+    const bodyId = this.reeditSourceBodyFromParams(stored, "linear pattern");
     if (!bodyId) return;
+    const axis = matchWorldAxis(stored?.direction);
+    if (!axis) {
+      viewportStore
+        .getState()
+        .setStatusHint("Cannot re-edit linear pattern: stored direction is not a world axis", {
+          severity: "error",
+          sticky: true,
+        });
+      return;
+    }
+    const spacing = scalarNumber(stored?.spacing);
+    const count = typeof stored?.count === "number" ? stored.count : countFromValueText(feat.valueText);
     toolStore.getState().setTool("linearPattern");
-    this.armLinear(bodyId, featureId, countFromValueText(this.featureValueText(featureId)));
+    this.armLinear(bodyId, featureId, count, axis, spacing);
   }
-  editCircularPatternFeature(featureId: string): void {
-    const bodyId = this.reeditSourceBody(featureId, "circularPattern");
+
+  /** Circular-pattern counterpart of `editLinearPatternFeature` — same contract,
+   *  seeding axis + angle + count from the stored `CircularPatternParams`. */
+  async editCircularPatternFeature(featureId: string): Promise<void> {
+    const feat = documentStore.getState().features.find((f) => f.id === featureId);
+    if (!feat || feat.opType !== "CircularPattern") return;
+    const requestGen = ++this.armGen;
+    const stored = await this.client.getOperationParams(featureId).catch(() => undefined);
+    if (requestGen !== this.armGen) return;
+    const bodyId = this.reeditSourceBodyFromParams(stored, "circular pattern");
     if (!bodyId) return;
+    const axis = matchWorldAxis(stored?.axisDirection);
+    if (!axis) {
+      viewportStore
+        .getState()
+        .setStatusHint("Cannot re-edit circular pattern: stored axis is not a world axis", {
+          severity: "error",
+          sticky: true,
+        });
+      return;
+    }
+    const angle = scalarNumber(stored?.angleDeg);
+    const count = typeof stored?.count === "number" ? stored.count : countFromValueText(feat.valueText);
     toolStore.getState().setTool("circularPattern");
-    this.armCircular(bodyId, featureId, countFromValueText(this.featureValueText(featureId)));
+    this.armCircular(bodyId, featureId, count, axis, angle);
   }
-  editMirrorFeature(featureId: string): void {
-    const bodyId = this.reeditSourceBody(featureId, "mirror");
+
+  /** Mirror counterpart of `editLinearPatternFeature` — seeds the mirror plane from
+   *  the stored `planeNormal` (matched against the three world planes the FSM offers). */
+  async editMirrorFeature(featureId: string): Promise<void> {
+    const feat = documentStore.getState().features.find((f) => f.id === featureId);
+    if (!feat || feat.opType !== "MirrorBody") return;
+    const requestGen = ++this.armGen;
+    const stored = await this.client.getOperationParams(featureId).catch(() => undefined);
+    if (requestGen !== this.armGen) return;
+    const bodyId = this.reeditSourceBodyFromParams(stored, "mirror");
     if (!bodyId) return;
+    const plane = matchWorldPlane(stored?.planeNormal);
+    if (!plane) {
+      viewportStore
+        .getState()
+        .setStatusHint("Cannot re-edit mirror: stored plane is not a world plane", {
+          severity: "error",
+          sticky: true,
+        });
+      return;
+    }
     toolStore.getState().setTool("mirror");
-    this.armMirror(bodyId, featureId);
+    this.armMirror(bodyId, featureId, plane);
   }
 
   /**
-   * The source body for a pattern/mirror re-edit. The projection does not record
-   * which body a pattern cloned, so we fall back to the currently-selected body,
-   * else the first document body (a mock-lane re-edit seam — a follow-up threads
-   * the real source through the projection).
+   * Resolve + validate the source body a pattern/mirror re-edit stored. NO fallback
+   * to the current selection or "the first body" — either would silently re-target
+   * a different body than the one this feature actually operated on. Mirrors
+   * `beginExtrudeFeatureEdit`'s missing-profile guard.
    */
-  private reeditSourceBody(featureId: string, kind: string): string | null {
-    const feat = documentStore.getState().features.find((f) => f.id === featureId);
-    if (!feat || feat.kind !== kind) return null;
-    const bodyId = this.firstSelectedBodyId() ?? Object.keys(documentStore.getState().bodies)[0] ?? null;
-    if (!bodyId) viewportStore.getState().setStatusHint("No body to re-pattern", { severity: "error", sticky: true });
-    return bodyId;
-  }
-
-  private featureValueText(featureId: string): string {
-    return documentStore.getState().features.find((f) => f.id === featureId)?.valueText ?? "";
+  private reeditSourceBodyFromParams(
+    stored: Record<string, unknown> | undefined,
+    what: string,
+  ): string | null {
+    const sourceBodyId = stored?.sourceBodyId;
+    if (typeof sourceBodyId !== "string" || !documentStore.getState().bodies[sourceBodyId]) {
+      viewportStore
+        .getState()
+        .setStatusHint(`Cannot re-edit ${what}: source body is missing or was deleted`, {
+          severity: "error",
+          sticky: true,
+        });
+      return null;
+    }
+    return sourceBodyId;
   }
 
   private firstSelectedBodyId(): string | null {
@@ -2598,11 +2824,15 @@ export class ModelToolController {
       completionHint =
         uniqueBodyIds.length > 1 ? `Extruded ${uniqueBodyIds.length} bodies` : "Extruded";
       // Consumed sketch auto-hides (Wave 2) — a FRESH arm only (a re-edit keeps it).
-      if (consumedSketch && !wasReedit) documentStore.getState().setVisibility(consumedSketch, false);
+      // Backend-backed (TRUST wave): a local flip pops back visible on the next
+      // projection. `finishExtrude` runs only after the WHOLE commit loop terminated
+      // (`rollbackFailedCommit` routes to onExtrudeCommitFailed instead), so this can
+      // never cross a rollback — it costs one extra undo step, accepted.
+      if (consumedSketch && !wasReedit) void setSketchVisible(consumedSketch, false);
     } else {
       selectionStore.getState().clear();
       completionHint = wasCut ? "Cut completed" : "Extruded";
-      if (consumedSketch && !wasReedit) documentStore.getState().setVisibility(consumedSketch, false);
+      if (consumedSketch && !wasReedit) void setSketchVisible(consumedSketch, false);
     }
     toolStore.getState().setTool("select");
     viewportStore.getState().setStatusHint(completionHint);
@@ -2723,6 +2953,8 @@ export class ModelToolController {
   private async commitBoolean(): Promise<void> {
     if (this.boolean.phase !== "armed" || !this.boolean.targetBodyId || !this.boolean.toolBodyId) return;
     const { targetBodyId, toolBodyId, op } = this.boolean;
+    const editFeatureId = this.booleanEditFeatureId;
+    const storedParams = this.booleanStoredParams;
     this.boolean = booleanStep(this.boolean, { kind: "apply" }).state;
     toolChipStore.getState().clear();
     const operation = op;
@@ -2735,15 +2967,92 @@ export class ModelToolController {
       params: { operation, targetBodyId, toolBodyId },
     };
     try {
-      const res = await this.client.applyOperation(cmd);
+      // A re-edit changes ONLY the operation: merge it into the stored params so the
+      // committed target/tool body ids survive VERBATIM. Re-sending them from the FSM
+      // would be a fresh authoring of consumed inputs — and `applyOperation` would
+      // append a SECOND boolean instead of editing the existing record.
+      const res =
+        editFeatureId && storedParams
+          ? await this.client.applyEditCommand(
+              updateScalarParamsCommand(editFeatureId, "Boolean", storedParams, { operation }),
+            )
+          : await this.client.applyOperation(cmd);
       this.applyResult(res);
       selectionStore.getState().set([{ kind: "body", id: targetBodyId }]);
-      viewportStore.getState().setStatusHint(`${operation} applied`);
+      viewportStore.getState().setStatusHint(
+        editFeatureId ? `Boolean changed to ${operation}` : `${operation} applied`,
+      );
     } catch (e) {
       viewportStore.getState().setStatusHint(`${operation} failed: ${errMessage(e)}`, { severity: "error", sticky: true });
     }
     this.boolean = booleanInit();
+    this.booleanEditFeatureId = undefined;
+    this.booleanStoredParams = undefined;
     toolStore.getState().setTool("select");
+    this.updateDebug();
+  }
+
+  /**
+   * Re-edit an existing Boolean feature — OPERATION SWAP ONLY (Union/Cut/Intersect).
+   *
+   * A committed boolean CONSUMES its tool body: the timeline removed it, so it is not
+   * in the document any more and there is nothing to re-pick. Offering a body re-pick
+   * here would be dishonest UI, so the whole re-edit is the one thing that IS still
+   * authorable — the operation — sent as an `UpdateOperationParams` that preserves the
+   * stored `targetBodyId`/`toolBodyId` verbatim.
+   *
+   * Gates on `opType`, NEVER `kind`: `dto.rs feature_kind` folds the pattern/mirror ops
+   * into `boolean`, so a `kind` guard would also catch a LinearPattern.
+   */
+  async editBooleanFeature(featureId: string): Promise<void> {
+    const feat = documentStore.getState().features.find((f) => f.id === featureId);
+    if (!feat || feat.opType !== "Boolean") return;
+    const requestGen = ++this.armGen;
+    const stored = await this.client.getOperationParams(featureId).catch(() => undefined);
+    if (requestGen !== this.armGen) return; // superseded while getOperationParams was in flight
+    const operation = matchBooleanOperation(stored?.operation);
+    const targetBodyId = typeof stored?.targetBodyId === "string" ? stored.targetBodyId : null;
+    const toolBodyId = typeof stored?.toolBodyId === "string" ? stored.toolBodyId : null;
+    if (!operation || !targetBodyId || !toolBodyId) {
+      viewportStore
+        .getState()
+        .setStatusHint("Cannot re-edit boolean: stored operation or bodies are missing", {
+          severity: "error",
+          sticky: true,
+        });
+      return;
+    }
+    // Already on the boolean tool? `setTool` is then a no-op that skips the
+    // onToolChange teardown, so cancel explicitly (extrude/revolve finding 10).
+    if (toolStore.getState().modelTool === "boolean") this.cancelBoolean();
+    toolStore.getState().setTool("boolean"); // may arm a selection-driven pickTool
+    // Drive the FSM to `armed` on the STORED pair, overriding whatever the
+    // selection-driven start above produced.
+    let fsm = booleanStep(booleanInit(), { kind: "start", targetBodyId }).state;
+    fsm = booleanStep(fsm, { kind: "pickTool", toolBodyId }).state;
+    this.boolean = booleanStep(fsm, { kind: "setOp", op: operation }).state;
+    this.booleanEditFeatureId = featureId;
+    this.booleanStoredParams = stored;
+    toolStore.setState({ phase: "armed" });
+
+    // The tool body is normally RETIRED (consumed by the original commit) — there is
+    // nothing to highlight, so the re-edit is chip-only. Highlight the pair only in
+    // the rare case both bodies still exist (e.g. a boolean that kept its tool).
+    const bodies = documentStore.getState().bodies;
+    const toolRetired = bodies[toolBodyId] === undefined;
+    if (!toolRetired && bodies[targetBodyId]) {
+      selectionStore.getState().set([
+        { kind: "body", id: targetBodyId },
+        { kind: "body", id: toolBodyId },
+      ]);
+    }
+    toolChipStore.getState().showBoolean(
+      operation,
+      this.bodyCenter(toolRetired ? targetBodyId : toolBodyId),
+      (next) => this.setBooleanOp(next),
+      () => void this.commitBoolean(),
+    );
+    viewportStore.getState().setStatusHint("Change the boolean operation · Apply", { sticky: true });
     this.updateDebug();
   }
 
@@ -2812,16 +3121,46 @@ export class ModelToolController {
 
   /** Re-arm the revolve tool on an existing revolve feature (param-only angle edit). */
   editRevolveFeature(featureId: string): void {
+    void this.beginRevolveFeatureEdit(featureId);
+  }
+
+  /**
+   * Revolve counterpart of `beginExtrudeFeatureEdit` (REVOLVE-REGION-PARITY). The
+   * profile comes from the feature's OWN stored params — never `lastArmedSketch` or
+   * "the document's first sketch", which re-armed the WRONG sketch (and then its
+   * first region) in any multi-sketch document. A missing/unrepaired profile refuses
+   * with a sticky hint rather than guessing.
+   */
+  private async beginRevolveFeatureEdit(featureId: string): Promise<void> {
     const feat = documentStore.getState().features.find((f) => f.id === featureId);
     if (!feat || feat.kind !== "revolve") return;
-    const sketchId = this.lastArmedSketch ?? Object.keys(documentStore.getState().sketches)[0];
-    if (!sketchId) {
-      viewportStore.getState().setStatusHint("No sketch to re-edit", { severity: "error", sticky: true });
+    const requestGen = ++this.armGen;
+    const stored = await this.client.getOperationParams(featureId).catch(() => undefined);
+    if (requestGen !== this.armGen) return; // superseded while getOperationParams was in flight
+    const profile =
+      stored && typeof stored.profile === "object" && stored.profile !== null
+        ? (stored.profile as { sketchId?: unknown; regionId?: unknown })
+        : null;
+    if (typeof profile?.sketchId !== "string" || typeof profile.regionId !== "string") {
+      viewportStore
+        .getState()
+        .setStatusHint("Revolve profile is missing or needs repair", {
+          severity: "error",
+          sticky: true,
+        });
       return;
     }
-    const angle = angleFromValueText(feat.valueText);
+    const storedAngle =
+      stored && typeof stored.angleDeg === "object" && stored.angleDeg !== null
+        ? Number((stored.angleDeg as { value?: unknown }).value)
+        : Number.NaN;
+    const angle = Number.isFinite(storedAngle) ? storedAngle : angleFromValueText(feat.valueText);
+    // If the revolve tool is ALREADY armed, setTool("revolve") is a no-op and skips the
+    // onToolChange → cancelRevolve that tears the previous arm down — so cancel here
+    // explicitly or the re-edit leaks the prior preview + chip (extrude finding 10).
+    if (toolStore.getState().modelTool === "revolve") this.cancelRevolve();
     toolStore.getState().setTool("revolve");
-    void this.armRevolve(sketchId, featureId, angle);
+    await this.armRevolve(profile.sketchId, featureId, angle, profile.regionId, stored);
   }
 
   // ── shared helpers ────────────────────────────────────────────────────────────
@@ -3017,6 +3356,8 @@ export class ModelToolController {
 
   private cancelBoolean(): void {
     this.boolean = booleanInit();
+    this.booleanEditFeatureId = undefined;
+    this.booleanStoredParams = undefined;
     toolChipStore.getState().clear();
   }
 
@@ -3109,22 +3450,73 @@ export class ModelToolController {
   }
 }
 
-function toFeatureMeta(f: FeatureRecord): FeatureMeta {
-  return {
-    id: f.id,
-    kind: f.kind,
-    // Re-edits route on the exact authored opType — `kind` folds Chamfer into
-    // "fillet" and the pattern/mirror ops into "boolean" (dto.rs feature_kind).
-    opType: f.opType,
-    label: f.label,
-    valueText: f.valueText,
-    status: f.status,
-  };
-}
-
 /** Human message from a rejected backend call (ApiError → JS Error message). */
 function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+const VEC_EPS = 1e-6;
+
+function isVec3(v: unknown): v is Vec3 {
+  return Array.isArray(v) && v.length === 3 && v.every((n) => typeof n === "number" && Number.isFinite(n));
+}
+
+function vecClose(a: Vec3, b: Vec3): boolean {
+  return Math.abs(a[0] - b[0]) < VEC_EPS && Math.abs(a[1] - b[1]) < VEC_EPS && Math.abs(a[2] - b[2]) < VEC_EPS;
+}
+
+/**
+ * Match a stored direction Vec3 against a named world axis. The linear/circular
+ * pattern FSM only ever offers X/Y/Z (`WORLD_AXIS`), so a fresh arm always commits
+ * one of exactly those three; a re-edit that finds anything else means the record
+ * was authored outside this arm path (or is corrupt) and must refuse rather than
+ * silently snap to X.
+ */
+function matchWorldAxis(v: unknown): PatternAxis | null {
+  if (!isVec3(v)) return null;
+  for (const axis of ["X", "Y", "Z"] as const) {
+    if (vecClose(v, WORLD_AXIS[axis])) return axis;
+  }
+  return null;
+}
+
+/** Mirror counterpart of `matchWorldAxis` for the mirror plane normal (`WORLD_PLANE_NORMAL`). */
+function matchWorldPlane(v: unknown): MirrorPlane | null {
+  if (!isVec3(v)) return null;
+  for (const plane of ["XY", "XZ", "YZ"] as const) {
+    if (vecClose(v, WORLD_PLANE_NORMAL[plane])) return plane;
+  }
+  return null;
+}
+
+/** Match a stored boolean `operation` against the three the chip offers — an
+ *  unknown token refuses the re-edit rather than defaulting to Union. */
+function matchBooleanOperation(v: unknown): BooleanOperation | null {
+  return v === "Union" || v === "Cut" || v === "Intersect" ? v : null;
+}
+
+/** The numeric `.value` of a wire `Scalar` object (`{value, expr?}`), or `undefined`
+ *  if `v` is not one (mirrors `beginExtrudeFeatureEdit`'s inline distance extraction). */
+function scalarNumber(v: unknown): number | undefined {
+  if (v && typeof v === "object" && "value" in (v as Record<string, unknown>)) {
+    const n = (v as { value: unknown }).value;
+    if (typeof n === "number" && Number.isFinite(n)) return n;
+  }
+  return undefined;
+}
+
+/**
+ * The `lineId` of a stored `AxisRef` (`{kind:"sketchLine", sketchId, lineId}`, SCHEMA
+ * §7.3) — the axis a revolve re-edit must re-render, not re-guess. Anything else
+ * (absent axis, an `edge` variant the revolve tool never authors, a malformed value)
+ * yields `null`, which the caller treats as "no stored axis", NOT as a licence to
+ * substitute a different line.
+ */
+function axisLineIdFromParams(stored: Record<string, unknown> | undefined): string | null {
+  const axis = stored?.axis;
+  if (!axis || typeof axis !== "object") return null;
+  const { kind, lineId } = axis as { kind?: unknown; lineId?: unknown };
+  return kind === "sketchLine" && typeof lineId === "string" && lineId.length > 0 ? lineId : null;
 }
 
 /** True when a keyboard event targets a text field (skip the capture-Enter commit). */

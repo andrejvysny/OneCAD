@@ -28,9 +28,10 @@ pub mod worker;
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 use tokio::sync::{watch, Mutex};
 
 use onecad_core::regen::{Outcome, RegenDirective, RegenScheduler};
@@ -38,6 +39,37 @@ use onecad_core::regen::{Outcome, RegenDirective, RegenScheduler};
 use crate::document_runtime::{DocumentRuntime, RegenReport};
 use crate::dto::DocumentProjection;
 use crate::state::AppState;
+
+/// Re-entrancy guard for the close/quit confirmation prompt (unsaved-changes
+/// guard). Shared by the native window-close button
+/// ([`WindowEvent::CloseRequested`]) and the app-level exit request
+/// ([`RunEvent::ExitRequested`], e.g. ⌘Q) so only the FIRST of either emits
+/// [`events::CLOSE_REQUESTED`] while a frontend prompt is already pending —
+/// repeated clicks/chords just keep blocking the close/exit without piling up
+/// duplicate prompts. `api::confirm_exit` / `api::cancel_exit` clear it once the
+/// frontend resolves the prompt.
+///
+/// The claim is only kept when the prompt request actually goes out: if there is
+/// no main window, or the emit fails, the claimer releases it and lets the
+/// close/exit proceed — a latched guard nobody can resolve would make the app
+/// permanently unclosable.
+#[derive(Default)]
+pub struct ExitGuard(AtomicBool);
+
+impl ExitGuard {
+    /// Attempts to claim the guard (false → true). Returns whether THIS call
+    /// claimed it — only the claimer should emit [`events::CLOSE_REQUESTED`].
+    fn begin(&self) -> bool {
+        self.0
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    /// Releases the guard so a future close/exit attempt prompts again.
+    pub fn clear(&self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
 
 /// The boxed future the regen driver hands the scheduler (the driver closure is a
 /// distinct type per call, so it is type-erased for the scheduler's `select!`).
@@ -140,9 +172,35 @@ pub fn run() {
         .with_writer(std::io::stderr)
         .try_init();
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
+        .manage(ExitGuard::default())
+        // Native window-close button (macOS traffic light / OS chrome): prevent the
+        // immediate close and — the FIRST time while no prompt is already pending —
+        // ask the frontend via CLOSE_REQUESTED instead. The frontend proceeds
+        // through `confirm_exit` (see below), never through the OS's own close. The
+        // close is prevented ONLY while something can still resolve the guard.
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let guard = window.state::<ExitGuard>();
+                if !guard.begin() {
+                    api.prevent_close(); // a prompt is already pending — keep blocking
+                    return;
+                }
+                // SELF-HEALING: only prevent the close once the prompt request is
+                // actually out. A failed emit means nothing can ever resolve the
+                // guard, and a latched guard makes the window permanently
+                // unclosable — release it and let the OS close proceed instead.
+                match window.emit(events::CLOSE_REQUESTED, ()) {
+                    Ok(()) => api.prevent_close(),
+                    Err(e) => {
+                        tracing::warn!("close-requested emit failed ({e}); allowing close");
+                        guard.clear();
+                    }
+                }
+            }
+        })
         .setup(|app| {
             // Spawn the single regen scheduler over the shared runtime + app handle.
             let state = app.state::<AppState>();
@@ -209,7 +267,45 @@ pub fn run() {
             api::list_recents,
             api::open_file_dialog,
             api::save_file_dialog,
+            api::confirm_exit,
+            api::cancel_exit,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|handle, event| {
+        // App-level exit request (⌘Q, or the OS default "quit after last window
+        // closes"): `code` is `None` for a user-triggered request and `Some(_)`
+        // for a PROGRAMMATIC one (`AppHandle::exit` / `restart`). `api::confirm_exit`
+        // calls `app.exit(0)`, which re-fires this event with `code: Some(0)` — the
+        // `code.is_none()` gate below lets that one through unprompted, so a
+        // confirmed close/quit actually terminates the app instead of looping.
+        if let RunEvent::ExitRequested { api, code, .. } = event {
+            if code.is_none() {
+                let guard = handle.state::<ExitGuard>();
+                if !guard.begin() {
+                    api.prevent_exit(); // a prompt is already pending — keep blocking
+                    return;
+                }
+                // SELF-HEALING (mirrors `on_window_event`): with no main window, or
+                // a failed emit, NOTHING can ever resolve this guard. Latching it
+                // would leave the app unquittable, so release it and let the exit
+                // through rather than block forever on a prompt nobody can answer.
+                match handle
+                    .get_webview_window("main")
+                    .map(|w| w.emit(events::CLOSE_REQUESTED, ()))
+                {
+                    Some(Ok(())) => api.prevent_exit(),
+                    Some(Err(e)) => {
+                        tracing::warn!("close-requested emit failed ({e}); allowing exit");
+                        guard.clear();
+                    }
+                    None => {
+                        tracing::warn!("no main window to prompt for exit; allowing exit");
+                        guard.clear();
+                    }
+                }
+            }
+        }
+    });
 }

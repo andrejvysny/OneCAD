@@ -16,7 +16,6 @@ import { useToolStore } from "@/stores/toolStore";
 import { useViewportStore } from "@/stores/viewportStore";
 import { useSketchStore } from "@/stores/sketchStore";
 import { useRepairStore } from "@/stores/repairStore";
-import { useHistoryStore } from "@/stores/historyStore";
 import { documentStore } from "@/stores/documentStore";
 import { getModelToolController } from "@/tools/modelTools/modelToolBridge";
 import { HistoryList, type HistoryRowActions } from "./HistoryList";
@@ -66,16 +65,21 @@ function editFeature(item: FeatureMeta): void {
       void c?.editShellFeature(item.id);
       return;
     case "LinearPattern":
-      c?.editLinearPatternFeature(item.id);
+      void c?.editLinearPatternFeature(item.id);
       return;
     case "CircularPattern":
-      c?.editCircularPatternFeature(item.id);
+      void c?.editCircularPatternFeature(item.id);
       return;
     case "MirrorBody":
-      c?.editMirrorFeature(item.id);
+      void c?.editMirrorFeature(item.id);
+      return;
+    case "Boolean":
+      // Operation swap only — a Boolean's tool body is CONSUMED, so there is
+      // nothing to re-pick (see `editBooleanFeature`).
+      void c?.editBooleanFeature(item.id);
       return;
     default:
-      // Sketch/Boolean/opaque rows have no parametric editor yet.
+      // Sketch/opaque rows have no parametric editor yet.
       return;
   }
 }
@@ -102,11 +106,21 @@ function kindFallback(kind: FeatureMeta["kind"]): string {
   }
 }
 
-/** Build the per-row history affordances (suppress / roll-to-here / delete). */
-function makeRowActions(suppressedMap: Record<string, boolean>): (item: FeatureMeta) => HistoryRowActions {
-  return (item) => ({
-    suppressed: !!suppressedMap[item.id],
-    onToggleSuppress: (it) => void suppressFeature(it.id, !suppressedMap[it.id]),
+/**
+ * Per-row history affordances (suppress / roll-to-here / delete).
+ *
+ * `suppressed` reads the PROJECTION (`FeatureMeta.suppressed`, sourced from the
+ * backend record flag), never a frontend overlay: the retired optimistic overlay
+ * started empty on every document open, so a persisted suppression rendered
+ * un-dimmed and its toggle computed `!undefined === true` — re-suppressing a
+ * feature that was already suppressed, forever. The toggle therefore negates the
+ * feature's OWN authoritative flag.
+ */
+function rowActions(item: FeatureMeta): HistoryRowActions {
+  const suppressed = item.suppressed ?? false;
+  return {
+    suppressed,
+    onToggleSuppress: (it) => void suppressFeature(it.id, !(it.suppressed ?? false)),
     onRoll: (it) => {
       // Rollback cursor = applied op count (timeline.rs), so "roll to here" =
       // globalIndex + 1; resolve the GLOBAL index (the list may be a slice).
@@ -114,7 +128,7 @@ function makeRowActions(suppressedMap: Record<string, boolean>): (item: FeatureM
       if (idx >= 0) void rollToIndex(idx);
     },
     onDelete: (it) => void deleteFeature(it.id),
-  });
+  };
 }
 
 /**
@@ -235,8 +249,6 @@ function FeatureState({
   features: FeatureMeta[];
 }) {
   const feat = features.find((f) => f.id === featureId);
-  // The full-timeline view carries the per-row affordances (suppress/roll/delete).
-  const suppressedMap = useHistoryStore((s) => s.suppressed);
   return (
     <>
       <div className="text-[15px] font-semibold text-ink">{feat?.label ?? "Feature"}</div>
@@ -259,7 +271,7 @@ function FeatureState({
         selectedId={featureId}
         onSelect={selectFeature}
         onEdit={editFeature}
-        rowActions={makeRowActions(suppressedMap)}
+        rowActions={rowActions}
       />
     </>
   );

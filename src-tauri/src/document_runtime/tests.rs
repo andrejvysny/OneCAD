@@ -19,7 +19,7 @@ use onecad_core::document::record::{
     OperationRecord, RevolveParams,
 };
 use onecad_core::document::variables::Scalar;
-use onecad_core::edit::{EditCommand, RegenHint, SketchEditOp};
+use onecad_core::edit::{EditCommand, RegenHint, SketchEditOp, VisibilityTarget};
 use onecad_core::history::{StepState, Timeline};
 use onecad_core::ids::{
     BodyId, DocumentId, DocumentRevision, JobId, RecordId, SnapshotId, WorkerEpoch,
@@ -504,6 +504,48 @@ async fn apply_then_regen_publishes_body_and_marks_feature_ok() {
     assert_eq!(proj.features[0].value_text, "25.0 mm");
     assert_eq!(proj.features[0].status, crate::dto::FeatureStatus::Ok);
     assert!(proj.dirty);
+}
+
+#[tokio::test]
+async fn projection_prefers_document_body_metadata() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    rt.apply(add_extrude(0x10, 25.0)).unwrap();
+    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    let body = BodyId(Uuid::from_u128(0x10));
+
+    // The regen minted the body; adoption gave it a document row, so a body command
+    // can address it at all.
+    rt.apply(EditCommand::RenameBody {
+        body,
+        name: "Bracket".into(),
+    })
+    .unwrap();
+    rt.apply(EditCommand::SetVisibility {
+        target: VisibilityTarget::Body(body),
+        visible: false,
+    })
+    .unwrap();
+
+    // The regen row is untouched — the projection is an OVERLAY, not a mutation of
+    // the mirror (which the next regen would overwrite anyway).
+    assert_ne!(rt.regen.bodies.get(body).unwrap().name, "Bracket");
+    assert!(rt.regen.bodies.get(body).unwrap().visible);
+
+    let dto = rt.projection().bodies.remove(&body.to_string()).unwrap();
+    assert_eq!(dto.name, "Bracket", "the document's name wins");
+    assert!(!dto.visible, "the document's visibility wins");
+
+    // A from-0 regen rebuilds the registry from `BodyRegistry::new()` (default name,
+    // visible) — user intent must still win, and it is what a save writes.
+    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    let dto = rt.projection().bodies.remove(&body.to_string()).unwrap();
+    assert_eq!(dto.name, "Bracket");
+    assert!(!dto.visible);
+    let saved = rt.merged_bodies();
+    let meta = saved.get(body).unwrap();
+    assert_eq!((meta.name.as_str(), meta.visible), ("Bracket", false));
 }
 
 #[tokio::test]
@@ -1433,4 +1475,99 @@ async fn engine_failure_without_moved_fencing_reports_failed() {
         .await;
     assert_eq!(report.outcome_str(), "failed");
     assert!(report.failure_message().is_some());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T0 suppression: the record flag reaches the projection, and a committed regen
+// gives the dependency graph its body edges (so `cascade` can actually reach a
+// downstream op).
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn feature_dto_carries_suppressed() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    rt.apply(add_extrude(0x10, 10.0)).unwrap();
+    rt.apply(add_extrude(0x11, 20.0)).unwrap();
+    assert!(
+        rt.projection().features.iter().all(|f| !f.suppressed),
+        "nothing is suppressed to start with"
+    );
+
+    rt.apply(EditCommand::SetOperationSuppression {
+        record: RecordId(Uuid::from_u128(0x11)),
+        suppressed: true,
+        cascade: false,
+    })
+    .unwrap();
+
+    let features = rt.projection().features;
+    assert_eq!(features.len(), 2);
+    assert!(!features[0].suppressed, "op 0 untouched");
+    assert!(features[1].suppressed, "op 1 carries the record flag");
+    // The flag is available BEFORE any regen — it is read off the record, not the
+    // regen mirror state.
+    assert_eq!(features[1].status, crate::dto::FeatureStatus::Dirty);
+
+    rt.apply(EditCommand::SetOperationSuppression {
+        record: RecordId(Uuid::from_u128(0x11)),
+        suppressed: false,
+        cascade: false,
+    })
+    .unwrap();
+    assert!(rt.projection().features.iter().all(|f| !f.suppressed));
+}
+
+#[tokio::test]
+async fn committed_regen_backfills_record_outputs_so_cascade_reaches_a_fillet() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    // The FakeBackend mints `BodyId(opId.uuid)` per op (the D1 rule), so op 0x10's
+    // body is `BodyId(0x10)` — the body the fillet stands on.
+    let body = BodyId(Uuid::from_u128(0x10));
+    rt.apply(add_extrude(0x10, 10.0)).unwrap();
+    rt.apply(EditCommand::AddOperation {
+        record: fillet_record(0x20, body, "el_edge0", Vec3::new_unchecked(0.0, 0.0, 0.0)),
+        at_cursor: true,
+    })
+    .unwrap();
+
+    // Records arrive with EMPTY outputs, so before a regen the graph has no body
+    // edge and the cascade cannot see the fillet.
+    assert!(rt.session.document().timeline.records()[0]
+        .outputs
+        .is_empty());
+    assert!(rt
+        .session
+        .graph()
+        .downstream(RecordId(Uuid::from_u128(0x10)))
+        .is_empty());
+
+    let report = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert!(matches!(report.outcome, Outcome::Published(_)));
+
+    // The commit wrote the produced body back onto the record → body edge exists.
+    assert_eq!(
+        rt.session.document().timeline.records()[0].outputs,
+        vec![body],
+        "the extrude record adopted its produced body"
+    );
+    assert!(
+        rt.session
+            .graph()
+            .downstream(RecordId(Uuid::from_u128(0x10)))
+            .contains(&RecordId(Uuid::from_u128(0x20))),
+        "the fillet is now downstream of the extrude"
+    );
+
+    // …so a cascading suppression reaches it.
+    rt.apply(EditCommand::SetOperationSuppression {
+        record: RecordId(Uuid::from_u128(0x10)),
+        suppressed: true,
+        cascade: true,
+    })
+    .unwrap();
+    let features = rt.projection().features;
+    assert!(features[0].suppressed, "the extrude is suppressed");
+    assert!(features[1].suppressed, "the fillet cascaded");
 }

@@ -607,12 +607,17 @@ impl<E: GeometryEngine> RegenExecutor<E> {
             });
         }
 
-        // F23: a Completed prepare must have reached the target.
+        // F23: a Completed prepare must have executed every planned step. The yardstick
+        // is the LAST PLANNED step, not `target`: a suppressed op is absent from the
+        // plan, so when the target step itself is suppressed the last executed step is
+        // legitimately below it.
+        let last_planned = planned_steps.last().copied().unwrap_or(target);
         let completed_reached_target = prepared.stopped_reason != StoppedReason::Completed
-            || prepared.last_valid_step == Some(target);
+            || prepared.last_valid_step == Some(last_planned);
         debug_assert!(
             completed_reached_target,
-            "stoppedReason=Completed but lastValidStep {:?} != target {target}",
+            "stoppedReason=Completed but lastValidStep {:?} != last planned step {last_planned} \
+             (target {target})",
             prepared.last_valid_step
         );
 
@@ -700,7 +705,8 @@ impl<E: GeometryEngine> RegenExecutor<E> {
                 severity: Severity::Warning,
                 code: "PREPARE_INVARIANT".into(),
                 message: format!(
-                    "stoppedReason=Completed but lastValidStep {:?} != target {target}",
+                    "stoppedReason=Completed but lastValidStep {:?} != last planned step \
+                     {last_planned} (target {target})",
                     prepared.last_valid_step
                 ),
             });

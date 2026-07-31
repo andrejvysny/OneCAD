@@ -1623,3 +1623,89 @@ describe("tauriClient sketchUpsert transactional id-map", () => {
     expect(seenOps[2]).toEqual([]); // committed after (2) → no re-add
   });
 });
+
+// ── Metadata-only EditCommands: no regen ⇒ no correlation awaiter ─────────────
+//
+// `SetVisibility` / `RenameBody` / `RenameSketch` are `RegenHint::None` on the Rust
+// side (edit/session.rs), so `apply_edit_command` publishes a projection and NOTHING
+// else ever arrives. Routed through the normal correlated `applyEdit`, every eye
+// click would sit out the full 8 s safety timeout before resolving. These pin that
+// they settle off the command's own projection, with no timer advanced and no event
+// emitted. A mock-client test could not see this at all — the mock resolves
+// unconditionally (a false green).
+
+describe("tauriClient metadata-only edit commands", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    __setRegenTimeoutForTests(8000);
+  });
+
+  /** Settle-without-regen probe: resolves only if no awaiter is registered. */
+  async function settlesWithoutRegen(command: unknown): Promise<{
+    settled: boolean;
+    result: unknown;
+  }> {
+    const client = createTauriClient();
+    vi.useFakeTimers();
+    let settled = false;
+    const promise = client.applyEditCommand(command as never).then((r) => {
+      settled = true;
+      return r;
+    });
+    // Flush microtasks ONLY — no timer fires, and no document-changed /
+    // regen-finished is emitted, so an awaiter-backed path stays pending here.
+    await vi.advanceTimersByTimeAsync(0);
+    return { settled, result: settled ? await promise : null };
+  }
+
+  it("setVisibility resolves off the command projection alone (no awaiter, no 8s stall)", async () => {
+    const seen: unknown[] = [];
+    mockIPC((cmd, payload) => {
+      if (cmd === "apply_edit_command") {
+        seen.push((payload as { command: unknown }).command);
+        return readyProjection(7, [
+          { id: "f1", kind: "extrude", opType: "Extrude", label: "Extrude", valueText: "5.0 mm", status: "ok" },
+        ]);
+      }
+    });
+    __setRegenTimeoutForTests(60_000); // any awaiter would visibly stall
+
+    const { settled, result } = await settlesWithoutRegen({
+      cmd: "setVisibility",
+      target: { body: "b-uuid" },
+      visible: false,
+    });
+    expect(settled).toBe(true);
+    expect(result).toEqual({
+      revision: 7,
+      changedBodies: [],
+      removedBodies: [],
+      features: [
+        { id: "f1", kind: "extrude", opType: "Extrude", label: "Extrude", valueText: "5.0 mm", status: "ok" },
+      ],
+      opLabel: "Hide",
+    });
+    expect(seen[0]).toEqual({ cmd: "setVisibility", target: { body: "b-uuid" }, visible: false });
+  });
+
+  it("renameBody / renameSketch take the same metadata-only transport", async () => {
+    mockIPC((cmd) => (cmd === "apply_edit_command" ? readyProjection(3) : undefined));
+    __setRegenTimeoutForTests(60_000);
+    const a = await settlesWithoutRegen({ cmd: "renameBody", body: "b", name: "Housing" });
+    expect(a.settled).toBe(true);
+    vi.useRealTimers();
+    const b = await settlesWithoutRegen({ cmd: "renameSketch", sketch: "s", name: "Profile" });
+    expect(b.settled).toBe(true);
+  });
+
+  it("a TIMELINE command still registers the awaiter (the metadata set is not a blanket bypass)", async () => {
+    mockIPC((cmd) => (cmd === "apply_edit_command" ? readyProjection(3) : undefined), {
+      shouldMockEvents: true,
+    });
+    __setRegenTimeoutForTests(60_000);
+    // removeOperation dirties the timeline (RegenHint::ToEnd) — it MUST wait for the
+    // correlated regen, so it is still pending at this point.
+    const { settled } = await settlesWithoutRegen({ cmd: "removeOperation", record: "f3" });
+    expect(settled).toBe(false);
+  });
+});

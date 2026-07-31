@@ -9,6 +9,7 @@ import { createStore, useStore } from "zustand";
 import { createClient } from "@/ipc/client";
 import { resetDocumentScopedUi } from "@/ipc/documentLifecycle";
 import { documentStore, emptyDocument } from "@/stores/documentStore";
+import { saveDocument } from "@/features/shell/fileActions";
 import type { DocumentSnapshot, RecentProject, RecoveryInfo } from "@/ipc/types";
 
 const client = createClient();
@@ -16,6 +17,17 @@ const client = createClient();
 type Screen = "start" | "editor";
 type RecentsStatus = "idle" | "loading" | "ready";
 type RecoveryStatus = "idle" | "loading" | "ready";
+
+/**
+ * Which close path is awaiting confirmation:
+ *  - "close" — an in-app "Close Project" (TitleBar × / ⌘W): stays in the app,
+ *    returns to the start screen.
+ *  - "quit"  — an app-level exit (native window-close button / ⌘Q): Rust already
+ *    prevented the actual close/exit server-side and is waiting on `confirmExit`/
+ *    `cancelExit` (see `CadClient.onCloseRequested`).
+ * `null` = no prompt pending.
+ */
+export type PendingCloseIntent = "close" | "quit" | null;
 
 export interface AppState {
   screen: Screen;
@@ -26,6 +38,9 @@ export interface AppState {
   /** A crashed session's autosave offer (null once checked-and-empty or resolved). */
   recovery: RecoveryInfo | null;
   recoveryStatus: RecoveryStatus;
+  /** Set when a close/quit lands against a DIRTY document — drives the
+   *  UnsavedChangesDialog. See `requestClose` / `confirmClose`. */
+  pendingCloseIntent: PendingCloseIntent;
 
   loadRecents(): Promise<void>;
   newProject(): Promise<void>;
@@ -36,6 +51,29 @@ export interface AppState {
   checkRecovery(): Promise<void>;
   recoverDocument(): Promise<void>;
   discardRecovery(): Promise<void>;
+  /**
+   * Entry point for EVERY close/quit path (TitleBar ×, ⌘W, the native
+   * window-close button, ⌘Q). A clean document proceeds immediately (bypassing
+   * the dialog); a dirty one arms `pendingCloseIntent` so the
+   * UnsavedChangesDialog can prompt.
+   *
+   * Re-entrant by design (the dialog blocks the pointer, not the shortcut lane).
+   * An identical pending intent is ignored; a DIFFERENT one first releases a
+   * pending "quit" via `cancelExit`, because that intent — and only that one —
+   * holds Rust's `ExitGuard`, and dropping it unreleased makes the app unclosable.
+   */
+  requestClose(intent: "close" | "quit"): Promise<void>;
+  /**
+   * Resolve a pending prompt from the UnsavedChangesDialog.
+   *  - "cancel"  — clears the intent; for "quit" also releases the backend's
+   *    re-entrancy guard (without exiting) so a later attempt prompts again.
+   *  - "discard" — proceeds without saving.
+   *  - "save"    — saves first (via the shared `fileActions.saveDocument` path);
+   *    a save failure/cancel leaves the prompt open (the failure's error hint is
+   *    already surfaced by `saveDocument` itself) so the user can retry or fall
+   *    back to Cancel.
+   */
+  confirmClose(action: "save" | "discard" | "cancel"): Promise<void>;
 }
 
 export const appStore = createStore<AppState>()((set, get) => {
@@ -49,6 +87,11 @@ export const appStore = createStore<AppState>()((set, get) => {
     if (get().document) resetDocumentScopedUi();
   };
 
+  /** The actual close/quit action once nothing (or nothing further) blocks it —
+   *  a clean-document bypass, or a confirmed discard/save. */
+  const proceed = (intent: "close" | "quit"): Promise<void> =>
+    intent === "quit" ? client.confirmExit() : get().closeProject();
+
   return {
     screen: "start",
     recents: [],
@@ -56,6 +99,7 @@ export const appStore = createStore<AppState>()((set, get) => {
     document: null,
     recovery: null,
     recoveryStatus: "idle",
+    pendingCloseIntent: null,
 
     async loadRecents() {
       set({ recentsStatus: "loading" });
@@ -120,6 +164,42 @@ export const appStore = createStore<AppState>()((set, get) => {
     async discardRecovery() {
       await client.recoverDocument(false);
       set({ recovery: null, recoveryStatus: "ready" });
+    },
+
+    async requestClose(intent) {
+      const pending = get().pendingCloseIntent;
+      // Same prompt already up: ignore. (The dialog blocks the pointer but NOT the
+      // shortcut lane, so ⌘W/⌘Q can re-enter; Rust's ExitGuard likewise swallows a
+      // repeat "quit" without re-emitting.)
+      if (pending === intent) return;
+      // A pending "quit" means Rust PREVENTED the native close/exit and is holding
+      // `ExitGuard` until `confirmExit`/`cancelExit`. Replacing that intent without
+      // releasing the guard orphans it — the app then quietly refuses every later
+      // quit. Release it before the intent is replaced (or resolved by the
+      // clean-document fast path below, which never reaches `confirmExit`).
+      if (pending === "quit") await client.cancelExit();
+      if (!documentStore.getState().dirty) {
+        set({ pendingCloseIntent: null });
+        await proceed(intent);
+        return;
+      }
+      set({ pendingCloseIntent: intent });
+    },
+
+    async confirmClose(action) {
+      const intent = get().pendingCloseIntent;
+      if (!intent) return; // nothing pending
+      if (action === "cancel") {
+        set({ pendingCloseIntent: null });
+        if (intent === "quit") await client.cancelExit();
+        return;
+      }
+      if (action === "save") {
+        const saved = await saveDocument();
+        if (!saved) return; // failure/cancel — stay open (saveDocument surfaced the hint)
+      }
+      set({ pendingCloseIntent: null });
+      await proceed(intent);
     },
   };
 });

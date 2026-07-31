@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { mockClient, resetMockDocument, resetMockSketches, setMockLatency } from "./mockClient";
 import { updateScalarParamsCommand } from "./tauriCommandMap";
-import type { OperationOp, SketchEntity } from "./types";
+import type { FeatureRecord, OperationOp, SketchEntity } from "./types";
 
 const CIRCLE: SketchEntity = { id: "e1", type: "Circle", center: [0, 0], radius: 10 };
 
@@ -244,7 +244,10 @@ describe("mockClient operations", () => {
       params: { thickness: 2, openFaces: ["el_f"], targetBodyId: "body1" },
     });
     expect(created.changedBodies.map((b) => b.bodyId)).toContain("body1");
-    const shell = created.features.find((f) => f.kind === "shell");
+    // Look up by `opType`, not `kind`: the mock mirrors the REAL projection, where
+    // `dto.rs feature_kind` folds Shell into the `fillet` bucket.
+    const shell = created.features.find((f) => f.opType === "Shell");
+    expect(shell?.kind).toBe("fillet");
     expect(shell?.valueText).toBe("2.0 mm");
     expect(created.opLabel).toBe("Shell");
 
@@ -254,7 +257,7 @@ describe("mockClient operations", () => {
       inputs: [],
       params: { thickness: 4, openFaces: [], targetBodyId: "body1" },
     });
-    const shells = edited.features.filter((f) => f.kind === "shell");
+    const shells = edited.features.filter((f) => f.opType === "Shell");
     expect(shells).toHaveLength(1); // updated, not appended
     expect(shells[0].valueText).toBe("4.0 mm");
   });
@@ -266,7 +269,10 @@ describe("mockClient operations", () => {
       params: { sourceBodyId: "body1", direction: [1, 0, 0], spacing: 20, count: 4, fuseResult: true },
     });
     expect(lin.changedBodies.map((b) => b.bodyId)).toContain("body1");
-    expect(lin.features.some((f) => f.kind === "linearPattern" && f.valueText === "×4")).toBe(true);
+    // `opType` is the identity; `kind` is the folded projection bucket (boolean).
+    expect(lin.features.some((f) => f.opType === "LinearPattern" && f.kind === "boolean" && f.valueText === "×4")).toBe(
+      true,
+    );
     expect(lin.opLabel).toBe("Linear Pattern");
 
     const circ = await mockClient.applyOperation({
@@ -274,7 +280,9 @@ describe("mockClient operations", () => {
       inputs: [{ primary: { bodyId: "body1", kind: "body" } }],
       params: { sourceBodyId: "body1", axisOrigin: [0, 0, 0], axisDirection: [0, 0, 1], angleDeg: 360, count: 6 },
     });
-    expect(circ.features.some((f) => f.kind === "circularPattern" && f.valueText === "×6")).toBe(true);
+    expect(
+      circ.features.some((f) => f.opType === "CircularPattern" && f.kind === "boolean" && f.valueText === "×6"),
+    ).toBe(true);
     expect(circ.opLabel).toBe("Circular Pattern");
   });
 
@@ -284,12 +292,13 @@ describe("mockClient operations", () => {
       inputs: [{ primary: { bodyId: "body1", kind: "body" } }],
       params: { sourceBodyId: "body1", planePoint: [0, 0, 0], planeNormal: [1, 0, 0], fuseWithOriginal: false },
     });
-    const mirror = res.features.find((f) => f.kind === "mirror");
+    const mirror = res.features.find((f) => f.opType === "MirrorBody");
+    expect(mirror?.kind).toBe("boolean");
     expect(mirror?.valueText).toBe("YZ"); // normal +X → YZ plane
     expect(res.opLabel).toBe("Mirror");
 
     const undone = await mockClient.undo();
-    expect(undone.features.some((f) => f.kind === "mirror")).toBe(false);
+    expect(undone.features.some((f) => f.opType === "MirrorBody")).toBe(false);
   });
 
   it("preview session commits with the latest streamed params", async () => {
@@ -337,5 +346,124 @@ describe("mockClient operations", () => {
     await new Promise((r) => setTimeout(r, 5));
     expect(seen).not.toContain(3);
     unsub();
+  });
+});
+
+/*
+ * Suppression + boolean op-swap through the RAW EditCommand surface. The frontend
+ * has no suppression overlay any more (TRUST wave), so the mock's returned
+ * `features[].suppressed` IS the dim state every spec asserts on.
+ */
+/** The newest timeline row of a result (the op just committed). */
+function lastFeature(res: { features: FeatureRecord[] }): FeatureRecord {
+  const last = res.features[res.features.length - 1];
+  if (!last) throw new Error("result carries no features");
+  return last;
+}
+
+describe("mockClient — suppression + boolean re-edit", () => {
+  beforeEach(() => {
+    setMockLatency(0);
+    resetMockDocument();
+    resetMockSketches();
+  });
+
+  it("flips `suppressed` on the named feature and round-trips through undo/redo", async () => {
+    const regionId = await seedRegion();
+    const created = await mockClient.applyOperation(extrudeOp("skA", regionId, 10));
+    const featureId = lastFeature(created).id;
+
+    const suppressed = await mockClient.applyEditCommand({
+      cmd: "setOperationSuppression",
+      record: featureId,
+      suppressed: true,
+      cascade: true,
+    });
+    expect(suppressed.features.find((f) => f.id === featureId)?.suppressed).toBe(true);
+    expect(suppressed.opLabel).toBe("Suppress");
+
+    // Every EditCommand is undoable on the real backend (core mints an inverse for
+    // SetOperationSuppression too), so ⌘Z must restore the un-suppressed timeline.
+    const undone = await mockClient.undo();
+    expect(undone.features.find((f) => f.id === featureId)?.suppressed).toBeFalsy();
+    const redone = await mockClient.redo();
+    expect(redone.features.find((f) => f.id === featureId)?.suppressed).toBe(true);
+  });
+
+  it("cascades to a DERIVABLE downstream consumer of the suppressed feature's body", async () => {
+    const regionId = await seedRegion();
+    const created = await mockClient.applyOperation(extrudeOp("skA", regionId, 10));
+    const extrudeId = lastFeature(created).id;
+    const bodyId = created.changedBodies[0].bodyId;
+    // A Shell whose stored params NAME that body — the one dependency edge the
+    // mock can actually prove (it has no dependency graph).
+    const shelled = await mockClient.applyOperation({
+      opType: "Shell",
+      inputs: [{ primary: { bodyId, elementId: "el_f", kind: "face" } }],
+      params: { thickness: 2, openFaces: ["el_f"], targetBodyId: bodyId },
+    });
+    const shellId = lastFeature(shelled).id;
+
+    const res = await mockClient.applyEditCommand({
+      cmd: "setOperationSuppression",
+      record: extrudeId,
+      suppressed: true,
+      cascade: true,
+    });
+    expect(res.features.find((f) => f.id === extrudeId)?.suppressed).toBe(true);
+    expect(res.features.find((f) => f.id === shellId)?.suppressed).toBe(true);
+    // An UNRELATED earlier feature is never dragged in (cascade is downstream-only).
+    expect(res.features.find((f) => f.id === "f2")?.suppressed).toBeFalsy();
+  });
+
+  it("does NOT cascade on un-suppress (mirrors the one-directional backend policy)", async () => {
+    const regionId = await seedRegion();
+    const created = await mockClient.applyOperation(extrudeOp("skA", regionId, 10));
+    const extrudeId = lastFeature(created).id;
+    const bodyId = created.changedBodies[0].bodyId;
+    const shelled = await mockClient.applyOperation({
+      opType: "Shell",
+      inputs: [{ primary: { bodyId, elementId: "el_f", kind: "face" } }],
+      params: { thickness: 2, openFaces: ["el_f"], targetBodyId: bodyId },
+    });
+    const shellId = lastFeature(shelled).id;
+    await mockClient.applyEditCommand({ cmd: "setOperationSuppression", record: extrudeId, suppressed: true, cascade: true });
+
+    const res = await mockClient.applyEditCommand({
+      cmd: "setOperationSuppression",
+      record: extrudeId,
+      suppressed: false,
+      cascade: false,
+    });
+    expect(res.features.find((f) => f.id === extrudeId)?.suppressed).toBe(false);
+    // The dependent stays suppressed — un-suppress must never resurrect it.
+    expect(res.features.find((f) => f.id === shellId)?.suppressed).toBe(true);
+  });
+
+  it("a boolean operation swap edits the row in place, preserving the stored bodies", async () => {
+    const created = await mockClient.applyOperation({
+      opType: "Boolean",
+      inputs: [
+        { primary: { bodyId: "body1", kind: "body" } },
+        { primary: { bodyId: "body9", kind: "body" } },
+      ],
+      params: { operation: "Union", targetBodyId: "body1", toolBodyId: "body9" },
+    });
+    const featureId = lastFeature(created).id;
+    expect(lastFeature(created).label).toBe("Union");
+
+    const stored = await mockClient.getOperationParams(featureId);
+    const cmd = updateScalarParamsCommand(featureId, "Boolean", stored, { operation: "Cut" });
+    const edited = await mockClient.applyEditCommand(cmd);
+
+    // One row still (edit, not append) and the mock's boolean label follows the swap.
+    expect(edited.features.filter((f) => f.opType === "Boolean")).toHaveLength(1);
+    expect(lastFeature(edited).label).toBe("Cut");
+    // The consumed bodies survived the merge verbatim.
+    expect(await mockClient.getOperationParams(featureId)).toEqual({
+      operation: "Cut",
+      targetBodyId: "body1",
+      toolBodyId: "body9",
+    });
   });
 });

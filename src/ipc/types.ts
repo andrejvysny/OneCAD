@@ -699,6 +699,9 @@ export interface FeatureRecord {
   /** Worker failure reason for an errored step (`status === "error"`), surfaced as
    *  the HistoryList row tooltip (MODEL-HARDEN W0.5). Absent for any other status. */
   statusMessage?: string;
+  /** Whether the step is suppressed (backend-authoritative; a concurrent Rust change
+   *  adds this to `FeatureDto`). Optional so an older backend payload still parses. */
+  suppressed?: boolean;
 }
 
 /** `applyOperation` / `endPreview(commit)` / `undo` / `redo` result. */

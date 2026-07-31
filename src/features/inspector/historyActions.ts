@@ -15,10 +15,11 @@ import {
   rollbackToCursorCommand,
   suppressOperationCommand,
 } from "@/ipc/tauriCommandMap";
+import { toFeatureMeta } from "@/ipc/projectionHydration";
 import type { ApplyOperationResult, NeedsRepairItem, ResolveCandidate } from "@/ipc/types";
 import { parseRefId } from "@/ipc/tauriCommandMap";
-import { documentStore, type FeatureMeta } from "@/stores/documentStore";
-import { historyStore } from "@/stores/historyStore";
+import { documentStore } from "@/stores/documentStore";
+import { selectionStore } from "@/stores/selectionStore";
 import { viewportStore } from "@/stores/viewportStore";
 
 /** Hydrate the document store from a regen result (bodies + feature timeline). */
@@ -38,25 +39,6 @@ function applyEditResult(res: ApplyOperationResult): void {
   });
 }
 
-function toFeatureMeta(f: {
-  id: string;
-  kind: FeatureMeta["kind"];
-  opType?: string;
-  label: string;
-  valueText: string;
-  status: FeatureMeta["status"];
-}): FeatureMeta {
-  return {
-    id: f.id,
-    kind: f.kind,
-    // Re-edits route on the exact authored opType, not the folded `kind` bucket.
-    opType: f.opType,
-    label: f.label,
-    valueText: f.valueText,
-    status: f.status,
-  };
-}
-
 /** Transient success confirmation (auto-dismisses). */
 function hint(text: string): void {
   viewportStore.getState().setStatusHint(text);
@@ -73,15 +55,24 @@ function errMessage(e: unknown): string {
 
 // ── History-row affordances ────────────────────────────────────────────────
 
-/** Suppress / un-suppress a feature (optimistic dim + `SetOperationSuppression`). */
+/**
+ * Suppress / un-suppress a feature (`SetOperationSuppression`).
+ *
+ * NO optimistic flip: `FeatureDto.suppressed` is authoritative and rides every
+ * projection, so the returned features array (hydrated by `applyEditResult`) IS
+ * the dim state — including the CASCADE the backend applied, which a frontend
+ * overlay could never have known about. The retired overlay also broke on reopen
+ * (it started empty, so a persisted suppression could never be undone).
+ */
 export async function suppressFeature(opId: string, suppressed: boolean): Promise<void> {
-  historyStore.getState().setSuppressed(opId, suppressed); // optimistic
   try {
-    const res = await createClient().applyEditCommand(suppressOperationCommand(opId, suppressed));
+    // Cascade is ONE-DIRECTIONAL: suppressing a step also suppresses everything
+    // downstream that depends on it, but UN-suppressing must not cascade — that
+    // would resurrect dependents the user deliberately suppressed on their own.
+    const res = await createClient().applyEditCommand(suppressOperationCommand(opId, suppressed, suppressed));
     applyEditResult(res);
     hint(suppressed ? "Feature suppressed" : "Feature unsuppressed");
   } catch (e) {
-    historyStore.getState().setSuppressed(opId, !suppressed); // revert optimistic
     errorHint(`Suppress failed: ${errMessage(e)}`);
   }
 }
@@ -106,7 +97,6 @@ export async function deleteFeature(opId: string): Promise<void> {
   try {
     const res = await createClient().applyEditCommand(removeOperationCommand(opId));
     applyEditResult(res);
-    historyStore.getState().setSuppressed(opId, false); // drop any stale overlay
     hint("Feature deleted");
   } catch (e) {
     errorHint(`Delete failed: ${errMessage(e)}`);
@@ -117,18 +107,18 @@ export async function deleteFeature(opId: string): Promise<void> {
 
 /**
  * Derive the body a repair item's feature operated on. SEAM: the projection has
- * no feature→body linkage, so with a single body we use it; with several the
- * operated body is ambiguous and we fall back to the first (dev warn). A follow-up
- * needs the needs-repair item to carry its op's target body.
+ * no feature→body linkage. A single-body document is unambiguous; with several
+ * bodies the operated one is genuinely ambiguous UNLESS the user has explicitly
+ * narrowed it by selecting exactly one body — a silent guess (e.g. "the first")
+ * risks repairing the wrong feature's reference, which is worse than refusing. A
+ * follow-up needs the needs-repair item to carry its op's target body.
  */
 function deriveOperatedBody(): string | null {
   const ids = Object.keys(documentStore.getState().bodies);
   if (ids.length === 0) return null;
-  if (ids.length > 1 && import.meta.env?.DEV) {
-    // eslint-disable-next-line no-console
-    console.warn("[repair] ambiguous operated body (>1 body); using the first");
-  }
-  return ids[0];
+  if (ids.length === 1) return ids[0];
+  const selectedBodies = selectionStore.getState().selected.filter((r) => r.kind === "body");
+  return selectedBodies.length === 1 ? selectedBodies[0].id : null;
 }
 
 /**
@@ -148,7 +138,12 @@ export async function rebindCandidate(
 ): Promise<boolean> {
   const bodyId = deriveOperatedBody();
   if (!bodyId) {
-    errorHint("Cannot repair: no body to bind against");
+    const bodyCount = Object.keys(documentStore.getState().bodies).length;
+    errorHint(
+      bodyCount > 1
+        ? `Cannot repair: operated body is ambiguous (${bodyCount} bodies). Select the body this feature operated on first.`
+        : "Cannot repair: no body to bind against",
+    );
     return false;
   }
   const index = parseRefId(item.refId)?.index ?? 0;

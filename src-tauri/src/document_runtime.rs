@@ -36,7 +36,7 @@
 //! `Arc<dyn `[`MeshProvider`]`>`; production wires the real `WorkerManager`, with
 //! [`PendingBackend`](crate::worker::PendingBackend) the no-worker fallback.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -391,7 +391,7 @@ impl DocumentRuntime {
         // Seed the regen mirror from the (possibly persisted) geometry outputs so
         // the tree renders saved bodies immediately, before the first regen.
         let regen = RegenSession {
-            bodies: doc.bodies.clone(),
+            bodies: seed_regen_bodies(&doc),
             timeline: doc.timeline.clone(),
             repair: doc.repair.clone(),
             elements: doc.elements.clone(),
@@ -517,9 +517,28 @@ impl DocumentRuntime {
         if self.read_only {
             return Err(DomainError::ReadOnly);
         }
+        self.reject_timeline_body_delete(&cmd)?;
         let outcome = self.session.apply(cmd)?;
         self.after_mutation();
         Ok(outcome)
+    }
+
+    /// Rejects `DeleteBody` for a body the timeline produces. The Session cannot see
+    /// the regen mirror, and since [`adopt_regen_bodies`] gives every regen body a
+    /// document row, its `contains` check would let the delete "succeed" while the
+    /// projection keeps listing the regen row — a silent no-op. Timeline geometry is
+    /// deleted by deleting its producing feature.
+    ///
+    /// [`adopt_regen_bodies`]: onecad_core::edit::DocumentSession::adopt_regen_bodies
+    fn reject_timeline_body_delete(&self, cmd: &EditCommand) -> Result<(), DomainError> {
+        if let EditCommand::DeleteBody { body } = cmd {
+            if self.regen.bodies.contains(*body) {
+                return Err(DomainError::Validation(format!(
+                    "body {body} is produced by the timeline — delete its producing feature instead"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Undoes the newest committed edit. Returns `true` if a step was undone.
@@ -569,6 +588,10 @@ impl DocumentRuntime {
     /// regen), bump the fencing revision, and mark unsaved.
     fn after_mutation(&mut self) {
         self.sync_regen_timeline();
+        // Re-register the regen bodies' document rows: `Inverse::RestoreBodies`
+        // restores the WHOLE registry, so an undo erases rows adopted after the edit
+        // it reverts. Insert-only — user-authored name/visible survive.
+        self.session.adopt_regen_bodies(&self.regen.bodies);
         self.fencing.bump_revision();
         self.dirty = true;
     }
@@ -645,8 +668,16 @@ impl DocumentRuntime {
             &ctx,
         );
         if plan.is_empty() {
-            tracing::info!("begin_regen: EMPTY plan (noop)");
             self.last_regen_used_checkpoint = false;
+            // TRUST F2: an empty op list is NOT always "nothing to do". When the request
+            // covers the whole applied prefix and every op in it is suppressed (or nothing
+            // is applied at all), the correct result is NO geometry — reporting NoOp here
+            // left the last published bodies on screen AND in the saved container.
+            if let Some(prepared) = self.prepare_clear_regen(request) {
+                tracing::info!("begin_regen: EMPTY plan → CLEAR publish (all ops suppressed)");
+                return Some(prepared);
+            }
+            tracing::info!("begin_regen: EMPTY plan (noop)");
             return None;
         }
         let job = self.next_job_id();
@@ -687,16 +718,102 @@ impl DocumentRuntime {
             .as_ref()
             .map(|s| s.bodies.iter().map(|b| b.body).collect())
             .unwrap_or_default();
+        let executed: BTreeSet<RecordId> = plan_req.ops.iter().map(|o| o.record_id).collect();
         Some(PreparedRegen {
-            plan_req,
-            engine: AdoptingEngine::new(self.engine.clone(), known_ops, HashSet::new()),
+            work: PreparedWork::Plan {
+                plan_req: Box::new(plan_req),
+                engine: Box::new(AdoptingEngine::new(
+                    self.engine.clone(),
+                    known_ops,
+                    HashSet::new(),
+                )),
+            },
             scratch: self.clone_regen_session(),
             fencing: self.fencing.clone(),
             publisher: self.publisher.clone(),
             expected: (plan_rev, epoch),
             lod: Lod::Coarse,
             prior,
+            executed,
         })
+    }
+
+    /// Phase 1 for the **CLEAR** case (TRUST F2): a regen whose op list is empty
+    /// *because every op it covers is suppressed* (or because nothing is applied at
+    /// all) must still publish — as **no geometry** — instead of reporting `NoOp` and
+    /// leaving the previous bodies on screen and in the saved container.
+    ///
+    /// `None` (⇒ keep the `NoOp` terminal) whenever the emptiness is the benign kind:
+    /// a request that starts past the applied end ("nothing new to do"), a
+    /// checkpoint-based plan whose restored base still holds the geometry, or a
+    /// document that has no geometry to clear in the first place.
+    ///
+    /// The publish is Rust-side, with **no worker round-trip**: there is nothing for the
+    /// worker to compute, an ops-empty `ExecutePlan` is not part of the wire contract
+    /// (SCHEMA §7.2 — and the executor short-circuits `start_step().is_none()` to
+    /// `NoOp`), and the worker's stale head is harmless because the next non-empty regen
+    /// from this state replays from an empty base (`start_step == 0`) or restores from
+    /// immutable checkpoint artifacts. The result still travels the normal
+    /// [`finish_regen`](Self::finish_regen) accept path, so revision/fencing, the
+    /// `document-changed` delta and the projection all stay consistent.
+    fn prepare_clear_regen(&self, request: RegenRequest) -> Option<PreparedRegen> {
+        let target = self.fully_suppressed_target(request)?;
+        // Only meaningful if there IS geometry to drop. A never-regenerated blank
+        // document keeps its `NoOp` terminal (no spurious empty publish).
+        let mut prior: Vec<BodyId> = self.regen.bodies.bodies().iter().map(|b| b.id).collect();
+        if let Some(snap) = &self.latest_snapshot {
+            for b in &snap.bodies {
+                if !prior.contains(&b.body) {
+                    prior.push(b.body);
+                }
+            }
+        }
+        if prior.is_empty() {
+            return None;
+        }
+        let (plan_rev, epoch) = self.fencing.get();
+        Some(PreparedRegen {
+            work: PreparedWork::Clear { target },
+            scratch: self.clone_regen_session(),
+            fencing: self.fencing.clone(),
+            publisher: self.publisher.clone(),
+            expected: (plan_rev, epoch),
+            lod: Lod::Coarse,
+            prior,
+            // Nothing executed ⇒ no record's `outputs` is refreshed. Every op in range is
+            // suppressed, and `sync_record_outputs` skips suppressed records anyway (their
+            // last-known outputs are what an un-suppress cascade needs).
+            executed: BTreeSet::new(),
+        })
+    }
+
+    /// `Some(steps_covered)` iff `request` covers the applied prefix **from step 0** and
+    /// every applied op in it is suppressed — i.e. the geometry this regen describes is
+    /// empty. `steps_covered` is the number of leading timeline steps the clear spans
+    /// (`0` when nothing is applied).
+    ///
+    /// Deliberately derived from the timeline + request rather than from the compiled
+    /// plan: the planner's "nothing to do" early return also yields an empty op list with
+    /// `start_step == 0` for a single-record timeline, and those two must not be confused.
+    fn fully_suppressed_target(&self, request: RegenRequest) -> Option<usize> {
+        let applied = self.regen.timeline.cursor();
+        let (start, target) = match request {
+            RegenRequest::ToStep(k) => (k, k),
+            RegenRequest::ToEnd { from } => (from, applied.saturating_sub(1)),
+        };
+        if start != 0 {
+            return None; // a suffix regen keeps whatever the base already holds.
+        }
+        if applied == 0 {
+            return Some(0); // nothing applied ⇒ nothing to show.
+        }
+        let target = target.min(applied - 1);
+        let records = self.regen.timeline.records();
+        records
+            .get(0..=target)?
+            .iter()
+            .all(|rec| rec.suppressed)
+            .then_some(target + 1)
     }
 
     /// Phase 3 (**locked**): commit a driven regen back into the live session.
@@ -714,6 +831,7 @@ impl DocumentRuntime {
             prior,
             expected,
             lod,
+            executed,
         } = driven;
         // The revision this regen was PREPARED for (fenced at begin_regen). Threaded
         // into EVERY outcome — including Superseded/Failed — for commit correlation.
@@ -722,6 +840,12 @@ impl DocumentRuntime {
             if self.fencing.get() == expected {
                 let snapshot_id = snap.id.0;
                 let (changed, removed) = self.commit_snapshot(scratch, snap, lod, &prior);
+                // Write the just-produced body provenance back onto the records so the
+                // dependency graph gains its body edges (see `sync_record_outputs`).
+                self.sync_record_outputs(&executed);
+                // Give every just-published body a document metadata row, so the body
+                // commands (rename / visibility) can address it at all.
+                self.session.adopt_regen_bodies(&self.regen.bodies);
                 // Post-commit: the live repair state now reflects this regen. A lean
                 // per-item set drives the `needs-repair` event (empty ⇒ repairs
                 // cleared → banner drop).
@@ -833,6 +957,47 @@ impl DocumentRuntime {
         (changed, removed)
     }
 
+    /// Writes the bodies each op produced/modified in the just-committed regen back
+    /// onto its record's derived `outputs`, so the session's [`DependencyGraph`] gains
+    /// its body-producer edges.
+    ///
+    /// Without this the graph only ever has sketch edges: `outputs` is minted nowhere
+    /// else (records arrive from the frontend with it empty), so
+    /// `SetOperationSuppression { cascade: true }` on an extrude could never reach the
+    /// fillet standing on its body — the downstream closure was empty and the fillet
+    /// would regen against a body that no longer exists. Derived data, so it takes no
+    /// undo entry and does not bump the fencing revision.
+    ///
+    /// **Non-destructive outside `executed`** (TRUST F1). The write is scoped to the
+    /// records this regen actually ran: a checkpoint-accelerated regen restores its base
+    /// from the immutable artifacts, and that reconstructed registry carries an EMPTY
+    /// lifecycle log — so [`produced_bodies_of`], which folds only that log, knows nothing
+    /// about the pre-checkpoint prefix. Feeding it as the whole truth erased every earlier
+    /// record's `outputs`, which killed the suppression cascade for the whole prefix, and
+    /// the wipe persisted because `outputs` is serialized with the record. Suppressed
+    /// records are skipped (see the session method's contract).
+    ///
+    /// [`DependencyGraph`]: onecad_core::history::DependencyGraph
+    fn sync_record_outputs(&mut self, executed: &BTreeSet<RecordId>) {
+        let produced = produced_bodies_of(&self.regen.timeline, &self.regen.bodies);
+        self.session.sync_record_outputs(&produced, executed);
+    }
+
+    /// The body registry the document should be *seen* and *saved* with:
+    /// [`merge_body_metadata`] of the regen mirror and the authoritative document. The
+    /// single reconciliation point — `save`, `write_autosave` and `projection` all read
+    /// bodies through it, so what the tree shows is exactly what a reopen restores.
+    fn merged_bodies(&self) -> BodyRegistry {
+        merge_body_metadata(&self.regen.bodies, &self.session.document().bodies)
+    }
+
+    /// The body registry a **save** writes: [`merged_bodies`](Self::merged_bodies) plus
+    /// the document-only rows (TRUST F4). Diverges from the projection deliberately —
+    /// see [`merge_body_metadata_for_save`].
+    fn saved_bodies(&self) -> BodyRegistry {
+        merge_body_metadata_for_save(&self.regen.bodies, &self.session.document().bodies)
+    }
+
     /// Deep-clones the regen session so the executor drives on a copy (lock-free).
     fn clone_regen_session(&self) -> RegenSession {
         RegenSession {
@@ -900,7 +1065,7 @@ impl DocumentRuntime {
     pub fn save(&mut self, path: &Path, meta: SaveMeta) -> Result<(), IoError> {
         let mut doc = self.session.document().clone();
         // Merge regen-derived outputs so a reopen shows the tree before regen.
-        doc.bodies = self.regen.bodies.clone();
+        doc.bodies = self.saved_bodies();
         doc.elements = self.regen.elements.clone();
         doc.repair = self.regen.repair.clone();
         let caches = ContainerCaches {
@@ -926,7 +1091,7 @@ impl DocumentRuntime {
     /// untouched on any failure.
     pub fn write_autosave(&self, path: &Path, meta: SaveMeta) -> Result<(), IoError> {
         let mut doc = self.session.document().clone();
-        doc.bodies = self.regen.bodies.clone();
+        doc.bodies = self.saved_bodies();
         doc.elements = self.regen.elements.clone();
         doc.repair = self.regen.repair.clone();
         let caches = ContainerCaches {
@@ -1054,10 +1219,14 @@ impl DocumentRuntime {
     pub fn projection(&self) -> DocumentProjection {
         let doc = self.session.document();
 
-        // Bodies: regen geometry outputs, plus any edit-registered bodies the
-        // regen has not produced (disjoint in the V1 slice; deduped by id).
+        // Bodies: EXACTLY `merged_bodies` — the same registry a save writes, so the
+        // tree shows what a reopen would restore. Membership is the regen mirror's
+        // alone. A `document.bodies` row the regen does not carry is NOT projected: it
+        // is either a row adopted for a body a later regen dropped (a suppressed or
+        // deleted feature — projecting it would put a phantom, mesh-less row in the
+        // tree) or an `AddBody` registration, which a save has never persisted either.
         let mut bodies = BTreeMap::new();
-        for b in self.regen.bodies.bodies() {
+        for b in self.merged_bodies().bodies() {
             bodies.insert(
                 b.id.to_string(),
                 BodyDto {
@@ -1066,13 +1235,6 @@ impl DocumentRuntime {
                     visible: b.visible,
                 },
             );
-        }
-        for b in doc.bodies.bodies() {
-            bodies.entry(b.id.to_string()).or_insert_with(|| BodyDto {
-                id: b.id.to_string(),
-                name: b.name.clone(),
-                visible: b.visible,
-            });
         }
 
         // Sketches: real dof/status come from the last solver-lane solve
@@ -1143,6 +1305,10 @@ impl DocumentRuntime {
             // Surface a step's worker failure reason (`StepState::Error{reason}`) so
             // the HistoryList row can tint + tooltip it end-to-end (Codex MAJOR-4).
             status_message: feature_status_message(&state),
+            // From the RECORD, not the mirror state: the record is the single source
+            // of truth for suppression (the state is derived), and the mirror can lag
+            // the authoritative timeline between an edit and its regen.
+            suppressed: rec.suppressed,
         }
     }
 
@@ -1680,8 +1846,7 @@ impl DocumentRuntime {
 /// runs the executor on the cloned scratch with the runtime lock released, so a
 /// concurrent edit can advance the fencing tokens and supersede a stale prepare.
 pub struct PreparedRegen {
-    plan_req: PlanRequest,
-    engine: AdoptingEngine,
+    work: PreparedWork,
     scratch: RegenSession,
     fencing: Arc<FencingCell>,
     publisher: Arc<SnapshotPublisher>,
@@ -1691,6 +1856,23 @@ pub struct PreparedRegen {
     ),
     lod: Lod,
     prior: Vec<BodyId>,
+    /// The records this regen executes — the scope
+    /// [`DocumentRuntime::sync_record_outputs`] is allowed to overwrite (TRUST F1).
+    executed: BTreeSet<RecordId>,
+}
+
+/// What a [`PreparedRegen`] actually does in phase 2.
+enum PreparedWork {
+    /// Drive a compiled plan over the worker (the normal path).
+    Plan {
+        plan_req: Box<PlanRequest>,
+        engine: Box<AdoptingEngine>,
+    },
+    /// Publish an EMPTY result Rust-side (TRUST F2): every op the request covers is
+    /// suppressed (or nothing is applied), so the target geometry is "no bodies" and
+    /// there is nothing for the worker to compute. `target` is the number of leading
+    /// timeline steps the clear spans (for the published `step_states`).
+    Clear { target: usize },
 }
 
 impl PreparedRegen {
@@ -1701,28 +1883,76 @@ impl PreparedRegen {
     /// [`DocumentRuntime::finish_regen`].
     pub async fn drive(self, cancel: CancelToken) -> DrivenRegen {
         let PreparedRegen {
-            plan_req,
-            engine,
+            work,
             mut scratch,
             fencing,
             publisher,
             expected,
             lod,
             prior,
+            executed,
         } = self;
-        let gate = move || fencing.get();
-        let executor = RegenExecutor::new(engine);
-        let outcome = executor
-            .run(plan_req, &mut scratch, &gate, &cancel, &publisher)
-            .await;
+        let outcome = match work {
+            PreparedWork::Plan { plan_req, engine } => {
+                let gate = move || fencing.get();
+                let executor = RegenExecutor::new(*engine);
+                executor
+                    .run(*plan_req, &mut scratch, &gate, &cancel, &publisher)
+                    .await
+            }
+            PreparedWork::Clear { target } => {
+                drive_clear(&mut scratch, &publisher, &cancel, target)
+            }
+        };
         DrivenRegen {
             outcome,
             scratch,
             prior,
             expected,
             lod,
+            executed,
         }
     }
+}
+
+/// Phase 2 for [`PreparedWork::Clear`]: empties the scratch geometry state and
+/// publishes a body-less [`ModelSnapshot`] (TRUST F2). No worker call, so a cancel
+/// requested before it starts still wins deterministically.
+///
+/// `step_index` is `None` — the snapshot represents "base only", which also keeps
+/// [`DocumentRuntime::take_checkpoint_at_head`] from minting a checkpoint over it. The
+/// per-step states are the mirror's own (already `Suppressed` for every suppressed
+/// record — [`Timeline::from_records`] derives them from the record flag).
+fn drive_clear(
+    scratch: &mut RegenSession,
+    publisher: &SnapshotPublisher,
+    cancel: &CancelToken,
+    target: usize,
+) -> Outcome {
+    if cancel.is_cancelled() {
+        return Outcome::Cancelled;
+    }
+    scratch.bodies = BodyRegistry::new();
+    scratch.elements = onecad_core::document::element_index::ElementIndex::new();
+    scratch.repair.clear();
+    let step_states: Vec<(usize, StepState)> = (0..target)
+        .filter_map(|s| scratch.timeline.state(s).map(|st| (s, st.clone())))
+        .collect();
+    let snapshot = publisher.publish(|generation| ModelSnapshot {
+        // No `AcceptPrepared` happened, so there is no worker snapshot id. `0` is the
+        // same "nothing to address" value `noop_report` uses; with zero bodies there is
+        // nothing to promote or fetch a mesh for.
+        id: SnapshotId(0),
+        generation,
+        step_index: None,
+        bodies: Vec::new(),
+        stopped_reason: onecad_core::regen::StoppedReason::Completed,
+        step_states,
+        signatures: None,
+        diagnostics: Vec::new(),
+        repair_summary: onecad_core::regen::RepairSummary::default(),
+    });
+    Outcome::Published(snapshot)
 }
 
 /// The result of driving a [`PreparedRegen`] lock-free (phase 2 → 3 handoff).
@@ -1735,6 +1965,7 @@ pub struct DrivenRegen {
         onecad_core::ids::WorkerEpoch,
     ),
     lod: Lod,
+    executed: BTreeSet<RecordId>,
 }
 
 /// Repopulates the wire split-id interner from a registry's persisted `split_of`
@@ -1773,6 +2004,77 @@ fn failed_steps_of(timeline: &Timeline) -> Vec<FailedStep> {
         .collect()
 }
 
+/// The regen mirror's registry **wholesale** with the document's user-authored
+/// `name`/`visible` overlaid per id.
+///
+/// Membership, creation order, the lifecycle `log` and the retired→survivor `aliases`
+/// are the regen's — geometry decides which bodies exist, and `resolve`/`merge_winner`
+/// read the log and aliases, so they MUST survive the merge (this is why the regen
+/// registry is cloned rather than rebuilt from the document rows). Only `name` and
+/// `visible` are user intent, and only for a body the regen still carries: the two
+/// setters no-op for an unknown id.
+fn merge_body_metadata(regen: &BodyRegistry, doc: &BodyRegistry) -> BodyRegistry {
+    let mut merged = regen.clone();
+    for meta in doc.bodies() {
+        merged.set_name(meta.id, meta.name.clone());
+        merged.set_visible(meta.id, meta.visible);
+    }
+    merged
+}
+
+/// [`merge_body_metadata`] **plus** every document-only row (an id the regen mirror no
+/// longer carries), appended verbatim — the registry a SAVE writes (TRUST F4).
+///
+/// The projection deliberately does NOT use this: membership there is the regen
+/// mirror's alone, so a row with no live body never renders as a phantom, mesh-less
+/// tree entry. But durability is a different question. Suppress a feature and its body
+/// leaves the mirror while the user's `RenameBody` / `SetVisibility` survive only in
+/// `document.bodies`; a save that took membership wholesale from the mirror dropped that
+/// row on the floor, so re-opening and un-suppressing brought the body back with the
+/// re-derived `"Body N"` default and the rename was silently lost. Persisting the row
+/// costs one JSON object and is exactly what
+/// [`adopt_regen_bodies`](onecad_core::edit::DocumentSession::adopt_regen_bodies) — which
+/// is insert-only — needs on reopen to re-overlay the returning body.
+fn merge_body_metadata_for_save(regen: &BodyRegistry, doc: &BodyRegistry) -> BodyRegistry {
+    let mut merged = merge_body_metadata(regen, doc);
+    for meta in doc.bodies() {
+        if !merged.contains(meta.id) {
+            merged.register(meta.clone());
+        }
+    }
+    merged
+}
+
+/// The rows of a loaded `document.bodies` that seed the regen mirror at open: every row
+/// EXCEPT those produced by a currently-suppressed record (TRUST F4).
+///
+/// The mirror is seeded from the persisted registry so a reopen renders saved geometry
+/// before the first regen. Since a save now also persists the metadata rows of bodies
+/// whose feature is suppressed, seeding wholesale would put those back into the mirror —
+/// and therefore into the projection — as phantom, mesh-less tree entries until the first
+/// regen dropped them again. A suppressed producer means the next regen will not produce
+/// the body, so excluding it keeps "no live body ⇒ no tree row" true across save/reopen
+/// while the row itself stays in `document.bodies` for its name/visibility.
+fn seed_regen_bodies(doc: &Document) -> BodyRegistry {
+    let suppressed: HashSet<RecordId> = doc
+        .timeline
+        .records()
+        .iter()
+        .filter(|r| r.suppressed)
+        .map(|r| r.record_id)
+        .collect();
+    if suppressed.is_empty() {
+        return doc.bodies.clone();
+    }
+    let mut seeded = doc.bodies.clone();
+    for meta in doc.bodies.bodies().to_vec() {
+        if suppressed.contains(&meta.created_by) {
+            seeded.remove(meta.id);
+        }
+    }
+    seeded
+}
+
 /// Per-record-id, the bodies an op CREATED or MODIFIED in the committed regen —
 /// derived from the body lifecycle log folded during THIS regen (finding 1). Created
 /// (incl. split children `body_<opId>:<k>`, mapped to their derived uuids), Modified
@@ -1782,8 +2084,22 @@ fn failed_steps_of(timeline: &Timeline) -> Vec<FailedStep> {
 /// commit's recordId to a real published body. An op that only deleted a body yields
 /// no entry (empty vecs are never inserted).
 fn affected_bodies_of(timeline: &Timeline, bodies: &BodyRegistry) -> BTreeMap<String, Vec<String>> {
+    produced_bodies_of(timeline, bodies)
+        .into_iter()
+        .map(|(rec, bs)| (rec.to_string(), bs.iter().map(BodyId::to_string).collect()))
+        .collect()
+}
+
+/// The typed form of [`affected_bodies_of`]: per [`RecordId`], the bodies that op
+/// created or modified in the committed regen, in lifecycle-log order and deduped.
+/// Also the `OperationRecord::outputs` source (see
+/// [`DocumentRuntime::sync_record_outputs`]).
+fn produced_bodies_of(
+    timeline: &Timeline,
+    bodies: &BodyRegistry,
+) -> BTreeMap<RecordId, Vec<BodyId>> {
     let records = timeline.records();
-    let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut map: BTreeMap<RecordId, Vec<BodyId>> = BTreeMap::new();
     for entry in bodies.log() {
         let Some(rec) = records.get(entry.step_index) else {
             continue;
@@ -1799,11 +2115,10 @@ fn affected_bodies_of(timeline: &Timeline, bodies: &BodyRegistry) -> BTreeMap<St
         if touched.is_empty() {
             continue;
         }
-        let slot = map.entry(rec.record_id.to_string()).or_default();
+        let slot = map.entry(rec.record_id).or_default();
         for b in touched {
-            let wire = b.to_string();
-            if !slot.contains(&wire) {
-                slot.push(wire);
+            if !slot.contains(&b) {
+                slot.push(b);
             }
         }
     }

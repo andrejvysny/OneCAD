@@ -186,6 +186,12 @@ export type WireInputPath = { path: "filletEdges"; index: number };
  */
 export type WireInputRef = { element: WireElementRef };
 
+/**
+ * What a `setVisibility` targets — Rust `VisibilityTarget`, EXTERNALLY tagged
+ * camelCase (`edit/command.rs`): `{"body": "<uuid>"}` / `{"sketch": "<uuid>"}`.
+ */
+export type WireVisibilityTarget = { body: string } | { sketch: string };
+
 /** The `EditCommand` variants this WP emits (serde tag `"cmd"`, camelCase). */
 export type WireEditCommand =
   | { cmd: "addOperation"; record: WireOperationRecord; atCursor: boolean }
@@ -193,7 +199,14 @@ export type WireEditCommand =
   | { cmd: "editOperationInput"; record: string; path: WireInputPath; reference: WireInputRef }
   | { cmd: "removeOperation"; record: string }
   | { cmd: "setRollback"; cursor: number }
-  | { cmd: "setOperationSuppression"; record: string; suppressed: boolean; cascade: boolean };
+  | { cmd: "setOperationSuppression"; record: string; suppressed: boolean; cascade: boolean }
+  // ── Body/sketch METADATA (TRUST wave) — the only user-authored facts about a
+  // body or sketch. All three are `RegenHint::None` on the Rust side
+  // (`edit/session.rs` dirty/regen table), so they publish a projection and fire
+  // NO regen — see the metadata-only transport in `tauriClient.applyEditCommand`.
+  | { cmd: "setVisibility"; target: WireVisibilityTarget; visible: boolean }
+  | { cmd: "renameBody"; body: string; name: string }
+  | { cmd: "renameSketch"; sketch: string; name: string };
 
 const scalar = (n: number): WireScalar => ({ value: n });
 
@@ -432,21 +445,32 @@ export function wireParamsOf(op: OperationOp): Record<string, unknown> {
 export type ScalarPatch = Record<string, WireScalar>;
 
 /**
- * `UpdateOperationParams` that changes ONLY the given scalar field(s) of a stored op,
+ * `UpdateOperationParams` that changes ONLY the given field(s) of a stored op,
  * preserving every OTHER param (revolve `axis`, shell `openFaces`, fillet `edges` /
- * `edgeIds`, `targetBodyId`, `profile`) VERBATIM. `storedParams` is the op's params
- * JSON from `get_operation_params` (already the EditCommand `op.params` serde shape).
+ * `edgeIds`, boolean `targetBodyId` / `toolBodyId`, `profile`) VERBATIM.
+ * `storedParams` is the op's params JSON from `get_operation_params` (already the
+ * EditCommand `op.params` serde shape).
  *
- * A parametric re-edit (double-click a feature → change one dimension) cannot rebuild
- * these non-scalar inputs from the projection, so a whole-params replace would silently
- * clobber them (drop the picked revolve axis / wipe the shell's open faces + target).
- * Deep-merging the scalar into the stored params here is the fix.
+ * A parametric re-edit (double-click a feature → change one dimension, or swap a
+ * Boolean's operation) cannot rebuild these non-scalar inputs from the projection,
+ * so a whole-params replace would silently clobber them (drop the picked revolve
+ * axis / wipe the shell's open faces + target). Merging the patch into the stored
+ * params here is the fix.
+ *
+ * The patch is `Record<string, unknown>` because not every re-editable field is a
+ * `{value}` scalar — a Boolean's `operation` is a bare enum string. [`ScalarPatch`]
+ * is still the shape every DIMENSION re-edit passes.
+ *
+ * CALLER CONTRACT: the merge is SHALLOW (one `{...stored, ...patch}` spread), so a
+ * patch key must be a TOP-LEVEL params field and its value must be complete —
+ * patching `{profile: {regionId}}` would replace the whole stored `profile` object
+ * (dropping its `sketchId`), not merge into it.
  */
 export function updateScalarParamsCommand(
   recordId: string,
   opType: WireOperation["opType"],
   storedParams: Record<string, unknown>,
-  patch: ScalarPatch,
+  patch: Record<string, unknown>,
 ): WireEditCommand {
   const op = { opType, params: { ...storedParams, ...patch } } as unknown as WireOperation;
   return { cmd: "updateOperationParams", record: recordId, op };
@@ -578,6 +602,39 @@ export function removeOperationCommand(recordId: string): WireEditCommand {
   return { cmd: "removeOperation", record: recordId };
 }
 
+// ── Body / sketch metadata (TRUST wave) ───────────────────────────────────────
+//
+// The tree's eye + rename were purely local zustand flips, so any rehydration
+// (projection-updated / reopen) silently reverted them. These map onto the core
+// `SetVisibility` / `RenameBody` / `RenameSketch` commands, which the backend now
+// validates against regen-minted bodies and persists through save (see
+// `src-tauri/tests/body_metadata.rs`).
+//
+// Body ids go through `bareBodyId`: `BodyId` is `#[serde(transparent)]`, so the
+// core wants the BARE uuid — a `body_<uuid>` worker-wire id is not a uuid and the
+// whole command would be rejected. Sketch ids are already bare (the projection
+// keys sketches by `SketchId.to_string()`).
+
+/** `SetVisibility{Body}` — show/hide a body in the tree + viewport. */
+export function setBodyVisibilityCommand(bodyId: string, visible: boolean): WireEditCommand {
+  return { cmd: "setVisibility", target: { body: bareBodyId(bodyId) }, visible };
+}
+
+/** `SetVisibility{Sketch}` — show/hide a sketch's always-visible layer. */
+export function setSketchVisibilityCommand(sketchId: string, visible: boolean): WireEditCommand {
+  return { cmd: "setVisibility", target: { sketch: sketchId }, visible };
+}
+
+/** `RenameBody` — the body's user-authored name (durable across regen + save). */
+export function renameBodyCommand(bodyId: string, name: string): WireEditCommand {
+  return { cmd: "renameBody", body: bareBodyId(bodyId), name };
+}
+
+/** `RenameSketch` — the sketch's user-authored name. */
+export function renameSketchCommand(sketchId: string, name: string): WireEditCommand {
+  return { cmd: "renameSketch", sketch: sketchId, name };
+}
+
 /** A short human label for a raw EditCommand (status-bar hint). */
 export function editCommandLabel(cmd: WireEditCommand): string {
   switch (cmd.cmd) {
@@ -590,6 +647,11 @@ export function editCommandLabel(cmd: WireEditCommand): string {
       return "Rollback";
     case "setOperationSuppression":
       return cmd.suppressed ? "Suppress" : "Unsuppress";
+    case "setVisibility":
+      return cmd.visible ? "Show" : "Hide";
+    case "renameBody":
+    case "renameSketch":
+      return "Rename";
     default:
       return "Edit";
   }

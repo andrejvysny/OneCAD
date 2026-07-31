@@ -166,11 +166,11 @@ export function emitMockNeedsRepair(event: NeedsRepairEvent): void {
 
 /** Base timeline — MUST mirror documentStore.seedMockDocument().features. */
 const MOCK_BASE_FEATURES: FeatureRecord[] = [
-  { id: "f1", kind: "sketch", label: "Sketch 1", valueText: "", status: "ok" },
-  { id: "f2", kind: "extrude", label: "Extrude", valueText: "83.3 mm", status: "ok" },
-  { id: "f3", kind: "fillet", label: "Fillet", valueText: "2.0 mm", status: "ok" },
-  { id: "f4", kind: "sketch", label: "Sketch 2", valueText: "", status: "ok" },
-  { id: "f5", kind: "extrude", label: "Extrude", valueText: "12.0 mm", status: "ok" },
+  { id: "f1", kind: "sketch", opType: "Sketch", label: "Sketch 1", valueText: "", status: "ok" },
+  { id: "f2", kind: "extrude", opType: "Extrude", label: "Extrude", valueText: "83.3 mm", status: "ok" },
+  { id: "f3", kind: "fillet", opType: "Fillet", label: "Fillet", valueText: "2.0 mm", status: "ok" },
+  { id: "f4", kind: "sketch", opType: "Sketch", label: "Sketch 2", valueText: "", status: "ok" },
+  { id: "f5", kind: "extrude", opType: "Extrude", label: "Extrude", valueText: "12.0 mm", status: "ok" },
 ];
 
 const cloneFeature = (f: FeatureRecord): FeatureRecord => ({ ...f });
@@ -187,6 +187,73 @@ const featureBodies = new Map<string, string>();
 
 /** featureId → last committed wire params (the `get_operation_params` source). */
 const featureParams = new Map<string, Record<string, unknown>>();
+
+// ── Body / sketch METADATA (name + visible) — the mock's stand-in for the Rust
+//    `document.bodies` / `document.sketches` overlay (TRUST wave).
+//
+// The real backend owns these facts and re-asserts them onto the frontend through
+// every `projection-updated`, which is exactly why a LOCAL-only tree flip silently
+// reverted. The mock has no event stream, so without an equivalent authority a
+// local flip would survive here and any e2e "still hidden after a commit" check
+// would pass vacuously. `reassertMockMetadata()` (run on every committed op) plays
+// the backend's part: it forces each id it OWNS back to the mock's recorded value.
+//
+// Ownership is seeded from the mock document (so a never-touched row keeps its
+// seeded value — `Sketch 5` stays hidden) and extended by the metadata commands.
+// Bodies/sketches created later are NOT owned and are left alone.
+interface MockMeta {
+  name?: string;
+  visible: boolean;
+}
+const mockBodyMeta = new Map<string, MockMeta>();
+const mockSketchMeta = new Map<string, MockMeta>();
+
+function seedMockMetadata(): void {
+  mockBodyMeta.clear();
+  mockSketchMeta.clear();
+  const s = documentStore.getState();
+  for (const b of Object.values(s.bodies)) mockBodyMeta.set(b.id, { visible: b.visible });
+  for (const k of Object.values(s.sketches)) mockSketchMeta.set(k.id, { visible: k.visible });
+}
+seedMockMetadata();
+
+/** Re-assert the mock-owned metadata onto the projection store (the backend's role). */
+function reassertMockMetadata(): void {
+  const s = documentStore.getState();
+  const bodies = { ...s.bodies };
+  let bodiesChanged = false;
+  for (const [id, meta] of mockBodyMeta) {
+    const row = bodies[id];
+    if (!row) continue;
+    const name = meta.name ?? row.name;
+    if (row.visible === meta.visible && row.name === name) continue;
+    bodies[id] = { ...row, name, visible: meta.visible };
+    bodiesChanged = true;
+  }
+  const sketches = { ...s.sketches };
+  let sketchesChanged = false;
+  for (const [id, meta] of mockSketchMeta) {
+    const row = sketches[id];
+    if (!row) continue;
+    const name = meta.name ?? row.name;
+    if (row.visible === meta.visible && row.name === name) continue;
+    sketches[id] = { ...row, name, visible: meta.visible };
+    sketchesChanged = true;
+  }
+  if (bodiesChanged || sketchesChanged) s.applyChange({ bodies, sketches });
+}
+
+/** Record + apply one metadata mutation (the `setVisibility`/`rename*` arms). */
+function writeMockMeta(kind: "body" | "sketch", id: string, patch: Partial<MockMeta>): void {
+  const registry = kind === "body" ? mockBodyMeta : mockSketchMeta;
+  const s = documentStore.getState();
+  const row = kind === "body" ? s.bodies[id] : s.sketches[id];
+  // Adopt the row's CURRENT state on first touch, so renaming a body never also
+  // resurrects it (the patch is the only thing this command means to change).
+  const current = registry.get(id) ?? { visible: row?.visible ?? true, name: row?.name };
+  registry.set(id, { ...current, ...patch });
+  reassertMockMetadata();
+}
 
 interface DocSnap {
   label: string;
@@ -375,7 +442,11 @@ function mutateOp(op: OperationOp): {
     if (editing) {
       mockFeatures = mockFeatures.map((f) => (f.id === featureId ? { ...f, valueText } : f));
     } else {
-      mockFeatures = [...mockFeatures, { id: featureId, kind: "shell", opType: "Shell", label: "Shell", valueText, status: "ok" }];
+      // `kind` mirrors the REAL projection bucket (`dto.rs feature_kind` folds
+      // Shell → fillet and the pattern/mirror ops → boolean); `opType` carries the
+      // authored identity every re-edit routes on. Emitting the invented kinds the
+      // mock used to emit made the mock lane green while the Tauri lane was dead.
+      mockFeatures = [...mockFeatures, { id: featureId, kind: "fillet", opType: "Shell", label: "Shell", valueText, status: "ok" }];
     }
     return { changed: [bodyId], removed: [], label: "Shell", featureId };
   }
@@ -390,7 +461,7 @@ function mutateOp(op: OperationOp): {
     } else {
       mockFeatures = [
         ...mockFeatures,
-        { id: featureId, kind: "linearPattern", opType: "LinearPattern", label: "Linear Pattern", valueText, status: "ok" },
+        { id: featureId, kind: "boolean", opType: "LinearPattern", label: "Linear Pattern", valueText, status: "ok" },
       ];
     }
     return { changed: [bodyId], removed: [], label: "Linear Pattern", featureId };
@@ -405,7 +476,7 @@ function mutateOp(op: OperationOp): {
     } else {
       mockFeatures = [
         ...mockFeatures,
-        { id: featureId, kind: "circularPattern", opType: "CircularPattern", label: "Circular Pattern", valueText, status: "ok" },
+        { id: featureId, kind: "boolean", opType: "CircularPattern", label: "Circular Pattern", valueText, status: "ok" },
       ];
     }
     return { changed: [bodyId], removed: [], label: "Circular Pattern", featureId };
@@ -418,7 +489,7 @@ function mutateOp(op: OperationOp): {
     if (editing) {
       mockFeatures = mockFeatures.map((f) => (f.id === featureId ? { ...f, valueText } : f));
     } else {
-      mockFeatures = [...mockFeatures, { id: featureId, kind: "mirror", opType: "MirrorBody", label: "Mirror", valueText, status: "ok" }];
+      mockFeatures = [...mockFeatures, { id: featureId, kind: "boolean", opType: "MirrorBody", label: "Mirror", valueText, status: "ok" }];
     }
     return { changed: [bodyId], removed: [], label: "Mirror", featureId };
   }
@@ -442,6 +513,9 @@ function commitOp(op: OperationOp): ApplyOperationResult {
   // its non-scalar inputs (axis / openFaces / edges) verbatim.
   featureParams.set(featureId, wireParamsOf(op));
   mockRevision += 1;
+  // A committed op is the mock's "projection-updated": whatever the backend holds
+  // wins over whatever the tree flipped locally (see the mockBodyMeta header).
+  reassertMockMetadata();
   return {
     revision: mockRevision,
     changedBodies: changed.map(bodyRef),
@@ -550,6 +624,52 @@ function valueTextForFeature(
   }
 }
 
+/** Whether a wire-params subtree names `bodyId` (bare or in the `body_` wire form). */
+function mentionsBody(value: unknown, bodyId: string): boolean {
+  if (typeof value === "string") return value === bodyId || value === `body_${bodyId}`;
+  if (Array.isArray(value)) return value.some((v) => mentionsBody(v, bodyId));
+  if (value && typeof value === "object") return Object.values(value).some((v) => mentionsBody(v, bodyId));
+  return false;
+}
+
+/**
+ * The features the mock can HONESTLY prove depend on `recordId` — the downstream
+ * half of the backend's suppression cascade (core `set_suppression` walks the
+ * record dependency graph, whose body edges come from each record's regen
+ * `outputs`).
+ *
+ * The mock has no dependency graph, so it derives the one edge it really tracks:
+ * the body `recordId` produced (`featureBodies`) named by a LATER feature's
+ * committed wire params (`featureParams` — `targetBodyId` / `toolBodyId` /
+ * `sourceBodyId`, or a body id nested inside a typed ElementRef). Transitive via
+ * the worklist below, since each newly-caught feature has its own produced body.
+ *
+ * MOCK LIMIT, deliberately UNDER-approximating: a feature with no recorded body
+ * (the seeded f1–f5 timeline) or a consumer with no recorded params yields no
+ * cascade. Inventing "everything after it is downstream" would be a WRONG graph,
+ * and a wrong cascade is worse than a missing one.
+ */
+function dependentFeatureIds(recordId: string): string[] {
+  const found = new Set<string>();
+  const queue: string[] = [recordId];
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    const body = featureBodies.get(id);
+    if (!body) continue;
+    const from = mockFeatures.findIndex((f) => f.id === id);
+    if (from < 0) continue;
+    for (const f of mockFeatures.slice(from + 1)) {
+      if (f.id === recordId || found.has(f.id)) continue;
+      const params = featureParams.get(f.id);
+      if (params && mentionsBody(params, body)) {
+        found.add(f.id);
+        queue.push(f.id);
+      }
+    }
+  }
+  return [...found];
+}
+
 /** Apply one raw EditCommand against the mock document model (M4b). */
 async function mockApplyEditCommand(command: WireEditCommand): Promise<ApplyOperationResult> {
   await wait();
@@ -581,8 +701,18 @@ async function mockApplyEditCommand(command: WireEditCommand): Promise<ApplyOper
         redoStack.length = 0;
         featureParams.set(command.record, { ...(featureParams.get(command.record) ?? {}), ...params });
         const valueText = valueTextForFeature(feat.kind, params);
-        if (valueText !== undefined) {
-          mockFeatures = mockFeatures.map((f) => (f.id === command.record ? { ...f, valueText } : f));
+        // A Boolean re-edit swaps ONLY the operation, and a boolean carries no
+        // dimension (`valueTextForFeature` returns undefined, matching dto.rs
+        // `feature_value_text`) — but the mock LABELS a boolean row by its
+        // operation (mutateOp), so the label is what has to follow the swap.
+        const label =
+          feat.opType === "Boolean" && typeof params.operation === "string" ? params.operation : undefined;
+        if (valueText !== undefined || label !== undefined) {
+          mockFeatures = mockFeatures.map((f) =>
+            f.id === command.record
+              ? { ...f, ...(valueText !== undefined ? { valueText } : {}), ...(label !== undefined ? { label } : {}) }
+              : f,
+          );
         }
       }
       mockRevision += 1;
@@ -606,12 +736,54 @@ async function mockApplyEditCommand(command: WireEditCommand): Promise<ApplyOper
       emitMockDocumentChanged({ revision: res.revision, changedBodies: [], removedBodies: [] });
       return res;
     }
-    case "setOperationSuppression":
+    case "setOperationSuppression": {
+      // Flip the tracked `suppressed` flag — the projection IS the dim state now
+      // (no frontend overlay), so a suppress spec asserts on the returned array.
+      // Undoable, like every other EditCommand (core `session.apply` mints an
+      // inverse for SetOperationSuppression too), so ⌘Z round-trips a toggle.
+      undoStack.push(snap(command.suppressed ? "Suppress" : "Unsuppress"));
+      redoStack.length = 0;
+      const cascaded = command.cascade && command.suppressed ? dependentFeatureIds(command.record) : [];
+      const flip = new Set([command.record, ...cascaded]);
+      mockFeatures = mockFeatures.map((f) =>
+        flip.has(f.id) ? { ...f, suppressed: command.suppressed } : f,
+      );
+      mockRevision += 1;
+      const res: ApplyOperationResult = {
+        revision: mockRevision,
+        changedBodies: [],
+        removedBodies: [],
+        features: mockFeatures.map(cloneFeature),
+        opLabel: command.suppressed ? "Suppress" : "Unsuppress",
+      };
+      return res;
+    }
+    // ── Body / sketch metadata (TRUST wave) ────────────────────────────────────
+    // These are `RegenHint::None` on the real backend: they publish a projection
+    // and fire NO regen, so the mock likewise emits no document-changed. The mock
+    // ids stay in the MOCK domain (`body1` / `sketch2`) — they never pass through
+    // `bareBodyId`'s uuid expectations, and the two lanes' id domains stay apart.
+    case "setVisibility": {
+      const target = command.target;
+      if ("body" in target) writeMockMeta("body", target.body, { visible: command.visible });
+      else writeMockMeta("sketch", target.sketch, { visible: command.visible });
+      mockRevision += 1;
+      return { ...noopResult(), opLabel: command.visible ? "Show" : "Hide" };
+    }
+    case "renameBody": {
+      writeMockMeta("body", command.body, { name: command.name });
+      mockRevision += 1;
+      return { ...noopResult(), opLabel: "Rename" };
+    }
+    case "renameSketch": {
+      writeMockMeta("sketch", command.sketch, { name: command.name });
+      mockRevision += 1;
+      return { ...noopResult(), opLabel: "Rename" };
+    }
     case "setRollback":
     default:
-      // Suppression / rollback carry no distinct projection signal in the lean mock
-      // (the real projection maps Suppressed→dirty; the frontend tracks an optimistic
-      // overlay for dimming — see historyStore). Return a valid no-op result.
+      // Rollback carries no distinct projection signal in the lean mock. Return a
+      // valid no-op result.
       mockRevision += 1;
       return { ...noopResult(), opLabel: "Edit" };
   }
@@ -666,6 +838,8 @@ export function resetMockDocument(): void {
   undoStack.length = 0;
   redoStack.length = 0;
   mockRecovery = null;
+  // Re-adopt the (already reset) projection store as the mock's metadata authority.
+  seedMockMetadata();
 }
 
 export const mockClient: CadClient = {
@@ -798,6 +972,16 @@ export const mockClient: CadClient = {
     needsRepairListeners.add(cb);
     return () => needsRepairListeners.delete(cb);
   },
+
+  // ── Close/quit confirmation ─────────────────────────────────────────────────
+  // The mock has no native window/process — nothing ever asks to close except
+  // the in-app "close" intent, which never routes through the backend at all
+  // (see appStore.requestClose). These exist to satisfy the CadClient contract.
+  onCloseRequested(_cb: () => void): Unsubscribe {
+    return () => {};
+  },
+  async confirmExit(): Promise<void> {},
+  async cancelExit(): Promise<void> {},
   async resolveRefs(refs: ResolveRefRequest[]): Promise<ResolveRefResult[]> {
     await wait(MESH_LATENCY_MS);
     return mockResolveRefs(refs);

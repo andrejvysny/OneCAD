@@ -24,9 +24,14 @@
 //! It **excludes record-level cosmetics** — `name`, record-level `extra`, and the
 //! `suppressed` flag — so a **rename (or any cosmetic edit) never invalidates a
 //! checkpoint**, while any geometry-affecting edit does (checkpoint staleness
-//! detection). Suppression is modeled by *omitting* an op from the executed
-//! sequence (see the cumulative prefixes below), not by a flag in the hashed
-//! content.
+//! detection). Suppression is modeled by *omitting* an op from the hashed sequence
+//! entirely, never by a flag in the hashed content: a suppressed record contributes
+//! **no line**, and the surviving records keep their **true timeline `stepIndex`**
+//! (so the gap is visible in the hashed content and toggling suppression changes the
+//! hash). Omission and the planner's op filter are ONE rule and must move together —
+//! the worker echoes hashes computed over the suppressed-free op sequence, so a
+//! suppression-inclusive `history_prefix_hash` would reject every checkpoint at or
+//! after a suppressed step forever.
 //!
 //! Rust is the sole hash authority (X-WP1): the worker treats `expectedBaseHash`
 //! and `prefixHashes` as **opaque tokens** it stores/compares/echoes but never
@@ -42,7 +47,7 @@
 //!   it.
 //! * `prefix_hashes[i]` = the running hash **after executing planned op `i`** —
 //!   the base lines extended by the canonical lines of `planned_ops[0..=i]`.
-//!   Because `planned_ops` already skips `Suppressed` steps, `prefix_hashes` is
+//!   Because `planned_ops` already skips suppressed steps, `prefix_hashes` is
 //!   indexed by **execution order** (0-based over executed ops), NOT by timeline
 //!   step index — a suppressed step leaves a gap in the hashed `stepIndex` values
 //!   but no gap in the `prefix_hashes` vector. The worker echoes
@@ -106,12 +111,19 @@ impl std::fmt::Display for HistoryPrefixHash {
 /// ([`wire_op_line`]) — cosmetic fields (`name`, record `extra`, `suppressed`) are
 /// excluded — joined with `\n` and SHA-256'd. Callers pass a prefix that starts at
 /// timeline index 0 so each record's `stepIndex` equals its enumerate position.
+///
+/// **Suppressed records contribute no line** (they never execute, so they are not
+/// part of the geometry this prefix fingerprints), while the survivors keep their
+/// TRUE timeline index as `stepIndex` — the same indices
+/// [`RegenPlanner::plan`] stamps on its [`PlannedOp`]s, which is what keeps this
+/// hash equal to the running `prefix_hashes` the worker echoes back.
 #[must_use]
 pub fn history_prefix_hash(records: &[OperationRecord]) -> HistoryPrefixHash {
     hash_wire_lines(
         records
             .iter()
             .enumerate()
+            .filter(|(_, rec)| !rec.suppressed)
             .map(|(i, rec)| wire_op_line(i, rec)),
     )
 }
@@ -213,9 +225,12 @@ fn compute_hashes(
     start_step: usize,
     planned_ops: &[PlannedOp],
 ) -> (HistoryPrefixHash, Vec<HistoryPrefixHash>) {
+    // Same suppressed-free rule as `history_prefix_hash` (enumerate FIRST so a
+    // surviving record keeps its true timeline index).
     let mut lines: Vec<String> = records[0..start_step]
         .iter()
         .enumerate()
+        .filter(|(_, rec)| !rec.suppressed)
         .map(|(i, rec)| wire_op_line(i, rec))
         .collect();
     let expected_base_hash = hash_wire_lines(lines.iter().cloned());
@@ -275,7 +290,7 @@ pub struct RegenPlan {
     /// (`None` ⇒ replay-from-0, the naive vertical-slice default).
     pub restore: Option<CheckpointRef>,
     /// The ordered op slice — `records[start_step..=target_step]` in **timeline
-    /// order**, with `Suppressed` steps skipped (they keep their `step_index`).
+    /// order**, with suppressed records skipped (survivors keep their `step_index`).
     pub planned_ops: Vec<PlannedOp>,
     /// History-prefix hash of `records[0..start_step]` — the plan's
     /// `expected_base_hash`.
@@ -352,7 +367,14 @@ impl RegenPlanner {
     ///    hash equals `history_prefix_hash(&records[0..=cp.step])`. None ⇒
     ///    replay-from-0.
     /// 3. `start_step = restore.map(step + 1).unwrap_or(0)`.
-    /// 4. `planned_ops = records[start_step..=target]` minus `Suppressed` steps.
+    /// 4. `planned_ops = records[start_step..=target]` minus **suppressed records**.
+    ///    The predicate is the RECORD flag, never [`StepState::Suppressed`]: the
+    ///    record is the single source of truth and the step state is derived
+    ///    (display) only. It must stay identical to the one
+    ///    [`history_prefix_hash`] applies, or the base hash would describe an op
+    ///    sequence the plan never executes.
+    ///
+    /// [`StepState::Suppressed`]: crate::history::StepState::Suppressed
     /// 5. `expected_base_hash = history_prefix_hash(&records[0..start_step])`.
     #[must_use]
     pub fn plan(
@@ -364,7 +386,6 @@ impl RegenPlanner {
     ) -> RegenPlan {
         let _ = graph; // reserved (see doc): linear order is authoritative here.
         let records = timeline.records();
-        let states = timeline.states();
         let applied = timeline.cursor(); // records[0, applied) are applied.
 
         // ── (1) requested_start + target, clamped into the applied prefix ──────
@@ -401,8 +422,9 @@ impl RegenPlanner {
 
         // ── (4) op slice, skipping suppressed steps (they keep their index) ────
         let planned_ops: Vec<PlannedOp> = (start_step..=target)
-            .filter(|&i| states.get(i) != Some(&crate::history::StepState::Suppressed))
-            .filter_map(|i| records.get(i).map(|rec| planned_op(i, rec)))
+            .filter_map(|i| records.get(i).map(|rec| (i, rec)))
+            .filter(|(_, rec)| !rec.suppressed)
+            .map(|(i, rec)| planned_op(i, rec))
             .collect();
 
         // ── (5) base hash + cumulative executed-op prefix hashes ───────────────
@@ -427,7 +449,6 @@ impl RegenPlanner {
     #[must_use]
     pub fn without_checkpoint(timeline: &Timeline, target_step: usize) -> RegenPlan {
         let records = timeline.records();
-        let states = timeline.states();
         let applied = timeline.cursor();
         if applied == 0 {
             return RegenPlan {
@@ -441,8 +462,9 @@ impl RegenPlanner {
         }
         let target = target_step.min(applied - 1);
         let planned_ops: Vec<PlannedOp> = (0..=target)
-            .filter(|&i| states.get(i) != Some(&crate::history::StepState::Suppressed))
-            .filter_map(|i| records.get(i).map(|rec| planned_op(i, rec)))
+            .filter_map(|i| records.get(i).map(|rec| (i, rec)))
+            .filter(|(_, rec)| !rec.suppressed)
+            .map(|(i, rec)| planned_op(i, rec))
             .collect();
         let (expected_base_hash, prefix_hashes) = compute_hashes(records, 0, &planned_ops);
         RegenPlan {
@@ -587,5 +609,107 @@ mod tests {
         let g = DependencyGraph::new();
         let plan = RegenPlanner::plan(&tl, &g, &[], RegenRequest::ToEnd { from: 0 }, &ctx());
         assert!(plan.is_empty());
+    }
+
+    // ── Suppression (T0): the hash filter and the planner filter are ONE rule ──
+
+    /// Golden neutrality: with nothing suppressed the hash is byte-identical to the
+    /// pre-filter form, so every golden-pinned planner hash still holds.
+    #[test]
+    fn hash_is_unchanged_when_nothing_is_suppressed() {
+        let tl = timeline(3);
+        let r = tl.records();
+        assert!(r.iter().all(|rec| !rec.suppressed));
+        // The pre-filter definition, spelled out: every record contributes its line
+        // at its enumerate position.
+        let expected = hash_wire_lines(r.iter().enumerate().map(|(i, rec)| wire_op_line(i, rec)));
+        assert_eq!(history_prefix_hash(r), expected);
+    }
+
+    /// Suppressing a record CHANGES the prefix hash (its line disappears while the
+    /// survivors keep their true `stepIndex`) — so a checkpoint minted before the
+    /// suppression is correctly rejected as stale.
+    #[test]
+    fn hash_changes_when_a_record_is_suppressed() {
+        let tl = timeline(3);
+        let before = history_prefix_hash(tl.records());
+
+        let mut recs = tl.records().to_vec();
+        recs[1].suppressed = true;
+        let after = history_prefix_hash(&recs);
+        assert_ne!(before, after, "suppressing step 1 must change the hash");
+
+        // The survivors keep their TRUE indices — NOT a re-packed 0,1 sequence.
+        let renumbered = hash_wire_lines(
+            [(0usize, &recs[0]), (1usize, &recs[2])]
+                .into_iter()
+                .map(|(i, rec)| wire_op_line(i, rec)),
+        );
+        assert_ne!(
+            after, renumbered,
+            "step indices must stay true to the timeline, not be re-packed"
+        );
+
+        // Un-suppressing restores the original hash exactly (round-trip).
+        recs[1].suppressed = false;
+        assert_eq!(history_prefix_hash(&recs), before);
+    }
+
+    /// The planner filters on the RECORD flag, not on [`StepState::Suppressed`]:
+    /// a record marked suppressed is dropped from `planned_ops` even when the
+    /// timeline states were never touched.
+    #[test]
+    fn planner_skips_suppressed_records_and_survivors_keep_their_step_index() {
+        let mut recs = timeline(3).records().to_vec();
+        recs[1].suppressed = true;
+        let mut tl = Timeline::from_records(recs);
+        // Force every state away from `Suppressed` — the record flag alone must rule.
+        for s in 0..tl.len() {
+            tl.mark_state(s, crate::history::StepState::Valid).unwrap();
+        }
+        let g = DependencyGraph::new();
+        let plan = RegenPlanner::plan(&tl, &g, &[], RegenRequest::ToEnd { from: 0 }, &ctx());
+        assert_eq!(plan.planned_ops.len(), 2, "the suppressed step is skipped");
+        assert_eq!(
+            plan.planned_ops
+                .iter()
+                .map(|o| o.step_index)
+                .collect::<Vec<_>>(),
+            vec![0, 2],
+            "survivors keep their true timeline step index"
+        );
+
+        let bare = RegenPlanner::without_checkpoint(&tl, 2);
+        assert_eq!(
+            bare.planned_ops
+                .iter()
+                .map(|o| o.step_index)
+                .collect::<Vec<_>>(),
+            vec![0, 2],
+            "the from-0 fallback applies the same predicate"
+        );
+    }
+
+    /// The load-bearing coupling: the plan's `expected_base_hash` must equal the
+    /// `history_prefix_hash` of the same suppressed-free prefix — otherwise a
+    /// checkpoint at/after a suppressed step could never match again.
+    #[test]
+    fn base_hash_agrees_with_history_prefix_hash_over_a_suppressed_prefix() {
+        let mut recs = timeline(4).records().to_vec();
+        recs[1].suppressed = true;
+        let tl = Timeline::from_records(recs);
+        let g = DependencyGraph::new();
+        let plan = RegenPlanner::plan(&tl, &g, &[], RegenRequest::ToEnd { from: 3 }, &ctx());
+        assert_eq!(plan.start_step, 0, "no checkpoint ⇒ replay from 0");
+        assert_eq!(
+            plan.expected_base_hash,
+            history_prefix_hash(&tl.records()[0..0])
+        );
+        // The running prefix after the last executed op == the whole-prefix hash.
+        assert_eq!(
+            plan.prefix_hashes.last().cloned().unwrap(),
+            history_prefix_hash(tl.records()),
+            "prefix_hashes tracks history_prefix_hash under the same filter"
+        );
     }
 }

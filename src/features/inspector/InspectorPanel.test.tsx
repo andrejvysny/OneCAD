@@ -5,6 +5,7 @@ import { selectionStore } from "@/stores/selectionStore";
 import { toolStore } from "@/stores/toolStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { documentStore } from "@/stores/documentStore";
+import { mockClient } from "@/ipc/mockClient";
 import { setModelToolController } from "@/tools/modelTools/modelToolBridge";
 import type { ModelToolController } from "@/tools/modelTools/ModelToolController";
 import { resetStores } from "@/test/resetStores";
@@ -142,6 +143,87 @@ describe("InspectorPanel", () => {
       expect(editEdgeOpFeature).toHaveBeenLastCalledWith("f-fi", "Fillet");
     } finally {
       setModelToolController(null);
+    }
+  });
+
+  it("routes a Boolean row's double-click to the operation-swap re-edit", () => {
+    const editBooleanFeature = vi.fn(() => Promise.resolve());
+    setModelToolController({ editBooleanFeature } as unknown as ModelToolController);
+    try {
+      documentStore.setState({
+        features: [{ id: "f-bool", kind: "boolean", opType: "Boolean", label: "Union", valueText: "", status: "ok" }],
+      });
+      render(<InspectorPanel />);
+      act(() => selectionStore.getState().set([{ kind: "body", id: "body1" }]));
+
+      fireEvent.doubleClick(screen.getByTestId("history-row-f-bool"));
+      expect(editBooleanFeature).toHaveBeenCalledWith("f-bool");
+    } finally {
+      setModelToolController(null);
+    }
+  });
+
+  /**
+   * The dim state rides `FeatureMeta.suppressed` (backend-authoritative), NOT a
+   * frontend overlay. The retired overlay started empty on every document open, so
+   * a persisted suppression rendered un-dimmed and its toggle computed
+   * `!undefined === true` — re-suppressing an already-suppressed feature forever.
+   */
+  it("dims a suppressed row straight from the projection flag", () => {
+    documentStore.setState({
+      features: [
+        { id: "f-a", kind: "extrude", opType: "Extrude", label: "Extrude", valueText: "5.0 mm", status: "ok" },
+        {
+          id: "f-b",
+          kind: "fillet",
+          opType: "Fillet",
+          label: "Fillet",
+          valueText: "1.0 mm",
+          status: "dirty",
+          suppressed: true,
+        },
+      ],
+    });
+    render(<InspectorPanel />);
+    act(() => selectionStore.getState().set([{ kind: "feature", id: "f-a" }]));
+
+    expect(screen.getByTestId("history-row-f-b").className).toContain("opacity-60");
+    expect(screen.getByText("Fillet").className).toContain("line-through");
+    expect(screen.getByTestId("history-row-f-a").className).not.toContain("opacity-60");
+  });
+
+  it("un-suppresses a persisted suppression (toggle negates the feature's OWN flag)", async () => {
+    const apply = vi.spyOn(mockClient, "applyEditCommand");
+    try {
+      documentStore.setState({
+        features: [
+          {
+            id: "f-b",
+            kind: "fillet",
+            opType: "Fillet",
+            label: "Fillet",
+            valueText: "1.0 mm",
+            status: "dirty",
+            suppressed: true,
+          },
+        ],
+      });
+      render(<InspectorPanel />);
+      act(() => selectionStore.getState().set([{ kind: "feature", id: "f-b" }]));
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("history-suppress-f-b"));
+      });
+
+      // suppressed:false — the un-suppress. Cascade stays off when un-suppressing.
+      expect(apply.mock.calls[0][0]).toEqual({
+        cmd: "setOperationSuppression",
+        record: "f-b",
+        suppressed: false,
+        cascade: false,
+      });
+    } finally {
+      apply.mockRestore();
     }
   });
 

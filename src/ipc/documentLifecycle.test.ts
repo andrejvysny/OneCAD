@@ -11,15 +11,32 @@ import { appStore } from "@/stores/appStore";
 import { toolStore } from "@/stores/toolStore";
 import { selectionStore } from "@/stores/selectionStore";
 import { viewportStore } from "@/stores/viewportStore";
+import { repairStore } from "@/stores/repairStore";
+import { sketchStore } from "@/stores/sketchStore";
+import { toolChipStore } from "@/stores/toolChipStore";
 import { setMockRecovery } from "./mockClient";
 import { resetStores } from "@/test/resetStores";
 
-/** Put the UI into a state that only makes sense for the OUTGOING document. */
+/**
+ * Put the UI into a state that only makes sense for the OUTGOING document. These
+ * dirtying calls must go straight at the stores (never through
+ * `resetDocumentScopedUi` itself) so the assertions below prove PRODUCTION code
+ * resets them — the global vitest `resetStores()` in `beforeEach` runs BEFORE this
+ * dirtying, so it cannot mask a missing reset in the actual flow under test.
+ */
 function dirtyDocumentScopedUi(): void {
   toolStore.getState().setMode("sketch", "sketch2");
   viewportStore.getState().setPendingExtrude("sketch2");
   selectionStore.getState().set([{ kind: "body", id: "body1" }]);
   selectionStore.getState().setHover({ kind: "body", id: "body1" });
+  repairStore.getState().applyEvent({
+    revision: 3,
+    items: [{ opId: "f3", refId: "f3.input1", reason: "ambiguous", candidateCount: 2 }],
+  });
+  repairStore.getState().openPanel();
+  sketchStore.getState().pushUndoSnapshot({ entities: [], constraints: [] });
+  sketchStore.getState().setConflicting(["c1"]);
+  toolChipStore.getState().showFillet(2, [0, 0, 0], () => {});
 }
 
 function expectDocumentScopedUiClean(): void {
@@ -27,6 +44,11 @@ function expectDocumentScopedUiClean(): void {
   expect(viewportStore.getState().pendingExtrudeSketch).toBeNull();
   expect(selectionStore.getState().selected).toEqual([]);
   expect(selectionStore.getState().hover).toBeNull();
+  expect(repairStore.getState().items).toEqual([]);
+  expect(repairStore.getState().panelOpen).toBe(false);
+  expect(sketchStore.getState().undoStack).toEqual([]);
+  expect(sketchStore.getState().conflictingIds).toEqual([]);
+  expect(toolChipStore.getState().kind).toBe("none");
 }
 
 describe("resetDocumentScopedUi", () => {

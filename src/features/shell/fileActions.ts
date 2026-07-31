@@ -45,30 +45,40 @@ function refreshRecents(): void {
   void appStore.getState().loadRecents();
 }
 
-/** ⌘S: save to the known path; a never-saved document falls back to Save As. */
-export async function saveDocument(): Promise<void> {
+/**
+ * ⌘S: save to the known path; a never-saved document falls back to Save As.
+ * Resolves `true` on a completed save (the UnsavedChangesDialog's "Save" action
+ * reads this to decide whether it may proceed with the close/quit); `false` on
+ * any failure or a cancelled Save As dialog — the error hint (if any) is already
+ * surfaced here, so callers just need the boolean.
+ */
+export async function saveDocument(): Promise<boolean> {
   try {
     await client.saveDocument();
     transientHint(`Saved ${docName()}`);
     refreshRecents();
+    return true;
   } catch (e) {
     if (isNoPathError(e)) {
-      await saveDocumentAs();
-      return;
+      return saveDocumentAs();
     }
     errorHint(`Save failed: ${message(e)}`);
+    return false;
   }
 }
 
-/** ⇧⌘S: dialog + save. A cancelled dialog is a no-op (no hint). */
-export async function saveDocumentAs(): Promise<void> {
+/** ⇧⌘S: dialog + save. A cancelled dialog is a no-op (no hint), resolving `false`
+ *  (see `saveDocument`'s return contract). */
+export async function saveDocumentAs(): Promise<boolean> {
   try {
     const path = await client.saveDocumentAs();
-    if (!path) return; // cancelled
+    if (!path) return false; // cancelled
     transientHint(`Saved ${baseName(path)}`);
     refreshRecents();
+    return true;
   } catch (e) {
     errorHint(`Save failed: ${message(e)}`);
+    return false;
   }
 }
 
@@ -114,10 +124,15 @@ export async function openDocumentDialog(): Promise<void> {
   }
 }
 
-/** ⌘W: close the open project and return to the start screen. */
+/**
+ * ⌘W / TitleBar ×: close the open project and return to the start screen. Routed
+ * through `appStore.requestClose` (the ONE shared entry point every close/quit
+ * path uses) so a dirty document prompts via the UnsavedChangesDialog instead of
+ * discarding work unconditionally.
+ */
 export async function closeProject(): Promise<void> {
   try {
-    await appStore.getState().closeProject();
+    await appStore.getState().requestClose("close");
   } catch (e) {
     errorHint(`Close failed: ${message(e)}`);
   }

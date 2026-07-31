@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { Icon } from "@/icons/Icon";
 import { Popover } from "@/ui/Popover";
-import { MonoValue } from "@/ui/MonoValue";
+import { MenuItem } from "@/ui/MenuItem";
 import {
   closeProject,
   exportObj,
@@ -23,7 +23,7 @@ export function FileMenu() {
   const [open, setOpen] = useState(false);
   const btn = useRef<HTMLButtonElement | null>(null);
 
-  const run = (action: () => void | Promise<void>) => {
+  const run = (action: () => void | Promise<unknown>) => {
     setOpen(false);
     void action();
   };
@@ -61,27 +61,6 @@ export function FileMenu() {
         <MenuItem label="Export STL…" onClick={() => run(exportStl)} />
         <MenuItem label="Export OBJ…" onClick={() => run(exportObj)} />
       </Popover>
-    </div>
-  );
-}
-
-function MenuItem({
-  label,
-  shortcut,
-  onClick,
-}: {
-  label: string;
-  shortcut?: string;
-  onClick: () => void;
-}) {
-  return (
-    <div
-      role="menuitem"
-      onClick={onClick}
-      className="flex h-[30px] cursor-pointer items-center gap-2 rounded-[5px] px-2.5 text-[12.5px] text-ink-2 hover:bg-well"
-    >
-      <span className="flex-1">{label}</span>
-      {shortcut && <MonoValue className="text-[11px] text-ink-6">{shortcut}</MonoValue>}
     </div>
   );
 }

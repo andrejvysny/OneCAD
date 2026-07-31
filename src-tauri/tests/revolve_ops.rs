@@ -23,6 +23,24 @@
 //!   whose message names the requested + available ids (proves the id reaches the
 //!   worker — an id-dropping marshalling regression would hide behind the fallback).
 //!
+//! REVOLVE-REGION-PARITY additions (the frontend seam the postmortem names, now for
+//! Revolve — see `docs/POSTMORTEM_EXTRUDE_COMMIT.md`):
+//! * `revolve_commit_after_pure_read_arm_mints_the_profile_record` — the EXACT new
+//!   frontend sequence through the PRODUCTION scheduler/driver: AddSketch →
+//!   `enter_sketch` → `sketch_upsert` → `cancel_sketch` (SketchController.exit's
+//!   teardown half) → `prepare_sketch_regions().drive()` (the PURE-READ arm, which
+//!   deliberately authors NO timeline record) → `finish_sketch` (the commit-boundary
+//!   guarantee `confirmRevolve` now issues) → typed Revolve commit ⇒ published body.
+//! * `revolve_commit_without_the_record_guarantee_fails_loud` — the regression
+//!   TRIPWIRE: the identical flow with the `finish_sketch` step REMOVED must fail
+//!   with the worker's `Revolve: profile sketch not found in plan`. Delete the
+//!   commit-boundary guarantee and this test goes green while the product breaks —
+//!   which is exactly how the extrude defect shipped.
+//! * `revolve_reedit_binds_the_stored_region_not_the_first` — a TWO-region sketch
+//!   whose revolve is bound to the second region by exact id, then re-edited via
+//!   `UpdateOperationParams` (the angle-only deep-merge the re-edit sends): the
+//!   published volume matches THAT region's Pappus solid, never the first region's.
+//!
 //! The revolve mesh-volume expectations for the CURVED solids (Pappus / half) are
 //! FINE-lod faceting bounds, NOT exactness assertions — BRep-exact volume lives in
 //! the worker ctest (`test_wp6_ops` / `test_revolve_split`, `ShapeMetrics`); the
@@ -42,6 +60,9 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio::sync::{watch, Mutex};
+
 use onecad_core::document::body::split_child_uuid;
 use onecad_core::document::record::{
     BooleanMode, ExtrudeMode, ExtrudeParams, KnownOperation, Operation, OperationRecord, PlaneKind,
@@ -49,17 +70,21 @@ use onecad_core::document::record::{
 };
 use onecad_core::document::refs::{AxisRef, SketchRegionRef};
 use onecad_core::document::variables::Scalar;
-use onecad_core::edit::EditCommand;
+use onecad_core::edit::{EditCommand, SketchEditOp};
 use onecad_core::ids::{BodyId, ConstraintId, EntityId, RecordId, RegionId, SketchId};
 use onecad_core::math::{Vec2, Vec3};
-use onecad_core::regen::{CancelToken, GeometryEngine, Lod, ModelSnapshot, Outcome, RegenRequest};
+use onecad_core::regen::{
+    CancelToken, GeometryEngine, Lod, ModelSnapshot, Outcome, RegenRequest, RegenScheduler,
+    SchedulerHandle,
+};
 use onecad_core::sketch::{Constraint, Sketch, SketchEntity, WorldPlane};
 
 use onecad_lib::document_runtime::{DocumentRuntime, RegenReport};
-use onecad_lib::dto::FeatureStatus;
+use onecad_lib::dto::{DocumentChange, DocumentProjection, FeatureStatus, SketchRegionDto};
 use onecad_lib::worker::manager::SupervisorConfig;
 use onecad_lib::worker::wire::sketch_wire;
 use onecad_lib::worker::{resolve_worker_path, MeshProvider, SolverEngine, WorkerManager};
+use onecad_lib::{regen_driver_with_emitter, RegenEmitter};
 
 use onecad_protocol::mesh::{f32_le, u32_le, validate_mesh_blob, MeshHeaderView};
 
@@ -125,6 +150,96 @@ fn published<'a>(report: &'a RegenReport, what: &str) -> &'a Arc<ModelSnapshot> 
 
 fn body_of(rec: u128) -> BodyId {
     BodyId(Uuid::from_u128(rec))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Production scheduler/driver wiring (verbatim from scheduler_commit.rs). The
+// REVOLVE-REGION-PARITY tests must cross the same apply → `RegenScheduler::handle`
+// → driver → publish chain the real app uses; driving `run_regen` directly would
+// skip exactly the seam the extrude postmortem's defect lived in.
+// ─────────────────────────────────────────────────────────────────────────────
+
+type Runtime = Arc<Mutex<Option<DocumentRuntime>>>;
+/// What the emitter captures per completion: `(outcome_str, document_change, projection)`.
+type Emit = (String, Option<DocumentChange>, DocumentProjection);
+
+async fn wire_with(runtime: Runtime) -> (Runtime, SchedulerHandle, UnboundedReceiver<Emit>) {
+    let (tx, rx) = unbounded_channel::<Emit>();
+    let emit: RegenEmitter = Arc::new(
+        move |report: &RegenReport, projection: &DocumentProjection| {
+            let _ = tx.send((
+                report.outcome_str().to_string(),
+                report.document_change(),
+                projection.clone(),
+            ));
+        },
+    );
+    let autosave_tick = Arc::new(watch::channel(0u64).0);
+    let driver = regen_driver_with_emitter(runtime.clone(), emit, autosave_tick);
+    let (scheduler, sched) = RegenScheduler::new(driver);
+    tokio::spawn(scheduler.run());
+    (runtime, sched, rx)
+}
+
+/// Awaits the next emitter completion (15 s ceiling — a worker regen is well under).
+async fn recv(rx: &mut UnboundedReceiver<Emit>) -> Emit {
+    tokio::time::timeout(Duration::from_secs(15), rx.recv())
+        .await
+        .expect("regen completion emitted within 15s")
+        .expect("emitter channel stayed open")
+}
+
+/// The `SketchEditOp` batch a drawing session sends for `sketch`'s whole content —
+/// exactly what the frontend's incremental draw accumulates into `sketch_upsert`.
+fn sketch_edit_ops(sketch: &Sketch) -> Vec<SketchEditOp> {
+    sketch
+        .entities()
+        .iter()
+        .cloned()
+        .map(|entity| SketchEditOp::AddEntity { entity })
+        .chain(
+            sketch
+                .constraints()
+                .iter()
+                .cloned()
+                .map(|constraint| SketchEditOp::AddConstraint { constraint }),
+        )
+        .collect()
+}
+
+fn sketch_record_count(rt: &DocumentRuntime) -> usize {
+    rt.projection()
+        .features
+        .iter()
+        .filter(|f| f.op_type == "Sketch")
+        .count()
+}
+
+/// A region's fill area and area-weighted centroid `u`, both in sketch (u,v) space —
+/// the two Pappus inputs that identify WHICH region a revolve actually consumed.
+fn region_area_centroid_u(region: &SketchRegionDto) -> (f64, f64) {
+    let t = region.preview_triangles.as_ref().expect("region fill");
+    let point = |index: u32| {
+        let offset = index as usize * 2;
+        [t.positions[offset], t.positions[offset + 1]]
+    };
+    let mut area = 0.0f64;
+    let mut moment_u = 0.0f64;
+    for tri in t.indices.chunks_exact(3) {
+        let [a, b, c] = [point(tri[0]), point(tri[1]), point(tri[2])];
+        let tri_area = ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs() * 0.5;
+        area += tri_area;
+        moment_u += tri_area * (a[0] + b[0] + c[0]) / 3.0;
+    }
+    (area, if area > 0.0 { moment_u / area } else { 0.0 })
+}
+
+/// Pappus volume of `region` swept `angle_deg` about the constant-`u` line `axis_u`.
+/// The XY plane maps `(u,v) → (-v, u, 0)`, so a constant-`u` axis is parallel to the
+/// world X-axis and every profile point's radius is exactly `u - axis_u`.
+fn pappus_volume(region: &SketchRegionDto, axis_u: f64, angle_deg: f64) -> f64 {
+    let (area, centroid_u) = region_area_centroid_u(region);
+    (angle_deg / 360.0) * 2.0 * std::f64::consts::PI * (centroid_u - axis_u) * area
 }
 
 // Fixed record ids.
@@ -882,5 +997,390 @@ async fn revolve_region_binding_explicit_and_fallback() {
     eprintln!(
         "Revolve region-binding PASS: explicit regionId {region_id} + \"\" fallback both published; \
          wrong regionId '{bogus}' ⇒ OP_FAILED naming requested + available — {msg}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6. REVOLVE-REGION-PARITY: the interactive frontend sequence, end to end, through
+//    the PRODUCTION scheduler. Arming a revolve is now a PURE region read
+//    (`prepare_sketch_regions` — the backend of `getSketchRegions`), which by
+//    design authors no timeline record; the record is guaranteed at the COMMIT
+//    boundary instead (`confirmRevolve`'s `finishSketch`). This test walks that
+//    exact ladder and proves the revolve commits.
+//    (Provenance: docs/POSTMORTEM_EXTRUDE_COMMIT.md; shape mirrors
+//    scheduler_commit.rs::interactive_sketch_flow_mints_the_timeline_record_and_extrude_commits.)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The drawn content shared by the two interactive-flow tests: the Pappus fixture
+/// (10×10 rect at `u ∈ [10,20]`, `v ∈ [0,10]`) plus a dangling axis line at `u = 0`.
+/// Returns `(sketch, axis line id)`.
+fn interactive_profile(sid: SketchId) -> (Sketch, EntityId) {
+    rect_with_axis_sketch(sid, 0x1000, 10.0, 0.0, 10.0, 10.0, (0.0, -5.0, 15.0))
+}
+
+/// Runs AddSketch → enter → upsert → cancel (the `SketchController.exit` teardown
+/// half) → `prepare_sketch_regions().drive()` (the pure-read arm), asserting that
+/// NOTHING in that ladder minted a `Sketch` timeline record. Returns the armed
+/// region's normative id.
+async fn interactive_arm(runtime: &Runtime, sid: SketchId, drawn: &Sketch) -> String {
+    {
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut().expect("document open");
+        rt.apply(EditCommand::AddSketch {
+            sketch: Sketch::on_world_plane(sid, "Sketch 1", WorldPlane::XY),
+        })
+        .expect("AddSketch");
+        rt.enter_sketch(sid).await.expect("enter_sketch");
+        rt.sketch_upsert(sid, sketch_edit_ops(drawn))
+            .await
+            .expect("sketch_upsert");
+        // SketchController.exit()'s FIRST half: worker-gesture teardown + squash.
+        rt.cancel_sketch(sid).await.expect("cancel_sketch");
+        assert_eq!(
+            sketch_record_count(rt),
+            0,
+            "AddSketch + upsert + cancel author NO Sketch timeline record (this is \
+             precisely why the commit boundary must guarantee one)"
+        );
+    }
+
+    // The arm: a PURE read driven with the runtime lock RELEASED (production shape).
+    let prepared = {
+        let guard = runtime.lock().await;
+        guard
+            .as_ref()
+            .expect("document open")
+            .prepare_sketch_regions(sid)
+            .expect("prepare_sketch_regions")
+    };
+    let regions = prepared.drive().await.expect("regions").regions;
+    assert_eq!(
+        regions.len(),
+        1,
+        "the rect derives exactly one closed region (the dangling axis line closes none), got {:?}",
+        regions.iter().map(|r| &r.region_id).collect::<Vec<_>>()
+    );
+    {
+        let guard = runtime.lock().await;
+        assert_eq!(
+            sketch_record_count(guard.as_ref().expect("document open")),
+            0,
+            "the PURE-READ arm must not author a Sketch record either"
+        );
+    }
+    regions[0].region_id.clone()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revolve_commit_after_pure_read_arm_mints_the_profile_record() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let (runtime, sched, mut rx) = wire_with(Arc::new(Mutex::new(Some(runtime_over(&wm))))).await;
+    let sid = SketchId(Uuid::from_u128(0xF0A));
+    let (drawn, axis) = interactive_profile(sid);
+
+    let region_id = interactive_arm(&runtime, sid, &drawn).await;
+
+    // The COMMIT-BOUNDARY GUARANTEE (`confirmRevolve` → `client.finishSketch`): the
+    // only step in the whole interactive ladder that mints the `Sketch` record.
+    let finish_outcome = {
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut().expect("document open");
+        let (_dto, outcome) = rt
+            .finish_sketch_with_outcome(sid)
+            .await
+            .expect("finish_sketch");
+        assert_eq!(
+            sketch_record_count(rt),
+            1,
+            "the commit-boundary finish minted exactly ONE Sketch timeline record"
+        );
+        outcome.expect("the first finish appends the record ⇒ Some(outcome)")
+    };
+    sched.handle(&finish_outcome);
+    let (outcome_str, _, _) = recv(&mut rx).await;
+    assert_eq!(outcome_str, "published", "the sketch-only regen publishes");
+
+    // The commit: the exact frontend shape — a TYPED profile (sketchId + the
+    // normative regionId read at arm time) plus the picked axis line.
+    let revolve_outcome = {
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut().expect("document open");
+        rt.apply(EditCommand::AddOperation {
+            record: revolve_record(
+                REVOLVE,
+                sid,
+                &region_id,
+                360.0,
+                axis,
+                BooleanMode::NewBody,
+                None,
+            ),
+            at_cursor: false, // the frontend commit shape
+        })
+        .expect("revolve commit")
+    };
+    sched.handle(&revolve_outcome);
+    let (outcome_str, change, proj) = recv(&mut rx).await;
+    assert_eq!(outcome_str, "published", "the revolve commit published");
+    let change = change.expect("a published regen carries a document_change");
+    assert_eq!(
+        change.changed_bodies.len(),
+        1,
+        "the revolve off the interactively drawn sketch produced its body, got {:?}",
+        change.changed_bodies
+    );
+    let rev_id = RecordId(Uuid::from_u128(REVOLVE)).to_string();
+    let feat = proj
+        .features
+        .iter()
+        .find(|f| f.id == rev_id)
+        .expect("the revolve feature is projected");
+    assert_eq!(
+        feat.status,
+        FeatureStatus::Ok,
+        "the revolve step succeeded, statusMessage={:?}",
+        feat.status_message
+    );
+
+    // The body is the RIGHT one: the Pappus solid of the armed region (same fixture
+    // and same fine-mesh faceting regime as `revolve_new_body_pappus_volume`).
+    let vol = {
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut().expect("document open");
+        mesh_vol(rt, body_of(REVOLVE), Lod::Fine).await
+    };
+    const PAPPUS: f64 = 9424.778; // 2π·15·100
+    assert!(
+        (vol - PAPPUS).abs() < 40.0,
+        "the committed body is the armed region's Pappus solid, got {vol}"
+    );
+
+    sched.shutdown();
+    wm.shutdown().await;
+    eprintln!(
+        "REVOLVE-INTERACTIVE-FLOW PASS: pure-read arm authored no record; the commit-boundary \
+         finish minted it; the typed Revolve published 1 body (volume {vol:.3} ≈ Pappus)"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. The regression TRIPWIRE for the test above: the SAME ladder with the
+//    commit-boundary `finish_sketch` REMOVED must fail loudly. Delete the
+//    guarantee from `confirmRevolve` and this test goes green while every real
+//    revolve silently does nothing — the exact failure mode the extrude
+//    postmortem documents.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revolve_commit_without_the_record_guarantee_fails_loud() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let (runtime, sched, mut rx) = wire_with(Arc::new(Mutex::new(Some(runtime_over(&wm))))).await;
+    let sid = SketchId(Uuid::from_u128(0xF0A));
+    let (drawn, axis) = interactive_profile(sid);
+
+    let region_id = interactive_arm(&runtime, sid, &drawn).await;
+    // ── NO finish_sketch here — that is the whole point of this test. ──
+
+    let revolve_outcome = {
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut().expect("document open");
+        rt.apply(EditCommand::AddOperation {
+            record: revolve_record(
+                REVOLVE,
+                sid,
+                &region_id,
+                360.0,
+                axis,
+                BooleanMode::NewBody,
+                None,
+            ),
+            at_cursor: false,
+        })
+        .expect("revolve commit")
+    };
+    sched.handle(&revolve_outcome);
+    let (outcome_str, change, proj) = recv(&mut rx).await;
+
+    // A per-op failure still publishes the (empty) valid prefix — the failure is
+    // carried by the step, not by the regen outcome.
+    assert_eq!(outcome_str, "published");
+    assert!(
+        change.is_none_or(|c| c.changed_bodies.is_empty()),
+        "the recordless revolve minted NO body"
+    );
+    let rev_id = RecordId(Uuid::from_u128(REVOLVE)).to_string();
+    let feat = proj
+        .features
+        .iter()
+        .find(|f| f.id == rev_id)
+        .expect("the revolve feature is projected");
+    assert_eq!(
+        feat.status,
+        FeatureStatus::Error,
+        "a revolve whose profile sketch has no timeline record is a hard step failure"
+    );
+    let msg = feat
+        .status_message
+        .as_deref()
+        .expect("an errored feature carries a statusMessage (W0.5)");
+    assert!(
+        msg.contains("profile sketch not found in plan"),
+        "the tripwire message is the postmortem's, got {msg:?}"
+    );
+
+    sched.shutdown();
+    wm.shutdown().await;
+    eprintln!(
+        "REVOLVE-TRIPWIRE PASS: without the commit-boundary finish the revolve fails with {msg:?} \
+         (0 bodies) — this is what the guarantee prevents"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 8. Re-edit binds the STORED region, never the first. A two-region sketch whose
+//    revolve is bound to region index 1 by exact id survives an angle re-edit
+//    (`UpdateOperationParams`, the deep-merge the frontend sends): the published
+//    volume tracks THAT region's Pappus solid at the new angle. Before the FE fix
+//    a re-edit re-armed `regions[0]` and would have re-authored the wrong profile.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Two disjoint rects (`u ∈ [0,40] v ∈ [0,20]` and `u ∈ [60,70] v ∈ [0,10]`, areas
+/// 800 vs 100) plus a dangling axis line at `u = -10` — left of BOTH footprints, so
+/// it splits neither profile. Returns `(sketch, axis line id)`.
+fn two_region_with_axis_sketch(sid: SketchId) -> (Sketch, EntityId) {
+    let (mut sk, axis) =
+        rect_with_axis_sketch(sid, 0x5000, 0.0, 0.0, 40.0, 20.0, (-10.0, -5.0, 25.0));
+    let second = rect_sketch(sid, 0x6000, 60.0, 0.0, 10.0, 10.0);
+    for entity in second.entities().iter().cloned() {
+        sk.add_entity(entity).unwrap();
+    }
+    for constraint in second.constraints().iter().cloned() {
+        sk.add_constraint(constraint).unwrap();
+    }
+    (sk, axis)
+}
+
+const AXIS_U: f64 = -10.0;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revolve_reedit_binds_the_stored_region_not_the_first() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let sid = SketchId(Uuid::from_u128(0xE0A));
+    let (sk, axis) = two_region_with_axis_sketch(sid);
+
+    rt.apply(EditCommand::AddSketch { sketch: sk.clone() })
+        .expect("AddSketch");
+    add_op(&mut rt, sketch_record(SKETCH_A, &sk, xy_plane_ref()));
+
+    // The arm's region read (the exact source the frontend binds from).
+    let regions = rt
+        .prepare_sketch_regions(sid)
+        .expect("prepare_sketch_regions")
+        .drive()
+        .await
+        .expect("regions")
+        .regions;
+    assert_eq!(regions.len(), 2, "both disjoint cells are selectable");
+    let bound = &regions[1]; // NOT regions[0] — the old silent fallback
+    let other = &regions[0];
+
+    let want_360 = pappus_volume(bound, AXIS_U, 360.0);
+    let wrong_360 = pappus_volume(other, AXIS_U, 360.0);
+    assert!(
+        (want_360 - wrong_360).abs() > want_360.max(wrong_360) * 0.5,
+        "the fixture regions must sweep VERY different volumes for this test to \
+         discriminate ({want_360} vs {wrong_360})"
+    );
+
+    add_op(
+        &mut rt,
+        revolve_record(
+            REVOLVE,
+            sid,
+            &bound.region_id,
+            360.0,
+            axis,
+            BooleanMode::NewBody,
+            None,
+        ),
+    );
+    let report = regen_all(&mut rt).await;
+    let snap = published(&report, "two-region revolve");
+    assert_eq!(snap.bodies.len(), 1, "one revolve body");
+    let vol = mesh_vol(&mut rt, body_of(REVOLVE), Lod::Fine).await;
+    eprintln!(
+        "bound region {} 360°: mesh {vol:.3} vs Pappus {want_360:.3} (the OTHER region \
+         would be {wrong_360:.3})",
+        bound.region_id
+    );
+    // Faceting deficit on a revolved solid is ~0.2%; 1.5% is ≈7× headroom yet far
+    // tighter than the ≥50% gap to the wrong region's volume.
+    assert!(
+        (vol - want_360).abs() < want_360 * 0.015,
+        "the bound region's Pappus solid ({want_360}), got {vol}"
+    );
+    assert!(
+        (vol - wrong_360).abs() > wrong_360 * 0.1,
+        "and emphatically NOT the first region's solid ({wrong_360}), got {vol}"
+    );
+
+    // The re-edit: an angle-only `UpdateOperationParams` carrying the SAME typed
+    // profile + axis (the frontend's deep-merge shape). The binding must survive.
+    let reedit = revolve_record(
+        REVOLVE,
+        sid,
+        &bound.region_id,
+        180.0,
+        axis,
+        BooleanMode::NewBody,
+        None,
+    );
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(REVOLVE)),
+        op: reedit.op,
+    })
+    .expect("angle re-edit");
+    let report = regen_all(&mut rt).await;
+    let snap = published(&report, "two-region revolve re-edit");
+    assert_eq!(
+        snap.bodies.len(),
+        1,
+        "still one revolve body after the re-edit"
+    );
+
+    let want_180 = pappus_volume(bound, AXIS_U, 180.0);
+    let wrong_180 = pappus_volume(other, AXIS_U, 180.0);
+    let vol2 = mesh_vol(&mut rt, body_of(REVOLVE), Lod::Fine).await;
+    eprintln!(
+        "after the 180° re-edit: mesh {vol2:.3} vs Pappus {want_180:.3} (the OTHER region \
+         would be {wrong_180:.3})"
+    );
+    assert!(
+        (vol2 - want_180).abs() < want_180 * 0.015,
+        "the re-edited angle applied to the SAME bound region ({want_180}), got {vol2}"
+    );
+    assert!(
+        (vol2 - wrong_180).abs() > wrong_180 * 0.1,
+        "the re-edit did not silently re-bind to the first region ({wrong_180}), got {vol2}"
+    );
+
+    wm.shutdown().await;
+    eprintln!(
+        "REVOLVE-REEDIT-BINDING PASS: region {} held across a 360°→180° \
+         UpdateOperationParams ({vol:.3} → {vol2:.3})",
+        bound.region_id
     );
 }

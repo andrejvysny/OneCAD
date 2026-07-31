@@ -40,3 +40,11 @@ pub const SELECTION_CHANGED: &str = "selection-changed";
 
 /// An autosave completed (or a crash marker was written).
 pub const AUTOSAVE: &str = "autosave";
+
+/// The user asked to close the window or quit the app — the native window-close
+/// button (`WindowEvent::CloseRequested`) and an app-level exit request
+/// (`RunEvent::ExitRequested`, e.g. ⌘Q) both funnel into this ONE event. Rust
+/// prevents the close/exit server-side first, so the frontend's unsaved-changes
+/// prompt (`appStore.requestClose`) always gets a chance to run; `confirm_exit` /
+/// `cancel_exit` (`api`) resolve the prompt.
+pub const CLOSE_REQUESTED: &str = "close-requested";

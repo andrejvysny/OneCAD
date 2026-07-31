@@ -408,7 +408,7 @@ describe("ModelToolController Wave 2", () => {
     clientMock.getOperationParams.mockReturnValue(new Promise((r) => (resolveParams = r)));
 
     controller.editRevolveFeature("rev-1");
-    await flush(); // finishSketch + getSketch resolve; paused at the getOperationParams await
+    await flush(); // paused at the getOperationParams await (the FIRST await of the re-edit)
     toolStore.getState().setTool("select"); // supersede: invalidateArm() bumps armGen + cancelRevolve
     await flush();
     resolveParams({}); // the stale params resolve LATE

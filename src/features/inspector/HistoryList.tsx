@@ -19,7 +19,8 @@ const FEATURE_ICON: Record<FeatureKind, IconName> = {
 
 /** Per-row history affordances (M4b): suppress toggle · roll-to-here · delete. */
 export interface HistoryRowActions {
-  /** Whether this feature is (optimistically) suppressed — dims the row + icon. */
+  /** Whether this feature is suppressed — dims the row + icon. Sourced from the
+   *  PROJECTION (`FeatureMeta.suppressed`), never a frontend overlay. */
   suppressed: boolean;
   onToggleSuppress: (item: FeatureMeta) => void;
   onRoll: (item: FeatureMeta) => void;

@@ -55,6 +55,8 @@ export interface FeatureMeta {
   /** Worker failure reason for an errored feature (`status === "error"`), shown as
    *  the HistoryList row tooltip (MODEL-HARDEN W0.5). Absent for any other status. */
   statusMessage?: string;
+  /** Whether the feature is suppressed (backend-authoritative; see `FeatureRecord.suppressed`). */
+  suppressed?: boolean;
 }
 
 /** The full document projection (everything the chrome renders from). */
@@ -157,11 +159,11 @@ export function seedMockDocument(): DocumentProjection {
       },
     },
     features: [
-      { id: "f1", kind: "sketch", label: "Sketch 1", valueText: "", status: "ok" },
-      { id: "f2", kind: "extrude", label: "Extrude", valueText: "83.3 mm", status: "ok" },
-      { id: "f3", kind: "fillet", label: "Fillet", valueText: "2.0 mm", status: "ok" },
-      { id: "f4", kind: "sketch", label: "Sketch 2", valueText: "", status: "ok" },
-      { id: "f5", kind: "extrude", label: "Extrude", valueText: "12.0 mm", status: "ok" },
+      { id: "f1", kind: "sketch", opType: "Sketch", label: "Sketch 1", valueText: "", status: "ok" },
+      { id: "f2", kind: "extrude", opType: "Extrude", label: "Extrude", valueText: "83.3 mm", status: "ok" },
+      { id: "f3", kind: "fillet", opType: "Fillet", label: "Fillet", valueText: "2.0 mm", status: "ok" },
+      { id: "f4", kind: "sketch", opType: "Sketch", label: "Sketch 2", valueText: "", status: "ok" },
+      { id: "f5", kind: "extrude", opType: "Extrude", label: "Extrude", valueText: "12.0 mm", status: "ok" },
     ],
   };
 }

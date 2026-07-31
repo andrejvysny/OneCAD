@@ -49,7 +49,9 @@
 //! worker's `RegenerationEngine` surfaces an unresolved reference as a
 //! failure/`NeedsRepair` rather than the command rejecting it up front.
 
-use crate::document::body::BodyMeta;
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::document::body::{BodyMeta, BodyRegistry};
 use crate::document::datum::DatumPlane;
 use crate::document::record::{KnownOperation, Operation, OperationRecord};
 use crate::document::refs::ElementRef;
@@ -300,6 +302,92 @@ impl DocumentSession {
         };
         let label = edit.forward.label().to_string();
         self.undo.squash(count, Some(Txn::single(label, edit)));
+    }
+
+    /// Syncs every record's **derived** `outputs` — the bodies that op
+    /// produced/modified in the last accepted regen — and rebuilds the dependency
+    /// graph. Returns whether anything changed.
+    ///
+    /// Derived data, not an edit: no undo entry, no command outcome, step states and
+    /// the cursor untouched — the same treatment `inputs` gets on load (re-derived,
+    /// never trusted from disk). `outputs` is the ONLY source of the graph's
+    /// body-producer index, so until a regen calls this the graph has **no body
+    /// edges at all** and both the suppression cascade
+    /// ([`EditCommand::SetOperationSuppression`] with `cascade`) and the
+    /// anti-time-travel check are inert for body dependencies.
+    ///
+    /// `outputs` is the whole truth **only for the records this regen actually ran**.
+    /// `executed` names them (the committed plan's records); a record in that set but
+    /// absent from `outputs` produced nothing and has its `outputs` cleared, so a stale
+    /// producer edge cannot survive the regen that dropped it.
+    ///
+    /// A record **outside** `executed` is left **untouched** — never cleared. A
+    /// checkpoint-accelerated regen executes only the post-checkpoint suffix, and the
+    /// restored base registry carries **no lifecycle log** for the prefix (the worker
+    /// reconstructs it from the immutable artifacts), so the caller's `outputs` map
+    /// legitimately knows nothing about the pre-checkpoint records. Clearing them there
+    /// would erase the graph's body-producer edges for the whole prefix and silently kill
+    /// the suppression cascade — and the wipe is durable, because `outputs` is serialized
+    /// with the record. Records absent from `executed` but PRESENT in `outputs` are still
+    /// refreshed: the executor's replay-from-0 fallback (Invariant 7) re-runs more steps
+    /// than the plan named, and that fresh provenance is strictly better than the old.
+    ///
+    /// **Suppressed records are skipped** — they were deliberately not executed, so they
+    /// have no fresh provenance, and keeping their last-known `outputs` is what lets an
+    /// *un*-suppress cascade find the ops standing on their bodies (clearing them would
+    /// make suppression a one-way door).
+    pub fn sync_record_outputs(
+        &mut self,
+        outputs: &BTreeMap<RecordId, Vec<BodyId>>,
+        executed: &BTreeSet<RecordId>,
+    ) -> bool {
+        let mut changed = false;
+        for i in 0..self.document.timeline.len() {
+            let Some(rec) = self.document.timeline.record(i) else {
+                continue;
+            };
+            if rec.suppressed {
+                continue;
+            }
+            let id = rec.record_id;
+            if !executed.contains(&id) && !outputs.contains_key(&id) {
+                continue; // outside this regen's executed range — keep what it had.
+            }
+            let next = outputs.get(&id).cloned().unwrap_or_default();
+            changed |= self.document.timeline.set_record_outputs(i, next);
+        }
+        if changed {
+            self.rebuild_graph();
+        }
+        changed
+    }
+
+    /// Registers a document metadata row for every body in `regen` the document does
+    /// not know yet (the regen row copied verbatim). Returns whether anything was
+    /// adopted.
+    ///
+    /// Registers **identity, not user intent**: no undo entry, no command outcome, no
+    /// dirty flip — the counterpart of
+    /// [`sync_record_outputs`](Self::sync_record_outputs). A worker-minted body
+    /// (an extrude output) is otherwise absent from `document.bodies`, so
+    /// `DeleteBody` / `RenameBody` / `SetVisibility`, which all validate against it,
+    /// reject every body the timeline actually produced.
+    ///
+    /// An existing row is **never** overwritten: its `name`/`visible` are user intent
+    /// and outrank the regen row's generated defaults (a from-0 replay starts from a
+    /// fresh registry and re-derives `"Body N"`).
+    ///
+    /// Callers MUST re-run this after undo/redo as well as after a regen commit:
+    /// [`Inverse::RestoreBodies`] restores the WHOLE registry, so an undo erases every
+    /// row adopted since the edit it reverts.
+    pub fn adopt_regen_bodies(&mut self, regen: &BodyRegistry) -> bool {
+        let mut adopted = false;
+        for meta in regen.bodies() {
+            if !self.document.bodies.contains(meta.id) {
+                adopted |= self.document.bodies.register(meta.clone());
+            }
+        }
+        adopted
     }
 
     /// Undoes the newest committed transaction (applies its inverses in reverse

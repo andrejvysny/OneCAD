@@ -1,6 +1,8 @@
+import { useEffect, useRef, type MouseEvent as ReactMouseEvent } from "react";
 import { cn } from "@/ui/cn";
 import { Icon } from "@/icons/Icon";
 import { EyeToggle } from "@/ui/EyeToggle";
+import { TextInput } from "@/ui/TextInput";
 import type { IconName } from "@/icons/paths";
 
 type TreeRowProps = {
@@ -12,12 +14,23 @@ type TreeRowProps = {
   onToggleVisible: (visible: boolean) => void;
   /** Double-click activator (sketch rows enter sketch mode). */
   onActivate?: () => void;
+  /** Right-click → the tree's shared context menu (anchored to this row). */
+  onContextMenu?: (e: ReactMouseEvent<HTMLDivElement>) => void;
+  /** Inline rename in progress — the label swaps for a focused text field. */
+  editing?: boolean;
+  /** Enter / blur with a name. The caller validates + commits (empty is refused). */
+  onRenameCommit?: (name: string) => void;
+  /** Escape — abandon the edit with no write. */
+  onRenameCancel?: () => void;
 };
 
 /**
  * 32px model-tree row (prototype 1c). Selected = sel-bg + sel-text; hover
  * surface otherwise. The eye is a nested toggle whose click must not bubble
  * into the row's select (prototype stops propagation).
+ *
+ * `role="option"` + the eye's `role="switch"` are load-bearing: the e2e helpers
+ * (`bodyOptions` / `sketchOptions`) address tree rows through them.
  */
 export function TreeRow({
   name,
@@ -27,20 +40,74 @@ export function TreeRow({
   onSelect,
   onToggleVisible,
   onActivate,
+  onContextMenu,
+  editing = false,
+  onRenameCommit,
+  onRenameCancel,
 }: TreeRowProps) {
+  const input = useRef<HTMLInputElement>(null);
+  // Guards the blur handler: Enter/Escape both settle the edit and then blur, and a
+  // second commit off that blur would either double-write or resurrect a cancelled
+  // name. Whichever path settles first wins.
+  const settled = useRef(false);
+
+  useEffect(() => {
+    if (!editing) {
+      settled.current = false;
+      return;
+    }
+    const el = input.current;
+    el?.focus();
+    el?.select();
+  }, [editing]);
+
+  const commit = (): void => {
+    if (settled.current) return;
+    settled.current = true;
+    onRenameCommit?.(input.current?.value ?? name);
+  };
+  const cancel = (): void => {
+    if (settled.current) return;
+    settled.current = true;
+    onRenameCancel?.();
+  };
+
   return (
     <div
       role="option"
       aria-selected={selected}
-      onClick={onSelect}
-      onDoubleClick={onActivate}
+      // While editing, the row must not select/activate underneath the field —
+      // a stray click inside the input would otherwise enter sketch mode.
+      onClick={editing ? undefined : onSelect}
+      onDoubleClick={editing ? undefined : onActivate}
+      onContextMenu={onContextMenu}
       className={cn(
         "mx-2 my-px flex h-8 cursor-default items-center gap-2 rounded-sm px-2",
         selected ? "bg-sel-bg text-sel-text" : "text-tree-label hover:bg-hover-2",
       )}
     >
       <Icon name={icon} size={15} strokeWidth={1.6} className="flex-none" />
-      <span className="flex-1 text-[13px]">{name}</span>
+      {editing ? (
+        <TextInput
+          ref={input}
+          defaultValue={name}
+          aria-label={`Rename ${name}`}
+          wrapperClassName="flex-1"
+          className="h-[24px] text-[13px]"
+          onClick={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            // The tree sits under global shortcuts (Escape cancels the active tool,
+            // letters arm tools) — keep every keystroke inside the field.
+            e.stopPropagation();
+            if (e.key === "Enter") commit();
+            else if (e.key === "Escape") cancel();
+          }}
+        />
+      ) : (
+        <span className="flex-1 text-[13px]">{name}</span>
+      )}
       <span
         className="flex"
         onClick={(e) => e.stopPropagation()}

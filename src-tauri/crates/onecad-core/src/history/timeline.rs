@@ -21,7 +21,7 @@
 
 use crate::document::record::OperationRecord;
 use crate::error::DomainError;
-use crate::ids::RecordId;
+use crate::ids::{BodyId, RecordId};
 
 use super::DirtyRange;
 
@@ -66,12 +66,28 @@ impl Timeline {
     }
 
     /// Builds a timeline from a loaded record list. The cursor is placed at the
-    /// end (all records applied) and every step starts [`StepState::Dirty`]
+    /// end (all records applied); a step starts [`StepState::Suppressed`] iff its
+    /// record carries the persisted `suppressed` flag, else [`StepState::Dirty`]
     /// (a freshly loaded document must be regenerated before it is trusted).
+    ///
+    /// This is the SINGLE point where `OperationRecord::suppressed` becomes step
+    /// state — every wholesale rebuild routes through here (document load,
+    /// `DocumentSession::set_suppression`, the undo memento replace, the runtime's
+    /// regen-mirror sync), so `states[i] == Suppressed ⟺ records[i].suppressed`
+    /// holds right after construction.
     #[must_use]
     pub fn from_records(records: Vec<OperationRecord>) -> Self {
         let cursor = records.len();
-        let states = vec![StepState::Dirty; records.len()];
+        let states = records
+            .iter()
+            .map(|rec| {
+                if rec.suppressed {
+                    StepState::Suppressed
+                } else {
+                    StepState::Dirty
+                }
+            })
+            .collect();
         Self {
             records,
             cursor,
@@ -216,6 +232,20 @@ impl Timeline {
         Ok(())
     }
 
+    /// Replaces the **derived** `outputs` (produced/modified bodies) of the record
+    /// at `index`. Regen provenance sync, not an edit: step states and the cursor
+    /// are deliberately untouched, so committing a regen never re-dirties the steps
+    /// it just validated. Returns whether anything changed; out of range is a no-op.
+    pub fn set_record_outputs(&mut self, index: usize, outputs: Vec<BodyId>) -> bool {
+        match self.records.get_mut(index) {
+            Some(rec) if rec.outputs != outputs => {
+                rec.outputs = outputs;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Removes the record with the given id, keeping the cursor consistent
     /// (OneCAD-CPP `Document::removeOperation`, `Document.cpp:966-990`: decrement
     /// the applied cursor iff the removed index is inside the applied prefix,
@@ -291,7 +321,6 @@ mod tests {
         BooleanMode, ExtrudeMode, ExtrudeParams, KnownOperation, Operation,
     };
     use crate::document::variables::Scalar;
-    use crate::ids::BodyId;
     use uuid::Uuid;
 
     fn extrude_record(seed: u128, distance: f64) -> OperationRecord {
@@ -339,5 +368,56 @@ mod tests {
     fn mark_state_out_of_bounds_errs() {
         let mut tl = Timeline::new();
         assert!(tl.mark_state(0, StepState::Valid).is_err());
+    }
+
+    /// The T0 predicate equivalence: `from_records` is the single point that turns
+    /// the persisted record flag into `StepState::Suppressed`, so
+    /// `states[i] == Suppressed ⟺ records[i].suppressed` for every index.
+    #[test]
+    fn from_records_derives_suppressed_state_from_the_record_flag() {
+        let mut recs = vec![
+            extrude_record(1, 10.0),
+            extrude_record(2, 5.0),
+            extrude_record(3, 7.0),
+        ];
+        recs[1].suppressed = true;
+        let tl = Timeline::from_records(recs);
+
+        for (i, rec) in tl.records().iter().enumerate() {
+            assert_eq!(
+                tl.state(i) == Some(&StepState::Suppressed),
+                rec.suppressed,
+                "step {i}: state {:?} must agree with record.suppressed={}",
+                tl.state(i),
+                rec.suppressed
+            );
+        }
+        assert_eq!(tl.state(0), Some(&StepState::Dirty));
+        assert_eq!(tl.state(1), Some(&StepState::Suppressed));
+        assert_eq!(tl.state(2), Some(&StepState::Dirty));
+        tl.validate().unwrap();
+    }
+
+    #[test]
+    fn suppressed_state_survives_dirty_marking() {
+        let mut recs = vec![extrude_record(1, 10.0), extrude_record(2, 5.0)];
+        recs[0].suppressed = true;
+        let mut tl = Timeline::from_records(recs);
+        tl.mark_dirty_from(0);
+        assert_eq!(tl.state(0), Some(&StepState::Suppressed));
+        assert_eq!(tl.state(1), Some(&StepState::Dirty));
+    }
+
+    #[test]
+    fn set_record_outputs_leaves_states_and_cursor_alone() {
+        let mut tl = Timeline::from_records(vec![extrude_record(1, 10.0)]);
+        tl.mark_state(0, StepState::Valid).unwrap();
+        let body = BodyId(Uuid::from_u128(0xFEED));
+        assert!(tl.set_record_outputs(0, vec![body]));
+        assert!(!tl.set_record_outputs(0, vec![body]), "idempotent");
+        assert!(!tl.set_record_outputs(9, vec![body]), "out of range no-op");
+        assert_eq!(tl.record(0).unwrap().outputs, vec![body]);
+        assert_eq!(tl.state(0), Some(&StepState::Valid), "states untouched");
+        assert_eq!(tl.cursor(), 1);
     }
 }

@@ -12,7 +12,7 @@ use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use onecad_core::document::record::Operation;
 use onecad_core::document::refs::{AnchorIntent, ElementRef};
@@ -238,6 +238,52 @@ pub async fn close_document(state: State<'_, AppState>, app: AppHandle) -> Resul
     }
     let _ = app.emit(events::PROJECTION_UPDATED, &DocumentProjection::empty());
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Close/quit confirmation (unsaved-changes guard)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `crate::run`'s `on_window_event` / `RunEvent::ExitRequested` handlers prevent
+// the native window-close and app-exit, then emit `events::CLOSE_REQUESTED` so
+// the frontend can prompt for unsaved changes. These two commands are how the
+// frontend resolves that prompt; both clear `crate::ExitGuard` so a LATER
+// close/quit attempt prompts again rather than being silently swallowed by a
+// stale guard.
+
+/// Resolves a pending close/quit prompt by proceeding: clears the open document's
+/// crash-recovery state and the re-entrancy guard, then exits. `AppHandle::exit`
+/// re-fires `RunEvent::ExitRequested` with `code: Some(0)`, which the
+/// `code.is_none()` gate in `crate::run` already lets through unprompted — so this
+/// actually terminates the app rather than looping back into another prompt.
+///
+/// WHY the recovery clear: reaching here means the user answered the unsaved-changes
+/// prompt with Save or **Don't Save**. An explicit discard is NOT a crash, but the
+/// autosave marker + container survive process exit, so leaving them behind makes
+/// the next launch offer the deliberately-discarded work back as "recovered" —
+/// resurrecting data the user just chose to throw away. Mirrors `close_document`'s
+/// clear (a clean close is likewise not a crash). Save already cleared it at that
+/// document's save path; clearing again is a harmless no-op.
+#[tauri::command]
+pub async fn confirm_exit(app: AppHandle) {
+    let document_id = {
+        let state = app.state::<AppState>();
+        let guard = state.runtime.lock().await;
+        guard.as_ref().map(DocumentRuntime::document_uuid)
+    };
+    if let (Some(id), Some(root)) = (document_id, autosave::autosave_root(&app)) {
+        autosave::clear_recovery_state(&root, id);
+    }
+    app.state::<crate::ExitGuard>().clear();
+    app.exit(0);
+}
+
+/// Resolves a pending close/quit prompt by cancelling: clears the re-entrancy
+/// guard WITHOUT exiting, so the app stays open and a later close/quit attempt
+/// prompts again.
+#[tauri::command]
+pub async fn cancel_exit(app: AppHandle) {
+    app.state::<crate::ExitGuard>().clear();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
