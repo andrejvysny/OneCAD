@@ -675,7 +675,10 @@ export class SketchController {
       if (!this.machine || !this.machineState) return;
       const stepped = this.machine.step(this.machineState, { kind: "move", pt: snap.point }, this.stepCtx());
       this.machineState = stepped.state;
-      this.deps.engine.setSketchPreview(stepped.preview);
+      this.deps.engine.setSketchPreview(this.decorate(stepped.preview));
+      // The RAW preview feeds the H/V ghost: `updateGhost` deliberately ignores
+      // construction drafts (the arc radius rubber-band), but a construction-mode
+      // line still gets H/V auto-constrained at commit, so the hint must still show.
       this.updateGhost(stepped.preview, snap.point);
     });
   };
@@ -723,9 +726,9 @@ export class SketchController {
     if (!snap) return;
     const stepped = this.machine.step(this.machineState, { kind: "click", pt: snap.point }, this.stepCtx());
     this.machineState = stepped.state;
-    this.deps.engine.setSketchPreview(stepped.preview);
+    this.deps.engine.setSketchPreview(this.decorate(stepped.preview));
     if (stepped.committed && stepped.committed.length > 0) {
-      void this.commit(stepped.committed);
+      void this.commit(this.decorate(stepped.committed));
     }
     if (stepped.done) this.deps.engine.setSketchGhost(null, null);
   };
@@ -1261,6 +1264,19 @@ export class SketchController {
     this.dragPlane = null;
     this.pendingTarget = null;
     this.dragEndPending = null;
+  }
+
+  /**
+   * W1-B: apply the sticky construction draw modifier to a tool machine's output.
+   * The machines are mode-blind (they already mark their OWN helper drafts, e.g. the
+   * arc radius rubber-band), so the flag is OR-ed on here — the single place drafts
+   * cross from the FSM into the engine / the commit path. Off ⇒ the same array back
+   * (no churn). Applied to preview + committed so what the user sees dashed is
+   * exactly what gets authored.
+   */
+  private decorate(drafts: DraftEntity[]): DraftEntity[] {
+    if (!sketchStore.getState().constructionMode) return drafts;
+    return drafts.map((d) => (d.construction ? d : { ...d, construction: true }));
   }
 
   private updateGhost(preview: DraftEntity[], cursor: Point2): void {

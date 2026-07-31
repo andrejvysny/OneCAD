@@ -263,6 +263,49 @@ async function trimEntityNow(
 }
 
 /**
+ * Flip `entityIds` to `target` construction state (W1-B). Construction geometry is
+ * still SOLVED (constraints, dimensions, snapping all keep working) but is excluded
+ * from region detection, so a profile edge flipped to construction stops closing its
+ * loop. The mixed-selection RULE lives in the CALLER (`runToggleConstruction` in
+ * shortcuts/useShortcuts.ts) — this verb takes an explicit target so the caller owns
+ * "all become construction unless every one already is".
+ *
+ * Round-trips through `sketchUpsert` like the delete verbs; the marshaller turns the
+ * changed flags into `setEntityConstruction` ops (id-diff alone would emit nothing).
+ * No-op on empty `entityIds` / no session / nothing actually changing.
+ */
+export function setEntitiesConstruction(
+  client: CadClient,
+  entityIds: string[],
+  target: boolean,
+): Promise<void> {
+  return enqueueSketchMutation(() => setEntitiesConstructionNow(client, entityIds, target));
+}
+
+async function setEntitiesConstructionNow(
+  client: CadClient,
+  entityIds: string[],
+  target: boolean,
+): Promise<void> {
+  if (entityIds.length === 0) return;
+  const gen = sketchStore.getState().sessionGeneration;
+  const session = sketchStore.getState().session;
+  if (!session) return;
+  const picked = new Set(entityIds);
+  let changed = false;
+  const entities = session.entities.map((e) => {
+    if (!picked.has(e.id) || !!e.construction === target) return e;
+    changed = true;
+    return { ...e, construction: target };
+  });
+  if (!changed) return; // no live id matched, or all already at `target`
+  const before: SketchSnapshot = { entities: session.entities, constraints: session.constraints };
+  if (await commitReducedSketch(client, session, entities, session.constraints, gen, "construction")) {
+    sketchStore.getState().pushUndoSnapshot(before, { kind: "construction" });
+  }
+}
+
+/**
  * Delete sketch constraints (user-facing delete). Removes `ids` from the
  * constraint array (entities untouched) and re-solves. No-op on empty `ids` / no
  * session / nothing matched; a solve failure surfaces a status hint.
@@ -290,7 +333,7 @@ async function deleteConstraintsNow(client: CadClient, ids: string[]): Promise<v
  * solve (dof/status/positions), and refresh session + engine + DOF badges — the
  * same write-back shape `commit`/`commitDimensionConstraint` use. A rejected upsert
  * surfaces a status hint (matching SketchController.commit's error path) and leaves
- * the session untouched.
+ * the session untouched. `verb` only names the operation in that hint.
  */
 async function commitReducedSketch(
   client: CadClient,
@@ -298,6 +341,7 @@ async function commitReducedSketch(
   entities: SketchEntity[],
   constraints: SketchConstraint[],
   gen: number,
+  verb = "delete",
 ): Promise<boolean> {
   let result;
   try {
@@ -305,7 +349,7 @@ async function commitReducedSketch(
   } catch (e) {
     if (sessionSuperseded(gen)) return false; // superseded — don't surface a stale hint
     const msg = e instanceof Error ? e.message : String(e);
-    viewportStore.getState().setStatusHint(`Sketch delete failed: ${msg}`, { severity: "error", sticky: true });
+    viewportStore.getState().setStatusHint(`Sketch ${verb} failed: ${msg}`, { severity: "error", sticky: true });
     return false;
   }
   if (sessionSuperseded(gen)) return false;

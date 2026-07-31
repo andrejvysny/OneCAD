@@ -120,6 +120,8 @@ interface ClientOpts {
   /** Per-call `endPreview` results (index k = the k-th commit); default: success. */
   endResults?: ApplyOperationResult[];
   storedParams?: Record<string, unknown>;
+  /** Sketch entities the axis candidates are resolved from (default: one real line). */
+  axisEntities?: SketchSession["entities"];
 }
 
 function makeClientMock(opts: ClientOpts, capture?: (cb: (r: PreviewResult) => void) => void) {
@@ -132,7 +134,7 @@ function makeClientMock(opts: ClientOpts, capture?: (cb: (r: PreviewResult) => v
     }),
     finishSketch: vi.fn((): Promise<FinishSketchResult> => Promise.resolve({ regions: opts.regions })),
     getSketchRegions: vi.fn((): Promise<FinishSketchResult> => Promise.resolve({ regions: opts.regions })),
-    getSketch: vi.fn(() => Promise.resolve(makeSession([AXIS_OK]))),
+    getSketch: vi.fn(() => Promise.resolve(makeSession(opts.axisEntities ?? [AXIS_OK]))),
     beginPreview: vi.fn((_d: PreviewDraft) =>
       Promise.resolve({ sessionId: `pv-${++seq}`, previewBodyId: `pb-${seq}` }),
     ),
@@ -278,6 +280,28 @@ describe("ModelToolController revolve kernel preview", () => {
     const initial = clientMock.updatePreview.mock.calls;
     expect(initial.map((c) => c[0])).toEqual(["pv-1", "pv-2"]);
     expect(initial.map((c) => c[2])).toEqual([1, 1]); // one shared epoch
+  });
+
+  // W1-B pin: a CONSTRUCTION line is a first-class revolve axis (the classic
+  // centerline workflow). Axis candidates filter on `type === "Line"` only — the
+  // construction flag excludes geometry from REGIONS, never from being an axis.
+  it("accepts a CONSTRUCTION line as an axis candidate", async () => {
+    build({ regions: [R0], axisEntities: [{ ...AXIS_OK, construction: true }] });
+    await armAndPickAxis();
+
+    // It was OFFERED as a candidate (the engine gets the endpoints only)…
+    const candidates = engineMock.showRevolveAxisCandidates.mock.calls[0][1] as {
+      a: [number, number];
+      b: [number, number];
+    }[];
+    expect(candidates).toEqual([{ a: AXIS_OK.p0, b: AXIS_OK.p1 }]);
+    // …and the pick BOUND it: the lathe + a kernel preview session opened on a
+    // draft whose axis names the construction line. Nothing about construction
+    // geometry blocks it — it only leaves region detection.
+    expect(engineMock.showRevolvePreview).toHaveBeenCalledTimes(1);
+    expect(clientMock.beginPreview).toHaveBeenCalledTimes(1);
+    const draft = clientMock.beginPreview.mock.calls[0][0] as PreviewDraft;
+    expect(draft.params.axis as AxisRef).toMatchObject({ kind: "sketchLine", lineId: "axOk" });
   });
 
   it("keeps the L1 lathe under the exact preview (the drag handle never disappears)", async () => {

@@ -233,3 +233,94 @@ describe("useShortcuts — undo/redo routing (mode-gated)", () => {
     expect(ctrl.redo).not.toHaveBeenCalled();
   });
 });
+
+// ── W1-B: X — construction geometry ───────────────────────────────────────────
+
+describe("X — construction geometry", () => {
+  beforeEach(() => resetStores());
+
+  it("resolves in sketch mode only, and never crosses into model mode", () => {
+    expect(resolveBinding("x", false, "sketch")).toEqual({ type: "toggleConstruction" });
+    // Not a `tool` action ⇒ the AUTO-MODE cross-mode fallback must NOT leak it.
+    expect(resolveBinding("x", false, "model")).toBeNull();
+  });
+
+  function seedSketch(entities: SketchEntity[]): void {
+    sketchStore.getState().setSession({
+      sketchId: "sk-x",
+      plane: planeFor("XY"),
+      entities,
+      constraints: [],
+      dof: 8,
+      status: "UnderConstrained",
+    });
+  }
+
+  const real = (id: string): SketchEntity => ({ id, type: "Line", p0: [0, 0], p1: [40, 0] });
+  const cons = (id: string): SketchEntity => ({ ...real(id), construction: true });
+  const flags = (): boolean[] =>
+    sketchStore.getState().session!.entities.map((e) => !!e.construction);
+
+  it("with an EMPTY selection toggles the sticky draw mode", () => {
+    render(<Harness />);
+    act(() => toolStore.getState().setMode("sketch"));
+    sketchSelectionStore.getState().clear();
+
+    expect(sketchStore.getState().constructionMode).toBe(false);
+    const ev = press("x");
+    expect(ev.defaultPrevented).toBe(true);
+    expect(sketchStore.getState().constructionMode).toBe(true);
+    press("x");
+    expect(sketchStore.getState().constructionMode).toBe(false);
+  });
+
+  it("with a selection flips those entities and leaves the draw mode alone", async () => {
+    render(<Harness />);
+    act(() => toolStore.getState().setMode("sketch"));
+    seedSketch([real("e1"), real("e2")]);
+    // A point-pick flips its OWNING entity (same V1 rule as delete).
+    sketchSelectionStore.getState().set([{ entityId: "e1", point: "Start" }]);
+
+    await act(async () => {
+      press("x");
+      await flushSketchMutations();
+    });
+    expect(flags()).toEqual([true, false]);
+    expect(sketchStore.getState().constructionMode).toBe(false); // mode untouched
+  });
+
+  it("MIXED selection: everything becomes construction unless ALL already are", async () => {
+    render(<Harness />);
+    act(() => toolStore.getState().setMode("sketch"));
+    seedSketch([cons("e1"), real("e2")]);
+    sketchSelectionStore.getState().set([{ entityId: "e1" }, { entityId: "e2" }]);
+
+    // Mixed ⇒ target true: the real one joins the construction one.
+    await act(async () => {
+      press("x");
+      await flushSketchMutations();
+    });
+    expect(flags()).toEqual([true, true]);
+
+    // Now ALL are construction ⇒ the next press flips the whole pick back to real.
+    await act(async () => {
+      press("x");
+      await flushSketchMutations();
+    });
+    expect(flags()).toEqual([false, false]);
+  });
+
+  it("is a no-op when the selection names no live entity", async () => {
+    render(<Harness />);
+    act(() => toolStore.getState().setMode("sketch"));
+    seedSketch([real("e1")]);
+    sketchSelectionStore.getState().set([{ entityId: "gone" }]);
+
+    await act(async () => {
+      press("x");
+      await flushSketchMutations();
+    });
+    expect(flags()).toEqual([false]);
+    expect(sketchStore.getState().constructionMode).toBe(false); // never fell back to the mode
+  });
+});

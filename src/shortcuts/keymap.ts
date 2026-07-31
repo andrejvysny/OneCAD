@@ -4,7 +4,7 @@
  * Model:  V select · S new-sketch (enters sketch mode) · E extrude · R revolve
  *         · F fillet · B combine/boolean
  * Sketch: V select · L line · R rectangle · C circle · A arc · D dimension
- *         · T trim · M mirror
+ *         · T trim · M mirror · X construction (flip selection / sticky mode)
  * Global: Esc cancel-ladder · Enter finish-sketch (sketch mode) · H home (stub)
  *         · Shift+F zoom-to-fit
  *
@@ -24,6 +24,7 @@ export type ShortcutAction =
   | { type: "enterSketch" }
   | { type: "finishSketch" }
   | { type: "deleteSketchSelection" }
+  | { type: "toggleConstruction" }
   | { type: "cancel" }
   | { type: "zoomFit" }
   | { type: "home" };
@@ -62,6 +63,11 @@ export const SKETCH_KEYS: KeyBinding[] = [
   { key: "d", action: { type: "tool", tool: "dimension" } },
   { key: "t", action: { type: "tool", tool: "trim" } },
   { key: "m", action: { type: "tool", tool: "mirror" } },
+  // X flips construction geometry (W1-B): with a sketch selection it flips those
+  // entities, with none it toggles the sticky construction draw mode. Sketch-scoped
+  // only — the action is NOT a `tool`, so the cross-mode fallback never leaks it
+  // into model mode (where X is still free).
+  { key: "x", action: { type: "toggleConstruction" } },
   // Delete/Backspace remove the current sketch selection. Sketch-scoped only;
   // in model mode they fall through (no binding). The handler additionally lets
   // the key fall through when nothing is selected (see useShortcuts).

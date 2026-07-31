@@ -53,6 +53,12 @@ export interface SketchState {
    *  enter SEEDS it from `session.conflicting`; exit/dispose/session-swap CLEAR it
    *  (setSession(null)). The inspector + badge layer tint these ids red. */
   conflictingIds: string[];
+  /** STICKY draw modifier (W1-B): while on, every entity the draw tools commit is
+   *  authored as CONSTRUCTION geometry (dashed, excluded from regions, still
+   *  solved). Toggled by X with an empty sketch selection / the chrome-bar button.
+   *  Session-independent — it survives entering and leaving sketches, and is not
+   *  persisted (a document close resets the store). */
+  constructionMode: boolean;
   entitySeq: number;
   constraintSeq: number;
   undoStack: SketchSnapshot[];
@@ -63,6 +69,8 @@ export interface SketchState {
   /** REPLACE the conflicting-id set (every solve write-back / session-enter seed).
    *  Short-circuits when unchanged so live drag solves don't churn subscribers. */
   setConflicting(ids: string[]): void;
+  /** Flip the sticky construction draw modifier. */
+  toggleConstructionMode(): void;
   /** Mint the next entity id (`e1`, `e2`, …) and advance the counter. */
   nextEntityId(): string;
   /** Mint the next constraint id (`c1`, `c2`, …) and advance the counter. */
@@ -82,6 +90,7 @@ export const sketchStore = createStore<SketchState>()((set, get) => ({
   session: null,
   sessionGeneration: 0,
   conflictingIds: [],
+  constructionMode: false,
   entitySeq: 0,
   constraintSeq: 0,
   undoStack: [],
@@ -106,6 +115,10 @@ export const sketchStore = createStore<SketchState>()((set, get) => ({
       if (cur.length === ids.length && cur.every((v, i) => v === ids[i])) return {};
       return { conflictingIds: ids };
     });
+  },
+
+  toggleConstructionMode() {
+    set((s) => ({ constructionMode: !s.constructionMode }));
   },
 
   nextEntityId() {
@@ -161,6 +174,7 @@ export const sketchStore = createStore<SketchState>()((set, get) => ({
       session: null,
       sessionGeneration: 0,
       conflictingIds: [],
+      constructionMode: false,
       entitySeq: 0,
       constraintSeq: 0,
       undoStack: [],

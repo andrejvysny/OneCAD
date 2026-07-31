@@ -7,6 +7,7 @@ import {
   applySolvedPositions,
   buildAddSketch,
   buildDeleteSketch,
+  cloneIdMap,
   createIdMap,
   frontendConflictingIds,
   frontendConstraintsFromDto,
@@ -578,5 +579,131 @@ describe("frontendConflictingIds — reverse map.constraint (backend uuid → fr
     const map = createIdMap("sk", "XY");
     seedIdMapFromWire(map, [], [{ id: "backend-uuid-1", type: "Horizontal", entities: ["e1"] }]);
     expect(frontendConflictingIds(map, ["backend-uuid-1"])).toEqual(["backend-uuid-1"]);
+  });
+});
+
+// ── W1-B: construction flag transport (SetEntityConstruction) ─────────────────
+//
+// The id-only diff never noticed a flag change on an ALREADY-mapped entity, so
+// flipping construction was silently lost on the wire. `entityConstruction` caches
+// the last-SENT flag; these specs pin every touchpoint of that cache.
+
+describe("marshalUpsert — construction flag", () => {
+  const cline = (id: string, construction: boolean): SketchEntity => ({
+    ...line(id, [0, 0], [40, 0]),
+    construction,
+  });
+
+  it("carries the flag INLINE on the add (no separate op) and primes the cache", () => {
+    const map = createIdMap("sk", "XY");
+    const ops = marshalUpsert(map, { entities: [cline("e1", true)], constraints: [] }, mint);
+    expect(ops.filter((o) => o.op === "setEntityConstruction")).toEqual([]);
+    expect(ops[2]).toMatchObject({ op: "addEntity", entity: { kind: "line", construction: true } });
+    expect(map.entityConstruction.get("e1")).toBe(true);
+  });
+
+  it("emits exactly ONE setEntityConstruction op naming the BACKEND uuid on a flip", () => {
+    const map = createIdMap("sk", "XY");
+    marshalUpsert(map, { entities: [line("e1", [0, 0], [40, 0])], constraints: [] }, mint);
+    const backendId = map.entity.get("e1")!;
+
+    const ops = marshalUpsert(map, { entities: [cline("e1", true)], constraints: [] }, mint);
+    expect(ops).toEqual([{ op: "setEntityConstruction", entity: backendId, construction: true }]);
+    expect(map.entityConstruction.get("e1")).toBe(true);
+  });
+
+  it("flips BACK to real geometry (construction: false)", () => {
+    const map = createIdMap("sk", "XY");
+    marshalUpsert(map, { entities: [cline("e1", true)], constraints: [] }, mint);
+    const backendId = map.entity.get("e1")!;
+    const ops = marshalUpsert(map, { entities: [line("e1", [0, 0], [40, 0])], constraints: [] }, mint);
+    expect(ops).toEqual([{ op: "setEntityConstruction", entity: backendId, construction: false }]);
+    expect(map.entityConstruction.get("e1")).toBe(false);
+  });
+
+  it("emits NOTHING when the flag is unchanged (either polarity, undefined == false)", () => {
+    const map = createIdMap("sk", "XY");
+    marshalUpsert(map, { entities: [cline("e1", true)], constraints: [] }, mint);
+    expect(marshalUpsert(map, { entities: [cline("e1", true)], constraints: [] }, mint)).toEqual([]);
+
+    const map2 = createIdMap("sk", "XY");
+    marshalUpsert(map2, { entities: [line("e2", [0, 0], [40, 0])], constraints: [] }, mint);
+    // `undefined` and an explicit `false` are the SAME state — no spurious op.
+    expect(marshalUpsert(map2, { entities: [cline("e2", false)], constraints: [] }, mint)).toEqual([]);
+  });
+
+  it("flips only the entity that changed in a mixed batch", () => {
+    const map = createIdMap("sk", "XY");
+    const a = line("e1", [0, 0], [40, 0]);
+    const b = circle("e2", [10, 10], 3);
+    marshalUpsert(map, { entities: [a, b], constraints: [] }, mint);
+    const ops = marshalUpsert(map, { entities: [a, { ...b, construction: true }], constraints: [] }, mint);
+    expect(ops).toEqual([
+      { op: "setEntityConstruction", entity: map.entity.get("e2")!, construction: true },
+    ]);
+  });
+
+  it("drops the cache entry when the entity is removed (no stale flag on an id reuse)", () => {
+    const map = createIdMap("sk", "XY");
+    marshalUpsert(map, { entities: [cline("e1", true)], constraints: [] }, mint);
+    expect(map.entityConstruction.get("e1")).toBe(true);
+
+    marshalUpsert(map, { entities: [], constraints: [] }, mint);
+    expect(map.entityConstruction.has("e1")).toBe(false);
+
+    // Re-adding the SAME frontend id as REAL geometry must re-add inline, not flip.
+    const ops = marshalUpsert(map, { entities: [line("e1", [0, 0], [40, 0])], constraints: [] }, mint);
+    expect(ops.every((o) => o.op === "addEntity")).toBe(true);
+    expect(map.entityConstruction.get("e1")).toBe(false);
+  });
+
+  it("re-entry: seedIdMapFromWire primes the flag, then a flip emits the right op", () => {
+    const wire = [
+      { id: "p1", type: "Point", at: [0, 0] },
+      { id: "p2", type: "Point", at: [40, 0] },
+      { id: "l1", type: "Line", p0Ref: "p1", p1Ref: "p2", construction: true },
+      { id: "cc", type: "Circle", center: [10, 10], centerRef: "p3", radius: 3 },
+      { id: "p3", type: "Point", at: [10, 10] },
+    ];
+    const map = createIdMap("sk", "XY");
+    seedIdMapFromWire(map, wire, []);
+    expect(map.entityConstruction.get("l1")).toBe(true);
+    expect(map.entityConstruction.get("cc")).toBe(false);
+
+    // The hydrated session carries the same flags ⇒ zero ops (no spurious flip).
+    const entities = frontendEntitiesFromDto(wire);
+    expect(marshalUpsert(map, { entities, constraints: [] }, mint)).toEqual([]);
+
+    // Now flip the hydrated construction line back to real geometry.
+    const flipped = entities.map((e) => (e.id === "l1" ? { ...e, construction: false } : e));
+    expect(marshalUpsert(map, { entities: flipped, constraints: [] }, mint)).toEqual([
+      { op: "setEntityConstruction", entity: "l1", construction: false },
+    ]);
+  });
+
+  it("seedIdMapFromWire CLEARS a prior session's flags (no stale-map rebind)", () => {
+    const map = createIdMap("sk", "XY");
+    marshalUpsert(map, { entities: [cline("e1", true)], constraints: [] }, mint);
+    seedIdMapFromWire(map, [{ id: "l9", type: "Line", p0Ref: "q1", p1Ref: "q2" }, { id: "q1", type: "Point", at: [0, 0] }, { id: "q2", type: "Point", at: [1, 1] }], []);
+    expect(map.entityConstruction.has("e1")).toBe(false);
+    expect(map.entityConstruction.get("l9")).toBe(false);
+  });
+
+  it("cloneIdMap copies the cache, so a REJECTED upsert leaves it at the last-SENT flag", () => {
+    // Mirrors tauriClient.sketchUpsert: marshal against a clone, commit only on success.
+    const live = createIdMap("sk", "XY");
+    marshalUpsert(live, { entities: [line("e1", [0, 0], [40, 0])], constraints: [] }, mint);
+
+    const rejected = cloneIdMap(live);
+    marshalUpsert(rejected, { entities: [cline("e1", true)], constraints: [] }, mint);
+    expect(rejected.entityConstruction.get("e1")).toBe(true);
+    // The RPC threw ⇒ the clone is dropped; the live map must be untouched.
+    expect(live.entityConstruction.get("e1")).toBe(false);
+
+    // The retry therefore still emits the flip (nothing was silently swallowed).
+    const retry = cloneIdMap(live);
+    expect(marshalUpsert(retry, { entities: [cline("e1", true)], constraints: [] }, mint)).toEqual([
+      { op: "setEntityConstruction", entity: live.entity.get("e1")!, construction: true },
+    ]);
   });
 });

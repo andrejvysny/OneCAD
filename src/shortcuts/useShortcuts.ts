@@ -14,8 +14,10 @@ import {
   deleteEntities,
   flushSketchMutations,
   redoSketch,
+  setEntitiesConstruction,
   undoSketch,
 } from "@/tools/sketch/sketchService";
+import { sketchStore } from "@/stores/sketchStore";
 import { getModelToolController } from "@/tools/modelTools/modelToolBridge";
 import { activateTool } from "@/tools/activateTool";
 import {
@@ -71,6 +73,29 @@ function runDeleteSketchSelection(): void {
 }
 
 /**
+ * X — construction geometry (W1-B), two behaviours by selection state:
+ *   - SELECTION non-empty → flip those entities. MIXED-SELECTION RULE (the single
+ *     owner of it): the target is `!selected.every(construction)`, i.e. everything
+ *     becomes construction UNLESS every picked entity already is, in which case
+ *     everything flips back to real. Idempotent per press-pair, and a mixed pick
+ *     never leaves the user guessing which half moved.
+ *   - SELECTION empty → toggle the sticky construction DRAW mode instead.
+ * Point-picks resolve to their OWNING entity (same V1 rule as delete).
+ */
+function runToggleConstruction(): void {
+  const sel = sketchSelectionStore.getState().selected;
+  const entityIds = [...new Set(sel.map((s) => s.entityId))];
+  if (entityIds.length === 0) {
+    sketchStore.getState().toggleConstructionMode();
+    return;
+  }
+  const picked = sketchStore.getState().session?.entities.filter((e) => entityIds.includes(e.id)) ?? [];
+  if (picked.length === 0) return;
+  const target = !picked.every((e) => e.construction);
+  void setEntitiesConstruction(createClient(), entityIds, target);
+}
+
+/**
  * Finish the active sketch → hand it to the model layer for profile selection
  * (Shapr3D flow). DRAIN the sketch mutation queue FIRST: a still-in-flight upsert
  * (fast last click / dimension edit) must settle before regions are computed, else
@@ -105,6 +130,9 @@ export function runAction(action: ShortcutAction): void {
       break;
     case "deleteSketchSelection":
       runDeleteSketchSelection();
+      break;
+    case "toggleConstruction":
+      runToggleConstruction();
       break;
     case "cancel":
       runCancel();

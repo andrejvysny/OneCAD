@@ -1,7 +1,14 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { commitDimensionConstraint, deleteConstraints, deleteEntities, editConstraintValue } from "./sketchService";
+import {
+  commitDimensionConstraint,
+  deleteConstraints,
+  deleteEntities,
+  editConstraintValue,
+  setEntitiesConstruction,
+  undoSketch,
+} from "./sketchService";
 import { mockClient, resetMockSketches } from "@/ipc/mockClient";
-import { planeFor } from "@/ipc/mockSketch";
+import { detectRegions, planeFor } from "@/ipc/mockSketch";
 import { sketchStore } from "@/stores/sketchStore";
 import { viewportStore } from "@/stores/viewportStore";
 import type { CadClient } from "@/ipc/client";
@@ -262,5 +269,77 @@ describe("deleteConstraints — constraints only, entities untouched", () => {
     const before = sketchStore.getState().session;
     await deleteConstraints(mockClient, ["nope"]);
     expect(sketchStore.getState().session).toBe(before);
+  });
+});
+
+// ── W1-B: construction flip ───────────────────────────────────────────────────
+
+describe("setEntitiesConstruction — flip the construction flag", () => {
+  beforeEach(() => {
+    resetMockSketches();
+    sketchStore.getState().reset();
+  });
+
+  it("flips the named entities, leaves the rest and the constraints alone", async () => {
+    seed([lineA, lineB, circle], [{ id: "c1", type: "Horizontal", entities: ["e1"] }]);
+    await setEntitiesConstruction(mockClient, ["e1", "e3"], true);
+    const s = sketchStore.getState().session!;
+    expect(s.entities.map((e) => !!e.construction)).toEqual([true, false, true]);
+    expect(s.constraints.map((c) => c.id)).toEqual(["c1"]);
+  });
+
+  it("pushes ONE undo snapshot carrying the pre-flip flags", async () => {
+    seed([lineA], []);
+    await setEntitiesConstruction(mockClient, ["e1"], true);
+    const undo = sketchStore.getState().undoStack;
+    expect(undo).toHaveLength(1);
+    expect(undo[0].entities[0].construction).toBeFalsy();
+    expect(sketchStore.getState().lastUndoPush).toEqual({ kind: "construction" });
+  });
+
+  it("undo restores the pre-flip flag", async () => {
+    seed([lineA], []);
+    await setEntitiesConstruction(mockClient, ["e1"], true);
+    await undoSketch(mockClient);
+    expect(sketchStore.getState().session!.entities[0].construction).toBeFalsy();
+  });
+
+  it("construction geometry is still SOLVED (dof unchanged) but leaves regions", async () => {
+    // A closed square: 4 lines ⇒ one region until an edge turns construction.
+    const sq: SketchEntity[] = [
+      { id: "s1", type: "Line", p0: [0, 0], p1: [10, 0] },
+      { id: "s2", type: "Line", p0: [10, 0], p1: [10, 10] },
+      { id: "s3", type: "Line", p0: [10, 10], p1: [0, 10] },
+      { id: "s4", type: "Line", p0: [0, 10], p1: [0, 0] },
+    ];
+    seed(sq, []);
+    const dofBefore = sketchStore.getState().session!.entities.length * 4;
+    await setEntitiesConstruction(mockClient, ["s1"], true);
+    const s = sketchStore.getState().session!;
+    expect(s.dof).toBe(dofBefore); // still 4 free dof per line — the solver sees it
+    expect(detectRegions(s.entities)).toHaveLength(0); // but it no longer closes a loop
+  });
+
+  it("is a no-op on empty ids / no session / already at the target", async () => {
+    await setEntitiesConstruction(mockClient, ["e1"], true); // no session
+    expect(sketchStore.getState().session).toBeNull();
+
+    seed([{ ...lineA, construction: true }], []);
+    const before = sketchStore.getState().session;
+    await setEntitiesConstruction(mockClient, [], true);
+    await setEntitiesConstruction(mockClient, ["nope"], true);
+    await setEntitiesConstruction(mockClient, ["e1"], true); // already construction
+    expect(sketchStore.getState().session).toBe(before); // same reference: untouched
+    expect(sketchStore.getState().undoStack).toHaveLength(0);
+  });
+
+  it("surfaces a status hint and leaves state intact on upsert failure", async () => {
+    seed([lineA], []);
+    const before = sketchStore.getState().session;
+    const failing = { sketchUpsert: () => Promise.reject(new Error("boom")) } as unknown as CadClient;
+    await setEntitiesConstruction(failing, ["e1"], true);
+    expect(sketchStore.getState().session).toBe(before);
+    expect(viewportStore.getState().statusHint?.message).toContain("Sketch construction failed");
+    expect(sketchStore.getState().undoStack).toHaveLength(0);
   });
 });

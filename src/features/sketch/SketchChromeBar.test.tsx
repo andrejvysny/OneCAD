@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { SketchChromeBar } from "./SketchChromeBar";
 import { toolStore } from "@/stores/toolStore";
 import { viewportStore } from "@/stores/viewportStore";
+import { sketchStore } from "@/stores/sketchStore";
 import { resetStores } from "@/test/resetStores";
 
 describe("SketchChromeBar", () => {
@@ -55,5 +56,45 @@ describe("SketchChromeBar", () => {
     await user.click(screen.getByRole("button", { name: /Cancel/ }));
     expect(toolStore.getState().mode).toBe("model");
     expect(viewportStore.getState().pendingExtrudeSketch).toBeNull();
+  });
+});
+
+// ── W1-B: the Construction toggle ─────────────────────────────────────────────
+
+describe("SketchChromeBar — construction toggle", () => {
+  beforeEach(() => resetStores());
+
+  it("is absent in the plane-pick phase (nothing to draw into yet)", () => {
+    render(<SketchChromeBar />);
+    act(() => toolStore.getState().setMode("sketch"));
+    expect(screen.queryByRole("button", { name: /Construction/ })).toBeNull();
+  });
+
+  it("mirrors constructionMode as its pressed state and toggles it on click", async () => {
+    const user = userEvent.setup();
+    render(<SketchChromeBar />);
+    act(() => toolStore.getState().setMode("sketch", "sketch2"));
+
+    const btn = screen.getByRole("button", { name: /Construction/ });
+    expect(btn).toHaveAttribute("aria-pressed", "false");
+    expect(btn).toHaveAttribute("title", "Construction (X)");
+
+    await user.click(btn);
+    expect(sketchStore.getState().constructionMode).toBe(true);
+    expect(btn).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(btn);
+    expect(sketchStore.getState().constructionMode).toBe(false);
+    expect(btn).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("reflects a mode flip driven from elsewhere (the X shortcut)", () => {
+    render(<SketchChromeBar />);
+    act(() => toolStore.getState().setMode("sketch", "sketch2"));
+    act(() => sketchStore.getState().toggleConstructionMode());
+    expect(screen.getByRole("button", { name: /Construction/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
   });
 });

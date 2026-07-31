@@ -4,6 +4,7 @@ import { cn } from "@/ui/cn";
 import { useToolStore } from "@/stores/toolStore";
 import { useViewportStore } from "@/stores/viewportStore";
 import { useDocumentStore } from "@/stores/documentStore";
+import { sketchStore, useSketchStore } from "@/stores/sketchStore";
 import { runAction } from "@/shortcuts/useShortcuts";
 import { sketchStatusText } from "./constraintStatus";
 
@@ -23,6 +24,7 @@ export function SketchChromeBar() {
   const sketch = useDocumentStore((s) =>
     activeSketchId ? s.sketches[activeSketchId] : undefined,
   );
+  const construction = useSketchStore((s) => s.constructionMode);
 
   if (mode !== "sketch") return null;
 
@@ -58,6 +60,20 @@ export function SketchChromeBar() {
       <span className={cn("text-[12px] font-medium", tone === "ok" ? "text-ink-4" : "text-warn")}>
         {label}
       </span>
+      {/* Sticky construction DRAW mode only — flipping an existing selection is the
+          X key's job (it needs the selection context this button doesn't have), so
+          the pressed state here always reads the mode and nothing else. */}
+      <Button
+        size="sm"
+        variant="secondary"
+        aria-pressed={construction}
+        title="Construction (X)"
+        className={cn(construction ? "border-transparent bg-sel-bg text-sel-text" : "text-ink-3")}
+        onClick={() => sketchStore.getState().toggleConstructionMode()}
+      >
+        <Icon name="line" size={12} strokeWidth={2} />
+        Construction
+      </Button>
       <Button size="sm" variant="secondary" className="text-ink-3" onClick={cancel}>
         <Icon name="x" size={11} strokeWidth={2.2} />
         Cancel

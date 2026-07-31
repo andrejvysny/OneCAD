@@ -130,7 +130,11 @@ export type SketchEditOp =
   | { op: "addConstraint"; constraint: WireConstraint }
   | { op: "removeConstraint"; constraint: string }
   | { op: "setDimension"; constraint: string; value: WireScalar }
-  | { op: "setEntityPositions"; positions: [string, [number, number]][] };
+  | { op: "setEntityPositions"; positions: [string, [number, number]][] }
+  // W1-B: flip the construction flag on an ALREADY-ADDED entity. The add path
+  // carries `construction` inline, so this op exists only for the in-place edit
+  // (X key / chrome toggle) — without it a flip on a mapped id emitted nothing.
+  | { op: "setEntityConstruction"; entity: string; construction: boolean };
 
 // ── Id-map: string frontend ids ↔ minted UUIDs, kept across upserts ───────────
 
@@ -147,6 +151,10 @@ export interface SketchIdMap {
   constraint: Map<string, string>;
   /** Frontend constraint id → last dimension value sent (for SetDimension diffs). */
   constraintValue: Map<string, number | undefined>;
+  /** Frontend entity id → last `construction` flag SENT (for SetEntityConstruction
+   *  diffs). Mirrors `constraintValue`: the backend already holds this value, so a
+   *  marshal only emits when the live entity disagrees with it. */
+  entityConstruction: Map<string, boolean>;
 }
 
 export function createIdMap(backendSketchId: string, planeKind: SketchPlaneKind): SketchIdMap {
@@ -157,11 +165,12 @@ export function createIdMap(backendSketchId: string, planeKind: SketchPlaneKind)
     point: new Map(),
     constraint: new Map(),
     constraintValue: new Map(),
+    entityConstruction: new Map(),
   };
 }
 
 /**
- * Deep-clone a per-sketch id map (the 4 id maps duplicated; scalar fields copied).
+ * Deep-clone a per-sketch id map (the 5 id/cache maps duplicated; scalar fields copied).
  * The upsert marshaller MUTATES the map it diffs against as it mints/drops ids, so an
  * upsert works on a CLONE and the caller commits it onto the live map ONLY after the
  * RPC resolves — a rejected upsert then leaves the live map byte-for-byte unchanged
@@ -175,6 +184,7 @@ export function cloneIdMap(map: SketchIdMap): SketchIdMap {
     point: new Map(map.point),
     constraint: new Map(map.constraint),
     constraintValue: new Map(map.constraintValue),
+    entityConstruction: new Map(map.entityConstruction),
   };
 }
 
@@ -200,6 +210,13 @@ function addEntityOps(map: SketchIdMap, e: SketchEntity, mint: () => string): Sk
   const ops: SketchEditOp[] = [];
   const construction = e.construction ? true : undefined;
 
+  // Bind the frontend id to its minted uuid AND record the `construction` flag this
+  // Add carries — the SetEntityConstruction diff (W1-B) compares against it.
+  const bind = (id: string): void => {
+    map.entity.set(e.id, id);
+    map.entityConstruction.set(e.id, !!e.construction);
+  };
+
   const mintPoint = (position: ConstraintPosition, at: [number, number]): string => {
     const id = mint();
     map.point.set(pointKey(e.id, position), id);
@@ -211,7 +228,7 @@ function addEntityOps(map: SketchIdMap, e: SketchEntity, mint: () => string): Sk
     case "Point": {
       if (!e.p0) return [];
       const id = mint();
-      map.entity.set(e.id, id);
+      bind(id);
       map.point.set(pointKey(e.id, "Start"), id);
       map.point.set(pointKey(e.id, "Center"), id);
       ops.push({ op: "addEntity", entity: { kind: "point", id, at: e.p0, construction } });
@@ -222,7 +239,7 @@ function addEntityOps(map: SketchIdMap, e: SketchEntity, mint: () => string): Sk
       const start = mintPoint("Start", e.p0);
       const end = mintPoint("End", e.p1);
       const id = mint();
-      map.entity.set(e.id, id);
+      bind(id);
       ops.push({ op: "addEntity", entity: { kind: "line", id, start, end, construction } });
       return ops;
     }
@@ -230,7 +247,7 @@ function addEntityOps(map: SketchIdMap, e: SketchEntity, mint: () => string): Sk
       if (!e.center || e.radius === undefined) return [];
       const center = mintPoint("Center", e.center);
       const id = mint();
-      map.entity.set(e.id, id);
+      bind(id);
       ops.push({ op: "addEntity", entity: { kind: "circle", id, center, radius: e.radius, construction } });
       return ops;
     }
@@ -238,7 +255,7 @@ function addEntityOps(map: SketchIdMap, e: SketchEntity, mint: () => string): Sk
       if (!e.center || e.radius === undefined) return [];
       const center = mintPoint("Center", e.center);
       const id = mint();
-      map.entity.set(e.id, id);
+      bind(id);
       // Rust Arc stores angles (radians from +X); derive from start/end coords.
       const angle = (p?: [number, number]): number =>
         p ? Math.atan2(p[1] - e.center![1], p[0] - e.center![0]) : 0;
@@ -455,6 +472,7 @@ export function marshalUpsert(
     if (!liveEntities.has(fid)) {
       ops.push({ op: "removeEntity", entity: uuid });
       map.entity.delete(fid);
+      map.entityConstruction.delete(fid);
       // BUG-5: also drop the entity's synthesized child points (line endpoints /
       // circle-arc center). The core `RemoveEntity` cascade drops constraints + curves
       // that REFERENCE a removed point, but a point is never a dependent of its owning
@@ -480,9 +498,21 @@ export function marshalUpsert(
     }
   }
 
-  // Additions (entities before constraints so refs resolve).
+  // Additions (entities before constraints so refs resolve). An ALREADY-mapped
+  // entity whose `construction` flag no longer matches what was last sent flips in
+  // place (W1-B) — the id-only diff above would otherwise emit nothing and the
+  // backend would keep the stale flag (silent loss).
   for (const e of next.entities) {
-    if (!map.entity.has(e.id)) ops.push(...addEntityOps(map, e, mint));
+    if (!map.entity.has(e.id)) {
+      ops.push(...addEntityOps(map, e, mint));
+    } else if (!!e.construction !== !!map.entityConstruction.get(e.id)) {
+      map.entityConstruction.set(e.id, !!e.construction);
+      ops.push({
+        op: "setEntityConstruction",
+        entity: map.entity.get(e.id)!,
+        construction: !!e.construction,
+      });
+    }
   }
   for (const c of next.constraints) {
     if (!map.constraint.has(c.id)) {
@@ -972,6 +1002,7 @@ export function seedIdMapFromWire(
   map.point.clear();
   map.constraint.clear();
   map.constraintValue.clear();
+  map.entityConstruction.clear();
 
   if (Array.isArray(dtoEntities)) {
     const wire = dtoEntities as WireDtoEntity[];
@@ -1010,6 +1041,11 @@ export function seedIdMapFromWire(
           if (e.centerRef) map.point.set(pointKey(e.id, "Center"), e.centerRef);
           break;
       }
+      // W1-B: seed the last-SENT construction flag from the wire (only for entities
+      // the switch actually bound — every skipped case `continue`s). Mirrors
+      // `frontendEntitiesFromDto`, which carries the same flag onto the live
+      // session, so the first marshal after re-entry emits no spurious flip.
+      if (map.entity.has(e.id)) map.entityConstruction.set(e.id, !!e.construction);
     }
   }
 
