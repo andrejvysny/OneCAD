@@ -199,9 +199,21 @@ export type EnterSketchTarget =
    * backend (`face_sketch_plane` → the kernel's own face descriptor + the
    * lock-tested in-plane axis rule), never from a tessellated triangle normal.
    * V1 policy: the frame is FROZEN at creation.
+   *
+   * `topoKey` rides along when the caller has it (SKETCH-ON-FACE W2): the real
+   * lane creates the sketch through `add_sketch_on_face`, which walks the SAME
+   * two-rung ladder as `face_sketch_plane` — topoKey FIRST, because a
+   * just-promoted, never-consumed `elementId` is genuinely absent from the
+   * worker's on-demand element-map partition. Dropping it here would make the
+   * pick-a-face-then-sketch flow fail to resolve at all.
    */
   | {
-      newOnFace: { bodyId: string; elementId: string; worldPoint?: [number, number, number] };
+      newOnFace: {
+        bodyId: string;
+        elementId: string;
+        topoKey?: string;
+        worldPoint?: [number, number, number];
+      };
       plane: SketchPlane;
       sketchId?: string;
     }

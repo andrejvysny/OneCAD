@@ -115,7 +115,9 @@ describe("SketchController — sketch on a selected face", () => {
     expect(clientMock.faceSketchPlane).toHaveBeenCalledWith("body1", "el_1", "f:22");
     expect(clientMock.enterSketch).toHaveBeenCalledTimes(1);
     expect(clientMock.enterSketch).toHaveBeenCalledWith({
-      newOnFace: { bodyId: "body1", elementId: "el_1", worldPoint: [1, 2, 25] },
+      // W2: the topoKey rides through to `add_sketch_on_face` too — it is the
+      // rung that resolves a just-promoted, never-consumed ElementId.
+      newOnFace: { bodyId: "body1", elementId: "el_1", topoKey: "f:22", worldPoint: [1, 2, 25] },
       plane: FACE_PLANE,
     });
     // Same object identity: the frame is carried through, never rebuilt.
@@ -134,7 +136,7 @@ describe("SketchController — sketch on a selected face", () => {
     expect(clientMock.promoteSelection).toHaveBeenCalledWith("body1", [{ topoKey: "f:22", anchor: { worldPoint: [1, 2, 25] } }]);
     expect(clientMock.faceSketchPlane).toHaveBeenCalledWith("body1", "el_fresh", "f:22");
     expect(clientMock.enterSketch).toHaveBeenCalledWith({
-      newOnFace: { bodyId: "body1", elementId: "el_fresh", worldPoint: [1, 2, 25] },
+      newOnFace: { bodyId: "body1", elementId: "el_fresh", topoKey: "f:22", worldPoint: [1, 2, 25] },
       plane: FACE_PLANE,
     });
   });
@@ -179,5 +181,20 @@ describe("SketchController — sketch on a selected face", () => {
     // The picker's own prompt is showing (sticky) — the fallback did not strand
     // the user with no chrome and no explanation.
     expect(viewportStore.getState().statusHint?.sticky).toBe(true);
+  });
+
+  it("the refusal RIDES INTO the picker prompt (a separate hint would be overwritten)", async () => {
+    // W2: `beginPlanePick` writes the status hint itself, so a refusal published
+    // before it is silently clobbered — the user is told nothing about WHY the
+    // face was rejected. The reason is threaded through instead.
+    clientMock.faceSketchPlane.mockRejectedValueOnce(new Error("only a planar face can host a sketch"));
+    selectionStore.getState().set([faceRef()]);
+    toolStore.getState().setMode("sketch");
+    await flush();
+
+    const hint = viewportStore.getState().statusHint;
+    expect(hint?.message).toMatch(/Cannot sketch on that face: only a planar face can host a sketch/);
+    expect(hint?.message).toMatch(/Select a plane to start the sketch/);
+    expect(hint?.severity).toBe("error");
   });
 });

@@ -164,6 +164,36 @@ describe("deleteEntities — cascade the referencing constraints", () => {
     expect(sketchStore.getState().session).toBe(before); // unchanged
     expect(viewportStore.getState().statusHint?.message).toContain("boom");
   });
+
+  // ── L3 guard: locked reference geometry (SKETCH-ON-FACE W2) ──────────────
+
+  it("SKIPS locked entities but still deletes the user's own, silently", async () => {
+    // A marquee that swept up the projected boundary alongside the user's line
+    // should still delete the line — refusing the whole action would be worse.
+    const locked: SketchEntity = { ...lineB, referenceLocked: true };
+    seed([lineA, locked], []);
+    viewportStore.getState().setStatusHint(null);
+    await deleteEntities(mockClient, ["e1", "e2"]);
+    const s = sketchStore.getState().session!;
+    expect(s.entities.map((e) => e.id)).toEqual(["e2"]); // the locked one survives
+    expect(viewportStore.getState().statusHint).toBeNull(); // partial ⇒ no complaint
+  });
+
+  it("refuses with a NAMED hint when the target set was ENTIRELY locked", async () => {
+    const locked: SketchEntity = { ...lineA, referenceLocked: true };
+    seed([locked], [{ id: "c1", type: "Horizontal", entities: ["e1"] }]);
+    const before = sketchStore.getState().session;
+    await deleteEntities(mockClient, ["e1"]);
+    expect(sketchStore.getState().session).toBe(before); // untouched
+    expect(viewportStore.getState().statusHint?.message).toMatch(/Reference geometry is locked/);
+  });
+
+  it("stays silent when the ids matched nothing at all (not a lock refusal)", async () => {
+    seed([{ ...lineA, referenceLocked: true }], []);
+    viewportStore.getState().setStatusHint(null);
+    await deleteEntities(mockClient, ["nope"]);
+    expect(viewportStore.getState().statusHint).toBeNull();
+  });
 });
 
 // ── conflictingIds ownership (SCHEMA §7.4) ────────────────────────────────────

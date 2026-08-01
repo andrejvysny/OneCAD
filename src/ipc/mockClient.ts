@@ -41,6 +41,7 @@ import { wireParamsOf } from "./tauriCommandMap";
 import { concatMesh1, makeBoxMesh, makeCylinderMesh, makeExtrudeBodyMesh, makeRevolveBodyMesh } from "./mockMeshes";
 import type { LatheAxis } from "@/tools/preview/lathePreview";
 import { createLocalSolverLane } from "./localSolver";
+import { lookupMockFace, mockElementHash } from "./mockFaceGeometry";
 import { detectRegions, planeFor, solveDof } from "./mockSketch";
 import type { DatumMeta } from "@/stores/documentStore";
 import { documentStore, emptyDocument } from "@/stores/documentStore";
@@ -1077,15 +1078,29 @@ export const mockClient: CadClient = {
   },
 
   /**
-   * MOCK LIMIT: no kernel to query, so the frame is synthesized from the mock
-   * body's world position rather than a real face descriptor — a +Z-facing plane
-   * at the picked point. It applies the SAME in-plane axis rule as the backend
-   * (`plane_from_point_normal`: a +Z normal falls back to the +X seed and lands
-   * on the named XY basis), so the mock lane and the real lane agree on
-   * orientation even though they disagree on which face was picked.
+   * The picked face's frame, answered ANALYTICALLY per face (SKETCH-ON-FACE W2).
+   *
+   * There is still no kernel here, but the mock's two synthetic shapes are exact
+   * solids whose faces are known in closed form (`mockFaceGeometry`), so the
+   * frame comes from the real face's own centroid + outward normal run through
+   * the SAME `plane_from_point_normal` rule the backend applies. Picking the top
+   * face and picking a side face now genuinely differ — before W2 this returned
+   * XY-at-the-body for every face, which made the mock lane unable to show the
+   * defect class sketch-on-face is about.
+   *
+   * The cylinder's curved side face REFUSES, exactly as the backend does for a
+   * non-planar face, so that path is reachable without a worker.
+   *
+   * MOCK LIMIT: a synthesized (extruded/boolean) body has no analytic entry, and
+   * falls back to the old +Z-at-the-origin frame rather than refusing.
    */
-  async faceSketchPlane(_bodyId: string, _elementId: string, _topoKey?: string): Promise<SketchPlane> {
+  async faceSketchPlane(bodyId: string, elementId: string, topoKey?: string): Promise<SketchPlane> {
     await wait(MESH_LATENCY_MS);
+    const found = lookupMockFace(bodyId, elementId, topoKey);
+    if (found.kind === "nonPlanar") {
+      throw new Error("only a planar face can host a sketch");
+    }
+    if (found.kind === "planar") return found.geometry.plane;
     return { ...planeFor("XY"), kind: "custom" };
   },
 
@@ -1271,16 +1286,6 @@ export const mockClient: CadClient = {
   endPreview: lane.endPreview,
   onPreviewResult: lane.onPreviewResult,
 };
-
-/** Small deterministic hash for mock ElementIds (FNV-1a-32 hex). */
-function mockElementHash(s: string): string {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return (h >>> 0).toString(16).padStart(8, "0");
-}
 
 function basename(path: string): string {
   const file = path.split(/[\\/]/).pop() ?? path;

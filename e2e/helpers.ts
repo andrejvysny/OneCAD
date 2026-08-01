@@ -34,7 +34,11 @@ export type SketchToolLabel =
 
 async function bootEditor(page: Page, path: string): Promise<void> {
   await page.goto(path);
-  await page.getByRole("button", { name: "New project" }).click();
+  // `?vpdemo` (App.tsx `forceEditor`) boots straight into the editor shell, so
+  // there is no start screen to click through — clicking would hang forever.
+  if (!path.includes("vpdemo")) {
+    await page.getByRole("button", { name: "New project" }).click();
+  }
   // The editor shell (and thus the viewport canvas) only mounts after the mock
   // newDocument() resolves and appStore flips screen → editor.
   await expect(page.locator(`${CANVAS} canvas`)).toBeVisible();
@@ -57,8 +61,12 @@ export async function openEditor(page: Page): Promise<void> {
  * through the engine's OWN `hitExtrudeHandle` raycast to find a real client
  * point to click — this flag is what exposes that raycast to the page.
  */
-export async function openEditorDebug(page: Page): Promise<void> {
-  await bootEditor(page, "/?vpdebug");
+export async function openEditorDebug(page: Page, opts?: { mockBody?: boolean }): Promise<void> {
+  // `?vpdemo` additionally drives the mock BOX body through the full
+  // `onDocumentChanged` ingest path, so there is real body geometry in the scene
+  // to raycast against (the mock lane publishes no meshes otherwise). Specs that
+  // need to click a model FACE — not just a sketch — ask for it.
+  await bootEditor(page, opts?.mockBody ? "/?vpdebug&vpdemo" : "/?vpdebug");
 }
 
 /** The viewport container's bounding box (the canvas fills the same rect). */
@@ -232,6 +240,53 @@ export async function findDatumQuad(page: Page): Promise<{ x: number; y: number;
     expect(found).not.toBeNull();
   }).toPass({ timeout: 15_000, intervals: [150, 300, 600, 1_000] });
   return found as unknown as { x: number; y: number; id: string };
+}
+
+/**
+ * Hit-scan the canvas for a real client pixel over a model FACE, through the
+ * engine's OWN `probePick` raycast (exposed at `window.__vpEngine` — see
+ * `openEditorDebug`). Returns the pixel plus the face's body + `topoKey`.
+ *
+ * Same rationale as `findDatumQuad` / `findExtrudeHandle`: a body's faces land
+ * wherever the camera puts them, with no closed-form screen position, so the only
+ * robust target is one found with the exact raycast the real pointer handlers use.
+ * This produces a GENUINE pick — the spec clicks it for real rather than seeding
+ * the selection store, which is the whole point when the flow under test is
+ * "pick a face, then sketch on it".
+ *
+ * Requires body geometry in the scene (`openEditorDebug(page, { mockBody: true })`).
+ */
+export async function findFaceOnBody(
+  page: Page,
+  bodyId?: string,
+): Promise<{ x: number; y: number; bodyId: string; topoKey: string }> {
+  let found: { x: number; y: number; bodyId: string; topoKey: string } | null = null;
+  await expect(async () => {
+    found = await page.evaluate((want) => {
+      const engine = (
+        window as unknown as {
+          __vpEngine?: {
+            probePick(x: number, y: number): { bodyId: string; kind: string; topoKey: string } | null;
+          };
+        }
+      ).__vpEngine;
+      const canvas = document.querySelector('[data-testid="viewport-canvas"] canvas') as HTMLCanvasElement | null;
+      if (!engine || !canvas) return null;
+      const rect = canvas.getBoundingClientRect();
+      const step = 8;
+      for (let y = rect.top + step; y <= rect.bottom - step; y += step) {
+        for (let x = rect.left + step; x <= rect.right - step; x += step) {
+          const hit = engine.probePick(x, y);
+          if (!hit || hit.kind !== "face") continue;
+          if (want && hit.bodyId !== want) continue;
+          return { x, y, bodyId: hit.bodyId, topoKey: hit.topoKey };
+        }
+      }
+      return null;
+    }, bodyId ?? null);
+    expect(found, "no model face found under any scanned pixel").not.toBeNull();
+  }).toPass({ timeout: 15_000, intervals: [150, 300, 600, 1_000] });
+  return found as unknown as { x: number; y: number; bodyId: string; topoKey: string };
 }
 
 /** The datum-plane names in the projection store (`__stores.document`, dev-only). */

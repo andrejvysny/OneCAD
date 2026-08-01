@@ -3,7 +3,7 @@ import { Icon } from "@/icons/Icon";
 import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
 import { CONSTRAINT_PRESENTATION } from "@/features/sketch/constraintCatalog";
 import { formatDimensionValue } from "@/features/sketch/dimensionFormat";
-import type { SketchConstraint, SketchConstraintType } from "@/ipc/types";
+import type { SketchConstraint, SketchConstraintType, SketchEntity } from "@/ipc/types";
 
 /** Dimensional constraint kinds that carry a `value` column. */
 const DIMENSIONAL: ReadonlySet<SketchConstraintType> = new Set([
@@ -94,21 +94,56 @@ function ConstraintRow({
   );
 }
 
+/**
+ * Machine `Fixed` rows minted by a host-face projection (SKETCH-ON-FACE W2).
+ *
+ * A sketch on a face opens with one `Fixed` per projected boundary point — four
+ * rows for a rectangular face, dozens for a real one, none of them authored or
+ * deletable by the user. They are hidden HERE, in the view only: `session.constraints`
+ * keeps every one of them, because the marshaller's seeded-set == live-set invariant
+ * (`sketchWireMap.ts` `seedIdMapFromWire`) reads a seeded constraint missing from the
+ * live array as a deletion and emits a `removeConstraint` for it. Filtering upstream
+ * would delete the pins on the first edit after entering the sketch.
+ *
+ * The DOF badge is likewise unaffected — it reports the solver's number, which
+ * counts these constraints.
+ */
+function isMachineFixed(c: SketchConstraint, locked: ReadonlySet<string>): boolean {
+  return c.type === "Fixed" && c.entities.length > 0 && c.entities.every((id) => locked.has(id));
+}
+
+/** The rows this list actually renders. Exported so the panel's "No constraints
+ *  yet." empty state agrees with the list instead of rendering an empty box for a
+ *  sketch whose only constraints are the hidden projection pins. */
+export function visibleConstraints(
+  constraints: SketchConstraint[],
+  entities: SketchEntity[],
+): SketchConstraint[] {
+  const locked = new Set(entities.filter((e) => e.referenceLocked).map((e) => e.id));
+  if (locked.size === 0) return constraints;
+  return constraints.filter((c) => !isMachineFixed(c, locked));
+}
+
 /** Per-row constraint list for the inspector SKETCH state. `conflictingIds` (SCHEMA
- *  §7.4, frontend ids) tint the matching rows red; defaults to none. */
+ *  §7.4, frontend ids) tint the matching rows red; defaults to none. `entities` is
+ *  the live session geometry, used only to recognise (and hide) the machine `Fixed`
+ *  rows pinning locked reference geometry. */
 export function ConstraintList({
   constraints,
+  entities = [],
   onDelete,
   conflictingIds = [],
 }: {
   constraints: SketchConstraint[];
+  entities?: SketchEntity[];
   onDelete: (id: string) => void;
   conflictingIds?: string[];
 }) {
   const conflicting = new Set(conflictingIds);
+  const rows = visibleConstraints(constraints, entities);
   return (
     <div>
-      {constraints.map((c) => (
+      {rows.map((c) => (
         <ConstraintRow key={c.id} constraint={c} conflicting={conflicting.has(c.id)} onDelete={onDelete} />
       ))}
     </div>

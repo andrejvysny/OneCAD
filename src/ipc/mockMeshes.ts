@@ -218,75 +218,77 @@ function computeFaceBboxes(positions: number[], faces: FaceSource[]): number[] {
 }
 
 // ── Box (80×60×30, centred at origin — matches the retired demo box) ─────────
+//
+// The corner table + face table below are the SINGLE source of truth for the mock
+// box's topology. `mockFaceGeometry.ts` derives each face's sketch plane and
+// projected boundary from the SAME tables, so the analytic face data and the
+// rendered triangles can never drift apart (exporting the corners alone would
+// still have left two hand-written corner lists to keep in step).
+
+/** The eight box corners, keyed `"xyz"` with `1` = the POSITIVE half-space. */
+export type BoxCornerKey = "000" | "100" | "110" | "010" | "001" | "101" | "111" | "011";
+
+/** Default mock box dimensions (mm) — the seed body every mock lane renders. */
+export const BOX_SIZE: readonly [number, number, number] = [80, 60, 30];
+
+/** Corner coordinates for a box of `size`, centred at the origin. */
+export function boxCorners(
+  size: readonly [number, number, number] = BOX_SIZE,
+): Record<BoxCornerKey, [number, number, number]> {
+  const [hx, hy, hz] = [size[0] / 2, size[1] / 2, size[2] / 2];
+  return {
+    "000": [-hx, -hy, -hz], "100": [hx, -hy, -hz], "110": [hx, hy, -hz], "010": [-hx, hy, -hz],
+    "001": [-hx, -hy, hz], "101": [hx, -hy, hz], "111": [hx, hy, hz], "011": [-hx, hy, hz],
+  };
+}
+
+/** The six box faces `f:0..f:5`: outward normal + corner ring (CCW seen from
+ *  outside — the winding the crease-split triangles are emitted in). */
+export const BOX_FACES: readonly {
+  id: string;
+  normal: [number, number, number];
+  corners: readonly [BoxCornerKey, BoxCornerKey, BoxCornerKey, BoxCornerKey];
+}[] = [
+  { id: "f:0", normal: [1, 0, 0], corners: ["100", "110", "111", "101"] },
+  { id: "f:1", normal: [-1, 0, 0], corners: ["010", "000", "001", "011"] },
+  { id: "f:2", normal: [0, 1, 0], corners: ["110", "010", "011", "111"] },
+  { id: "f:3", normal: [0, -1, 0], corners: ["000", "100", "101", "001"] },
+  { id: "f:4", normal: [0, 0, 1], corners: ["001", "101", "111", "011"] },
+  { id: "f:5", normal: [0, 0, -1], corners: ["100", "000", "010", "110"] },
+];
+
+/** The twelve box edges `e:0..e:11` as corner pairs (bottom, top, verticals). */
+export const BOX_EDGE_PAIRS: readonly [BoxCornerKey, BoxCornerKey][] = [
+  ["000", "100"], ["100", "110"], ["110", "010"], ["010", "000"], // bottom
+  ["001", "101"], ["101", "111"], ["111", "011"], ["011", "001"], // top
+  ["000", "001"], ["100", "101"], ["110", "111"], ["010", "011"], // verticals
+];
 
 /** Six crease-split faces `f:0..f:5`, twelve edges `e:0..e:11`. */
-export function makeBoxMesh(sizeX = 80, sizeY = 60, sizeZ = 30, lod = 0): ArrayBuffer {
-  const hx = sizeX / 2;
-  const hy = sizeY / 2;
-  const hz = sizeZ / 2;
+export function makeBoxMesh(sizeX = BOX_SIZE[0], sizeY = BOX_SIZE[1], sizeZ = BOX_SIZE[2], lod = 0): ArrayBuffer {
+  const c = boxCorners([sizeX, sizeY, sizeZ]);
 
   const positions: number[] = [];
   const normals: number[] = [];
   const faces: FaceSource[] = [];
 
   // Each face: 4 own vertices (crease split) + 2 triangles, normal = face dir.
-  const addFace = (corners: [number, number, number][], normal: [number, number, number], id: string) => {
+  for (const face of BOX_FACES) {
     const base = positions.length / 3;
-    for (const c of corners) {
-      positions.push(c[0], c[1], c[2]);
-      normals.push(normal[0], normal[1], normal[2]);
+    for (const key of face.corners) {
+      positions.push(c[key][0], c[key][1], c[key][2]);
+      normals.push(face.normal[0], face.normal[1], face.normal[2]);
     }
     faces.push({
       triangles: [
         [base, base + 1, base + 2],
         [base, base + 2, base + 3],
       ],
-      id,
+      id: face.id,
     });
-  };
+  }
 
-  addFace(
-    [ [hx, -hy, -hz], [hx, hy, -hz], [hx, hy, hz], [hx, -hy, hz] ],
-    [1, 0, 0],
-    "f:0",
-  );
-  addFace(
-    [ [-hx, hy, -hz], [-hx, -hy, -hz], [-hx, -hy, hz], [-hx, hy, hz] ],
-    [-1, 0, 0],
-    "f:1",
-  );
-  addFace(
-    [ [hx, hy, -hz], [-hx, hy, -hz], [-hx, hy, hz], [hx, hy, hz] ],
-    [0, 1, 0],
-    "f:2",
-  );
-  addFace(
-    [ [-hx, -hy, -hz], [hx, -hy, -hz], [hx, -hy, hz], [-hx, -hy, hz] ],
-    [0, -1, 0],
-    "f:3",
-  );
-  addFace(
-    [ [-hx, -hy, hz], [hx, -hy, hz], [hx, hy, hz], [-hx, hy, hz] ],
-    [0, 0, 1],
-    "f:4",
-  );
-  addFace(
-    [ [hx, -hy, -hz], [-hx, -hy, -hz], [-hx, hy, -hz], [hx, hy, -hz] ],
-    [0, 0, -1],
-    "f:5",
-  );
-
-  // 8 corners → 12 edges.
-  const c: Record<string, [number, number, number]> = {
-    "000": [-hx, -hy, -hz], "100": [hx, -hy, -hz], "110": [hx, hy, -hz], "010": [-hx, hy, -hz],
-    "001": [-hx, -hy, hz], "101": [hx, -hy, hz], "111": [hx, hy, hz], "011": [-hx, hy, hz],
-  };
-  const edgePairs: [string, string][] = [
-    ["000", "100"], ["100", "110"], ["110", "010"], ["010", "000"], // bottom
-    ["001", "101"], ["101", "111"], ["111", "011"], ["011", "001"], // top
-    ["000", "001"], ["100", "101"], ["110", "111"], ["010", "011"], // verticals
-  ];
-  const edges: EdgeSource[] = edgePairs.map(([a, b], i) => ({
+  const edges: EdgeSource[] = BOX_EDGE_PAIRS.map(([a, b], i) => ({
     points: [c[a], c[b]],
     id: `e:${i}`,
   }));

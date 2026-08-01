@@ -70,6 +70,7 @@ export function constraintFreedom(c: SketchConstraint): number {
   }
 }
 
+/** Total free parameters, ignoring the reference-lock rule (see `solveDof`). */
 export function freeDegrees(entities: SketchEntity[]): number {
   return entities.reduce((sum, e) => sum + entityFreedom(e), 0);
 }
@@ -78,12 +79,35 @@ export function removedDegrees(constraints: SketchConstraint[]): number {
   return constraints.reduce((sum, c) => sum + constraintFreedom(c), 0);
 }
 
-/** Solve → {dof (clamped ≥0), status}. Signed surplus decides the state. */
+/**
+ * Solve → {dof (clamped ≥0), status}. Signed surplus decides the state.
+ *
+ * REFERENCE-LOCK RULE (SKETCH-ON-FACE W2). A `referenceLocked` entity is
+ * projected host-face geometry: it is pinned by `Fixed` constraints and cannot
+ * move, so it must contribute ZERO net degrees of freedom. The coarse count is
+ * therefore taken over the USER geometry only —
+ *
+ *   - a locked entity adds 0 free degrees, and
+ *   - a constraint whose every referenced entity is locked removes 0
+ *     (that is exactly the machine `Fixed` set the projection minted).
+ *
+ * Counting them naively would give a freshly projected rectangle 4·4 − 4·2 = 8
+ * DOF, i.e. a sketch-on-face session that opens "under-constrained" with nothing
+ * drawn — which the real solver never reports. A constraint the USER later adds
+ * between their own geometry and the locked boundary still counts in full: it
+ * has a non-locked operand, so it removes DOF from the user's side.
+ */
 export function solveDof(
   entities: SketchEntity[],
   constraints: SketchConstraint[],
 ): { dof: number; status: SketchSolveStatus } {
-  const surplus = freeDegrees(entities) - removedDegrees(constraints);
+  const locked = new Set(entities.filter((e) => e.referenceLocked).map((e) => e.id));
+  const free = entities.reduce((sum, e) => sum + (locked.has(e.id) ? 0 : entityFreedom(e)), 0);
+  const removed = constraints.reduce((sum, c) => {
+    const machine = c.entities.length > 0 && c.entities.every((id) => locked.has(id));
+    return sum + (machine ? 0 : constraintFreedom(c));
+  }, 0);
+  const surplus = free - removed;
   const status: SketchSolveStatus =
     surplus > 0 ? "UnderConstrained" : surplus === 0 ? "FullyConstrained" : "OverConstrained";
   return { dof: Math.max(0, surplus), status };

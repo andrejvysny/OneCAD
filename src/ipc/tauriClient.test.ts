@@ -586,6 +586,178 @@ describe("tauriClient enter_sketch on a DATUM plane", () => {
   });
 });
 
+// ── enter_sketch on a model FACE → add_sketch_on_face (SKETCH-ON-FACE W2) ─────
+
+describe("tauriClient enter_sketch on a model FACE", () => {
+  const FACE_PLANE = {
+    kind: "custom" as const,
+    origin: [0, 0, 15] as [number, number, number],
+    xAxis: [0, 1, 0] as [number, number, number],
+    yAxis: [-1, 0, 0] as [number, number, number],
+    normal: [0, 0, 1] as [number, number, number],
+  };
+
+  /** A `SketchOnFaceDto` for a face whose boundary projected to a rectangle. */
+  const onFaceDto = (sketchId: string) => ({
+    sketchId,
+    plane: { origin: FACE_PLANE.origin, xAxis: FACE_PLANE.xAxis, yAxis: FACE_PLANE.yAxis, normal: FACE_PLANE.normal },
+    entityCount: 8,
+    constraintCount: 4,
+    faceCount: 1,
+    hasClosedBoundary: true,
+    projectedBoundaryVersion: 1,
+  });
+
+  it("routes through add_sketch_on_face — NOT apply_edit_command — with the FE-minted id adopted verbatim", async () => {
+    const seen: string[] = [];
+    let onFaceArgs: Record<string, unknown> | undefined;
+    let enterSketchId: string | undefined;
+    mockIPC(
+      (cmd, payload) => {
+        seen.push(cmd);
+        if (cmd === "add_sketch_on_face") {
+          onFaceArgs = payload as Record<string, unknown>;
+          return onFaceDto(String((payload as { sketchId: string }).sketchId));
+        }
+        if (cmd === "enter_sketch") {
+          enterSketchId = (payload as { sketchId: string }).sketchId;
+          return { sketchId: enterSketchId, plane: FACE_PLANE, entities: [], constraints: [], dof: 0, status: "FullyConstrained" };
+        }
+        return readyProjection(1);
+      },
+      { shouldMockEvents: true },
+    );
+
+    const session = await createTauriClient().enterSketch({
+      newOnFace: { bodyId: "body1", elementId: "el_1", topoKey: "f:4", worldPoint: [1, 2, 15] },
+      plane: FACE_PLANE,
+    });
+
+    // The face lane must NOT assemble an AddSketch of its own: that could only
+    // produce an EMPTY host-face sketch with projectedBoundaryVersion 0.
+    expect(seen).not.toContain("apply_edit_command");
+    expect(seen).toContain("add_sketch_on_face");
+
+    // The id the frontend minted IS the backend SketchId, the enter target, and
+    // the session id — one string, or the projection store's entry is stranded.
+    expect(onFaceArgs?.sketchId).toBe(session.sketchId);
+    expect(enterSketchId).toBe(session.sketchId);
+    expect(String(onFaceArgs?.sketchId)).toMatch(/^[0-9a-f]{8}-/);
+
+    // camelCase args; `body_<uuid>` worker wire form; topoKey forwarded (the rung
+    // that resolves a just-promoted, never-consumed ElementId).
+    expect(onFaceArgs).toMatchObject({
+      snapshotId: 0,
+      bodyId: "body_body1", // the frontend's bare id, prefixed for the wire
+      elementId: "el_1",
+      topoKey: "f:4",
+    });
+    expect(typeof onFaceArgs?.name).toBe("string");
+  });
+
+  it("forwards a null topoKey when the caller has none, and keeps the body_ prefix idempotent", async () => {
+    let onFaceArgs: Record<string, unknown> | undefined;
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "add_sketch_on_face") {
+          onFaceArgs = payload as Record<string, unknown>;
+          return onFaceDto(String((payload as { sketchId: string }).sketchId));
+        }
+        if (cmd === "enter_sketch") {
+          const sketchId = (payload as { sketchId: string }).sketchId;
+          return { sketchId, plane: FACE_PLANE, entities: [], constraints: [], dof: 0, status: "FullyConstrained" };
+        }
+        return readyProjection(1);
+      },
+      { shouldMockEvents: true },
+    );
+
+    await createTauriClient().enterSketch({
+      newOnFace: { bodyId: "body_abc", elementId: "el_2" },
+      plane: FACE_PLANE,
+    });
+    expect(onFaceArgs?.topoKey).toBeNull();
+    expect(onFaceArgs?.bodyId).toBe("body_abc");
+  });
+
+  it("hydrates the projected LOCKED entities the enter_sketch DTO carries", async () => {
+    // What `add_sketch_on_face` committed comes back through the ordinary
+    // enter_sketch path: 4 boundary points + 4 locked lines + 4 Fixed pins.
+    const pts = ["p0", "p1", "p2", "p3"];
+    const at: Record<string, [number, number]> = {
+      p0: [-30, 40], p1: [-30, -40], p2: [30, -40], p3: [30, 40],
+    };
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "add_sketch_on_face") return onFaceDto(String((payload as { sketchId: string }).sketchId));
+        if (cmd === "enter_sketch") {
+          return {
+            sketchId: (payload as { sketchId: string }).sketchId,
+            plane: FACE_PLANE,
+            entities: [
+              ...pts.map((id) => ({ id, type: "Point", at: at[id], referenceLocked: true })),
+              ...pts.map((id, i) => ({
+                id: `ln${i}`,
+                type: "Line",
+                p0Ref: id,
+                p1Ref: pts[(i + 1) % pts.length],
+                referenceLocked: true,
+              })),
+            ],
+            constraints: pts.map((id, i) => ({ id: `fx${i}`, type: "Fixed", entities: [id] })),
+            dof: 0,
+            status: "FullyConstrained",
+          };
+        }
+        return readyProjection(1);
+      },
+      { shouldMockEvents: true },
+    );
+
+    const session = await createTauriClient().enterSketch({
+      newOnFace: { bodyId: "body1", elementId: "el_1", topoKey: "f:4" },
+      plane: FACE_PLANE,
+    });
+
+    // Owned child points ride on their lines — no stray dots.
+    expect(session.entities.map((e) => e.type)).toEqual(["Line", "Line", "Line", "Line"]);
+    expect(session.entities.every((e) => e.referenceLocked)).toBe(true);
+    expect(session.constraints).toHaveLength(4);
+    expect(session.constraints.every((c) => c.type === "Fixed")).toBe(true);
+  });
+
+  it("still runs the orphan DeleteSketch compensation when enter_sketch rejects", async () => {
+    const commands: { cmd: string }[] = [];
+    let created: string | undefined;
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "add_sketch_on_face") {
+          created = String((payload as { sketchId: string }).sketchId);
+          return onFaceDto(created);
+        }
+        if (cmd === "apply_edit_command") {
+          commands.push((payload as { command: { cmd: string } }).command);
+          return readyProjection(1);
+        }
+        if (cmd === "enter_sketch") throw new Error("workerDown: no worker");
+      },
+      { shouldMockEvents: true },
+    );
+
+    await expect(
+      createTauriClient().enterSketch({
+        newOnFace: { bodyId: "body1", elementId: "el_1", topoKey: "f:4" },
+        plane: FACE_PLANE,
+      }),
+    ).rejects.toThrow(/workerDown/);
+
+    // The sketch add_sketch_on_face committed would otherwise orphan in the tree
+    // (with its projected geometry), and every retry would mint another.
+    expect(commands.map((c) => c.cmd)).toEqual(["deleteSketch"]);
+    expect((commands[0] as { cmd: string; sketch?: unknown }).sketch).toBe(created);
+  });
+});
+
 // ── enter_sketch failure → AWAITED DeleteSketch compensation (orphan cleanup) ─
 
 interface WireCmd {

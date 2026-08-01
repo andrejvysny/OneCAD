@@ -19,7 +19,7 @@ import { useRepairStore } from "@/stores/repairStore";
 import { documentStore } from "@/stores/documentStore";
 import { getModelToolController } from "@/tools/modelTools/modelToolBridge";
 import { HistoryList, type HistoryRowActions } from "./HistoryList";
-import { ConstraintList } from "./ConstraintList";
+import { ConstraintList, visibleConstraints } from "./ConstraintList";
 import { RepairPanel } from "@/features/repair/RepairPanel";
 import { suppressFeature, rollToIndex, deleteFeature } from "./historyActions";
 import { cn } from "@/ui/cn";
@@ -27,7 +27,7 @@ import { sketchStatusText, sketchStatusSentence } from "@/features/sketch/constr
 import { createClient } from "@/ipc/client";
 import { deleteConstraints } from "@/tools/sketch/sketchService";
 import type { SketchStatus } from "@/stores/documentStore";
-import type { SketchConstraint } from "@/ipc/types";
+import type { SketchConstraint, SketchEntity } from "@/ipc/types";
 
 /** Delete one constraint (row × button) — fire-and-forget, mirrors useShortcuts'
  * deleteEntities call: the service re-solves + writes the session back, so the
@@ -145,6 +145,8 @@ export function InspectorPanel() {
   const features = useDocumentStore((s) => s.features);
   const activeSketchId = useViewportStore((s) => s.activeSketchId);
   const constraints = useSketchStore((s) => s.session?.constraints);
+  // Only for the ConstraintList's locked-row filter — the panel renders no geometry.
+  const sketchEntities = useSketchStore((s) => s.session?.entities);
   const conflictingIds = useSketchStore((s) => s.conflictingIds);
   const repairPanelOpen = useRepairStore((s) => s.panelOpen);
   const repairItemCount = useRepairStore((s) => s.items.length);
@@ -164,6 +166,7 @@ export function InspectorPanel() {
           dof={sketches[activeSketchId ?? ""]?.dof ?? 0}
           status={sketches[activeSketchId ?? ""]?.status ?? "under"}
           constraints={constraints ?? []}
+          entities={sketchEntities ?? []}
           conflictingIds={conflictingIds}
         />
       ) : showRepair ? (
@@ -284,12 +287,14 @@ function SketchState({
   dof,
   status,
   constraints,
+  entities,
   conflictingIds,
 }: {
   sketchName: string;
   dof: number;
   status: SketchStatus;
   constraints: SketchConstraint[];
+  entities: SketchEntity[];
   conflictingIds: string[];
 }) {
   const { label, tone } = sketchStatusText(status, dof);
@@ -314,8 +319,13 @@ function SketchState({
       </div>
 
       <SectionLabel className="pb-1.5 pt-4">Constraints</SectionLabel>
-      {constraints.length > 0 ? (
-        <ConstraintList constraints={constraints} onDelete={deleteConstraint} conflictingIds={conflictingIds} />
+      {visibleConstraints(constraints, entities).length > 0 ? (
+        <ConstraintList
+          constraints={constraints}
+          entities={entities}
+          onDelete={deleteConstraint}
+          conflictingIds={conflictingIds}
+        />
       ) : (
         <div className="text-[12px] leading-normal text-ink-6">
           No constraints yet.

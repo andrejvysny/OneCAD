@@ -42,7 +42,9 @@ import {
   commitDimensionConstraint,
   enqueueSketchMutation,
   flushSketchMutations,
+  lockedEntityIds,
   trimEntity,
+  LOCKED_GEOMETRY_HINT,
 } from "./sketchService";
 import type { SketchSnapshot } from "@/stores/sketchStore";
 import { hitTestSketch } from "./sketchHitTest";
@@ -251,17 +253,24 @@ export class SketchController {
       // the three world quads — that is the whole point of sketch-on-face: a
       // part is built by sketching on what you already made.
       if (!activeId) {
-        if (await this.tryEnterOnSelectedFace()) return;
+        const faceEntry = await this.tryEnterOnSelectedFace();
+        if (faceEntry.entered) return;
+        // A REFUSAL rides into the picker prompt rather than being published
+        // separately: beginPlanePick sets the status hint itself, so a hint
+        // written before it would be silently overwritten (the same last-word-
+        // wins trap `ModelToolController.resetToSelect` documents). A refused
+        // FACE short-circuits the datum rung below — the face is the more
+        // specific pick, so its reason is the one to show.
+        if (faceEntry.refusal) {
+          this.beginPlanePick(faceEntry.refusal);
+          return;
+        }
         // A selected DATUM plane is a sketch host too (DATUM W1) — the tree's
         // datum double-click selects one and flips the mode, and this is what
         // picks it up. Checked AFTER the face (a face is the more specific pick
         // when somehow both are selected) and BEFORE the world-plane picker.
         const datumEntry = await this.tryEnterOnSelectedDatum();
         if (datumEntry.entered) return;
-        // A REFUSAL rides into the picker prompt rather than being published
-        // separately: beginPlanePick sets the status hint itself, so a hint
-        // written before it would be silently overwritten (the same last-word-
-        // wins trap `ModelToolController.resetToSelect` documents).
         this.beginPlanePick(datumEntry.refusal);
         return;
       }
@@ -446,15 +455,19 @@ export class SketchController {
    * replay-stable. A non-planar face is refused by the backend and reported,
    * rather than sketching on an approximated plane.
    *
-   * Returns false when there is nothing usable selected, so the caller falls
-   * through to the world-plane picker.
+   * `entered: false` means the caller falls through to the world-plane picker;
+   * `refusal` (when set) is the reason, for the picker prompt to CARRY. A refusal
+   * published as its own status hint here would be overwritten the moment
+   * `beginPlanePick` writes its prompt (the last-word-wins trap the datum path
+   * already documents), so the user would be told nothing at all — which is
+   * exactly what a "non-planar face" pick used to do.
    */
-  private async tryEnterOnSelectedFace(): Promise<boolean> {
+  private async tryEnterOnSelectedFace(): Promise<{ entered: boolean; refusal?: string }> {
     const faces = selectionStore.getState().selected.filter((r) => r.kind === "face");
-    if (faces.length !== 1) return false;
+    if (faces.length !== 1) return { entered: false };
     const face = faces[0];
     const bodyId = face.bodyId;
-    if (!bodyId) return false;
+    if (!bodyId) return { entered: false };
 
     // A pick is promoted to a minted ElementId by ViewportRoot; if that has not
     // landed yet, promote here rather than sending a snapshot-scoped TopoKey the
@@ -466,7 +479,7 @@ export class SketchController {
         .catch(() => null);
       elementId = promoted?.[0]?.elementId;
     }
-    if (!elementId) return false;
+    if (!elementId) return { entered: false };
 
     // `topoKey` rides along: this id was just minted (never consumed by an op),
     // so it is genuinely absent from the worker's on-demand element-map
@@ -475,20 +488,22 @@ export class SketchController {
     try {
       plane = await this.deps.client.faceSketchPlane(bodyId, elementId, face.topoKey);
     } catch (e) {
-      viewportStore.getState().setStatusHint(
-        `Cannot sketch on that face: ${e instanceof Error ? e.message : String(e)}`,
-        { severity: "error", sticky: true },
-      );
-      // Fall back to the world planes so the user is not stuck.
-      return false;
+      // Fall back to the world planes so the user is not stuck — carrying WHY.
+      return {
+        entered: false,
+        refusal: `Cannot sketch on that face: ${e instanceof Error ? e.message : String(e)}`,
+      };
     }
-    if (toolStore.getState().mode !== "sketch") return false;
+    if (toolStore.getState().mode !== "sketch") return { entered: false };
 
     const opened = await this.openSession({
-      newOnFace: { bodyId, elementId, worldPoint: face.anchor?.worldPoint },
+      // `topoKey` rides through to `add_sketch_on_face` for the SAME reason it
+      // rides to `faceSketchPlane` above — it is the rung that actually resolves
+      // a freshly promoted, never-consumed ElementId.
+      newOnFace: { bodyId, elementId, topoKey: face.topoKey, worldPoint: face.anchor?.worldPoint },
       plane,
     });
-    return opened;
+    return { entered: opened };
   }
 
   /**
@@ -1036,6 +1051,15 @@ export class SketchController {
     const tol = SNAP_PX * this.deps.engine.planePixelWorld();
     const hit = hitTestSketch(raw, session.entities, tol);
     if (!hit) return; // miss → no-op
+    // Trim REPLACES the target with its surviving pieces — a destructive edit the
+    // backend refuses outright on locked geometry (W2 L3). Refuse here, loudly:
+    // the alternative is a rejected upsert batch for an action the user had no
+    // way to know was illegal.
+    if (lockedEntityIds(session.entities).has(hit.entityId)) {
+      this.deps.engine.setSketchTrimGhost(null);
+      viewportStore.getState().setStatusHint(`${LOCKED_GEOMETRY_HINT} — it cannot be trimmed`);
+      return;
+    }
     // Drop the hover ghost immediately; the write-back's updateSketchSession also
     // clears it, but this makes the click feel instant.
     this.deps.engine.setSketchTrimGhost(null);
@@ -1180,6 +1204,17 @@ export class SketchController {
     const session = sketchStore.getState().session;
     const hit = this.hitAt(e.clientX, e.clientY);
     const intent = dragIntent(hit, session?.entities ?? []);
+    // LOCKED GEOMETRY (W2 L3): a projected boundary point is a legitimate snap +
+    // selection target, but dragging it is a `SetEntityPositions` the backend
+    // refuses. Refuse to ARM (rather than letting the drag run and fail at
+    // endGesture), and say why — a handle that silently ignores the pointer reads
+    // as a broken app. The click path below is untouched: the point stays
+    // selectable.
+    if (intent && session && lockedEntityIds(session.entities).has(intent.sel.entityId)) {
+      this.dragArmed = null;
+      viewportStore.getState().setStatusHint(`${LOCKED_GEOMETRY_HINT} — it cannot be dragged`);
+      return;
+    }
     this.dragArmed = intent;
     // Suppress LMB orbit for a potential handle drag; a plain click restores it on up.
     if (intent) {

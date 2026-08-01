@@ -295,3 +295,105 @@ describe("SketchController — Trim + Mirror", () => {
     });
   });
 });
+
+// ── L3 guards: locked reference geometry (SKETCH-ON-FACE W2) ────────────────
+
+describe("SketchController — Trim + Mirror over LOCKED reference geometry", () => {
+  let engineMock: ReturnType<typeof makeEngineMock>;
+  let clientMock: ReturnType<typeof makeClientMock>;
+  let container: HTMLDivElement;
+  let controller: SketchController;
+
+  /** ref1: a projected host-face segment (locked). e2: an ordinary axis line. */
+  const LOCKED_ENTITIES: SketchEntity[] = [
+    { id: "ref1", type: "Line", p0: [0, 10], p1: [20, 10], referenceLocked: true },
+    { id: "e2", type: "Line", p0: [0, 0], p1: [100, 0] },
+  ];
+
+  beforeEach(async () => {
+    resetStores();
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      cb(0);
+      return 1;
+    });
+    engineMock = makeEngineMock();
+    clientMock = makeClientMock();
+    clientMock.enterSketch.mockResolvedValue({
+      sketchId: "sketch1",
+      plane: PLANE,
+      entities: LOCKED_ENTITIES.map((e) => ({ ...e })),
+      constraints: [],
+      dof: 4,
+      status: "UnderConstrained",
+    });
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    controller = new SketchController({
+      engine: engineMock as unknown as ViewportEngine,
+      client: clientMock as unknown as CadClient,
+      container,
+    });
+    toolStore.getState().setMode("sketch", "sketch1");
+    await flush();
+    sketchStore.setState({ entitySeq: 2, constraintSeq: 0 });
+  });
+
+  afterEach(() => {
+    controller.dispose();
+    container.remove();
+    vi.unstubAllGlobals();
+  });
+
+  const click = (x: number, y: number, mods?: { shiftKey?: boolean }): void => {
+    container.dispatchEvent(
+      new MouseEvent("pointerdown", { clientX: x, clientY: y, button: 0, buttons: 1, bubbles: true, ...mods }),
+    );
+    container.dispatchEvent(
+      new MouseEvent("pointerup", { clientX: x, clientY: y, button: 0, buttons: 0, bubbles: true, ...mods }),
+    );
+  };
+
+  it("Trim REFUSES a locked target and says why (no upsert)", async () => {
+    toolStore.getState().setTool("trim");
+    await flush();
+    click(10, 10); // on ref1
+    await flush();
+    await flush();
+
+    // Trim replaces the target with its surviving pieces — refused outright on
+    // locked geometry, so the batch must never be authored.
+    expect(clientMock.sketchUpsert).not.toHaveBeenCalled();
+    expect(viewportStore.getState().statusHint?.message).toMatch(/Reference geometry is locked/);
+    expect(sketchStore.getState().session!.entities).toHaveLength(2);
+  });
+
+  it("Trim still works on the UNLOCKED entity in the same session", async () => {
+    toolStore.getState().setTool("trim");
+    await flush();
+    click(50, 0); // on e2
+    await flush();
+    await flush();
+    expect(clientMock.sketchUpsert).toHaveBeenCalledTimes(1);
+  });
+
+  it("Mirror over a LOCKED source produces an UNLOCKED copy (copies are user geometry)", async () => {
+    toolStore.getState().setTool("mirror");
+    await flush();
+    click(10, 10); // Phase A — select the locked segment as the mirror source
+    expect(sketchSelectionStore.getState().selected).toEqual([{ entityId: "ref1" }]);
+    click(50, 0); // Phase B — e2 is the axis → mirror
+    await flush();
+    await flush();
+
+    expect(clientMock.sketchUpsert).toHaveBeenCalledTimes(1);
+    const entities = clientMock.sketchUpsert.mock.calls[0][1];
+    const copy = entities.find((e) => e.id !== "ref1" && e.id !== "e2");
+    expect(copy, "the mirror must have produced a copy").toBeDefined();
+    // Inheriting the lock would mint un-deletable geometry the backend then
+    // refuses every edit on — the copy is the USER's, freely editable.
+    expect(copy!.referenceLocked).toBeUndefined();
+    expect(copy!.p0).toEqual([0, -10]);
+    // The source itself is untouched and still locked.
+    expect(entities.find((e) => e.id === "ref1")!.referenceLocked).toBe(true);
+  });
+});

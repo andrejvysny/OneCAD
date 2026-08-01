@@ -182,7 +182,8 @@ describe("buildAddSketch / frontendEntitiesFromDto / isDimensional", () => {
     });
     const custom = buildAddSketch("id-1", "S", "custom").sketch;
     // `buildAddSketch` only ever emits the world arm — a real custom basis comes
-    // from `buildAddSketchOnFace`, so narrow before reading `plane`.
+    // from a datum or the backend's own `add_sketch_on_face`, so narrow before
+    // reading `plane`.
     expect(custom.attachment.kind).toBe("world");
     if (custom.attachment.kind !== "world") throw new Error("expected a world attachment");
     expect(custom.attachment.plane).toBe("XY");

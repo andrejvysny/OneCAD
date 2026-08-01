@@ -49,6 +49,23 @@ export function flushSketchMutations(): Promise<void> {
 }
 
 /**
+ * The ONE status hint every locked-geometry refusal shows (SKETCH-ON-FACE W2 L3).
+ *
+ * Projected host-face geometry is `referenceLocked`: selectable and snappable,
+ * but every geometry-mutating edit is refused by the backend
+ * (`SketchError::ReferenceLocked`). The frontend refuses FIRST — and says so —
+ * because the alternative is a whole `sketchUpsert` batch failing on one op the
+ * user did not know was illegal. A silent no-op would be worse still: the user
+ * would read it as a broken drag / broken Delete.
+ */
+export const LOCKED_GEOMETRY_HINT = "Reference geometry is locked";
+
+/** Ids of the `referenceLocked` entities in a session's entity array. */
+export function lockedEntityIds(entities: SketchEntity[]): Set<string> {
+  return new Set(entities.filter((e) => e.referenceLocked).map((e) => e.id));
+}
+
+/**
  * Fencing gate (see sketchStore.sessionGeneration). A queued mutation captures the
  * generation at its turn start and calls this after every await: a bumped generation
  * (a newer setSession superseded it) or a torn-down session (null) means the write
@@ -186,6 +203,17 @@ async function commitDimensionConstraintNow(
  * OWNING entity id in `entities`, so a child-point ref (e.g. a line's Start↔End
  * Distance) is covered by the same predicate. No-op on empty `ids` / no session /
  * nothing matched; a solve failure surfaces a status hint and leaves state intact.
+ *
+ * LOCKED GEOMETRY (W2 L3) is SKIPPED, not refused: a marquee that swept up the
+ * projected boundary along with the user's own lines should still delete the
+ * user's lines. Only when the target set was ENTIRELY locked is there nothing to
+ * do and the refusal hint is shown — otherwise the delete proceeds silently on
+ * the remainder, which is what the user asked for.
+ *
+ * This lives in the service rather than the controller because the service is the
+ * single funnel every delete goes through (the keyboard shortcut, and anything
+ * added later); guarding at one call site would leave the others able to author
+ * the one op the backend refuses.
  */
 export function deleteEntities(client: CadClient, ids: string[]): Promise<void> {
   return enqueueSketchMutation(() => deleteEntitiesNow(client, ids));
@@ -196,7 +224,15 @@ async function deleteEntitiesNow(client: CadClient, ids: string[]): Promise<void
   const gen = sketchStore.getState().sessionGeneration;
   const session = sketchStore.getState().session;
   if (!session) return;
-  const doomed = new Set(ids);
+  const locked = lockedEntityIds(session.entities);
+  const deletable = ids.filter((id) => !locked.has(id));
+  if (deletable.length === 0) {
+    if (ids.some((id) => locked.has(id))) {
+      viewportStore.getState().setStatusHint(`${LOCKED_GEOMETRY_HINT} — it cannot be deleted`);
+    }
+    return;
+  }
+  const doomed = new Set(deletable);
   const entities = session.entities.filter((e) => !doomed.has(e.id));
   const constraints = session.constraints.filter((c) => !c.entities.some((r) => doomed.has(r)));
   if (entities.length === session.entities.length && constraints.length === session.constraints.length) {

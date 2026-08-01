@@ -12,6 +12,7 @@ import type { SketchEntity, SketchPlane, SketchSession } from "@/ipc/types";
 import { toolStore } from "@/stores/toolStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
+import { viewportStore } from "@/stores/viewportStore";
 import { resetStores } from "@/test/resetStores";
 
 const PLANE: SketchPlane = {
@@ -246,5 +247,88 @@ describe("SketchController select tool", () => {
     expect(selected()).toHaveLength(1);
     toolStore.getState().setTool("line");
     expect(selected()).toEqual([]);
+  });
+});
+
+// ── L3 guard: locked reference geometry refuses to arm a drag (W2) ───────────
+
+describe("SketchController select tool — locked reference geometry", () => {
+  let engineMock: ReturnType<typeof makeEngineMock>;
+  let clientMock: ReturnType<typeof makeClientMock>;
+  let container: HTMLDivElement;
+  let controller: SketchController;
+
+  /** A projected host-face segment (locked) plus an ordinary user line. */
+  const LOCKED_SESSION: SketchEntity[] = [
+    { id: "ref1", type: "Line", p0: [0, 0], p1: [40, 0], referenceLocked: true },
+    { id: "e1", type: "Line", p0: [0, 60], p1: [40, 60] },
+  ];
+
+  beforeEach(async () => {
+    resetStores();
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      cb(0);
+      return 1;
+    });
+    engineMock = makeEngineMock();
+    clientMock = makeClientMock();
+    clientMock.enterSketch.mockResolvedValue({
+      sketchId: "sketch1",
+      plane: PLANE,
+      entities: LOCKED_SESSION.map((e) => ({ ...e })),
+      constraints: [],
+      dof: 2,
+      status: "UnderConstrained",
+    });
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    controller = new SketchController({
+      engine: engineMock as unknown as ViewportEngine,
+      client: clientMock as unknown as CadClient,
+      container,
+    });
+    toolStore.getState().setMode("sketch", "sketch1");
+    await flush();
+    toolStore.getState().setTool("select");
+    await flush();
+  });
+
+  afterEach(() => {
+    controller.dispose();
+    container.remove();
+    vi.unstubAllGlobals();
+  });
+
+  function mouse(type: string, x: number, y: number, button: number, buttons: number): void {
+    container.dispatchEvent(new MouseEvent(type, { clientX: x, clientY: y, button, buttons, bubbles: true }));
+  }
+
+  it("refuses to ARM a drag on a locked endpoint, and says why", async () => {
+    engineMock.setSketchDrawingActive.mockClear(); // ignore the tool-arm calls from setup
+    mouse("pointerdown", 0, 0, 0, 1); // over ref1.Start
+    mouse("pointermove", 30, 0, 0, 1); // past DRAG_PX — would begin a gesture
+    await flush();
+
+    // No gesture opened: dragging locked geometry is a SetEntityPositions the
+    // backend refuses, so it must never leave the frontend.
+    expect(clientMock.beginGesture).not.toHaveBeenCalled();
+    expect(clientMock.solveDrag).not.toHaveBeenCalled();
+    // Never silent — a handle that ignores the pointer reads as a broken app.
+    expect(viewportStore.getState().statusHint?.message).toMatch(/Reference geometry is locked/);
+    // Orbit was never suppressed for a drag that cannot happen.
+    expect(engineMock.setSketchDrawingActive).not.toHaveBeenCalledWith(true);
+  });
+
+  it("still SELECTS the locked handle on a click (locked is pickable + snappable)", () => {
+    mouse("pointerdown", 0, 0, 0, 1);
+    mouse("pointerup", 0, 0, 0, 0);
+    expect(sketchSelectionStore.getState().selected).toEqual([{ entityId: "ref1", point: "Start" }]);
+  });
+
+  it("an UNLOCKED handle in the same session still drags normally", async () => {
+    mouse("pointerdown", 0, 60, 0, 1); // e1.Start
+    mouse("pointermove", 30, 60, 0, 1);
+    await flush();
+    expect(clientMock.beginGesture).toHaveBeenCalledWith("sketch1", "e1.Start");
   });
 });

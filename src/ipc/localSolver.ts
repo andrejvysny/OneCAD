@@ -40,6 +40,7 @@ import type {
   Unsubscribe,
 } from "./types";
 import { makeExtrudeBodyMesh } from "./mockMeshes";
+import { lookupMockFace, mockProjectedContent } from "./mockFaceGeometry";
 import { detectRegions, planeFor, solveDof } from "./mockSketch";
 import { profileFromRegion, type PrismProfile } from "@/tools/preview/prismPreview";
 import { buildPreviewOp, supportsPreview, type PreviewSessionState } from "./previewOps";
@@ -335,12 +336,24 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
       // backend-resolved frame the caller passed through); a world-plane one
       // derives it from the named kind (`planeFor`).
       let explicitPlane: SketchPlane | null = null;
+      // A NEW host-face sketch is seeded with the face's projected boundary as
+      // LOCKED reference geometry — the real lane gets it from
+      // `add_sketch_on_face` + the `enter_sketch` DTO, so a mock session without
+      // it would be structurally different (no region to extrude, no locked
+      // geometry to guard) and every mock-lane test of this flow false-green.
+      let seed: { entities: SketchEntity[]; constraints: SketchConstraint[] } | null = null;
       if (typeof target === "string") {
         id = target;
       } else if ("newOnFace" in target) {
         explicitPlane = target.plane;
         planeKind = "custom";
         id = target.sketchId ?? `sk-${nextSketchSeq++}`;
+        const found = lookupMockFace(
+          target.newOnFace.bodyId,
+          target.newOnFace.elementId,
+          target.newOnFace.topoKey,
+        );
+        if (found.kind === "planar") seed = mockProjectedContent(found.geometry);
       } else if ("newOnDatum" in target) {
         // DATUM W1. This one branch covers the mock lane end to end — the mock
         // client shares this lane, and only `commit` differs between the two.
@@ -353,13 +366,18 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
       }
       let session = sketchSessions.get(id);
       if (!session) {
+        const entities = seed?.entities ?? [];
+        const constraints = seed?.constraints ?? [];
+        // Fixed-pinned locked geometry contributes ZERO net DOF, so a freshly
+        // projected boundary still reports FullyConstrained (see `solveDof`).
+        const { dof, status } = solveDof(entities, constraints);
         session = {
           sketchId: id,
           plane: explicitPlane ?? planeFor(planeKind),
-          entities: [],
-          constraints: [],
-          dof: 0,
-          status: "FullyConstrained",
+          entities,
+          constraints,
+          dof,
+          status,
           conflicting: [], // mock lane never conflicts (deterministic)
         };
         sketchSessions.set(id, session);

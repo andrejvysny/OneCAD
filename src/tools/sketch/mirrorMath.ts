@@ -70,6 +70,13 @@ export interface MirroredEntity {
  * Mirror ONE source entity across the axis line `a`–`b` (see the module matrix).
  * `axisId` is the mirror line's entity id (the third ref of every Symmetric).
  * Returns null for an unmappable entity (missing coords / unsupported type).
+ *
+ * `construction` is inherited; `referenceLocked` deliberately is NOT (W2 L3).
+ * Locked geometry is the host face's projected boundary — a copy of it is the
+ * USER's own new geometry, freely editable, and inheriting the lock would mint
+ * un-deletable entities the backend would then refuse every edit on. Each field
+ * is copied explicitly below rather than spreading `src`, which is what makes
+ * that the default rather than an oversight.
  */
 export function mirrorEntity(
   src: SketchEntity,

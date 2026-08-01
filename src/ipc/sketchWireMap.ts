@@ -665,7 +665,6 @@ export interface WireAddSketch {
     };
     attachment:
       | { kind: "world"; plane: "XY" | "XZ" | "YZ" }
-      | { kind: "hostFace"; face: WireFaceRef; projectedBoundaryVersion: number }
       // DATUM W1. Rust `SketchAttachment` is internally tagged on `"kind"` with
       // camelCase variants + camelCase fields, so `Datum { datum: DatumPlaneId }`
       // renders exactly like this (`DatumPlaneId` is a transparent UUID string).
@@ -673,16 +672,18 @@ export interface WireAddSketch {
   };
 }
 
-/** The typed `ElementRef` a host-face attachment carries (Rust `ElementRef`). */
-export interface WireFaceRef {
-  primary?: { bodyId: string; elementId: string; kind: "face" };
-  anchor?: { worldPoint: [number, number, number] };
-}
+// NOTE (SKETCH-ON-FACE W2): there is deliberately no `hostFace` arm here and no
+// `buildAddSketchOnFace`. A sketch on a model face is created by its own command
+// (`add_sketch_on_face`), which projects the face boundary into the new sketch
+// across two worker round-trips before applying ONE `AddSketch`. An `AddSketch`
+// assembled on this side could only ever produce an EMPTY host-face sketch with
+// `projectedBoundaryVersion: 0`, which is precisely the seam W2 closed.
 
 /** Build the `AddSketch` EditCommand for a new world-plane sketch. `custom` planes
- *  fall back to XY (a custom basis needs `buildAddSketchOnFace`). The plane basis
- *  is the SCHEMA §7.3 canonical basis for the kind (same table Rust's
- *  `SketchPlane::xy/xz/yz()` carry — `planeFor` mirrors it verbatim). */
+ *  fall back to XY (a custom basis reaches the wire only via a datum or the
+ *  backend's own `add_sketch_on_face`). The plane basis is the SCHEMA §7.3
+ *  canonical basis for the kind (same table Rust's `SketchPlane::xy/xz/yz()`
+ *  carry — `planeFor` mirrors it verbatim). */
 export function buildAddSketch(
   backendSketchId: string,
   name: string,
@@ -702,57 +703,10 @@ export function buildAddSketch(
 }
 
 /**
- * Build the `AddSketch` EditCommand for a sketch placed on a model FACE
- * (MODEL-OPS W2).
- *
- * The basis is NOT computed here — it comes from the backend's
- * `face_sketch_plane`, which reads the kernel's own face descriptor and applies
- * the lock-tested `plane_from_point_normal` rule. Rust owns identity, and the
- * frame is frozen with the sketch, so deriving it from a tessellated triangle
- * normal on this side would be both less accurate and non-authoritative.
- *
- * No worker change is needed for this to work: `plane_kind_str` already maps a
- * `hostFace` attachment to wire kind `"custom"`, and `WireSketch::parse_plane`
- * has always accepted an arbitrary `custom` origin/xAxis/yAxis/normal — the
- * attachment simply had no producer.
- *
- * **V1 policy: the frame is FROZEN at creation.** Editing an upstream feature
- * leaves the sketch where it was rather than moving it; re-deriving it needs the
- * dormant `UpdateSketchAttachment` command plus a regen-epilogue resolve, which
- * is a separate WP. This matches the OneCAD-CPP oracle (`document/datum.rs`: a
- * sketch on a datum "copies the resolved frame at creation (frozen, like
- * sketch-on-face)").
- */
-export function buildAddSketchOnFace(
-  backendSketchId: string,
-  name: string,
-  plane: WireAddSketch["sketch"]["plane"],
-  face: WireFaceRef,
-): WireAddSketch {
-  return {
-    cmd: "addSketch",
-    sketch: {
-      id: backendSketchId,
-      name,
-      plane: {
-        origin: plane.origin,
-        xAxis: plane.xAxis,
-        yAxis: plane.yAxis,
-        normal: plane.normal,
-      },
-      // 0 = the host face's boundary has not been projected into the sketch yet
-      // (projection is not implemented anywhere — the field is a version counter
-      // with no producer, mirrored faithfully from the C++ struct).
-      attachment: { kind: "hostFace", face, projectedBoundaryVersion: 0 },
-    },
-  };
-}
-
-/**
  * Build the `AddSketch` EditCommand for a sketch placed on a DATUM plane
  * (DATUM W1).
  *
- * Like `buildAddSketchOnFace`, the basis is NOT computed here: `plane` is the
+ * The basis is NOT computed here: `plane` is the
  * datum's backend-RESOLVED frame (`documentStore.datums[id].plane`, itself
  * produced by `DocumentSession::resolve_datum_frame`). Re-deriving it from
  * `basePlaneId + offset` on this side would give the sketch a second, competing

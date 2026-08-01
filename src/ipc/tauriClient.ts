@@ -81,7 +81,6 @@ import {
 import {
   buildAddSketch,
   buildAddSketchOnDatum,
-  buildAddSketchOnFace,
   buildDeleteSketch,
   cloneIdMap,
   createIdMap,
@@ -129,6 +128,7 @@ const CMD = {
   endGesture: "end_gesture",
   promoteSelection: "promote_selection",
   faceSketchPlane: "face_sketch_plane",
+  addSketchOnFace: "add_sketch_on_face",
   elementInfo: "element_info",
   previewOp: "preview_op",
   resolveRefs: "resolve_refs",
@@ -202,6 +202,19 @@ interface SketchSessionDto {
   status: SketchSolveStatus;
   /** Backend constraint uuids in conflict (SCHEMA §7.4); mapped to frontend ids. */
   conflicting?: string[];
+}
+/** `add_sketch_on_face` result (Rust `SketchOnFaceDto`; SKETCH-ON-FACE W1b).
+ *  Deliberately lean — the sketch's geometry arrives through the normal
+ *  `enter_sketch` path right after, so only the counts + the frozen frame ride
+ *  here. `sketchId` echoes the id the CALLER minted (adopted verbatim). */
+interface SketchOnFaceDto {
+  sketchId: string;
+  plane: Omit<SketchPlane, "kind">;
+  entityCount: number;
+  constraintCount: number;
+  faceCount: number;
+  hasClosedBoundary: boolean;
+  projectedBoundaryVersion: number;
 }
 interface SketchUpsertDto {
   sketchId: string;
@@ -624,6 +637,7 @@ export function createTauriClient(): CadClient {
         kind: "face";
         bodyId: string;
         elementId: string;
+        topoKey?: string;
         plane: SketchPlane;
         worldPoint?: [number, number, number];
       }
@@ -649,32 +663,39 @@ export function createTauriClient(): CadClient {
     const map = createIdMap(backendSketchId, planeKind);
     sketchMaps.set(frontendId, map);
     const name = nextSketchName(documentStore.getState().sketches);
+    // A HOST-FACE sketch is created by its OWN command (SKETCH-ON-FACE W2), not by
+    // an `AddSketch` edit assembled here. `add_sketch_on_face` does what the
+    // frontend structurally cannot: two worker round-trips (the kernel-exact face
+    // frame, then the boundary projected in the basis Rust derives from it) before
+    // a single `AddSketch` carrying the projected boundary as `referenceLocked`
+    // entities pinned by `Fixed` constraints. Building the command here instead
+    // would seed an EMPTY host-face sketch with `projectedBoundaryVersion: 0`.
+    //
+    // The frontend-minted `backendSketchId` is adopted VERBATIM as the document
+    // SketchId (the id-adoption rule), so the follow-up `enter_sketch` below reads
+    // back the very sketch this created — projected entities included.
+    if (host?.kind === "face") {
+      await call<SketchOnFaceDto>(CMD.addSketchOnFace, {
+        snapshotId: currentSnapshotId,
+        // The `body_<uuid>` worker wire form (`wire::parse_body_id`), same as
+        // faceSketchPlane / promoteSelection.
+        bodyId: host.bodyId.startsWith("body_") ? host.bodyId : `body_${host.bodyId}`,
+        elementId: host.elementId,
+        topoKey: host.topoKey ?? null,
+        sketchId: backendSketchId,
+        name,
+      });
+      return map;
+    }
     // Create the backend sketch. This fires an edit + regen; the sketch appears in
     // the tree via projection-updated hydration.
-    //
-    // A HOST-FACE sketch carries the backend-resolved basis plus the typed face
-    // ref, and rides the wire as `plane.kind: "custom"` — `plane_kind_str` has
-    // always mapped a hostFace attachment that way and `WireSketch::parse_plane`
-    // has always accepted an arbitrary custom basis, so no worker change is
-    // involved. The basis is FROZEN here (V1 policy — see `buildAddSketchOnFace`).
     const command =
-      host?.kind === "face"
-        ? buildAddSketchOnFace(backendSketchId, name, host.plane, {
-            primary: {
-              // The core EditCommand serde wants the BARE uuid (`BodyId` is
-              // transparent); promote/pick hand us the `body_<uuid>` worker form.
-              bodyId: host.bodyId.startsWith("body_") ? host.bodyId.slice("body_".length) : host.bodyId,
-              elementId: host.elementId,
-              kind: "face",
-            },
-            ...(host.worldPoint ? { anchor: { worldPoint: host.worldPoint } } : {}),
-          })
-        : host?.kind === "datum"
-          ? // DATUM W1: same shape as the host-face branch — a `custom` basis on
-            // the wire plus a typed attachment. The basis is the datum's
-            // backend-RESOLVED frame, carried verbatim (never re-derived here).
-            buildAddSketchOnDatum(backendSketchId, name, host.plane, host.datumId)
-          : buildAddSketch(backendSketchId, name, planeKind);
+      host?.kind === "datum"
+        ? // DATUM W1: a `custom` basis on the wire plus a typed attachment. The
+          // basis is the datum's backend-RESOLVED frame, carried verbatim (never
+          // re-derived here) and FROZEN with the sketch (V1 policy).
+          buildAddSketchOnDatum(backendSketchId, name, host.plane, host.datumId)
+        : buildAddSketch(backendSketchId, name, planeKind);
     await call<DocumentProjectionDto>(CMD.applyEditCommand, { command });
     return map;
   }
@@ -754,6 +775,7 @@ export function createTauriClient(): CadClient {
           kind: "face",
           bodyId: target.newOnFace.bodyId,
           elementId: target.newOnFace.elementId,
+          topoKey: target.newOnFace.topoKey,
           worldPoint: target.newOnFace.worldPoint,
           plane: target.plane,
         };

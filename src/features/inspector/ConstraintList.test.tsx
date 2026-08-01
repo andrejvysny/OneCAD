@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
-import { ConstraintList } from "./ConstraintList";
+import { ConstraintList, visibleConstraints } from "./ConstraintList";
 import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
-import type { SketchConstraint } from "@/ipc/types";
+import type { SketchConstraint, SketchEntity } from "@/ipc/types";
 
 const constraints: SketchConstraint[] = [
   { id: "c1", type: "Coincident", entities: ["p1", "p2"] },
@@ -81,5 +81,47 @@ describe("ConstraintList", () => {
     for (const c of constraints) {
       expect(screen.getByTestId(`constraint-row-${c.id}`)).not.toHaveAttribute("data-conflicting");
     }
+  });
+
+  // ── Machine `Fixed` rows from a host-face projection (SKETCH-ON-FACE W2) ──
+
+  describe("locked reference geometry", () => {
+    const locked: SketchEntity[] = [
+      { id: "ref1", type: "Line", p0: [0, 0], p1: [40, 0], referenceLocked: true },
+      { id: "ref2", type: "Line", p0: [40, 0], p1: [40, 30], referenceLocked: true },
+    ];
+    const user: SketchEntity[] = [{ id: "l1", type: "Line", p0: [5, 5], p1: [20, 5] }];
+    const rows: SketchConstraint[] = [
+      { id: "fx1", type: "Fixed", entities: ["ref1"], positions: ["Start"] },
+      { id: "fx2", type: "Fixed", entities: ["ref2"], positions: ["Start"] },
+      { id: "u1", type: "Fixed", entities: ["l1"], positions: ["Start"] }, // the USER pinned their own point
+      { id: "u2", type: "Horizontal", entities: ["l1"] },
+    ];
+
+    it("hides the machine Fixed rows pinning locked geometry, keeps everything else", () => {
+      render(<ConstraintList constraints={rows} entities={[...locked, ...user]} onDelete={() => {}} />);
+      expect(screen.queryByTestId("constraint-row-fx1")).toBeNull();
+      expect(screen.queryByTestId("constraint-row-fx2")).toBeNull();
+      // A Fixed the USER authored on their OWN geometry is not machine noise.
+      expect(screen.getByTestId("constraint-row-u1")).toBeInTheDocument();
+      expect(screen.getByTestId("constraint-row-u2")).toBeInTheDocument();
+    });
+
+    it("is a VIEW filter only — the caller's array is untouched", () => {
+      // session.constraints must keep the pins: `marshalUpsert` reads a seeded
+      // constraint missing from the live array as a removal and emits
+      // `removeConstraint` for it, deleting the pins on the first edit.
+      const before = [...rows];
+      render(<ConstraintList constraints={rows} entities={[...locked, ...user]} onDelete={() => {}} />);
+      expect(rows).toEqual(before);
+      expect(visibleConstraints(rows, [...locked, ...user])).toHaveLength(2);
+      expect(rows).toHaveLength(4);
+    });
+
+    it("with no locked entities every row renders (the pre-W2 behaviour)", () => {
+      render(<ConstraintList constraints={rows} entities={user} onDelete={() => {}} />);
+      for (const c of rows) expect(screen.getByTestId(`constraint-row-${c.id}`)).toBeInTheDocument();
+      expect(visibleConstraints(rows, [])).toBe(rows); // identity: no copy, no filter
+    });
   });
 });

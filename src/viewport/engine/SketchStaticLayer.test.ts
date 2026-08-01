@@ -276,4 +276,30 @@ describe("SketchStaticLayer teardown", () => {
     layer.dispose();
     expect(sketchRoot.children.length).toBe(0);
   });
+
+  // ── Locked reference geometry renders like any other curve (W2) ────────────
+
+  it("renders the projected host-face boundary of a NON-ACTIVE sketch", () => {
+    // A sketch-on-face sketch that is not being edited is drawn by this layer, and
+    // its projected boundary is a real part of the sketch — dropping it would make
+    // the outline vanish the moment the user leaves the sketch. This layer applies
+    // no per-entity styling at all (construction geometry is likewise undifferentiated
+    // here), so "renders" is the whole contract: same segments, same material.
+    const { layer, sketchRoot } = makeLayer();
+    const locked = RECT.map((e) => ({ ...e, referenceLocked: true }));
+    layer.setSketch("plain", { plane: IDENTITY_PLANE, entities: RECT, regions: [] });
+    layer.setSketch("onFace", { plane: IDENTITY_PLANE, entities: locked, regions: [] });
+
+    const seg = (id: string): number =>
+      childOfType<THREE.LineSegments>(groupFor(sketchRoot, id), "LineSegments")!.geometry.getAttribute("position")
+        .count;
+    const dots = (id: string): number =>
+      childOfType<THREE.Points>(groupFor(sketchRoot, id), "Points")!.geometry.getAttribute("position").count;
+
+    expect(seg("onFace")).toBe(seg("plain"));
+    expect(seg("onFace")).toBeGreaterThan(0);
+    expect(dots("onFace")).toBe(dots("plain"));
+
+    layer.dispose();
+  });
 });

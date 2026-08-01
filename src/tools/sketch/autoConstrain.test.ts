@@ -235,3 +235,62 @@ describe("entityPoints / inferConstraints — Ellipse", () => {
     expect(inferConstraints([ell], existing, { nextConstraintId: ids() })).toEqual([]);
   });
 });
+
+// ── Locked reference geometry as an auto-constrain TARGET (SKETCH-ON-FACE W2) ─
+//
+// PINS CURRENT BEHAVIOUR, deliberately: `inferConstraints` does NOT filter
+// `referenceLocked` entities out of its reference set, and that is the intended
+// design — a projected host-face boundary is exactly what a user snaps a new
+// profile to, and a constraint whose other end is Fixed-pinned simply drives the
+// USER's geometry (which is the point of pinning). Adding a lock filter here
+// would silently drop the auto-constraints that make sketch-on-face usable, so
+// this file is the tripwire if anyone tries.
+
+describe("inferConstraints — locked reference geometry participates", () => {
+  let n = 0;
+  const opts = () => {
+    n = 0;
+    return { nextConstraintId: () => `c${++n}` };
+  };
+
+  /** A projected boundary segment: locked, but geometrically ordinary. */
+  const refLine: SketchEntity = {
+    id: "ref1",
+    type: "Line",
+    p0: [0, 0],
+    p1: [40, 0],
+    referenceLocked: true,
+  };
+
+  it("emits Coincident when a new endpoint lands on a LOCKED endpoint", () => {
+    const next: SketchEntity = { id: "e2", type: "Line", p0: [40, 0], p1: [40, 20] };
+    const cs = inferConstraints([next], [refLine], opts());
+    const coincident = cs.find((c) => c.type === "Coincident");
+    expect(coincident).toBeDefined();
+    expect(coincident!.entities).toEqual(["e2", "ref1"]);
+    expect(coincident!.positions).toEqual(["Start", "End"]);
+  });
+
+  it("emits Perpendicular / Parallel against a LOCKED reference line", () => {
+    // H/V wins over both, so use off-axis geometry (mirrors the tests above).
+    const refDiag: SketchEntity = { id: "ref2", type: "Line", p0: [0, 0], p1: [40, 40], referenceLocked: true };
+
+    const perp: SketchEntity = { id: "e2", type: "Line", p0: [40, 40], p1: [0, 80] };
+    expect(inferConstraints([perp], [refDiag], opts()).find((c) => c.type === "Perpendicular")).toMatchObject({
+      entities: ["e2", "ref2"],
+    });
+
+    const par: SketchEntity = { id: "e3", type: "Line", p0: [0, 20], p1: [40, 60] };
+    expect(inferConstraints([par], [refDiag], opts()).find((c) => c.type === "Parallel")).toMatchObject({
+      entities: ["e3", "ref2"],
+    });
+  });
+
+  it("the locked entity is never itself given an H/V constraint (it is not NEW)", () => {
+    // Only `newEntities` get orientation constraints; the reference set is read-only.
+    const next: SketchEntity = { id: "e2", type: "Line", p0: [0, 20], p1: [40, 20] };
+    const cs = inferConstraints([next], [refLine], opts());
+    expect(cs.every((c) => !c.entities.includes("ref1") || c.type === "Coincident")).toBe(true);
+    expect(cs.some((c) => c.type === "Horizontal" && c.entities[0] === "e2")).toBe(true);
+  });
+});
