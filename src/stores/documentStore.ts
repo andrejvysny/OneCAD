@@ -83,7 +83,21 @@ export interface DocumentState extends DocumentProjection {
   removeSketch(id: string): void;
   /** Push a solver result onto a sketch (drives chrome bar + inspector DOF). */
   setSketchSolve(id: string, dof: number, status: SketchStatus): void;
+  /**
+   * Stamp a fresh LOCAL geometry token on a sketch (no-op when it is not registered).
+   *
+   * For the one case the frontend knows a sketch's geometry moved but no backend
+   * projection will say so: the sketch→sketch switch closes A on the wire while the
+   * mock lane publishes nothing, leaving A's always-visible static layer showing its
+   * entry-time content. `local:<n>` is monotonic within a session and cannot collide
+   * with a backend token — `applySnapshot` replaces the whole `sketches` record, so a
+   * local stamp never has to coexist with a hydrated one for the same id.
+   */
+  bumpSketchGeometry(id: string): void;
 }
+
+/** Monotonic counter behind the `local:<n>` tokens {@link DocumentState.bumpSketchGeometry} mints. */
+let localGeometryTokenSeq = 0;
 
 /** Map the wire solver state (SCHEMA §7.4) → the tree/inspector status. */
 export function docSketchStatus(
@@ -233,6 +247,15 @@ export const documentStore = createStore<DocumentState>()((set) => ({
       const sketch = s.sketches[id];
       if (!sketch) return {};
       return { sketches: { ...s.sketches, [id]: { ...sketch, dof, status } } };
+    });
+  },
+
+  bumpSketchGeometry(id) {
+    set((s) => {
+      const sketch = s.sketches[id];
+      if (!sketch) return {};
+      const geometryToken = `local:${++localGeometryTokenSeq}`;
+      return { sketches: { ...s.sketches, [id]: { ...sketch, geometryToken } } };
     });
   },
 }));

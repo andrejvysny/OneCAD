@@ -246,6 +246,64 @@ describe("SketchStaticSync editing (mode enter/exit)", () => {
   });
 });
 
+describe("SketchStaticSync editing (sketch→sketch switch)", () => {
+  it("reloads the CLOSED sketch when its token bumps while another sketch is active", async () => {
+    // The contract SketchController.switchTo relies on: A's layer copy is stale the
+    // moment A closes, and the ONLY signal is its geometryToken. The mode never
+    // changes across a switch, so the sketch→model refetch above never fires here.
+    documentStore.setState({
+      sketches: { A: meta("A", true, "wire:A:v1"), B: meta("B", true, "wire:B:v1") },
+    });
+    const layer = fakeLayer();
+    const client = fakeClient();
+    sync = new SketchStaticSync();
+    sync.attach(fakeEngine(layer), client);
+    await tick();
+
+    toolStore.getState().setMode("sketch", "A");
+    viewportStore.setState({ activeSketchId: "A" });
+    await tick();
+    // The switch lands: B is the edited sketch, A is closed and back on the layer.
+    viewportStore.setState({ activeSketchId: "B" });
+    await tick();
+    client.getSketch.mockClear();
+    layer.setSketch.mockClear();
+    layer.removeSketch.mockClear();
+
+    documentStore.setState({
+      sketches: { A: meta("A", true, "local:1"), B: meta("B", true, "wire:B:v1") },
+    });
+    await tick();
+
+    expect(layer.removeSketch).toHaveBeenCalledWith("A"); // stale fills never stay pickable
+    expect(client.getSketch).toHaveBeenCalledWith("A");
+    expect(client.getSketch).not.toHaveBeenCalledWith("B");
+    expect(layer.setSketch).toHaveBeenCalledOnce();
+  });
+
+  it("does NOT refetch a sketch whose token bumps while IT is the one being edited", async () => {
+    documentStore.setState({ sketches: { A: meta("A", true, "wire:A:v1") } });
+    const layer = fakeLayer();
+    const client = fakeClient();
+    sync = new SketchStaticSync();
+    sync.attach(fakeEngine(layer), client);
+    await tick();
+
+    toolStore.getState().setMode("sketch", "A");
+    viewportStore.setState({ activeSketchId: "A" });
+    await tick();
+    client.getSketch.mockClear();
+
+    documentStore.setState({ sketches: { A: meta("A", true, "local:2") } });
+    await tick();
+
+    // The live SketchObject owns A's geometry while it is open — refetching would
+    // race the session, so the diff drops the copy and waits for the exit refetch.
+    expect(layer.removeSketch).toHaveBeenCalledWith("A");
+    expect(client.getSketch).not.toHaveBeenCalled();
+  });
+});
+
 describe("SketchStaticSync fill degradation + selection mirror", () => {
   it("still builds the sketch with empty regions when getSketchRegions rejects", async () => {
     documentStore.setState({ sketches: { s1: meta("s1", true) } });

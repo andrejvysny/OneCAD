@@ -542,6 +542,61 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     expect(clientMock.endPreview).not.toHaveBeenCalled();
   });
 
+  it("the edge-op re-edit's result hint SURVIVES its reset to select", async () => {
+    // Hint-clobber regression: the dim-edit tail published its result and THEN called
+    // setTool("select"), whose synchronous sweep cleared it.
+    build();
+    documentStore.setState({
+      features: [
+        { id: "feat-fi", kind: "fillet", opType: "Fillet", label: "Fillet", valueText: "2.0 mm", status: "ok" },
+      ],
+    });
+    await controller.editEdgeOpFeature("feat-fi", "Fillet");
+    await flush();
+
+    toolChipStore.getState().onValue?.(4);
+    await flush();
+
+    expect(toolStore.getState().modelTool).toBe("select");
+    expect(viewportStore.getState().statusHint?.message).toBe("Fillet radius updated");
+  });
+
+  it("a FAILED edge-op re-edit keeps its reason on screen too", async () => {
+    build();
+    clientMock.applyEditCommand.mockRejectedValueOnce(new Error("kernel said no"));
+    documentStore.setState({
+      features: [
+        { id: "feat-fi", kind: "fillet", opType: "Fillet", label: "Fillet", valueText: "2.0 mm", status: "ok" },
+      ],
+    });
+    await controller.editEdgeOpFeature("feat-fi", "Fillet");
+    await flush();
+
+    toolChipStore.getState().onValue?.(4);
+    await flush();
+
+    expect(toolStore.getState().modelTool).toBe("select");
+    expect(viewportStore.getState().statusHint?.message).toBe("Fillet failed: kernel said no");
+    expect(viewportStore.getState().statusHint?.severity).toBe("error");
+  });
+
+  it("the shell re-edit's result hint SURVIVES its reset to select", async () => {
+    build();
+    documentStore.setState({
+      features: [
+        { id: "feat-sh", kind: "fillet", opType: "Shell", label: "Shell", valueText: "2.0 mm", status: "ok" },
+      ],
+    });
+    await controller.editShellFeature("feat-sh");
+    await flush();
+
+    toolChipStore.getState().onValue?.(3);
+    await flush();
+
+    expect(toolStore.getState().modelTool).toBe("select");
+    expect(viewportStore.getState().statusHint?.message).toBe("Shell thickness updated");
+  });
+
   it("editEdgeOpFeature refuses a Shell row that merely shares the folded `fillet` kind", async () => {
     build();
     documentStore.setState({

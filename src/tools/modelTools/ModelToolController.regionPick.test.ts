@@ -48,6 +48,15 @@ const R1: SketchRegion = {
   previewTriangles: { positions: [100, 100, 140, 100, 140, 140, 100, 140], indices: [0, 1, 2, 0, 2, 3] },
 };
 
+// A region the profile builder REFUSES (degenerate triangulation) — the pick has
+// nothing extrudable to offer, so it must refuse with a hint instead of arming.
+const R_DEGENERATE: SketchRegion = {
+  regionId: "rbad",
+  outerLoop: [],
+  holes: [],
+  previewTriangles: { positions: [0, 0], indices: [] },
+};
+
 // A vertical axis line to the LEFT of r1 (valid: does not cross the profile).
 const AXIS_LINE = { id: "axis1", type: "Line" as const, p0: [95, 100] as [number, number], p1: [95, 140] as [number, number] };
 
@@ -293,6 +302,35 @@ describe("ModelToolController region pick", () => {
     click(130, 110);
     await flush();
     expect(clientMock.applyOperation).not.toHaveBeenCalled();
+  });
+
+  it("(c2) a pick with ZERO extrudable regions refuses with a hint that SURVIVES the reset to select", async () => {
+    // Hint-clobber regression: the refusal used to publish the hint and THEN call
+    // setTool("select"), whose synchronous tool-change sweep cleared it — the user
+    // saw an inert toolbar and no reason at all.
+    build(() => Promise.resolve({ regions: [R_DEGENERATE] }));
+    selectionStore.getState().set([{ kind: "sketch", id: "sk" }]);
+    toolStore.getState().setTool("extrude");
+    await flush();
+    await flush();
+
+    expect(engineMock.showRegionPick).not.toHaveBeenCalled();
+    expect(clientMock.beginPreview).not.toHaveBeenCalled();
+    expect(toolStore.getState().modelTool).toBe("select");
+    expect(viewportStore.getState().statusHint?.message).toBe("No closed region to extrude");
+    expect(viewportStore.getState().statusHint?.severity).toBe("error");
+  });
+
+  it("(c3) the same refusal on the REVOLVE pick keeps its hint too", async () => {
+    build(() => Promise.resolve({ regions: [R_DEGENERATE, { ...R_DEGENERATE, regionId: "rbad2" }] }));
+    selectionStore.getState().set([{ kind: "sketch", id: "sk" }]);
+    toolStore.getState().setTool("revolve");
+    await flush();
+    await flush();
+
+    expect(engineMock.showRegionPick).not.toHaveBeenCalled();
+    expect(toolStore.getState().modelTool).toBe("select");
+    expect(viewportStore.getState().statusHint?.message).toBe("No closed region to revolve");
   });
 
   it("(d) a stale finishSketch result (arm re-triggered) is dropped — no second region pick", async () => {

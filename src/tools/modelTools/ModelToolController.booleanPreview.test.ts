@@ -191,6 +191,43 @@ describe("ModelToolController boolean kernel preview", () => {
     expect(selectionStore.getState().selected).toEqual([{ kind: "body", id: "body1" }]);
   });
 
+  it("the success hint SURVIVES the commit's reset to select", async () => {
+    // Hint-clobber regression: the tail published "Union applied" and then called
+    // setTool("select"), whose synchronous sweep cleared it — the confirmation never
+    // reached the status bar.
+    __setExactPreviewTimeoutForTests(2000);
+    build();
+    await armBoolean();
+
+    toolChipStore.getState().onApply?.();
+    await flush();
+    const calls = clientMock.updatePreview.mock.calls;
+    const [sessionId, , epoch] = calls[calls.length - 1];
+    previewCb?.({ sessionId, epoch, bodyId: "preview", bodies: [], replacedBodyIds: ["body2"] });
+    await flush();
+
+    expect(toolStore.getState().modelTool).toBe("select");
+    expect(viewportStore.getState().statusHint?.message).toBe("Union applied");
+  });
+
+  it("a re-edit's success hint survives its reset to select too", async () => {
+    build();
+    documentStore.setState({
+      bodies: { body1: { id: "body1", name: "Body 1", visible: true } },
+      features: [
+        { id: "feat-bool", kind: "boolean", opType: "Boolean", label: "Union", valueText: "", status: "ok" },
+      ],
+    });
+
+    await controller.editBooleanFeature("feat-bool");
+    await flush();
+    toolChipStore.getState().onApply?.();
+    await flush();
+
+    expect(toolStore.getState().modelTool).toBe("select");
+    expect(viewportStore.getState().statusHint?.message).toBe("Boolean changed to Union");
+  });
+
   it("a failed final exact preview blocks the commit, re-arms, and names the kernel reason", async () => {
     __setExactPreviewTimeoutForTests(2000);
     build();

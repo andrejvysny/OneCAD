@@ -1,8 +1,8 @@
 //! Sketch-constraint **serde proof** (S4b) against the REAL C++ OCCT worker.
 //!
-//! The five user-applicable geometric kinds the frontend marshaller
+//! The user-applicable geometric kinds the frontend marshaller
 //! (`sketchWireMap.ts toWireConstraint`) newly emits — Fixed / OnCurve / Tangent /
-//! Concentric / Symmetric — must survive the full path: frontend wire JSON →
+//! Concentric / Symmetric / Equal / Midpoint — must survive the full path: frontend wire JSON →
 //! `onecad_core::Constraint` (serde, `constraint.rs`) → worker wire (`worker/wire.rs
 //! wire_constraint`) → the C++ `WireSketch`/`PlaneGCS` solver. This test drives the
 //! same single-writer [`DocumentRuntime`] as `sketch_reentry.rs` and asserts, for
@@ -235,6 +235,44 @@ async fn user_constraints_round_trip_through_real_worker() {
             position: CurvePosition::Arbitrary,
         },
         "OnCurve",
+    )
+    .await;
+
+    // Equal — two circles with DIFFERENT radii (removes 1 DOF).
+    assert_constrains(
+        &wm,
+        0x5c05,
+        vec![
+            point(0x01, 0.0, 0.0),
+            point(0x02, 20.0, 0.0),
+            circle(0x10, 0x01, 5.0),
+            circle(0x11, 0x02, 3.0),
+        ],
+        Constraint::Equal {
+            id: cid(0x90),
+            entity1: eid(0x10),
+            entity2: eid(0x11),
+        },
+        "Equal",
+    )
+    .await;
+
+    // Midpoint — a free point NOT at the line's midpoint (removes 2 DOF).
+    assert_constrains(
+        &wm,
+        0x5c06,
+        vec![
+            point(0x01, 3.0, 7.0),
+            point(0x02, 0.0, 0.0),
+            point(0x03, 10.0, 0.0),
+            line(0x10, 0x02, 0x03),
+        ],
+        Constraint::Midpoint {
+            id: cid(0x90),
+            point: eid(0x01),
+            line: eid(0x10),
+        },
+        "Midpoint",
     )
     .await;
 

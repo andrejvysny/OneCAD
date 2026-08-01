@@ -267,6 +267,33 @@ Scope (user decisions): construction toggle + T/E/M constraints + point + shapes
 - [ ] Marquee: rightward drag = solid border, selects only fully-inside; leftward = dashed, touch-selects; Shift adds; Esc cancels; after any marquee LMB orbit still works in model mode
 - [ ] History: pattern/mirror/chamfer/shell rows show their OWN icons
 
+## MODELING-REACH wave (plan approved 2026-08-01, `~/.claude/plans/do-thorough-exploration-and-rosy-lollipop.md`; adversarial review REVISE → 2 MAJOR + 3 MINOR folded)
+Scope (user): datum offset planes + measure V1a + units-display + display-mode/fit/isolate UX + SKETCH-POWER debt incl. arc-endpoint handles (own gate). Feature rename NOT chosen.
+### Wave 0a — debt quick batch — SHIPPED 2026-08-01
+- [x] Equal/Midpoint real-worker DOF proofs: Equal circles 10→9 (−1), Midpoint off-midpoint point 6→4 (−2); all 7 kinds now proven (Fixed 2→0, Concentric 10→8, Tangent 9→8, Symmetric 8→6, OnCurve 6→5)
+- [x] Hint-clobber → `resetToSelect(hint?)` (setTool FIRST, last word wins; StatusHintOpts derived from the store so it can't drift): 20 sites converted (8 hazards + 3 inline workarounds + 9 same-shape preventives — class can't regrow), 8 bare no-hint setTool calls deliberately untouched; 9 red-first pins (zero-region extrude/revolve, success/failure hints survive commit tails)
+- [x] Stale static layer → `documentStore.bumpSketchGeometry` (`local:<n>`, no-op unregistered, hydration-collision-safe) called unconditionally in switchTo's closing block BEFORE superseded returns (A is closed either way); sketchStaticSync needed NO change (token diff already reloads); red-first [j]/[j2] + control [j3]
+- [x] **Gate W0a PASSED** (2026-08-01): tsc 0 · FE 1674/126 · e2e 76/76 · cargo 547/0 vs real worker · clippy/fmt clean
+### Wave 0b — arc-endpoint wire handles (cross-layer; SCHEMA §7.4 e3.start becomes true)
+- [ ] Worker: SketchArc endpoint ids + WireSketch `.start`/`.end` handles + ArcRules tag-0 (redundancy-invisible, asserted) + angle echo + naive-DOF −4-only
+- [ ] Rust: Coincident optional point positions (serde-frozen-safe) + wire `positions` emission
+- [ ] FE: toWireConstraint arc-endpoint resolve + hydration positions merge + slot Coincident×4 → DOF 5 (measure FE-shaped number first; dup-center inflation → separate backlog if confirmed)
+- [ ] Red-first ctest ("unresolved point handle" today); SolveDrag proof on UNWELDED bare arc (pin-all limitation documented); **Gate W0b**
+### Wave 1 — datum offset planes V1 (world base + sketch-on-datum + DeleteDatum; worker untouched)
+- [ ] Core: add_datum resolve-at-creation frozen (Rust = basis authority) + DeleteDatum (referenced-guard) + add_sketch datum-attachment stamp/validate
+- [ ] Rust: DatumDto + DocumentProjection.datums + projection fill
+- [ ] FE: wire arms + documentStore.datums + mock (undo snap!) + datum tool (D, PlanePicker verbatim + offset chip + ghost) + DatumLayer/datumSync + tree section + sketch-on-datum (newOnDatum both clients)
+- [ ] Real-worker proof: datum-hosted extrude bbox z∈[10,15]; legacy-swapped-bases pin ("XZ offset 10" moves +X); e2e ×2; **Gate W1**
+### Wave 2 — units foundation + measure V1a
+- [ ] `src/units/format.ts` single seam (parseLength mm/cm/m/in; dimensionFormat shim; valueText round-trip guards)
+- [ ] Rust: parse_query_element keeps size/magnitude/curveType + `element_info` command (face_sketch_plane clone)
+- [ ] FE: measure tool (`?`, EXCLUDED from cross-mode fallback — would finish sketch) + measureTool FSM + MeasureOverlay mountChip portals + mock values
+- [ ] Real-worker proof: face 800 / edge 40 / center (−10,20,25) non-standard basis; **Gate W2**
+### Wave 3 — display-mode + fit-selection + isolate
+- [ ] Display mode real (MeshIngest owner; default → shadedEdges; wireframe = edges-only)
+- [ ] ⇧F fits selection (fitToBodies bounds param); NavPill
+- [ ] Transient isolate (⇧I; never persisted; BOTH preview-interplay directions guarded); **Gate W3**
+
 ## Execution rules
 - Orchestrator: decisions/review only. WPs → Opus 4.8 subagents.
 - RISKY WP = extra independent review pass.

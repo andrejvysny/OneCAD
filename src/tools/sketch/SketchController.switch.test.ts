@@ -29,6 +29,7 @@ import type {
 } from "@/ipc/types";
 import { toolStore } from "@/stores/toolStore";
 import { viewportStore } from "@/stores/viewportStore";
+import { documentStore, type SketchMeta } from "@/stores/documentStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { settingsStore } from "@/stores/settingsStore";
 import { resetStores } from "@/test/resetStores";
@@ -105,6 +106,11 @@ function makeClientMock(calls: Calls) {
       },
     ),
   };
+}
+
+/** A tree-registered sketch with a backend-shaped geometry token. */
+function sketchMeta(id: string): SketchMeta {
+  return { id, name: id, visible: true, dof: 0, status: "under", geometryToken: `wire:${id}:v1` };
 }
 
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
@@ -323,6 +329,54 @@ describe("SketchController sketch→sketch switch", () => {
     expect(sketchStore.getState().session).toBeNull();
     expect(viewportStore.getState().statusHint?.message).toMatch(/Enter sketch failed/);
     errorSpy.mockRestore();
+  });
+
+  // ── the closed sketch's static layer must be told its geometry moved ─────────
+  //
+  // A's always-visible SketchStaticLayer copy was fetched at ENTRY. The switch
+  // commits A's edits on the wire and then re-shows that stale copy — the real lane
+  // self-heals because a backend projection bumps A's geometryToken, but the mock
+  // lane publishes nothing, so the switch stamps a LOCAL token itself.
+
+  it("[j] the switch bumps the CLOSED sketch's geometryToken so its static layer refetches", async () => {
+    documentStore.setState({ sketches: { A: sketchMeta("A"), B: sketchMeta("B") } });
+    toolStore.getState().setMode("sketch", "A");
+    await settle();
+    const beforeA = documentStore.getState().sketches.A.geometryToken;
+    const beforeB = documentStore.getState().sketches.B.geometryToken;
+
+    toolStore.getState().setMode("sketch", "B");
+    await settle();
+
+    expect(documentStore.getState().sketches.A.geometryToken).not.toBe(beforeA);
+    // Only the CLOSED sketch is stamped — B's copy is the one being edited.
+    expect(documentStore.getState().sketches.B.geometryToken).toBe(beforeB);
+  });
+
+  it("[j2] a SUPERSEDED switch still bumps A — A really closed", async () => {
+    documentStore.setState({
+      sketches: { A: sketchMeta("A"), B: sketchMeta("B"), C: sketchMeta("C") },
+    });
+    toolStore.getState().setMode("sketch", "A");
+    await settle();
+    const beforeA = documentStore.getState().sketches.A.geometryToken;
+
+    toolStore.getState().setMode("sketch", "B");
+    toolStore.getState().setMode("sketch", "C"); // supersedes the B switch mid-close
+    await settle();
+
+    expect(sketchStore.getState().session?.sketchId).toBe("C");
+    expect(documentStore.getState().sketches.A.geometryToken).not.toBe(beforeA);
+  });
+
+  it("[j3] a NON-switch entry never bumps anything", async () => {
+    documentStore.setState({ sketches: { A: sketchMeta("A") } });
+    const before = documentStore.getState().sketches.A.geometryToken;
+
+    toolStore.getState().setMode("sketch", "A");
+    await settle();
+
+    expect(documentStore.getState().sketches.A.geometryToken).toBe(before);
   });
 
   it("[h] re-activating the SAME sketch is a no-op (no close/reopen churn)", async () => {

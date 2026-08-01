@@ -316,4 +316,27 @@ describe("ModelToolController pattern/mirror re-edit honesty", () => {
       }),
     );
   });
+
+  it("the pattern commit's done hint SURVIVES its reset to select", async () => {
+    // Hint-clobber regression: `commitPattern` published the done hint and THEN
+    // called setTool("select"), whose synchronous sweep cleared it.
+    build();
+    clientMock.getOperationParams.mockResolvedValue({
+      sourceBodyId: "body1",
+      direction: [0, 1, 0],
+      spacing: { value: 33 },
+      count: 7,
+    });
+    documentStore.setState({
+      features: [{ id: "feat-lp", kind: "boolean", opType: "LinearPattern", label: "Linear Pattern", valueText: "×7", status: "ok" }],
+    });
+
+    await controller.editLinearPatternFeature("feat-lp");
+    await flush();
+    toolChipStore.getState().onApply?.();
+    await flush();
+
+    expect(toolStore.getState().modelTool).toBe("select");
+    expect(viewportStore.getState().statusHint?.message).toBe("Linear pattern ×7");
+  });
 });

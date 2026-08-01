@@ -323,6 +323,14 @@ export class SketchController {
         } catch (e) {
           console.error("[sketch] switch: closing the previous sketch failed", e);
         }
+        // A is CLOSED now — whatever happens to this switch below. Its always-visible
+        // static layer still holds the copy fetched at entry, and the only signal
+        // SketchStaticSync diffs is the geometryToken (the MODE never changes across a
+        // switch, so its sketch→model refetch never fires). The real lane happens to
+        // bump the token via the projection; the mock lane publishes nothing, so stamp
+        // it here — unconditionally, because the superseded/failed paths below leave A
+        // just as closed and just as stale.
+        documentStore.getState().bumpSketchGeometry(closing.sketchId);
       }
       // Superseded mid-close: a mode exit already tore everything down, or a newer
       // target landed (the drain below runs it instead).

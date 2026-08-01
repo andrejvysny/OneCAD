@@ -19,7 +19,11 @@
  *   (g) the ~0° confirm refusal survives the new commit path.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { ModelToolController, __setExactPreviewTimeoutForTests } from "./ModelToolController";
+import {
+  ModelToolController,
+  __setBodyLoadTimeoutForTests,
+  __setExactPreviewTimeoutForTests,
+} from "./ModelToolController";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import type { CadClient } from "@/ipc/client";
 import type {
@@ -192,6 +196,7 @@ describe("ModelToolController revolve kernel preview", () => {
     controller?.dispose();
     container.remove();
     __setExactPreviewTimeoutForTests(4000);
+    __setBodyLoadTimeoutForTests(4000);
   });
 
   function pointer(type: string, x: number, y: number, button: number, buttons: number): void {
@@ -388,6 +393,21 @@ describe("ModelToolController revolve kernel preview", () => {
 
     expect(clientMock.endPreview).toHaveBeenCalledWith("pv-1", true);
     expect(clientMock.applyOperation).not.toHaveBeenCalled(); // never a second ad-hoc op
+  });
+
+  it("the success hint SURVIVES finishRevolve's reset to select", async () => {
+    // Hint-clobber regression: `finishRevolve` published "Revolved" and THEN called
+    // setTool("select"), whose synchronous sweep cleared it.
+    __setBodyLoadTimeoutForTests(0); // no mesh ingest here — finish on the bounded wait
+    build({ regions: [R0] });
+    await armAndPickAxis();
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    for (let i = 0; i < 6; i++) await flush();
+
+    expect(clientMock.endPreview).toHaveBeenCalledWith("pv-1", true);
+    expect(toolStore.getState().modelTool).toBe("select");
+    expect(viewportStore.getState().statusHint?.message).toBe("Revolved");
   });
 
   it("proceeds with the commit when no exact candidate ever arrives (bounded barrier)", async () => {

@@ -42,7 +42,7 @@ import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
 import { buildBodyObjects, getEntry, remove as removeMesh, swap as swapMesh } from "@/viewport/mesh/meshRegistry";
 import { toolStore } from "@/stores/toolStore";
 import { trace, traceWarn } from "@/debug/trace";
-import { viewportStore } from "@/stores/viewportStore";
+import { viewportStore, type ViewportState } from "@/stores/viewportStore";
 import { documentStore, type SketchMeta } from "@/stores/documentStore";
 import { selectionStore, type EntityRef } from "@/stores/selectionStore";
 import { toolChipStore } from "@/stores/toolChipStore";
@@ -142,6 +142,9 @@ let exactPreviewTimeoutMs = 4000;
 export function __setExactPreviewTimeoutForTests(ms: number): void {
   exactPreviewTimeoutMs = ms;
 }
+
+/** The presentation policy `viewportStore.setStatusHint` accepts (severity + stickiness). */
+type StatusHintOpts = Parameters<ViewportState["setStatusHint"]>[1];
 
 type ExactPreviewOutcome = { ok: true } | { ok: false; error: PreviewFailure };
 
@@ -437,10 +440,9 @@ export class ModelToolController {
           lastPending = s.pendingExtrudeSketch;
           if (s.pendingExtrudeSketch && toolStore.getState().mode === "model") {
             viewportStore.getState().setPendingExtrude(null);
-            toolStore.getState().setTool("select");
-            viewportStore
-              .getState()
-              .setStatusHint("Select one closed sketch region, then choose Extrude", { sticky: true });
+            this.resetToSelect("Select one closed sketch region, then choose Extrude", {
+              sticky: true,
+            });
           }
         }
       }),
@@ -464,25 +466,21 @@ export class ModelToolController {
     const revolvePhase = this.revolve.phase;
     if (revolvePhase === "armed" || revolvePhase === "dragging" || revolvePhase === "axisPick") {
       this.cancelRevolve();
-      toolStore.getState().setTool("select"); // Esc-ladder tail; also clears the hint
-      viewportStore
-        .getState()
-        .setStatusHint("Sketch changed — revolve preview cancelled", {
-          severity: "info",
-          sticky: true,
-        });
+      // Esc-ladder tail (the reset also bumps commitGen).
+      this.resetToSelect("Sketch changed — revolve preview cancelled", {
+        severity: "info",
+        sticky: true,
+      });
       return;
     }
     if (this.previewSessions.length === 0) return;
     if (this.extrude.phase !== "armed" && this.extrude.phase !== "dragging") return;
     this.cancelPreview();
-    toolStore.getState().setTool("select"); // Esc-ladder tail (also bumps commitGen)
-    viewportStore
-      .getState()
-      .setStatusHint("Sketch changed — extrude preview cancelled", {
-        severity: "info",
-        sticky: true,
-      });
+    // Esc-ladder tail (the reset also bumps commitGen).
+    this.resetToSelect("Sketch changed — extrude preview cancelled", {
+      severity: "info",
+      sticky: true,
+    });
   }
 
   /**
@@ -506,24 +504,35 @@ export class ModelToolController {
     const shellArmed = this.shell.phase === "armed" || this.shell.phase === "dragging";
     if (filletArmed && !this.filletEditFeatureId) {
       this.cancelFillet();
-      toolStore.getState().setTool("select"); // Esc-ladder tail; also clears the hint
-      viewportStore
-        .getState()
-        .setStatusHint("Model changed — re-select edges", { severity: "info", sticky: true });
+      this.resetToSelect("Model changed — re-select edges", { severity: "info", sticky: true }); // Esc-ladder tail
       this.updateDebug();
       return;
     }
     if (shellArmed && !this.shellEditFeatureId) {
       this.cancelShell();
-      toolStore.getState().setTool("select");
-      viewportStore
-        .getState()
-        .setStatusHint("Model changed — re-select faces", { severity: "info", sticky: true });
+      this.resetToSelect("Model changed — re-select faces", { severity: "info", sticky: true });
       this.updateDebug();
     }
   }
 
   // ── tool arming ────────────────────────────────────────────────────────────
+
+  /**
+   * Leave the active tool for `select` and publish the message the user must read —
+   * in THAT order, always.
+   *
+   * `setTool` drives `onToolChange` SYNCHRONOUSLY, and that sweep ends on
+   * `setStatusHint(null)` for the `select` tool. So a flow that publishes its hint
+   * first and resets the tool afterwards loses the message entirely — the defect
+   * class this helper exists to make unrepresentable. The contract it encodes:
+   * the cancel sweep is idempotent and must never emit a hint of its own, so the
+   * LAST word wins and the caller's message is what survives. Call with no `hint`
+   * to reset and clear.
+   */
+  private resetToSelect(hint?: string, opts?: StatusHintOpts): void {
+    toolStore.getState().setTool("select");
+    viewportStore.getState().setStatusHint(hint ?? null, opts);
+  }
 
   private onToolChange(tool: string): void {
     // Any tool switch invalidates a pending arm (drop a late finishSketch result) and
@@ -1023,8 +1032,7 @@ export class ModelToolController {
     // Only regions with an extrudable profile are pickable (others can't be built).
     const pickable = regions.filter((r) => profileFromRegion(r) !== null);
     if (pickable.length === 0) {
-      viewportStore.getState().setStatusHint(`No closed region to ${noun}`, { severity: "error", sticky: true });
-      toolStore.getState().setTool("select");
+      this.resetToSelect(`No closed region to ${noun}`, { severity: "error", sticky: true });
       return;
     }
     if (pickable.length === 1) {
@@ -1082,8 +1090,7 @@ export class ModelToolController {
     const valid = regions.filter((_, i) => profiles[i] !== null);
     const validProfiles = profiles.filter((p): p is PrismProfile => p !== null);
     if (valid.length === 0) {
-      viewportStore.getState().setStatusHint(`No closed region to ${kind}`, { severity: "error", sticky: true });
-      toolStore.getState().setTool("select");
+      this.resetToSelect(`No closed region to ${kind}`, { severity: "error", sticky: true });
       return;
     }
     if (kind === "extrude") {
@@ -1225,13 +1232,10 @@ export class ModelToolController {
       const boundProfile = bound ? profileFromRegion(bound) : null;
       if (!bound || !boundProfile) {
         const available = read.regions.map((candidate) => candidate.regionId).join(", ") || "none";
-        toolStore.getState().setTool("select"); // clears the hint — re-set it after
-        viewportStore
-          .getState()
-          .setStatusHint(`Revolve region ${regionId} is stale or invalid; available: ${available}`, {
-            severity: "error",
-            sticky: true,
-          });
+        this.resetToSelect(
+          `Revolve region ${regionId} is stale or invalid; available: ${available}`,
+          { severity: "error", sticky: true },
+        );
         return;
       }
       // Pure read (no session opened) — see armExtrude (MODEL-HARDEN W0.5). The revolve
@@ -1257,8 +1261,7 @@ export class ModelToolController {
     const region = read.regions[0];
     const profile = region ? profileFromRegion(region) : null;
     if (!region || !profile) {
-      toolStore.getState().setTool("select"); // clears the hint — re-set it after
-      viewportStore.getState().setStatusHint("No closed region to revolve", { severity: "error", sticky: true });
+      this.resetToSelect("No closed region to revolve", { severity: "error", sticky: true });
       return;
     }
     const session = await this.deps.client.getSketch(sketchId); // plane + entities
@@ -1298,13 +1301,10 @@ export class ModelToolController {
       if (storedAxisLineId) {
         seedAxis = candidates.find((c) => c.id === storedAxisLineId) ?? null;
         if (!seedAxis) {
-          toolStore.getState().setTool("select"); // clears the hint — re-set it after
-          viewportStore
-            .getState()
-            .setStatusHint(`Revolve axis line ${storedAxisLineId} no longer exists in the sketch`, {
-              severity: "error",
-              sticky: true,
-            });
+          this.resetToSelect(
+            `Revolve axis line ${storedAxisLineId} no longer exists in the sketch`,
+            { severity: "error", sticky: true },
+          );
           return;
         }
       } else {
@@ -1946,16 +1946,17 @@ export class ModelToolController {
     this.revolveArmedDown = false;
     if (this.dragging === "revolve") this.dragging = null;
     const unique = bodyIds.filter((id, i, a) => a.indexOf(id) === i);
+    let completionHint: string | undefined;
     if (unique.length > 0) {
       selectionStore.getState().set(unique.map((id) => ({ kind: "body" as const, id })));
-      viewportStore.getState().setStatusHint(unique.length > 1 ? `Revolved ${unique.length} bodies` : "Revolved");
+      completionHint = unique.length > 1 ? `Revolved ${unique.length} bodies` : "Revolved";
       // Consumed sketch auto-hides. Backend-backed (TRUST wave): a local flip pops
       // back visible on the next projection. Issued from `finishRevolve`, i.e. only
       // after the WHOLE commit loop terminated — `rollbackFailedCommit` never reaches
       // here, so an extra undo step is the only cost.
       if (consumedSketch && !wasReedit) void setSketchVisible(consumedSketch, false);
     }
-    toolStore.getState().setTool("select");
+    this.resetToSelect(completionHint);
     this.updateDebug();
   }
 
@@ -2239,8 +2240,7 @@ export class ModelToolController {
     this.shellFaces = [];
     this.shellEditFeatureId = undefined;
     this.shellStoredParams = undefined;
-    toolStore.getState().setTool("select");
-    viewportStore.getState().setStatusHint("Shelled");
+    this.resetToSelect("Shelled");
     this.updateDebug();
   }
 
@@ -2253,6 +2253,9 @@ export class ModelToolController {
     if (step.effect === "commit") this.shell = step.state;
     this.deps.engine.setOrbitSuppressed(false);
     toolChipStore.getState().clear();
+    // The result message is captured, not published, until the tool has been reset —
+    // see `resetToSelect` for why publishing first would lose it.
+    let failure: string | null = null;
     try {
       // A re-edit changes ONLY the thickness: deep-merge into the stored params so the
       // shell's open faces + target survive (a whole-params replace would wipe them).
@@ -2263,15 +2266,18 @@ export class ModelToolController {
         }),
       );
       this.applyResult(res);
-      viewportStore.getState().setStatusHint("Shell thickness updated");
     } catch (e) {
-      viewportStore.getState().setStatusHint(`Shell failed: ${errMessage(e)}`, { severity: "error", sticky: true });
+      failure = errMessage(e);
     }
     this.shell = shellInit();
     this.shellFaces = [];
     this.shellEditFeatureId = undefined;
     this.shellStoredParams = undefined;
-    toolStore.getState().setTool("select");
+    if (failure !== null) {
+      this.resetToSelect(`Shell failed: ${failure}`, { severity: "error", sticky: true });
+    } else {
+      this.resetToSelect("Shell thickness updated");
+    }
     this.updateDebug();
   }
 
@@ -2518,19 +2524,25 @@ export class ModelToolController {
   private async commitPattern(op: OperationOp, bodyId: string, doneHint: string): Promise<void> {
     this.deps.engine.hideGhostPreview();
     toolChipStore.getState().clear();
+    // The result message is captured, not published, until the tool has been reset —
+    // see `resetToSelect` for why publishing first would lose it.
+    let failure: string | null = null;
     try {
       const res = await this.client.applyOperation(op);
       this.applyResult(res);
       selectionStore.getState().set([{ kind: "body", id: bodyId }]);
-      viewportStore.getState().setStatusHint(doneHint);
     } catch (e) {
-      viewportStore.getState().setStatusHint(`Pattern failed: ${errMessage(e)}`, { severity: "error", sticky: true });
+      failure = errMessage(e);
     }
     this.linear = linearPatternInit();
     this.circular = circularPatternInit();
     this.mirror = mirrorInit();
     this.patternEditFeatureId = undefined;
-    toolStore.getState().setTool("select");
+    if (failure !== null) {
+      this.resetToSelect(`Pattern failed: ${failure}`, { severity: "error", sticky: true });
+    } else {
+      this.resetToSelect(doneHint);
+    }
     this.updateDebug();
   }
 
@@ -3495,8 +3507,7 @@ export class ModelToolController {
       completionHint = wasCut ? "Cut completed" : "Extruded";
       if (consumedSketch && !wasReedit) void setSketchVisible(consumedSketch, false);
     }
-    toolStore.getState().setTool("select");
-    viewportStore.getState().setStatusHint(completionHint);
+    this.resetToSelect(completionHint);
     this.commitBodyId = null;
     this.updateDebug();
   }
@@ -3648,12 +3659,9 @@ export class ModelToolController {
     this.filletEditFeatureId = undefined;
     this.filletStoredParams = undefined;
     this.filletEdges = [];
-    toolStore.getState().setTool("select");
-    viewportStore
-      .getState()
-      .setStatusHint(
-        `${kind === "Chamfer" ? "Chamfered" : "Filleted"} ${edgeCount} edge${edgeCount > 1 ? "s" : ""}`,
-      );
+    this.resetToSelect(
+      `${kind === "Chamfer" ? "Chamfered" : "Filleted"} ${edgeCount} edge${edgeCount > 1 ? "s" : ""}`,
+    );
     this.updateDebug();
   }
 
@@ -3667,6 +3675,9 @@ export class ModelToolController {
     if (step.effect === "commit") this.fillet = step.state;
     this.deps.engine.setOrbitSuppressed(false);
     toolChipStore.getState().clear();
+    // The result message is captured, not published, until the tool has been reset —
+    // see `resetToSelect` for why publishing first would lose it.
+    let failure: string | null = null;
     try {
       // A re-edit changes ONLY the radius: deep-merge into the stored params so the
       // fillet's edgeIds + typed edges survive (a whole-params replace would drop them).
@@ -3679,17 +3690,18 @@ export class ModelToolController {
         }),
       );
       this.applyResult(res);
-      viewportStore
-        .getState()
-        .setStatusHint(`${kind} ${kind === "Chamfer" ? "distance" : "radius"} updated`);
     } catch (e) {
-      viewportStore.getState().setStatusHint(`${kind} failed: ${errMessage(e)}`, { severity: "error", sticky: true });
+      failure = errMessage(e);
     }
     this.fillet = filletInit();
     this.filletEditFeatureId = undefined;
     this.filletStoredParams = undefined;
     this.filletEdges = [];
-    toolStore.getState().setTool("select");
+    if (failure !== null) {
+      this.resetToSelect(`${kind} failed: ${failure}`, { severity: "error", sticky: true });
+    } else {
+      this.resetToSelect(`${kind} ${kind === "Chamfer" ? "distance" : "radius"} updated`);
+    }
     this.updateDebug();
   }
 
@@ -3858,22 +3870,26 @@ export class ModelToolController {
     if (editFeatureId && storedParams) {
       this.boolean = booleanStep(this.boolean, { kind: "apply" }).state;
       toolChipStore.getState().clear();
+      // The result message is captured, not published, until the tool has been reset —
+      // see `resetToSelect` for why publishing first would lose it.
+      let failure: string | null = null;
       try {
         const res = await this.client.applyEditCommand(
           updateScalarParamsCommand(editFeatureId, "Boolean", storedParams, { operation }),
         );
         this.applyResult(res);
         selectionStore.getState().set([{ kind: "body", id: targetBodyId }]);
-        viewportStore.getState().setStatusHint(`Boolean changed to ${operation}`);
       } catch (e) {
-        viewportStore
-          .getState()
-          .setStatusHint(`${operation} failed: ${errMessage(e)}`, { severity: "error", sticky: true });
+        failure = errMessage(e);
       }
       this.boolean = booleanInit();
       this.booleanEditFeatureId = undefined;
       this.booleanStoredParams = undefined;
-      toolStore.getState().setTool("select");
+      if (failure !== null) {
+        this.resetToSelect(`${operation} failed: ${failure}`, { severity: "error", sticky: true });
+      } else {
+        this.resetToSelect(`Boolean changed to ${operation}`);
+      }
       this.updateDebug();
       return;
     }
@@ -3944,11 +3960,10 @@ export class ModelToolController {
     this.engine.setPreviewTint("normal");
     this.throttle.reset();
     selectionStore.getState().set([{ kind: "body", id: targetBodyId }]);
-    viewportStore.getState().setStatusHint(`${operation} applied`);
     this.boolean = booleanInit();
     this.booleanEditFeatureId = undefined;
     this.booleanStoredParams = undefined;
-    toolStore.getState().setTool("select");
+    this.resetToSelect(`${operation} applied`);
     this.updateDebug();
   }
 
@@ -4261,8 +4276,7 @@ export class ModelToolController {
       e.preventDefault();
       e.stopPropagation();
       this.cancelRegionPick();
-      viewportStore.getState().setStatusHint(null);
-      toolStore.getState().setTool("select");
+      this.resetToSelect();
       return;
     }
     // Esc during a boolean target pick steps back to armed(NewBody) — NOT the whole
