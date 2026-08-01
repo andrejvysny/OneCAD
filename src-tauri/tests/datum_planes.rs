@@ -386,6 +386,16 @@ async fn delete_datum_is_guarded_by_its_sketches() {
     })
     .expect("AddSketch");
 
+    // A DATUM-hosted sketch is not a FACE-hosted one: its projection row carries
+    // no `hostFace`, so the frontend's double-click-a-face re-entry can never
+    // mistake it for a sketch living on model geometry (SKETCH-ON-FACE W3).
+    assert!(
+        rt.projection().sketches[&sid.to_string()]
+            .host_face
+            .is_none(),
+        "a datum-hosted sketch has no host FACE"
+    );
+
     let err = rt
         .apply(EditCommand::DeleteDatum { datum: did })
         .expect_err("a referenced datum must not be deletable");

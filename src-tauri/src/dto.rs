@@ -46,6 +46,24 @@ pub enum SketchStatus {
     Error,
 }
 
+/// The model face a sketch is hosted on (`types.ts` `SketchHostFace`).
+///
+/// Projected from [`SketchAttachment::HostFace`](onecad_core::sketch::SketchAttachment)
+/// so the frontend can answer "is there already a sketch on this face?" without a
+/// round-trip — the double-click-a-face re-entry (SKETCH-ON-FACE W3). Identity
+/// ONLY: the frozen basis, the anchor and the worker-owned `intent` descriptor are
+/// deliberately NOT projected (the sketch's own `plane` is the basis authority,
+/// and the descriptor is evidence the core never interprets).
+///
+/// `body_id`/`element_id` render exactly as [`BodyDto::id`] and a promoted
+/// `elementId` do, so a face pick's promoted id compares `==` against this.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchHostFaceDto {
+    pub body_id: String,
+    pub element_id: String,
+}
+
 /// One sketch in the tree (`documentStore.ts` `SketchMeta`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,6 +77,11 @@ pub struct SketchDto {
     /// frontend uses it to invalidate static profile fills without rebuilding
     /// every sketch for unrelated document revisions.
     pub geometry_token: String,
+    /// The host face, for a `HostFace`-attached sketch that carries a `primary`
+    /// binding. Omitted entirely for world- and datum-hosted sketches, so their
+    /// projection rows stay byte-identical to before this field existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_face: Option<SketchHostFaceDto>,
 }
 
 /// Feature-timeline entry kind (`documentStore.ts` `FeatureKind`).

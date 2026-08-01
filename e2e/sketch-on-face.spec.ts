@@ -9,6 +9,7 @@ import {
   planePointToClient,
   clickAtClient,
   bodyOptions,
+  sketchOptions,
   commitExtrudeAtHandle,
 } from "./helpers";
 
@@ -30,6 +31,80 @@ import {
  * geometry here would pin the mock to itself. Numeric truth for a projected face
  * boundary lives in the cargo/ctest gates.
  */
+
+/** Hide every currently-visible sketch through the tree's own toggles. Seeded
+ *  sketches fill the origin INSIDE the box and would arbitrate against a face
+ *  pick; a finished FACE sketch lies flush on its host and would claim the
+ *  double-click through the static-sketch branch. */
+async function hideVisibleSketches(page: Page): Promise<void> {
+  const visible = page
+    .getByRole("listbox", { name: "Sketches" })
+    .locator('[role="switch"][aria-checked="true"]');
+  while ((await visible.count()) > 0) await visible.first().click();
+}
+
+/**
+ * A canvas pixel where a model FACE is the ONLY thing under the pointer — no
+ * datum, and (crucially, while the plane picker is up) no origin quad, since the
+ * pick order deliberately gives those two the pointer first.
+ */
+async function findFaceClearOfPickerChrome(page: Page): Promise<{ x: number; y: number; topoKey: string }> {
+  let found: { x: number; y: number; topoKey: string } | null = null;
+  await expect(async () => {
+    found = await page.evaluate(() => {
+      const engine = (
+        window as unknown as {
+          __vpEngine?: {
+            probePick(x: number, y: number): { kind: string; topoKey: string } | null;
+            planePickerHitTest(x: number, y: number): string | null;
+            datumHitTest(x: number, y: number): string | null;
+            sketchStaticHitTest(x: number, y: number): unknown;
+          };
+        }
+      ).__vpEngine;
+      const canvas = document.querySelector('[data-testid="viewport-canvas"] canvas') as HTMLCanvasElement | null;
+      if (!engine || !canvas) return null;
+      const rect = canvas.getBoundingClientRect();
+      const step = 8;
+      for (let y = rect.top + step; y <= rect.bottom - step; y += step) {
+        for (let x = rect.left + step; x <= rect.right - step; x += step) {
+          const hit = engine.probePick(x, y);
+          if (!hit || hit.kind !== "face") continue;
+          if (engine.planePickerHitTest(x, y) || engine.datumHitTest(x, y)) continue;
+          if (engine.sketchStaticHitTest(x, y)) continue;
+          return { x, y, topoKey: hit.topoKey };
+        }
+      }
+      return null;
+    });
+    expect(found, "no unobstructed model face found under any scanned pixel").not.toBeNull();
+  }).toPass({ timeout: 15_000, intervals: [150, 300, 600, 1_000] });
+  return found as unknown as { x: number; y: number; topoKey: string };
+}
+
+/** The live `activeSketchId` (the document id the controller is driving). */
+async function activeSketchId(page: Page): Promise<string | null> {
+  return page.evaluate(() => {
+    const w = window as unknown as {
+      __stores?: { viewport: { getState(): { activeSketchId: string | null } } };
+    };
+    return w.__stores?.viewport.getState().activeSketchId ?? null;
+  });
+}
+
+/** The projection row's recorded host face (`SketchDto.hostFace` in the real lane). */
+async function hostFaceOf(page: Page, sketchId: string): Promise<{ bodyId: string; elementId: string } | null> {
+  return page.evaluate((id) => {
+    const w = window as unknown as {
+      __stores?: {
+        document: {
+          getState(): { sketches: Record<string, { hostFace?: { bodyId: string; elementId: string } }> };
+        };
+      };
+    };
+    return w.__stores?.document.getState().sketches[id]?.hostFace ?? null;
+  }, sketchId);
+}
 
 /** Ids of the `referenceLocked` entities in the live session (the projected boundary). */
 async function lockedEntityIds(page: Page): Promise<string[]> {
@@ -72,10 +147,7 @@ test("sketch on a picked face: the projected boundary is seeded, locked, and ext
 
   // Hide the seeded sketches: their static fills sit at the origin, INSIDE the
   // box, and would arbitrate against the face pick. The body stays visible.
-  const visibleSeedSketches = page
-    .getByRole("listbox", { name: "Sketches" })
-    .locator('[role="switch"][aria-checked="true"]');
-  while ((await visibleSeedSketches.count()) > 0) await visibleSeedSketches.first().click();
+  await hideVisibleSketches(page);
 
   // ── (a) pick a real model face ─────────────────────────────────────────────
   const face = await findFaceOnBody(page);
@@ -184,6 +256,79 @@ test("sketch on a picked face: the projected boundary is seeded, locked, and ext
   await commitExtrudeAtHandle(page);
 
   await expect(bodyOptions(page)).toHaveCount(bodiesBefore + 1);
+});
+
+test("W3(b): the plane picker accepts a body FACE — S with nothing selected, then click the part", async ({ page }) => {
+  await openEditorDebug(page, { mockBody: true });
+  await hideVisibleSketches(page);
+
+  // Nothing selected ⇒ `S` is the bare new-sketch intent, so the picker comes up
+  // instead of the sketch-on-the-selected-face shortcut the first spec covers.
+  await page.evaluate(() => {
+    const w = window as unknown as { __stores?: { selection: { getState(): { clear(): void } } } };
+    w.__stores?.selection.getState().clear();
+  });
+  await page.keyboard.press("s");
+  await expect(page.getByText(/Select a plane to start the sketch/)).toBeVisible({ timeout: 10_000 });
+  await waitForCameraSettled(page); // the picker re-homes an axis-aligned camera
+
+  const face = await findFaceClearOfPickerChrome(page);
+  expect(face.topoKey).toMatch(/^f:\d+$/);
+
+  // Hovering names the face in the prompt — the affordance that tells the user a
+  // body is pickable here at all. NO planarity check runs on hover (it would cost
+  // a backend round-trip per move); the click below is what validates.
+  await page.mouse.move(face.x, face.y);
+  await expect(page.getByText(/— click to sketch on it/)).toBeVisible();
+
+  await clickAtClient(page, face.x, face.y);
+  await expect(page.getByText(/^Editing /)).toBeVisible({ timeout: 10_000 });
+  await waitForCameraSettled(page);
+
+  // Identical outcome to the selected-face route: the host's projected boundary
+  // arrives WITH the session, locked. Same command, reached a different way.
+  expect(await lockedEntityIds(page)).toHaveLength(4);
+  expect(await getSketchEntityCount(page)).toBe(4);
+
+  const sid = await activeSketchId(page);
+  expect(sid).toBeTruthy();
+  expect(await hostFaceOf(page, sid as string)).toMatchObject({ bodyId: expect.any(String) });
+});
+
+test("W3(c): double-clicking a face creates a sketch there, then RE-ENTERS that same sketch", async ({ page }) => {
+  await openEditorDebug(page, { mockBody: true });
+  await hideVisibleSketches(page);
+
+  const face = await findFaceClearOfPickerChrome(page);
+
+  // ── first double-click: nothing hosted there yet ⇒ create ──────────────────
+  await page.mouse.dblclick(face.x, face.y);
+  await expect(page.getByText(/^Editing /)).toBeVisible({ timeout: 10_000 });
+  await waitForCameraSettled(page);
+  const first = await activeSketchId(page);
+  expect(first).toBeTruthy();
+  expect(await lockedEntityIds(page)).toHaveLength(4);
+  // The row records its host — this is the ONLY thing the re-entry below matches on.
+  const host = await hostFaceOf(page, first as string);
+  expect(host?.elementId).toBeTruthy();
+
+  await page.keyboard.press("Enter"); // finish back to model mode
+  await expect(page.getByText(/^Editing /)).toHaveCount(0);
+  await waitForCameraSettled(page);
+
+  // Hide the new sketch. Its projected boundary lies FLUSH on the host face, so
+  // while visible the static-sketch branch of the double-click would claim the
+  // gesture and the hostFace lookup would never be exercised.
+  await hideVisibleSketches(page);
+
+  // ── second double-click on the SAME face: re-enter, never a second sketch ──
+  const sketchRowsBefore = await sketchOptions(page).count();
+  await page.mouse.dblclick(face.x, face.y);
+  await expect(page.getByText(/^Editing /)).toBeVisible({ timeout: 10_000 });
+  await waitForCameraSettled(page);
+
+  expect(await activeSketchId(page), "the same sketch is re-entered, not a new one").toBe(first);
+  expect(await sketchOptions(page).count()).toBe(sketchRowsBefore);
 });
 
 test("a NON-PLANAR face refuses to host a sketch and falls back to the plane picker", async ({ page }) => {

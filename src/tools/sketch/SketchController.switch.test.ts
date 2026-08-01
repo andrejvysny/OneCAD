@@ -50,6 +50,8 @@ function makeEngineMock(hit: () => PickablePlane | null) {
     planePickerHitTest: vi.fn(() => hit()),
     clearPlanePickerHover: vi.fn(),
     // DATUM W1: the plane-pick path consults the datum layer first.
+    // W3: the plane-pick phase falls through to a body FACE (probePick).
+    probePick: vi.fn(() => null),
     datumHitTest: vi.fn(() => null),
     setDatumHover: vi.fn(),
     enterSketch: vi.fn(),

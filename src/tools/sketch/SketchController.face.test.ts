@@ -63,6 +63,8 @@ describe("SketchController — sketch on a selected face", () => {
       planePickerHover: vi.fn(),
       planePickerHitTest: vi.fn(() => null as PickablePlane | null),
       clearPlanePickerHover: vi.fn(),
+      // W3: the plane-pick phase falls through to a body FACE (probePick).
+      probePick: vi.fn(() => null),
       datumHitTest: vi.fn(() => null),
       setDatumHover: vi.fn(),
       enterSketch: vi.fn(),

@@ -27,9 +27,14 @@ import type { PickablePlane } from "@/viewport/engine/PlanePicker";
 import type { Point2 } from "@/viewport/engine/sketchBasis";
 import { chooseGridStep } from "@/viewport/engine/GridPlane";
 import { toolStore } from "@/stores/toolStore";
-import { viewportStore, type Projection } from "@/stores/viewportStore";
-import { documentStore, docSketchStatus, nextSketchName } from "@/stores/documentStore";
-import { selectionStore } from "@/stores/selectionStore";
+import { viewportStore, type Projection, type StatusSeverity } from "@/stores/viewportStore";
+import {
+  documentStore,
+  docSketchStatus,
+  nextSketchName,
+  type SketchMeta,
+} from "@/stores/documentStore";
+import { selectionStore, topoRefId } from "@/stores/selectionStore";
 import { sketchSelectionStore, sameSketchSel, type SketchSel } from "@/stores/sketchSelectionStore";
 import { settingsStore } from "@/stores/settingsStore";
 import { sketchStore } from "@/stores/sketchStore";
@@ -99,6 +104,49 @@ const CURSOR_BY_TOOL: Record<string, string> = {
 /** Digit keys the polygon tool consumes as a side count (W2-C). */
 const POLYGON_SIDES_KEY = /^[3-9]$/;
 
+/** The plane-pick phase's own prompt (also the fallback line every refusal rides). */
+const PLANE_PICK_PROMPT = "Select a plane to start the sketch — Esc to cancel";
+
+/**
+ * A model face offered as a sketch host — from a selection ref, a plane-pick
+ * click, or a viewport double-click. Deliberately NOT `PickHit`: the controller
+ * must not depend on Three.js types, and the three producers carry the anchor in
+ * three different shapes.
+ */
+export interface FacePickTarget {
+  bodyId: string;
+  /** Snapshot-scoped evidence (`"f:22"`) — the rung that resolves a fresh pick. */
+  topoKey?: string;
+  /** Persistent Rust-minted id when already promoted; else promoted on demand. */
+  elementId?: string;
+  worldPoint?: [number, number, number];
+}
+
+/**
+ * The id of the NEWEST sketch hosted on `elementId`, or null.
+ *
+ * Matching is on the ElementId alone: it is Rust-minted and globally unique, and
+ * deliberately does NOT embed a BodyId (the identity rule), so a body check would
+ * be redundant. "Newest" is the LAST entry in projection iteration order.
+ *
+ * CAVEAT (flagged, not fixed): the real backend projects sketches from a
+ * `BTreeMap` keyed by SketchId, so that order is uuid-lexicographic, not creation
+ * order — with TWO sketches on the SAME face the "newest" picked here is
+ * arbitrary-but-deterministic rather than genuinely newest. Both are valid hosts,
+ * so the failure mode is "re-entered the other coincident sketch", never a wrong
+ * bind. The mock lane inserts in creation order, so it is literally newest there.
+ */
+export function newestSketchOnFace(
+  sketches: Record<string, SketchMeta>,
+  elementId: string,
+): string | null {
+  let found: string | null = null;
+  for (const s of Object.values(sketches)) {
+    if (s.hostFace?.elementId === elementId) found = s.id;
+  }
+  return found;
+}
+
 export interface SketchControllerDeps {
   engine: ViewportEngine;
   client: CadClient;
@@ -136,6 +184,18 @@ export class SketchController {
   // Plane-pick phase: bare sketch entry shows the plane picker; a click on a
   // quad creates the sketch on that plane and opens the normal session.
   private planePicking = false;
+  // The picker's own prompt (with any refusal already folded in), so the
+  // face-hover line below can be swapped in and then swapped back out without
+  // losing the reason the picker is up at all.
+  private planePickHint: { message: string; severity?: StatusSeverity } | null = null;
+  // The body FACE hovered during the plane-pick phase (W3 trigger b). Held so the
+  // hover highlight + prompt only churn on an actual change, and so every
+  // teardown path (`endPlanePick`) can drop them.
+  private faceHover: FacePickTarget | null = null;
+  // A double-click face entry is in flight (W3 trigger c). Separate from
+  // `entering`: the RE-ENTER branch flips the mode and must leave `entering`
+  // clear so the resulting `enter()` actually opens the session.
+  private faceEntryInFlight = false;
 
   private downX = 0;
   private downY = 0;
@@ -425,6 +485,19 @@ export class SketchController {
         dof: session.dof,
         status: docSketchStatus(session.status),
         geometryToken: `pending:${session.sketchId}`,
+        // The HOST the session was just opened against. Optimistic exactly like
+        // the three fields above it: the real lane's next `projection-updated`
+        // replaces the whole row with backend truth (`SketchDto.hostFace`), and
+        // the mock lane has no projection stream, so this row IS its projection —
+        // which is what lets the mock-lane double-click re-entry find the sketch.
+        ...(typeof target !== "string" && "newOnFace" in target
+          ? {
+              hostFace: {
+                bodyId: target.newOnFace.bodyId,
+                elementId: target.newOnFace.elementId,
+              },
+            }
+          : {}),
       });
     }
     selectionStore.getState().set([{ kind: "sketch", id: session.sketchId }]);
@@ -469,41 +542,145 @@ export class SketchController {
     const bodyId = face.bodyId;
     if (!bodyId) return { entered: false };
 
+    const resolved = await this.resolveFaceHost({
+      bodyId,
+      topoKey: face.topoKey,
+      elementId: face.elementId,
+      worldPoint: face.anchor?.worldPoint,
+    });
+    // An unidentifiable pick falls through SILENTLY, exactly as before: the user
+    // asked for "a sketch", not for this face, so the picker is the answer.
+    if (resolved.kind === "unresolved") return { entered: false };
+    if (resolved.kind === "refused") return { entered: false, refusal: resolved.reason };
+    if (toolStore.getState().mode !== "sketch") return { entered: false };
+
+    const opened = await this.openSession({ newOnFace: resolved.target, plane: resolved.plane });
+    return { entered: opened };
+  }
+
+  /**
+   * Promote (if needed) + PREFLIGHT one picked face into an `enterSketch` target.
+   *
+   * The single funnel all three entry triggers share (selected face, plane-pick
+   * click, viewport double-click), so the identity rules live in exactly one
+   * place. Pure resolution — it opens nothing and touches no store, which is what
+   * lets the double-click path validate a face BEFORE flipping the mode.
+   *
+   * `faceSketchPlane` is validation-only here; the frame it returns is the
+   * BACKEND's (the kernel's own face descriptor + the lock-tested in-plane axis
+   * rule), carried through by reference and never rebuilt on this side. A
+   * non-planar face comes back `refused` rather than sketched on approximately.
+   */
+  private async resolveFaceHost(
+    pick: FacePickTarget,
+  ): Promise<
+    | { kind: "ok"; target: { bodyId: string; elementId: string; topoKey?: string; worldPoint?: [number, number, number] }; plane: SketchPlane }
+    | { kind: "refused"; reason: string }
+    | { kind: "unresolved" }
+  > {
     // A pick is promoted to a minted ElementId by ViewportRoot; if that has not
     // landed yet, promote here rather than sending a snapshot-scoped TopoKey the
     // attachment could not survive an edit with.
-    let elementId = face.elementId;
-    if (!elementId && face.topoKey) {
-      const promoted = await this.deps.client
-        .promoteSelection(bodyId, [{ topoKey: face.topoKey, anchor: face.anchor }])
-        .catch(() => null);
-      elementId = promoted?.[0]?.elementId;
-    }
-    if (!elementId) return { entered: false };
+    const elementId = await this.promoteFace(pick);
+    if (!elementId) return { kind: "unresolved" };
 
     // `topoKey` rides along: this id was just minted (never consumed by an op),
     // so it is genuinely absent from the worker's on-demand element-map
     // partition — the topoKey rung is what makes THIS flow resolve at all.
     let plane: SketchPlane;
     try {
-      plane = await this.deps.client.faceSketchPlane(bodyId, elementId, face.topoKey);
+      plane = await this.deps.client.faceSketchPlane(pick.bodyId, elementId, pick.topoKey);
     } catch (e) {
-      // Fall back to the world planes so the user is not stuck — carrying WHY.
-      return {
-        entered: false,
-        refusal: `Cannot sketch on that face: ${e instanceof Error ? e.message : String(e)}`,
-      };
+      return { kind: "refused", reason: `Cannot sketch on that face: ${sketchErr(e)}` };
     }
-    if (toolStore.getState().mode !== "sketch") return { entered: false };
-
-    const opened = await this.openSession({
+    return {
+      kind: "ok",
       // `topoKey` rides through to `add_sketch_on_face` for the SAME reason it
       // rides to `faceSketchPlane` above — it is the rung that actually resolves
       // a freshly promoted, never-consumed ElementId.
-      newOnFace: { bodyId, elementId, topoKey: face.topoKey, worldPoint: face.anchor?.worldPoint },
+      target: {
+        bodyId: pick.bodyId,
+        elementId,
+        topoKey: pick.topoKey,
+        worldPoint: pick.worldPoint,
+      },
       plane,
-    });
-    return { entered: opened };
+    };
+  }
+
+  /** The pick's persistent ElementId, promoting the TopoKey on demand. */
+  private async promoteFace(pick: FacePickTarget): Promise<string | undefined> {
+    if (pick.elementId) return pick.elementId;
+    if (!pick.topoKey) return undefined;
+    const promoted = await this.deps.client
+      .promoteSelection(pick.bodyId, [
+        {
+          topoKey: pick.topoKey,
+          anchor: pick.worldPoint ? { worldPoint: pick.worldPoint } : undefined,
+        },
+      ])
+      .catch(() => null);
+    return promoted?.[0]?.elementId;
+  }
+
+  /**
+   * Double-click a model FACE in model mode → sketch on it (W3 trigger c).
+   *
+   * Re-entry wins over creation: a face that ALREADY hosts a sketch opens that
+   * sketch (the newest — see `newestSketchOnFace`) through the same
+   * `setMode('sketch', id)` path the static-sketch double-click uses, rather than
+   * stacking a second identical projected boundary on the same plane.
+   *
+   * A fresh create validates BEFORE it flips the mode, so a non-planar face
+   * reports and leaves the user exactly where they were — no sketch chrome, no
+   * plane picker, no mode change.
+   */
+  async enterOnFace(pick: FacePickTarget): Promise<void> {
+    if (this.faceEntryInFlight || this.entering || this.disposed) return;
+    if (toolStore.getState().mode !== "model") return; // model-mode gesture only
+    this.faceEntryInFlight = true;
+    try {
+      // ONE promotion for both branches: the re-entry match is by ElementId, and
+      // a second promote for the create branch would be a redundant round-trip.
+      const elementId = await this.promoteFace(pick);
+      if (this.disposed || toolStore.getState().mode !== "model") return;
+      if (!elementId) {
+        viewportStore
+          .getState()
+          .setStatusHint("Cannot sketch on that face: it could not be identified", { severity: "error" });
+        return;
+      }
+      const existing = newestSketchOnFace(documentStore.getState().sketches, elementId);
+      if (existing) {
+        // Deliberately NOT guarded by `entering`: the mode flip is what makes
+        // `enter()` open the session, and `enter()` no-ops while it is set.
+        toolStore.getState().setMode("sketch", existing);
+        return;
+      }
+      const resolved = await this.resolveFaceHost({ ...pick, elementId });
+      if (this.disposed || toolStore.getState().mode !== "model") return;
+      if (resolved.kind !== "ok") {
+        viewportStore.getState().setStatusHint(
+          resolved.kind === "refused"
+            ? resolved.reason
+            : "Cannot sketch on that face: it could not be identified",
+          { severity: "error" },
+        );
+        return; // model mode untouched — the double-click simply did nothing
+      }
+      this.entering = true; // `enter()` no-ops on the mode flip below; we own the open
+      try {
+        sketchSelectionStore.getState().clear();
+        toolStore.getState().setMode("sketch");
+        const opened = await this.openSession({ newOnFace: resolved.target, plane: resolved.plane });
+        if (!opened) this.failOutOfSketchMode();
+      } finally {
+        this.entering = false;
+        this.drainPendingSwitch();
+      }
+    } finally {
+      this.faceEntryInFlight = false;
+    }
   }
 
   /**
@@ -546,22 +723,99 @@ export class SketchController {
     // may have set a drawing cursor before the picker appeared).
     this.deps.container.style.cursor = "default";
     this.deps.engine.setPlanePickerVisible(true);
-    const prompt = "Select a plane to start the sketch — Esc to cancel";
-    viewportStore
-      .getState()
-      .setStatusHint(refusal ? `${refusal}. ${prompt}` : prompt, {
-        sticky: true,
-        ...(refusal ? { severity: "error" as const } : {}),
-      });
+    this.showPlanePickPrompt(refusal);
+  }
+
+  /** Publish the pick-phase prompt (with `refusal` folded in) AND remember it, so
+   *  a transient face-hover line can be swapped in and then restored verbatim. */
+  private showPlanePickPrompt(refusal?: string): void {
+    const message = refusal ? `${refusal}. ${PLANE_PICK_PROMPT}` : PLANE_PICK_PROMPT;
+    const severity = refusal ? ("error" as const) : undefined;
+    this.planePickHint = { message, severity };
+    viewportStore.getState().setStatusHint(message, { sticky: true, ...(severity ? { severity } : {}) });
   }
 
   /** Reverse beginPlanePick (idempotent): hide the picker + clear its hint. */
   private endPlanePick(): void {
     if (!this.planePicking) return;
     this.planePicking = false;
+    this.setFaceHover(null); // before the hint clear below — it would restore the prompt
+    this.planePickHint = null;
     this.deps.engine.setPlanePickerVisible(false);
     this.deps.engine.setDatumHover(null); // datums stay visible; drop the pick tint
     viewportStore.getState().setStatusHint(null);
+  }
+
+  /**
+   * Hover (or un-hover) a body FACE during the plane-pick phase (W3 trigger b).
+   *
+   * The highlight goes through `selectionStore.setHover` rather than
+   * `engine.setHighlightState` directly: ViewportRoot already subscribes the
+   * store to the highlight layer, and a second writer would be clobbered by the
+   * next selection event. One writer, the standard face tint.
+   *
+   * NO planarity check here — that costs a backend round-trip, and paying one per
+   * pointer move to grey out a face is not worth it. The CLICK validates.
+   */
+  private setFaceHover(pick: FacePickTarget | null): void {
+    const sameKey = this.faceHover?.bodyId === pick?.bodyId && this.faceHover?.topoKey === pick?.topoKey;
+    if (sameKey) return;
+    this.faceHover = pick;
+    const sel = selectionStore.getState();
+    if (!pick || !pick.topoKey) {
+      sel.setHover(null);
+      if (this.planePickHint) {
+        viewportStore.getState().setStatusHint(this.planePickHint.message, {
+          sticky: true,
+          ...(this.planePickHint.severity ? { severity: this.planePickHint.severity } : {}),
+        });
+      }
+      return;
+    }
+    sel.setHover({
+      kind: "face",
+      id: topoRefId(pick.bodyId, pick.topoKey),
+      bodyId: pick.bodyId,
+      topoKey: pick.topoKey,
+      elementId: pick.elementId,
+      ...(pick.worldPoint ? { anchor: { worldPoint: pick.worldPoint } } : {}),
+    });
+    const name = documentStore.getState().bodies[pick.bodyId]?.name ?? pick.bodyId;
+    viewportStore
+      .getState()
+      .setStatusHint(`Face of ${name} — click to sketch on it`, { sticky: true });
+  }
+
+  /** A body FACE was clicked during the plane pick: open a sketch on it (W3).
+   *  Mirrors confirmDatumPick — a REFUSED face leaves the picker up, carrying the
+   *  reason in the prompt, rather than dropping the user into nothing. */
+  private async confirmFacePick(pick: FacePickTarget): Promise<void> {
+    if (this.entering) return; // a double-click must not create two sketches
+    this.entering = true;
+    try {
+      const resolved = await this.resolveFaceHost(pick);
+      if (this.disposed || toolStore.getState().mode !== "sketch") return;
+      if (resolved.kind !== "ok") {
+        this.setFaceHover(null);
+        this.showPlanePickPrompt(
+          resolved.kind === "refused"
+            ? resolved.reason
+            : "Cannot sketch on that face: it could not be identified",
+        );
+        return; // stay in the pick phase — the world quads are still on screen
+      }
+      this.endPlanePick();
+      const opened = await this.openSession({ newOnFace: resolved.target, plane: resolved.plane });
+      if (!opened && toolStore.getState().mode === "sketch") {
+        // Re-show the quads but keep the failure hint visible (don't overwrite
+        // the statusHint openSession just set).
+        this.planePicking = true;
+        this.deps.engine.setPlanePickerVisible(true);
+      }
+    } finally {
+      this.entering = false;
+      this.drainPendingSwitch();
+    }
   }
 
   /** A DATUM plane was clicked during the plane pick: open a sketch hosted on it.
@@ -795,8 +1049,23 @@ export class SketchController {
     if (this.planePicking) {
       const datumId = this.deps.engine.datumHitTest(e.clientX, e.clientY);
       this.deps.engine.setDatumHover(datumId);
-      if (datumId) this.deps.engine.clearPlanePickerHover();
-      else this.deps.engine.planePickerHover(e.clientX, e.clientY);
+      if (datumId) {
+        this.deps.engine.clearPlanePickerHover();
+        this.setFaceHover(null);
+        return;
+      }
+      // A body FACE is the LAST rung (W3 trigger b), mirroring the resolve order
+      // in onPointerUp: the datum and the three world quads are the things the
+      // picker itself put on screen, so they own the pointer first.
+      if (this.deps.engine.planePickerHover(e.clientX, e.clientY)) {
+        this.setFaceHover(null);
+        return;
+      }
+      // Only while idle: this rung raycasts every body mesh, and an LMB-held move
+      // is an orbit whose release `wasClick` rejects anyway — so there is nothing
+      // to advertise as clickable and no reason to pay for it mid-drag.
+      if (e.buttons !== 0) return;
+      this.setFaceHover(facePickFrom(this.deps.engine.probePick(e.clientX, e.clientY)));
       return;
     }
     if (this.selectActive) {
@@ -867,14 +1136,22 @@ export class SketchController {
     this.downButton = -1;
     if (!wasClick) return;
     if (this.planePicking) {
-      // Datum first (see the hover branch above), then the three world quads.
+      // RESOLVE ORDER (pinned by test): datum → world quad → body face. The datum
+      // and the quads are chrome the picker itself raised, so they win over
+      // whatever model geometry happens to lie under them; the face is the
+      // fallback that makes "S with nothing selected, then click the part" work.
       const datumId = this.deps.engine.datumHitTest(e.clientX, e.clientY);
       if (datumId) {
         void this.confirmDatumPick(datumId);
         return;
       }
       const kind = this.deps.engine.planePickerHitTest(e.clientX, e.clientY);
-      if (kind) void this.confirmPlanePick(kind);
+      if (kind) {
+        void this.confirmPlanePick(kind);
+        return;
+      }
+      const face = facePickFrom(this.deps.engine.probePick(e.clientX, e.clientY));
+      if (face) void this.confirmFacePick(face);
       return;
     }
     if (this.dimensionActive) {
@@ -1780,6 +2057,21 @@ function isEditableKeyTarget(target: EventTarget | null): boolean {
     target instanceof HTMLElement &&
     (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
   );
+}
+
+/** A raw engine pick → a {@link FacePickTarget}, or null when it is not a face.
+ *  Typed structurally so the controller never imports Three.js (`worldPos` is a
+ *  `THREE.Vector3` on the engine side). */
+function facePickFrom(
+  hit: { bodyId: string; kind: string; topoKey: string; elementId?: string; worldPos: { x: number; y: number; z: number } } | null,
+): FacePickTarget | null {
+  if (!hit || hit.kind !== "face") return null;
+  return {
+    bodyId: hit.bodyId,
+    topoKey: hit.topoKey,
+    elementId: hit.elementId,
+    worldPoint: [hit.worldPos.x, hit.worldPos.y, hit.worldPos.z],
+  };
 }
 
 /** Human message from a rejected backend sketch call. */

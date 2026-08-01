@@ -1,4 +1,73 @@
-# OneCAD-Tauri — Current State (2026-08-01, MODELING-REACH wave shipped)
+# OneCAD-Tauri — Current State (2026-08-01, SKETCH-ON-FACE wave shipped)
+
+## SKETCH-ON-FACE (2026-08-01, commits 2ac7aba→(final)) — sketch on model geometry, with the host outline as locked reference
+Plan `~/.claude/plans/act-as-senior-software-twinkly-crown.md` (internal
+adversarial review REVISE → 2 BLOCKER + 6 MAJOR + 6 MINOR folded pre-approval).
+Four gates, all 4-suite green vs the real worker.
+THE POINT: a part is built by sketching on what you already made. Before this
+wave a face-hosted sketch opened EMPTY — no outline, nothing to snap or
+dimension against — so "sketch on a face" was decorative. Now the host face's
+own boundary is projected in as `referenceLocked` geometry that bounds regions
+but cannot be moved or deleted.
+**W0 (2ac7aba)**: W0a `face_sketch_plane` topoKey rung — the SAME latent
+MODELING-REACH W2 fixed for `element_info` and flagged unfixed here: element-map
+entries mint only when an OP consumes an id, so a just-promoted face is
+genuinely absent and the feature's single most common path failed loudly.
+Red-first vs the real worker. W0b `referenceLocked` END-TO-END with zero
+producers (flag on all 5 entity variants, L1 guards, worker + solver, FE
+hydration + marshal latch). **DEFECT CLASS FOUND**: the C++ oracle's
+`addConstraint` veto SILENTLY DROPPED every non-Fixed constraint naming locked
+geometry — removed; immobility moved to solver tag-0 pins (endpoint-position
+pinning is singular on 180° arcs, so arcs pin by ANGLE).
+**W1 (d145ae6)**: worker `FaceBoundaryProjector` rewritten to oracle parity
+(exact Line/Circle/Arc, CCW-via-D1-tangent, normative ordering, byte-identical
+determinism) + `ProjectFaceBoundary` verb (SCHEMA §7.6, no fixture bump) +
+Rust `add_sketch_on_face` (frameOnly → Rust-owned basis → real projection in
+that basis, 1e-9 exact tripwire, failure leaves the document untouched).
+**PRE-EXISTING BUG FOUND+FIXED**: `CoplanarFacePatch`'s predicate took
+`gp_Dir::Dot` through an implicit `gp_Vec→gp_Dir` conversion, which made the
+1e-3mm DISTANCE test angular (a 0.05mm-off face at 100mm lateral passed) and
+threw `Standard_ConstructionError` on coincident origins. Coplanar collection
+also became an all-faces scan, not BFS — disconnected coplanar prongs were
+being missed. Proof: a tilted 10°-draft face projects onto its own plane with
+origin-on-plane ≤1e-4 and extrudes to kernel-area×height to 8 sig figs.
+**W2 (b01b71b)**: the real lane (`tauriClient` face branch → the new command;
+the FE can no longer author a host-face `AddSketch` at all), mock parity from
+the shared mock-mesh corners, L3 guards (drag/Trim/Delete all refuse, loudly),
+machine pins hidden from the inspector without touching the session. The
+**bbox-centre anchor** was the blocker here — it is not a point ON the face, so
+the anchor became the kernel-exact plane origin. Hint-clobber fixed early:
+`tryEnterOnSelectedFace` returns `{entered, refusal}` so a non-planar reason
+survives the picker's own prompt (a hint published before `beginPlanePick`
+writes is silently overwritten — the last-word-wins trap MODELING-REACH W0a
+already catalogued).
+**W3**: the two remaining entry triggers. The plane picker now accepts a body
+FACE after the datum and the three world quads (order pinned with all three
+stacked under one pointer), with the standard face tint driven through
+`selectionStore.setHover` — one writer — and a prompt that names the body.
+Deliberately NO hover-time planarity check: that is one backend round-trip per
+pointer move. Double-clicking a face in model mode re-enters the sketch already
+hosted there, else creates one, and VALIDATES BEFORE flipping the mode so a
+non-planar face hints without moving the user anywhere. Re-entry needed the
+frontend to know which sketch lives on which face, which nothing projected —
+hence the additive internal `SketchDto.hostFace {bodyId, elementId}` (from the
+attachment's `primary`; `protocol/SCHEMA.md` untouched, zero worker frames
+moved, world/datum rows byte-identical).
+Suites at final gate: tsc 0 · FE 1962/143 · cargo 592/0 vs real worker · ctest
+79/79 · e2e 94/94 · clippy/fmt clean.
+BACKLOGGED THIS WAVE: "newest sketch on this face" is last-in-projection-order,
+which is uuid-lexicographic in the real lane (harmless — both candidates are
+valid hosts — but not literally newest); `FaceExtrudeProfileBuilder` keeps its
+own coplanar scan (correct math, repointing changes shipped-op behavior);
+locked bare Point / Ellipse carry no solver pins; `beginGroupDrag` lacks a
+locked pre-filter (fails loudly via pins); synthesized mock bodies keep the +Z
+fallback frame; a body face is not in the orbit gate during plane picking (same
+deliberate choice datum planes made).
+REMAINING: USER manual Tauri gates (TODO.md SKETCH-ON-FACE checklist + the older
+MODELING-REACH/SKETCH-POWER/TRUST/PREVIEW ones); Codex post-hoc reviews after
+2026-08-05. NOTE: `src/viewport/debug/inputProbe.ts:87` holds one raw hex in the
+file already marked TEMPORARY — the hex gate is otherwise clean.
+
 
 ## MODELING-REACH (2026-08-01, commits c960183→be4beb4) — datum planes, measure, view UX, arc-endpoint welds
 Plan `~/.claude/plans/do-thorough-exploration-and-rosy-lollipop.md` (adversarial

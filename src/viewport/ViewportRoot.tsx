@@ -299,12 +299,32 @@ export function ViewportRoot({ className }: { className?: string }) {
         // ── Double-click a static sketch → edit it (AUTO-MODE; mirrors the
         // tree row double-click). Model mode + select tool only, so it never
         // fights armed model tools or the region-pick double-click accelerator
-        // (those run while a model tool is active, not "select"). ──
+        // (those run while a model tool is active, not "select").
+        //
+        // A miss falls through to a body FACE (SKETCH-ON-FACE W3): the same
+        // gesture that re-opens a sketch re-opens the sketch already hosted on
+        // that face, or starts one there. The sketch layer keeps priority — a
+        // face sketch lies FLUSH on its host, so the two are always coincident
+        // and the sketch is the more specific target. ──
         const onDblClick = (e: MouseEvent) => {
           const s = toolStore.getState();
           if (s.mode !== "model" || s.modelTool !== "select") return;
           const hit = engine.sketchStaticHitTest(e.clientX, e.clientY);
-          if (hit) s.setMode("sketch", hit.sketchId);
+          if (hit) {
+            s.setMode("sketch", hit.sketchId);
+            return;
+          }
+          const face = engine.probePick(e.clientX, e.clientY);
+          if (!face || face.kind !== "face") return;
+          // A DIRECT call, not a selection mutation + `S`: routing through the
+          // selection would make the entry depend on pick side effects that the
+          // double-click's own first click already owns.
+          void sketchController.enterOnFace({
+            bodyId: face.bodyId,
+            topoKey: face.topoKey,
+            elementId: face.elementId,
+            worldPoint: [face.worldPos.x, face.worldPos.y, face.worldPos.z],
+          });
         };
         container.addEventListener("dblclick", onDblClick);
         cleanups.push(() => container.removeEventListener("dblclick", onDblClick));

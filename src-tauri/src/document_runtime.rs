@@ -78,8 +78,8 @@ use crate::dto::{
     default_label, feature_kind, feature_status, feature_status_message, feature_value_text,
     needs_repair_item_dto, op_type_name, BodyDto, BodyMeshRef, DatumDto, DocStatus, DocumentChange,
     DocumentProjection, FailedStep, FeatureDto, FinishSketchDto, NeedsRepairItemDto,
-    PromotedElementDto, SketchDto, SketchSessionDto, SketchSolveStatus, SketchStatus,
-    SketchUpsertDto,
+    PromotedElementDto, SketchDto, SketchHostFaceDto, SketchSessionDto, SketchSolveStatus,
+    SketchStatus, SketchUpsertDto,
 };
 use crate::mesh_cache::MeshCache;
 use crate::worker::{lod_str, AdoptingEngine, MeshProvider, SolverEngine};
@@ -1255,6 +1255,7 @@ impl DocumentRuntime {
                     dof,
                     status,
                     geometry_token: sketch_geometry_token(sk),
+                    host_face: sketch_host_face(sk),
                 },
             );
         }
@@ -2191,6 +2192,25 @@ fn sketch_geometry_token(sketch: &Sketch) -> String {
     let bytes = serde_json::to_vec(&geometry)
         .expect("validated sketch geometry must serialize deterministically");
     format!("{:x}", Sha256::digest(bytes))
+}
+
+/// The host-face identity of a face-attached sketch, for the projection.
+///
+/// Only the `primary` binding is projected — that is the pair the frontend
+/// compares a promoted face pick against (SKETCH-ON-FACE W3: double-clicking a
+/// face re-enters a sketch already hosted there). A `HostFace` attachment with no
+/// `primary` is a face bound by evidence alone; it has no id to compare, so it
+/// projects as `None` rather than as a fabricated one.
+fn sketch_host_face(sketch: &Sketch) -> Option<SketchHostFaceDto> {
+    match &sketch.attachment {
+        SketchAttachment::HostFace { face, .. } => {
+            face.primary.as_ref().map(|p| SketchHostFaceDto {
+                body_id: p.body.to_string(),
+                element_id: p.element.to_string(),
+            })
+        }
+        SketchAttachment::World { .. } | SketchAttachment::Datum { .. } => None,
+    }
 }
 
 /// Renders a [`MeshKey`] as the `"<bodyId>:<lod>:<generation>"` string the

@@ -53,6 +53,31 @@ describe("applyProjectionToStore", () => {
     expect(s.features[0].valueText).toBe("10.0 mm");
   });
 
+  it("carries a sketch's hostFace through, and leaves world/datum sketches without one", () => {
+    // SKETCH-ON-FACE W3: the double-click-a-face re-entry matches a promoted pick
+    // against this id, so dropping it here would silently turn every re-entry
+    // into "create a second sketch on the same face".
+    applyProjectionToStore(
+      proj(9, {
+        sketches: {
+          onFace: {
+            id: "onFace",
+            name: "On Face",
+            visible: true,
+            dof: 0,
+            status: "ok",
+            geometryToken: "g1",
+            hostFace: { bodyId: "b1", elementId: "el_7" },
+          },
+          world: { id: "world", name: "World", visible: true, dof: 3, status: "under", geometryToken: "g2" },
+        },
+      }),
+    );
+    const s = documentStore.getState();
+    expect(s.sketches.onFace.hostFace).toEqual({ bodyId: "b1", elementId: "el_7" });
+    expect(s.sketches.world.hostFace).toBeUndefined();
+  });
+
   it("carries the authored opType through so a Chamfer re-edit does not route as Fillet", () => {
     applyProjectionToStore(
       proj(7, {

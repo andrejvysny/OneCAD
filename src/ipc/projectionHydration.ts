@@ -55,6 +55,9 @@ export function projectionToStore(p: DocumentProjectionWire): DocumentProjection
       dof: s.dof,
       status: sketchStatus(s.status),
       geometryToken: s.geometryToken,
+      // Face-hosted sketches only; the backend omits it everywhere else, and the
+      // store treats `undefined` as "not hosted on a face" (SKETCH-ON-FACE W3).
+      hostFace: s.hostFace,
     };
   }
   // Datums: the resolved `plane` is carried VERBATIM (never re-derived from

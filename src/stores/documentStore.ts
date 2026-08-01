@@ -9,7 +9,7 @@
  */
 import { createStore, useStore } from "zustand";
 
-import type { SketchPlane } from "@/ipc/types";
+import type { SketchHostFace, SketchPlane } from "@/ipc/types";
 
 export type DocStatus = "empty" | "loading" | "ready";
 
@@ -30,6 +30,15 @@ export interface SketchMeta {
   status: SketchStatus;
   /** Stable authoritative geometry identity; metadata-only changes preserve it. */
   geometryToken: string;
+  /**
+   * The model face this sketch is hosted on ({@link SketchHostFace}), when it is
+   * face-attached. Backend-owned (`SketchDto.hostFace`); the ONE place the
+   * frontend writes it itself is the optimistic row `SketchController` mints for
+   * a sketch it has just created on a face, exactly as it fabricates `name` /
+   * `dof` / `geometryToken` there — the next projection overwrites all four with
+   * backend truth. Absent for world- and datum-hosted sketches.
+   */
+  hostFace?: SketchHostFace;
 }
 
 /**

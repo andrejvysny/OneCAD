@@ -659,6 +659,12 @@ async fn state_get_sketch(state: &AppState, sid: SketchId) -> SketchSessionDto {
         .expect("get_sketch")
 }
 
+/// The frontend-facing projection (`SketchDto.hostFace` lives only here).
+async fn state_projection(state: &AppState) -> onecad_lib::dto::DocumentProjection {
+    let guard = state.runtime.lock().await;
+    guard.as_ref().expect("runtime").projection()
+}
+
 /// `(record count, sketch count)` — the pair a failed command must not move.
 async fn state_counts(state: &AppState) -> (usize, usize) {
     let guard = state.runtime.lock().await;
@@ -944,6 +950,15 @@ async fn add_sketch_on_face_projects_the_top_face_boundary_as_locked_geometry() 
     let top_key = top_face_pick(&view, &mesh);
     let face_el = promote(&mut rt, snap, body, &top_key).await;
 
+    // A WORLD-plane sketch in the SAME document, so the projection's `hostFace`
+    // is proven present-for-a-face-sketch AND absent-for-everything-else in one
+    // read (a field that were always Some would pass a presence-only assertion).
+    let world_sid = SketchId(Uuid::from_u128(0x000F_ACE0));
+    rt.apply(EditCommand::AddSketch {
+        sketch: Sketch::on_world_plane(world_sid, "World", WorldPlane::XY),
+    })
+    .expect("AddSketch on a world plane");
+
     let app = tauri::test::mock_app();
     *app_state.runtime.lock().await = Some(rt);
     app.manage(app_state);
@@ -953,7 +968,7 @@ async fn add_sketch_on_face_projects_the_top_face_boundary_as_locked_geometry() 
         app.state(),
         snap.0,
         body_id_wire(body),
-        face_el,
+        face_el.clone(),
         Some(top_key),
         sid.to_string(),
         "Top".into(),
@@ -990,6 +1005,24 @@ async fn add_sketch_on_face_projects_the_top_face_boundary_as_locked_geometry() 
     );
 
     let state: tauri::State<'_, AppState> = app.state();
+
+    // The PROJECTION carries the host binding (SKETCH-ON-FACE W3): it is the only
+    // route by which the frontend can answer "is there already a sketch on this
+    // face?" — the attachment itself never leaves the core. Identity only, and
+    // rendered exactly as `BodyDto.id` / a promoted `elementId` are, so a face
+    // pick compares `==` against it without any normalization.
+    let proj = state_projection(&state).await;
+    let host = proj.sketches[&sid.to_string()]
+        .host_face
+        .as_ref()
+        .expect("a face-hosted sketch projects its host face");
+    assert_eq!(host.body_id, body.to_string());
+    assert_eq!(host.element_id, face_el);
+    assert!(
+        proj.sketches[&world_sid.to_string()].host_face.is_none(),
+        "a world-plane sketch has no host face"
+    );
+
     let session = state_get_sketch(&state, sid).await;
     let entities = wire_entities(&session);
     assert_eq!(of_type(&entities, "Point").len(), 4);

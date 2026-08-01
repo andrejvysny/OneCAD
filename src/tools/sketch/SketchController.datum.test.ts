@@ -67,6 +67,8 @@ describe("SketchController — sketch on a datum plane", () => {
       planePickerHover: vi.fn(),
       planePickerHitTest: vi.fn(() => planeHit),
       clearPlanePickerHover: vi.fn(),
+      // W3: the plane-pick phase falls through to a body FACE (probePick).
+      probePick: vi.fn(() => null),
       datumHitTest: vi.fn(() => datumHit),
       setDatumHover: vi.fn(),
       enterSketch: vi.fn(),

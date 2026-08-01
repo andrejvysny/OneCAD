@@ -442,6 +442,20 @@ export interface BodyProjection {
   visible: boolean;
 }
 
+/**
+ * The model face a sketch is hosted on (mirrors Rust `SketchHostFaceDto`, from
+ * `SketchAttachment::HostFace`'s `primary` binding).
+ *
+ * Identity only — the sketch's frozen basis is its own `plane`, never re-derived
+ * from the host. `elementId` is the persistent Rust-minted id, so a face pick
+ * that has been promoted compares `===` against it (SKETCH-ON-FACE W3: the
+ * double-click-a-face re-entry). Absent for world- and datum-hosted sketches.
+ */
+export interface SketchHostFace {
+  bodyId: string;
+  elementId: string;
+}
+
 /** One sketch in the projection (mirrors `documentStore.SketchMeta`). */
 export interface SketchProjection {
   id: string;
@@ -452,6 +466,8 @@ export interface SketchProjection {
   status: string;
   /** Deterministic identity of authoritative plane/entities/constraints. */
   geometryToken: string;
+  /** The host face, for a face-hosted sketch. Omitted for world/datum sketches. */
+  hostFace?: SketchHostFace;
 }
 
 /**
