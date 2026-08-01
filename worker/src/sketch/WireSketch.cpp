@@ -71,6 +71,15 @@ bool is_construction(const json& e) {
     return it != e.end() && it->is_boolean() && it->get<bool>();
 }
 
+// SCHEMA §7.3: `referenceLocked` is optional, absent ⇒ false. Geometry projected
+// from the sketch's host face. Unlike `construction` it DOES bound regions; what
+// it forbids is EDITING — `Sketch` refuses removal/split/drag against it and the
+// solver pins its parameters so no user constraint can drag it off the face.
+bool is_reference_locked(const json& e) {
+    const auto it = e.find("referenceLocked");
+    return it != e.end() && it->is_boolean() && it->get<bool>();
+}
+
 // Position of a Point entity from any of the accepted coordinate keys.
 bool read_point_pos(const json& e, double& x, double& y) {
     for (const char* k : {"at", "p", "pos", "position", "xy", "p0"}) {
@@ -159,6 +168,12 @@ TranslateResult translate(const json& args) {
         }
     };
 
+    // Set-only: a referenced (not synthesized) point carries its OWN wire flag
+    // from pass 1, so a free parent must never clear it back to false.
+    auto lock = [&](const sk::EntityID& id, bool locked) {
+        if (locked) sketch->setEntityReferenceLocked(id, true);
+    };
+
     // Pass 1: Point entities (lines may reference them by id).
     for (const json& e : entities) {
         if (!e.is_object()) {
@@ -178,6 +193,7 @@ TranslateResult translate(const json& args) {
             return result;
         }
         const sk::EntityID pid = sketch->addPoint(x, y, is_construction(e));
+        lock(pid, is_reference_locked(e));
         idx.wire_to_internal[id] = pid;
         reg_handle(id, pid, /*primary=*/true);
     }
@@ -192,8 +208,9 @@ TranslateResult translate(const json& args) {
             return result;
         }
         // Synthesized child points (inline line endpoints, arc/circle centers)
-        // INHERIT the parent's flag — they exist only to carry it.
+        // INHERIT the parent's flags — they exist only to carry them.
         const bool construction = is_construction(e);
+        const bool locked = is_reference_locked(e);
 
         if (type == "Line") {
             sk::EntityID sp, ep;
@@ -215,6 +232,8 @@ TranslateResult translate(const json& args) {
                 }
                 sp = sketch->addPoint(x0, y0, construction);
                 ep = sketch->addPoint(x1, y1, construction);
+                lock(sp, locked);
+                lock(ep, locked);
                 reg_handle(id + ".p0", sp, true);
                 reg_handle(id + ".p1", ep, true);
             }
@@ -228,6 +247,7 @@ TranslateResult translate(const json& args) {
                 result.error = "line '" + id + "' could not be created";
                 return result;
             }
+            lock(lid, locked);
             idx.wire_to_internal[id] = lid;
             idx.internal_edge_to_wire[lid] = id;
         } else if (type == "Circle") {
@@ -238,12 +258,14 @@ TranslateResult translate(const json& args) {
                 return result;
             }
             const sk::EntityID cp = sketch->addPoint(cx, cy, construction);
+            lock(cp, locked);
             reg_handle(id + ".center", cp, true);
             const sk::EntityID cid = sketch->addCircle(cp, radius, construction);
             if (cid.empty()) {
                 result.error = "circle '" + id + "' could not be created";
                 return result;
             }
+            lock(cid, locked);
             idx.wire_to_internal[id] = cid;
             idx.internal_edge_to_wire[cid] = id;
         } else if (type == "Arc") {
@@ -264,6 +286,7 @@ TranslateResult translate(const json& args) {
                 scalar_field(e, {"endAngle"}, end_angle);
             }
             const sk::EntityID cp = sketch->addPoint(cx, cy, construction);
+            lock(cp, locked);
             reg_handle(id + ".center", cp, true);
             // Mint the two ENDPOINT points at their derived coordinates and hand
             // them to the arc, which couples them via internal PlaneGCS arc rules
@@ -278,6 +301,8 @@ TranslateResult translate(const json& args) {
             const sk::EntityID ep = sketch->addPoint(cx + radius * std::cos(end_angle),
                                                      cy + radius * std::sin(end_angle),
                                                      construction);
+            lock(sp, locked);
+            lock(ep, locked);
             reg_handle(id + ".start", sp, true);
             reg_handle(id + ".end", ep, true);
             const sk::EntityID aid =
@@ -286,6 +311,7 @@ TranslateResult translate(const json& args) {
                 result.error = "arc '" + id + "' could not be created";
                 return result;
             }
+            lock(aid, locked);
             idx.wire_to_internal[id] = aid;
             idx.internal_edge_to_wire[aid] = id;
         } else if (type == "Ellipse") {
@@ -303,12 +329,14 @@ TranslateResult translate(const json& args) {
             double rotation = 0.0;
             scalar_field(e, {"rotation"}, rotation);  // optional, default 0
             const sk::EntityID cp = sketch->addPoint(cx, cy, construction);
+            lock(cp, locked);
             reg_handle(id + ".center", cp, true);
             const sk::EntityID eid = sketch->addEllipse(cp, major, minor, rotation, construction);
             if (eid.empty()) {
                 result.error = "ellipse '" + id + "' could not be created";
                 return result;
             }
+            lock(eid, locked);
             idx.wire_to_internal[id] = eid;
             idx.internal_edge_to_wire[eid] = id;
         } else {

@@ -148,6 +148,46 @@ struct ConstraintSupportResult {
 };
 
 /**
+ * @brief The parameters the solver must hold still because their owning entity
+ *        is reference-locked (host-face projected geometry).
+ *
+ * `referenceLocked` means "this mirrors the model face — a constraint may
+ * REFERENCE it, nothing may MOVE it". Constraints against locked geometry are
+ * legal (that is how a profile snaps to the boundary), so immobility has to come
+ * from the solver: every parameter a locked entity owns is pinned to its current
+ * value under the INTERNAL tag 0, exactly like the W0b arc rules.
+ *
+ * The pin set is the entity's OWN parameterization, never a derived quantity:
+ *  - Line   → both endpoint points (its whole DOF).
+ *  - Circle → center point + radius.
+ *  - Arc    → center point + radius + start/end ANGLE. Its `.start`/`.end`
+ *             points are then held by the arc rules; pinning those directly
+ *             instead would be 2 redundant equations AND go singular on a
+ *             180° arc (the two circle-circle intersections merge, so the
+ *             Jacobian drops rank and PlaneGCS reports the sketch redundant).
+ *  - Ellipse→ nothing: ellipses are not registered with PlaneGCS at all.
+ *  - a bare locked Point → nothing; a locked point that no locked curve owns is
+ *             pinned by an explicit `Fixed` constraint from the producer.
+ *
+ * A point that already carries a user `Fixed` constraint is EXCLUDED — that
+ * constraint already pins it, and adding a second copy would be reported as
+ * genuine redundancy (`hasRedundantConstraints` reads PlaneGCS's raw flag, which
+ * tag 0 does not hide).
+ */
+struct ReferenceLockPins {
+    std::vector<EntityID> points;     ///< pinned at their current (x, y) — 2 equations each
+    std::vector<EntityID> radii;      ///< arcs/circles with a pinned radius — 1 equation each
+    std::vector<EntityID> arcAngles;  ///< arcs with pinned start+end angle — 2 equations each
+
+    /// Equations these pins add — the term `naiveDegreesOfFreedom` must subtract.
+    int equationCount() const {
+        return static_cast<int>(2 * points.size() + radii.size() + 2 * arcAngles.size());
+    }
+
+    bool empty() const { return points.empty() && radii.empty() && arcAngles.empty(); }
+};
+
+/**
  * @brief Main sketch class
  *
  * Manages all 2D geometry and constraints for a single sketch.
@@ -273,6 +313,17 @@ public:
      * @brief Set or clear host-reference lock on a sketch entity.
      */
     bool setEntityReferenceLocked(EntityID id, bool locked);
+
+    /**
+     * @brief The solver pins implied by this sketch's reference-locked entities.
+     *
+     * Single source of truth for both consumers: `SolverAdapter` materializes
+     * them as tag-0 PlaneGCS constraints, and `naiveDegreesOfFreedom` subtracts
+     * `equationCount()` (those equations live nowhere in `constraints_`, so the
+     * ellipse fallback would otherwise over-report DOF — the same fix-up the W0b
+     * arc rules needed). Empty for every sketch with no locked geometry.
+     */
+    ReferenceLockPins referenceLockPins() const;
 
     /**
      * @brief Get typed entity
@@ -494,14 +545,17 @@ public:
     bool hasSolverUnsupportedEntities() const;
 
     /**
-     * @brief True when some entity carries an INTERNAL solver coupling — i.e. an
-     *        arc whose endpoints are real points bound by arc rules (W0b).
+     * @brief True when some entity carries an INTERNAL solver coupling — an arc
+     *        whose endpoints are real points bound by arc rules (W0b), or a
+     *        reference-locked entity whose parameters are pinned.
      *
      * The solve/drag fast paths short-circuit on `constraints_.empty()` and just
      * teleport the geometry. That is only sound while every relationship in the
      * sketch is a user constraint; an endpoint-bearing arc has four equations
      * that live nowhere in `constraints_`, so a sketch holding one must always go
-     * through PlaneGCS or a drag would tear the endpoint off its own circle.
+     * through PlaneGCS or a drag would tear the endpoint off its own circle. Pins
+     * are the same kind of hidden equation — teleporting past them would let a
+     * group drag walk locked host-face geometry off the face.
      */
     bool hasInternalCouplings() const;
 
@@ -555,13 +609,16 @@ public:
     /**
      * @brief Translate all sketch geometry by (dx, dy) in sketch coordinates.
      * Updates every point position and every Fixed constraint's stored (x,y).
+     * @return false — mutating NOTHING — if any entity is reference-locked.
      */
-    void translateSketch(double dx, double dy);
+    bool translateSketch(double dx, double dy);
 
     /**
      * @brief Translate only the points (and their Fixed constraints) that belong to the given region.
+     * @return false — mutating NOTHING — for an empty/unknown region or if any
+     *         member of the region is reference-locked.
      */
-    void translateSketchRegion(const std::string& regionId, double dx, double dy);
+    bool translateSketchRegion(const std::string& regionId, double dx, double dy);
 
     // ========== Optional Host Attachment ==========
 

@@ -1516,78 +1516,96 @@ fn point_pos(sketch: &Sketch, id: EntityId) -> Option<[f64; 2]> {
     }
 }
 
+/// Adds `"referenceLocked": true` to an already-built entity object, and NOTHING
+/// when the flag is false (SCHEMA §7.3: optional, default `false`). Omitting the
+/// false case keeps the wire byte-identical for every sketch authored before the
+/// flag existed — which is all of them, since nothing produces locked geometry yet.
+fn tag_reference_locked(mut v: Value, e: &SketchEntity) -> Value {
+    if e.is_reference_locked() {
+        v["referenceLocked"] = json!(true);
+    }
+    v
+}
+
 fn wire_entity(sketch: &Sketch, e: &SketchEntity) -> Option<Value> {
-    Some(match e {
-        SketchEntity::Point {
-            id,
-            at,
-            construction,
-            ..
-        } => json!({
-            "id": id.to_string(), "type": "Point",
-            "at": [at.x, at.y], "construction": construction,
-        }),
-        SketchEntity::Line {
-            id,
-            start,
-            end,
-            construction,
-        } => json!({
-            "id": id.to_string(), "type": "Line",
-            "p0Ref": start.to_string(), "p1Ref": end.to_string(), "construction": construction,
-        }),
-        SketchEntity::Circle {
-            id,
-            center,
-            radius,
-            construction,
-        } => {
-            let c = point_pos(sketch, *center)?;
-            // `centerRef` carries the center point's uuid alongside the inlined coords
-            // so re-entry hydration can re-own the center Point (BUG-5). The worker
-            // ignores the extra key; the frontend consumes it (`sketchWireMap.ts`).
-            json!({
-                "id": id.to_string(), "type": "Circle",
-                "center": c, "centerRef": center.to_string(),
-                "radius": radius, "construction": construction,
-            })
-        }
-        SketchEntity::Arc {
-            id,
-            center,
-            radius,
-            start_angle,
-            end_angle,
-            construction,
-        } => {
-            let c = point_pos(sketch, *center)?;
-            json!({
-                "id": id.to_string(), "type": "Arc",
-                "center": c, "centerRef": center.to_string(), "radius": radius,
-                "startAngle": start_angle, "endAngle": end_angle, "construction": construction,
-            })
-        }
-        SketchEntity::Ellipse {
-            id,
-            center,
-            major_r,
-            minor_r,
-            rotation,
-            construction,
-        } => {
-            let c = point_pos(sketch, *center)?;
-            // Same shape as Circle: inlined center coords + the informational
-            // `centerRef` uuid so re-entry hydration re-owns the center Point.
-            // `rotation` is RADIANS on the wire (core stores radians too — the
-            // UI converts at its own boundary via `angleUnits.ts`).
-            json!({
-                "id": id.to_string(), "type": "Ellipse",
-                "center": c, "centerRef": center.to_string(),
-                "majorR": major_r, "minorR": minor_r, "rotation": rotation,
-                "construction": construction,
-            })
-        }
-    })
+    Some(tag_reference_locked(
+        match e {
+            SketchEntity::Point {
+                id,
+                at,
+                construction,
+                ..
+            } => json!({
+                "id": id.to_string(), "type": "Point",
+                "at": [at.x, at.y], "construction": construction,
+            }),
+            SketchEntity::Line {
+                id,
+                start,
+                end,
+                construction,
+                ..
+            } => json!({
+                "id": id.to_string(), "type": "Line",
+                "p0Ref": start.to_string(), "p1Ref": end.to_string(), "construction": construction,
+            }),
+            SketchEntity::Circle {
+                id,
+                center,
+                radius,
+                construction,
+                ..
+            } => {
+                let c = point_pos(sketch, *center)?;
+                // `centerRef` carries the center point's uuid alongside the inlined coords
+                // so re-entry hydration can re-own the center Point (BUG-5). The worker
+                // ignores the extra key; the frontend consumes it (`sketchWireMap.ts`).
+                json!({
+                    "id": id.to_string(), "type": "Circle",
+                    "center": c, "centerRef": center.to_string(),
+                    "radius": radius, "construction": construction,
+                })
+            }
+            SketchEntity::Arc {
+                id,
+                center,
+                radius,
+                start_angle,
+                end_angle,
+                construction,
+                ..
+            } => {
+                let c = point_pos(sketch, *center)?;
+                json!({
+                    "id": id.to_string(), "type": "Arc",
+                    "center": c, "centerRef": center.to_string(), "radius": radius,
+                    "startAngle": start_angle, "endAngle": end_angle, "construction": construction,
+                })
+            }
+            SketchEntity::Ellipse {
+                id,
+                center,
+                major_r,
+                minor_r,
+                rotation,
+                construction,
+                ..
+            } => {
+                let c = point_pos(sketch, *center)?;
+                // Same shape as Circle: inlined center coords + the informational
+                // `centerRef` uuid so re-entry hydration re-owns the center Point.
+                // `rotation` is RADIANS on the wire (core stores radians too — the
+                // UI converts at its own boundary via `angleUnits.ts`).
+                json!({
+                    "id": id.to_string(), "type": "Ellipse",
+                    "center": c, "centerRef": center.to_string(),
+                    "majorR": major_r, "minorR": minor_r, "rotation": rotation,
+                    "construction": construction,
+                })
+            }
+        },
+        e,
+    ))
 }
 
 fn wire_constraint(c: &Constraint) -> Value {
@@ -2446,6 +2464,65 @@ mod solver_wire_tests {
         // Radians on the wire, not degrees.
         assert_eq!(e["rotation"], json!(0.25));
         assert_eq!(e["construction"], json!(false));
+    }
+
+    /// `referenceLocked` is emitted ONLY when true (SCHEMA §7.3), on all five
+    /// kinds. The omission is the load-bearing half: every sketch authored
+    /// before the flag existed must still marshal byte-identically, and with
+    /// zero producers that is every sketch in existence.
+    #[test]
+    fn sketch_wire_emits_reference_locked_only_when_set() {
+        let sid = SketchId(Uuid::from_u128(9));
+        let mut sk = Sketch::on_world_plane(sid, "S", WorldPlane::XY);
+        let (p0, p1, c) = (eid(0x50), eid(0x51), eid(0x52));
+        for (id, locked) in [(p0, false), (p1, false), (c, true)] {
+            sk.add_entity(SketchEntity::point(
+                id,
+                Vec2::new_unchecked(0.0, 0.0),
+                false,
+                locked,
+            ))
+            .unwrap();
+        }
+        let (line, arc, circle, ellipse) = (eid(0x53), eid(0x54), eid(0x55), eid(0x56));
+        sk.add_entity(SketchEntity::line(line, p0, p1, false))
+            .unwrap();
+        sk.add_entity(
+            SketchEntity::arc(arc, c, 5.0, 0.0, 1.0, false)
+                .unwrap()
+                .with_reference_locked(true),
+        )
+        .unwrap();
+        sk.add_entity(
+            SketchEntity::circle(circle, c, 5.0, false)
+                .unwrap()
+                .with_reference_locked(true),
+        )
+        .unwrap();
+        sk.add_entity(
+            SketchEntity::ellipse(ellipse, c, 6.0, 3.0, 0.0, false)
+                .unwrap()
+                .with_reference_locked(true),
+        )
+        .unwrap();
+
+        let (_, entities, _) = sketch_wire(&sk);
+        let ents = entities.as_array().unwrap();
+        let at = |id: EntityId| {
+            ents.iter()
+                .find(|e| e["id"] == json!(id.to_string()))
+                .unwrap()
+                .clone()
+        };
+        for id in [c, arc, circle, ellipse] {
+            assert_eq!(at(id)["referenceLocked"], json!(true), "{id} is locked");
+        }
+        for id in [p0, p1, line] {
+            assert!(
+                at(id).get("referenceLocked").is_none(),
+                "{id} is free, so the key must be ABSENT (not `false`)"
+            );
+        }
     }
 
     /// The construction flag rides through to the wire, where the worker's

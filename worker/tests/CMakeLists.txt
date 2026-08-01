@@ -26,6 +26,13 @@ add_executable(test_sketch_ellipse test_sketch_ellipse.cpp)
 target_link_libraries(test_sketch_ellipse PRIVATE worker_core)
 add_test(NAME sketch_ellipse COMMAND test_sketch_ellipse)
 
+# --- W0b: `referenceLocked` host-face geometry — the wire flag + child
+#     inheritance, region participation (the contrast with `construction`), the
+#     tag-0 solver pins, and the now-reachable edit guards. ---
+add_executable(test_sketch_reference_locked test_sketch_reference_locked.cpp)
+target_link_libraries(test_sketch_reference_locked PRIVATE worker_core)
+add_test(NAME sketch_reference_locked COMMAND test_sketch_reference_locked)
+
 # --- W0b: arc endpoints as REAL solver points — the `<id>.start`/`<id>.end`
 #     handles, the internal (tag 0) ArcRules coupling, and the welded-slot DOF. ---
 add_executable(test_sketch_arc_endpoints test_sketch_arc_endpoints.cpp)

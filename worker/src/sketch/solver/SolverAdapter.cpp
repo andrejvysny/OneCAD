@@ -45,6 +45,20 @@ bool SolverAdapter::populateSolver(Sketch& sketch, ConstraintSolver& solver) {
         }
     }
 
+    // LAST: reference-lock pins. They must follow the user constraints because
+    // the pin set skips points a `Fixed` already holds — pinning those twice
+    // would be reported as genuine redundancy.
+    const ReferenceLockPins pins = sketch.referenceLockPins();
+    for (const auto& pointId : pins.points) {
+        solver.pinPointPosition(pointId);
+    }
+    for (const auto& entityId : pins.radii) {
+        solver.pinRadius(entityId);
+    }
+    for (const auto& arcId : pins.arcAngles) {
+        solver.pinArcAngles(arcId);
+    }
+
     return ok;
 }
 

@@ -432,6 +432,9 @@ LoopDetectionResult LoopDetector::detect(const sk::Sketch& sketch,
         }
 
         for (const auto& entity : sketch.getAllEntities()) {
+            // REFERENCE-LOCK PIN: `isConstruction` is the ONLY entity flag that excludes
+            // geometry here. Reference-locked (host-face projected) geometry MUST keep
+            // bounding regions — a profile extruded off the face boundary depends on it.
             if (!entity || entity->isConstruction()) {
                 continue;
             }
@@ -553,6 +556,9 @@ LoopDetectionResult LoopDetector::detect(const sk::Sketch& sketch,
 
         bool referenced = false;
         for (const auto& e : sketch.getAllEntities()) {
+            // REFERENCE-LOCK PIN: `isConstruction` is the ONLY entity flag that excludes
+            // geometry here. Reference-locked (host-face projected) geometry MUST keep
+            // bounding regions — a profile extruded off the face boundary depends on it.
             if (!e || e->isConstruction()) {
                 continue;
             }
@@ -708,6 +714,9 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
 
     if (!planarize) {
         for (const auto& entity : sketch.getAllEntities()) {
+            // REFERENCE-LOCK PIN: `isConstruction` is the ONLY entity flag that excludes
+            // geometry here. Reference-locked (host-face projected) geometry MUST keep
+            // bounding regions — a profile extruded off the face boundary depends on it.
             if (!entity || entity->isConstruction()) {
                 continue;
             }
@@ -789,6 +798,9 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
     segments.reserve(sketch.getAllEntities().size() * 4);
 
     for (const auto& entity : sketch.getAllEntities()) {
+        // REFERENCE-LOCK PIN: `isConstruction` is the ONLY entity flag that excludes
+        // geometry here. Reference-locked (host-face projected) geometry MUST keep
+        // bounding regions — a profile extruded off the face boundary depends on it.
         if (!entity || entity->isConstruction()) {
             continue;
         }

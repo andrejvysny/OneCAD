@@ -46,8 +46,7 @@ expression: canonical_sketch()
         0.0,
         0.0
       ],
-      "construction": false,
-      "referenceLocked": false
+      "construction": false
     },
     {
       "kind": "point",
@@ -56,8 +55,7 @@ expression: canonical_sketch()
         40.0,
         0.0
       ],
-      "construction": false,
-      "referenceLocked": false
+      "construction": false
     },
     {
       "kind": "point",
@@ -66,8 +64,7 @@ expression: canonical_sketch()
         40.0,
         20.0
       ],
-      "construction": false,
-      "referenceLocked": false
+      "construction": false
     },
     {
       "kind": "point",
@@ -76,8 +73,7 @@ expression: canonical_sketch()
         10.0,
         10.0
       ],
-      "construction": false,
-      "referenceLocked": false
+      "construction": false
     },
     {
       "kind": "line",

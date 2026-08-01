@@ -468,9 +468,12 @@ export class SketchController {
     }
     if (!elementId) return false;
 
+    // `topoKey` rides along: this id was just minted (never consumed by an op),
+    // so it is genuinely absent from the worker's on-demand element-map
+    // partition — the topoKey rung is what makes THIS flow resolve at all.
     let plane: SketchPlane;
     try {
-      plane = await this.deps.client.faceSketchPlane(bodyId, elementId);
+      plane = await this.deps.client.faceSketchPlane(bodyId, elementId, face.topoKey);
     } catch (e) {
       viewportStore.getState().setStatusHint(
         `Cannot sketch on that face: ${e instanceof Error ? e.message : String(e)}`,

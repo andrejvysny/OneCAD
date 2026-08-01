@@ -20,6 +20,7 @@ export type TokenName =
   | "--color-canvas-sketch"
   | "--color-ink"
   | "--color-ink-5"
+  | "--color-sketch-reference"
   | "--color-accent"
   | "--color-sel-bg"
   | "--color-sel-text"
@@ -40,6 +41,7 @@ const FALLBACK: Record<TokenName, string> = {
   "--color-canvas-sketch": "rgb(244, 247, 252)",
   "--color-ink": "rgb(27, 29, 33)",
   "--color-ink-5": "rgb(138, 145, 156)",
+  "--color-sketch-reference": "rgb(107, 122, 143)",
   "--color-accent": "rgb(46, 111, 224)",
   "--color-sel-bg": "rgb(225, 235, 251)",
   "--color-sel-text": "rgb(29, 79, 168)",
@@ -104,6 +106,8 @@ export const palette = {
   sketchSelected: () => tokenColor("--color-sel-text"),
   /** Construction (dashed) geometry. */
   sketchConstruction: () => tokenColor("--color-ink-5"),
+  /** Host-face reference geometry (`referenceLocked`) — SOLID, recessive. */
+  sketchReference: () => tokenColor("--color-sketch-reference"),
   /** Conflicting / over-constrained geometry. */
   sketchConflict: () => tokenColor("--color-warn"),
   /** Sketch plane tint quad + sketch canvas background. */

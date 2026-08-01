@@ -869,12 +869,21 @@ fn parse_preview_operation(mut raw: serde_json::Value) -> Result<(Operation, Str
 /// plane is exactly the class of "silent wrong bind" this codebase refuses.
 /// Worker IO runs OUTSIDE the runtime lock (the lock is taken only to read the
 /// head snapshot id).
+///
+/// `topo_key` walks the SAME two-rung read ladder `element_info` does (see its
+/// doc comment for the full rationale): a just-promoted face id has not yet
+/// been CONSUMED by any operation, so the worker's on-demand element-map
+/// partition has no entry for it and an ElementId-only lookup fails loudly —
+/// exactly the flow `SketchController.tryEnterOnSelectedFace` drives (select a
+/// face, sketch on it immediately). The topoKey rung resolves against the body
+/// shape directly, so it is tried FIRST; the elementId is the fallback.
 #[tauri::command]
 pub async fn face_sketch_plane(
     state: State<'_, AppState>,
     snapshot_id: u64,
     body_id: String,
     element_id: String,
+    topo_key: Option<String>,
 ) -> Result<crate::dto::SketchPlaneDto, ApiError> {
     let body = wire::parse_body_id(&body_id).map_err(ApiError::InvalidCommand)?;
     {
@@ -888,15 +897,22 @@ pub async fn face_sketch_plane(
     // The caller supplies the snapshot its pick was made against — the same
     // contract `promoteSelection` uses, so a TopoKey/ElementId resolves against
     // the exact snapshot the mesh was tessellated at (Invariant 4).
-    let info = state
-        .element_query()
-        .query_element(SnapshotId(snapshot_id), body, &element_id)
-        .await?
-        .ok_or_else(|| {
-            ApiError::InvalidCommand(format!(
-                "faceSketchPlane: element {element_id} is not present in the current snapshot"
-            ))
-        })?;
+    let snapshot = SnapshotId(snapshot_id);
+    let query = state.element_query();
+    let mut info = None;
+    if let Some(topo_key) = topo_key.as_deref().filter(|k| !k.is_empty()) {
+        info = query
+            .query_element_by_topo_key(snapshot, body, topo_key)
+            .await?;
+    }
+    if info.is_none() {
+        info = query.query_element(snapshot, body, &element_id).await?;
+    }
+    let info = info.ok_or_else(|| {
+        ApiError::InvalidCommand(format!(
+            "faceSketchPlane: element {element_id} is not present in the current snapshot"
+        ))
+    })?;
 
     if info.kind != "face" {
         return Err(ApiError::InvalidCommand(format!(

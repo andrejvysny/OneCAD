@@ -236,6 +236,14 @@ pub enum SketchError {
         /// The missing referenced entity.
         missing: EntityId,
     },
+    /// A geometry-mutating edit named locked host-face reference geometry.
+    ///
+    /// Loud by design: the projected boundary must stay congruent with the model
+    /// face it came from, so a partial edit is worse than a rejected one. Adding
+    /// a CONSTRAINT against locked geometry is allowed (that is how a profile
+    /// snaps to the face boundary) — only geometry mutation is refused.
+    #[error("entity {0} is reference-locked (host-face geometry) and cannot be edited")]
+    ReferenceLocked(EntityId),
 }
 
 /// Serde mirror of [`Sketch`] (the persisted fields only). Deserializing into

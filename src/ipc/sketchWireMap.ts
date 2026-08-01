@@ -184,6 +184,12 @@ export interface SketchIdMap {
    *  diffs). Mirrors `constraintValue`: the backend already holds this value, so a
    *  marshal only emits when the live entity disagrees with it. */
   entityConstruction: Map<string, boolean>;
+  /** Frontend ids of REFERENCE-LOCKED entities (SCHEMA §7.3), seeded on hydration.
+   *  Not a diff cache — a latch: the marshaller refuses to author a destructive op
+   *  against any id in here. Locked geometry is projected from the host face, and
+   *  the backend would reject the op anyway (`SketchError::ReferenceLocked`), so
+   *  emitting one could only ever fail a whole upsert batch. */
+  entityReferenceLocked: Set<string>;
 }
 
 export function createIdMap(backendSketchId: string, planeKind: SketchPlaneKind): SketchIdMap {
@@ -195,11 +201,12 @@ export function createIdMap(backendSketchId: string, planeKind: SketchPlaneKind)
     constraint: new Map(),
     constraintValue: new Map(),
     entityConstruction: new Map(),
+    entityReferenceLocked: new Set(),
   };
 }
 
 /**
- * Deep-clone a per-sketch id map (the 5 id/cache maps duplicated; scalar fields copied).
+ * Deep-clone a per-sketch id map (the 6 id/cache collections duplicated; scalar fields copied).
  * The upsert marshaller MUTATES the map it diffs against as it mints/drops ids, so an
  * upsert works on a CLONE and the caller commits it onto the live map ONLY after the
  * RPC resolves — a rejected upsert then leaves the live map byte-for-byte unchanged
@@ -214,6 +221,7 @@ export function cloneIdMap(map: SketchIdMap): SketchIdMap {
     constraint: new Map(map.constraint),
     constraintValue: new Map(map.constraintValue),
     entityConstruction: new Map(map.entityConstruction),
+    entityReferenceLocked: new Set(map.entityReferenceLocked),
   };
 }
 
@@ -552,6 +560,13 @@ export function marshalUpsert(
   const liveEntities = new Set(next.entities.map((e) => e.id));
   for (const [fid, uuid] of [...map.entity]) {
     if (!liveEntities.has(fid)) {
+      // REFERENCE-LOCK LATCH. Locked entities must stay in `next.entities` — they
+      // are part of the session like any other geometry. If one ever goes missing
+      // (a tool filtering the session, a hydration gap) the id-only diff below
+      // reads it as a deletion, and this loop would author the one op the backend
+      // refuses outright, failing the whole batch. Skip instead, and keep the id
+      // mapped so the next upsert is still coherent.
+      if (map.entityReferenceLocked.has(fid)) continue;
       ops.push({ op: "removeEntity", entity: uuid });
       map.entity.delete(fid);
       map.entityConstruction.delete(fid);
@@ -587,7 +602,15 @@ export function marshalUpsert(
   for (const e of next.entities) {
     if (!map.entity.has(e.id)) {
       ops.push(...addEntityOps(map, e, mint));
-    } else if (!!e.construction !== !!map.entityConstruction.get(e.id)) {
+    } else if (
+      !!e.construction !== !!map.entityConstruction.get(e.id) &&
+      // A construction flip is a geometry-semantics edit; the backend refuses it
+      // on locked geometry. Nothing in the UI can reach this today (the flip
+      // affordances gate on selection, which never carries locked entities), so
+      // a disagreement here means the flag drifted — resync the cache silently
+      // rather than emit an op that fails the batch.
+      !map.entityReferenceLocked.has(e.id)
+    ) {
       map.entityConstruction.set(e.id, !!e.construction);
       ops.push({
         op: "setEntityConstruction",
@@ -800,6 +823,8 @@ interface WireDtoEntity {
   minorR?: number;
   rotation?: number;
   construction?: boolean;
+  /** SCHEMA §7.3: emitted ONLY when true. Absent ⇒ false. */
+  referenceLocked?: boolean;
 }
 
 /** A backend point uuid's owner: the entity that carries it as `position`. */
@@ -862,20 +887,32 @@ export function frontendEntitiesFromDto(dtoEntities: unknown): SketchEntity[] {
 
   const out: SketchEntity[] = [];
   for (const e of wire) {
+    // `referenceLocked` rides along on every kind — it drives rendering (solid,
+    // dimmed) and the marshaller's destructive-op latch, so dropping it here
+    // would make locked geometry indistinguishable from free geometry on re-entry.
+    const referenceLocked = e.referenceLocked;
     switch (e.type) {
       case "Point":
         if (e.at && !ownedChildIds.has(e.id))
-          out.push({ id: e.id, type: "Point", p0: e.at, construction: e.construction });
+          out.push({ id: e.id, type: "Point", p0: e.at, construction: e.construction, referenceLocked });
         break;
       case "Line": {
         const p0 = e.p0Ref ? pointAt.get(e.p0Ref) : undefined;
         const p1 = e.p1Ref ? pointAt.get(e.p1Ref) : undefined;
-        if (p0 && p1) out.push({ id: e.id, type: "Line", p0, p1, construction: e.construction });
+        if (p0 && p1)
+          out.push({ id: e.id, type: "Line", p0, p1, construction: e.construction, referenceLocked });
         break;
       }
       case "Circle":
         if (e.center && e.radius !== undefined)
-          out.push({ id: e.id, type: "Circle", center: e.center, radius: e.radius, construction: e.construction });
+          out.push({
+            id: e.id,
+            type: "Circle",
+            center: e.center,
+            radius: e.radius,
+            construction: e.construction,
+            referenceLocked,
+          });
         break;
       case "Ellipse":
         if (e.center && e.majorR !== undefined && e.minorR !== undefined)
@@ -887,6 +924,7 @@ export function frontendEntitiesFromDto(dtoEntities: unknown): SketchEntity[] {
             minorR: e.minorR,
             rotation: e.rotation ?? 0,
             construction: e.construction,
+            referenceLocked,
           });
         break;
       case "Arc":
@@ -903,6 +941,7 @@ export function frontendEntitiesFromDto(dtoEntities: unknown): SketchEntity[] {
             start: at(e.startAngle),
             end: at(e.endAngle),
             construction: e.construction,
+            referenceLocked,
           });
         }
         break;
@@ -1164,6 +1203,7 @@ export function seedIdMapFromWire(
   map.constraint.clear();
   map.constraintValue.clear();
   map.entityConstruction.clear();
+  map.entityReferenceLocked.clear();
 
   if (Array.isArray(dtoEntities)) {
     const wire = dtoEntities as WireDtoEntity[];
@@ -1213,7 +1253,12 @@ export function seedIdMapFromWire(
       // the switch actually bound — every skipped case `continue`s). Mirrors
       // `frontendEntitiesFromDto`, which carries the same flag onto the live
       // session, so the first marshal after re-entry emits no spurious flip.
-      if (map.entity.has(e.id)) map.entityConstruction.set(e.id, !!e.construction);
+      if (map.entity.has(e.id)) {
+        map.entityConstruction.set(e.id, !!e.construction);
+        // W0b: latch the reference lock the same way, so the marshaller can
+        // refuse destructive ops against host-face geometry.
+        if (e.referenceLocked) map.entityReferenceLocked.add(e.id);
+      }
     }
   }
 

@@ -536,7 +536,44 @@ bool Sketch::setEntityReferenceLocked(EntityID id, bool locked) {
         return false;
     }
     entity->setReferenceLocked(locked);
+    invalidateSolver();
+    dofDirty_ = true;
     return true;
+}
+
+ReferenceLockPins Sketch::referenceLockPins() const {
+    ReferenceLockPins pins;
+    std::unordered_set<EntityID> seenPoints;
+
+    // A point already held by a user `Fixed` must not be pinned twice — see the
+    // redundancy note on ReferenceLockPins.
+    auto pinPoint = [&](const EntityID& id) {
+        if (id.empty() || !getEntityAs<SketchPoint>(id) || hasFixedConstraint(id)) {
+            return;
+        }
+        if (seenPoints.insert(id).second) {
+            pins.points.push_back(id);
+        }
+    };
+
+    for (const auto& entity : entities_) {
+        if (!entity || !entity->isReferenceLocked()) {
+            continue;
+        }
+        if (const auto* line = dynamic_cast<const SketchLine*>(entity.get())) {
+            pinPoint(line->startPointId());
+            pinPoint(line->endPointId());
+        } else if (const auto* arc = dynamic_cast<const SketchArc*>(entity.get())) {
+            pinPoint(arc->centerPointId());
+            pins.radii.push_back(arc->id());
+            pins.arcAngles.push_back(arc->id());
+        } else if (const auto* circle = dynamic_cast<const SketchCircle*>(entity.get())) {
+            pinPoint(circle->centerPointId());
+            pins.radii.push_back(circle->id());
+        }
+        // Point / Ellipse: nothing — see the ReferenceLockPins docs.
+    }
+    return pins;
 }
 
 std::vector<SketchEntity*> Sketch::getEntitiesByType(EntityType type) {
@@ -766,10 +803,13 @@ ConstraintID Sketch::addConstraint(std::unique_ptr<SketchConstraint> constraint)
             WLOG_WARN("%s", "addConstraint:invalid-reference");
             return {};
         }
-        if (referenced->isReferenceLocked() && constraint->type() != ConstraintType::Fixed) {
-            WLOG_WARN("%s", "addConstraint:reference-locked");
-            return {};
-        }
+        // A constraint MAY reference reference-locked geometry (SCHEMA §7.3).
+        // The oracle vetoed everything but `Fixed` here, which made the whole
+        // point of projecting a host-face boundary unreachable: you snap a
+        // profile TO that boundary with Coincident/Tangent/Distance. Immobility
+        // is enforced where it belongs — in the solver, by pinning the locked
+        // entity's parameters (`referenceLockPins`), so such a constraint can
+        // only ever move the FREE side.
     }
 
     const ConstraintSupportResult support = validateConstraintSupport(*constraint);
@@ -939,32 +979,41 @@ void Sketch::translatePlaneInSketch(const Vec2d& deltaSketch) {
     plane_.origin.z += deltaSketch.x * plane_.xAxis.z + deltaSketch.y * plane_.yAxis.z;
 }
 
-void Sketch::translateSketch(double dx, double dy) {
+// A translation is rigid: moving only the free half of a set would SHEAR the
+// sketch and, worse, silently desync a projected boundary from the model face it
+// mirrors. The oracle skipped locked points and translated the rest; refusing the
+// whole move is the loud alternative (all-or-nothing, nothing mutated).
+bool Sketch::translateSketch(double dx, double dy) {
+    for (const auto& entity : entities_) {
+        if (entity && entity->isReferenceLocked()) {
+            WLOG_WARN("%s", "translateSketch:reference-locked");
+            return false;
+        }
+    }
     for (auto& entity : entities_) {
         if (!entity) {
             continue;
         }
-        auto* point = dynamic_cast<SketchPoint*>(entity.get());
-        if (point && !point->isReferenceLocked()) {
+        if (auto* point = dynamic_cast<SketchPoint*>(entity.get())) {
             gp_Pnt2d p = point->position();
             point->setPosition(p.X() + dx, p.Y() + dy);
         }
     }
     for (auto& constraint : constraints_) {
         if (constraint && constraint->type() == ConstraintType::Fixed) {
-            auto* fc = dynamic_cast<constraints::FixedConstraint*>(constraint.get());
-            if (fc && !isEntityReferenceLocked(fc->pointId())) {
+            if (auto* fc = dynamic_cast<constraints::FixedConstraint*>(constraint.get())) {
                 fc->translate(dx, dy);
             }
         }
     }
     invalidateSolver();
     dofDirty_ = true;
+    return true;
 }
 
-void Sketch::translateSketchRegion(const std::string& regionId, double dx, double dy) {
+bool Sketch::translateSketchRegion(const std::string& regionId, double dx, double dy) {
     if (regionId.empty()) {
-        return;
+        return false;
     }
     std::vector<EntityID> entityIds = onecad::core::loop::getEntityIdsInRegion(*this, regionId);
     std::unordered_set<EntityID> pointIds;
@@ -973,12 +1022,19 @@ void Sketch::translateSketchRegion(const std::string& regionId, double dx, doubl
             pointIds.insert(id);
         }
     }
+    // Refuse on ANY locked member of the region — including the bounding curves,
+    // whose points are what a locked host boundary actually pins.
+    for (const auto& id : entityIds) {
+        if (isEntityReferenceLocked(id)) {
+            WLOG_WARN("%s", "translateSketchRegion:reference-locked");
+            return false;
+        }
+    }
     for (auto& entity : entities_) {
         if (!entity || pointIds.find(entity->id()) == pointIds.end()) {
             continue;
         }
-        auto* point = dynamic_cast<SketchPoint*>(entity.get());
-        if (point && !point->isReferenceLocked()) {
+        if (auto* point = dynamic_cast<SketchPoint*>(entity.get())) {
             gp_Pnt2d p = point->position();
             point->setPosition(p.X() + dx, p.Y() + dy);
         }
@@ -988,14 +1044,13 @@ void Sketch::translateSketchRegion(const std::string& regionId, double dx, doubl
             continue;
         }
         auto* fc = dynamic_cast<constraints::FixedConstraint*>(constraint.get());
-        if (fc &&
-            pointIds.find(fc->pointId()) != pointIds.end() &&
-            !isEntityReferenceLocked(fc->pointId())) {
+        if (fc && pointIds.find(fc->pointId()) != pointIds.end()) {
             fc->translate(dx, dy);
         }
     }
     invalidateSolver();
     dofDirty_ = true;
+    return true;
 }
 
 void Sketch::setHostFaceAttachment(const std::string& bodyId, const std::string& faceId) {
@@ -1568,6 +1623,9 @@ int Sketch::naiveDegreesOfFreedom() const {
             total -= constraint->degreesRemoved();
         }
     }
+    // Reference-lock pins are tag-0 solver constraints, so like the arc rules
+    // above they are absent from `constraints_` and nothing else subtracts them.
+    total -= referenceLockPins().equationCount();
     return total;
 }
 
@@ -1578,7 +1636,9 @@ bool Sketch::hasInternalCouplings() const {
             return true;
         }
     }
-    return false;
+    // Reference-lock pins are equations too: a group drag over a constraint-free
+    // sketch would otherwise take the teleport path and move locked geometry.
+    return !referenceLockPins().empty();
 }
 
 bool Sketch::hasSolverUnsupportedEntities() const {

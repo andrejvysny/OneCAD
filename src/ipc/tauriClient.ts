@@ -1021,8 +1021,17 @@ export function createTauriClient(): CadClient {
    * in-plane axis rule, so the basis is authoritative and replay-stable — a
    * frame derived here from a tessellated triangle normal would be neither.
    * A non-planar face is rejected by the backend, surfacing as an ApiError.
+   *
+   * `topoKey` is forwarded when the caller has it: a just-promoted, not-yet-
+   * consumed `elementId` is not yet in the worker's on-demand element-map
+   * partition, so the backend tries the topoKey rung first (same ladder as
+   * `elementInfo`) before falling back to `elementId`.
    */
-  async function faceSketchPlane(bodyId: string, elementId: string): Promise<SketchPlane> {
+  async function faceSketchPlane(
+    bodyId: string,
+    elementId: string,
+    topoKey?: string,
+  ): Promise<SketchPlane> {
     // Same `body_<uuid>` wire form promoteSelection uses (document-changed hands
     // the frontend a bare uuid).
     const wireBodyId = bodyId.startsWith("body_") ? bodyId : `body_${bodyId}`;
@@ -1035,6 +1044,7 @@ export function createTauriClient(): CadClient {
       snapshotId: currentSnapshotId,
       bodyId: wireBodyId,
       elementId,
+      topoKey: topoKey ?? null,
     });
     return { kind: "custom", ...dto };
   }

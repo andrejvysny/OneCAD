@@ -21,6 +21,9 @@
 //! camelCase fields. Numeric fields reject `NaN`/`±Inf` both at the constructor
 //! boundary (checked constructors return `Option`) and on deserialize (SCHEMA
 //! §4). `construction` / `referenceLocked` default to `false` when absent.
+//! `referenceLocked` is additionally OMITTED when `false` — it rides on all five
+//! kinds now, and emitting a false flag five times per entity would bloat every
+//! stored document for a flag that is false for all authored geometry.
 //!
 //! **Forward-compat** (see the note in [`crate::sketch`]): a tagged enum cannot
 //! preserve an ALIEN variant (an unknown `kind` fails to deserialize) and drops
@@ -36,9 +39,12 @@
 //! center, radius}`. That is the worker-lane wire shape (carried opaquely by
 //! `SketchOpParams`); this typed model is the authoritative document / sketch
 //! file format. Bridging the two is the `onecad-protocol` adapter's job.
-//! Additional C++ fidelity note: C++ carries `referenceLocked` on the *base*
-//! `SketchEntity` (all kinds); the WP scopes it to `Point` only — kept as
-//! specified.
+//!
+//! **`referenceLocked`** now matches C++ (the flag lives on the *base*
+//! `SketchEntity`, i.e. all five kinds), closing the divergence this module used
+//! to report. It marks geometry projected from a host face: selectable and
+//! snappable, immovable by any edit, and — unlike `construction` — a full
+//! participant in loop/region detection (SCHEMA §7.3).
 
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -54,6 +60,11 @@ fn de_finite<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
     } else {
         Err(serde::de::Error::custom("non-finite value"))
     }
+}
+
+/// `skip_serializing_if` predicate — an unset `referenceLocked` stays off the wire.
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 /// A geometry primitive in a sketch.
@@ -78,8 +89,7 @@ pub enum SketchEntity {
         #[serde(default)]
         construction: bool,
         /// Locked host-face reference geometry (selectable but not editable).
-        /// C++ keeps this on every entity; scoped to `Point` per the WP.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "is_false")]
         reference_locked: bool,
     },
     /// A line segment between two point entities (C++ `SketchLine`).
@@ -93,6 +103,9 @@ pub enum SketchEntity {
         /// Construction geometry.
         #[serde(default)]
         construction: bool,
+        /// Locked host-face reference geometry.
+        #[serde(default, skip_serializing_if = "is_false")]
+        reference_locked: bool,
     },
     /// A circular arc: center point + radius + CCW angular extent, angles in
     /// radians from +X (C++ `SketchArc`).
@@ -113,6 +126,9 @@ pub enum SketchEntity {
         /// Construction geometry.
         #[serde(default)]
         construction: bool,
+        /// Locked host-face reference geometry.
+        #[serde(default, skip_serializing_if = "is_false")]
+        reference_locked: bool,
     },
     /// A full circle: center point + radius (C++ `SketchCircle`).
     Circle {
@@ -126,6 +142,9 @@ pub enum SketchEntity {
         /// Construction geometry.
         #[serde(default)]
         construction: bool,
+        /// Locked host-face reference geometry.
+        #[serde(default, skip_serializing_if = "is_false")]
+        reference_locked: bool,
     },
     /// An ellipse: center point + semi-major/minor radii + major-axis rotation
     /// (radians from +X) (C++ `SketchEllipse`).
@@ -146,6 +165,9 @@ pub enum SketchEntity {
         /// Construction geometry.
         #[serde(default)]
         construction: bool,
+        /// Locked host-face reference geometry.
+        #[serde(default, skip_serializing_if = "is_false")]
+        reference_locked: bool,
     },
 }
 
@@ -163,6 +185,10 @@ impl SketchEntity {
     }
 
     /// A line between two point entities.
+    ///
+    /// Non-`Point` constructors take no `reference_locked` argument: locked
+    /// geometry is projected, never hand-authored, so it is built by chaining
+    /// [`with_reference_locked`](Self::with_reference_locked).
     #[must_use]
     pub fn line(id: EntityId, start: EntityId, end: EntityId, construction: bool) -> Self {
         Self::Line {
@@ -170,6 +196,7 @@ impl SketchEntity {
             start,
             end,
             construction,
+            reference_locked: false,
         }
     }
 
@@ -192,6 +219,7 @@ impl SketchEntity {
                 start_angle,
                 end_angle,
                 construction,
+                reference_locked: false,
             },
         )
     }
@@ -204,6 +232,7 @@ impl SketchEntity {
             center,
             radius,
             construction,
+            reference_locked: false,
         })
     }
 
@@ -226,6 +255,7 @@ impl SketchEntity {
                 minor_r,
                 rotation,
                 construction,
+                reference_locked: false,
             },
         )
     }
@@ -251,6 +281,63 @@ impl SketchEntity {
             | Self::Arc { construction, .. }
             | Self::Circle { construction, .. }
             | Self::Ellipse { construction, .. } => construction,
+        }
+    }
+
+    /// True for locked host-face reference geometry.
+    ///
+    /// Locked geometry is projected from the sketch's host face: it is
+    /// selectable and snappable, every geometry-mutating edit against it is
+    /// refused, and — the deliberate contrast with
+    /// [`is_construction`](Self::is_construction) — it DOES bound regions
+    /// (SCHEMA §7.3).
+    #[must_use]
+    pub fn is_reference_locked(&self) -> bool {
+        match *self {
+            Self::Point {
+                reference_locked, ..
+            }
+            | Self::Line {
+                reference_locked, ..
+            }
+            | Self::Arc {
+                reference_locked, ..
+            }
+            | Self::Circle {
+                reference_locked, ..
+            }
+            | Self::Ellipse {
+                reference_locked, ..
+            } => reference_locked,
+        }
+    }
+
+    /// This entity with its lock flag set — the only authoring path for the
+    /// four non-`Point` kinds (see [`line`](Self::line)).
+    #[must_use]
+    pub fn with_reference_locked(mut self, locked: bool) -> Self {
+        self.set_reference_locked(locked);
+        self
+    }
+
+    /// Sets the lock flag in place.
+    pub fn set_reference_locked(&mut self, locked: bool) {
+        match self {
+            Self::Point {
+                reference_locked, ..
+            }
+            | Self::Line {
+                reference_locked, ..
+            }
+            | Self::Arc {
+                reference_locked, ..
+            }
+            | Self::Circle {
+                reference_locked, ..
+            }
+            | Self::Ellipse {
+                reference_locked, ..
+            } => *reference_locked = locked,
         }
     }
 
@@ -321,6 +408,34 @@ mod tests {
         let json = serde_json::json!({ "kind": "spline", "id":
             "00000000-0000-0000-0000-000000000001" });
         assert!(serde_json::from_value::<SketchEntity>(json).is_err());
+    }
+
+    #[test]
+    fn reference_locked_rides_on_every_kind_and_omits_false() {
+        let c = eid(0xC);
+        let kinds = [
+            SketchEntity::point(eid(1), Vec2::new_unchecked(0.0, 0.0), false, false),
+            SketchEntity::line(eid(2), eid(1), c, false),
+            SketchEntity::arc(eid(3), c, 5.0, 0.0, 1.0, false).unwrap(),
+            SketchEntity::circle(eid(4), c, 5.0, false).unwrap(),
+            SketchEntity::ellipse(eid(5), c, 5.0, 3.0, 0.0, false).unwrap(),
+        ];
+        for e in kinds {
+            assert!(!e.is_reference_locked());
+            let json = serde_json::to_value(&e).unwrap();
+            assert!(
+                json.get("referenceLocked").is_none(),
+                "a false flag must stay off the wire ({json})"
+            );
+
+            let locked = e.with_reference_locked(true);
+            assert!(locked.is_reference_locked());
+            let json = serde_json::to_value(&locked).unwrap();
+            assert_eq!(json["referenceLocked"], serde_json::json!(true));
+            // …and round-trips.
+            let back: SketchEntity = serde_json::from_value(json).unwrap();
+            assert_eq!(back, locked);
+        }
     }
 
     #[test]

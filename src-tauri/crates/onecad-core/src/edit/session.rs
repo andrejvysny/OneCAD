@@ -1472,14 +1472,35 @@ fn want_body(r: &InputRef) -> Result<BodyId, DomainError> {
 /// Applies a batch of sketch edits to a copy of `prior`, preserving entity /
 /// constraint order (SetDimension/SetEntityPositions mutate in place). Validation
 /// (dup id / dangling ref) runs on the rebuilt sketch via its `add_*` API.
+///
+/// **Reference-locked geometry (L1 guard).** Every op that MUTATES existing
+/// geometry — remove (including anything the cascade would take), reposition,
+/// construction flip — is refused with [`SketchError::ReferenceLocked`] when it
+/// names locked host-face geometry. The refusal happens before any working-vec
+/// mutation, so the batch is atomic and the caller's memento/inverse is never
+/// captured for a rejected edit. Adding a constraint against locked geometry is
+/// deliberately NOT guarded (that is how a profile snaps to the face boundary).
 fn apply_sketch_ops(prior: &Sketch, ops: &[SketchEditOp]) -> Result<Sketch, DomainError> {
     let mut entities: Vec<SketchEntity> = prior.entities().to_vec();
     let mut constraints: Vec<Constraint> = prior.constraints().to_vec();
+
+    let locked = |entities: &[SketchEntity], id: crate::ids::EntityId| -> Result<(), DomainError> {
+        match entities.iter().find(|e| e.id() == id) {
+            Some(e) if e.is_reference_locked() => Err(sketch_err(SketchError::ReferenceLocked(id))),
+            _ => Ok(()),
+        }
+    };
 
     for op in ops {
         match op {
             SketchEditOp::AddEntity { entity } => entities.push(entity.clone()),
             SketchEditOp::RemoveEntity { entity } => {
+                // The cascade takes everything that references the seed, so the
+                // guard has to cover the whole doomed set — otherwise removing a
+                // free point would silently delete the locked line hanging off it.
+                for doomed in doomed_by_remove(&entities, *entity) {
+                    locked(&entities, doomed)?;
+                }
                 entities = cascade_remove_entity(&entities, &mut constraints, *entity);
             }
             SketchEditOp::AddConstraint { constraint } => {
@@ -1503,6 +1524,9 @@ fn apply_sketch_ops(prior: &Sketch, ops: &[SketchEditOp]) -> Result<Sketch, Doma
                 *c = next;
             }
             SketchEditOp::SetEntityPositions { positions } => {
+                for (eid, _) in positions {
+                    locked(&entities, *eid)?;
+                }
                 for (eid, at) in positions {
                     let e = entities
                         .iter_mut()
@@ -1519,6 +1543,7 @@ fn apply_sketch_ops(prior: &Sketch, ops: &[SketchEditOp]) -> Result<Sketch, Doma
                 entity,
                 construction,
             } => {
+                locked(&entities, *entity)?;
                 let e = entities
                     .iter_mut()
                     .find(|e| e.id() == *entity)
@@ -1530,13 +1555,13 @@ fn apply_sketch_ops(prior: &Sketch, ops: &[SketchEditOp]) -> Result<Sketch, Doma
     rebuild_sketch(prior, entities, constraints)
 }
 
-/// Removes `seed` and, to a fixpoint, every entity that transitively references
-/// it, then drops any constraint that referenced a removed entity.
-fn cascade_remove_entity(
+/// `seed` plus, to a fixpoint, every entity that transitively references it —
+/// exactly the set [`cascade_remove_entity`] would drop. Split out so the
+/// reference-lock guard can inspect the doomed set BEFORE anything is removed.
+fn doomed_by_remove(
     entities: &[SketchEntity],
-    constraints: &mut Vec<Constraint>,
     seed: crate::ids::EntityId,
-) -> Vec<SketchEntity> {
+) -> Vec<crate::ids::EntityId> {
     let mut removed = vec![seed];
     loop {
         let newly: Vec<_> = entities
@@ -1548,10 +1573,20 @@ fn cascade_remove_entity(
             .map(SketchEntity::id)
             .collect();
         if newly.is_empty() {
-            break;
+            return removed;
         }
         removed.extend(newly);
     }
+}
+
+/// Removes `seed` and, to a fixpoint, every entity that transitively references
+/// it, then drops any constraint that referenced a removed entity.
+fn cascade_remove_entity(
+    entities: &[SketchEntity],
+    constraints: &mut Vec<Constraint>,
+    seed: crate::ids::EntityId,
+) -> Vec<SketchEntity> {
+    let removed = doomed_by_remove(entities, seed);
     constraints.retain(|c| !c.entities().iter().any(|r| removed.contains(r)));
     entities
         .iter()
@@ -1690,11 +1725,18 @@ fn entity_with_construction(e: &SketchEntity, construction: bool) -> SketchEntit
             construction,
             reference_locked: *reference_locked,
         },
-        SketchEntity::Line { id, start, end, .. } => SketchEntity::Line {
+        SketchEntity::Line {
+            id,
+            start,
+            end,
+            reference_locked,
+            ..
+        } => SketchEntity::Line {
             id: *id,
             start: *start,
             end: *end,
             construction,
+            reference_locked: *reference_locked,
         },
         SketchEntity::Arc {
             id,
@@ -1702,6 +1744,7 @@ fn entity_with_construction(e: &SketchEntity, construction: bool) -> SketchEntit
             radius,
             start_angle,
             end_angle,
+            reference_locked,
             ..
         } => SketchEntity::Arc {
             id: *id,
@@ -1710,14 +1753,20 @@ fn entity_with_construction(e: &SketchEntity, construction: bool) -> SketchEntit
             start_angle: *start_angle,
             end_angle: *end_angle,
             construction,
+            reference_locked: *reference_locked,
         },
         SketchEntity::Circle {
-            id, center, radius, ..
+            id,
+            center,
+            radius,
+            reference_locked,
+            ..
         } => SketchEntity::Circle {
             id: *id,
             center: *center,
             radius: *radius,
             construction,
+            reference_locked: *reference_locked,
         },
         SketchEntity::Ellipse {
             id,
@@ -1725,6 +1774,7 @@ fn entity_with_construction(e: &SketchEntity, construction: bool) -> SketchEntit
             major_r,
             minor_r,
             rotation,
+            reference_locked,
             ..
         } => SketchEntity::Ellipse {
             id: *id,
@@ -1733,6 +1783,7 @@ fn entity_with_construction(e: &SketchEntity, construction: bool) -> SketchEntit
             minor_r: *minor_r,
             rotation: *rotation,
             construction,
+            reference_locked: *reference_locked,
         },
     }
 }
@@ -1883,6 +1934,161 @@ mod tests {
         )
         .expect("flip back accepted");
         assert_eq!(back.entities(), s.entities());
+    }
+
+    /// `stamp_datum_plane` is a DATUM-only stamp. A host-face sketch carries a
+    /// frame the worker derived from the face itself; overwriting it would
+    /// silently reproject every entity coordinate, and the projected boundary
+    /// (the reference-locked geometry a later wave lands) is expressed in it.
+    /// The `let … else` on the attachment is what keeps that frame frozen — this
+    /// pins it for both entry points.
+    #[test]
+    fn stamp_datum_plane_no_ops_for_a_host_face_sketch() {
+        use crate::document::refs::ElementRef;
+        use crate::document::Document;
+        use crate::ids::DocumentId;
+        use crate::sketch::SketchPlane;
+
+        // A frame that is NOT any named world plane, so a stray stamp shows up.
+        let frozen = SketchPlane {
+            origin: crate::math::Vec3::new_unchecked(1.0, 2.0, 3.0),
+            ..SketchPlane::xz()
+        };
+        let mut authored = Sketch::new(
+            sid(),
+            "on face",
+            SketchAttachment::HostFace {
+                face: ElementRef {
+                    primary: None,
+                    intent: None,
+                    anchor: None,
+                    extra: Default::default(),
+                },
+                projected_boundary_version: 0,
+            },
+        );
+        authored.plane = frozen;
+
+        let mut session = DocumentSession::new(Document::new(DocumentId(Uuid::from_u128(1))));
+        // No datum planes exist at all: a stamp would have to ERROR, so passing
+        // proves the host-face arm returned early.
+        session
+            .apply(EditCommand::AddSketch {
+                sketch: authored.clone(),
+            })
+            .expect("a host-face sketch needs no datum");
+        assert_eq!(session.document().sketches[&sid()].plane, frozen);
+
+        // The same holds on the re-attach entry point.
+        session
+            .apply(EditCommand::UpdateSketchAttachment {
+                sketch: sid(),
+                plane: frozen,
+                attachment: authored.attachment.clone(),
+            })
+            .expect("re-attaching a host-face sketch needs no datum");
+        assert_eq!(session.document().sketches[&sid()].plane, frozen);
+    }
+
+    /// A sketch whose circle (and its center point) is locked host-face geometry.
+    fn locked_sketch() -> Sketch {
+        let mut s = Sketch::on_world_plane(sid(), "T", WorldPlane::XY);
+        s.add_entity(SketchEntity::point(
+            eid(1),
+            Vec2::new_unchecked(0.0, 0.0),
+            false,
+            true,
+        ))
+        .unwrap();
+        s.add_entity(SketchEntity::point(
+            eid(2),
+            Vec2::new_unchecked(10.0, 0.0),
+            false,
+            false,
+        ))
+        .unwrap();
+        s.add_entity(
+            SketchEntity::circle(eid(3), eid(1), 5.0, false)
+                .unwrap()
+                .with_reference_locked(true),
+        )
+        .unwrap();
+        s
+    }
+
+    #[test]
+    fn geometry_edits_against_locked_entities_are_refused() {
+        let s = locked_sketch();
+
+        let refused = |ops: Vec<SketchEditOp>, what: &str| {
+            let err = apply_sketch_ops(&s, &ops).expect_err(what);
+            let DomainError::Validation(msg) = err else {
+                panic!("{what}: expected a validation refusal");
+            };
+            assert!(
+                msg.contains("reference-locked"),
+                "{what}: refusal must name the lock, got {msg}"
+            );
+        };
+
+        refused(
+            vec![SketchEditOp::RemoveEntity { entity: eid(3) }],
+            "removing the locked circle",
+        );
+        // The CASCADE is guarded too: the free center point is removable in
+        // isolation, but taking it would drag the locked circle with it.
+        refused(
+            vec![SketchEditOp::RemoveEntity { entity: eid(1) }],
+            "removing a point the locked circle references",
+        );
+        refused(
+            vec![SketchEditOp::SetEntityPositions {
+                positions: vec![(eid(1), Vec2::new_unchecked(1.0, 1.0))],
+            }],
+            "moving the locked center point",
+        );
+        refused(
+            vec![SketchEditOp::SetEntityConstruction {
+                entity: eid(3),
+                construction: true,
+            }],
+            "flipping the locked circle to construction",
+        );
+
+        // …and nothing locked was touched by any of the rejected batches.
+        assert_eq!(s.entities(), locked_sketch().entities());
+    }
+
+    #[test]
+    fn locked_geometry_still_accepts_constraints_and_free_edits() {
+        let s = locked_sketch();
+        // A dimension ON the locked circle is allowed — that is how a profile
+        // binds to the projected face boundary.
+        let dim = apply_sketch_ops(
+            &s,
+            &[SketchEditOp::AddConstraint {
+                constraint: Constraint::Radius {
+                    id: cid(1),
+                    entity: eid(3),
+                    value: Scalar::new(5.0),
+                },
+            }],
+        )
+        .expect("a constraint may reference locked geometry");
+        assert_eq!(dim.constraints().len(), 1);
+
+        // The FREE point next to it still moves.
+        let moved = apply_sketch_ops(
+            &s,
+            &[SketchEditOp::SetEntityPositions {
+                positions: vec![(eid(2), Vec2::new_unchecked(3.0, 4.0))],
+            }],
+        )
+        .expect("a free point still moves");
+        assert!(matches!(
+            moved.get_entity(eid(2)).unwrap(),
+            SketchEntity::Point { at, .. } if [at.x, at.y] == [3.0, 4.0]
+        ));
     }
 
     #[test]

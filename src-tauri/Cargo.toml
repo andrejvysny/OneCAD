@@ -74,6 +74,11 @@ sha2 = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]
+# `tauri::test::mock_app` gives integration tests a real `tauri::State<AppState>`
+# (its constructor is otherwise crate-private) so `sketch_on_face.rs` can call the
+# actual `#[tauri::command]` fn instead of re-deriving its logic. `test = []` in
+# tauri's own manifest — zero extra transitive deps, dev-only (not in the bundle).
+tauri = { version = "2", features = ["test"] }
 # Save/reopen round-trip tests for the open/save command path; chaos drills spawn
 # the built stub bin from a scratch dir.
 tempfile = "3"

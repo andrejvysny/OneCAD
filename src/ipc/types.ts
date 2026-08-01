@@ -114,6 +114,11 @@ export interface SketchEntity {
   type: SketchEntityType;
   /** Construction geometry (dashed, not part of profiles). */
   construction?: boolean;
+  /** Host-face reference geometry (SCHEMA §7.3 `referenceLocked`): projected from
+   *  the face this sketch sits on. Selectable and snappable, and — unlike
+   *  `construction` — it DOES bound regions; what it forbids is EDITING. Nothing
+   *  in the frontend authors it yet; it only ever arrives on the hydration wire. */
+  referenceLocked?: boolean;
   p0?: [number, number];
   p1?: [number, number];
   center?: [number, number];

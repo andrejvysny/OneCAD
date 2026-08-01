@@ -1084,7 +1084,7 @@ export const mockClient: CadClient = {
    * on the named XY basis), so the mock lane and the real lane agree on
    * orientation even though they disagree on which face was picked.
    */
-  async faceSketchPlane(_bodyId: string, _elementId: string): Promise<SketchPlane> {
+  async faceSketchPlane(_bodyId: string, _elementId: string, _topoKey?: string): Promise<SketchPlane> {
     await wait(MESH_LATENCY_MS);
     return { ...planeFor("XY"), kind: "custom" };
   },

@@ -201,8 +201,13 @@ export interface CadClient {
    * (MODEL-OPS W2). REJECTS a non-planar face rather than approximating one —
    * silently sketching on a made-up plane is the "silent wrong bind" class this
    * codebase refuses. The mock derives an equivalent frame locally.
+   *
+   * `topoKey` is forwarded alongside `elementId` when the caller has it: the
+   * backend walks the same two-rung ladder `elementInfo` does (topoKey first,
+   * then elementId) because a just-promoted, not-yet-consumed ElementId is not
+   * yet in the worker's on-demand element-map partition — see `api::element_info`.
    */
-  faceSketchPlane(bodyId: string, elementId: string): Promise<SketchPlane>;
+  faceSketchPlane(bodyId: string, elementId: string, topoKey?: string): Promise<SketchPlane>;
 
   /**
    * Read one element's geometric evidence — the MEASURE tool's only backend

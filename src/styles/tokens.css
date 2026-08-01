@@ -82,6 +82,12 @@
   /* ---- Inset well ---- */
   --color-well: #f0f2f5;
 
+  /* Host-face reference geometry in a sketch (`referenceLocked`, SCHEMA §7.3):
+     projected, immovable, still bounds regions. Rendered SOLID (unlike dashed
+     construction) but recessive — the prototype's ink-4/ink-5 neighbour, pulled
+     cool so it reads as "belongs to the model, not to you". */
+  --color-sketch-reference: #6b7a8f;
+
   /* ---- Sketch mode chrome ---- */
   --color-sketch-chrome: #e9f1fd;
   --color-sketch-chrome-border: #cbdcf7;

@@ -177,6 +177,7 @@ void ConstraintSolver::clear() {
     parameterBackup_.clear();
     parameters_.clear();
     drivenParameters_.clear();
+    pinValues_.clear();
     nextEntityTag_ = 1;
     nextConstraintTag_ = 1;
 
@@ -297,6 +298,55 @@ bool ConstraintSolver::addConstraint(SketchConstraint* constraint) {
     nextConstraintTag_++;
     gcsSystem_->invalidatedDiagnosis();
     return true;
+}
+
+// Reference-lock pins. `kPinTag` is the same INTERNAL tag the arc rules use —
+// see the rationale on `addArcRules` (never blamed, never mapped to a
+// ConstraintID, so `getConflicting`/`getRedundant` cannot surface one).
+namespace {
+constexpr int kPinTag = 0;
+}  // namespace
+
+void ConstraintSolver::pinPointPosition(EntityID pointId) {
+    auto it = pointsById_.find(pointId);
+    if (it == pointsById_.end() || !it->second || !gcsSystem_) {
+        return;
+    }
+    double* x = &pinValues_.emplace_back(it->second->position().X());
+    double* y = &pinValues_.emplace_back(it->second->position().Y());
+    GCS::Point gcsPoint = makePoint(it->second);
+    gcsSystem_->addConstraintCoordinateX(gcsPoint, x, kPinTag, true);
+    gcsSystem_->addConstraintCoordinateY(gcsPoint, y, kPinTag, true);
+    gcsSystem_->invalidatedDiagnosis();
+}
+
+void ConstraintSolver::pinRadius(EntityID arcOrCircleId) {
+    if (!gcsSystem_) {
+        return;
+    }
+    double* radius = nullptr;
+    if (auto arcIt = arcsById_.find(arcOrCircleId); arcIt != arcsById_.end() && arcIt->second) {
+        radius = &arcIt->second->radius();
+    } else if (auto circleIt = circlesById_.find(arcOrCircleId);
+               circleIt != circlesById_.end() && circleIt->second) {
+        radius = &circleIt->second->radius();
+    }
+    if (!radius) {
+        return;
+    }
+    gcsSystem_->addConstraintEqual(radius, &pinValues_.emplace_back(*radius), kPinTag, true);
+    gcsSystem_->invalidatedDiagnosis();
+}
+
+void ConstraintSolver::pinArcAngles(EntityID arcId) {
+    auto it = arcsById_.find(arcId);
+    if (it == arcsById_.end() || !it->second || !gcsSystem_) {
+        return;
+    }
+    for (double* angle : {&it->second->startAngle(), &it->second->endAngle()}) {
+        gcsSystem_->addConstraintEqual(angle, &pinValues_.emplace_back(*angle), kPinTag, true);
+    }
+    gcsSystem_->invalidatedDiagnosis();
 }
 
 void ConstraintSolver::removeEntity(EntityID id) {

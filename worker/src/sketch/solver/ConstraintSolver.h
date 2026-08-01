@@ -22,6 +22,7 @@
 #include "../SketchTypes.h"
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -205,6 +206,24 @@ public:
      */
     bool addConstraint(SketchConstraint* constraint);
 
+    // ===== Reference-lock pins (see `Sketch::referenceLockPins`) =====
+    //
+    // Freeze the parameters of host-face-projected geometry at their current
+    // values. All three register under the INTERNAL tag 0, like the W0b arc
+    // rules: structurally required, never blamed, and absent from
+    // `gcsTagToConstraint_`, so a pin can never surface in
+    // `conflicting[]`/`redundant[]`. `SolverAdapter` drives them AFTER entities
+    // and user constraints, from the single pin set `Sketch` computes.
+
+    /// Hold a point at its current (x, y). No-op for an unregistered id.
+    void pinPointPosition(EntityID pointId);
+
+    /// Hold an arc's / circle's radius at its current value.
+    void pinRadius(EntityID arcOrCircleId);
+
+    /// Hold an arc's start AND end angle at their current values.
+    void pinArcAngles(EntityID arcId);
+
     /**
      * @brief Remove an entity from the solver
      */
@@ -333,6 +352,13 @@ private:
     /// Parameter pointers used for direct binding
     std::vector<double*> parameters_;
     std::vector<double*> drivenParameters_;
+
+    /// Frozen target values for reference-lock pins. PlaneGCS keeps the raw
+    /// `double*` it is handed, so this must be POINTER-STABLE for the solver's
+    /// whole life — a deque never invalidates on push_back, a vector would.
+    /// These are deliberately NOT in `parameters_`: they are constants, not
+    /// unknowns.
+    std::deque<double> pinValues_;
 
     int nextEntityTag_ = 1;
     int nextConstraintTag_ = 1;

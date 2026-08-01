@@ -65,8 +65,7 @@ expression: sess.document()
             0.0,
             0.0
           ],
-          "construction": false,
-          "referenceLocked": false
+          "construction": false
         },
         {
           "kind": "point",
@@ -75,8 +74,7 @@ expression: sess.document()
             40.0,
             0.0
           ],
-          "construction": false,
-          "referenceLocked": false
+          "construction": false
         },
         {
           "kind": "line",

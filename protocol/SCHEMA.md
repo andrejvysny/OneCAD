@@ -797,6 +797,50 @@ the full authoritative sketch so replay is deterministic.
   solve, exactly like real geometry. A child point synthesized by a reader for an
   inline-coordinate parent (line endpoints, arc/circle centers) inherits that
   parent's flag.
+- `entities[].referenceLocked` (bool, **optional**, default `false`) — geometry
+  PROJECTED from the model face a sketch is attached to (`attachment.kind`
+  `hostFace`). Readers MUST default an absent field to `false`; producers MUST
+  emit it **only when `true`** (so a sketch with no locked geometry is
+  byte-identical to one authored before the flag existed). A child point
+  synthesized by a reader for an inline-coordinate parent inherits the parent's
+  flag, exactly as `construction` does. A point referenced by id (`p0Ref`/
+  `p1Ref`) carries its OWN flag and MUST NOT be relabelled by its parent.
+
+  It is the deliberate OPPOSITE of `construction` on the axis that matters most:
+
+  | flag              | bounds regions | editable | in the solver |
+  |-------------------|----------------|----------|---------------|
+  | `construction`    | **no**         | yes      | yes           |
+  | `referenceLocked` | **yes**        | **no**   | pinned        |
+
+  - **NOT excluded from loop/region detection.** A locked loop bounds a region
+    like any other geometry — extruding a profile off the projected face boundary
+    is the whole point of projecting it. Region ids are unaffected by the flag
+    (a signature derives only from its loop's edge ids, §7.4), so setting or
+    clearing it never remaps a region.
+  - **Readers MUST refuse geometry-mutating edits** naming locked geometry:
+    removal (including anything a removal would cascade onto), repositioning,
+    splitting, dragging, a `construction` flip, and any partial translation of a
+    set containing locked geometry (refuse the whole translation rather than
+    shear the sketch). Refusal is loud and mutates nothing — a projected boundary
+    that has silently drifted from its face is worse than a rejected edit.
+  - **Constraints MAY reference locked geometry**, of any kind. That is how a
+    profile snaps to the face boundary (`Coincident` onto a locked arc's
+    `<id>.start`, a `Distance` from a free point, …). Immobility does not come
+    from vetoing the constraint; it comes from the solver.
+  - **Locked entities are fully pinned in the solver.** A reader MUST hold every
+    parameter a locked entity owns at its current value, so a constraint spanning
+    locked and free geometry can only ever move the FREE side. The pins are
+    INTERNAL — same reserved tag `0` contract as the arc rules above: never
+    surfaced in `conflicting[]`, never reported as redundant, and counted in the
+    §7.4 naive-dof fallback (which must subtract one equation per pinned scalar,
+    two per pinned point). The reference implementation pins the entity's own
+    parameterization — a `Line`'s two endpoint points; a `Circle`'s center point
+    and radius; an `Arc`'s center point, radius and start/end ANGLE (its
+    `<id>.start`/`<id>.end` then follow from the arc rules; pinning those
+    positions directly would add two redundant equations and become singular on a
+    180° arc) — and skips any point an explicit `Fixed` constraint already holds.
+    An `Ellipse` is not registered with PlaneGCS at all, so it carries no pins.
 - `constraints[].type` ∈ the 18 kinds (verbatim from OneCAD-CPP
   `SketchTypes.h ConstraintType`): `Coincident`, `Horizontal`, `Vertical`,
   `Fixed`, `Midpoint`, `OnCurve`, `Parallel`, `Perpendicular`, `Tangent`,
@@ -1159,6 +1203,9 @@ preview fill).
   appear in no `outerLoop`/`holes`, publish no cell of their own, and perturb no
   other cell's `regionId`. The same exclusion applies to plan-time profile
   derivation, so a region selectable here is exactly a region an op can extrude.
+  **`construction` is the ONLY entity flag with this effect** — in particular
+  `referenceLocked: true` (§7.3) geometry participates in loop detection exactly
+  like free geometry.
 
 - **`previewTriangles` SUBTRACTS the region's holes** (changed 2026-07-26 — see
   [Changelog](#14-changelog)). The fill MUST cover exactly the material the
@@ -1658,6 +1705,41 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-08-01 — §7.3 `entities[].referenceLocked` documented AND honored; §7.4
+  region-detection exclusion narrowed to `construction` alone**
+  (W0b host-face reference geometry; cross-track sign-off recorded 2026-08-01;
+  additive optional field, emitted only when `true`, so **no existing wire byte
+  moves and no fixture bump** — `protocol/fixtures/` carries no sketch payloads
+  at all, it remains `hello` + `echo_error`).
+  The flag existed in OneCAD-CPP on the base `SketchEntity` and the ported worker
+  still carried all eight of its edit guards, but nothing ever SET it: the wire
+  never spoke it, so every guard was dead code. This entry gives it a contract
+  and makes the chain live end to end (Rust core → wire → worker → solver →
+  frontend). **There are still ZERO producers** — the face-boundary projection
+  that authors locked geometry lands in a later wave, so in practice every flag
+  on the wire today is absent.
+  * **Wire shape** (§7.3): optional bool on all five entity kinds, default
+    `false`, **emitted only when `true`**. Synthesized child points inherit it;
+    a point referenced by `p0Ref`/`p1Ref` keeps its own.
+  * **Regions** (§7.3/§7.4): locked geometry **DOES** bound regions. This is the
+    explicit contrast with `construction`, and §7.4's exclusion paragraph is
+    narrowed to say `construction` is the only flag that drops an entity from
+    loop detection. Region ids are untouched either way.
+  * **Edits** (§7.3): readers refuse every geometry-mutating edit against locked
+    geometry — removal (and its cascade), reposition, split, drag, `construction`
+    flip — and refuse a translation of any set containing it outright rather than
+    translating the free half.
+  * **Constraints** (§7.3): a constraint of ANY kind may reference locked
+    geometry. The oracle vetoed everything but `Fixed` here; that veto is
+    REMOVED, because snapping a profile to the projected boundary is the entire
+    purpose of the flag.
+  * **Solver pins** (§7.3/§7.4): immobility moves from the veto to the solver.
+    Every parameter a locked entity owns is pinned under the reserved INTERNAL
+    tag `0` (the arc-rules contract: never blamed, never redundant), and the
+    naive-dof fallback subtracts those equations the same way it subtracts the
+    arc rules.
+  * **Not changed**: any existing wire shape, any region id, the DOF of any
+    sketch without locked geometry, and the `construction` semantics.
 - **2026-08-01 — §7.3 an `Arc`'s START/END are real, addressable points;
   §7.4 naive-dof gains a −4-per-endpoint-bearing-arc term** (W0b arc-endpoint
   handles; **aligns the implementation with text this document has always

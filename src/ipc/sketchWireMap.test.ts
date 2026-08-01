@@ -926,3 +926,79 @@ describe("marshalUpsert — construction flag", () => {
     ]);
   });
 });
+
+// ── W0b: referenceLocked transport (SCHEMA §7.3) ──────────────────────────────
+//
+// Host-face projected geometry. NOTHING in the frontend authors it — it only
+// ever arrives on the hydration wire — so these specs drive the read path and
+// the two places the marshaller must refuse to author a mutating op against it.
+
+describe("referenceLocked", () => {
+  const wire = [
+    { id: "p1", type: "Point", at: [0, 0] },
+    { id: "p2", type: "Point", at: [40, 0] },
+    { id: "lk", type: "Line", p0Ref: "p1", p1Ref: "p2", referenceLocked: true },
+    { id: "fr", type: "Circle", center: [10, 10], centerRef: "p3", radius: 3 },
+    { id: "p3", type: "Point", at: [10, 10] },
+  ];
+
+  it("hydration carries the flag onto the session, and its absence means false", () => {
+    const entities = frontendEntitiesFromDto(wire);
+    expect(entities.find((e) => e.id === "lk")!.referenceLocked).toBe(true);
+    expect(entities.find((e) => e.id === "fr")!.referenceLocked).toBeUndefined();
+  });
+
+  it("seedIdMapFromWire latches the locked ids and clears a prior session's", () => {
+    const map = createIdMap("sk", "XY");
+    seedIdMapFromWire(map, wire, []);
+    expect([...map.entityReferenceLocked]).toEqual(["lk"]);
+
+    seedIdMapFromWire(map, [{ id: "q1", type: "Point", at: [0, 0] }], []);
+    expect(map.entityReferenceLocked.size).toBe(0);
+  });
+
+  it("cloneIdMap copies the latch (a rejected upsert must not lose it)", () => {
+    const map = createIdMap("sk", "XY");
+    seedIdMapFromWire(map, wire, []);
+    const clone = cloneIdMap(map);
+    clone.entityReferenceLocked.delete("lk");
+    expect([...map.entityReferenceLocked]).toEqual(["lk"]);
+  });
+
+  it("a hydrated locked sketch marshals to ZERO ops (no spurious flip or removal)", () => {
+    const map = createIdMap("sk", "XY");
+    seedIdMapFromWire(map, wire, []);
+    expect(marshalUpsert(map, { entities: frontendEntitiesFromDto(wire), constraints: [] }, mint))
+      .toEqual([]);
+  });
+
+  it("never authors a removal for a locked entity that fell out of the session", () => {
+    const map = createIdMap("sk", "XY");
+    seedIdMapFromWire(map, wire, []);
+    // Drop EVERYTHING: the free circle goes (with its synthesized center child,
+    // BUG-5), the locked line does not — endpoints included.
+    const ops = marshalUpsert(map, { entities: [], constraints: [] }, mint);
+    expect(ops).toEqual([
+      { op: "removeEntity", entity: "fr" },
+      { op: "removeEntity", entity: "p3" },
+    ]);
+    // …and the locked id stays mapped, so the next upsert is still coherent.
+    expect(map.entity.get("lk")).toBe("lk");
+    expect(map.point.get("lk.Start")).toBe("p1");
+    expect(map.entity.has("fr")).toBe(false);
+  });
+
+  it("never authors a construction flip against a locked entity", () => {
+    const map = createIdMap("sk", "XY");
+    seedIdMapFromWire(map, wire, []);
+    const flipped = frontendEntitiesFromDto(wire).map((e) =>
+      e.id === "lk" ? { ...e, construction: true } : e,
+    );
+    expect(marshalUpsert(map, { entities: flipped, constraints: [] }, mint)).toEqual([]);
+    // The FREE entity in the same batch still flips.
+    const both = flipped.map((e) => (e.id === "fr" ? { ...e, construction: true } : e));
+    expect(marshalUpsert(map, { entities: both, constraints: [] }, mint)).toEqual([
+      { op: "setEntityConstruction", entity: "fr", construction: true },
+    ]);
+  });
+});

@@ -132,6 +132,7 @@ export class SketchObject {
   private readonly matSelected: LineMaterial;
   private readonly matHover: LineMaterial;
   private readonly matConstruction: LineMaterial;
+  private readonly matReference: LineMaterial;
   private readonly matPreview: LineMaterial;
   private readonly matTrimGhost: LineMaterial;
   private readonly allMaterials: LineMaterial[];
@@ -190,6 +191,10 @@ export class SketchObject {
     this.matSelected = mk(palette.sketchSelected());
     this.matHover = mk(palette.hoverAccent());
     this.matConstruction = mk(palette.sketchConstruction(), { dashed: true, dashSize: 3, gapSize: 2 });
+    // SOLID, deliberately: construction is dashed because it is not real
+    // geometry, whereas reference geometry IS real (it bounds regions) — it just
+    // is not YOURS to move. Colour carries the difference, not the stroke.
+    this.matReference = mk(palette.sketchReference());
     this.matPreview = mk(palette.sketchUnder(), { linewidth: PREVIEW_WIDTH, transparent: true, opacity: 0.9 });
     this.matTrimGhost = mk(palette.destructive(), { linewidth: TRIM_GHOST_WIDTH, transparent: true, opacity: 0.95 });
     this.allMaterials = [
@@ -199,6 +204,7 @@ export class SketchObject {
       this.matSelected,
       this.matHover,
       this.matConstruction,
+      this.matReference,
       this.matPreview,
       this.matTrimGhost,
     ];
@@ -310,13 +316,17 @@ export class SketchObject {
     for (const e of this.entities) {
       const positions = entityPolyline(e);
       if (positions.length < 6) continue;
+      // Selection/hover tints still win — locked geometry is selectable and
+      // snappable, so it has to light up like anything else under the cursor.
       const mat = this.selected.has(e.id)
         ? this.matSelected
         : this.hovered.has(e.id)
           ? this.matHover
-          : e.construction
-            ? this.matConstruction
-            : statusMat;
+          : e.referenceLocked
+            ? this.matReference
+            : e.construction
+              ? this.matConstruction
+              : statusMat;
       this.entityGroup.add(this.buildLine(positions, mat));
     }
   }
