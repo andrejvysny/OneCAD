@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { viewportStore, AUTO_DISMISS_MS } from "./viewportStore";
+import { viewportStore, AUTO_DISMISS_MS, ISOLATE_HINT } from "./viewportStore";
+import { selectionStore, type EntityRef } from "./selectionStore";
+import { setViewportEngine } from "@/viewport/engineBridge";
+import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 
 const hint = () => viewportStore.getState().statusHint;
 const set = (message: string | null, opts?: { severity?: "info" | "error"; sticky?: boolean }) =>
@@ -64,5 +67,151 @@ describe("viewportStore.setStatusHint", () => {
     set("prompt", { sticky: true });
     vi.advanceTimersByTime(AUTO_DISMISS_MS * 2);
     expect(hint()?.message).toBe("prompt"); // the earlier non-sticky timer did not fire
+  });
+});
+
+// ── W3 view UX: display mode · zoom-to-selection · isolate ───────────────────
+
+function fakeEngine(previewHidden = false) {
+  const engine = {
+    fitView: vi.fn(),
+    fitToBodies: vi.fn(),
+    hasPreviewHiddenBodies: vi.fn(() => previewHidden),
+  };
+  setViewportEngine(engine as unknown as ViewportEngine);
+  return engine;
+}
+
+function select(refs: EntityRef[]): void {
+  selectionStore.getState().set(refs);
+}
+
+afterEach(() => {
+  setViewportEngine(null);
+  selectionStore.getState().clear();
+  viewportStore.setState({ isolatedBodyIds: null, displayMode: "shadedEdges" });
+  viewportStore.getState().setStatusHint(null);
+});
+
+describe("viewportStore display mode", () => {
+  it("defaults to shadedEdges — what the renderer has always actually drawn", () => {
+    expect(viewportStore.getState().displayMode).toBe("shadedEdges");
+  });
+
+  it("cycles shadedEdges → wireframe → shaded → shadedEdges", () => {
+    const cycle = () => viewportStore.getState().cycleDisplayMode();
+    cycle();
+    expect(viewportStore.getState().displayMode).toBe("wireframe");
+    cycle();
+    expect(viewportStore.getState().displayMode).toBe("shaded");
+    cycle();
+    expect(viewportStore.getState().displayMode).toBe("shadedEdges");
+  });
+});
+
+describe("viewportStore.zoomFit — frames the selection", () => {
+  it("maps a body ref to its own id", () => {
+    const engine = fakeEngine();
+    select([{ kind: "body", id: "bodyA" }]);
+    viewportStore.getState().zoomFit();
+    expect(engine.fitToBodies).toHaveBeenCalledWith(["bodyA"]);
+    expect(engine.fitView).not.toHaveBeenCalled();
+  });
+
+  it("maps face/edge picks to their OWNING body, de-duplicated", () => {
+    const engine = fakeEngine();
+    select([
+      { kind: "face", id: "bodyA#f:1", bodyId: "bodyA" },
+      { kind: "edge", id: "bodyA#e:2", bodyId: "bodyA" },
+      { kind: "face", id: "bodyB#f:0", bodyId: "bodyB" },
+    ]);
+    viewportStore.getState().zoomFit();
+    expect(engine.fitToBodies).toHaveBeenCalledWith(["bodyA", "bodyB"]);
+  });
+
+  it("falls back to fit-all for a selection with no bodies (sketch / region / datum)", () => {
+    const engine = fakeEngine();
+    select([
+      { kind: "sketch", id: "sketch2" },
+      { kind: "datum", id: "datum1" },
+    ]);
+    viewportStore.getState().zoomFit();
+    expect(engine.fitView).toHaveBeenCalled();
+    expect(engine.fitToBodies).not.toHaveBeenCalled();
+  });
+
+  it("falls back to fit-all with an empty selection", () => {
+    const engine = fakeEngine();
+    select([]);
+    viewportStore.getState().zoomFit();
+    expect(engine.fitView).toHaveBeenCalled();
+  });
+
+  it("is a no-op before the engine mounts", () => {
+    setViewportEngine(null);
+    select([{ kind: "body", id: "bodyA" }]);
+    expect(() => viewportStore.getState().zoomFit()).not.toThrow();
+  });
+});
+
+describe("viewportStore isolate", () => {
+  it("isolates the selected bodies and shows the sticky hint", () => {
+    fakeEngine();
+    select([{ kind: "body", id: "bodyA" }, { kind: "face", id: "bodyB#f:1", bodyId: "bodyB" }]);
+    viewportStore.getState().toggleIsolate();
+    expect(viewportStore.getState().isolatedBodyIds).toEqual(["bodyA", "bodyB"]);
+    expect(hint()).toEqual({ message: ISOLATE_HINT, severity: "info", sticky: true });
+  });
+
+  it("refuses to isolate a selection that names no body (would hide everything)", () => {
+    fakeEngine();
+    select([{ kind: "sketch", id: "sketch2" }]);
+    viewportStore.getState().toggleIsolate();
+    expect(viewportStore.getState().isolatedBodyIds).toBeNull();
+    expect(hint()).toBeNull();
+  });
+
+  it("toggles back off and clears the hint", () => {
+    fakeEngine();
+    select([{ kind: "body", id: "bodyA" }]);
+    viewportStore.getState().toggleIsolate();
+    viewportStore.getState().toggleIsolate();
+    expect(viewportStore.getState().isolatedBodyIds).toBeNull();
+    expect(hint()).toBeNull();
+  });
+
+  it("exitIsolate leaves a FOREIGN hint alone (a tool prompt must survive)", () => {
+    fakeEngine();
+    select([{ kind: "body", id: "bodyA" }]);
+    viewportStore.getState().isolateSelection();
+    set("Select a face to measure", { sticky: true });
+    viewportStore.getState().exitIsolate();
+    expect(hint()?.message).toBe("Select a face to measure");
+  });
+
+  it("exitIsolate is a no-op when isolation is already off", () => {
+    set("Drag the arrow to set depth", { sticky: true });
+    viewportStore.getState().exitIsolate();
+    expect(hint()?.message).toBe("Drag the arrow to set depth");
+  });
+
+  // The preview save/restore snapshot owns `visible` for the bodies it hides, so
+  // the toggle must not move underneath it — in EITHER direction.
+  it("ignores the toggle while a preview holds bodies hidden (enter)", () => {
+    fakeEngine(true);
+    select([{ kind: "body", id: "bodyA" }]);
+    viewportStore.getState().toggleIsolate();
+    expect(viewportStore.getState().isolatedBodyIds).toBeNull();
+  });
+
+  it("ignores the toggle while a preview holds bodies hidden (exit)", () => {
+    const engine = fakeEngine();
+    select([{ kind: "body", id: "bodyA" }]);
+    viewportStore.getState().toggleIsolate();
+    expect(viewportStore.getState().isolatedBodyIds).toEqual(["bodyA"]);
+
+    engine.hasPreviewHiddenBodies.mockReturnValue(true);
+    viewportStore.getState().toggleIsolate();
+    expect(viewportStore.getState().isolatedBodyIds).toEqual(["bodyA"]); // still isolated
   });
 });

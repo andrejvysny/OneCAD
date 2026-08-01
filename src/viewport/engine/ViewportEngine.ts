@@ -503,6 +503,44 @@ export class ViewportEngine {
     this.controls?.fitView();
   }
 
+  /**
+   * Frame exactly `bodyIds` (zoom-to-selection, W3). Falls back to the
+   * whole-scene fit when none of them has visible geometry — a stale or hidden
+   * id must never leave the camera pointing at nothing.
+   */
+  fitToBodies(bodyIds: readonly string[]): void {
+    this.controls?.fitView(this.getBoundsForBodies(bodyIds) ?? undefined);
+  }
+
+  /**
+   * World bounds of the VISIBLE body groups among `bodyIds` (null = none).
+   *
+   * The `child.visible` filter is load-bearing: `Box3.setFromObject` walks
+   * `children` unconditionally (three's `expandByObject` recurses without
+   * consulting `visible`), so a body hidden by the tree eye or by isolation
+   * would otherwise pull the frame out to geometry the user cannot see.
+   */
+  getBoundsForBodies(bodyIds: readonly string[]): THREE.Box3 | null {
+    const wanted = new Set(bodyIds);
+    const box = new THREE.Box3();
+    const one = new THREE.Box3();
+    for (const child of this.bodiesRoot.children) {
+      if (!child.visible) continue;
+      if (!wanted.has(String(child.userData.bodyId ?? ""))) continue;
+      box.union(one.setFromObject(child));
+    }
+    return box.isEmpty() ? null : box;
+  }
+
+  /**
+   * True while an armed preview holds committed bodies hidden (see
+   * `setPreviewReplacedBodyIds`). Read by the isolate toggle, which must not
+   * touch body visibility that the preview is going to restore from a snapshot.
+   */
+  hasPreviewHiddenBodies(): boolean {
+    return this.previewHiddenBodies.size > 0;
+  }
+
   snapToViewDirection(dir: THREE.Vector3): void {
     this.controls?.snapToViewDirection(dir);
   }

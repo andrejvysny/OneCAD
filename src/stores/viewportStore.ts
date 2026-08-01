@@ -8,6 +8,7 @@
  */
 import { createStore, useStore } from "zustand";
 import { getViewportEngine } from "@/viewport/engineBridge";
+import { selectedBodyIds, selectionStore } from "@/stores/selectionStore";
 import type { InputDevice } from "@/viewport/engine/navInput";
 
 export type Projection = "persp" | "ortho";
@@ -35,6 +36,16 @@ export interface CursorCoords {
 }
 
 const DISPLAY_CYCLE: DisplayMode[] = ["shaded", "shadedEdges", "wireframe"];
+
+/** Human label for the display-mode button (its own tooltip + aria-label). */
+export const DISPLAY_MODE_LABEL: Record<DisplayMode, string> = {
+  shaded: "Shaded",
+  shadedEdges: "Shaded + edges",
+  wireframe: "Wireframe",
+};
+
+/** Sticky status hint shown for the whole time isolation is on. */
+export const ISOLATE_HINT = "Isolation on — Esc or ⇧I to exit";
 
 /** Non-sticky hints self-clear after this long. */
 export const AUTO_DISMISS_MS = 4000;
@@ -75,6 +86,17 @@ export interface ViewportState {
   statusHint: StatusHint | null;
   /** Finish-sketch → auto-arm extrude handoff: the sketch just finished (F-WP7). */
   pendingExtrudeSketch: string | null;
+  /**
+   * TRANSIENT body isolation (W3). `null` = off; otherwise exactly the bodies
+   * that stay visible.
+   *
+   * This is a VIEW mask, never a document fact: the tree eye
+   * (`SetVisibility`) stays the persisted truth and MeshIngest ANDs the two, so
+   * a body hidden by the eye stays hidden inside an isolate set and re-hides
+   * when isolation ends. Cleared on document close (`resetDocumentScopedUi`) and
+   * whenever a model tool arms.
+   */
+  isolatedBodyIds: string[] | null;
   setPendingExtrude(sketchId: string | null): void;
   setProjection(p: Projection): void;
   cycleDisplayMode(): void;
@@ -91,14 +113,37 @@ export interface ViewportState {
    * severity or make it sticky. Every call cancels any pending auto-dismiss.
    */
   setStatusHint(message: string | null, opts?: { severity?: StatusSeverity; sticky?: boolean }): void;
-  /** Dispatch to the live viewport engine (no-op until it mounts). */
+  /**
+   * Frame the SELECTION when one names bodies (a body ref, or the owning body of
+   * a face/edge pick); otherwise frame the whole scene. Dispatches to the live
+   * viewport engine (no-op until it mounts).
+   */
   zoomFit(): void;
   homeView(): void;
+  /** Isolate the bodies the selection names. No-op when it names none. */
+  isolateSelection(): void;
+  /** Leave isolation (Esc ladder, model-tool arm, document close). Idempotent. */
+  exitIsolate(): void;
+  /**
+   * ⇧I / the NavPill button: enter or leave isolation.
+   *
+   * IGNORED — in BOTH directions — while an armed preview is holding committed
+   * bodies hidden. The engine saves each body's `visible` flag when the preview
+   * hides it and replays that snapshot on restore, so flipping isolation
+   * underneath a live preview would either resurrect a body isolation hid or
+   * strand one the preview hid. The unconditional {@link exitIsolate} is safe
+   * because every path that calls it (Esc with no armed tool, the tool-arm hook,
+   * document close) runs after the preview has already been cancelled.
+   */
+  toggleIsolate(): void;
 }
 
-export const viewportStore = createStore<ViewportState>()((set) => ({
+export const viewportStore = createStore<ViewportState>()((set, get) => ({
   projection: "persp",
-  displayMode: "shaded",
+  // shadedEdges is what the renderer has always actually drawn (BodyObject adds
+  // a face Mesh AND an edge LineSegments), so this is the honest default — and
+  // it makes the first click on the display button visibly change something.
+  displayMode: "shadedEdges",
   // On by default: the grid renders (GridPlane) so the viewport never looks
   // empty; the grid button shows the pressed (accent) treatment to match.
   gridVisible: true,
@@ -110,6 +155,7 @@ export const viewportStore = createStore<ViewportState>()((set) => ({
   dofBadge: null,
   statusHint: null,
   pendingExtrudeSketch: null,
+  isolatedBodyIds: null,
 
   setPendingExtrude(sketchId) {
     set({ pendingExtrudeSketch: sketchId });
@@ -166,10 +212,37 @@ export const viewportStore = createStore<ViewportState>()((set) => ({
 
   // Dispatch to the live engine via the bridge; no-op before it mounts.
   zoomFit() {
-    getViewportEngine()?.fitView();
+    const engine = getViewportEngine();
+    if (!engine) return;
+    const ids = selectedBodyIds(selectionStore.getState().selected);
+    // A selection of only sketches/regions/datums yields no ids — that is a
+    // fit-all, not a fit-nothing.
+    if (ids.length > 0) engine.fitToBodies(ids);
+    else engine.fitView();
   },
   homeView() {
     getViewportEngine()?.homeView();
+  },
+
+  isolateSelection() {
+    const ids = selectedBodyIds(selectionStore.getState().selected);
+    if (ids.length === 0) return;
+    set({ isolatedBodyIds: ids });
+    get().setStatusHint(ISOLATE_HINT, { sticky: true });
+  },
+
+  exitIsolate() {
+    if (get().isolatedBodyIds === null) return;
+    set({ isolatedBodyIds: null });
+    // Clear only OUR hint: a tool that armed while isolation was on has already
+    // published its own prompt, and stomping it would lose the live instruction.
+    if (get().statusHint?.message === ISOLATE_HINT) get().setStatusHint(null);
+  },
+
+  toggleIsolate() {
+    if (getViewportEngine()?.hasPreviewHiddenBodies()) return;
+    if (get().isolatedBodyIds !== null) get().exitIsolate();
+    else get().isolateSelection();
   },
 }));
 

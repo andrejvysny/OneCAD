@@ -97,6 +97,13 @@ export const ICON_PATHS = {
   // line) and `line`, which are the two it could otherwise be confused with.
   measure:
     "M14.5 3.5l6 6-10 10-6-6zM10.5 7.5l2 2M8 10l2 2M5.5 12.5l2 2",
+
+  // ---- W3 isolate (authored for this WP, NOT from the prototype) ----
+  // A single body (the `cube` hexagon, shrunk) inside four corner brackets:
+  // "show only this". The brackets point INWARD, which is what separates it from
+  // `fit`, whose brackets are the same corners opening outward.
+  isolate:
+    "M12 8.4l3.6 2.1v4.2L12 16.8l-3.6-2.1v-4.2zM4.5 8V4.5H8M16 4.5h3.5V8M19.5 16v3.5H16M8 19.5H4.5V16",
 } as const;
 
 export type IconName = keyof typeof ICON_PATHS;

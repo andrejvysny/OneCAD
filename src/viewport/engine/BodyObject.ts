@@ -9,6 +9,7 @@
  * the Picker resolve an intersection back to a body + element.
  */
 import * as THREE from "three";
+import type { DisplayMode } from "@/stores/viewportStore";
 import type { MeshEntry } from "../mesh/meshRegistry";
 import { palette } from "./palette";
 
@@ -44,6 +45,21 @@ export interface BodyObjectHandle {
   bodyId: string;
   group: THREE.Group;
   setVisible(visible: boolean): void;
+  /**
+   * Apply the viewport display mode (W3) by toggling the two CHILDREN, never by
+   * swapping materials: `shaded` = faces only, `shadedEdges` = both, `wireframe`
+   * = edges only. Deliberately NOT `material.wireframe = true` — the materials
+   * are shared engine-wide (previews included) and the edge LineSegments already
+   * carry the kernel's real topological edges, which is the wireframe a CAD user
+   * expects rather than a triangulation.
+   *
+   * ACCEPTED CONSEQUENCE: in `wireframe` the face Mesh is invisible, and the
+   * Picker raycasts with `traverseVisible`, so faces are not pickable there —
+   * you pick what you see.
+   *
+   * Independent of {@link setVisible}, which owns the GROUP's flag.
+   */
+  setDisplayMode(mode: DisplayMode): void;
 }
 
 /** Build the face + edge objects for `entry` under one group. */
@@ -57,8 +73,9 @@ export function buildBodyObject(entry: MeshEntry, materials: BodyMaterials): Bod
   faceMesh.userData.kind = "face";
   group.add(faceMesh);
 
+  let edges: THREE.LineSegments | null = null;
   if (entry.edgeGeometry) {
-    const edges = new THREE.LineSegments(entry.edgeGeometry, materials.edge);
+    edges = new THREE.LineSegments(entry.edgeGeometry, materials.edge);
     edges.userData.bodyId = entry.bodyId;
     edges.userData.kind = "edge";
     group.add(edges);
@@ -69,6 +86,10 @@ export function buildBodyObject(entry: MeshEntry, materials: BodyMaterials): Bod
     group,
     setVisible(visible: boolean) {
       group.visible = visible;
+    },
+    setDisplayMode(mode: DisplayMode) {
+      faceMesh.visible = mode !== "wireframe";
+      if (edges) edges.visible = mode !== "shaded";
     },
   };
 }

@@ -296,10 +296,18 @@ Scope (user): datum offset planes + measure V1a + units-display + display-mode/f
 - [x] FE: measure tool (`?` shift-exact; NEW `NO_CROSS_MODE` set in resolveBinding — ambient keystroke INERT in sketch mode, explicit toolbar click still finishes; 10 keymap pins) + measureTool keep-latest-2 FSM + measureStore/MeasureOverlay (mountChip id-keyed portals) + labels honest ("center ↔ center" — bbox center NOT centroid) + mock FNV-synthesized values (MOCK LIMIT; numeric truth = Rust test)
 - [x] Real-worker proof: face area 799.9999999999999, center [−10,20,25] EXACT (frozen non-standard basis), edge 25, bbox diag ≈44.72; unknown id + stale topoKey → None
 - [x] **Gate W2 PASSED** (2026-08-01, merged tree re-verified): cargo 570/0 vs real worker · clippy/fmt clean · tsc 0 · FE 1846/136 · e2e 87/87 · ctest 77/77 stands (no C++)
-### Wave 3 — display-mode + fit-selection + isolate
-- [ ] Display mode real (MeshIngest owner; default → shadedEdges; wireframe = edges-only)
-- [ ] ⇧F fits selection (fitToBodies bounds param); NavPill
-- [ ] Transient isolate (⇧I; never persisted; BOTH preview-interplay directions guarded); **Gate W3**
+### Wave 3 — display-mode + fit-selection + isolate — SHIPPED 2026-08-01
+- [x] Display mode REAL (was a dead button): BodyObjectHandle.setDisplayMode toggles face/edge children (never shared-material wireframe flag); MeshIngest owner (subscription + loadBody); default flipped → shadedEdges (the look the renderer always produced); dynamic button label; wireframe faces genuinely unpickable (pick what you see, documented)
+- [x] ⇧F fits SELECTION (face/edge → their body; empty → fit-all unchanged); `Box3.expandByObject` recurses invisible children UNCONDITIONALLY (verified vs three source :379) → explicit `child.visible` filter with a can't-rot test beside it; CadOrbitControls.fitView(bounds?) reuses sphere-fit
+- [x] Transient isolate (⇧I / NavPill; NEVER persisted — tree-eye is a document fact): effective visibility = docVisible && in-set at subscription/loadBody/flag-change; Esc rung BEFORE deselect; tree dims isolated-away rows (eyes untouched); exits on doc close + on tool ARM (not disarm — Esc rungs stay distinct); ⇧I ignored ENTIRELY while a preview holds hidden bodies (both directions of the raw-snapshot stomp guarded via new hasPreviewHiddenBodies())
+- [x] **Gate W3 PASSED** (2026-08-01, merged tree re-verified): tsc 0 · FE 1893/138 · e2e 90/90 · backend untouched (cargo 570/0 + ctest 77/77 stand)
+### Manual Tauri gate (USER, `bun run tauri dev`) — MODELING-REACH
+- [ ] Datum: D → pick XY quad → offset 10 on the live ghost → ✓ → quad + label in viewport, "Datum 1" in tree; dbl-click it → sketch opens ON it → draw → extrude lands 10mm up; save/reopen keeps it; delete rejected (named hint) while the sketch references it; undo removes a fresh datum
+- [ ] Measure: ? (model mode) → click a face → exact area label; click an edge → length + center↔center distance + deltas; Esc clears; ? while sketching does NOTHING
+- [ ] Units input: type "2.5 cm" into a dimension chip → becomes 25 mm; "1 in" → 25.4
+- [ ] Slot drag (FE lane): drag a wall — caps stay welded to wall ends (tangency is as-drawn, not enforced — expected V1)
+- [ ] Display button cycles Shaded / Shaded+Edges / Wireframe visibly; ⇧F with a body selected frames IT; ⇧I isolates selection, Esc restores; isolate + boolean preview don't fight
+- [ ] Hints now visible: extrude pick with no closed region shows "No closed region to extrude"; success hints ("Union applied" etc.) survive tool reset
 
 ## Execution rules
 - Orchestrator: decisions/review only. WPs → Opus 4.8 subagents.

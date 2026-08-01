@@ -10,6 +10,7 @@
  * uses).
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import * as THREE from "three";
 import { CadOrbitControls } from "./CadOrbitControls";
 import { CameraRig } from "./CameraRig";
 import type { DevicePref } from "./navInput";
@@ -22,7 +23,10 @@ interface Harness {
   devices: string[];
 }
 
-function setup(pref: DevicePref = "auto"): Harness {
+function setup(
+  pref: DevicePref = "auto",
+  getBounds: () => THREE.Box3 | null = () => null,
+): Harness {
   const el = document.createElement("div");
   Object.defineProperty(el, "clientHeight", { value: 800, configurable: true });
   Object.defineProperty(el, "clientWidth", { value: 1000, configurable: true });
@@ -38,7 +42,7 @@ function setup(pref: DevicePref = "auto"): Harness {
     rig: new CameraRig(76),
     element: el,
     onChange: () => {},
-    getBounds: () => null,
+    getBounds,
     getDevicePref: () => prefRef.value,
     isDragActive: () => dragActive.value,
     onDeviceChange: (d) => devices.push(d),
@@ -247,6 +251,42 @@ describe("CadOrbitControls — pointer buttons", () => {
     const ev = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
     h.el.dispatchEvent(ev);
     expect(ev.defaultPrevented).toBe(true);
+  });
+});
+
+/*
+ * fitView(bounds?) — zoom-to-fit vs zoom-to-SELECTION (W3). The optional
+ * argument is the only difference: same sphere-fit math, a different box.
+ */
+describe("CadOrbitControls — fitView bounds argument", () => {
+  const box = (min: [number, number, number], max: [number, number, number]) =>
+    new THREE.Box3(new THREE.Vector3(...min), new THREE.Vector3(...max));
+
+  /** Run the fit tween to completion so target/distance are the final values. */
+  const settle = (h: Harness) => h.controls.update(performance.now() + 10_000);
+
+  it("frames the passed bounds, NOT the whole scene", () => {
+    const scene = box([-100, -100, -100], [100, 100, 100]);
+    const h = setup("auto", () => scene);
+
+    h.controls.fitView(box([40, 40, 0], [60, 60, 20]));
+    settle(h);
+
+    expect(h.controls.getTarget().toArray()).toEqual([50, 50, 10]);
+    const selectionDistance = h.controls.getDistance();
+
+    h.controls.fitView(); // no argument → whole scene
+    settle(h);
+    expect(h.controls.getTarget().toArray()).toEqual([0, 0, 0]);
+    expect(h.controls.getDistance()).toBeGreaterThan(selectionDistance);
+  });
+
+  it("empty bounds fall back to the default framed view at the origin", () => {
+    const h = setup("auto", () => box([-10, -10, -10], [10, 10, 10]));
+    h.controls.fitView(new THREE.Box3()); // makeEmpty()
+    settle(h);
+    expect(h.controls.getTarget().toArray()).toEqual([0, 0, 0]);
+    expect(h.controls.getDistance()).toBeGreaterThan(0);
   });
 });
 

@@ -4,6 +4,7 @@ import { resolveBinding } from "./keymap";
 import { useShortcuts } from "./useShortcuts";
 import { toolStore } from "@/stores/toolStore";
 import { selectionStore } from "@/stores/selectionStore";
+import { viewportStore } from "@/stores/viewportStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
 import { planeFor } from "@/ipc/mockSketch";
@@ -128,6 +129,22 @@ describe("keymap resolveBinding", () => {
     // Non-tool sketch-only actions (Delete) still cannot cross into model mode.
     expect(resolveBinding("Delete", false, "model")).toBeNull();
   });
+
+  it("W3: ⇧I is isolate in model mode and INERT everywhere else", () => {
+    expect(resolveBinding("i", true, "model")).toEqual({ type: "isolate" });
+    // Exact shift chord — plain `i` stays free in both tables.
+    expect(resolveBinding("i", false, "model")).toBeNull();
+    expect(resolveBinding("i", false, "sketch")).toBeNull();
+    // Not a `tool` action, so the cross-mode fallback cannot leak it into sketch
+    // mode (isolating bodies would hide what the sketch is drawn against).
+    expect(resolveBinding("i", true, "sketch")).toBeNull();
+  });
+
+  it("W3: ⇧I collides with nothing — the pinned neighbours keep their meaning", () => {
+    expect(resolveBinding("f", true, "model")).toEqual({ type: "zoomFit" });
+    expect(resolveBinding("r", true, "sketch")).toEqual({ type: "tool", tool: "centerRect" });
+    expect(resolveBinding("?", true, "model")).toEqual({ type: "tool", tool: "measure" });
+  });
 });
 
 describe("useShortcuts", () => {
@@ -168,6 +185,39 @@ describe("useShortcuts", () => {
     expect(selectionStore.getState().selected.length).toBe(1);
     press("Escape");
     expect(selectionStore.getState().selected.length).toBe(0);
+  });
+
+  it("⇧I isolates the selected bodies, and Esc leaves isolation BEFORE deselecting", () => {
+    render(<Harness />);
+    selectionStore.getState().set([{ kind: "body", id: "body1" }]);
+
+    press("i", { shift: true });
+    expect(viewportStore.getState().isolatedBodyIds).toEqual(["body1"]);
+
+    // Rung order matters: clearing the selection first would strand the user
+    // inside an isolate set with nothing selected.
+    press("Escape");
+    expect(viewportStore.getState().isolatedBodyIds).toBeNull();
+    expect(selectionStore.getState().selected).toHaveLength(1);
+
+    press("Escape");
+    expect(selectionStore.getState().selected).toHaveLength(0);
+  });
+
+  it("⇧I toggles isolation back off", () => {
+    render(<Harness />);
+    selectionStore.getState().set([{ kind: "body", id: "body1" }]);
+    press("i", { shift: true });
+    press("i", { shift: true });
+    expect(viewportStore.getState().isolatedBodyIds).toBeNull();
+  });
+
+  it("plain `i` does nothing (the chord is exact-shift)", () => {
+    render(<Harness />);
+    selectionStore.getState().set([{ kind: "body", id: "body1" }]);
+    const ev = press("i");
+    expect(ev.defaultPrevented).toBe(false);
+    expect(viewportStore.getState().isolatedBodyIds).toBeNull();
   });
 
   it("Delete deletes the sketch selection and clears it", async () => {

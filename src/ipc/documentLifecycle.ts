@@ -13,6 +13,9 @@ import { viewportStore } from "@/stores/viewportStore";
 export function resetDocumentScopedUi(): void {
   toolStore.getState().setMode("model");
   viewportStore.getState().setPendingExtrude(null);
+  // Isolation names bodies of the OUTGOING document — carrying it over would
+  // hide every body of the incoming one (its ids never match).
+  viewportStore.getState().exitIsolate();
   selectionStore.getState().clear();
   selectionStore.getState().setHover(null);
   // Overlay/local UI stores also carry state scoped to the outgoing document — an

@@ -174,4 +174,72 @@ describe("ViewportEngine lifecycle", () => {
     expect(target.visible).toBe(true);
     engine.dispose();
   });
+
+  it("reports whether a preview is holding committed bodies hidden (isolate guard)", () => {
+    const engine = new ViewportEngine();
+    const target = new THREE.Group();
+    target.userData.bodyId = "target";
+    engine.bodiesRoot.add(target);
+
+    expect(engine.hasPreviewHiddenBodies()).toBe(false);
+    engine.setPreviewReplacedBodyIds(["target"]);
+    expect(engine.hasPreviewHiddenBodies()).toBe(true);
+    engine.clearPreviewBody();
+    expect(engine.hasPreviewHiddenBodies()).toBe(false);
+    engine.dispose();
+  });
+});
+
+/*
+ * Zoom-to-selection bounds (W3). The invisible-body filter is the load-bearing
+ * part: `Box3.setFromObject` recurses through `children` WITHOUT consulting
+ * `visible`, so a hidden body would silently widen the frame.
+ */
+describe("ViewportEngine.getBoundsForBodies", () => {
+  /** A body group whose geometry is a unit box centred at `center`. */
+  function bodyAt(bodyId: string, center: [number, number, number]): THREE.Group {
+    const group = new THREE.Group();
+    group.userData.bodyId = bodyId;
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2));
+    mesh.position.set(...center);
+    group.add(mesh);
+    return group;
+  }
+
+  it("unions only the requested bodies", () => {
+    const engine = new ViewportEngine();
+    engine.bodiesRoot.add(bodyAt("a", [0, 0, 0]), bodyAt("b", [100, 0, 0]));
+
+    const only = engine.getBoundsForBodies(["a"])!;
+    expect(only.min.toArray()).toEqual([-1, -1, -1]);
+    expect(only.max.toArray()).toEqual([1, 1, 1]);
+
+    const both = engine.getBoundsForBodies(["a", "b"])!;
+    expect(both.max.x).toBe(101);
+    engine.dispose();
+  });
+
+  it("EXCLUDES a hidden body (setFromObject would have included it)", () => {
+    const engine = new ViewportEngine();
+    const a = bodyAt("a", [0, 0, 0]);
+    const b = bodyAt("b", [100, 0, 0]);
+    engine.bodiesRoot.add(a, b);
+    b.visible = false; // tree eye or isolation
+
+    // Proof the filter is doing real work: three itself does not respect it.
+    expect(new THREE.Box3().setFromObject(b).isEmpty()).toBe(false);
+
+    const bounds = engine.getBoundsForBodies(["a", "b"])!;
+    expect(bounds.max.x).toBe(1);
+    expect(engine.getBoundsForBodies(["b"])).toBeNull();
+    engine.dispose();
+  });
+
+  it("returns null for unknown ids and for an empty request", () => {
+    const engine = new ViewportEngine();
+    engine.bodiesRoot.add(bodyAt("a", [0, 0, 0]));
+    expect(engine.getBoundsForBodies(["nope"])).toBeNull();
+    expect(engine.getBoundsForBodies([])).toBeNull();
+    engine.dispose();
+  });
 });

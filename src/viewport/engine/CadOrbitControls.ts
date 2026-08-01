@@ -464,9 +464,13 @@ export class CadOrbitControls {
     this.commit();
   }
 
-  fitView(): void {
-    const bounds = this.getBounds();
-    if (!bounds || bounds.isEmpty()) {
+  /**
+   * Frame `bounds`, or the whole scene when omitted (zoom-to-fit). Empty or
+   * missing bounds fall back to the default framed distance at the origin.
+   */
+  fitView(bounds?: THREE.Box3): void {
+    const box = bounds ?? this.getBounds();
+    if (!box || box.isEmpty()) {
       this.animateTo({
         yaw: this.yaw,
         pitch: this.pitch,
@@ -475,7 +479,7 @@ export class CadOrbitControls {
       });
       return;
     }
-    const sphere = bounds.getBoundingSphere(new THREE.Sphere());
+    const sphere = box.getBoundingSphere(new THREE.Sphere());
     const dist = (sphere.radius / Math.sin((this.rig.fovDeg * Math.PI) / 360)) * 1.15;
     this.animateTo({
       yaw: this.yaw,

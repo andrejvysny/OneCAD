@@ -5,6 +5,7 @@ import { Popover } from "@/ui/Popover";
 import { useDocumentStore } from "@/stores/documentStore";
 import { selectionStore, useSelectionStore, type EntityKind } from "@/stores/selectionStore";
 import { useToolStore } from "@/stores/toolStore";
+import { useViewportStore } from "@/stores/viewportStore";
 import { TreeRow } from "./TreeRow";
 import {
   deleteDatum,
@@ -45,6 +46,7 @@ export function ModelTreePanel() {
   const selected = useSelectionStore((s) => s.selected);
   const select = useSelectionStore((s) => s.set);
   const setMode = useToolStore((s) => s.setMode);
+  const isolated = useViewportStore((s) => s.isolatedBodyIds);
 
   const [menu, setMenu] = useState<MenuTarget | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -102,6 +104,9 @@ export function ModelTreePanel() {
             name={b.name}
             icon="cube"
             visible={b.visible}
+            // Isolated AWAY → dim the row (the eye still reports the document's
+            // own visibility; isolation is a transient viewport mask).
+            dimmed={isolated !== null && !isolated.includes(b.id)}
             selected={isSelected("body", b.id)}
             onSelect={() => select([{ kind: "body", id: b.id }])}
             onToggleVisible={(v) => void setBodyVisible(b.id, v)}

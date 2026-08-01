@@ -3,7 +3,7 @@ import { cn } from "@/ui/cn";
 import { Tooltip } from "@/ui/Tooltip";
 import { Icon } from "@/icons/Icon";
 import type { IconName } from "@/icons/paths";
-import { useViewportStore } from "@/stores/viewportStore";
+import { DISPLAY_MODE_LABEL, useViewportStore } from "@/stores/viewportStore";
 import { SnapPopover } from "@/features/snap/SnapPopover";
 import { ViewCube } from "@/features/viewcube/ViewCube";
 
@@ -51,6 +51,7 @@ export function CornerCluster() {
   const gridVisible = useViewportStore((s) => s.gridVisible);
   const toggleGrid = useViewportStore((s) => s.toggleGrid);
   const cycleDisplayMode = useViewportStore((s) => s.cycleDisplayMode);
+  const displayMode = useViewportStore((s) => s.displayMode);
 
   const [snapOpen, setSnapOpen] = useState(false);
   const snapBtnRef = useRef<HTMLButtonElement | null>(null);
@@ -59,9 +60,12 @@ export function CornerCluster() {
     <div className="absolute right-[296px] top-3 z-[25] flex flex-col items-center gap-2">
       <ViewCube />
 
+      {/* The button CYCLES three modes, so the label carries the current one —
+          a bare "Display mode" on a tri-state control says nothing about what
+          the next click will do. */}
       <ClusterButton
         icon="display"
-        label="Display mode"
+        label={`Display mode: ${DISPLAY_MODE_LABEL[displayMode]}`}
         onClick={cycleDisplayMode}
       />
       <ClusterButton

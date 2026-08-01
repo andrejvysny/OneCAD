@@ -181,4 +181,36 @@ describe("ModelTreePanel — inline rename", () => {
     await user.keyboard("{F2}");
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
   });
+
+  /*
+   * W3 isolation dims the rows of bodies isolated AWAY. It must NOT touch the
+   * eye: the eye reports the document's persisted `visible` fact, isolation is a
+   * transient viewport mask, and collapsing the two would make "hidden" ambiguous.
+   */
+  it("dims the rows of bodies isolated away, leaving their eyes untouched", () => {
+    documentStore.setState({
+      bodies: {
+        body1: { id: "body1", name: "Body 1", visible: true },
+        body2: { id: "body2", name: "Body 2", visible: true },
+      },
+    });
+    const { rerender } = render(<ModelTreePanel />);
+    const dimmed = (name: RegExp) =>
+      screen.getByRole("option", { name }).className.includes("opacity-50");
+
+    expect(dimmed(/Body 1/)).toBe(false);
+    expect(dimmed(/Body 2/)).toBe(false);
+
+    viewportStore.setState({ isolatedBodyIds: ["body1"] });
+    rerender(<ModelTreePanel />);
+    expect(dimmed(/Body 1/)).toBe(false);
+    expect(dimmed(/Body 2/)).toBe(true);
+    expect(
+      screen.getByRole("option", { name: /Body 2/ }).querySelector('[role="switch"]'),
+    ).toHaveAttribute("aria-checked", "true");
+
+    viewportStore.setState({ isolatedBodyIds: null });
+    rerender(<ModelTreePanel />);
+    expect(dimmed(/Body 2/)).toBe(false);
+  });
 });

@@ -27,7 +27,7 @@ export function resetStores(): void {
   });
   viewportStore.setState({
     projection: "persp",
-    displayMode: "shaded",
+    displayMode: "shadedEdges",
     gridVisible: true,
     activeSketchId: null,
     cameraViewLabel: "TOP",
@@ -37,6 +37,7 @@ export function resetStores(): void {
     detectedInputDevice: "mouse",
     statusHint: null,
     pendingExtrudeSketch: null,
+    isolatedBodyIds: null,
   });
   // Go through the action too, to cancel any pending auto-dismiss timer the
   // previous test armed (setState alone would leave the module timer running).

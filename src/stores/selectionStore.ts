@@ -79,6 +79,29 @@ export function topoRefId(bodyId: string, topoKey: string): string {
   return `${bodyId}#${topoKey}`;
 }
 
+/**
+ * The bodies a selection refers to, de-duplicated in pick order.
+ *
+ * A `body` ref IS its body; a face/edge/vertex pick carries its owning `bodyId`.
+ * Sketch / sketchRegion / feature / datum refs have NO body and are skipped —
+ * they must never fall back to "all bodies", because the callers (zoom-to-
+ * selection, isolate) distinguish "nothing body-shaped is selected" from "these
+ * bodies" and decide the fallback themselves.
+ */
+export function selectedBodyIds(refs: readonly EntityRef[]): string[] {
+  const out: string[] = [];
+  for (const ref of refs) {
+    const id =
+      ref.kind === "body"
+        ? ref.id
+        : ref.kind === "face" || ref.kind === "edge" || ref.kind === "vertex"
+          ? ref.bodyId
+          : undefined;
+    if (id && !out.includes(id)) out.push(id);
+  }
+  return out;
+}
+
 export interface SelectionState {
   hover: EntityRef | null;
   selected: EntityRef[];

@@ -39,11 +39,19 @@ function isEditableTarget(el: EventTarget | null): boolean {
   );
 }
 
-/** Esc ladder: cancel active tool → deselect → exit sketch mode. */
+/** Esc ladder: cancel active tool → exit isolation → deselect → exit sketch mode. */
 function runCancel(): void {
   const tool = toolStore.getState();
   if (activeTool(tool) !== "select") {
     tool.setTool("select");
+    return;
+  }
+  // Isolation outranks deselect: the selection is what the user isolated, so
+  // clearing it first would strand them inside an isolate set with nothing
+  // selected and no obvious way back.
+  const viewport = viewportStore.getState();
+  if (viewport.isolatedBodyIds !== null) {
+    viewport.exitIsolate();
     return;
   }
   const sel = selectionStore.getState();
@@ -139,6 +147,9 @@ export function runAction(action: ShortcutAction): void {
       break;
     case "zoomFit":
       viewportStore.getState().zoomFit();
+      break;
+    case "isolate":
+      viewportStore.getState().toggleIsolate();
       break;
     case "home":
       viewportStore.getState().homeView();

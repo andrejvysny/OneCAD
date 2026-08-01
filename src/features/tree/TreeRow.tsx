@@ -18,6 +18,12 @@ type TreeRowProps = {
    * silently does nothing is worse than no toggle.
    */
   onToggleVisible?: (visible: boolean) => void;
+  /**
+   * Dim the row without touching its eye: the body is currently isolated AWAY
+   * (W3). Transient viewport state, NOT a document fact — the eye keeps showing
+   * the persisted `visible` value so the two never look like one thing.
+   */
+  dimmed?: boolean;
   /** Double-click activator (sketch rows enter sketch mode). */
   onActivate?: () => void;
   /** Right-click → the tree's shared context menu (anchored to this row). */
@@ -45,6 +51,7 @@ export function TreeRow({
   selected,
   onSelect,
   onToggleVisible,
+  dimmed = false,
   onActivate,
   onContextMenu,
   editing = false,
@@ -90,6 +97,7 @@ export function TreeRow({
       className={cn(
         "mx-2 my-px flex h-8 cursor-default items-center gap-2 rounded-sm px-2",
         selected ? "bg-sel-bg text-sel-text" : "text-tree-label hover:bg-hover-2",
+        dimmed && "opacity-50",
       )}
     >
       <Icon name={icon} size={15} strokeWidth={1.6} className="flex-none" />

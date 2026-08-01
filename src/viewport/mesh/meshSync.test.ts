@@ -10,6 +10,7 @@ import * as reg from "./meshRegistry";
 import { makeBoxMesh } from "@/ipc/mockMeshes";
 import { documentStore } from "@/stores/documentStore";
 import { toolStore } from "@/stores/toolStore";
+import { viewportStore } from "@/stores/viewportStore";
 import type { CadClient } from "@/ipc/client";
 import type { DocumentChange } from "@/ipc/types";
 import type { ViewportEngine } from "../engine/ViewportEngine";
@@ -72,7 +73,26 @@ afterEach(() => {
   ingest?.detach();
   ingest = null;
   toolStore.getState().setMode("model"); // dimming tests flip this; keep the file isolated
+  viewportStore.setState({ isolatedBodyIds: null, displayMode: "shadedEdges" });
 });
+
+/** The scene group for a body (undefined when it has no scene object). */
+function bodyGroup(
+  engine: ReturnType<typeof fakeEngine>,
+  bodyId: string,
+): THREE.Group | undefined {
+  return engine.bodiesRoot.children.find((c) => c.userData.bodyId === bodyId) as
+    | THREE.Group
+    | undefined;
+}
+
+/** [faceVisible, edgeVisible] for a loaded body. */
+function childVisibility(engine: ReturnType<typeof fakeEngine>, bodyId: string): boolean[] {
+  const group = bodyGroup(engine, bodyId)!;
+  return ["face", "edge"].map(
+    (kind) => group.children.find((c) => c.userData.kind === kind)!.visible,
+  );
+}
 
 describe("MeshIngest onDocumentChanged", () => {
   it("fetches + swaps + adds a scene object for a changed, visible body", async () => {
@@ -275,5 +295,177 @@ describe("MeshIngest sketch-mode dimming", () => {
     expect(() => toolStore.getState().setMode("sketch")).not.toThrow();
     expect(mat.opacity).toBe(opacityBefore); // detached ingest no longer touches it
     expect(engine.invalidate.mock.calls.length).toBe(invalidateCallsBeforeDetach);
+  });
+});
+
+/*
+ * W3 display mode — MeshIngest owns applying it, because it owns the
+ * bodyId→handle map. Session-only viewport state, never a document write.
+ */
+describe("MeshIngest display mode", () => {
+  it("applies the CURRENT mode to a body loaded later", async () => {
+    viewportStore.setState({ displayMode: "wireframe" });
+    setBodies({ body1: true });
+    const engine = fakeEngine();
+    const { client, emit } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+
+    emit(changed("body1"));
+    await tick();
+
+    expect(childVisibility(engine, "body1")).toEqual([false, true]);
+  });
+
+  it("re-applies to every live body when the store flips", async () => {
+    setBodies({ body1: true, body2: true });
+    const engine = fakeEngine();
+    const { client } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    await tick();
+
+    expect(childVisibility(engine, "body1")).toEqual([true, true]); // shadedEdges
+
+    viewportStore.getState().cycleDisplayMode(); // → wireframe
+    expect(childVisibility(engine, "body1")).toEqual([false, true]);
+    expect(childVisibility(engine, "body2")).toEqual([false, true]);
+
+    viewportStore.getState().cycleDisplayMode(); // → shaded
+    expect(childVisibility(engine, "body1")).toEqual([true, false]);
+    expect(engine.invalidate).toHaveBeenCalled();
+  });
+
+  it("detach unsubscribes — a later mode flip does not touch the scene", async () => {
+    setBodies({ body1: true });
+    const engine = fakeEngine();
+    const { client } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    await tick();
+    const group = bodyGroup(engine, "body1")!;
+
+    ingest.detach();
+    ingest = null;
+
+    viewportStore.setState({ displayMode: "wireframe" });
+    expect(group.children.every((c) => c.visible)).toBe(true);
+  });
+});
+
+/*
+ * W3 isolate — a TRANSIENT mask ANDed with the document's own `visible` fact.
+ * The document is never written, so the tree eye keeps its meaning throughout.
+ */
+describe("MeshIngest isolation", () => {
+  it("hides the bodies outside the isolate set and restores them on exit", async () => {
+    setBodies({ body1: true, body2: true });
+    const engine = fakeEngine();
+    const { client } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    await tick();
+
+    viewportStore.setState({ isolatedBodyIds: ["body1"] });
+    expect(bodyGroup(engine, "body1")!.visible).toBe(true);
+    expect(bodyGroup(engine, "body2")!.visible).toBe(false);
+
+    viewportStore.setState({ isolatedBodyIds: null });
+    expect(bodyGroup(engine, "body2")!.visible).toBe(true);
+  });
+
+  it("a DOC-hidden body stays hidden inside the isolate set — and after exit", async () => {
+    setBodies({ body1: true, body2: false });
+    const engine = fakeEngine();
+    const { client } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    await tick();
+
+    // body2 was never loaded (doc-hidden), so isolating it must not resurrect it.
+    viewportStore.setState({ isolatedBodyIds: ["body1", "body2"] });
+    await tick();
+    expect(bodyGroup(engine, "body2")).toBeUndefined();
+
+    viewportStore.setState({ isolatedBodyIds: null });
+    await tick();
+    expect(bodyGroup(engine, "body2")).toBeUndefined();
+  });
+
+  it("a tree-eye SHOW inside an isolate set loads the body but keeps it masked", async () => {
+    setBodies({ body1: true, body2: false });
+    const engine = fakeEngine();
+    const { client, getMesh } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    await tick();
+
+    viewportStore.setState({ isolatedBodyIds: ["body1"] });
+    setBodies({ body1: true, body2: true }); // eye flips body2 on, still isolated away
+    await tick();
+
+    expect(getMesh).toHaveBeenCalledWith("body2", "coarse"); // fetched (kept fresh)
+    expect(bodyGroup(engine, "body2")!.visible).toBe(false); // but masked
+
+    viewportStore.setState({ isolatedBodyIds: null });
+    expect(bodyGroup(engine, "body2")!.visible).toBe(true);
+  });
+
+  it("lazy-loads a body that becomes effectively visible only on exit", async () => {
+    setBodies({ body1: true });
+    const engine = fakeEngine();
+    const { client } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    await tick();
+
+    // A body the document gains while isolation masks it (no load: not effective).
+    viewportStore.setState({ isolatedBodyIds: ["body1"] });
+    setBodies({ body1: true, body2: false });
+    await tick();
+    expect(bodyGroup(engine, "body2")).toBeUndefined();
+
+    // It becomes doc-visible while still masked, then isolation ends.
+    documentStore.setState({
+      bodies: {
+        body1: { id: "body1", name: "body1", visible: true },
+        body2: { id: "body2", name: "body2", visible: true },
+      },
+    });
+    await tick();
+    viewportStore.setState({ isolatedBodyIds: null });
+    await tick();
+    expect(bodyGroup(engine, "body2")!.visible).toBe(true);
+  });
+
+  it("a body loaded WHILE isolated arrives masked", async () => {
+    setBodies({ body1: true, body2: true });
+    const engine = fakeEngine();
+    const { client, emit } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    await tick();
+
+    viewportStore.setState({ isolatedBodyIds: ["body1"] });
+    emit(changed("body2")); // a regen republishes body2's mesh
+    await tick();
+
+    expect(bodyGroup(engine, "body2")!.visible).toBe(false);
+  });
+
+  it("detach unsubscribes — a later isolate flip does not touch the scene", async () => {
+    setBodies({ body1: true, body2: true });
+    const engine = fakeEngine();
+    const { client } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    await tick();
+    const group = bodyGroup(engine, "body2")!;
+
+    ingest.detach();
+    ingest = null;
+
+    viewportStore.setState({ isolatedBodyIds: ["body1"] });
+    expect(group.visible).toBe(true);
   });
 });

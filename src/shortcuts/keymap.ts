@@ -2,12 +2,12 @@
  * Keyboard bindings (F-WP3) — data-driven, mode-scoped.
  *
  * Model:  V select · S new-sketch (enters sketch mode) · D datum plane · E extrude
- *         · R revolve · F fillet · B combine/boolean
+ *         · R revolve · F fillet · B combine/boolean · ⇧I isolate selection
  * Sketch: V select · L line · R rectangle · ⇧R center-rectangle · C circle
  *         · O ellipse · A arc · G polygon · S slot · P point · D dimension
  *         · T trim · M mirror · X construction (flip selection / sticky mode)
  * Global: Esc cancel-ladder · Enter finish-sketch (sketch mode) · H home (stub)
- *         · Shift+F zoom-to-fit
+ *         · Shift+F zoom-to-fit (frames the SELECTION when it names bodies)
  *
  * COLLISIONS (all deliberate, all resolved by `mode` or by a chord — never by
  * guessing):
@@ -47,6 +47,7 @@ export type ShortcutAction =
   | { type: "toggleConstruction" }
   | { type: "cancel" }
   | { type: "zoomFit" }
+  | { type: "isolate" }
   | { type: "home" };
 
 export interface KeyBinding {
@@ -79,6 +80,12 @@ export const MODEL_KEYS: KeyBinding[] = [
   // Declared as an exact shift chord, exactly like sketch ⇧R, so it can never be
   // claimed by a plain-key press. It is in NO_CROSS_MODE below — see there.
   { key: "?", shift: true, action: { type: "tool", tool: "measure" } },
+  // W3 isolate. `i` was free in BOTH tables; declared as an exact shift chord
+  // (like ⇧R / ⇧?) so a plain `i` stays available. MODEL-scoped on purpose and
+  // NOT a `tool` action, so the cross-mode fallback can never fire it while
+  // drawing — isolating bodies mid-sketch would hide the very geometry the
+  // sketch is being drawn against.
+  { key: "i", shift: true, action: { type: "isolate" } },
 ];
 
 export const SKETCH_KEYS: KeyBinding[] = [

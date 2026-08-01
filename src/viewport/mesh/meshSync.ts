@@ -12,11 +12,17 @@
  * The engine stays graphics-only; this controller owns the client, the document
  * store subscription, the shared body materials, and the bodyId→BodyObject map.
  * `detach` clears the scene, disposes the registry (leak tripwire) and materials.
+ *
+ * It is also the single owner of the two viewport-level body view states (W3):
+ * the DISPLAY MODE (face/edge child visibility per body) and the transient
+ * ISOLATION mask. Both are applied here rather than in the engine because the
+ * bodyId→handle map lives here.
  */
 import type { CadClient } from "@/ipc/client";
 import type { DocumentChange, Lod } from "@/ipc/types";
 import { documentStore } from "@/stores/documentStore";
 import { toolStore } from "@/stores/toolStore";
+import { viewportStore } from "@/stores/viewportStore";
 import type { ViewportEngine } from "../engine/ViewportEngine";
 import {
   buildBodyObject,
@@ -87,6 +93,28 @@ export class MeshIngest {
     );
     if (prevMode === "sketch") this.setDimmed(true);
 
+    // Display mode + isolation (W3): both are viewport-store facts applied to
+    // the handles this controller owns. Separate prev-guards so a change to one
+    // never re-walks the scene for the other.
+    let prevDisplay = viewportStore.getState().displayMode;
+    this.unsubs.push(
+      viewportStore.subscribe((s) => {
+        if (s.displayMode !== prevDisplay) {
+          prevDisplay = s.displayMode;
+          this.applyDisplayMode();
+        }
+      }),
+    );
+    let prevIsolate = viewportStore.getState().isolatedBodyIds;
+    this.unsubs.push(
+      viewportStore.subscribe((s) => {
+        if (s.isolatedBodyIds !== prevIsolate) {
+          prevIsolate = s.isolatedBodyIds;
+          this.applyIsolation();
+        }
+      }),
+    );
+
     // Initial sweep: bodies already in the store at attach time (open/new/recover
     // populate the projection before the viewport engine exists) never fire a
     // document-changed or visibility-flip event, so bootstrap them here. Idempotent
@@ -114,12 +142,49 @@ export class MeshIngest {
       if (was === meta.visible) continue;
       const handle = this.bodyObjects.get(id);
       if (handle) {
-        handle.setVisible(meta.visible);
+        handle.setVisible(this.effectiveVisible(id));
         this.engine?.invalidate();
       } else if (meta.visible) {
-        void this.loadBody(id, DEFAULT_LOD); // lazy-load on first show
+        // Lazy-load on first show. Gated on the DOCUMENT fact, not the effective
+        // one: fetching a body that isolation is currently masking costs one
+        // mesh but keeps it fresh, and `loadBody` applies the mask on arrival.
+        void this.loadBody(id, DEFAULT_LOD);
       }
     }
+  }
+
+  /**
+   * Should this body render right now? The document's `visible` fact AND the
+   * transient isolation mask — in that order of authority. Isolation can only
+   * ever hide MORE than the tree eye does, so leaving isolation never resurrects
+   * a body the user hid.
+   */
+  private effectiveVisible(bodyId: string): boolean {
+    const docVisible = documentStore.getState().bodies[bodyId]?.visible ?? true;
+    const isolated = viewportStore.getState().isolatedBodyIds;
+    return docVisible && (isolated === null || isolated.includes(bodyId));
+  }
+
+  /** Push the current display mode onto every live body handle. */
+  private applyDisplayMode(): void {
+    const mode = viewportStore.getState().displayMode;
+    for (const handle of this.bodyObjects.values()) handle.setDisplayMode(mode);
+    this.engine?.invalidate();
+  }
+
+  /**
+   * Re-evaluate effective visibility for every body after an isolation change.
+   * A body that becomes effectively visible with no scene object yet (never
+   * loaded because it was hidden at attach time) is lazy-loaded here.
+   */
+  private applyIsolation(): void {
+    for (const [id, handle] of this.bodyObjects) handle.setVisible(this.effectiveVisible(id));
+    for (const id of Object.keys(documentStore.getState().bodies)) {
+      if (!this.bodyObjects.has(id) && this.effectiveVisible(id)) {
+        void this.loadBody(id, DEFAULT_LOD);
+      }
+    }
+    this.engine?.invalidate();
   }
 
   private async loadBody(bodyId: string, lod: Lod): Promise<void> {
@@ -142,7 +207,8 @@ export class MeshIngest {
     const old = this.bodyObjects.get(bodyId);
     if (old) this.engine.bodiesRoot.remove(old.group);
     const handle = buildBodyObject(entry, this.materials);
-    handle.setVisible(documentStore.getState().bodies[bodyId]?.visible ?? true);
+    handle.setVisible(this.effectiveVisible(bodyId));
+    handle.setDisplayMode(viewportStore.getState().displayMode);
     this.engine.bodiesRoot.add(handle.group);
     this.bodyObjects.set(bodyId, handle);
 

@@ -190,6 +190,25 @@ describe("ModelToolController Wave 2", () => {
     expect(debug().booleanTargetId).toBeNull();
   });
 
+  it("W3: arming a tool leaves isolation; disarming back to select does NOT", async () => {
+    build({ finish: () => Promise.resolve({ regions: [R0] }) });
+
+    // An op previews against bodies the isolate mask hides, and the preview's own
+    // hide/restore snapshot would fight that mask — so arming drops isolation.
+    viewportStore.setState({ isolatedBodyIds: ["body1"] });
+    await armExtrude();
+    expect(viewportStore.getState().isolatedBodyIds).toBeNull();
+    // The arm's own prompt still has the last word (exitIsolate ran BEFORE it).
+    expect(viewportStore.getState().statusHint?.message).toBeTruthy();
+
+    // Going back to `select` is a DISARM — Esc's ladder owns isolation there, so
+    // one Esc must not silently do both rungs.
+    viewportStore.setState({ isolatedBodyIds: ["body1"] });
+    toolStore.getState().setTool("select");
+    await flush();
+    expect(viewportStore.getState().isolatedBodyIds).toEqual(["body1"]);
+  });
+
   it("Add with >1 visible body enters targetPick; a body click adopts the target", async () => {
     // A second visible body → Add must ask which one.
     documentStore.setState({ bodies: { body1: { id: "body1", name: "B1", visible: true }, body2: { id: "body2", name: "B2", visible: true } } });

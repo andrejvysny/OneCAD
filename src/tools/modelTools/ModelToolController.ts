@@ -571,6 +571,13 @@ export class ModelToolController {
     this.endDatumPick();
     this.cancelMeasure();
     toolChipStore.getState().clear();
+    // W3: arming a real tool leaves isolation. An op previews against bodies the
+    // isolate mask is hiding, and the preview's own hide/restore snapshot would
+    // fight that mask. Deliberately NOT on the switch back to `select`, which is
+    // a disarm — Esc's own ladder owns exiting isolation there. Placed AFTER the
+    // cancel sweep (so no preview still holds a saved visibility snapshot) and
+    // BEFORE the arms (so their status hints have the last word).
+    if (tool !== "select") viewportStore.getState().exitIsolate();
     if (tool === "datum") this.startDatum();
     else if (tool === "extrude") this.armExtrudeFromSelection();
     else if (tool === "revolve") this.armRevolveFromSelection();

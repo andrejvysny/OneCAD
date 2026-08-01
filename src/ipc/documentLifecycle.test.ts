@@ -37,6 +37,9 @@ function dirtyDocumentScopedUi(): void {
   sketchStore.getState().pushUndoSnapshot({ entities: [], constraints: [] });
   sketchStore.getState().setConflicting(["c1"]);
   toolChipStore.getState().showFillet(2, [0, 0, 0], () => {});
+  // Isolation names bodies of the OUTGOING document (W3) — a carried-over set
+  // would hide every body of the incoming one, since no id can match.
+  viewportStore.setState({ isolatedBodyIds: ["body1"] });
 }
 
 function expectDocumentScopedUiClean(): void {
@@ -49,6 +52,7 @@ function expectDocumentScopedUiClean(): void {
   expect(sketchStore.getState().undoStack).toEqual([]);
   expect(sketchStore.getState().conflictingIds).toEqual([]);
   expect(toolChipStore.getState().kind).toBe("none");
+  expect(viewportStore.getState().isolatedBodyIds).toBeNull();
 }
 
 describe("resetDocumentScopedUi", () => {
