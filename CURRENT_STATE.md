@@ -1,4 +1,48 @@
-# OneCAD-Tauri — Current State (2026-08-01, SKETCH-POWER wave shipped)
+# OneCAD-Tauri — Current State (2026-08-01, MODELING-REACH wave shipped)
+
+## MODELING-REACH (2026-08-01, commits c960183→be4beb4) — datum planes, measure, view UX, arc-endpoint welds
+Plan `~/.claude/plans/do-thorough-exploration-and-rosy-lollipop.md` (adversarial
+review REVISE → 2 MAJOR + 3 MINOR folded pre-approval). Five gates, all 4-suite
+green vs real worker.
+**W0a (c960183)**: hint-clobber 8-site class → `resetToSelect` (20 sites, hints
+finally visible); stale static layer after sketch-switch → local geometryToken
+bump; Equal/Midpoint real-worker DOF proofs (all 7 kinds now proven).
+**W0b (7bc73a5)**: arc endpoints are REAL solver points — worker mints
+`.start`/`.end` handles coupled by PlaneGCS ArcRules (tag-0,
+redundancy-invisible), Rust Coincident gains optional positions (frozen serde
+byte-stable), slot caps welded to walls. SCHEMA §7.3 positions + §7.4 e3.start
+examples became TRUE. Findings: entity-Tangent degenerate once welded (dropped
+from slot, DOF 9 honest; endpoint-tangency kind backlogged); latent
+constraint-free drag TELEPORT fixed; dup wire center points confirmed (+4 DOF,
+pre-existing, backlogged).
+**W1 (3a210cf)**: datum offset planes — D tool (PlanePicker + offset ghost),
+core resolves frames AT CREATION (frozen, Rust = basis authority, stamps
+datum-attached sketch planes), DatumLayer + tree section + sketch-on-datum both
+clients, DeleteDatum referenced-guard. Worker + protocol byte-identical. Proof:
+extrude off an XY+10-hosted sketch → bbox z=[10,15] exact; legacy-swapped bases
+pinned (XZ offset moves world +X).
+**W2 (d1b151b)**: measure tool (?) — exact kernel face area / edge length +
+center↔center distance (bbox centers, labeled honestly); LATENT FOUND+ROUTED:
+element-map entries mint on demand so promoted-but-unused ids are absent → new
+`query_element_by_topo_key` ladder rung; **`face_sketch_plane` has the SAME
+latent (flagged follow-up)**. Units: `src/units/format.ts` single seam,
+mm/cm/m/in input parsing, valueText round-trips guarded both directions; `?`
+inert while sketching (NO_CROSS_MODE keymap set).
+**W3 (be4beb4)**: display-mode button REAL (was dead — renderer never read it;
+default shadedEdges), ⇧F fits selection (explicit visible-filter —
+Box3.expandByObject recurses invisible children), ⇧I transient isolate (never
+persisted; preview-stomp guarded both directions).
+Suites at final gate: tsc 0 · FE 1893/138 · cargo 570/0 vs real worker · ctest
+77/77 · e2e 90/90 · clippy/fmt/hex clean. 8 implementation agents, every diff
+reviewed + every gate re-verified by orchestrator.
+BACKLOGGED THIS WAVE: endpoint-tangency constraint kind; wire center-point
+dedupe (worker honoring centerRef); face_sketch_plane topoKey rung;
+solved-arc-endpoint/radius FE write-back; datum rename/visibility +
+OffsetFromFace/AngledFromEdge; chained-datum delete guard if resolution ever
+re-derives.
+REMAINING: USER manual Tauri gates (TODO.md MODELING-REACH checklist + older
+SKETCH-POWER/TRUST/PREVIEW ones); Codex post-hoc reviews after 2026-08-05.
+
 
 ## SKETCH-POWER (2026-07-31→08-01, commits 130854b→b191ed2) — sketch expressiveness wave
 Plan `~/.claude/plans/do-thorough-exploration-and-rosy-lollipop.md` (internal
