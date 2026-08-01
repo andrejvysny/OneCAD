@@ -454,21 +454,43 @@ describe("slotTool — centerline → width", () => {
     expect(capP0.end).toEqual({ x: 30, y: 0 });
   });
 
-  it("authors Tangent ×4 (wall × cap) + Equal ×1 (cap ↔ cap), all entity-level", () => {
+  it("welds each wall endpoint to the cap endpoint it touches + Equal ×1 (W0b)", () => {
     const steps = run(slotTool, [
       ["click", { x: 0, y: 0 }],
       ["click", { x: 100, y: 0 }],
       ["click", { x: 50, y: 20 }],
     ]);
     expect(steps[2].committedConstraints).toEqual([
-      { type: "Tangent", refs: [0, 2] },
-      { type: "Tangent", refs: [0, 3] },
-      { type: "Tangent", refs: [1, 2] },
-      { type: "Tangent", refs: [1, 3] },
+      { type: "Coincident", refs: [0, 2], positions: ["End", "End"] },
+      { type: "Coincident", refs: [1, 2], positions: ["End", "Start"] },
+      { type: "Coincident", refs: [0, 3], positions: ["Start", "Start"] },
+      { type: "Coincident", refs: [1, 3], positions: ["Start", "End"] },
       { type: "Equal", refs: [2, 3] },
     ]);
-    // No arc-endpoint Coincidents: they would be silently dropped by the marshaller.
-    expect(steps[2].committedConstraints!.some((c) => c.type === "Coincident")).toBe(false);
+    // NO entity-level Tangents: welded to the arc endpoint, `distance(center,
+    // wall) == radius` sits at its maximum and PlaneGCS calls all four redundant
+    // (which renders as OverConstrained). See the slot header.
+    expect(steps[2].committedConstraints!.some((c) => c.type === "Tangent")).toBe(false);
+  });
+
+  it("every weld names the endpoint the two drafts actually share", () => {
+    const steps = run(slotTool, [
+      ["click", { x: 0, y: 0 }],
+      ["click", { x: 100, y: 0 }],
+      ["click", { x: 50, y: 20 }],
+    ]);
+    const committed = steps[2].committed!;
+    const at = (draft: DraftEntity, position: string): Point2 => {
+      if (draft.type === "Line") return position === "End" ? draft.p1! : draft.p0!;
+      return position === "End" ? draft.end! : draft.start!;
+    };
+    for (const spec of steps[2].committedConstraints!) {
+      if (spec.type !== "Coincident") continue;
+      const a = at(committed[spec.refs[0]], spec.positions![0]!);
+      const b = at(committed[spec.refs[1]], spec.positions![1]!);
+      expect(a.x).toBeCloseTo(b.x, 9);
+      expect(a.y).toBeCloseTo(b.y, 9);
+    }
   });
 
   it("rejects a sub-minSize centerline and a sub-minSize width", () => {

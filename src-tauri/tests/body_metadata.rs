@@ -51,7 +51,7 @@ use onecad_core::ids::{BodyId, ConstraintId, EntityId, RecordId, RegionId, Sketc
 use onecad_core::io::container::SaveMeta;
 use onecad_core::math::{Vec2, Vec3};
 use onecad_core::regen::{CancelToken, GeometryEngine, ModelSnapshot, Outcome, RegenRequest};
-use onecad_core::sketch::{Constraint, Sketch, SketchEntity, WorldPlane};
+use onecad_core::sketch::{Constraint, CurvePosition, Sketch, SketchEntity, WorldPlane};
 
 use onecad_lib::document_runtime::{DocumentRuntime, RegenReport};
 use onecad_lib::dto::BodyDto;
@@ -212,6 +212,8 @@ fn rect_sketch(sid: SketchId, base: u128, x0: f64, y0: f64, w: f64, h: f64) -> S
             id,
             point1: a,
             point2: b,
+            point1_position: CurvePosition::Arbitrary,
+            point2_position: CurvePosition::Arbitrary,
         })
         .unwrap();
     };

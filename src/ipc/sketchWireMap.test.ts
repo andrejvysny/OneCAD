@@ -117,13 +117,48 @@ describe("marshalUpsert — constraints", () => {
     expect(ops).toEqual([{ op: "setDimension", constraint: cId, value: { value: 8 } }]);
   });
 
-  it("skips an unmappable constraint (arc-endpoint coincidence) without throwing", () => {
+  it("W0b: an arc-endpoint Coincident marshals as arc uuid + position", () => {
     const map = createIdMap("sk", "XY");
-    const arc: SketchEntity = { id: "e1", type: "Arc", center: [0, 0], radius: 5, start: [5, 0], end: [0, 5] };
-    // Coincident on the arc START has no Rust point id (arc references only center).
+    const arcEntity: SketchEntity = { id: "e2", type: "Arc", center: [40, 0], radius: 5, start: [40, -5], end: [40, 5] };
     const ops = marshalUpsert(
       map,
-      { entities: [arc], constraints: [{ id: "c1", type: "Coincident", entities: ["e1", "e1"], positions: ["Start", "End"] }] },
+      {
+        entities: [line("e1", [0, 0], [40, 5]), arcEntity],
+        // wall END welded to the arc's END.
+        constraints: [{ id: "c1", type: "Coincident", entities: ["e1", "e2"], positions: ["End", "End"] }],
+      },
+      mint,
+    );
+    // e1: p uuid-1(Start), uuid-2(End), line uuid-3; e2: center uuid-4, arc uuid-5.
+    const c = ops.find((o) => o.op === "addConstraint");
+    expect(c).toEqual({
+      op: "addConstraint",
+      constraint: { kind: "coincident", id: "uuid-6", point1: "uuid-2", point2: "uuid-5", point2Position: "end" },
+    });
+    expect(map.constraint.has("c1")).toBe(true);
+  });
+
+  it("an arc endpoint on BOTH sides carries both position fields", () => {
+    const map = createIdMap("sk", "XY");
+    const a = (id: string): SketchEntity => ({ id, type: "Arc", center: [0, 0], radius: 5, start: [5, 0], end: [0, 5] });
+    const ops = marshalUpsert(
+      map,
+      { entities: [a("e1"), a("e2")], constraints: [{ id: "c1", type: "Coincident", entities: ["e1", "e2"], positions: ["Start", "End"] }] },
+      mint,
+    );
+    const c = ops.find((o) => o.op === "addConstraint");
+    expect(c).toEqual({
+      op: "addConstraint",
+      constraint: { kind: "coincident", id: "uuid-5", point1: "uuid-2", point2: "uuid-4", point1Position: "start", point2Position: "end" },
+    });
+  });
+
+  it("an arc Start/End under a kind OTHER than Coincident is still skipped", () => {
+    const map = createIdMap("sk", "XY");
+    const arcEntity: SketchEntity = { id: "e1", type: "Arc", center: [0, 0], radius: 5, start: [5, 0], end: [0, 5] };
+    const ops = marshalUpsert(
+      map,
+      { entities: [arcEntity, line("e2", [0, 0], [10, 0])], constraints: [{ id: "c1", type: "Distance", entities: ["e1", "e2"], positions: ["Start", "Start"], value: 4 }] },
       mint,
     );
     expect(ops.some((o) => o.op === "addConstraint")).toBe(false);
@@ -477,6 +512,32 @@ describe("re-entry ownership — centerRef seeds .Center, constraints remap to o
     expect(c.entities).toEqual(["p1", "p2"]);
     expect(c.positions).toBeUndefined();
   });
+
+  it("W0b: keeps the wire's ARC-endpoint role while remapping the owned point", () => {
+    // A welded slot on re-entry: slot 0 is a line's endpoint POINT (owner-derived
+    // → l1/End), slot 1 is the ARC ITSELF with a role that exists ONLY in
+    // `positions`. Dropping the latter would unweld every cap on reopen.
+    const wire = [
+      { id: "p1", type: "Point", at: [0, 0] as [number, number] },
+      { id: "p2", type: "Point", at: [40, 0] as [number, number] },
+      { id: "l1", type: "Line", p0Ref: "p1", p1Ref: "p2" },
+      { id: "pc", type: "Point", at: [40, 5] as [number, number] },
+      { id: "a1", type: "Arc", center: [40, 5] as [number, number], centerRef: "pc", radius: 5, startAngle: 0, endAngle: Math.PI },
+    ];
+    const [c] = frontendConstraintsFromDto(
+      [{ id: "k1", type: "Coincident", entities: ["p2", "a1"], positions: ["", "End"] }],
+      wire,
+    );
+    expect(c.entities).toEqual(["l1", "a1"]);
+    expect(c.positions).toEqual(["End", "End"]);
+  });
+
+  it("wire positions stay INDEX-ALIGNED with entities when nothing is owned", () => {
+    const [c] = frontendConstraintsFromDto([
+      { id: "k1", type: "OnCurve", entities: ["p1", "a1"], positions: ["", "Start"] },
+    ]);
+    expect(c.positions).toEqual(["", "Start"]);
+  });
 });
 
 // ── Full hydration round-trip (BUG-5 + BUG-2): fresh → wire → hydrate → 0 diff ──
@@ -507,7 +568,14 @@ function wireFromOps(ops: ReturnType<typeof marshalUpsert>) {
       const c = op.constraint;
       const type = PASCAL[c.kind];
       const rec: Record<string, unknown> = { id: c.id, type };
-      if (c.kind === "coincident") rec.entities = [c.point1, c.point2];
+      if (c.kind === "coincident") {
+        rec.entities = [c.point1, c.point2];
+        // Mirrors Rust `wire_constraint`: `positions` rides ONLY when a slot names
+        // an arc endpoint, and an `Arbitrary` slot is the EMPTY role.
+        const role = (p?: "start" | "end") => (p === "start" ? "Start" : p === "end" ? "End" : "");
+        if (c.point1Position || c.point2Position)
+          rec.positions = [role(c.point1Position), role(c.point2Position)];
+      }
       else if (c.kind === "horizontal" || c.kind === "vertical") rec.entities = [c.line];
       else if (c.kind === "angle") { rec.entities = [c.line1, c.line2]; rec.value = c.value.value; }
       else if (c.kind === "radius" || c.kind === "diameter") { rec.entities = [c.entity]; rec.value = c.value.value; }
@@ -534,6 +602,11 @@ describe("hydration round-trip — marshal fresh → wire → hydrate → re-mar
         { id: "k2", type: "Horizontal", entities: ["l1"] },
         { id: "k3", type: "Angle", entities: ["l1", "l2"], value: 90 },
         { id: "k4", type: "Radius", entities: ["c1"], value: 3 },
+        // W0b: a wall endpoint WELDED to an arc endpoint. Its `End` role lives
+        // only in the wire's `positions`, so the hydration merge is what keeps the
+        // weld from silently unbinding on re-entry (it would then re-marshal as a
+        // brand-new constraint every reopen).
+        { id: "k5", type: "Coincident", entities: ["l2", "a1"], positions: ["End", "Start"] },
       ] as SketchConstraint[],
     };
     // 1. Marshal the fresh sketch (mints backend uuids into map1).
@@ -555,6 +628,13 @@ describe("hydration round-trip — marshal fresh → wire → hydrate → re-mar
     expect(entities).toHaveLength(5);
     // The Angle hydrated back to degrees.
     expect(constraints.find((c) => c.type === "Angle")?.value).toBeCloseTo(90, 10);
+    // The arc-endpoint weld survived hydration WITH its roles: slot 0 remapped to
+    // the OWNING line (owner-derived), slot 1 kept the arc + the wire-carried
+    // Start. Hydrated constraints keep the BACKEND ids, so find it by shape.
+    const [arcId, lineId] = [map1.entity.get("a1")!, map1.entity.get("l2")!];
+    const weld = constraints.find((c) => c.type === "Coincident" && c.entities[1] === arcId)!;
+    expect(weld.entities).toEqual([lineId, arcId]);
+    expect(weld.positions).toEqual(["End", "Start"]);
 
     // 4. Re-marshal the hydrated arrays — a faithful reopen diffs to ZERO ops.
     expect(marshalUpsert(map2, { entities, constraints }, mint)).toEqual([]);

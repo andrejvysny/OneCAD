@@ -1563,9 +1563,31 @@ fn wire_entity(sketch: &Sketch, e: &SketchEntity) -> Option<Value> {
 fn wire_constraint(c: &Constraint) -> Value {
     let s = |id: &EntityId| id.to_string();
     match c {
-        Constraint::Coincident { point1, point2, .. } => json!({
-            "id": cid(c), "type": "Coincident", "entities": [s(point1), s(point2)],
-        }),
+        Constraint::Coincident {
+            point1,
+            point2,
+            point1_position,
+            point2_position,
+            ..
+        } => {
+            let mut v = json!({
+                "id": cid(c), "type": "Coincident", "entities": [s(point1), s(point2)],
+            });
+            // `positions` is emitted ONLY when a side names an arc endpoint. A
+            // plain point-to-point Coincident (every one authored before W0b)
+            // keeps its exact previous wire shape — and an `Arbitrary` slot is
+            // spelled `""`, not `"Arbitrary"`, because the worker's
+            // `WireIndex::resolve_point` treats an EMPTY role as "the entity is
+            // itself the point" (a literal "arbitrary" role would miss the
+            // handle map and only survive on its fallback).
+            if !point1_position.is_arbitrary() || !point2_position.is_arbitrary() {
+                v["positions"] = json!([
+                    curve_position_role(*point1_position),
+                    curve_position_role(*point2_position),
+                ]);
+            }
+            v
+        }
         Constraint::Horizontal { line, .. } => {
             json!({ "id": cid(c), "type": "Horizontal", "entities": [s(line)] })
         }
@@ -1665,6 +1687,15 @@ fn curve_position_str(p: CurvePosition) -> &'static str {
         CurvePosition::Start => "Start",
         CurvePosition::End => "End",
         CurvePosition::Arbitrary => "Arbitrary",
+    }
+}
+
+/// Same tokens, but `Arbitrary` renders as the EMPTY role — the spelling a
+/// `positions` slot uses when the operand is a point entity in its own right.
+fn curve_position_role(p: CurvePosition) -> &'static str {
+    match p {
+        CurvePosition::Arbitrary => "",
+        other => curve_position_str(other),
     }
 }
 
@@ -2365,6 +2396,95 @@ mod solver_wire_tests {
         // worker's `addEllipse` normalization is a no-op here.
         assert_eq!(e["majorR"], json!(5.0));
         assert_eq!(e["minorR"], json!(5.0));
+    }
+
+    /// W0b: an arc-endpoint Coincident carries `positions`; a plain
+    /// point-to-point one must stay byte-identical to the pre-W0b wire (the
+    /// worker parses `positions` per slot, so a spurious array would change how
+    /// every existing Coincident resolves).
+    #[test]
+    fn coincident_emits_positions_only_for_arc_endpoints() {
+        let (p, arc) = (eid(0x50), eid(0x51));
+
+        let plain = wire_constraint(&Constraint::Coincident {
+            id: ConstraintId(Uuid::from_u128(1)),
+            point1: p,
+            point2: arc,
+            point1_position: CurvePosition::Arbitrary,
+            point2_position: CurvePosition::Arbitrary,
+        });
+        assert_eq!(
+            plain,
+            json!({
+                "id": ConstraintId(Uuid::from_u128(1)).to_string(),
+                "type": "Coincident",
+                "entities": [p.to_string(), arc.to_string()],
+            }),
+            "a point-to-point Coincident renders exactly as it always has"
+        );
+
+        let welded = wire_constraint(&Constraint::Coincident {
+            id: ConstraintId(Uuid::from_u128(2)),
+            point1: p,
+            point2: arc,
+            point1_position: CurvePosition::Arbitrary,
+            point2_position: CurvePosition::End,
+        });
+        // The Arbitrary slot is the EMPTY role, not "Arbitrary" — see
+        // `curve_position_role`.
+        assert_eq!(welded["positions"], json!(["", "End"]));
+        assert_eq!(welded["entities"], json!([p.to_string(), arc.to_string()]));
+
+        let both = wire_constraint(&Constraint::Coincident {
+            id: ConstraintId(Uuid::from_u128(3)),
+            point1: arc,
+            point2: arc,
+            point1_position: CurvePosition::Start,
+            point2_position: CurvePosition::End,
+        });
+        assert_eq!(both["positions"], json!(["Start", "End"]));
+    }
+
+    /// The core serde form is likewise unchanged for the default positions —
+    /// this is what keeps the frozen sketch fixtures byte-identical.
+    #[test]
+    fn coincident_serde_skips_default_positions() {
+        let plain = Constraint::Coincident {
+            id: ConstraintId(Uuid::from_u128(1)),
+            point1: eid(0x50),
+            point2: eid(0x51),
+            point1_position: CurvePosition::Arbitrary,
+            point2_position: CurvePosition::Arbitrary,
+        };
+        let v = serde_json::to_value(&plain).unwrap();
+        assert!(v.get("point1Position").is_none());
+        assert!(v.get("point2Position").is_none());
+        // …and a document written before the fields existed still loads.
+        let legacy = json!({
+            "kind": "coincident",
+            "id": ConstraintId(Uuid::from_u128(1)).to_string(),
+            "point1": eid(0x50).to_string(),
+            "point2": eid(0x51).to_string(),
+        });
+        assert_eq!(serde_json::from_value::<Constraint>(legacy).unwrap(), plain);
+
+        let welded = Constraint::Coincident {
+            id: ConstraintId(Uuid::from_u128(2)),
+            point1: eid(0x50),
+            point2: eid(0x51),
+            point1_position: CurvePosition::Arbitrary,
+            point2_position: CurvePosition::Start,
+        };
+        let v = serde_json::to_value(&welded).unwrap();
+        assert!(
+            v.get("point1Position").is_none(),
+            "default slot stays absent"
+        );
+        assert_eq!(
+            v["point2Position"],
+            json!("start"),
+            "camelCase field, camelCase value"
+        );
     }
 
     #[test]

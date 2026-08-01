@@ -278,3 +278,128 @@ async fn user_constraints_round_trip_through_real_worker() {
 
     wm.shutdown().await;
 }
+
+// ── W0b: arc-endpoint Coincidents survive the whole path ──────────────────────
+
+/// The slot shape the frontend's `slotTool` authors, built through the typed core
+/// API: two walls over shared `Point` entities and two cap arcs, welded
+/// wall-endpoint ↔ arc-endpoint by four `Coincident`s carrying `Start`/`End`
+/// positions.
+///
+/// Before W0b those four were UNEXPRESSIBLE — an arc's endpoints had no wire
+/// handle, so the frontend marshaller dropped them silently and the worker would
+/// have answered "Coincident: unresolved point handle". This measures the DOF the
+/// FE-shaped document actually reaches and asserts the invariant that matters:
+/// the four welds remove exactly 8 DOF, and the sketch stays UnderConstrained
+/// (never Over/Conflicting — the arc rules are internal and must never surface).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn arc_endpoint_coincidents_weld_a_slot_through_real_worker() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let sid = SketchId(Uuid::from_u128(0x5c07));
+    rt.apply(EditCommand::AddSketch {
+        sketch: Sketch::on_world_plane(sid, "slot", WorldPlane::XY),
+    })
+    .expect("AddSketch");
+    rt.enter_sketch(sid).await.expect("enter_sketch");
+
+    // Centerline (-50,0) → (50,0), radius 20 — `slotDrafts(p0, p1, r)`.
+    const R: f64 = 20.0;
+    const X: f64 = 50.0;
+    let (a0, a1, b0, b1) = (0x01, 0x02, 0x03, 0x04); // wall endpoints (+n, then −n)
+    let (c_p0, c_p1) = (0x05, 0x06); // arc centers
+    let (wall0, wall1, cap_p1, cap_p0) = (0x10, 0x11, 0x12, 0x13);
+
+    let geometry = vec![
+        point(a0, -X, R),
+        point(a1, X, R),
+        point(b0, -X, -R),
+        point(b1, X, -R),
+        point(c_p0, -X, 0.0),
+        point(c_p1, X, 0.0),
+        line(wall0, a0, a1),
+        line(wall1, b0, b1),
+        // cap@p1 sweeps CCW from b1 (−pi/2) to a1 (+pi/2); cap@p0 from a0 (+pi/2)
+        // back to b0 (−pi/2) — the far side of each end, as `slotDrafts` draws it.
+        SketchEntity::arc(
+            eid(cap_p1),
+            eid(c_p1),
+            R,
+            -std::f64::consts::FRAC_PI_2,
+            std::f64::consts::FRAC_PI_2,
+            false,
+        )
+        .expect("finite arc"),
+        SketchEntity::arc(
+            eid(cap_p0),
+            eid(c_p0),
+            R,
+            std::f64::consts::FRAC_PI_2,
+            -std::f64::consts::FRAC_PI_2,
+            false,
+        )
+        .expect("finite arc"),
+    ];
+
+    let baseline = rt
+        .sketch_upsert(
+            sid,
+            geometry
+                .into_iter()
+                .map(|entity| SketchEditOp::AddEntity { entity })
+                .collect(),
+        )
+        .await
+        .expect("sketch_upsert (slot geometry)");
+
+    // The 4 welds, in `SLOT_CONSTRAINTS` order.
+    let weld =
+        |n: u128, point_id: u128, arc: u128, at: CurvePosition| SketchEditOp::AddConstraint {
+            constraint: Constraint::Coincident {
+                id: cid(n),
+                point1: eid(point_id),
+                point2: eid(arc),
+                point1_position: CurvePosition::Arbitrary,
+                point2_position: at,
+            },
+        };
+    let welded = rt
+        .sketch_upsert(
+            sid,
+            vec![
+                weld(0xa0, a1, cap_p1, CurvePosition::End),
+                weld(0xa1, b1, cap_p1, CurvePosition::Start),
+                weld(0xa2, a0, cap_p0, CurvePosition::Start),
+                weld(0xa3, b0, cap_p0, CurvePosition::End),
+            ],
+        )
+        .await
+        .expect("sketch_upsert (4 arc-endpoint welds)");
+
+    // MEASURED, not predicted: the FE-shaped document's absolute DOF depends on
+    // how many points the round trip mints (see the note below). What is pinned
+    // is the DELTA the four welds are worth.
+    eprintln!(
+        "slot (FE-shaped): dof {} -> {} (status {:?} -> {:?})",
+        baseline.dof, welded.dof, baseline.status, welded.status
+    );
+    assert_eq!(
+        i64::from(baseline.dof) - i64::from(welded.dof),
+        8,
+        "the 4 arc-endpoint Coincidents must remove exactly 8 DOF ({} -> {})",
+        baseline.dof,
+        welded.dof
+    );
+    assert!(
+        matches!(welded.status, SketchSolveStatus::UnderConstrained),
+        "the welded slot must stay UnderConstrained (got {:?}) — the internal arc \
+         rules are tag 0 and must never be reported as user redundancy",
+        welded.status
+    );
+
+    wm.shutdown().await;
+}

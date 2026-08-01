@@ -47,7 +47,7 @@ use onecad_core::regen::{
     CancelToken, GeometryEngine, Lod, ModelSnapshot, Outcome, RegenRequest, ResolveOutcome,
     ResolveRef, ResolveRequest,
 };
-use onecad_core::sketch::{Constraint, Sketch, SketchEntity, WorldPlane};
+use onecad_core::sketch::{Constraint, CurvePosition, Sketch, SketchEntity, WorldPlane};
 
 use onecad_lib::document_runtime::{DocumentRuntime, RegenReport};
 use onecad_lib::worker::manager::SupervisorConfig;
@@ -192,6 +192,8 @@ fn add_rect(sk: &mut Sketch, base: u128, x0: f64, y0: f64, w: f64, h: f64) {
             id,
             point1: a,
             point2: b,
+            point1_position: CurvePosition::Arbitrary,
+            point2_position: CurvePosition::Arbitrary,
         })
         .unwrap();
     };

@@ -94,9 +94,12 @@ export interface ToolState {
  * `undefined` in a slot means the ref is ENTITY-level (whole line / circle / arc).
  *
  * Only positions the marshaller can express may be used — Line Start/End,
- * Circle/Arc Center, or entity-level. An Arc Start/End has NO synthesized wire
- * point uuid, so `toWireConstraint` resolves it to null and `marshalUpsert`
- * SILENTLY DROPS the constraint (sketchWireMap.ts, documented arc-endpoint seam).
+ * Circle/Arc Center, entity-level, or (Coincident ONLY) an Arc Start/End. An arc
+ * endpoint has no synthesized point uuid of its own: it is minted by the WORKER,
+ * so `toWireConstraint` sends the arc's uuid plus a position, and only the
+ * Coincident wire shape carries those position fields (W0b). Under any other
+ * kind an Arc Start/End still resolves to null and `marshalUpsert` SILENTLY DROPS
+ * the constraint (sketchWireMap.ts).
  */
 export interface ToolConstraintSpec {
   type: SketchConstraintType;
@@ -459,19 +462,33 @@ export const centerRectTool: ToolMachine = {
 // sweep on the far side of its own end, instead of doubling back into the slot.)
 // The four endpoints have degree 2 exactly, so the slot reads as ONE closed loop.
 //
-// AUTHORED CONSTRAINTS: Tangent ×4 (each wall × each cap, ENTITY-level) + Equal ×1
-// (cap ↔ cap).
+// AUTHORED CONSTRAINTS: Coincident ×4 (each wall endpoint welded to the cap
+// endpoint it touches) + Equal ×1 (cap ↔ cap radius).
 //
-// NO wall↔arc endpoint Coincidents — DELIBERATE. An Arc's Start/End have no
-// synthesized wire point uuid (`sketchWireMap.resolveRef` returns null and
-// `marshalUpsert` skips the constraint without a word), so authoring them would
-// look correct in the frontend arrays and silently vanish on the wire. The
-// geometry is drawn exactly coincident, and the distance-form Tangent holds each
-// cap against both walls.
+// The welds became expressible in W0b: the worker mints an arc's endpoints as
+// real solver points and registers `<id>.start`/`<id>.end`, so `sketchWireMap`
+// marshals an arc-endpoint Coincident as "the ARC's uuid + a position" instead of
+// dropping it. The slot is now a genuinely CONNECTED loop in the solver — drag a
+// wall and its caps follow.
 //
-// REAL-LANE DOF ≈ 13: 2 lines (4 each) + 2 arcs (5 each) = 18 free, minus 4
-// Tangent and 1 Equal. A slot whose caps were also endpoint-welded would sit far
-// lower — 13 is the honest number for what this tool actually authors today.
+// NO entity-level Tangent ×4 any more — REMOVED, not forgotten. An entity-level
+// `Tangent(line, arc)` is `distance(arcCenter, line) == radius`. Once the wall's
+// endpoint is WELDED to the arc's endpoint the wall necessarily passes through a
+// point at exactly `radius` from the centre, so that distance sits at its
+// MAXIMUM: the constraint's gradient vanishes on the manifold of the others and
+// PlaneGCS diagnoses all four as redundant — which `upsert_state` renders as
+// OverConstrained. Welds + Tangents is strictly worse than welds alone (same DOF,
+// plus a bogus over-constrained badge). Pinned by the worker ctest
+// `test_sketch_arc_endpoints.cpp::test_endpoint_weld_makes_entity_tangent_redundant`.
+// Proper endpoint tangency needs its own constraint kind (as in FreeCAD) — open.
+//
+// REAL-LANE DOF 9: 2 lines (4 each) + 2 arcs (5 each) = 18 free, minus 4
+// Coincident (2 each) and 1 Equal. The worker's minted arc endpoints add 4 more
+// parameters per arc and its internal arc rules remove them again, so they do not
+// move this number. (A slot round-tripped through the RUST typed document reads
+// 14, not 9: the wire emits each arc's centre BOTH as a standalone `Point` entity
+// and as an inline `center` coordinate, and the worker mints a point for the
+// latter — 2 stray free points, +4 DOF. Pre-existing, tracked separately.)
 
 interface SlotFrame {
   /** Unit centerline direction. */
@@ -513,11 +530,13 @@ export function slotDrafts(p0: Point2, p1: Point2, r: number): DraftEntity[] {
   ];
 }
 
+// Refs index `slotDrafts`: 0 = wall(+n) a0→a1, 1 = wall(−n) b0→b1,
+// 2 = cap@p1 (start b1, end a1), 3 = cap@p0 (start a0, end b0).
 const SLOT_CONSTRAINTS: ToolConstraintSpec[] = [
-  { type: "Tangent", refs: [0, 2] },
-  { type: "Tangent", refs: [0, 3] },
-  { type: "Tangent", refs: [1, 2] },
-  { type: "Tangent", refs: [1, 3] },
+  { type: "Coincident", refs: [0, 2], positions: ["End", "End"] }, // a1
+  { type: "Coincident", refs: [1, 2], positions: ["End", "Start"] }, // b1
+  { type: "Coincident", refs: [0, 3], positions: ["Start", "Start"] }, // a0
+  { type: "Coincident", refs: [1, 3], positions: ["Start", "End"] }, // b0
   { type: "Equal", refs: [2, 3] },
 ];
 

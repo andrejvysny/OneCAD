@@ -760,6 +760,23 @@ the full authoritative sketch so replay is deterministic.
     does — `Sketch::addEllipse`). A reader that normalizes MUST echo the
     normalized `majorR`/`minorR`/`rotation` on its return wire, so a producer
     never re-sends parameters the reader does not hold.
+  - An **`Arc`**'s START and END points are addressable. The reader mints a
+    `Point` for each at its derived coordinate (center + radius + angle) and
+    registers the handles `<id>.start` and `<id>.end`, exactly as it mints and
+    registers `<id>.center` for a `Circle`/`Arc`/`Ellipse`. The three are kept
+    consistent by an **internal, DOF-neutral arc-rules constraint** (the
+    reference implementation uses PlaneGCS `addConstraintArcRules` under the
+    reserved tag `0`): it adds four parameters and four independent equations, so
+    the diagnosed `dof` is unchanged, and — being internal — it MUST NOT appear
+    in `conflicting[]` or be reported as a redundant constraint. Consequences,
+    both normative: a `Coincident` MAY name an arc with `positions` `Start`/`End`
+    (the example above), and a `SolveDrag` MAY address `<id>.start` as its
+    `pointId` (§7.4). A reader that does not mint them MUST fail such a
+    constraint loudly rather than silently binding the arc's center.
+    The arc's stored parameterization is unchanged — it is still
+    center + radius + `startAngle`/`endAngle`, and a reader echoing solved
+    geometry back MUST echo whichever endpoint form the request carried
+    (`start`/`end` coordinates, or `startAngle`/`endAngle`).
   - A `Circle`/`Arc`/`Ellipse` returned by the solver lane
     (`enter_sketch`/`get_sketch` return wire) carries an **optional `centerRef`**
     — the backend point-entity uuid of its center — alongside the inlined
@@ -1006,7 +1023,13 @@ solver** (parity with OneCAD-CPP, whose solver has no ellipse binding). A sketch
 containing at least one ellipse therefore reports `dof` from a static count —
 Σ entity DOF (`Point` 2, `Line` 0, `Arc` 3, `Circle` 1, `Ellipse` 3, each
 inline-minted center Point a further 2) − Σ constraint arity — instead of a
-PlaneGCS diagnosis. Consequences, all normative:
+PlaneGCS diagnosis. An `Arc`'s two inline-minted ENDPOINT points (§7.3) each
+contribute 2 the same way, but the internal arc rules that couple them live
+outside `constraints[]` and so subtract nothing: a reader counting naively MUST
+therefore subtract a further **4 per endpoint-bearing arc**, or the fallback
+reports 4 phantom degrees of freedom per arc. (The PlaneGCS path needs no such
+fix-up — there the 4 parameters and 4 equations cancel in the diagnosis.)
+Consequences, all normative:
 * **Redundancy is unreported.** `OverConstrained` is a PlaneGCS notion; on the
   naive path the state can only be `Conflicting` (never, since no solve
   diagnoses), `FullyConstrained` (naive count == 0) or `UnderConstrained`. The
@@ -1635,6 +1658,42 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-08-01 — §7.3 an `Arc`'s START/END are real, addressable points;
+  §7.4 naive-dof gains a −4-per-endpoint-bearing-arc term** (W0b arc-endpoint
+  handles; **aligns the implementation with text this document has always
+  carried, additive, no fixture bump** — `protocol/fixtures/` remains
+  `hello` + `echo_error`).
+  This entry makes two long-standing examples TRUE rather than aspirational: the
+  §7.3 `Coincident` with `"positions": ["End","Start"]` over an arc, and the §7.4
+  `SolveDrag` with `"pointId": "e3.start"`. Both previously failed — a reader had
+  no `<id>.start`/`<id>.end` handle to resolve, so an arc-endpoint `Coincident`
+  was rejected ("unresolved point handle") and the frontend marshaller dropped it
+  before it ever reached the wire.
+  * **Minted endpoints** (§7.3): a reader mints a `Point` per arc endpoint at its
+    derived coordinate and registers `<id>.start`/`<id>.end`, mirroring the
+    `<id>.center` contract. They are coupled to center+radius+angle by an
+    INTERNAL arc-rules constraint (reference implementation: PlaneGCS
+    `addConstraintArcRules` under the reserved tag `0`) — 4 parameters, 4
+    independent equations, so `dof` is unchanged, and it must never surface in
+    `conflicting[]` or as a redundant constraint. The arc's stored
+    parameterization is untouched.
+  * **Echo** (§7.3): a reader MUST echo whichever endpoint form the request
+    carried — `start`/`end` coordinates OR `startAngle`/`endAngle`. Welded caps
+    genuinely rotate under a solve, so echoing only center+radius would leave the
+    producer holding angles the reader no longer has.
+  * **Naive dof** (§7.4): the fallback count must subtract 4 per
+    endpoint-bearing arc, since the coupling equations are not in
+    `constraints[]`.
+  * **Not changed**: the constraint wire shape (`positions` already existed and
+    already meant this), the entity wire shape, and the DOF of any sketch without
+    an arc. A `Coincident` with both positions absent/`Arbitrary` serializes
+    byte-identically to before.
+  * **Interop note, not normative**: welding a line endpoint to an arc endpoint
+    makes an ENTITY-level `Tangent` between the same pair first-order degenerate
+    (`distance(center, line) == radius` is then at a maximum, so its gradient
+    vanishes on the manifold of the other constraints). PlaneGCS diagnoses such
+    tangents as redundant. Producers authoring both should expect that; endpoint
+    tangency as a distinct constraint kind is not modeled in V1.
 - **2026-08-01 — §7.3 `Ellipse` is SUPPORTED on the solver lane (wire entity
   shape pinned); §7.4 naive-dof deviation + ellipse fragment note** (W3 ellipse
   backend; **additive entity type, no existing shape moved, no fixture bump**).

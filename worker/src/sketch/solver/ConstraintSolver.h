@@ -183,7 +183,9 @@ public:
     /**
      * @brief Add an arc to the solver
      *
-     * Registers arc parameters (radius, start/end angles) for solving.
+     * Registers arc parameters (radius, start/end angles) for solving, and — for
+     * an arc carrying endpoint points (W0b) — the internal arc rules that couple
+     * those points to center+radius+angle.
      */
     void addArc(SketchArc* arc);
 
@@ -356,6 +358,16 @@ private:
      * @brief Translate OneCAD constraint to PlaneGCS constraint
      */
     bool translateConstraint(SketchConstraint* constraint, int tagId);
+
+    /**
+     * @brief Couple an endpoint-bearing arc's start/end points to its
+     *        center+radius+angle parameterization (PlaneGCS `ArcRules`).
+     *
+     * DOF-neutral (4 new parameters, 4 independent equations) and registered
+     * under the INTERNAL tag 0, so it is never reported as a user constraint.
+     * No-op for an arc with derived endpoints.
+     */
+    void addArcRules(SketchArc* arc);
 
     void configureSystem();
 

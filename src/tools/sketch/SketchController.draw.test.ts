@@ -263,7 +263,7 @@ describe("SketchController draw tools (pointer path)", () => {
 
   // ── W2-B/C: tool-authored constraints reach the session with REAL ids ───────
 
-  it("slot: 3 clicks commit 2 walls + 2 cap arcs with Tangent ×4 + Equal ×1", async () => {
+  it("slot: 3 clicks commit 2 walls + 2 cap arcs welded by Coincident ×4 + Equal ×1", async () => {
     await setTool("slot");
     click(0, 0); // p0
     click(100, 0); // p1 — centerline
@@ -277,25 +277,33 @@ describe("SketchController draw tools (pointer path)", () => {
     expect(ents[3]).toMatchObject({ center: [0, 0], radius: 20 });
 
     const cons = session().constraints;
-    const tangents = cons.filter((c) => c.type === "Tangent");
+    const welds = cons.filter((c) => c.type === "Coincident");
     const equals = cons.filter((c) => c.type === "Equal");
-    expect(tangents).toHaveLength(4);
+    expect(welds).toHaveLength(4);
     expect(equals).toHaveLength(1);
-    // The index refs resolved to the REAL minted ids of this batch.
+    // W0b: the caps are WELDED, not merely tangent — an entity-level Tangent on
+    // an already-welded line/arc pair is first-order redundant (slot header).
+    expect(cons.some((c) => c.type === "Tangent")).toBe(false);
+    // The index refs resolved to the REAL minted ids of this batch, and each
+    // weld carries the arc-endpoint role the marshaller needs.
     const [w1, w2, capP1, capP0] = ents.map((e) => e.id);
-    expect(tangents.map((c) => c.entities)).toEqual([
-      [w1, capP1],
-      [w1, capP0],
-      [w2, capP1],
-      [w2, capP0],
+    expect(welds.map((c) => [c.entities, c.positions])).toEqual([
+      [[w1, capP1], ["End", "End"]],
+      [[w2, capP1], ["End", "Start"]],
+      [[w1, capP0], ["Start", "Start"]],
+      [[w2, capP0], ["Start", "End"]],
     ]);
     expect(equals[0].entities).toEqual([capP1, capP0]);
-    // Intra-batch inference is suppressed: no duplicate Tangent/Coincident/H-V.
+    // Intra-batch inference is suppressed: no duplicate Coincident/H-V.
     expect(cons).toHaveLength(5);
 
-    // MOCK-ONLY DOF (mockSketch's coarse table, NOT a real solver rank):
-    // 2 lines (4 each) + 2 arcs (5 each) = 18 − 4 Tangent − 1 Equal = 13.
-    expect(solveDof(ents, cons).dof).toBe(13);
+    // MOCK DOF (mockSketch's coarse table): 2 lines (4 each) + 2 arcs (5 each)
+    // = 18 − 4 Coincident (2 each) − 1 Equal = 9. This one AGREES with the real
+    // PlaneGCS lane for a worker-authored slot (the arc rules that bind the
+    // minted endpoints are DOF-neutral); a slot round-tripped through the Rust
+    // typed document reads 14 because the wire duplicates each arc's centre
+    // point — pre-existing, tracked separately.
+    expect(solveDof(ents, cons).dof).toBe(9);
   });
 
   it("polygon: commits n lines + a CONSTRUCTION circumcircle with the regularity set", async () => {

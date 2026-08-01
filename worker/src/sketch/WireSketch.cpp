@@ -265,8 +265,23 @@ TranslateResult translate(const json& args) {
             }
             const sk::EntityID cp = sketch->addPoint(cx, cy, construction);
             reg_handle(id + ".center", cp, true);
+            // Mint the two ENDPOINT points at their derived coordinates and hand
+            // them to the arc, which couples them via internal PlaneGCS arc rules
+            // (W0b). This is what makes `<id>.start`/`<id>.end` real, addressable
+            // handles: a Coincident can weld to them (SCHEMA §7.3 `positions`)
+            // and a SolveDrag can move them (§7.4). Same synthesized-child
+            // convention as an inline line's endpoints, construction flag
+            // inherited from the parent arc.
+            const sk::EntityID sp = sketch->addPoint(cx + radius * std::cos(start_angle),
+                                                     cy + radius * std::sin(start_angle),
+                                                     construction);
+            const sk::EntityID ep = sketch->addPoint(cx + radius * std::cos(end_angle),
+                                                     cy + radius * std::sin(end_angle),
+                                                     construction);
+            reg_handle(id + ".start", sp, true);
+            reg_handle(id + ".end", ep, true);
             const sk::EntityID aid =
-                sketch->addArc(cp, radius, start_angle, end_angle, construction);
+                sketch->addArc(cp, radius, start_angle, end_angle, construction, sp, ep);
             if (aid.empty()) {
                 result.error = "arc '" + id + "' could not be created";
                 return result;
@@ -509,6 +524,14 @@ void apply_solved_positions(json& args, const sk::Sketch& sketch, const WireInde
                         e["start"] = json::array({sp.X(), sp.Y()});
                         e["end"] = json::array({ep.X(), ep.Y()});
                     }
+                    // ANGLE-form arcs (what the frontend marshaller emits) need
+                    // the same echo: now that the endpoints are welded solver
+                    // points, a solve genuinely ROTATES a cap, and writing back
+                    // only center+radius would leave the stored wire holding
+                    // angles the worker no longer holds — re-dirtying the sketch
+                    // on every diff (the bug the ellipse echo fixed).
+                    if (e.contains("startAngle")) e["startAngle"] = a->startAngle();
+                    if (e.contains("endAngle")) e["endAngle"] = a->endAngle();
                 }
             }
         }

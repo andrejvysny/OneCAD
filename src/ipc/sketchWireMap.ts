@@ -24,13 +24,16 @@
  * LIMITS (report → M2 gate): (a) the frontend Coincident/adjacency model gives
  * each line its OWN endpoints tied by Coincident (matches the Rust separate-point
  * + Coincident model, so it is faithful); (b) an Arc's Rust form references only
- * its `center` point (endpoints are derived from angles), so a Coincident on an
- * arc START/END has no point id — skipped with a note; (c) an Ellipse (W3 P3)
- * marshals exactly like a Circle — one synthesized `Center` point plus
- * `majorR`/`minorR`/`rotation` scalars — so its centre is a real solver handle
- * and its CURVE carries no constraints at all (legacy parity). These only surface
- * for arc-heavy sketches; the M2 slice (line/rect/circle profiles → extrude) is
- * fully covered.
+ * its `center` point — its ENDPOINTS are minted by the worker (W0b), which
+ * registers `<id>.start`/`<id>.end` handles and couples them with internal arc
+ * rules. This marshaller therefore has no point uuid to hand out for an arc
+ * Start/End and instead addresses them as "the ARC's uuid + a position"
+ * (`arcEndpointRef` → the wire `point1Position`/`point2Position` fields). Only
+ * `Coincident` speaks that form today; every other kind still resolves an arc
+ * Start/End to `null` and is skipped; (c) an Ellipse (W3 P3) marshals exactly
+ * like a Circle — one synthesized `Center` point plus `majorR`/`minorR`/
+ * `rotation` scalars — so its centre is a real solver handle and its CURVE
+ * carries no constraints at all (legacy parity).
  */
 import type {
   ConstraintPosition,
@@ -117,7 +120,18 @@ export type WireSketchEntity = WirePoint | WireLine | WireCircle | WireArc | Wir
 /** A Rust `Constraint` (internally tagged `"kind"`, camelCase). Only the kinds the
  *  vertical-slice tools author are modeled; others route through a best-effort. */
 export type WireConstraint =
-  | { kind: "coincident"; id: string; point1: string; point2: string }
+  // `point1Position`/`point2Position` are the Rust `CurvePosition` (camelCase),
+  // OMITTED when the ref IS a point entity (Rust defaults them to `Arbitrary` and
+  // skips them on the wire). Present only for an ARC-endpoint ref, where the
+  // `point*` slot names the arc and the position picks its `.start`/`.end`.
+  | {
+      kind: "coincident";
+      id: string;
+      point1: string;
+      point2: string;
+      point1Position?: "start" | "end";
+      point2Position?: "start" | "end";
+    }
   | { kind: "horizontal"; id: string; line: string }
   | { kind: "vertical"; id: string; line: string }
   | { kind: "fixed"; id: string; point: string; at: [number, number] }
@@ -315,9 +329,14 @@ function addEntityOps(map: SketchIdMap, e: SketchEntity, mint: () => string): Sk
 // ── Constraint → AddConstraint op ─────────────────────────────────────────────
 
 /** Resolve a frontend entity ref to its Rust id. With a positional selector the
- *  ref is a POINT — resolve STRICTLY to the synthesized point uuid (an arc START/
- *  END has none → `null`, so the constraint is skipped). Without a selector the
- *  ref is the entity itself (e.g. a Point entity or a whole line). */
+ *  ref is a POINT — resolve STRICTLY to the synthesized point uuid. Without a
+ *  selector the ref is the entity itself (e.g. a Point entity or a whole line).
+ *
+ *  An ARC's Start/End is the one position with no synthesized point uuid: those
+ *  endpoints are minted by the WORKER, not by this marshaller, so they are
+ *  addressed as "the arc entity + a role" and never resolve here. Only
+ *  `Coincident` can carry that role today (`arcEndpointRef`) — every other kind
+ *  still gets `null` and is skipped. */
 function resolveRef(
   map: SketchIdMap,
   entityId: string,
@@ -325,6 +344,22 @@ function resolveRef(
 ): string | null {
   if (position) return map.point.get(pointKey(entityId, position)) ?? null;
   return map.entity.get(entityId) ?? null;
+}
+
+/** The wire form of an ARC endpoint ref: the arc's own uuid plus a lowercase
+ *  role, matching the Rust `Constraint::Coincident` `point*Position` field.
+ *  Returns `null` when the ref is not an arc Start/End (or the arc is unmapped),
+ *  so callers fall back to the ordinary point resolution. */
+function arcEndpointRef(
+  map: SketchIdMap,
+  entities: SketchEntity[],
+  entityId: string,
+  position?: ConstraintPosition,
+): { id: string; position: "start" | "end" } | null {
+  if (position !== "Start" && position !== "End") return null;
+  if (entities.find((e) => e.id === entityId)?.type !== "Arc") return null;
+  const id = map.entity.get(entityId);
+  return id ? { id, position: position === "Start" ? "start" : "end" } : null;
 }
 
 /** Current plane coord of a point ref (entity + optional position) — the `at` a
@@ -368,10 +403,11 @@ const DIMENSIONAL: ReadonlySet<SketchConstraintType> = new Set([
 ]);
 
 /** Map one frontend constraint to a Rust `WireConstraint` (or `null` if it cannot
- *  be expressed — e.g. an arc-endpoint Coincident, reported as an M2 seam).
+ *  be expressed — e.g. a ref that is not in the id-map yet).
  *
- *  `entities` is the FULL authoritative entity array (needed only for `Fixed`,
- *  whose wire shape carries the point's CURRENT plane coords as `at`). */
+ *  `entities` is the FULL authoritative entity array (needed for `Fixed`, whose
+ *  wire shape carries the point's CURRENT plane coords as `at`, and for
+ *  `Coincident`, which must know whether a Start/End ref names an ARC). */
 function toWireConstraint(
   map: SketchIdMap,
   c: SketchConstraint,
@@ -385,9 +421,20 @@ function toWireConstraint(
 
   switch (c.type) {
     case "Coincident": {
-      const p1 = ref(0);
-      const p2 = ref(1);
-      return p1 && p2 ? { kind: "coincident", id, point1: p1, point2: p2 } : null;
+      // Each side is either an ordinary point ref or an ARC endpoint (the arc's
+      // uuid + a role). W0b: the worker mints an arc's endpoints as real solver
+      // points and registers `<id>.start`/`<id>.end`, so this is what lets a
+      // wall weld to a cap instead of being dropped on the floor.
+      const slot = (i: number): { id: string; position?: "start" | "end" } | null =>
+        arcEndpointRef(map, entities, c.entities[i], pos[i]) ??
+        (ref(i) ? { id: ref(i)! } : null);
+      const a = slot(0);
+      const b = slot(1);
+      if (!a || !b) return null;
+      const out: WireConstraint = { kind: "coincident", id, point1: a.id, point2: b.id };
+      if (a.position) out.point1Position = a.position;
+      if (b.position) out.point2Position = b.position;
+      return out;
     }
     case "Horizontal": {
       const line = map.entity.get(c.entities[0]);
@@ -558,8 +605,9 @@ export function marshalUpsert(
         map.constraintValue.set(c.id, c.value);
         ops.push({ op: "addConstraint", constraint: wire });
       }
-      // Unmappable constraints (e.g. arc-endpoint coincidence) are skipped — the
-      // solver still runs on the geometry; documented M2 seam.
+      // Unmappable constraints (a ref this map has never minted, or an arc
+      // Start/End under a kind other than Coincident) are skipped — the solver
+      // still runs on the geometry; documented seam.
     } else if (isDimensional(c.type) && map.constraintValue.get(c.id) !== c.value) {
       // In-place dimension edit (the DimensionInput chip / editConstraintValue). The
       // cache holds UI-domain values; the wire carries the wire domain (Angle: deg→rad).
@@ -838,6 +886,15 @@ export function frontendEntitiesFromDto(dtoEntities: unknown): SketchEntity[] {
  * backend point UUID). Keys not in the id-map are skipped silently with a dev
  * warn (common on re-entry, before the id-map is seeded — the DTO entities are
  * already solved there, so no movement is needed).
+ *
+ * SEAM (W0b): an arc's endpoints are minted by the WORKER, whose primary handle
+ * for them is `"<arcWireId>.start"`/`".end"` (SCHEMA §7.4), not a backend point
+ * uuid — so a solve that rotates a welded cap arrives here as unmapped keys and
+ * is skipped. That matches the pre-existing behaviour for a solved arc's RADIUS
+ * and angles, which this lane has never written back either: the frontend's arc
+ * `start`/`end` coordinates go stale until the next re-entry rebuilds them from
+ * the wire. Applying them needs the radius echoed on the same path, else the
+ * three would disagree — tracked separately.
  */
 export function frontendSolvedPositions(
   map: SketchIdMap,
@@ -980,18 +1037,26 @@ export function frontendConstraintsFromDto(
     if (!Array.isArray(raw.entities)) continue;
     const type = raw.type as SketchConstraintType;
     const c: SketchConstraint = { id: raw.id, type, entities: raw.entities };
+    // The wire may carry positions of its own — W0b arc-endpoint Coincidents ride
+    // as "the ARC's uuid + Start/End", and that role exists ONLY in `positions`
+    // (the ref is already an entity id, so the owner map has nothing to say about
+    // it). Merge: owner-derived wins where a slot names an owned child POINT,
+    // wire-carried fills every other slot. Dropping the wire's roles here is what
+    // would make a welded slot lose its caps on re-entry.
+    const wirePosition = (i: number): ConstraintPosition | "" => {
+      const p = Array.isArray(raw.positions) ? raw.positions[i] : undefined;
+      return p === "Start" || p === "End" || p === "Center" || p === "Midpoint" ? p : "";
+    };
     if (owners && raw.entities.some((e) => owners.has(e))) {
       // Remap owned point refs → owner entity id; non-point refs (lines/circles) stay.
       c.entities = raw.entities.map((e) => owners.get(e)?.entityId ?? e);
       // A `""` slot is falsy, so `resolveRef` resolves it as an ENTITY ref (matches a
       // direct line/circle operand, e.g. Midpoint's line or Symmetric's axis).
-      const positions = raw.entities.map((e) => owners.get(e)?.position ?? "");
+      const positions = raw.entities.map((e, i) => owners.get(e)?.position ?? wirePosition(i));
       if (positions.some((p) => p !== "")) c.positions = positions as ConstraintPosition[];
     } else if (Array.isArray(raw.positions)) {
-      c.positions = raw.positions.filter(
-        (p): p is ConstraintPosition =>
-          p === "Start" || p === "End" || p === "Center" || p === "Midpoint",
-      );
+      const positions = raw.entities.map((_, i) => wirePosition(i));
+      if (positions.some((p) => p !== "")) c.positions = positions as ConstraintPosition[];
     }
     // Dimensional value arrives in the WIRE domain (Angle: rad→deg; BUG-2).
     if (typeof raw.value === "number") c.value = fromWireDimensionValue(type, raw.value);

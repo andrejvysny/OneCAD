@@ -58,6 +58,18 @@ pub enum CurvePosition {
     Arbitrary,
 }
 
+impl CurvePosition {
+    /// True for the default (no role) position.
+    ///
+    /// Used as a `skip_serializing_if` predicate so an optional position field
+    /// left at its default is absent from the serialized form — which is what
+    /// keeps the frozen constraint fixtures byte-identical.
+    #[must_use]
+    pub fn is_arbitrary(&self) -> bool {
+        matches!(self, Self::Arbitrary)
+    }
+}
+
 /// A geometric or dimensional constraint (18 kinds; C++ `ConstraintType`).
 ///
 /// Internally tagged on `"kind"`. Every variant carries a [`ConstraintId`]
@@ -70,13 +82,28 @@ pub enum CurvePosition {
 )]
 pub enum Constraint {
     /// Two points share a location (C++ `CoincidentConstraint`).
+    ///
+    /// Each side is normally a `Point` entity and its position is
+    /// [`CurvePosition::Arbitrary`] (absent on the wire). A side MAY instead
+    /// name an `Arc` together with `Start`/`End`: an arc's endpoints are real
+    /// solver points in the worker but have no independent entity id here, so
+    /// the owning arc plus a role is how they are addressed (SCHEMA §7.3
+    /// `positions`). Both position fields default to `Arbitrary` and are skipped
+    /// when serializing, so an ordinary point-to-point Coincident round-trips
+    /// byte-identically to before these fields existed.
     Coincident {
         /// Constraint identity.
         id: ConstraintId,
-        /// First point entity.
+        /// First point entity, or the arc owning the referenced endpoint.
         point1: EntityId,
-        /// Second point entity.
+        /// Second point entity, or the arc owning the referenced endpoint.
         point2: EntityId,
+        /// Which point of `point1` (default `Arbitrary` ⇒ `point1` IS the point).
+        #[serde(default, skip_serializing_if = "CurvePosition::is_arbitrary")]
+        point1_position: CurvePosition,
+        /// Which point of `point2` (default `Arbitrary` ⇒ `point2` IS the point).
+        #[serde(default, skip_serializing_if = "CurvePosition::is_arbitrary")]
+        point2_position: CurvePosition,
     },
     /// A line is horizontal (C++ `HorizontalConstraint`, line-form only).
     Horizontal {
@@ -359,6 +386,8 @@ mod tests {
                     id: cid(1),
                     point1: p1,
                     point2: p2,
+                    point1_position: CurvePosition::Arbitrary,
+                    point2_position: CurvePosition::Arbitrary,
                 },
                 vec![p1, p2],
             ),

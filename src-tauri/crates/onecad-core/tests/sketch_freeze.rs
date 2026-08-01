@@ -81,6 +81,8 @@ fn canonical_constraints() -> Vec<(&'static str, Constraint)> {
                 id: cid(1),
                 point1: eid(P0),
                 point2: eid(P1),
+                point1_position: CurvePosition::Arbitrary,
+                point2_position: CurvePosition::Arbitrary,
             },
         ),
         (
@@ -262,6 +264,8 @@ fn canonical_sketch() -> Sketch {
         id: cid(2),
         point1: eid(P1),
         point2: eid(P1),
+        point1_position: CurvePosition::Arbitrary,
+        point2_position: CurvePosition::Arbitrary,
     })
     .unwrap();
     s.add_constraint(Constraint::Distance {

@@ -25,7 +25,7 @@ use onecad_core::document::Document;
 use onecad_core::ids::{ConstraintId, DocumentId, EntityId, RecordId, RegionId, SketchId};
 use onecad_core::io::container::{ContainerCaches, ContainerWriter, SaveMeta};
 use onecad_core::math::{Vec2, Vec3};
-use onecad_core::sketch::{Constraint, Sketch, SketchEntity, WorldPlane};
+use onecad_core::sketch::{Constraint, CurvePosition, Sketch, SketchEntity, WorldPlane};
 
 use onecad_lib::worker::resolve_worker_path;
 
@@ -106,6 +106,8 @@ fn rect_sketch(sid: SketchId, base: u128, x0: f64, y0: f64, w: f64, h: f64) -> S
             id,
             point1: a,
             point2: b,
+            point1_position: CurvePosition::Arbitrary,
+            point2_position: CurvePosition::Arbitrary,
         })
         .unwrap();
     };

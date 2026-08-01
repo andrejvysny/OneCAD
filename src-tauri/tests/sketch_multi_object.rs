@@ -29,7 +29,7 @@ use onecad_core::edit::{EditCommand, SketchEditOp};
 use onecad_core::ids::{ConstraintId, EntityId, SketchId};
 use onecad_core::math::Vec2;
 use onecad_core::regen::GeometryEngine;
-use onecad_core::sketch::{Constraint, Sketch, SketchEntity, WorldPlane};
+use onecad_core::sketch::{Constraint, CurvePosition, Sketch, SketchEntity, WorldPlane};
 
 use onecad_lib::document_runtime::DocumentRuntime;
 use onecad_lib::worker::manager::SupervisorConfig;
@@ -111,6 +111,8 @@ fn coincident(c: u128, p1: u128, p2: u128) -> SketchEditOp {
             id: cid(c),
             point1: eid(p1),
             point2: eid(p2),
+            point1_position: CurvePosition::Arbitrary,
+            point2_position: CurvePosition::Arbitrary,
         },
     }
 }

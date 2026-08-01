@@ -609,6 +609,8 @@ mod tests {
             id: cid(1),
             point1: p0,
             point2: missing,
+            point1_position: CurvePosition::Arbitrary,
+            point2_position: CurvePosition::Arbitrary,
         };
         assert_eq!(
             s.add_constraint(bad),
@@ -622,6 +624,8 @@ mod tests {
             id: cid(2),
             point1: p0,
             point2: p1,
+            point1_position: CurvePosition::Arbitrary,
+            point2_position: CurvePosition::Arbitrary,
         };
         s.add_constraint(good.clone()).unwrap();
         // duplicate id.

@@ -71,6 +71,39 @@ public:
      */
     void setCenterPointId(const PointID& pointId) { m_centerPointId = pointId; }
 
+    //--------------------------------------------------------------------------
+    // Endpoint points (W0b — DIVERGENCE FROM THE PORT)
+    //--------------------------------------------------------------------------
+    //
+    // OneCAD-CPP's arc has NO endpoint points: start/end are always derived from
+    // center + radius + angles. That made `<id>.start`/`<id>.end` unaddressable —
+    // a `Coincident` welding a wall to a cap could not be expressed at all
+    // (SCHEMA §7.3 promises it; §7.4 promises `"pointId": "e3.start"`).
+    //
+    // An arc MAY now carry two real `SketchPoint` ids for its endpoints. When
+    // set, `ConstraintSolver::addArc` couples them to center+radius+angle with
+    // PlaneGCS `addConstraintArcRules` (4 equations for the 4 new parameters —
+    // DOF-neutral), so the endpoints are genuine solver handles that other
+    // constraints can reference and a drag can move.
+    //
+    // EMPTY = legacy derived behaviour: no minted points, no ArcRules, endpoints
+    // exist only as `startPoint()`/`endPoint()` computations. Every geometric
+    // accessor below stays angle-derived either way — the points MIRROR the
+    // parameterization, they do not replace it.
+
+    /// Id of the arc's start `SketchPoint`, or empty when endpoints are derived.
+    const PointID& startPointId() const { return m_startPointId; }
+    /// Id of the arc's end `SketchPoint`, or empty when endpoints are derived.
+    const PointID& endPointId() const { return m_endPointId; }
+    /// True when both endpoint points exist (⇒ the solver adds arc rules).
+    bool hasEndpointPoints() const { return !m_startPointId.empty() && !m_endPointId.empty(); }
+
+    /// Bind (or clear, with two empty ids) the arc's endpoint points.
+    void setEndpointPointIds(const PointID& startPointId, const PointID& endPointId) {
+        m_startPointId = startPointId;
+        m_endPointId = endPointId;
+    }
+
     /**
      * @brief Get arc radius
      * @return Radius in mm
@@ -214,6 +247,10 @@ public:
     /**
      * @brief Arc DOF: radius (1) + startAngle (1) + endAngle (1) = 3
      * @note Center point contributes its own 2 DOF separately
+     * @note Minted ENDPOINT points likewise contribute their own 2 each, but the
+     *       arc rules that couple them remove all 4 again. `Sketch::
+     *       naiveDegreesOfFreedom` applies that −4 once per endpoint-bearing arc;
+     *       this per-entity count stays 3 either way.
      */
     int degreesOfFreedom() const override { return 3; }
 
@@ -244,6 +281,8 @@ public:
 
 private:
     PointID m_centerPointId;
+    PointID m_startPointId;  // empty ⇒ derived (see setEndpointPointIds)
+    PointID m_endPointId;    // empty ⇒ derived
     double m_radius = 0.0;
     double m_startAngle = 0.0;  // Radians
     double m_endAngle = 0.0;    // Radians

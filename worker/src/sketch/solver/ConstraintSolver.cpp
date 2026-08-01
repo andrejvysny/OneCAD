@@ -105,6 +105,9 @@ GCS::Circle makeCircle(SketchPoint* center, SketchCircle* circle) {
     return gcsCircle;
 }
 
+// Constraint-translation form: center + radius + angles only. Every constraint
+// PlaneGCS builds from an arc (Tangent, Equal, Radius, …) reduces to those
+// parameters, so `start`/`end` stay null here exactly as before W0b.
 GCS::Arc makeArc(SketchPoint* center, SketchArc* arc) {
     GCS::Arc gcsArc;
     gcsArc.center = makePoint(center);
@@ -221,6 +224,46 @@ void ConstraintSolver::addArc(SketchArc* arc) {
     parameters_.push_back(&arc->radius());
     parameters_.push_back(&arc->startAngle());
     parameters_.push_back(&arc->endAngle());
+
+    addArcRules(arc);
+}
+
+void ConstraintSolver::addArcRules(SketchArc* arc) {
+    if (!arc || !arc->hasEndpointPoints() || !gcsSystem_) {
+        return;
+    }
+    // `SolverAdapter` registers every Point in pass 1 and the curves in pass 2,
+    // so the endpoints are already bound to their parameter storage here.
+    auto centerIt = pointsById_.find(arc->centerPointId());
+    auto startIt = pointsById_.find(arc->startPointId());
+    auto endIt = pointsById_.find(arc->endPointId());
+    if (centerIt == pointsById_.end() || startIt == pointsById_.end() ||
+        endIt == pointsById_.end() || !centerIt->second || !startIt->second || !endIt->second) {
+        WLOG_WARN("%s", "addArc:endpoint-points-not-registered");
+        return;
+    }
+
+    GCS::Arc gcsArc;
+    gcsArc.center = makePoint(centerIt->second);
+    gcsArc.rad = &arc->radius();
+    gcsArc.startAngle = &arc->startAngle();
+    gcsArc.endAngle = &arc->endAngle();
+    gcsArc.start = makePoint(startIt->second);
+    gcsArc.end = makePoint(endIt->second);
+
+    // TAG 0 = a PlaneGCS "priority constraint": structurally required, never
+    // blamed. The 4 equations (x+y per endpoint) exactly consume the 4 new
+    // endpoint parameters, so the diagnosed DOF is unchanged — but tagging them
+    // like a user constraint would make GCS report them as conflicting/redundant
+    // and, worse, `gcsTagToConstraint_` would have to invent a ConstraintID for
+    // them. Tag 0 is deliberately absent from that map, so `getConflicting` /
+    // `getRedundant` can never surface an arc rule to the frontend.
+    // `GCS::System` COPIES the curve but keeps the raw `double*`, and every one
+    // of those points into a live SketchPoint/SketchArc field — stable for as
+    // long as this solver lives (the solver is rebuild-only, never incrementally
+    // mutated, so an arc rule can never outlive its geometry).
+    gcsSystem_->addConstraintArcRules(gcsArc, /*tagId=*/0, /*driving=*/true);
+    gcsSystem_->invalidatedDiagnosis();
 }
 
 void ConstraintSolver::addCircle(SketchCircle* circle) {

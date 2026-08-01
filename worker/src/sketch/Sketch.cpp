@@ -130,20 +130,34 @@ EntityID Sketch::addLine(double x1, double y1, double x2, double y2, bool constr
 }
 
 EntityID Sketch::addArc(EntityID centerId, double radius, double startAngle,
-                        double endAngle, bool construction) {
+                        double endAngle, bool construction,
+                        EntityID startPointId, EntityID endPointId) {
     auto* centerPoint = getEntityAs<SketchPoint>(centerId);
     if (!centerPoint) {
         return {};
     }
 
+    // Endpoint binding is ALL-OR-NOTHING: a half-bound arc would put two of the
+    // four arc-rule equations in and leave two endpoint coordinates free.
+    auto* startPoint = getEntityAs<SketchPoint>(startPointId);
+    auto* endPoint = getEntityAs<SketchPoint>(endPointId);
+    const bool bindEndpoints = startPoint && endPoint;
+
     auto arc = std::make_unique<SketchArc>(centerId, radius, startAngle, endAngle);
     arc->setConstruction(construction);
+    if (bindEndpoints) {
+        arc->setEndpointPointIds(startPointId, endPointId);
+    }
 
     EntityID id = arc->id();
     entityIndex_[id] = entities_.size();
     entities_.push_back(std::move(arc));
 
     centerPoint->addConnectedEntity(id);
+    if (bindEndpoints) {
+        startPoint->addConnectedEntity(id);
+        endPoint->addConnectedEntity(id);
+    }
 
     invalidateSolver();
     return id;
@@ -295,6 +309,14 @@ bool Sketch::removeEntity(EntityID id) {
         if (auto* center = getEntityAs<SketchPoint>(arc->centerPointId())) {
             center->removeConnectedEntity(arc->id());
             potentiallyOrphanedPoints.push_back(arc->centerPointId());
+        }
+        // W0b: minted endpoint points are owned by the arc exactly like a line's
+        // endpoints, so they detach + orphan-collect on the same path.
+        for (const EntityID& endpointId : {arc->startPointId(), arc->endPointId()}) {
+            if (auto* endpoint = getEntityAs<SketchPoint>(endpointId)) {
+                endpoint->removeConnectedEntity(arc->id());
+                potentiallyOrphanedPoints.push_back(endpointId);
+            }
         }
     } else if (auto* circle = dynamic_cast<SketchCircle*>(entity)) {
         if (auto* center = getEntityAs<SketchPoint>(circle->centerPointId())) {
@@ -1175,7 +1197,9 @@ std::vector<Vec2d> Sketch::getPointFreeDirections(EntityID pointId) const {
 SolveResult Sketch::solve() {
     SolveResult result;
 
-    if (constraints_.empty()) {
+    // The no-constraints fast path is only sound when nothing else couples the
+    // geometry — see hasInternalCouplings().
+    if (constraints_.empty() && !hasInternalCouplings()) {
         lastConflictingConstraints_.clear();
         result.success = true;
         return result;
@@ -1385,7 +1409,7 @@ SolveResult Sketch::solveWithGroupDrag(
         rigidTargets[pointId] = Vec2d{.x = startIt->second.x + delta.x, .y = startIt->second.y + delta.y};
     }
 
-    if (constraints_.empty()) {
+    if (constraints_.empty() && !hasInternalCouplings()) {
         lastConflictingConstraints_.clear();
         for (const auto& [pointId, rigidTarget] : rigidTargets) {
             auto* point = getEntityAs<SketchPoint>(pointId);
@@ -1471,7 +1495,7 @@ SolveResult Sketch::solveWithDrag(EntityID draggedPoint, const Vec2d& targetPos)
         return result;
     }
 
-    if (constraints_.empty()) {
+    if (constraints_.empty() && !hasInternalCouplings()) {
         lastConflictingConstraints_.clear();
         point->setPosition(targetPos.x, targetPos.y);
         result.success = true;
@@ -1526,6 +1550,18 @@ int Sketch::naiveDegreesOfFreedom() const {
         if (entity) {
             total += entity->degreesOfFreedom();
         }
+        // W0b: an arc's minted endpoint points are ordinary `SketchPoint`
+        // entities, so the loop above already counted their 2 DOF each. The arc
+        // rules that couple them to center+radius+angle are INTERNAL (tag 0) and
+        // therefore absent from `constraints_`, so nothing below subtracts them.
+        // Take all 4 back here, ONCE per endpoint-bearing arc — the GCS
+        // diagnosis path needs no such fix-up (+4 params, +4 independent
+        // equations), this is only the ellipse-bearing fallback.
+        if (const auto* arc = dynamic_cast<const SketchArc*>(entity.get())) {
+            if (arc->hasEndpointPoints()) {
+                total -= 4;
+            }
+        }
     }
     for (const auto& constraint : constraints_) {
         if (constraint) {
@@ -1533,6 +1569,16 @@ int Sketch::naiveDegreesOfFreedom() const {
         }
     }
     return total;
+}
+
+bool Sketch::hasInternalCouplings() const {
+    for (const auto& entity : entities_) {
+        const auto* arc = dynamic_cast<const SketchArc*>(entity.get());
+        if (arc && arc->hasEndpointPoints()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool Sketch::hasSolverUnsupportedEntities() const {

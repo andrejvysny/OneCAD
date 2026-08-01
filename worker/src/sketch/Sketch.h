@@ -195,9 +195,18 @@ public:
      * @param radius Arc radius
      * @param startAngle Start angle in radians
      * @param endAngle End angle in radians
+     * @param startPointId Optional existing point to bind as the arc's START
+     * @param endPointId   Optional existing point to bind as the arc's END
+     *
+     * Passing both endpoint ids makes them REAL solver handles coupled to
+     * center+radius+angle by PlaneGCS arc rules (W0b — see
+     * `SketchArc::setEndpointPointIds`). Both must resolve to existing points or
+     * neither is bound (endpoints stay derived). Omitting them is the legacy
+     * OneCAD-CPP behaviour.
      */
     EntityID addArc(EntityID centerId, double radius,
-                    double startAngle, double endAngle, bool construction = false);
+                    double startAngle, double endAngle, bool construction = false,
+                    EntityID startPointId = {}, EntityID endPointId = {});
 
     /**
      * @brief Add a circle
@@ -483,6 +492,18 @@ public:
 
     /// True when an entity type not registered with PlaneGCS is present.
     bool hasSolverUnsupportedEntities() const;
+
+    /**
+     * @brief True when some entity carries an INTERNAL solver coupling — i.e. an
+     *        arc whose endpoints are real points bound by arc rules (W0b).
+     *
+     * The solve/drag fast paths short-circuit on `constraints_.empty()` and just
+     * teleport the geometry. That is only sound while every relationship in the
+     * sketch is a user constraint; an endpoint-bearing arc has four equations
+     * that live nowhere in `constraints_`, so a sketch holding one must always go
+     * through PlaneGCS or a drag would tear the endpoint off its own circle.
+     */
+    bool hasInternalCouplings() const;
 
     /**
      * @brief Check if sketch is fully constrained (DOF == 0)

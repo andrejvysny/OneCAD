@@ -26,6 +26,12 @@ add_executable(test_sketch_ellipse test_sketch_ellipse.cpp)
 target_link_libraries(test_sketch_ellipse PRIVATE worker_core)
 add_test(NAME sketch_ellipse COMMAND test_sketch_ellipse)
 
+# --- W0b: arc endpoints as REAL solver points — the `<id>.start`/`<id>.end`
+#     handles, the internal (tag 0) ArcRules coupling, and the welded-slot DOF. ---
+add_executable(test_sketch_arc_endpoints test_sketch_arc_endpoints.cpp)
+target_link_libraries(test_sketch_arc_endpoints PRIVATE worker_core)
+add_test(NAME sketch_arc_endpoints COMMAND test_sketch_arc_endpoints)
+
 # --- Region preview fill: holes subtracted + the bridge-interiority invariant
 #     the frontend ring derivation depends on (pure 2D, no OCCT). ---
 add_executable(test_polygon_fill test_polygon_fill.cpp)
