@@ -257,6 +257,62 @@ pub trait ElementQuery: Send + Sync {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Host-face boundary projection seam (SCHEMA §7.6 `ProjectFaceBoundary`)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Projects a picked planar face's boundary into a sketch plane's UV.
+///
+/// A separate seam beside [`ElementQuery`] for the same reason: this is a
+/// **read-only side query** that neither mutates nor fences anything (no
+/// prepare/accept/discard, no element-map minting), so it does not belong on the
+/// regen-shaped [`GeometryEngine`] trait. Like the §7.5 identity verbs it reads a
+/// copy of the head, so a stale or absent reference answers `Ok(None)` —
+/// "that face is gone" is an ANSWER, not an error.
+///
+/// # The two-round-trip handshake
+///
+/// The plane is INPUT and AUTHORITATIVE (SCHEMA §7.6): Rust owns the basis and
+/// the worker expresses every coordinate in it. But Rust cannot build a basis
+/// before it knows a point that is genuinely ON the face plane — an element
+/// descriptor's `center` is an axis-aligned **bbox** centre and sits OFF-plane
+/// for a tilted face, which would extrude a sliver. So:
+///
+/// 1. [`project_face_boundary_frame`](FaceBoundaryProjection::project_face_boundary_frame)
+///    (`frameOnly`) returns the kernel-exact `gp_Pln` origin + orientation-corrected
+///    normal;
+/// 2. Rust builds the deterministic, lock-tested basis
+///    ([`plane_from_point_normal`](onecad_core::sketch::plane_from_point_normal));
+/// 3. [`project_face_boundary`](FaceBoundaryProjection::project_face_boundary)
+///    runs the real projection in THAT basis and echoes `exact` back as a
+///    tripwire the caller compares.
+///
+/// Callers MUST NOT hold the `DocumentRuntime` lock across either call — both are
+/// worker round-trips, and holding the single writer across worker IO is the
+/// anti-pattern R-WP11 fixed for regen.
+#[async_trait]
+pub trait FaceBoundaryProjection: Send + Sync {
+    /// `ProjectFaceBoundary` with `frameOnly:true` (SCHEMA §7.6) — round-trip 1.
+    /// `Ok(None)` when the reference does not resolve in the current head.
+    async fn project_face_boundary_frame(
+        &self,
+        snapshot: SnapshotId,
+        body: BodyId,
+        address: wire::FaceAddress<'_>,
+    ) -> Result<Option<onecad_core::sketch::FaceFrame>, EngineError>;
+
+    /// `ProjectFaceBoundary` with the caller's authoritative `plane` — round-trip 2.
+    /// `Ok(None)` when the reference does not resolve in the current head.
+    async fn project_face_boundary(
+        &self,
+        snapshot: SnapshotId,
+        body: BodyId,
+        address: wire::FaceAddress<'_>,
+        plane: &onecad_core::sketch::SketchPlane,
+        scope: wire::ProjectionScope,
+    ) -> Result<Option<onecad_core::sketch::ProjectionPayload>, EngineError>;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Drag-time preview seam (SCHEMA §7.6 `PreviewOp`)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -622,6 +678,29 @@ impl ElementQuery for PendingBackend {
         _body: BodyId,
         _topo_key: &str,
     ) -> Result<Option<crate::dto::ElementInfoDto>, EngineError> {
+        Err(Self::not_ready())
+    }
+}
+
+#[async_trait]
+impl FaceBoundaryProjection for PendingBackend {
+    async fn project_face_boundary_frame(
+        &self,
+        _snapshot: SnapshotId,
+        _body: BodyId,
+        _address: wire::FaceAddress<'_>,
+    ) -> Result<Option<onecad_core::sketch::FaceFrame>, EngineError> {
+        Err(Self::not_ready())
+    }
+
+    async fn project_face_boundary(
+        &self,
+        _snapshot: SnapshotId,
+        _body: BodyId,
+        _address: wire::FaceAddress<'_>,
+        _plane: &onecad_core::sketch::SketchPlane,
+        _scope: wire::ProjectionScope,
+    ) -> Result<Option<onecad_core::sketch::ProjectionPayload>, EngineError> {
         Err(Self::not_ready())
     }
 }

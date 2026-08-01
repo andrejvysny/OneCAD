@@ -39,6 +39,13 @@ add_executable(test_sketch_arc_endpoints test_sketch_arc_endpoints.cpp)
 target_link_libraries(test_sketch_arc_endpoints PRIVATE worker_core)
 add_test(NAME sketch_arc_endpoints COMMAND test_sketch_arc_endpoints)
 
+# --- SKETCH-ON-FACE W1a: face-boundary projector + `ProjectFaceBoundary` verb
+#     (SCHEMA §7.6). Unit-level projector calls over self-built OCCT shapes PLUS
+#     verb-level calls through the handler (in-process, real OCCT). ---
+add_executable(test_face_projection test_face_projection.cpp)
+target_link_libraries(test_face_projection PRIVATE worker_core)
+add_test(NAME face_projection COMMAND test_face_projection)
+
 # --- Region preview fill: holes subtracted + the bridge-interiority invariant
 #     the frontend ring derivation depends on (pure 2D, no OCCT). ---
 add_executable(test_polygon_fill test_polygon_fill.cpp)

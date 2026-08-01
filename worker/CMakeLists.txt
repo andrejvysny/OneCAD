@@ -82,6 +82,9 @@ add_library(worker_core STATIC
     src/tess/Tessellate.cpp
     src/sketch/WireSketch.cpp
     src/sketch/RegionId.cpp
+    # --- SKETCH-ON-FACE W1: face-boundary projection (SCHEMA §7.6) ---
+    src/sketch/FaceBoundaryProjector.cpp
+    src/session/FaceProjection.cpp
     # --- W-WP2 kernel port (mirrors OneCAD-CPP src/kernel onecad_kernel lib) ---
     src/kernel/geometry/EdgeChainer.cpp
     src/kernel/modeling/FaceExtrudeProfileBuilder.cpp

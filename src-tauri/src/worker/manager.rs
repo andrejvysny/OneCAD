@@ -1329,6 +1329,49 @@ impl crate::worker::ElementQuery for WorkerManager {
 }
 
 #[async_trait]
+impl crate::worker::FaceBoundaryProjection for WorkerManager {
+    async fn project_face_boundary_frame(
+        &self,
+        snapshot: SnapshotId,
+        body: BodyId,
+        address: wire::FaceAddress<'_>,
+    ) -> Result<Option<onecad_core::sketch::FaceFrame>, EngineError> {
+        let client = self.client_or_err()?;
+        let resp = client
+            .request(
+                "ProjectFaceBoundary",
+                wire::project_face_boundary_frame_args(snapshot, body, address),
+            )
+            .await
+            .map_err(protocol_err)?;
+        // A malformed frame is a PROTOCOL break, never a default: fabricating
+        // `(0,0,0)/(0,0,1)` would silently sketch on the world XY plane.
+        wire::parse_project_face_boundary_frame(&ok_result(resp)?)
+            .map_err(|message| EngineError::Protocol { message })
+    }
+
+    async fn project_face_boundary(
+        &self,
+        snapshot: SnapshotId,
+        body: BodyId,
+        address: wire::FaceAddress<'_>,
+        plane: &onecad_core::sketch::SketchPlane,
+        scope: wire::ProjectionScope,
+    ) -> Result<Option<onecad_core::sketch::ProjectionPayload>, EngineError> {
+        let client = self.client_or_err()?;
+        let resp = client
+            .request(
+                "ProjectFaceBoundary",
+                wire::project_face_boundary_args(snapshot, body, address, plane, scope),
+            )
+            .await
+            .map_err(protocol_err)?;
+        wire::parse_project_face_boundary(&ok_result(resp)?)
+            .map_err(|message| EngineError::Protocol { message })
+    }
+}
+
+#[async_trait]
 impl MeshProvider for WorkerManager {
     async fn fetch_mesh(
         &self,

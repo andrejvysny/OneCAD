@@ -28,6 +28,7 @@
 #include "protocol/Envelope.h"
 #include "protocol/SolverLane.h"
 #include "session/ElementIdentity.h"
+#include "session/FaceProjection.h"
 #include "session/PlanExecutor.h"
 #include "session/PreviewOp.h"
 #include "session/Session.h"
@@ -278,6 +279,13 @@ void register_verbs(Dispatcher& dispatcher, SolverLane& solver_lane, Session& se
         "ResolveRefs",
         [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {
             return onecad::session::handle_resolve_refs(session, r);
+        });
+    // --- SKETCH-ON-FACE W1: face-boundary projection (SCHEMA §7.6). Read-only;
+    //     addressed like QueryElement (head copy, `present:false` for stale). ---
+    dispatcher.register_verb(
+        "ProjectFaceBoundary",
+        [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {
+            return onecad::session::handle_project_face_boundary(session, r);
         });
     // --- W-WP6: STEP export (SCHEMA §7.8, D2) ---
     dispatcher.register_verb(

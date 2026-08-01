@@ -14,6 +14,7 @@
 #include <TopoDS_Compound.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Pnt.hxx>
 #include <gp_Vec.hxx>
 
 #include <cmath>
@@ -24,23 +25,7 @@ namespace onecad::core::modeling {
 namespace {
 
 bool planarFaceData(const TopoDS_Face& face, gp_Pln& planeOut, gp_Dir& normalOut) {
-    try {
-        if (face.IsNull()) {
-            return false;
-        }
-        BRepAdaptor_Surface surface(face, true);
-        if (surface.GetType() != GeomAbs_Plane) {
-            return false;
-        }
-        planeOut = surface.Plane();
-        normalOut = planeOut.Axis().Direction();
-        if (face.Orientation() == TopAbs_REVERSED) {
-            normalOut.Reverse();
-        }
-        return true;
-    } catch (...) {
-        return false;
-    }
+    return CoplanarFacePatch::planarFacePlaneAndNormal(face, planeOut, normalOut);
 }
 
 bool isCoplanarWithSeed(const TopoDS_Face& candidate,
@@ -60,8 +45,17 @@ bool isCoplanarWithSeed(const TopoDS_Face& candidate,
         return false;
     }
 
+    // `seedNormal.Dot(delta)` would resolve to gp_Dir::Dot after an IMPLICIT
+    // gp_Vec→gp_Dir conversion, which (a) NORMALIZES delta, so the result is a
+    // cosine and the "1e-3 mm" tolerance silently becomes an angular one — a face
+    // 0.05mm off-plane but 100mm away laterally scored 5e-4 and passed — and (b)
+    // THROWS Standard_ConstructionError when the two plane origins coincide, which
+    // is the ordinary case for collectCoplanarFaces (the caller's plane origin is
+    // usually a face's own origin). Dot in gp_Vec space: a true signed mm distance,
+    // matching FaceExtrudeProfileBuilder's `projectedPlaneDistance`.
     const gp_Vec delta(seedOrigin, candidatePlane.Location());
-    const double planeDistance = std::abs(seedNormal.Dot(delta));
+    const gp_Vec seedNormalVec(seedNormal.X(), seedNormal.Y(), seedNormal.Z());
+    const double planeDistance = std::abs(delta.Dot(seedNormalVec));
     if (planeDistance > planeDistanceTolerance) {
         return false;
     }
@@ -75,6 +69,62 @@ double sanitizeTolerance(double value, double fallback) {
 }
 
 } // namespace
+
+bool CoplanarFacePatch::planarFacePlaneAndNormal(const TopoDS_Face& face, gp_Pln& planeOut,
+                                                 gp_Dir& normalOut) {
+    try {
+        if (face.IsNull()) {
+            return false;
+        }
+        BRepAdaptor_Surface surface(face, true);
+        if (surface.GetType() != GeomAbs_Plane) {
+            return false;
+        }
+        planeOut = surface.Plane();
+        normalOut = planeOut.Axis().Direction();
+        if (face.Orientation() == TopAbs_REVERSED) {
+            normalOut.Reverse();
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+std::vector<TopoDS_Face> CoplanarFacePatch::collectCoplanarFaces(const TopoDS_Shape& shape,
+                                                                 const gp_Pln& plane,
+                                                                 const Options& options) {
+    std::vector<TopoDS_Face> faces;
+    if (shape.IsNull()) {
+        return faces;
+    }
+
+    const double normalDotTolerance = sanitizeTolerance(options.normalDotTolerance, 0.9999);
+    const double planeDistanceTolerance = sanitizeTolerance(options.planeDistanceTolerance, 1e-3);
+    const gp_Pnt origin = plane.Location();
+    const gp_Dir normal = plane.Axis().Direction();
+
+    try {
+        TopTools_MapOfShape seen;
+        for (TopExp_Explorer exp(shape, TopAbs_FACE); exp.More(); exp.Next()) {
+            const TopoDS_Face face = TopoDS::Face(exp.Current());
+            if (face.IsNull() || !seen.Add(face)) {
+                continue;
+            }
+            bool needsReverse = false;
+            if (!isCoplanarWithSeed(face, origin, normal, normalDotTolerance,
+                                    planeDistanceTolerance, needsReverse)) {
+                continue;
+            }
+            // Deliberately NOT reversed — see the header. The projection consumer
+            // walks wires; flipping a face flips BRepTools_WireExplorer traversal.
+            faces.push_back(face);
+        }
+    } catch (...) {
+        // Keep whatever was collected before the failure.
+    }
+    return faces;
+}
 
 std::vector<TopoDS_Face> CoplanarFacePatch::collectConnectedFaces(const TopoDS_Shape& body,
                                                                   const TopoDS_Face& seedFace,

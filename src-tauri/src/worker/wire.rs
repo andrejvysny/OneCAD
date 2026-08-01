@@ -29,6 +29,7 @@ use onecad_core::document::repair::RepairItem;
 use onecad_core::ids::{
     BodyId, DocumentRevision, ElementId, EntityId, JobId, SnapshotId, TopoKey, WorkerEpoch,
 };
+use onecad_core::math::{Vec2, Vec3};
 use onecad_core::regen::{
     AcceptResult, AcquireRequest, BodySelector, CheckpointArtifact, CheckpointArtifacts,
     CheckpointEnvelope, Diagnostic, ElementMapDelta, ElementMapEntry, EngineError,
@@ -38,7 +39,10 @@ use onecad_core::regen::{
     WorkerElementEvidence, WorkerHead, ARTIFACT_SCHEMA_VERSION,
 };
 use onecad_core::sketch::WorldPlane;
-use onecad_core::sketch::{Constraint, CurvePosition, Sketch, SketchAttachment, SketchEntity};
+use onecad_core::sketch::{
+    Constraint, CurvePosition, FaceFrame, ProjectedEntity, ProjectionPayload, Sketch,
+    SketchAttachment, SketchEntity, SketchPlane,
+};
 
 use onecad_protocol::messages::{BinSection, ErrorCode, ErrorObject};
 
@@ -1374,6 +1378,289 @@ pub fn parse_query_element(result: &Value) -> Option<crate::dto::ElementInfoDto>
         size: num_at("size", 0.0),
         magnitude: num_at("magnitude", 0.0),
     })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Host-face boundary projection (SCHEMA §7.6 `ProjectFaceBoundary`)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The addressing rung this request uses (SCHEMA §7.6): `elementId`, **else**
+/// `{bodyId, topoKey}`.
+///
+/// The two are mutually exclusive on the wire, not merely preferred: the worker
+/// branches on the PRESENCE of `elementId` (`FaceProjection.cpp resolve_seed`) and
+/// answers `present:false` when that branch misses, so shipping both would let a
+/// stale elementId shadow a perfectly good topoKey.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaceAddress<'a> {
+    /// The `elementId` branch — partition entry → `(bodyId, topoKey)` → sub-shape.
+    ElementId(&'a str),
+    /// The `{bodyId, topoKey}` branch — resolves against the body shape directly.
+    TopoKey(&'a str),
+}
+
+impl FaceAddress<'_> {
+    /// Renders this rung into `args`, writing exactly ONE of the two keys.
+    fn write_into(self, args: &mut Value) {
+        match self {
+            Self::ElementId(id) => args["elementId"] = Value::String(id.to_string()),
+            Self::TopoKey(key) => args["topoKey"] = Value::String(key.to_string()),
+        }
+    }
+}
+
+/// Which faces the projection covers (SCHEMA §7.6 `scope`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProjectionScope {
+    /// The seed face alone.
+    FaceOnly,
+    /// The seed face plus every other face of the same body coplanar with the
+    /// supplied plane (the wire default).
+    #[default]
+    CoplanarBody,
+}
+
+impl ProjectionScope {
+    /// The wire token.
+    #[must_use]
+    pub const fn wire(self) -> &'static str {
+        match self {
+            Self::FaceOnly => "faceOnly",
+            Self::CoplanarBody => "coplanarBody",
+        }
+    }
+}
+
+/// `ProjectFaceBoundary` args for the **first** handshake round-trip (SCHEMA §7.6
+/// `frameOnly`): the caller has no basis yet, so it asks only for the kernel-exact
+/// frame. `plane`/`scope` are IGNORED in this mode and are deliberately not sent.
+#[must_use]
+pub fn project_face_boundary_frame_args(
+    snapshot: SnapshotId,
+    body: BodyId,
+    address: FaceAddress<'_>,
+) -> Value {
+    let mut args = json!({
+        "snapshotId": snapshot.0,
+        // The worker's BodyStore is keyed `body_<uuid>` — the same wire-form rule
+        // every other body-bearing param follows (M2-R). Required by BOTH rungs:
+        // the elementId branch overwrites it from the partition entry, the topoKey
+        // branch resolves against it.
+        "bodyId": body_id_wire(body),
+        "frameOnly": true,
+    });
+    address.write_into(&mut args);
+    args
+}
+
+/// `ProjectFaceBoundary` args for the **second** round-trip: the real projection,
+/// expressed in the basis Rust built from the `frameOnly` frame.
+///
+/// `plane` is INPUT and AUTHORITATIVE (SCHEMA §7.6) — every returned `at` and every
+/// arc/circle centre is in ITS UV, and `coplanarBody` membership is tested against
+/// IT, not against the seed face's own frame. `options` is omitted so the worker's
+/// documented defaults apply.
+#[must_use]
+pub fn project_face_boundary_args(
+    snapshot: SnapshotId,
+    body: BodyId,
+    address: FaceAddress<'_>,
+    plane: &SketchPlane,
+    scope: ProjectionScope,
+) -> Value {
+    let mut args = json!({
+        "snapshotId": snapshot.0,
+        "bodyId": body_id_wire(body),
+        "frameOnly": false,
+        "plane": {
+            "origin": [plane.origin.x, plane.origin.y, plane.origin.z],
+            "xAxis": [plane.x_axis.x, plane.x_axis.y, plane.x_axis.z],
+            "yAxis": [plane.y_axis.x, plane.y_axis.y, plane.y_axis.z],
+            "normal": [plane.normal.x, plane.normal.y, plane.normal.z],
+        },
+        "scope": scope.wire(),
+    });
+    address.write_into(&mut args);
+    args
+}
+
+/// Reads a `[x, y, z]` wire vector, rejecting a wrong shape or a non-finite
+/// component (SCHEMA §4).
+fn projection_vec3(value: Option<&Value>, what: &str) -> Result<Vec3, String> {
+    let a = value
+        .and_then(Value::as_array)
+        .filter(|a| a.len() == 3)
+        .ok_or_else(|| format!("ProjectFaceBoundary: {what} must be a 3-number array"))?;
+    let g = |i: usize| -> Result<f64, String> {
+        a[i].as_f64()
+            .ok_or_else(|| format!("ProjectFaceBoundary: {what}[{i}] is not a number"))
+    };
+    Vec3::new(g(0)?, g(1)?, g(2)?)
+        .ok_or_else(|| format!("ProjectFaceBoundary: {what} has a non-finite component"))
+}
+
+/// Parses the mandatory `exact` frame (SCHEMA §7.6 — always present when
+/// `present`, in BOTH modes).
+fn parse_exact_frame(result: &Value) -> Result<FaceFrame, String> {
+    let exact = result
+        .get("exact")
+        .ok_or_else(|| "ProjectFaceBoundary: present:true without an `exact` frame".to_string())?;
+    Ok(FaceFrame {
+        origin: projection_vec3(exact.get("origin"), "exact.origin")?,
+        normal: projection_vec3(exact.get("normal"), "exact.normal")?,
+    })
+}
+
+/// True when the result says the reference did not resolve (`present:false`).
+///
+/// `present` is required; a response missing it is malformed, and treating that
+/// as "absent" would silently swallow a protocol break.
+fn projection_present(result: &Value) -> Result<bool, String> {
+    result
+        .get("present")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "ProjectFaceBoundary: result is missing `present`".to_string())
+}
+
+/// Parses a `frameOnly` result. `Ok(None)` = `present:false` (a stale or absent
+/// reference is an ANSWER, not an error — SCHEMA §7.6).
+///
+/// # Errors
+/// A human-readable reason when the frame is missing or malformed (the caller
+/// surfaces it as `PROTOCOL_ERROR`; a malformed frame must never be defaulted —
+/// a fabricated `(0,0,0)/(0,0,1)` would sketch on the world XY plane and look
+/// plausible).
+pub fn parse_project_face_boundary_frame(result: &Value) -> Result<Option<FaceFrame>, String> {
+    if !projection_present(result)? {
+        return Ok(None);
+    }
+    parse_exact_frame(result).map(Some)
+}
+
+/// Resolves a response-local `p<N>` ref (SCHEMA §7.6) to an index into this
+/// response's `points[]`. Refs are 0-based, scoped to ONE response, and are NOT
+/// `ElementId`s — a ref that does not resolve is a protocol break, not a miss.
+fn parse_point_ref(entity: &Value, field: &str, points: usize) -> Result<usize, String> {
+    let raw = entity
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("ProjectFaceBoundary: entity is missing {field}"))?;
+    let index: usize = raw
+        .strip_prefix('p')
+        .and_then(|n| n.parse().ok())
+        .ok_or_else(|| format!("ProjectFaceBoundary: {field} {raw:?} is not a `p<N>` ref"))?;
+    if index >= points {
+        return Err(format!(
+            "ProjectFaceBoundary: {field} {raw:?} is out of range ({points} points in this response)"
+        ));
+    }
+    Ok(index)
+}
+
+/// Reads a required finite number off an entity.
+fn projection_number(entity: &Value, field: &str) -> Result<f64, String> {
+    entity
+        .get(field)
+        .and_then(Value::as_f64)
+        .filter(|v| v.is_finite())
+        .ok_or_else(|| format!("ProjectFaceBoundary: entity {field} must be a finite number"))
+}
+
+/// Parses a full `ProjectFaceBoundary` result into the pure core payload
+/// [`ProjectionPayload`] the translator consumes. `Ok(None)` = `present:false`.
+///
+/// Every `p<N>` ref is resolved and bounds-checked HERE, so the pure translator
+/// downstream never has to reason about wire shape.
+///
+/// # Errors
+/// A human-readable reason for any malformed field. There is no lenient path: a
+/// dropped boundary curve would produce an open profile that silently fails to
+/// form a region later, far from the cause.
+pub fn parse_project_face_boundary(result: &Value) -> Result<Option<ProjectionPayload>, String> {
+    if !projection_present(result)? {
+        return Ok(None);
+    }
+    let exact = parse_exact_frame(result)?;
+
+    let mut points = Vec::new();
+    for (i, p) in result
+        .get("points")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+    {
+        let at = p
+            .get("at")
+            .and_then(Value::as_array)
+            .filter(|a| a.len() == 2)
+            .ok_or_else(|| {
+                format!("ProjectFaceBoundary: points[{i}].at must be a 2-number array")
+            })?;
+        let g = |k: usize| -> Result<f64, String> {
+            at[k]
+                .as_f64()
+                .ok_or_else(|| format!("ProjectFaceBoundary: points[{i}].at[{k}] is not a number"))
+        };
+        points.push(
+            Vec2::new(g(0)?, g(1)?)
+                .ok_or_else(|| format!("ProjectFaceBoundary: points[{i}].at is non-finite"))?,
+        );
+    }
+
+    let mut entities = Vec::new();
+    for e in result
+        .get("entities")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        let kind = e
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "ProjectFaceBoundary: entity is missing `type`".to_string())?;
+        entities.push(match kind {
+            "Line" => ProjectedEntity::Line {
+                p0: parse_point_ref(e, "p0Ref", points.len())?,
+                p1: parse_point_ref(e, "p1Ref", points.len())?,
+            },
+            "Circle" => ProjectedEntity::Circle {
+                center: parse_point_ref(e, "centerRef", points.len())?,
+                radius: projection_number(e, "radius")?,
+            },
+            "Arc" => ProjectedEntity::Arc {
+                center: parse_point_ref(e, "centerRef", points.len())?,
+                radius: projection_number(e, "radius")?,
+                // Already the CCW-ordered pair (SCHEMA §7.6) — carried verbatim.
+                start_angle: projection_number(e, "startAngle")?,
+                end_angle: projection_number(e, "endAngle")?,
+                ccw: e.get("ccw").and_then(Value::as_bool).unwrap_or(true),
+            },
+            other => {
+                return Err(format!(
+                    "ProjectFaceBoundary: unknown entity type {other:?} (SCHEMA §7.6 emits only \
+                     Line/Circle/Arc — every other curve falls back to a Line polyline)"
+                ))
+            }
+        });
+    }
+
+    Ok(Some(ProjectionPayload {
+        exact,
+        has_closed_boundary: result
+            .get("hasClosedBoundary")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        face_count: result
+            .get("faceCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .try_into()
+            .unwrap_or(u32::MAX),
+        points,
+        entities,
+    }))
 }
 
 /// Parses an `AcquireElementIds` result into worker evidence (Rust then mints the

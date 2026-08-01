@@ -17,6 +17,7 @@
 pub mod constraint;
 pub mod entity;
 pub mod plane;
+pub mod projection;
 
 use std::collections::HashMap;
 
@@ -29,6 +30,7 @@ use crate::math::Vec2;
 pub use constraint::{Constraint, CurvePosition};
 pub use entity::SketchEntity;
 pub use plane::{plane_from_point_normal, SketchPlane};
+pub use projection::{projected_sketch_content, FaceFrame, ProjectedEntity, ProjectionPayload};
 
 /// A named world reference plane (SCHEMA §7.3 `plane.kind` ∈ `XY`|`XZ`|`YZ`).
 /// The concrete basis is [`SketchPlane::xy`]/[`xz`](SketchPlane::xz)/

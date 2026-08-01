@@ -1396,6 +1396,116 @@ Loads BREP blobs into the session (input via request `bin`/stream).
 { "loaded": ["body_1"], "snapshotId": 5014 }
 ```
 
+#### ProjectFaceBoundary
+**Read-only kernel query.** Resolves a picked planar face within the current head
+and returns its exact plane frame plus its boundary — and, in `coplanarBody`
+scope, the boundary of every OTHER face of the same body coplanar with the
+supplied plane — as 2D points and Line/Circle/Arc entities in that plane's UV.
+
+It does **not** fence, prepare, accept, discard, or mint. Like the
+[§7.5](#75-element-identity) identity verbs it reads a copy of the head, so a
+stale or absent reference is `present:false` — an **answer, not an error**.
+
+```json
+// req.args
+{ "snapshotId": 5012,
+  "bodyId": "body_3", "topoKey": "f:22",   // or { "elementId": "el_…4a1" }
+  "frameOnly": false,
+  "plane": { "origin": [0,0,30], "xAxis": [1,0,0], "yAxis": [0,1,0], "normal": [0,0,1] },
+  "scope": "coplanarBody",                 // "faceOnly" | "coplanarBody" (default)
+  "options": { "pointMergeTolerance": 1e-5, "normalDotTolerance": 0.9999,
+               "planeDistanceTolerance": 1e-3, "fallbackSegmentsPerCurve": 24 } }
+// result
+{ "present": true,
+  "exact": { "origin": [0,0,30], "normal": [0,0,1] },
+  "hasClosedBoundary": true,
+  "faceCount": 2,
+  "points": [ { "ref": "p0", "at": [0,0] }, { "ref": "p1", "at": [80,0] } ],
+  "entities": [
+    { "type": "Line",   "p0Ref": "p0", "p1Ref": "p1" },
+    { "type": "Circle", "centerRef": "p4", "radius": 10 },
+    { "type": "Arc",    "centerRef": "p5", "radius": 10,
+      "startAngle": 0, "endAngle": 1.5707963267948966, "ccw": true }
+  ] }
+```
+
+**Addressing.** `elementId`, else `{bodyId, topoKey}`. The `elementId` form carries
+one rung more than [`QueryElement`](#queryelement): partition entry →
+`(bodyId, topoKey)` → the body's sub-shape. `QueryElement`'s `elementId` branch
+answers from the partition descriptor and never reaches a shape; this verb MUST
+resolve all the way to a real face. A miss anywhere on that chain — unknown
+`elementId`, missing body, stale `topoKey` — is `{ "present": false }` with
+`ok:true`. A reference that resolves to a non-face element is `OP_FAILED`.
+`snapshotId` is **advisory** here, exactly as in [§7.5](#75-element-identity):
+the query always answers against the current head, and a `topoKey` minted under an
+older snapshot simply fails to resolve (`present:false`). It is NOT a fence —
+callers needing a stale-head guard must compare the head themselves.
+
+**`frameOnly`.** When `true`, `plane` and `scope` are IGNORED and the result is
+`present` + `exact` only. This is the first half of the plane handshake: the
+caller has no basis yet, takes the kernel-exact frame, builds one, and sends it
+back on a second call.
+
+**`exact` is ALWAYS returned when `present`** (both modes): the kernel `gp_Pln`
+origin and the **orientation-corrected unit normal** of the **seed** face
+(reversed for a `TopAbs_REVERSED` face, so it points out of the solid). It lies ON
+the face plane — a descriptor `center` does not, being an axis-aligned bbox
+centre, which for a tilted face sits off-plane and would extrude a sliver.
+Outside `frameOnly` it is an echo the caller SHOULD compare against the plane it
+supplied (a tripwire, not a fence).
+
+**The `plane` argument is authoritative.** Every `at` and every arc/circle centre
+is expressed in ITS UV; the worker MUST NOT substitute a basis of its own, even
+when its own frame looks better. `plane` is REQUIRED unless `frameOnly:true`;
+absent, it is `PROTOCOL_ERROR`. Units are **mm**; angles are **radians, CCW from
+the plane's +X (U) axis**.
+
+**Point refs are response-local.** `p<N>` is 0-based and indexes `points[]` of
+THIS response only. They are not `ElementId`s, carry no persistence, and are not
+comparable across responses. Every `p0Ref`/`p1Ref`/`centerRef` MUST resolve within
+the same response's `points[]`. Points within `pointMergeTolerance` of each other
+merge onto one entry, so **a ref reused across entities IS the same point** — that
+is how adjacent boundary curves share an endpoint.
+
+**Exactness.** A `GeomAbs_Line` edge stays a Line; a full circular edge stays a
+Circle; a circular arc stays an Arc. An Arc's `startAngle`/`endAngle` are always
+the CCW-ordered pair (sweeping from `startAngle` counter-clockwise reaches
+`endAngle`); `ccw` reports the direction of the UNDERLYING kernel curve. Every
+other curve type (B-spline, ellipse, …) falls back to a **Line polyline** of
+`fallbackSegmentsPerCurve` segments. That fallback is **lossy** and permanent —
+the emitted geometry no longer follows the true curve, and nothing downstream can
+recover it.
+
+**A non-planar SEED face is refused** with a recoverable `OP_FAILED`, in both
+modes. It is never approximated.
+
+**`scope: "coplanarBody"`** adds the edges of every OTHER face of the SAME body
+coplanar with the **supplied** plane (tested against that plane, not the seed
+face): `|n·n'| ≥ normalDotTolerance` and `|n·(p'−p)| ≤ planeDistanceTolerance` mm,
+over ALL faces of the body — **not** an edge-adjacency walk, so DISCONNECTED
+coplanar faces are included. Edges are deduped by `IsSame`, so a `TopoDS_Edge`
+shared by two coplanar faces is emitted **ONCE**; an interior edge that survives
+that way is intentional — it splits the projected profile into two regions, which
+is faithful to the body's topology. `faceCount` reports how many faces were
+walked (always `1` for `faceOnly`).
+
+**`hasClosedBoundary`** is true when some wire closed: either it contributed a
+full Circle, or it emitted ≥3 curves AND (the wire carries OCCT's closed flag OR
+the walk's first and last points merged onto the same entry).
+
+**Determinism.** For the same inputs against the same snapshot the response is
+byte-identical across fresh worker processes. The emission order is normative:
+
+1. the **seed** face first, then the remaining coplanar faces in
+   `TopExp_Explorer(shape, TopAbs_FACE)` order;
+2. within a face, its **outer** wire first, then its holes in
+   `TopExp_Explorer(face, TopAbs_WIRE)` order;
+3. within a wire, edges in `BRepTools_WireExplorer` order;
+4. `entities[]` in that walk order, and `points[]` numbered by **first use**.
+
+**Lane.** Kernel lane, alongside `ExecutePlan`/`PreviewOp`. It takes no locks
+beyond the brief head copy, so it does not block an in-flight regen.
+
 ### 7.7 Checkpoints
 
 #### SaveCheckpoint
@@ -1705,6 +1815,39 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-08-01 — §7.6 NEW read-only verb `ProjectFaceBoundary`**
+  (SKETCH-ON-FACE W1a; cross-track sign-off recorded 2026-08-01.
+  Additive verb: no existing verb, arg, result field or wire
+  byte moves, and `protocol/fixtures/` is untouched, so **no fixture bump**.)
+  This is the missing PRODUCER for the `referenceLocked` chain the entry below
+  gave a contract but no author. It returns a picked planar face's boundary as
+  2D primitives so Rust can mint locked sketch geometry from it.
+  * **Read-only** (§7.6): no fence, no prepare/accept/discard, no element-map
+    minting. It reads a copy of the head, exactly like the §7.5 identity verbs, so
+    a stale or absent reference answers `present:false` rather than erroring.
+  * **Addressing** (§7.6): `elementId` or `{bodyId, topoKey}` — the same pair
+    `QueryElement` takes, but with one extra rung on the `elementId` branch
+    (partition entry → `(bodyId, topoKey)` → sub-shape). `QueryElement` stops at
+    the partition descriptor and never reaches a `TopoDS_Shape`; this verb must,
+    so the rung is spelled out normatively rather than left implied.
+  * **The plane is INPUT and AUTHORITATIVE** (§7.6): Rust owns the basis; the
+    worker expresses every coordinate in it and never substitutes its own. The
+    two-round-trip handshake — `frameOnly` for the kernel-exact `gp_Pln` frame,
+    then the real projection in the basis Rust built from it — exists because a
+    descriptor `center` is an axis-aligned bbox centre and sits OFF the face plane
+    for a tilted face (a sliver at extrude time).
+  * **Response-local refs** (§7.6): `points[].ref` is `p<N>`, 0-based, scoped to
+    the one response. It is deliberately NOT an `ElementId` — Invariant 1 keeps id
+    minting in Rust, and a read-only query mints nothing.
+  * **Lossy fallback documented** (§7.6): unsupported curve types (B-spline,
+    ellipse, …) degrade to a Line polyline of `fallbackSegmentsPerCurve` segments.
+    Called out explicitly because the loss is permanent and invisible downstream.
+  * **Determinism** (§7.6): the emission order (seed face → outer wire → holes →
+    `BRepTools_WireExplorer` edges; points numbered by first use) is normative, so
+    the response is byte-identical across fresh worker processes.
+  * **Not changed**: every existing verb, `QueryElement`'s own contract, the
+    §7.3/§7.4 sketch wire shapes, and the §8 error taxonomy (this verb uses only
+    the existing `OP_FAILED` / `PROTOCOL_ERROR` codes).
 - **2026-08-01 — §7.3 `entities[].referenceLocked` documented AND honored; §7.4
   region-detection exclusion narrowed to `construction` alone**
   (W0b host-face reference geometry; cross-track sign-off recorded 2026-08-01;

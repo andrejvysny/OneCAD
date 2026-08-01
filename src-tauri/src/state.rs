@@ -30,8 +30,8 @@ use crate::dto::WorkerStatusDto;
 use crate::events;
 use crate::export::GeometryExporter;
 use crate::worker::{
-    resolve_worker_path, ElementQuery, MeshProvider, PendingBackend, PreviewEngine, SolverEngine,
-    SupervisorConfig, WorkerLifecycle, WorkerManager, WorkerState,
+    resolve_worker_path, ElementQuery, FaceBoundaryProjection, MeshProvider, PendingBackend,
+    PreviewEngine, SolverEngine, SupervisorConfig, WorkerLifecycle, WorkerManager, WorkerState,
 };
 
 /// The geometry backend split into its three facets (the executor drives the
@@ -43,8 +43,11 @@ pub type BackendPair = (
     Arc<dyn SolverEngine>,
 );
 
-/// A backend bundle: the [`BackendPair`] facets plus the [`GeometryExporter`] for the
-/// same worker (`export_step_file` drives it). Same `WorkerManager` Arc throughout.
+/// A backend bundle: the [`BackendPair`] facets plus the read-only side seams for
+/// the same worker — [`GeometryExporter`] (`export_step_file`), [`ElementQuery`]
+/// (`face_sketch_plane` / `element_info`), [`PreviewEngine`] (`preview_op`) and
+/// [`FaceBoundaryProjection`] (`add_sketch_on_face`). Same `WorkerManager` Arc
+/// throughout.
 pub type BackendBundle = (
     Arc<dyn GeometryEngine>,
     Arc<dyn MeshProvider>,
@@ -52,6 +55,7 @@ pub type BackendBundle = (
     Arc<dyn GeometryExporter>,
     Arc<dyn ElementQuery>,
     Arc<dyn PreviewEngine>,
+    Arc<dyn FaceBoundaryProjection>,
 );
 
 /// Builds a fresh backend bundle for a newly opened document.
@@ -93,6 +97,9 @@ pub struct AppState {
     element_query: RwLock<Arc<dyn ElementQuery>>,
     /// The current document's drag-time preview engine (same `WorkerManager` Arc).
     preview: RwLock<Arc<dyn PreviewEngine>>,
+    /// The current document's host-face boundary projector (same `WorkerManager`
+    /// Arc), used by `add_sketch_on_face`. Swapped alongside the exporter.
+    face_projection: RwLock<Arc<dyn FaceBoundaryProjection>>,
     backend_factory: BackendFactory,
 }
 
@@ -110,6 +117,7 @@ impl AppState {
             exporter: RwLock::new(Arc::new(PendingBackend)),
             element_query: RwLock::new(Arc::new(PendingBackend)),
             preview: RwLock::new(Arc::new(PendingBackend)),
+            face_projection: RwLock::new(Arc::new(PendingBackend)),
             backend_factory,
         }
     }
@@ -125,7 +133,8 @@ impl AppState {
     /// worker.
     #[must_use]
     pub fn make_backend(&self) -> BackendPair {
-        let (engine, meshes, solver, exporter, elements, preview) = (self.backend_factory)();
+        let (engine, meshes, solver, exporter, elements, preview, face_projection) =
+            (self.backend_factory)();
         if let Ok(mut slot) = self.exporter.write() {
             *slot = exporter;
         }
@@ -134,6 +143,9 @@ impl AppState {
         }
         if let Ok(mut slot) = self.preview.write() {
             *slot = preview;
+        }
+        if let Ok(mut slot) = self.face_projection.write() {
+            *slot = face_projection;
         }
         (engine, meshes, solver)
     }
@@ -155,6 +167,13 @@ impl AppState {
     pub fn preview(&self) -> Arc<dyn PreviewEngine> {
         self.preview.read().unwrap().clone()
     }
+
+    /// The current document's host-face boundary projector
+    /// (see [`make_backend`](Self::make_backend)).
+    #[must_use]
+    pub fn face_projection(&self) -> Arc<dyn FaceBoundaryProjection> {
+        self.face_projection.read().unwrap().clone()
+    }
 }
 
 impl Default for AppState {
@@ -172,6 +191,7 @@ impl Default for AppState {
             exporter: RwLock::new(Arc::new(PendingBackend)),
             element_query: RwLock::new(Arc::new(PendingBackend)),
             preview: RwLock::new(Arc::new(PendingBackend)),
+            face_projection: RwLock::new(Arc::new(PendingBackend)),
             backend_factory,
         }
     }
@@ -213,8 +233,17 @@ fn real_worker_factory(
             let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
             let exporter: Arc<dyn GeometryExporter> = Arc::new(wm.clone());
             let elements: Arc<dyn ElementQuery> = Arc::new(wm.clone());
-            let preview: Arc<dyn PreviewEngine> = Arc::new(wm);
-            (engine, meshes, solver, exporter, elements, preview)
+            let preview: Arc<dyn PreviewEngine> = Arc::new(wm.clone());
+            let face_projection: Arc<dyn FaceBoundaryProjection> = Arc::new(wm);
+            (
+                engine,
+                meshes,
+                solver,
+                exporter,
+                elements,
+                preview,
+                face_projection,
+            )
         }
         None => {
             let backend = Arc::new(PendingBackend);
@@ -223,8 +252,17 @@ fn real_worker_factory(
             let solver: Arc<dyn SolverEngine> = backend.clone();
             let exporter: Arc<dyn GeometryExporter> = backend.clone();
             let elements: Arc<dyn ElementQuery> = backend.clone();
-            let preview: Arc<dyn PreviewEngine> = backend;
-            (engine, meshes, solver, exporter, elements, preview)
+            let preview: Arc<dyn PreviewEngine> = backend.clone();
+            let face_projection: Arc<dyn FaceBoundaryProjection> = backend;
+            (
+                engine,
+                meshes,
+                solver,
+                exporter,
+                elements,
+                preview,
+                face_projection,
+            )
         }
     })
 }

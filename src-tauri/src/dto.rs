@@ -479,6 +479,36 @@ impl From<onecad_core::sketch::SketchPlane> for SketchPlaneDto {
     }
 }
 
+/// `addSketchOnFace` result — the projected host-face sketch the backend just
+/// committed (SCHEMA §7.6 `ProjectFaceBoundary` → `EditCommand::AddSketch`).
+///
+/// Deliberately lean: the sketch's full geometry arrives through the normal
+/// `enterSketch` / `getSketch` path, so this carries only what the caller cannot
+/// derive — the frozen frame plus enough counts to render a confirmation and to
+/// assert the projection was not empty.
+///
+/// `sketch_id` echoes the id the CALLER minted (the id-adoption rule: the backend
+/// `SketchId`, the frontend id and the projection-store key are one string).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SketchOnFaceDto {
+    pub sketch_id: String,
+    /// The frozen sketch frame, derived from the kernel-exact face plane.
+    pub plane: SketchPlaneDto,
+    /// Locked entities minted from the projection (points + curves).
+    pub entity_count: u32,
+    /// `Fixed` constraints minted — one per projected point.
+    pub constraint_count: u32,
+    /// Faces the projection covered: the seed face plus its coplanar companions
+    /// (SCHEMA §7.6 `faceCount`).
+    pub face_count: u32,
+    /// Whether the projected geometry closes into at least one boundary. `false`
+    /// is NOT an error — the sketch still exists, it just forms no region yet.
+    pub has_closed_boundary: bool,
+    /// The attachment's `projectedBoundaryVersion` after this projection.
+    pub projected_boundary_version: u32,
+}
+
 /// `finishSketch` result (`types.ts FinishSketchResult`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]

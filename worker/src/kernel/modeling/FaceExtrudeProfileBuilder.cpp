@@ -1,6 +1,8 @@
 // Ported from OneCAD-CPP src/kernel/modeling/FaceExtrudeProfileBuilder.cpp @ b4ddcccc (2026-07-16)
 #include "FaceExtrudeProfileBuilder.h"
 
+#include "topology/CoplanarFacePatch.h"
+
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRep_Builder.hxx>
@@ -48,24 +50,10 @@ double sanitizeNormalDotTolerance(double value, double fallback) {
     return fallback;
 }
 
+// Single planar-frame extractor, shared with the coplanar patch scan and the
+// face-boundary projector (hoisted to CoplanarFacePatch; body unchanged).
 bool planarFacePlaneAndNormal(const TopoDS_Face& face, gp_Pln& planeOut, gp_Dir& normalOut) {
-    try {
-        if (face.IsNull()) {
-            return false;
-        }
-        BRepAdaptor_Surface surface(face, true);
-        if (surface.GetType() != GeomAbs_Plane) {
-            return false;
-        }
-        planeOut = surface.Plane();
-        normalOut = planeOut.Axis().Direction();
-        if (face.Orientation() == TopAbs_REVERSED) {
-            normalOut.Reverse();
-        }
-        return true;
-    } catch (...) {
-        return false;
-    }
+    return CoplanarFacePatch::planarFacePlaneAndNormal(face, planeOut, normalOut);
 }
 
 double faceArea(const TopoDS_Face& face) {

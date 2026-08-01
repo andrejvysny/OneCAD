@@ -262,6 +262,7 @@ pub fn run() {
             api::finish_sketch,
             api::promote_selection,
             api::face_sketch_plane,
+            api::add_sketch_on_face,
             api::element_info,
             api::preview_op,
             api::resolve_refs,

@@ -15,9 +15,11 @@ use serde::Deserialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use onecad_core::document::record::Operation;
-use onecad_core::document::refs::{AnchorIntent, ElementRef};
+use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, PrimaryRef};
 use onecad_core::edit::{EditCommand, SketchEditOp};
-use onecad_core::ids::{BodyId, EntityId, RecordId, SketchId, SnapshotId, TopoKey};
+use onecad_core::ids::{
+    BodyId, ConstraintId, ElementId, EntityId, RecordId, SketchId, SnapshotId, TopoKey,
+};
 use onecad_core::io::container::SaveMeta;
 use onecad_core::io::recovery::{scan_stale_markers, RecoveryOffer};
 use onecad_core::regen::{RegenRequest, ResolveRef, ResolveRequest};
@@ -26,8 +28,8 @@ use crate::autosave;
 use crate::document_runtime::{DocumentRuntime, RegenReport};
 use crate::dto::{
     BeginGestureDto, DocumentProjection, DocumentSnapshotDto, DragSolveDto, FinishSketchDto,
-    PromotedElementDto, RecentProjectDto, RecoveryInfoDto, ResolveRefDto, SketchSessionDto,
-    SketchUpsertDto,
+    PromotedElementDto, RecentProjectDto, RecoveryInfoDto, ResolveRefDto, SketchOnFaceDto,
+    SketchSessionDto, SketchUpsertDto,
 };
 use crate::error::ApiError;
 use crate::events;
@@ -933,6 +935,255 @@ pub async fn face_sketch_plane(
         onecad_core::math::Vec3::new_unchecked(info.normal[0], info.normal[1], info.normal[2]),
     );
     Ok(plane.into())
+}
+
+/// The addressing rung that actually resolved a picked face, kept so the SECOND
+/// projection round-trip re-uses it verbatim instead of re-walking the ladder.
+///
+/// Re-laddering between the two calls would be a real hazard, not a nicety: the
+/// two rungs can resolve to DIFFERENT faces (a stale `topoKey` and a live
+/// `elementId` need not agree), and the handshake's whole premise is that both
+/// round-trips describe the same face.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ResolvedFaceAddress {
+    ElementId(String),
+    TopoKey(String),
+}
+
+impl ResolvedFaceAddress {
+    fn as_wire(&self) -> wire::FaceAddress<'_> {
+        match self {
+            Self::ElementId(id) => wire::FaceAddress::ElementId(id),
+            Self::TopoKey(key) => wire::FaceAddress::TopoKey(key),
+        }
+    }
+}
+
+/// Creates a sketch ON a picked planar face, seeded with that face's projected
+/// boundary as locked reference geometry (SKETCH-ON-FACE W1b; SCHEMA §7.6
+/// `ProjectFaceBoundary`).
+///
+/// This is the AUTHORING sibling of [`face_sketch_plane`], which stays the
+/// frontend's read-only pre-flight (does this face host a sketch, and where?).
+/// Here the backend additionally asks the kernel for the face's boundary and
+/// mints it into the new sketch as `referenceLocked` entities pinned by `Fixed`
+/// constraints — the geometry a user snaps a profile to.
+///
+/// # The two-round-trip plane handshake (SCHEMA §7.6)
+///
+/// 1. `frameOnly` — the kernel's own `gp_Pln` origin + orientation-corrected
+///    normal. This is why the verb exists rather than reusing `QueryElement`: a
+///    descriptor `center` is an axis-aligned **bbox** centre and sits OFF the
+///    plane for a tilted face, so a sketch built on it would extrude a sliver.
+/// 2. Rust builds the deterministic, lock-tested basis
+///    ([`plane_from_point_normal`](onecad_core::sketch::plane_from_point_normal)) —
+///    Rust owns the frame, and the frame is frozen with the sketch, so a
+///    non-deterministic basis would rotate stored sketches on reopen.
+/// 3. The real projection, in THAT basis, over `coplanarBody` scope so a face
+///    split into coplanar patches projects as one outline. Its echoed `exact` is
+///    compared against round-trip 1 as a **tripwire**: a mismatch means the head
+///    moved between the calls, and the command refuses rather than committing a
+///    sketch whose boundary belongs to a different face.
+///
+/// # Identity + ordering
+///
+/// * `sketch_id` is the FRONTEND-minted uuid and becomes the document `SketchId`
+///   **verbatim**. The frontend keys its projection store by that id, so minting
+///   a different one here would strand the store's entry.
+/// * `topo_key` walks the same two-rung read ladder [`face_sketch_plane`] and
+///   [`element_info`] do — topoKey FIRST, because a just-promoted, never-consumed
+///   `ElementId` is genuinely absent from the worker's on-demand element-map
+///   partition (see [`element_info`]'s doc comment).
+/// * Both worker round-trips run OUTSIDE the runtime lock; the lock is taken only
+///   for the presence check and for the single [`EditCommand::AddSketch`] apply.
+/// * An unresolvable face, a non-planar face, or a malformed response leaves the
+///   document **completely untouched** — nothing is applied until the projection
+///   has landed and translated.
+///
+/// A sketch created here has entities in the DOCUMENT immediately, but NOT a
+/// `Sketch` timeline record: the regen planner resolves an extrude's profile only
+/// from such a record, and minting one is `finish_sketch`'s job
+/// (EXTRUDE-COMMIT-FIX). Enter then finish before extruding off this sketch.
+#[tauri::command]
+pub async fn add_sketch_on_face(
+    state: State<'_, AppState>,
+    snapshot_id: u64,
+    body_id: String,
+    element_id: String,
+    topo_key: Option<String>,
+    sketch_id: String,
+    name: String,
+) -> Result<SketchOnFaceDto, ApiError> {
+    let body = wire::parse_body_id(&body_id).map_err(ApiError::InvalidCommand)?;
+    // Adopted VERBATIM (see the doc comment): backend SketchId == frontend id.
+    let sketch_id = parse_sketch_id(&sketch_id)?;
+    let topo_key = topo_key.unwrap_or_default();
+    if element_id.is_empty() && topo_key.is_empty() {
+        return Err(ApiError::InvalidCommand(
+            "addSketchOnFace: one of elementId / topoKey is required".into(),
+        ));
+    }
+    {
+        // Presence check only — the runtime lock is NOT held across the worker
+        // round-trips below (the R-WP11 rule; a held lock makes fencing inert).
+        let guard = state.runtime.lock().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("addSketchOnFace".into()))?;
+    }
+    let snapshot = SnapshotId(snapshot_id);
+    let projector = state.face_projection();
+
+    // ── Round-trip 1: the kernel-exact frame, via the topoKey-first ladder ────
+    let mut resolved: Option<(ResolvedFaceAddress, onecad_core::sketch::FaceFrame)> = None;
+    if !topo_key.is_empty() {
+        let address = ResolvedFaceAddress::TopoKey(topo_key.clone());
+        if let Some(frame) = projector
+            .project_face_boundary_frame(snapshot, body, address.as_wire())
+            .await?
+        {
+            resolved = Some((address, frame));
+        }
+    }
+    if resolved.is_none() && !element_id.is_empty() {
+        let address = ResolvedFaceAddress::ElementId(element_id.clone());
+        if let Some(frame) = projector
+            .project_face_boundary_frame(snapshot, body, address.as_wire())
+            .await?
+        {
+            resolved = Some((address, frame));
+        }
+    }
+    let (address, frame) = resolved.ok_or_else(|| {
+        ApiError::InvalidCommand(format!(
+            "addSketchOnFace: face (elementId {element_id:?}, topoKey {topo_key:?}) on body \
+             {body_id} is not present in snapshot {snapshot_id}"
+        ))
+    })?;
+
+    // ── The frame Rust owns, frozen with the sketch ──────────────────────────
+    let plane = onecad_core::sketch::plane_from_point_normal(frame.origin, frame.normal);
+
+    // ── Round-trip 2: the real projection in that basis ──────────────────────
+    let payload = projector
+        .project_face_boundary(
+            snapshot,
+            body,
+            address.as_wire(),
+            &plane,
+            // A model face is routinely split into coplanar patches by unrelated
+            // features; projecting only the seed patch would seed a sketch with a
+            // partial outline that silently forms the wrong region.
+            wire::ProjectionScope::CoplanarBody,
+        )
+        .await?
+        .ok_or_else(|| {
+            ApiError::Internal(format!(
+                "addSketchOnFace: face on body {body_id} resolved for the frame query but \
+                 vanished before the projection — the head moved mid-handshake"
+            ))
+        })?;
+
+    // TRIPWIRE (SCHEMA §7.6): the echoed `exact` must still describe the frame the
+    // sketch's basis was built from. It is not a fence, so it cannot prevent a
+    // concurrent edit — it can only refuse to commit a boundary that no longer
+    // belongs to the plane it is expressed in.
+    const EXACT_EPS: f64 = 1e-9;
+    if !payload.exact.approx_eq(&frame, EXACT_EPS) {
+        return Err(ApiError::Internal(format!(
+            "addSketchOnFace: the projection echoed a different exact frame than the \
+             frameOnly query (frameOnly {:?}/{:?}, projection {:?}/{:?}) — refusing to commit a \
+             boundary expressed in a stale basis",
+            frame.origin, frame.normal, payload.exact.origin, payload.exact.normal
+        )));
+    }
+
+    // ── Translate + build (pure; no worker, no lock) ─────────────────────────
+    let (entities, constraints) = onecad_core::sketch::projected_sketch_content(
+        &payload,
+        &mut EntityId::new,
+        &mut ConstraintId::new,
+    );
+    let attachment = onecad_core::sketch::SketchAttachment::HostFace {
+        face: ElementRef {
+            // Only a real, non-empty ElementId is a binding; an empty string
+            // would be a fabricated identity the resolution ladder would chase.
+            primary: (!element_id.is_empty()).then(|| PrimaryRef {
+                body,
+                element: ElementId::new(element_id.clone()),
+                kind: ElementKind::Face,
+                extra: Default::default(),
+            }),
+            // No `intent`: the descriptor is worker-owned evidence and capturing
+            // it would cost a third round-trip this command has no other use for.
+            intent: None,
+            anchor: Some(AnchorIntent {
+                // The kernel-exact plane origin — a point genuinely ON the face,
+                // unlike a bbox centre.
+                world_point: frame.origin,
+                surface_uv: None,
+                local_frame: None,
+                adjacency_hint: None,
+                extra: Default::default(),
+            }),
+            extra: Default::default(),
+        },
+        projected_boundary_version: 1,
+    };
+    let mut sketch = onecad_core::sketch::Sketch::new(sketch_id, name, attachment);
+    sketch.plane = plane;
+    let (entity_count, constraint_count) = (entities.len(), constraints.len());
+    for entity in entities {
+        sketch
+            .add_entity(entity)
+            .map_err(|e| ApiError::Internal(format!("addSketchOnFace: projected entity: {e}")))?;
+    }
+    for constraint in constraints {
+        sketch.add_constraint(constraint).map_err(|e| {
+            ApiError::Internal(format!("addSketchOnFace: projected constraint: {e}"))
+        })?;
+    }
+
+    // ── The single locked write ──────────────────────────────────────────────
+    let (outcome, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("addSketchOnFace".into()))?;
+        let outcome = rt
+            .apply(EditCommand::AddSketch { sketch })
+            .inspect_err(|e| {
+                tracing::warn!("add_sketch_on_face: sketch={sketch_id} REJECTED: {e}")
+            })?;
+        (outcome, rt.projection())
+    };
+    tracing::info!(
+        "add_sketch_on_face: sketch={sketch_id} body={body_id} faces={} entities={entity_count} \
+         constraints={constraint_count} closed={}",
+        payload.face_count,
+        payload.has_closed_boundary
+    );
+    // The AppHandle comes from the set-once `AppState` slot rather than a command
+    // parameter: `AppHandle` is generic over the runtime, and taking it here would
+    // pin this command to `Wry` and make it uncallable from a `mock_app` test (the
+    // only way to exercise it against the real worker). Absent ⇒ no webview yet.
+    if let Some(app) = state.app.get() {
+        let _ = app.emit(events::PROJECTION_UPDATED, &projection);
+    }
+    if let Some(sched) = state.scheduler.get() {
+        sched.handle(&outcome);
+    }
+    state.note_mutation();
+
+    Ok(SketchOnFaceDto {
+        sketch_id: sketch_id.to_string(),
+        plane: plane.into(),
+        entity_count: entity_count.try_into().unwrap_or(u32::MAX),
+        constraint_count: constraint_count.try_into().unwrap_or(u32::MAX),
+        face_count: payload.face_count,
+        has_closed_boundary: payload.has_closed_boundary,
+        projected_boundary_version: 1,
+    })
 }
 
 /// Read one element's geometric evidence (`QueryElement`; SCHEMA §7.5) —
