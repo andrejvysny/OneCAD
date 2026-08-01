@@ -57,6 +57,23 @@ export function projectionToStore(p: DocumentProjectionWire): DocumentProjection
       geometryToken: s.geometryToken,
     };
   }
+  // Datums: the resolved `plane` is carried VERBATIM (never re-derived from
+  // basePlaneId+offset — the backend is the basis authority) and tagged `custom`,
+  // which is the plane kind a datum frame takes on the wire (SCHEMA §7.3).
+  // `?? {}` is a belt-and-braces guard: the field is required on the wire, but a
+  // dev webview pointed at an older backend build would otherwise take down ALL
+  // hydration, not just the datums.
+  const datums: DocumentProjection["datums"] = {};
+  for (const [id, d] of Object.entries(p.datums ?? {})) {
+    datums[id] = {
+      id: d.id,
+      name: d.name,
+      basePlaneId: d.basePlaneId,
+      offset: d.offset,
+      plane: { kind: "custom", ...d.plane },
+      resolvedValid: d.resolvedValid,
+    };
+  }
   const features = p.features.map(toFeatureMeta);
   return {
     status: p.status,
@@ -65,6 +82,7 @@ export function projectionToStore(p: DocumentProjectionWire): DocumentProjection
     dirty: p.dirty,
     bodies: { ...p.bodies },
     sketches,
+    datums,
     features,
   };
 }

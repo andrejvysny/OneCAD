@@ -94,6 +94,14 @@ describe("keymap resolveBinding", () => {
     // Sketch P = point, deliberately SHADOWING the cross-mode linearPattern.
     expect(resolveBinding("p", false, "sketch")).toEqual({ type: "tool", tool: "point" });
     expect(resolveBinding("p", false, "model")).toEqual({ type: "tool", tool: "linearPattern" });
+
+    // DATUM W1: D is mode-resolved, exactly like R. Sketch mode's Dimension tool
+    // claims `d` first, so the datum tool can never fire while drawing.
+    expect(resolveBinding("d", false, "model")).toEqual({ type: "tool", tool: "datum" });
+    expect(resolveBinding("d", false, "sketch")).toEqual({ type: "tool", tool: "dimension" });
+    // …and the chord form is unclaimed in both tables.
+    expect(resolveBinding("d", true, "model")).toBeNull();
+    expect(resolveBinding("d", true, "sketch")).toBeNull();
   });
 
   it("binds Delete/Backspace to delete-sketch-selection (sketch mode only)", () => {

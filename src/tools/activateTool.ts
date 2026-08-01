@@ -38,6 +38,10 @@ const SKETCH_ONLY: ReadonlySet<Tool> = new Set([
 ]);
 
 const MODEL_ONLY: ReadonlySet<Tool> = new Set([
+  // Datum planes are authored against WORLD/datum planes, which only exist in
+  // model mode — pressing D inside a sketch finishes that sketch first (the
+  // shared drained-squash path), exactly like Extrude.
+  "datum",
   "extrude",
   "revolve",
   "fillet",

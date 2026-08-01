@@ -7,6 +7,7 @@ import { selectionStore, useSelectionStore, type EntityKind } from "@/stores/sel
 import { useToolStore } from "@/stores/toolStore";
 import { TreeRow } from "./TreeRow";
 import {
+  deleteDatum,
   deleteSketch,
   renameBody,
   renameSketch,
@@ -15,11 +16,19 @@ import {
 } from "./treeActions";
 
 /** Which row the shared context menu is currently anchored to. */
-type MenuTarget = { kind: "body" | "sketch"; id: string; name: string; visible: boolean };
+type MenuTarget = {
+  kind: "body" | "sketch" | "datum";
+  id: string;
+  name: string;
+  visible: boolean;
+};
 
 /**
- * Docked model tree: BODIES + SKETCHES sections driven by the document
- * projection. Click selects; double-clicking a sketch enters sketch mode.
+ * Docked model tree: BODIES + SKETCHES + DATUMS sections driven by the document
+ * projection. Click selects; double-clicking a sketch enters sketch mode, and
+ * double-clicking a DATUM starts a new sketch hosted on it (the selection is set
+ * first, then `setMode("sketch")` — SketchController's `tryEnterOnSelectedDatum`
+ * picks the selection up, exactly as the face path works).
  *
  * The eye and the rename affordance are BACKEND-BACKED (TRUST wave): both route
  * through `treeActions`, which dispatches `SetVisibility` / `RenameBody` /
@@ -32,6 +41,7 @@ type MenuTarget = { kind: "body" | "sketch"; id: string; name: string; visible: 
 export function ModelTreePanel() {
   const bodies = useDocumentStore((s) => s.bodies);
   const sketches = useDocumentStore((s) => s.sketches);
+  const datums = useDocumentStore((s) => s.datums);
   const selected = useSelectionStore((s) => s.selected);
   const select = useSelectionStore((s) => s.set);
   const setMode = useToolStore((s) => s.setMode);
@@ -123,6 +133,25 @@ export function ModelTreePanel() {
         ))}
       </div>
 
+      <SectionLabel className="px-[14px] pb-1 pt-3">Datums</SectionLabel>
+      <div role="listbox" aria-label="Datums">
+        {Object.values(datums).map((d) => (
+          <TreeRow
+            key={d.id}
+            name={d.name}
+            icon="datum"
+            // No eye: a datum carries no visibility fact in the document.
+            selected={isSelected("datum", d.id)}
+            onSelect={() => select([{ kind: "datum", id: d.id }])}
+            onActivate={() => {
+              select([{ kind: "datum", id: d.id }]);
+              setMode("sketch");
+            }}
+            onContextMenu={openMenu({ kind: "datum", id: d.id, name: d.name, visible: true })}
+          />
+        ))}
+      </div>
+
       {menu && (
         // Keyed by the target so re-opening on a DIFFERENT row re-runs the
         // Popover's anchor-measuring effect (it keys off `open`, and the ref
@@ -136,25 +165,57 @@ export function ModelTreePanel() {
           width={170}
           className="p-1"
         >
-          <MenuItem
-            label="Rename"
-            shortcut="F2"
-            data-testid="tree-menu-rename"
-            onClick={() => {
-              closeMenu();
-              setRenaming(menu.id);
-            }}
-          />
-          <MenuItem
-            label={menu.visible ? "Hide" : "Show"}
-            data-testid="tree-menu-visibility"
-            onClick={() => {
-              closeMenu();
-              void (menu.kind === "body"
-                ? setBodyVisible(menu.id, !menu.visible)
-                : setSketchVisible(menu.id, !menu.visible));
-            }}
-          />
+          {/* Rename + Hide/Show are body/sketch-only: DATUM W1 ships no
+              RenameDatum command and a datum has no visibility fact, so offering
+              either would be a dead affordance. */}
+          {menu.kind !== "datum" && (
+            <>
+              <MenuItem
+                label="Rename"
+                shortcut="F2"
+                data-testid="tree-menu-rename"
+                onClick={() => {
+                  closeMenu();
+                  setRenaming(menu.id);
+                }}
+              />
+              <MenuItem
+                label={menu.visible ? "Hide" : "Show"}
+                data-testid="tree-menu-visibility"
+                onClick={() => {
+                  closeMenu();
+                  void (menu.kind === "body"
+                    ? setBodyVisible(menu.id, !menu.visible)
+                    : setSketchVisible(menu.id, !menu.visible));
+                }}
+              />
+            </>
+          )}
+          {menu.kind === "datum" && (
+            // Two-click confirm, same idiom as the sketch delete below. The
+            // backend refuses while a sketch is hosted on the datum; treeActions
+            // surfaces that rejection as a sticky hint.
+            <>
+              {confirmDelete ? (
+                <MenuItem
+                  label="Confirm delete"
+                  danger
+                  data-testid="tree-menu-datum-delete-confirm"
+                  onClick={() => {
+                    closeMenu();
+                    void deleteDatum(menu.id);
+                  }}
+                />
+              ) : (
+                <MenuItem
+                  label="Delete datum"
+                  danger
+                  data-testid="tree-menu-datum-delete"
+                  onClick={() => setConfirmDelete(true)}
+                />
+              )}
+            </>
+          )}
           {menu.kind === "sketch" && (
             <>
               <div aria-hidden="true" className="my-1 h-px bg-border" />

@@ -19,7 +19,7 @@ describe("activateTool — tool classification", () => {
       expect(isSketchOnlyTool(t)).toBe(true);
       expect(isModelOnlyTool(t)).toBe(false);
     }
-    for (const t of ["extrude", "revolve", "fillet", "chamfer", "boolean", "shell", "linearPattern", "circularPattern"] as const) {
+    for (const t of ["datum", "extrude", "revolve", "fillet", "chamfer", "boolean", "shell", "linearPattern", "circularPattern"] as const) {
       expect(isModelOnlyTool(t)).toBe(true);
       expect(isSketchOnlyTool(t)).toBe(false);
     }
@@ -93,6 +93,18 @@ describe("activateTool — sketch mode", () => {
     await activateTool("extrude");
     expect(toolStore.getState().mode).toBe("model");
     expect(viewportStore.getState().pendingExtrudeSketch).toBe("sketch2");
+  });
+
+  it("datum (DATUM W1) finishes the sketch FIRST, then arms in model mode", async () => {
+    await activateTool("datum");
+    const s = toolStore.getState();
+    // A datum is authored against world planes, which only exist in model mode —
+    // pressing D while drawing must not leave a half-finished sketch behind.
+    expect(s.mode).toBe("model");
+    expect(s.modelTool).toBe("datum");
+    expect(s.phase).toBe("armed");
+    expect(viewportStore.getState().activeSketchId).toBeNull();
+    expect(viewportStore.getState().pendingExtrudeSketch).toBeNull();
   });
 
   it.each(["revolve", "chamfer", "boolean", "shell", "linearPattern", "circularPattern"] as const)(

@@ -62,8 +62,10 @@ function colorFor(kind: PickablePlane): THREE.Color {
 
 /** Geometric plane name for a WORLD normal (standard convention: the plane
  *  perpendicular to +X is "YZ", to +Y is "XZ", to +Z is "XY") — independent of
- *  which repo `kind` that basis happens to be labeled with (see module doc). */
-function geometricLabel(normal: readonly [number, number, number]): string {
+ *  which repo `kind` that basis happens to be labeled with (see module doc).
+ *  Exported so anything that shows a plane to the user (the datum chip) reads
+ *  the same name the picker's hover chip does. */
+export function geometricLabel(normal: readonly [number, number, number]): string {
   const [ax, ay, az] = [Math.abs(normal[0]), Math.abs(normal[1]), Math.abs(normal[2])];
   if (ax >= ay && ax >= az) return "YZ";
   if (ay >= az) return "XZ";

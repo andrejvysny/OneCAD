@@ -47,6 +47,7 @@ import { PreviewMesh } from "./PreviewMesh";
 import { DragHandle } from "./DragHandle";
 import { RevolvePreview, type AxisCandidate } from "./RevolvePreview";
 import { PlanePicker, type PickablePlane } from "./PlanePicker";
+import { DatumLayer, datumGhostPlane, type DatumVisual } from "./DatumLayer";
 import { GhostLayer } from "./GhostLayer";
 import type { LatheAxis } from "@/tools/preview/lathePreview";
 import type { GhostTransform } from "@/tools/preview/patternPreview";
@@ -136,6 +137,9 @@ export class ViewportEngine {
 
   // Always-visible document sketches in MODEL mode (Fusion-style static layer).
   private sketchStatic: SketchStaticLayer | null = null;
+
+  // Always-visible datum (reference) planes + the datum tool's ghost (DATUM W1).
+  private datumLayer: DatumLayer | null = null;
 
   // Sketch mode (F-WP6).
   private overlayEl: HTMLElement | null = null;
@@ -241,11 +245,15 @@ export class ViewportEngine {
       isActive: () => this.pickHandlers?.isActive() ?? false,
       onHover: (hit, x, y, alt) => this.pickHandlers?.onHover(hit, x, y, alt),
       onPick: (hit, mods, x, y) => this.pickHandlers?.onPick(hit, mods, x, y),
-      // Secondary hover token: the always-visible sketch under the pointer (only
-      // consulted when there is no body hit).
+      // Secondary hover token: the always-visible sketch — or, failing that, the
+      // datum plane — under the pointer (only consulted when there is no body
+      // hit). A datum must be folded in here too, else moving between two datums
+      // in empty space produces no key change and hover never fires.
       secondaryHoverKey: (x, y) => {
         const hit = this.sketchStaticHitTest(x, y);
-        return hit ? sketchStaticHitKey(hit) : null;
+        if (hit) return sketchStaticHitKey(hit);
+        const datumId = this.datumHitTest(x, y);
+        return datumId ? `datum:${datumId}` : null;
       },
     });
 
@@ -381,6 +389,8 @@ export class ViewportEngine {
     if (this.planePicker?.visible) {
       this.planePicker.update(camera, height);
     }
+    // Datum quads hold a constant on-screen size (they ARE the hit geometry).
+    this.datumLayer?.update(camera, height);
     if (this.sketch) {
       this.sketch.update(width * dpr, height * dpr, this.controls.getTarget(), this.controls.getDistance());
     }
@@ -888,6 +898,81 @@ export class ViewportEngine {
     return this.planePicker.hitTest(this.raycaster)?.kind ?? null;
   }
 
+  /** Drop the plane picker's hover highlight + label (a datum won the pointer). */
+  clearPlanePickerHover(): void {
+    this.planePicker?.setHover(null);
+  }
+
+  // ---- Datum (reference) planes — DATUM W1 ----
+  //
+  // Persistent document content, so the layer is always live in model mode (the
+  // datumSync controller drives it from documentStore.datums). Deliberately NOT
+  // in the orbit gate (SketchStaticLayer convention): clicking empty space near a
+  // datum still orbits.
+
+  /** The datum layer (lazy). Null before `init()` — there is no overlay host yet. */
+  private ensureDatumLayer(): DatumLayer | null {
+    if (this.disposed || !this.overlayEl) return null;
+    if (!this.datumLayer) {
+      this.datumLayer = new DatumLayer({
+        root: this.interactionRoot,
+        overlay: this.overlayDriver,
+        overlayEl: this.overlayEl,
+        invalidate: () => this.invalidate(),
+      });
+    }
+    return this.datumLayer;
+  }
+
+  /** Reconcile the rendered datum planes against the projection (add/remove/move). */
+  syncDatums(metas: readonly DatumVisual[]): void {
+    const layer = this.ensureDatumLayer();
+    if (!layer) return;
+    layer.syncDatums(metas);
+    // Size the quads now, not on the next frame: a hit-test can raycast them
+    // before the render loop runs, and the quads ARE the hit geometry.
+    layer.update(this.rig.getCamera(), this.viewportSize().height);
+  }
+
+  /** The datum plane under a client point, or null. Pure (no hover mutation). */
+  datumHitTest(clientX: number, clientY: number): string | null {
+    if (!this.datumLayer) return null;
+    const ndc = this.clientToNdc(clientX, clientY);
+    if (!ndc || Math.abs(ndc.x) > 1 || Math.abs(ndc.y) > 1) return null;
+    this.raycaster.setFromCamera(ndc, this.rig.getCamera());
+    return this.datumLayer.hitTest(this.raycaster);
+  }
+
+  setDatumHover(id: string | null): void {
+    this.datumLayer?.setHover(id);
+  }
+
+  setDatumSelected(ids: readonly string[]): void {
+    this.datumLayer?.setSelected(ids);
+  }
+
+  /**
+   * Show the datum TOOL's live ghost quad for `baseKind` offset by `offset`, or
+   * hide it with `baseKind: null`. The frame comes from `datumGhostPlane` — the
+   * one place the frontend derives a datum basis, because nothing is committed
+   * yet and there is no backend frame to read (see DatumLayer's module doc).
+   */
+  setDatumGhost(baseKind: PickablePlane | null, offset: number, label?: string): void {
+    if (baseKind === null) {
+      this.datumLayer?.setGhost(null);
+      return;
+    }
+    const layer = this.ensureDatumLayer();
+    if (!layer) return;
+    layer.setGhost(datumGhostPlane(baseKind, offset), label);
+    layer.update(this.rig.getCamera(), this.viewportSize().height);
+  }
+
+  /** True while the datum tool ghost is on screen (gate/introspection probe). */
+  isDatumGhostVisible(): boolean {
+    return this.datumLayer?.ghostVisible ?? false;
+  }
+
   /** Raycast a client point onto an ARBITRARY sketch plane → plane (u,v). */
   screenToPlaneOn(plane: SketchPlane, clientX: number, clientY: number): Point2 | null {
     const ndc = this.clientToNdc(clientX, clientY);
@@ -1111,6 +1196,9 @@ export class ViewportEngine {
 
     this.sketchStatic?.dispose();
     this.sketchStatic = null;
+
+    this.datumLayer?.dispose();
+    this.datumLayer = null;
 
     // Model-tool previews.
     this.previewMesh?.dispose();

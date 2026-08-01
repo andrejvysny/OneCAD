@@ -18,6 +18,7 @@ const proj = (revision: number, over: Partial<DocumentProjectionWire> = {}): Doc
   dirty: true,
   bodies: {},
   sketches: {},
+  datums: {},
   features: [],
   ...over,
 });
@@ -76,7 +77,7 @@ describe("applyProjectionToStore", () => {
 
   it("always applies the empty projection (close), even at revision 0", () => {
     documentStore.getState().applySnapshot({ ...seedMockDocument(), revision: 5 });
-    const applied = applyProjectionToStore({ status: "empty", revision: 0, title: "", dirty: false, bodies: {}, sketches: {}, features: [] });
+    const applied = applyProjectionToStore({ status: "empty", revision: 0, title: "", dirty: false, bodies: {}, sketches: {}, datums: {}, features: [] });
     expect(applied).toBe(true);
     expect(documentStore.getState().status).toBe("empty");
     expect(documentStore.getState().bodies).toEqual({});
@@ -122,5 +123,61 @@ describe("applyProjectionToStore", () => {
     expect(feats[0].statusMessage).toBe("revolve axis lineId not found");
     // A non-error feature carries no message.
     expect(feats[1].statusMessage).toBeUndefined();
+  });
+});
+
+// ── Datum planes (DATUM W1) ──────────────────────────────────────────────────
+
+describe("datum hydration", () => {
+  const wireDatum = {
+    id: "d1",
+    name: "Datum 1",
+    kind: "OffsetFromPlane",
+    basePlaneId: "XZ",
+    offset: 10,
+    // XZ's normal is +X (the non-standard Sketch.h basis), so the backend
+    // resolved this to world +X — NOT to −Y as the plane's NAME suggests.
+    plane: {
+      origin: [10, 0, 0] as [number, number, number],
+      xAxis: [0, 1, 0] as [number, number, number],
+      yAxis: [0, 0, 1] as [number, number, number],
+      normal: [1, 0, 0] as [number, number, number],
+    },
+    resolvedValid: true,
+  };
+
+  it("carries the backend-resolved frame VERBATIM and tags it custom", () => {
+    applyProjectionToStore(proj(11, { datums: { d1: wireDatum } }));
+    const d = documentStore.getState().datums.d1;
+    expect(d).toEqual({
+      id: "d1",
+      name: "Datum 1",
+      basePlaneId: "XZ",
+      offset: 10,
+      plane: { kind: "custom", origin: [10, 0, 0], xAxis: [0, 1, 0], yAxis: [0, 0, 1], normal: [1, 0, 0] },
+      resolvedValid: true,
+    });
+  });
+
+  it("keeps an unresolved datum in the tree, flagged", () => {
+    applyProjectionToStore(
+      proj(12, { datums: { d2: { ...wireDatum, id: "d2", basePlaneId: "NOPE", resolvedValid: false } } }),
+    );
+    expect(documentStore.getState().datums.d2.resolvedValid).toBe(false);
+  });
+
+  it("a projection with no datums clears them (snapshot semantics, not a merge)", () => {
+    applyProjectionToStore(proj(13, { datums: { d1: wireDatum } }));
+    expect(Object.keys(documentStore.getState().datums)).toHaveLength(1);
+    applyProjectionToStore(proj(14, { datums: {} }));
+    expect(documentStore.getState().datums).toEqual({});
+  });
+
+  it("survives a backend that omits datums entirely, instead of taking down all hydration", () => {
+    const legacy = proj(15, { title: "Legacy" });
+    delete (legacy as { datums?: unknown }).datums;
+    expect(applyProjectionToStore(legacy)).toBe(true);
+    expect(documentStore.getState().title).toBe("Legacy");
+    expect(documentStore.getState().datums).toEqual({});
   });
 });

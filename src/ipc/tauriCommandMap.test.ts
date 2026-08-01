@@ -15,6 +15,8 @@ import {
   removeOperationCommand,
   parseRefId,
   editCommandLabel,
+  buildAddDatumPlane,
+  deleteDatumCommand,
   operationToEditCommand,
   opLabelFor,
   wireOperation,
@@ -465,5 +467,63 @@ describe("Chamfer marshalling", () => {
     expect(rec.opType).toBe("Chamfer");
     expect(rec.params.radius).toEqual({ value: 1.5 });
     expect(rec.params.edgeIds).toEqual(["e:1"]);
+  });
+});
+
+// ── Datum planes (DATUM W1) ──────────────────────────────────────────────────
+
+describe("buildAddDatumPlane", () => {
+  it("emits the raw core DatumPlane struct with every serde-REQUIRED field", () => {
+    const cmd = buildAddDatumPlane("d1", "Datum 1", "XY", 10);
+    if (cmd.cmd !== "addDatumPlane") throw new Error(`expected addDatumPlane, got ${cmd.cmd}`);
+    // The Rust `DatumPlane` has serde defaults ONLY for basePlaneId / the typed
+    // refs / extra — everything below must be present or the whole command is
+    // rejected at deserialize.
+    expect(Object.keys(cmd.datum).sort()).toEqual(
+      ["angleDeg", "basePlaneId", "id", "kind", "name", "offset", "resolvedPlane", "resolvedValid"].sort(),
+    );
+    expect(cmd.datum).toMatchObject({
+      id: "d1",
+      name: "Datum 1",
+      kind: "OffsetFromPlane",
+      basePlaneId: "XY",
+      offset: 10,
+      angleDeg: 0,
+    });
+  });
+
+  it("sends an UNRESOLVED placeholder frame — the backend is the basis authority", () => {
+    const cmd = buildAddDatumPlane("d1", "Datum 1", "XZ", 10);
+    if (cmd.cmd !== "addDatumPlane") throw new Error("expected addDatumPlane");
+    // Marked invalid on purpose: the core overwrites both fields in add_datum, so
+    // a client that somehow had its frame honoured would still not claim it is
+    // resolved. The basis matches the non-standard XY identity (Sketch.h).
+    expect(cmd.datum.resolvedValid).toBe(false);
+    expect(cmd.datum.resolvedPlane).toEqual({
+      origin: [0, 0, 0],
+      xAxis: [0, 1, 0],
+      yAxis: [-1, 0, 0],
+      normal: [0, 0, 1],
+    });
+  });
+
+  it("accepts another datum's id as the base (chained offsets)", () => {
+    const cmd = buildAddDatumPlane("d2", "Datum 2", "d1", -4);
+    if (cmd.cmd !== "addDatumPlane") throw new Error("expected addDatumPlane");
+    expect(cmd.datum.basePlaneId).toBe("d1");
+    expect(cmd.datum.offset).toBe(-4);
+  });
+});
+
+describe("deleteDatumCommand", () => {
+  it("targets the datum by bare id", () => {
+    expect(deleteDatumCommand("d1")).toEqual({ cmd: "deleteDatum", datum: "d1" });
+  });
+});
+
+describe("editCommandLabel for datums", () => {
+  it("labels the datum commands distinctly", () => {
+    expect(editCommandLabel(buildAddDatumPlane("d1", "Datum 1", "XY", 10))).toBe("Create datum plane");
+    expect(editCommandLabel(deleteDatumCommand("d1"))).toBe("Delete datum plane");
   });
 });

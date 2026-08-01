@@ -279,6 +279,7 @@ export function ModelToolChips() {
   const canUseBodyEnds = useToolChipStore((s) => s.canUseBodyEnds);
   const showEndConditions = useToolChipStore((s) => s.showEndConditions);
   const suffix = useToolChipStore((s) => s.suffix);
+  const label = useToolChipStore((s) => s.label);
   const worldPos = useToolChipStore((s) => s.worldPos);
   /** Whether the armed owner wired a ✓ (fillet/shell: fresh arm yes, re-edit no). */
   const hasConfirm = useToolChipStore((s) => s.onConfirm !== null);
@@ -374,6 +375,22 @@ export function ModelToolChips() {
           Axis
         </button>
         {booleanSegments}
+        {confirmButtons}
+      </>,
+    );
+  } else if (kind === "datumOffset") {
+    // Armed datum plane (DATUM W1): the picked base plane's GEOMETRIC name +
+    // the offset, committed by ✓ or by Enter in the input (same armed-cluster
+    // gesture the extrude/revolve chips use).
+    content = panel(
+      <>
+        <span
+          data-testid="chip-datum-base"
+          className="px-2 py-1 text-[11.5px] font-medium text-ink-2"
+        >
+          {label}
+        </span>
+        {clusterInput("mm")}
         {confirmButtons}
       </>,
     );

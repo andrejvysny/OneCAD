@@ -331,12 +331,19 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
       await wait(SKETCH_LATENCY_MS);
       let id: string;
       let planeKind: SketchSession["plane"]["kind"] = "XY";
-      // A face-hosted sketch carries its own basis; a world-plane one derives it
-      // from the named kind (`planeFor`).
+      // A face- or DATUM-hosted sketch carries its own explicit basis (the
+      // backend-resolved frame the caller passed through); a world-plane one
+      // derives it from the named kind (`planeFor`).
       let explicitPlane: SketchPlane | null = null;
       if (typeof target === "string") {
         id = target;
       } else if ("newOnFace" in target) {
+        explicitPlane = target.plane;
+        planeKind = "custom";
+        id = target.sketchId ?? `sk-${nextSketchSeq++}`;
+      } else if ("newOnDatum" in target) {
+        // DATUM W1. This one branch covers the mock lane end to end — the mock
+        // client shares this lane, and only `commit` differs between the two.
         explicitPlane = target.plane;
         planeKind = "custom";
         id = target.sketchId ?? `sk-${nextSketchSeq++}`;

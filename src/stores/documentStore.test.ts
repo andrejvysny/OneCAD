@@ -7,8 +7,8 @@
  * so each case resets modules and re-imports with the flag toggled.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { documentStore, nextSketchName, seedMockDocument } from "./documentStore";
-import type { SketchMeta } from "./documentStore";
+import { documentStore, emptyDocument, nextDatumName, nextSketchName, seedMockDocument } from "./documentStore";
+import type { DatumMeta, SketchMeta } from "./documentStore";
 
 const TAURI = "__TAURI_INTERNALS__";
 
@@ -98,7 +98,67 @@ describe("documentStore seeding gate", () => {
       dirty: false,
       bodies: {},
       sketches: {},
+      datums: {},
       features: [],
     });
+  });
+});
+
+// ── Datum planes (DATUM W1) ──────────────────────────────────────────────────
+
+/** Build a datums record from names (the frame is irrelevant to naming). */
+function datumsNamed(...names: string[]): Record<string, DatumMeta> {
+  const out: Record<string, DatumMeta> = {};
+  names.forEach((name, i) => {
+    out[`d${i}`] = {
+      id: `d${i}`,
+      name,
+      basePlaneId: "XY",
+      offset: 10,
+      plane: { kind: "custom", origin: [0, 0, 10], xAxis: [0, 1, 0], yAxis: [-1, 0, 0], normal: [0, 0, 1] },
+      resolvedValid: true,
+    };
+  });
+  return out;
+}
+
+describe("nextDatumName", () => {
+  it("starts at Datum 1 and steps past the highest existing index", () => {
+    expect(nextDatumName({})).toBe("Datum 1");
+    expect(nextDatumName(datumsNamed("Datum 1"))).toBe("Datum 2");
+    // Non-contiguous: one PAST the max, never the first free slot (monotonic).
+    expect(nextDatumName(datumsNamed("Datum 1", "Datum 7"))).toBe("Datum 8");
+  });
+
+  it("ignores names that do not match the pattern", () => {
+    expect(nextDatumName(datumsNamed("Top face", "Datum 2", "Datum X"))).toBe("Datum 3");
+  });
+});
+
+describe("documentStore datum registry", () => {
+  afterEach(() => {
+    documentStore.getState().applySnapshot(seedMockDocument());
+  });
+
+  it("adds, replaces and removes datums without touching sketches/bodies", () => {
+    const store = documentStore.getState();
+    const before = store.sketches;
+    const [d0] = Object.values(datumsNamed("Datum 1"));
+    store.addDatum(d0);
+    expect(documentStore.getState().datums.d0.name).toBe("Datum 1");
+    expect(documentStore.getState().sketches).toBe(before);
+
+    store.addDatum({ ...d0, name: "Renamed" });
+    expect(documentStore.getState().datums.d0.name).toBe("Renamed");
+
+    store.removeDatum("d0");
+    expect(documentStore.getState().datums).toEqual({});
+    // Idempotent — removing an absent datum is a no-op, not a throw.
+    expect(() => store.removeDatum("nope")).not.toThrow();
+  });
+
+  it("the seeded demo document and the empty projection both start with no datums", () => {
+    expect(seedMockDocument().datums).toEqual({});
+    expect(emptyDocument().datums).toEqual({});
   });
 });

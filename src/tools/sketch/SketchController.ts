@@ -252,7 +252,17 @@ export class SketchController {
       // part is built by sketching on what you already made.
       if (!activeId) {
         if (await this.tryEnterOnSelectedFace()) return;
-        this.beginPlanePick();
+        // A selected DATUM plane is a sketch host too (DATUM W1) — the tree's
+        // datum double-click selects one and flips the mode, and this is what
+        // picks it up. Checked AFTER the face (a face is the more specific pick
+        // when somehow both are selected) and BEFORE the world-plane picker.
+        const datumEntry = await this.tryEnterOnSelectedDatum();
+        if (datumEntry.entered) return;
+        // A REFUSAL rides into the picker prompt rather than being published
+        // separately: beginPlanePick sets the status hint itself, so a hint
+        // written before it would be silently overwritten (the same last-word-
+        // wins trap `ModelToolController.resetToSelect` documents).
+        this.beginPlanePick(datumEntry.refusal);
         return;
       }
       const opened = await this.openSession(activeId);
@@ -478,14 +488,53 @@ export class SketchController {
     return opened;
   }
 
-  /** Show the plane picker and prompt; a quad click resolves via confirmPlanePick. */
-  private beginPlanePick(): void {
+  /**
+   * If a single DATUM plane is selected, start the sketch ON it (DATUM W1).
+   *
+   * The basis is read straight off the projection (`DatumMeta.plane`), which the
+   * BACKEND resolved — never re-derived here from `basePlaneId + offset`. The
+   * core stamps the sketch with exactly that frame, so a second derivation on
+   * this side would be a competing source of truth for the sketch's own
+   * coordinate system.
+   *
+   * An UNRESOLVED datum (`resolvedValid: false`) is refused with a `refusal`
+   * message rather than sketched on: its cached frame is a meaningless identity
+   * plane, and silently placing a sketch there is worse than saying no.
+   *
+   * `entered: false` means the caller falls through to the world-plane picker;
+   * `refusal` (when set) is the reason, for the picker prompt to carry.
+   */
+  private async tryEnterOnSelectedDatum(): Promise<{ entered: boolean; refusal?: string }> {
+    const refs = selectionStore.getState().selected.filter((r) => r.kind === "datum");
+    if (refs.length !== 1) return { entered: false };
+    const datum = documentStore.getState().datums[refs[0].id];
+    if (!datum) return { entered: false };
+    if (!datum.resolvedValid) {
+      return { entered: false, refusal: `Cannot sketch on ${datum.name}: the datum did not resolve` };
+    }
+    const entered = await this.openSession({
+      newOnDatum: { datumId: datum.id },
+      plane: datum.plane,
+    });
+    return { entered };
+  }
+
+  /** Show the plane picker and prompt; a quad click resolves via confirmPlanePick.
+   *  `refusal` prefixes the prompt when the picker is a FALLBACK from a rejected
+   *  host (an unresolved datum), so the reason is not lost to this prompt. */
+  private beginPlanePick(refusal?: string): void {
     this.planePicking = true;
     // Default arrow while picking (a tool preserved across an auto-switch entry
     // may have set a drawing cursor before the picker appeared).
     this.deps.container.style.cursor = "default";
     this.deps.engine.setPlanePickerVisible(true);
-    viewportStore.getState().setStatusHint("Select a plane to start the sketch — Esc to cancel", { sticky: true });
+    const prompt = "Select a plane to start the sketch — Esc to cancel";
+    viewportStore
+      .getState()
+      .setStatusHint(refusal ? `${refusal}. ${prompt}` : prompt, {
+        sticky: true,
+        ...(refusal ? { severity: "error" as const } : {}),
+      });
   }
 
   /** Reverse beginPlanePick (idempotent): hide the picker + clear its hint. */
@@ -493,7 +542,38 @@ export class SketchController {
     if (!this.planePicking) return;
     this.planePicking = false;
     this.deps.engine.setPlanePickerVisible(false);
+    this.deps.engine.setDatumHover(null); // datums stay visible; drop the pick tint
     viewportStore.getState().setStatusHint(null);
+  }
+
+  /** A DATUM plane was clicked during the plane pick: open a sketch hosted on it.
+   *  Mirrors confirmPlanePick (including the re-show-on-failure recovery). */
+  private async confirmDatumPick(datumId: string): Promise<void> {
+    if (this.entering) return; // a double-click must not create two sketches
+    const datum = documentStore.getState().datums[datumId];
+    if (!datum) return;
+    if (!datum.resolvedValid) {
+      viewportStore.getState().setStatusHint(
+        `Cannot sketch on ${datum.name}: the datum did not resolve`,
+        { severity: "error", sticky: true },
+      );
+      return; // stay in the pick phase — the world quads are still on screen
+    }
+    this.entering = true;
+    try {
+      this.endPlanePick();
+      const opened = await this.openSession({
+        newOnDatum: { datumId: datum.id },
+        plane: datum.plane,
+      });
+      if (!opened && toolStore.getState().mode === "sketch") {
+        this.planePicking = true;
+        this.deps.engine.setPlanePickerVisible(true);
+      }
+    } finally {
+      this.entering = false;
+      this.drainPendingSwitch();
+    }
   }
 
   /** A plane was clicked: leave pick mode and open a fresh sketch on it. On a
@@ -691,8 +771,14 @@ export class SketchController {
 
   private onPointerMove = (e: PointerEvent): void => {
     // Plane-pick phase owns the pointer: highlight the plane under the cursor.
+    // A DATUM plane is a pickable sketch host here too (DATUM W1) and WINS — it
+    // is offset off the origin, so the ray can hit both, and the datum is the
+    // thing the user deliberately created.
     if (this.planePicking) {
-      this.deps.engine.planePickerHover(e.clientX, e.clientY);
+      const datumId = this.deps.engine.datumHitTest(e.clientX, e.clientY);
+      this.deps.engine.setDatumHover(datumId);
+      if (datumId) this.deps.engine.clearPlanePickerHover();
+      else this.deps.engine.planePickerHover(e.clientX, e.clientY);
       return;
     }
     if (this.selectActive) {
@@ -763,6 +849,12 @@ export class SketchController {
     this.downButton = -1;
     if (!wasClick) return;
     if (this.planePicking) {
+      // Datum first (see the hover branch above), then the three world quads.
+      const datumId = this.deps.engine.datumHitTest(e.clientX, e.clientY);
+      if (datumId) {
+        void this.confirmDatumPick(datumId);
+        return;
+      }
       const kind = this.deps.engine.planePickerHitTest(e.clientX, e.clientY);
       if (kind) void this.confirmPlanePick(kind);
       return;

@@ -76,7 +76,7 @@ use onecad_core::sketch::{Sketch, SketchAttachment, WorldPlane};
 
 use crate::dto::{
     default_label, feature_kind, feature_status, feature_status_message, feature_value_text,
-    needs_repair_item_dto, op_type_name, BodyDto, BodyMeshRef, DocStatus, DocumentChange,
+    needs_repair_item_dto, op_type_name, BodyDto, BodyMeshRef, DatumDto, DocStatus, DocumentChange,
     DocumentProjection, FailedStep, FeatureDto, FinishSketchDto, NeedsRepairItemDto,
     PromotedElementDto, SketchDto, SketchSessionDto, SketchSolveStatus, SketchStatus,
     SketchUpsertDto,
@@ -1259,6 +1259,26 @@ impl DocumentRuntime {
             );
         }
 
+        // Datums: straight off the authoritative document. Unlike bodies there is
+        // no regen mirror to reconcile against — a datum is pure core-owned state
+        // that never crosses the OCW1 wire, so `document.datum_planes` IS the
+        // truth (and is exactly what a save writes / a reopen restores).
+        let mut datums = BTreeMap::new();
+        for (id, d) in &doc.datum_planes {
+            datums.insert(
+                id.to_string(),
+                DatumDto {
+                    id: id.to_string(),
+                    name: d.name.clone(),
+                    kind: d.kind.name().to_string(),
+                    base_plane_id: d.base_plane_id.clone(),
+                    offset: d.offset,
+                    plane: d.resolved_plane.into(),
+                    resolved_valid: d.resolved_valid,
+                },
+            );
+        }
+
         let features = doc
             .timeline
             .records()
@@ -1274,6 +1294,7 @@ impl DocumentRuntime {
             dirty: self.dirty,
             bodies,
             sketches,
+            datums,
             features,
             // Timeline cursor + length drive the legacy-draft recovery hint
             // (`appliedOps < totalOps` ⇒ ops sit beyond the rollback bar).

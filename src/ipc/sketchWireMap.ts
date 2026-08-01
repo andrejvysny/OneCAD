@@ -642,7 +642,11 @@ export interface WireAddSketch {
     };
     attachment:
       | { kind: "world"; plane: "XY" | "XZ" | "YZ" }
-      | { kind: "hostFace"; face: WireFaceRef; projectedBoundaryVersion: number };
+      | { kind: "hostFace"; face: WireFaceRef; projectedBoundaryVersion: number }
+      // DATUM W1. Rust `SketchAttachment` is internally tagged on `"kind"` with
+      // camelCase variants + camelCase fields, so `Datum { datum: DatumPlaneId }`
+      // renders exactly like this (`DatumPlaneId` is a transparent UUID string).
+      | { kind: "datum"; datum: string };
   };
 }
 
@@ -717,6 +721,42 @@ export function buildAddSketchOnFace(
       // (projection is not implemented anywhere — the field is a version counter
       // with no producer, mirrored faithfully from the C++ struct).
       attachment: { kind: "hostFace", face, projectedBoundaryVersion: 0 },
+    },
+  };
+}
+
+/**
+ * Build the `AddSketch` EditCommand for a sketch placed on a DATUM plane
+ * (DATUM W1).
+ *
+ * Like `buildAddSketchOnFace`, the basis is NOT computed here: `plane` is the
+ * datum's backend-RESOLVED frame (`documentStore.datums[id].plane`, itself
+ * produced by `DocumentSession::resolve_datum_frame`). Re-deriving it from
+ * `basePlaneId + offset` on this side would give the sketch a second, competing
+ * source of truth for its own coordinate system — the exact defect class the
+ * migration exists to remove. The frame is FROZEN with the sketch (V1 policy).
+ *
+ * The datum must be RESOLVED (`resolvedValid`) before this is called; the caller
+ * refuses an unresolved datum rather than sending a meaningless identity frame.
+ */
+export function buildAddSketchOnDatum(
+  backendSketchId: string,
+  name: string,
+  plane: WireAddSketch["sketch"]["plane"],
+  datumId: string,
+): WireAddSketch {
+  return {
+    cmd: "addSketch",
+    sketch: {
+      id: backendSketchId,
+      name,
+      plane: {
+        origin: plane.origin,
+        xAxis: plane.xAxis,
+        yAxis: plane.yAxis,
+        normal: plane.normal,
+      },
+      attachment: { kind: "datum", datum: datumId },
     },
   };
 }

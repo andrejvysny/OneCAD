@@ -15,6 +15,7 @@
  */
 import { createClient } from "@/ipc/client";
 import {
+  deleteDatumCommand,
   renameBodyCommand,
   renameSketchCommand,
   setBodyVisibilityCommand,
@@ -169,6 +170,32 @@ export async function deleteSketch(sketchId: string): Promise<boolean> {
     return true;
   } catch (e) {
     errorHint(`Delete sketch failed: ${errMessage(e)}`);
+    return false;
+  }
+}
+
+/**
+ * Delete a datum plane (`DeleteDatum`, metadata-only — `RegenHint::None`).
+ *
+ * The backend REFUSES while any sketch is hosted on the datum, and the rejection
+ * NAMES the blocking sketches — that message is surfaced verbatim rather than
+ * paraphrased, because it is the only thing that tells the user what to delete
+ * first.
+ *
+ * The local removal happens AFTER the round-trip, not optimistically before it:
+ * both lanes resolve the datum by id at command time (the mock rejects an id it
+ * cannot find), so removing first would turn every delete into a spurious
+ * "unknown datum" and make the referenced-guard unreachable. Same order
+ * `deleteSketch` above uses, for the same reason.
+ */
+export async function deleteDatum(datumId: string): Promise<boolean> {
+  try {
+    applyEditResult(await createClient().applyEditCommand(deleteDatumCommand(datumId)));
+    documentStore.getState().removeDatum(datumId); // idempotent (real lane: projection wins)
+    viewportStore.getState().setStatusHint("Datum deleted");
+    return true;
+  } catch (e) {
+    errorHint(`Delete datum failed: ${errMessage(e)}`);
     return false;
   }
 }

@@ -33,7 +33,7 @@ use crate::document::datum::DatumPlane;
 use crate::document::record::{Operation, OperationRecord};
 use crate::document::refs::{AxisRef, ElementRef, SketchRegionRef};
 use crate::document::variables::{Scalar, Variable};
-use crate::ids::{BodyId, ConstraintId, EntityId, RecordId, SketchId, VariableId};
+use crate::ids::{BodyId, ConstraintId, DatumPlaneId, EntityId, RecordId, SketchId, VariableId};
 use crate::math::Vec2;
 use crate::sketch::{Constraint, Sketch, SketchAttachment, SketchEntity, SketchPlane};
 
@@ -162,9 +162,18 @@ pub enum EditCommand {
         visible: bool,
     },
     /// Add a datum plane (C++ `AddDatumPlaneCommand`).
+    ///
+    /// The caller supplies the PARAMETRIC definition only; the session resolves
+    /// the frame and OVERWRITES `resolved_plane`/`resolved_valid` (Rust is the
+    /// basis authority — see `DocumentSession::add_datum`).
     AddDatumPlane {
         /// The datum to add.
         datum: DatumPlane,
+    },
+    /// Delete a datum plane. Rejected while a sketch is attached to it.
+    DeleteDatum {
+        /// Target datum.
+        datum: DatumPlaneId,
     },
     /// Set an existing variable's value.
     SetVariable {
@@ -211,6 +220,7 @@ impl EditCommand {
             Self::RenameBody { .. } => "Rename Body",
             Self::SetVisibility { .. } => "Toggle Visibility",
             Self::AddDatumPlane { .. } => "Create Datum Plane",
+            Self::DeleteDatum { .. } => "Delete Datum Plane",
             Self::SetVariable { .. } => "Set Variable",
             Self::AddVariable { .. } => "Add Variable",
             Self::RemoveVariable { .. } => "Remove Variable",

@@ -916,12 +916,7 @@ pub async fn face_sketch_plane(
         onecad_core::math::Vec3::new_unchecked(info.center[0], info.center[1], info.center[2]),
         onecad_core::math::Vec3::new_unchecked(info.normal[0], info.normal[1], info.normal[2]),
     );
-    Ok(crate::dto::SketchPlaneDto {
-        origin: [plane.origin.x, plane.origin.y, plane.origin.z],
-        x_axis: [plane.x_axis.x, plane.x_axis.y, plane.x_axis.z],
-        y_axis: [plane.y_axis.x, plane.y_axis.y, plane.y_axis.z],
-        normal: [plane.normal.x, plane.normal.y, plane.normal.z],
-    })
+    Ok(plane.into())
 }
 
 /// Dry-run ladder resolution for repair dialogs (`ResolveRefs`; SCHEMA §7.5) —

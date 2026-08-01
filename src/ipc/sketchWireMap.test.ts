@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   applySolvedPositions,
   buildAddSketch,
+  buildAddSketchOnDatum,
   buildDeleteSketch,
   cloneIdMap,
   createIdMap,
@@ -191,6 +192,32 @@ describe("buildAddSketch / frontendEntitiesFromDto / isDimensional", () => {
       xAxis: [0, 1, 0],
       yAxis: [-1, 0, 0],
       normal: [0, 0, 1],
+    });
+  });
+
+  it("buildAddSketchOnDatum pins the DATUM attachment wire shape + carries the frame verbatim", () => {
+    // Rust `SketchAttachment` is internally tagged on "kind" with camelCase
+    // variants + fields, so `Datum { datum: DatumPlaneId }` (a transparent UUID)
+    // renders as {kind:"datum", datum:"<uuid>"}. A drift here is a hard serde
+    // rejection at the command boundary, not a soft fallback — hence the pin.
+    const plane = {
+      origin: [0, 0, 10] as [number, number, number],
+      xAxis: [0, 1, 0] as [number, number, number],
+      yAxis: [-1, 0, 0] as [number, number, number],
+      normal: [0, 0, 1] as [number, number, number],
+    };
+    expect(
+      buildAddSketchOnDatum("sk-uuid", "Sketch 7", plane, "datum-uuid"),
+    ).toEqual({
+      cmd: "addSketch",
+      sketch: {
+        id: "sk-uuid",
+        name: "Sketch 7",
+        // The BACKEND-resolved datum frame, carried through untouched — no
+        // re-derivation from basePlaneId + offset anywhere on this side.
+        plane: { origin: [0, 0, 10], xAxis: [0, 1, 0], yAxis: [-1, 0, 0], normal: [0, 0, 1] },
+        attachment: { kind: "datum", datum: "datum-uuid" },
+      },
     });
   });
 

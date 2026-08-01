@@ -36,6 +36,11 @@ export const RENDER_ORDER = {
   /** Origin-plane picker quads + outlines. */
   PLANE_PICK_FILL: -2,
   PLANE_PICK_OUTLINE: -1,
+  /** Datum plane quads + outlines (DATUM W1). Shares the plane-picker tier: both
+   *  are translucent reference quads and a datum is offset off the origin planes,
+   *  so they never co-locate and the tie is order-independent. */
+  DATUM_FILL: -2,
+  DATUM_OUTLINE: -1,
   /** Static (model-mode) sketch region fills. */
   STATIC_FILL: 1,
   /** Body face highlight (hover/selection). */

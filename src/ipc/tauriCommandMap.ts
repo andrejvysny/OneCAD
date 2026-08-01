@@ -192,6 +192,33 @@ export type WireInputRef = { element: WireElementRef };
  */
 export type WireVisibilityTarget = { body: string } | { sketch: string };
 
+/**
+ * The core `DatumPlane` struct as `AddDatumPlane` carries it (camelCase).
+ *
+ * These are exactly the fields the core serde REQUIRES — `basePlaneId` and the
+ * typed refs default, everything here does not. `resolvedPlane`/`resolvedValid`
+ * are required by the struct but are OVERWRITTEN by `DocumentSession::add_datum`
+ * (Rust is the basis authority), so `buildAddDatumPlane` sends a placeholder and
+ * the frontend must read the real frame back off the projection.
+ */
+export interface WireDatumPlane {
+  id: string;
+  name: string;
+  /** PascalCase `DatumKind` token. V1 authors only `"OffsetFromPlane"`. */
+  kind: "OffsetFromPlane" | "OffsetFromFace" | "AngledFromEdge" | "ThreePoint";
+  /** `"XY"` | `"XZ"` | `"YZ"`, or another datum's id (chained offsets). */
+  basePlaneId: string;
+  offset: number;
+  angleDeg: number;
+  resolvedPlane: {
+    origin: [number, number, number];
+    xAxis: [number, number, number];
+    yAxis: [number, number, number];
+    normal: [number, number, number];
+  };
+  resolvedValid: boolean;
+}
+
 /** The `EditCommand` variants this WP emits (serde tag `"cmd"`, camelCase). */
 export type WireEditCommand =
   | { cmd: "addOperation"; record: WireOperationRecord; atCursor: boolean }
@@ -206,7 +233,12 @@ export type WireEditCommand =
   // NO regen — see the metadata-only transport in `tauriClient.applyEditCommand`.
   | { cmd: "setVisibility"; target: WireVisibilityTarget; visible: boolean }
   | { cmd: "renameBody"; body: string; name: string }
-  | { cmd: "renameSketch"; sketch: string; name: string };
+  | { cmd: "renameSketch"; sketch: string; name: string }
+  // ── Datum planes (DATUM W1) — also `RegenHint::None`, same metadata-only
+  // transport. `addDatumPlane` carries the RAW core `DatumPlane` struct, so it
+  // must satisfy that struct's serde (see `buildAddDatumPlane`).
+  | { cmd: "addDatumPlane"; datum: WireDatumPlane }
+  | { cmd: "deleteDatum"; datum: string };
 
 const scalar = (n: number): WireScalar => ({ value: n });
 
@@ -635,6 +667,68 @@ export function renameSketchCommand(sketchId: string, name: string): WireEditCom
   return { cmd: "renameSketch", sketch: sketchId, name };
 }
 
+// ── Datum planes (DATUM W1) ──────────────────────────────────────────────────
+
+/**
+ * A placeholder resolved frame for a freshly authored datum.
+ *
+ * The core REQUIRES `resolvedPlane`/`resolvedValid` (the struct has no serde
+ * defaults for them) but OVERWRITES both in `add_datum` — it re-derives the frame
+ * from the parametric definition and never trusts a client-supplied basis. So
+ * this is deliberately the identity XY frame with `resolvedValid: false`: the
+ * least-surprising thing to see if it ever DID survive, and identical to the Rust
+ * `DatumPlane::offset_from_plane` constructor's own starting point. Read the real
+ * frame back off `projection.datums[id].plane`.
+ */
+const UNRESOLVED_PLANE: WireDatumPlane["resolvedPlane"] = {
+  origin: [0, 0, 0],
+  xAxis: [0, 1, 0],
+  yAxis: [-1, 0, 0],
+  normal: [0, 0, 1],
+};
+
+/**
+ * `AddDatumPlane` — an `OffsetFromPlane` datum offset from `basePlaneId` along
+ * that base's NORMAL.
+ *
+ * **The bases are non-standard** (`Sketch.h`, ported verbatim): "XZ" has world
+ * normal **+X** and "YZ" has **+Y**, so "XZ offset 10" moves along world +X, not
+ * along −Y. Callers must not "correct" the sign for a base plane.
+ *
+ * `basePlaneId` may also be another datum's id — the backend chains off its
+ * resolved frame. An unresolvable base is accepted leniently and comes back with
+ * `resolvedValid: false` (it cannot host a sketch).
+ */
+export function buildAddDatumPlane(
+  id: string,
+  name: string,
+  basePlaneId: string,
+  offset: number,
+): WireEditCommand {
+  return {
+    cmd: "addDatumPlane",
+    datum: {
+      id,
+      name,
+      kind: "OffsetFromPlane",
+      basePlaneId,
+      offset,
+      angleDeg: 0,
+      resolvedPlane: UNRESOLVED_PLANE,
+      resolvedValid: false,
+    },
+  };
+}
+
+/**
+ * `DeleteDatum` — remove a datum plane. The backend REJECTS this while any sketch
+ * is attached to the datum (the error names the blocking sketches), so a caller
+ * must surface the rejection rather than assume success.
+ */
+export function deleteDatumCommand(datumId: string): WireEditCommand {
+  return { cmd: "deleteDatum", datum: datumId };
+}
+
 /** A short human label for a raw EditCommand (status-bar hint). */
 export function editCommandLabel(cmd: WireEditCommand): string {
   switch (cmd.cmd) {
@@ -652,6 +746,10 @@ export function editCommandLabel(cmd: WireEditCommand): string {
     case "renameBody":
     case "renameSketch":
       return "Rename";
+    case "addDatumPlane":
+      return "Create datum plane";
+    case "deleteDatum":
+      return "Delete datum plane";
     default:
       return "Edit";
   }

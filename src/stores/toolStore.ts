@@ -30,6 +30,8 @@ export type EditorMode = "model" | "sketch";
 export type ModelTool =
   | "select"
   | "sketch"
+  /** Datum offset plane (DATUM W1): pick a base plane, set an offset, commit. */
+  | "datum"
   | "extrude"
   | "revolve"
   | "fillet"

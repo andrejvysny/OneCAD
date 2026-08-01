@@ -395,6 +395,11 @@ fn all_variant_commands() -> Vec<(&'static str, EditCommand)> {
             },
         ),
         (
+            // `base_document` seeds did(1) with no sketch attached to it.
+            "DeleteDatum",
+            EditCommand::DeleteDatum { datum: did(1) },
+        ),
+        (
             "SetVariable",
             EditCommand::SetVariable {
                 variable: vid(1),
@@ -454,7 +459,7 @@ fn every_command_apply_undo_restores_and_redo_reapplies() {
             "{name}: second undo restores"
         );
     }
-    assert_eq!(count, 21, "all 21 EditCommand variants covered");
+    assert_eq!(count, 22, "all 22 EditCommand variants covered");
 }
 
 // ── EditOperationInput: every InputPath branch ───────────────────────────────
@@ -1203,4 +1208,305 @@ fn frontend_sketch_upsert_ops_wire_deserializes() {
     assert!(matches!(ops[9], SketchEditOp::SetDimension { .. }));
     assert!(matches!(ops[10], SketchEditOp::SetEntityPositions { .. }));
     assert!(matches!(ops[12], SketchEditOp::RemoveEntity { .. }));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Datum planes (DATUM W1) — resolution is a CREATION-TIME, core-owned act.
+//
+// The FE authors only the parametric definition; `add_datum` resolves it and
+// overwrites the frame, `add_sketch` stamps a datum-hosted sketch from that
+// frame, and `DeleteDatum` refuses while a sketch still points at it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A session over a blank document (no seeded datum) — the datum tests below
+/// author everything they need through commands, like the frontend does.
+fn blank_session() -> DocumentSession {
+    DocumentSession::new(Document::new(DocumentId(u(0xDA))))
+}
+
+fn add_offset_datum(
+    sess: &mut DocumentSession,
+    id: DatumPlaneId,
+    base: &str,
+    offset: f64,
+) -> Result<(), String> {
+    sess.apply(EditCommand::AddDatumPlane {
+        datum: DatumPlane::offset_from_plane(id, "Datum", base, offset),
+    })
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+#[test]
+fn add_datum_resolves_at_creation_and_overwrites_the_client_frame() {
+    let mut sess = blank_session();
+    // A client that sent a bogus resolved frame + `resolvedValid: true` must not
+    // be able to dictate the basis — Rust re-derives it, unconditionally.
+    let mut d = DatumPlane::offset_from_plane(did(5), "Datum 1", "XY", 10.0);
+    d.resolved_plane = onecad_core::sketch::SketchPlane {
+        origin: Vec3::new_unchecked(999.0, 999.0, 999.0),
+        ..onecad_core::sketch::SketchPlane::yz()
+    };
+    d.resolved_valid = true;
+    sess.apply(EditCommand::AddDatumPlane { datum: d }).unwrap();
+
+    let stored = sess.document().datum(did(5)).expect("datum stored");
+    assert!(stored.resolved_valid);
+    // XY's normal is +Z ⇒ a 10mm offset lands at z = 10, with XY's axes verbatim.
+    assert_eq!(
+        stored.resolved_plane.origin,
+        Vec3::new_unchecked(0.0, 0.0, 10.0)
+    );
+    assert_eq!(
+        stored.resolved_plane.x_axis,
+        onecad_core::sketch::SketchPlane::xy().x_axis
+    );
+    assert_eq!(
+        stored.resolved_plane.normal,
+        onecad_core::sketch::SketchPlane::xy().normal
+    );
+}
+
+/// LEGACY-SWAPPED BASES PIN (`sketch/plane.rs`): the repo's "XZ" plane has world
+/// normal **+X**, so "XZ offset 10" slides along world +X — NOT along −Y as the
+/// name suggests. Likewise "YZ" has normal +Y. If this ever fails, someone
+/// "fixed" the non-standard bases and every datum in every stored file moved.
+#[test]
+fn offset_from_xz_slides_along_world_x() {
+    let mut sess = blank_session();
+    add_offset_datum(&mut sess, did(6), "XZ", 10.0).unwrap();
+    assert_eq!(
+        sess.document().datum(did(6)).unwrap().resolved_plane.origin,
+        Vec3::new_unchecked(10.0, 0.0, 0.0),
+        "XZ's normal is +X (Sketch.h), so the offset moves along world +X"
+    );
+
+    add_offset_datum(&mut sess, did(7), "YZ", -4.0).unwrap();
+    assert_eq!(
+        sess.document().datum(did(7)).unwrap().resolved_plane.origin,
+        Vec3::new_unchecked(0.0, -4.0, 0.0),
+        "YZ's normal is +Y (Sketch.h)"
+    );
+}
+
+#[test]
+fn a_datum_chains_off_another_resolved_datum() {
+    let mut sess = blank_session();
+    add_offset_datum(&mut sess, did(8), "XY", 10.0).unwrap();
+    // Base = the FIRST datum's id (a heterogeneous `basePlaneId`, per the C++ model).
+    add_offset_datum(&mut sess, did(9), &did(8).to_string(), 5.0).unwrap();
+
+    let chained = sess.document().datum(did(9)).unwrap();
+    assert!(chained.resolved_valid);
+    assert_eq!(
+        chained.resolved_plane.origin,
+        Vec3::new_unchecked(0.0, 0.0, 15.0),
+        "10 + 5 along the shared +Z normal"
+    );
+}
+
+#[test]
+fn an_unresolvable_base_inserts_lenient_but_invalid() {
+    let mut sess = blank_session();
+    // Unknown base name.
+    add_offset_datum(&mut sess, did(10), "NOPE", 3.0).unwrap();
+    assert!(!sess.document().datum(did(10)).unwrap().resolved_valid);
+
+    // A base datum id that does not exist.
+    add_offset_datum(&mut sess, did(11), &did(0xFFF).to_string(), 3.0).unwrap();
+    assert!(!sess.document().datum(did(11)).unwrap().resolved_valid);
+
+    // Chaining off an INVALID datum does not resolve either (no silent guess).
+    add_offset_datum(&mut sess, did(12), &did(10).to_string(), 1.0).unwrap();
+    assert!(!sess.document().datum(did(12)).unwrap().resolved_valid);
+
+    // A kind the core cannot resolve without kernel context stays invalid too.
+    let mut face_datum = DatumPlane::offset_from_plane(did(13), "FromFace", "XY", 2.0);
+    face_datum.kind = onecad_core::document::datum::DatumKind::OffsetFromFace;
+    sess.apply(EditCommand::AddDatumPlane { datum: face_datum })
+        .unwrap();
+    assert!(!sess.document().datum(did(13)).unwrap().resolved_valid);
+}
+
+#[test]
+fn a_datum_hosted_sketch_is_stamped_with_the_core_resolved_frame() {
+    let mut sess = blank_session();
+    add_offset_datum(&mut sess, did(14), "XY", 10.0).unwrap();
+
+    // The frontend's sketch carries the XY placeholder frame (`Sketch::new`), and
+    // a hostile one could carry anything — the core overwrites it either way.
+    let mut sk = Sketch::new(
+        sid(9),
+        "Sketch on datum",
+        SketchAttachment::Datum { datum: did(14) },
+    );
+    sk.plane = onecad_core::sketch::SketchPlane::yz();
+    sess.apply(EditCommand::AddSketch { sketch: sk }).unwrap();
+
+    let stored = &sess.document().sketches[&sid(9)];
+    assert_eq!(stored.plane.origin, Vec3::new_unchecked(0.0, 0.0, 10.0));
+    assert_eq!(
+        stored.plane.x_axis,
+        onecad_core::sketch::SketchPlane::xy().x_axis,
+        "the datum carried XY's axes verbatim, so the sketch reads like a sketch on XY"
+    );
+}
+
+#[test]
+fn a_sketch_on_a_missing_or_unresolved_datum_is_rejected_loudly() {
+    let mut sess = blank_session();
+    let missing = Sketch::new(sid(10), "S", SketchAttachment::Datum { datum: did(99) });
+    let err = sess
+        .apply(EditCommand::AddSketch { sketch: missing })
+        .expect_err("a dangling datum ref must not be accepted");
+    assert!(err.to_string().contains("does not exist"), "{err}");
+
+    add_offset_datum(&mut sess, did(15), "NOPE", 1.0).unwrap(); // invalid
+    let unresolved = Sketch::new(sid(11), "S", SketchAttachment::Datum { datum: did(15) });
+    let err = sess
+        .apply(EditCommand::AddSketch { sketch: unresolved })
+        .expect_err("an unresolved datum must not host a sketch");
+    assert!(err.to_string().contains("unresolved"), "{err}");
+    assert!(
+        sess.document().sketches.is_empty(),
+        "a rejected AddSketch must not partially apply"
+    );
+}
+
+#[test]
+fn delete_datum_is_refused_while_a_sketch_references_it_and_names_the_blockers() {
+    let mut sess = blank_session();
+    add_offset_datum(&mut sess, did(16), "XY", 10.0).unwrap();
+    sess.apply(EditCommand::AddSketch {
+        sketch: Sketch::new(
+            sid(12),
+            "Sketch 1",
+            SketchAttachment::Datum { datum: did(16) },
+        ),
+    })
+    .unwrap();
+
+    let err = sess
+        .apply(EditCommand::DeleteDatum { datum: did(16) })
+        .expect_err("a referenced datum must not be deletable");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Sketch 1"),
+        "message must NAME the blocker: {msg}"
+    );
+    assert!(msg.contains(&sid(12).to_string()), "and its id: {msg}");
+    assert!(sess.document().datum(did(16)).is_some(), "nothing removed");
+
+    // Drop the sketch and the same delete now succeeds.
+    sess.apply(EditCommand::DeleteSketch { sketch: sid(12) })
+        .unwrap();
+    sess.apply(EditCommand::DeleteDatum { datum: did(16) })
+        .unwrap();
+    assert!(sess.document().datum(did(16)).is_none());
+}
+
+#[test]
+fn delete_datum_round_trips_through_undo_redo() {
+    let mut sess = blank_session();
+    add_offset_datum(&mut sess, did(17), "XY", 7.0).unwrap();
+    let before = json(sess.document());
+
+    sess.apply(EditCommand::DeleteDatum { datum: did(17) })
+        .unwrap();
+    assert!(sess.document().datum(did(17)).is_none());
+
+    assert!(sess.undo(), "undo available");
+    assert_eq!(
+        json(sess.document()),
+        before,
+        "undo restores the exact datum"
+    );
+    // Specifically: the RESOLVED frame comes back, not a re-defaulted one.
+    let d = sess.document().datum(did(17)).unwrap();
+    assert!(d.resolved_valid);
+    assert_eq!(d.resolved_plane.origin, Vec3::new_unchecked(0.0, 0.0, 7.0));
+
+    assert!(sess.redo().unwrap(), "redo available");
+    assert!(sess.document().datum(did(17)).is_none());
+}
+
+#[test]
+fn delete_datum_rejects_an_unknown_id() {
+    let mut sess = blank_session();
+    assert!(sess
+        .apply(EditCommand::DeleteDatum { datum: did(0xABC) })
+        .is_err());
+}
+
+// ── Frontend wire pin #3: the datum commands ─────────────────────────────────
+//
+// Same contract class as the AddSketch pin above. `AddDatumPlane` carries the RAW
+// core `DatumPlane` struct, which has NO serde defaults for kind/offset/angleDeg/
+// resolvedPlane/resolvedValid — so a TS builder that omits any of them breaks the
+// whole command at deserialize, silently, with no compile-time signal on either
+// side. These payloads are copied VERBATIM from `buildAddDatumPlane` /
+// `deleteDatumCommand` in `src/ipc/tauriCommandMap.ts`; change both together.
+
+#[test]
+fn frontend_add_datum_plane_wire_parses_and_applies() {
+    let wire = r#"{
+        "cmd": "addDatumPlane",
+        "datum": {
+            "id": "a1b2c3d4-0000-4000-8000-000000000001",
+            "name": "Datum 1",
+            "kind": "OffsetFromPlane",
+            "basePlaneId": "XY",
+            "offset": 10,
+            "angleDeg": 0,
+            "resolvedPlane": {
+                "origin": [0, 0, 0],
+                "xAxis": [0, 1, 0],
+                "yAxis": [-1, 0, 0],
+                "normal": [0, 0, 1]
+            },
+            "resolvedValid": false
+        }
+    }"#;
+
+    let cmd: EditCommand =
+        serde_json::from_str(wire).expect("frontend AddDatumPlane wire must parse");
+    let mut sess = DocumentSession::new(base_document());
+    sess.apply(cmd).unwrap();
+
+    let id: DatumPlaneId = "a1b2c3d4-0000-4000-8000-000000000001".parse().unwrap();
+    let stored = sess
+        .document()
+        .datum(id)
+        .expect("datum lands in the document");
+    // The frontend sent `resolvedValid: false` + an origin frame; the core
+    // resolved it anyway. This is the "Rust is the basis authority" contract seen
+    // from the wire.
+    assert!(stored.resolved_valid);
+    assert_eq!(
+        stored.resolved_plane.origin,
+        Vec3::new_unchecked(0.0, 0.0, 10.0)
+    );
+
+    // `kind` is REQUIRED: the same payload without it must NOT parse.
+    let no_kind = wire.replace("\"kind\": \"OffsetFromPlane\",\n", "");
+    assert!(
+        no_kind.len() < wire.len(),
+        "replace must have removed the kind field"
+    );
+    assert!(
+        serde_json::from_str::<EditCommand>(&no_kind).is_err(),
+        "AddDatumPlane without kind must fail (frontend MUST send it)"
+    );
+}
+
+#[test]
+fn frontend_delete_datum_wire_parses_and_applies() {
+    let wire = r#"{ "cmd": "deleteDatum", "datum": "00000000-0000-0000-0000-00000000d001" }"#;
+    let cmd: EditCommand =
+        serde_json::from_str(wire).expect("frontend DeleteDatum wire must parse");
+    assert!(matches!(cmd, EditCommand::DeleteDatum { datum } if datum == did(1)));
+
+    let mut sess = DocumentSession::new(base_document());
+    sess.apply(cmd).unwrap();
+    assert!(sess.document().datum(did(1)).is_none());
 }

@@ -84,6 +84,12 @@ export const ICON_PATHS = {
   // The `circle` glyph's two-arc construction with rx=8, ry=5 (a wide ellipse
   // reads unambiguously against the circle at 14–15px).
   ellipse: "M20 12a8 5 0 1 1-16 0 8 5 0 0 1 16 0z",
+
+  // ---- DATUM W1 datum plane (authored for this WP, NOT from the prototype) ----
+  // Plane-with-offset motif: a base plane parallelogram, the same plane offset
+  // above it, and the offset distance drawn on the shared left corner. Reads
+  // distinctly from `sketch`/`pen` (a pencil) and `grid` (a square lattice).
+  datum: "M3 15l9-3.5 9 3.5-9 3.5-9-3.5zM3 8.5l9-3.5 9 3.5-9 3.5-9-3.5M3 15V8.5",
 } as const;
 
 export type IconName = keyof typeof ICON_PATHS;

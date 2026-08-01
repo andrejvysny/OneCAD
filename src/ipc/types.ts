@@ -199,6 +199,19 @@ export type EnterSketchTarget =
       newOnFace: { bodyId: string; elementId: string; worldPoint?: [number, number, number] };
       plane: SketchPlane;
       sketchId?: string;
+    }
+  /**
+   * A new sketch placed on a DATUM plane (DATUM W1). `plane` is the datum's
+   * BACKEND-RESOLVED frame, read straight off `documentStore.datums[id].plane` —
+   * never re-derived from `basePlaneId + offset`, since the core stamps the
+   * sketch with exactly that basis (SCHEMA §7.3: only the resolved basis ever
+   * reaches the worker, as a `custom` sketch plane). Same V1 freeze-at-creation
+   * policy as sketch-on-face.
+   */
+  | {
+      newOnDatum: { datumId: string };
+      plane: SketchPlane;
+      sketchId?: string;
     };
 
 /** `sketchUpsert` result (SCHEMA §7.4 SketchUpsert result + solved coords). */
@@ -390,6 +403,36 @@ export interface SketchProjection {
   geometryToken: string;
 }
 
+/**
+ * One datum plane in the projection (mirrors Rust `DatumDto`).
+ *
+ * `kind`/`basePlaneId`/`offset` are the DEFINITION the user authored; `plane` is
+ * the **backend-resolved** frame and is authoritative — a sketch attached to this
+ * datum is stamped with exactly this basis by the core, so the frontend renders
+ * and previews from `plane` and never re-derives it from the definition.
+ *
+ * Datums never cross the OCW1 wire (SCHEMA §7.3: only the resolved basis reaches
+ * the worker, as a `custom` sketch plane), so this projection is their one route
+ * from the core to the UI.
+ */
+export interface DatumProjection {
+  id: string;
+  name: string;
+  /** PascalCase `DatumKind` token — V1 authors only `"OffsetFromPlane"`. */
+  kind: string;
+  /** `"XY"` | `"XZ"` | `"YZ"`, or another datum's id (chained offsets). */
+  basePlaneId: string;
+  offset: number;
+  plane: {
+    origin: [number, number, number];
+    xAxis: [number, number, number];
+    yAxis: [number, number, number];
+    normal: [number, number, number];
+  };
+  /** `false` ⇒ the definition did not resolve; the datum cannot host a sketch. */
+  resolvedValid: boolean;
+}
+
 /** The `projection-updated` payload (mirrors `documentStore.DocumentProjection`). */
 export interface DocumentProjectionWire {
   status: "empty" | "loading" | "ready";
@@ -398,6 +441,8 @@ export interface DocumentProjectionWire {
   dirty: boolean;
   bodies: Record<string, BodyProjection>;
   sketches: Record<string, SketchProjection>;
+  /** Datum planes keyed by id. Always sent by the backend (possibly empty). */
+  datums: Record<string, DatumProjection>;
   features: FeatureRecord[];
   /**
    * Applied op count (timeline cursor): `features[0, appliedOps)` are applied,

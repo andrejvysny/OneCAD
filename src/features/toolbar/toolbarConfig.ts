@@ -26,6 +26,9 @@ export function isSeparator(e: ToolEntry): e is ToolSeparator {
 export const MODEL_TOOLS: ToolEntry[] = [
   { id: "select", icon: "select", label: "Select", shortcut: "V" },
   { id: "sketch", icon: "sketch", label: "New sketch", shortcut: "S" },
+  // DATUM W1 — a construction tool, grouped with "New sketch" (both author a
+  // surface to draw on) rather than with the solid-modelling ops below.
+  { id: "datum", icon: "datum", label: "Datum plane", shortcut: "D" },
   { sep: true },
   { id: "extrude", icon: "extrude", label: "Extrude", shortcut: "E" },
   { id: "revolve", icon: "revolve", label: "Revolve", shortcut: "R" },

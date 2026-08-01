@@ -12,6 +12,8 @@ export type EntityKind =
   | "body"
   | "sketch"
   | "sketchRegion"
+  /** A datum (reference) plane — a tree row, a viewport quad, a sketch host. */
+  | "datum"
   | "feature"
   | "face"
   | "edge"

@@ -518,6 +518,74 @@ describe("tauriClient enter_sketch minted id (no explicit sketchId)", () => {
   });
 });
 
+// ── enter_sketch({newOnDatum}) — the datum host branch (DATUM W1) ────────────
+
+describe("tauriClient enter_sketch on a DATUM plane", () => {
+  it("fires AddSketch with the datum attachment + the datum's resolved frame verbatim", async () => {
+    const DATUM_PLANE = {
+      origin: [0, 0, 10] as [number, number, number],
+      xAxis: [0, 1, 0] as [number, number, number],
+      yAxis: [-1, 0, 0] as [number, number, number],
+      normal: [0, 0, 1] as [number, number, number],
+    };
+    let command: { cmd: string; sketch: Record<string, unknown> } | undefined;
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "apply_edit_command") {
+          command = (payload as { command: { cmd: string; sketch: Record<string, unknown> } }).command;
+          return readyProjection(1);
+        }
+        if (cmd === "enter_sketch") {
+          const sketchId = (payload as { sketchId: string }).sketchId;
+          return {
+            sketchId,
+            plane: { kind: "custom", ...DATUM_PLANE },
+            entities: [],
+            constraints: [],
+            dof: 0,
+            status: "FullyConstrained",
+          };
+        }
+      },
+      { shouldMockEvents: true },
+    );
+
+    await createTauriClient().enterSketch({
+      newOnDatum: { datumId: "datum-uuid" },
+      plane: { kind: "custom", ...DATUM_PLANE },
+    });
+
+    expect(command?.cmd).toBe("addSketch");
+    // The typed attachment the core serde expects, plus the BACKEND-resolved
+    // basis carried through untouched (a `custom` plane on the wire).
+    expect(command?.sketch.attachment).toEqual({ kind: "datum", datum: "datum-uuid" });
+    expect(command?.sketch.plane).toEqual(DATUM_PLANE);
+  });
+
+  it("a failed enter on a datum still runs the orphan DeleteSketch compensation", async () => {
+    const commands: { cmd: string }[] = [];
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "apply_edit_command") {
+          commands.push((payload as { command: { cmd: string } }).command);
+          return readyProjection(1);
+        }
+        if (cmd === "enter_sketch") throw new Error("workerDown: no worker");
+      },
+      { shouldMockEvents: true },
+    );
+
+    await expect(
+      createTauriClient().enterSketch({
+        newOnDatum: { datumId: "datum-uuid" },
+        plane: { kind: "custom", origin: [0, 0, 10], xAxis: [0, 1, 0], yAxis: [-1, 0, 0], normal: [0, 0, 1] },
+      }),
+    ).rejects.toThrow(/workerDown/);
+
+    expect(commands.map((c) => c.cmd)).toEqual(["addSketch", "deleteSketch"]);
+  });
+});
+
 // ── enter_sketch failure → AWAITED DeleteSketch compensation (orphan cleanup) ─
 
 interface WireCmd {
@@ -596,6 +664,7 @@ describe("tauriClient fresh-sketch naming", () => {
           geometryToken: "geometry-s1",
         },
       },
+      datums: {},
       features: [],
     });
     let addName: string | undefined;

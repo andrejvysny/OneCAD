@@ -111,11 +111,36 @@ pub struct FeatureDto {
     pub suppressed: bool,
 }
 
+/// One datum plane in the tree (`documentStore.ts` `DatumMeta`).
+///
+/// The definition fields (`kind`/`basePlaneId`/`offset`) are what the user
+/// authored; `plane` is the **core-resolved** frame and is authoritative — a
+/// sketch attached to this datum is stamped with exactly this basis
+/// (`DocumentSession::stamp_datum_plane`), so the frontend must render/preview
+/// from `plane` and never re-derive it from the definition.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatumDto {
+    pub id: String,
+    pub name: String,
+    /// PascalCase `DatumKind` token (`"OffsetFromPlane"` …) — the same spelling
+    /// the core serde emits (`DatumKind::name`, lock-tested there).
+    pub kind: String,
+    /// `"XY"`/`"XZ"`/`"YZ"` or another datum's id.
+    pub base_plane_id: String,
+    pub offset: f64,
+    pub plane: SketchPlaneDto,
+    /// `false` ⇒ the definition could not be resolved; the datum exists in the
+    /// tree but cannot host a sketch (`AddSketch` rejects it).
+    pub resolved_valid: bool,
+}
+
 /// The full document projection (`documentStore.ts` `DocumentProjection`).
 ///
-/// `bodies`/`sketches` serialize as JSON objects keyed by id (the store's
-/// `Record<string, …>`); a `BTreeMap` keeps the key order deterministic.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// `bodies`/`sketches`/`datums` serialize as JSON objects keyed by id (the
+/// store's `Record<string, …>`); a `BTreeMap` keeps the key order deterministic.
+// Not `Eq`: `DatumDto` carries `f64` (offset + the resolved basis).
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentProjection {
     pub status: DocStatus,
@@ -124,6 +149,10 @@ pub struct DocumentProjection {
     pub dirty: bool,
     pub bodies: std::collections::BTreeMap<String, BodyDto>,
     pub sketches: std::collections::BTreeMap<String, SketchDto>,
+    /// Datum planes, keyed by id. Core-owned state — datums never cross the OCW1
+    /// wire (SCHEMA §7.3: only the RESOLVED basis reaches the worker, as a
+    /// `custom` sketch plane), so this projection is their only route to the UI.
+    pub datums: std::collections::BTreeMap<String, DatumDto>,
     pub features: Vec<FeatureDto>,
     /// Applied op count (timeline cursor): `features[0, appliedOps)` are applied,
     /// `[appliedOps, totalOps)` are drafts beyond the rollback bar. Drives the
@@ -144,6 +173,7 @@ impl DocumentProjection {
             dirty: false,
             bodies: std::collections::BTreeMap::new(),
             sketches: std::collections::BTreeMap::new(),
+            datums: std::collections::BTreeMap::new(),
             features: Vec::new(),
             applied_ops: 0,
             total_ops: 0,
@@ -417,6 +447,19 @@ pub struct SketchPlaneDto {
     pub x_axis: [f64; 3],
     pub y_axis: [f64; 3],
     pub normal: [f64; 3],
+}
+
+impl From<onecad_core::sketch::SketchPlane> for SketchPlaneDto {
+    /// Carries the basis VERBATIM — never re-derived, never re-ordered (the
+    /// non-standard `Sketch.h` bases are load-bearing; see `sketch/plane.rs`).
+    fn from(p: onecad_core::sketch::SketchPlane) -> Self {
+        Self {
+            origin: [p.origin.x, p.origin.y, p.origin.z],
+            x_axis: [p.x_axis.x, p.x_axis.y, p.x_axis.z],
+            y_axis: [p.y_axis.x, p.y_axis.y, p.y_axis.z],
+            normal: [p.normal.x, p.normal.y, p.normal.z],
+        }
+    }
 }
 
 /// `finishSketch` result (`types.ts FinishSketchResult`).
@@ -824,6 +867,19 @@ mod tests {
                 visible: true,
             },
         );
+        let mut datums = std::collections::BTreeMap::new();
+        datums.insert(
+            "d1".to_string(),
+            DatumDto {
+                id: "d1".into(),
+                name: "Datum 1".into(),
+                kind: "OffsetFromPlane".into(),
+                base_plane_id: "XY".into(),
+                offset: 10.0,
+                plane: onecad_core::sketch::SketchPlane::xy().into(),
+                resolved_valid: true,
+            },
+        );
         let proj = DocumentProjection {
             status: DocStatus::Ready,
             revision: 5,
@@ -831,6 +887,7 @@ mod tests {
             dirty: false,
             bodies,
             sketches: std::collections::BTreeMap::new(),
+            datums,
             features: vec![FeatureDto {
                 op_type: "Extrude".into(),
                 id: "f1".into(),
@@ -853,6 +910,20 @@ mod tests {
         assert_eq!(v["features"][0]["status"], "ok");
         assert_eq!(v["appliedOps"], 1);
         assert_eq!(v["totalOps"], 1);
+        // Datums project camelCase, keyed by id, carrying the resolved basis
+        // VERBATIM (the non-standard XY basis — see sketch/plane.rs).
+        assert_eq!(v["datums"]["d1"]["kind"], "OffsetFromPlane");
+        assert_eq!(v["datums"]["d1"]["basePlaneId"], "XY");
+        assert_eq!(v["datums"]["d1"]["offset"], 10.0);
+        assert_eq!(v["datums"]["d1"]["resolvedValid"], true);
+        assert_eq!(
+            v["datums"]["d1"]["plane"]["xAxis"],
+            serde_json::json!([0.0, 1.0, 0.0])
+        );
+        assert_eq!(
+            v["datums"]["d1"]["plane"]["yAxis"],
+            serde_json::json!([-1.0, 0.0, 0.0])
+        );
     }
 
     #[test]

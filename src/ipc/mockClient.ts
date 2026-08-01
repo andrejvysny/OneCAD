@@ -41,6 +41,7 @@ import { concatMesh1, makeBoxMesh, makeCylinderMesh, makeExtrudeBodyMesh, makeRe
 import type { LatheAxis } from "@/tools/preview/lathePreview";
 import { createLocalSolverLane } from "./localSolver";
 import { detectRegions, planeFor, solveDof } from "./mockSketch";
+import type { DatumMeta } from "@/stores/documentStore";
 import { documentStore, emptyDocument } from "@/stores/documentStore";
 
 const LATENCY_MS = 120;
@@ -255,10 +256,66 @@ function writeMockMeta(kind: "body" | "sketch", id: string, patch: Partial<MockM
   reassertMockMetadata();
 }
 
+// ── Datum planes (DATUM W1) ──────────────────────────────────────────────────
+//
+// The mock owns datums in the projection store, like the backend does. Two mock
+// LIMITS worth naming:
+//
+// * **Sketch→datum attachments are not modelled.** `SketchMeta` carries no
+//   attachment (the real `SketchDto` doesn't either — attachments are core-owned
+//   and never projected), and the mock lane has no sketch-creation command at
+//   all, so nothing populates `mockSketchDatum` today. It exists so the
+//   referenced-guard below is real code with a real registry rather than a
+//   permanently-true branch, and so the datum TOOL half can register an
+//   attachment through `mockAttachSketchToDatum` without reworking this.
+// * Resolution is a hand-mirror of the core rule, not the core itself.
+
+/** sketch id → the datum it is attached to (see the limits note above). */
+const mockSketchDatum = new Map<string, string>();
+
+/**
+ * Test/tool seam: record that `sketchId` is hosted on `datumId` so `deleteDatum`
+ * guards on it. Pass `null` to clear. No-op on the real client.
+ */
+export function mockAttachSketchToDatum(sketchId: string, datumId: string | null): void {
+  if (datumId === null) mockSketchDatum.delete(sketchId);
+  else mockSketchDatum.set(sketchId, datumId);
+}
+
+/**
+ * MOCK MIRROR of `DocumentSession::resolve_datum_frame`: slide the base frame
+ * along its own NORMAL by `offset`, carrying the base axes verbatim. The base is
+ * a named world plane or another RESOLVED datum; anything else is unresolvable
+ * and comes back `resolvedValid: false` (lenient, exactly like the core).
+ *
+ * The named bases are the non-standard `Sketch.h` ones (`mockSketch.PLANES`), so
+ * "XZ offset 10" moves along world **+X** here too.
+ */
+function mockResolveDatum(basePlaneId: string, offset: number): { plane: SketchPlane; resolvedValid: boolean } {
+  const named = basePlaneId === "XY" || basePlaneId === "XZ" || basePlaneId === "YZ";
+  const chained = named ? undefined : documentStore.getState().datums[basePlaneId];
+  const base = named ? planeFor(basePlaneId) : chained?.resolvedValid ? chained.plane : undefined;
+  if (!base) return { plane: { ...planeFor("XY"), kind: "custom" }, resolvedValid: false };
+  const n = base.normal;
+  return {
+    plane: {
+      kind: "custom",
+      origin: [base.origin[0] + n[0] * offset, base.origin[1] + n[1] * offset, base.origin[2] + n[2] * offset],
+      xAxis: [...base.xAxis],
+      yAxis: [...base.yAxis],
+      normal: [...base.normal],
+    },
+    resolvedValid: true,
+  };
+}
+
 interface DocSnap {
   label: string;
   features: FeatureRecord[];
   bodies: Map<string, ArrayBuffer>;
+  /** Datums are projection-store state, so undo has to carry them too — a snap
+   *  that forgot them would silently resurrect a deleted datum on redo. */
+  datums: Record<string, DatumMeta>;
 }
 const undoStack: DocSnap[] = [];
 const redoStack: DocSnap[] = [];
@@ -269,7 +326,12 @@ const bodyRef = (bodyId: string): BodyMeshRef => ({
 });
 
 function snap(label: string): DocSnap {
-  return { label, features: mockFeatures.map(cloneFeature), bodies: new Map(syntheticBodies) };
+  return {
+    label,
+    features: mockFeatures.map(cloneFeature),
+    bodies: new Map(syntheticBodies),
+    datums: { ...documentStore.getState().datums },
+  };
 }
 
 /** Compute changed (new/replaced) + removed bodies between two body maps. */
@@ -290,6 +352,7 @@ function restoreSnap(s: DocSnap): { changed: string[]; removed: string[] } {
   mockFeatures = s.features.map(cloneFeature);
   syntheticBodies.clear();
   for (const [k, v] of s.bodies) syntheticBodies.set(k, v);
+  documentStore.getState().applyChange({ datums: { ...s.datums } });
   mockRevision += 1;
   return diffBodies(before, syntheticBodies);
 }
@@ -780,6 +843,43 @@ async function mockApplyEditCommand(command: WireEditCommand): Promise<ApplyOper
       mockRevision += 1;
       return { ...noopResult(), opLabel: "Rename" };
     }
+    // ── Datum planes (DATUM W1) — also RegenHint::None, no document-changed ──
+    case "addDatumPlane": {
+      const d = command.datum;
+      undoStack.push(snap("Create datum plane"));
+      redoStack.length = 0;
+      // The client-sent `resolvedPlane` is DISCARDED, exactly as the core
+      // discards it — the mock re-derives the frame from the definition so both
+      // lanes agree on where a datum actually is.
+      const { plane, resolvedValid } = mockResolveDatum(d.basePlaneId, d.offset);
+      documentStore.getState().addDatum({
+        id: d.id,
+        name: d.name,
+        basePlaneId: d.basePlaneId,
+        offset: d.offset,
+        plane,
+        resolvedValid,
+      });
+      mockRevision += 1;
+      return { ...noopResult(), opLabel: "Create datum plane" };
+    }
+    case "deleteDatum": {
+      const id = command.datum;
+      if (!documentStore.getState().datums[id]) throw new Error(`deleteDatum: unknown datum ${id}`);
+      // Referenced-guard, mirroring the core: a datum a sketch is hosted on must
+      // not vanish under it, and the message NAMES the blockers.
+      const blockers = [...mockSketchDatum.entries()].filter(([, d]) => d === id).map(([s]) => s);
+      if (blockers.length > 0) {
+        throw new Error(
+          `deleteDatum: datum ${id} is referenced by ${blockers.length} sketch(es): ${blockers.join(", ")}`,
+        );
+      }
+      undoStack.push(snap("Delete datum plane"));
+      redoStack.length = 0;
+      documentStore.getState().removeDatum(id);
+      mockRevision += 1;
+      return { ...noopResult(), opLabel: "Delete datum plane" };
+    }
     case "setRollback":
     default:
       // Rollback carries no distinct projection signal in the lean mock. Return a
@@ -817,7 +917,15 @@ async function enterSketchWithHydration(target: EnterSketchTarget): Promise<Sket
     await lane.enterSketch(target);
     await lane.sketchUpsert(target, seededSketchRectangle(), []);
   }
-  return lane.enterSketch(target);
+  const session = await lane.enterSketch(target);
+  // DATUM W1: the shared lane models the sketch's PLANE but not its attachment
+  // (see the `mockSketchDatum` note above), so the mock client is where a
+  // datum-hosted sketch gets registered against its host. Without this the
+  // `deleteDatum` referenced-guard would be permanently vacuous in the mock lane.
+  if (typeof target !== "string" && "newOnDatum" in target) {
+    mockAttachSketchToDatum(session.sketchId, target.newOnDatum.datumId);
+  }
+  return session;
 }
 
 /** Test seam: forget all sketch state so a fresh sketch starts empty. */
@@ -838,6 +946,8 @@ export function resetMockDocument(): void {
   undoStack.length = 0;
   redoStack.length = 0;
   mockRecovery = null;
+  mockSketchDatum.clear();
+  documentStore.getState().applyChange({ datums: {} });
   // Re-adopt the (already reset) projection store as the mock's metadata authority.
   seedMockMetadata();
 }
@@ -939,6 +1049,28 @@ export const mockClient: CadClient = {
       dirty: s.dirty,
       bodies: { ...s.bodies },
       sketches: { ...s.sketches },
+      // Back onto the WIRE shape: the store's `plane` carries a `kind` the
+      // backend never sends (`DatumDto.plane` is a bare basis), so drop it here
+      // rather than round-tripping a field the real projection lacks.
+      datums: Object.fromEntries(
+        Object.entries(s.datums).map(([id, d]) => [
+          id,
+          {
+            id: d.id,
+            name: d.name,
+            kind: "OffsetFromPlane",
+            basePlaneId: d.basePlaneId,
+            offset: d.offset,
+            plane: {
+              origin: [...d.plane.origin] as [number, number, number],
+              xAxis: [...d.plane.xAxis] as [number, number, number],
+              yAxis: [...d.plane.yAxis] as [number, number, number],
+              normal: [...d.plane.normal] as [number, number, number],
+            },
+            resolvedValid: d.resolvedValid,
+          },
+        ]),
+      ),
       features: s.features.map((f) => ({ ...f })),
     };
   },
@@ -1082,6 +1214,10 @@ export const mockClient: CadClient = {
   async deleteSketch(id: string): Promise<void> {
     documentStore.getState().removeSketch(id);
     lane.dropSession(id);
+    // A deleted sketch no longer references its host datum — otherwise the
+    // orphan-cleanup path (SketchController leaving mid-enter) would leave a
+    // phantom blocker that makes the datum permanently undeletable.
+    mockAttachSketchToDatum(id, null);
   },
   beginGesture: lane.beginGesture,
   solveDrag: lane.solveDrag,

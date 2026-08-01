@@ -22,7 +22,7 @@
 //! | `DeleteSketch` / `UpdateSketchAttachment` / `SketchEdit` / `SketchDragGesture` | `min(producing Sketch op, first dependent op)` | `ToEnd` / `None` |
 //! | `RenameSketch` | — | `None` |
 //! | `AddBody` / `DeleteBody` / `RenameBody` / `SetVisibility` | — | `None` |
-//! | `AddDatumPlane` | — | `None` |
+//! | `AddDatumPlane` / `DeleteDatum` | — | `None` |
 //! | `SetVariable` / `AddVariable` / `RemoveVariable` | `[0, len)` (conservative) | `ToEnd` / `None` |
 //!
 //! `UpdateOperationParams` keeps it simple (`ToEnd`) rather than a `PreviewTo`
@@ -48,11 +48,17 @@
 //! design, matching C++: the command layer only rewrites the record, and the
 //! worker's `RegenerationEngine` surfaces an unresolved reference as a
 //! failure/`NeedsRepair` rather than the command rejecting it up front.
+//!
+//! **The one exception is a `Datum` sketch attachment** (`stamp_datum_plane`): a
+//! sketch's coordinate frame is FROZEN at attach time and every entity coordinate
+//! is expressed in it, so the datum has to exist and be resolved *now*. Deferring
+//! it would leave the sketch on the XY placeholder — a silent wrong frame, not a
+//! deferred resolution.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::document::body::{BodyMeta, BodyRegistry};
-use crate::document::datum::DatumPlane;
+use crate::document::datum::{resolve_datum, DatumContext, DatumKind, DatumPlane};
 use crate::document::record::{KnownOperation, Operation, OperationRecord};
 use crate::document::refs::ElementRef;
 use crate::document::variables::{Scalar, Variable, VariableTable};
@@ -61,7 +67,7 @@ use crate::error::DomainError;
 use crate::history::{DependencyGraph, DirtyRange, Timeline};
 use crate::ids::{BodyId, RecordId, SketchId};
 use crate::math::Vec2;
-use crate::sketch::{Constraint, Sketch, SketchEntity, SketchError};
+use crate::sketch::{Constraint, Sketch, SketchAttachment, SketchEntity, SketchError};
 
 use super::command::{EditCommand, InputPath, InputRef, SketchEditOp, VisibilityTarget};
 use super::outcome::{CommandOutcome, ProjectionDelta, RegenHint};
@@ -492,6 +498,7 @@ impl DocumentSession {
                 self.set_visibility(*target, *visible)
             }
             EditCommand::AddDatumPlane { datum } => self.add_datum(datum.clone()),
+            EditCommand::DeleteDatum { datum } => self.delete_datum(*datum),
             EditCommand::SetVariable { variable, value } => {
                 self.set_variable(*variable, value.clone())
             }
@@ -735,11 +742,43 @@ impl DocumentSession {
 
     // ── Sketch commands ──────────────────────────────────────────────────────
 
-    fn add_sketch(&mut self, sketch: Sketch) -> Result<(CommandOutcome, Inverse), DomainError> {
+    /// For a `Datum`-attached sketch, STAMP its frame from the datum's resolved
+    /// plane and reject a missing / unresolved datum loudly.
+    ///
+    /// This is a DELIBERATE exception to the "reference existence is a regen-time
+    /// concern" rule documented at the top of this module. The frame is frozen
+    /// into the sketch at attach time and every entity coordinate is expressed in
+    /// it, so the reference has to exist *now* — deferring it to regen would
+    /// silently leave the sketch on the XY default (`Sketch::new`'s placeholder),
+    /// i.e. exactly the silent-wrong-bind failure the migration exists to remove.
+    /// It is also why the caller's `sketch.plane` is overwritten rather than
+    /// trusted: the frontend round-trips it, and the core is the basis authority.
+    fn stamp_datum_plane(&self, sketch: &mut Sketch) -> Result<(), DomainError> {
+        let SketchAttachment::Datum { datum } = sketch.attachment else {
+            return Ok(());
+        };
+        let d = self.document.datum_planes.get(&datum).ok_or_else(|| {
+            DomainError::Validation(format!(
+                "sketch {} attaches to datum {datum}, which does not exist",
+                sketch.id
+            ))
+        })?;
+        if !d.resolved_valid {
+            return Err(DomainError::Validation(format!(
+                "sketch {} attaches to datum {datum} ('{}'), whose frame is unresolved",
+                sketch.id, d.name
+            )));
+        }
+        sketch.plane = d.resolved_plane;
+        Ok(())
+    }
+
+    fn add_sketch(&mut self, mut sketch: Sketch) -> Result<(CommandOutcome, Inverse), DomainError> {
         let id = sketch.id;
         if self.document.sketches.contains_key(&id) {
             return Err(DomainError::Validation(format!("duplicate sketch id {id}")));
         }
+        self.stamp_datum_plane(&mut sketch)?;
         self.document.sketches.insert(id, sketch);
         Ok((
             self.sketch_dirty_outcome(id),
@@ -796,14 +835,18 @@ impl DocumentSession {
         plane: crate::sketch::SketchPlane,
         attachment: crate::sketch::SketchAttachment,
     ) -> Result<(CommandOutcome, Inverse), DomainError> {
-        let sketch = self
-            .document
-            .sketches
-            .get_mut(&id)
-            .ok_or_else(|| DomainError::Validation(format!("sketch {id} not found")))?;
-        let prior = sketch.clone();
-        sketch.plane = plane;
-        sketch.attachment = attachment;
+        if !self.document.sketches.contains_key(&id) {
+            return Err(DomainError::Validation(format!("sketch {id} not found")));
+        }
+        let prior = self.document.sketches[&id].clone();
+        // Re-attaching to a datum takes the same core-stamped frame add_sketch
+        // does, so neither entry point can leave a datum-hosted sketch on a
+        // frontend-supplied basis.
+        let mut next = prior.clone();
+        next.plane = plane;
+        next.attachment = attachment;
+        self.stamp_datum_plane(&mut next)?;
+        self.document.sketches.insert(id, next);
         Ok((
             self.sketch_dirty_outcome(id),
             Inverse::RestoreSketch {
@@ -937,15 +980,117 @@ impl DocumentSession {
         }
     }
 
-    fn add_datum(&mut self, datum: DatumPlane) -> Result<(CommandOutcome, Inverse), DomainError> {
+    // ── Datum commands ───────────────────────────────────────────────────────
+
+    /// The frame `datum.base_plane_id` names: a world plane's basis, or another
+    /// datum's already-resolved frame (chaining). `None` when the name is neither
+    /// — an unknown id, or a base datum that never resolved.
+    fn datum_base_frame(&self, datum: &DatumPlane) -> Option<crate::sketch::SketchPlane> {
+        match datum.base_plane_id.as_str() {
+            // NOTE the LEGACY-SWAPPED bases (sketch/plane.rs): "XZ" has world
+            // normal +X and "YZ" has +Y, so an offset along the base normal moves
+            // along those axes, not the intuitive ones. Ported verbatim from
+            // `Sketch.h`; pinned by `offset_from_xz_slides_along_world_x`.
+            "XY" => Some(crate::sketch::SketchPlane::xy()),
+            "XZ" => Some(crate::sketch::SketchPlane::xz()),
+            "YZ" => Some(crate::sketch::SketchPlane::yz()),
+            other => {
+                let id: crate::ids::DatumPlaneId = other.parse().ok()?;
+                let base = self.document.datum_planes.get(&id)?;
+                base.resolved_valid.then_some(base.resolved_plane)
+            }
+        }
+    }
+
+    /// Resolves a datum's frame with the context THE CORE can supply (V1: base
+    /// world plane / base datum only). `OffsetFromFace` and `AngledFromEdge` need
+    /// kernel-supplied geometry the core cannot derive, so they resolve to `None`
+    /// and the datum is stored `resolved_valid == false` rather than guessing a
+    /// frame — the same "never a silent wrong bind" rule the region and element
+    /// paths follow.
+    fn resolve_datum_frame(&self, datum: &DatumPlane) -> Option<crate::sketch::SketchPlane> {
+        if datum.kind != DatumKind::OffsetFromPlane {
+            return None;
+        }
+        let base = self.datum_base_frame(datum)?;
+        resolve_datum(
+            datum,
+            &DatumContext {
+                base,
+                face: None,
+                axis_dir: None,
+                axis_origin: None,
+            },
+        )
+    }
+
+    fn add_datum(
+        &mut self,
+        mut datum: DatumPlane,
+    ) -> Result<(CommandOutcome, Inverse), DomainError> {
         let id = datum.id;
         if self.document.datum_planes.contains_key(&id) {
             return Err(DomainError::Validation(format!("duplicate datum id {id}")));
+        }
+        // FROZEN policy: resolve HERE, at creation, and OVERWRITE whatever frame
+        // the caller sent. Rust is the basis authority — a client-supplied
+        // `resolved_plane` is never trusted, exactly as a sketch's frame is
+        // stamped from the datum rather than round-tripped through the frontend.
+        // Unresolvable definitions are stored LENIENTLY (`resolved_valid: false`)
+        // instead of rejected, so a future import carrying a kind V1 cannot
+        // resolve still loads; the guard that matters is in `add_sketch`, which
+        // refuses to host a sketch on an unresolved datum.
+        match self.resolve_datum_frame(&datum) {
+            Some(plane) => datum.set_resolved(plane),
+            None => {
+                datum.resolved_plane = crate::sketch::SketchPlane::xy();
+                datum.resolved_valid = false;
+            }
         }
         self.document.datum_planes.insert(id, datum);
         Ok((
             CommandOutcome::metadata_only(ProjectionDelta::datum(id)),
             Inverse::RestoreDatum { id, prior: None },
+        ))
+    }
+
+    fn delete_datum(
+        &mut self,
+        id: crate::ids::DatumPlaneId,
+    ) -> Result<(CommandOutcome, Inverse), DomainError> {
+        if !self.document.datum_planes.contains_key(&id) {
+            return Err(DomainError::Validation(format!("datum {id} not found")));
+        }
+        // Referenced-guard. A datum-hosted sketch's frame was STAMPED from this
+        // datum at creation, so deleting it would leave the sketch pointing at a
+        // dangling id with a frame nothing can re-derive. Reject loudly and NAME
+        // the blockers so the user can act (mirrors the region-binding rule: a
+        // stale reference fails with the available ids, never binds silently).
+        let referencing: Vec<String> = self
+            .document
+            .sketches
+            .values()
+            .filter(|s| matches!(&s.attachment, SketchAttachment::Datum { datum } if *datum == id))
+            .map(|s| format!("{} ({})", s.name, s.id))
+            .collect();
+        if !referencing.is_empty() {
+            return Err(DomainError::Validation(format!(
+                "datum {id} is referenced by {} sketch(es): {}",
+                referencing.len(),
+                referencing.join(", ")
+            )));
+        }
+        let prior = self
+            .document
+            .datum_planes
+            .remove(&id)
+            .expect("presence checked above");
+        Ok((
+            CommandOutcome::metadata_only(ProjectionDelta::datum(id)),
+            Inverse::RestoreDatum {
+                id,
+                prior: Some(Box::new(prior)),
+            },
         ))
     }
 

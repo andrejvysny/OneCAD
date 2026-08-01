@@ -34,6 +34,21 @@ pub enum DatumKind {
     ThreePoint,
 }
 
+impl DatumKind {
+    /// The PascalCase token this kind serializes as. Lock-tested against the
+    /// serde output so a projection DTO can render the discriminator without
+    /// re-serializing (and can never drift from the wire spelling).
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::OffsetFromPlane => "OffsetFromPlane",
+            Self::OffsetFromFace => "OffsetFromFace",
+            Self::AngledFromEdge => "AngledFromEdge",
+            Self::ThreePoint => "ThreePoint",
+        }
+    }
+}
+
 /// A user-created reference plane (C++ `DatumPlane`).
 ///
 /// The definition fields are parametric and re-derivable; `resolved_plane` /
@@ -236,6 +251,20 @@ mod tests {
         assert_eq!(v["resolvedValid"], true);
         let back: DatumPlane = serde_json::from_value(v).unwrap();
         assert_eq!(d, back);
+    }
+
+    /// LOCK — `DatumKind::name()` must equal the serde token for every variant
+    /// (the projection DTO renders `kind` from it without re-serializing).
+    #[test]
+    fn kind_name_matches_the_serde_token() {
+        for k in [
+            DatumKind::OffsetFromPlane,
+            DatumKind::OffsetFromFace,
+            DatumKind::AngledFromEdge,
+            DatumKind::ThreePoint,
+        ] {
+            assert_eq!(serde_json::to_value(k).unwrap(), k.name(), "{k:?}");
+        }
     }
 
     #[test]

@@ -90,9 +90,17 @@ export interface ValueChipHandlers {
   onCancel?: () => void;
 }
 
+/** Handlers the armed DATUM chip wires (offset input + ✓/✕ — DATUM W1). */
+export interface DatumChipHandlers {
+  onValue: (v: number) => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
 export type ChipKind =
   | "none"
   | "extrudeDepth"
+  | "datumOffset"
   | "filletRadius"
   | "revolveAngle"
   | "booleanOp"
@@ -133,6 +141,8 @@ export interface ToolChipState {
   regionCount: number;
   /** Unit suffix for the numeric chip (mm / ° — sketch dimension chip). */
   suffix: string;
+  /** Leading context label (datum chip: the picked base plane's geometric name). */
+  label: string;
   /** World anchor for the overlay driver, or null. */
   worldPos: [number, number, number] | null;
   /** Committed value from the editable chip (Enter/blur). */
@@ -176,6 +186,13 @@ export interface ToolChipState {
     worldPos: [number, number, number],
     handlers: RevolveChipHandlers,
     opts?: RevolveChipOpts,
+  ): void;
+  /** Show the armed datum chip `[ <base> · offset mm ✓ ✕ ]` at the ghost origin. */
+  showDatum(
+    offset: number,
+    worldPos: [number, number, number],
+    baseLabel: string,
+    handlers: DatumChipHandlers,
   ): void;
   /** Show the multi-region select chip `[ N regions ✓ ✕ ]` at the sketch centroid. */
   showRegionSelect(
@@ -267,6 +284,7 @@ const CLEARED = {
   showBooleanSegments: false,
   regionCount: 1,
   suffix: "",
+  label: "",
   worldPos: null,
   onValue: null,
   onSymmetric: null,
@@ -332,6 +350,18 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
       onConfirm: handlers.onConfirm,
       onCancel: handlers.onCancel,
       onBooleanMode: handlers.onBooleanMode ?? null,
+    });
+  },
+  showDatum(offset, worldPos, baseLabel, handlers) {
+    set({
+      ...CLEARED,
+      kind: "datumOffset",
+      value: offset,
+      label: baseLabel,
+      worldPos,
+      onValue: handlers.onValue,
+      onConfirm: handlers.onConfirm,
+      onCancel: handlers.onCancel,
     });
   },
   showRegionSelect(count, worldPos, handlers) {

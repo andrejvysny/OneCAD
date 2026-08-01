@@ -1,8 +1,8 @@
 /*
  * Keyboard bindings (F-WP3) — data-driven, mode-scoped.
  *
- * Model:  V select · S new-sketch (enters sketch mode) · E extrude · R revolve
- *         · F fillet · B combine/boolean
+ * Model:  V select · S new-sketch (enters sketch mode) · D datum plane · E extrude
+ *         · R revolve · F fillet · B combine/boolean
  * Sketch: V select · L line · R rectangle · ⇧R center-rectangle · C circle
  *         · O ellipse · A arc · G polygon · S slot · P point · D dimension
  *         · T trim · M mirror · X construction (flip selection / sticky mode)
@@ -24,6 +24,10 @@
  *     cross-mode fallback could never have claimed sketch `S` anyway.
  *   - `G` was free in both modes; sketch owns it (Polygon) and model mode reaches
  *     it through the normal cross-mode fallback.
+ *   - `D` in SKETCH mode is the Dimension tool; model `D` = Datum plane (DATUM W1).
+ *     Mode-resolved exactly like `R` (revolve vs rectangle) — sketch mode's own
+ *     table claims `d` first, so the cross-mode fallback never reaches the datum
+ *     tool while drawing. Pressing D in model mode is unambiguous.
  *   - `O` (Ellipse, W3 P3) was likewise free in BOTH tables, so sketch owns it and
  *     model mode reaches it cross-mode. Deliberately NOT `E`: that letter is the
  *     model Extrude binding, i.e. the cross-mode "finish this sketch and extrude"
@@ -55,6 +59,9 @@ export interface KeyBinding {
 export const MODEL_KEYS: KeyBinding[] = [
   { key: "v", action: { type: "tool", tool: "select" } },
   { key: "s", action: { type: "enterSketch" } },
+  // D = Datum plane (DATUM W1). Free in the model table; sketch mode's own `d`
+  // (Dimension) shadows it there, so the two never collide (see COLLISIONS).
+  { key: "d", action: { type: "tool", tool: "datum" } },
   { key: "e", action: { type: "tool", tool: "extrude" } },
   { key: "r", action: { type: "tool", tool: "revolve" } },
   { key: "f", action: { type: "tool", tool: "fillet" } },

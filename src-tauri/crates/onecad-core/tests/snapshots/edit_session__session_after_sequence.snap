@@ -140,7 +140,7 @@ expression: sess.document()
       "angleDeg": 0.0,
       "resolvedPlane": {
         "origin": [
-          0.0,
+          5.0,
           0.0,
           0.0
         ],
@@ -150,17 +150,17 @@ expression: sess.document()
           0.0
         ],
         "yAxis": [
-          -1.0,
-          0.0,
-          0.0
-        ],
-        "normal": [
           0.0,
           0.0,
           1.0
+        ],
+        "normal": [
+          1.0,
+          0.0,
+          0.0
         ]
       },
-      "resolvedValid": false
+      "resolvedValid": true
     }
   },
   "timeline": {

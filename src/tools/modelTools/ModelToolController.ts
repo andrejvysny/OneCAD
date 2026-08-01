@@ -34,16 +34,19 @@ import type {
   SketchSession,
 } from "@/ipc/types";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
-import { updateScalarParamsCommand } from "@/ipc/tauriCommandMap";
+import { buildAddDatumPlane, updateScalarParamsCommand } from "@/ipc/tauriCommandMap";
+import { mintUuid } from "@/ipc/sketchWireMap";
 import { toFeatureMeta } from "@/ipc/projectionHydration";
 import { setSketchVisible } from "@/features/tree/treeActions";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
+import { datumGhostPlane } from "@/viewport/engine/DatumLayer";
+import { geometricLabel, type PickablePlane } from "@/viewport/engine/PlanePicker";
 import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
 import { buildBodyObjects, getEntry, remove as removeMesh, swap as swapMesh } from "@/viewport/mesh/meshRegistry";
 import { toolStore } from "@/stores/toolStore";
 import { trace, traceWarn } from "@/debug/trace";
 import { viewportStore, type ViewportState } from "@/stores/viewportStore";
-import { documentStore, type SketchMeta } from "@/stores/documentStore";
+import { documentStore, nextDatumName, type SketchMeta } from "@/stores/documentStore";
 import { selectionStore, type EntityRef } from "@/stores/selectionStore";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { profileFromRegion, profileBounds, type PrismProfile } from "@/tools/preview/prismPreview";
@@ -117,6 +120,9 @@ const EDGE_OP_TRAILING_MS = 160;
 const EDGE_OP_DRAG_TRAILING_MS = 80;
 /** Shell hollows the whole solid — the dearest of the three; one floor, no drag tier. */
 const SHELL_TRAILING_MS = 200;
+
+/** Seed offset for a fresh datum plane (mm) — matches DEFAULT_EXTRUDE_DEPTH's role. */
+const DEFAULT_DATUM_OFFSET = 10;
 
 /**
  * How long a commit waits for its new bodies to enter the scene (onBodyLoaded)
@@ -340,6 +346,13 @@ export class ModelToolController {
   // Pattern / mirror context (chip-driven; ghost clones of the source body).
   private patternEditFeatureId: string | undefined;
 
+  /**
+   * Datum-plane tool context (DATUM W1), null when the tool is not armed.
+   * `base === null` is the BASE-PICK phase (the plane picker owns the pointer);
+   * a non-null base is the OFFSET phase (ghost + chip up, ✓ / Enter commits).
+   */
+  private datum: { base: PickablePlane | null; offset: number } | null = null;
+
   // Boolean re-edit context (operation swap only — the tool body is consumed).
   private booleanEditFeatureId: string | undefined;
   /** Stored params of the boolean being re-edited (target/tool ids survive the swap). */
@@ -547,8 +560,10 @@ export class ModelToolController {
     this.cancelRevolve();
     this.cancelShell();
     this.cancelPattern();
+    this.endDatumPick();
     toolChipStore.getState().clear();
-    if (tool === "extrude") this.armExtrudeFromSelection();
+    if (tool === "datum") this.startDatum();
+    else if (tool === "extrude") this.armExtrudeFromSelection();
     else if (tool === "revolve") this.armRevolveFromSelection();
     else if (tool === "fillet") void this.armEdgeOpFromSelection("Fillet");
     else if (tool === "chamfer") void this.armEdgeOpFromSelection("Chamfer");
@@ -2658,6 +2673,111 @@ export class ModelToolController {
     return selectionStore.getState().selected.find((r) => r.kind === "body")?.id ?? null;
   }
 
+  // ── datum plane tool (DATUM W1) ──────────────────────────────────────────────
+  //
+  // Two phases, both owned here (this controller owns model-mode pointer events
+  // and the onToolChange dispatch):
+  //
+  //   base pick — the PlanePicker gizmo is reused VERBATIM (its orbit gate,
+  //               hover chip and geometric labelling all come along for free);
+  //   offset    — a live ghost quad + the datum chip. ✓ or Enter commits; there
+  //               is deliberately NO click-away commit (`isArmedForClickAway`
+  //               ignores the datum), because the offset phase has no drag
+  //               gesture and a stray canvas click would silently author a datum.
+  //
+  // V1 authors OffsetFromPlane off a WORLD plane only. The backend also accepts
+  // another datum's id as the base (chained offsets) — that is a later wave, and
+  // is why `buildAddDatumPlane` takes a plain string rather than a plane kind.
+
+  private startDatum(): void {
+    this.datum = { base: null, offset: DEFAULT_DATUM_OFFSET };
+    this.engine.setPlanePickerVisible(true);
+    viewportStore
+      .getState()
+      .setStatusHint("Select a base plane for the datum — Esc to cancel", { sticky: true });
+    this.updateDebug();
+  }
+
+  /** A base plane was clicked: hide the picker, show the ghost + offset chip. */
+  private pickDatumBase(base: PickablePlane): void {
+    const state = this.datum;
+    if (!state || state.base !== null) return;
+    state.base = base;
+    this.engine.setPlanePickerVisible(false);
+    const ghost = datumGhostPlane(base, state.offset);
+    // The chip shows the base plane's GEOMETRIC name ("XY"/"XZ"/"YZ" by world
+    // normal); the repo `kind` — which is legacy-swapped — is what gets stored.
+    const label = geometricLabel(ghost.normal);
+    this.engine.setDatumGhost(base, state.offset, label);
+    // The chip anchors ONCE (armed-chip convention): the ghost slides with the
+    // offset, the chip stays where the plane was picked.
+    toolChipStore.getState().showDatum(state.offset, ghost.origin, label, {
+      onValue: (v) => this.onDatumOffset(v),
+      onConfirm: () => void this.confirmDatum(),
+      onCancel: () => {
+        this.endDatumPick();
+        this.resetToSelect();
+      },
+    });
+    viewportStore
+      .getState()
+      .setStatusHint(`Datum offset from ${label} — Enter or ✓ to create, Esc to cancel`, {
+        sticky: true,
+      });
+    this.updateDebug();
+  }
+
+  private onDatumOffset(offset: number): void {
+    const state = this.datum;
+    if (!state || state.base === null) return;
+    state.offset = offset;
+    toolChipStore.getState().setValue(offset);
+    this.engine.setDatumGhost(state.base, offset, geometricLabel(datumGhostPlane(state.base, 0).normal));
+    this.updateDebug();
+  }
+
+  /**
+   * Commit the armed datum. The tool chrome is torn down BEFORE the await: the
+   * ghost + chip describe something uncommitted, and the REAL datum arrives
+   * through the projection (mock lane: `mockApplyEditCommand`; real lane:
+   * `projection-updated`) — the controller never writes it into the store itself.
+   */
+  private async confirmDatum(): Promise<void> {
+    const state = this.datum;
+    if (!state || state.base === null) return;
+    const gen = ++this.commitGen;
+    const base = state.base;
+    const offset = state.offset;
+    const name = nextDatumName(documentStore.getState().datums);
+    this.endDatumPick();
+    let res: ApplyOperationResult;
+    try {
+      res = await this.client.applyEditCommand(buildAddDatumPlane(mintUuid(), name, base, offset));
+    } catch (e) {
+      if (gen !== this.commitGen) return; // superseded mid-flight — touch nothing
+      this.resetToSelect(`Create datum plane failed: ${errMessage(e)}`, {
+        severity: "error",
+        sticky: true,
+      });
+      return;
+    }
+    if (gen !== this.commitGen) return;
+    this.applyResult(res);
+    this.resetToSelect(`${name} created`);
+  }
+
+  /** Reverse `startDatum` (IDEMPOTENT): drop the picker, the ghost and the chip.
+   *  Every teardown path funnels here — Esc, the chip ✕, a tool switch, a mode
+   *  change (cancelAll) and dispose. */
+  private endDatumPick(): void {
+    if (!this.datum) return;
+    this.datum = null;
+    this.engine.setPlanePickerVisible(false);
+    this.engine.setDatumGhost(null, 0);
+    toolChipStore.getState().clear();
+    this.updateDebug(); // republish the now-idle phase (a tool switch has no other hook)
+  }
+
   // ── pointer handling ─────────────────────────────────────────────────────────
 
   private onPointerDown = (e: PointerEvent): void => {
@@ -2705,6 +2825,11 @@ export class ModelToolController {
   private onPointerMove = (e: PointerEvent): void => {
     if (Math.abs(e.clientX - this.downX) > DRAG_PX || Math.abs(e.clientY - this.downY) > DRAG_PX) {
       this.moved = true;
+    }
+    // Datum base pick owns the pointer: highlight the plane quad under it.
+    if (this.datum && this.datum.base === null) {
+      this.engine.planePickerHover(e.clientX, e.clientY);
+      return;
     }
     // Region pick owns the pointer: hover-tint the region under it, nothing else.
     if (this.regionPick) {
@@ -2754,6 +2879,15 @@ export class ModelToolController {
       this.downButton === 0 && e.button === 0 && !this.moved &&
       Math.abs(e.clientX - this.downX) <= DRAG_PX && Math.abs(e.clientY - this.downY) <= DRAG_PX;
     this.downButton = -1;
+
+    // Datum base pick owns the pointer: a click on a plane quad picks the base.
+    if (this.datum && this.datum.base === null) {
+      if (wasClick) {
+        const kind = this.engine.planePickerHitTest(e.clientX, e.clientY);
+        if (kind) this.pickDatumBase(kind);
+      }
+      return;
+    }
 
     // Region pick owns the pointer: a click resolves the region under it.
     if (this.regionPick) {
@@ -4224,6 +4358,11 @@ export class ModelToolController {
       filletPhase: this.fillet.phase,
       edgeOpKind: this.edgeOpKind,
       shellPhase: this.shell.phase,
+      // Datum tool (DATUM W1): "idle" | "basePick" | "offset" + the armed values,
+      // so e2e can assert the two-phase gesture without any DOM of its own.
+      datumPhase: this.datum ? (this.datum.base === null ? "basePick" : "offset") : "idle",
+      datumBase: this.datum?.base ?? null,
+      datumOffset: this.datum?.offset ?? null,
       booleanMode: this.extrude.booleanMode,
       symmetric: this.extrude.symmetric,
       endCondition: this.extrude.endCondition,
@@ -4270,6 +4409,22 @@ export class ModelToolController {
   // ── keyboard ──────────────────────────────────────────────────────────────────
 
   private onKeyDown = (e: KeyboardEvent): void => {
+    // Esc cancels the datum tool from EITHER phase (base pick / offset) and owns
+    // the key, so the global Esc-ladder does not also fire.
+    if (e.key === "Escape" && this.datum) {
+      e.preventDefault();
+      e.stopPropagation();
+      this.endDatumPick();
+      this.resetToSelect();
+      return;
+    }
+    // Enter confirms an armed datum (offset phase). Skipped while a chip input has
+    // focus — DimensionInput consumes Enter itself and calls onConfirm (no double).
+    if (e.key === "Enter" && this.datum && this.datum.base !== null && !isEditableTarget(e.target)) {
+      e.preventDefault();
+      void this.confirmDatum();
+      return;
+    }
     // Esc during region pick cancels cleanly back to idle (restore orbit), and owns
     // the key so the global Esc-ladder does not also fire.
     if (e.key === "Escape" && this.regionPick) {
@@ -4497,6 +4652,7 @@ export class ModelToolController {
     this.cancelRevolve();
     this.cancelShell();
     this.cancelPattern();
+    this.endDatumPick();
     toolChipStore.getState().clear();
     toolStore.setState({ phase: toolStore.getState().modelTool === "select" ? "idle" : "armed" });
     this.updateDebug();
@@ -4506,6 +4662,10 @@ export class ModelToolController {
     // Supersede any in-flight commit sequence: its awaits resume after teardown
     // (the barrier + body waits are released below) and must not touch dead state.
     this.commitGen++;
+    // Drop the datum tool's picker/ghost/chip: a viewport remount disposes the
+    // controller mid-arm, and the chip store outlives it (it is a zustand store,
+    // not engine state) — without this the chip would survive with dead handlers.
+    this.endDatumPick();
     const c = this.deps.container;
     c.removeEventListener("pointerdown", this.onPointerDown);
     c.removeEventListener("pointermove", this.onPointerMove);

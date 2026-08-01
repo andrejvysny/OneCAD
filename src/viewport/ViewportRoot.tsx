@@ -16,6 +16,7 @@ import { ViewportEngine } from "./engine/ViewportEngine";
 import { secondaryHitWins, type PickHit } from "./engine/Picker";
 import { MeshIngest } from "./mesh/meshSync";
 import { SketchStaticSync } from "./sketchStaticSync";
+import { DatumSync } from "./datumSync";
 import { setViewportEngine } from "./engineBridge";
 import { viewLabelForDirection } from "@/features/viewcube/ViewCube";
 import { viewportStore } from "@/stores/viewportStore";
@@ -186,6 +187,11 @@ export function ViewportRoot({ className }: { className?: string }) {
         sketchStaticSync.attach(engine, client);
         cleanups.push(() => sketchStaticSync.detach());
 
+        // ── Always-visible datum (reference) planes (DATUM W1) ──
+        const datumSync = new DatumSync();
+        datumSync.attach(engine);
+        cleanups.push(() => datumSync.detach());
+
         // Missed-event race: projection-updated may fire before these listeners
         // attach (open/new/recover populate the doc before the viewport wires up) —
         // one authoritative pull recovers it; applyProjectionToStore reconciles by
@@ -239,17 +245,24 @@ export function ViewportRoot({ className }: { className?: string }) {
           const s = toolStore.getState();
           return s.mode === "model" && s.modelTool === "select";
         };
+        // A datum plane is the LAST resort under the pointer (DATUM W1): bodies
+        // and sketches are the things you are actually modelling, a datum is
+        // reference scaffolding, so it only wins where nothing else is hit.
+        const datumRefAt = (x: number, y: number): EntityRef | null => {
+          const id = engine.datumHitTest(x, y);
+          return id ? { kind: "datum", id } : null;
+        };
         engine.configurePicking({
           isActive: isPickingActive,
           onHover: (hit, x, y, alt) => {
             const sel = selectionStore.getState();
             const sketchHit = engine.sketchStaticHitTest(x, y);
-            sel.setHover(refFromModelHits(hit, sketchHit, alt));
+            sel.setHover(refFromModelHits(hit, sketchHit, alt) ?? datumRefAt(x, y));
           },
           onPick: (hit, mods, x, y) => {
             const sel = selectionStore.getState();
             const sketchHit = engine.sketchStaticHitTest(x, y);
-            const ref = refFromModelHits(hit, sketchHit, mods.alt);
+            const ref = refFromModelHits(hit, sketchHit, mods.alt) ?? datumRefAt(x, y);
             if (!ref) {
               sel.clear();
               return;

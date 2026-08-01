@@ -160,6 +160,90 @@ export function bodyOptions(page: Page): Locator {
   return page.getByRole("listbox", { name: "Bodies" }).getByRole("option");
 }
 
+/** Datum rows in the model tree (DATUM W1 — ModelTreePanel's "Datums" listbox). */
+export function datumOptions(page: Page): Locator {
+  return page.getByRole("listbox", { name: "Datums" }).getByRole("option");
+}
+
+/**
+ * Hit-scan the canvas for a real client pixel over the plane-picker quad of a
+ * given repo `kind`, via the engine's OWN `planePickerHitTest` raycast exposed
+ * at `window.__vpEngine` (see openEditorDebug).
+ *
+ * A center click is not enough here: all three origin quads MEET at the world
+ * origin, so which one the ray finds first depends on the settled camera pose.
+ * Scanning with the exact method the pointer handlers use is the only way to
+ * target a NAMED plane. Wrapped in `toPass` because the picker's quads are only
+ * sized on its first post-arm update (render-on-demand).
+ */
+export async function findPlaneQuad(
+  page: Page,
+  kind: "XY" | "XZ" | "YZ",
+): Promise<{ x: number; y: number }> {
+  let found: { x: number; y: number } | null = null;
+  await expect(async () => {
+    found = await page.evaluate((want) => {
+      const engine = (
+        window as unknown as {
+          __vpEngine?: { planePickerHitTest(x: number, y: number): string | null };
+        }
+      ).__vpEngine;
+      const canvas = document.querySelector('[data-testid="viewport-canvas"] canvas') as HTMLCanvasElement | null;
+      if (!engine || !canvas) return null;
+      const rect = canvas.getBoundingClientRect();
+      const step = 8;
+      for (let y = rect.top + step; y <= rect.bottom - step; y += step) {
+        for (let x = rect.left + step; x <= rect.right - step; x += step) {
+          if (engine.planePickerHitTest(x, y) === want) return { x, y };
+        }
+      }
+      return null;
+    }, kind);
+    expect(found).not.toBeNull();
+  }).toPass({ timeout: 15_000, intervals: [150, 300, 600, 1_000] });
+  return found as unknown as { x: number; y: number };
+}
+
+/**
+ * Hit-scan the canvas for a real client pixel over a DATUM plane quad, via the
+ * engine's own `datumHitTest`. Returns the pixel plus the datum id found there.
+ * Same rationale as `findPlaneQuad`: a datum sits at an arbitrary offset with no
+ * closed-form screen position.
+ */
+export async function findDatumQuad(page: Page): Promise<{ x: number; y: number; id: string }> {
+  let found: { x: number; y: number; id: string } | null = null;
+  await expect(async () => {
+    found = await page.evaluate(() => {
+      const engine = (
+        window as unknown as { __vpEngine?: { datumHitTest(x: number, y: number): string | null } }
+      ).__vpEngine;
+      const canvas = document.querySelector('[data-testid="viewport-canvas"] canvas') as HTMLCanvasElement | null;
+      if (!engine || !canvas) return null;
+      const rect = canvas.getBoundingClientRect();
+      const step = 8;
+      for (let y = rect.top + step; y <= rect.bottom - step; y += step) {
+        for (let x = rect.left + step; x <= rect.right - step; x += step) {
+          const id = engine.datumHitTest(x, y);
+          if (id) return { x, y, id };
+        }
+      }
+      return null;
+    });
+    expect(found).not.toBeNull();
+  }).toPass({ timeout: 15_000, intervals: [150, 300, 600, 1_000] });
+  return found as unknown as { x: number; y: number; id: string };
+}
+
+/** The datum-plane names in the projection store (`__stores.document`, dev-only). */
+export async function getDatumNames(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const w = window as unknown as {
+      __stores?: { document: { getState(): { datums: Record<string, { name: string }> } } };
+    };
+    return Object.values(w.__stores?.document.getState().datums ?? {}).map((d) => d.name);
+  });
+}
+
 /**
  * The persistent sketch constraint toolbar (SketchConstraintToolbar.tsx —
  * role="toolbar" aria-label="Constraints"). ConstraintContextChips renders a

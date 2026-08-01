@@ -79,6 +79,7 @@ import {
 } from "./tauriCommandMap";
 import {
   buildAddSketch,
+  buildAddSketchOnDatum,
   buildAddSketchOnFace,
   buildDeleteSketch,
   cloneIdMap,
@@ -158,6 +159,10 @@ const METADATA_ONLY_CMDS: ReadonlySet<string> = new Set([
   "setVisibility",
   "renameBody",
   "renameSketch",
+  // Datums are core-owned state that never crosses the OCW1 wire, so adding or
+  // deleting one publishes a projection and fires NO regen either.
+  "addDatumPlane",
+  "deleteDatum",
 ]);
 
 /**
@@ -607,6 +612,21 @@ export function createTauriClient(): CadClient {
     return target.sketchId ?? mintUuid();
   }
 
+  /**
+   * What a NEW sketch is attached to, when it is not a bare world plane. Both
+   * variants carry a `plane` that the BACKEND authored (`face_sketch_plane` /
+   * `resolve_datum_frame`) and that rides the wire as `plane.kind: "custom"`.
+   */
+  type SketchHost =
+    | {
+        kind: "face";
+        bodyId: string;
+        elementId: string;
+        plane: SketchPlane;
+        worldPoint?: [number, number, number];
+      }
+    | { kind: "datum"; datumId: string; plane: SketchPlane };
+
   /** Resolve (or lazily create) the backend sketch for a frontend id + plane.
    *  `adoptId`, when given, IS used as the backend `SketchId` instead of minting a
    *  second UUID — the `{newOnPlane}`-without-`sketchId` lane passes its already-
@@ -617,7 +637,7 @@ export function createTauriClient(): CadClient {
     frontendId: string,
     planeKind: SketchPlaneKind,
     adoptId?: string,
-    host?: { bodyId: string; elementId: string; plane: SketchPlane; worldPoint?: [number, number, number] },
+    host?: SketchHost,
   ): Promise<SketchIdMap> {
     const existing = sketchMaps.get(frontendId);
     if (existing) return existing;
@@ -635,18 +655,24 @@ export function createTauriClient(): CadClient {
     // always mapped a hostFace attachment that way and `WireSketch::parse_plane`
     // has always accepted an arbitrary custom basis, so no worker change is
     // involved. The basis is FROZEN here (V1 policy — see `buildAddSketchOnFace`).
-    const command = host
-      ? buildAddSketchOnFace(backendSketchId, name, host.plane, {
-          primary: {
-            // The core EditCommand serde wants the BARE uuid (`BodyId` is
-            // transparent); promote/pick hand us the `body_<uuid>` worker form.
-            bodyId: host.bodyId.startsWith("body_") ? host.bodyId.slice("body_".length) : host.bodyId,
-            elementId: host.elementId,
-            kind: "face",
-          },
-          ...(host.worldPoint ? { anchor: { worldPoint: host.worldPoint } } : {}),
-        })
-      : buildAddSketch(backendSketchId, name, planeKind);
+    const command =
+      host?.kind === "face"
+        ? buildAddSketchOnFace(backendSketchId, name, host.plane, {
+            primary: {
+              // The core EditCommand serde wants the BARE uuid (`BodyId` is
+              // transparent); promote/pick hand us the `body_<uuid>` worker form.
+              bodyId: host.bodyId.startsWith("body_") ? host.bodyId.slice("body_".length) : host.bodyId,
+              elementId: host.elementId,
+              kind: "face",
+            },
+            ...(host.worldPoint ? { anchor: { worldPoint: host.worldPoint } } : {}),
+          })
+        : host?.kind === "datum"
+          ? // DATUM W1: same shape as the host-face branch — a `custom` basis on
+            // the wire plus a typed attachment. The basis is the datum's
+            // backend-RESOLVED frame, carried verbatim (never re-derived here).
+            buildAddSketchOnDatum(backendSketchId, name, host.plane, host.datumId)
+          : buildAddSketch(backendSketchId, name, planeKind);
     await call<DocumentProjectionDto>(CMD.applyEditCommand, { command });
     return map;
   }
@@ -688,7 +714,11 @@ export function createTauriClient(): CadClient {
     await ensureEvents();
     const frontendId = frontendIdFor(target);
     const planeKind: SketchPlaneKind =
-      typeof target === "string" ? "XY" : "newOnFace" in target ? "custom" : target.newOnPlane;
+      typeof target === "string"
+        ? "XY"
+        : "newOnFace" in target || "newOnDatum" in target
+          ? "custom"
+          : target.newOnPlane;
     // Re-entry after reopen: a persisted sketch id is present in the projection
     // store but the in-memory id-map is empty (documentStore.sketches keys ARE valid
     // backend SketchId strings — the Rust projection uses `id.to_string()`). Adopt
@@ -716,15 +746,18 @@ export function createTauriClient(): CadClient {
       const adoptId = typeof target !== "string" && target.sketchId === undefined ? frontendId : undefined;
       // ensureBackendSketch fires AddSketch ONLY when there is no existing map.
       firedAddSketch = !sketchMaps.has(frontendId);
-      const host =
-        typeof target !== "string" && "newOnFace" in target
-          ? {
-              bodyId: target.newOnFace.bodyId,
-              elementId: target.newOnFace.elementId,
-              worldPoint: target.newOnFace.worldPoint,
-              plane: target.plane,
-            }
-          : undefined;
+      let host: SketchHost | undefined;
+      if (typeof target !== "string" && "newOnFace" in target) {
+        host = {
+          kind: "face",
+          bodyId: target.newOnFace.bodyId,
+          elementId: target.newOnFace.elementId,
+          worldPoint: target.newOnFace.worldPoint,
+          plane: target.plane,
+        };
+      } else if (typeof target !== "string" && "newOnDatum" in target) {
+        host = { kind: "datum", datumId: target.newOnDatum.datumId, plane: target.plane };
+      }
       map = await ensureBackendSketch(frontendId, planeKind, adoptId, host);
     }
     let dto: SketchSessionDto;

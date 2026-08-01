@@ -9,6 +9,8 @@
  */
 import { createStore, useStore } from "zustand";
 
+import type { SketchPlane } from "@/ipc/types";
+
 export type DocStatus = "empty" | "loading" | "ready";
 
 export interface BodyMeta {
@@ -28,6 +30,32 @@ export interface SketchMeta {
   status: SketchStatus;
   /** Stable authoritative geometry identity; metadata-only changes preserve it. */
   geometryToken: string;
+}
+
+/**
+ * A datum (reference) plane in the tree.
+ *
+ * `basePlaneId`/`offset` are the DEFINITION the user authored; `plane` is the
+ * **backend-resolved** frame and is authoritative. The core stamps a sketch
+ * attached to this datum with exactly this basis, so anything that draws or
+ * previews on a datum must read `plane` — re-deriving it from `basePlaneId +
+ * offset` on the frontend would reintroduce the two-sources-of-truth bug the
+ * migration exists to remove. (The bases are also NON-STANDARD: repo-kind "XZ"
+ * has world normal +X and "YZ" has +Y, so "XZ offset 10" moves along world +X.)
+ *
+ * `plane.kind` is always `"custom"` — a datum frame has an arbitrary origin, and
+ * `custom` is exactly what the backend sends for a datum-hosted sketch
+ * (SCHEMA §7.3).
+ */
+export interface DatumMeta {
+  id: string;
+  name: string;
+  /** `"XY"` | `"XZ"` | `"YZ"`, or another datum's id (chained offsets). */
+  basePlaneId: string;
+  offset: number;
+  plane: SketchPlane;
+  /** `false` ⇒ the definition did not resolve; the datum cannot host a sketch. */
+  resolvedValid: boolean;
 }
 
 export type FeatureKind =
@@ -67,6 +95,8 @@ export interface DocumentProjection {
   dirty: boolean;
   bodies: Record<string, BodyMeta>;
   sketches: Record<string, SketchMeta>;
+  /** Datum planes keyed by id (backend-authoritative; see {@link DatumMeta}). */
+  datums: Record<string, DatumMeta>;
   features: FeatureMeta[];
 }
 
@@ -81,6 +111,10 @@ export interface DocumentState extends DocumentProjection {
   addSketch(meta: SketchMeta): void;
   /** Remove a sketch from the tree/registry (idempotent; no-op when absent). */
   removeSketch(id: string): void;
+  /** Register a datum plane in the tree/registry (mock lane / optimistic add). */
+  addDatum(meta: DatumMeta): void;
+  /** Remove a datum from the tree/registry (idempotent; no-op when absent). */
+  removeDatum(id: string): void;
   /** Push a solver result onto a sketch (drives chrome bar + inspector DOF). */
   setSketchSolve(id: string, dof: number, status: SketchStatus): void;
   /**
@@ -129,6 +163,16 @@ export function nextSketchName(sketches: Record<string, SketchMeta>): string {
   return `Sketch ${max + 1}`;
 }
 
+/** Next free "Datum N" name — same rule as {@link nextSketchName}. */
+export function nextDatumName(datums: Record<string, DatumMeta>): string {
+  let max = 0;
+  for (const d of Object.values(datums)) {
+    const m = /^Datum (\d+)$/.exec(d.name);
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return `Datum ${max + 1}`;
+}
+
 /**
  * Bracket-like demo document. The body/sketch registries mirror prototype 1c's
  * tree exactly (Body 1; Sketch 2 / 4 / 5) so the flagship screen renders
@@ -172,6 +216,8 @@ export function seedMockDocument(): DocumentProjection {
         geometryToken: "mock:sketch5:v1",
       },
     },
+    // The demo document has no datums — the datum tool authors them at runtime.
+    datums: {},
     features: [
       { id: "f1", kind: "sketch", opType: "Sketch", label: "Sketch 1", valueText: "", status: "ok" },
       { id: "f2", kind: "extrude", opType: "Extrude", label: "Extrude", valueText: "83.3 mm", status: "ok" },
@@ -191,6 +237,7 @@ export function emptyDocument(): DocumentProjection {
     dirty: false,
     bodies: {},
     sketches: {},
+    datums: {},
     features: [],
   };
 }
@@ -239,6 +286,19 @@ export const documentStore = createStore<DocumentState>()((set) => ({
       const sketches = { ...s.sketches };
       delete sketches[id];
       return { sketches };
+    });
+  },
+
+  addDatum(meta) {
+    set((s) => ({ datums: { ...s.datums, [meta.id]: meta } }));
+  },
+
+  removeDatum(id) {
+    set((s) => {
+      if (!s.datums[id]) return {};
+      const datums = { ...s.datums };
+      delete datums[id];
+      return { datums };
     });
   },
 

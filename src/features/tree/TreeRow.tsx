@@ -8,10 +8,16 @@ import type { IconName } from "@/icons/paths";
 type TreeRowProps = {
   name: string;
   icon: IconName;
-  visible: boolean;
+  /** Eye state. Only meaningful alongside `onToggleVisible`. */
+  visible?: boolean;
   selected: boolean;
   onSelect: () => void;
-  onToggleVisible: (visible: boolean) => void;
+  /**
+   * Show/hide handler. OMITTED ⇒ the row renders no eye at all — a datum plane
+   * has no visibility fact in the document (DATUM W1), and a dead toggle that
+   * silently does nothing is worse than no toggle.
+   */
+  onToggleVisible?: (visible: boolean) => void;
   /** Double-click activator (sketch rows enter sketch mode). */
   onActivate?: () => void;
   /** Right-click → the tree's shared context menu (anchored to this row). */
@@ -35,7 +41,7 @@ type TreeRowProps = {
 export function TreeRow({
   name,
   icon,
-  visible,
+  visible = true,
   selected,
   onSelect,
   onToggleVisible,
@@ -108,17 +114,19 @@ export function TreeRow({
       ) : (
         <span className="flex-1 text-[13px]">{name}</span>
       )}
-      <span
-        className="flex"
-        onClick={(e) => e.stopPropagation()}
-        onDoubleClick={(e) => e.stopPropagation()}
-      >
-        <EyeToggle
-          on={visible}
-          onChange={onToggleVisible}
-          ariaLabel={`Toggle ${name} visibility`}
-        />
-      </span>
+      {onToggleVisible && (
+        <span
+          className="flex"
+          onClick={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
+        >
+          <EyeToggle
+            on={visible}
+            onChange={onToggleVisible}
+            ariaLabel={`Toggle ${name} visibility`}
+          />
+        </span>
+      )}
     </div>
   );
 }
