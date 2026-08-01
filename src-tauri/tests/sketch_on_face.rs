@@ -777,6 +777,30 @@ fn region_extrude_record(rec: u128, sketch: SketchId, region: &str, dist: f64) -
     record
 }
 
+/// A feature-fused extrude of an EXACT region, bound to an existing body — the op
+/// the HOST-BOOLEAN default authors when a face-hosted sketch is extruded
+/// (`booleanMode` + `targetBodyId` have ridden the wire since MODEL-HARDEN W2;
+/// what changed is that the tool now defaults to them).
+///
+/// `dist` is SIGNED against the sketch plane's normal, which for a face-hosted
+/// sketch IS the host face's OUTWARD normal: positive grows away from the solid
+/// (Add), negative pushes into it (Cut).
+fn host_extrude_record(
+    rec: u128,
+    sketch: SketchId,
+    region: &str,
+    dist: f64,
+    mode: BooleanMode,
+    target: BodyId,
+) -> OperationRecord {
+    let mut record = region_extrude_record(rec, sketch, region, dist);
+    if let Operation::Known(KnownOperation::Extrude(p)) = &mut record.op {
+        p.boolean_mode = mode;
+        p.target_body = Some(target);
+    }
+    record
+}
+
 /// A circle profile (centre point + circle) for the pocket cutter.
 fn circle_sketch(sid: SketchId, base: u128, cx: f64, cy: f64, r: f64) -> Sketch {
     let mut sk = Sketch::on_world_plane(sid, "Pocket", WorldPlane::XY);
@@ -1761,6 +1785,150 @@ async fn a_line_across_the_projected_rect_yields_two_extrudable_regions() {
     assert!(
         (total - want_total).abs() < 1.0,
         "the halves sum to the full prism {want_total}, got {total}"
+    );
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (k) HOST-BOOLEAN — the user story a face-hosted sketch exists for: the op it
+//     drives MODIFIES its host body instead of spawning a new one, and the drag
+//     DIRECTION decides whether that is material added or removed.
+//
+//     The tool-layer defaults live in the frontend (`ModelToolController`); what
+//     these two prove is the other end — that the exact op those defaults author
+//     lands the exact solid, against the real kernel. Together with the extrude
+//     handedness proof in (d) (`+dist` grows AWAY from the host face), they pin
+//     the whole push/pull loop numerically.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_add_extrude_grows_the_host_body_and_mints_no_new_one() {
+    if real_worker().is_none() {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    }
+    let (wm, app, sid, host, _snap) = box_with_projected_top().await;
+    let state: tauri::State<'_, AppState> = app.state();
+
+    state_enter(&state, sid).await;
+    let regions = state_finish(&state, sid).await.regions;
+    assert_eq!(regions.len(), 1);
+
+    // Dragging AWAY from the host face (positive against its outward normal).
+    const RISER: f64 = 7.0;
+    state_add_op(
+        &state,
+        host_extrude_record(
+            OP_TAIL,
+            sid,
+            &regions[0].region_id,
+            RISER,
+            BooleanMode::Add,
+            host,
+        ),
+    )
+    .await;
+    let report = state_regen(&state).await;
+    let snapshot = published(&report, "host Add");
+
+    // MODIFIED, not created. The whole point of the default: after the op the
+    // document still holds ONE body, and it is the host — a NewBody extrude would
+    // leave two, with `body_<opId>` sitting next to the part.
+    assert_eq!(
+        snapshot.bodies.len(),
+        1,
+        "an Add fuses into the host — the document must not gain a body, got {:#?}",
+        snapshot.bodies.iter().map(|b| b.body).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        snapshot.bodies[0].body, host,
+        "the surviving body is the HOST"
+    );
+    assert!(
+        report.changed.iter().any(|(b, _)| *b == host),
+        "the host is reported CHANGED (its mesh was rebuilt), got {:?}",
+        report.changed
+    );
+    assert!(
+        !report.changed.iter().any(|(b, _)| *b == body_of(OP_TAIL)),
+        "the NewBody id was never minted, got {:?}",
+        report.changed
+    );
+    assert!(report.removed.is_empty(), "nothing was removed by an Add");
+
+    // Exact: the host is now its own volume PLUS the cap-footprint riser.
+    let mesh = state_mesh(&state, host).await;
+    let view = validate_mesh_blob(&mesh).expect("fused MESH1");
+    let vol = mesh_volume(&view, &mesh);
+    let want = BOX_W * BOX_D * (BOX_H + RISER);
+    assert!(
+        (vol - want).abs() < 1.0,
+        "box + riser = {BOX_W}·{BOX_D}·({BOX_H}+{RISER}) = {want}, got {vol}"
+    );
+    assert!(
+        f64::from(view.bbox_max[2]) > BOX_H + RISER - 1e-3,
+        "the fused solid reaches z ≈ {}, got {}",
+        BOX_H + RISER,
+        view.bbox_max[2]
+    );
+    wm.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_cut_extrude_removes_material_from_the_host_body() {
+    if real_worker().is_none() {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    }
+    let (wm, app, sid, host, _snap) = box_with_projected_top().await;
+    let state: tauri::State<'_, AppState> = app.state();
+
+    state_enter(&state, sid).await;
+    let regions = state_finish(&state, sid).await.regions;
+    assert_eq!(regions.len(), 1);
+
+    // Dragging INTO the host: NEGATIVE against the face's outward normal, which is
+    // exactly what the direction-aware default turns into a Cut.
+    const DEPTH: f64 = 7.0;
+    state_add_op(
+        &state,
+        host_extrude_record(
+            OP_TAIL,
+            sid,
+            &regions[0].region_id,
+            -DEPTH,
+            BooleanMode::Cut,
+            host,
+        ),
+    )
+    .await;
+    let report = state_regen(&state).await;
+    let snapshot = published(&report, "host Cut");
+
+    assert_eq!(
+        snapshot.bodies.len(),
+        1,
+        "a Cut into the host leaves one body, got {:#?}",
+        snapshot.bodies.iter().map(|b| b.body).collect::<Vec<_>>()
+    );
+    assert_eq!(snapshot.bodies[0].body, host);
+
+    // Exact: the cap footprint × DEPTH is GONE. A sign error here would either
+    // remove nothing (the tool sitting outside the solid) or fail loudly — this is
+    // the numeric proof that "drag in" really subtracts.
+    let mesh = state_mesh(&state, host).await;
+    let view = validate_mesh_blob(&mesh).expect("pocketed MESH1");
+    let vol = mesh_volume(&view, &mesh);
+    let want = BOX_W * BOX_D * (BOX_H - DEPTH);
+    assert!(
+        (vol - want).abs() < 1.0,
+        "box − pocket = {BOX_W}·{BOX_D}·({BOX_H}−{DEPTH}) = {want}, got {vol}"
+    );
+    assert!(
+        (f64::from(view.bbox_max[2]) - (BOX_H - DEPTH)).abs() < 1e-2,
+        "the cut face is the new top at z ≈ {}, got {}",
+        BOX_H - DEPTH,
+        view.bbox_max[2]
     );
     wm.shutdown().await;
 }

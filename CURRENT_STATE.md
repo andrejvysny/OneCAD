@@ -3,7 +3,16 @@
 ## SKETCH-ON-FACE (2026-08-01, commits 2ac7aba→(final)) — sketch on model geometry, with the host outline as locked reference
 Plan `~/.claude/plans/act-as-senior-software-twinkly-crown.md` (internal
 adversarial review REVISE → 2 BLOCKER + 6 MAJOR + 6 MINOR folded pre-approval).
-Four gates, all 4-suite green vs the real worker.
+Four gates + HOST-BOOLEAN follow-up, all 4-suite green vs the real worker.
+**HOST-BOOLEAN (user-reported same day)**: every op off a face sketch spawned a
+NEW body — Shapr3D push/pull expects the HOST modified. Fresh arm on a hostFace
+sketch now seeds Add + host target (`BooleanSeed` through the pure arm event;
+re-edit never clobbered; hidden host falls back); extrude drag is
+DIRECTION-AWARE while auto (away=Add, into=Cut, live chip+tint; symmetric never
+flips; explicit chip click ends auto for the session); revolve seeds Add. Bound
+target survives Add↔Cut (was: re-prompted pick on multi-body docs). Proof vs
+real worker: Add → bodyEvents MODIFIED / 1 body / 153600 exact; Cut inward →
+86400 exact. Typed-negative-depth chip does not flip (drag only — open).
 THE POINT: a part is built by sketching on what you already made. Before this
 wave a face-hosted sketch opened EMPTY — no outline, nothing to snap or
 dimension against — so "sketch on a face" was decorative. Now the host face's

@@ -31,6 +31,26 @@ export const DEFAULT_EXTRUDE_DEPTH = 10;
 /** Boolean fusion mode the extrude/revolve commit carries (Wave 2 UI). */
 export type BooleanMode = "NewBody" | "Add" | "Cut";
 
+/**
+ * The boolean default an arm is SEEDED with (SKETCH-ON-FACE HOST-BOOLEAN).
+ *
+ * A sketch hosted on a model face belongs to that body, so a modeling op off it
+ * defaults to MODIFYING the host rather than spawning a new body (the Shapr3D
+ * push/pull expectation). The controller resolves the host; the reducers only
+ * carry what it decided.
+ */
+export interface BooleanSeed {
+  mode: BooleanMode;
+  targetBodyId: string;
+  /**
+   * EXTRUDE ONLY: while set, the DRAG DIRECTION owns the mode (away from the host
+   * = Add, into it = Cut). Any explicit `setBooleanMode` clears it, so a manual
+   * override sticks for the rest of the session. Revolve has no direction to read
+   * — its arm seeds the mode and ignores this flag.
+   */
+  auto?: boolean;
+}
+
 export type ExtrudePhase =
   | "idle"
   | "armed"
@@ -65,6 +85,8 @@ export interface ExtrudeFsm {
   booleanMode: BooleanMode;
   /** The body an Add/Cut targets (null for NewBody, or until a target is picked). */
   targetBodyId: string | null;
+  /** The drag direction still owns `booleanMode` — see {@link BooleanSeed.auto}. */
+  booleanAuto: boolean;
   /** Direction-1 end condition. */
   endCondition: ExtrudeEndCondition;
   /** Draft angle in DEGREES (0 = no draft). */
@@ -87,7 +109,7 @@ export interface ExtrudeFsm {
 }
 
 export type ExtrudeEvent =
-  | { kind: "arm"; depth?: number }
+  | { kind: "arm"; depth?: number; boolean?: BooleanSeed }
   | { kind: "grab" }
   | { kind: "drag"; depth: number; symmetric?: boolean }
   | { kind: "setDepth"; depth: number }
@@ -123,6 +145,7 @@ export function extrudeInit(): ExtrudeFsm {
     hasRegion: false,
     booleanMode: "NewBody",
     targetBodyId: null,
+    booleanAuto: false,
     endCondition: "Blind",
     draftAngleDeg: 0,
     twoDirections: false,
@@ -134,22 +157,55 @@ export function extrudeInit(): ExtrudeFsm {
   };
 }
 
+/**
+ * The mode a drag frame lands on while the arm is still host-seeded: pulling AWAY
+ * from the host adds material, pushing INTO it cuts. Depth 0 keeps the current
+ * mode (a gesture crossing zero must not blink through a third state), and a
+ * SYMMETRIC extrude grows both ways so it has no direction to read.
+ */
+function autoBooleanMode(s: ExtrudeFsm, depth: number, symmetric: boolean): BooleanMode {
+  if (!s.booleanAuto || !s.targetBodyId || symmetric) return s.booleanMode;
+  if (!Number.isFinite(depth) || depth === 0) return s.booleanMode;
+  return depth < 0 ? "Cut" : "Add";
+}
+
 export function extrudeStep(s: ExtrudeFsm, e: ExtrudeEvent): ExtrudeStep {
   switch (e.kind) {
-    case "arm":
+    case "arm": {
+      const seed = e.boolean;
       return {
-        state: { ...extrudeInit(), phase: "armed", depth: e.depth ?? DEFAULT_EXTRUDE_DEPTH, hasRegion: true },
+        state: {
+          ...extrudeInit(),
+          phase: "armed",
+          depth: e.depth ?? DEFAULT_EXTRUDE_DEPTH,
+          hasRegion: true,
+          ...(seed
+            ? {
+                booleanMode: seed.mode,
+                targetBodyId: seed.targetBodyId,
+                booleanAuto: seed.auto === true,
+              }
+            : {}),
+        },
         effect: "begin",
       };
+    }
     case "grab":
       if (s.phase !== "armed") return { state: s, effect: "none" };
       return { state: { ...s, phase: "dragging" }, effect: "none" };
-    case "drag":
+    case "drag": {
       if (s.phase !== "dragging") return { state: s, effect: "none" };
+      const symmetric = e.symmetric ?? s.symmetric;
       return {
-        state: { ...s, depth: e.depth, symmetric: e.symmetric ?? s.symmetric },
+        state: {
+          ...s,
+          depth: e.depth,
+          symmetric,
+          booleanMode: autoBooleanMode(s, e.depth, symmetric),
+        },
         effect: "update",
       };
+    }
     case "setDepth":
       if (s.phase !== "armed" && s.phase !== "dragging") return { state: s, effect: "none" };
       return { state: { ...s, depth: e.depth }, effect: "update" };
@@ -169,14 +225,29 @@ export function extrudeStep(s: ExtrudeFsm, e: ExtrudeEvent): ExtrudeStep {
       return { state: { ...s, phase: "armed" }, effect: "update" };
     case "setBooleanMode": {
       if (s.phase !== "armed" && s.phase !== "targetPick") return { state: s, effect: "none" };
+      // An EXPLICIT choice (chip segment, whatever the source) ends the host-seeded
+      // auto lane for the rest of the session: a manual override must stick, even
+      // when the user afterwards drags back through zero.
       if (e.mode === "NewBody") {
-        return { state: { ...s, phase: "armed", booleanMode: "NewBody", targetBodyId: null }, effect: "update" };
+        return {
+          state: { ...s, phase: "armed", booleanMode: "NewBody", targetBodyId: null, booleanAuto: false },
+          effect: "update",
+        };
       }
       if (e.needsPick) {
-        return { state: { ...s, phase: "targetPick", booleanMode: e.mode, targetBodyId: null }, effect: "none" };
+        return {
+          state: { ...s, phase: "targetPick", booleanMode: e.mode, targetBodyId: null, booleanAuto: false },
+          effect: "none",
+        };
       }
       return {
-        state: { ...s, phase: "armed", booleanMode: e.mode, targetBodyId: e.targetBodyId ?? null },
+        state: {
+          ...s,
+          phase: "armed",
+          booleanMode: e.mode,
+          targetBodyId: e.targetBodyId ?? null,
+          booleanAuto: false,
+        },
         effect: "update",
       };
     }
@@ -377,7 +448,14 @@ export interface RevolveFsm {
 }
 
 export type RevolveEvent =
-  | { kind: "arm"; angle?: number; hasRegion?: boolean; hasAxis?: boolean; axisLineId?: string | null }
+  | {
+      kind: "arm";
+      angle?: number;
+      hasRegion?: boolean;
+      hasAxis?: boolean;
+      axisLineId?: string | null;
+      boolean?: BooleanSeed;
+    }
   | { kind: "pickAxis"; lineId: string; valid: boolean }
   | { kind: "resetAxis" }
   | { kind: "grab" }
@@ -413,7 +491,16 @@ export function revolveStep(s: RevolveFsm, e: RevolveEvent): RevolveStep {
     case "arm": {
       if (e.hasRegion === false) return { state: revolveInit(), effect: "none" };
       const angle = e.angle ?? DEFAULT_REVOLVE_ANGLE;
-      const base = { angle, hasRegion: true, booleanMode: "NewBody" as BooleanMode, targetBodyId: null };
+      // A host-seeded arm defaults to modifying its host body. There is no
+      // direction logic here (a revolve sweeps around an axis, it does not push
+      // into or away from the host), so `BooleanSeed.auto` is deliberately unread
+      // — the seeded mode holds until the chip changes it.
+      const base = {
+        angle,
+        hasRegion: true,
+        booleanMode: e.boolean?.mode ?? ("NewBody" as BooleanMode),
+        targetBodyId: e.boolean?.targetBodyId ?? null,
+      };
       // A re-edit seeds an existing axis (param-only edit) → skip axis-pick.
       if (e.hasAxis) {
         return { state: { ...base, phase: "armed", axisLineId: e.axisLineId ?? null }, effect: "begin" };

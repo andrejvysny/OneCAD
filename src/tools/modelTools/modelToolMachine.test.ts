@@ -140,6 +140,108 @@ describe("extrude FSM", () => {
     expect(extrudeStep(armed, { kind: "pickTarget", bodyId: "x" }).effect).toBe("none");
   });
 
+  // ── HOST-BOOLEAN: a face-hosted arm defaults to modifying its host ───────────
+  //
+  // The seed comes from the controller (it owns the `hostFace` lookup); the reducer
+  // only carries it and applies the direction rule while the seed is untouched.
+
+  it("arms with a boolean seed: Add on the host, target bound, auto lane open", () => {
+    const step = extrudeStep(extrudeInit(), {
+      kind: "arm",
+      depth: 5,
+      boolean: { mode: "Add", targetBodyId: "host1", auto: true },
+    });
+    expect(step.effect).toBe("begin");
+    expect(step.state.phase).toBe("armed");
+    expect(step.state.depth).toBe(5);
+    expect(step.state.booleanMode).toBe("Add");
+    expect(step.state.targetBodyId).toBe("host1");
+    expect(step.state.booleanAuto).toBe(true);
+    // An UNSEEDED arm is byte-identical to before: NewBody, no target, no auto lane.
+    const plain = extrudeStep(extrudeInit(), { kind: "arm" }).state;
+    expect(plain.booleanMode).toBe("NewBody");
+    expect(plain.targetBodyId).toBeNull();
+    expect(plain.booleanAuto).toBe(false);
+  });
+
+  it("an auto drag flips with the direction: away from the host = Add, into it = Cut", () => {
+    const armed = extrudeStep(extrudeInit(), {
+      kind: "arm",
+      boolean: { mode: "Add", targetBodyId: "host1", auto: true },
+    }).state;
+    let s = extrudeStep(armed, { kind: "grab" }).state;
+
+    s = extrudeStep(s, { kind: "drag", depth: 12 }).state;
+    expect(s.booleanMode).toBe("Add"); // pulling away adds material
+
+    s = extrudeStep(s, { kind: "drag", depth: -3 }).state;
+    expect(s.booleanMode).toBe("Cut"); // pushing in removes it
+    expect(s.targetBodyId).toBe("host1"); // the host stays bound across the flip
+
+    // Zero holds the current mode — a gesture crossing zero must not blink through
+    // a third state on the way past.
+    s = extrudeStep(s, { kind: "drag", depth: 0 }).state;
+    expect(s.booleanMode).toBe("Cut");
+
+    s = extrudeStep(s, { kind: "drag", depth: 4 }).state;
+    expect(s.booleanMode).toBe("Add"); // and back again, live
+  });
+
+  it("a SYMMETRIC drag never flips (it grows both ways — there is no direction)", () => {
+    const armed = extrudeStep(extrudeInit(), {
+      kind: "arm",
+      boolean: { mode: "Add", targetBodyId: "host1", auto: true },
+    }).state;
+    const dragging = extrudeStep(armed, { kind: "grab" }).state;
+    const sym = extrudeStep(dragging, { kind: "drag", depth: -9, symmetric: true });
+    expect(sym.state.symmetric).toBe(true);
+    expect(sym.state.booleanMode).toBe("Add");
+  });
+
+  it("an UNSEEDED (world-plane) arm never flips on a negative drag", () => {
+    const dragging = extrudeStep(extrudeStep(extrudeInit(), { kind: "arm" }).state, { kind: "grab" }).state;
+    expect(extrudeStep(dragging, { kind: "drag", depth: -20 }).state.booleanMode).toBe("NewBody");
+  });
+
+  it("a manual setBooleanMode kills the auto lane — the override sticks past a sign change", () => {
+    const armed = extrudeStep(extrudeInit(), {
+      kind: "arm",
+      boolean: { mode: "Add", targetBodyId: "host1", auto: true },
+    }).state;
+    const manual = extrudeStep(armed, { kind: "setBooleanMode", mode: "Add", targetBodyId: "host1" });
+    expect(manual.state.booleanAuto).toBe(false);
+
+    const dragging = extrudeStep(manual.state, { kind: "grab" }).state;
+    const negative = extrudeStep(dragging, { kind: "drag", depth: -30 });
+    expect(negative.state.booleanMode).toBe("Add"); // NOT flipped — the user chose Add
+    expect(negative.state.depth).toBe(-30);
+  });
+
+  it("a NewBody override on a host-seeded arm clears the target and the auto lane", () => {
+    const armed = extrudeStep(extrudeInit(), {
+      kind: "arm",
+      boolean: { mode: "Add", targetBodyId: "host1", auto: true },
+    }).state;
+    const plain = extrudeStep(armed, { kind: "setBooleanMode", mode: "NewBody" });
+    expect(plain.state.booleanMode).toBe("NewBody");
+    expect(plain.state.targetBodyId).toBeNull();
+    expect(plain.state.booleanAuto).toBe(false);
+    // …and it stays NewBody for the rest of the session, whichever way the drag goes.
+    const dragging = extrudeStep(plain.state, { kind: "grab" }).state;
+    expect(extrudeStep(dragging, { kind: "drag", depth: -7 }).state.booleanMode).toBe("NewBody");
+  });
+
+  it("a targetPick override clears the auto lane too (mode chosen, target still open)", () => {
+    const armed = extrudeStep(extrudeInit(), {
+      kind: "arm",
+      boolean: { mode: "Add", targetBodyId: "host1", auto: true },
+    }).state;
+    const pick = extrudeStep(armed, { kind: "setBooleanMode", mode: "Cut", needsPick: true });
+    expect(pick.state.phase).toBe("targetPick");
+    expect(pick.state.booleanAuto).toBe(false);
+    expect(pick.state.targetBodyId).toBeNull();
+  });
+
   it("cancel from any active phase resets + emits cancel", () => {
     const dragging = extrudeStep(extrudeStep(extrudeInit(), { kind: "arm" }).state, { kind: "grab" }).state;
     const step = extrudeStep(dragging, { kind: "cancel" });
@@ -295,6 +397,29 @@ describe("revolve FSM", () => {
     const step = revolveStep(committing, { kind: "commitFailed" });
     expect(step.effect).toBe("none");
     expect(step.state.phase).toBe("armed");
+  });
+
+  // HOST-BOOLEAN: the revolve half seeds the mode + host target and stops there —
+  // there is no direction to read from an angle sweep, so nothing ever flips.
+  it("arms with a boolean seed that survives the axis pick, and never flips on a drag", () => {
+    const axisPick = revolveStep(revolveInit(), {
+      kind: "arm",
+      boolean: { mode: "Add", targetBodyId: "host1" },
+    }).state;
+    expect(axisPick.phase).toBe("axisPick");
+    expect(axisPick.booleanMode).toBe("Add");
+    expect(axisPick.targetBodyId).toBe("host1");
+
+    const armed = revolveStep(axisPick, { kind: "pickAxis", lineId: "L1", valid: true }).state;
+    expect(armed.booleanMode).toBe("Add"); // the seed rides through the axis pick
+    expect(armed.targetBodyId).toBe("host1");
+
+    const dragged = revolveStep(revolveStep(armed, { kind: "grab" }).state, { kind: "drag", angle: -90 });
+    expect(dragged.state.booleanMode).toBe("Add"); // no direction rule here
+    // An UNSEEDED revolve arm is unchanged: NewBody, no target.
+    const plain = revolveStep(revolveInit(), { kind: "arm" }).state;
+    expect(plain.booleanMode).toBe("NewBody");
+    expect(plain.targetBodyId).toBeNull();
   });
 
   it("re-edit arms straight into armed with the seeded angle (skips axis-pick)", () => {

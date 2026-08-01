@@ -10,7 +10,9 @@ import {
   clickAtClient,
   bodyOptions,
   sketchOptions,
-  commitExtrudeAtHandle,
+  findExtrudeHandle,
+  extrudeDebug,
+  getFeatureLabels,
 } from "./helpers";
 
 /*
@@ -127,6 +129,26 @@ async function lineEndpoints(page: Page): Promise<Array<[number, number]>> {
 }
 
 const lockedHint = (page: Page) => page.getByText(/Reference geometry is locked/);
+
+/**
+ * Drag the extrude depth handle to an exact client point and RELEASE (which keeps
+ * the tool armed at that depth — MODEL-HARDEN W1). Retries a missed grab: the
+ * handle scan and the pointerdown are a frame apart on a render-on-demand engine,
+ * so an occasional press lands beside the handle and no drag starts at all.
+ */
+async function dragExtrudeTo(page: Page, target: { x: number; y: number }): Promise<void> {
+  await expect(async () => {
+    const handle = await findExtrudeHandle(page);
+    await page.mouse.move(handle.x, handle.y);
+    await page.mouse.down();
+    try {
+      await page.mouse.move(target.x, target.y, { steps: 8 });
+      expect((await extrudeDebug(page))?.phase).toBe("dragging");
+    } finally {
+      await page.mouse.up();
+    }
+  }).toPass({ timeout: 20_000, intervals: [200, 500, 1_000] });
+}
 
 /** Clear the status hint so the NEXT guard's hint is proof of that guard firing
  *  (the two refusals share one message by design). */
@@ -251,11 +273,43 @@ test("sketch on a picked face: the projected boundary is seeded, locked, and ext
   expect(selectedRegion?.kind).toBe("sketchRegion");
   expect(selectedRegion?.regionId).toBeTruthy();
 
-  await page.getByRole("button", { name: "Extrude", exact: true }).click();
+  const extrudeBtn = page.getByRole("button", { name: "Extrude", exact: true });
+  await extrudeBtn.click();
   await expect(page.getByText(/^Drag the arrow to set depth/)).toBeVisible();
-  await commitExtrudeAtHandle(page);
 
-  await expect(bodyOptions(page)).toHaveCount(bodiesBefore + 1);
+  // ── (f) HOST-BOOLEAN: the op defaults to MODIFYING the host, not a new body ─
+  // This sketch is hosted on that body's face, so the arm opens on Add against it
+  // — the Shapr3D push/pull expectation. `New Body` is still one click away.
+  await expect(page.getByTestId("chip-bool-add")).toHaveAttribute("aria-pressed", "true");
+  expect((await extrudeDebug(page))?.booleanMode).toBe("Add");
+
+  // Direction-aware, live: the +depth screen direction is (handle − plane point),
+  // so MIRRORING the handle through the plane point is a drag INTO the host. That
+  // makes the flip a deterministic input here rather than a camera-dependent guess.
+  const armedHandle = await findExtrudeHandle(page);
+  const zero = await planePointToClient(page, plane, centroid);
+  const into = { x: 2 * zero.x - armedHandle.x, y: 2 * zero.y - armedHandle.y };
+
+  await dragExtrudeTo(page, into);
+  expect((await extrudeDebug(page))?.depth as number).toBeLessThan(0); // really went in
+  expect((await extrudeDebug(page))?.booleanMode).toBe("Cut");
+  await expect(page.getByTestId("chip-bool-cut")).toHaveAttribute("aria-pressed", "true");
+
+  // …and back out again — the flip is live in BOTH directions, so the commit
+  // below is an additive push/pull.
+  await dragExtrudeTo(page, armedHandle);
+  expect((await extrudeDebug(page))?.depth as number).toBeGreaterThan(0);
+  expect((await extrudeDebug(page))?.booleanMode).toBe("Add");
+  await expect(page.getByTestId("chip-bool-add")).toHaveAttribute("aria-pressed", "true");
+
+  await page.keyboard.press("Enter"); // explicit confirm → commit
+  await expect(extrudeBtn).not.toHaveAttribute("aria-pressed", "true", { timeout: 10_000 });
+
+  // The host was MODIFIED: one timeline row reading Add, and NO new body. (The
+  // mock's Add concats into the target — the numeric truth for a real fused solid
+  // is the cargo gate, `sketch_on_face.rs`.)
+  await expect.poll(() => getFeatureLabels(page)).toContain("Extrude (Add)");
+  await expect(bodyOptions(page)).toHaveCount(bodiesBefore);
 });
 
 test("W3(b): the plane picker accepts a body FACE — S with nothing selected, then click the part", async ({ page }) => {

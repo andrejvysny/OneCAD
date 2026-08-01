@@ -101,6 +101,7 @@ import {
   DEFAULT_SHELL_THICKNESS,
   type BooleanFsm,
   type BooleanMode,
+  type BooleanSeed,
   type ExtrudeFsm,
   type FilletFsm,
   type RevolveFsm,
@@ -820,7 +821,15 @@ export class ModelToolController {
     this.negativeDragHintShown = false;
     this.previewFailure = null;
     this.stalePreviewRetryAttempted = false;
-    this.extrude = extrudeStep(extrudeInit(), { kind: "arm", depth: startDepth }).state;
+    // HOST-BOOLEAN: a FRESH arm off a face-hosted sketch defaults to modifying its
+    // host body. A re-edit is excluded — its commit deep-merges the STORED params,
+    // so seeding a default here would be a lie about what the ✓ re-targets.
+    const hostSeed = editFeatureId ? null : this.hostBooleanSeed(sketchId, true);
+    this.extrude = extrudeStep(extrudeInit(), {
+      kind: "arm",
+      depth: startDepth,
+      ...(hostSeed ? { boolean: hostSeed } : {}),
+    }).state;
 
     const centroid = combinedCentroidWorld(plane, profiles);
     this.centroidWorld = centroid;
@@ -913,7 +922,8 @@ export class ModelToolController {
         canUseBodyEnds: canBoolean,
         endCondition: "Blind",
         canBoolean,
-        booleanMode: "NewBody",
+        // The RESOLVED mode, not a literal — a host-seeded arm opens on Add.
+        booleanMode: this.extrude.booleanMode,
         regionCount: n,
       },
     );
@@ -955,21 +965,69 @@ export class ModelToolController {
    * that body; >1 → a target must be picked. Drives the chip's canBoolean + the
    * Add/Cut → armed vs targetPick decision.
    */
-  private resolveBooleanTarget(): { canBoolean: boolean; count: number; autoTargetId: string | null } {
+  private resolveBooleanTarget(): {
+    canBoolean: boolean;
+    count: number;
+    autoTargetId: string | null;
+    visibleIds: string[];
+  } {
     const bodies = documentStore.getState().bodies;
     const visible = Object.values(bodies)
       .filter((b) => b.visible !== false && !b.id.startsWith("preview:"))
       .map((b) => b.id);
-    return { canBoolean: visible.length > 0, count: visible.length, autoTargetId: visible.length === 1 ? visible[0] : null };
+    return {
+      canBoolean: visible.length > 0,
+      count: visible.length,
+      autoTargetId: visible.length === 1 ? visible[0] : null,
+      visibleIds: visible,
+    };
+  }
+
+  /**
+   * The boolean default a FRESH arm off `sketchId` opens with (SKETCH-ON-FACE
+   * HOST-BOOLEAN). A sketch hosted on a model face belongs to that body, so the
+   * op it drives modifies the HOST instead of spawning a new body — the Shapr3D
+   * push/pull expectation, and the whole point of sketching on your part.
+   *
+   * `hostFace` is the projection row's own record (`SketchDto.hostFace`), read
+   * SYNCHRONOUSLY from the same store row the arm already reads its
+   * `geometryToken` from, so this adds no round-trip to the arm path.
+   *
+   * A world- or datum-hosted sketch, a host body that is gone, or a host that is
+   * HIDDEN all fall back to today's NewBody behaviour: an Add/Cut against a body
+   * the user cannot see would be a silent surprise, and `resolveBooleanTarget`
+   * counts only visible bodies for exactly that reason.
+   */
+  private hostBooleanSeed(sketchId: string, directionAware: boolean): BooleanSeed | null {
+    const doc = documentStore.getState();
+    const host = doc.sketches[sketchId]?.hostFace;
+    if (!host) return null;
+    const body = doc.bodies[host.bodyId];
+    if (!body || body.visible === false) return null;
+    return { mode: "Add", targetBodyId: host.bodyId, auto: directionAware };
+  }
+
+  /**
+   * The still-valid body an Add/Cut is ALREADY bound to, if any. A host-seeded arm
+   * carries one from the moment it opens, and switching Add↔Cut must keep it —
+   * demanding a body pick for a target the tool already knows would be a worse
+   * override than no override. Null when nothing is bound (the pre-HOST-BOOLEAN
+   * state of every fresh arm) or the bound body is gone / hidden.
+   */
+  private boundBooleanTarget(current: string | null, visibleIds: string[]): string | null {
+    return current && visibleIds.includes(current) ? current : null;
   }
 
   /** Boolean segment picked on the armed EXTRUDE cluster. */
   private onExtrudeBooleanMode(mode: BooleanMode): void {
     if (this.extrude.phase !== "armed" && this.extrude.phase !== "targetPick") return;
-    const { canBoolean, count, autoTargetId } = this.resolveBooleanTarget();
+    const { canBoolean, count, autoTargetId, visibleIds } = this.resolveBooleanTarget();
     if (mode !== "NewBody" && !canBoolean) return; // segment disabled — no existing body
+    const bound = this.boundBooleanTarget(this.extrude.targetBodyId, visibleIds);
     if (mode === "NewBody") {
       this.extrude = extrudeStep(this.extrude, { kind: "setBooleanMode", mode }).state;
+    } else if (bound) {
+      this.extrude = extrudeStep(this.extrude, { kind: "setBooleanMode", mode, targetBodyId: bound }).state;
     } else if (count === 1) {
       this.extrude = extrudeStep(this.extrude, { kind: "setBooleanMode", mode, targetBodyId: autoTargetId }).state;
     } else {
@@ -1050,10 +1108,13 @@ export class ModelToolController {
   /** Boolean segment picked on the armed REVOLVE cluster (mirrors the extrude path). */
   private onRevolveBooleanMode(mode: BooleanMode): void {
     if (this.revolve.phase !== "armed" && this.revolve.phase !== "targetPick") return;
-    const { canBoolean, count, autoTargetId } = this.resolveBooleanTarget();
+    const { canBoolean, count, autoTargetId, visibleIds } = this.resolveBooleanTarget();
     if (mode !== "NewBody" && !canBoolean) return;
+    const bound = this.boundBooleanTarget(this.revolve.targetBodyId, visibleIds);
     if (mode === "NewBody") {
       this.revolve = revolveStep(this.revolve, { kind: "setBooleanMode", mode }).state;
+    } else if (bound) {
+      this.revolve = revolveStep(this.revolve, { kind: "setBooleanMode", mode, targetBodyId: bound }).state;
     } else if (count === 1) {
       this.revolve = revolveStep(this.revolve, { kind: "setBooleanMode", mode, targetBodyId: autoTargetId }).state;
     } else {
@@ -1114,6 +1175,10 @@ export class ModelToolController {
    */
   private maybeNegativeDragHint(depth: number): void {
     if (this.negativeDragHintShown || depth >= 0) return;
+    // A host-seeded arm already FLIPPED to Cut on this same frame — the mode change
+    // itself is the affordance, and telling the user to "choose Cut" they are
+    // already in would be noise. The tip still serves every non-host sketch.
+    if (this.extrude.booleanAuto) return;
     if (this.extrude.booleanMode !== "NewBody") return;
     if (!this.resolveBooleanTarget().canBoolean) return;
     this.negativeDragHintShown = true;
@@ -1487,7 +1552,15 @@ export class ModelToolController {
     } else {
       this.revolveAxis = null;
       this.revolveAxisLineId = null;
-      this.revolve = revolveStep(revolveInit(), { kind: "arm", angle: startAngle }).state; // → axisPick
+      // HOST-BOOLEAN, revolve half: a face-hosted sketch defaults to Add on its host.
+      // NO direction logic — a revolve sweeps around an axis rather than pushing into
+      // or away from the host — so the seeded mode holds until the chip changes it.
+      const hostSeed = this.hostBooleanSeed(sketchId, false);
+      this.revolve = revolveStep(revolveInit(), {
+        kind: "arm",
+        angle: startAngle,
+        ...(hostSeed ? { boolean: hostSeed } : {}),
+      }).state; // → axisPick
       this.deps.engine.showRevolveAxisCandidates(
         this.plane,
         this.revolveAxisCandidates.map((k) => ({ a: k.a, b: k.b })),
@@ -1597,7 +1670,8 @@ export class ModelToolController {
         onCancel: () => toolStore.getState().setTool("select"),
         onBooleanMode: (mode) => this.onRevolveBooleanMode(mode),
       },
-      { showBooleanSegments: true, canBoolean, booleanMode: "NewBody" },
+      // The RESOLVED mode, not a literal — a host-seeded arm opens on Add.
+      { showBooleanSegments: true, canBoolean, booleanMode: this.revolve.booleanMode },
     );
     viewportStore.getState().setStatusHint(this.armHintFor("revolve"), { sticky: true });
     toolStore.setState({ phase: "armed" });
@@ -2951,10 +3025,19 @@ export class ModelToolController {
       const ray = this.engine.screenRay(e.clientX, e.clientY);
       if (!ray) return;
       const depth = axisDepthFromRay(ray.origin, ray.dir, this.centroidWorld, this.normal);
+      const modeBefore = this.extrude.booleanMode;
       this.extrude = extrudeStep(this.extrude, { kind: "drag", depth, symmetric: this.altHeld }).state;
       this.engine.setExtrudeDepth(this.extrude.depth, this.extrude.symmetric);
       toolChipStore.getState().setValue(this.extrude.depth);
       toolChipStore.getState().setSymmetric(this.extrude.symmetric); // Alt-drag syncs the ⇔ toggle
+      // HOST-BOOLEAN: the reducer flips Add↔Cut with the drag direction while the arm
+      // is still host-seeded. The flip has to be VISIBLE on the same frame the params
+      // change, so the chip + destructive tint follow it here (the sketch-plane normal
+      // of a face sketch IS the outward face normal, so depth<0 pushes into the host).
+      // Cheap by construction: the compare only does work on an actual sign crossing.
+      if (this.extrude.booleanMode !== modeBefore) {
+        this.applyBooleanState(this.extrude.booleanMode, false, "extrude");
+      }
       this.maybeNegativeDragHint(this.extrude.depth);
       this.sendPreview();
       this.updateDebug(); // publish live phase ("dragging") + depth to the debug surface
