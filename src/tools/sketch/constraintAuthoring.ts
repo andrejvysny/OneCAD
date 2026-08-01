@@ -18,6 +18,7 @@
  * `constraintTarget` (coord resolution) + `dimensionTool` (angle math) modules.
  */
 import type { ConstraintPosition, SketchConstraint, SketchEntity } from "@/ipc/types";
+import { LENGTH_SUFFIX } from "@/units/format";
 import type { Point2 } from "@/viewport/engine/sketchBasis";
 import type { ApplicableConstraint } from "./constraintApplicability";
 import {
@@ -161,7 +162,7 @@ export function buildAppliedDimension(
       return {
         value,
         anchor: { x: c.center[0], y: c.center[1] },
-        suffix: "mm",
+        suffix: LENGTH_SUFFIX,
         build: (v, id) => ({ id, type: a.type, entities: [id0], value: v }),
       };
     }
@@ -188,7 +189,7 @@ export function buildAppliedDimension(
       return {
         value,
         anchor: mid(cp, cq),
-        suffix: "mm",
+        suffix: LENGTH_SUFFIX,
         build: (v, id) => ({
           id,
           type: a.type,
@@ -224,7 +225,7 @@ function distanceDimension(
     return {
       value: len(cp, cq),
       anchor: mid(cp, cq),
-      suffix: "mm",
+      suffix: LENGTH_SUFFIX,
       build: (v, id) => ({
         id,
         type: "Distance",
@@ -244,7 +245,7 @@ function distanceDimension(
     return {
       value: pointToLineDist(cp, seg[0], seg[1]),
       anchor: mid(cp, midXY(seg[0], seg[1])),
-      suffix: "mm",
+      suffix: LENGTH_SUFFIX,
       build: (v, id) => ({
         id,
         type: "Distance",
@@ -264,7 +265,7 @@ function distanceDimension(
     return {
       value: pointToLineDist(ma, sb[0], sb[1]),
       anchor: mid(ma, midXY(sb[0], sb[1])),
-      suffix: "mm",
+      suffix: LENGTH_SUFFIX,
       build: (v, id) => ({
         id,
         type: "Distance",

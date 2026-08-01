@@ -16,6 +16,7 @@ import type {
   DocumentProjectionWire,
   DocumentSnapshot,
   DragSolveResult,
+  ElementInfo,
   EnterSketchTarget,
   FinishSketchResult,
   Lod,
@@ -202,6 +203,23 @@ export interface CadClient {
    * codebase refuses. The mock derives an equivalent frame locally.
    */
   faceSketchPlane(bodyId: string, elementId: string): Promise<SketchPlane>;
+
+  /**
+   * Read one element's geometric evidence — the MEASURE tool's only backend
+   * call (W2-B). A pure read: nothing is minted, nothing enters history, so
+   * measuring can never appear in the undo stack.
+   *
+   * Resolves `null` when the element is not present in the current snapshot (a
+   * stale pick after an edit); the caller drops the pick rather than showing a
+   * fabricated zero. Pass BOTH handles when the caller has them: the backend
+   * walks a two-rung ladder (topoKey, then elementId) because neither alone
+   * answers every case — see `api::element_info`.
+   */
+  elementInfo(
+    bodyId: string,
+    elementId: string,
+    topoKey?: string,
+  ): Promise<ElementInfo | null>;
 
   // ── Topology repair (SCHEMA §9; M4b) ──────────────────────────────────────
 

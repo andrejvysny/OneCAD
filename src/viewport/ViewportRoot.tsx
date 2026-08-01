@@ -241,10 +241,17 @@ export function ViewportRoot({ className }: { className?: string }) {
         });
 
         // ── Picking → selection store (engine stays store-agnostic) ──
+        // Measure (W2-B) reuses the SAME face/edge raycast as `select` rather
+        // than owning a second one: a duplicate hit-test would be a second
+        // source of truth for "what is under the cursor", and the two would
+        // drift. It differs only in what it does with the hit (below).
         const isPickingActive = () => {
           const s = toolStore.getState();
-          return s.mode === "model" && s.modelTool === "select";
+          return s.mode === "model" && (s.modelTool === "select" || s.modelTool === "measure");
         };
+        const isMeasuring = () =>
+          toolStore.getState().mode === "model" &&
+          toolStore.getState().modelTool === "measure";
         // A datum plane is the LAST resort under the pointer (DATUM W1): bodies
         // and sketches are the things you are actually modelling, a datum is
         // reference scaffolding, so it only wins where nothing else is hit.
@@ -265,6 +272,18 @@ export function ViewportRoot({ className }: { className?: string }) {
             const ref = refFromModelHits(hit, sketchHit, mods.alt) ?? datumRefAt(x, y);
             if (!ref) {
               sel.clear();
+              return;
+            }
+            // Measure: the pick is a READ, so it always REPLACES the selection
+            // (a modifier-extended multi-select would not mean anything to a
+            // two-element measurement) and routes to the controller, which owns
+            // the promote → elementInfo → overlay sequence. Everything else in
+            // this handler is unchanged, including the promotion below — the
+            // controller re-promotes only if this fire-and-forget one has not
+            // landed by the time it needs an id.
+            if (isMeasuring()) {
+              sel.set([ref]);
+              void modelToolController.measurePick(ref);
               return;
             }
             if (mods.shift || mods.meta) sel.toggle(ref);

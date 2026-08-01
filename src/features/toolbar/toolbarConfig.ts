@@ -40,6 +40,10 @@ export const MODEL_TOOLS: ToolEntry[] = [
   { id: "linearPattern", icon: "linearPattern", label: "Linear pattern", shortcut: "P" },
   { id: "circularPattern", icon: "circularPattern", label: "Circular pattern", shortcut: "C" },
   { id: "mirror", icon: "mirrorBody", label: "Mirror", shortcut: "M" },
+  { sep: true },
+  // W2-B — grouped alone at the tail: Measure is the only READ-ONLY tool in the
+  // set (it writes nothing to the timeline), so it does not belong with the ops.
+  { id: "measure", icon: "measure", label: "Measure", shortcut: "?" },
 ];
 
 export const SKETCH_TOOLS: ToolEntry[] = [

@@ -46,6 +46,7 @@ import type {
   DocumentProjectionWire,
   DocumentSnapshot,
   DragSolveResult,
+  ElementInfo,
   EnterSketchTarget,
   FeatureRecord,
   FinishSketchResult,
@@ -128,6 +129,7 @@ const CMD = {
   endGesture: "end_gesture",
   promoteSelection: "promote_selection",
   faceSketchPlane: "face_sketch_plane",
+  elementInfo: "element_info",
   previewOp: "preview_op",
   resolveRefs: "resolve_refs",
   confirmExit: "confirm_exit",
@@ -1037,6 +1039,31 @@ export function createTauriClient(): CadClient {
     return { kind: "custom", ...dto };
   }
 
+  /**
+   * Read one element's kernel descriptor (MEASURE V1a). Read-only: it mints
+   * nothing and never touches history.
+   *
+   * Both handles are forwarded when available — Rust walks the two-rung ladder
+   * (topoKey first, then elementId) because a promoted-but-unused ElementId is
+   * not yet in the worker's on-demand partition. `null` means "not present in
+   * this snapshot", which the caller treats as a dropped pick, not an error.
+   */
+  async function elementInfo(
+    bodyId: string,
+    elementId: string,
+    topoKey?: string,
+  ): Promise<ElementInfo | null> {
+    // Same `body_<uuid>` wire form promoteSelection uses (document-changed hands
+    // the frontend a bare uuid).
+    const wireBodyId = bodyId.startsWith("body_") ? bodyId : `body_${bodyId}`;
+    return call<ElementInfo | null>(CMD.elementInfo, {
+      snapshotId: currentSnapshotId,
+      bodyId: wireBodyId,
+      elementId,
+      topoKey: topoKey ?? null,
+    });
+  }
+
   async function promoteSelection(bodyId: string, picks: PromotePick[]): Promise<PromotedElement[]> {
     // promote_selection wants the `body_<uuid>` wire form; document-changed hands
     // the frontend a bare uuid, so prefix it here (get_mesh keeps the bare form).
@@ -1184,6 +1211,7 @@ export function createTauriClient(): CadClient {
     endGesture,
     promoteSelection,
     faceSketchPlane,
+    elementInfo,
     resolveRefs,
     applyEditCommand,
     getOperationParams,

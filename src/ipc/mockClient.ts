@@ -17,6 +17,7 @@ import type {
   DocumentChange,
   DocumentProjectionWire,
   DocumentSnapshot,
+  ElementInfo,
   EnterSketchTarget,
   FeatureRecord,
   Lod,
@@ -1086,6 +1087,49 @@ export const mockClient: CadClient = {
   async faceSketchPlane(_bodyId: string, _elementId: string): Promise<SketchPlane> {
     await wait(MESH_LATENCY_MS);
     return { ...planeFor("XY"), kind: "custom" };
+  },
+
+  /**
+   * MOCK LIMIT — the numbers here are SYNTHESIZED, not measured.
+   *
+   * There is no kernel in this lane, so `magnitude`/`size`/`center` are derived
+   * from a hash of `(bodyId, elementId, topoKey)`. They are deterministic (the
+   * same pick always yields the same figures, so the UI is testable and stable)
+   * and dimensionally plausible, but they describe NOTHING about the mock box on
+   * screen. E2E may assert the measure overlay's SHAPE — that a face pick shows
+   * an area with `mm²`, that a second pick adds a centre-to-centre distance —
+   * and must never assert a value. Numeric truth is pinned against the real OCCT
+   * worker in `src-tauri/tests/wire_contract.rs
+   * measure_element_info_reports_exact_kernel_quantities`.
+   */
+  async elementInfo(
+    bodyId: string,
+    elementId: string,
+    topoKey?: string,
+  ): Promise<ElementInfo | null> {
+    await wait(MESH_LATENCY_MS);
+    const key = topoKey ?? elementId;
+    if (!key) return null;
+    const h = mockElementHash(`${bodyId}#${key}`);
+    const at = (i: number) => parseInt(h.slice(i, i + 2), 16); // 0..255
+    const isEdge = key.startsWith("e:");
+    return {
+      elementId: elementId || `el_${h}`,
+      topoKey: key,
+      bodyId,
+      kind: isEdge ? "edge" : "face",
+      // 0 == GeomAbs_Plane / GeomAbs_Line; the mock only ever fakes the simple
+      // cases, and -1 (absent) for the axis that does not apply to this kind.
+      surfaceType: isEdge ? -1 : 0,
+      curveType: isEdge ? 0 : -1,
+      center: [at(0) / 8 - 16, at(2) / 8 - 16, at(4) / 8],
+      normal: [0, 0, 1],
+      hasNormal: !isEdge,
+      size: 10 + at(6) / 8,
+      // An edge reads as a LENGTH (tens of mm), a face as an AREA (hundreds of
+      // mm²) — so the two label forms are visibly distinguishable in the UI.
+      magnitude: isEdge ? 10 + at(4) / 4 : 200 + at(2) * 4,
+    };
   },
 
   // Deterministic mock promotion (Invariant 1: same pick → same id).

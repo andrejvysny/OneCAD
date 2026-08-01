@@ -1309,6 +1309,23 @@ impl crate::worker::ElementQuery for WorkerManager {
             .map_err(protocol_err)?;
         ok_result(resp).map(|r| wire::parse_query_element(&r))
     }
+
+    async fn query_element_by_topo_key(
+        &self,
+        snapshot: SnapshotId,
+        body: BodyId,
+        topo_key: &str,
+    ) -> Result<Option<crate::dto::ElementInfoDto>, EngineError> {
+        let client = self.client_or_err()?;
+        let resp = client
+            .request(
+                "QueryElement",
+                wire::query_element_by_topo_key_args(snapshot, body, topo_key),
+            )
+            .await
+            .map_err(protocol_err)?;
+        ok_result(resp).map(|r| wire::parse_query_element(&r))
+    }
 }
 
 #[async_trait]

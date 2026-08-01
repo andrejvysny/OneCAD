@@ -75,6 +75,10 @@ export const MODEL_KEYS: KeyBinding[] = [
   { key: "p", action: { type: "tool", tool: "linearPattern" } },
   { key: "c", action: { type: "tool", tool: "circularPattern" } },
   { key: "m", action: { type: "tool", tool: "mirror" } },
+  // W2-B Measure. `?` (⇧/) is free in BOTH tables and reads as "what is this?".
+  // Declared as an exact shift chord, exactly like sketch ⇧R, so it can never be
+  // claimed by a plain-key press. It is in NO_CROSS_MODE below — see there.
+  { key: "?", shift: true, action: { type: "tool", tool: "measure" } },
 ];
 
 export const SKETCH_KEYS: KeyBinding[] = [
@@ -117,6 +121,25 @@ export function modeKeys(mode: EditorMode): KeyBinding[] {
 }
 
 /**
+ * Tools whose key is INERT outside their own mode — the opt-out from the
+ * cross-mode fallback below.
+ *
+ * The fallback is a real convenience for AUTHORING tools: pressing E while
+ * drawing means "I am done, extrude this", and `activateTool` finishing the
+ * sketch is precisely what the user asked for. It is NOT appropriate for a
+ * READ-ONLY tool. `?` in sketch mode would otherwise resolve cross-mode to
+ * Measure and `finishSketchToTool` would END the user's sketch — an irreversible
+ * side effect (it squashes the session into one undo step) triggered by a
+ * keystroke that promised only to look at something.
+ *
+ * A toolbar CLICK on Measure still finishes the sketch, consistent with every
+ * other model tool: that is an explicit, visible intent. Only the ambient
+ * keystroke is suppressed. Members must also be listed in `activateTool`'s
+ * MODEL_ONLY (or SKETCH_ONLY) set for that click path to behave.
+ */
+const NO_CROSS_MODE: ReadonlySet<Tool> = new Set<Tool>(["measure"]);
+
+/**
  * Resolve a raw key + shift + mode to an action. Mode bindings win over global
  * ones so tool letters take precedence. Returns null when nothing matches.
  *
@@ -126,7 +149,8 @@ export function modeKeys(mode: EditorMode): KeyBinding[] {
  * finishes and arms Extrude). Shared letters never leak: the current mode's
  * table already claimed them (R = rect in sketch, revolve in model). Fallback
  * is restricted to `tool` actions, so sketch-only Delete/Backspace semantics
- * can never fire in model mode.
+ * can never fire in model mode — and further restricted by `NO_CROSS_MODE`,
+ * which keeps a read-only tool's key from silently finishing a sketch.
  */
 export function resolveBinding(
   key: string,
@@ -138,5 +162,6 @@ export function resolveBinding(
   const hit = [...modeKeys(mode), ...GLOBAL_KEYS].find(same);
   if (hit) return hit.action;
   const cross = modeKeys(mode === "sketch" ? "model" : "sketch").find(same);
-  return cross && cross.action.type === "tool" ? cross.action : null;
+  if (!cross || cross.action.type !== "tool") return null;
+  return NO_CROSS_MODE.has(cross.action.tool) ? null : cross.action;
 }

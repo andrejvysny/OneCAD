@@ -1300,6 +1300,20 @@ pub fn query_element_args(snapshot: SnapshotId, body: BodyId, element: &str) -> 
     })
 }
 
+/// `QueryElement` args in the SCHEMA §7.5 **`{topoKey, bodyId}`** form.
+///
+/// `elementId` is deliberately ABSENT, not empty: the worker branches on the
+/// PRESENCE of the key and returns early on that path, so including it would
+/// shadow the topoKey lookup entirely.
+#[must_use]
+pub fn query_element_by_topo_key_args(snapshot: SnapshotId, body: BodyId, topo_key: &str) -> Value {
+    json!({
+        "snapshotId": snapshot.0,
+        "bodyId": body_id_wire(body),
+        "topoKey": topo_key,
+    })
+}
+
 /// Parses a `QueryElement` result. `None` when the element is absent from the
 /// snapshot (`present: false`), so a stale pick reads as "gone", not as a face at
 /// the origin.
@@ -1326,6 +1340,11 @@ pub fn parse_query_element(result: &Value) -> Option<crate::dto::ElementInfoDto>
             .unwrap_or_default()
             .to_string()
     };
+    let num_at = |key: &str, fallback: f64| -> f64 {
+        d.and_then(|d| d.get(key))
+            .and_then(Value::as_f64)
+            .unwrap_or(fallback)
+    };
     Some(crate::dto::ElementInfoDto {
         element_id: str_at("elementId"),
         topo_key: str_at("topoKey"),
@@ -1337,12 +1356,23 @@ pub fn parse_query_element(result: &Value) -> Option<crate::dto::ElementInfoDto>
             // -1, not 0: 0 IS `GeomAbs_Plane`, so a missing descriptor must never
             // read as "this is a plane".
             .unwrap_or(-1),
+        // Same rule for the curve type: 0 IS `GeomAbs_Line`.
+        curve_type: d
+            .and_then(|d| d.get("curveType"))
+            .and_then(Value::as_i64)
+            .unwrap_or(-1),
         center: vec3("center", [0.0, 0.0, 0.0]),
         normal: vec3("normal", [0.0, 0.0, 1.0]),
         has_normal: d
             .and_then(|d| d.get("hasNormal"))
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        // The worker has always emitted these (ElementMapPartition::descriptor_to_json);
+        // MEASURE V1a is the first consumer, so they stop being dropped here.
+        // 0.0 is the honest absence value for both — a measurement UI shows
+        // "0 mm²" rather than a fabricated size.
+        size: num_at("size", 0.0),
+        magnitude: num_at("magnitude", 0.0),
     })
 }
 
@@ -1976,6 +2006,58 @@ fn u64_at(v: Option<&Value>, key: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// MEASURE V1a: `magnitude` / `size` / `curveType` used to be DROPPED here.
+    #[test]
+    fn parse_query_element_keeps_the_measurable_descriptor_fields() {
+        let result = json!({
+            "elementId": "el_7",
+            "topoKey": "f:22",
+            "bodyId": "body_1",
+            "kind": "face",
+            "present": true,
+            "descriptor": {
+                "center": [1.0, 2.0, 3.0],
+                "normal": [0.0, 0.0, 1.0],
+                "hasNormal": true,
+                "surfaceType": 0,
+                "curveType": 0,
+                "size": 44.72,
+                "magnitude": 800.0,
+            },
+        });
+        let info = parse_query_element(&result).expect("present element");
+        assert_eq!(info.element_id, "el_7");
+        assert_eq!(info.kind, "face");
+        assert_eq!(info.surface_type, 0);
+        assert_eq!(info.curve_type, 0);
+        assert!((info.magnitude - 800.0).abs() < 1e-9);
+        assert!((info.size - 44.72).abs() < 1e-9);
+    }
+
+    /// A descriptor that carries no curve type must read as −1, NOT 0 —
+    /// `GeomAbs_Line` is 0, so a defaulted 0 would claim "this is a line"
+    /// (the same trap `surface_type` already guards against for `GeomAbs_Plane`).
+    #[test]
+    fn parse_query_element_missing_type_ordinals_are_negative_one() {
+        let result = json!({
+            "elementId": "el_9",
+            "kind": "edge",
+            "descriptor": { "magnitude": 40.0 },
+        });
+        let info = parse_query_element(&result).expect("present element");
+        assert_eq!(info.surface_type, -1);
+        assert_eq!(info.curve_type, -1);
+        assert!((info.magnitude - 40.0).abs() < 1e-9);
+        assert!((info.size - 0.0).abs() < 1e-9);
+    }
+
+    /// `present: false` (a stale pick after an edit) stays `None`, so a vanished
+    /// element can never be measured as a zero-area face at the origin.
+    #[test]
+    fn parse_query_element_absent_is_none() {
+        assert!(parse_query_element(&json!({ "elementId": "el_9", "present": false })).is_none());
+    }
 
     #[test]
     fn body_id_round_trips_through_wire() {

@@ -12,7 +12,8 @@ if (import.meta.env.DEV) {
     import("./stores/toolStore"),
     import("./stores/settingsStore"),
     import("./stores/selectionStore"),
-  ]).then(([doc, sketch, viewport, tool, settings, selection]) => {
+    import("./stores/measureStore"),
+  ]).then(([doc, sketch, viewport, tool, settings, selection, measure]) => {
     (window as unknown as Record<string, unknown>).__stores = {
       document: doc.documentStore,
       sketch: sketch.sketchStore,
@@ -20,6 +21,7 @@ if (import.meta.env.DEV) {
       tool: tool.toolStore,
       settings: settings.settingsStore,
       selection: selection.selectionStore,
+      measure: measure.measureStore,
     };
   });
 }

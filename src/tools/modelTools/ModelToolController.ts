@@ -57,6 +57,14 @@ import { axisSplitsRegion, type LatheAxis } from "@/tools/preview/lathePreview";
 import { angleFromDrag, snapRevolveAngle, clampAngle, angleFromValueText } from "@/tools/preview/revolveAngle";
 import { thicknessFromValueText } from "@/tools/preview/shellThickness";
 import {
+  measureAdd,
+  measureInit,
+  measureSummary,
+  pickFromElementInfo,
+  type MeasureState,
+} from "./measureTool";
+import { measureStore } from "@/stores/measureStore";
+import {
   WORLD_AXIS,
   WORLD_PLANE_NORMAL,
   linearGhostTransforms,
@@ -561,6 +569,7 @@ export class ModelToolController {
     this.cancelShell();
     this.cancelPattern();
     this.endDatumPick();
+    this.cancelMeasure();
     toolChipStore.getState().clear();
     if (tool === "datum") this.startDatum();
     else if (tool === "extrude") this.armExtrudeFromSelection();
@@ -572,7 +581,102 @@ export class ModelToolController {
     else if (tool === "linearPattern") this.armLinearFromSelection();
     else if (tool === "circularPattern") this.armCircularFromSelection();
     else if (tool === "mirror") this.armMirrorFromSelection();
+    else if (tool === "measure") this.armMeasure();
     else viewportStore.getState().setStatusHint(null);
+  }
+
+  // ── measure (W2-B) — READ ONLY ──────────────────────────────────────────────
+  //
+  // Measure is the only tool here that writes nothing: no preview session, no
+  // FSM in `modelToolMachine`, no commit path, no history row. It owns a pure
+  // reducer (`measureTool`) plus a display store, and everything below is
+  // self-contained so the rest of this (heavily churned) controller is unaffected.
+  //
+  // Picks arrive from ViewportRoot rather than this file's own pointer handlers:
+  // the engine's Picker already does the face/edge raycast for `select`, and
+  // duplicating that raycast here would be a second source of truth for what is
+  // under the cursor.
+
+  private measure: MeasureState = measureInit();
+  /** Bumped on every arm/cancel so a late `elementInfo` for a dead arm is dropped. */
+  private measureGen = 0;
+
+  private armMeasure(): void {
+    this.measure = measureInit();
+    this.measureGen++;
+    measureStore.getState().clear();
+    viewportStore
+      .getState()
+      .setStatusHint("Select a face or edge to measure", { sticky: true });
+  }
+
+  private cancelMeasure(): void {
+    this.measure = measureInit();
+    this.measureGen++;
+    measureStore.getState().clear();
+  }
+
+  /**
+   * Handle one face/edge pick while Measure is armed (called by ViewportRoot).
+   *
+   * Promote-if-missing first, mirroring `SketchController.tryEnterOnSelectedFace`:
+   * ViewportRoot promotes every pick, but that is fire-and-forget and may not have
+   * landed yet, so we await our own promotion rather than racing it. Both handles
+   * are then sent — the backend needs the TopoKey for a fresh pick (the worker
+   * mints partition entries only for op-referenced elements) and the ElementId for
+   * one an operation already consumed.
+   *
+   * A `null` reply means the element is not in the current snapshot. That is an
+   * ordinary outcome for a stale pick and the pick is DROPPED with a hint —
+   * never recorded as a zero-magnitude element at the origin.
+   */
+  async measurePick(ref: EntityRef): Promise<void> {
+    if (ref.kind !== "face" && ref.kind !== "edge") return;
+    const bodyId = ref.bodyId;
+    if (!bodyId) return;
+    const gen = this.measureGen;
+
+    let elementId = ref.elementId;
+    if (!elementId && ref.topoKey) {
+      const promoted = await this.client
+        .promoteSelection(bodyId, [{ topoKey: ref.topoKey, anchor: ref.anchor }])
+        .catch(() => null);
+      if (gen !== this.measureGen) return; // disarmed / re-armed mid-await
+      elementId = promoted?.[0]?.elementId;
+    }
+    if (!elementId && !ref.topoKey) return;
+
+    const info = await this.client
+      .elementInfo(bodyId, elementId ?? "", ref.topoKey)
+      .catch((e: unknown) => {
+        traceWarn("measure", "elementInfo failed", errMessage(e));
+        return null;
+      });
+    if (gen !== this.measureGen) return;
+    if (!info) {
+      viewportStore.getState().setStatusHint("That element is no longer in the model", {
+        severity: "info",
+        sticky: true,
+      });
+      return;
+    }
+
+    this.measure = measureAdd(this.measure, pickFromElementInfo(bodyId, info));
+    const summary = measureSummary(this.measure);
+    measureStore.getState().set(this.measure.picks, summary);
+    viewportStore
+      .getState()
+      .setStatusHint(
+        summary
+          ? "Pick another element to re-measure, or Esc to clear"
+          : "Select a second face or edge to measure between them",
+        { sticky: true },
+      );
+  }
+
+  /** Whether Measure currently owns picks (ViewportRoot routes clicks on this). */
+  isMeasureArmed(): boolean {
+    return toolStore.getState().modelTool === "measure";
   }
 
   private armExtrudeFromSelection(): void {
@@ -4653,6 +4757,7 @@ export class ModelToolController {
     this.cancelShell();
     this.cancelPattern();
     this.endDatumPick();
+    this.cancelMeasure();
     toolChipStore.getState().clear();
     toolStore.setState({ phase: toolStore.getState().modelTool === "select" ? "idle" : "armed" });
     this.updateDebug();
@@ -4666,6 +4771,10 @@ export class ModelToolController {
     // controller mid-arm, and the chip store outlives it (it is a zustand store,
     // not engine state) — without this the chip would survive with dead handlers.
     this.endDatumPick();
+    // Same reason as endDatumPick above: measureStore is a zustand store that
+    // OUTLIVES this controller, so a viewport remount mid-measure would leave
+    // orphaned labels anchored to a disposed engine.
+    this.cancelMeasure();
     const c = this.deps.container;
     c.removeEventListener("pointerdown", this.onPointerDown);
     c.removeEventListener("pointermove", this.onPointerMove);

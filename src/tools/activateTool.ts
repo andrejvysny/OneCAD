@@ -50,6 +50,11 @@ const MODEL_ONLY: ReadonlySet<Tool> = new Set([
   "shell",
   "linearPattern",
   "circularPattern",
+  // Measure inspects SOLIDS, which only exist in model mode. A toolbar CLICK is
+  // an explicit intent, so it finishes the sketch first like every other model
+  // tool. Its ambient `?` KEYSTROKE is deliberately inert in sketch mode instead
+  // — see NO_CROSS_MODE in shortcuts/keymap.ts.
+  "measure",
 ]);
 
 export function isSketchOnlyTool(tool: Tool): boolean {

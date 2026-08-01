@@ -11,7 +11,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import type { SketchConstraintType } from "@/ipc/types";
-import { formatDimensionValue } from "./dimensionFormat";
+import { formatLength as formatDimensionValue, parseLength } from "@/units/format";
 
 export interface DimensionInputProps {
   value: number;
@@ -65,6 +65,19 @@ export function DimensionInput({
   autoFocus = false,
   kind,
 }: DimensionInputProps) {
+  /*
+   * Is this chip editing an ANGLE (degrees) rather than a LENGTH (mm)?
+   *
+   * Both signals are load-bearing because the two producers differ:
+   *   - ConstraintBadgeLayer passes `kind="Angle"` with an EMPTY suffix (the °
+   *     is already baked into the badge glyph);
+   *   - the model-tool cluster + the sketch Dimension chip pass no `kind` at all
+   *     and mark the domain with `suffix="°"` (revolve angle, circular pattern
+   *     angle, an Angle dimension being authored).
+   * Checking only one of them would silently run a degree value through the
+   * length parser (or vice versa), so both are honoured.
+   */
+  const isAngle = kind === "Angle" || suffix === "°";
   const [text, setText] = useState(() => formatDimensionValue(value));
   const [isError, setIsError] = useState(false);
   const ref = useRef<HTMLInputElement>(null);
@@ -100,7 +113,12 @@ export function DimensionInput({
    * user can correct the value in place.
    */
   const commit = (): boolean => {
-    const n = Number.parseFloat(text);
+    // ANGLE chips keep the plain float parse: the UI angle domain is degrees and
+    // its deg↔rad marshalling lives in `@/ipc/angleUnits`, which this module must
+    // not second-guess. Every other chip is a LENGTH, so it accepts a unit suffix
+    // (`25`, `25mm`, `2.5 cm`, `1 in`) and stores millimetres — and REJECTS text
+    // it only partly understood ("25abc"), where parseFloat would commit 25.
+    const n = isAngle ? Number.parseFloat(text) : (parseLength(text) ?? Number.NaN);
     if (!Number.isFinite(n)) {
       if (kind) {
         flashError();

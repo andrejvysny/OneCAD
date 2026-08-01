@@ -8,14 +8,21 @@
  * the backend on commit. The drag mapping is shared with fillet
  * (`radiusFromDrag`); this module owns the thickness defaults + the re-edit parse.
  */
+import { LENGTH_SUFFIX, formatLength } from "@/units/format";
+
 export const DEFAULT_SHELL_THICKNESS = 2;
 
 /** Minimum shell thickness (world units); a zero-thickness shell is a no-op. */
 export const MIN_SHELL_THICKNESS = 0.1;
 
-/** Format a thickness for the mono chip / history text ("2.0 mm"). */
+/**
+ * Format a thickness for the mono chip. Shares the W2-A length formatter with
+ * fillet's `formatMm`, so both chips render a number identically (`2`, not
+ * `2.0`). `thicknessFromValueText` still parses this AND the RUST-composed
+ * `valueText` ("2.0 mm") that seeds a re-edit — both round-trips are pinned.
+ */
 export function formatThickness(value: number): string {
-  return `${value.toFixed(1)} mm`;
+  return `${formatLength(value)} ${LENGTH_SUFFIX}`;
 }
 
 /**

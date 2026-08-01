@@ -297,6 +297,40 @@ export interface PromotedElement {
   bodyId: string;
 }
 
+/**
+ * One element's geometric evidence (`elementInfo` → Rust `ElementInfoDto` →
+ * the worker's `QueryElement` descriptor). MEASURE V1a's whole input.
+ *
+ * Every number here is the KERNEL's, computed with OCCT `GProp` on the real
+ * BRep — not re-derived from the tessellation the viewport is drawing.
+ */
+export interface ElementInfo {
+  elementId: string;
+  topoKey: string;
+  bodyId: string;
+  /** `face` | `edge` | `vertex` | `body`. */
+  kind: string;
+  /** OCCT `GeomAbs_SurfaceType` ordinal; **0 == plane**, `-1` == absent. */
+  surfaceType: number;
+  /** OCCT `GeomAbs_CurveType` ordinal; **0 == line**, `-1` == absent. */
+  curveType: number;
+  /**
+   * BOUNDING-BOX CENTRE — emphatically **not** a centroid (the kernel takes it
+   * from `Bnd_Box`). Any UI reporting a distance between two of these must say
+   * "center ↔ center".
+   */
+  center: [number, number, number];
+  normal: [number, number, number];
+  hasNormal: boolean;
+  /** Bounding-box diagonal length — a coarse size proxy, not a measurement. */
+  size: number;
+  /**
+   * The EXACT measured quantity: a face's **area** (mm²), an edge's **arc
+   * length** (mm), a solid's **volume** (mm³).
+   */
+  magnitude: number;
+}
+
 // ── Topology repair (SCHEMA §9; M4b) — the `needs-repair` event + `resolveRefs` ─
 //
 // These MIRROR the Rust DTOs in `src-tauri/src/dto.rs` (camelCase serde):

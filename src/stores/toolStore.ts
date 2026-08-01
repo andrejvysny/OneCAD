@@ -40,7 +40,9 @@ export type ModelTool =
   | "shell"
   | "linearPattern"
   | "circularPattern"
-  | "mirror";
+  | "mirror"
+  /** Measure (W2-B): a READ-ONLY inspection tool — picks nothing into history. */
+  | "measure";
 
 export type SketchTool =
   | "select"

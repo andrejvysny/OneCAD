@@ -11,6 +11,8 @@
  * edge's depth), so the feel is consistent across zoom levels. Radius is clamped
  * to a small positive minimum (a zero-radius fillet is a no-op).
  */
+import { LENGTH_SUFFIX, formatLength } from "@/units/format";
+
 export interface RadiusDragOpts {
   /** World units per screen pixel at the edge depth (from the camera). */
   worldPerPx: number;
@@ -35,9 +37,15 @@ export function radiusFromDrag(
   return Math.max(min, startRadius + delta);
 }
 
-/** Format a radius/depth for the mono chip, matching the history-list style ("2.0 mm"). */
+/**
+ * Format a radius/depth for the mono chip. W2-A routes it through the shared
+ * length formatter, so a chip and a sketch dimension render the same number the
+ * same way (trailing zeros trimmed: `2` not `2.0`, `83.25` not `83.3`).
+ * `radiusFromValueText` below still parses the result, and still parses the
+ * RUST-composed `valueText` ("2.0 mm") a re-edit seeds from — both are pinned.
+ */
 export function formatMm(value: number): string {
-  return `${value.toFixed(1)} mm`;
+  return `${formatLength(value)} ${LENGTH_SUFFIX}`;
 }
 
 /** Default fillet radius (mirrors modelToolMachine.DEFAULT_FILLET_RADIUS). */

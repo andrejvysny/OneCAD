@@ -381,6 +381,8 @@ const SEC_INDICES: u32 = 3;
 const SEC_FACE_RANGES: u32 = 4;
 const SEC_FACE_ID_OFFS: u32 = 5;
 const SEC_FACE_ID_CHARS: u32 = 6;
+const SEC_EDGE_ID_OFFS: u32 = 9;
+const SEC_EDGE_ID_CHARS: u32 = 10;
 
 fn vertex(blob: &[u8], pbase: usize, i: usize) -> [f64; 3] {
     let o = pbase + i * 12;
@@ -2120,5 +2122,158 @@ async fn extrude_of_a_pure_ellipse_loop_is_analytic() {
     eprintln!(
         "ellipse extrude PASS: volume {vol:.4} == π·6·3·10 ({analytic:.4}), faces {} (analytic)",
         view.face_count
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MEASURE V1a — element_info's descriptor numbers are the KERNEL's, exactly
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The measure tool reports a face's area and an edge's length straight off the
+/// worker's `QueryElement` descriptor. Those numbers come from OCCT `GProp`
+/// (`BRepGProp::SurfaceProperties` / `LinearProperties` in
+/// `ElementMap::computeDescriptor`), NOT from the tessellation the viewport
+/// draws — so this pins them against a shape whose exact answer is arithmetic.
+///
+/// Fixture: `rect_sketch(…, 0,0, 40,20)` extruded 25. The frozen `xy_plane_ref`
+/// basis is deliberately NON-STANDARD — `xAxis = (0,1,0)`, `yAxis = (−1,0,0)` —
+/// so sketch (u,v) maps to world `(−v, u, 0)` and the profile lands on
+/// worldX[−20,0] × worldY[0,40]. Hence:
+///   * top face area  = 40·20 = **800 mm²**
+///   * top face CENTER (the descriptor's Bnd_Box centre, *not* a centroid)
+///     = **(−10, 20, 25)** — asserting (20,10,25) here would be reading the
+///     sketch basis as the identity it is not.
+///   * every top-face edge is 40 mm or 20 mm long, and is a LINE (`GeomAbs_Line`
+///     == curveType 0).
+/// A never-promoted element id must read as `Ok(None)` — "that pick is gone" is
+/// an ordinary outcome, not an error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn measure_element_info_reports_exact_kernel_quantities() {
+    use onecad_lib::worker::ElementQuery;
+
+    if real_worker().is_none() {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    }
+    let wm = spawn_worker(real_worker().unwrap()).await;
+    let mut rt = runtime_over(&wm);
+
+    let sa = SketchId(Uuid::from_u128(0xA));
+    add_op(
+        &mut rt,
+        sketch_record(SKETCH_A, &rect_sketch(sa, 0x1000, 0.0, 0.0, 40.0, 20.0)),
+    );
+    add_op(
+        &mut rt,
+        extrude_record(EXTRUDE_A, sa, 25.0, BooleanMode::NewBody, None),
+    );
+    let report = regen_all(&mut rt).await;
+    let _ = published(&report, "measure box");
+    let snap_id = SnapshotId(report.snapshot_id);
+    let body = body_of(EXTRUDE_A);
+
+    let mesh = body_mesh(&mut rt, body).await;
+    let view = validate_mesh_blob(&mesh).expect("box MESH1 validates");
+    assert_eq!(view.face_count, 6, "the extruded rect is a 6-faced box");
+
+    // ── FACE: exact area + the box-centre the distance summary uses ──────────
+    let (top_key, top_centroid) = top_face_pick(&view, &mesh);
+    let promoted = rt
+        .promote_selection(snap_id, body, vec![(TopoKey::new(&top_key), None)])
+        .await
+        .expect("promote top face");
+    let face_el = promoted[0].element_id.clone();
+
+    // RUNG 1 of the read ladder — and the reason it exists. A promoted id is
+    // minted by RUST; the worker's partition only gains an entry when an OP
+    // resolves the element as an input, so an ElementId lookup on a fresh pick
+    // is legitimately ABSENT. Pinned here so the ladder is not "optimised" away.
+    assert!(
+        ElementQuery::query_element(&wm, snap_id, body, &face_el)
+            .await
+            .expect("QueryElement(by elementId)")
+            .is_none(),
+        "a promoted-but-unconsumed ElementId is not in the worker partition — \
+         this is what makes the topoKey rung load-bearing"
+    );
+
+    let face = ElementQuery::query_element_by_topo_key(&wm, snap_id, body, &top_key)
+        .await
+        .expect("QueryElement(top face by topoKey)")
+        .expect("the picked face resolves against the body shape");
+    assert_eq!(face.kind, "face");
+    assert_eq!(face.surface_type, 0, "a box cap is GeomAbs_Plane (0)");
+    assert!(
+        (face.magnitude - 800.0).abs() < 0.1,
+        "top face area is EXACTLY 40·20 = 800 mm², got {}",
+        face.magnitude
+    );
+    // Bnd_Box centre of worldX[−20,0] × worldY[0,40] × Z=25.
+    for (axis, got, want) in [
+        ("x", face.center[0], -10.0),
+        ("y", face.center[1], 20.0),
+        ("z", face.center[2], 25.0),
+    ] {
+        assert!(
+            (got - want).abs() < 0.05,
+            "top face center.{axis} = {want} (frozen non-standard sketch basis), got {got} \
+             (full center {:?}, mesh centroid {:?})",
+            face.center,
+            top_centroid
+        );
+    }
+    // The box diagonal of a 40×20×0 slab: √(40²+20²) ≈ 44.72.
+    assert!(
+        (face.size - (40.0f64.powi(2) + 20.0f64.powi(2)).sqrt()).abs() < 0.05,
+        "size is the bbox diagonal, got {}",
+        face.size
+    );
+
+    // ── EDGE: exact arc length from the mesh's own edge id table ─────────────
+    assert!(view.edge_count > 0, "the box mesh carries edges");
+    let edge_keys = id_table(
+        &view,
+        &mesh,
+        SEC_EDGE_ID_OFFS,
+        SEC_EDGE_ID_CHARS,
+        view.edge_count as usize,
+    );
+    let edge = ElementQuery::query_element_by_topo_key(&wm, snap_id, body, &edge_keys[0])
+        .await
+        .expect("QueryElement(edge by topoKey)")
+        .expect("the picked edge resolves against the body shape");
+    assert_eq!(edge.kind, "edge");
+    assert_eq!(edge.curve_type, 0, "a box edge is GeomAbs_Line (0)");
+    // Every edge of a 40×20×25 box is one of its three side lengths.
+    let len = edge.magnitude;
+    assert!(
+        [40.0f64, 20.0, 25.0]
+            .iter()
+            .any(|want| (len - want).abs() < 0.1),
+        "edge length must be one of 40/20/25 mm, got {len}"
+    );
+
+    // ── An element that does not exist is ABSENT, not an error ───────────────
+    for (what, got) in [
+        (
+            "unknown elementId",
+            ElementQuery::query_element(&wm, snap_id, body, "el_never_promoted")
+                .await
+                .expect("an absent element is Ok, not Err"),
+        ),
+        (
+            "stale topoKey",
+            ElementQuery::query_element_by_topo_key(&wm, snap_id, body, "f:9999")
+                .await
+                .expect("an absent element is Ok, not Err"),
+        ),
+    ] {
+        assert!(got.is_none(), "{what} reads as None, got {got:?}");
+    }
+
+    wm.shutdown().await;
+    eprintln!(
+        "measure PASS: face area {} == 800, center {:?} == (-10,20,25), edge len {len}",
+        face.magnitude, face.center
     );
 }

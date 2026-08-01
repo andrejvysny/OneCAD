@@ -20,6 +20,7 @@ import { createPortal } from "react-dom";
 import { cn } from "@/ui/cn";
 import { DimensionInput } from "@/features/sketch/DimensionInput";
 import { useToolChipStore, toolChipStore } from "@/stores/toolChipStore";
+import { LENGTH_SUFFIX } from "@/units/format";
 import { useViewportEngine } from "@/viewport/engineBridge";
 import type { BooleanOperation } from "@/ipc/types";
 import type {
@@ -351,7 +352,7 @@ export function ModelToolChips() {
         {/* A distance is meaningless for the non-Blind end conditions — the
             kernel derives it — so the numeric input hides rather than showing a
             value that does not drive the result. */}
-        {endCondition === "Blind" && clusterInput("mm")}
+        {endCondition === "Blind" && clusterInput(LENGTH_SUFFIX)}
         {endConditionSegments}
         {showSymmetric && endCondition === "Blind" && (
           <SymmetricToggle
@@ -390,7 +391,7 @@ export function ModelToolChips() {
         >
           {label}
         </span>
-        {clusterInput("mm")}
+        {clusterInput(LENGTH_SUFFIX)}
         {confirmButtons}
       </>,
     );
@@ -419,11 +420,11 @@ export function ModelToolChips() {
     content = hasConfirm
       ? panel(
           <>
-            {clusterInput("mm")}
+            {clusterInput(LENGTH_SUFFIX)}
             {confirmButtons}
           </>,
         )
-      : numericChip("mm");
+      : numericChip(LENGTH_SUFFIX);
   } else if (kind === "dimension") {
     // Sketch Dimension tool: seeded + auto-focused; Enter commits, Esc cancels,
     // and a canvas click must NOT blur-commit (a 2nd line click upgrades a length
@@ -451,7 +452,7 @@ export function ModelToolChips() {
           onPick={(a) => toolChipStore.getState().onAxis?.(a)}
         />
         <CountStepper count={count} onCount={(n) => toolChipStore.getState().onCount?.(n)} />
-        {numericChip("mm")}
+        {numericChip(LENGTH_SUFFIX)}
         <ApplyButton />
       </>,
     );

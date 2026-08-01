@@ -396,13 +396,30 @@ pub struct ElementInfoDto {
     /// `"face"` | `"edge"` | `"vertex"` | `"body"`.
     pub kind: String,
     pub surface_type: i64,
+    /// OCCT's `GeomAbs_CurveType` ordinal for an EDGE, where **0 == line**
+    /// (`GeomAbs_Line` is the first enumerator). `-1` means the descriptor
+    /// carried none — a missing value must never read as "this is a line".
+    pub curve_type: i64,
     /// Bounding-box centre. For a PLANAR face this lies ON the plane (every point
     /// of the face is coplanar, so the box centre is too), which is what makes it
     /// a usable plane origin.
+    ///
+    /// It is a BOX centre, **not** a centroid — the kernel takes it from
+    /// `Bnd_Box` (`ElementMap::computeDescriptor`). UI that reports a distance
+    /// between two of these must say so ("center ↔ center"), never "centroid".
     pub center: [f64; 3],
     pub normal: [f64; 3],
     /// Whether the descriptor actually carries a normal (`hasNormal`).
     pub has_normal: bool,
+    /// Bounding-box DIAGONAL length (`sqrt(dx²+dy²+dz²)`), the kernel's coarse
+    /// size proxy. Not a measurement — `magnitude` is the exact quantity.
+    pub size: f64,
+    /// The element's EXACT measured quantity, straight from OCCT `GProp`:
+    /// a face's **area** (`BRepGProp::SurfaceProperties`), an edge's **arc
+    /// length** (`LinearProperties`), a solid's **volume** (`VolumeProperties`).
+    /// `ElementMap::computeDescriptor` is the authority; this is not an estimate
+    /// derived from the tessellation.
+    pub magnitude: f64,
 }
 
 /// One previewed body's mesh (`PreviewOp` result → `types.ts PreviewResult`).
@@ -1238,5 +1255,40 @@ mod tests {
         assert_eq!(v["reason"], "no-candidates");
         assert_eq!(v["scoringVersion"], 1);
         assert_eq!(v["candidateCount"], 0);
+    }
+
+    /// MEASURE V1a: the three fields the frontend reads off `element_info`
+    /// (`magnitude`, `size`, `curveType`) must reach it in camelCase alongside
+    /// the pre-existing shape — the DTO is Serialize-only, so this IS the wire.
+    #[test]
+    fn element_info_dto_shape_is_camel_case() {
+        let dto = ElementInfoDto {
+            element_id: "el_7".into(),
+            topo_key: "f:22".into(),
+            body_id: "body_1".into(),
+            kind: "face".into(),
+            surface_type: 0,
+            curve_type: -1,
+            center: [1.0, 2.0, 3.0],
+            normal: [0.0, 0.0, 1.0],
+            has_normal: true,
+            size: 44.72,
+            magnitude: 800.0,
+        };
+        let v = serde_json::to_value(&dto).unwrap();
+        assert_eq!(v["elementId"], "el_7");
+        assert_eq!(v["topoKey"], "f:22");
+        assert_eq!(v["bodyId"], "body_1");
+        assert_eq!(v["kind"], "face");
+        assert_eq!(v["surfaceType"], 0);
+        assert_eq!(v["curveType"], -1);
+        assert_eq!(v["hasNormal"], true);
+        assert_eq!(v["center"], serde_json::json!([1.0, 2.0, 3.0]));
+        assert_eq!(v["magnitude"], 800.0);
+        assert_eq!(v["size"], 44.72);
+        // No snake_case leakage.
+        assert!(v.get("element_id").is_none());
+        assert!(v.get("curve_type").is_none());
+        assert!(v.get("has_normal").is_none());
     }
 }

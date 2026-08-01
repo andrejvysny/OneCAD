@@ -919,6 +919,84 @@ pub async fn face_sketch_plane(
     Ok(plane.into())
 }
 
+/// Read one element's geometric evidence (`QueryElement`; SCHEMA §7.5) —
+/// MEASURE V1a's only backend verb.
+///
+/// A pure READ: it touches no history, mints nothing, and publishes nothing, so
+/// measuring can never enter the undo stack. `magnitude` is the kernel's EXACT
+/// quantity (face area / edge arc length — `BRepGProp`), not a value re-derived
+/// from the tessellation the viewport happens to be showing.
+///
+/// Returns `Ok(None)` — not an error — when the element is absent from the
+/// snapshot: a stale pick after an edit is an ordinary, expected outcome ("that
+/// edge is gone"), and the caller simply drops it. Everything else (no document,
+/// a malformed body id, a worker failure) still fails LOUDLY. Worker IO runs
+/// OUTSIDE the runtime lock; the lock is taken only for the presence check.
+///
+/// # The two-rung read ladder
+///
+/// A caller may hold an `elementId`, a `topoKey`, or both, and NEITHER alone
+/// answers every case:
+///
+/// * `elementId` is the durable identity, but the worker's element-map partition
+///   mints entries **on demand** — only when an OPERATION resolves the element as
+///   an input. `AcquireElementIds` returns evidence and RUST mints the id; the
+///   worker is never told. So a just-promoted, not-yet-used id is genuinely
+///   absent from the partition and this rung reports `None`.
+/// * `topoKey` resolves against the body shape itself, so it answers for a fresh
+///   pick — but it is snapshot-scoped ordinal evidence, and when a mesh carries
+///   minted ElementIds in its id table the frontend's `topoKey` field actually
+///   holds an ElementId (`Picker.ts`), which this rung cannot resolve.
+///
+/// So the topoKey is tried FIRST (the fresh-pick case, one round-trip) and the
+/// elementId is the fallback. Both rungs are exact lookups — neither guesses, so
+/// a miss on one can never bind the other to the wrong thing. Supplying neither
+/// is a caller bug and is rejected rather than silently answered `None`.
+#[tauri::command]
+pub async fn element_info(
+    state: State<'_, AppState>,
+    snapshot_id: u64,
+    body_id: String,
+    element_id: String,
+    topo_key: Option<String>,
+) -> Result<Option<crate::dto::ElementInfoDto>, ApiError> {
+    let body = wire::parse_body_id(&body_id).map_err(ApiError::InvalidCommand)?;
+    let topo_key = topo_key.unwrap_or_default();
+    if element_id.is_empty() && topo_key.is_empty() {
+        return Err(ApiError::InvalidCommand(
+            "elementInfo: one of elementId / topoKey is required".into(),
+        ));
+    }
+    {
+        // Presence check only — the runtime lock is NOT held across the worker
+        // round-trip below (the R-WP11 rule; a held lock makes fencing inert).
+        let guard = state.runtime.lock().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("elementInfo".into()))?;
+    }
+    // The caller supplies the snapshot its pick was made against — the same
+    // contract `promoteSelection` / `faceSketchPlane` use, so the lookup resolves
+    // against the exact snapshot the mesh was tessellated at (Invariant 4).
+    let snapshot = SnapshotId(snapshot_id);
+    let query = state.element_query();
+    if !topo_key.is_empty() {
+        if let Some(info) = query
+            .query_element_by_topo_key(snapshot, body, &topo_key)
+            .await?
+        {
+            return Ok(Some(info));
+        }
+    }
+    if element_id.is_empty() {
+        return Ok(None);
+    }
+    query
+        .query_element(snapshot, body, &element_id)
+        .await
+        .map_err(Into::into)
+}
+
 /// Dry-run ladder resolution for repair dialogs (`ResolveRefs`; SCHEMA §7.5) —
 /// binds nothing.
 #[tauri::command]

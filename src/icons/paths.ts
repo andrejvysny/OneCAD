@@ -90,6 +90,13 @@ export const ICON_PATHS = {
   // above it, and the offset distance drawn on the shared left corner. Reads
   // distinctly from `sketch`/`pen` (a pencil) and `grid` (a square lattice).
   datum: "M3 15l9-3.5 9 3.5-9 3.5-9-3.5zM3 8.5l9-3.5 9 3.5-9 3.5-9-3.5M3 15V8.5",
+
+  // ---- W2-B measure (authored for this WP, NOT from the prototype) ----
+  // A ruler laid diagonally with three graduation ticks striking inward from its
+  // upper edge. Reads distinctly from `dimension` (a plain arrowed extension
+  // line) and `line`, which are the two it could otherwise be confused with.
+  measure:
+    "M14.5 3.5l6 6-10 10-6-6zM10.5 7.5l2 2M8 10l2 2M5.5 12.5l2 2",
 } as const;
 
 export type IconName = keyof typeof ICON_PATHS;

@@ -223,13 +223,36 @@ pub trait SolverEngine: Send + Sync {
 /// defines it exactly.
 #[async_trait]
 pub trait ElementQuery: Send + Sync {
-    /// `QueryElement` (SCHEMA §7.5) — the element's current binding + descriptor.
-    /// `Ok(None)` when the element is not present in the snapshot.
+    /// `QueryElement` **by ElementId** (SCHEMA §7.5) — the element's current
+    /// binding + descriptor. `Ok(None)` when the element is not present.
+    ///
+    /// IMPORTANT — what "not present" means here. The worker's element-map
+    /// partition mints entries **on demand**, and the only thing that mints one
+    /// is an OP resolving it as an input (`PlanExecutor resolve_input_refs`).
+    /// `AcquireElementIds` returns *evidence*; RUST mints the id and the worker
+    /// never hears about it. So an id that has been promoted but not yet CONSUMED
+    /// by an operation is legitimately absent from the partition, and this lookup
+    /// returns `None` for it. Use [`ElementQuery::query_element_by_topo_key`] for
+    /// a fresh pick — the two together are the read ladder (see `api::element_info`).
     async fn query_element(
         &self,
         snapshot: SnapshotId,
         body: BodyId,
         element: &str,
+    ) -> Result<Option<crate::dto::ElementInfoDto>, EngineError>;
+
+    /// `QueryElement` **by `{topoKey, bodyId}`** — the SCHEMA §7.5 second form.
+    ///
+    /// A `TopoKey` is snapshot-scoped ordinal evidence rather than a durable
+    /// identity, so this is only sound when the caller passes the snapshot its
+    /// pick was made against (Invariant 4). It resolves against the body shape
+    /// directly instead of the partition, which is exactly why it answers for a
+    /// just-picked element that no operation has referenced yet.
+    async fn query_element_by_topo_key(
+        &self,
+        snapshot: SnapshotId,
+        body: BodyId,
+        topo_key: &str,
     ) -> Result<Option<crate::dto::ElementInfoDto>, EngineError>;
 }
 
@@ -589,6 +612,15 @@ impl ElementQuery for PendingBackend {
         _snapshot: SnapshotId,
         _body: BodyId,
         _element: &str,
+    ) -> Result<Option<crate::dto::ElementInfoDto>, EngineError> {
+        Err(Self::not_ready())
+    }
+
+    async fn query_element_by_topo_key(
+        &self,
+        _snapshot: SnapshotId,
+        _body: BodyId,
+        _topo_key: &str,
     ) -> Result<Option<crate::dto::ElementInfoDto>, EngineError> {
         Err(Self::not_ready())
     }

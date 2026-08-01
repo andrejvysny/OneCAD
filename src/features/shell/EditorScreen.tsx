@@ -9,6 +9,7 @@ import { NavPill } from "./NavPill";
 import { CornerCluster } from "./CornerCluster";
 import { FloatingToolbar } from "@/features/toolbar/FloatingToolbar";
 import { ModelToolChips } from "@/features/toolbar/ModelToolChips";
+import { MeasureOverlay } from "@/features/measure/MeasureOverlay";
 import { ModelTreePanel } from "@/features/tree/ModelTreePanel";
 import { InspectorPanel } from "@/features/inspector/InspectorPanel";
 import { RepairBanner } from "@/features/repair/RepairBanner";
@@ -52,6 +53,7 @@ export function EditorScreen() {
         <ConstraintBadgeLayer />
         <ConstraintContextChips />
         <ModelToolChips />
+        <MeasureOverlay />
 
         <FloatingToolbar />
         <SketchChromeBar />
