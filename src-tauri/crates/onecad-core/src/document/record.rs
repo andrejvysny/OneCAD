@@ -71,6 +71,7 @@ const KNOWN_OP_TYPES: &[&str] = &[
     "Loft",
     "Sweep",
     "MirrorBody",
+    "ImportStep",
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -303,6 +304,7 @@ pub enum KnownOperation {
     Loft(LoftParams),
     Sweep(SweepParams),
     MirrorBody(MirrorBodyParams),
+    ImportStep(ImportStepParams),
 }
 
 /// Unknown-`opType` payload, captured as a raw map (frozen node).
@@ -333,6 +335,7 @@ impl Operation {
                 KnownOperation::Loft(_) => "Loft",
                 KnownOperation::Sweep(_) => "Sweep",
                 KnownOperation::MirrorBody(_) => "MirrorBody",
+                KnownOperation::ImportStep(_) => "ImportStep",
             },
             // The frozen node keeps its original tag inside `raw`; report it so a
             // future opType is not mislabelled as one of the known ops.
@@ -476,6 +479,13 @@ impl Operation {
                     inputs.push_body(b);
                 }
             }
+
+            // ImportStep: NO inputs. An import depends on nothing in the document
+            // — its whole upstream is the content-addressed source blob, which is
+            // a container section (`imports/<sha256>.<codec>`), not a timeline
+            // node. Giving it a dependency would make the dependency graph claim
+            // an edge that regen cannot honour. No C++ analogue (new v2 op).
+            KnownOperation::ImportStep(_) => {}
         }
         inputs
     }
@@ -611,6 +621,76 @@ pub enum PlaneKind {
     Yz,
     #[serde(rename = "custom")]
     Custom,
+}
+
+/// Codec of an [`ImportStepParams`] source blob. Lowercase wire values, matching
+/// the `imports/<sha256>.<ext>` container-section extension exactly (the enum IS
+/// the extension registry — see [`ImportSourceCodec::extension`]).
+///
+/// `Step` is the raw user-supplied STEP text; `Brep` is a kernel-native BinTools
+/// dump produced ONCE at import and pinned by
+/// [`ImportStepParams::brep_format`] — a from-0 replay never consults
+/// checkpoints, so re-parsing STEP on every open is the alternative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImportSourceCodec {
+    /// ISO 10303-21 STEP text (`imports/<sha256>.step`).
+    #[default]
+    Step,
+    /// OCCT BinTools BREP dump (`imports/<sha256>.brep`).
+    Brep,
+}
+
+impl ImportSourceCodec {
+    /// The container-section file extension for this codec (no leading dot).
+    #[must_use]
+    pub fn extension(self) -> &'static str {
+        match self {
+            ImportSourceCodec::Step => "step",
+            ImportSourceCodec::Brep => "brep",
+        }
+    }
+
+    /// The codec for a container-section extension (no leading dot), if known.
+    /// An unrecognised extension is `None` — a foreign `imports/` entry is
+    /// ignored, never guessed at.
+    #[must_use]
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        match ext {
+            "step" => Some(ImportSourceCodec::Step),
+            "brep" => Some(ImportSourceCodec::Brep),
+            _ => None,
+        }
+    }
+}
+
+/// The only heal policy this build authors / accepts (SCHEMA §7.3 `healPolicy`).
+/// A future policy is a new *value*, never a reinterpretation of `"v1"`: the
+/// string is part of the geometry-relevant params, so a document pins the exact
+/// healing behaviour it was imported under.
+pub const IMPORT_HEAL_POLICY_V1: &str = "v1";
+
+fn default_heal_policy() -> String {
+    IMPORT_HEAL_POLICY_V1.to_string()
+}
+
+fn default_unit_scale() -> Scalar {
+    Scalar::new(1.0)
+}
+
+/// True iff `s` is a 64-character lowercase-hex SHA-256 digest — the ONLY shape
+/// accepted for a content-addressed import blob key.
+///
+/// Strictness is load-bearing, not cosmetic: the key is interpolated into a ZIP
+/// entry name (`imports/<sha256>.step`), so a lax check would let a hostile /
+/// buggy `sourceSha256` inject a path separator. `[0-9a-f]{64}` cannot.
+/// Uppercase hex is rejected too — two spellings of one digest would break
+/// content-addressing (two entries, one blob).
+#[must_use]
+pub fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn default_true() -> bool {
@@ -926,4 +1006,344 @@ pub struct MirrorBodyParams {
     pub fuse_with_original: bool,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     pub extra: Extra,
+}
+
+/// STEP/BREP import parameters (new v2 op; no OneCAD-CPP analogue).
+///
+/// **The params are a POINTER, never a payload.** They carry the content hash of
+/// the source blob, not the blob: the bytes live in the container's authoritative
+/// `imports/<sourceSha256>.<codec>` section (see
+/// [`crate::io::imports`]). Three reasons this is not negotiable:
+///
+/// * `params` is hashed by
+///   [`history_prefix_hash`](crate::regen::planner::history_prefix_hash) on every
+///   plan compile — embedding megabytes of STEP would make each hash O(file).
+/// * `params` round-trips through `document.json`; a 200 MB base64 blob inside
+///   the authoritative JSON section would blow its 64 MB cap.
+/// * A content hash is stable across machines; an absolute path is not. **No
+///   filesystem path is stored** — `source_name` is a display-only basename and
+///   is deliberately NOT used to locate anything.
+///
+/// Every field is geometry-relevant (all of them feed the hash), so re-importing
+/// the same bytes under the same policy is a no-op edit, while a different file,
+/// scale, or heal policy is a genuinely different operation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportStepParams {
+    /// SHA-256 of the source blob, lowercase hex, 64 chars — the container key
+    /// (`imports/<sourceSha256>.<codec>`) and the sole link to the bytes.
+    pub source_sha256: String,
+    /// Which codec the blob is stored in (picks the section extension).
+    pub source_codec: ImportSourceCodec,
+    /// Display-only source basename (tree label / diagnostics). **Never a path**
+    /// and never resolved — see the type docs.
+    pub source_name: String,
+    /// The healing policy the import was performed under
+    /// ([`IMPORT_HEAL_POLICY_V1`]).
+    #[serde(default = "default_heal_policy")]
+    pub heal_policy: String,
+    /// Uniform scale applied to the imported geometry (1.0 = source units are
+    /// already document units).
+    #[serde(default = "default_unit_scale")]
+    pub unit_scale: Scalar,
+    /// BinTools format version the `.brep` blob was written with — present iff
+    /// `source_codec == Brep`, absent (skipped) otherwise, so a STEP import
+    /// serializes without the key at all. Pinned because a BinTools dump is only
+    /// readable by a kernel that understands its format version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brep_format: Option<u32>,
+    #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
+    pub extra: Extra,
+}
+
+impl ImportStepParams {
+    /// Validates the params' self-contained invariants, returning a human-facing
+    /// reason on failure. Checked at every authoring entry point (see
+    /// `crate::edit::session`), NOT at deserialize time: a document written by a
+    /// future build must still load (and round-trip) rather than become
+    /// unopenable.
+    ///
+    /// # Errors
+    /// A message naming the violated invariant.
+    pub fn validate(&self) -> Result<(), String> {
+        if !is_sha256_hex(&self.source_sha256) {
+            return Err(format!(
+                "import sourceSha256 `{}` is not a 64-character lowercase-hex sha256",
+                self.source_sha256
+            ));
+        }
+        if !self.unit_scale.value.is_finite() || self.unit_scale.value <= 0.0 {
+            return Err(format!(
+                "import unitScale must be finite and > 0 (got {})",
+                self.unit_scale.value
+            ));
+        }
+        if self.heal_policy != IMPORT_HEAL_POLICY_V1 {
+            return Err(format!(
+                "unsupported import healPolicy `{}` (this build authors `{IMPORT_HEAL_POLICY_V1}`)",
+                self.heal_policy
+            ));
+        }
+        match (self.source_codec, self.brep_format) {
+            (ImportSourceCodec::Brep, None) => {
+                Err("import sourceCodec `brep` requires a brepFormat (BinTools version pin)".into())
+            }
+            (ImportSourceCodec::Step, Some(v)) => Err(format!(
+                "import sourceCodec `step` must not carry a brepFormat (got {v})"
+            )),
+            _ => Ok(()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A canonical STEP-codec import (the shape the importer authors).
+    fn step_params() -> ImportStepParams {
+        ImportStepParams {
+            source_sha256: "a".repeat(64),
+            source_codec: ImportSourceCodec::Step,
+            source_name: "bracket.step".into(),
+            heal_policy: IMPORT_HEAL_POLICY_V1.into(),
+            unit_scale: Scalar::new(1.0),
+            brep_format: None,
+            extra: Extra::new(),
+        }
+    }
+
+    fn brep_params() -> ImportStepParams {
+        ImportStepParams {
+            source_codec: ImportSourceCodec::Brep,
+            brep_format: Some(4),
+            ..step_params()
+        }
+    }
+
+    #[test]
+    fn import_step_is_a_known_op_type() {
+        assert!(KNOWN_OP_TYPES.contains(&"ImportStep"));
+        let op = Operation::Known(KnownOperation::ImportStep(step_params()));
+        assert_eq!(op.op_type(), "ImportStep");
+        // The tag must round-trip through the KNOWN gate, not fall through to
+        // Opaque (which would freeze imports out of regen forever).
+        let json = serde_json::to_value(&op).unwrap();
+        assert_eq!(json["opType"], serde_json::json!("ImportStep"));
+        assert!(matches!(
+            serde_json::from_value::<Operation>(json).unwrap(),
+            Operation::Known(KnownOperation::ImportStep(_))
+        ));
+    }
+
+    #[test]
+    fn import_step_params_serialize_camel_case_and_round_trip() {
+        let op = Operation::Known(KnownOperation::ImportStep(brep_params()));
+        let json = serde_json::to_value(&op).unwrap();
+        let params = &json["params"];
+        assert_eq!(params["sourceSha256"], serde_json::json!("a".repeat(64)));
+        assert_eq!(params["sourceCodec"], serde_json::json!("brep"));
+        assert_eq!(params["sourceName"], serde_json::json!("bracket.step"));
+        assert_eq!(params["healPolicy"], serde_json::json!("v1"));
+        // `Scalar` serializes as `{value, expr?}` (bare numbers are accepted on
+        // the way IN only) — same as every other dimensional param.
+        assert_eq!(params["unitScale"], serde_json::json!({ "value": 1.0 }));
+        assert_eq!(params["brepFormat"], serde_json::json!(4));
+
+        let back: Operation = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&back).unwrap(), json);
+        match back {
+            Operation::Known(KnownOperation::ImportStep(p)) => assert_eq!(p, brep_params()),
+            other => panic!("expected ImportStep, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_codec_omits_brep_format_entirely() {
+        // skip-none: a STEP import must not grow a `brepFormat: null` key.
+        let op = Operation::Known(KnownOperation::ImportStep(step_params()));
+        let json = serde_json::to_value(&op).unwrap();
+        assert!(json["params"].get("brepFormat").is_none());
+    }
+
+    #[test]
+    fn import_params_defaults_fill_in_for_a_minimal_payload() {
+        // A payload carrying only the three required keys still parses, with
+        // healPolicy/unitScale defaulted (a future writer may omit them).
+        let json = serde_json::json!({
+            "opType": "ImportStep",
+            "params": {
+                "sourceSha256": "b".repeat(64),
+                "sourceCodec": "step",
+                "sourceName": "part.stp"
+            }
+        });
+        match serde_json::from_value::<Operation>(json).unwrap() {
+            Operation::Known(KnownOperation::ImportStep(p)) => {
+                assert_eq!(p.heal_policy, IMPORT_HEAL_POLICY_V1);
+                assert_eq!(p.unit_scale.value, 1.0);
+                assert_eq!(p.brep_format, None);
+                assert!(p.validate().is_ok());
+            }
+            other => panic!("expected ImportStep, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn import_params_are_hash_stable_across_identical_records() {
+        // The planner hashes `params` verbatim (planner::history_prefix_hash), so
+        // two independently-built identical records MUST serialize identically —
+        // otherwise every plan compile would invalidate its own checkpoints.
+        let a = serde_json::to_string(&KnownOperation::ImportStep(brep_params())).unwrap();
+        let b = serde_json::to_string(&KnownOperation::ImportStep(brep_params())).unwrap();
+        assert_eq!(a, b);
+
+        let rec_a = OperationRecord::new(
+            RecordId(Uuid::from_u128(0x1)),
+            0,
+            "Import 1",
+            Operation::Known(KnownOperation::ImportStep(brep_params())),
+        );
+        let rec_b = OperationRecord::new(
+            RecordId(Uuid::from_u128(0x1)),
+            0,
+            "Import 1",
+            Operation::Known(KnownOperation::ImportStep(brep_params())),
+        );
+        assert_eq!(
+            serde_json::to_string(&rec_a).unwrap(),
+            serde_json::to_string(&rec_b).unwrap()
+        );
+    }
+
+    #[test]
+    fn import_params_carry_no_bytes_and_no_path() {
+        // The params are a POINTER. Anything that could smuggle a payload or an
+        // absolute path into `document.json` is a schema defect.
+        let json = serde_json::to_value(KnownOperation::ImportStep(brep_params())).unwrap();
+        let text = serde_json::to_string(&json).unwrap();
+        assert!(!text.contains('/'), "no path component may appear: {text}");
+        // Every params key is accounted for (no surprise payload field).
+        let keys: Vec<&str> = json["params"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        // `serde_json::Map` is a BTreeMap here, so the listing is alphabetical.
+        assert_eq!(
+            keys,
+            vec![
+                "brepFormat",
+                "healPolicy",
+                "sourceCodec",
+                "sourceName",
+                "sourceSha256",
+                "unitScale"
+            ]
+        );
+    }
+
+    #[test]
+    fn import_step_derives_no_inputs() {
+        let op = Operation::Known(KnownOperation::ImportStep(step_params()));
+        let inputs = op.derive_inputs();
+        assert!(inputs.bodies.is_empty());
+        assert!(inputs.sketches.is_empty());
+        assert!(inputs.elements.is_empty());
+        assert_eq!(inputs, OperationInputs::default());
+    }
+
+    #[test]
+    fn import_step_alien_params_keys_round_trip() {
+        let mut json = serde_json::to_value(KnownOperation::ImportStep(step_params())).unwrap();
+        json["params"]
+            .as_object_mut()
+            .unwrap()
+            .insert("alienImportKey".into(), serde_json::json!({ "keep": 1 }));
+        let back: Operation = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&back).unwrap(), json);
+    }
+
+    #[test]
+    fn validate_rejects_malformed_sha256() {
+        for bad in [
+            "",
+            "abc",
+            &"A".repeat(64),    // uppercase hex is a second spelling
+            &"g".repeat(64),    // non-hex
+            "../../etc/passwd", // traversal attempt
+            &format!("{}x", "a".repeat(63)),
+        ] {
+            let p = ImportStepParams {
+                source_sha256: (*bad).to_string(),
+                ..step_params()
+            };
+            assert!(p.validate().is_err(), "must reject sourceSha256 `{bad}`");
+        }
+        assert!(step_params().validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_non_positive_or_non_finite_unit_scale() {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let p = ImportStepParams {
+                unit_scale: Scalar {
+                    value: bad,
+                    expr: None,
+                },
+                ..step_params()
+            };
+            assert!(p.validate().is_err(), "must reject unitScale {bad}");
+        }
+        let ok = ImportStepParams {
+            unit_scale: Scalar::new(25.4),
+            ..step_params()
+        };
+        assert!(ok.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_unknown_heal_policy_and_codec_format_disagreement() {
+        let p = ImportStepParams {
+            heal_policy: "v2".into(),
+            ..step_params()
+        };
+        assert!(p.validate().is_err());
+
+        // brep without a BinTools version pin is unreadable later.
+        let p = ImportStepParams {
+            brep_format: None,
+            ..brep_params()
+        };
+        assert!(p.validate().is_err());
+
+        // step with a version pin is a contradiction.
+        let p = ImportStepParams {
+            brep_format: Some(4),
+            ..step_params()
+        };
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn codec_extension_registry_is_bijective() {
+        for codec in [ImportSourceCodec::Step, ImportSourceCodec::Brep] {
+            assert_eq!(
+                ImportSourceCodec::from_extension(codec.extension()),
+                Some(codec)
+            );
+        }
+        assert_eq!(ImportSourceCodec::from_extension("iges"), None);
+        assert_eq!(ImportSourceCodec::from_extension("STEP"), None);
+    }
+
+    #[test]
+    fn sha256_hex_shape_guard() {
+        assert!(is_sha256_hex(&"0123456789abcdef".repeat(4)));
+        assert!(!is_sha256_hex(&"0123456789ABCDEF".repeat(4)));
+        assert!(!is_sha256_hex(&"a".repeat(63)));
+        assert!(!is_sha256_hex(&"a".repeat(65)));
+        assert!(!is_sha256_hex("imports/../x"));
+    }
 }

@@ -10,6 +10,7 @@
 //! | `geometry/<bodyId>.brep` | cache (mismatch → stale) | 1 GB | Stored |
 //! | `meshes/<bodyId>.<lod>.mesh` | cache | 1 GB | Stored |
 //! | `checkpoints/<step>.json` / `.bin` | cache | 1 GB | Stored |
+//! | `imports/<sha256>.step`/`.brep` | **authoritative-for-a-record** (see [`super::imports`]) | 256 MB | Deflated |
 //! | `preview.png` | cache | 1 GB | Stored |
 //!
 //! Whole-container caps: **4 GB** total (declared uncompressed) and **10 000**
@@ -46,6 +47,10 @@ use zip::{CompressionMethod, ZipArchive};
 use crate::document::Document;
 use crate::ids::BodyId;
 
+use super::imports::{
+    import_sections, parse_import_blob_path, verify_blob, ImportBlobError, ImportBlobInfo,
+    ImportBlobResult, ImportBlobs, IMPORTS_DIR, MAX_IMPORT_BLOB_BYTES,
+};
 use super::manifest::{Manifest, ManifestEntry, CONTAINER_VERSION, GLOBAL_SCHEMA_VERSION, MAGIC};
 use super::migrate::{LoadOutcome, MigrationRegistry};
 use super::{document_io, history_io, sha256_hex, Diagnostic, IoError, IoResult};
@@ -185,7 +190,31 @@ impl ContainerWriter {
         caches: &ContainerCaches,
         meta: &SaveMeta,
     ) -> IoResult<()> {
-        Self::save_inner(path, document, caches, meta, true).map(|_| ())
+        Self::save_inner(path, document, caches, &ImportBlobs::new(), meta, true).map(|_| ())
+    }
+
+    /// Atomically writes `document` (+ optional `caches`) to `path`, additionally
+    /// persisting the `imports` blobs its `ImportStep` records reference.
+    ///
+    /// Only REFERENCED blobs are written and orphans are dropped — see
+    /// [`referenced_import_shas`](super::imports::referenced_import_shas) for the
+    /// refcount rule. A document with no `ImportStep` record writes no `imports/`
+    /// entry at all and is byte-identical to the same
+    /// [`save`](ContainerWriter::save).
+    ///
+    /// # Errors
+    /// [`IoError`] on a serialization or filesystem failure, on a malformed /
+    /// mis-keyed blob key, or on a blob over
+    /// [`MAX_IMPORT_BLOB_BYTES`]. On any failure the target file is left
+    /// untouched and the temp file is removed.
+    pub fn save_with_imports(
+        path: &Path,
+        document: &Document,
+        caches: &ContainerCaches,
+        imports: &ImportBlobs,
+        meta: &SaveMeta,
+    ) -> IoResult<()> {
+        Self::save_inner(path, document, caches, imports, meta, true).map(|_| ())
     }
 
     /// Crash-simulation hook: writes + fsyncs the temp file but **skips** the
@@ -201,17 +230,18 @@ impl ContainerWriter {
         caches: &ContainerCaches,
         meta: &SaveMeta,
     ) -> IoResult<PathBuf> {
-        Self::save_inner(path, document, caches, meta, false)
+        Self::save_inner(path, document, caches, &ImportBlobs::new(), meta, false)
     }
 
     fn save_inner(
         path: &Path,
         document: &Document,
         caches: &ContainerCaches,
+        imports: &ImportBlobs,
         meta: &SaveMeta,
         commit: bool,
     ) -> IoResult<PathBuf> {
-        let sections = build_sections(document, caches)?;
+        let sections = build_sections(document, caches, imports)?;
         let manifest = build_manifest(document, meta, &sections);
         let manifest_bytes = serde_json::to_vec_pretty(&manifest)
             .map_err(|e| IoError::Corrupt(format!("manifest serialize: {e}")))?;
@@ -241,9 +271,13 @@ impl ContainerWriter {
     }
 }
 
-/// Builds the section list (authoritative + derived + caches) with validated
-/// names.
-fn build_sections(document: &Document, caches: &ContainerCaches) -> IoResult<Vec<Section>> {
+/// Builds the section list (authoritative + derived + imports + caches) with
+/// validated names.
+fn build_sections(
+    document: &Document,
+    caches: &ContainerCaches,
+    imports: &ImportBlobs,
+) -> IoResult<Vec<Section>> {
     let mut sections = Vec::new();
     sections.push(Section {
         path: DOCUMENT_PATH.to_string(),
@@ -253,6 +287,14 @@ fn build_sections(document: &Document, caches: &ContainerCaches) -> IoResult<Vec
         path: OPS_PATH.to_string(),
         bytes: history_io::serialize_ops_jsonl(document.timeline.records())?,
     });
+    // Authoritative-for-a-record import blobs, refcounted against live records.
+    for (path, bytes) in import_sections(document, imports)? {
+        guard_authored_name(&path)?;
+        sections.push(Section {
+            path,
+            bytes: bytes.to_vec(),
+        });
+    }
     for (body, bytes) in &caches.geometry {
         sections.push(Section {
             path: format!("{GEOMETRY_DIR}{body}.brep"),
@@ -364,9 +406,12 @@ fn compression_for(name: &str, len: usize) -> CompressionMethod {
     if len < STORE_THRESHOLD {
         return CompressionMethod::Stored;
     }
+    // Import blobs are STEP/BREP text — highly compressible, and the one section
+    // family where a user routinely ships tens of MB.
     let is_text = name == MANIFEST_PATH
         || name == DOCUMENT_PATH
         || name == OPS_PATH
+        || name.starts_with(IMPORTS_DIR)
         || name.ends_with(".json");
     if is_text {
         CompressionMethod::Deflated
@@ -463,6 +508,9 @@ pub struct LoadedContainer {
     /// The load outcome: the (migrated) document, read-only flag, migration report,
     /// stale-caches flag and diagnostics.
     pub outcome: LoadOutcome,
+    /// Import blobs present in the archive, indexed from the ZIP directory at
+    /// open (names + declared sizes only — **no bytes are read**).
+    imports: Vec<ImportBlobInfo>,
     /// The container path (reopened for lazy cache reads).
     source: PathBuf,
 }
@@ -474,15 +522,65 @@ impl LoadedContainer {
         &self.outcome.document
     }
 
-    /// The cache entries listed in the manifest (everything but the authoritative
-    /// document and the derived ops projection).
+    /// The cache entries listed in the manifest — everything but the
+    /// authoritative document, the derived ops projection, and the
+    /// authoritative-for-a-record `imports/` blobs (an import blob is NOT a
+    /// cache: it can never be regenerated, so it must never be reported stale
+    /// and discarded; see [`LoadedContainer::import_blobs`]).
     #[must_use]
     pub fn cache_entries(&self) -> Vec<&ManifestEntry> {
         self.manifest
             .entries
             .iter()
-            .filter(|e| e.path != DOCUMENT_PATH && e.path != OPS_PATH)
+            .filter(|e| {
+                e.path != DOCUMENT_PATH && e.path != OPS_PATH && !e.path.starts_with(IMPORTS_DIR)
+            })
             .collect()
+    }
+
+    /// The import blobs present in this container — digest, codec and declared
+    /// size, **without reading any bytes**.
+    ///
+    /// Indexed from the ZIP central directory during the open-time cap walk, so
+    /// this is free. Entries under `imports/` that do not parse as
+    /// `<sha256>.<known codec>` are omitted (a future codec is ignored, never
+    /// guessed at) and never fail the open.
+    #[must_use]
+    pub fn import_blobs(&self) -> &[ImportBlobInfo] {
+        &self.imports
+    }
+
+    /// Reads one import blob by its content hash, verifying the decompressed
+    /// bytes against that hash.
+    ///
+    /// Unlike [`read_cache`](LoadedContainer::read_cache) this ignores
+    /// `stale_caches` entirely: an import blob is source input, not a derived
+    /// artifact, so a stale `opsHash` says nothing about it.
+    ///
+    /// # Errors
+    /// * [`ImportBlobError::BadKey`] — `sha256` is not a 64-char lowercase hex digest.
+    /// * [`ImportBlobError::Missing`] — no such blob in this container.
+    /// * [`ImportBlobError::HashMismatch`] — the bytes were tampered with / rotted.
+    /// * [`ImportBlobError::Io`] — transport failure, or the entry inflates past
+    ///   [`MAX_IMPORT_BLOB_BYTES`] ([`IoError::TooLarge`]).
+    pub fn read_import_blob(&self, sha256: &str) -> ImportBlobResult<Vec<u8>> {
+        let info = self
+            .imports
+            .iter()
+            .find(|i| i.sha256 == sha256)
+            .ok_or_else(|| {
+                if crate::document::record::is_sha256_hex(sha256) {
+                    ImportBlobError::Missing(sha256.to_string())
+                } else {
+                    ImportBlobError::BadKey(sha256.to_string())
+                }
+            })?;
+        let file = std::fs::File::open(&self.source).map_err(IoError::from)?;
+        let mut archive = ZipArchive::new(std::io::BufReader::new(file))
+            .map_err(|e| IoError::Corrupt(format!("reopen archive: {e}")))?;
+        let bytes = read_named(&mut archive, &info.path, MAX_IMPORT_BLOB_BYTES)?
+            .ok_or_else(|| ImportBlobError::Missing(sha256.to_string()))?;
+        verify_blob(sha256, bytes)
     }
 
     /// Reads a cache blob by its archive path, on demand.
@@ -501,7 +599,7 @@ impl LoadedContainer {
         let Some(entry) = self.manifest.entry(path) else {
             return Ok(CacheRead::Missing);
         };
-        if path == DOCUMENT_PATH || path == OPS_PATH {
+        if path == DOCUMENT_PATH || path == OPS_PATH || path.starts_with(IMPORTS_DIR) {
             return Ok(CacheRead::Missing); // not a cache
         }
         let file = std::fs::File::open(&self.source)?;
@@ -547,7 +645,8 @@ impl ContainerReader {
         let mut archive = ZipArchive::new(std::io::BufReader::new(file))
             .map_err(|e| IoError::Corrupt(format!("open archive: {e}")))?;
 
-        guard_directory(&mut archive)?;
+        // Caps + traversal guard, and (free, same walk) the import-blob index.
+        let imports = guard_directory(&mut archive)?;
 
         // Manifest (index) — identity-validated.
         let manifest_bytes = read_named(&mut archive, MANIFEST_PATH, MAX_MANIFEST_BYTES)?
@@ -595,6 +694,7 @@ impl ContainerReader {
         Ok(LoadedContainer {
             manifest,
             outcome,
+            imports,
             source: path.to_path_buf(),
         })
     }
@@ -602,13 +702,22 @@ impl ContainerReader {
 
 /// Validates the archive directory up front: entry count, path traversal, and the
 /// total declared-uncompressed-size cap. Runs before any decompression.
-fn guard_directory<R: Read + Seek>(archive: &mut ZipArchive<R>) -> IoResult<()> {
+///
+/// Also returns the **import-blob index** built from the same walk — names and
+/// declared sizes only, no decompression. An `imports/` entry that does not parse
+/// as `<sha256>.<known codec>` is skipped, and an oversized one is indexed rather
+/// than rejected: a bad import blob is a one-record failure surfaced at
+/// [`LoadedContainer::read_import_blob`], never an open failure (see
+/// [`super::imports`]). Import blobs DO count against the whole-container caps
+/// enforced here.
+fn guard_directory<R: Read + Seek>(archive: &mut ZipArchive<R>) -> IoResult<Vec<ImportBlobInfo>> {
     if archive.len() > MAX_ENTRIES {
         return Err(IoError::TooLarge(format!(
             "{} entries exceeds the {MAX_ENTRIES} cap",
             archive.len()
         )));
     }
+    let mut imports = Vec::new();
     let mut total: u64 = 0;
     for i in 0..archive.len() {
         let file = archive
@@ -631,8 +740,16 @@ fn guard_directory<R: Read + Seek>(archive: &mut ZipArchive<R>) -> IoResult<()> 
                 "declared uncompressed size exceeds the {MAX_TOTAL_BYTES}-byte cap"
             )));
         }
+        if let Some((sha256, codec)) = parse_import_blob_path(file.name()) {
+            imports.push(ImportBlobInfo {
+                sha256,
+                codec,
+                declared_size: file.size(),
+                path: file.name().to_string(),
+            });
+        }
     }
-    Ok(())
+    Ok(imports)
 }
 
 /// Reads a named entry, bounding the decompressed size to `cap`. `Ok(None)` when

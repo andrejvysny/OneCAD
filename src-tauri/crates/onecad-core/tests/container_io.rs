@@ -5,8 +5,10 @@
 //! truncation, entry-count cap, random fuzz — none may panic); the derived
 //! `ops.jsonl` reconciliation (integrity + content divergence → `document.json`
 //! wins); version policy (newer → read-only; synthetic migration chain, low
-//! confidence → read-only); and entry-hash tamper (authoritative → `Corrupt`,
-//! cache → stale).
+//! confidence → read-only); entry-hash tamper (authoritative → `Corrupt`, cache →
+//! stale); and the `imports/` section family (content-addressed round-trip,
+//! read-time verification, per-blob cap on write + read, refcount-at-save, and
+//! byte-identity for a document that has no imports).
 
 use std::io::{Cursor, Read, Write};
 use std::path::Path;
@@ -16,16 +18,21 @@ use uuid::Uuid;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use onecad_core::document::record::{
-    BooleanMode, ExtrudeMode, ExtrudeParams, KnownOperation, Operation, OperationRecord,
+    BooleanMode, ExtrudeMode, ExtrudeParams, ImportSourceCodec, ImportStepParams, KnownOperation,
+    Operation, OperationRecord,
 };
 use onecad_core::document::variables::Scalar;
 use onecad_core::document::Document;
 use onecad_core::ids::{BodyId, DocumentId, RecordId};
 use onecad_core::io::container::{
     CacheRead, ContainerCaches, ContainerReader, ContainerWriter, SaveMeta, DOCUMENT_PATH,
-    GEOMETRY_DIR, MANIFEST_PATH, MAX_DOCUMENT_BYTES, OPS_PATH,
+    GEOMETRY_DIR, MANIFEST_PATH, MAX_DOCUMENT_BYTES, MAX_ENTRIES, OPS_PATH,
 };
+use onecad_core::io::document_io;
 use onecad_core::io::history_io;
+use onecad_core::io::imports::{
+    import_blob_path, ImportBlob, ImportBlobError, ImportBlobs, MAX_IMPORT_BLOB_BYTES,
+};
 use onecad_core::io::manifest::{Manifest, CONTAINER_VERSION, GLOBAL_SCHEMA_VERSION, MAGIC};
 use onecad_core::io::migrate::{MigrationConfidence, MigrationRegistry, MigrationStep};
 use onecad_core::io::IoError;
@@ -488,6 +495,338 @@ fn legacy_version_with_empty_registry_is_read_only() {
     assert!(loaded.outcome.read_only);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// imports/ — the THIRD section class (authoritative-for-a-record)
+//
+// Contract (see `onecad_core::io::imports`): irreplaceable input, so it is never
+// a cache; but one-record blast radius, so a missing/corrupt blob NEVER fails the
+// open — the typed failure surfaces at read time. Content-addressed, refcounted
+// against live records at save, and capped independently of the cache blobs.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A document holding one `ImportStep` record pinning `sha`.
+fn import_doc(sha: &str, codec: ImportSourceCodec, suppressed: bool) -> Document {
+    let op = Operation::Known(KnownOperation::ImportStep(ImportStepParams {
+        source_sha256: sha.to_string(),
+        source_codec: codec,
+        source_name: "part.step".into(),
+        heal_policy: "v1".into(),
+        unit_scale: Scalar::new(1.0),
+        brep_format: match codec {
+            ImportSourceCodec::Brep => Some(4),
+            ImportSourceCodec::Step => None,
+        },
+        extra: Default::default(),
+    }));
+    let mut rec = OperationRecord::new(RecordId(Uuid::from_u128(0x1)), 0, "Import 1", op);
+    rec.suppressed = suppressed;
+
+    let mut d = Document::new(DocumentId(Uuid::from_u128(0xD0C)));
+    d.timeline.insert_at_cursor(rec);
+    d
+}
+
+/// `(sha256, carrier holding exactly that blob)`.
+fn blob(bytes: &[u8], codec: ImportSourceCodec) -> (String, ImportBlobs) {
+    let sha = sha256_hex(bytes);
+    let mut blobs = ImportBlobs::new();
+    blobs.insert(
+        sha.clone(),
+        ImportBlob {
+            codec,
+            bytes: bytes.to_vec(),
+        },
+    );
+    (sha, blobs)
+}
+
+/// Replaces one entry's bytes in place, leaving the manifest (and its now-stale
+/// hashes) alone — the tamper shape the content-addressed read must catch itself.
+fn rewrite_entry(path: &Path, target: &str, bytes: Vec<u8>, method: CompressionMethod) {
+    let entries = read_entries(path);
+    let crafted: Vec<(&str, Vec<u8>, CompressionMethod)> = entries
+        .iter()
+        .map(|(name, buf)| {
+            if name == target {
+                (name.as_str(), bytes.clone(), method)
+            } else {
+                (name.as_str(), buf.clone(), CompressionMethod::Stored)
+            }
+        })
+        .collect();
+    build_raw_zip(path, &crafted);
+}
+
+#[test]
+fn import_blob_round_trips_for_both_codecs() {
+    for (codec, bytes) in [
+        (
+            ImportSourceCodec::Step,
+            b"ISO-10303-21; HEADER; ENDSEC;".as_slice(),
+        ),
+        (
+            ImportSourceCodec::Brep,
+            b"CASCADE Topology V3, (c) Open Cascade".as_slice(),
+        ),
+    ] {
+        let dir = tmp();
+        let path = dir.path().join("m.onecad");
+        let (sha, blobs) = blob(bytes, codec);
+        let doc = import_doc(&sha, codec, false);
+        ContainerWriter::save_with_imports(&path, &doc, &ContainerCaches::none(), &blobs, &meta())
+            .unwrap();
+
+        let loaded = ContainerReader::open(&path).unwrap();
+        let listed = loaded.import_blobs();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].sha256, sha);
+        assert_eq!(listed[0].codec, codec);
+        assert_eq!(listed[0].declared_size, bytes.len() as u64);
+        assert_eq!(listed[0].path, import_blob_path(&sha, codec));
+        assert_eq!(loaded.read_import_blob(&sha).unwrap(), bytes);
+        // The section name IS the manifest digest (content-addressing).
+        assert_eq!(loaded.manifest.entry(&listed[0].path).unwrap().sha256, sha);
+    }
+}
+
+#[test]
+fn import_blobs_are_not_reported_as_caches() {
+    // An import blob must never surface through the cache API: a stale opsHash
+    // would mark it `Stale`, and a cache may be discarded — but this one can
+    // never be regenerated.
+    let dir = tmp();
+    let path = dir.path().join("m.onecad");
+    let (sha, blobs) = blob(b"ISO-10303-21; not a cache", ImportSourceCodec::Step);
+    let doc = import_doc(&sha, ImportSourceCodec::Step, false);
+    ContainerWriter::save_with_imports(&path, &doc, &ContainerCaches::none(), &blobs, &meta())
+        .unwrap();
+
+    let loaded = ContainerReader::open(&path).unwrap();
+    let blob_path = import_blob_path(&sha, ImportSourceCodec::Step);
+    assert!(loaded.cache_entries().iter().all(|e| e.path != blob_path));
+    assert_eq!(loaded.read_cache(&blob_path).unwrap(), CacheRead::Missing);
+    // ...yet it still reads back through the import API.
+    assert!(loaded.read_import_blob(&sha).is_ok());
+}
+
+#[test]
+fn flipped_byte_fails_verification_but_the_container_still_opens() {
+    let dir = tmp();
+    let path = dir.path().join("m.onecad");
+    let bytes = b"ISO-10303-21; HEADER; FILE_NAME('part'); ENDSEC;".to_vec();
+    let (sha, blobs) = blob(&bytes, ImportSourceCodec::Step);
+    let doc = import_doc(&sha, ImportSourceCodec::Step, false);
+    ContainerWriter::save_with_imports(&path, &doc, &ContainerCaches::none(), &blobs, &meta())
+        .unwrap();
+
+    let mut flipped = bytes.clone();
+    flipped[7] ^= 0x01;
+    rewrite_entry(
+        &path,
+        &import_blob_path(&sha, ImportSourceCodec::Step),
+        flipped,
+        CompressionMethod::Stored,
+    );
+
+    // The container opens clean — a bad import blob is a ONE-RECORD failure.
+    let loaded = ContainerReader::open(&path).unwrap();
+    assert!(!loaded.outcome.read_only);
+    assert_eq!(loaded.document().timeline.len(), 1);
+    assert_eq!(loaded.import_blobs().len(), 1);
+    // ...and the failure is typed, at read time, and NOT `IoError::Corrupt`.
+    assert!(matches!(
+        loaded.read_import_blob(&sha),
+        Err(ImportBlobError::HashMismatch { .. })
+    ));
+}
+
+#[test]
+fn a_missing_blob_does_not_fail_the_open() {
+    let dir = tmp();
+    let path = dir.path().join("m.onecad");
+    let sha = sha256_hex(b"never supplied");
+    // The record pins a blob the caller never handed over: the save succeeds (it
+    // cannot write bytes it does not have) and the open stays green.
+    let doc = import_doc(&sha, ImportSourceCodec::Step, false);
+    ContainerWriter::save_with_imports(
+        &path,
+        &doc,
+        &ContainerCaches::none(),
+        &ImportBlobs::new(),
+        &meta(),
+    )
+    .unwrap();
+
+    let loaded = ContainerReader::open(&path).unwrap();
+    assert!(loaded.import_blobs().is_empty());
+    assert!(matches!(
+        loaded.read_import_blob(&sha),
+        Err(ImportBlobError::Missing(_))
+    ));
+    assert!(matches!(
+        loaded.read_import_blob("not-a-digest"),
+        Err(ImportBlobError::BadKey(_))
+    ));
+}
+
+#[test]
+fn orphan_blob_is_dropped_at_save_and_a_suppressed_record_keeps_its_own() {
+    let dir = tmp();
+    let path = dir.path().join("m.onecad");
+    let live = b"ISO-10303-21; live".to_vec();
+    let orphan = b"ISO-10303-21; orphaned by a re-import".to_vec();
+    let live_sha = sha256_hex(&live);
+    let orphan_sha = sha256_hex(&orphan);
+
+    let mut blobs = ImportBlobs::new();
+    for (sha, bytes) in [(&live_sha, &live), (&orphan_sha, &orphan)] {
+        blobs.insert(
+            sha.clone(),
+            ImportBlob {
+                codec: ImportSourceCodec::Step,
+                bytes: bytes.clone(),
+            },
+        );
+    }
+
+    // The one live record is SUPPRESSED — it must still pin its blob, or a
+    // reversible display toggle would become destructive data loss on save.
+    let doc = import_doc(&live_sha, ImportSourceCodec::Step, true);
+    ContainerWriter::save_with_imports(&path, &doc, &ContainerCaches::none(), &blobs, &meta())
+        .unwrap();
+
+    let loaded = ContainerReader::open(&path).unwrap();
+    let shas: Vec<&str> = loaded
+        .import_blobs()
+        .iter()
+        .map(|i| i.sha256.as_str())
+        .collect();
+    assert_eq!(shas, vec![live_sha.as_str()]);
+    assert_eq!(loaded.read_import_blob(&live_sha).unwrap(), live);
+}
+
+#[test]
+fn per_blob_cap_is_enforced_on_write() {
+    let dir = tmp();
+    let path = dir.path().join("m.onecad");
+    let big = vec![b'S'; (MAX_IMPORT_BLOB_BYTES as usize) + 1];
+    let (sha, blobs) = blob(&big, ImportSourceCodec::Step);
+    let doc = import_doc(&sha, ImportSourceCodec::Step, false);
+    assert!(matches!(
+        ContainerWriter::save_with_imports(&path, &doc, &ContainerCaches::none(), &blobs, &meta()),
+        Err(IoError::TooLarge(_))
+    ));
+    assert!(!path.exists(), "nothing is committed on a cap breach");
+}
+
+#[test]
+fn per_blob_cap_is_enforced_on_read_as_a_zip_bomb_guard() {
+    let dir = tmp();
+    let path = dir.path().join("m.onecad");
+    let bytes = b"ISO-10303-21; small".to_vec();
+    let (sha, blobs) = blob(&bytes, ImportSourceCodec::Step);
+    let doc = import_doc(&sha, ImportSourceCodec::Step, false);
+    ContainerWriter::save_with_imports(&path, &doc, &ContainerCaches::none(), &blobs, &meta())
+        .unwrap();
+
+    // Swap the blob for one that Deflates tiny but inflates past the cap.
+    let bomb = vec![b' '; (MAX_IMPORT_BLOB_BYTES as usize) + 1];
+    rewrite_entry(
+        &path,
+        &import_blob_path(&sha, ImportSourceCodec::Step),
+        bomb,
+        CompressionMethod::Deflated,
+    );
+    assert!(
+        std::fs::metadata(&path).unwrap().len() < 4 * 1024 * 1024,
+        "the crafted entry must really be a bomb"
+    );
+
+    // Opening is unaffected (the directory walk never decompresses)...
+    let loaded = ContainerReader::open(&path).unwrap();
+    assert_eq!(loaded.import_blobs().len(), 1);
+    // ...and the read is bounded, not an OOM.
+    assert!(matches!(
+        loaded.read_import_blob(&sha),
+        Err(ImportBlobError::Io(IoError::TooLarge(_)))
+    ));
+}
+
+#[test]
+fn imports_count_against_the_whole_container_caps() {
+    let dir = tmp();
+    let path = dir.path().join("m.onecad");
+    let bytes = b"ISO-10303-21; counted".to_vec();
+    let (sha, blobs) = blob(&bytes, ImportSourceCodec::Step);
+    let doc = import_doc(&sha, ImportSourceCodec::Step, false);
+    ContainerWriter::save_with_imports(&path, &doc, &ContainerCaches::none(), &blobs, &meta())
+        .unwrap();
+
+    let plain = dir.path().join("plain.onecad");
+    ContainerWriter::save(&plain, &doc, &ContainerCaches::none(), &meta()).unwrap();
+    assert_eq!(
+        read_entries(&path).len(),
+        read_entries(&plain).len() + 1,
+        "the import blob is one more counted entry"
+    );
+
+    // Padding the archive past MAX_ENTRIES with import blobs is rejected at open,
+    // exactly like any other entry family.
+    let mut entries = read_entries(&path);
+    for i in 0..MAX_ENTRIES {
+        entries.push((format!("imports/{i:064x}.step"), vec![0u8]));
+    }
+    write_entries(&path, &entries);
+    assert!(matches!(
+        ContainerReader::open(&path),
+        Err(IoError::TooLarge(_))
+    ));
+}
+
+#[test]
+fn a_document_without_imports_is_byte_identical_to_a_plain_save() {
+    // The blob carrier is container payload, never document state: with no
+    // `ImportStep` record the two writers must produce the SAME archive — which
+    // is what keeps every existing snapshot/fixture untouched by this feature.
+    let dir = tmp();
+    let plain = dir.path().join("plain.onecad");
+    let with_imports = dir.path().join("imports.onecad");
+    let doc = small_doc();
+    ContainerWriter::save(&plain, &doc, &ContainerCaches::none(), &meta()).unwrap();
+
+    // Even when blobs ARE handed over: with nothing referencing them, none is written.
+    let (_, blobs) = blob(b"ISO-10303-21; unreferenced", ImportSourceCodec::Step);
+    ContainerWriter::save_with_imports(
+        &with_imports,
+        &doc,
+        &ContainerCaches::none(),
+        &blobs,
+        &meta(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read(&plain).unwrap(),
+        std::fs::read(&with_imports).unwrap()
+    );
+    assert!(ContainerReader::open(&plain)
+        .unwrap()
+        .import_blobs()
+        .is_empty());
+}
+
+#[test]
+fn an_import_record_puts_no_bytes_in_document_json() {
+    // A document WITH an import still serializes only the pointer params —
+    // `document.json` never grows a payload (its 64 MB cap depends on it, and so
+    // does the planner hash being O(1) in file size).
+    let bytes = b"ISO-10303-21; a fairly long body of STEP text".to_vec();
+    let sha = sha256_hex(&bytes);
+    let doc = import_doc(&sha, ImportSourceCodec::Step, false);
+    let json = String::from_utf8(document_io::serialize_document(&doc).unwrap()).unwrap();
+    assert!(json.contains(&sha), "the pointer is persisted");
+    assert!(!json.contains("ISO-10303-21"), "the payload is NOT");
+}
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────

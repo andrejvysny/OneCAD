@@ -11,6 +11,7 @@
 //! geometry/<bodyId>.brep opaque BREP cache (from the worker)
 //! meshes/<bodyId>.<lod>.mesh   MESH1 cache
 //! checkpoints/<step>.json + .bin   optional checkpoint artifacts
+//! imports/<sha256>.step|.brep      import source blobs — AUTHORITATIVE-FOR-A-RECORD
 //! preview.png            optional thumbnail
 //! ```
 //!
@@ -32,6 +33,11 @@
 //!   of truth and (b) churn the already-frozen `document.json` shape. Divergence
 //!   from the plan is deliberate and recorded here + in [`sketch_io`]. Flag for
 //!   orchestrator review.
+//! * **`imports/` is a THIRD section class — "authoritative-for-a-record".** It
+//!   is irreplaceable input (no regen can reconstruct a source STEP, so it is not
+//!   a cache), yet its blast radius is one timeline step, so a missing or corrupt
+//!   blob must not fail the open the way a corrupt `document.json` does. Rationale
+//!   and the full contract live in [`imports`].
 //!
 //! ## File attack surface (Codex red-team; plan "File attack surface")
 //!
@@ -47,6 +53,7 @@
 pub mod container;
 pub mod document_io;
 pub mod history_io;
+pub mod imports;
 pub mod manifest;
 pub mod migrate;
 pub mod recovery;

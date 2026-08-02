@@ -819,7 +819,8 @@ pub fn feature_kind(op: &Operation) -> FeatureKind {
             KnownOperation::Boolean(_)
             | KnownOperation::LinearPattern(_)
             | KnownOperation::CircularPattern(_)
-            | KnownOperation::MirrorBody(_) => FeatureKind::Boolean,
+            | KnownOperation::MirrorBody(_)
+            | KnownOperation::ImportStep(_) => FeatureKind::Boolean,
         },
         Operation::Opaque(_) => FeatureKind::Extrude,
     }
@@ -872,6 +873,7 @@ pub fn default_label(op: &Operation) -> &'static str {
             KnownOperation::MirrorBody(_) => "Mirror",
             KnownOperation::Loft(_) => "Loft",
             KnownOperation::Sweep(_) => "Sweep",
+            KnownOperation::ImportStep(_) => "Import",
         },
         // A frozen unknown node keeps its opType as the label rather than
         // masquerading as an Extrude.

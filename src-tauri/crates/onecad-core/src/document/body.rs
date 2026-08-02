@@ -75,11 +75,19 @@ fn split_origin(body: BodyId, by: RecordId) -> Option<SplitOrigin> {
     }
 }
 
-/// The boolean-split origin of a body (SCHEMA §2 `body_<opId>:<k>`), persisted so the
+/// The ordinal-child origin of a body (SCHEMA §2 `body_<opId>:<k>`), persisted so the
 /// wire layer's split-id interner can be **repopulated on document open / checkpoint
 /// restore** — before any plan compiles a downstream op that references the child
 /// (which would otherwise render a bare derived uuid the worker never minted). Additive
-/// + skip-when-`None`, so a document with no splits serializes byte-identically.
+/// + skip-when-`None`, so a document with no ordinal children serializes byte-identically.
+///
+/// **Meaning: "ordinal child `k` of an N-body op"** — NOT "boolean split" specifically.
+/// A boolean split is merely the op that produces N bodies today; a multi-solid
+/// `ImportStep` (one STEP assembly ⇒ N solids) is the next one, and it uses this
+/// exact mechanism with no schema change. The ordinal domain is unbounded and
+/// carries no coupling to a `deleted` parent (WP-0 gate). Nothing here is
+/// boolean-specific: `op` is whichever record produced the bodies, `k` is the
+/// producer's deterministic output ordering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SplitOrigin {
@@ -104,9 +112,11 @@ pub struct BodyMeta {
     pub visible: bool,
     /// The op that first produced this body.
     pub created_by: RecordId,
-    /// The boolean-split origin (SCHEMA §2 `body_<opId>:<k>`), when this body was
-    /// minted as a split child. Persisted so the wire interner can be repopulated on
-    /// open/restore (see [`SplitOrigin`]). Absent (skipped) for a normal body ⇒ no
+    /// The ordinal-child origin (SCHEMA §2 `body_<opId>:<k>`), when this body was
+    /// minted as the `k`-th child of an N-body op — a boolean split today, a
+    /// multi-solid import next; see [`SplitOrigin`] for why the meaning is
+    /// deliberately producer-agnostic. Persisted so the wire interner can be
+    /// repopulated on open/restore. Absent (skipped) for a single-body op ⇒ no
     /// document.json shape change for existing snapshots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split_of: Option<SplitOrigin>,

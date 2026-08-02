@@ -521,6 +521,8 @@ impl DocumentSession {
         }
         // F2: fillet/chamfer `edges`/`edge_ids` must be in lockstep (all entry paths).
         validate_fillet_lockstep(&record.op)?;
+        // ImportStep params must name a real content-addressed blob (all entry paths).
+        validate_import_step(&record.op)?;
         // F8: re-derive the uniform input view for Known ops (self-healing — don't
         // trust caller-supplied `inputs`; mirrors `update_operation_params` and the
         // record deserialize path). An Opaque frozen node keeps its stored inputs.
@@ -597,6 +599,8 @@ impl DocumentSession {
         let type_changed = !same_op_type(&prior.op, &op);
         // F2: fillet/chamfer `edges`/`edge_ids` must be in lockstep (all entry paths).
         validate_fillet_lockstep(&op)?;
+        // ImportStep params must name a real content-addressed blob (all entry paths).
+        validate_import_step(&op)?;
         let mut nr = prior.clone();
         nr.op = op;
         // A sanctioned Fillet⇄Chamfer swap is the only path that can strand the
@@ -1332,6 +1336,23 @@ fn validate_fillet_lockstep(op: &Operation) -> Result<(), DomainError> {
         }
     }
     Ok(())
+}
+
+/// Validates an [`KnownOperation::ImportStep`] record's params (sha256 shape,
+/// unit scale, heal policy, codec/`brepFormat` agreement — see
+/// [`ImportStepParams::validate`](crate::document::record::ImportStepParams::validate)).
+/// Non-import and opaque ops are trivially valid.
+///
+/// Enforced HERE rather than at deserialize time, mirroring
+/// [`validate_fillet_lockstep`]: the session is the single writer, so a bad
+/// `sourceSha256` is rejected before it can reach `document.json` (where it would
+/// be interpolated into a container entry name), while an existing document
+/// authored by another build still opens and round-trips.
+fn validate_import_step(op: &Operation) -> Result<(), DomainError> {
+    let Operation::Known(KnownOperation::ImportStep(p)) = op else {
+        return Ok(());
+    };
+    p.validate().map_err(DomainError::Validation)
 }
 
 /// Whether `UpdateOperationParams` may rewrite `prior` into `next`.

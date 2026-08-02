@@ -107,7 +107,7 @@ A frame with no binary payload sets `binLen = 0` and omits `bin` (or sets `bin:
 | `sketchRevision` | JSON integer (`u64`) | Rust-owned sketch revision. |
 | `gestureId` | JSON integer (`u64`) | Rust-assigned drag-gesture id. |
 | `streamId` | JSON integer (`u64`) | Worker-assigned bulk-stream id, unique per connection. |
-| `BodyId` | JSON string | Opaque, globally unique (e.g. `"body_7"`). **Minting is split (D1):** a **NewBody** body is **worker-minted deterministic** `body_<opId>` (the `opId` is the Rust-minted op record id, so replay is stable); an op whose result is **N > 1 ordered bodies** (today: a boolean split; the rule is generic to any N-body op, e.g. a multi-solid import) mints `body_<opId>:<k>` with deterministic `k`-ordering, while an op producing exactly **one** new body always mints the plain `body_<opId>` form (mirror/pattern precedent). Rust **adopts** these ids from `planStep` `bodyEvents` at `AcceptPrepared` time, validating format (`body_` prefix + a known `opId` in the plan) and uniqueness, and **rejects** the prepared plan (`PROTOCOL_ERROR`, discard — never publish) on malformation/collision. All *other* body ids (loaded/imported bodies) stay Rust-minted. See [§7.2](#72-regen--executeplan). |
+| `BodyId` | JSON string | Opaque, globally unique (e.g. `"body_7"`). **Minting is split (D1):** a **NewBody** body is **worker-minted deterministic** `body_<opId>` (the `opId` is the Rust-minted op record id, so replay is stable); an op whose result is **N > 1 ordered bodies** (today: a boolean split; the rule is generic to any N-body op, e.g. a multi-solid import) mints `body_<opId>:<k>` with deterministic `k`-ordering, while an op producing exactly **one** new body always mints the plain `body_<opId>` form (mirror/pattern precedent). Rust **adopts** these ids from `planStep` `bodyEvents` at `AcceptPrepared` time, validating format (`body_` prefix + a known `opId` in the plan) and uniqueness, and **rejects** the prepared plan (`PROTOCOL_ERROR`, discard — never publish) on malformation/collision. All *other* body ids (bodies loaded from a saved document) stay Rust-minted; **imported** bodies (§7.3 `ImportStep`) are worker-minted ordinal children under the N-body rule above. See [§7.2](#72-regen--executeplan). |
 | `ElementId` | JSON string | Opaque, Rust-minted, **globally unique and DOES NOT embed BodyId** (e.g. `"el_00000000000004a1"`). Partition membership (which body an element belongs to) is a *mapping*, never encoded in the id. |
 | `TopoKey` | JSON string | **Snapshot-scoped** topology address: `"<kind>:<index>"`, kind ∈ `f` (face) / `e` (edge) / `v` (vertex) / `b` (body). Example `"f:22"`. Valid only within the `snapshotId` that produced it. NEW scheme (OneCAD-CPP used path-style ids; this protocol uses compact snapshot-scoped TopoKeys promoted on demand to `ElementId`). |
 | hash | JSON string, lowercase hex, no `0x` | 64-bit hash → 16 hex chars (e.g. `"cbf29ce484222325"`). SHA-256 → 64 hex chars. Applies to `expectedBaseHash`, `historyPrefixHash`, all signatures, `brepContentHash`, `contentHash`, `tolerancePolicyHash`, `solverPolicyHash`, `occtFingerprint`, chunk `sha256`. |
@@ -364,8 +364,8 @@ Worker → Rust:
     "solverPolicyVersion": 1,
     "capabilities": [
       "op.sketch", "op.extrude", "op.revolve", "op.fillet", "op.chamfer",
-      "op.boolean", "solver.planegcs", "tessellate.mesh1", "io.step",
-      "io.stl", "io.obj", "checkpoint.v1"
+      "op.boolean", "op.importStep", "solver.planegcs", "tessellate.mesh1",
+      "io.step", "io.step.import", "io.stl", "io.obj", "checkpoint.v1"
     ],
     "limits": { "chunkSize": 1048576, "initialBulkCredit": 8388608 }
   }
@@ -671,8 +671,9 @@ Each op in `ExecutePlan.ops` is:
 ```
 
 `opType` ∈ `Sketch` | `Extrude` | `Revolve` | `Fillet` | `Chamfer` | `Boolean`
-| `Shell` | `LinearPattern` | `CircularPattern` | `MirrorBody` (the M6a breadth
-ops extend the original vertical slice — see the [Changelog](#14-changelog)).
+| `Shell` | `LinearPattern` | `CircularPattern` | `MirrorBody` | `ImportStep`
+(the M6a breadth ops and the 2026-08-02 `ImportStep` extend the original vertical
+slice — see the [Changelog](#14-changelog)).
 `Loft` and `Sweep` remain **`UNSUPPORTED`** ([§8](#8-error-taxonomy)). Values keep
 OneCAD-CPP `operationTypeName` spelling (PascalCase).
 
@@ -1028,6 +1029,51 @@ from OneCAD-CPP `MirrorBodyParams` (flat `planePointX/Y/Z` + `planeNormalX/Y/Z` 
   (`gp_Trsf::SetMirror(gp_Ax2(planePoint, planeNormal))`).
 - `fuseWithOriginal` (default `false`): `true` ⇒ source + mirror image FUSED into
   one solid; `false` ⇒ the mirror image alone. Either way ONE new body
+
+**ImportStep** (`op.importStep`) — materialize the solids of a STEP file as
+document bodies, as a **plan step** (NOT a session verb: an import must live on
+the timeline so full-replay regen reproduces it, be fenced like every op, and
+advance `historyPrefixHash`). Added 2026-08-02 (WP-A).
+
+```json
+// inputs: [] — an import depends on nothing
+// params (hashed — no bytes, no paths)
+{ "sourceSha256": "ab12…64 hex chars…", "sourceCodec": "step",
+  "sourceName": "bracket.step", "healPolicy": "v1", "unitScale": 1.0,
+  "brepFormat": null }
+// wire-only, NON-hashed, injected by Rust at lowering time (§7.8 temp-path rule):
+{ "path": "/tmp/onecad/import_ab12.step" }
+```
+
+- `sourceSha256` — content address of the authoritative source bytes, stored in
+  the document container's `imports/` section; Rust materializes them to a temp
+  `path` for the worker. The hash covers the params, so a re-import (new file
+  version) is an ordinary `updateOperationParams` that dirties the step.
+- `sourceCodec` ∈ `"step"` | `"brep"` — which byte form the worker replays.
+  `step` runs the full pinned reader pipeline below; `brep` deserializes
+  BinTools bytes previously produced by that pipeline (`brepFormat` pins the
+  BinTools format version; REQUIRED iff codec is `brep`).
+- `healPolicy` (`"v1"`) versions the fixed, unconditional pipeline: pinned
+  `Interface_Static` knobs (`xstep.cascade.unit=MM`, `read.precision.mode=0`,
+  `read.step.product.mode=1`; all knobs saved + restored around the read) →
+  `STEPControl_Reader` → `TransferRoots` → sew → `ShapeFix_Shape` → solid
+  promotion → deterministic solid ordering. The transform is a pure function of
+  the source bytes, so replay is stable; a future `v2` never silently re-heals
+  existing documents.
+- `unitScale` (default `1.0`) — explicit post-transfer uniform scale escape
+  hatch for files with missing/ambiguous `length_unit` (the reader itself always
+  converts to mm; a conversion is reported as a `STEP_UNIT_CONVERTED`
+  diagnostic).
+- **Body minting**: N resulting solids mint ordered `created` children under the
+  §2/§7.2 rules — `body_<opId>:<k>` for N > 1, plain `body_<opId>` for exactly
+  one — with **no** `deleted` parent (creation ex nihilo). Bodies SHOULD be
+  named from STEP product names where recoverable (delivered via the step's
+  diagnostics/metadata, not the id).
+- **Failure is recoverable**: a malformed/unreadable file is `OP_FAILED` on the
+  step (publish ≤ m−1, Invariant 6), NEVER `PROTOCOL_ERROR` — a user data
+  problem must not tear down the worker. Diagnostics vocabulary: `STEP_SEWN`,
+  `STEP_HEALED`, `STEP_UNIT_CONVERTED`, `STEP_NO_SOLIDS`, `STEP_ROOT_SKIPPED`,
+  `STEP_INVALID_SHAPE`, `STEP_DUPLICATE_SOLIDS`.
   `body_<opId>` (NewBody lineage; source preserved). Empty `elementMapDelta`.
 
 ### 7.4 Sketch solver lane
@@ -1573,13 +1619,22 @@ drift.
 Paths are **Rust-provided temp paths** (the webview has zero fs capability; Rust
 does all IO and handles hostile files in the isolated worker).
 
-#### ImportStep
+#### InspectStep
+
+Read-only preflight probe — parses a STEP file WITHOUT mutating any session
+state (addressed like the §7.5 identity verbs: no fence, no scratch, no
+publish). The actual import is the §7.3 `ImportStep` **op**, executed inside
+`ExecutePlan` like every other op. (The former `ImportStep` *verb* specified
+here was removed 2026-08-02 before any implementation existed — a
+session-mutating import verb is invisible to full-replay regen, which would
+delete its bodies on the next regen; see the changelog.)
 
 ```json
 // req.args
 { "path": "/tmp/onecad/import_ab12.step" }
 // result
-{ "bodyIds": ["body_10","body_11"], "snapshotId": 5016,
+{ "solidCount": 2, "sourceUnit": "INCH", "bbox": { "min": [0,0,0], "max": [50.8,25.4,12.7] },
+  "productNames": ["Bracket", "Pin"],
   "diagnostics": [ { "severity": "warning", "code": "STEP_HEALED", "message": "…" } ] }
 ```
 
@@ -1820,6 +1875,21 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-02 — §7.3 NEW op `ImportStep`; §7.8 `ImportStep` verb REMOVED,
+  replaced by read-only `InspectStep`** (WP-A STEP-IMPORT; cross-track sign-off
+  recorded 2026-08-02). The import is a **timeline op** executed inside
+  `ExecutePlan` — the never-implemented §7.8 verb shape mutated the session
+  outside a plan (no fence, no `historyPrefixHash` advance, invisible to
+  full-replay regen, which would delete the imported bodies on the next regen)
+  and could not stand. Op params are content-addressed (`sourceSha256` into the
+  container's `imports/` section) + a versioned heal policy, with the byte
+  `path` injected wire-only and non-hashed under the §7.8 temp-path rule.
+  Body minting follows the widened §2 N-body ordinal rule with no `deleted`
+  parent. Capabilities gain `op.importStep` + `io.step.import`. The §7.8 →
+  `InspectStep` swap is the one **subtractive** delta and removes a verb no
+  layer ever implemented or fixtured, so no shipped behavior moves and
+  `protocol/fixtures/` is untouched — **no fixture bump**.
 
 - **2026-08-02 — §2 + §7.2 `body_<opId>:<k>` widened from "boolean split" to
   "ordered children of any N-body op"** (WP-0 identity prerequisite; cross-track
