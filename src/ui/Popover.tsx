@@ -85,14 +85,14 @@ export function Popover({
       role="dialog"
       style={{ position: "fixed", left: pos.left, top: pos.top, width }}
       className={cn(
-        "z-[100] rounded-md border border-border bg-white font-ui shadow-popover",
+        "z-[100] rounded-md border border-border bg-surface font-ui shadow-popover",
         className,
       )}
     >
       {caret && (
         <span
           aria-hidden="true"
-          className="absolute -right-[6px] top-4 h-2.5 w-2.5 rotate-45 border-r border-t border-border bg-white"
+          className="absolute -right-[6px] top-4 h-2.5 w-2.5 rotate-45 border-r border-t border-border bg-surface"
         />
       )}
       {children}

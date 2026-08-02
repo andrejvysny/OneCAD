@@ -6,8 +6,9 @@ type ProjectCardProps = {
 };
 
 // Faint 45° hatch that fills the empty preview well (prototype 1a, line 76).
+// Token-tinted so it inverts with the theme (see VIEWPORT_HATCH).
 const PREVIEW_HATCH =
-  "repeating-linear-gradient(45deg, rgba(0,0,0,0.025) 0 10px, transparent 10px 20px)";
+  "repeating-linear-gradient(45deg, var(--color-hatch) 0 10px, transparent 10px 20px)";
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString("en-US", {
@@ -27,7 +28,7 @@ export function ProjectCard({ project, onOpen }: ProjectCardProps) {
       type="button"
       title={project.path}
       onClick={() => onOpen(project.path)}
-      className="block w-full cursor-pointer overflow-hidden rounded-lg border border-border bg-white text-left transition-[box-shadow,border-color] duration-150 hover:border-card-hover-border hover:shadow-card-hover"
+      className="block w-full cursor-pointer overflow-hidden rounded-lg border border-border bg-surface text-left transition-[box-shadow,border-color] duration-150 hover:border-card-hover-border hover:shadow-card-hover"
     >
       <div
         className="flex h-24 items-center justify-center border-b border-border-subtle bg-well"

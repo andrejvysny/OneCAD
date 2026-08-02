@@ -52,12 +52,12 @@ export function UnsavedChangesDialog() {
   if (!intent) return null;
 
   return createPortal(
-    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40">
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-scrim">
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="unsaved-changes-title"
-        className="w-[380px] rounded-md border border-border bg-white p-5 font-ui shadow-popover"
+        className="w-[380px] rounded-md border border-border bg-surface p-5 font-ui shadow-popover"
       >
         <div id="unsaved-changes-title" className="text-[14px] font-semibold text-ink-2">
           Save changes to &ldquo;{title || "Untitled"}&rdquo;?

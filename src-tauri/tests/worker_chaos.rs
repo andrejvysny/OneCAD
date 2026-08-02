@@ -446,6 +446,13 @@ async fn poisoned_plan_fails_fast_and_a_different_plan_still_runs() {
         matches!(&fast, Outcome::EngineFailed(EngineError::Crashed { message }) if message.contains("circuit")),
         "poisoned plan fails fast (circuit), got {fast:?}"
     );
+    // DEV-OBSERVABILITY: an open circuit must say WHY it opened. The poison entry
+    // keeps the last crash message and the fail-fast error carries it, so a
+    // postmortem does not have to correlate back to the crash by hand.
+    assert!(
+        matches!(&fast, Outcome::EngineFailed(EngineError::Crashed { message }) if message.contains("last crash:")),
+        "the fail-fast error carries the last crash message, got {fast:?}"
+    );
     assert_ne!(
         wm.state(),
         WorkerState::Failed,

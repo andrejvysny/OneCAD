@@ -12,6 +12,7 @@
  * after a document closes.
  */
 import * as THREE from "three";
+import { logError } from "@/debug/log";
 import type { BodyMeshView } from "./parseMeshPayload";
 import { TopoIndex } from "./faceRangeIndex";
 
@@ -172,7 +173,7 @@ export function flushDisposals(): void {
 /**
  * Dispose everything and clear the registry (document close). Dev leak tripwire:
  * after this the registry MUST be empty and no live geometry may remain — a
- * violation logs console.error and bumps {@link leakTripwireCount}.
+ * violation logs an `err`-level `vp` event and bumps {@link leakTripwireCount}.
  */
 export function disposeAll(): void {
   for (const e of registry.values()) e.dispose();
@@ -180,10 +181,10 @@ export function disposeAll(): void {
   flushDisposals();
   if (registrySize() !== 0 || liveGeometryCount !== 0) {
     leakTripwireCount++;
-    // eslint-disable-next-line no-console
-    console.error(
-      `[meshRegistry] leak tripwire: size=${registrySize()} liveGeometries=${liveGeometryCount} after disposeAll`,
-    );
+    logError("vp", "meshRegistry leak tripwire after disposeAll", {
+      size: registrySize(),
+      liveGeometries: liveGeometryCount,
+    });
   }
 }
 

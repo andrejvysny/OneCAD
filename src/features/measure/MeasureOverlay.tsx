@@ -89,7 +89,7 @@ function MeasureChip({
   }, [engine, id, anchorKey, host]);
 
   return createPortal(
-    <div className="pointer-events-none inline-flex flex-col items-start gap-0.5 rounded-md border border-border bg-white px-2 py-1 font-mono text-[11.5px] text-ink-2 shadow-panel">
+    <div className="pointer-events-none inline-flex flex-col items-start gap-0.5 rounded-md border border-border bg-surface px-2 py-1 font-mono text-[11.5px] text-ink-2 shadow-panel">
       {children}
     </div>,
     host,

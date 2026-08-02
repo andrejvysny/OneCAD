@@ -98,7 +98,7 @@ export function ConstraintBadgeLayer() {
               <span
                 title={b.kind}
                 style={staggerStyle}
-                className={`inline-flex h-4 min-w-4 -translate-y-3.5 translate-x-2 items-center justify-center rounded-sm border bg-white px-1 text-[10px] font-semibold leading-none shadow-ctrl ${
+                className={`inline-flex h-4 min-w-4 -translate-y-3.5 translate-x-2 items-center justify-center rounded-sm border bg-surface px-1 text-[10px] font-semibold leading-none shadow-ctrl ${
                   isConflicting ? "border-traffic-close text-traffic-close" : "border-border text-accent"
                 }`}
               >

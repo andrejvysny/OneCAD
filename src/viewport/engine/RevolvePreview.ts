@@ -38,6 +38,8 @@ export class RevolvePreview {
   private readonly candidates: THREE.LineSegments;
   private readonly hoverLine: THREE.LineSegments;
   private mesh: THREE.Mesh | null = null;
+  /** Last tint applied, so a theme change can re-derive instead of resetting. */
+  private cut = false;
   private readonly _basis = new THREE.Matrix4();
 
   constructor(private readonly deps: RevolvePreviewDeps) {
@@ -119,8 +121,20 @@ export class RevolvePreview {
 
   /** Recolor the lathe shell: destructive (Cut boolean) vs the normal accent (Wave 2). */
   setTint(cut: boolean): void {
+    this.cut = cut;
     this.meshMat.color.copy(cut ? palette.destructive() : palette.hoverAccent());
     this.deps.invalidate();
+  }
+
+  /**
+   * Theme change: re-read all three materials, preserving the shell's tint.
+   * `setTint` only ever touches `meshMat`, so the candidate and hover line
+   * materials have no other path back to the palette.
+   */
+  refreshColors(): void {
+    this.meshMat.color.copy(this.cut ? palette.destructive() : palette.hoverAccent());
+    this.candMat.color.copy(palette.referenceNeutral());
+    this.hoverMat.color.copy(palette.selectedEdge());
   }
 
   clearLathe(): void {

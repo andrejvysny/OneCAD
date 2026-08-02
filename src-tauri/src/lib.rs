@@ -21,6 +21,7 @@ pub mod dto;
 pub mod error;
 pub mod events;
 pub mod export;
+pub mod logging;
 pub mod mesh_cache;
 pub mod recents;
 pub mod state;
@@ -167,10 +168,11 @@ fn make_regen_driver(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Logs go to stderr; stdout is reserved for worker OCW1 frames downstream.
-    let _ = tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .try_init();
+    // Logs go to stderr + `logs/dev.jsonl`; stdout is reserved for worker OCW1
+    // frames downstream. `logging::init` is called from HERE ONLY — no test or CLI
+    // may enable the file lane (see the `logging` module docs).
+    let mut log_guard = logging::init();
+    logging::install_panic_hook();
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -271,11 +273,20 @@ pub fn run() {
             api::save_file_dialog,
             api::confirm_exit,
             api::cancel_exit,
+            api::log_event,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    app.run(|handle, event| {
+    app.run(move |handle, event| {
+        // Normal termination: drop the non-blocking JSONL writer's guard so the
+        // buffered tail is flushed before the process goes away. A SIGINT (Ctrl-C on
+        // `tauri dev`) never reaches this arm — at most one buffer of `dev.jsonl`
+        // tail is lost there, which is why the stderr layer stays unbuffered.
+        // Matched FIRST and by a binding-free pattern, so `event` is not moved.
+        if let RunEvent::Exit = event {
+            drop(log_guard.take());
+        }
         // App-level exit request (⌘Q, or the OS default "quit after last window
         // closes"): `code` is `None` for a user-triggered request and `Some(_)`
         // for a PROGRAMMATIC one (`AppHandle::exit` / `restart`). `api::confirm_exit`

@@ -55,7 +55,7 @@ export function ConstraintContextChips() {
       className="pointer-events-none absolute inset-x-0 bottom-[34px] top-0 z-[4] overflow-hidden"
     >
       <div ref={hostRef}>
-        <div className="pointer-events-auto inline-flex -translate-x-1/2 -translate-y-9 items-center gap-0.5 rounded-md border border-border bg-white p-0.5 shadow-panel">
+        <div className="pointer-events-auto inline-flex -translate-x-1/2 -translate-y-9 items-center gap-0.5 rounded-md border border-border bg-surface p-0.5 shadow-panel">
           {applicables.map((a, i) => {
             const { glyph, label } = CONSTRAINT_PRESENTATION[a.type];
             return (

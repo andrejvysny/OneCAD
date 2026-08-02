@@ -45,6 +45,7 @@ import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
 import { buildBodyObjects, getEntry, remove as removeMesh, swap as swapMesh } from "@/viewport/mesh/meshRegistry";
 import { toolStore } from "@/stores/toolStore";
 import { trace, traceWarn } from "@/debug/trace";
+import { logDebug } from "@/debug/log";
 import { viewportStore, type ViewportState } from "@/stores/viewportStore";
 import { documentStore, nextDatumName, type SketchMeta } from "@/stores/documentStore";
 import { selectionStore, type EntityRef } from "@/stores/selectionStore";
@@ -52,7 +53,15 @@ import { toolChipStore } from "@/stores/toolChipStore";
 import { profileFromRegion, profileBounds, type PrismProfile } from "@/tools/preview/prismPreview";
 import { regionAtPoint } from "@/tools/preview/regionPick";
 import { axisDepthFromRay, normalize, type Vec3 } from "@/tools/preview/depthProjection";
-import { radiusFromDrag, radiusFromValueText } from "@/tools/preview/filletRadius";
+import {
+  radiusFromDrag,
+  radiusFromValueText,
+  screenDragAxis,
+  signedValueFromDrag,
+  SCREEN_UP_AXIS,
+  type ScreenAxis,
+} from "@/tools/preview/filletRadius";
+import { averageOutward, edgeOutward } from "@/tools/preview/edgeDirection";
 import { axisSplitsRegion, type LatheAxis } from "@/tools/preview/lathePreview";
 import { angleFromDrag, snapRevolveAngle, clampAngle, angleFromValueText } from "@/tools/preview/revolveAngle";
 import { thicknessFromValueText } from "@/tools/preview/shellThickness";
@@ -76,22 +85,22 @@ import {
 import { PreviewThrottle } from "@/tools/preview/previewThrottle";
 import {
   booleanInit,
-  booleanStep,
+  booleanStep as booleanStepRaw,
   extrudeInit,
-  extrudeStep,
+  extrudeStep as extrudeStepRaw,
   type ExtrudeEndCondition,
   filletInit,
-  filletStep,
+  filletStep as filletStepRaw,
   revolveInit,
-  revolveStep,
+  revolveStep as revolveStepRaw,
   shellInit,
-  shellStep,
+  shellStep as shellStepRaw,
   linearPatternInit,
-  linearPatternStep,
+  linearPatternStep as linearPatternStepRaw,
   circularPatternInit,
-  circularPatternStep,
+  circularPatternStep as circularPatternStepRaw,
   mirrorInit,
-  mirrorStep,
+  mirrorStep as mirrorStepRaw,
   regionSelectInit,
   regionSelectStep,
   DEFAULT_EXTRUDE_DEPTH,
@@ -102,6 +111,7 @@ import {
   type BooleanFsm,
   type BooleanMode,
   type BooleanSeed,
+  type EdgeOpKind,
   type ExtrudeFsm,
   type FilletFsm,
   type RevolveFsm,
@@ -113,7 +123,21 @@ import {
   type MirrorPlane,
   type RegionSelectState,
 } from "./modelToolMachine";
+import { withPhaseLog } from "./fsmLog";
 import type { FeatureBooleanMode } from "@/ipc/types";
+
+// ── Observability wrapping (DEV-OBSERVABILITY Wave F) ────────────────────────
+// The eight phase-bearing reducers are wrapped ONCE here, so every call site
+// below keeps its original name and every phase transition lands one `fsm`
+// debug event. `regionSelectStep` has no `phase` and stays unwrapped.
+const extrudeStep = withPhaseLog("extrude", extrudeStepRaw);
+const filletStep = withPhaseLog("edgeOp", filletStepRaw);
+const revolveStep = withPhaseLog("revolve", revolveStepRaw);
+const booleanStep = withPhaseLog("boolean", booleanStepRaw);
+const shellStep = withPhaseLog("shell", shellStepRaw);
+const linearPatternStep = withPhaseLog("linearPattern", linearPatternStepRaw);
+const circularPatternStep = withPhaseLog("circularPattern", circularPatternStepRaw);
+const mirrorStep = withPhaseLog("mirror", mirrorStepRaw);
 
 const DRAG_PX = 4;
 
@@ -129,6 +153,13 @@ const EDGE_OP_TRAILING_MS = 160;
 const EDGE_OP_DRAG_TRAILING_MS = 80;
 /** Shell hollows the whole solid — the dearest of the three; one floor, no drag tier. */
 const SHELL_TRAILING_MS = 200;
+
+/**
+ * How many armed edges contribute to the drag-direction mean. The mean only has
+ * to orient ONE screen axis, so a long tangent-chain selection must not walk
+ * every mesh entry to compute it.
+ */
+const EDGE_OP_OUTWARD_SAMPLE = 8;
 
 /** Seed offset for a fresh datum plane (mm) — matches DEFAULT_EXTRUDE_DEPTH's role. */
 const DEFAULT_DATUM_OFFSET = 10;
@@ -254,12 +285,18 @@ export class ModelToolController {
   private extrude: ExtrudeFsm = extrudeInit();
   private fillet: FilletFsm = filletInit();
   /**
-   * Which edge op the shared fillet lane is currently authoring. Fillet and
-   * Chamfer are the SAME gesture over the same `FilletChamferParams` (SCHEMA
-   * §7.3), distinguished only by `opType`/`mode` at the wire — so one lane with a
-   * discriminator, not two copies of the arm/drag/commit path.
+   * Which edge op the shared lane is authoring. Fillet and Chamfer are the SAME
+   * gesture over the same `FilletChamferParams` (SCHEMA §7.3), distinguished only
+   * by `opType`/`mode` at the wire — so one lane with a discriminator, not two
+   * copies of the arm/drag/commit path.
+   *
+   * The FSM OWNS it (FILLET-CHAMFER-UNIFY): the drag direction can re-type the op
+   * mid-gesture, and a second copy of that decision here would be a second source
+   * of truth for what the ✓ commits.
    */
-  private edgeOpKind: "Fillet" | "Chamfer" = "Fillet";
+  private get edgeOpKind(): EdgeOpKind {
+    return this.fillet.edgeOp;
+  }
   private boolean: BooleanFsm = booleanInit();
   private revolve: RevolveFsm = revolveInit();
   private shell: ShellFsm = shellInit();
@@ -336,10 +373,31 @@ export class ModelToolController {
   private clickAwayDownX = 0;
   private clickAwayDownY = 0;
 
-  // Fillet context.
+  // Edge-op (fillet / chamfer) context.
   private filletEdges: EntityRef[] = [];
+  private filletDownX = 0;
   private filletDownY = 0;
-  private filletStartRadius = DEFAULT_FILLET_RADIUS;
+  /**
+   * SIGNED value at the grab (negated for a Chamfer). The gesture lives on ONE
+   * number line through zero — positive is Fillet, negative is Chamfer — so a
+   * drag that crosses back over zero re-types continuously instead of jumping.
+   */
+  private filletStartValue = DEFAULT_FILLET_RADIUS;
+  /** Screen direction one world unit of "away from the body" points, resolved per grab. */
+  private filletAxis: ScreenAxis = SCREEN_UP_AXIS;
+  /** World outward direction for the armed edges (null = none honest enough to use). */
+  private filletOutward: Vec3 | null = null;
+  /** World point the drag axis is projected from (mean of the armed edge midpoints). */
+  private filletAnchor: Vec3 = [0, 0, 0];
+  /** Edge tangent, only for a SINGLE-edge arm (removed from the screen axis so a
+   *  drag ALONG the edge is inert). Meaningless to average across edges. */
+  private filletTangent: Vec3 | null = null;
+  /**
+   * Which tier produced {@link filletOutward}. `auto` type-flipping is armed ONLY
+   * on "bisector": the bbox proxy points INTO material on a concave edge, so
+   * trusting it there would silently author the wrong op.
+   */
+  private filletAxisSource: "bisector" | "bbox" | "screen" = "screen";
   private filletEditFeatureId: string | undefined;
   /** Stored params of the fillet being re-edited (radius-only edit preserves edges). */
   private filletStoredParams: Record<string, unknown> | undefined;
@@ -396,6 +454,9 @@ export class ModelToolController {
   /** Bounded-wait timers for the commit body-load reconcile (finding 8). */
   private commitBodyTimer: ReturnType<typeof setTimeout> | null = null;
   private commitRevolveBodyTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Last phase vector logged by {@link updateDebug} — dedup, see there. */
+  private lastPhaseSig = "";
 
   // Pointer bookkeeping.
   private downX = 0;
@@ -582,8 +643,11 @@ export class ModelToolController {
     if (tool === "datum") this.startDatum();
     else if (tool === "extrude") this.armExtrudeFromSelection();
     else if (tool === "revolve") this.armRevolveFromSelection();
-    else if (tool === "fillet") void this.armEdgeOpFromSelection("Fillet");
-    else if (tool === "chamfer") void this.armEdgeOpFromSelection("Chamfer");
+    // The unified edge tool seeds Fillet and lets the DRAG DIRECTION re-type it
+    // (where the direction is honest — `armEdgeOpFromSelection` downgrades `auto`
+    // off the bisector tier). The `chamfer` tool id is dead (FILLET-CHAMFER-UNIFY
+    // W2) — Chamfer is reached only via drag-into or the chip segment now.
+    else if (tool === "fillet") void this.armEdgeOpFromSelection("Fillet", { auto: true });
     else if (tool === "boolean") this.startBooleanFromSelection();
     else if (tool === "shell") void this.armShellFromSelection();
     else if (tool === "linearPattern") this.armLinearFromSelection();
@@ -2160,31 +2224,206 @@ export class ModelToolController {
     this.updateDebug();
   }
 
-  private async armEdgeOpFromSelection(kind: "Fillet" | "Chamfer"): Promise<void> {
+  private async armEdgeOpFromSelection(
+    kind: EdgeOpKind,
+    opts?: { auto?: boolean },
+  ): Promise<void> {
     const edges = selectionStore.getState().selected.filter((r) => r.kind === "edge");
     if (edges.length === 0) {
       viewportStore.getState().setStatusHint(`Select edges, then ${kind}`, { sticky: true });
       return;
     }
     const gen = ++this.armGen;
-    this.edgeOpKind = kind;
     this.filletEdges = edges;
     this.filletEditFeatureId = undefined;
+    this.computeEdgeOpOutward();
+    // Direction-driven typing is armed ONLY on the bisector tier. The bbox proxy is
+    // convex-only — on a pocket edge it points INTO material, so an automatic flip
+    // there would author the op the user did not ask for. Off that tier the chip
+    // segments are the type control and the drag only sizes.
+    const auto = opts?.auto === true && this.filletAxisSource === "bisector";
     const size = kind === "Chamfer" ? DEFAULT_CHAMFER_DISTANCE : DEFAULT_FILLET_RADIUS;
-    this.fillet = filletStep(filletInit(), { kind: "arm", edgeCount: edges.length, radius: size }).state;
+    this.fillet = filletStep(filletInit(), {
+      kind: "arm",
+      edgeCount: edges.length,
+      radius: size,
+      edgeOp: kind,
+      auto,
+    }).state;
     toolStore.setState({ phase: "armed" });
     this.deps.engine.setOrbitSuppressed(true); // modal: drag adjusts the size, not orbit
-    const noun = kind === "Chamfer" ? "distance" : "radius";
-    const hint = `${kind} ${edges.length} edge${edges.length > 1 ? "s" : ""} — drag or type ${noun} · Enter or ✓ to apply`;
+    const hint = this.edgeOpArmHint();
     this.previewArmHint = hint;
     viewportStore.getState().setStatusHint(hint, { sticky: true });
     const anchor = edges[0].anchor?.worldPoint ?? [0, 0, 0];
-    toolChipStore.getState().showFillet(size, anchor, (v) => this.onFilletChip(v), {
-      onConfirm: () => void this.commitFillet(),
-      onCancel: () => toolStore.getState().setTool("select"),
-    });
+    toolChipStore.getState().showFillet(
+      size,
+      anchor,
+      (v) => this.onFilletChip(v),
+      {
+        onConfirm: () => void this.commitFillet(),
+        onCancel: () => toolStore.getState().setTool("select"),
+      },
+      {
+        edgeOp: this.fillet.edgeOp,
+        showEdgeOpSegments: true,
+        onEdgeOp: (k) => this.onEdgeOpChip(k),
+      },
+    );
     this.updateDebug();
     await this.openEdgeOpPreview(gen);
+  }
+
+  /** The armed edge op's status line, naming the CURRENT type (a drag flip or a
+   *  segment pick republishes it). */
+  private edgeOpArmHint(): string {
+    const kind = this.fillet.edgeOp;
+    const noun = kind === "Chamfer" ? "distance" : "radius";
+    // A RE-EDIT arms with NO picks (`filletEdges` is empty by construction — the
+    // edges live in the stored params), so the pick-count wording would read
+    // "0 edges". One hint source so a type flip republishes the right sentence.
+    if (this.filletEditFeatureId) {
+      return `Edit ${kind.toLowerCase()} ${noun} — drag or type, Enter to apply`;
+    }
+    const n = this.filletEdges.length;
+    return `${kind} ${n} edge${n > 1 ? "s" : ""} — drag or type ${noun} · Enter or ✓ to apply`;
+  }
+
+  /**
+   * Resolve the world "away from the body" direction for the armed edges — ONCE,
+   * at arm time.
+   *
+   * Deliberately NOT lazy: `MeshEntry`s are double-buffered on every mesh swap
+   * (`meshRegistry.swap`), so a mid-drag lookup could read an entry whose edge
+   * ordinals no longer mean what the user picked. The arm is already dropped on
+   * any document change (`onDocumentRevisionChanged`), which is exactly the event
+   * that could invalidate this.
+   *
+   * At most {@link EDGE_OP_OUTWARD_SAMPLE} edges contribute: the mean only has to
+   * be good enough to orient one drag axis, and a 200-edge chain selection must
+   * not walk every mesh. A mean the tier math refuses (`averageOutward` null —
+   * edges facing substantially different ways) leaves NO direction rather than a
+   * fabricated one.
+   */
+  private computeEdgeOpOutward(): void {
+    this.filletOutward = null;
+    this.filletTangent = null;
+    this.filletAnchor = this.filletEdges[0]?.anchor?.worldPoint ?? [0, 0, 0];
+    this.filletAxisSource = "screen";
+
+    const dirs: Vec3[] = [];
+    const mids: Vec3[] = [];
+    let tangent: Vec3 | null = null;
+    // Every contributing edge must have resolved via the bisector for the arm to
+    // count as bisector-tier — one bbox fallback in the mean poisons the sign.
+    let allBisector = true;
+    for (const ref of this.filletEdges.slice(0, EDGE_OP_OUTWARD_SAMPLE)) {
+      const entry = ref.bodyId ? getEntry(ref.bodyId) : undefined;
+      const index = entry?.edgeIndex;
+      if (!entry || !index) {
+        allBisector = false;
+        continue;
+      }
+      const ord = index.ordinalForId(ref.topoKey ?? ref.id);
+      if (ord < 0) {
+        allBisector = false;
+        continue;
+      }
+      const res = edgeOutward(entry.view, ord);
+      if (!res) {
+        allBisector = false;
+        continue;
+      }
+      if (res.source !== "bisector") allBisector = false;
+      dirs.push(res.outward);
+      mids.push(res.mid);
+      tangent = res.tangent;
+    }
+    if (dirs.length === 0) return;
+    const mean = averageOutward(dirs);
+    if (!mean) return;
+    this.filletOutward = mean;
+    this.filletAnchor = [
+      mids.reduce((a, m) => a + m[0], 0) / mids.length,
+      mids.reduce((a, m) => a + m[1], 0) / mids.length,
+      mids.reduce((a, m) => a + m[2], 0) / mids.length,
+    ];
+    // A tangent is only meaningful for ONE edge; averaging two tangents produces a
+    // direction neither edge has, and subtracting it would tilt the axis wrongly.
+    this.filletTangent = dirs.length === 1 ? tangent : null;
+    this.filletAxisSource = allBisector ? "bisector" : "bbox";
+  }
+
+  /**
+   * The screen axis a value drag is measured along, resolved PER GRAB (the camera
+   * may have orbited since the arm). Finite difference rather than a transformed
+   * vector: one projection of the anchor and one of a point a few pixels' worth of
+   * world along `outward` capture perspective foreshortening exactly.
+   *
+   * Falls back to the screen convention (up grows) whenever there is nothing
+   * honest to project — no outward direction, an engine without `projectPoint`
+   * (test mocks), a point behind the camera, or a collapsed projected difference
+   * (a head-on edge, which `screenDragAxis` refuses rather than normalizing noise).
+   */
+  private edgeOpScreenAxis(): ScreenAxis {
+    const outward = this.filletOutward;
+    if (!outward) return SCREEN_UP_AXIS;
+    const engine = this.engine as Partial<ViewportEngine>;
+    if (typeof engine.projectPoint !== "function") return SCREEN_UP_AXIS;
+    const project = engine.projectPoint.bind(this.engine);
+    const step = 10 * this.engine.planePixelWorld();
+    const a = this.filletAnchor;
+    const along = (d: Vec3): Vec3 => [a[0] + step * d[0], a[1] + step * d[1], a[2] + step * d[2]];
+    const pMid = project(a);
+    const pOut = project(along(outward));
+    if (!pMid || !pOut) return SCREEN_UP_AXIS;
+    const pTan = this.filletTangent ? project(along(this.filletTangent)) : null;
+    return screenDragAxis(pMid, pOut, pTan ?? undefined) ?? SCREEN_UP_AXIS;
+  }
+
+  /**
+   * Commit a Fillet↔Chamfer change — the ONE place a type flip becomes real,
+   * whether the drag direction or a chip segment caused it.
+   *
+   * `beginPreview` FREEZES the draft's `opType` (`localSolver.ts:495-508`; the
+   * per-opType builders in `previewOps.ts` are chosen there), so a type change is
+   * a session close + REOPEN, never a params patch. `armGen` is bumped BEFORE the
+   * close: two hysteresis crossings inside one in-flight `beginPreview` would
+   * otherwise both pass the gen fence, installing a stale-kind session and leaking
+   * the other.
+   */
+  private applyEdgeOpKindChange(): void {
+    toolChipStore.getState().setEdgeOp(this.fillet.edgeOp);
+    const hint = this.edgeOpArmHint();
+    this.previewArmHint = hint;
+    viewportStore.getState().setStatusHint(hint, { sticky: true });
+    const gen = ++this.armGen;
+    const wasDragging = this.dragging === "fillet";
+    this.closePreviewSessions();
+    // A RE-EDIT never opens a preview: PreviewOp runs against the CURRENT head, so
+    // previewing an existing feature double-applies it (the rule `armShell` states
+    // for its own re-edit). The flip there is chip + record only.
+    if (!this.filletEditFeatureId) {
+      void this.openEdgeOpPreview(gen).then(() => {
+        // The reopen re-raises the ARMED trailing floor; a flip DURING a drag has to
+        // get the drag floor back or the value stops tracking the pointer.
+        if (wasDragging && this.dragging === "fillet") {
+          this.throttle.setTrailingMs(EDGE_OP_DRAG_TRAILING_MS);
+        }
+      });
+    }
+    this.updateDebug();
+  }
+
+  /** A [Fillet|Chamfer] segment was clicked: lock the type for the session. */
+  private onEdgeOpChip(edgeOp: EdgeOpKind): void {
+    // Idempotent — but only once the type is already LOCKED. Re-picking the active
+    // segment while the drag still owns the type is the gesture that kills `auto`,
+    // so it must fall through.
+    if (edgeOp === this.fillet.edgeOp && !this.fillet.auto) return;
+    this.fillet = filletStep(this.fillet, { kind: "setEdgeOp", edgeOp }).state;
+    toolChipStore.getState().setValue(this.fillet.radius); // a pristine arm reseeds
+    this.applyEdgeOpKindChange();
   }
 
   /**
@@ -2985,8 +3224,13 @@ export class ModelToolController {
       // The chip lives inside the container's overlay, so a press ON the chip must
       // NOT be swallowed as a drag: excluding it is what makes the ✓ clickable.
       this.dragging = "fillet";
+      this.filletDownX = e.clientX;
       this.filletDownY = e.clientY;
-      this.filletStartRadius = this.fillet.radius;
+      // Signed continuity: a Chamfer's size lives on the NEGATIVE half of the same
+      // number line, so a drag that reverses past zero re-types instead of jumping.
+      this.filletStartValue =
+        this.fillet.edgeOp === "Chamfer" ? -this.fillet.radius : this.fillet.radius;
+      this.filletAxis = this.edgeOpScreenAxis(); // per grab — the camera may have orbited
       this.fillet = filletStep(this.fillet, { kind: "grabEdge" }).state;
       toolStore.setState({ phase: "dragging" });
       this.throttle.setTrailingMs(EDGE_OP_DRAG_TRAILING_MS); // live while the pointer owns it
@@ -3042,11 +3286,25 @@ export class ModelToolController {
       this.sendPreview();
       this.updateDebug(); // publish live phase ("dragging") + depth to the debug surface
     } else if (this.dragging === "fillet") {
-      const dy = this.filletDownY - e.clientY; // up-drag grows the radius
-      const radius = radiusFromDrag(this.filletStartRadius, dy, { worldPerPx: this.engine.planePixelWorld() });
-      this.fillet = filletStep(this.fillet, { kind: "drag", radius }).state;
-      toolChipStore.getState().setValue(radius);
-      this.sendPreview();
+      // RAW screen deltas: the sign lives entirely in `filletAxis` (which is
+      // SCREEN_UP_AXIS — up grows — whenever no world direction was resolvable, so
+      // the pre-unification mapping is reproduced exactly there).
+      const signed = signedValueFromDrag(
+        this.filletStartValue,
+        e.clientX - this.filletDownX,
+        e.clientY - this.filletDownY,
+        this.filletAxis,
+        { worldPerPx: this.engine.planePixelWorld() },
+      );
+      const before = this.fillet.edgeOp;
+      this.fillet = filletStep(this.fillet, { kind: "drag", signed }).state;
+      toolChipStore.getState().setValue(this.fillet.radius);
+      // The flip has to be VISIBLE on the frame its params change, and it swaps the
+      // whole preview session (opType is frozen per session) — so it replaces the
+      // ordinary send rather than following it. Cheap by construction: the compare
+      // only does work on an actual type crossing.
+      if (this.fillet.edgeOp !== before) this.applyEdgeOpKindChange();
+      else this.sendPreview();
     } else if (this.dragging === "shell") {
       const dy = this.shellDownY - e.clientY; // up-drag grows the thickness
       const thickness = radiusFromDrag(this.shellStartThickness, dy, { worldPerPx: this.engine.planePixelWorld() });
@@ -4007,15 +4265,22 @@ export class ModelToolController {
     // see `resetToSelect` for why publishing first would lose it.
     let failure: string | null = null;
     try {
-      // A re-edit changes ONLY the radius: deep-merge into the stored params so the
-      // fillet's edgeIds + typed edges survive (a whole-params replace would drop them).
+      // A re-edit changes only the size and (optionally) the TYPE: deep-merge into
+      // the stored params so the fillet's edgeIds + typed edges survive (a
+      // whole-params replace would drop them). `kind` is the CURRENT type — a
+      // segment flip here rewrites the record's `opType`, which core sanctions for
+      // this one pair only (`session::op_type_edit_allowed`).
       if (!this.filletStoredParams) {
         throw new Error(`Stored ${kind} parameters are unavailable`);
       }
+      const patch: Record<string, unknown> = { radius: { value: radius } };
+      // The legacy SCHEMA §7.3 `mode` string is redundant with `opType`; keep it
+      // consistent immediately when the stored params carry one. Core normalizes
+      // it at the swap site regardless — that is the invariant holder, this is
+      // only so the payload never LOOKS self-contradicting on the wire.
+      if ("mode" in this.filletStoredParams) patch.mode = kind;
       const res = await this.client.applyEditCommand(
-        updateScalarParamsCommand(editFeatureId, kind, this.filletStoredParams, {
-          radius: { value: radius },
-        }),
+        updateScalarParamsCommand(editFeatureId, kind, this.filletStoredParams, patch),
       );
       this.applyResult(res);
     } catch (e) {
@@ -4038,7 +4303,7 @@ export class ModelToolController {
    * mirrors editRevolveFeature). Seeds the chip with the feature's CURRENT radius;
    * committing routes through `UpdateOperationParams` (edge refs unchanged).
    */
-  async editEdgeOpFeature(featureId: string, kind: "Fillet" | "Chamfer" = "Fillet"): Promise<void> {
+  async editEdgeOpFeature(featureId: string, kind: EdgeOpKind = "Fillet"): Promise<void> {
     const feat = documentStore.getState().features.find((f) => f.id === featureId);
     if (!feat || feat.kind !== "fillet") return;
     // `dto.rs feature_kind` folds Shell into the SAME `fillet` bucket (that is why
@@ -4051,26 +4316,74 @@ export class ModelToolController {
     // Fetch the stored params so the size-only commit deep-merges instead of
     // dropping the edgeIds + typed edges (the projection does not expose them).
     const stored = await this.deps.client.getOperationParams(featureId).catch(() => undefined);
-    this.edgeOpKind = kind;
-    // Selecting the tool fires cancelEdgeOp (which clears filletStoredParams AND
-    // resets edgeOpKind), so both are re-applied immediately after.
-    toolStore.getState().setTool(kind === "Chamfer" ? "chamfer" : "fillet");
-    this.edgeOpKind = kind;
+    // Selecting the tool fires cancelEdgeOp (which clears filletStoredParams and
+    // resets the FSM to a Fillet arm), so the re-edit state is applied AFTER it.
+    toolStore.getState().setTool("fillet");
+    // Review F5 fence (pre-existing leak, sharpened by the tool-id unification):
+    // `setTool` above is a NO-OP whenever the edge-op tool is ALREADY "fillet" —
+    // the controller's subscriber only re-fires `onToolChange` on an actual value
+    // change — so a re-edit opened while a PRIOR arm still owns a live or
+    // in-flight preview session is never swept by the cancel above. And even when
+    // `setTool` DOES change the tool (a fresh re-edit from `select`), `onToolChange`
+    // re-arms `armEdgeOpFromSelection` off whatever edges happen to still be
+    // selected in the viewport, and its `await openEdgeOpPreview(gen)` can resolve
+    // AFTER this function has already returned, installing a session for those
+    // (irrelevant) edges that nothing here would ever close — a leaked session,
+    // and were it ever previewed against this feature's own edges, a double-apply
+    // (PreviewOp always runs against the CURRENT head — the same rule `armShell`'s
+    // own re-edit cites). Fence both paths: bump `armGen` so any such stale
+    // continuation supersedes itself instead of installing, then re-run the
+    // cancel sweep to close anything already open synchronously. Every field this
+    // clears (filletStoredParams/filletEdges/filletEditFeatureId/fillet/chip) is
+    // re-set by this function's own re-edit state below, in program order, so
+    // nothing here can clobber it.
+    this.invalidateArm();
+    this.cancelFillet();
     this.filletStoredParams = stored; // set AFTER the tool-change cancel
     this.filletEdges = [];
     this.filletEditFeatureId = featureId;
     // edgeCount 1 keeps the FSM out of its bail path (a re-edit has no picks yet).
-    this.fillet = filletStep(filletInit(), { kind: "arm", edgeCount: 1, radius }).state;
+    // `auto:false` — a re-edit opens the COMMITTED type; there is no fresh pick and
+    // no live preview to re-type against, so only an explicit choice may change it.
+    // `touched:true` — the seeded size IS the committed size, so the pristine
+    // reseed must NOT fire: flipping the segment on a committed 5 mm fillet has to
+    // keep 5 mm, not rewrite it to the chamfer default.
+    this.fillet = filletStep(filletInit(), {
+      kind: "arm",
+      edgeCount: 1,
+      radius,
+      edgeOp: kind,
+      auto: false,
+      touched: true,
+    }).state;
     toolStore.setState({ phase: "armed" });
     this.deps.engine.setOrbitSuppressed(true); // modal: drag adjusts the size, not orbit
-    viewportStore.getState().setStatusHint(
-      `Edit ${kind.toLowerCase()} ${kind === "Chamfer" ? "distance" : "radius"} — drag or type, Enter to apply`,
-      { sticky: true },
+    viewportStore.getState().setStatusHint(this.edgeOpArmHint(), { sticky: true });
+    // The edge-op re-edit gets the FULL armed cluster, not the bare numeric chip:
+    // a committed row's TYPE is editable here, and a pure type flip changes no
+    // number, so a chip whose only commit trigger is "the value differs" could
+    // never commit one (`DimensionInput.commit` no-ops on unchanged text). ✓/Enter
+    // is therefore the single commit path and `onValue` only sizes the arm — which
+    // also means a blur while reaching for the [Fillet|Chamfer] segment can no
+    // longer commit the op out from under the flip.
+    //
+    // The flip itself is chip + record only: `applyEdgeOpKindChange` gates its
+    // preview reopen on `!this.filletEditFeatureId`, because a PreviewOp always
+    // runs against the CURRENT head and would double-apply the edited feature.
+    toolChipStore.getState().showFillet(
+      radius,
+      [0, 0, 0],
+      (v) => this.onFilletChip(v),
+      {
+        onConfirm: () => void this.commitFillet(),
+        onCancel: () => toolStore.getState().setTool("select"),
+      },
+      {
+        edgeOp: this.fillet.edgeOp,
+        showEdgeOpSegments: true,
+        onEdgeOp: (k) => this.onEdgeOpChip(k),
+      },
     );
-    toolChipStore.getState().showFillet(radius, [0, 0, 0], (v) => {
-      this.onFilletChip(v);
-      void this.commitFillet(); // chip Enter/blur commits the radius-only edit
-    });
     this.updateDebug();
   }
 
@@ -4551,6 +4864,11 @@ export class ModelToolController {
       // gesture the same way (they have no 3D handle to scan for).
       filletPhase: this.fillet.phase,
       edgeOpKind: this.edgeOpKind,
+      // Whether the DRAG DIRECTION still owns the edge-op type, and which tier
+      // produced the direction it reads. e2e asserts the rule that binds them:
+      // auto is armed only where the direction is sign-correct (bisector).
+      edgeOpAuto: this.fillet.auto,
+      edgeOpAxisSource: this.filletAxisSource,
       shellPhase: this.shell.phase,
       // Datum tool (DATUM W1): "idle" | "basePick" | "offset" + the armed values,
       // so e2e can assert the two-phase gesture without any DOM of its own.
@@ -4598,6 +4916,31 @@ export class ModelToolController {
       // observable difference, so e2e asserts on it.
       profileHoleCounts: profiled.map((s) => s.profile.holes.length),
     };
+
+    // DEV-OBSERVABILITY Wave F — mirror the phase vector into the log lane, but
+    // only when it actually MOVED: updateDebug is called from ~40 sites incl.
+    // per-drag ones, so an unguarded event here would be drag-frequency. Note
+    // this rides `deps.debug` (the early return above), so the SNAPSHOT lane is
+    // `?vpdebug`-only; the `fsm` transition events from fsmLog are not.
+    const sig = [
+      this.extrude.phase,
+      this.revolve.phase,
+      this.fillet.phase,
+      this.shell.phase,
+      this.boolean.phase,
+    ].join("|");
+    if (sig !== this.lastPhaseSig) {
+      this.lastPhaseSig = sig;
+      logDebug("fsm", `phases ${sig}`, {
+        extrude: this.extrude.phase,
+        revolve: this.revolve.phase,
+        edgeOp: this.fillet.phase,
+        shell: this.shell.phase,
+        boolean: this.boolean.phase,
+        previewOwner: this.previewOwner,
+        sessions: this.previewSessions.length,
+      });
+    }
   }
 
   // ── keyboard ──────────────────────────────────────────────────────────────────
@@ -4759,9 +5102,12 @@ export class ModelToolController {
     this.closePreviewSessions();
     this.previewArmHint = null;
     this.deps.engine.setOrbitSuppressed(false);
-    this.fillet = filletInit();
-    this.edgeOpKind = "Fillet";
+    this.fillet = filletInit(); // carries edgeOp back to "Fillet"
     this.filletEdges = [];
+    this.filletOutward = null;
+    this.filletTangent = null;
+    this.filletAxis = SCREEN_UP_AXIS;
+    this.filletAxisSource = "screen";
     this.filletEditFeatureId = undefined;
     this.filletStoredParams = undefined;
     if (this.dragging === "fillet") this.dragging = null;

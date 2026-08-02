@@ -11,7 +11,8 @@
  * "trackpad"; auto-classification itself is covered by navInput.test.ts, and a
  * real pinch (which Playwright cannot synthesise at all) stays a manual check.
  */
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect } from "./fixtures";
+import type { Page } from "@playwright/test";
 import { openEditorDebug, waitForCameraSettled, CANVAS } from "./helpers";
 
 interface CamSnapshot {

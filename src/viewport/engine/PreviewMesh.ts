@@ -24,6 +24,8 @@ export class PreviewMesh {
   // One unit prism per armed region (N==1 in the single-region path; N in Wave 2's
   // multi-select). All share the one material, so a tint / depth write hits them all.
   private meshes: THREE.Mesh[] = [];
+  /** Last tint applied, so a theme change can re-derive instead of resetting. */
+  private cut = false;
   private readonly _basis = new THREE.Matrix4();
 
   constructor(private readonly deps: PreviewMeshDeps) {
@@ -86,8 +88,17 @@ export class PreviewMesh {
 
   /** Recolor the prisms: destructive (Cut boolean) vs the normal accent (Wave 2). */
   setTint(cut: boolean): void {
+    this.cut = cut;
     this.material.color.copy(cut ? palette.destructive() : palette.hoverAccent());
     this.deps.invalidate();
+  }
+
+  /**
+   * Theme change: re-read the palette, PRESERVING the current tint. Resetting
+   * to the accent here would silently turn a live Cut preview back to Add.
+   */
+  refreshColors(): void {
+    this.material.color.copy(this.cut ? palette.destructive() : palette.hoverAccent());
   }
 
   setVisible(visible: boolean): void {

@@ -1,5 +1,6 @@
 #include "protocol/Dispatcher.h"
 
+#include <chrono>
 #include <thread>
 #include <unistd.h>
 #include <utility>
@@ -43,6 +44,8 @@ Envelope Dispatcher::execute(const Job& job, const std::function<void(Envelope&)
         // Unknown verb: well-framed but protocol-illegal (SCHEMA §8) — a terminal
         // PROTOCOL_ERROR resp, NOT a process exit. UNSUPPORTED is reserved for a
         // KNOWN verb with an unsupported op/param.
+        WLOG_ERROR("unknown verb '%s' (id %llu)", req.verb.c_str(),
+                   static_cast<unsigned long long>(req.id));
         return Envelope::error_response(
             req.id, ErrorInfo{"PROTOCOL_ERROR", "unknown verb: " + req.verb,
                               /*retriable=*/false});
@@ -57,20 +60,34 @@ Envelope Dispatcher::execute(const Job& job, const std::function<void(Envelope&)
         emit,
     };
 
+    const auto started = std::chrono::steady_clock::now();
+    auto elapsed_ms = [started] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now() - started)
+            .count();
+    };
+
     try {
-        return it->second(req, job.bin, ctx);
+        Envelope resp = it->second(req, job.bin, ctx);
+        WLOG_DEBUG("verb '%s' id %llu ok in %lld ms", req.verb.c_str(),
+                   static_cast<unsigned long long>(req.id),
+                   static_cast<long long>(elapsed_ms()));
+        return resp;
     } catch (const Standard_Failure& f) {
         // OCCT exceptions derive from Standard_Transient, NOT std::exception, so
         // they'd otherwise escape this boundary -> std::terminate. Same recoverable
         // op-failure contract as below (SCHEMA §8 OP_FAILED): session untouched.
         const char* msg = f.GetMessageString();
         const std::string message = (msg && *msg) ? msg : f.DynamicType()->Name();
-        WLOG_ERROR("handler for verb '%s' threw Standard_Failure: %s", req.verb.c_str(),
-                   message.c_str());
+        WLOG_ERROR("handler for verb '%s' id %llu threw Standard_Failure after %lld ms: %s",
+                   req.verb.c_str(), static_cast<unsigned long long>(req.id),
+                   static_cast<long long>(elapsed_ms()), message.c_str());
         return Envelope::error_response(
             req.id, ErrorInfo{"OP_FAILED", message, /*retriable=*/false});
     } catch (const std::exception& ex) {
-        WLOG_ERROR("handler for verb '%s' threw: %s", req.verb.c_str(), ex.what());
+        WLOG_ERROR("handler for verb '%s' id %llu threw after %lld ms: %s", req.verb.c_str(),
+                   static_cast<unsigned long long>(req.id),
+                   static_cast<long long>(elapsed_ms()), ex.what());
         // A handler failure is a recoverable op failure (SCHEMA §8 OP_FAILED):
         // the session is untouched (all work was in scratch).
         return Envelope::error_response(

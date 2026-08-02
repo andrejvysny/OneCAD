@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::{Buf, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -29,6 +29,89 @@ use crate::messages::{
 /// a `resp` addressed by an inline `bin` section carries (e.g. a small MESH1 blob,
 /// SCHEMA §5.2); empty when the frame declared no tail.
 type RespWithBin = (RespFrame, Vec<u8>);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Diagnostics (feature `tracing`)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A client-internal warning. With the `tracing` feature it becomes a `tracing`
+/// event under this module's target; without it, the historical `eprintln!`.
+///
+/// Both arms live INSIDE `client.rs` on purpose: the macro is only ever used here,
+/// so a `tracing`-without-`client` build never sees it (a crate-root definition
+/// would trip `unused_macros` under `-D warnings` on that feature combination).
+#[cfg(feature = "tracing")]
+macro_rules! diag_warn {
+    ($($arg:tt)*) => { tracing::warn!($($arg)*) };
+}
+#[cfg(not(feature = "tracing"))]
+macro_rules! diag_warn {
+    ($($arg:tt)*) => { eprintln!($($arg)*) };
+}
+
+/// The frame lane target — `debug` (OFF under the default filter). Turn it on with
+/// `RUST_LOG=…,onecad_protocol::frames=debug` to see every tx/rx with its OCW1
+/// `reqId` + elapsed; `=trace` adds bulk chunk frames.
+#[cfg(feature = "tracing")]
+const FRAMES: &str = "onecad_protocol::frames";
+
+/// Frame lane: an outgoing `req`.
+fn trace_tx(id: u64, verb: &str, lane: Lane, json_len: usize) {
+    #[cfg(feature = "tracing")]
+    tracing::debug!(target: FRAMES, id, verb, lane = ?lane, jsonLen = json_len, "tx req");
+    #[cfg(not(feature = "tracing"))]
+    let _ = (id, verb, lane, json_len);
+}
+
+/// Frame lane: the terminal `resp` for a request (or its transport failure).
+fn trace_rx(id: u64, verb: &str, started: Instant, result: &Result<RespWithBin, ProtocolError>) {
+    #[cfg(feature = "tracing")]
+    {
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        match result {
+            Ok((resp, tail)) => tracing::debug!(
+                target: FRAMES,
+                id,
+                verb,
+                ok = resp.ok,
+                elapsed_ms,
+                binLen = tail.len(),
+                "rx resp"
+            ),
+            Err(err) => tracing::debug!(
+                target: FRAMES,
+                id,
+                verb,
+                ok = false,
+                elapsed_ms,
+                error = %err,
+                "rx failed"
+            ),
+        }
+    }
+    #[cfg(not(feature = "tracing"))]
+    let _ = (id, verb, started, result);
+}
+
+/// Frame lane: an inbound non-terminal frame. Chunks are `trace` (a bulk mesh is
+/// thousands of them); everything else is `debug`.
+#[cfg(feature = "tracing")]
+fn trace_rx_frame(frame: &Frame) {
+    match frame {
+        Frame::Progress(p) => {
+            tracing::debug!(target: FRAMES, id = p.id, "rx progress");
+        }
+        Frame::Event(e) => {
+            tracing::debug!(target: FRAMES, id = e.id, event = %e.event, step = ?e.step_index, "rx event");
+        }
+        Frame::Chunk(c) => {
+            tracing::trace!(target: FRAMES, id = c.id, stream = c.stream_id, kind = ?c.kind, "rx chunk");
+        }
+        _ => {}
+    }
+}
+#[cfg(not(feature = "tracing"))]
+fn trace_rx_frame(_frame: &Frame) {}
 
 /// The correlation table plus a **closed** latch. Once the reader task tears down
 /// (EOF / fatal frame — SCHEMA §8, no resync), it drains every waiter with
@@ -66,6 +149,11 @@ pub struct InflightRequest {
     /// `chunk` frames by this and pass it to [`ProtocolClient::cancel`].
     pub id: u64,
     rx: oneshot::Receiver<Result<RespWithBin, ProtocolError>>,
+    /// Frame-lane diagnostics. Carried UNCONDITIONALLY (not `cfg`-gated): two
+    /// clone-free words per request are trivial next to the JSON serialize that
+    /// created the frame, and gated fields make every constructor conditional.
+    started: Instant,
+    verb: String,
 }
 
 impl InflightRequest {
@@ -79,10 +167,18 @@ impl InflightRequest {
     /// Awaits the terminal `resp` **with** its raw binary tail (SCHEMA §1) — for a
     /// verb that inlines a small bulk payload in the `resp` tail (SCHEMA §5.2).
     pub async fn response_with_bin(self) -> Result<RespWithBin, ProtocolError> {
-        match self.rx.await {
+        let InflightRequest {
+            id,
+            rx,
+            started,
+            verb,
+        } = self;
+        let result = match rx.await {
             Ok(result) => result,
             Err(_) => Err(ProtocolError::ConnectionLost("response channel dropped")),
-        }
+        };
+        trace_rx(id, &verb, started, &result);
+        result
     }
 }
 
@@ -213,11 +309,18 @@ impl ProtocolClient {
             pending.waiters.insert(id, tx);
         }
 
+        let json_len = raw.json.len();
         if self.cmd_tx.send(raw).await.is_err() {
             self.pending.lock().unwrap().waiters.remove(&id);
             return Err(ProtocolError::ConnectionLost("writer task ended"));
         }
-        Ok(InflightRequest { id, rx })
+        trace_tx(id, verb, lane, json_len);
+        Ok(InflightRequest {
+            id,
+            rx,
+            started: Instant::now(),
+            verb: verb.to_string(),
+        })
     }
 
     /// [`request`](Self::request) with a Rust-side deadline (SCHEMA §8 timeouts
@@ -308,7 +411,7 @@ where
         let bytes = match encode_frame(&frame.json, &frame.bin) {
             Ok(bytes) => bytes,
             Err(err) => {
-                eprintln!("onecad-protocol: writer encode error: {err}");
+                diag_warn!("onecad-protocol: writer encode error: {err}");
                 break;
             }
         };
@@ -338,7 +441,7 @@ async fn reader_task<R>(
                 Ok(None) => break,
                 Err(err) => {
                     // Fatal framing violation (bad magic / over-cap). No resync.
-                    eprintln!("onecad-protocol: fatal frame error: {err}");
+                    diag_warn!("onecad-protocol: fatal frame error: {err}");
                     fail_all(&pending);
                     return;
                 }
@@ -366,7 +469,7 @@ async fn reader_task<R>(
             }
             Ok(_) => {}
             Err(err) => {
-                eprintln!("onecad-protocol: reader io error: {err}");
+                diag_warn!("onecad-protocol: reader io error: {err}");
                 fail_all(&pending);
                 return;
             }
@@ -385,18 +488,19 @@ fn dispatch(frame: &RawFrame, pending: &PendingMap, events_tx: &broadcast::Sende
         Err(err) => {
             // A well-framed but unparseable envelope is a protocol error; the
             // frame stream is desynchronized. Fail everything (no resync).
-            eprintln!("onecad-protocol: malformed envelope: {err}");
+            diag_warn!("onecad-protocol: malformed envelope: {err}");
             fail_all(pending);
             return;
         }
     };
+    trace_rx_frame(&parsed);
     match parsed {
         Frame::Resp(resp) => {
             let waiter = pending.lock().unwrap().waiters.remove(&resp.id);
             if let Some(tx) = waiter {
                 let _ = tx.send(Ok((resp, frame.bin.clone())));
             } else {
-                eprintln!("onecad-protocol: resp for unknown id {}", resp.id);
+                diag_warn!("onecad-protocol: resp for unknown id {}", resp.id);
             }
         }
         Frame::Progress(p) => {
@@ -412,10 +516,10 @@ fn dispatch(frame: &RawFrame, pending: &PendingMap, events_tx: &broadcast::Sende
             let _ = events_tx.send(WorkerEvent::Credit(c));
         }
         Frame::Hello(_) => {
-            eprintln!("onecad-protocol: unexpected second hello");
+            diag_warn!("onecad-protocol: unexpected second hello");
         }
         Frame::Req(_) | Frame::Cancel(_) => {
-            eprintln!("onecad-protocol: worker sent a driver-only frame");
+            diag_warn!("onecad-protocol: worker sent a driver-only frame");
         }
     }
 }

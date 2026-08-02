@@ -9,6 +9,7 @@
  * UI state is local (not from the backend).
  */
 import { createStore, useStore } from "zustand";
+import { logDebug, logWarn } from "@/debug/log";
 import type { NeedsRepairEvent, NeedsRepairItem } from "@/ipc/types";
 
 export interface RepairState {
@@ -52,6 +53,17 @@ export const repairStore = createStore<RepairState>()((set) => ({
   ...INITIAL,
 
   applyEvent(event) {
+    // A `needs-repair` event fires after EVERY published regen, so only a
+    // NON-empty one is worth a warn — logging the routine "still nothing to
+    // repair" at warn would fire on every commit and mean nothing.
+    if (event.items.length > 0) {
+      logWarn("repair", `${event.items.length} ref(s) need repair`, {
+        revision: event.revision,
+        refIds: event.items.map((i) => i.refId),
+      });
+    } else {
+      logDebug("repair", "repairs cleared", { revision: event.revision });
+    }
     set((s) => {
       const cleared = event.items.length === 0;
       // Keep an expanded ref only if it still needs repair after the new event.

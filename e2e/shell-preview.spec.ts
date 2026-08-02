@@ -1,4 +1,5 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect } from "./fixtures";
+import type { Page } from "@playwright/test";
 import { openEditorDebug, getFeatureLabels } from "./helpers";
 import { seedSelection, toolPhases, dragInCanvas } from "./modelToolHelpers";
 
@@ -12,7 +13,7 @@ import { seedSelection, toolPhases, dragInCanvas } from "./modelToolHelpers";
  * live kernel preview, stays armed through a release, and only commits on Enter or
  * the visible ✓ — with the ✓ BLOCKED while the newest candidate is a failure.
  *
- * GESTURE ONLY, same discipline as `chamfer.spec.ts`: the mock lane has no CSG and
+ * GESTURE ONLY, same discipline as `filletChamfer.spec.ts`: the mock lane has no CSG and
  * publishes no candidate mesh, so there is nothing honest to assert about geometry
  * here. `src-tauri/tests/preview_edge_shell.rs shell_preview_matches_the_commit`
  * pins the real numbers (10000 → 2224, preview == commit) against the OCCT worker.

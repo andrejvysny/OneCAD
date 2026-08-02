@@ -953,6 +953,14 @@ pub fn parse_restore_checkpoint(result: &Value) -> (bool, bool, u64) {
 /// Maps a wire [`ErrorObject`] to the core [`EngineError`] taxonomy (SCHEMA §8).
 #[must_use]
 pub fn map_error(err: &ErrorObject) -> EngineError {
+    // The RAW wire terminal, before the engine taxonomy folds `retriable` away
+    // (SCHEMA §8) — the only place a worker error's own code/retriable is visible.
+    tracing::debug!(
+        code = ?err.code,
+        retriable = err.retriable,
+        message = %err.message,
+        "worker error frame"
+    );
     let op = |code| EngineError::OpFailed {
         code,
         recoverable: true,

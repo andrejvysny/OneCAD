@@ -25,6 +25,7 @@ import type {
   SemanticRef,
 } from "@/ipc/types";
 import { buildPreviewOp } from "@/ipc/previewOps";
+import type { EdgeOpKind } from "./modelToolMachine";
 import { toolStore } from "@/stores/toolStore";
 import { selectionStore, type EntityRef } from "@/stores/selectionStore";
 import { documentStore } from "@/stores/documentStore";
@@ -154,7 +155,10 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
   let controller: ModelToolController;
   let previewCb: ((r: PreviewResult) => void) | null;
 
-  function build(endResult: () => ApplyOperationResult = okResult): void {
+  function build(
+    endResult: () => ApplyOperationResult = okResult,
+    opts?: { debug?: boolean },
+  ): void {
     engineMock = makeEngineMock();
     previewCb = null;
     clientMock = makeClientMock(endResult, (cb) => {
@@ -165,6 +169,7 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
       client: clientMock as unknown as CadClient,
       container,
       onBodyLoaded: () => () => {},
+      debug: opts?.debug,
     });
   }
 
@@ -181,10 +186,18 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     __setExactPreviewTimeoutForTests(4000);
   });
 
-  async function armFillet(kind: "fillet" | "chamfer" = "fillet"): Promise<void> {
+  // The `chamfer` tool id is dead (FILLET-CHAMFER-UNIFY W2): every arm goes
+  // through the unified `fillet` tool id, and Chamfer is reached via the chip's
+  // `onEdgeOp` segment (the drag-direction auto-flip path is covered by
+  // `edgeOpDirection.test.ts`, which has real mesh geometry to compute a tier).
+  async function armFillet(kind: EdgeOpKind = "Fillet"): Promise<void> {
     selectionStore.getState().set(EDGES);
-    toolStore.getState().setTool(kind);
+    toolStore.getState().setTool("fillet");
     await flush();
+    if (kind === "Chamfer") {
+      toolChipStore.getState().onEdgeOp?.("Chamfer");
+      await flush();
+    }
   }
 
   async function armShell(): Promise<void> {
@@ -250,10 +263,14 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     expect(lastUpdate().sessionId).toBe("pv-1");
   });
 
-  it("Chamfer arms the same lane under its own opType", async () => {
+  it("Chamfer arms the same lane under its own opType (via the chip flip — no `chamfer` tool id)", async () => {
     build();
-    await armFillet("chamfer");
-    const draft = clientMock.beginPreview.mock.calls[0][0] as PreviewDraft;
+    await armFillet("Chamfer");
+    // The unified tool always arms Fillet first (`draft` #1); the chip's `onEdgeOp`
+    // flip closes that session and opens a FRESH one under the new opType.
+    expect(clientMock.beginPreview).toHaveBeenCalledTimes(2);
+    expect(clientMock.endPreview).toHaveBeenCalledWith("pv-1", false);
+    const draft = clientMock.beginPreview.mock.calls[1][0] as PreviewDraft;
     expect(draft.opType).toBe("Chamfer");
     expect(draft.params.mode).toBe("Chamfer");
   });
@@ -523,10 +540,17 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     // would double-apply it — a re-edit is deliberately preview-free.
     expect(clientMock.beginPreview).not.toHaveBeenCalled();
     expect(toolChipStore.getState().kind).toBe("filletRadius");
-    expect(toolChipStore.getState().onConfirm).toBeNull(); // no ✓ cluster on a re-edit
+    // W3: the edge-op re-edit wires ✓ (a pure type flip changes no number, so an
+    // input-only commit trigger could never fire for one). `onValue` now only
+    // sizes the arm — the ✓/Enter path is the single commit.
+    expect(toolChipStore.getState().onConfirm).not.toBeNull();
 
     toolChipStore.getState().onValue?.(4);
+    toolChipStore.getState().onConfirm?.();
     await flush();
+    // BYTE-IDENTICAL to the pre-W3 payload: a no-flip re-edit changes nothing on
+    // the wire (same opType, same deep-merged params, no `mode` invented).
+    expect(clientMock.applyEditCommand).toHaveBeenCalledTimes(1);
     expect(clientMock.applyEditCommand).toHaveBeenCalledWith({
       cmd: "updateOperationParams",
       record: "feat-fi",
@@ -555,6 +579,7 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     await flush();
 
     toolChipStore.getState().onValue?.(4);
+    toolChipStore.getState().onConfirm?.();
     await flush();
 
     expect(toolStore.getState().modelTool).toBe("select");
@@ -573,6 +598,7 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     await flush();
 
     toolChipStore.getState().onValue?.(4);
+    toolChipStore.getState().onConfirm?.();
     await flush();
 
     expect(toolStore.getState().modelTool).toBe("select");
@@ -595,6 +621,146 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
 
     expect(toolStore.getState().modelTool).toBe("select");
     expect(viewportStore.getState().statusHint?.message).toBe("Shell thickness updated");
+  });
+
+  // ── re-edit TYPE flip (FILLET-CHAMFER-UNIFY W3) ─────────────────────────────
+
+  /** Arm the re-edit on a committed row of `opType`, with `stored` as its params. */
+  async function reeditEdgeOp(
+    opType: "Fillet" | "Chamfer",
+    stored?: Record<string, unknown>,
+  ): Promise<void> {
+    if (stored) {
+      clientMock.getOperationParams.mockResolvedValueOnce(
+        stored as unknown as Awaited<ReturnType<typeof clientMock.getOperationParams>>,
+      );
+    }
+    documentStore.setState({
+      features: [
+        { id: "feat-fi", kind: "fillet", opType, label: opType, valueText: "5.0 mm", status: "ok" },
+      ],
+    });
+    await controller.editEdgeOpFeature("feat-fi", opType);
+    await flush();
+  }
+
+  it("a re-edit arms the COMMITTED type with auto off and the type segments shown", async () => {
+    build(okResult, { debug: true });
+    await reeditEdgeOp("Chamfer");
+
+    const chip = toolChipStore.getState();
+    expect(chip.kind).toBe("filletRadius");
+    expect(chip.edgeOp).toBe("Chamfer"); // the committed type, not the tool default
+    expect(chip.showEdgeOpSegments).toBe(true); // the flip control is present
+    expect(chip.onEdgeOp).not.toBeNull();
+    expect(chip.onConfirm).not.toBeNull(); // ✓/Enter is the commit path for a flip
+    // A re-edit has no fresh pick and no live preview to re-type against, so the
+    // drag direction must NOT own the type — only an explicit segment may change it.
+    const dbg = (window as unknown as { __extrudePreview?: { edgeOpAuto: boolean } })
+      .__extrudePreview;
+    expect(dbg?.edgeOpAuto).toBe(false);
+  });
+
+  it("a segment flip in a re-edit keeps the COMMITTED size (no pristine reseed)", async () => {
+    build();
+    await reeditEdgeOp("Fillet"); // seeded at the row's 5.0 mm
+    expect(toolChipStore.getState().value).toBe(5);
+
+    toolChipStore.getState().onEdgeOp?.("Chamfer");
+    await flush();
+
+    // `touched:true` on the re-edit arm: the seeded number IS the user's committed
+    // number, so the setEdgeOp reseed to DEFAULT_CHAMFER_DISTANCE must not fire.
+    expect(toolChipStore.getState().value).toBe(5);
+    expect(toolChipStore.getState().edgeOp).toBe("Chamfer");
+  });
+
+  it("a segment flip in a re-edit opens NO preview and raises NO failure hint", async () => {
+    build();
+    await reeditEdgeOp("Fillet");
+    expect(clientMock.beginPreview).not.toHaveBeenCalled();
+
+    toolChipStore.getState().onEdgeOp?.("Chamfer");
+    await flush();
+    await flush();
+
+    // PreviewOp always runs against the CURRENT head, so a preview of the feature
+    // being edited would double-apply it. The flip is chip + record only.
+    expect(clientMock.beginPreview).not.toHaveBeenCalled();
+    expect(clientMock.endPreview).not.toHaveBeenCalled();
+    expect(viewportStore.getState().statusHint?.severity ?? "info").not.toBe("error");
+    expect(viewportStore.getState().statusHint?.message).toBe(
+      "Edit chamfer distance — drag or type, Enter to apply",
+    );
+  });
+
+  it("a FLIPPED re-edit commits ONE updateOperationParams carrying the NEW opType", async () => {
+    build();
+    await reeditEdgeOp("Fillet");
+
+    toolChipStore.getState().onEdgeOp?.("Chamfer");
+    await flush();
+    toolChipStore.getState().onValue?.(4);
+    toolChipStore.getState().onConfirm?.();
+    await flush();
+
+    expect(clientMock.applyEditCommand).toHaveBeenCalledTimes(1);
+    expect(clientMock.applyEditCommand).toHaveBeenCalledWith({
+      cmd: "updateOperationParams",
+      record: "feat-fi",
+      op: {
+        opType: "Chamfer",
+        params: {
+          radius: { value: 4 },
+          // The stored edge binding rides through VERBATIM — a flip re-types the
+          // op, it never re-picks the edges.
+          edgeIds: ["el-edge-5"],
+          edges: [{ primary: { bodyId: "body1", elementId: "el-edge-5", kind: "edge" } }],
+        },
+      },
+    });
+    // The result hint names the CURRENT type, not the one the row was opened on.
+    expect(viewportStore.getState().statusHint?.message).toBe("Chamfer distance updated");
+  });
+
+  it("a PURE type flip (no size change) still commits — the size rides through", async () => {
+    build();
+    await reeditEdgeOp("Fillet"); // committed at 5.0 mm
+
+    toolChipStore.getState().onEdgeOp?.("Chamfer");
+    await flush();
+    toolChipStore.getState().onConfirm?.(); // ✓ / Enter, no number typed
+    await flush();
+
+    expect(clientMock.applyEditCommand).toHaveBeenCalledTimes(1);
+    const [cmd] = clientMock.applyEditCommand.mock.calls[0] as unknown as [
+      { op: { opType: string; params: Record<string, unknown> } },
+    ];
+    expect(cmd.op.opType).toBe("Chamfer");
+    expect(cmd.op.params.radius).toEqual({ value: 5 });
+  });
+
+  it("a flip rewrites the legacy `mode` string only when the stored params carry one", async () => {
+    build();
+    await reeditEdgeOp("Fillet", {
+      radius: { value: 5 },
+      mode: "Fillet",
+      edgeIds: ["el-edge-5"],
+      edges: [{ primary: { bodyId: "body1", elementId: "el-edge-5", kind: "edge" } }],
+    });
+
+    toolChipStore.getState().onEdgeOp?.("Chamfer");
+    await flush();
+    toolChipStore.getState().onValue?.(4);
+    toolChipStore.getState().onConfirm?.();
+    await flush();
+
+    const [cmd] = clientMock.applyEditCommand.mock.calls[0] as unknown as [
+      { op: { params: Record<string, unknown> } },
+    ];
+    // Redundant with `opType`, so it must never contradict it on the wire. Core
+    // normalizes it at the swap site regardless — this is the FE half.
+    expect(cmd.op.params.mode).toBe("Chamfer");
   });
 
   it("editEdgeOpFeature refuses a Shell row that merely shares the folded `fillet` kind", async () => {

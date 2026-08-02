@@ -27,6 +27,7 @@ import type {
   PatternAxis,
   MirrorPlane,
   BooleanMode,
+  EdgeOpKind,
   ExtrudeEndCondition,
 } from "@/tools/modelTools/modelToolMachine";
 
@@ -40,6 +41,13 @@ const BOOLEAN_MODES: { mode: BooleanMode; label: string; testid: string }[] = [
   { mode: "NewBody", label: "New Body", testid: "chip-bool-newbody" },
   { mode: "Add", label: "Add", testid: "chip-bool-add" },
   { mode: "Cut", label: "Cut", testid: "chip-bool-cut" },
+];
+
+/** The armed-edge-op segments (FILLET-CHAMFER-UNIFY): the explicit override of
+ *  the drag direction's automatic choice. */
+const EDGE_OPS: { edgeOp: EdgeOpKind; label: string; testid: string }[] = [
+  { edgeOp: "Fillet", label: "Fillet", testid: "chip-edgeop-fillet" },
+  { edgeOp: "Chamfer", label: "Chamfer", testid: "chip-edgeop-chamfer" },
 ];
 
 /**
@@ -168,7 +176,7 @@ function ApplyButton() {
     <button
       type="button"
       onClick={() => toolChipStore.getState().onApply?.()}
-      className="rounded-sm bg-accent px-2 py-1 text-[11.5px] font-medium text-white hover:opacity-90"
+      className="rounded-sm bg-accent px-2 py-1 text-[11.5px] font-medium text-on-accent hover:opacity-90"
     >
       Apply
     </button>
@@ -184,7 +192,7 @@ function ConfirmButtons({ onConfirm, onCancel }: { onConfirm?: () => void; onCan
         data-testid="chip-confirm"
         aria-label="Confirm"
         onClick={() => onConfirm?.()}
-        className="rounded-sm bg-accent px-2 py-1 text-[11.5px] font-medium text-white hover:opacity-90"
+        className="rounded-sm bg-accent px-2 py-1 text-[11.5px] font-medium text-on-accent hover:opacity-90"
       >
         ✓
       </button>
@@ -263,6 +271,42 @@ function BooleanModeSegments({
   );
 }
 
+/**
+ * The [Fillet | Chamfer] segment group on the armed edge-op cluster. Both
+ * segments are always available — unlike the boolean modes there is no
+ * precondition to check (any picked edge can take either op; whether OCCT
+ * accepts the SIZE is what the live preview failure reports). A drag that
+ * re-types the op moves the pressed segment, so this doubles as the readout of
+ * what the direction just chose.
+ */
+function EdgeOpSegments({
+  active,
+  onPick,
+}: {
+  active: EdgeOpKind;
+  onPick: (edgeOp: EdgeOpKind) => void;
+}) {
+  return (
+    <div className="flex overflow-hidden rounded-sm" role="group" aria-label="Edge op">
+      {EDGE_OPS.map((o) => (
+        <button
+          key={o.edgeOp}
+          type="button"
+          data-testid={o.testid}
+          aria-pressed={o.edgeOp === active}
+          onClick={() => onPick(o.edgeOp)}
+          className={cn(
+            "px-2 py-1 text-[11.5px] font-medium",
+            o.edgeOp === active ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
+          )}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function ModelToolChips() {
   const engine = useViewportEngine();
   const kind = useToolChipStore((s) => s.kind);
@@ -276,6 +320,8 @@ export function ModelToolChips() {
   const booleanMode = useToolChipStore((s) => s.booleanMode);
   const canBoolean = useToolChipStore((s) => s.canBoolean);
   const showBooleanSegments = useToolChipStore((s) => s.showBooleanSegments);
+  const edgeOp = useToolChipStore((s) => s.edgeOp);
+  const showEdgeOpSegments = useToolChipStore((s) => s.showEdgeOpSegments);
   const endCondition = useToolChipStore((s) => s.endCondition);
   const canUseBodyEnds = useToolChipStore((s) => s.canUseBodyEnds);
   const showEndConditions = useToolChipStore((s) => s.showEndConditions);
@@ -307,7 +353,7 @@ export function ModelToolChips() {
   );
 
   const panel = (children: React.ReactNode) => (
-    <div className="pointer-events-auto inline-flex items-center gap-1 rounded-md border border-border bg-white p-1 shadow-panel">
+    <div className="pointer-events-auto inline-flex items-center gap-1 rounded-md border border-border bg-surface p-1 shadow-panel">
       {children}
     </div>
   );
@@ -335,6 +381,13 @@ export function ModelToolChips() {
       canBoolean={canBoolean}
       onPick={(m) => toolChipStore.getState().onBooleanMode?.(m)}
     />
+  ) : null;
+
+  // Only the FRESH edge-op arm sets this flag; the shell shares the value-chip
+  // branch below (`shellThickness`) and the edge-op re-edit renders the bare
+  // numeric chip, so neither can reach the segments.
+  const edgeOpSegments = showEdgeOpSegments ? (
+    <EdgeOpSegments active={edgeOp} onPick={(k) => toolChipStore.getState().onEdgeOp?.(k)} />
   ) : null;
 
   const endConditionSegments = showEndConditions ? (
@@ -414,13 +467,17 @@ export function ModelToolChips() {
   } else if (kind === "filletRadius" || kind === "shellThickness") {
     // Edge-op preview wave: a FRESH fillet/chamfer/shell arm wires ✓/✕ and gets
     // the same armed cluster the extrude/revolve chips use — release no longer
-    // commits, so the visible confirm is the only way out other than Enter. The
-    // parametric RE-EDIT chip wires no ✓ (it commits from its own input) and
-    // keeps rendering as the bare numeric chip it always was.
+    // commits, so the visible confirm is the only way out other than Enter.
+    //
+    // The EDGE-OP re-edit wires ✓ too (W3): its type is editable there, and a pure
+    // Fillet⇄Chamfer flip changes no number, so an input-only commit trigger could
+    // never fire for one. The SHELL re-edit has no type to flip and keeps the bare
+    // numeric chip it always was.
     content = hasConfirm
       ? panel(
           <>
             {clusterInput(LENGTH_SUFFIX)}
+            {edgeOpSegments}
             {confirmButtons}
           </>,
         )

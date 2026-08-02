@@ -143,7 +143,7 @@ export function DimensionInput({
 
   return (
     <span
-      className={`pointer-events-auto inline-flex items-center gap-0.5 rounded-sm border bg-white px-1 font-mono text-[11px] text-sel-text shadow-ctrl ${
+      className={`pointer-events-auto inline-flex items-center gap-0.5 rounded-sm border bg-surface px-1 font-mono text-[11px] text-sel-text shadow-ctrl ${
         isError ? "border-traffic-close" : "border-accent"
       }`}
     >

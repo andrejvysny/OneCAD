@@ -74,6 +74,15 @@ export class DragHandle {
     this.deps.invalidate();
   }
 
+  /**
+   * Theme change: re-read both materials. `setHover` SWAPS between them rather
+   * than recoloring, so both must stay current regardless of hover state.
+   */
+  refreshColors(): void {
+    this.matNormal.color.copy(palette.hoverAccent());
+    this.matHover.color.copy(palette.selectedEdge());
+  }
+
   setHover(hovered: boolean): void {
     if (hovered === this.hovered) return;
     this.hovered = hovered;

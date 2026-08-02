@@ -167,6 +167,12 @@ pub struct DatumDto {
 #[serde(rename_all = "camelCase")]
 pub struct DocumentProjection {
     pub status: DocStatus,
+    /// The document this projection describes. Revisions restart at 1 for every
+    /// newly opened runtime, so the frontend's stale-projection guard MUST scope
+    /// its revision compare to one document — comparing revisions across
+    /// documents drops every projection of a freshly opened one. Empty for the
+    /// "no document" projection.
+    pub document_id: String,
     pub revision: u64,
     pub title: String,
     pub dirty: bool,
@@ -191,6 +197,7 @@ impl DocumentProjection {
     pub fn empty() -> Self {
         Self {
             status: DocStatus::Empty,
+            document_id: String::new(),
             revision: 0,
             title: String::new(),
             dirty: false,
@@ -952,6 +959,7 @@ mod tests {
         );
         let proj = DocumentProjection {
             status: DocStatus::Ready,
+            document_id: "doc-1".into(),
             revision: 5,
             title: "Bracket".into(),
             dirty: false,

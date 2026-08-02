@@ -42,7 +42,7 @@ export function Switch({
       <span
         aria-hidden="true"
         className={cn(
-          "absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-knob transition-transform",
+          "absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-surface shadow-knob transition-transform",
           checked ? "translate-x-[14px]" : "translate-x-0",
         )}
       />

@@ -11,6 +11,7 @@
  *   committing — pointer released; awaiting the exact L2 result before select
  */
 import type { BooleanOperation } from "@/ipc/types";
+import { EDGE_OP_FLIP_HOLD, EDGE_OP_MIN_VALUE } from "@/tools/preview/filletRadius";
 
 export type ModelPhase = "idle" | "armed" | "dragging" | "committing";
 
@@ -327,7 +328,16 @@ export function extrudeStep(s: ExtrudeFsm, e: ExtrudeEvent): ExtrudeStep {
   }
 }
 
-// ── Fillet ───────────────────────────────────────────────────────────────────
+// ── Edge op (Fillet / Chamfer) ───────────────────────────────────────────────
+//
+// FILLET-CHAMFER-UNIFY: ONE machine drives both edge ops. The DRAG DIRECTION
+// picks which one while the arm is direction-driven (`auto`) — away from the
+// body rounds it, into it bevels — and the [Fillet|Chamfer] chip segments are
+// the explicit override (which locks the type for the session). `auto` is armed
+// ONLY where the direction is honest: the bisector tier. The bbox proxy points
+// INTO material on a concave edge, so an auto flip there would silently author
+// the op the user did not ask for; those arms seed `auto:false` and the chip is
+// the type control (see tools/preview/edgeDirection.ts).
 //
 // EDGE-OP PREVIEW wave: the edge ops join the professional commit gesture the
 // extrude/revolve lanes already use. A pointer RELEASE keeps the tool ARMED (the
@@ -342,17 +352,51 @@ export function extrudeStep(s: ExtrudeFsm, e: ExtrudeEvent): ExtrudeStep {
 
 export const DEFAULT_FILLET_RADIUS = 2;
 
+/** A chamfer distance is not a fillet radius, hence its own default. */
+export const DEFAULT_CHAMFER_DISTANCE = 1;
+
+/**
+ * Which edge op the ONE edge lane is authoring (FILLET-CHAMFER-UNIFY). Fillet
+ * and Chamfer are the same gesture over the same `FilletChamferParams` (SCHEMA
+ * §7.3), distinguished only by `opType`/`mode` at the wire — so one machine
+ * with a discriminator, not two byte-identical reducers to drift apart.
+ */
+export type EdgeOpKind = "Fillet" | "Chamfer";
+
 export interface FilletFsm {
   phase: ModelPhase;
+  /** MAGNITUDE of the radius/distance — always ≥ EDGE_OP_MIN_VALUE, never signed.
+   *  The drag's SIGN picks {@link edgeOp}; it never reaches the wire. */
   radius: number;
   edgeCount: number;
+  /** The op this arm commits (drives `opType`, so a change is a session swap). */
+  edgeOp: EdgeOpKind;
+  /** The DRAG DIRECTION still owns `edgeOp` — see {@link autoEdgeOp}. Any explicit
+   *  `setEdgeOp` clears it, so a manual override sticks for the rest of the session. */
+  auto: boolean;
+  /** Whether the user has authored a size yet (drag or typed). A pristine arm
+   *  reseeds to the picked op's default on `setEdgeOp`; a touched one keeps the
+   *  user's number. */
+  touched: boolean;
 }
 
 export type FilletEvent =
-  | { kind: "arm"; edgeCount: number; radius?: number }
+  | {
+      kind: "arm";
+      edgeCount: number;
+      radius?: number;
+      edgeOp?: EdgeOpKind;
+      auto?: boolean;
+      /** Seed the arm as already-authored. A RE-EDIT passes `true`: the seeded
+       *  size IS the committed size, i.e. the user's own number, so a later
+       *  segment pick must keep it instead of reseeding to a tool default. */
+      touched?: boolean;
+    }
   | { kind: "grabEdge" }
-  | { kind: "drag"; radius: number }
+  /** `signed` is the raw drag projection: positive = away from the body. */
+  | { kind: "drag"; signed: number }
   | { kind: "setRadius"; radius: number }
+  | { kind: "setEdgeOp"; edgeOp: EdgeOpKind }
   | { kind: "release" }
   | { kind: "confirm" }
   | { kind: "commitFailed" }
@@ -365,7 +409,32 @@ export interface FilletStep {
 }
 
 export function filletInit(): FilletFsm {
-  return { phase: "idle", radius: DEFAULT_FILLET_RADIUS, edgeCount: 0 };
+  return {
+    phase: "idle",
+    radius: DEFAULT_FILLET_RADIUS,
+    edgeCount: 0,
+    edgeOp: "Fillet",
+    auto: false,
+    touched: false,
+  };
+}
+
+/**
+ * The op a drag frame lands on while the arm is still direction-driven: dragging
+ * AWAY from the body rounds it (Fillet), pushing INTO it bevels (Chamfer) — the
+ * Shapr3D convention. Mirror of {@link autoBooleanMode} for the extrude lane.
+ *
+ * `EDGE_OP_FLIP_HOLD` is a HYSTERESIS band, not a dead zone around zero: a
+ * gesture crossing zero must not strobe the authored type, because every flip
+ * tears the kernel preview session down and reopens it under the new `opType`
+ * (`beginPreview` freezes it). A non-finite value keeps the current type for
+ * the same reason a zero does.
+ */
+function autoEdgeOp(s: FilletFsm, signed: number): EdgeOpKind {
+  if (!s.auto) return s.edgeOp;
+  if (!Number.isFinite(signed)) return s.edgeOp;
+  if (Math.abs(signed) < EDGE_OP_FLIP_HOLD) return s.edgeOp;
+  return signed < 0 ? "Chamfer" : "Fillet";
 }
 
 export function filletStep(s: FilletFsm, e: FilletEvent): FilletStep {
@@ -373,18 +442,64 @@ export function filletStep(s: FilletFsm, e: FilletEvent): FilletStep {
     case "arm":
       if (e.edgeCount <= 0) return { state: filletInit(), effect: "none" };
       return {
-        state: { phase: "armed", radius: e.radius ?? DEFAULT_FILLET_RADIUS, edgeCount: e.edgeCount },
+        state: {
+          ...filletInit(),
+          phase: "armed",
+          radius: e.radius ?? DEFAULT_FILLET_RADIUS,
+          edgeCount: e.edgeCount,
+          edgeOp: e.edgeOp ?? "Fillet",
+          auto: e.auto === true,
+          touched: e.touched === true,
+        },
         effect: "begin",
       };
     case "grabEdge":
       if (s.phase !== "armed") return { state: s, effect: "none" };
       return { state: { ...s, phase: "dragging" }, effect: "none" };
-    case "drag":
+    case "drag": {
       if (s.phase !== "dragging") return { state: s, effect: "none" };
-      return { state: { ...s, radius: e.radius }, effect: "update" };
+      if (s.auto) {
+        return {
+          state: {
+            ...s,
+            radius: Math.max(EDGE_OP_MIN_VALUE, Math.abs(e.signed)),
+            edgeOp: autoEdgeOp(s, e.signed),
+            touched: true,
+          },
+          effect: "update",
+        };
+      }
+      // A LOCKED type projects the drag onto its own half-line rather than taking
+      // the magnitude: dragging a locked Chamfer the "wrong" way must bottom out at
+      // the minimum and STAY there, not V-bounce back up as |signed| would.
+      const sign = s.edgeOp === "Chamfer" ? -1 : 1;
+      return {
+        state: { ...s, radius: Math.max(EDGE_OP_MIN_VALUE, sign * e.signed), touched: true },
+        effect: "update",
+      };
+    }
     case "setRadius":
       if (s.phase !== "armed" && s.phase !== "dragging") return { state: s, effect: "none" };
-      return { state: { ...s, radius: e.radius }, effect: "update" };
+      // A TYPED value never re-types the op (TODO.md:32 precedent): the number is a
+      // magnitude, and the sign convention belongs to the gesture, not the keyboard.
+      return {
+        state: { ...s, radius: Math.max(EDGE_OP_MIN_VALUE, Math.abs(e.radius)), touched: true },
+        effect: "update",
+      };
+    case "setEdgeOp": {
+      if (s.phase !== "armed" && s.phase !== "dragging") return { state: s, effect: "none" };
+      // An EXPLICIT choice (chip segment) ends the direction-driven lane for the
+      // rest of the session — a manual override must stick even when the user
+      // afterwards drags back through zero (host-boolean precedent).
+      // PRISTINE RESEED: an untouched arm takes the picked op's own default; once
+      // the user has authored a size, that size is theirs and survives the swap.
+      const radius = s.touched
+        ? s.radius
+        : e.edgeOp === "Chamfer"
+          ? DEFAULT_CHAMFER_DISTANCE
+          : DEFAULT_FILLET_RADIUS;
+      return { state: { ...s, edgeOp: e.edgeOp, auto: false, radius }, effect: "update" };
+    }
     case "release":
       // Release does NOT commit — it keeps the tool armed at the dragged size so
       // the kernel preview stays live and the user confirms explicitly.
@@ -406,18 +521,10 @@ export function filletStep(s: FilletFsm, e: FilletEvent): FilletStep {
   }
 }
 
-// ── Chamfer ─────────────────────────────────────────────────────────────────
-//
-// Chamfer has NO reducer of its own: it is the same edge-selection + drag-to-size
-// gesture as Fillet, so the controller drives ONE edge-op lane over `FilletFsm`
-// with a `kind` discriminator. Two byte-identical reducers would only be two
-// places to drift. The worker has always implemented it
-// (`FilletChamferOp.cpp execute_chamfer`, sharing `FilletChamferParams` with
-// Fillet and distinguished by `mode`); only the tool was missing.
-//
-// A chamfer distance is not a fillet radius, hence its own default.
-
-export const DEFAULT_CHAMFER_DISTANCE = 1;
+// Chamfer has NO reducer of its own — it is a value of `FilletFsm.edgeOp` above.
+// The worker has always implemented it (`FilletChamferOp.cpp execute_chamfer`,
+// sharing `FilletChamferParams` with Fillet and distinguished by `mode`); only
+// the tool was missing.
 
 // ── Revolve ──────────────────────────────────────────────────────────────────
 //

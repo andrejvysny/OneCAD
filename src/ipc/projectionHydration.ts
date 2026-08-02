@@ -80,6 +80,7 @@ export function projectionToStore(p: DocumentProjectionWire): DocumentProjection
   const features = p.features.map(toFeatureMeta);
   return {
     status: p.status,
+    documentId: p.documentId,
     revision: p.revision,
     title: p.title,
     dirty: p.dirty,
@@ -116,7 +117,17 @@ function maybeHintUnappliedDrafts(p: DocumentProjectionWire): void {
 export function applyProjectionToStore(p: DocumentProjectionWire): boolean {
   const store = documentStore.getState();
   const isEmpty = p.status === "empty";
-  if (!isEmpty && p.revision < store.revision) return false; // stale — drop
+  // Revisions restart at 1 for every newly opened runtime, so the stale guard is
+  // meaningful only WITHIN one document: a projection for a different documentId
+  // is a document replacement and always applies (comparing revisions across
+  // documents dropped every projection of a freshly opened document while the
+  // store still held the old one's high revision). Either side missing its id
+  // (mock lane, pre-hydration store) ⇒ same-document semantics.
+  const sameDocument =
+    p.documentId === undefined ||
+    store.documentId === undefined ||
+    p.documentId === store.documentId;
+  if (!isEmpty && sameDocument && p.revision < store.revision) return false; // stale — drop
   const wasEmpty = store.status === "empty"; // the fresh-open transition detector
   store.applySnapshot(projectionToStore(p));
   if (!isEmpty && wasEmpty) maybeHintUnappliedDrafts(p);

@@ -55,6 +55,11 @@ jobs:
       - name: Install OCCT toolchain
         if: hashFiles('worker/CMakeLists.txt') != ''
         run: brew install opencascade boost eigen nlohmann-json || true
+      - name: Stdout hygiene gate
+        if: hashFiles('worker/CMakeLists.txt') != ''
+        # worker stdout carries OCW1 frames ONLY; this job runs raw cmake
+        # (not scripts/build-worker.sh), so the gate needs its own step here.
+        run: scripts/check-worker-stdout-hygiene.sh
       - name: Configure
         if: hashFiles('worker/CMakeLists.txt') != ''
         run: cmake -S worker -B worker/build -DCMAKE_BUILD_TYPE=Release
@@ -64,6 +69,11 @@ jobs:
       - name: Test
         if: hashFiles('worker/CMakeLists.txt') != ''
         run: ctest --test-dir worker/build --output-on-failure
+      - name: Selftest smoke (debug logging)
+        if: hashFiles('worker/CMakeLists.txt') != ''
+        env:
+          ONECAD_WORKER_LOG: debug
+        run: ./worker/build/onecad-worker --selftest
 
   frontend:
     name: frontend

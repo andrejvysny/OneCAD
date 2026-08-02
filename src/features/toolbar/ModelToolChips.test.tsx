@@ -201,6 +201,61 @@ describe("ModelToolChips (M6b)", () => {
     expect(onCancel).toHaveBeenCalledTimes(1);
   });
 
+  // ── FILLET-CHAMFER-UNIFY: the [Fillet|Chamfer] segments ─────────────────────
+
+  const edgeOpCluster = (opts: Record<string, unknown> = {}, onEdgeOp = vi.fn()) => {
+    act(() =>
+      toolChipStore.getState().showFillet(
+        2,
+        WORLD,
+        vi.fn(),
+        { onConfirm: vi.fn(), onCancel: vi.fn() },
+        { showEdgeOpSegments: true, onEdgeOp, ...opts },
+      ),
+    );
+    return onEdgeOp;
+  };
+
+  it("armed edge-op cluster renders the segments, marks the active op, and dispatches", () => {
+    render(<ModelToolChips />);
+    const onEdgeOp = edgeOpCluster({ edgeOp: "Fillet" });
+
+    expect(screen.getByTestId("chip-edgeop-fillet")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("chip-edgeop-chamfer")).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(screen.getByTestId("chip-edgeop-chamfer"));
+    expect(onEdgeOp).toHaveBeenCalledWith("Chamfer");
+  });
+
+  // A drag that re-types the op only calls `setEdgeOp` — the pressed segment is
+  // the readout of what the direction chose, so it has to follow that alone.
+  it("the pressed segment follows a live setEdgeOp (the drag-direction flip)", () => {
+    render(<ModelToolChips />);
+    edgeOpCluster({ edgeOp: "Fillet" });
+    act(() => toolChipStore.getState().setEdgeOp("Chamfer"));
+    expect(screen.getByTestId("chip-edgeop-chamfer")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("chip-edgeop-fillet")).toHaveAttribute("aria-pressed", "false");
+  });
+
+  // Opt-in only. (The EDGE-OP re-edit now DOES ask for them — W3 — but a bare
+  // `showFillet` with no opts must still render none.)
+  it("omits the segments unless the arm asks for them", () => {
+    render(<ModelToolChips />);
+    act(() => toolChipStore.getState().showFillet(2, WORLD, vi.fn()));
+    expect(screen.queryByTestId("chip-edgeop-fillet")).toBeNull();
+  });
+
+  // Shell shares the value-chip branch (`shellThickness`) — it must never grow an
+  // edge-op picker just by living next door.
+  it("the shell chip renders NO edge-op segments", () => {
+    render(<ModelToolChips />);
+    act(() =>
+      toolChipStore.getState().showShell(2, WORLD, vi.fn(), { onConfirm: vi.fn(), onCancel: vi.fn() }),
+    );
+    expect(screen.getByTestId("chip-confirm")).toBeInTheDocument(); // the armed cluster IS up
+    expect(screen.queryByTestId("chip-edgeop-fillet")).toBeNull();
+    expect(screen.queryByTestId("chip-edgeop-chamfer")).toBeNull();
+  });
+
   it("armed revolve cluster: degree value + Axis reset + ✓/✕ dispatch through the handlers", () => {
     const h = { onValue: vi.fn(), onResetAxis: vi.fn(), onConfirm: vi.fn(), onCancel: vi.fn() };
     render(<ModelToolChips />);

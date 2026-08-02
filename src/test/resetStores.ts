@@ -8,6 +8,7 @@ import { selectionStore } from "@/stores/selectionStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { documentStore, seedMockDocument } from "@/stores/documentStore";
 import { settingsStore } from "@/stores/settingsStore";
+import { DEFAULT_THEME } from "@/theme/themes";
 import { DEFAULT_RENDER_MODE } from "@/viewport/engine/renderModes";
 import { sketchStore } from "@/stores/sketchStore";
 import { toolChipStore } from "@/stores/toolChipStore";
@@ -57,6 +58,7 @@ export function resetStores(): void {
     show: { guidePoints: true, snappingHints: true },
     navigation: { inputDevice: "auto" },
     displayMode: DEFAULT_RENDER_MODE,
+    theme: DEFAULT_THEME,
   });
   sketchStore.getState().reset();
   toolChipStore.getState().clear();

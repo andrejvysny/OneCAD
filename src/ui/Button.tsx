@@ -8,9 +8,9 @@ type Size = "sm" | "md" | "lg";
 // secondary = white fill, hairline border (prototype Open… / Import STEP… / Cancel)
 // ghost    = transparent, hover surface (prototype nav / toolbar buttons)
 const VARIANT: Record<Variant, string> = {
-  primary: "bg-accent text-white font-semibold hover:bg-accent-hover",
+  primary: "bg-accent text-on-accent font-semibold hover:bg-accent-hover",
   secondary:
-    "bg-white text-ink-2 font-medium border border-border-strong hover:bg-hover",
+    "bg-surface text-ink-2 font-medium border border-border-strong hover:bg-hover",
   ghost: "bg-transparent text-ink-4 font-medium hover:bg-hover",
 };
 

@@ -1,15 +1,25 @@
 /*
  * OneCAD design tokens (Tailwind v4 @theme).
  *
- * Every value below is extracted VERBATIM from the design prototype:
+ * This file carries BOTH themes: the `@theme` block below is the light theme
+ * and the default; the `:root[data-theme="dark"]` block after it overrides the
+ * same custom properties for dark. Tailwind v4 compiles color utilities to
+ * `var(--color-*)` (verified: `.bg-panel{background-color:var(--color-panel)}`),
+ * so redefining a property under that selector re-themes every utility using it
+ * — there are no `dark:` variants anywhere in the codebase.
+ *
+ * Every LIGHT value is extracted VERBATIM from the design prototype:
  *   design/project/OneCAD UI Explorations.dc.html
  * (color hexes confirmed byte-for-byte against that file; shadow/alpha
  *  channels normalized to modern space-separated rgb() syntax — identical
  *  values, Tailwind v4 form).
+ * The prototype has NO dark variant — it only suggests one — so every DARK
+ * value is authored here, following the same precedent as --color-body-fill.
  *
  * GREP GATE: this file is the SOLE source of design colors. Any new color
- * MUST be added HERE as a token, never written inline in a component. A CI
- * grep rejects raw hex literals outside this file.
+ * MUST be added HERE as a token, never written inline in a component, and
+ * MUST be given a value in BOTH blocks. A CI grep rejects raw hex literals
+ * outside this file.
  */
 
 @theme {
@@ -51,6 +61,16 @@
   --color-titlebar: #f6f7f8;
   /* Title-bar document title (prototype 1c titlebar, line 150). */
   --color-titlebar-text: #3a3f46;
+  /* Raised surface: popovers, cards, dialogs, inputs, floating toolbars.
+     The prototype draws these as literal white; the token exists so dark has
+     somewhere to put its elevated gray. */
+  --color-surface: #ffffff;
+  /* Text/icons ON an accent-filled control (primary button, active chip). */
+  --color-on-accent: #ffffff;
+  /* Modal scrim behind a dialog. */
+  --color-scrim: rgb(0 0 0 / 0.4);
+  /* Diagonal hatch on empty placeholders (viewport, project card). */
+  --color-hatch: rgb(0 0 0 / 0.02);
 
   /* ---- Borders (default / strong / subtle) ---- */
   --color-border: #e2e4e8;
@@ -135,4 +155,144 @@
   /* ---- Fonts ---- */
   --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, Menlo, monospace;
+}
+
+/*
+ * ============================ DARK THEME ============================
+ *
+ * Authored (the prototype has no dark variant). Stamped on <html> by
+ * src/theme/themeController.ts as data-theme="dark".
+ *
+ * Deliberately UNLAYERED: `@import "tailwindcss"` puts @theme's :root block in
+ * the `theme` layer, and unlayered CSS outranks every layer, so these win
+ * regardless of selector specificity.
+ *
+ * Radii and fonts are theme-independent and are not repeated. Traffic-light
+ * colors are macOS window-control constants and stay fixed in both themes.
+ *
+ * Contrast target: WCAG AA (4.5:1) for body text against its own surface.
+ */
+:root[data-theme="dark"] {
+  /* ---- Accent / interactive ---- */
+  /* Lifted off the light #2e6fe0: that blue is only ~2.4:1 on a #23262b canvas. */
+  --color-accent: #4d8bf0;
+  --color-accent-hover: #6ba0f5;
+
+  /* ---- Selection ---- */
+  --color-sel-bg: #1d3157;
+  --color-sel-text: #9cc2ff;
+
+  /* ---- Warning / caution ---- */
+  --color-warn: #e0a44a;
+  --color-warn-surface: #3a2f1c;
+  --color-warn-border: #5c4726;
+  --color-warn-strong: #f0c47e;
+
+  /* ---- Canvas (viewport backgrounds) ---- */
+  /* NOTE: --color-canvas is also the renderer clear color AND the fill PMREM
+     uses for directions the studio room does not cover, so it sets the
+     viewport's ambient level, not just its background. */
+  --color-canvas: #23262b;
+  --color-canvas-model: #1f2226;
+  /* Kept blue-tinted: the cool shift is the light theme's "you are sketching"
+     signal, and a neutral dark would lose it. */
+  --color-canvas-sketch: #1b2130;
+  --color-canvas-start: #1e2126;
+
+  /* ---- Origin axis triad ---- */
+  --color-axis-x: #e07a7a;
+  --color-axis-y: #78c878;
+  --color-axis-z: #6f9de8;
+
+  /* ---- Sketch plane picker ---- */
+  --color-plane-xy: #6f9de8;
+  --color-plane-xz: #e0a05c;
+  --color-plane-yz: #78c878;
+
+  /* ---- Chrome surfaces ---- */
+  --color-panel: #202327;
+  --color-statusbar: #1d2024;
+  --color-titlebar: #26292e;
+  --color-titlebar-text: #c8ced6;
+  --color-surface: #2a2e34;
+  /* Near-black ON the accent, not white: white on #4d8bf0 is ~3.0:1 and fails
+     AA, this is ~7:1. Reads unusual next to a light-theme blue button, but a
+     legible control beats a familiar one. */
+  --color-on-accent: #0f1319;
+  --color-scrim: rgb(0 0 0 / 0.6);
+  --color-hatch: rgb(255 255 255 / 0.03);
+
+  /* ---- Borders ---- */
+  --color-border: #34383f;
+  --color-border-strong: #434952;
+  --color-border-subtle: #2b2f35;
+  --color-card-hover-border: #3d5b96;
+
+  /* ---- Ink scale (INVERTED: lightest text → dimmest) ---- */
+  --color-ink: #e8eaed;
+  --color-ink-2: #d5d9de;
+  --color-tree-label: #c9ced5;
+  --color-ink-3: #b0b7c0;
+  --color-ink-4: #9aa1ab;
+  --color-ink-5: #7f8791;
+  --color-ink-6: #6e7680;
+  --color-ink-7: #626a74;
+
+  /* ---- Hover surfaces (lighten instead of darken) ---- */
+  --color-hover: #30353b;
+  --color-hover-2: #363c43;
+  --color-hover-3: #3c434b;
+
+  /* ---- Chips ---- */
+  --color-chip: #2d3238;
+  --color-chip-2: #333941;
+
+  /* ---- Inset well (recedes BELOW the panel, so darker than it) ---- */
+  --color-well: #1a1d21;
+
+  /* ---- Sketch reference geometry ---- */
+  --color-sketch-reference: #8b9bb0;
+
+  /* ---- Sketch mode chrome ---- */
+  --color-sketch-chrome: #1f2a3d;
+  --color-sketch-chrome-border: #33445f;
+  --color-toolbar-sketch: #222c3e;
+
+  /* ---- Tooltip (stays a raised dark slab; inverting it to a white chip
+          would make it the brightest thing on screen) ---- */
+  --color-tooltip: #383d44;
+  --color-tooltip-text: #eef0f3;
+
+  /* ---- Toggle (off state track) ---- */
+  --color-toggle-off: #454b53;
+
+  /* ---- Body (viewport solids) ---- */
+  /* Darker than the light theme's #a9aeb6 so the now-LIGHT edge lines read
+     against a shaded face. */
+  --color-body-fill: #7d838c;
+  /* INVERTED, and load-bearing: wireframe mode draws edges with no faces
+     behind them, so a near-black edge on a dark canvas would be invisible. */
+  --color-body-edge: #cfd4db;
+}
+
+/*
+ * Dark shadows.
+ *
+ * Overriding --shadow-* here would do NOTHING: Tailwind v4 INLINES those token
+ * values into each utility at build time and hoists the color into an escape
+ * hatch — `.shadow-ctrl{--tw-shadow:0 1px 3px var(--tw-shadow-color,#0000000f)}`
+ * — so nothing reads --shadow-ctrl at runtime. Setting --tw-shadow-color is the
+ * supported way in, and it re-tints every shadow at once.
+ *
+ * The universal selector is REQUIRED, not sloppy: Tailwind registers
+ * `@property --tw-shadow-color { syntax:"*"; inherits:false }`, so a
+ * declaration on :root alone would not reach descendants.
+ *
+ * Light mode deliberately sets nothing, letting each utility keep its own
+ * inlined alpha. Dark trades that per-shadow differentiation for one tint —
+ * on dark surfaces the depth cue comes from the surface step anyway.
+ */
+:root[data-theme="dark"],
+:root[data-theme="dark"] * {
+  --tw-shadow-color: rgb(0 0 0 / 0.55);
 }

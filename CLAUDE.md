@@ -100,11 +100,33 @@ The whole point of this migration is fixing the legacy stack's unfixed defect (H
 - `?vpdebug` in the URL exposes `window.__vpEngine` / `window.__vpFrames` — the e2e specs rely on this to raycast real handle positions.
 
 ### Styling
-`src/styles/tokens.css` is the **sole** source of design colors (Tailwind v4 `@theme`, values extracted verbatim from the design prototype). No raw hex literal may appear anywhere else — including test/jsdom fallbacks, which is why `palette.ts` falls back to `rgb()` mirrors rather than `#` hex. New color ⇒ new token in `tokens.css`. The "hex gate" is a grep verified manually at each gate (`grep -rn '#[0-9a-fA-F]\{6\}' src --include='*.ts' --include='*.tsx'` should be empty); it is *not* wired into `ci.yml`.
+`src/styles/tokens.css` is the **sole** source of design colors (Tailwind v4 `@theme`, light values extracted verbatim from the design prototype). No raw hex literal may appear anywhere else — including test/jsdom fallbacks, which is why `palette.ts` falls back to `rgb()` mirrors rather than `#` hex. New color ⇒ new token in `tokens.css`, **with a value in BOTH theme blocks**. The "hex gate" is a grep verified manually at each gate (`grep -rn '#[0-9a-fA-F]\{6\}' src --include='*.ts' --include='*.tsx'` should be empty); it is *not* wired into `ci.yml`.
+
+The file carries both themes: `@theme { … }` is light and the default, `:root[data-theme="dark"] { … }` overrides it. Tailwind v4 compiles color utilities to `var(--color-*)`, so redefining a property under that selector re-themes every utility — there are **no `dark:` variants anywhere**. The prototype has no dark variant, so dark values are authored (same precedent as `--color-body-fill`).
+
+Two traps:
+- **`--shadow-*` cannot be overridden per theme.** Tailwind INLINES those values at build time (`.shadow-ctrl{--tw-shadow:0 1px 3px var(--tw-shadow-color,#0000000f)}`), so nothing reads the token at runtime. Dark shadows go through `--tw-shadow-color`, and must use a universal selector because Tailwind registers it `@property{inherits:false}`.
+- **The 3D viewport does not follow CSS.** `palette.ts` caches and materials are built once; see `src/viewport/engine/README.md` § Theming for the `refreshColors()` invariant. Adding a viewport color without wiring it there fails silently.
+
+`src/theme/` owns resolution: `themes.ts` is the registry (light/dark/system), `themeController.ts` is the sole writer of `data-theme` on `<html>`. Only the PREFERENCE is persisted; the resolved value is derived at runtime.
 
 ## Testing conventions
 
 Four suites, all expected green at a gate: vitest (frontend, colocated `*.test.ts(x)`), `cargo test --workspace` (unit + worker-backed integration under `src-tauri/tests/`), ctest (worker), Playwright (e2e, mock lane). `corpus/` holds characterization fixtures captured from `OneCAD-CPP` at frozen commit `b4ddccc` — every numeric expectation there carries a provenance citation to a binary recording or a source line. Preserve that discipline when adding cases.
+
+## Debugging & logs
+
+`logs/dev.jsonl` (repo root, gitignored) is the CURRENT `tauri dev` / debug-build session ONLY — truncated at every app start, first line always `session.start` (pid/version/filter/dir). Never written by `cargo test`, ctest, vitest, or Playwright. Lane = `target`: a Rust module path (`onecad_lib::…`) · `worker` (forwarded C++ stderr, field `epoch`, **no span context** — join via OCW1 `id` in the frame lane or `epoch`) · `fe` (forwarded webview events, fields `tag,seq,feTs,tMono,ctx`) · `onecad_protocol::frames` (tx/rx per OCW1 frame, debug-gated) · `panic`. Schema, tag taxonomy, and correlation keys: `docs/DEBUGGING.md`.
+
+Knobs: `RUST_LOG` (default `info,onecad_lib=debug,onecad=debug,fe=debug,worker=debug` — the `fe=debug,worker=debug` directives are REQUIRED, a bare `info` silently drops both synthetic lanes); `ONECAD_LOG_DIR` (path, or `off` to kill the file lane; unset = repo `logs/` in debug builds, off in release); `ONECAD_WORKER_LOG` (`error|warn|info|debug`, default `info`, C++ worker's own min level); FE logger gate = `?trace` or a DEV build (never under vitest); `?vpdebug` additionally exposes `window.__vpEngine`/`__extrudePreview` and vpdebug-only `updateDebug` phase snapshots (the `fsm` tag itself is NOT vpdebug-gated).
+
+First-look greps: `grep '"level":"ERROR"' logs/dev.jsonl`, `grep '"target":"worker"'`, `grep 'regen:'` (outcome + failed-step lines), `grep '"tag":"hint"'` (what the user actually saw on screen).
+
+e2e (`e2e/fixtures.ts`): every spec auto-captures browser console + `pageerror`; on a failing test, or any pageerror at all, `test-results/<test>/` gets `console.log`, `pageerror.log`, `fe-logs.json` (the FE ring via `__logsDump()`), plus Playwright's own trace on retry.
+
+White-box surfaces (dev builds only): `window.__logs`/`__logsDump()`/`__logsClear()`, `window.__stores` (12 keys — document/sketch/viewport/tool/settings/selection/measure/app/toolChip/worker/repair/sketchSelection), `window.__vpEngine` (`?vpdebug`), `window.__extrudePreview`.
+
+Policy: never log a drag-frequency path (per-frame preview/pointer/solver ticks) on either side; `ctx`/context payloads are capped, never raw geometry. Full manual — schema, cookbook, failure-signature table, extension policy: `docs/DEBUGGING.md`.
 
 ## Knowledge graph (graphify)
 

@@ -1,9 +1,17 @@
 import type { RefObject } from "react";
 import { Popover } from "@/ui/Popover";
 import { SectionLabel } from "@/ui/SectionLabel";
+import { SegmentedToggle, type SegmentedOption } from "@/ui/SegmentedToggle";
 import { Icon } from "@/icons/Icon";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { THEMES, THEME_ORDER, type ThemePref } from "@/theme/themes";
 import { RENDER_MODES, RENDER_MODE_ORDER, type RenderModeId } from "@/viewport/engine/renderModes";
+
+/** Built from the registry so the control can never list a theme that isn't real. */
+const THEME_OPTIONS: SegmentedOption<ThemePref>[] = THEME_ORDER.map((id) => ({
+  value: id,
+  label: THEMES[id].label,
+}));
 
 function DisplayModeRow({
   label,
@@ -40,10 +48,16 @@ type DisplayModePopoverProps = {
  * to its left with a right-pointing caret. Replaces the old cycling button —
  * a tri-state control that only ever showed "the next click's target" gave no
  * way to jump straight to a mode or see all of them at once.
+ *
+ * Also carries Appearance. Both settings answer "how does the viewport look",
+ * so they belong behind the same button; a fourth corner-cluster icon for a
+ * once-a-month preference would not earn its place.
  */
 export function DisplayModePopover({ open, onClose, anchorRef }: DisplayModePopoverProps) {
   const displayMode = useSettingsStore((s) => s.displayMode);
   const setDisplayMode = useSettingsStore((s) => s.setDisplayMode);
+  const theme = useSettingsStore((s) => s.theme);
+  const setTheme = useSettingsStore((s) => s.setTheme);
 
   const choose = (mode: RenderModeId) => {
     setDisplayMode(mode);
@@ -70,6 +84,23 @@ export function DisplayModePopover({ open, onClose, anchorRef }: DisplayModePopo
             onClick={() => choose(id)}
           />
         ))}
+      </div>
+
+      <div className="mx-3.5 my-1.5 h-px bg-border-subtle" />
+
+      <SectionLabel className="px-3.5 pb-0.5 pt-0.5">Appearance</SectionLabel>
+      <div className="px-3.5 pb-1 pt-0.5">
+        {/* Stays open on change, unlike the mode rows: the whole point is to
+            see the theme land, and re-opening the popover to undo a mistake is
+            worse than one extra click to dismiss. */}
+        <SegmentedToggle
+          options={THEME_OPTIONS}
+          value={theme}
+          onChange={setTheme}
+          ariaLabel="Appearance"
+          size="sm"
+          className="w-full"
+        />
       </div>
     </Popover>
   );

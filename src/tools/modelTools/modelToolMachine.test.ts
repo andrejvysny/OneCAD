@@ -265,11 +265,14 @@ describe("fillet FSM", () => {
     expect(s.phase).toBe("armed");
     expect(s.edgeCount).toBe(2);
     expect(s.radius).toBe(3);
+    expect(s.edgeOp).toBe("Fillet"); // the default arm
+    expect(s.auto).toBe(false);
+    expect(s.touched).toBe(false);
 
     s = filletStep(s, { kind: "grabEdge" }).state;
     expect(s.phase).toBe("dragging");
 
-    const dragged = filletStep(s, { kind: "drag", radius: 4.5 });
+    const dragged = filletStep(s, { kind: "drag", signed: 4.5 });
     expect(dragged.effect).toBe("update");
     expect(dragged.state.radius).toBe(4.5);
 
@@ -301,6 +304,129 @@ describe("fillet FSM", () => {
     expect(filletStep(armed, { kind: "commitFailed" }).state.phase).toBe("armed");
 
     expect(filletStep(committing.state, { kind: "settle" }).state.phase).toBe("idle");
+  });
+
+  // ── FILLET-CHAMFER-UNIFY: the drag DIRECTION types the op ───────────────────
+  //
+  // Away from the body (positive) rounds it, into it (negative) bevels. Every
+  // boundary below is load-bearing: the flip band is deliberately WIDER than the
+  // magnitude clamp, so a gesture parked at the clamped floor cannot ping-pong the
+  // op type — and each flip tears down and reopens the kernel preview session.
+
+  const autoArm = (radius = 2): FilletFsm =>
+    filletStep(filletInit(), { kind: "arm", edgeCount: 1, radius, edgeOp: "Fillet", auto: true }).state;
+  const grabbed = (s: FilletFsm): FilletFsm => filletStep(s, { kind: "grabEdge" }).state;
+
+  it("an auto arm types the op from the drag SIGN", () => {
+    const s = grabbed(autoArm());
+
+    const away = filletStep(s, { kind: "drag", signed: 4.5 });
+    expect(away.state.radius).toBe(4.5);
+    expect(away.state.edgeOp).toBe("Fillet");
+    expect(away.state.touched).toBe(true);
+
+    const into = filletStep(s, { kind: "drag", signed: -3 });
+    expect(into.state.radius).toBe(3); // MAGNITUDE — the sign never reaches the wire
+    expect(into.state.edgeOp).toBe("Chamfer");
+    expect(into.state.auto).toBe(true); // a direction flip does not lock the type
+  });
+
+  it("holds the type inside the flip band, and flips just past it", () => {
+    const s = grabbed(autoArm());
+    expect(filletStep(s, { kind: "drag", signed: -0.2 }).state.edgeOp).toBe("Fillet");
+    expect(filletStep(s, { kind: "drag", signed: -0.3 }).state.edgeOp).toBe("Chamfer");
+
+    // …and symmetrically on the way back: the band is hysteresis, not a dead zone.
+    const chamfered = filletStep(s, { kind: "drag", signed: -0.3 }).state;
+    expect(filletStep(chamfered, { kind: "drag", signed: 0.2 }).state.edgeOp).toBe("Chamfer");
+    expect(filletStep(chamfered, { kind: "drag", signed: 0.3 }).state.edgeOp).toBe("Fillet");
+  });
+
+  it("clamps the magnitude to the minimum without re-typing inside the clamp", () => {
+    const s = grabbed(autoArm());
+    const tiny = filletStep(s, { kind: "drag", signed: 0.01 });
+    expect(tiny.state.radius).toBe(0.1);
+    expect(tiny.state.edgeOp).toBe("Fillet");
+  });
+
+  it("a LOCKED type projects the drag onto its own half-line (no V-bounce)", () => {
+    // auto:false — the drag sizes, it never types.
+    const locked = grabbed(
+      filletStep(filletInit(), { kind: "arm", edgeCount: 1, radius: 2, edgeOp: "Fillet" }).state,
+    );
+    const backwards = filletStep(locked, { kind: "drag", signed: -5 });
+    expect(backwards.state.edgeOp).toBe("Fillet");
+    expect(backwards.state.radius).toBe(0.1); // bottomed out, NOT |−5| = 5
+    // …and it recovers monotonically from there.
+    expect(filletStep(backwards.state, { kind: "drag", signed: 3 }).state.radius).toBe(3);
+
+    // A locked Chamfer is the mirror image: its half-line is the negative one.
+    const lockedChamfer = grabbed(
+      filletStep(filletInit(), { kind: "arm", edgeCount: 1, radius: 1, edgeOp: "Chamfer" }).state,
+    );
+    const away = filletStep(lockedChamfer, { kind: "drag", signed: 5 });
+    expect(away.state.edgeOp).toBe("Chamfer");
+    expect(away.state.radius).toBe(0.1);
+    expect(filletStep(away.state, { kind: "drag", signed: -2 }).state.radius).toBe(2);
+  });
+
+  it("setEdgeOp locks the type for the session (a later drag cannot re-type)", () => {
+    const picked = filletStep(autoArm(), { kind: "setEdgeOp", edgeOp: "Chamfer" });
+    expect(picked.effect).toBe("update");
+    expect(picked.state.edgeOp).toBe("Chamfer");
+    expect(picked.state.auto).toBe(false);
+
+    const dragged = filletStep(grabbed(picked.state), { kind: "drag", signed: -5 });
+    expect(dragged.state.edgeOp).toBe("Chamfer"); // still the user's choice
+    expect(dragged.state.radius).toBe(5);
+  });
+
+  it("setEdgeOp reseeds a PRISTINE arm's size, and preserves a touched one", () => {
+    // Untouched: the picked op's own default (a chamfer distance is not a radius).
+    const chamfer = filletStep(autoArm(), { kind: "setEdgeOp", edgeOp: "Chamfer" }).state;
+    expect(chamfer.radius).toBe(1);
+    // A segment pick authors no SIZE, so the arm is still pristine and picking back
+    // reseeds again rather than stranding the fillet at the chamfer's default.
+    expect(chamfer.touched).toBe(false);
+    expect(filletStep(chamfer, { kind: "setEdgeOp", edgeOp: "Fillet" }).state.radius).toBe(2);
+
+    // Touched (dragged or typed): the size is the user's and survives the swap.
+    const typed = filletStep(autoArm(), { kind: "setRadius", radius: 7 }).state;
+    expect(typed.touched).toBe(true);
+    expect(filletStep(typed, { kind: "setEdgeOp", edgeOp: "Chamfer" }).state.radius).toBe(7);
+  });
+
+  it("a TYPED value is a magnitude and never re-types the op", () => {
+    const s = filletStep(autoArm(), { kind: "setRadius", radius: -7 });
+    expect(s.state.radius).toBe(7);
+    expect(s.state.edgeOp).toBe("Fillet");
+    expect(s.state.auto).toBe(true); // typing does not end the direction lane
+    expect(filletStep(autoArm(), { kind: "setRadius", radius: 0 }).state.radius).toBe(0.1);
+  });
+
+  it("setEdgeOp is inert outside armed/dragging", () => {
+    expect(filletStep(filletInit(), { kind: "setEdgeOp", edgeOp: "Chamfer" }).effect).toBe("none");
+  });
+
+  it("arm can seed `touched` — a RE-EDIT's size is already the user's", () => {
+    // A fresh pick arms pristine (the reseed above is correct there)…
+    expect(filletStep(filletInit(), { kind: "arm", edgeCount: 1, radius: 5 }).state.touched).toBe(
+      false,
+    );
+    // …but a re-edit seeds the COMMITTED size, so a later segment pick must keep it
+    // rather than rewriting a committed 5 mm fillet to the 1 mm chamfer default.
+    const reedit = filletStep(filletInit(), {
+      kind: "arm",
+      edgeCount: 1,
+      radius: 5,
+      edgeOp: "Fillet",
+      auto: false,
+      touched: true,
+    }).state;
+    expect(reedit.touched).toBe(true);
+    const flipped = filletStep(reedit, { kind: "setEdgeOp", edgeOp: "Chamfer" }).state;
+    expect(flipped.edgeOp).toBe("Chamfer");
+    expect(flipped.radius).toBe(5);
   });
 });
 

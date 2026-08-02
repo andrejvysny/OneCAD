@@ -503,6 +503,13 @@ export interface DatumProjection {
 /** The `projection-updated` payload (mirrors `documentStore.DocumentProjection`). */
 export interface DocumentProjectionWire {
   status: "empty" | "loading" | "ready";
+  /**
+   * The document this projection describes. Revisions restart at 1 for every
+   * newly opened runtime, so the stale-projection guard scopes its revision
+   * compare to one document. Optional: the mock lane omits it (same-document
+   * semantics — the mock never replaces the document out from under the store).
+   */
+  documentId?: string;
   revision: number;
   title: string;
   dirty: boolean;

@@ -10,6 +10,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+echo "==> Checking worker stdout hygiene"
+"${SCRIPT_DIR}/check-worker-stdout-hygiene.sh"
+
 BUILD_TYPE="${1:-Release}"
 
 # Rust host triple names the sidecar binary; fall back to Apple Silicon if

@@ -595,6 +595,18 @@ function labelForOp(op: OperationOp): string {
   return op.opType;
 }
 
+/**
+ * The ONE `opType` change `UpdateOperationParams` may make — mirrors core
+ * `session::op_type_edit_allowed`. Fillet and Chamfer have field-identical
+ * params and derive the same inputs, so the unified edge tool's re-edit may flip
+ * one into the other; every other pair is a remove + re-add, not a params update.
+ */
+function isSanctionedOpTypeSwap(prior: string, next: string): boolean {
+  return (
+    (prior === "Fillet" && next === "Chamfer") || (prior === "Chamfer" && next === "Fillet")
+  );
+}
+
 function noopResult(): ApplyOperationResult {
   return {
     revision: mockRevision,
@@ -761,6 +773,21 @@ async function mockApplyEditCommand(command: WireEditCommand): Promise<ApplyOper
       // its body (the lean mock keeps the same mesh — a documented geometry limit).
       const feat = mockFeatures.find((f) => f.id === command.record);
       const params = command.op.params as unknown as Record<string, unknown>;
+      const nextOpType = command.op.opType;
+      // MIRROR the core allow-list (`session::op_type_edit_allowed`): `opType` is
+      // structural, so a params update may not change it — with the ONE sanctioned
+      // Fillet⇄Chamfer pair. Without this the mock lane stays green on an edit the
+      // real backend rejects (e.g. Fillet→Extrude), which is exactly the class of
+      // divergence the mock exists to avoid.
+      const priorOpType = feat?.opType;
+      if (
+        priorOpType !== undefined &&
+        priorOpType !== nextOpType &&
+        !isSanctionedOpTypeSwap(priorOpType, nextOpType)
+      ) {
+        throw new Error("UpdateOperationParams may not change opType");
+      }
+      const typeChanged = priorOpType !== undefined && priorOpType !== nextOpType;
       if (feat) {
         undoStack.push(snap("Update"));
         redoStack.length = 0;
@@ -770,12 +797,24 @@ async function mockApplyEditCommand(command: WireEditCommand): Promise<ApplyOper
         // dimension (`valueTextForFeature` returns undefined, matching dto.rs
         // `feature_value_text`) — but the mock LABELS a boolean row by its
         // operation (mutateOp), so the label is what has to follow the swap.
+        // A sanctioned Fillet⇄Chamfer swap labels by the new `opType`, matching how
+        // `mutateOp` stamps a freshly authored edge op.
         const label =
-          feat.opType === "Boolean" && typeof params.operation === "string" ? params.operation : undefined;
-        if (valueText !== undefined || label !== undefined) {
+          feat.opType === "Boolean" && typeof params.operation === "string"
+            ? params.operation
+            : typeChanged
+              ? nextOpType
+              : undefined;
+        const opType = typeChanged ? nextOpType : undefined;
+        if (valueText !== undefined || label !== undefined || opType !== undefined) {
           mockFeatures = mockFeatures.map((f) =>
             f.id === command.record
-              ? { ...f, ...(valueText !== undefined ? { valueText } : {}), ...(label !== undefined ? { label } : {}) }
+              ? {
+                  ...f,
+                  ...(valueText !== undefined ? { valueText } : {}),
+                  ...(label !== undefined ? { label } : {}),
+                  ...(opType !== undefined ? { opType } : {}),
+                }
               : f,
           );
         }

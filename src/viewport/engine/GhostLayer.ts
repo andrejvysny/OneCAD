@@ -74,6 +74,11 @@ export class GhostLayer {
     deps.root.add(this.group);
   }
 
+  /** Theme change: re-read the palette into the shared ghost material. */
+  refreshColors(): void {
+    this.material.color.copy(palette.hoverAccent());
+  }
+
   /** Show translucent clones of `entry`'s geometry at each transform. */
   show(entry: MeshEntry, transforms: GhostTransform[]): void {
     this.clearMeshes();

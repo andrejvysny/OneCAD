@@ -40,7 +40,8 @@
 //! ## Reference existence is a regen-time concern (F7; C++ parity)
 //!
 //! The session validates *structural* invariants — duplicate ids, `opType`
-//! immutability, fillet/chamfer lockstep, and anti-time-travel
+//! immutability (with the ONE sanctioned Fillet⇄Chamfer exception — see
+//! [`op_type_edit_allowed`]), fillet/chamfer lockstep, and anti-time-travel
 //! (`produces_before`) — but does NOT check that a referenced sketch or body
 //! actually *exists* when a command binds it (e.g. an `EditOperationInput`
 //! profile pointing at an absent sketch, or an `AddOperation` whose params name a
@@ -588,15 +589,23 @@ impl DocumentSession {
             .index_of(id)
             .ok_or(DomainError::RecordNotFound(id))?;
         let prior = self.document.timeline.record(index).unwrap().clone();
-        if !same_op_type(&prior.op, &op) {
+        if !op_type_edit_allowed(&prior.op, &op) {
             return Err(DomainError::Validation(
                 "UpdateOperationParams may not change opType".into(),
             ));
         }
+        let type_changed = !same_op_type(&prior.op, &op);
         // F2: fillet/chamfer `edges`/`edge_ids` must be in lockstep (all entry paths).
         validate_fillet_lockstep(&op)?;
         let mut nr = prior.clone();
         nr.op = op;
+        // A sanctioned Fillet⇄Chamfer swap is the only path that can strand the
+        // legacy `mode` string on the wrong opType; the session is the single
+        // writer, so the contradiction is corrected HERE rather than trusted to
+        // whichever caller happened to build the payload.
+        if type_changed {
+            normalize_edge_op_mode(&mut nr.op, &prior.op);
+        }
         nr.inputs = nr.op.derive_inputs();
 
         let mut recs = self.document.timeline.records().to_vec();
@@ -1325,7 +1334,88 @@ fn validate_fillet_lockstep(op: &Operation) -> Result<(), DomainError> {
     Ok(())
 }
 
-/// True iff two operations have the same `opType` (params update may not change it).
+/// Whether `UpdateOperationParams` may rewrite `prior` into `next`.
+///
+/// **The default is NO.** `opType` is structural, not cosmetic: dependents bind
+/// through it, the planner hash includes it (`planner.rs`), and the worker
+/// dispatches an op on `opType` ALONE (`PlanExecutor.cpp:234-235`). Changing it
+/// under a "params update" would silently re-author the operation.
+///
+/// Exactly ONE pair is sanctioned — **Fillet ⇄ Chamfer**, both directions —
+/// because every property that makes a swap dangerous is absent there:
+/// * [`FilletParams`](crate::document::record::FilletParams) and
+///   [`ChamferParams`](crate::document::record::ChamferParams) are
+///   FIELD-IDENTICAL (`record.rs:754-781`), so the payload is interchangeable
+///   with no field invented or dropped;
+/// * both derive the same inputs, so `derive_inputs` is preserved and the
+///   dependency graph does not move;
+/// * they share one validator ([`validate_fillet_lockstep`]), so the edge
+///   lockstep invariant holds identically across the swap;
+/// * the worker keys only on `opType`, so the swapped record executes the other
+///   kernel op with no further translation;
+/// * one frontend tool authors both (the unified Fillet/Chamfer edge tool), so
+///   this is a real user gesture rather than a synthetic edit; and
+/// * the inverse is `Inverse::RestoreRecord` of the WHOLE prior record, so undo
+///   restores the original `opType` (and params) exactly, and redo re-runs this
+///   same symmetric guard.
+///
+/// **Widening rule:** a new pair may be added only when it is likewise
+/// params-interchangeable AND `derive_inputs`-preserving. Anything else is a
+/// remove + re-add, not a params update.
+///
+/// Matching is on ENUM VARIANTS, never on `opType` strings: a string allow-list
+/// would also admit a `Known` ⇄ `Opaque` crossing, and `validate_temporal` is
+/// vacuous for an opaque record — the swap would skip the anti-time-travel
+/// check entirely.
+fn op_type_edit_allowed(prior: &Operation, next: &Operation) -> bool {
+    if same_op_type(prior, next) {
+        return true;
+    }
+    matches!(
+        (prior, next),
+        (
+            Operation::Known(KnownOperation::Fillet(_)),
+            Operation::Known(KnownOperation::Chamfer(_))
+        ) | (
+            Operation::Known(KnownOperation::Chamfer(_)),
+            Operation::Known(KnownOperation::Fillet(_))
+        )
+    )
+}
+
+/// Rewrites the legacy SCHEMA §7.3 `mode` string to agree with the op's own
+/// `opType` after a sanctioned Fillet⇄Chamfer swap.
+///
+/// `mode` is redundant with the authoritative `opType` tag and is NOT modelled;
+/// it round-trips through the `extra` flatten (`record.rs:743-744`) whenever a
+/// document carried one. A swap that left it alone would persist the
+/// self-contradicting `{"opType":"Chamfer","params":{"mode":"Fillet"}}` across
+/// save/reload. The key is only WRITTEN when one of the two records already
+/// carried it — a document that never had a `mode` never grows one.
+fn normalize_edge_op_mode(op: &mut Operation, prior: &Operation) {
+    if !edge_op_has_mode(op) && !edge_op_has_mode(prior) {
+        return;
+    }
+    let op_type = serde_json::Value::String(op.op_type().to_string());
+    let extra = match op {
+        Operation::Known(KnownOperation::Fillet(p)) => &mut p.extra,
+        Operation::Known(KnownOperation::Chamfer(p)) => &mut p.extra,
+        _ => return,
+    };
+    extra.insert("mode".into(), op_type);
+}
+
+/// Whether a fillet/chamfer op carries the legacy `mode` string in its `extra`.
+fn edge_op_has_mode(op: &Operation) -> bool {
+    match op {
+        Operation::Known(KnownOperation::Fillet(p)) => p.extra.contains_key("mode"),
+        Operation::Known(KnownOperation::Chamfer(p)) => p.extra.contains_key("mode"),
+        _ => false,
+    }
+}
+
+/// True iff two operations have the same `opType` — the base case of
+/// [`op_type_edit_allowed`], which owns the one sanctioned exception.
 fn same_op_type(a: &Operation, b: &Operation) -> bool {
     match (a, b) {
         (Operation::Known(x), Operation::Known(y)) => {

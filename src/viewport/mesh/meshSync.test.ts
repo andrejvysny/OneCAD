@@ -12,6 +12,7 @@ import { documentStore } from "@/stores/documentStore";
 import { toolStore } from "@/stores/toolStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { settingsStore } from "@/stores/settingsStore";
+import { __resetLogForTests, logSnapshot } from "@/debug/log";
 import type { CadClient } from "@/ipc/client";
 import type { DocumentChange } from "@/ipc/types";
 import type { ViewportEngine } from "../engine/ViewportEngine";
@@ -33,7 +34,7 @@ function fakeEngine() {
   };
 }
 
-function fakeClient(getMesh = vi.fn(async () => makeBoxMesh())) {
+function fakeClient(getMesh: ReturnType<typeof vi.fn> = vi.fn(async () => makeBoxMesh())) {
   const listeners = new Set<(c: DocumentChange) => void>();
   const client = {
     getBodyMesh: getMesh,
@@ -469,5 +470,136 @@ describe("MeshIngest isolation", () => {
 
     viewportStore.setState({ isolatedBodyIds: ["body1"] });
     expect(group.visible).toBe(true);
+  });
+});
+
+// ── SAVE/OPEN hardening: self-healing reconcile + surfaced failures ──────────
+describe("MeshIngest reconcile (missed document-changed self-heal)", () => {
+  it("the exact reopen wedge: first fetch hits the pre-publish window (empty), the " +
+     "post-regen projection re-applies the SAME bodies, and the body still loads", async () => {
+    setBodies({ body1: true });
+    // First fetch = the open window (mesh not regenerated yet); later = published.
+    let published = false;
+    const getMesh = vi.fn(async () => (published ? makeBoxMesh() : new ArrayBuffer(0)));
+    const engine = fakeEngine();
+    const { client } = fakeClient(getMesh);
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    await tick();
+    expect(bodyGroup(engine, "body1")).toBeUndefined(); // pre-publish miss, no scene object
+
+    // The open-regen publishes; document-changed is MISSED (the webview race).
+    // The post-regen projection re-hydrates the store with the SAME visible flag —
+    // before the reconcile pass this produced no visibility diff and the body
+    // stayed invisible forever.
+    published = true;
+    setBodies({ body1: true });
+    await tick();
+    expect(bodyGroup(engine, "body1")).toBeDefined();
+    expect(bodyGroup(engine, "body1")!.visible).toBe(true);
+  });
+
+  it("reconcile drops a scene object whose body left the store (missed removal)", async () => {
+    setBodies({ body1: true, body2: true });
+    const engine = fakeEngine();
+    const { client } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    await tick();
+    expect(bodyGroup(engine, "body2")).toBeDefined();
+
+    // body2 vanishes from the projection with NO removedBodies event.
+    setBodies({ body1: true });
+    await tick();
+    expect(bodyGroup(engine, "body2")).toBeUndefined();
+  });
+
+  it("reconcile does not re-fetch a body that is already loaded or in flight", async () => {
+    setBodies({ body1: true });
+    const engine = fakeEngine();
+    const { client, getMesh } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    await tick();
+    expect(getMesh).toHaveBeenCalledTimes(1);
+
+    // A projection re-apply with identical content: loaded body ⇒ no new fetch.
+    setBodies({ body1: true });
+    await tick();
+    expect(getMesh).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("MeshIngest empty-mesh bounded retry", () => {
+  it("retries a get_mesh miss on its own and renders once the mesh publishes, with NO further event", async () => {
+    vi.useFakeTimers();
+    try {
+      setBodies({ body1: true });
+      let published = false;
+      const getMesh = vi.fn(async () => (published ? makeBoxMesh() : new ArrayBuffer(0)));
+      const engine = fakeEngine();
+      const { client } = fakeClient(getMesh);
+      ingest = new MeshIngest();
+      ingest.attach(engine, client);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(bodyGroup(engine, "body1")).toBeUndefined();
+
+      published = true; // the publish lands silently (no document-changed, no projection)
+      await vi.advanceTimersByTimeAsync(1000); // > retry backoff
+      expect(bodyGroup(engine, "body1")).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives up after the bounded retries without wedging or throwing", async () => {
+    vi.useFakeTimers();
+    try {
+      setBodies({ body1: true });
+      const getMesh = vi.fn(async () => new ArrayBuffer(0)); // never publishes
+      const engine = fakeEngine();
+      const { client } = fakeClient(getMesh);
+      ingest = new MeshIngest();
+      ingest.attach(engine, client);
+      await vi.advanceTimersByTimeAsync(10_000);
+      // initial + 3 bounded retries, then stop — no unbounded polling.
+      expect(getMesh).toHaveBeenCalledTimes(4);
+      expect(bodyGroup(engine, "body1")).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("MeshIngest load-failure surfacing", () => {
+  it("a rejected mesh fetch surfaces an error hint and does not block other bodies", async () => {
+    setBodies({ bad: true, good: true });
+    const getMesh = vi.fn(async (id: string) => {
+      if (id === "bad") throw new Error("boom");
+      return makeBoxMesh();
+    });
+    const engine = fakeEngine();
+    const { client } = fakeClient(getMesh);
+    viewportStore.getState().setStatusHint(null);
+    // The failure lands on the structured log lane (DEV-OBSERVABILITY Wave F),
+    // which vitest keeps closed by default — open it just for this assertion.
+    __resetLogForTests();
+    try {
+      ingest = new MeshIngest();
+      ingest.attach(engine, client);
+      await tick();
+
+      expect(bodyGroup(engine, "good")).toBeDefined(); // the failure is per-body
+      expect(bodyGroup(engine, "bad")).toBeUndefined();
+      const hint = viewportStore.getState().statusHint;
+      expect(hint?.severity).toBe("error");
+      expect(hint?.message).toContain("boom");
+      const logged = logSnapshot().filter((e) => e.level === "error" && e.tag === "mesh");
+      expect(logged).toHaveLength(1);
+      expect(logged[0].msg).toContain("bad");
+    } finally {
+      __resetLogForTests({ enabled: false });
+      viewportStore.getState().setStatusHint(null);
+    }
   });
 });

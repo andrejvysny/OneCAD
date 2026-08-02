@@ -9,6 +9,7 @@
 import { createStore, useStore } from "zustand";
 import { getViewportEngine } from "@/viewport/engineBridge";
 import { selectedBodyIds, selectionStore } from "@/stores/selectionStore";
+import { log } from "@/debug/log";
 import type { InputDevice } from "@/viewport/engine/navInput";
 
 export type Projection = "persp" | "ortho";
@@ -177,6 +178,10 @@ export const viewportStore = createStore<ViewportState>()((set, get) => ({
     }
     const severity = opts?.severity ?? "info";
     const sticky = opts?.sticky ?? false;
+    // Every hint the user actually SAW, in the one place all 90+ callers pass
+    // through — grep tag `hint` to reconstruct what the UI told them, and when.
+    // A CLEAR (message === null) is silent: it carries no information.
+    log(severity === "error" ? "warn" : "debug", "hint", message, { severity, sticky });
     set({ statusHint: { message, severity, sticky } });
     if (!sticky) {
       dismissTimer = setTimeout(() => {

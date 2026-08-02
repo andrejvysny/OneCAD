@@ -213,6 +213,33 @@ export class SketchObject {
     ];
   }
 
+  /**
+   * Theme change: re-read every color this object baked at construction.
+   *
+   * The nine LineMaterials are built from `color.getHex()` — a VALUE snapshot,
+   * not a live reference — and entity state changes only swap which material an
+   * entity uses, never recolor one. So without this every sketch drawn before a
+   * theme flip keeps the old theme's colors until the sketch is re-entered.
+   */
+  refreshColors(): void {
+    (this.tint.material as THREE.MeshBasicMaterial).color.copy(palette.sketchPlane());
+    this.grid.setColors({
+      minor: palette.gridMinor(),
+      major: palette.gridMajor(),
+      clear: palette.sketchPlane(),
+    });
+    this.pointsMat.color.copy(palette.sketchFull());
+    this.matUnder.color.copy(palette.sketchUnder());
+    this.matFull.color.copy(palette.sketchFull());
+    this.matConflict.color.copy(palette.sketchConflict());
+    this.matSelected.color.copy(palette.sketchSelected());
+    this.matHover.color.copy(palette.hoverAccent());
+    this.matConstruction.color.copy(palette.sketchConstruction());
+    this.matReference.color.copy(palette.sketchReference());
+    this.matPreview.color.copy(palette.sketchUnder());
+    this.matTrimGhost.color.copy(palette.destructive());
+  }
+
   setVisible(visible: boolean): void {
     this.planeGroup.visible = visible;
     this.deps.invalidate();

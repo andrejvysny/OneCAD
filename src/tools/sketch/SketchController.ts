@@ -64,6 +64,7 @@ import {
 import { mirrorEntities } from "./mirrorMath";
 import { trimPreview, entityToDraft } from "./trimMath";
 import { trace } from "@/debug/trace";
+import { logDebug, logError } from "@/debug/log";
 import {
   dimensionInit,
   dimensionStep,
@@ -81,9 +82,30 @@ import {
   type ToolConstraintSpec,
   type ToolMachine,
   type ToolState,
+  type ToolStep,
 } from "./toolMachine";
 
 const DRAG_PX = 4;
+
+/**
+ * Log a sketch-tool step that actually PRODUCED something (committed geometry or
+ * a finished gesture) — DEV-OBSERVABILITY Wave F.
+ *
+ * Deliberately called from the discrete sites only (click, polygon side count).
+ * The pointer-MOVE site steps the same machines at rAF frequency and must never
+ * reach the log lane, which is why this is not folded into `machine.step`.
+ */
+function logSketchStep(toolId: string, event: string, stepped: ToolStep): void {
+  const committed = stepped.committed?.length ?? 0;
+  if (committed === 0 && stepped.done !== true) return;
+  logDebug("fsm", `sketch/${toolId}: ${event} committed ${committed}`, {
+    tool: toolId,
+    event,
+    committed,
+    done: stepped.done === true,
+    kinds: stepped.committed?.map((c) => c.type),
+  });
+}
 
 /** Per-tool container cursor (U8). Draw tools show a crosshair for aiming; pick
  *  tools (select/trim/mirror) keep the default arrow — omitted here since the
@@ -400,7 +422,10 @@ export class SketchController {
           await this.deps.client.cancelSketch(closing.sketchId);
           await this.deps.client.finishSketch(closing.sketchId);
         } catch (e) {
-          console.error("[sketch] switch: closing the previous sketch failed", e);
+          logError("sketch", "switch: closing the previous sketch FAILED", {
+            sketchId: closing.sketchId,
+            error: e,
+          });
         }
         // A is CLOSED now — whatever happens to this switch below. Its always-visible
         // static layer still holds the copy fetched at entry, and the only signal
@@ -454,7 +479,7 @@ export class SketchController {
     try {
       session = await this.deps.client.enterSketch(target);
     } catch (e) {
-      console.error("[sketch] enterSketch failed", target, e);
+      logError("sketch", "enterSketch FAILED", { target, error: e });
       viewportStore.getState().setStatusHint(`Enter sketch failed: ${sketchErr(e)}`, { severity: "error", sticky: true });
       return false;
     }
@@ -468,7 +493,9 @@ export class SketchController {
       if (typeof target !== "string") {
         void this.deps.client
           .deleteSketch(session.sketchId)
-          .catch((e) => console.error("[sketch] orphan cleanup failed", e));
+          .catch((e: unknown) =>
+            logError("sketch", "orphan cleanup FAILED", { sketchId: session.sketchId, error: e }),
+          );
       }
       return true; // the session opened; the user just left
     }
@@ -925,7 +952,10 @@ export class SketchController {
           await this.deps.client.cancelSketch(sketchId);
           await this.deps.client.finishSketch(sketchId);
         } catch (e) {
-          console.error("[sketch] exit: finishSketch failed (record may be missing)", e);
+          logError("sketch", "exit: finishSketch FAILED (timeline record may be missing)", {
+            sketchId,
+            error: e,
+          });
         }
       })();
     }
@@ -1170,6 +1200,7 @@ export class SketchController {
     const snap = this.snapAt(e.clientX, e.clientY) ?? this.lastSnap;
     if (!snap) return;
     const stepped = this.machine.step(this.machineState, { kind: "click", pt: snap.point }, this.stepCtx());
+    logSketchStep(this.machine.id, "click", stepped);
     this.machineState = stepped.state;
     this.deps.engine.setSketchPreview(this.decorate(stepped.preview));
     if (stepped.committed && stepped.committed.length > 0) {
@@ -1953,6 +1984,7 @@ export class SketchController {
       !isEditableKeyTarget(e.target)
     ) {
       const stepped = this.machine.step(this.machineState, { kind: "sides", n: Number(e.key) }, this.stepCtx());
+      logSketchStep(this.machine.id, "sides", stepped);
       this.machineState = stepped.state;
       this.deps.engine.setSketchPreview(this.decorate(stepped.preview));
       this.updatePolygonHint();

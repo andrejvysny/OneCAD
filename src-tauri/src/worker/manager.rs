@@ -156,8 +156,17 @@ struct Shared {
 /// Crash-circuit state (poison detection).
 #[derive(Default)]
 struct Poison {
-    counts: HashMap<String, u32>,
+    entries: HashMap<String, PoisonEntry>,
     open: HashSet<String>,
+}
+
+/// What is known about one poison key: how many consecutive same-key crashes, and
+/// the LAST crash message. The message is what makes an open circuit diagnosable —
+/// "circuit open" alone says nothing about why the worker kept dying.
+#[derive(Default)]
+struct PoisonEntry {
+    count: u32,
+    last_message: String,
 }
 
 impl Shared {
@@ -178,19 +187,45 @@ impl Shared {
             .unwrap_or_default()
     }
 
+    /// Broadcasts a lifecycle transition — and logs it FIRST, so the transition is
+    /// on the record even when nobody is subscribed (the broadcast has no receiver
+    /// in tests / before the status banner mounts).
     fn emit(&self, ev: WorkerLifecycle) {
+        match &ev {
+            WorkerLifecycle::Ready { epoch, fingerprint } => {
+                tracing::info!(epoch, fingerprint = %fingerprint, "worker ready");
+            }
+            WorkerLifecycle::Restarting { epoch, reason } => {
+                tracing::warn!(epoch, reason = %reason, "worker restarting");
+            }
+            WorkerLifecycle::Failed { reason } => {
+                tracing::error!(reason = %reason, "worker failed (no worker)");
+            }
+            WorkerLifecycle::CircuitOpen { key } => {
+                // The enum stays as-is (wire/event contract); the crash message is
+                // looked up here so the log line is self-contained.
+                tracing::error!(
+                    key = %key,
+                    last_crash = %self.last_crash(key),
+                    "worker crash circuit open (poison) — this plan now fails fast"
+                );
+            }
+        }
         let _ = self.lifecycle.send(ev);
     }
 
-    /// Records a same-key crash; returns `true` if the circuit just opened.
-    fn record_crash(&self, key: &str) -> bool {
+    /// Records a same-key crash + its message; returns `true` if the circuit just
+    /// opened.
+    fn record_crash(&self, key: &str, message: &str) -> bool {
         let mut p = self.poison.lock().unwrap();
+        let entry = p.entries.entry(key.to_string()).or_default();
+        entry.last_message = message.to_string();
         if p.open.contains(key) {
             return false;
         }
-        let c = p.counts.entry(key.to_string()).or_insert(0);
-        *c += 1;
-        if *c >= self.config.poison_threshold {
+        let entry = p.entries.get_mut(key).expect("just inserted");
+        entry.count += 1;
+        if entry.count >= self.config.poison_threshold {
             p.open.insert(key.to_string());
             true
         } else {
@@ -203,16 +238,34 @@ impl Shared {
     fn record_success(&self, keys: &[String]) {
         let mut p = self.poison.lock().unwrap();
         for key in keys {
-            p.counts.remove(key);
+            p.entries.remove(key);
             p.open.remove(key);
         }
     }
 
-    /// Whether ANY of a plan's candidate op keys has an open circuit — the fail-fast
-    /// gate (the crashing op is one of them, so a poisoned plan is caught up front).
-    fn plan_circuit_open(&self, keys: &[String]) -> bool {
+    /// The first of a plan's candidate op keys with an open circuit, and that key's
+    /// last crash message — the fail-fast gate (the crashing op is one of them, so a
+    /// poisoned plan is caught up front). The message travels into the fail-fast
+    /// error so the caller reports WHY, not just "circuit open".
+    fn plan_circuit_open(&self, keys: &[String]) -> Option<(String, String)> {
         let p = self.poison.lock().unwrap();
-        keys.iter().any(|k| p.open.contains(k))
+        let key = keys.iter().find(|k| p.open.contains(*k))?;
+        let message = p
+            .entries
+            .get(key)
+            .map(|e| e.last_message.clone())
+            .unwrap_or_default();
+        Some((key.clone(), message))
+    }
+
+    fn last_crash(&self, key: &str) -> String {
+        self.poison
+            .lock()
+            .unwrap()
+            .entries
+            .get(key)
+            .map(|e| e.last_message.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -508,7 +561,7 @@ async fn spawn_and_connect(
     let mut cmd = tokio::process::Command::new(&shared.config.binary);
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
     for (k, v) in &shared.config.envs {
         cmd.env(k, v);
@@ -516,12 +569,99 @@ async fn spawn_and_connect(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("spawn {:?}: {e}", shared.config.binary))?;
+    // HARD INVARIANT: the stderr pipe is now OURS, and `Log.h` flushes every line —
+    // an unread pipe fills its buffer and BLOCKS the worker mid-op. The forwarder is
+    // therefore spawned unconditionally, before anything that can fail or await
+    // (`?` below drops `child`, and `kill_on_drop` then ends the forwarder at EOF).
+    // The epoch is read at spawn time: the supervisor's `fetch_add` happens on the
+    // death path, before the respawn, so this is the epoch the worker runs under.
+    // (The failed-*start* branch does not bump, so N consecutive failed spawns share
+    // one epoch — cosmetic, and there is no worker output to attribute anyway.)
+    let epoch = shared.epoch.load(Ordering::SeqCst);
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(forward_worker_stderr(stderr, epoch));
+    }
     let stdout = child.stdout.take().ok_or("child stdout missing")?;
     let stdin = child.stdin.take().ok_or("child stdin missing")?;
     let client = ProtocolClient::connect(stdout, stdin)
         .await
         .map_err(|e| format!("handshake: {e}"))?;
     Ok((child, Arc::new(client)))
+}
+
+/// Largest single worker stderr line forwarded verbatim; the remainder of an
+/// over-long line is dropped with a marker (a runaway `WLOG` must not blow up the
+/// JSONL sink).
+const MAX_WORKER_LINE: usize = 8 * 1024;
+
+/// Forwards the C++ worker's stderr into the `tracing` stream under target
+/// `worker`, one event per line, at the level its `WLOG` prefix declares.
+///
+/// This task is detached (it outlives nothing but the pipe), so worker events carry
+/// **no span context** — join them to a regen through the frame trace's `reqId`, or
+/// through `epoch`. It self-terminates at EOF: it is the sole owner of the pipe, so
+/// when the child dies the read resolves `Ok(0)`.
+async fn forward_worker_stderr(stderr: tokio::process::ChildStderr, epoch: u64) {
+    use tokio::io::AsyncBufReadExt;
+
+    let mut reader = tokio::io::BufReader::new(stderr);
+    let mut buf: Vec<u8> = Vec::with_capacity(512);
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf).await {
+            Ok(0) => {
+                tracing::debug!(target: "worker", epoch, "worker stderr closed (EOF)");
+                return;
+            }
+            Ok(_) => {
+                let truncated = buf.len() > MAX_WORKER_LINE;
+                if truncated {
+                    buf.truncate(MAX_WORKER_LINE);
+                }
+                let line = String::from_utf8_lossy(&buf);
+                let line = line.trim_end_matches(['\n', '\r']);
+                if line.is_empty() {
+                    continue;
+                }
+                let line = if truncated {
+                    format!("{line} …[truncated]")
+                } else {
+                    line.to_string()
+                };
+                match sniff_worker_level(&line) {
+                    WorkerLine::Error => tracing::error!(target: "worker", epoch, "{line}"),
+                    WorkerLine::Warn => tracing::warn!(target: "worker", epoch, "{line}"),
+                    WorkerLine::Info => tracing::info!(target: "worker", epoch, "{line}"),
+                    WorkerLine::Debug => tracing::debug!(target: "worker", epoch, "{line}"),
+                }
+            }
+            Err(e) => {
+                tracing::debug!(target: "worker", epoch, "worker stderr read error: {e}");
+                return;
+            }
+        }
+    }
+}
+
+/// The level a forwarded worker line claims.
+enum WorkerLine {
+    Error,
+    Warn,
+    Info,
+    Debug,
+}
+
+/// Sniffs the `WLOG` prefix `[<timestamp>] <LEVEL>  <message>` (`Log.h`). Anything
+/// else (a raw `fprintf(stderr,…)`, an OCCT message, the test stub's own lines)
+/// is INFO — never silently dropped.
+fn sniff_worker_level(line: &str) -> WorkerLine {
+    let rest = line.split_once("] ").map_or(line, |(_, rest)| rest);
+    match rest.split_whitespace().next().unwrap_or_default() {
+        "ERROR" => WorkerLine::Error,
+        "WARN" => WorkerLine::Warn,
+        "DEBUG" => WorkerLine::Debug,
+        _ => WorkerLine::Info,
+    }
 }
 
 async fn auto_open_session(shared: &Shared, client: &ProtocolClient) -> Result<(), ProtocolError> {
@@ -555,6 +695,7 @@ async fn run_until_death(
                     Ok(resp) if resp.ok => missed = 0,
                     _ => {
                         missed += 1;
+                        tracing::debug!(missed, max = shared.config.max_missed_pings, "worker ping missed");
                         if missed >= shared.config.max_missed_pings {
                             let _ = child.start_kill();
                             let _ = child.wait().await;
@@ -864,10 +1005,13 @@ async fn stream_plan(shared: Arc<Shared>, request: PlanRequest, tx: mpsc::Sender
     // crashing op is one of them, so a poisoned plan is caught up front (F3).
     let op_keys = plan_op_keys(&request, &shared.fingerprint());
 
-    if shared.plan_circuit_open(&op_keys) {
+    if let Some((key, last)) = shared.plan_circuit_open(&op_keys) {
         let _ = tx
             .send(PlanEvent::Failed(EngineError::Crashed {
-                message: "crash circuit breaker open (poison) — plan abandoned".into(),
+                message: format!(
+                    "crash circuit breaker open (poison) — plan abandoned \
+                     (key {key}; last crash: {last})"
+                ),
             }))
             .await;
         return;
@@ -983,7 +1127,7 @@ fn finish_plan(
             // but does NOT kill the worker (the supervisor keeps it alive so other
             // plans still run) — only the F2 flap budget reaches Failed.
             if let Some(key) = op_keys.get(steps_received.min(op_keys.len().saturating_sub(1))) {
-                if shared.record_crash(key) {
+                if shared.record_crash(key, &proto.to_string()) {
                     shared.emit(WorkerLifecycle::CircuitOpen { key: key.clone() });
                 }
             }
@@ -1479,8 +1623,8 @@ fn assemble_mesh(
     let total = reconcile_field(manifest_total, resp_total, "totalBytes")?;
     let sha = reconcile_field(manifest_sha, resp_sha, "sha256")?;
     if total.is_none() && sha.is_none() {
-        eprintln!(
-            "worker: mesh handle carried no totalBytes/sha256 (manifest or resp) — \
+        tracing::warn!(
+            "mesh handle carried no totalBytes/sha256 (manifest or resp) — \
              validating MESH1 header only"
         );
     }

@@ -60,3 +60,82 @@ export function radiusFromValueText(text: string, fallback = DEFAULT_FILLET_RADI
   const n = Number.parseFloat(text);
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
+
+/*
+ * FILLET-CHAMFER-UNIFY direction-driven edge op (W0 addition below — pure,
+ * additive; nothing above this line changes).
+ *
+ * FLIP_HOLD is the type-hysteresis band (how far a signed drag must cross
+ * zero before the FSM re-types Fillet↔Chamfer); MIN_VALUE is the magnitude
+ * clamp on the committed radius/distance. The band is deliberately LARGER
+ * than the clamp — if it were smaller, a drag sitting right at the clamped
+ * floor could ping-pong type on sub-pixel noise. The FSM (W1) owns applying
+ * both; this module only supplies the constants and the signed value they
+ * gate.
+ */
+export const EDGE_OP_FLIP_HOLD = 0.25;
+export const EDGE_OP_MIN_VALUE = 0.1;
+
+/** A 2D direction in canvas-pixel space. Not a THREE type — this module has
+ *  no three.js dependency. */
+export interface ScreenAxis {
+  x: number;
+  y: number;
+}
+
+/** Screen convention for the no-projection fallback (T3): up = positive,
+ *  reproducing today's `radiusFromDrag` up-grows mapping exactly. */
+export const SCREEN_UP_AXIS: ScreenAxis = { x: 0, y: -1 };
+
+/**
+ * Unit drag axis from the edge midpoint to its projected outward point, with
+ * the projected edge-tangent component removed (a drag ALONG the edge must
+ * not register as a radius/distance change). Null when the remaining vector
+ * is shorter than `minPx` — a head-on edge (outward and tangent nearly
+ * collinear on screen) must not normalize a noise vector into a fabricated
+ * axis.
+ */
+export function screenDragAxis(
+  pMid: ScreenAxis,
+  pOut: ScreenAxis,
+  pTan?: ScreenAxis,
+  minPx = 3,
+): ScreenAxis | null {
+  let ax = pOut.x - pMid.x;
+  let ay = pOut.y - pMid.y;
+  if (pTan) {
+    const tx = pTan.x - pMid.x;
+    const ty = pTan.y - pMid.y;
+    const tLen = Math.hypot(tx, ty);
+    if (tLen > 1e-9) {
+      const ux = tx / tLen;
+      const uy = ty / tLen;
+      const proj = ax * ux + ay * uy;
+      ax -= proj * ux;
+      ay -= proj * uy;
+    }
+  }
+  const axisLen = Math.hypot(ax, ay);
+  if (axisLen < minPx) return null;
+  return { x: ax / axisLen, y: ay / axisLen };
+}
+
+/**
+ * Signed value after dragging `(dxPx, dyPx)` (RAW screen deltas — clientX −
+ * downX, clientY − downY; no up-positive massaging) along `axis`. UNCLAMPED
+ * and un-abs'd on purpose: the sign lives entirely in `axis` (e.g.
+ * `SCREEN_UP_AXIS.y = -1` makes an upward drag positive, matching
+ * `radiusFromDrag`'s convention exactly), and the caller owns clamping plus
+ * the Fillet/Chamfer type split around zero.
+ */
+export function signedValueFromDrag(
+  startValue: number,
+  dxPx: number,
+  dyPx: number,
+  axis: ScreenAxis,
+  opts: RadiusDragOpts,
+): number {
+  const gain = opts.sensitivity ?? 1;
+  const proj = dxPx * axis.x + dyPx * axis.y;
+  return startValue + proj * opts.worldPerPx * gain;
+}

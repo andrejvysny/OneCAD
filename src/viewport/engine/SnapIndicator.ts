@@ -142,6 +142,8 @@ export class SnapIndicator {
     this.guides = new THREE.LineSegments(new THREE.BufferGeometry(), this.guideMat);
     this.guides.renderOrder = RENDER_ORDER.SNAP_GUIDES;
     this.group.add(this.guides);
+    // (refreshColors below re-reads both of the above on a theme change; the
+    // hint chip styles itself from CSS vars and needs nothing.)
 
     this.hintEl = document.createElement("div");
     this.hintEl.dataset.sketchSnapHint = "1";
@@ -164,6 +166,12 @@ export class SnapIndicator {
   }
 
   /** Swap the marker sprite to the given glyph (lazily building its texture). */
+  /** Theme change: re-read the palette into the marker + guide materials. */
+  refreshColors(): void {
+    this.markerMat.color.copy(palette.sketchUnder());
+    this.guideMat.color.copy(palette.sketchUnder());
+  }
+
   private setGlyph(glyph: MarkerGlyph): void {
     if (this.currentGlyph === glyph) return;
     if (!(glyph in this.glyphTextures)) this.glyphTextures[glyph] = makeGlyphTexture(glyph);

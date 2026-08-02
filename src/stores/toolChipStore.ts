@@ -16,6 +16,7 @@ import type {
   PatternAxis,
   MirrorPlane,
   BooleanMode,
+  EdgeOpKind,
   ExtrudeEndCondition,
 } from "@/tools/modelTools/modelToolMachine";
 
@@ -90,6 +91,20 @@ export interface ValueChipHandlers {
   onCancel?: () => void;
 }
 
+/**
+ * Extra armed-EDGE-OP-cluster options (FILLET-CHAMFER-UNIFY). Only the FRESH
+ * arm renders the [Fillet|Chamfer] segments; the parametric re-edit chip passes
+ * none and stays the bare numeric chip it always was.
+ */
+export interface EdgeOpChipOpts {
+  /** Seed the segment group's active op (default Fillet). */
+  edgeOp?: EdgeOpKind;
+  /** Whether to render the segment group at all (fresh arm only). */
+  showEdgeOpSegments?: boolean;
+  /** A segment was picked — the controller locks the type and swaps the session. */
+  onEdgeOp?: (edgeOp: EdgeOpKind) => void;
+}
+
 /** Handlers the armed DATUM chip wires (offset input + ✓/✕ — DATUM W1). */
 export interface DatumChipHandlers {
   onValue: (v: number) => void;
@@ -137,6 +152,10 @@ export interface ToolChipState {
   canBoolean: boolean;
   /** Whether the armed cluster renders the boolean segment group (fresh arm only). */
   showBooleanSegments: boolean;
+  /** Which edge op the armed fillet/chamfer cluster is authoring. */
+  edgeOp: EdgeOpKind;
+  /** Whether the armed edge-op cluster renders the [Fillet|Chamfer] segments. */
+  showEdgeOpSegments: boolean;
   /** How many regions the armed op covers (1 in the single-region path). */
   regionCount: number;
   /** Unit suffix for the numeric chip (mm / ° — sketch dimension chip). */
@@ -158,6 +177,8 @@ export interface ToolChipState {
   onOp: ((op: BooleanOperation) => void) | null;
   /** Boolean mode segment picked (armed extrude/revolve cluster — Wave 2). */
   onBooleanMode: ((mode: BooleanMode) => void) | null;
+  /** Edge-op segment picked (armed fillet/chamfer cluster). */
+  onEdgeOp: ((edgeOp: EdgeOpKind) => void) | null;
   /** Apply pressed (boolean / pattern / mirror chip). */
   onApply: (() => void) | null;
   /** Axis-reset pressed (revolve chip). */
@@ -180,6 +201,7 @@ export interface ToolChipState {
     worldPos: [number, number, number],
     onValue: (v: number) => void,
     handlers?: ValueChipHandlers,
+    opts?: EdgeOpChipOpts,
   ): void;
   showRevolve(
     value: number,
@@ -263,6 +285,8 @@ export interface ToolChipState {
   setSymmetric(symmetric: boolean): void;
   /** Update just the armed cluster boolean mode (New Body / Add / Cut — Wave 2). */
   setBooleanMode(mode: BooleanMode): void;
+  /** Update just the armed edge-op cluster's authored op (drag flip / segment pick). */
+  setEdgeOp(edgeOp: EdgeOpKind): void;
   clear(): void;
 }
 
@@ -282,6 +306,9 @@ const CLEARED = {
   booleanMode: "NewBody" as BooleanMode,
   canBoolean: false,
   showBooleanSegments: false,
+  edgeOp: "Fillet" as EdgeOpKind,
+  showEdgeOpSegments: false,
+  onEdgeOp: null,
   regionCount: 1,
   suffix: "",
   label: "",
@@ -325,7 +352,7 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
       onBooleanMode: handlers.onBooleanMode ?? null,
     });
   },
-  showFillet(value, worldPos, onValue, handlers) {
+  showFillet(value, worldPos, onValue, handlers, opts) {
     set({
       ...CLEARED,
       kind: "filletRadius",
@@ -334,6 +361,9 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
       onValue,
       onConfirm: handlers?.onConfirm ?? null,
       onCancel: handlers?.onCancel ?? null,
+      edgeOp: opts?.edgeOp ?? "Fillet",
+      showEdgeOpSegments: opts?.showEdgeOpSegments ?? false,
+      onEdgeOp: opts?.onEdgeOp ?? null,
     });
   },
   showRevolve(value, worldPos, handlers, opts) {
@@ -442,6 +472,9 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
   },
   setBooleanMode(booleanMode) {
     set({ booleanMode });
+  },
+  setEdgeOp(edgeOp) {
+    set({ edgeOp });
   },
   clear() {
     set({ ...CLEARED });

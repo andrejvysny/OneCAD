@@ -75,7 +75,7 @@ awaited construction resolves after disposal).
 | `CadOrbitControls.ts`| Turntable orbit / pan / zoom-to-cursor; Home/Fit/snap tweens.   |
 | `GridPlane.ts`       | Adaptive XY grid (1/5/10 decade step), re-centered on target.   |
 | `HtmlOverlayDriver.ts`| Projects world→screen and writes DOM transforms per frame.     |
-| `palette.ts`         | Reads design tokens (tokens.css) via getComputedStyle once.     |
+| `palette.ts`         | Reads design tokens (tokens.css) via getComputedStyle; cached.  |
 | `lightRig.ts`        | Pure camera-relative key/fill positions (floored key elevation).|
 | `BodyObject.ts`      | Per-body face Mesh + edge LineSegments; shared body materials.  |
 | `Picker.ts`          | rAF-coalesced raycast → face/edge PickHit; edge screen-bias.    |
@@ -158,6 +158,65 @@ the root cause of the flat look.
 **Tone-mapping rule.** Overlay/annotation materials set `toneMapped: false`. Tone
 mapping is for lit body faces only — everything else renders its design token
 exactly.
+
+## Theming (dark mode)
+
+`palette.ts` memoizes a `THREE.Color` per token, and almost every layer builds
+its materials once at construction. So the viewport cannot follow a theme change
+the way CSS does — it has to be told.
+
+**THE INVARIANT: every layer that reads `palette` MUST expose `refreshColors()`
+(or `setColors()`, where the color is baked into geometry) and MUST be listed in
+`ViewportEngine.applyTheme()`.** A layer missing from that list fails *silently*
+— nothing throws, it just keeps the previous theme's colors until something
+unrelated happens to rebuild it. `themeRefresh.test.ts` covers this per layer;
+each of those tests has been negative-checked by neutering the implementation.
+
+The sequence, driven from `ViewportRoot` on `subscribeResolvedTheme`:
+
+```
+resetPaletteCache()        // orphans every cached Color — must come FIRST
+engine.applyTheme()        // clear color → light levels → environment → layers
+meshIngest.refreshColors() // the COMMITTED bodies' material library
+```
+
+Ordering inside `applyTheme()` is load-bearing:
+
+1. `setClearColor` — before the environment, because
+2. `buildEnvironment()` prefilters `RoomEnvironment` through PMREM, and PMREM
+   fills every direction the room does not cover with **the renderer's current
+   clear color**. Rebuild the environment first and bodies stay lit by the old
+   background.
+
+Two shapes of layer need different treatment:
+
+- **Material recolor** — copy fresh palette colors into existing materials.
+  Watch for materials that are SWAPPED rather than recolored (`DragHandle`,
+  `SketchObject`'s nine `LineMaterial`s): the *inactive* one must be refreshed
+  too, or it appears stale the moment the user hovers. `SketchObject`'s
+  materials are built from `color.getHex()` — a value snapshot, not a live
+  reference.
+- **Geometry rebuild** — `GridPlane` bakes the minor-line fade toward the clear
+  color into a per-vertex buffer, and `OriginTriad` bakes axis colors the same
+  way. Both need the attribute rewritten, not a material touched.
+
+Tints are STATE, not theme: `BodyMaterialLibrary`, `PreviewMesh` and
+`RevolvePreview` all preserve an active Cut tint across a theme change while
+still re-reading everything else.
+
+There are **two** `BodyMaterialLibrary` instances — `MeshIngest` owns the
+committed bodies', the engine lazily makes its own for previews — and neither
+owner can reach the other. That is why `ViewportRoot` drives the pair instead of
+each subscribing independently; independent subscribers would also race the
+"drop the cache before anything re-reads it" ordering above.
+
+Light levels are a theme × backend table (`LIGHT_LEVELS`), not just a backend
+split: the hemisphere light's ground half IS the canvas token, so in dark it
+must come down or it muddies undersides.
+
+`--color-body-edge` INVERTS in dark. That is not cosmetic — wireframe mode draws
+edges with no faces behind them, so a near-black edge on a dark canvas would be
+invisible.
 
 ## Testing note
 

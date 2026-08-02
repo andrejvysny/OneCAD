@@ -51,11 +51,12 @@ pub enum EditCommand {
         at_cursor: bool,
     },
     /// Replace an op's parameters (C++ `UpdateOperationParamsCommand`). `op` is
-    /// the new operation payload; its `opType` must equal the target's.
+    /// the new operation payload; its `opType` must equal the target's, with the
+    /// ONE sanctioned Fillet⇄Chamfer exception (`session::op_type_edit_allowed`).
     UpdateOperationParams {
         /// Target record.
         record: RecordId,
-        /// Replacement operation (same `opType`).
+        /// Replacement operation (same `opType`, or the Fillet⇄Chamfer swap).
         op: Operation,
     },
     /// Re-bind a single input reference inside an op's params — the topological

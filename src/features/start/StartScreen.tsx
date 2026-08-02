@@ -65,7 +65,7 @@ export function StartScreen() {
 
   return (
     <div className="flex h-full w-full items-center justify-center bg-canvas-start font-ui text-ink">
-      <div className="w-[780px] max-w-[calc(100%-32px)] rounded-lg border border-border bg-white px-7 pb-7 pt-[26px] shadow-start-card">
+      <div className="w-[780px] max-w-[calc(100%-32px)] rounded-lg border border-border bg-surface px-7 pb-7 pt-[26px] shadow-start-card">
         {/* Wordmark + version */}
         <div className="mb-[18px] flex items-baseline gap-2">
           <span className="text-[16px] font-bold tracking-[-0.01em] text-ink">

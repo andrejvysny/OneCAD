@@ -45,7 +45,7 @@ function ClusterButton({
         className={cn(
           "flex h-9 w-9 cursor-pointer items-center justify-center rounded-md border border-border shadow-ctrl transition-colors",
           "focus-visible:shadow-focus-ring focus-visible:outline-none",
-          active ? "bg-sel-bg text-accent" : "bg-white text-ink-4 hover:bg-hover",
+          active ? "bg-sel-bg text-accent" : "bg-surface text-ink-4 hover:bg-hover",
         )}
       >
         <Icon name={icon} size={17} strokeWidth={strokeWidth} />

@@ -9,6 +9,14 @@
  * the document store toggle the BodyObject (lazy-loading a body the first time it
  * becomes visible).
  *
+ * SELF-HEALING (SAVE/OPEN hardening): `document-changed` is the *fast path*, not
+ * a load-bearing single point of failure. Every applied projection additionally
+ * runs `reconcile()` — any store-visible body with no scene object (and no fetch
+ * in flight) is loaded, and any scene object whose body left the store is
+ * dropped. A `get_mesh` miss (mesh not regenerated yet) also retries itself a
+ * few times, so a publish that lands with no further frontend event still
+ * renders. Failures are surfaced (statusHint + console), never swallowed.
+ *
  * The engine stays graphics-only; this controller owns the client, the document
  * store subscription, the shared body material library, and the bodyId→BodyObject
  * map. `detach` clears the scene, disposes the registry (leak tripwire) + library.
@@ -20,6 +28,8 @@
  */
 import type { CadClient } from "@/ipc/client";
 import type { DocumentChange, Lod } from "@/ipc/types";
+import { trace } from "@/debug/trace";
+import { logError } from "@/debug/log";
 import { documentStore } from "@/stores/documentStore";
 import { toolStore } from "@/stores/toolStore";
 import { viewportStore } from "@/stores/viewportStore";
@@ -33,6 +43,10 @@ import { buildBodyObjects, disposeAll, remove, swap } from "./meshRegistry";
 
 const DEFAULT_LOD: Lod = "coarse";
 
+/** Bounded retry for a `get_mesh` miss (mesh not regenerated/cached yet). */
+const EMPTY_MESH_RETRIES = 3;
+const EMPTY_MESH_RETRY_MS = 300;
+
 export class MeshIngest {
   private engine: ViewportEngine | null = null;
   private client: CadClient | null = null;
@@ -42,6 +56,8 @@ export class MeshIngest {
   private meshRev = 0;
   /** Per-body monotonic fetch token — a resolved fetch older than the latest is discarded. */
   private readonly loadSeq = new Map<string, number>();
+  /** Bodies with a fetch in flight — `reconcile()` skips these (no fetch storms). */
+  private readonly pending = new Set<string>();
   private detached = false;
   /** Fires after a body's mesh finishes loading into the scene (F-WP7 commit reconcile). */
   private readonly bodyLoadedListeners = new Set<(bodyId: string) => void>();
@@ -60,13 +76,18 @@ export class MeshIngest {
 
     this.unsubs.push(client.onDocumentChanged((c) => this.onDocumentChanged(c)));
 
-    // Visibility flips come through the document store (tree eye toggle).
+    // Visibility flips come through the document store (tree eye toggle) — and
+    // EVERY applied projection reconciles scene ↔ store, so a body whose mesh
+    // event was missed (or whose first fetch hit the pre-publish window) is
+    // picked up on the next projection instead of staying invisible forever.
     let prev = documentStore.getState().bodies;
     this.unsubs.push(
       documentStore.subscribe((s) => {
         if (s.bodies !== prev) {
-          this.onVisibilityChanged(prev, s.bodies);
+          const old = prev;
           prev = s.bodies;
+          this.onVisibilityChanged(old, s.bodies);
+          this.reconcile();
         }
       }),
     );
@@ -112,8 +133,25 @@ export class MeshIngest {
     // populate the projection before the viewport engine exists) never fire a
     // document-changed or visibility-flip event, so bootstrap them here. Idempotent
     // via loadSeq (a later document-changed for the same body just supersedes it).
-    for (const [id, meta] of Object.entries(documentStore.getState().bodies)) {
-      if (meta.visible) void this.loadBody(id, DEFAULT_LOD);
+    this.reconcile();
+  }
+
+  /**
+   * Scene ↔ store reconciliation (the self-healing pass): load every
+   * store-visible body with no scene object and no fetch in flight; drop every
+   * scene object whose body is gone from the store. Runs at attach and after
+   * every applied projection — `document-changed` stays the fast path, but a
+   * missed event can no longer strand a body invisible.
+   */
+  private reconcile(): void {
+    const bodies = documentStore.getState().bodies;
+    for (const [id, meta] of Object.entries(bodies)) {
+      if (meta.visible && !this.bodyObjects.has(id) && !this.pending.has(id)) {
+        void this.loadBody(id, DEFAULT_LOD);
+      }
+    }
+    for (const id of [...this.bodyObjects.keys()]) {
+      if (!(id in bodies)) this.dropBody(id);
     }
   }
 
@@ -167,6 +205,20 @@ export class MeshIngest {
     return RENDER_MODES[coerceRenderMode(settingsStore.getState().displayMode)];
   }
 
+  /**
+   * Theme change: re-read the palette into the COMMITTED bodies' material
+   * library. The engine owns a separate library for previews and refreshes that
+   * one itself; nothing can reach both, so ViewportRoot drives the pair.
+   *
+   * Deliberately not a store subscription of its own: the palette cache must be
+   * dropped before any re-read, and independent subscribers would make that
+   * ordering a race.
+   */
+  refreshColors(): void {
+    this.materials?.refreshColors();
+    this.engine?.invalidate();
+  }
+
   /** Push the current display mode onto every live body handle. */
   private applyDisplayMode(): void {
     const def = this.currentModeDef();
@@ -189,34 +241,64 @@ export class MeshIngest {
     this.engine?.invalidate();
   }
 
-  private async loadBody(bodyId: string, lod: Lod): Promise<void> {
+  private async loadBody(bodyId: string, lod: Lod, attempt = 0): Promise<void> {
     if (!this.client || !this.engine || !this.materials) return;
     const token = (this.loadSeq.get(bodyId) ?? 0) + 1;
     this.loadSeq.set(bodyId, token);
+    this.pending.add(bodyId);
 
-    const buffer = await this.client.getBodyMesh(bodyId, lod);
-    // Discard if detached or superseded by a newer fetch for this body.
-    if (this.detached || this.loadSeq.get(bodyId) !== token) return;
-    // Empty = the mesh isn't regenerated/cached yet (Rust get_mesh miss); the
-    // later document-changed event re-triggers this fetch once it is published.
-    if (buffer.byteLength === 0) return;
+    try {
+      const buffer = await this.client.getBodyMesh(bodyId, lod);
+      // Discard if detached or superseded by a newer fetch for this body.
+      if (this.detached || this.loadSeq.get(bodyId) !== token) return;
+      // Empty = the mesh isn't regenerated/cached yet (Rust get_mesh miss). The
+      // document-changed / reconcile paths re-trigger this fetch once published;
+      // the bounded self-retry covers a publish that lands with no further event.
+      if (buffer.byteLength === 0) {
+        trace("mesh", `getBodyMesh miss body=${bodyId} attempt=${attempt} (not published yet)`);
+        if (attempt < EMPTY_MESH_RETRIES) {
+          setTimeout(() => {
+            if (
+              !this.detached &&
+              this.loadSeq.get(bodyId) === token &&
+              !this.bodyObjects.has(bodyId)
+            ) {
+              void this.loadBody(bodyId, lod, attempt + 1);
+            }
+          }, EMPTY_MESH_RETRY_MS);
+        }
+        return;
+      }
 
-    const view = parseMeshPayload(buffer);
-    const entry = buildBodyObjects(view, bodyId, ++this.meshRev);
-    swap(bodyId, entry);
+      const view = parseMeshPayload(buffer);
+      const entry = buildBodyObjects(view, bodyId, ++this.meshRev);
+      swap(bodyId, entry);
 
-    // Rebuild the scene object (remove old, add new).
-    const old = this.bodyObjects.get(bodyId);
-    if (old) this.engine.bodiesRoot.remove(old.group);
-    const handle = buildBodyObject(entry, this.materials);
-    handle.setVisible(this.effectiveVisible(bodyId));
-    handle.applyMode(this.currentModeDef());
-    this.engine.bodiesRoot.add(handle.group);
-    this.bodyObjects.set(bodyId, handle);
+      // Rebuild the scene object (remove old, add new).
+      const old = this.bodyObjects.get(bodyId);
+      if (old) this.engine.bodiesRoot.remove(old.group);
+      const handle = buildBodyObject(entry, this.materials);
+      handle.setVisible(this.effectiveVisible(bodyId));
+      handle.applyMode(this.currentModeDef());
+      this.engine.bodiesRoot.add(handle.group);
+      this.bodyObjects.set(bodyId, handle);
 
-    this.engine.refreshHighlights();
-    this.engine.invalidate();
-    for (const cb of [...this.bodyLoadedListeners]) cb(bodyId);
+      this.engine.refreshHighlights();
+      this.engine.invalidate();
+      for (const cb of [...this.bodyLoadedListeners]) cb(bodyId);
+    } catch (e) {
+      if (this.detached) return;
+      // A fetch/parse/build failure must never be silent: without this the body
+      // simply never appears and nothing anywhere says why (the SAVE/OPEN bug
+      // class). Keep serving other bodies.
+      const reason = e instanceof Error ? e.message : String(e);
+      logError("mesh", `body mesh load FAILED body=${bodyId}`, { bodyId, error: e });
+      viewportStore.getState().setStatusHint(`Body failed to load — ${reason}`, {
+        severity: "error",
+      });
+    } finally {
+      if (this.loadSeq.get(bodyId) === token) this.pending.delete(bodyId);
+    }
   }
 
   /**
@@ -238,6 +320,7 @@ export class MeshIngest {
       this.bodyObjects.delete(bodyId);
     }
     this.loadSeq.delete(bodyId);
+    this.pending.delete(bodyId);
     remove(bodyId);
     this.engine?.refreshHighlights();
     this.engine?.invalidate();
@@ -254,6 +337,7 @@ export class MeshIngest {
     }
     this.bodyObjects.clear();
     this.loadSeq.clear();
+    this.pending.clear();
     disposeAll(); // registry empty + leak tripwire
     this.materials?.dispose();
     this.materials = null;

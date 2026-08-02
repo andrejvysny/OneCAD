@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use onecad_core::error::DomainError;
 use onecad_core::io::IoError;
-use onecad_core::regen::EngineError;
+use onecad_core::regen::{EngineError, OpFailureCode};
 
 /// Error returned from Tauri commands to the webview (`{ kind, message }`).
 #[derive(Debug, Clone, Serialize)]
@@ -61,8 +61,39 @@ impl From<IoError> for ApiError {
     }
 }
 
+/// The engine→API conversion is the ONE choke point every `?`-propagated engine
+/// failure crosses, so it is where the failure's structured detail is preserved:
+/// the wire shape stays the pinned `{kind, message}`, but `code`/`recoverable`
+/// reach the log.
+///
+/// `StalePreview` is deliberately DEMOTED to `debug`: it is the routine outcome of a
+/// drag frame that raced a publish (and fires from unit tests), so warning on it
+/// would make `'"level":"WARN"'` useless as a first-look grep.
 impl From<EngineError> for ApiError {
     fn from(e: EngineError) -> Self {
+        match &e {
+            EngineError::OpFailed {
+                code: OpFailureCode::StalePreview,
+                message,
+                ..
+            } => tracing::debug!(message = %message, "engine: stale preview"),
+            EngineError::OpFailed {
+                code,
+                recoverable,
+                message,
+            } => tracing::warn!(
+                code = ?code,
+                recoverable,
+                message = %message,
+                "engine: op failed"
+            ),
+            EngineError::Crashed { .. }
+            | EngineError::Protocol { .. }
+            | EngineError::Timeout { .. } => {
+                tracing::debug!(error = %e, "engine: worker-class failure → ApiError::Worker");
+            }
+            EngineError::Cancelled => {}
+        }
         match e {
             EngineError::OpFailed { .. } => ApiError::OpFailed(e.to_string()),
             EngineError::Crashed { .. }

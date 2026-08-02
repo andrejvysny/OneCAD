@@ -28,17 +28,24 @@ export async function seedSelection(
   }, refs);
 }
 
-/** The model-tool debug surface (`?vpdebug`), which carries both value-drag phases. */
-export async function toolPhases(
-  page: Page,
-): Promise<{ filletPhase?: string; shellPhase?: string; edgeOpKind?: string } | undefined> {
+/**
+ * The model-tool debug surface (`?vpdebug`), which carries both value-drag
+ * phases. `edgeOpAuto`/`edgeOpAxisSource` expose the FILLET-CHAMFER-UNIFY rule
+ * that binds them: the drag direction may re-type the edge op ONLY on the
+ * bisector tier. The seeded mock document publishes the box body's MESH1
+ * through the ingest path, so `body1`'s edges DO reach that tier here.
+ */
+interface ToolDebugSurface {
+  filletPhase?: string;
+  shellPhase?: string;
+  edgeOpKind?: string;
+  edgeOpAuto?: boolean;
+  edgeOpAxisSource?: string;
+}
+
+export async function toolPhases(page: Page): Promise<ToolDebugSurface | undefined> {
   return page.evaluate(
-    () =>
-      (
-        window as unknown as {
-          __extrudePreview?: { filletPhase?: string; shellPhase?: string; edgeOpKind?: string };
-        }
-      ).__extrudePreview,
+    () => (window as unknown as { __extrudePreview?: ToolDebugSurface }).__extrudePreview,
   );
 }
 
@@ -56,6 +63,23 @@ export async function dragInCanvas(page: Page, dx: number, dy: number): Promise<
   await page.mouse.move(x, y);
   await page.mouse.down();
   await page.mouse.move(x, y - 40, { steps: 4 });
+  await page.mouse.up();
+}
+
+/**
+ * Press at the canvas CENTRE and drag by `(dx, dy)` before releasing. Unlike
+ * `dragInCanvas` (which offsets the press point and always drags 40px up), the
+ * delta here is the whole gesture — the edge-op direction lane measures the
+ * value from the press point, so the test has to own both ends of it.
+ */
+export async function dragBy(page: Page, dx: number, dy: number): Promise<void> {
+  const box = await page.locator(CANVAS).boundingBox();
+  if (!box) throw new Error("viewport canvas has no bounding box");
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x + dx, y + dy, { steps: 4 });
   await page.mouse.up();
 }
 

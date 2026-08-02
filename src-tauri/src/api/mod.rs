@@ -6,6 +6,22 @@
 //! the frontend `CadClient` seam (`src/ipc/client.ts`); F-WP8 swaps its mock for a
 //! `tauriClient` that calls these. No webview capability is widened — Rust does all
 //! filesystem/dialog IO (capabilities stay `core:default`).
+//!
+//! ## Tracing (DEV-OBSERVABILITY wave R)
+//!
+//! The **baseline is free**: tauri's `tracing` cargo feature wraps every
+//! `#[tauri::command]` in an `ipc::request::handler` debug span carrying the command
+//! name + timing, so a new command is observable the day it is added. Only commands
+//! whose *arguments* identify the work are hand-`#[instrument]`ed on top (always
+//! `skip_all` + explicit id fields — payloads never enter the log).
+//!
+//! Two deliberate omissions:
+//! * `err(…)` is only ever attached to a `Result`-returning command (it is a compile
+//!   error otherwise), and
+//! * NEVER to a drag-frequency command (`preview_op`/`solve_drag`/`get_mesh`/
+//!   `get_sketch_regions`): `err` records at ERROR, and a stale-preview race is
+//!   routine, so it would ERROR-flood once per drag frame. Those keep their
+//!   hand-rolled debug/warn match.
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -68,6 +84,7 @@ pub async fn new_document(
 /// path→documentId index. Deferred to a later WP; the startup scan covers the
 /// crash-then-relaunch flow that matters most.
 #[tauri::command]
+#[tracing::instrument(skip_all, fields(path = %path), err(Display))]
 pub async fn open_document(
     state: State<'_, AppState>,
     app: AppHandle,
@@ -106,6 +123,7 @@ pub async fn import_step(
 /// path; an unsaved document with no path is an error (the frontend's Save action
 /// then falls back to Save As). Records the saved path in the recents store.
 #[tauri::command]
+#[tracing::instrument(skip_all, fields(path = ?path), err(Display))]
 pub async fn save_document(
     state: State<'_, AppState>,
     app: AppHandle,
@@ -395,12 +413,15 @@ fn file_mtime_ms(p: &Path) -> u64 {
 /// (pre-regen) projection; post-regen geometry arrives via `document-changed` +
 /// `projection-updated` events (projection stores are written only by events).
 #[tauri::command]
+#[tracing::instrument(skip_all, fields(cmd = tracing::field::Empty), err(Display))]
 pub async fn apply_edit_command(
     state: State<'_, AppState>,
     app: AppHandle,
     command: EditCommand,
 ) -> Result<DocumentProjection, ApiError> {
     let summary = edit_command_summary(&command);
+    // Recorded (not a span-attribute expression) so the digest is built ONCE.
+    tracing::Span::current().record("cmd", summary.as_str());
     tracing::info!("apply_edit_command: {summary}");
     let (outcome, projection) = {
         let mut guard = state.runtime.lock().await;
@@ -531,6 +552,7 @@ pub async fn get_mesh(
 /// Enters sketch mode: syncs the sketch to the worker solver lane and returns the
 /// live session + real dof/status (`CadClient.enterSketch`; the F-WP9 swap target).
 #[tauri::command]
+#[tracing::instrument(skip_all, fields(sketchId = %sketch_id), err(Display))]
 pub async fn enter_sketch(
     state: State<'_, AppState>,
     app: AppHandle,
@@ -683,6 +705,7 @@ pub async fn cancel_sketch(state: State<'_, AppState>, sketch_id: String) -> Res
 /// Computes the closed profile regions for extrude/revolve selection + preview fill
 /// (`finishSketch` → `SketchRegions`).
 #[tauri::command]
+#[tracing::instrument(skip_all, fields(sketchId = %sketch_id), err(Display))]
 pub async fn finish_sketch(
     state: State<'_, AppState>,
     app: AppHandle,
@@ -820,7 +843,10 @@ pub async fn preview_op(
             message,
             ..
         }) => {
-            tracing::debug!("preview_op: op={op_id_log} STALE: {message}");
+            // `trace`, not `debug`: a stale candidate is the EXPECTED outcome of a
+            // drag frame that raced a publish — at debug it would drown the default
+            // filter's `onecad_lib=debug` lane once per frame.
+            tracing::trace!("preview_op: op={op_id_log} STALE: {message}");
             Err(ApiError::StalePreview(message))
         }
         Err(error) => {
@@ -1005,6 +1031,11 @@ impl ResolvedFaceAddress {
 /// from such a record, and minting one is `finish_sketch`'s job
 /// (EXTRUDE-COMMIT-FIX). Enter then finish before extruding off this sketch.
 #[tauri::command]
+#[tracing::instrument(
+    skip_all,
+    fields(sketchId = %sketch_id, bodyId = %body_id, snapshot = snapshot_id),
+    err(Display)
+)]
 pub async fn add_sketch_on_face(
     state: State<'_, AppState>,
     snapshot_id: u64,
@@ -1404,6 +1435,91 @@ async fn pick_mesh_save(app: AppHandle, label: &str, extensions: &[&str]) -> Opt
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Frontend log bridge (DEV-OBSERVABILITY wave R/F)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One frontend log event, as batched by `src/debug/logSink.ts`. The shape is
+/// FROZEN with that module (camelCase over the wire, both sides land in one wave).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeLogEvent {
+    /// `Date.now()` at emit (epoch ms, fractional).
+    pub ts: f64,
+    /// `performance.now()` at emit (ms since page load) — the monotonic ordering key.
+    pub t_mono: f64,
+    /// Per-session monotonic sequence (gap ⇒ the ring dropped events).
+    pub seq: u64,
+    /// Reserved for a future non-`fe` producer; the target is always `fe` today.
+    pub lane: String,
+    /// `error` / `warn` / `info` / anything else ⇒ debug.
+    pub level: String,
+    /// Tag taxonomy (`ipc`, `hint`, `fsm`, `vp`, …).
+    pub tag: String,
+    pub msg: String,
+    #[serde(default)]
+    pub ctx: Option<serde_json::Value>,
+}
+
+/// Max serialized `ctx` bytes re-emitted per event — a frontend context object is
+/// capped at the source too, this is the belt-and-braces bound on the log line.
+const FE_CTX_CAP: usize = 2048;
+
+/// Re-emits batched frontend log events into the Rust `tracing` stream under target
+/// `fe`, so ONE `logs/dev.jsonl` carries both lanes in wall-clock order.
+///
+/// Deliberately infallible and NOT instrumented: it is the logging path, so it must
+/// never fail a caller, never recurse, and never add a span of its own to every
+/// batch. Malformed content is capped/stringified, never rejected.
+#[tauri::command]
+pub fn log_event(events: Vec<FeLogEvent>) {
+    for event in events {
+        let ctx = event
+            .ctx
+            .as_ref()
+            .map(|v| cap_str(v.to_string(), FE_CTX_CAP));
+        emit_fe_event(&event, ctx.as_deref());
+    }
+}
+
+/// Truncates `s` to at most `max` bytes on a char boundary, marking the cut.
+fn cap_str(mut s: String, max: usize) -> String {
+    if s.len() > max {
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
+        s.push('…');
+    }
+    s
+}
+
+fn emit_fe_event(event: &FeLogEvent, ctx: Option<&str>) {
+    // The level is runtime data but `tracing` levels are compile-time, so the four
+    // arms are spelled out (one macro body, four call sites).
+    macro_rules! fe {
+        ($level:ident) => {
+            tracing::$level!(
+                target: "fe",
+                seq = event.seq,
+                tag = %event.tag,
+                feTs = event.ts,
+                tMono = event.t_mono,
+                ctx = ctx,
+                "{}",
+                event.msg
+            )
+        };
+    }
+    match event.level.as_str() {
+        "error" => fe!(error),
+        "warn" => fe!(warn),
+        "info" => fe!(info),
+        _ => fe!(debug),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Shared helpers (also used by the regen driver in `crate::run`)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1415,24 +1531,12 @@ async fn pick_mesh_save(app: AppHandle, label: &str, extensions: &[&str]) -> Opt
 /// banner appears (items non-empty) or is dropped (items empty ⇒ repairs cleared;
 /// M4a). A superseded/failed/no-op regen leaves the live repair state unchanged, so
 /// no `needs-repair` is emitted for those.
+///
+/// **Not a logging site.** The `regen:` postmortem line + the per-failed-step warns
+/// live in [`DocumentRuntime::finish_regen`], which runs on EVERY regen path
+/// (including the inline `run_regen` used by tests and the headless CLI); logging
+/// here as well would double every line for the app lane only.
 pub fn emit_regen_events(app: &AppHandle, report: &RegenReport, projection: &DocumentProjection) {
-    tracing::info!(
-        "regen: outcome={} rev={} srcRev={} snapshot={} changed={} removed={} failedSteps={}",
-        report.outcome_str(),
-        report.revision,
-        report.source_revision,
-        report.snapshot_id,
-        report.changed.len(),
-        report.removed.len(),
-        report.failed_steps.len()
-    );
-    for step in &report.failed_steps {
-        tracing::warn!(
-            "regen: FAILED step record={} reason={}",
-            step.record_id,
-            step.message
-        );
-    }
     if let Some(change) = report.document_change() {
         let _ = app.emit(events::DOCUMENT_CHANGED, change);
     }

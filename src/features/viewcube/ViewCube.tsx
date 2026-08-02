@@ -150,7 +150,7 @@ export function ViewCube() {
               }
               className={cn(
                 "absolute inset-0 flex cursor-pointer items-center justify-center",
-                "rounded-[2px] border border-border bg-white text-[10px] font-semibold",
+                "rounded-[2px] border border-border bg-surface text-[10px] font-semibold",
                 "tracking-[0.06em] text-ink-4 shadow-ctrl",
                 "hover:bg-sel-bg hover:text-accent",
                 "focus-visible:shadow-focus-ring focus-visible:outline-none",

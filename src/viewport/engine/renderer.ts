@@ -7,6 +7,7 @@
  * default bundle. Any WebGPU failure falls back to WebGL.
  */
 import * as THREE from "three";
+import { logWarn } from "@/debug/log";
 import { palette } from "./palette";
 
 /** The subset of renderer API the engine relies on (WebGL and WebGPU both satisfy it). */
@@ -125,7 +126,7 @@ export async function createRenderer(
       return await createWebGpu(canvas);
     } catch (err) {
       // Fall through to WebGL — WebGL is the tested path.
-      console.warn("[viewport] WebGPU init failed, falling back to WebGL:", err);
+      logWarn("vp", "WebGPU init failed, falling back to WebGL", { error: err });
     }
   }
   return createWebGl(canvas);

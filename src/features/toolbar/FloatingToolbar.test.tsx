@@ -9,7 +9,7 @@ describe("FloatingToolbar", () => {
 
   it("renders the model tool set with Select active by default", () => {
     render(<FloatingToolbar />);
-    for (const name of ["Select", "New sketch", "Extrude", "Revolve", "Fillet", "Combine"]) {
+    for (const name of ["Select", "New sketch", "Extrude", "Revolve", "Fillet / Chamfer", "Combine"]) {
       expect(screen.getByRole("button", { name })).toBeInTheDocument();
     }
     // Sketch-only tools are absent in model mode.
@@ -18,6 +18,11 @@ describe("FloatingToolbar", () => {
       "aria-pressed",
       "true",
     );
+  });
+
+  it("has no separate Chamfer button — the unified tool covers both (FILLET-CHAMFER-UNIFY W2)", () => {
+    render(<FloatingToolbar />);
+    expect(screen.queryByRole("button", { name: "Chamfer" })).toBeNull();
   });
 
   it("toggles the active tool on click", async () => {

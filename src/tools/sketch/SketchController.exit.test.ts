@@ -18,6 +18,7 @@ import { SketchController } from "./SketchController";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import type { CadClient } from "@/ipc/client";
 import type { SketchEntity, SketchPlane, SketchSession } from "@/ipc/types";
+import { __resetLogForTests, logSnapshot } from "@/debug/log";
 import { toolStore } from "@/stores/toolStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { resetStores } from "@/test/resetStores";
@@ -126,7 +127,9 @@ describe("SketchController exit ordering", () => {
       calls.push(`cancelSketch:${id}`);
       return Promise.reject(new Error("worker gone"));
     });
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // The failure now lands on the structured log lane (DEV-OBSERVABILITY Wave
+    // F), whose gate vitest keeps closed — open it just for this assertion.
+    __resetLogForTests();
 
     toolStore.getState().setMode("sketch", "sketch1");
     await flush();
@@ -135,8 +138,9 @@ describe("SketchController exit ordering", () => {
     await flush();
 
     expect(calls).toEqual(["cancelSketch:sketch1"]); // finish never reached
-    expect(errorSpy).toHaveBeenCalled(); // ...but the failure is LOUD, never silent
+    // ...but the failure is LOUD, never silent.
+    expect(logSnapshot().filter((e) => e.level === "error" && e.tag === "sketch")).toHaveLength(1);
     expect(sketchStore.getState().session).toBeNull();
-    errorSpy.mockRestore();
+    __resetLogForTests({ enabled: false });
   });
 });

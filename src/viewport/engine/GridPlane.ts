@@ -47,7 +47,7 @@ interface GridColors {
 
 export class GridPlane {
   readonly object3D: THREE.Group;
-  private readonly colors: GridColors;
+  private colors: GridColors;
   private minorSeg: THREE.LineSegments | null = null;
   private majorSeg: THREE.LineSegments | null = null;
   private currentStep = 0;
@@ -62,6 +62,20 @@ export class GridPlane {
 
   setVisible(visible: boolean): void {
     this.object3D.visible = visible;
+  }
+
+  /**
+   * Theme change: adopt fresh palette colors.
+   *
+   * A REBUILD is required, not a material recolor: the minor lines fade toward
+   * the clear color through a baked per-vertex color buffer, so the new
+   * background has to be re-interpolated into the geometry. Skipped before the
+   * first `update()` — there is nothing built yet, and the next one will pick
+   * these up.
+   */
+  setColors(colors: GridColors): void {
+    this.colors = colors;
+    if (this.currentStep > 0) this.rebuild(this.currentStep);
   }
 
   /** Re-center on the target and re-step from the camera distance. */

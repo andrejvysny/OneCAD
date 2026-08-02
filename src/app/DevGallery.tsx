@@ -22,7 +22,7 @@ function Section({
   return (
     <section className="flex flex-col gap-3">
       <SectionLabel>{label}</SectionLabel>
-      <div className="rounded-lg border border-border bg-white p-5 shadow-card">
+      <div className="rounded-lg border border-border bg-surface p-5 shadow-card">
         {children}
       </div>
     </section>
@@ -191,7 +191,7 @@ export default function DevGallery() {
               ref={snapBtn}
               type="button"
               onClick={() => setSnapOpen((v) => !v)}
-              className="flex h-[36px] w-[36px] cursor-pointer items-center justify-center rounded-md border border-border bg-white text-ink-4 shadow-ctrl hover:bg-hover"
+              className="flex h-[36px] w-[36px] cursor-pointer items-center justify-center rounded-md border border-border bg-surface text-ink-4 shadow-ctrl hover:bg-hover"
               aria-label="Snap settings"
             >
               <Icon name="snap" size={17} strokeWidth={1.6} />

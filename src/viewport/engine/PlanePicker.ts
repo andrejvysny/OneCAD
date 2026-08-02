@@ -194,6 +194,19 @@ export class PlanePicker {
     return { kind, point: hit.point.clone() };
   }
 
+  /**
+   * Theme change: re-read each quad's plane color into its fill and outline.
+   * `setHover` only ever changes OPACITY, so there is no other path back to
+   * the palette here.
+   */
+  refreshColors(): void {
+    for (const q of this.quads) {
+      const color = colorFor(q.kind);
+      q.mat.color.copy(color);
+      (q.outline.material as THREE.LineBasicMaterial).color.copy(color);
+    }
+  }
+
   /** Highlight the hovered quad + show its geometric-name label chip, or clear. */
   setHover(hit: PlaneHit | null): void {
     this.hoveredKind = hit?.kind ?? null;

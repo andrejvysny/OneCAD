@@ -28,6 +28,30 @@ describe("resolveBinding — mode scoping", () => {
   });
 });
 
+describe("resolveBinding — chamfer tool id + H binding died (FILLET-CHAMFER-UNIFY W2)", () => {
+  it("model `h` resolves to the GLOBAL home action, un-shadowed", () => {
+    expect(resolveBinding("h", false, "model")).toEqual({ type: "home" });
+  });
+
+  it("`f` still resolves to fillet in model mode and cross-mode from sketch", () => {
+    expect(resolveBinding("f", false, "model")).toEqual({ type: "tool", tool: "fillet" });
+    expect(resolveBinding("f", false, "sketch")).toEqual({ type: "tool", tool: "fillet" });
+  });
+
+  it("nothing resolves to tool \"chamfer\" — no key, in either mode, plain or shifted", () => {
+    for (const mode of ["model", "sketch"] as const) {
+      for (const shift of [false, true]) {
+        for (const key of [...new Set([...MODEL_KEYS, ...SKETCH_KEYS].map((b) => b.key))]) {
+          const action = resolveBinding(key, shift, mode);
+          if (action && action.type === "tool") {
+            expect(action.tool).not.toBe("chamfer");
+          }
+        }
+      }
+    }
+  });
+});
+
 describe("resolveBinding — Measure (?) is NOT cross-mode (W2-B)", () => {
   it("arms Measure in model mode", () => {
     expect(resolveBinding("?", true, "model")).toEqual({ type: "tool", tool: "measure" });

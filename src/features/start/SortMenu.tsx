@@ -36,7 +36,7 @@ export function SortMenu({ value, onChange }: SortMenuProps) {
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="menu"
         aria-expanded={open}
-        className="flex h-[32px] cursor-pointer items-center gap-1.5 rounded-sm border border-border-strong bg-white px-2.5 font-ui text-[12.5px] text-ink-2 hover:bg-hover"
+        className="flex h-[32px] cursor-pointer items-center gap-1.5 rounded-sm border border-border-strong bg-surface px-2.5 font-ui text-[12.5px] text-ink-2 hover:bg-hover"
       >
         {LABEL[value]}
         <Icon name="chevronDown" size={12} strokeWidth={2} className="text-ink-5" />

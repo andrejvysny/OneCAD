@@ -5,6 +5,7 @@
  */
 import { createStore, useStore } from "zustand";
 import { persist } from "zustand/middleware";
+import { coerceTheme, DEFAULT_THEME, type ThemePref } from "@/theme/themes";
 import type { DevicePref } from "@/viewport/engine/navInput";
 import { coerceRenderMode, DEFAULT_RENDER_MODE, type RenderModeId } from "@/viewport/engine/renderModes";
 
@@ -58,11 +59,21 @@ export interface SettingsState {
    * unknown id even at the current version.
    */
   displayMode: RenderModeId;
+  /**
+   * Appearance PREFERENCE — "system" stays "system" here. The resolved
+   * light/dark value is derived at runtime by themeController and deliberately
+   * never persisted: storing it would show last session's OS appearance until
+   * something poked it, the same stale-classification trap `navigation`
+   * documents above. Coerced on every hydration, not just on migrate (see
+   * `merge`), since a hand-edited blob can carry an unknown id at any version.
+   */
+  theme: ThemePref;
   setSnap(key: SnapKey, value: boolean): void;
   setShow(key: ShowKey, value: boolean): void;
   setExperimentalWebGpu(value: boolean): void;
   setInputDevice(value: DevicePref): void;
   setDisplayMode(mode: RenderModeId): void;
+  setTheme(theme: ThemePref): void;
 }
 
 /** Versioned localStorage key (bump `version` on a breaking shape change). */
@@ -88,6 +99,7 @@ export const settingsStore = createStore<SettingsState>()(
       experimentalWebGpu: false,
       navigation: { inputDevice: "auto" },
       displayMode: DEFAULT_RENDER_MODE,
+      theme: DEFAULT_THEME,
       setSnap(key, value) {
         set((s) => ({ snapTo: { ...s.snapTo, [key]: value } }));
       },
@@ -103,16 +115,21 @@ export const settingsStore = createStore<SettingsState>()(
       setDisplayMode(mode) {
         set({ displayMode: mode });
       },
+      setTheme(theme) {
+        set({ theme });
+      },
     }),
     {
       name: STORAGE_KEY,
-      version: 4,
+      version: 5,
       // v1 → v2 added the M6c snap types (quadrant / intersection / onCurve).
       // A v1 blob has no keys for them; backfill the on-by-default values so an
       // existing user's popover shows them enabled (parity with a fresh install).
       // v2 → v3 added the navigation section.
       // v3 → v4 moved displayMode here from viewportStore (session-only before);
       // a pre-v4 blob has no key for it at all, so coerce(undefined) → default.
+      // v4 → v5 added the appearance preference; a pre-v5 blob has no key, so
+      // coerce(undefined) → "system" (follow the OS, matching a fresh install).
       migrate: (persisted, version) => {
         const s = persisted as Partial<SettingsState>;
         if (s && version < 2) {
@@ -129,17 +146,21 @@ export const settingsStore = createStore<SettingsState>()(
         if (s && version < 4) {
           s.displayMode = coerceRenderMode((s as Partial<SettingsState>).displayMode);
         }
+        if (s && version < 5) {
+          s.theme = coerceTheme((s as Partial<SettingsState>).theme);
+        }
         return s as unknown as SettingsState;
       },
       // `migrate` only runs when the persisted blob's version differs from the
       // current one. A SAME-version blob can still carry a garbage displayMode
-      // (hand-edited localStorage, or a rolled-back build that wrote an id a
-      // newer registry no longer has) — coerce it here too, on every hydration,
-      // not just across a version bump. Mirrors zustand's default shallow-merge
-      // shape so nothing else about persist's merge behavior changes.
+      // or theme (hand-edited localStorage, or a rolled-back build that wrote
+      // an id a newer registry no longer has) — coerce them here too, on every
+      // hydration, not just across a version bump. Mirrors zustand's default
+      // shallow-merge shape so nothing else about persist's merge changes.
       merge: (persisted, current) => {
         const merged = { ...current, ...(persisted as Partial<SettingsState>) };
         merged.displayMode = coerceRenderMode(merged.displayMode);
+        merged.theme = coerceTheme(merged.theme);
         return merged;
       },
     },

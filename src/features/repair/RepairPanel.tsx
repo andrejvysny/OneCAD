@@ -197,7 +197,7 @@ function CandidateRow({
       onMouseLeave={() => repairStore.getState().setHoveredWorldPos(null)}
       className={cn(
         "mb-1 flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left",
-        disabled ? "opacity-50" : "bg-white hover:bg-hover-2",
+        disabled ? "opacity-50" : "bg-surface hover:bg-hover-2",
       )}
     >
       <span className="flex-1">

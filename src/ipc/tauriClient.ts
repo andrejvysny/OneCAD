@@ -38,6 +38,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { trace, traceWarn } from "@/debug/trace";
+import { logDebug, logError, logWarn } from "@/debug/log";
 import type { CadClient } from "./client";
 import type {
   ApplyOperationResult,
@@ -95,6 +96,7 @@ import {
 } from "./sketchWireMap";
 import { applyProjectionToStore } from "./projectionHydration";
 import { documentStore, nextSketchName } from "@/stores/documentStore";
+import { viewportStore } from "@/stores/viewportStore";
 
 // ── Command + event names (must match src-tauri/src/api + events.rs) ──────────
 const CMD = {
@@ -274,12 +276,77 @@ function toClientError(e: unknown): Error {
   return e instanceof Error ? e : new Error(String(e));
 }
 
-/** Thin invoke wrapper that surfaces backend `ApiError`s as JS Errors. */
+/**
+ * Commands NOT logged by `call<T>` (DEV-OBSERVABILITY Wave F):
+ *  • `solve_drag` fires per drag frame — logging it violates the no-drag-frequency
+ *    policy and would bury every other event in the ring.
+ *  • `log_event` IS the forwarding channel; logging it recurses.
+ */
+const IPC_LOG_EXEMPT = new Set<string>(["solve_drag", "log_event"]);
+
+/**
+ * A one-line SHAPE summary of the command args — never the payload. Ids and
+ * flags are the correlation keys worth having; a sketch's entity array or a
+ * mesh buffer is not, and would blow the ctx cap for nothing.
+ */
+function summarizeValue(v: unknown): unknown {
+  if (v === null || v === undefined) return v;
+  switch (typeof v) {
+    case "string":
+      return v.length > 80 ? `${v.slice(0, 80)}…` : v;
+    case "number":
+    case "boolean":
+      return v;
+    case "object":
+      break;
+    default:
+      return `[${typeof v}]`;
+  }
+  if (Array.isArray(v)) return `Array(${v.length})`;
+  if (ArrayBuffer.isView(v)) return `${v.constructor.name}(${v.byteLength}B)`;
+  const keys = Object.keys(v as object);
+  return `{${keys.slice(0, 8).join(",")}${keys.length > 8 ? ",…" : ""}}`;
+}
+
+function summarizeArgs(args?: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (args === undefined) return undefined;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(args)) out[k] = summarizeValue(v);
+  return out;
+}
+
+/**
+ * Thin invoke wrapper that surfaces backend `ApiError`s as JS Errors.
+ *
+ * ALSO the frontend's single IPC chokepoint for observability: every real-lane
+ * command round-trip lands one `ipc` event with its duration, so the FE side of
+ * a commit lines up with the Rust `ipc::request::handler` span for the same
+ * command. The mock lane has no Rust side to correlate with and keeps its
+ * existing hand-placed trace sites.
+ */
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const t0 = performance.now();
   try {
-    return await invoke<T>(cmd, args);
+    const result = await invoke<T>(cmd, args);
+    if (!IPC_LOG_EXEMPT.has(cmd)) {
+      logDebug("ipc", cmd, {
+        cmd,
+        durMs: Math.round((performance.now() - t0) * 100) / 100,
+        args: summarizeArgs(args),
+      });
+    }
+    return result;
   } catch (e) {
-    throw toClientError(e);
+    const err = toClientError(e);
+    if (!IPC_LOG_EXEMPT.has(cmd)) {
+      logWarn("ipc", `${cmd} FAILED`, {
+        cmd,
+        durMs: Math.round((performance.now() - t0) * 100) / 100,
+        kind: (err as Error & { kind?: string }).kind ?? err.name,
+        message: err.message,
+      });
+    }
+    throw err;
   }
 }
 
@@ -438,6 +505,17 @@ export function createTauriClient(): CadClient {
           `message=${rf.message ?? "none"} failedSteps=${failed.length}`,
         failed,
       );
+      // An UNCORRELATED failure (no commit awaiter — e.g. the open-regen replay,
+      // or a worker-restart replay) has no controller to surface it: without this
+      // hint the only sign is a tinted history row nobody is looking at, and the
+      // viewport just quietly shows nothing.
+      if (awaiters.size === 0) {
+        const reason = rf.message ?? failed[0]?.message ?? "see the history list";
+        viewportStore.getState().setStatusHint(`Geometry rebuild failed — ${reason}`, {
+          severity: "error",
+          sticky: true,
+        });
+      }
     } else {
       trace(
         "ipc",
@@ -504,30 +582,45 @@ export function createTauriClient(): CadClient {
     };
   }
 
-  // Persistent event listeners started lazily (first correlation / subscribe) so
-  // pure command tests don't need the event plugin mocked.
-  let eventsStarted = false;
+  // Persistent event listeners. Memoized as a PROMISE (not a started-flag): the
+  // old boolean let a subscriber registered while `listen()` was still pending
+  // believe the bridge was live — any backend event in that window (e.g. the
+  // open-regen's `document-changed`) was silently lost, and a lost mesh event
+  // means a body that never renders. Await the promise wherever ordering
+  // matters; a bridge failure resolves `false` (and retries on the next call)
+  // instead of vanishing.
+  let eventsReady: Promise<boolean> | null = null;
   const unlisteners: UnlistenFn[] = [];
-  async function ensureEvents(): Promise<void> {
-    if (eventsStarted) return;
-    eventsStarted = true;
-    try {
-      unlisteners.push(
-        await listen<DocumentChange>(EVT.documentChanged, (e) => onDocumentChangedEvent(e.payload)),
-        await listen<DocumentProjectionDto>(EVT.projectionUpdated, (e) => onProjectionUpdatedEvent(e.payload)),
-        await listen<RegenFinished>(EVT.regenFinished, (e) => onRegenFinishedEvent(e.payload)),
-        await listen<SketchUpsertDto>(EVT.sketchSolved, (e) => {
-          lastSketchSolved = e.payload;
-        }),
-        await listen<WorkerStatus>(EVT.workerStatus, (e) => onWorkerStatusEvent(e.payload)),
-        await listen<NeedsRepairEvent>(EVT.needsRepair, (e) => onNeedsRepairEvent(e.payload)),
-        await listen<void>(EVT.closeRequested, () => onCloseRequestedEvent()),
-      );
-    } catch {
-      // A missing event bridge must not break command-only flows.
-      eventsStarted = false;
-    }
+  function ensureEvents(): Promise<boolean> {
+    eventsReady ??= (async () => {
+      try {
+        unlisteners.push(
+          await listen<DocumentChange>(EVT.documentChanged, (e) => onDocumentChangedEvent(e.payload)),
+          await listen<DocumentProjectionDto>(EVT.projectionUpdated, (e) => onProjectionUpdatedEvent(e.payload)),
+          await listen<RegenFinished>(EVT.regenFinished, (e) => onRegenFinishedEvent(e.payload)),
+          await listen<SketchUpsertDto>(EVT.sketchSolved, (e) => {
+            lastSketchSolved = e.payload;
+          }),
+          await listen<WorkerStatus>(EVT.workerStatus, (e) => onWorkerStatusEvent(e.payload)),
+          await listen<NeedsRepairEvent>(EVT.needsRepair, (e) => onNeedsRepairEvent(e.payload)),
+          await listen<void>(EVT.closeRequested, () => onCloseRequestedEvent()),
+        );
+        return true;
+      } catch (e) {
+        // A missing event bridge must not break command-only flows (vitest mocks
+        // invoke only) — but it must not be silent either: without events no
+        // mesh ever refreshes.
+        traceWarn("ipc", "event bridge failed to attach (will retry on next use)", e);
+        eventsReady = null;
+        return false;
+      }
+    })();
+    return eventsReady;
   }
+  // Eager start: the pre-regen `projection-updated` of an open/new fires DURING
+  // the command round-trip, so the listeners must be attaching before any
+  // command can possibly be invoked on this client.
+  void ensureEvents();
 
   /** Run an edit command and correlate its regen into an ApplyOperationResult.
    *  `recordId` (a fresh AddOperation's minted id) opts the awaiter into the
@@ -796,8 +889,10 @@ export function createTauriClient(): CadClient {
         try {
           await deleteSketch(frontendId);
         } catch (cleanupErr) {
-          // eslint-disable-next-line no-console
-          console.error("[sketch] enterSketch orphan cleanup (DeleteSketch) failed", cleanupErr);
+          logError("sketch", "enterSketch orphan cleanup (DeleteSketch) FAILED", {
+            sketchId: map.backendSketchId,
+            error: cleanupErr,
+          });
           const orig = e instanceof Error ? e : new Error(String(e));
           orig.message = `${orig.message} (cleanup failed — empty sketch left in tree)`;
           throw orig;
@@ -1113,16 +1208,21 @@ export function createTauriClient(): CadClient {
       return call<RecentProject[]>(CMD.listRecents);
     },
     async newDocument(): Promise<DocumentSnapshot> {
+      // Events BEFORE the command: the pre-regen projection (and a fast open-regen's
+      // document-changed) fires during/right after the round-trip.
+      await ensureEvents();
       const snap = await call<DocumentSnapshotDto>(CMD.newDocument);
       resetCorrelation(); // drop the OLD document's buffered change + pending awaiters
       return snap;
     },
     async openDocument(path: string): Promise<DocumentSnapshot> {
+      await ensureEvents();
       const snap = await call<DocumentSnapshotDto>(CMD.openDocument, { path });
       resetCorrelation();
       return snap;
     },
     async importStep(path: string): Promise<DocumentSnapshot> {
+      await ensureEvents();
       const snap = await call<DocumentSnapshotDto>(CMD.importStep, { path });
       resetCorrelation();
       return snap;
@@ -1135,6 +1235,7 @@ export function createTauriClient(): CadClient {
       return call<RecoveryInfoDto | null>(CMD.checkRecovery);
     },
     async recoverDocument(accept: boolean): Promise<DocumentSnapshot | null> {
+      if (accept) await ensureEvents(); // a recover-open emits like an open
       const snap = await call<DocumentSnapshotDto | null>(CMD.recoverDocument, { accept });
       if (accept) resetCorrelation(); // a discard (accept:false) opens no new document
       return snap;

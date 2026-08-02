@@ -43,6 +43,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
+use tracing::Instrument;
 use uuid::Uuid;
 
 use onecad_core::document::body::{BodyLifecycleEvent, BodyRegistry};
@@ -703,9 +704,16 @@ impl DocumentRuntime {
         // D1: worker-minted `created` ids must match a known op in this plan and be
         // unique. Replay-from-0 base is empty, so collisions are in-plan.
         let known_ops: HashSet<Uuid> = plan_req.ops.iter().map(|o| o.record_id.as_uuid()).collect();
+        let base_hash_prefix = hash_prefix(plan_req.expected_base_hash.as_str());
+        let step_count = plan_req.ops.len();
         tracing::info!(
-            "begin_regen: job={job:?} rev={} steps=[{}]",
-            plan_rev.0,
+            job = %job.0,
+            rev = plan_rev.0,
+            epoch = epoch.0,
+            base = %base_hash_prefix,
+            steps = step_count,
+            checkpoint = self.last_regen_used_checkpoint,
+            "begin_regen: steps=[{}]",
             plan_req
                 .ops
                 .iter()
@@ -735,6 +743,9 @@ impl DocumentRuntime {
             lod: Lod::Coarse,
             prior,
             executed,
+            job: Some(job),
+            base_hash_prefix,
+            step_count,
         })
     }
 
@@ -784,6 +795,11 @@ impl DocumentRuntime {
             // suppressed, and `sync_record_outputs` skips suppressed records anyway (their
             // last-known outputs are what an un-suppress cascade needs).
             executed: BTreeSet::new(),
+            // No plan was compiled: there is no job id, no expected base hash and no
+            // steps. The regen lane renders `job=clear` for this path.
+            job: None,
+            base_hash_prefix: String::new(),
+            step_count: 0,
         })
     }
 
@@ -832,7 +848,11 @@ impl DocumentRuntime {
             expected,
             lod,
             executed,
+            job,
+            base_hash_prefix,
+            step_count,
         } = driven;
+        let job = JobLabel(job);
         // The revision this regen was PREPARED for (fenced at begin_regen). Threaded
         // into EVERY outcome — including Superseded/Failed — for commit correlation.
         let source_revision = expected.0 .0;
@@ -856,7 +876,7 @@ impl DocumentRuntime {
                 // mirror so the frontend correlates its own commit's recordId precisely.
                 let failed_steps = failed_steps_of(&self.regen.timeline);
                 let affected_bodies = affected_bodies_of(&self.regen.timeline, &self.regen.bodies);
-                return RegenReport {
+                let report = RegenReport {
                     outcome,
                     revision: self.fencing.revision().0,
                     source_revision,
@@ -867,9 +887,18 @@ impl DocumentRuntime {
                     failed_steps,
                     affected_bodies,
                 };
+                log_regen_outcome(job, &base_hash_prefix, step_count, &report);
+                return report;
             }
             // Window race: worker accepted lock-free but the document advanced.
-            return RegenReport {
+            tracing::warn!(
+                job = %job,
+                rev = self.fencing.revision().0,
+                srcRev = source_revision,
+                snapshot = snap.id.0,
+                "regen: SUPERSEDED (window race — accepted lock-free, document advanced)"
+            );
+            let report = RegenReport {
                 outcome: Outcome::Superseded,
                 revision: self.fencing.revision().0,
                 source_revision,
@@ -880,6 +909,8 @@ impl DocumentRuntime {
                 failed_steps: Vec::new(),
                 affected_bodies: BTreeMap::new(),
             };
+            log_regen_outcome(job, &base_hash_prefix, step_count, &report);
+            return report;
         }
         // Finding 5: an `EngineFailed` outcome whose fencing tokens MOVED since
         // `begin_regen` is really a supersede — a later covering regen is already on the
@@ -889,11 +920,22 @@ impl DocumentRuntime {
         // and NoOp keep their own terminal.
         let outcome =
             if matches!(outcome, Outcome::EngineFailed(_)) && self.fencing.get() != expected {
+                // The failure itself is the only place this error is ever visible:
+                // the report about to be built reports `superseded` and DROPS it.
+                if let Outcome::EngineFailed(original_error) = &outcome {
+                    tracing::warn!(
+                        job = %job,
+                        rev = self.fencing.revision().0,
+                        srcRev = source_revision,
+                        original_error = %original_error,
+                        "regen: FAILED downgraded to superseded (fencing moved)"
+                    );
+                }
                 Outcome::Superseded
             } else {
                 outcome
             };
-        RegenReport {
+        let report = RegenReport {
             outcome,
             revision: self.fencing.revision().0,
             source_revision,
@@ -903,7 +945,9 @@ impl DocumentRuntime {
             needs_repair: Vec::new(),
             failed_steps: Vec::new(),
             affected_bodies: BTreeMap::new(),
-        }
+        };
+        log_regen_outcome(job, &base_hash_prefix, step_count, &report);
+        report
     }
 
     /// The current document repair items (SCHEMA §9 state), for a test/repair-panel
@@ -1136,6 +1180,11 @@ impl DocumentRuntime {
         // step == head_step), else a checkpoint keyed at head_step would mis-describe
         // the worker's actual geometry.
         if self.latest_snapshot.as_ref().and_then(|s| s.step_index) != Some(head_step) {
+            tracing::info!(
+                "checkpoint: SKIPPED at save — head step {head_step} not fully regenerated \
+                 (snapshot step {:?}); the save proceeds without an acceleration base",
+                self.latest_snapshot.as_ref().and_then(|s| s.step_index)
+            );
             return;
         }
         if let Ok(artifacts) = self.engine.save_checkpoint(head_step).await {
@@ -1290,6 +1339,7 @@ impl DocumentRuntime {
 
         DocumentProjection {
             status: DocStatus::Ready,
+            document_id: doc.id.to_string(),
             revision: self.fencing.revision().0,
             title: self.title.clone(),
             dirty: self.dirty,
@@ -1911,6 +1961,63 @@ pub struct PreparedRegen {
     /// The records this regen executes — the scope
     /// [`DocumentRuntime::sync_record_outputs`] is allowed to overwrite (TRUST F1).
     executed: BTreeSet<RecordId>,
+    /// Correlation key for the whole phase 1→3 chain; `None` on the CLEAR path
+    /// (no plan was compiled, so no job exists — the lane renders `job=clear`).
+    job: Option<JobId>,
+    /// Short `expectedBaseHash` prefix — the fencing evidence a regen line is read
+    /// against. Empty on the CLEAR path (no worker round-trip, no base hash).
+    base_hash_prefix: String,
+    /// Number of compiled ops (0 on the CLEAR path).
+    step_count: usize,
+}
+
+/// Renders an optional [`JobId`] for the regen lane: the bare uuid, or `clear` for
+/// the worker-less CLEAR publish.
+#[derive(Clone, Copy)]
+struct JobLabel(Option<JobId>);
+
+impl std::fmt::Display for JobLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(job) => write!(f, "{}", job.0),
+            None => f.write_str("clear"),
+        }
+    }
+}
+
+/// The first 12 chars of a hash — enough to correlate `begin_regen` ↔ `regen.drive`
+/// ↔ the postmortem line without pasting 64 hex chars onto every event.
+fn hash_prefix(hash: &str) -> String {
+    hash.chars().take(12).collect()
+}
+
+/// The `regen:` postmortem contract — emitted on EVERY finish path (published,
+/// window-race supersede, failed/cancelled/noop), plus one `warn` per failed step.
+/// `finish_regen` is the single funnel for that, so the inline `run_regen` (tests,
+/// headless CLI) and the scheduler-driven app path log identically.
+fn log_regen_outcome(job: JobLabel, base: &str, steps: usize, report: &RegenReport) {
+    tracing::info!(
+        job = %job,
+        rev = report.revision,
+        srcRev = report.source_revision,
+        snapshot = report.snapshot_id,
+        base = %base,
+        steps,
+        changed = report.changed.len(),
+        removed = report.removed.len(),
+        failedSteps = report.failed_steps.len(),
+        needsRepair = report.needs_repair.len(),
+        "regen: {}",
+        report.outcome_str()
+    );
+    for step in &report.failed_steps {
+        tracing::warn!(
+            job = %job,
+            record = %step.record_id,
+            reason = %step.message,
+            "regen: FAILED step"
+        );
+    }
 }
 
 /// What a [`PreparedRegen`] actually does in phase 2.
@@ -1943,19 +2050,44 @@ impl PreparedRegen {
             lod,
             prior,
             executed,
+            job,
+            base_hash_prefix,
+            step_count,
         } = self;
+        // The phase-2 span. Everything the executor awaits nests inside it — INCLUDING
+        // the `onecad_protocol::frames` tx/rx events, which is the join from a regen to
+        // its OCW1 `reqId`s. The forwarded worker-stderr lane does NOT nest (it is a
+        // detached per-spawn task); join that one through the frame trace's `reqId`.
+        let span = tracing::info_span!(
+            "regen.drive",
+            job = %JobLabel(job),
+            rev = expected.0 .0,
+            epoch = expected.1 .0,
+            base = %base_hash_prefix,
+            steps = step_count,
+        );
+        let started = std::time::Instant::now();
         let outcome = match work {
             PreparedWork::Plan { plan_req, engine } => {
                 let gate = move || fencing.get();
                 let executor = RegenExecutor::new(*engine);
                 executor
                     .run(*plan_req, &mut scratch, &gate, &cancel, &publisher)
+                    .instrument(span.clone())
                     .await
             }
             PreparedWork::Clear { target } => {
-                drive_clear(&mut scratch, &publisher, &cancel, target)
+                span.in_scope(|| drive_clear(&mut scratch, &publisher, &cancel, target))
             }
         };
+        span.in_scope(|| {
+            tracing::info!(
+                outcome = outcome_label(&outcome),
+                // Machine timing: the span-close `time.busy` is a unit-suffixed STRING.
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "regen.drive: done"
+            );
+        });
         DrivenRegen {
             outcome,
             scratch,
@@ -1963,7 +2095,22 @@ impl PreparedRegen {
             expected,
             lod,
             executed,
+            job,
+            base_hash_prefix,
+            step_count,
         }
+    }
+}
+
+/// The terminal label of a driven [`Outcome`] (the same vocabulary
+/// [`RegenReport::outcome_str`] publishes, before a report exists).
+fn outcome_label(outcome: &Outcome) -> &'static str {
+    match outcome {
+        Outcome::Published(_) => "published",
+        Outcome::Superseded => "superseded",
+        Outcome::EngineFailed(_) => "failed",
+        Outcome::Cancelled => "cancelled",
+        Outcome::NoOp => "noop",
     }
 }
 
@@ -2018,6 +2165,11 @@ pub struct DrivenRegen {
     ),
     lod: Lod,
     executed: BTreeSet<RecordId>,
+    /// Correlation fields threaded from [`PreparedRegen`] so phase 3's postmortem
+    /// line carries the SAME keys phase 1/2 logged (see [`PreparedRegen`]).
+    job: Option<JobId>,
+    base_hash_prefix: String,
+    step_count: usize,
 }
 
 /// Repopulates the wire split-id interner from a registry's persisted `split_of`

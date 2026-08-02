@@ -274,6 +274,14 @@ export class SketchStaticLayer {
     e.group.visible = e.visible && id !== this.editingId;
   }
 
+  /**
+   * Theme change: re-tint every sketch. `applyTint` re-reads the palette per
+   * call, so replaying it across the entries is the whole fix.
+   */
+  refreshColors(): void {
+    for (const id of this.entries.keys()) this.applyTint(id);
+  }
+
   private applyTint(id: string): void {
     const e = this.entries.get(id);
     if (!e) return;

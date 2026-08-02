@@ -1,5 +1,15 @@
 import { describe, it, expect } from "vitest";
-import { radiusFromDrag, formatMm, radiusFromValueText, DEFAULT_FILLET_RADIUS } from "./filletRadius";
+import {
+  radiusFromDrag,
+  formatMm,
+  radiusFromValueText,
+  DEFAULT_FILLET_RADIUS,
+  screenDragAxis,
+  signedValueFromDrag,
+  SCREEN_UP_AXIS,
+  type ScreenAxis,
+  type RadiusDragOpts,
+} from "./filletRadius";
 
 describe("radiusFromDrag", () => {
   it("grows the radius 1:1 with world units when dragging up", () => {
@@ -63,5 +73,72 @@ describe("radiusFromValueText (fillet re-edit seed)", () => {
     for (const v of [2, 12.5, 83.3, 100]) {
       expect(radiusFromValueText(`${v.toFixed(1)} mm`)).toBeCloseTo(v, 9);
     }
+  });
+});
+
+// ── FILLET-CHAMFER-UNIFY W0 additions below (additive only) ────────────────
+
+describe("screenDragAxis", () => {
+  it("returns a unit vector from mid toward the outward point", () => {
+    const axis = screenDragAxis({ x: 100, y: 100 }, { x: 100, y: 70 })!; // 30px up
+    expect(Math.hypot(axis.x, axis.y)).toBeCloseTo(1, 9);
+    expect(axis).toEqual({ x: 0, y: -1 });
+  });
+
+  it("removes the tangent component: a drag purely along the projected tangent is inert", () => {
+    const mid: ScreenAxis = { x: 0, y: 0 };
+    const out: ScreenAxis = { x: 10, y: 10 }; // outward at 45°, not parallel to the tangent
+    const tan: ScreenAxis = { x: 10, y: 0 }; // tangent along +x
+    const axis = screenDragAxis(mid, out, tan);
+    expect(axis).not.toBeNull();
+    const opts = { worldPerPx: 0.5 };
+    // A drag along (mid -> tan) is, by construction, perpendicular to `axis`
+    // (its tangent-aligned component was removed when deriving the axis) —
+    // so it must not move the value at all.
+    const delta = signedValueFromDrag(5, tan.x - mid.x, tan.y - mid.y, axis!, opts) - 5;
+    expect(delta).toBeCloseTo(0, 9);
+  });
+
+  it("pixel floor: a remaining vector shorter than minPx is null (no fabricated axis)", () => {
+    expect(screenDragAxis({ x: 0, y: 0 }, { x: 2, y: 0 })).toBeNull(); // 2px < default 3px
+    expect(screenDragAxis({ x: 0, y: 0 }, { x: 5, y: 0 }, undefined, 10)).toBeNull(); // custom floor
+  });
+
+  it("works with no tangent argument (undefined path)", () => {
+    const axis = screenDragAxis({ x: 0, y: 0 }, { x: 0, y: -10 });
+    expect(axis).toEqual({ x: 0, y: -1 });
+  });
+});
+
+describe("signedValueFromDrag + SCREEN_UP_AXIS — golden-pins radiusFromDrag", () => {
+  // `dy` here is the RAW screen delta signedValueFromDrag takes (clientY −
+  // downY); radiusFromDrag's own convention is up-positive dyPixels = -dy.
+  // Reuses the exact numeric cases from the `radiusFromDrag` describe above.
+  const grid: Array<{ start: number; dy: number; opts: RadiusDragOpts }> = [
+    { start: 2, dy: -10, opts: { worldPerPx: 0.5 } }, // up 10px
+    { start: 5, dy: 6, opts: { worldPerPx: 0.5 } }, // down 6px
+    { start: 0, dy: -10, opts: { worldPerPx: 1, sensitivity: 2 } },
+    { start: 10, dy: -3, opts: { worldPerPx: 2, sensitivity: 0.5 } },
+  ];
+
+  it("equals radiusFromDrag's UNCLAMPED value for a grid of positive-result drags", () => {
+    for (const { start, dy, opts } of grid) {
+      const gain = opts.sensitivity ?? 1;
+      const unclamped = start + -dy * opts.worldPerPx * gain;
+      const min = opts.min ?? 0.1;
+      expect(unclamped).toBeGreaterThan(min); // grid never engages the clamp
+      expect(radiusFromDrag(start, -dy, opts)).toBeCloseTo(Math.max(min, unclamped), 9);
+      const signed = signedValueFromDrag(start, 0, dy, SCREEN_UP_AXIS, opts);
+      expect(signed).toBeCloseTo(unclamped, 9);
+      expect(signed).toBeCloseTo(radiusFromDrag(start, -dy, opts), 9);
+    }
+  });
+
+  it("returns a negative result UNCLAMPED where radiusFromDrag would floor it", () => {
+    const opts = { worldPerPx: 0.5, min: 0.1 };
+    const dy = 100; // moved down 100px
+    const signed = signedValueFromDrag(2, 0, dy, SCREEN_UP_AXIS, opts);
+    expect(signed).toBeCloseTo(-48, 9);
+    expect(radiusFromDrag(2, -dy, opts)).toBe(0.1); // same unclamped value, but floored
   });
 });

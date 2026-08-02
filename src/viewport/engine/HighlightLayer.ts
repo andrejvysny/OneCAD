@@ -103,6 +103,18 @@ export class HighlightLayer {
     this.rebuild();
   }
 
+  /**
+   * Theme change: re-read the palette into the four shared materials.
+   * `rebuild()` only recreates OBJECTS — it reuses these materials, so it can
+   * never pick up a new theme on its own.
+   */
+  refreshColors(): void {
+    this.hoverFaceMat.color.copy(palette.hoverAccent());
+    this.selFaceMat.color.copy(palette.selectedTint());
+    this.hoverEdgeMat.color.copy(palette.hoverAccent());
+    this.selEdgeMat.color.copy(palette.selectedEdge());
+  }
+
   private rebuild(): void {
     this.clearObjects();
     for (const ref of this.selected) this.addHighlight(ref, false);

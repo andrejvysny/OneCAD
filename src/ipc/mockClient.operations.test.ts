@@ -237,6 +237,52 @@ describe("mockClient operations", () => {
     expect(res.features.some((f) => f.kind === "fillet" && f.valueText === "3.0 mm")).toBe(true);
   });
 
+  it("a Fillet→Chamfer re-edit swaps the row's opType + label (the ONE sanctioned opType edit)", async () => {
+    const created = await mockClient.applyOperation({
+      opType: "Fillet",
+      inputs: [{ primary: { bodyId: "body1", elementId: "el_e", kind: "edge" } }],
+      params: { mode: "Fillet", radius: 3, edgeIds: ["el_e"] },
+    });
+    const featureId = created.features.find((f) => f.opType === "Fillet" && f.valueText === "3.0 mm")!.id;
+
+    const stored = await mockClient.getOperationParams(featureId);
+    const edited = await mockClient.applyEditCommand(
+      updateScalarParamsCommand(featureId, "Chamfer", stored, { radius: { value: 4 } }),
+    );
+
+    const row = edited.features.find((f) => f.id === featureId)!;
+    // Both have to follow the swap: `opType` drives the HistoryList icon and the
+    // InspectorPanel's re-edit routing, `label` is what the row reads.
+    expect(row.opType).toBe("Chamfer");
+    expect(row.label).toBe("Chamfer");
+    expect(row.kind).toBe("fillet"); // the coarse bucket still folds both
+    expect(row.valueText).toBe("4.0 mm");
+    expect(edited.features).toHaveLength(created.features.length); // no new row
+  });
+
+  it("mirrors the core allow-list: any OTHER opType change through updateOperationParams rejects", async () => {
+    const created = await mockClient.applyOperation({
+      opType: "Fillet",
+      inputs: [{ primary: { bodyId: "body1", elementId: "el_e", kind: "edge" } }],
+      params: { mode: "Fillet", radius: 3, edgeIds: ["el_e"] },
+    });
+    const featureId = created.features.find((f) => f.opType === "Fillet" && f.valueText === "3.0 mm")!.id;
+    const stored = await mockClient.getOperationParams(featureId);
+
+    // `opType` is structural — dependents, the planner hash, and the worker's
+    // dispatch all key on it. The mock must not stay green where the real backend
+    // errors (`session::op_type_edit_allowed`).
+    await expect(
+      mockClient.applyEditCommand(
+        updateScalarParamsCommand(featureId, "Extrude", stored, { distance: { value: 4 } }),
+      ),
+    ).rejects.toThrow(/opType/);
+
+    // …and the rejected edit wrote nothing.
+    const after = await mockClient.getOperationParams(featureId);
+    expect(after.radius).toEqual({ value: 3 });
+  });
+
   it("Shell adds a thickness feature + re-emits the target body; a re-edit updates in place", async () => {
     const created = await mockClient.applyOperation({
       opType: "Shell",

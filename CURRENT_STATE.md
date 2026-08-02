@@ -1,6 +1,101 @@
-# OneCAD-Tauri — Current State (2026-08-02, RENDER-MODE wave shipped)
+# OneCAD-Tauri — Current State (2026-08-02, FILLET-CHAMFER-UNIFY shipped)
 
-## RENDER-MODE (2026-08-02, commit 63b3adc) — display-mode registry + studio shading
+## FILLET-CHAMFER-UNIFY (2026-08-02, commit (pending)) — ONE direction-driven edge tool
+Plan `~/.claude/plans/act-as-senior-software-peppy-quilt.md` (internal adversarial
+review REVISE → 1 BLOCKER + 6 MAJOR folded pre-approval). Shapr3D parity: F arms
+one "Fillet / Chamfer" tool; drag AWAY from the body rounds, INTO it bevels, the
+chip flips live; `[Fillet|Chamfer]` segments are the explicit override that ends
+auto for the session (host-boolean precedent). `chamfer` tool id + `H` are dead
+(`h` = Home again); the chamfer ICON lives on in history rows.
+THE HONESTY RULE: the drag direction may pick the op ONLY where the sign is
+provable — the bisector tier (sum of adjacent flat face normals reconstructed
+from MESH1; FE has no edge→face topology). The bbox fallback points INTO
+material on a concave edge, so off-bisector arms are `auto:false` and the chips
+own the type. A cylinder cap edge degrades tiers HONESTLY (smooth normals fail
+the tangent-plane test) and is pinned by test.
+FLIP MECHANICS: `beginPreview` freezes opType, so a type flip is a session
+close+reopen fenced by `++armGen` (two hysteresis crossings inside one in-flight
+begin = stale-kind session + leak — race-tested); hysteresis 0.25 > value clamp
+0.1 so type never strobes at the floor; mid-drag flip restores the 80ms trailing.
+RE-EDIT TYPE FLIP: core `op_type_edit_allowed` sanctions exactly the
+Fillet⇄Chamfer pair (enum-variant matched; params field-identical; undo exact via
+whole-record inverse; legacy `mode` string normalized in core). Re-edit chip
+became the full armed cluster — necessary: `DimensionInput.commit` fires only on
+a CHANGED number, so a pure type flip could never commit from the bare chip.
+PRE-EXISTING LEAK FIXED (W2): re-edit while the same tool was armed never swept
+the old arm's in-flight preview session (`setTool` no-op → no `onToolChange`);
+`editEdgeOpFeature` now fences AFTER `setTool`.
+PROOF vs real worker: swap fillet(r=2)→chamfer(d=2) on a 20×... box — removed
+volume 23.463 → 50.000, ratio 2.131 (analytic 2.33; asserted on the RATIO, never
+the record's own opType (tautology) or label (fixture rename)); undo restores;
+zero needsRepair.
+Suites at final gate (orchestrator-verified): ctest 79/79 · cargo 600/0 vs real
+worker · tsc 0 · FE 2135/156 · e2e 111/111 · hex 1 pre-existing (inputProbe).
+NOTE: workspace `fmt`/`clippy` at gate time were red from the CONCURRENT
+DEV-OBSERVABILITY session's in-flight edits (its files only); this WP's crates
+tested clean before those landed.
+REMAINING: USER manual Tauri gate (TODO.md FILLET-CHAMFER-UNIFY checklist).
+Backlog: 2-distance chamfer / chordal / G2, edge-midpoint drag gizmo.
+
+## DARK-MODE (2026-08-02, commit (pending)) — Light/Dark/System, chrome + live viewport
+Plan `~/.claude/plans/act-as-senior-software-transient-puddle.md`.
+The app had no theming layer at all: one flat `@theme` block of light hexes, and
+a viewport that memoizes `THREE.Color` and builds ~30 materials once. So a token
+swap would have repainted the chrome instantly and left the entire 3D scene
+light. The only pre-existing seam, `resetPaletteCache()`, was exported with zero
+callers; this wave wires it.
+
+`src/theme/` owns resolution — a registry (`themes.ts`, mirroring the
+render-mode table) plus a controller that is the sole writer of `data-theme` on
+`<html>`. Only the PREFERENCE is persisted; "system" resolves against the OS at
+runtime, following the precedent `navigation.inputDevice` set. Chrome re-themes
+through CSS alone: Tailwind v4 compiles color utilities to `var(--color-*)`, so
+a `:root[data-theme="dark"]` block re-themes everything with no `dark:` variants
+anywhere.
+
+The viewport cannot do that, so it is told: `ViewportEngine.applyTheme()` drops
+through clear color → light levels → environment → eleven layer refreshes. The
+order is load-bearing — PMREM fills the directions the studio room does not
+cover with the renderer's clear color, so the environment must rebuild AFTER the
+new background lands.
+
+Two findings worth carrying forward. Tailwind INLINES `--shadow-*` at build
+time, so overriding those tokens per theme is a silent no-op — dark shadows go
+through `--tw-shadow-color` instead. And `--color-body-edge` has to INVERT:
+wireframe mode draws edges with no faces behind them, so near-black edges on a
+dark canvas would be invisible.
+Appearance is reachable two ways: the full three-way radio in the display
+popover, and a one-click cycling shortcut in the title bar (naming the current
+value, so its changing icon is never ambiguous).
+Suites at gate: tsc 0 · FE 2085/153 · e2e 11/11 new (94 prior untouched) · hex
+clean. cargo/ctest not re-run — only `capabilities/default.json` changed on the
+Rust side.
+OPEN: a user reported dark chrome with a still-LIGHT viewport under `tauri dev`.
+Not reproducible in the mock lane on either path (toggle-after-boot and
+cold-boot-already-dark are both green vs real WebGL) and the dark canvas token
+is confirmed in the built CSS. The palette cache was re-keyed BY THEME in
+response, which removes the ordering-bug class that would explain it: a read
+taken while the document says dark can no longer return a light color, so
+correctness no longer depends on `resetPaletteCache()` having fired first. The
+leading remaining theory is a Vite HMR artifact, not a product bug — a CSS-only
+hot reload re-themes chrome instantly while `data-theme` never CHANGES, so no
+event fires and the engine's already-built materials stay stale. Needs a cold
+restart plus devtools output from the real webview to close.
+BACKLOGGED THIS WAVE: the first per-layer test draft was VACUOUS (most layers
+keep shared materials off the scene graph until something draws with them, so an
+idle traversal proved nothing) — caught only by neutering an implementation and
+watching the test stay green; the helper now refuses an empty traversal and every
+case attaches real content. `--tw-shadow-color` is a Tailwind internal and no
+test can catch a regression in it, because jsdom never runs the Tailwind
+pipeline. Dark collapses per-shadow alphas to a single tint. `--color-on-accent`
+goes near-black on the accent for AA contrast, which reads unfamiliar.
+`palette.ts` now mirrors ~40 token values by hand across two themes with nothing
+enforcing the match.
+REMAINING: USER manual Tauri gate (TODO.md DARK-MODE checklist).
+
+
+
+## RENDER-MODE (2026-08-02, commit 55454d0) — display-mode registry + studio shading
 No plan doc; direct WP continuing MODELING-REACH W3, which shipped the
 display-mode button as a 3-state cycler over session-only `viewportStore` state.
 Now the mode is DATA: `renderModes.ts` holds the descriptor table
@@ -30,9 +125,8 @@ drives body shading; `palette.ts` still caches colors forever and
 frozen for the life of the engine; two `BodyMaterialLibrary` instances exist
 with no single owner able to reach both.
 REMAINING: USER manual Tauri gate (TODO.md RENDER-MODE checklist).
-NEXT: DARK-MODE wave — plan
-`~/.claude/plans/act-as-senior-software-transient-puddle.md` (approved
-2026-08-02), which wires `resetPaletteCache()` and unfreezes those materials.
+NOTE: the frozen-material and unwired-`resetPaletteCache()` flags above were
+closed by the DARK-MODE wave that followed.
 
 ## SKETCH-ON-FACE (2026-08-01, commits 2ac7aba→(final)) — sketch on model geometry, with the host outline as locked reference
 Plan `~/.claude/plans/act-as-senior-software-twinkly-crown.md` (internal

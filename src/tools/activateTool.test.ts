@@ -19,7 +19,7 @@ describe("activateTool — tool classification", () => {
       expect(isSketchOnlyTool(t)).toBe(true);
       expect(isModelOnlyTool(t)).toBe(false);
     }
-    for (const t of ["datum", "extrude", "revolve", "fillet", "chamfer", "boolean", "shell", "linearPattern", "circularPattern"] as const) {
+    for (const t of ["datum", "extrude", "revolve", "fillet", "boolean", "shell", "linearPattern", "circularPattern"] as const) {
       expect(isModelOnlyTool(t)).toBe(true);
       expect(isSketchOnlyTool(t)).toBe(false);
     }
@@ -107,7 +107,7 @@ describe("activateTool — sketch mode", () => {
     expect(viewportStore.getState().pendingExtrudeSketch).toBeNull();
   });
 
-  it.each(["revolve", "chamfer", "boolean", "shell", "linearPattern", "circularPattern"] as const)(
+  it.each(["revolve", "boolean", "shell", "linearPattern", "circularPattern"] as const)(
     "finishes + arms %s without the extrude handoff",
     async (tool) => {
       await activateTool(tool);

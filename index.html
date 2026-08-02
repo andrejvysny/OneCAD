@@ -8,7 +8,30 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
     />
+    <!-- Lets the UA pick native scrollbar/form-control appearance per theme;
+         themeController narrows this to the resolved value on <html>. -->
+    <meta name="color-scheme" content="light dark" />
     <title>OneCAD</title>
+    <script>
+      // No-FOUC: stamp the theme BEFORE first paint. The module bundle loads too
+      // late — without this a dark-theme user gets a white flash on every launch.
+      // Duplicates STORAGE_KEY from src/stores/settingsStore.ts and the resolve
+      // rule from src/theme/themes.ts on purpose: this must not import anything.
+      // Worst case on drift is one frame of the wrong theme, never a broken app.
+      (function () {
+        try {
+          var raw = localStorage.getItem("onecad.settings");
+          var pref = raw ? JSON.parse(raw).state.theme : "system";
+          if (pref !== "light" && pref !== "dark") {
+            pref = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+          }
+          document.documentElement.dataset.theme = pref;
+          document.documentElement.style.colorScheme = pref;
+        } catch (e) {
+          document.documentElement.dataset.theme = "light";
+        }
+      })();
+    </script>
   </head>
 
   <body>

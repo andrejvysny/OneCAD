@@ -104,6 +104,18 @@ export const ICON_PATHS = {
   // `fit`, whose brackets are the same corners opening outward.
   isolate:
     "M12 8.4l3.6 2.1v4.2L12 16.8l-3.6-2.1v-4.2zM4.5 8V4.5H8M16 4.5h3.5V8M19.5 16v3.5H16M8 19.5H4.5V16",
+
+  // ---- DARK-MODE appearance (authored for this WP, NOT from the prototype) ----
+  // One glyph per ThemePref, so the title-bar button always shows the CURRENT
+  // preference rather than a generic "theme" symbol. Drawn on the same 24-grid
+  // at the same stroke weight as the tool glyphs.
+  // Sun: disc + eight rays (two arcs close the disc, as `boolean` does).
+  themeLight:
+    "M12 8.2a3.8 3.8 0 1 1 0 7.6 3.8 3.8 0 0 1 0-7.6M12 3v2.2M12 18.8V21M4.6 4.6l1.6 1.6M17.8 17.8l1.6 1.6M3 12h2.2M18.8 12H21M4.6 19.4l1.6-1.6M17.8 6.2l1.6-1.6",
+  // Crescent: one arc cut by another, no fill (stroke-only like every glyph).
+  themeDark: "M20 14.2A8.2 8.2 0 0 1 9.8 4 8.4 8.4 0 1 0 20 14.2z",
+  // Monitor = "whatever the desktop says" (System).
+  themeSystem: "M3.5 5.5h17v10h-17zM9 19.5h6M12 15.5v4",
 } as const;
 
 export type IconName = keyof typeof ICON_PATHS;

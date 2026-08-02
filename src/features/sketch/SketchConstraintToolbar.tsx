@@ -71,7 +71,7 @@ export function SketchConstraintToolbar() {
       role="toolbar"
       aria-label="Constraints"
       data-testid="sketch-constraint-toolbar"
-      className="absolute left-1/2 top-[108px] z-30 flex -translate-x-1/2 items-center gap-0.5 rounded-lg border border-border bg-white p-1 shadow-card"
+      className="absolute left-1/2 top-[108px] z-30 flex -translate-x-1/2 items-center gap-0.5 rounded-lg border border-border bg-surface p-1 shadow-card"
     >
       {GEOMETRIC_TYPES.map(button)}
       <span aria-hidden="true" className="mx-1 h-5 w-px bg-border" />

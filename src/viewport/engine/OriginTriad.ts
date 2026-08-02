@@ -37,6 +37,15 @@ const TRIAD_WIDTH = 2;
 /** Leg length in CSS px, held constant across zoom. */
 const TRIAD_PX = 110;
 
+/** Flat rgb pairs (both ends of each leg) in +X/+Y/+Z order. */
+function legColors(colors: TriadColors): number[] {
+  const col: number[] = [];
+  for (const c of [colors.x, colors.y, colors.z]) {
+    col.push(c.r, c.g, c.b, c.r, c.g, c.b);
+  }
+  return col;
+}
+
 export class OriginTriad {
   readonly object3D: THREE.Group;
   private readonly material: LineMaterial;
@@ -66,11 +75,7 @@ export class OriginTriad {
       0, 0, 0, 0, 1, 0, // +Y
       0, 0, 0, 0, 0, 1, // +Z
     ]);
-    const col: number[] = [];
-    for (const c of [colors.x, colors.y, colors.z]) {
-      col.push(c.r, c.g, c.b, c.r, c.g, c.b);
-    }
-    geo.setColors(col);
+    geo.setColors(legColors(colors));
 
     this.seg = new LineSegments2(geo, this.material);
     this.seg.renderOrder = RENDER_ORDER.TRIAD;
@@ -90,6 +95,17 @@ export class OriginTriad {
     // The group never moves, so its local position IS its world position.
     this.object3D.scale.setScalar(worldPerPixel(camera, this.object3D.position, h) * TRIAD_PX);
     this.material.resolution.set(Math.max(width, 1) * dpr, h * dpr);
+  }
+
+  /**
+   * Theme change: re-bake the axis colors.
+   *
+   * The legs carry per-vertex colors rather than a material color (one
+   * LineSegments2 draws all three), so this rewrites the geometry's color
+   * attribute — there is no material color to copy into.
+   */
+  setColors(colors: TriadColors): void {
+    (this.seg.geometry as LineSegmentsGeometry).setColors(legColors(colors));
   }
 
   /** Current leg length in world units. */

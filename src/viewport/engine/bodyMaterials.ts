@@ -126,7 +126,26 @@ export class BodyMaterialLibrary {
   /** Drop the override and go back to the neutral body token. */
   resetFaceColor(): void {
     this.faceColor = null;
-    for (const set of this.sets.values()) set.face.color.copy(palette.bodyNeutral());
+    this.applyPaletteColors();
+  }
+
+  /**
+   * Theme change: re-read the palette into every live set.
+   *
+   * Distinct from {@link resetFaceColor}: an active Cut tint is PRESERVED (it
+   * is a state, not a theme), while the edge color — which nothing else ever
+   * updates — is re-read unconditionally. That edge re-read is load-bearing in
+   * wireframe mode, where edges are all that draws.
+   */
+  refreshColors(): void {
+    this.applyPaletteColors();
+  }
+
+  private applyPaletteColors(): void {
+    for (const set of this.sets.values()) {
+      set.face.color.copy(this.faceColor ?? palette.bodyNeutral());
+      set.edge.color.copy(palette.bodyEdge());
+    }
   }
 
   dispose(): void {

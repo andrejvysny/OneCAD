@@ -19,6 +19,7 @@
  */
 import * as THREE from "three";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
+import { logInfo, logWarn } from "@/debug/log";
 import { createRenderer, type EnvironmentHandle, type RendererHandle } from "./renderer";
 import { CameraRig, type ProjectionKind } from "./CameraRig";
 import { CadOrbitControls } from "./CadOrbitControls";
@@ -97,14 +98,40 @@ const Z0_PLANE = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
  * WebGL carries an IBL environment, so the direct lights only need to add
  * shaping on top of it. WebGPU has no environment here (PMREM is WebGL-only —
  * see renderer.ts), so its lights must supply the whole level themselves.
+ *
+ * THEME is the second axis, and it is not cosmetic. Two couplings force it:
+ *   - The hemisphere light's GROUND half is the canvas token. In dark that is
+ *     near-black, so the same intensity that reads as soft fill in light mode
+ *     actively muddies undersides — it has to come down.
+ *   - PMREM fills the directions RoomEnvironment does not cover with the
+ *     renderer clear color, so a dark canvas lowers the environment's net
+ *     contribution. RoomEnvironment still covers most directions, so the
+ *     correction is small; the key light takes up the slack.
+ *
+ * A table, not branches, for the same reason renderModes.ts is a table.
  */
-const ENV_INTENSITY = 0.35;
-const KEY_WEBGL = 1.9;
-const FILL_WEBGL = 0.6;
-const HEMI_WEBGL = 0.25;
-const KEY_WEBGPU = 2.4;
-const FILL_WEBGPU = 0.85;
-const HEMI_WEBGPU = 0.7;
+interface LightLevels {
+  env: number;
+  key: number;
+  fill: number;
+  hemi: number;
+}
+
+const LIGHT_LEVELS: Record<"light" | "dark", Record<"webgl" | "webgpu", LightLevels>> = {
+  light: {
+    webgl: { env: 0.35, key: 1.9, fill: 0.6, hemi: 0.25 },
+    webgpu: { env: 0, key: 2.4, fill: 0.85, hemi: 0.7 },
+  },
+  dark: {
+    webgl: { env: 0.3, key: 2.1, fill: 0.7, hemi: 0.15 },
+    webgpu: { env: 0, key: 2.6, fill: 0.95, hemi: 0.45 },
+  },
+};
+
+function lightLevels(isWebGPU: boolean): LightLevels {
+  const theme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+  return LIGHT_LEVELS[theme][isWebGPU ? "webgpu" : "webgl"];
+}
 
 export class ViewportEngine {
   // Lifecycle
@@ -121,9 +148,13 @@ export class ViewportEngine {
   // Context-loss recovery (WKWebView drops GL contexts on GPU switch/sleep):
   // preventDefault on loss is REQUIRED for the browser to ever restore it.
   private readonly onContextLost = (e: Event): void => {
+    // A silent context loss looks exactly like "the viewport froze" — it MUST
+    // be on the record, and it is rare enough to warrant a warn.
+    logWarn("vp", "webgl context LOST", { disposed: this.disposed });
     if (!this.disposed) e.preventDefault();
   };
   private readonly onContextRestored = (): void => {
+    logInfo("vp", "webgl context restored");
     this.invalidate();
     // The environment map lives ONLY on the GPU (a PMREM render target has no
     // CPU-side source), so a restored context comes back with a black env unless
@@ -324,6 +355,66 @@ export class ViewportEngine {
     if (this.debug) {
       (window as unknown as { __vpEngine?: ViewportEngine }).__vpEngine = this;
     }
+
+    // StrictMode double-invokes the mount effect, so a DEV session legitimately
+    // shows init/dispose/init — that pattern in the log is expected, not a bug.
+    logInfo("vp", "engine init", {
+      backend: this.isWebGPU ? "webgpu" : "webgl",
+      debug: this.debug,
+    });
+  }
+
+  /**
+   * Re-read every design token after a theme change.
+   *
+   * The caller MUST have dropped the palette cache first (`resetPaletteCache()`
+   * in ViewportRoot) — every getter below would otherwise hand back the old
+   * theme's memoized THREE.Color.
+   *
+   * ORDER IS LOAD-BEARING: the clear color has to land before
+   * `buildEnvironment()`, because PMREM fills the directions RoomEnvironment
+   * does not cover with whatever the renderer is currently clearing to. Rebuild
+   * the environment first and the bodies stay lit by the OLD background.
+   *
+   * INVARIANT: every layer that reads `palette` implements `refreshColors()`
+   * (or `setColors()` where the color is baked into geometry) and is listed
+   * here. A layer missing from this list fails silently — it simply keeps the
+   * previous theme's colors until something else rebuilds it. See
+   * engine/README.md.
+   */
+  applyTheme(): void {
+    if (!this.initialized || this.disposed) return;
+
+    this.rendererHandle?.renderer.setClearColor(palette.clear(), 1);
+    this.applyLightIntensities();
+    // Ground half of the ambient tracks the background, so unlit undersides
+    // settle toward it instead of toward the old theme's canvas.
+    this.hemiLight?.groundColor.copy(palette.clear());
+    this.buildEnvironment();
+
+    this.grid?.setColors({
+      minor: palette.gridMinor(),
+      major: palette.gridMajor(),
+      clear: palette.clear(),
+    });
+    this.triad?.setColors({ x: palette.axisX(), y: palette.axisY(), z: palette.axisZ() });
+
+    this.highlights?.refreshColors();
+    this.planePicker?.refreshColors();
+    this.datumLayer?.refreshColors();
+    this.regionPickLayer?.refreshColors();
+    this.sketch?.refreshColors();
+    this.sketchStatic?.refreshColors();
+    this.snapIndicator?.refreshColors();
+    this.ghostLayer?.refreshColors();
+    this.previewMesh?.refreshColors();
+    this.revolvePreview?.refreshColors();
+    this.dragHandle?.refreshColors();
+    // Preview bodies only. The COMMITTED bodies' library belongs to MeshIngest,
+    // which the engine cannot reach — ViewportRoot refreshes that one.
+    this.previewMaterials?.refreshColors();
+
+    this.invalidate();
   }
 
   /** Debug-only introspection (?vpdebug). */
@@ -333,6 +424,10 @@ export class ViewportEngine {
     return {
       isWebGPU: this.isWebGPU,
       envReady: this.environment !== null,
+      // Theme probes for e2e: there is no per-body DOM, so proving the 3D side
+      // actually re-themed means reading the scene, not the store.
+      theme: document.documentElement.dataset.theme ?? "light",
+      clearColor: `#${palette.clear().getHexString()}`,
       frames: this.frames,
       camPos: cam.position.toArray(),
       camNear: (cam as THREE.PerspectiveCamera).near,
@@ -365,18 +460,19 @@ export class ViewportEngine {
   private buildScene(): void {
     // Ambient floor. The ground half is the canvas token, so unlit undersides
     // settle toward the background instead of a hard-coded blue-gray.
+    const levels = lightLevels(false);
     this.hemiLight = new THREE.HemisphereLight(
       new THREE.Color(1, 1, 1),
       palette.clear(),
-      HEMI_WEBGL,
+      levels.hemi,
     );
     this.scene.add(this.hemiLight);
 
     // Key + fill are positioned per frame by the light rig (renderFrame).
     // Intensities are the WebGL defaults here and re-applied once the backend is
     // known — buildScene() runs before the renderer exists.
-    this.keyLight = new THREE.DirectionalLight(new THREE.Color(1, 1, 1), KEY_WEBGL);
-    this.fillLight = new THREE.DirectionalLight(new THREE.Color(1, 1, 1), FILL_WEBGL);
+    this.keyLight = new THREE.DirectionalLight(new THREE.Color(1, 1, 1), levels.key);
+    this.fillLight = new THREE.DirectionalLight(new THREE.Color(1, 1, 1), levels.fill);
     this.scene.add(this.keyLight, this.keyLight.target);
     this.scene.add(this.fillLight, this.fillLight.target);
 
@@ -388,14 +484,15 @@ export class ViewportEngine {
   }
 
   /**
-   * Level the direct lights for the active backend. WebGL adds an IBL on top, so
-   * its lights only shape; WebGPU has no environment and must carry it all.
+   * Level the direct lights for the active backend AND theme. WebGL adds an IBL
+   * on top, so its lights only shape; WebGPU has no environment and must carry
+   * it all. Re-run on every theme change (see applyTheme).
    */
   private applyLightIntensities(): void {
-    const webgpu = this.isWebGPU;
-    if (this.hemiLight) this.hemiLight.intensity = webgpu ? HEMI_WEBGPU : HEMI_WEBGL;
-    if (this.keyLight) this.keyLight.intensity = webgpu ? KEY_WEBGPU : KEY_WEBGL;
-    if (this.fillLight) this.fillLight.intensity = webgpu ? FILL_WEBGPU : FILL_WEBGL;
+    const levels = lightLevels(this.isWebGPU);
+    if (this.hemiLight) this.hemiLight.intensity = levels.hemi;
+    if (this.keyLight) this.keyLight.intensity = levels.key;
+    if (this.fillLight) this.fillLight.intensity = levels.fill;
   }
 
   /**
@@ -426,7 +523,7 @@ export class ViewportEngine {
     this.scene.environmentRotation.set(Math.PI / 2, 0, 0);
     // PMREM fills directions the room does not cover with the renderer's clear
     // color, so the environment automatically matches the canvas background.
-    this.scene.environmentIntensity = ENV_INTENSITY;
+    this.scene.environmentIntensity = lightLevels(this.isWebGPU).env;
   }
 
   private setupDebugOverlay(overlayEl: HTMLElement): void {
@@ -436,8 +533,8 @@ export class ViewportEngine {
     label.style.font = "11px ui-monospace, monospace";
     label.style.padding = "1px 4px";
     label.style.borderRadius = "3px";
-    label.style.background = "rgba(0,0,0,0.55)";
-    label.style.color = "rgb(240,240,240)";
+    label.style.background = "var(--color-tooltip)";
+    label.style.color = "var(--color-tooltip-text)";
     label.style.pointerEvents = "none";
     overlayEl.appendChild(label);
     this.overlayDriver.register("__debug_origin", label, new THREE.Vector3(0, 0, 0));
@@ -821,6 +918,33 @@ export class ViewportEngine {
     }
     const oc = cam as THREE.OrthographicCamera;
     return (oc.top - oc.bottom) / height;
+  }
+
+  /**
+   * Project a world point to canvas-relative screen pixels. Reuses the
+   * view-projection math of HtmlOverlayDriver.projectToScreen, inlined
+   * rather than imported — that driver owns its own per-frame Matrix4 cache
+   * and this is a one-off query (see HtmlOverlayDriver.ts:24-38). Valid
+   * whenever w > 0, even off-frustum — a drag-axis anchor still needs a
+   * projected point outside the visible frame; null when behind the camera
+   * (w ≤ 0) or before the canvas exists.
+   */
+  projectPoint(world: Vec3): { x: number; y: number } | null {
+    if (!this.canvas) return null;
+    const { width, height } = this.viewportSize();
+    const camera = this.rig.getCamera();
+    const viewProj = new THREE.Matrix4().multiplyMatrices(
+      camera.projectionMatrix,
+      camera.matrixWorldInverse,
+    );
+    const v = new THREE.Vector4(world[0], world[1], world[2], 1).applyMatrix4(viewProj);
+    if (v.w <= 0) return null;
+    const ndcX = v.x / v.w;
+    const ndcY = v.y / v.w;
+    return {
+      x: (ndcX * 0.5 + 0.5) * width,
+      y: (-ndcY * 0.5 + 0.5) * height,
+    };
   }
 
   /** Exit sketch mode: tear down the presence and restore the saved camera. */
@@ -1324,6 +1448,10 @@ export class ViewportEngine {
 
   dispose(): void {
     if (this.disposed) return;
+    // `initialized:false` means init() was still awaiting the renderer and bailed
+    // at its disposed-check — the normal StrictMode first-mount shape, and the
+    // reason a DEV session's first log line can be a dispose with no init before it.
+    logInfo("vp", "engine dispose", { frames: this.frames, initialized: this.initialized });
     this.disposed = true;
     this.initialized = false;
 

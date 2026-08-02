@@ -7,6 +7,7 @@
  * failed). The mock never emits, so this stays null under vitest.
  */
 import { createStore, useStore } from "zustand";
+import { logInfo } from "@/debug/log";
 import type { WorkerStatus } from "@/ipc/types";
 
 export type WorkerLifecycleState = WorkerStatus["state"] | null;
@@ -22,6 +23,9 @@ export const workerStore = createStore<WorkerStoreState>()((set) => ({
   state: null,
   epoch: 0,
   set(status) {
+    // The FE half of the worker lifecycle. `epoch` is the fencing key that joins
+    // this to the Rust `worker` lane lines for the same restart.
+    logInfo("worker", `lifecycle ${status.state}`, { state: status.state, epoch: status.epoch });
     set({ state: status.state, epoch: status.epoch });
   },
   reset() {

@@ -92,6 +92,46 @@ describe("applyProjectionToStore", () => {
     expect(features.map((f) => f.kind)).toEqual(["fillet", "fillet"]); // kind still folded
   });
 
+  it("a freshly opened DOCUMENT always applies — revisions never compare across documentIds", () => {
+    // The reopen bug class: a new runtime restarts revisions at 1, so with the
+    // store still holding the old document's high revision, a cross-document
+    // revision compare dropped every projection of the opened document forever.
+    documentStore.getState().applySnapshot({
+      ...seedMockDocument(),
+      documentId: "doc-old",
+      revision: 42,
+    });
+    const applied = applyProjectionToStore(
+      proj(1, {
+        documentId: "doc-new",
+        title: "Reopened",
+        bodies: { b1: { id: "b1", name: "B1", visible: true } },
+      }),
+    );
+    expect(applied).toBe(true);
+    const s = documentStore.getState();
+    expect(s.documentId).toBe("doc-new");
+    expect(s.revision).toBe(1);
+    expect(s.title).toBe("Reopened");
+    expect(s.bodies.b1).toBeDefined();
+  });
+
+  it("still drops a stale projection WITHIN the same documentId", () => {
+    documentStore.getState().applySnapshot({
+      ...seedMockDocument(),
+      documentId: "doc-1",
+      revision: 7,
+    });
+    expect(applyProjectionToStore(proj(3, { documentId: "doc-1" }))).toBe(false);
+    expect(documentStore.getState().revision).toBe(7);
+  });
+
+  it("treats a missing documentId (mock lane) as same-document semantics", () => {
+    documentStore.getState().applySnapshot({ ...seedMockDocument(), revision: 7 });
+    expect(applyProjectionToStore(proj(3))).toBe(false); // stale within the doc
+    expect(applyProjectionToStore(proj(8))).toBe(true); // newer applies
+  });
+
   it("drops a stale (lower-revision) projection", () => {
     documentStore.getState().applySnapshot({ ...seedMockDocument(), revision: 5, title: "keep" });
     const applied = applyProjectionToStore(proj(3, { title: "STALE" }));

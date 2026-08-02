@@ -17,7 +17,8 @@ import { mockClient } from "./mockClient";
 import { operationToEditCommand } from "./tauriCommandMap";
 import { makeBoxMesh } from "./mockMeshes";
 import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
-import { documentStore, seedMockDocument } from "@/stores/documentStore";
+import { documentStore, emptyDocument, seedMockDocument } from "@/stores/documentStore";
+import { __resetLogForTests, logSnapshot } from "@/debug/log";
 import type { DocumentChange, OperationOp } from "./types";
 
 const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
@@ -796,7 +797,8 @@ describe("tauriClient enterSketch orphan cleanup (DeleteSketch compensation)", (
   });
 
   it("suffixes the error when the DeleteSketch compensation ALSO rejects", async () => {
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // The orphan-cleanup failure is on the structured log lane now (Wave F).
+    __resetLogForTests();
     mockIPC(
       (cmd, payload) => {
         if (cmd === "apply_edit_command") {
@@ -811,8 +813,10 @@ describe("tauriClient enterSketch orphan cleanup (DeleteSketch compensation)", (
     await expect(createTauriClient().enterSketch({ newOnPlane: "XZ" })).rejects.toThrow(
       /workerDown: no worker \(cleanup failed — empty sketch left in tree\)$/,
     );
-    expect(errSpy).toHaveBeenCalled();
-    errSpy.mockRestore();
+    expect(
+      logSnapshot().filter((e) => e.level === "error" && e.msg.includes("orphan cleanup")),
+    ).toHaveLength(1);
+    __resetLogForTests({ enabled: false });
   });
 });
 
@@ -899,6 +903,40 @@ describe("tauriClient events", () => {
     unsub();
     await emit("document-changed", { revision: 8, changedBodies: [], removedBodies: [] });
     expect(seen).toHaveLength(1); // no delivery after unsubscribe
+  });
+
+  it("openDocument attaches the event bridge BEFORE invoking — an event fired during " +
+     "the command round-trip reaches the store (SAVE/OPEN hardening)", async () => {
+    // The reopen bug class: the pre-regen projection-updated (and a fast
+    // open-regen's document-changed) fires DURING the open_document round-trip.
+    // With the old fire-and-forget ensureEvents, listeners could still be
+    // attaching — those events were silently lost.
+    documentStore.getState().applySnapshot(emptyDocument());
+    mockIPC(async (cmd) => {
+      if (cmd === "open_document") {
+        await emit("projection-updated", {
+          status: "ready",
+          documentId: "doc-reopened",
+          revision: 1,
+          title: "Reopened",
+          dirty: false,
+          bodies: { b1: { id: "b1", name: "Body 1", visible: true } },
+          sketches: {},
+          datums: {},
+          features: [],
+        });
+        return { documentId: "doc-reopened", title: "Reopened" };
+      }
+      return undefined;
+    }, { shouldMockEvents: true });
+    const client = createTauriClient();
+
+    await client.openDocument("/tmp/reopened.onecad");
+    await tick();
+
+    const s = documentStore.getState();
+    expect(s.documentId).toBe("doc-reopened");
+    expect(s.bodies.b1).toBeDefined();
   });
 });
 

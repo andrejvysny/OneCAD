@@ -8,6 +8,10 @@ edition = "2021"
 # The async client pulls the transport stack. Server-side (worker) users depend
 # on this crate without the feature and get only the framing + message types.
 client = ["dep:tokio", "dep:tokio-util", "dep:bytes"]
+# Diagnostics: routes the client's internal warnings through `tracing` instead of
+# `eprintln!`, and enables the `onecad_protocol::frames` tx/rx trace lane. Declared
+# EXPLICITLY (an implicit `dep:`-only feature of the same name is a Cargo error).
+tracing = ["dep:tracing"]
 
 [dependencies]
 serde = { workspace = true }
@@ -26,3 +30,4 @@ tokio = { workspace = true, optional = true, features = [
 ] }
 tokio-util = { workspace = true, optional = true, features = ["codec"] }
 bytes = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }

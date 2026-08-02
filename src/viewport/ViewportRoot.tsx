@@ -12,7 +12,10 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/ui/cn";
+import { logWarn } from "@/debug/log";
 import { ViewportEngine } from "./engine/ViewportEngine";
+import { resetPaletteCache } from "./engine/palette";
+import { getResolvedTheme, subscribeResolvedTheme } from "@/theme/themeController";
 import { secondaryHitWins, type PickHit } from "./engine/Picker";
 import { MeshIngest } from "./mesh/meshSync";
 import { SketchStaticSync } from "./sketchStaticSync";
@@ -22,7 +25,6 @@ import { viewLabelForDirection } from "@/features/viewcube/ViewCube";
 import { viewportStore } from "@/stores/viewportStore";
 import { settingsStore } from "@/stores/settingsStore";
 import { toolStore } from "@/stores/toolStore";
-import { installInputProbe } from "./debug/inputProbe";
 import {
   selectionStore,
   sketchRegionRef,
@@ -111,8 +113,10 @@ function promotePick(client: ReturnType<typeof createClient>, ref: EntityRef): v
 }
 
 // Faint 45° hatch behind the placeholder (prototype 1c) — fallback only.
+// Tinted from a token so it inverts with the theme; a fixed black wash is
+// invisible on a dark canvas.
 const VIEWPORT_HATCH =
-  "repeating-linear-gradient(45deg, rgba(0,0,0,0.02) 0 12px, transparent 12px 24px)";
+  "repeating-linear-gradient(45deg, var(--color-hatch) 0 12px, transparent 12px 24px)";
 
 function hasFlag(name: string): boolean {
   return new URLSearchParams(window.location.search).has(name);
@@ -147,6 +151,12 @@ export function ViewportRoot({ className }: { className?: string }) {
     const engine = new ViewportEngine();
     let cancelled = false;
     const cleanups: Array<() => void> = [];
+    // The theme the engine is about to build its materials against. `init()`
+    // awaits renderer construction, and the theme subscription below can only
+    // be installed after that resolves — so a flip landing inside that window
+    // would be missed entirely and the scene would stay on the old theme until
+    // the NEXT flip. Compared once, after subscribing.
+    const themeAtInit = getResolvedTheme();
 
     engine
       .init(container, overlay, {
@@ -175,12 +185,23 @@ export function ViewportRoot({ className }: { className?: string }) {
         const client = createClient();
         const meshIngest = new MeshIngest();
         meshIngest.attach(engine, client);
-        // ?inputprobe — TEMPORARY wheel/gesture diagnostic. Remove with the probe.
-        if (hasFlag("inputprobe")) {
-          cleanups.push(installInputProbe(container));
-        }
-
         cleanups.push(() => meshIngest.detach());
+
+        // ── Live re-theme ──
+        // ONE orchestrator, because the ordering is not optional: the palette
+        // cache must be dropped before ANY layer re-reads it, and the two
+        // material-library owners (engine previews, MeshIngest commits) have no
+        // common parent. Independent per-owner subscriptions would race.
+        const applyTheme = () => {
+          resetPaletteCache();
+          engine.applyTheme();
+          meshIngest.refreshColors();
+        };
+        cleanups.push(subscribeResolvedTheme(applyTheme));
+        // Close the init-window race described above. Guarded, not
+        // unconditional: applyTheme() rebuilds the PMREM environment, which is
+        // real GPU work and must not run on every boot.
+        if (getResolvedTheme() !== themeAtInit) applyTheme();
 
         // ── Always-visible document sketches in MODEL mode (Fusion-style) ──
         const sketchStaticSync = new SketchStaticSync();
@@ -472,9 +493,9 @@ export function ViewportRoot({ className }: { className?: string }) {
           container.removeEventListener("pointermove", onMove),
         );
       })
-      .catch((err) => {
+      .catch((err: unknown) => {
         // jsdom / no-WebGL: stay in placeholder mode. Not fatal.
-        console.warn("[viewport] engine init failed; showing placeholder:", err);
+        logWarn("vp", "engine init failed; showing placeholder", { error: err });
       });
 
     return () => {

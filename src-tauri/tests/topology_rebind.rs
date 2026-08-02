@@ -20,6 +20,9 @@
 //!   silently apply to a wrong edge, and the payload is IDENTICAL on replay.
 //! * `symmetric_ambiguity_resolves_to_needs_repair` — corpus case f: a symmetric
 //!   descriptor tie ⇒ `NeedsRepair`, never a guess (real-worker `ResolveRefs`).
+//! * `fillet_reedit_swaps_to_chamfer_and_regens` — FILLET-CHAMFER-UNIFY W3: the
+//!   ONE sanctioned `opType` edit reaches the kernel (removed-volume ratio, not
+//!   the record's own tag), rebinds the same edge, and undoes.
 //!
 //! Gated on `ONECAD_WORKER_PATH` (else the dev-tree fallback); a missing binary skips.
 
@@ -30,8 +33,8 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use onecad_core::document::record::{
-    BooleanMode, ExtrudeMode, ExtrudeParams, FilletParams, KnownOperation, Operation,
-    OperationRecord, PlaneKind, SketchOpParams, SketchPlaneRef,
+    BooleanMode, ChamferParams, ExtrudeMode, ExtrudeParams, FilletParams, KnownOperation,
+    Operation, OperationRecord, PlaneKind, SketchOpParams, SketchPlaneRef,
 };
 use onecad_core::document::refs::{
     AnchorIntent, ElementKind, ElementRef, PrimaryRef, SketchRegionRef,
@@ -634,6 +637,9 @@ struct FilletedBox {
     filleted: bool,
     vol: f64,
     faces: u32,
+    /// Volume of the SHARP box, measured before the fillet op is added. The edge-op
+    /// swap proof compares REMOVED volume (`base_vol - vol`), not absolutes.
+    base_vol: f64,
 }
 
 async fn build_filleted_box(rt: &mut DocumentRuntime, sid: SketchId) -> FilletedBox {
@@ -648,6 +654,7 @@ async fn build_filleted_box(rt: &mut DocumentRuntime, sid: SketchId) -> Filleted
     let mesh = body_mesh(rt, body).await;
     let view = validate_mesh_blob(&mesh).expect("box MESH1 validates");
     assert_eq!(view.face_count, 6, "a box has 6 faces");
+    let base_vol = mesh_volume(&view, &mesh);
     let (edge_key, edge_anchor) = vertical_edge_pick(&view, &mesh);
 
     // Promote the picked edge → a persistent Rust-minted ElementId.
@@ -673,7 +680,7 @@ async fn build_filleted_box(rt: &mut DocumentRuntime, sid: SketchId) -> Filleted
     let fview = validate_mesh_blob(&fmesh).expect("filleted MESH1 validates");
     let vol = mesh_volume(&fview, &fmesh);
     eprintln!(
-        "H5-B setup: filleted={filleted}, faces={}, vol={vol:.1}, edgeId={}, needsRepair={}",
+        "H5-B setup: filleted={filleted}, faces={}, baseVol={base_vol:.1}, vol={vol:.1}, edgeId={}, needsRepair={}",
         fview.face_count,
         edge_el.as_str(),
         fil_snap.repair_summary.needs_repair_count
@@ -685,6 +692,7 @@ async fn build_filleted_box(rt: &mut DocumentRuntime, sid: SketchId) -> Filleted
         filleted,
         vol,
         faces: fview.face_count,
+        base_vol,
     }
 }
 
@@ -840,6 +848,137 @@ async fn h5b_fillet_survives_small_edit() {
          (re-resolve ⇒ {reason}, candidates {keys:?}), id {} carried through, vol {vol:.1}",
         view.face_count,
         setup.edge_el.as_str()
+    );
+
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FILLET-CHAMFER-UNIFY W3 — a committed edge op's TYPE is re-editable.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A re-edit that FLIPS a committed Fillet into a Chamfer regenerates the OTHER
+/// kernel geometry, and undo puts the fillet back.
+///
+/// The proof is the REMOVED volume, never the record's own `opType` (the guard
+/// just wrote that — asserting it is a tautology) and never the history label
+/// (this file's `fillet_record` stamps `name: "Fillet"`, which
+/// `document_runtime` prefers over `default_label`; the app's own FE-authored
+/// records carry no name, so the label there does follow the swap).
+///
+/// Analytically, on one straight edge of length `L`:
+///   * a fillet removes `(1 − π/4)·r²·L ≈ 0.2146·r²·L`,
+///   * an equal-leg chamfer removes `0.5·d²·L`,
+/// so at `r == d` the chamfer removes ≈ **2.33×** what the fillet did. The
+/// assertion uses a 1.8 floor, comfortably clear of tessellation error on both
+/// meshes while still excluding "the geometry never changed" (ratio ≈ 1.0).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fillet_reedit_swaps_to_chamfer_and_regens() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let sid = SketchId(Uuid::from_u128(0x60));
+
+    let setup = build_filleted_box(&mut rt, sid).await;
+    assert!(
+        setup.filleted,
+        "precondition: the fillet applies on the clean box"
+    );
+    let removed_fillet = setup.base_vol - setup.vol;
+    assert!(
+        removed_fillet > 0.0,
+        "precondition: the fillet REMOVED material (base {:.3} > filleted {:.3})",
+        setup.base_vol,
+        setup.vol
+    );
+
+    // The re-edit the unified edge tool emits: SAME record, SAME edges, SAME size —
+    // only the opType flips. This is the one `UpdateOperationParams` that may.
+    let swap = Operation::Known(KnownOperation::Chamfer(ChamferParams {
+        radius: Scalar::new(2.0),
+        edge_ids: vec![setup.edge_el.clone()],
+        edges: vec![ElementRef {
+            primary: Some(PrimaryRef {
+                body: setup.body,
+                element: setup.edge_el.clone(),
+                kind: ElementKind::Edge,
+                extra: Default::default(),
+            }),
+            intent: None,
+            anchor: Some(AnchorIntent {
+                world_point: setup.edge_anchor,
+                surface_uv: None,
+                local_frame: None,
+                adjacency_hint: None,
+                extra: Default::default(),
+            }),
+            extra: Default::default(),
+        }],
+        chain_tangent_edges: false,
+        extra: Default::default(),
+    }));
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(FILLET_REC)),
+        op: swap,
+    })
+    .expect("core sanctions the Fillet→Chamfer swap");
+
+    let report = regen_all(&mut rt).await;
+    let snap = published(&report, "edge-op swap").clone();
+    assert_eq!(
+        snap.repair_summary.needs_repair_count, 0,
+        "the swapped op binds the SAME edge — no NeedsRepair"
+    );
+    assert!(
+        report.needs_repair.is_empty(),
+        "the needs-repair event set is empty after the swap"
+    );
+
+    let mesh = body_mesh(&mut rt, setup.body).await;
+    let view = validate_mesh_blob(&mesh).expect("chamfered MESH1 validates");
+    let vol_chamfer = mesh_volume(&view, &mesh);
+    let removed_chamfer = setup.base_vol - vol_chamfer;
+    let ratio = removed_chamfer / removed_fillet;
+    eprintln!(
+        "W3 swap: base={:.3} fillet={:.3} chamfer={vol_chamfer:.3} \
+         removed(fillet)={removed_fillet:.3} removed(chamfer)={removed_chamfer:.3} ratio={ratio:.3}",
+        setup.base_vol, setup.vol
+    );
+
+    // A ratio near 1.0 means the regen re-ran the SAME op (the swap never reached
+    // the kernel); anything between is geometry neither model predicts. Both are
+    // hard failures — there is no "close enough" reading of this number.
+    assert!(
+        ratio > 1.8,
+        "the chamfer must remove ≈2.33× the fillet's material (analytic 0.5·d²·L / 0.2146·r²·L), \
+         measured {ratio:.3}. A ratio near 1.0 means the opType swap never reached the worker; \
+         anything in (0.9, 1.8) is AMBIGUOUS geometry and is a failure, not a pass."
+    );
+    assert!(
+        view.face_count >= 7,
+        "the chamfer still adds a face (faces {})",
+        view.face_count
+    );
+
+    // Undo restores the whole prior record (opType included) — the fillet geometry
+    // comes back on the next regen.
+    assert!(rt.undo(), "the swap is undoable");
+    let back_report = regen_all(&mut rt).await;
+    let back_snap = published(&back_report, "edge-op swap undo").clone();
+    assert_eq!(
+        back_snap.repair_summary.needs_repair_count, 0,
+        "the restored fillet re-binds cleanly too"
+    );
+    let back_mesh = body_mesh(&mut rt, setup.body).await;
+    let back_view = validate_mesh_blob(&back_mesh).expect("restored MESH1 validates");
+    let vol_back = mesh_volume(&back_view, &back_mesh);
+    assert!(
+        (vol_back - setup.vol).abs() < 1e-6 * setup.base_vol.max(1.0),
+        "undo restores the FILLET volume ({vol_back:.3} ≈ {:.3}, chamfer was {vol_chamfer:.3})",
+        setup.vol
     );
 
     wm.shutdown().await;

@@ -46,7 +46,7 @@ export function EditorScreen() {
   // ExitGuard latches on the first attempt and the app becomes unclosable.
 
   return (
-    <div className="flex h-full w-full select-none flex-col overflow-hidden bg-white font-ui">
+    <div className="flex h-full w-full select-none flex-col overflow-hidden bg-surface font-ui">
       <TitleBar />
       <div className="relative min-h-0 flex-1">
         <ViewportRoot className="absolute inset-x-0 bottom-[34px] top-0" />

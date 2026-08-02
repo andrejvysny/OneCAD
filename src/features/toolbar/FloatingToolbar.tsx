@@ -28,7 +28,7 @@ export function FloatingToolbar() {
       className={cn(
         "absolute left-1/2 top-3 z-30 flex -translate-x-1/2 items-center gap-0.5",
         "rounded-lg border border-border p-1 shadow-card",
-        mode === "sketch" ? "bg-toolbar-sketch" : "bg-white",
+        mode === "sketch" ? "bg-toolbar-sketch" : "bg-surface",
       )}
     >
       {entries.map((e, i) =>

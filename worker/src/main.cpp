@@ -365,6 +365,10 @@ int run_selftest() {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // 0. Read ONECAD_WORKER_LOG before anything else logs, so --selftest and
+    //    every startup diagnostic below already run at the requested level.
+    onecad::log::init_level_from_env();
+
     // 1. Little-endian guarantee (compile-time static_assert lives in the
     //    header; this is the runtime belt-and-suspenders check).
     if (!onecad::endian::host_is_little_endian()) {

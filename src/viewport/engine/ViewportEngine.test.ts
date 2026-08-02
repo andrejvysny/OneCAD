@@ -195,6 +195,50 @@ describe("ViewportEngine lifecycle", () => {
  * part: `Box3.setFromObject` recurses through `children` WITHOUT consulting
  * `visible`, so a hidden body would silently widen the frame.
  */
+/*
+ * projectPoint (FILLET-CHAMFER-UNIFY W0). homeView(false) — called
+ * synchronously near the end of init() — poses the camera immediately, with
+ * no frame flush needed: a real camera is cheaply available right after
+ * `await engine.init(...)`, so this gets real coverage rather than being
+ * deferred to W1's controller-level tests.
+ */
+describe("ViewportEngine.projectPoint", () => {
+  it("is null before init (no canvas yet)", () => {
+    const engine = new ViewportEngine();
+    expect(engine.projectPoint([0, 0, 0])).toBeNull();
+  });
+
+  it("projects the camera's target on-screen and rejects a point behind the eye", async () => {
+    const { canvas, overlay } = newDom();
+    Object.defineProperty(canvas, "clientWidth", { value: 1000, configurable: true });
+    Object.defineProperty(canvas, "clientHeight", { value: 800, configurable: true });
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+
+    // CadOrbitControls defaults target to the world origin.
+    const target = engine.projectPoint([0, 0, 0]);
+    expect(target).not.toBeNull();
+    expect(Number.isFinite(target!.x)).toBe(true);
+    expect(Number.isFinite(target!.y)).toBe(true);
+
+    // A point on the far side of the eye from the target (behind the camera)
+    // must report null (w <= 0), not a flipped/garbage projection.
+    // getViewDirection() is target→camera (see CadOrbitControls.ts), so
+    // cameraPos = target + dir*distance; going further along `dir` walks
+    // PAST the eye, away from the target.
+    const dir = engine.getViewDirection();
+    const dist = engine.getCameraDistance();
+    const behind: [number, number, number] = [
+      dir.x * (dist + 100),
+      dir.y * (dist + 100),
+      dir.z * (dist + 100),
+    ];
+    expect(engine.projectPoint(behind)).toBeNull();
+
+    engine.dispose();
+  });
+});
+
 describe("ViewportEngine.getBoundsForBodies", () => {
   /** A body group whose geometry is a unit box centred at `center`. */
   function bodyAt(bodyId: string, center: [number, number, number]): THREE.Group {

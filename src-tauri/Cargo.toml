@@ -17,6 +17,11 @@ serde_json = "1"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 tracing = "0.1"
+# Dev-observability (DEV-OBSERVABILITY wave R): `env-filter` makes `RUST_LOG`
+# live, `json` backs the `logs/dev.jsonl` lane; `tracing-appender` provides the
+# non-blocking writer + its flush guard.
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
 async-trait = "0.1"
 tokio = { version = "1", default-features = false }
 tokio-util = { version = "0.7", default-features = false }
@@ -44,8 +49,11 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 onecad-core = { workspace = true }
-onecad-protocol = { workspace = true, features = ["client"] }
-tauri = { version = "2", features = [] }
+onecad-protocol = { workspace = true, features = ["client", "tracing"] }
+# `tracing`: tauri's command macro then wraps EVERY `#[tauri::command]` in a
+# `ipc::request::handler` debug span (cmd name + timing) at the call-site module
+# target — the command-boundary baseline, with zero per-command code.
+tauri = { version = "2", features = ["tracing"] }
 tauri-plugin-dialog = "2"
 tokio = { workspace = true, features = [
     "rt-multi-thread",
@@ -59,8 +67,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-# Not in the plan's explicit dep list, but required by task 3 (stderr tracing init).
-tracing-subscriber = "0.3"
+# The dev-observability subscriber (`crate::logging`): stderr fmt layer + the
+# `logs/dev.jsonl` JSONL layer, both behind one `RUST_LOG`-aware `EnvFilter`.
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
 uuid = { workspace = true }
 # R-WP10: the geometry-backend seam (MeshProvider / AdoptingEngine) implements the
 # core `#[async_trait]` GeometryEngine, so the app crate needs async-trait too.
@@ -88,7 +98,7 @@ zip = { workspace = true }
 # R-WP11 chaos/convergence/smoke integration tests drive the WorkerManager over
 # the real stub/worker with core plan types, and validate MESH1 headers.
 onecad-core = { workspace = true }
-onecad-protocol = { workspace = true, features = ["client"] }
+onecad-protocol = { workspace = true, features = ["client", "tracing"] }
 uuid = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = [

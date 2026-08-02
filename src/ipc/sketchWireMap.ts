@@ -44,6 +44,7 @@ import type {
 } from "./types";
 import { planeFor } from "./mockSketch";
 import { fromWireDimensionValue, toWireDimensionValue } from "./angleUnits";
+import { logWarn } from "@/debug/log";
 
 /** The 18 constraint-type tokens the worker wire emits (== `SketchConstraintType`). */
 const CONSTRAINT_TYPES: ReadonlySet<string> = new Set<SketchConstraintType>([
@@ -944,9 +945,10 @@ export function frontendSolvedPositions(
     if (key) out[key] = xy;
     else unknown.push(uuid);
   }
-  if (unknown.length > 0 && typeof import.meta !== "undefined" && import.meta.env?.DEV) {
-    // eslint-disable-next-line no-console
-    console.warn(`[sketchWireMap] solvedPositions: ${unknown.length} unmapped point key(s) skipped`);
+  if (unknown.length > 0) {
+    logWarn("sketch", `solvedPositions: ${unknown.length} unmapped point key(s) skipped`, {
+      unknown: unknown.slice(0, 8),
+    });
   }
   return out;
 }

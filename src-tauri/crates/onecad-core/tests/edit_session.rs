@@ -15,8 +15,9 @@ use onecad_core::document::body::BodyMeta;
 use onecad_core::document::datum::DatumPlane;
 use onecad_core::document::record::PlaneKind;
 use onecad_core::document::record::{
-    BooleanMode, BooleanOp, BooleanParams, ExtrudeMode, ExtrudeParams, FilletParams,
-    KnownOperation, Operation, OperationRecord, RevolveParams, SketchOpParams, SketchPlaneRef,
+    BooleanMode, BooleanOp, BooleanParams, ChamferParams, ExtrudeMode, ExtrudeParams, FilletParams,
+    KnownOperation, Operation, OperationRecord, RevolveParams, ShellParams, SketchOpParams,
+    SketchPlaneRef,
 };
 use onecad_core::document::refs::{AxisRef, ElementKind, ElementRef, PrimaryRef, SketchRegionRef};
 use onecad_core::document::variables::{Scalar, Unit, Variable};
@@ -1013,6 +1014,253 @@ fn update_operation_params_validates_fillet_edge_lockstep() {
         op: fillet_op(&["e9"], vec![edge_ref(BX(), "e9")]),
     })
     .expect("consistent update accepted");
+}
+
+// ── (W3) the ONE sanctioned opType edit: Fillet ⇄ Chamfer ────────────────────
+
+fn chamfer_op(edge_ids: &[&str], edges: Vec<ElementRef>, radius: f64) -> Operation {
+    Operation::Known(KnownOperation::Chamfer(ChamferParams {
+        radius: s(radius),
+        edge_ids: edge_ids.iter().map(|e| ElementId::new(*e)).collect(),
+        edges,
+        chain_tangent_edges: true,
+        extra: Default::default(),
+    }))
+}
+
+/// A one-record fillet document: `rid(1)` fillets `el` on body `BX` at r=2.
+fn fillet_doc(el: &str) -> DocumentSession {
+    let mut doc = Document::new(DocumentId(u(0x5D)));
+    doc.bodies.register(BodyMeta::new(BX(), "b", rid(0)));
+    doc.timeline = Timeline::from_records(vec![record(
+        rid(1),
+        "Fillet",
+        fillet_op(&[el], vec![edge_ref(BX(), el)]),
+        vec![BX()],
+    )]);
+    DocumentSession::new(doc)
+}
+
+/// `(edge_ids, typed-edge count, radius, `extra.mode`)` of a fillet/chamfer op.
+fn edge_op_facts(op: &Operation) -> (Vec<String>, usize, f64, Option<String>) {
+    let (ids, edges, radius, extra) = match op {
+        Operation::Known(KnownOperation::Fillet(p)) => {
+            (&p.edge_ids, &p.edges, p.radius.value, &p.extra)
+        }
+        Operation::Known(KnownOperation::Chamfer(p)) => {
+            (&p.edge_ids, &p.edges, p.radius.value, &p.extra)
+        }
+        other => panic!("not an edge op: {}", other.op_type()),
+    };
+    (
+        ids.iter().map(|e| e.as_str().to_string()).collect(),
+        edges.len(),
+        radius,
+        extra
+            .get("mode")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    )
+}
+
+#[test]
+fn update_operation_params_swaps_fillet_to_chamfer() {
+    let mut sess = fillet_doc("e1");
+    // A record that carried the legacy SCHEMA §7.3 `mode` string, with a payload
+    // whose own `mode` is STALE ("Fillet" on a Chamfer op) — the exact shape a
+    // caller that forgot to patch it would send. Core is the single writer, so
+    // the contradiction must not survive.
+    let stamp_mode = |op: &mut Operation, v: &str| match op {
+        Operation::Known(KnownOperation::Fillet(p)) => {
+            p.extra.insert("mode".into(), v.into());
+        }
+        Operation::Known(KnownOperation::Chamfer(p)) => {
+            p.extra.insert("mode".into(), v.into());
+        }
+        _ => unreachable!(),
+    };
+    let prior = {
+        let mut op = fillet_op(&["e1"], vec![edge_ref(BX(), "e1")]);
+        stamp_mode(&mut op, "Fillet");
+        op
+    };
+    sess.apply(EditCommand::UpdateOperationParams {
+        record: rid(1),
+        op: prior,
+    })
+    .expect("seed the legacy `mode` string");
+
+    let mut swap = chamfer_op(&["e1"], vec![edge_ref(BX(), "e1")], 3.5);
+    stamp_mode(&mut swap, "Fillet"); // stale on purpose
+    let out = sess
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(1),
+            op: swap,
+        })
+        .expect("the sanctioned Fillet→Chamfer swap is accepted");
+
+    // The regen contract is IDENTICAL to an in-type param update: dirty from this
+    // step to the end, `ToEnd` (a swap is not a special regen shape).
+    assert_eq!(out.dirty, Some(DirtyRange::new(0, 1)), "dirty span");
+    assert_eq!(out.regen, RegenHint::ToEnd, "regen hint");
+
+    let rec = sess.document().timeline.record_by_id(rid(1)).unwrap();
+    assert_eq!(rec.op.op_type(), "Chamfer", "the record IS a chamfer now");
+    let (ids, typed, radius, mode) = edge_op_facts(&rec.op);
+    assert_eq!(ids, vec!["e1".to_string()], "edgeIds preserved");
+    assert_eq!(typed, 1, "typed edge refs preserved");
+    assert_eq!(radius, 3.5, "the new size landed");
+    assert_eq!(
+        mode.as_deref(),
+        Some("Chamfer"),
+        "the legacy `mode` string is NORMALIZED to the new opType, never left stale"
+    );
+    // Inputs are re-derived from the swapped op (the body the edge belongs to).
+    assert_eq!(
+        rec.inputs,
+        rec.op.derive_inputs(),
+        "inputs re-derived from the new op"
+    );
+
+    // Undo restores the WHOLE prior record — opType, size, and `mode` alike.
+    assert!(sess.undo(), "the swap is undoable");
+    let back = sess.document().timeline.record_by_id(rid(1)).unwrap();
+    assert_eq!(back.op.op_type(), "Fillet", "undo restores the opType");
+    let (_, _, r0, m0) = edge_op_facts(&back.op);
+    assert_eq!(r0, 2.0, "undo restores the radius");
+    assert_eq!(m0.as_deref(), Some("Fillet"), "undo restores `mode`");
+
+    // …and redo re-runs the same symmetric guard.
+    assert!(sess.redo().expect("redo applies"), "redo available");
+    let again = sess.document().timeline.record_by_id(rid(1)).unwrap();
+    assert_eq!(again.op.op_type(), "Chamfer", "redo re-applies the swap");
+    assert_eq!(edge_op_facts(&again.op).2, 3.5, "redo restores the size");
+}
+
+#[test]
+fn update_operation_params_normalizes_mode_carried_only_by_the_prior_record() {
+    let mut sess = fillet_doc("e1");
+    let seeded = {
+        let mut op = fillet_op(&["e1"], vec![edge_ref(BX(), "e1")]);
+        if let Operation::Known(KnownOperation::Fillet(p)) = &mut op {
+            p.extra.insert("mode".into(), "Fillet".into());
+        }
+        op
+    };
+    sess.apply(EditCommand::UpdateOperationParams {
+        record: rid(1),
+        op: seeded,
+    })
+    .expect("seed `mode`");
+
+    // The incoming payload carries NO `mode` — but the record did, so the swap
+    // must not silently drop it into a stale-on-reload state either.
+    sess.apply(EditCommand::UpdateOperationParams {
+        record: rid(1),
+        op: chamfer_op(&["e1"], vec![edge_ref(BX(), "e1")], 2.0),
+    })
+    .expect("swap accepted");
+    let rec = sess.document().timeline.record_by_id(rid(1)).unwrap();
+    assert_eq!(edge_op_facts(&rec.op).3.as_deref(), Some("Chamfer"));
+
+    // A document that never carried `mode` never grows one.
+    let mut clean = fillet_doc("e2");
+    clean
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(1),
+            op: chamfer_op(&["e2"], vec![edge_ref(BX(), "e2")], 2.0),
+        })
+        .expect("swap accepted");
+    let rec = clean.document().timeline.record_by_id(rid(1)).unwrap();
+    assert_eq!(
+        edge_op_facts(&rec.op).3,
+        None,
+        "no `mode` key is invented on a record that never had one"
+    );
+}
+
+#[test]
+fn update_operation_params_still_refuses_other_op_type_changes() {
+    // Fillet → Extrude.
+    let mut sess = fillet_doc("e1");
+    let err = sess
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(1),
+            op: extrude_newbody(rid(9), 5.0, BY()).op,
+        })
+        .unwrap_err();
+    assert!(err.to_string().contains("opType"), "Fillet→Extrude: {err}");
+
+    // Extrude → Revolve.
+    let mut doc = Document::new(DocumentId(u(0x5E)));
+    doc.bodies.register(BodyMeta::new(BX(), "b", rid(0)));
+    doc.timeline = Timeline::from_records(vec![extrude_newbody(rid(1), 5.0, BX())]);
+    let mut sess = DocumentSession::new(doc);
+    let revolve = Operation::Known(KnownOperation::Revolve(RevolveParams {
+        profile: Some(profile()),
+        angle_deg: s(90.0),
+        axis: None,
+        boolean_mode: BooleanMode::NewBody,
+        target_body: None,
+        extra: Default::default(),
+    }));
+    let err = sess
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(1),
+            op: revolve,
+        })
+        .unwrap_err();
+    assert!(err.to_string().contains("opType"), "Extrude→Revolve: {err}");
+
+    // Shell → Fillet. Shell folds into the SAME frontend feature bucket as the
+    // edge ops (`dto.rs feature_kind`), so it is the nearest miss to the
+    // sanctioned pair and must still be refused.
+    let mut doc = Document::new(DocumentId(u(0x5F)));
+    doc.bodies.register(BodyMeta::new(BX(), "b", rid(0)));
+    let shell = Operation::Known(KnownOperation::Shell(ShellParams {
+        thickness: s(1.0),
+        open_faces: vec![ElementId::new("f1")],
+        target_body: Some(BX()),
+        extra: Default::default(),
+    }));
+    doc.timeline = Timeline::from_records(vec![record(rid(1), "Shell", shell, vec![BX()])]);
+    let mut sess = DocumentSession::new(doc);
+    let err = sess
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(1),
+            op: fillet_op(&["e1"], vec![edge_ref(BX(), "e1")]),
+        })
+        .unwrap_err();
+    assert!(err.to_string().contains("opType"), "Shell→Fillet: {err}");
+}
+
+#[test]
+fn fillet_chamfer_swap_still_enforces_edge_lockstep() {
+    let mut sess = fillet_doc("e1");
+    // Widening the opType guard must NOT widen the F2 lockstep guard: a swap
+    // carrying 2 ids and 1 typed edge is still rejected.
+    let err = sess
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(1),
+            op: chamfer_op(&["e1", "e2"], vec![edge_ref(BX(), "e1")], 2.0),
+        })
+        .unwrap_err();
+    assert!(err.to_string().contains("mismatch"), "swap lockstep: {err}");
+
+    // …and a typed ref pointing at a different element than its parallel id.
+    let err = sess
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(1),
+            op: chamfer_op(&["e1"], vec![edge_ref(BX(), "e7")], 2.0),
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("!="),
+        "swap element mismatch: {err}"
+    );
+    // The record is untouched by either rejection.
+    let rec = sess.document().timeline.record_by_id(rid(1)).unwrap();
+    assert_eq!(rec.op.op_type(), "Fillet", "a rejected swap writes nothing");
 }
 
 // ── (b) proptest: random valid sequences ─────────────────────────────────────

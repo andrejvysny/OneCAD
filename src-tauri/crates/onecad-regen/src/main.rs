@@ -83,8 +83,22 @@ fn parse_args() -> Result<Args, String> {
     })
 }
 
+/// stderr-only diagnostics with a `RUST_LOG`-aware filter. Deliberately quieter
+/// than the app's default (`onecad_lib=info`, not `debug`): the CLI is a CI gate
+/// whose signal is its report, not a debugging session. There is **no file layer** —
+/// only the app writes `logs/dev.jsonl`. stdout stays reserved for `--json`.
+fn init_tracing() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,onecad_lib=info"));
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(filter)
+        .try_init();
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> ExitCode {
+    init_tracing();
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) if e == "help" => {

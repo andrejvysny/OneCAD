@@ -99,6 +99,13 @@ export interface FeatureMeta {
 /** The full document projection (everything the chrome renders from). */
 export interface DocumentProjection {
   status: DocStatus;
+  /**
+   * The document this projection describes (backend-authoritative). Revisions
+   * are meaningful only within one documentId — the hydration guard resets on a
+   * documentId change instead of comparing revisions across documents. Absent
+   * in the mock lane (same-document semantics).
+   */
+  documentId?: string;
   revision: number;
   title: string;
   dirty: boolean;

@@ -6,7 +6,7 @@
  *     slot/point/dimension/trim)
  *     ⇒ enter sketch mode WITH that tool armed (no active sketch ⇒ the usual
  *       entry flow: selected face → sketch-on-face, else the plane picker).
- *   sketch mode + model-only tool (extrude/revolve/fillet/chamfer/boolean/shell/
+ *   sketch mode + model-only tool (extrude/revolve/fillet/boolean/shell/
  *     patterns)
  *     ⇒ finish the sketch (same drained-squash path as the Enter shortcut — the
  *       whole session stays ONE undo step), land in model mode WITH the tool
@@ -45,7 +45,6 @@ const MODEL_ONLY: ReadonlySet<Tool> = new Set([
   "extrude",
   "revolve",
   "fillet",
-  "chamfer",
   "boolean",
   "shell",
   "linearPattern",

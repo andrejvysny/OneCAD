@@ -262,6 +262,23 @@ export class DatumLayer {
     this.deps.invalidate();
   }
 
+  /**
+   * Theme change: re-tint every datum quad, plus the tool ghost. `applyTints`
+   * re-reads the palette on each call so the quads are free; the ghost's
+   * materials are built once in `ensureGhost` and have no other path back.
+   */
+  refreshColors(): void {
+    this.applyTints();
+    if (this.ghostGroup) {
+      for (const child of this.ghostGroup.children) {
+        const mat = (child as THREE.Mesh | THREE.LineLoop).material as THREE.Material & {
+          color?: THREE.Color;
+        };
+        mat.color?.copy(palette.hoverAccent());
+      }
+    }
+  }
+
   private applyTints(): void {
     for (const q of this.quads.values()) {
       const selected = this.selectedIds.has(q.id);

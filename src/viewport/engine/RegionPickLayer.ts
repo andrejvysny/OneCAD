@@ -136,6 +136,14 @@ export class RegionPickLayer {
     return [...this.entries.keys()];
   }
 
+  /**
+   * Theme change: re-tint every region. `applyTints` already re-reads the
+   * palette on each call, so replaying it is the whole fix.
+   */
+  refreshColors(): void {
+    this.applyTints();
+  }
+
   private applyTints(): void {
     for (const [id, e] of this.entries) {
       const selected = this.selectedIds.has(id);

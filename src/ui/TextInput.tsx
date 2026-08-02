@@ -34,7 +34,7 @@ export function TextInput({
       <input
         ref={ref}
         className={cn(
-          "h-[32px] w-full rounded-sm border border-border-strong bg-white",
+          "h-[32px] w-full rounded-sm border border-border-strong bg-surface",
           "font-ui text-[13px] text-ink outline-none placeholder:text-ink-6",
           "focus:border-accent focus:shadow-focus-ring",
           leadingIcon ? "pl-[30px] pr-2.5" : "px-2.5",
