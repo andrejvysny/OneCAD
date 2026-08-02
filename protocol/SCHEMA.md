@@ -672,8 +672,9 @@ Each op in `ExecutePlan.ops` is:
 
 `opType` ∈ `Sketch` | `Extrude` | `Revolve` | `Fillet` | `Chamfer` | `Boolean`
 | `Shell` | `LinearPattern` | `CircularPattern` | `MirrorBody` | `ImportStep`
-(the M6a breadth ops and the 2026-08-02 `ImportStep` extend the original vertical
-slice — see the [Changelog](#14-changelog)).
+| `TransformBody`
+(the M6a breadth ops and the 2026-08-02 `ImportStep`/`TransformBody` extend the
+original vertical slice — see the [Changelog](#14-changelog)).
 `Loft` and `Sweep` remain **`UNSUPPORTED`** ([§8](#8-error-taxonomy)). Values keep
 OneCAD-CPP `operationTypeName` spelling (PascalCase).
 
@@ -1079,6 +1080,53 @@ advance `historyPrefixHash`). Added 2026-08-02 (WP-A).
   problem must not tear down the worker. Diagnostics vocabulary: `STEP_SEWN`,
   `STEP_HEALED`, `STEP_UNIT_CONVERTED`, `STEP_NO_SOLIDS`, `STEP_ROOT_SKIPPED`,
   `STEP_INVALID_SHAPE`, `STEP_DUPLICATE_SOLIDS`.
+
+**TransformBody** (`op.transformBody`) — rigid placement of one or more bodies:
+translate + rotate about a frozen pivot, optionally as copies. The light
+multi-part "position parts for fit-check" primitive — parametric, ONE cumulative
+record per placement intent, re-edited in place (never a stack of nudges).
+Added 2026-08-02 (WP-B W0).
+
+```json
+// inputs: [ semanticRef(target body) × N ] — mirrors params.targets
+// params
+{ "targets": ["body_1", "body_2"],
+  "translate": [10.0, 0.0, 5.0],
+  "rotate": { "center": [0,0,0], "axis": [0,0,1], "angleDeg": 90.0 },
+  "copy": false }
+```
+
+- **Evaluation order is normative**: `X' = T ∘ R(center, axis, angleDeg) · X`
+  (rotate about the pivot first, then translate). Each `translate` component and
+  `angleDeg` is a scalar (expression-capable); `center`/`axis` are plain Vec3.
+- `center` is **frozen at first authoring** (the targets' combined bbox centre
+  at that moment) and never re-derived — re-edits recompose against the stored
+  pivot, so repeated edits are exact (no drift) and the stored form stays
+  canonical.
+- Validation: `axis` non-zero when `angleDeg ≠ 0`; all components finite;
+  `targets` non-empty, no duplicates; a zero motion (identity) is legal and a
+  geometric no-op.
+- **Lineage**: `copy: false` ⇒ every target emits `modified` — the FIRST
+  body-level op with modify lineage; the worker keeps its
+  `BRepBuilderAPI_Transform` history alive so the element-map partition rebinds
+  every tracked element at level 1 (no descriptor scoring), and additionally
+  applies the same rigid motion to each entry's stored `anchor` world point
+  (`apply_placement` — anchors are physical points that move WITH the body).
+  `copy: true` ⇒ sources preserved (no event) and the copies mint under the §2
+  N-body rule: one target ⇒ plain `body_<opId>`, N > 1 ⇒ `body_<opId>:<k>` with
+  `k` = the target's index in `targets`.
+- **§9/§10 edit-safety gate (V1, normative until anchor pick-frame
+  compensation ships)**: level-1 partition rebinds stay EXACT under a rigid
+  transform, so ops authored after a transform resolve honestly. Descriptor
+  SCORING, however, compares frozen record evidence against moved geometry — a
+  congruent-feature decoy at the anchor's new location can outscore the true
+  element (a silent wrong bind, the H5-B class). Therefore **editing the params
+  of, suppressing, or un-suppressing a `TransformBody` seeds `NeedsRepair` on
+  every downstream ref whose producing body is in the transform's target
+  lineage** — those refs re-resolve only through the repair flow, never by
+  silent scoring. The seeding rides the same undo entry as the edit, so undo
+  restores the previous binding state exactly. Deterministic-loud beats
+  silent-wrong.
   `body_<opId>` (NewBody lineage; source preserved). Empty `elementMapDelta`.
 
 ### 7.4 Sketch solver lane
@@ -1897,6 +1945,17 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-02 — §7.3 NEW op `TransformBody`** (WP-B W0 BODY-TRANSFORM;
+  cross-track sign-off recorded 2026-08-02). Rigid multi-target placement with a
+  frozen pivot, normative `T ∘ R` evaluation, modify lineage for `copy:false`
+  (first body-level modify-lineage op — partition level-1 rebind + rigid
+  `anchor` migration keep tracked elements exact with zero scoring), §2 N-body
+  minting for `copy:true`, and the V1 edit-safety gate: transform param
+  edit/suppress seeds `NeedsRepair` on downstream lineage refs (descriptor
+  scoring against moved geometry admits congruent-decoy wrong binds — H5-B
+  class; gate holds until anchor pick-frame compensation ships). Additive op,
+  no wire byte moves, `protocol/fixtures/` untouched — **no fixture bump**.
 
 - **2026-08-02 — MESH1 `FACE_COLORS` section (type 12, flags bit 4) + `xbf`
   import replay codec** (WP-A W4.5 XCAF fidelity; cross-track sign-off recorded
