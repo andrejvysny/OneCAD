@@ -7,7 +7,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mockClient } from "@/ipc/mockClient";
 import { viewportStore } from "@/stores/viewportStore";
 import { documentStore, seedMockDocument } from "@/stores/documentStore";
-import { saveDocument, saveDocumentAs, exportStep, exportStl, exportObj } from "./fileActions";
+import { saveDocument, saveDocumentAs, exportStep, exportStl, exportObj, insertStep } from "./fileActions";
+import type { ApplyOperationResult } from "@/ipc/types";
 
 beforeEach(() => {
   viewportStore.getState().setStatusHint(null);
@@ -71,6 +72,55 @@ describe("fileActions", () => {
     vi.spyOn(mockClient, "exportStl").mockResolvedValue(null);
     await exportStl();
     expect(hint()).toBeNull();
+  });
+
+  // ── Import STEP (in-editor lane; Rust owns the dialog) ────────────────────
+
+  /** An `insert_step` result carrying `count` imported bodies. */
+  const importResult = (count: number): ApplyOperationResult => ({
+    revision: 9,
+    changedBodies: Array.from({ length: count }, (_, i) => ({
+      bodyId: `body${i + 10}`,
+      meshKey: `body${i + 10}:coarse:9`,
+    })),
+    removedBodies: [],
+    features: [],
+    opLabel: "Import",
+  });
+
+  it("Import STEP reports the imported body count", async () => {
+    vi.spyOn(mockClient, "insertStep").mockResolvedValue(importResult(3));
+    await insertStep();
+    expect(hint()).toBe("Imported 3 bodies");
+  });
+
+  it("Import STEP singularizes a one-body import", async () => {
+    vi.spyOn(mockClient, "insertStep").mockResolvedValue(importResult(1));
+    await insertStep();
+    expect(hint()).toBe("Imported 1 body");
+  });
+
+  it("Import STEP is a no-op when the dialog is cancelled", async () => {
+    vi.spyOn(mockClient, "insertStep").mockResolvedValue(null);
+    await insertStep();
+    expect(hint()).toBeNull();
+  });
+
+  it("Import STEP surfaces a thrown failure with its reason", async () => {
+    vi.spyOn(mockClient, "insertStep").mockRejectedValueOnce(new Error("not a STEP file"));
+    await insertStep();
+    expect(hint()).toBe("Import failed: not a STEP file");
+  });
+
+  /** A CORRELATED regen failure comes back as a resolved result carrying
+   *  `errorMessage`, not a rejection — it must not read as a success. */
+  it("Import STEP surfaces a correlated regen failure", async () => {
+    vi.spyOn(mockClient, "insertStep").mockResolvedValue({
+      ...importResult(0),
+      errorMessage: "STEP entity 42 unsupported",
+    });
+    await insertStep();
+    expect(hint()).toBe("Import failed: STEP entity 42 unsupported");
   });
 
   it("Export OBJ shows 'Exported ⟨name⟩' on success", async () => {

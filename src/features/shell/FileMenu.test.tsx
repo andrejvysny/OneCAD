@@ -11,6 +11,7 @@ vi.mock("./fileActions", () => ({
   exportStep: vi.fn(),
   exportStl: vi.fn(),
   exportObj: vi.fn(),
+  insertStep: vi.fn(),
 }));
 
 import { FileMenu } from "./FileMenu";
@@ -31,6 +32,7 @@ describe("FileMenu", () => {
     expect(screen.getByText("⌘O")).toBeInTheDocument();
     expect(screen.getByText("⌘S")).toBeInTheDocument();
     expect(screen.getByText("⇧⌘S")).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /Import STEP/ })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /Export STEP/ })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /Export STL/ })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /Export OBJ/ })).toBeInTheDocument();
@@ -47,6 +49,12 @@ describe("FileMenu", () => {
     await user.click(screen.getByRole("button", { name: /File/ }));
     await user.click(screen.getByRole("menuitem", { name: /Save As/ }));
     expect(fileActions.saveDocumentAs).toHaveBeenCalledTimes(1);
+
+    // Import and Export STEP are distinct items — a `/STEP/` match would hit both.
+    await user.click(screen.getByRole("button", { name: /File/ }));
+    await user.click(screen.getByRole("menuitem", { name: /Import STEP/ }));
+    expect(fileActions.insertStep).toHaveBeenCalledTimes(1);
+    expect(fileActions.exportStep).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: /File/ }));
     await user.click(screen.getByRole("menuitem", { name: /Export STEP/ }));

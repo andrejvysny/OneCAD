@@ -41,6 +41,16 @@ export interface AppState {
   /** Set when a close/quit lands against a DIRTY document — drives the
    *  UnsavedChangesDialog. See `requestClose` / `confirmClose`. */
   pendingCloseIntent: PendingCloseIntent;
+  /**
+   * Why the last start-screen STEP import failed (null = none pending).
+   *
+   * The editor's status-bar hint is the wrong surface for this lane: a failed
+   * import leaves the user ON the start screen, where the StatusBar is not
+   * mounted, so the reason would have been invisible until some later document
+   * was opened. `StartScreen` renders it inline instead. Cleared on the next
+   * import attempt.
+   */
+  importError: string | null;
 
   loadRecents(): Promise<void>;
   newProject(): Promise<void>;
@@ -100,6 +110,7 @@ export const appStore = createStore<AppState>()((set, get) => {
     recovery: null,
     recoveryStatus: "idle",
     pendingCloseIntent: null,
+    importError: null,
 
     async loadRecents() {
       set({ recentsStatus: "loading" });
@@ -130,11 +141,28 @@ export const appStore = createStore<AppState>()((set, get) => {
       void get().loadRecents();
     },
 
+    /**
+     * START-SCREEN import: open a NEW document FROM a STEP file (the in-editor
+     * "Import STEP…" is a different lane — `fileActions.insertStep` appends to the
+     * open document instead of replacing it).
+     *
+     * A failure must not reject into the caller's `void importStep()`: it is a
+     * routine outcome (an unreadable/invalid STEP file), so it is captured as
+     * `importError` for the start screen to show and the user stays put.
+     *
+     * The dialog is `stepFileDialog`, NOT `openFileDialog`: the latter filters
+     * `.onecad`, which made a STEP file unpickable from this button.
+     */
     async importStep() {
-      const path = await client.openFileDialog();
-      if (!path) return; // cancelled
-      resetIfReplacing();
-      enter(await client.importStep(path));
+      set({ importError: null });
+      const path = await client.stepFileDialog();
+      if (!path) return; // cancelled — silent, nothing to report
+      try {
+        resetIfReplacing();
+        enter(await client.importStep(path));
+      } catch (e) {
+        set({ importError: e instanceof Error ? e.message : String(e) });
+      }
     },
 
     async closeProject() {

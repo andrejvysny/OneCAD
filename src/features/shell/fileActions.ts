@@ -115,6 +115,36 @@ export async function exportObj(): Promise<void> {
   }
 }
 
+/**
+ * Import STEP…: append a STEP import to the OPEN document (STEP-IMPORT WP-A).
+ *
+ * NOT the start-screen "Import STEP…" — that one OPENS a new document from the
+ * file (`appStore.importStep`). This appends an `ImportStep` history record to
+ * the document already on screen, so nothing is swapped and nothing is lost.
+ *
+ * Rust owns the dialog; a cancel resolves null and is a no-op (no hint), matching
+ * every other dialog-backed action here. The document itself updates through the
+ * normal projection/regen path — the result is read only for the hint.
+ */
+export async function insertStep(): Promise<void> {
+  try {
+    const res = await client.insertStep();
+    if (!res) return; // cancelled
+    if (res.errorMessage) {
+      errorHint(`Import failed: ${res.errorMessage}`);
+      return;
+    }
+    transientHint(bodyCountHint(res.changedBodies.length));
+  } catch (e) {
+    errorHint(`Import failed: ${message(e)}`);
+  }
+}
+
+/** "Imported 1 body" / "Imported 3 bodies" — the import success confirmation. */
+function bodyCountHint(count: number): string {
+  return `Imported ${count} ${count === 1 ? "body" : "bodies"}`;
+}
+
 /** ⌘O: native open dialog + open (+ recents refresh); stays on the editor shell. */
 export async function openDocumentDialog(): Promise<void> {
   try {

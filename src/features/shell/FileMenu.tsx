@@ -7,14 +7,15 @@ import {
   exportObj,
   exportStep,
   exportStl,
+  insertStep,
   openDocumentDialog,
   saveDocument,
   saveDocumentAs,
 } from "./fileActions";
 
 /**
- * Compact File menu in the title bar: Open… / Save / Save As… / Export STEP… /
- * Export STL… / Export OBJ…, each routed through the shared `fileActions` bridge
+ * Compact File menu in the title bar: Open… / Save / Save As… / Import STEP… /
+ * Export STEP… / Export STL… / Export OBJ…, each routed through `fileActions`
  * (same path the ⌘O/⌘S/⇧⌘S shortcuts use). Mirrors the start-screen SortMenu pattern
  * (a hairline trigger + anchored Popover) so it reuses the existing primitives +
  * design tokens.
@@ -54,6 +55,9 @@ export function FileMenu() {
         <MenuItem label="Open…" shortcut="⌘O" onClick={() => run(openDocumentDialog)} />
         <MenuItem label="Save" shortcut="⌘S" onClick={() => run(saveDocument)} />
         <MenuItem label="Save As…" shortcut="⇧⌘S" onClick={() => run(saveDocumentAs)} />
+        {/* Import lands in the Open/Save group, ABOVE the Export separator: it
+            mutates the open document, so it belongs with the input actions. */}
+        <MenuItem label="Import STEP…" onClick={() => run(insertStep)} />
         <div aria-hidden="true" className="my-1 h-px bg-border" />
         <MenuItem label="Close Project" shortcut="⌘W" onClick={() => run(closeProject)} />
         <div aria-hidden="true" className="my-1 h-px bg-border" />

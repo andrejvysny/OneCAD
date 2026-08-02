@@ -61,6 +61,7 @@ describe("ModelTreePanel", () => {
     expect(selectionStore.getState().selected).toEqual([
       { kind: "body", id: "body1" },
     ]);
+    await apply.mock.results[0]?.value; // drain — see the rename test's note
     apply.mockRestore();
   });
 });
@@ -98,6 +99,7 @@ describe("ModelTreePanel — context menu", () => {
         visible: false,
       }),
     );
+    await apply.mock.results[0]?.value; // drain — see the rename test's note
     apply.mockRestore();
   });
 
@@ -135,6 +137,12 @@ describe("ModelTreePanel — inline rename", () => {
     );
     expect(documentStore.getState().bodies.body1.name).toBe("Housing");
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    // Drain the in-flight command before leaving. The store write above is the
+    // OPTIMISTIC one; `mockApplyEditCommand` waits out the simulated backend
+    // latency and only then records the rename in the mock's metadata registry.
+    // Left in flight, that write lands after the next test's `resetStores()` and
+    // re-asserts "Housing" onto the freshly reseeded document.
+    await apply.mock.results[0]?.value;
     apply.mockRestore();
   });
 

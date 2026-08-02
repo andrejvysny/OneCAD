@@ -104,6 +104,7 @@ const CMD = {
   newDocument: "new_document",
   openDocument: "open_document",
   importStep: "import_step",
+  insertStep: "insert_step",
   closeDocument: "close_document",
   checkRecovery: "check_recovery",
   recoverDocument: "recover_document",
@@ -112,6 +113,7 @@ const CMD = {
   exportStlFile: "export_stl_file",
   exportObjFile: "export_obj_file",
   openFileDialog: "open_file_dialog",
+  stepFileDialog: "step_file_dialog",
   saveFileDialog: "save_file_dialog",
   getMesh: "get_mesh",
   getProjection: "get_projection",
@@ -700,6 +702,45 @@ export function createTauriClient(): CadClient {
     return result;
   }
 
+  /**
+   * `insert_step` — append a STEP import to the OPEN document (STEP-IMPORT WP-A).
+   *
+   * Same correlation contract as `applyEdit` (register the awaiter BEFORE invoking,
+   * then target the returned projection's revision), with ONE difference that is
+   * why it cannot just delegate: Rust owns the file dialog, so a CANCELLED dialog
+   * comes back as a null projection with no revision to correlate against. The
+   * awaiter must be cancelled there or it would sit out the full safety timeout.
+   */
+  async function insertStep(): Promise<ApplyOperationResult | null> {
+    await ensureEvents();
+    const awaiter = awaitNextChange();
+    let projection: DocumentProjectionDto | null;
+    try {
+      projection = await call<DocumentProjectionDto | null>(CMD.insertStep);
+    } catch (e) {
+      awaiter.cancel();
+      traceWarn("ipc", "insertStep: invoke THREW", e);
+      throw e;
+    }
+    if (!projection) {
+      awaiter.cancel(); // dialog cancelled — nothing was appended, no regen fires
+      return null;
+    }
+    awaiter.setTarget(projection.revision);
+    const resolved = await awaiter.promise;
+    const result: ApplyOperationResult = {
+      revision: resolved?.revision ?? projection.revision,
+      changedBodies: resolved?.change?.changedBodies ?? [],
+      removedBodies: resolved?.change?.removedBodies ?? [],
+      // Pre-regen timeline, as in `applyEdit`: projection-updated hydrates the
+      // post-regen one independently.
+      features: projection.features,
+      opLabel: "Import",
+    };
+    if (resolved?.errorMessage) result.errorMessage = resolved.errorMessage;
+    return result;
+  }
+
   async function applyOperation(op: OperationOp): Promise<ApplyOperationResult> {
     const command = operationToEditCommand(op);
     // A fresh op mints a recordId (addOperation); a parametric re-edit
@@ -1227,6 +1268,7 @@ export function createTauriClient(): CadClient {
       resetCorrelation();
       return snap;
     },
+    insertStep,
     async closeDocument(): Promise<void> {
       await call<void>(CMD.closeDocument);
       resetCorrelation();
@@ -1242,6 +1284,11 @@ export function createTauriClient(): CadClient {
     },
     async openFileDialog(): Promise<string | null> {
       return call<string | null>(CMD.openFileDialog);
+    },
+    async stepFileDialog(): Promise<string | null> {
+      // Rust filters step/stp here; `open_file_dialog` filters `.onecad` and would
+      // make a STEP file unpickable.
+      return call<string | null>(CMD.stepFileDialog);
     },
 
     async saveDocument(path?: string): Promise<void> {

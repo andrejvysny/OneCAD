@@ -40,6 +40,7 @@ export function StartScreen() {
   const openProject = useAppStore((s) => s.openProject);
   const openDialogAndOpen = useAppStore((s) => s.openDialogAndOpen);
   const importStep = useAppStore((s) => s.importStep);
+  const importError = useAppStore((s) => s.importError);
   const recovery = useAppStore((s) => s.recovery);
   const recoveryStatus = useAppStore((s) => s.recoveryStatus);
   const checkRecovery = useAppStore((s) => s.checkRecovery);
@@ -89,6 +90,14 @@ export function StartScreen() {
             Import STEP…
           </Button>
         </div>
+
+        {/* Import failure — the StatusBar this would normally use is editor-only
+            chrome, and a failed import leaves the user right here. */}
+        {importError && (
+          <div role="alert" className="mb-[22px] text-[12.5px] text-traffic-close">
+            Import failed: {importError}
+          </div>
+        )}
 
         {/* Crash-recovery offer (a crashed session left an autosave) */}
         {recovery && (

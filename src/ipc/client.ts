@@ -363,6 +363,38 @@ export interface CadClient {
    * in the mock.
    */
   cancelExit(): Promise<void>;
+
+  // ── STEP import into the OPEN document (STEP-IMPORT WP-A) ──────────────────
+
+  /**
+   * Append a STEP import to the OPEN document — an `ImportStep` history record,
+   * NOT a document swap (that is `importStep(path)`, the start-screen lane).
+   *
+   * Takes no arguments: Rust owns the `.step` file dialog exactly as it owns the
+   * open dialog, so the path never crosses the webview boundary. Resolves `null`
+   * when the dialog was cancelled (the house shape — see `exportStep`), otherwise
+   * the correlated regen result whose `changedBodies` are the imported bodies.
+   *
+   * The AUTHORITATIVE document update rides the normal projection/regen events on
+   * the real lane (the mock writes its projection stores directly, as it does for
+   * every other committed change), so a caller only awaits this for the outcome —
+   * it must not hydrate the store off the return value.
+   */
+  insertStep(): Promise<ApplyOperationResult | null>;
+
+  /**
+   * Show a native file-open dialog filtered to STEP files (`.step` / `.stp`) and
+   * resolve to the chosen path, or null when cancelled.
+   *
+   * SEPARATE from `openFileDialog` on purpose: that one filters `.onecad`, so a
+   * user driving the start screen's "Import STEP…" through it could not select a
+   * STEP file at all. Rust owns both dialogs (the webview has zero fs/dialog
+   * capability); the mock returns a fake path.
+   *
+   * Only the START-SCREEN lane needs this — `insertStep` opens its own dialog
+   * inside Rust and takes no path.
+   */
+  stepFileDialog(): Promise<string | null>;
 }
 
 /**

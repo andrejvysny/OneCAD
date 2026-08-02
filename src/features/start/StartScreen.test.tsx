@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "@/App";
 import { StartScreen } from "./StartScreen";
 import { appStore } from "@/stores/appStore";
+import { mockClient } from "@/ipc/mockClient";
 
 beforeEach(() => {
   appStore.setState({
@@ -13,8 +14,11 @@ beforeEach(() => {
     document: null,
     recovery: null,
     recoveryStatus: "ready",
+    importError: null,
   });
 });
+
+afterEach(() => vi.restoreAllMocks());
 
 /** The name shown on the first (top-left) project card in DOM order. */
 function firstCard(): HTMLElement {
@@ -76,6 +80,58 @@ describe("StartScreen", () => {
     // Editor shell (F-WP3) mounts — its titlebar File menu is a stable marker
     // (AUTO-MODE deleted the Model⇄Sketch toggle; the mode is tool-derived now).
     expect(await screen.findByRole("button", { name: "File" })).toBeInTheDocument();
+  });
+
+  // ── Import STEP (start-screen lane) ───────────────────────────────────────
+
+  it("Import STEP opens the imported document in the editor", async () => {
+    const user = userEvent.setup();
+    // The dialog must be the STEP-filtered one: `openFileDialog` filters `.onecad`,
+    // so routing this button through it made a STEP file unpickable.
+    const stepDialog = vi.spyOn(mockClient, "stepFileDialog");
+    const openDialog = vi.spyOn(mockClient, "openFileDialog");
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: /Import STEP/ }));
+
+    expect(await screen.findByRole("button", { name: "File" })).toBeInTheDocument();
+    expect(stepDialog).toHaveBeenCalledTimes(1);
+    expect(openDialog).not.toHaveBeenCalled();
+    expect(appStore.getState().importError).toBeNull();
+  });
+
+  it("a cancelled STEP dialog is a silent no-op (no error, no screen change)", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(mockClient, "stepFileDialog").mockResolvedValue(null);
+    const importStep = vi.spyOn(mockClient, "importStep");
+    render(<StartScreen />);
+
+    await user.click(screen.getByRole("button", { name: /Import STEP/ }));
+
+    await waitFor(() => expect(importStep).not.toHaveBeenCalled());
+    expect(appStore.getState().screen).toBe("start");
+    expect(appStore.getState().importError).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  /**
+   * A failed import must not reject into the caller's `void importStep()` NOR be
+   * routed to the editor StatusBar — the user is still on the start screen, where
+   * that bar is not mounted, so the reason has to render right here.
+   */
+  it("shows an inline reason when the import fails, staying on the start screen", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(mockClient, "importStep").mockRejectedValueOnce(
+      new Error("io error: not a STEP file"),
+    );
+    render(<StartScreen />);
+
+    await user.click(screen.getByRole("button", { name: /Import STEP/ }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Import failed: io error: not a STEP file",
+    );
+    expect(appStore.getState().screen).toBe("start");
   });
 
   it("shows the recovery card and Restore enters the editor", async () => {

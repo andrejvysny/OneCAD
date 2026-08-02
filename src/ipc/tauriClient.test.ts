@@ -126,6 +126,23 @@ describe("tauriClient command marshalling", () => {
     mockIPC((cmd) => (cmd === "open_file_dialog" ? null : undefined));
     expect(await createTauriClient().openFileDialog()).toBeNull();
   });
+
+  /** The STEP dialog is its OWN command: `open_file_dialog` filters `.onecad`, so
+   *  routing the start-screen import through it made a STEP file unpickable. */
+  it("stepFileDialog invokes step_file_dialog with no args (null on cancel)", async () => {
+    const payloads: Record<string, unknown> = {};
+    mockIPC((cmd, payload) => {
+      payloads[cmd] = payload;
+      if (cmd === "step_file_dialog") return "/parts/Widget.step";
+    });
+    expect(await createTauriClient().stepFileDialog()).toBe("/parts/Widget.step");
+    expect(payloads["step_file_dialog"]).toEqual({});
+    expect(payloads["open_file_dialog"]).toBeUndefined();
+
+    clearMocks();
+    mockIPC((cmd) => (cmd === "step_file_dialog" ? null : undefined));
+    expect(await createTauriClient().stepFileDialog()).toBeNull();
+  });
 });
 
 // ── Crash recovery (check_recovery / recover_document) ─────────────────────────
@@ -1114,6 +1131,52 @@ describe("tauriClient edit + correlation", () => {
     const res = await createTauriClient().undo();
     expect(res.removedBodies).toEqual(["gone"]);
     expect(res.revision).toBe(4);
+  });
+
+  // ── insert_step (STEP-IMPORT WP-A) ──────────────────────────────────────────
+  // Pins the shape the Rust wave must land: NO args (Rust owns the dialog), a
+  // projection back, regen correlated like any other edit, null == cancelled.
+
+  it("insertStep invokes insert_step with no args and correlates the regen", async () => {
+    const payloads: Record<string, unknown> = {};
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "insert_step") {
+          payloads[cmd] = payload;
+          setTimeout(() => {
+            void emit("document-changed", {
+              revision: 7,
+              changedBodies: [
+                { bodyId: "imp1", meshKey: "imp1:coarse:7" },
+                { bodyId: "imp2", meshKey: "imp2:coarse:7" },
+              ],
+              removedBodies: [],
+            });
+            void emit("regen-finished", { revision: 7, sourceRevision: 6, outcome: "published" });
+          }, 0);
+          return readyProjection(6, [
+            { id: "f-imp", kind: "boolean", opType: "ImportStep", label: "Import", valueText: "", status: "dirty" },
+          ]);
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    __setRegenTimeoutForTests(300);
+    const res = await createTauriClient().insertStep();
+    expect(payloads["insert_step"]).toEqual({});
+    expect(res?.revision).toBe(7);
+    expect(res?.changedBodies.map((b) => b.bodyId)).toEqual(["imp1", "imp2"]);
+    expect(res?.opLabel).toBe("Import");
+    expect(res?.features[0].opType).toBe("ImportStep");
+  });
+
+  it("insertStep resolves null when the Rust dialog was cancelled", async () => {
+    mockIPC((cmd) => (cmd === "insert_step" ? null : undefined), { shouldMockEvents: true });
+    // A short timeout would still pass if the awaiter leaked; the point is that it
+    // returns PROMPTLY (no correlation wait at all) on a cancel.
+    __setRegenTimeoutForTests(5000);
+    await expect(createTauriClient().insertStep()).resolves.toBeNull();
+    __setRegenTimeoutForTests(300);
   });
 
   it("surfaces a rejected command as an Error carrying the ApiError kind", async () => {

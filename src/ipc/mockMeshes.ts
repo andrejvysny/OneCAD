@@ -264,9 +264,29 @@ export const BOX_EDGE_PAIRS: readonly [BoxCornerKey, BoxCornerKey][] = [
   ["000", "001"], ["100", "101"], ["110", "111"], ["010", "011"], // verticals
 ];
 
-/** Six crease-split faces `f:0..f:5`, twelve edges `e:0..e:11`. */
-export function makeBoxMesh(sizeX = BOX_SIZE[0], sizeY = BOX_SIZE[1], sizeZ = BOX_SIZE[2], lod = 0): ArrayBuffer {
-  const c = boxCorners([sizeX, sizeY, sizeZ]);
+/**
+ * Six crease-split faces `f:0..f:5`, twelve edges `e:0..e:11`.
+ *
+ * `origin` translates the whole box in world space (default: centred at the
+ * origin, the seed body every mock lane renders). It exists so a fabricated body
+ * — the STEP-import stand-in — can sit visibly clear of the seed box instead of
+ * being buried inside it. `boxCorners`/`mockFaceGeometry` keep the un-translated
+ * table, so the analytic face data still describes the DEFAULT box only.
+ */
+export function makeBoxMesh(
+  sizeX = BOX_SIZE[0],
+  sizeY = BOX_SIZE[1],
+  sizeZ = BOX_SIZE[2],
+  lod = 0,
+  origin: readonly [number, number, number] = [0, 0, 0],
+): ArrayBuffer {
+  const centred = boxCorners([sizeX, sizeY, sizeZ]);
+  const c = Object.fromEntries(
+    Object.entries(centred).map(([key, p]) => [
+      key,
+      [p[0] + origin[0], p[1] + origin[1], p[2] + origin[2]] as [number, number, number],
+    ]),
+  ) as Record<BoxCornerKey, [number, number, number]>;
 
   const positions: number[] = [];
   const normals: number[] = [];

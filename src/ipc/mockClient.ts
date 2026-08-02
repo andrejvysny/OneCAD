@@ -36,6 +36,7 @@ import type {
   Unsubscribe,
   WorkerStatus,
 } from "./types";
+import { IMPORT_STEP_OP_TYPE } from "./types";
 import type { WireEditCommand } from "./tauriCommandMap";
 import { wireParamsOf } from "./tauriCommandMap";
 import { concatMesh1, makeBoxMesh, makeCylinderMesh, makeExtrudeBodyMesh, makeRevolveBodyMesh } from "./mockMeshes";
@@ -630,6 +631,67 @@ function commitAndEmit(op: OperationOp): Promise<ApplyOperationResult> {
   });
 }
 
+// ── STEP import (STEP-IMPORT WP-A) ────────────────────────────────────────────
+//
+// MOCK LIMIT: there is no STEP reader in this lane. The fabrication below stands
+// in for one — ONE box body offset clear of the seed box (so the import is
+// visibly distinct rather than buried inside it), plus the `ImportStep` history
+// row and the body NAME the real projection would publish.
+//
+// It writes the projection store itself because the mock has no event stream:
+// the same "play the backend's part" role `reassertMockMetadata` fills. The name
+// is registered as mock-OWNED so a later committed op's re-assert cannot rewrite
+// it to "Body N".
+
+let nextImportSeq = 1;
+
+/** Where the Nth fabricated import body sits — a row marching clear along +X. */
+const importOrigin = (n: number): [number, number, number] => [110 + (n - 1) * 60, 0, 0];
+
+/** Fabricate one import: body + `ImportStep` row + projection write. */
+function commitImportStep(): ApplyOperationResult {
+  undoStack.push(snap("Import"));
+  redoStack.length = 0;
+  const seq = nextImportSeq++;
+  const bodyId = nextBodyId();
+  const name = `Imported ${seq}`;
+  syntheticBodies.set(bodyId, makeBoxMesh(40, 40, 40, 0, importOrigin(seq)));
+  const featureId = nextFeatureId();
+  mockFeatures = [
+    ...mockFeatures,
+    // `kind` mirrors the REAL projection bucket (interim "boolean" — the backend
+    // has no import bucket yet), so the row's icon MUST come from `opType`.
+    { id: featureId, kind: "boolean", opType: IMPORT_STEP_OP_TYPE, label: "Import", valueText: "", status: "ok" },
+  ];
+  mockRevision += 1;
+  const doc = documentStore.getState();
+  doc.applyChange({
+    revision: mockRevision,
+    features: mockFeatures.map(cloneFeature),
+    bodies: { ...doc.bodies, [bodyId]: { id: bodyId, name, visible: true } },
+    dirty: true,
+  });
+  writeMockMeta("body", bodyId, { name }); // also re-asserts the owned metadata
+  return {
+    revision: mockRevision,
+    changedBodies: [bodyRef(bodyId)],
+    removedBodies: [],
+    features: mockFeatures.map(cloneFeature),
+    opLabel: "Import",
+  };
+}
+
+/** Fabricate an import + fire the document-changed the viewport ingests through. */
+function importStepAndEmit(): ApplyOperationResult {
+  const res = commitImportStep();
+  emitMockDocumentChanged({
+    revision: res.revision,
+    changedBodies: res.changedBodies,
+    removedBodies: res.removedBodies,
+  });
+  return res;
+}
+
 /** Canned repair candidates for a ref (deterministic; descending score). */
 function mockResolveRefs(refs: ResolveRefRequest[]): ResolveRefResult[] {
   return refs.map((r) => {
@@ -984,6 +1046,7 @@ export function resetMockDocument(): void {
   mockRevision = 5;
   nextBodySeq = 2;
   nextFeatureSeq = 100;
+  nextImportSeq = 1;
   undoStack.length = 0;
   redoStack.length = 0;
   mockRecovery = null;
@@ -1007,8 +1070,13 @@ export const mockClient: CadClient = {
     const known = RECENTS.find((p) => p.path === path);
     return snapshot(known?.name ?? basename(path));
   },
+  // START-SCREEN lane: a new document FROM a STEP file. The mock has no document
+  // model to swap (newDocument/openDocument likewise just hand back a snapshot and
+  // leave the seeded projection in place), so this runs the same fabrication the
+  // in-editor lane does — the editor then opens with the imported body + its row.
   async importStep(path) {
     await wait();
+    importStepAndEmit();
     return snapshot(basename(path));
   },
   async closeDocument() {
@@ -1033,6 +1101,12 @@ export const mockClient: CadClient = {
     await wait(40);
     // Rust returns the real chosen path in F-WP8; here we fake a pick.
     return "/Users/andrej/CAD/Projects/Imported.onecad";
+  },
+  // The STEP-filtered sibling (start-screen import lane). Same fake-pick shape,
+  // with the extension the real dialog would actually be able to return.
+  async stepFileDialog() {
+    await wait(40);
+    return "/Users/andrej/CAD/Projects/Imported.step";
   },
 
   // Save/export are Rust-owned in the real app; the mock keeps them deterministic
@@ -1232,6 +1306,14 @@ export const mockClient: CadClient = {
 
   applyOperation(op: OperationOp): Promise<ApplyOperationResult> {
     return commitAndEmit(op);
+  },
+
+  // IN-EDITOR lane: append an import to the OPEN document. Rust owns the dialog on
+  // the real client, so there is nothing to cancel here — the mock always "picks"
+  // a file and therefore never resolves null.
+  async insertStep(): Promise<ApplyOperationResult | null> {
+    await wait();
+    return importStepAndEmit();
   },
 
   async undo(): Promise<ApplyOperationResult> {

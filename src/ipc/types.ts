@@ -799,6 +799,21 @@ export type OperationOp =
     };
 
 /**
+ * `opType` of a STEP-import history row (STEP-IMPORT WP-A).
+ *
+ * DELIBERATELY NOT in `OpType`: that union is the set of ops the FRONTEND authors
+ * and previews (it feeds `OperationOp` / `tauriCommandMap` / the preview builders),
+ * and an import has no frontend-authored params at all — Rust owns the file dialog
+ * and the record. It only ever arrives on `FeatureRecord.opType` (a plain string),
+ * so it is exported as a shared literal instead: the icon map, the re-edit router
+ * and the mock fabrication all key off THIS rather than three loose spellings.
+ *
+ * The projection buckets it under `kind: "boolean"` (interim — the backend has no
+ * dedicated import bucket yet), which is exactly why the icon must be opType-keyed.
+ */
+export const IMPORT_STEP_OP_TYPE = "ImportStep";
+
+/**
  * One feature-timeline entry (mirrors the Rust projection DTO; identical shape to
  * the store's FeatureMeta so the controller maps it 1:1). The mock now emits
  * these with real values (e.g. "25.0 mm").

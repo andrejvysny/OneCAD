@@ -5,6 +5,7 @@ import { selectionStore } from "@/stores/selectionStore";
 import { toolStore } from "@/stores/toolStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { documentStore } from "@/stores/documentStore";
+import { viewportStore } from "@/stores/viewportStore";
 import { mockClient } from "@/ipc/mockClient";
 import { setModelToolController } from "@/tools/modelTools/modelToolBridge";
 import type { ModelToolController } from "@/tools/modelTools/ModelToolController";
@@ -158,6 +159,35 @@ describe("InspectorPanel", () => {
 
       fireEvent.doubleClick(screen.getByTestId("history-row-f-bool"));
       expect(editBooleanFeature).toHaveBeenCalledWith("f-bool");
+    } finally {
+      setModelToolController(null);
+    }
+  });
+
+  /**
+   * An ImportStep row buckets under kind "boolean" in the projection (interim), so
+   * routing on `kind` would have sent a double-click into the BOOLEAN editor — a
+   * tool armed against inputs an import does not have. It must open no editor and
+   * say why instead.
+   */
+  it("routes an ImportStep row's double-click to a no-op hint, not an editor", () => {
+    const editBooleanFeature = vi.fn(() => Promise.resolve());
+    setModelToolController({ editBooleanFeature } as unknown as ModelToolController);
+    try {
+      documentStore.setState({
+        features: [
+          { id: "f-imp", kind: "boolean", opType: "ImportStep", label: "Import", valueText: "", status: "ok" },
+        ],
+      });
+      render(<InspectorPanel />);
+      act(() => selectionStore.getState().set([{ kind: "body", id: "body1" }]));
+
+      fireEvent.doubleClick(screen.getByTestId("history-row-f-imp"));
+
+      expect(editBooleanFeature).not.toHaveBeenCalled();
+      expect(viewportStore.getState().statusHint?.message).toBe(
+        "Imported feature — re-import to update",
+      );
     } finally {
       setModelToolController(null);
     }

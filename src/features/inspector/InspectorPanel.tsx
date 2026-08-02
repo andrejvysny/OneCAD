@@ -13,7 +13,7 @@ import {
   type EntityRef,
 } from "@/stores/selectionStore";
 import { useToolStore } from "@/stores/toolStore";
-import { useViewportStore } from "@/stores/viewportStore";
+import { useViewportStore, viewportStore } from "@/stores/viewportStore";
 import { useSketchStore } from "@/stores/sketchStore";
 import { useRepairStore } from "@/stores/repairStore";
 import { documentStore } from "@/stores/documentStore";
@@ -27,6 +27,7 @@ import { sketchStatusText, sketchStatusSentence } from "@/features/sketch/constr
 import { createClient } from "@/ipc/client";
 import { deleteConstraints } from "@/tools/sketch/sketchService";
 import type { SketchStatus } from "@/stores/documentStore";
+import { IMPORT_STEP_OP_TYPE } from "@/ipc/types";
 import type { SketchConstraint, SketchEntity } from "@/ipc/types";
 
 /** Delete one constraint (row × button) — fire-and-forget, mirrors useShortcuts'
@@ -77,6 +78,15 @@ function editFeature(item: FeatureMeta): void {
       // Operation swap only — a Boolean's tool body is CONSUMED, so there is
       // nothing to re-pick (see `editBooleanFeature`).
       void c?.editBooleanFeature(item.id);
+      return;
+    case IMPORT_STEP_OP_TYPE:
+      // An import has NO parametric inputs — its geometry comes from a file, so
+      // there is nothing an editor could change. Opening one anyway (the coarse
+      // `kind: "boolean"` bucket would have routed it into the Boolean editor)
+      // would arm a tool against inputs that do not exist. Say so instead: an
+      // unroutable row is otherwise silent, and silence reads as a broken
+      // double-click on a row that looks exactly like its editable neighbours.
+      viewportStore.getState().setStatusHint("Imported feature — re-import to update");
       return;
     default:
       // Sketch/opaque rows have no parametric editor yet.
