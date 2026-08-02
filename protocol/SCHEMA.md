@@ -107,7 +107,7 @@ A frame with no binary payload sets `binLen = 0` and omits `bin` (or sets `bin:
 | `sketchRevision` | JSON integer (`u64`) | Rust-owned sketch revision. |
 | `gestureId` | JSON integer (`u64`) | Rust-assigned drag-gesture id. |
 | `streamId` | JSON integer (`u64`) | Worker-assigned bulk-stream id, unique per connection. |
-| `BodyId` | JSON string | Opaque, globally unique (e.g. `"body_7"`). **Minting is split (D1):** a **NewBody** body is **worker-minted deterministic** `body_<opId>` (the `opId` is the Rust-minted op record id, so replay is stable); a future split mints `body_<opId>:<k>` with deterministic `k`-ordering. Rust **adopts** these ids from `planStep` `bodyEvents` at `AcceptPrepared` time, validating format (`body_` prefix + a known `opId` in the plan) and uniqueness, and **rejects** the prepared plan (`PROTOCOL_ERROR`, discard — never publish) on malformation/collision. All *other* body ids (loaded/imported bodies) stay Rust-minted. See [§7.2](#72-regen--executeplan). |
+| `BodyId` | JSON string | Opaque, globally unique (e.g. `"body_7"`). **Minting is split (D1):** a **NewBody** body is **worker-minted deterministic** `body_<opId>` (the `opId` is the Rust-minted op record id, so replay is stable); an op whose result is **N > 1 ordered bodies** (today: a boolean split; the rule is generic to any N-body op, e.g. a multi-solid import) mints `body_<opId>:<k>` with deterministic `k`-ordering, while an op producing exactly **one** new body always mints the plain `body_<opId>` form (mirror/pattern precedent). Rust **adopts** these ids from `planStep` `bodyEvents` at `AcceptPrepared` time, validating format (`body_` prefix + a known `opId` in the plan) and uniqueness, and **rejects** the prepared plan (`PROTOCOL_ERROR`, discard — never publish) on malformation/collision. All *other* body ids (loaded/imported bodies) stay Rust-minted. See [§7.2](#72-regen--executeplan). |
 | `ElementId` | JSON string | Opaque, Rust-minted, **globally unique and DOES NOT embed BodyId** (e.g. `"el_00000000000004a1"`). Partition membership (which body an element belongs to) is a *mapping*, never encoded in the id. |
 | `TopoKey` | JSON string | **Snapshot-scoped** topology address: `"<kind>:<index>"`, kind ∈ `f` (face) / `e` (edge) / `v` (vertex) / `b` (body). Example `"f:22"`. Valid only within the `snapshotId` that produced it. NEW scheme (OneCAD-CPP used path-style ids; this protocol uses compact snapshot-scoped TopoKeys promoted on demand to `ElementId`). |
 | hash | JSON string, lowercase hex, no `0x` | 64-bit hash → 16 hex chars (e.g. `"cbf29ce484222325"`). SHA-256 → 64 hex chars. Applies to `expectedBaseHash`, `historyPrefixHash`, all signatures, `brepContentHash`, `contentHash`, `tolerancePolicyHash`, `solverPolicyHash`, `occtFingerprint`, chunk `sha256`. |
@@ -577,7 +577,13 @@ Per-step `event`s (`event:"planStep"`), one per executed step:
   rules above (the `body_` prefix + `<opId>` a known plan op, the `:<k>` ordinals
   contiguous from 0, ids unique — else the plan is rejected). A **single-solid**
   boolean result instead emits a `modified` on the surviving target (its `BodyId`
-  preserved). See the 2026-07-19 (M5a) and 2026-07-22 (Revolve parity) changelog
+  preserved). The `:<k>` rule is **generic**: ANY op whose result is N > 1
+  deterministically-ordered bodies mints `body_<opId>:<k>` children under these
+  same adoption rules — a boolean split is today's only producer, but the naming
+  contract does not assume a `deleted` parent accompanies the `created` children
+  (an op may create N children ex nihilo). The ordinal domain is **unbounded**
+  (adoption fences contiguity-from-0 and uniqueness, never a maximum). See the
+  2026-07-19 (M5a) and 2026-07-22 (Revolve parity) changelog
   entries for the shipped derived-uuid representation + interner. This is a normative
   refinement of the §2 `BodyId` "Rust-minted" note: for NewBody and split children the
   worker mints and Rust adopts+fences, rather than Rust pre-minting (split/merge body
@@ -1814,6 +1820,19 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-02 — §2 + §7.2 `body_<opId>:<k>` widened from "boolean split" to
+  "ordered children of any N-body op"** (WP-0 identity prerequisite; cross-track
+  sign-off recorded 2026-08-02. Doc-only normative widening: no wire byte, verb,
+  arg or result field moves and today's sole producer — the boolean split — is
+  byte-identical, so **no fixture bump**.) Motivations: (1) the forthcoming
+  multi-solid STEP import mints `created` children with NO `deleted` parent, which
+  the old prose implicitly coupled; (2) §2 now states the single-vs-multi minting
+  rule explicitly (one new body ⇒ plain `body_<opId>`; N > 1 ⇒ `:<k>`); (3) the
+  ordinal domain is declared unbounded — the Rust core's former 256-ordinal
+  `split_origin` recovery probe (a silent cross-process identity loss for k ≥ 256)
+  was replaced by an exact derivation-time memo (`onecad-core` `document/body.rs`,
+  non-wire change, regression-locked at k = 300).
 
 - **2026-08-01 — §7.6 NEW read-only verb `ProjectFaceBoundary`**
   (SKETCH-ON-FACE W1a; cross-track sign-off recorded 2026-08-01.

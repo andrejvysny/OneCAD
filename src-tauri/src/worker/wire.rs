@@ -2477,6 +2477,42 @@ mod tests {
     }
 
     #[test]
+    fn high_ordinal_child_full_identity_round_trip() {
+        let _guard = INTERNER_TEST_LOCK.lock().unwrap();
+        // WP-0: ordinal 300 exceeds the deleted 256-probe cap. The whole chain —
+        // parse → registry origin stamp → fresh-process re-intern → wire render —
+        // must hold for ANY ordinal, or a >256-solid op (multi-solid STEP import)
+        // silently loses bodies on reopen.
+        use onecad_core::document::body::{BodyLifecycleEvent, BodyRegistry, SplitOrigin};
+        use onecad_core::ids::RecordId;
+        let op = Uuid::from_u128(0xBEEF);
+        let k = 300;
+        let child = parse_body_id(&format!("body_{op}:{k}")).unwrap();
+
+        // Core registry stamps the exact origin (this is what document.json persists).
+        let by = RecordId(op);
+        let mut reg = BodyRegistry::new();
+        reg.fold(0, by, BodyLifecycleEvent::Created { body: child });
+        let origin = reg.get(child).expect("registered").split_of;
+        assert_eq!(
+            origin,
+            Some(SplitOrigin { op: by, k }),
+            "origin exact at k=300"
+        );
+
+        // Fresh process: re-intern from the persisted origin → exact wire form.
+        clear_split_interner_for_test();
+        let o = origin.unwrap();
+        let rederived = intern_split_child(o.op.as_uuid(), o.k);
+        assert_eq!(
+            rederived, child,
+            "persisted origin re-derives the same BodyId"
+        );
+        assert_eq!(body_id_wire(child), format!("body_{op}:{k}"));
+        clear_split_interner_for_test();
+    }
+
+    #[test]
     fn plan_step_parses_created_body_and_delta() {
         let op = Uuid::from_u128(0x10);
         let payload = json!({

@@ -13,7 +13,8 @@
 //! serializes transparently as its UUID string — the JSON *shape* matches, the
 //! id *values* are Rust-owned UUIDs (reported divergence).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -21,21 +22,29 @@ use uuid::Uuid;
 
 use crate::ids::{BodyId, RecordId};
 
-/// Domain-separation prefix for deriving a boolean split-child `BodyId` uuid from its
+/// Domain-separation prefix for deriving an ordinal-child `BodyId` uuid from its
 /// `body_<opId>:<k>` wire form (SCHEMA §2, M5a). MUST stay byte-identical to the wire
 /// layer's renderer (`worker/wire.rs`), which calls [`split_child_uuid`].
 const SPLIT_NS: &[u8] = b"onecad.body.split.v1:";
 
-/// The maximum split-child ordinal probed when recovering a body's `(opId, k)` origin
-/// at fold time (a boolean rarely yields more solids than this; bounded so the probe
-/// is O(1)).
-pub const MAX_SPLIT_CHILDREN: usize = 256;
+/// Exact inverse of [`split_child_uuid`]: `derived uuid → (opId, k)`, recorded at
+/// derivation time. `split_child_uuid` is the SOLE mint path for ordinal-child uuids
+/// (wire `parse_body_id`, open/restore re-intern, and plan lowering all route through
+/// it), so any child `BodyId` reaching [`BodyRegistry::fold`] was derived through it
+/// in this process and the lookup is total — no bounded probing, no ordinal cap. The
+/// mapping is content (a pure-function cache), not document state, so one
+/// process-wide map is sound across documents.
+fn split_memo() -> &'static RwLock<HashMap<Uuid, (Uuid, usize)>> {
+    static MEMO: OnceLock<RwLock<HashMap<Uuid, (Uuid, usize)>>> = OnceLock::new();
+    MEMO.get_or_init(|| RwLock::new(HashMap::new()))
+}
 
-/// The deterministic derived uuid for split child `k` of `op`: the first 16 bytes of
+/// The deterministic derived uuid for ordinal child `k` of `op`: the first 16 bytes of
 /// `SHA-256(SPLIT_NS ‖ "<op>:<k>")` (a uuid5-style stable hash). A pure function ⇒
 /// replay- and persistence-stable. The wire layer renders the `body_<op>:<k>` string
 /// for this uuid via its interner; the core owns the derivation so [`BodyRegistry`]
-/// can record + reload the split identity (`splitOf`).
+/// can record + reload the child identity (`splitOf`). Also memoizes the inverse
+/// (see [`split_memo`]) so `split_origin` recovers `(op, k)` exactly for ANY ordinal.
 #[must_use]
 pub fn split_child_uuid(op: Uuid, k: usize) -> Uuid {
     let mut hasher = Sha256::new();
@@ -44,20 +53,26 @@ pub fn split_child_uuid(op: Uuid, k: usize) -> Uuid {
     let digest = hasher.finalize();
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&digest[..16]);
-    Uuid::from_bytes(bytes)
+    let derived = Uuid::from_bytes(bytes);
+    if let Ok(mut memo) = split_memo().write() {
+        memo.insert(derived, (op, k));
+    }
+    derived
 }
 
-/// The `(opId, ordinal)` a `BodyId` was minted as a boolean split child of, if any.
-/// Recovered by probing [`split_child_uuid`] against the producing op — the body is a
-/// split child iff its uuid equals `split_child_uuid(by, k)` for some `k`.
+/// The `(opId, ordinal)` a `BodyId` was minted as an ordinal child of, if any —
+/// exact [`split_memo`] lookup, gated on the producer matching `by` (a child of a
+/// DIFFERENT op is not this op's child and gets no origin).
 fn split_origin(body: BodyId, by: RecordId) -> Option<SplitOrigin> {
-    // Fast path: a NewBody id IS the opId uuid (never a split child).
+    // Fast path: a NewBody id IS the opId uuid (never an ordinal child).
     if body.as_uuid() == by.as_uuid() {
         return None;
     }
-    (0..MAX_SPLIT_CHILDREN)
-        .find(|&k| split_child_uuid(by.as_uuid(), k) == body.as_uuid())
-        .map(|k| SplitOrigin { op: by, k })
+    let memo = split_memo().read().ok()?;
+    match memo.get(&body.as_uuid()) {
+        Some(&(op, k)) if op == by.as_uuid() => Some(SplitOrigin { op: by, k }),
+        _ => None,
+    }
 }
 
 /// The boolean-split origin of a body (SCHEMA §2 `body_<opId>:<k>`), persisted so the
@@ -512,6 +527,35 @@ mod tests {
         let v = serde_json::to_value(&merged).unwrap();
         assert_eq!(v["kind"], "merged");
         assert!(v.get("inputs").is_some() && v.get("winner").is_some());
+    }
+
+    #[test]
+    fn split_origin_exact_beyond_legacy_probe_cap() {
+        // The pre-WP-0 probe was bounded at 256 ordinals — ordinal 300 got
+        // `split_of: None` and silently lost its cross-process identity. The memo
+        // lookup is exact for ANY ordinal.
+        let op = rid(0x77);
+        let k = 300;
+        let child = BodyId(split_child_uuid(op.as_uuid(), k));
+        let mut reg = BodyRegistry::new();
+        reg.fold(0, op, BodyLifecycleEvent::Created { body: child });
+        assert_eq!(
+            reg.get(child).expect("child registered").split_of,
+            Some(SplitOrigin { op, k }),
+            "ordinal-child origin stamped exactly, unbounded"
+        );
+    }
+
+    #[test]
+    fn split_origin_requires_matching_producer() {
+        // A child derived from op A folded by op B is NOT B's ordinal child — no
+        // origin is stamped (same semantics the probe had: it probed against `by`).
+        let op = rid(0x78);
+        let other = rid(0x79);
+        let child = BodyId(split_child_uuid(op.as_uuid(), 1));
+        let mut reg = BodyRegistry::new();
+        reg.fold(0, other, BodyLifecycleEvent::Created { body: child });
+        assert_eq!(reg.get(child).expect("registered").split_of, None);
     }
 
     #[test]
