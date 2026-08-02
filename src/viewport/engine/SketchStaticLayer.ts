@@ -170,6 +170,7 @@ export class SketchStaticLayer {
         opacity: FILL_OPACITY,
         depthWrite: false,
         side: THREE.DoubleSide,
+        toneMapped: false,
       });
       const fill = new THREE.Mesh(fillGeo, fillMat);
       fill.name = `sketchStaticRegion_${region.regionId}`;
@@ -195,6 +196,7 @@ export class SketchStaticLayer {
       color: palette.sketchFull(),
       transparent: true,
       depthWrite: false,
+      toneMapped: false,
     });
     const lines = new THREE.LineSegments(lineGeo, lineMat);
     lines.renderOrder = RENDER_ORDER.STATIC_CURVES;
@@ -214,6 +216,7 @@ export class SketchStaticLayer {
       sizeAttenuation: false,
       transparent: true,
       depthWrite: false,
+      toneMapped: false,
     });
     const points = new THREE.Points(ptGeo, pointsMat);
     points.renderOrder = RENDER_ORDER.STATIC_POINTS;

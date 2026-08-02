@@ -89,24 +89,8 @@ function select(refs: EntityRef[]): void {
 afterEach(() => {
   setViewportEngine(null);
   selectionStore.getState().clear();
-  viewportStore.setState({ isolatedBodyIds: null, displayMode: "shadedEdges" });
+  viewportStore.setState({ isolatedBodyIds: null });
   viewportStore.getState().setStatusHint(null);
-});
-
-describe("viewportStore display mode", () => {
-  it("defaults to shadedEdges — what the renderer has always actually drawn", () => {
-    expect(viewportStore.getState().displayMode).toBe("shadedEdges");
-  });
-
-  it("cycles shadedEdges → wireframe → shaded → shadedEdges", () => {
-    const cycle = () => viewportStore.getState().cycleDisplayMode();
-    cycle();
-    expect(viewportStore.getState().displayMode).toBe("wireframe");
-    cycle();
-    expect(viewportStore.getState().displayMode).toBe("shaded");
-    cycle();
-    expect(viewportStore.getState().displayMode).toBe("shadedEdges");
-  });
 });
 
 describe("viewportStore.zoomFit — frames the selection", () => {

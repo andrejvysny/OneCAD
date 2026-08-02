@@ -11,6 +11,7 @@ import { makeBoxMesh } from "@/ipc/mockMeshes";
 import { documentStore } from "@/stores/documentStore";
 import { toolStore } from "@/stores/toolStore";
 import { viewportStore } from "@/stores/viewportStore";
+import { settingsStore } from "@/stores/settingsStore";
 import type { CadClient } from "@/ipc/client";
 import type { DocumentChange } from "@/ipc/types";
 import type { ViewportEngine } from "../engine/ViewportEngine";
@@ -73,7 +74,8 @@ afterEach(() => {
   ingest?.detach();
   ingest = null;
   toolStore.getState().setMode("model"); // dimming tests flip this; keep the file isolated
-  viewportStore.setState({ isolatedBodyIds: null, displayMode: "shadedEdges" });
+  viewportStore.setState({ isolatedBodyIds: null });
+  settingsStore.setState({ displayMode: "shadedEdges" });
 });
 
 /** The scene group for a body (undefined when it has no scene object). */
@@ -300,11 +302,11 @@ describe("MeshIngest sketch-mode dimming", () => {
 
 /*
  * W3 display mode — MeshIngest owns applying it, because it owns the
- * bodyId→handle map. Session-only viewport state, never a document write.
+ * bodyId→handle map. Persisted (settingsStore), never a document write.
  */
 describe("MeshIngest display mode", () => {
   it("applies the CURRENT mode to a body loaded later", async () => {
-    viewportStore.setState({ displayMode: "wireframe" });
+    settingsStore.setState({ displayMode: "wireframe" });
     setBodies({ body1: true });
     const engine = fakeEngine();
     const { client, emit } = fakeClient();
@@ -327,11 +329,11 @@ describe("MeshIngest display mode", () => {
 
     expect(childVisibility(engine, "body1")).toEqual([true, true]); // shadedEdges
 
-    viewportStore.getState().cycleDisplayMode(); // → wireframe
+    settingsStore.setState({ displayMode: "wireframe" });
     expect(childVisibility(engine, "body1")).toEqual([false, true]);
     expect(childVisibility(engine, "body2")).toEqual([false, true]);
 
-    viewportStore.getState().cycleDisplayMode(); // → shaded
+    settingsStore.setState({ displayMode: "shaded" });
     expect(childVisibility(engine, "body1")).toEqual([true, false]);
     expect(engine.invalidate).toHaveBeenCalled();
   });
@@ -348,7 +350,7 @@ describe("MeshIngest display mode", () => {
     ingest.detach();
     ingest = null;
 
-    viewportStore.setState({ displayMode: "wireframe" });
+    settingsStore.setState({ displayMode: "wireframe" });
     expect(group.children.every((c) => c.visible)).toBe(true);
   });
 });

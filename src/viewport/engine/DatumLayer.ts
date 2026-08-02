@@ -172,20 +172,22 @@ export class DatumLayer {
 
   private buildQuad(meta: DatumVisual, frameKey: string): DatumQuad {
     const mat = new THREE.MeshBasicMaterial({
-      color: palette.bodyNeutral(),
+      color: palette.referenceNeutral(),
       transparent: true,
       opacity: OPACITY_BASE,
       depthWrite: false,
       side: THREE.DoubleSide,
+      toneMapped: false,
     });
     const mesh = new THREE.Mesh(new THREE.PlaneGeometry(SIZE, SIZE), mat);
     mesh.renderOrder = RENDER_ORDER.DATUM_FILL;
     mesh.userData.datumId = meta.id;
 
     const outlineMat = new THREE.LineBasicMaterial({
-      color: palette.bodyNeutral(),
+      color: palette.referenceNeutral(),
       transparent: true,
       opacity: OUTLINE_OPACITY,
+      toneMapped: false,
     });
     const outline = new THREE.LineLoop(quadOutlineGeometry(), outlineMat);
     outline.renderOrder = RENDER_ORDER.DATUM_OUTLINE;
@@ -268,7 +270,7 @@ export class DatumLayer {
         ? palette.selectedEdge()
         : hovered
           ? palette.hoverAccent()
-          : palette.bodyNeutral();
+          : palette.referenceNeutral();
       q.mat.color.copy(color);
       q.outlineMat.color.copy(color);
       q.mat.opacity = !q.resolvedValid
@@ -329,6 +331,7 @@ export class DatumLayer {
       opacity: GHOST_OPACITY,
       depthWrite: false,
       side: THREE.DoubleSide,
+      toneMapped: false,
     });
     const mesh = new THREE.Mesh(new THREE.PlaneGeometry(SIZE, SIZE), mat);
     mesh.renderOrder = RENDER_ORDER.DATUM_FILL;
@@ -336,6 +339,7 @@ export class DatumLayer {
       color: palette.hoverAccent(),
       transparent: true,
       opacity: OUTLINE_OPACITY,
+      toneMapped: false,
     });
     const outline = new THREE.LineLoop(quadOutlineGeometry(), outlineMat);
     outline.renderOrder = RENDER_ORDER.DATUM_OUTLINE;

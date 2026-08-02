@@ -12,7 +12,6 @@ import { selectedBodyIds, selectionStore } from "@/stores/selectionStore";
 import type { InputDevice } from "@/viewport/engine/navInput";
 
 export type Projection = "persp" | "ortho";
-export type DisplayMode = "shaded" | "shadedEdges" | "wireframe";
 
 export type StatusSeverity = "info" | "error";
 
@@ -34,15 +33,6 @@ export interface CursorCoords {
   y: number;
   z: number;
 }
-
-const DISPLAY_CYCLE: DisplayMode[] = ["shaded", "shadedEdges", "wireframe"];
-
-/** Human label for the display-mode button (its own tooltip + aria-label). */
-export const DISPLAY_MODE_LABEL: Record<DisplayMode, string> = {
-  shaded: "Shaded",
-  shadedEdges: "Shaded + edges",
-  wireframe: "Wireframe",
-};
 
 /** Sticky status hint shown for the whole time isolation is on. */
 export const ISOLATE_HINT = "Isolation on — Esc or ⇧I to exit";
@@ -67,7 +57,6 @@ function cancelDismiss(): void {
 
 export interface ViewportState {
   projection: Projection;
-  displayMode: DisplayMode;
   gridVisible: boolean;
   activeSketchId: string | null;
   cameraViewLabel: string;
@@ -99,7 +88,6 @@ export interface ViewportState {
   isolatedBodyIds: string[] | null;
   setPendingExtrude(sketchId: string | null): void;
   setProjection(p: Projection): void;
-  cycleDisplayMode(): void;
   toggleGrid(): void;
   setActiveSketch(id: string | null): void;
   /** Engine → store: live pointer read-out (raycast onto Z=0). */
@@ -140,10 +128,6 @@ export interface ViewportState {
 
 export const viewportStore = createStore<ViewportState>()((set, get) => ({
   projection: "persp",
-  // shadedEdges is what the renderer has always actually drawn (BodyObject adds
-  // a face Mesh AND an edge LineSegments), so this is the honest default — and
-  // it makes the first click on the display button visibly change something.
-  displayMode: "shadedEdges",
   // On by default: the grid renders (GridPlane) so the viewport never looks
   // empty; the grid button shows the pressed (accent) treatment to match.
   gridVisible: true,
@@ -163,13 +147,6 @@ export const viewportStore = createStore<ViewportState>()((set, get) => ({
 
   setProjection(p) {
     set({ projection: p });
-  },
-
-  cycleDisplayMode() {
-    set((s) => {
-      const next = DISPLAY_CYCLE[(DISPLAY_CYCLE.indexOf(s.displayMode) + 1) % DISPLAY_CYCLE.length];
-      return { displayMode: next };
-    });
   },
 
   toggleGrid() {

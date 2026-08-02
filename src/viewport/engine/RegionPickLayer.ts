@@ -81,11 +81,12 @@ export class RegionPickLayer {
       const geo = buildRegionGeometry(r);
       if (!geo) continue;
       const mat = new THREE.MeshBasicMaterial({
-        color: palette.bodyNeutral(),
+        color: palette.referenceNeutral(),
         transparent: true,
         opacity: FILL_OPACITY,
         depthWrite: false,
         side: THREE.DoubleSide,
+        toneMapped: false,
       });
       const mesh = new THREE.Mesh(geo, mat);
       mesh.renderOrder = RENDER_ORDER.REGION_FILL;
@@ -141,7 +142,7 @@ export class RegionPickLayer {
       const hovered = id === this.hoverId;
       // Selected wins over hover (a selected region stays highlighted while hovered).
       e.mat.color.copy(
-        selected ? palette.selectedEdge() : hovered ? palette.hoverAccent() : palette.bodyNeutral(),
+        selected ? palette.selectedEdge() : hovered ? palette.hoverAccent() : palette.referenceNeutral(),
       );
       e.mat.opacity = selected ? FILL_OPACITY_SELECTED : hovered ? FILL_OPACITY_HOVER : FILL_OPACITY;
     }

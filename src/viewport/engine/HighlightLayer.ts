@@ -65,6 +65,7 @@ export class HighlightLayer {
       polygonOffsetFactor: -1,
       polygonOffsetUnits: -1,
       side: THREE.DoubleSide,
+      toneMapped: false,
     });
     this.selFaceMat = new THREE.MeshBasicMaterial({
       color: palette.selectedTint(),
@@ -75,16 +76,19 @@ export class HighlightLayer {
       polygonOffsetFactor: -1,
       polygonOffsetUnits: -1,
       side: THREE.DoubleSide,
+      toneMapped: false,
     });
     this.hoverEdgeMat = new THREE.LineBasicMaterial({
       color: palette.hoverAccent(),
       depthTest: false,
       transparent: true,
+      toneMapped: false,
     });
     this.selEdgeMat = new THREE.LineBasicMaterial({
       color: palette.selectedEdge(),
       depthTest: false,
       transparent: true,
+      toneMapped: false,
     });
   }
 

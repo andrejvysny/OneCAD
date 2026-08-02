@@ -6,6 +6,7 @@
 import { createStore, useStore } from "zustand";
 import { persist } from "zustand/middleware";
 import type { DevicePref } from "@/viewport/engine/navInput";
+import { coerceRenderMode, DEFAULT_RENDER_MODE, type RenderModeId } from "@/viewport/engine/renderModes";
 
 export interface SnapSettings {
   grid: boolean;
@@ -49,10 +50,19 @@ export interface SettingsState {
    */
   experimentalWebGpu: boolean;
   navigation: NavigationSettings;
+  /**
+   * Viewport body render mode (shaded / shaded+edges / wireframe). Moved off
+   * viewportStore (session-only) so it survives reloads; coerced against the
+   * render-mode registry both on migrate AND on every hydration (see `merge`
+   * below) since a hand-edited or rolled-back localStorage blob can carry an
+   * unknown id even at the current version.
+   */
+  displayMode: RenderModeId;
   setSnap(key: SnapKey, value: boolean): void;
   setShow(key: ShowKey, value: boolean): void;
   setExperimentalWebGpu(value: boolean): void;
   setInputDevice(value: DevicePref): void;
+  setDisplayMode(mode: RenderModeId): void;
 }
 
 /** Versioned localStorage key (bump `version` on a breaking shape change). */
@@ -77,6 +87,7 @@ export const settingsStore = createStore<SettingsState>()(
       },
       experimentalWebGpu: false,
       navigation: { inputDevice: "auto" },
+      displayMode: DEFAULT_RENDER_MODE,
       setSnap(key, value) {
         set((s) => ({ snapTo: { ...s.snapTo, [key]: value } }));
       },
@@ -89,14 +100,19 @@ export const settingsStore = createStore<SettingsState>()(
       setInputDevice(value) {
         set((s) => ({ navigation: { ...s.navigation, inputDevice: value } }));
       },
+      setDisplayMode(mode) {
+        set({ displayMode: mode });
+      },
     }),
     {
       name: STORAGE_KEY,
-      version: 3,
+      version: 4,
       // v1 → v2 added the M6c snap types (quadrant / intersection / onCurve).
       // A v1 blob has no keys for them; backfill the on-by-default values so an
       // existing user's popover shows them enabled (parity with a fresh install).
       // v2 → v3 added the navigation section.
+      // v3 → v4 moved displayMode here from viewportStore (session-only before);
+      // a pre-v4 blob has no key for it at all, so coerce(undefined) → default.
       migrate: (persisted, version) => {
         const s = persisted as Partial<SettingsState>;
         if (s && version < 2) {
@@ -110,7 +126,21 @@ export const settingsStore = createStore<SettingsState>()(
         if (s && version < 3) {
           s.navigation = { inputDevice: "auto", ...(s.navigation as Partial<NavigationSettings>) };
         }
+        if (s && version < 4) {
+          s.displayMode = coerceRenderMode((s as Partial<SettingsState>).displayMode);
+        }
         return s as unknown as SettingsState;
+      },
+      // `migrate` only runs when the persisted blob's version differs from the
+      // current one. A SAME-version blob can still carry a garbage displayMode
+      // (hand-edited localStorage, or a rolled-back build that wrote an id a
+      // newer registry no longer has) — coerce it here too, on every hydration,
+      // not just across a version bump. Mirrors zustand's default shallow-merge
+      // shape so nothing else about persist's merge behavior changes.
+      merge: (persisted, current) => {
+        const merged = { ...current, ...(persisted as Partial<SettingsState>) };
+        merged.displayMode = coerceRenderMode(merged.displayMode);
+        return merged;
       },
     },
   ),

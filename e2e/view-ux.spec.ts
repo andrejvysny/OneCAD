@@ -94,7 +94,7 @@ async function seedSecondBody(page: Page): Promise<void> {
   await expect.poll(async () => Object.keys(await groupVisibility(page)).length).toBe(2);
 }
 
-test("the display-mode button cycles what the renderer actually draws", async ({ page }) => {
+test("the display-mode popover picks what the renderer actually draws", async ({ page }) => {
   await openEditorDebug(page);
   await expect.poll(async () => Object.keys(await childVisibility(page)).length).toBe(1);
 
@@ -104,16 +104,37 @@ test("the display-mode button cycles what the renderer actually draws", async ({
   const button = page.getByRole("button", { name: /^Display mode/ });
   await expect(button).toHaveAccessibleName("Display mode: Shaded + edges");
 
-  await button.click(); // → wireframe: edges only
+  // Wireframe: edges only.
+  await button.click();
+  await page.getByRole("menuitemradio", { name: "Wireframe" }).click();
   await expect(button).toHaveAccessibleName("Display mode: Wireframe");
   await expect.poll(async () => (await childVisibility(page)).body1).toEqual([false, true]);
 
-  await button.click(); // → shaded: faces only
+  // Shaded: faces only. ("Shaded" is a substring of "Shaded + edges", so this
+  // needs an exact match — otherwise the locator resolves to both rows.)
+  await button.click();
+  const shaded = page.getByRole("menuitemradio", { name: "Shaded", exact: true });
+  await shaded.click();
   await expect(button).toHaveAccessibleName("Display mode: Shaded");
   await expect.poll(async () => (await childVisibility(page)).body1).toEqual([true, false]);
 
-  await button.click(); // → back to shadedEdges
+  // Reopen: the just-picked row now reports checked.
+  await button.click();
+  await expect(page.getByRole("menuitemradio", { name: "Shaded", exact: true })).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+
+  // Shaded + edges: both.
+  await page.getByRole("menuitemradio", { name: "Shaded + edges" }).click();
+  await expect(button).toHaveAccessibleName("Display mode: Shaded + edges");
   await expect.poll(async () => (await childVisibility(page)).body1).toEqual([true, true]);
+
+  await button.click();
+  await expect(page.getByRole("menuitemradio", { name: "Shaded + edges" })).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
 });
 
 test("⇧F frames the selected body, and falls back to the whole scene with none", async ({

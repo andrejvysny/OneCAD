@@ -24,10 +24,29 @@ export interface RendererPrefs {
   experimentalWebGpu?: boolean;
 }
 
+/** A prefiltered environment map plus the disposer for the render target behind it. */
+export interface EnvironmentHandle {
+  texture: THREE.Texture;
+  dispose(): void;
+}
+
 export interface RendererHandle {
   renderer: CadRenderer;
   isWebGPU: boolean;
   dispose(): void;
+  /**
+   * Prefilter `source` into an environment map (PMREM).
+   *
+   * WebGL ONLY — `THREE.PMREMGenerator` takes a `WebGLRenderer`. The method is
+   * simply ABSENT on the WebGPU handle (and on mocked handles in unit tests),
+   * which is the guard: callers do `handle.createEnvironment?.(scene)` and skip
+   * IBL entirely when it is undefined. No `isWebGPU` branch belongs in the engine.
+   *
+   * The caller OWNS the returned handle and must `dispose()` it while the GL
+   * context is still alive — `PMREMGenerator.dispose()` does not free the render
+   * target that `fromScene` returns.
+   */
+  createEnvironment?(source: THREE.Scene): EnvironmentHandle | null;
 }
 
 async function webGpuAvailable(): Promise<boolean> {
@@ -55,6 +74,11 @@ function createWebGl(canvas: HTMLCanvasElement): RendererHandle {
     preserveDrawingBuffer: true,
   });
   renderer.setClearColor(palette.clear(), 1);
+  // Studio look: Neutral (Khronos PBR neutral) compresses highlights without the
+  // filmic color shift ACES imposes, so a body's albedo token still reads as
+  // itself. Exposure 1.0 — the light rig, not the exposure, sets the level.
+  renderer.toneMapping = THREE.NeutralToneMapping;
+  renderer.toneMappingExposure = 1.0;
   return {
     renderer,
     isWebGPU: false,
@@ -62,6 +86,12 @@ function createWebGl(canvas: HTMLCanvasElement): RendererHandle {
       // forceContextLoss frees the GL context promptly (StrictMode re-inits).
       renderer.forceContextLoss();
       renderer.dispose();
+    },
+    createEnvironment(source: THREE.Scene): EnvironmentHandle | null {
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      const rt = pmrem.fromScene(source, 0.04);
+      pmrem.dispose(); // frees the generator's scratch targets, NOT `rt`
+      return { texture: rt.texture, dispose: () => rt.dispose() };
     },
   };
 }

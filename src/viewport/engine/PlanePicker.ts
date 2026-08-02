@@ -125,12 +125,13 @@ export class PlanePicker {
       opacity: OPACITY_BASE,
       depthWrite: false,
       side: THREE.DoubleSide,
+      toneMapped: false,
     });
     const mesh = new THREE.Mesh(new THREE.PlaneGeometry(SIZE, SIZE), mat);
     mesh.renderOrder = RENDER_ORDER.PLANE_PICK_FILL;
     mesh.userData.kind = kind;
 
-    const outlineMat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: OUTLINE_OPACITY });
+    const outlineMat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: OUTLINE_OPACITY, toneMapped: false });
     const outlineGeo = new THREE.BufferGeometry().setFromPoints([
       new THREE.Vector3(-HALF, -HALF, 0),
       new THREE.Vector3(HALF, -HALF, 0),

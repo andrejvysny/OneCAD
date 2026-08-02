@@ -11,14 +11,15 @@
  *
  * Scene graph (see README.md — Z-UP RIGHT-HANDED is a HARD INVARIANT):
  *   scene
- *   ├── HemisphereLight + headlight DirectionalLight (follows the camera)
+ *   ├── HemisphereLight + key/fill DirectionalLights (camera-relative rig)
  *   ├── GridPlane            (world XY, Z=0)
  *   ├── bodiesRoot           (mesh ingestion — F-WP5)
  *   ├── sketchRoot           (sketch entities — later WP)
  *   └── interactionRoot      (previews / gizmos — later WP)
  */
 import * as THREE from "three";
-import { createRenderer, type RendererHandle } from "./renderer";
+import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
+import { createRenderer, type EnvironmentHandle, type RendererHandle } from "./renderer";
 import { CameraRig, type ProjectionKind } from "./CameraRig";
 import { CadOrbitControls } from "./CadOrbitControls";
 import type { DevicePref, InputDevice } from "./navInput";
@@ -47,11 +48,13 @@ import { PreviewMesh } from "./PreviewMesh";
 import { DragHandle } from "./DragHandle";
 import { RevolvePreview, type AxisCandidate } from "./RevolvePreview";
 import { PlanePicker, type PickablePlane } from "./PlanePicker";
+import { lightRigPose, type LightRigPose } from "./lightRig";
 import { DatumLayer, datumGhostPlane, type DatumVisual } from "./DatumLayer";
 import { GhostLayer } from "./GhostLayer";
 import type { LatheAxis } from "@/tools/preview/lathePreview";
 import type { GhostTransform } from "@/tools/preview/patternPreview";
-import { buildBodyObject, createBodyMaterials, type BodyMaterials, type BodyObjectHandle } from "./BodyObject";
+import { buildBodyObject, type BodyObjectHandle } from "./BodyObject";
+import { BodyMaterialLibrary } from "./bodyMaterials";
 import type { PrismProfile } from "@/tools/preview/prismPreview";
 import type { Vec3 } from "@/tools/preview/depthProjection";
 
@@ -81,6 +84,28 @@ const MAX_DPR = 2;
 const SKETCH_PICK_PX = 8;
 const Z0_PLANE = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
 
+/*
+ * Lighting levels, split by backend.
+ *
+ * r185 physics, worth stating because the old numbers looked arbitrary: a
+ * DirectionalLight uploads `color × intensity` with NO 1/π factor, while
+ * BRDF_Lambert divides the diffuse term by π. So an intensity of ~π is what
+ * "full white light" actually costs. The previous 0.75 headlight therefore
+ * delivered ≈0.75/π ≈ 0.24 × albedo — the root cause of the flat, muddy look;
+ * the hemisphere light was carrying the image on its own.
+ *
+ * WebGL carries an IBL environment, so the direct lights only need to add
+ * shaping on top of it. WebGPU has no environment here (PMREM is WebGL-only —
+ * see renderer.ts), so its lights must supply the whole level themselves.
+ */
+const ENV_INTENSITY = 0.35;
+const KEY_WEBGL = 1.9;
+const FILL_WEBGL = 0.6;
+const HEMI_WEBGL = 0.25;
+const KEY_WEBGPU = 2.4;
+const FILL_WEBGPU = 0.85;
+const HEMI_WEBGPU = 0.7;
+
 export class ViewportEngine {
   // Lifecycle
   private initialized = false;
@@ -100,6 +125,18 @@ export class ViewportEngine {
   };
   private readonly onContextRestored = (): void => {
     this.invalidate();
+    // The environment map lives ONLY on the GPU (a PMREM render target has no
+    // CPU-side source), so a restored context comes back with a black env unless
+    // it is regenerated. It must be DEFERRED: these canvas listeners are
+    // registered in init() BEFORE the renderer exists, so this handler runs
+    // before WebGLRenderer's own (registered later, in its constructor) has
+    // re-initialised the GL context — prefiltering now would render into a
+    // context three still considers lost. A microtask puts us after it.
+    queueMicrotask(() => {
+      if (this.disposed || !this.rendererHandle) return; // dispose() nulls the handle first
+      this.buildEnvironment();
+      this.invalidate();
+    });
   };
 
   // Scene graph
@@ -113,7 +150,16 @@ export class ViewportEngine {
   readonly sketchRoot = new THREE.Group();
   readonly interactionRoot = new THREE.Group();
   readonly previewRoot = new THREE.Group(); // L2 preview body (lit like a real body)
-  private headlight: THREE.DirectionalLight | null = null;
+  // Camera-relative studio rig (see lightRig.ts) + the IBL it sits on top of.
+  private hemiLight: THREE.HemisphereLight | null = null;
+  private keyLight: THREE.DirectionalLight | null = null;
+  private fillLight: THREE.DirectionalLight | null = null;
+  private environment: EnvironmentHandle | null = null;
+  /** Reused per-frame rig pose — renderFrame allocates nothing. */
+  private readonly rigPose: LightRigPose = {
+    key: new THREE.Vector3(),
+    fill: new THREE.Vector3(),
+  };
 
   // Model-tool previews (F-WP7).
   private previewMesh: PreviewMesh | null = null; // L1 extrude prism
@@ -122,7 +168,10 @@ export class ViewportEngine {
   private ghostLayer: GhostLayer | null = null; // L1 pattern / mirror clones
   private regionPickLayer: RegionPickLayer | null = null; // multi-region extrude/revolve pick
   private planePicker: PlanePicker | null = null; // origin-plane pick gizmo
-  private previewMaterials: BodyMaterials | null = null;
+  // Preview bodies get their OWN material library so a Cut tint never reaches
+  // committed geometry. Created lazily at the first setPreviewBody, not in
+  // init() — engine unit tests drive previews without ever initialising GL.
+  private previewMaterials: BodyMaterialLibrary | null = null;
   // One L2 preview body per armed region, keyed by bodyId (N==1 single-region;
   // N in Wave 2 multi-select). The materials are shared, so a Cut tint hits all.
   private previewBodies = new Map<string, BodyObjectHandle>();
@@ -201,6 +250,11 @@ export class ViewportEngine {
     }
     this.rendererHandle = handle;
     this.isWebGPU = handle.isWebGPU;
+    // Both need the backend identity, which only exists now; buildScene() ran
+    // before the renderer was constructed. No `await` follows the disposed check
+    // above, so neither can race a dispose().
+    this.applyLightIntensities();
+    this.buildEnvironment();
 
     this.grid = new GridPlane({
       minor: palette.gridMinor(),
@@ -278,6 +332,7 @@ export class ViewportEngine {
     const bounds = this.getSceneBounds();
     return {
       isWebGPU: this.isWebGPU,
+      envReady: this.environment !== null,
       frames: this.frames,
       camPos: cam.position.toArray(),
       camNear: (cam as THREE.PerspectiveCamera).near,
@@ -308,22 +363,70 @@ export class ViewportEngine {
   }
 
   private buildScene(): void {
-    const hemi = new THREE.HemisphereLight(
+    // Ambient floor. The ground half is the canvas token, so unlit undersides
+    // settle toward the background instead of a hard-coded blue-gray.
+    this.hemiLight = new THREE.HemisphereLight(
       new THREE.Color(1, 1, 1),
-      new THREE.Color(0.4, 0.43, 0.48),
-      1.15,
+      palette.clear(),
+      HEMI_WEBGL,
     );
-    this.scene.add(hemi);
+    this.scene.add(this.hemiLight);
 
-    this.headlight = new THREE.DirectionalLight(new THREE.Color(1, 1, 1), 0.75);
-    this.scene.add(this.headlight);
-    this.scene.add(this.headlight.target);
+    // Key + fill are positioned per frame by the light rig (renderFrame).
+    // Intensities are the WebGL defaults here and re-applied once the backend is
+    // known — buildScene() runs before the renderer exists.
+    this.keyLight = new THREE.DirectionalLight(new THREE.Color(1, 1, 1), KEY_WEBGL);
+    this.fillLight = new THREE.DirectionalLight(new THREE.Color(1, 1, 1), FILL_WEBGL);
+    this.scene.add(this.keyLight, this.keyLight.target);
+    this.scene.add(this.fillLight, this.fillLight.target);
 
     this.bodiesRoot.name = "bodiesRoot";
     this.sketchRoot.name = "sketchRoot";
     this.interactionRoot.name = "interactionRoot";
     this.previewRoot.name = "previewRoot";
     this.scene.add(this.bodiesRoot, this.sketchRoot, this.interactionRoot, this.previewRoot);
+  }
+
+  /**
+   * Level the direct lights for the active backend. WebGL adds an IBL on top, so
+   * its lights only shape; WebGPU has no environment and must carry it all.
+   */
+  private applyLightIntensities(): void {
+    const webgpu = this.isWebGPU;
+    if (this.hemiLight) this.hemiLight.intensity = webgpu ? HEMI_WEBGPU : HEMI_WEBGL;
+    if (this.keyLight) this.keyLight.intensity = webgpu ? KEY_WEBGPU : KEY_WEBGL;
+    if (this.fillLight) this.fillLight.intensity = webgpu ? FILL_WEBGPU : FILL_WEBGL;
+  }
+
+  /**
+   * Prefilter a neutral studio room into `scene.environment` (image-based
+   * lighting for the body face material — the only MeshStandardMaterial in the
+   * scene). Runs at init and once per context restore, never per frame, so the
+   * idle-zero-rAF contract is untouched.
+   *
+   * No-ops when the handle has no `createEnvironment` — i.e. on WebGPU (PMREM is
+   * WebGL-only) and under the mocked handle in unit tests.
+   */
+  private buildEnvironment(): void {
+    if (this.disposed || !this.rendererHandle?.createEnvironment) return;
+
+    this.scene.environment = null;
+    this.environment?.dispose();
+    this.environment = null;
+
+    const room = new RoomEnvironment();
+    const env = this.rendererHandle.createEnvironment(room);
+    room.dispose(); // the room's own geometry/materials; the PMREM result is independent
+    if (!env) return;
+
+    this.environment = env;
+    this.scene.environment = env.texture;
+    // RoomEnvironment is authored Y-up. Rotating the SAMPLING direction is the
+    // fix; the scene graph itself is never touched, so the Z-up invariant holds.
+    this.scene.environmentRotation.set(Math.PI / 2, 0, 0);
+    // PMREM fills directions the room does not cover with the renderer's clear
+    // color, so the environment automatically matches the canvas background.
+    this.scene.environmentIntensity = ENV_INTENSITY;
   }
 
   private setupDebugOverlay(overlayEl: HTMLElement): void {
@@ -369,11 +472,23 @@ export class ViewportEngine {
     if (!this.rendererHandle || !this.controls) return;
     const camera = this.rig.getCamera();
 
-    // Headlight tracks the camera (a simple headlight, projection-agnostic).
-    if (this.headlight) {
-      this.headlight.position.copy(camera.position);
-      this.headlight.target.position.copy(this.controls.getTarget());
-      this.headlight.target.updateMatrixWorld();
+    // Camera-relative key + fill (see lightRig.ts). Both orbit with the view, so
+    // the shading cue is stable while tumbling; the pose object is reused.
+    if (this.keyLight && this.fillLight) {
+      const target = this.controls.getTarget();
+      const pose = lightRigPose(
+        this.controls.yaw,
+        this.controls.pitch,
+        target,
+        this.controls.getDistance(),
+        this.rigPose,
+      );
+      this.keyLight.position.copy(pose.key);
+      this.keyLight.target.position.copy(target);
+      this.keyLight.target.updateMatrixWorld();
+      this.fillLight.position.copy(pose.fill);
+      this.fillLight.target.position.copy(target);
+      this.fillLight.target.updateMatrixWorld();
     }
     if (this.grid) {
       this.grid.update(this.controls.getTarget(), this.controls.getDistance());
@@ -781,9 +896,8 @@ export class ViewportEngine {
     this.extrudePreviewCut = cut;
     this.previewMesh?.setTint(cut);
     this.revolvePreview?.setTint(cut);
-    if (this.previewMaterials) {
-      this.previewMaterials.face.color.copy(cut ? palette.destructive() : palette.bodyNeutral());
-    }
+    if (cut) this.previewMaterials?.setFaceColor(palette.destructive());
+    else this.previewMaterials?.resetFaceColor();
     this.invalidate();
   }
 
@@ -1058,13 +1172,15 @@ export class ViewportEngine {
    */
   setPreviewBody(entry: MeshEntry): void {
     if (this.disposed) return;
-    if (!this.previewMaterials) this.previewMaterials = createBodyMaterials();
+    if (!this.previewMaterials) this.previewMaterials = new BodyMaterialLibrary();
     const prev = this.previewBodies.get(entry.bodyId);
     if (prev) this.previewRoot.remove(prev.group);
     const handle = buildBodyObject(entry, this.previewMaterials);
     this.previewBodies.set(entry.bodyId, handle);
     this.previewRoot.add(handle.group);
-    if (this.extrudePreviewCut) this.previewMaterials.face.color.copy(palette.destructive());
+    // Re-apply a tint that was set before this library existed (setPreviewTint
+    // runs while the engine still has no preview materials to recolor).
+    if (this.extrudePreviewCut) this.previewMaterials.setFaceColor(palette.destructive());
     this.invalidate();
   }
 
@@ -1268,6 +1384,12 @@ export class ViewportEngine {
 
     this.overlayDriver.clear();
     this.cameraListeners.clear();
+
+    // The PMREM render target must be released while the GL context is still
+    // alive — dispose the environment BEFORE the renderer handle.
+    this.scene.environment = null;
+    this.environment?.dispose();
+    this.environment = null;
 
     this.rendererHandle?.dispose();
     this.rendererHandle = null;

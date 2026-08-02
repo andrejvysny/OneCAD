@@ -105,6 +105,14 @@
   --color-traffic-min: #febc2e;
   --color-traffic-max: #28c840;
 
+  /* ---- Body (viewport solids) ---- */
+  /* Authored for the render-mode WP (not from the prototype): light neutral
+     body surface for a professional CAD shaded look. */
+  --color-body-fill: #a9aeb6;
+  /* Authored for the render-mode WP (not from the prototype): near-black
+     feature edges. */
+  --color-body-edge: #3a3f47;
+
   /* ---- Radii ---- */
   --radius-sm: 6px;
   --radius-md: 8px;

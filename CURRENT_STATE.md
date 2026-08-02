@@ -1,4 +1,38 @@
-# OneCAD-Tauri — Current State (2026-08-01, SKETCH-ON-FACE wave shipped)
+# OneCAD-Tauri — Current State (2026-08-02, RENDER-MODE wave shipped)
+
+## RENDER-MODE (2026-08-02, commit 63b3adc) — display-mode registry + studio shading
+No plan doc; direct WP continuing MODELING-REACH W3, which shipped the
+display-mode button as a 3-state cycler over session-only `viewportStore` state.
+Now the mode is DATA: `renderModes.ts` holds the descriptor table
+(`faceVisible` / `edgeVisible` / `materialKind`), so adding a mode is a table
+entry, not a branch in `BodyObject`, the ingest controller, or the store.
+`bodyMaterials.ts` becomes the sole owner of body materials — shared per-kind
+sets, dim save/restore that replays the observed prior state, tints that copy
+rather than retain the shared palette color. `displayMode` moved to persisted
+`settingsStore` (v4) and is coerced on EVERY hydration, not just on a version
+bump, because a same-version blob can still carry an unknown id. The cycling
+button became a radio-row popover sharing one open-slot with the snap popover.
+Shading is the other half: Neutral tone mapping, a `RoomEnvironment` PMREM IBL
+built once at init (never per frame — the idle-zero-rAF contract holds), and a
+camera-relative key/fill rig. WebGL-only by CONSTRUCTION — `createEnvironment`
+is simply absent on the WebGPU and mocked handles, so no `isWebGPU` branch
+exists in the engine. Every overlay layer now sets `toneMapped: false`: tone
+mapping is for lit body faces, everything else renders its design token exactly.
+Suites at gate: tsc 0 · FE 2012/149 · e2e 94/94 · ctest 79/79 + cargo 594/0
+untouched (no Rust/C++ files in the diff) · hex clean.
+BACKLOGGED THIS WAVE: the IBL path has NO automated coverage — the unit-test
+renderer mock deliberately omits `createEnvironment` and e2e asserts scene-graph
+flags, not pixels, so the studio look rests on the manual gate alone; the WebGPU
+lane (lights-only, higher intensities) is untested; PMREM fills uncovered
+directions with the renderer clear color, so `--color-canvas` now silently
+drives body shading; `palette.ts` still caches colors forever and
+`resetPaletteCache()` is still unwired, leaving every construction-time material
+frozen for the life of the engine; two `BodyMaterialLibrary` instances exist
+with no single owner able to reach both.
+REMAINING: USER manual Tauri gate (TODO.md RENDER-MODE checklist).
+NEXT: DARK-MODE wave — plan
+`~/.claude/plans/act-as-senior-software-transient-puddle.md` (approved
+2026-08-02), which wires `resetPaletteCache()` and unfreezes those materials.
 
 ## SKETCH-ON-FACE (2026-08-01, commits 2ac7aba→(final)) — sketch on model geometry, with the host outline as locked reference
 Plan `~/.claude/plans/act-as-senior-software-twinkly-crown.md` (internal

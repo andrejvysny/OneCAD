@@ -69,6 +69,7 @@ export class GhostLayer {
       opacity: 0.28,
       depthWrite: false,
       side: THREE.DoubleSide,
+      toneMapped: false,
     });
     deps.root.add(this.group);
   }

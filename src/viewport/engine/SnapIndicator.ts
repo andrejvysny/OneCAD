@@ -120,6 +120,7 @@ export class SnapIndicator {
       depthTest: false,
       transparent: true,
       alphaTest: 0.4,
+      toneMapped: false,
     });
     this.marker = new THREE.Points(
       new THREE.BufferGeometry().setAttribute("position", new THREE.Float32BufferAttribute([0, 0, 0], 3)),
@@ -136,6 +137,7 @@ export class SnapIndicator {
       depthTest: false,
       transparent: true,
       opacity: 0.75,
+      toneMapped: false,
     });
     this.guides = new THREE.LineSegments(new THREE.BufferGeometry(), this.guideMat);
     this.guides.renderOrder = RENDER_ORDER.SNAP_GUIDES;

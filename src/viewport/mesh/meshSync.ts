@@ -10,26 +10,24 @@
  * becomes visible).
  *
  * The engine stays graphics-only; this controller owns the client, the document
- * store subscription, the shared body materials, and the bodyId→BodyObject map.
- * `detach` clears the scene, disposes the registry (leak tripwire) and materials.
+ * store subscription, the shared body material library, and the bodyId→BodyObject
+ * map. `detach` clears the scene, disposes the registry (leak tripwire) + library.
  *
- * It is also the single owner of the two viewport-level body view states (W3):
- * the DISPLAY MODE (face/edge child visibility per body) and the transient
- * ISOLATION mask. Both are applied here rather than in the engine because the
- * bodyId→handle map lives here.
+ * It is also the single owner of the two body view states (W3): the DISPLAY
+ * MODE (face/edge child visibility per body — persisted on settingsStore) and
+ * the transient ISOLATION mask (viewportStore, session-only). Both are applied
+ * here rather than in the engine because the bodyId→handle map lives here.
  */
 import type { CadClient } from "@/ipc/client";
 import type { DocumentChange, Lod } from "@/ipc/types";
 import { documentStore } from "@/stores/documentStore";
 import { toolStore } from "@/stores/toolStore";
 import { viewportStore } from "@/stores/viewportStore";
+import { settingsStore } from "@/stores/settingsStore";
 import type { ViewportEngine } from "../engine/ViewportEngine";
-import {
-  buildBodyObject,
-  createBodyMaterials,
-  type BodyMaterials,
-  type BodyObjectHandle,
-} from "../engine/BodyObject";
+import { buildBodyObject, type BodyObjectHandle } from "../engine/BodyObject";
+import { BodyMaterialLibrary } from "../engine/bodyMaterials";
+import { coerceRenderMode, RENDER_MODES, type RenderModeDef } from "../engine/renderModes";
 import { parseMeshPayload } from "./parseMeshPayload";
 import { buildBodyObjects, disposeAll, remove, swap } from "./meshRegistry";
 
@@ -38,11 +36,7 @@ const DEFAULT_LOD: Lod = "coarse";
 export class MeshIngest {
   private engine: ViewportEngine | null = null;
   private client: CadClient | null = null;
-  private materials: BodyMaterials | null = null;
-  private dimmed = false;
-  /** Face material state saved just before dimming, reapplied verbatim on restore. */
-  private savedFaceState: { transparent: boolean; opacity: number; depthWrite: boolean } | null =
-    null;
+  private materials: BodyMaterialLibrary | null = null;
   private readonly bodyObjects = new Map<string, BodyObjectHandle>();
   private readonly unsubs: Array<() => void> = [];
   private meshRev = 0;
@@ -61,10 +55,8 @@ export class MeshIngest {
   attach(engine: ViewportEngine, client: CadClient): void {
     this.engine = engine;
     this.client = client;
-    this.materials = createBodyMaterials();
+    this.materials = new BodyMaterialLibrary();
     this.detached = false;
-    this.dimmed = false;
-    this.savedFaceState = null;
 
     this.unsubs.push(client.onDocumentChanged((c) => this.onDocumentChanged(c)));
 
@@ -93,12 +85,13 @@ export class MeshIngest {
     );
     if (prevMode === "sketch") this.setDimmed(true);
 
-    // Display mode + isolation (W3): both are viewport-store facts applied to
-    // the handles this controller owns. Separate prev-guards so a change to one
-    // never re-walks the scene for the other.
-    let prevDisplay = viewportStore.getState().displayMode;
+    // Display mode (persisted, settingsStore) + isolation (transient, W3
+    // viewportStore): both are applied to the handles this controller owns.
+    // Separate prev-guards so a change to one never re-walks the scene for
+    // the other.
+    let prevDisplay = settingsStore.getState().displayMode;
     this.unsubs.push(
-      viewportStore.subscribe((s) => {
+      settingsStore.subscribe((s) => {
         if (s.displayMode !== prevDisplay) {
           prevDisplay = s.displayMode;
           this.applyDisplayMode();
@@ -165,10 +158,19 @@ export class MeshIngest {
     return docVisible && (isolated === null || isolated.includes(bodyId));
   }
 
+  /**
+   * The store's display mode as a render-mode descriptor. Coerced rather than
+   * indexed blind so an unknown id (older persisted session) falls back instead
+   * of leaving handles with an undefined mode.
+   */
+  private currentModeDef(): RenderModeDef {
+    return RENDER_MODES[coerceRenderMode(settingsStore.getState().displayMode)];
+  }
+
   /** Push the current display mode onto every live body handle. */
   private applyDisplayMode(): void {
-    const mode = viewportStore.getState().displayMode;
-    for (const handle of this.bodyObjects.values()) handle.setDisplayMode(mode);
+    const def = this.currentModeDef();
+    for (const handle of this.bodyObjects.values()) handle.applyMode(def);
     this.engine?.invalidate();
   }
 
@@ -208,7 +210,7 @@ export class MeshIngest {
     if (old) this.engine.bodiesRoot.remove(old.group);
     const handle = buildBodyObject(entry, this.materials);
     handle.setVisible(this.effectiveVisible(bodyId));
-    handle.setDisplayMode(viewportStore.getState().displayMode);
+    handle.applyMode(this.currentModeDef());
     this.engine.bodiesRoot.add(handle.group);
     this.bodyObjects.set(bodyId, handle);
 
@@ -218,33 +220,14 @@ export class MeshIngest {
   }
 
   /**
-   * Dim (sketch mode) or restore (model mode) the shared face material — a focus
-   * cue so the body isn't visually competing with the sketch on top of it. Edge
-   * material is left untouched so silhouettes stay crisp. Saves the material's
-   * PRIOR state before dimming and reapplies it verbatim on restore rather than
-   * hardcoding reset values, so a future change to the default face styling
-   * can't drift out of sync with what "restore" means here.
+   * Dim (sketch mode) or restore (model mode) the body face materials — a focus
+   * cue so the body isn't visually competing with the sketch on top of it. The
+   * library owns the save/restore discipline (and applies the dim to material
+   * sets it creates later); this only decides WHEN, and repaints.
    */
   private setDimmed(dimmed: boolean): void {
-    if (!this.materials || this.dimmed === dimmed) return;
-    this.dimmed = dimmed;
-    const face = this.materials.face;
-    if (dimmed) {
-      this.savedFaceState = {
-        transparent: face.transparent,
-        opacity: face.opacity,
-        depthWrite: face.depthWrite,
-      };
-      face.transparent = true;
-      face.opacity = 0.35;
-      face.needsUpdate = true;
-    } else if (this.savedFaceState) {
-      face.transparent = this.savedFaceState.transparent;
-      face.opacity = this.savedFaceState.opacity;
-      face.depthWrite = this.savedFaceState.depthWrite;
-      face.needsUpdate = true;
-      this.savedFaceState = null;
-    }
+    if (!this.materials) return;
+    this.materials.setDimmed(dimmed);
     this.engine?.invalidate();
   }
 
@@ -274,8 +257,6 @@ export class MeshIngest {
     disposeAll(); // registry empty + leak tripwire
     this.materials?.dispose();
     this.materials = null;
-    this.dimmed = false;
-    this.savedFaceState = null;
     this.engine = null;
     this.client = null;
   }

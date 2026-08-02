@@ -154,6 +154,7 @@ export class SketchObject {
         opacity: 0.5,
         depthWrite: false,
         side: THREE.DoubleSide,
+        toneMapped: false,
       }),
     );
     this.tint.renderOrder = RENDER_ORDER.SKETCH_TINT;
@@ -172,6 +173,7 @@ export class SketchObject {
       sizeAttenuation: false,
       transparent: true,
       depthWrite: false,
+      toneMapped: false,
     });
     this.points = new THREE.Points(new THREE.BufferGeometry(), this.pointsMat);
     this.points.renderOrder = RENDER_ORDER.SKETCH_POINTS;
@@ -183,6 +185,7 @@ export class SketchObject {
         linewidth: LINE_WIDTH,
         transparent: true,
         depthWrite: false,
+        toneMapped: false,
         ...opts,
       });
     this.matUnder = mk(palette.sketchUnder());

@@ -34,10 +34,10 @@ export class DragHandle {
   constructor(private readonly deps: DragHandleDeps) {
     this.group.name = "extrudeHandle";
     this.group.visible = false;
-    this.matNormal = new THREE.MeshBasicMaterial({ color: palette.hoverAccent(), depthTest: false, transparent: true, opacity: 0.9 });
+    this.matNormal = new THREE.MeshBasicMaterial({ color: palette.hoverAccent(), depthTest: false, transparent: true, opacity: 0.9, toneMapped: false });
     // transparent keeps the hover state in the same (transparent) render list
     // as matNormal — an opaque hover material would drop under all fills.
-    this.matHover = new THREE.MeshBasicMaterial({ color: palette.selectedEdge(), depthTest: false, transparent: true });
+    this.matHover = new THREE.MeshBasicMaterial({ color: palette.selectedEdge(), depthTest: false, transparent: true, toneMapped: false });
 
     // Geometry authored pointing +Y, sized in "px units" (scaled per frame).
     this.shaft = new THREE.Mesh(
@@ -49,7 +49,7 @@ export class DragHandle {
     this.cone.position.y = SHAFT_PX + CONE_PX / 2;
     this.hitCyl = new THREE.Mesh(
       new THREE.CylinderGeometry(CONE_RADIUS_PX * HIT_PAD, CONE_RADIUS_PX * HIT_PAD, SHAFT_PX + CONE_PX, 8),
-      new THREE.MeshBasicMaterial({ visible: false }),
+      new THREE.MeshBasicMaterial({ visible: false, toneMapped: false }),
     );
     this.hitCyl.position.y = (SHAFT_PX + CONE_PX) / 2;
     this.hitCyl.userData.extrudeHandle = true;

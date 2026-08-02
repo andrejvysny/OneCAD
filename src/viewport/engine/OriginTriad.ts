@@ -55,6 +55,7 @@ export class OriginTriad {
       polygonOffset: true,
       polygonOffsetFactor: -4,
       polygonOffsetUnits: -4,
+      toneMapped: false,
     });
 
     // One LineSegments2, three unit-length legs, per-vertex colors. Built once:

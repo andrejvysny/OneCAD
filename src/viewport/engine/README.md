@@ -76,6 +76,7 @@ awaited construction resolves after disposal).
 | `GridPlane.ts`       | Adaptive XY grid (1/5/10 decade step), re-centered on target.   |
 | `HtmlOverlayDriver.ts`| Projects world→screen and writes DOM transforms per frame.     |
 | `palette.ts`         | Reads design tokens (tokens.css) via getComputedStyle once.     |
+| `lightRig.ts`        | Pure camera-relative key/fill positions (floored key elevation).|
 | `BodyObject.ts`      | Per-body face Mesh + edge LineSegments; shared body materials.  |
 | `Picker.ts`          | rAF-coalesced raycast → face/edge PickHit; edge screen-bias.    |
 | `HighlightLayer.ts`  | Hover/selected highlight via shared-attribute drawRange clones. |
@@ -102,12 +103,61 @@ suppressed when an LMB drag starts on geometry (`CadOrbitControls` `hitTest` sea
 
 ```
 scene
-├── HemisphereLight + headlight DirectionalLight (follows camera)
+├── HemisphereLight + key/fill DirectionalLights (camera-relative rig)
 ├── GridPlane           (world XY, Z=0)
 ├── bodiesRoot          (body face Mesh + edge LineSegments — F-WP5)
 ├── sketchRoot          (sketch entities — later WP)
 └── interactionRoot     (hover/selected highlight meshes — F-WP5)
 ```
+
+## Environment & shading
+
+Bodies are lit as a **studio setup**, not by a headlight: `NeutralToneMapping`
+(exposure 1.0), an image-based environment, and a camera-relative key/fill rig.
+
+**Environment (IBL).** `RoomEnvironment` is prefiltered through `PMREMGenerator`
+into `scene.environment` **once at `init()`** and **once per context restore** —
+never inside `renderFrame`, so the idle-zero-rAF contract is untouched. Details
+that are load-bearing:
+
+- **WebGL only, by construction.** `PMREMGenerator` takes a `WebGLRenderer`, so
+  `createEnvironment` exists only on the WebGL `RendererHandle`; it is *absent*
+  on the WebGPU handle and on the mocked handle in unit tests. Callers write
+  `handle.createEnvironment?.(…)` — there is no `isWebGPU` branch in the engine.
+  WebGPU therefore runs lights-only, at higher intensities to compensate.
+- **Context restore is deferred by a microtask.** A PMREM render target has no
+  CPU-side source, so a restored context returns a black environment unless it is
+  rebuilt. The engine's `webglcontextrestored` listener is registered in `init()`
+  *before* the renderer exists, so it fires **before** `WebGLRenderer`'s own
+  handler re-initialises GL; rebuilding synchronously would prefilter into a
+  context three still considers lost. `queueMicrotask` puts the rebuild after it.
+- **The caller owns the render target.** `PMREMGenerator.dispose()` does not free
+  what `fromScene` returned, so `EnvironmentHandle.dispose()` does — and
+  `ViewportEngine.dispose()` calls it *before* disposing the renderer handle,
+  while the GL context is still alive.
+- **Undefined directions inherit the renderer clear color.** That is deliberate:
+  the environment automatically matches the canvas background token.
+- `scene.environmentRotation` maps the Y-up room to our Z-up world. This rotates
+  **sampling only** — no scene root is touched, so the Z-up invariant holds.
+- `scene.environment` only affects `MeshStandardMaterial`; the body face material
+  is the sole instance.
+
+**Light rig — `lightRig.ts` (pure, unit-tested).** A key light offset from the
+view direction plus a weaker fill on the opposite side, both camera-relative and
+repositioned every rendered frame, over a hemisphere ambient floor. The key's
+absolute elevation has a **floor**: a purely camera-relative key swings below the
+horizon when orbiting under the model, which lights bottom faces brightest and
+inverts the shape cue. Flooring the key while leaving the fill unfloored keeps
+under-views legible without ever out-shining a top face.
+
+Intensity numbers look large because of r185 physics: a `DirectionalLight`
+uploads `color × intensity` with no 1/π factor while `BRDF_Lambert` divides by π,
+so ~π is what full white costs. The old 0.75 headlight delivered ≈0.24 × albedo —
+the root cause of the flat look.
+
+**Tone-mapping rule.** Overlay/annotation materials set `toneMapped: false`. Tone
+mapping is for lit body faces only — everything else renders its design token
+exactly.
 
 ## Testing note
 

@@ -51,10 +51,11 @@ export class RevolvePreview {
       opacity: 0.3,
       depthWrite: false,
       side: THREE.DoubleSide,
+      toneMapped: false,
     });
-    this.candMat = new THREE.LineBasicMaterial({ color: palette.bodyNeutral(), transparent: true, opacity: 0.85, depthTest: false });
+    this.candMat = new THREE.LineBasicMaterial({ color: palette.referenceNeutral(), transparent: true, opacity: 0.85, depthTest: false, toneMapped: false });
     // transparent keeps the hover line in the same render list as the candidates.
-    this.hoverMat = new THREE.LineBasicMaterial({ color: palette.selectedEdge(), depthTest: false, transparent: true });
+    this.hoverMat = new THREE.LineBasicMaterial({ color: palette.selectedEdge(), depthTest: false, transparent: true, toneMapped: false });
 
     this.candidates = new THREE.LineSegments(new THREE.BufferGeometry(), this.candMat);
     this.candidates.renderOrder = RENDER_ORDER.REVOLVE_CANDIDATES;

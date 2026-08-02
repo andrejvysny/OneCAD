@@ -85,7 +85,7 @@ describe("RegionPickLayer tint", () => {
     layer.setRegions([R0, R1]);
 
     const mat = (id: string) => meshFor(root, id).material as THREE.MeshBasicMaterial;
-    expect(mat("r0").color.getHex()).toBe(palette.bodyNeutral().getHex());
+    expect(mat("r0").color.getHex()).toBe(palette.referenceNeutral().getHex());
 
     layer.setHover("r1");
     expect(mat("r1").color.getHex()).toBe(palette.hoverAccent().getHex());
@@ -106,7 +106,7 @@ describe("RegionPickLayer tint", () => {
     expect(mat("r1").color.getHex()).toBe(palette.selectedEdge().getHex());
 
     layer.setSelected([]); // clears back to neutral
-    expect(mat("r0").color.getHex()).toBe(palette.bodyNeutral().getHex());
+    expect(mat("r0").color.getHex()).toBe(palette.referenceNeutral().getHex());
   });
 });
 

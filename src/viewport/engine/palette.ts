@@ -31,7 +31,9 @@ export type TokenName =
   | "--color-plane-xy"
   | "--color-plane-xz"
   | "--color-plane-yz"
-  | "--color-traffic-close";
+  | "--color-traffic-close"
+  | "--color-body-fill"
+  | "--color-body-edge";
 
 // rgb() mirrors of the token values in tokens.css (non-browser fallback only).
 const FALLBACK: Record<TokenName, string> = {
@@ -54,6 +56,8 @@ const FALLBACK: Record<TokenName, string> = {
   "--color-plane-yz": "rgb(92, 160, 92)",
   // Traffic-light close (see tokens.css) — the destructive trim-ghost color.
   "--color-traffic-close": "rgb(255, 95, 87)",
+  "--color-body-fill": "rgb(169, 174, 182)",
+  "--color-body-edge": "rgb(58, 63, 71)",
 };
 
 let cache: Map<TokenName, THREE.Color> | null = null;
@@ -87,9 +91,11 @@ export const palette = {
   /** Renderer clear color = base viewport canvas background. */
   clear: () => tokenColor("--color-canvas"),
   /** Neutral body face material. */
-  bodyNeutral: () => tokenColor("--color-ink-5"),
+  bodyNeutral: () => tokenColor("--color-body-fill"),
   /** Body edge lines. */
-  bodyEdge: () => tokenColor("--color-border-strong"),
+  bodyEdge: () => tokenColor("--color-body-edge"),
+  /** Neutral gray for reference/overlay layers — deliberately NOT the body fill, which is lighter. */
+  referenceNeutral: () => tokenColor("--color-ink-5"),
   /** Hover accent (face + edge highlight). */
   hoverAccent: () => tokenColor("--color-accent"),
   /** Selected face tint. */

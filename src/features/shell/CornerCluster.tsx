@@ -3,8 +3,11 @@ import { cn } from "@/ui/cn";
 import { Tooltip } from "@/ui/Tooltip";
 import { Icon } from "@/icons/Icon";
 import type { IconName } from "@/icons/paths";
-import { DISPLAY_MODE_LABEL, useViewportStore } from "@/stores/viewportStore";
+import { useViewportStore } from "@/stores/viewportStore";
+import { useSettingsStore } from "@/stores/settingsStore";
+import { RENDER_MODES } from "@/viewport/engine/renderModes";
 import { SnapPopover } from "@/features/snap/SnapPopover";
+import { DisplayModePopover } from "@/features/shell/DisplayModePopover";
 import { ViewCube } from "@/features/viewcube/ViewCube";
 
 function ClusterButton({
@@ -12,6 +15,7 @@ function ClusterButton({
   label,
   strokeWidth = 1.6,
   active = false,
+  expanded,
   onClick,
   ref,
 }: {
@@ -19,16 +23,24 @@ function ClusterButton({
   label: string;
   strokeWidth?: number;
   active?: boolean;
+  /**
+   * Popover-trigger semantics: when set, the button emits aria-expanded
+   * instead of aria-pressed (it opens a popover, it isn't a plain toggle).
+   * Visual `active` styling is unaffected either way.
+   */
+  expanded?: boolean;
   onClick: () => void;
   ref?: Ref<HTMLButtonElement>;
 }) {
+  const stateProps =
+    expanded === undefined ? { "aria-pressed": active } : { "aria-expanded": expanded };
   return (
     <Tooltip label={label}>
       <button
         ref={ref}
         type="button"
         aria-label={label}
-        aria-pressed={active}
+        {...stateProps}
         onClick={onClick}
         className={cn(
           "flex h-9 w-9 cursor-pointer items-center justify-center rounded-md border border-border shadow-ctrl transition-colors",
@@ -44,29 +56,34 @@ function ClusterButton({
 
 /**
  * Top-right reserved corner (prototype 1c): ViewCube placeholder + a column of
- * display-mode / grid / snap buttons. Grid + snap show a pressed (accent) state;
- * the snap button opens the settings popover to its left.
+ * display-mode / grid / snap buttons. Grid shows a pressed (accent) state;
+ * display + snap are popover triggers that open their settings panel to the
+ * left. The two popovers share one `openPopover` slot so they can never both
+ * be open in this narrow column.
  */
 export function CornerCluster() {
   const gridVisible = useViewportStore((s) => s.gridVisible);
   const toggleGrid = useViewportStore((s) => s.toggleGrid);
-  const cycleDisplayMode = useViewportStore((s) => s.cycleDisplayMode);
-  const displayMode = useViewportStore((s) => s.displayMode);
+  const displayMode = useSettingsStore((s) => s.displayMode);
 
-  const [snapOpen, setSnapOpen] = useState(false);
+  // Two popovers share this column; only one may be open at a time.
+  const [openPopover, setOpenPopover] = useState<"none" | "display" | "snap">("none");
+  const displayBtnRef = useRef<HTMLButtonElement | null>(null);
   const snapBtnRef = useRef<HTMLButtonElement | null>(null);
 
   return (
     <div className="absolute right-[296px] top-3 z-[25] flex flex-col items-center gap-2">
       <ViewCube />
 
-      {/* The button CYCLES three modes, so the label carries the current one —
-          a bare "Display mode" on a tri-state control says nothing about what
-          the next click will do. */}
+      {/* The label carries the current mode — a bare "Display mode" on a
+          tri-state control says nothing about which mode is active. */}
       <ClusterButton
+        ref={displayBtnRef}
         icon="display"
-        label={`Display mode: ${DISPLAY_MODE_LABEL[displayMode]}`}
-        onClick={cycleDisplayMode}
+        label={`Display mode: ${RENDER_MODES[displayMode].label}`}
+        active={openPopover === "display"}
+        expanded={openPopover === "display"}
+        onClick={() => setOpenPopover((v) => (v === "display" ? "none" : "display"))}
       />
       <ClusterButton
         icon="grid"
@@ -79,13 +96,19 @@ export function CornerCluster() {
         ref={snapBtnRef}
         icon="snap"
         label="Snap settings"
-        active={snapOpen}
-        onClick={() => setSnapOpen((v) => !v)}
+        active={openPopover === "snap"}
+        expanded={openPopover === "snap"}
+        onClick={() => setOpenPopover((v) => (v === "snap" ? "none" : "snap"))}
       />
 
+      <DisplayModePopover
+        open={openPopover === "display"}
+        onClose={() => setOpenPopover("none")}
+        anchorRef={displayBtnRef}
+      />
       <SnapPopover
-        open={snapOpen}
-        onClose={() => setSnapOpen(false)}
+        open={openPopover === "snap"}
+        onClose={() => setOpenPopover("none")}
         anchorRef={snapBtnRef}
       />
     </div>

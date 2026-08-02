@@ -3,55 +3,30 @@
  * both wrapping the registry's zero-copy geometry. The face material carries a
  * polygonOffset so edge lines sit cleanly on top without z-fighting.
  *
- * Materials are SHARED across all bodies (created once by the engine) — a
- * BodyObject owns neither geometry (registry-owned) nor materials, so tearing it
- * down is just removing the group from bodiesRoot. `userData.bodyId`/`kind` let
- * the Picker resolve an intersection back to a body + element.
+ * Materials come from a BodyMaterialLibrary and are SHARED across every body
+ * drawing in the same render mode — a BodyObject owns neither geometry
+ * (registry-owned) nor materials (library-owned), so tearing it down is just
+ * removing the group from its root. `userData.bodyId`/`kind` let the Picker
+ * resolve an intersection back to a body + element.
  */
 import * as THREE from "three";
-import type { DisplayMode } from "@/stores/viewportStore";
 import type { MeshEntry } from "../mesh/meshRegistry";
-import { palette } from "./palette";
-
-export interface BodyMaterials {
-  face: THREE.MeshStandardMaterial;
-  edge: THREE.LineBasicMaterial;
-  dispose(): void;
-}
-
-/** Create the shared face + edge materials (one set per engine). */
-export function createBodyMaterials(): BodyMaterials {
-  const face = new THREE.MeshStandardMaterial({
-    color: palette.bodyNeutral(),
-    metalness: 0.05,
-    roughness: 0.75,
-    side: THREE.DoubleSide, // closed solids; robust picking regardless of winding
-    polygonOffset: true,
-    polygonOffsetFactor: 1,
-    polygonOffsetUnits: 1,
-  });
-  const edge = new THREE.LineBasicMaterial({ color: palette.bodyEdge() });
-  return {
-    face,
-    edge,
-    dispose() {
-      face.dispose();
-      edge.dispose();
-    },
-  };
-}
+import type { BodyMaterialLibrary } from "./bodyMaterials";
+import { DEFAULT_RENDER_MODE, RENDER_MODES, type RenderModeDef } from "./renderModes";
 
 export interface BodyObjectHandle {
   bodyId: string;
   group: THREE.Group;
   setVisible(visible: boolean): void;
   /**
-   * Apply the viewport display mode (W3) by toggling the two CHILDREN, never by
-   * swapping materials: `shaded` = faces only, `shadedEdges` = both, `wireframe`
-   * = edges only. Deliberately NOT `material.wireframe = true` — the materials
-   * are shared engine-wide (previews included) and the edge LineSegments already
-   * carry the kernel's real topological edges, which is the wireframe a CAD user
-   * expects rather than a triangulation.
+   * Apply a render-mode descriptor: toggle the two CHILDREN to the mode's
+   * face/edge visibility, then point both at the mode's shared material set.
+   *
+   * Deliberately NOT `material.wireframe = true` for the wireframe mode, on two
+   * counts: the edge LineSegments already carry the kernel's real topological
+   * edges — the wireframe a CAD user expects, rather than a triangulation — and
+   * the face material is shared by every body of that kind, so flipping a flag
+   * on it would leak across all of them.
    *
    * ACCEPTED CONSEQUENCE: in `wireframe` the face Mesh is invisible, and the
    * Picker raycasts with `traverseVisible`, so faces are not pickable there —
@@ -59,11 +34,16 @@ export interface BodyObjectHandle {
    *
    * Independent of {@link setVisible}, which owns the GROUP's flag.
    */
-  setDisplayMode(mode: DisplayMode): void;
+  applyMode(def: RenderModeDef): void;
 }
 
-/** Build the face + edge objects for `entry` under one group. */
-export function buildBodyObject(entry: MeshEntry, materials: BodyMaterials): BodyObjectHandle {
+/**
+ * Build the face + edge objects for `entry` under one group, materialled from
+ * `library` at the DEFAULT mode. The eager assignment is load-bearing: preview
+ * bodies are built and shown without anyone ever calling {@link applyMode}.
+ */
+export function buildBodyObject(entry: MeshEntry, library: BodyMaterialLibrary): BodyObjectHandle {
+  const materials = library.get(RENDER_MODES[DEFAULT_RENDER_MODE].materialKind);
   const group = new THREE.Group();
   group.name = `body:${entry.bodyId}`;
   group.userData.bodyId = entry.bodyId;
@@ -87,9 +67,14 @@ export function buildBodyObject(entry: MeshEntry, materials: BodyMaterials): Bod
     setVisible(visible: boolean) {
       group.visible = visible;
     },
-    setDisplayMode(mode: DisplayMode) {
-      faceMesh.visible = mode !== "wireframe";
-      if (edges) edges.visible = mode !== "shaded";
+    applyMode(def: RenderModeDef) {
+      faceMesh.visible = def.faceVisible;
+      const set = library.get(def.materialKind);
+      faceMesh.material = set.face;
+      if (edges) {
+        edges.visible = def.edgeVisible;
+        edges.material = set.edge;
+      }
     },
   };
 }

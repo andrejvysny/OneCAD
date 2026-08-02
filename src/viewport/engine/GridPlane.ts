@@ -118,11 +118,11 @@ export class GridPlane {
     // grid is painted first and never occludes anything (see renderOrder.ts).
     this.minorSeg = new THREE.LineSegments(
       minorGeo,
-      new THREE.LineBasicMaterial({ vertexColors: true, depthWrite: false }),
+      new THREE.LineBasicMaterial({ vertexColors: true, depthWrite: false, toneMapped: false }),
     );
     this.majorSeg = new THREE.LineSegments(
       majorGeo,
-      new THREE.LineBasicMaterial({ color: this.colors.major, depthWrite: false }),
+      new THREE.LineBasicMaterial({ color: this.colors.major, depthWrite: false, toneMapped: false }),
     );
     this.minorSeg.renderOrder = RENDER_ORDER.GRID;
     this.majorSeg.renderOrder = RENDER_ORDER.GRID;

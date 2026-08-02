@@ -59,14 +59,20 @@ export function clampPitch(pitch: number, eps = 1e-3): number {
   return Math.max(-lim, Math.min(lim, pitch));
 }
 
-/** Turntable spherical → target→camera offset (yaw about Z, pitch from XY plane). */
+/**
+ * Turntable spherical → target→camera offset (yaw about Z, pitch from XY plane).
+ *
+ * `out` writes in place for per-frame callers (the light rig) that must not
+ * allocate; omitting it returns a fresh vector as before.
+ */
 export function sphericalToOffset(
   yaw: number,
   pitch: number,
   radius: number,
+  out?: THREE.Vector3,
 ): THREE.Vector3 {
   const cp = Math.cos(pitch);
-  return new THREE.Vector3(
+  return (out ?? new THREE.Vector3()).set(
     radius * cp * Math.cos(yaw),
     radius * cp * Math.sin(yaw),
     radius * Math.sin(pitch),
