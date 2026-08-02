@@ -115,6 +115,19 @@ add_executable(test_m6a_ops test_m6a_ops.cpp)
 target_link_libraries(test_m6a_ops PRIVATE worker_core)
 add_test(NAME m6a_ops COMMAND test_m6a_ops)
 
+# --- STEP-IMPORT WP-A W0: the pure STEP read core. Both binaries GENERATE their
+#     own STEP fixtures at run time (see tests/step_fixture_util.h) — nothing
+#     binary is committed — so they need a writable working directory; CTest runs
+#     them in ${CMAKE_CURRENT_BINARY_DIR}. test_step_read_determinism re-executes
+#     ITSELF (argv[0] + "digest <fixture>") for the cross-process probe, so it
+#     must stay a single self-contained binary with no extra COMMAND args. ---
+foreach(_t step_read step_read_determinism)
+    add_executable(test_${_t} test_${_t}.cpp)
+    target_link_libraries(test_${_t} PRIVATE worker_core)
+    add_test(NAME ${_t} COMMAND test_${_t})
+    set_tests_properties(${_t} PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+endforeach()
+
 # --- Region-with-hole extrude: volume-checked (GProp) hole subtraction, incl. a
 #     no-hole negative control (in-process, real OCCT). ---
 add_executable(test_hole_extrude test_hole_extrude.cpp)
