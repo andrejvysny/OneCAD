@@ -23,6 +23,7 @@
 
 #include "io/Checkpoint.h"
 #include "io/ExportStep.h"
+#include "io/InspectStep.h"
 #include "io/MeshExport.h"
 #include "protocol/Dispatcher.h"
 #include "protocol/Envelope.h"
@@ -96,8 +97,9 @@ nlohmann::json make_hello_result() {
         {"quantizationVersion", kQuantizationVersion},
         {"solverPolicyVersion", kSolverPolicyVersion},
         {"capabilities", nlohmann::json::array({"op.sketch", "op.extrude", "op.revolve", "op.fillet",
-                                                "op.chamfer", "op.boolean", "solver.planegcs",
-                                                "tessellate.mesh1", "io.step"})},
+                                                "op.chamfer", "op.boolean", "op.importStep",
+                                                "solver.planegcs", "tessellate.mesh1", "io.step",
+                                                "io.step.import"})},
         {"limits", {{"chunkSize", kChunkSize}, {"initialBulkCredit", kInitialBulkCredit}}},
     };
 }
@@ -292,6 +294,14 @@ void register_verbs(Dispatcher& dispatcher, SolverLane& solver_lane, Session& se
         "ExportStep",
         [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {
             return onecad::io::handle_export_step(session, r);
+        });
+    // --- STEP-IMPORT WP-A W1: read-only STEP probe + brep conversion lane
+    //     (SCHEMA §7.8). No session argument by design: no head, no scratch, no
+    //     fence, no publish — the import itself is the §7.3 `ImportStep` op. ---
+    dispatcher.register_verb(
+        "InspectStep",
+        [](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext& ctx) {
+            return onecad::io::handle_inspect_step(r, ctx.cancel);
         });
     // --- M5a: mesh export (STL / OBJ, SCHEMA §7.8) ---
     dispatcher.register_verb(

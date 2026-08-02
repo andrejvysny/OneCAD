@@ -128,6 +128,14 @@ foreach(_t step_read step_read_determinism)
     set_tests_properties(${_t} PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 endforeach()
 
+# --- STEP-IMPORT WP-A W1: the `ImportStep` op through a real ExecutePlan
+#     transaction (both codecs) + the read-only `InspectStep` verb and its brep
+#     conversion lane. Generates its own STEP fixtures into the system temp dir
+#     (see tests/step_fixture_util.h), so no WORKING_DIRECTORY is needed. ---
+add_executable(test_import_step test_import_step.cpp)
+target_link_libraries(test_import_step PRIVATE worker_core)
+add_test(NAME import_step COMMAND test_import_step)
+
 # --- Region-with-hole extrude: volume-checked (GProp) hole subtraction, incl. a
 #     no-hole negative control (in-process, real OCCT). ---
 add_executable(test_hole_extrude test_hole_extrude.cpp)
@@ -140,7 +148,7 @@ foreach(_fx executeplan_happy executeplan_fail_step executeplan_needsrepair
             executeplan_deltas tessellate_acquire resolve_refs
             executeplan_region_nomatch export_mesh checkpoint_roundtrip
             executeplan_linearpattern executeplan_shell
-            executeplan_ellipse_extrude)
+            executeplan_ellipse_extrude import_step)
     add_test(
         NAME harness_${_fx}
         COMMAND worker_harness

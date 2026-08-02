@@ -45,6 +45,10 @@ struct CandidateResult {
     elementmap::ElementMapDelta delta;
     std::vector<nlohmann::json> needs_repair;
     std::vector<RefBinding> ref_bindings;
+    // Advisory `{severity, code, message}` entries the op surfaced, merged into
+    // the step's `planStep.diagnostics[]` (SCHEMA §7.2). Survives rollback: a
+    // diagnostic explains what the attempt SAW, so it is still worth reporting.
+    std::vector<nlohmann::json> diagnostics;
 };
 
 // Execute one complete candidate step: predecessor input resolution, operation,

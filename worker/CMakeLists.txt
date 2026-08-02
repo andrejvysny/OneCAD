@@ -76,10 +76,14 @@ add_library(worker_core STATIC
     src/io/ExportStep.cpp
     src/io/MeshExport.cpp
     src/io/Checkpoint.cpp
-    # --- STEP-IMPORT WP-A W0: pure STEP read core + OCCT global-state guards.
-    #     No verb/dispatcher wiring yet (that is W1) — only the tests call these. ---
+    # --- STEP-IMPORT WP-A W0: pure STEP read core + OCCT global-state guards. ---
     src/io/OcctStaticGuard.cpp
     src/io/StepRead.cpp
+    # --- STEP-IMPORT WP-A W1: the `ImportStep` op (§7.3) + the read-only
+    #     `InspectStep` verb (§7.8) + the BinTools brep byte form they share. ---
+    src/io/BrepCodec.cpp
+    src/io/InspectStep.cpp
+    src/ops/ImportOp.cpp
     src/session/ElementIdentity.cpp
     src/tess/Mesh1.cpp
     src/tess/MeshHandle.cpp

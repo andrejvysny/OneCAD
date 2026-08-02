@@ -55,6 +55,12 @@ struct OpOutcome {
     std::vector<std::string> body_ids;              // bodies present/produced at this step
     elementmap::ElementMapDelta delta;              // relabeled/removed from this op's history
     std::vector<nlohmann::json> needs_repair;       // §9 items (STATE, not error)
+    // Advisory step diagnostics — `{severity, code, message}` objects appended to
+    // the step's EXISTING `planStep.diagnostics[]` array (SCHEMA §7.2). Not a new
+    // frame field: PlanExecutor already emits that array for failure diagnostics,
+    // this lets an op surface non-fatal findings (e.g. §7.3 ImportStep's
+    // STEP_SEWN / STEP_HEALED vocabulary) on a step that SUCCEEDS.
+    std::vector<nlohmann::json> diagnostics;
 
     static OpOutcome ok() { return OpOutcome{}; }
     static OpOutcome fail(std::string code, std::string msg) {

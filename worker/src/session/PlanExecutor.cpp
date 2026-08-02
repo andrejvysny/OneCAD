@@ -17,6 +17,7 @@
 #include "ops/BooleanOp.h"
 #include "ops/ExtrudeOp.h"
 #include "ops/FilletChamferOp.h"
+#include "ops/ImportOp.h"
 #include "ops/MirrorOp.h"
 #include "ops/OpTypes.h"
 #include "ops/PatternOp.h"
@@ -237,6 +238,7 @@ ops::OpOutcome run_single_op(ScratchJob& job, const json& op, const std::string&
     if (op_type == "LinearPattern") return ops::execute_linear_pattern(octx, op, op_id);
     if (op_type == "CircularPattern") return ops::execute_circular_pattern(octx, op, op_id);
     if (op_type == "MirrorBody") return ops::execute_mirror_body(octx, op, op_id);
+    if (op_type == "ImportStep") return ops::execute_import_step(octx, op, op_id);
 
     // Loft / Sweep remain UNSUPPORTED (SCHEMA §8) — Rust freezes the node.
     return ops::OpOutcome::unsupported("unsupported opType: " + op_type);
@@ -266,6 +268,7 @@ void merge_outcome(CandidateResult& result, ops::OpOutcome outcome) {
     for (auto& repair : outcome.needs_repair) {
         result.needs_repair.push_back(std::move(repair));
     }
+    for (auto& diag : outcome.diagnostics) result.diagnostics.push_back(std::move(diag));
     if (outcome.status == ops::OpOutcome::Status::Ok) {
         result.status = result.needs_repair.empty()
                             ? CandidateResult::Status::Ok
@@ -369,6 +372,9 @@ ExecResult execute_ops(ScratchJob& job, const json& ops, std::uint64_t job_id, s
             res.status = ExecStatus::Cancelled;
             return res;
         }
+        // Advisory op diagnostics first, so a failure diagnostic stays LAST — the
+        // `opFailed` branch below reads `diagnostics.back()` as the step message.
+        for (json& d : candidate.diagnostics) diagnostics.push_back(std::move(d));
         if (candidate.status == CandidateResult::Status::Failed ||
             candidate.status == CandidateResult::Status::Unsupported) {
             diagnostics.push_back(

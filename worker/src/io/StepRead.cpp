@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <string>
+#include <vector>
 
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepCheck_Analyzer.hxx>
@@ -10,6 +11,7 @@
 #include <BRep_Tool.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Interface_Static.hxx>
+#include <Message_ProgressRange.hxx>
 #include <STEPControl_Controller.hxx>
 #include <STEPControl_Reader.hxx>
 #include <ShapeAnalysis_Shell.hxx>
@@ -34,6 +36,7 @@
 #include <TopoDS_Vertex.hxx>
 
 #include "io/OcctStaticGuard.h"
+#include "ops/CancelProgress.h"  // ops::CancelProgress — cancel token ↔ UserBreak()
 #include "ops/OpCommon.h"  // ops::ordered_solids — the deterministic solid order
 #include "util/Log.h"
 
@@ -224,31 +227,64 @@ HealedRoot heal_root(const TopoDS_Shape& root, const StepReadPolicy& policy) {
     return hr;
 }
 
-// A STEP length unit that is not millimetres means OCCT scaled the geometry on
-// the way in. Worth a diagnostic: the scale factor is a rounding source the codec
-// decision has to price in.
-bool file_unit_is_mm(STEPControl_Reader& reader) {
+// Every declared length unit of the file, uppercased, in declaration order.
+// Empty when the file declares none (OCCT then assumes millimetres).
+std::vector<std::string> file_length_units(STEPControl_Reader& reader) {
     TColStd_SequenceOfAsciiString lengths;
     TColStd_SequenceOfAsciiString angles;
     TColStd_SequenceOfAsciiString solid_angles;
     reader.FileUnits(lengths, angles, solid_angles);
-    if (lengths.IsEmpty()) return true;  // undeclared ⇒ OCCT assumes mm; not a conversion
+    std::vector<std::string> out;
+    out.reserve(static_cast<std::size_t>(lengths.Length()));
     for (int i = 1; i <= lengths.Length(); ++i) {
         TCollection_AsciiString name = lengths.Value(i);
         name.UpperCase();
-        if (name != "MM" && name != "MILLIMETRE" && name != "MILLIMETER") return false;
+        out.emplace_back(name.ToCString());
+    }
+    return out;
+}
+
+bool is_mm(const std::string& name) {
+    return name == "MM" || name == "MILLIMETRE" || name == "MILLIMETER";
+}
+
+// A STEP length unit that is not millimetres means OCCT scaled the geometry on
+// the way in. Worth a diagnostic: the scale factor is a rounding source the codec
+// decision has to price in.
+bool units_are_mm(const std::vector<std::string>& units) {
+    if (units.empty()) return true;  // undeclared ⇒ OCCT assumes mm; not a conversion
+    for (const std::string& name : units) {
+        if (!is_mm(name)) return false;
     }
     return true;
 }
 
+// `source_unit` reporting form. The three millimetre spellings collapse to "MM"
+// so a file that declares MILLIMETRE and a file that declares nothing (where
+// OCCT assumes mm) report the SAME unit — a caller comparing against the "MM"
+// fallback must not see two different answers for the same physical unit. Any
+// other unit is reported verbatim, uppercased.
+std::string canonical_unit(const std::string& name) { return is_mm(name) ? "MM" : name; }
+
 }  // namespace
 
-StepReadResult read_step(const std::string& path, const StepReadPolicy& policy) {
+StepReadResult read_step(const std::string& path, const StepReadPolicy& policy,
+                         const onecad::CancelToken* cancel) {
     StepReadResult out;
+    // Cancellation is a DISTINCT outcome, not a failure: `cancelled` drives the
+    // caller to SCHEMA §8 CANCELLED (session intact) instead of OP_FAILED.
+    const auto bail_cancelled = [&out]() {
+        out.solids.clear();
+        out.cancelled = true;
+        out.error = "StepRead: cancelled";
+        return out;
+    };
+
     if (path.empty()) {
         out.error = "StepRead: empty path";
         return out;
     }
+    if (cancel != nullptr && cancel->cancelled()) return bail_cancelled();
 
     // Registers the STEP norm AND its Interface_Static knobs. Must run before the
     // guard snapshots them, otherwise every knob reads as absent and the pinning
@@ -276,7 +312,9 @@ StepReadResult read_step(const std::string& path, const StepReadPolicy& policy) 
             return out;
         }
 
-        if (!file_unit_is_mm(reader)) {
+        const std::vector<std::string> units = file_length_units(reader);
+        if (!units.empty()) out.source_unit = canonical_unit(units.front());
+        if (!units_are_mm(units)) {
             add_diag(out, step_diag::kUnitConverted,
                      "file length unit is not millimetres; converted to " + policy.target_unit);
         }
@@ -286,7 +324,16 @@ StepReadResult read_step(const std::string& path, const StepReadPolicy& policy) 
             out.product_names.push_back(product_name_of_root(reader.RootForTransfer(r)));
         }
 
-        const int transferred = static_cast<int>(reader.TransferRoots());
+        // The transfer is the long pole; drive it through a progress range backed
+        // by the cancel token so `UserBreak()` aborts it between algorithm steps.
+        Message_ProgressRange transfer_range;
+        Handle(ops::CancelProgress) progress;
+        if (cancel != nullptr) {
+            progress = new ops::CancelProgress(*cancel);
+            transfer_range = progress->Start();
+        }
+        const int transferred = static_cast<int>(reader.TransferRoots(transfer_range));
+        if (cancel != nullptr && cancel->cancelled()) return bail_cancelled();
         // NbShapes() indexes the TRANSFERRED SHAPES, which are not 1:1 with the
         // roots counted above — a root can fail to translate, and OCCT accumulates
         // results across calls. Iterate the shapes; report against both counts so a
@@ -306,6 +353,7 @@ StepReadResult read_step(const std::string& path, const StepReadPolicy& policy) 
         bool any_restructured = false;
 
         for (int i = 1; i <= shape_count; ++i) {
+            if (cancel != nullptr && cancel->cancelled()) return bail_cancelled();
             const TopoDS_Shape shape = reader.Shape(i);
             if (shape.IsNull()) {
                 add_diag(out, step_diag::kRootSkipped,
@@ -354,12 +402,16 @@ StepReadResult read_step(const std::string& path, const StepReadPolicy& policy) 
             }
         }
     } catch (const Standard_Failure& f) {
+        // An aborted OCCT algorithm usually SURFACES as a Standard_Failure, so the
+        // token has to be consulted before the exception is rendered as a failure.
+        if (cancel != nullptr && cancel->cancelled()) return bail_cancelled();
         out.solids.clear();
         out.error = std::string("StepRead raised: ") +
                     (f.GetMessageString() != nullptr ? f.GetMessageString() : "OCCT failure");
         WLOG_ERROR("StepRead: %s", out.error->c_str());
         return out;
     } catch (const std::exception& e) {
+        if (cancel != nullptr && cancel->cancelled()) return bail_cancelled();
         out.solids.clear();
         out.error = std::string("StepRead raised: ") + e.what();
         WLOG_ERROR("StepRead: %s", out.error->c_str());

@@ -33,6 +33,8 @@
 
 #include <TopoDS_Shape.hxx>
 
+#include "util/Cancel.h"
+
 namespace onecad::io {
 
 // Diagnostic codes. Advisory: none of these is an error, they describe what the
@@ -88,15 +90,31 @@ struct StepReadResult {
     // (a root may yield several solids, or none); W0 does not correlate them.
     std::vector<std::string> product_names;
     std::vector<StepReadDiagnostic> diagnostics;
+    // The file's FIRST declared length unit, uppercased ("MM", "INCH", …), or
+    // "MM" when the file declares none (OCCT's own assumption). The three
+    // millimetre spellings (MM / MILLIMETRE / MILLIMETER) collapse to "MM" so
+    // "declared mm" and "undeclared" report identically. Advisory metadata for
+    // the §7.8 `InspectStep` probe — the geometry is ALWAYS already converted to
+    // `policy.target_unit`, so this never scales anything. W1.
+    std::string source_unit = "MM";
     // nullopt on success. Set for: unreadable/garbage file, a failed transfer, or
     // any Standard_Failure escaping a pipeline stage.
     std::optional<std::string> error;
+    // True when the caller's cancel token fired during the read; `error` is set
+    // too, so `ok()` stays false, but the caller must map this to CANCELLED
+    // rather than OP_FAILED (SCHEMA §8 — different session semantics). W1.
+    bool cancelled = false;
 
     bool ok() const { return !error.has_value(); }
 };
 
 // Read `path` under `policy`. Pure: no session state, no globals left mutated
 // (every `Interface_Static` knob touched is restored — see OcctStaticGuard.h).
-StepReadResult read_step(const std::string& path, const StepReadPolicy& policy = StepReadPolicy{});
+//
+// `cancel` (optional, W1) is consulted between pipeline stages AND inside
+// `TransferRoots` via `ops::CancelProgress`, so a large assembly aborts promptly
+// instead of running to completion. A fired token yields `cancelled == true`.
+StepReadResult read_step(const std::string& path, const StepReadPolicy& policy = StepReadPolicy{},
+                         const onecad::CancelToken* cancel = nullptr);
 
 }  // namespace onecad::io
