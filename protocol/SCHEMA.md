@@ -1040,7 +1040,7 @@ advance `historyPrefixHash`). Added 2026-08-02 (WP-A).
 // params (hashed — no bytes, no paths)
 { "sourceSha256": "ab12…64 hex chars…", "sourceCodec": "step",
   "sourceName": "bracket.step", "healPolicy": "v1", "unitScale": 1.0,
-  "brepFormat": null }
+  "brepFormat": null, "provenanceSha256": null }
 // wire-only, NON-hashed, injected by Rust at lowering time (§7.8 temp-path rule):
 { "path": "/tmp/onecad/import_ab12.step" }
 ```
@@ -1053,6 +1053,11 @@ advance `historyPrefixHash`). Added 2026-08-02 (WP-A).
   `step` runs the full pinned reader pipeline below; `brep` deserializes
   BinTools bytes previously produced by that pipeline (`brepFormat` pins the
   BinTools format version; REQUIRED iff codec is `brep`).
+- `provenanceSha256` (optional, skip-none) — when `sourceCodec` is a CONVERTED
+  replay form (brep-primary policy), the sha of the user's ORIGINAL bytes,
+  co-stored in `imports/` for re-export / future re-heal. Referenced here so the
+  save-time refcount pins the provenance blob; absent when the replayed blob IS
+  the original. MUST differ from `sourceSha256`.
 - `healPolicy` (`"v1"`) versions the fixed, unconditional pipeline: pinned
   `Interface_Static` knobs (`xstep.cascade.unit=MM`, `read.precision.mode=0`,
   `read.step.product.mode=1`; all knobs saved + restored around the read) →
@@ -1631,12 +1636,24 @@ delete its bodies on the next regen; see the changelog.)
 
 ```json
 // req.args
-{ "path": "/tmp/onecad/import_ab12.step" }
+{ "path": "/tmp/onecad/import_ab12.step", "includeBrep": true }
 // result
 { "solidCount": 2, "sourceUnit": "INCH", "bbox": { "min": [0,0,0], "max": [50.8,25.4,12.7] },
-  "productNames": ["Bracket", "Pin"],
+  "productNames": ["Bracket", "Pin"], "brepFormat": 3,
   "diagnostics": [ { "severity": "warning", "code": "STEP_HEALED", "message": "…" } ] }
+// bin (only when includeBrep): { "name": "brep", … } — BinTools bytes of the
+// healed result compound, solids in the §7.3 deterministic ordinal order
 ```
+
+- `includeBrep` (default `false`): when `true`, the response's binary tail
+  carries the **healed, mm-normalized, UNSCALED** result as one BinTools
+  compound whose solid order IS the ordinal order, plus `brepFormat` (the
+  BinTools format version to pin in §7.3 `ImportStep.brepFormat`). This is the
+  conversion lane for the `sourceCodec:"brep"` replay policy: Rust probes once
+  at import-command time, persists the brep bytes alongside the STEP source,
+  and authors the record against the brep — so replay never re-parses STEP.
+- The probe honors cancel; a malformed file is an `OP_FAILED`-class error
+  response (recoverable), never `PROTOCOL_ERROR`.
 
 #### ExportStep
 

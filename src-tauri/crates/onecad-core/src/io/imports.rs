@@ -179,9 +179,16 @@ pub fn referenced_import_shas(document: &Document) -> BTreeSet<String> {
         .timeline
         .records()
         .iter()
-        .filter_map(|rec| match &rec.op {
-            Operation::Known(KnownOperation::ImportStep(p)) => Some(p.source_sha256.clone()),
-            _ => None,
+        .flat_map(|rec| match &rec.op {
+            Operation::Known(KnownOperation::ImportStep(p)) => {
+                // The replayed blob AND (brep-primary policy) the co-stored
+                // original both stay pinned — dropping the provenance would
+                // orphan the user's actual file at the first save.
+                let mut shas = vec![p.source_sha256.clone()];
+                shas.extend(p.provenance_sha256.clone());
+                shas
+            }
+            _ => Vec::new(),
         })
         .collect()
 }
@@ -265,6 +272,7 @@ mod tests {
                 ImportSourceCodec::Brep => Some(1),
                 ImportSourceCodec::Step => None,
             },
+            provenance_sha256: None,
             extra: Default::default(),
         }))
     }
@@ -330,6 +338,23 @@ mod tests {
         let refs = referenced_import_shas(&d);
         assert!(refs.contains(&a));
         assert!(refs.contains(&b), "a suppressed record still pins its blob");
+    }
+
+    #[test]
+    fn referenced_shas_include_provenance() {
+        // Brep-primary policy: the record replays the brep (source_sha256) while
+        // the user's original STEP is co-stored under provenance_sha256 — BOTH
+        // must be pinned or the provenance is orphan-dropped at the first save.
+        let replay = sha_of(b"brep bytes");
+        let provenance = sha_of(b"original step bytes");
+        let mut op = import_op(&replay, ImportSourceCodec::Brep);
+        if let Operation::Known(KnownOperation::ImportStep(p)) = &mut op {
+            p.provenance_sha256 = Some(provenance.clone());
+        }
+        let d = doc_with_imports(&[(0x1, op, false)]);
+        let refs = referenced_import_shas(&d);
+        assert!(refs.contains(&replay));
+        assert!(refs.contains(&provenance), "provenance blob stays pinned");
     }
 
     #[test]

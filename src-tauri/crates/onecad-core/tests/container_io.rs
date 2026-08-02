@@ -516,6 +516,7 @@ fn import_doc(sha: &str, codec: ImportSourceCodec, suppressed: bool) -> Document
             ImportSourceCodec::Brep => Some(4),
             ImportSourceCodec::Step => None,
         },
+        provenance_sha256: None,
         extra: Default::default(),
     }));
     let mut rec = OperationRecord::new(RecordId(Uuid::from_u128(0x1)), 0, "Import 1", op);

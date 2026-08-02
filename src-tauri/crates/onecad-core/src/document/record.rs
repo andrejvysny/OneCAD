@@ -1052,6 +1052,14 @@ pub struct ImportStepParams {
     /// readable by a kernel that understands its format version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brep_format: Option<u32>,
+    /// SHA-256 of the ORIGINAL user-supplied bytes when `source_sha256` points at
+    /// a converted replay form (brep-primary policy: the record replays the brep,
+    /// but the user's STEP file is kept co-stored as provenance — re-export,
+    /// re-heal under a future policy, audit). Referenced here so the save-time
+    /// refcount pins the provenance blob too; absent when the replayed blob IS
+    /// the original.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance_sha256: Option<String>,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     pub extra: Extra,
 }
@@ -1084,6 +1092,20 @@ impl ImportStepParams {
                 self.heal_policy
             ));
         }
+        if let Some(p) = &self.provenance_sha256 {
+            if !is_sha256_hex(p) {
+                return Err(format!(
+                    "import provenanceSha256 `{p}` is not a 64-character lowercase-hex sha256"
+                ));
+            }
+            if *p == self.source_sha256 {
+                return Err(
+                    "import provenanceSha256 must differ from sourceSha256 (drop it when the \
+                     replayed blob IS the original)"
+                        .into(),
+                );
+            }
+        }
         match (self.source_codec, self.brep_format) {
             (ImportSourceCodec::Brep, None) => {
                 Err("import sourceCodec `brep` requires a brepFormat (BinTools version pin)".into())
@@ -1109,6 +1131,7 @@ mod tests {
             heal_policy: IMPORT_HEAL_POLICY_V1.into(),
             unit_scale: Scalar::new(1.0),
             brep_format: None,
+            provenance_sha256: None,
             extra: Extra::new(),
         }
     }
@@ -1117,6 +1140,7 @@ mod tests {
         ImportStepParams {
             source_codec: ImportSourceCodec::Brep,
             brep_format: Some(4),
+            provenance_sha256: None,
             ..step_params()
         }
     }
@@ -1314,6 +1338,7 @@ mod tests {
         // brep without a BinTools version pin is unreadable later.
         let p = ImportStepParams {
             brep_format: None,
+            provenance_sha256: None,
             ..brep_params()
         };
         assert!(p.validate().is_err());
@@ -1321,6 +1346,7 @@ mod tests {
         // step with a version pin is a contradiction.
         let p = ImportStepParams {
             brep_format: Some(4),
+            provenance_sha256: None,
             ..step_params()
         };
         assert!(p.validate().is_err());
