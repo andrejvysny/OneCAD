@@ -63,8 +63,10 @@ use onecad_core::ids::{
     SnapshotId, TopoKey, WorkerEpoch,
 };
 use onecad_core::io::container::{
-    CheckpointCache, ContainerCaches, ContainerReader, ContainerWriter, SaveMeta, CHECKPOINTS_DIR,
+    CheckpointCache, ContainerCaches, ContainerReader, ContainerWriter, LoadedContainer, SaveMeta,
+    CHECKPOINTS_DIR,
 };
+use onecad_core::io::imports::{ImportBlob, ImportBlobs};
 use onecad_core::io::IoError;
 use onecad_core::math::Vec2;
 use onecad_core::regen::{
@@ -82,6 +84,8 @@ use crate::dto::{
     PromotedElementDto, SketchDto, SketchHostFaceDto, SketchSessionDto, SketchSolveStatus,
     SketchStatus, SketchUpsertDto,
 };
+use crate::error::ApiError;
+use crate::imports::{ImportWorkspace, PreparedImport};
 use crate::mesh_cache::MeshCache;
 use crate::worker::{lod_str, AdoptingEngine, MeshProvider, SolverEngine};
 
@@ -318,6 +322,23 @@ pub struct DocumentRuntime {
     /// Whether the most recent [`begin_regen`](Self::begin_regen) compiled a
     /// checkpoint-accelerated plan (observability for tests / diagnostics).
     last_regen_used_checkpoint: bool,
+    /// The document's import source blobs, keyed by content hash — the carrier
+    /// [`ContainerWriter::save_with_imports`] persists (only the digests a live
+    /// `ImportStep` record references are actually written; see
+    /// [`referenced_import_shas`](onecad_core::io::imports::referenced_import_shas)).
+    /// Populated at open from the container and at import time from the just-read
+    /// file. Held in memory because a save must be able to rewrite every blob even
+    /// if its temp materialization was deleted underneath us.
+    imports: ImportBlobs,
+    /// The temp directory the blobs are materialized into for the worker. Owned
+    /// here so the files outlive the unlocked `PreparedRegen::drive` window and a
+    /// worker-restart replay, and are cleaned when the document closes (Drop).
+    import_workspace: ImportWorkspace,
+    /// STEP product names captured at import time, per `ImportStep` record, in
+    /// ordinal order. Applied to the bodies that record mints once regen adopts
+    /// them (see [`apply_import_body_names`](Self::apply_import_body_names)) — the
+    /// ids are not known until then.
+    import_names: HashMap<RecordId, Vec<String>>,
 }
 
 impl DocumentRuntime {
@@ -372,6 +393,10 @@ impl DocumentRuntime {
         // Reload the persisted checkpoint cache so a post-open edit can regen
         // incrementally (SCHEMA §7.7). Disposable — a stale entry is skipped.
         rt.load_checkpoints(&loaded);
+        // Import sources are authoritative-for-a-record: without them the
+        // `ImportStep` steps cannot replay. Loaded eagerly (unlike caches) because
+        // regen starts immediately after open and the worker needs real files.
+        rt.load_import_blobs(&loaded);
         Ok(rt)
     }
 
@@ -404,6 +429,7 @@ impl DocumentRuntime {
         // — replay-from-0 compiles the whole plan up front, before the worker re-mints
         // the child.
         reintern_split_children(regen.bodies.bodies());
+        let import_workspace = ImportWorkspace::new(doc.id);
         Self {
             session: DocumentSession::new(doc),
             regen,
@@ -427,6 +453,9 @@ impl DocumentRuntime {
             promoted: HashMap::new(),
             checkpoints: InMemoryCheckpointStore::new(),
             last_regen_used_checkpoint: false,
+            imports: ImportBlobs::new(),
+            import_workspace,
+            import_names: HashMap::new(),
         }
     }
 
@@ -863,6 +892,10 @@ impl DocumentRuntime {
                 // Write the just-produced body provenance back onto the records so the
                 // dependency graph gains its body edges (see `sync_record_outputs`).
                 self.sync_record_outputs(&executed);
+                // Label freshly-imported bodies from their STEP product names BEFORE
+                // the rows are adopted — `adopt_regen_bodies` is insert-only, so this
+                // is the one moment the name can reach `document.bodies`.
+                self.apply_import_body_names();
                 // Give every just-published body a document metadata row, so the body
                 // commands (rename / visibility) can address it at all.
                 self.session.adopt_regen_bodies(&self.regen.bodies);
@@ -1116,7 +1149,7 @@ impl DocumentRuntime {
             checkpoints: self.checkpoint_caches(),
             ..ContainerCaches::none()
         };
-        ContainerWriter::save(path, &doc, &caches, &meta)?;
+        ContainerWriter::save_with_imports(path, &doc, &caches, &self.imports, &meta)?;
         self.path = Some(path.to_path_buf());
         self.dirty = false;
         Ok(())
@@ -1142,7 +1175,7 @@ impl DocumentRuntime {
             checkpoints: self.checkpoint_caches(),
             ..ContainerCaches::none()
         };
-        ContainerWriter::save(path, &doc, &caches, &meta)
+        ContainerWriter::save_with_imports(path, &doc, &caches, &self.imports, &meta)
     }
 
     /// The document's stable id (the autosave container + crash-marker key,
@@ -1160,6 +1193,155 @@ impl DocumentRuntime {
     pub fn mark_recovered(&mut self, original: Option<PathBuf>) {
         self.path = original;
         self.dirty = true;
+    }
+
+    // ── STEP import (SCHEMA §7.3 `ImportStep`) ───────────────────────────────
+
+    /// Authors one `ImportStep` record from a [`PreparedImport`] the caller built
+    /// off the worker probe ([`crate::imports::prepare_import`]), persisting its
+    /// blobs into the document's carrier and materializing them for the worker.
+    ///
+    /// `at_cursor` mirrors [`EditCommand::AddOperation`]: `true` inserts at the
+    /// rollback cursor (the in-editor "Import STEP…" lane, so the import lands where
+    /// the user is looking), `false` appends at the end.
+    ///
+    /// The blobs are stored + materialized BEFORE the record is applied, so the
+    /// record is never visible to a regen that cannot resolve its source. On a
+    /// materialization failure nothing is authored at all.
+    ///
+    /// # Errors
+    /// [`ApiError::InvalidCommand`] when the session rejects the record, or
+    /// [`ApiError::Io`] when the blob cannot be written to the workspace.
+    pub fn add_import_record(
+        &mut self,
+        prepared: &PreparedImport,
+        at_cursor: bool,
+    ) -> Result<CommandOutcome, ApiError> {
+        for (sha, blob) in &prepared.blobs {
+            self.import_workspace
+                .materialize(sha, blob.codec, &blob.bytes)
+                .map_err(|e| {
+                    ApiError::Io(format!(
+                        "cannot stage import source {sha} for the geometry worker: {e}"
+                    ))
+                })?;
+            self.imports.insert(sha.clone(), blob.clone());
+        }
+        let record = OperationRecord::new(
+            RecordId(Uuid::new_v4()),
+            0,
+            import_record_name(&prepared.params.source_name),
+            Operation::Known(KnownOperation::ImportStep(prepared.params.clone())),
+        );
+        let record_id = record.record_id;
+        tracing::info!(
+            record = %record_id,
+            source = %prepared.params.source_name,
+            solids = prepared.solid_count,
+            at_cursor,
+            "importStep: authoring record"
+        );
+        let outcome = self.apply(EditCommand::AddOperation { record, at_cursor })?;
+        // Product names cannot be applied yet — the bodies are worker-minted and do
+        // not exist until this record executes. Parked until adoption.
+        if prepared.product_names.iter().any(|n| !n.is_empty()) {
+            self.import_names
+                .insert(record_id, prepared.product_names.clone());
+        }
+        Ok(outcome)
+    }
+
+    /// The import blobs currently carried (a save writes the referenced subset).
+    /// Tests / diagnostics.
+    #[must_use]
+    pub fn import_blob_shas(&self) -> Vec<String> {
+        self.imports.keys().cloned().collect()
+    }
+
+    /// The directory this document's import blobs are materialized into (tests).
+    #[must_use]
+    pub fn import_workspace_dir(&self) -> &Path {
+        self.import_workspace.dir()
+    }
+
+    /// Loads every import blob from an opened container into the carrier and
+    /// materializes it for the worker.
+    ///
+    /// A missing / corrupt / oversized blob is SKIPPED with a diagnostic, never an
+    /// open failure: `io::imports` designs the blast radius to be exactly one
+    /// timeline step, so the document opens, the tree renders, and only that one
+    /// `ImportStep` fails (loudly) at its own step.
+    fn load_import_blobs(&mut self, loaded: &LoadedContainer) {
+        for info in loaded.import_blobs() {
+            match loaded.read_import_blob(&info.sha256) {
+                Ok(bytes) => {
+                    if let Err(e) =
+                        self.import_workspace
+                            .materialize(&info.sha256, info.codec, &bytes)
+                    {
+                        tracing::warn!(
+                            sha = %info.sha256,
+                            error = %e,
+                            "import blob could not be staged for the worker — that step will fail"
+                        );
+                    }
+                    self.imports.insert(
+                        info.sha256.clone(),
+                        ImportBlob {
+                            codec: info.codec,
+                            bytes,
+                        },
+                    );
+                }
+                Err(e) => tracing::warn!(
+                    sha = %info.sha256,
+                    error = %e,
+                    "import blob unreadable — the document opens, that ImportStep step will fail"
+                ),
+            }
+        }
+    }
+
+    /// Names the bodies an `ImportStep` just minted from the STEP product names
+    /// captured at import time.
+    ///
+    /// Runs on the **regen mirror**, immediately before
+    /// [`adopt_regen_bodies`](onecad_core::edit::DocumentSession::adopt_regen_bodies)
+    /// inserts the document metadata rows — so the name lands in the row the tree
+    /// reads, the save persists, and a reopen restores. It is therefore also the
+    /// point after which a user rename WINS: `merge_body_metadata` overlays
+    /// `document.bodies` onto the mirror unconditionally, and `adopt_regen_bodies`
+    /// is insert-only.
+    ///
+    /// Best effort by design (SCHEMA §7.3: names are recoverable evidence, never
+    /// identity): a count mismatch between the probe's `productNames` and the bodies
+    /// the op actually produced means the two lists cannot be zipped by ordinal
+    /// without risking a wrong label, so the whole record is skipped. Empty names
+    /// are skipped individually.
+    fn apply_import_body_names(&mut self) {
+        if self.import_names.is_empty() {
+            return;
+        }
+        let produced = produced_bodies_of(&self.regen.timeline, &self.regen.bodies);
+        for (record, names) in &self.import_names {
+            let Some(bodies) = produced.get(record) else {
+                continue; // not executed in this regen (rolled back / suppressed)
+            };
+            if bodies.len() != names.len() {
+                tracing::debug!(
+                    record = %record,
+                    bodies = bodies.len(),
+                    names = names.len(),
+                    "importStep: productNames count differs from minted bodies — names skipped"
+                );
+                continue;
+            }
+            for (body, name) in bodies.iter().zip(names) {
+                if !name.is_empty() {
+                    self.regen.bodies.set_name(*body, name.clone());
+                }
+            }
+        }
     }
 
     // ── Checkpoints (SCHEMA §7.7) ────────────────────────────────────────────
@@ -2206,6 +2388,21 @@ fn failed_steps_of(timeline: &Timeline) -> Vec<FailedStep> {
             _ => None,
         })
         .collect()
+}
+
+/// The tree label for an `ImportStep` record: the source basename with its
+/// extension dropped, so `bracket.step` reads as `Import bracket` rather than as a
+/// path. Falls back to a bare `"Import"` for a nameless source.
+fn import_record_name(source_name: &str) -> String {
+    let stem = Path::new(source_name)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if stem.is_empty() {
+        "Import".to_string()
+    } else {
+        format!("Import {stem}")
+    }
 }
 
 /// The regen mirror's registry **wholesale** with the document's user-authored

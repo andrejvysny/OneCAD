@@ -313,6 +313,70 @@ pub trait FaceBoundaryProjection: Send + Sync {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// STEP import preflight seam (SCHEMA §7.8 `InspectStep`)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One `InspectStep` result (SCHEMA §7.8) — a read-only probe of a STEP file.
+///
+/// `brep_bytes` is `Some` only when the caller asked for the conversion lane
+/// (`include_brep`): the healed, mm-normalized, **UNSCALED** BinTools compound
+/// whose solid order IS the §7.3 ordinal order. `brep_format` pins the BinTools
+/// version those bytes were written in (reported unconditionally, so a caller that
+/// defers fetching the bytes still learns the version to pin).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StepInspection {
+    /// Number of solids the heal pipeline recovered (= the number of bodies the
+    /// §7.3 `ImportStep` op will mint).
+    pub solid_count: usize,
+    /// The file's declared length unit (`"MM"`, `"INCH"`, …), display-only.
+    pub source_unit: String,
+    /// Axis-aligned bounds over every solid, `(min, max)` in mm.
+    pub bbox: ([f64; 3], [f64; 3]),
+    /// STEP product names in ordinal order, where recoverable. May be shorter than
+    /// `solid_count` (or empty) — a name is best-effort evidence, never identity.
+    pub product_names: Vec<String>,
+    /// The BinTools format version of `brep_bytes` (and the value to pin in
+    /// `ImportStepParams::brep_format`).
+    pub brep_format: u32,
+    /// Advisory findings from the read (`STEP_SEWN`, `STEP_HEALED`, …) as
+    /// `(code, message)`. The probe itself succeeded — a failure is an error.
+    pub diagnostics: Vec<(String, String)>,
+    /// The healed BinTools compound bytes, when `include_brep` was requested.
+    pub brep_bytes: Option<Vec<u8>>,
+}
+
+/// Probes a STEP file without touching any session state (SCHEMA §7.8
+/// `InspectStep`).
+///
+/// A separate seam beside [`FaceBoundaryProjection`] for the same reason: the
+/// probe neither fences, prepares, nor publishes anything, so it does not belong on
+/// the regen-shaped [`GeometryEngine`] trait. It is the **conversion lane** for the
+/// brep-primary replay policy (W0 decision): Rust probes the user's file once at
+/// import-command time, persists the returned brep bytes alongside the STEP source
+/// in the container, and authors the `ImportStep` record against the brep — so
+/// replay never re-parses STEP.
+///
+/// A malformed file comes back as a recoverable `OP_FAILED`-class [`EngineError`],
+/// never a protocol tear-down (SCHEMA §7.8). Callers MUST NOT hold the
+/// `DocumentRuntime` lock across this call — it is a worker round-trip, and holding
+/// the single writer across worker IO is the anti-pattern R-WP11 fixed for regen.
+#[async_trait]
+pub trait StepImport: Send + Sync {
+    /// `InspectStep` (SCHEMA §7.8). `path` is a Rust-owned path the worker reads;
+    /// `include_brep` additionally requests the healed BinTools compound in the
+    /// response's `brep` bin section.
+    ///
+    /// # Errors
+    /// [`EngineError`] on a disconnected worker, a malformed response, or an
+    /// unreadable / invalid STEP file (recoverable `OpFailed`).
+    async fn inspect_step(
+        &self,
+        path: &Path,
+        include_brep: bool,
+    ) -> Result<StepInspection, EngineError>;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Drag-time preview seam (SCHEMA §7.6 `PreviewOp`)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -701,6 +765,17 @@ impl FaceBoundaryProjection for PendingBackend {
         _plane: &onecad_core::sketch::SketchPlane,
         _scope: wire::ProjectionScope,
     ) -> Result<Option<onecad_core::sketch::ProjectionPayload>, EngineError> {
+        Err(Self::not_ready())
+    }
+}
+
+#[async_trait]
+impl StepImport for PendingBackend {
+    async fn inspect_step(
+        &self,
+        _path: &Path,
+        _include_brep: bool,
+    ) -> Result<StepInspection, EngineError> {
         Err(Self::not_ready())
     }
 }

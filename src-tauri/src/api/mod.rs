@@ -107,16 +107,89 @@ pub async fn open_document(
     Ok(snapshot)
 }
 
-/// Imports a STEP file into a new document. The `ImportStep` worker verb lands
-/// with R-WP11 / W-WP6; until then this reports the worker is not ready.
+/// **Start-screen lane**: opens a NEW document whose first (and only) feature is an
+/// `ImportStep` of `path` (`CadClient.importStep`). The in-editor "Import STEP…"
+/// lane is [`insert_step`], which appends to the document already open.
+///
+/// Responds exactly like [`open_document`] — a [`DocumentSnapshotDto`] plus a
+/// `projection-updated` emit and a from-0 regen request — because the frontend
+/// treats it identically (`appStore.importStep` calls `enter(...)` on the result).
+///
+/// The probe runs BEFORE the new runtime is published, so an unreadable STEP file
+/// leaves the previous screen state untouched: no document is swapped in, and the
+/// error surfaces as the start screen's `importError`.
+///
+/// **`path` must come from [`step_file_dialog`], not `open_file_dialog`** — the
+/// latter filters `.onecad`, so a user could never select a `.step` through it.
 #[tauri::command]
+#[tracing::instrument(skip_all, fields(path = %path), err(Display))]
 pub async fn import_step(
-    _state: State<'_, AppState>,
-    _path: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+    path: String,
 ) -> Result<DocumentSnapshotDto, ApiError> {
-    Err(ApiError::Worker(
-        "STEP import lands with the worker (R-WP11 / W-WP6)".into(),
-    ))
+    let (engine, meshes, solver) = state.make_backend();
+    // Worker round-trip FIRST, with no lock held and no runtime published (the
+    // R-WP11 rule); the backend was just built, so `state.step_import()` is this
+    // document's worker.
+    let prepared = crate::imports::prepare_import(&*state.step_import(), Path::new(&path)).await?;
+    let mut rt = DocumentRuntime::new_blank(engine, meshes, solver);
+    rt.add_import_record(&prepared, false)?;
+    let (snapshot, projection) = {
+        let mut guard = state.runtime.lock().await;
+        *guard = Some(rt);
+        let rt = guard.as_ref().unwrap();
+        (snapshot_of(rt), rt.projection())
+    };
+    let _ = app.emit(events::PROJECTION_UPDATED, &projection);
+    if let Some(sched) = state.scheduler.get() {
+        sched.request(RegenRequest::ToEnd { from: 0 });
+    }
+    state.note_mutation();
+    Ok(snapshot)
+}
+
+/// **In-editor lane**: appends an `ImportStep` record to the OPEN document
+/// (`CadClient.insertStep`), inserted at the rollback cursor like every other
+/// authored feature.
+///
+/// Rust owns the `.step` dialog (the webview has zero fs capability), so this takes
+/// no arguments and resolves `Ok(None)` when the dialog is cancelled — the house
+/// shape the frontend's `insertStep` correlates against (a null projection cancels
+/// its regen awaiter). Otherwise it responds like `apply_edit_command`: the
+/// pre-regen [`DocumentProjection`], with the authoritative geometry arriving on
+/// the normal `document-changed` / `projection-updated` events.
+#[tauri::command]
+#[tracing::instrument(skip_all, err(Display))]
+pub async fn insert_step(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<Option<DocumentProjection>, ApiError> {
+    {
+        // Presence check only — the lock is NOT held across the probe below.
+        let guard = state.runtime.lock().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("insertStep".into()))?;
+    }
+    let Some(path) = pick_step_open(app.clone()).await else {
+        return Ok(None); // dialog cancelled
+    };
+    let prepared = crate::imports::prepare_import(&*state.step_import(), Path::new(&path)).await?;
+    let (outcome, projection) = {
+        let mut guard = state.runtime.lock().await;
+        let rt = guard
+            .as_mut()
+            .ok_or_else(|| ApiError::NoDocument("insertStep".into()))?;
+        let outcome = rt.add_import_record(&prepared, true)?;
+        (outcome, rt.projection())
+    };
+    let _ = app.emit(events::PROJECTION_UPDATED, &projection);
+    if let Some(sched) = state.scheduler.get() {
+        sched.handle(&outcome);
+    }
+    state.note_mutation();
+    Ok(Some(projection))
 }
 
 /// Saves the open document (`CadClient` save). `path` `None` reuses the last save
@@ -1379,6 +1452,19 @@ pub async fn save_file_dialog(app: AppHandle) -> Result<Option<String>, ApiError
     Ok(pick_file(app, true).await)
 }
 
+/// Shows a native **STEP** open dialog (`.step`/`.stp`) for the start-screen import
+/// lane, resolving to the chosen path or `None` on cancel.
+///
+/// A separate command from [`open_file_dialog`] on purpose: that one filters
+/// `.onecad`, and widening its filter would let the plain Open action offer files
+/// [`open_document`] cannot read. The start-screen `importStep` flow must pick its
+/// path HERE — see the note on [`import_step`]. (The in-editor lane needs no
+/// command: [`insert_step`] runs its own dialog.)
+#[tauri::command]
+pub async fn step_file_dialog(app: AppHandle) -> Result<Option<String>, ApiError> {
+    Ok(pick_step_open(app).await)
+}
+
 async fn pick_file(app: AppHandle, save: bool) -> Option<String> {
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1407,6 +1493,25 @@ async fn pick_step_save(app: AppHandle) -> Option<String> {
         .file()
         .add_filter("STEP", &["step", "stp"])
         .save_file(move |file: Option<tauri_plugin_dialog::FilePath>| {
+            let _ = tx.send(file);
+        });
+    rx.await
+        .ok()
+        .flatten()
+        .and_then(|f| f.into_path().ok())
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Shows a native STEP **open** dialog (`.step`/`.stp` filter) for the in-editor
+/// import lane. Resolves to the chosen path or `None` on cancel. Mirrors
+/// [`pick_step_save`] with `pick_file` instead of `save_file`.
+async fn pick_step_open(app: AppHandle) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("STEP", &["step", "stp"])
+        .pick_file(move |file: Option<tauri_plugin_dialog::FilePath>| {
             let _ = tx.send(file);
         });
     rx.await

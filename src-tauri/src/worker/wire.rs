@@ -50,7 +50,7 @@ use crate::dto::{
     DragSolveDto, PreviewTrianglesDto, SketchRegionDto, SketchSolveStatus, SketchUpsertDto,
 };
 
-use super::lod_str;
+use super::{lod_str, StepInspection};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // BodyId ↔ wire (`body_<opId>`)
@@ -261,6 +261,7 @@ fn lower_operation(
     let (op_type, mut params) = split_operation(operation, op_val);
     to_wire_body_form(&mut params);
     lift_profile_to_params(&mut params);
+    inject_import_path(operation, &mut params);
     json!({
         "opType": op_type,
         "opId": op_id,
@@ -321,6 +322,45 @@ fn lift_profile_to_params(params: &mut Value) {
     {
         map.insert("regionId".into(), rid.clone());
     }
+}
+
+/// Injects the **wire-only, NON-hashed** `params.path` an `ImportStep` op needs
+/// (SCHEMA §7.3 / §7.8): the core params are a content-address POINTER
+/// (`sourceSha256`), and Rust materializes the blob to a temp file the worker reads.
+///
+/// The path is resolved from the process-wide
+/// [`import path registry`](crate::imports) that
+/// [`DocumentRuntime`](crate::document_runtime::DocumentRuntime) populates when it
+/// materializes a document's import blobs. It is deliberately absent from
+/// [`ImportStepParams`](onecad_core::document::record::ImportStepParams) — the
+/// planner hashes the CORE params, so two lowerings of the same record under
+/// different temp roots produce the same
+/// [`history_prefix_hash`](onecad_core::regen::planner::history_prefix_hash) and
+/// different wire JSON. An absolute path in the hash would make every document
+/// machine-specific.
+///
+/// **A missing blob lowers an EMPTY path on purpose.** The worker then fails that
+/// one step with `OP_FAILED` ("no source path supplied"), which is a recoverable,
+/// named, per-record failure — exactly the blast radius `io::imports` designs for.
+/// Refusing to lower (or panicking) would take down the whole plan, i.e. every
+/// unrelated feature in the document, over one un-materialized blob.
+fn inject_import_path(operation: &Operation, params: &mut Value) {
+    let Operation::Known(KnownOperation::ImportStep(p)) = operation else {
+        return;
+    };
+    let Some(map) = params.as_object_mut() else {
+        return;
+    };
+    let path = crate::imports::resolve_blob_path(&p.source_sha256);
+    if path.is_empty() {
+        tracing::warn!(
+            sha = %p.source_sha256,
+            source = %p.source_name,
+            "importStep: no materialized blob for this source — lowering an empty path \
+             (the worker will fail THIS step with OP_FAILED, not the plan)"
+        );
+    }
+    map.insert("path".into(), Value::String(path));
 }
 
 /// Rewrites every body-bearing field of `value` — a key exactly `"bodyId"` or ending
@@ -820,6 +860,85 @@ pub fn export_obj_args(path: &str, bodies: &[BodyId], lod: &str) -> Value {
         "bodyIds": bodies.iter().map(|b| body_id_wire(*b)).collect::<Vec<_>>(),
         "lod": lod,
     })
+}
+
+/// `InspectStep.args` (SCHEMA §7.8): `{path, includeBrep}`.
+#[must_use]
+pub fn inspect_step_args(path: &str, include_brep: bool) -> Value {
+    json!({ "path": path, "includeBrep": include_brep })
+}
+
+/// Parses an `InspectStep` result (SCHEMA §7.8) into a [`StepInspection`], WITHOUT
+/// the `brep` bin payload (the caller attaches it from the response tail).
+///
+/// Missing/mistyped scalars fall back to their neutral values (`0` / `""` / an
+/// all-zero bbox) rather than failing: the probe already SUCCEEDED at the worker,
+/// and the fields this parser tolerates losing are advisory display evidence. The
+/// two load-bearing ones are `solidCount` and `brepFormat`, and both are validated
+/// by the caller against what it actually does with them (a zero `solidCount` means
+/// no bodies; a `brepFormat` the worker cannot read fails the op loudly at replay).
+#[must_use]
+pub fn parse_inspect_step(result: &Value) -> StepInspection {
+    let vec3 = |v: Option<&Value>| -> [f64; 3] {
+        let a = v.and_then(Value::as_array);
+        let get = |i: usize| {
+            a.and_then(|a| a.get(i))
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0)
+        };
+        [get(0), get(1), get(2)]
+    };
+    let bbox = result.get("bbox");
+    StepInspection {
+        solid_count: result
+            .get("solidCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .min(usize::MAX as u64) as usize,
+        source_unit: result
+            .get("sourceUnit")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        bbox: (
+            vec3(bbox.and_then(|b| b.get("min"))),
+            vec3(bbox.and_then(|b| b.get("max"))),
+        ),
+        product_names: result
+            .get("productNames")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .map(|v| v.as_str().unwrap_or_default().to_string())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        brep_format: result
+            .get("brepFormat")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32,
+        diagnostics: result
+            .get("diagnostics")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .map(|d| {
+                        (
+                            d.get("code")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .into(),
+                            d.get("message")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .into(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        brep_bytes: None,
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

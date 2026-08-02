@@ -21,6 +21,7 @@ pub mod dto;
 pub mod error;
 pub mod events;
 pub mod export;
+pub mod imports;
 pub mod logging;
 pub mod mesh_cache;
 pub mod recents;
@@ -204,6 +205,10 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            // Reclaim import-blob temp directories a previous crash left behind
+            // (`ImportWorkspace::drop` never ran). Best-effort, mtime-only, no
+            // daemon — see `crate::imports`.
+            imports::sweep_stale_workspaces(imports::STALE_WORKSPACE_AGE);
             // Spawn the single regen scheduler over the shared runtime + app handle.
             let state = app.state::<AppState>();
             // Publish the app handle so the backend factory's worker-status
@@ -240,6 +245,7 @@ pub fn run() {
             api::new_document,
             api::open_document,
             api::import_step,
+            api::insert_step,
             api::save_document,
             api::export_step_file,
             api::export_stl_file,
@@ -270,6 +276,7 @@ pub fn run() {
             api::resolve_refs,
             api::list_recents,
             api::open_file_dialog,
+            api::step_file_dialog,
             api::save_file_dialog,
             api::confirm_exit,
             api::cancel_exit,
