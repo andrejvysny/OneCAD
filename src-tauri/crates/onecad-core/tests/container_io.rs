@@ -512,10 +512,7 @@ fn import_doc(sha: &str, codec: ImportSourceCodec, suppressed: bool) -> Document
         source_name: "part.step".into(),
         heal_policy: "v1".into(),
         unit_scale: Scalar::new(1.0),
-        brep_format: match codec {
-            ImportSourceCodec::Brep => Some(4),
-            ImportSourceCodec::Step => None,
-        },
+        brep_format: codec.is_converted().then_some(4),
         provenance_sha256: None,
         extra: Default::default(),
     }));

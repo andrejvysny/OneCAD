@@ -442,7 +442,8 @@ json attach_tessellate(const ScratchJob& job, const json& artifacts, Envelope& r
 
     json meshes = json::array();
     for (const auto& [bid, rec] : job.bodies.all()) {
-        tess::BodyMesh bm = tess::tessellate_body(rec.geom, bid, lod, include_edges, &job.partition);
+        tess::BodyMesh bm = tess::tessellate_body(rec.geom, bid, lod, include_edges, &job.partition,
+                                                  &rec.face_colors);
         if (!bm.ok) continue;
         const std::uint64_t off = resp.out_bin.size();
         resp.out_bin.insert(resp.out_bin.end(), bm.blob.begin(), bm.blob.end());

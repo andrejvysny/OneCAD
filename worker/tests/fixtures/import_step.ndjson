@@ -23,10 +23,10 @@
 # Produce the STEP input for the import below.
 {"send":{"v":1,"t":"req","id":4,"verb":"ExportStep","args":{"path":"/tmp/onecad_harness_import.step","bodyIds":["body_op1"],"schema":"AP214IS"}}}
 {"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"written":true,"bytes":"$present"}}}
-# Read-only probe + conversion lane. `bin` carries the BinTools compound; the
+# Read-only probe + conversion lane. `bin` carries the BinXCAF document; the
 # section table is what Rust addresses the bytes by (SCHEMA §5.2).
-{"send":{"v":1,"t":"req","id":5,"verb":"InspectStep","args":{"path":"/tmp/onecad_harness_import.step","includeBrep":true}}}
-{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"solidCount":1,"sourceUnit":"MM","brepFormat":4,"bbox":{"min":"$present","max":"$present"},"productNames":"$present","diagnostics":"$present"},"bin":[{"name":"brep","off":0,"len":"$present"}]}}
+{"send":{"v":1,"t":"req","id":5,"verb":"InspectStep","args":{"path":"/tmp/onecad_harness_import.step","includeGeometry":true}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"solidCount":1,"sourceUnit":"MM","geometryCodec":"xbf","geometryFormat":12,"bbox":{"min":"$present","max":"$present"},"productNames":"$present","diagnostics":"$present"},"bin":[{"name":"geometry","off":0,"len":"$present"}]}}
 # …and it published nothing: the head is byte-identical to the one after id 3.
 {"send":{"v":1,"t":"req","id":6,"verb":"GetWorkerHead","args":{}}}
 {"expect":{"v":1,"t":"resp","id":6,"ok":true,"result":{"documentRevision":0,"workerEpoch":3,"snapshotId":1,"hasScratch":false,"historyPrefixHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}

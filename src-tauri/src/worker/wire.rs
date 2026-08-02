@@ -862,21 +862,22 @@ pub fn export_obj_args(path: &str, bodies: &[BodyId], lod: &str) -> Value {
     })
 }
 
-/// `InspectStep.args` (SCHEMA §7.8): `{path, includeBrep}`.
+/// `InspectStep.args` (SCHEMA §7.8): `{path, includeGeometry}`.
 #[must_use]
-pub fn inspect_step_args(path: &str, include_brep: bool) -> Value {
-    json!({ "path": path, "includeBrep": include_brep })
+pub fn inspect_step_args(path: &str, include_geometry: bool) -> Value {
+    json!({ "path": path, "includeGeometry": include_geometry })
 }
 
 /// Parses an `InspectStep` result (SCHEMA §7.8) into a [`StepInspection`], WITHOUT
-/// the `brep` bin payload (the caller attaches it from the response tail).
+/// the `geometry` bin payload (the caller attaches it from the response tail).
 ///
 /// Missing/mistyped scalars fall back to their neutral values (`0` / `""` / an
 /// all-zero bbox) rather than failing: the probe already SUCCEEDED at the worker,
 /// and the fields this parser tolerates losing are advisory display evidence. The
-/// two load-bearing ones are `solidCount` and `brepFormat`, and both are validated
-/// by the caller against what it actually does with them (a zero `solidCount` means
-/// no bodies; a `brepFormat` the worker cannot read fails the op loudly at replay).
+/// load-bearing ones are `solidCount`, `geometryCodec` and `geometryFormat`, and
+/// all three are validated by the caller against what it actually does with them (a
+/// zero `solidCount` means no bodies; an unknown codec or a format the worker
+/// cannot read fails loudly at authoring / replay).
 #[must_use]
 pub fn parse_inspect_step(result: &Value) -> StepInspection {
     let vec3 = |v: Option<&Value>| -> [f64; 3] {
@@ -913,8 +914,13 @@ pub fn parse_inspect_step(result: &Value) -> StepInspection {
                     .collect()
             })
             .unwrap_or_default(),
-        brep_format: result
-            .get("brepFormat")
+        geometry_codec: result
+            .get("geometryCodec")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        geometry_format: result
+            .get("geometryFormat")
             .and_then(Value::as_u64)
             .unwrap_or(0) as u32,
         diagnostics: result
@@ -937,7 +943,7 @@ pub fn parse_inspect_step(result: &Value) -> StepInspection {
                     .collect()
             })
             .unwrap_or_default(),
-        brep_bytes: None,
+        geometry_bytes: None,
     }
 }
 

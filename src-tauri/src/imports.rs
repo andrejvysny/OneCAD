@@ -247,16 +247,17 @@ pub fn sweep_stale_workspaces(max_age: Duration) -> usize {
 /// Everything an `ImportStep` record needs, produced WITHOUT touching the document:
 /// the params to author plus the two blobs to persist. Built by [`prepare_import`].
 ///
-/// **Brep-primary replay policy** (W0 decision): `params.source_sha256` addresses
-/// the healed BinTools blob so replay never re-parses STEP, while the user's
-/// original file is co-stored under `params.provenance_sha256` for re-export /
-/// re-heal / audit. `blobs` carries both, and `referenced_import_shas` pins both at
-/// save.
+/// **Converted-primary replay policy** (W0 decision, codec chosen by the worker):
+/// `params.source_sha256` addresses the healed kernel blob so replay never
+/// re-parses STEP, while the user's original file is co-stored under
+/// `params.provenance_sha256` for re-export / re-heal / audit. `blobs` carries
+/// both, and `referenced_import_shas` pins both at save.
 #[derive(Debug, Clone)]
 pub struct PreparedImport {
     /// The record params (already `validate`d).
     pub params: ImportStepParams,
-    /// `(sha256, blob)` for the replay brep AND the provenance STEP, in that order.
+    /// `(sha256, blob)` for the converted replay blob AND the provenance STEP, in
+    /// that order.
     pub blobs: Vec<(String, ImportBlob)>,
     /// How many bodies this import will mint (SCHEMA §7.3 ordinal children).
     pub solid_count: usize,
@@ -297,7 +298,7 @@ pub async fn prepare_import(
     let source_sha = sha256_hex(&source_bytes);
 
     // The probe IS the conversion lane: one read of the user's file yields both the
-    // metadata and the canonical brep the record will replay (SCHEMA §7.8).
+    // metadata and the canonical replay bytes the record will use (SCHEMA §7.8).
     let inspection: StepInspection = importer.inspect_step(path, true).await?;
     if inspection.solid_count == 0 {
         return Err(ApiError::OpFailed(format!(
@@ -305,10 +306,27 @@ pub async fn prepare_import(
             path.display()
         )));
     }
-    let brep_bytes = inspection.brep_bytes.clone().ok_or_else(|| {
-        ApiError::Worker("InspectStep returned no brep bytes for the conversion lane".into())
+    // The WORKER names its preferred replay codec; Rust does not hardcode one. An
+    // unknown value is a hard stop rather than a fallback: authoring a record under
+    // the wrong codec would persist a document whose replay reads the bytes with the
+    // wrong reader.
+    let codec = ImportSourceCodec::from_extension(&inspection.geometry_codec).ok_or_else(|| {
+        ApiError::Worker(format!(
+            "InspectStep reported geometryCodec `{}`, which this build cannot store",
+            inspection.geometry_codec
+        ))
     })?;
-    let brep_sha = sha256_hex(&brep_bytes);
+    if !codec.is_converted() {
+        return Err(ApiError::Worker(format!(
+            "InspectStep reported geometryCodec `{}` for the conversion lane — expected a \
+             converted replay form",
+            inspection.geometry_codec
+        )));
+    }
+    let geometry_bytes = inspection.geometry_bytes.clone().ok_or_else(|| {
+        ApiError::Worker("InspectStep returned no geometry bytes for the conversion lane".into())
+    })?;
+    let geometry_sha = sha256_hex(&geometry_bytes);
 
     let mut diagnostics = inspection.diagnostics.clone();
     if meta.len() > LARGE_IMPORT_HINT_BYTES {
@@ -327,28 +345,28 @@ pub async fn prepare_import(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "import.step".to_string());
 
-    // Degenerate but possible: a STEP whose healed brep hashes to the same digest as
-    // the source file. `provenanceSha256` MUST differ from `sourceSha256` (core
+    // Degenerate but possible: a STEP whose converted blob hashes to the same digest
+    // as the source file. `provenanceSha256` MUST differ from `sourceSha256` (core
     // validation), and it would address the same blob anyway, so drop it.
-    let provenance = (brep_sha != source_sha).then(|| source_sha.clone());
+    let provenance = (geometry_sha != source_sha).then(|| source_sha.clone());
 
     let params = ImportStepParams {
-        source_sha256: brep_sha.clone(),
-        source_codec: ImportSourceCodec::Brep,
+        source_sha256: geometry_sha.clone(),
+        source_codec: codec,
         source_name,
         heal_policy: IMPORT_HEAL_POLICY_V1.to_string(),
         unit_scale: Scalar::new(1.0),
-        brep_format: Some(inspection.brep_format),
+        brep_format: Some(inspection.geometry_format),
         provenance_sha256: provenance,
         extra: Default::default(),
     };
     params.validate().map_err(ApiError::InvalidCommand)?;
 
     let mut blobs = vec![(
-        brep_sha,
+        geometry_sha,
         ImportBlob {
-            codec: ImportSourceCodec::Brep,
-            bytes: brep_bytes,
+            codec,
+            bytes: geometry_bytes,
         },
     )];
     if params.provenance_sha256.is_some() {
@@ -365,7 +383,8 @@ pub async fn prepare_import(
         source = %params.source_name,
         solids = inspection.solid_count,
         unit = %inspection.source_unit,
-        brep_format = inspection.brep_format,
+        codec = %inspection.geometry_codec,
+        geometry_format = inspection.geometry_format,
         sha = %params.source_sha256,
         "importStep: prepared"
     );
@@ -463,7 +482,7 @@ mod tests {
         async fn inspect_step(
             &self,
             _path: &Path,
-            _include_brep: bool,
+            _include_geometry: bool,
         ) -> Result<StepInspection, onecad_core::regen::EngineError> {
             panic!("an over-cap file must be rejected before the worker is asked to read it");
         }

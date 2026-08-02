@@ -268,10 +268,7 @@ mod tests {
             source_name: "bracket.step".into(),
             heal_policy: "v1".into(),
             unit_scale: Scalar::new(1.0),
-            brep_format: match codec {
-                ImportSourceCodec::Brep => Some(1),
-                ImportSourceCodec::Step => None,
-            },
+            brep_format: codec.is_converted().then_some(1),
             provenance_sha256: None,
             extra: Default::default(),
         }))
@@ -291,7 +288,11 @@ mod tests {
     #[test]
     fn blob_path_round_trips_through_parse() {
         let sha = sha_of(b"ISO-10303-21;");
-        for codec in [ImportSourceCodec::Step, ImportSourceCodec::Brep] {
+        for codec in [
+            ImportSourceCodec::Step,
+            ImportSourceCodec::Brep,
+            ImportSourceCodec::Xbf,
+        ] {
             let path = import_blob_path(&sha, codec);
             assert!(path.starts_with(IMPORTS_DIR));
             assert_eq!(parse_import_blob_path(&path), Some((sha.clone(), codec)));

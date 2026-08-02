@@ -66,7 +66,8 @@ std::map<std::string, std::string> minted_ids(const elementmap::ElementMapPartit
 
 BodyMesh tessellate_body(const TopoDS_Shape& shape, const std::string& body_id,
                          const std::string& lod, bool include_edges,
-                         const elementmap::ElementMapPartition* partition) {
+                         const elementmap::ElementMapPartition* partition,
+                         const std::vector<std::uint32_t>* face_colors) {
     BodyMesh out;
     out.body_id = body_id;
     if (shape.IsNull()) return out;
@@ -207,6 +208,14 @@ BodyMesh tessellate_body(const TopoDS_Shape& shape, const std::string& body_id,
     }
 
     mi.ids_have_elementids = any_elementid;
+
+    // The face loop above pushed exactly one `face_ranges` entry per face of the
+    // SAME `TopExp::MapShapes` map the caller indexed its colors by, so the two
+    // vectors are index-aligned by construction. `encode_mesh1` re-checks the length
+    // and drops the section on a mismatch rather than colouring the wrong faces.
+    if (face_colors != nullptr && face_colors->size() == mi.face_ranges.size()) {
+        mi.face_colors = *face_colors;
+    }
 
     // bbox
     if (!box.IsVoid()) {

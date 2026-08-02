@@ -9,13 +9,18 @@
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <Standard_Failure.hxx>
+#include <TopAbs_ShapeEnum.hxx>
+#include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS_Shape.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
 
 #include "io/BrepCodec.h"
 #include "io/StepRead.h"
+#include "io/XcafCodec.h"
 #include "ops/OpCommon.h"
+#include "util/Log.h"
 
 namespace onecad::ops {
 
@@ -46,16 +51,42 @@ std::string source_label(const json& params) {
 // Uniform scale about the origin. Copy=true so the canonical (unscaled) shape the
 // caller holds is never mutated — re-editing `unitScale` must re-scale from the
 // canonical geometry, not compound onto an already-scaled one.
-bool scale_solids(std::vector<TopoDS_Shape>& solids, double factor, std::string& err) {
+//
+// `face_colors` (parallel to `solids`, may be empty) is REMAPPED through the
+// transform's own history rather than assumed index-stable: the color index space
+// is the `TopExp::MapShapes` order of the shape it describes, and that shape is
+// being replaced. `ModifiedShape` is the only authority on which new face is which
+// old face.
+bool scale_solids(std::vector<TopoDS_Shape>& solids,
+                  std::vector<std::vector<std::uint32_t>>& face_colors, double factor,
+                  std::string& err) {
     gp_Trsf trsf;
     trsf.SetScale(gp_Pnt(0.0, 0.0, 0.0), factor);
-    for (TopoDS_Shape& s : solids) {
-        BRepBuilderAPI_Transform xf(s, trsf, Standard_True);
+    for (std::size_t k = 0; k < solids.size(); ++k) {
+        BRepBuilderAPI_Transform xf(solids[k], trsf, Standard_True);
         if (!xf.IsDone() || xf.Shape().IsNull()) {
             err = "unitScale transform failed";
             return false;
         }
-        s = xf.Shape();
+        if (k < face_colors.size() && !face_colors[k].empty()) {
+            TopTools_IndexedMapOfShape before;
+            TopTools_IndexedMapOfShape after;
+            TopExp::MapShapes(solids[k], TopAbs_FACE, before);
+            TopExp::MapShapes(xf.Shape(), TopAbs_FACE, after);
+            std::vector<std::uint32_t> remapped(static_cast<std::size_t>(after.Extent()),
+                                                io::kUnsetColor);
+            for (int i = 1; i <= before.Extent(); ++i) {
+                const std::size_t src = static_cast<std::size_t>(i - 1);
+                if (src >= face_colors[k].size() || face_colors[k][src] == io::kUnsetColor) {
+                    continue;
+                }
+                const TopoDS_Shape moved = xf.ModifiedShape(before(i));
+                const int dst = moved.IsNull() ? 0 : after.FindIndex(moved);
+                if (dst >= 1) remapped[static_cast<std::size_t>(dst - 1)] = face_colors[k][src];
+            }
+            face_colors[k] = std::move(remapped);
+        }
+        solids[k] = xf.Shape();
     }
     return true;
 }
@@ -81,7 +112,7 @@ OpOutcome execute_import_step(OpContext& ctx, const json& op, const std::string&
     const std::string label = source_label(params);
 
     const std::string codec = read_str(params, "sourceCodec", "step");
-    if (codec != "step" && codec != "brep") {
+    if (codec != "step" && codec != "brep" && codec != io::kXcafCodecName) {
         return OpOutcome::fail("OP_FAILED", "ImportStep: unknown sourceCodec '" + codec +
                                                 "' for source " + label);
     }
@@ -114,6 +145,28 @@ OpOutcome execute_import_step(OpContext& ctx, const json& op, const std::string&
 
     OpOutcome out;
     std::vector<TopoDS_Shape> solids;
+    // Parallel to `solids` (or empty). The step/brep lanes leave it empty: neither
+    // byte form carries appearance, which is exactly why the conversion lane moved
+    // to xbf (SCHEMA §14, 2026-08-02).
+    std::vector<std::vector<std::uint32_t>> face_colors;
+
+    // `brepFormat` REQUIRED for every CONVERTED codec (SCHEMA §7.3): it pins the
+    // binary format version the bytes were written in. A record pinned to a version
+    // this worker does not write is a data problem, not a parse problem — report it
+    // before OCCT gets a chance to fail obscurely.
+    const auto check_format = [&](int expected) -> std::string {
+        if (!params.contains("brepFormat") || !params["brepFormat"].is_number_integer()) {
+            return "ImportStep: sourceCodec '" + codec +
+                   "' requires an integer brepFormat for source " + label;
+        }
+        const int got = params["brepFormat"].get<int>();
+        if (got != expected) {
+            return "ImportStep: brepFormat " + std::to_string(got) +
+                   " is not the version this worker writes (" + std::to_string(expected) +
+                   ") for source " + label;
+        }
+        return {};
+    };
 
     if (codec == "step") {
         const io::StepReadResult read = io::read_step(path, io::StepReadPolicy{}, ctx.cancel);
@@ -129,29 +182,25 @@ OpOutcome execute_import_step(OpContext& ctx, const json& op, const std::string&
             return OpOutcome::fail("OP_FAILED", "ImportStep: no solid recovered from source " + label);
         }
         solids = read.solids;  // already in ops::ordered_solids order (W0)
-    } else {
-        // `brepFormat` REQUIRED for this codec (SCHEMA §7.3): it pins the BinTools
-        // version the bytes were written in. A record pinned to a version this
-        // worker does not write is a data problem, not a parse problem — report it
-        // before OCCT gets a chance to fail obscurely.
-        if (!params.contains("brepFormat") || !params["brepFormat"].is_number_integer()) {
-            return OpOutcome::fail("OP_FAILED",
-                                   "ImportStep: sourceCodec 'brep' requires an integer brepFormat "
-                                   "for source " + label);
-        }
-        const int brep_format = params["brepFormat"].get<int>();
-        if (brep_format != io::kBrepFormatVersion) {
-            return OpOutcome::fail("OP_FAILED",
-                                   "ImportStep: brepFormat " + std::to_string(brep_format) +
-                                       " is not the version this worker writes (" +
-                                       std::to_string(io::kBrepFormatVersion) + ") for source " +
-                                       label);
-        }
+    } else if (codec == "brep") {
+        const std::string bad = check_format(io::kBrepFormatVersion);
+        if (!bad.empty()) return OpOutcome::fail("OP_FAILED", bad);
         const io::BrepReadResult read = io::read_brep_solids(path);
         if (!read.ok()) {
             return OpOutcome::fail("OP_FAILED", "ImportStep: " + read.error + " for source " + label);
         }
         solids = read.solids;  // STORED order — never re-sorted (see ImportOp.h)
+        check_solids(solids, out);
+    } else {
+        const std::string bad = check_format(io::kXcafFormatVersion);
+        if (!bad.empty()) return OpOutcome::fail("OP_FAILED", bad);
+        const io::XcafReadResult read = io::read_xcaf_solids(path);
+        if (!read.ok()) {
+            return OpOutcome::fail("OP_FAILED", "ImportStep: " + read.error + " for source " + label);
+        }
+        solids = read.solids;  // STORED order — never re-sorted (see ImportOp.h)
+        face_colors.reserve(read.attributes.size());
+        for (const io::SolidAttributes& a : read.attributes) face_colors.push_back(a.face_colors);
         check_solids(solids, out);
     }
 
@@ -160,7 +209,7 @@ OpOutcome execute_import_step(OpContext& ctx, const json& op, const std::string&
     if (unit_scale != 1.0) {
         std::string err;
         try {
-            if (!scale_solids(solids, unit_scale, err)) {
+            if (!scale_solids(solids, face_colors, unit_scale, err)) {
                 return OpOutcome::fail("OP_FAILED", "ImportStep: " + err + " for source " + label);
             }
         } catch (const Standard_Failure& f) {
@@ -174,13 +223,25 @@ OpOutcome execute_import_step(OpContext& ctx, const json& op, const std::string&
     // `ops::publish_boolean_result` applies to a split, minus the deleted parent:
     // an import creates ex nihilo, so there is nothing to delete and no partition
     // entry to relabel (the delta stays empty; ElementIds are minted on demand).
+    std::size_t colored_bodies = 0;
     for (std::size_t k = 0; k < solids.size(); ++k) {
         const std::string bid = solids.size() == 1
                                     ? "body_" + op_id
                                     : "body_" + op_id + ":" + std::to_string(k);
-        ctx.bodies.create(bid, op_id, solids[k]);
+        onecad::session::BodyRecord& rec = ctx.bodies.create(bid, op_id, solids[k]);
+        // Appearance rides the BODY, not the document (see BodyStore.h): the
+        // tessellator copies it into the MESH1 FACE_COLORS section, and nothing
+        // mints an ElementId or a TopoKey for it.
+        if (k < face_colors.size() && !face_colors[k].empty()) {
+            rec.face_colors = face_colors[k];
+            ++colored_bodies;
+        }
         out.body_events.push_back({"created", bid});
         out.body_ids.push_back(bid);
+    }
+    if (colored_bodies > 0) {
+        WLOG_INFO("ImportStep: %zu of %zu imported body(ies) carry authored face colors",
+                  colored_bodies, solids.size());
     }
     return out;
 }

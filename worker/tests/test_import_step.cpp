@@ -38,6 +38,7 @@
 #include "io/BrepCodec.h"
 #include "io/InspectStep.h"
 #include "io/StepRead.h"
+#include "io/XcafCodec.h"
 #include "nlohmann/json.hpp"
 #include "ops/ImportOp.h"
 #include "ops/OpTypes.h"
@@ -165,6 +166,14 @@ json brep_params(const std::string& path, double unit_scale = 1.0,
     json p = {{"sourceSha256", std::string(64, 'b')}, {"sourceName", "fixture.step"},
               {"sourceCodec", "brep"}, {"healPolicy", "v1"}, {"unitScale", unit_scale},
               {"brepFormat", brep_format}, {"path", path}};
+    return p;
+}
+
+json xbf_params(const std::string& path, double unit_scale = 1.0,
+                int format = onecad::io::kXcafFormatVersion) {
+    json p = {{"sourceSha256", std::string(64, 'c')}, {"sourceName", "fixture.step"},
+              {"sourceCodec", onecad::io::kXcafCodecName}, {"healPolicy", "v1"},
+              {"unitScale", unit_scale}, {"brepFormat", format}, {"path", path}};
     return p;
 }
 
@@ -296,6 +305,18 @@ void test_garbage_file(const std::string& step_path, const std::string& garbage_
     check(wrong.ok && wrong.stopped_reason == "opFailed",
           "wrong-codec: STEP bytes on the brep lane fail the step, not the session");
     check(s2.bodies_copy().size() == 0, "wrong-codec: nothing published");
+
+    // Same for the xbf lane: the `BINFILE` magic guard rejects the bytes before OCAF
+    // sees them, so a hostile blob is a per-step failure, not a worker teardown.
+    Session s3;
+    open_session(s3);
+    const PlanRun wrong_xbf = run_import_plan(s3, 7, "op0", xbf_params(step_path), tok);
+    check(wrong_xbf.ok && wrong_xbf.stopped_reason == "opFailed",
+          "wrong-codec: STEP bytes on the xbf lane fail the step, not the session");
+    check(wrong_xbf.step_message.find("BINFILE") != std::string::npos,
+          "wrong-codec: the xbf rejection names the OCAF magic (got '" + wrong_xbf.step_message +
+              "')");
+    check(s3.bodies_copy().size() == 0, "wrong-codec(xbf): nothing published");
 }
 
 // Param validation — each is a data problem, so each is OP_FAILED, never a frame
@@ -314,11 +335,16 @@ void test_param_guards(const std::string& path) {
     json no_format = brep_params(path);
     no_format.erase("brepFormat");
     json wrong_format = brep_params(path, 1.0, 99);
+    json xbf_no_format = xbf_params(path);
+    xbf_no_format.erase("brepFormat");
+    json xbf_wrong_format = xbf_params(path, 1.0, 99);
 
     const std::vector<Case> cases = {{"healPolicy v2", bad_policy}, {"missing path", no_path},
                                      {"unitScale 0", bad_scale},    {"unknown codec", bad_codec},
                                      {"brep without brepFormat", no_format},
-                                     {"brepFormat mismatch", wrong_format}};
+                                     {"brepFormat mismatch", wrong_format},
+                                     {"xbf without brepFormat", xbf_no_format},
+                                     {"xbf format mismatch", xbf_wrong_format}};
     std::uint64_t job = 10;
     for (const Case& c : cases) {
         Session s;
@@ -365,7 +391,7 @@ void test_cancel(const std::string& path) {
 // InspectStep: the probe payload + the conversion lane's binary tail, and the
 // read-only guarantee (no session argument exists, so this asserts the caller's
 // head is untouched across the call).
-void test_inspect(const std::string& path, const std::string& brep_out) {
+void test_inspect(const std::string& path, const std::string& xbf_out) {
     Session s;
     open_session(s);
     CancelToken tok;
@@ -375,22 +401,26 @@ void test_inspect(const std::string& path, const std::string& brep_out) {
     const std::string sig_before = onecad::session::geometry_signature(s.bodies_copy());
 
     const Envelope resp = onecad::io::handle_inspect_step(
-        Envelope::request(1, "InspectStep", json{{"path", path}, {"includeBrep", true}}), tok);
+        Envelope::request(1, "InspectStep", json{{"path", path}, {"includeGeometry", true}}), tok);
     check(resp.ok.value_or(false), "inspect: ok");
     if (!resp.ok.value_or(false)) return;
 
     check(resp.result.value("solidCount", 0) == 3, "inspect: solidCount 3");
     check_eq(resp.result.value("sourceUnit", std::string{}), "MM", "inspect: sourceUnit MM");
-    check(resp.result.value("brepFormat", 0) == onecad::io::kBrepFormatVersion,
-          "inspect: brepFormat is the pinned BinTools version");
-    check(resp.result["productNames"].is_array(), "inspect: productNames array present");
+    check_eq(resp.result.value("geometryCodec", std::string{}), onecad::io::kXcafCodecName,
+             "inspect: geometryCodec is the worker's preferred replay codec");
+    check(resp.result.value("geometryFormat", 0) == onecad::io::kXcafFormatVersion,
+          "inspect: geometryFormat is the pinned BinXCAF storage version");
+    check(resp.result["productNames"].is_array() && resp.result["productNames"].size() == 3,
+          "inspect: productNames is one entry PER ORDINAL SOLID (Rust zips by ordinal)");
     check(resp.result["diagnostics"].is_array(), "inspect: diagnostics array present");
     const json& bbox = resp.result["bbox"];
     check(bbox["min"].size() == 3 && bbox["max"].size() == 3, "inspect: bbox min/max are 3-vectors");
     check(bbox["max"][1].get<double>() > 200.0,
           "inspect: bbox spans the offset cylinder (y > 200)");
 
-    check(resp.bin.size() == 1 && resp.bin[0].name == "brep", "inspect: one 'brep' bin section");
+    check(resp.bin.size() == 1 && resp.bin[0].name == "geometry",
+          "inspect: one 'geometry' bin section");
     check(!resp.out_bin.empty() && resp.bin[0].off == 0 &&
               resp.bin[0].len == resp.out_bin.size(),
           "inspect: bin section addresses the whole tail");
@@ -405,48 +435,72 @@ void test_inspect(const std::string& path, const std::string& brep_out) {
     check_eq(onecad::session::geometry_signature(s.bodies_copy()), sig_before,
              "inspect: read-only — bodies untouched");
 
-    std::ofstream out(brep_out, std::ios::binary | std::ios::trunc);
+    std::ofstream out(xbf_out, std::ios::binary | std::ios::trunc);
     out.write(reinterpret_cast<const char*>(resp.out_bin.data()),
               static_cast<std::streamsize>(resp.out_bin.size()));
     out.close();
 }
 
-// The equivalence that licenses brep replay: same fixture, same opId, two codecs,
-// identical published geometry.
-void test_brep_lane(const std::string& step_path, const std::string& brep_path) {
+// The equivalence that licenses converted replay: same fixture, same opId, the step
+// lane vs a converted lane, identical published geometry. Run for BOTH converted
+// codecs — `brep` is no longer what the conversion lane emits, but documents
+// authored against it must keep replaying identically (SCHEMA §7.8), so it stays
+// pinned here with bytes produced directly by `io::write_brep_compound`.
+void test_converted_lane(const std::string& step_path, const char* what, const json& params) {
     CancelToken tok;
     Session a;
     open_session(a);
     const PlanRun step_run = run_import_plan(a, 30, "op0", step_params(step_path), tok);
-    check(step_run.ok && step_run.stopped_reason == "completed", "brep: step-codec run completed");
+    check(step_run.ok && step_run.stopped_reason == "completed",
+          std::string(what) + ": step-codec run completed");
 
     Session b;
     open_session(b);
-    const PlanRun brep_run = run_import_plan(b, 31, "op0", brep_params(brep_path), tok);
-    check(brep_run.ok && brep_run.stopped_reason == "completed", "brep: brep-codec run completed");
-    check(!brep_run.step_events.empty(), "brep: planStep streamed");
+    const PlanRun conv = run_import_plan(b, 31, "op0", params, tok);
+    check(conv.ok && conv.stopped_reason == "completed",
+          std::string(what) + ": converted-codec run completed (" + conv.step_message + ")");
+    check(!conv.step_events.empty(), std::string(what) + ": planStep streamed");
 
     const BodyStore ba = a.bodies_copy();
     const BodyStore bb = b.bodies_copy();
-    check(ba.ids() == bb.ids(), "brep: identical BodyIds (same ordinals for the same opId)");
+    check(ba.ids() == bb.ids(),
+          std::string(what) + ": identical BodyIds (same ordinals for the same opId)");
     check_eq(onecad::session::geometry_signature(bb), onecad::session::geometry_signature(ba),
-             "brep: identical geometry signature across codecs");
+             std::string(what) + ": identical geometry signature across codecs");
     check_eq(stepfx::digest_solids(ordinal_shapes(bb)), stepfx::digest_solids(ordinal_shapes(ba)),
-             "brep: identical ordinal digest across codecs");
+             std::string(what) + ": identical ordinal digest across codecs");
 
-    // …and the scale escape hatch works off the CANONICAL (unscaled) brep bytes.
+    // …and the scale escape hatch works off the CANONICAL (unscaled) stored bytes.
+    json scaled_params = params;
+    scaled_params["unitScale"] = 2.0;
     Session c;
     open_session(c);
-    const PlanRun scaled = run_import_plan(c, 32, "op0", brep_params(brep_path, 2.0), tok);
-    check(scaled.ok && scaled.stopped_reason == "completed", "brep: unitScale run completed");
+    const PlanRun scaled = run_import_plan(c, 32, "op0", scaled_params, tok);
+    check(scaled.ok && scaled.stopped_reason == "completed",
+          std::string(what) + ": unitScale run completed");
     const std::vector<TopoDS_Shape> ref = ordinal_shapes(ba);
     const std::vector<TopoDS_Shape> got = ordinal_shapes(c.bodies_copy());
-    check(got.size() == ref.size(), "brep: unitScale preserves the solid count");
+    check(got.size() == ref.size(), std::string(what) + ": unitScale preserves the solid count");
     for (std::size_t k = 0; k < got.size() && k < ref.size(); ++k) {
         check_volume(onecad::session::shape_volume(got[k]),
                      onecad::session::shape_volume(ref[k]) * 8.0,
-                     "brep: unitScale=2 ordinal " + std::to_string(k) + " volume x8");
+                     std::string(what) + ": unitScale=2 ordinal " + std::to_string(k) +
+                         " volume x8");
     }
+}
+
+// BinTools bytes for the brep regression lane. The §7.8 conversion lane no longer
+// produces them (it emits xbf), so the test produces them from the same W0 read the
+// old lane fed, which is exactly what an already-authored document holds.
+void write_brep_fixture(const std::string& step_path, const std::string& brep_out) {
+    const onecad::io::StepReadResult read = onecad::io::read_step(step_path);
+    check(read.ok(), "brep fixture: W0 read succeeded");
+    std::vector<std::uint8_t> blob;
+    const std::string err = onecad::io::write_brep_compound(read.solids, blob);
+    check(err.empty(), "brep fixture: BinTools compound written (" + err + ")");
+    std::ofstream out(brep_out, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(blob.data()),
+              static_cast<std::streamsize>(blob.size()));
 }
 
 // Run `fn` with the process's real stdout captured to a temp file; return the
@@ -487,6 +541,7 @@ int main() {
     const std::string multi = tmp_path("onecad_import_multi.step");
     const std::string garbage = tmp_path("onecad_import_garbage.step");
     const std::string brep = tmp_path("onecad_import_multi.brep");
+    const std::string xbf = tmp_path("onecad_import_multi.xbf");
 
     const std::string e1 = stepfx::write_step_fixture(stepfx::make_single_box(), single);
     const std::string e2 = stepfx::write_step_fixture(stepfx::make_multi_solid(), multi);
@@ -511,13 +566,15 @@ int main() {
         test_garbage_file(multi, garbage, single);
         test_param_guards(multi);
         test_cancel(multi);
-        test_inspect(multi, brep);
-        test_brep_lane(multi, brep);
+        test_inspect(multi, xbf);
+        write_brep_fixture(multi, brep);
+        test_converted_lane(multi, "brep", brep_params(brep));
+        test_converted_lane(multi, "xbf", xbf_params(xbf));
     });
     check(stdout_bytes == 0, "stdout hygiene: zero bytes written to real stdout");
 
     std::error_code rm;
-    for (const std::string& p : {single, multi, garbage, brep}) std::filesystem::remove(p, rm);
+    for (const std::string& p : {single, multi, garbage, brep, xbf}) std::filesystem::remove(p, rm);
     if (g_failures == 0) std::fprintf(stderr, "import_step: OK\n");
     return g_failures;
 }

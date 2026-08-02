@@ -33,27 +33,42 @@
 #include <tuple>
 #include <vector>
 
+#include <map>
+
 #include <BRepBuilderAPI_MakeShape.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRep_Builder.hxx>
 #include <BRepGProp.hxx>
+#include <BinXCAFDrivers.hxx>
 #include <GProp_GProps.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Interface_Static.hxx>
+#include <Quantity_Color.hxx>
+#include <Quantity_ColorRGBA.hxx>
+#include <STEPCAFControl_Writer.hxx>
 #include <STEPControl_StepModelType.hxx>
 #include <STEPControl_Writer.hxx>
 #include <Standard_Failure.hxx>
+#include <TCollection_ExtendedString.hxx>
+#include <TDataStd_Name.hxx>
+#include <TDF_Label.hxx>
+#include <TDocStd_Application.hxx>
+#include <TDocStd_Document.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Shape.hxx>
+#include <XCAFDoc_ColorTool.hxx>
+#include <XCAFDoc_DocumentTool.hxx>
+#include <XCAFDoc_ShapeTool.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
 
 #include "elementmap/ElementMapPartition.h"
 #include "io/StepRead.h"
+#include "io/XcafCodec.h"
 #include "ops/OpCommon.h"
 #include "session/BodyStore.h"
 #include "session/Signatures.h"
@@ -122,6 +137,125 @@ inline std::string write_step_fixture(const TopoDS_Shape& shape, const std::stri
 // 1e-6 quantization — the SAME constant `ops::ordered_solids` and the ElementMap
 // descriptors use. Rendered as a signed integer, never as a formatted double.
 inline long long quantize(double v) { return static_cast<long long>(std::llround(v * 1e6)); }
+
+// --- Colored XCAF fixture (WP-A W4.5) ---------------------------------------
+//
+// Authored through `STEPCAFControl_Writer` so the STEP file really carries XCAF
+// product names + `surface_style_usage` colors, exactly like a file exported from
+// SolidWorks/CATIA — the thing the plain `STEPControl_Writer` fixture above cannot
+// express and therefore could never have caught the attribute loss.
+//
+// Colors are authored in **sRGB** (`Quantity_TOC_sRGB`) at 0/255 endpoints so the
+// STEP linear round-trip is exact and the expected bytes are unambiguous, plus one
+// mid-tone that exercises the non-linear conversion (assert that one with a small
+// per-channel tolerance).
+
+// Packed sRGB RGBA, the `io::PackedColor` byte order.
+inline constexpr std::uint32_t kColorRed = 0xFF0000FFu;
+inline constexpr std::uint32_t kColorGreen = 0x00FF00FFu;
+inline constexpr std::uint32_t kColorYellow = 0xFFFF00FFu;
+inline constexpr std::uint32_t kColorBlue = 0x0000FFFFu;
+
+inline constexpr const char* kPartAName = "PartA";  // the 20x30x40 box (volume 24000)
+inline constexpr const char* kPartBName = "PartB";  // the 10x10x10 box (volume 1000)
+
+// Quantized face centroid — the key the expectations below are stated in, because
+// the heal pipeline may renumber the face map but never moves a face.
+struct FaceSpot {
+    long long cx = 0, cy = 0, cz = 0;
+    bool operator<(const FaceSpot& o) const {
+        if (cx != o.cx) return cx < o.cx;
+        if (cy != o.cy) return cy < o.cy;
+        return cz < o.cz;
+    }
+};
+
+inline FaceSpot spot_of(const TopoDS_Shape& face) {
+    GProp_GProps p;
+    BRepGProp::SurfaceProperties(face, p);
+    const gp_Pnt c = p.CentreOfMass();
+    return FaceSpot{quantize(c.X()), quantize(c.Y()), quantize(c.Z())};
+}
+
+// What `write_colored_step_fixture` authored, stated geometrically.
+struct ColoredFixture {
+    std::map<FaceSpot, std::uint32_t> face_colors;   // every face that got a color
+    std::map<long long, std::string> solid_names;    // quantized volume → product name
+};
+
+inline Handle(TDocStd_Application) fixture_app() {
+    static Handle(TDocStd_Application) app;
+    if (app.IsNull()) {
+        app = new TDocStd_Application();
+        BinXCAFDrivers::DefineFormat(app);
+    }
+    return app;
+}
+
+inline Quantity_ColorRGBA srgb(std::uint32_t packed) {
+    return Quantity_ColorRGBA(Quantity_Color(static_cast<double>((packed >> 24) & 0xff) / 255.0,
+                                             static_cast<double>((packed >> 16) & 0xff) / 255.0,
+                                             static_cast<double>((packed >> 8) & 0xff) / 255.0,
+                                             Quantity_TOC_sRGB),
+                              static_cast<float>(packed & 0xff) / 255.0f);
+}
+
+// Two named boxes: PartA (24000) with THREE per-face colors, PartB (1000) with a
+// whole-solid color (so all six of its faces inherit one). The volumes differ so
+// `ops::ordered_solids` puts the SMALL box at ordinal 0 — names and colors must
+// follow the ORDINAL, not the file order. Returns "" on success.
+inline std::string write_colored_step_fixture(const std::string& path, ColoredFixture& expect,
+                                              std::uint32_t mid_tone = 0x8040C0FFu) {
+    try {
+        Handle(TDocStd_Document) doc;
+        fixture_app()->NewDocument("BinXCAF", doc);
+        if (doc.IsNull()) return "colored fixture: no XCAF document";
+        Handle(XCAFDoc_ShapeTool) shapes = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+        Handle(XCAFDoc_ColorTool) colors = XCAFDoc_DocumentTool::ColorTool(doc->Main());
+
+        const TopoDS_Shape a =
+            BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), kBoxDx, kBoxDy, kBoxDz).Shape();
+        const TopoDS_Shape b =
+            BRepPrimAPI_MakeBox(gp_Pnt(100, 0, 0), kBoxBDx, kBoxBDy, kBoxBDz).Shape();
+        const TDF_Label la = shapes->AddShape(a, Standard_False);
+        const TDF_Label lb = shapes->AddShape(b, Standard_False);
+        TDataStd_Name::Set(la, TCollection_ExtendedString(kPartAName));
+        TDataStd_Name::Set(lb, TCollection_ExtendedString(kPartBName));
+        expect.solid_names[quantize(kBoxAVolume)] = kPartAName;
+        expect.solid_names[quantize(kBoxBVolume)] = kPartBName;
+
+        TopTools_IndexedMapOfShape fa;
+        TopExp::MapShapes(a, TopAbs_FACE, fa);
+        const std::uint32_t painted[4] = {kColorRed, kColorGreen, kColorYellow, mid_tone};
+        for (int i = 1; i <= 4 && i <= fa.Extent(); ++i) {
+            const TDF_Label sub = shapes->AddSubShape(la, fa(i));
+            if (sub.IsNull()) return "colored fixture: face " + std::to_string(i) + " unaddressable";
+            colors->SetColor(sub, srgb(painted[i - 1]), XCAFDoc_ColorSurf);
+            expect.face_colors[spot_of(fa(i))] = painted[i - 1];
+        }
+
+        // Whole-solid color: XCAF resolves it for every face beneath the label, so
+        // the import must colour all six.
+        colors->SetColor(lb, srgb(kColorBlue), XCAFDoc_ColorSurf);
+        TopTools_IndexedMapOfShape fb;
+        TopExp::MapShapes(b, TopAbs_FACE, fb);
+        for (int i = 1; i <= fb.Extent(); ++i) expect.face_colors[spot_of(fb(i))] = kColorBlue;
+
+        STEPCAFControl_Writer writer;
+        Interface_Static::SetCVal("write.step.schema", "AP214IS");
+        if (writer.Transfer(doc, STEPControl_AsIs) != Standard_True) {
+            fixture_app()->Close(doc);
+            return "colored fixture: transfer failed";
+        }
+        const IFSelect_ReturnStatus ws = writer.Write(path.c_str());
+        fixture_app()->Close(doc);
+        if (ws != IFSelect_RetDone) return "colored fixture: write failed";
+    } catch (const Standard_Failure& f) {
+        return std::string("colored fixture raised: ") +
+               (f.GetMessageString() != nullptr ? f.GetMessageString() : "OCCT");
+    }
+    return "";
+}
 
 // Digest of ONE ordered solid vector. Single line, fields separated by '|', so a
 // mismatch shows up as a diff on one line rather than a wall of text:

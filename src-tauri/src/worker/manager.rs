@@ -1520,16 +1520,16 @@ impl crate::worker::StepImport for WorkerManager {
     async fn inspect_step(
         &self,
         path: &std::path::Path,
-        include_brep: bool,
+        include_geometry: bool,
     ) -> Result<crate::worker::StepInspection, EngineError> {
         let client = self.client_or_err()?;
-        // The healed BinTools compound rides INLINE in the response tail (SCHEMA
-        // §7.8) — one `brep` section, no bulk-chunk lane — so this is the same
+        // The healed replay bytes ride INLINE in the response tail (SCHEMA §7.8) —
+        // one `geometry` section, no bulk-chunk lane — so this is the same
         // `response_with_bin` shape `SketchRegions`/`PreviewOp` use.
         let (resp, tail) = client
             .start_request(
                 "InspectStep",
-                wire::inspect_step_args(&path.to_string_lossy(), include_brep),
+                wire::inspect_step_args(&path.to_string_lossy(), include_geometry),
                 Lane::Control,
             )
             .await
@@ -1540,19 +1540,19 @@ impl crate::worker::StepImport for WorkerManager {
         let sections = resp.bin.clone().unwrap_or_default();
         let result = ok_result(resp)?;
         let mut inspection = wire::parse_inspect_step(&result);
-        if include_brep {
+        if include_geometry {
             let by_name = wire::validate_bin_sections("InspectStep", &sections, &tail)
                 .map_err(|e| protocol(&e))?;
             // A missing section when the bytes were REQUESTED is a protocol break, not
-            // a soft miss: the caller is about to author a `sourceCodec:"brep"` record
+            // a soft miss: the caller is about to author a converted-codec record
             // against them, so an empty blob would persist a record whose replay source
             // does not exist.
-            let section = by_name.get("brep").ok_or_else(|| {
-                protocol("InspectStep: includeBrep set but no `brep` bin section")
+            let section = by_name.get("geometry").ok_or_else(|| {
+                protocol("InspectStep: includeGeometry set but no `geometry` bin section")
             })?;
             let start = section.off as usize;
             let end = start + section.len as usize;
-            inspection.brep_bytes = Some(tail[start..end].to_vec());
+            inspection.geometry_bytes = Some(tail[start..end].to_vec());
         }
         Ok(inspection)
     }

@@ -627,18 +627,26 @@ pub enum PlaneKind {
 /// the `imports/<sha256>.<ext>` container-section extension exactly (the enum IS
 /// the extension registry — see [`ImportSourceCodec::extension`]).
 ///
-/// `Step` is the raw user-supplied STEP text; `Brep` is a kernel-native BinTools
-/// dump produced ONCE at import and pinned by
-/// [`ImportStepParams::brep_format`] — a from-0 replay never consults
-/// checkpoints, so re-parsing STEP on every open is the alternative.
+/// `Step` is the raw user-supplied STEP text; `Brep` and `Xbf` are kernel-native
+/// dumps produced ONCE at import and pinned by [`ImportStepParams::brep_format`] —
+/// a from-0 replay never consults checkpoints, so re-parsing STEP on every open is
+/// the alternative.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ImportSourceCodec {
     /// ISO 10303-21 STEP text (`imports/<sha256>.step`).
     #[default]
     Step,
-    /// OCCT BinTools BREP dump (`imports/<sha256>.brep`).
+    /// OCCT BinTools BREP dump (`imports/<sha256>.brep`). Topology only — it
+    /// carries NO XCAF attributes, so a document authored against it loses the
+    /// imported product names and face colors. Superseded by [`Self::Xbf`] as the
+    /// conversion lane's output (SCHEMA §14, 2026-08-02) and kept only so already
+    /// authored documents keep replaying.
     Brep,
+    /// OCCT BinXCAF document (`imports/<sha256>.xbf`) — shapes **plus** the XCAF
+    /// product names and per-face colors. What the §7.8 conversion lane emits
+    /// today, so an import survives save→reopen with its appearance intact.
+    Xbf,
 }
 
 impl ImportSourceCodec {
@@ -648,6 +656,7 @@ impl ImportSourceCodec {
         match self {
             ImportSourceCodec::Step => "step",
             ImportSourceCodec::Brep => "brep",
+            ImportSourceCodec::Xbf => "xbf",
         }
     }
 
@@ -659,8 +668,17 @@ impl ImportSourceCodec {
         match ext {
             "step" => Some(ImportSourceCodec::Step),
             "brep" => Some(ImportSourceCodec::Brep),
+            "xbf" => Some(ImportSourceCodec::Xbf),
             _ => None,
         }
+    }
+
+    /// True for a CONVERTED replay form — one whose bytes are a kernel dump whose
+    /// binary format version must be pinned in [`ImportStepParams::brep_format`].
+    /// False for [`Self::Step`], where a format pin would be meaningless.
+    #[must_use]
+    pub fn is_converted(self) -> bool {
+        matches!(self, ImportSourceCodec::Brep | ImportSourceCodec::Xbf)
     }
 }
 
@@ -1046,10 +1064,13 @@ pub struct ImportStepParams {
     /// already document units).
     #[serde(default = "default_unit_scale")]
     pub unit_scale: Scalar,
-    /// BinTools format version the `.brep` blob was written with — present iff
-    /// `source_codec == Brep`, absent (skipped) otherwise, so a STEP import
-    /// serializes without the key at all. Pinned because a BinTools dump is only
-    /// readable by a kernel that understands its format version.
+    /// Binary format version the converted blob was written with — the BinTools
+    /// version for `Brep`, the OCAF storage version for `Xbf`. Present iff
+    /// [`ImportSourceCodec::is_converted`], absent (skipped) otherwise, so a STEP
+    /// import serializes without the key at all. Pinned because a kernel dump is
+    /// only readable by a kernel that understands its format version. (The field
+    /// name predates the `xbf` codec and is frozen — renaming it would move a
+    /// `document.json` key for zero behavioural gain.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brep_format: Option<u32>,
     /// SHA-256 of the ORIGINAL user-supplied bytes when `source_sha256` points at
@@ -1106,11 +1127,12 @@ impl ImportStepParams {
                 );
             }
         }
-        match (self.source_codec, self.brep_format) {
-            (ImportSourceCodec::Brep, None) => {
-                Err("import sourceCodec `brep` requires a brepFormat (BinTools version pin)".into())
-            }
-            (ImportSourceCodec::Step, Some(v)) => Err(format!(
+        match (self.source_codec.is_converted(), self.brep_format) {
+            (true, None) => Err(format!(
+                "import sourceCodec `{}` requires a brepFormat (binary format version pin)",
+                self.source_codec.extension()
+            )),
+            (false, Some(v)) => Err(format!(
                 "import sourceCodec `step` must not carry a brepFormat (got {v})"
             )),
             _ => Ok(()),
@@ -1350,11 +1372,60 @@ mod tests {
             ..step_params()
         };
         assert!(p.validate().is_err());
+
+        // `xbf` is a CONVERTED form too, so the same pin rule applies to it —
+        // an OCAF document is only readable by a build that knows its storage
+        // version, exactly like a BinTools dump.
+        let p = ImportStepParams {
+            source_codec: ImportSourceCodec::Xbf,
+            brep_format: None,
+            provenance_sha256: None,
+            ..brep_params()
+        };
+        assert!(
+            p.validate().is_err(),
+            "an xbf record without a format pin must be rejected"
+        );
+        let p = ImportStepParams {
+            source_codec: ImportSourceCodec::Xbf,
+            brep_format: Some(12),
+            provenance_sha256: None,
+            ..brep_params()
+        };
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn xbf_codec_serializes_as_its_extension() {
+        // The enum IS the `imports/<sha>.<ext>` registry, so the wire value, the
+        // extension and the SCHEMA §7.8 `geometryCodec` string are one string.
+        let params = ImportStepParams {
+            source_codec: ImportSourceCodec::Xbf,
+            brep_format: Some(12),
+            provenance_sha256: None,
+            ..brep_params()
+        };
+        let json = serde_json::to_value(KnownOperation::ImportStep(params.clone())).unwrap();
+        assert_eq!(json["params"]["sourceCodec"], serde_json::json!("xbf"));
+        assert_eq!(json["params"]["brepFormat"], serde_json::json!(12));
+        assert_eq!(ImportSourceCodec::Xbf.extension(), "xbf");
+        assert!(ImportSourceCodec::Xbf.is_converted());
+        assert!(!ImportSourceCodec::Step.is_converted());
+
+        let back: KnownOperation = serde_json::from_value(json).unwrap();
+        match back {
+            KnownOperation::ImportStep(p) => assert_eq!(p, params),
+            other => panic!("expected ImportStep, got {other:?}"),
+        }
     }
 
     #[test]
     fn codec_extension_registry_is_bijective() {
-        for codec in [ImportSourceCodec::Step, ImportSourceCodec::Brep] {
+        for codec in [
+            ImportSourceCodec::Step,
+            ImportSourceCodec::Brep,
+            ImportSourceCodec::Xbf,
+        ] {
             assert_eq!(
                 ImportSourceCodec::from_extension(codec.extension()),
                 Some(codec)

@@ -175,7 +175,8 @@ Envelope handle_tessellate(Session& session, const Envelope& req) {
         const onecad::session::BodyRecord* rec = bodies.get(bid);
         if (!rec) continue;
         onecad::tess::BodyMesh bm =
-            onecad::tess::tessellate_body(rec->geom, bid, lod, include_edges, &part);
+            onecad::tess::tessellate_body(rec->geom, bid, lod, include_edges, &part,
+                                          &rec->face_colors);
         if (!bm.ok) continue;
         const std::uint64_t off = resp.out_bin.size();
         resp.out_bin.insert(resp.out_bin.end(), bm.blob.begin(), bm.blob.end());

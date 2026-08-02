@@ -19,6 +19,7 @@ enum SectionType : std::uint32_t {
     EDGE_POSITIONS = 8,
     EDGE_ID_OFFS = 9,
     EDGE_ID_CHARS = 10,
+    FACE_COLORS = 12,
 };
 
 void put_u16(std::vector<std::uint8_t>& b, std::size_t at, std::uint16_t v) {
@@ -132,6 +133,25 @@ std::vector<std::uint8_t> encode_mesh1(const Mesh1Input& in) {
         build_id_table(in.edge_ids, EDGE_ID_OFFS, EDGE_ID_CHARS, sections);
     }
 
+    // FACE_COLORS (type 12) — appended LAST so the table stays sorted by offset AND
+    // by type, and so a color-less mesh is byte-identical to the pre-W4.5 output.
+    // The size guard is load-bearing: an index space that is not exactly the
+    // FACE_RANGES index space would colour the wrong faces, so a mismatch drops the
+    // section rather than emitting a misaligned one.
+    const bool has_face_colors = !in.face_colors.empty() && in.face_colors.size() == F;
+    if (has_face_colors) {
+        Section s;
+        s.type = FACE_COLORS;
+        s.data.reserve(in.face_colors.size() * 4);
+        for (std::uint32_t rgba : in.face_colors) {
+            s.data.push_back(static_cast<std::uint8_t>((rgba >> 24) & 0xff));  // r
+            s.data.push_back(static_cast<std::uint8_t>((rgba >> 16) & 0xff));  // g
+            s.data.push_back(static_cast<std::uint8_t>((rgba >> 8) & 0xff));   // b
+            s.data.push_back(static_cast<std::uint8_t>(rgba & 0xff));          // a
+        }
+        sections.push_back(std::move(s));
+    }
+
     const std::uint16_t section_count = static_cast<std::uint16_t>(sections.size());
 
     // --- header + table skeleton ---
@@ -159,6 +179,7 @@ std::vector<std::uint8_t> encode_mesh1(const Mesh1Input& in) {
     if (in.has_normals && !in.normals.empty()) flags |= 0x0001;  // HAS_NORMALS
     if (in.has_edges) flags |= 0x0002;                           // HAS_EDGES
     if (in.ids_have_elementids) flags |= 0x0008;                 // IDS_HAVE_ELEMENTIDS
+    if (has_face_colors) flags |= 0x0010;                        // HAS_FACE_COLORS
 
     put_u32(blob, 0x00, 0x4D455348);  // magic "MESH" (LE u32)
     put_u16(blob, 0x04, 1);           // version

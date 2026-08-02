@@ -1639,7 +1639,7 @@ delete its bodies on the next regen; see the changelog.)
 { "path": "/tmp/onecad/import_ab12.step", "includeGeometry": true }
 // result
 { "solidCount": 2, "sourceUnit": "INCH", "bbox": { "min": [0,0,0], "max": [50.8,25.4,12.7] },
-  "productNames": ["Bracket", "Pin"], "geometryCodec": "xbf", "geometryFormat": 4,
+  "productNames": ["Bracket", "Pin"], "geometryCodec": "xbf", "geometryFormat": 12,
   "diagnostics": [ { "severity": "warning", "code": "STEP_HEALED", "message": "…" } ] }
 // bin (only when includeGeometry): { "name": "geometry", … } — the healed
 // result serialized in `geometryCodec`, solids in the §7.3 ordinal order

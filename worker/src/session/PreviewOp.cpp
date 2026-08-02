@@ -169,7 +169,7 @@ std::string append_mesh(const std::string& body_id, const BodyRecord& body,
                         const elementmap::ElementMapPartition& partition,
                         Envelope& response, json& meshes) {
     tess::BodyMesh mesh = tess::tessellate_body(
-        body.geom, body_id, lod, /*include_edges=*/true, &partition);
+        body.geom, body_id, lod, /*include_edges=*/true, &partition, &body.face_colors);
     if (!mesh.ok || mesh.triangle_count == 0) {
         return "PreviewOp: changed body produced no preview mesh: " + body_id;
     }

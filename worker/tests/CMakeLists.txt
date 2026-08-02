@@ -136,6 +136,14 @@ add_executable(test_import_step test_import_step.cpp)
 target_link_libraries(test_import_step PRIVATE worker_core)
 add_test(NAME import_step COMMAND test_import_step)
 
+# --- WP-A W4.5: XCAF fidelity end to end — a colored, named multi-solid STEP
+#     (authored via STEPCAFControl_Writer, see step_fixture_util.h) through the
+#     probe, the xbf conversion, the `sourceCodec:"xbf"` replay op and out into the
+#     MESH1 FACE_COLORS section. Generates its fixtures into the system temp dir. ---
+add_executable(test_xcaf_import test_xcaf_import.cpp)
+target_link_libraries(test_xcaf_import PRIVATE worker_core)
+add_test(NAME xcaf_import COMMAND test_xcaf_import)
+
 # --- Region-with-hole extrude: volume-checked (GProp) hole subtraction, incl. a
 #     no-hole negative control (in-process, real OCCT). ---
 add_executable(test_hole_extrude test_hole_extrude.cpp)

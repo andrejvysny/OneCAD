@@ -19,6 +19,7 @@
 // cross-lane access (see Session.h).
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <string>
 #include <utility>
@@ -32,12 +33,24 @@ namespace onecad::session {
 // a real OCCT shape. Nothing else in BodyStore references the concrete payload.
 using BodyGeometry = TopoDS_Shape;
 
-// One registered body: identity, provenance, geometry, visibility.
+// One registered body: identity, provenance, geometry, visibility, appearance.
 struct BodyRecord {
     std::string id;            // BodyId (e.g. "body_op_5")
     std::string provenance;    // producing opId (SCHEMA §7.3 op.opId)
     BodyGeometry geom;         // real TopoDS_Shape (W-WP5)
     bool visible = true;
+
+    // Authored per-face appearance, indexed by `TopExp::MapShapes(geom, TopAbs_FACE)`
+    // order — the SAME order `tess::tessellate_body` walks, which is what makes the
+    // MESH1 FACE_COLORS section index-aligned with FACE_RANGES (mesh_format.md §4).
+    // Packed `r<<24|g<<16|b<<8|a`, u8 sRGB; 0 == unset. EMPTY for every body except
+    // one imported from a colored STEP (WP-A W4.5).
+    //
+    // NOT document state: colors ride the tessellation only. Minting an ElementId per
+    // face just to carry appearance would bloat the resolution-ladder surface, and a
+    // TopoKey is snapshot-scoped, so neither is a place to persist a color. Replay
+    // restores them from the `xbf` import blob instead (SCHEMA §14, 2026-08-02).
+    std::vector<std::uint32_t> face_colors;
 };
 
 // A registry of bodies keyed by BodyId, iterated in sorted id order for
@@ -51,6 +64,11 @@ public:
         r.provenance = std::move(provenance);
         r.geom = std::move(geom);
         r.visible = true;
+        // Appearance belongs to the SHAPE, so replacing the shape must clear it: a
+        // boolean/fillet result reusing a BodyId has a different face set, and a
+        // stale color vector would land on the wrong faces (or trip the size guard
+        // and vanish silently). The ImportStep op re-sets it right after this call.
+        r.face_colors.clear();
         return r;
     }
 

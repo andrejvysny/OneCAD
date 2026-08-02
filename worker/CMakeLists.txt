@@ -82,6 +82,13 @@ add_library(worker_core STATIC
     # --- STEP-IMPORT WP-A W1: the `ImportStep` op (§7.3) + the read-only
     #     `InspectStep` verb (§7.8) + the BinTools brep byte form they share. ---
     src/io/BrepCodec.cpp
+    # --- WP-A W4.5: XCAF fidelity — the BinXCAF (`.xbf`) replay codec that keeps
+    #     product names + face colors across save/reopen, and the attribute-only
+    #     STEP pass that harvests them. OCCT's XCAF/OCAF libs (TKXCAF, TKLCAF,
+    #     TKBinXCAF, TKCDF, TKVCAF) already ride in ${OpenCASCADE_LIBRARIES}. ---
+    src/io/OcafApp.cpp
+    src/io/XcafCodec.cpp
+    src/io/XcafRead.cpp
     src/io/InspectStep.cpp
     src/ops/ImportOp.cpp
     src/session/ElementIdentity.cpp

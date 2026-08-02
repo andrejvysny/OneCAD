@@ -43,9 +43,17 @@ struct RawMesh {
 
 // Tessellate one body into a MESH1 blob. `lod` ∈ "coarse"|"medium"|"fine".
 // `partition` (optional) supplies minted ElementIds by TopoKey for id labelling.
+//
+// `face_colors` (optional, WP-A W4.5) is the body's authored appearance in
+// `session::BodyRecord::face_colors` form — packed sRGB RGBA, indexed by the SAME
+// `TopExp::MapShapes(shape, TopAbs_FACE)` order this function walks. It is copied
+// verbatim into the MESH1 FACE_COLORS section; a null pointer, an empty vector, or
+// a length that is not the face count leaves the section out and the flag bit clear
+// (mesh_format.md §2/§4), so a body without colors produces byte-identical output.
 BodyMesh tessellate_body(const TopoDS_Shape& shape, const std::string& body_id,
                          const std::string& lod, bool include_edges,
-                         const elementmap::ElementMapPartition* partition);
+                         const elementmap::ElementMapPartition* partition,
+                         const std::vector<std::uint32_t>* face_colors = nullptr);
 
 // Mesh one body into raw triangle arrays (no ids, no edges). `lod` selects the same
 // deflection tier as tessellate_body, so the triangles match the viewport mesh.

@@ -23,6 +23,15 @@ struct Mesh1Input {
     std::vector<std::pair<std::uint32_t, std::uint32_t>> face_ranges;  // {firstTri, triCount}
     std::vector<std::string> face_ids;                   // one per face (TopoKey/ElementId)
 
+    // Authored per-face appearance (mesh_format.md §4 type 12, flags bit 4). Packed
+    // `r<<24|g<<16|b<<8|a`, u8 sRGB; alpha 0 == "unset" (renderer falls back to the
+    // body material). EMPTY — the overwhelmingly common case — means the FACE_COLORS
+    // section is omitted entirely and the flag bit stays clear, so a mesh without
+    // authored colors is byte-identical to what this encoder produced before the
+    // section existed. When non-empty it MUST be exactly `face_ranges.size()` long:
+    // the index space IS the FACE_RANGES index space.
+    std::vector<std::uint32_t> face_colors;
+
     // Edge sections (present iff has_edges).
     std::vector<float> edge_positions;                   // 3·P (polyline points, grouped by edge)
     std::vector<std::pair<std::uint32_t, std::uint32_t>> edge_ranges;  // {firstPoint, pointCount}

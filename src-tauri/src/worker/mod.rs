@@ -318,11 +318,12 @@ pub trait FaceBoundaryProjection: Send + Sync {
 
 /// One `InspectStep` result (SCHEMA §7.8) — a read-only probe of a STEP file.
 ///
-/// `brep_bytes` is `Some` only when the caller asked for the conversion lane
-/// (`include_brep`): the healed, mm-normalized, **UNSCALED** BinTools compound
-/// whose solid order IS the §7.3 ordinal order. `brep_format` pins the BinTools
-/// version those bytes were written in (reported unconditionally, so a caller that
-/// defers fetching the bytes still learns the version to pin).
+/// `geometry_bytes` is `Some` only when the caller asked for the conversion lane
+/// (`include_geometry`): the healed, mm-normalized, **UNSCALED** result serialized
+/// in `geometry_codec`, whose solid order IS the §7.3 ordinal order.
+/// `geometry_codec` + `geometry_format` name that byte form and pin its binary
+/// format version (both reported unconditionally, so a caller that defers fetching
+/// the bytes still learns what to pin).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct StepInspection {
     /// Number of solids the heal pipeline recovered (= the number of bodies the
@@ -332,17 +333,24 @@ pub struct StepInspection {
     pub source_unit: String,
     /// Axis-aligned bounds over every solid, `(min, max)` in mm.
     pub bbox: ([f64; 3], [f64; 3]),
-    /// STEP product names in ordinal order, where recoverable. May be shorter than
-    /// `solid_count` (or empty) — a name is best-effort evidence, never identity.
+    /// STEP product names, ONE PER ORDINAL SOLID where recoverable (an entry is
+    /// empty when the file carried no name for that solid). A length that differs
+    /// from the minted body count makes the whole list unusable, so the worker
+    /// pads rather than truncates — a name is best-effort evidence, never identity.
     pub product_names: Vec<String>,
-    /// The BinTools format version of `brep_bytes` (and the value to pin in
+    /// The codec `geometry_bytes` is serialized in, and the value to author into
+    /// `ImportStepParams::source_codec` (SCHEMA §7.8 `geometryCodec`; `"xbf"`
+    /// today). Empty when the worker reported none.
+    pub geometry_codec: String,
+    /// The binary format version of `geometry_bytes` (and the value to pin in
     /// `ImportStepParams::brep_format`).
-    pub brep_format: u32,
+    pub geometry_format: u32,
     /// Advisory findings from the read (`STEP_SEWN`, `STEP_HEALED`, …) as
     /// `(code, message)`. The probe itself succeeded — a failure is an error.
     pub diagnostics: Vec<(String, String)>,
-    /// The healed BinTools compound bytes, when `include_brep` was requested.
-    pub brep_bytes: Option<Vec<u8>>,
+    /// The healed geometry bytes in `geometry_codec`, when `include_geometry` was
+    /// requested.
+    pub geometry_bytes: Option<Vec<u8>>,
 }
 
 /// Probes a STEP file without touching any session state (SCHEMA §7.8
@@ -351,9 +359,9 @@ pub struct StepInspection {
 /// A separate seam beside [`FaceBoundaryProjection`] for the same reason: the
 /// probe neither fences, prepares, nor publishes anything, so it does not belong on
 /// the regen-shaped [`GeometryEngine`] trait. It is the **conversion lane** for the
-/// brep-primary replay policy (W0 decision): Rust probes the user's file once at
-/// import-command time, persists the returned brep bytes alongside the STEP source
-/// in the container, and authors the `ImportStep` record against the brep — so
+/// converted-primary replay policy (W0 decision): Rust probes the user's file once
+/// at import-command time, persists the returned geometry bytes alongside the STEP
+/// source in the container, and authors the `ImportStep` record against them — so
 /// replay never re-parses STEP.
 ///
 /// A malformed file comes back as a recoverable `OP_FAILED`-class [`EngineError`],
@@ -363,8 +371,8 @@ pub struct StepInspection {
 #[async_trait]
 pub trait StepImport: Send + Sync {
     /// `InspectStep` (SCHEMA §7.8). `path` is a Rust-owned path the worker reads;
-    /// `include_brep` additionally requests the healed BinTools compound in the
-    /// response's `brep` bin section.
+    /// `include_geometry` additionally requests the healed replay bytes in the
+    /// response's `geometry` bin section.
     ///
     /// # Errors
     /// [`EngineError`] on a disconnected worker, a malformed response, or an
@@ -372,7 +380,7 @@ pub trait StepImport: Send + Sync {
     async fn inspect_step(
         &self,
         path: &Path,
-        include_brep: bool,
+        include_geometry: bool,
     ) -> Result<StepInspection, EngineError>;
 }
 
@@ -774,7 +782,7 @@ impl StepImport for PendingBackend {
     async fn inspect_step(
         &self,
         _path: &Path,
-        _include_brep: bool,
+        _include_geometry: bool,
     ) -> Result<StepInspection, EngineError> {
         Err(Self::not_ready())
     }

@@ -432,21 +432,27 @@ async fn import_mints_ordinal_children_with_exact_volumes() {
     let mut rt = runtime_over(&wm);
     let prepared = do_import(&wm, &mut rt, &step, false).await;
 
-    // The probe is what the record is authored from — brep-primary replay policy.
+    // The probe is what the record is authored from — converted-primary replay
+    // policy, with the WORKER naming the codec (SCHEMA §7.8 `geometryCodec`).
     assert_eq!(prepared.solid_count, 2, "the STEP carries two solids");
+    assert!(
+        prepared.params.source_codec.is_converted(),
+        "the replayed blob is the healed kernel dump, not the STEP (got {:?})",
+        prepared.params.source_codec
+    );
     assert_eq!(
         prepared.params.source_codec,
-        ImportSourceCodec::Brep,
-        "the replayed blob is the healed brep, not the STEP"
+        ImportSourceCodec::Xbf,
+        "the conversion lane emits BinXCAF, so imported names/colors survive replay"
     );
     assert!(
         prepared.params.brep_format.is_some(),
-        "a brep-codec record MUST pin its BinTools version"
+        "a converted-codec record MUST pin its binary format version"
     );
     assert_eq!(
         prepared.blobs.len(),
         2,
-        "brep replay blob + co-stored STEP provenance"
+        "converted replay blob + co-stored STEP provenance"
     );
     assert_eq!(
         prepared.params.provenance_sha256.as_deref(),
