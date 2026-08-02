@@ -64,7 +64,8 @@ Exactly 64 bytes (one cache line). Fields (LE):
 | 1 | `0x0002` | `HAS_EDGES` — EDGE_* sections present |
 | 2 | `0x0004` | `HAS_FACE_BBOXES` — FACE_BBOXES section present |
 | 3 | `0x0008` | `IDS_HAVE_ELEMENTIDS` — face/edge id tables contain minted ElementIds (else pure TopoKeys) |
-| 4–15 | | reserved (MUST be 0) |
+| 4 | `0x0010` | `HAS_FACE_COLORS` — FACE_COLORS section present (2026-08-02, WP-A W4.5) |
+| 5–15 | | reserved (MUST be 0) |
 
 Buffers are **Z-up right-handed** (hard frontend invariant): positions are
 consumed verbatim into GPU buffers, no axis swaps.
@@ -110,6 +111,7 @@ A section `type` MUST appear at most once. Unknown `type` values MUST be skipped
 | 9 | `EDGE_ID_OFFS` | if `HAS_EDGES` | `4·(E+1)` | u32 prefix-sum offsets into EDGE_ID_CHARS |
 | 10 | `EDGE_ID_CHARS` | if `HAS_EDGES` | `offs[E]` | UTF-8 bytes of all edge ids concatenated (`"e:5"` or ElementId) |
 | 11 | `FACE_BBOXES` | optional | `24·F` | per face: f32 × 6 `{minX,minY,minZ,maxX,maxY,maxZ}` — pick accel |
+| 12 | `FACE_COLORS` | if `HAS_FACE_COLORS` | `4·F` | per face: u8 × 4 sRGB `{r,g,b,a}` — authored appearance (imported XCAF color; `a` currently 255). Faces with no authored color carry `{0,0,0,0}` (alpha 0 = "unset", renderer falls back to the body material). Added 2026-08-02 (WP-A W4.5); consumers written earlier skip it per the unknown-`type` rule |
 
 Notes:
 - Triangle → face lookup: binary-search FACE_RANGES for the triangle index (ranges

@@ -1636,22 +1636,27 @@ delete its bodies on the next regen; see the changelog.)
 
 ```json
 // req.args
-{ "path": "/tmp/onecad/import_ab12.step", "includeBrep": true }
+{ "path": "/tmp/onecad/import_ab12.step", "includeGeometry": true }
 // result
 { "solidCount": 2, "sourceUnit": "INCH", "bbox": { "min": [0,0,0], "max": [50.8,25.4,12.7] },
-  "productNames": ["Bracket", "Pin"], "brepFormat": 3,
+  "productNames": ["Bracket", "Pin"], "geometryCodec": "xbf", "geometryFormat": 4,
   "diagnostics": [ { "severity": "warning", "code": "STEP_HEALED", "message": "…" } ] }
-// bin (only when includeBrep): { "name": "brep", … } — BinTools bytes of the
-// healed result compound, solids in the §7.3 deterministic ordinal order
+// bin (only when includeGeometry): { "name": "geometry", … } — the healed
+// result serialized in `geometryCodec`, solids in the §7.3 ordinal order
 ```
 
-- `includeBrep` (default `false`): when `true`, the response's binary tail
-  carries the **healed, mm-normalized, UNSCALED** result as one BinTools
-  compound whose solid order IS the ordinal order, plus `brepFormat` (the
-  BinTools format version to pin in §7.3 `ImportStep.brepFormat`). This is the
-  conversion lane for the `sourceCodec:"brep"` replay policy: Rust probes once
-  at import-command time, persists the brep bytes alongside the STEP source,
-  and authors the record against the brep — so replay never re-parses STEP.
+- `includeGeometry` (default `false`): when `true`, the response's binary tail
+  carries the **healed, mm-normalized, UNSCALED** result serialized in the
+  worker's preferred replay codec, named by `geometryCodec` with its binary
+  format version in `geometryFormat` (pinned into §7.3
+  `ImportStep.brepFormat`). Current codec is `"xbf"` (BinXCAF — round-trips
+  shapes + XCAF product names + face colors; plain BinTools `.brep` loses the
+  attributes, which is why the lane moved off it; `"brep"` remains a valid
+  §7.3 `sourceCodec` for documents that carry it). Rust probes once at
+  import-command time, persists the geometry bytes alongside the STEP source,
+  and authors the record against them — replay never re-parses STEP.
+  (2026-08-02 later same day: `includeBrep`/`brepFormat`/bin `"brep"` renamed
+  to the codec-neutral forms before any release shipped — no compat shim.)
 - The probe honors cancel; a malformed file is an `OP_FAILED`-class error
   response (recoverable), never `PROTOCOL_ERROR`.
 
@@ -1892,6 +1897,20 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-02 — MESH1 `FACE_COLORS` section (type 12, flags bit 4) + `xbf`
+  import replay codec** (WP-A W4.5 XCAF fidelity; cross-track sign-off recorded
+  2026-08-02). Plain BinTools `.brep` bytes carry NO XCAF attributes, so the
+  brep replay lane would silently drop imported face colors and product names on
+  every reopen — the conversion lane therefore moves to BinXCAF (`.xbf`,
+  `sourceCodec: "xbf"`, additive enum value; `brep` stays valid), which
+  round-trips shapes + names + colors through replay. Face colors reach the
+  frontend per-tessellation via the additive MESH1 `FACE_COLORS` section
+  (`protocol/mesh_format.md` §2/§4) — never as document state (TopoKey is
+  snapshot-scoped; minting thousands of ElementIds for appearance would bloat
+  the ladder surface). Additive on both surfaces: unknown section types MUST be
+  skipped (mesh_format §3) and existing meshes carry no new bytes — **no
+  fixture bump**.
 
 - **2026-08-02 — §7.3 NEW op `ImportStep`; §7.8 `ImportStep` verb REMOVED,
   replaced by read-only `InspectStep`** (WP-A STEP-IMPORT; cross-track sign-off
