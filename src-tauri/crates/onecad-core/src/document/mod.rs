@@ -374,6 +374,7 @@ mod tests {
                 ui_label: String::new(),
                 scoring_version: None,
                 seeded: false,
+                ordinal_anchor: None,
             }],
         );
 

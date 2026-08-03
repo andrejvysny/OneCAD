@@ -21,8 +21,10 @@
 // quantization (SCHEMA §10, quantizationVersion = 1).
 #pragma once
 
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -31,11 +33,26 @@
 
 namespace onecad::session {
 
+// The quantized geometric rank key an N-body op ordered its children by:
+// (volume, centroid x, centroid y, centroid z, face count) at 1e-6 quantization.
+// See `ops::ranked_solids` — this is that function's key, verbatim.
+using RankKey = std::array<std::int64_t, 5>;
+
 // One body lifecycle event of a step (SCHEMA §7.2 `bodyEvents[]`).
 // kind ∈ "created" | "modified" | "deleted" | "split" | "merged".
+//
+// `rank_key` is OPTIONAL identity-tripwire evidence (VF-B6, SCHEMA §7.2): the
+// geometric key this body's ORDINAL was assigned by, emitted only on the paths
+// where the ordinal IS a geometric rank (today: `ops::publish_boolean_result`).
+// Absence is "no claim", never "no key" — Rust must tolerate it and skip the
+// tripwire for that body. It is deliberately NOT folded into the `bodyLifecycle`
+// signature (§12): the signature pins the ordered create/modify/delete lineage,
+// and folding a geometric measurement into it would make every dimensional edit
+// look like a lifecycle change.
 struct BodyEvent {
     std::string kind;
     std::string body_id;
+    std::optional<RankKey> rank_key;
 };
 
 // One resolved reference binding (refId → ElementId) produced by a step.

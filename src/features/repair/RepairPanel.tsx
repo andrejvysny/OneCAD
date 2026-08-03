@@ -22,7 +22,13 @@ function reasonText(reason: string): string {
       return "No candidate matched";
     case "low-confidence":
       return "Low confidence — no clear match";
+    case "ordinal-permutation":
+      // VF-B6: the split children of an N-body op changed geometric order, so
+      // `:<k>` names a different solid than this reference was authored against.
+      return "Split pieces swapped order — this may point at a different body";
     default:
+      // Unknown tokens (a newer build's reason) fall through verbatim rather than
+      // being swallowed — the panel is deliberately generic over `reason`.
       return reason;
   }
 }

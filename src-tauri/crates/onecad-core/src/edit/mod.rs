@@ -8,5 +8,5 @@ pub mod undo;
 
 pub use command::{EditCommand, InputPath, InputRef, SketchEditOp, VisibilityTarget};
 pub use outcome::{CommandOutcome, ProjectionDelta, RegenHint};
-pub use session::DocumentSession;
+pub use session::{gate_items_for_moved, DocumentSession};
 pub use undo::{AppliedEdit, Inverse, Txn, UndoStack, UNDO_CAP};

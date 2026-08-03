@@ -37,6 +37,8 @@
 //!
 //! [`cancel`]: GeometryEngine::cancel
 
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -294,6 +296,17 @@ pub struct PlanStepEvent {
     /// Ordered body create/modify/delete/split/merge events (folded into the
     /// [`BodyRegistry`](crate::document::body::BodyRegistry)).
     pub body_events: Vec<BodyLifecycleEvent>,
+    /// Per-body geometric rank keys (SCHEMA §7.2 `bodyEvents[].rankKey`), stamped
+    /// onto [`BodyMeta::geom_stamp`](crate::document::body::BodyMeta::geom_stamp)
+    /// when the step commits. Absent bodies made **no claim** — see the VF-B6
+    /// tripwire.
+    ///
+    /// Carried as a side map keyed by body rather than as a field on
+    /// [`BodyLifecycleEvent`] on purpose: that enum is **persisted** (it is the
+    /// element type of the registry's lifecycle log inside `document.json`), so
+    /// widening its variants would move every existing document's bytes for
+    /// evidence that belongs to one transient wire event.
+    pub body_rank_keys: BTreeMap<BodyId, crate::document::repair::RankKey>,
     /// Element-map partition delta for the step.
     pub element_map_delta: ElementMapDelta,
     /// NeedsRepair items surfaced by the resolution ladder (STATE — SCHEMA §9).

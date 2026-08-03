@@ -320,6 +320,7 @@ impl GeometryEngine for FakeEngine {
                         events.push(PlanEvent::Step(PlanStepEvent {
                             step_index: step,
                             body_events,
+                            body_rank_keys: Default::default(),
                             element_map_delta: deltas,
                             needs_repair: vec![],
                             signatures,
@@ -337,6 +338,7 @@ impl GeometryEngine for FakeEngine {
                         events.push(PlanEvent::Step(PlanStepEvent {
                             step_index: step,
                             body_events,
+                            body_rank_keys: Default::default(),
                             element_map_delta: ElementMapDelta::default(),
                             needs_repair: items,
                             signatures: sigs(step),
@@ -355,6 +357,7 @@ impl GeometryEngine for FakeEngine {
                         events.push(PlanEvent::Step(PlanStepEvent {
                             step_index: step,
                             body_events: vec![],
+                            body_rank_keys: Default::default(),
                             element_map_delta: ElementMapDelta::default(),
                             needs_repair: vec![],
                             signatures: sigs(step),

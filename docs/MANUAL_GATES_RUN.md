@@ -7,6 +7,9 @@
       doc swap; reopen the saved doc → identical geometry + colors; fillet an
       imported edge → survives reopen; delete the Import row → downstream
       NeedsRepair loud, undo restores.
+      NOTE (2026-08-03 WP-FIX W1): colored faces were INVISIBLE on the real lane
+      until the VF-B1 mask fix — if bodies with authored colors render at all,
+      the fix holds; a colored file rendering blank/missing bodies = regression.
 - [ ] **Transform (t)**: select body → t → gizmo (arrows/quads/rings) drags with
       snap (Shift fine); chip typing; second move FOLDS into the same row;
       dblclick row re-edits; Alt-drag or [Copy] duplicates; multi-select moves

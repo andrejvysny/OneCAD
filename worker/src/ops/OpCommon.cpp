@@ -3,7 +3,8 @@
 
 #include <algorithm>
 #include <cmath>
-#include <tuple>
+#include <cstdint>
+#include <optional>
 
 #include <BOPAlgo_Operation.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -244,41 +245,57 @@ BooleanResult checked_boolean(const TopoDS_Shape& target, const TopoDS_Shape& to
     }
 }
 
-std::vector<TopoDS_Shape> ordered_solids(const TopoDS_Shape& shape) {
-    std::vector<TopoDS_Shape> solids;
-    if (shape.IsNull()) return solids;
-    for (TopExp_Explorer exp(shape, TopAbs_SOLID); exp.More(); exp.Next()) {
-        solids.push_back(exp.Current());
-    }
+std::vector<RankedSolid> ranked_solids(const TopoDS_Shape& shape) {
+    std::vector<RankedSolid> ranked;
+    if (shape.IsNull()) return ranked;
     // Quantized geometric sort key (1e-6, matching the ElementMap quantization) so a
     // symmetric bisection (equal volumes) breaks the tie on centroid deterministically.
-    using Key = std::tuple<long long, long long, long long, long long, long long>;
-    auto q = [](double v) { return static_cast<long long>(std::llround(v * 1e6)); };
-    auto key = [&](const TopoDS_Shape& s) -> Key {
+    //
+    // VF-B6: the key is computed ONCE per solid here and RETAINED (it used to live
+    // inside the comparator and was discarded), so the ordinal a child is minted at
+    // can be published as tripwire evidence. `std::array` compares lexicographically
+    // exactly like the `std::tuple` this replaced, and `stable_sort` + the `* 1e6`
+    // quantization are unchanged — the resulting ordinal assignment is byte-identical
+    // to the pre-VF-B6 order.
+    auto q = [](double v) { return static_cast<std::int64_t>(std::llround(v * 1e6)); };
+    for (TopExp_Explorer exp(shape, TopAbs_SOLID); exp.More(); exp.Next()) {
+        const TopoDS_Shape& s = exp.Current();
         GProp_GProps props;
         BRepGProp::VolumeProperties(s, props);
         const gp_Pnt c = props.CentreOfMass();
         TopTools_IndexedMapOfShape faces;
         TopExp::MapShapes(s, TopAbs_FACE, faces);
-        return {q(props.Mass()), q(c.X()), q(c.Y()), q(c.Z()),
-                static_cast<long long>(faces.Extent())};
-    };
-    std::stable_sort(solids.begin(), solids.end(),
-                     [&](const TopoDS_Shape& a, const TopoDS_Shape& b) { return key(a) < key(b); });
+        ranked.push_back(RankedSolid{
+            s, session::RankKey{q(props.Mass()), q(c.X()), q(c.Y()), q(c.Z()),
+                                static_cast<std::int64_t>(faces.Extent())}});
+    }
+    std::stable_sort(ranked.begin(), ranked.end(),
+                     [](const RankedSolid& a, const RankedSolid& b) { return a.key < b.key; });
+    return ranked;
+}
+
+std::vector<TopoDS_Shape> ordered_solids(const TopoDS_Shape& shape) {
+    std::vector<TopoDS_Shape> solids;
+    for (const RankedSolid& r : ranked_solids(shape)) solids.push_back(r.shape);
     return solids;
 }
 
 void publish_boolean_result(OpContext& ctx, const std::string& op_id,
                             const std::string& target_id, const TopoDS_Shape& result,
                             BRepBuilderAPI_MakeShape* builder, OpOutcome& out) {
-    const std::vector<TopoDS_Shape> solids = ordered_solids(result);
+    const std::vector<RankedSolid> solids = ranked_solids(result);
     if (solids.size() <= 1) {
         // Single body: modify the target in place (BodyId PRESERVED — corpus invariant).
         ctx.bodies.create(target_id, op_id, result);
         if (builder) {
             ctx.partition.apply_history(target_id, result, *builder, out.delta, &out.needs_repair);
         }
-        out.body_events.push_back({"modified", target_id});
+        // The rank key rides even the single-solid case (VF-B6): it costs the GProps
+        // pass already done above, and it lets Rust anchor the op's stamp BEFORE a
+        // later edit turns the same op into a split.
+        std::optional<session::RankKey> key;
+        if (solids.size() == 1) key = solids[0].key;
+        out.body_events.push_back({"modified", target_id, key});
         out.body_ids.push_back(target_id);
         return;
     }
@@ -290,8 +307,10 @@ void publish_boolean_result(OpContext& ctx, const std::string& op_id,
     out.body_events.push_back({"deleted", target_id});
     for (std::size_t k = 0; k < solids.size(); ++k) {
         const std::string child_id = "body_" + op_id + ":" + std::to_string(k);
-        ctx.bodies.create(child_id, op_id, solids[k]);
-        out.body_events.push_back({"created", child_id});
+        ctx.bodies.create(child_id, op_id, solids[k].shape);
+        // VF-B6: `k` IS this solid's geometric rank, so the key it was ranked by is
+        // the evidence Rust needs to notice the rank flipping under a parametric edit.
+        out.body_events.push_back({"created", child_id, solids[k].key});
         out.body_ids.push_back(child_id);
     }
 }

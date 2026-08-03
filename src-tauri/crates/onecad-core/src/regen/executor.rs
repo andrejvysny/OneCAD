@@ -229,6 +229,8 @@ pub enum Outcome {
 struct BufferedStep {
     by: RecordId,
     body_events: Vec<BodyLifecycleEvent>,
+    /// SCHEMA §7.2 `rankKey` evidence, applied after the lifecycle fold (VF-B6).
+    rank_keys: BTreeMap<crate::ids::BodyId, crate::document::repair::RankKey>,
     added: Vec<super::engine::ElementMapEntry>,
     relabeled: Vec<super::engine::ElementMapEntry>,
     removed: Vec<crate::ids::ElementId>,
@@ -276,6 +278,7 @@ impl Scratch {
             BufferedStep {
                 by,
                 body_events: event.body_events,
+                rank_keys: event.body_rank_keys,
                 added: event.element_map_delta.added,
                 relabeled: event.element_map_delta.relabeled,
                 removed: event.element_map_delta.removed,
@@ -310,6 +313,13 @@ impl Scratch {
             // Body lifecycle (§2.2 identity rules applied inside `fold`).
             for be in buf.body_events {
                 self.bodies.fold(step, buf.by, be);
+            }
+            // VF-B6 identity evidence, stamped AFTER the fold so the body exists.
+            // Rides the same `last_valid` gate as the geometry it describes: a stamp
+            // from a step that never reached the accepted registry would anchor the
+            // tripwire on geometry the document does not have.
+            for (body, key) in buf.rank_keys {
+                self.bodies.set_geom_stamp(body, key);
             }
             // Element-map partition delta: identity is stable, only partition moves.
             // The owning body comes from the delta entry itself (review F19).

@@ -312,5 +312,7 @@ fn repair_reason_token(item: &RepairItem) -> &'static str {
         RepairReason::Ambiguous => "ambiguous",
         RepairReason::NoCandidates => "no-candidates",
         RepairReason::LowConfidence => "low-confidence",
+        RepairReason::OrdinalPermutation => "ordinal-permutation",
+        RepairReason::Unknown => "unknown",
     }
 }

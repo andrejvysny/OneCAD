@@ -120,6 +120,23 @@ pub struct BodyMeta {
     /// document.json shape change for existing snapshots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split_of: Option<SplitOrigin>,
+    /// The quantized geometric rank key the producing op ranked this body by
+    /// (SCHEMA §7.2 `bodyEvents[].rankKey`), when it published one.
+    ///
+    /// **Identity evidence, not geometry.** For an ordinal child (`split_of` is
+    /// `Some`) this is *why* the body holds ordinal `k`, so comparing the stamp
+    /// across two regens is what lets the VF-B6 tripwire notice `:<k>` silently
+    /// changing which solid it names. Derived, never user-authored: a save takes it
+    /// from the regen mirror, an open feeds it back, and a producer that publishes
+    /// no key leaves it `None` — which the tripwire reads as **"no claim"** and
+    /// skips, so a legacy document raises no false alarm on its first regen.
+    ///
+    /// An `[i64; 5]` rather than a float triple because [`BodyMeta`],
+    /// [`BodyRegistry`] and `Document` derive `Eq`, and because the worker's ordinal
+    /// assignment is defined on exactly this quantized tuple.
+    /// Additive + skipped when `None` ⇒ pre-VF-B6 documents serialize byte-identically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geom_stamp: Option<crate::document::repair::RankKey>,
 }
 
 impl BodyMeta {
@@ -132,6 +149,7 @@ impl BodyMeta {
             visible: true,
             created_by,
             split_of: None,
+            geom_stamp: None,
         }
     }
 }
@@ -337,6 +355,51 @@ impl BodyRegistry {
         }
     }
 
+    /// Records the geometric rank key the producing op published for a body
+    /// (SCHEMA §7.2 `bodyEvents[].rankKey`). Returns `false` if the body is not
+    /// active. Derived evidence — it takes no undo entry and bumps no revision.
+    pub fn set_geom_stamp(&mut self, id: BodyId, key: crate::document::repair::RankKey) -> bool {
+        match self.bodies.iter_mut().find(|b| b.id == id) {
+            Some(b) => {
+                b.geom_stamp = Some(key);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Per producing op, its ordinal children's `k → (body, stamp)` — the VF-B6
+    /// tripwire's view of the registry.
+    ///
+    /// Only ops with **at least two** ordinal children are reported (a single child
+    /// has no ordering to permute), and only children whose `geom_stamp` is present:
+    /// a missing stamp is "no claim" (SCHEMA §7.2), so an op with any unstamped
+    /// child is omitted entirely rather than compared on partial evidence.
+    #[must_use]
+    pub fn ordinal_children(
+        &self,
+    ) -> BTreeMap<RecordId, BTreeMap<usize, (BodyId, crate::document::repair::RankKey)>> {
+        let mut out: BTreeMap<RecordId, BTreeMap<usize, _>> = BTreeMap::new();
+        let mut unstamped: std::collections::HashSet<RecordId> = std::collections::HashSet::new();
+        for meta in &self.bodies {
+            let Some(origin) = meta.split_of else {
+                continue;
+            };
+            match meta.geom_stamp {
+                Some(key) => {
+                    out.entry(origin.op)
+                        .or_default()
+                        .insert(origin.k, (meta.id, key));
+                }
+                None => {
+                    unstamped.insert(origin.op);
+                }
+            }
+        }
+        out.retain(|op, kids| kids.len() >= 2 && !unstamped.contains(op));
+        out
+    }
+
     /// Sets a body's visibility. Returns `false` if the body is not active.
     pub fn set_visible(&mut self, id: BodyId, visible: bool) -> bool {
         match self.bodies.iter_mut().find(|b| b.id == id) {
@@ -434,6 +497,7 @@ impl BodyRegistry {
                         visible: pm.visible,
                         created_by: pm.created_by,
                         split_of: None, // the survivor inherits the parent identity
+                        geom_stamp: pm.geom_stamp,
                     }),
                     _ => self.ensure_fresh(child, by),
                 }
@@ -457,6 +521,7 @@ impl BodyRegistry {
                     visible: m.visible,
                     created_by: m.created_by,
                     split_of: None, // merge winner keeps its own identity
+                    geom_stamp: m.geom_stamp,
                 },
                 None => BodyMeta::new(winner, self.default_name(), by),
             };
@@ -640,6 +705,66 @@ mod tests {
         assert!(reg.contains(bid(1)) && !reg.contains(bid(2)));
         assert_eq!(reg.resolve(bid(2)), bid(1));
         assert_eq!(changed, vec![bid(1), bid(2)]);
+    }
+
+    #[test]
+    fn geom_stamp_is_absent_from_the_wire_until_a_producer_publishes_one() {
+        // VF-B6: a legacy document (no worker ever published a rankKey) must
+        // serialize byte-identically to before the field existed.
+        let mut reg = BodyRegistry::new();
+        reg.fold(0, rid(1), BodyLifecycleEvent::Created { body: bid(1) });
+        let v = serde_json::to_value(&reg).unwrap();
+        assert!(
+            v["bodies"][0].get("geomStamp").is_none(),
+            "byte-stable for pre-VF-B6 documents"
+        );
+
+        assert!(reg.set_geom_stamp(bid(1), [8_500_000_000, 8_500_000, 0, 0, 6]));
+        assert!(!reg.set_geom_stamp(bid(99), [0; 5]), "unknown body ⇒ no-op");
+        let v = serde_json::to_value(&reg).unwrap();
+        assert_eq!(
+            v["bodies"][0]["geomStamp"][0],
+            serde_json::json!(8_500_000_000i64)
+        );
+        let back: BodyRegistry = serde_json::from_value(v).unwrap();
+        assert_eq!(back, reg, "stamps survive a save/reopen round trip");
+        assert_eq!(
+            back.get(bid(1)).unwrap().geom_stamp,
+            Some([8_500_000_000, 8_500_000, 0, 0, 6])
+        );
+    }
+
+    #[test]
+    fn ordinal_children_reports_only_fully_stamped_multi_child_ops() {
+        let op = rid(0x51);
+        let solo = rid(0x52);
+        let c0 = BodyId(split_child_uuid(op.as_uuid(), 0));
+        let c1 = BodyId(split_child_uuid(op.as_uuid(), 1));
+        let lone = BodyId(split_child_uuid(solo.as_uuid(), 0));
+        let mut reg = BodyRegistry::new();
+        for (b, by) in [(c0, op), (c1, op), (lone, solo)] {
+            reg.fold(1, by, BodyLifecycleEvent::Created { body: b });
+        }
+
+        // No stamps at all ⇒ NO CLAIM: a legacy document must not trip the wire on
+        // its first regen.
+        assert!(reg.ordinal_children().is_empty());
+
+        // One child stamped, the other not ⇒ still no claim (partial evidence is
+        // not evidence).
+        reg.set_geom_stamp(c0, [1, 1, 0, 0, 6]);
+        assert!(reg.ordinal_children().is_empty());
+
+        reg.set_geom_stamp(c1, [2, 9, 0, 0, 6]);
+        reg.set_geom_stamp(lone, [3, 3, 0, 0, 6]);
+        let seen = reg.ordinal_children();
+        assert_eq!(
+            seen.keys().copied().collect::<Vec<_>>(),
+            vec![op],
+            "a single-child op has no ordering to permute"
+        );
+        assert_eq!(seen[&op][&0], (c0, [1, 1, 0, 0, 6]));
+        assert_eq!(seen[&op][&1], (c1, [2, 9, 0, 0, 6]));
     }
 
     #[test]

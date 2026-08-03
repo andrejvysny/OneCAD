@@ -602,6 +602,7 @@ pub fn parse_plan_step(payload: &Value, fallback_step: usize) -> Result<PlanStep
     Ok(PlanStepEvent {
         step_index,
         body_events: parse_body_events(payload.get("bodyEvents"))?,
+        body_rank_keys: parse_body_rank_keys(payload.get("bodyEvents")),
         element_map_delta: parse_element_delta(payload.get("elementMapDelta"))?,
         needs_repair: parse_needs_repair(payload.get("needsRepair"), step_index)?,
         signatures: parse_signatures(payload.get("signatures")),
@@ -631,6 +632,47 @@ fn parse_body_event(ev: &Value) -> Result<BodyLifecycleEvent, String> {
         }),
         other => Err(format!("unknown bodyEvent kind {other:?}")),
     }
+}
+
+/// Collects the OPTIONAL SCHEMA §7.2 `bodyEvents[].rankKey` evidence (VF-B6) into a
+/// `bodyId → [i64; 5]` map.
+///
+/// **Deliberately infallible.** `rankKey` is diagnostic identity evidence, not
+/// execution input: a malformed or missing key means "no claim" and is dropped, and
+/// the tripwire simply does not fire for that body. Escalating it to a
+/// `PROTOCOL_ERROR` would let a bad *diagnostic* tear down an otherwise valid regen —
+/// the exact opposite of the failure bias this tripwire exists to enforce. Body ids
+/// that fail to parse are also skipped here; `parse_body_events` already rejects the
+/// frame for those on the authoritative path.
+fn parse_body_rank_keys(v: Option<&Value>) -> BTreeMap<BodyId, [i64; 5]> {
+    let mut out = BTreeMap::new();
+    let Some(arr) = v.and_then(Value::as_array) else {
+        return out;
+    };
+    for ev in arr {
+        let Some(nums) = ev.get("rankKey").and_then(Value::as_array) else {
+            continue;
+        };
+        if nums.len() != 5 {
+            continue;
+        }
+        let mut key = [0i64; 5];
+        let mut ok = true;
+        for (slot, n) in key.iter_mut().zip(nums) {
+            match n.as_i64() {
+                Some(x) => *slot = x,
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        // `rankKey` rides `created`/`modified` events, whose body is `bodyId`.
+        if let (true, Ok(body)) = (ok, body_field(ev, "bodyId")) {
+            out.insert(body, key);
+        }
+    }
+    out
 }
 
 fn body_field(ev: &Value, key: &str) -> Result<BodyId, String> {

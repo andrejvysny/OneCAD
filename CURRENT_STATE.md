@@ -1,4 +1,28 @@
-# OneCAD-Tauri — Current State (2026-08-03, FULL ROADMAP IMPLEMENTED + VALIDATION PHASE V)
+# OneCAD-Tauri — Current State (2026-08-03, WP-FIX COMPLETE — all Phase-V blockers closed)
+
+## WP-FIX COMPLETE (2026-08-03, 5 waves, commits 4b9d9b8→(W5))
+All 7 Phase-V BLOCKERs + adjacent M2/M8 fixed, every wave red-first-tested +
+orchestrator-gated: W1 colored-mesh mask/instance fencing/epoch seeding/
+checkpoint-mint guard · W2 checkpoints in-session-only + bounded ladder +
+per-request D1 known-ops (reopen→append wedge dead; container growth
+quadratic→linear, save 154→30 ms) · W3 save/autosave off the single-writer
+lock (edit stall during autosave 2998→0.02 ms; persistence lane kills the
+recovery-marker race) · W4 transform gate sees host-face sketches (hash-frozen
+legacy bridge), delete seeds the gate, seeded repair indices track the
+timeline, single-snapshot repair inverses · W5 split-ordinal tripwire
+(worker rankKey evidence → OrdinalPermutation NeedsRepair, self-healing
+anchors — silent identity swap dead). PLUS one pre-existing product bug found
+by the gate rerun: chip clusters rendered UNDER the z-20 side panels near the
+right edge (unclickable — e2e hole spec caught it); fixed via a dedicated
+z-30 chip layer in ViewportEngine. Suite state at WP gate: ctest 87/87 ·
+cargo 761/0 vs real worker · FE 2693/180 · e2e (rerun) · hex clean.
+Remaining VF majors (M1 poison-key, M3/M4 identity-cache, M5 stale-anchor
+ladder, M6 imports edge-cases, M7 cross-body topoKey) → WP-FIX2 queue.
+Next per approved plan: user manual gates (Step 0) → WP-SHIP (unsigned .dmg
+now UNBLOCKED — F1a/F1b landed; F2 release logging still open in SHIP scope)
+→ feature packs D (print) → E (inspect) → F (machined) → G (polish).
+
+# Previous header: (2026-08-03, FULL ROADMAP IMPLEMENTED + VALIDATION PHASE V)
 
 ## VALIDATION PHASE V (2026-08-03, plan `act-as-senior-software-shimmying-blanket.md`)
 Independent re-validation of the shipped state: all 4 suites REPRODUCE EXACTLY

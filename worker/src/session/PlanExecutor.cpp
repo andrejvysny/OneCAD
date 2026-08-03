@@ -171,7 +171,14 @@ void emit_plan_step(HandlerContext& ctx, std::uint64_t req_id, std::uint64_t job
                     const json& element_map_delta, const json& needs_repair, const json& signatures,
                     const json& diagnostics) {
     json body_events = json::array();
-    for (const auto& e : events) body_events.push_back({{"kind", e.kind}, {"bodyId", e.body_id}});
+    for (const auto& e : events) {
+        json be = {{"kind", e.kind}, {"bodyId", e.body_id}};
+        // VF-B6: `rankKey` is emitted ONLY where the ordinal genuinely IS a geometric
+        // rank. Absence = "no claim" (SCHEMA §7.2), so a step that never ranks its
+        // bodies stays byte-identical to the pre-VF-B6 wire.
+        if (e.rank_key) be["rankKey"] = *e.rank_key;
+        body_events.push_back(std::move(be));
+    }
     json payload = {
         {"stepIndex", step_index},
         {"bodyEvents", std::move(body_events)},

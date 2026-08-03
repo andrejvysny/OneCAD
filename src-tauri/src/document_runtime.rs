@@ -1114,6 +1114,14 @@ impl DocumentRuntime {
         self.regen.repair.items()
     }
 
+    /// A body's reconciled document metadata — the exact row
+    /// [`merged_bodies`](Self::merged_bodies) would save, so `geom_stamp` /
+    /// `split_of` read here are what a reopen restores.
+    #[must_use]
+    pub fn body_meta(&self, body: BodyId) -> Option<onecad_core::document::body::BodyMeta> {
+        self.merged_bodies().get(body).cloned()
+    }
+
     /// Lean per-item NeedsRepair summaries for the `needs-repair` event, resolving
     /// each item's timeline step to its op record id (`opId`).
     fn needs_repair_items(&self) -> Vec<NeedsRepairItemDto> {
@@ -1142,12 +1150,24 @@ impl DocumentRuntime {
         prior: &[BodyId],
     ) -> (Vec<(BodyId, MeshKey)>, Vec<BodyId>) {
         let _ = lod;
+        // VF-B6 split-ordinal tripwire — decided BEFORE the mirror is overwritten,
+        // because `self.regen.bodies` IS the previous regen's stamp set and the only
+        // source that both survives save/reopen (it is seeded from the persisted
+        // registry at open) and is refreshed by every commit. `document.bodies` is
+        // adopted insert-only, so it cannot be trusted to hold the PREVIOUS regen's
+        // stamps for a body it already knew about.
+        let tripwire = ordinal_tripwire::evaluate(
+            &self.regen.bodies,
+            &scratch.bodies,
+            self.session.document(),
+        );
         self.regen = scratch;
         self.latest_snapshot = Some(snap.clone());
         // The caller has already fenced (tokens unchanged since begin_regen), so the
         // live epoch IS the one this geometry was computed under.
         self.head_epoch = self.fencing.get().1;
         self.dirty = true;
+        self.apply_ordinal_tripwire(tripwire);
         let changed: Vec<(BodyId, MeshKey)> =
             snap.bodies.iter().map(|b| (b.body, b.mesh_key)).collect();
         let current: HashSet<BodyId> = snap.bodies.iter().map(|b| b.body).collect();
@@ -1157,6 +1177,51 @@ impl DocumentRuntime {
             .filter(|b| !current.contains(b))
             .collect();
         (changed, removed)
+    }
+
+    /// Plants / retires the VF-B6 ordinal-permutation gates a just-committed regen
+    /// decided on (see `ordinal_tripwire`).
+    ///
+    /// **The seeds carry NO command inverse.** `commit_snapshot` is not an
+    /// `EditCommand`, so the VF-M8 single-snapshot rule (every edit-lane repair
+    /// mutation rides one `RestoreRepair` at the head of the command's inverse) does
+    /// not apply and `DocumentSession::fold_repair_inverse` is not reachable from
+    /// here. These gates are instead **self-healing state derived from geometry
+    /// stamps**: each one records the ordinal→rank-key anchor it was raised against,
+    /// so undoing the offending edit re-runs regen, the ordering matches the anchor
+    /// again, and this very function clears the gate. An undo restores the geometry;
+    /// the gate follows it. Nothing else may plant an `OrdinalPermutation` item.
+    ///
+    /// Both copies of the repair state are written: `document.repair` is
+    /// authoritative (it is what a save persists and what `after_mutation` re-syncs
+    /// from), and `regen.repair` is what `begin_regen` reads for its execution
+    /// ceiling — so a gate planted here bites on the very next regen.
+    ///
+    /// **One-regen lag on the lift, by construction.** The ceiling is sampled in
+    /// `begin_regen`, i.e. BEFORE the commit that clears a gate, so the regen that
+    /// self-heals still stopped below the formerly-gated step; the next regen runs
+    /// it. Until then the published snapshot's `repair_summary` (built by the
+    /// executor from the scratch state, also before this point) still counts the
+    /// gate, while `repair_items()` is already empty. Benign and self-correcting —
+    /// but it is why the lift takes two regens, not one.
+    fn apply_ordinal_tripwire(&mut self, tripwire: ordinal_tripwire::Tripwire) {
+        if tripwire.is_empty() {
+            return;
+        }
+        for op in &tripwire.healed {
+            if self.session.clear_ordinal_gates(*op) {
+                tracing::info!(op = %op, "regen: ordinal tripwire CLEARED (order matches the anchor)");
+            }
+        }
+        if !tripwire.items.is_empty() {
+            tracing::warn!(
+                items = tripwire.items.len(),
+                "regen: ordinal tripwire TRIPPED — an N-body op's children changed geometric \
+                 rank; downstream refs seeded NeedsRepair rather than silently re-bound"
+            );
+            self.session.seed_regen_repair_gates(tripwire.items.clone());
+        }
+        ordinal_tripwire::apply(&mut self.regen.repair, &tripwire);
     }
 
     /// Writes the bodies each op produced/modified in the just-committed regen back
@@ -2994,6 +3059,8 @@ fn element_ref_input(op: &Operation, index: usize) -> Option<&ElementRef> {
         _ => None,
     }
 }
+
+mod ordinal_tripwire;
 
 #[cfg(test)]
 mod tests;

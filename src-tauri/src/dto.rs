@@ -722,6 +722,10 @@ fn repair_reason_str(r: onecad_core::document::repair::RepairReason) -> &'static
         RepairReason::Ambiguous => "ambiguous",
         RepairReason::NoCandidates => "no-candidates",
         RepairReason::LowConfidence => "low-confidence",
+        // VF-B6 (Rust-seeded) and the forward-compat fallback. The repair UI renders
+        // `reason` as an opaque string, so both flow through without a frontend change.
+        RepairReason::OrdinalPermutation => "ordinal-permutation",
+        RepairReason::Unknown => "unknown",
     }
 }
 
@@ -1363,6 +1367,7 @@ mod tests {
             anchor: None,
             ui_label: "Fillet edge".into(),
             seeded: false,
+            ordinal_anchor: None,
         };
         let dto = ResolveRefDto::from_resolution(RefResolution {
             ref_id: "op_6.input0".into(),
@@ -1403,6 +1408,7 @@ mod tests {
             anchor: None,
             ui_label: String::new(),
             seeded: false,
+            ordinal_anchor: None,
         };
         let dto = needs_repair_item_dto("rec-1".into(), &item);
         let v = serde_json::to_value(&dto).unwrap();

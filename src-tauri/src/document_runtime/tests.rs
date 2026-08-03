@@ -187,6 +187,7 @@ impl GeometryEngine for FakeBackend {
                 events.push(PlanEvent::Step(PlanStepEvent {
                     step_index: step,
                     body_events,
+                    body_rank_keys: Default::default(),
                     element_map_delta: ElementMapDelta::default(),
                     needs_repair: vec![],
                     signatures: sigs(step),

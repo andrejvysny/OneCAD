@@ -11,10 +11,10 @@
 //! The payload mirrors the SCHEMA §9 `needsRepair` wire shape so a worker
 //! `planStep.needsRepair[]` entry maps 1:1 into a [`RepairItem`].
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::document::refs::{AnchorIntent, Extra};
-use crate::ids::ElementId;
+use crate::ids::{ElementId, RecordId};
 use crate::math::Vec3;
 
 /// Which ladder level failed to decide (SCHEMA §9 `ladderFailed`).
@@ -28,15 +28,104 @@ pub enum LadderLevel {
 }
 
 /// Why the ladder could not confidently bind (SCHEMA §9 `reason`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// **Forward compatibility.** This is a bare unit enum persisted verbatim in
+/// `document.json`, so a derived `Deserialize` would make an OLDER release **fail
+/// to open** a document written by a newer one that added a token. The hand-written
+/// [`Deserialize`] below therefore degrades any unrecognized token to
+/// [`Unknown`](Self::Unknown) instead of erroring. Serialization stays derived
+/// (kebab-case), so a round-trip through an older release flattens the unknown
+/// token to `"unknown"` — lossy, but recoverable state (the next regen republishes
+/// the real reason) versus an unopenable file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RepairReason {
+    /// A `reason` token this build does not know (a newer release wrote it).
+    /// Never produced by this build's own ladder or policy — only by
+    /// deserialization.
+    Unknown,
     /// Two or more candidates tie within the policy margin.
     Ambiguous,
     /// No candidate matched the frozen descriptor.
     NoCandidates,
     /// The best candidate scored below the auto-bind threshold.
     LowConfidence,
+    /// **Rust-seeded policy gate, never a worker outcome** (VF-B6). The reference
+    /// stands on an ordinal child `body_<opId>:<k>` of an N-body op, and the §7.2
+    /// `rankKey` evidence shows the op's children **permuted** across a parametric
+    /// edit: `:<k>` now names a different solid than the ref was authored against.
+    /// Left alone the ref would re-resolve *cleanly* to the WRONG body — the exact
+    /// silent mis-bind (H5-B) this stack exists to eliminate.
+    OrdinalPermutation,
+}
+
+impl<'de> Deserialize<'de> for RepairReason {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(match String::deserialize(d)?.as_str() {
+            "ambiguous" => Self::Ambiguous,
+            "no-candidates" => Self::NoCandidates,
+            "low-confidence" => Self::LowConfidence,
+            "ordinal-permutation" => Self::OrdinalPermutation,
+            _ => Self::Unknown,
+        })
+    }
+}
+
+/// The quantized geometric rank key an N-body op ordered one child by (SCHEMA §7.2
+/// `bodyEvents[].rankKey`): `[volume, cx, cy, cz, faceCount]`, the first four
+/// `llround(value * 1e6)`.
+///
+/// Integers on purpose: [`BodyMeta`](crate::document::body::BodyMeta),
+/// [`BodyRegistry`](crate::document::body::BodyRegistry) and
+/// [`Document`](crate::document::Document) all need `Eq`, which a float triple
+/// (`Vec3`) cannot give — and the worker's ordinal assignment is *defined* on the
+/// quantized tuple, so storing anything else would compare a different thing than
+/// the one that decided the ordinal.
+pub type RankKey = [i64; 5];
+
+/// One `(ordinal, rank key)` pair of an [`OrdinalAnchor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrdinalStamp {
+    /// The split ordinal `k` in `body_<opId>:<k>`.
+    pub k: usize,
+    /// The §7.2 rank key that ordinal held **before** the permutation.
+    pub key: RankKey,
+}
+
+/// The pre-permutation ordinal→rank-key snapshot a [`RepairReason::OrdinalPermutation`]
+/// gate was seeded against (VF-B6).
+///
+/// **This is what makes the tripwire self-healing without a command inverse.** The
+/// gate is planted from the REGEN side (`commit_snapshot`), which is not an
+/// `EditCommand` and therefore has no undo entry to ride. Instead the gate carries
+/// the state it was raised against: every later regen re-tests the op's CURRENT
+/// stamps against this anchor rather than against the immediately-previous regen, so
+///
+/// * a gate stays raised across intervening regens that merely re-publish the
+///   permuted geometry (comparing against the previous regen would see "no change"
+///   and wrongly clear it),
+/// * **undoing** the offending edit restores the anchored ordering, the comparison
+///   comes back identity, and the tripwire drops its own seeds, and
+/// * closing the gate through the repair flow ([`RepairState::clear_seeded_for_step`])
+///   destroys the anchor with it, so the *new* ordering silently becomes the
+///   baseline and the gate is not immediately re-seeded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrdinalAnchor {
+    /// The N-body op whose ordinal children permuted.
+    pub op: RecordId,
+    /// The ordinals and the rank keys they held before the permutation, ascending
+    /// by `k`.
+    pub stamps: Vec<OrdinalStamp>,
+}
+
+impl OrdinalAnchor {
+    /// The anchor's `k → key` map.
+    #[must_use]
+    pub fn keys(&self) -> std::collections::BTreeMap<usize, RankKey> {
+        self.stamps.iter().map(|s| (s.k, s.key)).collect()
+    }
 }
 
 /// One repair candidate returned by the ladder (SCHEMA §9 `candidates[]`).
@@ -100,6 +189,12 @@ pub struct RepairItem {
     /// worker-published item is byte-identical to before this field existed.
     #[serde(default, skip_serializing_if = "is_false")]
     pub seeded: bool,
+    /// The pre-permutation ordinal snapshot a [`RepairReason::OrdinalPermutation`]
+    /// gate was raised against (VF-B6) — see [`OrdinalAnchor`] for why the gate
+    /// carries its own baseline. `None` on every other item, and skipped on the
+    /// wire, so pre-VF-B6 documents and worker-published items stay byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordinal_anchor: Option<OrdinalAnchor>,
 }
 
 /// `skip_serializing_if` predicate for a `false` flag (keeps the wire byte-stable).
@@ -209,6 +304,46 @@ impl RepairState {
     /// Non-seeded (ladder-produced) items for that step are untouched.
     pub fn clear_seeded_for_step(&mut self, step: usize) {
         self.items.retain(|i| !(i.seeded && i.step_index == step));
+    }
+
+    // ── VF-B6 ordinal-permutation gates ──────────────────────────────────────
+
+    /// The anchor of the ordinal-permutation gate raised for `op`, if any (the
+    /// baseline the tripwire re-tests against — see [`OrdinalAnchor`]). All items of
+    /// one gate share the anchor, so the first match is authoritative.
+    #[must_use]
+    pub fn ordinal_anchor_for(&self, op: RecordId) -> Option<&OrdinalAnchor> {
+        self.items
+            .iter()
+            .filter(|i| i.seeded && i.reason == RepairReason::OrdinalPermutation)
+            .find_map(|i| i.ordinal_anchor.as_ref().filter(|a| a.op == op))
+    }
+
+    /// The ops currently carrying an ordinal-permutation gate, ascending by id.
+    #[must_use]
+    pub fn ordinal_gated_ops(&self) -> Vec<RecordId> {
+        let mut ops: Vec<RecordId> = self
+            .items
+            .iter()
+            .filter(|i| i.seeded && i.reason == RepairReason::OrdinalPermutation)
+            .filter_map(|i| i.ordinal_anchor.as_ref().map(|a| a.op))
+            .collect();
+        ops.sort_unstable_by_key(|r| r.0);
+        ops.dedup();
+        ops
+    }
+
+    /// Drops every ordinal-permutation gate anchored on `op` (the tripwire's own
+    /// self-heal: the ordering came back to the anchor). Returns `true` if anything
+    /// was dropped. Ladder-produced items and gates of other kinds are untouched.
+    pub fn clear_ordinal_gates(&mut self, op: RecordId) -> bool {
+        let before = self.items.len();
+        self.items.retain(|i| {
+            !(i.seeded
+                && i.reason == RepairReason::OrdinalPermutation
+                && i.ordinal_anchor.as_ref().is_some_and(|a| a.op == op))
+        });
+        self.items.len() != before
     }
 
     /// The seeded (policy-gate) items, order-stable.
@@ -324,6 +459,7 @@ mod tests {
             ui_label: "Fillet edge".into(),
             scoring_version: None,
             seeded: false,
+            ordinal_anchor: None,
         }
     }
 
@@ -398,6 +534,98 @@ mod tests {
     }
 
     #[test]
+    fn unknown_reason_token_degrades_instead_of_failing_the_open() {
+        // VF-B6 review B3: `RepairReason` is persisted in document.json, so a token
+        // this build has never heard of (a NEWER release wrote it) must not make the
+        // document unopenable.
+        let from = |tok: &str| -> RepairReason {
+            serde_json::from_value(serde_json::json!(tok)).expect("never an error")
+        };
+        assert_eq!(from("ambiguous"), RepairReason::Ambiguous);
+        assert_eq!(from("no-candidates"), RepairReason::NoCandidates);
+        assert_eq!(from("low-confidence"), RepairReason::LowConfidence);
+        assert_eq!(
+            from("ordinal-permutation"),
+            RepairReason::OrdinalPermutation
+        );
+        assert_eq!(from("a-reason-from-2027"), RepairReason::Unknown);
+        assert_eq!(from(""), RepairReason::Unknown);
+        // A whole item carrying the unknown token still deserializes.
+        let mut v = serde_json::to_value(item(1, "op_1.input0")).unwrap();
+        v["reason"] = serde_json::json!("something-new");
+        let back: RepairItem = serde_json::from_value(v).expect("item still parses");
+        assert_eq!(back.reason, RepairReason::Unknown);
+    }
+
+    #[test]
+    fn ordinal_anchor_round_trips_and_is_absent_when_none() {
+        use crate::ids::RecordId;
+        // Absent on every pre-VF-B6 item ⇒ byte-stable for old documents.
+        let v = serde_json::to_value(item(1, "op_1.input0")).unwrap();
+        assert!(v.get("ordinalAnchor").is_none());
+
+        let op = RecordId(uuid::Uuid::from_u128(0x5150));
+        let anchored = RepairItem {
+            reason: RepairReason::OrdinalPermutation,
+            ordinal_anchor: Some(OrdinalAnchor {
+                op,
+                stamps: vec![
+                    OrdinalStamp {
+                        k: 0,
+                        key: [8_500_000_000, 8_500_000, 0, 0, 6],
+                    },
+                    OrdinalStamp {
+                        k: 1,
+                        key: [9_500_000_000, 30_500_000, 0, 0, 6],
+                    },
+                ],
+            }),
+            ..seeded_item(2, "op_2.input0")
+        };
+        let v = serde_json::to_value(&anchored).unwrap();
+        assert_eq!(v["reason"], serde_json::json!("ordinal-permutation"));
+        assert_eq!(v["ordinalAnchor"]["stamps"][1]["k"], serde_json::json!(1));
+        let back: RepairItem = serde_json::from_value(v).unwrap();
+        assert_eq!(back, anchored);
+        assert_eq!(
+            back.ordinal_anchor.as_ref().unwrap().keys()[&1],
+            [9_500_000_000, 30_500_000, 0, 0, 6]
+        );
+    }
+
+    #[test]
+    fn ordinal_gates_are_addressed_by_their_anchor_op() {
+        use crate::ids::RecordId;
+        let op = RecordId(uuid::Uuid::from_u128(7));
+        let other = RecordId(uuid::Uuid::from_u128(8));
+        let gate = |step, refid, anchor_op| RepairItem {
+            reason: RepairReason::OrdinalPermutation,
+            ordinal_anchor: Some(OrdinalAnchor {
+                op: anchor_op,
+                stamps: vec![OrdinalStamp {
+                    k: 0,
+                    key: [1, 2, 3, 4, 5],
+                }],
+            }),
+            ..seeded_item(step, refid)
+        };
+        let mut r = RepairState::new();
+        r.seed([gate(3, "a", op), gate(4, "b", op), gate(5, "c", other)]);
+        r.seed([seeded_item(6, "transform-gate")]); // a NON-ordinal gate
+        assert_eq!(r.ordinal_gated_ops(), vec![op, other]);
+        assert!(r.ordinal_anchor_for(op).is_some());
+
+        assert!(r.clear_ordinal_gates(op));
+        assert_eq!(r.ordinal_gated_ops(), vec![other]);
+        assert!(!r.clear_ordinal_gates(op), "idempotent");
+        assert_eq!(
+            r.seeded_steps(),
+            vec![5, 6],
+            "the other op's gate and the transform gate are untouched"
+        );
+    }
+
+    #[test]
     fn enums_serialize_to_schema_tokens() {
         assert_eq!(
             serde_json::to_value(LadderLevel::History).unwrap(),
@@ -410,6 +638,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(RepairReason::LowConfidence).unwrap(),
             serde_json::json!("low-confidence")
+        );
+        assert_eq!(
+            serde_json::to_value(RepairReason::OrdinalPermutation).unwrap(),
+            serde_json::json!("ordinal-permutation")
         );
     }
 

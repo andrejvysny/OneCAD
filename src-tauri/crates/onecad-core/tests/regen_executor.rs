@@ -69,6 +69,7 @@ fn symmetric_repair_item(step: usize, ref_id: &str) -> RepairItem {
         ui_label: "Fillet edge on right pocket".into(),
         scoring_version: None,
         seeded: false,
+        ordinal_anchor: None,
     }
 }
 

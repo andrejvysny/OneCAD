@@ -391,11 +391,43 @@ impl DocumentSession {
     pub fn adopt_regen_bodies(&mut self, regen: &BodyRegistry) -> bool {
         let mut adopted = false;
         for meta in regen.bodies() {
-            if !self.document.bodies.contains(meta.id) {
-                adopted |= self.document.bodies.register(meta.clone());
+            if self.document.bodies.contains(meta.id) {
+                // Insert-only for USER-AUTHORED metadata (name/visible), but the
+                // VF-B6 identity stamp is DERIVED: leaving a first-adoption stamp on
+                // a row the mirror has since re-published would make the in-memory
+                // registry disagree with what a save writes (a save takes bodies
+                // from the mirror). Refresh it in place.
+                if let Some(key) = meta.geom_stamp {
+                    self.document.bodies.set_geom_stamp(meta.id, key);
+                }
+                continue;
             }
+            adopted |= self.document.bodies.register(meta.clone());
         }
         adopted
+    }
+
+    /// **Regen-lane** repair-gate seeding (VF-B6) — plants `items` as seeded gates
+    /// with NO command inverse.
+    ///
+    /// Deliberately outside the VF-M8 single-snapshot rule that governs every EDIT
+    /// command's repair mutation: `commit_snapshot` is not an [`EditCommand`], so
+    /// there is no transaction for a `RestoreRepair` to ride. These gates are
+    /// **self-healing state derived from geometry stamps** instead — each carries the
+    /// [`OrdinalAnchor`](crate::document::repair::OrdinalAnchor) it was raised
+    /// against, so undoing the offending edit re-runs regen, the ordering matches the
+    /// anchor again, and [`clear_ordinal_gates`](Self::clear_ordinal_gates) drops
+    /// them. An undo therefore does not need to (and must not) restore them by
+    /// inverse: it restores the *geometry*, and the gate follows.
+    pub fn seed_regen_repair_gates(&mut self, items: Vec<RepairItem>) {
+        self.document.repair.seed(items);
+    }
+
+    /// **Regen-lane** clear of the VF-B6 ordinal gates anchored on `op` (the
+    /// tripwire's self-heal). Returns `true` if anything was dropped. Inverse-free
+    /// for the same reason as [`seed_regen_repair_gates`](Self::seed_regen_repair_gates).
+    pub fn clear_ordinal_gates(&mut self, op: RecordId) -> bool {
+        self.document.repair.clear_ordinal_gates(op)
     }
 
     /// Undoes the newest committed transaction (applies its inverses in reverse
@@ -1660,10 +1692,15 @@ fn transform_gate_items(document: &Document, index: usize) -> Vec<RepairItem> {
 
 /// The gate items for every record at or after `from_step` that stands on one of
 /// the `moved` bodies — the scanning core shared by the EDIT/SUPPRESS gate
-/// ([`transform_gate_items`], which starts one past the transform) and the DELETE
+/// ([`transform_gate_items`], which starts one past the transform), the DELETE
 /// gate (VF-B5b, which starts AT the removed index because the timeline has
-/// already closed up over it).
-fn gate_items_for_moved(
+/// already closed up over it), and the REGEN-side VF-B6 ordinal tripwire (which
+/// passes the permuted split children as `moved`).
+///
+/// Public so the regen lane can seed the *same* walk rather than duplicating it:
+/// "which downstream records stand on these bodies" must have exactly one answer,
+/// or the edit gate and the tripwire would disagree about what is protected.
+pub fn gate_items_for_moved(
     document: &Document,
     moved: &[BodyId],
     from_step: usize,
@@ -1755,6 +1792,7 @@ fn gate_item(
         anchor: None,
         ui_label: label.to_string(),
         seeded: true,
+        ordinal_anchor: None,
     }
 }
 

@@ -66,11 +66,28 @@ BooleanResult checked_boolean(const TopoDS_Shape& target, const TopoDS_Shape& to
                               const nlohmann::json& occt_options, const onecad::CancelToken* cancel,
                               std::shared_ptr<BRepBuilderAPI_MakeShape>& builder_out);
 
-// The solids of `shape` in DETERMINISTIC order — the ordinal a split's child ids
-// (`body_<opId>:<k>`) are numbered by (SCHEMA §2, D1). Ordered by a quantized
-// geometric key: (volume, centroid x, y, z, face count) at 1e-6 quantization, so a
-// symmetric bisection (equal volumes) is disambiguated by centroid. NEVER unordered
-// TopExp iteration. Empty when `shape` carries no solid.
+// One solid of an N-body result, paired with the quantized geometric key its
+// ordinal was assigned by (VF-B6 identity-tripwire evidence).
+struct RankedSolid {
+    TopoDS_Shape shape;
+    session::RankKey key;
+};
+
+// The solids of `shape` in DETERMINISTIC order, each carrying its sort key —
+// the ordinal a split's child ids (`body_<opId>:<k>`) are numbered by (SCHEMA §2,
+// D1). Ordered by a quantized geometric key: (volume, centroid x, y, z, face count)
+// at 1e-6 quantization, so a symmetric bisection (equal volumes) is disambiguated
+// by centroid. NEVER unordered TopExp iteration. Empty when `shape` carries no
+// solid.
+//
+// The key is RETAINED rather than recomputed inside the comparator so that
+// `publish_boolean_result` can publish it (SCHEMA §7.2 `bodyEvents[].rankKey`):
+// the ordinal is a GEOMETRIC rank, not lineage, so Rust needs the rank key to
+// notice a parametric edit flipping which solid `:<k>` names.
+std::vector<RankedSolid> ranked_solids(const TopoDS_Shape& shape);
+
+// [`ranked_solids`] without the keys — the shape-only form the callers that just
+// need the deterministic order (StepRead, Extrude/Hole emptiness probes) use.
 std::vector<TopoDS_Shape> ordered_solids(const TopoDS_Shape& shape);
 
 // Publish a boolean / boolean-mode-Cut result into the scratch as the successor of

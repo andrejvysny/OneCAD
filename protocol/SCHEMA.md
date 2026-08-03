@@ -589,6 +589,43 @@ Per-step `event`s (`event:"planStep"`), one per executed step:
   worker mints and Rust adopts+fences, rather than Rust pre-minting (split/merge body
   counts are unknowable before OCCT executes, so pre-minting could never cover them
   anyway).
+- **`bodyEvents[].rankKey` — OPTIONAL identity-tripwire evidence (VF-B6).** An op
+  whose child ordinals are a **geometric rank** MAY attach, to each `created` (and
+  the single-solid `modified` that op would otherwise have produced), the exact key
+  it ranked that solid by:
+
+  ```json
+  { "kind": "created", "bodyId": "body_op4:0",
+    "rankKey": [7500000000, -10000000, 7500000, 12500000, 6] }
+  ```
+
+  Normative form: a **5-element array of signed integers**,
+  `[volume, centroidX, centroidY, centroidZ, faceCount]`, where the first four are
+  quantized as `llround(value * 1e6)` (the §10 `quantizationVersion = 1` step) over
+  `BRepGProp::VolumeProperties` mass + centre of mass, and `faceCount` is the exact
+  face count. Ordinals are assigned by a **stable sort on the lexicographic order of
+  this tuple**, ascending — so `rankKey` is not a description of the child, it *is*
+  the reason the child got ordinal `k`.
+
+  The field is **diagnostic/identity evidence, consumed by Rust**, and carries no
+  execution semantics: the worker never reads it back, and it is deliberately NOT
+  folded into the §12 `bodyLifecycle` signature (that signature pins the ordered
+  create/modify/delete lineage; folding a geometric measurement into it would make
+  every dimensional edit look like a lifecycle change).
+
+  **Absence means "no claim", never "no key".** A producer whose ordinals come from
+  *lineage* rather than geometry MUST omit it — `TransformBody`'s copy path (ordinal
+  = the caller's target-list index) and `ImportStep` (ordinal = the position in the
+  content-addressed source blob, which no parametric edit can permute) both omit it
+  today. Rust MUST tolerate the omission by skipping its tripwire for that body, and
+  MUST NOT infer anything from a missing key.
+
+  *Why Rust needs it:* `body_<opId>:<k>` is stable in NAME but its `k` is a
+  **geometric rank, not lineage**. A parametric edit that makes two split pieces
+  cross in that rank order silently re-points `:0` at a different solid, and every
+  downstream reference then re-resolves *cleanly* to the wrong body. Publishing the
+  rank key lets Rust detect the permutation and raise a deterministic `NeedsRepair`
+  (§9 `ordinal-permutation`) instead of binding silently.
 
 Terminal resp — `PlanPrepared`:
 
@@ -1884,6 +1921,7 @@ STATE (see [§8](#8-error-taxonomy)).
   "elementId": "el_…4a1",
   "ladderFailed": "descriptor",          // "history" | "descriptor"
   "reason": "ambiguous",                 // "ambiguous" | "no-candidates" | "low-confidence"
+                                         //   | "ordinal-permutation" (Rust-seeded only)
   "scoringVersion": 1,                   // = resolverVersion the scores were computed under
   "candidates": [
     {
@@ -1910,6 +1948,15 @@ STATE (see [§8](#8-error-taxonomy)).
 - `scoringVersion`: the `resolverVersion` (§10) the candidate scores were computed
   under. Present on every NeedsRepair evidence payload so a repair UI / a
   Rust-side policy knows which normalized-scoring scheme produced the numbers.
+- `reason`: the four tokens above. `ambiguous` / `no-candidates` / `low-confidence`
+  are ladder outcomes a **worker** may emit. **`ordinal-permutation` is
+  Rust-seeded only** (VF-B6): it marks a reference standing on an N-body op's
+  ordinal child `body_<opId>:<k>` whose [§7.2 `rankKey`](#72-regen--executeplan)
+  evidence shows the ordinals permuted under a parametric edit — the ref would
+  otherwise re-resolve cleanly to the WRONG solid. A worker MUST NOT emit it.
+  **Readers MUST tolerate an unknown `reason` token** rather than failing the
+  payload; a Rust reader degrades an unrecognized token to an opaque `unknown` so an
+  older release can still open a document written by a newer one.
 - `candidates[]` is sorted by `score` descending; a symmetric tie (equal scores,
   `margin` below the policy margin) MUST produce NeedsRepair, never a guess (false
   positive is worse than false negative).
@@ -2028,6 +2075,26 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-03 — §7.2 ADDITIVE `bodyEvents[].rankKey` + §9 `reason:
+  "ordinal-permutation"`** (WP-FIX W5, VF-B6; cross-track sign-off recorded in
+  `TODO.md` by the WP-FIX gate). Purely **additive on both**. §7.2: an N-body op
+  whose child ordinals are a geometric rank now publishes the quantized 5-tuple key
+  `[volume, cx, cy, cz, faceCount]` it ranked each solid by; absence stays legal and
+  means "no claim". §9: a fourth `reason` token, **Rust-seeded only**, plus a
+  normative "tolerate unknown `reason`" rule for readers. Rationale: `body_<opId>:<k>`
+  is stable in name but `k` is a geometric rank, so an edit that crosses two split
+  pieces' rank order silently re-points `:0` at a different solid and every
+  downstream ref re-resolves *cleanly* to the wrong body (H5-B class). With the key
+  published, Rust detects the permutation at adoption and raises a deterministic
+  `NeedsRepair` instead.
+  **No fixture bump.** The ordinal assignment itself is byte-identical (the same
+  `stable_sort` over the same `llround(v * 1e6)` lexicographic tuple — the key was
+  always computed, it was just discarded inside the comparator), so no shape moves,
+  no signature moves, and no `:<k>` id changes. The NDJSON fixtures under
+  `worker/tests/fixtures/` and `protocol/fixtures/` are **subset** matchers, so the
+  extra key on split-producing steps is tolerated by construction; no golden file
+  changed.
 
 - **2026-08-03 — §7.7 checkpoints are IN-SESSION ONLY** (WP-FIX W2, VF-B3;
   cross-track sign-off recorded in `TODO.md` by the WP-FIX gate). Doc-only
