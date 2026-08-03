@@ -1,4 +1,66 @@
-# OneCAD-Tauri — Current State (2026-08-02, FILLET-CHAMFER-UNIFY shipped)
+# OneCAD-Tauri — Current State (2026-08-03, STEP-IMPORT shipped; BODY-TRANSFORM in flight)
+
+## ROADMAP (approved 2026-08-02, plan `~/.claude/plans/act-as-senior-software-reflective-swing.md`)
+User priorities: 3D-print + machined parts + daily driver; light multi-part (no
+mates); STEP import first. Queue: Step-0 USER manual gates
+(`docs/MANUAL_GATES_RUN.md`) → WP-0 ✓ → WP-A ✓ → WP-B (in flight) → WP-C
+pro-ops sweep (mass props, units, hole tool, draft UI, 2-dist chamfer, sketch
+offset/fillet, revolve region-parity). NOT next: assemblies/mates, Loft/Sweep,
+drawings. Internal adversarial review pre-approval: REVISE → 3 BLOCKER + 7
+MAJOR + 8 MINOR all folded (incl. B1 transform wrong-bind, B2 256-solid cap,
+B3 checkpoint-replay fallacy → brep/xbf-primary codec).
+
+## WP-B BODY-TRANSFORM W0 (2026-08-03, commit 0dc8c91) — parametric move/rotate/copy
+Core `TransformBody{targets[], translate 3×Scalar, rotate{frozen center, axis,
+angleDeg}, copy}` + `can_fold_transform` lineage query (fold rule: one
+cumulative record per placement intent). Worker TransformOp: normative T∘R,
+copy:false = modify-in-place id-preserved via apply_history level-1 rebind +
+NEW `apply_placement` (anchors move WITH the body — fixed the pre-existing
+stale-anchor latent); copy:true mints §2 N-body ordinals. EDIT-SAFETY GATE
+(refined from the plan's blanket ban): healthy transform-then-model flows
+resolve clean; editing/suppressing a TransformBody seeds NeedsRepair on
+downstream lineage refs (descriptor scoring against moved geometry admits
+congruent-decoy WRONG binds — H5-B class; gate holds until pickFrame W3).
+ctest 85/85 · cargo 680/0 · transform_body 8/8. W1 FE (FSM/chips/`t`/fold/
+exact mock) in flight; then W2 gizmo, W2.5 align, W3 pickFrame deferred-safe.
+
+## WP-A STEP-IMPORT (2026-08-02, commits 0598369→885d92e) — COMPLETE
+Real import: Start Screen + in-editor File menu → XCAF product names + per-face
+colors → bodies are FIRST-CLASS (fillet/boolean/sketch-on-face/patterns) →
+identity survives process death. Architecture: §7.8 import VERB was
+structurally wrong (session mutation outside ExecutePlan = deleted by first
+regen) → §7.3 `ImportStep` RECORD, content-addressed source in NEW
+authoritative `imports/<sha256>` container section (256 MiB cap, refcount at
+save pins suppressed records + provenance, doc with missing blob still OPENS).
+Replay = **xbf-primary** (BinXCAF storage v12; plain brep DROPS XCAF attrs;
+STEP co-stored as provenance via `provenanceSha256`; W0 proved cross-process
+determinism + BinTools ~100× faster than STEP re-parse — and `from:0` regen
+NEVER consults checkpoints, so replay speed is open-time UX). `InspectStep`
+probe (includeGeometry conversion lane) runs BEFORE record authoring — bad
+file leaves the start screen intact. MESH1 gains FACE_COLORS (type 12, flags
+bit 4, unset=alpha-0 → body token, theme-rebake in place); FE de-indexes
+colored bodies (triangle ordinals preserved — picking pinned by real-raycast
+test), shadedVertex MaterialKind white-base.
+THREE stdout-corruption defects found+fixed en route (all would land bytes
+mid-OCW1-frame): BinTools_ShapeSet::Read version banner, TDocStd_Application's
+PRIVATE messenger (58B ANSI), plus ExportStep's own knob leak (observed).
+XCAF does NOT inherit colors downward — solid-label fill pass (whole-part-blue
+was 0/6 faces). W5 acceptance gate: ordinal-agnostic, survived the brep→xbf
+flip unchanged; delete-import ⇒ NeedsRepair "no-candidates", undo exact.
+Suites at close: ctest 84/84 · cargo 654/0 · FE 2223/162 · e2e 114/114 · tsc/
+clippy/fmt/hex clean. Deferred: W6 preflight dialog + progress frames.
+SEAM FLAGGED (pre-existing): promoted-but-unconsumed ElementId doesn't survive
+process death → face-sketch dblclick re-entry match can fail after reopen
+(TODO.md, route to face-sketch owner).
+
+## WP-0 (2026-08-02, commit d875ef9) — split-child identity prerequisite
+`split_origin` 256-probe DELETED → `split_child_uuid` memoizes derived→(op,k)
+at its sole mint path; exact + unbounded (>256-solid import used to silently
+lose `split_of` ⇒ cross-process REF_UNRESOLVED). SCHEMA §2/§7.2 `:<k>` widened
+to "ordered children of any N-body op" + single-vs-multi minting rule.
+Locked at k=300; M5a cold-interner proof green.
+
+# Previous state (2026-08-02, FILLET-CHAMFER-UNIFY shipped)
 
 ## FILLET-CHAMFER-UNIFY (2026-08-02, commit (pending)) — ONE direction-driven edge tool
 Plan `~/.claude/plans/act-as-senior-software-peppy-quilt.md` (internal adversarial
