@@ -76,6 +76,24 @@ pub struct AppState {
     /// The single open document (V1), or `None` when nothing is open. The regen
     /// driver and every command lock this one runtime (single writer).
     pub runtime: Arc<Mutex<Option<DocumentRuntime>>>,
+    /// The **persistence lane** — serializes the two writers that can touch the same
+    /// on-disk recovery state: an autosave (container + crash marker) and an explicit
+    /// save (container + marker/autosave *clearing*).
+    ///
+    /// Not a general IO lock. It exists for exactly two races opened by moving the
+    /// container write off the runtime lock (VF-B7):
+    ///
+    /// * **M3** — two concurrent writers on one target path eat each other's temps
+    ///   (`ContainerWriter` sweeps sibling temps with
+    ///   [`cleanup_stale_temps`](onecad_core::io::container) before its rename);
+    /// * **M2** — an in-flight autosave landing *after* a save cleared the crash
+    ///   marker would resurrect a bogus recovery offer for a cleanly-saved document.
+    ///
+    /// **Lock order is `runtime` → release → `persistence`, never nested.** No path
+    /// may await this lane while holding the runtime lock: both lanes take the
+    /// runtime lock first (to build a [`SavePayload`](crate::document_runtime::SavePayload)),
+    /// release it, and only then contend here.
+    pub persistence: Arc<Mutex<()>>,
     /// The regen scheduler control surface, set once in `crate::run`'s setup.
     pub scheduler: SharedScheduler,
     /// The app handle, set once in `crate::run`'s setup (the worker-status
@@ -115,6 +133,7 @@ impl AppState {
     pub fn new(backend_factory: BackendFactory) -> Self {
         Self {
             runtime: Arc::new(Mutex::new(None)),
+            persistence: Arc::new(Mutex::new(())),
             scheduler: Arc::new(OnceLock::new()),
             app: Arc::new(OnceLock::new()),
             autosave_tick: Arc::new(watch::channel(0u64).0),
@@ -199,6 +218,7 @@ impl Default for AppState {
         let backend_factory = real_worker_factory(runtime.clone(), scheduler.clone(), app.clone());
         Self {
             runtime,
+            persistence: Arc::new(Mutex::new(())),
             scheduler,
             app,
             autosave_tick: Arc::new(watch::channel(0u64).0),

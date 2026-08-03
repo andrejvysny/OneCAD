@@ -47,6 +47,7 @@
 //! [`referenced_import_shas`].
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use thiserror::Error;
 
@@ -64,12 +65,19 @@ pub const IMPORTS_DIR: &str = "imports/";
 pub const MAX_IMPORT_BLOB_BYTES: u64 = 256 * 1024 * 1024;
 
 /// One import source blob: its codec plus the raw bytes.
+///
+/// The bytes sit behind an [`Arc`] because a save must be able to *hand the whole
+/// carrier to a blocking writer thread* without deep-copying every source file
+/// (VF-B7: an import blob is up to [`MAX_IMPORT_BLOB_BYTES`], and the save/autosave
+/// lanes clone the carrier once per write while the runtime lock is held). Cloning
+/// an `ImportBlob` is therefore a refcount bump, not a `memcpy`. `Arc<T: Eq>` is
+/// itself `Eq`, so the derives are unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportBlob {
     /// Which codec the bytes are in (picks the section extension).
     pub codec: ImportSourceCodec,
     /// The source bytes, opaque to the core.
-    pub bytes: Vec<u8>,
+    pub bytes: Arc<Vec<u8>>,
 }
 
 /// The document-level import-blob carrier: `sha256 → blob`, keyed by the SAME
@@ -371,14 +379,14 @@ mod tests {
             live_sha.clone(),
             ImportBlob {
                 codec: ImportSourceCodec::Step,
-                bytes: live.clone(),
+                bytes: Arc::new(live.clone()),
             },
         );
         blobs.insert(
             orphan_sha,
             ImportBlob {
                 codec: ImportSourceCodec::Step,
-                bytes: orphan,
+                bytes: Arc::new(orphan),
             },
         );
 
@@ -407,7 +415,7 @@ mod tests {
             sha,
             ImportBlob {
                 codec: ImportSourceCodec::Step,
-                bytes: b"actually something else".to_vec(),
+                bytes: Arc::new(b"actually something else".to_vec()),
             },
         );
         assert!(matches!(
@@ -430,7 +438,7 @@ mod tests {
             "../../etc/passwd".into(),
             ImportBlob {
                 codec: ImportSourceCodec::Step,
-                bytes: b"pwned".to_vec(),
+                bytes: Arc::new(b"pwned".to_vec()),
             },
         );
         assert!(matches!(

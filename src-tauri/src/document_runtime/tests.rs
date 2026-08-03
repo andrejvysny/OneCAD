@@ -735,6 +735,153 @@ async fn save_then_reopen_round_trips_the_document() {
     assert!(!reopened.is_dirty());
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Save payload split (VF-B7 / plan F1a) — the lock-free write half
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn test_save_meta() -> onecad_core::io::container::SaveMeta {
+    onecad_core::io::container::SaveMeta {
+        app_version: "0.1.0-test".into(),
+        occt_fingerprint: None,
+        created: "2026-08-03T00:00:00Z".into(),
+        modified: "2026-08-03T00:00:00Z".into(),
+    }
+}
+
+/// A carrier blob keyed by its real digest (the writer verifies the equation).
+fn seed_import_blob(rt: &mut DocumentRuntime, bytes: Vec<u8>) -> String {
+    use onecad_core::document::record::ImportSourceCodec;
+    use sha2::{Digest, Sha256};
+    let sha = format!("{:x}", Sha256::digest(&bytes));
+    rt.imports.insert(
+        sha.clone(),
+        ImportBlob {
+            codec: ImportSourceCodec::Step,
+            bytes: Arc::new(bytes),
+        },
+    );
+    sha
+}
+
+#[tokio::test]
+async fn build_and_write_payload_produce_the_same_container_as_save() {
+    // The split must be a pure refactor of the bytes: `build_save_payload` +
+    // `write_payload` (the lock-free lane) and `save` (the in-place lane) write
+    // containers that reopen to the same document.
+    let dir = tempfile::tempdir().unwrap();
+    let split_path = dir.path().join("split.onecad");
+    let save_path = dir.path().join("save.onecad");
+
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    rt.apply(add_extrude(0x10, 25.0)).unwrap();
+    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+
+    // Lane A: snapshot, then write with NO `&self` in sight.
+    let payload = rt.build_save_payload(test_save_meta());
+    DocumentRuntime::write_payload(&split_path, &payload).unwrap();
+    // Lane B: the legacy in-place save.
+    rt.save(&save_path, test_save_meta()).unwrap();
+
+    let a = onecad_core::io::container::ContainerReader::open(&split_path).unwrap();
+    let b = onecad_core::io::container::ContainerReader::open(&save_path).unwrap();
+    assert_eq!(
+        onecad_core::io::document_io::serialize_document(a.document()).unwrap(),
+        onecad_core::io::document_io::serialize_document(b.document()).unwrap(),
+        "the split lane must persist exactly the document `save` does"
+    );
+    assert_eq!(
+        std::fs::read(&split_path).unwrap(),
+        std::fs::read(&save_path).unwrap(),
+        "same payload + same meta ⇒ byte-identical containers"
+    );
+}
+
+#[test]
+fn save_payload_shares_import_blob_bytes_instead_of_copying_them() {
+    // VF-B7: the payload is built UNDER the runtime lock, so it must be cheap. An
+    // import blob is up to 256 MiB — cloning the carrier has to be a refcount bump.
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let sha = seed_import_blob(&mut rt, b"ISO-10303-21; a large source file".to_vec());
+
+    let payload = rt.build_save_payload(test_save_meta());
+    let live = &rt.imports[&sha].bytes;
+    let snapshotted = &payload.imports[&sha].bytes;
+    assert!(
+        Arc::ptr_eq(live, snapshotted),
+        "the payload must share the blob allocation, not deep-copy it"
+    );
+}
+
+#[tokio::test]
+async fn mark_saved_keeps_the_document_dirty_when_an_edit_lands_mid_write() {
+    // The write now runs OFF the runtime lock, so an edit can land between the
+    // payload snapshot and the commit. Those bytes are not in the file that was just
+    // written — clearing `dirty` would advertise unsaved work as saved.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("model.onecad");
+
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    rt.apply(add_extrude(0x10, 25.0)).unwrap();
+
+    let payload = rt.build_save_payload(test_save_meta());
+    let revision = rt.revision();
+    DocumentRuntime::write_payload(&path, &payload).unwrap();
+    // …an edit lands while the container was being deflated.
+    rt.apply(add_extrude(0x11, 40.0)).unwrap();
+    rt.mark_saved(&path, revision);
+
+    assert_eq!(
+        rt.path(),
+        Some(path.as_path()),
+        "the path is adopted anyway"
+    );
+    assert!(
+        rt.is_dirty(),
+        "an edit that is NOT in the written bytes must leave the document dirty"
+    );
+
+    // The quiet case still goes clean.
+    let payload = rt.build_save_payload(test_save_meta());
+    let revision = rt.revision();
+    DocumentRuntime::write_payload(&path, &payload).unwrap();
+    rt.mark_saved(&path, revision);
+    assert!(!rt.is_dirty(), "no interleaved edit ⇒ the save is clean");
+}
+
+#[tokio::test]
+async fn checkpoint_ticket_is_discarded_when_an_edit_lands_during_save_checkpoint() {
+    // W1's ticket recheck becomes load-bearing in W3: `save_document` now awaits
+    // `SaveCheckpoint` with the runtime lock RELEASED, so an edit really can land
+    // between prepare and adopt. Artifacts describing a superseded head must be
+    // dropped, not stored under the (now wrong) head step.
+    let backend = Arc::new(FakeBackend::with_checkpoints());
+    let mut rt = runtime_with(backend.clone());
+    rt.apply(add_extrude(0x10, 25.0)).unwrap();
+    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+
+    let ticket = rt.prepare_checkpoint().expect("head is checkpointable");
+    let engine = rt.engine_arc();
+    // …the lock is released here in production; an edit lands and bumps the revision.
+    let artifacts = engine.save_checkpoint(ticket.step()).await.unwrap();
+    rt.apply(add_extrude(0x11, 40.0)).unwrap();
+    rt.adopt_checkpoint(ticket, artifacts);
+    assert_eq!(
+        rt.checkpoint_count(),
+        0,
+        "artifacts for a head the edit superseded must NOT be adopted"
+    );
+
+    // The undisturbed round-trip still adopts.
+    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    let ticket = rt.prepare_checkpoint().expect("head is checkpointable");
+    let artifacts = engine.save_checkpoint(ticket.step()).await.unwrap();
+    rt.adopt_checkpoint(ticket, artifacts);
+    assert_eq!(rt.checkpoint_count(), 1, "a quiet round-trip adopts");
+}
+
 #[tokio::test]
 async fn sequential_from_zero_regens_wholesale_replace_no_d1_false_positive() {
     // D5 / D1-vs-from-0: two sequential regen cycles where cycle 1 PUBLISHES a body,

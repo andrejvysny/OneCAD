@@ -532,7 +532,7 @@ fn blob(bytes: &[u8], codec: ImportSourceCodec) -> (String, ImportBlobs) {
         sha.clone(),
         ImportBlob {
             codec,
-            bytes: bytes.to_vec(),
+            bytes: std::sync::Arc::new(bytes.to_vec()),
         },
     );
     (sha, blobs)
@@ -682,7 +682,7 @@ fn orphan_blob_is_dropped_at_save_and_a_suppressed_record_keeps_its_own() {
             sha.clone(),
             ImportBlob {
                 codec: ImportSourceCodec::Step,
-                bytes: bytes.clone(),
+                bytes: std::sync::Arc::new(bytes.clone()),
             },
         );
     }

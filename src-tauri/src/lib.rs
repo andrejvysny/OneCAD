@@ -227,11 +227,13 @@ pub fn run() {
             // pathless environment (no app-data dir) simply skips autosave.
             if let Some(app_data) = autosave::autosave_root(app.handle()) {
                 let runtime = state.runtime.clone();
+                let lane = state.persistence.clone();
                 let tick = state.autosave_tick.subscribe();
                 let emitter = app.handle().clone();
                 tauri::async_runtime::spawn(autosave::run(
                     runtime,
                     app_data,
+                    lane,
                     tick,
                     autosave::AUTOSAVE_DEBOUNCE,
                     move |ev| {

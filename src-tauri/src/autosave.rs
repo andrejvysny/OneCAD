@@ -23,6 +23,21 @@
 //! * the next launch scans for **stale** markers (a marker whose `pid` is no longer
 //!   alive, per [`pid_alive`]) with a surviving autosave, and offers recovery
 //!   ([`check_recovery`](crate::api::check_recovery)).
+//!
+//! ## The persistence lane (VF-B7 / M2 / M3)
+//!
+//! Both writers here — [`autosave_current`] and [`write_save_payload`] (the explicit
+//! save's second half) — take the runtime lock ONLY to build a
+//! [`SavePayload`](crate::document_runtime::SavePayload), release it, and then do the
+//! container write on a `spawn_blocking` thread. That keeps serialization + deflate of
+//! up to a 256 MiB import blob off the single-writer lock, so an edit is never blocked
+//! by a save.
+//!
+//! Two writers off one lock need their own ordering, which is the `lane` parameter
+//! both take: a `tokio::sync::Mutex<()>` (`AppState::persistence`) serializing
+//! {container write + recovery-marker mutation}. **Lock order is runtime → release →
+//! lane, never nested** — no function in this module awaits the lane while holding
+//! the runtime lock.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -36,8 +51,9 @@ use onecad_core::io::container::SaveMeta;
 use onecad_core::io::recovery::{
     autosave_dir, autosave_path, remove_marker, write_marker, SessionMarker,
 };
+use onecad_core::io::IoError;
 
-use crate::document_runtime::DocumentRuntime;
+use crate::document_runtime::{DocumentRuntime, SavePayload};
 
 /// Quiet window after the last document mutation before an autosave fires
 /// (V1/V2 lifecycle). Constant by design — a debounce, not a fixed cadence: a busy
@@ -95,22 +111,21 @@ pub fn pid_alive(pid: u32) -> bool {
 /// document is open** (the zero-activity guard) or the write failed (logged).
 ///
 /// The document's live save path and dirty flag are untouched (this is a recovery
-/// snapshot, not a real save — see [`DocumentRuntime::write_autosave`]).
+/// snapshot, not a real save — see [`DocumentRuntime::build_save_payload`]).
+///
+/// **Off the runtime lock.** The lock is held only for the
+/// [`SavePayload`](crate::document_runtime::SavePayload) snapshot; the container
+/// write runs on a blocking thread under `lane` (see the module docs), and the join
+/// handle is **awaited** — `None` is this function's failure contract, and a
+/// detached write would both break it and let two writers race one target path.
+///
+/// The marker is written only after a successful container write, and under the same
+/// `lane` acquisition, so a marker never advertises an autosave that does not exist.
 pub async fn autosave_current(
     runtime: &Mutex<Option<DocumentRuntime>>,
     app_data: &Path,
+    lane: &Mutex<()>,
 ) -> Option<AutosaveEvent> {
-    let guard = runtime.lock().await;
-    let rt = guard.as_ref()?; // no document open ⇒ zero autosave activity.
-    let doc_id = rt.document_uuid();
-    let opened = rt.path().map(Path::to_path_buf);
-
-    // The marker writer creates the dir, but the container writer needs it first.
-    if let Err(e) = std::fs::create_dir_all(autosave_dir(app_data)) {
-        tracing::warn!("autosave: create dir failed: {e}");
-        return None;
-    }
-    let path = autosave_path(app_data, doc_id);
     let now = now_rfc3339();
     let meta = SaveMeta {
         app_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -118,9 +133,40 @@ pub async fn autosave_current(
         created: now.clone(),
         modified: now.clone(),
     };
-    if let Err(e) = rt.write_autosave(&path, meta) {
-        tracing::warn!("autosave: write container failed: {e}");
+    // ── Under the runtime lock: snapshot only. No IO, no serialization. ──
+    let (payload, doc_id, opened) = {
+        let guard = runtime.lock().await;
+        let rt = guard.as_ref()?; // no document open ⇒ zero autosave activity.
+        (
+            rt.build_save_payload(meta),
+            rt.document_uuid(),
+            rt.path().map(Path::to_path_buf),
+        )
+    };
+
+    // The marker writer creates the dir, but the container writer needs it first.
+    if let Err(e) = std::fs::create_dir_all(autosave_dir(app_data)) {
+        tracing::warn!("autosave: create dir failed: {e}");
         return None;
+    }
+    let path = autosave_path(app_data, doc_id);
+
+    // ── Persistence lane: container write + marker, serialized against an
+    //    explicit save's write + recovery clearing (M2/M3). ──
+    let _lane = lane.lock().await;
+    let target = path.clone();
+    match tokio::task::spawn_blocking(move || DocumentRuntime::write_payload(&target, &payload))
+        .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::warn!("autosave: write container failed: {e}");
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!("autosave: write task did not complete: {e}");
+            return None;
+        }
     }
     let marker = SessionMarker {
         document_id: doc_id,
@@ -135,6 +181,48 @@ pub async fn autosave_current(
         path: path.to_string_lossy().into_owned(),
         at_ms: now_ms(),
     })
+}
+
+/// The explicit save's **persistence half**: container write (off the runtime lock,
+/// on a blocking thread) followed by recovery-state clearing, both under `lane`.
+///
+/// Split out of [`save_document`](crate::api::save_document) so the two lanes share
+/// one ordering primitive and one code path. Clearing the marker INSIDE the lane is
+/// what closes M2 — an autosave that already holds the lane finishes first and its
+/// marker is then removed, instead of landing after the clear and resurrecting a
+/// bogus recovery offer for a cleanly-saved document.
+///
+/// Residual (accepted, documented): an autosave that snapshotted its payload *before*
+/// this save but only reaches the lane *after* it re-writes its marker. The offer that
+/// produces is spurious but harmless — the marker still points at a real autosave
+/// container holding a superset of the saved work, so recovery cannot lose anything.
+///
+/// `recovery_root` `None` ⇒ headless / no app-data dir; nothing to clear.
+///
+/// # Errors
+/// [`IoError`] when the container write fails — the target is untouched, and the
+/// recovery state is deliberately NOT cleared (a failed save must not discard the
+/// crash snapshot that is now the only copy of the work).
+pub async fn write_save_payload(
+    lane: &Mutex<()>,
+    path: &Path,
+    payload: SavePayload,
+    recovery_root: Option<&Path>,
+    document_id: DocumentId,
+) -> Result<(), IoError> {
+    let _lane = lane.lock().await;
+    let target = path.to_path_buf();
+    match tokio::task::spawn_blocking(move || DocumentRuntime::write_payload(&target, &payload))
+        .await
+    {
+        Ok(result) => result?,
+        Err(e) => return Err(IoError::Io(format!("save task did not complete: {e}"))),
+    }
+    // A clean save supersedes any crash-recovery state for this document.
+    if let Some(root) = recovery_root {
+        clear_recovery_state(root, document_id);
+    }
+    Ok(())
 }
 
 /// Clears a document's crash marker + stale autosave (a clean save/close, or a
@@ -155,9 +243,13 @@ pub fn clear_recovery_state(app_data: &Path, document_id: DocumentId) {
 /// mutation lands, waits `debounce` of quiet (resetting on every further mutation),
 /// autosaves the open document, and hands the [`AutosaveEvent`] to `emit`. Returns
 /// when every `tick` sender is dropped (app shutdown).
+///
+/// `lane` is the shared persistence lane (`AppState::persistence`) — see the module
+/// docs for the lock order.
 pub async fn run<F>(
     runtime: Arc<Mutex<Option<DocumentRuntime>>>,
     app_data: PathBuf,
+    lane: Arc<Mutex<()>>,
     mut tick: watch::Receiver<u64>,
     debounce: Duration,
     emit: F,
@@ -181,7 +273,7 @@ pub async fn run<F>(
                 }
             }
         }
-        if let Some(ev) = autosave_current(&runtime, &app_data).await {
+        if let Some(ev) = autosave_current(&runtime, &app_data, &lane).await {
             emit(ev);
         }
     }

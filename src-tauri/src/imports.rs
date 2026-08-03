@@ -40,7 +40,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
@@ -366,7 +366,7 @@ pub async fn prepare_import(
         geometry_sha,
         ImportBlob {
             codec,
-            bytes: geometry_bytes,
+            bytes: Arc::new(geometry_bytes),
         },
     )];
     if params.provenance_sha256.is_some() {
@@ -374,7 +374,7 @@ pub async fn prepare_import(
             source_sha,
             ImportBlob {
                 codec: ImportSourceCodec::Step,
-                bytes: source_bytes,
+                bytes: Arc::new(source_bytes),
             },
         ));
     }

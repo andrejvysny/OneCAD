@@ -198,6 +198,29 @@ pub async fn insert_step(
 /// Saves the open document (`CadClient` save). `path` `None` reuses the last save
 /// path; an unsaved document with no path is an error (the frontend's Save action
 /// then falls back to Save As). Records the saved path in the recents store.
+///
+/// ## Off the single-writer lock (VF-B7 / plan F1a)
+///
+/// The two slow parts of a save — the worker `SaveCheckpoint` round-trip and the
+/// container write (JSON + deflate of every import blob) — used to run with the
+/// runtime lock held, stalling every edit for their whole duration. They now run
+/// unlocked, in five phases:
+///
+/// 1. locked: resolve the target path, admit a checkpoint
+///    ([`prepare_checkpoint`](DocumentRuntime::prepare_checkpoint)), clone the engine;
+/// 2. **unlocked**: `SaveCheckpoint`; re-lock briefly to
+///    [`adopt_checkpoint`](DocumentRuntime::adopt_checkpoint), whose fencing recheck
+///    discards artifacts an interleaved edit or worker restart invalidated;
+/// 3. locked: [`build_save_payload`](DocumentRuntime::build_save_payload) + the
+///    revision it describes;
+/// 4. **unlocked**, under the persistence lane: the container write, then the
+///    recovery-marker clear ([`autosave::write_save_payload`]);
+/// 5. locked: [`mark_saved`](DocumentRuntime::mark_saved) — adopt the path, and go
+///    clean only if no edit landed during the write.
+///
+/// Every re-lock re-checks the document identity: `close_document` / `open_document`
+/// can interleave now that the lock is dropped, and the tail of a save must never be
+/// applied to a different document.
 #[tauri::command]
 #[tracing::instrument(skip_all, fields(path = ?path), err(Display))]
 pub async fn save_document(
@@ -205,10 +228,11 @@ pub async fn save_document(
     app: AppHandle,
     path: Option<String>,
 ) -> Result<(), ApiError> {
-    let (target, document_id): (PathBuf, onecad_core::ids::DocumentId) = {
-        let mut guard = state.runtime.lock().await;
+    // ── 1. Locked: target path + checkpoint admission + engine handle. ──
+    let (target, document_id, ticket, engine) = {
+        let guard = state.runtime.lock().await;
         let rt = guard
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| ApiError::NoDocument("save".into()))?;
         let target: PathBuf = match path {
             Some(p) => PathBuf::from(p),
@@ -217,15 +241,63 @@ pub async fn save_document(
                 .map(Path::to_path_buf)
                 .ok_or_else(|| ApiError::Io("no save path; provide one".into()))?,
         };
-        // Checkpoint policy (SCHEMA §7.7): mint a durable acceleration base of the
-        // current head before persisting, so a reopen/edit can regen incrementally.
-        rt.take_checkpoint_at_head().await;
-        rt.save(&target, save_meta())?;
-        (target, rt.document_uuid())
+        (
+            target,
+            rt.document_uuid(),
+            rt.prepare_checkpoint(),
+            rt.engine_arc(),
+        )
     };
-    // A clean save supersedes any crash-recovery state for this document.
-    if let Some(root) = autosave::autosave_root(&app) {
-        autosave::clear_recovery_state(&root, document_id);
+
+    // ── 2. Unlocked: the worker round-trip. Checkpoint policy (SCHEMA §7.7) — mint a
+    //    durable acceleration base of the current head so a later edit regens
+    //    incrementally. Best-effort: a worker failure just skips it (Invariant 7).
+    if let Some(ticket) = ticket {
+        if let Ok(artifacts) = engine.save_checkpoint(ticket.step()).await {
+            let mut guard = state.runtime.lock().await;
+            if let Some(rt) = guard
+                .as_mut()
+                .filter(|rt| rt.document_uuid() == document_id)
+            {
+                rt.adopt_checkpoint(ticket, artifacts);
+            }
+        }
+    }
+
+    // ── 3. Locked: snapshot the bytes-to-be + the revision they describe. ──
+    let (payload, revision) = {
+        let guard = state.runtime.lock().await;
+        let rt = guard
+            .as_ref()
+            .filter(|rt| rt.document_uuid() == document_id)
+            .ok_or_else(|| ApiError::NoDocument("save".into()))?;
+        (rt.build_save_payload(save_meta()), rt.revision())
+    };
+
+    // ── 4. Unlocked, persistence lane: write + clear the crash-recovery state. ──
+    let recovery_root = autosave::autosave_root(&app);
+    autosave::write_save_payload(
+        &state.persistence,
+        &target,
+        payload,
+        recovery_root.as_deref(),
+        document_id,
+    )
+    .await?;
+
+    // ── 5. Locked: adopt the path; go clean only if nothing was edited mid-write. ──
+    {
+        let mut guard = state.runtime.lock().await;
+        match guard
+            .as_mut()
+            .filter(|rt| rt.document_uuid() == document_id)
+        {
+            Some(rt) => rt.mark_saved(&target, revision),
+            None => tracing::warn!(
+                "save: the document closed while its container was being written; \
+                 the file at {target:?} is complete but no live document adopts it"
+            ),
+        }
     }
     recents::record(&app, &target);
     Ok(())

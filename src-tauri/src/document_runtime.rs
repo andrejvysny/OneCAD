@@ -287,6 +287,34 @@ pub struct CheckpointTicket {
     fencing: (DocumentRevision, WorkerEpoch),
 }
 
+impl CheckpointTicket {
+    /// The head step the admitted checkpoint describes — the `SaveCheckpoint`
+    /// argument. Exposed so the engine round-trip can run **off** the runtime lock
+    /// between [`prepare_checkpoint`](DocumentRuntime::prepare_checkpoint) and
+    /// [`adopt_checkpoint`](DocumentRuntime::adopt_checkpoint).
+    #[must_use]
+    pub fn step(&self) -> usize {
+        self.step
+    }
+}
+
+/// Everything one container write needs, detached from the [`DocumentRuntime`]
+/// (VF-B7 / plan F1a).
+///
+/// A save is two halves: a cheap `&self` snapshot under the single-writer lock
+/// ([`DocumentRuntime::build_save_payload`]) and an expensive, lock-free write
+/// ([`DocumentRuntime::write_payload`]) — JSON serialization plus deflate of every
+/// referenced import blob. Holding the runtime lock across the second half stalled
+/// every edit for the duration of the write; a `SavePayload` is what lets the lock
+/// be released in between. It is `Send + 'static`, so it can be moved onto a
+/// `spawn_blocking` thread.
+pub struct SavePayload {
+    doc: Document,
+    caches: ContainerCaches,
+    imports: ImportBlobs,
+    meta: SaveMeta,
+}
+
 /// The per-document runtime (V1 single writer).
 pub struct DocumentRuntime {
     session: DocumentSession,
@@ -1241,16 +1269,78 @@ impl DocumentRuntime {
     /// [`IoError`] on a serialization / filesystem failure; the target is left
     /// untouched on any failure.
     pub fn save(&mut self, path: &Path, meta: SaveMeta) -> Result<(), IoError> {
+        let payload = self.build_save_payload(meta);
+        let revision = self.revision();
+        Self::write_payload(path, &payload)?;
+        self.mark_saved(path, revision);
+        Ok(())
+    }
+
+    /// Snapshots everything a container write needs, **detached from `&self`** —
+    /// the only half of a save that must run under the runtime lock (VF-B7 / F1a).
+    ///
+    /// Serialization and deflate (an import blob is up to 256 MiB) then happen off
+    /// the single-writer lock on a blocking thread via
+    /// [`write_payload`](Self::write_payload), so a save/autosave never blocks an
+    /// edit. The import carrier is cloned by refcount, not by `memcpy` (the blob
+    /// bytes live behind an `Arc`).
+    #[must_use]
+    pub fn build_save_payload(&self, meta: SaveMeta) -> SavePayload {
         let mut doc = self.session.document().clone();
         // Merge regen-derived outputs so a reopen shows the tree before regen.
         doc.bodies = self.saved_bodies();
         doc.elements = self.regen.elements.clone();
         doc.repair = self.regen.repair.clone();
-        let caches = ContainerCaches::none();
-        ContainerWriter::save_with_imports(path, &doc, &caches, &self.imports, &meta)?;
+        SavePayload {
+            doc,
+            // Checkpoints are in-session only (SCHEMA §7.7 V2 policy), and no other
+            // cache class is persisted in V1 — so a save is document-only + imports.
+            caches: ContainerCaches::none(),
+            imports: self.imports.clone(),
+            meta,
+        }
+    }
+
+    /// Writes a [`SavePayload`] to `path` atomically. Deliberately **takes no
+    /// `self`**: this is the blocking, lock-free half of a save (see
+    /// [`build_save_payload`](Self::build_save_payload)) and is meant to be handed
+    /// to `tokio::task::spawn_blocking`.
+    ///
+    /// # Errors
+    /// [`IoError`] on a serialization / filesystem failure; the target is left
+    /// untouched on any failure.
+    pub fn write_payload(path: &Path, payload: &SavePayload) -> Result<(), IoError> {
+        ContainerWriter::save_with_imports(
+            path,
+            &payload.doc,
+            &payload.caches,
+            &payload.imports,
+            &payload.meta,
+        )
+    }
+
+    /// Adopts the result of a **successful** container write: `path` becomes the
+    /// live save target, and the document goes clean **only if no edit landed since
+    /// `revision_at_build`**.
+    ///
+    /// The conditional is load-bearing now that the write runs off the runtime lock:
+    /// an edit applied while the bytes were being deflated is NOT in those bytes, so
+    /// clearing `dirty` unconditionally would advertise unsaved work as saved. The
+    /// path is adopted either way — the file at `path` is a real (if slightly older)
+    /// container, and a subsequent Save must target it rather than re-prompting.
+    pub fn mark_saved(&mut self, path: &Path, revision_at_build: DocumentRevision) {
         self.path = Some(path.to_path_buf());
-        self.dirty = false;
-        Ok(())
+        let now = self.fencing.revision();
+        if now == revision_at_build {
+            self.dirty = false;
+        } else {
+            tracing::info!(
+                "save: document stays DIRTY — edits landed during the container write \
+                 (built at revision {}, now {})",
+                revision_at_build.0,
+                now.0
+            );
+        }
     }
 
     /// Writes an autosave copy of the document (+ merged regen outputs) to `path`
@@ -1266,12 +1356,7 @@ impl DocumentRuntime {
     /// [`IoError`] on a serialization / filesystem failure; the target is left
     /// untouched on any failure.
     pub fn write_autosave(&self, path: &Path, meta: SaveMeta) -> Result<(), IoError> {
-        let mut doc = self.session.document().clone();
-        doc.bodies = self.saved_bodies();
-        doc.elements = self.regen.elements.clone();
-        doc.repair = self.regen.repair.clone();
-        let caches = ContainerCaches::none();
-        ContainerWriter::save_with_imports(path, &doc, &caches, &self.imports, &meta)
+        Self::write_payload(path, &self.build_save_payload(meta))
     }
 
     /// The document's stable id (the autosave container + crash-marker key,
@@ -1385,7 +1470,7 @@ impl DocumentRuntime {
                         info.sha256.clone(),
                         ImportBlob {
                             codec: info.codec,
-                            bytes,
+                            bytes: Arc::new(bytes),
                         },
                     );
                 }
@@ -1454,6 +1539,15 @@ impl DocumentRuntime {
         if let Ok(artifacts) = self.engine.save_checkpoint(ticket.step).await {
             self.adopt_checkpoint(ticket, artifacts);
         }
+    }
+
+    /// The geometry engine behind this document, cloned out so a caller can drive a
+    /// round-trip (e.g. `SaveCheckpoint`) **without holding the runtime lock**.
+    /// Pairs with [`prepare_checkpoint`](Self::prepare_checkpoint) /
+    /// [`adopt_checkpoint`](Self::adopt_checkpoint).
+    #[must_use]
+    pub fn engine_arc(&self) -> Arc<dyn GeometryEngine> {
+        self.engine.clone()
     }
 
     /// Admits (or refuses) a checkpoint mint at the current head, capturing the

@@ -92,6 +92,7 @@ async fn driver_writes_autosave_and_marker_after_debounce() {
     let driver = tokio::spawn(autosave::run(
         runtime.clone(),
         app_data.clone(),
+        Arc::new(Mutex::new(())),
         rx,
         Duration::from_millis(80), // short debounce for the test
         move |ev| seen2.lock().unwrap().push(ev),
@@ -141,6 +142,7 @@ async fn driver_is_silent_with_no_document_open() {
     let driver = tokio::spawn(autosave::run(
         runtime.clone(),
         app_data.clone(),
+        Arc::new(Mutex::new(())),
         rx,
         Duration::from_millis(60),
         move |ev| seen2.lock().unwrap().push(ev),
@@ -177,7 +179,8 @@ async fn clear_recovery_state_removes_marker_and_autosave() {
     let runtime = Mutex::new(Some(rt));
 
     // Write one autosave (marker + container).
-    let ev = autosave::autosave_current(&runtime, &app_data)
+    let lane = Mutex::new(());
+    let ev = autosave::autosave_current(&runtime, &app_data, &lane)
         .await
         .expect("autosave written");
     assert!(autosave_path(&app_data, doc_id).exists());
@@ -216,7 +219,8 @@ async fn recovery_round_trip_reconstructs_the_autosaved_document() {
         rt.mark_recovered(Some(original_path.clone())); // sets path + dirty (reused seam)
         doc_id = rt.document_uuid();
         let runtime = Mutex::new(Some(rt));
-        autosave::autosave_current(&runtime, &app_data)
+        let lane = Mutex::new(());
+        autosave::autosave_current(&runtime, &app_data, &lane)
             .await
             .expect("autosave the pre-crash revision");
     } // the "session" ends here without a clean close (simulated crash — marker stays)
