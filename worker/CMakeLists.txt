@@ -94,6 +94,8 @@ add_library(worker_core STATIC
     src/io/InspectStep.cpp
     src/ops/ImportOp.cpp
     src/session/ElementIdentity.cpp
+    # --- WP-C1: read-only exact mass properties (SCHEMA §7.5) ---
+    src/session/MassProperties.cpp
     src/tess/Mesh1.cpp
     src/tess/MeshHandle.cpp
     src/tess/Tessellate.cpp

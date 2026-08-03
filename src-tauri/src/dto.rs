@@ -452,6 +452,35 @@ pub struct ElementInfoDto {
     pub magnitude: f64,
 }
 
+/// One body's exact kernel mass properties from `QueryMassProperties`
+/// (SCHEMA §7.5; WP-C1).
+///
+/// **Density-free.** The app has no material system, so `principal_moments` are
+/// pure VOLUME integrals (mm⁵) about the centroid — multiply by a density to get
+/// a mass moment. Reporting kg·mm² here would require inventing a material.
+///
+/// Every number is `GProp` over the real BRep, never re-derived from the
+/// tessellation the viewport happens to be drawing.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MassPropertiesDto {
+    /// The body this reading describes (frontend `body<n>` form, as every other DTO).
+    pub body_id: String,
+    /// Enclosed volume, mm³ (`BRepGProp::VolumeProperties`). 0 for a shape with
+    /// no solid — an honest reading, not a failure.
+    pub volume: f64,
+    /// Total area of every face, mm² (`BRepGProp::SurfaceProperties`).
+    pub surface_area: f64,
+    /// The VOLUME centre of mass, mm. Distinct from `ElementInfoDto::center`,
+    /// which is a bounding-box centre — this one is a true centroid.
+    pub centroid: [f64; 3],
+    /// Principal moments about the centroid (mm⁵), paired IN ORDER with
+    /// `principal_axes`.
+    pub principal_moments: [f64; 3],
+    /// The principal frame: three unit, right-handed, sign-canonical rows.
+    pub principal_axes: [[f64; 3]; 3],
+}
+
 /// One previewed body's mesh (`PreviewOp` result → `types.ts PreviewResult`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]

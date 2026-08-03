@@ -1536,6 +1536,76 @@ pub fn parse_query_element(result: &Value) -> Option<crate::dto::ElementInfoDto>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Mass properties (SCHEMA §7.5 `QueryMassProperties`; WP-C1)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `QueryMassProperties` args (SCHEMA §7.5).
+///
+/// `snapshotId` is deliberately ABSENT: the verb reads the worker's current head
+/// copy and a body id is durable across snapshots, so there is nothing for a
+/// snapshot stamp to disambiguate. Sending one would imply a per-snapshot lookup
+/// the worker does not perform.
+#[must_use]
+pub fn query_mass_properties_args(body: BodyId) -> Value {
+    json!({ "bodyId": body_id_wire(body) })
+}
+
+/// Parses a `QueryMassProperties` result into a [`crate::dto::MassPropertiesDto`].
+///
+/// `body_id` is the CALLER's own string rather than anything off the wire: the
+/// worker keys its store by `body_<uuid>` and the frontend speaks its own form,
+/// and echoing the caller's is what keeps the DTO addressable by the id that was
+/// asked about.
+///
+/// # Errors
+/// Returns the offending field name when a required number/array is missing or
+/// malformed. A mass reading has no honest default — a fabricated `0` would
+/// render as a real "0 mm³" measurement — so this never falls back.
+pub fn parse_mass_properties(
+    body_id: String,
+    result: &Value,
+) -> Result<crate::dto::MassPropertiesDto, String> {
+    let num = |key: &str| -> Result<f64, String> {
+        result
+            .get(key)
+            .and_then(Value::as_f64)
+            .ok_or_else(|| format!("QueryMassProperties: missing/invalid {key:?}"))
+    };
+    let vec3 = |value: Option<&Value>, what: &str| -> Result<[f64; 3], String> {
+        let a = value
+            .and_then(Value::as_array)
+            .filter(|a| a.len() == 3)
+            .ok_or_else(|| format!("QueryMassProperties: {what} is not a 3-array"))?;
+        let mut out = [0.0f64; 3];
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = a[i]
+                .as_f64()
+                .ok_or_else(|| format!("QueryMassProperties: {what}[{i}] is not a number"))?;
+        }
+        Ok(out)
+    };
+
+    let axes_raw = result
+        .get("principalAxes")
+        .and_then(Value::as_array)
+        .filter(|a| a.len() == 3)
+        .ok_or_else(|| "QueryMassProperties: principalAxes is not a 3-array".to_string())?;
+    let mut principal_axes = [[0.0f64; 3]; 3];
+    for (i, row) in principal_axes.iter_mut().enumerate() {
+        *row = vec3(Some(&axes_raw[i]), &format!("principalAxes[{i}]"))?;
+    }
+
+    Ok(crate::dto::MassPropertiesDto {
+        body_id,
+        volume: num("volume")?,
+        surface_area: num("surfaceArea")?,
+        centroid: vec3(result.get("centroid"), "centroid")?,
+        principal_moments: vec3(result.get("principalMoments"), "principalMoments")?,
+        principal_axes,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Host-face boundary projection (SCHEMA §7.6 `ProjectFaceBoundary`)
 // ─────────────────────────────────────────────────────────────────────────────
 

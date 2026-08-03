@@ -5,14 +5,19 @@ import { openEditorDebug, getFeatureLabels, waitForCameraSettled, CANVAS } from 
 /*
  * MEASURE V1a (W2-B) — the read-only inspection tool, mock lane.
  *
- * SHAPE ONLY, and deliberately so. `mockClient.elementInfo` SYNTHESIZES its
- * numbers from a hash of the pick (there is no kernel in this lane), so the only
- * honest assertions here are about the UI contract: a face pick shows an area
- * with `mm²`, a second pick adds a centre-to-centre distance in `mm` plus its Δ
- * components, and Esc clears everything. The NUMBERS are pinned against the real
- * OCCT worker in `src-tauri/tests/wire_contract.rs
- * measure_element_info_reports_exact_kernel_quantities` (top face area == 800,
- * centre == (−10,20,25)).
+ * The cases in THIS block are shape-only: a face pick shows an area with `mm²`,
+ * a second adds a centre-to-centre distance in `mm` plus its Δ components, and
+ * Esc clears everything. They were written when `mockClient.elementInfo`
+ * synthesized every number from a hash of the pick, and they stay value-free so
+ * they keep testing the UI contract rather than the mock's arithmetic.
+ *
+ * WP-C1 changed what the mock knows: `elementInfo` and `massProperties` are now
+ * MEASURED off the body's own MESH1 bytes (`mockMeshMetrics`), which is exact for
+ * a closed mesh — so the WP-C1 block at the bottom of this file does assert real
+ * values. KERNEL truth (curved geometry, real BRep quantities) is still pinned
+ * against the OCCT worker in `src-tauri/tests/wire_contract.rs`
+ * (`measure_element_info_reports_exact_kernel_quantities` — top face area == 800,
+ * centre == (−10,20,25) — and `mass_properties_report_exact_kernel_quantities`).
  *
  * Picks go through the engine's OWN raycast rather than a seeded store write,
  * because routing a pick to the measure tool (ViewportRoot `onPick`) is exactly
@@ -100,9 +105,10 @@ async function pickFace(
 
 /**
  * The measured element ids, oldest first — read from the dev-only `__stores`
- * surface. The rendered LABELS cannot stand in for identity here: the mock
- * synthesizes its magnitudes, so two different faces can legitimately format to
- * the same string, which would make an "it changed" text assertion vacuous.
+ * surface. The rendered LABELS cannot stand in for identity here: a box's
+ * OPPOSITE faces have identical areas and centre-symmetric positions, so two
+ * genuinely different picks can format to the same string and an "it changed"
+ * text assertion would be vacuous.
  */
 async function measuredIds(page: Page): Promise<string[]> {
   return page.evaluate(() => {
@@ -198,4 +204,66 @@ test("a third pick replaces the OLDEST — the reading is always the last two", 
   expect(after[1]).not.toBe(idB); // the third face really is a new element
   // Still exactly two slots + one summary on screen — never three readings.
   await expect(page.locator('[data-testid^="measure-label-"]')).toHaveCount(3);
+});
+
+/*
+ * ── WP-C1: body mass properties + the two-face angle ────────────────────────
+ *
+ * These two are NOT shape-only, unlike the cases above. `mockClient` no longer
+ * synthesizes its measure numbers from a hash: `elementInfo` and
+ * `massProperties` are MEASURED off the body's own MESH1 bytes
+ * (`mockMeshMetrics`), and for a closed mesh the divergence theorem makes that
+ * exact. So the seed box's volume really is 80·60·30 and its adjacent faces
+ * really are perpendicular, and asserting those values here is a genuine
+ * end-to-end check rather than a restatement of a fixture.
+ *
+ * The KERNEL numbers (curved geometry, real BRep areas) stay pinned against the
+ * OCCT worker in `src-tauri/tests/wire_contract.rs` +
+ * `worker/tests/test_mass_properties.cpp` — this lane has no kernel.
+ */
+
+/** The seed mock body: `mockMeshes.BOX_SIZE`. */
+const BOX = { x: 80, y: 60, z: 30 };
+
+test("measuring a face reports the BODY's volume, surface area and centroid", async ({ page }) => {
+  await openEditorDebug(page);
+  const [pointA] = await findFacePoints(page, 1);
+
+  await armMeasure(page);
+  // The panel appears with the first pick — a body's mass properties need only
+  // one pick to identify the body, unlike the pair readings.
+  await pickFace(page, pointA, 1);
+
+  const panel = page.getByTestId("measure-panel");
+  await expect(panel).toBeVisible();
+  // 80 · 60 · 30 = 144000 mm³ and 2(4800 + 2400 + 1800) = 18000 mm².
+  await expect(page.getByTestId("measure-volume")).toHaveText(`${BOX.x * BOX.y * BOX.z} mm³`);
+  await expect(page.getByTestId("measure-surface-area")).toHaveText(
+    `${2 * (BOX.x * BOX.y + BOX.x * BOX.z + BOX.y * BOX.z)} mm²`,
+  );
+  // The seed box is centred on the origin.
+  await expect(page.getByTestId("measure-centroid")).toHaveText("0, 0, 0");
+
+  // Still a pure read — no timeline row appeared.
+  await page.keyboard.press("Escape");
+  await expect(panel).toHaveCount(0);
+});
+
+test("measuring two faces of the box reports the ANGLE between them", async ({ page }) => {
+  await openEditorDebug(page);
+  // An isometric view of a box shows three MUTUALLY PERPENDICULAR faces, so any
+  // two distinct ones the scan finds are at 90°.
+  const [pointA, pointB] = await findFacePoints(page, 2);
+
+  await armMeasure(page);
+  await pickFace(page, pointA, 1);
+  await pickFace(page, pointB, 2);
+
+  // Adjacent box faces ⇒ exactly 90°, where the two supplementary forms coincide
+  // and only one is shown. The oblique "60° / 120°" form is pinned in
+  // `measureTool.test.ts` / `MeasurePanel.test.tsx` — no mock body has an
+  // oblique face pair to click.
+  await expect(page.getByTestId("measure-plane-pair")).toHaveText("Angle: 90°");
+  // The same reading rides the floating pair chip.
+  await expect(page.getByTestId("measure-angle")).toHaveText("Angle: 90°");
 });

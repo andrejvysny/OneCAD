@@ -48,6 +48,7 @@ import type {
   DocumentSnapshot,
   DragSolveResult,
   ElementInfo,
+  MassProperties,
   EnterSketchTarget,
   FeatureRecord,
   FinishSketchResult,
@@ -135,6 +136,7 @@ const CMD = {
   faceSketchPlane: "face_sketch_plane",
   addSketchOnFace: "add_sketch_on_face",
   elementInfo: "element_info",
+  massProperties: "query_mass_properties",
   previewOp: "preview_op",
   resolveRefs: "resolve_refs",
   confirmExit: "confirm_exit",
@@ -1240,6 +1242,20 @@ export function createTauriClient(): CadClient {
     });
   }
 
+  /**
+   * One body's exact kernel mass properties (WP-C1). Read-only.
+   *
+   * No `snapshotId` is sent — a BodyId is durable across snapshots, so the
+   * backend answers against the current head (see `api::query_mass_properties`).
+   * An unknown body REJECTS; there is no `null` arm to absorb.
+   */
+  async function massProperties(bodyId: string): Promise<MassProperties> {
+    // Same `body_<uuid>` wire form promoteSelection uses (document-changed hands
+    // the frontend a bare uuid).
+    const wireBodyId = bodyId.startsWith("body_") ? bodyId : `body_${bodyId}`;
+    return call<MassProperties>(CMD.massProperties, { bodyId: wireBodyId });
+  }
+
   async function promoteSelection(bodyId: string, picks: PromotePick[]): Promise<PromotedElement[]> {
     // promote_selection wants the `body_<uuid>` wire form; document-changed hands
     // the frontend a bare uuid, so prefix it here (get_mesh keeps the bare form).
@@ -1400,6 +1416,7 @@ export function createTauriClient(): CadClient {
     promoteSelection,
     faceSketchPlane,
     elementInfo,
+    massProperties,
     resolveRefs,
     applyEditCommand,
     getOperationParams,

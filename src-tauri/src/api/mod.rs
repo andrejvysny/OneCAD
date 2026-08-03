@@ -1389,6 +1389,43 @@ pub async fn element_info(
         .map_err(Into::into)
 }
 
+/// One body's exact mass properties (`QueryMassProperties`; SCHEMA §7.5; WP-C1).
+///
+/// A pure READ, like [`element_info`]: no fence, no history, no minting, nothing
+/// published — measuring can never enter the undo stack. Worker IO runs OUTSIDE
+/// the runtime lock (the R-WP11 rule); the lock is taken only for the
+/// document-presence check.
+///
+/// No snapshot argument, deliberately. A `BodyId` is durable across snapshots
+/// (Invariant 1) while a `TopoKey` is not, so unlike [`element_info`] there is
+/// nothing here for a snapshot stamp to disambiguate — the answer is always
+/// "this body, as the head has it now", which is what a live measurement panel
+/// wants.
+///
+/// An unknown body fails LOUDLY (`REF_UNRESOLVED` from the worker) rather than
+/// resolving to `None`. A missing body is not the ordinary stale-pick outcome
+/// that `element_info` absorbs: there is no partial reading to fall back to, and
+/// a silent empty answer would look identical to a body with no volume.
+#[tauri::command]
+pub async fn query_mass_properties(
+    state: State<'_, AppState>,
+    body_id: String,
+) -> Result<crate::dto::MassPropertiesDto, ApiError> {
+    let body = wire::parse_body_id(&body_id).map_err(ApiError::InvalidCommand)?;
+    {
+        // Presence check only — the lock is NOT held across the worker round-trip.
+        let guard = state.runtime.lock().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("queryMassProperties".into()))?;
+    }
+    state
+        .element_query()
+        .query_mass_properties(body, body_id)
+        .await
+        .map_err(Into::into)
+}
+
 /// Dry-run ladder resolution for repair dialogs (`ResolveRefs`; SCHEMA §7.5) —
 /// binds nothing.
 #[tauri::command]

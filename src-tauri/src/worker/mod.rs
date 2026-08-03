@@ -254,6 +254,26 @@ pub trait ElementQuery: Send + Sync {
         body: BodyId,
         topo_key: &str,
     ) -> Result<Option<crate::dto::ElementInfoDto>, EngineError>;
+
+    /// `QueryMassProperties` (SCHEMA §7.5; WP-C1) — exact `GProp` volume, surface
+    /// area, centroid and principal inertia frame for ONE body.
+    ///
+    /// On this trait rather than a ninth backend facet because SCHEMA files it
+    /// under §7.5 beside `QueryElement`, and it is the same KIND of call: a
+    /// read-only, non-fencing, non-minting lookup against a copy of the worker
+    /// head, served by the same `WorkerManager`. The only difference is what it
+    /// addresses — a whole body instead of one of its sub-shapes.
+    ///
+    /// Unlike the two lookups above there is no `Option`: an unknown body is a
+    /// caller mistake and comes back as a loud `REF_UNRESOLVED` error. "That
+    /// element is gone" is a real answer for a snapshot-scoped pick; "that body
+    /// is gone" has no partial reading to report, and answering `None` would let
+    /// a UI silently show nothing where it should show a failure.
+    async fn query_mass_properties(
+        &self,
+        body: BodyId,
+        body_id_label: String,
+    ) -> Result<crate::dto::MassPropertiesDto, EngineError>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -750,6 +770,14 @@ impl ElementQuery for PendingBackend {
         _body: BodyId,
         _topo_key: &str,
     ) -> Result<Option<crate::dto::ElementInfoDto>, EngineError> {
+        Err(Self::not_ready())
+    }
+
+    async fn query_mass_properties(
+        &self,
+        _body: BodyId,
+        _body_id_label: String,
+    ) -> Result<crate::dto::MassPropertiesDto, EngineError> {
         Err(Self::not_ready())
     }
 }

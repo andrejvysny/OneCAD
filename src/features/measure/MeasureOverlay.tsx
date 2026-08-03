@@ -20,6 +20,7 @@ import { createPortal } from "react-dom";
 import { useMeasureStore } from "@/stores/measureStore";
 import { useViewportEngine } from "@/viewport/engineBridge";
 import { AREA_SUFFIX, LENGTH_SUFFIX, formatArea, formatLength } from "@/units/format";
+import { planePairLabel } from "./MeasurePanel";
 import type { MeasurePick, MeasureSummary } from "@/tools/modelTools/measureTool";
 
 type Vec3 = [number, number, number];
@@ -126,6 +127,13 @@ export function MeasureOverlay() {
         >
           <span data-testid="measure-distance">{summaryLabel(summary)}</span>
           <span className="text-ink-5">{deltaLabel(summary)}</span>
+          {/* The plane relationship, when both picks are planes (WP-C1). It sits
+              on the pair chip as well as the panel because it belongs to the two
+              picks the chip already straddles — reading it in mid-air between the
+              faces is the whole point of a floating label. */}
+          {planePairLabel(summary) && (
+            <span data-testid="measure-angle">{planePairLabel(summary)}</span>
+          )}
         </MeasureChip>
       )}
     </>

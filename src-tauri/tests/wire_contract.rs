@@ -2277,3 +2277,174 @@ async fn measure_element_info_reports_exact_kernel_quantities() {
         face.magnitude, face.center
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-C1 — QueryMassProperties reports the KERNEL's exact body-level quantities
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `QueryMassProperties` (SCHEMA §7.5) over the real worker.
+///
+/// Same fixture discipline as the element_info test above: the frozen
+/// `xy_plane_ref` basis is NON-STANDARD (`xAxis = (0,1,0)`, `yAxis = (−1,0,0)`),
+/// so a sketch rect `(0,0)–(40,20)` lands on worldX[−20,0] × worldY[0,40]. A 25
+/// extrude therefore gives a 20 × 40 × 25 block:
+///   * volume       = 20 · 40 · 25 = **20000 mm³**
+///   * surface area = 2·(20·40 + 20·25 + 40·25) = **4600 mm²**
+///   * centroid     = **(−10, 20, 12.5)** — the true centre of MASS, which for a
+///     box coincides with the box centre (a shape where they differ is what the
+///     `ElementInfoDto::center` caveat is about, not this field)
+///   * principal moments about the CENTROID = V·(a²+b²)/12 per axis. An
+///     about-ORIGIN answer would be several times larger for this off-origin
+///     block, so these three numbers are what pin the Huygens transfer.
+///
+/// Then a 10 × 10 pocket 5 deep is CUT into the same body, and the volume must
+/// drop by exactly 500 — proving the reading tracks the live head rather than
+/// some cached first answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mass_properties_report_exact_kernel_quantities() {
+    use onecad_lib::worker::ElementQuery;
+
+    if real_worker().is_none() {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    }
+    let wm = spawn_worker(real_worker().unwrap()).await;
+    let mut rt = runtime_over(&wm);
+
+    let sa = SketchId(Uuid::from_u128(0xA));
+    add_op(
+        &mut rt,
+        sketch_record(SKETCH_A, &rect_sketch(sa, 0x1000, 0.0, 0.0, 40.0, 20.0)),
+    );
+    add_op(
+        &mut rt,
+        extrude_record(EXTRUDE_A, sa, 25.0, BooleanMode::NewBody, None),
+    );
+    let report = regen_all(&mut rt).await;
+    let _ = published(&report, "mass props block");
+    let body = body_of(EXTRUDE_A);
+
+    let mp = ElementQuery::query_mass_properties(&wm, body, "body1".into())
+        .await
+        .expect("QueryMassProperties over the extruded block");
+
+    assert_eq!(mp.body_id, "body1", "the DTO echoes the CALLER's body id");
+    assert!(
+        (mp.volume - 20_000.0).abs() < 0.01,
+        "volume is EXACTLY 20·40·25 = 20000 mm³, got {}",
+        mp.volume
+    );
+    assert!(
+        (mp.surface_area - 4600.0).abs() < 0.01,
+        "surface area is EXACTLY 2·(800+500+1000) = 4600 mm², got {}",
+        mp.surface_area
+    );
+    for (axis, got, want) in [
+        ("x", mp.centroid[0], -10.0),
+        ("y", mp.centroid[1], 20.0),
+        ("z", mp.centroid[2], 12.5),
+    ] {
+        assert!(
+            (got - want).abs() < 0.01,
+            "centroid.{axis} = {want} (frozen non-standard sketch basis), got {got} \
+             (full centroid {:?})",
+            mp.centroid
+        );
+    }
+
+    // Principal frame: unit rows, right-handed, and each moment paired with the
+    // world axis its own row names (the block is axis-aligned, so every principal
+    // axis IS a world axis — matched by dominant component rather than by a
+    // presumed sort order).
+    let spans = [20.0f64, 40.0, 25.0]; // world X, Y, Z extents
+    for (k, (row, moment)) in mp
+        .principal_axes
+        .iter()
+        .zip(mp.principal_moments.iter())
+        .enumerate()
+    {
+        let len = (row[0] * row[0] + row[1] * row[1] + row[2] * row[2]).sqrt();
+        assert!(
+            (len - 1.0).abs() < 1e-9,
+            "principal axis is unit, got {len}"
+        );
+        let dominant = (0..3)
+            .max_by(|&i, &j| row[i].abs().total_cmp(&row[j].abs()))
+            .unwrap();
+        assert!(
+            (row[dominant].abs() - 1.0).abs() < 1e-6,
+            "an axis-aligned block's principal axes are the world axes, got {row:?}"
+        );
+        // Only the first TWO rows are sign-canonicalized. The third is rebuilt as
+        // a1 × a2 so the frame is right-handed by construction, which means its
+        // sign is whatever handedness demands — canonicalizing it too could yield
+        // a left-handed triple.
+        assert!(
+            k == 2 || row[dominant] > 0.0,
+            "rows 0–1 are sign-canonical (dominant component positive), got {row:?}"
+        );
+        // V·(other two spans squared)/12, about the CENTROID.
+        let others: f64 = (0..3)
+            .filter(|&i| i != dominant)
+            .map(|i| spans[i] * spans[i])
+            .sum();
+        let want = 20_000.0 * others / 12.0;
+        assert!(
+            (moment - want).abs() < 1.0,
+            "moment about world axis {dominant} is V·(a²+b²)/12 = {want}, got {moment} \
+             (an about-ORIGIN answer would be far larger for this off-origin block)"
+        );
+    }
+    let [a1, a2, a3] = mp.principal_axes;
+    let cross = [
+        a1[1] * a2[2] - a1[2] * a2[1],
+        a1[2] * a2[0] - a1[0] * a2[2],
+        a1[0] * a2[1] - a1[1] * a2[0],
+    ];
+    let handedness = cross[0] * a3[0] + cross[1] * a3[1] + cross[2] * a3[2];
+    assert!(
+        (handedness - 1.0).abs() < 1e-6,
+        "(a1 × a2) · a3 == +1 — the frame is right-handed, got {handedness}"
+    );
+
+    // ── An unknown body fails LOUDLY, never as a zero reading ────────────────
+    let missing = ElementQuery::query_mass_properties(
+        &wm,
+        BodyId(Uuid::from_u128(0xDEAD_BEEF)),
+        "body_gone".into(),
+    )
+    .await;
+    assert!(
+        missing.is_err(),
+        "an unknown body is REF_UNRESOLVED, not a 0 mm³ reading — got {missing:?}"
+    );
+
+    // ── After a Cut, the reading tracks the LIVE head ────────────────────────
+    let sb = SketchId(Uuid::from_u128(0xB));
+    add_op(
+        &mut rt,
+        sketch_record(SKETCH_B, &rect_sketch(sb, 0x2000, 0.0, 0.0, 10.0, 10.0)),
+    );
+    add_op(
+        &mut rt,
+        extrude_record(EXTRUDE_B, sb, 5.0, BooleanMode::Cut, Some(body)),
+    );
+    let report = regen_all(&mut rt).await;
+    let _ = published(&report, "mass props after cut");
+
+    let after = ElementQuery::query_mass_properties(&wm, body, "body1".into())
+        .await
+        .expect("QueryMassProperties after the Cut");
+    assert!(
+        (after.volume - 19_500.0).abs() < 0.01,
+        "the 10×10×5 pocket removes EXACTLY 500 mm³ (20000 − 500 = 19500), got {}",
+        after.volume
+    );
+
+    wm.shutdown().await;
+    eprintln!(
+        "mass properties PASS: volume {} == 20000, area {} == 4600, centroid {:?}, \
+         after cut {} == 19500",
+        mp.volume, mp.surface_area, mp.centroid, after.volume
+    );
+}

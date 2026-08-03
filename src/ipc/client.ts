@@ -17,6 +17,7 @@ import type {
   DocumentSnapshot,
   DragSolveResult,
   ElementInfo,
+  MassProperties,
   EnterSketchTarget,
   FinishSketchResult,
   Lod,
@@ -225,6 +226,23 @@ export interface CadClient {
     elementId: string,
     topoKey?: string,
   ): Promise<ElementInfo | null>;
+
+  /**
+   * One body's exact mass properties — volume, surface area, centroid and the
+   * principal inertia frame (WP-C1; SCHEMA §7.5 `QueryMassProperties`).
+   *
+   * A pure read, like `elementInfo`: nothing is minted, nothing enters history.
+   *
+   * No snapshot argument, unlike `elementInfo`: a BodyId is durable across
+   * snapshots while a TopoKey is not, so the answer is always "this body as the
+   * head has it now" — which is what a live measurement panel wants.
+   *
+   * REJECTS an unknown body rather than resolving `null`. A stale face pick is
+   * an ordinary outcome worth absorbing; a missing body has no partial reading
+   * to fall back to, and an empty answer would be indistinguishable from a body
+   * that genuinely encloses no volume.
+   */
+  massProperties(bodyId: string): Promise<MassProperties>;
 
   // ── Topology repair (SCHEMA §9; M4b) ──────────────────────────────────────
 

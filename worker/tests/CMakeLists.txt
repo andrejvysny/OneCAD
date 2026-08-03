@@ -46,6 +46,12 @@ add_executable(test_face_projection test_face_projection.cpp)
 target_link_libraries(test_face_projection PRIVATE worker_core)
 add_test(NAME face_projection COMMAND test_face_projection)
 
+# --- WP-C1: exact mass properties verb (SCHEMA §7.5). Analytic solids with
+#     self-derived expectations + the read-only/determinism invariants. ---
+add_executable(test_mass_properties test_mass_properties.cpp)
+target_link_libraries(test_mass_properties PRIVATE worker_core)
+add_test(NAME mass_properties COMMAND test_mass_properties)
+
 # --- Region preview fill: holes subtracted + the bridge-interiority invariant
 #     the frontend ring derivation depends on (pure 2D, no OCCT). ---
 add_executable(test_polygon_fill test_polygon_fill.cpp)

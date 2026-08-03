@@ -18,6 +18,7 @@ import type {
   DocumentProjectionWire,
   DocumentSnapshot,
   ElementInfo,
+  MassProperties,
   EnterSketchTarget,
   FeatureRecord,
   Lod,
@@ -53,6 +54,11 @@ import { placementMatrix } from "@/tools/preview/patternPreview";
 import type { LatheAxis } from "@/tools/preview/lathePreview";
 import { createLocalSolverLane } from "./localSolver";
 import { lookupMockFace, mockElementHash } from "./mockFaceGeometry";
+import {
+  edgeMetricsFromMesh,
+  faceMetricsFromMesh,
+  massPropertiesFromMesh,
+} from "./mockMeshMetrics";
 import { detectRegions, planeFor, solveDof } from "./mockSketch";
 import type { DatumMeta } from "@/stores/documentStore";
 import { documentStore, emptyDocument } from "@/stores/documentStore";
@@ -191,6 +197,19 @@ const cloneFeature = (f: FeatureRecord): FeatureRecord => ({ ...f });
 
 /** Synthetic body meshes by bodyId (seed body1 is a fallback box, not stored). */
 const syntheticBodies = new Map<string, ArrayBuffer>();
+
+/**
+ * The MESH1 bytes this mock serves for `bodyId` — synthesized geometry (extrude
+ * output) first, else the seed box/cylinder.
+ *
+ * Factored out because `getBodyMesh` is no longer the only reader: WP-C1's
+ * `massProperties` and the mesh-derived `elementInfo` both MEASURE these bytes,
+ * and all three must see the same geometry or the mock would report numbers for
+ * a body other than the one on screen.
+ */
+function mockBodyMesh(bodyId: string): ArrayBuffer {
+  return syntheticBodies.get(bodyId) ?? meshForBody(bodyId);
+}
 let mockFeatures: FeatureRecord[] = MOCK_BASE_FEATURES.map(cloneFeature);
 let mockRevision = 5; // matches the seed projection revision
 let nextBodySeq = 2; // body1 is the seed body
@@ -1286,8 +1305,7 @@ export const mockClient: CadClient = {
 
   async getBodyMesh(bodyId, _lod) {
     await wait(MESH_LATENCY_MS);
-    // Synthesized bodies (extrude output) win; else the seed box/cylinder.
-    return syntheticBodies.get(bodyId) ?? meshForBody(bodyId);
+    return mockBodyMesh(bodyId);
   },
 
   onDocumentChanged(cb): () => void {
@@ -1366,17 +1384,28 @@ export const mockClient: CadClient = {
   },
 
   /**
-   * MOCK LIMIT — the numbers here are SYNTHESIZED, not measured.
+   * The mock's element descriptor, MEASURED off the body's own MESH1 bytes
+   * (WP-C1) with a synthesized fallback.
    *
-   * There is no kernel in this lane, so `magnitude`/`size`/`center` are derived
-   * from a hash of `(bodyId, elementId, topoKey)`. They are deterministic (the
-   * same pick always yields the same figures, so the UI is testable and stable)
-   * and dimensionally plausible, but they describe NOTHING about the mock box on
-   * screen. E2E may assert the measure overlay's SHAPE — that a face pick shows
-   * an area with `mm²`, that a second pick adds a centre-to-centre distance —
-   * and must never assert a value. Numeric truth is pinned against the real OCCT
-   * worker in `src-tauri/tests/wire_contract.rs
-   * measure_element_info_reports_exact_kernel_quantities`.
+   * It used to be hash-synthesized end to end. That was defensible while measure
+   * only reported a magnitude — but it reported the normal `(0,0,1)` for EVERY
+   * face, so a two-face ANGLE reads 0° for every pair in this lane and any e2e
+   * coverage of it would pass vacuously. The mock draws real MESH1 triangles, so
+   * `mockMeshMetrics` derives area / length / bbox-centre / normal from the very
+   * geometry on screen instead.
+   *
+   * MOCK LIMIT, unchanged in spirit: these are MESH values, not kernel values.
+   * They are exact for the box (planar faces, straight edges) and faceted for the
+   * cylinder — its side "face" is 24 quads, so its area under-reports 2πrh and it
+   * correctly reports as NON-planar. `surfaceType` is therefore 0 (plane) only
+   * when every triangle of the face shares a normal, else 1 (a stand-in for
+   * `GeomAbs_Cylinder`); `curveType` is 0 (line) for a 2-point edge, else 1.
+   * Numeric truth for real curved geometry stays pinned against the OCCT worker
+   * in `src-tauri/tests/wire_contract.rs`.
+   *
+   * The hash fallback survives for a pick this mesh cannot resolve — an
+   * `elementId`-only lookup (nothing maps a minted id back to a face here) or an
+   * id from a body with no synthesized mesh.
    */
   async elementInfo(
     bodyId: string,
@@ -1389,13 +1418,51 @@ export const mockClient: CadClient = {
     const h = mockElementHash(`${bodyId}#${key}`);
     const at = (i: number) => parseInt(h.slice(i, i + 2), 16); // 0..255
     const isEdge = key.startsWith("e:");
-    return {
+    const base = {
       elementId: elementId || `el_${h}`,
       topoKey: key,
       bodyId,
       kind: isEdge ? "edge" : "face",
-      // 0 == GeomAbs_Plane / GeomAbs_Line; the mock only ever fakes the simple
-      // cases, and -1 (absent) for the axis that does not apply to this kind.
+    };
+
+    const blob = mockBodyMesh(bodyId);
+    if (isEdge) {
+      const edge = edgeMetricsFromMesh(blob, key);
+      if (edge) {
+        return {
+          ...base,
+          surfaceType: -1,
+          curveType: edge.straight ? 0 : 1,
+          center: edge.center,
+          normal: [0, 0, 1],
+          hasNormal: false,
+          size: edge.size,
+          magnitude: edge.length,
+        };
+      }
+    } else {
+      const face = faceMetricsFromMesh(blob, key);
+      if (face) {
+        return {
+          ...base,
+          // 0 == GeomAbs_Plane. A curved face must NOT claim to be one: the
+          // measure tool's angle reading is gated on this, and a lying flag would
+          // let it take the "angle between planes" of a cylinder wall.
+          surfaceType: face.planar ? 0 : 1,
+          curveType: -1,
+          center: face.center,
+          normal: face.normal,
+          hasNormal: true,
+          size: face.size,
+          magnitude: face.area,
+        };
+      }
+    }
+
+    // Fallback: no mesh entry for this key (an elementId-only lookup, or a body
+    // with no synthesized geometry). Deterministic + dimensionally plausible.
+    return {
+      ...base,
       surfaceType: isEdge ? -1 : 0,
       curveType: isEdge ? 0 : -1,
       center: [at(0) / 8 - 16, at(2) / 8 - 16, at(4) / 8],
@@ -1406,6 +1473,28 @@ export const mockClient: CadClient = {
       // mm²) — so the two label forms are visibly distinguishable in the UI.
       magnitude: isEdge ? 10 + at(4) / 4 : 200 + at(2) * 4,
     };
+  },
+
+  /**
+   * The mock's body mass properties, computed EXACTLY from the body's MESH1
+   * bytes (WP-C1) — see `mockMeshMetrics.massPropertiesFromMesh`.
+   *
+   * Not synthesized: for a closed triangle mesh the divergence theorem gives the
+   * enclosed volume, centroid and inertia exactly, so the mock lane's reading is
+   * a true measurement of the box it is drawing (144000 mm³ / 18000 mm² for the
+   * 80×60×30 seed). What it is NOT is a kernel reading of a curved solid — the
+   * mock's "cylinder" is a 24-gon prism and answers as one.
+   *
+   * REJECTS an unknown body, mirroring `api::query_mass_properties`: the real
+   * lane answers `REF_UNRESOLVED` there, and a mock that returned zeros would
+   * make a UI bug (rendering "0 mm³") pass e2e.
+   */
+  async massProperties(bodyId: string): Promise<MassProperties> {
+    await wait(MESH_LATENCY_MS);
+    const known =
+      syntheticBodies.has(bodyId) || documentStore.getState().bodies[bodyId] !== undefined;
+    if (!known) throw new Error(`massProperties: unknown body ${bodyId}`);
+    return massPropertiesFromMesh(bodyId, mockBodyMesh(bodyId));
   },
 
   // Deterministic mock promotion (Invariant 1: same pick → same id).

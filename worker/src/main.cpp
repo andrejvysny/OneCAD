@@ -30,6 +30,7 @@
 #include "protocol/SolverLane.h"
 #include "session/ElementIdentity.h"
 #include "session/FaceProjection.h"
+#include "session/MassProperties.h"
 #include "session/PlanExecutor.h"
 #include "session/PreviewOp.h"
 #include "session/Session.h"
@@ -277,6 +278,13 @@ void register_verbs(Dispatcher& dispatcher, SolverLane& solver_lane, Session& se
         "QueryElement",
         [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {
             return onecad::session::handle_query_element(session, r);
+        });
+    // --- WP-C1: exact mass properties (SCHEMA §7.5). Read-only, addressed by
+    //     bodyId against a head copy — no fence, no scratch, no minting. ---
+    dispatcher.register_verb(
+        "QueryMassProperties",
+        [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {
+            return onecad::session::handle_query_mass_properties(session, r);
         });
     dispatcher.register_verb(
         "ResolveRefs",

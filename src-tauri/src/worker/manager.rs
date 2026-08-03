@@ -1470,6 +1470,25 @@ impl crate::worker::ElementQuery for WorkerManager {
             .map_err(protocol_err)?;
         ok_result(resp).map(|r| wire::parse_query_element(&r))
     }
+
+    async fn query_mass_properties(
+        &self,
+        body: BodyId,
+        body_id_label: String,
+    ) -> Result<crate::dto::MassPropertiesDto, EngineError> {
+        let client = self.client_or_err()?;
+        let resp = client
+            .request(
+                "QueryMassProperties",
+                wire::query_mass_properties_args(body),
+            )
+            .await
+            .map_err(protocol_err)?;
+        // A malformed reading is a PROTOCOL break, never a default: a fabricated
+        // zero volume would render as a genuine "0 mm³" measurement.
+        wire::parse_mass_properties(body_id_label, &ok_result(resp)?)
+            .map_err(|message| EngineError::Protocol { message })
+    }
 }
 
 #[async_trait]

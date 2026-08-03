@@ -348,6 +348,39 @@ export interface ElementInfo {
   magnitude: number;
 }
 
+/**
+ * One body's exact kernel mass properties (`massProperties` → Rust
+ * `MassPropertiesDto` → the worker's `QueryMassProperties`; SCHEMA §7.5, WP-C1).
+ *
+ * Every number is OCCT `GProp` over the real BRep, not re-derived from the mesh
+ * the viewport is drawing.
+ *
+ * **Density-free.** The app has no material system, so `principalMoments` are
+ * pure VOLUME integrals (mm⁵) about the centroid, never kg·mm². A UI must not
+ * label them "mass moments".
+ */
+export interface MassProperties {
+  /** The body this reading describes — the id the caller asked about. */
+  bodyId: string;
+  /** Enclosed volume, mm³. 0 for a shape with no solid — an honest reading. */
+  volume: number;
+  /** Total area of every face, mm². */
+  surfaceArea: number;
+  /**
+   * The true VOLUME centre of mass, mm. Distinct from `ElementInfo.center`,
+   * which is a bounding-box centre.
+   */
+  centroid: [number, number, number];
+  /** Principal moments about the centroid (mm⁵), paired IN ORDER with `principalAxes`. */
+  principalMoments: [number, number, number];
+  /** The principal frame: three unit, right-handed rows. */
+  principalAxes: [
+    [number, number, number],
+    [number, number, number],
+    [number, number, number],
+  ];
+}
+
 // ── Topology repair (SCHEMA §9; M4b) — the `needs-repair` event + `resolveRefs` ─
 //
 // These MIRROR the Rust DTOs in `src-tauri/src/dto.rs` (camelCase serde):
