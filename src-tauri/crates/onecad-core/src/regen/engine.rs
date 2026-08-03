@@ -691,6 +691,10 @@ pub struct RefResolution {
 pub struct RestoreRequest {
     pub checkpoint: CheckpointRef,
     pub expected_history_prefix_hash: HistoryPrefixHash,
+    /// The D4 fencing epoch this restore is issued under — the SAME token the plan it
+    /// seeds carries. Sourced from the plan, never re-read from the engine: two verbs
+    /// of one plan reading two different epochs is exactly the desync VF-B4 covers.
+    pub worker_epoch: WorkerEpoch,
     /// The stored checkpoint artifacts (the app supplies them from its
     /// [`CheckpointStore`](super::checkpoint::CheckpointStore)). The engine
     /// reconstructs the base [`BodyRegistry`](crate::document::body::BodyRegistry) +
@@ -716,6 +720,17 @@ pub struct RestoreRequest {
 /// ([`PlanEvent::Failed`]).
 #[async_trait]
 pub trait GeometryEngine: Send + Sync {
+    /// The epoch the engine's worker is CURRENTLY running under (D4 fencing).
+    ///
+    /// A restart bumps it, and the worker's session head adopts the bumped value at
+    /// `OpenSession` — so anything that seeds fencing tokens (a runtime opening a
+    /// document) must read the live value rather than assume the first epoch, or every
+    /// plan it sends is fenced against a stale one. The default is the first epoch, for
+    /// engines with no restart notion (test doubles, the pending backend).
+    fn current_epoch(&self) -> WorkerEpoch {
+        WorkerEpoch(1)
+    }
+
     /// `OpenSession` (SCHEMA §7.1).
     async fn open_session(&self, req: OpenSessionRequest) -> Result<WorkerHead, EngineError>;
 

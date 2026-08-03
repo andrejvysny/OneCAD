@@ -68,6 +68,7 @@ pub async fn new_document(
         let mut guard = state.runtime.lock().await;
         *guard = Some(DocumentRuntime::new_blank(engine, meshes, solver));
         let rt = guard.as_ref().unwrap();
+        rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
         (snapshot_of(rt), rt.projection())
     };
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
@@ -96,6 +97,7 @@ pub async fn open_document(
         let mut guard = state.runtime.lock().await;
         *guard = Some(rt);
         let rt = guard.as_ref().unwrap();
+        rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
         (snapshot_of(rt), rt.projection())
     };
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
@@ -139,6 +141,7 @@ pub async fn import_step(
         let mut guard = state.runtime.lock().await;
         *guard = Some(rt);
         let rt = guard.as_ref().unwrap();
+        rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
         (snapshot_of(rt), rt.projection())
     };
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
@@ -439,6 +442,7 @@ pub async fn recover_document(
         let mut guard = state.runtime.lock().await;
         *guard = Some(rt);
         let rt = guard.as_ref().unwrap();
+        rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
         (snapshot_of(rt), rt.projection())
     };
     // Consume the marker (the autosave is superseded on the next save/close). The

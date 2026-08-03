@@ -55,6 +55,9 @@ struct FakeState {
     snapshot_counter: u64,
     /// Active gestures: `gestureId → (dragPoint id string, last target)`.
     gestures: HashMap<u64, (String, [f64; 2])>,
+    /// How many times `save_checkpoint` was invoked — the observable a skipped mint
+    /// is asserted against (a re-save at the same step would leave the count alone).
+    checkpoint_saves: usize,
 }
 
 struct FakeBackend {
@@ -67,6 +70,8 @@ struct FakeBackend {
     /// When set, `execute_plan` emits a single `Failed` terminal — models a hard regen
     /// failure (finding 5: EngineFailed-while-superseded downgrades to Superseded).
     plan_fails: bool,
+    /// When set, `save_checkpoint` returns artifacts instead of `Unsupported`.
+    checkpoints_work: bool,
     state: Mutex<FakeState>,
 }
 
@@ -76,6 +81,7 @@ impl Default for FakeBackend {
             body_overrides: HashMap::new(),
             solver_fails: false,
             plan_fails: false,
+            checkpoints_work: false,
             state: Mutex::new(FakeState::default()),
         }
     }
@@ -107,6 +113,18 @@ impl FakeBackend {
             plan_fails: true,
             ..Self::default()
         }
+    }
+
+    /// A backend whose `SaveCheckpoint` succeeds, counting every call.
+    fn with_checkpoints() -> Self {
+        Self {
+            checkpoints_work: true,
+            ..Self::default()
+        }
+    }
+
+    fn checkpoint_saves(&self) -> usize {
+        self.state.lock().unwrap().checkpoint_saves
     }
 
     fn bodies_for(&self, step: usize, record: RecordId) -> Vec<BodyId> {
@@ -249,11 +267,21 @@ impl GeometryEngine for FakeBackend {
     async fn tessellate(&self, _r: TessellateRequest) -> Result<TessellateResult, EngineError> {
         Ok(TessellateResult { meshes: vec![] })
     }
-    async fn save_checkpoint(&self, _s: usize) -> Result<CheckpointArtifacts, EngineError> {
-        Err(EngineError::OpFailed {
-            code: OpFailureCode::Unsupported,
-            recoverable: true,
-            message: "fake".into(),
+    async fn save_checkpoint(&self, step: usize) -> Result<CheckpointArtifacts, EngineError> {
+        if !self.checkpoints_work {
+            return Err(EngineError::OpFailed {
+                code: OpFailureCode::Unsupported,
+                recoverable: true,
+                message: "fake".into(),
+            });
+        }
+        self.state.lock().unwrap().checkpoint_saves += 1;
+        Ok(CheckpointArtifacts {
+            step,
+            artifacts: Vec::new(),
+            element_map_partition: Vec::new(),
+            signatures: sigs(step),
+            history_prefix_hash: HistoryPrefixHash::empty(),
         })
     }
     async fn restore_checkpoint(&self, _r: RestoreRequest) -> Result<RestoreResult, EngineError> {
@@ -781,6 +809,105 @@ async fn edit_during_regen_supersedes_via_live_fencing() {
         .await;
     assert!(matches!(converge.outcome, Outcome::Published(_)));
     assert_eq!(rt.projection().bodies.len(), 2, "converged after supersede");
+}
+
+#[tokio::test]
+async fn regen_driven_on_another_runtime_instance_never_commits() {
+    // VF-B2: `new_document` swaps the runtime slot WITHOUT cancelling the in-flight
+    // job, and the fresh runtime's FencingCell restarts from the same origin — so the
+    // (revision, epoch) pair alone cannot tell doc A's regen from doc B's. One edit in
+    // each document puts both at revision 1 with the same epoch: the tuple collides
+    // exactly, and phase 3 would commit doc A's scratch (timeline + bodies) INTO doc B.
+    // The per-runtime `instance` id is what makes that impossible.
+    let mut rt_a = runtime_with(Arc::new(FakeBackend::new()));
+    rt_a.apply(add_extrude(0x10, 25.0)).unwrap();
+    let prepared = rt_a
+        .begin_regen(RegenRequest::ToEnd { from: 0 })
+        .expect("non-empty plan");
+    let driven = prepared.drive(CancelToken::new()).await;
+
+    // Document B: a different runtime, edited once so its fencing tokens MATCH the
+    // in-flight regen's captured pair.
+    let mut rt_b = runtime_with(Arc::new(FakeBackend::new()));
+    rt_b.apply(add_extrude(0x20, 10.0)).unwrap();
+    assert_eq!(
+        rt_b.revision(),
+        DocumentRevision(1),
+        "the two documents must share fencing tokens for this test to prove anything"
+    );
+
+    let report = rt_b.finish_regen(driven);
+    assert!(
+        matches!(report.outcome, Outcome::Superseded),
+        "a regen prepared on ANOTHER runtime instance must be discarded, got {:?}",
+        report.outcome
+    );
+    assert!(
+        report.document_change().is_none(),
+        "nothing may be published into the unrelated document"
+    );
+    assert!(
+        rt_b.projection().bodies.is_empty(),
+        "document B must hold NO body from document A's regen"
+    );
+    let features = rt_b.projection().features;
+    assert_eq!(features.len(), 1, "document B keeps its own single feature");
+    assert_eq!(
+        features[0].id,
+        RecordId(Uuid::from_u128(0x20)).to_string(),
+        "document B's timeline must not be replaced by document A's"
+    );
+}
+
+#[tokio::test]
+async fn checkpoint_is_not_minted_over_a_restarted_worker() {
+    // VF-M2: after a worker restart the fresh process holds NO geometry, but the
+    // runtime's `latest_snapshot` still describes the pre-restart head — so the
+    // "fully regenerated" guard passes and SaveCheckpoint mints an EMPTY-prefix
+    // checkpoint OVER the valid one (the store's per-step insert overwrites), which
+    // then gets persisted into the container. The mint must wait for the replay.
+    let backend = Arc::new(FakeBackend::with_checkpoints());
+    let mut rt = runtime_with(backend.clone());
+    rt.apply(add_extrude(0x10, 25.0)).unwrap();
+    let r = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert!(
+        matches!(r.outcome, Outcome::Published(_)),
+        "{:?}",
+        r.outcome
+    );
+
+    rt.take_checkpoint_at_head().await;
+    assert_eq!(rt.checkpoint_count(), 1, "the valid checkpoint is minted");
+    assert_eq!(backend.checkpoint_saves(), 1, "one SaveCheckpoint so far");
+
+    // The worker crashed and came back under a new epoch. The replay has NOT run yet.
+    rt.on_worker_restart(WorkerEpoch(2));
+    rt.take_checkpoint_at_head().await;
+    assert_eq!(
+        backend.checkpoint_saves(),
+        1,
+        "SaveCheckpoint must NOT be issued against a worker that no longer holds the \
+         head geometry — the valid checkpoint would be overwritten by an empty one"
+    );
+    assert_eq!(rt.checkpoint_count(), 1, "the cache still holds one entry");
+
+    // Once the replay republishes the head under the new epoch, minting resumes.
+    let replay = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert!(
+        matches!(replay.outcome, Outcome::Published(_)),
+        "{:?}",
+        replay.outcome
+    );
+    rt.take_checkpoint_at_head().await;
+    assert_eq!(
+        backend.checkpoint_saves(),
+        2,
+        "after the replay the head geometry is the running worker's again"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

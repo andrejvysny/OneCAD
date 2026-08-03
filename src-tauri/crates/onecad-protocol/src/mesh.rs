@@ -36,10 +36,15 @@ pub const FLAG_HAS_EDGES: u16 = 0x0002;
 pub const FLAG_HAS_FACE_BBOXES: u16 = 0x0004;
 /// `flags` bit: id tables carry minted ElementIds (else pure TopoKeys).
 pub const FLAG_IDS_HAVE_ELEMENTIDS: u16 = 0x0008;
+/// `flags` bit: FACE_COLORS section present.
+pub const FLAG_HAS_FACE_COLORS: u16 = 0x0010;
 
 /// Mask of all defined `flags` bits; any bit outside this must be zero.
-const FLAGS_KNOWN_MASK: u16 =
-    FLAG_HAS_NORMALS | FLAG_HAS_EDGES | FLAG_HAS_FACE_BBOXES | FLAG_IDS_HAVE_ELEMENTIDS;
+const FLAGS_KNOWN_MASK: u16 = FLAG_HAS_NORMALS
+    | FLAG_HAS_EDGES
+    | FLAG_HAS_FACE_BBOXES
+    | FLAG_IDS_HAVE_ELEMENTIDS
+    | FLAG_HAS_FACE_COLORS;
 
 /// Level-of-detail tier for a tessellation (`mesh_format.md` §2 `lod`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

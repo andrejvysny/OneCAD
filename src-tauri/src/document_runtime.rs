@@ -278,18 +278,42 @@ impl PreparedSketchRegions {
     }
 }
 
+/// An admitted checkpoint mint (SCHEMA §7.7): the head step to save, plus the
+/// fencing tokens the artifacts must still match when they come back.
+/// [`DocumentRuntime::prepare_checkpoint`] issues one; only
+/// [`DocumentRuntime::adopt_checkpoint`] consumes it.
+#[derive(Debug, Clone, Copy)]
+pub struct CheckpointTicket {
+    step: usize,
+    fencing: (DocumentRevision, WorkerEpoch),
+}
+
 /// The per-document runtime (V1 single writer).
 pub struct DocumentRuntime {
     session: DocumentSession,
     regen: RegenSession,
     /// The lock-free fencing tokens (revision + worker epoch). See [`FencingCell`].
     fencing: Arc<FencingCell>,
+    /// Identity of THIS runtime object, minted per construction and never reused.
+    ///
+    /// The `(revision, epoch)` pair fences edits WITHIN one document; it cannot fence
+    /// ACROSS documents, because every fresh runtime restarts from the same origin
+    /// (revision 0). Swapping the runtime slot (`new_document` / `open_document` /
+    /// import / recovery) does not cancel an in-flight regen, so without this id a
+    /// job prepared on the previous document can land on the new one with tokens that
+    /// collide exactly, and phase 3 would commit the wrong document's geometry.
+    /// [`finish_regen`](Self::finish_regen) discards any regen not minted here.
+    instance: Uuid,
     title: String,
     path: Option<PathBuf>,
     dirty: bool,
     read_only: bool,
     mesh_cache: MeshCache,
     latest_snapshot: Option<Arc<ModelSnapshot>>,
+    /// The worker epoch [`latest_snapshot`](Self::latest_snapshot) was produced under.
+    /// Only that worker still holds the head geometry, so it is the only one a
+    /// checkpoint of the head may be asked from (VF-M2).
+    head_epoch: WorkerEpoch,
     publisher: Arc<SnapshotPublisher>,
     engine: Arc<dyn GeometryEngine>,
     meshes: Arc<dyn MeshProvider>,
@@ -433,13 +457,17 @@ impl DocumentRuntime {
         Self {
             session: DocumentSession::new(doc),
             regen,
-            fencing: Arc::new(FencingCell::new(1)),
+            instance: Uuid::new_v4(),
+            fencing: Arc::new(FencingCell::new(engine.current_epoch().0)),
             title,
             path,
             dirty: false,
             read_only,
             mesh_cache: MeshCache::new(),
             latest_snapshot: None,
+            // No snapshot yet; `prepare_checkpoint` refuses before the first publish
+            // regardless, and the first commit stamps the real value.
+            head_epoch: WorkerEpoch(0),
             publisher: Arc::new(SnapshotPublisher::new()),
             engine,
             meshes,
@@ -500,6 +528,17 @@ impl DocumentRuntime {
     pub fn on_worker_restart(&mut self, epoch: WorkerEpoch) {
         self.fencing.set_epoch(epoch.0);
         self.dirty = true;
+    }
+
+    /// Re-reads the engine's live epoch into the fencing cell.
+    ///
+    /// Construction already seeds it, but the runtime is built BEFORE it is published
+    /// into the app's runtime slot (open/import do worker IO in between), and the
+    /// restart hook can only reach a runtime that is already in the slot. Resampling
+    /// under the slot lock closes that window: after this call either the hook saw the
+    /// runtime, or this read saw the hook's epoch (VF-B4).
+    pub fn adopt_current_epoch(&self) {
+        self.fencing.set_epoch(self.engine.current_epoch().0);
     }
 
     /// The stored save path, if any.
@@ -788,6 +827,7 @@ impl DocumentRuntime {
             scratch: self.clone_regen_session(),
             fencing: self.fencing.clone(),
             publisher: self.publisher.clone(),
+            instance: self.instance,
             expected: (plan_rev, epoch),
             lod: Lod::Coarse,
             prior,
@@ -837,6 +877,7 @@ impl DocumentRuntime {
             scratch: self.clone_regen_session(),
             fencing: self.fencing.clone(),
             publisher: self.publisher.clone(),
+            instance: self.instance,
             expected: (plan_rev, epoch),
             lod: Lod::Coarse,
             prior,
@@ -889,11 +930,16 @@ impl DocumentRuntime {
     /// but the document moved on: the snapshot is stale, so it is **not** committed
     /// (the pending edit's regen reconverges) and the outcome is reported as
     /// `Superseded`. This upholds single-writer for the session mutation.
+    ///
+    /// A regen prepared on a DIFFERENT [`instance`](Self::instance) takes the same
+    /// `Superseded` path: the fencing tuple is per-document, so it cannot rule out a
+    /// job that outlived a runtime-slot swap (VF-B2).
     pub fn finish_regen(&mut self, driven: DrivenRegen) -> RegenReport {
         let DrivenRegen {
             outcome,
             scratch,
             prior,
+            instance,
             expected,
             lod,
             executed,
@@ -905,8 +951,17 @@ impl DocumentRuntime {
         // The revision this regen was PREPARED for (fenced at begin_regen). Threaded
         // into EVERY outcome — including Superseded/Failed — for commit correlation.
         let source_revision = expected.0 .0;
+        let same_instance = instance == self.instance;
+        if !same_instance {
+            tracing::warn!(
+                job = %job,
+                srcRev = source_revision,
+                "regen from a different runtime instance discarded (the document slot was \
+                 swapped while the job was in flight)"
+            );
+        }
         if let Outcome::Published(snap) = &outcome {
-            if self.fencing.get() == expected {
+            if same_instance && self.fencing.get() == expected {
                 let snapshot_id = snap.id.0;
                 let (changed, removed) = self.commit_snapshot(scratch, snap, lod, &prior);
                 // Write the just-produced body provenance back onto the records so the
@@ -970,24 +1025,26 @@ impl DocumentRuntime {
         // way — so reporting `failed` here would send a spurious failure to a commit that
         // is about to be resolved by that covering regen. Downgrade it to `Superseded`
         // (a hard failure with UNCHANGED fencing is still reported as `failed`). Cancelled
-        // and NoOp keep their own terminal.
-        let outcome =
-            if matches!(outcome, Outcome::EngineFailed(_)) && self.fencing.get() != expected {
-                // The failure itself is the only place this error is ever visible:
-                // the report about to be built reports `superseded` and DROPS it.
-                if let Outcome::EngineFailed(original_error) = &outcome {
-                    tracing::warn!(
-                        job = %job,
-                        rev = self.fencing.revision().0,
-                        srcRev = source_revision,
-                        original_error = %original_error,
-                        "regen: FAILED downgraded to superseded (fencing moved)"
-                    );
-                }
-                Outcome::Superseded
-            } else {
-                outcome
-            };
+        // and NoOp keep their own terminal. A failure that belongs to ANOTHER runtime
+        // instance is likewise not this document's to report (VF-B2).
+        let outcome = if matches!(outcome, Outcome::EngineFailed(_))
+            && (!same_instance || self.fencing.get() != expected)
+        {
+            // The failure itself is the only place this error is ever visible:
+            // the report about to be built reports `superseded` and DROPS it.
+            if let Outcome::EngineFailed(original_error) = &outcome {
+                tracing::warn!(
+                    job = %job,
+                    rev = self.fencing.revision().0,
+                    srcRev = source_revision,
+                    original_error = %original_error,
+                    "regen: FAILED downgraded to superseded (fencing moved)"
+                );
+            }
+            Outcome::Superseded
+        } else {
+            outcome
+        };
         let report = RegenReport {
             outcome,
             revision: self.fencing.revision().0,
@@ -1052,6 +1109,9 @@ impl DocumentRuntime {
         let _ = lod;
         self.regen = scratch;
         self.latest_snapshot = Some(snap.clone());
+        // The caller has already fenced (tokens unchanged since begin_regen), so the
+        // live epoch IS the one this geometry was computed under.
+        self.head_epoch = self.fencing.get().1;
         self.dirty = true;
         let changed: Vec<(BodyId, MeshKey)> =
             snap.bodies.iter().map(|b| (b.body, b.mesh_key)).collect();
@@ -1378,14 +1438,25 @@ impl DocumentRuntime {
 
     /// Takes a checkpoint of the current head into the cache (the SaveCheckpoint
     /// policy: on explicit `save_document` only — the cheapest sound policy, so a save
-    /// is the natural moment a durable acceleration base is minted). No-op unless the
-    /// latest published snapshot is exactly the timeline head (so the worker's head
-    /// geometry matches the checkpoint step). Best-effort: a worker failure skips the
-    /// checkpoint (the cache is disposable — Invariant 7).
+    /// is the natural moment a durable acceleration base is minted). No-op unless
+    /// [`prepare_checkpoint`](Self::prepare_checkpoint) admits the mint. Best-effort:
+    /// a worker failure skips the checkpoint (the cache is disposable — Invariant 7).
     pub async fn take_checkpoint_at_head(&mut self) {
+        let Some(ticket) = self.prepare_checkpoint() else {
+            return;
+        };
+        if let Ok(artifacts) = self.engine.save_checkpoint(ticket.step).await {
+            self.adopt_checkpoint(ticket, artifacts);
+        }
+    }
+
+    /// Admits (or refuses) a checkpoint mint at the current head, capturing the
+    /// fencing tokens the artifacts must still be current against. `None` ⇒ skip.
+    #[must_use]
+    pub fn prepare_checkpoint(&self) -> Option<CheckpointTicket> {
         let applied = self.regen.timeline.cursor();
         if applied == 0 {
-            return;
+            return None;
         }
         let head_step = applied - 1;
         // The worker head must be the fully-regenerated document head (its last valid
@@ -1397,18 +1468,54 @@ impl DocumentRuntime {
                  (snapshot step {:?}); the save proceeds without an acceleration base",
                 self.latest_snapshot.as_ref().and_then(|s| s.step_index)
             );
+            return None;
+        }
+        let fencing = self.fencing.get();
+        // VF-M2: a restarted worker is a fresh process holding NO geometry, while
+        // `latest_snapshot` still describes the pre-restart head — so the check above
+        // passes and SaveCheckpoint would mint an EMPTY-prefix checkpoint OVER the
+        // valid one (the store's per-step insert overwrites), losing the acceleration
+        // base and persisting a corrupt cache entry. Wait for the replay to republish.
+        if fencing.1 != self.head_epoch {
+            tracing::info!(
+                "checkpoint: SKIPPED at save — head geometry was produced under worker epoch \
+                 {} but the worker is now at epoch {}; the restart replay must land first",
+                self.head_epoch.0,
+                fencing.1 .0
+            );
+            return None;
+        }
+        Some(CheckpointTicket {
+            step: head_step,
+            fencing,
+        })
+    }
+
+    /// Stores just-saved checkpoint artifacts against the ticket that admitted them.
+    /// A fencing move since [`prepare_checkpoint`](Self::prepare_checkpoint) means the
+    /// artifacts no longer describe the head — a logged skip, never an error (the
+    /// cache is disposable, Invariant 7).
+    pub fn adopt_checkpoint(&mut self, ticket: CheckpointTicket, artifacts: CheckpointArtifacts) {
+        if self.fencing.get() != ticket.fencing {
+            tracing::info!(
+                "checkpoint: DISCARDED at step {} — fencing moved during SaveCheckpoint \
+                 (prepared at rev {} epoch {}, now rev {} epoch {})",
+                ticket.step,
+                ticket.fencing.0 .0,
+                ticket.fencing.1 .0,
+                self.fencing.get().0 .0,
+                self.fencing.get().1 .0
+            );
             return;
         }
-        if let Ok(artifacts) = self.engine.save_checkpoint(head_step).await {
-            // Adopt the worker's real OCCT fingerprint from the checkpoint so the
-            // PlanContext compatibility check (which governs checkpoint selection)
-            // matches the envelope — the V1 `occt_fingerprint` placeholder would
-            // otherwise reject every checkpoint (Invariant 7 fingerprint gate).
-            if let Some(env) = artifacts.representative_envelope() {
-                self.occt_fingerprint = env.occt_fingerprint.clone();
-            }
-            self.checkpoints.save(head_step, artifacts);
+        // Adopt the worker's real OCCT fingerprint from the checkpoint so the
+        // PlanContext compatibility check (which governs checkpoint selection)
+        // matches the envelope — the V1 `occt_fingerprint` placeholder would
+        // otherwise reject every checkpoint (Invariant 7 fingerprint gate).
+        if let Some(env) = artifacts.representative_envelope() {
+            self.occt_fingerprint = env.occt_fingerprint.clone();
         }
+        self.checkpoints.save(ticket.step, artifacts);
     }
 
     /// Whether the most recent [`begin_regen`](Self::begin_regen) compiled a
@@ -2164,6 +2271,9 @@ pub struct PreparedRegen {
     scratch: RegenSession,
     fencing: Arc<FencingCell>,
     publisher: Arc<SnapshotPublisher>,
+    /// The [`DocumentRuntime::instance`] this regen was compiled against — phase 3
+    /// commits only back into that same runtime.
+    instance: Uuid,
     expected: (
         onecad_core::ids::DocumentRevision,
         onecad_core::ids::WorkerEpoch,
@@ -2258,6 +2368,7 @@ impl PreparedRegen {
             mut scratch,
             fencing,
             publisher,
+            instance,
             expected,
             lod,
             prior,
@@ -2304,6 +2415,7 @@ impl PreparedRegen {
             outcome,
             scratch,
             prior,
+            instance,
             expected,
             lod,
             executed,
@@ -2371,6 +2483,8 @@ pub struct DrivenRegen {
     outcome: Outcome,
     scratch: RegenSession,
     prior: Vec<BodyId>,
+    /// Carried verbatim from [`PreparedRegen::instance`] — the cross-document fence.
+    instance: Uuid,
     expected: (
         onecad_core::ids::DocumentRevision,
         onecad_core::ids::WorkerEpoch,

@@ -715,6 +715,10 @@ async fn run_until_death(
 
 #[async_trait]
 impl GeometryEngine for WorkerManager {
+    fn current_epoch(&self) -> WorkerEpoch {
+        self.epoch()
+    }
+
     async fn execute_plan(&self, request: PlanRequest) -> mpsc::Receiver<PlanEvent> {
         let (tx, rx) = mpsc::channel(256);
         tokio::spawn(stream_plan(self.shared.clone(), request, tx));
@@ -838,7 +842,7 @@ impl GeometryEngine for WorkerManager {
         // stored artifacts (review F3), so the executor seeds its scratch from the
         // immutable checkpoint, not live state.
         let client = self.client_or_err()?;
-        let args = wire::restore_checkpoint_args(&req, self.epoch());
+        let args = wire::restore_checkpoint_args(&req);
         let resp = client
             .request("RestoreCheckpoint", args)
             .await

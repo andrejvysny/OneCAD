@@ -565,6 +565,10 @@ impl AdoptingEngine {
 
 #[async_trait]
 impl GeometryEngine for AdoptingEngine {
+    fn current_epoch(&self) -> WorkerEpoch {
+        self.inner.current_epoch()
+    }
+
     async fn execute_plan(&self, request: PlanRequest) -> mpsc::Receiver<PlanEvent> {
         let mut inner_rx = self.inner.execute_plan(request).await;
         let (tx, rx) = mpsc::channel(256);

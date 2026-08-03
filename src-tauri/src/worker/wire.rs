@@ -990,13 +990,16 @@ pub fn save_checkpoint_args(step_index: usize) -> Value {
 
 /// `RestoreCheckpoint.args` (SCHEMA §7.7 + `workerEpoch` for D4 fencing +
 /// `stepIndex` so the worker keys its in-session retained checkpoint).
+///
+/// The epoch comes from the request (i.e. from the plan), not from the manager: a
+/// restore and the plan it seeds must fence against ONE epoch (VF-B4).
 #[must_use]
-pub fn restore_checkpoint_args(req: &RestoreRequest, worker_epoch: WorkerEpoch) -> Value {
+pub fn restore_checkpoint_args(req: &RestoreRequest) -> Value {
     json!({
         "checkpointId": req.checkpoint.checkpoint_id.as_str(),
         "stepIndex": req.checkpoint.step_index,
         "expectedHistoryPrefixHash": req.expected_history_prefix_hash.as_str(),
-        "workerEpoch": worker_epoch.0,
+        "workerEpoch": req.worker_epoch.0,
     })
 }
 
