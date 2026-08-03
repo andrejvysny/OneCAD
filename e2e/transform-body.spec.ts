@@ -1,7 +1,7 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import { openEditorDebug, extrudeDebug, getFeatureLabels, bodyOptions } from "./helpers";
-import { seedSelection, findGizmoHandle, dragFromTo } from "./modelToolHelpers";
+import { seedSelection, findGizmoHandle, dragFromTo, findFacePoint, clickAt } from "./modelToolHelpers";
 
 /*
  * WP-B W1 + W2 — TransformBody: the numeric placement UX, and the drag gizmo.
@@ -499,4 +499,140 @@ test("the Copy segment toggles the flag without a gizmo drag", async ({ page }) 
   await copyBtn.click();
   await expect(copyBtn).toHaveAttribute("aria-pressed", "true");
   await expect.poll(async () => (await placement(page)).copy).toBe(true);
+});
+
+// ── WP-B W2.5: ALIGN face-to-face ────────────────────────────────────────────
+//
+// A one-shot placement SOLVE, not a mate: two face picks produce one rigid
+// motion, it lands in the same armed record everything else writes, and ✓
+// commits it. So the assertion that matters is geometric — after the commit the
+// two bodies TOUCH on the plane the picked faces share — and it is checked
+// against the scene, exactly like the W1/W2 cases above.
+//
+// The numbers here are hand-derived and camera-independent (unlike the gizmo
+// drags, which have to read back what the camera made of a pixel delta):
+//
+//   moving = body1's +X face   centre (40, 0, 0),   normal (1, 0, 0)
+//   dest   = import's −Y face  centre (110,−20, 0), normal (0,−1, 0)
+//   R      = +90° about Z (the minimal turn from (1,0,0) to −(0,−1,0))
+//   R·(40,0,0) = (0,40,0)  ⇒  translate = (110,−20,0) − (0,40,0) = (110,−60,0)
+//
+// which takes body1's 80×60×30 box to x∈[80,140], y∈[−100,−20], z∈[−15,15] —
+// flush against the 40³ import box at x∈[90,130], y∈[−20,20].
+
+/** The align sub-flow's phase, as `?vpdebug` publishes it. */
+async function alignPhase(page: Page): Promise<string | null> {
+  const d = (await extrudeDebug(page)) ?? {};
+  return (d.transformAlignPhase as string | null) ?? null;
+}
+
+/**
+ * The second mock body: the STEP-import stand-in (a 40³ box at x = 110).
+ *
+ * Zoom-to-fit afterwards is not cosmetic. The camera framed the seed box alone,
+ * and the import lands 110mm along +X — off to the side, under the 260px
+ * inspector panel, where a real click cannot reach it. Shift+F is the gesture a
+ * user reaches for in exactly that situation, and it brings BOTH bodies into
+ * the clear part of the canvas.
+ */
+async function importSecondBody(page: Page): Promise<string> {
+  await page.getByRole("button", { name: "File" }).click();
+  await page.getByRole("menuitem", { name: /Import STEP/ }).click();
+  await expect.poll(async () => (await getFeatureLabels(page)).includes("Import")).toBe(true);
+  const ids = await page.evaluate(() =>
+    Object.keys(
+      (window as unknown as { __stores?: { document: { getState(): { bodies: Record<string, unknown> } } } })
+        .__stores?.document.getState().bodies ?? {},
+    ),
+  );
+  const other = ids.find((id) => id !== BODY);
+  if (!other) throw new Error("import did not add a second body");
+  await waitForBody(page, other);
+  await page.keyboard.press("Shift+F");
+  return other;
+}
+
+const alignChip = (page: Page) => chip(page).getByTestId("chip-transform-align");
+
+test("Align: two face picks snap the body FLUSH onto another body's face", async ({ page }) => {
+  await openEditorDebug(page, { mockBody: true });
+  await waitForBody(page, BODY);
+  const other = await importSecondBody(page);
+  const destBefore = await bodyBounds(page, other);
+
+  await armTransform(page, BODY);
+  await alignChip(page).click();
+  await expect(alignChip(page)).toHaveAttribute("aria-pressed", "true");
+  await expect.poll(() => alignPhase(page)).toBe("pickMoving");
+
+  // Pick 1 — the face to move (+X of the seed box).
+  await clickAt(page, await findFacePoint(page, BODY, "f:0"));
+  await expect.poll(() => alignPhase(page)).toBe("pickDest");
+
+  // Pick 2 — where it should sit (−Y of the imported box).
+  await clickAt(page, await findFacePoint(page, other, "f:3"));
+  await expect.poll(() => alignPhase(page)).toBe(null);
+
+  // The SOLVE, against the hand-derived expectation above.
+  const solved = await placement(page);
+  expect(solved.translate[0]).toBeCloseTo(110, 6);
+  expect(solved.translate[1]).toBeCloseTo(-60, 6);
+  expect(solved.translate[2]).toBeCloseTo(0, 6);
+  expect(solved.angleDeg).toBeCloseTo(90, 6);
+  const axis = (await extrudeDebug(page))?.transformRotAxisVec as number[];
+  expect(axis[2]).toBeCloseTo(1, 6); // a FREE axis, published because no chip can show one
+  // It reads out as the Move it is, on the component it leaned on hardest.
+  expect(solved.mode).toBe("move");
+  await expect(chip(page).getByTestId("chip-transform-move")).toHaveAttribute("aria-pressed", "true");
+  await expect(chipInput(page)).toHaveValue("110");
+
+  await confirmWithEnter(page);
+
+  // FLUSH, in the scene: the moved box's +Y extent IS the destination's −Y face…
+  await expectMin(page, BODY, [80, -100, -15]);
+  const after = (await bodyBounds(page, BODY))!;
+  expect(after.max[0]).toBeCloseTo(140, 3);
+  expect(after.max[1]).toBeCloseTo(destBefore!.min[1], 3); // contact, not overlap
+  expect(after.max[2]).toBeCloseTo(15, 3);
+  // …and the destination body never moved.
+  const destAfter = await bodyBounds(page, other);
+  expect(destAfter!.min).toEqual(destBefore!.min);
+  // ONE cumulative record, as ever.
+  expect(await moveRows(page)).toHaveLength(1);
+});
+
+test("Align: Esc walks back one pick at a time and leaves the placement armed", async ({ page }) => {
+  await openEditorDebug(page, { mockBody: true });
+  await waitForBody(page, BODY);
+  const other = await importSecondBody(page);
+
+  await armTransform(page, BODY);
+  // A nudge first — backing out of the align must not throw it away.
+  await chipInput(page).fill("30");
+  await chipInput(page).blur();
+
+  await alignChip(page).click();
+  await clickAt(page, await findFacePoint(page, BODY, "f:0"));
+  await expect.poll(() => alignPhase(page)).toBe("pickDest");
+
+  await page.keyboard.press("Escape");
+  await expect.poll(() => alignPhase(page)).toBe("pickMoving");
+  await page.keyboard.press("Escape");
+  await expect.poll(() => alignPhase(page)).toBe(null);
+
+  // Still armed, still holding the typed 30, gizmo back — nothing committed.
+  await expect.poll(async () => (await extrudeDebug(page))?.transformPhase).toBe("armed");
+  await expect(chip(page)).toBeVisible();
+  await expect(alignChip(page)).toHaveAttribute("aria-pressed", "false");
+  expect((await placement(page)).translate).toEqual([30, 0, 0]);
+  await expect.poll(async () => (await placement(page)).gizmo).toBe(true);
+  expect(await moveRows(page)).toHaveLength(0);
+
+  // The abandoned first pick is NOT reused: a fresh flow starts from scratch.
+  await alignChip(page).click();
+  await expect.poll(() => alignPhase(page)).toBe("pickMoving");
+  await clickAt(page, await findFacePoint(page, other, "f:3"));
+  // …and that click was on the wrong side, so it is refused, not consumed.
+  await expect.poll(() => alignPhase(page)).toBe("pickMoving");
+  await expect(page.getByText(/not on a body being moved/i)).toBeVisible();
 });

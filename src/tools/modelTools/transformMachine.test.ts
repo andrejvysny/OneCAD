@@ -16,8 +16,10 @@ import {
   transformParamsOf,
   isIdentityPlacement,
   axisIndex,
+  dominantAxis,
   type TransformFsm,
 } from "./modelToolMachine";
+import type { Vec3 } from "@/tools/preview/depthProjection";
 
 const armed = (): TransformFsm =>
   transformStep(transformInit(), { kind: "arm", targets: ["b1"], center: [5, 6, 7] }).state;
@@ -341,5 +343,146 @@ describe("transformStep — gizmo drag frames", () => {
       expect(r.state).toEqual(idle);
       expect(r.effect).toBe("none");
     }
+  });
+});
+
+// ── ALIGN sub-flow (WP-B W2.5) ───────────────────────────────────────────────
+//
+// The align is a PHASE OF THE ARMED PLACEMENT, not a tool. What has to hold:
+// the two picks advance in order and nothing else, Esc walks BACK one rung at a
+// time without disarming, and `alignApply` REPLACES the placement — including
+// with a rotation axis the three-letter chip cannot express, which must then
+// survive out to `transformParamsOf` verbatim.
+
+describe("transformStep — align", () => {
+  const alignApply = (axis: Vec3, angleDeg = 90, translate: Vec3 = [110, -60, 0]) =>
+    ({ kind: "alignApply", translate, angleDeg, rotAxisVec: axis }) as const;
+
+  const inAlign = (): TransformFsm => step(armed(), { kind: "beginAlign" });
+  const atDest = (): TransformFsm => step(inAlign(), { kind: "alignPickedMoving" });
+
+  it("beginAlign waits for the FIRST pick, and only while armed", () => {
+    const s = transformStep(armed(), { kind: "beginAlign" });
+    expect(s.state.alignPhase).toBe("pickMoving");
+    expect(s.effect).toBe("ghost");
+    expect(transformStep(transformInit(), { kind: "beginAlign" }).state.alignPhase).toBeNull();
+  });
+
+  it("advances pickMoving → pickDest, and refuses an out-of-order advance", () => {
+    expect(atDest().alignPhase).toBe("pickDest");
+    // A second "moving" pick while waiting for the destination is not a thing.
+    expect(step(atDest(), { kind: "alignPickedMoving" }).alignPhase).toBe("pickDest");
+    expect(step(armed(), { kind: "alignPickedMoving" }).alignPhase).toBeNull();
+  });
+
+  it("leaves the arm, the targets and the FROZEN pivot untouched across the flow", () => {
+    const s = atDest();
+    expect(s.phase).toBe("armed");
+    expect(s.targets).toEqual(["b1"]);
+    expect(s.center).toEqual([5, 6, 7]);
+  });
+
+  it("Esc walks BACK one rung: pickDest → pickMoving → off, arm intact", () => {
+    const back1 = step(atDest(), { kind: "alignCancel" });
+    expect(back1.alignPhase).toBe("pickMoving");
+    const back2 = step(back1, { kind: "alignCancel" });
+    expect(back2.alignPhase).toBeNull();
+    expect(back2.phase).toBe("armed");
+    // A third Esc is a no-op HERE — the tool-level cancel owns that rung.
+    const r = transformStep(back2, { kind: "alignCancel" });
+    expect(r.state).toEqual(back2);
+    expect(r.effect).toBe("none");
+  });
+
+  it("alignApply REPLACES the placement and reads out as Move · dominant axis", () => {
+    const s = step(atDest(), alignApply([0, 0, 1]));
+    expect(s.alignPhase).toBeNull();
+    expect(s.translate).toEqual([110, -60, 0]);
+    expect(s.angleDeg).toBe(90);
+    expect(s.mode).toBe("move");
+    expect(s.axis).toBe("X"); // |110| > |−60| > 0
+    expect(transformValue(s)).toBe(110); // the chip shows the component it named
+  });
+
+  it("REPLACES rather than composes: an earlier nudge does not survive", () => {
+    const nudged = step(armed(), { kind: "setValue", value: 30 }, { kind: "beginAlign" }, { kind: "alignPickedMoving" });
+    expect(step(nudged, alignApply([0, 0, 1])).translate).toEqual([110, -60, 0]);
+  });
+
+  it("carries the FREE axis out to the record verbatim", () => {
+    const axis: Vec3 = [0.6, 0, 0.8];
+    const s = step(atDest(), alignApply(axis, 37.5));
+    expect(s.rotAxisVec).toEqual(axis);
+    const p = transformParamsOf(s);
+    expect(p.rotate.axis).toEqual(axis); // NOT snapped to the nearest world axis
+    expect(p.rotate.angleDeg).toBe(37.5);
+    expect(p.rotate.center).toEqual([5, 6, 7]);
+  });
+
+  it("reads 0° on every world axis while a free axis is stored (nothing to rewrite)", () => {
+    const s = step(atDest(), alignApply([0.6, 0, 0.8], 37.5), { kind: "setMode", mode: "rotate" });
+    for (const axis of ["X", "Y", "Z"] as const) {
+      expect(transformValue(step(s, { kind: "setAxis", axis }))).toBe(0);
+    }
+  });
+
+  it("authoring a rotation CLAIMS a world axis and drops the solved one", () => {
+    const aligned = step(atDest(), alignApply([0.6, 0, 0.8], 37.5), { kind: "setMode", mode: "rotate" });
+    const typed = step(aligned, { kind: "setAxis", axis: "Y" }, { kind: "setValue", value: 15 });
+    expect(typed.rotAxisVec).toBeNull();
+    expect(typed.rotAxis).toBe("Y");
+    expect(transformParamsOf(typed).rotate.axis).toEqual([0, 1, 0]);
+    // …and so does a ring drag, which is the same authorship by another gesture.
+    const dragged = step(aligned, { kind: "grab", grab: { kind: "ring", axis: "X" } }, { kind: "dragAngle", angleDeg: 20 });
+    expect(dragged.rotAxisVec).toBeNull();
+    expect(transformParamsOf(dragged).rotate.axis).toEqual([1, 0, 0]);
+  });
+
+  it("a MOVE never disturbs the solved rotation", () => {
+    const aligned = step(atDest(), alignApply([0.6, 0, 0.8], 37.5));
+    const moved = step(aligned, { kind: "setAxis", axis: "Z" }, { kind: "setValue", value: 9 });
+    expect(moved.rotAxisVec).toEqual([0.6, 0, 0.8]);
+    expect(moved.angleDeg).toBe(37.5);
+    expect(moved.translate).toEqual([110, -60, 9]);
+  });
+
+  it("REFUSES a non-finite solve rather than poisoning the placement", () => {
+    const base = atDest();
+    for (const bad of [
+      alignApply([0, 0, 1], NaN),
+      alignApply([NaN, 0, 1]),
+      alignApply([0, 0, 1], 0, [Infinity, 0, 0]),
+    ]) {
+      const r = transformStep(base, bad);
+      expect(r.state).toEqual(base);
+      expect(r.effect).toBe("none");
+      expect(r.state.alignPhase).toBe("pickDest"); // still waiting — nothing lost
+    }
+  });
+
+  it("ignores alignApply when no destination pick is outstanding", () => {
+    expect(transformStep(armed(), alignApply([0, 0, 1])).state.rotAxisVec).toBeNull();
+    expect(transformStep(inAlign(), alignApply([0, 0, 1])).state.alignPhase).toBe("pickMoving");
+  });
+
+  it("a seed can CLEAR a free axis back to the world one (an explicit null)", () => {
+    const aligned = step(atDest(), alignApply([0.6, 0, 0.8], 37.5));
+    expect(step(aligned, { kind: "seed", rotAxisVec: null }).rotAxisVec).toBeNull();
+    expect(step(aligned, { kind: "seed", angleDeg: 1 }).rotAxisVec).toEqual([0.6, 0, 0.8]); // absent ⇒ kept
+  });
+
+  it("cancel clears the whole flow along with the placement", () => {
+    expect(transformStep(atDest(), { kind: "cancel" }).state).toEqual(transformInit());
+  });
+});
+
+describe("dominantAxis", () => {
+  it("names the largest |component|, ties to the lowest index", () => {
+    expect(dominantAxis([110, -60, 0])).toBe("X");
+    expect(dominantAxis([0, -60, 5])).toBe("Y");
+    expect(dominantAxis([-1, 2, -3])).toBe("Z");
+    expect(dominantAxis([0, 0, 0])).toBe("X");
+    expect(dominantAxis([5, 5, 5])).toBe("X");
+    expect(dominantAxis([0, 5, 5])).toBe("Y");
   });
 });

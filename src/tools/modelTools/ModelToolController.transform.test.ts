@@ -368,12 +368,47 @@ describe("ModelToolController placement (TransformBody)", () => {
     expect(op.params.rotate.center).toEqual([5, 6, 7]);
   });
 
-  it("editTransformFeature refuses a stored rotation about a non-world axis", async () => {
+  /**
+   * A stored rotation about an OFF-AXIS vector was refused outright in W1: no
+   * chip could show it, so arming would have let a ✓ rewrite it to a world axis
+   * the user never chose. WP-B W2.5 makes such a record a normal frontend
+   * product (an align flushes two arbitrary faces about their normals' cross
+   * product), so the vector is now carried VERBATIM instead — which closes the
+   * same data-loss hole without also breaking the fold rule for aligned bodies.
+   */
+  it("editTransformFeature carries a stored NON-world rotation axis through unchanged", async () => {
     build();
     clientMock.getOperationParams.mockResolvedValue({
       targets: ["body1"],
       translate: [{ value: 0 }, { value: 0 }, { value: 0 }],
-      rotate: { center: [0, 0, 0], axis: [1, 1, 0], angleDeg: { value: 30 } },
+      rotate: { center: [0, 0, 0], axis: [0.6, 0, 0.8], angleDeg: { value: 30 } },
+      copy: false,
+    });
+    documentStore.setState({
+      features: [
+        { id: "feat-mv", kind: "boolean", opType: "TransformBody", label: "Move", valueText: "30.0°", status: "ok" },
+      ],
+    });
+
+    await controller.editTransformFeature("feat-mv");
+    await flush();
+    expect(toolStore.getState().modelTool).toBe("transform");
+
+    toolChipStore.getState().onConfirm?.();
+    await flush();
+    const op = lastOp();
+    if (op.opType !== "TransformBody") throw new Error("unreachable");
+    expect(op.featureId).toBe("feat-mv");
+    expect(op.params.rotate.axis).toEqual([0.6, 0, 0.8]); // NOT snapped to Z
+    expect(op.params.rotate.angleDeg).toBe(30);
+  });
+
+  it("editTransformFeature still refuses a stored axis that is not a direction at all", async () => {
+    build();
+    clientMock.getOperationParams.mockResolvedValue({
+      targets: ["body1"],
+      translate: [{ value: 0 }, { value: 0 }, { value: 0 }],
+      rotate: { center: [0, 0, 0], axis: [0, 0, 0], angleDeg: { value: 30 } },
       copy: false,
     });
     documentStore.setState({
@@ -385,7 +420,7 @@ describe("ModelToolController placement (TransformBody)", () => {
     await controller.editTransformFeature("feat-mv");
     await flush();
 
-    expect(hintText()).toBe("Cannot re-edit move: stored placement is not a world-axis rotation");
+    expect(hintText()).toBe("Cannot re-edit move: stored placement has no usable rotation axis");
     expect(toolChipStore.getState().kind).toBe("none");
     expect(toolStore.getState().modelTool).not.toBe("transform");
   });

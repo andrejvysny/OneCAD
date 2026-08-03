@@ -49,7 +49,7 @@ import { trace, traceWarn } from "@/debug/trace";
 import { logDebug } from "@/debug/log";
 import { viewportStore, type ViewportState } from "@/stores/viewportStore";
 import { documentStore, nextDatumName, type SketchMeta } from "@/stores/documentStore";
-import { selectionStore, type EntityRef } from "@/stores/selectionStore";
+import { selectionStore, topoRefId, type EntityRef } from "@/stores/selectionStore";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { profileFromRegion, profileBounds, type PrismProfile } from "@/tools/preview/prismPreview";
 import { regionAtPoint } from "@/tools/preview/regionPick";
@@ -85,7 +85,16 @@ import {
   placementMatrix,
   applyPlacementToPoint,
   type GhostTransform,
+  type Mat4Rows,
 } from "@/tools/preview/patternPreview";
+import {
+  alignPlacement,
+  composePlacements,
+  faceFrame,
+  inversePlacement,
+  transformFrame,
+  type PlanarFaceFrame,
+} from "@/tools/preview/alignSolve";
 import {
   accumulateAngleDeg,
   axisDragDelta,
@@ -119,6 +128,7 @@ import {
   transformParamsOf,
   transformValue,
   axisIndex,
+  dominantAxis,
   isIdentityPlacement,
   regionSelectInit,
   regionSelectStep,
@@ -140,6 +150,7 @@ import {
   type MirrorFsm,
   type PatternAxis,
   type MirrorPlane,
+  type AlignPhase,
   type TransformFsm,
   type TransformGrab,
   type TransformMode,
@@ -192,11 +203,16 @@ function storedVec3(v: unknown): Vec3 | null {
  * Rebuild the full placement authoring state from a stored `TransformBodyParams`
  * (the wire serde shape `get_operation_params` returns).
  *
- * Returns null — refusing to arm — when the record is not something the W1 chip
- * can represent: no targets, or a rotation about an axis that is not one of the
- * three the axis picker offers. Arming anyway would let a ✓ REWRITE that axis to
- * a world one the user never chose, which is a silent data loss, not a fallback.
- * A record the frontend authored always passes.
+ * Returns null — refusing to arm — when the record has no targets, or a rotation
+ * axis that is neither a world axis nor a usable vector at all. The original
+ * refusal was blanket ("not one of the three the picker offers"), because arming
+ * anyway would have let a ✓ REWRITE the axis to a world one the user never
+ * chose. WP-B W2.5 makes an off-axis rotation a NORMAL frontend product — an
+ * align flushes two arbitrary faces about their normals' cross product — so a
+ * free axis is now carried VERBATIM in `rotAxisVec` instead. That closes the
+ * data-loss hole properly: the exact vector goes straight back out on the ✓, and
+ * a blanket refusal here would instead break the fold rule (a second placement
+ * on an aligned body would stack a second record rather than re-edit the one).
  */
 function transformSeedFromParams(
   stored: Record<string, unknown> | undefined,
@@ -208,12 +224,19 @@ function transformSeedFromParams(
   const rotate = (stored.rotate ?? {}) as Record<string, unknown>;
   const center = storedVec3(rotate.center) ?? [0, 0, 0];
   const angleDeg = storedScalar(rotate.angleDeg);
-  const rotAxis = matchWorldAxis(storedVec3(rotate.axis) ?? undefined);
-  if (!rotAxis) return null;
+  const axisVec = storedVec3(rotate.axis);
+  const worldAxis = matchWorldAxis(axisVec ?? undefined);
+  // A zero-length / malformed axis is still refused: nothing can be rebuilt from
+  // it, and guessing one would be exactly the rewrite this guard exists to stop.
+  if (!worldAxis && (!axisVec || Math.hypot(axisVec[0], axisVec[1], axisVec[2]) < 1e-9)) return null;
+  const rotAxisVec = worldAxis ? null : axisVec;
+  const rotAxis = worldAxis ?? dominantAxis(axisVec!);
   // Open on the component that actually carries the placement, so a re-edit shows
   // the number the row's value text shows rather than a bare 0 on Move X.
   const movedAxis = (["X", "Y", "Z"] as const).find((a) => translate[axisIndex(a)] !== 0);
-  const mode: TransformMode = !movedAxis && angleDeg !== 0 ? "rotate" : "move";
+  // A free axis has no chip that can show its angle, so a rotation-only aligned
+  // record still opens on Move — the honest surface, not a mislabelled one.
+  const mode: TransformMode = !movedAxis && angleDeg !== 0 && !rotAxisVec ? "rotate" : "move";
   return {
     targets,
     seed: {
@@ -222,6 +245,7 @@ function transformSeedFromParams(
       translate,
       angleDeg,
       rotAxis,
+      rotAxisVec,
       center,
       copy: stored.copy === true,
     },
@@ -553,6 +577,20 @@ export class ModelToolController {
    * to take down.
    */
   private transformGizmoShown = false;
+
+  /**
+   * The INVERSE of the placement the on-screen geometry already carries, frozen
+   * at arm — identity on a fresh arm, the record's stored motion on a fold /
+   * re-edit (WP-B W2.5). Face frames for the align solve are read off the mesh
+   * registry, which shows the body as COMMITTED, while a record's `translate` /
+   * `rotate` are relative to the geometry it CONSUMES. Pulling a frame back
+   * through this is what keeps those two frames from being silently conflated.
+   */
+  private transformArmedInverse: Mat4Rows | null = null;
+  /** The first align pick, in the record's INPUT frame; null between picks. */
+  private alignMovingFrame: PlanarFaceFrame | null = null;
+  /** Whether THIS controller currently owns the selection store's hover. */
+  private alignHidHover = false;
 
   /**
    * Datum-plane tool context (DATUM W1), null when the tool is not armed.
@@ -3315,6 +3353,15 @@ export class ModelToolController {
   private armTransform(targets: string[], editFeatureId?: string, seed?: TransformSeed): void {
     this.transformEditFeatureId = editFeatureId;
     this.transform = transformStep(transformInit(), { kind: "arm", targets, ...seed }).state;
+    // Freeze what the visible geometry already carries — see the field's note.
+    const armedParams = transformParamsOf(this.transform);
+    this.transformArmedInverse = inversePlacement(
+      armedParams.translate,
+      armedParams.rotate.center,
+      armedParams.rotate.axis,
+      armedParams.rotate.angleDeg,
+    );
+    this.alignMovingFrame = null;
     toolStore.setState({ phase: "armed" });
     viewportStore
       .getState()
@@ -3340,9 +3387,11 @@ export class ModelToolController {
           onConfirm: () => void this.commitTransform(),
           onCancel: () => this.resetToSelect(),
           onCopy: (c) => this.onTransformEvent({ kind: "setCopy", copy: c }),
+          onAlign: () => this.toggleAlign(),
         },
         { copy: this.transform.copy },
       );
+    toolChipStore.getState().setAlignPhase(this.transform.alignPhase);
   }
 
   /** One chip edit: step the FSM, then re-publish the chip's view + the ghost. */
@@ -3364,6 +3413,7 @@ export class ModelToolController {
     // every event — switching Move X → Move Y shows the stored dy, not the dx.
     chip.setValue(transformValue(this.transform));
     chip.setCopy(this.transform.copy);
+    chip.setAlignPhase(this.transform.alignPhase);
     this.rebuildTransformGhost();
     this.updateTransformGizmo();
     this.updateDebug();
@@ -3392,7 +3442,13 @@ export class ModelToolController {
 
   /** Show / move the gizmo while armed; hide it otherwise. */
   private updateTransformGizmo(): void {
-    if (this.transform.phase !== "armed" || this.transform.targets.length === 0) {
+    if (
+      this.transform.phase !== "armed" ||
+      this.transform.targets.length === 0 ||
+      // The align picks own the pointer, and the gizmo's handles sit exactly
+      // where the user is trying to click a face.
+      this.transform.alignPhase !== null
+    ) {
       this.hideTransformGizmo();
       return;
     }
@@ -3413,7 +3469,12 @@ export class ModelToolController {
     this.transform = transformStep(this.transform, { kind: "grab", grab: hit, copy: alt || undefined }).state;
     const axis = WORLD_AXIS[hit.axis];
     const grabScalar = hit.kind === "axis" ? (axisDragDelta(ray, origin, axis) ?? 0) : 0;
-    const startAngle = this.transform.rotAxis === hit.axis ? this.transform.angleDeg : 0;
+    // A FREE (aligned) axis is not any of the three rings, so a ring grab starts
+    // a NEW rotation from 0 — the same rule the chip's `transformValue` follows.
+    const startAngle =
+      !this.transform.rotAxisVec && this.transform.rotAxis === hit.axis
+        ? this.transform.angleDeg
+        : 0;
     this.gizmoDrag = {
       grab: hit,
       origin,
@@ -3489,6 +3550,195 @@ export class ModelToolController {
     this.publishTransformState();
   }
 
+  // ── align face-to-face (WP-B W2.5) ───────────────────────────────────────────
+  //
+  // A ONE-SHOT SOLVE, NOT A MATE. Two picks — a planar face on a body being
+  // placed, then a planar face on a body that is not — produce one rigid motion
+  // that lands the first face flush on the second (normals anti-parallel, centres
+  // coincident). That motion is written into the SAME armed record every other
+  // placement gesture writes, so a ✓ commits it exactly as a typed 30mm would,
+  // and nothing survives to re-solve when an upstream feature changes. V1 has no
+  // constraint graph; a persistent mate would be a promise it cannot keep.
+  //
+  // The sub-flow is a PHASE of the armed placement, never a tool of its own: the
+  // targets, the frozen pivot and the fold decision all stay put across it, and
+  // Esc walks back one pick at a time without disarming.
+  //
+  // ONE HOVER WRITER. The face tint goes through `selectionStore.setHover` — the
+  // same store the select tool writes and the same `setHighlightState` bridge
+  // renders — rather than a second highlight path of its own. The picker is
+  // inactive while a model tool is armed, so there is no contention; the flag
+  // below is what stops this controller restoring a hover it never set.
+
+  /**
+   * The [Align] segment. It renders `aria-pressed`, so a second press has to
+   * mean "off" — otherwise the one control that says the flow is running is the
+   * one control that cannot stop it. Entering drops the ghost + gizmo and asks
+   * for the first face.
+   */
+  private toggleAlign(): void {
+    if (this.transform.phase !== "armed") return;
+    if (this.transform.alignPhase !== null) {
+      // Through the reducer, one rung at a time — the FSM stays the one writer.
+      while (this.transform.alignPhase !== null) {
+        this.transform = transformStep(this.transform, { kind: "alignCancel" }).state;
+      }
+      this.endAlign();
+      this.publishTransformState();
+      this.publishAlignHint();
+      return;
+    }
+    this.alignMovingFrame = null;
+    this.transform = transformStep(this.transform, { kind: "beginAlign" }).state;
+    this.publishTransformState();
+    this.publishAlignHint();
+  }
+
+  /** Esc during align: back one pick, then out of the flow (the arm survives). */
+  private cancelAlignStep(): void {
+    if (this.transform.alignPhase === null) return;
+    this.transform = transformStep(this.transform, { kind: "alignCancel" }).state;
+    if (this.transform.alignPhase !== "pickDest") this.alignMovingFrame = null;
+    this.clearAlignHover();
+    this.publishTransformState();
+    this.publishAlignHint();
+  }
+
+  /** Leave the flow without solving (tool switch / commit / cancel teardown). */
+  private endAlign(): void {
+    this.alignMovingFrame = null;
+    this.clearAlignHover();
+  }
+
+  /** The prompt for whichever pick is outstanding — or the armed hint when none. */
+  private publishAlignHint(): void {
+    const hint =
+      this.transform.alignPhase === "pickMoving"
+        ? "Align: click the flat face to move · Esc backs out"
+        : this.transform.alignPhase === "pickDest"
+          ? "Align: click the flat face on another body to sit against · Esc backs out"
+          : "Move / Rotate along an axis, then ✓";
+    viewportStore.getState().setStatusHint(hint, { sticky: true });
+  }
+
+  /** A refusal during an align pick: say why, and STAY in the phase. */
+  private alignRefusal(message: string): void {
+    viewportStore.getState().setStatusHint(message, { severity: "error", sticky: true });
+  }
+
+  /** Hover-tint the face under the pointer while an align pick is outstanding. */
+  private updateAlignHover(clientX: number, clientY: number): void {
+    const hit = this.engine.probePick(clientX, clientY);
+    const sel = selectionStore.getState();
+    if (!hit || hit.kind !== "face" || !this.alignBodyAllowed(hit.bodyId)) {
+      this.clearAlignHover();
+      return;
+    }
+    // Unchanged hover ⇒ no store write ⇒ no repaint (render-on-demand holds).
+    if (sel.hover?.kind === "face" && sel.hover.id === topoRefId(hit.bodyId, hit.topoKey)) return;
+    sel.setHover({
+      kind: "face",
+      id: topoRefId(hit.bodyId, hit.topoKey),
+      bodyId: hit.bodyId,
+      topoKey: hit.topoKey,
+      elementId: hit.elementId,
+      anchor: { worldPoint: [hit.worldPos.x, hit.worldPos.y, hit.worldPos.z] },
+    });
+    this.alignHidHover = true;
+  }
+
+  /** Drop a hover THIS controller set (never one somebody else owns). */
+  private clearAlignHover(): void {
+    if (!this.alignHidHover) return;
+    this.alignHidHover = false;
+    selectionStore.getState().setHover(null);
+  }
+
+  /** Whether a body is a legal target for the OUTSTANDING pick. */
+  private alignBodyAllowed(bodyId: string): boolean {
+    if (bodyId.startsWith("preview:")) return false;
+    const isTarget = this.transform.targets.includes(bodyId);
+    return this.transform.alignPhase === "pickMoving" ? isTarget : !isTarget;
+  }
+
+  /**
+   * A click during an align pick. Every refusal names its own reason and leaves
+   * the phase running — a two-pick flow that silently swallowed a bad click would
+   * leave the user staring at an unchanged prompt with no idea why.
+   */
+  private tryPickAlignFace(clientX: number, clientY: number): void {
+    const phase = this.transform.alignPhase;
+    if (phase === null) return;
+    const hit = this.engine.probePick(clientX, clientY);
+    if (!hit || hit.kind !== "face" || hit.bodyId.startsWith("preview:")) {
+      this.alignRefusal("Align: click a flat FACE (edges and empty space do not align)");
+      return;
+    }
+    if (!this.alignBodyAllowed(hit.bodyId)) {
+      this.alignRefusal(
+        phase === "pickMoving"
+          ? "Align: that face is not on a body being moved — pick one of the selected bodies"
+          : "Align: pick a face on ANOTHER body — a body cannot be aligned to itself",
+      );
+      return;
+    }
+    const frame = this.alignFaceFrame(hit.bodyId, hit.topoKey, phase);
+    if (!frame) {
+      this.alignRefusal("Align: that face is not flat — align needs two planar faces");
+      return;
+    }
+    if (phase === "pickMoving") {
+      this.alignMovingFrame = frame;
+      this.transform = transformStep(this.transform, { kind: "alignPickedMoving" }).state;
+      this.clearAlignHover();
+      this.publishTransformState();
+      this.publishAlignHint();
+      return;
+    }
+    this.applyAlign(frame);
+  }
+
+  /**
+   * The picked face's planar frame, in the frame the SOLVE needs it in.
+   *
+   * The moving face is pulled back into the record's INPUT geometry (see
+   * `transformArmedInverse`); the destination belongs to a body the record does
+   * not touch, so it is already in the world frame the record's output lands in.
+   */
+  private alignFaceFrame(bodyId: string, topoKey: string, phase: AlignPhase): PlanarFaceFrame | null {
+    const entry = getEntry(bodyId);
+    if (!entry) return null;
+    const ordinal = entry.faceIndex.ordinalForId(topoKey);
+    if (ordinal < 0) return null;
+    const frame = faceFrame(entry.view, ordinal);
+    if (!frame || phase === "pickDest") return frame;
+    const inv = this.transformArmedInverse;
+    return inv ? transformFrame(inv, frame) : frame;
+  }
+
+  /** Solve against the destination frame and write the answer into the record. */
+  private applyAlign(dest: PlanarFaceFrame): void {
+    const moving = this.alignMovingFrame;
+    if (!moving) return;
+    const solved = alignPlacement(moving, dest, this.transform.center);
+    if (!solved) {
+      this.alignRefusal("Align: those two faces do not resolve to a placement");
+      return;
+    }
+    this.transform = transformStep(this.transform, {
+      kind: "alignApply",
+      translate: solved.translate,
+      angleDeg: solved.rotate.angleDeg,
+      rotAxisVec: solved.rotate.axis,
+    }).state;
+    this.alignMovingFrame = null;
+    this.clearAlignHover();
+    this.publishTransformState();
+    viewportStore
+      .getState()
+      .setStatusHint("Aligned flush — adjust or ✓ to commit", { sticky: true });
+  }
+
   /**
    * The live L1 ghost: each target's own geometry at the composed placement.
    *
@@ -3498,7 +3748,13 @@ export class ModelToolController {
    * keeps them — that IS the difference between the two.
    */
   private rebuildTransformGhost(): void {
-    if (this.transform.phase !== "armed" || isIdentityPlacement(this.transform)) {
+    if (
+      this.transform.phase !== "armed" ||
+      isIdentityPlacement(this.transform) ||
+      // While the align picks are running the SOURCES have to be visible: they
+      // are what the user is about to click, and a ghost hides them (W2.5).
+      this.transform.alignPhase !== null
+    ) {
       this.hideTransformGhost();
       return;
     }
@@ -3511,10 +3767,22 @@ export class ModelToolController {
     }
   }
 
-  /** One ghost clone per target that has ingested geometry, at the shared matrix. */
+  /**
+   * One ghost clone per target that has ingested geometry, at the shared matrix.
+   *
+   * The matrix is the live placement composed with the INVERSE of the one the
+   * registry geometry already carries. On a fresh arm that inverse is the
+   * identity and this is the plain placement. On a FOLD it is not, and without
+   * it the ghost would show the stored motion applied twice — a re-edit of a
+   * 30mm move would preview at 60mm and then commit at 30 (WP-B W2.5; the frame
+   * distinction is the same one the align solve needs, see `alignSolve`).
+   */
   private transformGhostItems(): { entry: MeshEntry; transforms: GhostTransform[] }[] {
     const p = transformParamsOf(this.transform);
-    const m = placementMatrix(p.translate, p.rotate.center, p.rotate.axis, p.rotate.angleDeg);
+    const live = placementMatrix(p.translate, p.rotate.center, p.rotate.axis, p.rotate.angleDeg);
+    const m = this.transformArmedInverse
+      ? composePlacements(live, this.transformArmedInverse)
+      : live;
     const items: { entry: MeshEntry; transforms: GhostTransform[] }[] = [];
     for (const id of this.transform.targets) {
       const entry = getEntry(id);
@@ -3534,6 +3802,7 @@ export class ModelToolController {
 
   private async commitTransform(): Promise<void> {
     if (this.transform.phase !== "armed" || this.transform.targets.length === 0) return;
+    if (this.transform.alignPhase !== null) return; // a pick is still outstanding
     const params = transformParamsOf(this.transform);
     const editFeatureId = this.transformEditFeatureId;
     const armed = this.transform;
@@ -3552,9 +3821,11 @@ export class ModelToolController {
     try {
       const res = await this.client.applyOperation(op);
       this.applyResult(res);
+      this.endAlign();
       selectionStore.getState().set(params.targets.map((id) => ({ kind: "body" as const, id })));
       this.transform = transformInit();
       this.transformEditFeatureId = undefined;
+      this.transformArmedInverse = null;
       this.resetToSelect(placementHint(params));
     } catch (e) {
       // A refused placement stays ARMED with the reason — unlike pattern/mirror,
@@ -3589,7 +3860,7 @@ export class ModelToolController {
     if (!seed) {
       viewportStore
         .getState()
-        .setStatusHint("Cannot re-edit move: stored placement is not a world-axis rotation", {
+        .setStatusHint("Cannot re-edit move: stored placement has no usable rotation axis", {
           severity: "error",
           sticky: true,
         });
@@ -3622,8 +3893,10 @@ export class ModelToolController {
   private cancelTransform(): void {
     this.hideTransformGhost();
     this.hideTransformGizmo();
+    this.endAlign();
     this.transform = transformInit();
     this.transformEditFeatureId = undefined;
+    this.transformArmedInverse = null;
     toolChipStore.getState().clear();
     // Republish: `onToolChange` has no updateDebug of its own, so without this the
     // debug surface keeps reporting a placement (and a gizmo) that is already gone
@@ -3761,7 +4034,9 @@ export class ModelToolController {
     // — every other press while armed stays available to orbit / select, which is
     // why this tool needs no orbit-suppression of its own (the engine's `hitTest`
     // already folds `hitTransformGizmo` in, exactly like the extrude handle).
-    if (this.transform.phase === "armed") {
+    // …but not while an align pick owns the pointer: the gizmo is hidden then,
+    // and a press that still grabbed it would eat the face click (W2.5).
+    if (this.transform.phase === "armed" && this.transform.alignPhase === null) {
       const grab = this.engine.hitTransformGizmo(e.clientX, e.clientY);
       if (grab && this.startGizmoDrag(grab, e.clientX, e.clientY, e.altKey)) return;
     }
@@ -3817,6 +4092,11 @@ export class ModelToolController {
     // Region pick owns the pointer: hover-tint the region under it, nothing else.
     if (this.regionPick) {
       this.updateRegionHover(e.clientX, e.clientY);
+      return;
+    }
+    // Align pick owns the pointer: tint the face it would take, nothing else.
+    if (this.transform.alignPhase !== null) {
+      this.updateAlignHover(e.clientX, e.clientY);
       return;
     }
     if (this.dragging === "transform") {
@@ -3906,6 +4186,12 @@ export class ModelToolController {
     // Region pick owns the pointer: a click resolves the region under it.
     if (this.regionPick) {
       if (wasClick) this.tryPickRegion(e.clientX, e.clientY);
+      return;
+    }
+
+    // Align pick owns the pointer: a CLICK takes the face, a drag was an orbit.
+    if (this.transform.alignPhase !== null) {
+      if (wasClick) this.tryPickAlignFace(e.clientX, e.clientY);
       return;
     }
 
@@ -5452,6 +5738,11 @@ export class ModelToolController {
       transformTargets: [...this.transform.targets],
       transformFold: this.transformEditFeatureId ?? null,
       transformCopy: this.transform.copy,
+      // Align sub-flow (WP-B W2.5). `transformRotAxisVec` is the only surface on
+      // which a FREE rotation axis is visible at all — no chip can show it — so
+      // e2e reads the solved placement here and checks it against geometry.
+      transformAlignPhase: this.transform.alignPhase,
+      transformRotAxisVec: this.transform.rotAxisVec ? [...this.transform.rotAxisVec] : null,
       // Gizmo surface (WP-B W2): whether it is on screen and which handle (if
       // any) a gesture currently owns. e2e reads the grab to prove that dragging
       // a ring is what re-typed the placement to Rotate about that axis.
@@ -5558,6 +5849,14 @@ export class ModelToolController {
       this.resetToSelect();
       return;
     }
+    // Esc during an align pick walks BACK one pick (pickDest → pickMoving → off)
+    // and leaves the placement armed — the Esc ladder, one rung at a time (W2.5).
+    if (e.key === "Escape" && this.transform.alignPhase !== null) {
+      e.preventDefault();
+      e.stopPropagation();
+      this.cancelAlignStep();
+      return;
+    }
     // Esc during a boolean target pick steps back to armed(NewBody) — NOT the whole
     // tool (the Esc ladder tail). Own the key so the global cancel doesn't also fire.
     if (e.key === "Escape" && this.extrude.phase === "facePick") {
@@ -5605,8 +5904,10 @@ export class ModelToolController {
         return;
       }
       // A placement joins the same explicit gesture: nothing writes to the
-      // timeline until Enter or the chip ✓.
-      if (this.transform.phase === "armed") {
+      // timeline until Enter or the chip ✓. An OUTSTANDING align pick holds it
+      // back — the user is mid-gesture, and committing the pre-align placement
+      // is not what "Enter" means there.
+      if (this.transform.phase === "armed" && this.transform.alignPhase === null) {
         e.preventDefault();
         void this.commitTransform();
         return;
@@ -5806,6 +6107,9 @@ export class ModelToolController {
     // OUTLIVES this controller, so a viewport remount mid-measure would leave
     // orphaned labels anchored to a disposed engine.
     this.cancelMeasure();
+    // Same again for the align sub-flow's hover: `selectionStore` outlives this
+    // controller, so a remount mid-pick would leave a face tinted for ever.
+    this.endAlign();
     const c = this.deps.container;
     c.removeEventListener("pointerdown", this.onPointerDown);
     c.removeEventListener("pointermove", this.onPointerMove);

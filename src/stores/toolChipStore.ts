@@ -13,6 +13,7 @@
 import { createStore, useStore } from "zustand";
 import type { BooleanOperation } from "@/ipc/types";
 import type {
+  AlignPhase,
   PatternAxis,
   MirrorPlane,
   BooleanMode,
@@ -119,6 +120,8 @@ export interface TransformChipHandlers {
   onCancel: () => void;
   /** Copy toggled (WP-B W2) — the visible surface for `params.copy`. */
   onCopy?: (copy: boolean) => void;
+  /** [Align] pressed (WP-B W2.5) — starts the two-pick face-to-face flow. */
+  onAlign?: () => void;
 }
 
 /** Extra armed-placement options (the W2 copy seed). */
@@ -188,6 +191,10 @@ export interface ToolChipState {
   copy: boolean;
   /** Copy toggled (armed placement cluster — W2). */
   onCopy: ((copy: boolean) => void) | null;
+  /** Which align pick is outstanding, or null when the flow is off (W2.5). */
+  alignPhase: AlignPhase | null;
+  /** [Align] pressed (armed placement cluster — W2.5). */
+  onAlign: (() => void) | null;
   /** Unit suffix for the numeric chip (mm / ° — sketch dimension chip). */
   suffix: string;
   /** Leading context label (datum chip: the picked base plane's geometric name). */
@@ -330,6 +337,8 @@ export interface ToolChipState {
   setTransformMode(mode: TransformMode): void;
   /** Update just the armed placement's copy flag (Alt-drag / the Copy segment). */
   setCopy(copy: boolean): void;
+  /** Update just the align sub-flow's outstanding pick (W2.5). */
+  setAlignPhase(alignPhase: AlignPhase | null): void;
   clear(): void;
 }
 
@@ -357,6 +366,8 @@ const CLEARED = {
   onTransformMode: null,
   copy: false,
   onCopy: null,
+  alignPhase: null as AlignPhase | null,
+  onAlign: null,
   suffix: "",
   label: "",
   worldPos: null,
@@ -511,6 +522,7 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
       onConfirm: handlers.onConfirm,
       onCancel: handlers.onCancel,
       onCopy: handlers.onCopy ?? null,
+      onAlign: handlers.onAlign ?? null,
     });
   },
   showDimension(value, suffix, worldPos, onValue, onCancel) {
@@ -545,6 +557,9 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
   },
   setCopy(copy) {
     set({ copy });
+  },
+  setAlignPhase(alignPhase) {
+    set({ alignPhase });
   },
   clear() {
     set({ ...CLEARED });

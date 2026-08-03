@@ -24,6 +24,7 @@ import { LENGTH_SUFFIX } from "@/units/format";
 import { useViewportEngine } from "@/viewport/engineBridge";
 import type { BooleanOperation } from "@/ipc/types";
 import type {
+  AlignPhase,
   PatternAxis,
   MirrorPlane,
   BooleanMode,
@@ -380,6 +381,32 @@ function CopyToggle({ copy, onToggle }: { copy: boolean; onToggle: (copy: boolea
   );
 }
 
+/**
+ * The [Align] segment on the armed placement cluster (WP-B W2.5). Unlike every
+ * other segment here it does not set a value — it hands the pointer a two-pick
+ * face flow, so it reads as PRESSED for as long as that flow owns the pointer
+ * and the label names the pick still outstanding. That is the only feedback the
+ * chip can give: the picks themselves happen in the viewport.
+ */
+function AlignButton({ phase, onStart }: { phase: AlignPhase | null; onStart: () => void }) {
+  const label = phase === "pickMoving" ? "Pick face" : phase === "pickDest" ? "Pick target" : "Align";
+  return (
+    <button
+      type="button"
+      data-testid="chip-transform-align"
+      aria-pressed={phase !== null}
+      title="Align a face flush onto a face of another body"
+      onClick={onStart}
+      className={cn(
+        "rounded-sm px-2 py-1 text-[11.5px] font-medium",
+        phase !== null ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
+      )}
+    >
+      {label}
+    </button>
+  );
+}
+
 export function ModelToolChips() {
   const engine = useViewportEngine();
   const kind = useToolChipStore((s) => s.kind);
@@ -396,6 +423,7 @@ export function ModelToolChips() {
   const edgeOp = useToolChipStore((s) => s.edgeOp);
   const transformMode = useToolChipStore((s) => s.transformMode);
   const copy = useToolChipStore((s) => s.copy);
+  const alignPhase = useToolChipStore((s) => s.alignPhase);
   const showEdgeOpSegments = useToolChipStore((s) => s.showEdgeOpSegments);
   const endCondition = useToolChipStore((s) => s.endCondition);
   const canUseBodyEnds = useToolChipStore((s) => s.canUseBodyEnds);
@@ -621,6 +649,7 @@ export function ModelToolChips() {
         />
         {clusterInput(transformMode === "rotate" ? "°" : LENGTH_SUFFIX)}
         <CopyToggle copy={copy} onToggle={(c) => toolChipStore.getState().onCopy?.(c)} />
+        <AlignButton phase={alignPhase} onStart={() => toolChipStore.getState().onAlign?.()} />
         {confirmButtons}
       </>,
     );

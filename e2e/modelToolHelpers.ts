@@ -147,6 +147,74 @@ export async function dragFromTo(
   for (const m of modifiers) await page.keyboard.up(m);
 }
 
+/**
+ * Hit-scan the canvas for a client point that picks face `topoKey` of `bodyId`,
+ * through the engine's OWN `probePick` raycast (`window.__vpEngine`, `?vpdebug`).
+ *
+ * Same rationale as `findGizmoHandle`: there is no per-face DOM in a WebGL
+ * viewport and the camera decides where a face lands on screen, so the only way
+ * to produce a GENUINE face click is to ask the very raycast the controller's
+ * pointer handler will run. A point that scans as `body1/f:0` is a point the
+ * real pointerup classifies as `body1/f:0`.
+ *
+ * Faces are large, so the 8px step is plenty (the gizmo scan needs 3px because
+ * its arms are a few pixels wide). Only primitives cross the bridge — a
+ * `PickHit` carries a `THREE.Vector3` that Playwright cannot serialise.
+ *
+ * THE CANVAS MUST BE THE TOPMOST ELEMENT at the returned point. The canvas runs
+ * the full width of the shell and the inspector panel floats OVER its right-hand
+ * 260px, so a raycast happily reports geometry at points where a real mouse
+ * click would land on the panel instead and never reach the viewport's pointer
+ * handlers at all. `elementFromPoint` is the same arbitration the browser does.
+ */
+export async function findFacePoint(
+  page: Page,
+  bodyId: string,
+  topoKey: string,
+): Promise<{ x: number; y: number }> {
+  let found: { x: number; y: number } | null = null;
+  await expect(async () => {
+    found = await page.evaluate(
+      ({ bodyId: wantBody, topoKey: wantFace }) => {
+        const engine = (
+          window as unknown as {
+            __vpEngine?: {
+              probePick(x: number, y: number): { bodyId: string; kind: string; topoKey: string } | null;
+            };
+          }
+        ).__vpEngine;
+        const canvas = document.querySelector(
+          '[data-testid="viewport-canvas"] canvas',
+        ) as HTMLCanvasElement | null;
+        if (!engine || !canvas) return null;
+        const rect = canvas.getBoundingClientRect();
+        const step = 8;
+        for (let y = rect.top + step; y <= rect.bottom - step; y += step) {
+          for (let x = rect.left + step; x <= rect.right - step; x += step) {
+            const hit = engine.probePick(x, y);
+            if (!hit || hit.kind !== "face" || hit.bodyId !== wantBody || hit.topoKey !== wantFace) {
+              continue;
+            }
+            if (document.elementFromPoint(x, y) !== canvas) continue; // occluded by DOM
+            return { x, y };
+          }
+        }
+        return null;
+      },
+      { bodyId, topoKey },
+    );
+    expect(found, `no screen point picks ${bodyId}/${topoKey}`).not.toBeNull();
+  }).toPass({ timeout: 15_000, intervals: [200, 400, 800] });
+  return found as unknown as { x: number; y: number };
+}
+
+/** A press + release at one point — a CLICK, not a drag (align picks, face picks). */
+export async function clickAt(page: Page, at: { x: number; y: number }): Promise<void> {
+  await page.mouse.move(at.x, at.y);
+  await page.mouse.down();
+  await page.mouse.up();
+}
+
 /** Wait until the named model tool reports `armed` on the debug surface. */
 export async function expectArmed(page: Page, which: "fillet" | "shell"): Promise<void> {
   await expect

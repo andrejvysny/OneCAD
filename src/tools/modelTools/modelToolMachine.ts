@@ -1065,6 +1065,14 @@ export function mirrorStep(s: MirrorFsm, e: MirrorEvent): MirrorStep {
 
 export type TransformMode = "move" | "rotate";
 
+/**
+ * The two-pick ALIGN sub-flow (WP-B W2.5), or `null` when it is not running.
+ * It is a PHASE OF THE ARMED PLACEMENT, not a tool: the record, the targets and
+ * the frozen pivot all stay exactly as they were, and the solve simply writes
+ * the same fields a chip edit or a gizmo drag writes.
+ */
+export type AlignPhase = "pickMoving" | "pickDest";
+
 export interface TransformFsm {
   phase: ConfigPhase;
   mode: TransformMode;
@@ -1072,16 +1080,31 @@ export interface TransformFsm {
   axis: PatternAxis;
   /** Cumulative world translation (the record's canonical `translate`). */
   translate: Vec3;
-  /** Cumulative rotation angle in DEGREES about `rotAxis`. */
+  /** Cumulative rotation angle in DEGREES about `rotAxis` / `rotAxisVec`. */
   angleDeg: number;
   /** The stored rotation axis — kept separate so a move never disturbs the rotation. */
   rotAxis: PatternAxis;
+  /**
+   * A FREE rotation axis (unit, world), or `null` when the rotation is about the
+   * world axis `rotAxis` names.
+   *
+   * The three-letter picker cannot express what an align solves — flushing two
+   * arbitrary faces needs a rotation about their normals' cross product — and
+   * `TransformRotationParams.axis` is a full vector, so the record can carry it
+   * even though no chip can author it. Holding it here (rather than snapping to
+   * the nearest world axis for display) is what makes a re-edit lossless: the
+   * exact vector goes back out on a ✓ unless the user deliberately authors a new
+   * rotation, which CLAIMS a world axis and clears this.
+   */
+  rotAxisVec: Vec3 | null;
   /** The bodies being placed; mirrors `params.targets` in order. */
   targets: string[];
   /** The frozen pivot (world). */
   center: Vec3;
   /** `true` places COPIES and preserves the sources. No W1 UI authors it (see the WP note). */
   copy: boolean;
+  /** Which pick the align sub-flow is waiting for, or `null` when it is off. */
+  alignPhase: AlignPhase | null;
 }
 
 /** The full stored shape a fold / re-edit seeds (everything but `phase`). */
@@ -1091,6 +1114,8 @@ export interface TransformSeed {
   translate?: Vec3;
   angleDeg?: number;
   rotAxis?: PatternAxis;
+  /** A stored FREE rotation axis (an aligned record); `null`/absent = world axis. */
+  rotAxisVec?: Vec3 | null;
   center?: Vec3;
   copy?: boolean;
 }
@@ -1118,6 +1143,14 @@ export type TransformEvent =
   /** A ring drag frame wrote the angle; the ring's axis is already claimed. */
   | { kind: "dragAngle"; angleDeg: number }
   | { kind: "setCopy"; copy: boolean }
+  /** Start the two-pick align (WP-B W2.5) — waits for the face to move. */
+  | { kind: "beginAlign" }
+  /** The first pick landed on a target body's planar face. */
+  | { kind: "alignPickedMoving" }
+  /** The solve landed: REPLACE the whole placement with it. */
+  | { kind: "alignApply"; translate: Vec3; angleDeg: number; rotAxisVec: Vec3 }
+  /** Esc during align: step BACK one pick, and off the flow from the first. */
+  | { kind: "alignCancel" }
   | { kind: "apply" }
   | { kind: "settle" }
   | { kind: "cancel" };
@@ -1135,9 +1168,11 @@ export function transformInit(): TransformFsm {
     translate: [0, 0, 0],
     angleDeg: 0,
     rotAxis: "Z",
+    rotAxisVec: null,
     targets: [],
     center: [0, 0, 0],
     copy: false,
+    alignPhase: null,
   };
 }
 
@@ -1147,12 +1182,31 @@ export function axisIndex(axis: PatternAxis): 0 | 1 | 2 {
 }
 
 /**
+ * The world axis a vector leans on hardest — largest |component|, ties broken by
+ * the lowest index. A DISPLAY choice only: it names which chip segment lights up
+ * for a placement the three-letter picker cannot express, and never touches the
+ * exact vector the record carries.
+ */
+export function dominantAxis(v: Vec3): PatternAxis {
+  let i: 0 | 1 | 2 = 0;
+  if (Math.abs(v[1]) > Math.abs(v[i])) i = 1;
+  if (Math.abs(v[2]) > Math.abs(v[i])) i = 2;
+  return i === 0 ? "X" : i === 1 ? "Y" : "Z";
+}
+
+/**
  * The number the chip shows for the CURRENT mode + axis. In rotate mode an axis
  * that is not the stored rotation axis reads 0 — there is one rotation, and
  * asking about a different axis honestly has no angle yet.
+ *
+ * A FREE axis (an aligned placement) reads 0 on ALL THREE: the stored rotation
+ * is about none of them, so every world axis honestly has no angle. Typing one
+ * in is then an unambiguous act of authorship that claims that axis and drops
+ * the solved one — never an accidental rewrite of a number the chip displayed.
  */
 export function transformValue(s: TransformFsm): number {
   if (s.mode === "move") return s.translate[axisIndex(s.axis)];
+  if (s.rotAxisVec) return 0;
   return s.axis === s.rotAxis ? s.angleDeg : 0;
 }
 
@@ -1165,6 +1219,14 @@ function applySeed(s: TransformFsm, e: TransformSeed): TransformFsm {
     translate: e.translate ? [...e.translate] : s.translate,
     angleDeg: e.angleDeg ?? s.angleDeg,
     rotAxis: e.rotAxis ?? s.rotAxis,
+    // `undefined` keeps what is there; an explicit `null` CLEARS a free axis
+    // back to the world one (the seed shape has to be able to say both).
+    rotAxisVec:
+      e.rotAxisVec === undefined
+        ? s.rotAxisVec
+        : e.rotAxisVec === null
+          ? null
+          : [e.rotAxisVec[0], e.rotAxisVec[1], e.rotAxisVec[2]],
     center: e.center ? [...e.center] : s.center,
     copy: e.copy ?? s.copy,
   };
@@ -1209,8 +1271,9 @@ export function transformStep(s: TransformFsm, e: TransformEvent): TransformStep
       const v = Number.isFinite(e.value) ? e.value : 0;
       if (s.mode === "rotate") {
         // Typing an angle also CLAIMS the axis: the record carries one rotation,
-        // so authoring about Y is what makes Y the rotation axis.
-        return { state: { ...s, angleDeg: v, rotAxis: s.axis }, effect: "ghost" };
+        // so authoring about Y is what makes Y the rotation axis — and drops any
+        // free (aligned) axis, which is the one thing Y could otherwise mean.
+        return { state: { ...s, angleDeg: v, rotAxis: s.axis, rotAxisVec: null }, effect: "ghost" };
       }
       const translate: Vec3 = [...s.translate];
       translate[axisIndex(s.axis)] = v;
@@ -1229,11 +1292,54 @@ export function transformStep(s: TransformFsm, e: TransformEvent): TransformStep
       if (s.phase !== "armed") return { state: s, effect: "none" };
       if (!Number.isFinite(e.angleDeg)) return { state: s, effect: "none" };
       // Same rule as typing an angle: authoring about an axis CLAIMS it.
-      return { state: { ...s, angleDeg: e.angleDeg, rotAxis: s.axis }, effect: "ghost" };
+      return {
+        state: { ...s, angleDeg: e.angleDeg, rotAxis: s.axis, rotAxisVec: null },
+        effect: "ghost",
+      };
     }
     case "setCopy":
       if (s.phase !== "armed") return { state: s, effect: "none" };
       return { state: { ...s, copy: e.copy }, effect: "ghost" };
+    case "beginAlign":
+      if (s.phase !== "armed") return { state: s, effect: "none" };
+      return { state: { ...s, alignPhase: "pickMoving" }, effect: "ghost" };
+    case "alignPickedMoving":
+      if (s.alignPhase !== "pickMoving") return { state: s, effect: "none" };
+      return { state: { ...s, alignPhase: "pickDest" }, effect: "none" };
+    case "alignApply": {
+      if (s.alignPhase !== "pickDest") return { state: s, effect: "none" };
+      if (!e.translate.every(Number.isFinite) || !Number.isFinite(e.angleDeg)) {
+        return { state: s, effect: "none" };
+      }
+      if (!e.rotAxisVec.every(Number.isFinite)) return { state: s, effect: "none" };
+      // REPLACES the placement rather than composing onto it: the solve already
+      // answers "where does this body have to BE", so anything left over from an
+      // earlier nudge is a different answer to the same question.
+      const translate: Vec3 = [...e.translate];
+      return {
+        state: {
+          ...s,
+          alignPhase: null,
+          translate,
+          angleDeg: e.angleDeg,
+          rotAxisVec: [...e.rotAxisVec],
+          // The chip cannot show a free axis, so it shows the MOVE it can: the
+          // component the align actually leaned on. The full vector is still in
+          // `translate` and still goes out on the ✓ (the W1 whole-vector rule).
+          mode: "move",
+          axis: dominantAxis(translate),
+        },
+        effect: "ghost",
+      };
+    }
+    case "alignCancel":
+      if (s.alignPhase === null) return { state: s, effect: "none" };
+      // One step back per Esc — pickDest → pickMoving → off. The PLACEMENT stays
+      // armed throughout: backing out of a pick is not cancelling the tool.
+      return {
+        state: { ...s, alignPhase: s.alignPhase === "pickDest" ? "pickMoving" : null },
+        effect: "ghost",
+      };
     case "apply":
       if (s.phase !== "armed") return { state: s, effect: "none" };
       return { state: { ...s, phase: "committing" }, effect: "commit" };
@@ -1257,12 +1363,15 @@ export function isIdentityPlacement(s: TransformFsm): boolean {
  * the same point).
  */
 export function transformParamsOf(s: TransformFsm): TransformBodyParams {
+  const axis = s.rotAxisVec ?? WORLD_AXIS[s.rotAxis];
   return {
     targets: [...s.targets],
     translate: [s.translate[0], s.translate[1], s.translate[2]],
     rotate: {
       center: [s.center[0], s.center[1], s.center[2]],
-      axis: [...WORLD_AXIS[s.rotAxis]],
+      // A free (aligned) axis wins over the letter: the letter is a display
+      // choice, the vector is the record.
+      axis: [axis[0], axis[1], axis[2]],
       angleDeg: s.angleDeg,
     },
     copy: s.copy,
