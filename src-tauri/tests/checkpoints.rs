@@ -7,8 +7,10 @@
 //!     planner selects the checkpoint, the executor drives RestoreCheckpoint + an
 //!     incremental plan — and the final bodies/geometry-signature are **IDENTICAL**
 //!     to a forced from-0 replay of the same document (the determinism cross-check);
-//!   * the checkpoint is **persisted** into the `.onecad` container and reloaded on
-//!     open (durability).
+//!   * checkpoints are **in-session only** (SCHEMA §7.7 V2): never written to the
+//!     `.onecad` container, never loaded from one (legacy containers included), and a
+//!     restore the worker cannot serve degrades to a from-0 replay that PUBLISHES;
+//!   * the in-memory ladder is bounded and truncation-evicted on edit.
 //!
 //! REQUIRE_WORKER-guarded (CI hard-fails without a worker; local dev skips cleanly).
 
@@ -252,6 +254,8 @@ const SK_A: u128 = 0xA00;
 const EX_A: u128 = 0xA01;
 const SK_B: u128 = 0xB00;
 const EX_B: u128 = 0xB01;
+const SK_C: u128 = 0xC00;
+const EX_C: u128 = 0xC01;
 
 /// Builds the box-A prefix (sketch + extrude) into `rt`.
 fn build_prefix(rt: &mut DocumentRuntime) {
@@ -273,8 +277,42 @@ fn build_suffix(rt: &mut DocumentRuntime) {
     add_op(rt, extrude_record(EX_B, sb, 25.0));
 }
 
+/// Appends a third independent NewBody (box C) — the "append after reopen" edit.
+fn build_third(rt: &mut DocumentRuntime) {
+    let sc = SketchId(Uuid::from_u128(0xC));
+    add_op(
+        rt,
+        sketch_record(SK_C, &rect_sketch(sc, 0x3000, 120.0, 0.0, 20.0, 20.0)),
+    );
+    add_op(rt, extrude_record(EX_C, sc, 25.0));
+}
+
+/// The archive entry names of a `.onecad` container (zip order).
+fn zip_entry_names(path: &Path) -> Vec<String> {
+    let bytes = std::fs::read(path).unwrap();
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+    (0..archive.len())
+        .map(|i| archive.by_index(i).unwrap().name().to_string())
+        .collect()
+}
+
+/// Asserts the container carries NO `checkpoints/` cache entries — the V2
+/// in-session-only policy (SCHEMA §7.7): the app never WRITES the cache.
+fn assert_no_checkpoint_entries(path: &Path, what: &str) {
+    let names = zip_entry_names(path);
+    let found: Vec<&String> = names
+        .iter()
+        .filter(|n| n.starts_with("checkpoints/"))
+        .collect();
+    assert!(
+        found.is_empty(),
+        "{what}: container must carry no checkpoint cache (in-session-only policy), got {found:?} \
+         in {names:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn checkpoint_incremental_matches_from_zero_and_persists() {
+async fn checkpoint_incremental_matches_from_zero_and_stays_in_session() {
     let Some(bin) = real_worker() else {
         eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
         return;
@@ -303,7 +341,7 @@ async fn checkpoint_incremental_matches_from_zero_and_persists() {
     let report = regen(&mut rt, 0).await; // publish box A at head (step 1)
     let _ = published(&report, "box A");
 
-    // Save → mints a checkpoint of the head (step 1) into the cache + the container.
+    // Save → mints a checkpoint of the head (step 1) into the IN-SESSION cache.
     rt.take_checkpoint_at_head().await;
     assert_eq!(
         rt.checkpoint_count(),
@@ -330,21 +368,24 @@ async fn checkpoint_incremental_matches_from_zero_and_persists() {
          incremental plan produce the same head)"
     );
 
-    // ── (4) Persistence: reopen the container → the checkpoint reloads ─────────
+    // ── (4) Policy: the checkpoint is IN-SESSION ONLY — never written to the
+    //        container, never reloaded on open (SCHEMA §7.7 V2) ───────────────────
+    assert_no_checkpoint_entries(&path, "save with an in-session checkpoint");
     let engine: Arc<dyn GeometryEngine> = Arc::new(wm.clone());
     let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
     let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
     let reopened = DocumentRuntime::open(&path, engine, meshes, solver).expect("reopen container");
     assert_eq!(
         reopened.checkpoint_count(),
-        1,
-        "the persisted checkpoint reloaded from the .onecad container"
+        0,
+        "a reopened document starts with an EMPTY cache — the worker's restore map is \
+         in-session, so a persisted checkpoint could only ever answer restored:false"
     );
 
     wm.shutdown().await;
     eprintln!(
         "checkpoint PASS: incremental sig {inc_sig} == from-0 {base_sig}, {inc_bodies} bodies, \
-         checkpoint persisted + reloaded"
+         checkpoint stayed in-session"
     );
 }
 
@@ -438,92 +479,6 @@ async fn checkpoint_present_worker_restart_replays_and_converges() {
     );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// M5b deliverable 4: signature-drift degradation — the planner's compatibility
-// gate skips a stale checkpoint and replays from 0 (graceful, never an error).
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Doctors a persisted checkpoint's `envelope.descriptor_version` (a plan-context
-/// compatibility axis that is NOT re-adopted on load, unlike the OCCT fingerprint)
-/// to a mismatched value, keeping the manifest hash consistent so the checkpoint
-/// still **loads** (integrity intact) but the planner's
-/// [`is_compatible`](onecad_core::regen::CheckpointEnvelope) gate **rejects** it.
-/// Reopening then regenerating must ignore the stale checkpoint (from-0 replay),
-/// succeed, and reproduce the correct geometry — Invariant 7 at the real seam.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn signature_drift_skips_stale_checkpoint_and_replays_from_zero() {
-    let Some(bin) = real_worker() else {
-        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
-        return;
-    };
-
-    // ── Baseline: a from-0 replay of the FULL 4-op doc (own worker) ─────────────
-    let (base_sig, base_bodies) = {
-        let wm = spawn_worker(bin.clone()).await;
-        let mut rt = runtime_over(&wm);
-        build_prefix(&mut rt);
-        build_suffix(&mut rt);
-        let report = regen(&mut rt, 0).await;
-        let g = head_geometry(&report, "from-0 baseline");
-        wm.shutdown().await;
-        g
-    };
-    assert_eq!(base_bodies, 2, "baseline: box A + box B");
-
-    // ── Build box A → checkpoint at head → save a container WITH the checkpoint ──
-    // (the tempdir must outlive the reopen below, so it is held at test scope).
-    let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("drift.onecad");
-    {
-        let wm = spawn_worker(bin.clone()).await;
-        let mut rt = runtime_over(&wm);
-        build_prefix(&mut rt);
-        let r = regen(&mut rt, 0).await;
-        let _ = published(&r, "box A");
-        rt.take_checkpoint_at_head().await;
-        assert_eq!(rt.checkpoint_count(), 1, "checkpoint minted");
-        rt.save(&path, save_meta()).expect("save with checkpoint");
-        wm.shutdown().await;
-    }
-
-    // ── Doctor the persisted checkpoint's descriptor_version (version drift) ─────
-    doctor_checkpoint_descriptor_version(&path, 1, 999_999);
-
-    // ── Reopen the doctored container + regen with box B, from step 2 ───────────
-    let wm = spawn_worker(bin.clone()).await;
-    let engine: Arc<dyn GeometryEngine> = Arc::new(wm.clone());
-    let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
-    let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
-    let mut rt = DocumentRuntime::open(&path, engine, meshes, solver).expect("reopen doctored");
-    assert_eq!(
-        rt.checkpoint_count(),
-        1,
-        "the doctored checkpoint still LOADS (integrity intact) — the gate is version, not hash"
-    );
-    build_suffix(&mut rt);
-    let report = regen(&mut rt, 2).await;
-
-    // The compatibility gate degraded gracefully: the version-drifted checkpoint was
-    // SKIPPED (from-0 replay), the regen SUCCEEDED (no error), and the head is right.
-    assert!(
-        !rt.last_regen_used_checkpoint(),
-        "the version-drifted checkpoint was skipped by the compatibility gate, not consumed"
-    );
-    let (drift_sig, drift_bodies) = head_geometry(&report, "post-drift replay");
-    assert_eq!(
-        drift_bodies, base_bodies,
-        "converged to the correct body count"
-    );
-    assert_eq!(
-        drift_sig, base_sig,
-        "the from-0 fallback reproduces the correct geometry signature (graceful, no error)"
-    );
-
-    wm.shutdown().await;
-    let _ = std::fs::remove_file(&path);
-    eprintln!("drift drill PASS: stale-signature checkpoint skipped → from-0 → sig {drift_sig} == baseline");
-}
-
 /// Lowercase-hex SHA-256 (the container's content-hash convention).
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
@@ -535,12 +490,14 @@ fn sha256_hex(bytes: &[u8]) -> String {
     s
 }
 
-/// Rewrites a `.onecad` container in place, bumping every
-/// `checkpoints/<step>.json` artifact's `envelope.descriptor_version` to
-/// `new_version` and updating that entry's manifest `sha256` so the container's
-/// integrity stays intact — the checkpoint still loads, but the planner's
-/// version-compatibility gate rejects it. Every other entry is preserved verbatim.
-fn doctor_checkpoint_descriptor_version(path: &Path, step: usize, new_version: u64) {
+// ─────────────────────────────────────────────────────────────────────────────
+// VF-B3 — the reopen→append wedge and its in-session twin
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Injects a hand-authored `checkpoints/<step>.json` cache entry (plus its manifest
+/// row) into an existing container — a **legacy** container written by the pre-V2
+/// policy. Every other entry is preserved verbatim.
+fn inject_checkpoint_cache(path: &Path, step: usize, json: &[u8]) {
     let bytes = std::fs::read(path).unwrap();
     let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
     let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
@@ -557,31 +514,20 @@ fn doctor_checkpoint_descriptor_version(path: &Path, step: usize, new_version: u
     drop(archive);
 
     let cp_name = format!("checkpoints/{step}.json");
-    let mut new_hash: Option<String> = None;
-    for (name, buf) in &mut entries {
-        if *name == cp_name {
-            let mut v: serde_json::Value = serde_json::from_slice(buf).unwrap();
-            for art in v["artifacts"].as_array_mut().expect("artifacts array") {
-                art["envelope"]["descriptor_version"] = serde_json::json!(new_version);
-            }
-            let nb = serde_json::to_vec(&v).unwrap();
-            new_hash = Some(sha256_hex(&nb));
-            *buf = nb;
-        }
-    }
-    let new_hash = new_hash.unwrap_or_else(|| panic!("no {cp_name} entry in {path:?}"));
-
     for (name, buf) in &mut entries {
         if name == "manifest.json" {
             let mut m: serde_json::Value = serde_json::from_slice(buf).unwrap();
-            for e in m["entries"].as_array_mut().expect("manifest entries") {
-                if e["path"] == cp_name {
-                    e["sha256"] = serde_json::json!(new_hash);
-                }
-            }
+            m["entries"]
+                .as_array_mut()
+                .expect("manifest entries")
+                .push(serde_json::json!({
+                    "path": cp_name,
+                    "sha256": sha256_hex(json),
+                }));
             *buf = serde_json::to_vec(&m).unwrap();
         }
     }
+    entries.push((cp_name, json.to_vec()));
 
     let out = std::fs::File::create(path).unwrap();
     let mut zip = ZipWriter::new(out);
@@ -591,4 +537,259 @@ fn doctor_checkpoint_descriptor_version(path: &Path, step: usize, new_version: u
         zip.write_all(&buf).unwrap();
     }
     zip.finish().unwrap();
+}
+
+/// Worker checkpoint restore is **in-session-map only** (`Session.cpp`): a restarted
+/// worker holds no checkpoints, answers `restored:false`, and the executor takes the
+/// Invariant-7 `RetryFromZero` fallback. That retry replays the WHOLE prefix —
+/// including the ops the narrow incremental plan never listed — so the D1 adoption
+/// guard must derive its known-op set from the request it is validating, not from the
+/// plan its engine was constructed for. Otherwise every pre-checkpoint `NewBody` id
+/// reads as a "D1 malformation" and the regen hard-fails (VF-B3c).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restore_failure_retries_from_zero_and_publishes() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin.clone()).await;
+    let mut rt = runtime_over(&wm);
+
+    // Box A (steps 0,1) → regen → checkpoint at the head (step 1).
+    build_prefix(&mut rt);
+    let _ = published(&regen(&mut rt, 0).await, "box A");
+    rt.take_checkpoint_at_head().await;
+    assert_eq!(rt.checkpoint_count(), 1, "checkpoint minted at step 1");
+
+    // Append box B (steps 2,3) — the incremental edit that will select the checkpoint.
+    build_suffix(&mut rt);
+
+    // Kill the worker: the restart is a brand-new process whose in-session checkpoint
+    // map is EMPTY, so the restore below reports `restored:false`.
+    let epoch_before = wm.epoch().0;
+    wm.shutdown().await;
+    let mut restarted = false;
+    for _ in 0..200 {
+        if wm.epoch().0 > epoch_before && wm.state() == WorkerState::Ready {
+            restarted = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(restarted, "worker restarted after the kill");
+    // Adopt the new epoch first — otherwise the plan is rejected by fencing before it
+    // ever reaches the restore path this test is about.
+    rt.on_worker_restart(wm.epoch());
+
+    // Regen from step 2: the planner SELECTS the step-1 checkpoint (its stored prefix
+    // hash still matches), the worker cannot restore it, and the executor must retry
+    // from 0 and PUBLISH.
+    let report = regen(&mut rt, 2).await;
+    assert!(
+        rt.last_regen_used_checkpoint(),
+        "precondition: the plan selected the checkpoint (the restore path is reached)"
+    );
+    let snap = published(&report, "restore-failure retry");
+    assert_eq!(
+        snap.bodies.len(),
+        2,
+        "the from-0 retry converged to box A + box B"
+    );
+
+    wm.shutdown().await;
+    eprintln!("restore-failure PASS: restored:false → RetryFromZero → 2 bodies");
+}
+
+/// The VF-B3 headline: **save → reopen → add a feature** must regen. The container
+/// carries no checkpoint cache at all under the V2 in-session-only policy, so the
+/// fresh process plans from 0 and the append regens normally.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reopen_then_append_regens_and_container_has_no_checkpoints() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("reopen.onecad");
+
+    // ── Session 1: 4-op doc → regen → checkpoint at head → save ────────────────
+    {
+        let wm = spawn_worker(bin.clone()).await;
+        let mut rt = runtime_over(&wm);
+        build_prefix(&mut rt);
+        build_suffix(&mut rt);
+        let _ = published(&regen(&mut rt, 0).await, "boxes A+B");
+        rt.take_checkpoint_at_head().await;
+        assert_eq!(rt.checkpoint_count(), 1, "in-session checkpoint at step 3");
+        rt.save(&path, save_meta()).expect("save");
+        wm.shutdown().await;
+    }
+    assert_no_checkpoint_entries(&path, "explicit save");
+
+    // ── Session 2: a fresh worker process reopens, replays, and APPENDS ────────
+    let wm = spawn_worker(bin.clone()).await;
+    let engine: Arc<dyn GeometryEngine> = Arc::new(wm.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
+    let mut rt = DocumentRuntime::open(&path, engine, meshes, solver).expect("reopen");
+    assert_eq!(
+        rt.checkpoint_count(),
+        0,
+        "a reopened document starts with an EMPTY checkpoint cache (in-session-only policy)"
+    );
+
+    let opened = regen(&mut rt, 0).await;
+    assert_eq!(
+        published(&opened, "open replay").bodies.len(),
+        2,
+        "the open replay rebuilds both boxes"
+    );
+
+    build_third(&mut rt);
+    let appended = regen(&mut rt, 4).await;
+    assert!(
+        !rt.last_regen_used_checkpoint(),
+        "nothing was loaded from the container, so the append plans from 0"
+    );
+    assert_eq!(
+        published(&appended, "post-reopen append").bodies.len(),
+        3,
+        "the appended feature regens after a reopen (the VF-B3 wedge)"
+    );
+
+    wm.shutdown().await;
+    eprintln!("reopen→append PASS: 3 bodies, container carries no checkpoint cache");
+}
+
+/// A **legacy** container (written before the in-session-only policy) still carries a
+/// `checkpoints/` cache. Opening it must ignore that cache entirely — no restore of a
+/// checkpoint no worker process holds, and therefore no wedge on the next append.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_container_checkpoint_cache_is_ignored() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("legacy.onecad");
+
+    // ── Author a legacy container: a normal save + a hand-injected checkpoint cache
+    //    built from a REAL SaveCheckpoint artifact set (exactly the V1 layout) ──────
+    {
+        let wm = spawn_worker(bin.clone()).await;
+        let mut rt = runtime_over(&wm);
+        build_prefix(&mut rt);
+        build_suffix(&mut rt);
+        let _ = published(&regen(&mut rt, 0).await, "boxes A+B");
+        rt.save(&path, save_meta()).expect("save");
+        let artifacts = wm.save_checkpoint(3).await.expect("SaveCheckpoint at head");
+        let json = serde_json::to_vec(&artifacts).unwrap();
+        wm.shutdown().await;
+        inject_checkpoint_cache(&path, 3, &json);
+    }
+    let names = zip_entry_names(&path);
+    assert!(
+        names.iter().any(|n| n == "checkpoints/3.json"),
+        "the legacy fixture really carries a checkpoint cache, got {names:?}"
+    );
+
+    // ── Open it: the cache is ignored, and the append regens ───────────────────
+    let wm = spawn_worker(bin.clone()).await;
+    let engine: Arc<dyn GeometryEngine> = Arc::new(wm.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
+    let mut rt = DocumentRuntime::open(&path, engine, meshes, solver).expect("reopen legacy");
+    assert_eq!(
+        rt.checkpoint_count(),
+        0,
+        "the legacy checkpoint cache is IGNORED, not adopted"
+    );
+
+    let _ = published(&regen(&mut rt, 0).await, "legacy open replay");
+    build_third(&mut rt);
+    let appended = regen(&mut rt, 4).await;
+    assert_eq!(
+        published(&appended, "legacy append").bodies.len(),
+        3,
+        "a legacy container appends + regens like any other"
+    );
+
+    // The next save drops the stale cache entry (the container shrinks).
+    rt.save(&path, save_meta()).expect("resave");
+    assert_no_checkpoint_entries(&path, "resave of a legacy container");
+
+    wm.shutdown().await;
+    eprintln!("legacy-container PASS: cache ignored, append regens, resave shrinks");
+}
+
+/// VF-B7 growth half: the in-memory ladder is **bounded** and the container never
+/// grows a checkpoint section, no matter how many save cycles run. A rolled-back edit
+/// then evicts the now-orphaned checkpoints above the dirty floor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn checkpoint_ladder_is_bounded_and_invalidated_on_edit() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin.clone()).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("growth.onecad");
+    let mut rt = runtime_over(&wm);
+
+    // 12 × (append a feature → regen → checkpoint → save).
+    for i in 0..12u128 {
+        let sid = SketchId(Uuid::from_u128(0x100 + i));
+        add_op(
+            &mut rt,
+            sketch_record(
+                0x1_0000 + i * 2,
+                &rect_sketch(
+                    sid,
+                    0x10_0000 + i * 0x100,
+                    40.0 * (i as f64),
+                    0.0,
+                    10.0,
+                    10.0,
+                ),
+            ),
+        );
+        add_op(&mut rt, extrude_record(0x1_0001 + i * 2, sid, 5.0));
+        let from = (i as usize) * 2;
+        let _ = published(&regen(&mut rt, from).await, "growth cycle");
+        rt.take_checkpoint_at_head().await;
+        rt.save(&path, save_meta()).expect("save");
+        assert!(
+            rt.checkpoint_count() <= 5,
+            "cycle {i}: the ladder is bounded at 5, got {}",
+            rt.checkpoint_count()
+        );
+        assert_no_checkpoint_entries(&path, &format!("cycle {i}"));
+    }
+    let steps = rt.checkpoint_steps();
+    assert!(
+        steps.contains(&23),
+        "the head checkpoint (step 23) is always retained, got {steps:?}"
+    );
+
+    // Roll back 4 commands (the last two features), then branch with a new edit: the
+    // checkpoints above the dirty floor are orphans and must be evicted.
+    for _ in 0..4 {
+        assert!(rt.undo(), "undo");
+    }
+    let sid = SketchId(Uuid::from_u128(0x200));
+    add_op(
+        &mut rt,
+        sketch_record(
+            0x2_0000,
+            &rect_sketch(sid, 0x20_0000, 0.0, 200.0, 10.0, 10.0),
+        ),
+    );
+    let steps = rt.checkpoint_steps();
+    assert!(
+        steps.iter().all(|&s| s < 20),
+        "the branch edit at step 20 evicted every checkpoint at/above it, got {steps:?}"
+    );
+
+    wm.shutdown().await;
+    eprintln!("bounded-growth PASS: ladder ≤5, container checkpoint-free, orphans evicted");
 }

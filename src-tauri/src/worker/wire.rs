@@ -3436,6 +3436,32 @@ mod solver_wire_tests {
         assert!(parse_sketch_regions("sk_1", &result, &aligned, &aligned_tail).is_ok());
     }
 
+    /// SCHEMA §7.7 wire pin: the four `RestoreCheckpoint` arg keys, and specifically
+    /// that `workerEpoch` comes from the REQUEST (the plan's fenced token), not from a
+    /// live engine read — two verbs of one plan reading two epochs is the VF-B4 desync.
+    #[test]
+    fn restore_checkpoint_args_pin_the_wire_keys() {
+        let req = RestoreRequest {
+            checkpoint: onecad_core::regen::CheckpointRef {
+                step_index: 4,
+                checkpoint_id: onecad_core::regen::CheckpointId::new("ckpt_9"),
+            },
+            expected_history_prefix_hash: onecad_core::regen::HistoryPrefixHash::new("9c4d"),
+            worker_epoch: WorkerEpoch(7),
+            artifacts: None,
+        };
+        let args = restore_checkpoint_args(&req);
+        assert_eq!(args["checkpointId"], "ckpt_9");
+        assert_eq!(args["stepIndex"], 4);
+        assert_eq!(args["expectedHistoryPrefixHash"], "9c4d");
+        assert_eq!(args["workerEpoch"], 7);
+        assert_eq!(
+            args.as_object().unwrap().len(),
+            4,
+            "exactly the four §7.7 keys"
+        );
+    }
+
     #[test]
     fn acquire_args_and_evidence_round_trip() {
         let body = BodyId(Uuid::from_u128(0x3));

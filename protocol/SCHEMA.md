@@ -1719,6 +1719,24 @@ Checkpoints are **disposable caches**: an envelope whose versions/fingerprint ar
 incompatible is discarded + replayed; a checkpoint never blocks opening the
 authoritative JSON (Invariant 7).
 
+#### Checkpoint lifetime — in-session only (V2 policy)
+
+A checkpoint lives **only for the worker session that minted it**. `RestoreCheckpoint`
+resolves `checkpointId` against the worker's in-session map, so a checkpoint that
+outlives the worker process can only ever answer `restored:false`.
+
+Normative consequences:
+
+* The app **MUST NOT write** the container's `checkpoints/` cache section. The section
+  and its `checkpoints/<step>.json` / `.bin` layout stay part of the container format —
+  readers **MUST tolerate it present or absent** — but nothing produces it.
+* A reader that finds `checkpoints/` entries (a legacy container) **MUST ignore them**
+  and log once; the next save drops them and the container shrinks.
+* Rust keeps a **bounded** in-session ladder and evicts every checkpoint at or above a
+  mutated timeline step (those prefixes are hash-stale by definition).
+* Nothing above is a correctness dependency: with zero checkpoints every plan replays
+  from 0 and produces the identical head (Invariant 7).
+
 #### RestoreCheckpoint
 Restores a checkpoint as base state; verifies the envelope signature and reports
 drift.
@@ -2010,6 +2028,17 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-03 — §7.7 checkpoints are IN-SESSION ONLY** (WP-FIX W2, VF-B3;
+  cross-track sign-off recorded in `TODO.md` by the WP-FIX gate). Doc-only
+  clarification of an existing constraint: `RestoreCheckpoint` has always resolved
+  `checkpointId` against the worker's in-session map, so a container-persisted
+  checkpoint could only ever answer `restored:false` — costing container growth and a
+  guaranteed replay detour, and (with a stale D1 known-op set) wedging the
+  reopen→append regen entirely. The app therefore no longer WRITES the container's
+  `checkpoints/` cache and ignores it on read; the section stays in the container
+  format and readers must tolerate present-or-absent. **No wire shape changes, no
+  worker changes — no fixture bump.**
 
 - **2026-08-03 — §7.3 NEW op `Hole`** (WP-C T3; cross-track sign-off recorded
   2026-08-03). Simple/counterbore/countersink as one parametric feature on a

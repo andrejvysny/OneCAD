@@ -540,26 +540,23 @@ pub fn validate_created(
 /// `PlanPrepared` into a `PlanEvent::Failed(PROTOCOL_ERROR)`, so the executor
 /// **discards** the scratch job (rejecting the prepared plan) rather than
 /// publishing worker-minted ids Rust cannot adopt.
+///
+/// The known-op set is derived **per request**, never captured at construction: one
+/// engine drives more than one plan. The executor's Invariant-7 fallback re-plans the
+/// same job as a wider replay-from-0 over the SAME engine, so a captured set from the
+/// narrow incremental plan would reject every pre-checkpoint `NewBody` id as a D1
+/// malformation and turn a degraded cache into a hard regen failure (VF-B3c).
 pub struct AdoptingEngine {
     inner: Arc<dyn GeometryEngine>,
-    known_ops: HashSet<Uuid>,
     existing: HashSet<BodyId>,
 }
 
 impl AdoptingEngine {
-    /// Wraps `inner`, validating `created` ids against the plan's `known_ops`
-    /// (op record-id UUIDs) and the scratch base's `existing` bodies.
+    /// Wraps `inner`, validating `created` ids against each request's own op set and
+    /// the scratch base's `existing` bodies.
     #[must_use]
-    pub fn new(
-        inner: Arc<dyn GeometryEngine>,
-        known_ops: HashSet<Uuid>,
-        existing: HashSet<BodyId>,
-    ) -> Self {
-        Self {
-            inner,
-            known_ops,
-            existing,
-        }
+    pub fn new(inner: Arc<dyn GeometryEngine>, existing: HashSet<BodyId>) -> Self {
+        Self { inner, existing }
     }
 }
 
@@ -570,9 +567,12 @@ impl GeometryEngine for AdoptingEngine {
     }
 
     async fn execute_plan(&self, request: PlanRequest) -> mpsc::Receiver<PlanEvent> {
+        // D1: the `created` ids this plan may mint are exactly its own ops' record ids.
+        // Derived here (before `request` is consumed), so a re-planned retry over the
+        // same engine validates against the ops it actually executes.
+        let known: HashSet<Uuid> = request.ops.iter().map(|o| o.record_id.as_uuid()).collect();
         let mut inner_rx = self.inner.execute_plan(request).await;
         let (tx, rx) = mpsc::channel(256);
-        let known = self.known_ops.clone();
         let existing = self.existing.clone();
         tokio::spawn(async move {
             let mut seen: HashSet<BodyId> = HashSet::new();

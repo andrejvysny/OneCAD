@@ -1074,7 +1074,12 @@ async fn suppress_invalidates_checkpoint() {
     // prefix, so the next incremental regen selects it again — targeted staleness
     // detection, not a permanent rejection.
     rt.take_checkpoint_at_head().await;
-    assert_eq!(rt.checkpoint_count(), 2, "a second checkpoint at step 5");
+    assert_eq!(
+        rt.checkpoint_count(),
+        1,
+        "only the fresh step-5 checkpoint: suppressing step 1 truncation-evicted the \
+         step-3 one, which its own prefix hash had already made unusable"
+    );
     build_box(&mut rt, SK_D, EX_D, 180.0, 20.0, 20.0);
     let reused = rt
         .run_regen(RegenRequest::ToEnd { from: 6 }, CancelToken::new())

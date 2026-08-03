@@ -243,6 +243,36 @@ fn incompatible_fingerprint_checkpoint_falls_back_to_replay_from_zero() {
     assert_eq!(plan.planned_ops.len(), 4);
 }
 
+/// Signature/policy drift on any version axis is the same gate as the fingerprint:
+/// `is_compatible` rejects the checkpoint and the planner replays from 0 — graceful
+/// degradation, never an error (Invariant 7). `descriptorVersion` stands in for the
+/// four version axes; the container no longer persists checkpoints, so this is where
+/// the drift path lives (it used to be a doctored-container integration test).
+#[test]
+fn descriptor_version_drift_checkpoint_falls_back_to_replay_from_zero() {
+    let tl = timeline_of(4);
+    let mut store = InMemoryCheckpointStore::new();
+    let mut env = compatible_envelope(1, &tl);
+    env.descriptor_version = 999_999;
+    store.save(1, artifacts_for(1, env));
+
+    let plan = RegenPlanner::plan(
+        &tl,
+        &DependencyGraph::new(),
+        &store.list(),
+        RegenRequest::ToEnd { from: 2 },
+        &default_ctx(),
+    );
+
+    assert!(
+        plan.restore.is_none(),
+        "a version-drifted checkpoint is discarded by the compatibility gate"
+    );
+    assert_eq!(plan.start_step, 0, "replay from empty base");
+    assert_eq!(plan.expected_base_hash, HistoryPrefixHash::empty());
+    assert_eq!(plan.planned_ops.len(), 4);
+}
+
 #[test]
 fn stale_prefix_hash_checkpoint_falls_back_to_replay_from_zero() {
     let tl = timeline_of(4);

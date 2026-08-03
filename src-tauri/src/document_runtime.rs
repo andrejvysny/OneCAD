@@ -63,8 +63,7 @@ use onecad_core::ids::{
     SnapshotId, TopoKey, WorkerEpoch,
 };
 use onecad_core::io::container::{
-    CheckpointCache, ContainerCaches, ContainerReader, ContainerWriter, LoadedContainer, SaveMeta,
-    CHECKPOINTS_DIR,
+    ContainerCaches, ContainerReader, ContainerWriter, LoadedContainer, SaveMeta, CHECKPOINTS_DIR,
 };
 use onecad_core::io::imports::{ImportBlob, ImportBlobs};
 use onecad_core::io::IoError;
@@ -337,11 +336,16 @@ pub struct DocumentRuntime {
     promoted: HashMap<(BodyId, TopoKey), ElementId>,
     /// The regen checkpoint cache (SCHEMA §7.7). Populated by
     /// [`take_checkpoint_at_head`](Self::take_checkpoint_at_head) (policy: on explicit
-    /// `save_document` only — the cheapest sound policy), persisted into the `.onecad`
-    /// container, and reloaded on open. [`begin_regen`](Self::begin_regen) hands its
-    /// metadata to the planner so a post-checkpoint edit regens incrementally
+    /// `save_document` only — the cheapest sound policy). [`begin_regen`](Self::begin_regen)
+    /// hands its metadata to the planner so a post-checkpoint edit regens incrementally
     /// (RestoreCheckpoint) instead of from 0. A **disposable cache**: an incompatible
     /// or unavailable checkpoint degrades to replay, never a wrong result (Invariant 7).
+    ///
+    /// **In-session only** (V2 policy): never persisted, never loaded from a container.
+    /// The worker's restore map lives inside one worker session, so a checkpoint that
+    /// outlives the process can only ever answer `restored:false` — persisting it grew
+    /// the container and bought a guaranteed replay detour. Bounded + truncation-evicted
+    /// by [`InMemoryCheckpointStore`].
     checkpoints: InMemoryCheckpointStore,
     /// Whether the most recent [`begin_regen`](Self::begin_regen) compiled a
     /// checkpoint-accelerated plan (observability for tests / diagnostics).
@@ -414,9 +418,7 @@ impl DocumentRuntime {
             meshes,
             solver,
         );
-        // Reload the persisted checkpoint cache so a post-open edit can regen
-        // incrementally (SCHEMA §7.7). Disposable — a stale entry is skipped.
-        rt.load_checkpoints(&loaded);
+        log_legacy_checkpoint_cache(&loaded);
         // Import sources are authoritative-for-a-record: without them the
         // `ImportStep` steps cannot replay. Loaded eagerly (unlike caches) because
         // regen starts immediately after open and the worker needs real files.
@@ -588,6 +590,15 @@ impl DocumentRuntime {
         }
         self.reject_timeline_body_delete(&cmd)?;
         let outcome = self.session.apply(cmd)?;
+        // Truncation eviction (SCHEMA §7.7): every checkpoint at or above the dirty
+        // floor describes a prefix this edit just changed, so the planner would reject
+        // it on every future plan — an orphan that only grows the cache. Metadata-only
+        // edits carry no dirty span and touch nothing. `SetRollback` is the one
+        // over-eager case (its records are unchanged), accepted: the cache is
+        // disposable and a rolled-back branch usually invalidates them anyway.
+        if let Some(dirty) = outcome.dirty {
+            self.checkpoints.invalidate_from(dirty.from);
+        }
         self.after_mutation();
         Ok(outcome)
     }
@@ -789,9 +800,6 @@ impl DocumentRuntime {
                 plan_req.base_checkpoint_artifacts = Some(stored.artifacts);
             }
         }
-        // D1: worker-minted `created` ids must match a known op in this plan and be
-        // unique. Replay-from-0 base is empty, so collisions are in-plan.
-        let known_ops: HashSet<Uuid> = plan_req.ops.iter().map(|o| o.record_id.as_uuid()).collect();
         let base_hash_prefix = hash_prefix(plan_req.expected_base_hash.as_str());
         let step_count = plan_req.ops.len();
         tracing::info!(
@@ -818,11 +826,10 @@ impl DocumentRuntime {
         Some(PreparedRegen {
             work: PreparedWork::Plan {
                 plan_req: Box::new(plan_req),
-                engine: Box::new(AdoptingEngine::new(
-                    self.engine.clone(),
-                    known_ops,
-                    HashSet::new(),
-                )),
+                // D1: worker-minted `created` ids must match an op in the plan the
+                // engine is handed and be unique. Replay-from-0 base is empty, so
+                // collisions are in-plan.
+                engine: Box::new(AdoptingEngine::new(self.engine.clone(), HashSet::new())),
             },
             scratch: self.clone_regen_session(),
             fencing: self.fencing.clone(),
@@ -1222,9 +1229,13 @@ impl DocumentRuntime {
 
     // ── Save ─────────────────────────────────────────────────────────────────
 
-    /// Atomically saves the document (+ merged regen geometry outputs + the regen
-    /// checkpoint cache) to `path`. Timestamps come from the caller (the pure core
-    /// never reads the wall clock).
+    /// Atomically saves the document (+ merged regen geometry outputs) to `path`.
+    /// Timestamps come from the caller (the pure core never reads the wall clock).
+    ///
+    /// Checkpoints are **not** written: they are in-session acceleration only (SCHEMA
+    /// §7.7 V2 policy). Worker restore is in-session-map-only, so a container-loaded
+    /// checkpoint could never actually be restored — it only cost container growth and
+    /// a replay detour.
     ///
     /// # Errors
     /// [`IoError`] on a serialization / filesystem failure; the target is left
@@ -1235,21 +1246,19 @@ impl DocumentRuntime {
         doc.bodies = self.saved_bodies();
         doc.elements = self.regen.elements.clone();
         doc.repair = self.regen.repair.clone();
-        let caches = ContainerCaches {
-            checkpoints: self.checkpoint_caches(),
-            ..ContainerCaches::none()
-        };
+        let caches = ContainerCaches::none();
         ContainerWriter::save_with_imports(path, &doc, &caches, &self.imports, &meta)?;
         self.path = Some(path.to_path_buf());
         self.dirty = false;
         Ok(())
     }
 
-    /// Writes an autosave copy of the document (+ merged regen outputs + the
-    /// checkpoint cache) to `path` **without** touching the live save path or the
-    /// dirty flag — a crash-recovery snapshot, not a real save. Reuses the same
-    /// atomic [`ContainerWriter`] the autosave layout ([`io::recovery`]) points at.
-    /// Timestamps come from the caller (the pure core never reads the wall clock).
+    /// Writes an autosave copy of the document (+ merged regen outputs) to `path`
+    /// **without** touching the live save path or the dirty flag — a crash-recovery
+    /// snapshot, not a real save. Reuses the same atomic [`ContainerWriter`] the
+    /// autosave layout ([`io::recovery`]) points at. Timestamps come from the caller
+    /// (the pure core never reads the wall clock). No checkpoint cache is written
+    /// (in-session-only policy — see [`save`](Self::save)).
     ///
     /// [`io::recovery`]: onecad_core::io::recovery
     ///
@@ -1261,10 +1270,7 @@ impl DocumentRuntime {
         doc.bodies = self.saved_bodies();
         doc.elements = self.regen.elements.clone();
         doc.repair = self.regen.repair.clone();
-        let caches = ContainerCaches {
-            checkpoints: self.checkpoint_caches(),
-            ..ContainerCaches::none()
-        };
+        let caches = ContainerCaches::none();
         ContainerWriter::save_with_imports(path, &doc, &caches, &self.imports, &meta)
     }
 
@@ -1531,52 +1537,12 @@ impl DocumentRuntime {
         self.checkpoints.list().len()
     }
 
-    /// Serializes the checkpoint cache into container [`CheckpointCache`] entries
-    /// (`checkpoints/<step>.json`). V1 stores the whole [`CheckpointArtifacts`] as
-    /// JSON (BREP bytes inline as an array) — a size inefficiency (documented
-    /// divergence from the §7.7 split json/bin), sound for the small V1 artifacts.
-    fn checkpoint_caches(&self) -> Vec<CheckpointCache> {
-        self.checkpoints
-            .list()
-            .iter()
-            .filter_map(|m| {
-                let stored = self.checkpoints.load(m.step)?;
-                let json = serde_json::to_vec(&stored.artifacts).ok()?;
-                Some(CheckpointCache {
-                    step: m.step,
-                    json,
-                    bin: None,
-                })
-            })
-            .collect()
-    }
-
-    /// Loads persisted checkpoints from an opened container into the cache. A stale /
-    /// unparseable / hash-mismatched entry is skipped (Invariant 7 — a bad cache
-    /// degrades to replay, never a wrong result).
-    fn load_checkpoints(&mut self, loaded: &onecad_core::io::container::LoadedContainer) {
-        use onecad_core::io::container::CacheRead;
-        for entry in loaded.cache_entries() {
-            let Some(rest) = entry.path.strip_prefix(CHECKPOINTS_DIR) else {
-                continue;
-            };
-            let Some(step_str) = rest.strip_suffix(".json") else {
-                continue;
-            };
-            let Ok(step) = step_str.parse::<usize>() else {
-                continue;
-            };
-            if let Ok(CacheRead::Present(bytes)) = loaded.read_cache(&entry.path) {
-                if let Ok(artifacts) = serde_json::from_slice::<CheckpointArtifacts>(&bytes) {
-                    // Adopt the persisted worker fingerprint so a post-open regen's
-                    // PlanContext matches the loaded envelopes (see take_checkpoint).
-                    if let Some(env) = artifacts.representative_envelope() {
-                        self.occt_fingerprint = env.occt_fingerprint.clone();
-                    }
-                    self.checkpoints.save(step, artifacts);
-                }
-            }
-        }
+    /// The steps the cached checkpoints sit at, ascending (tests / diagnostics).
+    #[must_use]
+    pub fn checkpoint_steps(&self) -> Vec<usize> {
+        let mut steps: Vec<usize> = self.checkpoints.list().iter().map(|m| m.step).collect();
+        steps.sort_unstable();
+        steps
     }
 
     // ── Projection ───────────────────────────────────────────────────────────
@@ -2496,6 +2462,23 @@ pub struct DrivenRegen {
     job: Option<JobId>,
     base_hash_prefix: String,
     step_count: usize,
+}
+
+/// Logs once when an opened container still carries the pre-V2 `checkpoints/` cache.
+/// The entries are ignored (checkpoints are in-session acceleration only, SCHEMA §7.7)
+/// and the next save drops them, so the container shrinks on its own.
+fn log_legacy_checkpoint_cache(loaded: &LoadedContainer) {
+    let stale = loaded
+        .cache_entries()
+        .iter()
+        .filter(|e| e.path.starts_with(CHECKPOINTS_DIR))
+        .count();
+    if stale > 0 {
+        tracing::info!(
+            "open: {stale} legacy container checkpoint cache entries ignored \
+             (in-session-only policy) — shrinks on next save"
+        );
+    }
 }
 
 /// Repopulates the wire split-id interner from a registry's persisted `split_of`

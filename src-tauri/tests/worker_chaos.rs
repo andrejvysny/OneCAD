@@ -127,8 +127,7 @@ fn plan_request(tl: &Timeline, rev: u64, epoch: u64) -> PlanRequest {
 /// enforcing D1 adoption — exactly the app's regen path.
 async fn drive(wm: &WorkerManager, tl: &Timeline, rev: u64, epoch: u64) -> Outcome {
     let plan = plan_request(tl, rev, epoch);
-    let known: HashSet<Uuid> = plan.ops.iter().map(|o| o.record_id.as_uuid()).collect();
-    let engine = AdoptingEngine::new(Arc::new(wm.clone()), known, HashSet::new());
+    let engine = AdoptingEngine::new(Arc::new(wm.clone()), HashSet::new());
     let executor = RegenExecutor::new(engine);
     let mut session = RegenSession {
         timeline: tl.clone(),

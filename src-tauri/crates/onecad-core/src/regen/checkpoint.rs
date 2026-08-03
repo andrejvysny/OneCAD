@@ -216,15 +216,32 @@ pub trait CheckpointStore {
     fn list(&self) -> Vec<CheckpointMeta>;
 
     /// Stores a checkpoint's artifacts at `step`, returning its minted id. A
-    /// later save at the same step supersedes the earlier one.
+    /// later save at the same step supersedes the earlier one. Implementations MAY
+    /// prune older entries to stay bounded (a checkpoint is disposable).
     fn save(&mut self, step: usize, artifacts: CheckpointArtifacts) -> CheckpointId;
 
     /// Loads the checkpoint stored at `step`, if any.
     fn load(&self, step: usize) -> Option<StoredCheckpoint>;
+
+    /// Drops every checkpoint at or above `step` — the **truncation** eviction. A
+    /// timeline mutation at `step` makes those checkpoints' stored prefix hashes
+    /// stale by definition; without this they linger as orphans the planner rejects
+    /// on every plan and the cache only ever grows. The edit layer calls it (only the
+    /// edit layer knows which step moved).
+    fn invalidate_from(&mut self, step: usize);
 }
 
-/// A naive in-memory [`CheckpointStore`] — the vertical-slice default. With **no
+/// How many checkpoints [`InMemoryCheckpointStore`] retains (the ladder width).
+const LADDER_WIDTH: usize = 5;
+
+/// A bounded in-memory [`CheckpointStore`] — the vertical-slice default. With **no
 /// checkpoints saved, plans replay from 0** (the correct, cache-free baseline).
+///
+/// Retention is a **geometric ladder** anchored at the highest stored step `head`:
+/// `head`, `head−1`, and the nearest stored steps at or below `head/2`, `head/4` and
+/// `0`. That keeps re-editing the newest feature cheap while still holding a coarse
+/// fallback deep in the timeline, in a fixed [`LADDER_WIDTH`] slots — so a long
+/// editing session's memory is flat, not linear in the number of saves.
 #[derive(Debug, Default)]
 pub struct InMemoryCheckpointStore {
     by_step: BTreeMap<usize, StoredCheckpoint>,
@@ -236,6 +253,26 @@ impl InMemoryCheckpointStore {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Prunes to the retention ladder. Anchored at the highest stored step, **never**
+    /// at the step just saved: a rollback-save at cursor 4 must not evict a still-valid
+    /// step-10 checkpoint (the timeline above 4 is untouched — only
+    /// [`invalidate_from`](CheckpointStore::invalidate_from) may drop it).
+    fn prune(&mut self) {
+        let Some(&head) = self.by_step.keys().next_back() else {
+            return;
+        };
+        let mut keep: Vec<usize> = vec![head, head.saturating_sub(1)];
+        for target in [head / 2, head / 4, 0] {
+            if let Some(&s) = self.by_step.range(..=target).next_back().map(|(s, _)| s) {
+                keep.push(s);
+            }
+        }
+        keep.sort_unstable();
+        keep.dedup();
+        debug_assert!(keep.len() <= LADDER_WIDTH);
+        self.by_step.retain(|s, _| keep.contains(s));
     }
 }
 
@@ -275,11 +312,16 @@ impl CheckpointStore for InMemoryCheckpointStore {
         };
         self.by_step
             .insert(step, StoredCheckpoint { meta, artifacts });
+        self.prune();
         id
     }
 
     fn load(&self, step: usize) -> Option<StoredCheckpoint> {
         self.by_step.get(&step).cloned()
+    }
+
+    fn invalidate_from(&mut self, step: usize) {
+        self.by_step.split_off(&step);
     }
 }
 
@@ -356,5 +398,106 @@ mod tests {
         let loaded = store.load(2).unwrap();
         assert_eq!(loaded.artifacts.artifacts[0].bytes, vec![1, 2, 3]);
         assert!(store.load(5).is_none());
+    }
+
+    fn artifacts_at(step: usize) -> CheckpointArtifacts {
+        let mut env = envelope("fp", 1);
+        env.step = step;
+        CheckpointArtifacts {
+            step,
+            artifacts: vec![CheckpointArtifact {
+                envelope: env,
+                bytes: vec![step as u8],
+            }],
+            element_map_partition: vec![],
+            signatures: sigs(),
+            history_prefix_hash: HistoryPrefixHash::new(format!("h{step}")),
+        }
+    }
+
+    fn steps(store: &InMemoryCheckpointStore) -> Vec<usize> {
+        let mut s: Vec<usize> = store.list().iter().map(|m| m.step).collect();
+        s.sort_unstable();
+        s
+    }
+
+    /// Saving every step keeps the ladder at ≤5 slots, always anchored on the head +
+    /// its predecessor, with coarse fallbacks near head/2, head/4 and the floor.
+    ///
+    /// The mid-rungs **thin out** as the head advances: pruning is greedy, so a step
+    /// dropped at head `h` cannot come back to serve `h'/2` later, and a
+    /// save-every-step session settles on `{0, 2, head−1, head}`. Bounded memory is
+    /// the contract; the deep rungs are best-effort acceleration (Invariant 7 — a
+    /// missing checkpoint only ever costs a replay). Pinned here so a future ladder
+    /// change is a deliberate one.
+    #[test]
+    fn ladder_stays_bounded_and_keeps_head_and_floor() {
+        let mut store = InMemoryCheckpointStore::new();
+        for step in 0..=32 {
+            store.save(step, artifacts_at(step));
+            let got = steps(&store);
+            assert!(
+                got.len() <= LADDER_WIDTH,
+                "head {step}: ladder must stay ≤{LADDER_WIDTH}, got {got:?}"
+            );
+            assert_eq!(*got.last().unwrap(), step, "head {step} is always retained");
+            assert_eq!(got[0], 0, "the floor checkpoint is always retained");
+            if step >= 1 {
+                assert!(
+                    got.contains(&(step - 1)),
+                    "head {step}: the predecessor is retained, got {got:?}"
+                );
+            }
+        }
+        assert_eq!(
+            steps(&store),
+            vec![0, 2, 31, 32],
+            "the settled save-every-step ladder at head 32"
+        );
+    }
+
+    /// The degenerate heads: nothing panics and nothing is over-evicted.
+    #[test]
+    fn ladder_saturates_at_head_zero_and_one() {
+        let mut store = InMemoryCheckpointStore::new();
+        store.save(0, artifacts_at(0));
+        assert_eq!(steps(&store), vec![0]);
+        store.save(1, artifacts_at(1));
+        assert_eq!(steps(&store), vec![0, 1]);
+    }
+
+    /// Review M7: pruning is anchored at the **highest stored step**, never at the step
+    /// just written. A rollback-save low in the timeline must not destroy a still-valid
+    /// checkpoint above it — only `invalidate_from` may do that.
+    #[test]
+    fn rollback_save_keeps_the_later_checkpoint() {
+        let mut store = InMemoryCheckpointStore::new();
+        store.save(0, artifacts_at(0));
+        store.save(9, artifacts_at(9));
+        store.save(10, artifacts_at(10));
+        assert_eq!(steps(&store), vec![0, 9, 10]);
+        store.save(4, artifacts_at(4));
+        assert_eq!(
+            steps(&store),
+            vec![0, 4, 9, 10],
+            "the step-10 head survives a save at step 4"
+        );
+    }
+
+    #[test]
+    fn invalidate_from_evicts_at_and_above_the_step() {
+        let mut store = InMemoryCheckpointStore::new();
+        for step in 0..=6 {
+            store.save(step, artifacts_at(step));
+        }
+        assert_eq!(steps(&store), vec![0, 1, 2, 5, 6]);
+        store.invalidate_from(2);
+        assert_eq!(steps(&store), vec![0, 1], "2, 5, 6 evicted (>= 2)");
+        assert!(store.load(2).is_none());
+        store.invalidate_from(0);
+        assert!(
+            steps(&store).is_empty(),
+            "invalidate_from(0) clears the cache"
+        );
     }
 }
