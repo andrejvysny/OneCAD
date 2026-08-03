@@ -1,4 +1,23 @@
-# OneCAD-Tauri — Current State (2026-08-03, FULL ROADMAP IMPLEMENTED)
+# OneCAD-Tauri — Current State (2026-08-03, FULL ROADMAP IMPLEMENTED + VALIDATION PHASE V)
+
+## VALIDATION PHASE V (2026-08-03, plan `act-as-senior-software-shimmying-blanket.md`)
+Independent re-validation of the shipped state: all 4 suites REPRODUCE EXACTLY
+(ctest 87/87 · cargo 704/0 vs real worker · FE 2688/180 · e2e 157/157 zero-flake
+· hygiene + hex fully clean). Probes: save-growth defect CONFIRMED empirically
+(checkpoints 1/save never evicted, quadratic container growth, save 19→154 ms in
+12 toy saves, all under the runtime lock); soak clean (no RSS growth over 120
+regens). Adversarial review (3 agents, orchestrator-verified): **7 BLOCKER-class
+defects** — colored-STEP meshes rejected by the Rust MESH1 validator (mask omits
+FACE_COLORS — colored imports render NOTHING on the real lane); cross-document
+regen commit (new_document during in-flight regen publishes doc A into doc B);
+reopen→append regen wedge (self-satisfying fingerprint gate + in-session-only
+restore + RetryFromZero reusing narrow known_ops = D1 hard-fail);
+epoch desync when the worker restarts with no doc open; transform edit-safety
+gate holes (host-face sketches invisible to it, delete bypasses it, positional
+step_index drifts); split-child ordinals are geometric ranks (param edit swaps
+identities silently); save/autosave serialize everything under the single-writer
+lock. Full ranked list + 8 majors: TODO.md § VF FINDINGS. Next: WP-FIX (blocks
+the unsigned tester .dmg), while user runs `docs/MANUAL_GATES_RUN.md` Step 0.
 
 ## ROADMAP COMPLETE (2026-08-02→03, ~29 commits d875ef9→d3c9289)
 Every code item of the approved roadmap (plan
