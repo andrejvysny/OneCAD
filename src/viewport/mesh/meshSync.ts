@@ -39,7 +39,7 @@ import { buildBodyObject, type BodyObjectHandle } from "../engine/BodyObject";
 import { BodyMaterialLibrary } from "../engine/bodyMaterials";
 import { coerceRenderMode, RENDER_MODES, type RenderModeDef } from "../engine/renderModes";
 import { parseMeshPayload } from "./parseMeshPayload";
-import { buildBodyObjects, disposeAll, remove, swap } from "./meshRegistry";
+import { buildBodyObjects, disposeAll, refreshFaceColors, remove, swap } from "./meshRegistry";
 
 const DEFAULT_LOD: Lod = "coarse";
 
@@ -213,9 +213,14 @@ export class MeshIngest {
    * Deliberately not a store subscription of its own: the palette cache must be
    * dropped before any re-read, and independent subscribers would make that
    * ordering a race.
+   *
+   * A colored (imported) body needs MORE than a material re-read: its unset
+   * faces have the body-fill token BAKED into a vertex attribute, so the
+   * registry re-bakes those in place. Authored colors are data and stay put.
    */
   refreshColors(): void {
     this.materials?.refreshColors();
+    refreshFaceColors();
     this.engine?.invalidate();
   }
 

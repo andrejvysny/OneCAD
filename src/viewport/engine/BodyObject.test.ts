@@ -10,18 +10,22 @@ import { describe, it, expect, afterEach } from "vitest";
 import * as THREE from "three";
 import { buildBodyObject } from "./BodyObject";
 import { BodyMaterialLibrary } from "./bodyMaterials";
-import { DEFAULT_RENDER_MODE, RENDER_MODES } from "./renderModes";
+import { DEFAULT_RENDER_MODE, RENDER_MODES, vertexColorKind } from "./renderModes";
 import { buildBodyObjects, __resetRegistryForTests, disposeAll } from "../mesh/meshRegistry";
 import { parseMeshPayload } from "../mesh/parseMeshPayload";
-import { makeBoxMesh } from "@/ipc/mockMeshes";
+import { makeBoxMesh, type FaceColor } from "@/ipc/mockMeshes";
 
 afterEach(() => {
   disposeAll();
   __resetRegistryForTests();
 });
 
-function handleFor() {
-  const entry = buildBodyObjects(parseMeshPayload(makeBoxMesh()), "body1", 1);
+/** Stand-in authored STEP color on f:0 only (the rest fall back to the body material). */
+const RED: FaceColor = [214, 74, 62, 255];
+const coloredBoxMesh = () => makeBoxMesh(40, 40, 40, 0, [0, 0, 0], [RED, null, null, null, null, null]);
+
+function handleFor(mesh: ArrayBuffer = makeBoxMesh()) {
+  const entry = buildBodyObjects(parseMeshPayload(mesh), "body1", 1);
   const library = new BodyMaterialLibrary();
   const handle = buildBodyObject(entry, library);
   const face = handle.group.children.find((c) => c.userData.kind === "face") as THREE.Mesh;
@@ -90,6 +94,55 @@ describe("buildBodyObject", () => {
     const set = library.get(RENDER_MODES[DEFAULT_RENDER_MODE].materialKind);
     expect(face.material).toBe(set.face);
     expect(edges.material).toBe(set.edge);
+    entry.dispose();
+    library.dispose();
+  });
+
+  /*
+   * A colored body substitutes the VERTEX variant of whatever kind the mode
+   * dictates. It is a per-body swap, not a mode: face/edge visibility, and thus
+   * wireframe/edges behavior, must be byte-identical to a plain body's.
+   */
+  it("picks the vertex-color material kind for a body with baked FACE_COLORS", () => {
+    const { handle, face, entry, library } = handleFor(coloredBoxMesh());
+    expect(entry.hasVertexColors).toBe(true);
+
+    for (const def of Object.values(RENDER_MODES)) {
+      handle.applyMode(def);
+      const vertexSet = library.get(vertexColorKind(def.materialKind));
+      expect(face.material).toBe(vertexSet.face);
+      expect((face.material as THREE.MeshStandardMaterial).vertexColors).toBe(true);
+      // …and NOT the plain set the mode names.
+      expect(face.material).not.toBe(library.get(def.materialKind).face);
+    }
+    entry.dispose();
+    library.dispose();
+  });
+
+  it("leaves a color-less body on the plain kind, with identical visibility", () => {
+    const plain = handleFor();
+    const colored = handleFor(coloredBoxMesh());
+
+    for (const def of Object.values(RENDER_MODES)) {
+      plain.handle.applyMode(def);
+      colored.handle.applyMode(def);
+      expect([colored.face.visible, colored.edges.visible]).toEqual([
+        plain.face.visible,
+        plain.edges.visible,
+      ]);
+    }
+    expect((plain.face.material as THREE.MeshStandardMaterial).vertexColors).toBe(false);
+
+    plain.entry.dispose();
+    plain.library.dispose();
+    colored.entry.dispose();
+    colored.library.dispose();
+  });
+
+  it("materials a colored body at BUILD time too (previews never applyMode)", () => {
+    const { face, entry, library } = handleFor(coloredBoxMesh());
+    const set = library.get(vertexColorKind(RENDER_MODES[DEFAULT_RENDER_MODE].materialKind));
+    expect(face.material).toBe(set.face);
     entry.dispose();
     library.dispose();
   });

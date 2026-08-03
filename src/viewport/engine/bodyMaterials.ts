@@ -15,7 +15,7 @@
  */
 import * as THREE from "three";
 import { palette } from "./palette";
-import type { MaterialKind } from "./renderModes";
+import { MATERIAL_KIND_VERTEX_COLORS, type MaterialKind } from "./renderModes";
 
 export interface BodyMaterialSet {
   face: THREE.MeshStandardMaterial;
@@ -32,6 +32,13 @@ interface SavedFaceState {
 /** Sketch-mode dim opacity (focus cue: the body must not compete with the sketch). */
 const DIM_OPACITY = 0.35;
 
+/**
+ * Base color of a vertex-colored face material. Three multiplies `diffuse` by
+ * the per-vertex color, so white is the only value that reproduces an authored
+ * (imported) color unchanged. NOT a design token — it is multiply identity.
+ */
+const VERTEX_COLOR_BASE = new THREE.Color(1, 1, 1);
+
 export class BodyMaterialLibrary {
   private readonly sets = new Map<MaterialKind, BodyMaterialSet>();
   private readonly savedFaceStates = new Map<MaterialKind, SavedFaceState>();
@@ -43,7 +50,7 @@ export class BodyMaterialLibrary {
   get(kind: MaterialKind): BodyMaterialSet {
     let set = this.sets.get(kind);
     if (!set) {
-      set = this.create();
+      set = this.create(kind);
       this.sets.set(kind, set);
       // A set born while the library is dimmed still needs the dim; its saved
       // prior is its constructor defaults, so undimming restores it correctly.
@@ -52,9 +59,13 @@ export class BodyMaterialLibrary {
     return set;
   }
 
-  private create(): BodyMaterialSet {
+  private create(kind: MaterialKind): BodyMaterialSet {
     const face = new THREE.MeshStandardMaterial({
-      color: this.faceColor ?? palette.bodyNeutral(),
+      color: this.baseColor(kind),
+      // Colored (imported) bodies bake FACE_COLORS into a per-vertex attribute;
+      // the shading params below are otherwise identical, so the two kinds stay
+      // visually one material with one of them reading an extra attribute.
+      vertexColors: MATERIAL_KIND_VERTEX_COLORS[kind],
       // Machined-surface dielectric: rough enough to stay matte, smooth enough
       // that the environment map produces a readable gradient across a face.
       // At 0.75 the specular lobe is so wide the IBL contributes nothing.
@@ -142,10 +153,21 @@ export class BodyMaterialLibrary {
   }
 
   private applyPaletteColors(): void {
-    for (const set of this.sets.values()) {
-      set.face.color.copy(this.faceColor ?? palette.bodyNeutral());
+    for (const [kind, set] of this.sets) {
+      set.face.color.copy(this.baseColor(kind));
       set.edge.color.copy(palette.bodyEdge());
     }
+  }
+
+  /**
+   * The face base color for a kind. A Cut tint outranks everything (it is state,
+   * and tinting a colored body is exactly what the Cut preview should look
+   * like); otherwise a vertex-colored kind takes multiply identity and a plain
+   * one takes the body token.
+   */
+  private baseColor(kind: MaterialKind): THREE.Color {
+    if (this.faceColor) return this.faceColor;
+    return MATERIAL_KIND_VERTEX_COLORS[kind] ? VERTEX_COLOR_BASE : palette.bodyNeutral();
   }
 
   dispose(): void {

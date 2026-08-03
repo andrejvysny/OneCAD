@@ -204,6 +204,18 @@ Tints are STATE, not theme: `BodyMaterialLibrary`, `PreviewMesh` and
 `RevolvePreview` all preserve an active Cut tint across a theme change while
 still re-reading everything else.
 
+**Baked FACE_COLORS are a third shape.** An imported body with authored MESH1
+face colors renders through the `shadedVertex` material kind, whose face colors
+live in a per-vertex geometry attribute — and every face the file left *unset*
+has `--color-body-fill` baked into that attribute. A material re-read cannot
+reach them, so `MeshIngest.refreshColors()` also calls `refreshFaceColors()`
+(mesh registry), which re-bakes each entry's attribute in place; authored colors
+are DATA and are rewritten identically, only the unset faces move. Miss this and
+an imported body keeps the old theme's neutral on half its faces while every
+other body follows — silently, as always. The `shadedVertex` material itself
+keeps a WHITE base in both themes (vertex colors multiply it), so it is the
+attribute, not the material, that carries the theme here.
+
 There are **two** `BodyMaterialLibrary` instances — `MeshIngest` owns the
 committed bodies', the engine lazily makes its own for previews — and neither
 owner can reach the other. That is why `ViewportRoot` drives the pair instead of

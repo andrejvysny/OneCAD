@@ -58,6 +58,45 @@ function renderedBodyIds(page: Page): Promise<string[]> {
   );
 }
 
+/**
+ * Live face-material facts per body, straight off the scene graph (`?vpdebug`):
+ * does its face Mesh draw with a vertex-colored material, and does its geometry
+ * actually carry the baked `color` attribute? Asserting the STORE here would
+ * prove nothing — FACE_COLORS never reaches a store; the whole path is
+ * parse → de-index → attribute → material kind, and only the scene shows it.
+ */
+function faceColorFacts(page: Page): Promise<Record<string, { vertexColors: boolean; colorAttr: boolean; indexed: boolean }>> {
+  return page.evaluate(() => {
+    const engine = (
+      window as unknown as {
+        __vpEngine?: {
+          bodiesRoot: {
+            children: Array<{
+              userData: { bodyId?: string };
+              children: Array<{
+                userData: { kind?: string };
+                material?: { vertexColors?: boolean };
+                geometry?: { attributes: Record<string, unknown>; index: unknown };
+              }>;
+            }>;
+          };
+        };
+      }
+    ).__vpEngine;
+    const out: Record<string, { vertexColors: boolean; colorAttr: boolean; indexed: boolean }> = {};
+    for (const group of engine?.bodiesRoot.children ?? []) {
+      const face = group.children.find((c) => c.userData.kind === "face");
+      if (!face) continue;
+      out[String(group.userData.bodyId)] = {
+        vertexColors: face.material?.vertexColors === true,
+        colorAttr: face.geometry?.attributes.color != null,
+        indexed: face.geometry?.index != null,
+      };
+    }
+    return out;
+  });
+}
+
 /** Which re-edit chip the ModelToolController armed ("none" = no editor open). */
 function armedChipKind(page: Page): Promise<string | undefined> {
   return page.evaluate(
@@ -127,6 +166,28 @@ test("File ▸ Import STEP appends a body, an Import row, and renders it", async
   // (4) The mesh actually reached the viewport (a second body group in the scene),
   //     which is the half a store-only assertion would miss.
   await expect.poll(() => renderedBodyIds(page)).toHaveLength(2);
+});
+
+test("the imported body renders with its authored MESH1 face colors", async ({ page }) => {
+  // The seed body is the CONTRAST: same scene, same mode, no FACE_COLORS — so a
+  // blanket "everything got vertexColors" regression cannot pass this.
+  await openEditorDebug(page, { mockBody: true });
+  await expect.poll(() => renderedBodyIds(page)).toHaveLength(1);
+  const [seedId] = Object.keys(await faceColorFacts(page));
+
+  await importViaFileMenu(page);
+  await expect(page.getByText("Imported 1 body")).toBeVisible();
+  await expect.poll(() => renderedBodyIds(page)).toHaveLength(2);
+
+  const facts = await faceColorFacts(page);
+  const importedId = Object.keys(facts).find((id) => id !== seedId)!;
+
+  // The imported body: baked color attribute, vertex-colored material, and
+  // de-indexed (the index is dropped so a shared vertex cannot bleed between two
+  // differently-colored faces).
+  expect(facts[importedId]).toEqual({ vertexColors: true, colorAttr: true, indexed: false });
+  // The seed body keeps the plain shaded material on zero-copy indexed geometry.
+  expect(facts[seedId]).toEqual({ vertexColors: false, colorAttr: false, indexed: true });
 });
 
 test("double-clicking an imported history row hints instead of opening an editor", async ({

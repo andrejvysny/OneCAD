@@ -15,12 +15,18 @@ import * as THREE from "three";
 import { logError } from "@/debug/log";
 import type { BodyMeshView } from "./parseMeshPayload";
 import { TopoIndex } from "./faceRangeIndex";
+import { bakeFaceColors, deIndexTriangles, hasAuthoredFaceColors } from "./faceColors";
 
 export interface MeshEntry {
   readonly bodyId: string;
   readonly meshRev: number;
   readonly view: BodyMeshView;
-  /** Faces: indexed geometry, attributes alias the blob (zero-copy). */
+  /**
+   * Faces. Plain bodies: indexed geometry whose attributes alias the blob
+   * (zero-copy). Bodies with authored FACE_COLORS: DE-INDEXED, with a baked
+   * per-vertex `color` attribute (see faceColors.ts — triangle order, and
+   * therefore picking and highlight drawRanges, is identical either way).
+   */
   readonly geometry: THREE.BufferGeometry;
   /** Edges: expanded LineSegments endpoints (null when the mesh has no edges). */
   readonly edgeGeometry: THREE.BufferGeometry | null;
@@ -30,6 +36,15 @@ export interface MeshEntry {
   readonly edgeIndex: TopoIndex | null;
   /** Packed {firstSeg, segCount} per edge, for edge-highlight drawRange (null when no edges). */
   readonly edgeSegmentRanges: Uint32Array | null;
+  /** True when `geometry` carries a baked per-vertex `color` attribute. */
+  readonly hasVertexColors: boolean;
+  /**
+   * Theme change: re-bake the color attribute against the CURRENT body-fill
+   * token. Only unset faces move — authored colors are data, not a token — so
+   * this is an in-place rewrite of the existing array, never a new attribute.
+   * No-op for a body with no colors (and after dispose).
+   */
+  rebakeFaceColors(): void;
   dispose(): void;
 }
 
@@ -46,11 +61,10 @@ export let leakTripwireCount = 0;
  */
 export function buildBodyObjects(view: BodyMeshView, bodyId: string, meshRev: number): MeshEntry {
   const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.BufferAttribute(view.positions, 3));
-  if (view.normals) {
-    geometry.setAttribute("normal", new THREE.BufferAttribute(view.normals, 3));
-  }
-  geometry.setIndex(new THREE.BufferAttribute(view.indices, 1));
+  // `drawRange` counts INDICES when the geometry is indexed and VERTICES when it
+  // is not — and de-indexing produces exactly `indices.length` vertices, so the
+  // same count is right in both arms (and so are HighlightLayer's face ranges).
+  const colorAttr = buildFaceGeometry(geometry, view);
   geometry.setDrawRange(0, view.indices.length);
   const bmin = view.bboxMin;
   const bmax = view.bboxMax;
@@ -90,6 +104,12 @@ export function buildBodyObjects(view: BodyMeshView, bodyId: string, meshRev: nu
     faceIndex,
     edgeIndex,
     edgeSegmentRanges,
+    hasVertexColors: colorAttr !== null,
+    rebakeFaceColors() {
+      if (!colorAttr || disposed) return;
+      bakeFaceColors(view, colorAttr.array as Float32Array);
+      colorAttr.needsUpdate = true;
+    },
     dispose() {
       if (disposed) return;
       disposed = true;
@@ -98,6 +118,34 @@ export function buildBodyObjects(view: BodyMeshView, bodyId: string, meshRev: nu
       liveGeometryCount -= edgeGeometry ? 2 : 1;
     },
   };
+}
+
+/**
+ * Populate the face geometry's attributes. Returns the baked `color` attribute
+ * when the mesh carries authored FACE_COLORS, else null (and the plain indexed,
+ * zero-copy layout).
+ */
+function buildFaceGeometry(
+  geometry: THREE.BufferGeometry,
+  view: BodyMeshView,
+): THREE.BufferAttribute | null {
+  if (!hasAuthoredFaceColors(view.faceColors)) {
+    geometry.setAttribute("position", new THREE.BufferAttribute(view.positions, 3));
+    if (view.normals) {
+      geometry.setAttribute("normal", new THREE.BufferAttribute(view.normals, 3));
+    }
+    geometry.setIndex(new THREE.BufferAttribute(view.indices, 1));
+    return null;
+  }
+  // Colored: vertices are duplicated per triangle so a crease between two
+  // authored colors stays crisp instead of interpolating across the shared
+  // vertex. Zero-copy is traded away here, and only here.
+  const { positions, normals } = deIndexTriangles(view);
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  if (normals) geometry.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+  const colorAttr = new THREE.BufferAttribute(bakeFaceColors(view), 3);
+  geometry.setAttribute("color", colorAttr);
+  return colorAttr;
 }
 
 /**
@@ -161,6 +209,17 @@ export function getEntry(bodyId: string): MeshEntry | undefined {
 
 export function registrySize(): number {
   return registry.size;
+}
+
+/**
+ * Theme change: re-bake every registered body's face colors, because the UNSET
+ * faces carry the body-fill TOKEN and that token just moved. Authored colors
+ * are unaffected. A body with no colors is a no-op, so this stays cheap even
+ * with the whole registry loaded. Driven from `MeshIngest.refreshColors()`
+ * (see engine/README.md § Theming) — it does NOT repaint on its own.
+ */
+export function refreshFaceColors(): void {
+  for (const e of registry.values()) e.rebakeFaceColors();
 }
 
 /** Dispose entries queued by a previous swap/remove. Call once per rendered frame. */

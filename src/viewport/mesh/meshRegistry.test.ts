@@ -3,9 +3,14 @@
  * swap (old disposed only on flush), and the document-close leak tripwire.
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import type * as THREE from "three";
 import * as reg from "./meshRegistry";
 import { parseMeshPayload } from "./parseMeshPayload";
-import { makeBoxMesh } from "@/ipc/mockMeshes";
+import { makeBoxMesh, type FaceColor } from "@/ipc/mockMeshes";
+
+/** Stand-in authored STEP colors (sRGB 0–255) for the colored-body cases. */
+const RED: FaceColor = [214, 74, 62, 255];
+const BLUE: FaceColor = [58, 122, 196, 255];
 
 function box(rev: number): reg.MeshEntry {
   return reg.buildBodyObjects(parseMeshPayload(makeBoxMesh()), "body1", rev);
@@ -83,6 +88,84 @@ describe("double-buffer swap", () => {
     reg.flushDisposals();
     expect(spy).not.toHaveBeenCalled();
     only.dispose();
+  });
+});
+
+/*
+ * A body with authored FACE_COLORS trades the zero-copy indexed layout for a
+ * de-indexed one carrying a baked `color` attribute. The thing that must NOT
+ * change is triangle ordinals: `faceIndex` (picking) and HighlightLayer's
+ * drawRanges both address triangles by ordinal, and `drawRange` silently
+ * switches from index units to vertex units when the index is dropped.
+ */
+describe("buildBodyObjects with FACE_COLORS", () => {
+  const coloredBox = () =>
+    parseMeshPayload(makeBoxMesh(40, 40, 40, 0, [0, 0, 0], [RED, null, null, null, BLUE, null]));
+
+  it("de-indexes and attaches a color attribute", () => {
+    const view = coloredBox();
+    const entry = reg.buildBodyObjects(view, "body1", 1);
+
+    expect(entry.hasVertexColors).toBe(true);
+    expect(entry.geometry.getIndex()).toBeNull();
+    const pos = entry.geometry.getAttribute("position");
+    expect(pos.count).toBe(view.indices.length); // 3 verts per triangle, no sharing
+    expect(entry.geometry.getAttribute("color").count).toBe(view.indices.length);
+    expect(entry.geometry.getAttribute("normal").count).toBe(view.indices.length);
+    // drawRange counts VERTICES now, and 3·T is the same number either way.
+    expect(entry.geometry.drawRange).toEqual({ start: 0, count: view.indices.length });
+    entry.dispose();
+  });
+
+  it("keeps triangle ordinals — so faceIndex still binds the right face", () => {
+    const view = coloredBox();
+    const entry = reg.buildBodyObjects(view, "body1", 1);
+    // Same expectations as the plain box: 12 triangles, 2 per face, in order.
+    expect(entry.faceIndex.idAt(0)).toBe("f:0");
+    expect(entry.faceIndex.idAt(1)).toBe("f:0");
+    expect(entry.faceIndex.idAt(8)).toBe("f:4");
+    expect(entry.faceIndex.idAt(11)).toBe("f:5");
+    entry.dispose();
+  });
+
+  it("leaves a color-less body on the zero-copy indexed path", () => {
+    const view = parseMeshPayload(makeBoxMesh());
+    const entry = reg.buildBodyObjects(view, "body1", 1);
+    expect(entry.hasVertexColors).toBe(false);
+    expect(entry.geometry.getAttribute("color")).toBeUndefined();
+    expect(entry.geometry.getAttribute("position").array).toBe(view.positions);
+    entry.rebakeFaceColors(); // must be a no-op, not a throw
+    entry.dispose();
+  });
+
+  it("rebakeFaceColors rewrites the SAME array and flags it for upload", () => {
+    const entry = reg.buildBodyObjects(coloredBox(), "body1", 1);
+    const attr = entry.geometry.getAttribute("color") as THREE.BufferAttribute;
+    const array = attr.array;
+    const version = attr.version;
+
+    entry.rebakeFaceColors();
+
+    expect(entry.geometry.getAttribute("color")).toBe(attr); // no attribute swap
+    expect(attr.array).toBe(array); // no reallocation
+    // `needsUpdate` is write-only on BufferAttribute — the re-upload it schedules
+    // is observable only as a version bump.
+    expect(attr.version).toBeGreaterThan(version);
+    entry.dispose();
+  });
+
+  it("refreshFaceColors reaches every REGISTERED entry", () => {
+    const colored = reg.buildBodyObjects(coloredBox(), "body1", 1);
+    const plain = reg.buildBodyObjects(parseMeshPayload(makeBoxMesh()), "body2", 1);
+    reg.swap("body1", colored);
+    reg.swap("body2", plain);
+    const spy = vi.spyOn(colored, "rebakeFaceColors");
+    const plainSpy = vi.spyOn(plain, "rebakeFaceColors");
+
+    reg.refreshFaceColors();
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(plainSpy).toHaveBeenCalledTimes(1); // uniform call, no-op inside
   });
 });
 

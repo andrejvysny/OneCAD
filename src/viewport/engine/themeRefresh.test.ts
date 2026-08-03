@@ -21,7 +21,14 @@ import { DragHandle } from "./DragHandle";
 import { PreviewMesh } from "./PreviewMesh";
 import { RevolvePreview } from "./RevolvePreview";
 import { BodyMaterialLibrary } from "./bodyMaterials";
-import { buildBodyObjects, swap, disposeAll, __resetRegistryForTests } from "../mesh/meshRegistry";
+import {
+  buildBodyObjects,
+  swap,
+  getEntry,
+  refreshFaceColors,
+  disposeAll,
+  __resetRegistryForTests,
+} from "../mesh/meshRegistry";
 import { parseMeshPayload } from "../mesh/parseMeshPayload";
 import { makeBoxMesh } from "@/ipc/mockMeshes";
 
@@ -355,6 +362,85 @@ describe("refreshColors picks up a theme flip", () => {
     // meshMat keeps its tint; candMat/hoverMat — which setTint never touches —
     // are the ones only refreshColors can rescue.
     expect(subtreeColors(d.root)).toContain(palette.destructive().getHex());
+  });
+});
+
+/*
+ * Baked FACE_COLORS are the "geometry rebuild" shape of the invariant, and the
+ * nastiest one: the stale color lives in a VERTEX ATTRIBUTE, so every material
+ * in the scene can be perfectly fresh while an imported body still wears the old
+ * theme's neutral on the faces its STEP file left unset.
+ *
+ * Negative-checked: neutering `MeshEntry.rebakeFaceColors` (or dropping the
+ * `refreshFaceColors()` call from MeshIngest.refreshColors) turns these red.
+ */
+describe("baked FACE_COLORS follow the theme", () => {
+  const RED = [214, 74, 62, 255] as const;
+  const coloredEntry = () =>
+    buildBodyObjects(
+      parseMeshPayload(makeBoxMesh(40, 40, 40, 0, [0, 0, 0], [RED, null, null, null, null, null])),
+      "imported1",
+      1,
+    );
+
+  /** The baked rgb triple of de-indexed vertex `i`. */
+  const vertexColor = (entry: ReturnType<typeof coloredEntry>, i: number): number[] => {
+    const a = entry.geometry.getAttribute("color").array;
+    return [a[i * 3], a[i * 3 + 1], a[i * 3 + 2]];
+  };
+  /** The body token as it lands in a Float32 attribute. */
+  const neutralTriple = (): number[] => {
+    const n = palette.bodyNeutral();
+    return [...Float32Array.from([n.r, n.g, n.b])];
+  };
+  /** The authored color as a material would resolve it (sRGB → working space). */
+  const authoredTriple = (): number[] => {
+    const c = new THREE.Color().setRGB(RED[0] / 255, RED[1] / 255, RED[2] / 255, THREE.SRGBColorSpace);
+    return [...Float32Array.from([c.r, c.g, c.b])];
+  };
+
+  afterEach(() => {
+    setTheme("light");
+    disposeAll();
+    __resetRegistryForTests();
+  });
+
+  it("rebakes the UNSET faces and leaves the authored ones alone", () => {
+    setTheme("light");
+    const entry = coloredEntry();
+    // f:0 is authored (vertices 0–5); f:1 is unset (vertices 6–11).
+    expect(vertexColor(entry, 6)).toEqual(neutralTriple());
+    expect(vertexColor(entry, 0)).toEqual(authoredTriple());
+
+    setTheme("dark");
+    entry.rebakeFaceColors();
+
+    expect(vertexColor(entry, 6)).toEqual(neutralTriple()); // now the DARK token
+    expect(vertexColor(entry, 0)).toEqual(authoredTriple()); // data, unchanged
+    entry.dispose();
+  });
+
+  it("without the rebake the unset face is left holding the LIGHT token", () => {
+    // The non-vacuity guard: proves the assertion above can actually fail.
+    setTheme("light");
+    const entry = coloredEntry();
+    const lightNeutral = neutralTriple();
+
+    setTheme("dark");
+    expect(neutralTriple()).not.toEqual(lightNeutral); // the token really moved
+    expect(vertexColor(entry, 6)).toEqual(lightNeutral); // …and the bake is stale
+    entry.dispose();
+  });
+
+  it("refreshFaceColors reaches every registered body", () => {
+    setTheme("light");
+    swap("imported1", coloredEntry());
+
+    setTheme("dark");
+    refreshFaceColors();
+
+    const entry = getEntry("imported1")!;
+    expect(vertexColor(entry as ReturnType<typeof coloredEntry>, 6)).toEqual(neutralTriple());
   });
 });
 

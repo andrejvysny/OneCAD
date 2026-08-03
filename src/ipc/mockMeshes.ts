@@ -17,11 +17,20 @@ const TABLE_ENTRY_BYTES = 16;
 
 const align4 = (n: number): number => (n + 3) & ~3;
 
+/** Authored sRGB `{r,g,b,a}`, 0–255 — appearance DATA (mesh_format.md §4 type 12). */
+export type FaceColor = readonly [number, number, number, number];
+
 export interface FaceSource {
   /** Triangles as triples of indices into `positions` (grouped under this face). */
   triangles: ReadonlyArray<readonly [number, number, number]>;
   /** Face id — TopoKey (`"f:0"`) or minted ElementId. */
   id: string;
+  /**
+   * Optional authored color. Any face carrying one turns on HAS_FACE_COLORS and
+   * emits FACE_COLORS for the WHOLE mesh; faces without one encode `{0,0,0,0}`
+   * (unset ⇒ the renderer falls back to the body material).
+   */
+  color?: FaceColor;
 }
 
 export interface EdgeSource {
@@ -95,12 +104,14 @@ export function encodeMesh1(src: Mesh1Source): ArrayBuffer {
   const hasNormals = src.normals !== undefined;
   const hasEdges = E > 0;
   const hasFaceBboxes = src.faceBboxes === true;
+  const hasFaceColors = src.faces.some((f) => f.color !== undefined);
 
   let flags = 0;
   if (hasNormals) flags |= FLAG.HAS_NORMALS;
   if (hasEdges) flags |= FLAG.HAS_EDGES;
   if (hasFaceBboxes) flags |= FLAG.HAS_FACE_BBOXES;
   if (src.idsHaveElementIds) flags |= FLAG.IDS_HAVE_ELEMENTIDS;
+  if (hasFaceColors) flags |= FLAG.HAS_FACE_COLORS;
 
   // ── Section byte payloads, in ascending type order ──
   const sections: SectionBytes[] = [];
@@ -118,6 +129,9 @@ export function encodeMesh1(src: Mesh1Source): ArrayBuffer {
   }
   if (hasFaceBboxes) {
     sections.push({ type: SEC.FACE_BBOXES, bytes: f32Bytes(computeFaceBboxes(src.positions, src.faces)) });
+  }
+  if (hasFaceColors) {
+    sections.push({ type: SEC.FACE_COLORS, bytes: faceColorBytes(src.faces) });
   }
 
   // ── Lay sections out with 4-byte alignment ──
@@ -198,6 +212,14 @@ function computeBbox(positions: number[]): { min: [number, number, number]; max:
   }
   return { min, max };
 }
+/** 4·F u8 sRGB RGBA in face order; a face with no authored color stays `{0,0,0,0}`. */
+function faceColorBytes(faces: FaceSource[]): Uint8Array {
+  const out = new Uint8Array(faces.length * 4);
+  faces.forEach((f, i) => {
+    if (f.color) out.set(f.color, i * 4);
+  });
+  return out;
+}
 function computeFaceBboxes(positions: number[], faces: FaceSource[]): number[] {
   const out: number[] = [];
   for (const face of faces) {
@@ -272,6 +294,10 @@ export const BOX_EDGE_PAIRS: readonly [BoxCornerKey, BoxCornerKey][] = [
  * — the STEP-import stand-in — can sit visibly clear of the seed box instead of
  * being buried inside it. `boxCorners`/`mockFaceGeometry` keep the un-translated
  * table, so the analytic face data still describes the DEFAULT box only.
+ *
+ * `faceColors` (indexed by {@link BOX_FACES}) stands in for a STEP file's
+ * authored appearance: a `null`/absent entry leaves that face unset, so one box
+ * can exercise both the colored and the fallback path.
  */
 export function makeBoxMesh(
   sizeX = BOX_SIZE[0],
@@ -279,6 +305,7 @@ export function makeBoxMesh(
   sizeZ = BOX_SIZE[2],
   lod = 0,
   origin: readonly [number, number, number] = [0, 0, 0],
+  faceColors?: ReadonlyArray<FaceColor | null>,
 ): ArrayBuffer {
   const centred = boxCorners([sizeX, sizeY, sizeZ]);
   const c = Object.fromEntries(
@@ -293,7 +320,7 @@ export function makeBoxMesh(
   const faces: FaceSource[] = [];
 
   // Each face: 4 own vertices (crease split) + 2 triangles, normal = face dir.
-  for (const face of BOX_FACES) {
+  BOX_FACES.forEach((face, i) => {
     const base = positions.length / 3;
     for (const key of face.corners) {
       positions.push(c[key][0], c[key][1], c[key][2]);
@@ -305,8 +332,9 @@ export function makeBoxMesh(
         [base, base + 2, base + 3],
       ],
       id: face.id,
+      color: faceColors?.[i] ?? undefined,
     });
-  }
+  });
 
   const edges: EdgeSource[] = BOX_EDGE_PAIRS.map(([a, b], i) => ({
     points: [c[a], c[b]],

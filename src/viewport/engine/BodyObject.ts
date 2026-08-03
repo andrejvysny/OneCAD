@@ -12,7 +12,13 @@
 import * as THREE from "three";
 import type { MeshEntry } from "../mesh/meshRegistry";
 import type { BodyMaterialLibrary } from "./bodyMaterials";
-import { DEFAULT_RENDER_MODE, RENDER_MODES, type RenderModeDef } from "./renderModes";
+import {
+  DEFAULT_RENDER_MODE,
+  RENDER_MODES,
+  vertexColorKind,
+  type MaterialKind,
+  type RenderModeDef,
+} from "./renderModes";
 
 export interface BodyObjectHandle {
   bodyId: string;
@@ -43,7 +49,15 @@ export interface BodyObjectHandle {
  * bodies are built and shown without anyone ever calling {@link applyMode}.
  */
 export function buildBodyObject(entry: MeshEntry, library: BodyMaterialLibrary): BodyObjectHandle {
-  const materials = library.get(RENDER_MODES[DEFAULT_RENDER_MODE].materialKind);
+  // A body whose mesh carried authored FACE_COLORS draws with the vertex-colored
+  // variant of whatever kind the MODE dictates — a per-body substitution over the
+  // one mode table, not a mode of its own, so nothing about face/edge visibility
+  // changes for it. The mesh fact is fixed for the entry's lifetime (a new mesh
+  // means a new entry and a new BodyObject), so it is read once here.
+  const kindFor = (def: RenderModeDef): MaterialKind =>
+    entry.hasVertexColors ? vertexColorKind(def.materialKind) : def.materialKind;
+
+  const materials = library.get(kindFor(RENDER_MODES[DEFAULT_RENDER_MODE]));
   const group = new THREE.Group();
   group.name = `body:${entry.bodyId}`;
   group.userData.bodyId = entry.bodyId;
@@ -69,7 +83,7 @@ export function buildBodyObject(entry: MeshEntry, library: BodyMaterialLibrary):
     },
     applyMode(def: RenderModeDef) {
       faceMesh.visible = def.faceVisible;
-      const set = library.get(def.materialKind);
+      const set = library.get(kindFor(def));
       faceMesh.material = set.face;
       if (edges) {
         edges.visible = def.edgeVisible;

@@ -13,7 +13,7 @@ import {
 } from "./Picker";
 import { buildBodyObjects, type MeshEntry } from "../mesh/meshRegistry";
 import { parseMeshPayload } from "../mesh/parseMeshPayload";
-import { makeBoxMesh } from "@/ipc/mockMeshes";
+import { makeBoxMesh, type FaceColor } from "@/ipc/mockMeshes";
 
 function boxEntry(): MeshEntry {
   return buildBodyObjects(parseMeshPayload(makeBoxMesh()), "body1", 1);
@@ -111,6 +111,58 @@ describe("resolvePick — intersection → PickHit via the registry", () => {
 
   it("returns null for an unknown body or missing index", () => {
     expect(resolvePick(fakeFaceHit("ghost", 0), "face", lookup)).toBeNull();
+  });
+});
+
+/*
+ * The de-index guarantee, end to end through a REAL raycast.
+ *
+ * A colored body's geometry loses its index (faceColors.ts), and three's
+ * `faceIndex` is computed differently for indexed and non-indexed geometry.
+ * Both paths report the TRIANGLE ordinal — which is the only reason
+ * `TopoIndex.ordinalOf`'s FACE_RANGES binary search keeps working — but that is
+ * an assumption about three, so it gets raycast rather than reasoned about.
+ */
+describe("picking survives the FACE_COLORS de-index", () => {
+  const RED: FaceColor = [214, 74, 62, 255];
+  const build = (mesh: ArrayBuffer) => buildBodyObjects(parseMeshPayload(mesh), "body1", 1);
+
+  /** Raycast the entry's real geometry and resolve the hit like the Picker does. */
+  function pickAlong(entry: MeshEntry, from: THREE.Vector3, dir: THREE.Vector3): string | null {
+    const mesh = new THREE.Mesh(
+      entry.geometry,
+      new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }),
+    );
+    mesh.userData = { bodyId: "body1", kind: "face" };
+    const hit = new THREE.Raycaster(from, dir.normalize()).intersectObject(mesh, false)[0];
+    return hit ? (resolvePick(hit, "face", () => entry)?.topoKey ?? null) : null;
+  }
+
+  it("resolves the same face ids on de-indexed geometry as on indexed", () => {
+    const plain = build(makeBoxMesh());
+    const colored = build(makeBoxMesh(80, 60, 30, 0, [0, 0, 0], [RED, null, null, null, RED, null]));
+    expect(colored.hasVertexColors).toBe(true);
+    expect(colored.geometry.getIndex()).toBeNull();
+    expect(plain.geometry.getIndex()).not.toBeNull();
+
+    const rays: [THREE.Vector3, THREE.Vector3][] = [
+      [new THREE.Vector3(200, 0, 0), new THREE.Vector3(-1, 0, 0)], // → +X face
+      [new THREE.Vector3(-200, 0, 0), new THREE.Vector3(1, 0, 0)], // → −X face
+      [new THREE.Vector3(0, 200, 0), new THREE.Vector3(0, -1, 0)], // → +Y face
+      [new THREE.Vector3(0, 0, 200), new THREE.Vector3(0, 0, -1)], // → +Z face
+      [new THREE.Vector3(0, 0, -200), new THREE.Vector3(0, 0, 1)], // → −Z face
+    ];
+    for (const [from, dir] of rays) {
+      const expected = pickAlong(plain, from.clone(), dir.clone());
+      expect(expected).not.toBeNull(); // guard: the ray really hits the box
+      expect(pickAlong(colored, from.clone(), dir.clone())).toBe(expected);
+    }
+    // …and the ids are the ones the face table says, not just "equal to each other".
+    expect(pickAlong(colored, new THREE.Vector3(200, 0, 0), new THREE.Vector3(-1, 0, 0))).toBe("f:0");
+    expect(pickAlong(colored, new THREE.Vector3(0, 0, 200), new THREE.Vector3(0, 0, -1))).toBe("f:4");
+
+    plain.dispose();
+    colored.dispose();
   });
 });
 

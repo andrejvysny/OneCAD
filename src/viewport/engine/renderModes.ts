@@ -14,11 +14,42 @@
  */
 
 /**
- * Which shared material set a mode draws with. One kind today; future modes
- * add a kind rather than mutating the standard set (mutation would leak across
- * every body sharing it).
+ * Which shared material set a mode draws with. Future modes add a kind rather
+ * than mutating an existing set (mutation would leak across every body sharing
+ * it).
+ *
+ * `shadedVertex` is NOT a mode: it is the vertex-colored twin of `standard`,
+ * substituted PER BODY for geometry that carries baked MESH1 FACE_COLORS (see
+ * {@link vertexColorKind}). No render mode names it directly.
  */
-export type MaterialKind = "standard";
+export type MaterialKind = "standard" | "shadedVertex";
+
+/**
+ * Does a kind's face material read the geometry's per-vertex `color`? Such a
+ * material MUST carry a WHITE base: vertex colors MULTIPLY it, so any tinted
+ * base would tint the authored (imported) colors.
+ */
+export const MATERIAL_KIND_VERTEX_COLORS: Record<MaterialKind, boolean> = {
+  standard: false,
+  shadedVertex: true,
+};
+
+/**
+ * The vertex-colored variant of a kind. A body whose mesh carries authored face
+ * colors draws with `vertexColorKind(mode.materialKind)` instead of
+ * `mode.materialKind` — a per-body SUBSTITUTION, table-driven so adding a mode
+ * (or a kind) never scatters `if (hasColors)` through BodyObject. Face/edge
+ * visibility is untouched, so wireframe and shaded+edges behave identically for
+ * colored and plain bodies.
+ */
+const VERTEX_COLOR_KIND: Record<MaterialKind, MaterialKind> = {
+  standard: "shadedVertex",
+  shadedVertex: "shadedVertex",
+};
+
+export function vertexColorKind(kind: MaterialKind): MaterialKind {
+  return VERTEX_COLOR_KIND[kind];
+}
 
 export type RenderModeId = "shaded" | "shadedEdges" | "wireframe";
 

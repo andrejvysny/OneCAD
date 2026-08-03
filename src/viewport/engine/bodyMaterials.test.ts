@@ -11,6 +11,9 @@ import * as THREE from "three";
 import { BodyMaterialLibrary } from "./bodyMaterials";
 import { palette } from "./palette";
 
+/** Multiply identity for a vertex-colored material (computed, never a hex literal). */
+const WHITE_HEX = new THREE.Color(1, 1, 1).getHex();
+
 describe("BodyMaterialLibrary.get", () => {
   it("hands back the SAME set on every call for a kind (shared materials)", () => {
     const lib = new BodyMaterialLibrary();
@@ -38,6 +41,81 @@ describe("BodyMaterialLibrary.get", () => {
     expect(edge.color.getHex()).toBe(palette.bodyEdge().getHex());
     // Edges are annotation, not lit surface — they render their token exactly.
     expect(edge.toneMapped).toBe(false);
+    lib.dispose();
+  });
+});
+
+/*
+ * `shadedVertex` is the same PBR material reading a per-vertex color. Its base
+ * MUST be white, in every theme, because the shader multiplies base × vertex —
+ * a tinted base would silently recolor authored (imported) STEP colors.
+ */
+describe("BodyMaterialLibrary shadedVertex kind", () => {
+  it("is the standard shading with vertexColors on and a WHITE base", () => {
+    const lib = new BodyMaterialLibrary();
+    const std = lib.get("standard").face;
+    const vtx = lib.get("shadedVertex").face;
+
+    expect(vtx.vertexColors).toBe(true);
+    expect(std.vertexColors).toBe(false);
+    expect(vtx.color.getHex()).toBe(WHITE_HEX);
+    expect(vtx.color.getHex()).not.toBe(std.color.getHex());
+    // Everything else is shared with the standard kind.
+    expect([vtx.metalness, vtx.roughness, vtx.envMapIntensity, vtx.side]).toEqual([
+      std.metalness,
+      std.roughness,
+      std.envMapIntensity,
+      std.side,
+    ]);
+    expect(vtx.polygonOffset).toBe(std.polygonOffset);
+    lib.dispose();
+  });
+
+  it("keeps its white base across a palette refresh (the theme must not tint it)", () => {
+    const lib = new BodyMaterialLibrary();
+    const vtx = lib.get("shadedVertex").face;
+    lib.refreshColors();
+    expect(vtx.color.getHex()).toBe(WHITE_HEX);
+    // The edge, which is genuinely theme-driven, still follows.
+    expect(lib.get("shadedVertex").edge.color.getHex()).toBe(palette.bodyEdge().getHex());
+    lib.dispose();
+  });
+
+  it("takes a Cut tint like any other kind, and resets back to white", () => {
+    const lib = new BodyMaterialLibrary();
+    const vtx = lib.get("shadedVertex").face;
+    lib.setFaceColor(palette.destructive());
+    expect(vtx.color.getHex()).toBe(palette.destructive().getHex());
+
+    lib.resetFaceColor();
+    expect(vtx.color.getHex()).toBe(WHITE_HEX);
+    lib.dispose();
+  });
+
+  it("dims and restores independently of the standard set", () => {
+    const lib = new BodyMaterialLibrary();
+    const std = lib.get("standard").face;
+    const vtx = lib.get("shadedVertex").face;
+
+    lib.setDimmed(true);
+    expect([std.opacity, vtx.opacity]).toEqual([0.35, 0.35]);
+    expect(vtx.transparent).toBe(true);
+
+    lib.setDimmed(false);
+    expect([std.opacity, vtx.opacity]).toEqual([1, 1]);
+    expect(vtx.transparent).toBe(false);
+    lib.dispose();
+  });
+
+  it("a set born WHILE dimmed still undims (per-kind saved state)", () => {
+    const lib = new BodyMaterialLibrary();
+    lib.setDimmed(true);
+    const vtx = lib.get("shadedVertex").face; // first use under the dim
+    expect(vtx.opacity).toBe(0.35);
+
+    lib.setDimmed(false);
+    expect(vtx.opacity).toBe(1);
+    expect(vtx.color.getHex()).toBe(WHITE_HEX); // and still multiply-identity
     lib.dispose();
   });
 });

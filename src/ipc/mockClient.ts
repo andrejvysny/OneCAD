@@ -39,6 +39,7 @@ import type {
 import { IMPORT_STEP_OP_TYPE } from "./types";
 import type { WireEditCommand } from "./tauriCommandMap";
 import { wireParamsOf } from "./tauriCommandMap";
+import type { FaceColor } from "./mockMeshes";
 import { concatMesh1, makeBoxMesh, makeCylinderMesh, makeExtrudeBodyMesh, makeRevolveBodyMesh } from "./mockMeshes";
 import type { LatheAxis } from "@/tools/preview/lathePreview";
 import { createLocalSolverLane } from "./localSolver";
@@ -648,6 +649,25 @@ let nextImportSeq = 1;
 /** Where the Nth fabricated import body sits — a row marching clear along +X. */
 const importOrigin = (n: number): [number, number, number] => [110 + (n - 1) * 60, 0, 0];
 
+/**
+ * The authored appearance the fabricated import carries (MESH1 FACE_COLORS) —
+ * the mock's stand-in for STEP/XCAF colors, so the frontend's whole color path
+ * (flag → section → de-index → vertex attribute → `shadedVertex` material) runs
+ * with no backend. Exactly TWO of the six `BOX_FACES` are colored, so the same
+ * body also proves the unset ⇒ body-token fallback.
+ *
+ * These are sRGB 0–255 DATA, not design tokens: an imported file's colors can
+ * never be theme-derived.
+ */
+const IMPORT_FACE_COLORS: ReadonlyArray<FaceColor | null> = [
+  [214, 74, 62, 255], // f:0  +X
+  null, // f:1
+  null, // f:2
+  null, // f:3
+  [58, 122, 196, 255], // f:4  +Z
+  null, // f:5
+];
+
 /** Fabricate one import: body + `ImportStep` row + projection write. */
 function commitImportStep(): ApplyOperationResult {
   undoStack.push(snap("Import"));
@@ -655,7 +675,10 @@ function commitImportStep(): ApplyOperationResult {
   const seq = nextImportSeq++;
   const bodyId = nextBodyId();
   const name = `Imported ${seq}`;
-  syntheticBodies.set(bodyId, makeBoxMesh(40, 40, 40, 0, importOrigin(seq)));
+  syntheticBodies.set(
+    bodyId,
+    makeBoxMesh(40, 40, 40, 0, importOrigin(seq), IMPORT_FACE_COLORS),
+  );
   const featureId = nextFeatureId();
   mockFeatures = [
     ...mockFeatures,

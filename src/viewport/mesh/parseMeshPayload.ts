@@ -38,6 +38,7 @@ export const SEC = {
   EDGE_ID_OFFS: 9,
   EDGE_ID_CHARS: 10,
   FACE_BBOXES: 11,
+  FACE_COLORS: 12,
 } as const;
 
 // ── Header flag bits (mesh_format.md §2) ────────────────────────────────────
@@ -46,8 +47,9 @@ export const FLAG = {
   HAS_EDGES: 0x0002,
   HAS_FACE_BBOXES: 0x0004,
   IDS_HAVE_ELEMENTIDS: 0x0008,
+  HAS_FACE_COLORS: 0x0010,
 } as const;
-const FLAG_RESERVED_MASK = 0xfff0; // bits 4–15 MUST be 0
+const FLAG_RESERVED_MASK = 0xffe0; // bits 5–15 MUST be 0
 
 export const MESH1_MAGIC = 0x4d455348; // LE u32; on-wire bytes 48 53 45 4D
 export const MESH1_VERSION = 1;
@@ -101,6 +103,8 @@ export interface BodyMeshView {
   readonly hasEdges: boolean;
   readonly hasFaceBboxes: boolean;
   readonly idsHaveElementIds: boolean;
+  /** The HEADER FLAG. `faceColors` may still be null — see its note. */
+  readonly hasFaceColors: boolean;
 
   // Required data (views, no copy).
   readonly positions: Float32Array; // 3·V
@@ -116,6 +120,16 @@ export interface BodyMeshView {
   readonly edgeIdOffsets: Uint32Array | null; // E+1
   readonly edgeIdChars: Uint8Array | null; // UTF-8 edge ids
   readonly faceBboxes: Float32Array | null; // 6·F
+  /**
+   * Per-face u8 sRGB `{r,g,b,a}` (4·F) — authored appearance, e.g. an imported
+   * STEP body's XCAF colors. `{0,0,0,0}` (alpha 0) means "unset": that face
+   * falls back to the body material.
+   *
+   * Null when the flag is clear AND when the section is absent or the wrong
+   * length — appearance is DECORATION, so a malformed section is downgraded to
+   * "no colors" (with a warning) rather than failing the body's whole render.
+   */
+  readonly faceColors: Uint8Array | null; // 4·F
 }
 
 interface SectionRec {
@@ -267,6 +281,7 @@ export function parseMeshPayload(
   const hasEdges = (flags & FLAG.HAS_EDGES) !== 0;
   const hasFaceBboxes = (flags & FLAG.HAS_FACE_BBOXES) !== 0;
   const idsHaveElementIds = (flags & FLAG.IDS_HAVE_ELEMENTIDS) !== 0;
+  const hasFaceColors = (flags & FLAG.HAS_FACE_COLORS) !== 0;
 
   // ── Optional sections ──
   let normals: Float32Array | null = null;
@@ -294,6 +309,26 @@ export function parseMeshPayload(
   let faceBboxes: Float32Array | null = null;
   if (hasFaceBboxes) faceBboxes = f32(req(SEC.FACE_BBOXES, "FACE_BBOXES"), 6 * faceCount, "FACE_BBOXES");
 
+  // FACE_COLORS is the one TOLERATED section: it carries appearance, not
+  // geometry or identity, so a producer that gets it wrong must cost the body
+  // its colors — never its render. `console.warn` rather than the structured
+  // logger deliberately: this module imports nothing from `src/**` (it is the
+  // hot zero-copy path, and the logger is silenced under vitest anyway).
+  let faceColors: Uint8Array | null = null;
+  if (hasFaceColors) {
+    const rec = byType.get(SEC.FACE_COLORS);
+    const expected = 4 * faceCount;
+    if (!rec) {
+      console.warn("MESH1: HAS_FACE_COLORS set but FACE_COLORS section absent — ignoring colors");
+    } else if (rec.byteLen !== expected) {
+      console.warn(
+        `MESH1: FACE_COLORS byteLen ${rec.byteLen} != 4·F ${expected} — ignoring colors`,
+      );
+    } else {
+      faceColors = new Uint8Array(buffer, blobByteOffset + rec.offset, expected);
+    }
+  }
+
   return {
     buffer,
     blobByteOffset,
@@ -311,6 +346,7 @@ export function parseMeshPayload(
     hasEdges,
     hasFaceBboxes,
     idsHaveElementIds,
+    hasFaceColors,
     positions,
     indices,
     faceRanges,
@@ -322,6 +358,7 @@ export function parseMeshPayload(
     edgeIdOffsets,
     edgeIdChars,
     faceBboxes,
+    faceColors,
   };
 }
 

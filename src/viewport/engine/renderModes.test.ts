@@ -9,8 +9,11 @@ import { describe, it, expect } from "vitest";
 import {
   coerceRenderMode,
   DEFAULT_RENDER_MODE,
+  MATERIAL_KIND_VERTEX_COLORS,
   RENDER_MODES,
   RENDER_MODE_ORDER,
+  vertexColorKind,
+  type MaterialKind,
   type RenderModeId,
 } from "./renderModes";
 
@@ -32,6 +35,29 @@ describe("RENDER_MODES", () => {
     expect(vis("shaded")).toEqual([true, false]);
     expect(vis("shadedEdges")).toEqual([true, true]);
     expect(vis("wireframe")).toEqual([false, true]);
+  });
+});
+
+describe("vertexColorKind (per-body FACE_COLORS substitution)", () => {
+  const KINDS: MaterialKind[] = ["standard", "shadedVertex"];
+
+  it("maps every kind to a vertex-colored kind, and is idempotent", () => {
+    for (const kind of KINDS) {
+      const swapped = vertexColorKind(kind);
+      expect(MATERIAL_KIND_VERTEX_COLORS[swapped]).toBe(true);
+      expect(vertexColorKind(swapped)).toBe(swapped);
+    }
+  });
+
+  it("no MODE names a vertex-colored kind — it is a per-body substitution only", () => {
+    for (const def of Object.values(RENDER_MODES)) {
+      expect(MATERIAL_KIND_VERTEX_COLORS[def.materialKind]).toBe(false);
+    }
+  });
+
+  it("covers every kind (a new kind with no entry would be undefined at runtime)", () => {
+    expect(Object.keys(MATERIAL_KIND_VERTEX_COLORS).sort()).toEqual([...KINDS].sort());
+    for (const kind of KINDS) expect(vertexColorKind(kind)).toBeDefined();
   });
 });
 

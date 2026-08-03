@@ -3,7 +3,7 @@
  * mesh_format.md §5), mock synth ↔ parse round-trip, and the typed error surface
  * (truncated / bad-magic / misaligned / overlap / bad-length / container).
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   parseMeshPayload,
   parseMeshContainer,
@@ -211,8 +211,86 @@ describe("MESH1 parser error surface", () => {
 
   it("rejects a set reserved flag bit", () => {
     const buf = good();
-    new DataView(buf).setUint16(0x06, 0x0013, true); // bit 4 set
+    new DataView(buf).setUint16(0x06, 0x0023, true); // bit 5 (first still-reserved bit)
     expect(catchParse(buf).kind).toBe("reserved-nonzero");
+  });
+});
+
+/*
+ * FACE_COLORS is the one section whose failure is TOLERATED: it carries
+ * appearance, not geometry or identity, so a producer that gets it wrong costs
+ * the body its colors and nothing else. Every negative case below must still
+ * return a fully usable view.
+ */
+describe("FACE_COLORS (§4 type 12)", () => {
+  /** Two 1-triangle faces; only the FIRST carries an authored color. */
+  function colored(): ArrayBuffer {
+    return encodeMesh1({
+      positions: [0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0],
+      faces: [
+        { triangles: [[0, 1, 2]], id: "f:0", color: [12, 34, 56, 255] },
+        { triangles: [[0, 2, 3]], id: "f:1" },
+      ],
+    });
+  }
+
+  /** Table row index of a section type (rows are offset-ordered, not type-keyed). */
+  function rowOf(buf: ArrayBuffer, type: number): number {
+    const dv = new DataView(buf);
+    const count = dv.getUint16(0x1e, true);
+    for (let i = 0; i < count; i++) {
+      if (dv.getUint32(64 + i * 16, true) === type) return i;
+    }
+    throw new Error(`section type ${type} not in the table`);
+  }
+
+  it("is absent — flag clear, view null — on a mesh with no authored colors", () => {
+    const v = parseMeshPayload(makeBoxMesh());
+    expect(v.hasFaceColors).toBe(false);
+    expect(v.faceColors).toBeNull();
+    expect(v.flags & FLAG.HAS_FACE_COLORS).toBe(0);
+  });
+
+  it("round-trips 4·F sRGB RGBA, unset faces as {0,0,0,0}", () => {
+    const buf = colored();
+    const v = parseMeshPayload(buf);
+    expect(v.hasFaceColors).toBe(true);
+    expect(v.flags & FLAG.HAS_FACE_COLORS).toBe(FLAG.HAS_FACE_COLORS);
+    expect(v.faceColors).not.toBeNull();
+    expect(v.faceColors!.length).toBe(4 * v.faceCount);
+    expect([...v.faceColors!]).toEqual([12, 34, 56, 255, 0, 0, 0, 0]);
+    // Zero-copy, like every other section.
+    expect(v.faceColors!.buffer).toBe(buf);
+  });
+
+  it("drops the colors (warn, no throw) when byteLen != 4·F", () => {
+    const buf = colored();
+    const row = rowOf(buf, SEC.FACE_COLORS);
+    new DataView(buf).setUint32(64 + row * 16 + 0x0c, 4, true); // 8 → 4
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const v = parseMeshPayload(buf);
+
+    expect(v.faceColors).toBeNull();
+    expect(warn).toHaveBeenCalledOnce();
+    // …and the body is still fully renderable.
+    expect(v.faceCount).toBe(2);
+    expect([...v.indices]).toEqual([0, 1, 2, 0, 2, 3]);
+    warn.mockRestore();
+  });
+
+  it("drops the colors (warn, no throw) when the flag is set but the section is absent", () => {
+    const buf = makeBoxMesh();
+    new DataView(buf).setUint16(0x06, parseMeshPayload(buf).flags | FLAG.HAS_FACE_COLORS, true);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const v = parseMeshPayload(buf);
+
+    expect(v.hasFaceColors).toBe(true);
+    expect(v.faceColors).toBeNull();
+    expect(warn).toHaveBeenCalledOnce();
+    expect(v.faceCount).toBe(6);
+    warn.mockRestore();
   });
 });
 
