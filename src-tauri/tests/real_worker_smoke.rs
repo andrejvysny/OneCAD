@@ -328,6 +328,7 @@ fn sketch_record(seed: u128) -> OperationRecord {
         plane,
         entities: vec![],
         constraints: vec![],
+        host_face: None,
         extra: Default::default(),
     }));
     OperationRecord::new(RecordId(Uuid::from_u128(seed)), 0, "Sketch", op)

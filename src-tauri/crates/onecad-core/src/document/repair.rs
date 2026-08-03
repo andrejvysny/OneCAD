@@ -243,6 +243,42 @@ impl RepairState {
             .min()
     }
 
+    /// Remaps seeded `step_index`es after a record is INSERTED at `at`
+    /// (VF-B5c): every gate at or after the insertion point shifts down the
+    /// timeline by one.
+    ///
+    /// `step_index` is POSITIONAL — nothing else ties a gate to its record — so
+    /// without this a timeline insert silently re-points the regen ceiling
+    /// ([`first_seeded_step`](Self::first_seeded_step)) at the wrong step, either
+    /// truncating an innocent op or letting the gated one execute. Ladder-produced
+    /// items are deliberately untouched: they are re-published (or dropped) by the
+    /// next regen of their step, which is exactly what an insert forces.
+    pub fn shift_seeded_for_insert(&mut self, at: usize) {
+        for item in &mut self.items {
+            if item.seeded && item.step_index >= at {
+                item.step_index += 1;
+            }
+        }
+        self.sort();
+    }
+
+    /// Remaps seeded `step_index`es after the record at `at` is REMOVED
+    /// (VF-B5c): gates above it shift up by one, and the removed step's own gates
+    /// are DROPPED — the record they guard no longer exists, so nothing could ever
+    /// close them and the ceiling would pin regen forever.
+    ///
+    /// See [`shift_seeded_for_insert`](Self::shift_seeded_for_insert) on why
+    /// ladder items are left alone.
+    pub fn shift_seeded_for_remove(&mut self, at: usize) {
+        self.items.retain(|i| !(i.seeded && i.step_index == at));
+        for item in &mut self.items {
+            if item.seeded && item.step_index > at {
+                item.step_index -= 1;
+            }
+        }
+        self.sort();
+    }
+
     /// Replaces the seeded subset with `seeded`, leaving ladder-produced items
     /// alone. Used to mirror the authoritative document's gates into the regen
     /// session copy without clobbering worker-published repair state.

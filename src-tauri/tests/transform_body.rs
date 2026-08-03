@@ -58,7 +58,9 @@ use onecad_core::history::StepState;
 use onecad_core::ids::{BodyId, ConstraintId, ElementId, EntityId, RecordId, RegionId, SketchId};
 use onecad_core::math::{Vec2, Vec3};
 use onecad_core::regen::{CancelToken, GeometryEngine, Lod, ModelSnapshot, Outcome, RegenRequest};
-use onecad_core::sketch::{Constraint, CurvePosition, Sketch, SketchEntity, WorldPlane};
+use onecad_core::sketch::{
+    Constraint, CurvePosition, Sketch, SketchAttachment, SketchEntity, WorldPlane,
+};
 
 use onecad_lib::document_runtime::{DocumentRuntime, RegenReport};
 use onecad_lib::worker::manager::SupervisorConfig;
@@ -241,6 +243,7 @@ fn sketch_record(rec: u128, sk: &Sketch) -> OperationRecord {
         plane: xy_plane_ref(),
         entities: entities.as_array().cloned().unwrap_or_default(),
         constraints: constraints.as_array().cloned().unwrap_or_default(),
+        host_face: None,
         extra: Default::default(),
     };
     OperationRecord::new(
@@ -1057,4 +1060,316 @@ async fn suppressing_a_transform_seeds_the_same_gate() {
 
     wm.shutdown().await;
     eprintln!("Suppression gate PASS: gated {gated_vol:.1} vs healthy {filleted_vol:.1}");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (8) WP-FIX W4 / VF-B5a — a FACE-HOSTED SKETCH is downstream of the move
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SKETCH_HOST_REC: u128 = 0xE00;
+const EXTRUDE_HOST: u128 = 0xE01;
+const HOST_FACE_EL: &str = "el_host_top";
+
+/// A rect sketch glued to a face of `body` — the shape `add_sketch_on_face`
+/// authors: a typed `ElementRef` host plus a frame frozen on that face.
+fn hosted_rect_sketch(sid: SketchId, base: u128, body: BodyId, el: &str, z: f64) -> Sketch {
+    let src = rect_sketch(sid, base, 2.0, 2.0, 6.0, 6.0);
+    let mut sk = Sketch::new(
+        sid,
+        "OnFace",
+        SketchAttachment::HostFace {
+            face: ElementRef {
+                primary: Some(PrimaryRef {
+                    body,
+                    element: ElementId::new(el),
+                    kind: ElementKind::Face,
+                    extra: Default::default(),
+                }),
+                intent: None,
+                anchor: Some(AnchorIntent {
+                    world_point: Vec3::new_unchecked(0.0, 0.0, z),
+                    surface_uv: None,
+                    local_frame: None,
+                    adjacency_hint: None,
+                    extra: Default::default(),
+                }),
+                extra: Default::default(),
+            },
+            projected_boundary_version: 1,
+        },
+    );
+    // The frozen frame: the host face's own plane (the box's top cap).
+    sk.plane = onecad_core::sketch::plane_from_point_normal(
+        Vec3::new_unchecked(0.0, 0.0, z),
+        Vec3::new_unchecked(0.0, 0.0, 1.0),
+    );
+    for e in src.entities() {
+        sk.add_entity(e.clone()).expect("hosted entity");
+    }
+    for c in src.constraints() {
+        sk.add_constraint(c.clone()).expect("hosted constraint");
+    }
+    sk
+}
+
+/// **VF-B5a.** A sketch attached to a FACE of a moved body — and everything built
+/// from it — must be gated when that move is edited.
+///
+/// RED (pre-W4): `Operation::derive_inputs` returned NOTHING for a `Sketch` op, so
+/// the record declared no dependency on its host body at all. `transform_gate_items`
+/// intersects `inputs.bodies` with the transform's moved set, found nothing, and
+/// seeded ZERO items: the sketch's frozen frame silently stayed at the OLD placement
+/// while the box moved, and the body extruded from it published at the stale
+/// location with no `NeedsRepair` anywhere — the exact silent-wrong-geometry the
+/// gate exists to kill.
+///
+/// This drives the REAL stamp path: `finish_sketch` → `upsert_sketch_record` mints
+/// the record with `host_face` from the live attachment.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn editing_a_transform_gates_a_sketch_hosted_on_the_moved_face() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    // steps: 0 Sketch · 1 Extrude(box) · 2 Move · 3 Sketch(on the moved face) · 4 Extrude
+    let body = build_box(&mut rt, SKETCH_A, EXTRUDE_A, 0xA, 0.0, 0.0, 25.0).await;
+    let _ = published(&regen_all(&mut rt).await, "box");
+    add_op(
+        &mut rt,
+        transform_record(OP_MOVE, vec![body], [15.0, 0.0, 0.0], None, false),
+    );
+    let _ = published(&regen_all(&mut rt).await, "move");
+
+    let host_sid = SketchId(Uuid::from_u128(SKETCH_HOST_REC));
+    rt.apply(EditCommand::AddSketch {
+        sketch: hosted_rect_sketch(host_sid, SKETCH_HOST_REC << 8, body, HOST_FACE_EL, 25.0),
+    })
+    .expect("AddSketch on the moved face");
+    rt.finish_sketch(host_sid)
+        .await
+        .expect("finishSketch mints the Sketch record");
+    add_op(&mut rt, extrude_record(EXTRUDE_HOST, host_sid, 4.0));
+    let rep = regen_all(&mut rt).await;
+    let snap = published(&rep, "hosted extrude");
+    assert_eq!(
+        snap.repair_summary.needs_repair_count, 0,
+        "HEALTHY: the hosted sketch and its extrude resolve honestly"
+    );
+    assert_eq!(snap.bodies.len(), 2, "the box plus the hosted body");
+
+    // ── EDIT the move ⇒ the gate must fire ON THE SKETCH STEP ────────────────
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(OP_MOVE)),
+        op: transform_op(vec![body], [15.0, 40.0, 0.0], None, false),
+    })
+    .expect("UpdateOperationParams on the TransformBody");
+
+    let gated: Vec<_> = rt.repair_items().iter().filter(|i| i.seeded).collect();
+    assert!(
+        !gated.is_empty(),
+        "editing the Move gates the face-hosted sketch (VF-B5a: this was EMPTY — \
+         zero NeedsRepair while the geometry moved under the sketch)"
+    );
+    assert!(
+        gated.iter().any(|i| i.step_index == 3),
+        "the SKETCH step (3) is gated, got {:?}",
+        gated.iter().map(|i| i.step_index).collect::<Vec<_>>()
+    );
+    assert!(
+        gated
+            .iter()
+            .any(|i| i.element_id.as_ref().map(ElementId::as_str) == Some(HOST_FACE_EL)),
+        "the gate names the sketch's HOST FACE ref"
+    );
+    let ceiling = gated.iter().map(|i| i.step_index).min().unwrap();
+    assert_eq!(
+        ceiling, 3,
+        "the regen ceiling stops BELOW the sketch step, so neither the sketch nor \
+         the body extruded from it can execute against a stale frozen frame"
+    );
+
+    let rep = regen_all(&mut rt).await;
+    let snap = published(&rep, "regen after the transform edit");
+    assert!(
+        snap.step_states
+            .iter()
+            .any(|(i, st)| *i == 3 && *st == StepState::NeedsRepair),
+        "the hosted-sketch step is NeedsRepair, got {:?}",
+        snap.step_states
+    );
+    assert_eq!(
+        snap.bodies.len(),
+        1,
+        "publish ≤ m−1: only the moved box — the hosted body was NOT re-published \
+         against the stale frame"
+    );
+
+    // ── UNDO ⇒ the gate lifts and the hosted body comes back ─────────────────
+    assert!(rt.undo(), "undo the transform edit");
+    assert!(
+        rt.repair_items().iter().all(|i| !i.seeded),
+        "the seed rides the SAME undo entry as the edit that planted it"
+    );
+    let rep = regen_all(&mut rt).await;
+    let snap = published(&rep, "regen after undo");
+    assert_eq!(snap.repair_summary.needs_repair_count, 0);
+    assert_eq!(snap.bodies.len(), 2, "the hosted body is back");
+
+    wm.shutdown().await;
+    eprintln!("Host-face gate PASS: sketch step 3 gated, ceiling {ceiling}");
+}
+
+/// The LEGACY document shape: the `Sketch` record carries NO `host_face` param
+/// (it predates the field), so `derive_inputs` still declares nothing — yet the
+/// gate must cover it via the document-level attachment bridge. The record is
+/// never rewritten: `inputs` is inside the golden prefix hash, so backfilling it
+/// would move every legacy document's hash and bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_legacy_hosted_sketch_record_is_gated_through_its_attachment() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    let body = build_box(&mut rt, SKETCH_A, EXTRUDE_A, 0xA, 0.0, 0.0, 25.0).await;
+    let _ = published(&regen_all(&mut rt).await, "box");
+    add_op(
+        &mut rt,
+        transform_record(OP_MOVE, vec![body], [15.0, 0.0, 0.0], None, false),
+    );
+    let _ = published(&regen_all(&mut rt).await, "move");
+
+    // The document knows the attachment…
+    let host_sid = SketchId(Uuid::from_u128(SKETCH_HOST_REC));
+    let sk = hosted_rect_sketch(host_sid, SKETCH_HOST_REC << 8, body, HOST_FACE_EL, 25.0);
+    rt.apply(EditCommand::AddSketch { sketch: sk.clone() })
+        .expect("AddSketch");
+    // …but the RECORD is authored in the pre-W4 shape: no `host_face` param.
+    let legacy = sketch_record(SKETCH_HOST_REC, &sk);
+    let Operation::Known(KnownOperation::Sketch(p)) = &legacy.op else {
+        panic!("Sketch record")
+    };
+    assert!(p.host_face.is_none(), "precondition: the legacy shape");
+    assert!(
+        legacy.op.derive_inputs().bodies.is_empty(),
+        "precondition: it declares no dependency at all"
+    );
+    add_op(&mut rt, legacy);
+    add_op(&mut rt, extrude_record(EXTRUDE_HOST, host_sid, 4.0));
+    let _ = published(&regen_all(&mut rt).await, "legacy hosted extrude");
+
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(OP_MOVE)),
+        op: transform_op(vec![body], [15.0, 40.0, 0.0], None, false),
+    })
+    .expect("UpdateOperationParams");
+
+    let gated: Vec<_> = rt.repair_items().iter().filter(|i| i.seeded).collect();
+    assert!(
+        gated.iter().any(|i| i.step_index == 3
+            && i.element_id.as_ref().map(ElementId::as_str) == Some(HOST_FACE_EL)),
+        "a legacy hosted sketch is gated through the attachment bridge, got {:?}",
+        gated
+    );
+
+    wm.shutdown().await;
+    eprintln!("Legacy attachment-bridge gate PASS");
+}
+
+/// **VF-B5b.** DELETING a `TransformBody` moves downstream geometry exactly like
+/// suppressing it, so it must seed the SAME gate.
+///
+/// RED (pre-W4): `remove_operation` never touched the repair state — the one edit
+/// that removes a placement outright was the one edit that re-bound every
+/// downstream ref silently, while merely suppressing the same record gated it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deleting_a_transform_seeds_the_gate_like_suppressing_it() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    // steps: 0 Sketch · 1 Extrude · 2 Move · 3 Fillet(on the moved box)
+    let body = build_box(&mut rt, SKETCH_A, EXTRUDE_A, 0xA, 0.0, 0.0, 25.0).await;
+    let _ = published(&regen_all(&mut rt).await, "box");
+    add_op(
+        &mut rt,
+        transform_record(OP_MOVE, vec![body], [15.0, 0.0, 0.0], None, false),
+    );
+    let _ = published(&regen_all(&mut rt).await, "move");
+    let mesh = body_mesh(&mut rt, body).await;
+    let view = validate_mesh_blob(&mesh).expect("MESH1 validates");
+    let anchor = vertical_edge_anchor(&view, &mesh);
+    add_op(
+        &mut rt,
+        fillet_record(body, ElementId::new("el_move_edge"), anchor, 3.0),
+    );
+    let rep = regen_all(&mut rt).await;
+    let snap = published(&rep, "fillet on the moved box");
+    assert_eq!(snap.repair_summary.needs_repair_count, 0, "healthy first");
+    let (filleted_vol, _, _) = body_geom(&mut rt, body).await;
+
+    // ── DELETE the Move ⇒ the gate fires at the POST-removal index ───────────
+    rt.apply(EditCommand::RemoveOperation {
+        record: RecordId(Uuid::from_u128(OP_MOVE)),
+    })
+    .expect("RemoveOperation on the TransformBody");
+    let gated: Vec<_> = rt.repair_items().iter().filter(|i| i.seeded).collect();
+    assert!(
+        !gated.is_empty(),
+        "deleting a TransformBody seeds the edit-safety gate (VF-B5b: this was \
+         EMPTY — the delete path bypassed the gate entirely)"
+    );
+    assert!(
+        gated.iter().all(|i| i.step_index == 2),
+        "the fillet shifted from step 3 to step 2 when the Move was removed; the \
+         seeded step_index must address the POST-removal timeline, got {:?}",
+        gated.iter().map(|i| i.step_index).collect::<Vec<_>>()
+    );
+    assert!(
+        gated
+            .iter()
+            .any(|i| i.element_id.as_ref().map(ElementId::as_str) == Some("el_move_edge")),
+        "the gate names the fillet's edge ref"
+    );
+
+    let rep = regen_all(&mut rt).await;
+    let snap = published(&rep, "regen after the delete");
+    assert!(
+        snap.step_states
+            .iter()
+            .any(|(i, st)| *i == 2 && *st == StepState::NeedsRepair),
+        "the fillet step is NeedsRepair, got {:?}",
+        snap.step_states
+    );
+    let (gated_vol, _, _) = body_geom(&mut rt, body).await;
+    assert!(
+        (gated_vol - BOX_VOL).abs() < 1.0 && (gated_vol - filleted_vol).abs() > 5.0,
+        "publish ≤ m−1: the plain box, NOT a re-bound fillet — got {gated_vol}"
+    );
+
+    // ── UNDO restores the timeline AND the repair state ──────────────────────
+    assert!(rt.undo(), "undo the delete");
+    assert!(
+        rt.repair_items().iter().all(|i| !i.seeded),
+        "the delete's seeds ride the delete's own undo entry"
+    );
+    let rep = regen_all(&mut rt).await;
+    let snap = published(&rep, "regen after undo");
+    assert_eq!(snap.repair_summary.needs_repair_count, 0);
+    let (restored_vol, _, _) = body_geom(&mut rt, body).await;
+    assert!(
+        (restored_vol - filleted_vol).abs() < 1.0,
+        "the fillet is back: {filleted_vol} vs {restored_vol}"
+    );
+
+    wm.shutdown().await;
+    eprintln!("Delete gate PASS: healthy {filleted_vol:.1} → gated {gated_vol:.1}");
 }

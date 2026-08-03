@@ -122,6 +122,7 @@ pub fn op_sketch() -> Operation {
         constraints: vec![
             serde_json::json!({ "id": "c1", "type": "Horizontal", "entities": ["e1"] }),
         ],
+        host_face: None,
         extra: Default::default(),
     }))
 }

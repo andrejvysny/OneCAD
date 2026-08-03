@@ -7,6 +7,7 @@
 //! token the executor verifies, and serves canned MESH1 bytes per body.
 
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -1986,4 +1987,113 @@ async fn committed_regen_backfills_record_outputs_so_cascade_reaches_a_fillet() 
     let features = rt.projection().features;
     assert!(features[0].suppressed, "the extrude is suppressed");
     assert!(features[1].suppressed, "the fillet cascaded");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-FIX W4 / VF-B5a — the host-face stamp at record mint/refresh
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A minimal `Sketch` timeline record for `sketch`, in the LEGACY shape (no
+/// `host_face` param) — what `backfill_missing_sketch_records` authors.
+fn legacy_sketch_record(seed: u128, sketch: SketchId) -> OperationRecord {
+    use onecad_core::document::record::{PlaneKind, SketchOpParams, SketchPlaneRef};
+    let op = Operation::Known(KnownOperation::Sketch(SketchOpParams {
+        sketch,
+        plane: SketchPlaneRef {
+            kind: PlaneKind::Xy,
+            origin: Vec3::new_unchecked(0.0, 0.0, 0.0),
+            x_axis: Vec3::new_unchecked(0.0, 1.0, 0.0),
+            y_axis: Vec3::new_unchecked(-1.0, 0.0, 0.0),
+            normal: Vec3::new_unchecked(0.0, 0.0, 1.0),
+            extra: Default::default(),
+        },
+        entities: vec![],
+        constraints: vec![],
+        host_face: None,
+        extra: Default::default(),
+    }));
+    OperationRecord::new(RecordId(Uuid::from_u128(seed)), 0, "Sketch", op)
+}
+
+fn host_face_attachment(body: BodyId, el: &str) -> onecad_core::sketch::SketchAttachment {
+    onecad_core::sketch::SketchAttachment::HostFace {
+        face: ElementRef {
+            primary: Some(PrimaryRef {
+                body,
+                element: ElementId::new(el),
+                kind: ElementKind::Face,
+                extra: Default::default(),
+            }),
+            intent: None,
+            anchor: None,
+            extra: Default::default(),
+        },
+        projected_boundary_version: 1,
+    }
+}
+
+/// Finishing a face-hosted sketch STAMPS the record's `host_face`, which is what
+/// gives the dependency graph (and the §7.3 edit-safety gate) the edge.
+#[tokio::test]
+async fn finish_sketch_stamps_the_host_face_on_the_minted_record() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    rt.apply(add_extrude(0x10, 25.0)).unwrap();
+    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    let host = BodyId(Uuid::from_u128(0x10));
+
+    let sid = SketchId(Uuid::from_u128(0x501));
+    let sketch = Sketch::new(sid, "OnFace", host_face_attachment(host, "el_top"));
+    rt.apply(EditCommand::AddSketch { sketch }).unwrap();
+    rt.finish_sketch(sid).await.expect("finishSketch");
+
+    let params = rt
+        .projection()
+        .features
+        .iter()
+        .find(|f| f.op_type == "Sketch")
+        .and_then(|f| RecordId::from_str(&f.id).ok())
+        .and_then(|r| rt.operation_params(r))
+        .expect("the minted Sketch record's params");
+    assert_eq!(
+        params["hostFace"]["primary"]["elementId"], "el_top",
+        "the mint path stamps the host-face dependency, got {params}"
+    );
+}
+
+/// …but NOT when the record sits AHEAD of the body it would depend on. A legacy
+/// container's sketch records are backfilled at the FRONT of the timeline
+/// (`backfill_missing_sketch_records`), so a refresh that stamped `host_face`
+/// there would author an edge `validate_temporal` must reject — turning an
+/// ordinary re-finish into a hard error. The stamp is skipped instead; the gate's
+/// attachment bridge still covers the sketch.
+#[tokio::test]
+async fn finish_sketch_skips_the_stamp_for_a_record_ahead_of_its_host_body() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let sid = SketchId(Uuid::from_u128(0x502));
+    // step 0: the front-inserted legacy Sketch record …
+    rt.apply(EditCommand::AddOperation {
+        record: legacy_sketch_record(0x502, sid),
+        at_cursor: true,
+    })
+    .unwrap();
+    // step 1: … and only THEN the op producing its host body.
+    rt.apply(add_extrude(0x10, 25.0)).unwrap();
+    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    let host = BodyId(Uuid::from_u128(0x10));
+
+    let sketch = Sketch::new(sid, "OnFace", host_face_attachment(host, "el_top"));
+    rt.apply(EditCommand::AddSketch { sketch }).unwrap();
+    rt.finish_sketch(sid)
+        .await
+        .expect("finishSketch must NOT hard-fail on a legacy front-inserted record");
+
+    let params = rt
+        .operation_params(RecordId(Uuid::from_u128(0x502)))
+        .expect("the legacy Sketch record's params");
+    assert!(
+        params.get("hostFace").is_none(),
+        "no stamp when the host body is produced by a LATER op, got {params}"
+    );
 }

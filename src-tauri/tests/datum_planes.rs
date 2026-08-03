@@ -166,6 +166,7 @@ fn sketch_op(rec: RecordId, sk: &Sketch) -> OperationRecord {
             },
             entities: entities.as_array().cloned().unwrap_or_default(),
             constraints: constraints.as_array().cloned().unwrap_or_default(),
+            host_face: None,
             extra: Default::default(),
         })),
     )

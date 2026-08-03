@@ -94,6 +94,7 @@ fn sketch_op(rec: RecordId, sketch: SketchId) -> OperationRecord {
         },
         entities: vec![],
         constraints: vec![],
+        host_face: None,
         extra: Default::default(),
     }));
     OperationRecord::new(rec, 0, "Sketch", op)

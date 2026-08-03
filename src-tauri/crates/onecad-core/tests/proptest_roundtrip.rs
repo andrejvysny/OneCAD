@@ -184,6 +184,7 @@ fn operation_strategy() -> impl Strategy<Value = Operation> {
                 },
                 entities: vec![],
                 constraints: vec![],
+                host_face: None,
                 extra: Default::default(),
             }))
         },

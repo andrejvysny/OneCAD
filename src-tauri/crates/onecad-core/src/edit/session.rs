@@ -516,6 +516,8 @@ impl DocumentSession {
         mut record: OperationRecord,
         at_cursor: bool,
     ) -> Result<(CommandOutcome, Inverse), DomainError> {
+        // VF-M8 single-snapshot rule (see `fold_repair_inverse`).
+        let prior_repair = self.document.repair.clone();
         let id = record.record_id;
         if self.document.timeline.record_by_id(id).is_some() {
             return Err(DomainError::Validation(format!("duplicate record id {id}")));
@@ -567,6 +569,11 @@ impl DocumentSession {
             insert_index
         };
         self.rebuild_graph();
+        // VF-B5c: a record inserted at/below a seeded gate pushes that gate one step
+        // down the timeline. Without this the positional `step_index` would keep
+        // naming the OLD position — truncating regen at an innocent step while the
+        // gated one runs free. A frontier append (`index == len − 1`) shifts nothing.
+        self.document.repair.shift_seeded_for_insert(index);
 
         let new_len = self.document.timeline.len();
         let dirty = DirtyRange::new(index, new_len);
@@ -577,13 +584,14 @@ impl DocumentSession {
         };
         let mut delta = ProjectionDelta::timeline();
         delta.cursor_changed = at_cursor || frontier_append;
+        let inverse = self.fold_repair_inverse(prior_repair, Inverse::RemoveRecord { record: id });
         Ok((
             CommandOutcome {
                 projection_delta: delta,
                 dirty: Some(dirty),
                 regen,
             },
-            Inverse::RemoveRecord { record: id },
+            inverse,
         ))
     }
 
@@ -592,6 +600,9 @@ impl DocumentSession {
         id: RecordId,
         op: Operation,
     ) -> Result<(CommandOutcome, Inverse), DomainError> {
+        // VF-M8 single-snapshot rule: capture the repair state ONCE, at command
+        // entry, before anything can mutate it.
+        let prior_repair = self.document.repair.clone();
         let index = self
             .document
             .timeline
@@ -634,8 +645,9 @@ impl DocumentSession {
         // re-resolve through the REPAIR flow, never by silent descriptor scoring.
         // The seed rides THIS command's inverse (composite) so undo restores the
         // previous binding state exactly.
-        let inverse = self.seed_transform_gate(
-            index,
+        self.seed_transform_gate(index);
+        let inverse = self.fold_repair_inverse(
+            prior_repair,
             Inverse::RestoreRecord {
                 index,
                 record: Box::new(prior),
@@ -645,24 +657,55 @@ impl DocumentSession {
     }
 
     /// Seeds the SCHEMA §7.3 `TransformBody` edit-safety gate for the record at
-    /// `index` and folds the repair-state memento into `inverse`, so the seeding
-    /// undoes with the very same undo entry as the edit that caused it.
+    /// `index`. **Snapshot-free** — the calling command owns the single
+    /// command-entry repair snapshot and folds it in with
+    /// [`fold_repair_inverse`](Self::fold_repair_inverse) (VF-M8).
     ///
-    /// A no-op (returns `inverse` unchanged) when the record is not a
-    /// `TransformBody` or when nothing downstream stands on its target lineage.
-    fn seed_transform_gate(&mut self, index: usize, inverse: Inverse) -> Inverse {
-        let items = transform_gate_items(self.document.timeline.records(), index);
+    /// A no-op when the record is not a `TransformBody` or when nothing downstream
+    /// stands on its target lineage.
+    fn seed_transform_gate(&mut self, index: usize) {
+        let items = transform_gate_items(&self.document, index);
         if items.is_empty() {
+            return;
+        }
+        self.document.repair.seed(items);
+    }
+
+    /// Folds **exactly one** [`Inverse::RestoreRepair`] carrying the
+    /// command-entry repair state into `inverse` — the single-snapshot repair rule
+    /// (VF-M8).
+    ///
+    /// **Ordering is the whole point.** [`Inverse::Composite`] applies its members
+    /// in REVERSE ([`undo`](super::undo)), so the restore must sit FIRST to be
+    /// applied LAST — otherwise a later sub-inverse could re-plant repair state the
+    /// undo just removed. The composite is kept FLAT (a `Composite` argument is
+    /// spliced, not nested) so no command can ever accumulate two `RestoreRepair`s
+    /// whose reverse order then decides which snapshot wins: before this rule, a
+    /// cascade (un)suppression across two `TransformBody` records wrapped one
+    /// snapshot per transform and the LAST-taken (already-seeded) one won, leaving
+    /// the first transform's gate alive after undo.
+    ///
+    /// Returns `inverse` untouched when the command did not move the repair state.
+    fn fold_repair_inverse(
+        &self,
+        prior: crate::document::repair::RepairState,
+        inverse: Inverse,
+    ) -> Inverse {
+        if prior == self.document.repair {
             return inverse;
         }
-        let prior_repair = self.document.repair.clone();
-        self.document.repair.seed(items);
-        Inverse::Composite(vec![
-            Inverse::RestoreRepair {
-                state: Box::new(prior_repair),
-            },
-            inverse,
-        ])
+        let restore = Inverse::RestoreRepair {
+            state: Box::new(prior),
+        };
+        match inverse {
+            Inverse::Composite(list) => {
+                let mut flat = Vec::with_capacity(list.len() + 1);
+                flat.push(restore);
+                flat.extend(list);
+                Inverse::Composite(flat)
+            }
+            other => Inverse::Composite(vec![restore, other]),
+        }
     }
 
     fn edit_operation_input(
@@ -671,6 +714,8 @@ impl DocumentSession {
         path: &InputPath,
         reference: &InputRef,
     ) -> Result<(CommandOutcome, Inverse), DomainError> {
+        // VF-M8 single-snapshot rule (see `fold_repair_inverse`).
+        let prior_repair = self.document.repair.clone();
         let index = self
             .document
             .timeline
@@ -690,50 +735,65 @@ impl DocumentSession {
         // `EditOperationInput` IS the repair flow (the user re-picked the ref), so
         // it CLOSES any seeded gate on this step. Ladder-produced items for the
         // step are left alone — the next regen republishes them.
-        let mut inverse = Inverse::RestoreRecord {
-            index,
-            record: Box::new(prior),
-        };
-        if !self.document.repair.seeded_items().is_empty() {
-            let prior_repair = self.document.repair.clone();
-            self.document.repair.clear_seeded_for_step(index);
-            if prior_repair != self.document.repair {
-                inverse = Inverse::Composite(vec![
-                    Inverse::RestoreRepair {
-                        state: Box::new(prior_repair),
-                    },
-                    inverse,
-                ]);
-            }
-        }
+        self.document.repair.clear_seeded_for_step(index);
         // A transform whose INPUT changed moves a different body set — same gate.
-        let inverse = self.seed_transform_gate(index, inverse);
+        self.seed_transform_gate(index);
+        let inverse = self.fold_repair_inverse(
+            prior_repair,
+            Inverse::RestoreRecord {
+                index,
+                record: Box::new(prior),
+            },
+        );
         Ok(self.dirty_record_outcome(index, inverse))
     }
 
     fn remove_operation(&mut self, id: RecordId) -> Result<(CommandOutcome, Inverse), DomainError> {
+        // VF-M8 single-snapshot rule (see `fold_repair_inverse`).
+        let prior_repair = self.document.repair.clone();
         let index = self
             .document
             .timeline
             .index_of(id)
             .ok_or(DomainError::RecordNotFound(id))?;
         let record = self.document.timeline.record(index).unwrap().clone();
+        // VF-B5b: the moved set must be read BEFORE the record leaves the timeline.
+        let moved = transform_moved_bodies(&record);
         let cursor = self.document.timeline.cursor();
         let dirty = self.document.timeline.remove(id)?;
         self.rebuild_graph();
+        // VF-B5c: `step_index` is positional — every gate above the hole shifts up
+        // by one, and the removed step's own gates die with the record they guarded
+        // (nothing could ever close them, and the ceiling would pin regen forever).
+        self.document.repair.shift_seeded_for_remove(index);
+        // VF-B5b: DELETING a `TransformBody` moves downstream geometry exactly like
+        // suppressing it (the placement disappears), so it seeds the SAME gate —
+        // otherwise the one edit that removes a placement outright is the one edit
+        // that re-binds every downstream ref silently. The scan starts AT `index`
+        // because the timeline has already closed up over the deleted record, so
+        // the emitted `step_index`es address the POST-removal timeline.
+        let label = format!(
+            "reference re-bind blocked by a deleted Move (was step {index}); repair to re-pick"
+        );
+        let items = gate_items_for_moved(&self.document, &moved, index, &label);
+        self.document.repair.seed(items);
         let mut delta = ProjectionDelta::timeline();
         delta.cursor_changed = index < cursor;
+        let inverse = self.fold_repair_inverse(
+            prior_repair,
+            Inverse::InsertRecord {
+                index,
+                record: Box::new(record),
+                cursor,
+            },
+        );
         Ok((
             CommandOutcome {
                 projection_delta: delta,
                 dirty: Some(dirty),
                 regen: RegenHint::ToEnd,
             },
-            Inverse::InsertRecord {
-                index,
-                record: Box::new(record),
-                cursor,
-            },
+            inverse,
         ))
     }
 
@@ -766,6 +826,8 @@ impl DocumentSession {
         suppressed: bool,
         cascade: bool,
     ) -> Result<(CommandOutcome, Inverse), DomainError> {
+        // VF-M8 single-snapshot rule (see `fold_repair_inverse`).
+        let prior_repair = self.document.repair.clone();
         let index = self
             .document
             .timeline
@@ -799,13 +861,16 @@ impl DocumentSession {
         // `TransformBody` moves downstream geometry exactly like a params edit
         // (the placement appears / disappears), so it seeds the same gate. Applied
         // for every affected record so a cascade that (un)suppresses several
-        // transforms gates all of them, on this command's single inverse.
-        let mut inverse = Inverse::Composite(inverses);
+        // transforms gates all of them — under ONE command-entry snapshot
+        // (VF-M8: the per-transform snapshots this loop used to take nested, and
+        // undo's reverse application then restored the LAST one, which already
+        // carried the first transform's seeds).
         for &rid in &affected {
             if let Some(i) = self.document.timeline.index_of(rid) {
-                inverse = self.seed_transform_gate(i, inverse);
+                self.seed_transform_gate(i);
             }
         }
+        let inverse = self.fold_repair_inverse(prior_repair, Inverse::Composite(inverses));
 
         let dirty = DirtyRange::new(index, self.document.timeline.len());
         Ok((
@@ -913,6 +978,8 @@ impl DocumentSession {
         plane: crate::sketch::SketchPlane,
         attachment: crate::sketch::SketchAttachment,
     ) -> Result<(CommandOutcome, Inverse), DomainError> {
+        // VF-M8 single-snapshot rule (see `fold_repair_inverse`).
+        let prior_repair = self.document.repair.clone();
         if !self.document.sketches.contains_key(&id) {
             return Err(DomainError::Validation(format!("sketch {id} not found")));
         }
@@ -924,14 +991,79 @@ impl DocumentSession {
         next.plane = plane;
         next.attachment = attachment;
         self.stamp_datum_plane(&mut next)?;
+        let host_face = next.host_face().cloned();
         self.document.sketches.insert(id, next);
-        Ok((
-            self.sketch_dirty_outcome(id),
-            Inverse::RestoreSketch {
-                id,
-                prior: Some(Box::new(prior)),
-            },
-        ))
+
+        // VF-B5a: re-picking the host must RESTAMP the record's `host_face` (and
+        // re-derive its inputs), else the dependency edge — and with it the
+        // TransformBody gate — keeps naming the OLD face forever. Re-picking a host
+        // IS the repair action for that step, so it also closes the step's seeded
+        // gate (mirrors `edit_operation_input`).
+        let mut inverse = Inverse::RestoreSketch {
+            id,
+            prior: Some(Box::new(prior)),
+        };
+        if let Some((index, prior_record)) = self.restamp_sketch_host_face(id, host_face) {
+            self.rebuild_graph();
+            self.document.repair.clear_seeded_for_step(index);
+            inverse = Inverse::Composite(vec![
+                inverse,
+                Inverse::RestoreRecord {
+                    index,
+                    record: Box::new(prior_record),
+                },
+            ]);
+        }
+        let inverse = self.fold_repair_inverse(prior_repair, inverse);
+        Ok((self.sketch_dirty_outcome(id), inverse))
+    }
+
+    /// Rewrites the `host_face` param (and the derived `inputs`) of the `Sketch`
+    /// record producing `id`. Returns `(index, prior record)` when a record was
+    /// actually changed, `None` otherwise.
+    ///
+    /// **Anti-time-travel guard.** The stamp is SKIPPED when the host body is not
+    /// produced strictly before this record (`produces_before`) — a legacy
+    /// front-inserted sketch record (`backfill_missing_sketch_records`) can sit
+    /// ahead of the body it is glued to, and stamping there would author an edge
+    /// the timeline cannot honour. Such a record is not downstream of any transform
+    /// on that body anyway, so nothing is left ungated.
+    fn restamp_sketch_host_face(
+        &mut self,
+        id: SketchId,
+        host_face: Option<ElementRef>,
+    ) -> Option<(usize, OperationRecord)> {
+        let (index, prior_record) = self
+            .document
+            .timeline
+            .records()
+            .iter()
+            .enumerate()
+            .find_map(|(i, r)| match &r.op {
+                Operation::Known(KnownOperation::Sketch(p)) if p.sketch == id => {
+                    Some((i, r.clone()))
+                }
+                _ => None,
+            })?;
+        let host_body = host_face
+            .as_ref()
+            .and_then(|f| f.primary.as_ref())
+            .map(|p| p.body);
+        let host_face = match host_body {
+            Some(b) if !self.graph.produces_before(b, prior_record.record_id) => None,
+            _ => host_face,
+        };
+        let mut next = prior_record.clone();
+        let Operation::Known(KnownOperation::Sketch(p)) = &mut next.op else {
+            return None;
+        };
+        if p.host_face == host_face {
+            return None;
+        }
+        p.host_face = host_face;
+        next.inputs = next.op.derive_inputs();
+        replace_record_at(&mut self.document.timeline, index, next);
+        Some((index, prior_record))
     }
 
     fn sketch_edit(
@@ -1508,30 +1640,60 @@ fn transform_moved_bodies(rec: &OperationRecord) -> Vec<BodyId> {
 /// body without naming an element (a boolean tool, a nested transform), one
 /// whole-record item. **Suppressed downstream records are skipped**: they never
 /// execute, so gating them would stall every op after them for no gain.
-fn transform_gate_items(records: &[OperationRecord], index: usize) -> Vec<RepairItem> {
-    let Some(rec) = records.get(index) else {
+///
+/// Takes the whole [`Document`] rather than just the records because of the
+/// LEGACY-SKETCH BRIDGE (VF-B5a): a `Sketch` record minted before
+/// `SketchOpParams::host_face` existed declares no inputs at all, so its host-face
+/// dependency is invisible to `inputs.bodies`. Those records are never rewritten
+/// (that would move the golden prefix hash of every legacy document), so the gate
+/// consults `Document.sketches[..].attachment` for them instead — the sketch is
+/// gated identically until its next re-finish stamps the param.
+fn transform_gate_items(document: &Document, index: usize) -> Vec<RepairItem> {
+    let Some(rec) = document.timeline.records().get(index) else {
         return Vec::new();
     };
     let moved = transform_moved_bodies(rec);
+    let label =
+        format!("reference re-bind blocked by an edited Move (step {index}); repair to re-pick");
+    gate_items_for_moved(document, &moved, index + 1, &label)
+}
+
+/// The gate items for every record at or after `from_step` that stands on one of
+/// the `moved` bodies — the scanning core shared by the EDIT/SUPPRESS gate
+/// ([`transform_gate_items`], which starts one past the transform) and the DELETE
+/// gate (VF-B5b, which starts AT the removed index because the timeline has
+/// already closed up over it).
+fn gate_items_for_moved(
+    document: &Document,
+    moved: &[BodyId],
+    from_step: usize,
+    label: &str,
+) -> Vec<RepairItem> {
     if moved.is_empty() {
         return Vec::new();
     }
+    let records = document.timeline.records();
     let mut items = Vec::new();
-    for (step, down) in records.iter().enumerate().skip(index + 1) {
-        if down.suppressed || !down.inputs.bodies.iter().any(|b| moved.contains(b)) {
+    for (step, down) in records.iter().enumerate().skip(from_step) {
+        if down.suppressed {
             continue;
         }
-        let label = format!(
-            "reference re-bind blocked by an edited Move (step {index}); repair to re-pick"
-        );
+        if !down.inputs.bodies.iter().any(|b| moved.contains(b)) {
+            // Legacy hosted sketch: no derived inputs, but the document-level
+            // attachment says it stands on a moved body.
+            if let Some(el) = legacy_host_face_element(document, down, moved) {
+                items.push(gate_item(
+                    step,
+                    &down.record_id.to_string(),
+                    0,
+                    Some(el),
+                    label,
+                ));
+            }
+            continue;
+        }
         if down.inputs.elements.is_empty() {
-            items.push(gate_item(
-                step,
-                &down.record_id.to_string(),
-                0,
-                None,
-                &label,
-            ));
+            items.push(gate_item(step, &down.record_id.to_string(), 0, None, label));
             continue;
         }
         for (k, el) in down.inputs.elements.iter().enumerate() {
@@ -1540,11 +1702,37 @@ fn transform_gate_items(records: &[OperationRecord], index: usize) -> Vec<Repair
                 &down.record_id.to_string(),
                 k,
                 Some(el.clone()),
-                &label,
+                label,
             ));
         }
     }
     items
+}
+
+/// The host-face element of a **legacy** `Sketch` record (params carry no
+/// `host_face`) whose document attachment binds it to one of `moved` — the
+/// VF-B5a bridge described on [`transform_gate_items`]. `None` for anything else,
+/// including a record that already carries the param (that one is covered by its
+/// derived inputs) and a host ref with no `primary` binding (nothing to gate on).
+fn legacy_host_face_element(
+    document: &Document,
+    record: &OperationRecord,
+    moved: &[BodyId],
+) -> Option<crate::ids::ElementId> {
+    let Operation::Known(KnownOperation::Sketch(p)) = &record.op else {
+        return None;
+    };
+    if p.host_face.is_some() {
+        return None;
+    }
+    let SketchAttachment::HostFace { face, .. } = &document.sketches.get(&p.sketch)?.attachment
+    else {
+        return None;
+    };
+    let primary = face.primary.as_ref()?;
+    moved
+        .contains(&primary.body)
+        .then(|| primary.element.clone())
 }
 
 /// One seeded gate item. `ref_id` follows the worker's `"<opId>.input<k>"`

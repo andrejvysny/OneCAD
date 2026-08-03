@@ -2120,7 +2120,7 @@ impl DocumentRuntime {
         let Some(sketch) = self.session.document().sketch(sketch_id).cloned() else {
             return Ok(None);
         };
-        let op = sketch_record_op(&sketch);
+        let mut op = sketch_record_op(&sketch);
         let existing = self
             .session
             .document()
@@ -2133,6 +2133,30 @@ impl DocumentRuntime {
                 }
                 _ => None,
             });
+        // VF-B5a anti-time-travel guard: a legacy record backfilled at the FRONT of
+        // the timeline can sit ahead of its host body's producer, and stamping
+        // `host_face` on it would author an edge `validate_temporal` must reject —
+        // turning an ordinary re-finish into a hard error. Drop the stamp for that
+        // record instead; the gate's attachment bridge still covers the sketch.
+        if let (Some((record_id, _)), Operation::Known(KnownOperation::Sketch(p))) =
+            (existing.as_ref(), &mut op)
+        {
+            let host_body = p.host_face.as_ref().and_then(|f| f.primary.as_ref());
+            if let Some(primary) = host_body {
+                if !self
+                    .session
+                    .graph()
+                    .produces_before(primary.body, *record_id)
+                {
+                    tracing::warn!(
+                        "sketch record: sketch={sketch_id} record={record_id} precedes its host \
+                         body {} — leaving hostFace unstamped (anti-time-travel)",
+                        primary.body
+                    );
+                    p.host_face = None;
+                }
+            }
+        }
         match existing {
             None => {
                 let record = OperationRecord::new(RecordId(Uuid::new_v4()), 0, "Sketch", op);
@@ -2796,6 +2820,13 @@ fn sketch_record_op(sketch: &Sketch) -> Operation {
         plane: plane_ref_of(sketch),
         entities: entities.as_array().cloned().unwrap_or_default(),
         constraints: constraints.as_array().cloned().unwrap_or_default(),
+        // VF-B5a: stamp the host-face dependency at MINT/REFRESH time — the only
+        // moment the record is authored from the live sketch. It is deliberately
+        // never derived from the attachment on load (`inputs` sits inside the golden
+        // prefix hash and is re-derived on every deserialize, so a backfill would
+        // move every legacy document's hash AND bytes); legacy records stay `None`
+        // and are gated through the edit layer's attachment bridge instead.
+        host_face: sketch.host_face().cloned(),
         extra: Default::default(),
     }))
 }
@@ -2834,12 +2865,18 @@ fn backfill_missing_sketch_records(doc: &mut Document) {
     let mut records: Vec<OperationRecord> = missing
         .into_iter()
         .map(|sid| {
-            OperationRecord::new(
-                RecordId(Uuid::new_v4()),
-                0,
-                "Sketch",
-                sketch_record_op(&doc.sketches[&sid]),
-            )
+            let mut op = sketch_record_op(&doc.sketches[&sid]);
+            // VF-B5a: these records go in at the FRONT, ahead of every existing op —
+            // including whatever produces a host-face sketch's host body. Stamping
+            // `host_face` here would author an input edge pointing at a LATER
+            // producer (anti-time-travel), so the backfill deliberately drops it.
+            // The gate's attachment bridge (`transform_gate_items`) still covers
+            // these sketches, and the next `finish_sketch` re-stamps if the record's
+            // position allows it.
+            if let Operation::Known(KnownOperation::Sketch(p)) = &mut op {
+                p.host_face = None;
+            }
+            OperationRecord::new(RecordId(Uuid::new_v4()), 0, "Sketch", op)
         })
         .collect();
     records.extend_from_slice(doc.timeline.records());

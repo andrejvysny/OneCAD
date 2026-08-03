@@ -367,9 +367,19 @@ impl Operation {
             Operation::Opaque(_) => return inputs,
         };
         match known {
-            // No C++ analogue (Sketch is a new v2 op). A sketch feature has no
-            // upstream feature dependency in V1.
-            KnownOperation::Sketch(_) => {}
+            // No C++ analogue (Sketch is a new v2 op). A world-/datum-attached
+            // sketch has no upstream feature dependency. A HOST-FACE sketch does:
+            // its frozen frame is glued to a face of a model body, so the body (and
+            // the face element) are real inputs — VF-B5a. Mirrors the Hole arm's
+            // shape (host body + host face element from the ref's `primary`); an
+            // intent-only ref contributes nothing and is bound by the ladder.
+            // Absent on legacy records (never backfilled — see `SketchOpParams`).
+            KnownOperation::Sketch(p) => {
+                if let Some(primary) = p.host_face.as_ref().and_then(|f| f.primary.as_ref()) {
+                    inputs.push_body(primary.body);
+                    inputs.push_element(primary.element.clone());
+                }
+            }
 
             // Extrude: profile sketch + (target body iff boolean != NewBody).
             // Parity: DependencyGraph.cpp:254-256 (SketchRegionRef→sketch),
@@ -805,6 +815,28 @@ pub struct SketchOpParams {
     pub entities: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub constraints: Vec<serde_json::Value>,
+    /// The host FACE a `HostFace`-attached sketch stands on (VF-B5a).
+    ///
+    /// **Why the record carries it at all.** The authoritative attachment lives on
+    /// `Document.sketches[id].attachment` and is core-owned; but
+    /// [`Operation::derive_inputs`] only sees the *record*, so without this field a
+    /// face-hosted sketch declares NO dependency on the body it is glued to. The
+    /// dependency graph then cannot see the edge, and — the actual defect — the
+    /// SCHEMA §7.3 `TransformBody` edit-safety gate cannot gate it: moving the host
+    /// body silently re-projects every downstream cut against stale geometry.
+    ///
+    /// **Never backfilled.** `inputs` is inside the golden prefix hash
+    /// (`regen::planner`) and is re-derived on every deserialize, so populating this
+    /// from the attachment at load time would move the hash and the bytes of every
+    /// legacy document. It is stamped ONLY when the record is minted / refreshed
+    /// from a live sketch, or when the attachment is re-picked. Legacy records keep
+    /// `None` and are gated through the edit layer's attachment bridge instead.
+    ///
+    /// **Wire-omitted**: SCHEMA §7.3 states the attachment never crosses the wire,
+    /// so the wire lowering strips this field (it is a `document.json` + planner-hash
+    /// field only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_face: Option<ElementRef>,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     pub extra: Extra,
 }

@@ -477,6 +477,7 @@ async fn an_extrude_off_a_face_hosted_sketch_lands_on_that_frame() {
         },
         entities: entities.as_array().cloned().unwrap_or_default(),
         constraints: constraints.as_array().cloned().unwrap_or_default(),
+        host_face: None,
         extra: Default::default(),
     };
     rt.apply(EditCommand::AddOperation {

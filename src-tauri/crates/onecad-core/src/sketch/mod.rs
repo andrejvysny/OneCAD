@@ -365,6 +365,22 @@ impl Sketch {
         Self::new(id, name, SketchAttachment::World { plane })
     }
 
+    /// The host FACE this sketch is glued to, or `None` for a world/datum
+    /// attachment.
+    ///
+    /// The single reader of [`SketchAttachment::HostFace`]'s `face` used to stamp
+    /// `SketchOpParams::host_face` — the timeline record's copy of the host-face
+    /// dependency (VF-B5a). Kept here so the record-mint path (app crate) and the
+    /// attachment-retarget path (edit session) can never disagree about what the
+    /// host ref is.
+    #[must_use]
+    pub fn host_face(&self) -> Option<&ElementRef> {
+        match &self.attachment {
+            SketchAttachment::HostFace { face, .. } => Some(face),
+            SketchAttachment::World { .. } | SketchAttachment::Datum { .. } => None,
+        }
+    }
+
     /// The entities, in authoritative order.
     #[must_use]
     pub fn entities(&self) -> &[SketchEntity] {

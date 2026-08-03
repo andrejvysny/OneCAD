@@ -259,6 +259,7 @@ fn lower_operation(
 ) -> Value {
     let op_val = serde_json::to_value(operation).unwrap_or(Value::Null);
     let (op_type, mut params) = split_operation(operation, op_val);
+    strip_sketch_host_face(operation, &mut params);
     to_wire_body_form(&mut params);
     lift_profile_to_params(&mut params);
     inject_import_path(operation, &mut params);
@@ -281,6 +282,27 @@ fn split_operation(operation: &Operation, op_val: Value) -> (Value, Value) {
             let op_type = obj.remove("opType").unwrap_or(Value::Null);
             (op_type, Value::Object(obj))
         }
+    }
+}
+
+/// Drops the core-only `hostFace` key from `Sketch` op params (VF-B5a).
+///
+/// `SketchOpParams::host_face` is the RECORD's copy of a face-hosted sketch's
+/// attachment: it exists so `derive_inputs` can declare the dependency (and the
+/// §7.3 edit-safety gate can see it), and it participates in the planner's
+/// prefix hash. It is NOT part of the §7.3 `Sketch` wire params — the SCHEMA
+/// states the attachment is core-owned and never crosses the wire, and the worker
+/// stores raw sketch params verbatim, so emitting it would put a core-only field
+/// into every plan frame for no consumer. Legacy/world/datum records carry `None`
+/// and never render the key at all, so this only bites newly stamped host-face
+/// records. (Rust remains the sole hash authority — the planner hashes the CORE
+/// params, so this omission cannot move a hash.)
+fn strip_sketch_host_face(operation: &Operation, params: &mut Value) {
+    if !matches!(operation, Operation::Known(KnownOperation::Sketch(_))) {
+        return;
+    }
+    if let Some(map) = params.as_object_mut() {
+        map.remove("hostFace");
     }
 }
 
@@ -2548,6 +2570,56 @@ fn u64_at(v: Option<&Value>, key: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// VF-B5a: `SketchOpParams::host_face` is a CORE-ONLY dependency field. SCHEMA
+    /// §7.3 states the sketch attachment never crosses the wire, and the worker
+    /// stores raw sketch params verbatim, so the lowering must drop it — otherwise
+    /// every plan frame for a face-hosted sketch would carry an undocumented key
+    /// with no consumer, and every runtime-baseline fixture holding one would move.
+    #[test]
+    fn sketch_host_face_is_dropped_from_the_wire_params() {
+        use onecad_core::document::record::{PlaneKind, SketchOpParams, SketchPlaneRef};
+        use onecad_core::document::refs::{ElementKind, ElementRef, PrimaryRef};
+        use onecad_core::ids::{ElementId, SketchId};
+        use onecad_core::math::Vec3;
+
+        let body = BodyId(Uuid::from_u128(0x77));
+        let op = Operation::Known(KnownOperation::Sketch(SketchOpParams {
+            sketch: SketchId(Uuid::from_u128(0x11)),
+            plane: SketchPlaneRef {
+                kind: PlaneKind::Xy,
+                origin: Vec3::new_unchecked(0.0, 0.0, 0.0),
+                x_axis: Vec3::new_unchecked(0.0, 1.0, 0.0),
+                y_axis: Vec3::new_unchecked(-1.0, 0.0, 0.0),
+                normal: Vec3::new_unchecked(0.0, 0.0, 1.0),
+                extra: Default::default(),
+            },
+            entities: vec![],
+            constraints: vec![],
+            host_face: Some(ElementRef {
+                primary: Some(PrimaryRef {
+                    body,
+                    element: ElementId::new("el_top"),
+                    kind: ElementKind::Face,
+                    extra: Default::default(),
+                }),
+                intent: None,
+                anchor: None,
+                extra: Default::default(),
+            }),
+            extra: Default::default(),
+        }));
+        let lowered = preview_wire_op(&op, "op_1");
+        assert_eq!(lowered["opType"], "Sketch");
+        assert!(
+            lowered["params"].get("hostFace").is_none(),
+            "hostFace must not reach the worker, got {}",
+            lowered["params"]
+        );
+        // …and the derived record inputs are likewise not echoed into the §7.3
+        // `inputs[]` array for a Sketch op (the worker resolves nothing there).
+        assert_eq!(lowered["inputs"], serde_json::json!([]));
+    }
 
     /// MEASURE V1a: `magnitude` / `size` / `curveType` used to be DROPPED here.
     #[test]

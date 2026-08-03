@@ -428,6 +428,7 @@ fn sketch_record(rec: u128, sk: &Sketch, plane: SketchPlaneRef) -> OperationReco
         plane,
         entities: entities.as_array().cloned().unwrap_or_default(),
         constraints: constraints.as_array().cloned().unwrap_or_default(),
+        host_face: None,
         extra: Default::default(),
     };
     OperationRecord::new(
