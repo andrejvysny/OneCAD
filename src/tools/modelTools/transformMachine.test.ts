@@ -1,0 +1,231 @@
+/*
+ * `transformStep` — the placement FSM (WP-B W1).
+ *
+ * The subtle contract is that the state is the record's CUMULATIVE canonical
+ * form, not a per-gesture delta, and the chip's number is a VIEW of the one
+ * component the current mode+axis addresses. These specs pin the consequences:
+ * an axis switch reveals a different stored component instead of re-writing the
+ * old one, a move never disturbs the stored rotation (and vice versa), and the
+ * frozen pivot survives every event.
+ */
+import { describe, it, expect } from "vitest";
+import {
+  transformInit,
+  transformStep,
+  transformValue,
+  transformParamsOf,
+  isIdentityPlacement,
+  axisIndex,
+  type TransformFsm,
+} from "./modelToolMachine";
+
+const armed = (): TransformFsm =>
+  transformStep(transformInit(), { kind: "arm", targets: ["b1"], center: [5, 6, 7] }).state;
+
+const step = (s: TransformFsm, ...events: Parameters<typeof transformStep>[1][]): TransformFsm =>
+  events.reduce((acc, e) => transformStep(acc, e).state, s);
+
+describe("transformStep — arm", () => {
+  it("arms on a non-empty target list and asks for a ghost", () => {
+    const r = transformStep(transformInit(), { kind: "arm", targets: ["b1", "b2"] });
+    expect(r.state.phase).toBe("armed");
+    expect(r.state.targets).toEqual(["b1", "b2"]);
+    expect(r.effect).toBe("ghost");
+  });
+
+  it("refuses to arm with no targets", () => {
+    const r = transformStep(transformInit(), { kind: "arm", targets: [] });
+    expect(r.state.phase).toBe("idle");
+    expect(r.effect).toBe("none");
+  });
+
+  it("defaults to Move · X · zero placement", () => {
+    const s = armed();
+    expect(s.mode).toBe("move");
+    expect(s.axis).toBe("X");
+    expect(transformValue(s)).toBe(0);
+    expect(isIdentityPlacement(s)).toBe(true);
+  });
+
+  it("seeds the FULL stored shape at arm (fold / re-edit)", () => {
+    const s = transformStep(transformInit(), {
+      kind: "arm",
+      targets: ["b1"],
+      mode: "rotate",
+      axis: "Y",
+      translate: [30, -4, 0],
+      angleDeg: 45,
+      rotAxis: "Y",
+      center: [1, 2, 3],
+      copy: true,
+    }).state;
+    expect(s.translate).toEqual([30, -4, 0]);
+    expect(s.angleDeg).toBe(45);
+    expect(s.center).toEqual([1, 2, 3]);
+    expect(s.copy).toBe(true);
+    expect(transformValue(s)).toBe(45);
+  });
+
+  it("copies the seeded vectors rather than aliasing the caller's arrays", () => {
+    const center: [number, number, number] = [1, 2, 3];
+    const s = transformStep(transformInit(), { kind: "arm", targets: ["b1"], center }).state;
+    center[0] = 999;
+    expect(s.center[0]).toBe(1);
+  });
+});
+
+describe("transformStep — chip edits", () => {
+  it("setValue writes the component the current mode+axis addresses", () => {
+    const s = step(armed(), { kind: "setValue", value: 30 });
+    expect(s.translate).toEqual([30, 0, 0]);
+    expect(s.angleDeg).toBe(0);
+  });
+
+  it("an axis switch REVEALS the other stored component, it does not move the value", () => {
+    const s = step(
+      armed(),
+      { kind: "setValue", value: 30 }, // X = 30
+      { kind: "setAxis", axis: "Y" },
+    );
+    expect(transformValue(s)).toBe(0); // Y is still untouched
+    expect(s.translate).toEqual([30, 0, 0]); // …and X survived the switch
+    const both = step(s, { kind: "setValue", value: 12 });
+    expect(both.translate).toEqual([30, 12, 0]);
+  });
+
+  it("a rotation leaves the stored translation alone, and vice versa", () => {
+    const s = step(
+      armed(),
+      { kind: "setValue", value: 30 },
+      { kind: "setMode", mode: "rotate" },
+      { kind: "setAxis", axis: "Z" },
+      { kind: "setValue", value: 90 },
+    );
+    expect(s.translate).toEqual([30, 0, 0]);
+    expect(s.angleDeg).toBe(90);
+    expect(s.rotAxis).toBe("Z");
+    const back = step(s, { kind: "setMode", mode: "move" }, { kind: "setAxis", axis: "X" });
+    expect(transformValue(back)).toBe(30);
+    expect(back.angleDeg).toBe(90);
+  });
+
+  it("typing an angle CLAIMS the axis — the record carries one rotation", () => {
+    const s = step(
+      armed(),
+      { kind: "setMode", mode: "rotate" },
+      { kind: "setValue", value: 15 }, // about the default X
+      { kind: "setAxis", axis: "Y" },
+    );
+    expect(transformValue(s)).toBe(0); // Y is not the stored rotation axis yet
+    const claimed = step(s, { kind: "setValue", value: 90 });
+    expect(claimed.rotAxis).toBe("Y");
+    expect(claimed.angleDeg).toBe(90);
+  });
+
+  it("a non-finite typed value falls back to 0 rather than poisoning the record", () => {
+    const s = step(armed(), { kind: "setValue", value: Number.NaN });
+    expect(s.translate).toEqual([0, 0, 0]);
+  });
+
+  it("the frozen pivot survives every chip edit", () => {
+    const s = step(
+      armed(),
+      { kind: "setValue", value: 30 },
+      { kind: "setMode", mode: "rotate" },
+      { kind: "setValue", value: 90 },
+    );
+    expect(s.center).toEqual([5, 6, 7]);
+  });
+
+  it("ignores chip edits while idle", () => {
+    const r = transformStep(transformInit(), { kind: "setValue", value: 30 });
+    expect(r.effect).toBe("none");
+    expect(r.state.translate).toEqual([0, 0, 0]);
+  });
+
+  it("`seed` re-seeds an ALREADY-armed placement (async re-edit params)", () => {
+    const s = transformStep(armed(), {
+      kind: "seed",
+      translate: [0, 50, 0],
+      axis: "Y",
+      center: [9, 9, 9],
+    }).state;
+    expect(s.translate).toEqual([0, 50, 0]);
+    expect(s.center).toEqual([9, 9, 9]);
+    expect(transformValue(s)).toBe(50);
+    expect(s.targets).toEqual(["b1"]); // the arm's targets are untouched
+  });
+});
+
+describe("transformStep — lifecycle", () => {
+  it("apply moves to committing and emits commit", () => {
+    const r = transformStep(armed(), { kind: "apply" });
+    expect(r.state.phase).toBe("committing");
+    expect(r.effect).toBe("commit");
+  });
+
+  it("cancel from armed resets and emits cancel; from idle it is inert", () => {
+    expect(transformStep(armed(), { kind: "cancel" }).effect).toBe("cancel");
+    expect(transformStep(transformInit(), { kind: "cancel" }).effect).toBe("none");
+  });
+});
+
+describe("transformParamsOf — the canonical record shape", () => {
+  it("a pure move carries a zero rotation about the FROZEN centre", () => {
+    const p = transformParamsOf(step(armed(), { kind: "setValue", value: 30 }));
+    expect(p).toEqual({
+      targets: ["b1"],
+      translate: [30, 0, 0],
+      // The pivot is stored even though a translation does not use it — the next
+      // re-edit must recompose against the SAME point.
+      rotate: { center: [5, 6, 7], axis: [0, 0, 1], angleDeg: 0 },
+      copy: false,
+    });
+  });
+
+  it("a pure rotate carries a zero translation and the picked world axis", () => {
+    const p = transformParamsOf(
+      step(armed(), { kind: "setMode", mode: "rotate" }, { kind: "setAxis", axis: "Y" }, { kind: "setValue", value: 90 }),
+    );
+    expect(p.translate).toEqual([0, 0, 0]);
+    expect(p.rotate).toEqual({ center: [5, 6, 7], axis: [0, 1, 0], angleDeg: 90 });
+  });
+
+  it("a combined placement carries BOTH halves in one record", () => {
+    const p = transformParamsOf(
+      step(
+        armed(),
+        { kind: "setValue", value: 30 },
+        { kind: "setAxis", axis: "Z" },
+        { kind: "setValue", value: -5 },
+        { kind: "setMode", mode: "rotate" },
+        { kind: "setValue", value: 45 },
+      ),
+    );
+    expect(p.translate).toEqual([30, 0, -5]);
+    expect(p.rotate.angleDeg).toBe(45);
+    expect(p.rotate.axis).toEqual([0, 0, 1]);
+  });
+
+  it("mirrors targets in order and does not alias the FSM's arrays", () => {
+    const s = transformStep(transformInit(), { kind: "arm", targets: ["b2", "b1"] }).state;
+    const p = transformParamsOf(s);
+    expect(p.targets).toEqual(["b2", "b1"]);
+    p.targets.push("b3");
+    expect(s.targets).toEqual(["b2", "b1"]);
+  });
+});
+
+describe("axisIndex / isIdentityPlacement", () => {
+  it("maps the three world axes to their vector slots", () => {
+    expect([axisIndex("X"), axisIndex("Y"), axisIndex("Z")]).toEqual([0, 1, 2]);
+  });
+
+  it("identity is zero translation AND zero angle", () => {
+    expect(isIdentityPlacement(armed())).toBe(true);
+    expect(isIdentityPlacement(step(armed(), { kind: "setValue", value: 1 }))).toBe(false);
+    expect(
+      isIdentityPlacement(step(armed(), { kind: "setMode", mode: "rotate" }, { kind: "setValue", value: 1 })),
+    ).toBe(false);
+  });
+});

@@ -43,6 +43,7 @@ import { datumGhostPlane } from "@/viewport/engine/DatumLayer";
 import { geometricLabel, type PickablePlane } from "@/viewport/engine/PlanePicker";
 import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
 import { buildBodyObjects, getEntry, remove as removeMesh, swap as swapMesh } from "@/viewport/mesh/meshRegistry";
+import type { MeshEntry } from "@/viewport/mesh/meshRegistry";
 import { toolStore } from "@/stores/toolStore";
 import { trace, traceWarn } from "@/debug/trace";
 import { logDebug } from "@/debug/log";
@@ -81,6 +82,8 @@ import {
   mirrorGhostTransforms,
   clampPatternCount,
   countFromValueText,
+  placementMatrix,
+  type GhostTransform,
 } from "@/tools/preview/patternPreview";
 import { PreviewThrottle } from "@/tools/preview/previewThrottle";
 import {
@@ -101,6 +104,12 @@ import {
   circularPatternStep as circularPatternStepRaw,
   mirrorInit,
   mirrorStep as mirrorStepRaw,
+  transformInit,
+  transformStep as transformStepRaw,
+  transformParamsOf,
+  transformValue,
+  axisIndex,
+  isIdentityPlacement,
   regionSelectInit,
   regionSelectStep,
   DEFAULT_EXTRUDE_DEPTH,
@@ -121,10 +130,13 @@ import {
   type MirrorFsm,
   type PatternAxis,
   type MirrorPlane,
+  type TransformFsm,
+  type TransformMode,
+  type TransformSeed,
   type RegionSelectState,
 } from "./modelToolMachine";
 import { withPhaseLog } from "./fsmLog";
-import type { FeatureBooleanMode } from "@/ipc/types";
+import type { FeatureBooleanMode, TransformBodyParams } from "@/ipc/types";
 
 // ── Observability wrapping (DEV-OBSERVABILITY Wave F) ────────────────────────
 // The eight phase-bearing reducers are wrapped ONCE here, so every call site
@@ -138,8 +150,81 @@ const shellStep = withPhaseLog("shell", shellStepRaw);
 const linearPatternStep = withPhaseLog("linearPattern", linearPatternStepRaw);
 const circularPatternStep = withPhaseLog("circularPattern", circularPatternStepRaw);
 const mirrorStep = withPhaseLog("mirror", mirrorStepRaw);
+const transformStep = withPhaseLog("transform", transformStepRaw);
 
 const DRAG_PX = 4;
+
+/** Set-equality over body ids (order-insensitive; ids are unique per selection). */
+function sameIdSet(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  const set = new Set(b);
+  return a.every((id) => set.has(id));
+}
+
+/** A stored Scalar (`{value}`) or bare number, as a number. Defaults to 0. */
+function storedScalar(v: unknown): number {
+  if (typeof v === "number") return v;
+  if (v && typeof v === "object" && typeof (v as { value?: unknown }).value === "number") {
+    return (v as { value: number }).value;
+  }
+  return 0;
+}
+
+/** A stored `[x,y,z]`, or null when it is not three finite numbers. */
+function storedVec3(v: unknown): Vec3 | null {
+  if (!Array.isArray(v) || v.length !== 3) return null;
+  const out = v.map(storedScalar);
+  return out.every(Number.isFinite) ? [out[0], out[1], out[2]] : null;
+}
+
+/**
+ * Rebuild the full placement authoring state from a stored `TransformBodyParams`
+ * (the wire serde shape `get_operation_params` returns).
+ *
+ * Returns null — refusing to arm — when the record is not something the W1 chip
+ * can represent: no targets, or a rotation about an axis that is not one of the
+ * three the axis picker offers. Arming anyway would let a ✓ REWRITE that axis to
+ * a world one the user never chose, which is a silent data loss, not a fallback.
+ * A record the frontend authored always passes.
+ */
+function transformSeedFromParams(
+  stored: Record<string, unknown> | undefined,
+): { targets: string[]; seed: TransformSeed } | null {
+  if (!stored) return null;
+  const targets = Array.isArray(stored.targets) ? stored.targets.filter((t) => typeof t === "string") : [];
+  if (targets.length === 0) return null;
+  const translate = storedVec3(stored.translate) ?? [0, 0, 0];
+  const rotate = (stored.rotate ?? {}) as Record<string, unknown>;
+  const center = storedVec3(rotate.center) ?? [0, 0, 0];
+  const angleDeg = storedScalar(rotate.angleDeg);
+  const rotAxis = matchWorldAxis(storedVec3(rotate.axis) ?? undefined);
+  if (!rotAxis) return null;
+  // Open on the component that actually carries the placement, so a re-edit shows
+  // the number the row's value text shows rather than a bare 0 on Move X.
+  const movedAxis = (["X", "Y", "Z"] as const).find((a) => translate[axisIndex(a)] !== 0);
+  const mode: TransformMode = !movedAxis && angleDeg !== 0 ? "rotate" : "move";
+  return {
+    targets,
+    seed: {
+      mode,
+      axis: mode === "rotate" ? rotAxis : (movedAxis ?? "X"),
+      translate,
+      angleDeg,
+      rotAxis,
+      center,
+      copy: stored.copy === true,
+    },
+  };
+}
+
+/** Status hint for a committed placement — names what actually changed. */
+function placementHint(p: TransformBodyParams): string {
+  const moved = p.translate.some((c) => c !== 0);
+  if (moved && p.rotate.angleDeg !== 0) return "Placed";
+  if (p.rotate.angleDeg !== 0) return `Rotated ${p.rotate.angleDeg.toFixed(1)}°`;
+  if (moved) return "Moved";
+  return "Placement unchanged";
+}
 
 /**
  * Preview trailing floors, per OP COST (`PreviewThrottle.setTrailingMs`). One
@@ -303,6 +388,7 @@ export class ModelToolController {
   private linear: LinearPatternFsm = linearPatternInit();
   private circular: CircularPatternFsm = circularPatternInit();
   private mirror: MirrorFsm = mirrorInit();
+  private transform: TransformFsm = transformInit();
   private readonly throttle = new PreviewThrottle<PreviewParams>({ trailingMs: 80 });
 
   // Kernel-preview context. One session per armed target (Extrude: one per region
@@ -412,6 +498,17 @@ export class ModelToolController {
 
   // Pattern / mirror context (chip-driven; ghost clones of the source body).
   private patternEditFeatureId: string | undefined;
+
+  /**
+   * The record a placement commit will REWRITE — either a fold target the backend
+   * lineage query named, or the row a history re-edit opened. `undefined` appends
+   * a fresh record. Kept here rather than in `TransformFsm` for the same reason
+   * `patternEditFeatureId` is: the reducers are pure authoring state, and a record
+   * id is identity, not authoring.
+   */
+  private transformEditFeatureId: string | undefined;
+  /** Whether the placement ghost is currently hiding its source bodies. */
+  private transformHidSources = false;
 
   /**
    * Datum-plane tool context (DATUM W1), null when the tool is not armed.
@@ -630,6 +727,7 @@ export class ModelToolController {
     this.cancelRevolve();
     this.cancelShell();
     this.cancelPattern();
+    this.cancelTransform();
     this.endDatumPick();
     this.cancelMeasure();
     toolChipStore.getState().clear();
@@ -653,6 +751,7 @@ export class ModelToolController {
     else if (tool === "linearPattern") this.armLinearFromSelection();
     else if (tool === "circularPattern") this.armCircularFromSelection();
     else if (tool === "mirror") this.armMirrorFromSelection();
+    else if (tool === "transform") this.armTransformFromSelection();
     else if (tool === "measure") this.armMeasure();
     else viewportStore.getState().setStatusHint(null);
   }
@@ -3097,6 +3196,256 @@ export class ModelToolController {
     return selectionStore.getState().selected.find((r) => r.kind === "body")?.id ?? null;
   }
 
+  /** Every selected BODY, in selection order (a placement is multi-body — W1). */
+  private selectedBodyIds(): string[] {
+    return selectionStore
+      .getState()
+      .selected.filter((r) => r.kind === "body")
+      .map((r) => r.id);
+  }
+
+  // ── transform body (WP-B W1; SCHEMA §7.3 TransformBody) ──────────────────────
+  //
+  // A PLACEMENT, not a modelling op: it changes where bodies ARE, never their
+  // shape. Arms from a body selection, authored through the numeric chip cluster
+  // `[Move|Rotate] [X|Y|Z] [value] [✓] [✕]` — the W1 surface. The drag gizmo is W2.
+  //
+  // Three things are load-bearing and easy to get subtly wrong:
+  //
+  // FOLD. A placement is ONE cumulative record per intent (SCHEMA §7.3), so a
+  // second gesture on an already-placed body must RE-EDIT that record rather than
+  // stack a second one. Whether that is safe is a LINEAGE question the frontend
+  // cannot answer — it sees a flat history list, not "which record last touched
+  // this body" — so `canFoldTransform` asks the backend and its answer is
+  // authoritative. We add one frontend condition on top (below).
+  //
+  // FROZEN PIVOT. `rotate.center` is captured ONCE, at first authoring, from the
+  // targets' combined bbox centre, and thereafter always read back from the stored
+  // params. Re-deriving it on each edit would move the pivot as the body moves and
+  // every re-edit would drift.
+  //
+  // NO PREVIEW ROUND-TRIP. Every other value tool opens a kernel preview session
+  // because only OCCT knows what a fillet/shell/boolean produces. A rigid
+  // placement is the one op where the frontend's own answer is EXACT — the same
+  // matrix moves the same points — so the L1 ghost is kernel-accurate and a
+  // PreviewOp lane here would cost a round trip per keystroke to reproduce a
+  // matrix multiply we already have. Deliberate deviation from the house pattern.
+
+  private armTransformFromSelection(): void {
+    const targets = this.selectedBodyIds();
+    if (targets.length === 0) {
+      viewportStore.getState().setStatusHint("Select a body to move", { sticky: true });
+      return;
+    }
+    void this.armTransformResolvingFold(targets);
+  }
+
+  /**
+   * Decide fold-vs-fresh, then arm. Fold requires BOTH:
+   *
+   *  1. the backend names a foldable record for the first target, and
+   *  2. that record's stored `targets` are EXACTLY the current selection.
+   *
+   * (2) is the frontend's own condition and it is not redundant: the query is
+   * asked per body, so a two-body selection whose first body was moved ALONE
+   * would otherwise fold into that single-body record and silently start moving a
+   * body it never covered. A mismatch appends a fresh record instead — the
+   * conservative direction.
+   */
+  private async armTransformResolvingFold(targets: string[]): Promise<void> {
+    const gen = ++this.armGen;
+    const foldId = await this.client.canFoldTransform(targets[0]).catch(() => null);
+    if (gen !== this.armGen) return; // tool switched / re-armed while in flight
+    if (foldId) {
+      const stored = await this.client.getOperationParams(foldId).catch(() => undefined);
+      if (gen !== this.armGen) return;
+      const seed = transformSeedFromParams(stored);
+      if (seed && sameIdSet(seed.targets, targets)) {
+        this.armTransform(seed.targets, foldId, seed.seed);
+        return;
+      }
+    }
+    this.armTransform(targets, undefined, { center: this.bodiesCenter(targets) });
+  }
+
+  private armTransform(targets: string[], editFeatureId?: string, seed?: TransformSeed): void {
+    this.transformEditFeatureId = editFeatureId;
+    this.transform = transformStep(transformInit(), { kind: "arm", targets, ...seed }).state;
+    toolStore.setState({ phase: "armed" });
+    viewportStore
+      .getState()
+      .setStatusHint("Move / Rotate along an axis, then ✓", { sticky: true });
+    this.rebuildTransformGhost();
+    this.showTransformChip();
+    this.updateDebug();
+  }
+
+  private showTransformChip(): void {
+    toolChipStore
+      .getState()
+      .showTransform(
+        this.transform.mode,
+        this.transform.axis,
+        transformValue(this.transform),
+        this.bodiesCenter(this.transform.targets),
+        {
+          onTransformMode: (m) => this.onTransformEvent({ kind: "setMode", mode: m }),
+          onAxis: (a) => this.onTransformEvent({ kind: "setAxis", axis: a }),
+          onValue: (v) => this.onTransformEvent({ kind: "setValue", value: v }),
+          onConfirm: () => void this.commitTransform(),
+          onCancel: () => this.resetToSelect(),
+        },
+      );
+  }
+
+  /** One chip edit: step the FSM, then re-publish the chip's view + the ghost. */
+  private onTransformEvent(e: Parameters<typeof transformStep>[1]): void {
+    this.transform = transformStep(this.transform, e).state;
+    const chip = toolChipStore.getState();
+    chip.setTransformMode(this.transform.mode);
+    chip.setAxis(this.transform.axis);
+    // The chip's number is a VIEW of one component, so it must be re-read after
+    // every event — switching Move X → Move Y shows the stored dy, not the dx.
+    chip.setValue(transformValue(this.transform));
+    this.rebuildTransformGhost();
+    this.updateDebug();
+  }
+
+  /**
+   * The live L1 ghost: each target's own geometry at the composed placement.
+   *
+   * `copy: false` HIDES the sources while previewing (via the same
+   * `previewHiddenBodies` machinery the L2 preview lane uses) so the ghost reads
+   * as "the body, moved" rather than "a second body next to it". `copy: true`
+   * keeps them — that IS the difference between the two.
+   */
+  private rebuildTransformGhost(): void {
+    if (this.transform.phase !== "armed" || isIdentityPlacement(this.transform)) {
+      this.hideTransformGhost();
+      return;
+    }
+    const items = this.transformGhostItems();
+    if (items.length === 0) return;
+    this.deps.engine.showGhostPreviewMulti(items);
+    if (!this.transform.copy) {
+      this.deps.engine.setPreviewReplacedBodyIds([...this.transform.targets]);
+      this.transformHidSources = true;
+    }
+  }
+
+  /** One ghost clone per target that has ingested geometry, at the shared matrix. */
+  private transformGhostItems(): { entry: MeshEntry; transforms: GhostTransform[] }[] {
+    const p = transformParamsOf(this.transform);
+    const m = placementMatrix(p.translate, p.rotate.center, p.rotate.axis, p.rotate.angleDeg);
+    const items: { entry: MeshEntry; transforms: GhostTransform[] }[] = [];
+    for (const id of this.transform.targets) {
+      const entry = getEntry(id);
+      if (entry) items.push({ entry, transforms: [{ kind: "rawMatrix", m }] });
+    }
+    return items;
+  }
+
+  private hideTransformGhost(): void {
+    this.deps.engine.hideGhostPreview();
+    if (!this.transformHidSources) return;
+    // Restore ONLY what this ghost hid. Guarded so a tool switch that never armed
+    // a placement cannot stomp the preview lane's own hidden-body snapshot.
+    this.deps.engine.setPreviewReplacedBodyIds([]);
+    this.transformHidSources = false;
+  }
+
+  private async commitTransform(): Promise<void> {
+    if (this.transform.phase !== "armed" || this.transform.targets.length === 0) return;
+    const params = transformParamsOf(this.transform);
+    const editFeatureId = this.transformEditFeatureId;
+    const armed = this.transform;
+    this.transform = transformStep(this.transform, { kind: "apply" }).state;
+    this.hideTransformGhost();
+    toolChipStore.getState().clear();
+    const op: OperationOp = {
+      opType: "TransformBody",
+      featureId: editFeatureId,
+      // `inputs[]` MIRRORS `params.targets` in order (SCHEMA §7.3) — the ordinal
+      // is what names a `copy: true` result's `body_<opId>:<k>`.
+      inputs: params.targets.map((bodyId) => ({ primary: { bodyId, kind: "body" as const } })),
+      params,
+    };
+    try {
+      const res = await this.client.applyOperation(op);
+      this.applyResult(res);
+      selectionStore.getState().set(params.targets.map((id) => ({ kind: "body" as const, id })));
+      this.transform = transformInit();
+      this.transformEditFeatureId = undefined;
+      this.resetToSelect(placementHint(params));
+    } catch (e) {
+      // A refused placement stays ARMED with the reason — unlike pattern/mirror,
+      // which reset to select. The user's numbers are still on screen and still
+      // valid to adjust; throwing them away to read the error would be hostile.
+      this.transform = armed;
+      this.rebuildTransformGhost();
+      this.showTransformChip();
+      viewportStore
+        .getState()
+        .setStatusHint(`Move failed: ${errMessage(e)}`, { severity: "error", sticky: true });
+    }
+    this.updateDebug();
+  }
+
+  /**
+   * Re-arm the placement tool on an existing `TransformBody` row (history
+   * double-click). The targets come from the STORED params — never the current
+   * selection — for the same reason the pattern re-edits do: a guess would
+   * silently re-point the record at different bodies.
+   */
+  async editTransformFeature(featureId: string): Promise<void> {
+    const feat = documentStore.getState().features.find((f) => f.id === featureId);
+    // Gate on `opType`, never `kind`: `dto.rs feature_kind` folds TransformBody
+    // into `boolean` alongside the pattern/mirror ops.
+    if (!feat || feat.opType !== "TransformBody") return;
+    const gen = ++this.armGen;
+    const stored = await this.client.getOperationParams(featureId).catch(() => undefined);
+    if (gen !== this.armGen) return;
+    const seed = transformSeedFromParams(stored);
+    if (!seed) {
+      viewportStore
+        .getState()
+        .setStatusHint("Cannot re-edit move: stored placement is not a world-axis rotation", {
+          severity: "error",
+          sticky: true,
+        });
+      return;
+    }
+    toolStore.getState().setTool("transform");
+    // `setTool` runs `onToolChange` → `armTransformFromSelection`, whose fold
+    // query is async; bump the token so that in-flight arm cannot land after this
+    // one and clobber the record we were asked to edit.
+    this.armGen++;
+    this.armTransform(seed.targets, featureId, seed.seed);
+  }
+
+  /** Combined bbox centre of `ids` — the FROZEN pivot a fresh placement captures. */
+  private bodiesCenter(ids: readonly string[]): Vec3 {
+    const min: Vec3 = [Infinity, Infinity, Infinity];
+    const max: Vec3 = [-Infinity, -Infinity, -Infinity];
+    for (const id of ids) {
+      const entry = getEntry(id);
+      if (!entry) continue;
+      for (let a = 0; a < 3; a++) {
+        min[a] = Math.min(min[a], entry.view.bboxMin[a]);
+        max[a] = Math.max(max[a], entry.view.bboxMax[a]);
+      }
+    }
+    if (!Number.isFinite(min[0])) return [0, 0, 0]; // nothing ingested yet
+    return [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2];
+  }
+
+  private cancelTransform(): void {
+    this.hideTransformGhost();
+    this.transform = transformInit();
+    this.transformEditFeatureId = undefined;
+    toolChipStore.getState().clear();
+  }
+
   // ── datum plane tool (DATUM W1) ──────────────────────────────────────────────
   //
   // Two phases, both owned here (this controller owns model-mode pointer events
@@ -4870,6 +5219,19 @@ export class ModelToolController {
       edgeOpAuto: this.fillet.auto,
       edgeOpAxisSource: this.filletAxisSource,
       shellPhase: this.shell.phase,
+      // Placement tool (WP-B W1). `transformFold` is the record a ✓ would
+      // REWRITE — the one bit of the fold decision that has no visible surface,
+      // and therefore the one e2e has to read here rather than infer from the
+      // history row count alone.
+      transformPhase: this.transform.phase,
+      transformMode: this.transform.mode,
+      transformAxis: this.transform.axis,
+      transformValue: transformValue(this.transform),
+      transformTranslate: [...this.transform.translate],
+      transformAngleDeg: this.transform.angleDeg,
+      transformCenter: [...this.transform.center],
+      transformTargets: [...this.transform.targets],
+      transformFold: this.transformEditFeatureId ?? null,
       // Datum tool (DATUM W1): "idle" | "basePick" | "offset" + the armed values,
       // so e2e can assert the two-phase gesture without any DOM of its own.
       datumPhase: this.datum ? (this.datum.base === null ? "basePick" : "offset") : "idle",
@@ -5015,6 +5377,13 @@ export class ModelToolController {
       if (this.shell.phase === "armed") {
         e.preventDefault();
         void this.commitShell();
+        return;
+      }
+      // A placement joins the same explicit gesture: nothing writes to the
+      // timeline until Enter or the chip ✓.
+      if (this.transform.phase === "armed") {
+        e.preventDefault();
+        void this.commitTransform();
         return;
       }
     }
@@ -5192,6 +5561,7 @@ export class ModelToolController {
     this.cancelRevolve();
     this.cancelShell();
     this.cancelPattern();
+    this.cancelTransform();
     this.endDatumPick();
     this.cancelMeasure();
     toolChipStore.getState().clear();

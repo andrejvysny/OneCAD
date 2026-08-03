@@ -2,7 +2,8 @@
  * Keyboard bindings (F-WP3) — data-driven, mode-scoped.
  *
  * Model:  V select · S new-sketch (enters sketch mode) · D datum plane · E extrude
- *         · R revolve · F fillet · B combine/boolean · ⇧I isolate selection
+ *         · R revolve · F fillet · B combine/boolean · T move/rotate body
+ *         · ⇧I isolate selection
  * Sketch: V select · L line · R rectangle · ⇧R center-rectangle · C circle
  *         · O ellipse · A arc · G polygon · S slot · P point · D dimension
  *         · T trim · M mirror · X construction (flip selection / sticky mode)
@@ -24,6 +25,8 @@
  *     cross-mode fallback could never have claimed sketch `S` anyway.
  *   - `G` was free in both modes; sketch owns it (Polygon) and model mode reaches
  *     it through the normal cross-mode fallback.
+ *   - `T` in SKETCH mode is the Trim tool; model `T` = Move/rotate a body (WP-B
+ *     W1). Mode-resolved exactly like `R` and `D`.
  *   - `D` in SKETCH mode is the Dimension tool; model `D` = Datum plane (DATUM W1).
  *     Mode-resolved exactly like `R` (revolve vs rectangle) — sketch mode's own
  *     table claims `d` first, so the cross-mode fallback never reaches the datum
@@ -73,6 +76,11 @@ export const MODEL_KEYS: KeyBinding[] = [
   { key: "p", action: { type: "tool", tool: "linearPattern" } },
   { key: "c", action: { type: "tool", tool: "circularPattern" } },
   { key: "m", action: { type: "tool", tool: "mirror" } },
+  // T = Move/rotate a body selection (WP-B W1). Sketch mode's own `t` (Trim)
+  // shadows it there, exactly like D (datum vs dimension). Claiming it here also
+  // stops model-mode `t` falling through cross-mode and STARTING A SKETCH with
+  // Trim, which is what it did while the model table had no `t` of its own.
+  { key: "t", action: { type: "tool", tool: "transform" } },
   // W2-B Measure. `?` (⇧/) is free in BOTH tables and reads as "what is this?".
   // Declared as an exact shift chord, exactly like sketch ⇧R, so it can never be
   // claimed by a plain-key press. It is in NO_CROSS_MODE below — see there.

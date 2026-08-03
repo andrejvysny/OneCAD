@@ -72,6 +72,11 @@ export const ICON_PATHS = {
   circularPattern: "M18 12a6 6 0 1 1-12 0 6 6 0 0 1 12 0zM11 5h2v2h-2zM5.8 14h2v2h-2zM16.2 14h2v2h-2z", // instances around a circle
   mirrorBody: "M12 4v16M4 9h4v6H4zM16 9h4v6h-4z", // a body + its reflection across a plane
 
+  // ---- WP-B W1 TransformBody (authored for this WP, NOT from the prototype) ----
+  // Same conventions as the M6b glyphs above. The four-way move motif: the two
+  // axes with arrowheads on all four ends — the universally-read "place this".
+  move: "M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3",
+
   // ---- W2-B/C sketch tools (authored for this WP, NOT from the prototype) ----
   // Same conventions as the prototype glyphs: 24×24 grid, single stroked path,
   // fill none, round caps/joins, weights read cleanly at 14–15px.

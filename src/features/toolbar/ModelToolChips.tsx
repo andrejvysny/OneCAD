@@ -29,12 +29,19 @@ import type {
   BooleanMode,
   EdgeOpKind,
   ExtrudeEndCondition,
+  TransformMode,
 } from "@/tools/modelTools/modelToolMachine";
 
 const CHIP_ID = "__model_tool_chip";
 const BOOLEAN_OPS: BooleanOperation[] = ["Union", "Cut", "Intersect"];
 const PATTERN_AXES: PatternAxis[] = ["X", "Y", "Z"];
 const MIRROR_PLANES: MirrorPlane[] = ["XY", "XZ", "YZ"];
+
+/** The armed-placement mode segments (WP-B W1). */
+const TRANSFORM_MODES: { mode: TransformMode; label: string; testid: string }[] = [
+  { mode: "move", label: "Move", testid: "chip-transform-move" },
+  { mode: "rotate", label: "Rotate", testid: "chip-transform-rotate" },
+];
 
 /** The armed-cluster boolean segments: New Body / Add / Cut (Wave 2). */
 const BOOLEAN_MODES: { mode: BooleanMode; label: string; testid: string }[] = [
@@ -114,11 +121,19 @@ function SegmentToggle<T extends string>({
   active,
   onPick,
   label,
+  testid,
 }: {
   options: readonly T[];
   active: T;
   onPick: (v: T) => void;
   label: string;
+  /**
+   * Per-segment `data-testid`. The chips live under the viewport's overlay root,
+   * which is `aria-hidden` (it decorates a canvas), so role/name queries cannot
+   * reach them — a testid is the ONLY handle e2e has. Optional because the
+   * pattern/mirror chips predate that need and have no spec depending on them.
+   */
+  testid?: (v: T) => string;
 }) {
   return (
     <div className="flex overflow-hidden rounded-sm" role="group" aria-label={label}>
@@ -126,6 +141,7 @@ function SegmentToggle<T extends string>({
         <button
           key={o}
           type="button"
+          data-testid={testid?.(o)}
           aria-pressed={o === active}
           onClick={() => onPick(o)}
           className={cn(
@@ -307,6 +323,39 @@ function EdgeOpSegments({
   );
 }
 
+/**
+ * The [Move | Rotate] segment group on the armed placement cluster (WP-B W1).
+ * The mode decides what the number to its right MEANS (mm along the axis vs
+ * degrees about it), so it reads left-to-right as one sentence.
+ */
+function TransformModeSegments({
+  active,
+  onPick,
+}: {
+  active: TransformMode;
+  onPick: (mode: TransformMode) => void;
+}) {
+  return (
+    <div className="flex overflow-hidden rounded-sm" role="group" aria-label="Placement mode">
+      {TRANSFORM_MODES.map((m) => (
+        <button
+          key={m.mode}
+          type="button"
+          data-testid={m.testid}
+          aria-pressed={m.mode === active}
+          onClick={() => onPick(m.mode)}
+          className={cn(
+            "px-2 py-1 text-[11.5px] font-medium",
+            m.mode === active ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
+          )}
+        >
+          {m.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function ModelToolChips() {
   const engine = useViewportEngine();
   const kind = useToolChipStore((s) => s.kind);
@@ -321,6 +370,7 @@ export function ModelToolChips() {
   const canBoolean = useToolChipStore((s) => s.canBoolean);
   const showBooleanSegments = useToolChipStore((s) => s.showBooleanSegments);
   const edgeOp = useToolChipStore((s) => s.edgeOp);
+  const transformMode = useToolChipStore((s) => s.transformMode);
   const showEdgeOpSegments = useToolChipStore((s) => s.showEdgeOpSegments);
   const endCondition = useToolChipStore((s) => s.endCondition);
   const canUseBodyEnds = useToolChipStore((s) => s.canUseBodyEnds);
@@ -525,6 +575,27 @@ export function ModelToolChips() {
         <CountStepper count={count} onCount={(n) => toolChipStore.getState().onCount?.(n)} />
         {numericChip("°")}
         <ApplyButton />
+      </>,
+    );
+  } else if (kind === "transform") {
+    // Armed placement (WP-B W1): mode · axis · the one component that pair
+    // addresses · ✓/✕. Enter in the input commits, exactly like the extrude and
+    // revolve clusters (apply the typed value THEN confirm, single fire).
+    content = panel(
+      <>
+        <TransformModeSegments
+          active={transformMode}
+          onPick={(m) => toolChipStore.getState().onTransformMode?.(m)}
+        />
+        <SegmentToggle
+          options={PATTERN_AXES}
+          active={axis}
+          label="Placement axis"
+          testid={(a) => `chip-axis-${a.toLowerCase()}`}
+          onPick={(a) => toolChipStore.getState().onAxis?.(a)}
+        />
+        {clusterInput(transformMode === "rotate" ? "°" : LENGTH_SUFFIX)}
+        {confirmButtons}
       </>,
     );
   } else if (kind === "mirror") {

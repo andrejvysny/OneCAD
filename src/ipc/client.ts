@@ -260,6 +260,18 @@ export interface CadClient {
    */
   getOperationParams(recordId: string): Promise<Record<string, unknown>>;
 
+  /**
+   * `recordId` iff the next placement gesture on `bodyId` may FOLD into that
+   * existing `TransformBody` record instead of appending a new one; `null`
+   * otherwise (SCHEMA §7.3 cumulative-placement rule — a placement is ONE
+   * re-edited record per intent, never a stack of nudges).
+   *
+   * A read-only lineage query, deliberately answered by the backend: the frontend
+   * sees a picked body and a FLAT history list, never "which record last touched
+   * this body". The mock mirrors the same rule against its own record list.
+   */
+  canFoldTransform(bodyId: string): Promise<string | null>;
+
   // ── Model operations + two-level preview (SCHEMA §7.3 / NEW_SPEC §15) ──────
   // The real client routes these to the worker's ExecutePlan (op) + solver-style
   // preview lane; the mock synthesizes bodies + a feature timeline locally.

@@ -74,6 +74,9 @@ function editFeature(item: FeatureMeta): void {
     case "MirrorBody":
       void c?.editMirrorFeature(item.id);
       return;
+    case "TransformBody":
+      void c?.editTransformFeature(item.id);
+      return;
     case "Boolean":
       // Operation swap only — a Boolean's tool body is CONSUMED, so there is
       // nothing to re-pick (see `editBooleanFeature`).

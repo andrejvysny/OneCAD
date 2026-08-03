@@ -25,6 +25,12 @@ export interface GhostLayerDeps {
   invalidate: () => void;
 }
 
+/** One source body's geometry plus the placements to clone it at. */
+export interface GhostInstances {
+  entry: MeshEntry;
+  transforms: GhostTransform[];
+}
+
 /** Build a THREE.Matrix4 for one ghost transform descriptor. */
 export function ghostMatrix(t: GhostTransform): THREE.Matrix4 {
   const m = new THREE.Matrix4();
@@ -40,6 +46,12 @@ export function ghostMatrix(t: GhostTransform): THREE.Matrix4 {
     const toOrigin = new THREE.Matrix4().makeTranslation(origin.x, origin.y, origin.z);
     const fromOrigin = new THREE.Matrix4().makeTranslation(-origin.x, -origin.y, -origin.z);
     return toOrigin.multiply(rot).multiply(fromOrigin);
+  }
+  if (t.kind === "rawMatrix") {
+    // Already composed by `placementMatrix` (row-major, the order Matrix4.set
+    // takes) — see the GhostTransform note on why a placement is not folded here.
+    m.set(...(t.m as unknown as Parameters<THREE.Matrix4["set"]>));
+    return m;
   }
   // mirror: Householder reflection across the plane through `point` with `normal`.
   const n = new THREE.Vector3(t.normal[0], t.normal[1], t.normal[2]).normalize();
@@ -81,14 +93,26 @@ export class GhostLayer {
 
   /** Show translucent clones of `entry`'s geometry at each transform. */
   show(entry: MeshEntry, transforms: GhostTransform[]): void {
+    this.showMulti([{ entry, transforms }]);
+  }
+
+  /**
+   * Show clones for SEVERAL source bodies at once. The pattern/mirror tools clone
+   * one body, but a `TransformBody` places a multi-body selection, and each of
+   * those bodies has its own geometry — one `show` per body would clear the
+   * previous body's clones (`show` is a replace, not an append).
+   */
+  showMulti(items: readonly GhostInstances[]): void {
     this.clearMeshes();
-    for (const t of transforms) {
-      const mesh = new THREE.Mesh(entry.geometry, this.material);
-      mesh.matrixAutoUpdate = false;
-      mesh.matrix.copy(ghostMatrix(t));
-      mesh.renderOrder = RENDER_ORDER.GHOST;
-      this.group.add(mesh);
-      this.meshes.push(mesh);
+    for (const { entry, transforms } of items) {
+      for (const t of transforms) {
+        const mesh = new THREE.Mesh(entry.geometry, this.material);
+        mesh.matrixAutoUpdate = false;
+        mesh.matrix.copy(ghostMatrix(t));
+        mesh.renderOrder = RENDER_ORDER.GHOST;
+        this.group.add(mesh);
+        this.meshes.push(mesh);
+      }
     }
     this.group.visible = this.meshes.length > 0;
     this.deps.invalidate();

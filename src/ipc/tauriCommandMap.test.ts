@@ -351,6 +351,73 @@ describe("operationToEditCommand — M6b op wire mappings", () => {
     });
   });
 
+  // ── TransformBody (WP-B W1; SCHEMA §7.3) ────────────────────────────────────
+  //
+  //   TransformBodyParams   targets: Vec<BodyId>, translate: [Scalar; 3],
+  //                         rotate: {center: Vec3, axis: Vec3, angleDeg: Scalar},
+  //                         copy: bool
+  //
+  // The two easy mistakes both live in the SHAPES, not the values: each translate
+  // component is expression-capable and therefore a Scalar (a bare number is
+  // rejected), while `center`/`axis` are plain Vec3s (a Scalar there is equally
+  // rejected). And `targets` uses the PLAIN `Vec<BodyId>` derive — no
+  // `de_opt_body_id` leniency like `sourceBodyId` — so a `body_<uuid>` worker-wire
+  // id would sink the whole EditCommand ("body_…" is not a uuid).
+
+  it("TransformBody maps translate components as SCALARS and center/axis as Vec3", () => {
+    const op: OperationOp = {
+      opType: "TransformBody",
+      params: {
+        targets: ["body1"],
+        translate: [30, 0, -5],
+        rotate: { center: [1, 2, 3], axis: [0, 0, 1], angleDeg: 90 },
+        copy: false,
+      },
+    };
+    expect(addedParams(op)).toEqual({
+      targets: ["body1"],
+      translate: [{ value: 30 }, { value: 0 }, { value: -5 }],
+      rotate: { center: [1, 2, 3], axis: [0, 0, 1], angleDeg: { value: 90 } },
+      copy: false,
+    });
+  });
+
+  it("TransformBody normalizes every target to the BARE uuid the core serde takes", () => {
+    const uuid = "0f7e5d2c-1111-4222-8333-444455556666";
+    const op: OperationOp = {
+      opType: "TransformBody",
+      params: {
+        targets: [`body_${uuid}`, "body1"],
+        translate: [0, 0, 0],
+        rotate: { center: [0, 0, 0], axis: [0, 0, 1], angleDeg: 0 },
+        copy: true,
+      },
+    };
+    const params = addedParams(op) as { targets: string[]; copy: boolean };
+    // Idempotent: an already-bare id (and a mock id with no underscore) passes through.
+    expect(params.targets).toEqual([uuid, "body1"]);
+    expect(params.copy).toBe(true);
+  });
+
+  it("a featureId re-targets a TransformBody via updateOperationParams (the FOLD path)", () => {
+    const op: OperationOp = {
+      opType: "TransformBody",
+      featureId: "rec-move",
+      params: {
+        targets: ["body1"],
+        translate: [50, 0, 0],
+        rotate: { center: [0, 0, 0], axis: [0, 0, 1], angleDeg: 0 },
+        copy: false,
+      },
+    };
+    const cmd = operationToEditCommand(op);
+    expect(cmd).toMatchObject({
+      cmd: "updateOperationParams",
+      record: "rec-move",
+      op: { opType: "TransformBody" },
+    });
+  });
+
   it("a featureId re-targets a pattern op via updateOperationParams (parametric edit)", () => {
     const op: OperationOp = {
       opType: "LinearPattern",
@@ -375,6 +442,19 @@ describe("operationToEditCommand — M6b op wire mappings", () => {
     expect(opLabelFor({ opType: "MirrorBody", params: { planePoint: [0, 0, 0], planeNormal: [1, 0, 0] } })).toBe(
       "Mirror",
     );
+    // Matches `dto.rs default_label` — the history row reads "Move", so the
+    // status hint must not say "TransformBody".
+    expect(
+      opLabelFor({
+        opType: "TransformBody",
+        params: {
+          targets: ["body1"],
+          translate: [1, 0, 0],
+          rotate: { center: [0, 0, 0], axis: [0, 0, 1], angleDeg: 0 },
+          copy: false,
+        },
+      }),
+    ).toBe("Move");
   });
 });
 

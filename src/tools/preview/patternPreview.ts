@@ -40,7 +40,25 @@ export const WORLD_PLANE_NORMAL: Record<WorldPlane, Vec3> = {
 export type GhostTransform =
   | { kind: "translate"; offset: Vec3 }
   | { kind: "rotate"; origin: Vec3; axis: Vec3; angleRad: number }
-  | { kind: "mirror"; point: Vec3; normal: Vec3 };
+  | { kind: "mirror"; point: Vec3; normal: Vec3 }
+  /**
+   * An ALREADY-COMPOSED rigid placement (WP-B W1 `TransformBody`). The three
+   * descriptors above each name exactly ONE primitive; a placement is
+   * `T ∘ R(pivot)`, which is neither, and folding a two-descriptor sequence
+   * would put composition order — the normative part of SCHEMA §7.3 — inside
+   * the render layer. It is carried as the matrix instead, built ONCE by
+   * {@link placementMatrix} and shared verbatim with the mock lane's mesh
+   * rewrite, which is what makes ghost and committed geometry agree exactly.
+   */
+  | { kind: "rawMatrix"; m: Mat4Rows };
+
+/** A 4×4 matrix in ROW-major order — the argument order `THREE.Matrix4.set` takes. */
+export type Mat4Rows = readonly [
+  number, number, number, number,
+  number, number, number, number,
+  number, number, number, number,
+  number, number, number, number,
+];
 
 const DEG2RAD = Math.PI / 180;
 
@@ -114,6 +132,74 @@ export function circularAnglesDeg(totalDeg: number, count: number): number[] {
   const out: number[] = [];
   for (let k = 0; k < n; k++) out.push(step * k);
   return out;
+}
+
+/**
+ * The SCHEMA §7.3 `TransformBody` placement as a row-major 4×4.
+ *
+ * NORMATIVE evaluation order: `X' = T ∘ R(center, axis, angleDeg) · X` — rotate
+ * about the frozen pivot FIRST, then translate. Expanded that is
+ * `X' = translate + center + R·(X − center)`, so the matrix's linear part is the
+ * Rodrigues rotation `R` and its translation column is
+ * `translate + center − R·center`.
+ *
+ * `axis` need not be unit length (it is normalized here, matching the Rust
+ * `TransformRotation.axis` contract); a zero `angleDeg` yields the identity
+ * rotation regardless of `axis`, so an axis-less pure translation is expressible.
+ */
+export function placementMatrix(
+  translate: Vec3,
+  center: Vec3,
+  axis: Vec3,
+  angleDeg: number,
+): Mat4Rows {
+  const r = rotationRows(axis, angleDeg * DEG2RAD);
+  const tx = translate[0] + center[0] - (r[0] * center[0] + r[1] * center[1] + r[2] * center[2]);
+  const ty = translate[1] + center[1] - (r[3] * center[0] + r[4] * center[1] + r[5] * center[2]);
+  const tz = translate[2] + center[2] - (r[6] * center[0] + r[7] * center[1] + r[8] * center[2]);
+  return [
+    r[0], r[1], r[2], tx,
+    r[3], r[4], r[5], ty,
+    r[6], r[7], r[8], tz,
+    0, 0, 0, 1,
+  ];
+}
+
+/** Rodrigues rotation as a row-major 3×3 (`[r00,r01,r02, r10,…]`). */
+function rotationRows(axis: Vec3, angleRad: number): number[] {
+  if (angleRad === 0) return [1, 0, 0, 0, 1, 0, 0, 0, 1];
+  const [x, y, z] = normalize(axis);
+  const c = Math.cos(angleRad);
+  const s = Math.sin(angleRad);
+  const t = 1 - c;
+  return [
+    t * x * x + c, t * x * y - s * z, t * x * z + s * y,
+    t * x * y + s * z, t * y * y + c, t * y * z - s * x,
+    t * x * z - s * y, t * y * z + s * x, t * z * z + c,
+  ];
+}
+
+/** Apply a {@link placementMatrix} to a world POINT (translation included). */
+export function applyPlacementToPoint(m: Mat4Rows, p: Vec3): Vec3 {
+  return [
+    m[0] * p[0] + m[1] * p[1] + m[2] * p[2] + m[3],
+    m[4] * p[0] + m[5] * p[1] + m[6] * p[2] + m[7],
+    m[8] * p[0] + m[9] * p[1] + m[10] * p[2] + m[11],
+  ];
+}
+
+/**
+ * Apply a {@link placementMatrix} to a normal / direction — the LINEAR part only.
+ * A rigid placement's linear part is a pure rotation (orthonormal, det +1), so
+ * the inverse-transpose a general transform would need reduces to the rotation
+ * itself and unit length is preserved exactly.
+ */
+export function applyPlacementToNormal(m: Mat4Rows, n: Vec3): Vec3 {
+  return [
+    m[0] * n[0] + m[1] * n[1] + m[2] * n[2],
+    m[4] * n[0] + m[5] * n[1] + m[6] * n[2],
+    m[8] * n[0] + m[9] * n[1] + m[10] * n[2],
+  ];
 }
 
 // ── Ghost transforms (the clones only — the original body is already onscreen) ─

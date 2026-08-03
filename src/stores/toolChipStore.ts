@@ -18,6 +18,7 @@ import type {
   BooleanMode,
   EdgeOpKind,
   ExtrudeEndCondition,
+  TransformMode,
 } from "@/tools/modelTools/modelToolMachine";
 
 /** Handlers the armed extrude cluster wires (MODEL-HARDEN Wave 1 + 2). */
@@ -105,6 +106,19 @@ export interface EdgeOpChipOpts {
   onEdgeOp?: (edgeOp: EdgeOpKind) => void;
 }
 
+/**
+ * Handlers the armed TRANSFORM cluster wires (WP-B W1):
+ * `[Move|Rotate] [X|Y|Z] [value] [✓] [✕]`. `onValue` writes the ONE component the
+ * current mode+axis addresses; the cluster never sees the whole placement.
+ */
+export interface TransformChipHandlers {
+  onTransformMode: (mode: TransformMode) => void;
+  onAxis: (axis: PatternAxis) => void;
+  onValue: (v: number) => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
 /** Handlers the armed DATUM chip wires (offset input + ✓/✕ — DATUM W1). */
 export interface DatumChipHandlers {
   onValue: (v: number) => void;
@@ -123,6 +137,7 @@ export type ChipKind =
   | "linearPattern"
   | "circularPattern"
   | "mirror"
+  | "transform"
   | "regionSelect"
   | "dimension";
 
@@ -158,6 +173,10 @@ export interface ToolChipState {
   showEdgeOpSegments: boolean;
   /** How many regions the armed op covers (1 in the single-region path). */
   regionCount: number;
+  /** Whether the armed placement is authoring a translation or a rotation (W1). */
+  transformMode: TransformMode;
+  /** Placement mode segment picked (armed transform cluster — W1). */
+  onTransformMode: ((mode: TransformMode) => void) | null;
   /** Unit suffix for the numeric chip (mm / ° — sketch dimension chip). */
   suffix: string;
   /** Leading context label (datum chip: the picked base plane's geometric name). */
@@ -263,6 +282,14 @@ export interface ToolChipState {
     worldPos: [number, number, number],
     handlers: { onPlane: (plane: MirrorPlane) => void; onApply: () => void },
   ): void;
+  /** Show the armed placement cluster `[Move|Rotate][X|Y|Z][value ▸][✓][✕]` (W1). */
+  showTransform(
+    mode: TransformMode,
+    axis: PatternAxis,
+    value: number,
+    worldPos: [number, number, number],
+    handlers: TransformChipHandlers,
+  ): void;
   /** Show the sketch Dimension chip (seeded, auto-focused; Enter commits, Esc cancels). */
   showDimension(
     value: number,
@@ -287,6 +314,8 @@ export interface ToolChipState {
   setBooleanMode(mode: BooleanMode): void;
   /** Update just the armed edge-op cluster's authored op (drag flip / segment pick). */
   setEdgeOp(edgeOp: EdgeOpKind): void;
+  /** Update just the armed placement's mode (Move / Rotate). */
+  setTransformMode(mode: TransformMode): void;
   clear(): void;
 }
 
@@ -310,6 +339,8 @@ const CLEARED = {
   showEdgeOpSegments: false,
   onEdgeOp: null,
   regionCount: 1,
+  transformMode: "move" as TransformMode,
+  onTransformMode: null,
   suffix: "",
   label: "",
   worldPos: null,
@@ -449,6 +480,21 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
   showMirror(plane, worldPos, handlers) {
     set({ ...CLEARED, kind: "mirror", plane, worldPos, onPlane: handlers.onPlane, onApply: handlers.onApply });
   },
+  showTransform(mode, axis, value, worldPos, handlers) {
+    set({
+      ...CLEARED,
+      kind: "transform",
+      transformMode: mode,
+      axis,
+      value,
+      worldPos,
+      onTransformMode: handlers.onTransformMode,
+      onAxis: handlers.onAxis,
+      onValue: handlers.onValue,
+      onConfirm: handlers.onConfirm,
+      onCancel: handlers.onCancel,
+    });
+  },
   showDimension(value, suffix, worldPos, onValue, onCancel) {
     set({ ...CLEARED, kind: "dimension", value, suffix, worldPos, onValue, onCancel });
   },
@@ -475,6 +521,9 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
   },
   setEdgeOp(edgeOp) {
     set({ edgeOp });
+  },
+  setTransformMode(transformMode) {
+    set({ transformMode });
   },
   clear() {
     set({ ...CLEARED });

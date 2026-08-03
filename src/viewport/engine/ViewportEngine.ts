@@ -51,7 +51,7 @@ import { RevolvePreview, type AxisCandidate } from "./RevolvePreview";
 import { PlanePicker, type PickablePlane } from "./PlanePicker";
 import { lightRigPose, type LightRigPose } from "./lightRig";
 import { DatumLayer, datumGhostPlane, type DatumVisual } from "./DatumLayer";
-import { GhostLayer } from "./GhostLayer";
+import { GhostLayer, type GhostInstances } from "./GhostLayer";
 import type { LatheAxis } from "@/tools/preview/lathePreview";
 import type { GhostTransform } from "@/tools/preview/patternPreview";
 import { buildBodyObject, type BodyObjectHandle } from "./BodyObject";
@@ -1103,11 +1103,16 @@ export class ViewportEngine {
 
   /** Show translucent clones of `entry`'s geometry at each transform (pattern/mirror L1). */
   showGhostPreview(entry: MeshEntry, transforms: GhostTransform[]): void {
+    this.showGhostPreviewMulti([{ entry, transforms }]);
+  }
+
+  /** Multi-source variant — a `TransformBody` places a whole body SELECTION (W1). */
+  showGhostPreviewMulti(items: readonly GhostInstances[]): void {
     if (this.disposed) return;
     if (!this.ghostLayer) {
       this.ghostLayer = new GhostLayer({ root: this.interactionRoot, invalidate: () => this.invalidate() });
     }
-    this.ghostLayer.show(entry, transforms);
+    this.ghostLayer.showMulti(items);
   }
 
   hideGhostPreview(): void {

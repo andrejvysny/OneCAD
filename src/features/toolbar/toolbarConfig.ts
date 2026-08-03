@@ -39,6 +39,9 @@ export const MODEL_TOOLS: ToolEntry[] = [
   { id: "linearPattern", icon: "linearPattern", label: "Linear pattern", shortcut: "P" },
   { id: "circularPattern", icon: "circularPattern", label: "Circular pattern", shortcut: "C" },
   { id: "mirror", icon: "mirrorBody", label: "Mirror", shortcut: "M" },
+  // WP-B W1 — a PLACEMENT, not a modelling op: it changes where a body is, never
+  // its shape. Grouped with the other body-level ops above.
+  { id: "transform", icon: "move", label: "Move", shortcut: "T" },
   { sep: true },
   // W2-B — grouped alone at the tail: Measure is the only READ-ONLY tool in the
   // set (it writes nothing to the timeline), so it does not belong with the ops.

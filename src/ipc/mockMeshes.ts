@@ -10,6 +10,12 @@
 import { FLAG, SEC, parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
 import { prismLocal, type PrismProfile } from "@/tools/preview/prismPreview";
 import { latheLocal, type LatheAxis } from "@/tools/preview/lathePreview";
+import {
+  applyPlacementToNormal,
+  applyPlacementToPoint,
+  type Mat4Rows,
+} from "@/tools/preview/patternPreview";
+import type { Vec3 } from "@/tools/preview/depthProjection";
 import type { SketchPlane } from "./types";
 
 const HEADER_BYTES = 64;
@@ -534,6 +540,95 @@ export function concatMesh1(a: ArrayBuffer, b: ArrayBuffer): ArrayBuffer {
   pushEdges(vb, "b:");
 
   return encodeMesh1({ positions, normals, faces, edges });
+}
+
+// ── Rigid placement (mock TransformBody) ─────────────────────────────────────
+
+/**
+ * Rewrite a MESH1 blob under a rigid placement — the mock lane's `TransformBody`.
+ *
+ * Unlike the mock's other body ops this is NOT a stand-in: a rigid transform of a
+ * tessellation IS the exact answer (the kernel moves the same points), so the
+ * mock's geometry and the worker's agree up to float rounding. The matrix comes
+ * from the SAME `placementMatrix` the ghost preview uses, which is what makes the
+ * preview and the committed body identical rather than merely similar.
+ *
+ * Positions and EDGE polyline points are world points and take the full `T ∘ R`;
+ * normals take the rotation only. Everything else is re-derived by `encodeMesh1`
+ * from the moved data — header bbox, the optional FACE_BBOXES section, and the
+ * section table — so no stale extent can survive (a stale header bbox silently
+ * breaks zoom-to-fit and the picker's broad phase).
+ */
+export function transformMesh1(blob: ArrayBuffer, m: Mat4Rows): ArrayBuffer {
+  const v = parseMeshPayload(blob);
+  const positions = mapTriples(v.positions, (p) => applyPlacementToPoint(m, p));
+  const normals = v.normals ? mapTriples(v.normals, (n) => applyPlacementToNormal(m, n)) : undefined;
+
+  const faceIds = decodeIds(v.faceIdChars, v.faceIdOffsets, v.faceCount);
+  const faces: FaceSource[] = [];
+  for (let f = 0; f < v.faceCount; f++) {
+    const firstTri = v.faceRanges[f * 2];
+    const triCount = v.faceRanges[f * 2 + 1];
+    const triangles: [number, number, number][] = [];
+    for (let t = 0; t < triCount; t++) {
+      const i = (firstTri + t) * 3;
+      triangles.push([v.indices[i], v.indices[i + 1], v.indices[i + 2]]);
+    }
+    const color = faceColorAt(v.faceColors, f);
+    faces.push(color ? { triangles, id: faceIds[f], color } : { triangles, id: faceIds[f] });
+  }
+
+  const edges: EdgeSource[] = [];
+  if (v.edgeRanges && v.edgePositions && v.edgeIdChars && v.edgeIdOffsets) {
+    const edgeIds = decodeIds(v.edgeIdChars, v.edgeIdOffsets, v.edgeCount);
+    for (let e = 0; e < v.edgeCount; e++) {
+      const firstPoint = v.edgeRanges[e * 2];
+      const pointCount = v.edgeRanges[e * 2 + 1];
+      const points: [number, number, number][] = [];
+      for (let p = 0; p < pointCount; p++) {
+        const i = (firstPoint + p) * 3;
+        points.push(applyPlacementToPoint(m, [v.edgePositions[i], v.edgePositions[i + 1], v.edgePositions[i + 2]]));
+      }
+      edges.push({ points, id: edgeIds[e] });
+    }
+  }
+
+  return encodeMesh1({
+    positions,
+    normals,
+    faces,
+    edges,
+    lod: v.lod,
+    idsHaveElementIds: v.idsHaveElementIds,
+    faceBboxes: v.hasFaceBboxes,
+  });
+}
+
+/** Apply `fn` to each xyz triple of a flat buffer, returning a flat number[]. */
+function mapTriples(src: Float32Array, fn: (p: Vec3) => Vec3): number[] {
+  const out = new Array<number>(src.length);
+  for (let i = 0; i < src.length; i += 3) {
+    const [x, y, z] = fn([src[i], src[i + 1], src[i + 2]]);
+    out[i] = x;
+    out[i + 1] = y;
+    out[i + 2] = z;
+  }
+  return out;
+}
+
+/** Decode `count` UTF-8 ids out of a chars blob + its prefix-sum offsets. */
+function decodeIds(chars: Uint8Array, offsets: Uint32Array, count: number): string[] {
+  const dec = new TextDecoder();
+  const out: string[] = [];
+  for (let i = 0; i < count; i++) out.push(dec.decode(chars.subarray(offsets[i], offsets[i + 1])));
+  return out;
+}
+
+/** Face `i`'s authored color, or undefined when the section is absent/unset (alpha 0). */
+function faceColorAt(colors: Uint8Array | null, i: number): FaceColor | undefined {
+  if (!colors || colors.length < (i + 1) * 4) return undefined;
+  const a = colors[i * 4 + 3];
+  return a === 0 ? undefined : [colors[i * 4], colors[i * 4 + 1], colors[i * 4 + 2], a];
 }
 
 // ── Revolve body (profile ring swept around an in-plane axis) — the mock L2 body ─

@@ -10,8 +10,10 @@
  *   dragging   — pointer owns the handle/edge (params track the drag)
  *   committing — pointer released; awaiting the exact L2 result before select
  */
-import type { BooleanOperation } from "@/ipc/types";
+import type { BooleanOperation, TransformBodyParams } from "@/ipc/types";
 import { EDGE_OP_FLIP_HOLD, EDGE_OP_MIN_VALUE } from "@/tools/preview/filletRadius";
+import { WORLD_AXIS } from "@/tools/preview/patternPreview";
+import type { Vec3 } from "@/tools/preview/depthProjection";
 
 export type ModelPhase = "idle" | "armed" | "dragging" | "committing";
 
@@ -1040,4 +1042,177 @@ export function mirrorStep(s: MirrorFsm, e: MirrorEvent): MirrorStep {
       if (s.phase === "idle") return { state: s, effect: "none" };
       return { state: mirrorInit(), effect: "cancel" };
   }
+}
+
+// ── Transform body (WP-B W1; SCHEMA §7.3 `TransformBody`) ────────────────────
+//
+// Arms with a BODY SELECTION (one or many). The chip cluster is
+// `[Move|Rotate] [X|Y|Z] [value] [✓] [✕]`: the mode picks WHAT the number means,
+// the axis picks WHICH component it writes, and the value is a live view of that
+// one component of the record's CUMULATIVE params.
+//
+// The state below is the record's canonical form, not a delta. A placement is ONE
+// re-edited record per intent (the fold rule), so `translate` / `angleDeg` are
+// always the full stored values and typing REPLACES the addressed component —
+// there is deliberately NO incremental composition math in V1 (a second gesture
+// after a 30mm move types the new absolute, not "+20"). Holding the whole vector
+// rather than a scalar is what makes an axis switch honest: moving X 30 then
+// switching to Y shows the stored dy (0), and committing keeps dx = 30.
+//
+// `center` is FROZEN at first authoring (SCHEMA §7.3) — seeded from the targets'
+// combined bbox centre on a fresh arm, from the stored params on a fold/re-edit,
+// and never re-derived, so repeated edits cannot drift the pivot.
+
+export type TransformMode = "move" | "rotate";
+
+export interface TransformFsm {
+  phase: ConfigPhase;
+  mode: TransformMode;
+  /** The active axis: the translate COMPONENT in move mode, the rotation axis in rotate mode. */
+  axis: PatternAxis;
+  /** Cumulative world translation (the record's canonical `translate`). */
+  translate: Vec3;
+  /** Cumulative rotation angle in DEGREES about `rotAxis`. */
+  angleDeg: number;
+  /** The stored rotation axis — kept separate so a move never disturbs the rotation. */
+  rotAxis: PatternAxis;
+  /** The bodies being placed; mirrors `params.targets` in order. */
+  targets: string[];
+  /** The frozen pivot (world). */
+  center: Vec3;
+  /** `true` places COPIES and preserves the sources. No W1 UI authors it (see the WP note). */
+  copy: boolean;
+}
+
+/** The full stored shape a fold / re-edit seeds (everything but `phase`). */
+export interface TransformSeed {
+  mode?: TransformMode;
+  axis?: PatternAxis;
+  translate?: Vec3;
+  angleDeg?: number;
+  rotAxis?: PatternAxis;
+  center?: Vec3;
+  copy?: boolean;
+}
+
+export type TransformEvent =
+  | ({ kind: "arm"; targets: string[] } & TransformSeed)
+  /** Re-seed an ALREADY-armed placement (a re-edit's stored params land async). */
+  | ({ kind: "seed" } & TransformSeed)
+  | { kind: "setMode"; mode: TransformMode }
+  | { kind: "setAxis"; axis: PatternAxis }
+  | { kind: "setValue"; value: number }
+  | { kind: "apply" }
+  | { kind: "settle" }
+  | { kind: "cancel" };
+
+export interface TransformStep {
+  state: TransformFsm;
+  effect: ToolEffect;
+}
+
+export function transformInit(): TransformFsm {
+  return {
+    phase: "idle",
+    mode: "move",
+    axis: "X",
+    translate: [0, 0, 0],
+    angleDeg: 0,
+    rotAxis: "Z",
+    targets: [],
+    center: [0, 0, 0],
+    copy: false,
+  };
+}
+
+/** Index of a world axis into a Vec3 / the translate triple. */
+export function axisIndex(axis: PatternAxis): 0 | 1 | 2 {
+  return axis === "X" ? 0 : axis === "Y" ? 1 : 2;
+}
+
+/**
+ * The number the chip shows for the CURRENT mode + axis. In rotate mode an axis
+ * that is not the stored rotation axis reads 0 — there is one rotation, and
+ * asking about a different axis honestly has no angle yet.
+ */
+export function transformValue(s: TransformFsm): number {
+  if (s.mode === "move") return s.translate[axisIndex(s.axis)];
+  return s.axis === s.rotAxis ? s.angleDeg : 0;
+}
+
+/** Merge a seed over a state, dropping the fields the caller left undefined. */
+function applySeed(s: TransformFsm, e: TransformSeed): TransformFsm {
+  return {
+    ...s,
+    mode: e.mode ?? s.mode,
+    axis: e.axis ?? s.axis,
+    translate: e.translate ? [...e.translate] : s.translate,
+    angleDeg: e.angleDeg ?? s.angleDeg,
+    rotAxis: e.rotAxis ?? s.rotAxis,
+    center: e.center ? [...e.center] : s.center,
+    copy: e.copy ?? s.copy,
+  };
+}
+
+export function transformStep(s: TransformFsm, e: TransformEvent): TransformStep {
+  switch (e.kind) {
+    case "arm": {
+      if (e.targets.length === 0) return { state: transformInit(), effect: "none" };
+      const armed = applySeed(transformInit(), e);
+      return { state: { ...armed, phase: "armed", targets: [...e.targets] }, effect: "ghost" };
+    }
+    case "seed":
+      if (s.phase !== "armed") return { state: s, effect: "none" };
+      return { state: applySeed(s, e), effect: "ghost" };
+    case "setMode":
+      if (s.phase !== "armed") return { state: s, effect: "none" };
+      return { state: { ...s, mode: e.mode }, effect: "ghost" };
+    case "setAxis":
+      if (s.phase !== "armed") return { state: s, effect: "none" };
+      return { state: { ...s, axis: e.axis }, effect: "ghost" };
+    case "setValue": {
+      if (s.phase !== "armed") return { state: s, effect: "none" };
+      const v = Number.isFinite(e.value) ? e.value : 0;
+      if (s.mode === "rotate") {
+        // Typing an angle also CLAIMS the axis: the record carries one rotation,
+        // so authoring about Y is what makes Y the rotation axis.
+        return { state: { ...s, angleDeg: v, rotAxis: s.axis }, effect: "ghost" };
+      }
+      const translate: Vec3 = [...s.translate];
+      translate[axisIndex(s.axis)] = v;
+      return { state: { ...s, translate }, effect: "ghost" };
+    }
+    case "apply":
+      if (s.phase !== "armed") return { state: s, effect: "none" };
+      return { state: { ...s, phase: "committing" }, effect: "commit" };
+    case "settle":
+      return { state: transformInit(), effect: "none" };
+    case "cancel":
+      if (s.phase === "idle") return { state: s, effect: "none" };
+      return { state: transformInit(), effect: "cancel" };
+  }
+}
+
+/** True iff the placement is the identity — a legal, geometry-free no-op. */
+export function isIdentityPlacement(s: TransformFsm): boolean {
+  return s.translate.every((c) => c === 0) && s.angleDeg === 0;
+}
+
+/**
+ * The canonical `TransformBodyParams` for an armed placement. The rotation always
+ * carries the FROZEN centre (even for a pure translation, where the pivot is
+ * unused but must survive the round-trip so the next re-edit recomposes against
+ * the same point).
+ */
+export function transformParamsOf(s: TransformFsm): TransformBodyParams {
+  return {
+    targets: [...s.targets],
+    translate: [s.translate[0], s.translate[1], s.translate[2]],
+    rotate: {
+      center: [s.center[0], s.center[1], s.center[2]],
+      axis: [...WORLD_AXIS[s.rotAxis]],
+      angleDeg: s.angleDeg,
+    },
+    copy: s.copy,
+  };
 }

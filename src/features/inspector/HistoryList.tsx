@@ -37,6 +37,9 @@ const OPTYPE_ICON: Record<string, IconName> = {
   LinearPattern: "linearPattern",
   CircularPattern: "circularPattern",
   MirrorBody: "mirrorBody",
+  // A placement also buckets under `kind: "boolean"` (dto.rs feature_kind), so
+  // without this entry every Move row would show the boolean glyph.
+  TransformBody: "move",
   // An import buckets under `kind: "boolean"` in the projection (interim), so
   // without this entry every imported body's row would show the boolean glyph.
   [IMPORT_STEP_OP_TYPE]: "import",

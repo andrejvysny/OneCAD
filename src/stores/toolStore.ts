@@ -40,6 +40,8 @@ export type ModelTool =
   | "linearPattern"
   | "circularPattern"
   | "mirror"
+  /** Move/rotate a body selection (WP-B W1 TransformBody). */
+  | "transform"
   /** Measure (W2-B): a READ-ONLY inspection tool — picks nothing into history. */
   | "measure";
 

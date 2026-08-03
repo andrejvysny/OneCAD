@@ -134,6 +134,20 @@ describe("HistoryList icons — opType-first lookup (W0.5)", () => {
     expect(iconPathOf("history-row-m1")).toBe(ICON_PATHS.mirrorBody);
   });
 
+  it("a folded TransformBody row (kind: boolean) shows the move icon", () => {
+    const moveRow: FeatureMeta = {
+      id: "t1",
+      kind: "boolean",
+      opType: "TransformBody",
+      label: "Move",
+      valueText: "Δ(30.0, 0.0, 0.0)",
+      status: "ok",
+    };
+    render(<HistoryList items={[moveRow]} />);
+    expect(iconPathOf("history-row-t1")).toBe(ICON_PATHS.move);
+    expect(iconPathOf("history-row-t1")).not.toBe(ICON_PATHS.boolean);
+  });
+
   it("a row without opType falls back to the kind icon", () => {
     const noOpTypeRow: FeatureMeta = {
       id: "n1",

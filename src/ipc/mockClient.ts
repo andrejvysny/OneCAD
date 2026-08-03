@@ -33,14 +33,23 @@ import type {
   ResolveRefResult,
   SketchEntity,
   SketchSession,
+  TransformBodyParams,
   Unsubscribe,
   WorkerStatus,
 } from "./types";
 import { IMPORT_STEP_OP_TYPE } from "./types";
 import type { WireEditCommand } from "./tauriCommandMap";
-import { wireParamsOf } from "./tauriCommandMap";
+import { bareBodyId, wireParamsOf } from "./tauriCommandMap";
 import type { FaceColor } from "./mockMeshes";
-import { concatMesh1, makeBoxMesh, makeCylinderMesh, makeExtrudeBodyMesh, makeRevolveBodyMesh } from "./mockMeshes";
+import {
+  concatMesh1,
+  makeBoxMesh,
+  makeCylinderMesh,
+  makeExtrudeBodyMesh,
+  makeRevolveBodyMesh,
+  transformMesh1,
+} from "./mockMeshes";
+import { placementMatrix } from "@/tools/preview/patternPreview";
 import type { LatheAxis } from "@/tools/preview/lathePreview";
 import { createLocalSolverLane } from "./localSolver";
 import { lookupMockFace, mockElementHash } from "./mockFaceGeometry";
@@ -408,6 +417,116 @@ function booleanTargetKnown(target: string | undefined): target is string {
   return !!target && (syntheticBodies.has(target) || documentStore.getState().bodies[target] !== undefined);
 }
 
+// ── TransformBody (WP-B W1) ──────────────────────────────────────────────────
+//
+// The one mock body op that is EXACT rather than a stand-in: a rigid transform of
+// a tessellation is what the kernel produces too (`transformMesh1`). Two pieces of
+// bookkeeping make it parametric rather than incremental:
+//
+// * `transformBases` freezes each target's PRE-placement mesh at the record's
+//   first commit, so a re-edit from 30mm to 50mm lands at 50 — not at 80. Without
+//   it the mock would compose every edit onto the already-moved mesh and the
+//   "one cumulative record" semantics would be a lie on this lane.
+// * `transformCopies` pins a `copy: true` record's minted body ids, so a re-edit
+//   rewrites the SAME copies instead of littering new ones.
+
+/** featureId → {bodyId → the mesh that record started from}. */
+const transformBases = new Map<string, Map<string, ArrayBuffer>>();
+/** featureId → the body ids a `copy: true` record minted, in `targets` order. */
+const transformCopies = new Map<string, string[]>();
+/** featureId → the bodies that record touched (the mock's stand-in for record lineage). */
+const featureTouched = new Map<string, string[]>();
+
+/**
+ * Ensure every body an op will rewrite IN PLACE is in `syntheticBodies` BEFORE the
+ * undo snapshot is taken. The seed bodies (`body1`/`body2`) live only as a
+ * `getBodyMesh` fallback, so a placement that added them afterwards would make
+ * `diffBodies` read the undo as a body REMOVAL and delete it from the scene.
+ */
+function materializeOpTargets(op: OperationOp): void {
+  if (op.opType !== "TransformBody") return;
+  for (const id of op.params.targets) {
+    if (!syntheticBodies.has(id)) syntheticBodies.set(id, meshForBody(id));
+  }
+}
+
+/** The mock's `dto.rs transform_value_text` mirror: Δ, else angle, else identity. */
+function transformValueText(p: TransformBodyParams): string {
+  const [dx, dy, dz] = p.translate;
+  if (dx !== 0 || dy !== 0 || dz !== 0) {
+    return `Δ(${dx.toFixed(1)}, ${dy.toFixed(1)}, ${dz.toFixed(1)})`;
+  }
+  if (p.rotate.angleDeg !== 0) return `${p.rotate.angleDeg.toFixed(1)}°`;
+  return "0.0 mm";
+}
+
+function mutateTransform(
+  p: TransformBodyParams,
+  editId: string | undefined,
+): { changed: string[]; removed: string[]; label: string; featureId: string } {
+  const featureId = editId ?? nextFeatureId();
+  const editing = editId !== undefined && transformBases.has(editId);
+  const bases = editing
+    ? transformBases.get(featureId)!
+    : new Map(p.targets.map((id) => [id, syntheticBodies.get(id) ?? meshForBody(id)]));
+  if (!editing) transformBases.set(featureId, bases);
+
+  const m = placementMatrix(p.translate, p.rotate.center, p.rotate.axis, p.rotate.angleDeg);
+  const changed: string[] = [];
+  if (p.copy) {
+    // `copy: true` preserves the sources and mints one body per target, id-stable
+    // across re-edits (the real op mints `body_<opId>[:k]` — same guarantee).
+    const ids = transformCopies.get(featureId) ?? p.targets.map(() => nextBodyId());
+    transformCopies.set(featureId, ids);
+    p.targets.forEach((src, k) => {
+      syntheticBodies.set(ids[k], transformMesh1(bases.get(src)!, m));
+      changed.push(ids[k]);
+    });
+  } else {
+    for (const id of p.targets) {
+      syntheticBodies.set(id, transformMesh1(bases.get(id)!, m));
+      changed.push(id);
+    }
+  }
+
+  const valueText = transformValueText(p);
+  if (editing) {
+    mockFeatures = mockFeatures.map((f) => (f.id === featureId ? { ...f, valueText } : f));
+  } else {
+    mockFeatures = [
+      ...mockFeatures,
+      { id: featureId, kind: "boolean", opType: "TransformBody", label: "Move", valueText, status: "ok" },
+    ];
+  }
+  return { changed, removed: [], label: "Move", featureId };
+}
+
+/**
+ * The mock's mirror of core `document::transform::can_fold_transform`.
+ *
+ * Walk the record list from the END for the first record that TOUCHED `bodyId`;
+ * fold iff that record is a `copy: false` TransformBody listing it as a target.
+ * `featureTouched` stands in for the core's `inputs.bodies ∪ outputs` — it is the
+ * body diff each record actually produced, which is the same question.
+ *
+ * Anything else — a fillet, a boolean, a `copy: true` placement, an untouched
+ * body — is `null` and appends a fresh record. Folding into a transform some
+ * LATER op already consumed would retroactively move the geometry that op was
+ * built on, which is the H5-B failure mode one layer up.
+ */
+function mockCanFoldTransform(bodyId: string): string | null {
+  for (let i = mockFeatures.length - 1; i >= 0; i--) {
+    const f = mockFeatures[i];
+    if (!featureTouched.get(f.id)?.includes(bodyId)) continue;
+    if (f.opType !== "TransformBody") return null;
+    const params = featureParams.get(f.id);
+    if (!params || params.copy === true) return null;
+    const targets = params.targets;
+    return Array.isArray(targets) && targets.includes(bareBodyId(bodyId)) ? f.id : null;
+  }
+  return null;
+}
+
 /** Apply one op forward (mutates features + bodies); returns the body diff. */
 function mutateOp(op: OperationOp): {
   changed: string[];
@@ -560,6 +679,7 @@ function mutateOp(op: OperationOp): {
     }
     return { changed: [bodyId], removed: [], label: "Mirror", featureId };
   }
+  if (op.opType === "TransformBody") return mutateTransform(op.params, op.featureId);
   // Boolean: MOCK removes the tool body, keeps the target (no real fusion).
   const { targetBodyId, toolBodyId, operation } = op.params;
   syntheticBodies.delete(toolBodyId);
@@ -573,12 +693,17 @@ function mutateOp(op: OperationOp): {
 
 /** Commit an op: push undo, mutate, bump revision, build the result. */
 function commitOp(op: OperationOp): ApplyOperationResult {
+  // BEFORE the snapshot: an op that rewrites a seed body in place needs that
+  // body's pre-op mesh captured, or undo reads as a deletion (see the helper).
+  materializeOpTargets(op);
   undoStack.push(snap(labelForOp(op)));
   redoStack.length = 0;
   const { changed, removed, label, featureId } = mutateOp(op);
   // Remember the committed wire params so `getOperationParams` can serve a re-edit
   // its non-scalar inputs (axis / openFaces / edges) verbatim.
   featureParams.set(featureId, wireParamsOf(op));
+  // …and which bodies it touched, the lineage `canFoldTransform` walks.
+  featureTouched.set(featureId, [...changed, ...removed]);
   mockRevision += 1;
   // A committed op is the mock's "projection-updated": whatever the backend holds
   // wins over whatever the tree flipped locally (see the mockBodyMeta header).
@@ -1329,6 +1454,11 @@ export const mockClient: CadClient = {
 
   applyOperation(op: OperationOp): Promise<ApplyOperationResult> {
     return commitAndEmit(op);
+  },
+
+  async canFoldTransform(bodyId: string): Promise<string | null> {
+    await wait();
+    return mockCanFoldTransform(bodyId);
   },
 
   // IN-EDITOR lane: append an import to the OPEN document. Rust owns the dialog on

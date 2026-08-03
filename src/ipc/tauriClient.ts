@@ -119,6 +119,7 @@ const CMD = {
   getProjection: "get_projection",
   applyEditCommand: "apply_edit_command",
   getOperationParams: "get_operation_params",
+  canFoldTransform: "can_fold_transform",
   undo: "undo",
   redo: "redo",
   enterSketch: "enter_sketch",
@@ -1172,6 +1173,13 @@ export function createTauriClient(): CadClient {
     return call<Record<string, unknown>>(CMD.getOperationParams, { recordId });
   }
 
+  async function canFoldTransform(bodyId: string): Promise<string | null> {
+    // Read-only lineage query (`api::can_fold_transform`, arg key `bodyId`).
+    // `Option<String>` on the Rust side, so `null` is the ordinary "append a
+    // fresh record" answer — never an error.
+    return call<string | null>(CMD.canFoldTransform, { bodyId });
+  }
+
   // ── Promotion (pick → ElementId) ──────────────────────────────────────────
   /**
    * Resolve a picked planar face to its sketch plane. The backend reads the
@@ -1395,6 +1403,7 @@ export function createTauriClient(): CadClient {
     resolveRefs,
     applyEditCommand,
     getOperationParams,
+    canFoldTransform,
 
     // ── Two-level preview (local seam; backend preview verb TBD) ──────────────
     beginPreview: lane.beginPreview,

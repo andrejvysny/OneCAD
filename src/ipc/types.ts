@@ -586,7 +586,9 @@ export type OpType =
   | "Shell"
   | "LinearPattern"
   | "CircularPattern"
-  | "MirrorBody";
+  | "MirrorBody"
+  /** Rigid placement of a body selection (SCHEMA §7.3; WP-B W0/W1). */
+  | "TransformBody";
 
 /** Extrude end condition (SCHEMA §7.3 ExtrudeParams). */
 export type ExtrudeMode = "Blind" | "ThroughAll" | "Symmetric" | "ToNext" | "ToFace";
@@ -721,6 +723,35 @@ export interface MirrorBodyParams {
 }
 
 /**
+ * The rotation half of a `TransformBody` (Rust `TransformRotation`). `center` is
+ * the FROZEN pivot — the targets' combined bbox centre at first authoring, never
+ * re-derived, so repeated re-edits recompose against the same point and cannot
+ * drift. `axis` need not be unit length but MUST be non-zero when `angleDeg ≠ 0`.
+ */
+export interface TransformRotationParams {
+  center: [number, number, number];
+  axis: [number, number, number];
+  angleDeg: number;
+}
+
+/**
+ * Rigid-placement op params (SCHEMA §7.3 `TransformBody`, Rust
+ * `TransformBodyParams`). NORMATIVE evaluation order is
+ * `X' = T ∘ R(center, axis, angleDeg) · X` — rotate about the frozen pivot
+ * first, THEN translate.
+ *
+ * `targets` mirrors `inputs[]` in order (the ordinal is load-bearing for
+ * `copy: true`, which mints `body_<opId>:<k>` at the target's index). A zero
+ * motion is legal and a geometric no-op.
+ */
+export interface TransformBodyParams {
+  targets: string[];
+  translate: [number, number, number];
+  rotate: TransformRotationParams;
+  copy: boolean;
+}
+
+/**
  * One op in an `ExecutePlan` (SCHEMA §7.3), discriminated by `opType`. An
  * optional `featureId` re-targets an EXISTING feature (parametric edit —
  * double-click a history entry → re-drag). `sketchId`/`regionId` on Extrude tell
@@ -796,6 +827,13 @@ export type OperationOp =
       featureId?: string;
       inputs?: SemanticRef[];
       params: MirrorBodyParams;
+    }
+  | {
+      opType: "TransformBody";
+      opId?: string;
+      featureId?: string;
+      inputs?: SemanticRef[];
+      params: TransformBodyParams;
     };
 
 /**
