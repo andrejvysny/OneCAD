@@ -1,10 +1,12 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { RefObject } from "react";
 import { DisplayModePopover } from "./DisplayModePopover";
 import { settingsStore } from "@/stores/settingsStore";
 import { resetStores } from "@/test/resetStores";
+import { DEFAULT_THEME } from "@/theme/themes";
+import { LENGTH_UNIT_ORDER } from "@/units/lengthUnits";
 
 const anchorRef = { current: null } as RefObject<HTMLButtonElement | null>;
 
@@ -122,6 +124,77 @@ describe("DisplayModePopover appearance section", () => {
     await user.click(screen.getByRole("tab", { name: "Dark" }));
 
     expect(settingsStore.getState().theme).toBe("dark");
+    expect(settingsStore.getState().displayMode).toBe("shadedEdges");
+  });
+});
+
+describe("DisplayModePopover units section", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    resetStores();
+  });
+
+  it("renders one tab per registry unit, the current preference selected", () => {
+    render(<DisplayModePopover open onClose={() => {}} anchorRef={anchorRef} />);
+
+    expect(screen.getByText("Units")).toBeInTheDocument();
+    const group = screen.getByRole("tablist", { name: "Units" });
+    expect(group).toBeInTheDocument();
+
+    for (const unit of LENGTH_UNIT_ORDER) {
+      expect(within(group).getByRole("tab", { name: unit })).toBeInTheDocument();
+    }
+    // resetStores() leaves displayUnit at the default (mm).
+    expect(within(group).getByRole("tab", { name: "mm" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(within(group).getByRole("tab", { name: "in" })).toHaveAttribute(
+      "aria-selected",
+      "false",
+    );
+  });
+
+  it("picking a unit writes the preference", async () => {
+    const user = userEvent.setup();
+    render(<DisplayModePopover open onClose={() => {}} anchorRef={anchorRef} />);
+    const group = screen.getByRole("tablist", { name: "Units" });
+
+    await user.click(within(group).getByRole("tab", { name: "in" }));
+    expect(settingsStore.getState().displayUnit).toBe("in");
+
+    await user.click(within(group).getByRole("tab", { name: "m" }));
+    expect(settingsStore.getState().displayUnit).toBe("m");
+  });
+
+  it("picking a unit does NOT close the popover (follows Appearance, not the mode rows)", async () => {
+    const user = userEvent.setup();
+    let closed = false;
+    render(
+      <DisplayModePopover
+        open
+        onClose={() => {
+          closed = true;
+        }}
+        anchorRef={anchorRef}
+      />,
+    );
+
+    const group = screen.getByRole("tablist", { name: "Units" });
+    await user.click(within(group).getByRole("tab", { name: "cm" }));
+    expect(closed).toBe(false);
+  });
+
+  it("unit, theme and display mode are independent", async () => {
+    const user = userEvent.setup();
+    render(<DisplayModePopover open onClose={() => {}} anchorRef={anchorRef} />);
+
+    await user.click(
+      within(screen.getByRole("tablist", { name: "Units" })).getByRole("tab", { name: "in" }),
+    );
+
+    expect(settingsStore.getState().displayUnit).toBe("in");
+    expect(settingsStore.getState().theme).toBe(DEFAULT_THEME);
     expect(settingsStore.getState().displayMode).toBe("shadedEdges");
   });
 });

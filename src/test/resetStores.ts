@@ -9,6 +9,7 @@ import { viewportStore } from "@/stores/viewportStore";
 import { documentStore, seedMockDocument } from "@/stores/documentStore";
 import { settingsStore } from "@/stores/settingsStore";
 import { DEFAULT_THEME } from "@/theme/themes";
+import { DEFAULT_LENGTH_UNIT } from "@/units/lengthUnits";
 import { DEFAULT_RENDER_MODE } from "@/viewport/engine/renderModes";
 import { sketchStore } from "@/stores/sketchStore";
 import { toolChipStore } from "@/stores/toolChipStore";
@@ -59,6 +60,7 @@ export function resetStores(): void {
     navigation: { inputDevice: "auto" },
     displayMode: DEFAULT_RENDER_MODE,
     theme: DEFAULT_THEME,
+    displayUnit: DEFAULT_LENGTH_UNIT,
   });
   sketchStore.getState().reset();
   toolChipStore.getState().clear();

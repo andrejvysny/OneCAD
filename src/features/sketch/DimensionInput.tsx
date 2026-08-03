@@ -11,7 +11,14 @@
  */
 import { useEffect, useRef, useState } from "react";
 import type { SketchConstraintType } from "@/ipc/types";
-import { formatLength as formatDimensionValue, parseLength } from "@/units/format";
+import { useSettingsStore } from "@/stores/settingsStore";
+import {
+  formatLength,
+  formatUnitless,
+  isLengthSuffix,
+  lengthSuffix,
+  parseLength,
+} from "@/units/format";
 
 export interface DimensionInputProps {
   value: number;
@@ -78,14 +85,43 @@ export function DimensionInput({
    * length parser (or vice versa), so both are honoured.
    */
   const isAngle = kind === "Angle" || suffix === "°";
-  const [text, setText] = useState(() => formatDimensionValue(value));
+  /*
+   * WP-C2. `value` is ALWAYS the document number: millimetres for a length,
+   * degrees for an angle. The DISPLAY unit only changes how a length reads and
+   * how a bare typed number is read back, so an angle ignores it entirely (the
+   * deg↔rad marshalling lives in `@/ipc/angleUnits` and this module must not
+   * second-guess it).
+   *
+   * Subscribing here is what makes every length chip in the app re-render on a
+   * unit switch — model-tool chips, sketch dimension badges and the dimension
+   * tool all render through THIS component, so none of them needs its own
+   * subscription.
+   */
+  const unit = useSettingsStore((s) => s.displayUnit);
+  const formatValue = (n: number) => (isAngle ? formatUnitless(n) : formatLength(n, unit));
+  /*
+   * A caller passes a LENGTH suffix ("mm", from `LENGTH_SUFFIX` or a literal)
+   * to say "this chip is a length", not to pick the unit — so it is replaced by
+   * the current display unit. A non-length suffix ("°", "") passes through
+   * untouched, which is what keeps angle chips out of this path.
+   */
+  const shownSuffix = !isAngle && isLengthSuffix(suffix) ? lengthSuffix(unit) : suffix;
+
+  const [text, setText] = useState(() => formatValue(value));
   const [isError, setIsError] = useState(false);
   const ref = useRef<HTMLInputElement>(null);
   const errorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  /*
+   * Re-render the SAME value in the new unit. This is a pure re-display: it
+   * never calls `onCommit`, so switching units cannot dirty a document or
+   * re-commit a dimension (pinned test) — the mm the constraint holds is
+   * untouched.
+   */
   useEffect(() => {
-    setText(formatDimensionValue(value));
-  }, [value]);
+    setText(formatValue(value));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value, unit]);
 
   useEffect(() => {
     if (autoFocus) {
@@ -116,16 +152,17 @@ export function DimensionInput({
     // ANGLE chips keep the plain float parse: the UI angle domain is degrees and
     // its deg↔rad marshalling lives in `@/ipc/angleUnits`, which this module must
     // not second-guess. Every other chip is a LENGTH, so it accepts a unit suffix
-    // (`25`, `25mm`, `2.5 cm`, `1 in`) and stores millimetres — and REJECTS text
-    // it only partly understood ("25abc"), where parseFloat would commit 25.
-    const n = isAngle ? Number.parseFloat(text) : (parseLength(text) ?? Number.NaN);
+    // (`25mm`, `2.5 cm`, `1 in`) or a BARE number read in the current display
+    // unit — and always emits MILLIMETRES, whatever the preference. It REJECTS
+    // text it only partly understood ("25abc"), where parseFloat would commit 25.
+    const n = isAngle ? Number.parseFloat(text) : (parseLength(text, unit) ?? Number.NaN);
     if (!Number.isFinite(n)) {
       if (kind) {
         flashError();
         return false;
       }
       // No kind ⇒ legacy finite-only behavior, unchanged (model-tool chips).
-      setText(formatDimensionValue(value));
+      setText(formatValue(value));
       return true;
     }
     if (kind && !isValidForKind(kind, n)) {
@@ -136,8 +173,8 @@ export function DimensionInput({
     // that displays truncated (e.g. 12.345 → "12.345" already exact, but a
     // value like 12.3456 rendering as "12.346") must not spuriously re-commit
     // the rounded display value as if the user had typed something new.
-    if (formatDimensionValue(n) !== formatDimensionValue(value)) onCommit(n);
-    else setText(formatDimensionValue(value));
+    if (formatValue(n) !== formatValue(value)) onCommit(n);
+    else setText(formatValue(value));
     return true;
   };
 
@@ -151,7 +188,12 @@ export function DimensionInput({
         ref={ref}
         aria-label="Dimension value"
         aria-invalid={isError}
-        className={`w-9 bg-transparent text-right outline-none ${isError ? "text-traffic-close" : ""}`}
+        /* The 36px field is prototype-exact for millimetres. Every other unit
+           divides, so it systematically renders more decimals ("0.0394 in" for
+           1 mm) and would scroll its leading digits out of sight — the field
+           widens only when a unit that needs it is selected, leaving the mm
+           default pixel-identical. */
+        className={`${isAngle || unit === "mm" ? "w-9" : "w-14"} bg-transparent text-right outline-none ${isError ? "text-traffic-close" : ""}`}
         value={text}
         inputMode="decimal"
         onChange={(e) => setText(e.target.value)}
@@ -167,7 +209,7 @@ export function DimensionInput({
             if (onCancel) {
               onCancel();
             } else {
-              setText(formatDimensionValue(value));
+              setText(formatValue(value));
               ref.current?.blur();
             }
           }
@@ -179,7 +221,7 @@ export function DimensionInput({
           }
         }}
       />
-      {suffix && <span className="text-ink-5">{suffix}</span>}
+      {shownSuffix && <span className="text-ink-5">{shownSuffix}</span>}
     </span>
   );
 }

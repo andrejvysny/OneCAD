@@ -4,6 +4,7 @@ import { MonoValue } from "@/ui/MonoValue";
 import { useToolStore } from "@/stores/toolStore";
 import { useSelectionStore, primarySelection } from "@/stores/selectionStore";
 import { useDocumentStore } from "@/stores/documentStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useWorkerStore, type WorkerLifecycleState } from "@/stores/workerStore";
 import {
   useViewportStore,
@@ -26,6 +27,9 @@ export function StatusBar() {
   const statusHint = useViewportStore((s) => s.statusHint);
   const workerState = useWorkerStore((s) => s.state);
   const activeSketchId = useViewportStore((s) => s.activeSketchId);
+  // WP-C2: the cursor read-out is mm in the store and display-unit on screen.
+  // Subscribing here is what repaints the row when the unit picker moves.
+  const displayUnit = useSettingsStore((s) => s.displayUnit);
   const activeSketch = useDocumentStore((s) =>
     activeSketchId ? s.sketches[activeSketchId] : undefined,
   );
@@ -75,7 +79,7 @@ export function StatusBar() {
       </span>
       <span aria-hidden="true" className="h-[14px] w-px bg-border" />
       <MonoValue className="whitespace-pre text-[11.5px]">
-        {formatCursor(cursor)}
+        {formatCursor(cursor, displayUnit)}
       </MonoValue>
     </div>
   );

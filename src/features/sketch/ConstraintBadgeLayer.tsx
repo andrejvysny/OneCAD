@@ -15,6 +15,7 @@ import { useViewportEngine } from "@/viewport/engineBridge";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
 import { createClient } from "@/ipc/client";
 import { editConstraintValue } from "@/tools/sketch/sketchService";
+import { LENGTH_SUFFIX } from "@/units/format";
 import { layoutBadges } from "./badgeLayout";
 import { DimensionInput } from "./DimensionInput";
 
@@ -87,7 +88,9 @@ export function ConstraintBadgeLayer() {
               >
                 <DimensionInput
                   value={b.value}
-                  suffix={b.kind === "Angle" ? "" : "mm"}
+                  // A length badge names the LENGTH domain, not a unit —
+                  // DimensionInput swaps in whatever the display unit is.
+                  suffix={b.kind === "Angle" ? "" : LENGTH_SUFFIX}
                   kind={b.kind}
                   onCommit={(v) => {
                     if (clientRef.current) void editConstraintValue(clientRef.current, b.id, v);

@@ -6,6 +6,11 @@
 import { createStore, useStore } from "zustand";
 import { persist } from "zustand/middleware";
 import { coerceTheme, DEFAULT_THEME, type ThemePref } from "@/theme/themes";
+import {
+  coerceLengthUnit,
+  DEFAULT_LENGTH_UNIT,
+  type LengthUnitId,
+} from "@/units/lengthUnits";
 import type { DevicePref } from "@/viewport/engine/navInput";
 import { coerceRenderMode, DEFAULT_RENDER_MODE, type RenderModeId } from "@/viewport/engine/renderModes";
 
@@ -68,12 +73,21 @@ export interface SettingsState {
    * `merge`), since a hand-edited blob can carry an unknown id at any version.
    */
   theme: ThemePref;
+  /**
+   * Unit every DISPLAYED length is rendered in, and the unit a BARE typed
+   * number is read in. Purely presentational: the document, the wire and every
+   * persisted coordinate stay in millimetres, so switching this can never
+   * change a model — only how its numbers read. Coerced on every hydration, not
+   * just on migrate (see `merge`), same as displayMode and theme.
+   */
+  displayUnit: LengthUnitId;
   setSnap(key: SnapKey, value: boolean): void;
   setShow(key: ShowKey, value: boolean): void;
   setExperimentalWebGpu(value: boolean): void;
   setInputDevice(value: DevicePref): void;
   setDisplayMode(mode: RenderModeId): void;
   setTheme(theme: ThemePref): void;
+  setDisplayUnit(unit: LengthUnitId): void;
 }
 
 /** Versioned localStorage key (bump `version` on a breaking shape change). */
@@ -100,6 +114,7 @@ export const settingsStore = createStore<SettingsState>()(
       navigation: { inputDevice: "auto" },
       displayMode: DEFAULT_RENDER_MODE,
       theme: DEFAULT_THEME,
+      displayUnit: DEFAULT_LENGTH_UNIT,
       setSnap(key, value) {
         set((s) => ({ snapTo: { ...s.snapTo, [key]: value } }));
       },
@@ -118,10 +133,13 @@ export const settingsStore = createStore<SettingsState>()(
       setTheme(theme) {
         set({ theme });
       },
+      setDisplayUnit(unit) {
+        set({ displayUnit: unit });
+      },
     }),
     {
       name: STORAGE_KEY,
-      version: 5,
+      version: 6,
       // v1 → v2 added the M6c snap types (quadrant / intersection / onCurve).
       // A v1 blob has no keys for them; backfill the on-by-default values so an
       // existing user's popover shows them enabled (parity with a fresh install).
@@ -130,6 +148,8 @@ export const settingsStore = createStore<SettingsState>()(
       // a pre-v4 blob has no key for it at all, so coerce(undefined) → default.
       // v4 → v5 added the appearance preference; a pre-v5 blob has no key, so
       // coerce(undefined) → "system" (follow the OS, matching a fresh install).
+      // v5 → v6 added the display unit; a pre-v6 blob has no key, so
+      // coerce(undefined) → "mm", which is what every such blob was authored in.
       migrate: (persisted, version) => {
         const s = persisted as Partial<SettingsState>;
         if (s && version < 2) {
@@ -149,18 +169,23 @@ export const settingsStore = createStore<SettingsState>()(
         if (s && version < 5) {
           s.theme = coerceTheme((s as Partial<SettingsState>).theme);
         }
+        if (s && version < 6) {
+          s.displayUnit = coerceLengthUnit((s as Partial<SettingsState>).displayUnit);
+        }
         return s as unknown as SettingsState;
       },
       // `migrate` only runs when the persisted blob's version differs from the
-      // current one. A SAME-version blob can still carry a garbage displayMode
-      // or theme (hand-edited localStorage, or a rolled-back build that wrote
-      // an id a newer registry no longer has) — coerce them here too, on every
-      // hydration, not just across a version bump. Mirrors zustand's default
-      // shallow-merge shape so nothing else about persist's merge changes.
+      // current one. A SAME-version blob can still carry a garbage displayMode,
+      // theme or displayUnit (hand-edited localStorage, or a rolled-back build
+      // that wrote an id a newer registry no longer has) — coerce them here
+      // too, on every hydration, not just across a version bump. Mirrors
+      // zustand's default shallow-merge shape so nothing else about persist's
+      // merge changes.
       merge: (persisted, current) => {
         const merged = { ...current, ...(persisted as Partial<SettingsState>) };
         merged.displayMode = coerceRenderMode(merged.displayMode);
         merged.theme = coerceTheme(merged.theme);
+        merged.displayUnit = coerceLengthUnit(merged.displayUnit);
         return merged;
       },
     },

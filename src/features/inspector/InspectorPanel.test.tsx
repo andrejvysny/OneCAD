@@ -101,7 +101,7 @@ describe("InspectorPanel", () => {
     expect(screen.getAllByText("Coincident")).toHaveLength(4);
     expect(screen.getByText("Horizontal")).toBeInTheDocument();
     expect(screen.getByText("Distance")).toBeInTheDocument();
-    expect(screen.getByText("90")).toBeInTheDocument();
+    expect(screen.getByText("90 mm")).toBeInTheDocument();
     expect(screen.getByText("Angle")).toBeInTheDocument();
     expect(screen.getByText("30°")).toBeInTheDocument();
     expect(

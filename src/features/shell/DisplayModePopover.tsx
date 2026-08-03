@@ -5,12 +5,19 @@ import { SegmentedToggle, type SegmentedOption } from "@/ui/SegmentedToggle";
 import { Icon } from "@/icons/Icon";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { THEMES, THEME_ORDER, type ThemePref } from "@/theme/themes";
+import { LENGTH_UNITS, LENGTH_UNIT_ORDER, type LengthUnitId } from "@/units/lengthUnits";
 import { RENDER_MODES, RENDER_MODE_ORDER, type RenderModeId } from "@/viewport/engine/renderModes";
 
 /** Built from the registry so the control can never list a theme that isn't real. */
 const THEME_OPTIONS: SegmentedOption<ThemePref>[] = THEME_ORDER.map((id) => ({
   value: id,
   label: THEMES[id].label,
+}));
+
+/** Same, for the display unit — the registry is the only list of real units. */
+const UNIT_OPTIONS: SegmentedOption<LengthUnitId>[] = LENGTH_UNIT_ORDER.map((id) => ({
+  value: id,
+  label: LENGTH_UNITS[id].symbol,
 }));
 
 function DisplayModeRow({
@@ -49,15 +56,19 @@ type DisplayModePopoverProps = {
  * a tri-state control that only ever showed "the next click's target" gave no
  * way to jump straight to a mode or see all of them at once.
  *
- * Also carries Appearance. Both settings answer "how does the viewport look",
- * so they belong behind the same button; a fourth corner-cluster icon for a
- * once-a-month preference would not earn its place.
+ * Also carries Appearance and Units. All three answer "how does this document
+ * read", so they belong behind the same button; another corner-cluster icon for
+ * a once-a-month preference would not earn its place. Units follows the
+ * Appearance row exactly — a segmented toggle built from a registry, staying
+ * open on change.
  */
 export function DisplayModePopover({ open, onClose, anchorRef }: DisplayModePopoverProps) {
   const displayMode = useSettingsStore((s) => s.displayMode);
   const setDisplayMode = useSettingsStore((s) => s.setDisplayMode);
   const theme = useSettingsStore((s) => s.theme);
   const setTheme = useSettingsStore((s) => s.setTheme);
+  const displayUnit = useSettingsStore((s) => s.displayUnit);
+  const setDisplayUnit = useSettingsStore((s) => s.setDisplayUnit);
 
   const choose = (mode: RenderModeId) => {
     setDisplayMode(mode);
@@ -98,6 +109,24 @@ export function DisplayModePopover({ open, onClose, anchorRef }: DisplayModePopo
           value={theme}
           onChange={setTheme}
           ariaLabel="Appearance"
+          size="sm"
+          className="w-full"
+        />
+      </div>
+
+      <div className="mx-3.5 my-1.5 h-px bg-border-subtle" />
+
+      <SectionLabel className="px-3.5 pb-0.5 pt-0.5">Units</SectionLabel>
+      <div className="px-3.5 pb-1 pt-0.5">
+        {/* DISPLAY only — the document and the wire stay in millimetres, so
+            this can never change a model, only how its numbers read. Stays
+            open on change for the same reason Appearance does: the point is to
+            watch the dimensions land in the new unit. */}
+        <SegmentedToggle
+          options={UNIT_OPTIONS}
+          value={displayUnit}
+          onChange={setDisplayUnit}
+          ariaLabel="Units"
           size="sm"
           className="w-full"
         />

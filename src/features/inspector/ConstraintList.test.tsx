@@ -32,9 +32,9 @@ describe("ConstraintList", () => {
     expect(screen.getByText("p1 +3")).toBeInTheDocument();
   });
 
-  it("shows a value column for dimensional kinds, Angle in degrees with °", () => {
+  it("shows a value column for dimensional kinds, lengths with the display unit, Angle in degrees with °", () => {
     render(<ConstraintList constraints={constraints} onDelete={() => {}} />);
-    expect(screen.getByText("90")).toBeInTheDocument();
+    expect(screen.getByText("90 mm")).toBeInTheDocument();
     expect(screen.getByText("45°")).toBeInTheDocument();
   });
 

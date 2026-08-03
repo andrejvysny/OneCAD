@@ -33,7 +33,7 @@ test("cold boot with a persisted Dark preference renders a DARK viewport", async
   await page.addInitScript(() => {
     localStorage.setItem(
       "onecad.settings",
-      JSON.stringify({ state: { theme: "dark" }, version: 5 }),
+      JSON.stringify({ state: { theme: "dark" }, version: 6 }),
     );
   });
 
@@ -59,7 +59,7 @@ test("cold boot on a dark OS with the System preference renders a DARK viewport"
   await page.addInitScript(() => {
     localStorage.setItem(
       "onecad.settings",
-      JSON.stringify({ state: { theme: "system" }, version: 5 }),
+      JSON.stringify({ state: { theme: "system" }, version: 6 }),
     );
   });
 

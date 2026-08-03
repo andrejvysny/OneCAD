@@ -11,7 +11,7 @@
  * edge's depth), so the feel is consistent across zoom levels. Radius is clamped
  * to a small positive minimum (a zero-radius fillet is a no-op).
  */
-import { LENGTH_SUFFIX, formatLength } from "@/units/format";
+import { MM_SUFFIX, formatMillimetres } from "@/units/format";
 
 export interface RadiusDragOpts {
   /** World units per screen pixel at the edge depth (from the camera). */
@@ -38,14 +38,20 @@ export function radiusFromDrag(
 }
 
 /**
- * Format a radius/depth for the mono chip. W2-A routes it through the shared
- * length formatter, so a chip and a sketch dimension render the same number the
- * same way (trailing zeros trimmed: `2` not `2.0`, `83.25` not `83.3`).
+ * Format a radius/depth as document text. W2-A routes it through the shared
+ * formatter, so trailing zeros are trimmed (`2` not `2.0`, `83.25` not `83.3`).
  * `radiusFromValueText` below still parses the result, and still parses the
  * RUST-composed `valueText` ("2.0 mm") a re-edit seeds from — both are pinned.
+ *
+ * MILLIMETRE-FIXED ON PURPOSE (WP-C2): this string is a `valueText`, and
+ * `radiusFromValueText` reads it back with `parseFloat`, i.e. as mm. Routing it
+ * through the DISPLAY formatter would make a re-edit under `displayUnit = "in"`
+ * seed 0.079 mm for a 2 mm fillet — the wire/document boundary must never see a
+ * display conversion. Anything a user READS as a measurement uses
+ * `formatLengthWithUnit` instead.
  */
 export function formatMm(value: number): string {
-  return `${formatLength(value)} ${LENGTH_SUFFIX}`;
+  return `${formatMillimetres(value)} ${MM_SUFFIX}`;
 }
 
 /** Default fillet radius (mirrors modelToolMachine.DEFAULT_FILLET_RADIUS). */

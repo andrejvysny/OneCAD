@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { StatusBar } from "./StatusBar";
 import { selectionStore } from "@/stores/selectionStore";
 import { viewportStore } from "@/stores/viewportStore";
+import { settingsStore } from "@/stores/settingsStore";
 import { resetStores } from "@/test/resetStores";
 
 describe("StatusBar", () => {
@@ -41,5 +42,25 @@ describe("StatusBar", () => {
     expect(screen.getByTestId("fov")).toHaveStyle({ opacity: "0.35" });
     await user.click(screen.getByRole("tab", { name: "Persp" }));
     expect(screen.getByTestId("fov")).toHaveStyle({ opacity: "1" });
+  });
+
+  /*
+   * WP-C2: the store holds mm; the row is display-only. The unit is named once
+   * at the end of the row rather than on every axis, and the columns keep their
+   * fixed width so the read-out does not jitter as the pointer moves.
+   */
+  it("renders the cursor read-out in the display unit, named once", () => {
+    render(<StatusBar />);
+    // resetStores() seeds cursor = (273, 210, 0) mm at the mm default.
+    expect(screen.getByText(/X\s+273\.00\s+Y\s+210\.00\s+Z\s+0\.00\s+mm/)).toBeInTheDocument();
+
+    act(() => settingsStore.getState().setDisplayUnit("cm"));
+    expect(screen.getByText(/X\s+27\.300\s+Y\s+21\.000\s+Z\s+0\.000\s+cm/)).toBeInTheDocument();
+
+    act(() => settingsStore.getState().setDisplayUnit("in"));
+    expect(screen.getByText(/10\.748.*in/)).toBeInTheDocument();
+
+    act(() => settingsStore.getState().setDisplayUnit("mm"));
+    expect(screen.getByText(/273\.00\s.*mm/)).toBeInTheDocument();
   });
 });

@@ -8,6 +8,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { settingsStore } from "./settingsStore";
 import { DEFAULT_THEME } from "@/theme/themes";
+import { DEFAULT_LENGTH_UNIT, LENGTH_UNIT_ORDER } from "@/units/lengthUnits";
 import { DEFAULT_RENDER_MODE } from "@/viewport/engine/renderModes";
 
 const STORAGE_KEY = "onecad.settings";
@@ -36,14 +37,14 @@ describe("settingsStore displayMode", () => {
     expect(settingsStore.getState().displayMode).toBe(DEFAULT_RENDER_MODE);
   });
 
-  it("a v5 blob with an unknown displayMode coerces to default via merge", async () => {
-    seed(5, { displayMode: "garbage" });
+  it("a v6 blob with an unknown displayMode coerces to default via merge", async () => {
+    seed(6, { displayMode: "garbage" });
     await settingsStore.persist.rehydrate();
     expect(settingsStore.getState().displayMode).toBe(DEFAULT_RENDER_MODE);
   });
 
   it("a valid persisted mode survives hydration unchanged", async () => {
-    seed(5, { displayMode: "wireframe" });
+    seed(6, { displayMode: "wireframe" });
     await settingsStore.persist.rehydrate();
     expect(settingsStore.getState().displayMode).toBe("wireframe");
   });
@@ -76,14 +77,14 @@ describe("settingsStore theme", () => {
     expect(settingsStore.getState().displayMode).toBe("wireframe");
   });
 
-  it("a v5 blob with an unknown theme coerces to default via merge", async () => {
-    seed(5, { theme: "solarized" });
+  it("a v6 blob with an unknown theme coerces to default via merge", async () => {
+    seed(6, { theme: "solarized" });
     await settingsStore.persist.rehydrate();
     expect(settingsStore.getState().theme).toBe(DEFAULT_THEME);
   });
 
   it("a valid persisted preference survives hydration unchanged", async () => {
-    seed(5, { theme: "dark" });
+    seed(6, { theme: "dark" });
     await settingsStore.persist.rehydrate();
     expect(settingsStore.getState().theme).toBe("dark");
   });
@@ -101,5 +102,62 @@ describe("settingsStore theme", () => {
     const raw = localStorage.getItem(STORAGE_KEY);
     expect(raw).not.toBeNull();
     expect(JSON.parse(raw!).state.theme).toBe("dark");
+  });
+});
+
+/*
+ * displayUnit (WP-C2). Same two recovery paths as displayMode and theme —
+ * `migrate` for a blob authored before the key existed, `merge` for a
+ * same-version blob carrying a value the registry does not know.
+ */
+describe("settingsStore displayUnit", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    settingsStore.setState({ displayUnit: DEFAULT_LENGTH_UNIT });
+  });
+
+  it("a v5 blob (predates displayUnit entirely) migrates to millimetres", async () => {
+    seed(5, { theme: "dark", displayMode: "wireframe" });
+    await settingsStore.persist.rehydrate();
+    expect(settingsStore.getState().displayUnit).toBe(DEFAULT_LENGTH_UNIT);
+    expect(settingsStore.getState().displayUnit).toBe("mm");
+    // The migration must not disturb the settings that already existed.
+    expect(settingsStore.getState().theme).toBe("dark");
+    expect(settingsStore.getState().displayMode).toBe("wireframe");
+  });
+
+  it("a v6 blob with an unknown displayUnit coerces to mm via merge", async () => {
+    seed(6, { displayUnit: "furlongs" });
+    await settingsStore.persist.rehydrate();
+    expect(settingsStore.getState().displayUnit).toBe("mm");
+  });
+
+  it("a non-string displayUnit coerces too", async () => {
+    seed(6, { displayUnit: 42 });
+    await settingsStore.persist.rehydrate();
+    expect(settingsStore.getState().displayUnit).toBe("mm");
+  });
+
+  it("every registry unit survives hydration unchanged", async () => {
+    for (const unit of LENGTH_UNIT_ORDER) {
+      localStorage.clear();
+      seed(6, { displayUnit: unit });
+      await settingsStore.persist.rehydrate();
+      expect(settingsStore.getState().displayUnit).toBe(unit);
+    }
+  });
+
+  it("setDisplayUnit updates the store and writes localStorage", () => {
+    settingsStore.getState().setDisplayUnit("in");
+    expect(settingsStore.getState().displayUnit).toBe("in");
+
+    const raw = localStorage.getItem(STORAGE_KEY);
+    expect(raw).not.toBeNull();
+    expect(JSON.parse(raw!).state.displayUnit).toBe("in");
+    expect(JSON.parse(raw!).version).toBe(6);
   });
 });

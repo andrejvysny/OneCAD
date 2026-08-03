@@ -21,6 +21,7 @@
  * real PlaneGCS Angle unit (rad vs deg) when the mock solver is replaced (seam).
  */
 import type { ConstraintPosition, SketchConstraint, SketchEntity, SketchSolveStatus } from "@/ipc/types";
+import { LENGTH_SUFFIX } from "@/units/format";
 import type { Point2 } from "@/viewport/engine/sketchBasis";
 import { entityPoints } from "./autoConstrain";
 import { hitTestSketch } from "./sketchHitTest";
@@ -179,9 +180,12 @@ export function buildDimensionConstraint(spec: DimensionSpec, id: string): Sketc
   return c;
 }
 
-/** Chip suffix for a spec (mm for lengths, ° for angles). */
+/**
+ * Chip suffix for a spec. A length gets the LENGTH domain marker, not a fixed
+ * unit — DimensionInput swaps in the current display unit (WP-C2).
+ */
 export function dimensionSuffix(kind: DimensionKind): string {
-  return kind === "Angle" ? "°" : "mm";
+  return kind === "Angle" ? "°" : LENGTH_SUFFIX;
 }
 
 // ── over-constraint decision (pure) ──────────────────────────────────────────

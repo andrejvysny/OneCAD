@@ -2,7 +2,9 @@ import { MonoValue } from "@/ui/MonoValue";
 import { Icon } from "@/icons/Icon";
 import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
 import { CONSTRAINT_PRESENTATION } from "@/features/sketch/constraintCatalog";
-import { formatDimensionValue } from "@/features/sketch/dimensionFormat";
+import { useSettingsStore } from "@/stores/settingsStore";
+import { formatLength, formatUnitless, lengthSuffix } from "@/units/format";
+import type { LengthUnitId } from "@/units/lengthUnits";
 import type { SketchConstraint, SketchConstraintType, SketchEntity } from "@/ipc/types";
 
 /** Dimensional constraint kinds that carry a `value` column. */
@@ -22,10 +24,16 @@ function entitySummary(entities: string[]): string {
   return `${entities[0]} +${entities.length - 1}`;
 }
 
-/** Dimensional value text — Angle is UI-domain degrees already (angleUnits.ts). */
-function valueText(c: SketchConstraint): string | null {
+/**
+ * Dimensional value text. Angle is UI-domain degrees already (angleUnits.ts)
+ * and never sees the length display unit; every other kind is a length stored
+ * in mm, rendered in the display unit WITH its symbol — a naked number here
+ * would silently change meaning when the unit does (WP-C2).
+ */
+function valueText(c: SketchConstraint, unit: LengthUnitId): string | null {
   if (!DIMENSIONAL.has(c.type) || typeof c.value !== "number") return null;
-  return c.type === "Angle" ? `${formatDimensionValue(c.value)}°` : formatDimensionValue(c.value);
+  if (c.type === "Angle") return `${formatUnitless(c.value)}°`;
+  return `${formatLength(c.value, unit)} ${lengthSuffix(unit)}`;
 }
 
 /** Small icon-only delete affordance — same shape as HistoryList's RowIconButton. */
@@ -64,7 +72,9 @@ function ConstraintRow({
   conflicting: boolean;
   onDelete: (id: string) => void;
 }) {
-  const value = valueText(constraint);
+  // Subscribed per row so a unit switch repaints the value column immediately;
+  // the list is otherwise driven by the sketch session, which does not change.
+  const value = valueText(constraint, useSettingsStore((s) => s.displayUnit));
   const glyphTone = conflicting ? "text-traffic-close" : "text-ink-5";
   const typeTone = conflicting ? "text-traffic-close" : "text-ink-2";
   return (

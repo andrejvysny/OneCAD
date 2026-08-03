@@ -10,6 +10,8 @@ import { createStore, useStore } from "zustand";
 import { getViewportEngine } from "@/viewport/engineBridge";
 import { selectedBodyIds, selectionStore } from "@/stores/selectionStore";
 import { log } from "@/debug/log";
+import { formatCursorAxis, lengthSuffix } from "@/units/format";
+import type { LengthUnitId } from "@/units/lengthUnits";
 import type { InputDevice } from "@/viewport/engine/navInput";
 
 export type Projection = "persp" | "ortho";
@@ -234,15 +236,23 @@ export function useViewportStore<T>(selector: (s: ViewportState) => T): T {
 }
 
 /**
- * Format the mono X/Y/Z read-out exactly like prototype 1c (white-space:pre):
- *   "X  273.00   Y  210.00   Z    0.00"
- * (axis + 2 spaces + value right-padded to width 6, columns joined by 3 spaces).
+ * Format the mono X/Y/Z read-out like prototype 1c (white-space:pre):
+ *   "X  273.00   Y  210.00   Z    0.00  mm"
+ * (axis + 2 spaces + value right-padded to width 6, columns joined by 3 spaces),
+ * with the display unit named once at the end rather than on every column.
+ *
+ * `c` is millimetres, like everything else the store holds; `unit` is display
+ * only. Passing it explicitly (rather than reading the setting inside
+ * `formatCursorAxis`) is what makes StatusBar's subscription the thing that
+ * drives the re-render — a hidden read would leave the row stale until some
+ * unrelated state changed.
  */
-export function formatCursor(c: CursorCoords): string {
+export function formatCursor(c: CursorCoords, unit?: LengthUnitId): string {
   const cols: [string, number][] = [
     ["X", c.x],
     ["Y", c.y],
     ["Z", c.z],
   ];
-  return cols.map(([ax, v]) => `${ax}  ${v.toFixed(2).padStart(6)}`).join("   ");
+  const row = cols.map(([ax, v]) => `${ax}  ${formatCursorAxis(v, unit)}`).join("   ");
+  return `${row}  ${lengthSuffix(unit)}`;
 }

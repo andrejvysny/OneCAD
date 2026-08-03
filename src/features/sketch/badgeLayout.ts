@@ -7,6 +7,7 @@
 import type { SketchConstraint, SketchEntity, SketchSession, ConstraintPosition } from "@/ipc/types";
 import type { Point2 } from "@/viewport/engine/sketchBasis";
 import { CONSTRAINT_PRESENTATION } from "./constraintCatalog";
+import { formatUnitless } from "@/units/format";
 import { formatDimensionValue } from "./dimensionFormat";
 
 export interface ConstraintBadge {
@@ -88,7 +89,10 @@ function badgeFor(c: SketchConstraint, byId: Map<string, SketchEntity>): Constra
       const at = entityAnchor(first);
       if (!at) return null;
       const value = c.value ?? 0;
-      const glyph = c.type === "Angle" ? `${formatDimensionValue(value)}°` : formatDimensionValue(value);
+      // An Angle is DEGREES and must never see the length display unit; every
+      // other dimensional kind is a length in mm and renders in it (WP-C2).
+      const glyph =
+        c.type === "Angle" ? `${formatUnitless(value)}°` : formatDimensionValue(value);
       return { id: c.id, glyph, kind: c.type, at, editable: true, value, offsetIndex: 0 };
     }
     default:

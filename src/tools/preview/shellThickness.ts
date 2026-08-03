@@ -8,7 +8,7 @@
  * the backend on commit. The drag mapping is shared with fillet
  * (`radiusFromDrag`); this module owns the thickness defaults + the re-edit parse.
  */
-import { LENGTH_SUFFIX, formatLength } from "@/units/format";
+import { MM_SUFFIX, formatMillimetres } from "@/units/format";
 
 export const DEFAULT_SHELL_THICKNESS = 2;
 
@@ -16,13 +16,16 @@ export const DEFAULT_SHELL_THICKNESS = 2;
 export const MIN_SHELL_THICKNESS = 0.1;
 
 /**
- * Format a thickness for the mono chip. Shares the W2-A length formatter with
- * fillet's `formatMm`, so both chips render a number identically (`2`, not
- * `2.0`). `thicknessFromValueText` still parses this AND the RUST-composed
- * `valueText` ("2.0 mm") that seeds a re-edit — both round-trips are pinned.
+ * Format a thickness as document text. Shares the W2-A formatter with fillet's
+ * `formatMm`, so both render a number identically (`2`, not `2.0`).
+ * `thicknessFromValueText` still parses this AND the RUST-composed `valueText`
+ * ("2.0 mm") that seeds a re-edit — both round-trips are pinned.
+ *
+ * MILLIMETRE-FIXED ON PURPOSE (WP-C2) — see `filletRadius.ts formatMm` for why
+ * a `valueText` producer must not follow the display-unit preference.
  */
 export function formatThickness(value: number): string {
-  return `${formatLength(value)} ${LENGTH_SUFFIX}`;
+  return `${formatMillimetres(value)} ${MM_SUFFIX}`;
 }
 
 /**
