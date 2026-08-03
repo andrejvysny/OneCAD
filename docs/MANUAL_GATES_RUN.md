@@ -1,4 +1,34 @@
-# Consolidated USER Manual Gate Run (2026-08-02)
+# Consolidated USER Manual Gate Run (updated 2026-08-03)
+
+## 0. NEW FEATURES batch (2026-08-02/03 autonomous run) — run FIRST, freshest code
+- [ ] **STEP import**: Start Screen "Import STEP…" picks a real .step (vendor
+      file if you have one) → bodies render, names from products, colored faces
+      show authored colors; File > Import STEP into an open doc appends without
+      doc swap; reopen the saved doc → identical geometry + colors; fillet an
+      imported edge → survives reopen; delete the Import row → downstream
+      NeedsRepair loud, undo restores.
+- [ ] **Transform (t)**: select body → t → gizmo (arrows/quads/rings) drags with
+      snap (Shift fine); chip typing; second move FOLDS into the same row;
+      dblclick row re-edits; Alt-drag or [Copy] duplicates; multi-select moves
+      together; [Align] two-pick sets a face flush on another, gizmo nudges
+      after; editing a transform under a downstream fillet ⇒ fillet NeedsRepair
+      (repair flow rebinds), undo exact.
+- [ ] **Units**: display popover Units row → in → chips/labels/status bar
+      convert, typing bare 1 = 1 in, geometry unchanged on switch-back, pref
+      survives reload.
+- [ ] **Measure+**: ? → click a body → volume/area/centroid card; two planar
+      faces → angle 60/120 form; parallel faces → separation.
+- [ ] **Draft**: extrude armed → [Draft] 10° → tapered preview + commit;
+      re-edit.
+- [ ] **Chamfer d2**: chamfer armed → set d2 → asymmetric preview, row
+      "1.0×2.5 mm"; flip-to-fillet blocked with named reason until d2 cleared.
+- [ ] **Sketch fillet (F in sketch) / offset (⇧O)**: L-corner fillet r=5 trims
+      + rounds, no OverConstrained badge; rectangle offset ±3 both sides, inner
+      collapse refused loudly.
+- [ ] **Hole (⇧H)**: face click → standards picker M6 close → Ø6.4 preview at
+      point; counterbore SHCS preset; countersink 90°; re-pick point while
+      armed; re-edit type switch; through-all on stepped part.
+
 
 One top-to-bottom `bun run tauri dev` session covering every open manual gate in
 TODO.md. Ordered newest → oldest; later WPs supersede a few older steps (annotated).

@@ -1,4 +1,23 @@
-# OneCAD-Tauri — Current State (2026-08-03, WP-B COMPLETE + WP-C tranche 1 shipped)
+# OneCAD-Tauri — Current State (2026-08-03, FULL ROADMAP IMPLEMENTED)
+
+## ROADMAP COMPLETE (2026-08-02→03, ~29 commits d875ef9→d3c9289)
+Every code item of the approved roadmap (plan
+`act-as-senior-software-reflective-swing.md`) is implemented and gated:
+WP-0 identity prerequisite · WP-A STEP-IMPORT (8 waves incl. XCAF colors) ·
+WP-B BODY-TRANSFORM (gizmo, fold, align, edit-safety gate) · WP-C pro-ops
+(mass props, units, draft UI, revolve binding, 2-dist chamfer, sketch
+fillet/offset, hole tool w/ ISO/DIN standards). Final suite state:
+**ctest 87/87 · cargo 704/0 vs real worker · FE vitest 2688/180 ·
+e2e 157/157 · tsc/clippy/fmt/hex clean.** Suite growth over the run:
+ctest 79→87 · cargo 600→704 · vitest 2172→2688 · e2e 111→157.
+REMAINING (user-run): `docs/MANUAL_GATES_RUN.md` — §0 NEW-FEATURES batch +
+the pre-existing backlog of open manual gates. Deferred by design: WP-A W6
+(preflight dialog + progress frames), WP-B W3 pickFrame (safe via seeding
+gate), riders (pattern-axis Tier B, DeleteBody op, scale), DIN 974-1/DIN 74
+transcription spot-check, Mac packaging (needs credentials).
+THREE production stdout-corruption defects found+killed during WP-A (all
+would land bytes mid-OCW1-frame); pre-existing stale-anchor latent fixed in
+WP-B W0; ModelTreePanel vitest race root-fixed in W4.
 
 ## WP-B BODY-TRANSFORM COMPLETE (2026-08-03, commits a540e74→7898e7d)
 Full placement suite on the W0 backend: W1 FSM/chips/`t`/fold-flow (fold =
