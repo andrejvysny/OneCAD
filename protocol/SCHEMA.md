@@ -672,7 +672,7 @@ Each op in `ExecutePlan.ops` is:
 
 `opType` ∈ `Sketch` | `Extrude` | `Revolve` | `Fillet` | `Chamfer` | `Boolean`
 | `Shell` | `LinearPattern` | `CircularPattern` | `MirrorBody` | `ImportStep`
-| `TransformBody`
+| `TransformBody` | `Hole`
 (the M6a breadth ops and the 2026-08-02 `ImportStep`/`TransformBody` extend the
 original vertical slice — see the [Changelog](#14-changelog)).
 `Loft` and `Sweep` remain **`UNSUPPORTED`** ([§8](#8-error-taxonomy)). Values keep
@@ -959,6 +959,36 @@ array carries the corresponding semantic refs (one per edge) supplying descripto
   Fillet⇄Chamfer `updateOperationParams` swap requires field-identical params —
   a Chamfer carrying `distance2` is NOT flippable to Fillet (the edit is
   rejected with the standard allow-list reason) until `distance2` is cleared.
+
+**Hole** (`op.hole`) — machined hole on a planar face: simple / counterbore /
+countersink, parametric as ONE feature. Added 2026-08-03 (WP-C T3).
+
+```json
+// inputs: [ semanticRef(host body), semanticRef(host face) ]
+// params
+{ "targetBodyId": "body_1",
+  "face": { /* ElementRef: elementId/topoKey + descriptor/anchor evidence */ },
+  "point": [25.0, 10.0, 30.0],
+  "holeType": "counterbore",
+  "diameter": 5.5, "depth": 20.0,
+  "cbDiameter": 9.5, "cbDepth": 5.4,
+  "csDiameter": null, "csAngleDeg": null }
+```
+
+- `point` — world-space hole center, frozen at authoring; MUST lie on the
+  resolved face (worker re-projects onto the face plane and fails loudly past
+  1e-3 mm). Axis = the face's inward normal (−outward) at `point`.
+- `holeType` ∈ `"simple"` | `"counterbore"` | `"countersink"`; `depth` is a
+  scalar or `null` = through-all (ray-extent + margin, ToNext-style bounded).
+  `cb*` REQUIRED iff counterbore (cbDiameter > diameter); `cs*` REQUIRED iff
+  countersink (csDiameter > diameter; csAngleDeg ∈ {82, 90, 100, 120}).
+- Tool solid = drill cylinder (+ cb cylinder / cs cone seated at the face) cut
+  from the host: lineage = `modified` on `targetBodyId`, nothing minted.
+- Failures recoverable `OP_FAILED`: non-planar resolved face, point off face,
+  drill deeper than through-all extent is fine (clamped = through), cb/cs
+  invariant violations, OCCT boolean failure — all name the reason.
+- Standard-size TABLES (M-series clearance, SHCS counterbores, DIN 74
+  countersinks) are a FRONTEND concern — params always carry raw mm.
 
 **Boolean** (`op.boolean`) — standalone body-body boolean. Field names from
 OneCAD-CPP `BooleanParams` (`operation` ∈ Union/Cut/Intersect; distinct from the
@@ -1980,6 +2010,12 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-03 — §7.3 NEW op `Hole`** (WP-C T3; cross-track sign-off recorded
+  2026-08-03). Simple/counterbore/countersink as one parametric feature on a
+  planar face; frozen world `point` re-projected + fenced 1e-3; inward-normal
+  axis; modified-host lineage; standards tables frontend-only (raw mm on the
+  wire). Additive — **no fixture bump**.
 
 - **2026-08-03 — §7.3 Chamfer `distance2` (two-distance chamfer)** (WP-C
   tranche 2; cross-track sign-off recorded 2026-08-03). Optional skip-none
