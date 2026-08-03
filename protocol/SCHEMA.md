@@ -938,14 +938,27 @@ chamfer distance).
 ```json
 // Fillet params
 { "mode": "Fillet", "radius": 2.0, "edgeIds": ["e:14", "e:15"], "chainTangentEdges": true }
-// Chamfer params
+// Chamfer params (equal-leg)
 { "mode": "Chamfer", "radius": 1.0, "edgeIds": ["e:14"], "chainTangentEdges": true }
+// Chamfer params (two-distance, 2026-08-03 — Chamfer only, optional + skip-none)
+{ "mode": "Chamfer", "radius": 1.0, "distance2": 2.5, "edgeIds": ["e:14"], "chainTangentEdges": true }
 ```
 
 `edgeIds` entries are TopoKeys (snapshot-scoped) or `ElementId`s; the worker
 resolves each through the ladder ([§10](#10-resolution-ladder)). The `inputs[]`
 array carries the corresponding semantic refs (one per edge) supplying descriptor
 + anchor evidence.
+
+- `distance2` (Chamfer only, optional, skip-none): asymmetric two-distance
+  chamfer — `radius` is the distance on the FIRST adjacent face of each edge
+  (the reference face the worker derives deterministically: the adjacent face
+  with the smaller resolved face ordinal), `distance2` on the other
+  (`BRepFilletAPI_MakeChamfer` two-distance form). Absent ⇒ equal-leg,
+  byte-identical to every existing document. A Fillet MUST NOT carry it.
+  **Type-flip interaction (FILLET-CHAMFER-UNIFY W3)**: the sanctioned
+  Fillet⇄Chamfer `updateOperationParams` swap requires field-identical params —
+  a Chamfer carrying `distance2` is NOT flippable to Fillet (the edit is
+  rejected with the standard allow-list reason) until `distance2` is cleared.
 
 **Boolean** (`op.boolean`) — standalone body-body boolean. Field names from
 OneCAD-CPP `BooleanParams` (`operation` ∈ Union/Cut/Intersect; distinct from the
@@ -1967,6 +1980,13 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-03 — §7.3 Chamfer `distance2` (two-distance chamfer)** (WP-C
+  tranche 2; cross-track sign-off recorded 2026-08-03). Optional skip-none
+  Chamfer-only field; deterministic reference-face rule (smaller resolved face
+  ordinal); absent = equal-leg byte-identical; Fillet⇄Chamfer type-flip
+  rejected while set (field-identity precondition of the sanctioned pair).
+  Additive — **no fixture bump**.
 
 - **2026-08-02 — §7.5 NEW read-only verb `QueryMassProperties`** (WP-C measure
   upgrades; cross-track sign-off recorded 2026-08-02). Exact GProp
