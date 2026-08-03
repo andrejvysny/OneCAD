@@ -32,6 +32,8 @@ export interface ExtrudeChipHandlers {
   onBooleanMode?: (mode: BooleanMode) => void;
   /** End condition picked (Blind / Through all / To next / To face — W1). */
   onEndCondition?: (end: ExtrudeEndCondition) => void;
+  /** Draft angle authored in the [Draft] segment's input, in DEGREES (WP-C3). */
+  onDraftAngle?: (deg: number) => void;
 }
 
 /** Extra armed-cluster options (symmetric seed; hide the ⇔ toggle in re-edit). */
@@ -57,6 +59,10 @@ export interface ExtrudeChipOpts {
   showBooleanSegments?: boolean;
   /** How many regions the armed op covers (Wave 2; default 1). */
   regionCount?: number;
+  /** Seed the [Draft] segment's angle in DEGREES (WP-C3; default 0). */
+  draftAngleDeg?: number;
+  /** Whether to render the [Draft] segment at all (default false). */
+  showDraft?: boolean;
 }
 
 /** Handlers the armed revolve cluster wires (MODEL-HARDEN Wave 1 + 2). */
@@ -183,6 +189,10 @@ export interface ToolChipState {
   showEdgeOpSegments: boolean;
   /** How many regions the armed op covers (1 in the single-region path). */
   regionCount: number;
+  /** Armed extrude draft angle in DEGREES — 0 renders the segment collapsed. */
+  draftAngleDeg: number;
+  /** Whether the armed extrude cluster renders the [Draft] segment. */
+  showDraft: boolean;
   /** Whether the armed placement is authoring a translation or a rotation (W1). */
   transformMode: TransformMode;
   /** Placement mode segment picked (armed transform cluster — W1). */
@@ -206,6 +216,8 @@ export interface ToolChipState {
   /** Symmetric toggled (armed extrude cluster). */
   onSymmetric: ((symmetric: boolean) => void) | null;
   onEndCondition: ((end: ExtrudeEndCondition) => void) | null;
+  /** Draft angle authored on the armed extrude cluster (WP-C3). */
+  onDraftAngle: ((deg: number) => void) | null;
   /** Commit the armed op (chip ✓ / chip-input Enter). */
   onConfirm: (() => void) | null;
   /** Esc / cancel from the dimension chip, or ✕ from the armed cluster. */
@@ -331,6 +343,8 @@ export interface ToolChipState {
   setSymmetric(symmetric: boolean): void;
   /** Update just the armed cluster boolean mode (New Body / Add / Cut — Wave 2). */
   setBooleanMode(mode: BooleanMode): void;
+  /** Update just the armed extrude draft angle (post-clamp read-back — WP-C3). */
+  setDraftAngle(deg: number): void;
   /** Update just the armed edge-op cluster's authored op (drag flip / segment pick). */
   setEdgeOp(edgeOp: EdgeOpKind): void;
   /** Update just the armed placement's mode (Move / Rotate). */
@@ -362,6 +376,9 @@ const CLEARED = {
   showEdgeOpSegments: false,
   onEdgeOp: null,
   regionCount: 1,
+  draftAngleDeg: 0,
+  showDraft: false,
+  onDraftAngle: null,
   transformMode: "move" as TransformMode,
   onTransformMode: null,
   copy: false,
@@ -403,11 +420,14 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
       canBoolean: opts?.canBoolean ?? false,
       showBooleanSegments: opts?.showBooleanSegments ?? false,
       regionCount: opts?.regionCount ?? 1,
+      draftAngleDeg: opts?.draftAngleDeg ?? 0,
+      showDraft: opts?.showDraft ?? false,
       onValue: handlers.onValue,
       onSymmetric: handlers.onSymmetric,
       onConfirm: handlers.onConfirm,
       onCancel: handlers.onCancel,
       onBooleanMode: handlers.onBooleanMode ?? null,
+      onDraftAngle: handlers.onDraftAngle ?? null,
     });
   },
   showFillet(value, worldPos, onValue, handlers, opts) {
@@ -548,6 +568,9 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
   },
   setBooleanMode(booleanMode) {
     set({ booleanMode });
+  },
+  setDraftAngle(draftAngleDeg) {
+    set({ draftAngleDeg });
   },
   setEdgeOp(edgeOp) {
     set({ edgeOp });

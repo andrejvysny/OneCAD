@@ -116,6 +116,51 @@ function EndConditionSegments({
   );
 }
 
+/**
+ * The [Draft] segment on the armed extrude cluster (WP-C3). `ExtrudeParams`
+ * has carried `draftAngleDeg` end-to-end since W-WP6 (the worker applies it with
+ * `BRepOffsetAPI_DraftAngle`), but no UI ever authored one — this is that
+ * surface.
+ *
+ * It stays COLLAPSED at 0 so the common no-draft extrude keeps a two-control
+ * chip, and expands into a degrees input on click. A NON-ZERO draft is always
+ * visible in the button label, because a drafted prism looks nearly identical to
+ * a straight one at small angles and the number is the only honest readout.
+ */
+function DraftSegment({
+  deg,
+  onDeg,
+  onConfirm,
+}: {
+  deg: number;
+  onDeg: (deg: number) => void;
+  onConfirm: () => void;
+}) {
+  const [open, setOpen] = useState(deg !== 0);
+  return (
+    <>
+      <button
+        type="button"
+        data-testid="chip-draft"
+        aria-pressed={open}
+        title="Draft angle applied to the side faces (degrees)"
+        onClick={() => setOpen((v) => !v)}
+        className={cn(
+          "rounded-sm px-2 py-1 text-[11.5px] font-medium",
+          deg !== 0 || open ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
+        )}
+      >
+        {deg === 0 ? "Draft" : `Draft ${deg}°`}
+      </button>
+      {open && (
+        <span data-testid="chip-draft-input">
+          <DimensionInput value={deg} suffix="°" onCommit={onDeg} onConfirm={onConfirm} />
+        </span>
+      )}
+    </>
+  );
+}
+
 /** A segmented toggle row (axis / plane pickers), styled like the boolean op row. */
 function SegmentToggle<T extends string>({
   options,
@@ -428,6 +473,8 @@ export function ModelToolChips() {
   const endCondition = useToolChipStore((s) => s.endCondition);
   const canUseBodyEnds = useToolChipStore((s) => s.canUseBodyEnds);
   const showEndConditions = useToolChipStore((s) => s.showEndConditions);
+  const draftAngleDeg = useToolChipStore((s) => s.draftAngleDeg);
+  const showDraft = useToolChipStore((s) => s.showDraft);
   const suffix = useToolChipStore((s) => s.suffix);
   const label = useToolChipStore((s) => s.label);
   const worldPos = useToolChipStore((s) => s.worldPos);
@@ -501,6 +548,17 @@ export function ModelToolChips() {
     />
   ) : null;
 
+  // Keyed on the anchor so a fresh arm reopens collapsed (or seeded, on a
+  // re-edit) instead of inheriting the previous arm's expanded state.
+  const draftSegment = showDraft ? (
+    <DraftSegment
+      key={`draft-${anchorKey}`}
+      deg={draftAngleDeg}
+      onDeg={(d) => toolChipStore.getState().onDraftAngle?.(d)}
+      onConfirm={() => toolChipStore.getState().onConfirm?.()}
+    />
+  ) : null;
+
   let content: React.ReactNode;
   if (kind === "extrudeDepth") {
     content = panel(
@@ -510,6 +568,7 @@ export function ModelToolChips() {
             value that does not drive the result. */}
         {endCondition === "Blind" && clusterInput(LENGTH_SUFFIX)}
         {endConditionSegments}
+        {draftSegment}
         {showSymmetric && endCondition === "Blind" && (
           <SymmetricToggle
             pressed={symmetric}

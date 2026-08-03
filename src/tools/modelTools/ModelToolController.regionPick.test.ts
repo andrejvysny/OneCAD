@@ -362,4 +362,106 @@ describe("ModelToolController region pick", () => {
     await flush();
     expect(engineMock.showRegionPick).toHaveBeenCalledTimes(1);
   });
+
+  // ── WP-C3: revolve region parity ───────────────────────────────────────────
+  //
+  // Revolve used to ignore a typed `sketchRegion` selection entirely: it read a
+  // whole SKETCH and re-derived a profile from it, so pressing Revolve with a
+  // region already picked could revolve a different region than the one on
+  // screen (and the old lane reached that sketch through `finishSketch`, which
+  // needs a live backend session and therefore THREW on a reopened document).
+  // Acquisition is now the same pure `getSketchRegions` read extrude uses.
+
+  it("(e) a selected region binds EXACTLY that region — never regions[0]", async () => {
+    build(() => Promise.resolve({ regions: [R0, R1] }));
+    selectionStore.getState().set([
+      { kind: "sketchRegion", id: "r1-ref", sketchId: "sk", regionId: "r1" },
+    ]);
+    toolStore.getState().setTool("revolve");
+    await flush();
+    await flush();
+
+    // No region picker: the selection already named the profile.
+    expect(engineMock.showRegionPick).not.toHaveBeenCalled();
+    expect(clientMock.getSketchRegions).toHaveBeenCalledWith("sk");
+    expect(engineMock.showRevolveAxisCandidates).toHaveBeenCalledTimes(1);
+
+    click(95, 120); // the axis line to the LEFT of r1
+    await flush();
+    await flush();
+    const draft = clientMock.beginPreview.mock.calls[0][0];
+    expect(draft.opType).toBe("Revolve");
+    expect(draft.regionId).toBe("r1");
+  });
+
+  it("(f) arming on a REOPENED sketch never calls finishSketch (no live session needed)", async () => {
+    build(() => Promise.resolve({ regions: [R0, R1] }));
+    // A sketch that was never ENTERED in this session: the old lane's finishSketch
+    // is exactly what used to throw here. Make it fail loudly so any surviving
+    // call is a red test rather than a silent dependency.
+    clientMock.finishSketch = vi.fn(() => Promise.reject(new Error("no live session")));
+    selectionStore.getState().set([
+      { kind: "sketchRegion", id: "r0-ref", sketchId: "sk", regionId: "r0" },
+    ]);
+    toolStore.getState().setTool("revolve");
+    await flush();
+    await flush();
+
+    expect(clientMock.finishSketch).not.toHaveBeenCalled();
+    expect(clientMock.getSketchRegions).toHaveBeenCalledWith("sk");
+    expect(clientMock.getSketch).toHaveBeenCalledWith("sk");
+    expect(engineMock.showRevolveAxisCandidates).toHaveBeenCalledTimes(1);
+  });
+
+  it("(g) a STALE selected regionId refuses loudly with the available ids, arming nothing", async () => {
+    build(() => Promise.resolve({ regions: [R0, R1] }));
+    selectionStore.getState().set([
+      { kind: "sketchRegion", id: "gone-ref", sketchId: "sk", regionId: "r_gone" },
+    ]);
+    toolStore.getState().setTool("revolve");
+    await flush();
+    await flush();
+
+    expect(engineMock.showRevolveAxisCandidates).not.toHaveBeenCalled();
+    expect(clientMock.beginPreview).not.toHaveBeenCalled();
+    expect(toolStore.getState().modelTool).toBe("select");
+    expect(viewportStore.getState().statusHint?.message).toBe(
+      "Revolve region r_gone is stale or invalid; available: r0, r1",
+    );
+    expect(viewportStore.getState().statusHint?.severity).toBe("error");
+  });
+
+  it("(h) N selected regions keep the multi-region commit loop (revolve is not single-profile)", async () => {
+    build(() => Promise.resolve({ regions: [R0, R1] }));
+    selectionStore.getState().set([
+      { kind: "sketchRegion", id: "r0-ref", sketchId: "sk", regionId: "r0" },
+      { kind: "sketchRegion", id: "r1-ref", sketchId: "sk", regionId: "r1" },
+    ]);
+    toolStore.getState().setTool("revolve");
+    await flush();
+    await flush();
+    expect(engineMock.showRegionPick).not.toHaveBeenCalled(); // the selection IS the pick
+
+    click(95, 120); // axis line — valid for BOTH fixtures (they sit to its right)
+    await flush();
+    await flush();
+    // One preview session per bound region, in selection order.
+    expect(clientMock.beginPreview).toHaveBeenCalledTimes(2);
+    expect(clientMock.beginPreview.mock.calls.map((c) => c[0].regionId)).toEqual(["r0", "r1"]);
+  });
+
+  it("(i) regions from TWO sketches refuse rather than guessing which sketch wins", async () => {
+    build(() => Promise.resolve({ regions: [R0, R1] }));
+    selectionStore.getState().set([
+      { kind: "sketchRegion", id: "r0-ref", sketchId: "sk", regionId: "r0" },
+      { kind: "sketchRegion", id: "other", sketchId: "sk2", regionId: "r1" },
+    ]);
+    toolStore.getState().setTool("revolve");
+    await flush();
+    await flush();
+
+    expect(clientMock.getSketchRegions).not.toHaveBeenCalled();
+    expect(engineMock.showRevolveAxisCandidates).not.toHaveBeenCalled();
+    expect(viewportStore.getState().statusHint?.message).toMatch(/one sketch/);
+  });
 });

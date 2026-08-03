@@ -6,7 +6,7 @@
  * callbacks the ModelToolController registers.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, act, fireEvent } from "@testing-library/react";
+import { render, screen, act, fireEvent, within } from "@testing-library/react";
 import { ModelToolChips } from "./ModelToolChips";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { setViewportEngine } from "@/viewport/engineBridge";
@@ -342,5 +342,67 @@ describe("extrude end-condition segments", () => {
       toolChipStore.setState({ endCondition: "ThroughAll" });
     });
     expect(screen.queryByRole("button", { name: /symmetric/i })).toBeNull();
+  });
+});
+
+// ── WP-C3: the [Draft] segment ──────────────────────────────────────────────
+describe("extrude draft segment", () => {
+  beforeEach(() => {
+    setViewportEngine(fakeEngine());
+    toolChipStore.getState().clear();
+  });
+
+  const showExtrude = (opts: Record<string, unknown>, onDraftAngle = vi.fn()) => {
+    act(() => {
+      toolChipStore.getState().showExtrude(
+        10,
+        WORLD,
+        {
+          onValue: vi.fn(),
+          onSymmetric: vi.fn(),
+          onConfirm: vi.fn(),
+          onCancel: vi.fn(),
+          onDraftAngle,
+        },
+        { showDraft: true, ...opts },
+      );
+    });
+    return onDraftAngle;
+  };
+
+  /** The draft input, scoped past the cluster's own depth `Dimension value`. */
+  const draftInput = () => within(screen.getByTestId("chip-draft-input")).getByLabelText("Dimension value");
+
+  it("is absent unless the arm asks for it", () => {
+    render(<ModelToolChips />);
+    showExtrude({ showDraft: false });
+    expect(screen.queryByTestId("chip-draft")).toBeNull();
+  });
+
+  it("opens COLLAPSED at 0 so the common no-draft extrude keeps a small chip", () => {
+    render(<ModelToolChips />);
+    showExtrude({});
+    expect(screen.getByTestId("chip-draft")).toHaveTextContent("Draft");
+    expect(screen.queryByTestId("chip-draft-input")).toBeNull();
+  });
+
+  it("expands on click and dispatches the typed degrees", () => {
+    render(<ModelToolChips />);
+    const onDraft = showExtrude({});
+
+    fireEvent.click(screen.getByTestId("chip-draft"));
+    fireEvent.change(draftInput(), { target: { value: "10" } });
+    fireEvent.keyDown(draftInput(), { key: "Enter" });
+    expect(onDraft).toHaveBeenCalledWith(10);
+  });
+
+  // A drafted prism looks nearly identical to a straight one at small angles, so
+  // the number itself is the only honest readout that a draft is armed.
+  it("a NON-ZERO draft opens expanded and shows the angle in the label", () => {
+    render(<ModelToolChips />);
+    showExtrude({ draftAngleDeg: 12 });
+    expect(screen.getByTestId("chip-draft")).toHaveTextContent("Draft 12°");
+    expect(draftInput()).toHaveValue("12");
+    expect(screen.getByText("°")).toBeInTheDocument();
   });
 });

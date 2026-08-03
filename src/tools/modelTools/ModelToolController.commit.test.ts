@@ -176,6 +176,16 @@ describe("ModelToolController commit gesture (Wave 1)", () => {
     await flush();
   }
 
+  /**
+   * The params of the LAST `updatePreview` send. A mid-arm send is throttled and
+   * may coalesce, but `confirmExtrude` force-flushes the final epoch before it
+   * commits, so after a confirm this IS the params the kernel builds from.
+   */
+  function lastSentParams(): Record<string, unknown> {
+    const calls = clientMock.updatePreview.mock.calls;
+    return calls[calls.length - 1]?.[1] as Record<string, unknown>;
+  }
+
   it("release from a drag keeps the tool armed (no commit) and the chip stays", async () => {
     build();
     await armExtrude();
@@ -526,6 +536,77 @@ describe("ModelToolController commit gesture (Wave 1)", () => {
       op: {
         opType: "Extrude",
         params: { ...stored, distance: { value: 25 } },
+      },
+    });
+  });
+
+  // ── WP-C3: the draft angle reaches the kernel ──────────────────────────────
+  //
+  // `ExtrudeParams.draftAngleDeg` has crossed FE→core→worker since W-WP6
+  // (`ExtrudeOp.cpp apply_draft` → `BRepOffsetAPI_DraftAngle`) with NO UI ever
+  // authoring one. These pin the chip → FSM → preview/commit params chain.
+
+  it("an authored draft angle rides the SAME params the preview and the commit use", async () => {
+    build();
+    await armExtrude();
+    expect(toolChipStore.getState().showDraft).toBe(true);
+
+    toolChipStore.getState().onDraftAngle?.(10);
+    await flush();
+
+    // The chip reads the value back from the FSM (never from the typed text).
+    expect(toolChipStore.getState().draftAngleDeg).toBe(10);
+
+    // The commit force-flushes the final epoch through the SAME lane session, so
+    // the previewed drafted prism is exactly what materializes.
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await flush();
+    expect(lastSentParams().draftAngleDeg).toBe(10);
+    await flush(); // the exact-preview barrier settles, then the session commits
+    expect(clientMock.endPreview).toHaveBeenCalledWith(expect.any(String), true);
+  });
+
+  it("an out-of-range draft is CLAMPED, and the chip shows what the op will carry", async () => {
+    build();
+    await armExtrude();
+
+    toolChipStore.getState().onDraftAngle?.(200);
+    await flush();
+    expect(toolChipStore.getState().draftAngleDeg).toBe(89); // legacy ±89 limit
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await flush();
+    expect(lastSentParams().draftAngleDeg).toBe(89);
+  });
+
+  it("a re-edit SEEDS the stored draft and deep-merges an edited one", async () => {
+    build();
+    const stored = {
+      profile: { sketchId: "sk", regionId: "r0" },
+      distance: { value: 20 },
+      draftAngleDeg: { value: 6 },
+    };
+    clientMock.getOperationParams.mockResolvedValue(stored);
+    documentStore.setState({
+      features: [{ id: "feat-ex", kind: "extrude", label: "Extrude", valueText: "20 mm", status: "ok" }],
+    });
+    controller.editExtrudeFeature("feat-ex");
+    await flush();
+
+    // Seeded from the RECORD — a 0 seed would silently zero the feature on ✓.
+    expect(toolChipStore.getState().draftAngleDeg).toBe(6);
+
+    toolChipStore.getState().onDraftAngle?.(15);
+    await flush();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await flush();
+
+    expect(clientMock.applyEditCommand).toHaveBeenCalledWith({
+      cmd: "updateOperationParams",
+      record: "feat-ex",
+      op: {
+        opType: "Extrude",
+        params: { ...stored, distance: { value: 20 }, draftAngleDeg: { value: 15 } },
       },
     });
   });

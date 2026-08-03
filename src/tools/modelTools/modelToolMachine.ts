@@ -31,6 +31,25 @@ export type ToolEffect = "none" | "begin" | "update" | "commit" | "cancel" | "gh
 
 export const DEFAULT_EXTRUDE_DEPTH = 10;
 
+/**
+ * Draft-angle limit in DEGREES, symmetric about 0 (WP-C3).
+ *
+ * Oracle: `OneCAD-CPP/src/ui/history/EditParameterDialog.cpp:33-34`
+ * (`kMinDraft = -89.0`, `kMaxDraft = 89.0`) — the legacy parameter dialog's own
+ * spin-box range. ±90° would make the side face parallel to the extrude
+ * direction (a degenerate prism), so 89 is the last representable angle.
+ * The kernel still refuses any draft OCCT cannot build, loudly
+ * (`ExtrudeOp.cpp apply_draft` → "Extrude draft failed"); this clamp only keeps
+ * the UI from authoring a value that is nonsense before it ever reaches it.
+ */
+export const DRAFT_ANGLE_LIMIT_DEG = 89;
+
+/** Clamp an authored draft angle into the legacy ±89° range; non-finite ⇒ 0. */
+export function clampDraftAngle(deg: number): number {
+  if (!Number.isFinite(deg)) return 0;
+  return Math.max(-DRAFT_ANGLE_LIMIT_DEG, Math.min(DRAFT_ANGLE_LIMIT_DEG, deg));
+}
+
 /** Boolean fusion mode the extrude/revolve commit carries (Wave 2 UI). */
 export type BooleanMode = "NewBody" | "Add" | "Cut";
 
@@ -112,7 +131,10 @@ export interface ExtrudeFsm {
 }
 
 export type ExtrudeEvent =
-  | { kind: "arm"; depth?: number; boolean?: BooleanSeed }
+  // `draft` seeds the stored draft angle on a RE-EDIT arm (WP-C3): the re-edit
+  // commit writes the chip's value back, so the arm has to open on the value the
+  // record already holds or the first ✓ would silently zero it.
+  | { kind: "arm"; depth?: number; draft?: number; boolean?: BooleanSeed }
   | { kind: "grab" }
   | { kind: "drag"; depth: number; symmetric?: boolean }
   | { kind: "setDepth"; depth: number }
@@ -181,6 +203,7 @@ export function extrudeStep(s: ExtrudeFsm, e: ExtrudeEvent): ExtrudeStep {
           ...extrudeInit(),
           phase: "armed",
           depth: e.depth ?? DEFAULT_EXTRUDE_DEPTH,
+          draftAngleDeg: clampDraftAngle(e.draft ?? 0),
           hasRegion: true,
           ...(seed
             ? {
@@ -283,9 +306,13 @@ export function extrudeStep(s: ExtrudeFsm, e: ExtrudeEvent): ExtrudeStep {
           : { ...s, phase: "armed", facePickFor: null, endCondition2: e.end, targetFace2: face };
       return { state: next, effect: "update" };
     }
-    case "setDraftAngle":
+    case "setDraftAngle": {
       if (s.phase !== "armed" && s.phase !== "dragging") return { state: s, effect: "none" };
-      return { state: { ...s, draftAngleDeg: e.deg }, effect: "update" };
+      const deg = clampDraftAngle(e.deg);
+      // An out-of-range entry still lands (clamped) — the chip reads the state
+      // back, so the user sees exactly what the op will carry.
+      return { state: { ...s, draftAngleDeg: deg }, effect: "update" };
+    }
     case "setTwoDirections":
       if (s.phase !== "armed" && s.phase !== "dragging") return { state: s, effect: "none" };
       // Mutually exclusive with `symmetric` — see `setSymmetric`.

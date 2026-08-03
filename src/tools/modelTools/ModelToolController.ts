@@ -1070,9 +1070,16 @@ export class ModelToolController {
     // host body. A re-edit is excluded — its commit deep-merges the STORED params,
     // so seeding a default here would be a lie about what the ✓ re-targets.
     const hostSeed = editFeatureId ? null : this.hostBooleanSeed(sketchId, true);
+    // WP-C3: a RE-EDIT opens on the record's own draft angle (the commit writes
+    // the armed value back, so a 0 seed would silently drop a stored draft). A
+    // fresh arm has no record to read and opens at 0.
+    const storedDraft = editFeatureId
+      ? storedScalar(this.extrudeStoredParams?.draftAngleDeg)
+      : 0;
     this.extrude = extrudeStep(extrudeInit(), {
       kind: "arm",
       depth: startDepth,
+      draft: storedDraft,
       ...(hostSeed ? { boolean: hostSeed } : {}),
     }).state;
 
@@ -1154,6 +1161,7 @@ export class ModelToolController {
         onCancel: () => toolStore.getState().setTool("select"),
         onBooleanMode: (mode) => this.onExtrudeBooleanMode(mode),
         onEndCondition: (end) => void this.onExtrudeEndCondition(end),
+        onDraftAngle: (deg) => this.onExtrudeDraftAngle(deg),
       },
       // Re-edit is param-only (depth) → value + ✓/✕ only, no symmetric toggle, no
       // boolean/end-condition segments (fresh arms only).
@@ -1170,6 +1178,11 @@ export class ModelToolController {
         // The RESOLVED mode, not a literal — a host-seeded arm opens on Add.
         booleanMode: this.extrude.booleanMode,
         regionCount: n,
+        // Draft is a plain scalar parameter like the distance, so BOTH the fresh
+        // arm and the param-only re-edit offer it (WP-C3). The seed is the armed
+        // state, which a re-edit has already loaded from the record.
+        showDraft: true,
+        draftAngleDeg: this.extrude.draftAngleDeg,
       },
     );
 
@@ -1200,6 +1213,22 @@ export class ModelToolController {
     this.engine.setExtrudeDepth(this.extrude.depth, symmetric);
     toolChipStore.getState().setSymmetric(symmetric);
     this.sendPreview();
+  }
+
+  /**
+   * Draft angle authored in the [Draft] segment (WP-C3). The reducer CLAMPS to
+   * the legacy ±89° range, so the chip is refreshed from the resulting state
+   * rather than from the typed value — the readout must never claim a value the
+   * op does not carry. The preview re-send is what makes the drafted prism
+   * appear: `extrudePreviewParams` already carried `draftAngleDeg`, and the
+   * kernel PreviewOp applies it exactly as the commit does.
+   */
+  private onExtrudeDraftAngle(deg: number): void {
+    if (this.extrude.phase !== "armed" && this.extrude.phase !== "dragging") return;
+    this.extrude = extrudeStep(this.extrude, { kind: "setDraftAngle", deg }).state;
+    toolChipStore.getState().setDraftAngle(this.extrude.draftAngleDeg);
+    this.sendPreview();
+    this.updateDebug();
   }
 
   // ── boolean modes (extrude/revolve New Body / Add / Cut — Wave 2) ─────────────
@@ -1619,11 +1648,86 @@ export class ModelToolController {
   // ── revolve ────────────────────────────────────────────────────────────────
 
   private armRevolveFromSelection(): void {
-    // Same tool-first ladder as extrude: explicit sketch selection wins, else the
-    // document's sole visible sketch, else a hint.
+    // REVOLVE-REGION-PARITY (WP-C3): a typed `sketchRegion` selection binds those
+    // EXACT regions, exactly as `armExtrudeFromSelection` does. The old ladder read
+    // only a whole-SKETCH selection and re-derived a profile from it, so pressing
+    // Revolve with a region already picked could revolve a DIFFERENT region than
+    // the one on screen. Unlike extrude (single-profile by design), revolve keeps
+    // its N-region commit loop, so every selected region is bound.
+    const picked = selectionStore
+      .getState()
+      .selected.filter((ref) => ref.kind === "sketchRegion");
+    if (picked.length > 0) {
+      const sketchId = picked[0].sketchId;
+      if (picked.some((ref) => ref.sketchId !== sketchId)) {
+        viewportStore
+          .getState()
+          .setStatusHint("Revolve takes regions from one sketch — deselect the others", {
+            severity: "error",
+            sticky: true,
+          });
+        return;
+      }
+      void this.armRevolveRegions(sketchId, picked.map((ref) => ref.regionId));
+      return;
+    }
+    // Nothing region-typed selected: the same tool-first ladder as extrude —
+    // explicit sketch selection wins, else the document's sole visible sketch.
     const sketchId = this.pickTargetSketchId();
     if (sketchId) void this.armRevolve(sketchId);
     else viewportStore.getState().setStatusHint("Select a sketch to revolve", { sticky: true });
+  }
+
+  /**
+   * Arm revolve on the EXACT regions the selection names (WP-C3 region parity).
+   *
+   * Region acquisition is the PURE `getSketchRegions` read extrude uses — never
+   * `finishSketch` — so this works on a REOPENED sketch that has no live backend
+   * session (both `getSketchRegions` and `getSketch` resolve a never-entered
+   * sketch by its store key, which IS the backend UUID after projection
+   * hydration), and it authors no timeline record at arm time (MODEL-HARDEN
+   * W0.5; `confirmRevolve` guarantees the record at the commit boundary).
+   *
+   * A `regionId` that no longer resolves fails LOUDLY with the available ids —
+   * house rule: a stale id must never silently bind a different profile.
+   */
+  private async armRevolveRegions(sketchId: string, regionIds: string[]): Promise<void> {
+    const gen = ++this.armGen;
+    let read: { regions: SketchRegion[] };
+    try {
+      read = await this.deps.client.getSketchRegions(sketchId);
+    } catch (error) {
+      if (gen !== this.armGen) return;
+      viewportStore
+        .getState()
+        .setStatusHint(`Cannot read sketch regions: ${errMessage(error)}`, {
+          severity: "error",
+          sticky: true,
+        });
+      return;
+    }
+    if (gen !== this.armGen) return; // superseded while getSketchRegions was in flight
+    const bound: SketchRegion[] = [];
+    const profiles: PrismProfile[] = [];
+    for (const id of regionIds) {
+      const region = read.regions.find((candidate) => candidate.regionId === id);
+      const profile = region ? profileFromRegion(region) : null;
+      if (!region || !profile) {
+        const available = read.regions.map((candidate) => candidate.regionId).join(", ") || "none";
+        this.resetToSelect(`Revolve region ${id} is stale or invalid; available: ${available}`, {
+          severity: "error",
+          sticky: true,
+        });
+        return;
+      }
+      bound.push(region);
+      profiles.push(profile);
+    }
+    // Pure read (no session opened) — the axis candidates come from
+    // `session.entities`, which `getSketch` returns verbatim.
+    const session = await this.deps.client.getSketch(sketchId);
+    if (gen !== this.armGen) return; // superseded while getSketch was in flight
+    this.beginRevolveArmed(sketchId, bound, profiles, session);
   }
 
   /**
@@ -4753,6 +4857,10 @@ export class ModelToolController {
           res = await this.client.applyEditCommand(
             updateScalarParamsCommand(editFeatureId, "Extrude", this.extrudeStoredParams, {
               distance: { value: finalDepth },
+              // WP-C3: the arm SEEDED this from the same record, so an untouched
+              // re-edit writes the identical value back (no-op) and an edited one
+              // actually lands — the only two behaviours a chip may have.
+              draftAngleDeg: { value: this.extrude.draftAngleDeg },
             }),
           );
         } else {
@@ -5769,6 +5877,11 @@ export class ModelToolController {
         : profiled.map((entry) => entry.region.regionId),
       sketchId: this.lastArmedSketch,
       regionIds: profiled.map((entry) => entry.region.regionId),
+      // The revolve arm's BOUND regions. Distinct from `regionIds` above, which
+      // only sees sessions carrying a region — a revolve session carries its
+      // profile and its draft, so the extrude-shaped surface reads empty for it
+      // and cannot show which region a revolve actually bound (WP-C3).
+      revolveRegionIds: [...this.revolveRegionIds],
       profileBounds: profiled.map((entry) => profileBounds(entry.profile)),
       candidateParams:
         this.previewSessions.length > 0 ? this.extrudePreviewParams() : null,

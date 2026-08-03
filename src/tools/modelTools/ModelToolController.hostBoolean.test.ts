@@ -371,10 +371,17 @@ describe("ModelToolController host-boolean (sketch on a face defaults to modifyi
     toolChipStore.getState().onValue?.(25);
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
     await flush();
+    // WP-C3: the re-edit patch also carries the armed draft angle. This record
+    // stores none, so the arm seeds 0 and the patch writes the wire default back
+    // — the boolean mode + target still ride through untouched, which is what
+    // this case is about.
     expect(clientMock.applyEditCommand).toHaveBeenCalledWith({
       cmd: "updateOperationParams",
       record: "feat-ex",
-      op: { opType: "Extrude", params: { ...stored, distance: { value: 25 } } },
+      op: {
+        opType: "Extrude",
+        params: { ...stored, distance: { value: 25 }, draftAngleDeg: { value: 0 } },
+      },
     });
   });
 

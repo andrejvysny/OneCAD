@@ -19,6 +19,7 @@ import {
   regionSelectInit,
   regionSelectStep,
   DEFAULT_EXTRUDE_DEPTH,
+  DRAFT_ANGLE_LIMIT_DEG,
   DEFAULT_REVOLVE_ANGLE,
   DEFAULT_SHELL_THICKNESS,
   type ExtrudeFsm,
@@ -898,5 +899,50 @@ describe("extrude end conditions", () => {
     s = extrudeStep(s, { kind: "arm" }).state;
     expect(s.endCondition).toBe("Blind");
     expect(s.draftAngleDeg).toBe(0);
+  });
+});
+
+// ── WP-C3: the draft angle is authored, clamped, and re-armable ──────────────
+describe("extrude draft angle", () => {
+  const armed = () => extrudeStep(extrudeInit(), { kind: "arm" }).state;
+
+  it("a setDraftAngle asks for a preview update (the drafted prism must re-render)", () => {
+    const r = extrudeStep(armed(), { kind: "setDraftAngle", deg: 10 });
+    expect(r.state.draftAngleDeg).toBe(10);
+    expect(r.effect).toBe("update");
+  });
+
+  // Oracle: EditParameterDialog.cpp kMinDraft/kMaxDraft = ∓89 — ±90° would make
+  // the side face parallel to the extrude direction (a degenerate prism).
+  it("clamps into the legacy ±89° range instead of authoring nonsense", () => {
+    expect(extrudeStep(armed(), { kind: "setDraftAngle", deg: 120 }).state.draftAngleDeg).toBe(
+      DRAFT_ANGLE_LIMIT_DEG,
+    );
+    expect(extrudeStep(armed(), { kind: "setDraftAngle", deg: -120 }).state.draftAngleDeg).toBe(
+      -DRAFT_ANGLE_LIMIT_DEG,
+    );
+    expect(extrudeStep(armed(), { kind: "setDraftAngle", deg: -12 }).state.draftAngleDeg).toBe(-12);
+  });
+
+  it("a non-finite entry falls back to 0 rather than poisoning the params", () => {
+    const s = extrudeStep(armed(), { kind: "setDraftAngle", deg: 8 }).state;
+    expect(extrudeStep(s, { kind: "setDraftAngle", deg: Number.NaN }).state.draftAngleDeg).toBe(0);
+  });
+
+  it("is ignored outside armed/dragging", () => {
+    const idle = extrudeInit();
+    expect(extrudeStep(idle, { kind: "setDraftAngle", deg: 10 }).state).toEqual(idle);
+    const committing = extrudeStep(armed(), { kind: "confirm" }).state;
+    expect(extrudeStep(committing, { kind: "setDraftAngle", deg: 10 }).state.draftAngleDeg).toBe(0);
+  });
+
+  // The re-edit commit writes the ARMED draft back, so an arm that ignored the
+  // stored value would silently zero a drafted feature on its first ✓.
+  it("arm seeds the stored draft (re-edit) and clamps it too", () => {
+    expect(extrudeStep(extrudeInit(), { kind: "arm", draft: 7 }).state.draftAngleDeg).toBe(7);
+    expect(extrudeStep(extrudeInit(), { kind: "arm", draft: 400 }).state.draftAngleDeg).toBe(
+      DRAFT_ANGLE_LIMIT_DEG,
+    );
+    expect(extrudeStep(extrudeInit(), { kind: "arm" }).state.draftAngleDeg).toBe(0);
   });
 });
