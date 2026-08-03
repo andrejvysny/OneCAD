@@ -5,8 +5,9 @@
  *         · R revolve · F fillet · B combine/boolean · T move/rotate body
  *         · ⇧I isolate selection
  * Sketch: V select · L line · R rectangle · ⇧R center-rectangle · C circle
- *         · O ellipse · A arc · G polygon · S slot · P point · D dimension
- *         · T trim · M mirror · X construction (flip selection / sticky mode)
+ *         · O ellipse · ⇧O offset · A arc · G polygon · S slot · P point
+ *         · D dimension · T trim · M mirror · F fillet
+ *         · X construction (flip selection / sticky mode)
  * Global: Esc cancel-ladder · Enter finish-sketch (sketch mode) · H home (stub)
  *         · Shift+F zoom-to-fit (frames the SELECTION when it names bodies)
  *
@@ -35,6 +36,17 @@
  *     model mode reaches it cross-mode. Deliberately NOT `E`: that letter is the
  *     model Extrude binding, i.e. the cross-mode "finish this sketch and extrude"
  *     handoff — rebinding it in sketch mode would shadow the handoff.
+ *   - `F` in SKETCH mode is the 2D Fillet tool (WP-C T2b); model `F` = the 3D
+ *     Fillet/Chamfer tool. SAME operation, one dimension apart, so one letter
+ *     means one thing in both modes — mode-resolved exactly like `T`/`D`/`R`.
+ *     This deliberately RETIRES the old cross-mode `f`-while-sketching → model
+ *     fillet fallback (which finished the sketch): a 2D fillet is what `F` means
+ *     while you are drawing, and the toolbar click still reaches the 3D one.
+ *   - `⇧O` (Offset, WP-C T2b) is an exact shift chord, like `⇧R`/`⇧?`/`⇧I`, so
+ *     plain `o` still resolves to Ellipse. Offset's conventional key IS `O` in
+ *     other CAD; Ellipse already holds it here, so Offset takes the chord rather
+ *     than a mnemonic-free letter. Free in the model table, so model mode reaches
+ *     it through the ordinary cross-mode fallback.
  *
  * AUTO-MODE: a key bound only in the OTHER mode resolves cross-mode (tool
  * actions only) so shortcuts drive the automatic mode switch — see
@@ -109,6 +121,10 @@ export const SKETCH_KEYS: KeyBinding[] = [
   { key: "d", action: { type: "tool", tool: "dimension" } },
   { key: "t", action: { type: "tool", tool: "trim" } },
   { key: "m", action: { type: "tool", tool: "mirror" } },
+  // WP-C T2b sketch edit tools. See COLLISIONS for why `f` is claimed here and
+  // why Offset is a shift chord.
+  { key: "f", action: { type: "tool", tool: "sketchFillet" } },
+  { key: "o", shift: true, action: { type: "tool", tool: "sketchOffset" } },
   // X flips construction geometry (W1-B): with a sketch selection it flips those
   // entities, with none it toggles the sticky construction draw mode. Sketch-scoped
   // only — the action is NOT a `tool`, so the cross-mode fallback never leaks it

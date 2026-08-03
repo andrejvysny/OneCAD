@@ -694,6 +694,14 @@ export interface RevolveParams {
 export interface FilletParams {
   mode: "Fillet" | "Chamfer";
   radius: number;
+  /**
+   * CHAMFER-ONLY second leg (SCHEMA §7.3, 2026-08-03). Absent ⇒ equal-leg, and
+   * the wire carries no such key. `radius` lands on the adjacent face with the
+   * smaller resolved face ordinal (the worker's deterministic reference face),
+   * `distance2` on the other. A `mode: "Fillet"` params object carrying it is
+   * dropped at the marshalling seam and rejected by core.
+   */
+  distance2?: number;
   /** TopoKeys (snapshot-scoped) or ElementIds; resolved through the ladder. */
   edgeIds: string[];
   chainTangentEdges?: boolean;

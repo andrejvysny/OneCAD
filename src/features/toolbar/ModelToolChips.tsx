@@ -19,8 +19,9 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "@/ui/cn";
 import { DimensionInput } from "@/features/sketch/DimensionInput";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useToolChipStore, toolChipStore } from "@/stores/toolChipStore";
-import { LENGTH_SUFFIX } from "@/units/format";
+import { LENGTH_SUFFIX, formatLength, parseLength } from "@/units/format";
 import { useViewportEngine } from "@/viewport/engineBridge";
 import type { BooleanOperation } from "@/ipc/types";
 import type {
@@ -57,6 +58,15 @@ const EDGE_OPS: { edgeOp: EdgeOpKind; label: string; testid: string }[] = [
   { edgeOp: "Fillet", label: "Fillet", testid: "chip-edgeop-fillet" },
   { edgeOp: "Chamfer", label: "Chamfer", testid: "chip-edgeop-chamfer" },
 ];
+
+/**
+ * What the CHAMFER second-leg field shows when there is no second leg: the two
+ * legs are EQUAL. Deliberately a glyph, not an empty field — a blank would read
+ * as "unset, and I do not know what happens", while `=` states the equal-leg
+ * semantics SCHEMA §7.3 gives an absent `distance2`. Typing it back (or clearing
+ * the field) is how the user returns to equal-leg.
+ */
+const EQUAL_LEG_TEXT = "=";
 
 /**
  * The armed-extrude end-condition segments (MODEL-OPS W1). `Symmetric` is NOT
@@ -370,6 +380,94 @@ function EdgeOpSegments({
 }
 
 /**
+ * The CHAMFER second-distance field (SCHEMA §7.3, 2026-08-03 — WP-C T2a). Rendered
+ * ONLY while the armed edge op is a Chamfer, immediately right of the first
+ * distance, so the cluster reads `[d1] [d2] [Fillet|Chamfer] [✓ ✕]`.
+ *
+ * Not a `DimensionInput`: this field's domain is `number | null`, and the
+ * equal-leg state has no number to show. `DimensionInput` also owns the
+ * `aria-label="Dimension value"` every spec uses to reach the FIRST distance, so
+ * a second instance of it would make that locator ambiguous.
+ *
+ * Commit rules (mirroring the cluster's own): Enter applies the text and then
+ * confirms the op; blur applies it; Esc reverts the text to the committed value.
+ * Empty or `=` commits `null` — equal-leg. A value the length parser refuses is
+ * reverted rather than silently read as a partial number.
+ */
+function ChamferDistance2Field({
+  value,
+  onValue,
+  onConfirm,
+}: {
+  value: number | null;
+  onValue: (v: number | null) => void;
+  onConfirm?: () => void;
+}) {
+  const unit = useSettingsStore((s) => s.displayUnit);
+  const shown = (v: number | null) => (v === null ? EQUAL_LEG_TEXT : formatLength(v, unit));
+  const [text, setText] = useState(() => shown(value));
+
+  // Re-render the SAME value when the committed second leg or the display unit
+  // changes; never commits, so a unit switch cannot dirty the document.
+  useEffect(() => {
+    setText(shown(value));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value, unit]);
+
+  const commit = (): void => {
+    const trimmed = text.trim();
+    if (trimmed === "" || trimmed === EQUAL_LEG_TEXT) {
+      if (value !== null) onValue(null);
+      setText(EQUAL_LEG_TEXT);
+      return;
+    }
+    const n = parseLength(trimmed, unit);
+    // SCHEMA §7.3 requires `distance2 > 0` when present, and the backend refuses
+    // anything else — so a rejected entry reverts rather than authoring it.
+    if (n === undefined || n === null || !Number.isFinite(n) || n <= 0) {
+      setText(shown(value));
+      return;
+    }
+    if (n !== value) onValue(n);
+    setText(shown(n));
+  };
+
+  return (
+    <span className="pointer-events-auto inline-flex items-center gap-0.5 rounded-sm border border-border bg-surface px-1 font-mono text-[11px] text-ink-2 shadow-ctrl">
+      <span aria-hidden className="text-ink-3">
+        ×
+      </span>
+      <input
+        aria-label="Second distance"
+        data-testid="chip-chamfer-d2"
+        className={cn(
+          "bg-transparent text-right outline-none",
+          unit === "mm" ? "w-9" : "w-14",
+        )}
+        value={text}
+        inputMode="decimal"
+        placeholder={EQUAL_LEG_TEXT}
+        title="Second chamfer distance — '=' for equal legs"
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            e.stopPropagation();
+            commit();
+            onConfirm?.();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            e.stopPropagation();
+            setText(shown(value));
+          }
+        }}
+      />
+    </span>
+  );
+}
+
+/**
  * The [Move | Rotate] segment group on the armed placement cluster (WP-B W1).
  * The mode decides what the number to its right MEANS (mm along the axis vs
  * degrees about it), so it reads left-to-right as one sentence.
@@ -470,6 +568,7 @@ export function ModelToolChips() {
   const copy = useToolChipStore((s) => s.copy);
   const alignPhase = useToolChipStore((s) => s.alignPhase);
   const showEdgeOpSegments = useToolChipStore((s) => s.showEdgeOpSegments);
+  const distance2 = useToolChipStore((s) => s.distance2);
   const endCondition = useToolChipStore((s) => s.endCondition);
   const canUseBodyEnds = useToolChipStore((s) => s.canUseBodyEnds);
   const showEndConditions = useToolChipStore((s) => s.showEndConditions);
@@ -539,6 +638,21 @@ export function ModelToolChips() {
   const edgeOpSegments = showEdgeOpSegments ? (
     <EdgeOpSegments active={edgeOp} onPick={(k) => toolChipStore.getState().onEdgeOp?.(k)} />
   ) : null;
+
+  // The second chamfer distance rides with the segments and ONLY while the armed
+  // op is a Chamfer — a Fillet has no second leg, and SCHEMA §7.3 forbids it from
+  // carrying one, so showing the field there would offer an edit the wire refuses.
+  // Keyed on the anchor so a fresh arm opens at `=` rather than inheriting the
+  // previous arm's typed text.
+  const chamferD2 =
+    showEdgeOpSegments && edgeOp === "Chamfer" ? (
+      <ChamferDistance2Field
+        key={`d2-${anchorKey}`}
+        value={distance2}
+        onValue={(v) => toolChipStore.getState().onDistance2?.(v)}
+        onConfirm={() => toolChipStore.getState().onConfirm?.()}
+      />
+    ) : null;
 
   const endConditionSegments = showEndConditions ? (
     <EndConditionSegments
@@ -639,11 +753,32 @@ export function ModelToolChips() {
       ? panel(
           <>
             {clusterInput(LENGTH_SUFFIX)}
+            {chamferD2}
             {edgeOpSegments}
             {confirmButtons}
           </>,
         )
       : numericChip(LENGTH_SUFFIX);
+  } else if (kind === "sketchValue") {
+    // WP-C T2b: an armed sketch EDIT tool's live parameter (fillet radius /
+    // offset distance). It commits nothing — the geometry commits on a viewport
+    // click — so the chip stays open across repeated applies and is keyed on the
+    // ANCHOR alone: it mounts (and auto-focuses) once per arm, so the value can
+    // be typed straight away without the field re-grabbing focus after each edit.
+    content = panel(
+      <>
+        <span data-testid="chip-sketch-label" className="px-2 py-1 text-[11.5px] font-medium text-ink-2">
+          {label}
+        </span>
+        <DimensionInput
+          key={`sketchValue-${anchorKey}`}
+          value={value}
+          suffix={LENGTH_SUFFIX}
+          autoFocus
+          onCommit={(v) => toolChipStore.getState().onValue?.(v)}
+        />
+      </>,
+    );
   } else if (kind === "dimension") {
     // Sketch Dimension tool: seeded + auto-focused; Enter commits, Esc cancels,
     // and a canvas click must NOT blur-commit (a 2nd line click upgrades a length

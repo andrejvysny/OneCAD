@@ -41,6 +41,8 @@ interface ToolDebugSurface {
   edgeOpKind?: string;
   edgeOpAuto?: boolean;
   edgeOpAxisSource?: string;
+  /** The CHAMFER second leg (`null` = equal-leg — SCHEMA §7.3, 2026-08-03). */
+  edgeOpDistance2?: number | null;
 }
 
 export async function toolPhases(page: Page): Promise<ToolDebugSurface | undefined> {

@@ -407,6 +407,18 @@ export interface FilletFsm {
    *  reseeds to the picked op's default on `setEdgeOp`; a touched one keeps the
    *  user's number. */
   touched: boolean;
+  /**
+   * The CHAMFER-ONLY second leg (SCHEMA §7.3, 2026-08-03 — WP-C T2a).
+   * `null` ⇒ equal-leg: `radius` is used on both adjacent faces and the wire
+   * carries NO `distance2` at all, byte-identically to every chamfer authored
+   * before the field existed.
+   *
+   * It is NOT cleared by a type flip. The value is the user's, and a Fillet
+   * simply never EMITS it (`edgeOpParams`), so flipping Chamfer→Fillet→Chamfer
+   * inside one arm hands the second leg back instead of silently discarding it.
+   * The drag lane never touches it either — a drag sizes `radius` only.
+   */
+  distance2: number | null;
 }
 
 export type FilletEvent =
@@ -420,12 +432,16 @@ export type FilletEvent =
        *  size IS the committed size, i.e. the user's own number, so a later
        *  segment pick must keep it instead of reseeding to a tool default. */
       touched?: boolean;
+      /** Seed the second chamfer leg (a re-edit of a two-distance chamfer). */
+      distance2?: number | null;
     }
   | { kind: "grabEdge" }
   /** `signed` is the raw drag projection: positive = away from the body. */
   | { kind: "drag"; signed: number }
   | { kind: "setRadius"; radius: number }
   | { kind: "setEdgeOp"; edgeOp: EdgeOpKind }
+  /** `null` clears back to equal-leg (the chip's `=` state). */
+  | { kind: "setDistance2"; distance2: number | null }
   | { kind: "release" }
   | { kind: "confirm" }
   | { kind: "commitFailed" }
@@ -445,6 +461,7 @@ export function filletInit(): FilletFsm {
     edgeOp: "Fillet",
     auto: false,
     touched: false,
+    distance2: null,
   };
 }
 
@@ -459,6 +476,18 @@ export function filletInit(): FilletFsm {
  * (`beginPreview` freezes it). A non-finite value keeps the current type for
  * the same reason a zero does.
  */
+/**
+ * Coerce a second-leg candidate to the FSM's domain: `null` (equal-leg) or a
+ * value at/above the shared magnitude clamp. A non-finite or non-positive number
+ * is equal-leg, NOT a zero-width bevel — SCHEMA §7.3 requires `distance2 > 0`
+ * when present, and the backend refuses anything else, so the chip must never
+ * author it.
+ */
+function normalizeDistance2(v: number | null): number | null {
+  if (v === null || !Number.isFinite(v) || v <= 0) return null;
+  return Math.max(EDGE_OP_MIN_VALUE, v);
+}
+
 function autoEdgeOp(s: FilletFsm, signed: number): EdgeOpKind {
   if (!s.auto) return s.edgeOp;
   if (!Number.isFinite(signed)) return s.edgeOp;
@@ -479,6 +508,7 @@ export function filletStep(s: FilletFsm, e: FilletEvent): FilletStep {
           edgeOp: e.edgeOp ?? "Fillet",
           auto: e.auto === true,
           touched: e.touched === true,
+          distance2: normalizeDistance2(e.distance2 ?? null),
         },
         effect: "begin",
       };
@@ -529,6 +559,15 @@ export function filletStep(s: FilletFsm, e: FilletEvent): FilletStep {
           : DEFAULT_FILLET_RADIUS;
       return { state: { ...s, edgeOp: e.edgeOp, auto: false, radius }, effect: "update" };
     }
+    case "setDistance2":
+      if (s.phase !== "armed" && s.phase !== "dragging") return { state: s, effect: "none" };
+      // Chamfer-only: the segment that authors it is not rendered for a Fillet,
+      // so a Fillet reaching here is a caller bug, not a value to store.
+      if (s.edgeOp !== "Chamfer") return { state: s, effect: "none" };
+      return {
+        state: { ...s, distance2: normalizeDistance2(e.distance2) },
+        effect: "update",
+      };
     case "release":
       // Release does NOT commit — it keeps the tool armed at the dragged size so
       // the kernel preview stays live and the user confirms explicitly.

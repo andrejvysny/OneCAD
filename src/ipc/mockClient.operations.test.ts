@@ -283,6 +283,68 @@ describe("mockClient operations", () => {
     expect(after.radius).toEqual({ value: 3 });
   });
 
+  // ── two-distance chamfer (SCHEMA §7.3, 2026-08-03 — WP-C T2a) ──────────────
+
+  /** A committed equal-leg Chamfer, and its record id. */
+  async function commitChamfer(radius = 1): Promise<string> {
+    const created = await mockClient.applyOperation({
+      opType: "Chamfer",
+      inputs: [{ primary: { bodyId: "body1", elementId: "el_e", kind: "edge" } }],
+      params: { mode: "Chamfer", radius, edgeIds: ["el_e"] },
+    });
+    return created.features.find((f) => f.opType === "Chamfer")!.id;
+  }
+
+  it("a two-distance chamfer's row reads `d1×d2` (mirrors dto.rs feature_value_text)", async () => {
+    const res = await mockClient.applyOperation({
+      opType: "Chamfer",
+      inputs: [{ primary: { bodyId: "body1", elementId: "el_e", kind: "edge" } }],
+      params: { mode: "Chamfer", radius: 1, distance2: 2.5, edgeIds: ["el_e"] },
+    });
+    const row = res.features.find((f) => f.opType === "Chamfer")!;
+    expect(row.valueText).toBe("1.0×2.5 mm");
+    // The re-edit seed parses the LEADING number back (`radiusFromValueText`).
+    expect(Number.parseFloat(row.valueText)).toBe(1);
+  });
+
+  it("MIRRORS the core precondition: a Chamfer carrying distance2 may not flip to Fillet", async () => {
+    const featureId = await commitChamfer();
+    const stored = await mockClient.getOperationParams(featureId);
+    // Author the second leg (a plain params edit — no type change).
+    await mockClient.applyEditCommand(
+      updateScalarParamsCommand(featureId, "Chamfer", stored, { distance2: { value: 2.5 } }),
+    );
+    const asym = await mockClient.getOperationParams(featureId);
+    expect(asym.distance2).toEqual({ value: 2.5 });
+
+    // The flip is refused with the reason core uses, VERBATIM and naming the field.
+    await expect(
+      mockClient.applyEditCommand(
+        updateScalarParamsCommand(featureId, "Fillet", asym, { radius: { value: 1 } }),
+      ),
+    ).rejects.toThrow(/opType.*distance2.*clear distance2 first/);
+    const afterReject = await mockClient.getOperationParams(featureId);
+    expect(afterReject.distance2).toEqual({ value: 2.5 }); // nothing written
+
+    // Clearing the second leg is an ordinary params edit — the key must actually
+    // GO (the mock stores what arrived; a merge would resurrect it).
+    const cleared = { ...asym };
+    delete cleared.distance2;
+    const clearedRes = await mockClient.applyEditCommand(
+      updateScalarParamsCommand(featureId, "Chamfer", cleared, { radius: { value: 1 } }),
+    );
+    expect("distance2" in (await mockClient.getOperationParams(featureId))).toBe(false);
+    expect(clearedRes.features.find((f) => f.id === featureId)!.valueText).toBe("1.0 mm");
+
+    // …and NOW the plain W3 swap goes through.
+    const flipped = await mockClient.applyEditCommand(
+      updateScalarParamsCommand(featureId, "Fillet", await mockClient.getOperationParams(featureId), {
+        radius: { value: 1 },
+      }),
+    );
+    expect(flipped.features.find((f) => f.id === featureId)!.opType).toBe("Fillet");
+  });
+
   it("Shell adds a thickness feature + re-emits the target body; a re-edit updates in place", async () => {
     const created = await mockClient.applyOperation({
       opType: "Shell",

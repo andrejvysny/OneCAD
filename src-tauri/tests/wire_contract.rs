@@ -1473,6 +1473,7 @@ async fn chamfer_reaches_the_worker() {
             // R-WP2.1) with an identical shape.
             Operation::Known(KnownOperation::Chamfer(ChamferParams {
                 radius: Scalar::new(2.0),
+                distance2: None,
                 edge_ids: vec![edge_el],
                 edges: vec![edge_ref],
                 chain_tangent_edges: false,

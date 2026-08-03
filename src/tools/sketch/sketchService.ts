@@ -9,14 +9,16 @@ import { getViewportEngine } from "@/viewport/engineBridge";
 import { documentStore, docSketchStatus } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { sketchStore, type SketchSnapshot } from "@/stores/sketchStore";
-import { applySolvedPositions } from "@/ipc/sketchWireMap";
+import { applySolvedPositions, isDimensional } from "@/ipc/sketchWireMap";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
 import { isConflictStatus } from "./dimensionTool";
 import type { ApplicableConstraint } from "./constraintApplicability";
 import { buildAppliedConstraint, buildAppliedDimension } from "./constraintAuthoring";
 import { trimPieces } from "./trimMath";
-import { draftToEntityFields } from "./toolMachine";
+import { filletGeometry, type FilletFailure, type LineEnd } from "./sketchFilletMath";
+import { buildChain, offsetChain, type OffsetFailure } from "./offsetMath";
+import { draftToEntityFields, type DraftEntity } from "./toolMachine";
 
 /*
  * ALL session mutators are serialized through one promise chain. Each reads
@@ -296,6 +298,224 @@ async function trimEntityNow(
   if (await commitReducedSketch(client, session, entities, constraints, gen)) {
     sketchStore.getState().pushUndoSnapshot(before, { kind: "trim" });
   }
+}
+
+// ── Sketch Fillet (WP-C T2b) ──────────────────────────────────────────────────
+//
+// A corner fillet REPLACES both legs with their trimmed selves and adds the
+// tangent arc, in ONE `sketchUpsert` (⇒ one undo step). Replace rather than edit
+// in place because `marshalUpsert` diffs entities by ID ONLY — a moved endpoint
+// on an already-mapped entity emits no op at all, so an in-place trim would
+// silently never reach the backend. This is exactly the shape `trimEntityNow`
+// uses, and the reason it uses it.
+//
+// CONSTRAINTS THE FILLET AUTHORS: two Coincident WELDS (each trimmed line's
+// consumed endpoint ↔ the arc endpoint it now meets) and NOTHING ELSE.
+//
+// Deliberately NO entity-level `Tangent(line, arc)`, even though the arc IS
+// tangent by construction. `Tangent` on a line/arc pair is
+// `distance(arcCentre, line) == radius`; once the line's endpoint is WELDED to
+// the arc's endpoint the line necessarily passes through a point exactly
+// `radius` from the centre, so that distance sits at its MAXIMUM, the
+// constraint's gradient vanishes on the manifold of the others, and PlaneGCS
+// diagnoses it as redundant — surfaced to the user as a bogus OverConstrained
+// badge on a perfectly good fillet. That is not a guess: it is the same
+// topology the SLOT tool hit, pinned by the worker ctest
+// `test_sketch_arc_endpoints.cpp::test_endpoint_weld_makes_entity_tangent_redundant`
+// (see the slot header in toolMachine.ts, which removed its four Tangents for
+// exactly this reason). Welds alone give the same DOF without the false badge.
+// Genuine ENDPOINT tangency needs its own constraint kind — open, tracked there.
+
+/** How a fillet rewrites the constraints that referenced its two legs. */
+interface FilletRemap {
+  aId: string;
+  bId: string;
+  newAId: string;
+  newBId: string;
+  /** The endpoint of each leg the fillet CONSUMED (moved to the tangent point). */
+  aEnd: LineEnd;
+  bEnd: LineEnd;
+}
+
+/**
+ * Re-author the constraints that referenced the replaced legs onto their
+ * successors, minting FRESH ids (a same-id rewrite would emit no wire op —
+ * `marshalUpsert` diffs constraints by id, so the backend would keep one
+ * pointing at entities its own remove-cascade already dropped).
+ *
+ * Four classes are DROPPED instead of remapped:
+ *   - the corner weld itself (a Coincident naming BOTH legs) — superseded by
+ *     the two arc welds, and it would now pull the tangent points back together;
+ *   - anything anchored at the CONSUMED endpoint (that vertex no longer exists);
+ *   - dimensional constraints on a leg (the fillet just shortened it, so the
+ *     pinned length is no longer the thing the user dimensioned);
+ *   - `Equal` on a leg (a length equality the trim just broke).
+ * Everything else — Horizontal/Vertical/Parallel/Perpendicular, and the welds at
+ * the FAR ends that keep the rest of the profile connected — survives, which is
+ * what stops a filleted rectangle falling apart into loose segments.
+ */
+export function remapFilletConstraints(
+  constraints: SketchConstraint[],
+  remap: FilletRemap,
+  nextConstraintId: () => string,
+): SketchConstraint[] {
+  const out: SketchConstraint[] = [];
+  for (const c of constraints) {
+    const touchesA = c.entities.includes(remap.aId);
+    const touchesB = c.entities.includes(remap.bId);
+    if (!touchesA && !touchesB) {
+      out.push(c);
+      continue;
+    }
+    if (touchesA && touchesB) continue; // the corner weld
+    if (isDimensional(c.type) || c.type === "Equal") continue;
+    const srcId = touchesA ? remap.aId : remap.bId;
+    const consumed = touchesA ? remap.aEnd : remap.bEnd;
+    if (c.entities.some((id, i) => id === srcId && c.positions?.[i] === consumed)) continue;
+    out.push({
+      ...c,
+      id: nextConstraintId(),
+      entities: c.entities.map((id) =>
+        id === remap.aId ? remap.newAId : id === remap.bId ? remap.newBId : id,
+      ),
+    });
+  }
+  return out;
+}
+
+/**
+ * Round the corner shared by lines `aId` and `bId` with a tangent arc of
+ * `radius`. Refuses loudly (returning the typed `FilletFailure` for the caller
+ * to phrase) rather than guessing on a non-corner, a collinear pair, or a radius
+ * the corner cannot fit. Locked reference geometry is refused here too — the
+ * fillet MUTATES both legs, which the backend rejects outright.
+ */
+export function filletSketchCorner(
+  client: CadClient,
+  aId: string,
+  bId: string,
+  radius: number,
+  opts: { tol: number },
+): Promise<{ ok: boolean; failure?: FilletFailure }> {
+  return enqueueSketchMutation(() => filletSketchCornerNow(client, aId, bId, radius, opts));
+}
+
+async function filletSketchCornerNow(
+  client: CadClient,
+  aId: string,
+  bId: string,
+  radius: number,
+  opts: { tol: number },
+): Promise<{ ok: boolean; failure?: FilletFailure }> {
+  const gen = sketchStore.getState().sessionGeneration;
+  const session = sketchStore.getState().session;
+  if (!session) return { ok: false };
+  const a = session.entities.find((e) => e.id === aId);
+  const b = session.entities.find((e) => e.id === bId);
+  if (!a || !b) return { ok: false };
+  const locked = lockedEntityIds(session.entities);
+  if (locked.has(aId) || locked.has(bId)) {
+    viewportStore.getState().setStatusHint(`${LOCKED_GEOMETRY_HINT} — it cannot be filleted`);
+    return { ok: false };
+  }
+  const solved = filletGeometry(a, b, radius, opts);
+  if (!solved.ok) return { ok: false, failure: solved };
+  const geom = solved.geom;
+
+  const mint = (d: DraftEntity): SketchEntity => ({
+    id: sketchStore.getState().nextEntityId(),
+    ...draftToEntityFields(d),
+  });
+  const newA = mint(geom.drafts[0]);
+  const newB = mint(geom.drafts[1]);
+  const arc = mint(geom.drafts[2]);
+
+  const doomed = new Set([aId, bId]);
+  const entities = [...session.entities.filter((e) => !doomed.has(e.id)), newA, newB, arc];
+  const nextConstraintId = () => sketchStore.getState().nextConstraintId();
+  const constraints: SketchConstraint[] = [
+    ...remapFilletConstraints(
+      session.constraints,
+      { aId, bId, newAId: newA.id, newBId: newB.id, aEnd: geom.aEnd, bEnd: geom.bEnd },
+      nextConstraintId,
+    ),
+    {
+      id: nextConstraintId(),
+      type: "Coincident",
+      entities: [newA.id, arc.id],
+      positions: [geom.aEnd, geom.arcEndA],
+    },
+    {
+      id: nextConstraintId(),
+      type: "Coincident",
+      entities: [newB.id, arc.id],
+      positions: [geom.bEnd, geom.arcEndB],
+    },
+  ];
+
+  const before: SketchSnapshot = { entities: session.entities, constraints: session.constraints };
+  if (await commitReducedSketch(client, session, entities, constraints, gen, "fillet")) {
+    sketchStore.getState().pushUndoSnapshot(before, { kind: "sketchFillet" });
+    return { ok: true };
+  }
+  return { ok: false };
+}
+
+// ── Sketch Offset (WP-C T2b) ──────────────────────────────────────────────────
+
+/**
+ * Author a parallel copy of the chain containing `seedId` at the SIGNED distance
+ * `signedDistance` (`+` = left of the chain's traversal — the caller multiplies
+ * the user's magnitude by `chainSideSign`, so the copy follows the cursor).
+ *
+ * Purely ADDITIVE: the source chain is untouched, exactly like Mirror, so this
+ * deliberately does NOT refuse locked reference geometry — offsetting a
+ * projected host-face boundary inward is a legitimate (and useful) move, and the
+ * copies are the user's own free geometry (`mirrorEntity` sets the same
+ * precedent: `referenceLocked` is never inherited).
+ *
+ * V1: the copy carries NO constraint back to its source. A persistent "offset
+ * by d" association would need a constraint kind PlaneGCS does not offer; the
+ * honest alternative — a pile of per-segment Distance dimensions — would
+ * over-constrain any real chain. The copy is ordinary geometry, editable like
+ * anything the user drew.
+ */
+export function offsetSketchChain(
+  client: CadClient,
+  seedId: string,
+  signedDistance: number,
+  opts: { tol: number; minSize: number },
+): Promise<{ ok: boolean; failure?: OffsetFailure }> {
+  return enqueueSketchMutation(() => offsetSketchChainNow(client, seedId, signedDistance, opts));
+}
+
+async function offsetSketchChainNow(
+  client: CadClient,
+  seedId: string,
+  signedDistance: number,
+  opts: { tol: number; minSize: number },
+): Promise<{ ok: boolean; failure?: OffsetFailure }> {
+  const gen = sketchStore.getState().sessionGeneration;
+  const session = sketchStore.getState().session;
+  if (!session) return { ok: false };
+  const seed = session.entities.find((e) => e.id === seedId);
+  if (!seed) return { ok: false };
+  const chain = buildChain(seed, session.entities, opts.tol);
+  if (!chain) return { ok: false, failure: { ok: false, reason: "unsupported" } };
+  const solved = offsetChain(chain, signedDistance, { minSize: opts.minSize });
+  if (!solved.ok) return { ok: false, failure: solved };
+
+  const copies: SketchEntity[] = solved.entities.map((d) => ({
+    id: sketchStore.getState().nextEntityId(),
+    ...draftToEntityFields(d),
+  }));
+  const entities = [...session.entities, ...copies];
+  const before: SketchSnapshot = { entities: session.entities, constraints: session.constraints };
+  if (await commitReducedSketch(client, session, entities, session.constraints, gen, "offset")) {
+    sketchStore.getState().pushUndoSnapshot(before, { kind: "sketchOffset" });
+    return { ok: true };
+  }
+  return { ok: false };
 }
 
 /**

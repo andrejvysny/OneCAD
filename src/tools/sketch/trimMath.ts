@@ -40,7 +40,9 @@ import type { SketchEntity } from "@/ipc/types";
 import type { Point2 } from "@/viewport/engine/sketchBasis";
 import type { DraftEntity } from "./toolMachine";
 
-type XY = [number, number];
+/** Plane (u,v) pair. Exported because `offsetMath` reuses the three full-curve
+ *  intersection primitives below rather than growing a second copy of them. */
+export type XY = [number, number];
 
 /** Param-equality epsilon — FIXED 1e-9 in param space (line/arc t,s ∈ [0,1]) and
  *  radian space (circle θ), never scaled by length/radius. Adequate at CAD scales:
@@ -98,7 +100,7 @@ function arcSweep(c: XY, start: XY, end: XY): number {
 // ── Full-curve intersection points (no extent gating — gated afterwards) ───────
 
 /** Two infinite lines: 0 or 1 point (empty if parallel/collinear). */
-function lineLineFull(p1: XY, p2: XY, p3: XY, p4: XY): XY[] {
+export function lineLineFull(p1: XY, p2: XY, p3: XY, p4: XY): XY[] {
   const d1x = p2[0] - p1[0];
   const d1y = p2[1] - p1[1];
   const d2x = p4[0] - p3[0];
@@ -110,7 +112,7 @@ function lineLineFull(p1: XY, p2: XY, p3: XY, p4: XY): XY[] {
 }
 
 /** Infinite line vs full circle: 0, 1 (tangent), or 2 points. */
-function lineCircleFull(a: XY, b: XY, c: XY, r: number): XY[] {
+export function lineCircleFull(a: XY, b: XY, c: XY, r: number): XY[] {
   const dx = b[0] - a[0];
   const dy = b[1] - a[1];
   const fx = a[0] - c[0];
@@ -130,7 +132,7 @@ function lineCircleFull(a: XY, b: XY, c: XY, r: number): XY[] {
 }
 
 /** Two full circles: 0, 1 (tangent), or 2 points. */
-function circleCircleFull(c1: XY, r1: number, c2: XY, r2: number): XY[] {
+export function circleCircleFull(c1: XY, r1: number, c2: XY, r2: number): XY[] {
   const dx = c2[0] - c1[0];
   const dy = c2[1] - c1[1];
   const d = Math.hypot(dx, dy);

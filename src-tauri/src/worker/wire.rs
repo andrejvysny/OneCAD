@@ -3699,6 +3699,41 @@ mod body_wire_tests {
         assert_eq!(w["inputs"][0]["primary"]["kind"], json!("edge"));
     }
 
+    /// SCHEMA §7.3 (2026-08-03): a two-distance chamfer's second leg reaches the
+    /// worker as `params.distance2`, and an equal-leg one emits NO such key — the
+    /// wire form of every existing chamfer is byte-identical.
+    #[test]
+    fn wire_op_chamfer_carries_distance2_only_when_set() {
+        use onecad_core::document::record::ChamferParams;
+
+        let body = BodyId(Uuid::from_u128(0x67));
+        let chamfer = |d2: Option<f64>| {
+            let op = Operation::Known(KnownOperation::Chamfer(ChamferParams {
+                radius: Scalar::new(1.0),
+                distance2: d2.map(Scalar::new),
+                edge_ids: vec![ElementId::new("e:14")],
+                edges: vec![],
+                chain_tangent_edges: true,
+                extra: Default::default(),
+            }));
+            let mut inputs = OperationInputs::default();
+            inputs.bodies.push(body);
+            inputs.elements.push(ElementId::new("e:14"));
+            wire_op(&planned(op, inputs))
+        };
+
+        let equal = chamfer(None);
+        assert!(
+            equal["params"].get("distance2").is_none(),
+            "equal-leg chamfer emits no distance2: {}",
+            equal["params"]
+        );
+
+        let asym = chamfer(Some(2.5));
+        assert_eq!(asym["params"]["distance2"], json!({ "value": 2.5 }));
+        assert_eq!(asym["params"]["radius"], json!({ "value": 1.0 }));
+    }
+
     #[test]
     fn wire_op_lifts_profile_to_sketch_and_region_for_extrude_and_revolve() {
         use onecad_core::document::refs::SketchRegionRef;
@@ -3847,6 +3882,7 @@ mod body_wire_tests {
                 "Chamfer",
                 Operation::Known(KnownOperation::Chamfer(ChamferParams {
                     radius: Scalar::new(1.0),
+                    distance2: None,
                     edge_ids: vec![ElementId::new("e:16")],
                     edges: vec![edge_ref(edge_body, "e:16")],
                     chain_tangent_edges: true,

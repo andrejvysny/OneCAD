@@ -281,6 +281,7 @@ fn operation_strategy() -> impl Strategy<Value = Operation> {
         .prop_map(|(radius, edges, chain, extra)| {
             Operation::Known(KnownOperation::Chamfer(ChamferParams {
                 radius,
+                distance2: None,
                 edge_ids: edges.into_iter().map(ElementId::new).collect(),
                 edges: vec![],
                 chain_tangent_edges: chain,

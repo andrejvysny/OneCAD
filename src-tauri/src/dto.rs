@@ -869,7 +869,17 @@ pub fn feature_value_text(op: &Operation) -> String {
         KnownOperation::Extrude(p) => format!("{:.1} mm", p.distance.value.abs()),
         KnownOperation::Revolve(p) => format!("{:.1}°", p.angle_deg.value),
         KnownOperation::Fillet(p) => format!("{:.1} mm", p.radius.value),
-        KnownOperation::Chamfer(p) => format!("{:.1} mm", p.radius.value),
+        // A two-distance chamfer (SCHEMA §7.3, 2026-08-03) reads as `d1×d2`: the
+        // row must not claim to be an equal-leg chamfer of `radius` when the
+        // second leg is what makes the feature what it is. Absent ⇒ the plain
+        // single-number form every existing chamfer row already shows.
+        // `src/tools/preview/filletRadius.ts radiusFromValueText` parses the
+        // LEADING number back for a re-edit seed, so d1 stays first (pinned both
+        // sides); the second leg is seeded from the stored params, not from here.
+        KnownOperation::Chamfer(p) => match &p.distance2 {
+            Some(d2) => format!("{:.1}×{:.1} mm", p.radius.value, d2.value),
+            None => format!("{:.1} mm", p.radius.value),
+        },
         KnownOperation::Shell(p) => format!("{:.1} mm", p.thickness.value),
         // The operation IS a boolean row's one editable parameter — without it a
         // re-edit op swap has no visible projection signal at all.
@@ -1061,6 +1071,28 @@ mod tests {
         let op = extrude(25.0);
         assert_eq!(feature_kind(&op), FeatureKind::Extrude);
         assert_eq!(feature_value_text(&op), "25.0 mm");
+    }
+
+    /// A two-distance chamfer's row shows BOTH legs (SCHEMA §7.3, 2026-08-03);
+    /// an equal-leg one is byte-identical to what it always showed.
+    #[test]
+    fn chamfer_value_text_shows_the_second_distance_only_when_set() {
+        use onecad_core::document::record::ChamferParams;
+        use onecad_core::ids::ElementId;
+        let chamfer = |d2: Option<f64>| {
+            Operation::Known(KnownOperation::Chamfer(ChamferParams {
+                radius: Scalar::new(1.0),
+                distance2: d2.map(Scalar::new),
+                edge_ids: vec![ElementId::new("e:14")],
+                edges: vec![],
+                chain_tangent_edges: true,
+                extra: Default::default(),
+            }))
+        };
+        assert_eq!(feature_value_text(&chamfer(None)), "1.0 mm");
+        assert_eq!(feature_value_text(&chamfer(Some(2.5))), "1.0×2.5 mm");
+        // The re-edit seed parses the LEADING number (`radiusFromValueText`).
+        assert!(feature_value_text(&chamfer(Some(2.5))).starts_with("1.0"));
     }
 
     /// PIN (frontend contract): the projection folds the pattern/mirror ops into

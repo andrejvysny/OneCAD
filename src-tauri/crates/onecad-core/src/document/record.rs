@@ -877,10 +877,23 @@ pub struct FilletParams {
 /// Chamfer parameters (SPLIT from OneCAD-CPP `FilletChamferParams`). `radius`
 /// doubles as the chamfer distance (OneCAD-CPP comment `OperationRecord.h:117`).
 /// `edges` mirrors [`FilletParams::edges`] (typed per-edge semantic refs).
+///
+/// `distance2` (SCHEMA §7.3, amended 2026-08-03 — WP-C T2a) is the CHAMFER-ONLY
+/// second leg of an asymmetric two-distance chamfer. It is `skip_serializing_if =
+/// "Option::is_none"` on purpose: every document authored before this field
+/// existed still serializes byte-identically, and an equal-leg chamfer never
+/// grows a key. [`FilletParams`] has no such field — a Fillet carrying one is
+/// rejected by the session ([`crate::edit`]), not silently round-tripped through
+/// `extra`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChamferParams {
     pub radius: Scalar,
+    /// Distance on the NON-reference adjacent face. Absent ⇒ equal-leg (`radius`
+    /// on both faces). See [`ChamferParams::validate`] and SCHEMA §7.3 for the
+    /// deterministic reference-face rule the worker applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distance2: Option<Scalar>,
     pub edge_ids: Vec<ElementId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edges: Vec<ElementRef>,
@@ -888,6 +901,29 @@ pub struct ChamferParams {
     pub chain_tangent_edges: bool,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     pub extra: Extra,
+}
+
+impl ChamferParams {
+    /// SCHEMA §7.3 two-distance validity: when present, `distance2` must be a
+    /// finite POSITIVE length. A zero/negative second leg is not a degenerate
+    /// chamfer the kernel can round down — it is a param the worker would have to
+    /// guess at, so it is refused here (the session is the single writer).
+    ///
+    /// `radius` itself is deliberately NOT range-checked here: the "too small"
+    /// floor is the worker's `kMinValue` (1e-3) and is a RECOVERABLE `OP_FAILED`,
+    /// not a rejected edit — moving it would change behaviour this WP does not own.
+    pub fn validate(&self) -> Result<(), String> {
+        let Some(d2) = self.distance2.as_ref() else {
+            return Ok(());
+        };
+        if !d2.value.is_finite() || d2.value <= 0.0 {
+            return Err(format!(
+                "Chamfer distance2 must be a positive finite length (got {})",
+                d2.value
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Shell parameters (OneCAD-CPP `ShellParams` `OperationRecord.h:122-125`).

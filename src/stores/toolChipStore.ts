@@ -111,6 +111,10 @@ export interface EdgeOpChipOpts {
   showEdgeOpSegments?: boolean;
   /** A segment was picked — the controller locks the type and swaps the session. */
   onEdgeOp?: (edgeOp: EdgeOpKind) => void;
+  /** Seed the CHAMFER second-leg segment (`null` = equal-leg — SCHEMA §7.3). */
+  distance2?: number | null;
+  /** The second leg was typed or cleared back to `=` (equal-leg). */
+  onDistance2?: (distance2: number | null) => void;
 }
 
 /**
@@ -155,7 +159,10 @@ export type ChipKind =
   | "mirror"
   | "transform"
   | "regionSelect"
-  | "dimension";
+  | "dimension"
+  /** A sketch EDIT tool's live parameter (fillet radius / offset distance —
+   *  WP-C T2b): `[ <label> <value> mm ]`, open for as long as the tool is armed. */
+  | "sketchValue";
 
 export interface ToolChipState {
   kind: ChipKind;
@@ -187,6 +194,13 @@ export interface ToolChipState {
   edgeOp: EdgeOpKind;
   /** Whether the armed edge-op cluster renders the [Fillet|Chamfer] segments. */
   showEdgeOpSegments: boolean;
+  /**
+   * The CHAMFER-ONLY second distance (SCHEMA §7.3, 2026-08-03). `null` ⇒
+   * equal-leg, which is what the `=` the segment shows means. Its segment is
+   * rendered only while `edgeOp === "Chamfer"`, so a Fillet arm never displays it
+   * even when the value is still parked here from an earlier flip.
+   */
+  distance2: number | null;
   /** How many regions the armed op covers (1 in the single-region path). */
   regionCount: number;
   /** Armed extrude draft angle in DEGREES — 0 renders the segment collapsed. */
@@ -228,6 +242,8 @@ export interface ToolChipState {
   onBooleanMode: ((mode: BooleanMode) => void) | null;
   /** Edge-op segment picked (armed fillet/chamfer cluster). */
   onEdgeOp: ((edgeOp: EdgeOpKind) => void) | null;
+  /** Second chamfer distance typed / cleared (armed edge-op cluster). */
+  onDistance2: ((distance2: number | null) => void) | null;
   /** Apply pressed (boolean / pattern / mirror chip). */
   onApply: (() => void) | null;
   /** Axis-reset pressed (revolve chip). */
@@ -321,6 +337,18 @@ export interface ToolChipState {
     handlers: TransformChipHandlers,
     opts?: TransformChipOpts,
   ): void;
+  /**
+   * Show an armed sketch EDIT tool's parameter chip (WP-C T2b). Unlike every
+   * chip above it commits NOTHING: it just holds the tool's live radius /
+   * distance, so it stays open across repeated applies and `onValue` only
+   * re-parameterises the next one.
+   */
+  showSketchValue(
+    value: number,
+    worldPos: [number, number, number],
+    label: string,
+    onValue: (v: number) => void,
+  ): void;
   /** Show the sketch Dimension chip (seeded, auto-focused; Enter commits, Esc cancels). */
   showDimension(
     value: number,
@@ -353,6 +381,8 @@ export interface ToolChipState {
   setCopy(copy: boolean): void;
   /** Update just the align sub-flow's outstanding pick (W2.5). */
   setAlignPhase(alignPhase: AlignPhase | null): void;
+  /** Update just the chamfer second leg (`null` = equal-leg). */
+  setDistance2(distance2: number | null): void;
   clear(): void;
 }
 
@@ -373,6 +403,8 @@ const CLEARED = {
   canBoolean: false,
   showBooleanSegments: false,
   edgeOp: "Fillet" as EdgeOpKind,
+  distance2: null as number | null,
+  onDistance2: null as ((distance2: number | null) => void) | null,
   showEdgeOpSegments: false,
   onEdgeOp: null,
   regionCount: 1,
@@ -442,6 +474,8 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
       edgeOp: opts?.edgeOp ?? "Fillet",
       showEdgeOpSegments: opts?.showEdgeOpSegments ?? false,
       onEdgeOp: opts?.onEdgeOp ?? null,
+      distance2: opts?.distance2 ?? null,
+      onDistance2: opts?.onDistance2 ?? null,
     });
   },
   showRevolve(value, worldPos, handlers, opts) {
@@ -545,6 +579,9 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
       onAlign: handlers.onAlign ?? null,
     });
   },
+  showSketchValue(value, worldPos, label, onValue) {
+    set({ ...CLEARED, kind: "sketchValue", value, worldPos, label, onValue });
+  },
   showDimension(value, suffix, worldPos, onValue, onCancel) {
     set({ ...CLEARED, kind: "dimension", value, suffix, worldPos, onValue, onCancel });
   },
@@ -574,6 +611,9 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
   },
   setEdgeOp(edgeOp) {
     set({ edgeOp });
+  },
+  setDistance2(distance2) {
+    set({ distance2 });
   },
   setTransformMode(transformMode) {
     set({ transformMode });

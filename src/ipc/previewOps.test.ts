@@ -145,6 +145,38 @@ describe("previewOps OP_BUILDERS mirror their commit call sites", () => {
     expect(op).toEqual({ ...callSite, opId: OP_ID });
   });
 
+  // ── two-distance chamfer (SCHEMA §7.3, 2026-08-03 — WP-C T2a) ──────────────
+
+  const edgeSession = (opType: "Fillet" | "Chamfer", latestParams: Record<string, unknown>) =>
+    session({
+      opType,
+      inputs: [{ primary: { bodyId: "body1", elementId: "el_1", kind: "edge" } }],
+      latestParams: { mode: opType, radius: 1, edgeIds: ["e:1"], ...latestParams },
+    });
+
+  it("a Chamfer draft carries `distance2` through; an equal-leg one emits no key", () => {
+    const asym = buildPreviewOp(edgeSession("Chamfer", { distance2: 2.5 }));
+    if (asym.opType !== "Chamfer") throw new Error("expected Chamfer");
+    expect(asym.params.distance2).toBe(2.5);
+
+    const equal = buildPreviewOp(edgeSession("Chamfer", {}));
+    if (equal.opType !== "Chamfer") throw new Error("expected Chamfer");
+    expect("distance2" in equal.params).toBe(false);
+  });
+
+  it("REFUSES a distance2 on a Fillet, or a non-positive one on a Chamfer", () => {
+    // Structural guards mirroring core: an invalid draft must fail the preview
+    // loudly (which blocks commit) rather than degrade to an equal-leg cut.
+    expect(() => buildPreviewOp(edgeSession("Fillet", { distance2: 2.5 }))).toThrow(
+      /Chamfer-only/,
+    );
+    for (const bad of [0, -1, Number.NaN]) {
+      expect(() => buildPreviewOp(edgeSession("Chamfer", { distance2: bad }))).toThrow(
+        /greater than zero/,
+      );
+    }
+  });
+
   it("Shell matches commitShell's op", () => {
     // commitShell:
     //   const bodyId = faces[0]?.bodyId;

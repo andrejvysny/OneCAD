@@ -2,15 +2,21 @@
 // in-process via the op executors (real OCCT). Covers geometry results, the radius
 // guard, and the "edge ref no longer resolves ⇒ NeedsRepair, never a wrong bind".
 // No framework: exit code == failure count.
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <GProp_GProps.hxx>
 #include <TopExp.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <TopoDS_Shape.hxx>
+#include <gp_Pnt.hxx>
 
 #include "elementmap/ElementMapPartition.h"
 #include "nlohmann/json.hpp"
@@ -123,6 +129,167 @@ void test_chamfer_edge() {
     check(face_count(bodies.get("body_1")->geom) == 7, "chamfer: 6 + 1 flat face = 7");
 }
 
+// ── two-distance chamfer (SCHEMA §7.3, 2026-08-03 — WP-C T2a) ────────────────
+
+// The result of running an asymmetric chamfer on the (0,0) vertical edge of a
+// 10mm box: volume + centroid. The CENTROID is the signature that discriminates
+// the reference-face choice — the removed wedge is asymmetric about the x==y
+// diagonal, so putting `radius` on the other adjacent face mirrors it.
+struct ChamferRun {
+    double volume = 0.0;
+    gp_Pnt centre;
+    std::size_t faces = 0;
+    bool ok = false;
+};
+
+ChamferRun run_two_distance_chamfer(double d1, double d2) {
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape();  // [0,10]^3
+    BodyStore bodies;
+    bodies.create("body_1", "op0", box);
+    em::ElementMapPartition part;
+
+    const TopoDS_Shape edge = edge_by_center(box, 0, 0, 5);
+    json op = {{"opType", "Chamfer"}, {"opId", "opc2"},
+               {"inputs", json::array({edge_input("body_1", "el_e", edge, 0, 0, 5)})},
+               {"params", {{"mode", "Chamfer"}, {"radius", d1}, {"distance2", d2},
+                           {"edgeIds", json::array({"e:x"})}}}};
+
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    const ops::OpOutcome oc = ops::execute_chamfer(ctx, op, "opc2");
+    ChamferRun r;
+    r.ok = oc.status == ops::OpOutcome::Status::Ok && oc.needs_repair.empty();
+    if (!r.ok) return r;
+    const TopoDS_Shape& out = bodies.get("body_1")->geom;
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(out, props);
+    r.volume = props.Mass();
+    r.centre = props.CentreOfMass();
+    r.faces = face_count(out);
+    return r;
+}
+
+// Whether the SCHEMA §7.3 reference face (the adjacent face with the SMALLER
+// resolved face ordinal — the same 1-based `TopExp::MapShapes` index a TopoKey
+// "f:N" is built from) of the box's (0,0) vertical edge is the x==0 plane.
+// Recomputed HERE from OCCT rather than assumed, so the expectation below states
+// the RULE and not one build's happenstance face order.
+bool reference_face_is_x0(const TopoDS_Shape& box, const TopoDS_Shape& edge) {
+    TopTools_IndexedDataMapOfShapeListOfShape edge_faces;
+    TopExp::MapShapesAndAncestors(box, TopAbs_EDGE, TopAbs_FACE, edge_faces);
+    TopTools_IndexedMapOfShape face_map;
+    TopExp::MapShapes(box, TopAbs_FACE, face_map);
+    const TopTools_ListOfShape& faces = edge_faces(edge_faces.FindIndex(edge));
+    TopoDS_Shape best;
+    int best_ordinal = 0;
+    for (TopTools_ListOfShape::Iterator it(faces); it.More(); it.Next()) {
+        const int ord = face_map.FindIndex(it.Value());
+        if (ord > 0 && (best_ordinal == 0 || ord < best_ordinal)) {
+            best_ordinal = ord;
+            best = it.Value();
+        }
+    }
+    // The x==0 face's centre is (0,5,5); the y==0 face's is (5,0,5).
+    return em::ElementMapPartition::describe(best).center.X() < 1e-9;
+}
+
+// --- Asymmetric legs remove the EXACT analytic wedge d1·d2/2·L, with `radius`
+//     landing on the deterministic reference face. ---
+void test_chamfer_two_distance() {
+    const double d1 = 1.0, d2 = 2.5, len = 10.0;
+    const ChamferRun r = run_two_distance_chamfer(d1, d2);
+    check(r.ok, "chamfer2: Ok, no NeedsRepair");
+    if (!r.ok) return;
+
+    // Removed = right-triangle prism of legs d1,d2 swept the edge length.
+    const double removed = 0.5 * d1 * d2 * len;
+    check_near(r.volume, 1000.0 - removed, 1e-6, "chamfer2: volume == 1000 - d1*d2/2*L");
+    check(r.faces == 7, "chamfer2: 6 + 1 flat face = 7");
+    // …and it is neither equal-leg reading of the params (d=1 ⇒ 995, d=2.5 ⇒ 968.75).
+    check(std::abs(r.volume - 995.0) > 1.0 && std::abs(r.volume - 968.75) > 1.0,
+          "chamfer2: distance2 actually reached the kernel (not an equal-leg cut)");
+
+    // ORIENTATION: `Add(Dis1, Dis2, E, F)` measures Dis1 ON F, so on the box's
+    // (0,0) vertical edge the cut meets the reference face at `d1` from the edge
+    // and the other adjacent face at `d2`. The removed prism's cross-section is
+    // therefore the triangle (0,0)-(0,d1)-(d2,0) when the reference face is x==0
+    // (centroid (d2/3, d1/3)), and its mirror when it is y==0.
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape();
+    const bool ref_x0 = reference_face_is_x0(box, edge_by_center(box, 0, 0, 5));
+    const double rem_cx = (ref_x0 ? d2 : d1) / 3.0;
+    const double rem_cy = (ref_x0 ? d1 : d2) / 3.0;
+    const double kept = 1000.0 - removed;
+    check_near(r.centre.X(), (1000.0 * 5.0 - removed * rem_cx) / kept, 1e-6,
+               "chamfer2: centroid X matches `radius` on the smaller face ordinal");
+    check_near(r.centre.Y(), (1000.0 * 5.0 - removed * rem_cy) / kept, 1e-6,
+               "chamfer2: centroid Y matches `distance2` on the other face");
+    std::fprintf(stderr, "chamfer2: reference face is %s, centroid (%.6f, %.6f)\n",
+                 ref_x0 ? "x==0" : "y==0", r.centre.X(), r.centre.Y());
+}
+
+// --- The reference-face rule is a pure function of the predecessor shape: the
+//     same document replayed twice produces an IDENTICAL geometry signature. ---
+void test_chamfer_two_distance_reference_face_is_deterministic() {
+    const ChamferRun a = run_two_distance_chamfer(1.0, 2.5);
+    const ChamferRun b = run_two_distance_chamfer(1.0, 2.5);
+    check(a.ok && b.ok, "chamfer2 replay: both runs Ok");
+    if (!(a.ok && b.ok)) return;
+    // Volume alone cannot see a flipped reference face (d1*d2/2 is symmetric) —
+    // the centroid can, so equality of BOTH is the determinism proof.
+    check(a.volume == b.volume, "chamfer2 replay: identical volume");
+    check(a.centre.X() == b.centre.X() && a.centre.Y() == b.centre.Y() &&
+              a.centre.Z() == b.centre.Z(),
+          "chamfer2 replay: identical centroid (same reference face both times)");
+    check(a.faces == b.faces, "chamfer2 replay: identical face count");
+
+    // …and swapping the two legs is a DIFFERENT solid, which is what makes the
+    // equality above a real assertion rather than a tautology.
+    const ChamferRun swapped = run_two_distance_chamfer(2.5, 1.0);
+    check(swapped.ok, "chamfer2 swapped: Ok");
+    check_near(swapped.volume, a.volume, 1e-6, "chamfer2 swapped: same removed volume");
+    check(std::abs(swapped.centre.X() - a.centre.X()) > 1e-6,
+          "chamfer2 swapped: the legs are ORIENTED (centroid moves)");
+}
+
+// --- distance2 below kMinValue ⇒ recoverable OP_FAILED (never a silent cut). ---
+void test_chamfer_distance2_too_small() {
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape();
+    BodyStore bodies;
+    bodies.create("body_1", "op0", box);
+    em::ElementMapPartition part;
+    const TopoDS_Shape edge = edge_by_center(box, 0, 0, 5);
+    json op = {{"opType", "Chamfer"}, {"opId", "opc3"},
+               {"inputs", json::array({edge_input("body_1", "el_e", edge, 0, 0, 5)})},
+               {"params", {{"mode", "Chamfer"}, {"radius", 1.0}, {"distance2", 0.0},
+                           {"edgeIds", json::array({"e:x"})}}}};
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    const ops::OpOutcome oc = ops::execute_chamfer(ctx, op, "opc3");
+    check(oc.status == ops::OpOutcome::Status::Failed, "chamfer2: distance2 too small → OP_FAILED");
+}
+
+// --- A Fillet IGNORES distance2 (Chamfer-only; Rust rejects such a record, so
+//     honouring it here would only paper over a core defect). ---
+void test_fillet_ignores_distance2() {
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape();
+    BodyStore bodies;
+    bodies.create("body_1", "op0", box);
+    em::ElementMapPartition part;
+    const TopoDS_Shape edge = edge_by_center(box, 0, 0, 5);
+    json op = {{"opType", "Fillet"}, {"opId", "opf2"},
+               {"inputs", json::array({edge_input("body_1", "el_e", edge, 0, 0, 5)})},
+               {"params", {{"mode", "Fillet"}, {"radius", 1.0}, {"distance2", 2.5},
+                           {"edgeIds", json::array({"e:x"})}}}};
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    const ops::OpOutcome oc = ops::execute_fillet(ctx, op, "opf2");
+    check(oc.status == ops::OpOutcome::Status::Ok, "fillet+distance2: Ok");
+    const double v = onecad::session::shape_volume(bodies.get("body_1")->geom);
+    // (1 - pi/4)*r^2*L = 2.146 for r=1, L=10 — the r=1 fillet, unchanged.
+    check_near(v, 1000.0 - (1.0 - M_PI / 4.0) * 10.0, 1e-6,
+               "fillet+distance2: the plain r=1 fillet, distance2 ignored");
+}
+
 // --- Radius below kMinValue (1e-3) → recoverable OP_FAILED. ---
 void test_fillet_radius_too_small() {
     const TopoDS_Shape box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape();
@@ -230,6 +397,10 @@ void test_revolve_angle_too_small() {
 int main() {
     test_fillet_edge();
     test_chamfer_edge();
+    test_chamfer_two_distance();
+    test_chamfer_two_distance_reference_face_is_deterministic();
+    test_chamfer_distance2_too_small();
+    test_fillet_ignores_distance2();
     test_fillet_radius_too_small();
     test_fillet_ambiguous_edge_needs_repair();
     test_revolve_pappus();

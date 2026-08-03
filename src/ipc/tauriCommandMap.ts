@@ -84,6 +84,13 @@ interface WireRevolveParams {
 
 interface WireFilletParams {
   radius: WireScalar;
+  /**
+   * Rust `ChamferParams::distance2` (SCHEMA §7.3, 2026-08-03). Emitted ONLY for
+   * a Chamfer that has one — the field is skip-none on the Rust side, so an
+   * equal-leg chamfer must marshal without the key or its wire form stops being
+   * byte-identical to every document authored before the field existed.
+   */
+  distance2?: WireScalar;
   edgeIds: string[];
   /**
    * Typed per-edge semantic refs (Rust `FilletParams::edges` — one `ElementRef`
@@ -357,6 +364,14 @@ function filletParams(p: FilletParams, inputs?: SemanticRef[]): WireFilletParams
     edgeIds,
     chainTangentEdges: p.chainTangentEdges ?? true,
   };
+  // SCHEMA §7.3 (2026-08-03): the second leg is CHAMFER-ONLY. Gating on `mode`
+  // here is the marshalling-seam half of that rule (core's session validator is
+  // the other): a caller that leaves a stale `distance2` on a params object it
+  // has just re-typed to Fillet marshals a plain fillet, never a record core has
+  // to reject.
+  if (p.mode === "Chamfer" && p.distance2 !== undefined && p.distance2 > 0) {
+    wire.distance2 = scalar(p.distance2);
+  }
   // R-WP2.1 dual rule: carry the typed `edges` in LOCKSTEP with `edgeIds`, built from
   // the op's per-edge SemanticRefs (`OperationOp.inputs`). Each typed ref supplies the
   // operated body — `record.rs::derive_inputs` recovers it from `primary.body`, and

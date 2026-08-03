@@ -65,6 +65,12 @@ export const SKETCH_TOOLS: ToolEntry[] = [
   { id: "dimension", icon: "dimension", label: "Dimension", shortcut: "D" },
   { id: "trim", icon: "trim", label: "Trim", shortcut: "T" },
   { id: "mirror", icon: "mirror", label: "Mirror", shortcut: "M" },
+  // WP-C T2b — the two 2D EDIT tools, grouped with Trim/Mirror (they modify or
+  // derive from geometry that already exists, unlike the draw tools above).
+  // The 2D fillet reuses the model `fillet` glyph deliberately: it is the same
+  // operation one dimension down, and the two live in different toolbars.
+  { id: "sketchFillet", icon: "fillet", label: "Fillet", shortcut: "F" },
+  { id: "sketchOffset", icon: "offset", label: "Offset", shortcut: "⇧O" },
 ];
 
 export function toolsForMode(mode: EditorMode): ToolEntry[] {

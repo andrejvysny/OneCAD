@@ -11,6 +11,7 @@
 #include <Standard_Failure.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
@@ -43,6 +44,48 @@ std::string target_body_of(const json& op) {
     return "";
 }
 
+// Whether `params` carries a readable scalar under `key` (SCHEMA §4: a bare
+// number OR a `{value}` object). `read_scalar`'s default cannot distinguish an
+// absent optional field from one legitimately set to that default, and
+// `distance2` is skip-none on the Rust side, so presence is asked separately.
+bool has_scalar(const json& params, const char* key) {
+    if (!params.is_object() || !params.contains(key)) return false;
+    const json& v = params[key];
+    return v.is_number() || (v.is_object() && v.contains("value") && v["value"].is_number());
+}
+
+// SCHEMA §7.3 (2026-08-03) DETERMINISTIC REFERENCE FACE for a two-distance
+// chamfer: of the edge's adjacent faces, the one with the SMALLER resolved face
+// ordinal. `radius` is applied on it, `distance2` on the other.
+//
+// Why the ordinal and not `faces.First()`: the ancestor list's order is an
+// artifact of how OCCT walked the shape while building the map, so it is stable
+// for one traversal but carries no documented meaning and cannot be reasoned
+// about from a document. The face ordinal is the same snapshot-scoped index the
+// element map already publishes as a TopoKey, so "distance on the smaller face
+// ordinal" is a rule a reader can verify against `QueryElement` output — and it
+// is a pure function of the predecessor shape, so replaying the same document
+// twice picks the same face and produces the same geometry.
+//
+// `face_map` is `TopExp::MapShapes(body, TopAbs_FACE)`, built ONCE by the caller.
+// Returns a null face when the edge has no adjacent face (a free edge — the
+// caller then skips it exactly as the equal-leg path does).
+TopoDS_Face reference_face(const TopTools_IndexedMapOfShape& face_map,
+                           const TopTools_ListOfShape& faces) {
+    TopoDS_Face best;
+    int best_ordinal = 0;
+    for (TopTools_ListOfShape::Iterator it(faces); it.More(); it.Next()) {
+        if (it.Value().ShapeType() != TopAbs_FACE) continue;
+        const int ordinal = face_map.FindIndex(it.Value());
+        if (ordinal <= 0) continue;
+        if (best_ordinal == 0 || ordinal < best_ordinal) {
+            best_ordinal = ordinal;
+            best = TopoDS::Face(it.Value());
+        }
+    }
+    return best;
+}
+
 OpOutcome run(OpContext& ctx, const json& op, const std::string& op_id, Mode mode) {
     const char* op_name = (mode == Mode::Fillet) ? "Fillet" : "Chamfer";
     const json params =
@@ -66,6 +109,18 @@ OpOutcome run(OpContext& ctx, const json& op, const std::string& op_id, Mode mod
         return OpOutcome::fail("OP_FAILED", (mode == Mode::Fillet)
                                                 ? "Fillet radius too small"
                                                 : "Chamfer distance too small");
+    }
+
+    // --- optional second chamfer leg (SCHEMA §7.3, 2026-08-03) ---
+    // Chamfer-only and ABSENT by default: an equal-leg chamfer takes the original
+    // `Add(d, d, e, faces.First())` path below, byte for byte. A Fillet that
+    // somehow carries the field is ignored here — Rust rejects that record before
+    // it can be authored (`session::validate_edge_op_distances`), so honouring it
+    // would only paper over a core defect.
+    const bool two_distance = (mode == Mode::Chamfer) && has_scalar(params, "distance2");
+    const double distance2 = two_distance ? read_scalar(params, "distance2", 0.0) : 0.0;
+    if (two_distance && distance2 < kMinValue) {
+        return OpOutcome::fail("OP_FAILED", "Chamfer distance2 too small");
     }
 
     // --- resolve each edge ref through the ladder (descriptor + anchor) ---
@@ -117,6 +172,10 @@ OpOutcome run(OpContext& ctx, const json& op, const std::string& op_id, Mode mod
         } else {
             TopTools_IndexedDataMapOfShapeListOfShape edge_face_map;
             TopExp::MapShapesAndAncestors(target_shape, TopAbs_EDGE, TopAbs_FACE, edge_face_map);
+            // The face-ordinal table the two-distance reference-face rule reads.
+            // Built once here, never per edge.
+            TopTools_IndexedMapOfShape face_map;
+            if (two_distance) TopExp::MapShapes(target_shape, TopAbs_FACE, face_map);
             auto ch = std::make_shared<BRepFilletAPI_MakeChamfer>(target_shape);
             std::size_t added = 0;
             for (const TopoDS_Edge& e : edges) {
@@ -124,7 +183,15 @@ OpOutcome run(OpContext& ctx, const json& op, const std::string& op_id, Mode mod
                 if (idx == 0) continue;
                 const TopTools_ListOfShape& faces = edge_face_map(idx);
                 if (faces.IsEmpty()) continue;
-                ch->Add(radius, radius, e, TopoDS::Face(faces.First()));  // equal-leg
+                if (two_distance) {
+                    // `Add(Dis1, Dis2, E, F)` measures `Dis1` ON `F`, so the
+                    // reference face is where `radius` lands (SCHEMA §7.3).
+                    const TopoDS_Face ref_face = reference_face(face_map, faces);
+                    if (ref_face.IsNull()) continue;
+                    ch->Add(radius, distance2, e, ref_face);
+                } else {
+                    ch->Add(radius, radius, e, TopoDS::Face(faces.First()));  // equal-leg
+                }
                 ++added;
             }
             if (added == 0) return OpOutcome::fail("OP_FAILED", "No valid edges for chamfer");

@@ -899,6 +899,7 @@ async fn fillet_reedit_swaps_to_chamfer_and_regens() {
     // only the opType flips. This is the one `UpdateOperationParams` that may.
     let swap = Operation::Known(KnownOperation::Chamfer(ChamferParams {
         radius: Scalar::new(2.0),
+        distance2: None,
         edge_ids: vec![setup.edge_el.clone()],
         edges: vec![ElementRef {
             primary: Some(PrimaryRef {
@@ -982,6 +983,223 @@ async fn fillet_reedit_swaps_to_chamfer_and_regens() {
     );
 
     wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-C T2a — the two-distance chamfer, end to end against the real kernel.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The chamfer record the FE's unified edge tool emits for `setup`'s edge, with
+/// an optional second leg (SCHEMA §7.3, 2026-08-03).
+fn chamfer_op_on(setup: &FilletedBox, radius: f64, distance2: Option<f64>) -> Operation {
+    Operation::Known(KnownOperation::Chamfer(ChamferParams {
+        radius: Scalar::new(radius),
+        distance2: distance2.map(Scalar::new),
+        edge_ids: vec![setup.edge_el.clone()],
+        edges: vec![ElementRef {
+            primary: Some(PrimaryRef {
+                body: setup.body,
+                element: setup.edge_el.clone(),
+                kind: ElementKind::Edge,
+                extra: Default::default(),
+            }),
+            intent: None,
+            anchor: Some(AnchorIntent {
+                world_point: setup.edge_anchor,
+                surface_uv: None,
+                local_frame: None,
+                adjacency_hint: None,
+                extra: Default::default(),
+            }),
+            extra: Default::default(),
+        }],
+        chain_tangent_edges: false,
+        extra: Default::default(),
+    }))
+}
+
+/// Exact kernel volume + centroid of a body (`QueryMassProperties`, SCHEMA §7.5) —
+/// read from the BRep, not from a tessellation, so the analytic wedge below can be
+/// asserted to kernel precision rather than to mesh-chord precision.
+async fn exact_mass(wm: &WorkerManager, body: BodyId) -> (f64, [f64; 3]) {
+    let m = onecad_lib::worker::ElementQuery::query_mass_properties(wm, body, "b".into())
+        .await
+        .expect("QueryMassProperties");
+    (m.volume, m.centroid)
+}
+
+/// A two-distance chamfer removes the EXACT asymmetric wedge `d1·d2/2·L`, the
+/// second leg is re-editable, and the SCHEMA §7.3 flip precondition holds against
+/// the real single-writer: while `distance2` is set the record will not flip to
+/// Fillet, and once cleared it flips exactly as the W3 swap always did.
+///
+/// The volume is the proof that `distance2` REACHED the kernel: an equal-leg
+/// reading of the same params removes `d1²/2·L` or `d2²/2·L`, both far from
+/// `d1·d2/2·L` at these legs (25 / 156.25 vs 62.5 mm³ on the 25 mm edge).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chamfer_two_distance_volume_reedit_and_flip_gate() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let sid = SketchId(Uuid::from_u128(0x61));
+
+    let setup = build_filleted_box(&mut rt, sid).await;
+    assert!(setup.filleted, "precondition: the fillet applies");
+    // `build_filleted_box` extrudes a 40×20 rect 25 mm, so the picked vertical
+    // edge — and therefore every chamfer swept along it — is 25 mm long.
+    const EDGE_LEN: f64 = 25.0;
+    // The sharp box's volume, measured from its MESH1 — a box tessellates into
+    // exact triangles, so this is the same 20000.0 the kernel would report.
+    let base_vol = setup.base_vol;
+    let wedge = |d1: f64, d2: f64| 0.5 * d1 * d2 * EDGE_LEN;
+
+    // (1) Fillet → two-distance Chamfer. The target type can hold every field, so
+    // this direction of the swap is open (unlike the reverse, gated below).
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(FILLET_REC)),
+        op: chamfer_op_on(&setup, 2.0, Some(5.0)),
+    })
+    .expect("Fillet → two-distance Chamfer is accepted");
+    let report = regen_all(&mut rt).await;
+    let snap = published(&report, "two-distance chamfer").clone();
+    assert_eq!(
+        snap.repair_summary.needs_repair_count, 0,
+        "the two-distance chamfer binds the SAME edge"
+    );
+
+    let (vol_2x5, centroid_2x5) = exact_mass(&wm, setup.body).await;
+    let removed = base_vol - vol_2x5;
+    eprintln!(
+        "T2a: base={base_vol:.4} vol(2×5)={vol_2x5:.4} removed={removed:.4} \
+         analytic={:.4} centroid={centroid_2x5:?}",
+        wedge(2.0, 5.0)
+    );
+    assert!(
+        (removed - wedge(2.0, 5.0)).abs() < 1e-6 * base_vol,
+        "removed {removed:.6} != analytic d1·d2/2·L = {:.6}",
+        wedge(2.0, 5.0)
+    );
+    // …and it is NEITHER equal-leg reading of the same two numbers.
+    for equal in [2.0, 5.0] {
+        assert!(
+            (removed - wedge(equal, equal)).abs() > 1.0,
+            "removed {removed:.6} must not match the equal-leg {equal} cut ({:.6}) — \
+             distance2 would not have reached the kernel",
+            wedge(equal, equal)
+        );
+    }
+
+    // (2) DETERMINISM: replaying the same record against the same predecessor
+    // rebuilds the identical solid. Volume alone cannot see a flipped reference
+    // face (d1·d2/2 is symmetric in the legs), so the CENTROID is asserted too.
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(FILLET_REC)),
+        op: chamfer_op_on(&setup, 2.0, Some(5.0)),
+    })
+    .expect("re-authoring the same params dirties the step");
+    let _ = published(&regen_all(&mut rt).await, "two-distance chamfer replay");
+    let (vol_replay, centroid_replay) = exact_mass(&wm, setup.body).await;
+    assert_eq!(
+        (vol_replay, centroid_replay),
+        (vol_2x5, centroid_2x5),
+        "the reference-face rule is a pure function of the predecessor shape"
+    );
+
+    // (3) The SECOND LEG is re-editable on its own (the chip's `d2` field).
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(FILLET_REC)),
+        op: chamfer_op_on(&setup, 2.0, Some(7.0)),
+    })
+    .expect("editing distance2 alone is a plain params edit");
+    let _ = published(&regen_all(&mut rt).await, "distance2 re-edit");
+    let (vol_2x7, _) = exact_mass(&wm, setup.body).await;
+    assert!(
+        ((base_vol - vol_2x7) - wedge(2.0, 7.0)).abs() < 1e-6 * base_vol,
+        "d2 5→7 removes {:.6}, analytic {:.6}",
+        base_vol - vol_2x7,
+        wedge(2.0, 7.0)
+    );
+
+    // (4) The FLIP GATE: while distance2 is set, Chamfer→Fillet is refused with
+    // the standard allow-list reason, NAMING the field — and writes nothing.
+    let err = rt
+        .apply(EditCommand::UpdateOperationParams {
+            record: RecordId(Uuid::from_u128(FILLET_REC)),
+            op: fillet_op(&setup, 2.0),
+        })
+        .expect_err("a two-distance chamfer is not flippable to Fillet");
+    let msg = err.to_string();
+    assert!(msg.contains("opType"), "standard allow-list reason: {msg}");
+    assert!(
+        msg.contains("distance2"),
+        "the reason NAMES the field: {msg}"
+    );
+    let (vol_after_reject, _) = exact_mass(&wm, setup.body).await;
+    assert_eq!(vol_after_reject, vol_2x7, "a rejected flip changes nothing");
+
+    // (5) Clear the second leg (an ordinary params edit) — the equal-leg chamfer
+    // is back — and NOW the plain W3 swap goes through and regenerates a fillet.
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(FILLET_REC)),
+        op: chamfer_op_on(&setup, 2.0, None),
+    })
+    .expect("clearing distance2 is a plain params edit");
+    let _ = published(&regen_all(&mut rt).await, "distance2 cleared").clone();
+    let (vol_equal, _) = exact_mass(&wm, setup.body).await;
+    assert!(
+        ((base_vol - vol_equal) - wedge(2.0, 2.0)).abs() < 1e-6 * base_vol,
+        "cleared ⇒ equal-leg d=2: removed {:.6}, analytic {:.6}",
+        base_vol - vol_equal,
+        wedge(2.0, 2.0)
+    );
+
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(FILLET_REC)),
+        op: fillet_op(&setup, 2.0),
+    })
+    .expect("with distance2 cleared the W3 swap is the plain sanctioned one");
+    let back = published(&regen_all(&mut rt).await, "chamfer → fillet").clone();
+    assert_eq!(back.repair_summary.needs_repair_count, 0);
+    let (vol_fillet, _) = exact_mass(&wm, setup.body).await;
+    let removed_fillet = base_vol - vol_fillet;
+    // (1 − π/4)·r²·L for r = 2 on the 25 mm edge.
+    let analytic_fillet = (1.0 - std::f64::consts::FRAC_PI_4) * 4.0 * EDGE_LEN;
+    assert!(
+        (removed_fillet - analytic_fillet).abs() < 1e-6 * base_vol,
+        "the flip really re-ran the FILLET: removed {removed_fillet:.6}, analytic {analytic_fillet:.6}"
+    );
+
+    wm.shutdown().await;
+}
+
+/// The Fillet the flip gate above swaps back to — same edge, same evidence.
+fn fillet_op(setup: &FilletedBox, radius: f64) -> Operation {
+    Operation::Known(KnownOperation::Fillet(FilletParams {
+        radius: Scalar::new(radius),
+        edge_ids: vec![setup.edge_el.clone()],
+        edges: vec![ElementRef {
+            primary: Some(PrimaryRef {
+                body: setup.body,
+                element: setup.edge_el.clone(),
+                kind: ElementKind::Edge,
+                extra: Default::default(),
+            }),
+            intent: None,
+            anchor: Some(AnchorIntent {
+                world_point: setup.edge_anchor,
+                surface_uv: None,
+                local_frame: None,
+                adjacency_hint: None,
+                extra: Default::default(),
+            }),
+            extra: Default::default(),
+        }],
+        chain_tangent_edges: false,
+        extra: Default::default(),
+    }))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

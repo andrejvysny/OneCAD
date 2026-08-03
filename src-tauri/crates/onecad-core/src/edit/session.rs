@@ -522,6 +522,8 @@ impl DocumentSession {
         }
         // F2: fillet/chamfer `edges`/`edge_ids` must be in lockstep (all entry paths).
         validate_fillet_lockstep(&record.op)?;
+        // SCHEMA §7.3: `distance2` is Chamfer-only and positive (all entry paths).
+        validate_edge_op_distances(&record.op)?;
         // ImportStep params must name a real content-addressed blob (all entry paths).
         validate_import_step(&record.op)?;
         // TransformBody params must be a well-formed rigid motion (all entry paths).
@@ -594,14 +596,14 @@ impl DocumentSession {
             .index_of(id)
             .ok_or(DomainError::RecordNotFound(id))?;
         let prior = self.document.timeline.record(index).unwrap().clone();
-        if !op_type_edit_allowed(&prior.op, &op) {
-            return Err(DomainError::Validation(
-                "UpdateOperationParams may not change opType".into(),
-            ));
+        if let Err(reason) = op_type_edit_allowed(&prior.op, &op) {
+            return Err(DomainError::Validation(reason.into()));
         }
         let type_changed = !same_op_type(&prior.op, &op);
         // F2: fillet/chamfer `edges`/`edge_ids` must be in lockstep (all entry paths).
         validate_fillet_lockstep(&op)?;
+        // SCHEMA §7.3: `distance2` is Chamfer-only and positive (all entry paths).
+        validate_edge_op_distances(&op)?;
         // ImportStep params must name a real content-addressed blob (all entry paths).
         validate_import_step(&op)?;
         // TransformBody params must be a well-formed rigid motion (all entry paths).
@@ -1397,6 +1399,34 @@ fn validate_fillet_lockstep(op: &Operation) -> Result<(), DomainError> {
     Ok(())
 }
 
+/// Validates the SCHEMA §7.3 (2026-08-03) two-distance chamfer rules on both
+/// edge ops:
+///
+/// * a **Chamfer**'s `distance2`, when present, must be a positive finite length
+///   ([`ChamferParams::validate`]);
+/// * a **Fillet** must not carry `distance2` at all. `FilletParams` has no typed
+///   field for it, so a payload that names one would otherwise land in the `extra`
+///   flatten and round-trip VERBATIM — a second leg silently persisted on an op
+///   the worker will never read it for, and (worse) resurrected by a later
+///   Fillet→Chamfer flip as if the user had authored it.
+///
+/// Non-edge and opaque ops are trivially valid. Enforced here rather than at
+/// deserialize time for the same single-writer reason as [`validate_import_step`]:
+/// a document authored by another build still opens and round-trips.
+fn validate_edge_op_distances(op: &Operation) -> Result<(), DomainError> {
+    match op {
+        Operation::Known(KnownOperation::Chamfer(p)) => {
+            p.validate().map_err(DomainError::Validation)
+        }
+        Operation::Known(KnownOperation::Fillet(p)) if p.extra.contains_key("distance2") => {
+            Err(DomainError::Validation(
+                "distance2 is Chamfer-only (SCHEMA §7.3); a Fillet may not carry it".into(),
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Validates an [`KnownOperation::ImportStep`] record's params (sha256 shape,
 /// unit scale, heal policy, codec/`brepFormat` agreement — see
 /// [`ImportStepParams::validate`](crate::document::record::ImportStepParams::validate)).
@@ -1518,7 +1548,18 @@ fn gate_item(
     }
 }
 
-/// Whether `UpdateOperationParams` may rewrite `prior` into `next`.
+/// The standard rejection reason when `UpdateOperationParams` is asked to change
+/// `opType` outside the one sanctioned pair.
+const OP_TYPE_EDIT_REASON: &str = "UpdateOperationParams may not change opType";
+
+/// The `distance2` refinement of [`OP_TYPE_EDIT_REASON`] (SCHEMA §7.3,
+/// 2026-08-03). Named as a constant because the mock client mirrors this exact
+/// string (`src/ipc/mockClient.ts`) so the mock lane cannot stay green on an edit
+/// the real backend rejects.
+const CHAMFER_D2_FLIP_REASON: &str = "UpdateOperationParams may not change opType: a Chamfer carrying distance2 is not flippable to Fillet (clear distance2 first)";
+
+/// Whether `UpdateOperationParams` may rewrite `prior` into `next` — `Ok(())`, or
+/// the reason it may not.
 ///
 /// **The default is NO.** `opType` is structural, not cosmetic: dependents bind
 /// through it, the planner hash includes it (`planner.rs`), and the worker
@@ -1529,7 +1570,7 @@ fn gate_item(
 /// because every property that makes a swap dangerous is absent there:
 /// * [`FilletParams`](crate::document::record::FilletParams) and
 ///   [`ChamferParams`](crate::document::record::ChamferParams) are
-///   FIELD-IDENTICAL (`record.rs:754-781`), so the payload is interchangeable
+///   FIELD-IDENTICAL, so the payload is interchangeable
 ///   with no field invented or dropped;
 /// * both derive the same inputs, so `derive_inputs` is preserved and the
 ///   dependency graph does not move;
@@ -1543,6 +1584,14 @@ fn gate_item(
 ///   restores the original `opType` (and params) exactly, and redo re-runs this
 ///   same symmetric guard.
 ///
+/// **`distance2` breaks the first bullet** (SCHEMA §7.3, 2026-08-03 — WP-C T2a).
+/// A two-distance chamfer carries a field a Fillet has no home for, so flipping it
+/// would DROP the user's second leg silently. The precondition is therefore
+/// enforced on the PRIOR record: a stored Chamfer with `distance2` set is not
+/// flippable until that field is cleared by an ordinary (visible, undoable) params
+/// edit. The other direction stays open — a Fillet becoming a two-distance Chamfer
+/// invents nothing the target type cannot hold.
+///
 /// **Widening rule:** a new pair may be added only when it is likewise
 /// params-interchangeable AND `derive_inputs`-preserving. Anything else is a
 /// remove + re-add, not a params update.
@@ -1551,20 +1600,27 @@ fn gate_item(
 /// would also admit a `Known` ⇄ `Opaque` crossing, and `validate_temporal` is
 /// vacuous for an opaque record — the swap would skip the anti-time-travel
 /// check entirely.
-fn op_type_edit_allowed(prior: &Operation, next: &Operation) -> bool {
+fn op_type_edit_allowed(prior: &Operation, next: &Operation) -> Result<(), &'static str> {
     if same_op_type(prior, next) {
-        return true;
+        return Ok(());
     }
-    matches!(
-        (prior, next),
+    match (prior, next) {
         (
             Operation::Known(KnownOperation::Fillet(_)),
-            Operation::Known(KnownOperation::Chamfer(_))
-        ) | (
             Operation::Known(KnownOperation::Chamfer(_)),
-            Operation::Known(KnownOperation::Fillet(_))
-        )
-    )
+        ) => Ok(()),
+        (
+            Operation::Known(KnownOperation::Chamfer(p)),
+            Operation::Known(KnownOperation::Fillet(_)),
+        ) => {
+            if p.distance2.is_some() {
+                Err(CHAMFER_D2_FLIP_REASON)
+            } else {
+                Ok(())
+            }
+        }
+        _ => Err(OP_TYPE_EDIT_REASON),
+    }
 }
 
 /// Rewrites the legacy SCHEMA §7.3 `mode` string to agree with the op's own

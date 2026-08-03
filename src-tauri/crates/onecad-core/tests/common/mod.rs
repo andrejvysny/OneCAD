@@ -190,6 +190,7 @@ pub fn op_fillet() -> Operation {
 pub fn op_chamfer() -> Operation {
     Operation::Known(KnownOperation::Chamfer(ChamferParams {
         radius: Scalar::new(1.0),
+        distance2: None,
         edge_ids: vec![elem_e14()],
         edges: vec![],
         chain_tangent_edges: true,

@@ -271,6 +271,19 @@ function edgeOpBuilder(kind: "Fillet" | "Chamfer"): PreviewOpBuilder {
       edgeIds,
       chainTangentEdges: s.latestParams.chainTangentEdges ?? true,
     };
+    // SCHEMA §7.3 (2026-08-03) two-distance chamfer. STRUCTURAL guards, mirroring
+    // core: it is Chamfer-only, and it must be a positive finite length — a draft
+    // that says otherwise must fail the preview loudly rather than reach the
+    // kernel as a silently-degraded equal-leg cut.
+    const d2 = s.latestParams.distance2;
+    if (d2 !== undefined && d2 !== null) {
+      if (kind !== "Chamfer") throw new Error("distance2 is Chamfer-only (SCHEMA §7.3)");
+      const n = Number(d2);
+      if (!Number.isFinite(n) || n <= 0) {
+        throw new Error("Chamfer distance2 must be greater than zero");
+      }
+      params.distance2 = n;
+    }
     return { opType: kind, opId: s.opId, featureId: s.editFeatureId, inputs, params };
   };
 }

@@ -628,7 +628,7 @@ function mutateOp(op: OperationOp): {
     const label = op.opType;
     const bodyId = op.inputs?.[0]?.primary.bodyId ?? "body1";
     const featureId = op.featureId ?? nextFeatureId();
-    const valueText = `${op.params.radius.toFixed(1)} mm`;
+    const valueText = edgeOpValueText(op.params.radius, op.params.distance2);
     const editing = op.featureId !== undefined && mockFeatures.some((f) => f.id === featureId);
     if (editing) {
       mockFeatures = mockFeatures.map((f) => (f.id === featureId ? { ...f, valueText } : f));
@@ -751,6 +751,35 @@ function isSanctionedOpTypeSwap(prior: string, next: string): boolean {
   return (
     (prior === "Fillet" && next === "Chamfer") || (prior === "Chamfer" && next === "Fillet")
   );
+}
+
+/** Mirrors core `session::OP_TYPE_EDIT_REASON`. */
+const OP_TYPE_EDIT_REASON = "UpdateOperationParams may not change opType";
+
+/**
+ * Mirrors core `session::CHAMFER_D2_FLIP_REASON` VERBATIM (SCHEMA §7.3,
+ * 2026-08-03). A Chamfer carrying `distance2` breaks the swap's field-identity
+ * precondition — a Fillet has no home for the second leg — so the flip is refused
+ * until that field is cleared by an ordinary params edit.
+ */
+const CHAMFER_D2_FLIP_REASON =
+  "UpdateOperationParams may not change opType: a Chamfer carrying distance2 is not flippable to Fillet (clear distance2 first)";
+
+/**
+ * The reason a `updateOperationParams` opType change is refused, or `null` when
+ * it is allowed. The precondition is read off the PRIOR (stored) params, exactly
+ * as core reads it off the prior RECORD: what the caller sends cannot buy its way
+ * past a second leg the document still holds.
+ */
+function opTypeSwapRejection(
+  prior: string,
+  next: string,
+  priorParams: Record<string, unknown> | undefined,
+): string | null {
+  if (prior === next) return null;
+  if (!isSanctionedOpTypeSwap(prior, next)) return OP_TYPE_EDIT_REASON;
+  if (prior === "Chamfer" && priorParams?.distance2 !== undefined) return CHAMFER_D2_FLIP_REASON;
+  return null;
 }
 
 function noopResult(): ApplyOperationResult {
@@ -900,6 +929,19 @@ function scalarValue(v: unknown): number | undefined {
   return undefined;
 }
 
+/**
+ * The history-row value text of an edge op — MIRRORS Rust `dto.rs
+ * feature_value_text` (pinned there by
+ * `chamfer_value_text_shows_the_second_distance_only_when_set`). A two-distance
+ * chamfer reads `d1×d2`; anything else keeps the single-number form.
+ * `radiusFromValueText` parses the LEADING number back, so d1 stays first.
+ */
+function edgeOpValueText(radius: number, distance2?: number): string {
+  return distance2 === undefined
+    ? `${radius.toFixed(1)} mm`
+    : `${radius.toFixed(1)}×${distance2.toFixed(1)} mm`;
+}
+
 /** The feature-chip value text for a re-edited op's wire params (mirrors mutateOp). */
 function valueTextForFeature(
   kind: FeatureRecord["kind"],
@@ -916,7 +958,10 @@ function valueTextForFeature(
     }
     case "fillet": {
       const r = scalarValue(params.radius);
-      return r === undefined ? undefined : `${r.toFixed(1)} mm`;
+      // `distance2` is Chamfer-only and skip-none on both sides, so its mere
+      // presence is what makes the row asymmetric — the coarse `kind` bucket
+      // (which also holds Fillet and Shell) never has to be consulted.
+      return r === undefined ? undefined : edgeOpValueText(r, scalarValue(params.distance2));
     }
     case "shell": {
       const t = scalarValue(params.thickness);
@@ -1009,18 +1054,27 @@ async function mockApplyEditCommand(command: WireEditCommand): Promise<ApplyOper
       // real backend rejects (e.g. Fillet→Extrude), which is exactly the class of
       // divergence the mock exists to avoid.
       const priorOpType = feat?.opType;
-      if (
-        priorOpType !== undefined &&
-        priorOpType !== nextOpType &&
-        !isSanctionedOpTypeSwap(priorOpType, nextOpType)
-      ) {
-        throw new Error("UpdateOperationParams may not change opType");
+      if (priorOpType !== undefined) {
+        const rejection = opTypeSwapRejection(
+          priorOpType,
+          nextOpType,
+          featureParams.get(command.record),
+        );
+        if (rejection !== null) throw new Error(rejection);
       }
       const typeChanged = priorOpType !== undefined && priorOpType !== nextOpType;
       if (feat) {
         undoStack.push(snap("Update"));
         redoStack.length = 0;
-        featureParams.set(command.record, { ...(featureParams.get(command.record) ?? {}), ...params });
+        // `op.params` is the COMPLETE params object — every producer merges a
+        // re-edit patch into the stored params BEFORE sending
+        // (`updateScalarParamsCommand` / `rewriteFilletEdgeParams` /
+        // `operationToEditCommand`), and the real backend replaces the whole op.
+        // Spreading the previous params over it would therefore make a key the
+        // caller deliberately OMITTED un-removable — a cleared `distance2` would
+        // come straight back, and the mock would report an asymmetric chamfer the
+        // backend no longer holds.
+        featureParams.set(command.record, { ...params });
         const valueText = valueTextForFeature(feat.kind, params);
         // A Boolean re-edit swaps ONLY the operation, and a boolean carries no
         // dimension (`valueTextForFeature` returns undefined, matching dto.rs

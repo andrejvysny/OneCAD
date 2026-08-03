@@ -33,9 +33,15 @@ describe("resolveBinding — chamfer tool id + H binding died (FILLET-CHAMFER-UN
     expect(resolveBinding("h", false, "model")).toEqual({ type: "home" });
   });
 
-  it("`f` still resolves to fillet in model mode and cross-mode from sketch", () => {
+  it("`f` still resolves to the 3D fillet in MODEL mode", () => {
     expect(resolveBinding("f", false, "model")).toEqual({ type: "tool", tool: "fillet" });
-    expect(resolveBinding("f", false, "sketch")).toEqual({ type: "tool", tool: "fillet" });
+  });
+
+  // WP-C T2b: sketch mode now claims `f` for the 2D corner fillet, which RETIRES
+  // the old cross-mode fallback (`f` while drawing used to finish the sketch and
+  // arm the 3D fillet). One letter, one meaning, mode-resolved like `t`/`d`/`r`.
+  it("`f` resolves to the 2D sketch fillet in SKETCH mode (no cross-mode leak)", () => {
+    expect(resolveBinding("f", false, "sketch")).toEqual({ type: "tool", tool: "sketchFillet" });
   });
 
   it("nothing resolves to tool \"chamfer\" — no key, in either mode, plain or shifted", () => {

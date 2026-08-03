@@ -46,11 +46,16 @@ import { inferConstraints, inferHV, entityPoints } from "./autoConstrain";
 import {
   commitDimensionConstraint,
   enqueueSketchMutation,
+  filletSketchCorner,
   flushSketchMutations,
   lockedEntityIds,
+  offsetSketchChain,
   trimEntity,
   LOCKED_GEOMETRY_HINT,
 } from "./sketchService";
+import { filletGeometry, findFilletCorner, sharedCorner, type FilletFailure } from "./sketchFilletMath";
+import { buildChain, chainSideSign, offsetChain, type Chain, type OffsetFailure } from "./offsetMath";
+import { formatLength, lengthSuffix } from "@/units/format";
 import type { SketchSnapshot } from "@/stores/sketchStore";
 import { hitTestSketch } from "./sketchHitTest";
 import { clickSelection, dragIntent, shouldApplyDrag, type DragIntent } from "./selectGesture";
@@ -125,6 +130,11 @@ const CURSOR_BY_TOOL: Record<string, string> = {
 
 /** Digit keys the polygon tool consumes as a side count (W2-C). */
 const POLYGON_SIDES_KEY = /^[3-9]$/;
+
+/** Seed parameters for the WP-C T2b sketch edit tools, in document mm. Sticky
+ *  per session through the tool's chip; re-seeded on a fresh session. */
+const DEFAULT_FILLET_RADIUS = 5;
+const DEFAULT_OFFSET_DISTANCE = 5;
 
 /** The plane-pick phase's own prompt (also the fallback line every refusal rides). */
 const PLANE_PICK_PROMPT = "Select a plane to start the sketch — Esc to cancel";
@@ -234,6 +244,17 @@ export class SketchController {
   // each gated STRICTLY on its tool id so the select/draw/dimension paths are untouched.
   private trimActive = false;
   private mirrorActive = false;
+
+  // Sketch Fillet / Offset (WP-C T2b) — click tools on the SAME lane as Trim /
+  // Mirror (hover ghost + click applies, repeatable while armed). Each owns one
+  // live parameter, held in its open chip rather than re-typed per apply.
+  private filletActive = false;
+  private offsetActive = false;
+  private filletRadius = DEFAULT_FILLET_RADIUS;
+  private offsetDistance = DEFAULT_OFFSET_DISTANCE;
+  /** Fillet TWO-PICK path: the first line picked, awaiting its corner partner.
+   *  Null while the one-click corner path is in play. */
+  private filletFirstPick: string | null = null;
 
   // Select tool (non-drawing): click-select + point-handle drag via the gesture
   // lane. A parallel path to `dimensionActive`, gated STRICTLY on tool === "select".
@@ -919,6 +940,11 @@ export class SketchController {
     this.selectActive = false;
     this.trimActive = false;
     this.mirrorActive = false;
+    this.endSketchEditTool();
+    this.filletActive = false;
+    this.offsetActive = false;
+    this.filletRadius = DEFAULT_FILLET_RADIUS;
+    this.offsetDistance = DEFAULT_OFFSET_DISTANCE;
     this.deps.container.style.cursor = "";
     this.deps.engine.setSketchDrawingActive(false);
     this.deps.engine.setSketchPreview([]);
@@ -981,6 +1007,13 @@ export class SketchController {
     if (this.mirrorActive && tool !== "mirror") {
       sketchSelectionStore.getState().clear();
     }
+    // Leaving Fillet / Offset drops the parameter chip + any half-made pick.
+    if (
+      (this.filletActive && tool !== "sketchFillet") ||
+      (this.offsetActive && tool !== "sketchOffset")
+    ) {
+      this.endSketchEditTool();
+    }
 
     const m = TOOL_MACHINES[tool] ?? null;
     this.machine = m;
@@ -989,6 +1022,8 @@ export class SketchController {
     this.selectActive = tool === "select";
     this.trimActive = tool === "trim";
     this.mirrorActive = tool === "mirror";
+    this.filletActive = tool === "sketchFillet";
+    this.offsetActive = tool === "sketchOffset";
     // The dimension tool owns the pointer (no orbit) so clicks pick entities.
     this.deps.engine.setSketchDrawingActive(!!m || this.dimensionActive);
     this.deps.engine.setSketchPreview([]);
@@ -1011,6 +1046,26 @@ export class SketchController {
     }
     if (this.mirrorActive) {
       this.updateMirrorHint();
+      return;
+    }
+    if (this.filletActive) {
+      this.openSketchValueChip("Fillet", this.filletRadius, (v) => {
+        this.filletRadius = v;
+        toolChipStore.getState().setValue(v);
+      });
+      this.updateFilletHint();
+      return;
+    }
+    if (this.offsetActive) {
+      this.openSketchValueChip("Offset", this.offsetDistance, (v) => {
+        this.offsetDistance = v;
+        toolChipStore.getState().setValue(v);
+      });
+      viewportStore
+        .getState()
+        .setStatusHint("Offset — hover a chain on the side to offset, then click · Esc to exit", {
+          sticky: true,
+        });
       return;
     }
     if (m?.id === "polygon") {
@@ -1102,13 +1157,15 @@ export class SketchController {
       this.onSelectPointerMove(e);
       return;
     }
-    // Trim / Mirror are click tools; a move past DRAG_PX with LMB held is an orbit,
-    // not a click — track it so pointerup doesn't fire a stray delete/pick.
-    if (this.trimActive || this.mirrorActive) {
+    // Trim / Mirror / Fillet / Offset are click tools; a move past DRAG_PX with LMB
+    // held is an orbit, not a click — track it so pointerup doesn't fire a stray
+    // delete/pick.
+    if (this.trimActive || this.mirrorActive || this.filletActive || this.offsetActive) {
       if ((e.buttons & 1) === 0) {
-        // Idle move: both Mirror (hover tint) and Trim (hover tint + destructive
-        // doomed-piece ghost) get live feedback, coalesced to one raycast/frame.
-        if (this.mirrorActive || this.trimActive) this.scheduleHoverHit(e.clientX, e.clientY);
+        // Idle move: every one of them gets live feedback (hover tint, plus Trim's
+        // destructive doomed-piece ghost and Fillet/Offset's result ghost),
+        // coalesced to one raycast/frame.
+        this.scheduleHoverHit(e.clientX, e.clientY);
         return;
       }
       const far =
@@ -1194,6 +1251,14 @@ export class SketchController {
     }
     if (this.mirrorActive) {
       this.handleMirrorClick(e.clientX, e.clientY, e.shiftKey || e.metaKey);
+      return;
+    }
+    if (this.filletActive) {
+      this.handleFilletClick(e.clientX, e.clientY);
+      return;
+    }
+    if (this.offsetActive) {
+      this.handleOffsetClick(e.clientX, e.clientY);
       return;
     }
     if (!this.machine || !this.machineState) return;
@@ -1482,6 +1547,207 @@ export class SketchController {
       );
   }
 
+  // ── Sketch Fillet / Offset shared plumbing (WP-C T2b) ────────────────────────
+
+  /**
+   * Endpoint-coincidence tolerance for the chain/corner walks — SCREEN-SCALED but
+   * TIGHT (a quarter pixel of world), with an absolute floor for the zoomed-way-in
+   * case. It must not be the 8px pick reach: both tools build their geometry from
+   * one of the two endpoints, so welding a visibly-apart pair would author a
+   * corner/chain that is not where the user sees one.
+   */
+  private weldTol(): number {
+    return Math.max(1e-6, 0.25 * this.deps.engine.planePixelWorld());
+  }
+
+  /** The 8px pick reach every sketch tool hit-tests with. */
+  private pickTol(): number {
+    return SNAP_PX * this.deps.engine.planePixelWorld();
+  }
+
+  /** Open an armed edit tool's live-parameter chip at the sketch origin (a stable
+   *  anchor: the camera framed the plane on entry, so (0,0) is on screen). */
+  private openSketchValueChip(label: string, value: number, onValue: (v: number) => void): void {
+    const session = sketchStore.getState().session;
+    if (!session) return;
+    const world = planePointToWorld(session.plane, { x: 0, y: 0 }).toArray() as [number, number, number];
+    toolChipStore.getState().showSketchValue(value, world, label, onValue);
+  }
+
+  /** Drop everything an armed Fillet / Offset owns (chip, half-pick, ghost). */
+  private endSketchEditTool(): void {
+    this.filletFirstPick = null;
+    if (this.filletActive || this.offsetActive) {
+      toolChipStore.getState().clear();
+      this.deps.engine.setSketchPreview([]);
+      sketchSelectionStore.getState().clear();
+    }
+  }
+
+  // ── Sketch Fillet tool ───────────────────────────────────────────────────────
+  //
+  // Two ways in, one operation:
+  //   ONE-CLICK  — click near a corner (two lines sharing an endpoint); the
+  //                nearest such corner within the pick reach wins.
+  //   TWO-PICK   — click a line with no corner under the cursor to arm it, then
+  //                click the line it shares an endpoint with.
+  // Either way the apply replaces both legs with their trimmed selves + the
+  // tangent arc in ONE undo step (sketchService.filletSketchCorner), and the tool
+  // stays armed for the next corner. Hover ghosts the exact result at the current
+  // chip radius. Esc cancels a half-made two-pick first, and only then falls
+  // through to the global ladder (→ select), matching the dimension tool's ladder.
+
+  /** The corner the cursor resolves to, honouring an armed two-pick. */
+  private resolveFilletPick(at: Point2): { a: SketchEntity; b: SketchEntity } | null {
+    const session = sketchStore.getState().session;
+    if (!session) return null;
+    const weldTol = this.weldTol();
+    if (this.filletFirstPick) {
+      const a = session.entities.find((e) => e.id === this.filletFirstPick);
+      const hit = hitTestSketch(at, session.entities, this.pickTol());
+      const b = hit ? session.entities.find((e) => e.id === hit.entityId) : undefined;
+      if (!a || !b || a.id === b.id) return null;
+      return sharedCorner(a, b, weldTol) ? { a, b } : null;
+    }
+    const corner = findFilletCorner(at, session.entities, { reach: this.pickTol(), weldTol });
+    return corner ? { a: corner.a, b: corner.b } : null;
+  }
+
+  /** Ghost the trimmed legs + tangent arc the current hover would author. */
+  private renderFilletGhost(clientX: number, clientY: number): void {
+    const raw = this.deps.engine.screenToPlane(clientX, clientY);
+    const pick = raw ? this.resolveFilletPick(raw) : null;
+    if (!pick) {
+      this.deps.engine.setSketchPreview([]);
+      return;
+    }
+    const solved = filletGeometry(pick.a, pick.b, this.filletRadius, { tol: this.weldTol() });
+    this.deps.engine.setSketchPreview(solved.ok ? [...solved.geom.drafts] : []);
+  }
+
+  private handleFilletClick(clientX: number, clientY: number): void {
+    const session = sketchStore.getState().session;
+    if (!session) return;
+    const raw = this.deps.engine.screenToPlane(clientX, clientY);
+    if (!raw) return;
+    const pick = this.resolveFilletPick(raw);
+    if (pick) {
+      this.filletFirstPick = null;
+      sketchSelectionStore.getState().clear();
+      this.deps.engine.setSketchPreview([]);
+      void this.applyFillet(pick.a.id, pick.b.id);
+      return;
+    }
+    // No corner resolved: a LINE under the cursor arms (or re-arms) the two-pick
+    // path; anything else drops it. Never clears geometry — a miss is inert.
+    const hit = hitTestSketch(raw, session.entities, this.pickTol());
+    const line = hit ? session.entities.find((e) => e.id === hit.entityId) : undefined;
+    if (!line || line.type !== "Line") {
+      this.filletFirstPick = null;
+      sketchSelectionStore.getState().clear();
+      this.updateFilletHint();
+      return;
+    }
+    this.filletFirstPick = line.id;
+    sketchSelectionStore.getState().set([{ entityId: line.id }]);
+    this.updateFilletHint();
+  }
+
+  private async applyFillet(aId: string, bId: string): Promise<void> {
+    const radius = this.filletRadius;
+    const result = await filletSketchCorner(this.deps.client, aId, bId, radius, {
+      tol: this.weldTol(),
+    });
+    if (this.disposed) return;
+    if (result.ok) {
+      viewportStore
+        .getState()
+        .setStatusHint(`Filleted at ${lengthHint(radius)} · click another corner or Esc to exit`);
+      return;
+    }
+    // A locked-geometry refusal already published its own hint (and carries no
+    // failure), so only a geometric refusal is phrased here.
+    if (result.failure) {
+      viewportStore.getState().setStatusHint(filletFailureHint(result.failure), { severity: "error" });
+    }
+  }
+
+  /** Phase-appropriate fillet hint (one-click corner vs. armed two-pick). */
+  private updateFilletHint(): void {
+    viewportStore
+      .getState()
+      .setStatusHint(
+        this.filletFirstPick
+          ? "Fillet — click the line that shares a corner · Esc to cancel"
+          : "Fillet — click a corner (or two lines) · Esc to exit",
+        { sticky: true },
+      );
+  }
+
+  // ── Sketch Offset tool ───────────────────────────────────────────────────────
+  //
+  // Hover any Line/Arc/Circle: the connected chain it belongs to is walked
+  // (offsetMath.buildChain), the offset SIDE is taken from which side of that
+  // chain the cursor is on, and the whole parallel copy is ghosted live. A click
+  // authors it in ONE undo step. The tool stays armed, so a second click offsets
+  // again (from whichever chain is now under the cursor).
+  //
+  // The controller sends the SIGNED distance rather than a side token: the
+  // service rebuilds the same chain from the same seed id, so the traversal — and
+  // therefore what "+" means — is identical on both sides of the queue.
+
+  /** Chain + signed distance the cursor currently resolves to, or null. */
+  private resolveOffsetPick(at: Point2): { seedId: string; chain: Chain; signed: number } | null {
+    const session = sketchStore.getState().session;
+    if (!session) return null;
+    const hit = hitTestSketch(at, session.entities, this.pickTol());
+    const seed = hit ? session.entities.find((e) => e.id === hit.entityId) : undefined;
+    if (!seed) return null;
+    const chain = buildChain(seed, session.entities, this.weldTol());
+    if (!chain) return null;
+    return { seedId: seed.id, chain, signed: chainSideSign(chain, at) * this.offsetDistance };
+  }
+
+  /** Ghost the parallel chain the current hover would author. */
+  private renderOffsetGhost(clientX: number, clientY: number): void {
+    const raw = this.deps.engine.screenToPlane(clientX, clientY);
+    const pick = raw ? this.resolveOffsetPick(raw) : null;
+    if (!pick) {
+      this.deps.engine.setSketchPreview([]);
+      return;
+    }
+    const solved = offsetChain(pick.chain, pick.signed, { minSize: this.stepCtx().minSize });
+    this.deps.engine.setSketchPreview(solved.ok ? solved.entities : []);
+  }
+
+  private handleOffsetClick(clientX: number, clientY: number): void {
+    const raw = this.deps.engine.screenToPlane(clientX, clientY);
+    if (!raw) return;
+    const pick = this.resolveOffsetPick(raw);
+    if (!pick) return; // a miss is inert
+    this.deps.engine.setSketchPreview([]);
+    void this.applyOffset(pick.seedId, pick.signed);
+  }
+
+  private async applyOffset(seedId: string, signed: number): Promise<void> {
+    const result = await offsetSketchChain(this.deps.client, seedId, signed, {
+      tol: this.weldTol(),
+      minSize: this.stepCtx().minSize,
+    });
+    if (this.disposed) return;
+    if (result.ok) {
+      viewportStore
+        .getState()
+        .setStatusHint(
+          `Offset by ${lengthHint(Math.abs(signed))} · click another chain or Esc to exit`,
+        );
+      return;
+    }
+    if (result.failure) {
+      viewportStore.getState().setStatusHint(offsetFailureHint(result.failure), { severity: "error" });
+    }
+  }
+
   // ── Select tool ─────────────────────────────────────────────────────────────
   //
   // FLOW. pointerdown resolves a hit; a DRAGGABLE handle arms a drag (and suppresses
@@ -1586,6 +1852,11 @@ export class SketchController {
       // Trim tool: overlay the destructive doomed-piece ghost for the hovered entity
       // (a miss / off-entity hover clears it).
       if (this.trimActive) this.renderTrimGhost(pt.x, pt.y, hit);
+      // Fillet / Offset: overlay the ADDITIVE ghost of what the click would author,
+      // on the ordinary preview lane (nothing is destroyed, so the trim ghost's
+      // destructive styling would read wrong).
+      if (this.filletActive) this.renderFilletGhost(pt.x, pt.y);
+      if (this.offsetActive) this.renderOffsetGhost(pt.x, pt.y);
     });
   }
 
@@ -2007,6 +2278,17 @@ export class SketchController {
       e.preventDefault();
       return;
     }
+    if (e.key === "Escape" && this.filletActive && this.filletFirstPick) {
+      // Cancel the half-made two-pick here; the SECOND Esc falls through to the
+      // global ladder and leaves the tool (same rung order as the dimension tool).
+      this.filletFirstPick = null;
+      sketchSelectionStore.getState().clear();
+      this.deps.engine.setSketchPreview([]);
+      this.updateFilletHint();
+      e.stopPropagation();
+      e.preventDefault();
+      return;
+    }
     if (e.key === "Escape" && this.dimensionActive && (this.dimState.ready || this.dimState.pending)) {
       // Cancel the in-flight dimension here; don't let the global Esc ladder run.
       this.cancelDimension();
@@ -2053,6 +2335,7 @@ export class SketchController {
     this.pendingSwitchId = null;
     this.endPlanePick();
     sketchSelectionStore.getState().clear();
+    this.endSketchEditTool();
     if (this.dimensionActive) this.cancelDimension();
     // An in-flight drag gesture must be closed on the wire (endGesture always commits
     // ONE step; there is no cancel verb) so the worker doesn't leak an open gesture.
@@ -2109,6 +2392,43 @@ function facePickFrom(
 /** Human message from a rejected backend sketch call. */
 function sketchErr(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/** A document-mm length rendered in the user's DISPLAY unit, for a hint. */
+function lengthHint(mm: number): string {
+  const unit = settingsStore.getState().displayUnit;
+  return `${formatLength(mm, unit)} ${lengthSuffix(unit)}`;
+}
+
+/** Phrase a typed fillet refusal (WP-C T2b). Every arm NAMES what went wrong —
+ *  a silent no-op reads as a broken tool. */
+function filletFailureHint(f: FilletFailure): string {
+  switch (f.reason) {
+    case "notACorner":
+      return "Fillet needs two lines that share a corner";
+    case "collinear":
+      return "Those lines are collinear — there is no corner to round";
+    case "degenerate":
+      return "That line is too short to fillet";
+    case "badRadius":
+      return "Fillet radius must be greater than zero";
+    case "radiusTooLarge":
+      return `Radius too large — this corner takes at most ${lengthHint(f.maxRadius)}`;
+  }
+}
+
+/** Phrase a typed offset refusal (WP-C T2b). */
+function offsetFailureHint(f: OffsetFailure): string {
+  switch (f.reason) {
+    case "unsupported":
+      return "Offset works on lines, arcs and circles";
+    case "badDistance":
+      return "Offset distance must be greater than zero";
+    case "arcCollapsed":
+      return `Offset too large — an arc collapses beyond ${lengthHint(f.maxDistance)}`;
+    case "segmentVanished":
+      return "Offset too large — a segment of the chain would vanish";
+  }
 }
 
 /** H/V inference for the ghost glyph — delegates to the shared `inferHV` (one source

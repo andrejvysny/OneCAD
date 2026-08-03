@@ -58,7 +58,11 @@ export type SketchTool =
   | "point"
   | "dimension"
   | "trim"
-  | "mirror";
+  | "mirror"
+  /** 2D corner fillet: round the corner two lines share (WP-C T2b). */
+  | "sketchFillet"
+  /** 2D parallel offset of a connected chain (WP-C T2b). */
+  | "sketchOffset";
 
 export type Tool = ModelTool | SketchTool;
 

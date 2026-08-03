@@ -35,6 +35,10 @@ const SKETCH_ONLY: ReadonlySet<Tool> = new Set([
   "point",
   "dimension",
   "trim",
+  // WP-C T2b. Both edit SKETCH geometry only, so a model-mode pick enters sketch
+  // mode with them armed like every other sketch tool.
+  "sketchFillet",
+  "sketchOffset",
 ]);
 
 const MODEL_ONLY: ReadonlySet<Tool> = new Set([

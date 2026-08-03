@@ -334,6 +334,7 @@ fn chamfer_record(rec: u128, body: BodyId, at: Vec3, distance: f64) -> Operation
         "Chamfer",
         Operation::Known(KnownOperation::Chamfer(ChamferParams {
             radius: Scalar::new(distance),
+            distance2: None,
             edge_ids: vec![edge.clone()],
             edges: vec![anchored_ref(body, &edge, ElementKind::Edge, at)],
             chain_tangent_edges: false,

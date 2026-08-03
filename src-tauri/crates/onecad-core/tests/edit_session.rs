@@ -1021,6 +1021,7 @@ fn update_operation_params_validates_fillet_edge_lockstep() {
 fn chamfer_op(edge_ids: &[&str], edges: Vec<ElementRef>, radius: f64) -> Operation {
     Operation::Known(KnownOperation::Chamfer(ChamferParams {
         radius: s(radius),
+        distance2: None,
         edge_ids: edge_ids.iter().map(|e| ElementId::new(*e)).collect(),
         edges,
         chain_tangent_edges: true,
@@ -1261,6 +1262,189 @@ fn fillet_chamfer_swap_still_enforces_edge_lockstep() {
     // The record is untouched by either rejection.
     let rec = sess.document().timeline.record_by_id(rid(1)).unwrap();
     assert_eq!(rec.op.op_type(), "Fillet", "a rejected swap writes nothing");
+}
+
+// ── (WP-C T2a) two-distance chamfer: `distance2` ─────────────────────────────
+
+/// A Chamfer op whose SECOND leg is set (SCHEMA §7.3, 2026-08-03).
+fn chamfer_op_d2(edge_ids: &[&str], edges: Vec<ElementRef>, radius: f64, d2: f64) -> Operation {
+    let Operation::Known(KnownOperation::Chamfer(mut p)) = chamfer_op(edge_ids, edges, radius)
+    else {
+        unreachable!("chamfer_op builds a Chamfer")
+    };
+    p.distance2 = Some(s(d2));
+    Operation::Known(KnownOperation::Chamfer(p))
+}
+
+/// The stored `distance2` of a record's op (`None` for an equal-leg chamfer).
+fn stored_d2(sess: &DocumentSession, r: RecordId) -> Option<f64> {
+    match &sess.document().timeline.record_by_id(r).unwrap().op {
+        Operation::Known(KnownOperation::Chamfer(p)) => p.distance2.as_ref().map(|s| s.value),
+        _ => None,
+    }
+}
+
+/// `distance2` is `skip_serializing_if = "Option::is_none"`: an equal-leg chamfer
+/// is byte-identical to every document authored before the field existed, and the
+/// asymmetric form renders the key in the SCHEMA §7.3 position (right after
+/// `radius`) so a reader diffing the two forms sees ONE inserted key.
+#[test]
+fn chamfer_distance2_is_skip_none_and_round_trips() {
+    let equal = chamfer_op(&["e:14"], vec![], 1.0);
+    let json = serde_json::to_string(&equal).expect("serialize");
+    assert!(
+        !json.contains("distance2"),
+        "an equal-leg chamfer must not grow a `distance2` key: {json}"
+    );
+    assert_eq!(
+        serde_json::from_str::<Operation>(&json).unwrap(),
+        equal,
+        "equal-leg round-trips"
+    );
+
+    let asym = chamfer_op_d2(&["e:14"], vec![], 1.0, 2.5);
+    let json = serde_json::to_string(&asym).expect("serialize");
+    assert!(
+        json.contains(r#""radius":{"value":1.0},"distance2":{"value":2.5}"#),
+        "SCHEMA §7.3 field order (radius then distance2): {json}"
+    );
+    assert_eq!(
+        serde_json::from_str::<Operation>(&json).unwrap(),
+        asym,
+        "the two-distance form round-trips"
+    );
+
+    // A SCHEMA §7.3 payload with a bare-number `distance2` (the hand-authored
+    // form `Scalar` documents) parses to the same op.
+    let wire = r#"{ "opType": "Chamfer", "params": {
+        "mode": "Chamfer", "radius": 1.0, "distance2": 2.5,
+        "edgeIds": ["e:14"], "chainTangentEdges": true } }"#;
+    match serde_json::from_str::<Operation>(wire).unwrap() {
+        Operation::Known(KnownOperation::Chamfer(p)) => {
+            assert_eq!(p.distance2.expect("distance2 parsed").value, 2.5);
+        }
+        other => panic!("expected Chamfer, got {other:?}"),
+    }
+}
+
+#[test]
+fn chamfer_rejects_a_non_positive_distance2_on_every_entry_path() {
+    for bad in [0.0, -1.0] {
+        // AddOperation.
+        let mut doc = Document::new(DocumentId(u(0x5A)));
+        doc.bodies.register(BodyMeta::new(BX(), "b", rid(0)));
+        let mut sess = DocumentSession::new(doc);
+        let err = sess
+            .apply(EditCommand::AddOperation {
+                record: record(
+                    rid(1),
+                    "Chamfer",
+                    chamfer_op_d2(&["e1"], vec![edge_ref(BX(), "e1")], 1.0, bad),
+                    vec![BX()],
+                ),
+                at_cursor: false,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("distance2"), "add {bad}: {err}");
+
+        // UpdateOperationParams.
+        let mut sess = fillet_doc("e1");
+        let err = sess
+            .apply(EditCommand::UpdateOperationParams {
+                record: rid(1),
+                op: chamfer_op_d2(&["e1"], vec![edge_ref(BX(), "e1")], 1.0, bad),
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("distance2"), "update {bad}: {err}");
+        let rec = sess.document().timeline.record_by_id(rid(1)).unwrap();
+        assert_eq!(rec.op.op_type(), "Fillet", "a rejected edit writes nothing");
+    }
+}
+
+/// `FilletParams` has no typed `distance2`, so an unguarded payload naming one
+/// would land in the `extra` flatten and round-trip VERBATIM — a second leg
+/// persisted on an op that never reads it, and resurrected by a later flip.
+#[test]
+fn a_fillet_may_not_carry_distance2() {
+    let mut fillet = fillet_op(&["e1"], vec![edge_ref(BX(), "e1")]);
+    if let Operation::Known(KnownOperation::Fillet(p)) = &mut fillet {
+        p.extra.insert("distance2".into(), serde_json::json!(2.5));
+    }
+    let mut sess = fillet_doc("e1");
+    let err = sess
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(1),
+            op: fillet,
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("distance2") && err.to_string().contains("Chamfer-only"),
+        "Fillet carrying distance2: {err}"
+    );
+}
+
+/// The FILLET-CHAMFER-UNIFY W3 swap has a FIELD-IDENTITY precondition. A Chamfer
+/// carrying `distance2` breaks it — flipping it to Fillet would silently drop the
+/// user's second leg — so the edit is refused with the standard allow-list reason,
+/// NAMING the field, until it is cleared.
+#[test]
+fn a_two_distance_chamfer_may_not_flip_to_fillet_until_distance2_is_cleared() {
+    let mut sess = fillet_doc("e1");
+    sess.apply(EditCommand::UpdateOperationParams {
+        record: rid(1),
+        op: chamfer_op_d2(&["e1"], vec![edge_ref(BX(), "e1")], 1.0, 2.5),
+    })
+    .expect("Fillet → two-distance Chamfer invents nothing the target cannot hold");
+    assert_eq!(stored_d2(&sess, rid(1)), Some(2.5));
+
+    let err = sess
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(1),
+            op: fillet_op(&["e1"], vec![edge_ref(BX(), "e1")]),
+        })
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("opType"), "standard allow-list reason: {msg}");
+    assert!(
+        msg.contains("distance2"),
+        "the reason NAMES the field: {msg}"
+    );
+    let rec = sess.document().timeline.record_by_id(rid(1)).unwrap();
+    assert_eq!(
+        rec.op.op_type(),
+        "Chamfer",
+        "a rejected flip writes nothing"
+    );
+    assert_eq!(
+        stored_d2(&sess, rid(1)),
+        Some(2.5),
+        "…and keeps the 2nd leg"
+    );
+
+    // Clearing `distance2` is an ordinary (visible, undoable) params edit; the
+    // flip is then the plain W3 swap again.
+    sess.apply(EditCommand::UpdateOperationParams {
+        record: rid(1),
+        op: chamfer_op(&["e1"], vec![edge_ref(BX(), "e1")], 1.0),
+    })
+    .expect("clearing distance2 is a plain params edit");
+    assert_eq!(stored_d2(&sess, rid(1)), None);
+    sess.apply(EditCommand::UpdateOperationParams {
+        record: rid(1),
+        op: fillet_op(&["e1"], vec![edge_ref(BX(), "e1")]),
+    })
+    .expect("an equal-leg Chamfer still flips to Fillet");
+    let rec = sess.document().timeline.record_by_id(rid(1)).unwrap();
+    assert_eq!(rec.op.op_type(), "Fillet");
+
+    // …and undo walks the whole sequence back, second leg included.
+    assert!(sess.undo(), "flip undone");
+    assert!(sess.undo(), "clear undone");
+    assert_eq!(
+        stored_d2(&sess, rid(1)),
+        Some(2.5),
+        "undo restores the cleared second leg"
+    );
 }
 
 // ── (b) proptest: random valid sequences ─────────────────────────────────────

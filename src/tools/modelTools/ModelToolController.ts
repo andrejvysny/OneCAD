@@ -192,6 +192,17 @@ function storedScalar(v: unknown): number {
   return 0;
 }
 
+/**
+ * A stored OPTIONAL Scalar: the number, or `null` when the key is absent/unusable.
+ * Distinct from {@link storedScalar} because a skip-none wire field (chamfer
+ * `distance2`) needs "absent" and "0" to stay different answers.
+ */
+function storedOptionalScalar(v: unknown): number | null {
+  if (v === undefined || v === null) return null;
+  const n = storedScalar(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 /** A stored `[x,y,z]`, or null when it is not three finite numbers. */
 function storedVec3(v: unknown): Vec3 | null {
   if (!Array.isArray(v) || v.length !== 3) return null;
@@ -2553,6 +2564,8 @@ export class ModelToolController {
         edgeOp: this.fillet.edgeOp,
         showEdgeOpSegments: true,
         onEdgeOp: (k) => this.onEdgeOpChip(k),
+        distance2: this.fillet.distance2,
+        onDistance2: (v) => this.onEdgeOpDistance2(v),
       },
     );
     this.updateDebug();
@@ -2765,12 +2778,21 @@ export class ModelToolController {
    * reads, so the two can never drift out of lockstep.
    */
   private edgeOpParams(radius = this.fillet.radius): FilletParams {
-    return {
+    const params: FilletParams = {
       mode: this.edgeOpKind,
       radius,
       edgeIds: this.filletEdges.map((e) => e.topoKey ?? e.id),
       chainTangentEdges: true,
     };
+    // SCHEMA §7.3 (2026-08-03): the second leg is CHAMFER-ONLY, and absent means
+    // equal-leg. The FSM KEEPS the user's number across a type flip (so flipping
+    // back hands it straight back), which is exactly why the gate belongs here at
+    // the emitting seam rather than in the reducer — a Fillet must never author
+    // it, whatever the arm still remembers.
+    if (this.edgeOpKind === "Chamfer" && this.fillet.distance2 !== null) {
+      params.distance2 = this.fillet.distance2;
+    }
+    return params;
   }
 
   /** The same params as a lane {@link PreviewParams} (which carries an index signature). */
@@ -2781,6 +2803,22 @@ export class ModelToolController {
   private onFilletChip(v: number): void {
     this.fillet = filletStep(this.fillet, { kind: "setRadius", radius: v }).state;
     toolChipStore.getState().setValue(v);
+    this.sendPreview();
+  }
+
+  /**
+   * The chamfer second-leg field was typed or cleared back to `=` (SCHEMA §7.3).
+   *
+   * Unlike a type flip this is a plain PARAMS change, so the live preview session
+   * stays open and is simply re-sent — `beginPreview` freezes `opType`, not the
+   * params. A re-edit has no session and `sendPreview` is a no-op there.
+   */
+  private onEdgeOpDistance2(distance2: number | null): void {
+    this.fillet = filletStep(this.fillet, { kind: "setDistance2", distance2 }).state;
+    // Read the value BACK off the FSM — it normalizes (clamp / non-positive ⇒
+    // equal-leg), so echoing the raw input to the chip could show a number the
+    // op will not carry.
+    toolChipStore.getState().setDistance2(this.fillet.distance2);
     this.sendPreview();
   }
 
@@ -5241,8 +5279,16 @@ export class ModelToolController {
       // it at the swap site regardless — that is the invariant holder, this is
       // only so the payload never LOOKS self-contradicting on the wire.
       if ("mode" in this.filletStoredParams) patch.mode = kind;
+      // SCHEMA §7.3 (2026-08-03) second leg. `updateScalarParamsCommand` merges
+      // SHALLOWLY over the stored params, so a CLEARED (or Fillet-typed) second
+      // leg has to be removed from the base — a patch cannot delete a key. The
+      // resulting op is then exactly what the record should hold.
+      const base = { ...this.filletStoredParams };
+      const distance2 = kind === "Chamfer" ? this.fillet.distance2 : null;
+      if (distance2 === null) delete base.distance2;
+      else patch.distance2 = { value: distance2 };
       const res = await this.client.applyEditCommand(
-        updateScalarParamsCommand(editFeatureId, kind, this.filletStoredParams, patch),
+        updateScalarParamsCommand(editFeatureId, kind, base, patch),
       );
       this.applyResult(res);
     } catch (e) {
@@ -5310,6 +5356,12 @@ export class ModelToolController {
     // `touched:true` — the seeded size IS the committed size, so the pristine
     // reseed must NOT fire: flipping the segment on a committed 5 mm fillet has to
     // keep 5 mm, not rewrite it to the chamfer default.
+    // SCHEMA §7.3 (2026-08-03): a two-distance chamfer re-opens with BOTH legs.
+    // The second one comes from the STORED params (skip-none, so absent ⇒
+    // equal-leg) and never from `valueText` — that string is a display form, and
+    // `radiusFromValueText` deliberately reads only its leading number.
+    const distance2 =
+      kind === "Chamfer" ? storedOptionalScalar(stored?.distance2) : null;
     this.fillet = filletStep(filletInit(), {
       kind: "arm",
       edgeCount: 1,
@@ -5317,6 +5369,7 @@ export class ModelToolController {
       edgeOp: kind,
       auto: false,
       touched: true,
+      distance2,
     }).state;
     toolStore.setState({ phase: "armed" });
     this.deps.engine.setOrbitSuppressed(true); // modal: drag adjusts the size, not orbit
@@ -5344,6 +5397,8 @@ export class ModelToolController {
         edgeOp: this.fillet.edgeOp,
         showEdgeOpSegments: true,
         onEdgeOp: (k) => this.onEdgeOpChip(k),
+        distance2: this.fillet.distance2,
+        onDistance2: (v) => this.onEdgeOpDistance2(v),
       },
     );
     this.updateDebug();
@@ -5831,6 +5886,9 @@ export class ModelToolController {
       // auto is armed only where the direction is sign-correct (bisector).
       edgeOpAuto: this.fillet.auto,
       edgeOpAxisSource: this.filletAxisSource,
+      // The CHAMFER second leg (`null` = equal-leg, SCHEMA §7.3) — the only
+      // readout e2e has of a value whose chip shows `=` rather than a number.
+      edgeOpDistance2: this.fillet.distance2,
       shellPhase: this.shell.phase,
       // Placement tool (WP-B W1). `transformFold` is the record a ✓ would
       // REWRITE — the one bit of the fold decision that has no visible surface,

@@ -85,11 +85,15 @@ async function chipValue(page: Page): Promise<number> {
 }
 
 /** The projection's last feature row (`__stores.document`, dev-only). */
-async function lastFeature(page: Page): Promise<{ id: string; label: string }> {
+async function lastFeature(
+  page: Page,
+): Promise<{ id: string; label: string; valueText: string }> {
   const f = await page.evaluate(() => {
     const w = window as unknown as {
       __stores?: {
-        document: { getState(): { features: Array<{ id: string; label: string }> } };
+        document: {
+          getState(): { features: Array<{ id: string; label: string; valueText: string }> };
+        };
       };
     };
     const all = w.__stores?.document.getState().features ?? [];
@@ -97,6 +101,21 @@ async function lastFeature(page: Page): Promise<{ id: string; label: string }> {
   });
   if (!f) throw new Error("the projection has no features");
   return f;
+}
+
+/** The armed chamfer's second-distance field (`=` when equal-leg). */
+function d2Field(page: Page) {
+  return page.getByLabel("Second distance");
+}
+
+/** Open the timeline and double-click the row `id` (the parametric re-edit entry). */
+async function reopenRow(page: Page, id: string): Promise<void> {
+  await bodyOptions(page).first().click();
+  await page.getByTestId("history-row-f3").click();
+  const row = page.getByTestId(`history-row-${id}`);
+  await expect(row).toBeVisible();
+  await row.dblclick();
+  await expect.poll(async () => (await toolPhases(page))?.filletPhase).toBe("armed");
 }
 
 // ── the unified tool + the dead `chamfer` id / `H` binding ───────────────────
@@ -296,5 +315,86 @@ test("a committed Fillet row re-edits its TYPE: dblclick → Chamfer segment →
   // (6) …and the swap is a normal undoable edit.
   await page.keyboard.press("Meta+z");
   await expect.poll(async () => (await lastFeature(page)).label).toBe("Fillet");
+  expect((await getFeatureLabels(page)).length).toBe(rowCount);
+});
+
+// ── two-distance chamfer (SCHEMA §7.3, 2026-08-03 — WP-C T2a) ────────────────
+
+test("a Chamfer arm gains a second-distance field; a Fillet arm does not", async ({ page }) => {
+  await armFillet(page);
+  // SCHEMA §7.3 forbids a Fillet from carrying `distance2`, so the field that
+  // authors it must not even be reachable there.
+  await expect(d2Field(page)).toHaveCount(0);
+
+  await page.getByTestId("chip-edgeop-chamfer").click();
+  await expect(d2Field(page)).toHaveValue("="); // equal-leg, not a blank
+  expect((await toolPhases(page))?.edgeOpDistance2).toBeNull();
+
+  // …and flipping back hides it again.
+  await page.getByTestId("chip-edgeop-fillet").click();
+  await expect(d2Field(page)).toHaveCount(0);
+});
+
+test("arm Chamfer → type a second distance → commit: the row reads `d1×d2`", async ({ page }) => {
+  await armChamferViaSegment(page);
+  const before = await getFeatureLabels(page);
+
+  await d2Field(page).fill("2.5");
+  // Enter in the second-distance field applies the value THEN confirms the op —
+  // the same single-fire contract the first distance's input has.
+  await d2Field(page).press("Enter");
+
+  await expect.poll(async () => (await getFeatureLabels(page)).length).toBe(before.length + 1);
+  const row = await lastFeature(page);
+  expect(row.label).toBe("Chamfer");
+  // Mirrors Rust `dto.rs feature_value_text` (pinned there); the LEADING number
+  // is what a re-edit seeds d1 from.
+  expect(row.valueText).toBe("1.0×2.5 mm");
+});
+
+test("a two-distance chamfer BLOCKS the type flip, and allows it once d2 is cleared", async ({
+  page,
+}) => {
+  // (1) Commit a two-distance chamfer this spec owns (the seeded mock rows carry
+  // no stored params, so a re-edit has to run against one authored here).
+  await armChamferViaSegment(page);
+  await d2Field(page).fill("2.5");
+  await d2Field(page).press("Enter");
+  await expect.poll(async () => (await lastFeature(page)).label).toBe("Chamfer");
+  const { id } = await lastFeature(page);
+  const rowCount = (await getFeatureLabels(page)).length;
+
+  // (2) Re-open it: BOTH legs are seeded from the stored params.
+  await reopenRow(page, id);
+  await expect(page.getByTestId("chip-edgeop-chamfer")).toHaveAttribute("aria-pressed", "true");
+  await expect(d2Field(page)).toHaveValue("2.5");
+  expect((await toolPhases(page))?.edgeOpDistance2).toBe(2.5);
+
+  // (3) Flipping to Fillet would DROP the second leg, so the backend refuses the
+  // edit with the standard allow-list reason — and the hint names the field.
+  await page.getByTestId("chip-edgeop-fillet").click();
+  await page.getByLabel("Dimension value").click();
+  await page.keyboard.press("Enter");
+  await expect(page.getByText(/clear distance2 first/)).toBeVisible();
+  // The rejected flip wrote nothing: the row is still the same Chamfer.
+  expect((await lastFeature(page)).label).toBe("Chamfer");
+  expect((await lastFeature(page)).valueText).toBe("1.0×2.5 mm");
+  expect((await getFeatureLabels(page)).length).toBe(rowCount);
+
+  // (4) Clear the second leg back to `=` — an ordinary params edit.
+  await reopenRow(page, id);
+  await d2Field(page).fill("=");
+  await d2Field(page).press("Enter");
+  await expect.poll(async () => (await lastFeature(page)).valueText).toBe("1.0 mm");
+  expect((await lastFeature(page)).label).toBe("Chamfer");
+
+  // (5) …and NOW the plain W3 swap goes through on the SAME row.
+  await reopenRow(page, id);
+  await expect(d2Field(page)).toHaveValue("=");
+  await page.getByTestId("chip-edgeop-fillet").click();
+  await page.getByLabel("Dimension value").click();
+  await page.keyboard.press("Enter");
+  await expect.poll(async () => (await lastFeature(page)).label).toBe("Fillet");
+  expect((await lastFeature(page)).id).toBe(id);
   expect((await getFeatureLabels(page)).length).toBe(rowCount);
 });

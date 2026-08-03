@@ -429,6 +429,80 @@ describe("fillet FSM", () => {
     expect(flipped.edgeOp).toBe("Chamfer");
     expect(flipped.radius).toBe(5);
   });
+
+  // ── two-distance chamfer (SCHEMA §7.3, 2026-08-03 — WP-C T2a) ──────────────
+
+  const chamferArm = (distance2: number | null = null) =>
+    filletStep(filletInit(), {
+      kind: "arm",
+      edgeCount: 1,
+      radius: 1,
+      edgeOp: "Chamfer",
+      touched: true,
+      distance2,
+    }).state;
+
+  it("a fresh arm is equal-leg; setDistance2 makes it asymmetric and null clears it", () => {
+    expect(filletInit().distance2).toBeNull();
+    const armed = chamferArm();
+    expect(armed.distance2).toBeNull();
+
+    const asym = filletStep(armed, { kind: "setDistance2", distance2: 2.5 });
+    expect(asym.effect).toBe("update");
+    expect(asym.state.distance2).toBe(2.5);
+
+    // Back to `=` — the chip's equal-leg state.
+    expect(filletStep(asym.state, { kind: "setDistance2", distance2: null }).state.distance2)
+      .toBeNull();
+  });
+
+  it("setDistance2 refuses a non-positive / non-finite second leg (equal-leg, never 0)", () => {
+    // SCHEMA §7.3 requires `distance2 > 0` when present — a zero-width bevel is
+    // not a value the wire may carry, so it collapses to equal-leg.
+    for (const bad of [0, -3, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(filletStep(chamferArm(2.5), { kind: "setDistance2", distance2: bad }).state.distance2)
+        .toBeNull();
+    }
+    // …and a tiny positive one is clamped to the shared magnitude floor.
+    expect(filletStep(chamferArm(), { kind: "setDistance2", distance2: 0.0001 }).state.distance2)
+      .toBe(0.1);
+  });
+
+  it("distance2 is CHAMFER-only: a Fillet arm ignores it (arm seed and event)", () => {
+    const filletSeeded = filletStep(filletInit(), {
+      kind: "arm",
+      edgeCount: 1,
+      radius: 2,
+      edgeOp: "Fillet",
+      distance2: 2.5,
+    }).state;
+    // The arm seed is normalized, not gated — a Fillet is never SHOWN the field
+    // and never EMITS the value (`edgeOpParams`), so the reducer keeps it simple.
+    const evented = filletStep(filletSeeded, { kind: "setDistance2", distance2: 4 });
+    expect(evented.effect).toBe("none");
+    expect(evented.state.distance2).toBe(filletSeeded.distance2);
+  });
+
+  it("a type flip KEEPS the second leg so flipping back hands it straight back", () => {
+    const asym = chamferArm(2.5);
+    const toFillet = filletStep(asym, { kind: "setEdgeOp", edgeOp: "Fillet" }).state;
+    expect(toFillet.edgeOp).toBe("Fillet");
+    expect(toFillet.distance2).toBe(2.5); // parked, never emitted for a Fillet
+    const back = filletStep(toFillet, { kind: "setEdgeOp", edgeOp: "Chamfer" }).state;
+    expect(back.distance2).toBe(2.5);
+  });
+
+  it("the DRAG lane sizes d1 only — it never touches the second leg", () => {
+    const dragged = filletStep(grabbed(chamferArm(2.5)), { kind: "drag", signed: -4 });
+    expect(dragged.state.radius).toBe(4);
+    expect(dragged.state.distance2).toBe(2.5);
+  });
+
+  it("setDistance2 is inert outside armed/dragging, and a re-arm resets to equal-leg", () => {
+    expect(filletStep(filletInit(), { kind: "setDistance2", distance2: 2 }).effect).toBe("none");
+    // `settle`/`cancel` go through filletInit, so the next arm starts equal-leg.
+    expect(filletStep(chamferArm(2.5), { kind: "cancel" }).state.distance2).toBeNull();
+  });
 });
 
 describe("revolve FSM", () => {

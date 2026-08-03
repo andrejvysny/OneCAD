@@ -117,6 +117,36 @@ describe("filletParams — R-WP2.1 dual edge rule (AddOperation from UI selectio
     const p = addedParams(op);
     expect("edges" in p).toBe(false);
   });
+
+  // ── two-distance chamfer (SCHEMA §7.3, 2026-08-03 — WP-C T2a) ──────────────
+
+  it("emits `distance2` for a Chamfer that has one, and NEVER for an equal-leg one", () => {
+    const equal = addedParams({
+      opType: "Chamfer",
+      params: { mode: "Chamfer", radius: 1, edgeIds: ["e:3"] },
+    });
+    // Skip-none on the Rust side: an equal-leg chamfer's wire form must stay
+    // byte-identical to every document authored before the field existed.
+    expect("distance2" in equal).toBe(false);
+
+    const asym = addedParams({
+      opType: "Chamfer",
+      params: { mode: "Chamfer", radius: 1, distance2: 2.5, edgeIds: ["e:3"] },
+    });
+    expect(asym.distance2).toEqual({ value: 2.5 });
+    expect(asym.radius).toEqual({ value: 1 });
+  });
+
+  it("DROPS `distance2` from a Fillet — the field is Chamfer-only (core rejects it)", () => {
+    const p = addedParams({
+      opType: "Fillet",
+      // A caller that re-typed a chamfer's params object to Fillet without
+      // stripping the second leg: the seam marshals a plain fillet rather than a
+      // record core would have to reject.
+      params: { mode: "Fillet", radius: 1, distance2: 2.5, edgeIds: ["e:3"] },
+    });
+    expect("distance2" in p).toBe(false);
+  });
 });
 
 describe("updateScalarParamsCommand — re-edit deep-merge (Findings 3+4)", () => {

@@ -244,6 +244,86 @@ describe("ModelToolChips (M6b)", () => {
     expect(screen.queryByTestId("chip-edgeop-fillet")).toBeNull();
   });
 
+  // ── chamfer second distance (SCHEMA §7.3, 2026-08-03 — WP-C T2a) ──────────
+
+  const d2Field = () => screen.getByLabelText("Second distance") as HTMLInputElement;
+
+  it("the second-distance field appears ONLY while the armed op is a Chamfer", () => {
+    render(<ModelToolChips />);
+    edgeOpCluster({ edgeOp: "Fillet" });
+    // A Fillet has no second leg and SCHEMA §7.3 forbids it from carrying one.
+    expect(screen.queryByTestId("chip-chamfer-d2")).toBeNull();
+
+    act(() => toolChipStore.getState().setEdgeOp("Chamfer"));
+    expect(screen.getByTestId("chip-chamfer-d2")).toBeInTheDocument();
+    // It never shadows the FIRST distance's locator.
+    expect(screen.getByLabelText("Dimension value")).toBeInTheDocument();
+
+    act(() => toolChipStore.getState().setEdgeOp("Fillet"));
+    expect(screen.queryByTestId("chip-chamfer-d2")).toBeNull();
+  });
+
+  it("an equal-leg chamfer shows `=`, and typing a number authors the second leg", () => {
+    render(<ModelToolChips />);
+    const onDistance2 = vi.fn();
+    edgeOpCluster({ edgeOp: "Chamfer", onDistance2 });
+    expect(d2Field().value).toBe("=");
+
+    fireEvent.change(d2Field(), { target: { value: "2.5" } });
+    fireEvent.blur(d2Field());
+    expect(onDistance2).toHaveBeenCalledWith(2.5);
+  });
+
+  it("clearing the field back to `=` (or empty) clears the second leg", () => {
+    render(<ModelToolChips />);
+    const onDistance2 = vi.fn();
+    edgeOpCluster({ edgeOp: "Chamfer", distance2: 2.5, onDistance2 });
+    expect(d2Field().value).toBe("2.5"); // a re-edit opens seeded
+
+    fireEvent.change(d2Field(), { target: { value: "" } });
+    fireEvent.blur(d2Field());
+    expect(onDistance2).toHaveBeenCalledWith(null);
+    expect(d2Field().value).toBe("=");
+
+    // …and the literal glyph is accepted as the same gesture.
+    act(() => toolChipStore.getState().setDistance2(2.5));
+    onDistance2.mockClear();
+    fireEvent.change(d2Field(), { target: { value: "=" } });
+    fireEvent.blur(d2Field());
+    expect(onDistance2).toHaveBeenCalledWith(null);
+  });
+
+  it("a non-positive or unparseable second leg is REVERTED, never authored", () => {
+    render(<ModelToolChips />);
+    const onDistance2 = vi.fn();
+    edgeOpCluster({ edgeOp: "Chamfer", distance2: 2.5, onDistance2 });
+    for (const bad of ["0", "-1", "2abc"]) {
+      fireEvent.change(d2Field(), { target: { value: bad } });
+      fireEvent.blur(d2Field());
+      expect(onDistance2).not.toHaveBeenCalled();
+      expect(d2Field().value).toBe("2.5");
+    }
+  });
+
+  it("Enter in the second-distance field applies the value THEN confirms (single fire)", () => {
+    render(<ModelToolChips />);
+    const onDistance2 = vi.fn();
+    const onConfirm = vi.fn();
+    act(() =>
+      toolChipStore.getState().showFillet(
+        1,
+        WORLD,
+        vi.fn(),
+        { onConfirm, onCancel: vi.fn() },
+        { showEdgeOpSegments: true, edgeOp: "Chamfer", onDistance2 },
+      ),
+    );
+    fireEvent.change(d2Field(), { target: { value: "3" } });
+    fireEvent.keyDown(d2Field(), { key: "Enter" });
+    expect(onDistance2).toHaveBeenCalledWith(3);
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+
   // Shell shares the value-chip branch (`shellThickness`) — it must never grow an
   // edge-op picker just by living next door.
   it("the shell chip renders NO edge-op segments", () => {
