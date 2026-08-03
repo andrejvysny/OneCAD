@@ -1356,6 +1356,28 @@ preview fill).
 
 ### 7.5 Element identity
 
+#### QueryMassProperties
+
+Read-only exact kernel mass properties for one body (GProp over the head
+snapshot — no fence, no scratch, no session mutation; addressed like the other
+§7.5 read verbs). Added 2026-08-02 (WP-C measure upgrades).
+
+```json
+// req.args
+{ "bodyId": "body_3" }
+// result
+{ "volume": 15000.0, "surfaceArea": 4300.0,
+  "centroid": [10.0, 5.0, 7.5],
+  "principalMoments": [1.2e6, 3.4e6, 3.9e6],
+  "principalAxes": [[1,0,0],[0,1,0],[0,0,1]] }
+```
+
+- Units: mm³ / mm² / mm; moments are volume-integrals (mm⁵) about the
+  centroid — density-free (the app has no material system; a consumer
+  multiplies by density). `principalAxes` rows are unit vectors, right-handed,
+  paired with `principalMoments` in order.
+- Unknown `bodyId` ⇒ `REF_UNRESOLVED` error resp (recoverable).
+
 #### AcquireElementIds
 Promotes snapshot-scoped TopoKeys to persistent, globally-unique `ElementId`s
 (**ID-on-demand**). ElementIds do **not** embed `BodyId`.
@@ -1945,6 +1967,12 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-02 — §7.5 NEW read-only verb `QueryMassProperties`** (WP-C measure
+  upgrades; cross-track sign-off recorded 2026-08-02). Exact GProp
+  volume/area/centroid/principal-inertia for one body, density-free, no session
+  mutation. Additive verb, no existing shape moves, fixtures untouched — **no
+  fixture bump**.
 
 - **2026-08-02 — §7.3 NEW op `TransformBody`** (WP-B W0 BODY-TRANSFORM;
   cross-track sign-off recorded 2026-08-02). Rigid multi-target placement with a
