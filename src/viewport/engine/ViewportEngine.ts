@@ -225,6 +225,14 @@ export class ViewportEngine {
 
   // Sketch mode (F-WP6).
   private overlayEl: HTMLElement | null = null;
+  /** Chip host layer — a SIBLING of the overlay stacked above the side panels.
+   *  The overlay itself sits at z=1 under the z=20 panels (sketch glyphs must
+   *  never cover the inspector), but an armed tool's chip cluster is the active
+   *  interaction: anchored near the right edge its buttons would render UNDER
+   *  the panel and become unclickable (pointer interception — the e2e hole
+   *  spec caught it). Chips alone get a z=30 layer; pointer-events stay opt-in
+   *  per chip exactly as in the overlay. */
+  private chipLayerEl: HTMLElement | null = null;
   private sketch: SketchObject | null = null;
   private snapIndicator: SnapIndicator | null = null;
   private sketchPlane: SketchPlane | null = null;
@@ -1393,10 +1401,31 @@ export class ViewportEngine {
     this.invalidate();
   }
 
-  /** Register a DOM chip in the overlay, positioned at `world` each frame. */
+  /** The lazily-created chip layer (see [`chipLayerEl`]). Parented beside the
+   *  overlay so its z-index competes with the panels at the same level. */
+  private chipLayer(): HTMLElement | null {
+    const parent = this.overlayEl?.parentElement;
+    if (!parent) return null;
+    if (!this.chipLayerEl || this.chipLayerEl.parentElement !== parent) {
+      const el = document.createElement("div");
+      el.dataset.chipLayer = "1";
+      el.setAttribute("aria-hidden", "true");
+      const s = el.style;
+      s.position = "absolute";
+      s.inset = "0";
+      s.zIndex = "30"; // above the z-20 side panels — chips stay clickable.
+      s.pointerEvents = "none";
+      parent.appendChild(el);
+      this.chipLayerEl = el;
+    }
+    return this.chipLayerEl;
+  }
+
+  /** Register a DOM chip in the chip layer, positioned at `world` each frame. */
   mountChip(id: string, el: HTMLElement, world: Vec3): void {
-    if (!this.overlayEl) return;
-    this.overlayEl.appendChild(el);
+    const layer = this.chipLayer();
+    if (!layer) return;
+    layer.appendChild(el);
     this.overlayDriver.register(id, el, new THREE.Vector3().fromArray(world));
     this.invalidate();
   }
@@ -1408,7 +1437,7 @@ export class ViewportEngine {
 
   unmountChip(id: string, el: HTMLElement): void {
     this.overlayDriver.unregister(id);
-    if (el.parentElement === this.overlayEl) el.remove();
+    if (el.parentElement === this.chipLayerEl) el.remove();
     this.invalidate();
   }
 
@@ -1531,6 +1560,8 @@ export class ViewportEngine {
     this.snapIndicator = null;
     this.ghostEl?.remove();
     this.ghostEl = null;
+    this.chipLayerEl?.remove();
+    this.chipLayerEl = null;
     this.overlayEl = null;
 
     this.highlights?.dispose();
