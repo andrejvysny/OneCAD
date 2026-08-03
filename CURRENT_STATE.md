@@ -1,4 +1,27 @@
-# OneCAD-Tauri — Current State (2026-08-03, STEP-IMPORT shipped; BODY-TRANSFORM in flight)
+# OneCAD-Tauri — Current State (2026-08-03, WP-B COMPLETE + WP-C tranche 1 shipped)
+
+## WP-B BODY-TRANSFORM COMPLETE (2026-08-03, commits a540e74→7898e7d)
+Full placement suite on the W0 backend: W1 FSM/chips/`t`/fold-flow (fold =
+backend lineage query AND stored-targets==selection; full-vector FSM state so
+axis switches can't clobber components; exact mock mesh transform incl. header
+bbox + FACE_BBOXES re-derivation); W2 gizmo (9 handles, extrude-precedent
+orbit arbitration, ring seam unwrap 360-not-0, degenerate-view guards
+negative-checked, Copy sticky — one record has ONE flag); W2.5 align
+face-to-face (planarity honesty gate, deterministic 180° branch, round-trip
+1e-12, tangential nudge live after the solve). NO PreviewOp lane — rigid ghost
+is kernel-exact (documented deviation). W3 pickFrame stays DEFERRED, safe via
+the W0 edit-seeding gate. Final: FE 2429/171 · e2e 132/132 clean-machine.
+
+## WP-C tranche 1 (2026-08-03, commits cf5a236/425c175/e2af9a0)
+Mass properties (worker GProp verb → MeasurePanel; two-plane angle 60/120;
+mock exact via divergence theorem — cylinder asserted as its 24-gon prism);
+display units mm/cm/m/in (wire NEVER leaves mm — marshalling independence
+pinned; valueText re-parse lanes deliberately mm-fixed); draft-angle UI
+(±89° oracle clamp — backend was wired end-to-end with zero UI dispatching
+it); revolve typed-region selection binding (the TODO:123 defect was mostly
+already fixed by TRUST T3 — residual was selection binding, now closed).
+Combined gate: ctest 86/86 · cargo 681/0 · FE 2534/173 · e2e 144/144.
+Tranche 2 queued: 2-distance chamfer, sketch offset + fillet, hole tool.
 
 ## ROADMAP (approved 2026-08-02, plan `~/.claude/plans/act-as-senior-software-reflective-swing.md`)
 User priorities: 3D-print + machined parts + daily driver; light multi-part (no
