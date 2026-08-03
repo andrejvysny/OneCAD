@@ -356,6 +356,30 @@ function TransformModeSegments({
   );
 }
 
+/**
+ * The [Copy] toggle on the armed placement cluster (WP-B W2): the visible
+ * surface for `TransformBodyParams.copy`, which decides whether a placement MOVES
+ * the bodies or leaves them behind. Alt at gizmo-grab writes the same FSM flag,
+ * so this button is where the user can see (and undo) that choice.
+ */
+function CopyToggle({ copy, onToggle }: { copy: boolean; onToggle: (copy: boolean) => void }) {
+  return (
+    <button
+      type="button"
+      data-testid="chip-transform-copy"
+      aria-pressed={copy}
+      title="Keep the originals and place copies (Alt-drag)"
+      onClick={() => onToggle(!copy)}
+      className={cn(
+        "rounded-sm px-2 py-1 text-[11.5px] font-medium",
+        copy ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
+      )}
+    >
+      Copy
+    </button>
+  );
+}
+
 export function ModelToolChips() {
   const engine = useViewportEngine();
   const kind = useToolChipStore((s) => s.kind);
@@ -371,6 +395,7 @@ export function ModelToolChips() {
   const showBooleanSegments = useToolChipStore((s) => s.showBooleanSegments);
   const edgeOp = useToolChipStore((s) => s.edgeOp);
   const transformMode = useToolChipStore((s) => s.transformMode);
+  const copy = useToolChipStore((s) => s.copy);
   const showEdgeOpSegments = useToolChipStore((s) => s.showEdgeOpSegments);
   const endCondition = useToolChipStore((s) => s.endCondition);
   const canUseBodyEnds = useToolChipStore((s) => s.canUseBodyEnds);
@@ -595,6 +620,7 @@ export function ModelToolChips() {
           onPick={(a) => toolChipStore.getState().onAxis?.(a)}
         />
         {clusterInput(transformMode === "rotate" ? "°" : LENGTH_SUFFIX)}
+        <CopyToggle copy={copy} onToggle={(c) => toolChipStore.getState().onCopy?.(c)} />
         {confirmButtons}
       </>,
     );

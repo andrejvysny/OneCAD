@@ -47,6 +47,7 @@ import type { SnapResult } from "@/tools/sketch/snapEngine";
 import type { DraftEntity } from "@/tools/sketch/toolMachine";
 import { PreviewMesh } from "./PreviewMesh";
 import { DragHandle } from "./DragHandle";
+import { TransformGizmo, type GizmoHit } from "./TransformGizmo";
 import { RevolvePreview, type AxisCandidate } from "./RevolvePreview";
 import { PlanePicker, type PickablePlane } from "./PlanePicker";
 import { lightRigPose, type LightRigPose } from "./lightRig";
@@ -195,6 +196,7 @@ export class ViewportEngine {
   // Model-tool previews (F-WP7).
   private previewMesh: PreviewMesh | null = null; // L1 extrude prism
   private dragHandle: DragHandle | null = null;
+  private transformGizmo: TransformGizmo | null = null; // placement drag gizmo (WP-B W2)
   private revolvePreview: RevolvePreview | null = null; // L1 lathe + axis picker
   private ghostLayer: GhostLayer | null = null; // L1 pattern / mirror clones
   private regionPickLayer: RegionPickLayer | null = null; // multi-region extrude/revolve pick
@@ -310,6 +312,7 @@ export class ViewportEngine {
       hitTest: (x, y) =>
         (this.picker?.hasHitAt(x, y) ?? false) ||
         this.hitExtrudeHandle(x, y) ||
+        this.hitTransformGizmo(x, y) !== null ||
         (this.planePicker?.visible === true && this.planePickerHitTest(x, y) !== null),
       getDevicePref: opts.getDevicePref,
       isDragActive: opts.isDragActive,
@@ -410,6 +413,7 @@ export class ViewportEngine {
     this.previewMesh?.refreshColors();
     this.revolvePreview?.refreshColors();
     this.dragHandle?.refreshColors();
+    this.transformGizmo?.refreshColors();
     // Preview bodies only. The COMMITTED bodies' library belongs to MeshIngest,
     // which the engine cannot reach — ViewportRoot refreshes that one.
     this.previewMaterials?.refreshColors();
@@ -608,6 +612,8 @@ export class ViewportEngine {
     }
     // Keep the extrude handle a constant screen size across zoom/orbit.
     if (this.dragHandle) this.dragHandle.setScale(this.planePixelWorld());
+    // Same for the placement gizmo — its arms ARE the grab targets.
+    if (this.transformGizmo?.visible) this.transformGizmo.setScale(this.planePixelWorld());
     this.rendererHandle.renderer.render(this.scene, camera);
     this.overlayDriver.update(camera, width, height);
     // Double-buffer disposal: geometries swapped out earlier are freed now, one
@@ -1040,6 +1046,55 @@ export class ViewportEngine {
     this.previewMesh?.setVisible(false);
     this.dragHandle?.setVisible(false);
     this.dragHandle?.setHover(false);
+  }
+
+  // ---- Placement gizmo (WP-B W2) ----
+  //
+  // Owned exactly like the extrude drag handle: created lazily, screen-scaled per
+  // frame, folded into the orbit-gating `hitTest` (so a press that grabs a handle
+  // never orbits), refreshed on a theme flip and disposed with the engine.
+
+  /**
+   * Show / move the placement gizmo to `origin` — the frozen pivot displaced by
+   * the live placement, so the handles ride the moved body. Idempotent.
+   */
+  showTransformGizmo(origin: Vec3): void {
+    if (this.disposed) return;
+    if (!this.transformGizmo) {
+      this.transformGizmo = new TransformGizmo({ root: this.interactionRoot, invalidate: () => this.invalidate() });
+    }
+    this.transformGizmo.setPose(new THREE.Vector3().fromArray(origin));
+    this.transformGizmo.setScale(this.planePixelWorld());
+    this.transformGizmo.setVisible(true);
+  }
+
+  /** Hide the placement gizmo (kept for reuse; disposed with the engine). */
+  hideTransformGizmo(): void {
+    this.transformGizmo?.setVisible(false);
+  }
+
+  /** True while the placement gizmo is on screen (gate / introspection probe). */
+  isTransformGizmoVisible(): boolean {
+    return this.transformGizmo?.visible ?? false;
+  }
+
+  /** Hover tint on one gizmo handle (null clears). */
+  setTransformGizmoHover(hit: GizmoHit | null): void {
+    this.transformGizmo?.setHover(hit);
+  }
+
+  /** Held highlight on the handle being dragged — outranks hover (null clears). */
+  setTransformGizmoActive(hit: GizmoHit | null): void {
+    this.transformGizmo?.setActive(hit);
+  }
+
+  /** Which placement handle a client point grabs, or null. */
+  hitTransformGizmo(clientX: number, clientY: number): GizmoHit | null {
+    if (!this.canvas || !this.transformGizmo?.visible) return null;
+    const ndc = this.clientToNdc(clientX, clientY);
+    if (!ndc) return null;
+    this.raycaster.setFromCamera(ndc, this.rig.getCamera());
+    return this.transformGizmo.raycast(this.raycaster);
   }
 
   // ---- Revolve L1 preview + axis picker ----
@@ -1492,6 +1547,8 @@ export class ViewportEngine {
     this.previewMesh = null;
     this.dragHandle?.dispose();
     this.dragHandle = null;
+    this.transformGizmo?.dispose();
+    this.transformGizmo = null;
     this.revolvePreview?.dispose();
     this.revolvePreview = null;
     this.ghostLayer?.dispose();

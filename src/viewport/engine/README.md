@@ -80,6 +80,16 @@ awaited construction resolves after disposal).
 | `BodyObject.ts`      | Per-body face Mesh + edge LineSegments; shared body materials.  |
 | `Picker.ts`          | rAF-coalesced raycast → face/edge PickHit; edge screen-bias.    |
 | `HighlightLayer.ts`  | Hover/selected highlight via shared-attribute drawRange clones. |
+| `DragHandle.ts`      | Extrude depth handle: screen-scaled arrow + fat pick cylinder.  |
+| `TransformGizmo.ts`  | Placement gizmo: 3 arrows / 3 plane quads / 3 rings (WP-B W2).  |
+
+Both grab gizmos follow the same wiring, and a new one should too: created lazily
+by `ViewportEngine`, rescaled to `planePixelWorld()` every frame, folded into the
+orbit-gating `hitTest` (so a press that grabs a handle never orbits the camera),
+refreshed in `applyTheme()`, and disposed with the engine. `TransformGizmo` is a
+deliberate SIBLING of `DragHandle` rather than a generalisation of it — the
+extrude handle is a one-axis depth grab on a hot, e2e-covered path, and the two
+share nothing beyond "screen-scaled overlay mesh".
 
 Colors come from `palette.ts` (design tokens) — the engine never hard-codes hex.
 

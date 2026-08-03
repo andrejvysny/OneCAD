@@ -18,6 +18,7 @@ import { OriginTriad } from "./OriginTriad";
 import { HighlightLayer } from "./HighlightLayer";
 import { GhostLayer } from "./GhostLayer";
 import { DragHandle } from "./DragHandle";
+import { TransformGizmo } from "./TransformGizmo";
 import { PreviewMesh } from "./PreviewMesh";
 import { RevolvePreview } from "./RevolvePreview";
 import { BodyMaterialLibrary } from "./bodyMaterials";
@@ -311,6 +312,27 @@ describe("refreshColors picks up a theme flip", () => {
     // current — check the subtree in each.
     expectNoLightLeftovers(d.root, lightOnly);
     handle.setHover(true);
+    expectNoLightLeftovers(d.root, lightOnly);
+  });
+
+  it("TransformGizmo refreshes every handle, INCLUDING the highlighted one", () => {
+    const lightOnly = lightOnlyHexes();
+    setTheme("light");
+    const d = deps();
+    const gizmo = new TransformGizmo(d);
+    gizmo.setVisible(true);
+    // A theme can flip mid-gesture, so refresh under a live hover + active
+    // highlight too: `applyColors` is the single writer of both, and a refresh
+    // that only rewrote the resting state would leave the lit handle stale.
+    gizmo.setHover({ kind: "ring", axis: "Z" });
+    gizmo.setActive({ kind: "axis", axis: "X" });
+
+    setTheme("dark");
+    gizmo.refreshColors();
+
+    expectNoLightLeftovers(d.root, lightOnly);
+    gizmo.setActive(null);
+    gizmo.setHover(null);
     expectNoLightLeftovers(d.root, lightOnly);
   });
 

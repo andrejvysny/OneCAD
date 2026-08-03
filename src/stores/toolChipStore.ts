@@ -117,6 +117,13 @@ export interface TransformChipHandlers {
   onValue: (v: number) => void;
   onConfirm: () => void;
   onCancel: () => void;
+  /** Copy toggled (WP-B W2) — the visible surface for `params.copy`. */
+  onCopy?: (copy: boolean) => void;
+}
+
+/** Extra armed-placement options (the W2 copy seed). */
+export interface TransformChipOpts {
+  copy?: boolean;
 }
 
 /** Handlers the armed DATUM chip wires (offset input + ✓/✕ — DATUM W1). */
@@ -177,6 +184,10 @@ export interface ToolChipState {
   transformMode: TransformMode;
   /** Placement mode segment picked (armed transform cluster — W1). */
   onTransformMode: ((mode: TransformMode) => void) | null;
+  /** Whether the armed placement leaves the sources behind (WP-B W2). */
+  copy: boolean;
+  /** Copy toggled (armed placement cluster — W2). */
+  onCopy: ((copy: boolean) => void) | null;
   /** Unit suffix for the numeric chip (mm / ° — sketch dimension chip). */
   suffix: string;
   /** Leading context label (datum chip: the picked base plane's geometric name). */
@@ -282,13 +293,14 @@ export interface ToolChipState {
     worldPos: [number, number, number],
     handlers: { onPlane: (plane: MirrorPlane) => void; onApply: () => void },
   ): void;
-  /** Show the armed placement cluster `[Move|Rotate][X|Y|Z][value ▸][✓][✕]` (W1). */
+  /** Show the armed placement cluster `[Move|Rotate][X|Y|Z][value ▸][Copy][✓][✕]`. */
   showTransform(
     mode: TransformMode,
     axis: PatternAxis,
     value: number,
     worldPos: [number, number, number],
     handlers: TransformChipHandlers,
+    opts?: TransformChipOpts,
   ): void;
   /** Show the sketch Dimension chip (seeded, auto-focused; Enter commits, Esc cancels). */
   showDimension(
@@ -316,6 +328,8 @@ export interface ToolChipState {
   setEdgeOp(edgeOp: EdgeOpKind): void;
   /** Update just the armed placement's mode (Move / Rotate). */
   setTransformMode(mode: TransformMode): void;
+  /** Update just the armed placement's copy flag (Alt-drag / the Copy segment). */
+  setCopy(copy: boolean): void;
   clear(): void;
 }
 
@@ -341,6 +355,8 @@ const CLEARED = {
   regionCount: 1,
   transformMode: "move" as TransformMode,
   onTransformMode: null,
+  copy: false,
+  onCopy: null,
   suffix: "",
   label: "",
   worldPos: null,
@@ -480,7 +496,7 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
   showMirror(plane, worldPos, handlers) {
     set({ ...CLEARED, kind: "mirror", plane, worldPos, onPlane: handlers.onPlane, onApply: handlers.onApply });
   },
-  showTransform(mode, axis, value, worldPos, handlers) {
+  showTransform(mode, axis, value, worldPos, handlers, opts) {
     set({
       ...CLEARED,
       kind: "transform",
@@ -488,11 +504,13 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
       axis,
       value,
       worldPos,
+      copy: opts?.copy ?? false,
       onTransformMode: handlers.onTransformMode,
       onAxis: handlers.onAxis,
       onValue: handlers.onValue,
       onConfirm: handlers.onConfirm,
       onCancel: handlers.onCancel,
+      onCopy: handlers.onCopy ?? null,
     });
   },
   showDimension(value, suffix, worldPos, onValue, onCancel) {
@@ -524,6 +542,9 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
   },
   setTransformMode(transformMode) {
     set({ transformMode });
+  },
+  setCopy(copy) {
+    set({ copy });
   },
   clear() {
     set({ ...CLEARED });

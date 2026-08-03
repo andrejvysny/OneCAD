@@ -229,3 +229,117 @@ describe("axisIndex / isIdentityPlacement", () => {
     ).toBe(false);
   });
 });
+
+/*
+ * Gizmo events (WP-B W2). The gizmo is the chip's PEER, not a second authority:
+ * every grab and drag frame lands as an FSM event, so the chip segments re-render
+ * from the same state and the two surfaces cannot drift apart.
+ */
+describe("transformStep — gizmo grab", () => {
+  it("a ring grab re-types the placement to Rotate about that axis", () => {
+    const s = step(armed(), { kind: "grab", grab: { kind: "ring", axis: "Y" } });
+    expect(s.mode).toBe("rotate");
+    expect(s.axis).toBe("Y");
+  });
+
+  it("an arrow grab re-types it to Move along that axis", () => {
+    const s = step(
+      armed(),
+      { kind: "setMode", mode: "rotate" },
+      { kind: "grab", grab: { kind: "axis", axis: "Z" } },
+    );
+    expect(s.mode).toBe("move");
+    expect(s.axis).toBe("Z");
+  });
+
+  it("a plane grab KEEPS an already-selected in-plane axis (the standing choice)", () => {
+    const s = step(
+      armed(),
+      { kind: "setAxis", axis: "Y" },
+      { kind: "grab", grab: { kind: "plane", axis: "Z" } }, // the Z quad moves X+Y
+    );
+    expect(s.axis).toBe("Y");
+  });
+
+  it("a plane grab NEVER leaves the chip on the quad's own normal", () => {
+    // The X quad cannot move X at all, so showing dx would peg the chip.
+    const s = step(
+      armed(),
+      { kind: "setAxis", axis: "X" },
+      { kind: "grab", grab: { kind: "plane", axis: "X" } },
+    );
+    expect(s.axis).toBe("Y");
+  });
+
+  it("Alt at grab sets copy; a plain grab leaves it exactly as it was", () => {
+    expect(step(armed(), { kind: "grab", grab: { kind: "axis", axis: "X" }, copy: true }).copy).toBe(true);
+    const sticky = step(
+      armed(),
+      { kind: "setCopy", copy: true },
+      { kind: "grab", grab: { kind: "axis", axis: "X" } },
+    );
+    expect(sticky.copy).toBe(true);
+  });
+
+  it("a grab never disturbs the placement values or the frozen pivot", () => {
+    const s = step(
+      armed(),
+      { kind: "setValue", value: 30 },
+      { kind: "grab", grab: { kind: "ring", axis: "X" } },
+    );
+    expect(s.translate).toEqual([30, 0, 0]);
+    expect(s.center).toEqual([5, 6, 7]);
+  });
+});
+
+describe("transformStep — gizmo drag frames", () => {
+  it("dragTranslate writes the WHOLE vector (a plane drag moves two axes at once)", () => {
+    const s = step(armed(), { kind: "dragTranslate", translate: [12, -7, 0] });
+    expect(s.translate).toEqual([12, -7, 0]);
+    expect(transformValue(s)).toBe(12); // the chip still shows the addressed one
+  });
+
+  it("dragAngle CLAIMS the current axis as the rotation axis", () => {
+    const s = step(
+      armed(),
+      { kind: "grab", grab: { kind: "ring", axis: "Y" } },
+      { kind: "dragAngle", angleDeg: 45 },
+    );
+    expect(s.angleDeg).toBe(45);
+    expect(s.rotAxis).toBe("Y");
+    expect(transformParamsOf(s).rotate.axis).toEqual([0, 1, 0]);
+  });
+
+  it("a translate drag leaves the stored rotation alone, and vice versa", () => {
+    const s = step(
+      armed(),
+      { kind: "grab", grab: { kind: "ring", axis: "Z" } },
+      { kind: "dragAngle", angleDeg: 90 },
+      { kind: "grab", grab: { kind: "axis", axis: "X" } },
+      { kind: "dragTranslate", translate: [40, 0, 0] },
+    );
+    expect(s.angleDeg).toBe(90);
+    expect(s.translate).toEqual([40, 0, 0]);
+  });
+
+  it("REFUSES a non-finite drag frame rather than poisoning the placement", () => {
+    const base = step(armed(), { kind: "setValue", value: 30 });
+    expect(step(base, { kind: "dragTranslate", translate: [NaN, 0, 0] }).translate).toEqual([30, 0, 0]);
+    expect(step(base, { kind: "dragAngle", angleDeg: Infinity }).angleDeg).toBe(0);
+  });
+
+  it("ignores every gizmo event while idle", () => {
+    const idle = transformInit();
+    const events: Parameters<typeof transformStep>[1][] = [
+      { kind: "grab", grab: { kind: "ring", axis: "X" } },
+      { kind: "dragTranslate", translate: [1, 2, 3] },
+      { kind: "dragAngle", angleDeg: 10 },
+      { kind: "setCopy", copy: true },
+    ];
+    for (const e of events) {
+      const r = transformStep(idle, e);
+      expect(r.state).toEqual(idle);
+      expect(r.effect).toBe("none");
+    }
+  });
+});

@@ -1095,6 +1095,15 @@ export interface TransformSeed {
   copy?: boolean;
 }
 
+/**
+ * Which gizmo handle a drag grabbed (WP-B W2). A PLANE is named by its NORMAL —
+ * the "Z" quad translates in XY — so every handle is keyed by one axis letter.
+ */
+export interface TransformGrab {
+  kind: "axis" | "plane" | "ring";
+  axis: PatternAxis;
+}
+
 export type TransformEvent =
   | ({ kind: "arm"; targets: string[] } & TransformSeed)
   /** Re-seed an ALREADY-armed placement (a re-edit's stored params land async). */
@@ -1102,6 +1111,13 @@ export type TransformEvent =
   | { kind: "setMode"; mode: TransformMode }
   | { kind: "setAxis"; axis: PatternAxis }
   | { kind: "setValue"; value: number }
+  /** A gizmo handle was grabbed: the handle DECIDES the mode + axis (W2). */
+  | { kind: "grab"; grab: TransformGrab; copy?: boolean }
+  /** A drag frame wrote the whole translation (a plane drag moves two axes). */
+  | { kind: "dragTranslate"; translate: Vec3 }
+  /** A ring drag frame wrote the angle; the ring's axis is already claimed. */
+  | { kind: "dragAngle"; angleDeg: number }
+  | { kind: "setCopy"; copy: boolean }
   | { kind: "apply" }
   | { kind: "settle" }
   | { kind: "cancel" };
@@ -1154,6 +1170,24 @@ function applySeed(s: TransformFsm, e: TransformSeed): TransformFsm {
   };
 }
 
+/**
+ * The mode + axis a grabbed handle claims. The gizmo is the chip's peer, not its
+ * master: grabbing a ring IS choosing Rotate about that axis, so the FSM records
+ * it and the chip segments re-render from the FSM — one writer, no drift.
+ *
+ * A PLANE quad writes two components at once but the chip can only show one, so
+ * it keeps the axis already selected when that axis lies IN the plane (the user's
+ * standing choice of which number to watch) and otherwise falls back to the first
+ * in-plane axis. Never the normal: that component is exactly the one a plane drag
+ * cannot move, so showing it would peg the chip at a constant.
+ */
+function grabbedModeAxis(s: TransformFsm, grab: TransformGrab): { mode: TransformMode; axis: PatternAxis } {
+  if (grab.kind === "ring") return { mode: "rotate", axis: grab.axis };
+  if (grab.kind === "axis") return { mode: "move", axis: grab.axis };
+  const inPlane = (["X", "Y", "Z"] as PatternAxis[]).filter((a) => a !== grab.axis);
+  return { mode: "move", axis: inPlane.includes(s.axis) ? s.axis : inPlane[0] };
+}
+
 export function transformStep(s: TransformFsm, e: TransformEvent): TransformStep {
   switch (e.kind) {
     case "arm": {
@@ -1182,6 +1216,24 @@ export function transformStep(s: TransformFsm, e: TransformEvent): TransformStep
       translate[axisIndex(s.axis)] = v;
       return { state: { ...s, translate }, effect: "ghost" };
     }
+    case "grab": {
+      if (s.phase !== "armed") return { state: s, effect: "none" };
+      return { state: { ...s, ...grabbedModeAxis(s, e.grab), copy: e.copy ?? s.copy }, effect: "ghost" };
+    }
+    case "dragTranslate": {
+      if (s.phase !== "armed") return { state: s, effect: "none" };
+      if (!e.translate.every((c) => Number.isFinite(c))) return { state: s, effect: "none" };
+      return { state: { ...s, translate: [...e.translate] }, effect: "ghost" };
+    }
+    case "dragAngle": {
+      if (s.phase !== "armed") return { state: s, effect: "none" };
+      if (!Number.isFinite(e.angleDeg)) return { state: s, effect: "none" };
+      // Same rule as typing an angle: authoring about an axis CLAIMS it.
+      return { state: { ...s, angleDeg: e.angleDeg, rotAxis: s.axis }, effect: "ghost" };
+    }
+    case "setCopy":
+      if (s.phase !== "armed") return { state: s, effect: "none" };
+      return { state: { ...s, copy: e.copy }, effect: "ghost" };
     case "apply":
       if (s.phase !== "armed") return { state: s, effect: "none" };
       return { state: { ...s, phase: "committing" }, effect: "commit" };

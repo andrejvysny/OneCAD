@@ -83,8 +83,18 @@ import {
   clampPatternCount,
   countFromValueText,
   placementMatrix,
+  applyPlacementToPoint,
   type GhostTransform,
 } from "@/tools/preview/patternPreview";
+import {
+  accumulateAngleDeg,
+  axisDragDelta,
+  planeDragDelta,
+  ringAngleDeg,
+  snapRotateDeg,
+  snapTranslate,
+  type PointerRay,
+} from "@/tools/preview/transformDrag";
 import { PreviewThrottle } from "@/tools/preview/previewThrottle";
 import {
   booleanInit,
@@ -131,6 +141,7 @@ import {
   type PatternAxis,
   type MirrorPlane,
   type TransformFsm,
+  type TransformGrab,
   type TransformMode,
   type TransformSeed,
   type RegionSelectState,
@@ -303,7 +314,31 @@ export interface ModelToolDeps {
   debug?: boolean;
 }
 
-type DragKind = "extrude" | "fillet" | "revolve" | "shell" | null;
+type DragKind = "extrude" | "fillet" | "revolve" | "shell" | "transform" | null;
+
+/**
+ * One placement gizmo gesture (WP-B W2). Everything is captured AT GRAB and the
+ * drag reports DIFFERENCES against it, which is what stops the body jumping to
+ * the cursor on the first frame: the grab point is never the handle's origin.
+ *
+ * `raw*` hold the unsnapped values. Snapping the accumulated raw value each frame
+ * (rather than accumulating snapped values) is what keeps a slow drag from
+ * ratcheting — the alternative quantises the ERROR too and drifts.
+ */
+interface GizmoDragState {
+  grab: TransformGrab;
+  /** Gizmo origin at grab (the frozen pivot displaced by the placement so far). */
+  origin: Vec3;
+  /** The placement's translation at grab — the base every drag frame adds to. */
+  startTranslate: Vec3;
+  /** Axis-arrow drags: the scalar sampled at grab, subtracted out every frame. */
+  grabScalar: number;
+  /** Ring drags: unsnapped cumulative angle + the previous frame's wrapped angle. */
+  rawAngle: number;
+  prevAngle: number;
+  /** Live unsnapped translation, so the snap never feeds back into itself. */
+  rawTranslate: Vec3;
+}
 
 /** One pickable revolve axis candidate (a sketch line), plane (u,v) endpoints. */
 interface AxisCandidate {
@@ -509,6 +544,15 @@ export class ModelToolController {
   private transformEditFeatureId: string | undefined;
   /** Whether the placement ghost is currently hiding its source bodies. */
   private transformHidSources = false;
+  /** In-flight gizmo drag (WP-B W2), null between gestures. */
+  private gizmoDrag: GizmoDragState | null = null;
+  /**
+   * Whether THIS controller has put the gizmo on screen. Guards the teardown the
+   * same way `transformHidSources` guards the ghost's: the tool-switch sweep runs
+   * on every arm of every tool, and a placement that was never armed has nothing
+   * to take down.
+   */
+  private transformGizmoShown = false;
 
   /**
    * Datum-plane tool context (DATUM W1), null when the tool is not armed.
@@ -3277,6 +3321,7 @@ export class ModelToolController {
       .setStatusHint("Move / Rotate along an axis, then ✓", { sticky: true });
     this.rebuildTransformGhost();
     this.showTransformChip();
+    this.updateTransformGizmo();
     this.updateDebug();
   }
 
@@ -3294,21 +3339,154 @@ export class ModelToolController {
           onValue: (v) => this.onTransformEvent({ kind: "setValue", value: v }),
           onConfirm: () => void this.commitTransform(),
           onCancel: () => this.resetToSelect(),
+          onCopy: (c) => this.onTransformEvent({ kind: "setCopy", copy: c }),
         },
+        { copy: this.transform.copy },
       );
   }
 
   /** One chip edit: step the FSM, then re-publish the chip's view + the ghost. */
   private onTransformEvent(e: Parameters<typeof transformStep>[1]): void {
     this.transform = transformStep(this.transform, e).state;
+    this.publishTransformState();
+  }
+
+  /**
+   * Re-publish everything downstream of the FSM: the chip's view, the ghost and
+   * the gizmo's pose. Called after EVERY placement event — chip, gizmo drag or
+   * seed — so the FSM stays the one writer and the two surfaces cannot disagree.
+   */
+  private publishTransformState(): void {
     const chip = toolChipStore.getState();
     chip.setTransformMode(this.transform.mode);
     chip.setAxis(this.transform.axis);
     // The chip's number is a VIEW of one component, so it must be re-read after
     // every event — switching Move X → Move Y shows the stored dy, not the dx.
     chip.setValue(transformValue(this.transform));
+    chip.setCopy(this.transform.copy);
     this.rebuildTransformGhost();
+    this.updateTransformGizmo();
     this.updateDebug();
+  }
+
+  // ── placement gizmo (WP-B W2) ────────────────────────────────────────────────
+  //
+  // Three grab kinds on one gizmo — arrow (one axis), quad (two axes) and ring
+  // (rotate about an axis through the pivot). Two rules make it safe:
+  //
+  // THE HANDLE DECIDES MODE + AXIS, and it does so THROUGH the FSM (`grab`), never
+  // by writing the chip directly. The chip segments then re-render from FSM state,
+  // so grabbing the Z ring and clicking [Rotate][Z] are literally the same edit.
+  //
+  // THE GIZMO RIDES THE BODY but never rotates with it. Its origin is the frozen
+  // pivot pushed through the live placement; its arms stay world-parallel because
+  // the record stores a WORLD translation and a WORLD rotation axis, and an arm
+  // pointing anywhere else would author a direction the record cannot express.
+
+  /** Where the gizmo sits right now: the frozen pivot under the live placement. */
+  private transformGizmoOrigin(): Vec3 {
+    const p = transformParamsOf(this.transform);
+    const m = placementMatrix(p.translate, p.rotate.center, p.rotate.axis, p.rotate.angleDeg);
+    return applyPlacementToPoint(m, this.transform.center);
+  }
+
+  /** Show / move the gizmo while armed; hide it otherwise. */
+  private updateTransformGizmo(): void {
+    if (this.transform.phase !== "armed" || this.transform.targets.length === 0) {
+      this.hideTransformGizmo();
+      return;
+    }
+    this.deps.engine.showTransformGizmo(this.transformGizmoOrigin());
+    this.transformGizmoShown = true;
+  }
+
+  /**
+   * Begin a gizmo gesture. `alt` at grab turns on COPY: with a cumulative record
+   * there is no such thing as "a copy for this one gesture" — the placement has a
+   * single `copy` flag — so Alt sets the flag the [Copy] segment shows, and the
+   * user can see and undo it. Returns false when the press missed every handle.
+   */
+  private startGizmoDrag(hit: TransformGrab, clientX: number, clientY: number, alt: boolean): boolean {
+    const ray = this.engine.screenRay(clientX, clientY);
+    if (!ray) return false;
+    const origin = this.transformGizmoOrigin();
+    this.transform = transformStep(this.transform, { kind: "grab", grab: hit, copy: alt || undefined }).state;
+    const axis = WORLD_AXIS[hit.axis];
+    const grabScalar = hit.kind === "axis" ? (axisDragDelta(ray, origin, axis) ?? 0) : 0;
+    const startAngle = this.transform.rotAxis === hit.axis ? this.transform.angleDeg : 0;
+    this.gizmoDrag = {
+      grab: hit,
+      origin,
+      startTranslate: [...this.transform.translate],
+      grabScalar,
+      rawAngle: startAngle,
+      prevAngle: hit.kind === "ring" ? (ringAngleDeg(ray, origin, axis) ?? 0) : 0,
+      rawTranslate: [...this.transform.translate],
+    };
+    this.dragging = "transform";
+    this.engine.setTransformGizmoActive(hit);
+    toolStore.setState({ phase: "dragging" });
+    this.publishTransformState();
+    return true;
+  }
+
+  /** One drag frame: project the pointer, snap, and hand the result to the FSM. */
+  private applyGizmoDrag(clientX: number, clientY: number, fine: boolean): void {
+    const drag = this.gizmoDrag;
+    if (!drag) return;
+    const ray = this.engine.screenRay(clientX, clientY);
+    if (!ray) return;
+    const axis = WORLD_AXIS[drag.grab.axis];
+    // A refused projection (degenerate view) holds the previous value — the drag
+    // goes inert rather than throwing the body across the scene.
+    if (drag.grab.kind === "ring") {
+      const now = ringAngleDeg(ray, drag.origin, axis);
+      if (now === null) return;
+      drag.rawAngle = accumulateAngleDeg(drag.rawAngle, drag.prevAngle, now);
+      drag.prevAngle = now;
+      this.transform = transformStep(this.transform, {
+        kind: "dragAngle",
+        angleDeg: snapRotateDeg(drag.rawAngle, fine),
+      }).state;
+    } else {
+      const moved = this.gizmoTranslateFrame(drag, ray, axis, fine);
+      if (!moved) return;
+      this.transform = transformStep(this.transform, { kind: "dragTranslate", translate: moved }).state;
+    }
+    this.publishTransformState();
+  }
+
+  /** The snapped translation for one arrow / quad drag frame, or null if refused. */
+  private gizmoTranslateFrame(
+    drag: GizmoDragState,
+    ray: PointerRay,
+    axis: Vec3,
+    fine: boolean,
+  ): Vec3 | null {
+    const next: Vec3 = [...drag.rawTranslate];
+    if (drag.grab.kind === "axis") {
+      const now = axisDragDelta(ray, drag.origin, axis);
+      if (now === null) return null;
+      const i = axisIndex(drag.grab.axis);
+      next[i] = drag.startTranslate[i] + (now - drag.grabScalar);
+    } else {
+      // The quad's delta already lies IN the plane, so the normal component is
+      // zero and adding it componentwise cannot disturb the third axis.
+      const delta = planeDragDelta(ray, drag.origin, axis);
+      if (delta === null) return null;
+      for (let a = 0; a < 3; a++) next[a] = drag.startTranslate[a] + delta[a];
+    }
+    drag.rawTranslate = next;
+    return [snapTranslate(next[0], fine), snapTranslate(next[1], fine), snapTranslate(next[2], fine)];
+  }
+
+  /** Release: the placement stays ARMED at the dragged value (Enter / ✓ commits). */
+  private endGizmoDrag(): void {
+    this.gizmoDrag = null;
+    this.dragging = null;
+    this.engine.setTransformGizmoActive(null);
+    toolStore.setState({ phase: "armed" });
+    this.publishTransformState();
   }
 
   /**
@@ -3361,6 +3539,7 @@ export class ModelToolController {
     const armed = this.transform;
     this.transform = transformStep(this.transform, { kind: "apply" }).state;
     this.hideTransformGhost();
+    this.hideTransformGizmo();
     toolChipStore.getState().clear();
     const op: OperationOp = {
       opType: "TransformBody",
@@ -3384,6 +3563,7 @@ export class ModelToolController {
       this.transform = armed;
       this.rebuildTransformGhost();
       this.showTransformChip();
+      this.updateTransformGizmo();
       viewportStore
         .getState()
         .setStatusHint(`Move failed: ${errMessage(e)}`, { severity: "error", sticky: true });
@@ -3441,9 +3621,25 @@ export class ModelToolController {
 
   private cancelTransform(): void {
     this.hideTransformGhost();
+    this.hideTransformGizmo();
     this.transform = transformInit();
     this.transformEditFeatureId = undefined;
     toolChipStore.getState().clear();
+    // Republish: `onToolChange` has no updateDebug of its own, so without this the
+    // debug surface keeps reporting a placement (and a gizmo) that is already gone
+    // — the same reason `endDatumPick` publishes its own now-idle phase.
+    this.updateDebug();
+  }
+
+  /** Drop the gizmo AND any gesture it owns (idempotent — every teardown hits it). */
+  private hideTransformGizmo(): void {
+    this.gizmoDrag = null;
+    if (this.dragging === "transform") this.dragging = null;
+    if (!this.transformGizmoShown) return; // never shown ⇒ nothing of ours to take down
+    this.transformGizmoShown = false;
+    this.deps.engine.setTransformGizmoActive(null);
+    this.deps.engine.setTransformGizmoHover(null);
+    this.deps.engine.hideTransformGizmo();
   }
 
   // ── datum plane tool (DATUM W1) ──────────────────────────────────────────────
@@ -3561,6 +3757,15 @@ export class ModelToolController {
     this.moved = false;
     if (e.button !== 0) return;
 
+    // The placement gizmo claims a press that lands ON a handle and nothing else
+    // — every other press while armed stays available to orbit / select, which is
+    // why this tool needs no orbit-suppression of its own (the engine's `hitTest`
+    // already folds `hitTransformGizmo` in, exactly like the extrude handle).
+    if (this.transform.phase === "armed") {
+      const grab = this.engine.hitTransformGizmo(e.clientX, e.clientY);
+      if (grab && this.startGizmoDrag(grab, e.clientX, e.clientY, e.altKey)) return;
+    }
+
     if (this.extrude.phase === "armed" && this.engine.hitExtrudeHandle(e.clientX, e.clientY)) {
       this.dragging = "extrude";
       this.extrude = extrudeStep(this.extrude, { kind: "grab" }).state;
@@ -3612,6 +3817,12 @@ export class ModelToolController {
     // Region pick owns the pointer: hover-tint the region under it, nothing else.
     if (this.regionPick) {
       this.updateRegionHover(e.clientX, e.clientY);
+      return;
+    }
+    if (this.dragging === "transform") {
+      // Shift is read off the LIVE event rather than a held-key flag: the fine
+      // tier only ever matters for the frame being projected.
+      this.applyGizmoDrag(e.clientX, e.clientY, e.shiftKey);
       return;
     }
     if (this.dragging === "extrude") {
@@ -3672,6 +3883,8 @@ export class ModelToolController {
       this.updateRevolveAxisHover(e.clientX, e.clientY);
     } else if (this.extrude.phase === "armed") {
       this.engine.setExtrudeHandleHover(this.engine.hitExtrudeHandle(e.clientX, e.clientY));
+    } else if (this.transform.phase === "armed") {
+      this.engine.setTransformGizmoHover(this.engine.hitTransformGizmo(e.clientX, e.clientY));
     }
   };
 
@@ -3696,6 +3909,12 @@ export class ModelToolController {
       return;
     }
 
+    if (this.dragging === "transform") {
+      // House armed-commit pattern: release keeps the placement ARMED at the
+      // dragged value; nothing reaches the timeline until Enter or the chip ✓.
+      this.endGizmoDrag();
+      return;
+    }
     if (this.dragging === "extrude") {
       // MODEL-HARDEN Wave 1: release KEEPS the tool armed (no implicit commit).
       // Flush the trailing L2 at the final depth; the chip cluster stays editable.
@@ -5232,6 +5451,12 @@ export class ModelToolController {
       transformCenter: [...this.transform.center],
       transformTargets: [...this.transform.targets],
       transformFold: this.transformEditFeatureId ?? null,
+      transformCopy: this.transform.copy,
+      // Gizmo surface (WP-B W2): whether it is on screen and which handle (if
+      // any) a gesture currently owns. e2e reads the grab to prove that dragging
+      // a ring is what re-typed the placement to Rotate about that axis.
+      transformGizmo: this.transformGizmoShown,
+      transformGrab: this.gizmoDrag ? { ...this.gizmoDrag.grab } : null,
       // Datum tool (DATUM W1): "idle" | "basePick" | "offset" + the armed values,
       // so e2e can assert the two-phase gesture without any DOM of its own.
       datumPhase: this.datum ? (this.datum.base === null ? "basePick" : "offset") : "idle",

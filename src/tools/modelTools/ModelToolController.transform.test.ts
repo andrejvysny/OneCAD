@@ -54,6 +54,12 @@ function makeEngineMock() {
     hideRevolvePreview: vi.fn(),
     hideRegionPick: vi.fn(),
     isExtrudePreviewVisible: vi.fn(() => false),
+    // Placement gizmo (WP-B W2) — armed/teardown paths touch all four.
+    showTransformGizmo: vi.fn(),
+    hideTransformGizmo: vi.fn(),
+    setTransformGizmoHover: vi.fn(),
+    setTransformGizmoActive: vi.fn(),
+    hitTransformGizmo: vi.fn(() => null),
   };
 }
 

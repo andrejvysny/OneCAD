@@ -68,5 +68,9 @@ export const RENDER_ORDER = {
   REVOLVE_SHELL: 6,
   REVOLVE_CANDIDATES: 7,
   DRAG_HANDLE: 7,
+  /** Placement gizmo (WP-B W2). Shares the drag-handle tier: both are the armed
+   *  tool's own grab surface and only ONE tool is armed at a time, so they can
+   *  never co-exist and the tie is unobservable. */
+  TRANSFORM_GIZMO: 7,
   REVOLVE_HOVER: 8,
 } as const;

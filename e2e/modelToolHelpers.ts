@@ -83,6 +83,70 @@ export async function dragBy(page: Page, dx: number, dy: number): Promise<void> 
   await page.mouse.up();
 }
 
+/** One placement-gizmo handle (WP-B W2), as `hitTransformGizmo` reports it. */
+export interface GizmoHandle {
+  kind: "axis" | "plane" | "ring";
+  axis: "X" | "Y" | "Z";
+}
+
+/**
+ * Hit-scan the canvas for a real client point that grabs `want` on the placement
+ * gizmo, through the engine's OWN `hitTransformGizmo` raycast (exposed at
+ * `window.__vpEngine` under `?vpdebug`).
+ *
+ * Same rationale as `findExtrudeHandle`: the gizmo is screen-scaled 3D geometry
+ * at a world pivot, so its arms land wherever the camera puts them and there is
+ * no closed-form pixel offset to click. Scanning with the exact raycast the
+ * pointer handlers use is the only way to produce a GENUINE grab — and it also
+ * proves the arbitration, since a point that scans as the Z ring is a point the
+ * real pointerdown will classify as the Z ring.
+ */
+export async function findGizmoHandle(page: Page, want: GizmoHandle): Promise<{ x: number; y: number }> {
+  let found: { x: number; y: number } | null = null;
+  await expect(async () => {
+    found = await page.evaluate((target) => {
+      const engine = (
+        window as unknown as {
+          __vpEngine?: { hitTransformGizmo(x: number, y: number): GizmoHandle | null };
+        }
+      ).__vpEngine;
+      const canvas = document.querySelector(
+        '[data-testid="viewport-canvas"] canvas',
+      ) as HTMLCanvasElement | null;
+      if (!engine || !canvas) return null;
+      const rect = canvas.getBoundingClientRect();
+      const step = 3; // the arms are only a few px wide on screen
+      for (let y = rect.top; y <= rect.bottom; y += step) {
+        for (let x = rect.left; x <= rect.right; x += step) {
+          const hit = engine.hitTransformGizmo(x, y);
+          if (hit && hit.kind === target.kind && hit.axis === target.axis) return { x, y };
+        }
+      }
+      return null;
+    }, want);
+    expect(found).not.toBeNull();
+  }).toPass({ timeout: 15_000, intervals: [200, 400, 800] });
+  return found as unknown as { x: number; y: number };
+}
+
+/**
+ * Press at `from`, move to `to` in steps, release. `modifiers` are held for the
+ * WHOLE gesture — Alt at press is what turns a placement drag into a copy.
+ */
+export async function dragFromTo(
+  page: Page,
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  modifiers: Array<"Alt" | "Shift"> = [],
+): Promise<void> {
+  for (const m of modifiers) await page.keyboard.down(m);
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(to.x, to.y, { steps: 8 });
+  await page.mouse.up();
+  for (const m of modifiers) await page.keyboard.up(m);
+}
+
 /** Wait until the named model tool reports `armed` on the debug surface. */
 export async function expectArmed(page: Page, which: "fillet" | "shell"): Promise<void> {
   await expect

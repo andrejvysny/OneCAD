@@ -1,10 +1,10 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import { openEditorDebug, extrudeDebug, getFeatureLabels, bodyOptions } from "./helpers";
-import { seedSelection } from "./modelToolHelpers";
+import { seedSelection, findGizmoHandle, dragFromTo } from "./modelToolHelpers";
 
 /*
- * WP-B W1 — TransformBody, the numeric placement UX (no gizmo; that is W2).
+ * WP-B W1 + W2 — TransformBody: the numeric placement UX, and the drag gizmo.
  *
  * This spec is unusually geometry-heavy for the mock lane, and deliberately so.
  * Every other mock body op is a stand-in (no CSG, no hollowing), so its specs can
@@ -18,6 +18,14 @@ import { seedSelection } from "./modelToolHelpers";
  * whose params were re-edited — never a stack of nudges. A regression there would
  * look completely normal on screen and only show up as history rot, which is
  * exactly why the row COUNT is asserted at every step.
+ *
+ * The W2 gizmo cases at the bottom drag REAL handles found through the engine's
+ * own raycast, then assert the commit against the SCENE. They deliberately never
+ * hard-code a screen→world mapping: the camera decides which way +X runs on
+ * screen, so each case reads the dragged placement off the debug surface and
+ * asserts the committed geometry matches THAT — which is the actual claim (the
+ * ghost, the chip and the committed body all agree), and is invariant to the
+ * camera in a way a pixel-delta expectation would not be.
  */
 
 /** The seeded mock box (80×60×30 at the origin) as published by ?vpdemo. */
@@ -317,4 +325,178 @@ test("a multi-body selection commits ONE record that moves both bodies", async (
   // ONE record covering both — not one per body.
   expect(await getFeatureLabels(page)).toHaveLength(rowsBefore.length + 1);
   expect(await moveRows(page)).toHaveLength(1);
+});
+
+// ── WP-B W2: the drag gizmo ──────────────────────────────────────────────────
+
+/** The live placement as the controller publishes it (`?vpdebug`). */
+async function placement(page: Page): Promise<{
+  translate: number[];
+  angleDeg: number;
+  mode: string;
+  axis: string;
+  copy: boolean;
+  gizmo: boolean;
+}> {
+  // Null until the first `updateDebug` — i.e. before any tool has ever armed.
+  const d = (await extrudeDebug(page)) ?? {};
+  return {
+    translate: (d.transformTranslate as number[]) ?? [0, 0, 0],
+    angleDeg: (d.transformAngleDeg as number) ?? 0,
+    mode: (d.transformMode as string) ?? "move",
+    axis: (d.transformAxis as string) ?? "X",
+    copy: (d.transformCopy as boolean) ?? false,
+    gizmo: (d.transformGizmo as boolean) ?? false,
+  };
+}
+
+/** Enter confirms the armed placement (the same gesture the W1 cases use). */
+async function confirmWithEnter(page: Page): Promise<void> {
+  await page.keyboard.press("Enter");
+  await expect(page.getByTestId("model-tool-chip")).toHaveCount(0);
+}
+
+/** Poll a body's bbox until its min corner matches `want` (rounded), then return it. */
+async function expectMin(page: Page, bodyId: string, want: number[]): Promise<void> {
+  await expect
+    .poll(async () => {
+      const b = await bodyBounds(page, bodyId);
+      return b ? b.min.map((v) => Math.round(v)) : null;
+    })
+    .toEqual(want.map((v) => Math.round(v)));
+}
+
+test("the gizmo appears with the armed placement and disappears with it", async ({ page }) => {
+  await openEditorDebug(page, { mockBody: true });
+  await waitForBody(page, BODY);
+  expect((await placement(page)).gizmo).toBeFalsy();
+
+  await armTransform(page, BODY);
+  await expect.poll(async () => (await placement(page)).gizmo).toBe(true);
+  // Every handle is reachable — three kinds, keyed by axis.
+  await findGizmoHandle(page, { kind: "axis", axis: "X" });
+  await findGizmoHandle(page, { kind: "plane", axis: "Z" });
+  await findGizmoHandle(page, { kind: "ring", axis: "Z" });
+
+  await chip(page).getByTestId("chip-cancel").click();
+  await expect.poll(async () => (await placement(page)).gizmo).toBe(false);
+});
+
+test("dragging the X arrow moves the body along X only, and Enter commits it", async ({ page }) => {
+  await openEditorDebug(page, { mockBody: true });
+  const before = await waitForBody(page, BODY);
+  await armTransform(page, BODY);
+
+  const grab = await findGizmoHandle(page, { kind: "axis", axis: "X" });
+  await dragFromTo(page, grab, { x: grab.x + 120, y: grab.y });
+
+  // The chip is live off the same FSM the ghost reads…
+  const dragged = await placement(page);
+  expect(dragged.mode).toBe("move");
+  expect(dragged.axis).toBe("X");
+  expect(Math.abs(dragged.translate[0])).toBeGreaterThan(0);
+  expect(dragged.translate[1]).toBe(0); // an arrow writes ONE component
+  expect(dragged.translate[2]).toBe(0);
+  await expect(chipInput(page)).toHaveValue(String(dragged.translate[0]));
+  // …and the release keeps it armed: nothing is on the timeline yet.
+  await expect.poll(async () => (await extrudeDebug(page))?.transformPhase).toBe("armed");
+  expect(await moveRows(page)).toHaveLength(0);
+
+  await confirmWithEnter(page);
+  await expectMin(page, BODY, [before.min[0] + dragged.translate[0], before.min[1], before.min[2]]);
+  expect(await moveRows(page)).toHaveLength(1);
+});
+
+test("dragging the Z plane quad moves in TWO axes at once", async ({ page }) => {
+  await openEditorDebug(page, { mockBody: true });
+  const before = await waitForBody(page, BODY);
+  await armTransform(page, BODY);
+
+  const grab = await findGizmoHandle(page, { kind: "plane", axis: "Z" });
+  // A diagonal drag: the quad's plane carries both of its in-plane axes.
+  await dragFromTo(page, grab, { x: grab.x + 110, y: grab.y - 70 });
+
+  const dragged = await placement(page);
+  expect(dragged.mode).toBe("move");
+  expect(dragged.translate[0]).not.toBe(0);
+  expect(dragged.translate[1]).not.toBe(0);
+  // The quad's NORMAL is the one axis a plane drag cannot move.
+  expect(dragged.translate[2]).toBe(0);
+
+  await confirmWithEnter(page);
+  await expectMin(page, BODY, [
+    before.min[0] + dragged.translate[0],
+    before.min[1] + dragged.translate[1],
+    before.min[2],
+  ]);
+});
+
+test("dragging the Z ring re-types the cluster to Rotate and commits a rotation", async ({ page }) => {
+  await openEditorDebug(page, { mockBody: true });
+  const before = await waitForBody(page, BODY);
+  await armTransform(page, BODY);
+
+  const grab = await findGizmoHandle(page, { kind: "ring", axis: "Z" });
+  // Tangential-ish: any sweep about the ring's own axis will do — the assertion
+  // below reads back the angle that actually resulted.
+  await dragFromTo(page, grab, { x: grab.x - 90, y: grab.y + 90 });
+
+  const dragged = await placement(page);
+  expect(dragged.mode).toBe("rotate"); // the HANDLE re-typed the placement…
+  expect(dragged.axis).toBe("Z");
+  expect(dragged.translate).toEqual([0, 0, 0]); // …and a rotation is not a move
+  expect(Math.abs(dragged.angleDeg)).toBeGreaterThanOrEqual(15); // the 15° snap
+  // …and the chip segments follow the FSM, not the other way round.
+  await expect(chip(page).getByTestId("chip-transform-rotate")).toHaveAttribute("aria-pressed", "true");
+  await expect(axisButton(page, "Z")).toHaveAttribute("aria-pressed", "true");
+
+  await confirmWithEnter(page);
+
+  // Rotating an 80×60 box about its own centre on Z gives an AABB of
+  // (80|cosθ| + 60|sinθ|) × (80|sinθ| + 60|cosθ|), and leaves Z untouched.
+  const rad = (Math.abs(dragged.angleDeg) * Math.PI) / 180;
+  const wantX = 80 * Math.abs(Math.cos(rad)) + 60 * Math.abs(Math.sin(rad));
+  await expect
+    .poll(async () => {
+      const b = await bodyBounds(page, BODY);
+      return b ? Math.round(b.max[0] - b.min[0]) : null;
+    })
+    .toBe(Math.round(wantX));
+  const after = (await bodyBounds(page, BODY))!;
+  expect(after.max[2] - after.min[2]).toBeCloseTo(before.max[2] - before.min[2], 3);
+  expect(await moveRows(page)).toHaveLength(1);
+});
+
+test("Alt-drag places a COPY: one more body, sources left where they were", async ({ page }) => {
+  await openEditorDebug(page, { mockBody: true });
+  const before = await waitForBody(page, BODY);
+  const bodiesBefore = await bodyOptions(page).count();
+  await armTransform(page, BODY);
+
+  const grab = await findGizmoHandle(page, { kind: "axis", axis: "X" });
+  await dragFromTo(page, grab, { x: grab.x + 120, y: grab.y }, ["Alt"]);
+
+  const dragged = await placement(page);
+  expect(dragged.copy).toBe(true);
+  // Alt writes the SAME flag the segment shows — one writer, visible state.
+  await expect(chip(page).getByTestId("chip-transform-copy")).toHaveAttribute("aria-pressed", "true");
+
+  await confirmWithEnter(page);
+
+  await expect(bodyOptions(page)).toHaveCount(bodiesBefore + 1);
+  // The SOURCE never moved — that is the whole difference between copy and move.
+  await expectMin(page, BODY, before.min);
+  expect(await moveRows(page)).toHaveLength(1);
+});
+
+test("the Copy segment toggles the flag without a gizmo drag", async ({ page }) => {
+  await openEditorDebug(page, { mockBody: true });
+  await waitForBody(page, BODY);
+  await armTransform(page, BODY);
+
+  const copyBtn = chip(page).getByTestId("chip-transform-copy");
+  await expect(copyBtn).toHaveAttribute("aria-pressed", "false");
+  await copyBtn.click();
+  await expect(copyBtn).toHaveAttribute("aria-pressed", "true");
+  await expect.poll(async () => (await placement(page)).copy).toBe(true);
 });
