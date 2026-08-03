@@ -45,6 +45,8 @@ import type {
   ExtrudeParams,
   FeatureBooleanMode,
   FilletParams,
+  HoleParams,
+  HoleType,
   OperationOp,
   OpType,
   PreviewParams,
@@ -315,6 +317,85 @@ function shellOp(s: PreviewSessionState): OperationOp {
   };
 }
 
+// ── Hole ─────────────────────────────────────────────────────────────────────
+
+const HOLE_TYPES = ["simple", "counterbore", "countersink"] as const;
+/** SCHEMA §7.3: the countersink included angles the backend admits. */
+const HOLE_CS_ANGLES = [82, 90, 100, 120];
+
+/** A positive finite dimension, or a throw naming the field (the house rule). */
+function positiveDim(v: unknown, what: string): number {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) throw new Error(`${what} must be greater than zero`);
+  return n;
+}
+
+/**
+ * Mirrors `ModelToolController.commitHole`. The conditional `cb*`/`cs*` blocks are
+ * emitted ONLY for their own `holeType` and spelled `null` otherwise — the same
+ * rule `holeParamsOf` applies at the call site, restated here because this builder
+ * is what the wire actually sees and the Rust session REJECTS a simple hole
+ * carrying a counterbore.
+ */
+function holeOp(s: PreviewSessionState): OperationOp {
+  const holeType = s.latestParams.holeType;
+  if (!HOLE_TYPES.includes(holeType as HoleType)) {
+    throw new Error(`Unsupported Hole holeType ${String(holeType)}`);
+  }
+  const targetBodyId = nonEmptyString(s.latestParams.targetBodyId);
+  if (!targetBodyId) throw new Error("Hole requires targetBodyId");
+  const face = s.latestParams.face as SemanticRef | undefined;
+  if (!face?.primary?.bodyId) throw new Error("Hole requires a host face ref");
+  const point = s.latestParams.point;
+  if (!Array.isArray(point) || point.length !== 3 || point.some((c) => !Number.isFinite(c))) {
+    throw new Error("Hole requires a [x, y, z] world point");
+  }
+  const diameter = positiveDim(s.latestParams.diameter, "Hole diameter");
+  // `null`/absent depth is THROUGH-ALL — a real end condition, so it must not be
+  // coerced through `positiveDim`.
+  const rawDepth = s.latestParams.depth;
+  const depth = rawDepth === null || rawDepth === undefined ? null : positiveDim(rawDepth, "Hole depth");
+
+  const params: HoleParams = {
+    targetBodyId,
+    face,
+    point: [point[0], point[1], point[2]] as [number, number, number],
+    holeType: holeType as HoleType,
+    diameter,
+    depth,
+    cbDiameter: null,
+    cbDepth: null,
+    csDiameter: null,
+    csAngleDeg: null,
+  };
+
+  if (params.holeType === "counterbore") {
+    params.cbDiameter = positiveDim(s.latestParams.cbDiameter, "Hole cbDiameter");
+    params.cbDepth = positiveDim(s.latestParams.cbDepth, "Hole cbDepth");
+    if (params.cbDiameter <= diameter) {
+      throw new Error("Hole cbDiameter must exceed diameter");
+    }
+  } else if (params.holeType === "countersink") {
+    params.csDiameter = positiveDim(s.latestParams.csDiameter, "Hole csDiameter");
+    const angle = Number(s.latestParams.csAngleDeg);
+    if (!HOLE_CS_ANGLES.includes(angle)) {
+      throw new Error(`Hole csAngleDeg must be one of ${HOLE_CS_ANGLES.join(", ")}`);
+    }
+    params.csAngleDeg = angle;
+    if (params.csDiameter <= diameter) {
+      throw new Error("Hole csDiameter must exceed diameter");
+    }
+  }
+
+  return {
+    opType: "Hole",
+    opId: s.opId,
+    featureId: s.editFeatureId,
+    inputs: [...(s.inputs ?? [])],
+    params,
+  };
+}
+
 // ── Boolean ──────────────────────────────────────────────────────────────────
 
 const BOOLEAN_OPERATIONS = ["Union", "Cut", "Intersect"] as const;
@@ -367,6 +448,7 @@ export const OP_BUILDERS: Partial<Record<OpType, PreviewOpBuilder>> = {
   Chamfer: edgeOpBuilder("Chamfer"),
   Shell: shellOp,
   Boolean: booleanOp,
+  Hole: holeOp,
 };
 
 /** True when a preview session can be opened for `opType` (OP_BUILDERS membership). */

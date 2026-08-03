@@ -55,6 +55,8 @@ const MODEL_ONLY: ReadonlySet<Tool> = new Set([
   "circularPattern",
   // A placement moves SOLIDS, which only exist in model mode (WP-B W1).
   "transform",
+  // A hole is machined INTO a solid's face — model mode only (WP-C T3).
+  "hole",
   // Measure inspects SOLIDS, which only exist in model mode. A toolbar CLICK is
   // an explicit intent, so it finishes the sketch first like every other model
   // tool. Its ambient `?` KEYSTROKE is deliberately inert in sketch mode instead

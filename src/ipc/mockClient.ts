@@ -41,6 +41,7 @@ import type {
 import { IMPORT_STEP_OP_TYPE } from "./types";
 import type { WireEditCommand } from "./tauriCommandMap";
 import { bareBodyId, wireParamsOf } from "./tauriCommandMap";
+import { holeValueText } from "@/tools/modelTools/holeMachine";
 import type { FaceColor } from "./mockMeshes";
 import {
   concatMesh1,
@@ -654,6 +655,30 @@ function mutateOp(op: OperationOp): {
       mockFeatures = [...mockFeatures, { id: featureId, kind: "fillet", opType: "Shell", label: "Shell", valueText, status: "ok" }];
     }
     return { changed: [bodyId], removed: [], label: "Shell", featureId };
+  }
+  if (op.opType === "Hole") {
+    // MOCK LIMIT: no real drilling. Subtracting a faceted cylinder from the mock
+    // box mesh would be a second, worse CSG implementation living in the mock —
+    // so the mock does what it does for every body-MODIFYING op (Shell,
+    // Fillet/Chamfer): re-emit the host untouched and record the feature. The
+    // GEOMETRY is pinned against the real kernel by `worker/tests/test_hole_op.cpp`
+    // and `src-tauri/tests/hole_ops.rs`; what the mock lane owns is the UI chain —
+    // face pick → chips → committed record → re-edit seed.
+    const bodyId = op.params.targetBodyId || op.inputs?.[0]?.primary.bodyId || "body1";
+    const featureId = op.featureId ?? nextFeatureId();
+    // ONE formatter, shared with the tool layer, mirroring `dto.rs
+    // feature_value_text` for Hole exactly (`Ø` + one decimal).
+    const valueText = holeValueText(op.params.diameter);
+    const editing = op.featureId !== undefined && mockFeatures.some((f) => f.id === featureId);
+    if (editing) {
+      mockFeatures = mockFeatures.map((f) => (f.id === featureId ? { ...f, valueText } : f));
+    } else {
+      // `kind: "boolean"` mirrors the REAL projection bucket — `dto.rs feature_kind`
+      // buckets Hole with the body-modifier family, not with Fillet's dress-up
+      // bucket. `opType` carries the authored identity the re-edit routes on.
+      mockFeatures = [...mockFeatures, { id: featureId, kind: "boolean", opType: "Hole", label: "Hole", valueText, status: "ok" }];
+    }
+    return { changed: [bodyId], removed: [], label: "Hole", featureId };
   }
   if (op.opType === "LinearPattern") {
     // MOCK LIMIT: no real instancing — re-emit the source body + a feature.

@@ -102,6 +102,13 @@ export const ICON_PATHS = {
   // distinctly from `sketch`/`pen` (a pencil) and `grid` (a square lattice).
   datum: "M3 15l9-3.5 9 3.5-9 3.5-9-3.5zM3 8.5l9-3.5 9 3.5-9 3.5-9-3.5M3 15V8.5",
 
+  // ---- WP-C T3 hole (authored for this WP, NOT from the prototype) ----
+  // A bore seen in three-quarter view: the elliptical mouth, the two side walls
+  // dropping from it, the bottom arc closing them, and the host face running out
+  // to both sides. The face lines are what separate it from `circle`/`ellipse` —
+  // a hole is a hole because it is IN something.
+  hole: "M17 7.5a5 2.5 0 1 1-10 0 5 2.5 0 0 1 10 0zM7 7.5v8a5 2.5 0 0 0 10 0v-8M2.5 7.5h4.5M17 7.5h4.5",
+
   // ---- W2-B measure (authored for this WP, NOT from the prototype) ----
   // A ruler laid diagonally with three graduation ticks striking inward from its
   // upper edge. Reads distinctly from `dimension` (a plain arrowed extension

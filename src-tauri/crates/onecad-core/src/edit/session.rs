@@ -528,6 +528,8 @@ impl DocumentSession {
         validate_import_step(&record.op)?;
         // TransformBody params must be a well-formed rigid motion (all entry paths).
         validate_transform_body(&record.op)?;
+        // Hole params must satisfy the SCHEMA §7.3 conditional blocks (all paths).
+        validate_hole(&record.op)?;
         // F8: re-derive the uniform input view for Known ops (self-healing — don't
         // trust caller-supplied `inputs`; mirrors `update_operation_params` and the
         // record deserialize path). An Opaque frozen node keeps its stored inputs.
@@ -608,6 +610,8 @@ impl DocumentSession {
         validate_import_step(&op)?;
         // TransformBody params must be a well-formed rigid motion (all entry paths).
         validate_transform_body(&op)?;
+        // Hole params must satisfy the SCHEMA §7.3 conditional blocks (all paths).
+        validate_hole(&op)?;
         let mut nr = prior.clone();
         nr.op = op;
         // A sanctioned Fillet⇄Chamfer swap is the only path that can strand the
@@ -1453,6 +1457,24 @@ fn validate_import_step(op: &Operation) -> Result<(), DomainError> {
 /// [`TransformBodyParams::validate`]: crate::document::record::TransformBodyParams::validate
 fn validate_transform_body(op: &Operation) -> Result<(), DomainError> {
     let Operation::Known(KnownOperation::TransformBody(p)) = op else {
+        return Ok(());
+    };
+    p.validate().map_err(DomainError::Validation)
+}
+
+/// Validates a [`KnownOperation::Hole`] record's params (positive finite
+/// diameter/depth, and the SCHEMA §7.3 conditional `cb*`/`cs*` blocks REQUIRED —
+/// and only permitted — for their own `holeType`; see [`HoleParams::validate`]).
+/// Non-hole and opaque ops are trivially valid. Enforced here for the same
+/// single-writer reason as [`validate_import_step`].
+///
+/// This is the ONLY layer that can enforce "a simple hole carries no `cb*`": the
+/// worker never sees a param it does not read, so a stale conditional would ride
+/// the record forever and resurrect on the next profile switch.
+///
+/// [`HoleParams::validate`]: crate::document::record::HoleParams::validate
+fn validate_hole(op: &Operation) -> Result<(), DomainError> {
+    let Operation::Known(KnownOperation::Hole(p)) = op else {
         return Ok(());
     };
     p.validate().map_err(DomainError::Validation)

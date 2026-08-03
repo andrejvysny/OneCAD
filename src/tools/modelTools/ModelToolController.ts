@@ -21,6 +21,7 @@ import type {
   BooleanOperation,
   FeatureRecord,
   FilletParams,
+  HoleParams,
   OperationOp,
   PreviewDraft,
   PreviewFailure,
@@ -66,6 +67,16 @@ import { averageOutward, edgeOutward } from "@/tools/preview/edgeDirection";
 import { axisSplitsRegion, type LatheAxis } from "@/tools/preview/lathePreview";
 import { angleFromDrag, snapRevolveAngle, clampAngle, angleFromValueText } from "@/tools/preview/revolveAngle";
 import { thicknessFromValueText } from "@/tools/preview/shellThickness";
+import {
+  holeFsmFromParams,
+  holeInit,
+  holeParamsOf,
+  holeStep,
+  type HoleEvent,
+  type HoleFsm,
+} from "./holeMachine";
+import { holeStandardPatch } from "./holeStandards";
+import type { HoleChipOpts } from "@/stores/toolChipStore";
 import {
   measureAdd,
   measureInit,
@@ -286,6 +297,13 @@ const EDGE_OP_DRAG_TRAILING_MS = 80;
 const SHELL_TRAILING_MS = 200;
 
 /**
+ * Status hint shown for as long as a hole is armed. It names the RE-CLICK
+ * affordance, which has no other surface: nothing on screen suggests that
+ * clicking the face again moves the hole rather than starting a second one.
+ */
+const HOLE_ARMED_HINT = "Hole: set the size, click again to move it · Enter or ✓ to apply";
+
+/**
  * How many armed edges contribute to the drag-direction mean. The mean only has
  * to orient ONE screen axis, so a long tangent-chain selection must not walk
  * every mesh entry to compute it.
@@ -434,7 +452,7 @@ interface ToolPreviewSession {
 }
 
 /** Which tool owns the currently open preview sessions (drives hints + params). */
-type PreviewOwner = "extrude" | "revolve" | "edgeOp" | "shell" | "boolean";
+type PreviewOwner = "extrude" | "revolve" | "edgeOp" | "shell" | "boolean" | "hole";
 
 export class ModelToolController {
   private extrude: ExtrudeFsm = extrudeInit();
@@ -565,6 +583,17 @@ export class ModelToolController {
   private shellEditFeatureId: string | undefined;
   /** Stored params of the shell being re-edited (thickness-only edit preserves faces). */
   private shellStoredParams: Record<string, unknown> | undefined;
+
+  // Hole context (WP-C T3): the FSM holds every param; only identity lives here.
+  private hole: HoleFsm = holeInit();
+  private holeEditFeatureId: string | undefined;
+  /**
+   * The armed seat's snapshot TopoKey. Kept OUTSIDE the FSM (which stores only
+   * the minted `SemanticRef`) purely so a re-click can recognise "same face" on a
+   * body whose faces were never promoted — a pick carries a TopoKey, and the
+   * minted ElementId is the only thing the record may hold.
+   */
+  private holeTopoKey: string | undefined;
 
   // Pattern / mirror context (chip-driven; ghost clones of the source body).
   private patternEditFeatureId: string | undefined;
@@ -819,6 +848,7 @@ export class ModelToolController {
     this.cancelBoolean();
     this.cancelRevolve();
     this.cancelShell();
+    this.cancelHole();
     this.cancelPattern();
     this.cancelTransform();
     this.endDatumPick();
@@ -841,6 +871,7 @@ export class ModelToolController {
     else if (tool === "fillet") void this.armEdgeOpFromSelection("Fillet", { auto: true });
     else if (tool === "boolean") this.startBooleanFromSelection();
     else if (tool === "shell") void this.armShellFromSelection();
+    else if (tool === "hole") this.startHole();
     else if (tool === "linearPattern") this.armLinearFromSelection();
     else if (tool === "circularPattern") this.armCircularFromSelection();
     else if (tool === "mirror") this.armMirrorFromSelection();
@@ -3059,6 +3090,334 @@ export class ModelToolController {
     await this.armShell([], featureId, thickness);
   }
 
+  // ── hole (WP-C T3) ─────────────────────────────────────────────────────────
+  //
+  // Two-phase gesture, like the datum tool: activate → click a PLANAR face →
+  // armed with a live kernel preview at the clicked point, chips for the profile
+  // and its dimensions, ✓ / Enter commits. A further click on a face MOVES the
+  // hole instead of re-arming (the seat is the expensive choice, the position is
+  // cheap), so a mis-placed hole is one click from fixed rather than a cancel.
+  //
+  // Planarity is validated BEFORE the tool arms (the sketch-on-face precedent):
+  // the backend would refuse a curved seat with `OP_FAILED`, and refusing it here
+  // turns a failed history row into an inline hint. The check runs on the LOCAL
+  // mesh (`faceFrame`) — no round-trip on a pointer click.
+
+  private startHole(): void {
+    this.hole = holeStep(this.hole, { kind: "start" }).state;
+    viewportStore
+      .getState()
+      .setStatusHint("Click a flat face to place the hole · Esc cancels", { sticky: true });
+    this.updateDebug();
+  }
+
+  /** The picked face's planar frame, or `null` when the face is not flat. */
+  private holeFaceFrame(bodyId: string, topoKey: string): PlanarFaceFrame | null {
+    const entry = getEntry(bodyId);
+    if (!entry) return null;
+    const ordinal = entry.faceIndex.ordinalForId(topoKey);
+    if (ordinal < 0) return null;
+    return faceFrame(entry.view, ordinal);
+  }
+
+  /**
+   * A face click while the hole tool is picking (or re-positioning). Promotes the
+   * TopoKey to a Rust-minted ElementId first, exactly like `tryPickExtrudeFace`:
+   * the seat must survive a parametric edit, and only a minted id carries the
+   * identity the resolution ladder rebinds (SCHEMA §7.3 / §10).
+   */
+  private async tryPickHoleFace(clientX: number, clientY: number): Promise<void> {
+    if (this.hole.phase !== "facePick" && this.hole.phase !== "armed") return;
+    const hit = this.engine.probePick(clientX, clientY);
+    if (!hit || hit.kind !== "face" || hit.bodyId.startsWith("preview:")) {
+      viewportStore.getState().setStatusHint("Hole: click a flat FACE to place the hole", {
+        severity: "error",
+        sticky: true,
+      });
+      return;
+    }
+    if (!this.holeFaceFrame(hit.bodyId, hit.topoKey)) {
+      // Refused HERE rather than by the kernel: a curved seat has no axis, and an
+      // errored history row is a worse way to learn that than a hint.
+      viewportStore.getState().setStatusHint("Hole: that face is not flat — a hole needs a flat seat", {
+        severity: "error",
+        sticky: true,
+      });
+      return;
+    }
+    const point: [number, number, number] = [hit.worldPos.x, hit.worldPos.y, hit.worldPos.z];
+
+    // Re-positioning an ALREADY armed hole on the SAME face: no promotion, no new
+    // session — just newer params on the live one.
+    const armedFace = this.hole.face as SemanticRef | null;
+    if (this.hole.phase === "armed" && armedFace?.primary.bodyId === hit.bodyId) {
+      const sameFace = hit.elementId
+        ? armedFace.primary.elementId === hit.elementId
+        : this.holeTopoKey === hit.topoKey;
+      if (sameFace) {
+        this.hole = holeStep(this.hole, { kind: "movePoint", point }).state;
+        this.showHoleChip(); // republish at the new anchor
+        this.sendPreview();
+        this.updateDebug();
+        return;
+      }
+    }
+
+    const gen = ++this.armGen;
+    let elementId = hit.elementId;
+    if (!elementId && hit.topoKey) {
+      const promoted = await this.client
+        .promoteSelection(hit.bodyId, [{ topoKey: hit.topoKey, anchor: { worldPoint: point } }])
+        .catch(() => null);
+      if (gen !== this.armGen) return; // re-armed while awaiting — drop
+      elementId = promoted?.[0]?.elementId;
+    }
+    if (toolStore.getState().modelTool !== "hole") return;
+    const face: SemanticRef = {
+      primary: { bodyId: hit.bodyId, elementId, kind: "face" },
+      anchor: { worldPoint: point },
+    };
+    this.holeTopoKey = hit.topoKey;
+    this.hole = holeStep(this.hole, {
+      kind: "pickFace",
+      face,
+      targetBodyId: hit.bodyId,
+      point,
+    }).state;
+    this.showHoleChip();
+    viewportStore.getState().setStatusHint(HOLE_ARMED_HINT, { sticky: true });
+    this.previewArmHint = this.holeEditFeatureId ? null : HOLE_ARMED_HINT;
+    this.updateDebug();
+    // A re-edit runs L1-only: PreviewOp executes against the CURRENT head, so
+    // previewing an existing feature would double-apply it (the extrude re-edit rule).
+    if (!this.holeEditFeatureId) await this.openHolePreview(gen);
+  }
+
+  /** (Re)publish the armed hole cluster with the FSM's current numbers. */
+  private showHoleChip(): void {
+    const anchor = this.hole.point ?? [0, 0, 0];
+    toolChipStore.getState().showHole(
+      this.hole.diameter,
+      anchor,
+      {
+        onValue: (v) => this.onHoleEvent({ kind: "setDiameter", diameter: v }),
+        onHoleType: (holeType) => this.onHoleEvent({ kind: "setHoleType", holeType }),
+        onDepth: (depth) => this.onHoleEvent({ kind: "setDepth", depth }),
+        onCbDiameter: (v) => this.onHoleEvent({ kind: "setCbDiameter", value: v }),
+        onCbDepth: (v) => this.onHoleEvent({ kind: "setCbDepth", value: v }),
+        onCsDiameter: (v) => this.onHoleEvent({ kind: "setCsDiameter", value: v }),
+        onCsAngle: (deg) => this.onHoleEvent({ kind: "setCsAngle", angleDeg: deg }),
+        onStandard: (thread, fit) => {
+          const patch = holeStandardPatch(thread, fit, this.hole.holeType);
+          if (patch) this.onHoleEvent({ kind: "applyStandard", patch });
+        },
+        onConfirm: () => void this.commitHole(),
+        onCancel: () => toolStore.getState().setTool("select"),
+      },
+      this.holeChipOpts(),
+    );
+  }
+
+  private holeChipOpts(): HoleChipOpts {
+    return {
+      holeType: this.hole.holeType,
+      depth: this.hole.depth,
+      cbDiameter: this.hole.cbDiameter,
+      cbDepth: this.hole.cbDepth,
+      csDiameter: this.hole.csDiameter,
+      csAngleDeg: this.hole.csAngleDeg,
+    };
+  }
+
+  /**
+   * ONE entry point for every chip edit: step the FSM, republish the cluster (a
+   * profile flip changes WHICH fields render, so the whole cluster is reissued
+   * rather than patched field by field), and push newer preview params.
+   */
+  private onHoleEvent(e: HoleEvent): void {
+    const before = this.hole;
+    this.hole = holeStep(this.hole, e).state;
+    if (this.hole === before) return;
+    this.showHoleChip();
+    this.sendPreview();
+    this.updateDebug();
+  }
+
+  private async openHolePreview(gen: number): Promise<void> {
+    // Re-seating an already-armed hole opens a NEW session; the old one must be
+    // released first or it leaks a scratch job in the worker (and its stale
+    // candidate would keep publishing meshes at the previous seat).
+    this.closePreviewSessions();
+    let params: PreviewParams;
+    try {
+      params = this.holePreviewParams();
+    } catch {
+      return; // not yet a complete hole — nothing honest to preview
+    }
+    const draft: PreviewDraft = {
+      opType: "Hole",
+      inputs: this.holeInputs(),
+      params,
+    };
+    let session: PreviewSession;
+    try {
+      session = await this.deps.client.beginPreview(draft);
+    } catch (error) {
+      if (gen !== this.armGen) return;
+      traceWarn("extrude", `Hole preview session failed: ${errMessage(error)}`);
+      return;
+    }
+    if (gen !== this.armGen) {
+      void this.deps.client.endPreview(session.sessionId, false);
+      return;
+    }
+    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [] }];
+    this.previewOwner = "hole";
+    this.previewParamsFn = () => this.holePreviewParams();
+    this.previewPending = false;
+    this.previewFailure = null;
+    this.stalePreviewRetryAttempted = false;
+    this.throttle.reset();
+    this.throttle.setTrailingMs(SHELL_TRAILING_MS);
+    this.sendPreview();
+    this.updateDebug();
+  }
+
+  /**
+   * The op's semantic refs — host body then host face, mirroring SCHEMA §7.3's
+   * `inputs: [semanticRef(host body), semanticRef(host face)]`. (Rust rebuilds
+   * these from `params` for the wire; this is the graph-visible echo the preview
+   * draft and the commit op both carry, in lockstep.)
+   */
+  private holeInputs(): SemanticRef[] {
+    const face = this.hole.face as SemanticRef | null;
+    if (!face) return [];
+    return [{ primary: { bodyId: this.hole.targetBodyId, kind: "body" } }, face];
+  }
+
+  /** Complete canonical Hole params for both exact preview and commit. */
+  private holeParams(): HoleParams {
+    return holeParamsOf(this.hole);
+  }
+
+  private holePreviewParams(): PreviewParams {
+    return { ...this.holeParams() };
+  }
+
+  /**
+   * Apply the armed hole. A RE-EDIT is a whole-params replacement (unlike Shell's
+   * scalar merge): the conditional `cb*`/`cs*` blocks mean a patch cannot express
+   * "this is no longer a counterbore" — `updateScalarParamsCommand` spreads, and a
+   * spread can never DELETE a key, so a counterbore→simple edit would leave the
+   * `cb*` behind and the Rust session would reject the record. The FSM already
+   * holds every field, so replacing wholesale is both correct and simpler.
+   */
+  private async commitHole(): Promise<void> {
+    if (this.hole.phase !== "armed") return;
+    if (this.previewFailure) {
+      viewportStore
+        .getState()
+        .setStatusHint(`Cannot apply invalid preview: ${this.previewFailure.message}`, {
+          severity: "error",
+          sticky: true,
+        });
+      return;
+    }
+    const step = holeStep(this.hole, { kind: "confirm" });
+    if (step.effect !== "commit") return;
+    this.hole = step.state; // → committing
+    toolStore.setState({ phase: "committing" });
+    const editFeatureId = this.holeEditFeatureId;
+    const gen = ++this.commitGen;
+    const op: OperationOp = {
+      opType: "Hole",
+      featureId: editFeatureId,
+      inputs: this.holeInputs(),
+      params: this.holeParams(),
+    };
+
+    // A re-edit has no lane session (it would double-apply the existing feature),
+    // so it takes the plain applyOperation path.
+    if (editFeatureId) {
+      let failure: string | null = null;
+      try {
+        this.applyResult(await this.client.applyOperation(op));
+      } catch (e) {
+        failure = errMessage(e);
+      }
+      this.finishHole(failure === null ? "Hole updated" : `Hole failed: ${failure}`, failure !== null);
+      return;
+    }
+
+    const outcome = await this.commitPreviewedOp(op, gen);
+    if (outcome.kind === "superseded") return;
+    if (outcome.kind === "failed") {
+      this.hole = holeStep(this.hole, { kind: "commitFailed" }).state; // → armed
+      toolStore.setState({ phase: "armed" });
+      viewportStore
+        .getState()
+        .setStatusHint(`Hole failed: ${outcome.reason}`, { severity: "error", sticky: true });
+      await this.openHolePreview(this.armGen); // re-arm the preview (work kept)
+      this.updateDebug();
+      return;
+    }
+    this.applyResult(outcome.res);
+    this.teardownPreviewedTool();
+    this.finishHole("Hole", false);
+  }
+
+  private finishHole(hint: string, failed: boolean): void {
+    this.hole = holeInit();
+    this.holeEditFeatureId = undefined;
+    this.holeTopoKey = undefined;
+    toolChipStore.getState().clear();
+    this.resetToSelect(hint, failed ? { severity: "error", sticky: true } : undefined);
+    this.updateDebug();
+  }
+
+  /**
+   * Re-arm the hole tool on an existing Hole feature. Unlike the value-only
+   * re-edits, EVERY field is seeded from the stored params — including the frozen
+   * seat (`face`/`point`), which the user never has to re-pick.
+   */
+  async editHoleFeature(featureId: string): Promise<void> {
+    const feat = documentStore.getState().features.find((f) => f.id === featureId);
+    // Gate on `opType`, NEVER `kind`: `dto.rs feature_kind` buckets Hole under
+    // `boolean`, so a `kind === "hole"` guard is unsatisfiable on the Tauri lane.
+    if (!feat || feat.opType !== "Hole") return;
+    const requestGen = ++this.armGen;
+    const stored = await this.client.getOperationParams(featureId).catch(() => undefined);
+    if (requestGen !== this.armGen) return; // superseded while in flight
+    const seeded = holeFsmFromParams(stored);
+    if (!seeded) {
+      viewportStore
+        .getState()
+        .setStatusHint("Cannot re-edit this hole: its stored parameters are unavailable", {
+          severity: "error",
+          sticky: true,
+        });
+      return;
+    }
+    toolStore.getState().setTool("hole"); // fires cancelHole (clears the seed fields)
+    this.armGen++; // the async startHole path must not clobber the seed
+    this.holeEditFeatureId = featureId; // set AFTER the tool-change cancel
+    this.hole = seeded;
+    this.showHoleChip();
+    viewportStore.getState().setStatusHint(HOLE_ARMED_HINT, { sticky: true });
+    this.updateDebug();
+  }
+
+  private cancelHole(): void {
+    // Release any open hole lane session FIRST (see cancelFillet).
+    this.closePreviewSessions();
+    this.previewArmHint = null;
+    this.hole = holeInit();
+    this.holeEditFeatureId = undefined;
+    this.holeTopoKey = undefined;
+    toolChipStore.getState().clear();
+    this.updateDebug(); // republish the now-idle phase (a tool switch has no other hook)
+  }
+
   // ── linear pattern ───────────────────────────────────────────────────────
   //
   // Chip-driven: axis (X/Y/Z) + count (2–12) + spacing (mm) + Apply. A live ghost
@@ -4334,6 +4693,16 @@ export class ModelToolController {
     // Align pick owns the pointer: a CLICK takes the face, a drag was an orbit.
     if (this.transform.alignPhase !== null) {
       if (wasClick) this.tryPickAlignFace(e.clientX, e.clientY);
+      return;
+    }
+
+    // The hole tool owns every viewport CLICK for as long as it is active: the
+    // first places the hole, each later one moves it. A drag stays an orbit, and
+    // a press on the chip is excluded so the ✓ remains clickable.
+    if (this.hole.phase === "facePick" || this.hole.phase === "armed") {
+      if (wasClick && !this.isExcludedClickAwayTarget(e.target)) {
+        void this.tryPickHoleFace(e.clientX, e.clientY);
+      }
       return;
     }
 
@@ -5890,6 +6259,21 @@ export class ModelToolController {
       // readout e2e has of a value whose chip shows `=` rather than a number.
       edgeOpDistance2: this.fillet.distance2,
       shellPhase: this.shell.phase,
+      // Hole tool (WP-C T3). The picked seat and every conditional dimension are
+      // published: the chip cluster renders only the ACTIVE profile's fields, so
+      // this is the only surface on which e2e can see that the other profile's
+      // numbers survived a flip.
+      holePhase: this.hole.phase,
+      holeType: this.hole.holeType,
+      holeDiameter: this.hole.diameter,
+      holeDepth: this.hole.depth,
+      holePoint: this.hole.point ? [...this.hole.point] : null,
+      holeBodyId: this.hole.targetBodyId || null,
+      holeCbDiameter: this.hole.cbDiameter,
+      holeCbDepth: this.hole.cbDepth,
+      holeCsDiameter: this.hole.csDiameter,
+      holeCsAngleDeg: this.hole.csAngleDeg,
+      holeEdit: this.holeEditFeatureId ?? null,
       // Placement tool (WP-B W1). `transformFold` is the record a ✓ would
       // REWRITE — the one bit of the fold decision that has no visible surface,
       // and therefore the one e2e has to read here rather than infer from the
@@ -6072,6 +6456,11 @@ export class ModelToolController {
       if (this.shell.phase === "armed") {
         e.preventDefault();
         void this.commitShell();
+        return;
+      }
+      if (this.hole.phase === "armed") {
+        e.preventDefault();
+        void this.commitHole();
         return;
       }
       // A placement joins the same explicit gesture: nothing writes to the
@@ -6257,6 +6646,7 @@ export class ModelToolController {
     this.cancelBoolean();
     this.cancelRevolve();
     this.cancelShell();
+    this.cancelHole();
     this.cancelPattern();
     this.cancelTransform();
     this.endDatumPick();

@@ -121,6 +121,14 @@ add_executable(test_m6a_ops test_m6a_ops.cpp)
 target_link_libraries(test_m6a_ops PRIVATE worker_core)
 add_test(NAME m6a_ops COMMAND test_m6a_ops)
 
+# --- WP-C T3: `Hole` numerics — EXACT analytic volumes (through-all / blind /
+#     counterbore / countersink) against the exact BRep via GProp, the point
+#     re-projection fences, the non-planar-seat + cb/cs guards, and bit-equal
+#     determinism. In-process, real OCCT. ---
+add_executable(test_hole_op test_hole_op.cpp)
+target_link_libraries(test_hole_op PRIVATE worker_core)
+add_test(NAME hole_op COMMAND test_hole_op)
+
 # --- WP-B W0: `TransformBody` numerics (exact bbox/volume, the normative T∘R
 #     order, §2 copy ordinals) + the element-map placement migration
 #     (`apply_placement`: level-1 rebind with ZERO scoring, anchors moved by

@@ -42,6 +42,8 @@ export type ModelTool =
   | "mirror"
   /** Move/rotate a body selection (WP-B W1 TransformBody). */
   | "transform"
+  /** Machined hole on a planar face (WP-C T3 Hole). */
+  | "hole"
   /** Measure (W2-B): a READ-ONLY inspection tool — picks nothing into history. */
   | "measure";
 

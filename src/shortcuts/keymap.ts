@@ -42,6 +42,14 @@
  *     This deliberately RETIRES the old cross-mode `f`-while-sketching → model
  *     fillet fallback (which finished the sketch): a 2D fillet is what `F` means
  *     while you are drawing, and the toolbar click still reaches the 3D one.
+ *   - `⇧H` (Hole, WP-C T3) is an exact shift chord. Plain `h` is the GLOBAL
+ *     `home` binding, and mode keys WIN over global (`resolveBinding` searches the
+ *     mode table first), so a model-mode `h` would silently shadow home — which
+ *     `e2e/filletChamfer.spec.ts` explicitly asserts must not happen. `H` is the
+ *     only mnemonic letter for "hole", so it takes the chord rather than one of the
+ *     mnemonic-free leftovers (`w`/`j`/`n`/`q`), exactly as Offset took `⇧O` rather
+ *     than surrender `O` to Ellipse. Free in the sketch table, so sketch mode
+ *     reaches it through the ordinary cross-mode fallback.
  *   - `⇧O` (Offset, WP-C T2b) is an exact shift chord, like `⇧R`/`⇧?`/`⇧I`, so
  *     plain `o` still resolves to Ellipse. Offset's conventional key IS `O` in
  *     other CAD; Ellipse already holds it here, so Offset takes the chord rather
@@ -93,6 +101,9 @@ export const MODEL_KEYS: KeyBinding[] = [
   // stops model-mode `t` falling through cross-mode and STARTING A SKETCH with
   // Trim, which is what it did while the model table had no `t` of its own.
   { key: "t", action: { type: "tool", tool: "transform" } },
+  // WP-C T3 Hole. An exact shift chord — see COLLISIONS on why plain `h` cannot
+  // be claimed here.
+  { key: "h", shift: true, action: { type: "tool", tool: "hole" } },
   // W2-B Measure. `?` (⇧/) is free in BOTH tables and reads as "what is this?".
   // Declared as an exact shift chord, exactly like sketch ⇧R, so it can never be
   // claimed by a plain-key press. It is in NO_CROSS_MODE below — see there.

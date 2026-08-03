@@ -19,6 +19,7 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "@/ui/cn";
 import { DimensionInput } from "@/features/sketch/DimensionInput";
+import { HoleChipCluster } from "./HoleChipCluster";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToolChipStore, toolChipStore } from "@/stores/toolChipStore";
 import { LENGTH_SUFFIX, formatLength, parseLength } from "@/units/format";
@@ -759,6 +760,15 @@ export function ModelToolChips() {
           </>,
         )
       : numericChip(LENGTH_SUFFIX);
+  } else if (kind === "hole") {
+    // WP-C T3. The cluster's own shape depends on `holeType`, so it lives in its
+    // own component; only the shared ✓/✕ pair is added here.
+    content = panel(
+      <>
+        <HoleChipCluster />
+        {confirmButtons}
+      </>,
+    );
   } else if (kind === "sketchValue") {
     // WP-C T2b: an armed sketch EDIT tool's live parameter (fillet radius /
     // offset distance). It commits nothing — the geometry commits on a viewport

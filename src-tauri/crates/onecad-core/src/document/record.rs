@@ -73,6 +73,7 @@ const KNOWN_OP_TYPES: &[&str] = &[
     "MirrorBody",
     "ImportStep",
     "TransformBody",
+    "Hole",
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -307,6 +308,7 @@ pub enum KnownOperation {
     MirrorBody(MirrorBodyParams),
     ImportStep(ImportStepParams),
     TransformBody(TransformBodyParams),
+    Hole(HoleParams),
 }
 
 /// Unknown-`opType` payload, captured as a raw map (frozen node).
@@ -339,6 +341,7 @@ impl Operation {
                 KnownOperation::MirrorBody(_) => "MirrorBody",
                 KnownOperation::ImportStep(_) => "ImportStep",
                 KnownOperation::TransformBody(_) => "TransformBody",
+                KnownOperation::Hole(_) => "Hole",
             },
             // The frozen node keeps its original tag inside `raw`; report it so a
             // future opType is not mislabelled as one of the known ops.
@@ -498,6 +501,20 @@ impl Operation {
                     inputs.push_body(*b);
                 }
             }
+
+            // Hole: the host body it is machined into, plus the host FACE the
+            // axis is derived from (SCHEMA §7.3 — `inputs: [semanticRef(host
+            // body), semanticRef(host face)]`). No C++ analogue (new v2 op).
+            // The face element id comes from the ref's `primary` when it has one;
+            // an intent-only face ref contributes no element dep and is bound by
+            // the ladder at regen time (mirrors the Fillet edge-ref rule).
+            KnownOperation::Hole(p) => {
+                inputs.push_body(p.target_body);
+                if let Some(primary) = &p.face.primary {
+                    inputs.push_body(primary.body);
+                    inputs.push_element(primary.element.clone());
+                }
+            }
         }
         inputs
     }
@@ -620,6 +637,36 @@ pub enum BooleanOp {
     Cut,
     Intersect,
 }
+
+/// Machined-hole profile (SCHEMA §7.3 `Hole.holeType` ∈ `simple` /
+/// `counterbore` / `countersink`). Lowercase wire values — unlike the PascalCase
+/// mode enums above, these are new-in-v2 values SCHEMA spells lowercase.
+///
+/// The variant selects which conditional param block is REQUIRED (see
+/// [`HoleParams::validate`]): `Counterbore` needs `cb*`, `Countersink` needs
+/// `cs*`, `Simple` needs neither and permits neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HoleType {
+    /// A plain drilled cylinder.
+    #[default]
+    Simple,
+    /// A drilled cylinder with a larger coaxial flat-bottomed recess seated at
+    /// the face (socket-head cap-screw clearance).
+    Counterbore,
+    /// A drilled cylinder with a conical recess seated at the face (flat-head
+    /// screw clearance).
+    Countersink,
+}
+
+/// The countersink included angles SCHEMA §7.3 admits, in degrees.
+///
+/// Not a free scalar: a countersink angle must match the screw head it clears,
+/// and the four values here are the entire population of standard included
+/// angles (DIN 74 / ISO 7046 90°, ANSI 82°, DIN 7721 / metric-coarse 100°,
+/// rivet/aerospace 120°). An arbitrary angle would silently produce a cone no
+/// fastener seats in, so it is refused at the authoring boundary.
+pub const HOLE_CS_ANGLES_DEG: [f64; 4] = [82.0, 90.0, 100.0, 120.0];
 
 /// Named sketch plane (SCHEMA §7.3 `plane.kind`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1313,6 +1360,162 @@ impl TransformBodyParams {
     }
 }
 
+/// Machined hole on a planar face (SCHEMA §7.3 `Hole`, added 2026-08-03 —
+/// WP-C T3; new v2 op, no OneCAD-CPP analogue). Simple / counterbore /
+/// countersink are ONE parametric feature, not three ops: the profile is a
+/// param, so switching a counterbore to a countersink is a param edit that keeps
+/// the record's identity (and every downstream ref bound to it).
+///
+/// **Lineage is `modified` on [`target_body`](Self::target_body)** — a hole
+/// mints nothing. The tool solid (drill cylinder + the conditional cb cylinder /
+/// cs cone) is fused and cut from the host in one boolean.
+///
+/// `point` is the world-space hole centre, **frozen at authoring**. The worker
+/// re-projects it onto the resolved face's plane every regen and fails loudly
+/// (recoverable `OP_FAILED`) past 1e-3 mm — so a face that moved *within its own
+/// plane* keeps the hole put, while a face that moved *out from under* the point
+/// is a named failure rather than a hole drilled through empty space. The axis is
+/// the face's INWARD normal (−outward) at `point`; it is never stored, because a
+/// stored axis and a re-resolved face can disagree.
+///
+/// Standard-size tables (M-series clearance, SHCS counterbores, DIN 74
+/// countersinks) are a **frontend** concern: these params always carry raw mm.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HoleParams {
+    /// The host body the hole is machined into (SCHEMA `targetBodyId`).
+    #[serde(rename = "targetBodyId")]
+    pub target_body: BodyId,
+    /// The planar host face the hole enters through — identity + descriptor +
+    /// anchor evidence, resolved through the ladder (§10) like a Fillet edge.
+    pub face: ElementRef,
+    /// World-space hole centre, frozen at authoring (see the type docs).
+    pub point: Vec3,
+    pub hole_type: HoleType,
+    /// Drill diameter in mm.
+    pub diameter: Scalar,
+    /// Blind depth in mm, or `None`/`null` = **through-all** (the worker extends
+    /// the drill past the host's extent along the axis). Serialized explicitly as
+    /// `null` rather than skipped: "through-all" is a deliberate authored choice,
+    /// and an absent key would read as an omission.
+    #[serde(default)]
+    pub depth: Option<Scalar>,
+    /// Counterbore diameter in mm. REQUIRED iff `hole_type == Counterbore`.
+    #[serde(default)]
+    pub cb_diameter: Option<Scalar>,
+    /// Counterbore depth in mm (measured from the face inward). REQUIRED iff
+    /// `hole_type == Counterbore`.
+    #[serde(default)]
+    pub cb_depth: Option<Scalar>,
+    /// Countersink major (face-level) diameter in mm. REQUIRED iff
+    /// `hole_type == Countersink`.
+    #[serde(default)]
+    pub cs_diameter: Option<Scalar>,
+    /// Countersink INCLUDED angle in degrees, one of [`HOLE_CS_ANGLES_DEG`].
+    /// REQUIRED iff `hole_type == Countersink`.
+    #[serde(default)]
+    pub cs_angle_deg: Option<Scalar>,
+    #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
+    pub extra: Extra,
+}
+
+impl HoleParams {
+    /// Validates the SCHEMA §7.3 `Hole` invariants, returning a human-facing
+    /// reason on failure. Checked at every authoring entry point (see
+    /// [`crate::edit::session`]), NOT at deserialize time, for the same
+    /// single-writer reason as [`TransformBodyParams::validate`]: a document
+    /// written by another build must still open and round-trip.
+    ///
+    /// The conditional blocks are checked **both ways** — a counterbore without
+    /// `cb*` is rejected, and so is a *simple* hole carrying `cb*`. A stale
+    /// conditional left behind by a profile switch would otherwise sit in the
+    /// record invisibly and reappear the moment the profile switched back.
+    ///
+    /// # Errors
+    /// A message naming the violated invariant.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.point.is_finite() {
+            return Err("Hole point has a non-finite component".into());
+        }
+        positive("Hole diameter", self.diameter.value)?;
+        if let Some(d) = &self.depth {
+            positive("Hole depth", d.value)?;
+        }
+        match self.hole_type {
+            HoleType::Simple => {
+                self.reject_counterbore("simple")?;
+                self.reject_countersink("simple")
+            }
+            HoleType::Counterbore => {
+                self.reject_countersink("counterbore")?;
+                let cb_d = require(self.cb_diameter.as_ref(), "cbDiameter", "counterbore")?;
+                let cb_t = require(self.cb_depth.as_ref(), "cbDepth", "counterbore")?;
+                positive("Hole cbDiameter", cb_d)?;
+                positive("Hole cbDepth", cb_t)?;
+                if cb_d <= self.diameter.value {
+                    return Err(format!(
+                        "Hole cbDiameter must exceed diameter (got {cb_d} <= {})",
+                        self.diameter.value
+                    ));
+                }
+                Ok(())
+            }
+            HoleType::Countersink => {
+                self.reject_counterbore("countersink")?;
+                let cs_d = require(self.cs_diameter.as_ref(), "csDiameter", "countersink")?;
+                let cs_a = require(self.cs_angle_deg.as_ref(), "csAngleDeg", "countersink")?;
+                positive("Hole csDiameter", cs_d)?;
+                if cs_d <= self.diameter.value {
+                    return Err(format!(
+                        "Hole csDiameter must exceed diameter (got {cs_d} <= {})",
+                        self.diameter.value
+                    ));
+                }
+                if !HOLE_CS_ANGLES_DEG.contains(&cs_a) {
+                    return Err(format!(
+                        "Hole csAngleDeg must be one of {HOLE_CS_ANGLES_DEG:?} (got {cs_a})"
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn reject_counterbore(&self, kind: &str) -> Result<(), String> {
+        if self.cb_diameter.is_some() || self.cb_depth.is_some() {
+            return Err(format!(
+                "Hole cb* params are counterbore-only (got a {kind} hole)"
+            ));
+        }
+        Ok(())
+    }
+
+    fn reject_countersink(&self, kind: &str) -> Result<(), String> {
+        if self.cs_diameter.is_some() || self.cs_angle_deg.is_some() {
+            return Err(format!(
+                "Hole cs* params are countersink-only (got a {kind} hole)"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// `Some(value)` or a "`<field>` is required for a `<kind>` hole" message.
+fn require(s: Option<&Scalar>, field: &str, kind: &str) -> Result<f64, String> {
+    s.map(|s| s.value)
+        .ok_or_else(|| format!("Hole {field} is required for a {kind} hole"))
+}
+
+/// Rejects a non-finite or non-positive dimension, naming the field.
+fn positive(field: &str, v: f64) -> Result<(), String> {
+    if !v.is_finite() || v <= 0.0 {
+        return Err(format!(
+            "{field} must be a positive finite length (got {v})"
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1778,6 +1981,301 @@ mod tests {
             "params": {
                 "targets": [body(1).to_string()],
                 "translate": [1.0, 2.0, 3.0],
+                "alienKey": { "future": true }
+            }
+        });
+        let op: Operation = serde_json::from_value(raw.clone()).unwrap();
+        let back = serde_json::to_value(&op).unwrap();
+        assert_eq!(back["params"]["alienKey"], raw["params"]["alienKey"]);
+    }
+
+    // ── Hole (WP-C T3; SCHEMA §7.3, 2026-08-03) ──────────────────────────────
+
+    fn hole_face_ref() -> ElementRef {
+        ElementRef {
+            primary: Some(crate::document::refs::PrimaryRef {
+                body: body(1),
+                element: ElementId::new("el_face_top"),
+                kind: crate::document::refs::ElementKind::Face,
+                extra: Extra::new(),
+            }),
+            intent: None,
+            anchor: None,
+            extra: Extra::new(),
+        }
+    }
+
+    /// A canonical SIMPLE blind hole (the shape the frontend authors).
+    fn hole_params() -> HoleParams {
+        HoleParams {
+            target_body: body(1),
+            face: hole_face_ref(),
+            point: Vec3::new_unchecked(25.0, 10.0, 30.0),
+            hole_type: HoleType::Simple,
+            diameter: Scalar::new(5.5),
+            depth: Some(Scalar::new(20.0)),
+            cb_diameter: None,
+            cb_depth: None,
+            cs_diameter: None,
+            cs_angle_deg: None,
+            extra: Extra::new(),
+        }
+    }
+
+    fn counterbore_params() -> HoleParams {
+        HoleParams {
+            hole_type: HoleType::Counterbore,
+            cb_diameter: Some(Scalar::new(9.5)),
+            cb_depth: Some(Scalar::new(5.4)),
+            ..hole_params()
+        }
+    }
+
+    fn countersink_params() -> HoleParams {
+        HoleParams {
+            hole_type: HoleType::Countersink,
+            cs_diameter: Some(Scalar::new(11.0)),
+            cs_angle_deg: Some(Scalar::new(90.0)),
+            ..hole_params()
+        }
+    }
+
+    #[test]
+    fn hole_is_a_known_op_type() {
+        assert!(KNOWN_OP_TYPES.contains(&"Hole"));
+        let op = Operation::Known(KnownOperation::Hole(hole_params()));
+        assert_eq!(op.op_type(), "Hole");
+        let json = serde_json::to_value(&op).unwrap();
+        assert_eq!(json["opType"], serde_json::json!("Hole"));
+        // Round-trips through the KNOWN gate (never demoted to Opaque).
+        let back: Operation = serde_json::from_value(json).unwrap();
+        assert_eq!(back, op);
+    }
+
+    /// The serialized shape must match the SCHEMA §7.3 `Hole` example key-for-key.
+    #[test]
+    fn hole_serializes_to_the_schema_shape() {
+        let json = serde_json::to_value(KnownOperation::Hole(counterbore_params())).unwrap();
+        let p = &json["params"];
+        assert_eq!(p["targetBodyId"], serde_json::json!(body(1).to_string()));
+        assert_eq!(p["point"], serde_json::json!([25.0, 10.0, 30.0]));
+        assert_eq!(p["holeType"], serde_json::json!("counterbore"));
+        // Scalars normalize to the object form on write (SCHEMA §7.3).
+        assert_eq!(p["diameter"]["value"], serde_json::json!(5.5));
+        assert_eq!(p["depth"]["value"], serde_json::json!(20.0));
+        assert_eq!(p["cbDiameter"]["value"], serde_json::json!(9.5));
+        assert_eq!(p["cbDepth"]["value"], serde_json::json!(5.4));
+        // The inapplicable block renders as explicit `null`, matching the SCHEMA
+        // example — "not a countersink" is authored, not omitted.
+        assert!(p["csDiameter"].is_null() && p["csAngleDeg"].is_null());
+        assert_eq!(p["face"]["primary"]["kind"], serde_json::json!("face"));
+    }
+
+    /// `depth: null` IS through-all, and survives a round-trip as `None`.
+    #[test]
+    fn hole_through_all_is_a_null_depth() {
+        let raw = serde_json::json!({
+            "opType": "Hole",
+            "params": {
+                "targetBodyId": body(1).to_string(),
+                "face": { "primary": { "bodyId": body(1).to_string(),
+                                       "elementId": "el_face_top", "kind": "face" } },
+                "point": [1.0, 2.0, 3.0],
+                "holeType": "simple",
+                "diameter": 6.0,
+                "depth": null
+            }
+        });
+        let op: Operation = serde_json::from_value(raw).unwrap();
+        let Operation::Known(KnownOperation::Hole(p)) = &op else {
+            panic!("expected Hole");
+        };
+        assert!(p.depth.is_none(), "null depth = through-all");
+        // A hand-authored BARE-number scalar loads (SCHEMA §7.3 both-forms rule).
+        assert_eq!(p.diameter.value, 6.0);
+        let back = serde_json::to_value(&op).unwrap();
+        assert!(back["params"]["depth"].is_null());
+        // An ABSENT depth key means the same thing (through-all), never an error.
+        let mut raw2 = back.clone();
+        raw2["params"].as_object_mut().unwrap().remove("depth");
+        let op2: Operation = serde_json::from_value(raw2).unwrap();
+        assert_eq!(op2, op);
+    }
+
+    /// `inputs[]` = host body + host face (SCHEMA §7.3).
+    #[test]
+    fn hole_derives_host_body_and_face_inputs() {
+        let inputs = Operation::Known(KnownOperation::Hole(hole_params())).derive_inputs();
+        assert_eq!(inputs.bodies, vec![body(1)]);
+        assert_eq!(inputs.elements, vec![ElementId::new("el_face_top")]);
+        assert!(inputs.sketches.is_empty());
+
+        // An intent-only face ref contributes no element dep (the ladder binds it
+        // at regen time) but the host body is still a dependency.
+        let intent_only = HoleParams {
+            face: ElementRef {
+                primary: None,
+                ..hole_face_ref()
+            },
+            ..hole_params()
+        };
+        let inputs = Operation::Known(KnownOperation::Hole(intent_only)).derive_inputs();
+        assert_eq!(inputs.bodies, vec![body(1)]);
+        assert!(inputs.elements.is_empty());
+    }
+
+    #[test]
+    fn hole_validation_matrix() {
+        // Every canonical profile is valid.
+        assert!(hole_params().validate().is_ok());
+        assert!(counterbore_params().validate().is_ok());
+        assert!(countersink_params().validate().is_ok());
+        // Through-all (no depth) is valid.
+        assert!(HoleParams {
+            depth: None,
+            ..hole_params()
+        }
+        .validate()
+        .is_ok());
+
+        // ── dimensions ──
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let p = HoleParams {
+                diameter: Scalar {
+                    value: bad,
+                    expr: None,
+                },
+                ..hole_params()
+            };
+            assert!(
+                p.validate().unwrap_err().contains("Hole diameter"),
+                "diameter {bad} must be rejected"
+            );
+            let p = HoleParams {
+                depth: Some(Scalar {
+                    value: bad,
+                    expr: None,
+                }),
+                ..hole_params()
+            };
+            assert!(p.validate().unwrap_err().contains("Hole depth"));
+        }
+        let p = HoleParams {
+            point: Vec3 {
+                x: f64::NAN,
+                y: 0.0,
+                z: 0.0,
+            },
+            ..hole_params()
+        };
+        assert!(p.validate().unwrap_err().contains("non-finite"));
+
+        // ── counterbore conditionals ──
+        for missing in [
+            HoleParams {
+                cb_diameter: None,
+                ..counterbore_params()
+            },
+            HoleParams {
+                cb_depth: None,
+                ..counterbore_params()
+            },
+        ] {
+            assert!(missing
+                .validate()
+                .unwrap_err()
+                .contains("required for a counterbore hole"));
+        }
+        // cbDiameter must EXCEED the drill diameter (equal is not a counterbore).
+        for d in [5.5, 4.0] {
+            let p = HoleParams {
+                cb_diameter: Some(Scalar::new(d)),
+                ..counterbore_params()
+            };
+            assert!(p.validate().unwrap_err().contains("cbDiameter must exceed"));
+        }
+        let p = HoleParams {
+            cb_depth: Some(Scalar::new(0.0)),
+            ..counterbore_params()
+        };
+        assert!(p.validate().unwrap_err().contains("Hole cbDepth"));
+
+        // ── countersink conditionals ──
+        for missing in [
+            HoleParams {
+                cs_diameter: None,
+                ..countersink_params()
+            },
+            HoleParams {
+                cs_angle_deg: None,
+                ..countersink_params()
+            },
+        ] {
+            assert!(missing
+                .validate()
+                .unwrap_err()
+                .contains("required for a countersink hole"));
+        }
+        let p = HoleParams {
+            cs_diameter: Some(Scalar::new(5.5)),
+            ..countersink_params()
+        };
+        assert!(p.validate().unwrap_err().contains("csDiameter must exceed"));
+        // Only the four standard included angles are admitted.
+        for ok in HOLE_CS_ANGLES_DEG {
+            let p = HoleParams {
+                cs_angle_deg: Some(Scalar::new(ok)),
+                ..countersink_params()
+            };
+            assert!(p.validate().is_ok(), "{ok}° is a standard angle");
+        }
+        for bad in [0.0, 60.0, 89.0, 91.0, 180.0] {
+            let p = HoleParams {
+                cs_angle_deg: Some(Scalar::new(bad)),
+                ..countersink_params()
+            };
+            assert!(p
+                .validate()
+                .unwrap_err()
+                .contains("csAngleDeg must be one of"));
+        }
+
+        // ── cross-profile leakage (both directions) ──
+        let p = HoleParams {
+            cb_diameter: Some(Scalar::new(9.5)),
+            cb_depth: Some(Scalar::new(5.4)),
+            ..hole_params()
+        };
+        assert!(p.validate().unwrap_err().contains("counterbore-only"));
+        let p = HoleParams {
+            cs_diameter: Some(Scalar::new(11.0)),
+            ..hole_params()
+        };
+        assert!(p.validate().unwrap_err().contains("countersink-only"));
+        // A counterbore must not carry cs* either (stale profile-switch residue).
+        let p = HoleParams {
+            cs_angle_deg: Some(Scalar::new(90.0)),
+            ..counterbore_params()
+        };
+        assert!(p.validate().unwrap_err().contains("countersink-only"));
+        let p = HoleParams {
+            cb_depth: Some(Scalar::new(5.4)),
+            ..countersink_params()
+        };
+        assert!(p.validate().unwrap_err().contains("counterbore-only"));
+    }
+
+    /// Unknown params keys ride through `extra` verbatim (no `deny_unknown_fields`).
+    #[test]
+    fn hole_preserves_unknown_params_keys() {
+        let raw = serde_json::json!({
+            "opType": "Hole",
+            "params": {
+                "targetBodyId": body(1).to_string(),
+                "face": {},
+                "point": [0.0, 0.0, 0.0],
+                "holeType": "simple",
+                "diameter": 3.0,
                 "alienKey": { "future": true }
             }
         });

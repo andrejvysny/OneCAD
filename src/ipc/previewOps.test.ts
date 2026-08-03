@@ -217,6 +217,99 @@ describe("previewOps OP_BUILDERS mirror their commit call sites", () => {
     expect(op).toEqual({ ...callSite, opId: OP_ID });
   });
 
+  it("Hole matches commitHole's op", () => {
+    // commitHole:
+    //   { opType: "Hole", featureId, inputs: holeInputs(),
+    //     params: holeParamsOf(this.hole) }
+    // — and `holeParamsOf` emits the INACTIVE conditional blocks as explicit
+    // `null`, which is exactly what the builder must reproduce.
+    const face: SemanticRef = {
+      primary: { bodyId: "body2", elementId: "el_top", kind: "face" },
+      anchor: { worldPoint: [10, 10, 25] },
+    };
+    const inputs: SemanticRef[] = [{ primary: { bodyId: "body2", kind: "body" } }, face];
+    const callSite: OperationOp = {
+      opType: "Hole",
+      featureId: undefined,
+      inputs,
+      params: {
+        targetBodyId: "body2",
+        face,
+        point: [10, 10, 25],
+        holeType: "counterbore",
+        diameter: 6.6,
+        depth: 20,
+        cbDiameter: 11,
+        cbDepth: 6.8,
+        csDiameter: null,
+        csAngleDeg: null,
+      },
+    };
+    const op = buildPreviewOp(
+      session({
+        opType: "Hole",
+        inputs,
+        latestParams: {
+          targetBodyId: "body2",
+          face,
+          point: [10, 10, 25],
+          holeType: "counterbore",
+          diameter: 6.6,
+          depth: 20,
+          cbDiameter: 11,
+          cbDepth: 6.8,
+          csDiameter: null,
+          csAngleDeg: null,
+        },
+      }),
+    );
+    expect(op).toEqual({ ...callSite, opId: OP_ID });
+  });
+
+  it("Hole through-all keeps a null depth (a real end condition, not a gap)", () => {
+    const face: SemanticRef = {
+      primary: { bodyId: "b", elementId: "el", kind: "face" },
+      anchor: undefined,
+    };
+    const op = buildPreviewOp(
+      session({
+        opType: "Hole",
+        latestParams: {
+          targetBodyId: "b",
+          face,
+          point: [0, 0, 0],
+          holeType: "simple",
+          diameter: 5.5,
+          depth: null,
+        },
+      }),
+    );
+    expect(op.params).toMatchObject({ depth: null, cbDiameter: null, csAngleDeg: null });
+  });
+
+  it("Hole REFUSES the invariants the backend would refuse", () => {
+    const face: SemanticRef = { primary: { bodyId: "b", elementId: "el", kind: "face" } };
+    const base = { targetBodyId: "b", face, point: [0, 0, 0] as [number, number, number], diameter: 6, depth: null };
+    const build = (p: Record<string, unknown>) => () =>
+      buildPreviewOp(session({ opType: "Hole", latestParams: p as PreviewParams }));
+    // An unknown profile is a caller bug, not a value to marshal — the union is
+    // widened here on purpose so the refusal can be exercised at all.
+    expect(build({ ...base, holeType: "spotface" })).toThrow(/holeType/);
+    expect(build({ ...base, holeType: "simple", diameter: 0 })).toThrow(/diameter/);
+    expect(build({ ...base, holeType: "counterbore" })).toThrow(/cbDiameter/);
+    expect(build({ ...base, holeType: "counterbore", cbDiameter: 6, cbDepth: 2 })).toThrow(
+      /cbDiameter must exceed/,
+    );
+    expect(build({ ...base, holeType: "countersink", csDiameter: 12, csAngleDeg: 95 })).toThrow(
+      /csAngleDeg must be one of/,
+    );
+    expect(
+      build({ ...base, holeType: "countersink", csDiameter: 5, csAngleDeg: 90 }),
+    ).toThrow(/csDiameter must exceed/);
+    // A missing seat is a caller bug, never a partial op on the wire.
+    expect(build({ ...base, face: undefined, holeType: "simple" })).toThrow(/host face ref/);
+  });
+
   it("Boolean matches commitBoolean's op", () => {
     // commitBoolean:
     //   { opType: "Boolean",
@@ -260,6 +353,18 @@ describe("previewOps OP_BUILDERS mirror their commit call sites", () => {
         opType: "Boolean",
         editFeatureId: "F",
         latestParams: { operation: "Union", targetBodyId: "a", toolBodyId: "b" },
+      }),
+      session({
+        opType: "Hole",
+        editFeatureId: "F",
+        latestParams: {
+          targetBodyId: "b",
+          face: { primary: { bodyId: "b", elementId: "el", kind: "face" } },
+          point: [0, 0, 0],
+          holeType: "simple",
+          diameter: 6,
+          depth: null,
+        },
       }),
     ];
     for (const d of drafts) expect(buildPreviewOp(d).featureId).toBe("F");
@@ -342,8 +447,8 @@ describe("previewOps builder validation", () => {
 });
 
 describe("previewOps supportsPreview", () => {
-  it("accepts the six kernel-previewable opTypes", () => {
-    for (const t of ["Extrude", "Revolve", "Fillet", "Chamfer", "Shell", "Boolean"] as const) {
+  it("accepts the seven kernel-previewable opTypes", () => {
+    for (const t of ["Extrude", "Revolve", "Fillet", "Chamfer", "Shell", "Boolean", "Hole"] as const) {
       expect(supportsPreview(t)).toBe(true);
       expect(OP_BUILDERS[t]).toBeTypeOf("function");
     }
@@ -399,6 +504,20 @@ describe("localSolver beginPreview accepts every builder-backed opType", () => {
     ["Chamfer", { opType: "Chamfer" as const, params: { radius: 1, edgeIds: ["e:1"] } }],
     ["Shell", { opType: "Shell" as const, params: { thickness: 1, openFaces: ["f"], targetBodyId: "b" } }],
     ["Boolean", { opType: "Boolean" as const, params: { operation: "Union" as const, targetBodyId: "a", toolBodyId: "b" } }],
+    [
+      "Hole",
+      {
+        opType: "Hole" as const,
+        params: {
+          targetBodyId: "b",
+          face: { primary: { bodyId: "b", elementId: "el", kind: "face" as const } },
+          point: [0, 0, 0] as [number, number, number],
+          holeType: "simple" as const,
+          diameter: 6,
+          depth: null,
+        },
+      },
+    ],
   ])("opens a %s session", async (_name, draft) => {
     const { lane } = makeLane();
     const s = await lane.beginPreview(draft);
@@ -438,6 +557,18 @@ describe("localSolver beginPreview accepts every builder-backed opType", () => {
       { opType: "Chamfer" as const, params: { radius: 1, edgeIds: ["e:1"], featureId: "F" } },
       { opType: "Shell" as const, params: { thickness: 1, openFaces: ["f"], targetBodyId: "b", featureId: "F" } },
       { opType: "Boolean" as const, params: { operation: "Union" as const, targetBodyId: "a", toolBodyId: "b", featureId: "F" } },
+      {
+        opType: "Hole" as const,
+        params: {
+          targetBodyId: "b",
+          face: { primary: { bodyId: "b", elementId: "el", kind: "face" as const } },
+          point: [0, 0, 0] as [number, number, number],
+          holeType: "simple" as const,
+          diameter: 6,
+          depth: null,
+          featureId: "F",
+        },
+      },
     ];
     for (const draft of drafts) {
       const previewOp = vi.fn(async (): Promise<BackendPreview> => ({ bodies: [] }));
@@ -503,7 +634,7 @@ describe("localSolver mock-lane local synthesis table", () => {
     expect(seen[0]?.mesh?.byteLength).toBeGreaterThan(0);
   });
 
-  it.each(["Revolve", "Fillet", "Chamfer", "Shell"] as const)(
+  it.each(["Revolve", "Fillet", "Chamfer", "Shell", "Hole"] as const)(
     "settles the epoch for %s with NO faked geometry",
     async (opType) => {
       const { lane } = makeLane();
@@ -514,7 +645,16 @@ describe("localSolver mock-lane local synthesis table", () => {
           ? { angleDeg: 90 }
           : opType === "Shell"
             ? { thickness: 1, openFaces: ["f"], targetBodyId: "b" }
-            : { radius: 1, edgeIds: ["e:1"] };
+            : opType === "Hole"
+              ? {
+                  targetBodyId: "b",
+                  face: { primary: { bodyId: "b", elementId: "el", kind: "face" as const } },
+                  point: [0, 0, 0] as [number, number, number],
+                  holeType: "simple" as const,
+                  diameter: 6,
+                  depth: null,
+                }
+              : { radius: 1, edgeIds: ["e:1"] };
       const draft =
         opType === "Revolve"
           ? { opType, sketchId: "sk", regionId: "r", params }

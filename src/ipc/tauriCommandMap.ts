@@ -39,6 +39,7 @@ import type {
   OperationOp,
   RevolveParams,
   SemanticRef,
+  HoleParams,
   ShellParams,
   TransformBodyParams,
 } from "./types";
@@ -117,6 +118,28 @@ interface WireBooleanParams {
 /** A world 3-vector on the wire (Rust `Vec3` — `try_from = "[f64; 3]"`, so `[x,y,z]`). */
 type WireVec3 = [number, number, number];
 
+/**
+ * Rust `HoleParams` (record.rs; SCHEMA §7.3 `Hole`).
+ *
+ * Every dimension is a `Scalar` and every CONDITIONAL block is spelled explicitly
+ * as `null` when inactive — the Rust field is `Option<Scalar>` WITHOUT
+ * `skip_serializing_if`, and an authored `null` is what "this hole is not a
+ * countersink" looks like on the wire. `depth: null` is the through-all end
+ * condition, not a missing field.
+ */
+interface WireHoleParams {
+  targetBodyId: string;
+  face: WireElementRef;
+  point: WireVec3;
+  holeType: HoleParams["holeType"];
+  diameter: WireScalar;
+  depth: WireScalar | null;
+  cbDiameter: WireScalar | null;
+  cbDepth: WireScalar | null;
+  csDiameter: WireScalar | null;
+  csAngleDeg: WireScalar | null;
+}
+
 /** Rust `ShellParams` (record.rs). `openFaces` are bare ElementIds/TopoKeys. */
 interface WireShellParams {
   thickness: WireScalar;
@@ -190,6 +213,7 @@ type WireOperation = (
   | { opType: "CircularPattern"; params: WireCircularPatternParams }
   | { opType: "MirrorBody"; params: WireMirrorBodyParams }
   | { opType: "TransformBody"; params: WireTransformBodyParams }
+  | { opType: "Hole"; params: WireHoleParams }
 ) & { opId?: string };
 
 /** A minimal real `OperationRecord` (every other field defaults on the Rust side). */
@@ -392,6 +416,46 @@ function filletParams(p: FilletParams, inputs?: SemanticRef[]): WireFilletParams
   return wire;
 }
 
+/**
+ * SCHEMA §7.3 `Hole`. The host FACE marshals as a typed `ElementRef` exactly like
+ * a fillet edge — identity + the anchor world point — so the worker's ladder can
+ * rebind the seat after a parametric edit instead of drilling into whatever face
+ * happens to carry the old id. `bodyId` is normalized to the bare-uuid core form
+ * ([`bareBodyId`]) for the same reason `edgeElementRef` does it: a pick carries a
+ * bare uuid, a promoted selection carries the `body_<uuid>` wire form, and the
+ * core `EditCommand` serde accepts only the former.
+ *
+ * The conditional blocks are gated on `holeType`, NOT on presence: a caller that
+ * leaves a stale `cbDiameter` on params it has just re-typed to `countersink`
+ * marshals a clean countersink rather than a record the Rust session must reject.
+ */
+function holeParams(p: HoleParams): WireHoleParams {
+  const cb = p.holeType === "counterbore";
+  const cs = p.holeType === "countersink";
+  const optional = (active: boolean, v: number | null | undefined): WireScalar | null =>
+    active && typeof v === "number" && Number.isFinite(v) ? scalar(v) : null;
+  const face: WireElementRef = {
+    primary: {
+      bodyId: bareBodyId(p.face.primary.bodyId),
+      elementId: p.face.primary.elementId ?? "",
+      kind: "face",
+    },
+  };
+  if (p.face.anchor?.worldPoint) face.anchor = { worldPoint: p.face.anchor.worldPoint };
+  return {
+    targetBodyId: bareBodyId(p.targetBodyId),
+    face,
+    point: [...p.point],
+    holeType: p.holeType,
+    diameter: scalar(p.diameter),
+    depth: typeof p.depth === "number" && Number.isFinite(p.depth) ? scalar(p.depth) : null,
+    cbDiameter: optional(cb, p.cbDiameter),
+    cbDepth: optional(cb, p.cbDepth),
+    csDiameter: optional(cs, p.csDiameter),
+    csAngleDeg: optional(cs, p.csAngleDeg),
+  };
+}
+
 function booleanParams(p: BooleanParams): WireBooleanParams {
   return {
     operation: p.operation,
@@ -494,6 +558,8 @@ export function wireOperation(op: OperationOp): WireOperation {
       return { ...identity, opType: "MirrorBody", params: mirrorBodyParams(op.params) };
     case "TransformBody":
       return { ...identity, opType: "TransformBody", params: transformBodyParams(op.params) };
+    case "Hole":
+      return { ...identity, opType: "Hole", params: holeParams(op.params) };
   }
 }
 

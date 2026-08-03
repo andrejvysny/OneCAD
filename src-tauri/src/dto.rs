@@ -852,7 +852,10 @@ pub fn feature_kind(op: &Operation) -> FeatureKind {
             | KnownOperation::ImportStep(_)
             // Interim bucket: `FeatureKind` is a coarse icon grouping and has no
             // placement/move member yet (adding one is a frontend-owned change).
-            | KnownOperation::TransformBody(_) => FeatureKind::Boolean,
+            | KnownOperation::TransformBody(_)
+            // A Hole is a body MODIFIER (it cuts its host), so it groups with the
+            // boolean family rather than the Fillet/Chamfer/Shell dress-up bucket.
+            | KnownOperation::Hole(_) => FeatureKind::Boolean,
         },
         Operation::Opaque(_) => FeatureKind::Extrude,
     }
@@ -881,6 +884,11 @@ pub fn feature_value_text(op: &Operation) -> String {
             None => format!("{:.1} mm", p.radius.value),
         },
         KnownOperation::Shell(p) => format!("{:.1} mm", p.thickness.value),
+        // A hole's one identifying number is its DRILL diameter — the counterbore
+        // /countersink dimensions dress it but never change what fastener it takes.
+        // Diameter-prefixed (`Ø`) rather than " mm"-suffixed so the row cannot be
+        // misread as a length; the unit is mm document-wide.
+        KnownOperation::Hole(p) => format!("Ø{:.1}", p.diameter.value),
         // The operation IS a boolean row's one editable parameter — without it a
         // re-edit op swap has no visible projection signal at all.
         KnownOperation::Boolean(p) => format!("{:?}", p.operation),
@@ -934,6 +942,7 @@ pub fn default_label(op: &Operation) -> &'static str {
             KnownOperation::Sweep(_) => "Sweep",
             KnownOperation::ImportStep(_) => "Import",
             KnownOperation::TransformBody(_) => "Move",
+            KnownOperation::Hole(_) => "Hole",
         },
         // A frozen unknown node keeps its opType as the label rather than
         // masquerading as an Extrude.

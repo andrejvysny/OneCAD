@@ -467,6 +467,15 @@ fn wire_op_inputs(
         Operation::Known(KnownOperation::TransformBody(p)) => {
             p.targets.iter().copied().map(body_input_ref).collect()
         }
+        // Hole: `[semanticRef(host body), semanticRef(host face)]` in that order
+        // (SCHEMA §7.3). The face ref is the TYPED one from `params.face` — it
+        // carries descriptor + anchor evidence, so `HoleOp` resolves it through the
+        // ladder exactly like a Fillet edge (and `NeedsRepair`s rather than guessing
+        // when the face is gone). `params.targetBodyId` also carries the host id
+        // (auto-covered by `to_wire_body_form`); this is the graph-visible echo.
+        Operation::Known(KnownOperation::Hole(p)) => {
+            vec![body_input_ref(p.target_body), element_ref_wire(&p.face)]
+        }
         Operation::Known(KnownOperation::Extrude(p)) => {
             let mut v = Vec::new();
             if p.mode == ExtrudeMode::ToFace {

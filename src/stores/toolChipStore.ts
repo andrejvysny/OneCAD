@@ -11,7 +11,14 @@
  * put, so no per-frame churn.
  */
 import { createStore, useStore } from "zustand";
-import type { BooleanOperation } from "@/ipc/types";
+import type { BooleanOperation, HoleType } from "@/ipc/types";
+import type { HoleFit } from "@/tools/modelTools/holeStandards";
+import {
+  DEFAULT_HOLE_CB_DEPTH,
+  DEFAULT_HOLE_CB_DIAMETER,
+  DEFAULT_HOLE_CS_ANGLE,
+  DEFAULT_HOLE_CS_DIAMETER,
+} from "@/tools/modelTools/holeMachine";
 import type {
   AlignPhase,
   PatternAxis,
@@ -139,6 +146,38 @@ export interface TransformChipOpts {
   copy?: boolean;
 }
 
+/**
+ * Handlers the armed HOLE cluster wires (WP-C T3):
+ * `[Simple|CBore|CSink] [Ø] [depth|Thru] (+ the active conditional pair) [Std ▾] [✓] [✕]`.
+ *
+ * `onValue` is the DRILL diameter — the one number every profile has, so the
+ * cluster's primary input never changes meaning when the profile flips.
+ */
+export interface HoleChipHandlers {
+  onValue: (v: number) => void;
+  onHoleType: (holeType: HoleType) => void;
+  /** `null` = through-all, which is a VALUE here, not a cleared field. */
+  onDepth: (depth: number | null) => void;
+  onCbDiameter: (v: number) => void;
+  onCbDepth: (v: number) => void;
+  onCsDiameter: (v: number) => void;
+  onCsAngle: (deg: number) => void;
+  /** A standards-picker row was chosen (thread + fit), already reduced to mm. */
+  onStandard: (thread: string, fit: HoleFit) => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
+/** The armed hole's current numbers — everything the cluster renders. */
+export interface HoleChipOpts {
+  holeType?: HoleType;
+  depth?: number | null;
+  cbDiameter?: number;
+  cbDepth?: number;
+  csDiameter?: number;
+  csAngleDeg?: number;
+}
+
 /** Handlers the armed DATUM chip wires (offset input + ✓/✕ — DATUM W1). */
 export interface DatumChipHandlers {
   onValue: (v: number) => void;
@@ -158,6 +197,8 @@ export type ChipKind =
   | "circularPattern"
   | "mirror"
   | "transform"
+  /** The armed machined-hole cluster (WP-C T3). */
+  | "hole"
   | "regionSelect"
   | "dimension"
   /** A sketch EDIT tool's live parameter (fillet radius / offset distance —
@@ -201,6 +242,23 @@ export interface ToolChipState {
    * even when the value is still parked here from an earlier flip.
    */
   distance2: number | null;
+  /** Which profile the armed hole cluster is authoring (WP-C T3). */
+  holeType: HoleType;
+  /** Armed hole blind depth, or `null` = through-all. */
+  holeDepth: number | null;
+  /** Armed hole counterbore block (rendered only while `holeType === "counterbore"`). */
+  cbDiameter: number;
+  cbDepth: number;
+  /** Armed hole countersink block (rendered only while `holeType === "countersink"`). */
+  csDiameter: number;
+  csAngleDeg: number;
+  onHoleType: ((holeType: HoleType) => void) | null;
+  onDepth: ((depth: number | null) => void) | null;
+  onCbDiameter: ((v: number) => void) | null;
+  onCbDepth: ((v: number) => void) | null;
+  onCsDiameter: ((v: number) => void) | null;
+  onCsAngle: ((deg: number) => void) | null;
+  onStandard: ((thread: string, fit: HoleFit) => void) | null;
   /** How many regions the armed op covers (1 in the single-region path). */
   regionCount: number;
   /** Armed extrude draft angle in DEGREES — 0 renders the segment collapsed. */
@@ -292,6 +350,13 @@ export interface ToolChipState {
     worldPos: [number, number, number],
     onOp: (op: BooleanOperation) => void,
     onApply: () => void,
+  ): void;
+  /** Show the armed hole cluster at the picked point (WP-C T3). */
+  showHole(
+    diameter: number,
+    worldPos: [number, number, number],
+    handlers: HoleChipHandlers,
+    opts?: HoleChipOpts,
   ): void;
   showShell(
     value: number,
@@ -407,6 +472,19 @@ const CLEARED = {
   onDistance2: null as ((distance2: number | null) => void) | null,
   showEdgeOpSegments: false,
   onEdgeOp: null,
+  holeType: "simple" as HoleType,
+  holeDepth: null as number | null,
+  cbDiameter: DEFAULT_HOLE_CB_DIAMETER,
+  cbDepth: DEFAULT_HOLE_CB_DEPTH,
+  csDiameter: DEFAULT_HOLE_CS_DIAMETER,
+  csAngleDeg: DEFAULT_HOLE_CS_ANGLE,
+  onHoleType: null,
+  onDepth: null,
+  onCbDiameter: null,
+  onCbDepth: null,
+  onCsDiameter: null,
+  onCsAngle: null,
+  onStandard: null,
   regionCount: 1,
   draftAngleDeg: 0,
   showDraft: false,
@@ -518,6 +596,32 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
   },
   showBoolean(op, worldPos, onOp, onApply) {
     set({ ...CLEARED, kind: "booleanOp", op, worldPos, onOp, onApply });
+  },
+  showHole(diameter, worldPos, handlers, opts) {
+    set({
+      ...CLEARED,
+      kind: "hole",
+      value: diameter,
+      worldPos,
+      holeType: opts?.holeType ?? "simple",
+      // `undefined` means "not supplied"; `null` means THROUGH-ALL. `??` would
+      // conflate them, so the check is explicit.
+      holeDepth: opts?.depth === undefined ? null : opts.depth,
+      cbDiameter: opts?.cbDiameter ?? DEFAULT_HOLE_CB_DIAMETER,
+      cbDepth: opts?.cbDepth ?? DEFAULT_HOLE_CB_DEPTH,
+      csDiameter: opts?.csDiameter ?? DEFAULT_HOLE_CS_DIAMETER,
+      csAngleDeg: opts?.csAngleDeg ?? DEFAULT_HOLE_CS_ANGLE,
+      onValue: handlers.onValue,
+      onHoleType: handlers.onHoleType,
+      onDepth: handlers.onDepth,
+      onCbDiameter: handlers.onCbDiameter,
+      onCbDepth: handlers.onCbDepth,
+      onCsDiameter: handlers.onCsDiameter,
+      onCsAngle: handlers.onCsAngle,
+      onStandard: handlers.onStandard,
+      onConfirm: handlers.onConfirm,
+      onCancel: handlers.onCancel,
+    });
   },
   showShell(value, worldPos, onValue, handlers) {
     set({

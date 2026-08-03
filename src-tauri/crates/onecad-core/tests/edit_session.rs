@@ -16,8 +16,8 @@ use onecad_core::document::datum::DatumPlane;
 use onecad_core::document::record::PlaneKind;
 use onecad_core::document::record::{
     BooleanMode, BooleanOp, BooleanParams, ChamferParams, ExtrudeMode, ExtrudeParams, FilletParams,
-    KnownOperation, Operation, OperationRecord, RevolveParams, ShellParams, SketchOpParams,
-    SketchPlaneRef,
+    HoleParams, HoleType, KnownOperation, Operation, OperationRecord, RevolveParams, ShellParams,
+    SketchOpParams, SketchPlaneRef,
 };
 use onecad_core::document::refs::{AxisRef, ElementKind, ElementRef, PrimaryRef, SketchRegionRef};
 use onecad_core::document::variables::{Scalar, Unit, Variable};
@@ -1941,4 +1941,142 @@ fn frontend_delete_datum_wire_parses_and_applies() {
     let mut sess = DocumentSession::new(base_document());
     sess.apply(cmd).unwrap();
     assert!(sess.document().datum(did(1)).is_none());
+}
+
+// ── Hole: the session is the gate on the SCHEMA §7.3 conditional blocks ──────
+//
+// `HoleParams::validate` owns the rule matrix (unit-tested in `record.rs`); what
+// these pin is that the SINGLE WRITER actually calls it, on BOTH authoring entry
+// points. Without that wiring an invalid hole reaches `document.json` and the
+// worker refuses it every regen thereafter — an un-openable feature the user
+// cannot fix from the UI.
+
+fn hole_op(hole_type: HoleType, diameter: f64, cb: Option<(f64, f64)>) -> Operation {
+    Operation::Known(KnownOperation::Hole(HoleParams {
+        target_body: BX(),
+        face: ElementRef {
+            primary: Some(PrimaryRef {
+                body: BX(),
+                element: ElementId::new("el_face"),
+                kind: ElementKind::Face,
+                extra: Default::default(),
+            }),
+            intent: None,
+            anchor: None,
+            extra: Default::default(),
+        },
+        point: Vec3::new_unchecked(1.0, 2.0, 3.0),
+        hole_type,
+        diameter: Scalar::new(diameter),
+        depth: None,
+        cb_diameter: cb.map(|(d, _)| Scalar::new(d)),
+        cb_depth: cb.map(|(_, t)| Scalar::new(t)),
+        cs_diameter: None,
+        cs_angle_deg: None,
+        extra: Default::default(),
+    }))
+}
+
+fn hole_doc() -> DocumentSession {
+    let mut doc = Document::new(DocumentId(u(0x5E)));
+    doc.bodies.register(BodyMeta::new(BX(), "b", rid(0)));
+    DocumentSession::new(doc)
+}
+
+#[test]
+fn add_operation_rejects_a_hole_whose_conditional_block_is_wrong() {
+    let mut sess = hole_doc();
+    // A counterbore MISSING its cb pair.
+    let err = sess
+        .apply(EditCommand::AddOperation {
+            record: record(
+                rid(1),
+                "Hole",
+                hole_op(HoleType::Counterbore, 6.0, None),
+                vec![BX()],
+            ),
+            at_cursor: false,
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("required for a counterbore hole"),
+        "the session must NAME the missing block: {err}"
+    );
+
+    // A SIMPLE hole carrying one — the direction only this layer can catch (the
+    // worker never reads a param it does not use, so the stale block would ride
+    // the record forever and resurrect on the next profile flip).
+    let err = sess
+        .apply(EditCommand::AddOperation {
+            record: record(
+                rid(2),
+                "Hole",
+                hole_op(HoleType::Simple, 6.0, Some((11.0, 6.8))),
+                vec![BX()],
+            ),
+            at_cursor: false,
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("counterbore-only"),
+        "a simple hole may not carry cb*: {err}"
+    );
+    assert_eq!(sess.document().timeline.len(), 0, "neither record landed");
+}
+
+#[test]
+fn update_operation_params_rejects_an_invalid_hole_edit() {
+    let mut sess = hole_doc();
+    sess.apply(EditCommand::AddOperation {
+        record: record(
+            rid(1),
+            "Hole",
+            hole_op(HoleType::Counterbore, 6.0, Some((11.0, 6.8))),
+            vec![BX()],
+        ),
+        at_cursor: false,
+    })
+    .expect("a well-formed counterbore is accepted");
+
+    // cbDiameter must EXCEED the drill — an edit that shrinks it is refused, and
+    // the STORED record is untouched.
+    let err = sess
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(1),
+            op: hole_op(HoleType::Counterbore, 6.0, Some((6.0, 6.8))),
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("cbDiameter must exceed diameter"),
+        "{err}"
+    );
+    let Operation::Known(KnownOperation::Hole(p)) = &sess.document().timeline.record(0).unwrap().op
+    else {
+        panic!("expected the stored Hole");
+    };
+    assert_eq!(
+        p.cb_diameter.as_ref().map(|s| s.value),
+        Some(11.0),
+        "the refused edit left the record alone"
+    );
+}
+
+#[test]
+fn a_hole_derives_its_host_body_and_face_as_inputs() {
+    let mut sess = hole_doc();
+    sess.apply(EditCommand::AddOperation {
+        record: record(
+            rid(1),
+            "Hole",
+            hole_op(HoleType::Simple, 6.0, None),
+            vec![BX()],
+        ),
+        at_cursor: false,
+    })
+    .expect("add");
+    // F8 self-healing: the session re-derives `inputs` from the op rather than
+    // trusting whatever the caller supplied.
+    let inputs = &sess.document().timeline.record(0).unwrap().inputs;
+    assert_eq!(inputs.bodies, vec![BX()]);
+    assert_eq!(inputs.elements, vec![ElementId::new("el_face")]);
 }

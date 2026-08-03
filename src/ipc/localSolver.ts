@@ -483,8 +483,8 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
         throw new Error(`Preview session does not support ${draft.opType}`);
       }
       // Only the PROFILE-based ops bind a sketch region up-front. Fillet/Chamfer/
-      // Shell/Boolean operate on existing solids and carry no {plane, profile}, so
-      // resolving one for them would reject every legitimate draft.
+      // Shell/Boolean/Hole operate on existing solids and carry no {plane, profile},
+      // so resolving one for them would reject every legitimate draft.
       let plane: SketchPlane | undefined;
       let profile: PrismProfile | undefined;
       if (draft.opType === "Extrude" || draft.opType === "Revolve") {
@@ -564,9 +564,11 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
         }, deps.latencyMs());
         return;
       }
-      // Revolve / Fillet / Chamfer / Shell: no local synthesis. Revolve already has
-      // its L1 lathe (and the lane holds no axis to build one from anyway); the edge
-      // and shell ops have no mock kernel at all. Settle the epoch, show nothing.
+      // Revolve / Fillet / Chamfer / Shell / Hole: no local synthesis. Revolve
+      // already has its L1 lathe (and the lane holds no axis to build one from
+      // anyway); the edge, shell and hole ops have no mock kernel at all — a hole
+      // in particular would need real CSG against the host mesh. Settle the epoch,
+      // show nothing.
       setTimeout(() => {
         if (!previewSessions.has(sessionId)) return;
         emitPreviewResult({ sessionId, epoch, bodyId });

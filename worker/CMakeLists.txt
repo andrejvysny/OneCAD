@@ -75,6 +75,9 @@ add_library(worker_core STATIC
     src/ops/MirrorOp.cpp
     # --- WP-B W0: rigid multi-target placement (`TransformBody`, SCHEMA §7.3) ---
     src/ops/TransformOp.cpp
+    # --- WP-C T3: machined hole (simple / counterbore / countersink, SCHEMA §7.3) ---
+    src/ops/HoleTool.cpp
+    src/ops/HoleOp.cpp
     src/io/ExportStep.cpp
     src/io/MeshExport.cpp
     src/io/Checkpoint.cpp

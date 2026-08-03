@@ -621,7 +621,9 @@ export type OpType =
   | "CircularPattern"
   | "MirrorBody"
   /** Rigid placement of a body selection (SCHEMA §7.3; WP-B W0/W1). */
-  | "TransformBody";
+  | "TransformBody"
+  /** Machined hole on a planar face (SCHEMA §7.3; WP-C T3). */
+  | "Hole";
 
 /** Extrude end condition (SCHEMA §7.3 ExtrudeParams). */
 export type ExtrudeMode = "Blind" | "ThroughAll" | "Symmetric" | "ToNext" | "ToFace";
@@ -723,6 +725,41 @@ export interface ShellParams {
   thickness: number;
   openFaces: string[];
   targetBodyId?: string;
+}
+
+/**
+ * Machined-hole profile (SCHEMA §7.3 `Hole.holeType`). LOWERCASE on the wire —
+ * unlike the PascalCase mode enums, these are new-in-v2 values.
+ */
+export type HoleType = "simple" | "counterbore" | "countersink";
+
+/**
+ * Hole op params (SCHEMA §7.3 `Hole`, Rust `HoleParams`; WP-C T3).
+ *
+ * ALWAYS RAW MILLIMETRES. The standard-size tables (`tools/modelTools/holeStandards.ts`)
+ * are a frontend convenience that FILL these numbers — they never travel: a
+ * document must mean the same thing to a reader who has never heard of DIN 74.
+ *
+ * `point` is the world-space hole centre frozen at authoring; `face` is the typed
+ * host-face ref the worker resolves through the ladder (and re-projects `point`
+ * onto, with a 1e-3 mm fence). `depth: null` = through-all.
+ *
+ * The conditional blocks are REQUIRED by, and exclusive to, their own `holeType`:
+ * a `simple` hole carrying `cbDiameter` is rejected by the Rust session, so the
+ * chip cluster must CLEAR the other profile's fields when the type flips.
+ */
+export interface HoleParams {
+  targetBodyId: string;
+  face: SemanticRef;
+  point: [number, number, number];
+  holeType: HoleType;
+  diameter: number;
+  /** Blind depth in mm, or `null` = through-all. */
+  depth: number | null;
+  cbDiameter?: number | null;
+  cbDepth?: number | null;
+  csDiameter?: number | null;
+  csAngleDeg?: number | null;
 }
 
 /**
@@ -875,6 +912,13 @@ export type OperationOp =
       featureId?: string;
       inputs?: SemanticRef[];
       params: TransformBodyParams;
+    }
+  | {
+      opType: "Hole";
+      opId?: string;
+      featureId?: string;
+      inputs?: SemanticRef[];
+      params: HoleParams;
     };
 
 /**
@@ -955,7 +999,8 @@ export type PreviewParams = Partial<ExtrudeParams> &
   Partial<RevolveParams> &
   Partial<FilletParams> &
   Partial<ShellParams> &
-  Partial<BooleanParams> & { [k: string]: unknown };
+  Partial<BooleanParams> &
+  Partial<HoleParams> & { [k: string]: unknown };
 
 /** `beginPreview` draft — the base op the drag will refine. */
 export interface PreviewDraft {

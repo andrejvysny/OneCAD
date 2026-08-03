@@ -36,6 +36,9 @@ export const MODEL_TOOLS: ToolEntry[] = [
   { id: "boolean", icon: "boolean", label: "Combine", shortcut: "B" },
   { sep: true },
   { id: "shell", icon: "shell", label: "Shell", shortcut: "K" },
+  // WP-C T3 — a machined feature, grouped with Shell (both modify a host body in
+  // place rather than producing a new one).
+  { id: "hole", icon: "hole", label: "Hole", shortcut: "\u21e7H" },
   { id: "linearPattern", icon: "linearPattern", label: "Linear pattern", shortcut: "P" },
   { id: "circularPattern", icon: "circularPattern", label: "Circular pattern", shortcut: "C" },
   { id: "mirror", icon: "mirrorBody", label: "Mirror", shortcut: "M" },
