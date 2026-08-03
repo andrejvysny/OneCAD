@@ -683,10 +683,19 @@ impl<E: GeometryEngine> RegenExecutor<E> {
         }
 
         // Apply repair: a re-regen from `start` invalidates its bindings; publish
-        // the fresh per-step NeedsRepair sets.
+        // the fresh per-step NeedsRepair sets. SEEDED items survive both calls —
+        // they are an edit-layer policy gate (SCHEMA §7.3), not a ladder outcome,
+        // so a regen may not clear them.
         session.repair.clear_from(start);
         for (step, items) in &scratch.repair_by_step {
             session.repair.set_step(*step, items.clone());
+        }
+        // A seeded step was deliberately EXCLUDED from the plan (the caller's
+        // execution ceiling), so the per-step loop above never touched its state.
+        // Stamp it here so the timeline says NeedsRepair rather than Dirty — the
+        // gate must be visible, not silent.
+        for step in session.repair.seeded_steps() {
+            let _ = session.timeline.mark_state(step, StepState::NeedsRepair);
         }
 
         // Build + publish the immutable snapshot (shared id + generation).
@@ -711,7 +720,17 @@ impl<E: GeometryEngine> RegenExecutor<E> {
                 ),
             });
         }
-        let step_states: Vec<(usize, StepState)> = planned_steps
+        // Report the planned steps' states PLUS every seeded-gate step: the gate
+        // steps are excluded from the plan by construction, so without this the
+        // snapshot would never carry the state that explains the truncation.
+        let mut reported: Vec<usize> = planned_steps.to_vec();
+        for s in session.repair.seeded_steps() {
+            if !reported.contains(&s) {
+                reported.push(s);
+            }
+        }
+        reported.sort_unstable();
+        let step_states: Vec<(usize, StepState)> = reported
             .iter()
             .filter_map(|&s| session.timeline.state(s).map(|st| (s, st.clone())))
             .collect();

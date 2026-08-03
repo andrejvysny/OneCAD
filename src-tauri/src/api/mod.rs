@@ -661,6 +661,27 @@ pub async fn get_sketch(
     Ok(rt.get_sketch(id)?)
 }
 
+/// `Some(recordId)` iff a new placement gesture on `bodyId` may **fold into** an
+/// existing `TransformBody` record instead of appending a new one
+/// (`CadClient.canFoldTransform`; SCHEMA §7.3 cumulative-placement rule).
+///
+/// A pure, read-only lineage query — no session state, no events. It lives in the
+/// core (not the frontend) because the frontend has no lineage: it sees a picked
+/// body and a flat history list, never "which record last touched this body".
+#[tauri::command]
+pub async fn can_fold_transform(
+    state: State<'_, AppState>,
+    body_id: String,
+) -> Result<Option<String>, ApiError> {
+    let id = BodyId::from_str(&body_id)
+        .map_err(|e| ApiError::InvalidCommand(format!("bad bodyId `{body_id}`: {e}")))?;
+    let guard = state.runtime.lock().await;
+    let rt = guard
+        .as_ref()
+        .ok_or_else(|| ApiError::NoDocument("canFoldTransform".into()))?;
+    Ok(rt.can_fold_transform(id).map(|r| r.to_string()))
+}
+
 /// Rebuilds the closed regions of a persisted sketch without opening, finishing,
 /// squashing or otherwise mutating its edit session.
 #[tauri::command]

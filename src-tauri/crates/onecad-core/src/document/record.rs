@@ -72,6 +72,7 @@ const KNOWN_OP_TYPES: &[&str] = &[
     "Sweep",
     "MirrorBody",
     "ImportStep",
+    "TransformBody",
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -305,6 +306,7 @@ pub enum KnownOperation {
     Sweep(SweepParams),
     MirrorBody(MirrorBodyParams),
     ImportStep(ImportStepParams),
+    TransformBody(TransformBodyParams),
 }
 
 /// Unknown-`opType` payload, captured as a raw map (frozen node).
@@ -336,6 +338,7 @@ impl Operation {
                 KnownOperation::Sweep(_) => "Sweep",
                 KnownOperation::MirrorBody(_) => "MirrorBody",
                 KnownOperation::ImportStep(_) => "ImportStep",
+                KnownOperation::TransformBody(_) => "TransformBody",
             },
             // The frozen node keeps its original tag inside `raw`; report it so a
             // future opType is not mislabelled as one of the known ops.
@@ -486,6 +489,15 @@ impl Operation {
             // node. Giving it a dependency would make the dependency graph claim
             // an edge that regen cannot honour. No C++ analogue (new v2 op).
             KnownOperation::ImportStep(_) => {}
+
+            // TransformBody: every target body (SCHEMA §7.3 — `inputs[]` mirrors
+            // `params.targets`). No C++ analogue (new v2 op). `copy: true` still
+            // depends on its sources: the copies are rebuilt from them each regen.
+            KnownOperation::TransformBody(p) => {
+                for b in &p.targets {
+                    inputs.push_body(*b);
+                }
+            }
         }
         inputs
     }
@@ -1140,6 +1152,131 @@ impl ImportStepParams {
     }
 }
 
+/// The rotation half of a [`TransformBodyParams`] (SCHEMA §7.3 `rotate`).
+///
+/// `center` is the **frozen pivot**: it is captured once when the placement is
+/// first authored (the targets' combined bbox centre at that moment) and is never
+/// re-derived. Re-edits recompose against the stored pivot, so repeated edits are
+/// exact (no drift) and the stored form stays canonical.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransformRotation {
+    /// Frozen pivot point in world coordinates.
+    pub center: Vec3,
+    /// Rotation axis direction (need not be unit length; MUST be non-zero when
+    /// `angle_deg != 0`).
+    pub axis: Vec3,
+    /// Rotation angle in **degrees** (the file/wire domain for this field —
+    /// SCHEMA §7.3 `angleDeg`, matching Revolve/CircularPattern).
+    pub angle_deg: Scalar,
+}
+
+impl Default for TransformRotation {
+    /// The identity rotation about the world origin, +Z axis.
+    fn default() -> Self {
+        Self {
+            center: Vec3::new_unchecked(0.0, 0.0, 0.0),
+            axis: Vec3::new_unchecked(0.0, 0.0, 1.0),
+            angle_deg: Scalar::new(0.0),
+        }
+    }
+}
+
+/// Rigid placement of one or more bodies (SCHEMA §7.3 `TransformBody`; new v2 op,
+/// no OneCAD-CPP analogue). The light multi-part "position parts for fit-check"
+/// primitive: parametric, ONE cumulative record per placement intent, re-edited in
+/// place — never a stack of nudges.
+///
+/// **Evaluation order is normative**: `X' = T ∘ R(center, axis, angleDeg) · X` —
+/// rotate about the frozen pivot FIRST, then translate. `R`-then-`T` and
+/// `T`-then-`R` differ for any non-central pivot, so the order is pinned by
+/// `transform_body.rs` / `test_transform_body`.
+///
+/// Lineage: `copy: false` ⇒ every target emits `modified` (BodyId preserved);
+/// `copy: true` ⇒ the sources are untouched and the copies mint under the §2
+/// N-body rule (one target ⇒ `body_<opId>`, N > 1 ⇒ `body_<opId>:<k>`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransformBodyParams {
+    /// The bodies to place. Non-empty, no duplicates; mirrored by `inputs[]`.
+    #[serde(default)]
+    pub targets: Vec<BodyId>,
+    /// World-space translation `[dx, dy, dz]`, applied AFTER the rotation.
+    pub translate: [Scalar; 3],
+    /// The rotation about the frozen pivot, applied FIRST.
+    #[serde(default)]
+    pub rotate: TransformRotation,
+    /// `true` ⇒ the targets are preserved and the transformed shapes become NEW
+    /// bodies; `false` ⇒ the targets are modified in place.
+    #[serde(default)]
+    pub copy: bool,
+    #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
+    pub extra: Extra,
+}
+
+impl TransformBodyParams {
+    /// The rotation angle in degrees.
+    #[must_use]
+    pub fn angle_deg(&self) -> f64 {
+        self.rotate.angle_deg.value
+    }
+
+    /// True iff this placement is the identity (zero translation, zero rotation).
+    /// An identity transform is LEGAL and a geometric no-op (SCHEMA §7.3).
+    #[must_use]
+    pub fn is_identity(&self) -> bool {
+        self.translate.iter().all(|s| s.value == 0.0) && self.angle_deg() == 0.0
+    }
+
+    /// Validates the params' self-contained invariants (SCHEMA §7.3), returning a
+    /// human-facing reason on failure. Checked at every authoring entry point (see
+    /// [`crate::edit::session`]), NOT at deserialize time: a document written by a
+    /// future build must still load rather than become unopenable.
+    ///
+    /// # Errors
+    /// A message naming the violated invariant.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.targets.is_empty() {
+            return Err("TransformBody requires at least one target body".into());
+        }
+        for (i, b) in self.targets.iter().enumerate() {
+            if self.targets[..i].contains(b) {
+                return Err(format!(
+                    "TransformBody targets contain a duplicate body {b}"
+                ));
+            }
+        }
+        for (axis, s) in ["x", "y", "z"].iter().zip(self.translate.iter()) {
+            if !s.value.is_finite() {
+                return Err(format!(
+                    "TransformBody translate.{axis} must be finite (got {})",
+                    s.value
+                ));
+            }
+        }
+        let angle = self.angle_deg();
+        if !angle.is_finite() {
+            return Err(format!(
+                "TransformBody rotate.angleDeg must be finite (got {angle})"
+            ));
+        }
+        if !self.rotate.center.is_finite() {
+            return Err("TransformBody rotate.center has a non-finite component".into());
+        }
+        if !self.rotate.axis.is_finite() {
+            return Err("TransformBody rotate.axis has a non-finite component".into());
+        }
+        // A zero axis is only meaningful when there is no rotation to perform.
+        let axis_len2 = self.rotate.axis.x * self.rotate.axis.x
+            + self.rotate.axis.y * self.rotate.axis.y
+            + self.rotate.axis.z * self.rotate.axis.z;
+        if angle != 0.0 && axis_len2 <= 0.0 {
+            return Err("TransformBody rotate.axis must be non-zero when angleDeg != 0".into());
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1442,5 +1579,174 @@ mod tests {
         assert!(!is_sha256_hex(&"a".repeat(63)));
         assert!(!is_sha256_hex(&"a".repeat(65)));
         assert!(!is_sha256_hex("imports/../x"));
+    }
+
+    // ── TransformBody (WP-B W0; SCHEMA §7.3) ─────────────────────────────────
+
+    fn body(n: u128) -> BodyId {
+        BodyId(Uuid::from_u128(n))
+    }
+
+    fn transform_params() -> TransformBodyParams {
+        TransformBodyParams {
+            targets: vec![body(1), body(2)],
+            translate: [Scalar::new(10.0), Scalar::new(0.0), Scalar::new(5.0)],
+            rotate: TransformRotation {
+                center: Vec3::new_unchecked(0.0, 0.0, 0.0),
+                axis: Vec3::new_unchecked(0.0, 0.0, 1.0),
+                angle_deg: Scalar::new(90.0),
+            },
+            copy: false,
+            extra: Extra::new(),
+        }
+    }
+
+    #[test]
+    fn transform_body_is_a_known_op_type() {
+        assert!(KNOWN_OP_TYPES.contains(&"TransformBody"));
+        let op = Operation::Known(KnownOperation::TransformBody(transform_params()));
+        assert_eq!(op.op_type(), "TransformBody");
+        let json = serde_json::to_value(&op).unwrap();
+        assert_eq!(json["opType"], serde_json::json!("TransformBody"));
+        // Round-trips through the KNOWN gate (never demoted to Opaque).
+        let back: Operation = serde_json::from_value(json).unwrap();
+        assert_eq!(back, op);
+    }
+
+    /// The serialized shape must match the SCHEMA §7.3 example key-for-key
+    /// (camelCase, `targets` as bare id strings, `rotate.angleDeg`, `copy`).
+    #[test]
+    fn transform_body_serializes_to_the_schema_shape() {
+        let json = serde_json::to_value(KnownOperation::TransformBody(transform_params())).unwrap();
+        let p = &json["params"];
+        assert!(p["targets"].is_array() && p["targets"].as_array().unwrap().len() == 2);
+        assert_eq!(p["targets"][0], serde_json::json!(body(1).to_string()));
+        assert_eq!(p["translate"].as_array().unwrap().len(), 3);
+        // Scalars normalize to the object form on write (SCHEMA §7.3).
+        assert_eq!(p["translate"][0]["value"], serde_json::json!(10.0));
+        assert_eq!(p["rotate"]["center"], serde_json::json!([0.0, 0.0, 0.0]));
+        assert_eq!(p["rotate"]["axis"], serde_json::json!([0.0, 0.0, 1.0]));
+        assert_eq!(p["rotate"]["angleDeg"]["value"], serde_json::json!(90.0));
+        assert_eq!(p["copy"], serde_json::json!(false));
+    }
+
+    /// A hand-authored payload spelling every scalar as a BARE number must load
+    /// (SCHEMA §7.3 "readers MUST accept both forms").
+    #[test]
+    fn transform_body_accepts_bare_number_scalars() {
+        let raw = serde_json::json!({
+            "opType": "TransformBody",
+            "params": {
+                "targets": [body(1).to_string()],
+                "translate": [10.0, 0, 5.5],
+                "rotate": { "center": [1.0, 2.0, 3.0], "axis": [0, 0, 1], "angleDeg": 45 },
+                "copy": true
+            }
+        });
+        let op: Operation = serde_json::from_value(raw).unwrap();
+        let Operation::Known(KnownOperation::TransformBody(p)) = op else {
+            panic!("expected TransformBody");
+        };
+        assert_eq!(p.translate[0].value, 10.0);
+        assert_eq!(p.translate[2].value, 5.5);
+        assert_eq!(p.angle_deg(), 45.0);
+        assert!(p.copy);
+        assert_eq!(p.rotate.center, Vec3::new_unchecked(1.0, 2.0, 3.0));
+    }
+
+    /// `inputs[]` MIRRORS `params.targets` (SCHEMA §7.3), in order and deduped.
+    #[test]
+    fn transform_body_derives_one_input_per_target() {
+        let op = Operation::Known(KnownOperation::TransformBody(transform_params()));
+        let inputs = op.derive_inputs();
+        assert_eq!(inputs.bodies, vec![body(1), body(2)]);
+        assert!(inputs.sketches.is_empty() && inputs.elements.is_empty());
+        // `copy: true` still depends on its sources (the copies are rebuilt from them).
+        let copy = Operation::Known(KnownOperation::TransformBody(TransformBodyParams {
+            copy: true,
+            ..transform_params()
+        }));
+        assert_eq!(copy.derive_inputs().bodies, vec![body(1), body(2)]);
+    }
+
+    #[test]
+    fn transform_body_validation() {
+        // The canonical form is valid.
+        assert!(transform_params().validate().is_ok());
+
+        // An IDENTITY placement is LEGAL (SCHEMA §7.3) and reports itself as one.
+        let identity = TransformBodyParams {
+            translate: [Scalar::new(0.0), Scalar::new(0.0), Scalar::new(0.0)],
+            rotate: TransformRotation::default(),
+            ..transform_params()
+        };
+        assert!(identity.validate().is_ok(), "identity is legal");
+        assert!(identity.is_identity());
+        assert!(!transform_params().is_identity());
+
+        // Empty targets.
+        let p = TransformBodyParams {
+            targets: vec![],
+            ..transform_params()
+        };
+        assert!(p.validate().unwrap_err().contains("at least one target"));
+
+        // Duplicate target.
+        let p = TransformBodyParams {
+            targets: vec![body(1), body(1)],
+            ..transform_params()
+        };
+        assert!(p.validate().unwrap_err().contains("duplicate"));
+
+        // Zero axis with a NON-zero angle is rejected …
+        let p = TransformBodyParams {
+            rotate: TransformRotation {
+                axis: Vec3::new_unchecked(0.0, 0.0, 0.0),
+                ..transform_params().rotate
+            },
+            ..transform_params()
+        };
+        assert!(p.validate().unwrap_err().contains("non-zero when angleDeg"));
+
+        // … but a zero axis with a ZERO angle is fine (nothing to rotate about).
+        let p = TransformBodyParams {
+            rotate: TransformRotation {
+                axis: Vec3::new_unchecked(0.0, 0.0, 0.0),
+                angle_deg: Scalar::new(0.0),
+                ..transform_params().rotate
+            },
+            ..transform_params()
+        };
+        assert!(p.validate().is_ok());
+
+        // Non-finite components.
+        let p = TransformBodyParams {
+            translate: [
+                Scalar {
+                    value: f64::NAN,
+                    expr: None,
+                },
+                Scalar::new(0.0),
+                Scalar::new(0.0),
+            ],
+            ..transform_params()
+        };
+        assert!(p.validate().unwrap_err().contains("finite"));
+    }
+
+    /// Unknown params keys ride through `extra` verbatim (no `deny_unknown_fields`).
+    #[test]
+    fn transform_body_preserves_unknown_params_keys() {
+        let raw = serde_json::json!({
+            "opType": "TransformBody",
+            "params": {
+                "targets": [body(1).to_string()],
+                "translate": [1.0, 2.0, 3.0],
+                "alienKey": { "future": true }
+            }
+        });
+        let op: Operation = serde_json::from_value(raw.clone()).unwrap();
+        let back = serde_json::to_value(&op).unwrap();
+        assert_eq!(back["params"]["alienKey"], raw["params"]["alienKey"]);
     }
 }

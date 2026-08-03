@@ -62,6 +62,7 @@ use crate::document::body::{BodyMeta, BodyRegistry};
 use crate::document::datum::{resolve_datum, DatumContext, DatumKind, DatumPlane};
 use crate::document::record::{KnownOperation, Operation, OperationRecord};
 use crate::document::refs::ElementRef;
+use crate::document::repair::{LadderLevel, RepairItem, RepairReason};
 use crate::document::variables::{Scalar, Variable, VariableTable};
 use crate::document::Document;
 use crate::error::DomainError;
@@ -523,6 +524,8 @@ impl DocumentSession {
         validate_fillet_lockstep(&record.op)?;
         // ImportStep params must name a real content-addressed blob (all entry paths).
         validate_import_step(&record.op)?;
+        // TransformBody params must be a well-formed rigid motion (all entry paths).
+        validate_transform_body(&record.op)?;
         // F8: re-derive the uniform input view for Known ops (self-healing — don't
         // trust caller-supplied `inputs`; mirrors `update_operation_params` and the
         // record deserialize path). An Opaque frozen node keeps its stored inputs.
@@ -601,6 +604,8 @@ impl DocumentSession {
         validate_fillet_lockstep(&op)?;
         // ImportStep params must name a real content-addressed blob (all entry paths).
         validate_import_step(&op)?;
+        // TransformBody params must be a well-formed rigid motion (all entry paths).
+        validate_transform_body(&op)?;
         let mut nr = prior.clone();
         nr.op = op;
         // A sanctioned Fillet⇄Chamfer swap is the only path that can strand the
@@ -618,13 +623,40 @@ impl DocumentSession {
 
         replace_record_at(&mut self.document.timeline, index, nr);
         self.rebuild_graph();
-        Ok(self.dirty_record_outcome(
+        // SCHEMA §7.3 edit-safety gate: a params edit to a TransformBody moves the
+        // geometry every downstream ref was frozen against, so those refs must
+        // re-resolve through the REPAIR flow, never by silent descriptor scoring.
+        // The seed rides THIS command's inverse (composite) so undo restores the
+        // previous binding state exactly.
+        let inverse = self.seed_transform_gate(
             index,
             Inverse::RestoreRecord {
                 index,
                 record: Box::new(prior),
             },
-        ))
+        );
+        Ok(self.dirty_record_outcome(index, inverse))
+    }
+
+    /// Seeds the SCHEMA §7.3 `TransformBody` edit-safety gate for the record at
+    /// `index` and folds the repair-state memento into `inverse`, so the seeding
+    /// undoes with the very same undo entry as the edit that caused it.
+    ///
+    /// A no-op (returns `inverse` unchanged) when the record is not a
+    /// `TransformBody` or when nothing downstream stands on its target lineage.
+    fn seed_transform_gate(&mut self, index: usize, inverse: Inverse) -> Inverse {
+        let items = transform_gate_items(self.document.timeline.records(), index);
+        if items.is_empty() {
+            return inverse;
+        }
+        let prior_repair = self.document.repair.clone();
+        self.document.repair.seed(items);
+        Inverse::Composite(vec![
+            Inverse::RestoreRepair {
+                state: Box::new(prior_repair),
+            },
+            inverse,
+        ])
     }
 
     fn edit_operation_input(
@@ -649,13 +681,28 @@ impl DocumentSession {
 
         replace_record_at(&mut self.document.timeline, index, nr);
         self.rebuild_graph();
-        Ok(self.dirty_record_outcome(
+        // `EditOperationInput` IS the repair flow (the user re-picked the ref), so
+        // it CLOSES any seeded gate on this step. Ladder-produced items for the
+        // step are left alone — the next regen republishes them.
+        let mut inverse = Inverse::RestoreRecord {
             index,
-            Inverse::RestoreRecord {
-                index,
-                record: Box::new(prior),
-            },
-        ))
+            record: Box::new(prior),
+        };
+        if !self.document.repair.seeded_items().is_empty() {
+            let prior_repair = self.document.repair.clone();
+            self.document.repair.clear_seeded_for_step(index);
+            if prior_repair != self.document.repair {
+                inverse = Inverse::Composite(vec![
+                    Inverse::RestoreRepair {
+                        state: Box::new(prior_repair),
+                    },
+                    inverse,
+                ]);
+            }
+        }
+        // A transform whose INPUT changed moves a different body set — same gate.
+        let inverse = self.seed_transform_gate(index, inverse);
+        Ok(self.dirty_record_outcome(index, inverse))
     }
 
     fn remove_operation(&mut self, id: RecordId) -> Result<(CommandOutcome, Inverse), DomainError> {
@@ -742,6 +789,18 @@ impl DocumentSession {
             .set_cursor(cursor.min(self.document.timeline.len()));
         self.rebuild_graph();
 
+        // SCHEMA §7.3 edit-safety gate: suppressing OR un-suppressing a
+        // `TransformBody` moves downstream geometry exactly like a params edit
+        // (the placement appears / disappears), so it seeds the same gate. Applied
+        // for every affected record so a cascade that (un)suppresses several
+        // transforms gates all of them, on this command's single inverse.
+        let mut inverse = Inverse::Composite(inverses);
+        for &rid in &affected {
+            if let Some(i) = self.document.timeline.index_of(rid) {
+                inverse = self.seed_transform_gate(i, inverse);
+            }
+        }
+
         let dirty = DirtyRange::new(index, self.document.timeline.len());
         Ok((
             CommandOutcome {
@@ -749,7 +808,7 @@ impl DocumentSession {
                 dirty: Some(dirty),
                 regen: RegenHint::ToEnd,
             },
-            Inverse::Composite(inverses),
+            inverse,
         ))
     }
 
@@ -1353,6 +1412,110 @@ fn validate_import_step(op: &Operation) -> Result<(), DomainError> {
         return Ok(());
     };
     p.validate().map_err(DomainError::Validation)
+}
+
+/// Validates a [`KnownOperation::TransformBody`] record's params (non-empty +
+/// deduped targets, finite components, non-zero axis when the angle is non-zero —
+/// see [`TransformBodyParams::validate`]). Non-transform and opaque ops are
+/// trivially valid. Enforced here for the same single-writer reason as
+/// [`validate_import_step`].
+///
+/// [`TransformBodyParams::validate`]: crate::document::record::TransformBodyParams::validate
+fn validate_transform_body(op: &Operation) -> Result<(), DomainError> {
+    let Operation::Known(KnownOperation::TransformBody(p)) = op else {
+        return Ok(());
+    };
+    p.validate().map_err(DomainError::Validation)
+}
+
+/// The bodies whose GEOMETRY a `TransformBody` record moves — the "target
+/// lineage" the SCHEMA §7.3 edit-safety gate is scoped to.
+///
+/// * `copy: false` — the targets themselves (modify lineage preserves the BodyId,
+///   so the targets' ids ARE the moved bodies for the whole downstream timeline;
+///   this is why the conservative target-id set suffices for V1).
+/// * `copy: true` — the sources are untouched; what moves are the minted copies,
+///   which appear in the record's regen-derived `outputs`.
+fn transform_moved_bodies(rec: &OperationRecord) -> Vec<BodyId> {
+    let Operation::Known(KnownOperation::TransformBody(p)) = &rec.op else {
+        return Vec::new();
+    };
+    if p.copy {
+        rec.outputs.clone()
+    } else {
+        p.targets.clone()
+    }
+}
+
+/// The §9 items the SCHEMA §7.3 edit-safety gate seeds when a `TransformBody` at
+/// `index` is edited / (un)suppressed: one per downstream ref standing on a body
+/// in the transform's target lineage.
+///
+/// A record contributes one item per referenced ELEMENT (the refs whose binding
+/// descriptor scoring would otherwise re-decide) and, when it references the moved
+/// body without naming an element (a boolean tool, a nested transform), one
+/// whole-record item. **Suppressed downstream records are skipped**: they never
+/// execute, so gating them would stall every op after them for no gain.
+fn transform_gate_items(records: &[OperationRecord], index: usize) -> Vec<RepairItem> {
+    let Some(rec) = records.get(index) else {
+        return Vec::new();
+    };
+    let moved = transform_moved_bodies(rec);
+    if moved.is_empty() {
+        return Vec::new();
+    }
+    let mut items = Vec::new();
+    for (step, down) in records.iter().enumerate().skip(index + 1) {
+        if down.suppressed || !down.inputs.bodies.iter().any(|b| moved.contains(b)) {
+            continue;
+        }
+        let label = format!(
+            "reference re-bind blocked by an edited Move (step {index}); repair to re-pick"
+        );
+        if down.inputs.elements.is_empty() {
+            items.push(gate_item(
+                step,
+                &down.record_id.to_string(),
+                0,
+                None,
+                &label,
+            ));
+            continue;
+        }
+        for (k, el) in down.inputs.elements.iter().enumerate() {
+            items.push(gate_item(
+                step,
+                &down.record_id.to_string(),
+                k,
+                Some(el.clone()),
+                &label,
+            ));
+        }
+    }
+    items
+}
+
+/// One seeded gate item. `ref_id` follows the worker's `"<opId>.input<k>"`
+/// convention so a repair UI keys it the same way as a ladder-produced item.
+fn gate_item(
+    step: usize,
+    op_id: &str,
+    k: usize,
+    element: Option<crate::ids::ElementId>,
+    label: &str,
+) -> RepairItem {
+    RepairItem {
+        step_index: step,
+        ref_id: format!("{op_id}.input{k}"),
+        element_id: element,
+        ladder_failed: LadderLevel::Descriptor,
+        reason: RepairReason::LowConfidence,
+        candidates: Vec::new(),
+        scoring_version: None,
+        anchor: None,
+        ui_label: label.to_string(),
+        seeded: true,
+    }
 }
 
 /// Whether `UpdateOperationParams` may rewrite `prior` into `next`.

@@ -12,6 +12,7 @@
 #include <Bnd_Box.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <gp_Dir.hxx>
+#include <gp_Vec.hxx>
 #include <gp_XYZ.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -408,6 +409,55 @@ void ElementMapPartition::apply_history(const std::string& body_id,
         if (changed) {
             delta.relabeled.push_back(DeltaEntry{id, new_key, kind_name(e.kind), body_id});
         }
+    }
+}
+
+// --- rigid placement --------------------------------------------------------
+
+namespace {
+
+// True iff `j[key]` is a 3-number array (a world point / direction triple).
+bool is_vec3(const nlohmann::json& j, const char* key) {
+    return j.is_object() && j.contains(key) && j[key].is_array() && j[key].size() >= 3 &&
+           j[key][0].is_number() && j[key][1].is_number() && j[key][2].is_number();
+}
+
+// Move a stored POINT triple by the FULL transformation (rotation + translation).
+void move_point(nlohmann::json& holder, const char* key, const gp_Trsf& trsf) {
+    if (!is_vec3(holder, key)) return;
+    const nlohmann::json& a = holder[key];
+    gp_Pnt p(a[0].get<double>(), a[1].get<double>(), a[2].get<double>());
+    p.Transform(trsf);
+    holder[key] = {p.X(), p.Y(), p.Z()};
+}
+
+// Move a stored DIRECTION triple by the ROTATION only. `gp_Vec::Transform` applies
+// the linear part of the trsf and ignores its translation by construction — a free
+// vector has no position — so this needs no separate rotation-only gp_Trsf.
+void move_direction(nlohmann::json& holder, const char* key, const gp_Trsf& trsf) {
+    if (!is_vec3(holder, key)) return;
+    const nlohmann::json& a = holder[key];
+    gp_Vec v(a[0].get<double>(), a[1].get<double>(), a[2].get<double>());
+    v.Transform(trsf);
+    holder[key] = {v.X(), v.Y(), v.Z()};
+}
+
+}  // namespace
+
+void ElementMapPartition::apply_placement(const std::string& body_id, const gp_Trsf& trsf) {
+    if (trsf.Form() == gp_Identity) return;  // a no-op placement moves no evidence
+    for (auto& [id, e] : entries_) {
+        if (e.body_id != body_id || !e.anchor.is_object()) continue;
+        move_point(e.anchor, "worldPoint", trsf);
+        if (e.anchor.contains("localFrame") && e.anchor["localFrame"].is_object()) {
+            nlohmann::json& lf = e.anchor["localFrame"];
+            move_point(lf, "origin", trsf);
+            move_direction(lf, "x", trsf);
+            move_direction(lf, "y", trsf);
+            move_direction(lf, "z", trsf);
+        }
+        // `surfaceUv` (parametric) and `adjacencyHint` (topology hash) are
+        // placement-invariant — deliberately NOT rewritten.
     }
 }
 

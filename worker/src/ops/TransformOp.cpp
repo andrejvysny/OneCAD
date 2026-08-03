@@ -1,0 +1,211 @@
+// TransformOp.cpp — see TransformOp.h.
+#include "ops/TransformOp.h"
+
+#include <cmath>
+#include <string>
+#include <vector>
+
+#include <BRepBuilderAPI_Transform.hxx>
+#include <Standard_Failure.hxx>
+#include <TopoDS_Shape.hxx>
+#include <gp_Ax1.hxx>
+#include <gp_Dir.hxx>
+#include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
+#include <gp_Vec.hxx>
+
+#include "ops/OpCommon.h"
+
+namespace onecad::ops {
+
+using nlohmann::json;
+
+namespace {
+
+constexpr double kPi = 3.14159265358979323846;
+// Below this an axis is treated as degenerate (squared length; matches MirrorOp).
+constexpr double kMinAxisLen2 = 1e-20;
+
+// A scalar at `index` of a JSON array: bare number OR {value, expr?} (SCHEMA §7.3
+// — the Rust core normalizes to the object form on write, hand-authored payloads
+// may carry a bare number; readers MUST accept both).
+double scalar_at(const json& arr, std::size_t index, double dflt) {
+    if (!arr.is_array() || index >= arr.size()) return dflt;
+    const json& v = arr[index];
+    if (v.is_number()) return v.get<double>();
+    if (v.is_object() && v.contains("value") && v["value"].is_number()) {
+        return v["value"].get<double>();
+    }
+    return dflt;
+}
+
+// A `[x, y, z]` triple from `holder[key]` (falls back to the supplied default).
+bool read_vec3(const json& holder, const char* key, double& x, double& y, double& z) {
+    if (!holder.is_object() || !holder.contains(key)) return false;
+    const json& v = holder[key];
+    if (!v.is_array() || v.size() < 3) return false;
+    if (!v[0].is_number() || !v[1].is_number() || !v[2].is_number()) return false;
+    x = v[0].get<double>();
+    y = v[1].get<double>();
+    z = v[2].get<double>();
+    return true;
+}
+
+bool all_finite(std::initializer_list<double> vs) {
+    for (double v : vs) {
+        if (!std::isfinite(v)) return false;
+    }
+    return true;
+}
+
+// The parsed op params.
+struct Placement {
+    std::vector<std::string> targets;
+    gp_Trsf trsf;
+    bool copy = false;
+};
+
+// Parses + validates `params` into a `Placement`. On failure fills `err` with the
+// §8 message (always recoverable OP_FAILED — a bad placement is user data).
+bool parse_placement(const json& params, Placement& out, std::string& err) {
+    if (!params.contains("targets") || !params["targets"].is_array() ||
+        params["targets"].empty()) {
+        err = "TransformBody requires a non-empty targets array";
+        return false;
+    }
+    for (const json& t : params["targets"]) {
+        if (!t.is_string() || t.get<std::string>().empty()) {
+            err = "TransformBody targets must be non-empty body id strings";
+            return false;
+        }
+        const std::string id = t.get<std::string>();
+        for (const std::string& seen : out.targets) {
+            if (seen == id) {
+                err = "TransformBody targets contain a duplicate body " + id;
+                return false;
+            }
+        }
+        out.targets.push_back(id);
+    }
+
+    const json& tr = params.contains("translate") ? params["translate"] : json::array();
+    const double tx = scalar_at(tr, 0, 0.0);
+    const double ty = scalar_at(tr, 1, 0.0);
+    const double tz = scalar_at(tr, 2, 0.0);
+
+    double cx = 0.0, cy = 0.0, cz = 0.0;
+    double ax = 0.0, ay = 0.0, az = 1.0;
+    double angle_deg = 0.0;
+    if (params.contains("rotate") && params["rotate"].is_object()) {
+        const json& rot = params["rotate"];
+        read_vec3(rot, "center", cx, cy, cz);
+        read_vec3(rot, "axis", ax, ay, az);
+        angle_deg = read_scalar(rot, "angleDeg", 0.0);
+    }
+    if (!all_finite({tx, ty, tz, cx, cy, cz, ax, ay, az, angle_deg})) {
+        err = "TransformBody has a non-finite placement component";
+        return false;
+    }
+    const double axis_len2 = ax * ax + ay * ay + az * az;
+    if (angle_deg != 0.0 && axis_len2 < kMinAxisLen2) {
+        err = "TransformBody rotate.axis must be non-zero when angleDeg != 0";
+        return false;
+    }
+
+    // NORMATIVE ORDER: X' = T ∘ R. gp_Trsf composition applies the RIGHT operand
+    // first, so `translation * rotation` rotates about the pivot, then translates.
+    gp_Trsf rotation;
+    if (angle_deg != 0.0) {
+        rotation.SetRotation(gp_Ax1(gp_Pnt(cx, cy, cz), gp_Dir(ax, ay, az)),
+                             angle_deg * kPi / 180.0);
+    }
+    gp_Trsf translation;
+    translation.SetTranslation(gp_Vec(tx, ty, tz));
+    out.trsf = translation * rotation;
+
+    out.copy = params.value("copy", false);
+    return true;
+}
+
+// The §2 minted id of the `copy: true` result for target index `k` of `n`.
+std::string copy_body_id(const std::string& op_id, std::size_t k, std::size_t n) {
+    return n == 1 ? "body_" + op_id : "body_" + op_id + ":" + std::to_string(k);
+}
+
+}  // namespace
+
+OpOutcome execute_transform_body(OpContext& ctx, const json& op, const std::string& op_id) {
+    const json params =
+        (op.contains("params") && op["params"].is_object()) ? op["params"] : json::object();
+
+    Placement placement;
+    std::string err;
+    if (!parse_placement(params, placement, err)) {
+        return OpOutcome::fail("OP_FAILED", err);
+    }
+
+    // Resolve every target on the PREDECESSOR snapshot before mutating anything —
+    // a half-applied multi-target placement would be worse than a clean refusal.
+    std::vector<TopoDS_Shape> sources;
+    sources.reserve(placement.targets.size());
+    for (const std::string& id : placement.targets) {
+        const session::BodyRecord* rec = ctx.bodies.get(id);
+        if (!rec || rec->geom.IsNull()) {
+            return OpOutcome::fail("REF_UNRESOLVED",
+                                   "TransformBody target body not found: " + id);
+        }
+        sources.push_back(rec->geom);
+    }
+
+    if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
+
+    OpOutcome out;
+    const std::size_t n = placement.targets.size();
+    for (std::size_t k = 0; k < n; ++k) {
+        const std::string& target_id = placement.targets[k];
+        TopoDS_Shape result;
+        BRepBuilderAPI_Transform builder(placement.trsf);
+        try {
+            // `copy: false` keeps the geometry shared and only re-locates it (an
+            // isometry with determinant 1), which is both cheap and what makes
+            // `Modified()` return exactly ONE image per sub-shape — the level-1
+            // rebind with zero descriptor scoring. `copy: true` must deep-copy: the
+            // source stays in the document alongside its copy.
+            builder.Perform(sources[k], placement.copy ? Standard_True : Standard_False);
+            if (!builder.IsDone() || builder.Shape().IsNull()) {
+                return OpOutcome::fail("OP_FAILED",
+                                       "TransformBody failed on body " + target_id);
+            }
+            result = builder.Shape();
+        } catch (const Standard_Failure& f) {
+            return OpOutcome::fail("OP_FAILED",
+                                   std::string("TransformBody raised: ") +
+                                       (f.GetMessageString() ? f.GetMessageString() : "OCCT"));
+        } catch (...) {
+            return OpOutcome::fail("OP_FAILED", "TransformBody raised an unknown exception");
+        }
+
+        if (placement.copy) {
+            // NewBody lineage: a fresh body per target; the source is preserved and
+            // emits NO event. Nothing is tracked on a brand-new body, so its
+            // partition starts empty (ID-on-demand).
+            const std::string bid = copy_body_id(op_id, k, n);
+            ctx.bodies.create(bid, op_id, result);
+            out.body_events.push_back({"created", bid});
+            out.body_ids.push_back(bid);
+        } else {
+            // MODIFY lineage: the BodyId is preserved (corpus invariant) and the
+            // element map follows the geometry — history first (shape/topoKey/
+            // descriptor), then the rigid anchor migration.
+            ctx.bodies.create(target_id, op_id, result);
+            ctx.partition.apply_history(target_id, result, builder, out.delta,
+                                        &out.needs_repair);
+            ctx.partition.apply_placement(target_id, placement.trsf);
+            out.body_events.push_back({"modified", target_id});
+            out.body_ids.push_back(target_id);
+        }
+    }
+    return out;
+}
+
+}  // namespace onecad::ops

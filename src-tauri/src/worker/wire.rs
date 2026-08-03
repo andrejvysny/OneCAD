@@ -393,6 +393,21 @@ fn to_wire_body_form(value: &mut Value) {
                         }
                     }
                 }
+                // `TransformBody.targets` is the one body-bearing param that is an
+                // ARRAY of ids rather than a `*BodyId` scalar (SCHEMA §7.3
+                // `"targets": ["body_1", …]`), so it needs its own arm. Same
+                // idempotent, uuid-parse-gated rewrite, applied per element.
+                if key == "targets" {
+                    if let Value::Array(items) = v {
+                        for item in items.iter_mut() {
+                            if let Value::String(s) = item {
+                                if let Ok(u) = Uuid::parse_str(s) {
+                                    *s = body_id_wire(BodyId(u));
+                                }
+                            }
+                        }
+                    }
+                }
                 to_wire_body_form(v);
             }
         }
@@ -444,6 +459,13 @@ fn wire_op_inputs(
         }
         Operation::Known(KnownOperation::MirrorBody(p)) => {
             p.source_body.map(body_input_ref).into_iter().collect()
+        }
+        // TransformBody: one whole-body ref per target, in `targets` order —
+        // `inputs[]` MIRRORS `params.targets` (SCHEMA §7.3). The order is
+        // load-bearing for `copy: true`: the ordinal `k` in `body_<opId>:<k>` is
+        // the target's index in `targets`.
+        Operation::Known(KnownOperation::TransformBody(p)) => {
+            p.targets.iter().copied().map(body_input_ref).collect()
         }
         Operation::Known(KnownOperation::Extrude(p)) => {
             let mut v = Vec::new();

@@ -261,6 +261,7 @@ pub fn run() {
             api::get_mesh,
             api::enter_sketch,
             api::get_sketch,
+            api::can_fold_transform,
             api::get_sketch_regions,
             api::sketch_upsert,
             api::begin_gesture,

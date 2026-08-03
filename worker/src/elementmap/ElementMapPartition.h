@@ -37,6 +37,7 @@
 
 #include <BRepBuilderAPI_MakeShape.hxx>
 #include <TopoDS_Shape.hxx>
+#include <gp_Trsf.hxx>
 
 #include "kernel/elementmap/ElementMap.h"
 #include "nlohmann/json.hpp"
@@ -128,6 +129,29 @@ public:
     void apply_history(const std::string& body_id, const TopoDS_Shape& new_body_shape,
                        BRepBuilderAPI_MakeShape& hist, ElementMapDelta& delta,
                        std::vector<nlohmann::json>* needs_repair_out = nullptr);
+
+    // --- rigid placement (SCHEMA §7.3 TransformBody) ---
+    // Migrate the stored ANCHOR EVIDENCE of every entry of `body_id` through the
+    // rigid motion `trsf`. Call this AFTER `apply_history` for the same op.
+    //
+    // Why it is needed: `apply_history` refreshes an entry's `shape`, `topo_key`
+    // and `descriptor` (recomputed from the NEW sub-shape, so all direction
+    // evidence inside the descriptor — normal/tangent/center — already follows the
+    // body), but it does NOT touch `anchor`. An anchor is a PHYSICAL point on the
+    // body, not a parametric one, so leaving it behind after a translate/rotate
+    // strands it in space: the next descriptor-stage resolve narrows candidates by
+    // distance to that stale point and can pick a congruent decoy. That latent
+    // staleness pre-dates TransformBody — it was simply unreachable while no op
+    // moved a body rigidly.
+    //
+    // What moves how:
+    //   * `anchor.worldPoint`, `anchor.localFrame.origin` — POINTS, full `trsf`.
+    //   * `anchor.localFrame.x|y|z` — DIRECTIONS, rotation only (a gp_Vec ignores
+    //     the translation component by construction).
+    //   * `anchor.surfaceUv` / `anchor.adjacencyHint` — placement-INVARIANT
+    //     (parametric coordinates / a topology hash), deliberately untouched.
+    // Entries of other bodies and entries with no anchor are left alone.
+    void apply_placement(const std::string& body_id, const gp_Trsf& trsf);
 
     // Drop every entry of a body that was consumed/deleted (e.g. a boolean tool);
     // appends each removed elementId to `delta.removed`.

@@ -618,6 +618,13 @@ impl DocumentRuntime {
     /// regen), bump the fencing revision, and mark unsaved.
     fn after_mutation(&mut self) {
         self.sync_regen_timeline();
+        // Mirror the authoritative document's SEEDED repair gates (SCHEMA §7.3)
+        // into the regen copy — that copy is what `begin_regen` reads for its
+        // execution ceiling and what `save` persists. Only the seeded subset is
+        // synced: worker-published repair items live solely on the regen side and
+        // must not be clobbered by an edit.
+        let seeded = self.session.document().repair.seeded_items();
+        self.regen.repair.sync_seeded(seeded);
         // Re-register the regen bodies' document rows: `Inverse::RestoreBodies`
         // restores the WHOLE registry, so an undo erases rows adopted after the edit
         // it reverts. Insert-only — user-authored name/visible survive.
@@ -690,12 +697,25 @@ impl DocumentRuntime {
                                             // Hand the checkpoint metadata to the planner (SCHEMA §7.7): a compatible
                                             // checkpoint at/below the dirty floor accelerates the base (incremental regen).
         let checkpoint_metas = self.checkpoints.list();
-        let plan = RegenPlanner::plan(
+        // SCHEMA §7.3 `TransformBody` edit-safety gate: a seeded NeedsRepair step's
+        // refs may only re-resolve through the repair flow, so the plan stops
+        // strictly BELOW the lowest seeded step (publish ≤ m−1, Invariant 6).
+        let ceiling = match self.regen.repair.first_seeded_step() {
+            None => None,
+            // A gate on step 0 leaves nothing legal to execute at all.
+            Some(0) => {
+                tracing::info!("begin_regen: repair gate at step 0 → nothing may execute (noop)");
+                return None;
+            }
+            Some(s) => Some(s - 1),
+        };
+        let plan = RegenPlanner::plan_with_ceiling(
             &self.regen.timeline,
             &graph,
             &checkpoint_metas,
             request,
             &ctx,
+            ceiling,
         );
         if plan.is_empty() {
             self.last_regen_used_checkpoint = false;
@@ -987,6 +1007,16 @@ impl DocumentRuntime {
     /// projection. Order-stable (sorted by `(step, refId)` in [`RepairState`]).
     ///
     /// [`RepairState`]: onecad_core::document::repair::RepairState
+    /// `Some(recordId)` iff a new placement gesture on `body` may **fold into** an
+    /// existing `TransformBody` record instead of appending a new one (SCHEMA §7.3
+    /// cumulative-placement rule). Core-owned lineage query — see
+    /// [`can_fold_transform`](onecad_core::document::transform::can_fold_transform)
+    /// for the exact rule; the frontend has no lineage of its own.
+    #[must_use]
+    pub fn can_fold_transform(&self, body: BodyId) -> Option<RecordId> {
+        onecad_core::document::transform::can_fold_transform(self.session.document(), body)
+    }
+
     #[must_use]
     pub fn repair_items(&self) -> &[RepairItem] {
         self.regen.repair.items()

@@ -384,6 +384,31 @@ impl RegenPlanner {
         request: RegenRequest,
         ctx: &PlanContext,
     ) -> RegenPlan {
+        Self::plan_with_ceiling(timeline, graph, checkpoints, request, ctx, None)
+    }
+
+    /// [`plan`](Self::plan) with an inclusive **execution ceiling**: no step above
+    /// `ceiling` is planned, whatever the request asks for.
+    ///
+    /// The ceiling is how the SCHEMA §7.3 `TransformBody` edit-safety gate is
+    /// enforced. A seeded `NeedsRepair` step's refs must re-resolve through the
+    /// repair flow, never by a regen that silently re-scores them, so the caller
+    /// passes `first_seeded_step − 1`: the plan stops strictly before the gated
+    /// step and the publish is `≤ m−1` — the same shape every other NeedsRepair
+    /// early stop takes (Invariant 6). Loud truncation beats a silent wrong bind.
+    ///
+    /// `None` ⇒ no ceiling (the plain [`plan`](Self::plan) behaviour). A ceiling
+    /// below the plan's start yields an EMPTY plan (nothing may legally execute),
+    /// which the caller reports as a no-op.
+    #[must_use]
+    pub fn plan_with_ceiling(
+        timeline: &Timeline,
+        graph: &DependencyGraph,
+        checkpoints: &[CheckpointMeta],
+        request: RegenRequest,
+        ctx: &PlanContext,
+        ceiling: Option<usize>,
+    ) -> RegenPlan {
         let _ = graph; // reserved (see doc): linear order is authoritative here.
         let records = timeline.records();
         let applied = timeline.cursor(); // records[0, applied) are applied.
@@ -409,6 +434,9 @@ impl RegenPlanner {
             };
         }
         let target = target.min(applied - 1);
+        // The edit-safety ceiling clamps the target (never the start): steps at or
+        // above a seeded gate MUST NOT execute.
+        let target = ceiling.map_or(target, |c| target.min(c));
 
         // ── (2)/(3) checkpoint selection ───────────────────────────────────────
         let ceiling = requested_start.checked_sub(1); // stale at/after the floor.
@@ -687,6 +715,85 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0, 2],
             "the from-0 fallback applies the same predicate"
+        );
+    }
+
+    // ── Edit-safety ceiling (SCHEMA §7.3 TransformBody gate) ──────────────────
+
+    #[test]
+    fn ceiling_truncates_the_plan_below_the_gated_step() {
+        let tl = timeline(4);
+        let g = DependencyGraph::new();
+        // A gate seeded at step 2 ⇒ ceiling 1 ⇒ only steps 0,1 may execute.
+        let plan = RegenPlanner::plan_with_ceiling(
+            &tl,
+            &g,
+            &[],
+            RegenRequest::ToEnd { from: 0 },
+            &ctx(),
+            Some(1),
+        );
+        assert_eq!(plan.target_step, 1);
+        assert_eq!(
+            plan.planned_ops
+                .iter()
+                .map(|o| o.step_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1],
+            "the gated step and everything after it are NOT planned"
+        );
+        // No ceiling ⇒ the full plan (the gate is the only difference).
+        let full = RegenPlanner::plan(&tl, &g, &[], RegenRequest::ToEnd { from: 0 }, &ctx());
+        assert_eq!(full.planned_ops.len(), 4);
+        assert_eq!(
+            plan.prefix_hashes.last(),
+            full.prefix_hashes.get(1),
+            "a truncated plan's running hashes agree with the untruncated prefix"
+        );
+    }
+
+    /// The ceiling clamps the TARGET, never the start — so a request whose dirty
+    /// floor already sits above the gate still replays the legal prefix (from 0, no
+    /// checkpoint) and simply stops at the ceiling. Nothing at or after the gate is
+    /// ever planned.
+    #[test]
+    fn a_ceiling_below_the_request_start_still_stops_at_the_ceiling() {
+        let tl = timeline(4);
+        let g = DependencyGraph::new();
+        let plan = RegenPlanner::plan_with_ceiling(
+            &tl,
+            &g,
+            &[],
+            RegenRequest::ToEnd { from: 3 },
+            &ctx(),
+            Some(1),
+        );
+        assert_eq!(plan.target_step, 1);
+        assert!(
+            plan.planned_ops.iter().all(|o| o.step_index <= 1),
+            "no step at/after the gate is planned, got {:?}",
+            plan.planned_ops
+                .iter()
+                .map(|o| o.step_index)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn plan_delegates_to_plan_with_ceiling_none() {
+        let tl = timeline(3);
+        let g = DependencyGraph::new();
+        assert_eq!(
+            RegenPlanner::plan(&tl, &g, &[], RegenRequest::ToEnd { from: 0 }, &ctx()),
+            RegenPlanner::plan_with_ceiling(
+                &tl,
+                &g,
+                &[],
+                RegenRequest::ToEnd { from: 0 },
+                &ctx(),
+                None
+            ),
+            "the ceiling-free path is byte-identical (every golden hash still holds)"
         );
     }
 

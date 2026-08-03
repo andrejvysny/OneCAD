@@ -115,6 +115,14 @@ add_executable(test_m6a_ops test_m6a_ops.cpp)
 target_link_libraries(test_m6a_ops PRIVATE worker_core)
 add_test(NAME m6a_ops COMMAND test_m6a_ops)
 
+# --- WP-B W0: `TransformBody` numerics (exact bbox/volume, the normative T∘R
+#     order, §2 copy ordinals) + the element-map placement migration
+#     (`apply_placement`: level-1 rebind with ZERO scoring, anchors moved by
+#     exactly the trsf). In-process, real OCCT. ---
+add_executable(test_transform_body test_transform_body.cpp)
+target_link_libraries(test_transform_body PRIVATE worker_core)
+add_test(NAME transform_body COMMAND test_transform_body)
+
 # --- STEP-IMPORT WP-A W0: the pure STEP read core. Both binaries GENERATE their
 #     own STEP fixtures at run time (see tests/step_fixture_util.h) — nothing
 #     binary is committed — so they need a writable working directory; CTest runs

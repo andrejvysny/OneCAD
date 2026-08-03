@@ -73,6 +73,8 @@ add_library(worker_core STATIC
     src/ops/ShellOp.cpp
     src/ops/PatternOp.cpp
     src/ops/MirrorOp.cpp
+    # --- WP-B W0: rigid multi-target placement (`TransformBody`, SCHEMA §7.3) ---
+    src/ops/TransformOp.cpp
     src/io/ExportStep.cpp
     src/io/MeshExport.cpp
     src/io/Checkpoint.cpp

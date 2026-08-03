@@ -19,6 +19,7 @@
 #include "ops/FilletChamferOp.h"
 #include "ops/ImportOp.h"
 #include "ops/MirrorOp.h"
+#include "ops/TransformOp.h"
 #include "ops/OpTypes.h"
 #include "ops/PatternOp.h"
 #include "ops/RevolveOp.h"
@@ -239,6 +240,7 @@ ops::OpOutcome run_single_op(ScratchJob& job, const json& op, const std::string&
     if (op_type == "CircularPattern") return ops::execute_circular_pattern(octx, op, op_id);
     if (op_type == "MirrorBody") return ops::execute_mirror_body(octx, op, op_id);
     if (op_type == "ImportStep") return ops::execute_import_step(octx, op, op_id);
+    if (op_type == "TransformBody") return ops::execute_transform_body(octx, op, op_id);
 
     // Loft / Sweep remain UNSUPPORTED (SCHEMA §8) — Rust freezes the node.
     return ops::OpOutcome::unsupported("unsupported opType: " + op_type);

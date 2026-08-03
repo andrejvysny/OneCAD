@@ -27,6 +27,7 @@ pub mod element_index;
 pub mod record;
 pub mod refs;
 pub mod repair;
+pub mod transform;
 pub mod variables;
 
 use std::collections::BTreeMap;
@@ -372,6 +373,7 @@ mod tests {
                 anchor: None,
                 ui_label: String::new(),
                 scoring_version: None,
+                seeded: false,
             }],
         );
 

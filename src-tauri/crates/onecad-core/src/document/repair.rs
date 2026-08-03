@@ -90,6 +90,22 @@ pub struct RepairItem {
     /// UI-friendly label (SCHEMA `uiLabel`; V1/V2 §3.7 "UI-friendly labels").
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub ui_label: String,
+    /// **Policy seed, not a ladder outcome.** `true` marks an item the EDIT layer
+    /// planted to force the repair flow — the SCHEMA §7.3 `TransformBody`
+    /// edit-safety gate. A seeded item is NOT produced by a regen and therefore
+    /// survives [`RepairState::set_step`] / [`RepairState::clear_from`]; only an
+    /// explicit un-seed (the repair flow rewriting the ref) or undo clears it.
+    ///
+    /// Absent from the wire when `false`, so every pre-existing document and
+    /// worker-published item is byte-identical to before this field existed.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub seeded: bool,
+}
+
+/// `skip_serializing_if` predicate for a `false` flag (keeps the wire byte-stable).
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// The document's repair state: unresolved refs organized by step (V1/V2 §3.7).
@@ -146,21 +162,97 @@ impl RepairState {
     /// Replaces the repair items for `step` with `items` (a step re-regen
     /// publishes a fresh NeedsRepair set for that step). Existing items for the
     /// step are dropped first; the result stays sorted by `(step_index, ref_id)`.
+    ///
+    /// **Seeded items are preserved**: they encode an edit-layer policy gate
+    /// ([`RepairItem::seeded`]), not a ladder outcome, so a regen may not clear
+    /// them — the whole point of the gate is that a regen must NOT re-decide those
+    /// refs on its own.
     pub fn set_step(&mut self, step: usize, items: Vec<RepairItem>) {
-        self.items.retain(|i| i.step_index != step);
+        self.items.retain(|i| i.step_index != step || i.seeded);
         self.items.extend(items);
         self.sort();
     }
 
-    /// Drops all repair items at or after `step` (a re-regen from `step`
-    /// invalidates their bindings).
+    /// Drops all non-seeded repair items at or after `step` (a re-regen from
+    /// `step` invalidates their bindings). Seeded items survive — see
+    /// [`set_step`](Self::set_step).
     pub fn clear_from(&mut self, step: usize) {
-        self.items.retain(|i| i.step_index < step);
+        self.items.retain(|i| i.step_index < step || i.seeded);
     }
 
-    /// Drops every repair item.
+    /// Drops every repair item, seeded ones included (a full reset — e.g. the
+    /// clear-publish path where the document holds no geometry at all).
     pub fn clear(&mut self) {
         self.items.clear();
+    }
+
+    // ── Seeded (policy-gate) items ───────────────────────────────────────────
+
+    /// Adds `items` as seeded policy gates, de-duplicated by `(step, ref_id)`
+    /// against what is already stored. Each item's `seeded` flag is forced on.
+    pub fn seed(&mut self, items: impl IntoIterator<Item = RepairItem>) {
+        for mut item in items {
+            item.seeded = true;
+            if self
+                .items
+                .iter()
+                .any(|i| i.step_index == item.step_index && i.ref_id == item.ref_id)
+            {
+                continue;
+            }
+            self.items.push(item);
+        }
+        self.sort();
+    }
+
+    /// Drops every seeded item for `step` (the repair flow closed the gate).
+    /// Non-seeded (ladder-produced) items for that step are untouched.
+    pub fn clear_seeded_for_step(&mut self, step: usize) {
+        self.items.retain(|i| !(i.seeded && i.step_index == step));
+    }
+
+    /// The seeded (policy-gate) items, order-stable.
+    #[must_use]
+    pub fn seeded_items(&self) -> Vec<RepairItem> {
+        self.items.iter().filter(|i| i.seeded).cloned().collect()
+    }
+
+    /// The distinct timeline steps carrying a seeded gate, ascending.
+    #[must_use]
+    pub fn seeded_steps(&self) -> Vec<usize> {
+        let mut steps: Vec<usize> = self
+            .items
+            .iter()
+            .filter(|i| i.seeded)
+            .map(|i| i.step_index)
+            .collect();
+        steps.sort_unstable();
+        steps.dedup();
+        steps
+    }
+
+    /// The LOWEST timeline step carrying a seeded gate — the regen **ceiling**:
+    /// a plan may execute steps strictly below it and no further, so a gated ref
+    /// is never bound outside the repair flow (SCHEMA §7.3 edit-safety gate).
+    #[must_use]
+    pub fn first_seeded_step(&self) -> Option<usize> {
+        self.items
+            .iter()
+            .filter(|i| i.seeded)
+            .map(|i| i.step_index)
+            .min()
+    }
+
+    /// Replaces the seeded subset with `seeded`, leaving ladder-produced items
+    /// alone. Used to mirror the authoritative document's gates into the regen
+    /// session copy without clobbering worker-published repair state.
+    pub fn sync_seeded(&mut self, seeded: Vec<RepairItem>) {
+        self.items.retain(|i| !i.seeded);
+        self.items.extend(seeded.into_iter().map(|mut i| {
+            i.seeded = true;
+            i
+        }));
+        self.sort();
     }
 
     fn sort(&mut self) {
@@ -195,7 +287,61 @@ mod tests {
             anchor: None,
             ui_label: "Fillet edge".into(),
             scoring_version: None,
+            seeded: false,
         }
+    }
+
+    fn seeded_item(step: usize, ref_id: &str) -> RepairItem {
+        RepairItem {
+            seeded: true,
+            ..item(step, ref_id)
+        }
+    }
+
+    #[test]
+    fn seeded_items_survive_regen_publication_and_clear_from() {
+        let mut r = RepairState::new();
+        r.seed([seeded_item(3, "op_3.gate")]);
+        r.set_step(3, vec![item(3, "op_3.input0")]);
+        assert_eq!(r.items_for_step(3).len(), 2, "the seed rides alongside");
+        // A fresh regen publishes an EMPTY set for step 3 — the seed still stands.
+        r.set_step(3, vec![]);
+        assert_eq!(r.items_for_step(3).len(), 1);
+        assert!(r.items_for_step(3)[0].seeded);
+        // clear_from wipes ladder items but never a policy gate.
+        r.set_step(4, vec![item(4, "op_4.input0")]);
+        r.clear_from(0);
+        assert_eq!(r.len(), 1, "only the seed survives a full clear_from");
+        assert_eq!(r.first_seeded_step(), Some(3));
+        assert_eq!(r.seeded_steps(), vec![3]);
+        // The explicit un-seed (the repair flow) closes it.
+        r.clear_seeded_for_step(3);
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn seed_is_idempotent_and_sync_seeded_replaces_the_subset() {
+        let mut r = RepairState::new();
+        r.seed([seeded_item(2, "a"), seeded_item(2, "a")]);
+        assert_eq!(r.len(), 1, "duplicate (step, refId) seeds collapse");
+        r.set_step(2, vec![item(2, "ladder")]);
+        r.sync_seeded(vec![item(5, "b")]); // note: `seeded` forced on by sync
+        assert_eq!(r.seeded_steps(), vec![5]);
+        assert_eq!(
+            r.items_for_step(2).len(),
+            1,
+            "the ladder item at step 2 is untouched by a seed sync"
+        );
+    }
+
+    #[test]
+    fn seeded_flag_is_absent_from_the_wire_when_false() {
+        let v = serde_json::to_value(item(1, "op_1.input0")).unwrap();
+        assert!(v.get("seeded").is_none(), "byte-stable for old documents");
+        let v = serde_json::to_value(seeded_item(1, "op_1.gate")).unwrap();
+        assert_eq!(v["seeded"], serde_json::json!(true));
+        let back: RepairItem = serde_json::from_value(v).unwrap();
+        assert!(back.seeded);
     }
 
     #[test]

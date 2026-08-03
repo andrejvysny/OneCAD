@@ -820,7 +820,10 @@ pub fn feature_kind(op: &Operation) -> FeatureKind {
             | KnownOperation::LinearPattern(_)
             | KnownOperation::CircularPattern(_)
             | KnownOperation::MirrorBody(_)
-            | KnownOperation::ImportStep(_) => FeatureKind::Boolean,
+            | KnownOperation::ImportStep(_)
+            // Interim bucket: `FeatureKind` is a coarse icon grouping and has no
+            // placement/move member yet (adding one is a frontend-owned change).
+            | KnownOperation::TransformBody(_) => FeatureKind::Boolean,
         },
         Operation::Opaque(_) => FeatureKind::Extrude,
     }
@@ -842,6 +845,23 @@ pub fn feature_value_text(op: &Operation) -> String {
         // The operation IS a boolean row's one editable parameter — without it a
         // re-edit op swap has no visible projection signal at all.
         KnownOperation::Boolean(p) => format!("{:?}", p.operation),
+        // A placement's one-line summary: the translation when there is one, else
+        // the rotation angle, else "0.0 mm" for an identity (a legal no-op that
+        // must still read as an editable value, not as a blank row).
+        KnownOperation::TransformBody(p) => {
+            let [dx, dy, dz] = [
+                p.translate[0].value,
+                p.translate[1].value,
+                p.translate[2].value,
+            ];
+            if dx != 0.0 || dy != 0.0 || dz != 0.0 {
+                format!("Δ({dx:.1}, {dy:.1}, {dz:.1})")
+            } else if p.angle_deg() != 0.0 {
+                format!("{:.1}°", p.angle_deg())
+            } else {
+                "0.0 mm".to_string()
+            }
+        }
         _ => String::new(),
     }
 }
@@ -874,6 +894,7 @@ pub fn default_label(op: &Operation) -> &'static str {
             KnownOperation::Loft(_) => "Loft",
             KnownOperation::Sweep(_) => "Sweep",
             KnownOperation::ImportStep(_) => "Import",
+            KnownOperation::TransformBody(_) => "Move",
         },
         // A frozen unknown node keeps its opType as the label rather than
         // masquerading as an Extrude.
@@ -1271,6 +1292,7 @@ mod tests {
             scoring_version: Some(1),
             anchor: None,
             ui_label: "Fillet edge".into(),
+            seeded: false,
         };
         let dto = ResolveRefDto::from_resolution(RefResolution {
             ref_id: "op_6.input0".into(),
@@ -1310,6 +1332,7 @@ mod tests {
             scoring_version: Some(1),
             anchor: None,
             ui_label: String::new(),
+            seeded: false,
         };
         let dto = needs_repair_item_dto("rec-1".into(), &item);
         let v = serde_json::to_value(&dto).unwrap();
