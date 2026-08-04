@@ -1,5 +1,32 @@
 # Consolidated USER Manual Gate Run (updated 2026-08-04)
 
+## 0. HISTORY-HARDEN (2026-08-04 session) — parametric history: change past decisions
+- [ ] **Inline dimension edit (main priority)**: build sketch → extrude → fillet;
+      select body → feature chip → history rows now show their value ALWAYS;
+      click the extrude's value, type a new depth, Enter → body + fillet rebuild;
+      row editor refuses while a tool is armed; sketch row shows a Dimensions
+      section — edit a dimension value there without entering sketch mode →
+      downstream extrude follows.
+- [ ] **Rollback**: right-click a mid row → "Roll to here" → GEOMETRY TRUNCATES
+      on screen (this was silently broken — any roll was a visual no-op);
+      grayed italic rows + marker line + "N operations rolled back [Roll to end]"
+      banner appear; roll to end restores everything.
+- [ ] **Insert at cursor**: while rolled back, draw + extrude a new feature →
+      it lands AT the cursor (not the tail), hint says "Inserted at step k of n";
+      roll to end → later features rebuild on top of it. (Previously: the new
+      feature became a permanently inert draft with zero signal.)
+- [ ] **Failure visibility + recovery**: edit an upstream dimension so a fillet
+      loses its edge → fillet row warn-tinted, downstream rows grayed,
+      "Timeline stopped at …" banner; banner's Suppress-feature un-wedges the
+      rebuild; repair panel candidates show a viewport crosshair on hover;
+      rebind works on a 2-body doc WITHOUT pre-selecting the body.
+- [ ] **Reattach**: right-click a world-plane sketch → Reattach → pick a datum →
+      sketch + its extrude MOVE to the datum (was: silently inert).
+- [ ] **Dependencies**: delete-confirm on a feature with dependents names the
+      count; inspector shows "Depends on / Used by".
+- [ ] **Undo speed sanity**: on a ~20-feature doc, save, edit the LAST feature,
+      undo → revert is near-instant (checkpoint restore, not full replay).
+
 ## 0a. SKETCH-PRO SP-0/SP-1 (2026-08-04 session) — live dimensions + conflict UX
 - [ ] **Live dimension chips (Shapr3D-style)**: arm Line, click an anchor, move —
       length + angle chips track the cursor; committed length lands on a round

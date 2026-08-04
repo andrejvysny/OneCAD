@@ -1,3 +1,31 @@
+## HISTORY-HARDEN (2026-08-04, plan `act-as-senior-software-mutable-turing.md`) — COMPLETE
+Parametric history hardened end-to-end: change past decisions like professional
+CAD. 10 waves, 6 gate commits (df15632→3ab2a22), internal adversarial review
+REVISE→4 BLOCKER+9 MAJOR folded pre-approval, 2 design amendments during
+implementation (recorded in TODO.md). FOUR blocker-class root causes found
+that predate the plan: (1) ROLLBACK WAS VISUALLY INERT (count/index domain bug
+— any roll-to published nothing); (2) `IntentQuery` NEVER CONSTRUCTED —
+production topological rebinding was pure nearest-centroid at weight 0.25, the
+entire descriptor system dead on the resolve path; (3) rolled-back append trap
+(new features became permanently inert drafts); (4) unrepairable refs with
+empty anchors FATALLY tore down regen. All fixed + red-first pinned.
+Shipped: inline dimension editing on history rows (+ sketch-dim quick path);
+rollback cursor viz + context menu + roll-to-end banner; insert-at-cursor;
+snapshot-scoped promotion (VF-M3/M4); frozen descriptors (VF-M5a) with
+measured (score,margin); edit-scoped anchor-tie veto w/ anchor-exact carve-out
+(drift caught, teleport = documented residual, flagship gesture preserved;
+resolverVersion 2, additive `editedFrom`); failure visibility (halt banner,
+suppress-to-continue, regen busy); undo/redo checkpoint acceleration
+(`RevertToEnd`, dirty floors, B1 clamp) + checkpoint-swallows-sketch guard;
+reattach V1 world⇄datum (was inert — record plane never restamped); repair
+generalization (slot table pinned both sides, Hole rebind volume-proven,
+bodyId on items, viewport marker); dependency view. Also closed: VF-M1
+(poison heals on param edit), VF-M7 (cross-body drill/shell guard).
+FINAL GATE: ctest 89/89 · cargo 834/0 vs real worker · FE 3090/3090 (194) ·
+e2e 179/179 zero-fail · tsc/fmt/clippy/hex clean. USER: MANUAL_GATES_RUN.md §0.
+Deferred (TODO.md): from-0 history rung · worker sketch-state across
+checkpoint restore · DAG error isolation · Shell faces §7.3 shape · reorder.
+
 # OneCAD-Tauri — Current State (2026-08-03, WP-FIX COMPLETE — all Phase-V blockers closed)
 
 ## WP-FIX COMPLETE (2026-08-03, 5 waves, commits 4b9d9b8→(W5))
