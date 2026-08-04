@@ -217,8 +217,8 @@ async fn finish_squashes_session_into_one_command() {
 
     // The newest entry is the minted Sketch record; beneath it ONE undo reverts
     // the WHOLE session — sketch back to the pre-session state.
-    assert!(rt.undo(), "undo the minted sketch record");
-    assert!(rt.undo(), "undo the net sketch command");
+    assert!(rt.undo().is_some(), "undo the minted sketch record");
+    assert!(rt.undo().is_some(), "undo the net sketch command");
     assert_eq!(rt.undo_depth(), base_depth, "back to just the AddSketch");
     let reverted = rt.get_sketch(sid).expect("get_sketch after undo");
     assert_eq!(
@@ -233,7 +233,10 @@ async fn finish_squashes_session_into_one_command() {
     );
 
     // Redo restores the final sketch exactly.
-    assert!(rt.redo().expect("redo"), "redo the net sketch command");
+    assert!(
+        rt.redo().expect("redo").is_some(),
+        "redo the net sketch command"
+    );
     let restored = rt.get_sketch(sid).expect("get_sketch after redo");
     assert_eq!(
         entity_count(&restored.entities),
@@ -279,7 +282,7 @@ async fn cancel_squashes_session_into_one_command() {
         "cancel collapses the 3 granular steps into exactly ONE net command"
     );
 
-    assert!(rt.undo(), "undo the net sketch command");
+    assert!(rt.undo().is_some(), "undo the net sketch command");
     let reverted = rt.get_sketch(sid).expect("get_sketch after undo");
     assert_eq!(
         entity_count(&reverted.entities),
@@ -383,8 +386,8 @@ async fn stray_finish_after_model_op_preserves_op_undo_entry() {
     );
 
     // Undo order: newest first — the minted Sketch record, THEN the extrude.
-    assert!(rt.undo(), "undo pops the sketch record");
-    assert!(rt.undo(), "undo pops the extrude");
+    assert!(rt.undo().is_some(), "undo pops the sketch record");
+    assert!(rt.undo().is_some(), "undo pops the extrude");
     assert_eq!(rt.undo_depth(), base_depth, "back to just the AddSketch");
     assert_eq!(
         rt.projection().features.len(),
@@ -460,15 +463,18 @@ async fn construction_flag_survives_the_session_squash() {
 
     // Undo the whole session, then redo it: the flag round-trips through the
     // memento AND the replayed net command.
-    assert!(rt.undo(), "undo the minted sketch record");
-    assert!(rt.undo(), "undo the net sketch command");
+    assert!(rt.undo().is_some(), "undo the minted sketch record");
+    assert!(rt.undo().is_some(), "undo the net sketch command");
     let reverted = rt.get_sketch(sid).expect("get_sketch after undo");
     assert_eq!(
         entity_count(&reverted.entities),
         0,
         "session fully reverted"
     );
-    assert!(rt.redo().expect("redo"), "redo the net sketch command");
+    assert!(
+        rt.redo().expect("redo").is_some(),
+        "redo the net sketch command"
+    );
     assert_eq!(
         construction_flag(&rt.get_sketch(sid).expect("get_sketch").entities, eid(L0)),
         Some(true),
@@ -539,8 +545,8 @@ async fn interleaved_session_keeps_edits_granular_and_op_survives() {
 
     // Undo reverts ONLY the head sketch edit (P1), never the whole session; the
     // interleaved extrude survives (this is the correctness the clamp would break).
-    assert!(rt.undo(), "undo the minted sketch record");
-    assert!(rt.undo(), "undo the head sketch edit");
+    assert!(rt.undo().is_some(), "undo the minted sketch record");
+    assert!(rt.undo().is_some(), "undo the head sketch edit");
     let s = rt.get_sketch(sid).expect("get_sketch after undo");
     assert_eq!(
         entity_count(&s.entities),

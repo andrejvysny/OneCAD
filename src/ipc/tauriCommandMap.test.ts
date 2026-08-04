@@ -10,6 +10,10 @@ import {
   updateFilletParamsCommand,
   updateScalarParamsCommand,
   filletEdgeRebindCommand,
+  inputPathFor,
+  rebindInputCommand,
+  elementKindOfTopoKey,
+  elementRefOfKind,
   suppressOperationCommand,
   rollbackToCursorCommand,
   removeOperationCommand,
@@ -635,5 +639,213 @@ describe("editCommandLabel for datums", () => {
   it("labels the datum commands distinctly", () => {
     expect(editCommandLabel(buildAddDatumPlane("d1", "Datum 1", "XY", 10))).toBe("Create datum plane");
     expect(editCommandLabel(deleteDatumCommand("d1"))).toBe("Delete datum plane");
+  });
+});
+
+// ── HISTORY-HARDEN H9: the repair SLOT TABLE, both sides ─────────────────────
+
+describe("inputPathFor mirrors the Rust wire_op_inputs slot table", () => {
+  /*
+   * THE TWIN of `src-tauri/src/worker/wire.rs`
+   * `wire_op_inputs_slot_order_is_the_repair_slot_table`. That test pins, per
+   * opType, WHAT the k-th entry of the wire `inputs[]` array is; this one pins
+   * which `InputPath` writes it. The two lists below are the same cases in the
+   * same order — read them side by side when either changes.
+   *
+   * A DIVERGENCE IS A SILENT MIS-REPAIR: the panel would send a well-formed
+   * `EditOperationInput` that overwrites a DIFFERENT input than the one the user
+   * clicked. Before H9 every rebind went out as `filletEdges{k}` regardless of
+   * op — the core rejected that loudly for Hole/Shell, but it would have quietly
+   * rewritten edge k of any fillet.
+   */
+  const faceRef = { primary: { bodyId: "b", elementId: "el_2", kind: "face" as const } };
+
+  const cases: Array<{
+    name: string;
+    opType: string;
+    /** Rust slot kinds, VERBATIM from the Rust test's `expected` column. */
+    rustSlots: string[];
+    params?: Record<string, unknown>;
+    /** Expected `inputPathFor(opType, k, params)` for k = 0..rustSlots.length. */
+    paths: Array<ReturnType<typeof inputPathFor>>;
+    /**
+     * Fillet/Chamfer/Shell inputs are LIST-shaped, so the path is
+     * index-parametric BY DESIGN: the projection does not expose the op's
+     * current edge/face count, which is the whole reason the rebind is
+     * slot-index-only (see `filletEdgeRebindCommand`). Bounds are enforced by
+     * the CORE (`set_fillet_edge` / `set_shell_open_face` → "out of range"),
+     * pinned in `edit_session.rs`. Every other op has FIXED arity, so one past
+     * the last slot must resolve to null here.
+     */
+    listShaped?: true;
+  }> = [
+    {
+      name: "fillet: one slot per edge, in `edges` order",
+      opType: "Fillet",
+      rustSlots: ["edge", "edge"],
+      paths: [{ path: "filletEdges", index: 0 }, { path: "filletEdges", index: 1 }],
+      listShaped: true,
+    },
+    {
+      name: "chamfer: same table as fillet",
+      opType: "Chamfer",
+      rustSlots: ["edge"],
+      paths: [{ path: "filletEdges", index: 0 }],
+      listShaped: true,
+    },
+    {
+      name: "shell: one slot per open face, in `openFaces` order",
+      opType: "Shell",
+      rustSlots: ["face", "face"],
+      paths: [{ path: "shellOpenFaces", index: 0 }, { path: "shellOpenFaces", index: 1 }],
+      listShaped: true,
+    },
+    {
+      name: "hole: [host body, host face] — slot 0 is NOT element-addressable",
+      opType: "Hole",
+      rustSlots: ["body", "face"],
+      paths: [null, { path: "holeFace" }],
+    },
+    {
+      name: "boolean: [target, tool] — both whole bodies",
+      opType: "Boolean",
+      rustSlots: ["body", "body"],
+      paths: [null, null],
+    },
+    {
+      name: "extrude Blind: no ToFace target ⇒ NO slots at all",
+      opType: "Extrude",
+      rustSlots: [],
+      params: { extrudeMode: "Blind", twoDirections: false, extrudeMode2: "Blind" },
+      paths: [],
+    },
+    {
+      name: "extrude ToFace, one direction: slot 0 = targetFace",
+      opType: "Extrude",
+      rustSlots: ["face"],
+      params: {
+        extrudeMode: "ToFace",
+        targetFace: faceRef,
+        twoDirections: false,
+        extrudeMode2: "Blind",
+      },
+      paths: [{ path: "extrudeTargetFace", second: false }],
+    },
+    {
+      name: "extrude ToFace both directions: slot 0 = targetFace, slot 1 = targetFace2",
+      opType: "Extrude",
+      rustSlots: ["face", "face"],
+      params: {
+        extrudeMode: "ToFace",
+        targetFace: faceRef,
+        twoDirections: true,
+        extrudeMode2: "ToFace",
+        targetFace2: faceRef,
+      },
+      paths: [
+        { path: "extrudeTargetFace", second: false },
+        { path: "extrudeTargetFace", second: true },
+      ],
+    },
+    {
+      // THE trap: direction 1 is Blind, so `targetFace2` COLLAPSES to slot 0.
+      name: "extrude Blind + second direction ToFace: slot 0 = targetFace2",
+      opType: "Extrude",
+      rustSlots: ["face"],
+      params: {
+        extrudeMode: "Blind",
+        targetFace: faceRef,
+        twoDirections: true,
+        extrudeMode2: "ToFace",
+        targetFace2: faceRef,
+      },
+      paths: [{ path: "extrudeTargetFace", second: true }],
+    },
+    {
+      name: "extrude ToFace + twoDirections but mode2 Blind: only slot 0",
+      opType: "Extrude",
+      rustSlots: ["face"],
+      params: {
+        extrudeMode: "ToFace",
+        targetFace: faceRef,
+        twoDirections: true,
+        extrudeMode2: "Blind",
+        targetFace2: faceRef,
+      },
+      paths: [{ path: "extrudeTargetFace", second: false }],
+    },
+    {
+      name: "revolve: the axis is an AxisRef, not an inputs[] slot",
+      opType: "Revolve",
+      rustSlots: [],
+      paths: [],
+    },
+    { name: "linearPattern: the source body", opType: "LinearPattern", rustSlots: ["body"], paths: [null] },
+    { name: "circularPattern: the source body", opType: "CircularPattern", rustSlots: ["body"], paths: [null] },
+    { name: "mirrorBody: the source body", opType: "MirrorBody", rustSlots: ["body"], paths: [null] },
+    {
+      name: "transformBody: one slot per target, in `targets` order",
+      opType: "TransformBody",
+      rustSlots: ["body", "body"],
+      paths: [null, null],
+    },
+    { name: "sketch: hostFace is core-only ⇒ no slots", opType: "Sketch", rustSlots: [], paths: [] },
+    { name: "loft: profile sketches only", opType: "Loft", rustSlots: [], paths: [] },
+    { name: "sweep: profile + path sketches only", opType: "Sweep", rustSlots: [], paths: [] },
+    { name: "importStep: no inputs at all", opType: "ImportStep", rustSlots: [], paths: [] },
+  ];
+
+  it.each(cases)("$name", ({ opType, rustSlots, params, paths, listShaped }) => {
+    expect(paths).toHaveLength(rustSlots.length);
+    paths.forEach((expected, k) => {
+      expect(inputPathFor(opType, k, params)).toEqual(expected);
+      // A BODY slot must map to null — a repair candidate is an element TopoKey,
+      // so there is nothing that could be written into a whole-body input.
+      if (rustSlots[k] === "body") expect(inputPathFor(opType, k, params)).toBeNull();
+    });
+    // One past the last real slot never resolves to a path — except for the
+    // list-shaped ops, whose bounds only the core knows (see `listShaped`).
+    if (!listShaped) expect(inputPathFor(opType, rustSlots.length, params)).toBeNull();
+  });
+
+  it("refuses a missing/garbage opType and a non-integer slot", () => {
+    expect(inputPathFor(undefined, 0)).toBeNull();
+    expect(inputPathFor("NoSuchOp", 0)).toBeNull();
+    expect(inputPathFor("Fillet", -1)).toBeNull();
+    expect(inputPathFor("Fillet", 0.5)).toBeNull();
+  });
+
+  it("an Extrude with NO stored params refuses rather than guessing a direction", () => {
+    // Both ToFace slots exist only conditionally, so without the params slot 0
+    // could be either `targetFace` or `targetFace2` — a guess rebinds the wrong
+    // direction's target face.
+    expect(inputPathFor("Extrude", 0)).toBeNull();
+  });
+});
+
+describe("rebindInputCommand / element ref kinds", () => {
+  it("wraps any InputPath as an EditOperationInput with an element ref", () => {
+    const ref = elementRefOfKind("body_abc", "el_9", "face", [1, 2, 3]);
+    expect(rebindInputCommand("op_1", { path: "holeFace" }, ref)).toEqual({
+      cmd: "editOperationInput",
+      record: "op_1",
+      path: { path: "holeFace" },
+      reference: { element: ref },
+    });
+  });
+
+  it("derives primary.kind from the candidate TopoKey", () => {
+    // A hole/shell rebind binds a FACE. Labelling it "edge" (the M4b default)
+    // would put a lie into the ref the descriptor rung scores on the next edit.
+    expect(elementKindOfTopoKey("f:22")).toBe("face");
+    expect(elementKindOfTopoKey("e:5")).toBe("edge");
+    expect(elementKindOfTopoKey("v:3")).toBe("vertex");
+    expect(elementKindOfTopoKey("weird")).toBe("edge");
+  });
+
+  it("normalizes the body id to the bare uuid core serde accepts", () => {
+    const ref = elementRefOfKind("body_00000000-0000-0000-0000-0000000000b0", "el_1", "face");
+    expect(ref.primary?.bodyId).toBe("00000000-0000-0000-0000-0000000000b0");
+    expect(ref.anchor).toBeUndefined();
   });
 });

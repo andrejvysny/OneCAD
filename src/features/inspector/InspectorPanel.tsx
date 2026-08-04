@@ -173,6 +173,8 @@ function rowActions(item: FeatureMeta): HistoryRowActions {
       if (idx >= 0) void rollToIndex(idx);
     },
     onDelete: (it) => void deleteFeature(it.id),
+    // H10: the dependent count behind the suppress/delete affordances.
+    getDependents: (it) => createClient().featureDependencies(it.id),
   };
 }
 
@@ -330,11 +332,81 @@ function FeatureState({
           Click a row's value to change it, or double-click the row for the full editor.
         </div>
       ) : null}
+      {/* Also below the list, same reason. */}
+      <FeatureDependenciesSection featureId={featureId} features={features} />
     </>
   );
 }
 
 const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
+
+/**
+ * H10 dependency view — "Depends on" (upstream) / "Used by" (downstream), read
+ * straight off `client.featureDependencies`. Ids are mapped to their live
+ * `FeatureMeta.label` (falling back to the bare id for a stale/legacy reference
+ * `features` no longer carries); each row selects that feature. Either
+ * subsection — and the whole block — hides when empty, so a leaf feature with no
+ * lineage renders nothing here.
+ */
+function FeatureDependenciesSection({
+  featureId,
+  features,
+}: {
+  featureId: string;
+  features: FeatureMeta[];
+}) {
+  const [deps, setDeps] = useState<{ upstream: string[]; downstream: string[] } | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    setDeps(null);
+    createClient()
+      .featureDependencies(featureId)
+      .then((d) => {
+        if (alive) setDeps(d);
+      })
+      .catch(() => {
+        // An unknown/opaque record (or a mock lane with no tracked lineage for it)
+        // has nothing honest to show — an empty section, not an error banner.
+        if (alive) setDeps({ upstream: [], downstream: [] });
+      });
+    return () => {
+      alive = false;
+    };
+  }, [featureId]);
+
+  if (!deps || (deps.upstream.length === 0 && deps.downstream.length === 0)) return null;
+
+  const labelOf = (id: string): string => features.find((f) => f.id === id)?.label ?? id;
+  const list = (title: string, ids: string[], testPrefix: string) =>
+    ids.length === 0 ? null : (
+      <>
+        <SectionLabel className="pb-1.5 pt-4">{title}</SectionLabel>
+        {ids.map((id) => (
+          <div
+            key={id}
+            role="button"
+            tabIndex={0}
+            data-testid={`${testPrefix}-${id}`}
+            onClick={() => selectFeature(id)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") selectFeature(id);
+            }}
+            className="mb-1 flex h-7 cursor-pointer items-center rounded-sm bg-chip px-2.5 text-[12.5px] text-ink-2 hover:bg-hover-2"
+          >
+            {labelOf(id)}
+          </div>
+        ))}
+      </>
+    );
+
+  return (
+    <>
+      {list("Depends on", deps.upstream, "feature-dep-upstream")}
+      {list("Used by", deps.downstream, "feature-dep-downstream")}
+    </>
+  );
+}
 
 /**
  * H3b — the dimensional constraints of a SELECTED past sketch feature, editable in

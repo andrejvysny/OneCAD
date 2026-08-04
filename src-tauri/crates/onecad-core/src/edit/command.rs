@@ -308,6 +308,23 @@ pub enum InputPath {
     BooleanTool,
     /// A revolve axis (`params.axis`).
     RevolveAxis,
+    /// A shell's removed (open) face at `index` (into `open_faces`).
+    ///
+    /// `ShellParams::open_faces` is a `Vec<ElementId>` — bare ids, no typed
+    /// per-face ref — so this arm writes ONLY `ref.primary.element`. The
+    /// descriptor/anchor evidence on the supplied ref is therefore DROPPED: a
+    /// shell open face has no slot to store it in, so an explicit user re-pick is
+    /// the only thing that can move it (the ladder's descriptor rung is not
+    /// available to it). See `wire::wire_op_inputs`'s Shell arm.
+    ShellOpenFaces {
+        /// Index of the open face to rebind.
+        index: usize,
+    },
+    /// A hole's host face (`params.face`) — the WHOLE typed [`ElementRef`],
+    /// evidence included (`HoleParams::face` is an `ElementRef`, unlike shell's
+    /// bare ids). Slot 1 of the Hole `inputs[]` array; slot 0 is the host BODY and
+    /// is not addressable here.
+    HoleFace,
 }
 
 /// The payload written by [`EditCommand::EditOperationInput`] — a union over the

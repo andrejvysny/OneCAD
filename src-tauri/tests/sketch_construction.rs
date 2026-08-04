@@ -231,7 +231,7 @@ async fn set_entity_construction_changes_the_region_set_and_undo_restores_it() {
     );
 
     // Undo restores the flag → the ORIGINAL cell comes back with its original id.
-    assert!(rt.undo(), "undo the flip");
+    assert!(rt.undo().is_some(), "undo the flip");
     let restored = regions(&mut rt, sid).await;
     assert_eq!(restored.len(), 1, "undo brings the cell back");
     assert_eq!(

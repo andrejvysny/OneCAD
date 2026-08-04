@@ -10,6 +10,7 @@ import { CornerCluster } from "./CornerCluster";
 import { FloatingToolbar } from "@/features/toolbar/FloatingToolbar";
 import { ModelToolChips } from "@/features/toolbar/ModelToolChips";
 import { MeasureOverlay } from "@/features/measure/MeasureOverlay";
+import { RepairMarkerOverlay } from "@/features/repair/RepairMarkerOverlay";
 import { MeasurePanel } from "@/features/measure/MeasurePanel";
 import { ModelTreePanel } from "@/features/tree/ModelTreePanel";
 import { InspectorPanel } from "@/features/inspector/InspectorPanel";
@@ -56,6 +57,7 @@ export function EditorScreen() {
         <ConstraintContextChips />
         <ModelToolChips />
         <MeasureOverlay />
+        <RepairMarkerOverlay />
         <MeasurePanel />
 
         <FloatingToolbar />

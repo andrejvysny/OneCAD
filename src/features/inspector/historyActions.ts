@@ -10,8 +10,10 @@
 import { createClient } from "@/ipc/client";
 import { promoteOne } from "@/ipc/promote";
 import {
-  edgeElementRef,
-  filletEdgeRebindCommand,
+  elementKindOfTopoKey,
+  elementRefOfKind,
+  inputPathFor,
+  rebindInputCommand,
   removeOperationCommand,
   rollbackToCursorCommand,
   suppressOperationCommand,
@@ -118,14 +120,18 @@ export async function deleteFeature(opId: string): Promise<void> {
 // ── Click-to-rebind (repair) ────────────────────────────────────────────────
 
 /**
- * Derive the body a repair item's feature operated on. SEAM: the projection has
- * no feature→body linkage. A single-body document is unambiguous; with several
- * bodies the operated one is genuinely ambiguous UNLESS the user has explicitly
- * narrowed it by selecting exactly one body — a silent guess (e.g. "the first")
- * risks repairing the wrong feature's reference, which is worse than refusing. A
- * follow-up needs the needs-repair item to carry its op's target body.
+ * The body a repair item's feature operated on.
+ *
+ * H9: the backend now DERIVES this from the failing record's own inputs and ships
+ * it on the `needs-repair` item (`NeedsRepairItemDto.body_id`), so this is the
+ * answer whenever it is present. The frontend derivation below is the fallback
+ * for an older backend / a step with no derivable body: a single-body document is
+ * unambiguous, and with several bodies the operated one is genuinely ambiguous
+ * UNLESS the user narrowed it by selecting exactly one body. A silent guess ("the
+ * first") risks repairing against the wrong body, which is worse than refusing.
  */
-function deriveOperatedBody(): string | null {
+function deriveOperatedBody(item: NeedsRepairItem): string | null {
+  if (item.bodyId) return item.bodyId;
   const ids = Object.keys(documentStore.getState().bodies);
   if (ids.length === 0) return null;
   if (ids.length === 1) return ids[0];
@@ -134,21 +140,53 @@ function deriveOperatedBody(): string | null {
 }
 
 /**
- * Rebind a NeedsRepair fillet edge to a chosen candidate:
- *   (a) promote the candidate TopoKey → a minted ElementId (anchor = worldPos),
- *   (b) build the typed edge ElementRef (primary {bodyId, elementId, kind:"edge"}
- *       + anchor.worldPoint), and
- *   (c) send `EditOperationInput{FilletEdges{index}}` (the backend-designated
- *       fillet-edge rebind — it rewrites BOTH `edge_ids[index]` and `edges[index]`
- *       in lockstep server-side; command.rs). `index` comes from the refId
- *       (`"<opId>.input<k>"`).
- * Returns false when it could not proceed (no body / already in flight upstream).
+ * The `InputPath` that writes the slot a repair item names, or `null` when that
+ * slot is not element-addressable. Fetches the op's stored params only for the
+ * one opType that needs them (Extrude — its ToFace slots are conditional; see
+ * `inputPathFor`), so the common repair path stays a single round trip.
+ */
+export async function repairInputPath(
+  item: NeedsRepairItem,
+): Promise<ReturnType<typeof inputPathFor>> {
+  const opType = documentStore.getState().features.find((f) => f.id === item.opId)?.opType;
+  const index = parseRefId(item.refId)?.index ?? 0;
+  if (opType !== "Extrude") return inputPathFor(opType, index);
+  try {
+    const params = await createClient().getOperationParams(item.opId);
+    return inputPathFor(opType, index, params);
+  } catch {
+    // Without the params the ToFace slot cannot be told apart from its twin, and
+    // guessing would rebind the wrong direction's target face.
+    return null;
+  }
+}
+
+/** The message shown when a repair item's slot has no `EditOperationInput` path. */
+export const REPAIR_NOT_REBINDABLE =
+  "This reference must be re-picked in the feature editor";
+
+/**
+ * Rebind a NeedsRepair input slot to a chosen candidate:
+ *   (a) resolve the slot's `InputPath` from the op type + slot index
+ *       (`inputPathFor` — mirrors the Rust wire slot table),
+ *   (b) promote the candidate TopoKey → a minted ElementId (anchor = worldPos),
+ *   (c) build the typed ElementRef, and
+ *   (d) send `EditOperationInput{path}`.
+ *
+ * Returns false when it could not proceed (slot not rebindable / no body /
+ * promotion refused). Never sends a doomed command: a slot with no path is
+ * reported to the user instead.
  */
 export async function rebindCandidate(
   item: NeedsRepairItem,
   candidate: ResolveCandidate,
 ): Promise<boolean> {
-  const bodyId = deriveOperatedBody();
+  const path = await repairInputPath(item);
+  if (!path) {
+    errorHint(REPAIR_NOT_REBINDABLE);
+    return false;
+  }
+  const bodyId = deriveOperatedBody(item);
   if (!bodyId) {
     const bodyCount = Object.keys(documentStore.getState().bodies).length;
     errorHint(
@@ -158,7 +196,6 @@ export async function rebindCandidate(
     );
     return false;
   }
-  const index = parseRefId(item.refId)?.index ?? 0;
   const client = createClient();
   try {
     // `promoteOne` already hints when the candidate cannot be promoted (a stale
@@ -168,8 +205,15 @@ export async function rebindCandidate(
       anchor: { worldPoint: candidate.worldPos },
     });
     if (!promoted) return false;
-    const ref = edgeElementRef(promoted.bodyId, promoted.elementId, candidate.worldPos);
-    const res = await client.applyEditCommand(filletEdgeRebindCommand(item.opId, index, ref));
+    // The candidate's TopoKey decides `primary.kind` — a hole/shell slot binds a
+    // FACE, and mislabelling it as an edge would poison the descriptor rung.
+    const ref = elementRefOfKind(
+      promoted.bodyId,
+      promoted.elementId,
+      elementKindOfTopoKey(candidate.topoKey),
+      candidate.worldPos,
+    );
+    const res = await client.applyEditCommand(rebindInputCommand(item.opId, path, ref));
     applyEditResult(res);
     hint("Reference repaired");
     return true;

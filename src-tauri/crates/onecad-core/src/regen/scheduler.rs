@@ -272,8 +272,11 @@ enum Command {
 enum Pending {
     /// A preview, runnable at `ready_at` (its debounce deadline).
     Preview { step: usize, ready_at: Instant },
-    /// A commit, runnable immediately (no debounce).
-    ToEnd { from: usize },
+    /// A commit or a revert (undo/redo), runnable immediately (no debounce). The
+    /// two schedule identically; `revert` only decides which [`RegenRequest`]
+    /// variant is handed to the driver, and with it the SCHEMA §7.2 `editedFrom`
+    /// claim (H8 — an undo must never claim an upstream edit).
+    ToEnd { from: usize, revert: bool },
 }
 
 /// The single in-flight job: its identity and the future being driven.
@@ -429,7 +432,13 @@ impl<D: RegenDriver> RegenScheduler<D> {
             Pending::Preview { step, .. } => {
                 (JobKind::Preview { step }, RegenRequest::ToStep(step))
             }
-            Pending::ToEnd { from } => (JobKind::ToEnd { from }, RegenRequest::ToEnd { from }),
+            Pending::ToEnd {
+                from,
+                revert: false,
+            } => (JobKind::ToEnd { from }, RegenRequest::ToEnd { from }),
+            Pending::ToEnd { from, revert: true } => {
+                (JobKind::ToEnd { from }, RegenRequest::RevertToEnd { from })
+            }
         };
         let cancel = CancelToken::new();
         let fut = Box::pin(self.driver.drive(RegenDirective {
@@ -464,7 +473,15 @@ impl<D: RegenDriver> RegenScheduler<D> {
                 // Commit: cancel any in-flight job, supersede any pending preview,
                 // and run immediately (latest-wins, no debounce).
                 self.cancel_in_flight();
-                self.pending = Some(Pending::ToEnd { from });
+                self.pending = Some(Pending::ToEnd {
+                    from,
+                    revert: false,
+                });
+            }
+            // A revert (undo/redo) is scheduled exactly like a commit.
+            RegenRequest::RevertToEnd { from } => {
+                self.cancel_in_flight();
+                self.pending = Some(Pending::ToEnd { from, revert: true });
             }
         }
     }

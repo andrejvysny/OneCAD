@@ -1388,7 +1388,7 @@ async fn imported_bodies_are_first_class_downstream_citizens() {
 
     // Undo restores the record — and with it the exact hash chain.
     assert!(
-        rt2.undo(),
+        rt2.undo().is_some(),
         "PHASE 7: undo restores the deleted import record"
     );
     let report4 = regen_all(&mut rt2).await;

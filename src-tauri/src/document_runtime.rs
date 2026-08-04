@@ -55,7 +55,7 @@ use onecad_core::document::record::{
 use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, IntentQuery};
 use onecad_core::document::repair::RepairItem;
 use onecad_core::document::Document;
-use onecad_core::edit::{CommandOutcome, DocumentSession, EditCommand, SketchEditOp};
+use onecad_core::edit::{CommandOutcome, DocumentSession, EditCommand, SketchEditOp, UndoOutcome};
 use onecad_core::error::DomainError;
 use onecad_core::history::{DependencyGraph, StepState, Timeline};
 use onecad_core::ids::{
@@ -80,9 +80,9 @@ use onecad_core::sketch::{Sketch, SketchAttachment, WorldPlane};
 use crate::dto::{
     default_label, feature_kind, feature_status, feature_status_message, feature_value,
     needs_repair_item_dto, op_type_name, BodyDto, BodyMeshRef, DatumDto, DocStatus, DocumentChange,
-    DocumentProjection, FailedStep, FeatureDto, FinishSketchDto, NeedsRepairItemDto,
-    PromotedElementDto, SketchDto, SketchHostFaceDto, SketchSessionDto, SketchSolveStatus,
-    SketchStatus, SketchUpsertDto,
+    DocumentProjection, FailedStep, FeatureDependenciesDto, FeatureDto, FinishSketchDto,
+    NeedsRepairItemDto, PromotedElementDto, SketchDto, SketchHostFaceDto, SketchSessionDto,
+    SketchSolveStatus, SketchStatus, SketchUpsertDto,
 };
 use crate::error::ApiError;
 use crate::imports::{ImportWorkspace, PreparedImport};
@@ -276,6 +276,22 @@ impl PreparedSketchRegions {
             .await?;
         Ok(FinishSketchDto { regions })
     }
+}
+
+/// What one [`DocumentRuntime::undo`] / [`redo`](DocumentRuntime::redo) did
+/// (HISTORY-HARDEN H8).
+///
+/// Its existence means a step WAS reverted (the methods return `Option<RevertReport>`).
+/// Checkpoint eviction already happened inside the runtime; the only thing left for
+/// the caller is to enqueue [`regen`](Self::regen) if it is `Some`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RevertReport {
+    /// The regen to schedule for this revert — always a
+    /// [`RegenRequest::RevertToEnd`] carrying an already-clamped floor, so it can
+    /// never claim SCHEMA §7.2 `editedFrom` (see
+    /// [`DocumentRuntime::revert_report`]). `None` ⇒ the revert moved nothing the
+    /// timeline regenerates, so scheduling anything would be pure waste.
+    pub regen: Option<RegenRequest>,
 }
 
 /// An admitted checkpoint mint (SCHEMA §7.7): the head step to save, plus the
@@ -764,33 +780,81 @@ impl DocumentRuntime {
             .map(|(_, kind, descriptor)| (kind, descriptor))
     }
 
-    /// Undoes the newest committed edit. Returns `true` if a step was undone.
-    pub fn undo(&mut self) -> bool {
+    /// Undoes the newest committed edit. `None` if nothing was undone (read-only,
+    /// an open transaction, or an empty undo stack).
+    ///
+    /// See [`revert_report`](Self::revert_report) for what the returned
+    /// [`RevertReport`] guarantees.
+    pub fn undo(&mut self) -> Option<RevertReport> {
         if self.read_only {
-            return false;
+            return None;
         }
-        let undone = self.session.undo();
-        if undone {
-            self.after_mutation();
-            self.drop_stale_sketch_session();
-        }
-        undone
+        let outcome = self.session.undo()?;
+        let report = self.revert_report(outcome);
+        self.after_mutation();
+        self.drop_stale_sketch_session();
+        Some(report)
     }
 
-    /// Redoes the newest undone edit.
+    /// Redoes the newest undone edit. `None` if nothing was redone.
     ///
     /// # Errors
     /// [`DomainError`] if a replayed command fails.
-    pub fn redo(&mut self) -> Result<bool, DomainError> {
+    pub fn redo(&mut self) -> Result<Option<RevertReport>, DomainError> {
         if self.read_only {
-            return Ok(false);
+            return Ok(None);
         }
-        let redone = self.session.redo()?;
-        if redone {
-            self.after_mutation();
-            self.drop_stale_sketch_session();
+        let Some(outcome) = self.session.redo()? else {
+            return Ok(None);
+        };
+        let report = self.revert_report(outcome);
+        self.after_mutation();
+        self.drop_stale_sketch_session();
+        Ok(Some(report))
+    }
+
+    /// Turns a session-level [`UndoOutcome`] into the runtime-level [`RevertReport`]:
+    /// evict the checkpoints the revert invalidated, then name the regen the caller
+    /// must schedule (HISTORY-HARDEN H8).
+    ///
+    /// Two rules, both load-bearing and deliberately using DIFFERENT floors:
+    ///
+    /// * **Eviction takes the RAW floor.** Undo/redo used to bypass the truncation
+    ///   eviction entirely (WP-FIX W2). That exemption rested on undo's request being
+    ///   `ToEnd { from: 0 }`, whose checkpoint ceiling is `0.checked_sub(1) == None`:
+    ///   a revert could never SELECT a checkpoint, so leaving stale ones around was
+    ///   merely untidy. H8 threads a real floor, so a revert now selects one — and the
+    ///   only thing standing between it and a checkpoint minted over the state the
+    ///   revert just undid is the planner's stored-prefix-hash filter, i.e. a single
+    ///   guard on a cache the revert is now allowed to read. It gets the same
+    ///   truncation eviction every other mutation gets. The RAW floor is used (not the
+    ///   clamped one) so an undo-of-append at index `i` drops only the checkpoints at
+    ///   `≥ i`, keeping the still-valid one below it — a truncation, not a wipe.
+    /// * **The regen request takes the CLAMPED floor** — `min(floor, applied − 1)`
+    ///   over the cursor AFTER the inverse applied. Without the clamp an
+    ///   undo-of-append yields `from == applied`, which the planner answers with an
+    ///   empty plan ⇒ `NoOp` ⇒ the undone body STAYS on screen. `applied == 0`
+    ///   saturates to `from: 0`, the planner's clear-publish path.
+    ///
+    /// The request is minted HERE, as a [`RegenRequest::RevertToEnd`], so no caller can
+    /// accidentally hand the H6a edit-lane veto a `from > 0` that came from an undo.
+    fn revert_report(&mut self, outcome: UndoOutcome) -> RevertReport {
+        let Some(floor) = outcome.dirty_floor else {
+            // Nothing the timeline regenerates moved (a sketch-visibility undo).
+            return RevertReport { regen: None };
+        };
+        self.checkpoints.invalidate_from(floor);
+        let applied = self.session.document().timeline.cursor();
+        let from = floor.min(applied.saturating_sub(1));
+        tracing::debug!(
+            floor,
+            from,
+            applied,
+            "revert: dirty floor threaded (checkpoints evicted from the raw floor)"
+        );
+        RevertReport {
+            regen: Some(RegenRequest::RevertToEnd { from }),
         }
-        Ok(redone)
     }
 
     /// Drops an open sketch session whose enter watermark now EXCEEDS the (shrunk)
@@ -1228,6 +1292,31 @@ impl DocumentRuntime {
         onecad_core::document::transform::can_fold_transform(self.session.document(), body)
     }
 
+    /// A feature's upstream/downstream transitive closures (H10 dependency view) —
+    /// the same class of read-only lineage query as [`can_fold_transform`]: the
+    /// frontend sees a flat history list, never edges between records. `None` when
+    /// `record` is not a known timeline node. A SUPPRESSED record is still listed —
+    /// suppression is a node flag on the graph, not removal from it.
+    #[must_use]
+    pub fn feature_dependencies(&self, record: RecordId) -> Option<FeatureDependenciesDto> {
+        let graph = self.session.graph();
+        if !graph.contains(record) {
+            return None;
+        }
+        Some(FeatureDependenciesDto {
+            upstream: graph
+                .upstream(record)
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect(),
+            downstream: graph
+                .downstream(record)
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect(),
+        })
+    }
+
     #[must_use]
     pub fn repair_items(&self) -> &[RepairItem] {
         self.regen.repair.items()
@@ -1242,7 +1331,16 @@ impl DocumentRuntime {
     }
 
     /// Lean per-item NeedsRepair summaries for the `needs-repair` event, resolving
-    /// each item's timeline step to its op record id (`opId`).
+    /// each item's timeline step to its op record id (`opId`) and the body that step
+    /// OPERATES ON (`bodyId`).
+    ///
+    /// The body is the record's first derived input body. For every op whose inputs
+    /// can go into NeedsRepair — Fillet/Chamfer (body recovered from the edge refs),
+    /// Shell (`targetBodyId`), Hole (`targetBodyId`), Extrude ToFace (the boolean
+    /// target when it has one) — that IS the operated body, because `derive_inputs`
+    /// pushes it first. An op with NO input bodies (a NewBody extrude whose ToFace
+    /// target broke) falls back to what the step PRODUCED, which is the body a
+    /// candidate `TopoKey` for it would be promoted against.
     fn needs_repair_items(&self) -> Vec<NeedsRepairItemDto> {
         let records = self.regen.timeline.records();
         self.regen
@@ -1250,11 +1348,17 @@ impl DocumentRuntime {
             .items()
             .iter()
             .map(|item| {
-                let op_id = records
-                    .get(item.step_index)
-                    .map(|r| r.record_id.to_string())
-                    .unwrap_or_default();
-                needs_repair_item_dto(op_id, item)
+                let record = records.get(item.step_index);
+                let op_id = record.map(|r| r.record_id.to_string()).unwrap_or_default();
+                let body_id = record.and_then(|r| {
+                    r.op.derive_inputs()
+                        .bodies
+                        .first()
+                        .copied()
+                        .or_else(|| r.outputs.first().copied())
+                        .map(|b| b.to_string())
+                });
+                needs_repair_item_dto(op_id, body_id, item)
             })
             .collect()
     }
@@ -3252,9 +3356,15 @@ fn element_ref_is_empty(r: &ElementRef) -> bool {
 
 /// The `index`-th topological input [`ElementRef`] of an op, in the SAME order the
 /// wire `inputs[]` array carries (mirrors `wire::wire_op_inputs`): fillet/chamfer
-/// `edges`, then extrude ToFace target faces. Ops whose inputs are whole bodies
-/// (Boolean / pattern / mirror) or bare ids (Shell open faces) expose no typed
-/// element ref here, so a refId-only resolve for them stays un-hydrated.
+/// `edges`, extrude ToFace target faces, and a Hole's host face at slot **1** (slot
+/// 0 is the host BODY, which is not an element ref). Ops whose inputs are whole
+/// bodies (Boolean / pattern / mirror) or bare ids (Shell open faces) expose no
+/// typed element ref here, so a refId-only resolve for them stays un-hydrated.
+///
+/// H9: the Hole arm closes the H5 divergence — `wire_op_inputs` and
+/// `element_refs_mut` both cover `HoleParams::face`, so a refId-only
+/// `resolve_refs` for a hole face used to come back with NO evidence while the
+/// planner lowered the full ref. Pinned by `hole_face_input_hydrates_at_slot_1`.
 fn element_ref_input(op: &Operation, index: usize) -> Option<&ElementRef> {
     let Operation::Known(k) = op else {
         return None;
@@ -3262,6 +3372,8 @@ fn element_ref_input(op: &Operation, index: usize) -> Option<&ElementRef> {
     match k {
         KnownOperation::Fillet(p) => p.edges.get(index),
         KnownOperation::Chamfer(p) => p.edges.get(index),
+        // `inputs[0]` is the host body ref (no element), `inputs[1]` the host face.
+        KnownOperation::Hole(p) => (index == 1).then_some(&p.face),
         KnownOperation::Extrude(p) => {
             let mut faces: Vec<&ElementRef> = Vec::new();
             if p.mode == ExtrudeMode::ToFace {

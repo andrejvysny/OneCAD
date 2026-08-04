@@ -527,6 +527,41 @@ fn fillet_record(seed: u128, body: BodyId, edge: &str, anchor: Vec3) -> Operatio
     OperationRecord::new(RecordId(Uuid::from_u128(seed)), 0, "Fillet", op)
 }
 
+/// A Hole on `body`'s face `face`, with a world-point anchor as its evidence.
+fn hole_record_at(seed: u128, body: BodyId, face: &str, anchor: Vec3) -> OperationRecord {
+    use onecad_core::document::record::{HoleParams, HoleType};
+    let op = Operation::Known(KnownOperation::Hole(HoleParams {
+        target_body: body,
+        face: ElementRef {
+            primary: Some(PrimaryRef {
+                body,
+                element: ElementId::new(face),
+                kind: ElementKind::Face,
+                extra: Default::default(),
+            }),
+            intent: None,
+            anchor: Some(AnchorIntent {
+                world_point: anchor,
+                surface_uv: None,
+                local_frame: None,
+                adjacency_hint: None,
+                extra: Default::default(),
+            }),
+            extra: Default::default(),
+        },
+        point: anchor,
+        hole_type: HoleType::Simple,
+        diameter: Scalar::new(6.0),
+        depth: None,
+        cb_diameter: None,
+        cb_depth: None,
+        cs_diameter: None,
+        cs_angle_deg: None,
+        extra: Default::default(),
+    }));
+    OperationRecord::new(RecordId(Uuid::from_u128(seed)), 0, "Hole", op)
+}
+
 fn runtime_with(backend: Arc<FakeBackend>) -> DocumentRuntime {
     let engine: Arc<dyn GeometryEngine> = backend.clone();
     let meshes: Arc<dyn MeshProvider> = backend.clone();
@@ -611,10 +646,10 @@ async fn undo_redo_round_trips_the_timeline() {
     rt.apply(add_extrude(0x11, 20.0)).unwrap();
     assert_eq!(rt.projection().features.len(), 2);
 
-    assert!(rt.undo(), "undo removes the second op");
+    assert!(rt.undo().is_some(), "undo removes the second op");
     assert_eq!(rt.projection().features.len(), 1);
 
-    assert!(rt.redo().unwrap(), "redo re-applies it");
+    assert!(rt.redo().unwrap().is_some(), "redo re-applies it");
     assert_eq!(rt.projection().features.len(), 2);
 
     // The redo re-executed the forward command → revision advanced past the apply.
@@ -1179,7 +1214,7 @@ fn projection_sketch_geometry_token_tracks_only_authoritative_geometry() {
         "geometry edits invalidate the profile cache"
     );
 
-    assert!(rt.undo());
+    assert!(rt.undo().is_some());
     assert_eq!(
         rt.projection().sketches[&sid.to_string()].geometry_token,
         initial,
@@ -1280,7 +1315,7 @@ async fn sketch_gesture_commits_exactly_one_undo_command() {
     );
 
     // One undo reverts the whole drag.
-    assert!(rt.undo());
+    assert!(rt.undo().is_some());
     assert_eq!(
         point_at(&rt, sid, point),
         [0.0, 0.0],
@@ -1616,6 +1651,35 @@ fn parse_input_ref_id_and_element_ref_input() {
     assert!(element_ref_input(&rec2.op, 1).is_none());
 }
 
+/// H9 (closing an H5 follow-up): a Hole's `inputs[]` is `[host body, host face]`
+/// (`worker::wire::wire_op_inputs`, pinned by
+/// `wire_op_inputs_slot_order_is_the_repair_slot_table`), so a refId-only
+/// `resolve_refs` for `<hole>.input1` must hydrate the STORED `params.face` —
+/// evidence included. Before this, `element_ref_input` had no Hole arm, so the
+/// lean request came back with no descriptor/anchor for the ladder to score
+/// against while the planner lowered the full ref: the resolve dry-run and the
+/// real regen disagreed about the same slot.
+#[test]
+fn hole_face_input_hydrates_at_slot_1() {
+    let body = BodyId(Uuid::from_u128(0xB9));
+    let anchor = Vec3::new_unchecked(7.0, 8.0, 9.0);
+    let rec = hole_record_at(0xF19, body, "f:22", anchor);
+
+    // Slot 0 is the host BODY ref — not an element, so nothing hydrates there.
+    assert!(
+        element_ref_input(&rec.op, 0).is_none(),
+        "slot 0 is the host body, not an element ref"
+    );
+    let r = element_ref_input(&rec.op, 1).expect("host face ref at slot 1");
+    assert_eq!(r.primary.as_ref().unwrap().element.as_str(), "f:22");
+    assert_eq!(
+        r.anchor.as_ref().map(|a| a.world_point),
+        Some(anchor),
+        "the stored evidence must ride the hydration, not just the id"
+    );
+    assert!(element_ref_input(&rec.op, 2).is_none());
+}
+
 #[tokio::test]
 async fn resolve_refs_hydrates_a_refid_only_request_from_the_stored_ref() {
     let mut rt = runtime_with(Arc::new(FakeBackend::new()));
@@ -1646,6 +1710,70 @@ async fn resolve_refs_hydrates_a_refid_only_request_from_the_stored_ref() {
     assert!(rt.stored_input_ref(&bogus).is_none());
     // An out-of-range slot (only one edge) does not hydrate.
     assert!(rt.stored_input_ref(&format!("{rec}.input9")).is_none());
+}
+
+/// H9: every `needs-repair` item names the body its step OPERATES ON.
+///
+/// Without it the frontend had to guess, and refused outright in a multi-body
+/// document (a candidate `TopoKey` can only be promoted against a body) — repair
+/// was unavailable in exactly the documents where topological naming is hardest.
+/// The derivation is the record's own first input body, falling back to what the
+/// step produced; it is never a guess.
+#[tokio::test]
+async fn needs_repair_items_name_the_operated_body() {
+    use onecad_core::document::repair::{LadderLevel, RepairItem, RepairReason};
+
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let fillet_body = BodyId(Uuid::from_u128(0xBA1));
+    let hole_body = BodyId(Uuid::from_u128(0xBA2));
+    let anchor = Vec3::new_unchecked(1.0, 2.0, 3.0);
+    rt.apply(EditCommand::AddOperation {
+        record: fillet_record(0xFA1, fillet_body, "e:5", anchor),
+        at_cursor: true,
+    })
+    .unwrap();
+    rt.apply(EditCommand::AddOperation {
+        record: hole_record_at(0xFA2, hole_body, "f:22", anchor),
+        at_cursor: true,
+    })
+    .unwrap();
+
+    // The repair state is a REGEN product; drive it directly so the derivation is
+    // tested without standing up a worker.
+    rt.regen.timeline = rt.session.document().timeline.clone();
+    let item = |step: usize, ref_id: &str| RepairItem {
+        step_index: step,
+        ref_id: ref_id.into(),
+        element_id: None,
+        ladder_failed: LadderLevel::Descriptor,
+        reason: RepairReason::Ambiguous,
+        candidates: Vec::new(),
+        scoring_version: Some(1),
+        anchor: None,
+        ui_label: String::new(),
+        seeded: false,
+        ordinal_anchor: None,
+    };
+    rt.regen.repair.set_step(0, vec![item(0, "op.input0")]);
+    rt.regen.repair.set_step(1, vec![item(1, "op.input1")]);
+
+    let items = rt.needs_repair_items();
+    assert_eq!(items.len(), 2);
+    assert_eq!(
+        items[0].body_id.as_deref(),
+        Some(fillet_body.to_string().as_str()),
+        "a fillet's operated body is recovered from its typed edge refs"
+    );
+    assert_eq!(
+        items[1].body_id.as_deref(),
+        Some(hole_body.to_string().as_str()),
+        "a hole's operated body is its targetBodyId"
+    );
+    // Bare uuid form — what the frontend's body registry / promote_selection use.
+    assert!(
+        !items[0].body_id.as_deref().unwrap().starts_with("body_"),
+        "bodyId is the BARE uuid, not the worker wire form"
+    );
 }
 
 #[tokio::test]
@@ -1809,7 +1937,7 @@ async fn undo_below_watermark_drops_the_sketch_session() {
     assert!(rt.sketch_session.is_some(), "enter opened a session");
 
     // Undo the extrude → depth 1 < watermark 2 (the stack shrank below enter).
-    assert!(rt.undo(), "the extrude undoes");
+    assert!(rt.undo().is_some(), "the extrude undoes");
     assert!(
         rt.sketch_session.is_none(),
         "an undo below the watermark drops the stale session (no squash)"
@@ -1870,7 +1998,7 @@ async fn eviction_during_session_refuses_the_squash() {
     );
     assert!(rt.sketch_session.is_none(), "the session is consumed");
     // Undo stays monotonic (each pop reverts exactly one step).
-    assert!(rt.undo());
+    assert!(rt.undo().is_some());
     assert_eq!(rt.session.undo_depth(), 199);
 }
 

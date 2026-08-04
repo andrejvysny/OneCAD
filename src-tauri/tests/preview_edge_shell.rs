@@ -42,7 +42,7 @@ use onecad_core::document::refs::{
     AnchorIntent, ElementKind, ElementRef, PrimaryRef, SketchRegionRef,
 };
 use onecad_core::document::variables::Scalar;
-use onecad_core::edit::EditCommand;
+use onecad_core::edit::{EditCommand, InputPath, InputRef};
 use onecad_core::ids::{BodyId, ConstraintId, ElementId, EntityId, RecordId, RegionId, SketchId};
 use onecad_core::math::{Vec2, Vec3};
 use onecad_core::regen::{CancelToken, GeometryEngine, Lod, ModelSnapshot, Outcome, RegenRequest};
@@ -762,5 +762,208 @@ async fn edge_op_preview_without_typed_edges_fails_loudly() {
     let after = body_mesh(&mut rt, body_a).await;
     let after_view = validate_mesh_blob(&after).expect("post-failure MESH1");
     assert_eq!(after_view.face_count, 6);
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HISTORY-HARDEN H9 — `InputPath::ShellOpenFaces`, and the weakness it inherits
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A shell's open face can be RE-PICKED through
+/// `EditOperationInput{InputPath::ShellOpenFaces{k}}`, and the re-pick lands
+/// because it writes the ElementId DIRECTLY — the resolution ladder is not
+/// involved in an explicit user rebind.
+///
+/// **The recorded weakness (expected-weak, pinned deliberately).**
+/// `ShellParams::open_faces` is a bare `Vec<ElementId>`, so the descriptor/anchor
+/// evidence on the ref the user picked has NOWHERE to be stored and is dropped
+/// (`edit/session.rs set_shell_open_face`). A shell open face is therefore
+/// anchor-less on the wire (`wire.rs face_input_refs`) and depends entirely on the
+/// worker's partition tracking: re-pick an id the partition does not track and the
+/// step goes NeedsRepair with no candidate rung to fall back on. That is the
+/// honest V1 behaviour and this test states it in both directions:
+///  (a) rebinding to an UNTRACKED id → NeedsRepair, geometry unchanged;
+///  (b) rebinding back to the tracked id → the cup rebuilds to the same volume.
+///
+/// Closing this properly needs a typed `ShellParams::faces` slot (a params change
+/// + a SCHEMA §7.3 amendment), which is out of H9's scope.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shell_open_face_rebind_writes_through_but_carries_no_evidence() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let body_a = build_box_a(&mut rt, 20.0, 20.0, 25.0).await;
+    let plain = body_mesh(&mut rt, body_a).await;
+    let plain_view = validate_mesh_blob(&plain).expect("box A MESH1 validates");
+    let (_top_key, centroid) = top_face_pick(&plain_view, &plain);
+
+    // Same partition-tracking setup as `shell_preview_matches_the_commit`: a ToFace
+    // extrude MINTS the open face's ElementId during the regen, which is the only
+    // way a bare-id shell face can bind at all.
+    let open_face = ElementId::new("el_shell_top");
+    let face_ref = anchored_ref(body_a, &open_face, ElementKind::Face, centroid);
+    let scol = SketchId(Uuid::from_u128(0xC0));
+    add_op(
+        &mut rt,
+        sketch_record(SKETCH_COL, &rect_sketch(scol, 0x3000, 5.0, 5.0, 5.0, 5.0)),
+    );
+    add_op(&mut rt, extrude_to_face_record(EXTRUDE_COL, scol, face_ref));
+    let shell = RecordId(Uuid::from_u128(OP_TAIL));
+    add_op(
+        &mut rt,
+        shell_record(OP_TAIL, body_a, vec![open_face.clone()], 1.0),
+    );
+    let rep = regen_all(&mut rt).await;
+    assert_eq!(
+        published(&rep, "shell").repair_summary.needs_repair_count,
+        0
+    );
+    let cup = body_mesh(&mut rt, body_a).await;
+    let cup_view = validate_mesh_blob(&cup).expect("cup MESH1");
+    let cup_volume = mesh_volume(&cup_view, &cup);
+    assert!(
+        (cup_volume - 2224.0).abs() < 2.0,
+        "shell(20×20×25, t=1, top open) = 2224, got {cup_volume}"
+    );
+
+    // (a) Re-pick an id the partition does NOT track. The ref carries a perfectly
+    // good anchor, but the bare-id slot cannot store it, so nothing can rescue the
+    // binding — NeedsRepair, deterministically, never a guessed face.
+    rt.apply(EditCommand::EditOperationInput {
+        record: shell,
+        path: InputPath::ShellOpenFaces { index: 0 },
+        reference: InputRef::Element(anchored_ref(
+            body_a,
+            &ElementId::new("el_never_minted"),
+            ElementKind::Face,
+            centroid,
+        )),
+    })
+    .expect("ShellOpenFaces{0} is accepted for a Shell record");
+    // The write-through IS observable in the record even though the evidence is not.
+    let stored = rt
+        .operation_params(shell)
+        .expect("shell params")
+        .get("openFaces")
+        .cloned()
+        .expect("openFaces");
+    assert_eq!(
+        stored,
+        serde_json::json!(["el_never_minted"]),
+        "the rebind wrote the bare id into slot 0"
+    );
+    let broken = regen_all(&mut rt).await;
+    let snap = published(&broken, "untracked shell face");
+    assert_eq!(
+        snap.repair_summary.needs_repair_count, 1,
+        "an untracked open face has NO evidence rung to fall back on — this is the \
+         recorded weakness of a bare-id slot, not a bug in the rebind"
+    );
+    let after = body_mesh(&mut rt, body_a).await;
+    let after_view = validate_mesh_blob(&after).expect("post-break MESH1");
+    let after_volume = mesh_volume(&after_view, &after);
+    assert!(
+        (after_volume - 10000.0).abs() < 1.0,
+        "the un-shelled box is back (10000) — the step did not run, and certainly \
+         did not open some other face: got {after_volume}"
+    );
+
+    // (b) Re-pick the TRACKED id: an explicit rebind writes the id directly, so it
+    // binds without the ladder ever being consulted. The cup comes back exactly.
+    rt.apply(EditCommand::EditOperationInput {
+        record: shell,
+        path: InputPath::ShellOpenFaces { index: 0 },
+        reference: InputRef::Element(anchored_ref(
+            body_a,
+            &open_face,
+            ElementKind::Face,
+            centroid,
+        )),
+    })
+    .expect("re-pick the tracked open face");
+    let rep = regen_all(&mut rt).await;
+    assert_eq!(
+        published(&rep, "repaired shell")
+            .repair_summary
+            .needs_repair_count,
+        0
+    );
+    let fixed = body_mesh(&mut rt, body_a).await;
+    let fixed_view = validate_mesh_blob(&fixed).expect("repaired MESH1");
+    let fixed_volume = mesh_volume(&fixed_view, &fixed);
+    assert!(
+        (fixed_volume - cup_volume).abs() < 1.0,
+        "the repaired shell must rebuild the SAME cup: want {cup_volume}, got {fixed_volume}"
+    );
+    eprintln!(
+        "H9 ShellOpenFaces rebind PASS: cup {cup_volume} → broken {after_volume} → {fixed_volume}"
+    );
+    wm.shutdown().await;
+}
+
+/// The core's bounds + identity discipline on the shell arm, at the app layer:
+/// a gap past the end and an evidence-only ref are both refused before the worker
+/// sees anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shell_open_face_rebind_refuses_out_of_range_and_identity_less_refs() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let body_a = build_box_a(&mut rt, 20.0, 20.0, 25.0).await;
+    let plain = body_mesh(&mut rt, body_a).await;
+    let plain_view = validate_mesh_blob(&plain).expect("box MESH1");
+    let (_k, centroid) = top_face_pick(&plain_view, &plain);
+    let shell = RecordId(Uuid::from_u128(OP_TAIL));
+    add_op(
+        &mut rt,
+        shell_record(OP_TAIL, body_a, vec![ElementId::new("el_a")], 1.0),
+    );
+
+    let err = rt
+        .apply(EditCommand::EditOperationInput {
+            record: shell,
+            path: InputPath::ShellOpenFaces { index: 3 },
+            reference: InputRef::Element(anchored_ref(
+                body_a,
+                &ElementId::new("el_b"),
+                ElementKind::Face,
+                centroid,
+            )),
+        })
+        .expect_err("a gap past the end of openFaces is out of range");
+    assert!(
+        format!("{err}").contains("out of range"),
+        "expected an out-of-range rejection, got: {err}"
+    );
+
+    let mut anchor_only = anchored_ref(body_a, &ElementId::new("x"), ElementKind::Face, centroid);
+    anchor_only.primary = None;
+    let err = rt
+        .apply(EditCommand::EditOperationInput {
+            record: shell,
+            path: InputPath::ShellOpenFaces { index: 0 },
+            reference: InputRef::Element(anchor_only),
+        })
+        .expect_err("a bare-id slot needs a primary element id");
+    assert!(
+        format!("{err}").contains("primary element id"),
+        "expected a primary-id rejection, got: {err}"
+    );
+
+    // Neither refusal touched the record.
+    assert_eq!(
+        rt.operation_params(shell)
+            .expect("shell params")
+            .get("openFaces")
+            .cloned()
+            .expect("openFaces"),
+        serde_json::json!(["el_a"])
+    );
     wm.shutdown().await;
 }

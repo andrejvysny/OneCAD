@@ -489,7 +489,7 @@ async fn undo_restores_prior_body_metadata() {
     assert!(!projected(&rt, b).name.is_empty(), "box B is in the tree");
 
     // Undo pops the rename (the newest committed edit).
-    assert!(rt.undo(), "the rename is undoable");
+    assert!(rt.undo().is_some(), "the rename is undoable");
     assert_eq!(
         projected(&rt, a).name,
         default_name,

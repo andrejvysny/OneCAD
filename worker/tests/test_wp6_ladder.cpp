@@ -9,6 +9,7 @@
 //   (5) SCORED SPLIT LINEAGE (closes review finding 2): a symmetric split of a
 //       tracked face ⇒ NeedsRepair "ambiguous" (was an unscored Modified().First()).
 // No framework: exit code == failure count.
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -230,6 +231,207 @@ void test_survives_small_edit_else_needs_repair() {
           "edit: a large ambiguous change ⇒ NeedsRepair (never a wrong bind)");
 }
 
+// ── H6a: edit-scoped descriptor-tie veto + proportional anchor floor ──────────
+//
+// The B3 attack scene: a 40×20×25 box whose x=0 and x=40 faces are EXACT descriptor
+// twins (same 20×25 area, opposite normals — scored by |dot| so a flip still
+// matches — same sorted-incident-edge adjacency hash). The ref was authored on the
+// x=0 face, but its stored anchor sits near the x=40 TWIN, which is what a stale
+// anchor looks like after an upstream edit moved geometry out from under it.
+// Descriptor evidence CANNOT separate the two; only the anchor can.
+//
+// `twin_offset` slides the stored anchor along −X away from the x=40 twin's centre,
+// which is what selects the two cases the veto must distinguish:
+//   * offset 0        — the twin sits EXACTLY at the stale anchor (TELEPORT).
+//   * offset > eps·scale — the twin is merely NEARER to the stale anchor than the
+//                       real element is (DRIFT).
+// The anchor scale here is 0.5·diag = 0.5·√(40²+20²+25²) ≈ 25.62, so the
+// anchor-exact threshold is 0.05 · 25.62 ≈ 1.28 mm.
+struct TwinScene {
+    TopoDS_Shape box;
+    em::LadderRef ref;
+};
+
+TwinScene b3_twin_scene(double twin_offset) {
+    TwinScene s;
+    s.box = BRepPrimAPI_MakeBox(40.0, 20.0, 25.0).Shape();
+    const TopoDS_Shape authored = face_by_center(s.box, 0, 10, 12.5);  // x=0
+    // Anchor near the x=40 twin — the STALE anchor.
+    s.ref = face_ref("el_twin", authored, 40.0 - twin_offset, 10.0, 12.5);
+    return s;
+}
+
+// The anchor-exact threshold for the 40×20×25 twin scene (≈1.28 mm).
+double twin_scene_exact_threshold() {
+    return em::kAnchorExactEps * em::anchor_scale(std::sqrt(40.0 * 40.0 + 20.0 * 20.0 + 25.0 * 25.0));
+}
+
+void dump_top2(const char* label, const em::LadderResolution& r) {
+    if (r.candidates.size() < 2) return;
+    std::fprintf(stderr, "  [%s] top1 %s score=%.4f | top2 %s score=%.4f\n", label,
+                 r.candidates[0].topo_key.c_str(), r.candidates[0].score,
+                 r.candidates[1].topo_key.c_str(), r.candidates[1].score);
+}
+
+// (7a) B3 DRIFT — the class the veto MUST catch. The stale anchor no longer sits on
+// ANY candidate; a congruent twin is merely NEARER to it than the moved original.
+// Nothing is sitting where it was authored, so nothing has earned the anchor's
+// trust, and binding on proximity alone would be a silent wrong bind.
+//
+// Also pins the carve-out BOUNDARY in both directions: inside the anchor-exact
+// epsilon the twin binds (the winner demonstrably did not move), outside it vetoes.
+// A carve-out that is too wide fails the second half; one that is absent or too
+// narrow fails the first.
+void test_edit_scoped_drift_veto_needs_repair() {
+    const double eps = twin_scene_exact_threshold();
+
+    // (i) INSIDE the epsilon — the twin is still effectively AT the anchor.
+    const TwinScene near = b3_twin_scene(eps * 0.5);
+    const auto res_near = em::resolve_descriptor_stage(
+        near.box, "body", {near.ref}, em::LadderEditContext{/*post_upstream_edit=*/true});
+    check(res_near.size() == 1, "drift: one resolution (inside eps)");
+    if (!res_near.empty()) {
+        dump_top2("drift<eps", res_near[0]);
+        check(res_near[0].outcome == em::LadderOutcome::AutoBind,
+              "drift: WITHIN the anchor-exact epsilon the anchor may still decide");
+    }
+
+    // (ii) OUTSIDE the epsilon — genuine drift ⇒ the veto fires.
+    const TwinScene far = b3_twin_scene(eps * 2.5);
+    const auto res_far = em::resolve_descriptor_stage(
+        far.box, "body", {far.ref}, em::LadderEditContext{/*post_upstream_edit=*/true});
+    check(res_far.size() == 1, "drift: one resolution (outside eps)");
+    if (res_far.empty()) return;
+    dump_top2("drift>eps", res_far[0]);
+    check(res_far[0].outcome == em::LadderOutcome::NeedsRepair,
+          "drift: a twin merely NEARER to a stale anchor must NOT auto-bind (B3)");
+    check(res_far[0].reason == "ambiguous", "drift: reason ambiguous (no new §9 token)");
+    check(res_far[0].candidates.size() >= 2, "drift: both twins surfaced as candidates");
+    if (res_far[0].candidates.size() >= 2) {
+        // Both x-faces are in the evidence, so a repair UI can offer the pair.
+        const std::string k0 = res_far[0].candidates[0].topo_key;
+        const std::string k1 = res_far[0].candidates[1].topo_key;
+        check(k0 != k1 && !k0.empty() && !k1.empty(), "drift: two distinct candidate topoKeys");
+    }
+}
+
+// (7b) B3 TELEPORT — the ACCEPTED RESIDUAL. An edit that parks an EXACT congruent
+// twin precisely at the stale anchor while moving the original away still
+// auto-binds, to the twin, silently.
+//
+// This is NOT an oversight and the assertion below is deliberate: the case is
+// LOCALLY UNDECIDABLE. The worker sees two candidates with byte-identical
+// descriptors, one of them exactly at the anchor, and no evidence that
+// distinguishes "it never moved" from "something else moved onto it". Refusing it
+// means refusing the anchor-exact carve-out, which regresses the flagship gesture
+// (see `h6a_edit_lane_*` on the Rust side: a fillet on a plain box, whose four
+// vertical edges are exact twins, would then NeedsRepair after every upstream
+// edit). Accepted and documented by the HISTORY-HARDEN H6a decision; the fix is
+// reserved for the future from-0 history rung, which has the lineage this stage
+// lacks.
+//
+// If a later wave closes it, THIS TEST FLIPS — that visibility is the point.
+void test_edit_scoped_teleport_is_the_accepted_residual() {
+    const TwinScene s = b3_twin_scene(0.0);  // twin EXACTLY at the stale anchor
+    const auto res = em::resolve_descriptor_stage(s.box, "body", {s.ref},
+                                                  em::LadderEditContext{true});
+    check(res.size() == 1, "teleport: one resolution");
+    if (res.empty()) return;
+    dump_top2("teleport", res[0]);
+    check(res[0].outcome == em::LadderOutcome::AutoBind,
+          "teleport: an exact twin AT the stale anchor still binds — ACCEPTED H6a "
+          "residual (locally undecidable; flips when the history rung lands)");
+}
+
+// (8) REOPEN SEMANTICS — the drift scene with NO edit context is a from-0 replay:
+// the geometry is byte-identical to the one the ref was authored against, so the
+// anchor is authoritative and deciding the tie with it is CORRECT. This pins that
+// H6a did not break reopen — note it uses the OUTSIDE-eps offset, so it is the
+// case the edit lane refuses, proving the two lanes really do differ.
+void test_no_edit_context_anchor_still_decides() {
+    const TwinScene s = b3_twin_scene(twin_scene_exact_threshold() * 2.5);
+    const auto res = em::resolve_descriptor_stage(s.box, "body", {s.ref});  // no edit context
+    check(res.size() == 1, "reopen: one resolution");
+    if (res.empty()) return;
+    dump_top2("reopen", res[0]);
+    check(res[0].outcome == em::LadderOutcome::AutoBind,
+          "reopen: with NO edit context the anchor still decides a descriptor tie");
+    const TopoDS_Shape at_anchor = face_by_center(s.box, 40, 10, 12.5);
+    check(res[0].bound_topo_key ==
+              em::ElementMapPartition::topokey_for_shape(s.box, at_anchor, km::ElementKind::Face),
+          "reopen: it bound the candidate NEAREST the anchor");
+}
+
+// (9) PROPORTIONAL ANCHOR FLOOR — a sub-millimetre part. The anchor proximity
+// feature scales by `max(0.5*bodyDiag, floor)`. With the old fixed 1.0 mm floor a
+// 0.3 mm separation on a 0.77 mm body is only 0.075 of margin (< 0.10) ⇒ the whole
+// part is un-resolvable. With the proportional floor the same separation is 0.195
+// ⇒ a clean auto-bind. body_diagonal() already floors a degenerate box at 1.0, so
+// the new 1e-7 is a divide-by-zero guard only.
+void test_proportional_anchor_floor_submm() {
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(0.3, 0.5, 0.5).Shape();
+    const TopoDS_Shape x0 = face_by_center(box, 0, 0.25, 0.25);
+    // Anchor exactly ON the authored face; the x=0.3 twin is 0.3 mm away.
+    std::vector<em::LadderRef> refs{face_ref("el_submm", x0, 0.0, 0.25, 0.25)};
+
+    const auto res = em::resolve_descriptor_stage(box, "body", refs);
+    check(res.size() == 1, "submm: one resolution");
+    if (res.empty()) return;
+    dump_top2("submm", res[0]);
+    check(res[0].outcome == em::LadderOutcome::AutoBind,
+          "submm: a 0.3mm separation on a 0.77mm body auto-binds (proportional floor)");
+    check(res[0].margin >= em::kAutoBindMinMargin,
+          "submm: the margin clears 0.10 once the anchor scale is proportional");
+    check(res[0].bound_topo_key ==
+              em::ElementMapPartition::topokey_for_shape(box, x0, km::ElementKind::Face),
+          "submm: it bound the face the anchor sits on, not its twin");
+}
+
+// (10) SYMMETRIC EXACT TIE — unchanged by edit context in EITHER direction. The
+// anchor is equidistant, so there is nothing for it to decide; the margin gate
+// already refuses. Edit context must not turn this into an auto-bind, and its
+// absence must not either.
+void test_exact_tie_needs_repair_either_way() {
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(gp_Pnt(-5, -5, -10), 10.0, 10.0, 20.0).Shape();
+    const TopoDS_Shape top = face_by_center(box, 0, 0, 10);
+    const std::vector<em::LadderRef> refs{face_ref("el_sym2", top, 0, 0, 0)};
+
+    const auto with_edit =
+        em::resolve_descriptor_stage(box, "body", refs, em::LadderEditContext{true});
+    const auto without = em::resolve_descriptor_stage(box, "body", refs);
+    check(with_edit.size() == 1 && with_edit[0].outcome == em::LadderOutcome::NeedsRepair,
+          "exact tie: NeedsRepair WITH edit context");
+    check(without.size() == 1 && without[0].outcome == em::LadderOutcome::NeedsRepair,
+          "exact tie: NeedsRepair WITHOUT edit context (unchanged)");
+}
+
+// (11) THE VETO IS SCOPED, not a blanket post-edit refusal. Notch one twin so the
+// two x-faces are no longer congruent (484 vs 500 mm², different adjacency hash):
+// the descriptor now separates them well past the tie epsilon, so a post-edit
+// resolution still auto-binds. Without this, H6a would degrade to "any edit ⇒
+// NeedsRepair" and defeat the ladder.
+void test_veto_does_not_fire_on_distinguishable_descriptors() {
+    const TopoDS_Shape base = BRepPrimAPI_MakeBox(40.0, 20.0, 25.0).Shape();
+    const TopoDS_Shape notch = BRepPrimAPI_MakeBox(gp_Pnt(35.0, -1.0, -1.0), 10.0, 5.0, 5.0).Shape();
+    BRepAlgoAPI_Cut cut(base, notch);
+    cut.Build();
+    const TopoDS_Shape body = cut.Shape();
+
+    const TopoDS_Shape x0 = face_by_center(body, 0, 10, 12.5);
+    std::vector<em::LadderRef> refs{face_ref("el_unique", x0, 0.0, 10.0, 12.5)};
+
+    const auto res =
+        em::resolve_descriptor_stage(body, "body", refs, em::LadderEditContext{true});
+    check(res.size() == 1, "scoped: one resolution");
+    if (res.empty()) return;
+    dump_top2("scoped", res[0]);
+    check(res[0].outcome == em::LadderOutcome::AutoBind,
+          "scoped: a DISTINGUISHABLE descriptor still auto-binds under edit context");
+    check(res[0].bound_topo_key ==
+              em::ElementMapPartition::topokey_for_shape(body, x0, km::ElementKind::Face),
+          "scoped: it bound the authored face");
+}
+
 }  // namespace
 
 int main() {
@@ -239,6 +441,12 @@ int main() {
     test_assignment_beats_greedy();
     test_symmetric_split_needs_repair();
     test_survives_small_edit_else_needs_repair();
+    test_edit_scoped_drift_veto_needs_repair();
+    test_edit_scoped_teleport_is_the_accepted_residual();
+    test_no_edit_context_anchor_still_decides();
+    test_proportional_anchor_floor_submm();
+    test_exact_tie_needs_repair_either_way();
+    test_veto_does_not_fire_on_distinguishable_descriptors();
     if (g_failures == 0) std::fprintf(stderr, "wp6_ladder: OK\n");
     return g_failures;
 }

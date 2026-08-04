@@ -43,9 +43,9 @@ use onecad_core::regen::{RegenRequest, ResolveRef, ResolveRequest};
 use crate::autosave;
 use crate::document_runtime::{DocumentRuntime, RegenReport};
 use crate::dto::{
-    BeginGestureDto, DocumentProjection, DocumentSnapshotDto, DragSolveDto, FinishSketchDto,
-    PromotedElementDto, RecentProjectDto, RecoveryInfoDto, ResolveRefDto, SketchOnFaceDto,
-    SketchSessionDto, SketchUpsertDto,
+    BeginGestureDto, DocumentProjection, DocumentSnapshotDto, DragSolveDto, FeatureDependenciesDto,
+    FinishSketchDto, PromotedElementDto, RecentProjectDto, RecoveryInfoDto, ResolveRefDto,
+    SketchOnFaceDto, SketchSessionDto, SketchUpsertDto,
 };
 use crate::error::ApiError;
 use crate::events;
@@ -616,12 +616,18 @@ fn edit_command_summary(command: &EditCommand) -> String {
 }
 
 /// Undoes the last committed edit (`CadClient.undo`).
+///
+/// The follow-up regen is whatever [`DocumentRuntime::undo`] named — a
+/// [`RegenRequest::RevertToEnd`] over the reverted step's real dirty floor, not the
+/// blind full-history `ToEnd { from: 0 }` this used to enqueue (HISTORY-HARDEN H8).
+/// The request is minted by the runtime precisely so this lane cannot hand the H6a
+/// edit-scoped veto a `from > 0` that came from a revert.
 #[tauri::command]
 pub async fn undo(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<DocumentProjection, ApiError> {
-    let (changed, projection) = {
+    let (revert, projection) = {
         let mut guard = state.runtime.lock().await;
         let rt = guard
             .as_mut()
@@ -629,22 +635,23 @@ pub async fn undo(
         (rt.undo(), rt.projection())
     };
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
-    if changed {
-        if let Some(sched) = state.scheduler.get() {
-            sched.request(RegenRequest::ToEnd { from: 0 });
+    if let Some(revert) = revert {
+        if let (Some(sched), Some(request)) = (state.scheduler.get(), revert.regen) {
+            sched.request(request);
         }
         state.note_mutation();
     }
     Ok(projection)
 }
 
-/// Redoes the last undone edit (`CadClient.redo`).
+/// Redoes the last undone edit (`CadClient.redo`). Same H8 dirty-floor lane as
+/// [`undo`].
 #[tauri::command]
 pub async fn redo(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<DocumentProjection, ApiError> {
-    let (changed, projection) = {
+    let (revert, projection) = {
         let mut guard = state.runtime.lock().await;
         let rt = guard
             .as_mut()
@@ -652,9 +659,9 @@ pub async fn redo(
         (rt.redo()?, rt.projection())
     };
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
-    if changed {
-        if let Some(sched) = state.scheduler.get() {
-            sched.request(RegenRequest::ToEnd { from: 0 });
+    if let Some(revert) = revert {
+        if let (Some(sched), Some(request)) = (state.scheduler.get(), revert.regen) {
+            sched.request(request);
         }
         state.note_mutation();
     }
@@ -1555,6 +1562,26 @@ pub async fn get_operation_params(
             "no params for record {record_id} (unknown or opaque)"
         ))
     })
+}
+
+/// A feature's upstream/downstream transitive closures (read-only; H10 dependency
+/// view — `CadClient.featureDependencies`). Consumed by the delete/suppress
+/// confirmations (dependent counts) and the inspector's "Depends on / Used by"
+/// section. A suppressed record is still a valid query target — suppression is a
+/// node flag on the graph, not removal from it.
+#[tauri::command]
+pub async fn feature_dependencies(
+    state: State<'_, AppState>,
+    record_id: String,
+) -> Result<FeatureDependenciesDto, ApiError> {
+    let record = RecordId::from_str(&record_id)
+        .map_err(|e| ApiError::InvalidCommand(format!("bad recordId {record_id:?}: {e}")))?;
+    let guard = state.runtime.lock().await;
+    let rt = guard
+        .as_ref()
+        .ok_or_else(|| ApiError::NoDocument("featureDependencies".into()))?;
+    rt.feature_dependencies(record)
+        .ok_or_else(|| ApiError::InvalidCommand(format!("unknown record {record_id}")))
 }
 
 fn parse_sketch_id(s: &str) -> Result<SketchId, ApiError> {

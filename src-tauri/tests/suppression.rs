@@ -980,7 +980,7 @@ async fn suppress_survives_undo_redo() {
 
     // Undo the suppression → both bodies (the undo memento restores the record,
     // and `from_records` re-derives the step state from it).
-    assert!(rt.undo(), "the suppression is an undoable edit");
+    assert!(rt.undo().is_some(), "the suppression is an undoable edit");
     assert!(!is_suppressed(&rt, EX_B), "undo cleared the record flag");
     let undone = regen_all(&mut rt).await;
     assert_eq!(
@@ -990,7 +990,10 @@ async fn suppress_survives_undo_redo() {
     );
 
     // Redo → back to one body.
-    assert!(rt.redo().expect("redo ok"), "the suppression redoes");
+    assert!(
+        rt.redo().expect("redo ok").is_some(),
+        "the suppression redoes"
+    );
     assert!(is_suppressed(&rt, EX_B), "redo re-set the record flag");
     let redone = regen_all(&mut rt).await;
     assert_eq!(

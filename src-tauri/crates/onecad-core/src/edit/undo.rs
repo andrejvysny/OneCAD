@@ -119,6 +119,61 @@ pub enum Inverse {
 }
 
 impl Inverse {
+    /// The lowest timeline step whose regen result applying this memento
+    /// invalidates — the **dirty floor** the undo/redo replay must start from.
+    /// `None` means the memento moves nothing the timeline regenerates (pure
+    /// display metadata).
+    ///
+    /// **Must be evaluated BEFORE [`apply`](Self::apply)**: `RemoveRecord` resolves
+    /// its index by looking the record up while it is still in the timeline, and the
+    /// sketch arms read the producer/consumer steps of the pre-undo document.
+    ///
+    /// ## The conservative rule — do not weaken it
+    ///
+    /// An inverse whose reach over the timeline is not **exactly** known MUST return
+    /// `Some(0)`. A floor that is too LOW costs a slower replay; a floor that is too
+    /// HIGH is a correctness bug: both the checkpoint eviction
+    /// ([`CheckpointStore::invalidate_from`](crate::regen::CheckpointStore::invalidate_from))
+    /// and the follow-up regen would then skip steps the undo actually changed, so the
+    /// viewport — and the next save — keep geometry the user just reverted. Every new
+    /// [`Inverse`] variant needs an arm here; the match is exhaustive on purpose so the
+    /// compiler forces the decision.
+    #[must_use]
+    pub fn dirty_floor(&self, doc: &Document) -> Option<usize> {
+        match self {
+            // Undo of an add: the record is still present, so its index is exact.
+            // A missing record should be impossible (the memento is applied against
+            // the state it was captured over) — floor to 0 rather than guess.
+            Inverse::RemoveRecord { record } => Some(doc.timeline.index_of(*record).unwrap_or(0)),
+            // Both carry the exact index they were captured at.
+            Inverse::InsertRecord { index, .. } | Inverse::RestoreRecord { index, .. } => {
+                Some(*index)
+            }
+            // The cursor moves in one direction or the other; everything between the
+            // two positions changes applied-ness, so the floor is the lower of them.
+            Inverse::RestoreCursor { cursor } => Some((*cursor).min(doc.timeline.cursor())),
+            // Same answer the edit lane's `sketch_dirty_outcome` computes.
+            Inverse::RestoreSketch { id, .. } => doc.sketch_dirty_step(*id),
+            // Display-only: no timeline step regenerates differently.
+            Inverse::RestoreSketchVisibility { .. } => None,
+            // Whole-collection mementos. `RestoreBodies` (names/visibility, but also
+            // every row adopted from regen since the reverted edit), `RestoreDatum`
+            // (a datum a sketch frame was stamped from), `RestoreVariables` (a bare
+            // variable name can drive any dimensioned op — the same conservative span
+            // the forward `variable_outcome` takes) and `RestoreRepair` (the repair
+            // state IS the regen execution ceiling) all restore state whose reach over
+            // the timeline this layer cannot bound. Conservative floor, per the rule.
+            Inverse::RestoreBodies { .. }
+            | Inverse::RestoreDatum { .. }
+            | Inverse::RestoreVariables { .. }
+            | Inverse::RestoreRepair { .. } => Some(0),
+            // The composite's members all apply, so the floor is the lowest of them
+            // (all-`None` members ⇒ `None` — nothing regenerates).
+            Inverse::Composite(list) => list.iter().filter_map(|i| i.dirty_floor(doc)).min(),
+            Inverse::Noop => None,
+        }
+    }
+
     /// Restores the mementoed prior state onto `doc`.
     pub(crate) fn apply(self, doc: &mut Document) {
         match self {
@@ -177,6 +232,33 @@ impl Inverse {
             }
             Inverse::Noop => {}
         }
+    }
+}
+
+/// What one undo/redo step moved (HISTORY-HARDEN H8).
+///
+/// Returned by [`DocumentSession::undo`](crate::edit::DocumentSession::undo) /
+/// [`redo`](crate::edit::DocumentSession::redo) so the caller can evict checkpoints
+/// and replay from a REAL floor instead of blindly regenerating the whole history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UndoOutcome {
+    /// The lowest timeline step whose regen result the step invalidated — folded
+    /// (min) across every edit in the transaction. `None` ⇒ the step touched no
+    /// regenerated state at all, so no regen is needed.
+    ///
+    /// Undo derives it from the mementos ([`Inverse::dirty_floor`], evaluated before
+    /// each is applied); redo derives it from the re-executed forward commands'
+    /// [`CommandOutcome::dirty`](crate::edit::CommandOutcome::dirty) — the same spans
+    /// the normal edit lane schedules from.
+    pub dirty_floor: Option<usize>,
+}
+
+/// Folds a new floor into an accumulator (the lower wins; `None` is "no claim").
+pub(crate) fn fold_floor(acc: Option<usize>, next: Option<usize>) -> Option<usize> {
+    match (acc, next) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (None, None) => None,
     }
 }
 
@@ -489,5 +571,277 @@ mod tests {
         // last → final state visible=false.
         inv.apply(&mut doc);
         assert!(!doc.sketch_visible(sid));
+    }
+
+    // ── H8: dirty floors ─────────────────────────────────────────────────────
+
+    use crate::document::record::{
+        BooleanMode, ExtrudeMode, ExtrudeParams, KnownOperation, Operation, OperationRecord,
+        PlaneKind, SketchOpParams, SketchPlaneRef,
+    };
+    use crate::document::refs::SketchRegionRef;
+    use crate::document::variables::Scalar;
+    use crate::ids::RegionId;
+    use crate::math::Vec3;
+
+    fn rec_id(seed: u128) -> RecordId {
+        RecordId(Uuid::from_u128(seed))
+    }
+
+    fn extrude_rec(seed: u128, sketch: SketchId) -> OperationRecord {
+        let op = Operation::Known(KnownOperation::Extrude(ExtrudeParams {
+            profile: Some(SketchRegionRef {
+                sketch,
+                region: RegionId::new(""),
+                extra: Default::default(),
+            }),
+            distance: Scalar::new(10.0),
+            draft_angle_deg: Scalar::new(0.0),
+            mode: ExtrudeMode::Blind,
+            boolean_mode: BooleanMode::NewBody,
+            target_body: None,
+            target_face: None,
+            two_directions: false,
+            mode2: ExtrudeMode::Blind,
+            distance2: Scalar::new(0.0),
+            target_face2: None,
+            extra: Default::default(),
+        }));
+        OperationRecord::new(rec_id(seed), 0, "Extrude", op)
+    }
+
+    fn sketch_rec(seed: u128, sketch: SketchId) -> OperationRecord {
+        let op = Operation::Known(KnownOperation::Sketch(SketchOpParams {
+            sketch,
+            plane: SketchPlaneRef {
+                kind: PlaneKind::Xy,
+                origin: Vec3::new_unchecked(0.0, 0.0, 0.0),
+                x_axis: Vec3::new_unchecked(1.0, 0.0, 0.0),
+                y_axis: Vec3::new_unchecked(0.0, 1.0, 0.0),
+                normal: Vec3::new_unchecked(0.0, 0.0, 1.0),
+                extra: Default::default(),
+            },
+            entities: Vec::new(),
+            constraints: Vec::new(),
+            host_face: None,
+            extra: Default::default(),
+        }));
+        OperationRecord::new(rec_id(seed), 0, "Sketch", op)
+    }
+
+    /// A 4-record document: `[sketchA, extrudeA, sketchB, extrudeB]`, cursor at the
+    /// end.
+    fn doc4() -> (Document, SketchId, SketchId) {
+        let mut doc = Document::new(DocumentId(Uuid::from_u128(1)));
+        let sa = SketchId(Uuid::from_u128(0xA));
+        let sb = SketchId(Uuid::from_u128(0xB));
+        for r in [
+            sketch_rec(0x10, sa),
+            extrude_rec(0x11, sa),
+            sketch_rec(0x20, sb),
+            extrude_rec(0x21, sb),
+        ] {
+            doc.timeline.insert_at_cursor(r);
+        }
+        assert_eq!(doc.timeline.cursor(), 4);
+        (doc, sa, sb)
+    }
+
+    /// Every structural inverse floors at the exact step it touches — read against
+    /// the PRE-undo document (`RemoveRecord` needs the record still present).
+    #[test]
+    fn dirty_floor_is_exact_for_the_structural_inverses() {
+        let (doc, _sa, _sb) = doc4();
+        assert_eq!(
+            Inverse::RemoveRecord {
+                record: rec_id(0x21)
+            }
+            .dirty_floor(&doc),
+            Some(3),
+            "undo of an append floors at the appended index"
+        );
+        assert_eq!(
+            Inverse::RemoveRecord {
+                record: rec_id(0x10)
+            }
+            .dirty_floor(&doc),
+            Some(0),
+        );
+        assert_eq!(
+            Inverse::RemoveRecord {
+                // A record the timeline does not hold cannot be located — the
+                // conservative default, never a guess.
+                record: rec_id(0xDEAD),
+            }
+            .dirty_floor(&doc),
+            Some(0),
+            "an unlocatable record takes the conservative floor"
+        );
+        assert_eq!(
+            Inverse::InsertRecord {
+                index: 2,
+                record: Box::new(sketch_rec(0x30, SketchId(Uuid::from_u128(0xC)))),
+                cursor: 4,
+            }
+            .dirty_floor(&doc),
+            Some(2),
+        );
+        assert_eq!(
+            Inverse::RestoreRecord {
+                index: 1,
+                record: Box::new(extrude_rec(0x11, SketchId(Uuid::from_u128(0xA)))),
+            }
+            .dirty_floor(&doc),
+            Some(1),
+        );
+    }
+
+    /// A cursor restore dirties from the LOWER of the two positions: everything
+    /// between them changes applied-ness in one direction or the other.
+    #[test]
+    fn dirty_floor_of_a_cursor_restore_is_the_lower_position() {
+        let (mut doc, _, _) = doc4();
+        assert_eq!(
+            Inverse::RestoreCursor { cursor: 1 }.dirty_floor(&doc),
+            Some(1),
+            "undo of a roll-back: cursor 4 → 1"
+        );
+        doc.timeline.set_cursor(1);
+        assert_eq!(
+            Inverse::RestoreCursor { cursor: 4 }.dirty_floor(&doc),
+            Some(1),
+            "undo of a roll-forward: cursor 1 → 4 still floors at 1"
+        );
+    }
+
+    /// A sketch restore floors at `min(producing Sketch op, first consumer)` — the
+    /// producer matters because its own regen re-runs region detection.
+    #[test]
+    fn dirty_floor_of_a_sketch_restore_covers_its_producer() {
+        let (doc, sa, sb) = doc4();
+        assert_eq!(
+            Inverse::RestoreSketch {
+                id: sa,
+                prior: None
+            }
+            .dirty_floor(&doc),
+            Some(0),
+            "sketch A is produced at step 0 and consumed at step 1"
+        );
+        assert_eq!(
+            Inverse::RestoreSketch {
+                id: sb,
+                prior: None
+            }
+            .dirty_floor(&doc),
+            Some(2),
+            "sketch B is produced at step 2"
+        );
+        assert_eq!(
+            Inverse::RestoreSketch {
+                id: SketchId(Uuid::from_u128(0xFFFF)),
+                prior: None,
+            }
+            .dirty_floor(&doc),
+            None,
+            "a sketch no timeline step produces or consumes regenerates nothing"
+        );
+    }
+
+    /// The whole-collection mementos take the conservative floor; display-only
+    /// state claims nothing at all.
+    #[test]
+    fn dirty_floor_defaults_conservatively_for_whole_collection_mementos() {
+        let (doc, sa, _) = doc4();
+        let conservative: Vec<Inverse> = vec![
+            Inverse::RestoreBodies {
+                registry: Box::new(BodyRegistry::new()),
+            },
+            Inverse::RestoreDatum {
+                id: DatumPlaneId(Uuid::from_u128(3)),
+                prior: None,
+            },
+            Inverse::RestoreVariables {
+                table: Box::new(VariableTable::new()),
+            },
+            Inverse::RestoreRepair {
+                state: Box::new(RepairState::new()),
+            },
+        ];
+        for inv in conservative {
+            assert_eq!(
+                inv.dirty_floor(&doc),
+                Some(0),
+                "{inv:?} must take the conservative floor — a too-HIGH floor is a \
+                 correctness bug, a too-low one is only slow"
+            );
+        }
+        assert_eq!(
+            Inverse::RestoreSketchVisibility {
+                id: sa,
+                prior: None,
+            }
+            .dirty_floor(&doc),
+            None,
+            "sketch visibility is display-only"
+        );
+        assert_eq!(Inverse::Noop.dirty_floor(&doc), None);
+    }
+
+    /// A composite takes the MINIMUM over its members (all-`None` ⇒ `None`).
+    #[test]
+    fn dirty_floor_of_a_composite_is_the_minimum_over_its_members() {
+        let (doc, sa, _) = doc4();
+        let inv = Inverse::Composite(vec![
+            Inverse::RestoreRecord {
+                index: 3,
+                record: Box::new(extrude_rec(0x21, SketchId(Uuid::from_u128(0xB)))),
+            },
+            Inverse::RestoreSketchVisibility {
+                id: sa,
+                prior: None,
+            },
+            Inverse::RestoreRecord {
+                index: 1,
+                record: Box::new(extrude_rec(0x11, sa)),
+            },
+        ]);
+        assert_eq!(inv.dirty_floor(&doc), Some(1), "the lowest member wins");
+
+        // A repair fold (the VF-M8 shape) drags the whole composite to 0.
+        let with_repair = Inverse::Composite(vec![
+            Inverse::RestoreRepair {
+                state: Box::new(RepairState::new()),
+            },
+            Inverse::RestoreRecord {
+                index: 3,
+                record: Box::new(extrude_rec(0x21, SketchId(Uuid::from_u128(0xB)))),
+            },
+        ]);
+        assert_eq!(with_repair.dirty_floor(&doc), Some(0));
+
+        assert_eq!(
+            Inverse::Composite(vec![
+                Inverse::Noop,
+                Inverse::RestoreSketchVisibility {
+                    id: sa,
+                    prior: None,
+                },
+            ])
+            .dirty_floor(&doc),
+            None,
+            "a composite of claim-free members claims nothing"
+        );
+        assert_eq!(Inverse::Composite(vec![]).dirty_floor(&doc), None);
+    }
+
+    /// The fold is a plain minimum with `None` meaning "no claim".
+    #[test]
+    fn fold_floor_takes_the_lower_claim() {
+        assert_eq!(fold_floor(None, None), None);
+        assert_eq!(fold_floor(None, Some(3)), Some(3));
+        assert_eq!(fold_floor(Some(3), None), Some(3));
+        assert_eq!(fold_floor(Some(3), Some(1)), Some(1));
+        assert_eq!(fold_floor(Some(1), Some(3)), Some(1));
     }
 }

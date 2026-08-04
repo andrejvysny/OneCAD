@@ -825,6 +825,18 @@ pub struct NeedsRepairItemDto {
     pub scoring_version: Option<u32>,
     /// How many candidates the ladder surfaced (0 ⇒ `no-candidates`).
     pub candidate_count: usize,
+    /// The body the failing step OPERATES ON, in the bare-uuid form the frontend
+    /// holds (H9). A rebind must promote its chosen `TopoKey` against SOME body,
+    /// and without this the frontend could only guess — it refused outright in a
+    /// multi-body document, which made repair unusable exactly where topological
+    /// naming is hardest. Derived from the record's own inputs (see
+    /// `DocumentRuntime::needs_repair_items`), so it is never a guess.
+    ///
+    /// `None` only when the step has no derivable body at all (an op whose inputs
+    /// are sketches only, or an unresolvable step index); the frontend then falls
+    /// back to its single-body/selection derivation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_id: Option<String>,
 }
 
 /// The `needs-repair` event payload (`{revision, items}`). Emitted after **every**
@@ -837,10 +849,31 @@ pub struct NeedsRepairEvent {
     pub items: Vec<NeedsRepairItemDto>,
 }
 
+/// A feature's upstream/downstream transitive closures from the session's derived
+/// dependency graph (H10 dependency view; `get_feature_dependencies`) — read-only,
+/// same class of lineage query as [`can_fold_transform`]. Consumed by delete/
+/// suppress confirmations (dependent counts) and the inspector's "Depends on /
+/// Used by" section. Never contains the queried record itself; order is the
+/// graph's own (creation-index-stable, not wire-significant).
+///
+/// [`can_fold_transform`]: onecad_core::document::transform::can_fold_transform
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeatureDependenciesDto {
+    /// Record ids this feature depends on (transitive).
+    pub upstream: Vec<String>,
+    /// Record ids that depend on this feature (transitive).
+    pub downstream: Vec<String>,
+}
+
 /// Builds the lean [`NeedsRepairItemDto`] for one repair item + its op record id.
+///
+/// `body_id` is the operated body the caller derived from the record (bare uuid);
+/// see the field docs for why the frontend cannot derive it itself.
 #[must_use]
 pub fn needs_repair_item_dto(
     op_id: String,
+    body_id: Option<String>,
     item: &onecad_core::document::repair::RepairItem,
 ) -> NeedsRepairItemDto {
     NeedsRepairItemDto {
@@ -849,6 +882,7 @@ pub fn needs_repair_item_dto(
         reason: repair_reason_str(item.reason).to_string(),
         scoring_version: item.scoring_version,
         candidate_count: item.candidates.len(),
+        body_id,
     }
 }
 
@@ -1673,13 +1707,37 @@ mod tests {
             seeded: false,
             ordinal_anchor: None,
         };
-        let dto = needs_repair_item_dto("rec-1".into(), &item);
+        let dto = needs_repair_item_dto("rec-1".into(), Some("body-7".into()), &item);
         let v = serde_json::to_value(&dto).unwrap();
         assert_eq!(v["opId"], "rec-1");
         assert_eq!(v["refId"], "op_2.input0");
         assert_eq!(v["reason"], "no-candidates");
         assert_eq!(v["scoringVersion"], 1);
         assert_eq!(v["candidateCount"], 0);
+        assert_eq!(v["bodyId"], "body-7");
+
+        // H9: `bodyId` is ADDITIVE — a step with no derivable body omits the key
+        // entirely rather than sending null, so an older frontend reads the event
+        // exactly as it did before.
+        let lean = needs_repair_item_dto("rec-1".into(), None, &item);
+        let v = serde_json::to_value(&lean).unwrap();
+        assert!(
+            v.get("bodyId").is_none(),
+            "bodyId must be skipped when absent: {v}"
+        );
+    }
+
+    /// H10: the wire shape a delete/suppress confirm and the inspector's
+    /// "Depends on / Used by" section both read.
+    #[test]
+    fn feature_dependencies_dto_shape() {
+        let dto = FeatureDependenciesDto {
+            upstream: vec!["op_1".into()],
+            downstream: vec!["op_3".into(), "op_4".into()],
+        };
+        let v = serde_json::to_value(&dto).unwrap();
+        assert_eq!(v["upstream"], serde_json::json!(["op_1"]));
+        assert_eq!(v["downstream"], serde_json::json!(["op_3", "op_4"]));
     }
 
     /// MEASURE V1a: the three fields the frontend reads off `element_info`

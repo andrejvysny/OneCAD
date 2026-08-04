@@ -388,15 +388,19 @@ async fn undo_redo_reconverge_via_scheduler() {
         "baseline: one extrude body"
     );
 
-    // Undo the extrude, reconverge from 0 (mirrors api::undo :384-387).
-    {
+    // Undo the extrude and reconverge on the request the RUNTIME names (mirrors
+    // `api::undo` — H8: a real dirty floor, not a blind `ToEnd { from: 0 }`).
+    let request = {
         let mut guard = runtime.lock().await;
-        assert!(
-            guard.as_mut().expect("open").undo(),
-            "undo pops the extrude commit"
-        );
-    }
-    sched.request(RegenRequest::ToEnd { from: 0 });
+        guard
+            .as_mut()
+            .expect("open")
+            .undo()
+            .expect("undo pops the extrude commit")
+            .regen
+            .expect("undoing a timeline op schedules a regen")
+    };
+    sched.request(request);
     let (s, change, _) = recv(&mut rx).await;
     assert_eq!(
         s, "published",
@@ -418,14 +422,18 @@ async fn undo_redo_reconverge_via_scheduler() {
     // Redo the extrude, reconverge from 0 → the body must republish. Before W0 the
     // redo re-created a permanent draft that `ToEnd{from:0}` clamped out, so the body
     // never came back — this pins that regression.
-    {
+    let request = {
         let mut guard = runtime.lock().await;
-        assert!(
-            guard.as_mut().expect("open").redo().expect("redo ok"),
-            "redo re-applies the extrude commit"
-        );
-    }
-    sched.request(RegenRequest::ToEnd { from: 0 });
+        guard
+            .as_mut()
+            .expect("open")
+            .redo()
+            .expect("redo ok")
+            .expect("redo re-applies the extrude commit")
+            .regen
+            .expect("redoing a timeline op schedules a regen")
+    };
+    sched.request(request);
     let (s, change, _) = recv(&mut rx).await;
     assert_eq!(s, "published", "redo republishes via the scheduler");
     assert_eq!(

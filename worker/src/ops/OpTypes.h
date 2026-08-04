@@ -37,6 +37,10 @@ struct OpContext {
     bool parallel = false;                                          // determinism.parallel (§7.3)
     nlohmann::json occt_options = nlohmann::json::object();         // determinism.occtOptions (§7.3)
     const onecad::CancelToken* cancel = nullptr;                    // cooperative cancel token
+    // This step is downstream of the plan's `editedFrom` (SCHEMA §7.2), so every
+    // stored anchor its refs carry may be STALE — ops that run the resolution ladder
+    // themselves forward this as `elementmap::LadderEditContext` (SCHEMA §10 veto).
+    bool post_upstream_edit = false;
 };
 
 // One op's result. On Ok: body_events / body_ids / delta / needs_repair are the

@@ -19,6 +19,7 @@ import type {
   ElementInfo,
   MassProperties,
   EnterSketchTarget,
+  FeatureDependencies,
   FinishSketchResult,
   Lod,
   NeedsRepairEvent,
@@ -34,6 +35,7 @@ import type {
   RecoveryInfo,
   ResolveRefRequest,
   ResolveRefResult,
+  SketchAttachTarget,
   SketchConstraint,
   SketchConstraintType,
   SketchEntity,
@@ -194,6 +196,26 @@ export interface CadClient {
    */
   deleteSketch(sketchId: string): Promise<void>;
 
+  /**
+   * REATTACH (H9): move a sketch onto a different host plane
+   * (`UpdateSketchAttachment`). The sketch's 2D entity coordinates are kept and
+   * REINTERPRETED in the new basis — the standard CAD reattach semantics — and
+   * everything downstream regenerates (`RegenHint::ToEnd`).
+   *
+   * V1 targets are named WORLD planes and DATUM planes only. A host-FACE target
+   * is deliberately absent: the frame of a face-hosted sketch is derived from the
+   * face by the worker and its projected boundary is expressed in that frame, so
+   * an attachment assembled here could only ever produce an unprojected
+   * (`projectedBoundaryVersion: 0`) host-face sketch — the seam SKETCH-ON-FACE W2
+   * closed. Reattaching a face-hosted sketch AWAY from its face is likewise not
+   * offered in V1: its projected boundary entities would be silently
+   * reinterpreted under the new basis with nothing to re-project them.
+   *
+   * The basis is BACKEND-authoritative for a datum (the core re-stamps the
+   * datum's resolved frame over whatever is sent).
+   */
+  reattachSketch(sketchId: string, target: SketchAttachTarget): Promise<ApplyOperationResult>;
+
   // ── Sketch drag gesture (SCHEMA §7.4) ──────────────────────────────────────
   // A point drag: beginGesture → many solveDrag (latest-wins) → endGesture (ONE
   // undo step). The real client routes to the worker's gesture verbs; the mock
@@ -314,6 +336,17 @@ export interface CadClient {
    * `get_operation_params`; the mock returns the op's stored params.
    */
   getOperationParams(recordId: string): Promise<Record<string, unknown>>;
+
+  /**
+   * A feature's upstream/downstream transitive closures from the core dependency
+   * graph (H10 dependency view). Read-only — never mutates the timeline. Consumed
+   * by delete/suppress confirmations (dependent counts) and the inspector's
+   * "Depends on / Used by" section. The real client routes to
+   * `feature_dependencies`; the mock derives the same producer-chain shape from
+   * its own record lineage (`featureTouched`), honestly returning empty arrays for
+   * a feature whose lineage the mock never tracked (e.g. the seeded fixture rows).
+   */
+  featureDependencies(featureId: string): Promise<FeatureDependencies>;
 
   /**
    * `recordId` iff the next placement gesture on `bodyId` may FOLD into that

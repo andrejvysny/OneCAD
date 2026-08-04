@@ -73,7 +73,10 @@ use crate::sketch::{Constraint, Sketch, SketchAttachment, SketchEntity, SketchEr
 
 use super::command::{EditCommand, InputPath, InputRef, SketchEditOp, VisibilityTarget};
 use super::outcome::{CommandOutcome, ProjectionDelta, RegenHint};
-use super::undo::{insert_record_at, replace_record_at, AppliedEdit, Inverse, Txn, UndoStack};
+use super::undo::{
+    fold_floor, insert_record_at, replace_record_at, AppliedEdit, Inverse, Txn, UndoOutcome,
+    UndoStack,
+};
 
 /// Owns the document and applies [`EditCommand`]s as the sole writer.
 #[derive(Debug)]
@@ -439,43 +442,56 @@ impl DocumentSession {
 
     /// Undoes the newest committed transaction (applies its inverses in reverse
     /// and moves it to the redo stack). Ignored while a transaction is open
-    /// (C++ `CommandProcessor::undo`). Returns `true` if a step was undone.
-    pub fn undo(&mut self) -> bool {
+    /// (C++ `CommandProcessor::undo`). `None` if there was nothing to undo.
+    ///
+    /// The returned [`UndoOutcome`] carries the **folded dirty floor** (H8): each
+    /// memento's [`Inverse::dirty_floor`] is read BEFORE that memento is applied —
+    /// `RemoveRecord` resolves its index against the timeline it is about to remove
+    /// from — and the lowest wins. The caller replays from there instead of from 0.
+    pub fn undo(&mut self) -> Option<UndoOutcome> {
         if self.open_txn.is_some() {
-            return false;
+            return None;
         }
-        let Some(txn) = self.undo.pop_for_undo() else {
-            return false;
-        };
+        let txn = self.undo.pop_for_undo()?;
+        let mut dirty_floor: Option<usize> = None;
         for edit in txn.edits.iter().rev() {
+            dirty_floor = fold_floor(dirty_floor, edit.inverse.dirty_floor(&self.document));
             edit.inverse.clone().apply(&mut self.document);
         }
         self.rebuild_graph();
         self.undo.push_undone(txn);
-        true
+        Some(UndoOutcome { dirty_floor })
     }
 
     /// Redoes the newest undone transaction by **re-executing** its forward
     /// commands (recomputing fresh inverses). Ignored while a transaction is
-    /// open. Returns `true` if a step was redone.
+    /// open. `None` if there was nothing to redo.
+    ///
+    /// The re-executed commands' [`CommandOutcome`]s were previously discarded; their
+    /// dirty spans are now folded into the returned [`UndoOutcome`] (H8), so a redo
+    /// replays from the same floor the original commit did.
     ///
     /// # Errors
     /// A [`DomainError`] if a replayed command fails (the partial replay is
     /// rolled back and the step returned to the redo stack).
-    pub fn redo(&mut self) -> Result<bool, DomainError> {
+    pub fn redo(&mut self) -> Result<Option<UndoOutcome>, DomainError> {
         if self.open_txn.is_some() {
-            return Ok(false);
+            return Ok(None);
         }
         let Some(txn) = self.undo.pop_for_redo() else {
-            return Ok(false);
+            return Ok(None);
         };
         let mut new_edits: Vec<AppliedEdit> = Vec::with_capacity(txn.edits.len());
+        let mut dirty_floor: Option<usize> = None;
         for edit in &txn.edits {
             match self.apply_forward(&edit.forward) {
-                Ok((_, inverse)) => new_edits.push(AppliedEdit {
-                    forward: edit.forward.clone(),
-                    inverse,
-                }),
+                Ok((outcome, inverse)) => {
+                    dirty_floor = fold_floor(dirty_floor, outcome.dirty.map(|d| d.from));
+                    new_edits.push(AppliedEdit {
+                        forward: edit.forward.clone(),
+                        inverse,
+                    });
+                }
                 Err(e) => {
                     for done in new_edits.into_iter().rev() {
                         done.inverse.apply(&mut self.document);
@@ -490,7 +506,7 @@ impl DocumentSession {
             label: txn.label,
             edits: new_edits,
         });
-        Ok(true)
+        Ok(Some(UndoOutcome { dirty_floor }))
     }
 
     // ── Forward dispatch ─────────────────────────────────────────────────────
@@ -1055,7 +1071,13 @@ impl DocumentSession {
             id,
             prior: Some(Box::new(prior)),
         };
-        if let Some((index, prior_record)) = self.restamp_sketch_host_face(id, host_face) {
+        let (next_plane, next_attachment) = {
+            let s = &self.document.sketches[&id];
+            (s.plane, s.attachment.clone())
+        };
+        if let Some((index, prior_record)) =
+            self.restamp_sketch_record(id, next_plane, &next_attachment, host_face)
+        {
             self.rebuild_graph();
             self.document.repair.clear_seeded_for_step(index);
             inverse = Inverse::Composite(vec![
@@ -1070,19 +1092,31 @@ impl DocumentSession {
         Ok((self.sketch_dirty_outcome(id), inverse))
     }
 
-    /// Rewrites the `host_face` param (and the derived `inputs`) of the `Sketch`
-    /// record producing `id`. Returns `(index, prior record)` when a record was
-    /// actually changed, `None` otherwise.
+    /// Rewrites the `plane` and `host_face` params (and the derived `inputs`) of
+    /// the `Sketch` record producing `id`. Returns `(index, prior record)` when a
+    /// record was actually changed, `None` otherwise.
     ///
-    /// **Anti-time-travel guard.** The stamp is SKIPPED when the host body is not
-    /// produced strictly before this record (`produces_before`) — a legacy
-    /// front-inserted sketch record (`backfill_missing_sketch_records`) can sit
-    /// ahead of the body it is glued to, and stamping there would author an edge
-    /// the timeline cannot honour. Such a record is not downstream of any transform
-    /// on that body anyway, so nothing is left ungated.
-    fn restamp_sketch_host_face(
+    /// **Why the plane too (H9 reattach).** The regen planner lowers the RECORD's
+    /// `SketchOpParams`, not `document.sketches[id]` — the record is otherwise
+    /// refreshed only when a sketch session finishes (`upsert_sketch_record`). So
+    /// an attachment change that moved the sketch's frame but left the record's
+    /// `plane` alone would update the tree and the on-screen sketch while every
+    /// regen kept replaying the sketch on its OLD plane, and no downstream feature
+    /// would follow. `plane_ref_of` mirrors the app layer's own helper of the same
+    /// name, so a record restamped here is identical to one minted at finish time.
+    ///
+    /// **Anti-time-travel guard.** The HOST-FACE stamp is SKIPPED when the host
+    /// body is not produced strictly before this record (`produces_before`) — a
+    /// legacy front-inserted sketch record (`backfill_missing_sketch_records`) can
+    /// sit ahead of the body it is glued to, and stamping there would author an
+    /// edge the timeline cannot honour. Such a record is not downstream of any
+    /// transform on that body anyway, so nothing is left ungated. The PLANE stamp
+    /// is not gated: a frame is not a dependency edge.
+    fn restamp_sketch_record(
         &mut self,
         id: SketchId,
+        plane: crate::sketch::SketchPlane,
+        attachment: &SketchAttachment,
         host_face: Option<ElementRef>,
     ) -> Option<(usize, OperationRecord)> {
         let (index, prior_record) = self
@@ -1105,14 +1139,16 @@ impl DocumentSession {
             Some(b) if !self.graph.produces_before(b, prior_record.record_id) => None,
             _ => host_face,
         };
+        let plane_ref = plane_ref_of(plane, attachment);
         let mut next = prior_record.clone();
         let Operation::Known(KnownOperation::Sketch(p)) = &mut next.op else {
             return None;
         };
-        if p.host_face == host_face {
+        if p.host_face == host_face && p.plane == plane_ref {
             return None;
         }
         p.host_face = host_face;
+        p.plane = plane_ref;
         next.inputs = next.op.derive_inputs();
         replace_record_at(&mut self.document.timeline, index, next);
         Some((index, prior_record))
@@ -1464,25 +1500,13 @@ impl DocumentSession {
     /// Outcome for a sketch edit: dirties to the end from the earliest affected
     /// step (regen to end); metadata-only if nothing depends on the sketch.
     ///
-    /// The earliest step is `min(producer, first consumer)` (F4). When a `Sketch`
-    /// op produces this `SketchId` in the timeline, that op's own regen re-runs
-    /// region detection worker-side, so an edit must dirty from the producer — not
-    /// merely from the first op that consumes a region. With no producer op (a
-    /// document sketch that never became a timeline node) it falls back to the
-    /// first consumer, and to metadata-only when nothing references it.
+    /// The earliest step is [`Document::sketch_dirty_step`] — `min(producer, first
+    /// consumer)` (F4). Shared with the undo lane
+    /// ([`Inverse::dirty_floor`](super::undo::Inverse::dirty_floor)) so an edit and
+    /// its undo agree on which step a sketch change dirties.
     fn sketch_dirty_outcome(&self, id: SketchId) -> CommandOutcome {
         let delta = ProjectionDelta::sketch(id);
-        let producer_step = self
-            .graph
-            .sketch_producer(id)
-            .and_then(|rid| self.document.timeline.index_of(rid));
-        let consumer_step = self.first_step_referencing_sketch(id);
-        let start = match (producer_step, consumer_step) {
-            (Some(p), Some(c)) => Some(p.min(c)),
-            (Some(s), None) | (None, Some(s)) => Some(s),
-            (None, None) => None,
-        };
-        match start {
+        match self.document.sketch_dirty_step(id) {
             Some(step) => CommandOutcome::dirty_to_end(
                 delta,
                 DirtyRange::new(step, self.document.timeline.len()),
@@ -1504,15 +1528,6 @@ impl DocumentSession {
         } else {
             CommandOutcome::dirty_to_end(delta, DirtyRange::new(0, len))
         }
-    }
-
-    /// The first timeline index whose op references `sketch` as an input.
-    fn first_step_referencing_sketch(&self, sketch: SketchId) -> Option<usize> {
-        self.document
-            .timeline
-            .records()
-            .iter()
-            .position(|r| r.op.derive_inputs().sketches.contains(&sketch))
     }
 }
 
@@ -1934,6 +1949,39 @@ fn same_op_type(a: &Operation, b: &Operation) -> bool {
     }
 }
 
+/// The timeline-record plane ref for a sketch frame + attachment. World
+/// attachments keep their named kind; host-face / datum frames serialize the
+/// resolved custom basis (the frame is frozen with the sketch — MODEL-OPS W2).
+///
+/// MIRRORS `document_runtime::plane_ref_of` (which builds the same ref when a
+/// sketch session finishes), so a record restamped by
+/// [`DocumentSession::restamp_sketch_record`] is byte-identical to one minted at
+/// finish time for the same sketch. Pinned by
+/// `reattaching_a_sketch_moves_the_timeline_record_plane`.
+fn plane_ref_of(
+    plane: crate::sketch::SketchPlane,
+    attachment: &SketchAttachment,
+) -> crate::document::record::SketchPlaneRef {
+    use crate::document::record::{PlaneKind, SketchPlaneRef};
+    use crate::sketch::WorldPlane;
+    let kind = match attachment {
+        SketchAttachment::World { plane } => match plane {
+            WorldPlane::XY => PlaneKind::Xy,
+            WorldPlane::XZ => PlaneKind::Xz,
+            WorldPlane::YZ => PlaneKind::Yz,
+        },
+        _ => PlaneKind::Custom,
+    };
+    SketchPlaneRef {
+        kind,
+        origin: plane.origin,
+        x_axis: plane.x_axis,
+        y_axis: plane.y_axis,
+        normal: plane.normal,
+        extra: Default::default(),
+    }
+}
+
 /// Writes `reference` into the op input slot named by `path`, keeping fillet
 /// `edge_ids`/`edges` in lockstep. See [`crate::edit::command`] for the divergence.
 fn set_input(
@@ -1989,6 +2037,22 @@ fn set_input(
         (InputPath::BooleanTool, KnownOperation::Boolean(p)) => {
             p.tool_body = want_body(reference)?;
         }
+        (InputPath::ShellOpenFaces { index }, KnownOperation::Shell(p)) => {
+            set_shell_open_face(&mut p.open_faces, *index, &want_element(reference)?)?;
+        }
+        (InputPath::HoleFace, KnownOperation::Hole(p)) => {
+            let face = want_element(reference)?;
+            // A hole seats its drill on this face and validates its frozen `point`
+            // against it, so a ref with no identity would silently fall through to
+            // the ladder on a slot the user just re-picked BY HAND. Same bar as
+            // `set_fillet_edge`: an explicit rebind must carry an explicit id.
+            if face.primary.is_none() {
+                return Err(DomainError::InvalidReference(
+                    "a hole host-face ref must carry a primary element id".into(),
+                ));
+            }
+            p.face = face;
+        }
         _ => {
             return Err(DomainError::InvalidReference(
                 "input path does not match the operation type / reference kind".into(),
@@ -2034,6 +2098,41 @@ fn set_fillet_edge(
         edge_ids.push(element);
     } else {
         edge_ids[index] = element;
+    }
+    Ok(())
+}
+
+/// Sets shell open face `index` to the supplied ref's PRIMARY element id, with the
+/// same bounds/append discipline as [`set_fillet_edge`] (overwrite a slot, append
+/// exactly at the end, refuse a gap past it).
+///
+/// `open_faces` is a bare-id list, so the ref's descriptor/anchor evidence has
+/// nowhere to live and is deliberately dropped — pinned by
+/// `shell_open_face_rebind_writes_the_bare_id_and_drops_evidence`.
+fn set_shell_open_face(
+    open_faces: &mut Vec<crate::ids::ElementId>,
+    index: usize,
+    reference: &ElementRef,
+) -> Result<(), DomainError> {
+    let element = reference
+        .primary
+        .as_ref()
+        .map(|p| p.element.clone())
+        .ok_or_else(|| {
+            DomainError::InvalidReference(
+                "a shell open-face ref must carry a primary element id".into(),
+            )
+        })?;
+    if index > open_faces.len() {
+        return Err(DomainError::InvalidReference(format!(
+            "shell open face index {index} out of range (len {})",
+            open_faces.len()
+        )));
+    }
+    if index == open_faces.len() {
+        open_faces.push(element);
+    } else {
+        open_faces[index] = element;
     }
     Ok(())
 }
@@ -2732,7 +2831,7 @@ mod tests {
             .unwrap()
             .is_construction());
 
-        assert!(session.undo(), "undo available");
+        assert!(session.undo().is_some(), "undo available");
         assert!(
             !session
                 .document()
@@ -2743,7 +2842,7 @@ mod tests {
                 .is_construction(),
             "undo restores the prior sketch verbatim"
         );
-        assert!(session.redo().unwrap(), "redo available");
+        assert!(session.redo().unwrap().is_some(), "redo available");
         assert!(session
             .document()
             .sketch(sid())
@@ -2831,7 +2930,7 @@ mod tests {
 
         // The critical property: undo of the HEAD sketch edit reverts only that edit
         // (entity 51), NOT the whole session — the granular inverses stay sound.
-        assert!(session.undo(), "undo the head sketch edit");
+        assert!(session.undo().is_some(), "undo the head sketch edit");
         let s = session.document().sketch(sid()).unwrap();
         assert!(
             s.entities().iter().any(|e| e.id() == eid(50)),

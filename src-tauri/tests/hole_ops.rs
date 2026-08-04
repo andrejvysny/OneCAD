@@ -49,11 +49,13 @@ use onecad_core::document::refs::{
     AnchorIntent, ElementKind, ElementRef, PrimaryRef, SketchRegionRef,
 };
 use onecad_core::document::variables::Scalar;
-use onecad_core::edit::EditCommand;
+use onecad_core::edit::{EditCommand, InputPath, InputRef};
 use onecad_core::ids::{BodyId, ConstraintId, ElementId, EntityId, RecordId, RegionId, SketchId};
 use onecad_core::io::container::SaveMeta;
 use onecad_core::math::{Vec2, Vec3};
-use onecad_core::regen::{CancelToken, GeometryEngine, Lod, ModelSnapshot, Outcome, RegenRequest};
+use onecad_core::regen::{
+    CancelToken, GeometryEngine, Lod, ModelSnapshot, Outcome, RegenRequest, StoppedReason,
+};
 use onecad_core::sketch::{Constraint, CurvePosition, Sketch, SketchEntity, WorldPlane};
 
 use onecad_lib::document_runtime::{DocumentRuntime, RegenReport};
@@ -913,6 +915,229 @@ async fn a_cross_body_element_ref_never_drills_the_wrong_body() {
     assert!(
         (got_a - want_a).abs() < want_a * 1e-9,
         "A must be untouched by the op on B: want {want_a}, got {got_a}"
+    );
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 9. HISTORY-HARDEN H9 — `InputPath::HoleFace` end to end
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The centroid of the face with the greatest average world-Y — the box's `+Y`
+/// side. Twin of [`top_face_centroid`]; a side face is what makes the rebind
+/// PROVABLE by volume (a `+Y` through-hole crosses 20 mm of this box, a `+Z` one
+/// crosses 25 mm, so the two land at different volumes).
+fn plus_y_face_centroid(view: &MeshHeaderView, blob: &[u8]) -> Vec3 {
+    let fr = view.section(SEC_FACE_RANGES).expect("FACE_RANGES");
+    let idx = view.section(SEC_INDICES).expect("INDICES");
+    let pos = view.section(SEC_POSITIONS).expect("POSITIONS");
+    let (frbase, ibase, pbase) = (fr.offset as usize, idx.offset as usize, pos.offset as usize);
+    let mut best: Option<Vec3> = None;
+    for f in 0..view.face_count as usize {
+        let first = u32_le(blob, frbase + f * 8) as usize;
+        let count = u32_le(blob, frbase + f * 8 + 4) as usize;
+        let (mut sx, mut sy, mut sz, mut n) = (0.0, 0.0, 0.0, 0.0f64);
+        for t in first..first + count {
+            let io = ibase + t * 12;
+            for k in 0..3 {
+                let v = vertex(blob, pbase, u32_le(blob, io + k * 4) as usize);
+                sx += v[0];
+                sy += v[1];
+                sz += v[2];
+                n += 1.0;
+            }
+        }
+        if n == 0.0 {
+            continue;
+        }
+        let c = Vec3::new_unchecked(sx / n, sy / n, sz / n);
+        if best.is_none_or(|b| c.y > b.y) {
+            best = Some(c);
+        }
+    }
+    best.expect("at least one face")
+}
+
+/// A face ref with an id but NO evidence at all — no descriptor, no anchor. This
+/// is what "the reference broke" looks like to the ladder: the exact-id rung
+/// misses and there is nothing below it to score.
+fn blind_face_ref(body: BodyId, element: &str) -> ElementRef {
+    ElementRef {
+        primary: Some(PrimaryRef {
+            body,
+            element: ElementId::new(element),
+            kind: ElementKind::Face,
+            extra: Default::default(),
+        }),
+        intent: None,
+        anchor: None,
+        extra: Default::default(),
+    }
+}
+
+/// **The H9 flagship.** A hole's host face is re-picked through
+/// `EditOperationInput{InputPath::HoleFace}` and the drill moves to the new face
+/// — proven by the EXACT kernel volume, not by a status flag.
+///
+/// Before H9 there was no `InputPath` that could address a hole's host face at
+/// all: the repair panel sent every rebind as `FilletEdges{k}`, which the core
+/// rejected for a Hole, so a hole whose face reference broke was UNREPAIRABLE
+/// except by rebuilding the feature.
+///
+/// The sequence is break → repair, so both directions of the write-through are
+/// exercised:
+///  1. drill through the TOP face (25 mm of stock) — the baseline volume;
+///  2. BREAK it with a `UpdateOperationParams` that blinds the face ref and moves
+///     the frozen `point` onto the `+Y` side face — the step can no longer resolve;
+///  3. REPAIR it with `EditOperationInput{HoleFace}` naming the `+Y` face;
+///  4. the drill now crosses 20 mm, not 25 — it landed on the RE-PICKED face.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hole_host_face_rebind_moves_the_drill_to_the_repicked_face() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let (body, top) = build_box(&mut rt, SKETCH_A, EXTRUDE_A, 0xA, 0.0, 25.0).await;
+    let mesh = body_mesh(&mut rt, body).await;
+    let view = validate_mesh_blob(&mesh).expect("box MESH1 validates");
+    let side = plus_y_face_centroid(&view, &mesh);
+    assert!(
+        side.y > 19.0 && top.z > 24.0,
+        "expected a +Y side face at y≈20 and a top face at z≈25, got side={side:?} top={top:?}"
+    );
+
+    // (1) Baseline: through the TOP — 25 mm of stock.
+    let hole = RecordId(Uuid::from_u128(HOLE_A));
+    add_op(
+        &mut rt,
+        hole_record(HOLE_A, hole_params(body, "el_top_face", top, 6.0)),
+    );
+    let rep = regen_all(&mut rt).await;
+    assert_eq!(
+        published(&rep, "top hole")
+            .repair_summary
+            .needs_repair_count,
+        0
+    );
+    let want_top = 10000.0 - removed_volume(6.0, 25.0, None, None);
+    let got_top = exact_volume(&wm, body).await;
+    assert!(
+        (got_top - want_top).abs() < want_top * 1e-9,
+        "baseline top hole: want {want_top}, got {got_top}"
+    );
+
+    // (2) BREAK: blind the face ref and move the frozen point to the side face.
+    let mut broken = hole_params(body, "el_gone", side, 6.0);
+    broken.face = blind_face_ref(body, "el_gone");
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: hole,
+        op: Operation::Known(KnownOperation::Hole(broken)),
+    })
+    .expect("blind the hole's face ref");
+    let broken_report = regen_all(&mut rt).await;
+    // A ref with NO evidence must produce a deterministic NeedsRepair, never a
+    // plausible-looking drill. (This is also the case that exposed the empty-anchor
+    // protocol defect — see `wire::parse_needs_repair`. Before that fix this regen
+    // came back `EngineFailed(Protocol)` and tore the worker down, so the item
+    // could never reach the repair panel at all.)
+    let snap = published(&broken_report, "blinded hole");
+    assert_eq!(snap.stopped_reason, StoppedReason::NeedsRepair);
+    assert_eq!(snap.repair_summary.needs_repair_count, 1);
+    assert_eq!(
+        snap.repair_summary.steps,
+        vec![2],
+        "the HOLE step (0 sketch, 1 extrude, 2 hole) is the one needing repair"
+    );
+    let broken_volume = exact_volume(&wm, body).await;
+    assert!(
+        (broken_volume - 10000.0).abs() < 1e-6,
+        "an unresolvable host face drills NOTHING — the stock is back to solid 10000, \
+         got {broken_volume}"
+    );
+
+    // (3) REPAIR through the NEW input path, with real evidence on the ref.
+    rt.apply(EditCommand::EditOperationInput {
+        record: hole,
+        path: InputPath::HoleFace,
+        reference: InputRef::Element(face_ref(body, &ElementId::new("el_side_face"), side)),
+    })
+    .expect("EditOperationInput{HoleFace} is accepted for a Hole record");
+    let rep = regen_all(&mut rt).await;
+    let snap = published(&rep, "repaired hole");
+    assert_eq!(
+        snap.repair_summary.needs_repair_count, 0,
+        "the re-picked face carries an anchor, so the ladder binds it"
+    );
+
+    // (4) THE PROOF: the drill crosses the box's 20 mm Y extent, not its 25 mm Z.
+    let want_side = 10000.0 - removed_volume(6.0, 20.0, None, None);
+    let got_side = exact_volume(&wm, body).await;
+    assert!(
+        (got_side - want_side).abs() < want_side * 1e-9,
+        "the rebound hole must be drilled through the +Y face (20 mm of stock): \
+         want {want_side}, got {got_side} (a top-face drill would read {want_top})"
+    );
+    assert!(
+        (got_side - want_top).abs() > 100.0,
+        "the two faces must give clearly different volumes for this to prove anything"
+    );
+    assert_eq!(
+        rt.head_body_ids(),
+        vec![body],
+        "a rebind mints nothing and deletes nothing"
+    );
+    eprintln!("H9 HoleFace rebind PASS: top {got_top} → side {got_side}");
+    wm.shutdown().await;
+}
+
+/// The core refuses a `HoleFace` rebind whose ref carries no identity, and
+/// refuses the path on a record that is not a Hole — neither reaches the worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hole_face_rebind_is_refused_without_identity_or_on_the_wrong_op() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let (body, top) = build_box(&mut rt, SKETCH_A, EXTRUDE_A, 0xA, 0.0, 25.0).await;
+    let hole = RecordId(Uuid::from_u128(HOLE_A));
+    add_op(
+        &mut rt,
+        hole_record(HOLE_A, hole_params(body, "el_top_face", top, 6.0)),
+    );
+    let _ = regen_all(&mut rt).await;
+
+    // Evidence-only ref (no `primary`): an explicit user re-pick that silently
+    // fell through to the ladder would defeat the point of re-picking.
+    let mut anchor_only = face_ref(body, &ElementId::new("x"), top);
+    anchor_only.primary = None;
+    let err = rt
+        .apply(EditCommand::EditOperationInput {
+            record: hole,
+            path: InputPath::HoleFace,
+            reference: InputRef::Element(anchor_only),
+        })
+        .expect_err("a hole face rebind needs a primary element id");
+    assert!(
+        format!("{err}").contains("primary element id"),
+        "expected a primary-id rejection, got: {err}"
+    );
+
+    // The path is checked against the op: `HoleFace` on the EXTRUDE record is a
+    // mis-repair, and the exact class of bug the FE slot table exists to prevent.
+    let err = rt
+        .apply(EditCommand::EditOperationInput {
+            record: RecordId(Uuid::from_u128(EXTRUDE_A)),
+            path: InputPath::HoleFace,
+            reference: InputRef::Element(face_ref(body, &ElementId::new("y"), top)),
+        })
+        .expect_err("HoleFace must not apply to an Extrude");
+    assert!(
+        format!("{err}").contains("does not match the operation type"),
+        "expected a path/op mismatch rejection, got: {err}"
     );
     wm.shutdown().await;
 }

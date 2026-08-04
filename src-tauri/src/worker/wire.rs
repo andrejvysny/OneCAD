@@ -719,6 +719,17 @@ fn parse_entries(v: Option<&Value>) -> Result<Vec<ElementMapEntry>, String> {
 /// Parses `needsRepair[]` **state** (SCHEMA §9), injecting the step index each
 /// item omits (it is implicit from the enclosing `planStep`). `scoringVersion`
 /// rides through as the `RepairItem`'s optional field.
+///
+/// **An EMPTY `anchor` object is read as "no anchor" (H9).** `PlanExecutor.cpp`
+/// renders `{"anchor": {}}` for a ref that was authored without one, but
+/// `AnchorIntent::world_point` is a REQUIRED field, so serde rejected the item —
+/// turning "this reference broke and carries no evidence", the most ordinary
+/// unrepairable case there is, into a fatal `Protocol` error that tore the worker
+/// down instead of surfacing a deterministic NeedsRepair the panel could act on.
+/// (Found by `hole_ops::hole_host_face_rebind_moves_the_drill_to_the_repicked_face`,
+/// which blinds a hole's face ref on purpose.) `anchor` is OPTIONAL evidence, so
+/// a tolerant read here masks nothing: an anchor with no world point carries no
+/// information the ladder could have used. Structural fields stay strict.
 fn parse_needs_repair(v: Option<&Value>, step: usize) -> Result<Vec<RepairItem>, String> {
     let arr = v.and_then(Value::as_array).cloned().unwrap_or_default();
     let mut out = Vec::with_capacity(arr.len());
@@ -726,6 +737,12 @@ fn parse_needs_repair(v: Option<&Value>, step: usize) -> Result<Vec<RepairItem>,
         let mut obj = item;
         if let Some(map) = obj.as_object_mut() {
             map.entry("stepIndex".to_string()).or_insert(json!(step));
+            let anchorless = map
+                .get("anchor")
+                .is_some_and(|a| a.is_null() || a.get("worldPoint").is_none());
+            if anchorless {
+                map.remove("anchor");
+            }
         }
         out.push(serde_json::from_value(obj).map_err(|e| format!("needsRepair parse: {e}"))?);
     }
@@ -4280,5 +4297,240 @@ mod body_wire_tests {
             }
         }
         assert_eq!(cases.len(), 15, "one fixture per KnownOperation variant");
+    }
+
+    // ── HISTORY-HARDEN H9 — the repair SLOT TABLE ───────────────────────────
+
+    /// H9: an EMPTY `anchor` object from the worker is read as "no anchor", not
+    /// as a parse failure.
+    ///
+    /// `PlanExecutor.cpp` renders `{"anchor": {}}` for a ref authored WITHOUT one
+    /// (`ref.anchor_json.is_null() ? json::object() : …`), while
+    /// `AnchorIntent::world_point` is required. The strict read turned "this
+    /// reference broke and carries no evidence" — the most ordinary unrepairable
+    /// case — into a fatal `Protocol` error that tore the worker down, so the item
+    /// never reached the repair panel at all. Structural fields stay strict; only
+    /// this optional evidence field is tolerant.
+    #[test]
+    fn an_empty_anchor_object_parses_as_no_anchor_instead_of_failing() {
+        let items = parse_needs_repair(
+            Some(&json!([{
+                "refId": "op_5.input1",
+                "ladderFailed": "descriptor",
+                "reason": "no-candidates",
+                "anchor": {}
+            }])),
+            4,
+        )
+        .expect("an anchorless needsRepair item must PARSE, not tear down the worker");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].step_index, 4, "the enclosing step is injected");
+        assert_eq!(items[0].ref_id, "op_5.input1");
+        assert!(items[0].anchor.is_none(), "an empty anchor is no anchor");
+
+        // `null` is treated the same way…
+        let items = parse_needs_repair(
+            Some(&json!([{ "refId": "r", "ladderFailed": "descriptor", "reason": "ambiguous", "anchor": null }])),
+            0,
+        )
+        .expect("a null anchor parses");
+        assert!(items[0].anchor.is_none());
+
+        // …and a REAL anchor still rides through untouched.
+        let items = parse_needs_repair(
+            Some(&json!([{
+                "refId": "r",
+                "ladderFailed": "descriptor",
+                "reason": "ambiguous",
+                "anchor": { "worldPoint": [1.0, 2.0, 3.0], "surfaceUv": [0.25, 0.75] }
+            }])),
+            0,
+        )
+        .expect("a populated anchor parses");
+        let anchor = items[0].anchor.as_ref().expect("anchor survives");
+        assert_eq!(anchor.world_point.x, 1.0);
+        assert!(anchor.surface_uv.is_some());
+
+        // A malformed STRUCTURAL field is still a hard error (no blanket leniency).
+        assert!(parse_needs_repair(
+            Some(&json!([{ "refId": "r", "ladderFailed": "not-a-level", "reason": "ambiguous" }])),
+            0
+        )
+        .is_err());
+    }
+
+    /// **The slot table.** [`wire_op_inputs`] decides, per `opType`, what the
+    /// `k`-th entry of `inputs[]` IS — and therefore what a repair `refId`
+    /// (`"<recordId>.input<k>"`, SCHEMA §9) names. The frontend's
+    /// `inputPathFor(opType, slot, params)` (`src/ipc/tauriCommandMap.ts`) must
+    /// map the SAME `(opType, k)` to the `InputPath` that writes that slot, and
+    /// its vitest twin (`tauriCommandMap.test.ts`,
+    /// "inputPathFor mirrors the Rust wire_op_inputs slot table") asserts the
+    /// mirror case by case against this list.
+    ///
+    /// **A divergence between the two is a SILENT MIS-REPAIR**: the panel would
+    /// send a well-formed `EditOperationInput` that overwrites a DIFFERENT input
+    /// than the one the user clicked — e.g. before H9 every op's rebind was sent
+    /// as `FilletEdges{k}`, which the core rejected for Hole/Shell/Extrude and
+    /// would have silently rewritten edge `k` of any fillet that happened to
+    /// match. Change one side, change the other, in the same commit.
+    ///
+    /// Each slot is pinned as its `primary.kind`: `"body"` (a whole-body ref —
+    /// NOT addressable from the repair panel, whose candidates are element
+    /// `TopoKey`s) or `"face"`/`"edge"` (a topological element slot).
+    #[test]
+    fn wire_op_inputs_slot_order_is_the_repair_slot_table() {
+        let b = "00000000-0000-0000-0000-0000000000b0";
+        let b2 = "00000000-0000-0000-0000-0000000000b1";
+        let face_ref = json!({
+            "primary": { "bodyId": b, "elementId": "el_2", "kind": "face" },
+            "anchor": { "worldPoint": [1.0, 2.0, 3.0] }
+        });
+        let edge_ref = |el: &str| {
+            json!({
+                "primary": { "bodyId": b, "elementId": el, "kind": "edge" },
+                "anchor": { "worldPoint": [1.0, 2.0, 3.0] }
+            })
+        };
+
+        // (case name, opType, params, ordered slot kinds).
+        let cases: Vec<(&str, &str, Value, Vec<&str>)> = vec![
+            (
+                "fillet: one slot per edge, in `edges` order",
+                "Fillet",
+                json!({ "radius": 2.0, "edgeIds": ["el_1", "el_3"], "edges": [edge_ref("el_1"), edge_ref("el_3")] }),
+                vec!["edge", "edge"],
+            ),
+            (
+                "chamfer: same table as fillet",
+                "Chamfer",
+                json!({ "radius": 1.0, "edgeIds": ["el_1"], "edges": [edge_ref("el_1")] }),
+                vec!["edge"],
+            ),
+            (
+                "shell: one slot per open face, in `openFaces` order",
+                "Shell",
+                json!({ "thickness": 1.5, "openFaces": ["el_2", "el_4"], "targetBodyId": b }),
+                vec!["face", "face"],
+            ),
+            (
+                "hole: [host body, host face] — slot 0 is NOT element-addressable",
+                "Hole",
+                json!({ "targetBodyId": b, "face": face_ref, "point": [0,0,0], "depth": null, "holeType": "simple", "diameter": 5.0 }),
+                vec!["body", "face"],
+            ),
+            (
+                "boolean: [target, tool] — both whole bodies",
+                "Boolean",
+                json!({ "operation": "Cut", "targetBodyId": b, "toolBodyId": b2 }),
+                vec!["body", "body"],
+            ),
+            (
+                "extrude Blind: no ToFace target ⇒ NO slots at all",
+                "Extrude",
+                json!({ "distance": 5.0, "draftAngleDeg": 0.0, "distance2": 0.0, "extrudeMode": "Blind", "twoDirections": false, "extrudeMode2": "Blind", "booleanMode": "NewBody" }),
+                vec![],
+            ),
+            (
+                "extrude ToFace, one direction: slot 0 = targetFace",
+                "Extrude",
+                json!({ "distance": 5.0, "draftAngleDeg": 0.0, "distance2": 0.0, "extrudeMode": "ToFace", "targetFace": face_ref, "twoDirections": false, "extrudeMode2": "Blind", "booleanMode": "NewBody" }),
+                vec!["face"],
+            ),
+            (
+                "extrude ToFace both directions: slot 0 = targetFace, slot 1 = targetFace2",
+                "Extrude",
+                json!({ "distance": 5.0, "draftAngleDeg": 0.0, "distance2": 0.0, "extrudeMode": "ToFace", "targetFace": face_ref, "twoDirections": true, "extrudeMode2": "ToFace", "targetFace2": face_ref, "booleanMode": "NewBody" }),
+                vec!["face", "face"],
+            ),
+            (
+                // THE trap the frontend must mirror: direction 1 is Blind, so
+                // `targetFace2` COLLAPSES to slot 0 — a mapper that assumed
+                // "slot 0 ⇒ second:false" would rebind the wrong face.
+                "extrude Blind + second direction ToFace: slot 0 = targetFace2",
+                "Extrude",
+                json!({ "distance": 5.0, "draftAngleDeg": 0.0, "distance2": 0.0, "extrudeMode": "Blind", "targetFace": face_ref, "twoDirections": true, "extrudeMode2": "ToFace", "targetFace2": face_ref, "booleanMode": "NewBody" }),
+                vec!["face"],
+            ),
+            (
+                "extrude ToFace + twoDirections but mode2 Blind: only slot 0",
+                "Extrude",
+                json!({ "distance": 5.0, "draftAngleDeg": 0.0, "distance2": 0.0, "extrudeMode": "ToFace", "targetFace": face_ref, "twoDirections": true, "extrudeMode2": "Blind", "targetFace2": face_ref, "booleanMode": "NewBody" }),
+                vec!["face"],
+            ),
+            (
+                "revolve: the axis is an AxisRef, not an inputs[] slot",
+                "Revolve",
+                json!({ "angleDeg": 90.0, "booleanMode": "NewBody", "axis": { "kind": "edge", "bodyId": b, "edgeId": "e:2" } }),
+                vec![],
+            ),
+            (
+                "linearPattern: the source body",
+                "LinearPattern",
+                json!({ "direction": [1,0,0], "count": 2, "spacing": 5.0, "sourceBodyId": b }),
+                vec!["body"],
+            ),
+            (
+                "circularPattern: the source body",
+                "CircularPattern",
+                json!({ "axisOrigin": [0,0,0], "axisDirection": [0,0,1], "count": 3, "angleDeg": 120.0, "sourceBodyId": b }),
+                vec!["body"],
+            ),
+            (
+                "mirrorBody: the source body",
+                "MirrorBody",
+                json!({ "planePoint": [0,0,0], "planeNormal": [0,0,1], "sourceBodyId": b }),
+                vec!["body"],
+            ),
+            (
+                "transformBody: one slot per target, in `targets` order",
+                "TransformBody",
+                json!({ "translate": [1,0,0], "targets": [b, b2] }),
+                vec!["body", "body"],
+            ),
+            (
+                "sketch: hostFace is core-only ⇒ no slots",
+                "Sketch",
+                json!({ "sketchId": "00000000-0000-0000-0000-000000000011", "plane": { "kind": "XY", "origin": [0,0,0], "xAxis": [0,1,0], "yAxis": [-1,0,0], "normal": [0,0,1] }, "hostFace": face_ref }),
+                vec![],
+            ),
+            (
+                "loft: profile sketches only",
+                "Loft",
+                json!({ "booleanMode": "NewBody", "profiles": [] }),
+                vec![],
+            ),
+            (
+                "sweep: profile + path sketches only",
+                "Sweep",
+                json!({ "booleanMode": "NewBody" }),
+                vec![],
+            ),
+            (
+                "importStep: no inputs at all",
+                "ImportStep",
+                json!({ "sourceSha256": "aa", "sourceCodec": "step", "sourceName": "x.step" }),
+                vec![],
+            ),
+        ];
+
+        for (name, op_type, params, expected) in &cases {
+            let known: KnownOperation =
+                serde_json::from_value(json!({ "opType": op_type, "params": params }))
+                    .unwrap_or_else(|e| panic!("{name}: fixture deserializes: {e}"));
+            let operation = Operation::Known(known);
+            let inputs = operation.derive_inputs();
+            let wired = wire_op_inputs(&operation, &inputs);
+            let kinds: Vec<String> = wired
+                .as_array()
+                .expect("inputs[] is an array")
+                .iter()
+                .map(|r| r["primary"]["kind"].as_str().unwrap_or("?").to_string())
+                .collect();
+            assert_eq!(
+                kinds, *expected,
+                "{name}: inputs[] slot table — got {wired}"
+            );
+        }
     }
 }

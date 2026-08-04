@@ -186,3 +186,133 @@ describe("historyActions — rebind flow (promote → EditOperationInput)", () =
     apply.mockRestore();
   });
 });
+
+// ── HISTORY-HARDEN H9 ────────────────────────────────────────────────────────
+
+describe("historyActions — rebind generalized beyond fillet (H9)", () => {
+  const candidate: ResolveCandidate = {
+    topoKey: "f:22",
+    score: 0.9,
+    margin: 0.02,
+    worldPos: [4, 5, 6],
+    summary: "planar face",
+  };
+
+  /** Put ONE feature of `opType` in the projection so `inputPathFor` can route. */
+  function seedFeature(id: string, opType: string, kind: FeatureRecord["kind"]): void {
+    documentStore.setState({
+      features: [{ id, kind, opType, label: opType, valueText: "", status: "needsRepair" }],
+    });
+  }
+
+  it("routes a HOLE host-face rebind to InputPath::HoleFace with a FACE ref, not filletEdges", async () => {
+    seedFeature("h1", "Hole", "extrude");
+    const apply = vi.spyOn(mockClient, "applyEditCommand");
+    const ok = await rebindCandidate(
+      { opId: "h1", refId: "h1.input1", reason: "ambiguous", candidateCount: 1, bodyId: "body1" },
+      candidate,
+    );
+    expect(ok).toBe(true);
+    const cmd = apply.mock.calls[0][0];
+    expect(cmd).toMatchObject({ cmd: "editOperationInput", record: "h1", path: { path: "holeFace" } });
+    // The candidate's TopoKey is a FACE — the ref must say so.
+    expect((cmd as { reference: { element: { primary: { kind: string } } } }).reference.element.primary.kind).toBe(
+      "face",
+    );
+    apply.mockRestore();
+  });
+
+  it("routes a SHELL open-face rebind to InputPath::ShellOpenFaces at the parsed slot", async () => {
+    seedFeature("s1", "Shell", "shell");
+    const apply = vi.spyOn(mockClient, "applyEditCommand");
+    await rebindCandidate(
+      { opId: "s1", refId: "s1.input2", reason: "ambiguous", candidateCount: 1, bodyId: "body1" },
+      candidate,
+    );
+    expect(apply.mock.calls[0][0]).toMatchObject({
+      path: { path: "shellOpenFaces", index: 2 },
+    });
+    apply.mockRestore();
+  });
+
+  it("refuses a BODY slot instead of sending a command the backend can only reject", async () => {
+    // Hole slot 0 is the host BODY — a repair candidate is an element TopoKey, so
+    // nothing could be written there. Before H9 this went out as filletEdges{0}.
+    seedFeature("h1", "Hole", "extrude");
+    const apply = vi.spyOn(mockClient, "applyEditCommand");
+    const promote = vi.spyOn(mockClient, "promoteSelection");
+    const ok = await rebindCandidate(
+      { opId: "h1", refId: "h1.input0", reason: "ambiguous", candidateCount: 1, bodyId: "body1" },
+      candidate,
+    );
+    expect(ok).toBe(false);
+    expect(apply).not.toHaveBeenCalled();
+    expect(promote).not.toHaveBeenCalled(); // not even a wasted promotion
+    expect(viewportStore.getState().statusHint?.message).toBe(
+      "This reference must be re-picked in the feature editor",
+    );
+    apply.mockRestore();
+    promote.mockRestore();
+  });
+
+  it("uses the item's bodyId, so a MULTI-BODY document no longer refuses the repair", async () => {
+    // The pre-H9 behaviour: 2 bodies + no selection → sticky "ambiguous" refusal
+    // (pinned above). With the backend-derived bodyId the repair just works.
+    documentStore.setState({
+      bodies: {
+        body1: { id: "body1", name: "Body 1", visible: true },
+        body2: { id: "body2", name: "Body 2", visible: true },
+      },
+    });
+    selectionStore.getState().clear();
+    seedFeature("f3", "Fillet", "fillet");
+    const promote = vi.spyOn(mockClient, "promoteSelection");
+    const ok = await rebindCandidate(
+      { opId: "f3", refId: "f3.input1", reason: "ambiguous", candidateCount: 2, bodyId: "body2" },
+      { ...candidate, topoKey: "e:7" },
+    );
+    expect(ok).toBe(true);
+    expect(promote.mock.calls[0][0]).toBe("body2");
+    promote.mockRestore();
+  });
+
+  it("the item's bodyId WINS over an unrelated single-body selection", async () => {
+    documentStore.setState({
+      bodies: {
+        body1: { id: "body1", name: "Body 1", visible: true },
+        body2: { id: "body2", name: "Body 2", visible: true },
+      },
+    });
+    selectionStore.getState().set([{ kind: "body", id: "body1" }]);
+    seedFeature("f3", "Fillet", "fillet");
+    const promote = vi.spyOn(mockClient, "promoteSelection");
+    await rebindCandidate(
+      { opId: "f3", refId: "f3.input1", reason: "ambiguous", candidateCount: 2, bodyId: "body2" },
+      { ...candidate, topoKey: "e:7" },
+    );
+    expect(promote.mock.calls[0][0]).toBe("body2");
+    promote.mockRestore();
+  });
+
+  it("an EXTRUDE ToFace slot reads the STORED params to pick the right direction", async () => {
+    seedFeature("f5", "Extrude", "extrude");
+    const params = vi.spyOn(mockClient, "getOperationParams").mockResolvedValue({
+      extrudeMode: "Blind",
+      twoDirections: true,
+      extrudeMode2: "ToFace",
+      targetFace: { primary: { bodyId: "b", elementId: "el_1", kind: "face" } },
+      targetFace2: { primary: { bodyId: "b", elementId: "el_2", kind: "face" } },
+    });
+    const apply = vi.spyOn(mockClient, "applyEditCommand");
+    await rebindCandidate(
+      { opId: "f5", refId: "f5.input0", reason: "ambiguous", candidateCount: 1, bodyId: "body1" },
+      candidate,
+    );
+    // Direction 1 is Blind, so slot 0 IS `targetFace2` — `second: true`.
+    expect(apply.mock.calls[0][0]).toMatchObject({
+      path: { path: "extrudeTargetFace", second: true },
+    });
+    params.mockRestore();
+    apply.mockRestore();
+  });
+});

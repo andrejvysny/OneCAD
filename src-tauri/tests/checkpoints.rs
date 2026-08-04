@@ -775,7 +775,7 @@ async fn checkpoint_ladder_is_bounded_and_invalidated_on_edit() {
     // Roll back 4 commands (the last two features), then branch with a new edit: the
     // checkpoints above the dirty floor are orphans and must be evicted.
     for _ in 0..4 {
-        assert!(rt.undo(), "undo");
+        assert!(rt.undo().is_some(), "undo");
     }
     let sid = SketchId(Uuid::from_u128(0x200));
     add_op(

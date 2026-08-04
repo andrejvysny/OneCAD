@@ -401,6 +401,15 @@ export interface NeedsRepairItem {
   scoringVersion?: number;
   /** How many candidates the ladder surfaced (0 ⇒ `no-candidates`). */
   candidateCount: number;
+  /**
+   * The body the failing step OPERATES ON, bare uuid (H9;
+   * `NeedsRepairItemDto.bodyId`). A rebind must promote its chosen `TopoKey`
+   * against some body — without this the panel could only guess, and refused
+   * outright in a multi-body document. Absent when the backend could not derive
+   * one (or on an older backend), in which case the caller falls back to its
+   * single-body / selection derivation.
+   */
+  bodyId?: string;
 }
 
 /**
@@ -410,6 +419,19 @@ export interface NeedsRepairItem {
 export interface NeedsRepairEvent {
   revision: number;
   items: NeedsRepairItem[];
+}
+
+/**
+ * A feature's upstream/downstream transitive closures from the core dependency
+ * graph (`FeatureDependenciesDto`; H10 dependency view). Read-only lineage: never
+ * contains the queried feature's own id. Consumed by delete/suppress confirmations
+ * (dependent counts) and the inspector's "Depends on / Used by" section.
+ */
+export interface FeatureDependencies {
+  /** Record ids this feature depends on (transitive). */
+  upstream: string[];
+  /** Record ids that depend on this feature (transitive). */
+  downstream: string[];
 }
 
 /** One ranked repair candidate (`ResolveCandidateDto`). */
@@ -488,6 +510,19 @@ export interface SketchHostFace {
   bodyId: string;
   elementId: string;
 }
+
+/**
+ * Where a REATTACH (H9) sends a sketch — the V1 target set of
+ * `CadClient.reattachSketch`.
+ *
+ * World and datum only. A host-FACE target is deliberately absent (see the
+ * `reattachSketch` docs): the frame of a face-hosted sketch is derived from the
+ * face by the worker, so the frontend can neither author one nor safely take one
+ * away.
+ */
+export type SketchAttachTarget =
+  | { kind: "world"; plane: "XY" | "XZ" | "YZ" }
+  | { kind: "datum"; datumId: string };
 
 /** One sketch in the projection (mirrors `documentStore.SketchMeta`). */
 export interface SketchProjection {

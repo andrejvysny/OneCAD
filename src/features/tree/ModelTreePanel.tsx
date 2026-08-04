@@ -7,6 +7,8 @@ import { selectionStore, useSelectionStore, type EntityKind } from "@/stores/sel
 import { useToolStore } from "@/stores/toolStore";
 import { useViewportStore } from "@/stores/viewportStore";
 import { TreeRow } from "./TreeRow";
+import { ReattachPopover } from "@/features/sketch/ReattachPopover";
+import { reattachSketch } from "@/features/sketch/reattachActions";
 import {
   deleteDatum,
   deleteSketch,
@@ -51,6 +53,9 @@ export function ModelTreePanel() {
   const [menu, setMenu] = useState<MenuTarget | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // H9 reattach: the sketch whose target picker is open. A SECOND popover, opened
+  // from the same row anchor after the context menu closes.
+  const [reattaching, setReattaching] = useState<string | null>(null);
   const anchor = useRef<HTMLElement | null>(null);
 
   const isSelected = (kind: EntityKind, id: string) =>
@@ -223,6 +228,22 @@ export function ModelTreePanel() {
           )}
           {menu.kind === "sketch" && (
             <>
+              {/* H9 REATTACH. Offered only for a sketch that is NOT face-hosted:
+                  a face-hosted sketch's frame comes from the face and its
+                  projected boundary is expressed in it, so moving it to a world
+                  plane / datum would silently reinterpret that boundary with
+                  nothing to re-project it (`reattachSketch` docs). */}
+              {!sketches[menu.id]?.hostFace && (
+                <MenuItem
+                  label="Reattach…"
+                  data-testid="tree-menu-reattach"
+                  onClick={() => {
+                    const id = menu.id;
+                    closeMenu();
+                    setReattaching(id);
+                  }}
+                />
+              )}
               <div aria-hidden="true" className="my-1 h-px bg-border" />
               {/* Two-click confirm (the HistoryList delete idiom): destructive and
                   the tree has no other undo affordance in reach. */}
@@ -247,6 +268,19 @@ export function ModelTreePanel() {
             </>
           )}
         </Popover>
+      )}
+
+      {reattaching && (
+        <ReattachPopover
+          open
+          anchorRef={anchor}
+          onClose={() => setReattaching(null)}
+          onPick={(target) => {
+            const id = reattaching;
+            setReattaching(null);
+            void reattachSketch(id, target);
+          }}
+        />
       )}
     </div>
   );

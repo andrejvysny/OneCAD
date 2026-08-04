@@ -241,7 +241,7 @@ fn cascade_unsuppression_across_two_transforms_undoes_the_repair_state_exactly()
         "BOTH transforms seeded their own (disjoint) gate, got {after:?}"
     );
 
-    assert!(s.undo(), "undo the cascade un-suppression");
+    assert!(s.undo().is_some(), "undo the cascade un-suppression");
     assert_eq!(
         s.document().repair,
         at_entry,
@@ -276,13 +276,13 @@ fn a_single_command_emits_exactly_one_restore_repair() {
         op: transform_op(vec![b], 40.0),
     })
     .expect("second params edit");
-    assert!(s.undo(), "undo the second edit");
+    assert!(s.undo().is_some(), "undo the second edit");
     assert_eq!(
         s.document().repair,
         after_first,
         "second edit undone exactly"
     );
-    assert!(s.undo(), "undo the first edit");
+    assert!(s.undo().is_some(), "undo the first edit");
     assert_eq!(s.document().repair, pristine, "first edit undone exactly");
 }
 
@@ -349,7 +349,7 @@ fn deleting_a_transform_seeds_the_same_gate_as_suppressing_it() {
     );
 
     // Undo restores the timeline AND the repair state exactly.
-    assert!(s.undo(), "undo the removal");
+    assert!(s.undo().is_some(), "undo the removal");
     assert_eq!(s.document().timeline.len(), 4, "the record is back");
     assert_eq!(s.document().timeline.index_of(rid(2)), Some(2));
     assert_eq!(
@@ -662,7 +662,7 @@ fn update_sketch_attachment_restamps_the_host_face_edge_and_closes_the_gate() {
     );
 
     // Undo restores the record, the attachment AND the repair state exactly.
-    assert!(s.undo(), "undo the re-pick");
+    assert!(s.undo().is_some(), "undo the re-pick");
     assert_eq!(s.document().repair, gated, "the gate is back");
     let rec = s.document().timeline.record(5).unwrap();
     let Operation::Known(KnownOperation::Sketch(p)) = &rec.op else {

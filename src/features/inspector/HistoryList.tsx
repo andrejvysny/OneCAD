@@ -6,9 +6,12 @@ import { Popover } from "@/ui/Popover";
 import { MonoValue } from "@/ui/MonoValue";
 import type { IconName } from "@/icons/paths";
 import { IMPORT_STEP_OP_TYPE } from "@/ipc/types";
+import type { FeatureDependencies } from "@/ipc/types";
 import type { FeatureKind, FeatureMeta } from "@/stores/documentStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { DimensionInput } from "@/features/sketch/DimensionInput";
+import { ReattachPopover } from "@/features/sketch/ReattachPopover";
+import { reattachSketch, sketchIdOfFeature } from "@/features/sketch/reattachActions";
 import { formatLength, formatUnitless, lengthSuffix, MM_SUFFIX } from "@/units/format";
 import type { LengthUnitId } from "@/units/lengthUnits";
 
@@ -107,6 +110,18 @@ export interface HistoryRowActions {
   onToggleSuppress: (item: FeatureMeta) => void;
   onRoll: (item: FeatureMeta) => void;
   onDelete: (item: FeatureMeta) => void;
+  /**
+   * Read-only dependency counts (H10) behind suppress/delete — fetched ONCE per
+   * row/menu-open, never per render (see the row's `ensureDeps` and the
+   * Popover's `openMenu`). Omit to skip the dependent-count hint entirely.
+   */
+  getDependents?: (item: FeatureMeta) => Promise<FeatureDependencies>;
+}
+
+/** " — N dependent(s)" for a non-empty downstream set, else "". */
+function depSuffix(downstream: string[] | undefined): string {
+  const n = downstream?.length ?? 0;
+  return n > 0 ? ` — ${n} dependent${n === 1 ? "" : "s"}` : "";
 }
 
 /**
@@ -197,6 +212,16 @@ function FeatureRow({
     if (openTimer.current === null) return;
     clearTimeout(openTimer.current);
     openTimer.current = null;
+  };
+  // H10 dependency counts behind the suppress/delete affordances — fetched ONCE
+  // (the ref guards it), on the first hover of the cluster (or the × click as a
+  // fallback for a pointer that never hovers), never per render.
+  const [deps, setDeps] = useState<FeatureDependencies | null>(null);
+  const depsRequested = useRef(false);
+  const ensureDeps = () => {
+    if (depsRequested.current || !actions?.getDependents) return;
+    depsRequested.current = true;
+    void actions.getDependents(item).then(setDeps, () => {});
   };
   // An OPEN editor closes the moment its row stops being editable — arming a model
   // tool mid-edit must not leave a live field that could commit underneath the
@@ -342,6 +367,9 @@ function FeatureRow({
             suppressed || selected || isError ? "opacity-100" : "opacity-0 group-hover:opacity-100",
           )}
           onClick={(e) => e.stopPropagation()}
+          // H10: the cluster becoming interactive is the "menu open" moment for the
+          // dependent-count hint — fetched once, not on every render.
+          onMouseEnter={ensureDeps}
         >
           {/* Discoverable twin of the row double-click: the full re-edit (tool
               session + viewport gesture), as opposed to the value chip's
@@ -361,8 +389,15 @@ function FeatureRow({
             testid={`history-suppress-${item.id}`}
             icon="eye"
             // On the halting row this button IS the recovery action, so it says what
-            // it will accomplish rather than just naming the state change.
-            title={suppressed ? "Unsuppress" : isError ? "Suppress to continue rebuild" : "Suppress"}
+            // it will accomplish rather than just naming the state change; either way
+            // a non-zero downstream count rides along as a hint (H10).
+            title={
+              suppressed
+                ? "Unsuppress"
+                : isError
+                  ? "Suppress to continue rebuild"
+                  : `Suppress${depSuffix(deps?.downstream)}`
+            }
             active={suppressed}
             onClick={() => {
               setConfirmingDelete(false);
@@ -382,7 +417,7 @@ function FeatureRow({
             <RowIconButton
               testid={`history-delete-confirm-${item.id}`}
               icon="check"
-              title="Confirm delete"
+              title={`Confirm delete${depSuffix(deps?.downstream)}`}
               danger
               onClick={() => {
                 setConfirmingDelete(false);
@@ -394,7 +429,13 @@ function FeatureRow({
               testid={`history-delete-${item.id}`}
               icon="x"
               title="Delete"
-              onClick={() => setConfirmingDelete(true)}
+              onClick={() => {
+                // A pointer that clicks straight through without hovering first (a
+                // fast double-click, a touch tap) still gets the count once it
+                // resolves — `ensureDeps` is idempotent.
+                ensureDeps();
+                setConfirmingDelete(true);
+              }}
             />
           )}
         </div>
@@ -480,10 +521,17 @@ export function HistoryList({
 }) {
   const [menu, setMenu] = useState<FeatureMeta | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // H10: the dependent counts behind the menu's Suppress/Delete items — fetched
+  // ONCE per menu OPEN, not per render.
+  const [menuDeps, setMenuDeps] = useState<FeatureDependencies | null>(null);
+  // H9 reattach: the SKETCH id behind the Sketch row whose target picker is open
+  // (a feature id is a record id — `sketchIdOfFeature` resolves the link).
+  const [reattaching, setReattaching] = useState<string | null>(null);
   const anchor = useRef<HTMLElement | null>(null);
   const closeMenu = useCallback(() => {
     setMenu(null);
     setConfirmDelete(false);
+    setMenuDeps(null);
   }, []);
 
   const rolledBack = appliedOps !== undefined && appliedOps < items.length;
@@ -496,6 +544,9 @@ export function HistoryList({
     anchor.current = e.currentTarget;
     setConfirmDelete(false);
     setMenu(item);
+    setMenuDeps(null);
+    const getDependents = rowActions(item).getDependents;
+    if (getDependents) void getDependents(item).then(setMenuDeps, () => {});
     onSelect?.(item.id);
   };
   const menuActions = menu ? rowActions?.(menu) : undefined;
@@ -567,6 +618,23 @@ export function HistoryList({
               }}
             />
           )}
+          {/* H9 REATTACH — Sketch rows only. Host-face sketches are excluded by
+              the same rule the tree uses; the check lives in the ACTION path
+              (the projection's feature row carries no attachment), so a
+              face-hosted sketch simply resolves no reattachable id. */}
+          {menu.kind === "sketch" && (
+            <MenuItem
+              label="Reattach…"
+              data-testid="history-menu-reattach"
+              onClick={() => {
+                const id = menu.id;
+                closeMenu();
+                void sketchIdOfFeature(id).then((sketchId) => {
+                  if (sketchId) setReattaching(sketchId);
+                });
+              }}
+            />
+          )}
           <MenuItem
             label="Roll to here"
             data-testid="history-menu-roll-here"
@@ -586,7 +654,11 @@ export function HistoryList({
             />
           )}
           <MenuItem
-            label={menuActions.suppressed ? "Unsuppress" : "Suppress"}
+            label={
+              menuActions.suppressed
+                ? "Unsuppress"
+                : `Suppress${depSuffix(menuDeps?.downstream)}`
+            }
             data-testid="history-menu-suppress"
             onClick={() => {
               closeMenu();
@@ -598,7 +670,7 @@ export function HistoryList({
               (ModelTreePanel's sketch/datum delete, the row's own × button). */}
           {confirmDelete ? (
             <MenuItem
-              label="Confirm delete"
+              label={`Confirm delete${depSuffix(menuDeps?.downstream)}`}
               danger
               data-testid="history-menu-delete-confirm"
               onClick={() => {
@@ -608,13 +680,26 @@ export function HistoryList({
             />
           ) : (
             <MenuItem
-              label="Delete"
+              label={`Delete${depSuffix(menuDeps?.downstream)}`}
               danger
               data-testid="history-menu-delete"
               onClick={() => setConfirmDelete(true)}
             />
           )}
         </Popover>
+      )}
+
+      {reattaching && (
+        <ReattachPopover
+          open
+          anchorRef={anchor}
+          onClose={() => setReattaching(null)}
+          onPick={(target) => {
+            const id = reattaching;
+            setReattaching(null);
+            void reattachSketch(id, target);
+          }}
+        />
       )}
     </div>
   );

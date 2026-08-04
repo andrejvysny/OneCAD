@@ -54,6 +54,15 @@ struct ScratchJob {
     // head documentRevision at AcceptPrepared (head stamps thereafter echo it).
     std::uint64_t plan_document_revision = 0;
 
+    // The plan's OPTIONAL `editedFrom` (SCHEMA §7.2): the timeline step index of the
+    // upstream CONTENT edit that triggered this regen. ABSENT (`nullopt`) means "no
+    // edit context" — an open-time replay, a rollback, an undo/redo, or a preview —
+    // and every ladder resolution then keeps the pre-v2 anchor-decides-ties policy.
+    // Present ⇒ refs owned by a step STRICTLY AFTER it resolve against geometry that
+    // an upstream edit moved, so their stored anchors are potentially stale and the
+    // descriptor-tie veto applies (SCHEMA §10).
+    std::optional<std::uint64_t> edited_from;
+
     // The scratch body state (clone of live at fence time, mutated by ops).
     BodyStore bodies;
 

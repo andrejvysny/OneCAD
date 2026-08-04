@@ -225,9 +225,16 @@ interface WireOperationRecord {
 
 /**
  * A typed input-slot path (Rust `InputPath`, internally tagged on `"path"`,
- * camelCase). Only the fillet-edge arm is authored by M4b.
+ * camelCase). These are the ELEMENT-bearing arms — the ones a repair rebind can
+ * target. The body arms (`booleanTarget`/`booleanTool`) and the region/axis arms
+ * exist in Rust but are not authored here: a repair candidate is an element
+ * `TopoKey`, so there is nothing to write into a body/region/axis slot.
  */
-export type WireInputPath = { path: "filletEdges"; index: number };
+export type WireInputPath =
+  | { path: "filletEdges"; index: number }
+  | { path: "shellOpenFaces"; index: number }
+  | { path: "holeFace" }
+  | { path: "extrudeTargetFace"; second: boolean };
 
 /**
  * The payload of an `EditOperationInput` (Rust `InputRef`, externally tagged,
@@ -681,6 +688,32 @@ export function edgeElementRef(
 }
 
 /**
+ * The `primary.kind` a snapshot `TopoKey` names (`"f:22"` ⇒ face, `"e:5"` ⇒ edge,
+ * `"v:3"` ⇒ vertex). Repair candidates arrive as TopoKeys, and the rebind target
+ * decides the kind — a hole host face and a shell open face are FACES, not edges,
+ * and a ref whose `kind` lies about its element misleads the resolver's descriptor
+ * rung on the next edit. Unknown prefixes fall back to `"edge"` (the M4b default,
+ * and what a fillet/chamfer rebind always wants).
+ */
+export function elementKindOfTopoKey(topoKey: string): "face" | "edge" | "vertex" {
+  if (topoKey.startsWith("f:")) return "face";
+  if (topoKey.startsWith("v:")) return "vertex";
+  return "edge";
+}
+
+/** {@link edgeElementRef} with an explicit `primary.kind` (see {@link elementKindOfTopoKey}). */
+export function elementRefOfKind(
+  bodyId: string,
+  elementId: string,
+  kind: "face" | "edge" | "vertex",
+  worldPos?: [number, number, number],
+): WireElementRef {
+  const ref: WireElementRef = { primary: { bodyId: bareBodyId(bodyId), elementId, kind } };
+  if (worldPos) ref.anchor = { worldPoint: worldPos };
+  return ref;
+}
+
+/**
  * PURE dual-field fillet-edge rewrite (M4b pinned rule): replace ONLY slot
  * `index` in BOTH `edgeIds` (bare) and `edges` (typed), leaving every sibling
  * edge untouched. `edgeIds[index]` becomes the minted `elementId`; `edges[index]`
@@ -734,6 +767,99 @@ export function filletEdgeRebindCommand(
     cmd: "editOperationInput",
     record: recordId,
     path: { path: "filletEdges", index },
+    reference: { element: ref },
+  };
+}
+
+/**
+ * **The repair slot table, frontend side.** Maps a repair `refId`'s slot index
+ * (`"<opId>.input<k>"`, SCHEMA §9) to the `InputPath` that WRITES that slot, for
+ * `opType`. Returns `null` when slot `k` is not an element slot a rebind can
+ * target — a whole-body ref (Boolean target/tool, pattern/mirror source,
+ * TransformBody target, a Hole's host body) or an op with no addressable inputs.
+ *
+ * This MIRRORS Rust `worker::wire::wire_op_inputs`, whose ordered table is pinned
+ * by `wire_op_inputs_slot_order_is_the_repair_slot_table`; the vitest twin
+ * ("inputPathFor mirrors the Rust wire_op_inputs slot table") asserts the same
+ * cases here. **A divergence between the two is a SILENT MIS-REPAIR**: the panel
+ * would send a well-formed `EditOperationInput` that overwrites a DIFFERENT input
+ * than the one the user clicked. Before H9 every rebind went out as
+ * `filletEdges{k}` regardless of op — the core rejected it loudly for Hole/Shell,
+ * but it would have quietly rewritten edge `k` of a fillet. Change one side,
+ * change the other, in the same commit.
+ *
+ * `params` is the op's STORED params (`client.getOperationParams`) and is needed
+ * only by Extrude, whose ToFace slots are CONDITIONAL: with direction 1 Blind and
+ * direction 2 ToFace, `targetFace2` collapses to slot 0, so assuming
+ * "slot 0 ⇒ second:false" rebinds the wrong face. Pass `undefined` when the params
+ * are not to hand — Extrude then yields `null` (re-pick in the feature editor)
+ * rather than guessing.
+ */
+export function inputPathFor(
+  opType: string | undefined,
+  slotIndex: number,
+  params?: Record<string, unknown>,
+): WireInputPath | null {
+  if (!opType || slotIndex < 0 || !Number.isInteger(slotIndex)) return null;
+  switch (opType) {
+    // `inputs[k]` = `edges[k]` (typed) / `edgeIds[k]` (bare) — the core writes both.
+    case "Fillet":
+    case "Chamfer":
+      return { path: "filletEdges", index: slotIndex };
+    // `inputs[k]` = `openFaces[k]`, a BARE ElementId list. The rebind writes the
+    // id and works, but the ref's evidence has nowhere to live (see the Rust
+    // `InputPath::ShellOpenFaces` docs) — a shell open face is anchor-only.
+    case "Shell":
+      return { path: "shellOpenFaces", index: slotIndex };
+    // `inputs` = `[host body, host face]`. Slot 0 is a whole body.
+    case "Hole":
+      return slotIndex === 1 ? { path: "holeFace" } : null;
+    case "Extrude":
+      return extrudeTargetFacePath(slotIndex, params);
+    // Whole-body slots (Boolean `[target, tool]`, pattern/mirror source,
+    // TransformBody targets) and the ops with no `inputs[]` at all (Sketch,
+    // Revolve — its axis is an AxisRef, Loft, Sweep, ImportStep).
+    default:
+      return null;
+  }
+}
+
+/**
+ * The Extrude ToFace slot at `slotIndex`, mirroring the Rust arm's two gates:
+ * `targetFace` rides iff `extrudeMode === "ToFace"`, then `targetFace2` iff
+ * `twoDirections && extrudeMode2 === "ToFace"`. Both are also skipped when the
+ * corresponding face is absent, so the slot list can be shorter than the gates
+ * suggest.
+ */
+function extrudeTargetFacePath(
+  slotIndex: number,
+  params?: Record<string, unknown>,
+): WireInputPath | null {
+  if (!params) return null;
+  const slots: boolean[] = []; // `second` flag, in wire slot order
+  if (params.extrudeMode === "ToFace" && params.targetFace) slots.push(false);
+  if (params.twoDirections === true && params.extrudeMode2 === "ToFace" && params.targetFace2) {
+    slots.push(true);
+  }
+  const second = slots[slotIndex];
+  return second === undefined ? null : { path: "extrudeTargetFace", second };
+}
+
+/**
+ * `EditOperationInput` for ANY element input slot — the generalized rebind
+ * (`filletEdgeRebindCommand` is the fillet-only special case it grew out of).
+ * `path` comes from {@link inputPathFor}; the caller must have already refused a
+ * `null` path (there is no command that can repair a body slot).
+ */
+export function rebindInputCommand(
+  recordId: string,
+  path: WireInputPath,
+  ref: WireElementRef,
+): WireEditCommand {
+  return {
+    cmd: "editOperationInput",
+    record: recordId,
+    path,
     reference: { element: ref },
   };
 }

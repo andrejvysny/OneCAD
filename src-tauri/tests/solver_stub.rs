@@ -114,7 +114,7 @@ async fn stub_sketch_gesture_flow_end_to_end() {
     );
 
     // The whole drag is one undo step.
-    assert!(rt.undo(), "undo reverts the committed gesture");
+    assert!(rt.undo().is_some(), "undo reverts the committed gesture");
 
     wm.shutdown().await;
 }

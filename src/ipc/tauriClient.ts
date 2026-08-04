@@ -50,6 +50,7 @@ import type {
   ElementInfo,
   MassProperties,
   EnterSketchTarget,
+  FeatureDependencies,
   FeatureRecord,
   FinishSketchResult,
   Lod,
@@ -65,6 +66,7 @@ import type {
   SketchConstraint,
   SketchConstraintType,
   SketchEntity,
+  SketchAttachTarget,
   SketchPlane,
   SketchPlaneKind,
   SketchRegion,
@@ -85,6 +87,8 @@ import {
   buildAddSketch,
   buildAddSketchOnDatum,
   buildDeleteSketch,
+  buildUpdateSketchAttachmentDatum,
+  buildUpdateSketchAttachmentWorld,
   cloneIdMap,
   createIdMap,
   frontendConflictingIds,
@@ -123,6 +127,7 @@ const CMD = {
   getProjection: "get_projection",
   applyEditCommand: "apply_edit_command",
   getOperationParams: "get_operation_params",
+  featureDependencies: "feature_dependencies",
   canFoldTransform: "can_fold_transform",
   undo: "undo",
   redo: "redo",
@@ -1166,6 +1171,49 @@ export function createTauriClient(): CadClient {
     sketchMaps.delete(sketchId);
   }
 
+  /**
+   * REATTACH (H9): `UpdateSketchAttachment` onto a world plane or datum.
+   *
+   * CORRELATED (not metadata-only): the core dirties from the sketch's producing
+   * step to the end (`RegenHint::ToEnd`), so every downstream feature rebuilds on
+   * the new frame and the result must carry that regen — same class as
+   * `DeleteSketch`, which is likewise kept out of `METADATA_ONLY_CMDS`.
+   *
+   * A DATUM target sends the datum's backend-resolved frame from the projection.
+   * The core overwrites it with the same frame anyway (`stamp_datum_plane`); the
+   * point of sending it is that this entry point and `add_sketch_on_datum` stay
+   * byte-identical rather than one of them becoming a second basis authority.
+   */
+  async function reattachSketch(
+    sketchId: string,
+    target: SketchAttachTarget,
+  ): Promise<ApplyOperationResult> {
+    const backendSketchId = sketchMaps.get(sketchId)?.backendSketchId ?? sketchId;
+    let command;
+    if (target.kind === "world") {
+      command = buildUpdateSketchAttachmentWorld(backendSketchId, target.plane);
+    } else {
+      const datum = documentStore.getState().datums[target.datumId];
+      if (!datum) throw new Error(`reattachSketch: unknown datum ${target.datumId}`);
+      // Same refusal `enterSketch`'s datum arm makes: an unresolved datum has no
+      // frame, and sending an identity basis would silently plant a wrong one.
+      if (!datum.resolvedValid) {
+        throw new Error(`reattachSketch: datum '${datum.name}' has an unresolved frame`);
+      }
+      command = buildUpdateSketchAttachmentDatum(
+        backendSketchId,
+        {
+          origin: [...datum.plane.origin] as [number, number, number],
+          xAxis: [...datum.plane.xAxis] as [number, number, number],
+          yAxis: [...datum.plane.yAxis] as [number, number, number],
+          normal: [...datum.plane.normal] as [number, number, number],
+        },
+        target.datumId,
+      );
+    }
+    return applyEdit(CMD.applyEditCommand, { command }, "Reattach Sketch");
+  }
+
   // ── Sketch drag gesture (latest-wins) ─────────────────────────────────────
   let dragSketchId: string | null = null;
   let dragMaxSeq = 0;
@@ -1273,6 +1321,13 @@ export function createTauriClient(): CadClient {
     // Read-only: the stored op's params (EditCommand `op.params` serde shape), so a
     // scalar re-edit can deep-merge without clobbering axis / openFaces / edges.
     return call<Record<string, unknown>>(CMD.getOperationParams, { recordId });
+  }
+
+  async function featureDependencies(featureId: string): Promise<FeatureDependencies> {
+    // Read-only lineage query (H10): upstream/downstream closures from the core
+    // dependency graph, for the delete/suppress dependent count and the inspector's
+    // "Depends on / Used by" section.
+    return call<FeatureDependencies>(CMD.featureDependencies, { recordId: featureId });
   }
 
   async function canFoldTransform(bodyId: string): Promise<string | null> {
@@ -1511,6 +1566,7 @@ export function createTauriClient(): CadClient {
     finishSketch,
     cancelSketch,
     deleteSketch,
+    reattachSketch,
     beginGesture,
     solveDrag,
     endGesture,
@@ -1522,6 +1578,7 @@ export function createTauriClient(): CadClient {
     applyEditCommand,
     clearWorkerCircuit,
     getOperationParams,
+    featureDependencies,
     canFoldTransform,
 
     // ── Two-level preview (local seam; backend preview verb TBD) ──────────────

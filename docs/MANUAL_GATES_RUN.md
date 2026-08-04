@@ -1,4 +1,22 @@
-# Consolidated USER Manual Gate Run (updated 2026-08-03)
+# Consolidated USER Manual Gate Run (updated 2026-08-04)
+
+## 0a. SKETCH-PRO SP-0/SP-1 (2026-08-04 session) — live dimensions + conflict UX
+- [ ] **Live dimension chips (Shapr3D-style)**: arm Line, click an anchor, move —
+      length + angle chips track the cursor; committed length lands on a round
+      number (zoom-adaptive: zoom in → finer step, verify at two zoom levels);
+      type `50` Tab `30` Enter mid-gesture → exact 50mm @ 30° segment commits, a
+      Distance badge appears and its value chip re-edits; Esc while a chip is
+      focused drops only the typed field (gesture survives), second Esc ends the
+      chain; polygon: digits at idle set sides, digits after the center click
+      type the radius. Alt suppresses rounding; endpoint snap beats rounding.
+      "Dimension rounding" + "Live dimensions" toggles live in the snap popover.
+- [ ] **Conflict naming (now also on mock lane)**: dimension a line 50, then
+      dimension the same points 120 → second dimension refused, entity stays,
+      hint names the EXISTING Distance it clashes with, DOF unchanged.
+- [ ] **Concentric/Equal auto-inference (legacy parity)**: draw a circle whose
+      center lands within ~2mm of an existing circle's center → Concentric badge
+      auto-appears; near-equal radius (<0.5mm delta) → Equal badge. Ellipses
+      never participate.
 
 ## 0. NEW FEATURES batch (2026-08-02/03 autonomous run) — run FIRST, freshest code
 - [ ] **STEP import**: Start Screen "Import STEP…" picks a real .step (vendor

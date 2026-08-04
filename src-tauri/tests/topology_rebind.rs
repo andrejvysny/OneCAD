@@ -566,7 +566,10 @@ async fn multi_region_extrude_binds_by_region_id() {
         let vol = mesh_volume(&view, &mesh);
         eprintln!("  region {region} → volume {vol:.1}");
         vols_by_region.push(vol);
-        assert!(rt.undo(), "undo the extrude op for the next region");
+        assert!(
+            rt.undo().is_some(),
+            "undo the extrude op for the next region"
+        );
     }
 
     // Each regionId selected a DISTINCT footprint (800·d and 200·d). Had regionId
@@ -606,7 +609,7 @@ async fn multi_region_extrude_binds_by_region_id() {
         reason.contains("available"),
         "the message lists the available region ids, got {reason:?}"
     );
-    assert!(rt.undo(), "undo the no-match extrude");
+    assert!(rt.undo().is_some(), "undo the no-match extrude");
     eprintln!("multi-region NO-MATCH PASS: '{bogus}' ⇒ OP_FAILED, no body — {reason}");
 
     // Omitting regionId (empty) ⇒ first-region fallback, deterministic across replays.
@@ -935,6 +938,45 @@ async fn h6a_edit_lane_vetoes_a_drifted_twin() {
         items.iter().map(|i| i.ref_id.clone()).collect::<Vec<_>>()
     );
 
+    // ── H8: UNDOING that edit must NOT re-arm the veto. ──────────────────────
+    // The undo restores exactly the state the drifted anchor was authored against,
+    // so the anchor is authoritative again and the fillet must resolve CLEAN. This
+    // is the whole reason `undo` requests a `RevertToEnd` rather than a `ToEnd`:
+    // H8 threads a real dirty floor, so the request's `from` is 1 here — and a
+    // `ToEnd { from: 1 }` would claim SCHEMA §7.2 `editedFrom: 1`, veto the twin,
+    // and leave the user staring at the NeedsRepair they just undid their way out
+    // of (measured: `needsRepair=1` with the request on the edit lane, 0 here).
+    let request = rt
+        .undo()
+        .expect("the extrude edit is undoable")
+        .regen
+        .expect("undoing a params edit schedules a regen");
+    assert_eq!(
+        request,
+        RegenRequest::RevertToEnd { from: 1 },
+        "H8: the undo threads the edited step as its floor, on the REVERT lane"
+    );
+    assert_eq!(
+        request.edited_from(),
+        None,
+        "H8: a revert makes no edit claim, whatever its floor"
+    );
+    let reverted = rt.run_regen(request, CancelToken::new()).await;
+    let reverted_repairs = match &reverted.outcome {
+        Outcome::Published(s) => s.repair_summary.needs_repair_count,
+        other => panic!("H8 undo lane: expected Published, got {other:?}"),
+    };
+    eprintln!("H8 undo lane (no editedFrom, from=1): needsRepair={reverted_repairs}");
+    assert_eq!(
+        reverted_repairs, 0,
+        "H8: an undo restores the geometry the anchor was authored against — it must \
+         NOT arm the edit-scoped veto (a `ToEnd {{ from: 1 }}` here would)"
+    );
+    assert!(
+        rt.repair_items().is_empty(),
+        "H8: the undo's clean rebind clears the gate the edit raised"
+    );
+
     wm.shutdown().await;
 }
 
@@ -1208,7 +1250,7 @@ async fn fillet_reedit_swaps_to_chamfer_and_regens() {
 
     // Undo restores the whole prior record (opType included) — the fillet geometry
     // comes back on the next regen.
-    assert!(rt.undo(), "the swap is undoable");
+    assert!(rt.undo().is_some(), "the swap is undoable");
     let back_report = regen_all(&mut rt).await;
     let back_snap = published(&back_report, "edge-op swap undo").clone();
     assert_eq!(

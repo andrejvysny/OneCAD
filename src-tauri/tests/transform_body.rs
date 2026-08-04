@@ -820,7 +820,7 @@ async fn undo_restores_the_exact_prior_hash_chain() {
     let (_, moved, _) = body_geom(&mut rt, body).await;
     assert!((moved[0] - min0[0] - 33.0).abs() < 1e-3, "moved +33");
 
-    assert!(rt.undo(), "undo the move");
+    assert!(rt.undo().is_some(), "undo the move");
     let _ = published(&regen_all(&mut rt).await, "after undo");
     let head1 = wm.get_worker_head().await.expect("head after undo");
     assert_eq!(
@@ -955,7 +955,7 @@ async fn editing_a_transform_seeds_needs_repair_on_the_downstream_fillet() {
     );
 
     // ── UNDO ⇒ the gate lifts, the fillet is healthy again, hash restored ─────
-    assert!(rt.undo(), "undo the transform edit");
+    assert!(rt.undo().is_some(), "undo the transform edit");
     assert!(
         rt.repair_items().iter().all(|i| !i.seeded),
         "the seed rides the SAME undo entry as the edit that planted it"
@@ -1049,7 +1049,7 @@ async fn suppressing_a_transform_seeds_the_same_gate() {
     );
 
     // Un-suppressing seeds the gate again (the placement re-appears).
-    assert!(rt.undo(), "undo the suppression");
+    assert!(rt.undo().is_some(), "undo the suppression");
     assert!(
         rt.repair_items().iter().all(|i| !i.seeded),
         "the suppression's seed rides its own undo entry"
@@ -1208,7 +1208,7 @@ async fn editing_a_transform_gates_a_sketch_hosted_on_the_moved_face() {
     );
 
     // ── UNDO ⇒ the gate lifts and the hosted body comes back ─────────────────
-    assert!(rt.undo(), "undo the transform edit");
+    assert!(rt.undo().is_some(), "undo the transform edit");
     assert!(
         rt.repair_items().iter().all(|i| !i.seeded),
         "the seed rides the SAME undo entry as the edit that planted it"
@@ -1356,7 +1356,7 @@ async fn deleting_a_transform_seeds_the_gate_like_suppressing_it() {
     );
 
     // ── UNDO restores the timeline AND the repair state ──────────────────────
-    assert!(rt.undo(), "undo the delete");
+    assert!(rt.undo().is_some(), "undo the delete");
     assert!(
         rt.repair_items().iter().all(|i| !i.seeded),
         "the delete's seeds ride the delete's own undo entry"

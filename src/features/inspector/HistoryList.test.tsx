@@ -1,9 +1,13 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { HistoryList, type HistoryRowActions, type HistoryValueEdit } from "./HistoryList";
 import type { FeatureMeta } from "@/stores/documentStore";
 import { ICON_PATHS } from "@/icons/paths";
 import { settingsStore } from "@/stores/settingsStore";
+import { documentStore } from "@/stores/documentStore";
+import { mockClient } from "@/ipc/mockClient";
+import { planeFor } from "@/ipc/mockSketch";
+import { resetStores } from "@/test/resetStores";
 
 const items: FeatureMeta[] = [
   { id: "f1", kind: "sketch", label: "Sketch 1", valueText: "", status: "ok" },
@@ -561,5 +565,204 @@ describe("HistoryList context menu (H7b)", () => {
     render(<HistoryList items={items} onSelect={vi.fn()} />);
     fireEvent.contextMenu(screen.getByTestId("history-row-f2"));
     expect(screen.queryByTestId("history-menu-roll-here")).toBeNull();
+  });
+});
+
+/*
+ * H10 — dependency-view dependent counts behind the suppress/delete affordances,
+ * both on the row itself (× two-click confirm + the suppress button's title) and
+ * on the context menu's Suppress/Delete items. `getDependents` is fetched ONCE
+ * per open/hover (never per render) — pinned by the call-count assertions below.
+ */
+describe("HistoryList H10 dependent counts", () => {
+  const depsOf = (downstream: string[]) =>
+    vi.fn().mockResolvedValue({ upstream: [], downstream });
+  const acts = (getDependents: HistoryRowActions["getDependents"]): HistoryRowActions => ({
+    suppressed: false,
+    onToggleSuppress: vi.fn(),
+    onRoll: vi.fn(),
+    onDelete: vi.fn(),
+    getDependents,
+  });
+
+  it("does NOT fetch dependents on plain render — only on hover/open", () => {
+    const getDependents = depsOf(["f5"]);
+    render(<HistoryList items={items} rowActions={() => acts(getDependents)} />);
+    expect(getDependents).not.toHaveBeenCalled();
+  });
+
+  it("hovering the row's affordance cluster fetches once and titles the Confirm-delete button with the count", async () => {
+    const getDependents = depsOf(["f5", "f6"]);
+    render(<HistoryList items={items} rowActions={() => acts(getDependents)} />);
+
+    const cluster = screen.getByTestId("history-suppress-f2").parentElement!;
+    fireEvent.mouseEnter(cluster);
+    fireEvent.mouseEnter(cluster); // a second hover must NOT re-fetch
+    expect(getDependents).toHaveBeenCalledTimes(1);
+    expect(getDependents).toHaveBeenCalledWith(items[1]);
+
+    // The suppress title picks up the count once the fetch resolves.
+    await screen.findByTitle("Suppress — 2 dependents");
+
+    fireEvent.click(screen.getByTestId("history-delete-f2")); // arms confirm
+    expect(getDependents).toHaveBeenCalledTimes(1); // still cached, no re-fetch
+    await screen.findByTitle("Confirm delete — 2 dependents");
+  });
+
+  it("a × click with no prior hover still fetches (fallback) and titles the confirm once resolved", async () => {
+    const getDependents = depsOf(["f5"]);
+    render(<HistoryList items={items} rowActions={() => acts(getDependents)} />);
+    fireEvent.click(screen.getByTestId("history-delete-f2"));
+    expect(getDependents).toHaveBeenCalledTimes(1);
+    await screen.findByTitle("Confirm delete — 1 dependent");
+  });
+
+  it("a ZERO dependent count leaves the plain titles untouched", async () => {
+    const getDependents = depsOf([]);
+    render(<HistoryList items={items} rowActions={() => acts(getDependents)} />);
+    fireEvent.mouseEnter(screen.getByTestId("history-suppress-f2").parentElement!);
+    await vi.waitFor(() => expect(getDependents).toHaveBeenCalled());
+    expect(screen.getByTestId("history-suppress-f2")).toHaveAttribute("title", "Suppress");
+  });
+
+  it("the context menu's Suppress/Delete items pick up the count on open, fetched once", async () => {
+    const getDependents = depsOf(["f5", "f6", "f7"]);
+    render(<HistoryList items={items} rowActions={() => acts(getDependents)} />);
+
+    fireEvent.contextMenu(screen.getByTestId("history-row-f2"));
+    expect(getDependents).toHaveBeenCalledTimes(1);
+    expect(getDependents).toHaveBeenCalledWith(items[1]);
+    expect(await screen.findByTestId("history-menu-suppress")).toHaveTextContent(
+      "Suppress — 3 dependents",
+    );
+    expect(screen.getByTestId("history-menu-delete")).toHaveTextContent("Delete — 3 dependents");
+
+    fireEvent.click(screen.getByTestId("history-menu-delete"));
+    expect(screen.getByTestId("history-menu-delete-confirm")).toHaveTextContent(
+      "Confirm delete — 3 dependents",
+    );
+    // Still just the one fetch from opening the menu.
+    expect(getDependents).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-opening the menu on a DIFFERENT row re-fetches for that row", async () => {
+    const getDependents = vi.fn(async (item: FeatureMeta) =>
+      item.id === "f2" ? { upstream: [], downstream: ["f5"] } : { upstream: [], downstream: [] },
+    );
+    render(<HistoryList items={items} rowActions={() => acts(getDependents)} />);
+
+    fireEvent.contextMenu(screen.getByTestId("history-row-f2"));
+    expect(await screen.findByTestId("history-menu-suppress")).toHaveTextContent(
+      "Suppress — 1 dependent",
+    );
+
+    fireEvent.contextMenu(screen.getByTestId("history-row-f1"));
+    expect(getDependents).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() =>
+      expect(screen.getByTestId("history-menu-suppress")).toHaveTextContent("Suppress"),
+    );
+    expect(screen.getByTestId("history-menu-suppress")).not.toHaveTextContent("dependent");
+  });
+
+  it("omitting getDependents skips the hint entirely (no count, no crash)", () => {
+    render(
+      <HistoryList
+        items={items}
+        rowActions={() => ({
+          suppressed: false,
+          onToggleSuppress: vi.fn(),
+          onRoll: vi.fn(),
+          onDelete: vi.fn(),
+        })}
+      />,
+    );
+    fireEvent.mouseEnter(screen.getByTestId("history-suppress-f2").parentElement!);
+    expect(screen.getByTestId("history-suppress-f2")).toHaveAttribute("title", "Suppress");
+  });
+});
+
+// ── HISTORY-HARDEN H9: Reattach… ─────────────────────────────────────────────
+
+describe("HistoryList — the Reattach affordance (H9)", () => {
+  const acts = (): HistoryRowActions => ({
+    suppressed: false,
+    onToggleSuppress: vi.fn(),
+    onRoll: vi.fn(),
+    onDelete: vi.fn(),
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    resetStores();
+  });
+
+  it("is offered on a SKETCH row only", () => {
+    render(<HistoryList items={items} rowActions={acts} />);
+    fireEvent.contextMenu(screen.getByTestId("history-row-f1")); // Sketch 1
+    expect(screen.getByTestId("history-menu-reattach")).toBeInTheDocument();
+  });
+
+  it("is NOT offered on a non-sketch row (an extrude has no attachment to move)", () => {
+    render(<HistoryList items={items} rowActions={acts} />);
+    fireEvent.contextMenu(screen.getByTestId("history-row-f2")); // Extrude
+    expect(screen.queryByTestId("history-menu-reattach")).toBeNull();
+  });
+
+  it("resolves the row's SKETCH id (a feature id is a RECORD id) then opens the picker", async () => {
+    // The projection carries no feature→sketch link, so the stored op params are
+    // the only place it exists.
+    const params = vi
+      .spyOn(mockClient, "getOperationParams")
+      .mockResolvedValue({ sketchId: "sketch2" });
+    render(<HistoryList items={items} rowActions={acts} />);
+    fireEvent.contextMenu(screen.getByTestId("history-row-f1"));
+    fireEvent.click(screen.getByTestId("history-menu-reattach"));
+    expect(params).toHaveBeenCalledWith("f1");
+
+    // World planes are always offered; the seeded document has no datums.
+    expect(await screen.findByTestId("reattach-world-XY")).toBeInTheDocument();
+    expect(screen.getByTestId("reattach-world-XZ")).toBeInTheDocument();
+    expect(screen.getByTestId("reattach-world-YZ")).toBeInTheDocument();
+
+    const reattach = vi.spyOn(mockClient, "reattachSketch");
+    fireEvent.click(screen.getByTestId("reattach-world-YZ"));
+    await waitFor(() =>
+      expect(reattach).toHaveBeenCalledWith("sketch2", { kind: "world", plane: "YZ" }),
+    );
+  });
+
+  it("lists RESOLVED datums as targets and shows an unresolved one as inert", async () => {
+    documentStore.getState().addDatum({
+      id: "d1",
+      name: "Datum 1",
+      basePlaneId: "XY",
+      offset: 10,
+      plane: { ...planeFor("XY"), kind: "custom" },
+      resolvedValid: true,
+    });
+    documentStore.getState().addDatum({
+      id: "d2",
+      name: "Broken",
+      basePlaneId: "nope",
+      offset: 1,
+      plane: { ...planeFor("XY"), kind: "custom" },
+      resolvedValid: false,
+    });
+    vi.spyOn(mockClient, "getOperationParams").mockResolvedValue({ sketchId: "sketch2" });
+    const reattach = vi.spyOn(mockClient, "reattachSketch");
+    render(<HistoryList items={items} rowActions={acts} />);
+    fireEvent.contextMenu(screen.getByTestId("history-row-f1"));
+    fireEvent.click(screen.getByTestId("history-menu-reattach"));
+
+    expect(await screen.findByTestId("reattach-datum-d1")).toHaveTextContent("Datum 1");
+    // Shown, not hidden — it exists in the tree — but it cannot be picked.
+    expect(screen.getByTestId("reattach-datum-d2")).toHaveTextContent("(unresolved)");
+    fireEvent.click(screen.getByTestId("reattach-datum-d2"));
+    expect(reattach).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId("reattach-datum-d1"));
+    await waitFor(() =>
+      expect(reattach).toHaveBeenCalledWith("sketch2", { kind: "datum", datumId: "d1" }),
+    );
   });
 });

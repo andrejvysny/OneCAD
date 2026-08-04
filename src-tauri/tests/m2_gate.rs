@@ -741,7 +741,7 @@ async fn m2_gate_full_slice() {
     );
 
     // ── Step 8: undo the fillet → regen → body reverts to the pre-fillet state ──
-    assert!(rt.undo(), "STEP 8: undo removes the fillet op");
+    assert!(rt.undo().is_some(), "STEP 8: undo removes the fillet op");
     let undo_report = regen_all(&mut rt).await;
     let undo_snap = published(&undo_report, "STEP 8 revert").clone();
     assert_eq!(

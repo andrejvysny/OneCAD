@@ -3,6 +3,7 @@ import { render, screen, fireEvent, act, waitFor } from "@testing-library/react"
 import { InspectorPanel } from "@/features/inspector/InspectorPanel";
 import { repairStore } from "@/stores/repairStore";
 import { mockClient } from "@/ipc/mockClient";
+import { documentStore } from "@/stores/documentStore";
 import { resetStores } from "@/test/resetStores";
 import type { NeedsRepairEvent } from "@/ipc/types";
 
@@ -41,7 +42,9 @@ describe("RepairPanel (inspector repair state)", () => {
     openRepair("f3", "f3.input0");
 
     fireEvent.click(screen.getByTestId("repair-item-head-f3.input0"));
-    expect(spy).toHaveBeenCalledWith([{ refId: "f3.input0" }]);
+    // H9: the slot's InputPath is resolved FIRST (a slot with no path never
+    // fetches candidates), so the resolveRefs call is one tick behind the click.
+    await waitFor(() => expect(spy).toHaveBeenCalledWith([{ refId: "f3.input0" }]));
 
     // The canned candidates arrive (mock latency) — highest score first.
     await screen.findByText("91%");
@@ -81,5 +84,45 @@ describe("RepairPanel (inspector repair state)", () => {
     openRepair("f3", "f3.input0");
     fireEvent.click(screen.getByTestId("repair-close"));
     expect(repairStore.getState().panelOpen).toBe(false);
+  });
+});
+
+// ── HISTORY-HARDEN H9 ────────────────────────────────────────────────────────
+
+describe("RepairPanel — a slot with no rebind path (H9)", () => {
+  it("says so instead of offering candidates that can only be rejected", async () => {
+    // A Hole's `inputs[0]` is the HOST BODY — a repair candidate is an element
+    // TopoKey, so nothing could be written there. Pre-H9 the panel showed
+    // clickable candidates and sent `filletEdges{0}`, which the core rejected.
+    documentStore.setState({
+      features: [
+        { id: "h1", kind: "extrude", opType: "Hole", label: "Hole", valueText: "", status: "needsRepair" },
+      ],
+    });
+    const spy = vi.spyOn(mockClient, "resolveRefs");
+    render(<InspectorPanel />);
+    openRepair("h1", "h1.input0");
+
+    fireEvent.click(screen.getByTestId("repair-item-head-h1.input0"));
+    await screen.findByTestId("repair-not-rebindable-h1.input0");
+    expect(
+      screen.getByText("This reference must be re-picked in the feature editor"),
+    ).toBeInTheDocument();
+    // …and it never even asked for candidates.
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("still offers candidates for a slot that IS rebindable (the hole's host FACE)", async () => {
+    documentStore.setState({
+      features: [
+        { id: "h1", kind: "extrude", opType: "Hole", label: "Hole", valueText: "", status: "needsRepair" },
+      ],
+    });
+    render(<InspectorPanel />);
+    openRepair("h1", "h1.input1"); // slot 1 = host face
+    fireEvent.click(screen.getByTestId("repair-item-head-h1.input1"));
+    await screen.findByText("91%");
+    expect(screen.queryByTestId("repair-not-rebindable-h1.input1")).not.toBeInTheDocument();
   });
 });

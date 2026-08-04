@@ -222,3 +222,60 @@ describe("ModelTreePanel — inline rename", () => {
     expect(dimmed(/Body 2/)).toBe(false);
   });
 });
+
+// ── HISTORY-HARDEN H9: Reattach… on a tree sketch row ────────────────────────
+
+describe("ModelTreePanel — Reattach (H9)", () => {
+  beforeEach(() => resetStores());
+
+  it("offers Reattach… on a sketch row and dispatches the picked target", async () => {
+    const user = userEvent.setup();
+    const reattach = vi.spyOn(mockClient, "reattachSketch");
+    render(<ModelTreePanel />);
+    await user.pointer({
+      keys: "[MouseRight]",
+      target: screen.getByRole("option", { name: /Sketch 4/ }),
+    });
+    await user.click(screen.getByTestId("tree-menu-reattach"));
+    await user.click(await screen.findByTestId("reattach-world-XZ"));
+    await waitFor(() =>
+      expect(reattach).toHaveBeenCalledWith("sketch4", { kind: "world", plane: "XZ" }),
+    );
+    reattach.mockRestore();
+  });
+
+  it("does NOT offer it on a BODY row (only a sketch has an attachment)", async () => {
+    const user = userEvent.setup();
+    render(<ModelTreePanel />);
+    await user.pointer({
+      keys: "[MouseRight]",
+      target: screen.getByRole("option", { name: /Body 1/ }),
+    });
+    expect(screen.queryByTestId("tree-menu-reattach")).toBeNull();
+  });
+
+  it("does NOT offer it on a FACE-HOSTED sketch — its geometry lives in the face's frame", async () => {
+    documentStore.setState({
+      sketches: {
+        sketch4: {
+          id: "sketch4",
+          name: "Sketch 4",
+          visible: true,
+          dof: 0,
+          status: "ok",
+          geometryToken: "t",
+          hostFace: { bodyId: "body1", elementId: "el_1" },
+        },
+      },
+    });
+    const user = userEvent.setup();
+    render(<ModelTreePanel />);
+    await user.pointer({
+      keys: "[MouseRight]",
+      target: screen.getByRole("option", { name: /Sketch 4/ }),
+    });
+    expect(screen.queryByTestId("tree-menu-reattach")).toBeNull();
+    // Delete is still there — the row is not otherwise crippled.
+    expect(screen.getByTestId("tree-menu-delete")).toBeInTheDocument();
+  });
+});

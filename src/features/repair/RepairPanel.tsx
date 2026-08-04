@@ -5,12 +5,20 @@ import { SectionLabel } from "@/ui/SectionLabel";
 import { useRepairStore, repairStore } from "@/stores/repairStore";
 import { useDocumentStore } from "@/stores/documentStore";
 import { createClient } from "@/ipc/client";
-import { rebindCandidate } from "@/features/inspector/historyActions";
+import {
+  rebindCandidate,
+  repairInputPath,
+  REPAIR_NOT_REBINDABLE,
+} from "@/features/inspector/historyActions";
 import type { NeedsRepairItem, ResolveCandidate } from "@/ipc/types";
 
 type CandidateLoad =
   | { status: "loading" }
   | { status: "error"; message: string }
+  // H9: the slot this refId names has no `EditOperationInput` path (a whole-body
+  // input, or an op with no addressable slots). Showing clickable candidates here
+  // would send a command the backend can only reject — say so instead.
+  | { status: "not-rebindable" }
   | { status: "ready"; candidates: ResolveCandidate[] };
 
 /** Humanize a repair reason token for display. */
@@ -63,11 +71,22 @@ export function RepairPanel() {
   const expand = useCallback((item: NeedsRepairItem) => {
     const next = repairStore.getState().expandedRefId === item.refId ? null : item.refId;
     repairStore.getState().setExpanded(next);
-    if (next && !loads[item.refId]) {
+    // A cached `not-rebindable` verdict is NOT sticky: it is derived from the
+    // item's op TYPE, which comes from the projection — so a verdict reached
+    // before the projection hydrated must be re-taken on the next expand rather
+    // than telling the user forever that a rebindable slot cannot be rebound.
+    const cached = loads[item.refId];
+    if (next && (!cached || cached.status === "not-rebindable")) {
       setLoads((s) => ({ ...s, [item.refId]: { status: "loading" } }));
-      createClient()
-        .resolveRefs([{ refId: item.refId }])
-        .then((results) => {
+      // Resolve the slot's InputPath FIRST: with no path there is nothing a click
+      // could do, so the candidate fetch would only offer a doomed affordance.
+      repairInputPath(item)
+        .then(async (path) => {
+          if (!path) {
+            setLoads((s) => ({ ...s, [item.refId]: { status: "not-rebindable" } }));
+            return;
+          }
+          const results = await createClient().resolveRefs([{ refId: item.refId }]);
           const r = results.find((x) => x.refId === item.refId) ?? results[0];
           const candidates = [...(r?.candidates ?? [])].sort((a, b) => b.score - a.score);
           setLoads((s) => ({ ...s, [item.refId]: { status: "ready", candidates } }));
@@ -154,6 +173,14 @@ export function RepairPanel() {
                   )}
                   {load?.status === "error" && (
                     <div className="text-[11.5px] text-warn-strong">{load.message}</div>
+                  )}
+                  {load?.status === "not-rebindable" && (
+                    <div
+                      data-testid={`repair-not-rebindable-${item.refId}`}
+                      className="text-[11.5px] text-ink-5"
+                    >
+                      {REPAIR_NOT_REBINDABLE}
+                    </div>
                   )}
                   {load?.status === "ready" && load.candidates.length === 0 && (
                     <div className="text-[11.5px] text-ink-5">No candidates to choose from.</div>

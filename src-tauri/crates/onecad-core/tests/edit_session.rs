@@ -19,7 +19,9 @@ use onecad_core::document::record::{
     HoleParams, HoleType, KnownOperation, Operation, OperationRecord, RevolveParams, ShellParams,
     SketchOpParams, SketchPlaneRef,
 };
-use onecad_core::document::refs::{AxisRef, ElementKind, ElementRef, PrimaryRef, SketchRegionRef};
+use onecad_core::document::refs::{
+    AnchorIntent, AxisRef, ElementKind, ElementRef, PrimaryRef, SketchRegionRef,
+};
 use onecad_core::document::variables::{Scalar, Unit, Variable};
 use onecad_core::document::Document;
 use onecad_core::edit::{
@@ -439,14 +441,14 @@ fn every_command_apply_undo_restores_and_redo_reapplies() {
         let after = json(sess.document());
         assert_ne!(after, initial, "{name}: apply must change the document");
 
-        assert!(sess.undo(), "{name}: undo available");
+        assert!(sess.undo().is_some(), "{name}: undo available");
         assert_eq!(
             json(sess.document()),
             initial,
             "{name}: undo must restore exactly"
         );
 
-        assert!(sess.redo().unwrap(), "{name}: redo available");
+        assert!(sess.redo().unwrap().is_some(), "{name}: redo available");
         assert_eq!(
             json(sess.document()),
             after,
@@ -454,7 +456,7 @@ fn every_command_apply_undo_restores_and_redo_reapplies() {
         );
 
         // undo→redo is idempotent for state.
-        assert!(sess.undo());
+        assert!(sess.undo().is_some());
         assert_eq!(
             json(sess.document()),
             initial,
@@ -531,7 +533,7 @@ fn edit_operation_input_all_paths() {
         })
         .unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_ne!(json(sess.document()), initial, "{name} changed the doc");
-        assert!(sess.undo());
+        assert!(sess.undo().is_some());
         assert_eq!(json(sess.document()), initial, "{name} undo restored");
     }
 }
@@ -769,7 +771,7 @@ fn append_undo_redo_cursor_roundtrip() {
     assert_eq!(sess.document().timeline.cursor(), len + 1);
 
     // Undo: the record is gone and the cursor steps back into the prefix.
-    assert!(sess.undo(), "undo the append");
+    assert!(sess.undo().is_some(), "undo the append");
     assert!(
         sess.document().timeline.record_by_id(rid(0x99)).is_none(),
         "undo removed the appended record"
@@ -784,7 +786,7 @@ fn append_undo_redo_cursor_roundtrip() {
     // Redo re-runs the (fixed) forward command: the record re-joins the applied
     // prefix (pins the redo-draft regression — a re-applied commit must not become
     // a permanent draft).
-    assert!(sess.redo().unwrap(), "redo the append");
+    assert!(sess.redo().unwrap().is_some(), "redo the append");
     assert!(
         sess.document().timeline.record_by_id(rid(0x99)).is_some(),
         "redo re-added the record"
@@ -855,7 +857,7 @@ fn transaction_is_single_undo_unit_with_combined_outcome() {
     assert!(combined.projection_delta.timeline_changed);
 
     // A single undo restores BOTH edits.
-    assert!(sess.undo());
+    assert!(sess.undo().is_some());
     assert_eq!(
         json(sess.document()),
         initial,
@@ -928,7 +930,7 @@ fn failed_apply_in_transaction_auto_cancels_and_undo_hits_previous_txn() {
         1,
         "cancelled batch adds no undo entry; only the committed txn remains"
     );
-    assert!(sess.undo(), "undo runs — no open transaction");
+    assert!(sess.undo().is_some(), "undo runs — no open transaction");
     assert_eq!(
         json(sess.document()),
         initial,
@@ -1129,7 +1131,7 @@ fn update_operation_params_swaps_fillet_to_chamfer() {
     );
 
     // Undo restores the WHOLE prior record — opType, size, and `mode` alike.
-    assert!(sess.undo(), "the swap is undoable");
+    assert!(sess.undo().is_some(), "the swap is undoable");
     let back = sess.document().timeline.record_by_id(rid(1)).unwrap();
     assert_eq!(back.op.op_type(), "Fillet", "undo restores the opType");
     let (_, _, r0, m0) = edge_op_facts(&back.op);
@@ -1137,7 +1139,10 @@ fn update_operation_params_swaps_fillet_to_chamfer() {
     assert_eq!(m0.as_deref(), Some("Fillet"), "undo restores `mode`");
 
     // …and redo re-runs the same symmetric guard.
-    assert!(sess.redo().expect("redo applies"), "redo available");
+    assert!(
+        sess.redo().expect("redo applies").is_some(),
+        "redo available"
+    );
     let again = sess.document().timeline.record_by_id(rid(1)).unwrap();
     assert_eq!(again.op.op_type(), "Chamfer", "redo re-applies the swap");
     assert_eq!(edge_op_facts(&again.op).2, 3.5, "redo restores the size");
@@ -1443,8 +1448,8 @@ fn a_two_distance_chamfer_may_not_flip_to_fillet_until_distance2_is_cleared() {
     assert_eq!(rec.op.op_type(), "Fillet");
 
     // …and undo walks the whole sequence back, second leg included.
-    assert!(sess.undo(), "flip undone");
-    assert!(sess.undo(), "clear undone");
+    assert!(sess.undo().is_some(), "flip undone");
+    assert!(sess.undo().is_some(), "clear undone");
     assert_eq!(
         stored_d2(&sess, rid(1)),
         Some(2.5),
@@ -1500,7 +1505,7 @@ proptest! {
             prop_assert!(sess.undo_depth() <= 200, "stack cap holds");
         }
         while sess.can_undo() {
-            prop_assert!(sess.undo());
+            prop_assert!(sess.undo().is_some());
         }
         prop_assert_eq!(json(sess.document()), initial);
     }
@@ -1607,6 +1612,123 @@ fn frontend_build_add_sketch_wire_deserializes_and_applies() {
         serde_json::from_str::<EditCommand>(&no_plane).is_err(),
         "AddSketch without plane must fail (frontend MUST send it)"
     );
+}
+
+// ── HISTORY-HARDEN H9: sketch REATTACH ───────────────────────────────────────
+
+/// Re-attaching a sketch must move the TIMELINE RECORD's plane, not just the
+/// document sketch's.
+///
+/// The regen planner lowers the RECORD's `SketchOpParams` — the record is
+/// otherwise refreshed only when a sketch session finishes
+/// (`document_runtime::upsert_sketch_record`). Before H9,
+/// `UpdateSketchAttachment` restamped only `host_face`, so a reattach updated the
+/// tree and the drawn sketch while every regen kept replaying the sketch on its
+/// OLD plane: the feature moved on screen and no downstream extrude followed it.
+#[test]
+fn reattaching_a_sketch_moves_the_timeline_record_plane() {
+    let mut doc = base_document();
+    // The base document's sketch S1 is world-XY with a producing Sketch record.
+    let record_index = doc
+        .timeline
+        .records()
+        .iter()
+        .position(
+            |r| matches!(&r.op, Operation::Known(KnownOperation::Sketch(p)) if p.sketch == S1()),
+        )
+        .expect("base document has a Sketch record for S1");
+    let plane_kind_of = |doc: &Document| {
+        let Operation::Known(KnownOperation::Sketch(p)) =
+            &doc.timeline.record(record_index).unwrap().op
+        else {
+            panic!("Sketch record")
+        };
+        (p.plane.kind, p.plane.normal)
+    };
+    assert_eq!(plane_kind_of(&doc).0, PlaneKind::Xy, "starts on world XY");
+    doc.sketches
+        .insert(S1(), Sketch::on_world_plane(S1(), "S1", WorldPlane::XY));
+    let mut sess = DocumentSession::new(doc);
+
+    // Re-attach to world XZ — a NAMED plane, so the record keeps a named kind.
+    let outcome = sess
+        .apply(EditCommand::UpdateSketchAttachment {
+            sketch: S1(),
+            plane: onecad_core::sketch::SketchPlane::xz(),
+            attachment: SketchAttachment::World {
+                plane: WorldPlane::XZ,
+            },
+        })
+        .expect("reattach to world XZ");
+    let (kind, normal) = plane_kind_of(sess.document());
+    assert_eq!(kind, PlaneKind::Xz, "the RECORD's plane kind follows");
+    assert_eq!(
+        normal,
+        onecad_core::sketch::SketchPlane::xz().normal,
+        "…and so does its basis — this is what the planner lowers"
+    );
+    // The reattach dirties from the producing Sketch step, so downstream regens.
+    assert_eq!(outcome.regen, RegenHint::ToEnd);
+
+    // Undo restores BOTH the sketch and the record's plane.
+    assert!(sess.undo().is_some());
+    assert_eq!(plane_kind_of(sess.document()).0, PlaneKind::Xy);
+}
+
+/// Re-attaching to a DATUM takes the datum's backend-resolved frame, never the
+/// caller's — the same rule `add_sketch` enforces via `stamp_datum_plane`. A
+/// frontend that sent a stale/identity basis must not be able to plant it.
+#[test]
+fn reattaching_to_a_datum_stamps_the_resolved_frame_on_the_record() {
+    let mut doc = base_document();
+    doc.sketches
+        .insert(S1(), Sketch::on_world_plane(S1(), "S1", WorldPlane::XY));
+    let mut sess = DocumentSession::new(doc);
+    sess.apply(EditCommand::AddDatumPlane {
+        datum: DatumPlane::offset_from_plane(did(7), "Datum 1", "XZ", 10.0),
+    })
+    .expect("add the datum");
+    let resolved = sess.document().datum_planes.get(&did(7)).unwrap().clone();
+    assert!(resolved.resolved_valid);
+
+    // Deliberately send a WRONG basis with the command.
+    sess.apply(EditCommand::UpdateSketchAttachment {
+        sketch: S1(),
+        plane: onecad_core::sketch::SketchPlane::xy(),
+        attachment: SketchAttachment::Datum { datum: did(7) },
+    })
+    .expect("reattach to the datum");
+
+    assert_eq!(
+        sess.document().sketches[&S1()].plane,
+        resolved.resolved_plane,
+        "the core overwrites the caller's basis with the datum's resolved frame"
+    );
+    let Operation::Known(KnownOperation::Sketch(p)) = &sess
+        .document()
+        .timeline
+        .records()
+        .iter()
+        .find(|r| matches!(&r.op, Operation::Known(KnownOperation::Sketch(q)) if q.sketch == S1()))
+        .expect("Sketch record")
+        .op
+    else {
+        panic!("Sketch record")
+    };
+    assert_eq!(p.plane.kind, PlaneKind::Custom, "a datum frame is custom");
+    assert_eq!(p.plane.origin, resolved.resolved_plane.origin);
+    assert_eq!(p.plane.normal, resolved.resolved_plane.normal);
+
+    // An UNRESOLVED / unknown datum is refused rather than silently leaving the
+    // sketch on a placeholder frame.
+    let err = sess
+        .apply(EditCommand::UpdateSketchAttachment {
+            sketch: S1(),
+            plane: onecad_core::sketch::SketchPlane::xy(),
+            attachment: SketchAttachment::Datum { datum: did(99) },
+        })
+        .unwrap_err();
+    assert!(err.to_string().contains("does not exist"), "{err}");
 }
 
 // ── Frontend wire pin #2: `sketch_upsert` ops (TS `marshalUpsert` output) ────
@@ -1852,7 +1974,7 @@ fn delete_datum_round_trips_through_undo_redo() {
         .unwrap();
     assert!(sess.document().datum(did(17)).is_none());
 
-    assert!(sess.undo(), "undo available");
+    assert!(sess.undo().is_some(), "undo available");
     assert_eq!(
         json(sess.document()),
         before,
@@ -1863,7 +1985,7 @@ fn delete_datum_round_trips_through_undo_redo() {
     assert!(d.resolved_valid);
     assert_eq!(d.resolved_plane.origin, Vec3::new_unchecked(0.0, 0.0, 7.0));
 
-    assert!(sess.redo().unwrap(), "redo available");
+    assert!(sess.redo().unwrap().is_some(), "redo available");
     assert!(sess.document().datum(did(17)).is_none());
 }
 
@@ -2084,4 +2206,407 @@ fn a_hole_derives_its_host_body_and_face_as_inputs() {
     let inputs = &sess.document().timeline.record(0).unwrap().inputs;
     assert_eq!(inputs.bodies, vec![BX()]);
     assert_eq!(inputs.elements, vec![ElementId::new("el_face")]);
+}
+
+// ── (g2) HISTORY-HARDEN H9: the Shell + Hole InputPath arms ──────────────────
+//
+// Before H9 the ONLY element-bearing `InputPath` was `FilletEdges`, so the repair
+// panel sent every rebind as a fillet-edge edit and the core rejected it for any
+// other op — repair was fillet/chamfer-only in practice. These two arms complete
+// the element slots the wire `inputs[]` array actually exposes
+// (`worker::wire::wire_op_inputs`; the ordered table is pinned there by
+// `wire_op_inputs_slot_order_is_the_repair_slot_table`).
+
+fn shell_op(open_faces: &[&str]) -> Operation {
+    Operation::Known(KnownOperation::Shell(ShellParams {
+        thickness: s(1.5),
+        open_faces: open_faces.iter().map(|f| ElementId::new(*f)).collect(),
+        target_body: Some(BX()),
+        extra: Default::default(),
+    }))
+}
+
+/// A ref with anchor evidence but NO `primary` — what an un-promoted pick looks
+/// like. Both new arms must refuse it (see their doc comments).
+fn evidence_only_ref() -> ElementRef {
+    ElementRef {
+        primary: None,
+        intent: None,
+        anchor: Some(AnchorIntent {
+            world_point: Vec3::new_unchecked(1.0, 2.0, 3.0),
+            surface_uv: None,
+            local_frame: None,
+            adjacency_hint: None,
+            extra: Default::default(),
+        }),
+        extra: Default::default(),
+    }
+}
+
+fn face_ref_at(body: BodyId, el: &str) -> ElementRef {
+    ElementRef {
+        primary: Some(PrimaryRef {
+            body,
+            element: ElementId::new(el),
+            kind: ElementKind::Face,
+            extra: Default::default(),
+        }),
+        intent: None,
+        anchor: Some(AnchorIntent {
+            world_point: Vec3::new_unchecked(1.0, 2.0, 3.0),
+            surface_uv: None,
+            local_frame: None,
+            adjacency_hint: None,
+            extra: Default::default(),
+        }),
+        extra: Default::default(),
+    }
+}
+
+fn shell_doc(open_faces: &[&str]) -> DocumentSession {
+    let mut doc = Document::new(DocumentId(u(0x5F)));
+    doc.bodies.register(BodyMeta::new(BX(), "b", rid(0)));
+    doc.timeline = Timeline::from_records(vec![record(
+        rid(1),
+        "Shell",
+        shell_op(open_faces),
+        vec![BX()],
+    )]);
+    DocumentSession::new(doc)
+}
+
+fn stored_shell_faces(sess: &DocumentSession) -> Vec<String> {
+    let Operation::Known(KnownOperation::Shell(p)) =
+        &sess.document().timeline.record(0).unwrap().op
+    else {
+        panic!("expected the stored Shell");
+    };
+    p.open_faces.iter().map(|f| f.to_string()).collect()
+}
+
+/// `ShellOpenFaces{k}` overwrites slot `k` with the ref's PRIMARY element id, and
+/// appends exactly at the end — the same bounds discipline `set_fillet_edge` uses.
+///
+/// The evidence on the supplied ref (anchor/descriptor) is DROPPED, because
+/// `ShellParams::open_faces` is a bare `Vec<ElementId>` with nowhere to put it.
+/// That is the recorded weakness of a shell rebind: an explicit re-pick writes the
+/// id and works, but nothing survives to feed the ladder's descriptor rung on the
+/// NEXT edit. Pinned so a future typed `ShellParams::faces` shows up as a
+/// deliberate change here rather than as a silent behaviour shift.
+#[test]
+fn shell_open_face_rebind_writes_the_bare_id_and_drops_evidence() {
+    let mut sess = shell_doc(&["el_a", "el_b"]);
+    let before = json(sess.document());
+    sess.apply(EditCommand::EditOperationInput {
+        record: rid(1),
+        path: InputPath::ShellOpenFaces { index: 1 },
+        reference: InputRef::Element(face_ref_at(BX(), "el_fresh")),
+    })
+    .expect("shell open-face rebind");
+    assert_eq!(stored_shell_faces(&sess), vec!["el_a", "el_fresh"]);
+    // Only the id landed — the params carry no place for the anchor.
+    let v = json(sess.document());
+    assert_eq!(
+        v["timeline"]["records"][0]["params"]["openFaces"],
+        serde_json::json!(["el_a", "el_fresh"])
+    );
+    // …and the derived inputs follow the rewritten slot.
+    assert_eq!(
+        sess.document().timeline.record(0).unwrap().inputs.elements,
+        vec![ElementId::new("el_a"), ElementId::new("el_fresh")]
+    );
+    assert!(sess.undo().is_some());
+    assert_eq!(json(sess.document()), before, "undo restores the shell");
+
+    // Append exactly at the end grows the list (mirrors the fillet rule).
+    let mut sess = shell_doc(&["el_a"]);
+    sess.apply(EditCommand::EditOperationInput {
+        record: rid(1),
+        path: InputPath::ShellOpenFaces { index: 1 },
+        reference: InputRef::Element(face_ref_at(BX(), "el_new")),
+    })
+    .expect("append at the end");
+    assert_eq!(stored_shell_faces(&sess), vec!["el_a", "el_new"]);
+}
+
+#[test]
+fn shell_open_face_rebind_refuses_out_of_range_and_evidence_only_refs() {
+    let mut sess = shell_doc(&["el_a"]);
+    // A gap PAST the end is out of range — appending at 2 into a 1-length list
+    // would leave a hole the worker reads as a face it was never given.
+    let err = sess
+        .apply(EditCommand::EditOperationInput {
+            record: rid(1),
+            path: InputPath::ShellOpenFaces { index: 2 },
+            reference: InputRef::Element(face_ref_at(BX(), "el_new")),
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("out of range"),
+        "expected an out-of-range rejection, got: {err}"
+    );
+    assert_eq!(stored_shell_faces(&sess), vec!["el_a"], "record untouched");
+
+    // An intent-only ref has no id to write into a bare-id list.
+    let err = sess
+        .apply(EditCommand::EditOperationInput {
+            record: rid(1),
+            path: InputPath::ShellOpenFaces { index: 0 },
+            reference: InputRef::Element(evidence_only_ref()),
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("primary element id"),
+        "expected a primary-id rejection, got: {err}"
+    );
+    assert_eq!(stored_shell_faces(&sess), vec!["el_a"], "record untouched");
+}
+
+/// `HoleFace` writes the WHOLE typed ref into `params.face` — evidence included,
+/// unlike shell — and re-derives the record's inputs from it.
+#[test]
+fn hole_face_rebind_writes_the_whole_typed_ref() {
+    let mut sess = hole_doc();
+    sess.apply(EditCommand::AddOperation {
+        record: record(
+            rid(1),
+            "Hole",
+            hole_op(HoleType::Simple, 6.0, None),
+            vec![BX()],
+        ),
+        at_cursor: false,
+    })
+    .expect("add the hole");
+    let before = json(sess.document());
+
+    sess.apply(EditCommand::EditOperationInput {
+        record: rid(1),
+        path: InputPath::HoleFace,
+        reference: InputRef::Element(face_ref_at(BX(), "el_repicked")),
+    })
+    .expect("hole host-face rebind");
+
+    let Operation::Known(KnownOperation::Hole(p)) = &sess.document().timeline.record(0).unwrap().op
+    else {
+        panic!("expected the stored Hole");
+    };
+    assert_eq!(
+        p.face.primary.as_ref().map(|x| x.element.to_string()),
+        Some("el_repicked".to_string())
+    );
+    assert!(
+        p.face.anchor.is_some(),
+        "the hole face slot is a typed ElementRef, so the anchor evidence must SURVIVE \
+         (this is what distinguishes it from the shell bare-id slot)"
+    );
+    assert_eq!(
+        sess.document().timeline.record(0).unwrap().inputs.elements,
+        vec![ElementId::new("el_repicked")],
+        "the derived inputs follow the rebind"
+    );
+    assert!(sess.undo().is_some());
+    assert_eq!(json(sess.document()), before, "undo restores the hole");
+}
+
+#[test]
+fn hole_face_rebind_refuses_an_evidence_only_ref_and_a_mismatched_op() {
+    let mut sess = hole_doc();
+    sess.apply(EditCommand::AddOperation {
+        record: record(
+            rid(1),
+            "Hole",
+            hole_op(HoleType::Simple, 6.0, None),
+            vec![BX()],
+        ),
+        at_cursor: false,
+    })
+    .expect("add the hole");
+
+    // No `primary` ⇒ the user's explicit re-pick would silently fall through to
+    // the ladder on the very slot they just picked by hand.
+    let err = sess
+        .apply(EditCommand::EditOperationInput {
+            record: rid(1),
+            path: InputPath::HoleFace,
+            reference: InputRef::Element(evidence_only_ref()),
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("primary element id"),
+        "expected a primary-id rejection, got: {err}"
+    );
+
+    // The path/op pairing is still checked: `HoleFace` on a Shell is a mis-repair.
+    let mut sess = shell_doc(&["el_a"]);
+    let err = sess
+        .apply(EditCommand::EditOperationInput {
+            record: rid(1),
+            path: InputPath::HoleFace,
+            reference: InputRef::Element(face_ref_at(BX(), "el_x")),
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("does not match the operation type"),
+        "expected a path/op mismatch rejection, got: {err}"
+    );
+    assert_eq!(stored_shell_faces(&sess), vec!["el_a"], "record untouched");
+}
+
+// ── (h) HISTORY-HARDEN H8: undo/redo thread a real dirty floor ───────────────
+
+/// Every structural undo reports the exact step it moved, so the caller replays
+/// `[floor, end]` instead of the whole history.
+#[test]
+fn undo_reports_the_step_it_moved() {
+    let base = base_document();
+    let len = base.timeline.len(); // 5
+    let mut sess = DocumentSession::new(base);
+
+    // Frontier append → undo floors at the appended index.
+    sess.apply(EditCommand::AddOperation {
+        record: extrude_newbody(rid(0x99), 3.0, bid(0x99)),
+        at_cursor: false,
+    })
+    .unwrap();
+    assert_eq!(
+        sess.undo().expect("undo available").dirty_floor,
+        Some(len),
+        "undo of an append floors at the appended index"
+    );
+
+    // A params edit at step 2 → undo floors at 2.
+    sess.apply(EditCommand::UpdateOperationParams {
+        record: rid(2),
+        op: extrude_newbody(rid(2), 99.0, BY()).op,
+    })
+    .unwrap();
+    assert_eq!(
+        sess.undo().expect("undo available").dirty_floor,
+        Some(2),
+        "undo of a params edit floors at the edited step"
+    );
+
+    // A removal at step 3 → undo (the re-insert) floors at 3.
+    sess.apply(EditCommand::RemoveOperation { record: rid(3) })
+        .unwrap();
+    assert_eq!(
+        sess.undo().expect("undo available").dirty_floor,
+        Some(3),
+        "undo of a removal floors at the re-inserted index"
+    );
+
+    // A rollback → undo (the cursor restore) floors at the lower cursor.
+    sess.apply(EditCommand::SetRollback { cursor: 2 }).unwrap();
+    assert_eq!(
+        sess.undo().expect("undo available").dirty_floor,
+        Some(2),
+        "undo of a roll-back floors at the lower of the two cursors"
+    );
+}
+
+/// A sketch edit's undo floors at the PRODUCING `Sketch` op, not at the first
+/// consumer — that op's own regen re-runs region detection worker-side. This is
+/// the floor that closes the sketch-geometry checkpoint hole.
+#[test]
+fn undo_of_a_sketch_edit_floors_at_its_producing_op() {
+    let mut sess = DocumentSession::new(base_document());
+    sess.apply(EditCommand::SketchEdit {
+        sketch: S1(),
+        ops: vec![SketchEditOp::AddEntity {
+            entity: SketchEntity::point(eid(77), Vec2::new_unchecked(1.0, 2.0), false, false),
+        }],
+    })
+    .unwrap();
+    assert_eq!(
+        sess.undo().expect("undo available").dirty_floor,
+        Some(0),
+        "the Sketch op producing S1 sits at step 0"
+    );
+}
+
+/// A metadata-only revert claims NO floor: nothing the timeline regenerates moved,
+/// so the caller must schedule no regen (and evict no checkpoint).
+#[test]
+fn undo_of_a_display_only_edit_claims_no_floor() {
+    let mut sess = DocumentSession::new(base_document());
+    sess.apply(EditCommand::SetVisibility {
+        target: VisibilityTarget::Sketch(S1()),
+        visible: false,
+    })
+    .unwrap();
+    assert_eq!(
+        sess.undo().expect("undo available").dirty_floor,
+        None,
+        "sketch visibility is display-only"
+    );
+}
+
+/// A transaction undoes/redoes as one step, and both directions fold to the LOWEST
+/// floor across its edits — never to the last one applied.
+#[test]
+fn a_transaction_folds_to_its_lowest_floor_in_both_directions() {
+    let mut sess = DocumentSession::new(base_document());
+    sess.begin_transaction("batch");
+    // Deliberately highest-first, so a "last wins" fold would report 3.
+    sess.apply(EditCommand::UpdateOperationParams {
+        record: rid(3),
+        op: boolean(rid(3), BX(), BY(), BX()).op,
+    })
+    .unwrap();
+    sess.apply(EditCommand::UpdateOperationParams {
+        record: rid(1),
+        op: extrude_newbody(rid(1), 77.0, BX()).op,
+    })
+    .unwrap();
+    sess.end_transaction().expect("one committed step");
+
+    assert_eq!(
+        sess.undo().expect("undo available").dirty_floor,
+        Some(1),
+        "the batch's lowest edited step wins"
+    );
+    assert_eq!(
+        sess.redo().unwrap().expect("redo available").dirty_floor,
+        Some(1),
+        "redo folds the RE-EXECUTED commands' dirty spans (they used to be discarded)"
+    );
+}
+
+/// Redo derives its floor from the forward commands it replays, so it matches the
+/// span the original commit scheduled.
+#[test]
+fn redo_reports_the_span_the_original_commit_scheduled() {
+    let base = base_document();
+    let len = base.timeline.len();
+    let mut sess = DocumentSession::new(base);
+    let outcome = sess
+        .apply(EditCommand::AddOperation {
+            record: extrude_newbody(rid(0x99), 3.0, bid(0x99)),
+            at_cursor: false,
+        })
+        .unwrap();
+    assert_eq!(outcome.dirty.map(|d| d.from), Some(len));
+    sess.undo().expect("undo available");
+    assert_eq!(
+        sess.redo().unwrap().expect("redo available").dirty_floor,
+        Some(len),
+        "redo replays from the same floor the commit did"
+    );
+}
+
+/// Nothing to revert ⇒ `None` (the signal the caller uses to skip the regen).
+#[test]
+fn an_empty_stack_reverts_nothing() {
+    let mut sess = DocumentSession::new(base_document());
+    assert!(sess.undo().is_none(), "nothing committed yet");
+    assert!(sess.redo().unwrap().is_none(), "nothing undone yet");
+    // An open transaction blocks both (C++ `CommandProcessor` parity).
+    sess.apply(EditCommand::SetRollback { cursor: 2 }).unwrap();
+    sess.begin_transaction("open");
+    assert!(sess.undo().is_none(), "undo is ignored mid-transaction");
+    assert!(
+        sess.redo().unwrap().is_none(),
+        "redo is ignored mid-transaction"
+    );
 }

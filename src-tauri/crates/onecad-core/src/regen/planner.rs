@@ -60,7 +60,9 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::document::record::{DeterminismSettings, Operation, OperationInputs, OperationRecord};
+use crate::document::record::{
+    DeterminismSettings, KnownOperation, Operation, OperationInputs, OperationRecord,
+};
 use crate::history::{DependencyGraph, Timeline};
 use crate::ids::{DocumentRevision, JobId, WorkerEpoch};
 
@@ -266,6 +268,18 @@ pub enum RegenRequest {
     ToStep(usize),
     /// Regenerate `[from, applied_end]` — the commit path (`RegenToEnd(from)`).
     ToEnd { from: usize },
+    /// Regenerate `[from, applied_end]` for a **revert** (undo / redo) — identical
+    /// work to [`ToEnd`](Self::ToEnd), but it makes NO SCHEMA §7.2 `editedFrom`
+    /// claim (see [`edited_from`](Self::edited_from)).
+    ///
+    /// The variant exists solely to carry that origin. An undo threads a real dirty
+    /// floor (HISTORY-HARDEN H8) instead of the old blind `ToEnd { from: 0 }`, and
+    /// a `from > 0` on the `ToEnd` variant is *defined* to mean "an upstream content
+    /// edit happened at `from`" — which would arm the H6a congruent-twin veto on
+    /// every undo. A revert is the opposite of an edit: it restores the very state
+    /// the stored anchors were authored against, so claiming an edit there would
+    /// make symmetric geometry un-resolvable after any undo.
+    RevertToEnd { from: usize },
 }
 
 impl RegenRequest {
@@ -290,11 +304,16 @@ impl RegenRequest {
     ///
     /// `ToStep` previews never carry it — a preview resolves against the state it is
     /// previewing, and its result is never published.
+    ///
+    /// [`RevertToEnd`](Self::RevertToEnd) never carries it either, **whatever its
+    /// `from`**: an undo/redo restores the state the anchors were authored against,
+    /// so an edit claim there would veto every congruent-twin resolution the revert
+    /// is supposed to reproduce exactly.
     #[must_use]
     pub fn edited_from(self) -> Option<usize> {
         match self {
             Self::ToEnd { from } if from > 0 => Some(from),
-            Self::ToEnd { .. } | Self::ToStep(_) => None,
+            Self::ToEnd { .. } | Self::ToStep(_) | Self::RevertToEnd { .. } => None,
         }
     }
 }
@@ -451,7 +470,10 @@ impl RegenPlanner {
         // ── (1) requested_start + target, clamped into the applied prefix ──────
         let (requested_start, target) = match request {
             RegenRequest::ToStep(k) => (k, k),
-            RegenRequest::ToEnd { from } => (from, applied.saturating_sub(1)),
+            // A revert plans exactly like a commit; only its `editedFrom` claim differs.
+            RegenRequest::ToEnd { from } | RegenRequest::RevertToEnd { from } => {
+                (from, applied.saturating_sub(1))
+            }
         };
 
         // Nothing applied, or a request that starts past the applied end: empty
@@ -476,7 +498,7 @@ impl RegenPlanner {
         // ── (2)/(3) checkpoint selection ───────────────────────────────────────
         let ceiling = requested_start.checked_sub(1); // stale at/after the floor.
         let restore_meta =
-            ceiling.and_then(|ceil| choose_checkpoint(checkpoints, records, ceil, ctx));
+            ceiling.and_then(|ceil| choose_checkpoint(checkpoints, records, ceil, target, ctx));
         let start_step = restore_meta.map_or(0, |m| m.step + 1);
         let restore = restore_meta.map(|m| CheckpointRef {
             step_index: m.step,
@@ -554,13 +576,16 @@ fn planned_op(step: usize, rec: &OperationRecord) -> PlannedOp {
 }
 
 /// Selects the highest-step checkpoint usable as a base: `step ≤ ceiling`,
-/// envelope-compatible with `ctx`, and prefix-hash-matching the current records.
-/// Returns `None` (⇒ replay-from-0) when no checkpoint qualifies — the
-/// correctness-never-depends-on-cache fallback (Invariant 7).
+/// envelope-compatible with `ctx`, prefix-hash-matching the current records, and
+/// leaving every sketch its executed suffix consumes resolvable
+/// ([`suffix_sketches_stay_planned`]). Returns `None` (⇒ replay-from-0) when no
+/// checkpoint qualifies — the correctness-never-depends-on-cache fallback
+/// (Invariant 7).
 fn choose_checkpoint<'a>(
     checkpoints: &'a [CheckpointMeta],
     records: &[OperationRecord],
     ceiling: usize,
+    target: usize,
     ctx: &PlanContext,
 ) -> Option<&'a CheckpointMeta> {
     checkpoints
@@ -568,7 +593,54 @@ fn choose_checkpoint<'a>(
         .filter(|m| m.step <= ceiling && m.step < records.len())
         .filter(|m| m.envelope.is_compatible(ctx))
         .filter(|m| m.history_prefix_hash == history_prefix_hash(&records[0..=m.step]))
+        .filter(|m| suffix_sketches_stay_planned(records, m.step, target))
         .max_by_key(|m| m.step)
+}
+
+/// Whether a checkpoint at `checkpoint_step` leaves every sketch consumed by the
+/// executed suffix `records[checkpoint_step + 1 ..= target]` **inside the plan**.
+///
+/// A checkpoint restores BODIES (BREP + the element partition). It does **not**
+/// restore the sketch/region state the worker derived when it executed a `Sketch` op,
+/// and the worker resolves an op's `profile` against THE PLAN'S ops — so an executed
+/// op whose profile sketch is produced *inside the restored base* fails outright with
+/// `"Extrude: profile sketch not found in plan"`. That is a lost feature and lost
+/// geometry, not a slow replay.
+///
+/// So a checkpoint that would swallow such a producer is REFUSED here and the plan
+/// degrades to replay-from-0 (Invariant 7: the cache may cost performance, never
+/// correctness). The common acceleration cases are untouched — a checkpoint minted at
+/// a feature boundary is followed by the `Sketch` op of the next feature, which the
+/// plan executes itself.
+///
+/// Suppressed records are ignored: they never execute, so they need no profile.
+fn suffix_sketches_stay_planned(
+    records: &[OperationRecord],
+    checkpoint_step: usize,
+    target: usize,
+) -> bool {
+    let suffix = (checkpoint_step + 1)..=target.min(records.len().saturating_sub(1));
+    for i in suffix {
+        let Some(rec) = records.get(i) else { continue };
+        if rec.suppressed {
+            continue;
+        }
+        for sketch in rec.op.derive_inputs().sketches {
+            // The producing `Sketch` op — the record that puts this sketch (and its
+            // regions) into the worker's plan state.
+            let producer = records.iter().position(|r| {
+                !r.suppressed
+                    && matches!(&r.op,
+                        Operation::Known(KnownOperation::Sketch(p)) if p.sketch == sketch)
+            });
+            // No producer at all is a different (legacy-backfill) problem and fails
+            // identically with or without the checkpoint — do not veto for it.
+            if producer.is_some_and(|p| p <= checkpoint_step) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -620,6 +692,26 @@ mod tests {
         // Previews resolve against the state they preview and never publish.
         assert_eq!(RegenRequest::ToStep(0).edited_from(), None);
         assert_eq!(RegenRequest::ToStep(4).edited_from(), None);
+        // H8: a revert threads a REAL dirty floor, so its `from` is routinely > 0 —
+        // and it must STILL make no edit claim, or every undo would arm the H6a
+        // congruent-twin veto against the state it just restored.
+        assert_eq!(RegenRequest::RevertToEnd { from: 0 }.edited_from(), None);
+        assert_eq!(RegenRequest::RevertToEnd { from: 1 }.edited_from(), None);
+        assert_eq!(RegenRequest::RevertToEnd { from: 9 }.edited_from(), None);
+    }
+
+    /// A revert plans EXACTLY like the commit of the same span — same start, same
+    /// target, same checkpoint choice. Only the `editedFrom` claim differs.
+    #[test]
+    fn revert_plans_identically_to_the_commit_of_the_same_span() {
+        let tl = timeline(5);
+        let g = DependencyGraph::new();
+        for from in 0..5 {
+            let commit = RegenPlanner::plan(&tl, &g, &[], RegenRequest::ToEnd { from }, &ctx());
+            let revert =
+                RegenPlanner::plan(&tl, &g, &[], RegenRequest::RevertToEnd { from }, &ctx());
+            assert_eq!(commit, revert, "from {from}: revert plans like a commit");
+        }
     }
 
     /// The pure planner never invents edit context; the caller stamps it.
@@ -885,5 +977,127 @@ mod tests {
             history_prefix_hash(tl.records()),
             "prefix_hashes tracks history_prefix_hash under the same filter"
         );
+    }
+
+    // ── the sketch-producer checkpoint guard ─────────────────────────────────
+
+    fn sketch_op(seed: u128, sketch: crate::ids::SketchId) -> OperationRecord {
+        use crate::document::record::{PlaneKind, SketchOpParams, SketchPlaneRef};
+        use crate::math::Vec3;
+        let op = Operation::Known(KnownOperation::Sketch(SketchOpParams {
+            sketch,
+            plane: SketchPlaneRef {
+                kind: PlaneKind::Xy,
+                origin: Vec3::new_unchecked(0.0, 0.0, 0.0),
+                x_axis: Vec3::new_unchecked(1.0, 0.0, 0.0),
+                y_axis: Vec3::new_unchecked(0.0, 1.0, 0.0),
+                normal: Vec3::new_unchecked(0.0, 0.0, 1.0),
+                extra: Default::default(),
+            },
+            entities: Vec::new(),
+            constraints: Vec::new(),
+            host_face: None,
+            extra: Default::default(),
+        }));
+        OperationRecord::new(RecordId(Uuid::from_u128(seed)), 0, "Sketch", op)
+    }
+
+    fn extrude_of(seed: u128, sketch: crate::ids::SketchId) -> OperationRecord {
+        let mut rec = extrude(seed, 10.0);
+        let Operation::Known(KnownOperation::Extrude(p)) = &mut rec.op else {
+            unreachable!()
+        };
+        p.profile = Some(crate::document::refs::SketchRegionRef {
+            sketch,
+            region: crate::ids::RegionId::new(""),
+            extra: Default::default(),
+        });
+        rec.inputs = rec.op.derive_inputs();
+        rec
+    }
+
+    /// `[sketchA, extrudeA, sketchB, extrudeB]` — the ordinary two-feature history.
+    fn two_feature_records() -> Vec<OperationRecord> {
+        let sa = crate::ids::SketchId(Uuid::from_u128(0xA));
+        let sb = crate::ids::SketchId(Uuid::from_u128(0xB));
+        vec![
+            sketch_op(0x10, sa),
+            extrude_of(0x11, sa),
+            sketch_op(0x20, sb),
+            extrude_of(0x21, sb),
+        ]
+    }
+
+    /// A checkpoint restores BODIES, never the worker's sketch/region state, and the
+    /// worker resolves a profile against THE PLAN'S ops. A base that swallows the
+    /// `Sketch` op an executed step consumes therefore fails that step outright
+    /// ("Extrude: profile sketch not found in plan") — a lost feature, not a slow
+    /// replay — so the planner must refuse such a checkpoint.
+    #[test]
+    fn a_checkpoint_that_swallows_a_consumed_sketch_op_is_refused() {
+        let records = two_feature_records();
+        // Executing step 3 (extrude B) off a base that already contains step 2
+        // (sketch B) is the broken shape.
+        assert!(
+            !suffix_sketches_stay_planned(&records, 2, 3),
+            "a base at step 2 swallows sketch B, which step 3 consumes"
+        );
+        // A base at a FEATURE BOUNDARY leaves sketch B inside the executed slice.
+        assert!(
+            suffix_sketches_stay_planned(&records, 1, 3),
+            "a base at step 1 keeps sketch B in the plan"
+        );
+        // Nothing downstream of the base consumes anything ⇒ trivially fine.
+        assert!(suffix_sketches_stay_planned(&records, 2, 2));
+        // A suppressed consumer never executes, so it constrains nothing.
+        let mut suppressed = two_feature_records();
+        suppressed[3].suppressed = true;
+        assert!(
+            suffix_sketches_stay_planned(&suppressed, 2, 3),
+            "a suppressed consumer needs no profile"
+        );
+    }
+
+    /// End-to-end through the planner: the unusable checkpoint degrades to
+    /// replay-from-0 (Invariant 7), the usable one still accelerates.
+    #[test]
+    fn checkpoint_selection_honours_the_sketch_producer_guard() {
+        let mut tl = Timeline::from_records(two_feature_records());
+        tl.set_cursor(4);
+        let g = DependencyGraph::new();
+        let meta = |step: usize| CheckpointMeta {
+            id: super::super::checkpoint::CheckpointId::new(format!("ckpt_{step}")),
+            step,
+            history_prefix_hash: history_prefix_hash(&tl.records()[0..=step]),
+            envelope: super::super::checkpoint::CheckpointEnvelope {
+                artifact_schema_version: super::super::checkpoint::ARTIFACT_SCHEMA_VERSION,
+                body: crate::ids::BodyId(Uuid::from_u128(1)),
+                step,
+                history_prefix_hash: history_prefix_hash(&tl.records()[0..=step]),
+                brep_content_hash: String::new(),
+                occt_fingerprint: "fp".into(),
+                descriptor_version: PolicyVersions::default().descriptor,
+                resolver_version: PolicyVersions::default().resolver,
+                quantization_version: PolicyVersions::default().quantization,
+                signature_version: PolicyVersions::default().signature,
+                codec: "brep-bintools".into(),
+                size: 0,
+                content_hash: String::new(),
+            },
+        };
+        // Only the swallowing checkpoint is offered ⇒ replay-from-0.
+        let plan = RegenPlanner::plan(&tl, &g, &[meta(2)], RegenRequest::ToEnd { from: 3 }, &ctx());
+        assert_eq!(plan.restore, None, "the unusable checkpoint is refused");
+        assert_eq!(plan.start_step, 0, "and the plan degrades to replay-from-0");
+        // The feature-boundary checkpoint is picked, even alongside the higher one.
+        let plan = RegenPlanner::plan(
+            &tl,
+            &g,
+            &[meta(1), meta(2)],
+            RegenRequest::ToEnd { from: 3 },
+            &ctx(),
+        );
+        assert_eq!(plan.restore.map(|r| r.step_index), Some(1));
+        assert_eq!(plan.start_step, 2, "sketch B is executed, not restored");
     }
 }

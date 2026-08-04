@@ -36,7 +36,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 use tokio::sync::{watch, Mutex};
 
-use onecad_core::regen::{Outcome, RegenDirective, RegenScheduler};
+use onecad_core::regen::{Outcome, RegenDirective, RegenRequest, RegenScheduler};
 
 use crate::document_runtime::{DocumentRuntime, RegenReport};
 use crate::dto::DocumentProjection;
@@ -154,6 +154,7 @@ pub fn regen_driver_with_started(
             // the busy indicator is up for the whole time the worker is out.
             on_started();
             // Phase 2 (UNLOCKED): drive the worker; concurrent edits may supersede.
+            let cancel = directive.cancel.clone();
             let driven = prepared.drive(directive.cancel).await;
             // Phase 3 (locked): commit iff still current, then emit events.
             let (report, projection) = {
@@ -171,8 +172,64 @@ pub fn regen_driver_with_started(
             if report.published() {
                 autosave_tick.send_modify(|v| *v = v.wrapping_add(1));
             }
+            // HISTORY-HARDEN H8: a published ROLLBACK is the one completion worth a
+            // free checkpoint (see `mint_rollback_checkpoint`).
+            if matches!(directive.request, RegenRequest::ToStep(_))
+                && report.published()
+                && !cancel.is_cancelled()
+            {
+                mint_rollback_checkpoint(&runtime).await;
+            }
             report.outcome
         })
+    }
+}
+
+/// Best-effort checkpoint mint at the head a just-published **rollback** settled on
+/// (HISTORY-HARDEN H8).
+///
+/// ## Why here, and what it actually accelerates
+///
+/// It does NOT speed up repeat rollbacks — a `ToStep(k)` preview picks a checkpoint
+/// at `≤ k − 1`, so a checkpoint AT `k` is invisible to it. What it accelerates is the
+/// **next step of the rollback workflow**: rolling back to cursor `c` and then
+/// inserting a feature at the cursor dirties `[c, len)`, which schedules
+/// `ToEnd { from: c }`, whose checkpoint ceiling is exactly `c − 1 == k` — the
+/// checkpoint minted here. The roll-back → insert → roll-forward loop is the whole
+/// point of the rollback bar, and it used to replay from 0 on every iteration because
+/// the only checkpoint mint in the product was on explicit save.
+///
+/// **Strictly best-effort (Invariant 7).** Skipped when another request is already
+/// queued (the cancel token fired) so an interactive scrub of the rollback bar does not
+/// pay a `SaveCheckpoint` per row; skipped when
+/// [`prepare_checkpoint`](DocumentRuntime::prepare_checkpoint) refuses; and dropped by
+/// [`adopt_checkpoint`](DocumentRuntime::adopt_checkpoint)'s fencing recheck if an edit
+/// or a worker restart landed during the round-trip. A failed mint costs a replay,
+/// never correctness.
+///
+/// The worker round-trip runs **unlocked** (the `save_document` five-phase pattern), so
+/// the mint never stalls an edit; both re-locks re-check the document identity because
+/// a close/open can interleave.
+async fn mint_rollback_checkpoint(runtime: &Arc<Mutex<Option<DocumentRuntime>>>) {
+    let (ticket, engine, document_id) = {
+        let guard = runtime.lock().await;
+        let Some(rt) = guard.as_ref() else {
+            return;
+        };
+        let Some(ticket) = rt.prepare_checkpoint() else {
+            return;
+        };
+        (ticket, rt.engine_arc(), rt.document_uuid())
+    };
+    let Ok(artifacts) = engine.save_checkpoint(ticket.step()).await else {
+        return;
+    };
+    let mut guard = runtime.lock().await;
+    if let Some(rt) = guard
+        .as_mut()
+        .filter(|rt| rt.document_uuid() == document_id)
+    {
+        rt.adopt_checkpoint(ticket, artifacts);
     }
 }
 
@@ -286,6 +343,7 @@ pub fn run() {
             api::recover_document,
             api::apply_edit_command,
             api::get_operation_params,
+            api::feature_dependencies,
             api::undo,
             api::redo,
             api::get_projection,

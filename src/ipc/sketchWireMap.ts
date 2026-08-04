@@ -739,6 +739,77 @@ export function buildAddSketchOnDatum(
   };
 }
 
+// ── UpdateSketchAttachment payload (REATTACH V1, H9) ─────────────────────────
+
+/**
+ * The `UpdateSketchAttachment` EditCommand wire shape (Rust
+ * `EditCommand::UpdateSketchAttachment`, internally tagged `cmd`, camelCase).
+ *
+ * `sketch` is a BARE `SketchId` uuid (`#[serde(transparent)]`); `plane` and
+ * `attachment` are the SAME shapes `AddSketch` carries, because the core re-uses
+ * `SketchPlane` / `SketchAttachment` verbatim on both entry points.
+ *
+ * There is deliberately no `hostFace` arm — same reason `buildAddSketchOnDatum`
+ * has none (see the note above `buildAddSketch`). A host-face sketch's frame is
+ * derived from the face by the WORKER, and its projected boundary is expressed in
+ * that frame; assembling one here could only produce a `projectedBoundaryVersion:
+ * 0` attachment with no projection, which is exactly the seam SKETCH-ON-FACE W2
+ * closed. Reattach V1 is world ⇄ datum only.
+ */
+export interface WireUpdateSketchAttachment {
+  cmd: "updateSketchAttachment";
+  sketch: string;
+  plane: WireAddSketch["sketch"]["plane"];
+  attachment: WireAddSketch["sketch"]["attachment"];
+}
+
+/**
+ * Build `UpdateSketchAttachment` for a reattach to a named WORLD plane. The basis
+ * is the SCHEMA §7.3 canonical one for the kind (`planeFor` mirrors Rust's
+ * `SketchPlane::xy/xz/yz()` verbatim) — the same source `buildAddSketch` uses, so
+ * a sketch created on XZ and one reattached to XZ end up on the identical frame.
+ */
+export function buildUpdateSketchAttachmentWorld(
+  sketchId: string,
+  planeKind: "XY" | "XZ" | "YZ",
+): WireUpdateSketchAttachment {
+  const { origin, xAxis, yAxis, normal } = planeFor(planeKind);
+  return {
+    cmd: "updateSketchAttachment",
+    sketch: sketchId,
+    plane: { origin, xAxis, yAxis, normal },
+    attachment: { kind: "world", plane: planeKind },
+  };
+}
+
+/**
+ * Build `UpdateSketchAttachment` for a reattach to a DATUM plane.
+ *
+ * As with `buildAddSketchOnDatum`, the basis is NOT computed here: `plane` is the
+ * datum's backend-RESOLVED frame (`documentStore.datums[id].plane`). The core
+ * OVERWRITES it anyway (`stamp_datum_plane` — pinned by
+ * `reattaching_to_a_datum_stamps_the_resolved_frame_on_the_record`), so sending
+ * the resolved frame keeps the two entry points identical rather than making this
+ * one a second source of truth.
+ */
+export function buildUpdateSketchAttachmentDatum(
+  sketchId: string,
+  plane: WireAddSketch["sketch"]["plane"],
+  datumId: string,
+): WireUpdateSketchAttachment {
+  return {
+    cmd: "updateSketchAttachment",
+    sketch: sketchId,
+    plane: {
+      origin: plane.origin,
+      xAxis: plane.xAxis,
+      yAxis: plane.yAxis,
+      normal: plane.normal,
+    },
+    attachment: { kind: "datum", datum: datumId },
+  };
+}
+
 // ── DeleteSketch payload (compensation: remove a sketch from the document) ────
 
 /** The `DeleteSketch` EditCommand wire shape (Rust `EditCommand::DeleteSketch`,

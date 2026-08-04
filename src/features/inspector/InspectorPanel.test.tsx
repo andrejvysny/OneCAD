@@ -444,4 +444,111 @@ describe("InspectorPanel", () => {
     expect(sketchStore.getState().session!.constraints.map((c) => c.id)).toEqual(["c1"]);
     expect(screen.queryByTestId("constraint-row-c2")).toBeNull();
   });
+
+  /*
+   * H10 — the inspector's "Depends on" / "Used by" section, read off
+   * `client.featureDependencies` and mapped through the live `features` list for
+   * labels. Also pins the delete/suppress dependent-count wiring at the panel
+   * level (the row/menu mechanics themselves are covered in HistoryList.test.tsx).
+   */
+  describe("H10 — dependency view", () => {
+    function timelineWithDependency(): void {
+      documentStore.setState({
+        features: [
+          { id: "f-a", kind: "extrude", opType: "Extrude", label: "Extrude", valueText: "5.0 mm", status: "ok" },
+          { id: "f-b", kind: "fillet", opType: "Fillet", label: "Fillet", valueText: "1.0 mm", status: "ok" },
+        ],
+      });
+    }
+
+    it("lists Depends on / Used by with feature labels, and a click selects that feature", async () => {
+      timelineWithDependency();
+      const deps = vi.spyOn(mockClient, "featureDependencies").mockImplementation(async (id) =>
+        id === "f-b" ? { upstream: ["f-a"], downstream: [] } : { upstream: [], downstream: ["f-b"] },
+      );
+      try {
+        render(<InspectorPanel />);
+        act(() => selectionStore.getState().set([{ kind: "feature", id: "f-b" }]));
+
+        expect(await screen.findByText("Depends on")).toBeInTheDocument();
+        const row = screen.getByTestId("feature-dep-upstream-f-a");
+        expect(row).toHaveTextContent("Extrude");
+        expect(screen.queryByText("Used by")).toBeNull(); // f-b's OWN downstream is empty
+
+        fireEvent.click(row);
+        expect(selectionStore.getState().selected).toEqual([{ kind: "feature", id: "f-a" }]);
+      } finally {
+        deps.mockRestore();
+      }
+    });
+
+    it("shows Used by (downstream) for an upstream feature and hides Depends on", async () => {
+      timelineWithDependency();
+      const deps = vi
+        .spyOn(mockClient, "featureDependencies")
+        .mockResolvedValue({ upstream: [], downstream: ["f-b"] });
+      try {
+        render(<InspectorPanel />);
+        act(() => selectionStore.getState().set([{ kind: "feature", id: "f-a" }]));
+
+        expect(await screen.findByText("Used by")).toBeInTheDocument();
+        expect(screen.getByTestId("feature-dep-downstream-f-b")).toHaveTextContent("Fillet");
+        expect(screen.queryByText("Depends on")).toBeNull();
+      } finally {
+        deps.mockRestore();
+      }
+    });
+
+    it("renders nothing when both directions are empty", async () => {
+      timelineWithDependency();
+      const deps = vi
+        .spyOn(mockClient, "featureDependencies")
+        .mockResolvedValue({ upstream: [], downstream: [] });
+      try {
+        render(<InspectorPanel />);
+        act(() => selectionStore.getState().set([{ kind: "feature", id: "f-a" }]));
+
+        await vi.waitFor(() => expect(deps).toHaveBeenCalled());
+        expect(screen.queryByText("Depends on")).toBeNull();
+        expect(screen.queryByText("Used by")).toBeNull();
+      } finally {
+        deps.mockRestore();
+      }
+    });
+
+    it("falls back to the bare id for a dependency the current features list no longer carries", async () => {
+      timelineWithDependency();
+      const deps = vi
+        .spyOn(mockClient, "featureDependencies")
+        .mockResolvedValue({ upstream: ["ghost-id"], downstream: [] });
+      try {
+        render(<InspectorPanel />);
+        act(() => selectionStore.getState().set([{ kind: "feature", id: "f-b" }]));
+
+        expect(await screen.findByTestId("feature-dep-upstream-ghost-id")).toHaveTextContent(
+          "ghost-id",
+        );
+      } finally {
+        deps.mockRestore();
+      }
+    });
+
+    it("shows the dependent count on the delete confirm once the row cluster is hovered", async () => {
+      timelineWithDependency();
+      const deps = vi
+        .spyOn(mockClient, "featureDependencies")
+        .mockResolvedValue({ upstream: [], downstream: ["f-b"] });
+      try {
+        render(<InspectorPanel />);
+        act(() => selectionStore.getState().set([{ kind: "feature", id: "f-a" }]));
+        await screen.findByText("Used by"); // the panel's own fetch landed
+
+        fireEvent.mouseEnter(screen.getByTestId("history-suppress-f-a").parentElement!);
+        fireEvent.click(screen.getByTestId("history-delete-f-a"));
+        await screen.findByTitle("Confirm delete — 1 dependent");
+      } finally {
+        deps.mockRestore();
+      }
+    });
+  });
 });

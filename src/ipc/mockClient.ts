@@ -20,11 +20,13 @@ import type {
   ElementInfo,
   MassProperties,
   EnterSketchTarget,
+  FeatureDependencies,
   FeatureRecord,
   Lod,
   NeedsRepairEvent,
   OperationOp,
   PromotedElement,
+  SketchAttachTarget,
   SketchPlane,
   PromotePick,
   RecentProject,
@@ -196,6 +198,22 @@ const MOCK_BASE_FEATURES: FeatureRecord[] = [
   { id: "f5", kind: "extrude", opType: "Extrude", label: "Extrude", valueText: "12.0 mm", primaryValue: 12, primaryValueKind: "length", status: "ok" },
 ];
 
+/**
+ * Stored params for the SEEDED Sketch features, so `getOperationParams` answers
+ * for them the way the real backend does (`SketchOpParams` serializes its sketch
+ * as `sketchId`).
+ *
+ * The seeded timeline is fabricated, so its rows had no params at all and every
+ * caller that resolves a feature→sketch link (H9 reattach from a history row)
+ * hit a hard "unknown record" on the mock while working fine against the real
+ * backend — a lane divergence, not a limit. The mapping pairs each seeded Sketch
+ * ROW with a seeded document SKETCH in tree order (see `seedMockDocument`).
+ */
+const MOCK_SEEDED_SKETCH_PARAMS: Record<string, Record<string, unknown>> = {
+  f1: { sketchId: "sketch2" },
+  f4: { sketchId: "sketch4" },
+};
+
 /** The `{primaryValue, primaryValueKind}` pair for a feature row — mirrors the
  *  Rust `dto.rs feature_value` arms, which are what the real lane projects. */
 function primary(
@@ -239,8 +257,11 @@ let nextFeatureSeq = 100;
 /** featureId → bodyId, so a parametric edit rebuilds the SAME body. */
 const featureBodies = new Map<string, string>();
 
-/** featureId → last committed wire params (the `get_operation_params` source). */
-const featureParams = new Map<string, Record<string, unknown>>();
+/** featureId → last committed wire params (the `get_operation_params` source).
+ *  Pre-seeded for the fabricated Sketch rows — see {@link MOCK_SEEDED_SKETCH_PARAMS}. */
+const featureParams = new Map<string, Record<string, unknown>>(
+  Object.entries(MOCK_SEEDED_SKETCH_PARAMS).map(([id, p]) => [id, { ...p }]),
+);
 
 // ── Body / sketch METADATA (name + visible) — the mock's stand-in for the Rust
 //    `document.bodies` / `document.sketches` overlay (TRUST wave).
@@ -656,6 +677,52 @@ function mockCanFoldTransform(bodyId: string): string | null {
   return null;
 }
 
+/**
+ * The mock's mirror of core `DependencyGraph::upstream`/`downstream` (H10
+ * dependency view). `featureTouched` again stands in for
+ * `inputs.bodies ∪ outputs` (see {@link mockCanFoldTransform}): walking the
+ * feature list in creation order, the most recent EARLIER feature to touch a
+ * given body is that body's "producer" at this point — an edge producer→consumer
+ * forms whenever a later feature touches a body an earlier one did, the same
+ * body-producer-chain the core `DependencyGraph` builds from
+ * `OperationRecord::outputs`. Upstream/downstream are the transitive closures
+ * over those edges, same algorithm shape as `graph.rs` `collect`.
+ *
+ * HONEST LIMIT: `MOCK_BASE_FEATURES` (the seeded document) bypasses `mutateOp`,
+ * so those rows carry no `featureTouched` entry — querying one answers with two
+ * empty arrays rather than a fabricated chain. A feature created through a real
+ * mock op (extrude/fillet/boolean/…) gets its real producer-chain edges.
+ */
+function mockFeatureDependencies(featureId: string): FeatureDependencies {
+  const forward = new Map<string, Set<string>>(); // producer id → consumer ids
+  const backward = new Map<string, Set<string>>(); // consumer id → producer ids
+  const lastToucher = new Map<string, string>(); // bodyId → most recent feature id
+  for (const f of mockFeatures) {
+    for (const bodyId of featureTouched.get(f.id) ?? []) {
+      const producer = lastToucher.get(bodyId);
+      if (producer && producer !== f.id) {
+        if (!forward.has(producer)) forward.set(producer, new Set());
+        forward.get(producer)!.add(f.id);
+        if (!backward.has(f.id)) backward.set(f.id, new Set());
+        backward.get(f.id)!.add(producer);
+      }
+      lastToucher.set(bodyId, f.id);
+    }
+  }
+  const closure = (start: string, edges: Map<string, Set<string>>): string[] => {
+    const visited = new Set<string>();
+    const stack = [...(edges.get(start) ?? [])];
+    while (stack.length > 0) {
+      const next = stack.pop()!;
+      if (visited.has(next)) continue;
+      visited.add(next);
+      for (const n of edges.get(next) ?? []) stack.push(n);
+    }
+    return [...visited];
+  };
+  return { upstream: closure(featureId, backward), downstream: closure(featureId, forward) };
+}
+
 /** Apply one op forward (mutates features + bodies); returns the body diff. */
 function mutateOp(op: OperationOp): {
   changed: string[];
@@ -917,6 +984,78 @@ function opTypeSwapRejection(
   if (!isSanctionedOpTypeSwap(prior, next)) return OP_TYPE_EDIT_REASON;
   if (prior === "Chamfer" && priorParams?.distance2 !== undefined) return CHAMFER_D2_FLIP_REASON;
   return null;
+}
+
+/**
+ * REATTACH (H9), honestly modelled on this lane.
+ *
+ * The mock's sketch frame lives in the local solver lane (`cacheSketchPlane`),
+ * and `resolveExtrudeInput` reads it, so moving the plane there and
+ * re-synthesizing every extrude whose profile is this sketch reproduces the real
+ * behaviour: the sketch's 2D coordinates are kept and reinterpreted in the new
+ * basis, and everything downstream follows.
+ *
+ * MOCK LIMITS, stated rather than faked:
+ *  • Only EXTRUDE geometry re-synthesizes — the same documented limit the
+ *    `updateOperationParams` arm carries (Fillet/Shell/Hole have no mock CSG).
+ *  • A sketch with an OPEN lane session keeps that session's plane until it is
+ *    closed (`resolveExtrudeInput` prefers a live session), so reattach is a
+ *    model-mode verb here exactly as it is in the UI.
+ *  • Undoable, like every other mock EditCommand.
+ */
+async function mockReattachSketch(
+  sketchId: string,
+  target: SketchAttachTarget,
+): Promise<ApplyOperationResult> {
+  await wait();
+  if (!documentStore.getState().sketches[sketchId]) {
+    throw new Error(`reattachSketch: unknown sketch ${sketchId}`);
+  }
+  let plane: SketchPlane;
+  if (target.kind === "world") {
+    plane = planeFor(target.plane);
+  } else {
+    const datum = documentStore.getState().datums[target.datumId];
+    if (!datum) throw new Error(`reattachSketch: unknown datum ${target.datumId}`);
+    if (!datum.resolvedValid) {
+      throw new Error(`reattachSketch: datum '${datum.name}' has an unresolved frame`);
+    }
+    plane = { ...datum.plane, kind: "custom" };
+  }
+  undoStack.push(snap("Reattach sketch"));
+  redoStack.length = 0;
+  lane.cacheSketchPlane(sketchId, plane);
+  mockAttachSketchToDatum(sketchId, target.kind === "datum" ? target.datumId : null);
+
+  // Rebuild every extrude standing on this sketch — this IS the "downstream
+  // regen" a reattach is for; without it the mock would report success and show
+  // nothing moving.
+  const changed: string[] = [];
+  for (const f of mockFeatures) {
+    const params = featureParams.get(f.id);
+    const profile = params?.profile as { sketchId?: string; regionId?: string } | undefined;
+    const bodyId = featureBodies.get(f.id);
+    if (f.opType !== "Extrude" || !bodyId || profile?.sketchId !== sketchId) continue;
+    const distance = scalarValue(params?.distance as unknown);
+    if (distance === undefined) continue;
+    const resolved = lane.resolveExtrudeInput(profile.sketchId, profile.regionId);
+    syntheticBodies.set(bodyId, makeExtrudeBodyMesh(resolved.profile, resolved.plane, distance));
+    changed.push(bodyId);
+  }
+  mockRevision += 1;
+  const res: ApplyOperationResult = {
+    revision: mockRevision,
+    changedBodies: changed.map(bodyRef),
+    removedBodies: [],
+    features: mockFeatures.map(cloneFeature),
+    opLabel: "Reattach Sketch",
+  };
+  emitMockDocumentChanged({
+    revision: res.revision,
+    changedBodies: res.changedBodies,
+    removedBodies: [],
+  });
+  return withCursor(res);
 }
 
 function noopResult(): ApplyOperationResult {
@@ -1505,6 +1644,9 @@ export function resetMockDocument(): void {
   maskedBodies.clear();
   featureBodies.clear();
   featureParams.clear();
+  for (const [id, params] of Object.entries(MOCK_SEEDED_SKETCH_PARAMS)) {
+    featureParams.set(id, { ...params });
+  }
   featureTouched.clear();
   lane.resetPreview();
   mockFeatures = MOCK_BASE_FEATURES.map(cloneFeature);
@@ -1848,6 +1990,14 @@ export const mockClient: CadClient = {
     return JSON.parse(JSON.stringify(params)) as Record<string, unknown>;
   },
 
+  async featureDependencies(featureId: string): Promise<FeatureDependencies> {
+    await wait();
+    if (!mockFeatures.some((f) => f.id === featureId)) {
+      throw new Error(`feature_dependencies: unknown record ${featureId}`);
+    }
+    return mockFeatureDependencies(featureId);
+  },
+
   // ── Model operations (SCHEMA §7.3) — the mock's local document model ───────
 
   applyOperation(op: OperationOp): Promise<ApplyOperationResult> {
@@ -1951,6 +2101,7 @@ export const mockClient: CadClient = {
     // phantom blocker that makes the datum permanently undeletable.
     mockAttachSketchToDatum(id, null);
   },
+  reattachSketch: mockReattachSketch,
   beginGesture: lane.beginGesture,
   solveDrag: lane.solveDrag,
   endGesture: lane.endGesture,

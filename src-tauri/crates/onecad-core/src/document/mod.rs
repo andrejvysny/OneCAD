@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use crate::document::body::BodyRegistry;
 use crate::document::datum::DatumPlane;
 use crate::document::element_index::ElementIndex;
-use crate::document::record::OperationRecord;
+use crate::document::record::{KnownOperation, Operation, OperationRecord};
 use crate::document::refs::Extra;
 use crate::document::repair::RepairState;
 use crate::document::variables::{Unit, VariableTable};
@@ -174,6 +174,40 @@ impl Document {
     /// Sets a sketch's visibility override.
     pub fn set_sketch_visible(&mut self, id: SketchId, visible: bool) {
         self.sketch_visibility.insert(id, visible);
+    }
+
+    /// The earliest timeline step a change to sketch `id` invalidates (F4), or
+    /// `None` when the timeline neither produces nor consumes it (a document sketch
+    /// that never became geometry — a metadata-only change).
+    ///
+    /// It is the lower of:
+    /// * the index of a `Sketch` op **producing** `id` — that op's own regen re-runs
+    ///   region detection worker-side, so an edit must dirty from the producer, not
+    ///   merely from the first op consuming a region; and
+    /// * the first op **consuming** `id` as an input.
+    ///
+    /// The **earliest** producer is taken, not
+    /// [`DependencyGraph::sketch_producer`](crate::history::DependencyGraph::sketch_producer)'s
+    /// most-recent one: a dirty floor must cover every step the change can move, and
+    /// a floor that is too low only costs replay. This is the single answer shared by
+    /// the edit lane (`sketch_dirty_outcome`) and the undo lane
+    /// ([`Inverse::dirty_floor`](crate::edit::Inverse::dirty_floor)) — they must not
+    /// disagree about which step a sketch change dirties.
+    #[must_use]
+    pub fn sketch_dirty_step(&self, id: SketchId) -> Option<usize> {
+        let records = self.timeline.records();
+        let producer = records.iter().position(|r| {
+            matches!(&r.op,
+                Operation::Known(KnownOperation::Sketch(p)) if p.sketch == id)
+        });
+        let consumer = records
+            .iter()
+            .position(|r| r.op.derive_inputs().sketches.contains(&id));
+        match (producer, consumer) {
+            (Some(p), Some(c)) => Some(p.min(c)),
+            (Some(s), None) | (None, Some(s)) => Some(s),
+            (None, None) => None,
+        }
     }
 }
 
