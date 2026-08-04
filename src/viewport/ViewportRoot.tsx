@@ -34,6 +34,7 @@ import {
 import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { createClient } from "@/ipc/client";
+import { promoteOne } from "@/ipc/promote";
 import {
   emitMockDocumentChanged,
   mockMeshKey,
@@ -92,24 +93,21 @@ export function refFromModelHits(
 /**
  * Promote a face/edge pick to a persistent Rust-minted ElementId (SCHEMA §7.5)
  * and write it back onto the still-selected ref. Fire-and-forget; a failed / stale
- * promotion leaves the transient topoKey ref intact (the tool falls back to it).
+ * promotion leaves the transient topoKey ref intact (the tool falls back to it)
+ * and `promoteOne` hints that the pick is out of date.
  */
 function promotePick(client: ReturnType<typeof createClient>, ref: EntityRef): void {
   if ((ref.kind !== "face" && ref.kind !== "edge") || !ref.bodyId || !ref.topoKey) return;
   const pick = { topoKey: ref.topoKey, anchor: ref.anchor ? { worldPoint: ref.anchor.worldPoint } : undefined };
-  void client
-    .promoteSelection(ref.bodyId, [pick])
-    .then((promoted) => {
-      const elementId = promoted.find((p) => p.topoKey === ref.topoKey)?.elementId;
-      if (!elementId) return;
-      const sel = selectionStore.getState();
-      // Only if the ref is still selected (selection may have moved on).
-      if (!sel.selected.some((r) => r.id === ref.id)) return;
-      sel.set(sel.selected.map((r) => (r.id === ref.id ? { ...r, elementId } : r)));
-    })
-    .catch(() => {
-      // Promotion failed (no snapshot / worker error) — keep the topoKey ref.
-    });
+  void promoteOne(client, ref.bodyId, pick).then((promoted) => {
+    if (!promoted) return;
+    const sel = selectionStore.getState();
+    // Only if the ref is still selected (selection may have moved on).
+    if (!sel.selected.some((r) => r.id === ref.id)) return;
+    sel.set(
+      sel.selected.map((r) => (r.id === ref.id ? { ...r, elementId: promoted.elementId } : r)),
+    );
+  });
 }
 
 // Faint 45° hatch behind the placeholder (prototype 1c) — fallback only.

@@ -575,3 +575,279 @@ async fn roll_to_current_row_is_a_full_noop() {
     wm.shutdown().await;
     eprintln!("ROLLBACK-LANE PASS: redundant roll = no regen/undo/eviction; real roll keeps ckpts");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (f) HISTORY-HARDEN H7a: authoring a fresh feature while rolled back must land
+//     AT THE CURSOR (mid-history) and regenerate — not join the timeline PAST the
+//     cursor as a permanently-inert draft (the "rolled-back-append trap").
+//
+// Red-first: the exact same setup, but with `at_cursor:false` (the pre-H7a FE
+// behavior — `operationToEditCommand` always sent `atCursor: false`) reproduces
+// the trap: the new record lands at the TAIL, past a pre-existing draft, and
+// `RegenHint::None` means it never regenerates — dead geometry with no visual
+// signal. `at_cursor:true` (the fix) lands the record at the rollback bar,
+// advances the cursor over it, and the follow-up regen PUBLISHES its geometry,
+// while the pre-existing draft (pushed one slot further down) stays a draft —
+// the fix does not silently resurrect unrelated rolled-back ops.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SKETCH_C: u128 = 0xC00;
+const SKETCH_D: u128 = 0xD00;
+const EXTRUDE_D: u128 = 0xD01;
+const SKETCH_E: u128 = 0xE00;
+const EXTRUDE_E: u128 = 0xE01;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn add_operation_at_cursor_after_rollback_lands_mid_history_not_tail() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+
+    // ── RED: at_cursor:false (pre-H7a) reproduces the trap ─────────────────────
+    {
+        let wm = spawn_worker(bin.clone()).await;
+        let (runtime, sched, mut rx) = wire(&wm).await;
+
+        // op1+op2: box A, at the frontier.
+        let outcome = commit_box(&runtime, SKETCH_A, EXTRUDE_A, 0xA, 0.0, 40.0, 20.0).await;
+        sched.handle(&outcome);
+        let (s, _, _) = recv(&mut rx).await;
+        assert_eq!(s, "published", "box A commit published");
+
+        // op3: a bare 3rd sketch, still at the frontier — the record that will end
+        // up as a pre-existing draft once the roll below moves the bar behind it.
+        let sid_c = SketchId(Uuid::from_u128(0xC));
+        let outcome = apply(
+            &runtime,
+            EditCommand::AddOperation {
+                record: sketch_record(
+                    SKETCH_C,
+                    &rect_sketch(sid_c, 0xC << 8, 0.0, 100.0, 10.0, 10.0),
+                ),
+                at_cursor: false,
+            },
+        )
+        .await;
+        sched.handle(&outcome);
+        let _ = recv(&mut rx).await; // drain — this op's own regen is not under test.
+
+        // Roll back to mid: box A stays applied (cursor=2); the 3rd sketch (op3)
+        // falls beyond the bar and becomes a draft.
+        let outcome = apply(&runtime, EditCommand::SetRollback { cursor: 2 }).await;
+        sched.handle(&outcome);
+        let (s, _, proj) = recv(&mut rx).await;
+        assert_eq!(s, "published", "roll to mid republishes box A only");
+        assert_eq!(proj.applied_ops, 2, "cursor sits mid-history");
+        assert_eq!(
+            proj.total_ops, 3,
+            "the 3rd sketch is now a draft beyond the bar"
+        );
+
+        // THE TRAP: author a new box with at_cursor:false (the pre-H7a FE always
+        // sent this). Both records must join the timeline PAST the cursor.
+        let sid_e = SketchId(Uuid::from_u128(0xE));
+        let outcome = apply(
+            &runtime,
+            EditCommand::AddOperation {
+                record: sketch_record(
+                    SKETCH_E,
+                    &rect_sketch(sid_e, 0xE << 8, 200.0, 0.0, 10.0, 10.0),
+                ),
+                at_cursor: false,
+            },
+        )
+        .await;
+        assert_eq!(
+            outcome.regen,
+            RegenHint::None,
+            "TRAP: append past the cursor schedules NO regen"
+        );
+        let outcome2 = apply(
+            &runtime,
+            EditCommand::AddOperation {
+                record: extrude_record(EXTRUDE_E, sid_e, 10.0),
+                at_cursor: false,
+            },
+        )
+        .await;
+        assert_eq!(
+            outcome2.regen,
+            RegenHint::None,
+            "TRAP: the paired extrude also schedules no regen"
+        );
+        sched.handle(&outcome);
+        sched.handle(&outcome2);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1500), rx.recv())
+                .await
+                .is_err(),
+            "TRAP CONFIRMED: RegenHint::None enqueues nothing — the new box never regenerates"
+        );
+
+        let proj = {
+            let guard = runtime.lock().await;
+            guard.as_ref().expect("document open").projection()
+        };
+        assert_eq!(
+            proj.applied_ops, 2,
+            "TRAP: the cursor never advances past the pre-rollback bar"
+        );
+        assert_eq!(
+            proj.total_ops, 5,
+            "5 records total: box A(2) + draft sketch(1) + the inert new box(2)"
+        );
+        let idx_new_sketch = proj
+            .features
+            .iter()
+            .position(|f| f.id == RecordId(Uuid::from_u128(SKETCH_E)).to_string())
+            .expect("the new sketch is in the projection");
+        assert_eq!(
+            idx_new_sketch, 3,
+            "TRAP: lands at the TAIL (index 3, after the pre-existing draft), not the cursor (index 2)"
+        );
+        assert!(
+            idx_new_sketch >= proj.applied_ops,
+            "TRAP: lands beyond appliedOps — this is exactly the FE's positional inert-draft predicate"
+        );
+
+        sched.shutdown();
+        wm.shutdown().await;
+        eprintln!("ROLLBACK-LANE RED: at_cursor:false append past a rolled-back cursor is inert (the trap)");
+    }
+
+    // ── GREEN: at_cursor:true (H7a fix) lands at the cursor and regenerates ────
+    {
+        let wm = spawn_worker(bin.clone()).await;
+        let (runtime, sched, mut rx) = wire(&wm).await;
+
+        let outcome = commit_box(&runtime, SKETCH_A, EXTRUDE_A, 0xA, 0.0, 40.0, 20.0).await;
+        sched.handle(&outcome);
+        let (s, _, _) = recv(&mut rx).await;
+        assert_eq!(s, "published", "box A commit published");
+
+        let sid_c = SketchId(Uuid::from_u128(0xC));
+        let outcome = apply(
+            &runtime,
+            EditCommand::AddOperation {
+                record: sketch_record(
+                    SKETCH_C,
+                    &rect_sketch(sid_c, 0xC << 8, 0.0, 100.0, 10.0, 10.0),
+                ),
+                at_cursor: false,
+            },
+        )
+        .await;
+        sched.handle(&outcome);
+        let _ = recv(&mut rx).await;
+
+        let outcome = apply(&runtime, EditCommand::SetRollback { cursor: 2 }).await;
+        sched.handle(&outcome);
+        let (s, _, proj) = recv(&mut rx).await;
+        assert_eq!(s, "published", "roll to mid republishes box A only");
+        assert_eq!(proj.applied_ops, 2, "cursor sits mid-history");
+        assert_eq!(
+            proj.total_ops, 3,
+            "the 3rd sketch is now a draft beyond the bar"
+        );
+
+        // THE FIX: author a new box with at_cursor:true (mirrors the H7a
+        // `operationToEditCommand` change — `atCursor: true`, unconditional).
+        let sid_d = SketchId(Uuid::from_u128(0xD));
+        let outcome = apply(
+            &runtime,
+            EditCommand::AddOperation {
+                record: sketch_record(
+                    SKETCH_D,
+                    &rect_sketch(sid_d, 0xD << 8, 200.0, 0.0, 10.0, 10.0),
+                ),
+                at_cursor: true,
+            },
+        )
+        .await;
+        assert_eq!(
+            outcome.regen,
+            RegenHint::ToEnd,
+            "FIX: insert at cursor schedules a regen"
+        );
+        sched.handle(&outcome);
+        let (s, _, proj_after_sketch) = recv(&mut rx).await;
+        assert_eq!(
+            s, "published",
+            "FIX: the mid-history insert actually regenerates and publishes"
+        );
+        assert_eq!(
+            proj_after_sketch.applied_ops, 3,
+            "cursor advances to cover exactly the new record"
+        );
+        assert_eq!(proj_after_sketch.total_ops, 4);
+        let idx_new_sketch = proj_after_sketch
+            .features
+            .iter()
+            .position(|f| f.id == RecordId(Uuid::from_u128(SKETCH_D)).to_string())
+            .expect("the new sketch is in the projection");
+        assert_eq!(
+            idx_new_sketch, 2,
+            "FIX: lands AT the cursor (index 2), not the tail"
+        );
+        assert!(
+            idx_new_sketch < proj_after_sketch.applied_ops,
+            "FIX: lands within appliedOps — not inert"
+        );
+
+        let outcome = apply(
+            &runtime,
+            EditCommand::AddOperation {
+                record: extrude_record(EXTRUDE_D, sid_d, 10.0),
+                at_cursor: true,
+            },
+        )
+        .await;
+        assert_eq!(
+            outcome.regen,
+            RegenHint::ToEnd,
+            "FIX: the paired extrude also schedules a regen"
+        );
+        sched.handle(&outcome);
+        let (s, change, proj_final) = recv(&mut rx).await;
+        assert_eq!(
+            s, "published",
+            "FIX: the extrude regenerates and PUBLISHES rebuilt geometry"
+        );
+        let change = change.expect("a published commit carries a document_change");
+        assert!(
+            !change.changed_bodies.is_empty(),
+            "FIX: a real body was rebuilt and published — the insert is NOT inert"
+        );
+        assert_eq!(
+            proj_final.applied_ops, 4,
+            "cursor now covers box A + the new box"
+        );
+        assert_eq!(
+            proj_final.total_ops, 5,
+            "5 records: box A(2) + the new box(2) + the still-draft 3rd sketch(1)"
+        );
+
+        // The pre-existing draft (3rd sketch) is pushed downstream by the insert —
+        // marked dirty, but stays a draft: the fix must not silently resurrect it.
+        let idx_draft = proj_final
+            .features
+            .iter()
+            .position(|f| f.id == RecordId(Uuid::from_u128(SKETCH_C)).to_string())
+            .expect("the pre-existing draft is still in the projection");
+        assert_eq!(
+            idx_draft, 4,
+            "the pre-existing draft is pushed one slot further down by the insert"
+        );
+        assert!(
+            idx_draft >= proj_final.applied_ops,
+            "the pre-existing draft remains beyond the cursor — untouched by the fix"
+        );
+
+        sched.shutdown();
+        wm.shutdown().await;
+        eprintln!(
+            "ROLLBACK-LANE GREEN: at_cursor:true lands at the cursor mid-history and regenerates (H7a fix)"
+        );
+    }
+}

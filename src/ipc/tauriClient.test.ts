@@ -18,6 +18,7 @@ import { operationToEditCommand } from "./tauriCommandMap";
 import { makeBoxMesh } from "./mockMeshes";
 import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
 import { documentStore, emptyDocument, seedMockDocument } from "@/stores/documentStore";
+import { viewportStore } from "@/stores/viewportStore";
 import { __resetLogForTests, logSnapshot } from "@/debug/log";
 import type { DocumentChange, OperationOp } from "./types";
 
@@ -40,6 +41,8 @@ afterEach(() => {
   delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   // Reset the shared projection store (the hydration test writes it).
   documentStore.getState().applySnapshot(seedMockDocument());
+  // Reset the shared status-hint store (the H7a mid-history insert hint writes it).
+  viewportStore.getState().setStatusHint(null);
 });
 
 /** A full SketchPlane payload (XZ) an `enter_sketch` mock returns. */
@@ -970,7 +973,10 @@ describe("operationToEditCommand", () => {
     });
     expect(cmd.cmd).toBe("addOperation");
     if (cmd.cmd !== "addOperation") throw new Error("unreachable");
-    expect(cmd.atCursor).toBe(false);
+    // H7a: author AT the cursor, unconditionally — a frontier commit is a no-op
+    // change (cursor === len), a rolled-back one lands mid-history instead of
+    // appending past the bar as a permanently-inert draft.
+    expect(cmd.atCursor).toBe(true);
     expect(cmd.record.recordId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     expect(cmd.record.opType).toBe("Extrude");
     const p = cmd.record.params as unknown as Record<string, unknown>;
@@ -1873,11 +1879,23 @@ describe("tauriClient regen-finished correlation", () => {
     expect(res.errorMessage).toBeUndefined();
   });
 
-  it("resolves immediately (no 8s stall) when a fresh op appends a draft while rolled back (finding 4)", async () => {
+  it("resolves immediately (no 8s stall) when a fresh op lands PAST the cursor — the positional trap fallback (finding 4 / H7a)", async () => {
+    // A tail draft (idx >= appliedOps) fires NO regen events. This is the
+    // POSITIONAL check (H7a): the record itself must sit at/beyond appliedOps in
+    // `features`, not merely "some appliedOps<totalOps gap exists somewhere" —
+    // a count-only check would also misfire on a legitimate mid-history insert
+    // that coexists with OTHER unrelated drafts (see the sibling test below).
+    let recordId = "";
     mockIPC(
-      (cmd) => {
-        // A draft append fires NO regen events; appliedOps < totalOps flags it.
-        if (cmd === "apply_edit_command") return { ...(readyProjection(5) as object), appliedOps: 2, totalOps: 3 };
+      (cmd, payload) => {
+        if (cmd === "apply_edit_command") {
+          recordId = (payload as { command: { record: { recordId: string } } }).command.record.recordId;
+          return {
+            ...(readyProjection(5, [{ id: "f0" }, { id: "f1" }, { id: recordId }]) as object),
+            appliedOps: 2,
+            totalOps: 3,
+          };
+        }
       },
       { shouldMockEvents: true },
     );
@@ -1888,6 +1906,34 @@ describe("tauriClient regen-finished correlation", () => {
     expect(res.changedBodies).toEqual([]);
     expect(res.errorMessage).toMatch(/rolled back/);
     expect(res.revision).toBe(5);
+  });
+
+  it("does NOT treat a mid-history insert as inert (idx < appliedOps) and hints where it landed (H7a)", async () => {
+    // The H7a-fixed record lands INSIDE the applied prefix (idx=2 < appliedOps=3)
+    // even though an UNRELATED pre-existing draft still sits beyond the cursor
+    // (totalOps=4) — a count-only `appliedOps < totalOps` check would wrongly
+    // flag this commit as inert; the positional check must not.
+    let recordId = "";
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "apply_edit_command") {
+          recordId = (payload as { command: { record: { recordId: string } } }).command.record.recordId;
+          return {
+            ...(readyProjection(5, [{ id: "f0" }, { id: "f1" }, { id: recordId }, { id: "unrelated-draft" }]) as object),
+            appliedOps: 3,
+            totalOps: 4,
+          };
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    __setRegenTimeoutForTests(300); // short: no regen-finished/document-changed follows — must not error
+    const res = await createTauriClient().applyOperation(op);
+    expect(res.errorMessage).toBeUndefined();
+    expect(res.revision).toBe(5);
+    expect(viewportStore.getState().statusHint?.message).toBe(
+      "Inserted at step 3 of 4 — roll to end to rebuild later features",
+    );
   });
 });
 

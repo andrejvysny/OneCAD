@@ -37,6 +37,7 @@ import type {
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import { buildAddDatumPlane, updateScalarParamsCommand } from "@/ipc/tauriCommandMap";
 import { mintUuid } from "@/ipc/sketchWireMap";
+import { promoteOne } from "@/ipc/promote";
 import { toFeatureMeta } from "@/ipc/projectionHydration";
 import { setSketchVisible } from "@/features/tree/treeActions";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
@@ -933,11 +934,14 @@ export class ModelToolController {
 
     let elementId = ref.elementId;
     if (!elementId && ref.topoKey) {
-      const promoted = await this.client
-        .promoteSelection(bodyId, [{ topoKey: ref.topoKey, anchor: ref.anchor }])
-        .catch(() => null);
+      // A refused promotion (stale snapshot) hints and leaves `elementId` unset —
+      // the topoKey rung below still answers for a fresh pick (see `promoteOne`).
+      const promoted = await promoteOne(this.client, bodyId, {
+        topoKey: ref.topoKey,
+        anchor: ref.anchor,
+      });
       if (gen !== this.measureGen) return; // disarmed / re-armed mid-await
-      elementId = promoted?.[0]?.elementId;
+      elementId = promoted?.elementId;
     }
     if (!elementId && !ref.topoKey) return;
 
@@ -1391,12 +1395,15 @@ export class ModelToolController {
     const gen = this.armGen;
     const worldTriple: [number, number, number] = [hit.worldPos.x, hit.worldPos.y, hit.worldPos.z];
     let elementId = hit.elementId;
+    let stale = false;
     if (!elementId && hit.topoKey) {
-      const promoted = await this.client
-        .promoteSelection(hit.bodyId, [{ topoKey: hit.topoKey, anchor: { worldPoint: worldTriple } }])
-        .catch(() => null);
+      const promoted = await promoteOne(this.client, hit.bodyId, {
+        topoKey: hit.topoKey,
+        anchor: { worldPoint: worldTriple },
+      });
       if (gen !== this.armGen) return; // re-armed while awaiting — drop
-      elementId = promoted?.[0]?.elementId;
+      elementId = promoted?.elementId;
+      stale = promoted === null;
     }
     if (this.extrude.phase !== "facePick") return;
     const ref: SemanticRef = {
@@ -1405,7 +1412,9 @@ export class ModelToolController {
     };
     this.extrude = extrudeStep(this.extrude, { kind: "pickFace", ref }).state;
     this.engine.setOrbitSuppressed(false);
-    viewportStore.getState().setStatusHint(this.armHintFor("extrude"), { sticky: true });
+    // A refused promotion leaves the target on its anchor alone — degraded, not
+    // aborted — so `promoteOne`'s hint must not be overwritten by the arm hint.
+    if (!stale) viewportStore.getState().setStatusHint(this.armHintFor("extrude"), { sticky: true });
     this.sendPreview();
     this.updateDebug();
   }
@@ -3165,12 +3174,15 @@ export class ModelToolController {
 
     const gen = ++this.armGen;
     let elementId = hit.elementId;
+    let stale = false;
     if (!elementId && hit.topoKey) {
-      const promoted = await this.client
-        .promoteSelection(hit.bodyId, [{ topoKey: hit.topoKey, anchor: { worldPoint: point } }])
-        .catch(() => null);
+      const promoted = await promoteOne(this.client, hit.bodyId, {
+        topoKey: hit.topoKey,
+        anchor: { worldPoint: point },
+      });
       if (gen !== this.armGen) return; // re-armed while awaiting — drop
-      elementId = promoted?.[0]?.elementId;
+      elementId = promoted?.elementId;
+      stale = promoted === null;
     }
     if (toolStore.getState().modelTool !== "hole") return;
     const face: SemanticRef = {
@@ -3185,7 +3197,9 @@ export class ModelToolController {
       point,
     }).state;
     this.showHoleChip();
-    viewportStore.getState().setStatusHint(HOLE_ARMED_HINT, { sticky: true });
+    // A refused promotion leaves the seat on its anchor alone — degraded, not
+    // aborted — so `promoteOne`'s hint must not be overwritten by the arm hint.
+    if (!stale) viewportStore.getState().setStatusHint(HOLE_ARMED_HINT, { sticky: true });
     this.previewArmHint = this.holeEditFeatureId ? null : HOLE_ARMED_HINT;
     this.updateDebug();
     // A re-edit runs L1-only: PreviewOp executes against the CURRENT head, so

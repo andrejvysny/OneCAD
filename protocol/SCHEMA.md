@@ -1470,6 +1470,12 @@ Promotes snapshot-scoped TopoKeys to persistent, globally-unique `ElementId`s
 { "ids": [ { "topoKey": "f:22", "elementId": "el_00000000000004a1", "kind": "face" } ] }
 ```
 
+A `snapshotId` that is present and does not equal the worker's current head
+snapshot MUST be refused with `REF_UNRESOLVED` (a `TopoKey` is snapshot-scoped
+evidence ([§9](#9-needsrepair-payload)), so promoting a pick taken against a
+superseded snapshot would mint a persistent id for an arbitrary element); an
+absent `snapshotId` is "no claim" and is resolved against the head.
+
 Note: `elementId` is **minted by Rust**, not the worker — the worker returns the
 resolved `topoKey → (kind, descriptor, anchor)` binding and Rust assigns/echoes
 the persistent id it owns. When Rust already holds an id for that stable element,
@@ -2075,6 +2081,24 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-04 — §7.5 `AcquireElementIds` MUST refuse a stale `snapshotId`**
+  (HISTORY-HARDEN H4, VF-M3; cross-track sign-off recorded in `TODO.md` by the
+  HISTORY-HARDEN H4 gate). **Additive semantics on an existing field — no wire
+  shape change.** `snapshotId` has always ridden in the request and was ignored by
+  the worker; it now gates the verb: present-and-not-head ⇒ `REF_UNRESOLVED`
+  (`detail: {requested, head}`), absent ⇒ unchanged behaviour. Rationale: a
+  `TopoKey` is a 1-based ordinal into `TopExp::MapShapes`, so a pick captured before
+  a regen names a *different* face after it; resolving it anyway minted a
+  persistent, op-referencable id for geometry the user never picked — the H5-B
+  silent-wrong-bind class. Rust holds the primary gate (`DocumentRuntime::
+  promote_selection` refuses against its own published head, skipping the check
+  when the head is `0` — a cleared document publishes no worker snapshot id); the
+  worker's is defense-in-depth for a drifted head.
+  **No fixture bump.** No shape, signature or id moves; every existing caller
+  already sends the head id (`worker/tests/fixtures/tessellate_acquire.ndjson`
+  sends `snapshotId:1` against head `1`), and the NDJSON fixtures are subset
+  matchers, so no golden file changed.
 
 - **2026-08-03 — §7.2 ADDITIVE `bodyEvents[].rankKey` + §9 `reason:
   "ordinal-permutation"`** (WP-FIX W5, VF-B6; cross-track sign-off recorded in

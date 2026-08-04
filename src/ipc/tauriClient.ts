@@ -650,31 +650,56 @@ export function createTauriClient(): CadClient {
       traceWarn("ipc", `applyEdit: cmd=${cmd} record=${recordId ?? "none"} invoke THREW`, e);
       throw e;
     }
-    // Finding 4: a fresh op appended while the timeline is rolled back joins the
-    // timeline as a DRAFT beyond the rollback bar (appliedOps < totalOps) — no regen
-    // fires for it, so waiting would stall on the safety timeout. Detect it from the
-    // returned projection and resolve immediately as a (soft) failure the controller
-    // surfaces.
-    if (
-      recordId !== undefined &&
-      typeof projection.appliedOps === "number" &&
-      typeof projection.totalOps === "number" &&
-      projection.appliedOps < projection.totalOps
-    ) {
-      awaiter.cancel();
-      traceWarn(
-        "ipc",
-        `applyEdit: cmd=${cmd} record=${recordId ?? "none"} added while ROLLED BACK ` +
-          `(appliedOps=${projection.appliedOps}/${projection.totalOps}) — no regen fires`,
-      );
-      return {
-        revision: projection.revision,
-        changedBodies: [],
-        removedBodies: [],
-        features: projection.features,
-        opLabel,
-        errorMessage: "Operation added while history is rolled back — roll forward to apply",
-      };
+    // Finding 4 / H7a: a fresh op joins the timeline AT the rollback cursor
+    // (`atCursor: true`, unconditional — see `operationToEditCommand`), so under
+    // normal operation it lands inside the applied prefix and regenerates. The
+    // POSITIONAL check below (not a count comparison) is what actually decides
+    // "inert": a count-only check (`appliedOps < totalOps`) would also fire for
+    // this record's own legitimate mid-history insert, since a rolled-back
+    // document still has OTHER (unrelated, pre-existing) drafts beyond the new
+    // cursor — that count staying nonzero is expected and must not be reported
+    // as this commit's failure. Only THIS record's own index relative to
+    // appliedOps tells whether it landed inside the applied prefix (regenerates)
+    // or past it (permanently inert — a safety net; should not occur once every
+    // authoring path sends atCursor:true, but a stale build or a future
+    // append-based caller must still be caught here rather than stall on the
+    // regen-correlation timeout).
+    if (recordId !== undefined) {
+      const idx = projection.features.findIndex((f) => f.id === recordId);
+      const appliedOps = projection.appliedOps;
+      const inert = idx >= 0 && typeof appliedOps === "number" && idx >= appliedOps;
+      if (inert) {
+        awaiter.cancel();
+        traceWarn(
+          "ipc",
+          `applyEdit: cmd=${cmd} record=${recordId ?? "none"} added PAST the cursor ` +
+            `(index=${idx}, appliedOps=${appliedOps}) — no regen fires`,
+        );
+        return {
+          revision: projection.revision,
+          changedBodies: [],
+          removedBodies: [],
+          features: projection.features,
+          opLabel,
+          errorMessage: "Operation added while history is rolled back — roll forward to apply",
+        };
+      }
+      // A commit that landed INSIDE the applied prefix but with drafts still
+      // beyond it means the document was rolled back when it was authored (a
+      // frontier commit always leaves appliedOps === totalOps). It is NOT inert
+      // — it regenerates normally — but "added a feature and nothing visibly
+      // changed at the end of the tree" reads as a no-op without this hint.
+      if (
+        idx >= 0 &&
+        typeof appliedOps === "number" &&
+        typeof projection.totalOps === "number" &&
+        appliedOps < projection.totalOps
+      ) {
+        viewportStore.getState().setStatusHint(
+          `Inserted at step ${idx + 1} of ${projection.totalOps} — roll to end to rebuild later features`,
+          { severity: "info" },
+        );
+      }
     }
     // Correlate the regen against THIS commit's post-apply revision R (exact under
     // rapid commits — see the awaiter table). Synchronous right after the await, so

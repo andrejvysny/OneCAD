@@ -1,6 +1,8 @@
 // ElementIdentity.cpp — see ElementIdentity.h. SCHEMA §7.5.
 #include "session/ElementIdentity.h"
 
+#include <cmath>
+#include <cstdint>
 #include <optional>
 #include <string>
 
@@ -31,6 +33,30 @@ const em::PartitionEntry* entry_by_topokey(const em::ElementMapPartition& part,
     return nullptr;
 }
 
+// Anchor-fallback sanity bound (VF-M3). `nearest_subshape` ranks candidates by
+// distance to their bbox CENTRE and always returns the least-bad one, so a pick
+// whose world point missed the body entirely still bound *something* — and that
+// something got a persistent, op-referencable ElementId.
+//
+// The bound must be RELATIVE to the winner's own size, not absolute: a corner hit
+// on a large planar face is legitimately far from that face's centre, so a fixed
+// tolerance would drop exactly the picks the fallback exists to serve. Both the
+// pick point and the whole candidate live inside the candidate's AABB whenever the
+// pick is real, so the STRICT bound is half the bbox diagonal (`descriptor.size`).
+// `kAnchorSlack = 1.0` doubles that — enough slack for a ray that lands slightly
+// off-surface and for the quantized descriptor centre, while still rejecting a
+// miss by a body-width. `kAnchorFloorMm` keeps a degenerate candidate (a vertex,
+// whose bbox diagonal is 0) pickable at all.
+constexpr double kAnchorSlack = 1.0;
+constexpr double kAnchorFloorMm = 1.0;
+
+bool anchor_within_candidate(const TopoDS_Shape& candidate, double wx, double wy, double wz) {
+    const em::km::ElementDescriptor d = em::ElementMapPartition::describe(candidate);
+    const double dx = d.center.X() - wx, dy = d.center.Y() - wy, dz = d.center.Z() - wz;
+    const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+    return dist <= kAnchorSlack * d.size + kAnchorFloorMm;
+}
+
 // Resolve a pick's shape: topoKey (explicit), else anchor.worldPoint nearest.
 TopoDS_Shape resolve_pick(const TopoDS_Shape& body, const json& pick, em::km::ElementKind& kind_out,
                           std::string& topo_out) {
@@ -56,9 +82,13 @@ TopoDS_Shape resolve_pick(const TopoDS_Shape& body, const json& pick, em::km::El
         em::km::ElementKind kind = em::ElementMapPartition::kind_from_name(kstr);
         if (kind == em::km::ElementKind::Unknown) kind = em::km::ElementKind::Face;
         const json& wp = pick["anchor"]["worldPoint"];
-        TopoDS_Shape s = em::ElementMapPartition::nearest_subshape(
-            body, kind, wp[0].get<double>(), wp[1].get<double>(), wp[2].get<double>());
-        if (!s.IsNull()) {
+        const double wx = wp[0].get<double>(), wy = wp[1].get<double>(), wz = wp[2].get<double>();
+        TopoDS_Shape s = em::ElementMapPartition::nearest_subshape(body, kind, wx, wy, wz);
+        // Deliberately NOT routed through the §10 descriptor ladder's 0.85 gate: the
+        // ladder scores a REMEMBERED descriptor against candidates, while this pick
+        // carries only a world point, and a corner hit would score far below 0.85 on
+        // its own face. The proportional veto is the right shape of test here.
+        if (!s.IsNull() && anchor_within_candidate(s, wx, wy, wz)) {
             kind_out = kind;
             topo_out = em::ElementMapPartition::topokey_for_shape(body, s, kind);
             return s;
@@ -71,6 +101,26 @@ TopoDS_Shape resolve_pick(const TopoDS_Shape& body, const json& pick, em::km::El
 
 Envelope handle_acquire_element_ids(Session& session, const Envelope& req) {
     const json& args = req.args;
+    // SCHEMA §7.5: a TopoKey is snapshot-scoped evidence, so a pick naming a
+    // snapshot that is no longer the head addresses ordinals of a shape that no
+    // longer exists — binding it would mint a persistent id for an arbitrary face
+    // (VF-M3). Rust gates this too; this is the defense-in-depth half, and the only
+    // one that holds when Rust's head and the worker's have drifted apart. An
+    // ABSENT snapshotId is "no claim" and is tolerated.
+    if (args.contains("snapshotId") && args["snapshotId"].is_number_unsigned()) {
+        const std::uint64_t requested = args["snapshotId"].get<std::uint64_t>();
+        const std::uint64_t head = session.current_snapshot_id();
+        if (requested != head) {
+            return Envelope::error_response(
+                req.id,
+                protocol::ErrorInfo{"REF_UNRESOLVED",
+                                    "AcquireElementIds: pick was taken against snapshot " +
+                                        std::to_string(requested) + "; head is " +
+                                        std::to_string(head) + " — re-pick",
+                                    /*retriable=*/false,
+                                    json{{"requested", requested}, {"head", head}}});
+        }
+    }
     const std::string body_id = get_str(args, "bodyId");
     const BodyStore bodies = session.bodies_copy();
     const em::ElementMapPartition part = session.partition_copy();

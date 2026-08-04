@@ -136,6 +136,13 @@ add_executable(test_cross_body_element_ref test_cross_body_element_ref.cpp)
 target_link_libraries(test_cross_body_element_ref PRIVATE worker_core)
 add_test(NAME cross_body_element_ref COMMAND test_cross_body_element_ref)
 
+# --- HISTORY-HARDEN H4 / VF-M3: `AcquireElementIds` refuses what it cannot honestly
+#     resolve — a stale `snapshotId` (REF_UNRESOLVED) and an anchor fallback whose
+#     world point is nowhere near the candidate it "won". In-process, real OCCT. ---
+add_executable(test_element_identity_gate test_element_identity_gate.cpp)
+target_link_libraries(test_element_identity_gate PRIVATE worker_core)
+add_test(NAME element_identity_gate COMMAND test_element_identity_gate)
+
 # --- WP-B W0: `TransformBody` numerics (exact bbox/volume, the normative T∘R
 #     order, §2 copy ordinals) + the element-map placement migration
 #     (`apply_placement`: level-1 rebind with ZERO scoring, anchors moved by

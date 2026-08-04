@@ -316,6 +316,20 @@ pub struct SavePayload {
     meta: SaveMeta,
 }
 
+/// One entry of the promotion cache (see [`DocumentRuntime::promoted`]).
+///
+/// The `descriptor` is the worker's opaque evidence for the element as it stood in
+/// the snapshot the id was minted under — **evidence, never identity** (Invariant
+/// 2). It is what makes the cross-generation reuse rung sound: byte-equality of
+/// two descriptors is the only cheap proof that a `TopoKey` still names the same
+/// geometry after a regen.
+#[derive(Debug, Clone)]
+struct PromotionEntry {
+    element_id: ElementId,
+    kind: onecad_core::document::refs::ElementKind,
+    descriptor: Option<serde_json::Value>,
+}
+
 /// The per-document runtime (V1 single writer).
 pub struct DocumentRuntime {
     session: DocumentSession,
@@ -358,11 +372,18 @@ pub struct DocumentRuntime {
     sketch_session: Option<SketchSession>,
     /// Monotonic gesture id allocator (SCHEMA §7.4 `gestureId`).
     gesture_seq: u64,
-    /// Rust-owned promotion cache `(body, topoKey) → ElementId` so re-picking the
-    /// same element in a snapshot returns the **same** id (Invariant 1). The worker
-    /// only echoes ids it already holds; Rust owns id identity, so this map upholds
-    /// the invariant across `AcquireElementIds` calls.
-    promoted: HashMap<(BodyId, TopoKey), ElementId>,
+    /// Rust-owned promotion cache `(snapshot, body, topoKey) → `[`PromotionEntry`]
+    /// so re-picking the same element **within one snapshot** returns the same id
+    /// (Invariant 1). The worker only echoes ids it already holds; Rust owns id
+    /// identity, so this map upholds the invariant across `AcquireElementIds` calls.
+    ///
+    /// **The `SnapshotId` in the key is the VF-M4 fix.** A `TopoKey` is a 1-based
+    /// ordinal into `TopExp::MapShapes` — snapshot-scoped evidence, never identity
+    /// (SCHEMA §9). Keyed on `(body, topoKey)` alone the cache survived regen and
+    /// handed back a WRONG id (not merely a missing one) as soon as an edit
+    /// renumbered the ordinals: one face got two ids, or worse, two faces shared
+    /// one. Pruned to two generations by [`prune_promoted`](Self::prune_promoted).
+    promoted: HashMap<(SnapshotId, BodyId, TopoKey), PromotionEntry>,
     /// The regen checkpoint cache (SCHEMA §7.7). Populated by
     /// [`take_checkpoint_at_head`](Self::take_checkpoint_at_head) (policy: on explicit
     /// `save_document` only — the cheapest sound policy). [`begin_regen`](Self::begin_regen)
@@ -1167,8 +1188,14 @@ impl DocumentRuntime {
             &scratch.bodies,
             self.session.document(),
         );
+        let prev_snapshot = self.latest_snapshot.as_ref().map(|s| s.id);
         self.regen = scratch;
         self.latest_snapshot = Some(snap.clone());
+        // VF-M4: the promotion cache is snapshot-keyed, so a commit retires every
+        // generation but {this one, the one before it} — the window the
+        // descriptor-pinned reuse rung reads. Ordered AFTER the tripwire evaluate
+        // above, which must see the pre-swap mirror.
+        self.prune_promoted(snap.id, prev_snapshot);
         // The caller has already fenced (tokens unchanged since begin_regen), so the
         // live epoch IS the one this geometry was computed under.
         self.head_epoch = self.fencing.get().1;
@@ -2269,13 +2296,15 @@ impl DocumentRuntime {
     /// recorded in the document element partition index.
     ///
     /// # Errors
-    /// [`EngineError`] on a worker failure.
+    /// [`EngineError`] on a worker failure, or a recoverable `OpFailed` when the
+    /// pick was taken against a snapshot that is no longer the head (VF-M3).
     pub async fn promote_selection(
         &mut self,
         snapshot: SnapshotId,
         body: BodyId,
         picks: Vec<(TopoKey, Option<AnchorIntent>)>,
     ) -> Result<Vec<PromotedElementDto>, EngineError> {
+        self.gate_stale_pick(snapshot)?;
         let req = AcquireRequest {
             snapshot_id: snapshot,
             body,
@@ -2286,19 +2315,43 @@ impl DocumentRuntime {
         };
         let mut evidence = self.engine.acquire_element_ids(req).await?;
         // Rust owns id identity: seed `existing` from the promotion cache so a
-        // re-pick of the same (body, topoKey) reuses the id (Invariant 1).
+        // re-pick of the same (snapshot, body, topoKey) reuses the id (Invariant 1).
+        let prev_gen = self.previous_promotion_generation(snapshot);
         for e in &mut evidence {
-            if e.existing.is_none() {
-                if let Some(id) = self.promoted.get(&(e.body, e.topo_key.clone())) {
-                    e.existing = Some(id.clone());
+            if e.existing.is_some() {
+                continue;
+            }
+            if let Some(hit) = self.promoted.get(&(snapshot, e.body, e.topo_key.clone())) {
+                e.existing = Some(hit.element_id.clone());
+                continue;
+            }
+            // Cross-generation reuse (Invariant 1 across a regen) is DESCRIPTOR-PINNED.
+            // A regen that renumbers ordinals keeps the TopoKey and moves the geometry
+            // under it, so the key alone proves nothing; byte-equal worker evidence
+            // does. A false negative here just mints a fresh id — the safe direction
+            // (a new sketch instead of silently re-entering the wrong one).
+            if let Some(prev) = prev_gen {
+                if let Some(hit) = self.promoted.get(&(prev, e.body, e.topo_key.clone())) {
+                    if hit.kind == e.kind
+                        && hit.descriptor.is_some()
+                        && hit.descriptor == e.descriptor
+                    {
+                        e.existing = Some(hit.element_id.clone());
+                    }
                 }
             }
         }
         let minted = mint_element_ids(evidence);
         let mut out = Vec::with_capacity(minted.len());
         for (id, ev) in minted {
-            self.promoted
-                .insert((ev.body, ev.topo_key.clone()), id.clone());
+            self.promoted.insert(
+                (snapshot, ev.body, ev.topo_key.clone()),
+                PromotionEntry {
+                    element_id: id.clone(),
+                    kind: ev.kind,
+                    descriptor: ev.descriptor.clone(),
+                },
+            );
             // Record the partition binding into the (regen-mirror) element index.
             self.regen
                 .elements
@@ -2311,6 +2364,69 @@ impl DocumentRuntime {
             });
         }
         Ok(out)
+    }
+
+    /// Refuses a promotion whose pick was taken against a snapshot that is no
+    /// longer the head (VF-M3).
+    ///
+    /// A `TopoKey` is a 1-based ordinal into the snapshot's shape map, so the SAME
+    /// key names a DIFFERENT face once a regen renumbers the ordinals. Promoting it
+    /// anyway mints a persistent, op-referencable id for geometry the user never
+    /// picked — the H5-B defect class this whole migration exists to kill. A loud
+    /// recoverable refusal ("re-pick") is the only safe answer.
+    ///
+    /// **Skipped when there is no positive head.** `latest_snapshot` is `None`
+    /// before the first publish, and a document *clear* publishes `SnapshotId(0)`
+    /// (`drive_clear` — no `AcceptPrepared` happened, so there is no worker snapshot
+    /// id to address). The frontend only ever adopts a POSITIVE published id, so
+    /// gating on `0` would refuse every legitimate first pick.
+    ///
+    /// The code mirrors the worker's own refusal (`REF_UNRESOLVED`, SCHEMA §7.5) so
+    /// the two halves of the gate report the same thing; both surface to the
+    /// frontend as `ApiError::OpFailed`.
+    fn gate_stale_pick(&self, snapshot: SnapshotId) -> Result<(), EngineError> {
+        let Some(head) = &self.latest_snapshot else {
+            return Ok(());
+        };
+        if head.id == SnapshotId(0) || head.id == snapshot {
+            return Ok(());
+        }
+        Err(EngineError::OpFailed {
+            code: onecad_core::regen::OpFailureCode::RefUnresolved,
+            recoverable: true,
+            message: format!(
+                "pick was taken against snapshot {}; head is {} — re-pick",
+                snapshot.0, head.id.0
+            ),
+        })
+    }
+
+    /// The newest promotion-cache generation strictly older than `snapshot`, or
+    /// `None` when the cache holds nothing older.
+    ///
+    /// [`prune_promoted`](Self::prune_promoted) keeps at most two generations, so
+    /// this is the single "previous" generation the descriptor-pinned reuse rung in
+    /// [`promote_selection`](Self::promote_selection) consults. Derived from the
+    /// cache rather than tracked in a field so the two can never disagree.
+    fn previous_promotion_generation(&self, snapshot: SnapshotId) -> Option<SnapshotId> {
+        self.promoted
+            .keys()
+            .map(|(s, _, _)| *s)
+            .filter(|s| *s < snapshot)
+            .max()
+    }
+
+    /// Drops promotion-cache entries older than the `{current, previous}` snapshot
+    /// generations (VF-M4).
+    ///
+    /// Two generations is what the descriptor-pinned reuse rung needs and no more:
+    /// a promoted-but-unconsumed element older than that re-mints a FRESH id on the
+    /// next pick. That is the safe direction — a false negative creates a new sketch
+    /// instead of re-entering the wrong one — and it bounds a map that would
+    /// otherwise grow once per pick per snapshot for the life of the document.
+    fn prune_promoted(&mut self, current: SnapshotId, previous: Option<SnapshotId>) {
+        self.promoted
+            .retain(|(s, _, _), _| *s == current || Some(*s) == previous);
     }
 
     /// Dry-run ladder resolution for repair dialogs (SCHEMA §7.5 `ResolveRefs`) —

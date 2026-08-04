@@ -578,7 +578,12 @@ export function operationToEditCommand(op: OperationOp): WireEditCommand {
   return {
     cmd: "addOperation",
     record: { recordId: op.opId ?? mintRecordId(), ...committedOperation },
-    atCursor: false,
+    // H7a: author AT the rollback cursor, always — the core insert (verified
+    // byte-equivalent to frontier append when cursor==len, see
+    // Timeline::insert_at_cursor) makes a frontier edit a no-op change, and a
+    // rolled-back edit lands mid-history instead of joining the timeline PAST
+    // the cursor as a permanently-inert draft that never regenerates.
+    atCursor: true,
   };
 }
 

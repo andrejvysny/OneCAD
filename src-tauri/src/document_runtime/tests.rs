@@ -1479,6 +1479,69 @@ async fn promote_selection_mints_ids_and_is_stable() {
     );
 }
 
+/// VF-M3, the RUST half of the stale-pick gate, isolated from the worker's.
+///
+/// The real worker refuses a stale `snapshotId` too (SCHEMA §7.5), so a
+/// worker-backed test cannot tell the two gates apart. `FakeBackend` has no gate at
+/// all and resolves any pick it is handed — exactly the shape of every non-worker
+/// backend — so this pins that the refusal is Rust's own and does not depend on a
+/// round-trip.
+#[tokio::test]
+async fn promote_selection_refuses_a_pick_against_a_superseded_snapshot() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    rt.apply(add_extrude(0x10, 25.0)).unwrap();
+    let report = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    let head = report.snapshot_id;
+    assert!(
+        head > 0,
+        "the fake backend published a positive snapshot id"
+    );
+
+    let body = BodyId(Uuid::from_u128(0x10));
+    let stale = SnapshotId(head - 1);
+    let err = rt
+        .promote_selection(stale, body, vec![(TopoKey::new("f:22"), None)])
+        .await
+        .expect_err("a pick against a superseded snapshot must be refused");
+    match err {
+        EngineError::OpFailed {
+            recoverable,
+            ref message,
+            ..
+        } => {
+            assert!(recoverable, "a stale pick leaves the session editable");
+            assert!(
+                message.contains(&stale.0.to_string()) && message.contains(&head.to_string()),
+                "the refusal names both ids: {message}"
+            );
+        }
+        other => panic!("expected a recoverable OpFailed, got {other:?}"),
+    }
+
+    // The same pick at the head is accepted — the gate is about staleness only.
+    rt.promote_selection(SnapshotId(head), body, vec![(TopoKey::new("f:22"), None)])
+        .await
+        .expect("promote at the head");
+}
+
+/// The gate MUST NOT fire before there is a positive published head: `drive_clear`
+/// publishes `SnapshotId(0)` (no `AcceptPrepared` happened, so there is no worker
+/// snapshot id to address) and the frontend only ever adopts a POSITIVE id, so
+/// gating on `0` would refuse every legitimate first pick.
+#[tokio::test]
+async fn promote_selection_skips_the_gate_before_the_first_publish() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let body = BodyId(Uuid::from_u128(0xB0));
+    rt.promote_selection(SnapshotId(0), body, vec![(TopoKey::new("f:1"), None)])
+        .await
+        .expect("no published snapshot ⇒ nothing to be stale against");
+    rt.promote_selection(SnapshotId(9), body, vec![(TopoKey::new("f:1"), None)])
+        .await
+        .expect("still nothing to be stale against");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // get_operation_params (re-edit deep-merge source; Findings 3+4) + refId-only
 // resolve_refs hydration (Finding 2)

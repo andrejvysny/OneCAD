@@ -8,6 +8,7 @@
  * Errors surface through the StatusBar hint (viewportStore.setStatusHint).
  */
 import { createClient } from "@/ipc/client";
+import { promoteOne } from "@/ipc/promote";
 import {
   edgeElementRef,
   filletEdgeRebindCommand,
@@ -158,13 +159,13 @@ export async function rebindCandidate(
   const index = parseRefId(item.refId)?.index ?? 0;
   const client = createClient();
   try {
-    const [promoted] = await client.promoteSelection(bodyId, [
-      { topoKey: candidate.topoKey, anchor: { worldPoint: candidate.worldPos } },
-    ]);
-    if (!promoted) {
-      errorHint("Repair failed: could not promote candidate");
-      return false;
-    }
+    // `promoteOne` already hints when the candidate cannot be promoted (a stale
+    // snapshot / unresolvable pick), so this arm only has to stop the repair.
+    const promoted = await promoteOne(client, bodyId, {
+      topoKey: candidate.topoKey,
+      anchor: { worldPoint: candidate.worldPos },
+    });
+    if (!promoted) return false;
     const ref = edgeElementRef(promoted.bodyId, promoted.elementId, candidate.worldPos);
     const res = await client.applyEditCommand(filletEdgeRebindCommand(item.opId, index, ref));
     applyEditResult(res);
