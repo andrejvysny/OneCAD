@@ -88,7 +88,7 @@ The whole point of this migration is fixing the legacy stack's unfixed defect (H
 
 ### Frontend seams
 - **`src/ipc/client.ts` — `CadClient` is the single seam to the backend.** Two impls: `mockClient` (in-memory, drives the whole UI with no backend) and `tauriClient`. Selected at runtime by presence of `__TAURI_INTERNALS__`. Keep additions to the interface append-only so both evolve together.
-- **`src/ipc/localSolver.ts`** — the sketch-solver and drag-preview lanes are *shared by both clients* (the worker's gesture verbs aren't wired yet). Only `commit` differs, injected as a dependency. Don't duplicate lane logic into either client.
+- **`src/ipc/localSolver.ts`** — the sketch-solver and drag-preview lanes are *shared by both clients*: the mock runs the identical lane logic over a local identity solve, while the tauri client routes the same calls to the worker's live gesture verbs (SCHEMA §7.4 — `SketchUpsert`/`BeginGesture`/`SolveDrag`/`EndGesture` are fully wired). Only `commit` differs, injected as a dependency. Don't duplicate lane logic into either client.
 - **`src/ipc/angleUnits.ts`** — UI angle domain is **degrees**, wire domain is **radians**. Every deg↔rad conversion for a sketch dimension goes through this module; three marshalling sites depend on it agreeing (a past bug).
 - Stores are zustand, one per concern (`src/stores/`). Features under `src/features/`, tools/FSMs under `src/tools/`.
 

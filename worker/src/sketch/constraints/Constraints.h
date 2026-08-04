@@ -3,11 +3,11 @@
  * @file Constraints.h
  * @brief Concrete constraint implementations for sketch system
  *
- * This file defines constraint types supported in v1.0:
- * - Positional: Coincident, Horizontal, Vertical (TODO: Midpoint)
- * - Relational: Parallel, Perpendicular, Tangent, Equal (TODO: Concentric)
- * - Dimensional: Distance, Angle, Radius (TODO: Diameter)
- * - Symmetry: TODO: Symmetric about line
+ * This file defines the supported constraint types:
+ * - Positional: Coincident, Horizontal, Vertical, Midpoint
+ * - Relational: Parallel, Perpendicular, Tangent, Equal, Concentric
+ * - Dimensional: Distance, Angle, Radius, Diameter
+ * - Symmetry: Symmetric about line
  */
 
 #ifndef ONECAD_CORE_SKETCH_CONSTRAINTS_H

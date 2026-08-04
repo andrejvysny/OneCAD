@@ -7,10 +7,14 @@ import {
   inferPerpendicularPartner,
   inferParallelPartner,
   inferTangentPartner,
+  inferConcentricPartner,
+  inferEqualRadiusPartner,
   HV_TOLERANCE_RAD,
   PERPENDICULAR_TOLERANCE_RAD,
   PARALLEL_TOLERANCE_RAD,
   TANGENT_TOLERANCE_RAD,
+  CONCENTRIC_TOLERANCE,
+  EQUAL_RADIUS_TOLERANCE,
   entityPoints,
 } from "./autoConstrain";
 import type { SketchEntity } from "@/ipc/types";
@@ -104,6 +108,12 @@ describe("tolerances mirror AutoConstrainer.h (all 5°)", () => {
     expect(TANGENT_TOLERANCE_RAD).toBeCloseTo(fiveDeg);
     expect(HV_TOLERANCE_RAD).toBeCloseTo(fiveDeg);
   });
+  it("CONCENTRIC_TOLERANCE is 2.0mm (coincidenceTolerance, AutoConstrainer.h:61)", () => {
+    expect(CONCENTRIC_TOLERANCE).toBe(2.0);
+  });
+  it("EQUAL_RADIUS_TOLERANCE is 0.5mm (RADIUS_TOLERANCE, AutoConstrainer.cpp:699)", () => {
+    expect(EQUAL_RADIUS_TOLERANCE).toBe(0.5);
+  });
 });
 
 describe("inferPerpendicularPartner", () => {
@@ -146,6 +156,68 @@ describe("inferTangentPartner", () => {
   });
   it("rejects when the arc start is not on any line endpoint", () => {
     expect(inferTangentPartner([50, 60], [50, 50], refs)).toBeNull();
+  });
+});
+
+describe("inferConcentricPartner", () => {
+  it("exact hit (distance 0)", () => {
+    const refs = [{ id: "r1", center: [0, 0] as [number, number], radius: 5 }];
+    expect(inferConcentricPartner([0, 0], refs)).toBe("r1");
+  });
+  it("1.9mm hit (within CONCENTRIC_TOLERANCE)", () => {
+    const refs = [{ id: "r1", center: [1.9, 0] as [number, number], radius: 5 }];
+    expect(inferConcentricPartner([0, 0], refs)).toBe("r1");
+  });
+  it("2.0mm boundary MISS (strict <, verbatim AutoConstrainer::inferConcentric seeding)", () => {
+    const refs = [{ id: "r1", center: [2, 0] as [number, number], radius: 5 }];
+    expect(inferConcentricPartner([0, 0], refs)).toBeNull();
+  });
+  it("nearest-of-two wins", () => {
+    const refs = [
+      { id: "far", center: [1.8, 0] as [number, number], radius: 5 },
+      { id: "near", center: [0.5, 0] as [number, number], radius: 5 },
+    ];
+    expect(inferConcentricPartner([0, 0], refs)).toBe("near");
+  });
+  it("arc↔circle cross-type — the ref set carries no entity kind, only center/radius", () => {
+    const refs = [{ id: "existingArc", center: [5, 5] as [number, number], radius: 12 }];
+    expect(inferConcentricPartner([5, 5], refs)).toBe("existingArc");
+  });
+  it("ignores Line/Point references — only Circle/Arc feed the concentric ref set", () => {
+    const existingLine: SketchEntity = { id: "l1", type: "Line", p0: [10, 10], p1: [40, 10] };
+    const existingPoint: SketchEntity = { id: "p1", type: "Point", p0: [10, 10] };
+    const circle: SketchEntity = { id: "c1", type: "Circle", center: [10, 10], radius: 5 };
+    const cs = inferConstraints([circle], [existingLine, existingPoint], { nextConstraintId: ids() });
+    // The circle's center lands exactly on the line's Start and on the Point ⇒ Coincident,
+    // but neither is a Circle/Arc so there is no concentric partner to match against.
+    expect(cs.some((c) => c.type === "Concentric")).toBe(false);
+    expect(cs.some((c) => c.type === "Coincident")).toBe(true);
+  });
+});
+
+describe("inferEqualRadiusPartner", () => {
+  it("exact hit (Δr = 0)", () => {
+    const refs = [{ id: "r1", center: [0, 0] as [number, number], radius: 5 }];
+    expect(inferEqualRadiusPartner(5, refs)).toBe("r1");
+  });
+  it("0.4mm hit (within EQUAL_RADIUS_TOLERANCE)", () => {
+    const refs = [{ id: "r1", center: [0, 0] as [number, number], radius: 5.4 }];
+    expect(inferEqualRadiusPartner(5, refs)).toBe("r1");
+  });
+  it("0.5mm boundary MISS (strict <, verbatim AutoConstrainer::inferEqualRadius seeding)", () => {
+    const refs = [{ id: "r1", center: [0, 0] as [number, number], radius: 5.5 }];
+    expect(inferEqualRadiusPartner(5, refs)).toBeNull();
+  });
+  it("nearest-diff wins", () => {
+    const refs = [
+      { id: "far", center: [0, 0] as [number, number], radius: 5.3 },
+      { id: "near", center: [0, 0] as [number, number], radius: 5.1 },
+    ];
+    expect(inferEqualRadiusPartner(5, refs)).toBe("near");
+  });
+  it("arc↔circle cross-type — the ref set carries no entity kind, only center/radius", () => {
+    const refs = [{ id: "arcRef", center: [0, 0] as [number, number], radius: 5.2 }];
+    expect(inferEqualRadiusPartner(5, refs)).toBe("arcRef");
   });
 });
 
@@ -292,5 +364,71 @@ describe("inferConstraints — locked reference geometry participates", () => {
     const cs = inferConstraints([next], [refLine], opts());
     expect(cs.every((c) => !c.entities.includes("ref1") || c.type === "Coincident")).toBe(true);
     expect(cs.some((c) => c.type === "Horizontal" && c.entities[0] === "e2")).toBe(true);
+  });
+});
+
+// ── Concentric / Equal auto-constraint port (AutoConstrainer.cpp:645-742) ────
+
+describe("inferConstraints — Concentric / Equal", () => {
+  it("circle-over-circle emits Concentric then Equal", () => {
+    const existing: SketchEntity = { id: "e1", type: "Circle", center: [0, 0], radius: 10 };
+    const next: SketchEntity = { id: "e2", type: "Circle", center: [1, 1], radius: 10.2 }; // dist √2mm, Δr 0.2mm
+    const cs = inferConstraints([next], [existing], { nextConstraintId: ids() });
+    const concentric = cs.find((c) => c.type === "Concentric");
+    const equal = cs.find((c) => c.type === "Equal");
+    expect(concentric).toMatchObject({ entities: ["e2", "e1"] });
+    expect(equal).toMatchObject({ entities: ["e2", "e1"] });
+    expect(cs.indexOf(concentric!)).toBeLessThan(cs.indexOf(equal!));
+    expect(cs.some((c) => c.type === "Coincident")).toBe(false); // not exactly-snapped, no gate involved
+  });
+
+  it("arc path: Tangent, then Concentric, then Equal", () => {
+    const line: SketchEntity = { id: "L", type: "Line", p0: [0, 0], p1: [10, 0] };
+    // Center offset 1mm from the arc's (within CONCENTRIC_TOLERANCE, outside the
+    // tight Coincident snap tolerance) so Concentric fires without the gate tripping.
+    const circle: SketchEntity = { id: "C", type: "Circle", center: [11, 10], radius: 10 };
+    const arc: SketchEntity = { id: "A", type: "Arc", center: [10, 10], radius: 10, start: [10, 0], end: [0, 10] };
+    const cs = inferConstraints([arc], [line, circle], { nextConstraintId: ids() });
+    const tan = cs.findIndex((c) => c.type === "Tangent");
+    const con = cs.findIndex((c) => c.type === "Concentric");
+    const eq = cs.findIndex((c) => c.type === "Equal");
+    expect(tan).toBeGreaterThanOrEqual(0);
+    expect(con).toBeGreaterThan(tan);
+    expect(eq).toBeGreaterThan(con);
+    expect(cs[con]).toMatchObject({ entities: ["A", "C"] });
+    expect(cs[eq]).toMatchObject({ entities: ["A", "C"] });
+  });
+
+  it("a same-batch Coincident between two Centers suppresses Concentric (not Equal)", () => {
+    const existing: SketchEntity = { id: "e1", type: "Circle", center: [5, 5], radius: 10 };
+    const next: SketchEntity = { id: "e2", type: "Circle", center: [5, 5], radius: 10.3 }; // exact-snapped center
+    const cs = inferConstraints([next], [existing], { nextConstraintId: ids() });
+    expect(cs.some((c) => c.type === "Coincident" && c.positions?.[0] === "Center")).toBe(true);
+    expect(cs.some((c) => c.type === "Concentric")).toBe(false);
+    expect(cs.find((c) => c.type === "Equal")).toMatchObject({ entities: ["e2", "e1"] });
+  });
+
+  it("intra-batch: two new circles in one commit still infer Concentric/Equal", () => {
+    const circleA: SketchEntity = { id: "cA", type: "Circle", center: [0, 0], radius: 5 };
+    const circleB: SketchEntity = { id: "cB", type: "Circle", center: [1, 1], radius: 5.1 };
+    const cs = inferConstraints([circleA, circleB], [], { nextConstraintId: ids() });
+    expect(cs.find((c) => c.type === "Concentric")).toMatchObject({ entities: ["cB", "cA"] });
+    expect(cs.find((c) => c.type === "Equal")).toMatchObject({ entities: ["cB", "cA"] });
+  });
+
+  it("an Ellipse emits neither Concentric nor Equal", () => {
+    const existing: SketchEntity = { id: "c1", type: "Circle", center: [10, 0], radius: 8 };
+    const ellipse: SketchEntity = { id: "el1", type: "Ellipse", center: [10, 0], majorR: 8, minorR: 3, rotation: 0 };
+    const cs = inferConstraints([ellipse], [existing], { nextConstraintId: ids() });
+    expect(cs.some((c) => c.type === "Concentric")).toBe(false);
+    expect(cs.some((c) => c.type === "Equal")).toBe(false);
+    expect(cs.some((c) => c.type === "Coincident")).toBe(true); // centre still coincides, per entityPoints
+  });
+
+  it("3mm center offset + 2mm radius delta ⇒ neither fires (both outside tolerance)", () => {
+    const existing: SketchEntity = { id: "c1", type: "Circle", center: [0, 0], radius: 10 };
+    const next: SketchEntity = { id: "c2", type: "Circle", center: [3, 0], radius: 12 };
+    const cs = inferConstraints([next], [existing], { nextConstraintId: ids() });
+    expect(cs).toEqual([]);
   });
 });

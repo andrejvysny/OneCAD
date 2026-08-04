@@ -173,9 +173,13 @@ describe("applyConstraint — serialization of rapid applies", () => {
     const targets = targetsFor(entities, { entityId: "e1" }, { entityId: "e2" });
     const offered = evaluateApplicability(targets, entities);
     const parallel = offered.find((a) => a.type === "Parallel")!;
-    const angle = offered.find((a) => a.type === "Perpendicular")!;
+    // Equal (not Perpendicular): two lines being BOTH parallel and equal-length
+    // is not a contradiction — Perpendicular would be (mockConflicts.ts R3), which
+    // would make this fixture a genuine reject-on-conflict case rather than the
+    // race-condition/queueing behavior this test actually targets.
+    const equal = offered.find((a) => a.type === "Equal")!;
     expect(parallel).toBeDefined();
-    expect(angle).toBeDefined();
+    expect(equal).toBeDefined();
 
     // Delay the FIRST sketchUpsert so the second apply fires while it is
     // in flight — without the mutation queue both captured the same stale
@@ -194,12 +198,12 @@ describe("applyConstraint — serialization of rapid applies", () => {
     };
 
     const p1 = applyConstraint(delayedClient, parallel);
-    const p2 = applyConstraint(delayedClient, angle);
+    const p2 = applyConstraint(delayedClient, equal);
     await Promise.all([p1, p2]);
     await flush();
 
     const s = sketchStore.getState().session!;
     const kinds = s.constraints.map((c) => c.type).sort();
-    expect(kinds).toEqual(["Parallel", "Perpendicular"]);
+    expect(kinds).toEqual(["Equal", "Parallel"]);
   });
 });

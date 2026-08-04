@@ -149,7 +149,7 @@ describe("unitPrismGeometry", () => {
 //
 // The kernel subtracts a region's holes (FaceBuilder adds each innerLoop as a
 // hole wire), so the preview must too. The producer of the triangulation
-// (worker `loop/PolygonFill.cpp`, mock `annulusTriangles`) merges holes with
+// (worker `loop/PolygonFill.cpp`, mock `loopTriangles`) merges holes with
 // BRIDGES that stay interior, leaving the outer and hole boundaries as the only
 // single-use edges — which is what the ring derivation below recovers.
 

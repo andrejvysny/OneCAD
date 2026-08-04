@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   planeFor,
   solveDof,
+  solveSketch,
   freeDegrees,
   detectRegions,
   orderedClosedLoop,
@@ -46,6 +47,39 @@ describe("solveDof — naive mock heuristic", () => {
       entities: ["e1"],
     }));
     expect(solveDof([rect[0]], cs).status).toBe("OverConstrained");
+  });
+});
+
+describe("solveSketch — solveDof + deterministic conflict precedence", () => {
+  it("clean sketch: same dof/status as solveDof, empty conflicting", () => {
+    const cs: SketchConstraint[] = [{ id: "c1", type: "Horizontal", entities: ["e1"] }];
+    expect(solveSketch([rect[0]], cs)).toEqual({ dof: 3, status: "UnderConstrained", conflicting: [] });
+  });
+
+  it("Conflicting OUTRANKS the dof-derived OverConstrained status", () => {
+    // Two Distance constraints on the same points with different values: an
+    // OverConstrained-by-count sketch that is ALSO genuinely conflicting.
+    const cs: SketchConstraint[] = [
+      { id: "d1", type: "Distance", entities: ["e1", "e1"], positions: ["Start", "End"], value: 40 },
+      { id: "d2", type: "Distance", entities: ["e1", "e1"], positions: ["Start", "End"], value: 999 },
+    ];
+    const result = solveSketch([rect[0]], cs);
+    expect(result.status).toBe("Conflicting");
+    expect(result.conflicting.sort()).toEqual(["d1", "d2"]);
+  });
+
+  it("Conflicting can fire even when the dof arithmetic alone reads UnderConstrained", () => {
+    // Horizontal + Vertical on one line: only 2 dof removed by the coarse count
+    // (4 free − 2 = 2, still "UnderConstrained" by count alone) but a genuine
+    // geometric contradiction — Conflicting must win regardless of dof sign.
+    const cs: SketchConstraint[] = [
+      { id: "h1", type: "Horizontal", entities: ["e1"] },
+      { id: "v1", type: "Vertical", entities: ["e1"] },
+    ];
+    const result = solveSketch([rect[0]], cs);
+    expect(result.status).toBe("Conflicting");
+    expect(result.conflicting.sort()).toEqual(["h1", "v1"]);
+    expect(result.dof).toBe(solveDof([rect[0]], cs).dof); // dof arithmetic itself is untouched
   });
 });
 
@@ -150,14 +184,70 @@ describe("detectRegions — nested circle creates two cells", () => {
     expect(regions[1].holes).toEqual([]);
   });
 
-  it("omits an enclosing cell when the mock cannot subtract every hole", () => {
+  it("subtracts EVERY hole from a multi-hole enclosing cell", () => {
     const regions = detectRegions([
       ...rect,
       { id: "c1", type: "Circle", center: [10, 10], radius: 3 },
       { id: "c2", type: "Circle", center: [30, 10], radius: 3 },
     ]);
-    expect(regions).toHaveLength(2);
-    expect(regions.every((region) => region.holes.length === 0)).toBe(true);
+    expect(regions).toHaveLength(3);
+    const enclosing = regions.find((region) => region.holes.length > 0)!;
+    expect(enclosing.holes).toEqual([["c1"], ["c2"]]);
+    expect(enclosing.previewTriangles!.holesSubtracted).toBe(2);
+    const tris = enclosing.previewTriangles!;
+    let area = 0;
+    for (let i = 0; i + 2 < tris.indices.length; i += 3) {
+      const [a, b, c] = [tris.indices[i], tris.indices[i + 1], tris.indices[i + 2]];
+      area += Math.abs(
+        ((tris.positions[b * 2] - tris.positions[a * 2]) *
+          (tris.positions[c * 2 + 1] - tris.positions[a * 2 + 1]) -
+          (tris.positions[b * 2 + 1] - tris.positions[a * 2 + 1]) *
+            (tris.positions[c * 2] - tris.positions[a * 2])) /
+          2,
+      );
+    }
+    // 800 − 2·π·3² ≈ 743.5 (32-gon holes slightly under-approximate the discs).
+    expect(area).toBeGreaterThan(741);
+    expect(area).toBeLessThan(746);
+  });
+});
+
+// Concave loop: the old centroid fan was exact only for star-shaped polygons —
+// on an L-shape it filled (and hit-tested) the notch OUTSIDE the boundary, so
+// the fill visibly disagreed with the drawn edges.
+describe("detectRegions — concave loop fill stays inside the boundary", () => {
+  const L: SketchEntity[] = [
+    { id: "e1", type: "Line", p0: [0, 0], p1: [40, 0] },
+    { id: "e2", type: "Line", p0: [40, 0], p1: [40, 20] },
+    { id: "e3", type: "Line", p0: [40, 20], p1: [20, 20] },
+    { id: "e4", type: "Line", p0: [20, 20], p1: [20, 40] },
+    { id: "e5", type: "Line", p0: [20, 40], p1: [0, 40] },
+    { id: "e6", type: "Line", p0: [0, 40], p1: [0, 0] },
+  ];
+
+  it("fill area equals the polygon area (no spill, no overlap)", () => {
+    const regions = detectRegions(L);
+    expect(regions).toHaveLength(1);
+    const tris = regions[0].previewTriangles!;
+    let area = 0;
+    for (let i = 0; i + 2 < tris.indices.length; i += 3) {
+      const [a, b, c] = [tris.indices[i], tris.indices[i + 1], tris.indices[i + 2]];
+      area += Math.abs(
+        ((tris.positions[b * 2] - tris.positions[a * 2]) *
+          (tris.positions[c * 2 + 1] - tris.positions[a * 2 + 1]) -
+          (tris.positions[b * 2 + 1] - tris.positions[a * 2 + 1]) *
+            (tris.positions[c * 2] - tris.positions[a * 2])) /
+          2,
+      );
+    }
+    expect(area).toBeCloseTo(1200, 6); // 40·40 − 20·20 notch
+  });
+
+  it("a point in the notch hit-tests to NO region", async () => {
+    const { regionAtPoint } = await import("@/tools/preview/regionPick");
+    const regions = detectRegions(L);
+    expect(regionAtPoint(regions, 30, 30)).toBeNull(); // notch interior
+    expect(regionAtPoint(regions, 10, 10)).toBe(regions[0].regionId); // material
   });
 });
 

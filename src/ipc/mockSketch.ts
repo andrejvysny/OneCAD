@@ -14,7 +14,9 @@ import type {
   SketchRegion,
   SketchSolveStatus,
 } from "./types";
+import { ShapeUtils, Vector2 } from "three";
 import { ellipseParams, sampleEllipse } from "@/tools/sketch/ellipseMath";
+import { detectConflicts } from "./mockConflicts";
 
 // ── Canonical planes — SCHEMA §7.3 EXACT bases (non-standard XY basis) ───────
 
@@ -113,6 +115,23 @@ export function solveDof(
   return { dof: Math.max(0, surplus), status };
 }
 
+/**
+ * `solveDof` + deterministic conflict detection (`mockConflicts.ts`), combined
+ * with the precedence the real worker uses (`SolverLane.cpp` `upsert_state`):
+ * Conflicting > OverConstrained > FullyConstrained > UnderConstrained. This is
+ * the mock lane's actual "solve" entry point — `solveDof` alone never reports
+ * Conflicting and is kept that way (existing callers rely on it staying a pure
+ * DOF heuristic); this wraps it rather than replacing it.
+ */
+export function solveSketch(
+  entities: SketchEntity[],
+  constraints: SketchConstraint[],
+): { dof: number; status: SketchSolveStatus; conflicting: string[] } {
+  const conflicting = detectConflicts(entities, constraints);
+  const { dof, status } = solveDof(entities, constraints);
+  return { dof, status: conflicting.length > 0 ? "Conflicting" : status, conflicting };
+}
+
 // ── Region detection (MOCK — single closed loop, or circles) ─────────────────
 //
 // LIMITS: detects (a) each SELF-CLOSED curve (Circle or Ellipse) as its own
@@ -207,15 +226,44 @@ export function orderedClosedLoop(entities: SketchEntity[]): { ids: string[]; po
   return key(cursor) === key(start) ? { ids, points } : null;
 }
 
-/** Fan-triangulate a polygon (from centroid) into plane-local (u,v) preview tris. */
-function polygonTriangles(points: [number, number][]): { positions: number[]; indices: number[] } {
-  const cx = points.reduce((s, p) => s + p[0], 0) / points.length;
-  const cy = points.reduce((s, p) => s + p[1], 0) / points.length;
-  const positions = [cx, cy];
-  for (const p of points) positions.push(p[0], p[1]);
+/**
+ * Ear-clip triangulation of a closed loop with optional holes, in plane-local
+ * (u,v). Output layout matches the real worker lane (SolverLane ear_clip):
+ * positions are the outer ring's vertices followed by each hole ring's vertices
+ * (no synthetic hub vertex), indices are ear-clip triples normalized CCW.
+ *
+ * Topology contract (SCHEMA §7.4): every hole-bridge diagonal earcut introduces
+ * is shared by exactly two triangles, so the only single-use edges are the real
+ * outer and hole boundaries — the property `prismPreview.profileFromRegion`
+ * recovers the rings from. Valid for ANY simple polygon: the previous centroid
+ * fan was exact only for star-shaped loops and filled OUTSIDE the boundary on
+ * concave ones (fill/edge mismatch on screen, and `regionAtPoint` hit-testing
+ * clicks outside the profile).
+ */
+function loopTriangles(
+  outerIn: [number, number][],
+  holesIn: [number, number][][],
+): { positions: number[]; indices: number[] } {
+  const outer = signedArea(outerIn) < 0 ? [...outerIn].reverse() : outerIn;
+  const holes = holesIn.map((h) => (signedArea(h) > 0 ? [...h].reverse() : h));
+  const contour = outer.map(([x, y]) => new Vector2(x, y));
+  const holeContours = holes.map((h) => h.map(([x, y]) => new Vector2(x, y)));
+  const faces = ShapeUtils.triangulateShape(contour, holeContours);
+
+  // Flatten AFTER triangulateShape: it trims a duplicated closing point in
+  // place, and earcut's indices address the trimmed rings.
+  const positions: number[] = [];
+  for (const ring of [contour, ...holeContours]) for (const p of ring) positions.push(p.x, p.y);
+
   const indices: number[] = [];
-  for (let i = 0; i < points.length; i++) {
-    indices.push(0, 1 + i, 1 + ((i + 1) % points.length));
+  for (const [a, b, c] of faces) {
+    const cross =
+      (positions[b * 2] - positions[a * 2]) * (positions[c * 2 + 1] - positions[a * 2 + 1]) -
+      (positions[b * 2 + 1] - positions[a * 2 + 1]) * (positions[c * 2] - positions[a * 2]);
+    // Normalize winding to CCW; keep zero-area slivers as-is (dropping one would
+    // change edge-use counts and fabricate a boundary in ring recovery).
+    if (cross >= 0) indices.push(a, b, c);
+    else indices.push(a, c, b);
   }
   return { positions, indices };
 }
@@ -268,100 +316,6 @@ function circlePolygon(center: [number, number], radius: number, segments = 32):
     pts.push([center[0] + radius * Math.cos(a), center[1] + radius * Math.sin(a)]);
   }
   return pts;
-}
-
-/**
- * Triangulate the annulus between an outer ring and ONE hole ring by stitching
- * them into a strip ordered by ANGLE about the hole's centre: both rings are
- * traversed CCW and whichever has the angularly-nearer next vertex advances.
- * Every connecting edge is shared by two triangles, so the only single-use edges
- * are the real outer and hole boundaries — the topology
- * `prismPreview.profileFromRegion` needs to recover both rings. Each emitted
- * triangle is normalized to CCW, which orients the recovered outer loop CCW and
- * the hole loop CW.
- *
- * Angle order (not normalized ring parameter) is what makes the strip
- * non-overlapping: a 4-vertex rectangle and a 32-vertex circle have wildly
- * different parameter spacing, and a parameter-based stitch produces crossing
- * triangles whose areas then double-count.
- *
- * MOCK LIMIT: exactly one hole, and both rings must be star-shaped about the
- * hole's centre (true for the rectangle + inner circle the mock lane draws). The
- * worker uses proper bridge-based ear clipping (`worker/src/loop/PolygonFill.cpp`).
- */
-function annulusTriangles(
-  outerIn: [number, number][],
-  holeIn: [number, number][],
-): { positions: number[]; indices: number[] } {
-  const outer = signedArea(outerIn) < 0 ? [...outerIn].reverse() : outerIn;
-  const hole = signedArea(holeIn) < 0 ? [...holeIn].reverse() : holeIn;
-  const m = hole.length;
-
-  const cx = hole.reduce((s, p) => s + p[0], 0) / m;
-  const cy = hole.reduce((s, p) => s + p[1], 0) / m;
-  const TWO_PI = Math.PI * 2;
-
-  // Every direction in which EITHER ring has a vertex. Sampling both rings at
-  // this shared, sorted direction set gives two rings with equal vertex counts
-  // whose k-th vertices lie on the same ray — so the quad strip between them is
-  // non-overlapping by construction, and both rings keep their original corners.
-  const dirs: number[] = [];
-  for (const p of [...outer, ...hole]) {
-    const a = Math.atan2(p[1] - cy, p[0] - cx);
-    dirs.push(((a % TWO_PI) + TWO_PI) % TWO_PI);
-  }
-  dirs.sort((a, b) => a - b);
-  const uniq = dirs.filter((a, k) => k === 0 || a - dirs[k - 1] > 1e-12);
-
-  // Farthest ray/boundary hit from the centre — exact at a vertex the ray passes
-  // through, so corners survive sampling.
-  const rayHit = (theta: number, poly: [number, number][]): [number, number] => {
-    const dx = Math.cos(theta);
-    const dy = Math.sin(theta);
-    let best = 0;
-    for (let k = 0; k < poly.length; k++) {
-      const [ax, ay] = poly[k];
-      const [bx, by] = poly[(k + 1) % poly.length];
-      const ex = bx - ax;
-      const ey = by - ay;
-      const den = dx * ey - dy * ex;
-      if (Math.abs(den) < 1e-15) continue;
-      const s = ((ax - cx) * ey - (ay - cy) * ex) / den; // along the ray
-      const t = ((ax - cx) * dy - (ay - cy) * dx) / den; // along the edge
-      if (s > 0 && t >= -1e-12 && t <= 1 + 1e-12) best = Math.max(best, s);
-    }
-    return [cx + best * dx, cy + best * dy];
-  };
-
-  const positions: number[] = [];
-  for (const t of uniq) {
-    const [x, y] = rayHit(t, outer);
-    positions.push(x, y);
-  }
-  for (const t of uniq) {
-    const [x, y] = rayHit(t, hole);
-    positions.push(x, y);
-  }
-
-  const k = uniq.length;
-  const oi = (i: number): number => i % k;
-  const hi = (j: number): number => k + (j % k);
-  const indices: number[] = [];
-  const push = (a: number, b: number, c: number): void => {
-    const ax = positions[a * 2];
-    const ay = positions[a * 2 + 1];
-    const cross =
-      (positions[b * 2] - ax) * (positions[c * 2 + 1] - ay) -
-      (positions[b * 2 + 1] - ay) * (positions[c * 2] - ax);
-    if (Math.abs(cross) < 1e-12) return; // degenerate
-    if (cross > 0) indices.push(a, b, c);
-    else indices.push(a, c, b);
-  };
-  for (let i = 0; i < k; i++) {
-    push(oi(i), oi(i + 1), hi(i));
-    push(oi(i + 1), hi(i + 1), hi(i));
-  }
-  return { positions, indices };
 }
 
 /** Fan-triangulate a closed ring about an interior `center` into plane-local
@@ -437,11 +391,7 @@ export function detectRegions(entities: SketchEntity[]): SketchRegion[] {
     });
   }
 
-  if (loop && holes.length <= 1) {
-    // MOCK LIMIT: annulusTriangles supports one hole. With multiple holes, omit
-    // the enclosing cell instead of publishing fill geometry for different
-    // material than the declared profile.
-    const first = holes[0];
+  if (loop) {
     regions.push({
       // A cell's identity includes its material boundary, not only its outer
       // wire. Adding/removing a hole must invalidate an armed profile.
@@ -449,8 +399,11 @@ export function detectRegions(entities: SketchEntity[]): SketchRegion[] {
       outerLoop: loop.ids,
       holes: holes.map((h) => [h.entity.id]),
       previewTriangles: {
-        ...(first ? annulusTriangles(loop.points, first.polygon) : polygonTriangles(loop.points)),
-        holesSubtracted: first ? 1 : 0,
+        ...loopTriangles(
+          loop.points,
+          holes.map((h) => h.polygon),
+        ),
+        holesSubtracted: holes.length,
       },
     });
   }

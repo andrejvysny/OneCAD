@@ -6,8 +6,8 @@
  * (enter/upsert/finish/BeginGesture/SolveDrag/EndGesture, SCHEMA §7.4) as real
  * Tauri commands through Rust → the worker's PlaneGCS actor, and does NOT route
  * them through this module. The sketch functions here (identity-echo solve, DOF
- * heuristic via mockSketch.solveDof) serve ONLY the mock client — browser demos,
- * vitest, and the Playwright mock lane.
+ * heuristic + deterministic conflict detection via mockSketch.solveSketch) serve
+ * ONLY the mock client — browser demos, vitest, and the Playwright mock lane.
  *
  * What IS still shared by both clients:
  *   - the op PREVIEW lane (beginPreview/updatePreview/endPreview — shared
@@ -41,7 +41,7 @@ import type {
 } from "./types";
 import { makeExtrudeBodyMesh } from "./mockMeshes";
 import { lookupMockFace, mockProjectedContent } from "./mockFaceGeometry";
-import { detectRegions, planeFor, solveDof } from "./mockSketch";
+import { detectRegions, planeFor, solveSketch } from "./mockSketch";
 import { profileFromRegion, type PrismProfile } from "@/tools/preview/prismPreview";
 import { buildPreviewOp, supportsPreview, type PreviewSessionState } from "./previewOps";
 import { mintRecordId } from "./tauriCommandMap";
@@ -370,7 +370,7 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
         const constraints = seed?.constraints ?? [];
         // Fixed-pinned locked geometry contributes ZERO net DOF, so a freshly
         // projected boundary still reports FullyConstrained (see `solveDof`).
-        const { dof, status } = solveDof(entities, constraints);
+        const { dof, status, conflicting } = solveSketch(entities, constraints);
         session = {
           sketchId: id,
           plane: explicitPlane ?? planeFor(planeKind),
@@ -378,7 +378,7 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
           constraints,
           dof,
           status,
-          conflicting: [], // mock lane never conflicts (deterministic)
+          conflicting,
         };
         sketchSessions.set(id, session);
         sketchPlanes.set(id, session.plane);
@@ -395,7 +395,7 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
       // Near-synchronous: drawing must feel instant; the DOF badge refreshes live.
       await wait(0);
       const prev = sketchSessions.get(sketchId);
-      const { dof, status } = solveDof(entities, constraints);
+      const { dof, status, conflicting } = solveSketch(entities, constraints);
       const session: SketchSession = {
         sketchId,
         plane: prev?.plane ?? planeFor("XY"),
@@ -403,13 +403,14 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
         constraints,
         dof,
         status,
+        conflicting,
       };
       sketchSessions.set(sketchId, session);
       sketchPlanes.set(sketchId, session.plane);
       const rev = (sketchRevisions.get(sketchId) ?? 0) + 1;
       sketchRevisions.set(sketchId, rev);
       // The local solver is an identity solve (echoes positions) — nothing moved.
-      return { sketchId, sketchRevision: rev, dof, status, conflicting: [], solvedPositions: {} };
+      return { sketchId, sketchRevision: rev, dof, status, conflicting, solvedPositions: {} };
     },
 
     async finishSketch(sketchId: string): Promise<{ regions: SketchRegion[] }> {

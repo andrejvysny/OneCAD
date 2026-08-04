@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { createLocalSolverLane } from "./localSolver";
-import type { ApplyOperationResult, OperationOp, PreviewResult } from "./types";
+import type { ApplyOperationResult, OperationOp, PreviewResult, SketchConstraint, SketchEntity } from "./types";
 
 type BackendPreview = {
   bodies: { bodyId: string; mesh: ArrayBuffer }[];
@@ -342,5 +342,27 @@ describe("localSolver exact backend preview lifecycle", () => {
     await flush();
     expect(previewOp).not.toHaveBeenCalled();
     await expect(lane.endPreview(session.sessionId, true)).rejects.toThrow(/scalar update/);
+  });
+});
+
+describe("localSolver sketchUpsert — deterministic conflict detection (mock lane)", () => {
+  const rectLine: SketchEntity = { id: "e1", type: "Line", p0: [0, 0], p1: [40, 0] };
+
+  it("surfaces Conflicting + the clashing ids for a duplicate-incompatible dimension", async () => {
+    const { lane } = makeLane();
+    const constraints: SketchConstraint[] = [
+      { id: "d1", type: "Distance", entities: ["e1", "e1"], positions: ["Start", "End"], value: 40 },
+      { id: "d2", type: "Distance", entities: ["e1", "e1"], positions: ["Start", "End"], value: 120 },
+    ];
+    const result = await lane.sketchUpsert("sk-conflict", [rectLine], constraints);
+    expect(result.status).toBe("Conflicting");
+    expect(result.conflicting?.slice().sort()).toEqual(["d1", "d2"]);
+  });
+
+  it("reports conflicting: [] and the dof-derived status when nothing clashes", async () => {
+    const { lane } = makeLane();
+    const result = await lane.sketchUpsert("sk-clean", [rectLine], []);
+    expect(result.status).toBe("UnderConstrained");
+    expect(result.conflicting).toEqual([]);
   });
 });

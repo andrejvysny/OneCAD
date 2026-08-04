@@ -20,6 +20,22 @@
  *     within ±5° (`tangentTolerance`). This is the exact legacy rule — the C++
  *     `inferTangent` only handles arc-start-tangent-to-line. (Line↔circle and
  *     arc↔arc tangency exist as SNAPS, not as legacy auto-constraints — seam.)
+ *   - Concentric: a new circle/arc's CENTER within `CONCENTRIC_TOLERANCE` (2mm,
+ *     `coincidenceTolerance`, AutoConstrainer.h:61) of an existing circle/arc's
+ *     center, nearest wins (`AutoConstrainer::inferConcentric`,
+ *     AutoConstrainer.cpp:645). DIVERGENCE FROM LEGACY: skipped when this same
+ *     batch already emitted a Coincident between the SAME two entities' Center
+ *     points — our tools SNAP centers exactly (unlike legacy's identity solve),
+ *     so that Coincident already zeroes the gap; both constraints would each
+ *     remove 2 DOF in the mock's coarse count (`mockSketch.ts constraintFreedom`)
+ *     for what is really one 2-DOF relation, producing a false OverConstrained
+ *     the real solver would never report.
+ *   - Equal: a new circle/arc's RADIUS within `EQUAL_RADIUS_TOLERANCE` (0.5mm,
+ *     function-local `constexpr RADIUS_TOLERANCE`, AutoConstrainer.cpp:699) of an
+ *     existing circle/arc's radius, nearest wins (`AutoConstrainer::inferEqualRadius`,
+ *     AutoConstrainer.cpp:694). Circles and arcs only — an Ellipse has no single
+ *     scalar radius and contributes to neither Concentric nor Equal (see
+ *     `entityPoints`).
  *
  * A line is never both Horizontal and Vertical, and never gets Perpendicular /
  * Parallel once it is H or V. Intra-batch relationships (e.g. a polyline's chained
@@ -44,6 +60,10 @@ export const TANGENT_TOLERANCE_RAD = (5 * Math.PI) / 180;
 export const TANGENT_COINCIDENCE_TOL = 2.0;
 /** MIN_GEOMETRY_SIZE = 0.01mm (SketchTypes.h) — skip degenerate lines. */
 export const MIN_GEOMETRY_SIZE = 0.01;
+/** coincidenceTolerance = 2mm (AutoConstrainer.h:61) — reused for Concentric center matching. */
+export const CONCENTRIC_TOLERANCE = 2.0;
+/** function-local `constexpr RADIUS_TOLERANCE = 0.5` (AutoConstrainer.cpp:699). */
+export const EQUAL_RADIUS_TOLERANCE = 0.5;
 
 export interface InferOptions {
   angleToleranceRad?: number;
@@ -65,6 +85,13 @@ interface RefLine {
   p1: [number, number];
 }
 
+/** A reference circle/arc for concentric / equal-radius inference. */
+interface RefCircular {
+  id: string;
+  center: [number, number];
+  radius: number;
+}
+
 /** Constrainable points of an entity (Start/End/Center), for coincidence. */
 export function entityPoints(e: SketchEntity): EntPoint[] {
   const out: EntPoint[] = [];
@@ -75,7 +102,9 @@ export function entityPoints(e: SketchEntity): EntPoint[] {
   }
   // An Ellipse contributes its CENTRE exactly like a Circle — that centre IS a
   // minted wire point (`sketchWireMap.addEntityOps`), so it selects, drags and
-  // auto-coincides for free. Its CURVE contributes nothing (legacy parity).
+  // auto-coincides for free. Its CURVE contributes nothing (legacy parity) — nor
+  // does it have a single scalar radius, so it feeds neither Concentric nor Equal
+  // (`inferConcentricPartner`/`inferEqualRadiusPartner` take Circle/Arc only).
   if ((e.type === "Circle" || e.type === "Ellipse") && e.center)
     out.push({ entityId: e.id, position: "Center", coord: e.center });
   if (e.type === "Arc") {
@@ -223,6 +252,85 @@ export function inferTangentPartner(
   return best;
 }
 
+/**
+ * Nearest concentric partner for a circle/arc CENTER: the closest existing
+ * circle/arc center within tol (verbatim from `AutoConstrainer::inferConcentric`
+ * — the running best is SEEDED at `tol` itself, so a candidate must beat it with
+ * a strict `<`; a center exactly `tol` away never fires). Returns the partner id
+ * or null.
+ */
+export function inferConcentricPartner(
+  center: [number, number],
+  refs: RefCircular[],
+  tol = CONCENTRIC_TOLERANCE,
+): string | null {
+  let best: string | null = null;
+  let bestDist = tol;
+  for (const r of refs) {
+    const d = dist2(center, r.center);
+    if (d < bestDist) {
+      bestDist = d;
+      best = r.id;
+    }
+  }
+  return best;
+}
+
+/**
+ * Nearest equal-radius partner for a circle/arc RADIUS: the closest existing
+ * circle/arc radius within tol (verbatim from `AutoConstrainer::inferEqualRadius`
+ * — running best seeded at `tol`, strict `<`; a radius delta of exactly `tol`
+ * never fires). Returns the partner id or null.
+ */
+export function inferEqualRadiusPartner(
+  radius: number,
+  refs: RefCircular[],
+  tol = EQUAL_RADIUS_TOLERANCE,
+): string | null {
+  let best: string | null = null;
+  let bestDiff = tol;
+  for (const r of refs) {
+    const diff = Math.abs(radius - r.radius);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = r.id;
+    }
+  }
+  return best;
+}
+
+/**
+ * Emit Concentric then Equal for one committed Circle/Arc `e` (LEGACY ORDER —
+ * `inferCircleConstraints`/`inferArcConstraints`), applying the Coincident
+ * divergence gate (see header comment). Mutates `out`; `refCircular` is the
+ * running reference set (existing + already-processed batch entities, NOT `e`).
+ */
+function inferCircularConstraints(
+  e: SketchEntity,
+  center: [number, number],
+  radius: number,
+  refCircular: RefCircular[],
+  out: SketchConstraint[],
+  nextConstraintId: () => string,
+): void {
+  const concentricPartner = inferConcentricPartner(center, refCircular);
+  if (concentricPartner) {
+    const centerCoincidentAlready = out.some(
+      (c) =>
+        c.type === "Coincident" &&
+        c.entities[0] === e.id &&
+        c.entities[1] === concentricPartner &&
+        c.positions?.[0] === "Center" &&
+        c.positions?.[1] === "Center",
+    );
+    if (!centerCoincidentAlready) {
+      out.push({ id: nextConstraintId(), type: "Concentric", entities: [e.id, concentricPartner] });
+    }
+  }
+  const equalPartner = inferEqualRadiusPartner(radius, refCircular);
+  if (equalPartner) out.push({ id: nextConstraintId(), type: "Equal", entities: [e.id, equalPartner] });
+}
+
 export function inferConstraints(
   newEntities: SketchEntity[],
   existing: SketchEntity[],
@@ -237,6 +345,9 @@ export function inferConstraints(
   const refLines: RefLine[] = existing
     .filter((e) => e.type === "Line" && e.p0 && e.p1)
     .map((e) => ({ id: e.id, p0: e.p0!, p1: e.p1! }));
+  const refCircular: RefCircular[] = existing
+    .filter((e) => (e.type === "Circle" || e.type === "Arc") && e.center && e.radius !== undefined)
+    .map((e) => ({ id: e.id, center: e.center!, radius: e.radius! }));
   const seenPairs = new Set<string>();
 
   for (const e of newEntities) {
@@ -279,8 +390,17 @@ export function inferConstraints(
       }
     }
 
+    // Concentric / Equal for a committed Circle or Arc (Ellipse contributes
+    // neither — see `entityPoints`). Runs after Tangent (above) and Coincident
+    // (just above), satisfying both legacy orderings in one pass.
+    if ((e.type === "Circle" || e.type === "Arc") && e.center && e.radius !== undefined) {
+      inferCircularConstraints(e, e.center, e.radius, refCircular, out, opts.nextConstraintId);
+    }
+
     refs.push(...entityPoints(e));
     if (e.type === "Line" && e.p0 && e.p1) refLines.push({ id: e.id, p0: e.p0, p1: e.p1 });
+    if ((e.type === "Circle" || e.type === "Arc") && e.center && e.radius !== undefined)
+      refCircular.push({ id: e.id, center: e.center, radius: e.radius });
   }
 
   return out;

@@ -75,6 +75,27 @@ describe("commitDimensionConstraint — solver round-trip + reject-on-conflict",
     expect(rejected).toBe(false);
     expect(sketchStore.getState().session).toBeNull();
   });
+
+  // Same reject-on-conflict round trip as above, but through the REAL mock lane
+  // (mockClient → localSolver.sketchUpsert → mockSketch.solveSketch), not a fake
+  // client — proves detectConflicts is actually wired end to end, not just unit
+  // tested in isolation.
+  it("names the pre-existing Distance in the reject hint on the mock lane", async () => {
+    seedSession([{ id: "d1", type: "Distance", entities: ["e1", "e1"], positions: ["Start", "End"], value: 40 }]);
+    const clashing: SketchConstraint = {
+      id: "d2",
+      type: "Distance",
+      entities: ["e1", "e1"],
+      positions: ["Start", "End"],
+      value: 120,
+    };
+    const { rejected, hint } = await commitDimensionConstraint(mockClient, clashing);
+    expect(rejected).toBe(true);
+    expect(hint).toBe("Dimension removed — conflicts with Distance (d1)");
+    const s = sketchStore.getState().session!;
+    expect(s.constraints.map((c) => c.id)).toEqual(["d1"]); // d2 dropped; d1 survives
+    expect(sketchStore.getState().conflictingIds).toEqual([]); // the restore solve is clean
+  });
 });
 
 // ── deletion (entities + constraints, mirroring the Rust cascade) ─────────────

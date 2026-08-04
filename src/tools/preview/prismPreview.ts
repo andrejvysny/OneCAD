@@ -3,11 +3,12 @@
  * the two-level extrude preview (NEW_SPEC §15).
  *
  * A finished sketch region carries a triangulation in plane (u,v) whose LAYOUT
- * differs by producer: the mock lane emits a fan (positions[0..1] = centroid
- * hub + ordered ring), the real worker lane (SolverLane ear_clip) emits the
- * outer-loop polygon vertices with ear-clip indices and NO hub. The profile
- * ring is therefore derived from triangulation topology (boundary edges), never
- * from a layout convention. We lift that flat profile into a 3D prism authored
+ * differs by producer: the mock lane emits ear-clip triples for loop cells
+ * (`loopTriangles`) but a centroid-hub fan for self-closed curves
+ * (`fanTriangles`), while the real worker lane (SolverLane ear_clip) always
+ * emits the outer-loop polygon vertices with ear-clip indices and NO hub. The
+ * profile ring is therefore derived from triangulation topology (boundary
+ * edges), never from a layout convention. We lift that flat profile into a 3D prism authored
  * in PLANE-LOCAL coordinates (x=u, y=v, z=w along the plane normal):
  *
  *   - L1 (engine): a UNIT prism (cap at w=1) built once; a group carrying the
