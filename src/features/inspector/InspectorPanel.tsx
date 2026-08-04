@@ -310,6 +310,8 @@ function FeatureState({
       </div>
       {feat?.kind === "sketch" && <SketchDimensions featureId={featureId} />}
       <SectionLabel className="pb-1.5 pt-4">History</SectionLabel>
+      {/* The ONLY view that may pass `appliedOps`: it renders `features` WHOLE, so
+          a row index is the global timeline index the cursor is expressed in. */}
       <HistoryList
         items={features}
         selectedId={featureId}
@@ -317,6 +319,8 @@ function FeatureState({
         onEdit={editFeature}
         rowActions={rowActions}
         valueEdit={makeValueEdit(appliedOps, modelTool)}
+        appliedOps={appliedOps}
+        onRollToEnd={() => void rollToIndex(features.length - 1)}
       />
       {/* BELOW the list on purpose: a selection-dependent block ABOVE it changes the
           panel height as the selection moves, which shifts the rows out from under a

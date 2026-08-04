@@ -88,7 +88,8 @@ json missing_body_repair(const em::LadderRef& ref, const std::string& body_id) {
 // stops before running the op (prepare m−1). Replaces the interim primary.topoKey
 // shortcut (D3 — the field is gone). Body/region refs (no sub-element) are skipped.
 void resolve_input_refs(ScratchJob& job, const json& op, const std::string& op_id,
-                        em::ElementMapDelta& delta, std::vector<json>& needs_repair) {
+                        const em::LadderEditContext& edit, em::ElementMapDelta& delta,
+                        std::vector<json>& needs_repair) {
     if (!op.contains("inputs") || !op["inputs"].is_array()) return;
 
     // Group sub-element refs by owning body (assignment/scoring is per-body pool).
@@ -115,7 +116,7 @@ void resolve_input_refs(ScratchJob& job, const json& op, const std::string& op_i
             continue;
         }
         const std::vector<em::LadderResolution> resolutions =
-            em::resolve_descriptor_stage(rec->geom, bid, refs);
+            em::resolve_descriptor_stage(rec->geom, bid, refs, edit);
         for (std::size_t k = 0; k < resolutions.size(); ++k) {
             const em::LadderResolution& res = resolutions[k];
             if (res.outcome == em::LadderOutcome::AutoBind && !res.bound_shape.IsNull()) {
@@ -223,7 +224,8 @@ struct ExecResult {
 // Dispatch one op to its real executor. Sketch materializes into the plan; Extrude
 // / Boolean run OCCT; other verbs are UNSUPPORTED this WP.
 ops::OpOutcome run_single_op(ScratchJob& job, const json& op, const std::string& op_id,
-                             std::string& last_sketch_id, const onecad::CancelToken& cancel) {
+                             std::string& last_sketch_id, const onecad::CancelToken& cancel,
+                             bool post_upstream_edit) {
     const std::string op_type = get_str(op, "opType");
     const json params = (op.contains("params") && op["params"].is_object()) ? op["params"] : json::object();
 
@@ -235,8 +237,8 @@ ops::OpOutcome run_single_op(ScratchJob& job, const json& op, const std::string&
     }
 
     const OpDeterminism det = read_determinism(op);
-    ops::OpContext octx{job.bodies,       &job.sketches, job.partition,   &last_sketch_id,
-                        det.parallel,     det.occt_options, &cancel};
+    ops::OpContext octx{job.bodies,       &job.sketches,    job.partition, &last_sketch_id,
+                        det.parallel,     det.occt_options, &cancel,       post_upstream_edit};
 
     if (op_type == "Extrude") return ops::execute_extrude(octx, op, op_id);
     if (op_type == "Boolean") return ops::execute_boolean(octx, op, op_id);
@@ -306,6 +308,25 @@ void rollback_candidate(ScratchJob& job, std::string& last_sketch_id,
 
 }  // namespace
 
+// Whether this op's refs resolve against geometry an UPSTREAM edit moved — the
+// gate on the SCHEMA §10 descriptor-tie veto. True iff the plan carried
+// `editedFrom = k` and this op's `stepIndex` is strictly greater than k.
+//
+// `> k`, not `>= k`: step k is the edited op itself, and its own refs were
+// re-authored by the very edit that dirtied it (Rust restamps the descriptor and
+// anchor on the record it just wrote), so they are FRESH, not stale. Everything
+// after k inherits geometry that moved under it.
+//
+// A `ScratchJob` with no `edited_from` (preview, and every no-edit replay lane)
+// yields false ⇒ resolverVersion-1 behaviour, unchanged.
+namespace {
+bool step_is_post_edit(const ScratchJob& job, const json& op) {
+    if (!job.edited_from) return false;
+    if (!op.contains("stepIndex") || !op["stepIndex"].is_number()) return false;
+    return op["stepIndex"].get<std::uint64_t>() > *job.edited_from;
+}
+}  // namespace
+
 CandidateResult execute_candidate_op(ScratchJob& job, const json& op,
                                      const std::string& op_id,
                                      std::string& last_sketch_id,
@@ -318,11 +339,13 @@ CandidateResult execute_candidate_op(ScratchJob& job, const json& op,
     }
 
     CandidateSnapshot snapshot = snapshot_candidate(job, last_sketch_id);
+    const bool post_edit = step_is_post_edit(job, op);
 
-    resolve_input_refs(job, op, op_id, result.delta, result.needs_repair);
+    resolve_input_refs(job, op, op_id, em::LadderEditContext{post_edit}, result.delta,
+                       result.needs_repair);
     if (result.needs_repair.empty()) {
         merge_outcome(
-            result, run_single_op(job, op, op_id, last_sketch_id, cancel));
+            result, run_single_op(job, op, op_id, last_sketch_id, cancel, post_edit));
     } else {
         result.status = CandidateResult::Status::NeedsRepair;
     }
@@ -504,6 +527,13 @@ Envelope handle_execute_plan(Session& session, const Envelope& req, HandlerConte
     job.bodies = std::move(fence.cloned_bodies);
     job.partition = std::move(fence.cloned_partition);
     job.prepared_snapshot_id = fence.prepared_snapshot_id;
+    // OPTIONAL `editedFrom` (SCHEMA §7.2). Absence = "no edit context" = no claim;
+    // a non-integer is treated as absent rather than as an error, per §4's
+    // tolerate-unknown/ignore-malformed-optional reader rule. See §10 for what it
+    // gates (the descriptor-tie veto) — nothing else in the plan depends on it.
+    if (args.contains("editedFrom") && args["editedFrom"].is_number_unsigned()) {
+        job.edited_from = args["editedFrom"].get<std::uint64_t>();
+    }
 
     const ExecResult exec = execute_ops(job, ops, job_id, req.id, ctx);
     if (exec.status == ExecStatus::Cancelled) {

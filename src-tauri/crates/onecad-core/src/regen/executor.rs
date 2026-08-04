@@ -388,6 +388,7 @@ impl<E: GeometryEngine> RegenExecutor<E> {
         let policy = request.policy_versions;
         let artifacts = request.artifacts.clone();
         let target = request.target_step;
+        let edited_from = request.edited_from;
         let had_checkpoint = request.base_checkpoint.is_some();
 
         match self
@@ -397,8 +398,12 @@ impl<E: GeometryEngine> RegenExecutor<E> {
             AttemptOutcome::Settled(outcome) => outcome,
             AttemptOutcome::RetryFromZero => {
                 // F12: strip the checkpoint, replay from 0, exactly once.
+                // The retry re-plans, but the EDIT CONTEXT is a property of why this
+                // regen was requested, not of how the base is rebuilt — the geometry
+                // is still post-edit, so the veto must stay armed (SCHEMA §7.2/§10).
                 let from_zero = RegenPlanner::without_checkpoint(&session.timeline, target)
-                    .into_request(job, plan_rev, epoch, policy, artifacts);
+                    .into_request(job, plan_rev, epoch, policy, artifacts)
+                    .with_edited_from(edited_from);
                 if from_zero.start_step().is_none() {
                     return Outcome::NoOp;
                 }

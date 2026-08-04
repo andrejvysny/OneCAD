@@ -7,6 +7,8 @@
 #include <numeric>
 
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <Bnd_Box.hxx>
 #include <GeomAbs_CurveType.hxx>
 #include <GeomAbs_SurfaceType.hxx>
@@ -49,6 +51,27 @@ double body_diagonal(const TopoDS_Shape& body_shape) {
     const double dx = xmax - xmin, dy = ymax - ymin, dz = zmax - zmin;
     const double diag = std::sqrt(dx * dx + dy * dy + dz * dz);
     return diag > 1e-9 ? diag : 1.0;
+}
+
+// Distance from a world point to a candidate SUB-SHAPE (not to its centroid) —
+// the measure behind the veto's anchor-exact carve-out (SCHEMA §10).
+//
+// Shape distance, not centroid distance, is what "the element did not move" means
+// here. A parametric edit routinely slides a feature ALONG ITSELF: growing an
+// extrude's depth moves every vertical edge's midpoint by half the delta while the
+// edge still passes exactly through its stored anchor. Centroid distance would call
+// that a move and veto the flagship gesture (a fillet surviving a depth change);
+// shape distance correctly reports 0. Falls back to the centroid when OCCT's
+// extrema solver does not converge.
+double distance_to_shape(const gp_Pnt& p, const TopoDS_Shape& shape, const gp_Pnt& fallback) {
+    if (shape.IsNull()) return p.Distance(fallback);
+    try {
+        BRepExtrema_DistShapeShape dist(BRepBuilderAPI_MakeVertex(p).Vertex(), shape);
+        if (dist.IsDone() && dist.NbSolution() > 0) return dist.Value();
+    } catch (const Standard_Failure&) {
+        // fall through to the centroid approximation
+    }
+    return p.Distance(fallback);
 }
 
 std::string surface_type_name(GeomAbs_SurfaceType t) {
@@ -138,7 +161,8 @@ nlohmann::json LadderResolution::to_needs_repair_json() const {
 
 std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_shape,
                                                        const std::string& body_id,
-                                                       const std::vector<LadderRef>& refs) {
+                                                       const std::vector<LadderRef>& refs,
+                                                       const LadderEditContext& edit) {
     (void)body_id;  // evidence label only
     std::vector<LadderResolution> out(refs.size());
     const double body_diag = body_diagonal(body_shape);
@@ -154,6 +178,10 @@ std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_
 
         // Score matrix + kept per-candidate evidence, per ref of this kind.
         std::vector<std::vector<double>> score(n, std::vector<double>(std::max(c, 1), 0.0));
+        // The same matrix with the `anchor` feature excluded — the space the
+        // edit-scoped tie veto compares in (SCHEMA §10).
+        std::vector<std::vector<double>> desc_score(n, std::vector<double>(std::max(c, 1), 0.0));
+        std::vector<char> anchor_scored(n, 0);  // the anchor feature contributed at all
         std::vector<std::vector<std::map<std::string, double>>> contribs(n);
         for (int i = 0; i < n; ++i) {
             const LadderRef& r = refs[idxs[i]];
@@ -162,7 +190,9 @@ std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_
                 const ScoreResult s = score_candidate(r.descriptor, r.has_descriptor, r.anchor,
                                                       pool.descriptors[j], body_diag);
                 score[i][j] = s.score;
+                desc_score[i][j] = s.descriptor_score;
                 contribs[i][j] = s.contributions;
+                if (s.has_anchor_feature) anchor_scored[i] = 1;
             }
         }
 
@@ -220,7 +250,63 @@ std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_
                 if (j != aj) runner_up = std::max(runner_up, score[i][j]);
             const double margin = assigned - runner_up;
 
-            if (assigned >= kAutoBindMinScore && margin >= kAutoBindMinMargin) {
+            // EDIT-SCOPED DESCRIPTOR-TIE VETO (SCHEMA §10, resolverVersion 2).
+            //
+            // Compare the assigned candidate against its best rival in
+            // DESCRIPTOR-ONLY space (the anchor feature removed). When that
+            // separation is ~0 the descriptor cannot tell them apart and the ANCHOR
+            // is what produced the blended margin below. On a no-edit replay that is
+            // correct — the anchor sits exactly where it was authored. After an
+            // upstream edit it is not: the geometry moved, so a congruent twin can
+            // sit closer to the stale anchor than the real element and would bind
+            // silently and wrongly (H5-B / review finding B3).
+            //
+            // The comparison is SIGNED, so it also fires when the anchor overrode a
+            // descriptor-BETTER rival (`desc_rival > desc_assigned` ⇒ negative ⇒
+            // below epsilon) — an even clearer case of the anchor deciding.
+            //
+            // An anchor-only ref (no frozen descriptor) has descriptor score 0 for
+            // EVERY candidate, so it always ties — but the ANCHOR-EXACT carve-out
+            // below still resolves the common case (a vertex pick whose element did
+            // not move), so such a ref is not blanket-refused post-edit.
+            //
+            // ANCHOR-EXACT CARVE-OUT: the veto fires only when the winner is NOT
+            // still sitting on the stored anchor. An element within
+            // `kAnchorExactEps * scale` of its anchor demonstrably did not move, so
+            // the edit never made ITS anchor stale and there is nothing to distrust —
+            // that covers ~all real edits. What remains uncaught is the TELEPORT
+            // residual (an edit that parks an exact congruent twin precisely at the
+            // stale anchor): locally undecidable, accepted and documented by the
+            // HISTORY-HARDEN H6a decision, reserved for the future from-0 history
+            // rung. The veto keeps catching the DRIFT class — a twin merely NEARER to
+            // the stale anchor than the moved original.
+            bool anchor_decided_a_tie = false;
+            if (edit.post_upstream_edit && c >= 2 && anchor_scored[i]) {
+                bool has_rival = false;
+                double desc_rival = 0.0;
+                for (int j = 0; j < c; ++j) {
+                    if (j == aj) continue;
+                    if (!has_rival || desc_score[i][j] > desc_rival) {
+                        desc_rival = desc_score[i][j];
+                        has_rival = true;
+                    }
+                }
+                const bool descriptor_tie =
+                    has_rival && (desc_score[i][aj] - desc_rival) < kDescriptorTieEpsilon;
+                // Same scale the `anchor` similarity feature used, from one source.
+                const double winner_anchor_dist = distance_to_shape(
+                    r.anchor.world_point, pool.shapes[aj], pool.descriptors[aj].center);
+                const bool anchor_exact =
+                    winner_anchor_dist <= kAnchorExactEps * anchor_scale(body_diag);
+                anchor_decided_a_tie = descriptor_tie && !anchor_exact;
+            }
+
+            if (anchor_decided_a_tie) {
+                res.outcome = LadderOutcome::NeedsRepair;
+                res.reason = "ambiguous";  // no new §9 token
+                res.score = assigned;
+                res.margin = margin;
+            } else if (assigned >= kAutoBindMinScore && margin >= kAutoBindMinMargin) {
                 res.outcome = LadderOutcome::AutoBind;
                 res.bound_shape = pool.shapes[aj];
                 res.bound_topo_key = pool.topo_keys[aj];

@@ -1171,6 +1171,20 @@ fn planner_hash_decoupled_from_wire_body_form() {
         params["targetBodyId"],
         serde_json::json!(target.to_string())
     );
+
+    // (3) SCHEMA §7.2 `editedFrom` is OPTIONAL and ABSENT means "no claim": a plan
+    //     with no edit context must not emit the key at all (a `null` would be a
+    //     different claim, and the worker treats a non-integer as absent anyway).
+    assert!(
+        args.get("editedFrom").is_none(),
+        "no edit context ⇒ the key is OMITTED, not null: {args}"
+    );
+    let edited = execute_plan_args(&req.clone().with_edited_from(Some(2)));
+    assert_eq!(
+        edited["editedFrom"],
+        serde_json::json!(2),
+        "the edit lane stamps the step index verbatim"
+    );
 }
 
 /// The golden history-prefix hash of the fixed one-Boolean document above. Pinned so

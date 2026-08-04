@@ -26,7 +26,7 @@
 //!
 //! Gated on `ONECAD_WORKER_PATH` (else the dev-tree fallback); a missing binary skips.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -45,6 +45,7 @@ use onecad_core::history::StepState;
 use onecad_core::ids::{
     BodyId, ConstraintId, ElementId, EntityId, RecordId, RegionId, SketchId, SnapshotId, TopoKey,
 };
+use onecad_core::io::container::SaveMeta;
 use onecad_core::math::{Vec2, Vec3};
 use onecad_core::regen::{
     CancelToken, GeometryEngine, Lod, ModelSnapshot, Outcome, RegenRequest, ResolveOutcome,
@@ -116,6 +117,31 @@ fn add_op(rt: &mut DocumentRuntime, record: OperationRecord) {
 async fn regen_all(rt: &mut DocumentRuntime) -> RegenReport {
     rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
         .await
+}
+
+/// The EDIT LANE regen (`SchedulerHandle::handle` maps a `RegenHint::ToEnd` to
+/// `ToEnd { from = dirty.from }`, and `dirty.from` is the index of the edited
+/// record). `from > 0` is what makes the plan carry SCHEMA §7.2 `editedFrom`, so
+/// this — not `regen_all` — is the lane the descriptor-tie veto sees.
+async fn regen_from(rt: &mut DocumentRuntime, from: usize) -> RegenReport {
+    rt.run_regen(RegenRequest::ToEnd { from }, CancelToken::new())
+        .await
+}
+
+fn open_over(wm: &WorkerManager, path: &Path) -> DocumentRuntime {
+    let engine: Arc<dyn GeometryEngine> = Arc::new(wm.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
+    DocumentRuntime::open(path, engine, meshes, solver).expect("reopen saved container")
+}
+
+fn save_meta() -> SaveMeta {
+    SaveMeta {
+        app_version: "topology-rebind".into(),
+        occt_fingerprint: None,
+        created: "2026-08-04T00:00:00Z".into(),
+        modified: "2026-08-04T00:00:00Z".into(),
+    }
 }
 
 fn published<'a>(report: &'a RegenReport, what: &str) -> &'a Arc<ModelSnapshot> {
@@ -695,6 +721,221 @@ async fn build_filleted_box(rt: &mut DocumentRuntime, sid: SketchId) -> Filleted
         faces: fview.face_count,
         base_vol,
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// H6a — the EDIT-SCOPED descriptor-tie veto, proved in BOTH directions.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// H6a **flagship pin** — the gesture the whole ladder exists to serve, driven
+/// through the EDIT LANE (`ToEnd { from: 1 }` ⇒ `editedFrom: 1`), plus the reopen
+/// half of the gate.
+///
+/// The scene is symmetric on purpose: the four vertical edges of a plain box are
+/// EXACT descriptor twins (same length, same tangent up to sign, same relative
+/// adjacency hash), so the frozen `intent.descriptor` cannot separate them and the
+/// stored ANCHOR is the only thing that can. That is the congruent-twin case H5
+/// measured — and it is also the single most ordinary thing a user does: fillet an
+/// edge of a box, then change the extrude depth.
+///
+/// Growing the depth slides that edge ALONG ITS OWN AXIS. Its midpoint moves, but
+/// the edge still passes exactly through the stored anchor, so the anchor never went
+/// stale for it — it is **anchor-exact**, the veto's carve-out applies, and the
+/// fillet must re-bind CLEANLY. A veto without that carve-out fails right here
+/// (a blanket edit-scoped refusal NeedsRepairs every box fillet after every edit);
+/// `h6a_edit_lane_vetoes_a_drifted_twin` is the other half that proves it did not
+/// simply give up on B3.
+///
+/// The reopen leg (`ToEnd { from: 0 }` ⇒ no `editedFrom`) pins the second axis: the
+/// SAME document replayed from 0 off disk rebuilds byte-identical geometry, so the
+/// anchor is authoritative there regardless of the carve-out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn h6a_flagship_edit_lane_fillet_survives_and_reopens_clean() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("h6a.onecad");
+    let mut rt = runtime_over(&wm);
+    let sid = SketchId(Uuid::from_u128(0x6A));
+
+    let setup = build_filleted_box(&mut rt, sid).await;
+    assert!(
+        setup.filleted,
+        "H6a precondition: the fillet APPLIES on the clean box (faces {})",
+        setup.faces
+    );
+
+    // Save the CLEAN, pre-edit document — this is what the reopen half replays.
+    rt.save(&path, save_meta()).expect("save clean document");
+
+    // ── (1) EDIT LANE: change the extrude depth at step 1, regen from 1. ──────
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(EXTRUDE_REC)),
+        op: extrude_op(sid, "", 30.0),
+    })
+    .expect("edit extrude depth");
+    let edited = regen_from(&mut rt, 1).await;
+    let edited_snap = match &edited.outcome {
+        Outcome::Published(s) => s.clone(),
+        // A non-Published outcome would mean the plan never reached the fillet at
+        // all, which does not exercise the carve-out — fail loudly rather than pass.
+        other => panic!("H6a edit lane: expected Published, got {other:?}"),
+    };
+    eprintln!(
+        "H6a FLAGSHIP edit lane (editedFrom=1): needsRepair={}",
+        edited_snap.repair_summary.needs_repair_count
+    );
+    assert_eq!(
+        edited_snap.repair_summary.needs_repair_count, 0,
+        "H6a FLAGSHIP: the filleted edge slid along its own axis and still passes \
+         through its stored anchor — it is anchor-exact, so the edit-scoped veto \
+         MUST NOT fire and the fillet must re-bind cleanly"
+    );
+    assert!(
+        rt.repair_items().is_empty(),
+        "H6a FLAGSHIP: no repair items after a surviving rebind"
+    );
+    // Not a vacuous zero: the fillet is really on the deeper box.
+    let emesh = body_mesh(&mut rt, setup.body).await;
+    let eview = validate_mesh_blob(&emesh).expect("post-edit MESH1 validates");
+    assert!(
+        eview.face_count >= 7,
+        "H6a FLAGSHIP: the fillet SURVIVED (faces {} >= 7)",
+        eview.face_count
+    );
+    assert!(
+        mesh_volume(&eview, &emesh) > setup.vol,
+        "H6a FLAGSHIP: the deeper box really is bigger"
+    );
+
+    // ── (2) REOPEN: the same document off disk, replayed from 0, no edit. ─────
+    let mut reopened = open_over(&wm, &path);
+    let replay = regen_from(&mut reopened, 0).await;
+    let snap = published(&replay, "H6a reopen").clone();
+    eprintln!(
+        "H6a reopen (no editedFrom): needsRepair={}",
+        snap.repair_summary.needs_repair_count
+    );
+    assert_eq!(
+        snap.repair_summary.needs_repair_count, 0,
+        "H6a: a from-0 reopen rebuilds the geometry every anchor was authored \
+         against — the anchor is authoritative there and the tie resolves clean"
+    );
+    assert!(
+        reopened.repair_items().is_empty(),
+        "H6a: no repair items survive a clean reopen"
+    );
+    // And the fillet really applied on reopen (not a vacuous zero).
+    let mesh = body_mesh(&mut reopened, setup.body).await;
+    let view = validate_mesh_blob(&mesh).expect("reopened MESH1 validates");
+    assert!(
+        view.face_count >= 7,
+        "H6a reopen: the fillet is present (faces {} >= 7)",
+        view.face_count
+    );
+
+    wm.shutdown().await;
+}
+
+/// H6a **the other half** — the DRIFT class the veto must still catch, so the
+/// anchor-exact carve-out cannot be accused of quietly disabling it.
+///
+/// Same symmetric box, same edit lane, one difference: the fillet's stored anchor is
+/// authored deliberately OFF its edge, pushed toward the body interior. After the
+/// upstream edit nothing is sitting at that anchor any more — the ref's own edge is
+/// no longer anchor-exact, and the only thing the ladder could do is bind whichever
+/// congruent twin happens to be nearest a point that names nothing. That is exactly
+/// review finding B3, and it must come back as deterministic `NeedsRepair`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn h6a_edit_lane_vetoes_a_drifted_twin() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let sid = SketchId(Uuid::from_u128(0x6B));
+
+    // Box 40×20×25 (steps 0,1), exactly as `build_filleted_box` — but the fillet is
+    // authored with a DRIFTED anchor, so it is inlined rather than shared.
+    let sketch = single_rect(sid, 0.0, 0.0, 40.0, 20.0);
+    add_op(&mut rt, sketch_record(&sketch));
+    add_op(&mut rt, extrude_record(sid, "", 25.0));
+    let report = regen_all(&mut rt).await;
+    let _ = published(&report, "H6a drift extrude");
+    let body = report.changed[0].0;
+    let snap_id = SnapshotId(report.snapshot_id);
+
+    let mesh = body_mesh(&mut rt, body).await;
+    let view = validate_mesh_blob(&mesh).expect("box MESH1 validates");
+    let (edge_key, edge_anchor) = vertical_edge_pick(&view, &mesh);
+    let centre = bbox_center(&view);
+
+    // Push the anchor 4 mm off its edge, toward the body centre. The anchor-exact
+    // threshold on this body is 0.05 × 0.5 × ‖(40,20,30)‖ ≈ 1.35 mm, so 4 mm is
+    // decisively OUTSIDE it — while still far nearer this edge than any twin
+    // (≈20 mm away), so the pre-veto policy would happily auto-bind.
+    let dx = centre.x - edge_anchor.x;
+    let dy = centre.y - edge_anchor.y;
+    let len = dx.hypot(dy);
+    let drifted = Vec3::new_unchecked(
+        edge_anchor.x + 4.0 * dx / len,
+        edge_anchor.y + 4.0 * dy / len,
+        edge_anchor.z,
+    );
+
+    // Promote with the TRUE pick (that is what the user clicked); the ref the op
+    // carries is what drifts.
+    let anchor = AnchorIntent {
+        world_point: edge_anchor,
+        surface_uv: None,
+        local_frame: None,
+        adjacency_hint: None,
+        extra: Default::default(),
+    };
+    let promoted = rt
+        .promote_selection(snap_id, body, vec![(TopoKey::new(&edge_key), Some(anchor))])
+        .await
+        .expect("promote edge");
+    let edge_el = ElementId::new(promoted[0].element_id.clone());
+    add_op(&mut rt, fillet_record(body, edge_el, drifted, 2.0));
+    let clean = published(&regen_all(&mut rt).await, "H6a drift fillet").clone();
+    assert_eq!(
+        clean.repair_summary.needs_repair_count, 0,
+        "H6a drift precondition: on the UNEDITED box the drifted anchor still \
+         resolves (no edit context ⇒ the anchor is authoritative)"
+    );
+
+    // ── EDIT LANE: the upstream extrude moves, the anchor names nothing. ──────
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(EXTRUDE_REC)),
+        op: extrude_op(sid, "", 30.0),
+    })
+    .expect("edit extrude depth");
+    let edited = regen_from(&mut rt, 1).await;
+    let repairs = match &edited.outcome {
+        Outcome::Published(s) => s.repair_summary.needs_repair_count,
+        other => panic!("H6a drift edit lane: expected Published, got {other:?}"),
+    };
+    eprintln!("H6a DRIFT edit lane (editedFrom=1): needsRepair={repairs}");
+    assert!(
+        repairs > 0,
+        "H6a DRIFT: with nothing sitting at the stale anchor, a congruent twin must \
+         NOT be bound on proximity alone (review finding B3)"
+    );
+    let items = rt.repair_items();
+    assert!(
+        items
+            .iter()
+            .any(|i| i.ref_id.contains(&format!("{:x}", FILLET_REC))),
+        "H6a DRIFT: the repair item names the fillet's ref — got {:?}",
+        items.iter().map(|i| i.ref_id.clone()).collect::<Vec<_>>()
+    );
+
+    wm.shutdown().await;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

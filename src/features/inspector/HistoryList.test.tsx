@@ -337,3 +337,229 @@ describe("HistoryList icons — opType-first lookup (W0.5)", () => {
     expect(iconPathOf("history-row-n1")).toBe(ICON_PATHS.fillet);
   });
 });
+
+/*
+ * H7b — the ROLLBACK CURSOR is visible: rows past the bar read as drafts, the bar
+ * itself is drawn, and a persistent banner offers the way back. `appliedOps` is
+ * POSITIONAL over `items`, so only the full-lineage view may pass it.
+ */
+describe("HistoryList rollback cursor (H7b)", () => {
+  const rowActions = (): ((i: FeatureMeta) => HistoryRowActions) => () => ({
+    suppressed: false,
+    onToggleSuppress: vi.fn(),
+    onRoll: vi.fn(),
+    onDelete: vi.fn(),
+  });
+
+  it("grays + italicizes the rows at or past the cursor and titles them", () => {
+    render(<HistoryList items={items} appliedOps={1} onRollToEnd={vi.fn()} />);
+    expect(screen.getByTestId("history-row-f1")).toHaveAttribute("data-applied", "true");
+    expect(screen.getByTestId("history-row-f2")).toHaveAttribute("data-applied", "false");
+    expect(screen.getByTestId("history-row-f2").className).toContain("italic");
+    expect(screen.getByTestId("history-row-f2")).toHaveAttribute(
+      "title",
+      "Not applied — beyond the rollback bar",
+    );
+  });
+
+  it("draws the marker between the last applied row and the first draft", () => {
+    render(<HistoryList items={items} appliedOps={2} onRollToEnd={vi.fn()} />);
+    const marker = screen.getByTestId("history-rollback-marker");
+    expect(marker).toHaveTextContent("rolled back");
+    // It sits ABOVE the first unapplied row, i.e. immediately before f3.
+    const rows = screen.getByTestId("history-row-f3");
+    expect(marker.compareDocumentPosition(rows) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("banners the rolled-back count and rolls to end on click", () => {
+    const onRollToEnd = vi.fn();
+    render(<HistoryList items={items} appliedOps={1} onRollToEnd={onRollToEnd} />);
+    expect(screen.getByTestId("history-rollback-banner")).toHaveTextContent(
+      "2 operations rolled back",
+    );
+    fireEvent.click(screen.getByTestId("history-roll-to-end"));
+    expect(onRollToEnd).toHaveBeenCalled();
+  });
+
+  it("says 'operation' (singular) for a single rolled-back op", () => {
+    render(<HistoryList items={items} appliedOps={2} onRollToEnd={vi.fn()} />);
+    expect(screen.getByTestId("history-rollback-banner")).toHaveTextContent(
+      "1 operation rolled back",
+    );
+  });
+
+  it("renders NO cursor chrome for a fully-applied timeline or a slice view", () => {
+    const { rerender } = render(
+      <HistoryList items={items} appliedOps={items.length} onRollToEnd={vi.fn()} />,
+    );
+    expect(screen.queryByTestId("history-rollback-banner")).toBeNull();
+    expect(screen.queryByTestId("history-rollback-marker")).toBeNull();
+    expect(screen.getByTestId("history-row-f3")).toHaveAttribute("data-applied", "true");
+
+    // A SLICE view passes no cursor at all — indices there are not global, so a
+    // bar drawn from them would point at the wrong op.
+    rerender(<HistoryList items={items} rowActions={rowActions()} />);
+    expect(screen.queryByTestId("history-rollback-banner")).toBeNull();
+    expect(screen.getByTestId("history-row-f3")).toHaveAttribute("data-applied", "true");
+  });
+});
+
+/*
+ * H7b — failure visibility. The status→tone map is derived from the HALT POINT
+ * (the first error/needsRepair row) so the row a user is sent to is the row that
+ * is tinted, and a dirty row is only "blocked" when something ahead of it stopped.
+ */
+describe("HistoryList failure tones (H7b)", () => {
+  const tinted = (over: Partial<FeatureMeta>[]): FeatureMeta[] =>
+    items.map((f, i) => ({ ...f, ...(over[i] ?? {}) }));
+
+  it("an errored row keeps the red tint + the worker reason as its tooltip", () => {
+    render(<HistoryList items={tinted([{}, { status: "error", statusMessage: "boom" }, {}])} />);
+    expect(screen.getByTestId("history-row-f2")).toHaveAttribute("data-tone", "error");
+    expect(screen.getByTestId("history-row-f2")).toHaveAttribute("title", "boom");
+    expect(screen.getByText("Extrude").className).toContain("text-traffic-close");
+  });
+
+  it("a needsRepair row is warn-toned and carries the repair glyph", () => {
+    render(<HistoryList items={tinted([{}, { status: "needsRepair" }, {}])} />);
+    expect(screen.getByTestId("history-row-f2")).toHaveAttribute("data-tone", "repair");
+    expect(screen.getByTestId("history-repair-glyph-f2")).toBeInTheDocument();
+    expect(screen.getByText("Extrude").className).toContain("text-warn");
+  });
+
+  it("grays only the dirty rows AFTER the halt — a pre-halt dirty row is normal", () => {
+    // f1 dirty (ordinary mid-regen), f2 errored (the halt), f3 dirty (blocked).
+    render(
+      <HistoryList items={tinted([{ status: "dirty" }, { status: "error" }, { status: "dirty" }])} />,
+    );
+    expect(screen.getByTestId("history-row-f1")).toHaveAttribute("data-tone", "normal");
+    expect(screen.getByTestId("history-row-f3")).toHaveAttribute("data-tone", "stale");
+    expect(screen.getByTestId("history-row-f3")).toHaveAttribute(
+      "title",
+      "Not rebuilt — the timeline stopped earlier",
+    );
+  });
+
+  it("with nothing halted, a dirty row stays normal", () => {
+    render(<HistoryList items={tinted([{}, { status: "dirty" }, {}])} />);
+    expect(screen.getByTestId("history-row-f2")).toHaveAttribute("data-tone", "normal");
+  });
+
+  it("an errored row pins its suppress affordance visible, titled for recovery", () => {
+    const onToggleSuppress = vi.fn();
+    render(
+      <HistoryList
+        items={tinted([{}, { status: "error" }, {}])}
+        rowActions={() => ({
+          suppressed: false,
+          onToggleSuppress,
+          onRoll: vi.fn(),
+          onDelete: vi.fn(),
+        })}
+      />,
+    );
+    const suppress = screen.getByTestId("history-suppress-f2");
+    expect(suppress).toHaveAttribute("title", "Suppress to continue rebuild");
+    // The cluster is not hover-gated on this row (opacity-0 would hide it).
+    expect(suppress.parentElement?.className).toContain("opacity-100");
+    fireEvent.click(suppress);
+    expect(onToggleSuppress).toHaveBeenCalled();
+  });
+
+  it("the SELECTED row also keeps its cluster visible", () => {
+    render(
+      <HistoryList
+        items={items}
+        selectedId="f2"
+        rowActions={() => ({
+          suppressed: false,
+          onToggleSuppress: vi.fn(),
+          onRoll: vi.fn(),
+          onDelete: vi.fn(),
+        })}
+      />,
+    );
+    expect(screen.getByTestId("history-suppress-f2").parentElement?.className).toContain(
+      "opacity-100",
+    );
+    expect(screen.getByTestId("history-suppress-f1").parentElement?.className).toContain(
+      "opacity-0",
+    );
+  });
+});
+
+/*
+ * H7b — the row CONTEXT MENU (same Popover/MenuItem shape as the model tree's).
+ * Right-click selects the row first so the menu can never act on a row other than
+ * the one under the pointer.
+ */
+describe("HistoryList context menu (H7b)", () => {
+  const acts = (over: Partial<HistoryRowActions> = {}) => {
+    const base: HistoryRowActions = {
+      suppressed: false,
+      onToggleSuppress: vi.fn(),
+      onRoll: vi.fn(),
+      onDelete: vi.fn(),
+      ...over,
+    };
+    return { base, build: () => base };
+  };
+
+  it("opens on right-click, selects the row, and offers the full set", () => {
+    const onSelect = vi.fn();
+    const { base, build } = acts();
+    render(
+      <HistoryList items={items} onSelect={onSelect} onEdit={vi.fn()} rowActions={build} />,
+    );
+    fireEvent.contextMenu(screen.getByTestId("history-row-f2"));
+    expect(onSelect).toHaveBeenCalledWith("f2");
+    expect(screen.getByTestId("history-menu-edit")).toBeInTheDocument();
+    expect(screen.getByTestId("history-menu-roll-here")).toBeInTheDocument();
+    expect(screen.getByTestId("history-menu-suppress")).toHaveTextContent("Suppress");
+    expect(screen.getByTestId("history-menu-delete")).toBeInTheDocument();
+    // No "Roll to end" while the timeline is fully applied — a dead affordance.
+    expect(screen.queryByTestId("history-menu-roll-end")).toBeNull();
+    fireEvent.click(screen.getByTestId("history-menu-roll-here"));
+    expect(base.onRoll).toHaveBeenCalledWith(items[1]);
+  });
+
+  it("offers Roll to end only while rolled back", () => {
+    const onRollToEnd = vi.fn();
+    render(
+      <HistoryList
+        items={items}
+        rowActions={acts().build}
+        appliedOps={1}
+        onRollToEnd={onRollToEnd}
+      />,
+    );
+    fireEvent.contextMenu(screen.getByTestId("history-row-f1"));
+    fireEvent.click(screen.getByTestId("history-menu-roll-end"));
+    expect(onRollToEnd).toHaveBeenCalled();
+  });
+
+  it("labels the suppress item by the row's own flag", () => {
+    const { base, build } = acts({ suppressed: true });
+    render(<HistoryList items={items} rowActions={build} />);
+    fireEvent.contextMenu(screen.getByTestId("history-row-f2"));
+    expect(screen.getByTestId("history-menu-suppress")).toHaveTextContent("Unsuppress");
+    fireEvent.click(screen.getByTestId("history-menu-suppress"));
+    expect(base.onToggleSuppress).toHaveBeenCalledWith(items[1]);
+  });
+
+  it("delete is a two-click confirm (the house idiom)", () => {
+    const { base, build } = acts();
+    render(<HistoryList items={items} rowActions={build} />);
+    fireEvent.contextMenu(screen.getByTestId("history-row-f2"));
+    fireEvent.click(screen.getByTestId("history-menu-delete"));
+    expect(base.onDelete).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("history-menu-delete-confirm"));
+    expect(base.onDelete).toHaveBeenCalledWith(items[1]);
+  });
+
+  it("does not open at all on a list with no rowActions (read-only slice view)", () => {
+    render(<HistoryList items={items} onSelect={vi.fn()} />);
+    fireEvent.contextMenu(screen.getByTestId("history-row-f2"));
+    expect(screen.queryByTestId("history-menu-roll-here")).toBeNull();
+  });
+});

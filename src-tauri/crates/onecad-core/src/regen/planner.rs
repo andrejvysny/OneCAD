@@ -268,6 +268,37 @@ pub enum RegenRequest {
     ToEnd { from: usize },
 }
 
+impl RegenRequest {
+    /// The plan's OPTIONAL `editedFrom` (SCHEMA §7.2): the timeline step of the
+    /// upstream CONTENT edit that triggered this regen, or `None` for "no edit
+    /// context / no claim".
+    ///
+    /// Only the **edit lane** carries it. `SchedulerHandle::handle` maps a
+    /// [`RegenHint::ToEnd`](crate::edit::RegenHint::ToEnd) — emitted by
+    /// `UpdateOperationParams` / `EditOperationInput` / `AddOperation` /
+    /// `RemoveOperation` / suppression — to `ToEnd { from = dirty.from }`, and
+    /// `DirtyRange::from` IS the index of the record the command edited.
+    ///
+    /// **`from == 0` is deliberately treated as ABSENT.** Every no-edit replay lane
+    /// —`open_document`, `import_step`, recovery, `undo`, `redo` — requests
+    /// `ToEnd { from: 0 }` explicitly, and so does a first-record edit. Those two are
+    /// indistinguishable here, and the conservative direction is ABSENT: a from-0
+    /// replay rebuilds the geometry every stored anchor was authored against, so
+    /// claiming an edit there would veto every congruent-twin resolution in the
+    /// document and make a clean reopen un-resolvable (SCHEMA §10). Under-claiming
+    /// costs only the veto on a step-0 edit; over-claiming breaks reopen.
+    ///
+    /// `ToStep` previews never carry it — a preview resolves against the state it is
+    /// previewing, and its result is never published.
+    #[must_use]
+    pub fn edited_from(self) -> Option<usize> {
+        match self {
+            Self::ToEnd { from } if from > 0 => Some(from),
+            Self::ToEnd { .. } | Self::ToStep(_) => None,
+        }
+    }
+}
+
 /// The context a plan validates checkpoints against (SCHEMA §7.7 / §13 version
 /// axes). A checkpoint envelope is only usable when these match.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -337,6 +368,10 @@ impl RegenPlan {
             policy_versions,
             target_step: self.target_step,
             artifacts,
+            // "No edit context" by default — a plan does not know WHY it was
+            // compiled. The caller that owns the triggering `RegenRequest` stamps it
+            // via `PlanRequest::with_edited_from` (SCHEMA §7.2).
+            edited_from: None,
         }
     }
 }
@@ -570,6 +605,38 @@ mod tests {
             tl.insert_at_cursor(extrude(0x10 + i as u128, 5.0 + i as f64));
         }
         tl
+    }
+
+    /// SCHEMA §7.2 `editedFrom` derivation — the edit lane claims, every no-edit
+    /// replay lane stays silent, and `from == 0` is deliberately silent too.
+    #[test]
+    fn edited_from_is_claimed_only_by_the_edit_lane() {
+        assert_eq!(RegenRequest::ToEnd { from: 1 }.edited_from(), Some(1));
+        assert_eq!(RegenRequest::ToEnd { from: 7 }.edited_from(), Some(7));
+        // Open / import / recovery / undo / redo all request from-0 explicitly: a
+        // from-0 replay rebuilds exactly the geometry the anchors were authored
+        // against, so claiming an edit there would veto a clean reopen.
+        assert_eq!(RegenRequest::ToEnd { from: 0 }.edited_from(), None);
+        // Previews resolve against the state they preview and never publish.
+        assert_eq!(RegenRequest::ToStep(0).edited_from(), None);
+        assert_eq!(RegenRequest::ToStep(4).edited_from(), None);
+    }
+
+    /// The pure planner never invents edit context; the caller stamps it.
+    #[test]
+    fn into_request_defaults_edited_from_to_absent() {
+        let tl = timeline(3);
+        let g = DependencyGraph::new();
+        let plan = RegenPlanner::plan(&tl, &g, &[], RegenRequest::ToEnd { from: 1 }, &ctx());
+        let req = plan.into_request(
+            JobId(Uuid::from_u128(1)),
+            DocumentRevision(1),
+            WorkerEpoch(1),
+            PolicyVersions::default(),
+            PlanArtifacts::default(),
+        );
+        assert_eq!(req.edited_from, None, "the plan itself makes no claim");
+        assert_eq!(req.with_edited_from(Some(1)).edited_from, Some(1));
     }
 
     fn ctx() -> PlanContext {

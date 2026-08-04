@@ -138,8 +138,8 @@ OpOutcome run(OpContext& ctx, const json& op, const std::string& op_id, Mode mod
     }
 
     OpOutcome out;
-    const std::vector<em::LadderResolution> res =
-        em::resolve_descriptor_stage(target_shape, target_id, refs);
+    const std::vector<em::LadderResolution> res = em::resolve_descriptor_stage(
+        target_shape, target_id, refs, em::LadderEditContext{ctx.post_upstream_edit});
     std::vector<TopoDS_Edge> edges;
     for (const em::LadderResolution& r : res) {
         if (r.outcome == em::LadderOutcome::AutoBind && !r.bound_shape.IsNull() &&
@@ -220,7 +220,7 @@ OpOutcome run(OpContext& ctx, const json& op, const std::string& op_id, Mode mod
     if (builder) {
         ctx.partition.apply_history(target_id, result, *builder, out.delta, &out.needs_repair);
     }
-    out.body_events.push_back({"modified", target_id});
+    out.body_events.push_back({"modified", target_id, {}});  // no rankKey: no ordinal ranked
     out.body_ids.push_back(target_id);
     return out;
 }

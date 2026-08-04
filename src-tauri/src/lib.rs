@@ -85,8 +85,15 @@ pub type BoxFut = Pin<Box<dyn Future<Output = Outcome> + Send>>;
 /// (Codex MINOR-10 — the driver seam must not require an `AppHandle`).
 pub type RegenEmitter = Arc<dyn Fn(&RegenReport, &DocumentProjection) + Send + Sync>;
 
+/// A regen START sink: called once per job that actually got a prepared plan,
+/// before the unlocked drive phase. The production wrapper emits
+/// [`events::REGEN_STARTED`] so the frontend can show a busy indicator; every
+/// other caller passes the no-op ([`regen_driver_with_emitter`]).
+pub type RegenStartEmitter = Arc<dyn Fn() + Send + Sync>;
+
 /// Builds the app-layer regen driver over an explicit completion [`RegenEmitter`]
-/// (plan "app layer runs the executor").
+/// (plan "app layer runs the executor"), with NO start sink — the shape every
+/// test harness wants. See [`regen_driver_with_started`] for the full seam.
 ///
 /// **Fencing goes live (R-WP11):** the driver holds the single-writer lock only
 /// for the two short phases that mutate the document — phase 1
@@ -102,9 +109,24 @@ pub fn regen_driver_with_emitter(
     emit: RegenEmitter,
     autosave_tick: Arc<watch::Sender<u64>>,
 ) -> impl Fn(RegenDirective) -> BoxFut + Send + Sync + 'static {
+    regen_driver_with_started(runtime, emit, Arc::new(|| {}), autosave_tick)
+}
+
+/// [`regen_driver_with_emitter`] plus a [`RegenStartEmitter`] fired right after
+/// [`begin_regen`](DocumentRuntime::begin_regen) hands back a prepared plan — the
+/// ONE point where "a regen is really going to run" is known, and the lock is
+/// already released. A no-op regen never reaches it (it has no work to be busy
+/// about), which is why the pairing with the completion sink is one-directional.
+pub fn regen_driver_with_started(
+    runtime: Arc<Mutex<Option<DocumentRuntime>>>,
+    emit: RegenEmitter,
+    on_started: RegenStartEmitter,
+    autosave_tick: Arc<watch::Sender<u64>>,
+) -> impl Fn(RegenDirective) -> BoxFut + Send + Sync + 'static {
     move |directive: RegenDirective| {
         let runtime = runtime.clone();
         let emit = emit.clone();
+        let on_started = on_started.clone();
         let autosave_tick = autosave_tick.clone();
         Box::pin(async move {
             // Phase 1 (locked): compile the plan + clone the scratch session. An EMPTY
@@ -128,6 +150,9 @@ pub fn regen_driver_with_emitter(
                     }
                 }
             };
+            // The job has real work: announce it BEFORE the (slow) drive phase, so
+            // the busy indicator is up for the whole time the worker is out.
+            on_started();
             // Phase 2 (UNLOCKED): drive the worker; concurrent edits may supersede.
             let driven = prepared.drive(directive.cancel).await;
             // Phase 3 (locked): commit iff still current, then emit events.
@@ -151,20 +176,24 @@ pub fn regen_driver_with_emitter(
     }
 }
 
-/// The production regen driver: a thin [`regen_driver_with_emitter`] wrapper whose
-/// emitter forwards each completion to the Tauri event bus
-/// ([`api::emit_regen_events`]). ZERO behavior change from the pre-seam driver.
+/// The production regen driver: a thin [`regen_driver_with_started`] wrapper whose
+/// emitters forward to the Tauri event bus — each completion through
+/// ([`api::emit_regen_events`]), each start as [`events::REGEN_STARTED`].
 fn make_regen_driver(
     runtime: Arc<Mutex<Option<DocumentRuntime>>>,
     app: AppHandle,
     autosave_tick: Arc<watch::Sender<u64>>,
 ) -> impl Fn(RegenDirective) -> BoxFut + Send + Sync + 'static {
+    let start_app = app.clone();
     let emit: RegenEmitter = Arc::new(
         move |report: &RegenReport, projection: &DocumentProjection| {
             api::emit_regen_events(&app, report, projection);
         },
     );
-    regen_driver_with_emitter(runtime, emit, autosave_tick)
+    let on_started: RegenStartEmitter = Arc::new(move || {
+        let _ = start_app.emit(events::REGEN_STARTED, ());
+    });
+    regen_driver_with_started(runtime, emit, on_started, autosave_tick)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

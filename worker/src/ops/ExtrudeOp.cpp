@@ -208,7 +208,8 @@ ToFaceResolve resolve_to_face(OpContext& ctx, const json& face_ref, const gp_Pnt
         return out;
     }
     std::vector<em::LadderRef> refs{r};
-    const std::vector<em::LadderResolution> res = em::resolve_descriptor_stage(rec->geom, bid, refs);
+    const std::vector<em::LadderResolution> res = em::resolve_descriptor_stage(
+        rec->geom, bid, refs, em::LadderEditContext{ctx.post_upstream_edit});
     if (res.empty() || res[0].outcome != em::LadderOutcome::AutoBind || res[0].bound_shape.IsNull()) {
         out.needs_repair = res.empty() ? json::object() : res[0].to_needs_repair_json();
         return out;
@@ -454,7 +455,7 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
     if (*boolean_mode == app::BooleanMode::NewBody) {
         const std::string bid = "body_" + op_id;
         ctx.bodies.create(bid, op_id, tool_shape);
-        out.body_events.push_back({"created", bid});
+        out.body_events.push_back({"created", bid, {}});  // no rankKey: no ordinal ranked
         out.body_ids.push_back(bid);
         return out;  // new body: no pre-existing partition entries → empty delta
     }
@@ -479,7 +480,7 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
     if (ordered_solids(br.shape).empty()) {
         ctx.partition.remove_body(target_id, out.delta);
         ctx.bodies.erase(target_id);
-        out.body_events.push_back({"deleted", target_id});
+        out.body_events.push_back({"deleted", target_id, {}});  // no rankKey: no ordinal ranked
         return out;
     }
 

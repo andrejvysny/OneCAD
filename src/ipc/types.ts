@@ -1008,6 +1008,19 @@ export interface ApplyOperationResult {
    *  (MODEL-HARDEN W0.5). Empty changedBodies + this ⇒ a hard failure, not a no-op.
    *  The mock lane never sets it. */
   errorMessage?: string;
+  /**
+   * The timeline CURSOR after the edit (applied op count), H7b.
+   *
+   * An edit result used to carry no cursor at all, so a rollback only became
+   * visible when the next `projection-updated` landed — and never at all on the
+   * mock lane. Both clients now read it off the same place the timeline came
+   * from: the real one off the command's own projection (`applied_ops`), the mock
+   * off its cursor. Absent ⇒ the caller falls back to `nextAppliedOps`.
+   */
+  appliedOps?: number;
+  /** Timeline LENGTH after the edit — always `features.length`; sent for symmetry
+   *  with {@link ApplyOperationResult.appliedOps} and cross-checked in tests. */
+  totalOps?: number;
 }
 
 // ── Two-level preview (NEW_SPEC §15) ─────────────────────────────────────────

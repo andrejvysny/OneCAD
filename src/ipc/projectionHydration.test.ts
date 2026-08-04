@@ -246,3 +246,37 @@ describe("datum hydration", () => {
     expect(documentStore.getState().datums).toEqual({});
   });
 });
+
+/*
+ * H7b — the ROLLBACK CURSOR is hydrated authoritatively. It drives the grayed
+ * rows / marker / banner now, not just the one-shot open hint, so a projection
+ * that moves it must move the store with it.
+ */
+describe("projectionToStore — the rollback cursor", () => {
+  const three = [
+    { id: "a", kind: "sketch" as const, label: "Sketch 1", valueText: "", status: "ok" as const },
+    { id: "b", kind: "extrude" as const, label: "Extrude", valueText: "", status: "ok" as const },
+    { id: "c", kind: "fillet" as const, label: "Fillet", valueText: "", status: "ok" as const },
+  ];
+
+  it("carries appliedOps verbatim from the projection", () => {
+    expect(projectionToStore(proj(3, { features: three, appliedOps: 1, totalOps: 3 })).appliedOps).toBe(1);
+    applyProjectionToStore(proj(20, { features: three, appliedOps: 2, totalOps: 3 }));
+    expect(documentStore.getState().appliedOps).toBe(2);
+  });
+
+  it("a payload WITHOUT the field reads as fully applied (older backend / mock lane)", () => {
+    expect(projectionToStore(proj(5, { features: three })).appliedOps).toBe(3);
+  });
+
+  it("clamps a cursor past the last row — the marker must land on a real index", () => {
+    expect(projectionToStore(proj(6, { features: three, appliedOps: 9, totalOps: 9 })).appliedOps).toBe(3);
+  });
+
+  it("totalOps is `features.length` by construction, so the store keeps no copy", () => {
+    // `document_runtime.rs` builds `features` from ALL timeline records and sets
+    // `total_ops = timeline.len()`; a second stored copy could only disagree.
+    const wire = proj(7, { features: three, appliedOps: 1, totalOps: 3 });
+    expect(projectionToStore(wire).features).toHaveLength(wire.totalOps!);
+  });
+});

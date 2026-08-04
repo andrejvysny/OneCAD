@@ -6228,6 +6228,7 @@ export class ModelToolController {
     features: FeatureRecord[];
     changedBodies?: { bodyId: string }[];
     removedBodies?: string[];
+    appliedOps?: number;
   }): void {
     const doc = documentStore.getState();
     // Register any freshly-created body + drop removed ones (tree + visibility).
@@ -6243,10 +6244,12 @@ export class ModelToolController {
       features,
       bodies,
       dirty: true,
-      // An `ApplyOperationResult` carries no timeline cursor — see `nextAppliedOps`.
-      // Without this a freshly committed op would sit at `index === appliedOps` and
-      // read as an unapplied draft, which the H3 inline-value gate refuses to edit.
-      appliedOps: nextAppliedOps(doc.appliedOps, doc.features.length, features.length),
+      // H7b: the result carries the cursor, which is what makes an insert-at-cursor
+      // (authoring while rolled back) land at the right place — `nextAppliedOps`
+      // could only ever clamp, so the fresh op read as an unapplied draft and the
+      // H3 inline-value gate refused to edit it.
+      appliedOps:
+        res.appliedOps ?? nextAppliedOps(doc.appliedOps, doc.features.length, features.length),
     });
   }
 

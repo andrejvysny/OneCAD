@@ -18,6 +18,16 @@ pub const DOCUMENT_CHANGED: &str = "document-changed";
 /// Incremental regen progress for the current job (reserved; R-WP11 fills it).
 pub const REGEN_PROGRESS: &str = "regen-progress";
 
+/// A regen job STARTED — emitted once the driver has a prepared plan (i.e. the
+/// job will really run the worker), before the unlocked drive phase. Payload-less
+/// on purpose: it exists so the frontend can show a "Rebuilding…" indicator, and
+/// richer per-step progress belongs to [`REGEN_PROGRESS`], not here.
+///
+/// Pairing: every started job ends in exactly one [`REGEN_FINISHED`], but the
+/// converse does NOT hold — a no-op regen finishes without ever starting. The
+/// frontend counter must therefore clamp at zero rather than assume a 1:1 match.
+pub const REGEN_STARTED: &str = "regen-started";
+
 /// The current regen job finished (published or discarded) — carries a
 /// [`RegenFinished`](crate::dto::RegenFinished) (`{revision, outcome}`) so the
 /// frontend correlation resolves promptly (no 8 s fallback; F-WP8 flag 3). Emitted

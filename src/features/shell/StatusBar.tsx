@@ -26,6 +26,9 @@ export function StatusBar() {
   const dofBadge = useViewportStore((s) => s.dofBadge);
   const statusHint = useViewportStore((s) => s.statusHint);
   const workerState = useWorkerStore((s) => s.state);
+  // H7b: > 0 while a regen job is out (real lane: regen-started/finished; mock:
+  // the same transitions around its synchronous apply).
+  const regenBusy = useDocumentStore((s) => s.regenBusy);
   const activeSketchId = useViewportStore((s) => s.activeSketchId);
   // WP-C2: the cursor read-out is mm in the store and display-unit on screen.
   // Subscribing here is what repaints the row when the unit picker moves.
@@ -51,6 +54,14 @@ export function StatusBar() {
           <span aria-hidden="true" className="h-[14px] w-px bg-border" />
           <span className={statusHint.severity === "error" ? "text-traffic-close" : "text-ink-5"}>
             {statusHint.message}
+          </span>
+        </>
+      )}
+      {regenBusy > 0 && (
+        <>
+          <span aria-hidden="true" className="h-[14px] w-px bg-border" />
+          <span role="status" data-testid="regen-busy" className="text-ink-4">
+            Rebuilding…
           </span>
         </>
       )}

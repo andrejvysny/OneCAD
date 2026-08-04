@@ -127,15 +127,35 @@ export interface DocumentProjection {
    * `[appliedOps, features.length)` are drafts beyond the rollback bar. Backend-
    * authoritative — hydrated from every `projection-updated`.
    *
-   * SEAM: an `ApplyOperationResult` carries no cursor, so `applyEditResult` can only
-   * CLAMP this to the new timeline length; a rollback's cursor move is corrected by
-   * the next authoritative projection (real lane). H7b owns carrying the cursor on
-   * the edit result itself.
+   * H7b: an `ApplyOperationResult` now CARRIES the cursor (`ApplyOperationResult
+   * .appliedOps`, taken from the command's own projection on the real lane and
+   * from the mock cursor on the mock lane), so a rollback is visible immediately
+   * instead of waiting for the next projection. {@link nextAppliedOps} stays as
+   * the fallback for a result that has none.
+   *
+   * `totalOps` is deliberately NOT a separate field: the projection's `features`
+   * array is built from ALL timeline records (`document_runtime.rs` maps
+   * `timeline.records()` whole, and `total_ops` is `timeline.len()`), so
+   * `features.length` IS the total — a second copy could only ever disagree.
    */
   appliedOps: number;
 }
 
 export interface DocumentState extends DocumentProjection {
+  /**
+   * How many regen jobs are in flight (H7b). NOT a projection fact — it is
+   * transport state, so it deliberately survives `applySnapshot` (a projection
+   * lands DURING a regen) and is cleared only by {@link DocumentState.regenIdle}.
+   * The status bar shows "Rebuilding…" while it is > 0.
+   */
+  regenBusy: number;
+  /** A regen job started (`regen-started`). */
+  regenStarted(): void;
+  /** A regen job completed (`regen-finished`). CLAMPED at zero: a no-op regen
+   *  finishes without ever having started, so completions outnumber starts. */
+  regenSettled(): void;
+  /** Forget all in-flight regens (document replaced/closed — nothing will finish). */
+  regenIdle(): void;
   /** Replace the whole projection (backend snapshot event). */
   applySnapshot(snapshot: DocumentProjection): void;
   /** Merge a partial projection delta (backend change event). */
@@ -315,6 +335,19 @@ function initialDocument(): DocumentProjection {
 
 export const documentStore = createStore<DocumentState>()((set) => ({
   ...initialDocument(),
+  regenBusy: 0,
+
+  regenStarted() {
+    set((s) => ({ regenBusy: s.regenBusy + 1 }));
+  },
+
+  regenSettled() {
+    set((s) => ({ regenBusy: Math.max(0, s.regenBusy - 1) }));
+  },
+
+  regenIdle() {
+    set({ regenBusy: 0 });
+  },
 
   applySnapshot(snapshot) {
     set(snapshot);

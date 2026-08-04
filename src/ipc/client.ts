@@ -294,6 +294,18 @@ export interface CadClient {
   applyEditCommand(command: WireEditCommand): Promise<ApplyOperationResult>;
 
   /**
+   * Clear the worker crash-circuit breaker and resolve to how many poison keys
+   * were forgotten (H2 `clear_worker_circuit`).
+   *
+   * The ordinary fix for a poisoned op is to EDIT it — a poison key is
+   * `(historyPrefixHash, opRecordId, occtFingerprint)`, so changing the params
+   * mints a new key by itself. This exists for what the key cannot see: an input
+   * file repaired outside the document, or a worker rebuilt in place. No document
+   * needs to be open. The mock has no circuit and resolves 0.
+   */
+  clearWorkerCircuit(): Promise<number>;
+
+  /**
    * Fetch a stored operation's params (the EditCommand `op.params` serde shape),
    * keyed by its record id. A parametric re-edit that changes ONE scalar (revolve
    * angle / shell thickness / fillet radius) fetches these on arm and deep-merges

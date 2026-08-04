@@ -1,4 +1,4 @@
-// Scoring.h — normalized [0,1] descriptor-match confidence (W-WP6, resolverVersion 1).
+// Scoring.h — normalized [0,1] descriptor-match confidence (W-WP6, resolverVersion 2).
 //
 // ── Why a new score (not the OneCAD-CPP one) ─────────────────────────────────
 // OneCAD-CPP `ElementMap::score()` (kernel/elementmap/ElementMap.h:639-672) is an
@@ -43,12 +43,58 @@ namespace km = onecad::kernel::elementmap;
 
 // resolverVersion (SCHEMA §10 / handshake §13). Bump on any scoring change; it is
 // stamped into every NeedsRepair evidence payload (`scoringVersion`).
-inline constexpr int kResolverVersion = 1;
+//
+// 2 (H6a) — two scoring-policy changes: the EDIT-SCOPED descriptor-tie veto
+// (`LadderEditContext`, gated on the plan's `editedFrom`) and the PROPORTIONAL
+// anchor floor (the fixed 1.0 mm scale floor became a 1e-7 divide-by-zero guard).
+// 1 (W-WP6) — the original normalized [0,1] confidence.
+inline constexpr int kResolverVersion = 2;
 
 // Locked confidence policy (SCHEMA §10). A false positive (silent wrong bind) is
 // strictly worse than a false negative (asking the user), so BOTH must hold.
 inline constexpr double kAutoBindMinScore = 0.85;   // best candidate confidence
 inline constexpr double kAutoBindMinMargin = 0.10;  // best − runner-up
+
+// Descriptor-only separation below which two candidates count as TIED for the
+// edit-scoped veto (SCHEMA §10, resolverVersion 2). Deliberately an order of
+// magnitude under `kAutoBindMinMargin`: the veto must fire only when the
+// descriptor genuinely cannot tell the candidates apart and the ANCHOR is doing
+// all the deciding, never merely because the descriptor evidence is weak. The
+// congruent-twin case it targets separates by EXACTLY 0 (identical type,
+// magnitude, direction and adjacency hash), so any small positive epsilon works;
+// 0.02 absorbs float noise in the magnitude/direction similarities without
+// reaching a case where 0.02 of descriptor separation is real evidence.
+inline constexpr double kDescriptorTieEpsilon = 0.02;
+
+// ANCHOR-EXACT carve-out for the edit-scoped veto (SCHEMA §10, resolverVersion 2).
+// A winner lying within `kAnchorExactEps * anchor_scale(bodyDiag)` of the stored
+// anchor — measured to the SUB-SHAPE, not to its centroid — is treated as NOT
+// having moved, and its anchor is allowed to settle a descriptor tie even post-edit.
+//
+// Derivation: the veto exists because an edit can move geometry out from under a
+// stored anchor. An element that is still sitting ON its anchor demonstrably did
+// NOT move, so the anchor never went stale for it and there is nothing to distrust
+// — which covers ~all real edits, where a parametric change either leaves a feature
+// in place or slides it along its own axis. (Sliding along itself is exactly why the
+// measure is to the shape: growing an extrude's depth moves every vertical edge's
+// MIDPOINT by half the delta while the edge still passes through its stored anchor.)
+// 0.05 is 5% of the anchor scale (itself half the body diagonal), i.e. 2.5% of the
+// body's extent: far above float/tessellation noise, far below the separation of any
+// two distinct features on the same body.
+//
+// What this deliberately does NOT catch is the TELEPORT residual: an edit that parks
+// an EXACT congruent twin precisely at the stale anchor while moving the original
+// away. That is locally undecidable — the worker sees two identical descriptors and
+// one of them is exactly at the anchor — and is an accepted, documented residual of
+// HISTORY-HARDEN H6a, reserved for the future from-0 history rung. The veto keeps
+// catching the DRIFT class: a twin merely NEARER to the stale anchor than the moved
+// original, which is genuinely suspicious.
+inline constexpr double kAnchorExactEps = 0.05;
+
+// The anchor-proximity scale (SCHEMA §10): half the body diagonal, floored only
+// against divide-by-zero. Shared by the `anchor` similarity feature and by the
+// veto's anchor-exact carve-out so the two can never drift apart.
+double anchor_scale(double body_diag);
 
 // Anchor evidence used to narrow a descriptor tie (SCHEMA §10 "anchor narrowing").
 struct AnchorEvidence {
@@ -62,6 +108,18 @@ struct AnchorEvidence {
 struct ScoreResult {
     double score = 0.0;
     std::map<std::string, double> contributions;  // named; Σ == score
+
+    // The SAME confidence recomputed with the `anchor` feature EXCLUDED — the
+    // "descriptor-only" score the edit-scoped tie veto compares (SCHEMA §10).
+    // Renormalized over the descriptor weights alone, so it is directly
+    // comparable across candidates. 0 when there is no descriptor evidence at
+    // all (an anchor-only ref) — then EVERY candidate ties at 0, which is the
+    // intended conservative reading: a stale anchor is the only evidence left.
+    double descriptor_score = 0.0;
+    // Whether the `anchor` feature contributed to `score`.
+    bool has_anchor_feature = false;
+    // Whether ANY non-anchor (descriptor) feature contributed to `score`.
+    bool has_descriptor_features = false;
 };
 
 // Score one candidate against a frozen intent descriptor + anchor. When

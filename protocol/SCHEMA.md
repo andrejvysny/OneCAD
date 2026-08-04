@@ -477,6 +477,7 @@ failure/NeedsRepair preparing snapshot `m−1`, and ends with a terminal
   "expectedBaseHash": "7f1a2b3c4d5e6f70",     // opaque base token (Rust-minted)
   "prefixHashes": [ "a1b2…", "c3d4…", "e5f6…" ],  // opaque per-executed-op tokens
   "baseCheckpoint": { "stepIndex": 2, "checkpointId": "ckpt_9" },  // optional
+  "editedFrom": 4,                            // optional — step of the upstream content edit
   "policyVersions": { "quantizationVersion": 1, "solverPolicyVersion": 1,
                       "descriptorVersion": 1, "resolverVersion": 1, "signatureVersion": 1 },
   "targetStep": 6,
@@ -535,6 +536,29 @@ failure/NeedsRepair preparing snapshot `m−1`, and ends with a terminal
   instead of replaying from empty.
 - `ops`: the ordered op slice; each op is executed on the **exact snapshot
   produced by its predecessor** (Invariant 3).
+- **`editedFrom` (OPTIONAL) — the edit-context declaration.** The timeline step
+  index of the upstream **content edit** that triggered this regen. It carries no
+  fencing, changes no geometry, and gates exactly one thing: the
+  [§10](#10-resolution-ladder) descriptor-tie veto, which applies to refs owned by
+  a step **strictly greater than** `editedFrom`. `> `, not `>= `: step
+  `editedFrom` is the edited op itself and Rust re-stamped its refs as part of the
+  edit, so they are fresh.
+  **ABSENT means "no claim", and absence is the safe default.** Only the edit lane
+  sets it — a `RegenToEnd(from)` whose `from > 0`, i.e. one the scheduler derived
+  from an `UpdateOperationParams` / `EditOperationInput` / `AddOperation` /
+  `RemoveOperation` / suppression command's dirty floor. Every **no-edit replay**
+  lane omits it: open-time replay, STEP import, crash recovery, undo, redo — all of
+  which request `RegenToEnd(0)` explicitly — and every `RegenToStep(k)` preview.
+  **`from == 0` is deliberately treated as absent**: a from-0 replay is
+  indistinguishable from a first-record edit here, and it rebuilds exactly the
+  geometry every stored anchor was authored against, so claiming an edit there
+  would veto every congruent-twin resolution in the document and make a clean
+  reopen un-resolvable. Under-claiming costs one veto on a step-0 edit;
+  over-claiming breaks reopen — the conservative direction is ABSENT.
+  Rust owns this field entirely: it is the only side that knows *why* a regen was
+  requested. The worker MUST tolerate its absence (pre-`resolverVersion`-2
+  behaviour) and SHOULD treat a non-integer value as absent rather than as an
+  error, per [§4](#4-json-encoding-rules).
 
 Per-step `event`s (`event:"planStep"`), one per executed step:
 
@@ -1928,7 +1952,7 @@ STATE (see [§8](#8-error-taxonomy)).
   "ladderFailed": "descriptor",          // "history" | "descriptor"
   "reason": "ambiguous",                 // "ambiguous" | "no-candidates" | "low-confidence"
                                          //   | "ordinal-permutation" (Rust-seeded only)
-  "scoringVersion": 1,                   // = resolverVersion the scores were computed under
+  "scoringVersion": 2,                   // = resolverVersion the scores were computed under
   "candidates": [
     {
       "topoKey": "f:31",
@@ -1954,6 +1978,10 @@ STATE (see [§8](#8-error-taxonomy)).
 - `scoringVersion`: the `resolverVersion` (§10) the candidate scores were computed
   under. Present on every NeedsRepair evidence payload so a repair UI / a
   Rust-side policy knows which normalized-scoring scheme produced the numbers.
+  This is the version the **worker actually scored under**, which is not required to
+  equal the `policyVersions.resolverVersion` Rust pinned in §7.2 — that axis gates
+  checkpoint-cache compatibility. When the two differ, this field wins for
+  interpreting the numbers in THIS payload.
 - `reason`: the four tokens above. `ambiguous` / `no-candidates` / `low-confidence`
   are ladder outcomes a **worker** may emit. **`ordinal-permutation` is
   Rust-seeded only** (VF-B6): it marks a reference standing on an N-body op's
@@ -2000,11 +2028,13 @@ count (edges). This is `quantizationVersion = 1` / `descriptorVersion = 1`.
 
 **Scoring (REDESIGNED — normalized).** OneCAD-CPP's `score()` is an unbounded,
 scale-dependent cost that cannot express the locked policy; this protocol replaces
-it with a **normalized `[0,1]` versioned confidence** (`resolverVersion = 1`).
-Higher = better match. Policy:
+it with a **normalized `[0,1]` versioned confidence** (`resolverVersion = 2`;
+version 1 was the same scheme without the edit-scoped veto and with a fixed
+`1.0 mm` anchor-scale floor). Higher = better match. Policy:
 
 - **Auto-bind iff** `score1 ≥ 0.85` **AND** `(score1 − score2) ≥ 0.10`
-  (score1/score2 = best/second-best candidate).
+  (score1/score2 = best/second-best candidate) **AND the edit-scoped
+  descriptor-tie veto below does not fire**.
 - Otherwise, attempt anchor narrowing; if still not confident ⇒ NeedsRepair.
 - For a set of referenced elements, use **min-cost assignment** over the
   **referenced-only** candidate sets (greedy is a documented counterexample —
@@ -2015,6 +2045,77 @@ Higher = better match. Policy:
 - A **symmetric tie** (e.g. `0.91` vs `0.91`, margin `< 0.10`) ⇒ NeedsRepair. A
   false positive (wrong silent bind) is strictly worse than a false negative
   (asking the user).
+- The **anchor proximity feature scales by `max(0.5 × bodyDiagonal, 1e-7)`** — the
+  floor is a divide-by-zero guard, NOT a modelling-scale constant. (In
+  `resolverVersion = 1` it was `1.0`, which silently stopped being proportional for
+  every body under 2 mm across: on a sub-millimetre part every candidate sat a
+  small fraction of a millimetre from the anchor, every anchor similarity collapsed
+  towards 1, the margin vanished and the whole part became un-resolvable. The
+  degenerate-bbox case is already floored at `1.0` when the diagonal is computed.)
+
+**Edit-scoped descriptor-tie veto (`resolverVersion = 2`).** Congruent twins — two
+sub-shapes with identical type, magnitude, direction and adjacency hash — tie
+EXACTLY in descriptor space, so the `anchor` is the only feature that can separate
+them. Whether letting it do so is correct depends on something the worker cannot
+see in the geometry:
+
+- On a **no-edit replay** (no [§7.2](#72-regen--executeplan) `editedFrom`) the
+  geometry is rebuilt exactly as the ref was authored against, so the stored anchor
+  sits on its element and **the anchor MAY decide the tie** — this is what makes a
+  reopen, a rollback and an undo/redo resolve cleanly.
+- After an **upstream content edit** (`editedFrom = k`, for refs owned by a step
+  `> k`) the geometry moved out from under the stored anchor, which can now sit
+  closer to a twin than to the real element. There the anchor is precisely the
+  evidence the edit invalidated, so **it MUST NOT decide**: the worker emits
+  NeedsRepair with `reason: "ambiguous"` and both candidates in the evidence.
+
+Normatively, for a ref owned by a step `> editedFrom`, auto-bind is REFUSED when
+**both** hold:
+
+1. **Descriptor tie** — the assigned candidate and its best rival are separated by
+   **less than `0.02` in DESCRIPTOR-ONLY score**: the same weighted confidence
+   recomputed with the `anchor` feature removed and renormalized over the remaining
+   weights, with the `anchor` feature having contributed at all. The comparison is
+   signed, so it also refuses when the anchor overrode a descriptor-BETTER rival.
+   `0.02` is an order of magnitude below the `0.10` margin gate on purpose — the
+   veto must fire only where the descriptor genuinely cannot tell candidates apart
+   (congruent twins separate by exactly `0`), never merely because descriptor
+   evidence is weak.
+2. **NOT anchor-exact** — the assigned candidate does not still lie on its stored
+   anchor. "Lies on" is measured as the distance from the anchor world point to the
+   candidate **sub-shape** (NOT to its centroid), against `0.05 × ` the anchor
+   scale. **Shape distance is load-bearing**: a parametric edit routinely slides a
+   feature along its own axis — growing an extrude's depth moves every vertical
+   edge's midpoint by half the delta while the edge still passes exactly through its
+   anchor — and centroid distance would misreport that as a move.
+
+Clause 2 is the **anchor-exact carve-out**, and it is what keeps the veto scoped to
+the class it was built for. An element still sitting on its anchor demonstrably did
+NOT move, so the edit never made *its* anchor stale and there is nothing to
+distrust; that covers ~all real edits. The veto therefore fires on the **DRIFT**
+class — a twin merely NEARER to a stale anchor than the moved original, where
+nothing is sitting where it was authored and proximity alone would be a guess.
+
+A ref with **no frozen descriptor** ties at descriptor score `0` against every
+candidate, so clause 1 always holds for it; clause 2 still resolves the common case
+(a vertex pick whose element did not move), so such a ref is not blanket-refused
+after an edit.
+
+**Accepted residual — the TELEPORT case.** An edit that parks an EXACT congruent
+twin *precisely* at the stale anchor, while moving the original away, still
+auto-binds — to the twin, silently. This is locally undecidable at this rung: the
+worker sees two byte-identical descriptors, one exactly at the anchor, and no
+evidence separating "it never moved" from "something else moved onto it". Refusing
+it means dropping the carve-out, which regresses the flagship gesture (a fillet on a
+plain box — whose four vertical edges are exact twins — would then NeedsRepair after
+every upstream edit). The residual is accepted and documented here; closing it is
+reserved for the from-0 history rung, which has the lineage this stage lacks.
+
+Note the two version fields answer different questions and MAY differ: §7.2
+`policyVersions.resolverVersion` is the axis **Rust pins** (it gates checkpoint-cache
+compatibility), while [§9](#9-needsrepair-payload) `scoringVersion` is the version
+the **worker actually scored under** and is the authority for interpreting the
+numbers in a payload.
 
 The worker returns, per ref: candidates, `featureContributions`, `score`,
 `margin`, and the ladder level reached — full evidence for repair UI and for
@@ -2081,6 +2182,52 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-04 — §7.2 ADDITIVE `editedFrom` + §10 edit-scoped descriptor-tie veto,
+  proportional anchor floor, `resolverVersion` 2** (HISTORY-HARDEN H6a, review
+  finding B3; cross-track sign-off recorded in `TODO.md` by the HISTORY-HARDEN H6a
+  gate). §7.2 gains ONE optional request field, `editedFrom` — the timeline step of
+  the upstream content edit that triggered the regen. **Purely additive; absence is
+  "no claim" and reproduces the previous behaviour exactly.** Only the edit lane
+  sets it (`RegenToEnd(from)` with `from > 0`); open/import/recovery/undo/redo all
+  request `RegenToEnd(0)` and every `RegenToStep(k)` preview omits it, and
+  **`from == 0` is deliberately treated as ABSENT** — a from-0 replay is
+  indistinguishable from a first-record edit, and claiming an edit there would veto
+  every congruent-twin resolution and make a clean reopen un-resolvable.
+  §10 changes the scoring POLICY in two ways, hence `resolverVersion` 1 → 2: (a) for
+  a ref owned by a step **strictly after** `editedFrom`, auto-bind is refused when
+  the assigned candidate and its best rival are within `0.02` in **descriptor-only**
+  score (the anchor feature removed, the anchor having contributed) **AND** the
+  winner is not **anchor-exact** — i.e. it no longer lies within `0.05 × ` the anchor
+  scale of its stored anchor, measured to the SUB-SHAPE rather than to its centroid
+  so that a feature sliding along its own axis is correctly read as "did not move";
+  (b) the anchor-proximity scale floor `max(0.5 × bodyDiagonal, 1.0)` becomes
+  `max(0.5 × bodyDiagonal, 1e-7)`, a divide-by-zero guard rather than a
+  modelling-scale constant.
+  The anchor-exact carve-out scopes the veto to the **DRIFT** class (a twin merely
+  nearer to a stale anchor than the moved original). Without it the veto is a blanket
+  post-edit refusal that regresses the flagship gesture — a fillet on a plain box,
+  whose four vertical edges are exact descriptor twins, would NeedsRepair after every
+  upstream edit. The **TELEPORT** case (an edit that parks an exact twin precisely at
+  the stale anchor) remains an ACCEPTED, documented residual: it is locally
+  undecidable at this rung and is reserved for the from-0 history rung, which has the
+  lineage the descriptor stage lacks.
+  Rationale: H5 measured that congruent twins tie EXACTLY in descriptor space, so
+  the anchor decides. That is correct on a clean reopen — the anchor sits on its
+  element — and wrong after an upstream edit, where the geometry moved and a twin
+  can sit closer to the STALE anchor than the real element; the ladder then bound it
+  and reported zero repairs (finding B3, the H5-B silent-wrong-bind class). The two
+  cases are locally indistinguishable in the worker, so Rust — the only side that
+  knows why a regen was requested — declares the context and the worker gates on it.
+  The old `1.0 mm` floor separately made every sub-2 mm part un-resolvable by
+  collapsing all anchor similarities towards 1.
+  **Fixture bump — 2 files.** `worker/tests/fixtures/executeplan_needsrepair.ndjson`
+  and `worker/tests/fixtures/resolve_refs.ndjson` pin `scoringVersion` and move
+  `1` → `2`. No shape, signature, id or geometry moves: the NeedsRepair payloads are
+  otherwise byte-identical and both files are subset matchers. `protocol/fixtures/`
+  (hello/echo only) is untouched, and no `policyVersions.resolverVersion` on the
+  wire changes — §10 documents why the pinned axis and the reported `scoringVersion`
+  are allowed to differ.
 
 - **2026-08-04 — §7.5 `AcquireElementIds` MUST refuse a stale `snapshotId`**
   (HISTORY-HARDEN H4, VF-M3; cross-track sign-off recorded in `TODO.md` by the

@@ -142,6 +142,7 @@ const CMD = {
   massProperties: "query_mass_properties",
   previewOp: "preview_op",
   resolveRefs: "resolve_refs",
+  clearWorkerCircuit: "clear_worker_circuit",
   confirmExit: "confirm_exit",
   cancelExit: "cancel_exit",
 } as const;
@@ -149,6 +150,7 @@ const CMD = {
 const EVT = {
   documentChanged: "document-changed",
   projectionUpdated: "projection-updated",
+  regenStarted: "regen-started",
   regenFinished: "regen-finished",
   sketchSolved: "sketch-solved",
   workerStatus: "worker-status",
@@ -484,6 +486,10 @@ export function createTauriClient(): CadClient {
   function resetCorrelation(): void {
     lastPublishedChange = null;
     currentSnapshotId = 0;
+    // …and any in-flight regen: the driver returns early (without emitting) when
+    // the document closes mid-drive, so a busy count kept across a replacement
+    // would stick at 1 and leave "Rebuilding…" on screen forever.
+    documentStore.getState().regenIdle();
     for (const a of [...awaiters]) {
       clearTimeout(a.timer);
       awaiters.delete(a);
@@ -504,7 +510,14 @@ export function createTauriClient(): CadClient {
     resolvePublished(change);
   }
 
+  function onRegenStartedEvent(): void {
+    documentStore.getState().regenStarted();
+  }
+
   function onRegenFinishedEvent(rf: RegenFinished): void {
+    // Paired with `regen-started`, CLAMPED at zero in the store: a no-op regen
+    // finishes without ever having started, so completions outnumber starts.
+    documentStore.getState().regenSettled();
     const failed = rf.failedSteps ?? [];
     if (failed.length > 0 || rf.outcome === "failed") {
       traceWarn(
@@ -605,6 +618,7 @@ export function createTauriClient(): CadClient {
         unlisteners.push(
           await listen<DocumentChange>(EVT.documentChanged, (e) => onDocumentChangedEvent(e.payload)),
           await listen<DocumentProjectionDto>(EVT.projectionUpdated, (e) => onProjectionUpdatedEvent(e.payload)),
+          await listen<void>(EVT.regenStarted, () => onRegenStartedEvent()),
           await listen<RegenFinished>(EVT.regenFinished, (e) => onRegenFinishedEvent(e.payload)),
           await listen<SketchUpsertDto>(EVT.sketchSolved, (e) => {
             lastSketchSolved = e.payload;
@@ -681,6 +695,8 @@ export function createTauriClient(): CadClient {
           removedBodies: [],
           features: projection.features,
           opLabel,
+          appliedOps: projection.appliedOps,
+          totalOps: projection.totalOps,
           errorMessage: "Operation added while history is rolled back — roll forward to apply",
         };
       }
@@ -728,6 +744,12 @@ export function createTauriClient(): CadClient {
       // projection to swap in). A correlated FAILURE additionally threads its reason.
       features: projection.features,
       opLabel,
+      // H7b: the CURSOR rides with those same features. A rollback's whole visible
+      // effect is the cursor move, and waiting for the post-regen projection left
+      // the rows un-grayed for a full worker round-trip (and, for a `RegenHint::
+      // None` command, forever).
+      appliedOps: projection.appliedOps,
+      totalOps: projection.totalOps,
     };
     if (resolved?.errorMessage) result.errorMessage = resolved.errorMessage;
     return result;
@@ -1235,9 +1257,16 @@ export function createTauriClient(): CadClient {
         removedBodies: [],
         features: projection.features,
         opLabel: editCommandLabel(command),
+        appliedOps: projection.appliedOps,
+        totalOps: projection.totalOps,
       };
     }
     return applyEdit(CMD.applyEditCommand, { command }, editCommandLabel(command));
+  }
+
+  /** H2 escape hatch: forget the worker's poison keys (returns how many). */
+  async function clearWorkerCircuit(): Promise<number> {
+    return call<number>(CMD.clearWorkerCircuit);
   }
 
   async function getOperationParams(recordId: string): Promise<Record<string, unknown>> {
@@ -1491,6 +1520,7 @@ export function createTauriClient(): CadClient {
     massProperties,
     resolveRefs,
     applyEditCommand,
+    clearWorkerCircuit,
     getOperationParams,
     canFoldTransform,
 

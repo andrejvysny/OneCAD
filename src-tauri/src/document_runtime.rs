@@ -931,8 +931,11 @@ impl DocumentRuntime {
                 include_edges: true,
             }),
         };
-        let mut plan_req =
-            plan.into_request(job, plan_rev, epoch, PolicyVersions::default(), artifacts);
+        // `edited_from` comes from the REQUEST, not the plan (SCHEMA §7.2): only the
+        // edit lane's `ToEnd { from > 0 }` claims an upstream content edit.
+        let mut plan_req = plan
+            .into_request(job, plan_rev, epoch, PolicyVersions::default(), artifacts)
+            .with_edited_from(request.edited_from());
         // Attach the selected checkpoint's stored artifacts so the executor's
         // RestoreCheckpoint reconstructs the base from them (review F3). A missing
         // stored checkpoint leaves them `None` ⇒ the worker reports `restored:false`

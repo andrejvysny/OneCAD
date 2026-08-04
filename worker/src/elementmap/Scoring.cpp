@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <string_view>
 #include <vector>
 
 #include <TopAbs_ShapeEnum.hxx>
@@ -33,6 +34,8 @@ struct Feature {
 
 std::uint64_t scoring_call_count() { return g_scoring_calls.load(std::memory_order_relaxed); }
 void reset_scoring_call_count() { g_scoring_calls.store(0, std::memory_order_relaxed); }
+
+double anchor_scale(double body_diag) { return std::max(0.5 * body_diag, 1e-7); }
 
 ScoreResult score_candidate(const km::ElementDescriptor& intent, bool has_intent_descriptor,
                             const AnchorEvidence& anchor, const km::ElementDescriptor& candidate,
@@ -79,20 +82,40 @@ ScoreResult score_candidate(const km::ElementDescriptor& intent, bool has_intent
 
     // anchor: world-point proximity to the candidate centre. Scale by half the
     // body diagonal so proximity is unit-independent; a coincident anchor ⇒ 1.
+    //
+    // The floor inside `anchor_scale` is a DIVIDE-BY-ZERO GUARD ONLY
+    // (resolverVersion 2). It used to be 1.0 mm, which silently stopped being
+    // proportional for every body under 2 mm across: on a sub-millimetre part each
+    // candidate sat a small fraction of one millimetre from the anchor, so every
+    // anchor similarity collapsed towards 1.0, the margin vanished and the whole
+    // part became un-resolvable. `body_diagonal()` already floors a
+    // null/void/degenerate bbox at 1.0 before we get here, so the only value that
+    // max can ever defend against is a non-degenerate diagonal that is nevertheless
+    // ~0 — hence 1e-7 rather than a modelling-scale constant.
     if (anchor.has_world_point) {
-        const double scale = std::max(0.5 * body_diag, 1.0);
+        const double scale = anchor_scale(body_diag);
         const double dist = anchor.world_point.Distance(candidate.center);
         feats.push_back({"anchor", 0.25, std::max(0.0, 1.0 - dist / scale)});
     }
 
     double total_weight = 0.0;
     double weighted = 0.0;
+    // The same accumulation over the DESCRIPTOR features only (anchor excluded) —
+    // the space the edit-scoped tie veto compares in (SCHEMA §10).
+    double desc_weight = 0.0;
+    double desc_weighted = 0.0;
     for (const Feature& f : feats) {
         total_weight += f.weight;
         weighted += f.weight * f.similarity;
+        if (std::string_view(f.name) == "anchor") continue;
+        desc_weight += f.weight;
+        desc_weighted += f.weight * f.similarity;
     }
 
     ScoreResult out;
+    out.has_anchor_feature = anchor.has_world_point;
+    out.has_descriptor_features = desc_weight > 0.0;
+    if (desc_weight > 0.0) out.descriptor_score = desc_weighted / desc_weight;
     if (total_weight <= 0.0) return out;  // no evidence → score 0
     out.score = weighted / total_weight;
     // Contributions are renormalized so they SUM to the reported score (matching

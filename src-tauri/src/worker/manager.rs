@@ -2208,6 +2208,7 @@ mod poison_tests {
             policy_versions: PolicyVersions::default(),
             target_step: 1,
             artifacts: PlanArtifacts::default(),
+            edited_from: None,
         }
     }
 

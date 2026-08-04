@@ -14,6 +14,7 @@ import { MeasurePanel } from "@/features/measure/MeasurePanel";
 import { ModelTreePanel } from "@/features/tree/ModelTreePanel";
 import { InspectorPanel } from "@/features/inspector/InspectorPanel";
 import { RepairBanner } from "@/features/repair/RepairBanner";
+import { TimelineStoppedBanner } from "@/features/repair/TimelineStoppedBanner";
 import { SketchChromeBar } from "@/features/sketch/SketchChromeBar";
 import { ConstraintBadgeLayer } from "@/features/sketch/ConstraintBadgeLayer";
 import { ConstraintContextChips } from "@/features/sketch/ConstraintContextChips";
@@ -63,6 +64,7 @@ export function EditorScreen() {
         <ModelTreePanel />
         <InspectorPanel />
         <RepairBanner />
+        <TimelineStoppedBanner />
         <CornerCluster />
         <NavPill />
         <StatusBar />

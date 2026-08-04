@@ -223,6 +223,15 @@ function mockBodyMesh(bodyId: string): ArrayBuffer {
   return syntheticBodies.get(bodyId) ?? meshForBody(bodyId);
 }
 let mockFeatures: FeatureRecord[] = MOCK_BASE_FEATURES.map(cloneFeature);
+/**
+ * The mock ROLLBACK CURSOR — the applied op count, mirroring core
+ * `Timeline::cursor` (M8). `mockFeatures[0, mockAppliedOps)` are applied;
+ * everything past it is a draft whose bodies are masked out of the scene
+ * ({@link maskedBodies}). Seeded fully-applied, like `seedMockDocument`.
+ */
+let mockAppliedOps = MOCK_BASE_FEATURES.length;
+/** Bodies hidden by the cursor: `bodyId → mesh`, restored on a roll forward. */
+const maskedBodies = new Map<string, ArrayBuffer>();
 let mockRevision = 5; // matches the seed projection revision
 let nextBodySeq = 2; // body1 is the seed body
 let nextFeatureSeq = 100;
@@ -360,6 +369,10 @@ interface DocSnap {
   /** Datums are projection-store state, so undo has to carry them too — a snap
    *  that forgot them would silently resurrect a deleted datum on redo. */
   datums: Record<string, DatumMeta>;
+  /** The rollback cursor + the bodies it was masking, so an undo that crosses a
+   *  cursor move restores the same document the user was looking at (M8). */
+  cursor: number;
+  masked: Map<string, ArrayBuffer>;
 }
 const undoStack: DocSnap[] = [];
 const redoStack: DocSnap[] = [];
@@ -375,6 +388,8 @@ function snap(label: string): DocSnap {
     features: mockFeatures.map(cloneFeature),
     bodies: new Map(syntheticBodies),
     datums: { ...documentStore.getState().datums },
+    cursor: mockAppliedOps,
+    masked: new Map(maskedBodies),
   };
 }
 
@@ -396,9 +411,92 @@ function restoreSnap(s: DocSnap): { changed: string[]; removed: string[] } {
   mockFeatures = s.features.map(cloneFeature);
   syntheticBodies.clear();
   for (const [k, v] of s.bodies) syntheticBodies.set(k, v);
+  maskedBodies.clear();
+  for (const [k, v] of s.masked) maskedBodies.set(k, v);
+  mockAppliedOps = s.cursor;
   documentStore.getState().applyChange({ datums: { ...s.datums } });
   mockRevision += 1;
   return diffBodies(before, syntheticBodies);
+}
+
+// ── Rollback cursor (M8) ──────────────────────────────────────────────────────
+//
+// The mock's mirror of core `Timeline` (`history/timeline.rs`). Two rules, both
+// taken verbatim from there rather than invented here:
+//
+// * `set_cursor(k)` (timeline.rs:198-210) — clamp k to [0, len]; steps that leave
+//   the applied prefix stop contributing geometry. The mock has no regen, so
+//   "stops contributing" is modelled by MASKING the bodies those records touched
+//   (`featureTouched`, the same lineage `mockCanFoldTransform` walks).
+// * `insert_at_cursor` (timeline.rs:174-185) — a fresh record goes in AT the
+//   cursor, the cursor advances past it (`cursor = index + 1`), and that record
+//   plus every step after it become Dirty.
+//
+// MOCK LIMIT: masking is set arithmetic over `featureTouched`, not a replay. A
+// body an applied record also touched stays visible even if a later, rolled-back
+// record touched it too — the mock has no way to rebuild the earlier state of
+// that body, and showing the LAST applied state is the honest approximation.
+
+/**
+ * Re-derive which bodies the cursor hides, then move it to `k`. Returns the body
+ * diff (masked ⇒ removed, unmasked ⇒ changed) for the caller's result payload.
+ */
+function setMockCursor(k: number): { changed: string[]; removed: string[] } {
+  mockAppliedOps = Math.max(0, Math.min(Math.floor(k), mockFeatures.length));
+  const hidden = new Set<string>();
+  const kept = new Set<string>();
+  mockFeatures.forEach((f, i) => {
+    for (const b of featureTouched.get(f.id) ?? []) (i < mockAppliedOps ? kept : hidden).add(b);
+  });
+  const changed: string[] = [];
+  const removed: string[] = [];
+  // Unmask first: a body an applied record touched must come back even if a
+  // rolled-back record touched it too (see the MOCK LIMIT above).
+  for (const [id, mesh] of [...maskedBodies]) {
+    if (hidden.has(id) && !kept.has(id)) continue;
+    maskedBodies.delete(id);
+    syntheticBodies.set(id, mesh);
+    changed.push(id);
+  }
+  for (const id of hidden) {
+    if (kept.has(id) || !syntheticBodies.has(id)) continue;
+    maskedBodies.set(id, syntheticBodies.get(id)!);
+    syntheticBodies.delete(id);
+    removed.push(id);
+  }
+  return { changed, removed };
+}
+
+/**
+ * Move a just-APPENDED record to the cursor, mirroring `insert_at_cursor`.
+ *
+ * `mutateOp` appends (it is the frontier case and by far the common one), so this
+ * is the one place the rolled-back case is corrected: splice the new row from the
+ * tail to `cursor`, advance the cursor past it, and mark the tail dirty. When the
+ * document is already at the frontier this is exactly "append + cursor += 1".
+ */
+function insertAtMockCursor(featureId: string): void {
+  const last = mockFeatures.length - 1;
+  if (last < 0 || mockFeatures[last].id !== featureId) return; // an EDIT, not an append
+  const index = Math.min(mockAppliedOps, last);
+  if (index < last) {
+    const [row] = mockFeatures.splice(last, 1);
+    mockFeatures.splice(index, 0, row);
+  }
+  mockAppliedOps = index + 1;
+  // Inserted node + tail are pending regen (timeline.rs `mark_dirty_from`),
+  // skipping suppressed steps exactly as `set_dirty_preserving_suppressed` does.
+  // A row that already carries a FAILURE status keeps it: dirtying it would erase
+  // the halt point the failure-visibility layer reads, and the mock has no regen
+  // that could clear it again.
+  mockFeatures = mockFeatures.map((f, i) =>
+    i > index && !f.suppressed && f.status === "ok" ? { ...f, status: "dirty" } : f,
+  );
+}
+
+/** Stamp the timeline cursor onto a result (H7b: the cursor rides the edit result). */
+function withCursor(res: ApplyOperationResult): ApplyOperationResult {
+  return { ...res, appliedOps: mockAppliedOps, totalOps: mockFeatures.length };
 }
 
 function nextBodyId(): string {
@@ -759,6 +857,9 @@ function commitOp(op: OperationOp): ApplyOperationResult {
   featureParams.set(featureId, wireParamsOf(op));
   // …and which bodies it touched, the lineage `canFoldTransform` walks.
   featureTouched.set(featureId, [...changed, ...removed]);
+  // A FRESH record joins the timeline at the rollback cursor, not at the tail
+  // (core `Timeline::insert_at_cursor`); a re-edit of an existing one is a no-op here.
+  insertAtMockCursor(featureId);
   mockRevision += 1;
   // A committed op is the mock's "projection-updated": whatever the backend holds
   // wins over whatever the tree flipped locally (see the mockBodyMeta header).
@@ -830,15 +931,21 @@ function noopResult(): ApplyOperationResult {
 /** Commit one op through the local model + emit its document-changed (the lane's
  *  `commit` seam + the client's own `applyOperation` share this path). */
 function commitAndEmit(op: OperationOp): Promise<ApplyOperationResult> {
-  return wait().then(() => {
-    const res = commitOp(op);
-    emitMockDocumentChanged({
-      revision: res.revision,
-      changedBodies: res.changedBodies,
-      removedBodies: res.removedBodies,
-    });
-    return res;
-  });
+  // The mock has no regen job, but the busy indicator is part of the UI under
+  // test: bracket the (latency-simulating) apply with the same store transitions
+  // the real `regen-started`/`regen-finished` pair drives.
+  documentStore.getState().regenStarted();
+  return wait()
+    .then(() => {
+      const res = commitOp(op);
+      emitMockDocumentChanged({
+        revision: res.revision,
+        changedBodies: res.changedBodies,
+        removedBodies: res.removedBodies,
+      });
+      return withCursor(res);
+    })
+    .finally(() => documentStore.getState().regenSettled());
 }
 
 // ── STEP import (STEP-IMPORT WP-A) ────────────────────────────────────────────
@@ -895,6 +1002,8 @@ function commitImportStep(): ApplyOperationResult {
     // has no import bucket yet), so the row's icon MUST come from `opType`.
     { id: featureId, kind: "boolean", opType: IMPORT_STEP_OP_TYPE, label: "Import", valueText: "", status: "ok" },
   ];
+  featureTouched.set(featureId, [bodyId]);
+  insertAtMockCursor(featureId); // same insert-at-cursor rule as any other op
   mockRevision += 1;
   const doc = documentStore.getState();
   doc.applyChange({
@@ -902,6 +1011,7 @@ function commitImportStep(): ApplyOperationResult {
     features: mockFeatures.map(cloneFeature),
     bodies: { ...doc.bodies, [bodyId]: { id: bodyId, name, visible: true } },
     dirty: true,
+    appliedOps: mockAppliedOps,
   });
   writeMockMeta("body", bodyId, { name }); // also re-asserts the owned metadata
   return {
@@ -1095,7 +1205,12 @@ async function mockApplyEditCommand(command: WireEditCommand): Promise<ApplyOper
     case "removeOperation": {
       undoStack.push(snap("Delete feature"));
       redoStack.length = 0;
+      // A record removed from INSIDE the applied prefix shortens it — the cursor
+      // counts applied ops, so leaving it alone would make it point past the end.
+      const removedIndex = mockFeatures.findIndex((f) => f.id === command.record);
       mockFeatures = mockFeatures.filter((f) => f.id !== command.record);
+      if (removedIndex >= 0 && removedIndex < mockAppliedOps) mockAppliedOps -= 1;
+      mockAppliedOps = Math.min(mockAppliedOps, mockFeatures.length);
       mockRevision += 1;
       const res: ApplyOperationResult = {
         revision: mockRevision,
@@ -1287,10 +1402,29 @@ async function mockApplyEditCommand(command: WireEditCommand): Promise<ApplyOper
       mockRevision += 1;
       return { ...noopResult(), opLabel: "Delete datum plane" };
     }
-    case "setRollback":
+    case "setRollback": {
+      // Move the cursor + mask/unmask the bodies the rolled-back records made
+      // (see `setMockCursor`). Undoable like every other EditCommand, and the
+      // masked meshes ride the snapshot so ⌘Z cannot resurrect a half-state.
+      undoStack.push(snap("Rollback"));
+      redoStack.length = 0;
+      const { changed, removed } = setMockCursor(command.cursor);
+      mockRevision += 1;
+      const res: ApplyOperationResult = {
+        revision: mockRevision,
+        changedBodies: changed.map(bodyRef),
+        removedBodies: removed,
+        features: mockFeatures.map(cloneFeature),
+        opLabel: "Rollback",
+      };
+      emitMockDocumentChanged({
+        revision: res.revision,
+        changedBodies: res.changedBodies,
+        removedBodies: res.removedBodies,
+      });
+      return res;
+    }
     default:
-      // Rollback carries no distinct projection signal in the lean mock. Return a
-      // valid no-op result.
       mockRevision += 1;
       return { ...noopResult(), opLabel: "Edit" };
   }
@@ -1368,10 +1502,13 @@ export function resetMockSketches(): void {
 /** Test seam: forget the whole mock document (bodies, features, undo, sessions). */
 export function resetMockDocument(): void {
   syntheticBodies.clear();
+  maskedBodies.clear();
   featureBodies.clear();
   featureParams.clear();
+  featureTouched.clear();
   lane.resetPreview();
   mockFeatures = MOCK_BASE_FEATURES.map(cloneFeature);
+  mockAppliedOps = MOCK_BASE_FEATURES.length;
   mockRevision = 5;
   nextBodySeq = 2;
   nextFeatureSeq = 100;
@@ -1690,7 +1827,17 @@ export const mockClient: CadClient = {
     return mockResolveRefs(refs);
   },
   applyEditCommand(command: WireEditCommand): Promise<ApplyOperationResult> {
-    return mockApplyEditCommand(command);
+    documentStore.getState().regenStarted();
+    return mockApplyEditCommand(command)
+      .then(withCursor)
+      .finally(() => documentStore.getState().regenSettled());
+  },
+
+  // No worker, so no crash circuit and nothing to forget — but the affordance
+  // must still resolve so the mock-lane UI can exercise the button.
+  async clearWorkerCircuit(): Promise<number> {
+    await wait();
+    return 0;
   },
 
   async getOperationParams(recordId: string): Promise<Record<string, unknown>> {
@@ -1717,12 +1864,12 @@ export const mockClient: CadClient = {
   // a file and therefore never resolves null.
   async insertStep(): Promise<ApplyOperationResult | null> {
     await wait();
-    return importStepAndEmit();
+    return withCursor(importStepAndEmit());
   },
 
   async undo(): Promise<ApplyOperationResult> {
     await wait();
-    if (undoStack.length === 0) return noopResult();
+    if (undoStack.length === 0) return withCursor(noopResult());
     const preOp = undoStack.pop()!;
     redoStack.push(snap(preOp.label));
     const { changed, removed } = restoreSnap(preOp);
@@ -1734,12 +1881,12 @@ export const mockClient: CadClient = {
       opLabel: preOp.label,
     };
     emitMockDocumentChanged({ revision: res.revision, changedBodies: res.changedBodies, removedBodies: res.removedBodies });
-    return res;
+    return withCursor(res);
   },
 
   async redo(): Promise<ApplyOperationResult> {
     await wait();
-    if (redoStack.length === 0) return noopResult();
+    if (redoStack.length === 0) return withCursor(noopResult());
     const postOp = redoStack.pop()!;
     undoStack.push(snap(postOp.label));
     const { changed, removed } = restoreSnap(postOp);
@@ -1751,7 +1898,7 @@ export const mockClient: CadClient = {
       opLabel: postOp.label,
     };
     emitMockDocumentChanged({ revision: res.revision, changedBodies: res.changedBodies, removedBodies: res.removedBodies });
-    return res;
+    return withCursor(res);
   },
 
   // ── Sketch solver lane + two-level preview (shared local lane) ─────────────

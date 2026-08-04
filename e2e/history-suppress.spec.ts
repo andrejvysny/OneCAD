@@ -71,3 +71,43 @@ test("suppressing a history row dims it, survives a later edit's fresh timeline,
   await expect(page.getByText("Feature unsuppressed")).toBeVisible();
   expect(await featureSuppressed(page, "f3")).toBe(false);
 });
+
+/*
+ * H7b — the same suppression reachable from the ROW CONTEXT MENU. The icon
+ * cluster is hover-gated on an ordinary row (undiscoverable on a trackpad), so
+ * right-click is the affordance that makes it findable; it must drive the exact
+ * same command, including the un-suppress direction.
+ */
+test("the row context menu suppresses and un-suppresses the same feature", async ({ page }) => {
+  await openEditor(page);
+  await openFeatureTimeline(page);
+
+  const row = page.getByTestId("history-row-f3");
+  await expect(row).not.toHaveClass(/opacity-60/);
+
+  await row.click({ button: "right" });
+  await expect(page.getByTestId("history-menu-suppress")).toHaveText("Suppress");
+  await page.getByTestId("history-menu-suppress").click();
+  await expect(row).toHaveClass(/opacity-60/);
+  expect(await featureSuppressed(page, "f3")).toBe(true);
+
+  // Re-opening reads the row's OWN flag, so the item now offers the inverse.
+  await row.click({ button: "right" });
+  await expect(page.getByTestId("history-menu-suppress")).toHaveText("Unsuppress");
+  await page.getByTestId("history-menu-suppress").click();
+  await expect(row).not.toHaveClass(/opacity-60/);
+  expect(await featureSuppressed(page, "f3")).toBe(false);
+});
+
+/** The menu's delete is the same two-click confirm the row's × button uses. */
+test("the row context menu deletes behind a confirm click", async ({ page }) => {
+  await openEditor(page);
+  await openFeatureTimeline(page);
+
+  await page.getByTestId("history-row-f1").click({ button: "right" });
+  await page.getByTestId("history-menu-delete").click();
+  // First click only ARMS it — the row is still there.
+  await expect(page.getByTestId("history-row-f1")).toHaveCount(1);
+  await page.getByTestId("history-menu-delete-confirm").click();
+  await expect(page.getByTestId("history-row-f1")).toHaveCount(0);
+});

@@ -92,10 +92,17 @@ export function projectionToStore(p: DocumentProjectionWire): DocumentProjection
     sketches,
     datums,
     features,
-    // The rollback cursor. A payload from a backend older than the field (or the
-    // mock lane's derived projection) means "everything is applied" — the
-    // permissive reading the legacy-draft hint already assumes when it is absent.
-    appliedOps: p.appliedOps ?? features.length,
+    // The rollback cursor, AUTHORITATIVE (H7b: it drives the grayed rows + the
+    // "N operations rolled back" banner, not just the one-shot open hint). A
+    // payload from a backend older than the field (or the mock lane's derived
+    // projection) means "everything is applied" — the permissive reading the
+    // legacy-draft hint already assumes when it is absent. CLAMPED, because a
+    // cursor past the rows we can render would leave the marker off the end.
+    //
+    // `p.totalOps` is intentionally not carried into the store: the projection's
+    // `features` are built from ALL timeline records and `total_ops` is
+    // `timeline.len()` (document_runtime.rs), so `features.length` IS the total.
+    appliedOps: Math.min(p.appliedOps ?? features.length, features.length),
   };
 }
 

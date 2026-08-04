@@ -202,6 +202,20 @@ pub struct PlanRequest {
     pub target_step: usize,
     /// Requested derived artifacts.
     pub artifacts: PlanArtifacts,
+    /// OPTIONAL `editedFrom` (SCHEMA §7.2): the timeline step of the upstream
+    /// CONTENT edit that triggered this regen. `None` ⇒ the field is OMITTED from
+    /// the wire ("no edit context", the no-edit replay lanes).
+    ///
+    /// Derived from the triggering [`RegenRequest`](super::planner::RegenRequest)
+    /// via [`RegenRequest::edited_from`](super::planner::RegenRequest::edited_from)
+    /// — see there for why `from == 0` counts as absent. Stamped onto the request by
+    /// the caller that owns the request (the runtime's `begin_regen`), NOT by the
+    /// pure planner, which has no notion of *why* it is planning.
+    ///
+    /// Its only effect is worker-side: refs owned by a step STRICTLY AFTER it lose
+    /// the right to settle a descriptor tie with a stored anchor, because an upstream
+    /// edit moved the geometry that anchor was captured against (SCHEMA §10 veto).
+    pub edited_from: Option<usize>,
 }
 
 impl PlanRequest {
@@ -221,6 +235,19 @@ impl PlanRequest {
     #[must_use]
     pub fn replays_from_base_zero(&self) -> bool {
         self.base_checkpoint.is_none()
+    }
+
+    /// Stamps the plan's [`edited_from`](Self::edited_from) (SCHEMA §7.2).
+    ///
+    /// Separate from [`RegenPlan::into_request`](super::planner::RegenPlan::into_request)
+    /// because it is a property of the *request that triggered* the plan, not of the
+    /// plan: the same compiled plan is legitimately re-issued from a different lane
+    /// (the executor's replay-from-0 retry re-plans and must carry the ORIGINAL
+    /// stamp forward, since the geometry is still post-edit).
+    #[must_use]
+    pub fn with_edited_from(mut self, edited_from: Option<usize>) -> Self {
+        self.edited_from = edited_from;
+        self
     }
 }
 

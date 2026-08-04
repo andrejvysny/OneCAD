@@ -217,6 +217,11 @@ pub fn execute_plan_args(req: &PlanRequest) -> Value {
         args["baseCheckpoint"] =
             json!({ "stepIndex": cp.step_index, "checkpointId": cp.checkpoint_id.as_str() });
     }
+    // OPTIONAL `editedFrom` (SCHEMA §7.2). OMITTED when there is no edit context —
+    // absence is "no claim", and a `null` would be a claim of a different kind.
+    if let Some(edited_from) = req.edited_from {
+        args["editedFrom"] = json!(edited_from);
+    }
     if let Some(t) = &req.artifacts.tessellate {
         args["artifacts"] =
             json!({ "tessellate": { "lod": lod_str(t.lod), "includeEdges": t.include_edges } });

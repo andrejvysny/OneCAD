@@ -1,10 +1,11 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { render, screen, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StatusBar } from "./StatusBar";
 import { selectionStore } from "@/stores/selectionStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { settingsStore } from "@/stores/settingsStore";
+import { documentStore, seedMockDocument } from "@/stores/documentStore";
 import { resetStores } from "@/test/resetStores";
 
 describe("StatusBar", () => {
@@ -62,5 +63,52 @@ describe("StatusBar", () => {
 
     act(() => settingsStore.getState().setDisplayUnit("mm"));
     expect(screen.getByText(/273\.00\s.*mm/)).toBeInTheDocument();
+  });
+});
+
+/*
+ * H7b — the regen busy indicator. The counter is transport state (regen-started /
+ * regen-finished on the real lane, the same transitions around the mock's apply),
+ * so it is asserted through the store rather than through a client.
+ */
+describe("StatusBar regen busy (H7b)", () => {
+  afterEach(() => act(() => documentStore.getState().regenIdle()));
+
+  it("shows Rebuilding… only while a regen is in flight", () => {
+    render(<StatusBar />);
+    expect(screen.queryByTestId("regen-busy")).toBeNull();
+
+    act(() => documentStore.getState().regenStarted());
+    expect(screen.getByTestId("regen-busy")).toHaveTextContent("Rebuilding…");
+
+    act(() => documentStore.getState().regenSettled());
+    expect(screen.queryByTestId("regen-busy")).toBeNull();
+  });
+
+  it("stays up across OVERLAPPING regens and cannot go negative", () => {
+    render(<StatusBar />);
+    act(() => {
+      documentStore.getState().regenStarted();
+      documentStore.getState().regenStarted();
+    });
+    act(() => documentStore.getState().regenSettled());
+    // One still in flight.
+    expect(screen.getByTestId("regen-busy")).toBeInTheDocument();
+    act(() => documentStore.getState().regenSettled());
+    expect(screen.queryByTestId("regen-busy")).toBeNull();
+
+    // A no-op regen finishes without ever starting — the clamp keeps the counter
+    // at zero instead of driving it negative and sticking the indicator off.
+    act(() => documentStore.getState().regenSettled());
+    expect(documentStore.getState().regenBusy).toBe(0);
+    act(() => documentStore.getState().regenStarted());
+    expect(screen.getByTestId("regen-busy")).toBeInTheDocument();
+  });
+
+  it("a projection snapshot landing mid-regen does not clear the indicator", () => {
+    render(<StatusBar />);
+    act(() => documentStore.getState().regenStarted());
+    act(() => documentStore.getState().applySnapshot(seedMockDocument()));
+    expect(screen.getByTestId("regen-busy")).toBeInTheDocument();
   });
 });

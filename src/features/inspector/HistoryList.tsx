@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { cn } from "@/ui/cn";
 import { Icon } from "@/icons/Icon";
+import { MenuItem } from "@/ui/MenuItem";
+import { Popover } from "@/ui/Popover";
 import { MonoValue } from "@/ui/MonoValue";
 import type { IconName } from "@/icons/paths";
 import { IMPORT_STEP_OP_TYPE } from "@/ipc/types";
@@ -107,19 +109,79 @@ export interface HistoryRowActions {
   onDelete: (item: FeatureMeta) => void;
 }
 
+/**
+ * How a row reads, derived from the timeline's FAILURE state (H7b).
+ *
+ *  - `error`  — the op itself failed in the worker (red, as before);
+ *  - `repair` — the op needs a reference repair (warn + a "⚠" glyph);
+ *  - `stale`  — a DIRTY row sitting after the halt point: it was never reached,
+ *               so it is not "about to rebuild", it is blocked. A dirty row
+ *               BEFORE the halt is an ordinary mid-regen row and stays normal;
+ *  - `normal` — everything else.
+ */
+export type HistoryRowTone = "normal" | "error" | "repair" | "stale";
+
+/**
+ * The index the timeline STOPPED at — the first `error`/`needsRepair` row — or
+ * `-1` when nothing halted it. The whole failure-visibility layer (row tone here,
+ * the `TimelineStoppedBanner` sentence) derives from this ONE rule so the row a
+ * user is sent to is always the row that is tinted.
+ */
+export function haltIndexOf(items: FeatureMeta[]): number {
+  return items.findIndex((f) => f.status === "error" || f.status === "needsRepair");
+}
+
+/** The tone of one row given the timeline's halt point ({@link haltIndexOf}). */
+export function rowTone(item: FeatureMeta, index: number, haltIndex: number): HistoryRowTone {
+  if (item.status === "error") return "error";
+  if (item.status === "needsRepair") return "repair";
+  if (item.status === "dirty" && haltIndex >= 0 && index > haltIndex) return "stale";
+  return "normal";
+}
+
+/** Row label/icon color for a tone (selection styling wins over all of them). */
+const TONE_TEXT: Record<HistoryRowTone, string> = {
+  normal: "text-ink-2",
+  error: "text-traffic-close",
+  repair: "text-warn",
+  stale: "text-ink-6",
+};
+const TONE_ICON: Record<HistoryRowTone, string> = {
+  normal: "text-ink-4",
+  error: "text-traffic-close",
+  repair: "text-warn",
+  stale: "text-ink-6",
+};
+
+/** The row's tooltip: the failure reason if any, else the rollback explanation. */
+function rowTitle(item: FeatureMeta, tone: HistoryRowTone, applied: boolean): string | undefined {
+  if (tone === "error") return item.statusMessage;
+  if (tone === "repair") return item.statusMessage ?? "Needs repair — a reference could not be resolved";
+  if (!applied) return "Not applied — beyond the rollback bar";
+  if (tone === "stale") return "Not rebuilt — the timeline stopped earlier";
+  return undefined;
+}
+
 /** 32px history chip (prototype 1c). Selected feature = sel-bg + sel-text. */
 function FeatureRow({
   item,
   selected,
+  applied,
+  tone,
   onSelect,
   onEdit,
+  onContextMenu,
   actions,
   valueEdit,
 }: {
   item: FeatureMeta;
   selected: boolean;
+  /** `false` ⇒ the row sits beyond the rollback bar (grayed + italic). */
+  applied: boolean;
+  tone: HistoryRowTone;
   onSelect?: (id: string) => void;
   onEdit?: (item: FeatureMeta) => void;
+  onContextMenu?: (e: ReactMouseEvent<HTMLDivElement>) => void;
   actions?: HistoryRowActions;
   valueEdit?: HistoryValueEdit;
 }) {
@@ -146,38 +208,54 @@ function FeatureRow({
   useEffect(() => () => cancelPendingOpen(), []);
   // An errored feature (regen failure) tints red + tooltips the worker reason
   // (MODEL-HARDEN W0.5). Selection styling still wins so a selected row stays legible.
-  const isError = item.status === "error";
+  const isError = tone === "error";
 
   return (
     <div
       role={interactive ? "button" : undefined}
       tabIndex={interactive ? 0 : undefined}
       data-testid={`history-row-${item.id}`}
-      title={isError ? item.statusMessage : undefined}
+      data-applied={applied ? "true" : "false"}
+      data-tone={tone}
+      title={rowTitle(item, tone, applied)}
       onClick={() => onSelect?.(item.id)}
       onDoubleClick={() => onEdit?.(item)}
+      onContextMenu={onContextMenu}
       className={cn(
         "group relative mb-1 flex h-8 items-center gap-2 rounded-sm px-2.5",
         interactive && "cursor-pointer",
         selected ? "bg-sel-bg" : "bg-chip hover:bg-hover-2",
         suppressed && "opacity-60",
+        // Beyond the rollback bar: the row describes an op the document is NOT
+        // currently built from, so it reads as a draft rather than as history.
+        !applied && "italic opacity-50",
       )}
     >
       <Icon
         name={OPTYPE_ICON[item.opType ?? ""] ?? FEATURE_ICON[item.kind]}
         size={14}
         strokeWidth={1.7}
-        className={selected ? "text-sel-text" : isError ? "text-traffic-close" : "text-ink-4"}
+        className={selected ? "text-sel-text" : TONE_ICON[tone]}
       />
       <span
         className={cn(
           "flex-1 text-[12.5px]",
-          selected ? "text-sel-text" : isError ? "text-traffic-close" : "text-ink-2",
+          selected ? "text-sel-text" : TONE_TEXT[tone],
           suppressed && "line-through",
         )}
       >
         {item.label}
       </span>
+      {tone === "repair" && (
+        <span
+          data-testid={`history-repair-glyph-${item.id}`}
+          title="Needs repair"
+          aria-label="Needs repair"
+          className={cn("text-[12px] leading-none", selected ? "text-sel-text" : "text-warn")}
+        >
+          ⚠
+        </span>
+      )}
 
       {/* The value is ALWAYS rendered — it used to disappear the moment a row grew
           its affordance cluster, which hid the one number the row is about on
@@ -253,11 +331,15 @@ function FeatureRow({
 
       {actions && (
         <div
-          // Revealed on row hover; the suppress toggle stays visible when active so
-          // a suppressed row keeps its "dimmed + icon" signal (design §5.1).
+          // Revealed on row hover; PINNED visible for the three rows a user needs to
+          // act on without hunting: a suppressed row (keeps its "dimmed + icon"
+          // signal, design §5.1), the SELECTED row (the one the inspector is about —
+          // hover-only affordances on it are undiscoverable on a trackpad), and an
+          // ERRORED row, whose suppress button is the one-click way to unblock the
+          // rest of the rebuild.
           className={cn(
             "flex items-center gap-0.5",
-            suppressed ? "opacity-100" : "opacity-0 group-hover:opacity-100",
+            suppressed || selected || isError ? "opacity-100" : "opacity-0 group-hover:opacity-100",
           )}
           onClick={(e) => e.stopPropagation()}
         >
@@ -278,7 +360,9 @@ function FeatureRow({
           <RowIconButton
             testid={`history-suppress-${item.id}`}
             icon="eye"
-            title={suppressed ? "Unsuppress" : "Suppress"}
+            // On the halting row this button IS the recovery action, so it says what
+            // it will accomplish rather than just naming the state change.
+            title={suppressed ? "Unsuppress" : isError ? "Suppress to continue rebuild" : "Suppress"}
             active={suppressed}
             onClick={() => {
               setConfirmingDelete(false);
@@ -357,8 +441,14 @@ function RowIconButton({
  * documentStore.features. Click selects a feature; double-clicking an editable
  * feature re-enters its drag edit (parametric-edit seed). When `rowActions` is
  * provided (full-timeline view) each row grows hover affordances: edit, suppress,
- * roll-to-here, delete (M4b) — and, with `valueEdit`, an inline editor on the
- * row's primary dimension (H3).
+ * roll-to-here, delete (M4b) — a RIGHT-CLICK on the row opens the same set as a
+ * menu (H7b) — and, with `valueEdit`, an inline editor on the row's primary
+ * dimension (H3).
+ *
+ * `appliedOps` turns on the ROLLBACK CURSOR rendering (grayed rows + marker +
+ * banner). It is POSITIONAL over `items`, so only a caller rendering the FULL
+ * lineage may pass it; a slice view (`SelectionState`) must leave it undefined or
+ * the bar would land at an index that means nothing.
  */
 export function HistoryList({
   items,
@@ -367,6 +457,8 @@ export function HistoryList({
   onEdit,
   rowActions,
   valueEdit,
+  appliedOps,
+  onRollToEnd,
 }: {
   items: FeatureMeta[];
   selectedId?: string;
@@ -380,20 +472,155 @@ export function HistoryList({
    * callers that render a SLICE must resolve the global index themselves.
    */
   valueEdit?: (item: FeatureMeta, index: number) => HistoryValueEdit;
+  /** The timeline cursor, in `items` indices. Omit on a slice view (see above). */
+  appliedOps?: number;
+  /** Restore the whole timeline (`rollToIndex(total - 1)`); powers the banner +
+   *  the menu's "Roll to end". Omit ⇒ neither is offered. */
+  onRollToEnd?: () => void;
 }) {
+  const [menu, setMenu] = useState<FeatureMeta | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const anchor = useRef<HTMLElement | null>(null);
+  const closeMenu = useCallback(() => {
+    setMenu(null);
+    setConfirmDelete(false);
+  }, []);
+
+  const rolledBack = appliedOps !== undefined && appliedOps < items.length;
+  const haltIndex = haltIndexOf(items);
+  // Same shape as ModelTreePanel's tree menu: right-click anchors to the row, and
+  // SELECTS it first so the menu can never act on a row other than the visible one.
+  const openMenu = (item: FeatureMeta) => (e: ReactMouseEvent<HTMLDivElement>) => {
+    if (!rowActions) return;
+    e.preventDefault();
+    anchor.current = e.currentTarget;
+    setConfirmDelete(false);
+    setMenu(item);
+    onSelect?.(item.id);
+  };
+  const menuActions = menu ? rowActions?.(menu) : undefined;
+
   return (
     <div>
+      {rolledBack && onRollToEnd && (
+        <div
+          data-testid="history-rollback-banner"
+          className="mb-2 flex items-center gap-2 rounded-md border border-warn-border bg-warn-surface px-2.5 py-1.5"
+        >
+          <span className="flex-1 text-[11.5px] leading-tight text-warn">
+            {rolledBackLabel(items.length - (appliedOps ?? 0))}
+          </span>
+          <button
+            type="button"
+            data-testid="history-roll-to-end"
+            onClick={onRollToEnd}
+            className="rounded-sm px-1.5 py-0.5 text-[11.5px] font-medium text-warn hover:bg-hover-3"
+          >
+            Roll to end
+          </button>
+        </div>
+      )}
       {items.map((f, i) => (
-        <FeatureRow
-          key={f.id}
-          item={f}
-          selected={f.id === selectedId}
-          onSelect={onSelect}
-          onEdit={onEdit}
-          actions={rowActions?.(f)}
-          valueEdit={valueEdit?.(f, i)}
-        />
+        <div key={f.id}>
+          {/* The bar itself: drawn BEFORE the first unapplied row, i.e. between
+              `appliedOps - 1` and `appliedOps`. */}
+          {rolledBack && i === appliedOps && (
+            <div data-testid="history-rollback-marker" className="mb-1 flex items-center gap-1.5">
+              <span aria-hidden="true" className="h-px flex-1 bg-warn" />
+              <span className="text-[10px] uppercase tracking-wide text-warn">rolled back</span>
+              <span aria-hidden="true" className="h-px flex-1 bg-warn" />
+            </div>
+          )}
+          <FeatureRow
+            item={f}
+            selected={f.id === selectedId}
+            applied={appliedOps === undefined || i < appliedOps}
+            tone={rowTone(f, i, haltIndex)}
+            onSelect={onSelect}
+            onEdit={onEdit}
+            onContextMenu={openMenu(f)}
+            actions={rowActions?.(f)}
+            valueEdit={valueEdit?.(f, i)}
+          />
+        </div>
       ))}
+
+      {menu && menuActions && (
+        // Keyed by the row so re-opening on a DIFFERENT one re-runs the Popover's
+        // anchor-measuring effect (it keys off `open`; the ref identity is stable).
+        <Popover
+          key={menu.id}
+          open
+          onClose={closeMenu}
+          anchorRef={anchor}
+          placement="bottom-end"
+          width={170}
+          className="p-1"
+        >
+          {onEdit && (
+            <MenuItem
+              label="Edit…"
+              data-testid="history-menu-edit"
+              onClick={() => {
+                closeMenu();
+                onEdit(menu);
+              }}
+            />
+          )}
+          <MenuItem
+            label="Roll to here"
+            data-testid="history-menu-roll-here"
+            onClick={() => {
+              closeMenu();
+              menuActions.onRoll(menu);
+            }}
+          />
+          {rolledBack && onRollToEnd && (
+            <MenuItem
+              label="Roll to end"
+              data-testid="history-menu-roll-end"
+              onClick={() => {
+                closeMenu();
+                onRollToEnd();
+              }}
+            />
+          )}
+          <MenuItem
+            label={menuActions.suppressed ? "Unsuppress" : "Suppress"}
+            data-testid="history-menu-suppress"
+            onClick={() => {
+              closeMenu();
+              menuActions.onToggleSuppress(menu);
+            }}
+          />
+          <div aria-hidden="true" className="my-1 h-px bg-border" />
+          {/* Two-click confirm — the house idiom for a destructive menu row
+              (ModelTreePanel's sketch/datum delete, the row's own × button). */}
+          {confirmDelete ? (
+            <MenuItem
+              label="Confirm delete"
+              danger
+              data-testid="history-menu-delete-confirm"
+              onClick={() => {
+                closeMenu();
+                menuActions.onDelete(menu);
+              }}
+            />
+          ) : (
+            <MenuItem
+              label="Delete"
+              danger
+              data-testid="history-menu-delete"
+              onClick={() => setConfirmDelete(true)}
+            />
+          )}
+        </Popover>
+      )}
     </div>
   );
+}
+
+/** "N operations rolled back" (singular-aware). */
+function rolledBackLabel(n: number): string {
+  return `${n} operation${n === 1 ? "" : "s"} rolled back`;
 }

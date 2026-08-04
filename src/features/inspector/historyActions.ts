@@ -44,8 +44,10 @@ export function applyEditResult(res: ApplyOperationResult): void {
     features,
     bodies,
     dirty: true,
-    // An `ApplyOperationResult` carries no timeline cursor — see `nextAppliedOps`.
-    appliedOps: nextAppliedOps(doc.appliedOps, doc.features.length, features.length),
+    // H7b: the result CARRIES the cursor (both lanes), so a rollback lands here
+    // immediately; `nextAppliedOps` is the fallback for a result without one.
+    appliedOps:
+      res.appliedOps ?? nextAppliedOps(doc.appliedOps, doc.features.length, features.length),
   });
 }
 

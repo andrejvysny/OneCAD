@@ -673,4 +673,37 @@ mod tests {
         assert_eq!(back, some_item);
         assert_eq!(back.scoring_version, Some(1));
     }
+
+    /// H6a: `scoringVersion` is an OPAQUE stamp, never a compatibility gate.
+    ///
+    /// The worker bumped `resolverVersion` 1 → 2, so a document saved before that
+    /// carries `scoringVersion: 1` on its stored repair items while the running
+    /// worker stamps `2`. Rust must load such an item VERBATIM — no clamp, no
+    /// upgrade-rewrite, no rejection — because the field's only job is telling a
+    /// repair UI which scheme produced the numbers it is looking at. A stale stamp
+    /// is information, not an error; the document's geometry is rebuilt by replay
+    /// anyway, which re-stamps every live item with the current version.
+    #[test]
+    fn a_stale_scoring_version_loads_verbatim_and_gates_nothing() {
+        let mut v1_item = item(1, "op_1.input0");
+        v1_item.scoring_version = Some(1); // as written by a resolverVersion-1 worker
+        let mut v2_item = item(2, "op_2.input0");
+        v2_item.scoring_version = Some(2); // as written by the current worker
+
+        // `RepairState` is an ARRAY on the wire, so a stored mixed-version state is
+        // exactly this — the shape a v1-era container hands the loader.
+        let stored = serde_json::json!([
+            serde_json::to_value(&v1_item).unwrap(),
+            serde_json::to_value(&v2_item).unwrap(),
+        ]);
+        let state: RepairState = serde_json::from_value(stored)
+            .expect("a mixed-version repair state still deserializes");
+        let back: RepairState = serde_json::from_value(serde_json::to_value(&state).unwrap())
+            .expect("and survives a re-save");
+        let items = back.items();
+        assert_eq!(items.len(), 2, "neither item was dropped as incompatible");
+        assert_eq!(items[0].scoring_version, Some(1), "v1 stamp kept verbatim");
+        assert_eq!(items[1].scoring_version, Some(2), "v2 stamp kept verbatim");
+        assert_eq!(back, state, "the whole state round-trips unchanged");
+    }
 }

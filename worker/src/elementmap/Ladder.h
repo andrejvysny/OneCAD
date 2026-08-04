@@ -58,6 +58,23 @@ struct LadderCandidate {
     std::map<std::string, double> contributions;
 };
 
+// Edit context for the descriptor stage (SCHEMA §7.2 `editedFrom` / §10 veto).
+//
+// The worker cannot tell a CLEAN REPLAY from a POST-EDIT regen by looking at the
+// geometry: both hand the ladder a shape plus a set of frozen refs. On a clean
+// replay (open-time replay, rollback, undo/redo) the geometry is byte-identical to
+// the one the ref was authored against, so a stored anchor sits EXACTLY on its
+// element and letting the anchor decide a descriptor tie is correct. After an
+// UPSTREAM CONTENT EDIT the geometry moved, so the stored anchor is STALE and a
+// congruent twin can sit closer to it than the real element — the anchor deciding
+// there is a silent wrong bind (H5-B / review finding B3). Only Rust knows which
+// case it is, so it says so in the plan and the worker gates the veto on it.
+struct LadderEditContext {
+    // True iff the plan carried `editedFrom = k` AND the step owning these refs is
+    // strictly AFTER k. Default false ⇒ pre-v2 behaviour, byte for byte.
+    bool post_upstream_edit = false;
+};
+
 enum class LadderOutcome { AutoBind, NeedsRepair };
 
 struct LadderResolution {
@@ -87,9 +104,13 @@ struct LadderResolution {
 // candidate, assign distinct bindings optimally (min-cost), gate each on confidence.
 // `body_id` labels the resolution (evidence only). Refs of different `kind` draw
 // from disjoint candidate pools (a face ref never binds an edge).
+//
+// `edit` carries the EDIT-SCOPED tie veto (SCHEMA §10, resolverVersion 2). Its
+// default — no edit context — reproduces the resolverVersion-1 policy exactly.
 std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_shape,
                                                        const std::string& body_id,
-                                                       const std::vector<LadderRef>& refs);
+                                                       const std::vector<LadderRef>& refs,
+                                                       const LadderEditContext& edit = {});
 
 // Build a LadderRef from one op input JSON object ({primary, intent, anchor},
 // SCHEMA §7.3). `ref_id` names it. `kind_hint` is the resolved element kind. The
