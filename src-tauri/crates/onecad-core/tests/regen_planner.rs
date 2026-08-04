@@ -15,8 +15,12 @@ use uuid::Uuid;
 
 use onecad_core::document::body::{BodyLifecycleEvent, BodyRegistry};
 use onecad_core::document::element_index::ElementIndex;
+use onecad_core::document::record::{FilletParams, KnownOperation, Operation, OperationRecord};
+use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, IntentQuery, PrimaryRef};
+use onecad_core::document::variables::Scalar;
 use onecad_core::history::{DependencyGraph, StepState, Timeline};
-use onecad_core::ids::{BodyId, DocumentRevision, JobId, WorkerEpoch};
+use onecad_core::ids::{BodyId, DocumentRevision, ElementId, JobId, WorkerEpoch};
+use onecad_core::math::Vec3;
 use onecad_core::regen::{
     history_prefix_hash, CancelToken, CheckpointArtifact, CheckpointArtifacts, CheckpointEnvelope,
     CheckpointStore, HistoryPrefixHash, InMemoryCheckpointStore, OpFailureCode, Outcome,
@@ -458,4 +462,99 @@ async fn checkpoint_op_failure_does_not_retry_from_zero() {
         "still the checkpoint plan (not stripped)"
     );
     assert_eq!(exec.engine().restore_calls(), 1, "restored once, no retry");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// M16 (HISTORY-HARDEN H5) — the stamped `intent.descriptor` enters the
+// golden-pinned history-prefix hash, so its JSON KEY ORDER is a wire contract.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A fillet whose edge ref carries the exact `intent` shape the single writer
+/// stamps: the descriptor is the verbatim object the worker's
+/// `ElementMapPartition::descriptor_to_json` emits (OCCT enums as ints,
+/// `adjacencyHash` as a 16-char hex string — SCHEMA §7.3 / §10).
+fn fillet_with_stamped_intent() -> OperationRecord {
+    let descriptor = serde_json::json!({
+        "shapeType": 6,      // TopAbs_EDGE
+        "center": [10.0, 40.0, 0.0],
+        "size": 10.0,
+        "magnitude": 10.0,
+        "surfaceType": 0,    // GeomAbs_Plane
+        "curveType": 0,      // GeomAbs_Line
+        "normal": [0.0, 0.0, 1.0],
+        "tangent": [1.0, 0.0, 0.0],
+        "hasNormal": false,
+        "hasTangent": true,
+        "adjacencyHash": "d41d8cd98f00b204",
+    });
+    let edge = ElementId::new("el_000000000000000000000000000004a1");
+    let op = Operation::Known(KnownOperation::Fillet(FilletParams {
+        radius: Scalar::new(2.0),
+        edge_ids: vec![edge.clone()],
+        edges: vec![ElementRef {
+            primary: Some(PrimaryRef {
+                body: BodyId(Uuid::from_u128(0xB0)),
+                element: edge,
+                kind: ElementKind::Edge,
+                extra: Default::default(),
+            }),
+            intent: Some(IntentQuery {
+                version: 1,
+                kind: ElementKind::Edge,
+                descriptor,
+                extra: Default::default(),
+            }),
+            anchor: Some(AnchorIntent {
+                world_point: Vec3::new_unchecked(10.0, 40.0, 0.0),
+                surface_uv: None,
+                local_frame: None,
+                adjacency_hint: None,
+                extra: Default::default(),
+            }),
+            extra: Default::default(),
+        }],
+        chain_tangent_edges: false,
+        extra: Default::default(),
+    }));
+    OperationRecord::new(rid(0x5), 0, "Fillet", op)
+}
+
+/// The descriptor is an opaque `serde_json::Value`, so its key order is whatever
+/// `serde_json::Map` happens to be — sorted today (a `BTreeMap`; the crate is built
+/// WITHOUT the `preserve_order` feature). Enabling that feature anywhere in the
+/// dependency graph would silently switch it to insertion order, move every
+/// stamped record's bytes, and invalidate every stored checkpoint against a hash
+/// nothing else changed. Pinned as exact bytes so the swap cannot land quietly.
+#[test]
+fn h5_stamped_intent_descriptor_serializes_in_a_pinned_key_order() {
+    let rec = fillet_with_stamped_intent();
+    let op_json = serde_json::to_string(&rec.op).expect("op serializes");
+    assert_eq!(
+        op_json,
+        concat!(
+            r#"{"opType":"Fillet","params":{"radius":{"value":2.0},"#,
+            r#""edgeIds":["el_000000000000000000000000000004a1"],"#,
+            r#""edges":[{"primary":{"bodyId":"00000000-0000-0000-0000-0000000000b0","#,
+            r#""elementId":"el_000000000000000000000000000004a1","kind":"edge"},"#,
+            r#""intent":{"version":1,"kind":"edge","descriptor":{"#,
+            // ── alphabetical, NOT the insertion order of `descriptor_to_json` ──
+            r#""adjacencyHash":"d41d8cd98f00b204","center":[10.0,40.0,0.0],"curveType":0,"#,
+            r#""hasNormal":false,"hasTangent":true,"magnitude":10.0,"normal":[0.0,0.0,1.0],"#,
+            r#""shapeType":6,"size":10.0,"surfaceType":0,"tangent":[1.0,0.0,0.0]}},"#,
+            r#""anchor":{"worldPoint":[10.0,40.0,0.0]}}],"chainTangentEdges":false}}"#,
+        ),
+        "the stamped descriptor's key order is a wire contract — see the test doc"
+    );
+}
+
+/// The same record's golden [`history_prefix_hash`] — the value the planner
+/// compares against every stored checkpoint and the worker echoes back. It moves
+/// only when the canonical wire form of a stamped ref genuinely changes.
+#[test]
+fn h5_stamped_intent_history_prefix_hash_is_golden() {
+    let hash = history_prefix_hash(&[fillet_with_stamped_intent()]);
+    assert_eq!(
+        hash.to_string(),
+        "53b231a27191a637f6bb95d927d8f8765b3c78d0904a6ffbda34fc3dc619ac48"
+    );
 }

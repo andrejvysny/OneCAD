@@ -4116,4 +4116,164 @@ mod body_wire_tests {
         );
         assert_eq!(w["params"]["targetBodyId"], json!(body_id_wire(target)));
     }
+
+    // ── HISTORY-HARDEN H5 — op-set agreement ────────────────────────────────
+
+    /// `KnownOperation::element_refs_mut` (where the single writer stamps
+    /// `intent.descriptor`) and [`wire_op_inputs`] (what the worker's ladder
+    /// actually receives) must cover the SAME op set with the SAME slot count.
+    ///
+    /// A ref slot present in the wire but missing from `element_refs_mut` would ship
+    /// `intent: null` forever — the H5 defect, reintroduced silently for one op. The
+    /// reverse would stamp evidence into a params field the worker never reads,
+    /// churning the golden history-prefix hash for nothing.
+    ///
+    /// Every op the enum knows is listed, each in its MOST ref-bearing form
+    /// (`ToFace` in both directions, a typed edge ref beside the bare `edgeIds`
+    /// fallback, a `hostFace`, a hole face). The fixtures are JSON so the required
+    /// params keys are the wire's own; the discriminator for "typed semantic ref" on
+    /// the wire side is the presence of `anchor` — only `element_ref_wire` emits it,
+    /// while the element-only fallbacks (`edge_input_refs`' bare path,
+    /// `face_input_refs`, `body_input_ref`) render `primary` alone.
+    #[test]
+    fn element_refs_mut_covers_exactly_the_wire_typed_ref_slots() {
+        let b = "00000000-0000-0000-0000-0000000000b0";
+        let sk = "00000000-0000-0000-0000-000000000011";
+        let edge_ref = json!({
+            "primary": { "bodyId": b, "elementId": "el_1", "kind": "edge" },
+            "anchor": { "worldPoint": [1.0, 2.0, 3.0] }
+        });
+        let face_ref = json!({
+            "primary": { "bodyId": b, "elementId": "el_2", "kind": "face" },
+            "anchor": { "worldPoint": [1.0, 2.0, 3.0] }
+        });
+
+        // (opType, params, expected typed-ref slots). Keep in sync with BOTH
+        // `element_refs_mut` and `wire_op_inputs` — that is the point of the test.
+        let cases: Vec<(&str, Value, usize)> = vec![
+            // hostFace is core-only (`strip_sketch_host_face`) ⇒ no slot either side.
+            (
+                "Sketch",
+                json!({ "sketchId": sk, "plane": { "kind": "XY", "origin": [0,0,0], "xAxis": [0,1,0], "yAxis": [-1,0,0], "normal": [0,0,1] }, "hostFace": face_ref }),
+                0,
+            ),
+            (
+                "Extrude",
+                json!({ "distance": 5.0, "draftAngleDeg": 0.0, "distance2": 0.0, "extrudeMode": "ToFace", "targetFace": face_ref, "twoDirections": true, "extrudeMode2": "ToFace", "targetFace2": face_ref, "booleanMode": "NewBody" }),
+                2,
+            ),
+            // Revolve's edge axis is an `AxisRef`, not an `ElementRef` — no slot.
+            (
+                "Revolve",
+                json!({ "angleDeg": 90.0, "booleanMode": "NewBody", "axis": { "kind": "edge", "bodyId": b, "edgeId": "e:2" } }),
+                0,
+            ),
+            (
+                "Fillet",
+                json!({ "radius": 2.0, "edgeIds": ["el_1"], "edges": [edge_ref] }),
+                1,
+            ),
+            (
+                "Chamfer",
+                json!({ "radius": 1.0, "edgeIds": ["el_1"], "edges": [edge_ref] }),
+                1,
+            ),
+            // Shell's open faces are bare ElementIds — element-only on the wire, no
+            // ref slot to stamp. RECORDED GAP (see `element_refs_mut`'s docs).
+            (
+                "Shell",
+                json!({ "thickness": 1.5, "openFaces": ["el_2"], "targetBodyId": b }),
+                0,
+            ),
+            (
+                "Boolean",
+                json!({ "operation": "Cut", "targetBodyId": b, "toolBodyId": b }),
+                0,
+            ),
+            (
+                "LinearPattern",
+                json!({ "direction": [1,0,0], "count": 2, "spacing": 5.0, "sourceBodyId": b }),
+                0,
+            ),
+            (
+                "CircularPattern",
+                json!({ "axisOrigin": [0,0,0], "axisDirection": [0,0,1], "count": 3, "angleDeg": 120.0, "sourceBodyId": b }),
+                0,
+            ),
+            (
+                "Loft",
+                json!({ "booleanMode": "NewBody", "profiles": [] }),
+                0,
+            ),
+            ("Sweep", json!({ "booleanMode": "NewBody" }), 0),
+            (
+                "MirrorBody",
+                json!({ "planePoint": [0,0,0], "planeNormal": [0,0,1], "sourceBodyId": b }),
+                0,
+            ),
+            (
+                "ImportStep",
+                json!({ "sourceSha256": "aa", "sourceCodec": "step", "sourceName": "x.step" }),
+                0,
+            ),
+            (
+                "TransformBody",
+                json!({ "translate": [1,0,0], "targets": [b] }),
+                0,
+            ),
+            (
+                "Hole",
+                json!({ "targetBodyId": b, "face": face_ref, "point": [0,0,0], "axis": [0,0,-1], "depth": null, "holeType": "simple", "diameter": 5.0 }),
+                1,
+            ),
+        ];
+
+        for (op_type, params, expected) in &cases {
+            let mut known: KnownOperation =
+                serde_json::from_value(json!({ "opType": op_type, "params": params }))
+                    .unwrap_or_else(|e| panic!("{op_type} fixture deserializes: {e}"));
+            assert_eq!(
+                known.element_refs_mut().len(),
+                *expected,
+                "{op_type}: element_refs_mut slot count"
+            );
+            let operation = Operation::Known(known);
+            let inputs = operation.derive_inputs();
+            let wired = wire_op_inputs(&operation, &inputs);
+            let typed = wired
+                .as_array()
+                .expect("inputs[] is an array")
+                .iter()
+                .filter(|r| r.get("anchor").is_some())
+                .count();
+            assert_eq!(
+                typed, *expected,
+                "{op_type}: wire inputs[] typed-ref count diverged from element_refs_mut — \
+                 got {wired}"
+            );
+        }
+
+        // The enum is covered exhaustively: a new variant fails to compile below
+        // until it is given a decision in `cases` above.
+        fn _covered(k: &KnownOperation) {
+            match k {
+                KnownOperation::Sketch(_)
+                | KnownOperation::Extrude(_)
+                | KnownOperation::Revolve(_)
+                | KnownOperation::Fillet(_)
+                | KnownOperation::Chamfer(_)
+                | KnownOperation::Shell(_)
+                | KnownOperation::Boolean(_)
+                | KnownOperation::LinearPattern(_)
+                | KnownOperation::CircularPattern(_)
+                | KnownOperation::Loft(_)
+                | KnownOperation::Sweep(_)
+                | KnownOperation::MirrorBody(_)
+                | KnownOperation::ImportStep(_)
+                | KnownOperation::TransformBody(_)
+                | KnownOperation::Hole(_) => {}
+            }
+        }
+        assert_eq!(cases.len(), 15, "one fixture per KnownOperation variant");
+    }
 }

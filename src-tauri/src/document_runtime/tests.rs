@@ -34,7 +34,7 @@ use onecad_core::regen::{
 };
 
 use onecad_core::document::refs::{
-    AnchorIntent, AxisRef, ElementKind, ElementRef, PrimaryRef, SketchRegionRef,
+    AnchorIntent, AxisRef, ElementKind, ElementRef, IntentQuery, PrimaryRef, SketchRegionRef,
 };
 use onecad_core::ids::{ElementId, EntityId, RegionId, SketchId, TopoKey};
 use onecad_core::math::{Vec2, Vec3};
@@ -73,6 +73,14 @@ struct FakeBackend {
     plan_fails: bool,
     /// When set, `save_checkpoint` returns artifacts instead of `Unsupported`.
     checkpoints_work: bool,
+    /// The opaque descriptor `acquire_element_ids` echoes per pick. Mutable so a
+    /// test can move the promotion cache's evidence between two promotions of the
+    /// SAME element and prove which stamp an edit kept (H5 fill-iff-None).
+    descriptor: Mutex<serde_json::Value>,
+    /// When set, `acquire_element_ids` echoes this as the pick's ALREADY-MINTED id
+    /// (SCHEMA §7.5 `existing`), so a test can warm the promotion cache for an
+    /// element id it did not mint in that runtime.
+    existing: Mutex<Option<ElementId>>,
     state: Mutex<FakeState>,
 }
 
@@ -83,6 +91,8 @@ impl Default for FakeBackend {
             solver_fails: false,
             plan_fails: false,
             checkpoints_work: false,
+            descriptor: Mutex::new(serde_json::json!({ "fake": true })),
+            existing: Mutex::new(None),
             state: Mutex::new(FakeState::default()),
         }
     }
@@ -126,6 +136,16 @@ impl FakeBackend {
 
     fn checkpoint_saves(&self) -> usize {
         self.state.lock().unwrap().checkpoint_saves
+    }
+
+    /// Re-points the descriptor every later `acquire_element_ids` echoes.
+    fn set_descriptor(&self, d: serde_json::Value) {
+        *self.descriptor.lock().unwrap() = d;
+    }
+
+    /// Makes every later pick resolve to an already-minted `elementId`.
+    fn set_existing(&self, id: Option<ElementId>) {
+        *self.existing.lock().unwrap() = id;
     }
 
     fn bodies_for(&self, step: usize, record: RecordId) -> Vec<BodyId> {
@@ -296,15 +316,21 @@ impl GeometryEngine for FakeBackend {
         r: AcquireRequest,
     ) -> Result<Vec<WorkerElementEvidence>, EngineError> {
         // Echo one evidence entry per pick (empty `existing` — Rust mints the id).
+        // `kind` follows the TopoKey prefix (`f:`/`e:`/`v:`), as the real worker's
+        // `kind_of_prefix` does — a fillet's edge pick must not come back a face.
         Ok(r.picks
             .into_iter()
             .map(|p| WorkerElementEvidence {
+                kind: match p.topo_key.as_str().as_bytes().first() {
+                    Some(b'e') => onecad_core::document::refs::ElementKind::Edge,
+                    Some(b'v') => onecad_core::document::refs::ElementKind::Vertex,
+                    _ => onecad_core::document::refs::ElementKind::Face,
+                },
                 topo_key: p.topo_key,
                 body: r.body,
-                kind: onecad_core::document::refs::ElementKind::Face,
                 anchor: p.anchor,
-                descriptor: Some(serde_json::json!({ "fake": true })),
-                existing: None,
+                descriptor: Some(self.descriptor.lock().unwrap().clone()),
+                existing: self.existing.lock().unwrap().clone(),
             })
             .collect())
     }
@@ -2159,5 +2185,263 @@ async fn finish_sketch_skips_the_stamp_for_a_record_ahead_of_its_host_body() {
     assert!(
         params.get("hostFace").is_none(),
         "no stamp when the host body is produced by a LATER op, got {params}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HISTORY-HARDEN H5 — `intent.descriptor` hydration at the single writer
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The `intent` stored on the first (and only) edge ref of a Fillet record.
+fn stored_edge_intent(rt: &DocumentRuntime, record: RecordId) -> Option<IntentQuery> {
+    let rec = rt
+        .session
+        .document()
+        .timeline
+        .records()
+        .iter()
+        .find(|r| r.record_id == record)
+        .expect("the record is in the timeline");
+    let Operation::Known(KnownOperation::Fillet(p)) = &rec.op else {
+        panic!("Fillet record")
+    };
+    p.edges[0].intent.clone()
+}
+
+/// Promotes one edge pick and returns its Rust-minted id.
+async fn promote_edge(rt: &mut DocumentRuntime, body: BodyId, key: &str) -> ElementId {
+    let promoted = rt
+        .promote_selection(SnapshotId(0), body, vec![(TopoKey::new(key), None)])
+        .await
+        .expect("promote");
+    ElementId::new(promoted[0].element_id.clone())
+}
+
+/// A ref authored against a promoted element is stamped with that element's
+/// worker-authored descriptor — the evidence the SCHEMA §10 ladder scores. Without
+/// it every ref ships `intent: null` and L2 degrades to a pure-anchor
+/// nearest-centroid match.
+#[tokio::test]
+async fn add_operation_stamps_the_promoted_descriptor_onto_a_fresh_ref() {
+    let backend = Arc::new(FakeBackend::new());
+    let mut rt = runtime_with(backend.clone());
+    let body = BodyId(Uuid::from_u128(0xB0));
+    backend.set_descriptor(serde_json::json!({ "gen": 1 }));
+    let edge = promote_edge(&mut rt, body, "e:7").await;
+
+    let record = RecordId(Uuid::from_u128(0xF0));
+    let mut rec = fillet_record(
+        0xF0,
+        body,
+        edge.as_str(),
+        Vec3::new_unchecked(1.0, 2.0, 3.0),
+    );
+    rec.record_id = record;
+    assert!(
+        matches!(&rec.op, Operation::Known(KnownOperation::Fillet(p)) if p.edges[0].intent.is_none()),
+        "precondition: the FE authors no intent (it holds no descriptor)"
+    );
+    rt.apply(EditCommand::AddOperation {
+        record: rec,
+        at_cursor: true,
+    })
+    .unwrap();
+
+    let intent = stored_edge_intent(&rt, record).expect("the ref was stamped");
+    assert_eq!(intent.descriptor, serde_json::json!({ "gen": 1 }));
+    assert_eq!(
+        intent.kind,
+        ElementKind::Edge,
+        "the stamped kind is the worker's own classification of the promoted element"
+    );
+    assert_eq!(intent.version, 1, "the descriptor policy axis (SCHEMA §6)");
+}
+
+/// **Fill iff `intent.is_none()`.** An already-stamped ref is frozen evidence from
+/// the moment it was authored (Invariant 2). Re-stamping it from a LATER promotion
+/// would teach the ladder that post-move geometry was always the intended target —
+/// the silent-rebind class this wave exists to kill. The complement is pinned in
+/// the same test: a ref that arrives unstamped still picks up the CURRENT evidence,
+/// so the freeze is a real decision and not a dead code path.
+#[tokio::test]
+async fn update_operation_params_never_overwrites_an_existing_intent() {
+    let backend = Arc::new(FakeBackend::new());
+    let mut rt = runtime_with(backend.clone());
+    let body = BodyId(Uuid::from_u128(0xB0));
+    let record = RecordId(Uuid::from_u128(0xF0));
+    let anchor = Vec3::new_unchecked(1.0, 2.0, 3.0);
+
+    backend.set_descriptor(serde_json::json!({ "gen": 1 }));
+    let edge = promote_edge(&mut rt, body, "e:7").await;
+    let mut rec = fillet_record(0xF0, body, edge.as_str(), anchor);
+    rec.record_id = record;
+    rt.apply(EditCommand::AddOperation {
+        record: rec,
+        at_cursor: true,
+    })
+    .unwrap();
+    let authored = stored_edge_intent(&rt, record).expect("stamped at mint");
+    assert_eq!(authored.descriptor, serde_json::json!({ "gen": 1 }));
+
+    // The element is re-promoted after an edit moved it: the cache now holds gen 2
+    // evidence under the SAME persistent id (Invariant 1 reuses the id).
+    backend.set_descriptor(serde_json::json!({ "gen": 2 }));
+    let same = promote_edge(&mut rt, body, "e:7").await;
+    assert_eq!(same, edge, "Invariant 1: the re-pick reuses the id");
+
+    // (a) A scalar re-edit that PRESERVES the stored ref (the `operation_params`
+    //     path the app uses) keeps the gen-1 stamp byte-for-byte.
+    let mut kept = fillet_record(0xF0, body, edge.as_str(), anchor);
+    kept.record_id = record;
+    if let Operation::Known(KnownOperation::Fillet(p)) = &mut kept.op {
+        p.edges[0].intent = Some(authored.clone());
+        p.radius = Scalar::new(3.0);
+    }
+    rt.apply(EditCommand::UpdateOperationParams {
+        record,
+        op: kept.op.clone(),
+    })
+    .unwrap();
+    let after = stored_edge_intent(&rt, record).expect("still stamped");
+    assert_eq!(
+        serde_json::to_string(&after).unwrap(),
+        serde_json::to_string(&authored).unwrap(),
+        "an existing intent is NEVER refreshed — a post-move descriptor must not be \
+         frozen onto a pre-move ref"
+    );
+
+    // (b) …and an unstamped ref (a genuinely re-picked edge) does take the current
+    //     evidence, so (a) is a decision, not an inert branch.
+    let mut fresh = fillet_record(0xF0, body, edge.as_str(), anchor);
+    fresh.record_id = record;
+    rt.apply(EditCommand::UpdateOperationParams {
+        record,
+        op: fresh.op.clone(),
+    })
+    .unwrap();
+    assert_eq!(
+        stored_edge_intent(&rt, record).unwrap().descriptor,
+        serde_json::json!({ "gen": 2 }),
+        "a re-authored ref picks up the CURRENT promotion evidence"
+    );
+}
+
+/// A ref whose element this runtime never promoted (a legacy record, a FE-authored
+/// id, a ref with no `primary`) is left EXACTLY as authored — anchor-only, the
+/// pre-H5 behaviour. Never a fabricated descriptor.
+#[tokio::test]
+async fn an_unpromoted_ref_is_left_anchor_only() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let body = BodyId(Uuid::from_u128(0xB0));
+    let record = RecordId(Uuid::from_u128(0xF1));
+    let mut rec = fillet_record(
+        0xF1,
+        body,
+        "el_never_promoted",
+        Vec3::new_unchecked(1.0, 2.0, 3.0),
+    );
+    rec.record_id = record;
+    rt.apply(EditCommand::AddOperation {
+        record: rec,
+        at_cursor: true,
+    })
+    .unwrap();
+    assert!(
+        stored_edge_intent(&rt, record).is_none(),
+        "no evidence ⇒ no stamp (the ladder falls back to the anchor, as before)"
+    );
+}
+
+/// **No load-time backfill.** A document saved before H5 carries `intent: null` on
+/// every ref. Opening it must not stamp anything: `inputs` and `params` are inside
+/// the golden `history_prefix_hash`, so a backfill would silently move every
+/// existing document's hash AND its `document.json` bytes, invalidating every
+/// stored checkpoint against a change the user never made. (Mirrors the WP-FIX W4
+/// `host_face` discipline, `transform_gate::a_legacy_host_face_document_reopens_and_resaves_byte_identical`.)
+#[tokio::test]
+async fn opening_a_legacy_document_does_not_backfill_intent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.onecad");
+    let body = BodyId(Uuid::from_u128(0xB0));
+    let record = RecordId(Uuid::from_u128(0xF0));
+
+    // Author the legacy shape through a runtime whose promotion cache is EMPTY, so
+    // the stored ref really is `intent: null` (never stamped).
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let mut rec = fillet_record(
+        0xF0,
+        body,
+        "el_legacy_edge",
+        Vec3::new_unchecked(1.0, 2.0, 3.0),
+    );
+    rec.record_id = record;
+    rt.apply(EditCommand::AddOperation {
+        record: rec,
+        at_cursor: true,
+    })
+    .unwrap();
+    assert!(stored_edge_intent(&rt, record).is_none(), "legacy shape");
+    rt.save(&path, test_save_meta()).unwrap();
+    let first = std::fs::read(&path).unwrap();
+    let hash_before =
+        onecad_core::regen::history_prefix_hash(rt.session.document().timeline.records());
+
+    let backend = Arc::new(FakeBackend::new());
+    let engine: Arc<dyn GeometryEngine> = backend.clone();
+    let meshes: Arc<dyn MeshProvider> = backend.clone();
+    let solver: Arc<dyn SolverEngine> = backend.clone();
+    let mut reopened = DocumentRuntime::open(&path, engine, meshes, solver).unwrap();
+    let op_bytes = |rt: &DocumentRuntime| {
+        serde_json::to_string(
+            &rt.session
+                .document()
+                .timeline
+                .records()
+                .iter()
+                .find(|r| r.record_id == record)
+                .unwrap()
+                .op,
+        )
+        .unwrap()
+    };
+    let op_before = op_bytes(&reopened);
+    assert!(
+        stored_edge_intent(&reopened, record).is_none(),
+        "no load-time backfill — the record is exactly as authored"
+    );
+    assert_eq!(
+        hash_before,
+        onecad_core::regen::history_prefix_hash(reopened.session.document().timeline.records()),
+        "the golden prefix hash of a legacy document does not move"
+    );
+    let path2 = dir.path().join("resaved.onecad");
+    reopened.save(&path2, test_save_meta()).unwrap();
+    assert_eq!(
+        first,
+        std::fs::read(&path2).unwrap(),
+        "a legacy document opened and re-saved is BYTE-IDENTICAL"
+    );
+
+    // …and warming the promotion cache for THAT VERY element id afterwards still
+    // backfills nothing — the only configuration in which a lazy stamp could fire.
+    backend.set_existing(Some(ElementId::new("el_legacy_edge")));
+    backend.set_descriptor(serde_json::json!({ "gen": 9 }));
+    reopened
+        .promote_selection(SnapshotId(0), body, vec![(TopoKey::new("e:7"), None)])
+        .await
+        .expect("promote");
+    assert!(
+        stored_edge_intent(&reopened, record).is_none(),
+        "a warm cache does not retro-stamp a stored ref"
+    );
+    assert_eq!(
+        op_before,
+        op_bytes(&reopened),
+        "the legacy record's params bytes are untouched by a promotion"
+    );
+    assert_eq!(
+        hash_before,
+        onecad_core::regen::history_prefix_hash(reopened.session.document().timeline.records()),
+        "…and so is its golden prefix hash"
     );
 }

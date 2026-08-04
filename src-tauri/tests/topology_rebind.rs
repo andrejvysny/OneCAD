@@ -1317,24 +1317,28 @@ async fn h5b_destructive_edit_is_deterministic_needs_repair() {
         .await
         .expect("refId-only resolve (hydrated from the stored ref)");
 
-    // (b) explicit — the FULL stored fillet edge ref; same refId for a 1:1 compare.
-    let explicit_ref = ElementRef {
-        primary: Some(PrimaryRef {
-            body: setup.body,
-            element: setup.edge_el.clone(),
-            kind: ElementKind::Edge,
-            extra: Default::default(),
-        }),
-        intent: None,
-        anchor: Some(AnchorIntent {
-            world_point: setup.edge_anchor,
-            surface_uv: None,
-            local_frame: None,
-            adjacency_hint: None,
-            extra: Default::default(),
-        }),
-        extra: Default::default(),
-    };
+    // (b) explicit — the FULL stored fillet edge ref, read back from the RECORD.
+    //
+    // It is read rather than rebuilt because the single writer stamps
+    // `intent.descriptor` onto the ref when the op is authored (HISTORY-HARDEN H5).
+    // A hand-rolled `{primary, anchor}` probe would carry no intent, and the two
+    // resolves would legitimately differ — comparing them would then only prove
+    // that the test forgot the evidence, not that hydration works.
+    let explicit_ref: ElementRef = serde_json::from_value(
+        rt.operation_params(RecordId(Uuid::from_u128(FILLET_REC)))
+            .expect("the fillet record's stored params")["edges"][0]
+            .clone(),
+    )
+    .expect("the stored edge ref deserializes");
+    assert_eq!(
+        explicit_ref.primary.as_ref().map(|p| p.element.as_str()),
+        Some(setup.edge_el.as_str()),
+        "the stored ref still names the promoted element"
+    );
+    assert!(
+        explicit_ref.intent.is_some(),
+        "H5: the single writer stamped descriptor evidence on the authored ref"
+    );
     let explicit = rt
         .resolve_refs(ResolveRequest {
             snapshot_id: snap_id,
@@ -1663,6 +1667,718 @@ async fn symmetric_ambiguity_resolves_to_needs_repair() {
         }
     }
     eprintln!("SYMMETRIC PASS: descriptor tie ⇒ NeedsRepair (never a silent bind)");
+
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HISTORY-HARDEN H5 — `intent.descriptor` evidence vs. a nearest-centroid anchor
+//
+// The shared body is a "comb": a base bar with two ribs of DIFFERENT cross
+// section, extruded in +Z. The op under test fillets the WIDE rib's top edge; an
+// upstream parametric edit then TRANSLATES the wide rib away and brings the narrow
+// rib to the exact position the wide one vacated — a decoy sitting on the stale
+// anchor.
+//
+// Anchor-only scoring (`Scoring.cpp`: `anchor` is the sole feature at weight 0.25,
+// so `score == anchor_similarity`) sees a candidate coincident with the stale
+// anchor and binds it at ≈1.0 with a wide margin. That bind is invisible in the
+// repair state and only shows up in the REMOVED VOLUME: a fillet of radius r on an
+// edge of length L removes exactly `(1 − π/4)·r²·L`, so the wide rib's 30 mm edge
+// and the narrow rib's 12 mm edge leave signatures 2.5× apart.
+//
+// With `intent.descriptor` stamped, `magnitude` (edge length, weight 0.25), `type`
+// (weight 0.20) and `tangent` (weight 0.20) enter the score, so the decoy can no
+// longer win on position alone.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Comb geometry (mm). The base bar spans `x ∈ [0, COMB_SPAN]`, `y ∈ [0, BASE_TOP]`;
+/// both ribs rise from `BASE_TOP` to `RIB_TOP`; the solid is `COMB_DEPTH` deep in +Z.
+const COMB_SPAN: f64 = 120.0;
+const BASE_TOP: f64 = 10.0;
+const RIB_TOP: f64 = 40.0;
+/// Deep enough that the authored rim edge's CONGRUENT TWIN on the opposite face
+/// (`z = COMB_DEPTH`, identical type/length/tangent/adjacency) stays outside the
+/// 0.10 auto-bind margin. Descriptor evidence matches that twin perfectly, so the
+/// anchor term is the ONLY separator and must carry ≥ 0.10/0.25 of its range:
+/// `COMB_DEPTH ≥ 0.4 · (0.5 · bodyDiagonal)` ⇒ ≥ 25.8 mm here. 45 leaves headroom.
+const COMB_DEPTH: f64 = 45.0;
+const RIB_WIDE: f64 = 30.0;
+const RIB_NARROW: f64 = 12.0;
+/// Fillet radius used by every H5 case.
+const H5_RADIUS: f64 = 2.0;
+
+/// Sketch `(u, v)` → world, through the plane `sketch_record` stamps
+/// ([`xy_plane_ref`]: `xAxis = +Y`, `yAxis = −X`), i.e. `world = (−v, u, z)`. The
+/// worker builds the profile from the RECORD's plane, so a test that wants to
+/// address a sketch feature in world space must go through the same mapping.
+fn sketch_to_world(u: f64, v: f64, z: f64) -> Vec3 {
+    let p = xy_plane_ref();
+    Vec3::new_unchecked(
+        p.origin.x + u * p.x_axis.x + v * p.y_axis.x + z * p.normal.x,
+        p.origin.y + u * p.x_axis.y + v * p.y_axis.y + z * p.normal.y,
+        p.origin.z + u * p.x_axis.z + v * p.y_axis.z + z * p.normal.z,
+    )
+}
+
+/// Volume a radius-`r` fillet removes from a straight edge of length `l`:
+/// the corner prism minus the quarter cylinder, `(1 − π/4)·r²·l`.
+fn fillet_removed(r: f64, l: f64) -> f64 {
+    (1.0 - std::f64::consts::FRAC_PI_4) * r * r * l
+}
+
+/// Adds a closed, fully-constrained (dof-0) polygon through `pts` (CCW).
+///
+/// Same marshaller shape as [`add_rect`] — two synthesized point entities per line
+/// — chained corner-to-corner with `Coincident` and pinned with one `Fixed` per
+/// corner. That is exactly `4N − 2N − 2N = 0` dof with no redundant constraint, and
+/// it keeps the ENTITY IDS stable while the coordinates move, so an edit that
+/// re-authors the polygon is a pure parametric translation (the region id hashes
+/// entity ids, not positions).
+fn add_poly(sk: &mut Sketch, base: u128, pts: &[(f64, f64)]) {
+    let n = pts.len() as u128;
+    let e = |k: u128| EntityId(Uuid::from_u128(base + k));
+    let c = |k: u128| ConstraintId(Uuid::from_u128(base + 0x400 + k));
+    for i in 0..n {
+        let (x0, y0) = pts[i as usize];
+        let (x1, y1) = pts[((i + 1) % n) as usize];
+        sk.add_entity(SketchEntity::point(
+            e(2 * i),
+            Vec2::new_unchecked(x0, y0),
+            false,
+            false,
+        ))
+        .unwrap();
+        sk.add_entity(SketchEntity::point(
+            e(2 * i + 1),
+            Vec2::new_unchecked(x1, y1),
+            false,
+            false,
+        ))
+        .unwrap();
+        sk.add_entity(SketchEntity::line(
+            e(0x100 + i),
+            e(2 * i),
+            e(2 * i + 1),
+            false,
+        ))
+        .unwrap();
+    }
+    for i in 0..n {
+        sk.add_constraint(Constraint::Coincident {
+            id: c(i),
+            point1: e(2 * i + 1),
+            point2: e(2 * ((i + 1) % n)),
+            point1_position: CurvePosition::Arbitrary,
+            point2_position: CurvePosition::Arbitrary,
+        })
+        .unwrap();
+        sk.add_constraint(Constraint::Fixed {
+            id: c(0x100 + i),
+            point: e(2 * i),
+            at: Vec2::new_unchecked(pts[i as usize].0, pts[i as usize].1),
+        })
+        .unwrap();
+    }
+}
+
+/// A comb outline whose LEFT and RIGHT rib are each `(x0, width)`. Twelve corners,
+/// CCW from the origin; re-authoring with different rib placements moves geometry
+/// only (identical entity ids, identical topology).
+fn comb_sketch(sid: SketchId, left: (f64, f64), right: (f64, f64)) -> Sketch {
+    let (l0, l1) = (left.0, left.0 + left.1);
+    let (r0, r1) = (right.0, right.0 + right.1);
+    assert!(
+        0.0 < l0 && l1 < r0 && r1 < COMB_SPAN,
+        "the outline must stay simple: 0 < {l0} < {l1} < {r0} < {r1} < {COMB_SPAN}"
+    );
+    let pts = [
+        (0.0, 0.0),
+        (COMB_SPAN, 0.0),
+        (COMB_SPAN, BASE_TOP),
+        (r1, BASE_TOP),
+        (r1, RIB_TOP),
+        (r0, RIB_TOP),
+        (r0, BASE_TOP),
+        (l1, BASE_TOP),
+        (l1, RIB_TOP),
+        (l0, RIB_TOP),
+        (l0, BASE_TOP),
+        (0.0, BASE_TOP),
+    ];
+    let mut sk = Sketch::on_world_plane(sid, "Comb", WorldPlane::XY);
+    add_poly(&mut sk, 0x7000, &pts);
+    sk
+}
+
+/// Exact volume of the comb solid (the extruded outline's area × depth) — the
+/// analytic baseline the removed-volume proofs subtract from. Unchanged by an edit
+/// that only MOVES the ribs.
+fn comb_volume(left_w: f64, right_w: f64) -> f64 {
+    (COMB_SPAN * BASE_TOP + (left_w + right_w) * (RIB_TOP - BASE_TOP)) * COMB_DEPTH
+}
+
+/// The MESH1 edge whose polyline centroid is nearest `target` →
+/// `(topoKey, centroid, polyline length)`.
+fn edge_pick_near(view: &MeshHeaderView, blob: &[u8], target: Vec3) -> (String, Vec3, f64) {
+    assert!(view.has_edges(), "MESH1 must carry edges for the pick");
+    let er = view.section(SEC_EDGE_RANGES).expect("EDGE_RANGES");
+    let ep = view.section(SEC_EDGE_POSITIONS).expect("EDGE_POSITIONS");
+    let keys = id_table(
+        view,
+        blob,
+        SEC_EDGE_ID_OFFS,
+        SEC_EDGE_ID_CHARS,
+        view.edge_count as usize,
+    );
+    let (erbase, epbase) = (er.offset as usize, ep.offset as usize);
+    let mut best: Option<(usize, f64, Vec3, f64)> = None;
+    for i in 0..view.edge_count as usize {
+        let first = u32_le(blob, erbase + i * 8) as usize;
+        let count = u32_le(blob, erbase + i * 8 + 4) as usize;
+        if count == 0 {
+            continue;
+        }
+        let pt = |p: usize| -> [f64; 3] {
+            let o = epbase + (first + p) * 12;
+            [
+                f32_le(blob, o) as f64,
+                f32_le(blob, o + 4) as f64,
+                f32_le(blob, o + 8) as f64,
+            ]
+        };
+        let (mut sx, mut sy, mut sz) = (0.0f64, 0.0f64, 0.0f64);
+        let mut len = 0.0f64;
+        for p in 0..count {
+            let v = pt(p);
+            sx += v[0];
+            sy += v[1];
+            sz += v[2];
+            if p > 0 {
+                let u = pt(p - 1);
+                len +=
+                    ((v[0] - u[0]).powi(2) + (v[1] - u[1]).powi(2) + (v[2] - u[2]).powi(2)).sqrt();
+            }
+        }
+        let n = count as f64;
+        let centroid = Vec3::new_unchecked(sx / n, sy / n, sz / n);
+        let d = (centroid.x - target.x).powi(2)
+            + (centroid.y - target.y).powi(2)
+            + (centroid.z - target.z).powi(2);
+        if best.is_none_or(|(_, bd, _, _)| d < bd) {
+            best = Some((i, d, centroid, len));
+        }
+    }
+    let (idx, _d, centroid, len) = best.expect("at least one edge");
+    (keys[idx].clone(), centroid, len)
+}
+
+/// `(score, margin, label)` of the ladder's verdict for one dry-run resolution —
+/// the H6 decision gate's raw input. `NeedsRepair` reports its best candidate's
+/// pair (SCHEMA §9 `score1`/`score1 − score2`).
+fn score_margin(outcome: &ResolveOutcome) -> (f64, f64, String) {
+    match outcome {
+        ResolveOutcome::AutoBind {
+            score,
+            margin,
+            topo_key,
+            ..
+        } => (
+            *score,
+            *margin,
+            format!(
+                "AutoBind(topoKey={})",
+                topo_key.as_ref().map_or("-", TopoKey::as_str)
+            ),
+        ),
+        ResolveOutcome::NeedsRepair(item) => {
+            let best = item.candidates.first();
+            (
+                best.map_or(0.0, |c| c.score),
+                best.map_or(0.0, |c| c.margin),
+                format!(
+                    "NeedsRepair({:?}/{:?}, {} candidates)",
+                    item.ladder_failed,
+                    item.reason,
+                    item.candidates.len()
+                ),
+            )
+        }
+        ResolveOutcome::Unchanged { element_id } => (
+            1.0,
+            1.0,
+            format!(
+                "Unchanged({})",
+                element_id.as_ref().map_or("-", ElementId::as_str)
+            ),
+        ),
+    }
+}
+
+/// The `(score, margin)` the REGEN ITSELF recorded for the fillet step, when the
+/// in-op ladder refused to bind. This is the primary H6 measurement: it is scored
+/// against the true candidate pool the op saw (`m−1` geometry, the filleted edge
+/// NOT yet consumed). `None` when the step bound cleanly — an auto-bind emits no
+/// repair item, so its score is not observable from here.
+fn in_op_score_margin(rt: &DocumentRuntime) -> Option<(f64, f64, String)> {
+    let item = fillet_repair_item(rt)?;
+    let best = item.candidates.first();
+    Some((
+        best.map_or(0.0, |c| c.score),
+        best.map_or(0.0, |c| c.margin),
+        format!(
+            "{:?}/{:?}, {} candidates",
+            item.ladder_failed,
+            item.reason,
+            item.candidates.len()
+        ),
+    ))
+}
+
+/// The regen's own repair item for the fillet's input slot, if the step refused.
+fn fillet_repair_item(rt: &DocumentRuntime) -> Option<&onecad_core::document::repair::RepairItem> {
+    let record = RecordId(Uuid::from_u128(FILLET_REC)).to_string();
+    rt.repair_items()
+        .iter()
+        .find(|i| i.ref_id.contains(&record))
+}
+
+/// Prints the ladder's RANKED candidate list — the H6 gate reads these rows to see
+/// which feature carried (or sank) the score.
+fn print_candidates(rt: &DocumentRuntime, label: &str) {
+    let Some(item) = fillet_repair_item(rt) else {
+        eprintln!("  RANKED [{label}] (no repair item — the step bound cleanly)");
+        return;
+    };
+    for (i, c) in item.candidates.iter().enumerate() {
+        eprintln!(
+            "  RANKED [{label}] #{i} {} score={:.4} margin={:.4} at ({:.1},{:.1},{:.1}) — {} | {}",
+            c.topo_key.as_str(),
+            c.score,
+            c.margin,
+            c.world_pos.x,
+            c.world_pos.y,
+            c.world_pos.z,
+            c.summary,
+            serde_json::to_string(&c.extra).unwrap_or_default()
+        );
+    }
+}
+
+/// Dry-runs the STORED fillet edge ref (input slot 0 of `FILLET_REC`) against
+/// `snapshot` through the worker's ladder and prints `(score, margin)`.
+///
+/// Goes through the refId-only path on purpose: `resolve_refs` hydrates it from the
+/// record the single writer actually stored, so the measurement is of the
+/// production ref — `intent` included — and not of a probe re-built by the test.
+///
+/// **Caveat for the H6 gate**: a dry run resolves against the PUBLISHED head. When
+/// the fillet applied, that head no longer contains the edge it consumed, so the
+/// numbers describe a different pool than the op's own L2 saw (the same inversion
+/// `h5b_fillet_survives_small_edit` documents). Prefer [`in_op_score_margin`] when
+/// the step reported NeedsRepair.
+async fn measure_fillet_ref(rt: &DocumentRuntime, snapshot: u64, label: &str) -> (f64, f64) {
+    let ref_id = format!("{}.input0", RecordId(Uuid::from_u128(FILLET_REC)));
+    let res = rt
+        .resolve_refs(ResolveRequest {
+            snapshot_id: SnapshotId(snapshot),
+            refs: vec![ResolveRef {
+                ref_id,
+                element: ElementRef {
+                    primary: None,
+                    intent: None,
+                    anchor: None,
+                    extra: Default::default(),
+                },
+            }],
+        })
+        .await
+        .expect("ResolveRefs dry-run");
+    assert_eq!(res.len(), 1);
+    let (score, margin, what) = score_margin(&res[0].outcome);
+    eprintln!("  MEASURED [{label}] dry-run score={score:.4} margin={margin:.4} → {what}");
+    if let Some((s, m, w)) = in_op_score_margin(rt) {
+        eprintln!("  MEASURED [{label}] in-op   score={s:.4} margin={m:.4} → {w}");
+    } else {
+        eprintln!("  MEASURED [{label}] in-op   (bound cleanly — no repair item)");
+    }
+    print_candidates(rt, label);
+    (score, margin)
+}
+
+/// The `intent` the single writer stamped on the stored fillet edge ref (H5), or
+/// `None` when the ref shipped anchor-only.
+fn stored_fillet_intent(rt: &DocumentRuntime) -> Option<serde_json::Value> {
+    rt.operation_params(RecordId(Uuid::from_u128(FILLET_REC)))?
+        .get("edges")?
+        .get(0)?
+        .get("intent")
+        .cloned()
+}
+
+/// Builds the comb, fillets the WIDE rib's top edge at `z = 0`, and returns
+/// `(body, snapshotId, edgeElementId, anchor, edgeLength, filletedVolume)`.
+struct CombFillet {
+    body: BodyId,
+    snapshot: u64,
+    edge_len: f64,
+    anchor: Vec3,
+}
+
+async fn build_comb_fillet(
+    wm: &WorkerManager,
+    rt: &mut DocumentRuntime,
+    sid: SketchId,
+    left: (f64, f64),
+    right: (f64, f64),
+    filleted_rib: (f64, f64),
+) -> CombFillet {
+    add_op(rt, sketch_record(&comb_sketch(sid, left, right)));
+    add_op(rt, extrude_record(sid, "", COMB_DEPTH));
+    let report = regen_all(rt).await;
+    let _ = published(&report, "comb extrude");
+    let body = report.changed[0].0;
+    let base_vol = comb_volume(left.1, right.1);
+
+    let mesh = body_mesh(rt, body).await;
+    let view = validate_mesh_blob(&mesh).expect("comb MESH1 validates");
+    let measured = mesh_volume(&view, &mesh);
+    assert!(
+        (measured - base_vol).abs() < 1.0,
+        "the comb outline extruded to the analytic {base_vol:.1}, got {measured:.1} — \
+         the polygon or its constraints are wrong"
+    );
+
+    // The top edge of the rib under test, at z = 0 (in world coordinates).
+    let target = sketch_to_world(filleted_rib.0 + filleted_rib.1 / 2.0, RIB_TOP, 0.0);
+    let (edge_key, centroid, edge_len) = edge_pick_near(&view, &mesh, target);
+    assert!(
+        (edge_len - filleted_rib.1).abs() < 0.1,
+        "picked the rib's top edge (length {edge_len:.3}, expected {:.3})",
+        filleted_rib.1
+    );
+
+    let snapshot = report.snapshot_id;
+    let anchor = AnchorIntent {
+        world_point: centroid,
+        surface_uv: None,
+        local_frame: None,
+        adjacency_hint: None,
+        extra: Default::default(),
+    };
+    let promoted = rt
+        .promote_selection(
+            SnapshotId(snapshot),
+            body,
+            vec![(TopoKey::new(&edge_key), Some(anchor))],
+        )
+        .await
+        .expect("promote the rib's top edge");
+    let edge_el = ElementId::new(promoted[0].element_id.clone());
+
+    add_op(rt, fillet_record(body, edge_el, centroid, H5_RADIUS));
+    let fil = regen_all(rt).await;
+    let snap = published(&fil, "comb fillet").clone();
+    assert_eq!(
+        snap.repair_summary.needs_repair_count,
+        0,
+        "precondition: the fillet APPLIES on the clean comb — repair items {:?}",
+        rt.repair_items()
+    );
+    let (vol, _) = exact_mass(wm, body).await;
+    let removed = base_vol - vol;
+    let analytic = fillet_removed(H5_RADIUS, edge_len);
+    assert!(
+        (removed - analytic).abs() < 1e-6 * base_vol,
+        "precondition: the fillet removed the analytic (1−π/4)·r²·L = {analytic:.6}, \
+         measured {removed:.6}"
+    );
+    eprintln!(
+        "  comb setup: base={base_vol:.3} filleted={vol:.3} removed={removed:.4} \
+         (analytic {:.4}) edgeLen={edge_len:.3} anchor=({:.1},{:.1},{:.1}) intent={}",
+        fillet_removed(H5_RADIUS, edge_len),
+        centroid.x,
+        centroid.y,
+        centroid.z,
+        stored_fillet_intent(rt).map_or("NONE".into(), |v| serde_json::to_string(&v)
+            .unwrap_or_default())
+    );
+    CombFillet {
+        body,
+        snapshot: fil.snapshot_id,
+        edge_len,
+        anchor: centroid,
+    }
+}
+
+/// **The headline case.** A NON-congruent decoy lands exactly on the stale anchor.
+///
+/// Before: the WIDE rib (30 mm) sits at sketch `u ∈ [20,50]`, the NARROW rib
+/// (12 mm) at `u ∈ [60,72]`. The wide rib's top edge at `z = 0` is filleted — its
+/// midpoint (sketch `u = 35`) becomes the ref's anchor.
+///
+/// The edit translates the wide rib to `u ∈ [45,75]` and the narrow rib to
+/// `u ∈ [29,41]`, whose top-edge midpoint is `u = 35` — the stale anchor, exactly.
+/// The two candidates are then:
+///
+/// | candidate            | midpoint      | length | fillet removes |
+/// |----------------------|---------------|--------|----------------|
+/// | narrow rib (decoy)   | sketch u = 35 | 12 mm  | `0.8584·12 = 10.30` |
+/// | wide rib (authored)  | sketch u = 60 | 30 mm  | `0.8584·30 = 25.75` |
+///
+/// Removed volume is therefore a 2.5× discriminator that no repair state can hide.
+/// The assertion is deliberately one-sided: whatever the ladder does, it must not
+/// fillet the decoy while reporting success.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn h5_non_congruent_decoy_at_the_stale_anchor() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let sid = SketchId(Uuid::from_u128(0x5001));
+
+    let before_left = (20.0, RIB_WIDE); // [20,50], midpoint 35 — the authored rib
+    let before_right = (60.0, RIB_NARROW); // [60,72], midpoint 66
+    let after_left = (29.0, RIB_NARROW); // [29,41], midpoint 35 — ON the stale anchor
+    let after_right = (45.0, RIB_WIDE); // [45,75], midpoint 60 — the authored rib, moved
+
+    let setup = build_comb_fillet(&wm, &mut rt, sid, before_left, before_right, before_left).await;
+    let authored_anchor = sketch_to_world(35.0, RIB_TOP, 0.0);
+    assert!(
+        (setup.anchor.x - authored_anchor.x).abs() < 0.01
+            && (setup.anchor.y - authored_anchor.y).abs() < 0.01
+            && (setup.edge_len - RIB_WIDE).abs() < 0.1,
+        "precondition: the authored edge is the 30 mm one at sketch u=35, got ({:.3},{:.3}) len={:.3}",
+        setup.anchor.x,
+        setup.anchor.y,
+        setup.edge_len
+    );
+    let (score0, margin0) = measure_fillet_ref(&rt, setup.snapshot, "clean comb").await;
+    assert!(score0 > 0.0, "the clean comb resolves (sanity)");
+    let _ = margin0;
+
+    // The upstream parametric edit: both ribs move, the narrow one onto the anchor.
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(SKETCH_REC)),
+        op: sketch_record(&comb_sketch(sid, after_left, after_right)).op,
+    })
+    .expect("translate the ribs");
+    let report = regen_all(&mut rt).await;
+    let snap = published(&report, "H5 decoy edit").clone();
+
+    let base_vol = comb_volume(after_left.1, after_right.1);
+    let (vol, _) = exact_mass(&wm, setup.body).await;
+    let removed = base_vol - vol;
+    let removed_decoy = fillet_removed(H5_RADIUS, RIB_NARROW);
+    let removed_true = fillet_removed(H5_RADIUS, RIB_WIDE);
+    let needs_repair = snap.repair_summary.needs_repair_count;
+    let (score, margin) = measure_fillet_ref(&rt, report.snapshot_id, "post-edit").await;
+    eprintln!(
+        "H5 DECOY: needsRepair={needs_repair} base={base_vol:.3} vol={vol:.3} removed={removed:.4} \
+         | decoy(12mm)={removed_decoy:.4} authored(30mm)={removed_true:.4} \
+         | score={score:.4} margin={margin:.4} intent={}",
+        stored_fillet_intent(&rt).map_or("NONE".into(), |v| serde_json::to_string(&v)
+            .unwrap_or_default())
+    );
+
+    // The decision the wave exists to change: a silent bind to the decoy is a
+    // FAILURE. Either the authored (30 mm) rib is filleted, or nothing is filleted
+    // and the state says NeedsRepair. There is no third reading of this number.
+    let is_decoy = (removed - removed_decoy).abs() < 0.1 * removed_decoy;
+    let is_authored = (removed - removed_true).abs() < 0.1 * removed_true;
+    assert!(
+        !(is_decoy && needs_repair == 0),
+        "SILENT WRONG BIND: the fillet consumed the DECOY (removed {removed:.4} ≈ the 12 mm \
+         rib's {removed_decoy:.4}) and reported no repair — the ladder bound on position alone"
+    );
+    assert!(
+        is_authored || needs_repair > 0,
+        "the outcome must be the authored rib (removed ≈ {removed_true:.4}) or a deterministic \
+         NeedsRepair; got removed {removed:.4} with needsRepair={needs_repair}"
+    );
+    if needs_repair > 0 {
+        assert!(
+            removed < 0.01 * base_vol,
+            "a NeedsRepair publishes the UNFILLETED m−1 body, got removed {removed:.4}"
+        );
+        // The positive H5 claim, and the sharpest one available: even when the
+        // 0.10 margin gate refuses to bind, the descriptor has RE-RANKED the pool.
+        // The best candidate must be the authored 30 mm rib at its NEW position —
+        // the decoy that sits ON the stale anchor (and therefore scores a perfect
+        // 0.25 anchor contribution) must NOT lead.
+        let item = fillet_repair_item(&rt).expect("a NeedsRepair carries its evidence");
+        let best = item.candidates.first().expect("ranked candidates");
+        let authored_now = sketch_to_world(after_right.0 + after_right.1 / 2.0, RIB_TOP, 0.0);
+        let decoy_now = sketch_to_world(after_left.0 + after_left.1 / 2.0, RIB_TOP, 0.0);
+        let near = |a: Vec3, b: Vec3| {
+            (a.x - b.x).abs() < 0.5 && (a.y - b.y).abs() < 0.5 && (a.z - b.z).abs() < 0.5
+        };
+        assert!(
+            !near(best.world_pos, decoy_now),
+            "the DECOY still leads the ranking ({:?}) — descriptor evidence did not reach the \
+             ladder",
+            best
+        );
+        assert!(
+            near(best.world_pos, authored_now),
+            "the authored 30 mm rib at {authored_now:?} must rank FIRST, got {best:?}"
+        );
+    }
+
+    wm.shutdown().await;
+}
+
+/// The CONGRUENT twin: two identical 12 mm ribs, and the edit puts BOTH of them
+/// equidistant from the stale anchor (sketch `u = 20` and `u = 40`, anchor `u = 30`).
+///
+/// Nothing in the descriptor can break this tie — the two candidate edges have the
+/// same type, length and tangent — so the only correct answers are "the authored
+/// rib" and "NeedsRepair". This test pins the NO-SILENT-WRONG floor only; actually
+/// resolving congruent ties is the H6a veto's job.
+///
+/// Note the volume signature is deliberately NOT a discriminator here: congruent
+/// ribs remove identical volume, which is exactly why the tie must be refused
+/// rather than guessed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn h5_congruent_twin_never_silently_binds() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let sid = SketchId(Uuid::from_u128(0x5002));
+
+    // Both ribs NARROW so two of them fit either side of the anchor after the edit.
+    let before_left = (24.0, RIB_NARROW); // [24,36], midpoint 30 — the authored rib
+    let before_right = (80.0, RIB_NARROW); // [80,92] — its congruent twin, far away
+    let after_left = (14.0, RIB_NARROW); // [14,26], midpoint 20 — 10 mm from the anchor
+    let after_right = (34.0, RIB_NARROW); // [34,46], midpoint 40 — 10 mm the other way
+
+    let setup = build_comb_fillet(&wm, &mut rt, sid, before_left, before_right, before_left).await;
+    let authored_anchor = sketch_to_world(30.0, RIB_TOP, 0.0);
+    assert!(
+        (setup.anchor.x - authored_anchor.x).abs() < 0.01
+            && (setup.anchor.y - authored_anchor.y).abs() < 0.01,
+        "precondition: the authored edge is at sketch u=30, got ({:.3},{:.3})",
+        setup.anchor.x,
+        setup.anchor.y
+    );
+
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(SKETCH_REC)),
+        op: sketch_record(&comb_sketch(sid, after_left, after_right)).op,
+    })
+    .expect("translate both ribs");
+    let report = regen_all(&mut rt).await;
+    let snap = published(&report, "H5 congruent edit").clone();
+
+    let base_vol = comb_volume(after_left.1, after_right.1);
+    let (vol, _) = exact_mass(&wm, setup.body).await;
+    let removed = base_vol - vol;
+    let needs_repair = snap.repair_summary.needs_repair_count;
+    let (score, margin) = measure_fillet_ref(&rt, report.snapshot_id, "congruent post-edit").await;
+    eprintln!(
+        "H5 CONGRUENT: needsRepair={needs_repair} base={base_vol:.3} vol={vol:.3} \
+         removed={removed:.4} (a congruent rib removes {:.4}) score={score:.4} margin={margin:.4}",
+        fillet_removed(H5_RADIUS, RIB_NARROW)
+    );
+
+    // A congruent pair is either bound (to a geometrically equivalent edge) or
+    // refused — but it must never be bound with the confidence of a unique match.
+    // Whatever happens, the published body must be self-consistent: a fillet was
+    // applied to SOME 30 mm rib, or none was applied at all.
+    let one_rib = fillet_removed(H5_RADIUS, RIB_NARROW);
+    assert!(
+        removed < 0.01 * base_vol || (removed - one_rib).abs() < 0.1 * one_rib,
+        "either nothing was filleted (NeedsRepair) or exactly ONE congruent rib was — \
+         got removed {removed:.4}, one rib is {one_rib:.4}"
+    );
+    if needs_repair == 0 {
+        assert!(
+            (removed - one_rib).abs() < 0.1 * one_rib,
+            "a clean regen must have actually applied the fillet, got removed {removed:.4}"
+        );
+    }
+
+    wm.shutdown().await;
+}
+
+/// The BENIGN large edit: the fillet's edge stays the only edge of its kind but
+/// moves FAR (extrude depth 25 → 100 quadruples the filleted vertical edge and
+/// drags its midpoint 37.5 mm along +Z).
+///
+/// Anchor-only that is a big miss — the anchor similarity falls to
+/// `1 − 37.5 / (0.5·diag)`. With `intent.descriptor` the type/length/tangent
+/// features carry the score. The measured `(score, margin)` is the number the H6
+/// gate consumes; the assertion is the invariant, not the number.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn h5_benign_large_edit_measures_the_ladder() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let sid = SketchId(Uuid::from_u128(0x5003));
+
+    let setup = build_filleted_box(&mut rt, sid).await;
+    assert!(
+        setup.filleted,
+        "precondition: the fillet applies at depth 25"
+    );
+    eprintln!(
+        "H5 BENIGN: stored intent = {}",
+        stored_fillet_intent(&rt).map_or("NONE".into(), |v| serde_json::to_string(&v)
+            .unwrap_or_default())
+    );
+
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(EXTRUDE_REC)),
+        op: extrude_op(sid, "", 100.0),
+    })
+    .expect("extrude depth 25 → 100");
+    let report = regen_all(&mut rt).await;
+    let snap = published(&report, "H5 benign large edit").clone();
+    let needs_repair = snap.repair_summary.needs_repair_count;
+
+    let mesh = body_mesh(&mut rt, setup.body).await;
+    let view = validate_mesh_blob(&mesh).expect("post-edit MESH1 validates");
+    let vol = mesh_volume(&view, &mesh);
+    // 40×20×100 minus the fillet on one 100 mm vertical edge.
+    let base_vol = 40.0 * 20.0 * 100.0;
+    let removed = base_vol - vol;
+    let (score, margin) = measure_fillet_ref(&rt, report.snapshot_id, "depth 25→100").await;
+    eprintln!(
+        "H5 BENIGN: needsRepair={needs_repair} faces={} base={base_vol:.1} vol={vol:.1} \
+         removed={removed:.4} (analytic {:.4}) score={score:.4} margin={margin:.4}",
+        view.face_count,
+        fillet_removed(H5_RADIUS, 100.0)
+    );
+
+    // The invariant: a clean regen means the fillet really re-applied to the SAME
+    // (now longer) edge — proven by the removed volume, not by the repair count.
+    if needs_repair == 0 {
+        assert!(
+            view.face_count >= 7,
+            "a clean rebind keeps the rolled face (faces {})",
+            view.face_count
+        );
+        assert!(
+            (removed - fillet_removed(H5_RADIUS, 100.0)).abs()
+                < 0.05 * fillet_removed(H5_RADIUS, 100.0),
+            "the rebound fillet swept the FULL 100 mm edge: removed {removed:.4}, analytic {:.4}",
+            fillet_removed(H5_RADIUS, 100.0)
+        );
+    } else {
+        assert_eq!(
+            view.face_count, 6,
+            "a NeedsRepair publishes the UNFILLETED m−1 box (faces {})",
+            view.face_count
+        );
+    }
 
     wm.shutdown().await;
 }

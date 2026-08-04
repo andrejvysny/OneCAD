@@ -52,7 +52,7 @@ use onecad_core::document::record::{
     ExtrudeMode, KnownOperation, Operation, OperationRecord, PlaneKind, SketchOpParams,
     SketchPlaneRef,
 };
-use onecad_core::document::refs::{AnchorIntent, ElementRef};
+use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, IntentQuery};
 use onecad_core::document::repair::RepairItem;
 use onecad_core::document::Document;
 use onecad_core::edit::{CommandOutcome, DocumentSession, EditCommand, SketchEditOp};
@@ -639,6 +639,7 @@ impl DocumentRuntime {
             return Err(DomainError::ReadOnly);
         }
         self.reject_timeline_body_delete(&cmd)?;
+        let cmd = self.hydrate_ref_intents(cmd);
         let is_rollback = matches!(cmd, EditCommand::SetRollback { .. });
         let outcome = self.session.apply(cmd)?;
         // Truncation eviction (SCHEMA §7.7): every checkpoint at or above the dirty
@@ -673,6 +674,94 @@ impl DocumentRuntime {
             }
         }
         Ok(())
+    }
+
+    // ── intent hydration (HISTORY-HARDEN H5) ─────────────────────────────────
+
+    /// Stamps the worker's frozen `intent.descriptor` evidence onto the element
+    /// refs of an op being **minted or re-edited**, so the ladder scores real
+    /// evidence (SCHEMA §10 descriptor features) instead of falling through to a
+    /// bare-anchor nearest-centroid match at `total_weight 0.25`.
+    ///
+    /// Two rules, both load-bearing:
+    ///
+    /// * **Fill iff `intent.is_none()`.** An existing intent is the descriptor as
+    ///   the element stood WHEN THE REF WAS AUTHORED (Invariant 2 — evidence, never
+    ///   identity). Refreshing it would freeze post-move evidence onto a pre-move
+    ///   ref, i.e. teach the ladder that the moved geometry was always the intended
+    ///   one — the exact silent-rebind class this wave exists to kill.
+    /// * **Mint / re-edit only.** This runs on the [`EditCommand`] funnel, never on
+    ///   load. A document opened from disk keeps `intent: None` on every legacy ref,
+    ///   so its `document.json` bytes and its golden `history_prefix_hash` are
+    ///   unchanged (the WP-FIX W4 `host_face` no-backfill discipline).
+    ///
+    /// Evidence comes from the H4 promotion cache, the only place Rust holds a
+    /// worker-authored descriptor per persistent [`ElementId`]. A ref whose element
+    /// was never promoted through this runtime (a FE-authored id, a legacy record,
+    /// a ref carrying no `primary`) is left exactly as authored — anchor-only, the
+    /// pre-H5 behaviour, never a fabricated descriptor.
+    fn hydrate_ref_intents(&self, cmd: EditCommand) -> EditCommand {
+        match cmd {
+            EditCommand::AddOperation {
+                mut record,
+                at_cursor,
+            } => {
+                if let Operation::Known(known) = &mut record.op {
+                    self.stamp_intents(known);
+                }
+                EditCommand::AddOperation { record, at_cursor }
+            }
+            EditCommand::UpdateOperationParams { record, mut op } => {
+                if let Operation::Known(known) = &mut op {
+                    self.stamp_intents(known);
+                }
+                EditCommand::UpdateOperationParams { record, op }
+            }
+            other => other,
+        }
+    }
+
+    /// Fills the `intent` of every unstamped element ref of `op` from the promotion
+    /// cache. See [`hydrate_ref_intents`](Self::hydrate_ref_intents) for the rules.
+    fn stamp_intents(&self, op: &mut KnownOperation) {
+        for reference in op.element_refs_mut() {
+            if reference.intent.is_some() {
+                continue;
+            }
+            let Some(primary) = reference.primary.as_ref() else {
+                continue;
+            };
+            let Some((kind, descriptor)) = self.promoted_evidence(&primary.element) else {
+                continue;
+            };
+            reference.intent = Some(IntentQuery {
+                // The descriptor policy axis the evidence was computed under — the
+                // same `descriptorVersion` every plan is compiled with, so a future
+                // bump invalidates stored intents through one knob (SCHEMA §6/§13).
+                version: PolicyVersions::default().descriptor,
+                kind,
+                descriptor,
+                extra: Default::default(),
+            });
+        }
+    }
+
+    /// The newest worker-authored `(kind, descriptor)` the promotion cache holds for
+    /// `element`, or `None` when the element was never promoted here or the worker
+    /// returned no descriptor for it.
+    ///
+    /// The cache is keyed by `(snapshot, body, topoKey)`, so the same persistent id
+    /// can appear once per retained generation; the NEWEST generation's evidence is
+    /// the one the ref is being authored against.
+    fn promoted_evidence(&self, element: &ElementId) -> Option<(ElementKind, serde_json::Value)> {
+        self.promoted
+            .iter()
+            .filter(|((_, _, _), entry)| &entry.element_id == element)
+            .filter_map(|((snapshot, _, _), entry)| {
+                entry.descriptor.clone().map(|d| (*snapshot, entry.kind, d))
+            })
+            .max_by_key(|(snapshot, _, _)| snapshot.0)
+            .map(|(_, kind, descriptor)| (kind, descriptor))
     }
 
     /// Undoes the newest committed edit. Returns `true` if a step was undone.

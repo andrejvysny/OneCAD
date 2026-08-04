@@ -311,6 +311,58 @@ pub enum KnownOperation {
     Hole(HoleParams),
 }
 
+impl KnownOperation {
+    /// Mutable access to every [`ElementRef`] this op carries as a topological
+    /// **input**, over the SAME op set and under the SAME conditions as the wire's
+    /// SCHEMA §7.3 `inputs[]` semantic-ref array (app crate
+    /// `worker::wire::wire_op_inputs`). The two must agree: an op that lowers a
+    /// semantic ref but is missing here would ship `intent: null` forever.
+    ///
+    /// The single writer uses this to stamp `intent.descriptor` evidence onto a
+    /// freshly authored or re-edited ref (HISTORY-HARDEN H5), so the worker's
+    /// resolution ladder scores real evidence instead of a bare anchor.
+    ///
+    /// **No `Sketch` arm, deliberately.** `SketchOpParams::host_face` is a
+    /// CORE-ONLY dependency field — `wire::strip_sketch_host_face` drops `hostFace`
+    /// from the lowered params (VF-B5a), so evidence stamped there could never
+    /// reach the ladder. It would only churn the golden-pinned history-prefix hash
+    /// for zero effect (the WP-FIX W4 no-backfill discipline).
+    ///
+    /// **No `Shell` arm.** `ShellParams::open_faces` are bare [`ElementId`]s with
+    /// no ref slot to carry evidence — `wire::face_input_refs` renders them
+    /// element-only. Giving Shell descriptor evidence needs a params-shape change,
+    /// not a hydration pass. Recorded gap.
+    #[must_use]
+    pub fn element_refs_mut(&mut self) -> Vec<&mut ElementRef> {
+        match self {
+            KnownOperation::Fillet(p) => p.edges.iter_mut().collect(),
+            KnownOperation::Chamfer(p) => p.edges.iter_mut().collect(),
+            // The two ToFace gates mirror `wire_op_inputs` exactly: a `target_face`
+            // left over from a mode the op no longer runs in is NOT lowered, so
+            // stamping evidence on it would move the params hash for a ref the
+            // worker never reads.
+            KnownOperation::Extrude(p) => {
+                let to_face = p.mode == ExtrudeMode::ToFace;
+                let to_face2 = p.two_directions && p.mode2 == ExtrudeMode::ToFace;
+                let mut refs: Vec<&mut ElementRef> = Vec::new();
+                if to_face {
+                    if let Some(f) = p.target_face.as_mut() {
+                        refs.push(f);
+                    }
+                }
+                if to_face2 {
+                    if let Some(f) = p.target_face2.as_mut() {
+                        refs.push(f);
+                    }
+                }
+                refs
+            }
+            KnownOperation::Hole(p) => vec![&mut p.face],
+            _ => Vec::new(),
+        }
+    }
+}
+
 /// Unknown-`opType` payload, captured as a raw map (frozen node).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpaqueOperation {
