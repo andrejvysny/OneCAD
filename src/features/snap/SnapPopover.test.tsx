@@ -22,9 +22,34 @@ describe("SnapPopover", () => {
       "aria-checked",
       "true",
     );
+  });
+
+  // Adding a row here without wiring it through SketchController.snapAt
+  // re-creates the VF dead-toggle defect (a switch that lies about what it
+  // does). `guidePoints3d`/`distantEdges` stay RESERVED in the store only.
+  it("renders exactly the snap rows the snap path actually reads", () => {
+    render(<SnapPopover open onClose={() => {}} anchorRef={anchorRef} />);
+    const live = [
+      "Grid",
+      "Sketch guide lines",
+      "Sketch guide points",
+      "Quadrant points",
+      "Intersections",
+      "On-curve points",
+      // SP-1: read by SketchController.dimQuantumNow / snapAt (rounding tier)
+      // and by the live-dimension chip overlay.
+      "Dimension rounding",
+      "Live dimensions",
+    ];
+    for (const label of live) {
+      expect(screen.getByRole("switch", { name: label })).toBeInTheDocument();
+    }
     expect(
-      screen.getByRole("switch", { name: "Distant edges" }),
-    ).toHaveAttribute("aria-checked", "false");
+      screen.queryByRole("switch", { name: "3D guide points" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("switch", { name: "Distant edges" }),
+    ).not.toBeInTheDocument();
   });
 
   it("persists a toggle to the store and localStorage", async () => {

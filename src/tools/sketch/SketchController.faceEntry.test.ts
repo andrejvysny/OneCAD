@@ -91,6 +91,7 @@ describe("SketchController — sketch-on-face entry triggers (W3)", () => {
       exitSketch: vi.fn(),
       setSketchDrawingActive: vi.fn(),
       setSketchPreview: vi.fn(),
+      moveChip: vi.fn(),
       setSketchGhost: vi.fn(),
       setSketchTrimGhost: vi.fn(),
       setSketchSnap: vi.fn(),

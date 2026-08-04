@@ -37,6 +37,7 @@ import type {
   SketchEntityType,
 } from "@/ipc/types";
 import type { Point2 } from "@/viewport/engine/sketchBasis";
+import type { DimLocks, DimQuantum, ToolDimension } from "./liveDimension";
 import { normalizeEllipse } from "./ellipseMath";
 
 /** A draft entity in plane coords (no id yet — the controller assigns on commit). */
@@ -71,6 +72,14 @@ export type ToolEvent =
  *  constant on screen at any zoom; the default keeps the machines usable bare. */
 export interface ToolContext {
   minSize?: number;
+  /** Live-dimension fields the user has PINNED (mm · degrees · count). Read ONLY
+   *  by the `withLiveDims` decorator (liveToolMachines.ts), which projects them
+   *  into the event before the raw machine ever sees it — every machine below
+   *  ignores this field. */
+  locks?: DimLocks;
+  /** Zoom-adaptive rounding granularity, or null when rounding is off (pref off,
+   *  Alt held, or a geometry snap already won). Same ownership as `locks`. */
+  quantum?: DimQuantum | null;
 }
 
 /** Fallback minimum feature size when no context is supplied (numerically tiny —
@@ -117,6 +126,9 @@ export interface ToolStep {
   committedConstraints?: ToolConstraintSpec[];
   /** True when the current gesture ended (chain closed / entity committed). */
   done?: boolean;
+  /** Live dimension chips for the gesture's CURRENT phase. Emitted only by the
+   *  `withLiveDims` decorator; a raw machine never sets it. */
+  dims?: ToolDimension[];
 }
 
 export interface ToolMachine {

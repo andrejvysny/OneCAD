@@ -21,6 +21,7 @@ import type {
   SketchPlane,
   SketchSession,
   SketchSolveStatus,
+  SketchUpsertResult,
 } from "@/ipc/types";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import type { PickablePlane } from "@/viewport/engine/PlanePicker";
@@ -40,6 +41,7 @@ import { settingsStore } from "@/stores/settingsStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { applySolvedPositions } from "@/ipc/sketchWireMap";
+import { promoteOne } from "@/ipc/promote";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
 import { buildSnapCache, computeSnap, SNAP_PX, type SnapCandidateCache, type SnapResult } from "./snapEngine";
 import { inferConstraints, inferHV, entityPoints } from "./autoConstrain";
@@ -50,6 +52,7 @@ import {
   flushSketchMutations,
   lockedEntityIds,
   offsetSketchChain,
+  rejectConflictHint,
   trimEntity,
   LOCKED_GEOMETRY_HINT,
 } from "./sketchService";
@@ -75,12 +78,12 @@ import {
   dimensionStep,
   buildDimensionConstraint,
   dimensionSuffix,
+  isConflictStatus,
   pickDimensionTarget,
   type DimState,
 } from "./dimensionTool";
 import {
   DEFAULT_POLYGON_SIDES,
-  TOOL_MACHINES,
   draftToEntityFields,
   resolveToolConstraints,
   type DraftEntity,
@@ -89,6 +92,32 @@ import {
   type ToolState,
   type ToolStep,
 } from "./toolMachine";
+import {
+  dimQuantum,
+  liveDimInit,
+  liveDimStep,
+  type DimFieldId,
+  type DimLocks,
+  type DimQuantum,
+  type LiveDimEvent,
+  type LiveDimState,
+  type ToolDimension,
+} from "./liveDimension";
+import {
+  liveDimChipId,
+  liveDimStore,
+  placementFor,
+  type LiveDimAnchors,
+  type LiveDimChipField,
+  type LiveDimHandlers,
+  type LiveDimPlacement,
+} from "@/stores/liveDimStore";
+import {
+  dedupeDimConstraints,
+  dimConstraintSpecs,
+  resolveDimConstraints,
+} from "./liveDimConstraints";
+import { LIVE_TOOL_MACHINES } from "./liveToolMachines";
 
 const DRAG_PX = 4;
 
@@ -130,6 +159,25 @@ const CURSOR_BY_TOOL: Record<string, string> = {
 
 /** Digit keys the polygon tool consumes as a side count (W2-C). */
 const POLYGON_SIDES_KEY = /^[3-9]$/;
+
+/** Keys that OPEN a live dimension chip when typed over the viewport (SP-1 W3).
+ *  `-` and `.` are in here so "-30" and ".5" can be typed from the first stroke. */
+const LIVE_DIM_TYPE_KEY = /^[0-9.\-]$/;
+
+/**
+ * Per-tool status hint while a draw tool is armed but idle, naming the live
+ * dimension affordance. Shown only while `show.liveDimensions` is on — the line
+ * promises something the pref can turn off. Polygon has its own (side count).
+ */
+const DRAW_TOOL_HINT: Record<string, string> = {
+  line: "Line — click to place · type a number for length · Tab for angle",
+  rect: "Rectangle — click a corner · type a number for width · Tab for height",
+  centerRect: "Center rectangle — click the centre · type a number for width · Tab for height",
+  circle: "Circle — click the centre · type a number for diameter · Tab for radius",
+  arc: "Arc — click the centre · type a number for radius",
+  ellipse: "Ellipse — click the centre · type a number for the major axis",
+  slot: "Slot — click to place · type a number for length · Tab for angle",
+};
 
 /** Seed parameters for the WP-C T2b sketch edit tools, in document mm. Sticky
  *  per session through the tool's chip; re-seeded on a fresh session. */
@@ -185,6 +233,28 @@ export interface SketchControllerDeps {
   container: HTMLElement;
 }
 
+/**
+ * Everything the QUEUED commit turn needs to know about the live dimensions of
+ * the gesture that produced it — captured BY VALUE at the click, BEFORE the
+ * machine step consumes the anchors and before the locks are cleared.
+ *
+ * The queued turn must never read `this.machineState` / `this.liveDim`: a fast
+ * click burst (polyline) settles each commit one turn later, by which time those
+ * fields already describe a LATER gesture, and the constraints would be authored
+ * against the wrong phase. (`lastChainLineId` is the deliberate exception — it is
+ * written only by the commit turn itself, so reading it there is what makes it
+ * see the segment that actually settled.)
+ */
+interface DimCommitContext {
+  toolId: string;
+  /** Gesture anchors BEFORE the committing click (they identify the phase and
+   *  carry the previous chain segment's direction). */
+  anchors: Point2[];
+  locks: DimLocks;
+  /** Polygon side count — also the batch index of its construction circumcircle. */
+  sides?: number;
+}
+
 export class SketchController {
   // Set FIRST in dispose(); every rAF callback + queued write-back bails on it so a
   // late frame / settled RPC never touches a torn-down controller.
@@ -193,6 +263,24 @@ export class SketchController {
   private machineState: ToolState | null = null;
   private lastSnap: SnapResult | null = null;
   private altHeld = false;
+
+  // Live dimensions (SP-1). `liveDim` holds the chip input FSM's state — focus,
+  // the focused field's raw text, and the pinned values. Locks are
+  // CONTROLLER-owned: cleared when a step commits / the gesture ends / the tool
+  // changes / the session tears down, and deliberately kept across a
+  // non-committing click so an arc's typed radius survives phase 1 → 2.
+  private liveDim: LiveDimState = liveDimInit();
+  // The descriptors currently on screen (Wave 3). Kept so a keystroke over the
+  // VIEWPORT knows which field a digit opens without re-stepping the machine.
+  private liveDims: ToolDimension[] = [];
+  // Whether the chip set is open in the store. Mirrors `liveDimStore.open`, held
+  // here so `syncLiveDims` can tell a first `show` from a per-move `update`.
+  private liveDimsOpen = false;
+  private liveDimPlacement: LiveDimPlacement = "tr";
+  // The last Line this chain committed — the only entity an ABSOLUTE typed angle
+  // can be expressed against (`Angle` is relative). Written by the commit turn,
+  // cleared whenever the chain it belongs to ends.
+  private lastChainLineId: string | null = null;
 
   // Entity-derived snap candidates (guide/quadrant/intersection points), rebuilt
   // only when the session's entity array reference changes — session arrays are
@@ -660,15 +748,11 @@ export class SketchController {
   private async promoteFace(pick: FacePickTarget): Promise<string | undefined> {
     if (pick.elementId) return pick.elementId;
     if (!pick.topoKey) return undefined;
-    const promoted = await this.deps.client
-      .promoteSelection(pick.bodyId, [
-        {
-          topoKey: pick.topoKey,
-          anchor: pick.worldPoint ? { worldPoint: pick.worldPoint } : undefined,
-        },
-      ])
-      .catch(() => null);
-    return promoted?.[0]?.elementId;
+    const promoted = await promoteOne(this.deps.client, pick.bodyId, {
+      topoKey: pick.topoKey,
+      anchor: pick.worldPoint ? { worldPoint: pick.worldPoint } : undefined,
+    });
+    return promoted?.elementId;
   }
 
   /**
@@ -931,6 +1015,7 @@ export class SketchController {
     this.machine = null;
     this.machineState = null;
     this.lastSnap = null;
+    this.clearLiveDimGesture();
     this.snapCache = null;
     this.snapCacheKey = null;
     if (this.dimensionActive) this.cancelDimension();
@@ -1015,9 +1100,16 @@ export class SketchController {
       this.endSketchEditTool();
     }
 
-    const m = TOOL_MACHINES[tool] ?? null;
+    // LIVE_TOOL_MACHINES, not TOOL_MACHINES: the `withLiveDims` decorator is
+    // transparent with no locks and no quantum (it passes the event through by
+    // identity), so this is a drop-in that only starts doing something once
+    // `stepCtx` hands it one of the two.
+    const m = LIVE_TOOL_MACHINES[tool] ?? null;
     this.machine = m;
     this.machineState = m ? m.init() : null;
+    // A tool change is a new gesture: nothing typed carries over, and the
+    // previous tool's last segment is not this one's angle reference.
+    this.clearLiveDimGesture();
     this.dimensionActive = tool === "dimension";
     this.selectActive = tool === "select";
     this.trimActive = tool === "trim";
@@ -1072,13 +1164,20 @@ export class SketchController {
       this.updatePolygonHint();
       return;
     }
-    viewportStore.getState().setStatusHint(null);
+    const hint = m && this.liveDimsEnabled() ? (DRAW_TOOL_HINT[m.id] ?? null) : null;
+    viewportStore.getState().setStatusHint(hint, hint ? { sticky: true } : undefined);
   }
 
-  /** Polygon status hint — carries the live side count + how to change it. */
+  /**
+   * Polygon status hint — the live side count plus how to change it, which
+   * DEPENDS ON PHASE: idle, a digit is the side-count verb; armed, a digit opens
+   * the radius chip and Tab reaches the count instead.
+   */
   private updatePolygonHint(): void {
     const n = this.machineState?.sides ?? DEFAULT_POLYGON_SIDES;
-    viewportStore.getState().setStatusHint(`Polygon — ${n} sides · 3–9 to change`, { sticky: true });
+    const armed = (this.machineState?.anchors.length ?? 0) > 0 && this.liveDimsEnabled();
+    const how = armed ? "type to set radius · Tab for sides" : "3–9 to change";
+    viewportStore.getState().setStatusHint(`Polygon — ${n} sides · ${how}`, { sticky: true });
   }
 
   // ── pointer handling ────────────────────────────────────────────────────
@@ -1092,10 +1191,54 @@ export class SketchController {
     return s.session === null || s.sessionGeneration !== gen;
   }
 
-  /** Degeneracy context for the tool machines: reject a click/drag below ~4px of
-   *  world so tiny/zero-extent geometry never commits, constant on screen at any zoom. */
-  private stepCtx(): { minSize: number } {
-    return { minSize: 4 * this.deps.engine.planePixelWorld() };
+  /**
+   * Context for the tool machines: the degeneracy floor (reject a click/drag
+   * below ~4px of world so tiny/zero-extent geometry never commits, constant on
+   * screen at any zoom) plus the live-dimension projection inputs the
+   * `withLiveDims` decorator reads (the raw machines ignore both).
+   */
+  private stepCtx(): { minSize: number; locks: DimLocks; quantum: DimQuantum | null } {
+    return {
+      minSize: 4 * this.deps.engine.planePixelWorld(),
+      locks: this.liveDim.locks,
+      quantum: this.dimQuantumNow(),
+    };
+  }
+
+  /**
+   * The rounding granularity a CURSOR-placed dimension lands on right now, or
+   * null for "do not round".
+   *
+   * Three ways to get null, all of them "something more specific already decided
+   * where this point goes": the pref is off, Alt suppresses snapping wholesale,
+   * or a GEOMETRY snap won (endpoint … onCurve, and the alignment guides) — those
+   * tiers place the point EXACTLY on real geometry, and rounding afterwards would
+   * quietly move it off. Only a free point (`none`) or the grid tier — which
+   * rounding REPLACES during a draw gesture — is ours to quantize.
+   *
+   * Locks are unaffected: a typed value pins whatever this returns.
+   */
+  private dimQuantumNow(): DimQuantum | null {
+    if (!settingsStore.getState().snapTo.dimensionRound) return null;
+    if (this.altHeld) return null;
+    const kind = this.lastSnap?.kind;
+    if (kind !== undefined && kind !== "none" && kind !== "grid") return null;
+    const minor = chooseGridStep(this.deps.engine.getCameraDistance()).minor;
+    return dimQuantum(minor, settingsStore.getState().displayUnit);
+  }
+
+  /**
+   * Is the dimension quantum currently REPLACING the grid snap tier?
+   *
+   * Grid quantizes x and y independently; a draw gesture in progress means a
+   * LENGTH and an ANGLE, so the two tiers answer different questions and running
+   * both would let the grid pull the point back off the rounded length. Only
+   * while a machine is armed (≥1 anchor) — with nothing placed there is no
+   * dimension to round, so the grid is still the right tier for the first point.
+   */
+  private dimensionRoundingActive(): boolean {
+    if (!this.machineState || this.machineState.anchors.length === 0) return false;
+    return settingsStore.getState().snapTo.dimensionRound && !this.altHeld;
   }
 
   private snapAt(clientX: number, clientY: number): SnapResult | null {
@@ -1114,7 +1257,7 @@ export class SketchController {
     return computeSnap(raw, sessionEntities ?? [], {
       gridStep: chooseGridStep(this.deps.engine.getCameraDistance()).minor,
       pixelWorld: this.deps.engine.planePixelWorld(),
-      enableGrid: settings.snapTo.grid,
+      enableGrid: settings.snapTo.grid && !this.dimensionRoundingActive(),
       enableGuideLines: settings.snapTo.sketchGuideLines,
       enableGuidePoints: settings.snapTo.sketchGuidePoints,
       enableQuadrant: settings.snapTo.quadrant,
@@ -1198,6 +1341,8 @@ export class SketchController {
       // construction drafts (the arc radius rubber-band), but a construction-mode
       // line still gets H/V auto-constrained at commit, so the hint must still show.
       this.updateGhost(stepped.preview, snap.point);
+      this.syncLiveDims(stepped.dims ?? []);
+      this.updateLiveDimPlacement(ev.clientX, ev.clientY);
     });
   };
 
@@ -1264,26 +1409,255 @@ export class SketchController {
     if (!this.machine || !this.machineState) return;
     const snap = this.snapAt(e.clientX, e.clientY) ?? this.lastSnap;
     if (!snap) return;
+    // The CLICK's own snap is the last winning one for `dimQuantumNow` below: a
+    // move rAF may never have run (a tap, or a click in the same frame), and a
+    // stale kind from the previous position would decide this point's rounding.
+    this.lastSnap = snap;
+    // Captured BEFORE the step consumes the anchors / the commit clears the locks.
+    const dims = this.dimCommitContext();
     const stepped = this.machine.step(this.machineState, { kind: "click", pt: snap.point }, this.stepCtx());
     logSketchStep(this.machine.id, "click", stepped);
+    this.applySteppedClick(stepped, dims);
+  };
+
+  /** Drop what belongs to the CURRENT gesture alone: the values the user pinned,
+   *  the chips showing them, and the chain's angle reference. Idempotent. */
+  private clearLiveDimGesture(): void {
+    this.liveDim = liveDimInit();
+    this.lastChainLineId = null;
+    this.closeLiveDims();
+  }
+
+  /** The live-dimension facts of the gesture as it stands RIGHT NOW — see
+   *  {@link DimCommitContext} for why this is captured rather than read later. */
+  private dimCommitContext(): DimCommitContext | null {
+    if (!this.machine || !this.machineState) return null;
+    return {
+      toolId: this.machine.id,
+      anchors: [...this.machineState.anchors],
+      locks: { ...this.liveDim.locks },
+      ...(this.machineState.sides !== undefined ? { sides: this.machineState.sides } : {}),
+    };
+  }
+
+  /**
+   * The tail of a click that stepped a draw machine: adopt the new state, publish
+   * the preview, queue any commit, and drop what the gesture no longer owns.
+   *
+   * Extracted from `onPointerUp` so the chip's Enter (Wave 3) commits through
+   * exactly THIS path rather than a second copy that drifts from it.
+   */
+  private applySteppedClick(stepped: ToolStep, dims: DimCommitContext | null): void {
     this.machineState = stepped.state;
     this.deps.engine.setSketchPreview(this.decorate(stepped.preview));
-    if (stepped.committed && stepped.committed.length > 0) {
-      void this.commit(this.decorate(stepped.committed), stepped.committedConstraints);
+    const committed = stepped.committed ?? [];
+    if (committed.length > 0) {
+      void this.commit(this.decorate(committed), stepped.committedConstraints, dims ?? undefined);
     }
-    if (stepped.done) this.deps.engine.setSketchGhost(null, null);
-  };
+    if (stepped.done) {
+      this.deps.engine.setSketchGhost(null, null);
+      this.lastChainLineId = null; // a fresh chain has no previous segment
+    }
+    // A step that produced geometry (or ended the gesture) CONSUMES its locks —
+    // the typed number described that entity, not the next one. A non-committing
+    // click keeps them, which is what carries an arc's radius phase 1 → 2.
+    if (committed.length > 0 || stepped.done) this.liveDim = liveDimInit();
+    // Republish for the phase the click landed IN — an empty set closes the chips
+    // (the gesture finished), a non-empty one re-opens them for the next leg.
+    this.syncLiveDims(stepped.dims ?? []);
+    if (this.machine?.id === "polygon") this.updatePolygonHint();
+  }
+
+  // ── live dimension chips (SP-1 Wave 3) ────────────────────────────────────
+
+  /** Is the chip lane switched on? Also the ONLY reader of `show.liveDimensions`. */
+  private liveDimsEnabled(): boolean {
+    return settingsStore.getState().show.liveDimensions;
+  }
+
+  /**
+   * Publish the current phase's chip descriptors: open/refresh the store, and
+   * push each chip's world anchor straight at the overlay driver.
+   *
+   * The anchors deliberately do NOT travel through React — they move every rAF,
+   * and re-rendering a focused text input at that rate would fight the typing.
+   */
+  private syncLiveDims(dims: ToolDimension[]): void {
+    const plane = sketchStore.getState().session?.plane;
+    if (!this.liveDimsEnabled() || dims.length === 0 || !plane) {
+      this.closeLiveDims();
+      return;
+    }
+    const anchors: LiveDimAnchors = {};
+    for (const d of dims) {
+      const w = planePointToWorld(plane, d.anchor);
+      anchors[d.field] = [w.x, w.y, w.z];
+    }
+    const chips: LiveDimChipField[] = dims.map(({ anchor: _anchor, ...chip }) => chip);
+    const store = liveDimStore.getState();
+    if (this.liveDimsOpen) store.update(chips, anchors);
+    else store.show(chips, anchors, this.liveDimHandlers());
+    this.liveDimsOpen = true;
+    this.liveDims = dims;
+    for (const d of dims) {
+      const at = anchors[d.field];
+      if (at) this.deps.engine.moveChip(liveDimChipId(d.field), at);
+    }
+  }
+
+  /** The chips are gone: close the store (React unmounts the hosts, which is what
+   *  unregisters them from the overlay). Idempotent. */
+  private closeLiveDims(): void {
+    this.liveDims = [];
+    if (!this.liveDimsOpen) return;
+    this.liveDimsOpen = false;
+    liveDimStore.getState().clear();
+  }
+
+  /** Flip the chips to the quadrant with room. Cheap, and computed at most once
+   *  per pointer move — the store only takes a write when the side changes. */
+  private updateLiveDimPlacement(clientX: number, clientY: number): void {
+    const c = this.deps.container;
+    const next = placementFor(clientX, clientY, c.clientWidth, c.clientHeight);
+    if (next === this.liveDimPlacement) return;
+    this.liveDimPlacement = next;
+    liveDimStore.getState().setPlacement(next);
+  }
+
+  /** The chip → controller callbacks. All of them run the same pure FSM. */
+  private liveDimHandlers(): LiveDimHandlers {
+    return {
+      onFocus: (field) => this.applyLiveDimStep({ kind: "focus", field }),
+      onText: (text) => this.applyLiveDimStep({ kind: "text", text }),
+      onTab: (back, value) =>
+        this.applyLiveDimStep({ kind: "tab", fields: this.liveDimFieldIds(), back, value }),
+      onEnter: (value) => this.applyLiveDimStep({ kind: "enter", value }),
+      onEscape: () => this.applyLiveDimStep({ kind: "escField" }),
+      // Only a blur from the field the FSM still considers focused is a real
+      // "focus left the chip set" (viewport click). A Tab to a sibling chip
+      // fires the DEPARTED field's blur after the FSM already moved — React's
+      // focus effect on the new field synchronously blurs the old input — and
+      // processing that stale blur would null the focus and swallow every
+      // keystroke into the new field.
+      onBlur: (field, value) => {
+        if (this.liveDim.focus !== field) return;
+        this.applyLiveDimStep({ kind: "blurCommit", value });
+      },
+    };
+  }
+
+  /** Tab order = the frame's own field order (never re-sorted). */
+  private liveDimFieldIds(): DimFieldId[] {
+    return this.liveDims.map((d) => d.field);
+  }
+
+  /**
+   * Run one chip event through the FSM and make the world agree with the result:
+   * mirror focus/text into the store, apply a side-count pick as the MACHINE verb
+   * it really is, re-step at the cursor so the preview shows the new lock at
+   * once, and commit the gesture when Enter said so.
+   */
+  private applyLiveDimStep(ev: LiveDimEvent): void {
+    if (this.disposed) return;
+    const step = liveDimStep(this.liveDim, ev);
+    this.liveDim = step.state;
+    liveDimStore.getState().setFocus(step.state.focus, step.state.text);
+    // A side count never MOVES a point, so it is not a geometry lock: it is the
+    // polygon machine's own `sides` verb. The lock is kept anyway so the chip
+    // still reads as pinned (it authors nothing either way).
+    if (step.locked === "sides") this.stepSides(step.state.locks.sides ?? DEFAULT_POLYGON_SIDES);
+    // Only a LOCK changes geometry — re-stepping on every character would repaint
+    // the rubber-band at typing speed to produce the identical point.
+    if (ev.kind !== "text") this.restepAtCursor();
+    if (step.commitGesture) this.commitLiveDimGesture();
+  }
+
+  /** Push a typed side count into the polygon machine. */
+  private stepSides(n: number): void {
+    if (!this.machine || !this.machineState) return;
+    const stepped = this.machine.step(this.machineState, { kind: "sides", n }, this.stepCtx());
+    logSketchStep(this.machine.id, "sides", stepped);
+    this.machineState = stepped.state;
+    this.deps.engine.setSketchPreview(this.decorate(stepped.preview));
+    this.updatePolygonHint();
+  }
+
+  /**
+   * Re-step the machine at the point it is already on, so a lock taken from a
+   * chip shows up in the rubber-band immediately instead of at the next pointer
+   * move. The cursor is re-PROJECTED through the new locks (`projectEvent`), so
+   * the direction the user aimed survives while the pinned number wins.
+   */
+  private restepAtCursor(): void {
+    if (!this.machine || !this.machineState) return;
+    const cursor = this.machineState.cursor;
+    if (!cursor) return;
+    const stepped = this.machine.step(this.machineState, { kind: "move", pt: cursor }, this.stepCtx());
+    this.machineState = stepped.state;
+    this.deps.engine.setSketchPreview(this.decorate(stepped.preview));
+    this.updateGhost(stepped.preview, stepped.state.cursor ?? cursor);
+    this.syncLiveDims(stepped.dims ?? []);
+  }
+
+  /**
+   * Enter on a chip commits the gesture through the SAME tail a mouse click
+   * takes (`applySteppedClick`) — a second commit path would drift from it, and
+   * the whole point of the extraction is that the two are byte-identical.
+   */
+  private commitLiveDimGesture(): void {
+    if (!this.machine || !this.machineState) return;
+    const cursor = this.machineState.cursor;
+    if (!cursor) return;
+    // Captured BEFORE the step consumes the anchors / the commit clears the locks.
+    const dims = this.dimCommitContext();
+    const stepped = this.machine.step(this.machineState, { kind: "click", pt: cursor }, this.stepCtx());
+    logSketchStep(this.machine.id, "enter", stepped);
+    this.applySteppedClick(stepped, dims);
+  }
+
+  /**
+   * A digit / `-` / `.` typed over the VIEWPORT opens the first chip on it.
+   *
+   * Requires an ARMED machine: with no anchor placed there is no dimension yet,
+   * which is what leaves the polygon tool's idle 3-9 side-count verb alone.
+   * Returns whether the key was claimed.
+   */
+  private tryStartLiveDimTyping(e: KeyboardEvent): boolean {
+    if (!LIVE_DIM_TYPE_KEY.test(e.key) || e.metaKey || e.ctrlKey || e.altKey) return false;
+    if (!this.liveDimsEnabled() || !this.machineState) return false;
+    if (this.machineState.anchors.length === 0 || this.liveDims.length === 0) return false;
+    const step = liveDimStep(this.liveDim, {
+      kind: "typeStart",
+      ch: e.key,
+      fields: this.liveDimFieldIds(),
+    });
+    if (step.state.focus === null) return false;
+    this.liveDim = step.state;
+    liveDimStore.getState().setFocus(step.state.focus, step.state.text);
+    e.stopPropagation();
+    e.preventDefault();
+    return true;
+  }
 
   // ── commit round-trip ─────────────────────────────────────────────────────
 
   /** Public thin wrapper: serialize the commit through the shared mutation queue so
    *  a burst of clicks (fast polyline) rebases each segment on the settled prior one.
-   *  `specs` are the tool's OWN constraints over `committed` (slot / polygon). */
-  private commit(committed: DraftEntity[], specs?: ToolConstraintSpec[]): Promise<void> {
-    return enqueueSketchMutation(() => this.commitNow(committed, specs));
+   *  `specs` are the tool's OWN constraints over `committed` (slot / polygon);
+   *  `dims` is the gesture's live-dimension context, captured by value. */
+  private commit(
+    committed: DraftEntity[],
+    specs?: ToolConstraintSpec[],
+    dims?: DimCommitContext,
+  ): Promise<void> {
+    return enqueueSketchMutation(() => this.commitNow(committed, specs, dims));
   }
 
-  private async commitNow(committed: DraftEntity[], specs?: ToolConstraintSpec[]): Promise<void> {
+  private async commitNow(
+    committed: DraftEntity[],
+    specs?: ToolConstraintSpec[],
+    dims?: DimCommitContext,
+  ): Promise<void> {
     if (this.disposed) return;
     const gen = sketchStore.getState().sessionGeneration;
     // Re-read the session INSIDE the queued turn and rebase the committed drafts onto
@@ -1296,30 +1670,13 @@ export class SketchController {
       id: sketchStore.getState().nextEntityId(),
       ...draftToEntityFields(d),
     }));
-    // Tool-authored constraints (slot tangency / polygon regularity) resolve their
-    // index refs against the id-assigned entities and SUPPRESS the intra-batch half
-    // of the inference — see `resolveToolConstraints` for why the draw path cannot
-    // afford a duplicated constraint.
-    const inferred = inferConstraints(newEntities, session.entities, {
-      nextConstraintId: () => sketchStore.getState().nextConstraintId(),
-    });
-    const newConstraints: SketchConstraint[] = resolveToolConstraints(specs, newEntities, inferred, () =>
-      sketchStore.getState().nextConstraintId(),
-    );
+    const { toolAuthored, dimAuthored } = this.buildCommitConstraints(session, newEntities, specs, dims);
 
     const entities = [...session.entities, ...newEntities];
-    const constraints = [...session.constraints, ...newConstraints];
-
-    let result;
-    try {
-      result = await this.deps.client.sketchUpsert(session.sketchId, entities, constraints);
-    } catch (e) {
-      if (this.sessionStale(gen)) return;
-      viewportStore.getState().setStatusHint(`Sketch solve failed: ${sketchErr(e)}`, { severity: "error", sticky: true });
-      return;
-    }
-    // A late exit / newer session could have superseded this turn mid-await.
-    if (this.sessionStale(gen)) return;
+    const base = [...session.constraints, ...toolAuthored];
+    const applied = await this.upsertWithDimFallback(session, gen, entities, base, dimAuthored);
+    if (!applied) return;
+    const { result, constraints, rejectHint } = applied;
 
     // F-WP9: the solver may have MOVED points (constraint-driven); write the
     // solved positions back into the geometry (backend point UUIDs were already
@@ -1332,7 +1689,98 @@ export class SketchController {
     sketchStore.getState().setConflicting(result.conflicting ?? []);
     this.deps.engine.updateSketchSession(next.plane, solvedEntities, next.status);
     this.pushSolve(session.sketchId, result.dof, result.status);
+    // EXACTLY ONE undo entry either way — a rejected dimension still leaves the
+    // entity the user drew, so undo has to land on the state before the click,
+    // not between the two upserts.
     sketchStore.getState().pushUndoSnapshot(before, { kind: "commit" });
+    if (rejectHint) viewportStore.getState().setStatusHint(rejectHint, { severity: "error" });
+    // The chain's angle reference for the NEXT segment. `?? null` on purpose: a
+    // batch with no line (circle, ellipse) leaves nothing to measure against.
+    this.lastChainLineId = newEntities.find((e) => e.type === "Line")?.id ?? null;
+  }
+
+  /**
+   * The two constraint sets a commit authors: the TOOL's own (slot tangency /
+   * polygon regularity, merged with the auto-constraint inference) and the ones
+   * the user TYPED during the gesture.
+   *
+   * The typed set is deliberately NOT routed through `resolveToolConstraints`:
+   * that call drops the intra-batch half of the inference whenever specs are
+   * present, and a typed length must not cost a rect the H/V it would otherwise
+   * have inferred. It is deduped against the tool set instead — a typed 0°
+   * authors Horizontal and the inference produces the same Horizontal, and the
+   * draw path has no reject lane for the inferred set (see `dedupeDimConstraints`).
+   */
+  private buildCommitConstraints(
+    session: SketchSession,
+    newEntities: SketchEntity[],
+    specs: ToolConstraintSpec[] | undefined,
+    dims: DimCommitContext | undefined,
+  ): { toolAuthored: SketchConstraint[]; dimAuthored: SketchConstraint[] } {
+    const nextId = (): string => sketchStore.getState().nextConstraintId();
+    // Tool-authored constraints resolve their index refs against the id-assigned
+    // entities and SUPPRESS the intra-batch half of the inference — see
+    // `resolveToolConstraints` for why the draw path cannot afford a duplicate.
+    const inferred = inferConstraints(newEntities, session.entities, { nextConstraintId: nextId });
+    const toolAuthored = resolveToolConstraints(specs, newEntities, inferred, nextId);
+    if (!dims || Object.keys(dims.locks).length === 0) return { toolAuthored, dimAuthored: [] };
+    const dimSpecs = dimConstraintSpecs(dims.toolId, dims.anchors, dims.locks, {
+      // Read HERE rather than captured at the click: this field is written only
+      // by the commit turn, and the queue is serial, so inside the turn it names
+      // the segment that actually settled. At click time it would still be null
+      // for the very next segment of a fast chain.
+      ...(this.lastChainLineId ? { prevLineId: this.lastChainLineId } : {}),
+      ...(dims.sides !== undefined ? { sides: dims.sides } : {}),
+    });
+    const resolved = resolveDimConstraints(dimSpecs, newEntities, nextId);
+    return { toolAuthored, dimAuthored: dedupeDimConstraints(resolved, toolAuthored) };
+  }
+
+  /**
+   * Upsert the batch WITH the typed dimensions, and on a conflict re-upsert
+   * WITHOUT them.
+   *
+   * The entity survives: the user DREW it, and refusing the whole gesture because
+   * one typed number over-constrains would throw away work they did not get wrong.
+   * The dropped dimension is named in the returned hint. Returns null when the
+   * turn was superseded (or the call failed) — the caller publishes nothing then.
+   */
+  private async upsertWithDimFallback(
+    session: SketchSession,
+    gen: number,
+    entities: SketchEntity[],
+    base: SketchConstraint[],
+    dimAuthored: SketchConstraint[],
+  ): Promise<{ result: SketchUpsertResult; constraints: SketchConstraint[]; rejectHint?: string } | null> {
+    const withDims = dimAuthored.length > 0 ? [...base, ...dimAuthored] : base;
+    const result = await this.solveUpsert(session.sketchId, gen, entities, withDims);
+    if (!result) return null;
+    if (dimAuthored.length === 0 || !isConflictStatus(result.status)) {
+      return { result, constraints: withDims };
+    }
+    // Name the clashing party from the FAILED solve, before it is discarded.
+    const rejectHint = rejectConflictHint(withDims, result.conflicting, dimAuthored[0].id, "Dimension");
+    const retry = await this.solveUpsert(session.sketchId, gen, entities, base);
+    return retry ? { result: retry, constraints: base, rejectHint } : null;
+  }
+
+  /** One upsert round-trip with the two guards every commit needs: report a
+   *  failure, and drop the result when a late exit / newer session superseded
+   *  this turn mid-await. Null ⇒ the caller publishes nothing. */
+  private async solveUpsert(
+    sketchId: string,
+    gen: number,
+    entities: SketchEntity[],
+    constraints: SketchConstraint[],
+  ): Promise<SketchUpsertResult | null> {
+    try {
+      const result = await this.deps.client.sketchUpsert(sketchId, entities, constraints);
+      return this.sessionStale(gen) ? null : result;
+    } catch (e) {
+      if (this.sessionStale(gen)) return null;
+      viewportStore.getState().setStatusHint(`Sketch solve failed: ${sketchErr(e)}`, { severity: "error", sticky: true });
+      return null;
+    }
   }
 
   private pushSolve(id: string, dof: number, status: SketchSession["status"]): void {
@@ -2238,6 +2686,15 @@ export class SketchController {
   // ── keyboard (Alt suppress + Enter/Esc end chain) ─────────────────────────
 
   private onKeyDown = (e: KeyboardEvent): void => {
+    // DOM FOCUS IS THE PRIORITY RULE (SP-1 §7.5), and this listener is
+    // capture-phase on window — so a key aimed at a text field (a live dimension
+    // chip, the dimension chip, an inspector input) has to be handed back before
+    // ANY branch below can swallow it. Enter, Escape, Tab and every digit then
+    // belong to that field, with zero keymap changes.
+    if (isEditableKeyTarget(e.target)) return;
+    // A digit over the viewport OPENS a chip. Claimed before the polygon
+    // side-count branch, which now only owns the IDLE phase.
+    if (this.tryStartLiveDimTyping(e)) return;
     if (e.key === "Escape" && this.planePicking) {
       // Cancel plane pick → back to model mode (exit() hides the picker).
       toolStore.getState().setMode("model");
@@ -2248,12 +2705,11 @@ export class SketchController {
     if (e.key === "Alt") this.altHeld = true;
     // Polygon side count: 3-9 belong to the armed polygon machine, so they are
     // claimed HERE (capture phase) before the global keymap ladder ever sees them.
-    if (
-      this.machine?.id === "polygon" &&
-      this.machineState &&
-      POLYGON_SIDES_KEY.test(e.key) &&
-      !isEditableKeyTarget(e.target)
-    ) {
+    // ARMED + live dimensions on, a digit is the RADIUS chip's (already claimed
+    // above) — so this branch owns the idle phase only. With the pref off it
+    // still owns both, because then there is no chip to hand the key to.
+    const sidesPhase = this.machineState?.anchors.length === 0 || !this.liveDimsEnabled();
+    if (this.machine?.id === "polygon" && this.machineState && sidesPhase && POLYGON_SIDES_KEY.test(e.key)) {
       const stepped = this.machine.step(this.machineState, { kind: "sides", n: Number(e.key) }, this.stepCtx());
       logSketchStep(this.machine.id, "sides", stepped);
       this.machineState = stepped.state;
@@ -2297,10 +2753,8 @@ export class SketchController {
       return;
     }
     if (e.key === "Enter" && this.machine && this.machineState && this.machineState.anchors.length > 0) {
-      // A text input (e.g. the open dimension chip) owns its own Enter; this
-      // handler is capture-phase on window so it would otherwise see the key
-      // before the input's own onKeyDown ever runs.
-      if (isEditableKeyTarget(e.target)) return;
+      // (A focused text input — the dimension chip, a live dimension chip — has
+      // already been handed its Enter by the editable-target guard at the top.)
       // A chain is in progress: Enter ends it here (mirrors the Esc-chain branch
       // below). No anchors ⇒ this branch is skipped and the global finishSketch
       // shortcut (useShortcuts) handles Enter instead.
@@ -2308,6 +2762,7 @@ export class SketchController {
       this.machineState = stepped.state;
       this.deps.engine.setSketchPreview([]);
       this.deps.engine.setSketchGhost(null, null);
+      this.clearLiveDimGesture();
       e.stopPropagation();
       e.preventDefault();
       return;
@@ -2319,6 +2774,7 @@ export class SketchController {
       this.machineState = stepped.state;
       this.deps.engine.setSketchPreview([]);
       this.deps.engine.setSketchGhost(null, null);
+      this.clearLiveDimGesture();
       e.stopPropagation();
       e.preventDefault();
     }
@@ -2332,6 +2788,7 @@ export class SketchController {
     this.disposed = true; // set FIRST: guards every pending rAF + queued write-back
     this.snapCache = null;
     this.snapCacheKey = null;
+    this.clearLiveDimGesture();
     this.pendingSwitchId = null;
     this.endPlanePick();
     sketchSelectionStore.getState().clear();

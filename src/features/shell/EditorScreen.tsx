@@ -10,14 +10,15 @@ import { CornerCluster } from "./CornerCluster";
 import { FloatingToolbar } from "@/features/toolbar/FloatingToolbar";
 import { ModelToolChips } from "@/features/toolbar/ModelToolChips";
 import { MeasureOverlay } from "@/features/measure/MeasureOverlay";
-import { RepairMarkerOverlay } from "@/features/repair/RepairMarkerOverlay";
 import { MeasurePanel } from "@/features/measure/MeasurePanel";
 import { ModelTreePanel } from "@/features/tree/ModelTreePanel";
 import { InspectorPanel } from "@/features/inspector/InspectorPanel";
 import { RepairBanner } from "@/features/repair/RepairBanner";
+import { RepairMarkerOverlay } from "@/features/repair/RepairMarkerOverlay";
 import { TimelineStoppedBanner } from "@/features/repair/TimelineStoppedBanner";
 import { SketchChromeBar } from "@/features/sketch/SketchChromeBar";
 import { ConstraintBadgeLayer } from "@/features/sketch/ConstraintBadgeLayer";
+import { LiveDimChips } from "@/features/sketch/LiveDimChips";
 import { ConstraintContextChips } from "@/features/sketch/ConstraintContextChips";
 import { SketchConstraintToolbar } from "@/features/sketch/SketchConstraintToolbar";
 import { ViewportRoot } from "@/viewport/ViewportRoot";
@@ -54,6 +55,7 @@ export function EditorScreen() {
       <div className="relative min-h-0 flex-1">
         <ViewportRoot className="absolute inset-x-0 bottom-[34px] top-0" />
         <ConstraintBadgeLayer />
+        <LiveDimChips />
         <ConstraintContextChips />
         <ModelToolChips />
         <MeasureOverlay />

@@ -158,6 +158,47 @@ describe("settingsStore displayUnit", () => {
     const raw = localStorage.getItem(STORAGE_KEY);
     expect(raw).not.toBeNull();
     expect(JSON.parse(raw!).state.displayUnit).toBe("in");
-    expect(JSON.parse(raw!).version).toBe(6);
+    expect(JSON.parse(raw!).version).toBe(7);
+  });
+});
+
+/*
+ * Live dimensions (SP-1). Both prefs default ON, so a blob authored before they
+ * existed must come back ON too — a silently disabled feature for every existing
+ * user is exactly what the backfill migrate exists to prevent.
+ */
+describe("settingsStore live dimensions", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+  });
+
+  it("a v6 blob (predates both keys) migrates with rounding + chips ON", async () => {
+    seed(6, {
+      snapTo: { grid: false, onCurve: true },
+      show: { guidePoints: true, snappingHints: false },
+      displayUnit: "in",
+    });
+    await settingsStore.persist.rehydrate();
+    const s = settingsStore.getState();
+    expect(s.snapTo.dimensionRound).toBe(true);
+    expect(s.show.liveDimensions).toBe(true);
+    // The migration must not disturb the settings that already existed.
+    expect(s.snapTo.grid).toBe(false);
+    expect(s.show.snappingHints).toBe(false);
+    expect(s.displayUnit).toBe("in");
+  });
+
+  it("a v7 blob's explicit OFF survives hydration (never re-defaulted)", async () => {
+    seed(7, {
+      snapTo: { grid: true, dimensionRound: false },
+      show: { guidePoints: true, snappingHints: true, liveDimensions: false },
+    });
+    await settingsStore.persist.rehydrate();
+    expect(settingsStore.getState().snapTo.dimensionRound).toBe(false);
+    expect(settingsStore.getState().show.liveDimensions).toBe(false);
   });
 });

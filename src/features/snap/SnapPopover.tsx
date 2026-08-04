@@ -18,13 +18,13 @@ const SNAP_ROWS: { key: SnapKey; label: string }[] = [
   { key: "quadrant", label: "Quadrant points" },
   { key: "intersection", label: "Intersections" },
   { key: "onCurve", label: "On-curve points" },
-  { key: "guidePoints3d", label: "3D guide points" },
-  { key: "distantEdges", label: "Distant edges" },
+  { key: "dimensionRound", label: "Dimension rounding" },
 ];
 
 const SHOW_ROWS: { key: ShowKey; label: string }[] = [
   { key: "guidePoints", label: "Guide points" },
   { key: "snappingHints", label: "Snapping hints" },
+  { key: "liveDimensions", label: "Live dimensions" },
 ];
 
 const DEVICE_OPTIONS: { value: DevicePref; label: string }[] = [

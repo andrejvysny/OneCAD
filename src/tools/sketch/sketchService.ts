@@ -84,8 +84,12 @@ function sessionSuperseded(gen: number): boolean {
  * INCLUDING the just-authored one); the authored id is excluded so the hint points
  * at the OTHER party. Falls back to the generic over-constrain text when no
  * conflicting id is available (e.g. the mock lane, which never reports ids).
+ *
+ * EXPORTED (append-only) for the draw path's live-dimension fallback, which
+ * rejects the typed dimension while KEEPING the entity — same phrasing, so a
+ * refused dimension reads identically however it was authored.
  */
-function rejectConflictHint(
+export function rejectConflictHint(
   constraints: SketchConstraint[],
   conflicting: string[] | undefined,
   authoredId: string,

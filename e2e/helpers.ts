@@ -632,6 +632,61 @@ export async function extrudeDebug(page: Page): Promise<Record<string, unknown> 
  * confirm. `ModelToolController` commits only on this explicit confirm (Enter /
  * chip-✓ / click-away); a release alone just sets the depth and stays armed.
  */
+// ── Live dimension chips (SP-1 W4) ───────────────────────────────────────────
+
+/** One live dimension chip's renderable facts, as read straight off the store
+ *  (`liveDimStore` — `LiveDimChipField` minus its plane anchor). Reading the
+ *  store instead of the DOM avoids depending on the chip's formatted/unit text. */
+export interface LiveDimSnapshot {
+  field: string;
+  value: number;
+  locked: boolean;
+}
+
+/** The currently open live-dimension chip set (`__stores.liveDim`). Empty when
+ *  no gesture has an armed dimension frame (idle tool, or the chips pref is off). */
+export async function getLiveDims(page: Page): Promise<LiveDimSnapshot[]> {
+  return page.evaluate(() => {
+    const w = window as unknown as {
+      __stores?: { liveDim: { getState(): { fields: LiveDimSnapshot[] } } };
+    };
+    return (w.__stores?.liveDim.getState().fields ?? []).map((f) => ({
+      field: f.field,
+      value: f.value,
+      locked: f.locked,
+    }));
+  });
+}
+
+/**
+ * Flip a snap/show preference straight through the settings store
+ * (`__stores.settings.setSnap`) — the sanctioned escape hatch for a spec that
+ * needs e.g. `dimensionRound` off (raw, unrounded coordinates) without driving
+ * the snap popover UI. `key` is whichever `SnapSettings` field the spec needs.
+ */
+export async function setSnapPref(page: Page, key: string, value: boolean): Promise<void> {
+  await page.evaluate(
+    ({ key, value }) => {
+      const w = window as unknown as {
+        __stores?: { settings: { getState(): { setSnap(key: string, value: boolean): void } } };
+      };
+      w.__stores?.settings.getState().setSnap(key, value);
+    },
+    { key, value },
+  );
+}
+
+/**
+ * A live dimension chip's `<input>`, by field id (`"length"`, `"angle"`, `"width"`,
+ * …) — `LiveDimField.tsx`'s `data-testid={"live-dim-"+field}`. Mounted in an
+ * overlay layer with `aria-hidden` on an ancestor (same convention as the
+ * constraint badges), so this is a plain attribute selector rather than a
+ * role/label query — those respect the accessibility tree, this does not.
+ */
+export function liveDimField(page: Page, field: string): Locator {
+  return page.locator(`[data-testid="live-dim-${field}"]`);
+}
+
 export async function commitExtrudeAtHandle(page: Page): Promise<void> {
   // The whole gesture is wrapped in a retry: an occasional handle-scan miss (the
   // scan and the real pointerdown are a frame apart — a render-on-demand engine can

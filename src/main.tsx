@@ -50,6 +50,7 @@ if (import.meta.env.DEV) {
     import("./stores/workerStore"),
     import("./stores/repairStore"),
     import("./stores/sketchSelectionStore"),
+    import("./stores/liveDimStore"),
   ]).then(
     ([
       doc,
@@ -64,6 +65,7 @@ if (import.meta.env.DEV) {
       worker,
       repair,
       sketchSelection,
+      liveDim,
     ]) => {
       (window as unknown as Record<string, unknown>).__stores = {
         document: doc.documentStore,
@@ -78,6 +80,7 @@ if (import.meta.env.DEV) {
         worker: worker.workerStore,
         repair: repair.repairStore,
         sketchSelection: sketchSelection.sketchSelectionStore,
+        liveDim: liveDim.liveDimStore,
       };
     },
   );

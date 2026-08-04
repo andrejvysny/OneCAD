@@ -295,6 +295,7 @@ function makeEngineMock() {
     exitSketch: vi.fn(),
     setSketchDrawingActive: vi.fn(),
     setSketchPreview: vi.fn(),
+    moveChip: vi.fn(),
     setSketchGhost: vi.fn(),
     setSketchTrimGhost: vi.fn(),
     setSketchSnap: vi.fn(),

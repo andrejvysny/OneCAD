@@ -24,13 +24,36 @@ export interface SnapSettings {
   intersection: boolean;
   /** Nearest-point-on-curve snaps (M6c parity, default on). */
   onCurve: boolean;
+  /**
+   * Round a CURSOR-placed dimension to the zoom-adaptive quantum while drawing
+   * (SP-1). Lives under `snapTo` because it is a snap tier: it REPLACES the grid
+   * tier during a draw gesture (grid quantizes x/y independently, a draw gesture
+   * means length + angle), and every geometry tier above it still wins. Default
+   * on — a drawn length landing on a round number is what makes cursor-drawn
+   * geometry usable without typing.
+   */
+  dimensionRound: boolean;
+  /**
+   * RESERVED — not read by any snap path (3D-geometry snapping is unscheduled).
+   * Kept so an existing persisted blob merges unchanged and a rollback to a
+   * build that still rendered the row is loss-free. Removing the field is a
+   * persist-shape change and needs a `version` bump.
+   */
   guidePoints3d: boolean;
+  /** RESERVED — see `guidePoints3d`. */
   distantEdges: boolean;
 }
 
 export interface ShowSettings {
   guidePoints: boolean;
   snappingHints: boolean;
+  /**
+   * Show the live dimension CHIPS during a draw gesture (SP-1). Default on.
+   * Only the chip overlay reads this — the zoom-adaptive rounding it displays is
+   * a separate concern with its own pref (`snapTo.dimensionRound`), so turning
+   * the chips off never silently changes where geometry lands.
+   */
+  liveDimensions: boolean;
 }
 
 export interface NavigationSettings {
@@ -103,12 +126,14 @@ export const settingsStore = createStore<SettingsState>()(
         quadrant: true,
         intersection: true,
         onCurve: true,
+        dimensionRound: true,
         guidePoints3d: true,
         distantEdges: false,
       },
       show: {
         guidePoints: true,
         snappingHints: true,
+        liveDimensions: true,
       },
       experimentalWebGpu: false,
       navigation: { inputDevice: "auto" },
@@ -139,7 +164,7 @@ export const settingsStore = createStore<SettingsState>()(
     }),
     {
       name: STORAGE_KEY,
-      version: 6,
+      version: 7,
       // v1 → v2 added the M6c snap types (quadrant / intersection / onCurve).
       // A v1 blob has no keys for them; backfill the on-by-default values so an
       // existing user's popover shows them enabled (parity with a fresh install).
@@ -150,6 +175,9 @@ export const settingsStore = createStore<SettingsState>()(
       // coerce(undefined) → "system" (follow the OS, matching a fresh install).
       // v5 → v6 added the display unit; a pre-v6 blob has no key, so
       // coerce(undefined) → "mm", which is what every such blob was authored in.
+      // v6 → v7 added the live-dimension prefs (SP-1). A pre-v7 blob has neither
+      // key; backfill both ON so an existing user gets the same behaviour as a
+      // fresh install rather than a silently disabled feature.
       migrate: (persisted, version) => {
         const s = persisted as Partial<SettingsState>;
         if (s && version < 2) {
@@ -171,6 +199,10 @@ export const settingsStore = createStore<SettingsState>()(
         }
         if (s && version < 6) {
           s.displayUnit = coerceLengthUnit((s as Partial<SettingsState>).displayUnit);
+        }
+        if (s && version < 7) {
+          s.snapTo = { dimensionRound: true, ...(s.snapTo as Partial<SnapSettings>) } as SnapSettings;
+          s.show = { liveDimensions: true, ...(s.show as Partial<ShowSettings>) } as ShowSettings;
         }
         return s as unknown as SettingsState;
       },

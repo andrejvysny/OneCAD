@@ -13,6 +13,7 @@ import { DEFAULT_LENGTH_UNIT } from "@/units/lengthUnits";
 import { DEFAULT_RENDER_MODE } from "@/viewport/engine/renderModes";
 import { sketchStore } from "@/stores/sketchStore";
 import { toolChipStore } from "@/stores/toolChipStore";
+import { liveDimStore } from "@/stores/liveDimStore";
 import { workerStore } from "@/stores/workerStore";
 import { repairStore } from "@/stores/repairStore";
 import { resetMockSketches, resetMockDocument } from "@/ipc/mockClient";
@@ -53,10 +54,14 @@ export function resetStores(): void {
       quadrant: true,
       intersection: true,
       onCurve: true,
+      // OFF here, ON in the app: the exact-coordinate pointer specs pin RAW
+      // click coords, which a zoom-adaptive quantum would move. The live-dim
+      // lane opts back in explicitly (SketchController.liveDim.test.ts).
+      dimensionRound: false,
       guidePoints3d: true,
       distantEdges: false,
     },
-    show: { guidePoints: true, snappingHints: true },
+    show: { guidePoints: true, snappingHints: true, liveDimensions: true },
     navigation: { inputDevice: "auto" },
     displayMode: DEFAULT_RENDER_MODE,
     theme: DEFAULT_THEME,
@@ -64,6 +69,7 @@ export function resetStores(): void {
   });
   sketchStore.getState().reset();
   toolChipStore.getState().clear();
+  liveDimStore.getState().clear();
   workerStore.getState().reset();
   repairStore.getState().reset();
   resetMockSketches();
