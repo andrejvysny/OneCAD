@@ -30,9 +30,9 @@ use crate::dto::WorkerStatusDto;
 use crate::events;
 use crate::export::GeometryExporter;
 use crate::worker::{
-    resolve_worker_path, ElementQuery, FaceBoundaryProjection, MeshProvider, PendingBackend,
-    PreviewEngine, SolverEngine, StepImport, SupervisorConfig, WorkerLifecycle, WorkerManager,
-    WorkerState,
+    resolve_worker_path, CircuitControl, ElementQuery, FaceBoundaryProjection, MeshProvider,
+    PendingBackend, PreviewEngine, SolverEngine, StepImport, SupervisorConfig, WorkerLifecycle,
+    WorkerManager, WorkerState,
 };
 
 /// The geometry backend split into its three facets (the executor drives the
@@ -47,8 +47,9 @@ pub type BackendPair = (
 /// A backend bundle: the [`BackendPair`] facets plus the read-only side seams for
 /// the same worker — [`GeometryExporter`] (`export_step_file`), [`ElementQuery`]
 /// (`face_sketch_plane` / `element_info`), [`PreviewEngine`] (`preview_op`),
-/// [`FaceBoundaryProjection`] (`add_sketch_on_face`) and [`StepImport`]
-/// (`import_step` / `insert_step`). Same `WorkerManager` Arc throughout.
+/// [`FaceBoundaryProjection`] (`add_sketch_on_face`), [`StepImport`]
+/// (`import_step` / `insert_step`) and [`CircuitControl`]
+/// (`clear_worker_circuit`). Same `WorkerManager` Arc throughout.
 pub type BackendBundle = (
     Arc<dyn GeometryEngine>,
     Arc<dyn MeshProvider>,
@@ -58,6 +59,7 @@ pub type BackendBundle = (
     Arc<dyn PreviewEngine>,
     Arc<dyn FaceBoundaryProjection>,
     Arc<dyn StepImport>,
+    Arc<dyn CircuitControl>,
 );
 
 /// Builds a fresh backend bundle for a newly opened document.
@@ -123,6 +125,9 @@ pub struct AppState {
     /// The current document's STEP import probe (same `WorkerManager` Arc), used by
     /// `import_step` / `insert_step`. Swapped alongside the exporter.
     step_import: RwLock<Arc<dyn StepImport>>,
+    /// The current document's crash-circuit control (same `WorkerManager` Arc), used
+    /// by `clear_worker_circuit`. Swapped alongside the exporter.
+    circuit: RwLock<Arc<dyn CircuitControl>>,
     backend_factory: BackendFactory,
 }
 
@@ -143,6 +148,7 @@ impl AppState {
             preview: RwLock::new(Arc::new(PendingBackend)),
             face_projection: RwLock::new(Arc::new(PendingBackend)),
             step_import: RwLock::new(Arc::new(PendingBackend)),
+            circuit: RwLock::new(Arc::new(PendingBackend)),
             backend_factory,
         }
     }
@@ -158,8 +164,17 @@ impl AppState {
     /// worker.
     #[must_use]
     pub fn make_backend(&self) -> BackendPair {
-        let (engine, meshes, solver, exporter, elements, preview, face_projection, step_import) =
-            (self.backend_factory)();
+        let (
+            engine,
+            meshes,
+            solver,
+            exporter,
+            elements,
+            preview,
+            face_projection,
+            step_import,
+            circuit,
+        ) = (self.backend_factory)();
         if let Ok(mut slot) = self.exporter.write() {
             *slot = exporter;
         }
@@ -174,6 +189,9 @@ impl AppState {
         }
         if let Ok(mut slot) = self.step_import.write() {
             *slot = step_import;
+        }
+        if let Ok(mut slot) = self.circuit.write() {
+            *slot = circuit;
         }
         (engine, meshes, solver)
     }
@@ -208,6 +226,12 @@ impl AppState {
     pub fn step_import(&self) -> Arc<dyn StepImport> {
         self.step_import.read().unwrap().clone()
     }
+
+    /// The current document's crash-circuit control (see [`make_backend`](Self::make_backend)).
+    #[must_use]
+    pub fn circuit(&self) -> Arc<dyn CircuitControl> {
+        self.circuit.read().unwrap().clone()
+    }
 }
 
 impl Default for AppState {
@@ -228,6 +252,7 @@ impl Default for AppState {
             preview: RwLock::new(Arc::new(PendingBackend)),
             face_projection: RwLock::new(Arc::new(PendingBackend)),
             step_import: RwLock::new(Arc::new(PendingBackend)),
+            circuit: RwLock::new(Arc::new(PendingBackend)),
             backend_factory,
         }
     }
@@ -271,7 +296,8 @@ fn real_worker_factory(
             let elements: Arc<dyn ElementQuery> = Arc::new(wm.clone());
             let preview: Arc<dyn PreviewEngine> = Arc::new(wm.clone());
             let face_projection: Arc<dyn FaceBoundaryProjection> = Arc::new(wm.clone());
-            let step_import: Arc<dyn StepImport> = Arc::new(wm);
+            let step_import: Arc<dyn StepImport> = Arc::new(wm.clone());
+            let circuit: Arc<dyn CircuitControl> = Arc::new(wm);
             (
                 engine,
                 meshes,
@@ -281,6 +307,7 @@ fn real_worker_factory(
                 preview,
                 face_projection,
                 step_import,
+                circuit,
             )
         }
         None => {
@@ -292,7 +319,8 @@ fn real_worker_factory(
             let elements: Arc<dyn ElementQuery> = backend.clone();
             let preview: Arc<dyn PreviewEngine> = backend.clone();
             let face_projection: Arc<dyn FaceBoundaryProjection> = backend.clone();
-            let step_import: Arc<dyn StepImport> = backend;
+            let step_import: Arc<dyn StepImport> = backend.clone();
+            let circuit: Arc<dyn CircuitControl> = backend;
             (
                 engine,
                 meshes,
@@ -302,6 +330,7 @@ fn real_worker_factory(
                 preview,
                 face_projection,
                 step_import,
+                circuit,
             )
         }
     })

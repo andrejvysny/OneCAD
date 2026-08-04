@@ -49,7 +49,7 @@ import { toolStore } from "@/stores/toolStore";
 import { trace, traceWarn } from "@/debug/trace";
 import { logDebug } from "@/debug/log";
 import { viewportStore, type ViewportState } from "@/stores/viewportStore";
-import { documentStore, nextDatumName, type SketchMeta } from "@/stores/documentStore";
+import { documentStore, nextAppliedOps, nextDatumName, type SketchMeta } from "@/stores/documentStore";
 import { selectionStore, topoRefId, type EntityRef } from "@/stores/selectionStore";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { profileFromRegion, profileBounds, type PrismProfile } from "@/tools/preview/prismPreview";
@@ -6223,11 +6223,16 @@ export class ModelToolController {
       if (!bodies[ref.bodyId]) bodies[ref.bodyId] = { id: ref.bodyId, name: `Body ${++n}`, visible: true };
     }
     for (const id of res.removedBodies ?? []) delete bodies[id];
+    const features = res.features.map(toFeatureMeta);
     doc.applyChange({
       revision: res.revision,
-      features: res.features.map(toFeatureMeta),
+      features,
       bodies,
       dirty: true,
+      // An `ApplyOperationResult` carries no timeline cursor — see `nextAppliedOps`.
+      // Without this a freshly committed op would sit at `index === appliedOps` and
+      // read as an unapplied draft, which the H3 inline-value gate refuses to edit.
+      appliedOps: nextAppliedOps(doc.appliedOps, doc.features.length, features.length),
     });
   }
 

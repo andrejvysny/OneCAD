@@ -434,6 +434,24 @@ pub trait PreviewEngine: Send + Sync {
     ) -> Result<crate::dto::PreviewResultDto, EngineError>;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Crash-circuit control (SCHEMA §8 poison / F3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The crash-circuit escape hatch.
+///
+/// A poison key is `(historyPrefixHash-through-op, opRecordId, occtFingerprint)`.
+/// That covers everything the *plan* can change, and a normal fix — editing the
+/// crashing op's params — already mints a new key. It cannot see changes OUTSIDE
+/// the plan (an externally repaired STEP file the op reads, a worker rebuilt in
+/// place without a fingerprint bump), so an open circuit for those is unclearable
+/// without this seam. Synchronous and infallible: it touches only in-process state.
+pub trait CircuitControl: Send + Sync {
+    /// Forgets every crash count and closes every open circuit; returns how many
+    /// keys were forgotten.
+    fn clear_circuit(&self) -> usize;
+}
+
 /// The full geometry backend: a [`GeometryEngine`] plus its [`MeshProvider`].
 /// Blanket-implemented, so any type that is both is a `Backend`.
 pub trait Backend: GeometryEngine + MeshProvider {}
@@ -817,6 +835,13 @@ impl StepImport for PendingBackend {
         _include_geometry: bool,
     ) -> Result<StepInspection, EngineError> {
         Err(Self::not_ready())
+    }
+}
+
+impl CircuitControl for PendingBackend {
+    /// No worker ⇒ no circuit ⇒ nothing to clear.
+    fn clear_circuit(&self) -> usize {
+        0
     }
 }
 

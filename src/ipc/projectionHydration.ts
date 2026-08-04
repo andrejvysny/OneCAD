@@ -36,6 +36,10 @@ export function toFeatureMeta(f: FeatureRecord): FeatureMeta {
     opType: f.opType,
     label: f.label,
     valueText: f.valueText,
+    // The inline-editable primary dimension (H3). Carried as a PAIR — a value
+    // without its kind would render a degree as a millimetre.
+    primaryValue: f.primaryValue,
+    primaryValueKind: f.primaryValueKind,
     status: f.status,
     // Carry the worker failure reason through to the store so the HistoryList row
     // tooltips it (MODEL-HARDEN W0.5). `undefined` for any non-error feature.
@@ -88,6 +92,10 @@ export function projectionToStore(p: DocumentProjectionWire): DocumentProjection
     sketches,
     datums,
     features,
+    // The rollback cursor. A payload from a backend older than the field (or the
+    // mock lane's derived projection) means "everything is applied" — the
+    // permissive reading the legacy-draft hint already assumes when it is absent.
+    appliedOps: p.appliedOps ?? features.length,
   };
 }
 

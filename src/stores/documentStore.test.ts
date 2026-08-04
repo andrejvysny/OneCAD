@@ -67,6 +67,27 @@ afterEach(() => {
   vi.resetModules();
 });
 
+/*
+ * H3 — the rollback cursor an edit RESULT has to derive (results carry no cursor).
+ * The gate that reads it refuses to inline-edit a row at or past the bar, so both
+ * directions matter: a fresh commit must not look like a draft, and a genuinely
+ * rolled-back timeline must not silently become fully applied.
+ */
+describe("nextAppliedOps", () => {
+  it("a fully-applied timeline stays fully applied across an append or a delete", async () => {
+    const { nextAppliedOps } = await import("./documentStore");
+    expect(nextAppliedOps(5, 5, 6)).toBe(6); // commit a new op
+    expect(nextAppliedOps(5, 5, 4)).toBe(4); // delete one
+    expect(nextAppliedOps(0, 0, 1)).toBe(1); // first op in an empty document
+  });
+
+  it("a ROLLED-BACK timeline keeps its cursor, clamped into the new length", async () => {
+    const { nextAppliedOps } = await import("./documentStore");
+    expect(nextAppliedOps(2, 5, 6)).toBe(2);
+    expect(nextAppliedOps(2, 5, 1)).toBe(1); // clamped — never past the end
+  });
+});
+
 describe("documentStore seeding gate", () => {
   it("seeds the mock document when NOT under Tauri (browser / vitest)", async () => {
     delete (window as unknown as Record<string, unknown>)[TAURI];
@@ -100,6 +121,7 @@ describe("documentStore seeding gate", () => {
       sketches: {},
       datums: {},
       features: [],
+      appliedOps: 0,
     });
   });
 });

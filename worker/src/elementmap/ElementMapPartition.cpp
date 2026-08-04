@@ -114,6 +114,17 @@ std::string ElementMapPartition::topokey_for_shape(const TopoDS_Shape& body_shap
     return std::string(1, topokey_prefix(kind)) + ":" + std::to_string(idx);
 }
 
+std::string ElementMapPartition::topokey_for_element_in_body(const ElementMapPartition& partition,
+                                                             const std::string& element_id,
+                                                             const std::string& body_id) {
+    if (element_id.empty() || body_id.empty()) return "";
+    const PartitionEntry* entry = partition.find(element_id);
+    // A foreign entry is NOT an error here — the caller falls through to the
+    // descriptor ladder, which owns the bind-or-NeedsRepair decision.
+    if (entry == nullptr || entry->body_id != body_id) return "";
+    return entry->topo_key;
+}
+
 TopoDS_Shape ElementMapPartition::shape_for_topokey(const TopoDS_Shape& body_shape,
                                                     const std::string& topo_key) {
     char prefix = 0;

@@ -1562,6 +1562,24 @@ fn parse_sketch_id(s: &str) -> Result<SketchId, ApiError> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Worker crash circuit
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Clears the worker crash-circuit breaker (SCHEMA §8 poison / F3) and returns how
+/// many poison keys were forgotten.
+///
+/// A poison key is `(historyPrefixHash-through-op, opRecordId, occtFingerprint)`, so
+/// the ordinary fix — editing the crashing op's parameters — already mints a new key
+/// and heals the circuit by itself. This exists for what the key cannot see: an
+/// input file repaired outside the document, or a worker rebuilt in place without a
+/// fingerprint bump. No document needs to be open (the circuit belongs to the
+/// worker, not the document).
+#[tauri::command]
+pub async fn clear_worker_circuit(state: State<'_, AppState>) -> Result<usize, ApiError> {
+    Ok(state.circuit().clear_circuit())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Start screen + native dialogs (Rust-side; webview has zero fs/dialog cap)
 // ─────────────────────────────────────────────────────────────────────────────
 

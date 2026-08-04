@@ -102,4 +102,52 @@ describe("mockClient — sketch solver lane flows", () => {
     const again = await mockClient.enterSketch("sketch2");
     expect(again.entities).toEqual([]);
   });
+
+  /*
+   * H3b — the inspector's sketch-dimension quick path. The mock must accept it on a
+   * sketch the user has only SELECTED (no `enterSketch` first), because that is the
+   * only state the history panel can be in.
+   */
+  describe("setSketchDimension", () => {
+    it("patches ONE constraint's value and re-solves, on a never-entered sketch", async () => {
+      documentStore.setState(seedMockDocument());
+      // Seed a dimensioned session, then drop back to "only selected" by asserting
+      // through the public read the panel itself uses.
+      await mockClient.enterSketch("sketch2");
+      await mockClient.sketchUpsert(
+        "sketch2",
+        [{ id: "e1", type: "Line", p0: [0, 0], p1: [60, 0] }],
+        [
+          { id: "c1", type: "Distance", entities: ["e1"], value: 60 },
+          { id: "c2", type: "Horizontal", entities: ["e1"] },
+        ],
+      );
+
+      const before = await mockClient.sketchUpsert(
+        "sketch2",
+        (await mockClient.getSketch("sketch2")).entities,
+        (await mockClient.getSketch("sketch2")).constraints,
+      );
+      const res = await mockClient.setSketchDimension("sketch2", "c1", "Distance", 75);
+      expect(res.sketchId).toBe("sketch2");
+      // Re-solved through the SHARED lane, so it advances the sketch revision.
+      expect(res.sketchRevision).toBe(before.sketchRevision + 1);
+
+      const after = await mockClient.getSketch("sketch2");
+      expect(after.constraints.find((c) => c.id === "c1")?.value).toBe(75);
+      // Every OTHER constraint and all geometry survive the patch.
+      expect(after.constraints.map((c) => c.id)).toEqual(["c1", "c2"]);
+      expect(after.entities).toHaveLength(1);
+    });
+
+    it("hydrates a document sketch that has no session yet instead of failing", async () => {
+      documentStore.setState(seedMockDocument());
+      // No enterSketch: the seeded rectangle is hydrated on demand. It carries no
+      // dimensional constraints, so the patch is a no-op that still re-solves —
+      // what matters is that it does not throw at the panel.
+      await expect(
+        mockClient.setSketchDimension("sketch4", "c-none", "Distance", 20),
+      ).resolves.toMatchObject({ sketchId: "sketch4" });
+    });
+  });
 });

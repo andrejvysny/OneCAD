@@ -278,6 +278,7 @@ pub fn run() {
             api::query_mass_properties,
             api::preview_op,
             api::resolve_refs,
+            api::clear_worker_circuit,
             api::list_recents,
             api::open_file_dialog,
             api::step_file_dialog,

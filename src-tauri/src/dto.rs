@@ -107,7 +107,8 @@ pub enum FeatureStatus {
 
 /// One feature-timeline entry (`documentStore.ts` `FeatureMeta`; identical shape
 /// to `types.ts` `FeatureRecord` so a controller maps it 1:1).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+// Not `Eq`: `primary_value` is an `f64` (same reason as `DatumDto`/`DocumentProjection`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FeatureDto {
     pub id: String,
@@ -120,7 +121,28 @@ pub struct FeatureDto {
     pub op_type: String,
     pub label: String,
     /// Mono value shown on the right of the history chip (e.g. `"25.0 mm"`).
+    ///
+    /// MILLIMETRE-FIXED and always produced, whatever the frontend's display-unit
+    /// preference: three frontend consumers parse it back as mm to seed a re-edit
+    /// (`filletRadius.radiusFromValueText`, `shellThickness.thicknessFromValueText`,
+    /// `patternPreview.countFromValueText`). [`FeatureDto::primary_value`] is the
+    /// NUMBER a unit-aware editor renders; this stays the document-domain text.
     pub value_text: String,
+    /// The ONE dimension the history row edits in place (H3), in the **document
+    /// domain**: millimetres for a length/diameter, degrees for an angle.
+    ///
+    /// Additive and OPTIONAL: `None` for every feature with no single primary
+    /// dimension (Sketch / Boolean / Move / patterns / mirror / import / opaque),
+    /// which is exactly the set whose row stays read-only. Minted in the same
+    /// match as [`value_text`](FeatureDto::value_text) — see [`feature_value`] —
+    /// so the two can never drift.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_value: Option<f64>,
+    /// Domain tag for [`FeatureDto::primary_value`]: `"length"` | `"angle"` |
+    /// `"diameter"`. Drives the inline editor's suffix (unit-aware vs `°`) and the
+    /// `Ø` prefix a hole's row carries. Absent whenever `primary_value` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_value_kind: Option<String>,
     pub status: FeatureStatus,
     /// The worker failure reason for an errored step (`StepState::Error{reason}`),
     /// surfaced to the HistoryList row tooltip (Codex MAJOR-4). Absent for any
@@ -865,17 +887,80 @@ pub fn feature_kind(op: &Operation) -> FeatureKind {
     }
 }
 
+/// A feature chip's value: the mono `valueText` **and** the primary dimension
+/// behind it ([`FeatureDto::primary_value`]).
+///
+/// ONE type for both because they are minted by ONE match ([`feature_value`]): the
+/// history row renders the number through a unit-aware formatter while three
+/// frontend parsers still read the millimetre-fixed text, and a drift between them
+/// would show one value and edit another.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FeatureValue {
+    /// Mono value text (e.g. `"25.0 mm"` / `"360.0°"`). Empty ⇒ dimensionless.
+    pub text: String,
+    /// The primary editable dimension in the document domain (mm / degrees).
+    pub primary: Option<f64>,
+    /// `"length"` | `"angle"` | `"diameter"`; `Some` exactly when `primary` is.
+    pub primary_kind: Option<&'static str>,
+}
+
+impl FeatureValue {
+    /// A row that reads as text only — nothing on it is inline-editable.
+    fn text_only(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            primary: None,
+            primary_kind: None,
+        }
+    }
+
+    /// A row whose text is backed by one editable dimension of `kind`.
+    fn dimensioned(text: String, primary: f64, kind: &'static str) -> Self {
+        Self {
+            text,
+            primary: Some(primary),
+            primary_kind: Some(kind),
+        }
+    }
+}
+
 /// The mono value text for a feature chip (e.g. `"25.0 mm"` / `"360.0°"`). Empty
 /// for dimensionless features (sketch/boolean).
+///
+/// Thin projection of [`feature_value`] — kept as its own entry point because the
+/// text is a stable, millimetre-fixed contract with the frontend re-edit parsers.
 #[must_use]
 pub fn feature_value_text(op: &Operation) -> String {
+    feature_value(op).text
+}
+
+/// The value text + primary editable dimension for a feature chip.
+///
+/// Every arm decides BOTH at once, so a row can never display one number and edit
+/// another. `primary` is `None` for a feature with no single editable dimension
+/// (Boolean's operation, a placement's Δ, a pattern count, an import) — those rows
+/// stay read-only in the history panel.
+#[must_use]
+pub fn feature_value(op: &Operation) -> FeatureValue {
     let Operation::Known(k) = op else {
-        return String::new();
+        return FeatureValue::text_only("");
     };
     match k {
-        KnownOperation::Extrude(p) => format!("{:.1} mm", p.distance.value.abs()),
-        KnownOperation::Revolve(p) => format!("{:.1}°", p.angle_deg.value),
-        KnownOperation::Fillet(p) => format!("{:.1} mm", p.radius.value),
+        KnownOperation::Extrude(p) => FeatureValue::dimensioned(
+            format!("{:.1} mm", p.distance.value.abs()),
+            p.distance.value.abs(),
+            "length",
+        ),
+        KnownOperation::Revolve(p) => FeatureValue::dimensioned(
+            format!("{:.1}°", p.angle_deg.value),
+            p.angle_deg.value,
+            "angle",
+        ),
+        KnownOperation::Fillet(p) => FeatureValue::dimensioned(
+            format!("{:.1} mm", p.radius.value),
+            p.radius.value,
+            "length",
+        ),
         // A two-distance chamfer (SCHEMA §7.3, 2026-08-03) reads as `d1×d2`: the
         // row must not claim to be an equal-leg chamfer of `radius` when the
         // second leg is what makes the feature what it is. Absent ⇒ the plain
@@ -883,37 +968,56 @@ pub fn feature_value_text(op: &Operation) -> String {
         // `src/tools/preview/filletRadius.ts radiusFromValueText` parses the
         // LEADING number back for a re-edit seed, so d1 stays first (pinned both
         // sides); the second leg is seeded from the stored params, not from here.
-        KnownOperation::Chamfer(p) => match &p.distance2 {
-            Some(d2) => format!("{:.1}×{:.1} mm", p.radius.value, d2.value),
-            None => format!("{:.1} mm", p.radius.value),
-        },
-        KnownOperation::Shell(p) => format!("{:.1} mm", p.thickness.value),
+        // The inline editor targets d1 (`radius`) only — a second leg is a
+        // two-field edit that belongs in the Chamfer tool, not a one-number row.
+        KnownOperation::Chamfer(p) => FeatureValue::dimensioned(
+            match &p.distance2 {
+                Some(d2) => format!("{:.1}×{:.1} mm", p.radius.value, d2.value),
+                None => format!("{:.1} mm", p.radius.value),
+            },
+            p.radius.value,
+            "length",
+        ),
+        KnownOperation::Shell(p) => FeatureValue::dimensioned(
+            format!("{:.1} mm", p.thickness.value),
+            p.thickness.value,
+            "length",
+        ),
         // A hole's one identifying number is its DRILL diameter — the counterbore
         // /countersink dimensions dress it but never change what fastener it takes.
         // Diameter-prefixed (`Ø`) rather than " mm"-suffixed so the row cannot be
         // misread as a length; the unit is mm document-wide.
-        KnownOperation::Hole(p) => format!("Ø{:.1}", p.diameter.value),
+        KnownOperation::Hole(p) => FeatureValue::dimensioned(
+            format!("Ø{:.1}", p.diameter.value),
+            p.diameter.value,
+            "diameter",
+        ),
         // The operation IS a boolean row's one editable parameter — without it a
-        // re-edit op swap has no visible projection signal at all.
-        KnownOperation::Boolean(p) => format!("{:?}", p.operation),
+        // re-edit op swap has no visible projection signal at all. NOT a number,
+        // so the row carries no `primary` and its value stays read-only.
+        KnownOperation::Boolean(p) => FeatureValue::text_only(format!("{:?}", p.operation)),
         // A placement's one-line summary: the translation when there is one, else
         // the rotation angle, else "0.0 mm" for an identity (a legal no-op that
         // must still read as an editable value, not as a blank row).
+        //
+        // No `primary`: a placement is 3 translations + an axis-angle, and picking
+        // any ONE of them as "the" dimension would let a row edit dx while showing
+        // Δ(dx, dy, dz). The Move tool owns that edit.
         KnownOperation::TransformBody(p) => {
             let [dx, dy, dz] = [
                 p.translate[0].value,
                 p.translate[1].value,
                 p.translate[2].value,
             ];
-            if dx != 0.0 || dy != 0.0 || dz != 0.0 {
+            FeatureValue::text_only(if dx != 0.0 || dy != 0.0 || dz != 0.0 {
                 format!("Δ({dx:.1}, {dy:.1}, {dz:.1})")
             } else if p.angle_deg() != 0.0 {
                 format!("{:.1}°", p.angle_deg())
             } else {
                 "0.0 mm".to_string()
-            }
+            })
         }
-        _ => String::new(),
+        _ => FeatureValue::text_only(""),
     }
 }
 
@@ -1047,6 +1151,8 @@ mod tests {
                 kind: FeatureKind::Extrude,
                 label: "Extrude".into(),
                 value_text: "25.0 mm".into(),
+                primary_value: Some(25.0),
+                primary_value_kind: Some("length".into()),
                 status: FeatureStatus::Ok,
                 status_message: None,
                 suppressed: false,
@@ -1084,6 +1190,159 @@ mod tests {
         let op = extrude(25.0);
         assert_eq!(feature_kind(&op), FeatureKind::Extrude);
         assert_eq!(feature_value_text(&op), "25.0 mm");
+    }
+
+    /// H3 — every dimensioned op exposes the ONE number its history row edits, in
+    /// the DOCUMENT domain (mm for a length/diameter, DEGREES for an angle), and
+    /// its `value_text` is byte-identical to what it was before the field existed.
+    #[test]
+    fn primary_value_is_the_row_editable_dimension_per_op_type() {
+        use onecad_core::document::record::{
+            ChamferParams, FilletParams, RevolveParams, ShellParams,
+        };
+        use onecad_core::ids::ElementId;
+        use onecad_core::math::Vec3;
+
+        let check = |op: &Operation, text: &str, primary: Option<f64>, kind: Option<&str>| {
+            let v = feature_value(op);
+            assert_eq!(v.text, text, "value_text must not move");
+            assert_eq!(v.primary, primary);
+            assert_eq!(v.primary_kind, kind);
+            // `feature_value_text` stays a pure projection of the same match.
+            assert_eq!(feature_value_text(op), text);
+        };
+
+        // A NEGATIVE (reversed) extrude edits its MAGNITUDE — the row shows 25.0,
+        // and committing 25.0 back must not silently flip the direction.
+        check(&extrude(-25.0), "25.0 mm", Some(25.0), Some("length"));
+
+        let revolve = Operation::Known(KnownOperation::Revolve(RevolveParams {
+            profile: None,
+            axis: None,
+            angle_deg: Scalar::new(90.0),
+            boolean_mode: BooleanMode::NewBody,
+            target_body: None,
+            extra: Default::default(),
+        }));
+        check(&revolve, "90.0°", Some(90.0), Some("angle"));
+
+        let fillet = Operation::Known(KnownOperation::Fillet(FilletParams {
+            radius: Scalar::new(2.0),
+            edge_ids: vec![ElementId::new("e:14")],
+            edges: vec![],
+            chain_tangent_edges: true,
+            extra: Default::default(),
+        }));
+        check(&fillet, "2.0 mm", Some(2.0), Some("length"));
+
+        // An asymmetric chamfer still edits d1 — the text keeps BOTH legs.
+        let chamfer = Operation::Known(KnownOperation::Chamfer(ChamferParams {
+            radius: Scalar::new(1.0),
+            distance2: Some(Scalar::new(2.5)),
+            edge_ids: vec![ElementId::new("e:14")],
+            edges: vec![],
+            chain_tangent_edges: true,
+            extra: Default::default(),
+        }));
+        check(&chamfer, "1.0×2.5 mm", Some(1.0), Some("length"));
+
+        let shell = Operation::Known(KnownOperation::Shell(ShellParams {
+            thickness: Scalar::new(1.5),
+            open_faces: Vec::new(),
+            target_body: None,
+            extra: Default::default(),
+        }));
+        check(&shell, "1.5 mm", Some(1.5), Some("length"));
+
+        // Hole/Boolean/Sketch carry required identity refs, so they are built the
+        // way a document loads them — through serde, from the SCHEMA §7.3 shape.
+        let from_json = |v: serde_json::Value| -> Operation { serde_json::from_value(v).unwrap() };
+        let hole = from_json(serde_json::json!({
+            "opType": "Hole",
+            "params": {
+                "targetBodyId": "00000000-0000-0000-0000-000000000001",
+                "face": { "primary": { "bodyId": "00000000-0000-0000-0000-000000000001",
+                                       "elementId": "el_face_top", "kind": "face" } },
+                "point": [0.0, 0.0, 0.0],
+                "holeType": "simple",
+                "diameter": 6.0,
+                "depth": null
+            }
+        }));
+        check(&hole, "Ø6.0", Some(6.0), Some("diameter"));
+
+        // ── No single primary dimension ⇒ the row stays read-only ──────────────
+        let boolean = from_json(serde_json::json!({
+            "opType": "Boolean",
+            "params": {
+                "operation": "Cut",
+                "targetBodyId": "00000000-0000-0000-0000-000000000001",
+                "toolBodyId": "00000000-0000-0000-0000-000000000002"
+            }
+        }));
+        assert_eq!(feature_value(&boolean).text, "Cut");
+        assert_eq!(feature_value(&boolean).primary, None);
+        assert_eq!(feature_value(&boolean).primary_kind, None);
+
+        let sketch = from_json(serde_json::json!({
+            "opType": "Sketch",
+            "params": {
+                "sketchId": "00000000-0000-0000-0000-000000000003",
+                "plane": { "kind": "XY", "origin": [0.0, 0.0, 0.0], "xAxis": [1.0, 0.0, 0.0],
+                           "yAxis": [0.0, 1.0, 0.0], "normal": [0.0, 0.0, 1.0] }
+            }
+        }));
+        check(&sketch, "", None, None);
+
+        let pattern = Operation::Known(KnownOperation::LinearPattern(
+            onecad_core::document::record::LinearPatternParams {
+                source_body: None,
+                direction: Vec3::new(1.0, 0.0, 0.0).unwrap(),
+                spacing: Scalar::new(20.0),
+                count: 4,
+                fuse_result: true,
+                extra: Default::default(),
+            },
+        ));
+        check(&pattern, "", None, None);
+
+        // An opaque frozen node has no params the projection can read at all.
+        check(
+            &from_json(serde_json::json!({ "opType": "Wobble" })),
+            "",
+            None,
+            None,
+        );
+    }
+
+    /// The two new fields are ADDITIVE: omitted entirely when absent, so a payload
+    /// for a dimensionless feature is byte-identical to a pre-H3 one.
+    #[test]
+    fn primary_value_is_omitted_when_absent() {
+        let dimensionless = FeatureDto {
+            id: "f9".into(),
+            kind: FeatureKind::Boolean,
+            op_type: "Boolean".into(),
+            label: "Boolean".into(),
+            value_text: "Cut".into(),
+            primary_value: None,
+            primary_value_kind: None,
+            status: FeatureStatus::Ok,
+            status_message: None,
+            suppressed: false,
+        };
+        let v = serde_json::to_value(&dimensionless).unwrap();
+        assert!(v.get("primaryValue").is_none());
+        assert!(v.get("primaryValueKind").is_none());
+
+        let dimensioned = FeatureDto {
+            primary_value: Some(6.0),
+            primary_value_kind: Some("diameter".into()),
+            ..dimensionless
+        };
+        let v = serde_json::to_value(&dimensioned).unwrap();
+        assert_eq!(v["primaryValue"], 6.0);
+        assert_eq!(v["primaryValueKind"], "diameter");
     }
 
     /// A two-distance chamfer's row shows BOTH legs (SCHEMA §7.3, 2026-08-03);
@@ -1134,6 +1393,8 @@ mod tests {
             op_type: op_type_name(&lp),
             label: "Linear Pattern".into(),
             value_text: feature_value_text(&lp),
+            primary_value: None,
+            primary_value_kind: None,
             status: FeatureStatus::Ok,
             status_message: None,
             suppressed: false,
@@ -1228,6 +1489,8 @@ mod tests {
             kind: FeatureKind::Extrude,
             label: "Extrude".into(),
             value_text: "25.0 mm".into(),
+            primary_value: Some(25.0),
+            primary_value_kind: Some("length".into()),
             status: FeatureStatus::Ok,
             status_message: None,
             suppressed: false,

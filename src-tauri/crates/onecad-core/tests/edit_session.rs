@@ -618,11 +618,15 @@ fn regen_hint_and_dirty_range_table() {
         Some(DirtyRange::new(1, len - 1)),
         RegenHint::ToEnd,
     );
-    // SetRollback to 2 (backward from len): span [2, len), PreviewTo(2).
+    // SetRollback to 2 (backward from len): span [2, len), PreviewTo(1).
+    // DOMAIN SPLIT: the command's `cursor` is an applied-op COUNT, `PreviewTo` (and the
+    // `RegenRequest::ToStep` the scheduler maps it to) is a step INDEX — the last applied
+    // step of a 2-op prefix is index 1. Pinning the count here pinned the defect where
+    // every non-zero roll asked for a step past the applied end and published nothing.
     check(
         EditCommand::SetRollback { cursor: 2 },
         Some(DirtyRange::new(2, len)),
-        RegenHint::PreviewTo(2),
+        RegenHint::PreviewTo(1),
     );
     // SetVisibility body: metadata only.
     check(

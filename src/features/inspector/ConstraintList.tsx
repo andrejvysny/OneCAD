@@ -7,7 +7,9 @@ import { formatLength, formatUnitless, lengthSuffix } from "@/units/format";
 import type { LengthUnitId } from "@/units/lengthUnits";
 import type { SketchConstraint, SketchConstraintType, SketchEntity } from "@/ipc/types";
 
-/** Dimensional constraint kinds that carry a `value` column. */
+/** Dimensional constraint kinds that carry a `value` column. Exported as
+ *  {@link isDimensionalConstraint} for the inspector's sketch-dimension editor
+ *  (H3b), which must offer a field for exactly this set. */
 const DIMENSIONAL: ReadonlySet<SketchConstraintType> = new Set([
   "Distance",
   "HorizontalDistance",
@@ -16,6 +18,11 @@ const DIMENSIONAL: ReadonlySet<SketchConstraintType> = new Set([
   "Radius",
   "Diameter",
 ]);
+
+/** Whether a constraint carries an editable dimensional value. */
+export function isDimensionalConstraint(type: SketchConstraintType): boolean {
+  return DIMENSIONAL.has(type);
+}
 
 /** Compact entity reference summary: "e1, e2" (≤2) or "e1 +2" (more). */
 function entitySummary(entities: string[]): string {

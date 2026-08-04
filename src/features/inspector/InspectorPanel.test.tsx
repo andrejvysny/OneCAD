@@ -6,7 +6,7 @@ import { toolStore } from "@/stores/toolStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { documentStore } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
-import { mockClient } from "@/ipc/mockClient";
+import { getMockLatency, mockClient } from "@/ipc/mockClient";
 import { setModelToolController } from "@/tools/modelTools/modelToolBridge";
 import type { ModelToolController } from "@/tools/modelTools/ModelToolController";
 import { resetStores } from "@/test/resetStores";
@@ -45,7 +45,10 @@ describe("InspectorPanel", () => {
     expect(screen.getByText("Solid body")).toBeInTheDocument();
     expect(screen.getByText("Sketch 1")).toBeInTheDocument();
     expect(screen.getByText("Fillet")).toBeInTheDocument();
-    expect(screen.getByText("2.0 mm")).toBeInTheDocument();
+    // The row renders `primaryValue` through the DISPLAY formatter now (H3), which
+    // trims trailing zeros exactly as every other length in the app does — the
+    // backend's millimetre-fixed "2.0 mm" is still on `FeatureMeta.valueText`.
+    expect(screen.getByText("2 mm")).toBeInTheDocument();
     // A body is fully defined — no DOF line.
     expect(screen.queryByText("Under-constrained · DOF 3")).toBeNull();
   });
@@ -254,6 +257,167 @@ describe("InspectorPanel", () => {
       });
     } finally {
       apply.mockRestore();
+    }
+  });
+
+  /*
+   * H3 — the inline value editor on a past feature's history row. The gates are
+   * unit-tested in `featureValueEdit.test.ts`; these pin that the PANEL feeds them
+   * live store values (a `getState()` read would leave a field editable after the
+   * tool armed) and that a commit reaches the backend as one params patch.
+   */
+  async function timelineForInlineEdit(): Promise<void> {
+    // Drain first, for LONGER than one mock command latency: a previous test's
+    // edit command resolves on a timer and hydrates the store from ITS timeline,
+    // which would otherwise land on top of this fixture mid-assertion (a real,
+    // reproducible cross-test clobber).
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, getMockLatency() + 60));
+    });
+    documentStore.setState({
+      appliedOps: 2,
+      features: [
+        { id: "f-a", kind: "extrude", opType: "Extrude", label: "Extrude", valueText: "5.0 mm", primaryValue: 5, primaryValueKind: "length", status: "ok" },
+        { id: "f-b", kind: "fillet", opType: "Fillet", label: "Fillet", valueText: "1.0 mm", primaryValue: 1, primaryValueKind: "length", status: "ok" },
+        // Beyond the rollback bar (appliedOps = 2) ⇒ read-only.
+        { id: "f-c", kind: "extrude", opType: "Extrude", label: "Extrude", valueText: "9.0 mm", primaryValue: 9, primaryValueKind: "length", status: "dirty" },
+      ],
+    });
+  }
+
+  it("commits an inline value edit as ONE params patch on the stored op", async () => {
+    await timelineForInlineEdit();
+    const params = vi
+      .spyOn(mockClient, "getOperationParams")
+      .mockResolvedValue({ distance: { value: 5 }, profile: { sketchId: "s1", regionId: "r0" } });
+    // Stubbed rather than called through: the real mock command resolves on a TIMER
+    // and hydrates the store from ITS OWN timeline, which under parallel load lands
+    // inside a later test and replaces that test's fixture (a real flake, seen).
+    const apply = vi.spyOn(mockClient, "applyEditCommand").mockResolvedValue({
+      revision: 99,
+      changedBodies: [],
+      removedBodies: [],
+      features: documentStore.getState().features.map((f) =>
+        f.id === "f-a" ? { ...f, valueText: "30.0 mm", primaryValue: 30 } : f,
+      ) as never,
+    });
+    try {
+      render(<InspectorPanel />);
+      act(() => selectionStore.getState().set([{ kind: "feature", id: "f-a" }]));
+
+      fireEvent.click(screen.getByTestId("history-value-f-a"));
+      // The field opens one double-click threshold later (HistoryList keeps the
+      // row's dblclick re-edit alive), so await it rather than reading it back.
+      const input = await screen.findByLabelText("Dimension value");
+      await act(async () => {
+        fireEvent.change(input, { target: { value: "30" } });
+        fireEvent.keyDown(input, { key: "Enter" });
+      });
+      // The commit is fire-and-forget from the row, so wait for it to LAND rather
+      // than assume one microtask flush drained both round-trips.
+      await vi.waitFor(() => expect(apply).toHaveBeenCalled());
+      await vi.waitFor(() =>
+        expect(documentStore.getState().features.find((f) => f.id === "f-a")?.primaryValue).toBe(30),
+      );
+
+      expect(apply.mock.calls[0][0]).toEqual({
+        cmd: "updateOperationParams",
+        record: "f-a",
+        // The profile survives the patch — only `distance` moved.
+        op: { opType: "Extrude", params: { distance: { value: 30 }, profile: { sketchId: "s1", regionId: "r0" } } },
+      });
+    } finally {
+      params.mockRestore();
+      apply.mockRestore();
+    }
+  });
+
+  it("GUARD — arming a model tool turns every row's value read-only, live", async () => {
+    await timelineForInlineEdit();
+    render(<InspectorPanel />);
+    act(() => selectionStore.getState().set([{ kind: "feature", id: "f-a" }]));
+    fireEvent.click(screen.getByTestId("history-value-f-a"));
+    expect(await screen.findByLabelText("Dimension value")).toBeInTheDocument();
+
+    // Arm Extrude WITHOUT re-selecting: the panel must re-render off the store.
+    act(() => toolStore.getState().setTool("extrude"));
+    expect(screen.queryByLabelText("Dimension value")).toBeNull();
+    fireEvent.click(screen.getByTestId("history-value-f-a"));
+    await new Promise((r) => setTimeout(r, 300));
+    expect(screen.queryByLabelText("Dimension value")).toBeNull();
+  });
+
+  it("GUARD — a row past the rollback cursor is read-only", async () => {
+    await timelineForInlineEdit();
+    render(<InspectorPanel />);
+    act(() => selectionStore.getState().set([{ kind: "feature", id: "f-a" }]));
+    fireEvent.click(screen.getByTestId("history-value-f-c"));
+    await new Promise((r) => setTimeout(r, 300));
+    expect(screen.queryByLabelText("Dimension value")).toBeNull();
+  });
+
+  it("GUARD — a suppressed row is read-only but still SHOWS its value", async () => {
+    await timelineForInlineEdit();
+    documentStore.setState({
+      features: documentStore
+        .getState()
+        .features.map((f) => (f.id === "f-b" ? { ...f, suppressed: true } : f)),
+    });
+    render(<InspectorPanel />);
+    act(() => selectionStore.getState().set([{ kind: "feature", id: "f-a" }]));
+    expect(screen.getByTestId("history-value-f-b")).toHaveTextContent("1 mm");
+    fireEvent.click(screen.getByTestId("history-value-f-b"));
+    await new Promise((r) => setTimeout(r, 300));
+    expect(screen.queryByLabelText("Dimension value")).toBeNull();
+  });
+
+  /*
+   * H3b — a SKETCH feature has no single primary dimension, so it gets a
+   * "Dimensions" section instead: every dimensional constraint, editable, committed
+   * through `setSketchDimension` (which the backend turns into a downstream regen).
+   */
+  it("lists a selected sketch feature's dimensions and commits an edit", async () => {
+    documentStore.setState({
+      appliedOps: 1,
+      features: [
+        { id: "f-s", kind: "sketch", opType: "Sketch", label: "Sketch 1", valueText: "", status: "ok" },
+      ],
+    });
+    const params = vi
+      .spyOn(mockClient, "getOperationParams")
+      .mockResolvedValue({ sketchId: "sketch2" });
+    const getSketch = vi.spyOn(mockClient, "getSketch").mockResolvedValue(
+      sessionWithConstraints([
+        { id: "c1", type: "Distance", entities: ["l1"], value: 60 },
+        // Non-dimensional constraints have no value to offer — filtered out.
+        { id: "c2", type: "Horizontal", entities: ["l1"] },
+      ]),
+    );
+    const setDim = vi
+      .spyOn(mockClient, "setSketchDimension")
+      .mockResolvedValue({ sketchId: "sketch2", sketchRevision: 2, dof: 2, status: "UnderConstrained" });
+    try {
+      render(<InspectorPanel />);
+      act(() => selectionStore.getState().set([{ kind: "feature", id: "f-s" }]));
+
+      // The section loads over TWO round-trips (params → sketch), so await the
+      // rendered result rather than a fixed number of microtask flushes.
+      expect(await screen.findByText("Dimensions")).toBeInTheDocument();
+      expect(await screen.findByTestId("sketch-dimension-c1")).toBeInTheDocument();
+      expect(screen.queryByTestId("sketch-dimension-c2")).toBeNull();
+
+      const input = screen.getByLabelText("Dimension value");
+      await act(async () => {
+        fireEvent.change(input, { target: { value: "75" } });
+        fireEvent.keyDown(input, { key: "Enter" });
+      });
+      // The TYPE rides along: it is what decides the wire domain (deg→rad for an
+      // Angle) inside the tauri client's `toWireDimensionValue` call.
+      expect(setDim).toHaveBeenCalledWith("sketch2", "c1", "Distance", 75);
+    } finally {
+      params.mockRestore();
+      getSketch.mockRestore();
+      setDim.mockRestore();
     }
   });
 

@@ -32,8 +32,10 @@ import type {
   ResolveCandidate,
   ResolveRefRequest,
   ResolveRefResult,
+  SketchConstraintType,
   SketchEntity,
   SketchSession,
+  SketchUpsertResult,
   TransformBodyParams,
   Unsubscribe,
   WorkerStatus,
@@ -188,11 +190,20 @@ export function emitMockNeedsRepair(event: NeedsRepairEvent): void {
 /** Base timeline — MUST mirror documentStore.seedMockDocument().features. */
 const MOCK_BASE_FEATURES: FeatureRecord[] = [
   { id: "f1", kind: "sketch", opType: "Sketch", label: "Sketch 1", valueText: "", status: "ok" },
-  { id: "f2", kind: "extrude", opType: "Extrude", label: "Extrude", valueText: "83.3 mm", status: "ok" },
-  { id: "f3", kind: "fillet", opType: "Fillet", label: "Fillet", valueText: "2.0 mm", status: "ok" },
+  { id: "f2", kind: "extrude", opType: "Extrude", label: "Extrude", valueText: "83.3 mm", primaryValue: 83.3, primaryValueKind: "length", status: "ok" },
+  { id: "f3", kind: "fillet", opType: "Fillet", label: "Fillet", valueText: "2.0 mm", primaryValue: 2, primaryValueKind: "length", status: "ok" },
   { id: "f4", kind: "sketch", opType: "Sketch", label: "Sketch 2", valueText: "", status: "ok" },
-  { id: "f5", kind: "extrude", opType: "Extrude", label: "Extrude", valueText: "12.0 mm", status: "ok" },
+  { id: "f5", kind: "extrude", opType: "Extrude", label: "Extrude", valueText: "12.0 mm", primaryValue: 12, primaryValueKind: "length", status: "ok" },
 ];
+
+/** The `{primaryValue, primaryValueKind}` pair for a feature row — mirrors the
+ *  Rust `dto.rs feature_value` arms, which are what the real lane projects. */
+function primary(
+  value: number,
+  kind: "length" | "angle" | "diameter" = "length",
+): Pick<FeatureRecord, "primaryValue" | "primaryValueKind"> {
+  return { primaryValue: value, primaryValueKind: kind };
+}
 
 const cloneFeature = (f: FeatureRecord): FeatureRecord => ({ ...f });
 
@@ -570,7 +581,7 @@ function mutateOp(op: OperationOp): {
       const featureId = op.featureId ?? nextFeatureId();
       const label = `Extrude${booleanSuffix(booleanMode)}`;
       const valueText = `${Math.abs(distance).toFixed(1)} mm`;
-      mockFeatures = [...mockFeatures, { id: featureId, kind: "extrude", opType: "Extrude", label, valueText, status: "ok" }];
+      mockFeatures = [...mockFeatures, { id: featureId, kind: "extrude", opType: "Extrude", label, valueText, ...primary(Math.abs(distance)), status: "ok" }];
       return { changed: [target], removed: [], label, featureId };
     }
     const editing = op.featureId !== undefined && featureBodies.has(op.featureId);
@@ -580,9 +591,9 @@ function mutateOp(op: OperationOp): {
     featureBodies.set(featureId, bodyId);
     const valueText = `${Math.abs(distance).toFixed(1)} mm`;
     if (editing) {
-      mockFeatures = mockFeatures.map((f) => (f.id === featureId ? { ...f, valueText } : f));
+      mockFeatures = mockFeatures.map((f) => (f.id === featureId ? { ...f, valueText, ...primary(Math.abs(distance)) } : f));
     } else {
-      mockFeatures = [...mockFeatures, { id: featureId, kind: "extrude", opType: "Extrude", label: "Extrude", valueText, status: "ok" }];
+      mockFeatures = [...mockFeatures, { id: featureId, kind: "extrude", opType: "Extrude", label: "Extrude", valueText, ...primary(Math.abs(distance)), status: "ok" }];
     }
     return { changed: [bodyId], removed: [], label: "Extrude", featureId };
   }
@@ -606,7 +617,7 @@ function mutateOp(op: OperationOp): {
       const featureId = op.featureId ?? nextFeatureId();
       const label = `Revolve${booleanSuffix(booleanMode)}`;
       const valueText = `${Math.round(Math.abs(angle))}°`;
-      mockFeatures = [...mockFeatures, { id: featureId, kind: "revolve", opType: "Revolve", label, valueText, status: "ok" }];
+      mockFeatures = [...mockFeatures, { id: featureId, kind: "revolve", opType: "Revolve", label, valueText, ...primary(angle, "angle"), status: "ok" }];
       return { changed: [target], removed: [], label, featureId };
     }
     const editing = op.featureId !== undefined && featureBodies.has(op.featureId);
@@ -616,9 +627,9 @@ function mutateOp(op: OperationOp): {
     featureBodies.set(featureId, bodyId);
     const valueText = `${Math.round(Math.abs(angle))}°`;
     if (editing) {
-      mockFeatures = mockFeatures.map((f) => (f.id === featureId ? { ...f, valueText } : f));
+      mockFeatures = mockFeatures.map((f) => (f.id === featureId ? { ...f, valueText, ...primary(angle, "angle") } : f));
     } else {
-      mockFeatures = [...mockFeatures, { id: featureId, kind: "revolve", opType: "Revolve", label: "Revolve", valueText, status: "ok" }];
+      mockFeatures = [...mockFeatures, { id: featureId, kind: "revolve", opType: "Revolve", label: "Revolve", valueText, ...primary(angle, "angle"), status: "ok" }];
     }
     return { changed: [bodyId], removed: [], label: "Revolve", featureId };
   }
@@ -632,9 +643,9 @@ function mutateOp(op: OperationOp): {
     const valueText = edgeOpValueText(op.params.radius, op.params.distance2);
     const editing = op.featureId !== undefined && mockFeatures.some((f) => f.id === featureId);
     if (editing) {
-      mockFeatures = mockFeatures.map((f) => (f.id === featureId ? { ...f, valueText } : f));
+      mockFeatures = mockFeatures.map((f) => (f.id === featureId ? { ...f, valueText, ...primary(op.params.radius) } : f));
     } else {
-      mockFeatures = [...mockFeatures, { id: featureId, kind: "fillet", opType: op.opType, label, valueText, status: "ok" }];
+      mockFeatures = [...mockFeatures, { id: featureId, kind: "fillet", opType: op.opType, label, valueText, ...primary(op.params.radius), status: "ok" }];
     }
     return { changed: [bodyId], removed: [], label, featureId };
   }
@@ -646,13 +657,13 @@ function mutateOp(op: OperationOp): {
     const valueText = `${op.params.thickness.toFixed(1)} mm`;
     const editing = op.featureId !== undefined && mockFeatures.some((f) => f.id === featureId);
     if (editing) {
-      mockFeatures = mockFeatures.map((f) => (f.id === featureId ? { ...f, valueText } : f));
+      mockFeatures = mockFeatures.map((f) => (f.id === featureId ? { ...f, valueText, ...primary(op.params.thickness) } : f));
     } else {
       // `kind` mirrors the REAL projection bucket (`dto.rs feature_kind` folds
       // Shell → fillet and the pattern/mirror ops → boolean); `opType` carries the
       // authored identity every re-edit routes on. Emitting the invented kinds the
       // mock used to emit made the mock lane green while the Tauri lane was dead.
-      mockFeatures = [...mockFeatures, { id: featureId, kind: "fillet", opType: "Shell", label: "Shell", valueText, status: "ok" }];
+      mockFeatures = [...mockFeatures, { id: featureId, kind: "fillet", opType: "Shell", label: "Shell", valueText, ...primary(op.params.thickness), status: "ok" }];
     }
     return { changed: [bodyId], removed: [], label: "Shell", featureId };
   }
@@ -671,12 +682,12 @@ function mutateOp(op: OperationOp): {
     const valueText = holeValueText(op.params.diameter);
     const editing = op.featureId !== undefined && mockFeatures.some((f) => f.id === featureId);
     if (editing) {
-      mockFeatures = mockFeatures.map((f) => (f.id === featureId ? { ...f, valueText } : f));
+      mockFeatures = mockFeatures.map((f) => (f.id === featureId ? { ...f, valueText, ...primary(op.params.diameter, "diameter") } : f));
     } else {
       // `kind: "boolean"` mirrors the REAL projection bucket — `dto.rs feature_kind`
       // buckets Hole with the body-modifier family, not with Fillet's dress-up
       // bucket. `opType` carries the authored identity the re-edit routes on.
-      mockFeatures = [...mockFeatures, { id: featureId, kind: "boolean", opType: "Hole", label: "Hole", valueText, status: "ok" }];
+      mockFeatures = [...mockFeatures, { id: featureId, kind: "boolean", opType: "Hole", label: "Hole", valueText, ...primary(op.params.diameter, "diameter"), status: "ok" }];
     }
     return { changed: [bodyId], removed: [], label: "Hole", featureId };
   }
@@ -967,36 +978,67 @@ function edgeOpValueText(radius: number, distance2?: number): string {
     : `${radius.toFixed(1)}×${distance2.toFixed(1)} mm`;
 }
 
-/** The feature-chip value text for a re-edited op's wire params (mirrors mutateOp). */
-function valueTextForFeature(
+/**
+ * The feature-chip value (text + inline-editable primary dimension) for a re-edited
+ * op's wire params — the mock's mirror of Rust `dto.rs feature_value`, which likewise
+ * decides both in ONE place so a row cannot show one number and edit another.
+ *
+ * Routed on the AUTHORED `opType`, not the coarse `kind` bucket: `kind: "boolean"`
+ * holds Hole alongside Boolean/patterns/Move, and `kind: "fillet"` holds Shell —
+ * neither can tell which params key carries the dimension.
+ *
+ * `undefined` fields mean "this op has nothing of that sort to update".
+ */
+function featureValueForParams(
+  opType: string | undefined,
   kind: FeatureRecord["kind"],
   params: Record<string, unknown>,
-): string | undefined {
-  switch (kind) {
+): Partial<Pick<FeatureRecord, "valueText" | "primaryValue" | "primaryValueKind">> {
+  const none = { valueText: undefined, primaryValue: undefined, primaryValueKind: undefined };
+  const dimensioned = (
+    valueText: string,
+    value: number,
+    primaryValueKind: FeatureRecord["primaryValueKind"] = "length",
+  ) => ({ valueText, primaryValue: value, primaryValueKind });
+  switch (opType ?? kind) {
+    case "Extrude":
     case "extrude": {
       const d = scalarValue(params.distance);
-      return d === undefined ? undefined : `${Math.abs(d).toFixed(1)} mm`;
+      return d === undefined ? none : dimensioned(`${Math.abs(d).toFixed(1)} mm`, Math.abs(d));
     }
+    case "Revolve":
     case "revolve": {
       const a = scalarValue(params.angleDeg);
-      return a === undefined ? undefined : `${Math.round(Math.abs(a))}°`;
+      return a === undefined ? none : dimensioned(`${Math.round(Math.abs(a))}°`, a, "angle");
     }
+    case "Fillet":
+    case "Chamfer":
     case "fillet": {
       const r = scalarValue(params.radius);
       // `distance2` is Chamfer-only and skip-none on both sides, so its mere
-      // presence is what makes the row asymmetric — the coarse `kind` bucket
-      // (which also holds Fillet and Shell) never has to be consulted.
-      return r === undefined ? undefined : edgeOpValueText(r, scalarValue(params.distance2));
+      // presence is what makes the row asymmetric. The inline editor still targets
+      // d1 (`radius`) alone, exactly as `dto.rs` does.
+      return r === undefined ? none : dimensioned(edgeOpValueText(r, scalarValue(params.distance2)), r);
     }
+    case "Shell":
     case "shell": {
       const t = scalarValue(params.thickness);
-      return t === undefined ? undefined : `${t.toFixed(1)} mm`;
+      return t === undefined ? none : dimensioned(`${t.toFixed(1)} mm`, t);
     }
+    case "Hole": {
+      const d = scalarValue(params.diameter);
+      return d === undefined ? none : dimensioned(holeValueText(d), d, "diameter");
+    }
+    case "LinearPattern":
+    case "CircularPattern":
     case "linearPattern":
     case "circularPattern":
-      return typeof params.count === "number" ? `×${params.count}` : undefined;
+      // A count is not a dimension — the row shows it and stays read-only.
+      return typeof params.count === "number"
+        ? { ...none, valueText: `×${params.count}` }
+        : none;
     default:
-      return undefined;
+      return none;
   }
 }
 
@@ -1100,10 +1142,14 @@ async function mockApplyEditCommand(command: WireEditCommand): Promise<ApplyOper
         // come straight back, and the mock would report an asymmetric chamfer the
         // backend no longer holds.
         featureParams.set(command.record, { ...params });
-        const valueText = valueTextForFeature(feat.kind, params);
+        const { valueText, primaryValue, primaryValueKind } = featureValueForParams(
+          nextOpType,
+          feat.kind,
+          params,
+        );
         // A Boolean re-edit swaps ONLY the operation, and a boolean carries no
-        // dimension (`valueTextForFeature` returns undefined, matching dto.rs
-        // `feature_value_text`) — but the mock LABELS a boolean row by its
+        // dimension (`featureValueForParams` returns nothing, matching dto.rs
+        // `feature_value`) — but the mock LABELS a boolean row by its
         // operation (mutateOp), so the label is what has to follow the swap.
         // A sanctioned Fillet⇄Chamfer swap labels by the new `opType`, matching how
         // `mutateOp` stamps a freshly authored edge op.
@@ -1119,7 +1165,7 @@ async function mockApplyEditCommand(command: WireEditCommand): Promise<ApplyOper
             f.id === command.record
               ? {
                   ...f,
-                  ...(valueText !== undefined ? { valueText } : {}),
+                  ...(valueText !== undefined ? { valueText, primaryValue, primaryValueKind } : {}),
                   ...(label !== undefined ? { label } : {}),
                   ...(opType !== undefined ? { opType } : {}),
                 }
@@ -1129,6 +1175,18 @@ async function mockApplyEditCommand(command: WireEditCommand): Promise<ApplyOper
       }
       mockRevision += 1;
       const bodyId = featureBodies.get(command.record);
+      // Re-synthesize the geometry an EXTRUDE's params describe, so a params-only
+      // re-edit (the history row's inline depth edit) actually changes the mesh
+      // instead of re-emitting the old one. Deliberately extrude-only: it is the
+      // one op whose mock mesh is a pure function of its params + profile — Fillet
+      // /Shell/Hole have no mock geometry to recompute (documented MOCK LIMIT), and
+      // faking one would be a second, worse CSG living in the mock.
+      const profile = params.profile as { sketchId?: string; regionId?: string } | undefined;
+      const distance = scalarValue(params.distance);
+      if (bodyId && feat?.opType === "Extrude" && profile?.sketchId && distance !== undefined) {
+        const resolved = lane.resolveExtrudeInput(profile.sketchId, profile.regionId);
+        syntheticBodies.set(bodyId, makeExtrudeBodyMesh(resolved.profile, resolved.plane, distance));
+      }
       const changedBodies = bodyId ? [bodyRef(bodyId)] : [];
       const res: ApplyOperationResult = {
         revision: mockRevision,
@@ -1275,6 +1333,31 @@ async function enterSketchWithHydration(target: EnterSketchTarget): Promise<Sket
     mockAttachSketchToDatum(session.sketchId, target.newOnDatum.datumId);
   }
   return session;
+}
+
+/**
+ * H3b — set ONE dimensional constraint's value without an edit session.
+ *
+ * Routed through the SHARED lane's `sketchUpsert` (the only writer of a lane
+ * session) rather than mutating the session behind its back, so the re-solve, the
+ * dof/status and the sketch revision all come from the same place the drawing tools
+ * get them. A sketch the user has only selected has no lane session yet, so it is
+ * hydrated first exactly as `enterSketchWithHydration` does.
+ *
+ * `type` is unused here: the mock IS the document, so it stores the UI-domain value
+ * verbatim. The deg→rad conversion is a WIRE concern and lives in the tauri client.
+ */
+async function mockSetSketchDimension(
+  sketchId: string,
+  constraintId: string,
+  _type: SketchConstraintType,
+  value: number,
+): Promise<SketchUpsertResult> {
+  const session = lane.peekSession(sketchId) ?? (await enterSketchWithHydration(sketchId));
+  const constraints = session.constraints.map((c) =>
+    c.id === constraintId ? { ...c, value } : c,
+  );
+  return lane.sketchUpsert(sketchId, session.entities, constraints);
 }
 
 /** Test seam: forget all sketch state so a fresh sketch starts empty. */
@@ -1675,6 +1758,7 @@ export const mockClient: CadClient = {
 
   enterSketch: enterSketchWithHydration,
   sketchUpsert: lane.sketchUpsert,
+  setSketchDimension: mockSetSketchDimension,
   finishSketch: lane.finishSketch,
   // Pure read for the always-visible sketch layer (no session opened). A live lane
   // session wins; else a persisted document sketch returns the deterministic seeded

@@ -13,11 +13,15 @@
 //!   flap) both count toward one strike budget (`max_rapid_deaths`); exhausting it
 //!   ⇒ [`WorkerState::Failed`] (F2). A death after a healthy period resets it;
 //! * **poison / circuit breaker** — a plan that crashes the worker on the same
-//!   `(historyPrefixHash, crashing-op, fingerprint)` key `poison_threshold` times
-//!   opens that plan-key's circuit: it then **fails fast without dispatch** (so it
-//!   stops killing the worker) but the worker stays alive/restarting so **other
-//!   plans still run** (F3). The circuit never sets [`WorkerState::Failed`] — only
-//!   the F2 flap budget does.
+//!   `(historyPrefixHash-through-the-crashing-op, crashing-op, fingerprint)` key
+//!   `poison_threshold` times opens that key's circuit: it then **fails fast without
+//!   dispatch** (so it stops killing the worker) but the worker stays
+//!   alive/restarting so **other plans still run** (F3). The circuit never sets
+//!   [`WorkerState::Failed`] — only the F2 flap budget does. Because the hash runs
+//!   *through* the op's own params, editing them mints a new key and heals the
+//!   circuit; see [`plan_op_keys`]. The entry map is bounded (fingerprint prune +
+//!   LRU cap) and can be cleared wholesale via
+//!   [`clear_circuit`](WorkerManager::clear_circuit).
 //!
 //! It implements [`GeometryEngine`] + [`MeshProvider`] by translating core types
 //! to the OCW1 wire via [`wire`](super::wire) over the current
@@ -153,11 +157,31 @@ struct Shared {
     restart_hook: RwLock<Option<RestartHook>>,
 }
 
+/// Cap on live poison entries. The map is per-Rust-process and unbounded by
+/// nature (every distinct `(prefix hash, op, fingerprint)` a session ever crashes
+/// on mints one), so it is bounded here by last-touch eviction. 128 is far above
+/// any realistic count of *simultaneously* poisoned ops — an evicted key simply
+/// starts counting from zero if it ever crashes again, which is the same position
+/// a fresh process would be in.
+const POISON_MAX_ENTRIES: usize = 128;
+
 /// Crash-circuit state (poison detection).
+///
+/// Bounded on two axes so a long-lived process cannot accumulate dead keys:
+/// * **fingerprint** — [`Poison::prune_to_fingerprint`] drops every entry not keyed
+///   under the worker's current OCCT fingerprint when it reconnects with a
+///   different one. The fingerprint is part of the key, so those entries are
+///   unreachable by construction; dropping them loses nothing.
+/// * **capacity** — [`POISON_MAX_ENTRIES`], least-recently-touched first.
 #[derive(Default)]
 struct Poison {
     entries: HashMap<String, PoisonEntry>,
     open: HashSet<String>,
+    /// The OCCT fingerprint the live entries were keyed under ("" until the first
+    /// handshake).
+    fingerprint: String,
+    /// Monotonic touch counter driving the LRU eviction order.
+    clock: u64,
 }
 
 /// What is known about one poison key: how many consecutive same-key crashes, and
@@ -167,6 +191,40 @@ struct Poison {
 struct PoisonEntry {
     count: u32,
     last_message: String,
+    /// `Poison::clock` at the last crash on this key (LRU eviction order).
+    touched: u64,
+}
+
+impl Poison {
+    /// Drops least-recently-touched entries until at most [`POISON_MAX_ENTRIES`]
+    /// remain, taking each evicted key out of `open` alongside (an entry that is
+    /// gone must not leave a fail-fast flag behind with no diagnosable message).
+    fn evict_over_cap(&mut self) {
+        while self.entries.len() > POISON_MAX_ENTRIES {
+            let victim = self
+                .entries
+                .iter()
+                .min_by(|a, b| a.1.touched.cmp(&b.1.touched).then_with(|| a.0.cmp(b.0)))
+                .map(|(k, _)| k.clone());
+            let Some(victim) = victim else { break };
+            self.entries.remove(&victim);
+            self.open.remove(&victim);
+        }
+    }
+
+    /// Re-keys to `fingerprint`, dropping every entry that does not carry it.
+    /// Returns how many were dropped. No-op for an empty or unchanged fingerprint.
+    fn prune_to_fingerprint(&mut self, fingerprint: &str) -> usize {
+        if fingerprint.is_empty() || self.fingerprint == fingerprint {
+            return 0;
+        }
+        self.fingerprint = fingerprint.to_string();
+        let suffix = format!("|{fingerprint}");
+        let before = self.entries.len();
+        self.entries.retain(|k, _| k.ends_with(&suffix));
+        self.open.retain(|k| k.ends_with(&suffix));
+        before - self.entries.len()
+    }
 }
 
 impl Shared {
@@ -218,19 +276,56 @@ impl Shared {
     /// opened.
     fn record_crash(&self, key: &str, message: &str) -> bool {
         let mut p = self.poison.lock().unwrap();
+        p.clock += 1;
+        let clock = p.clock;
         let entry = p.entries.entry(key.to_string()).or_default();
         entry.last_message = message.to_string();
+        entry.touched = clock;
         if p.open.contains(key) {
+            p.evict_over_cap();
             return false;
         }
         let entry = p.entries.get_mut(key).expect("just inserted");
         entry.count += 1;
-        if entry.count >= self.config.poison_threshold {
+        let opened = entry.count >= self.config.poison_threshold;
+        if opened {
             p.open.insert(key.to_string());
-            true
-        } else {
-            false
         }
+        // The key just touched is the most recent, so it is never its own victim.
+        p.evict_over_cap();
+        opened
+    }
+
+    /// Re-keys the crash circuit to the worker's current OCCT fingerprint (called on
+    /// every successful handshake). Entries minted under a previous fingerprint can
+    /// never be hit again — the fingerprint is part of the key — so a rebuilt or
+    /// upgraded worker drops them instead of leaking them for the process lifetime.
+    fn note_fingerprint(&self, fingerprint: &str) {
+        let dropped = self
+            .poison
+            .lock()
+            .unwrap()
+            .prune_to_fingerprint(fingerprint);
+        if dropped > 0 {
+            tracing::info!(
+                fingerprint = %fingerprint,
+                dropped,
+                "worker fingerprint changed — stale crash-circuit entries pruned"
+            );
+        }
+    }
+
+    /// Forgets every crash count and closes every open circuit; returns how many
+    /// keys were forgotten. The operator escape hatch behind `clear_worker_circuit`:
+    /// a user asking for this has changed something the key cannot see (a rebuilt
+    /// worker, a repaired input file), so it is deliberately total rather than
+    /// per-key.
+    fn clear_circuit(&self) -> usize {
+        let mut p = self.poison.lock().unwrap();
+        let cleared = p.entries.len();
+        p.entries.clear();
+        p.open.clear();
+        cleared
     }
 
     /// Clears the crash count + open flag for every one of a plan's candidate op
@@ -319,6 +414,12 @@ impl WorkerManager {
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<WorkerLifecycle> {
         self.shared.lifecycle.subscribe()
+    }
+
+    /// Forgets every crash count and closes every open poison circuit; returns how
+    /// many keys were forgotten. See [`Shared::clear_circuit`].
+    pub fn clear_circuit(&self) -> usize {
+        self.shared.clear_circuit()
     }
 
     /// Sets the restart hook (mark-dirty + replay). Replaces any prior hook.
@@ -452,6 +553,10 @@ async fn supervise(shared: Arc<Shared>) {
             Ok((child, client)) => {
                 *shared.conn.write().unwrap() = Some(client.clone());
                 *shared.hello.lock().unwrap() = Some(client.hello().clone());
+                // A different OCCT build re-keys every poison entry; drop the
+                // unreachable ones now rather than carrying them for the process
+                // lifetime (memory bound).
+                shared.note_fingerprint(&client.hello().occt.fingerprint);
                 if shared.config.auto_open_session {
                     let _ = auto_open_session(&shared, &client).await;
                 }
@@ -1005,10 +1110,30 @@ impl SolverEngine for WorkerManager {
 /// (SCHEMA §8 / F3).
 async fn stream_plan(shared: Arc<Shared>, request: PlanRequest, tx: mpsc::Sender<PlanEvent>) {
     let job = request.job_id;
-    // One candidate poison key per op (`base | opRecordId | fingerprint`); the
-    // crashing op is one of them, so a poisoned plan is caught up front (F3).
+    // The planner keeps `prefix_hashes` index-aligned with `ops`
+    // (`regen::planner::compute_hashes`). Asserted at the consumption site so a
+    // hand-rolled `PlanRequest` that breaks the invariant is loud in dev; release
+    // still degrades gracefully (see `plan_op_keys`) rather than aborting a regen.
+    debug_assert_eq!(
+        request.prefix_hashes.len(),
+        request.ops.len(),
+        "PlanRequest.prefix_hashes must be index-aligned with ops"
+    );
+    // One candidate poison key per op (`prefixHash(op) | opRecordId | fingerprint`);
+    // the crashing op is one of them, so a poisoned plan is caught up front (F3).
+    //
+    // Deliberately BEFORE the connection check: a plan that keeps killing the worker
+    // is most likely asked for again mid-restart, and the whole point of F3 is that
+    // it then reports the CIRCUIT (with the last crash message) rather than a bare
+    // "not connected". That is sound because `hello` is not cleared on a disconnect,
+    // so `fingerprint()` still returns the last handshake's value and the keys match
+    // the ones the same plan minted before the crash. The one case it does NOT hold
+    // — no handshake has ever completed, fingerprint "" — is handled inside
+    // `plan_op_keys`, which mints NO keys there; the gate then finds nothing and the
+    // connection check below reports the honest "worker not connected" (VF-M1
+    // secondary: keys minted under an empty fingerprint could never match the ones
+    // the same plan mints after connecting, so they must not be minted at all).
     let op_keys = plan_op_keys(&request, &shared.fingerprint());
-
     if let Some((key, last)) = shared.plan_circuit_open(&op_keys) {
         let _ = tx
             .send(PlanEvent::Failed(EngineError::Crashed {
@@ -1145,16 +1270,45 @@ fn finish_plan(
 /// A plan's candidate poison keys — one per op, `historyPrefixHash | opRecordId |
 /// fingerprint` in execution order (SCHEMA §8 keys on `(history hash, op,
 /// fingerprint)`; the crashing op is one of these — F3).
+///
+/// The hash is `prefix_hashes[i]`, the hash **through** op `i`, NOT the plan's
+/// `expected_base_hash`. That distinction is the whole point (VF-M1): the base hash
+/// is identical for every op of a plan and is unchanged by editing any of them, so a
+/// base-keyed circuit could never be healed by fixing the crashing parameter — the
+/// user's only escape was restarting the app. A prefix hash folds the timeline
+/// through op `i`'s own params, so a param edit mints a new key and the circuit
+/// heals on the next dispatch.
+///
+/// **Threshold economics.** `poison_threshold` (3) was calibrated against the coarse
+/// per-plan key, where all N ops shared one counter and ANY crash in the plan
+/// advanced it — three crashes anywhere tripped the breaker. Per-op keys are
+/// strictly sharper: a crash now advances only the counter of the op it was
+/// attributed to (`steps_received`, clamped), so tripping still needs three crashes
+/// but they must all be the SAME op at the SAME timeline prefix. That can only make
+/// the breaker slower to open, never faster, and the thing it protects — "stop
+/// re-dispatching a plan that reliably kills the worker" — needs exactly that
+/// repetition to be established. 3 therefore remains sound and is left alone.
 fn plan_op_keys(req: &PlanRequest, fingerprint: &str) -> Vec<String> {
+    // No live handshake ⇒ no fingerprint. Keys minted now could never match the ones
+    // the same plan mints after the worker connects, so they would only accumulate
+    // as unreachable entries while the fail-fast gate stayed blind. Key nothing.
+    if fingerprint.is_empty() {
+        return Vec::new();
+    }
     req.ops
         .iter()
-        .map(|o| {
-            format!(
-                "{}|{}|{}",
-                req.expected_base_hash.as_str(),
-                o.record_id,
-                fingerprint
-            )
+        .enumerate()
+        .map(|(i, o)| {
+            // Defensive fallback: `PlanRequest` has public fields, so a hand-rolled
+            // request can carry a short `prefix_hashes`. Degrade that op to the old
+            // coarse base key — still deterministic, just no longer param-sensitive
+            // — rather than panicking on the dispatch path.
+            let prefix = req
+                .prefix_hashes
+                .get(i)
+                .unwrap_or(&req.expected_base_hash)
+                .as_str();
+            format!("{}|{}|{}", prefix, o.record_id, fingerprint)
         })
         .collect()
 }
@@ -1581,6 +1735,12 @@ impl crate::worker::StepImport for WorkerManager {
     }
 }
 
+impl crate::worker::CircuitControl for WorkerManager {
+    fn clear_circuit(&self) -> usize {
+        WorkerManager::clear_circuit(self)
+    }
+}
+
 #[async_trait]
 impl MeshProvider for WorkerManager {
     async fn fetch_mesh(
@@ -1973,5 +2133,250 @@ mod preview_parse_tests {
             { "bodyId": second, "bin": "mesh:shared" }
         ]);
         assert_protocol_error(parse_preview_result(&result, &sections, &mesh));
+    }
+}
+
+#[cfg(test)]
+mod poison_tests {
+    //! VF-M1 — the crash circuit's key, reset policy and memory bound.
+    //!
+    //! Exercised over [`Shared`] + [`plan_op_keys`] directly: the behaviour under
+    //! test is pure bookkeeping, and driving it through a live supervisor would
+    //! replace a deterministic assertion with a crashing-worker race.
+
+    use super::*;
+    use onecad_core::document::record::{DeterminismSettings, OpaqueOperation, OperationInputs};
+    use onecad_core::regen::{HistoryPrefixHash, PlanArtifacts, PlannedOp, PolicyVersions};
+
+    const FP: &str = "occt-793-aaaa";
+
+    /// A `Shared` with no supervisor attached — nothing here touches `conn`.
+    fn shared(poison_threshold: u32) -> Arc<Shared> {
+        let (lifecycle, _) = broadcast::channel(8);
+        Arc::new(Shared {
+            config: SupervisorConfig {
+                binary: PathBuf::from("/nonexistent/onecad-worker"),
+                envs: Vec::new(),
+                ping_interval: Duration::from_secs(5),
+                ping_timeout: Duration::from_secs(5),
+                max_missed_pings: 2,
+                backoff: Vec::new(),
+                max_rapid_deaths: 3,
+                healthy_threshold: Duration::from_secs(5),
+                poison_threshold,
+                auto_open_session: false,
+            },
+            conn: RwLock::new(None),
+            epoch: AtomicU64::new(1),
+            state: Mutex::new(WorkerState::Starting),
+            hello: Mutex::new(None),
+            inflight: Mutex::new(HashMap::new()),
+            poison: Mutex::new(Poison::default()),
+            lifecycle,
+            restart_hook: RwLock::new(None),
+        })
+    }
+
+    fn op(record: u128) -> PlannedOp {
+        PlannedOp {
+            record_id: RecordId(uuid::Uuid::from_u128(record)),
+            step_index: 0,
+            operation: Operation::Opaque(OpaqueOperation {
+                raw: Default::default(),
+            }),
+            inputs: OperationInputs::default(),
+            determinism: DeterminismSettings::default(),
+        }
+    }
+
+    /// A two-op plan over a fixed base whose per-op prefix hashes are given. The
+    /// planner would derive these from the ops' params; spelling them out is what
+    /// lets a test model "the user edited op 1" as a single changed hash.
+    fn plan(prefixes: &[&str]) -> PlanRequest {
+        PlanRequest {
+            job_id: JobId(uuid::Uuid::from_u128(0x101)),
+            document_revision: DocumentRevision(1),
+            worker_epoch: WorkerEpoch(1),
+            expected_base_hash: HistoryPrefixHash::new("base-hash"),
+            prefix_hashes: prefixes
+                .iter()
+                .map(|h| HistoryPrefixHash::new(*h))
+                .collect(),
+            base_checkpoint: None,
+            base_checkpoint_artifacts: None,
+            ops: vec![op(0xA), op(0xB)],
+            policy_versions: PolicyVersions::default(),
+            target_step: 1,
+            artifacts: PlanArtifacts::default(),
+        }
+    }
+
+    // ── 1. The key must follow the op's params, not just the plan's base ──────
+    #[test]
+    fn editing_the_crashing_ops_params_heals_the_circuit() {
+        let s = shared(3);
+        let before = plan(&["h0", "h1-crashy"]);
+        let keys = plan_op_keys(&before, FP);
+        assert_eq!(keys.len(), 2);
+        assert_ne!(keys[0], keys[1], "one key per op, not one key per plan");
+
+        // Op 1 kills the worker three times.
+        for i in 0..3 {
+            let opened = s.record_crash(&keys[1], "SIGSEGV");
+            assert_eq!(opened, i == 2, "the circuit opens exactly on the threshold");
+        }
+        assert_eq!(
+            s.plan_circuit_open(&keys).map(|(k, _)| k),
+            Some(keys[1].clone()),
+            "the poisoned plan now fails fast"
+        );
+
+        // The user edits op 1's parameters: same record, same timeline base, new
+        // prefix hash through that op. THIS is what a base-keyed circuit could never
+        // see (VF-M1) — with per-op prefix keys the plan dispatches again.
+        let after = plan(&["h0", "h1-fixed"]);
+        let fixed = plan_op_keys(&after, FP);
+        assert_eq!(fixed[0], keys[0], "an untouched op keeps its key");
+        assert_ne!(fixed[1], keys[1], "the edited op mints a new key");
+        assert!(
+            s.plan_circuit_open(&fixed).is_none(),
+            "the edited plan must DISPATCH, not fail fast"
+        );
+
+        // A crash message still travels with the still-open original key.
+        assert_eq!(s.last_crash(&keys[1]), "SIGSEGV");
+    }
+
+    #[test]
+    fn a_successful_prepare_still_heals_every_candidate_key() {
+        let s = shared(1);
+        let keys = plan_op_keys(&plan(&["h0", "h1"]), FP);
+        assert!(s.record_crash(&keys[1], "boom"));
+        assert!(s.plan_circuit_open(&keys).is_some());
+        s.record_success(&keys);
+        assert!(s.plan_circuit_open(&keys).is_none());
+        assert_eq!(s.poison.lock().unwrap().entries.len(), 0);
+    }
+
+    // ── 2. Memory bound ──────────────────────────────────────────────────────
+    #[test]
+    fn the_entry_map_is_bounded_by_last_touch_eviction() {
+        let s = shared(1); // every crash opens its key, so `open` is pruned too
+        for i in 0..200 {
+            s.record_crash(&format!("h{i}|rec|{FP}"), "boom");
+        }
+        let p = s.poison.lock().unwrap();
+        assert!(
+            p.entries.len() <= POISON_MAX_ENTRIES,
+            "entries {} exceeded the cap",
+            p.entries.len()
+        );
+        assert!(
+            p.open.len() <= POISON_MAX_ENTRIES,
+            "the open set must be pruned alongside the entries"
+        );
+        // Eviction is least-recently-touched, so the newest key survives and the
+        // oldest is gone.
+        assert!(p.entries.contains_key(&format!("h199|rec|{FP}")));
+        assert!(!p.entries.contains_key(&format!("h0|rec|{FP}")));
+    }
+
+    #[test]
+    fn a_re_crash_refreshes_an_entrys_place_in_the_eviction_order() {
+        let s = shared(10); // never open a circuit — this is purely about touch order
+        let hot = format!("hot|rec|{FP}");
+        s.record_crash(&hot, "boom");
+        for i in 0..POISON_MAX_ENTRIES {
+            s.record_crash(&format!("cold{i}|rec|{FP}"), "boom");
+            s.record_crash(&hot, "boom"); // keep it warm
+        }
+        let p = s.poison.lock().unwrap();
+        assert!(p.entries.len() <= POISON_MAX_ENTRIES);
+        assert!(
+            p.entries.contains_key(&hot),
+            "a repeatedly-crashing key must never be evicted out from under its count"
+        );
+    }
+
+    // ── 3. Fingerprint flip ──────────────────────────────────────────────────
+    #[test]
+    fn a_new_worker_fingerprint_prunes_the_keys_it_can_never_match() {
+        let s = shared(1);
+        let old = plan_op_keys(&plan(&["h0", "h1"]), "occt-793-old");
+        let new = plan_op_keys(&plan(&["h0", "h1"]), "occt-794-new");
+        for k in &old {
+            s.record_crash(k, "boom");
+        }
+        assert_eq!(s.poison.lock().unwrap().entries.len(), 2);
+
+        s.note_fingerprint("occt-793-old"); // first handshake — same keys, nothing dropped
+        assert_eq!(s.poison.lock().unwrap().entries.len(), 2);
+
+        s.note_fingerprint("occt-794-new");
+        {
+            let p = s.poison.lock().unwrap();
+            assert!(
+                p.entries.is_empty(),
+                "old-fingerprint entries are unreachable"
+            );
+            assert!(p.open.is_empty(), "and so are their open flags");
+        }
+        assert!(
+            s.plan_circuit_open(&new).is_none(),
+            "the rebuilt worker starts clean"
+        );
+
+        // An empty fingerprint (disconnected) must never be treated as a flip.
+        s.record_crash(&new[0], "boom");
+        s.note_fingerprint("");
+        assert_eq!(s.poison.lock().unwrap().entries.len(), 1);
+    }
+
+    // ── 4. The operator escape hatch ─────────────────────────────────────────
+    #[test]
+    fn clear_circuit_forgets_counts_and_open_flags() {
+        let s = shared(2);
+        let keys = plan_op_keys(&plan(&["h0", "h1"]), FP);
+        s.record_crash(&keys[0], "boom"); // count 1, not open
+        s.record_crash(&keys[1], "boom");
+        s.record_crash(&keys[1], "boom"); // open
+        assert!(s.plan_circuit_open(&keys).is_some());
+
+        assert_eq!(s.clear_circuit(), 2, "reports how many keys it forgot");
+        {
+            let p = s.poison.lock().unwrap();
+            assert!(p.entries.is_empty());
+            assert!(p.open.is_empty());
+        }
+        assert!(s.plan_circuit_open(&keys).is_none());
+        // Counts are forgotten too: the next crash starts from one.
+        s.record_crash(&keys[1], "boom");
+        assert!(
+            s.plan_circuit_open(&keys).is_none(),
+            "a cleared key needs the full threshold again"
+        );
+    }
+
+    // ── 5. Defensive paths ───────────────────────────────────────────────────
+    #[test]
+    fn a_short_prefix_hash_vector_degrades_to_the_base_hash_without_panicking() {
+        // A hand-rolled `PlanRequest` (public fields) that skipped the planner.
+        let req = plan(&["h0"]); // two ops, ONE prefix hash
+        let keys = plan_op_keys(&req, FP);
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0], format!("h0|{}|{FP}", req.ops[0].record_id));
+        assert_eq!(keys[1], format!("base-hash|{}|{FP}", req.ops[1].record_id));
+        // Deterministic: the same request keys identically every time.
+        assert_eq!(keys, plan_op_keys(&req, FP));
+    }
+
+    #[test]
+    fn no_fingerprint_means_no_keys_at_all() {
+        // While disconnected the fingerprint is "", so any key minted now could never
+        // match the post-reconnect key for the same plan. Keying nothing keeps the
+        // circuit from filling with entries the fail-fast gate never reads.
+        assert!(plan_op_keys(&plan(&["h0", "h1"]), "").is_empty());
+        let s = shared(1);
+        assert!(s.plan_circuit_open(&[]).is_none());
     }
 }

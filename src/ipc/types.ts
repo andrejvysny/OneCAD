@@ -937,6 +937,13 @@ export type OperationOp =
 export const IMPORT_STEP_OP_TYPE = "ImportStep";
 
 /**
+ * Domain of a feature's primary editable dimension ({@link FeatureRecord.primaryValue}).
+ * `"length"`/`"diameter"` are millimetres, `"angle"` is DEGREES — the document
+ * domain in both cases, never a display unit.
+ */
+export type FeaturePrimaryKind = "length" | "angle" | "diameter";
+
+/**
  * One feature-timeline entry (mirrors the Rust projection DTO; identical shape to
  * the store's FeatureMeta so the controller maps it 1:1). The mock now emits
  * these with real values (e.g. "25.0 mm").
@@ -962,7 +969,22 @@ export interface FeatureRecord {
    */
   opType?: string;
   label: string;
+  /**
+   * The row's mono value text, MILLIMETRE-FIXED and always produced whatever the
+   * display-unit preference — three re-edit seeds parse it back as mm
+   * (`radiusFromValueText` / `thicknessFromValueText` / `countFromValueText`).
+   * {@link FeatureRecord.primaryValue} is what a UNIT-AWARE editor renders.
+   */
   valueText: string;
+  /**
+   * The ONE dimension the history row edits in place (H3), in the DOCUMENT domain
+   * (mm for a length/diameter, degrees for an angle). Absent for a feature with no
+   * single primary dimension (Sketch/Boolean/Move/patterns/mirror/import), whose
+   * row stays read-only. Optional so an older backend payload still parses.
+   */
+  primaryValue?: number;
+  /** Domain of {@link FeatureRecord.primaryValue}; absent whenever it is. */
+  primaryValueKind?: FeaturePrimaryKind;
   status: "ok" | "dirty" | "error" | "needsRepair";
   /** Worker failure reason for an errored step (`status === "error"`), surfaced as
    *  the HistoryList row tooltip (MODEL-HARDEN W0.5). Absent for any other status. */

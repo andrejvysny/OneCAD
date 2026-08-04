@@ -72,12 +72,13 @@ use onecad_core::regen::{
     mint_element_ids, AcquireRequest, CancelToken, CheckpointArtifacts, CheckpointStore,
     EngineError, GeometryEngine, InMemoryCheckpointStore, Lod, MeshKey, ModelSnapshot, Outcome,
     Pick, PlanArtifacts, PlanContext, PlanRequest, PolicyVersions, RefResolution, RegenExecutor,
-    RegenPlanner, RegenRequest, RegenSession, ResolveRequest, SnapshotPublisher, TessellateSpec,
+    RegenPlan, RegenPlanner, RegenRequest, RegenSession, ResolveRequest, SnapshotPublisher,
+    TessellateSpec,
 };
 use onecad_core::sketch::{Sketch, SketchAttachment, WorldPlane};
 
 use crate::dto::{
-    default_label, feature_kind, feature_status, feature_status_message, feature_value_text,
+    default_label, feature_kind, feature_status, feature_status_message, feature_value,
     needs_repair_item_dto, op_type_name, BodyDto, BodyMeshRef, DatumDto, DocStatus, DocumentChange,
     DocumentProjection, FailedStep, FeatureDto, FinishSketchDto, NeedsRepairItemDto,
     PromotedElementDto, SketchDto, SketchHostFaceDto, SketchSessionDto, SketchSolveStatus,
@@ -617,15 +618,19 @@ impl DocumentRuntime {
             return Err(DomainError::ReadOnly);
         }
         self.reject_timeline_body_delete(&cmd)?;
+        let is_rollback = matches!(cmd, EditCommand::SetRollback { .. });
         let outcome = self.session.apply(cmd)?;
         // Truncation eviction (SCHEMA §7.7): every checkpoint at or above the dirty
         // floor describes a prefix this edit just changed, so the planner would reject
         // it on every future plan — an orphan that only grows the cache. Metadata-only
-        // edits carry no dirty span and touch nothing. `SetRollback` is the one
-        // over-eager case (its records are unchanged), accepted: the cache is
-        // disposable and a rolled-back branch usually invalidates them anyway.
-        if let Some(dirty) = outcome.dirty {
-            self.checkpoints.invalidate_from(dirty.from);
+        // edits carry no dirty span and touch nothing. `SetRollback` is EXEMPT: cursor
+        // motion rewrites no record bytes, so every checkpoint stays hash-valid and
+        // evicting them only makes the roll-forward replay from 0 (the same exemption
+        // undo/redo get for free by not routing through this funnel).
+        if !is_rollback {
+            if let Some(dirty) = outcome.dirty {
+                self.checkpoints.invalidate_from(dirty.from);
+            }
         }
         self.after_mutation();
         Ok(outcome)
@@ -801,7 +806,7 @@ impl DocumentRuntime {
             // covers the whole applied prefix and every op in it is suppressed (or nothing
             // is applied at all), the correct result is NO geometry — reporting NoOp here
             // left the last published bodies on screen AND in the saved container.
-            if let Some(prepared) = self.prepare_clear_regen(request) {
+            if let Some(prepared) = self.prepare_clear_regen(&plan) {
                 tracing::info!("begin_regen: EMPTY plan → CLEAR publish (all ops suppressed)");
                 return Some(prepared);
             }
@@ -879,9 +884,9 @@ impl DocumentRuntime {
     /// leaving the previous bodies on screen and in the saved container.
     ///
     /// `None` (⇒ keep the `NoOp` terminal) whenever the emptiness is the benign kind:
-    /// a request that starts past the applied end ("nothing new to do"), a
-    /// checkpoint-based plan whose restored base still holds the geometry, or a
-    /// document that has no geometry to clear in the first place.
+    /// any unsuppressed applied op inside the plan's target range — a request past the
+    /// applied end ("nothing new to do") or a checkpoint-based plan whose restored base
+    /// still holds the geometry — or a document with no geometry to clear at all.
     ///
     /// The publish is Rust-side, with **no worker round-trip**: there is nothing for the
     /// worker to compute, an ops-empty `ExecutePlan` is not part of the wire contract
@@ -891,8 +896,8 @@ impl DocumentRuntime {
     /// immutable checkpoint artifacts. The result still travels the normal
     /// [`finish_regen`](Self::finish_regen) accept path, so revision/fencing, the
     /// `document-changed` delta and the projection all stay consistent.
-    fn prepare_clear_regen(&self, request: RegenRequest) -> Option<PreparedRegen> {
-        let target = self.fully_suppressed_target(request)?;
+    fn prepare_clear_regen(&self, plan: &RegenPlan) -> Option<PreparedRegen> {
+        let target = self.fully_suppressed_target(plan)?;
         // Only meaningful if there IS geometry to drop. A never-regenerated blank
         // document keeps its `NoOp` terminal (no spurious empty publish).
         let mut prior: Vec<BodyId> = self.regen.bodies.bodies().iter().map(|b| b.id).collect();
@@ -928,27 +933,28 @@ impl DocumentRuntime {
         })
     }
 
-    /// `Some(steps_covered)` iff `request` covers the applied prefix **from step 0** and
-    /// every applied op in it is suppressed — i.e. the geometry this regen describes is
-    /// empty. `steps_covered` is the number of leading timeline steps the clear spans
+    /// `Some(steps_covered)` iff every applied op in `[0, plan.target_step]` is
+    /// suppressed — i.e. the geometry the (empty) `plan` describes is no geometry at
+    /// all. `steps_covered` is the number of leading timeline steps the clear spans
     /// (`0` when nothing is applied).
     ///
-    /// Deliberately derived from the timeline + request rather than from the compiled
-    /// plan: the planner's "nothing to do" early return also yields an empty op list with
-    /// `start_step == 0` for a single-record timeline, and those two must not be confused.
-    fn fully_suppressed_target(&self, request: RegenRequest) -> Option<usize> {
+    /// Decided off the **compiled plan**, not the raw request, because only the plan
+    /// knows the target the planner actually settled on after clamping to the applied
+    /// prefix and to the SCHEMA §7.3 repair ceiling. Keying on the request's `start`
+    /// instead (the earlier `start != 0 ⇒ None` rule) refused the clear for every
+    /// suffix request — including the roll-to-row whose whole applied range is
+    /// suppressed, which then kept its stale bodies on screen.
+    ///
+    /// The guard that keeps a benign empty plan a `NoOp` is the suppressed-ness of the
+    /// range itself: a request past the applied end, and a checkpoint-accelerated plan
+    /// whose restored base still holds geometry, both cover at least one UNSUPPRESSED
+    /// applied op in `[0, target]` and so return `None` here.
+    fn fully_suppressed_target(&self, plan: &RegenPlan) -> Option<usize> {
         let applied = self.regen.timeline.cursor();
-        let (start, target) = match request {
-            RegenRequest::ToStep(k) => (k, k),
-            RegenRequest::ToEnd { from } => (from, applied.saturating_sub(1)),
-        };
-        if start != 0 {
-            return None; // a suffix regen keeps whatever the base already holds.
-        }
         if applied == 0 {
             return Some(0); // nothing applied ⇒ nothing to show.
         }
-        let target = target.min(applied - 1);
+        let target = plan.target_step.min(applied - 1);
         let records = self.regen.timeline.records();
         records
             .get(0..=target)?
@@ -1811,12 +1817,18 @@ impl DocumentRuntime {
             .state(index)
             .cloned()
             .unwrap_or(StepState::Dirty);
+        // ONE call for the row's text AND its inline-editable primary dimension —
+        // `dto::feature_value` decides both in a single match so a row can never
+        // display one number and edit another (H3).
+        let value = feature_value(&rec.op);
         FeatureDto {
             id: rec.record_id.to_string(),
             kind,
             op_type: op_type_name(&rec.op),
             label,
-            value_text: feature_value_text(&rec.op),
+            value_text: value.text,
+            primary_value: value.primary,
+            primary_value_kind: value.primary_kind.map(ToString::to_string),
             status: feature_status(&state),
             // Surface a step's worker failure reason (`StepState::Error{reason}`) so
             // the HistoryList row can tint + tooltip it end-to-end (Codex MAJOR-4).

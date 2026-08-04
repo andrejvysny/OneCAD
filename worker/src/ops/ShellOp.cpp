@@ -81,16 +81,18 @@ OpOutcome execute_shell(OpContext& ctx, const json& op, const std::string& op_id
             if (r.kind != em::km::ElementKind::Face) continue;  // Shell removes faces only
             ++face_ref_count;
 
-            // (1) Partition-tracked: the elementId was minted against this body on the
+            // (1) Partition-tracked: the elementId was minted against THIS body on the
             // predecessor snapshot; its TopoKey maps straight to the current sub-face.
-            if (!r.element_id.empty()) {
-                if (const em::PartitionEntry* e = ctx.partition.find(r.element_id)) {
-                    const TopoDS_Shape sub =
-                        em::ElementMapPartition::shape_for_topokey(target_shape, e->topo_key);
-                    if (!sub.IsNull() && sub.ShapeType() == TopAbs_FACE) {
-                        faces_to_remove.Append(TopoDS::Face(sub));
-                        continue;
-                    }
+            // An entry owned by another body is NOT usable here — its ordinal would
+            // open an arbitrary wall of the target instead (VF-M7); "" falls through.
+            const std::string topo_key = em::ElementMapPartition::topokey_for_element_in_body(
+                ctx.partition, r.element_id, target_id);
+            if (!topo_key.empty()) {
+                const TopoDS_Shape sub =
+                    em::ElementMapPartition::shape_for_topokey(target_shape, topo_key);
+                if (!sub.IsNull() && sub.ShapeType() == TopAbs_FACE) {
+                    faces_to_remove.Append(TopoDS::Face(sub));
+                    continue;
                 }
             }
             // (2) Fall through to the descriptor+anchor ladder (the Fillet path).
@@ -157,7 +159,7 @@ OpOutcome execute_shell(OpContext& ctx, const json& op, const std::string& op_id
     // --- publish the modified body (id preserved) + rebind partition via history ---
     ctx.bodies.create(target_id, op_id, result);
     ctx.partition.apply_history(target_id, result, *builder, out.delta, &out.needs_repair);
-    out.body_events.push_back({"modified", target_id});
+    out.body_events.push_back({"modified", target_id, {}});
     out.body_ids.push_back(target_id);
     return out;
 }

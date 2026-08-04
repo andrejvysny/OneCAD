@@ -129,6 +129,13 @@ add_executable(test_hole_op test_hole_op.cpp)
 target_link_libraries(test_hole_op PRIVATE worker_core)
 add_test(NAME hole_op COMMAND test_hole_op)
 
+# --- VF-M7: an ElementMap entry minted on body A must never bind a face of body B.
+#     Hole + Shell against two DIFFERENT bodies, asserted by exact analytic volume
+#     (silent wrong drill / wrong seat / wrong shell wall). In-process, real OCCT. ---
+add_executable(test_cross_body_element_ref test_cross_body_element_ref.cpp)
+target_link_libraries(test_cross_body_element_ref PRIVATE worker_core)
+add_test(NAME cross_body_element_ref COMMAND test_cross_body_element_ref)
+
 # --- WP-B W0: `TransformBody` numerics (exact bbox/volume, the normative T∘R
 #     order, §2 copy ordinals) + the element-map placement migration
 #     (`apply_placement`: level-1 rebind with ZERO scoring, anchors moved by

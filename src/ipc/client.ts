@@ -35,6 +35,7 @@ import type {
   ResolveRefRequest,
   ResolveRefResult,
   SketchConstraint,
+  SketchConstraintType,
   SketchEntity,
   SketchSession,
   SketchUpsertResult,
@@ -137,6 +138,30 @@ export interface CadClient {
     sketchId: string,
     entities: SketchEntity[],
     constraints: SketchConstraint[],
+  ): Promise<SketchUpsertResult>;
+
+  /**
+   * Set ONE dimensional constraint's value on a sketch, WITHOUT opening an edit
+   * session — the history panel's sketch-dimension quick path (H3b).
+   *
+   * Separate from `sketchUpsert` because that verb diffs a whole entity+constraint
+   * array against the id-map and requires the sketch to have been ENTERED; this one
+   * addresses a single constraint on a sketch the user has only SELECTED, which is
+   * the only thing the inspector can offer for a past sketch feature.
+   *
+   * `type` is required (not derivable from the id) because it decides the wire
+   * domain: an `Angle` is DEGREES here and RADIANS on the wire, and that conversion
+   * belongs to `ipc/angleUnits` — the one seam all three marshalling sites share.
+   * Every other dimensional kind is millimetres in both domains.
+   *
+   * Downstream regen is the BACKEND's job: changing a sketch dirties the consuming
+   * features, so a caller neither replays the timeline nor hydrates from a result.
+   */
+  setSketchDimension(
+    sketchId: string,
+    constraintId: string,
+    type: SketchConstraintType,
+    value: number,
   ): Promise<SketchUpsertResult>;
 
   /** Compute the closed profile regions for a sketch (extrude/revolve input). */

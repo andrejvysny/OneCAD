@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useState } from "react";
 import { Icon } from "@/icons/Icon";
 import { SectionLabel } from "@/ui/SectionLabel";
 import {
@@ -12,18 +13,23 @@ import {
   selectionStore,
   type EntityRef,
 } from "@/stores/selectionStore";
-import { useToolStore } from "@/stores/toolStore";
+import { useToolStore, type ModelTool } from "@/stores/toolStore";
 import { useViewportStore, viewportStore } from "@/stores/viewportStore";
 import { useSketchStore } from "@/stores/sketchStore";
 import { useRepairStore } from "@/stores/repairStore";
 import { documentStore } from "@/stores/documentStore";
 import { getModelToolController } from "@/tools/modelTools/modelToolBridge";
-import { HistoryList, type HistoryRowActions } from "./HistoryList";
-import { ConstraintList, visibleConstraints } from "./ConstraintList";
+import { HistoryList, type HistoryRowActions, type HistoryValueEdit } from "./HistoryList";
+import { canEditFeatureValue, commitFeatureValue } from "./featureValueEdit";
+import { ConstraintList, isDimensionalConstraint, visibleConstraints } from "./ConstraintList";
 import { RepairPanel } from "@/features/repair/RepairPanel";
 import { suppressFeature, rollToIndex, deleteFeature } from "./historyActions";
 import { cn } from "@/ui/cn";
 import { sketchStatusText, sketchStatusSentence } from "@/features/sketch/constraintStatus";
+import { CONSTRAINT_PRESENTATION } from "@/features/sketch/constraintCatalog";
+import { DimensionInput } from "@/features/sketch/DimensionInput";
+import { useSettingsStore } from "@/stores/settingsStore";
+import { lengthSuffix } from "@/units/format";
 import { createClient } from "@/ipc/client";
 import { deleteConstraints } from "@/tools/sketch/sketchService";
 import type { SketchStatus } from "@/stores/documentStore";
@@ -123,7 +129,30 @@ function kindFallback(kind: FeatureMeta["kind"]): string {
 }
 
 /**
- * Per-row history affordances (suppress / roll-to-here / delete).
+ * Builds the inline value editor for a history row (H3).
+ *
+ * Both gate inputs are passed in rather than read off the stores here, so the
+ * caller SUBSCRIBES to them: arming a model tool has to re-render the rows into
+ * their read-only state, and a `getState()` read would leave the field live.
+ *
+ * `index` is positional within the FULL timeline, which is what the rollback-cursor
+ * gate needs — `FeatureState` renders `documentStore.features` whole, so the row
+ * index IS the global index.
+ */
+function makeValueEdit(
+  appliedOps: number,
+  modelTool: ModelTool,
+): (item: FeatureMeta, index: number) => HistoryValueEdit {
+  return (item, index) => ({
+    editable: canEditFeatureValue(item, index, appliedOps, modelTool),
+    onCommit: (it, value) => {
+      void commitFeatureValue(it.id, it.opType ?? "", value);
+    },
+  });
+}
+
+/**
+ * Per-row history affordances (edit / suppress / roll-to-here / delete).
  *
  * `suppressed` reads the PROJECTION (`FeatureMeta.suppressed`, sourced from the
  * backend record flag), never a frontend overlay: the retired optimistic overlay
@@ -267,6 +296,10 @@ function FeatureState({
   featureId: string;
   features: FeatureMeta[];
 }) {
+  // Subscriptions, not `getState()` reads: arming a model tool or moving the
+  // rollback bar must re-render the rows into their read-only state (H3 gates).
+  const modelTool = useToolStore((s) => s.modelTool);
+  const appliedOps = useDocumentStore((s) => s.appliedOps);
   const feat = features.find((f) => f.id === featureId);
   return (
     <>
@@ -275,15 +308,7 @@ function FeatureState({
         {feat?.kind ? `${cap(feat.kind)} feature` : "Feature"}
         {feat?.valueText ? ` · ${feat.valueText}` : ""}
       </div>
-      {feat?.kind === "extrude" && (
-        <div className="mt-1 text-[12px] text-ink-6">Double-click to edit the depth.</div>
-      )}
-      {feat?.kind === "revolve" && (
-        <div className="mt-1 text-[12px] text-ink-6">Double-click to edit the angle.</div>
-      )}
-      {feat?.kind === "fillet" && (
-        <div className="mt-1 text-[12px] text-ink-6">Double-click to edit the radius.</div>
-      )}
+      {feat?.kind === "sketch" && <SketchDimensions featureId={featureId} />}
       <SectionLabel className="pb-1.5 pt-4">History</SectionLabel>
       <HistoryList
         items={features}
@@ -291,12 +316,114 @@ function FeatureState({
         onSelect={selectFeature}
         onEdit={editFeature}
         rowActions={rowActions}
+        valueEdit={makeValueEdit(appliedOps, modelTool)}
       />
+      {/* BELOW the list on purpose: a selection-dependent block ABOVE it changes the
+          panel height as the selection moves, which shifts the rows out from under a
+          double-click's second press (it broke the hole re-edit spec exactly so). */}
+      {feat?.primaryValue !== undefined ? (
+        <div className="mt-2 text-[12px] leading-normal text-ink-6">
+          Click a row's value to change it, or double-click the row for the full editor.
+        </div>
+      ) : null}
     </>
   );
 }
 
 const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
+
+/**
+ * H3b — the dimensional constraints of a SELECTED past sketch feature, editable in
+ * place. The counterpart to a solid feature's inline value: a sketch's "primary
+ * dimension" is not one number, so it gets a section instead of a row chip.
+ *
+ * Reads through the client on selection (`getOperationParams` → the record's
+ * `sketchId`, then `getSketch`) rather than off a store, because a sketch the user
+ * has only SELECTED was never entered — nothing has hydrated its geometry. A commit
+ * goes straight to `setSketchDimension`; the BACKEND dirties the consuming features,
+ * so there is no timeline replay here.
+ */
+function SketchDimensions({ featureId }: { featureId: string }) {
+  const unit = useSettingsStore((s) => s.displayUnit);
+  const [sketchId, setSketchId] = useState<string | null>(null);
+  const [dims, setDims] = useState<SketchConstraint[]>([]);
+
+  /** `alive` guards against a selection change landing mid-fetch: two round-trips
+   *  in, a resolved older request must not paint another feature's dimensions. */
+  const load = useCallback(
+    async (alive: () => boolean = () => true) => {
+      const client = createClient();
+      try {
+        const params = await client.getOperationParams(featureId);
+        // The record's key is `sketchId` (core `SketchOpParams`, serde-renamed).
+        const id = typeof params.sketchId === "string" ? params.sketchId : null;
+        if (!id) return;
+        const session = await client.getSketch(id);
+        if (!alive()) return;
+        setSketchId(id);
+        setDims(
+          session.constraints.filter(
+            (c) => isDimensionalConstraint(c.type) && typeof c.value === "number",
+          ),
+        );
+      } catch {
+        // A sketch record the backend cannot serve params/geometry for (an older
+        // document, or the mock's seeded rows) simply has no dimensions to offer —
+        // an empty section is the honest answer, not an error banner.
+        if (!alive()) return;
+        setSketchId(null);
+        setDims([]);
+      }
+    },
+    [featureId],
+  );
+
+  useEffect(() => {
+    let alive = true;
+    setSketchId(null);
+    setDims([]);
+    void load(() => alive);
+    return () => {
+      alive = false;
+    };
+  }, [load]);
+
+  if (sketchId === null || dims.length === 0) return null;
+  return (
+    <>
+      <SectionLabel className="pb-1.5 pt-4">Dimensions</SectionLabel>
+      {dims.map((c) => (
+        <div
+          key={c.id}
+          data-testid={`sketch-dimension-${c.id}`}
+          className="mb-1 flex h-[30px] items-center gap-2 rounded-sm bg-chip px-2.5"
+        >
+          <span className="w-4 shrink-0 text-center text-[12px] text-ink-5">
+            {CONSTRAINT_PRESENTATION[c.type].glyph}
+          </span>
+          <span className="flex-1 truncate text-[12.5px] text-ink-2">{c.type}</span>
+          <DimensionInput
+            value={c.value ?? 0}
+            kind={c.type}
+            suffix={c.type === "Angle" ? "" : lengthSuffix(unit)}
+            onCommit={(v) => {
+              void createClient()
+                .setSketchDimension(sketchId, c.id, c.type, v)
+                // Re-read: the solver may have moved OTHER dimensions to satisfy this one.
+                .then(() => load())
+                .catch((e: unknown) => {
+                  viewportStore.getState().setStatusHint(
+                    `Dimension edit failed: ${e instanceof Error ? e.message : String(e)}`,
+                    { severity: "error", sticky: true },
+                  );
+                });
+            }}
+          />
+        </div>
+      ))}
+    </>
+  );
+}
 
 function SketchState({
   sketchName,

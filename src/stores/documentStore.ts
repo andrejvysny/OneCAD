@@ -9,7 +9,7 @@
  */
 import { createStore, useStore } from "zustand";
 
-import type { SketchHostFace, SketchPlane } from "@/ipc/types";
+import type { FeaturePrimaryKind, SketchHostFace, SketchPlane } from "@/ipc/types";
 
 export type DocStatus = "empty" | "loading" | "ready";
 
@@ -86,8 +86,16 @@ export interface FeatureMeta {
   /** Exact authored `opType` — see `FeatureRecord.opType`; re-edits route on it. */
   opType?: string;
   label: string;
-  /** Mono value shown on the right of the history chip, e.g. "83.3 mm". */
+  /** Mono value shown on the right of the history chip, e.g. "83.3 mm".
+   *  MILLIMETRE-FIXED (see `FeatureRecord.valueText`) — the row RENDERS
+   *  {@link FeatureMeta.primaryValue} through the display unit instead, and falls
+   *  back to this string only when there is no primary dimension. */
   valueText: string;
+  /** The ONE dimension the history row edits in place (H3), document domain: mm
+   *  for a length/diameter, DEGREES for an angle. Absent ⇒ read-only row. */
+  primaryValue?: number;
+  /** Domain of {@link FeatureMeta.primaryValue}; absent whenever it is. */
+  primaryValueKind?: FeaturePrimaryKind;
   status: FeatureStatus;
   /** Worker failure reason for an errored feature (`status === "error"`), shown as
    *  the HistoryList row tooltip (MODEL-HARDEN W0.5). Absent for any other status. */
@@ -114,6 +122,17 @@ export interface DocumentProjection {
   /** Datum planes keyed by id (backend-authoritative; see {@link DatumMeta}). */
   datums: Record<string, DatumMeta>;
   features: FeatureMeta[];
+  /**
+   * Applied op count (the timeline CURSOR): `features[0, appliedOps)` are applied,
+   * `[appliedOps, features.length)` are drafts beyond the rollback bar. Backend-
+   * authoritative — hydrated from every `projection-updated`.
+   *
+   * SEAM: an `ApplyOperationResult` carries no cursor, so `applyEditResult` can only
+   * CLAMP this to the new timeline length; a rollback's cursor move is corrected by
+   * the next authoritative projection (real lane). H7b owns carrying the cursor on
+   * the edit result itself.
+   */
+  appliedOps: number;
 }
 
 export interface DocumentState extends DocumentProjection {
@@ -144,6 +163,28 @@ export interface DocumentState extends DocumentProjection {
    * local stamp never has to coexist with a hydrated one for the same id.
    */
   bumpSketchGeometry(id: string): void;
+}
+
+/**
+ * The rollback cursor to carry across a timeline REPLACEMENT that arrived on an
+ * edit result rather than a projection.
+ *
+ * An `ApplyOperationResult` has no cursor of its own, so the two result-hydration
+ * paths (`historyActions.applyEditResult`, `ModelToolController.applyResult`) have
+ * to derive one. The rule, and why:
+ *   - a FULLY-APPLIED timeline stays fully applied — an append (commit a new op)
+ *     or a delete must not leave the newest row looking like an unapplied draft;
+ *   - a ROLLED-BACK one keeps its cursor, clamped into the new length, because an
+ *     edit result cannot tell us the bar moved.
+ * The authoritative value rides the next `projection-updated` either way; the H3
+ * inline-edit gate reads this in the meantime.
+ */
+export function nextAppliedOps(
+  prevApplied: number,
+  prevLength: number,
+  nextLength: number,
+): number {
+  return prevApplied >= prevLength ? nextLength : Math.min(prevApplied, nextLength);
 }
 
 /** Monotonic counter behind the `local:<n>` tokens {@link DocumentState.bumpSketchGeometry} mints. */
@@ -236,11 +277,13 @@ export function seedMockDocument(): DocumentProjection {
     datums: {},
     features: [
       { id: "f1", kind: "sketch", opType: "Sketch", label: "Sketch 1", valueText: "", status: "ok" },
-      { id: "f2", kind: "extrude", opType: "Extrude", label: "Extrude", valueText: "83.3 mm", status: "ok" },
-      { id: "f3", kind: "fillet", opType: "Fillet", label: "Fillet", valueText: "2.0 mm", status: "ok" },
+      { id: "f2", kind: "extrude", opType: "Extrude", label: "Extrude", valueText: "83.3 mm", primaryValue: 83.3, primaryValueKind: "length", status: "ok" },
+      { id: "f3", kind: "fillet", opType: "Fillet", label: "Fillet", valueText: "2.0 mm", primaryValue: 2, primaryValueKind: "length", status: "ok" },
       { id: "f4", kind: "sketch", opType: "Sketch", label: "Sketch 2", valueText: "", status: "ok" },
-      { id: "f5", kind: "extrude", opType: "Extrude", label: "Extrude", valueText: "12.0 mm", status: "ok" },
+      { id: "f5", kind: "extrude", opType: "Extrude", label: "Extrude", valueText: "12.0 mm", primaryValue: 12, primaryValueKind: "length", status: "ok" },
     ],
+    // The whole demo timeline is applied (no rollback bar in the seed).
+    appliedOps: 5,
   };
 }
 
@@ -255,6 +298,7 @@ export function emptyDocument(): DocumentProjection {
     sketches: {},
     datums: {},
     features: [],
+    appliedOps: 0,
   };
 }
 

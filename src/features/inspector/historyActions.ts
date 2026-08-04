@@ -18,12 +18,18 @@ import {
 import { toFeatureMeta } from "@/ipc/projectionHydration";
 import type { ApplyOperationResult, NeedsRepairItem, ResolveCandidate } from "@/ipc/types";
 import { parseRefId } from "@/ipc/tauriCommandMap";
-import { documentStore } from "@/stores/documentStore";
+import { documentStore, nextAppliedOps } from "@/stores/documentStore";
 import { selectionStore } from "@/stores/selectionStore";
 import { viewportStore } from "@/stores/viewportStore";
 
-/** Hydrate the document store from a regen result (bodies + feature timeline). */
-function applyEditResult(res: ApplyOperationResult): void {
+/**
+ * Hydrate the document store from a regen result (bodies + feature timeline).
+ *
+ * Exported for the inline value editor (H3), which commits through the same raw
+ * `applyEditCommand` lane and must hydrate identically — a second hand-rolled copy
+ * is exactly how `statusMessage` silently dropped out of one path once already.
+ */
+export function applyEditResult(res: ApplyOperationResult): void {
   const doc = documentStore.getState();
   const bodies = { ...doc.bodies };
   let n = Object.keys(bodies).length;
@@ -31,11 +37,14 @@ function applyEditResult(res: ApplyOperationResult): void {
     if (!bodies[ref.bodyId]) bodies[ref.bodyId] = { id: ref.bodyId, name: `Body ${++n}`, visible: true };
   }
   for (const id of res.removedBodies ?? []) delete bodies[id];
+  const features = res.features.map(toFeatureMeta);
   doc.applyChange({
     revision: res.revision,
-    features: res.features.map(toFeatureMeta),
+    features,
     bodies,
     dirty: true,
+    // An `ApplyOperationResult` carries no timeline cursor — see `nextAppliedOps`.
+    appliedOps: nextAppliedOps(doc.appliedOps, doc.features.length, features.length),
   });
 }
 

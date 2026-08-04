@@ -103,12 +103,15 @@ std::optional<em::LadderRef> face_ref_of(const json& op, const json& params,
 // rung binds; the returned face is then null.
 TopoDS_Face resolve_host_face(OpContext& ctx, const TopoDS_Shape& target_shape,
                               const std::string& target_id, em::LadderRef ref, json& nr) {
-    if (!ref.element_id.empty()) {
-        if (const em::PartitionEntry* e = ctx.partition.find(ref.element_id)) {
-            const TopoDS_Shape sub =
-                em::ElementMapPartition::shape_for_topokey(target_shape, e->topo_key);
-            if (!sub.IsNull() && sub.ShapeType() == TopAbs_FACE) return TopoDS::Face(sub);
-        }
+    // The tracked rung is valid ONLY for an entry that belongs to THIS body: a
+    // TopoKey is an ordinal in one body's map, so a foreign entry's key would
+    // silently seat the drill on the target's Nth face (VF-M7). "" ⇒ fall through.
+    const std::string topo_key = em::ElementMapPartition::topokey_for_element_in_body(
+        ctx.partition, ref.element_id, target_id);
+    if (!topo_key.empty()) {
+        const TopoDS_Shape sub =
+            em::ElementMapPartition::shape_for_topokey(target_shape, topo_key);
+        if (!sub.IsNull() && sub.ShapeType() == TopAbs_FACE) return TopoDS::Face(sub);
     }
     std::vector<em::LadderRef> refs{std::move(ref)};
     const std::vector<em::LadderResolution> res =
@@ -299,7 +302,7 @@ OpOutcome execute_hole(OpContext& ctx, const json& op, const std::string& op_id)
     if (builder) {
         ctx.partition.apply_history(target_id, br.shape, *builder, out.delta, &out.needs_repair);
     }
-    out.body_events.push_back({"modified", target_id});
+    out.body_events.push_back({"modified", target_id, {}});
     out.body_ids.push_back(target_id);
     return out;
 }

@@ -158,6 +158,20 @@ public:
     void remove_body(const std::string& body_id, ElementMapDelta& delta);
 
     // --- evidence helpers (stateless; SCHEMA §7.5/§10) ---
+    // The TopoKey of `element_id` **as tracked on `body_id`**; "" when the entry is
+    // absent OR belongs to a DIFFERENT body.
+    //
+    // A TopoKey is an ORDINAL in one body's `TopExp::MapShapes` — body-scoped as
+    // well as snapshot-scoped. Feeding an entry minted on body A to
+    // `shape_for_topokey(bodyB, …)` therefore does not fail: it silently returns
+    // B's Nth face, an element the user never named (VF-M7). Every op executor that
+    // resolves an input ref against ITS OWN target body must ask through here and
+    // treat "" as "not tracked here", falling through to the descriptor+anchor
+    // ladder — which either binds correctly or emits NeedsRepair. Deterministic
+    // NeedsRepair beats a silent wrong bind (Invariant 2).
+    static std::string topokey_for_element_in_body(const ElementMapPartition& partition,
+                                                   const std::string& element_id,
+                                                   const std::string& body_id);
     // Resolve a TopoKey to its sub-shape within a body shape (null if absent).
     static TopoDS_Shape shape_for_topokey(const TopoDS_Shape& body_shape,
                                           const std::string& topo_key);

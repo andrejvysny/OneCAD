@@ -63,6 +63,7 @@ import type {
   ResolveRefRequest,
   ResolveRefResult,
   SketchConstraint,
+  SketchConstraintType,
   SketchEntity,
   SketchPlane,
   SketchPlaneKind,
@@ -93,8 +94,10 @@ import {
   marshalUpsert,
   mintUuid,
   seedIdMapFromWire,
+  type SketchEditOp,
   type SketchIdMap,
 } from "./sketchWireMap";
+import { toWireDimensionValue } from "./angleUnits";
 import { applyProjectionToStore } from "./projectionHydration";
 import { documentStore, nextSketchName } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
@@ -997,6 +1000,49 @@ export function createTauriClient(): CadClient {
     };
   }
 
+  /**
+   * H3b — one `SetDimension` against a sketch the user only SELECTED.
+   *
+   * Both ids fall back to themselves when the sketch was never entered this session
+   * (`?? sketchId` / `?? constraintId`), the same idiom `finishSketch`/`getSketch`
+   * use: a never-entered sketch's store key IS the backend UUID, and the constraint
+   * ids `getSketch` hands the inspector are the backend's own.
+   */
+  async function setSketchDimension(
+    sketchId: string,
+    constraintId: string,
+    type: SketchConstraintType,
+    value: number,
+  ): Promise<SketchUpsertResult> {
+    const map = sketchMaps.get(sketchId);
+    const ops: SketchEditOp[] = [
+      {
+        op: "setDimension",
+        constraint: map?.constraint.get(constraintId) ?? constraintId,
+        // deg→rad for an Angle, pass-through otherwise. NEVER re-derived here —
+        // `angleUnits` is the one seam the three marshalling sites share (BUG-2).
+        value: { value: toWireDimensionValue(type, value) },
+      },
+    ];
+    const dto = await call<SketchUpsertDto>(CMD.sketchUpsert, {
+      sketchId: map?.backendSketchId ?? sketchId,
+      ops,
+    });
+    // Keep the marshaller's diff cache in step: without this, entering the sketch
+    // later and upserting would re-emit a SetDimension for a value the backend
+    // already holds (harmless, but it is exactly the drift the cache exists to stop).
+    map?.constraintValue.set(constraintId, value);
+    return {
+      sketchId,
+      sketchRevision: dto.sketchRevision,
+      dof: dto.dof,
+      status: dto.status,
+      // No map ⇒ the wire ids ARE the ids the caller knows; pass them through.
+      conflicting: map ? frontendConflictingIds(map, dto.conflicting) : (dto.conflicting ?? []),
+      solvedPositions: map ? frontendSolvedPositions(map, dto.solvedPositions) : {},
+    };
+  }
+
   async function finishSketch(sketchId: string): Promise<FinishSketchResult> {
     // No id-map entry ⇒ a sketch never ENTERED this session (reopened document /
     // model-mode record guarantee). Its store key IS the backend UUID (projection
@@ -1407,6 +1453,7 @@ export function createTauriClient(): CadClient {
     getSketch,
     getSketchRegions,
     sketchUpsert,
+    setSketchDimension,
     finishSketch,
     cancelSketch,
     deleteSketch,

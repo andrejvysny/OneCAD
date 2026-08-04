@@ -16,7 +16,7 @@
 //! | `UpdateOperationParams` | `[step, len)` | `ToEnd` |
 //! | `EditOperationInput` | `[step, len)` | `ToEnd` |
 //! | `RemoveOperation` | `[removedIndex, len)` | `ToEnd` |
-//! | `SetRollback` | span from `set_cursor` | `PreviewTo(cursor)` |
+//! | `SetRollback` | span from `set_cursor` | `PreviewTo(cursor − 1)` (`None` when the cursor does not move) |
 //! | `SetOperationSuppression` | `[step, len)` | `ToEnd` |
 //! | `AddSketch` | first dependent op step (`None` if none) | `ToEnd` / `None` |
 //! | `DeleteSketch` / `UpdateSketchAttachment` / `SketchEdit` / `SketchDragGesture` | `min(producing Sketch op, first dependent op)` | `ToEnd` / `None` |
@@ -179,15 +179,22 @@ impl DocumentSession {
             forward: cmd,
             inverse,
         };
+        // A command that mementoed NOTHING changed nothing, so it must not occupy an
+        // undo slot — undoing it would pop a step the user never took and (with a
+        // bounded stack) evict a real one.
+        let undoable = !matches!(edit.inverse, Inverse::Noop);
         match &mut self.open_txn {
             Some(txn) => {
-                txn.edits.push(edit);
+                if undoable {
+                    txn.edits.push(edit);
+                }
                 merge_outcome(&mut txn.combined, &outcome);
             }
-            None => {
+            None if undoable => {
                 let label = edit.forward.label().to_string();
                 self.undo.push_committed(Txn::single(label, edit));
             }
+            None => {}
         }
         Ok(outcome)
     }
@@ -837,6 +844,12 @@ impl DocumentSession {
             )));
         }
         let prior = self.document.timeline.cursor();
+        // Rolling to the row the bar already sits on changes nothing, so it must cost
+        // nothing: no dirty span (checkpoints keep their validity), no regen, and no
+        // undo entry (`Inverse::Noop` is dropped at the `apply` funnel).
+        if cursor == prior {
+            return Ok((empty_outcome(), Inverse::Noop));
+        }
         let dirty = self.document.timeline.set_cursor(cursor);
         let delta = ProjectionDelta {
             cursor_changed: true,
@@ -846,7 +859,14 @@ impl DocumentSession {
             CommandOutcome {
                 projection_delta: delta,
                 dirty: Some(dirty),
-                regen: RegenHint::PreviewTo(cursor),
+                // DOMAIN SPLIT: `cursor` is an applied-op COUNT, while `PreviewTo` (and
+                // the `RegenRequest::ToStep` it maps to) takes a step INDEX. The last
+                // applied step is therefore `cursor − 1`; emitting the count made every
+                // non-zero rollback request a step past the applied end, which the
+                // planner answers with an empty plan — a visually inert roll. Cursor 0
+                // saturates to index 0 and the planner's `applied == 0` branch turns it
+                // into the clear publish.
+                regen: RegenHint::PreviewTo(cursor.saturating_sub(1)),
             },
             Inverse::RestoreCursor { cursor: prior },
         ))

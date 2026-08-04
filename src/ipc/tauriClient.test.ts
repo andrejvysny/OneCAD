@@ -859,6 +859,7 @@ describe("tauriClient fresh-sketch naming", () => {
       },
       datums: {},
       features: [],
+      appliedOps: 0,
     });
     let addName: string | undefined;
     mockIPC(
@@ -1249,6 +1250,45 @@ describe("tauriClient sketch solver lane (real commands)", () => {
     expect(Array.isArray(fin.regions)).toBe(true);
     expect(seen).toContain("sketch_upsert");
     expect(seen).toContain("finish_sketch");
+  });
+
+  /*
+   * H3b — the inspector's sketch-dimension quick path. Two things are load-bearing:
+   * it works on a sketch that was NEVER entered (no id-map — the only state the
+   * history panel can be in), and the Angle deg→rad conversion goes through
+   * `angleUnits.toWireDimensionValue`, the seam all three marshalling sites share.
+   */
+  it("setSketchDimension sends ONE setDimension op, converting an Angle deg→rad", async () => {
+    let upsertArgs: { sketchId?: string; ops?: { op: string; constraint?: string; value?: { value: number } }[] } | undefined;
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "sketch_upsert") {
+          upsertArgs = payload as typeof upsertArgs;
+          return {
+            sketchId: (payload as { sketchId: string }).sketchId,
+            sketchRevision: 4,
+            dof: 0,
+            status: "FullyConstrained",
+            solvedPositions: {},
+          };
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const client = createTauriClient();
+
+    // A LENGTH passes through untouched, addressed by the ids the caller holds
+    // (which for a never-entered sketch ARE the backend ids).
+    const res = await client.setSketchDimension("sk-uuid", "c-uuid", "Distance", 60);
+    expect(res.sketchRevision).toBe(4);
+    expect(upsertArgs?.sketchId).toBe("sk-uuid");
+    expect(upsertArgs?.ops).toEqual([
+      { op: "setDimension", constraint: "c-uuid", value: { value: 60 } },
+    ]);
+
+    // An ANGLE is DEGREES in the UI and RADIANS on the wire (SCHEMA §7.4).
+    await client.setSketchDimension("sk-uuid", "c-ang", "Angle", 45);
+    expect(upsertArgs?.ops?.[0].value?.value).toBeCloseTo(Math.PI / 4, 12);
   });
 
   it("cancelSketch invokes cancel_sketch on the backend sketch id", async () => {

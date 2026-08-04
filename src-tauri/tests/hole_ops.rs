@@ -26,6 +26,10 @@
 //!   step error, never a hole drilled through empty space.
 //! * `saved_hole_reopens_identically` — save → reopen on a FRESH worker replays to
 //!   the same volume, and `document.json` is byte-stable across a second save.
+//! * `a_cross_body_element_ref_never_drills_the_wrong_body` — VF-M7: an ElementId
+//!   minted on body A, reused by a hole on body B, must not seat the drill on B's
+//!   Nth face (`worker/tests/test_cross_body_element_ref.cpp` is the unit-level
+//!   twin). Asserted by exact volume on BOTH bodies.
 //!
 //! Gated on `ONECAD_WORKER_PATH` (else the dev-tree fallback); a missing binary
 //! skips cleanly (CI sets `ONECAD_REQUIRE_WORKER=1` to make that a hard failure).
@@ -828,4 +832,87 @@ fn document_json(path: &std::path::Path) -> Vec<u8> {
     let mut bytes = Vec::new();
     entry.read_to_end(&mut bytes).expect("read document.json");
     bytes
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 8. VF-M7 — a cross-body ElementId must never seat the drill
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// An `ElementId` is globally unique and body-INDEPENDENT (Invariant 2), so nothing
+/// stops one minted on body A from riding an op on body B — a copied/stale ref, or a
+/// hand-authored record. The worker's element-map entry for it carries a `TopoKey`,
+/// which is an ORDINAL in *A's* face map; applying it to B does not fail, it silently
+/// returns B's Nth face. `PlanExecutor::resolve_input_refs` deliberately does not
+/// re-mint an id it already tracks, so the foreign entry reaches the op intact.
+///
+/// The two ordinals really do diverge here, and for an ordinary reason: drilling A
+/// rebuilds A's face map, so `apply_history` relabels A's top face from `f:6` to
+/// `f:5`. `f:5` on the still-pristine B is its **bottom** face — a perfectly valid
+/// ordinal that means something else entirely. Before the VF-M7 fix the drill seated
+/// there and the op died on the point fence ("point is off the resolved face plane")
+/// against a face the user never named, leaving B undrilled at 16000 — a failure no
+/// amount of re-picking could clear. `worker/tests/test_cross_body_element_ref.cpp`
+/// is the unit-level twin, where the same mis-bind drills silently.
+///
+/// Both bodies are volume-checked against `QueryMassProperties`: B must lose exactly
+/// one Ø2 cylinder drilled through its OWN 40 mm from the TOP, and A exactly its own
+/// Ø6 — no drill may wander across bodies in either direction.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cross_body_element_ref_never_drills_the_wrong_body() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let (body_a, top_a) = build_box(&mut rt, SKETCH_A, EXTRUDE_A, 0xA, 0.0, 25.0).await;
+    let (body_b, top_b) = build_box(&mut rt, SKETCH_B, EXTRUDE_B, 0xB, 40.0, 40.0).await;
+
+    // The shared ElementId is minted HERE, against body A's top face.
+    add_op(
+        &mut rt,
+        hole_record(HOLE_A, hole_params(body_a, "el_shared", top_a, 6.0)),
+    );
+    // ...and reused on body B. Only the ElementId is foreign — the anchor names B's
+    // own top face, which is what the resolution ladder must bind instead.
+    add_op(
+        &mut rt,
+        hole_record(HOLE_B, hole_params(body_b, "el_shared", top_b, 2.0)),
+    );
+
+    let rep = regen_all(&mut rt).await;
+    let snap = published(&rep, "cross-body hole");
+    assert_eq!(
+        snap.repair_summary.needs_repair_count, 0,
+        "B's own top-face anchor must auto-bind despite the foreign ElementId"
+    );
+    // Timeline: 0 sketchA, 1 extrudeA, 2 sketchB, 3 extrudeB, 4 holeA, 5 holeB.
+    assert_eq!(
+        snap.step_index,
+        Some(5),
+        "both holes must execute — a mis-seated drill stops the plan at m−1"
+    );
+    assert_eq!(
+        rt.head_body_ids(),
+        vec![body_a, body_b],
+        "both hosts survive with their ids"
+    );
+
+    // B: its OWN 40 mm thickness. A bottom/side-face mis-seat leaves this at 16000,
+    // and drilling the wrong host would leave it there too — neither can pass.
+    let want_b = 16000.0 - removed_volume(2.0, 40.0, None, None);
+    let got_b = exact_volume(&wm, body_b).await;
+    assert!(
+        (got_b - want_b).abs() < want_b * 1e-9,
+        "B must lose exactly its own through-hole: want {want_b}, got {got_b}"
+    );
+
+    // A: exactly one hole. The shared id must not have dragged B's drill back here.
+    let want_a = 10000.0 - removed_volume(6.0, 25.0, None, None);
+    let got_a = exact_volume(&wm, body_a).await;
+    assert!(
+        (got_a - want_a).abs() < want_a * 1e-9,
+        "A must be untouched by the op on B: want {want_a}, got {got_a}"
+    );
+    wm.shutdown().await;
 }
