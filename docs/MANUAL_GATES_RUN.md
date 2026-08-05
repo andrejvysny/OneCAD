@@ -27,6 +27,35 @@
 - [ ] **Undo speed sanity**: on a ~20-feature doc, save, edit the LAST feature,
       undo → revert is near-instant (checkpoint restore, not full replay).
 
+## 0b. SKETCH-PRO SP-2/4/5 (2026-08-05) — pro tools + direct manipulation
+- [ ] **3-point arc (⇧A)**: click start, click end, then move — the arc follows the
+      cursor through the third point; clicking BELOW the chord gives the arc that
+      bulges the other way (not its mirror). Type a radius at the third phase →
+      that exact radius commits with a Radius badge.
+- [ ] **Tangent arc**: draw a line segment, then either DRAG from the chain end or
+      press `A` → the preview is an arc leaving tangent to that segment; click
+      commits and the NEXT segment continues tangentially. No over-constrained
+      badge appears (a weld + entity Tangent would be redundant — it is suppressed).
+- [ ] **Extend (⇧T)**: draw a short segment that stops short of two others; hover
+      near one end → a ghost shows the piece it would ADD; click → it grows to
+      exactly that crossing and keeps its Horizontal/Vertical.
+- [ ] **Direct manipulation**: grab a LINE's middle → the whole line translates
+      (cursor shows a move form); grab a circle's RING → it resizes about its
+      centre (ew-resize form); drag an ARC's endpoint → the sweep reshapes and the
+      radius follows. Esc mid-drag puts each back exactly where it started.
+      Re-open the document: the resized/reshaped geometry is still there (this is
+      the silent-revert bug — a radius that only reached the worker used to snap
+      back on the next edit).
+- [ ] **Polar tracking**: while drawing, approach 45° — the cursor locks onto a
+      dashed ray and the committed angle is exactly 45°, not a rounded 45.0-ish.
+      Also snaps parallel/perpendicular to the previous segment. Toggle it off in
+      the snap popover and the lock disappears.
+- [ ] **Snap radius (S/M/L)**: set L → picks grab from noticeably further away;
+      set S → you must be close. Survives a reload.
+- [ ] **Undo during a drag**: start dragging a point, and while still holding,
+      press ⌘Z → the undo is REFUSED rather than silently thrown away by the
+      pointer-up commit.
+
 ## 0a. SKETCH-PRO SP-0/SP-1 (2026-08-04 session) — live dimensions + conflict UX
 - [ ] **Live dimension chips (Shapr3D-style)**: arm Line, click an anchor, move —
       length + angle chips track the cursor; committed length lands on a round
