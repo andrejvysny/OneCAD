@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { HistoryList, type HistoryRowActions, type HistoryValueEdit } from "./HistoryList";
 import type { FeatureMeta } from "@/stores/documentStore";
-import { ICON_PATHS } from "@/icons/paths";
+import { ICONS, type IconName } from "@/icons/paths";
 import { settingsStore } from "@/stores/settingsStore";
 import { documentStore } from "@/stores/documentStore";
 import { mockClient } from "@/ipc/mockClient";
@@ -284,8 +284,16 @@ describe("HistoryList icons — opType-first lookup (W0.5)", () => {
   // FeatureKind folds Chamfer/Shell into "fillet" and pattern/mirror ops into
   // "boolean" (dto.rs feature_kind) so the icon must key off the exact authored
   // `opType` first, falling back to the coarse `kind` bucket only when absent.
-  function iconPathOf(testId: string): string | null {
-    return screen.getByTestId(testId).querySelector("path")?.getAttribute("d") ?? null;
+  // Icons are multi-element (two-tone), so identity is the full ordered list of
+  // `d` strings, not a single path.
+  function iconPathOf(testId: string): (string | null)[] {
+    return [...screen.getByTestId(testId).querySelectorAll("path")].map((p) =>
+      p.getAttribute("d"),
+    );
+  }
+
+  function iconDef(name: IconName): string[] {
+    return ICONS[name].map((el) => el.d);
   }
 
   it("a folded Chamfer row (kind: fillet) shows the chamfer icon, not the fillet icon", () => {
@@ -298,8 +306,8 @@ describe("HistoryList icons — opType-first lookup (W0.5)", () => {
       status: "ok",
     };
     render(<HistoryList items={[chamferRow]} />);
-    expect(iconPathOf("history-row-c1")).toBe(ICON_PATHS.chamfer);
-    expect(iconPathOf("history-row-c1")).not.toBe(ICON_PATHS.fillet);
+    expect(iconPathOf("history-row-c1")).toEqual(iconDef("chamfer"));
+    expect(iconPathOf("history-row-c1")).not.toEqual(iconDef("fillet"));
   });
 
   it("a folded MirrorBody row (kind: boolean) shows the mirror icon", () => {
@@ -312,7 +320,7 @@ describe("HistoryList icons — opType-first lookup (W0.5)", () => {
       status: "ok",
     };
     render(<HistoryList items={[mirrorRow]} />);
-    expect(iconPathOf("history-row-m1")).toBe(ICON_PATHS.mirrorBody);
+    expect(iconPathOf("history-row-m1")).toEqual(iconDef("mirrorBody"));
   });
 
   it("a folded TransformBody row (kind: boolean) shows the move icon", () => {
@@ -325,8 +333,8 @@ describe("HistoryList icons — opType-first lookup (W0.5)", () => {
       status: "ok",
     };
     render(<HistoryList items={[moveRow]} />);
-    expect(iconPathOf("history-row-t1")).toBe(ICON_PATHS.move);
-    expect(iconPathOf("history-row-t1")).not.toBe(ICON_PATHS.boolean);
+    expect(iconPathOf("history-row-t1")).toEqual(iconDef("move"));
+    expect(iconPathOf("history-row-t1")).not.toEqual(iconDef("boolean"));
   });
 
   it("a row without opType falls back to the kind icon", () => {
@@ -338,7 +346,7 @@ describe("HistoryList icons — opType-first lookup (W0.5)", () => {
       status: "ok",
     };
     render(<HistoryList items={[noOpTypeRow]} />);
-    expect(iconPathOf("history-row-n1")).toBe(ICON_PATHS.fillet);
+    expect(iconPathOf("history-row-n1")).toEqual(iconDef("fillet"));
   });
 });
 

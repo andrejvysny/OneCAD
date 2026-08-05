@@ -474,8 +474,8 @@ function SketchDimensions({ featureId }: { featureId: string }) {
           data-testid={`sketch-dimension-${c.id}`}
           className="mb-1 flex h-[30px] items-center gap-2 rounded-sm bg-chip px-2.5"
         >
-          <span className="w-4 shrink-0 text-center text-[12px] text-ink-5">
-            {CONSTRAINT_PRESENTATION[c.type].glyph}
+          <span className="flex w-4 shrink-0 justify-center text-ink-5">
+            <Icon name={CONSTRAINT_PRESENTATION[c.type].icon} size={14} strokeWidth={1.7} />
           </span>
           <span className="flex-1 truncate text-[12.5px] text-ink-2">{c.type}</span>
           <DimensionInput

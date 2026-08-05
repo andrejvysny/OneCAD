@@ -1,5 +1,5 @@
 import { Button } from "@/ui/Button";
-import { Icon } from "@/icons/Icon";
+import { ICON_MONO, Icon } from "@/icons/Icon";
 import { cn } from "@/ui/cn";
 import { useToolStore } from "@/stores/toolStore";
 import { useViewportStore } from "@/stores/viewportStore";
@@ -35,7 +35,12 @@ export function SketchChromeBar() {
   if (!activeSketchId) {
     return (
       <div className="absolute left-1/2 top-[62px] z-[29] flex h-[38px] -translate-x-1/2 items-center gap-2.5 rounded-md border border-sketch-chrome-border bg-sketch-chrome pl-3.5 pr-1.5 shadow-sketch-pill">
-        <Icon name="penEdit" size={15} strokeWidth={1.8} className="text-accent" />
+        <Icon
+          name="penEdit"
+          size={15}
+          strokeWidth={1.8}
+          className={cn("text-accent", ICON_MONO)}
+        />
         <span className="text-[12.5px] font-semibold text-sel-text">
           Select a sketch plane
         </span>
@@ -53,7 +58,12 @@ export function SketchChromeBar() {
 
   return (
     <div className="absolute left-1/2 top-[62px] z-[29] flex h-[38px] -translate-x-1/2 items-center gap-2.5 rounded-md border border-sketch-chrome-border bg-sketch-chrome pl-3.5 pr-1.5 shadow-sketch-pill">
-      <Icon name="penEdit" size={15} strokeWidth={1.8} className="text-accent" />
+      <Icon
+          name="penEdit"
+          size={15}
+          strokeWidth={1.8}
+          className={cn("text-accent", ICON_MONO)}
+        />
       <span className="text-[12.5px] font-semibold text-sel-text">
         Editing {name}
       </span>

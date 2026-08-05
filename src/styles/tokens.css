@@ -27,6 +27,16 @@
   --color-accent: #2e6fe0;
   --color-accent-hover: #2660c6;
 
+  /* Two-tone icon ACCENT tone: the "operation verb" inside a glyph (the extrude
+     arrow, the revolve axis, the constraint relation mark) — see
+     src/icons/DESIGN.md §3. Deliberately NOT --color-accent: that one tracks
+     interactive chrome, and restyling a button must never silently restyle the
+     internals of every icon. Seeded from the OneCAD-CPP master value #2D7FF9.
+     Containers that already paint the glyph accent-colored (an active
+     ToolButton) collapse this to currentColor locally, which every icon is
+     authored to survive. */
+  --color-icon-accent: #2d7ff9;
+
   /* ---- Selection ---- */
   --color-sel-bg: #e1ebfb;
   --color-sel-text: #1d4fa8;
@@ -177,6 +187,12 @@
   /* Lifted off the light #2e6fe0: that blue is only ~2.4:1 on a #23262b canvas. */
   --color-accent: #4d8bf0;
   --color-accent-hover: #6ba0f5;
+
+  /* Lifted the same way --color-accent is: the light #2d7ff9 sits at ~3.2:1 on
+     the #202327 panel, and icon accents are thin 1.5-2px strokes rather than
+     text, so they need MORE headroom than a glyph-sized contrast check implies.
+     Also has to stay legible on --color-sel-bg #1d3157 (active tool button). */
+  --color-icon-accent: #5aa2ff;
 
   /* ---- Selection ---- */
   --color-sel-bg: #1d3157;

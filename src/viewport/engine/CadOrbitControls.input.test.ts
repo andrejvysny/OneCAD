@@ -9,9 +9,9 @@
  * MouseEvent/WheelEvent stand in (the same trick SketchController.select.test.ts
  * uses).
  */
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as THREE from "three";
-import { CadOrbitControls } from "./CadOrbitControls";
+import { CadOrbitControls, isMacPlatform } from "./CadOrbitControls";
 import { CameraRig } from "./CameraRig";
 import type { DevicePref } from "./navInput";
 
@@ -197,6 +197,65 @@ describe("CadOrbitControls — device reporting", () => {
     padScroll(h.el, 5);
     for (let i = 0; i < 4; i++) wheel(h.el, { deltaY: 120, deltaMode: 1 });
     expect(h.devices).toEqual(["trackpad", "mouse"]);
+  });
+});
+
+describe("CadOrbitControls — macOS trackpad orbit direction", () => {
+  // jsdom's navigator.platform is "" and its UA carries "(darwin)", so the
+  // default environment reads as non-mac; mac cases pin the platform explicitly.
+  const setPlatform = (value: string): void => {
+    Object.defineProperty(window.navigator, "platform", { value, configurable: true });
+  };
+  afterEach(() => setPlatform(""));
+
+  it("isMacPlatform matches WKWebView/Safari platform strings", () => {
+    expect(isMacPlatform({ platform: "MacIntel", userAgent: "" })).toBe(true);
+    expect(isMacPlatform({ platform: "Win32", userAgent: "" })).toBe(false);
+    expect(
+      isMacPlatform({ platform: "", userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X)" }),
+    ).toBe(true);
+  });
+
+  it("reverses shift+scroll orbit on macOS (drag-direction)", () => {
+    setPlatform("MacIntel");
+    const h = setup("trackpad");
+    const pitch = h.controls.pitch;
+    padScroll(h.el, 3, { shiftKey: true }); // deltaY > 0
+    expect(h.controls.pitch).toBeLessThan(pitch);
+  });
+
+  it("keeps scroll-direction orbit off macOS", () => {
+    const h = setup("trackpad");
+    const pitch = h.controls.pitch;
+    padScroll(h.el, 3, { shiftKey: true });
+    expect(h.controls.pitch).toBeGreaterThan(pitch);
+  });
+
+  it("leaves mouse wheel zoom untouched on macOS", () => {
+    setPlatform("MacIntel");
+    const h = setup("mouse");
+    const before = h.controls.getDistance();
+    wheel(h.el, { deltaY: 120 });
+    expect(h.controls.getDistance()).toBeGreaterThan(before);
+  });
+
+  it("leaves LMB-drag orbit direction untouched on macOS", () => {
+    setPlatform("MacIntel");
+    Object.assign(HTMLElement.prototype, {
+      setPointerCapture: () => {},
+      releasePointerCapture: () => {},
+      hasPointerCapture: () => false,
+    });
+    const h = setup();
+    const yaw = h.controls.yaw;
+    h.el.dispatchEvent(
+      new MouseEvent("pointerdown", { button: 0, clientX: 500, clientY: 400, bubbles: true }),
+    );
+    h.el.dispatchEvent(
+      new MouseEvent("pointermove", { clientX: 560, clientY: 400, bubbles: true }),
+    );
+    // dx > 0 ⇒ yaw decreases — same as off-mac; the flip is wheel-orbit only.
+    expect(h.controls.yaw).toBeLessThan(yaw);
   });
 });
 

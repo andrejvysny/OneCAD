@@ -11,7 +11,7 @@
  *
  * TRACKPAD (macOS + Windows precision touchpads — the Fusion 360 convention)
  *   two-finger scroll         = pan
- *   shift + two-finger scroll = orbit
+ *   shift + two-finger scroll = orbit (drag-direction on macOS, see wheelOrbitSign)
  *   pinch                     = zoom-to-cursor
  *
  * Touch: 1-finger drag orbits, 2-finger drag pans + pinch-zooms.
@@ -126,6 +126,19 @@ export function yawForDirection(d: THREE.Vector3): number {
   return Math.hypot(d.x, d.y) < POLE_EPS ? CANONICAL_POLE_YAW : Math.atan2(d.y, d.x);
 }
 
+/**
+ * macOS "natural" scrolling delivers wheel deltas inverted relative to finger
+ * motion, so scroll-direction orbit feels backwards there — the model tilts
+ * against the fingers. macOS trackpad orbit therefore runs in drag-direction
+ * (same negation pan already applies); mouse and Windows-precision-touchpad
+ * behaviour is unchanged. Exported for tests.
+ */
+export function isMacPlatform(
+  nav: Pick<Navigator, "platform" | "userAgent"> = navigator,
+): boolean {
+  return /Mac/i.test(nav.platform) || /Macintosh/i.test(nav.userAgent);
+}
+
 // ---- Controller ----------------------------------------------------------
 
 const ORBIT_SPEED = 0.008;
@@ -204,6 +217,8 @@ export class CadOrbitControls {
   /** Pure reducer state for wheel + gesture routing. */
   private nav: NavState = navInit();
   private lastDevice: InputDevice | null = null;
+  /** −1 on macOS: trackpad orbit runs in drag-direction there (see isMacPlatform). */
+  private readonly wheelOrbitSign: 1 | -1;
 
   constructor(opts: OrbitOptions) {
     this.rig = opts.rig;
@@ -214,6 +229,7 @@ export class CadOrbitControls {
     this.getDevicePref = opts.getDevicePref ?? (() => "auto");
     this.isDragActive = opts.isDragActive ?? (() => false);
     this.onDeviceChange = opts.onDeviceChange ?? null;
+    this.wheelOrbitSign = isMacPlatform() ? -1 : 1;
     this.el.addEventListener("pointerdown", this.onPointerDown);
     this.el.addEventListener("pointermove", this.onPointerMove);
     this.el.addEventListener("pointerup", this.onPointerUp);
@@ -359,7 +375,8 @@ export class CadOrbitControls {
         break;
       case "orbit":
         // A camera move mid-drag would make the dragged value jump.
-        if (!this.isDragActive()) this.applyOrbit(op.dx, op.dy);
+        if (!this.isDragActive())
+          this.applyOrbit(this.wheelOrbitSign * op.dx, this.wheelOrbitSign * op.dy);
         break;
       case "zoom":
         this.zoomAtScreen(op.clientX, op.clientY, op.factor);

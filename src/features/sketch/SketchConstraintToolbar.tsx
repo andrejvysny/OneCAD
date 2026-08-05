@@ -8,6 +8,7 @@
  * open the seeded Dimension chip). Shown only while editing a sketch.
  */
 import { useMemo, useRef } from "react";
+import { Icon } from "@/icons/Icon";
 import { cn } from "@/ui/cn";
 import { useToolStore } from "@/stores/toolStore";
 import { useSketchStore } from "@/stores/sketchStore";
@@ -43,7 +44,7 @@ export function SketchConstraintToolbar() {
   const button = (type: SketchConstraintType) => {
     const applicable = byType.get(type);
     const enabled = applicable !== undefined;
-    const { glyph, label } = CONSTRAINT_PRESENTATION[type];
+    const { icon, label } = CONSTRAINT_PRESENTATION[type];
     return (
       <button
         key={type}
@@ -55,13 +56,13 @@ export function SketchConstraintToolbar() {
           if (applicable && clientRef.current) void applyConstraint(clientRef.current, applicable);
         }}
         className={cn(
-          "flex h-7 min-w-7 items-center justify-center rounded-sm px-1 text-[13px] font-semibold leading-none transition-colors",
+          "flex h-7 min-w-7 items-center justify-center rounded-sm px-1 leading-none transition-colors",
           enabled
             ? "cursor-pointer text-ink-4 hover:bg-hover-3 focus-visible:shadow-focus-ring focus-visible:outline-none"
             : "cursor-default text-ink-5 opacity-40",
         )}
       >
-        {glyph}
+        <Icon name={icon} size={17} strokeWidth={1.7} />
       </button>
     );
   };

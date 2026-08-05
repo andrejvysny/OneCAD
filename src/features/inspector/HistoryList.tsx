@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { cn } from "@/ui/cn";
-import { Icon } from "@/icons/Icon";
+import { ICON_MONO, Icon } from "@/icons/Icon";
 import { MenuItem } from "@/ui/MenuItem";
 import { Popover } from "@/ui/Popover";
 import { MonoValue } from "@/ui/MonoValue";
@@ -161,10 +161,15 @@ const TONE_TEXT: Record<HistoryRowTone, string> = {
   repair: "text-warn",
   stale: "text-ink-6",
 };
+/*
+ * `normal` and `stale` are neutral inks, so they keep the icon two-tone. The
+ * other two paint it a state hue and must collapse the accent with it — see
+ * ICON_MONO.
+ */
 const TONE_ICON: Record<HistoryRowTone, string> = {
   normal: "text-ink-4",
-  error: "text-traffic-close",
-  repair: "text-warn",
+  error: `text-traffic-close ${ICON_MONO}`,
+  repair: `text-warn ${ICON_MONO}`,
   stale: "text-ink-6",
 };
 
@@ -260,7 +265,7 @@ function FeatureRow({
         name={OPTYPE_ICON[item.opType ?? ""] ?? FEATURE_ICON[item.kind]}
         size={14}
         strokeWidth={1.7}
-        className={selected ? "text-sel-text" : TONE_ICON[tone]}
+        className={selected ? `text-sel-text ${ICON_MONO}` : TONE_ICON[tone]}
       />
       <span
         className={cn(
@@ -469,7 +474,11 @@ function RowIconButton({
       onClick={onClick}
       className={cn(
         "flex h-5 w-5 items-center justify-center rounded-sm hover:bg-hover-3",
-        danger ? "text-traffic-close" : active ? "text-warn" : "text-ink-5",
+        danger
+          ? `text-traffic-close ${ICON_MONO}`
+          : active
+            ? `text-warn ${ICON_MONO}`
+            : "text-ink-5",
       )}
     >
       <Icon name={icon} size={13} strokeWidth={1.8} />

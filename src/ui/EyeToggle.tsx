@@ -3,7 +3,7 @@ import { cn } from "./cn";
 import { Icon } from "@/icons/Icon";
 
 type EyeToggleProps = {
-  /** true = visible (eye shown at 0.85 opacity), false = hidden (0.3). */
+  /** true = visible (open eye, 0.85 opacity), false = hidden (struck-through eye, 0.3). */
   on: boolean;
   onChange: (on: boolean) => void;
   ariaLabel?: string;
@@ -12,9 +12,14 @@ type EyeToggleProps = {
 };
 
 /**
- * Visibility toggle rendered as the single `eye` glyph whose opacity encodes
- * state (prototype tree rows: 0.85 on ↔ 0.3 off, hover → 1). No eye-off glyph
- * exists in the prototype.
+ * Visibility toggle. State is carried by the GLYPH (open eye vs struck-through
+ * eye) and reinforced by opacity (prototype tree rows: 0.85 on ↔ 0.3 off,
+ * hover → 1).
+ *
+ * The prototype had no eye-off glyph, so state used to be opacity ALONE — which
+ * meant a hidden row and a dimmed-but-visible row looked the same, and the
+ * control read as "faint" rather than "off". The CAD icon family ships both
+ * halves of the pair, so the distinction is now in the shape.
  */
 export function EyeToggle({
   on,
@@ -38,7 +43,7 @@ export function EyeToggle({
         className,
       )}
     >
-      <Icon name="eye" size={14} strokeWidth={1.6} />
+      <Icon name={on ? "eyeOn" : "eyeOff"} size={14} strokeWidth={1.6} />
     </button>
   );
 }

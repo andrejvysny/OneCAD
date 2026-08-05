@@ -7,6 +7,7 @@
  * move), floated a fixed offset above via CSS. Hidden when the selection or the
  * applicable set is empty, so Esc / selection-change dismisses it naturally.
  */
+import { Icon } from "@/icons/Icon";
 import { useEffect, useRef } from "react";
 import { useToolStore } from "@/stores/toolStore";
 import { useSketchStore } from "@/stores/sketchStore";
@@ -57,7 +58,7 @@ export function ConstraintContextChips() {
       <div ref={hostRef}>
         <div className="pointer-events-auto inline-flex -translate-x-1/2 -translate-y-9 items-center gap-0.5 rounded-md border border-border bg-surface p-0.5 shadow-panel">
           {applicables.map((a, i) => {
-            const { glyph, label } = CONSTRAINT_PRESENTATION[a.type];
+            const { icon, label } = CONSTRAINT_PRESENTATION[a.type];
             return (
               <button
                 key={`${a.type}-${i}`}
@@ -67,9 +68,9 @@ export function ConstraintContextChips() {
                 onClick={() => {
                   if (clientRef.current) void applyConstraint(clientRef.current, a);
                 }}
-                className="flex h-6 min-w-6 cursor-pointer items-center justify-center rounded-sm px-1 text-[12px] font-semibold leading-none text-ink-4 hover:bg-hover-3 hover:text-accent focus-visible:shadow-focus-ring focus-visible:outline-none"
+                className="flex h-6 min-w-6 cursor-pointer items-center justify-center rounded-sm px-1 leading-none text-ink-4 hover:bg-hover-3 hover:text-accent focus-visible:shadow-focus-ring focus-visible:outline-none"
               >
-                {glyph}
+                <Icon name={icon} size={15} strokeWidth={1.7} />
               </button>
             );
           })}

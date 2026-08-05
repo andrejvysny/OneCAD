@@ -1,6 +1,6 @@
 import { useRef, useState, type ReactNode } from "react";
 import { Icon } from "@/icons/Icon";
-import { ICON_PATHS, type IconName } from "@/icons/paths";
+import { ICONS, type IconName } from "@/icons/paths";
 import { Button } from "@/ui/Button";
 import { SegmentedToggle } from "@/ui/SegmentedToggle";
 import { Switch } from "@/ui/Switch";
@@ -51,7 +51,7 @@ export default function DevGallery() {
   const [showHints, setShowHints] = useState(true);
   const snapBtn = useRef<HTMLButtonElement | null>(null);
 
-  const iconNames = Object.keys(ICON_PATHS) as IconName[];
+  const iconNames = (Object.keys(ICONS) as IconName[]).sort();
 
   return (
     <div className="min-h-full w-full overflow-auto bg-canvas font-ui text-ink">

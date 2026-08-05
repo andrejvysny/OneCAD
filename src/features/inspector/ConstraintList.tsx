@@ -1,5 +1,5 @@
 import { MonoValue } from "@/ui/MonoValue";
-import { Icon } from "@/icons/Icon";
+import { ICON_MONO, Icon } from "@/icons/Icon";
 import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
 import { CONSTRAINT_PRESENTATION } from "@/features/sketch/constraintCatalog";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -82,7 +82,8 @@ function ConstraintRow({
   // Subscribed per row so a unit switch repaints the value column immediately;
   // the list is otherwise driven by the sketch session, which does not change.
   const value = valueText(constraint, useSettingsStore((s) => s.displayUnit));
-  const glyphTone = conflicting ? "text-traffic-close" : "text-ink-5";
+  // Red primary + blue accent reads as neither, so a conflicting row collapses.
+  const glyphTone = conflicting ? `text-traffic-close ${ICON_MONO}` : "text-ink-5";
   const typeTone = conflicting ? "text-traffic-close" : "text-ink-2";
   return (
     <div
@@ -92,8 +93,12 @@ function ConstraintRow({
       onMouseLeave={() => sketchSelectionStore.getState().setConstraintHover(null)}
       className="group mb-1 flex h-[30px] items-center gap-2 rounded-sm bg-chip px-2.5 hover:bg-hover-2"
     >
-      <span className={`w-4 shrink-0 text-center text-[12px] ${glyphTone}`}>
-        {CONSTRAINT_PRESENTATION[constraint.type].glyph}
+      <span className={`flex w-4 shrink-0 justify-center ${glyphTone}`}>
+        <Icon
+          name={CONSTRAINT_PRESENTATION[constraint.type].icon}
+          size={14}
+          strokeWidth={1.7}
+        />
       </span>
       <span className={`flex-1 truncate text-[12.5px] ${typeTone}`}>{constraint.type}</span>
       <MonoValue className="shrink-0 text-[11px] text-ink-6">

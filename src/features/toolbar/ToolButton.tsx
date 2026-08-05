@@ -1,6 +1,6 @@
 import { cn } from "@/ui/cn";
 import { Tooltip } from "@/ui/Tooltip";
-import { Icon } from "@/icons/Icon";
+import { ICON_MONO, Icon } from "@/icons/Icon";
 import type { IconName } from "@/icons/paths";
 
 type ToolButtonProps = {
@@ -14,6 +14,12 @@ type ToolButtonProps = {
 /**
  * 34px floating-toolbar tool (prototype 1c). Active = selection-tint bg + accent
  * icon; hover surface otherwise. Tooltip shows "Label (Shortcut)" below.
+ *
+ * The active state paints the whole glyph accent-colored, which would leave a
+ * two-tone icon showing two near-identical blues instead of a readable
+ * primary/accent split. It collapses to monochrome there by pointing
+ * `--color-icon-accent` at `currentColor` — the mono preset every icon in the
+ * family is authored to survive (src/icons/DESIGN.md §3).
  */
 export function ToolButton({
   icon,
@@ -32,7 +38,9 @@ export function ToolButton({
         className={cn(
           "flex h-[34px] w-[34px] cursor-pointer items-center justify-center rounded-sm border-none transition-colors",
           "hover:bg-hover-3 focus-visible:shadow-focus-ring focus-visible:outline-none",
-          active ? "bg-sel-bg text-accent" : "bg-transparent text-ink-4",
+          active
+            ? cn("bg-sel-bg text-accent", ICON_MONO)
+            : "bg-transparent text-ink-4",
         )}
       >
         <Icon name={icon} size={18} strokeWidth={1.7} />

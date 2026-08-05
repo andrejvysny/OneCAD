@@ -1,139 +1,64 @@
 /*
- * OneCAD icon path table.
+ * The OneCAD icon registry.
  *
- * Every `d` string below is extracted VERBATIM from the design prototype:
- *   design/project/OneCAD UI Explorations.dc.html
+ * PROVENANCE. The bulk of this set is the purpose-built two-tone CAD icon
+ * family from `OneCAD-CPP/resources/icons/` — 88 masters drawn against a single
+ * spec (mirrored here as `./DESIGN.md`: 24x24 grid, 20x20 live area, one shared
+ * dimetric projection, "exactly one idea gets the accent"). They arrive via
+ * `./cppIcons.generated.ts`; regenerate with `node scripts/gen-icons.mjs`.
  *
- * Provenance (prototype line numbers):
- *   - Model toolbar tools .......... static MD table, lines 503-511
- *   - Sketch toolbar tools ......... static SK table, lines 512-523
- *   - Named glyphs (pen/cube/...) .. static ICONS table, lines 497-502
- *   - Inline chrome/start SVGs ..... individual lines cited per entry below
+ * This SUPERSEDES the earlier contract, under which every path was extracted
+ * verbatim from the HTML design prototype. That set was single-path and
+ * monochrome, covered none of the 18 constraints, and explicitly refused to
+ * supply an `eye-off`. The CPP family is now the app's icon language; glyphs
+ * survive outside it only where CPP has no counterpart — see `./authored.ts`,
+ * which keeps their original per-entry provenance.
  *
- * Notes on intentional duplicates (kept as distinct keys because the prototype
- * uses them under distinct names / the migration plan references them by name):
- *   - `pen` === `sketch`   (ICONS.pen is the New-sketch tool glyph)
- *   - `display` === `cube` (the display-mode button reuses the cube hexagon)
- *
- * `eye-off` is intentionally ABSENT: the prototype has no eye-off glyph. Hidden
- * state is expressed by lowering the opacity of the single `eye` icon
- * (see EyeToggle / prototype line 187, opacity 0.85 on ↔ 0.3 off). Inventing an
- * eye-off path would violate the "icons verbatim" contract.
+ * ALIASES. Call sites keep the names they already use rather than churning 18
+ * files to rename `rect` -> `rectangle`. An alias is one icon under two names,
+ * a pattern this registry already had (`pen` === `sketch`, `display` === `cube`).
  */
 
-export const ICON_PATHS = {
-  // ---- Model toolbar tools (MD table, lines 503-511) ----
-  select: "M5.5 3.5l6.5 16 2.2-6.8 6.8-2.2z",
-  sketch: "M4.5 19.5l1.2-4L15.5 5.7l2.8 2.8L8.5 18.3l-4 1.2zM13.5 7.7l2.8 2.8",
-  extrude: "M12 10V3.5M9.2 5.8L12 3.5l2.8 2.3M5.5 13.5h13v6.5h-13z",
-  revolve: "M19.3 13a7.3 7.3 0 1 1-2-6M19.5 4v3.5H16",
-  fillet: "M4.5 19.5V11a6.5 6.5 0 0 1 6.5-6.5h8.5",
-  // Chamfer = the fillet corner with a straight bevel instead of the arc.
-  chamfer: "M4.5 19.5V11l6.5-6.5h8.5",
-  boolean: "M14 12a4.3 4.3 0 1 1-8.6 0 4.3 4.3 0 0 1 8.6 0zM18.6 12a4.3 4.3 0 1 1-8.6 0 4.3 4.3 0 0 1 8.6 0z",
+import { AUTHORED_ICONS } from "./authored";
+import { CPP_ICONS } from "./cppIcons.generated";
+import type { IconDef } from "./types";
 
-  // ---- Sketch toolbar tools (SK table, lines 512-523) ----
-  line: "M5 19L19 5",
-  rect: "M5 6.5h14v11H5z",
-  circle: "M19 12a7 7 0 1 1-14 0 7 7 0 0 1 14 0z",
-  arc: "M5 19A14 14 0 0 1 19 5",
-  dimension: "M4 12h16M4 8.5v7M20 8.5v7",
-  trim: "M8 7a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM8 17a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM7.5 8.4L19 19M7.5 15.6L19 5",
-  mirror: "M12 4v16M8.5 8L5 12l3.5 4M15.5 8L19 12l-3.5 4",
+/**
+ * Legacy call-site names -> their master in the CPP family.
+ *
+ * `mirror` is deliberately NOT aliased: it maps 1:1 by name already, and the
+ * solid-body mirror is a separate authored glyph (`mirrorBody`) because CPP
+ * ships only the flat sketch form. Collapsing the two would hand two distinct
+ * toolbar entries the same icon.
+ */
+const ALIASES = {
+  rect: CPP_ICONS.rectangle,
+  boolean: CPP_ICONS.booleanUnion,
+  cube: CPP_ICONS.body,
+  display: CPP_ICONS.body,
+  eye: CPP_ICONS.eyeOn,
+  x: CPP_ICONS.close,
+  datum: CPP_ICONS.plane,
+  layers: CPP_ICONS.stack,
+  pen: CPP_ICONS.sketch,
+  penEdit: CPP_ICONS.edit,
+  linearPattern: CPP_ICONS.patternLinear,
+  circularPattern: CPP_ICONS.patternCircular,
+} as const satisfies Record<string, IconDef>;
 
-  // ---- Named glyphs (ICONS table, lines 497-502) ----
-  pen: "M4.5 19.5l1.2-4L15.5 5.7l2.8 2.8L8.5 18.3l-4 1.2zM13.5 7.7l2.8 2.8", // === sketch
-  cube: "M12 3l7.5 4.3v9.4L12 21l-7.5-4.3V7.3L12 3zM12 11.6l7.5-4.3M12 11.6L4.5 7.3M12 11.6V21",
+/*
+ * `as const` is what makes `IconName` the exact union of registered names, but
+ * it also narrows every element to its literal shape — so an element authored
+ * without `tone` gets a type on which `tone` does not EXIST, and the renderer
+ * cannot read the field at all. Infer the key union from the literal, then
+ * publish the registry through the widened element type.
+ */
+const REGISTRY = {
+  ...CPP_ICONS,
+  ...AUTHORED_ICONS,
+  ...ALIASES,
+} as const satisfies Record<string, IconDef>;
 
-  // ---- Inline chrome / start-screen SVGs ----
-  plus: "M12 5v14M5 12h14", // New project (line 52)
-  import: "M12 4v9M8.5 10L12 13.5 15.5 10M5 16v3.5h14V16", // Import STEP (line 54)
-  search: "M15.5 15.5L20 20M11 17a6 6 0 1 1 0-12 6 6 0 0 1 0 12z", // search (line 60)
-  chevronDown: "M6 9l6 6 6-6", // sort dropdown (line 64)
-  clock: "M12 8v4l2.5 2.5M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z", // Recent (line 101)
-  star: "M12 4l2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4L4.2 9.7l5.4-.8L12 4z", // Starred (line 102)
-  template: "M4.5 7.5h15v12h-15zM8 7.5V5h8v2.5", // Templates (line 103)
-  eye: "M2.5 12S6 6.5 12 6.5 21.5 12 21.5 12 18 17.5 12 17.5 2.5 12 2.5 12zM14.4 12a2.4 2.4 0 1 1-4.8 0 2.4 2.4 0 0 1 4.8 0z", // eye (line 187)
-  x: "M6 6l12 12M18 6L6 18", // Cancel (line 176)
-  check: "M5 12.5l4.5 4.5L19 7", // Finish sketch (line 177)
-  display: "M12 3l7.5 4.3v9.4L12 21l-7.5-4.3V7.3L12 3zM12 11.6l7.5-4.3M12 11.6L4.5 7.3M12 11.6V21", // display mode (line 241) === cube
-  grid: "M4.5 4.5h15v15h-15zM9.5 4.5v15M14.5 4.5v15M4.5 9.5h15M4.5 14.5h15", // grid (line 242)
-  snap: "M6 3.5h4.5V11a1.5 1.5 0 0 0 3 0V3.5H18V11a6 6 0 0 1-12 0V3.5zM6 7h4.5M13.5 7H18", // magnet (line 243)
-  home: "M4.5 10.5L12 4l7.5 6.5M6.5 9.5V20h11V9.5", // home view (line 272)
-  fit: "M4 9V4.5h4.5M20 9V4.5h-4.5M4 15v4.5h4.5M20 15v4.5h-4.5", // zoom to fit (line 273)
-  layers: "M12 4l8 4.2-8 4.2-8-4.2L12 4zM4.5 12.5L12 16.4l7.5-3.9M4.5 16.5L12 20.4l7.5-3.9", // view presets (line 274)
-  penEdit: "M4.5 19.5l1.2-4L15.5 5.7l2.8 2.8L8.5 18.3l-4 1.2z", // "Editing sketch" badge, pen body only (line 173)
+export type IconName = keyof typeof REGISTRY;
 
-  // ---- M6b model-op tools (authored for this WP, NOT from the prototype) ----
-  // Same conventions as the prototype glyphs: 24×24 grid, single stroked path,
-  // fill none, round caps/joins, weights read cleanly at 14–15px.
-  shell: "M4.5 7.5h15v12h-15zM8 7.5v8.5h8v-8.5", // hollow box, open top (removed face)
-  linearPattern: "M4 8h4v4H4zM10 8h4v4h-4zM16 8h4v4h-4z", // three instances in a row
-  circularPattern: "M18 12a6 6 0 1 1-12 0 6 6 0 0 1 12 0zM11 5h2v2h-2zM5.8 14h2v2h-2zM16.2 14h2v2h-2z", // instances around a circle
-  mirrorBody: "M12 4v16M4 9h4v6H4zM16 9h4v6h-4z", // a body + its reflection across a plane
-
-  // ---- WP-B W1 TransformBody (authored for this WP, NOT from the prototype) ----
-  // Same conventions as the M6b glyphs above. The four-way move motif: the two
-  // axes with arrowheads on all four ends — the universally-read "place this".
-  move: "M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3",
-
-  // ---- W2-B/C sketch tools (authored for this WP, NOT from the prototype) ----
-  // Same conventions as the prototype glyphs: 24×24 grid, single stroked path,
-  // fill none, round caps/joins, weights read cleanly at 14–15px.
-  centerRect: "M5 6.5h14v11H5zM10 12h4M12 10v4", // the rect glyph + its centre mark
-  polygon: "M12 4L18.9 8V16L12 20L5.1 16V8Z", // regular hexagon (default 6 sides)
-  slot: "M8.5 7.5h7a4.5 4.5 0 0 1 0 9h-7a4.5 4.5 0 0 1 0-9z", // stadium: 2 walls + 2 caps
-  point: "M13.5 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zM12 4.5v3M12 16.5v3M4.5 12h3M16.5 12h3", // dot + crosshair ticks
-
-  // ---- WP-C T2b sketch offset (authored for this WP, NOT from the prototype) ----
-  // An L-shaped chain plus its parallel copy inset into the corner — the motif
-  // every CAD uses for "offset". Reads distinctly from `mirror` (a reflection
-  // across a centre line) and `linearPattern` (repeated islands).
-  offset: "M4.5 18.5V7.5h11M8 18.5V11h7.5",
-
-  // ---- W3 P3 ellipse tool (authored for this WP, NOT from the prototype) ----
-  // The `circle` glyph's two-arc construction with rx=8, ry=5 (a wide ellipse
-  // reads unambiguously against the circle at 14–15px).
-  ellipse: "M20 12a8 5 0 1 1-16 0 8 5 0 0 1 16 0z",
-
-  // ---- DATUM W1 datum plane (authored for this WP, NOT from the prototype) ----
-  // Plane-with-offset motif: a base plane parallelogram, the same plane offset
-  // above it, and the offset distance drawn on the shared left corner. Reads
-  // distinctly from `sketch`/`pen` (a pencil) and `grid` (a square lattice).
-  datum: "M3 15l9-3.5 9 3.5-9 3.5-9-3.5zM3 8.5l9-3.5 9 3.5-9 3.5-9-3.5M3 15V8.5",
-
-  // ---- WP-C T3 hole (authored for this WP, NOT from the prototype) ----
-  // A bore seen in three-quarter view: the elliptical mouth, the two side walls
-  // dropping from it, the bottom arc closing them, and the host face running out
-  // to both sides. The face lines are what separate it from `circle`/`ellipse` —
-  // a hole is a hole because it is IN something.
-  hole: "M17 7.5a5 2.5 0 1 1-10 0 5 2.5 0 0 1 10 0zM7 7.5v8a5 2.5 0 0 0 10 0v-8M2.5 7.5h4.5M17 7.5h4.5",
-
-  // ---- W2-B measure (authored for this WP, NOT from the prototype) ----
-  // A ruler laid diagonally with three graduation ticks striking inward from its
-  // upper edge. Reads distinctly from `dimension` (a plain arrowed extension
-  // line) and `line`, which are the two it could otherwise be confused with.
-  measure:
-    "M14.5 3.5l6 6-10 10-6-6zM10.5 7.5l2 2M8 10l2 2M5.5 12.5l2 2",
-
-  // ---- W3 isolate (authored for this WP, NOT from the prototype) ----
-  // A single body (the `cube` hexagon, shrunk) inside four corner brackets:
-  // "show only this". The brackets point INWARD, which is what separates it from
-  // `fit`, whose brackets are the same corners opening outward.
-  isolate:
-    "M12 8.4l3.6 2.1v4.2L12 16.8l-3.6-2.1v-4.2zM4.5 8V4.5H8M16 4.5h3.5V8M19.5 16v3.5H16M8 19.5H4.5V16",
-
-  // ---- DARK-MODE appearance (authored for this WP, NOT from the prototype) ----
-  // One glyph per ThemePref, so the title-bar button always shows the CURRENT
-  // preference rather than a generic "theme" symbol. Drawn on the same 24-grid
-  // at the same stroke weight as the tool glyphs.
-  // Sun: disc + eight rays (two arcs close the disc, as `boolean` does).
-  themeLight:
-    "M12 8.2a3.8 3.8 0 1 1 0 7.6 3.8 3.8 0 0 1 0-7.6M12 3v2.2M12 18.8V21M4.6 4.6l1.6 1.6M17.8 17.8l1.6 1.6M3 12h2.2M18.8 12H21M4.6 19.4l1.6-1.6M17.8 6.2l1.6-1.6",
-  // Crescent: one arc cut by another, no fill (stroke-only like every glyph).
-  themeDark: "M20 14.2A8.2 8.2 0 0 1 9.8 4 8.4 8.4 0 1 0 20 14.2z",
-  // Monitor = "whatever the desktop says" (System).
-  themeSystem: "M3.5 5.5h17v10h-17zM9 19.5h6M12 15.5v4",
-} as const;
-
-export type IconName = keyof typeof ICON_PATHS;
+export const ICONS: Record<IconName, IconDef> = REGISTRY;
