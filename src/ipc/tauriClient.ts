@@ -43,6 +43,7 @@ import type { CadClient } from "./client";
 import type {
   ApplyOperationResult,
   BeginGestureResult,
+  CurveParams,
   DocumentChange,
   DocumentProjectionWire,
   DocumentSnapshot,
@@ -53,6 +54,7 @@ import type {
   FeatureDependencies,
   FeatureRecord,
   FinishSketchResult,
+  GestureTarget,
   Lod,
   NeedsRepairEvent,
   OperationOp,
@@ -94,6 +96,7 @@ import {
   frontendConflictingIds,
   frontendConstraintsFromDto,
   frontendEntitiesFromDto,
+  frontendSolvedCurves,
   frontendSolvedPositions,
   marshalUpsert,
   mintUuid,
@@ -241,10 +244,21 @@ interface SketchUpsertDto {
   /** Backend constraint uuids in conflict (SCHEMA §7.4); mapped to frontend ids. */
   conflicting?: string[];
   solvedPositions: Record<string, [number, number]>;
+  /** CHANGED curve members, keyed by backend entity uuid (SCHEMA §7.4 `curves`;
+   *  Rust always serializes it, older payloads simply lack the key). */
+  solvedCurves?: Record<string, CurveParams>;
 }
 interface BeginGestureDto {
   gestureId: number;
   ready: boolean;
+}
+/** `BeginGesture.drag` as the Rust command deserializes it (`GestureTargetArgs`,
+ *  camelCase): `entity` is a BACKEND uuid, `role` one of the §7.4 tokens. */
+interface GestureTargetArgs {
+  kind: GestureTarget["kind"];
+  entity: string;
+  role?: string;
+  grab?: [number, number];
 }
 interface DragSolveDto {
   gestureId: number;
@@ -253,6 +267,8 @@ interface DragSolveDto {
   dof: number;
   conflicting: string[];
   positions: Record<string, [number, number]>;
+  /** CHANGED curve members, keyed by backend entity uuid (SCHEMA §7.4 `curves`). */
+  curves?: Record<string, CurveParams>;
   solveMicros: number;
   superseded: boolean;
 }
@@ -1049,6 +1065,9 @@ export function createTauriClient(): CadClient {
       // reverse-map them to the frontend `entityId.point` keys the SketchController
       // applies (via the COMMITTED clone's id-map). Unknown keys are dropped.
       solvedPositions: frontendSolvedPositions(draft, dto.solvedPositions),
+      // SP-2 `curves` — a solve can move a curve PARAMETER (a Tangent propagating
+      // into a radius) with no point moving at all.
+      solvedCurves: frontendSolvedCurves(draft, dto.solvedCurves),
     };
   }
 
@@ -1092,6 +1111,7 @@ export function createTauriClient(): CadClient {
       // No map ⇒ the wire ids ARE the ids the caller knows; pass them through.
       conflicting: map ? frontendConflictingIds(map, dto.conflicting) : (dto.conflicting ?? []),
       solvedPositions: map ? frontendSolvedPositions(map, dto.solvedPositions) : {},
+      solvedCurves: map ? frontendSolvedCurves(map, dto.solvedCurves) : {},
     };
   }
 
@@ -1218,18 +1238,51 @@ export function createTauriClient(): CadClient {
   let dragSketchId: string | null = null;
   let dragMaxSeq = 0;
 
-  async function beginGesture(sketchId: string, dragPointId: string): Promise<BeginGestureResult> {
+  /**
+   * Marshal a frontend {@link GestureTarget} into the Rust command's
+   * `GestureTargetArgs` (SCHEMA §7.4), translating `entityId` per kind:
+   *
+   *  - `point` — the same ref ladder `dragPoint` uses (synthesized point → entity
+   *    → raw pass-through); `pointId` wins on that path anyway, so an unmapped ref
+   *    is no worse than today's.
+   *  - every other kind — a real ENTITY uuid, or THROW. A non-uuid would be
+   *    refused at the command boundary (`EntityId::from_str`) after the gesture
+   *    state was already armed; failing here names the id that could not be mapped.
+   */
+  function wireGestureTarget(map: SketchIdMap, target: GestureTarget): GestureTargetArgs {
+    const { kind, entityId, role, grab } = target;
+    const entity =
+      kind === "point"
+        ? (map.point.get(entityId) ?? map.entity.get(entityId) ?? entityId)
+        : map.entity.get(entityId);
+    if (!entity) {
+      throw new Error(`beginGesture: ${kind} target ${entityId} is not a mapped sketch entity`);
+    }
+    return { kind, entity, ...(role ? { role } : {}), ...(grab ? { grab } : {}) };
+  }
+
+  async function beginGesture(
+    sketchId: string,
+    dragPointId: string,
+    target?: GestureTarget,
+  ): Promise<BeginGestureResult> {
     await ensureEvents();
     const map = sketchMaps.get(sketchId);
     if (!map) throw new Error(`beginGesture: unknown sketch ${sketchId} (enter first)`);
     // Translate the frontend point ref → backend point UUID (a synthesized point,
     // a Point entity, or an already-real uuid pass-through).
     const dragPoint = map.point.get(dragPointId) ?? map.entity.get(dragPointId) ?? dragPointId;
+    // Marshal BEFORE arming the gesture state: an unmappable target must leave no
+    // half-open drag behind for the next solveDrag/endGesture to reconcile against.
+    const args = target ? wireGestureTarget(map, target) : undefined;
     dragSketchId = sketchId;
     dragMaxSeq = 0;
     const dto = await call<BeginGestureDto>(CMD.beginGesture, {
       sketchId: map.backendSketchId,
       dragPoint,
+      // Omitted entirely when absent — Rust's `Option<GestureTargetArgs>` then
+      // defaults to the plain point drag and the request stays pre-SP-2 identical.
+      ...(args ? { target: args } : {}),
     });
     return { gestureId: dto.gestureId, ready: dto.ready };
   }
@@ -1253,6 +1306,10 @@ export function createTauriClient(): CadClient {
       // frontend ids (previously passed raw UUIDs the UI could never match to a row).
       conflicting: map ? frontendConflictingIds(map, dto.conflicting) : [],
       positions: map ? frontendSolvedPositions(map, dto.positions) : dto.positions,
+      // SP-2: the `curves` channel is keyed by backend ENTITY uuid (not point
+      // uuid) — reverse-map it the same way. A `radius` drag's whole result
+      // arrives here, with `positions` legitimately empty.
+      curves: map ? frontendSolvedCurves(map, dto.curves) : {},
       solveMicros: dto.solveMicros,
       superseded: dto.superseded,
     };
@@ -1273,6 +1330,10 @@ export function createTauriClient(): CadClient {
       conflicting: map ? frontendConflictingIds(map, dto.conflicting) : [],
       // Reverse-map backend point UUIDs → frontend `entityId.point` keys (F-WP9).
       solvedPositions: map ? frontendSolvedPositions(map, dto.solvedPositions) : dto.solvedPositions,
+      // SP-2 `curves`, baselined at BeginGesture: an arc's solved radius/angles and
+      // a radius drag's whole result ride ONLY here — `solvedPositions` cannot carry
+      // them (the Rust Arc owns no endpoint entities, a radius moves no point).
+      solvedCurves: map ? frontendSolvedCurves(map, dto.solvedCurves) : {},
     };
   }
 

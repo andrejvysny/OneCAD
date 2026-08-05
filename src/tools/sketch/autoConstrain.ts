@@ -20,6 +20,8 @@
  *     within ±5° (`tangentTolerance`). This is the exact legacy rule — the C++
  *     `inferTangent` only handles arc-start-tangent-to-line. (Line↔circle and
  *     arc↔arc tangency exist as SNAPS, not as legacy auto-constraints — seam.)
+ *     DIVERGENCE FROM LEGACY: skipped when this same batch already emitted a
+ *     Coincident between the SAME two entities — see `weldedTo`.
  *   - Concentric: a new circle/arc's CENTER within `CONCENTRIC_TOLERANCE` (2mm,
  *     `coincidenceTolerance`, AutoConstrainer.h:61) of an existing circle/arc's
  *     center, nearest wins (`AutoConstrainer::inferConcentric`,
@@ -300,6 +302,35 @@ export function inferEqualRadiusPartner(
 }
 
 /**
+ * Is this batch already WELDING the arc to the line — a Coincident naming both?
+ *
+ * THE WELD GATE (divergence from legacy, same shape as the Concentric one above).
+ * An entity-level `Tangent(line, arc)` is `distance(arcCenter, line) == radius`.
+ * Once an arc ENDPOINT is coincident with the line's endpoint, the line already
+ * passes through a point exactly `radius` from the centre, so that distance sits
+ * at its MAXIMUM: the gradient vanishes on the manifold of the weld and PlaneGCS
+ * diagnoses the Tangent as redundant, which `upsert_state` renders as a false
+ * OverConstrained. Pinned by the worker ctest
+ * `test_sketch_arc_endpoints.cpp::test_endpoint_weld_makes_entity_tangent_redundant`;
+ * the same reasoning is why `slotTool` removed its four entity-level Tangents
+ * (toolMachine.ts slot header) and why `filletSketchCorner` authors none
+ * (sketchService.ts). Legacy could not hit this — its identity solve never made
+ * the endpoints actually equal, so the weld was never exact enough to be
+ * redundant; our tools SNAP them.
+ *
+ * Position-blind on purpose: ANY weld between the two entities makes the entity-
+ * level Tangent redundant, whichever endpoints it married.
+ */
+function weldedTo(out: SketchConstraint[], arcId: string, lineId: string): boolean {
+  return out.some(
+    (c) =>
+      c.type === "Coincident" &&
+      ((c.entities[0] === arcId && c.entities[1] === lineId) ||
+        (c.entities[0] === lineId && c.entities[1] === arcId)),
+  );
+}
+
+/**
  * Emit Concentric then Equal for one committed Circle/Arc `e` (LEGACY ORDER —
  * `inferCircleConstraints`/`inferArcConstraints`), applying the Coincident
  * divergence gate (see header comment). Mutates `out`; `refCircular` is the
@@ -365,12 +396,6 @@ export function inferConstraints(
       }
     }
 
-    // Tangent for an arc starting on a reference line's endpoint.
-    if (e.type === "Arc" && e.center && e.start) {
-      const tangentLine = inferTangentPartner(e.center, e.start, refLines);
-      if (tangentLine) out.push({ id: opts.nextConstraintId(), type: "Tangent", entities: [e.id, tangentLine] });
-    }
-
     // Coincidence for each of this entity's points against the reference set.
     for (const pt of entityPoints(e)) {
       const hit = refs.find(
@@ -390,9 +415,19 @@ export function inferConstraints(
       }
     }
 
+    // Tangent for an arc starting on a reference line's endpoint. Runs BELOW the
+    // Coincident loop — not for ordering's sake but because the weld gate reads
+    // the Coincidents this entity just emitted (`weldedTo`).
+    if (e.type === "Arc" && e.center && e.start) {
+      const tangentLine = inferTangentPartner(e.center, e.start, refLines);
+      if (tangentLine && !weldedTo(out, e.id, tangentLine)) {
+        out.push({ id: opts.nextConstraintId(), type: "Tangent", entities: [e.id, tangentLine] });
+      }
+    }
+
     // Concentric / Equal for a committed Circle or Arc (Ellipse contributes
-    // neither — see `entityPoints`). Runs after Tangent (above) and Coincident
-    // (just above), satisfying both legacy orderings in one pass.
+    // neither — see `entityPoints`). Runs after Tangent (just above) and
+    // Coincident, satisfying both legacy orderings in one pass.
     if ((e.type === "Circle" || e.type === "Arc") && e.center && e.radius !== undefined) {
       inferCircularConstraints(e, e.center, e.radius, refCircular, out, opts.nextConstraintId);
     }

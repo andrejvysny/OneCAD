@@ -22,6 +22,7 @@ use onecad_core::sketch::{Sketch, SketchEntity, WorldPlane};
 
 use onecad_lib::document_runtime::DocumentRuntime;
 use onecad_lib::worker::manager::SupervisorConfig;
+use onecad_lib::worker::wire::GestureTarget;
 use onecad_lib::worker::{MeshProvider, SolverEngine, WorkerManager};
 
 /// The built stub binary, derived from the test executable's target dir.
@@ -97,7 +98,10 @@ async fn stub_sketch_gesture_flow_end_to_end() {
     assert_eq!(session.entities.as_array().map(Vec::len), Some(1));
 
     // Gesture: begin → drags → pointer-up commits one undo command.
-    let g = rt.begin_gesture(sid, point).await.expect("begin gesture");
+    let g = rt
+        .begin_gesture(sid, point, GestureTarget::point(point))
+        .await
+        .expect("begin gesture");
     assert!(g.ready);
     let d1 = rt.solve_drag([5.0, 0.0]).await.expect("drag 1");
     assert_eq!(d1.status, "success");
@@ -131,9 +135,16 @@ async fn stub_solve_drag_latest_wins_supersedes_stale_seq() {
     wm.sketch_upsert(&sketch).await.expect("upsert");
     let rev = 1;
     let gesture = 99;
-    wm.begin_gesture(&sid.to_string(), rev, gesture, point, "")
-        .await
-        .expect("begin");
+    wm.begin_gesture(
+        &sid.to_string(),
+        rev,
+        gesture,
+        point,
+        GestureTarget::point(point),
+        "",
+    )
+    .await
+    .expect("begin");
 
     // Newest seq 5 solves; a later-arriving stale seq 3 is superseded (latest-wins).
     let newest = wm

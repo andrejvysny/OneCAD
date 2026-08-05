@@ -6,17 +6,20 @@
  *   move(pt)  — pointer moved to a snapped plane point (drives the rubber-band)
  *   esc       — cancel/end the current chain
  *   sides(n)  — polygon side count (digit keys 3-9); every OTHER machine ignores it
+ *   arcToggle — the line tool's TANGENT-ARC mode (drag / `A`); ignored elsewhere
  *
  * `step` returns the next state, the PREVIEW draft entities (rubber-band, no ids)
  * and, when a gesture completes, the COMMITTED draft entities the controller
  * id-assigns → auto-constrains → sends to `sketchUpsert`. Chaining semantics:
- *   - line      : click-click-… chains segments; Esc ends the chain.
+ *   - line      : click-click-… chains segments; Esc ends the chain. `arcToggle`
+ *                 makes the NEXT leg a tangent arc off the chain's own direction.
  *   - rect      : 2 clicks (corner→corner) commit 4 lines, then reset for the next.
  *   - centerRect: 2 clicks (center→corner) commit the 4 mirrored lines, then reset.
  *   - circle    : 2 clicks (center→radius) commit one circle, then reset.
  *   - ellipse   : 3 clicks (center→major-axis end→minor extent) commit one
  *                 ellipse, then reset.
  *   - arc       : 3 clicks (center→start→end) commit one arc, then reset.
+ *   - arc3p     : 3 clicks (start→end→through) commit one arc, then reset.
  *   - polygon   : 2 clicks (center→vertex) commit n lines + a construction
  *                 circumcircle; the side count is sticky across commits.
  *   - slot      : 3 clicks (p0→p1→width) commit 2 walls + 2 cap arcs, then reset.
@@ -39,6 +42,7 @@ import type {
 import type { Point2 } from "@/viewport/engine/sketchBasis";
 import type { DimLocks, DimQuantum, ToolDimension } from "./liveDimension";
 import { normalizeEllipse } from "./ellipseMath";
+import { arcThroughPoints, perpDistanceTo, tangentArcTo, unitDir, type TangentArc } from "./arcMath";
 
 /** A draft entity in plane coords (no id yet — the controller assigns on commit). */
 export interface DraftEntity {
@@ -64,7 +68,11 @@ export type ToolEvent =
   /** Polygon side count (SketchController routes digit keys 3-9 here while the
    *  polygon tool is armed). Consumed ONLY by `polygonTool`; every other machine
    *  ignores it (state unchanged, empty preview). */
-  | { kind: "sides"; n: number };
+  | { kind: "sides"; n: number }
+  /** Turn the line tool's tangent-arc mode on (`on: true`), off (`on: false`) or
+   *  flip it (`on` omitted). Consumed ONLY by `lineTool`; every other machine
+   *  ignores it on exactly the `sides` terms. */
+  | { kind: "arcToggle"; on?: boolean };
 
 /** Optional per-step context. `minSize` is the smallest accepted feature extent in
  *  PLANE (world) units — a click/drag below it is a degenerate no-op. The controller
@@ -80,6 +88,11 @@ export interface ToolContext {
   /** Zoom-adaptive rounding granularity, or null when rounding is off (pref off,
    *  Alt held, or a geometry snap already won). Same ownership as `locks`. */
   quantum?: DimQuantum | null;
+  /** CONTROLLER-RESOLVED chain tangent: the direction an EXISTING entity leaves
+   *  the anchor the chain was seeded on (`entityEndTangent`). Only a seed — a
+   *  machine that has recorded its own `ToolState.chainTangent` (it committed the
+   *  previous leg itself) always prefers that. Read by `lineTool` alone. */
+  tangent?: Point2;
 }
 
 /** Fallback minimum feature size when no context is supplied (numerically tiny —
@@ -92,6 +105,14 @@ export interface ToolState {
   cursor: Point2 | null;
   /** Polygon side count (polygonTool only). Sticky across commits + Esc. */
   sides?: number;
+  /** The direction the chain LEAVES its last anchor travelling in — recorded on
+   *  every `lineTool` commit, because an arc's exit direction is NOT its chord
+   *  and the next tangent arc has to continue the real curve. Cleared with the
+   *  chain (Esc / close / chain-end). */
+  chainTangent?: Point2;
+  /** `lineTool`: the NEXT leg is a tangent arc. Auto-clears on the arc's commit —
+   *  one arc per toggle, matching Fusion's line tool. */
+  arcMode?: boolean;
 }
 
 /**
@@ -143,8 +164,15 @@ const asPair = (p: Point2): [number, number] => [p.x, p.y];
 const line = (a: Point2, b: Point2): DraftEntity => ({ type: "Line", p0: a, p1: b });
 const dist = (a: Point2, b: Point2): number => Math.hypot(a.x - b.x, a.y - b.y);
 
-/** `sides` is a polygon-only verb; every other machine is a no-op for it. */
-const ignoreSides = (state: ToolState): ToolStep => ({ state, preview: [] });
+/** The TOOL-SPECIFIC verbs: `sides` belongs to the polygon, `arcToggle` to the
+ *  line. Every machine that does not own one is a no-op for it. */
+type ToolVerb = Extract<ToolEvent, { kind: "sides" } | { kind: "arcToggle" }>;
+
+const isToolVerb = (e: ToolEvent): e is ToolVerb => e.kind === "sides" || e.kind === "arcToggle";
+
+/** No-op for a verb this machine does not own — the SAME state object back, so a
+ *  caller can identity-check that nothing happened. */
+const ignoreVerb = (state: ToolState): ToolStep => ({ state, preview: [] });
 
 // ── Line tool: click-click chaining, Esc ends the chain ──────────────────────
 //
@@ -158,6 +186,49 @@ const ignoreSides = (state: ToolState): ToolStep => ({ state, preview: [] });
 //   2. within minSize of the FIRST anchor (chain has ≥2 anchors) → CLOSE LOOP:
 //      commit the closing segment back to the first anchor.
 //   3. otherwise → commit last→pt and keep chaining.
+//
+// TANGENT-ARC MODE (SP-4 W3) is a MODE of this machine, not a separate tool —
+// Fusion's rule, and the reason it can be: the arc has to continue the chain the
+// line tool is already holding, and a second machine would have to be handed that
+// chain on every toggle. `arcToggle` arms it; the next click commits ONE Arc and
+// the mode auto-clears, so the common "line, arc, line" run needs no untoggle.
+//
+// The direction the arc leaves along is `chainTangent` — RECORDED on every commit
+// rather than derived from the anchors, because an arc's exit direction is not its
+// chord: chaining an arc off an arc off a line is exact only if each leg reports
+// where it actually ended up pointing. `ctx.tangent` seeds the very first leg of a
+// chain the user started ON existing geometry (the controller resolves it there).
+// With no tangent at all the mode is INERT — a straight-line-only chain has no
+// direction to be tangent to, and guessing the chord would be a lie.
+
+/** A committed/previewed arc leg. `Arc` fields only — the CCW convention every
+ *  `arcMath` construction already states its result in. */
+const arcDraft = (a: TangentArc): DraftEntity => ({
+  type: "Arc",
+  center: a.center,
+  radius: a.radius,
+  start: a.start,
+  end: a.end,
+});
+
+/** The leg the chain is drawing right now: a tangent arc in arc mode, or the
+ *  straight rubber-band — which is also the FALLBACK whenever the cursor sits on
+ *  the tangent ray and no finite arc exists (previewing nothing there would read
+ *  as a broken tool). */
+function lineLeg(from: Point2, to: Point2, tangent: Point2 | undefined): DraftEntity {
+  if (!tangent) return line(from, to);
+  const arc = tangentArcTo(from, tangent, to);
+  return arc ? arcDraft(arc) : line(from, to);
+}
+
+/** `arcToggle`: inert with nothing placed or no tangent to leave along, and a
+ *  no-change toggle hands back the SAME state (nothing to repaint). */
+function lineArcToggle(state: ToolState, on: boolean | undefined, tangent: Point2 | undefined): ToolStep {
+  if (state.anchors.length === 0 || !tangent) return ignoreVerb(state);
+  const next = on ?? !(state.arcMode ?? false);
+  if (next === (state.arcMode ?? false)) return ignoreVerb(state);
+  return { state: { ...state, arcMode: next }, preview: [] };
+}
 
 export const lineTool: ToolMachine = {
   id: "line",
@@ -166,11 +237,15 @@ export const lineTool: ToolMachine = {
     if (event.kind === "esc") {
       return { state: emptyState(), preview: [], done: true };
     }
-    if (event.kind === "sides") return ignoreSides(state);
+    if (event.kind === "sides") return ignoreVerb(state);
+    // The machine's OWN record wins over the controller's seed — see the header.
+    const tangent = state.chainTangent ?? ctx?.tangent;
+    if (event.kind === "arcToggle") return lineArcToggle(state, event.on, tangent);
+    const arcTangent = state.arcMode === true ? tangent : undefined;
     if (event.kind === "move") {
       const last = state.anchors[state.anchors.length - 1] ?? null;
       const next = { ...state, cursor: event.pt };
-      return { state: next, preview: last ? [line(last, event.pt)] : [] };
+      return { state: next, preview: last ? [lineLeg(last, event.pt, arcTangent)] : [] };
     }
     // click
     const minSize = ctx?.minSize ?? DEFAULT_MIN_SIZE;
@@ -184,15 +259,45 @@ export const lineTool: ToolMachine = {
     }
     const first = state.anchors[0];
     if (state.anchors.length > 1 && dist(first, event.pt) < minSize) {
-      return { state: emptyState(), preview: [], committed: [line(last, first)], done: true };
+      // Closing leg: an ARC in arc mode (the mode is about this leg, and the loop
+      // has to close with the shape the user is looking at), else the segment.
+      return { state: emptyState(), preview: [], committed: [lineLeg(last, first, arcTangent)], done: true };
     }
+    if (arcTangent) return arcLegClick(state, last, arcTangent, event.pt);
+    const dir = unitDir(last, event.pt);
     return {
-      state: { anchors: [...state.anchors, event.pt], cursor: event.pt },
+      state: {
+        anchors: [...state.anchors, event.pt],
+        cursor: event.pt,
+        ...(dir ? { chainTangent: dir } : {}),
+      },
       preview: [],
       committed: [line(last, event.pt)],
     };
   },
 };
+
+/**
+ * The arc-mode committing click. No arc-LENGTH floor is needed: a circular arc is
+ * never shorter than its chord, and the chord already cleared `minSize` above — so
+ * the only rejection left is a cursor ON the tangent ray, where no finite circle
+ * exists. That click is IGNORED (stay armed, arc mode still on) rather than
+ * quietly committing a straight line the mode did not promise.
+ */
+function arcLegClick(state: ToolState, last: Point2, tangent: Point2, pt: Point2): ToolStep {
+  const arc = tangentArcTo(last, tangent, pt);
+  if (!arc) return { state: { ...state, cursor: pt }, preview: [] };
+  return {
+    state: {
+      anchors: [...state.anchors, pt],
+      cursor: pt,
+      chainTangent: arc.exitTangent,
+      arcMode: false, // one arc per toggle
+    },
+    preview: [],
+    committed: [arcDraft(arc)],
+  };
+}
 
 // ── Rectangle tool: 2 corner clicks → 4 lines ────────────────────────────────
 
@@ -209,7 +314,7 @@ export const rectTool: ToolMachine = {
   init: emptyState,
   step(state, event, ctx) {
     if (event.kind === "esc") return { state: emptyState(), preview: [], done: true };
-    if (event.kind === "sides") return ignoreSides(state);
+    if (isToolVerb(event)) return ignoreVerb(state);
     if (event.kind === "move") {
       const corner = state.anchors[0] ?? null;
       return { state: { ...state, cursor: event.pt }, preview: corner ? rectLines(corner, event.pt) : [] };
@@ -235,7 +340,7 @@ export const circleTool: ToolMachine = {
   init: emptyState,
   step(state, event, ctx) {
     if (event.kind === "esc") return { state: emptyState(), preview: [], done: true };
-    if (event.kind === "sides") return ignoreSides(state);
+    if (isToolVerb(event)) return ignoreVerb(state);
     if (event.kind === "move") {
       const center = state.anchors[0] ?? null;
       return {
@@ -300,7 +405,7 @@ export const ellipseTool: ToolMachine = {
   init: emptyState,
   step(state, event, ctx) {
     if (event.kind === "esc") return { state: emptyState(), preview: [], done: true };
-    if (event.kind === "sides") return ignoreSides(state);
+    if (isToolVerb(event)) return ignoreVerb(state);
     const [center, majorEnd] = state.anchors;
 
     if (event.kind === "move") {
@@ -363,7 +468,7 @@ export const arcTool: ToolMachine = {
   init: emptyState,
   step(state, event, ctx) {
     if (event.kind === "esc") return { state: emptyState(), preview: [], done: true };
-    if (event.kind === "sides") return ignoreSides(state);
+    if (isToolVerb(event)) return ignoreVerb(state);
     const minSize = ctx?.minSize ?? DEFAULT_MIN_SIZE;
     const [center, start] = state.anchors;
     if (event.kind === "move") {
@@ -398,6 +503,72 @@ export const arcTool: ToolMachine = {
   },
 };
 
+// ── 3-point arc: start → end → through (SP-4 W2) ─────────────────────────────
+//
+// The complement of `arcTool`: the two ENDPOINTS are placed first (so they can
+// be snapped onto existing geometry and weld to it), and the third click bends
+// the arc through the cursor. Radius and sweep are both derived — which is what
+// makes it the right tool for closing a profile between two known points, and
+// `arcTool` the right one when the centre is what is known.
+//
+// The through point selects WHICH of the two arcs the chord cuts (see
+// `arcThroughPoints`' swap rule), so dragging the cursor across the chord flips
+// the bulge instead of jumping to the far arc.
+//
+// It authors NO tool constraints: the endpoints are ordinary snapped points, so
+// the generic Coincident inference welds them to whatever they landed on for
+// free — and since a batch of one entity has no intra-batch inference to filter,
+// authoring nothing is what KEEPS those welds (see `resolveToolConstraints`).
+
+/** The Arc through S, E and `p`, or null when the gesture is degenerate: the
+ *  cursor on the chord, three collinear points, or an arc shorter than the
+ *  minimum feature size. */
+function arc3pDraft(s: Point2, e: Point2, p: Point2, minSize: number): DraftEntity | null {
+  if (perpDistanceTo(s, e, p) < minSize) return null;
+  const a = arcThroughPoints(s, e, p);
+  // `radius · sweep` is the arc LENGTH — the honest extent to floor, since a
+  // huge-radius sliver and a tiny-radius sliver are equally undrawable.
+  if (!a || a.radius * a.sweep < minSize) return null;
+  return { type: "Arc", center: a.center, radius: a.radius, start: a.start, end: a.end };
+}
+
+/** Phase-appropriate rubber-band: the chord as CONSTRUCTION while the second
+ *  endpoint is being placed, and again whenever the cursor makes no arc. */
+function arc3pPreview(s: Point2 | undefined, e: Point2 | undefined, p: Point2, minSize: number): DraftEntity[] {
+  if (!s) return [];
+  if (!e) return [{ ...line(s, p), construction: true }];
+  const arc = arc3pDraft(s, e, p, minSize);
+  return arc ? [arc] : [{ ...line(s, e), construction: true }];
+}
+
+export const arc3pTool: ToolMachine = {
+  id: "arc3p",
+  init: emptyState,
+  step(state, event, ctx) {
+    if (event.kind === "esc") return { state: emptyState(), preview: [], done: true };
+    if (isToolVerb(event)) return ignoreVerb(state);
+    const minSize = ctx?.minSize ?? DEFAULT_MIN_SIZE;
+    const [start, end] = state.anchors;
+    if (event.kind === "move") {
+      return {
+        state: { ...state, cursor: event.pt },
+        preview: arc3pPreview(start, end, event.pt, minSize),
+      };
+    }
+    // click
+    if (!start) return { state: { anchors: [event.pt], cursor: event.pt }, preview: [] };
+    if (!end) {
+      if (dist(start, event.pt) < minSize) return { state: { anchors: [start], cursor: event.pt }, preview: [] };
+      return { state: { anchors: [start, event.pt], cursor: event.pt }, preview: [] };
+    }
+    const arc = arc3pDraft(start, end, event.pt, minSize);
+    // Degenerate third click: stay armed on the two endpoints rather than commit
+    // a sliver the user cannot see (same rule as every other tool's floor).
+    if (!arc) return { state: { anchors: [start, end], cursor: event.pt }, preview: [] };
+    return { state: emptyState(), preview: [], committed: [arc], done: true };
+  },
+};
+
 // ── Point tool: one click commits a Point and re-arms ────────────────────────
 //
 // The simplest machine there is: no anchors, no preview, `done` on every click so
@@ -410,7 +581,7 @@ export const pointTool: ToolMachine = {
   init: emptyState,
   step(state, event) {
     if (event.kind === "esc") return { state: emptyState(), preview: [], done: true };
-    if (event.kind === "sides") return ignoreSides(state);
+    if (isToolVerb(event)) return ignoreVerb(state);
     if (event.kind === "move") return { state: { ...state, cursor: event.pt }, preview: [] };
     return {
       state: emptyState(),
@@ -438,7 +609,7 @@ export const centerRectTool: ToolMachine = {
   init: emptyState,
   step(state, event, ctx) {
     if (event.kind === "esc") return { state: emptyState(), preview: [], done: true };
-    if (event.kind === "sides") return ignoreSides(state);
+    if (isToolVerb(event)) return ignoreVerb(state);
     const center = state.anchors[0] ?? null;
     if (event.kind === "move") {
       return {
@@ -519,12 +690,9 @@ function slotFrame(p0: Point2, p1: Point2): SlotFrame | null {
 
 const offsetBy = (p: Point2, v: Point2, k: number): Point2 => ({ x: p.x + v.x * k, y: p.y + v.y * k });
 
-/** Perpendicular distance from `p` to the infinite line p0→p1 (0 when degenerate). */
-export function perpDistance(p0: Point2, p1: Point2, p: Point2): number {
-  const f = slotFrame(p0, p1);
-  if (!f) return 0;
-  return Math.abs((p.x - p0.x) * f.n.x + (p.y - p0.y) * f.n.y);
-}
+/** Perpendicular distance from `p` to the infinite line p0→p1 (0 when degenerate).
+ *  One implementation, in `arcMath` — the 3-point arc needs the same number. */
+export const perpDistance = perpDistanceTo;
 
 /** The 4 slot drafts in commit order: [wall(+n), wall(−n), cap@p1, cap@p0]. */
 export function slotDrafts(p0: Point2, p1: Point2, r: number): DraftEntity[] {
@@ -557,7 +725,7 @@ export const slotTool: ToolMachine = {
   init: emptyState,
   step(state, event, ctx) {
     if (event.kind === "esc") return { state: emptyState(), preview: [], done: true };
-    if (event.kind === "sides") return ignoreSides(state);
+    if (isToolVerb(event)) return ignoreVerb(state);
     const [p0, p1] = state.anchors;
     if (event.kind === "move") {
       if (p0 && p1) {
@@ -668,6 +836,7 @@ export const polygonTool: ToolMachine = {
         preview: center && state.cursor ? polygonDrafts(center, state.cursor, n) : [],
       };
     }
+    if (event.kind === "arcToggle") return ignoreVerb(state); // line-tool verb
     if (event.kind === "esc") return { state: polygonReset(sides), preview: [], done: true };
     if (event.kind === "move") {
       return {
@@ -697,6 +866,7 @@ export const TOOL_MACHINES: Record<string, ToolMachine> = {
   circle: circleTool,
   ellipse: ellipseTool,
   arc: arcTool,
+  arc3p: arc3pTool,
   polygon: polygonTool,
   slot: slotTool,
   point: pointTool,

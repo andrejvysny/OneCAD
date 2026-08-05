@@ -9,6 +9,11 @@ import {
   type ShowKey,
 } from "@/stores/settingsStore";
 import { useViewportStore } from "@/stores/viewportStore";
+import {
+  SNAP_RADIUS_LABEL,
+  SNAP_RADIUS_ORDER,
+  type SnapRadiusId,
+} from "@/tools/sketch/snapRadius";
 import type { DevicePref } from "@/viewport/engine/navInput";
 
 const SNAP_ROWS: { key: SnapKey; label: string }[] = [
@@ -19,7 +24,13 @@ const SNAP_ROWS: { key: SnapKey; label: string }[] = [
   { key: "intersection", label: "Intersections" },
   { key: "onCurve", label: "On-curve points" },
   { key: "dimensionRound", label: "Dimension rounding" },
+  { key: "polarTracking", label: "Polar tracking" },
 ];
+
+const RADIUS_OPTIONS: { value: SnapRadiusId; label: string }[] = SNAP_RADIUS_ORDER.map((id) => ({
+  value: id,
+  label: SNAP_RADIUS_LABEL[id],
+}));
 
 const SHOW_ROWS: { key: ShowKey; label: string }[] = [
   { key: "guidePoints", label: "Guide points" },
@@ -66,6 +77,8 @@ export function SnapPopover({ open, onClose, anchorRef }: SnapPopoverProps) {
   const show = useSettingsStore((s) => s.show);
   const setSnap = useSettingsStore((s) => s.setSnap);
   const setShow = useSettingsStore((s) => s.setShow);
+  const snapRadius = useSettingsStore((s) => s.snapRadius);
+  const setSnapRadius = useSettingsStore((s) => s.setSnapRadius);
   const inputDevice = useSettingsStore((s) => s.navigation.inputDevice);
   const setInputDevice = useSettingsStore((s) => s.setInputDevice);
   const detected = useViewportStore((s) => s.detectedInputDevice);
@@ -89,6 +102,19 @@ export function SnapPopover({ open, onClose, anchorRef }: SnapPopoverProps) {
           onChange={(v) => setSnap(r.key, v)}
         />
       ))}
+      {/* Numeric, so a segmented control rather than a switch — and last in the
+          section because it scales every switch above it rather than adding a
+          tier of its own. */}
+      <div className="flex h-8 items-center gap-2 px-3.5">
+        <span className="flex-1 text-[13px] text-ink-2">Snap radius</span>
+        <SegmentedToggle
+          options={RADIUS_OPTIONS}
+          value={snapRadius}
+          onChange={setSnapRadius}
+          ariaLabel="Snap radius"
+          size="sm"
+        />
+      </div>
 
       <div className="mx-3.5 my-1.5 h-px bg-border-subtle" />
 

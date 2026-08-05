@@ -8,6 +8,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { settingsStore } from "./settingsStore";
 import { DEFAULT_THEME } from "@/theme/themes";
+import {
+  DEFAULT_SNAP_RADIUS,
+  SNAP_RADIUS_ORDER,
+  SNAP_RADIUS_PX,
+} from "@/tools/sketch/snapRadius";
 import { DEFAULT_LENGTH_UNIT, LENGTH_UNIT_ORDER } from "@/units/lengthUnits";
 import { DEFAULT_RENDER_MODE } from "@/viewport/engine/renderModes";
 
@@ -158,7 +163,7 @@ describe("settingsStore displayUnit", () => {
     const raw = localStorage.getItem(STORAGE_KEY);
     expect(raw).not.toBeNull();
     expect(JSON.parse(raw!).state.displayUnit).toBe("in");
-    expect(JSON.parse(raw!).version).toBe(7);
+    expect(JSON.parse(raw!).version).toBe(8);
   });
 });
 
@@ -200,5 +205,78 @@ describe("settingsStore live dimensions", () => {
     await settingsStore.persist.rehydrate();
     expect(settingsStore.getState().snapTo.dimensionRound).toBe(false);
     expect(settingsStore.getState().show.liveDimensions).toBe(false);
+  });
+});
+
+/*
+ * Polar tracking + snap radius (SP-5). polarTracking backfills ON (fresh-install
+ * parity), and snapRadius backfills to "m" = 8px — the reach every build before
+ * v8 hard-coded, so a migrated blob must snap EXACTLY as it did before the knob
+ * existed. Same two recovery paths as the other registry-backed settings:
+ * `migrate` for a blob authored before the key, `merge` for a same-version blob
+ * carrying a value the registry does not know.
+ */
+describe("settingsStore polar tracking + snap radius", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    settingsStore.setState({ snapRadius: DEFAULT_SNAP_RADIUS });
+  });
+
+  it("a v7 blob (predates both keys) migrates with polar ON and the 8px radius", async () => {
+    seed(7, {
+      snapTo: { grid: false, dimensionRound: true },
+      show: { guidePoints: true, snappingHints: false, liveDimensions: true },
+      displayUnit: "in",
+    });
+    await settingsStore.persist.rehydrate();
+    const s = settingsStore.getState();
+    expect(s.snapTo.polarTracking).toBe(true);
+    expect(s.snapRadius).toBe(DEFAULT_SNAP_RADIUS);
+    expect(SNAP_RADIUS_PX[s.snapRadius]).toBe(8);
+    // The migration must not disturb the settings that already existed.
+    expect(s.snapTo.grid).toBe(false);
+    expect(s.snapTo.dimensionRound).toBe(true);
+    expect(s.show.snappingHints).toBe(false);
+    expect(s.displayUnit).toBe("in");
+  });
+
+  it("a v8 blob with an unknown snapRadius coerces to the default via merge", async () => {
+    seed(8, { snapRadius: "xl" });
+    await settingsStore.persist.rehydrate();
+    expect(settingsStore.getState().snapRadius).toBe(DEFAULT_SNAP_RADIUS);
+  });
+
+  it("a NUMERIC snapRadius (the px value, not the id) coerces too", async () => {
+    seed(8, { snapRadius: 12 });
+    await settingsStore.persist.rehydrate();
+    expect(settingsStore.getState().snapRadius).toBe(DEFAULT_SNAP_RADIUS);
+  });
+
+  it("every registry radius survives hydration unchanged", async () => {
+    for (const id of SNAP_RADIUS_ORDER) {
+      localStorage.clear();
+      seed(8, { snapRadius: id });
+      await settingsStore.persist.rehydrate();
+      expect(settingsStore.getState().snapRadius).toBe(id);
+    }
+  });
+
+  it("a v8 blob's explicit polar OFF survives hydration (never re-defaulted)", async () => {
+    seed(8, { snapTo: { grid: true, polarTracking: false } });
+    await settingsStore.persist.rehydrate();
+    expect(settingsStore.getState().snapTo.polarTracking).toBe(false);
+  });
+
+  it("setSnapRadius updates the store and writes localStorage", () => {
+    settingsStore.getState().setSnapRadius("s");
+    expect(settingsStore.getState().snapRadius).toBe("s");
+
+    const raw = localStorage.getItem(STORAGE_KEY);
+    expect(raw).not.toBeNull();
+    expect(JSON.parse(raw!).state.snapRadius).toBe("s");
   });
 });

@@ -15,7 +15,7 @@ import { resetStores } from "@/test/resetStores";
 
 describe("activateTool — tool classification", () => {
   it("classifies sketch-only vs model-only vs context-local tools", () => {
-    for (const t of ["line", "rect", "circle", "arc", "dimension", "trim"] as const) {
+    for (const t of ["line", "rect", "circle", "arc", "arc3p", "dimension", "trim", "extend"] as const) {
       expect(isSketchOnlyTool(t)).toBe(true);
       expect(isModelOnlyTool(t)).toBe(false);
     }
@@ -44,7 +44,7 @@ describe("activateTool — model mode", () => {
     expect(viewportStore.getState().activeSketchId).toBeNull();
   });
 
-  it.each(["line", "rect", "arc", "dimension", "trim"] as const)(
+  it.each(["line", "rect", "arc", "arc3p", "dimension", "trim", "extend"] as const)(
     "enters sketch mode preserving %s",
     async (tool) => {
       await activateTool(tool);

@@ -1596,6 +1596,164 @@ SolveResult Sketch::solveWithDrag(EntityID draggedPoint, const Vec2d& targetPos)
     return result;
 }
 
+SolveResult Sketch::solveWithTargets(const std::unordered_map<EntityID, Vec2d>& pointTargets,
+                                     const std::unordered_map<EntityID, double>& radiusTargets,
+                                     const std::unordered_set<EntityID>& pinnedPoints) {
+    SolveResult result;
+
+    if (pointTargets.empty() && radiusTargets.empty()) {
+        result.success = false;
+        result.errorMessage = "No drag targets";
+        return result;
+    }
+
+    // Refuse before touching the solver. A reference-locked entity is immovable
+    // by contract (§7.3), so driving one is a request we must fail loudly rather
+    // than "solve" into a no-op the caller would read as a successful drag.
+    // Locked points are NOT rejected as PINS: a pin only asks a point to stay
+    // where it is, which a locked point does anyway.
+    for (const auto& target : pointTargets) {
+        const auto* point = getEntityAs<SketchPoint>(target.first);
+        if (!point) {
+            result.success = false;
+            result.errorMessage = "Drag target point not found";
+            return result;
+        }
+        if (point->isReferenceLocked()) {
+            result.success = false;
+            result.errorMessage = "Entity is locked";
+            return result;
+        }
+    }
+    for (const auto& target : radiusTargets) {
+        const SketchEntity* entity = getEntity(target.first);
+        if (!entity || !isCircularCurve(entity->type())) {
+            result.success = false;
+            result.errorMessage = "Drag target curve not found";
+            return result;
+        }
+        if (entity->isReferenceLocked()) {
+            result.success = false;
+            result.errorMessage = "Entity is locked";
+            return result;
+        }
+    }
+
+    // Fast path: with no user constraints and no internal couplings nothing can
+    // propagate, so the targets ARE the answer. Note `hasInternalCouplings()`
+    // covers an endpoint-bearing arc (its 4 arc rules live outside
+    // `constraints_`) and reference-lock pins, so neither can be teleported past.
+    if (constraints_.empty() && !hasInternalCouplings()) {
+        lastConflictingConstraints_.clear();
+        for (const auto& [pointId, targetPos] : pointTargets) {
+            auto* point = getEntityAs<SketchPoint>(pointId);
+            if (!point) {
+                result.success = false;
+                result.errorMessage = "Drag target point not found";
+                return result;
+            }
+            point->setPosition(targetPos.x, targetPos.y);
+        }
+        for (const auto& [curveId, targetRadius] : radiusTargets) {
+            if (auto* circle = getEntityAs<SketchCircle>(curveId)) {
+                circle->setRadius(targetRadius);
+                continue;
+            }
+            if (auto* arc = getEntityAs<SketchArc>(curveId)) {
+                arc->setRadius(targetRadius);
+                continue;
+            }
+            result.success = false;
+            result.errorMessage = "Drag target curve not found";
+            return result;
+        }
+        result.success = true;
+        return result;
+    }
+
+    if (const auto unsupported = firstUnsupportedConstraint(*this)) {
+        result.success = false;
+        result.errorMessage = *unsupported;
+        WLOG_WARN("%s", "solveWithTargets:unsupported-constraint");
+        return result;
+    }
+
+    if (!solver_ || solverDirty_) {
+        rebuildSolver();
+    }
+
+    if (!solver_) {
+        result.success = false;
+        result.errorMessage = "Solver not available";
+        return result;
+    }
+
+    ConstraintSolver::DragTargets targets;
+    targets.points = pointTargets;
+    targets.radii = radiusTargets;
+    targets.pinnedPoints = pinnedPoints;
+
+    SolverResult solverResult = solver_->solveWithTargets(targets);
+    result.success = solverResult.success;
+    result.iterations = solverResult.iterations;
+    result.residual = solverResult.residual;
+    result.conflictingConstraints = solverResult.conflictingConstraints;
+    lastConflictingConstraints_ = solverResult.conflictingConstraints;
+    result.errorMessage = solverResult.errorMessage;
+
+    return result;
+}
+
+std::vector<EntityID> Sketch::entityPointIds(EntityID entityId) const {
+    std::vector<EntityID> ids;
+
+    const SketchEntity* entity = getEntity(entityId);
+    if (!entity) {
+        return ids;
+    }
+
+    auto push = [&](const EntityID& pointId) {
+        if (pointId.empty() || !getEntityAs<SketchPoint>(pointId)) {
+            return;
+        }
+        if (std::find(ids.begin(), ids.end(), pointId) != ids.end()) {
+            return;
+        }
+        ids.push_back(pointId);
+    };
+
+    switch (entity->type()) {
+        case EntityType::Point:
+            push(entityId);
+            break;
+        case EntityType::Line: {
+            const auto* line = static_cast<const SketchLine*>(entity);
+            push(line->startPointId());
+            push(line->endPointId());
+            break;
+        }
+        case EntityType::Arc: {
+            const auto* arc = static_cast<const SketchArc*>(entity);
+            push(arc->centerPointId());
+            if (arc->hasEndpointPoints()) {
+                push(arc->startPointId());
+                push(arc->endPointId());
+            }
+            break;
+        }
+        case EntityType::Circle:
+            push(static_cast<const SketchCircle*>(entity)->centerPointId());
+            break;
+        case EntityType::Ellipse:
+            push(static_cast<const SketchEllipse*>(entity)->centerPointId());
+            break;
+        case EntityType::Spline:
+            break;
+    }
+
+    return ids;
+}
+
 int Sketch::naiveDegreesOfFreedom() const {
     // Static count: entity DOF minus constraint arity. Wrong in the presence
     // of redundant constraints (each still subtracts); kept only as the

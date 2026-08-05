@@ -6,6 +6,7 @@
 import { createStore, useStore } from "zustand";
 import { persist } from "zustand/middleware";
 import { coerceTheme, DEFAULT_THEME, type ThemePref } from "@/theme/themes";
+import { coerceSnapRadius, DEFAULT_SNAP_RADIUS, type SnapRadiusId } from "@/tools/sketch/snapRadius";
 import {
   coerceLengthUnit,
   DEFAULT_LENGTH_UNIT,
@@ -33,6 +34,15 @@ export interface SnapSettings {
    * geometry usable without typing.
    */
   dimensionRound: boolean;
+  /**
+   * Snap the cursor onto a ray leaving the chain's last anchor at 0/45/90/135°,
+   * or parallel/perpendicular to the direction the chain is travelling in
+   * (SP-5.5). Lives under `snapTo` because it is a snap tier: it sits between
+   * the geometry ladder and the H/V alignment guides, and loses every tie to
+   * them. Default on — it is inert until a gesture has placed an anchor, so it
+   * can never move a first click.
+   */
+  polarTracking: boolean;
   /**
    * RESERVED — not read by any snap path (3D-geometry snapping is unscheduled).
    * Kept so an existing persisted blob merges unchanged and a rollback to a
@@ -104,6 +114,16 @@ export interface SettingsState {
    * just on migrate (see `merge`), same as displayMode and theme.
    */
   displayUnit: LengthUnitId;
+  /**
+   * On-screen reach of every point-like pick — the snap ladder's threshold AND
+   * the controller's hit/dimension tolerances (they are one number by design:
+   * two reaches would let a click select something the snap marker never
+   * offered). TOP-LEVEL, not inside `snapTo`, because `snapTo` is exclusively
+   * booleans the popover renders as switches — a numeric id in there would make
+   * the switch-row pin test unrepresentable. Coerced on every hydration, not
+   * just on migrate (see `merge`), same as displayMode / theme / displayUnit.
+   */
+  snapRadius: SnapRadiusId;
   setSnap(key: SnapKey, value: boolean): void;
   setShow(key: ShowKey, value: boolean): void;
   setExperimentalWebGpu(value: boolean): void;
@@ -111,6 +131,7 @@ export interface SettingsState {
   setDisplayMode(mode: RenderModeId): void;
   setTheme(theme: ThemePref): void;
   setDisplayUnit(unit: LengthUnitId): void;
+  setSnapRadius(radius: SnapRadiusId): void;
 }
 
 /** Versioned localStorage key (bump `version` on a breaking shape change). */
@@ -127,6 +148,7 @@ export const settingsStore = createStore<SettingsState>()(
         intersection: true,
         onCurve: true,
         dimensionRound: true,
+        polarTracking: true,
         guidePoints3d: true,
         distantEdges: false,
       },
@@ -140,6 +162,7 @@ export const settingsStore = createStore<SettingsState>()(
       displayMode: DEFAULT_RENDER_MODE,
       theme: DEFAULT_THEME,
       displayUnit: DEFAULT_LENGTH_UNIT,
+      snapRadius: DEFAULT_SNAP_RADIUS,
       setSnap(key, value) {
         set((s) => ({ snapTo: { ...s.snapTo, [key]: value } }));
       },
@@ -161,10 +184,13 @@ export const settingsStore = createStore<SettingsState>()(
       setDisplayUnit(unit) {
         set({ displayUnit: unit });
       },
+      setSnapRadius(radius) {
+        set({ snapRadius: radius });
+      },
     }),
     {
       name: STORAGE_KEY,
-      version: 7,
+      version: 8,
       // v1 → v2 added the M6c snap types (quadrant / intersection / onCurve).
       // A v1 blob has no keys for them; backfill the on-by-default values so an
       // existing user's popover shows them enabled (parity with a fresh install).
@@ -178,6 +204,11 @@ export const settingsStore = createStore<SettingsState>()(
       // v6 → v7 added the live-dimension prefs (SP-1). A pre-v7 blob has neither
       // key; backfill both ON so an existing user gets the same behaviour as a
       // fresh install rather than a silently disabled feature.
+      // v7 → v8 added polar tracking + the snap radius (SP-5). polarTracking
+      // backfills ON (fresh-install parity; it is inert until a gesture has an
+      // anchor, so it cannot surprise anyone on a first click), and snapRadius
+      // coerce(undefined) → "m" = 8px, exactly the reach every pre-v8 build
+      // hard-coded — so a migrated blob snaps identically until it is changed.
       migrate: (persisted, version) => {
         const s = persisted as Partial<SettingsState>;
         if (s && version < 2) {
@@ -204,11 +235,15 @@ export const settingsStore = createStore<SettingsState>()(
           s.snapTo = { dimensionRound: true, ...(s.snapTo as Partial<SnapSettings>) } as SnapSettings;
           s.show = { liveDimensions: true, ...(s.show as Partial<ShowSettings>) } as ShowSettings;
         }
+        if (s && version < 8) {
+          s.snapTo = { polarTracking: true, ...(s.snapTo as Partial<SnapSettings>) } as SnapSettings;
+          s.snapRadius = coerceSnapRadius((s as Partial<SettingsState>).snapRadius);
+        }
         return s as unknown as SettingsState;
       },
       // `migrate` only runs when the persisted blob's version differs from the
       // current one. A SAME-version blob can still carry a garbage displayMode,
-      // theme or displayUnit (hand-edited localStorage, or a rolled-back build
+      // theme, displayUnit or snapRadius (hand-edited localStorage, or a rolled-back build
       // that wrote an id a newer registry no longer has) — coerce them here
       // too, on every hydration, not just across a version bump. Mirrors
       // zustand's default shallow-merge shape so nothing else about persist's
@@ -218,6 +253,7 @@ export const settingsStore = createStore<SettingsState>()(
         merged.displayMode = coerceRenderMode(merged.displayMode);
         merged.theme = coerceTheme(merged.theme);
         merged.displayUnit = coerceLengthUnit(merged.displayUnit);
+        merged.snapRadius = coerceSnapRadius(merged.snapRadius);
         return merged;
       },
     },

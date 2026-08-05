@@ -1026,6 +1026,7 @@ impl SolverEngine for WorkerManager {
         sketch_revision: u64,
         gesture_id: u64,
         drag_point: EntityId,
+        target: wire::GestureTarget,
         solver_policy_hash: &str,
     ) -> Result<BeginGestureDto, EngineError> {
         let client = self.client_or_err()?;
@@ -1034,6 +1035,7 @@ impl SolverEngine for WorkerManager {
             sketch_revision,
             gesture_id,
             drag_point,
+            &target,
             solver_policy_hash,
         );
         let resp = client

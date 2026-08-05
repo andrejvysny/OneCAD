@@ -76,6 +76,37 @@ describe("dimConstraintSpecs — line", () => {
   });
 });
 
+describe("dimConstraintSpecs — line in ARC MODE (SP-4 W3)", () => {
+  const arc = { arcMode: true };
+
+  it("a locked radius authors Radius on the committed arc", () => {
+    expect(dimConstraintSpecs("line", [P(0, 0), P(10, 0)], { radius: 12 }, arc)).toEqual([
+      { type: "Radius", refs: [0], value: 12 },
+    ]);
+  });
+
+  it("IGNORES a length / angle lock — neither describes the arc that commits", () => {
+    expect(dimConstraintSpecs("line", [P(0, 0), P(10, 0)], { length: 50, angle: 90 }, arc)).toEqual([]);
+    // Even alongside a radius: the leftovers belong to the straight leg before it.
+    expect(
+      dimConstraintSpecs("line", [P(0, 0), P(10, 0)], { length: 50, angle: 90, radius: 7 }, arc),
+    ).toEqual([{ type: "Radius", refs: [0], value: 7 }]);
+  });
+
+  it("nothing locked ⇒ nothing authored", () => {
+    expect(dimConstraintSpecs("line", [P(0, 0)], {}, arc)).toEqual([]);
+  });
+
+  it("arcMode OFF (the default) leaves the straight-leg ladder exactly as it was", () => {
+    const locks = { length: 50, angle: 90 };
+    expect(dimConstraintSpecs("line", [P(0, 0)], locks, { arcMode: false })).toEqual(
+      dimConstraintSpecs("line", [P(0, 0)], locks),
+    );
+    // A radius lock is meaningless on a straight leg and authors nothing.
+    expect(dimConstraintSpecs("line", [P(0, 0)], { radius: 12 })).toEqual([]);
+  });
+});
+
 describe("dimConstraintSpecs — rect / centerRect", () => {
   it("W drives the horizontal edge (index 0), H the vertical one (index 1)", () => {
     expect(dimConstraintSpecs("rect", [P(0, 0)], { width: 80, height: 40 })).toEqual([
@@ -121,6 +152,23 @@ describe("dimConstraintSpecs — arc", () => {
 
   it("authors nothing from the non-committing phase", () => {
     expect(dimConstraintSpecs("arc", [P(0, 0)], { radius: 20 })).toEqual([]);
+  });
+});
+
+describe("dimConstraintSpecs — arc3p", () => {
+  it("the typed radius authors Radius on the committed arc", () => {
+    expect(dimConstraintSpecs("arc3p", [P(0, 0), P(20, 0)], { radius: 15 })).toEqual([
+      { type: "Radius", refs: [0], value: 15 },
+    ]);
+  });
+
+  it("the CHORD's length and angle author nothing — a chord is not an entity", () => {
+    expect(dimConstraintSpecs("arc3p", [P(0, 0)], { length: 20, angle: 0 })).toEqual([]);
+    expect(dimConstraintSpecs("arc3p", [P(0, 0), P(20, 0)], { length: 20, angle: 90 })).toEqual([]);
+  });
+
+  it("authors nothing from the non-committing phase", () => {
+    expect(dimConstraintSpecs("arc3p", [P(0, 0)], { radius: 15 })).toEqual([]);
   });
 });
 

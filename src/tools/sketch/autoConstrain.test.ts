@@ -255,15 +255,46 @@ describe("inferConstraints — perpendicular / parallel / tangent + precedence",
     expect(cs.some((c) => c.type === "Perpendicular")).toBe(false);
   });
 
-  it("infers Tangent for an arc starting tangent at a line endpoint", () => {
+  // ── the WELD GATE (SP-4 W3) ────────────────────────────────────────────────
+  //
+  // An entity-level Tangent(line, arc) is `distance(arcCenter, line) == radius`,
+  // which is REDUNDANT once the two are welded endpoint-to-endpoint — PlaneGCS
+  // reports the pair as OverConstrained (worker ctest
+  // test_endpoint_weld_makes_entity_tangent_redundant; same reason slotTool
+  // dropped four Tangents and filletSketchCorner authors none). Our tools SNAP
+  // endpoints exactly, so this fires on the ordinary tangent-arc gesture.
+
+  it("a batch that WELDS the arc to the line emits Coincident and NO Tangent", () => {
     const line: SketchEntity = { id: "L", type: "Line", p0: [0, 0], p1: [10, 0] };
+    // Arc START is exactly the line END ⇒ Coincident ⇒ the Tangent is suppressed.
     const arc: SketchEntity = { id: "A", type: "Arc", center: [10, 10], radius: 10, start: [10, 0], end: [0, 10] };
     const cs = inferConstraints([arc], [line], opts());
+    expect(cs.some((c) => c.type === "Coincident")).toBe(true);
+    expect(cs.some((c) => c.type === "Tangent")).toBe(false);
+  });
+
+  it("a NEAR-but-not-welded arc still gets its Tangent (the gate is not a mute)", () => {
+    // 0.001mm apart: past the 1e-6 Coincident snap tolerance, well inside the 2mm
+    // TANGENT_COINCIDENCE_TOL — so no weld exists to make the Tangent redundant.
+    const line: SketchEntity = { id: "L", type: "Line", p0: [0, 0], p1: [10, 0.001] };
+    const arc: SketchEntity = { id: "A", type: "Arc", center: [10, 10], radius: 10, start: [10, 0], end: [0, 10] };
+    const cs = inferConstraints([arc], [line], opts());
+    expect(cs.some((c) => c.type === "Coincident")).toBe(false);
     const tan = cs.find((c) => c.type === "Tangent");
     expect(tan).toBeDefined();
     expect(tan!.entities).toEqual(["A", "L"]);
-    // The arc START also lands on the line END ⇒ a Coincident is inferred too.
-    expect(cs.some((c) => c.type === "Coincident")).toBe(true);
+  });
+
+  it("ORDER PIN — a non-welded arc emits Coincident(s) first, then Tangent", () => {
+    // Arc START is 0.001mm off L's end (Tangent, no weld); its END is exactly on
+    // M's start (a weld — but to a DIFFERENT line, so it gates nothing).
+    const l: SketchEntity = { id: "L", type: "Line", p0: [0, 0], p1: [10, 0.001] };
+    const m: SketchEntity = { id: "M", type: "Line", p0: [0, 10], p1: [-10, 10] };
+    const arc: SketchEntity = { id: "A", type: "Arc", center: [10, 10], radius: 10, start: [10, 0], end: [0, 10] };
+    const cs = inferConstraints([arc], [l, m], opts());
+    expect(cs.map((c) => c.type)).toEqual(["Coincident", "Tangent"]);
+    expect(cs[0].entities).toEqual(["A", "M"]);
+    expect(cs[1].entities).toEqual(["A", "L"]);
   });
 });
 
@@ -383,7 +414,9 @@ describe("inferConstraints — Concentric / Equal", () => {
   });
 
   it("arc path: Tangent, then Concentric, then Equal", () => {
-    const line: SketchEntity = { id: "L", type: "Line", p0: [0, 0], p1: [10, 0] };
+    // The line END is 0.001mm off the arc START: near enough for the tangent rule
+    // (2mm), far enough that no Coincident welds them and trips the weld gate.
+    const line: SketchEntity = { id: "L", type: "Line", p0: [0, 0], p1: [10, 0.001] };
     // Center offset 1mm from the arc's (within CONCENTRIC_TOLERANCE, outside the
     // tight Coincident snap tolerance) so Concentric fires without the gate tripping.
     const circle: SketchEntity = { id: "C", type: "Circle", center: [11, 10], radius: 10 };

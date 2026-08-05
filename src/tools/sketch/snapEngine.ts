@@ -19,14 +19,22 @@
  *   5. quadrant (tier 3)   circle/arc 0/90/180/270° points (arc: in-extent only)
  *   6. intersection (t4)   line-line / line-circle / circle-circle crossings
  *   7. onCurve  (tier 5)   nearest point ON a line/circle/arc          [lowest point tier]
- *   8. H/V alignment guide  align to a reference point's x and/or y     [within 8px]
- *   9. grid                 round to the nearest grid step
- *  10. none                 raw point
+ *   8. polar                a ray leaving the gesture anchor at 0/45/90/135°, or
+ *                           parallel/perpendicular to the chain's direction
+ *   9. H/V alignment guide  align to a reference point's x and/or y     [within 8px]
+ *  10. grid                 round to the nearest grid step
+ *  11. none                 raw point
+ *
+ * Polar sits directly ABOVE the H/V guides but wins only OUTRIGHT — a tie goes
+ * to H/V, so the 0°/90° rays, which restate an alignment guide through the same
+ * anchor, never rename a snap users already know. It is inert without an anchor,
+ * so nothing about an idle cursor or a gesture's first click changes.
  *
  * 2mm↔8px mapping: the C++ app snaps in sketch millimetres (radius 2mm); the
- * frontend snaps in SCREEN pixels (radius 8px) so the target stays constant on
- * screen at any zoom. `threshold = SNAP_PX * pixelWorld` converts 8px into world
- * units at the cursor, so both models gate on the same on-screen distance.
+ * frontend snaps in SCREEN pixels (8px by default, `snapRadius` preference) so
+ * the target stays constant on screen at any zoom. `threshold = snapPx *
+ * pixelWorld` converts that into world units at the cursor, so both models gate
+ * on the same on-screen distance.
  *
  * Everything is pure so priority + guide math is unit-tested; the engine renders
  * the returned indicator/guides and the tool machines consume `point`.
@@ -46,13 +54,23 @@ export type SnapKind =
   | "onCurve"
   | "alignH"
   | "alignV"
-  | "alignHV";
+  | "alignHV"
+  | "polar";
 
-/** A dashed alignment guide: vertical ⇒ constant x, horizontal ⇒ constant y. */
-export interface GuideLine {
-  orientation: "vertical" | "horizontal";
-  value: number;
-}
+/**
+ * A dashed guide the indicator draws through the snapped point.
+ *
+ * The H/V arms are stated as a CONSTANT COORDINATE (vertical ⇒ constant x,
+ * horizontal ⇒ constant y) because they are always axis-aligned and span the
+ * whole plane. A polar guide is one ray of a fan centred on the gesture's
+ * anchor, so it carries that anchor plus a unit direction and is drawn
+ * symmetrically about it — the same LINE, stated the only way an arbitrary
+ * angle can be.
+ */
+export type GuideLine =
+  | { orientation: "vertical"; value: number }
+  | { orientation: "horizontal"; value: number }
+  | { orientation: "polar"; origin: Point2; dir: Point2 };
 
 export interface SnapResult {
   point: Point2;
@@ -66,8 +84,15 @@ export interface SnapResult {
 export interface SnapOptions {
   /** World units between grid snap lines. */
   gridStep: number;
-  /** World units per screen pixel at the cursor (sizes the 8px threshold). */
+  /** World units per screen pixel at the cursor (sizes the pixel threshold). */
   pixelWorld: number;
+  /**
+   * Point-snap reach in SCREEN pixels — the user's `snapRadius` preference,
+   * resolved through `snapRadius.ts`. Omitted ⇒ {@link SNAP_PX}, the reach every
+   * build before the preference existed hard-coded, so leaving it out is
+   * byte-identical to the old behavior.
+   */
+  snapPx?: number;
   enableGrid: boolean;
   enableGuideLines: boolean;
   enableGuidePoints: boolean;
@@ -77,6 +102,23 @@ export interface SnapOptions {
   enableIntersection?: boolean;
   /** Nearest-point-on-curve snaps (default on). */
   enableOnCurve?: boolean;
+  /**
+   * Polar tracking (default OFF here — the controller opts in from the pref).
+   * Snaps onto a ray leaving `polarAnchor` at 0/45/90/135°, plus the
+   * parallel/perpendicular pair off `polarRefDir`. INERT without an anchor: no
+   * anchor means no gesture in progress, and a fan centred on nothing would
+   * drag a free cursor onto an arbitrary ray.
+   */
+  enablePolar?: boolean;
+  /** Where the polar fan is centred — the gesture's LAST placed anchor. */
+  polarAnchor?: Point2 | null;
+  /**
+   * The direction the chain is currently travelling in, which adds the
+   * Parallel/Perpendicular pair to the fan. A direction that duplicates one of
+   * the fixed rays (mod π — a line has no sense) is dropped rather than
+   * offering the same line under two names.
+   */
+  polarRefDir?: Point2 | null;
   /** Alt held ⇒ raw point, no snap. */
   suppress: boolean;
   /** Extra reference points for H/V alignment (e.g. the current chain anchor). */
@@ -114,9 +156,11 @@ export interface SnapCandidateCache {
   refs: Point2[];
 }
 
-/** Point-snap reach in screen pixels (the pixel-space analogue of the C++ 2mm
- *  sketch-coord radius). Shared with the controller's hit/dimension tolerances so a
- *  single constant governs the on-screen reach of every point-like pick. */
+/** DEFAULT point-snap reach in screen pixels (the pixel-space analogue of the C++
+ *  2mm sketch-coord radius) — used when `SnapOptions.snapPx` is omitted. The live
+ *  value is the user's `snapRadius` preference (`snapRadius.ts`, whose "m" IS this
+ *  number); the controller resolves it and passes it here and into its own
+ *  hit/dimension tolerances, so one reach still governs every point-like pick. */
 export const SNAP_PX = 8;
 const EPS = 1e-9;
 const TWO_PI = Math.PI * 2;
@@ -402,7 +446,7 @@ const KIND_TIER: Record<string, number> = {
 
 interface Ranked {
   point: Point2;
-  kind: Exclude<SnapKind, "none" | "grid" | "alignH" | "alignV" | "alignHV">;
+  kind: Exclude<SnapKind, "none" | "grid" | "alignH" | "alignV" | "alignHV" | "polar">;
   d: number;
   tier: number;
 }
@@ -501,6 +545,115 @@ export function buildSnapCache(entities: SketchEntity[]): SnapCandidateCache {
   return { points, intersections, refs };
 }
 
+// ── Guide tiers (polar + H/V), ranked by how far they MOVE the point ─────────
+
+/** A guide-tier candidate. `d` is the displacement the snap would apply — the
+ *  one metric the polar and H/V tiers are compared on. */
+interface GuideHit {
+  point: Point2;
+  kind: SnapKind;
+  label: string;
+  guides: GuideLine[];
+  d: number;
+}
+
+const POLAR_RAYS: { angle: number; label: string }[] = [
+  { angle: 0, label: "0°" },
+  { angle: Math.PI / 4, label: "45°" },
+  { angle: Math.PI / 2, label: "90°" },
+  { angle: (3 * Math.PI) / 4, label: "135°" },
+];
+
+/**
+ * The candidate polar LINES through the anchor: the four fixed rays, plus the
+ * chain direction and its perpendicular when one is known.
+ *
+ * Deduped MOD π, because a line has no sense: `dir` and `−dir` are one candidate,
+ * so two directions collide when their cross product vanishes, not when they are
+ * equal. The fixed rays are listed first, so a chain running at exactly 45° is
+ * reported as "45°" rather than "Parallel" — one line, one name, deterministically.
+ */
+function polarDirections(refDir?: Point2 | null): { dir: Point2; label: string }[] {
+  const out = POLAR_RAYS.map((r) => ({
+    dir: { x: Math.cos(r.angle), y: Math.sin(r.angle) },
+    label: r.label,
+  }));
+  const len = refDir ? Math.hypot(refDir.x, refDir.y) : 0;
+  if (!refDir || len < 1e-12) return out;
+  const u = { x: refDir.x / len, y: refDir.y / len };
+  const isNew = (d: Point2): boolean => out.every((o) => Math.abs(o.dir.x * d.y - o.dir.y * d.x) > 1e-9);
+  if (isNew(u)) out.push({ dir: u, label: "Parallel" });
+  const perp = { x: -u.y, y: u.x };
+  if (isNew(perp)) out.push({ dir: perp, label: "Perpendicular" });
+  return out;
+}
+
+/** Nearest polar ray within `threshold`, by PERPENDICULAR distance (the snap
+ *  slides the cursor ALONG the ray, so only the off-ray miss is a cost). */
+function polarSnap(raw: Point2, opts: SnapOptions, threshold: number): GuideHit | null {
+  const anchor = opts.polarAnchor;
+  if (!opts.enablePolar || !anchor) return null;
+  const wx = raw.x - anchor.x;
+  const wy = raw.y - anchor.y;
+  let best: GuideHit | null = null;
+  for (const { dir, label } of polarDirections(opts.polarRefDir)) {
+    const off = Math.abs(dir.x * wy - dir.y * wx); // |dir × w|; dir is a unit vector
+    if (off > threshold || (best && off >= best.d - EPS)) continue;
+    const along = wx * dir.x + wy * dir.y;
+    best = {
+      point: { x: anchor.x + along * dir.x, y: anchor.y + along * dir.y },
+      kind: "polar",
+      label,
+      guides: [{ orientation: "polar", origin: anchor, dir }],
+      d: off,
+    };
+  }
+  return best;
+}
+
+/** H/V alignment onto a reference point's x and/or y, within `threshold`. */
+function guideSnap(
+  raw: Point2,
+  entities: SketchEntity[],
+  opts: SnapOptions,
+  threshold: number,
+): GuideHit | null {
+  if (!opts.enableGuideLines) return null;
+  const refs = referencePoints(entities, opts.recentPoints, opts.cache);
+  let vGuide: number | null = null; // constant x
+  let hGuide: number | null = null; // constant y
+  let vBest = threshold;
+  let hBest = threshold;
+  for (const r of refs) {
+    const dx = Math.abs(raw.x - r.x);
+    if (dx <= vBest) {
+      vBest = dx;
+      vGuide = r.x;
+    }
+    const dy = Math.abs(raw.y - r.y);
+    if (dy <= hBest) {
+      hBest = dy;
+      hGuide = r.y;
+    }
+  }
+  if (vGuide === null && hGuide === null) return null;
+  const guides: GuideLine[] = [];
+  if (vGuide !== null) guides.push({ orientation: "vertical", value: vGuide });
+  if (hGuide !== null) guides.push({ orientation: "horizontal", value: hGuide });
+  const both = vGuide !== null && hGuide !== null;
+  return {
+    point: { x: vGuide ?? raw.x, y: hGuide ?? raw.y },
+    kind: both ? "alignHV" : vGuide !== null ? "alignV" : "alignH",
+    label: both ? "Aligned" : vGuide !== null ? "Vertical" : "Horizontal",
+    guides,
+    // Ranked by the SMALLER axis miss, not the combined displacement: it is the
+    // axis this tier is surest about, and it keeps a polar ray that merely
+    // RESTATES an alignment (0°/90° through the same anchor) at a tie, which
+    // polar loses. Anything polar wins is a line H/V could not have offered.
+    d: Math.min(vGuide !== null ? vBest : Infinity, hGuide !== null ? hBest : Infinity),
+  };
+}
+
 export function computeSnap(
   raw: Point2,
   entities: SketchEntity[],
@@ -510,7 +663,7 @@ export function computeSnap(
     return { point: raw, kind: "none", label: null, guides: [], snapped: false };
   }
 
-  const threshold = SNAP_PX * opts.pixelWorld;
+  const threshold = (opts.snapPx ?? SNAP_PX) * opts.pixelWorld;
 
   // 2. Point-like snaps, ranked by (tier, distance) — C++ SnapResult::operator<.
   const candidates = collectPointCandidates(raw, entities, opts, threshold);
@@ -522,34 +675,15 @@ export function computeSnap(
     return { point: best.point, kind: best.kind, label: KIND_LABEL[best.kind], guides: [], snapped: true };
   }
 
-  // 3. H/V alignment guides from reference points.
-  if (opts.enableGuideLines) {
-    const refs = referencePoints(entities, opts.recentPoints, opts.cache);
-    let vGuide: number | null = null; // constant x
-    let hGuide: number | null = null; // constant y
-    let vBest = threshold;
-    let hBest = threshold;
-    for (const r of refs) {
-      const dx = Math.abs(raw.x - r.x);
-      if (dx <= vBest) {
-        vBest = dx;
-        vGuide = r.x;
-      }
-      const dy = Math.abs(raw.y - r.y);
-      if (dy <= hBest) {
-        hBest = dy;
-        hGuide = r.y;
-      }
-    }
-    if (vGuide !== null || hGuide !== null) {
-      const point = { x: vGuide ?? raw.x, y: hGuide ?? raw.y };
-      const guides: GuideLine[] = [];
-      if (vGuide !== null) guides.push({ orientation: "vertical", value: vGuide });
-      if (hGuide !== null) guides.push({ orientation: "horizontal", value: hGuide });
-      const kind: SnapKind = vGuide !== null && hGuide !== null ? "alignHV" : vGuide !== null ? "alignV" : "alignH";
-      const label = vGuide !== null && hGuide !== null ? "Aligned" : vGuide !== null ? "Vertical" : "Horizontal";
-      return { point, kind, label, guides, snapped: true };
-    }
+  // 3. Guide tiers: polar rays off the gesture anchor, then H/V alignment.
+  // Polar is the more specific statement (it knows where the chain is heading)
+  // so it is offered first, but it must win OUTRIGHT — `>=` would let a 0°/90°
+  // ray relabel an alignment guide it lands identically on.
+  const polar = polarSnap(raw, opts, threshold);
+  const guide = guideSnap(raw, entities, opts, threshold);
+  const hit = polar && (!guide || polar.d < guide.d - EPS) ? polar : guide;
+  if (hit) {
+    return { point: hit.point, kind: hit.kind, label: hit.label, guides: hit.guides, snapped: true };
   }
 
   // 4. Grid snap.

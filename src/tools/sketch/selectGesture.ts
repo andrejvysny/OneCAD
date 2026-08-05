@@ -18,34 +18,86 @@ import type { ConstraintPosition, SketchEntity, SketchEntityType } from "@/ipc/t
 import type { SketchSel } from "@/stores/sketchSelectionStore";
 import { sameSketchSel } from "@/stores/sketchSelectionStore";
 
+/** The gesture target kinds SCHEMA §7.4 defines. */
+export type GestureKind = "point" | "arcEnd" | "radius" | "entityBody";
+
 /**
- * A named point handle is draggable iff the worker owns it as a movable point:
- *   - Line    → Start / End
- *   - Circle  → Center
- *   - Ellipse → Center (its only minted wire point; the radii/rotation are scalars)
- *   - Arc     → Center only (Start/End are derived from center + angles)
- *   - Point   → Start (a free point)
- * A body pick (no `position`) is never a drag handle.
+ * The handle names a gesture can address. A strict subset of `ConstraintPosition`
+ * — `Midpoint` is a CONSTRAINT target, never a minted wire point, so it can never
+ * be grabbed. Narrowing here is what keeps the wire's `role` union honest.
+ */
+export type GestureRole = "Start" | "End" | "Center";
+
+function gestureRole(position: ConstraintPosition): GestureRole | undefined {
+  return position === "Start" || position === "End" || position === "Center"
+    ? position
+    : undefined;
+}
+
+/**
+ * Kind for a NAMED point handle, or null when that handle is not draggable.
+ *
+ * One rule decides the two entries that are NOT plain point drags:
+ *   - Arc Center → `entityBody`. A `point` drag pins every OTHER point, which for
+ *     an arc includes its own endpoints — that over-determines radius+angles and
+ *     a welded arc simply refuses to move. Translating an arc has to carry its
+ *     endpoints, which is exactly what `entityBody` does.
+ *   - Arc Start/End → `arcEnd`. These were NOT draggable before SP-2 (the comment
+ *     said "derived from center + angles"); they are real solver points, and the
+ *     `curves` channel is what finally carries the reshape back to the document.
+ */
+export function handleKind(
+  type: SketchEntityType,
+  position: ConstraintPosition | undefined,
+): GestureKind | null {
+  if (!position) return null;
+  switch (type) {
+    case "Line":
+      return position === "Start" || position === "End" ? "point" : null;
+    case "Circle":
+      return position === "Center" ? "point" : null;
+    case "Ellipse":
+      // Its only minted wire point; the radii/rotation are scalars the solver
+      // does not register, so there is nothing else to grab.
+      return position === "Center" ? "point" : null;
+    case "Arc":
+      if (position === "Center") return "entityBody";
+      return position === "Start" || position === "End" ? "arcEnd" : null;
+    case "Point":
+      return position === "Start" ? "point" : null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Kind for a CURVE-BODY pick (a hit with no named point), or null when the body
+ * is not draggable: round curve = resize, straight curve = translate.
+ *
+ * An Ellipse body is null on purpose — it is not registered with the solver
+ * (SCHEMA §7.4), so no gesture can move its parameters; it stays click-select.
+ */
+export function bodyKind(type: SketchEntityType): GestureKind | null {
+  switch (type) {
+    case "Line":
+      return "entityBody"; // no centre to grab — the body IS the translate handle
+    case "Circle":
+    case "Arc":
+      return "radius";
+    default:
+      return null;
+  }
+}
+
+/**
+ * A named point handle is draggable iff some gesture kind owns it.
+ * Kept as the predicate name the select lane and its tests already use.
  */
 export function isDraggableHandle(
   type: SketchEntityType,
   position: ConstraintPosition | undefined,
 ): boolean {
-  if (!position) return false;
-  switch (type) {
-    case "Line":
-      return position === "Start" || position === "End";
-    case "Circle":
-      return position === "Center";
-    case "Ellipse":
-      return position === "Center";
-    case "Arc":
-      return position === "Center";
-    case "Point":
-      return position === "Start";
-    default:
-      return false;
-  }
+  return handleKind(type, position) !== null;
 }
 
 /** The gesture point ref for `beginGesture`: `"<entityId>.<Position>"` (null for a body). */
@@ -53,22 +105,43 @@ export function pointRef(sel: SketchSel): string | null {
   return sel.point ? `${sel.entityId}.${sel.point}` : null;
 }
 
-/** A resolved drag intent: the picked handle + its `beginGesture` point ref. */
+/** A resolved drag intent: the picked target + everything `beginGesture` needs. */
 export interface DragIntent {
   sel: SketchSel;
+  kind: GestureKind;
+  /** `"<entityId>.<Position>"` for `point`; the bare entity id for every other kind. */
   pointRef: string;
+  /** Which handle was grabbed (`arcEnd` needs it; the backend ignores it elsewhere). */
+  role?: GestureRole;
+  /** Pointer-down plane position — the backend's per-kind offset baseline. */
+  grab: [number, number];
 }
 
 /**
- * Classify a pointerdown hit: a draggable handle → a `DragIntent`; a body pick, a
- * non-draggable point pick, or a miss → null (the caller falls back to click-select).
+ * Classify a pointerdown hit into a drag intent, or null when the caller should
+ * fall back to click-select (a miss, or a target no gesture kind owns).
+ *
+ * A hit WITH a named point resolves through `handleKind`; a body hit (no point)
+ * resolves through `bodyKind` — that second rung is what makes a whole line
+ * draggable and a circle's ring resizable, neither of which existed before SP-2.
  */
-export function dragIntent(hit: SketchSel | null, entities: SketchEntity[]): DragIntent | null {
-  if (!hit || !hit.point) return null;
+export function dragIntent(
+  hit: SketchSel | null,
+  entities: SketchEntity[],
+  grab: [number, number],
+): DragIntent | null {
+  if (!hit) return null;
   const e = entities.find((x) => x.id === hit.entityId);
-  if (!e || !isDraggableHandle(e.type, hit.point)) return null;
-  const ref = pointRef(hit);
-  return ref ? { sel: hit, pointRef: ref } : null;
+  if (!e) return null;
+  if (hit.point) {
+    const kind = handleKind(e.type, hit.point);
+    if (!kind) return null;
+    const ref = kind === "point" ? pointRef(hit) : hit.entityId;
+    const role = gestureRole(hit.point);
+    return ref ? { sel: hit, kind, pointRef: ref, ...(role ? { role } : {}), grab } : null;
+  }
+  const kind = bodyKind(e.type);
+  return kind ? { sel: hit, kind, pointRef: hit.entityId, grab } : null;
 }
 
 /**

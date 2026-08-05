@@ -53,12 +53,16 @@ const TWO_PI = Math.PI * 2;
 
 // ── Curve model ───────────────────────────────────────────────────────────────
 
-type Curve =
+/** The three curve kinds trim models. EXPORTED (additive) because `extendMath`
+ *  works in the SAME curve model — a second copy would be free to drift, and the
+ *  two tools must agree on what a crossing is or Trim/Extend become inverses in
+ *  name only. */
+export type Curve =
   | { kind: "line"; a: XY; b: XY }
   | { kind: "circle"; c: XY; r: number }
   | { kind: "arc"; c: XY; r: number; start: XY; end: XY };
 
-function curveOf(e: SketchEntity | DraftLike): Curve | null {
+export function curveOf(e: SketchEntity | DraftLike): Curve | null {
   if (e.type === "Line" && e.p0 && e.p1) return { kind: "line", a: e.p0, b: e.p1 };
   if (e.type === "Circle" && e.center && e.radius !== undefined)
     return { kind: "circle", c: e.center, r: e.radius };
@@ -81,14 +85,17 @@ interface DraftLike {
 
 // ── Angle helpers ─────────────────────────────────────────────────────────────
 
-/** Angle of a point about a center, in [0, 2π). */
-function angleOf(c: XY, p: XY): number {
+/** Angle of a point about a center, in [0, 2π). Exported for `extendMath`, whose
+ *  arc param space is stated against this SAME [0,2π) convention. */
+export function angleOf(c: XY, p: XY): number {
   const a = Math.atan2(p[1] - c[1], p[0] - c[0]);
   return a < 0 ? a + TWO_PI : a;
 }
 
-/** CCW sweep magnitude start→end in (0, 2π]. */
-function arcSweep(c: XY, start: XY, end: XY): number {
+/** CCW sweep magnitude start→end in (0, 2π]. Exported alongside `angleOf`: the
+ *  0-rad-crossing handling here is subtle enough that a duplicate would be a bug
+ *  waiting to happen. */
+export function arcSweep(c: XY, start: XY, end: XY): number {
   const a0 = angleOf(c, start);
   const a1 = angleOf(c, end);
   let sweep = a1 - a0;
@@ -150,8 +157,12 @@ export function circleCircleFull(c1: XY, r1: number, c2: XY, r2: number): XY[] {
   return out;
 }
 
-/** All intersection points of two full curves. */
-function fullIntersections(t: Curve, o: Curve): XY[] {
+/**
+ * All intersection points of two full curves — an ARC contributes its whole
+ * circle here, which is exactly what an extend's unbounded continuation needs
+ * (extents are applied afterwards, per-caller). Exported for `extendMath`.
+ */
+export function fullIntersections(t: Curve, o: Curve): XY[] {
   const circT = t.kind !== "line" ? t : null;
   const circO = o.kind !== "line" ? o : null;
   if (t.kind === "line" && o.kind === "line") return lineLineFull(t.a, t.b, o.a, o.b);
@@ -163,8 +174,10 @@ function fullIntersections(t: Curve, o: Curve): XY[] {
 
 // ── Extent gating ─────────────────────────────────────────────────────────────
 
-/** True if `p` lies within the OTHER curve's bounded extent (endpoints inclusive). */
-function withinExtent(curve: Curve, p: XY): boolean {
+/** True if `p` lies within the OTHER curve's bounded extent (endpoints inclusive).
+ *  Exported: Extend gates its candidate crossings by the SAME rule — a segment
+ *  you cannot see is not something you can extend TO. */
+export function withinExtent(curve: Curve, p: XY): boolean {
   if (curve.kind === "line") {
     const dx = curve.b[0] - curve.a[0];
     const dy = curve.b[1] - curve.a[1];

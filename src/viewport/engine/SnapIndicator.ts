@@ -44,7 +44,7 @@ function glyphFor(kind: SnapResult["kind"]): MarkerGlyph {
     case "onCurve":
       return "ring";
     default:
-      return "dot"; // endpoint / midpoint / center / grid / align*
+      return "dot"; // endpoint / midpoint / center / grid / align* / polar
   }
 }
 
@@ -194,11 +194,21 @@ export class SnapIndicator {
     pos.setXYZ(0, snap.point.x, snap.point.y, 0);
     pos.needsUpdate = true;
 
-    // Guides (plane-local dashed segments across the plane).
+    // Guides (plane-local dashed segments across the plane). One explicit branch
+    // per orientation: a polar guide is a line through an ORIGIN along a unit
+    // DIR, not a constant coordinate, so it is drawn symmetrically about its
+    // anchor rather than across a fixed axis.
     const seg: number[] = [];
     for (const g of snap.guides) {
-      if (g.orientation === "vertical") seg.push(g.value, -GUIDE_EXTENT, 0, g.value, GUIDE_EXTENT, 0);
-      else seg.push(-GUIDE_EXTENT, g.value, 0, GUIDE_EXTENT, g.value, 0);
+      if (g.orientation === "vertical") {
+        seg.push(g.value, -GUIDE_EXTENT, 0, g.value, GUIDE_EXTENT, 0);
+      } else if (g.orientation === "horizontal") {
+        seg.push(-GUIDE_EXTENT, g.value, 0, GUIDE_EXTENT, g.value, 0);
+      } else {
+        const dx = g.dir.x * GUIDE_EXTENT;
+        const dy = g.dir.y * GUIDE_EXTENT;
+        seg.push(g.origin.x - dx, g.origin.y - dy, 0, g.origin.x + dx, g.origin.y + dy, 0);
+      }
     }
     this.guides.geometry.setAttribute("position", new THREE.Float32BufferAttribute(seg, 3));
     this.guides.computeLineDistances();

@@ -15,7 +15,9 @@
  */
 import type { CadClient } from "@/ipc/client";
 import type {
+  CurveParams,
   EnterSketchTarget,
+  GestureTarget,
   SketchConstraint,
   SketchEntity,
   SketchPlane,
@@ -40,14 +42,17 @@ import { sketchSelectionStore, sameSketchSel, type SketchSel } from "@/stores/sk
 import { settingsStore } from "@/stores/settingsStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { toolChipStore } from "@/stores/toolChipStore";
-import { applySolvedPositions } from "@/ipc/sketchWireMap";
+import { applySolvedCurves, applySolvedPositions } from "@/ipc/sketchWireMap";
 import { promoteOne } from "@/ipc/promote";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
-import { buildSnapCache, computeSnap, SNAP_PX, type SnapCandidateCache, type SnapResult } from "./snapEngine";
+import { buildSnapCache, computeSnap, type SnapCandidateCache, type SnapResult } from "./snapEngine";
+import { SNAP_RADIUS_PX } from "./snapRadius";
 import { inferConstraints, inferHV, entityPoints } from "./autoConstrain";
+import { entityEndTangent, unitDir } from "./arcMath";
 import {
   commitDimensionConstraint,
   enqueueSketchMutation,
+  extendEntity,
   filletSketchCorner,
   flushSketchMutations,
   lockedEntityIds,
@@ -61,7 +66,7 @@ import { buildChain, chainSideSign, offsetChain, type Chain, type OffsetFailure 
 import { formatLength, lengthSuffix } from "@/units/format";
 import type { SketchSnapshot } from "@/stores/sketchStore";
 import { hitTestSketch } from "./sketchHitTest";
-import { clickSelection, dragIntent, shouldApplyDrag, type DragIntent } from "./selectGesture";
+import { bodyKind, clickSelection, dragIntent, shouldApplyDrag, type DragIntent } from "./selectGesture";
 import {
   marqueeHits,
   marqueeModeFor,
@@ -71,6 +76,7 @@ import {
 } from "./marqueeSelect";
 import { mirrorEntities } from "./mirrorMath";
 import { trimPreview, entityToDraft } from "./trimMath";
+import { extendPreview } from "./extendMath";
 import { trace } from "@/debug/trace";
 import { logDebug, logError } from "@/debug/log";
 import {
@@ -88,6 +94,7 @@ import {
   resolveToolConstraints,
   type DraftEntity,
   type ToolConstraintSpec,
+  type ToolEvent,
   type ToolMachine,
   type ToolState,
   type ToolStep,
@@ -151,6 +158,7 @@ const CURSOR_BY_TOOL: Record<string, string> = {
   circle: "crosshair",
   ellipse: "crosshair",
   arc: "crosshair",
+  arc3p: "crosshair",
   polygon: "crosshair",
   slot: "crosshair",
   point: "crosshair",
@@ -175,6 +183,7 @@ const DRAW_TOOL_HINT: Record<string, string> = {
   centerRect: "Center rectangle — click the centre · type a number for width · Tab for height",
   circle: "Circle — click the centre · type a number for diameter · Tab for radius",
   arc: "Arc — click the centre · type a number for radius",
+  arc3p: "3-point arc — click the start · type a number for the chord",
   ellipse: "Ellipse — click the centre · type a number for the major axis",
   slot: "Slot — click to place · type a number for length · Tab for angle",
 };
@@ -253,6 +262,8 @@ interface DimCommitContext {
   locks: DimLocks;
   /** Polygon side count — also the batch index of its construction circumcircle. */
   sides?: number;
+  /** The line tool committed a TANGENT ARC, not a segment (SP-4 W3). */
+  arcMode?: boolean;
 }
 
 export class SketchController {
@@ -263,6 +274,10 @@ export class SketchController {
   private machineState: ToolState | null = null;
   private lastSnap: SnapResult | null = null;
   private altHeld = false;
+  // Drag-to-arc (SP-4 W3): an LMB drag off the last chain anchor PROMOTED the line
+  // tool into tangent-arc mode, and the release commits the arc instead of being
+  // discarded as a non-click. Cleared on that release, teardown and dispose.
+  private arcDragging = false;
 
   // Live dimensions (SP-1). `liveDim` holds the chip input FSM's state — focus,
   // the focused field's raw text, and the pinned values. Locks are
@@ -332,6 +347,10 @@ export class SketchController {
   // each gated STRICTLY on its tool id so the select/draw/dimension paths are untouched.
   private trimActive = false;
   private mirrorActive = false;
+  /** Extend (SP-4 W4) — Trim's counterpart on the same click lane, but ADDITIVE:
+   *  its hover ghost is the span the click would GAIN, so it rides the ordinary
+   *  preview channel and never the destructive trim-ghost one. */
+  private extendActive = false;
 
   // Sketch Fillet / Offset (WP-C T2b) — click tools on the SAME lane as Trim /
   // Mirror (hover ghost + click applies, repeatable while armed). Each owns one
@@ -361,6 +380,11 @@ export class SketchController {
   // Accumulate them across the gesture; rendering each response alone onto
   // dragBase would snap earlier-moved coupled points back to their pre-drag pose.
   private dragAccum: Record<string, [number, number]> = {};
+  // The `curves` twin of `dragAccum` (SCHEMA §7.4). Radius/arc-angle changes are
+  // reported incrementally exactly like positions, and for the same reason they
+  // must accumulate: a radius drag reports NO position at all, so replaying only
+  // the newest response onto `dragBase` would show the entity un-resized.
+  private dragCurves: Record<string, CurveParams> = {};
   private pendingTarget: [number, number] | null = null; // coalesced latest drag target
   private solveScheduled = false;
   // A pointerup / Esc that arrived while beginGesture was still in flight — its end
@@ -1015,6 +1039,7 @@ export class SketchController {
     this.machine = null;
     this.machineState = null;
     this.lastSnap = null;
+    this.arcDragging = false;
     this.clearLiveDimGesture();
     this.snapCache = null;
     this.snapCacheKey = null;
@@ -1024,6 +1049,7 @@ export class SketchController {
     this.cancelMarquee(); // before setSketchDrawingActive(false) below — idempotent
     this.selectActive = false;
     this.trimActive = false;
+    this.extendActive = false;
     this.mirrorActive = false;
     this.endSketchEditTool();
     this.filletActive = false;
@@ -1113,6 +1139,7 @@ export class SketchController {
     this.dimensionActive = tool === "dimension";
     this.selectActive = tool === "select";
     this.trimActive = tool === "trim";
+    this.extendActive = tool === "extend";
     this.mirrorActive = tool === "mirror";
     this.filletActive = tool === "sketchFillet";
     this.offsetActive = tool === "sketchOffset";
@@ -1134,6 +1161,14 @@ export class SketchController {
     }
     if (this.trimActive) {
       viewportStore.getState().setStatusHint("Click a segment to trim · Esc to exit", { sticky: true });
+      return;
+    }
+    if (this.extendActive) {
+      viewportStore
+        .getState()
+        .setStatusHint("Extend — hover a segment near the end to grow · click to commit · Esc to exit", {
+          sticky: true,
+        });
       return;
     }
     if (this.mirrorActive) {
@@ -1164,8 +1199,34 @@ export class SketchController {
       this.updatePolygonHint();
       return;
     }
+    if (m?.id === "line") {
+      this.updateLineHint();
+      return;
+    }
     const hint = m && this.liveDimsEnabled() ? (DRAW_TOOL_HINT[m.id] ?? null) : null;
     viewportStore.getState().setStatusHint(hint, hint ? { sticky: true } : undefined);
+  }
+
+  /**
+   * Line-tool status hint, THREE states: idle (nothing placed, or a chain with no
+   * tangent to continue), armed-and-arcable (the drag / `A` affordance is live),
+   * and arc mode itself. The "type a number" clause is gated on the live-dimension
+   * pref exactly like `DRAW_TOOL_HINT` — the line must not promise a chip the
+   * setting turned off.
+   */
+  private updateLineHint(): void {
+    const typed = this.liveDimsEnabled();
+    const set = (message: string | null): void =>
+      viewportStore.getState().setStatusHint(message, message ? { sticky: true } : undefined);
+    if (this.machineState?.arcMode) {
+      set(`Tangent arc — click to place · A for straight${typed ? " · type a number for radius" : ""}`);
+      return;
+    }
+    if (this.canArcHere()) {
+      set(`Line — drag or press A for a tangent arc${typed ? " · type a number for length" : ""}`);
+      return;
+    }
+    set(typed ? (DRAW_TOOL_HINT.line ?? null) : null);
   }
 
   /**
@@ -1197,12 +1258,56 @@ export class SketchController {
    * screen at any zoom) plus the live-dimension projection inputs the
    * `withLiveDims` decorator reads (the raw machines ignore both).
    */
-  private stepCtx(): { minSize: number; locks: DimLocks; quantum: DimQuantum | null } {
+  private stepCtx(): {
+    minSize: number;
+    locks: DimLocks;
+    quantum: DimQuantum | null;
+    tangent?: Point2;
+  } {
+    const tangent = this.chainSeedTangent();
     return {
       minSize: 4 * this.deps.engine.planePixelWorld(),
       locks: this.liveDim.locks,
       quantum: this.dimQuantumNow(),
+      ...(tangent ? { tangent } : {}),
     };
+  }
+
+  /**
+   * The direction an EXISTING entity leaves the chain's first anchor travelling
+   * in — what lets a tangent arc continue geometry the chain did not draw itself.
+   *
+   * Only for the FIRST anchor: once the chain has committed a leg the machine
+   * carries its own `chainTangent`, which is exact (an arc's exit direction is not
+   * its chord). `weldTol`, not `pickTol`: the anchor has to be ON the endpoint, not
+   * merely near it, or the arc would leave along a neighbour it does not touch.
+   * `entityEndTangent` returns null at an AMBIGUOUS junction (two entities end
+   * there) rather than picking one — the NeedsRepair discipline, one dimension down.
+   */
+  private chainSeedTangent(): Point2 | undefined {
+    const st = this.machineState;
+    if (!st || st.anchors.length !== 1 || st.chainTangent) return undefined;
+    const session = sketchStore.getState().session;
+    if (!session) return undefined;
+    return entityEndTangent(st.anchors[0], session.entities, this.weldTol()) ?? undefined;
+  }
+
+  /** Can the chain draw a tangent arc from where it stands? Needs an anchor AND a
+   *  direction to leave along (its own recorded one, or a seed off geometry). */
+  private canArcHere(): boolean {
+    const st = this.machineState;
+    if (!st || st.anchors.length === 0) return false;
+    return (st.chainTangent ?? this.chainSeedTangent()) !== undefined;
+  }
+
+  /** Push the arc-mode verb into the machine and make the screen agree: the
+   *  rubber-band re-forms at the cursor it is already on, and the hint flips. */
+  private stepArcToggle(on?: boolean): void {
+    if (!this.machine || !this.machineState) return;
+    const event: ToolEvent = { kind: "arcToggle", ...(on !== undefined ? { on } : {}) };
+    this.machineState = this.machine.step(this.machineState, event, this.stepCtx()).state;
+    this.restepAtCursor();
+    this.updateLineHint();
   }
 
   /**
@@ -1257,16 +1362,45 @@ export class SketchController {
     return computeSnap(raw, sessionEntities ?? [], {
       gridStep: chooseGridStep(this.deps.engine.getCameraDistance()).minor,
       pixelWorld: this.deps.engine.planePixelWorld(),
+      snapPx: this.snapPx(),
       enableGrid: settings.snapTo.grid && !this.dimensionRoundingActive(),
       enableGuideLines: settings.snapTo.sketchGuideLines,
       enableGuidePoints: settings.snapTo.sketchGuidePoints,
       enableQuadrant: settings.snapTo.quadrant,
       enableIntersection: settings.snapTo.intersection,
       enableOnCurve: settings.snapTo.onCurve,
+      enablePolar: settings.snapTo.polarTracking,
+      polarAnchor: this.polarAnchor(),
+      polarRefDir: this.polarRefDir(),
       suppress: this.altHeld,
       recentPoints: this.machineState?.anchors ?? [],
       cache: this.snapCache ?? undefined,
     });
+  }
+
+  /** Where the polar fan is centred: the chain's LAST placed anchor, or null
+   *  when no gesture is in progress — which makes the whole tier inert, so an
+   *  idle cursor and a gesture's first click are untouched by the pref. */
+  private polarAnchor(): Point2 | null {
+    const anchors = this.machineState?.anchors;
+    return anchors && anchors.length > 0 ? anchors[anchors.length - 1] : null;
+  }
+
+  /**
+   * The direction the chain is TRAVELLING in, which adds the
+   * parallel/perpendicular rays to the fan.
+   *
+   * The machine's own `chainTangent` wins when it has one: it is exact, and an
+   * arc's exit direction is NOT its chord — reading the last two anchors after
+   * an arc would fan off a line the chain never travelled. The chord is the
+   * fallback for the tools that record no tangent.
+   */
+  private polarRefDir(): Point2 | null {
+    const st = this.machineState;
+    if (st?.chainTangent) return st.chainTangent;
+    const anchors = st?.anchors ?? [];
+    if (anchors.length < 2) return null;
+    return unitDir(anchors[anchors.length - 2], anchors[anchors.length - 1]);
   }
 
   private onPointerMove = (e: PointerEvent): void => {
@@ -1300,13 +1434,19 @@ export class SketchController {
       this.onSelectPointerMove(e);
       return;
     }
-    // Trim / Mirror / Fillet / Offset are click tools; a move past DRAG_PX with LMB
-    // held is an orbit, not a click — track it so pointerup doesn't fire a stray
-    // delete/pick.
-    if (this.trimActive || this.mirrorActive || this.filletActive || this.offsetActive) {
+    // Trim / Extend / Mirror / Fillet / Offset are click tools; a move past DRAG_PX
+    // with LMB held is an orbit, not a click — track it so pointerup doesn't fire a
+    // stray delete/pick.
+    if (
+      this.trimActive ||
+      this.extendActive ||
+      this.mirrorActive ||
+      this.filletActive ||
+      this.offsetActive
+    ) {
       if ((e.buttons & 1) === 0) {
         // Idle move: every one of them gets live feedback (hover tint, plus Trim's
-        // destructive doomed-piece ghost and Fillet/Offset's result ghost),
+        // destructive doomed-piece ghost and Extend/Fillet/Offset's result ghost),
         // coalesced to one raycast/frame.
         this.scheduleHoverHit(e.clientX, e.clientY);
         return;
@@ -1317,6 +1457,7 @@ export class SketchController {
       return;
     }
     if (!this.machine && !this.dimensionActive) return;
+    this.maybeStartArcDrag(e);
     this.pendingMove = e;
     if (e.buttons !== 0 && this.downButton === 0) this.moved = true;
     if (this.moveScheduled) return;
@@ -1346,11 +1487,45 @@ export class SketchController {
     });
   };
 
+  /**
+   * DRAG-TO-ARC (SP-4 W3, the primary gesture): dragging off the last chain anchor
+   * with LMB held promotes the line tool into tangent-arc mode, exactly as Fusion
+   * does. Armed once per press — `arcDragging` also tells `onPointerUp` that the
+   * release is a COMMIT and not the non-click it would otherwise be discarded as.
+   */
+  private maybeStartArcDrag(e: PointerEvent): void {
+    if (this.arcDragging || this.machine?.id !== "line") return;
+    if (this.downButton !== 0 || (e.buttons & 1) === 0) return;
+    const far =
+      Math.abs(e.clientX - this.downX) > DRAG_PX || Math.abs(e.clientY - this.downY) > DRAG_PX;
+    if (!far || !this.canArcHere()) return;
+    this.arcDragging = true;
+    this.stepArcToggle(true);
+  }
+
+  /** Release of a drag-to-arc: commit through the SAME tail a click takes, then
+   *  drop back to straight legs (the machine already auto-cleared arc mode on a
+   *  successful commit; this also covers the degenerate click it ignored). */
+  private commitArcDrag(e: PointerEvent): void {
+    if (!this.machine || !this.machineState) return;
+    const snap = this.snapAt(e.clientX, e.clientY) ?? this.lastSnap;
+    if (!snap) return;
+    this.lastSnap = snap;
+    const dims = this.dimCommitContext();
+    const stepped = this.machine.step(this.machineState, { kind: "click", pt: snap.point }, this.stepCtx());
+    logSketchStep(this.machine.id, "arcDrag", stepped);
+    this.applySteppedClick(stepped, dims);
+    this.stepArcToggle(false);
+  }
+
   private onPointerDown = (e: PointerEvent): void => {
     this.downX = e.clientX;
     this.downY = e.clientY;
     this.downButton = e.button;
     this.moved = false;
+    // Self-healing: a press starts a fresh gesture, so a drag-to-arc whose release
+    // landed OUTSIDE the container (no container `pointerup`) cannot leak into it.
+    this.arcDragging = false;
     if (this.selectActive) this.onSelectPointerDown(e);
   };
 
@@ -1366,6 +1541,13 @@ export class SketchController {
       Math.abs(e.clientX - this.downX) <= DRAG_PX &&
       Math.abs(e.clientY - this.downY) <= DRAG_PX;
     this.downButton = -1;
+    // A drag-to-arc release is a COMMIT, not a click — it is by definition past
+    // DRAG_PX, so it must be claimed before `wasClick` throws it away.
+    if (this.arcDragging) {
+      this.arcDragging = false;
+      this.commitArcDrag(e);
+      return;
+    }
     if (!wasClick) return;
     if (this.planePicking) {
       // RESOLVE ORDER (pinned by test): datum → world quad → body face. The datum
@@ -1392,6 +1574,10 @@ export class SketchController {
     }
     if (this.trimActive) {
       this.handleTrimClick(e.clientX, e.clientY);
+      return;
+    }
+    if (this.extendActive) {
+      this.handleExtendClick(e.clientX, e.clientY);
       return;
     }
     if (this.mirrorActive) {
@@ -1437,6 +1623,7 @@ export class SketchController {
       anchors: [...this.machineState.anchors],
       locks: { ...this.liveDim.locks },
       ...(this.machineState.sides !== undefined ? { sides: this.machineState.sides } : {}),
+      ...(this.machineState.arcMode ? { arcMode: true } : {}),
     };
   }
 
@@ -1466,6 +1653,7 @@ export class SketchController {
     // (the gesture finished), a non-empty one re-opens them for the next leg.
     this.syncLiveDims(stepped.dims ?? []);
     if (this.machine?.id === "polygon") this.updatePolygonHint();
+    else if (this.machine?.id === "line") this.updateLineHint();
   }
 
   // ── live dimension chips (SP-1 Wave 3) ────────────────────────────────────
@@ -1731,6 +1919,7 @@ export class SketchController {
       // for the very next segment of a fast chain.
       ...(this.lastChainLineId ? { prevLineId: this.lastChainLineId } : {}),
       ...(dims.sides !== undefined ? { sides: dims.sides } : {}),
+      ...(dims.arcMode ? { arcMode: true } : {}),
     });
     const resolved = resolveDimConstraints(dimSpecs, newEntities, nextId);
     return { toolAuthored, dimAuthored: dedupeDimConstraints(resolved, toolAuthored) };
@@ -1796,8 +1985,7 @@ export class SketchController {
     if (!session) return;
     const raw = this.deps.engine.screenToPlane(clientX, clientY);
     if (!raw) return;
-    const tol = SNAP_PX * this.deps.engine.planePixelWorld(); // same reach as snapping
-    const target = pickDimensionTarget(raw, session.entities, tol);
+    const target = pickDimensionTarget(raw, session.entities, this.pickTol());
     if (!target) {
       // A click on empty space cancels a half-made pick (but leaves an open chip).
       if (!this.dimState.ready) this.cancelDimension();
@@ -1869,8 +2057,7 @@ export class SketchController {
     if (!session) return;
     const raw = this.deps.engine.screenToPlane(clientX, clientY);
     if (!raw) return;
-    const tol = SNAP_PX * this.deps.engine.planePixelWorld();
-    const hit = hitTestSketch(raw, session.entities, tol);
+    const hit = hitTestSketch(raw, session.entities, this.pickTol());
     if (!hit) return; // miss → no-op
     // Trim REPLACES the target with its surviving pieces — a destructive edit the
     // backend refuses outright on locked geometry (W2 L3). Refuse here, loudly:
@@ -1887,6 +2074,71 @@ export class SketchController {
     void trimEntity(this.deps.client, hit.entityId, [raw.x, raw.y], {
       minSize: 4 * this.deps.engine.planePixelWorld(),
     });
+  }
+
+  // ── Extend tool (SP-4 W4) ────────────────────────────────────────────────────
+  //
+  // Trim's counterpart: hovering an entity NEAR ONE OF ITS ENDS ghosts the span
+  // that end would gain on its own continuation, and a click commits it
+  // (`extendEntity` → `extendPieces`). The end is chosen by where the cursor is,
+  // so the same entity extends either way depending on which half you aim at.
+  // A miss is inert (never destructive), and Esc falls through to the global
+  // ladder → back to select.
+
+  /** Degeneracy floor, in plane units: an extension under ~4px is invisible and
+   *  must not burn an undo step. Shared by the ghost and the commit so what the
+   *  ghost promises is exactly what the click authors. */
+  private extendMinSize(): number {
+    return 4 * this.deps.engine.planePixelWorld();
+  }
+
+  /** Ghost the span the current hover would ADD (ordinary preview lane — nothing
+   *  is destroyed here). Cleared on a miss or when there is nothing to grow to. */
+  private renderExtendGhost(clientX: number, clientY: number, hit: SketchSel | null): void {
+    const session = sketchStore.getState().session;
+    const raw = this.deps.engine.screenToPlane(clientX, clientY);
+    const target = hit && session ? session.entities.find((e) => e.id === hit.entityId) : undefined;
+    if (!session || !raw || !target) {
+      this.deps.engine.setSketchPreview([]);
+      return;
+    }
+    const others = session.entities.filter((e) => e.id !== target.id);
+    const addition = extendPreview(target, raw, others, { minSize: this.extendMinSize() });
+    this.deps.engine.setSketchPreview(addition ? [addition] : []);
+  }
+
+  private handleExtendClick(clientX: number, clientY: number): void {
+    const session = sketchStore.getState().session;
+    if (!session) return;
+    const raw = this.deps.engine.screenToPlane(clientX, clientY);
+    if (!raw) return;
+    const hit = hitTestSketch(raw, session.entities, this.pickTol());
+    if (!hit) return; // miss → no-op
+    // Extend REPLACES the target, which the backend refuses on locked geometry
+    // (W2 L3). Refuse HERE as well as in the service so the refusal hint wins:
+    // the service's own guard would be reached, but the caller would then have to
+    // guess whether "nothing happened" meant locked or no crossing.
+    if (lockedEntityIds(session.entities).has(hit.entityId)) {
+      this.deps.engine.setSketchPreview([]);
+      viewportStore.getState().setStatusHint(`${LOCKED_GEOMETRY_HINT} — it cannot be extended`);
+      return;
+    }
+    this.deps.engine.setSketchPreview([]);
+    void this.applyExtend(hit.entityId, [raw.x, raw.y]);
+  }
+
+  private async applyExtend(entityId: string, at: [number, number]): Promise<void> {
+    const outcome = await extendEntity(this.deps.client, entityId, at, {
+      minSize: this.extendMinSize(),
+    });
+    if (this.disposed) return;
+    // ONLY the geometric refusal is phrased here — a locked target or a rejected
+    // upsert already published its own hint, and overwriting it would hide why.
+    if (!outcome.ok && outcome.reason === "noExtension") {
+      viewportStore
+        .getState()
+        .setStatusHint("Nothing to extend to — that end reaches no other entity");
+    }
   }
 
   // ── Mirror tool ──────────────────────────────────────────────────────────────
@@ -2008,9 +2260,20 @@ export class SketchController {
     return Math.max(1e-6, 0.25 * this.deps.engine.planePixelWorld());
   }
 
-  /** The 8px pick reach every sketch tool hit-tests with. */
+  /** The user's snap reach, in SCREEN pixels (`snapRadius` preference). */
+  private snapPx(): number {
+    return SNAP_RADIUS_PX[settingsStore.getState().snapRadius];
+  }
+
+  /**
+   * The pick reach every sketch tool hit-tests with, in plane units.
+   *
+   * Deliberately the SAME number the snap ladder gates on: two reaches would let
+   * a click select something the snap marker never offered (or refuse something
+   * it did), so the preference moves both together.
+   */
   private pickTol(): number {
-    return SNAP_PX * this.deps.engine.planePixelWorld();
+    return this.snapPx() * this.deps.engine.planePixelWorld();
   }
 
   /** Open an armed edit tool's live-parameter chip at the sketch origin (a stable
@@ -2207,14 +2470,14 @@ export class SketchController {
   //   - a drag past DRAG_PX from EMPTY space → marquee / box select (W2-D, below).
   // Esc mid-drag ends the gesture at the ORIGINAL point + restores pre-drag geometry.
 
-  /** hitTest the current session at a client point (same 8px reach the dimension tool uses). */
+  /** hitTest the current session at a client point (the same reach the dimension
+   *  tool and the snap ladder use — see `pickTol`). */
   private hitAt(clientX: number, clientY: number): SketchSel | null {
     const session = sketchStore.getState().session;
     if (!session) return null;
     const raw = this.deps.engine.screenToPlane(clientX, clientY);
     if (!raw) return null;
-    const tol = SNAP_PX * this.deps.engine.planePixelWorld();
-    return hitTestSketch(raw, session.entities, tol);
+    return hitTestSketch(raw, session.entities, this.pickTol());
   }
 
   private onSelectPointerDown = (e: PointerEvent): void => {
@@ -2225,7 +2488,14 @@ export class SketchController {
     this.cancelMarquee();
     const session = sketchStore.getState().session;
     const hit = this.hitAt(e.clientX, e.clientY);
-    const intent = dragIntent(hit, session?.entities ?? []);
+    // The pointer-down plane point is the gesture's OFFSET BASELINE (SCHEMA §7.4
+    // `grab`): an entityBody drag moves by `target − grab` and a radius drag keeps
+    // `|grab − center| − radius`, so grabbing a line's middle translates it from
+    // there instead of teleporting its first point onto the cursor.
+    const down = this.deps.engine.screenToPlane(e.clientX, e.clientY);
+    const intent = down
+      ? dragIntent(hit, session?.entities ?? [], [down.x, down.y])
+      : null;
     // LOCKED GEOMETRY (W2 L3): a projected boundary point is a legitimate snap +
     // selection target, but dragging it is a `SetEntityPositions` the backend
     // refuses. Refuse to ARM (rather than letting the drag run and fail at
@@ -2297,15 +2567,32 @@ export class SketchController {
         (hit === null && store.hover === null) ||
         (hit !== null && store.hover !== null && sameSketchSel(hit, store.hover));
       if (!same) store.setHover(hit);
+      if (this.selectActive) this.applyDragCursor(hit);
       // Trim tool: overlay the destructive doomed-piece ghost for the hovered entity
       // (a miss / off-entity hover clears it).
       if (this.trimActive) this.renderTrimGhost(pt.x, pt.y, hit);
-      // Fillet / Offset: overlay the ADDITIVE ghost of what the click would author,
-      // on the ordinary preview lane (nothing is destroyed, so the trim ghost's
-      // destructive styling would read wrong).
+      // Extend / Fillet / Offset: overlay the ADDITIVE ghost of what the click would
+      // author, on the ordinary preview lane (nothing is destroyed, so the trim
+      // ghost's destructive styling would read wrong).
+      if (this.extendActive) this.renderExtendGhost(pt.x, pt.y, hit);
       if (this.filletActive) this.renderFilletGhost(pt.x, pt.y);
       if (this.offsetActive) this.renderOffsetGhost(pt.x, pt.y);
     });
+  }
+
+  /**
+   * Cursor affordance for what a press would DO (Select hover only): the two SP-2
+   * body-pick kinds are the ones a user cannot otherwise tell apart — a line's
+   * body translates, a round curve's body resizes. Point handles keep the tool
+   * default; the marker already reads as grabbable.
+   */
+  private applyDragCursor(hit: SketchSel | null): void {
+    const session = sketchStore.getState().session;
+    const e = hit && !hit.point ? session?.entities.find((x) => x.id === hit.entityId) : undefined;
+    const kind = e ? bodyKind(e.type) : null;
+    const cursor =
+      kind === "entityBody" ? "move" : kind === "radius" ? "ew-resize" : CURSOR_BY_TOOL.select;
+    if (this.deps.container.style.cursor !== cursor) this.deps.container.style.cursor = cursor;
   }
 
   /** Draw the destructive trim ghost for the entity under the cursor (Trim hover):
@@ -2379,8 +2666,9 @@ export class SketchController {
     this.dragStatus = session.status;
     this.dragLastSeq = 0;
     this.dragAccum = {};
+    this.dragCurves = {};
     try {
-      await this.deps.client.beginGesture(session.sketchId, armed.pointRef);
+      await this.deps.client.beginGesture(session.sketchId, armed.pointRef, gestureTarget(armed));
     } catch (err) {
       viewportStore.getState().setStatusHint(`Drag failed: ${sketchErr(err)}`, { severity: "error", sticky: true });
       this.resetDrag();
@@ -2435,7 +2723,11 @@ export class SketchController {
     sketchStore.getState().setConflicting(res!.conflicting ?? []);
     if (this.dragPlane) {
       this.dragAccum = { ...this.dragAccum, ...res!.positions };
-      const moved = applySolvedPositions(this.dragBase, this.dragAccum);
+      this.dragCurves = mergeCurves(this.dragCurves, res!.curves);
+      const moved = applySolvedCurves(
+        applySolvedPositions(this.dragBase, this.dragAccum),
+        this.dragCurves,
+      );
       this.deps.engine.updateSketchSession(this.dragPlane, moved, this.dragStatus);
     }
   }
@@ -2451,10 +2743,21 @@ export class SketchController {
     }
   }
 
-  /** Plane coord of the dragged point in the pre-drag base (for the Esc restore target). */
+  /**
+   * The target that makes `endGesture` a NO-OP, per kind — the Esc restore point.
+   *
+   * `point`/`arcEnd` teleport their handle to the target, so the pre-drag coord of
+   * that handle is what puts it back. `entityBody`/`radius` are measured from
+   * `grab` (delta and radial offset respectively), so ending AT `grab` is the
+   * zero-delta answer — the handle's own coordinate would translate/resize the
+   * entity by however far the user had already dragged.
+   */
   private draggedPointCoord(): [number, number] | undefined {
-    const sel = this.dragArmed?.sel;
-    if (!sel || !sel.point) return undefined;
+    const armed = this.dragArmed;
+    if (!armed) return undefined;
+    if (armed.kind === "entityBody" || armed.kind === "radius") return armed.grab;
+    const sel = armed.sel;
+    if (!sel.point) return undefined;
     const e = this.dragBase.find((x) => x.id === sel.entityId);
     if (!e) return undefined;
     return entityPoints(e).find((p) => p.position === sel.point)?.coord;
@@ -2487,8 +2790,12 @@ export class SketchController {
     if (!session || !plane) return;
 
     // On a cancel (Esc) restore the pre-drag geometry; else apply the committed delta.
+    // Both channels or neither: a radius/arcEnd gesture's whole result lives in
+    // `curves`, so dropping it here would commit an un-resized entity to the store
+    // while the worker's copy moved — the silent-revert class SP-2 exists to close.
     const positions = restore ? {} : result?.solvedPositions ?? {};
-    const entities = applySolvedPositions(base, positions);
+    const curves = restore ? {} : result?.solvedCurves ?? {};
+    const entities = applySolvedCurves(applySolvedPositions(base, positions), curves);
     const next: SketchSession = {
       ...session,
       entities,
@@ -2513,6 +2820,8 @@ export class SketchController {
     this.dragging = false;
     this.dragLastSeq = 0;
     this.dragBase = [];
+    this.dragAccum = {};
+    this.dragCurves = {};
     this.dragPlane = null;
     this.pendingTarget = null;
     this.dragEndPending = null;
@@ -2655,8 +2964,10 @@ export class SketchController {
     else this.cancelMarquee();
   };
 
-  /** OS/browser-level pointer loss (touch cancel, capture stolen): drop the box. */
+  /** OS/browser-level pointer loss (touch cancel, capture stolen): drop the box —
+   *  and any drag-to-arc, whose release will never arrive. */
   private onWindowPointerCancel = (): void => {
+    this.arcDragging = false;
     this.cancelMarquee();
   };
 
@@ -2719,6 +3030,24 @@ export class SketchController {
       e.preventDefault();
       return;
     }
+    // Plain `A` flips the line tool's tangent-arc mode (SP-4 W3). Deliberately NOT
+    // a keymap entry: it is only a verb while a chain is armed on a known tangent,
+    // and outside that it has to fall through so the global ladder still sees it.
+    // NO shift — ⇧A stays the 3-point arc tool, and no meta/ctrl/alt either.
+    if (
+      e.key.toLowerCase() === "a" &&
+      !e.shiftKey &&
+      !e.metaKey &&
+      !e.ctrlKey &&
+      !e.altKey &&
+      this.machine?.id === "line" &&
+      this.canArcHere()
+    ) {
+      this.stepArcToggle();
+      e.stopPropagation();
+      e.preventDefault();
+      return;
+    }
     if (e.key === "Escape" && this.selectActive && (this.marqueeActive || this.marqueeArmed)) {
       // Cancel the in-flight box select here (overlay + orbit restored); don't let the
       // global Esc ladder also switch tools / leave sketch mode.
@@ -2758,11 +3087,7 @@ export class SketchController {
       // A chain is in progress: Enter ends it here (mirrors the Esc-chain branch
       // below). No anchors ⇒ this branch is skipped and the global finishSketch
       // shortcut (useShortcuts) handles Enter instead.
-      const stepped = this.machine.step(this.machineState, { kind: "esc" }, this.stepCtx());
-      this.machineState = stepped.state;
-      this.deps.engine.setSketchPreview([]);
-      this.deps.engine.setSketchGhost(null, null);
-      this.clearLiveDimGesture();
+      this.endChainGesture();
       e.stopPropagation();
       e.preventDefault();
       return;
@@ -2770,15 +3095,23 @@ export class SketchController {
     if (e.key === "Escape" && this.machine && this.machineState && this.machineState.anchors.length > 0) {
       // A gesture is in progress: end the chain here, and DON'T let the global
       // Esc ladder also switch tools (capture-phase intercept).
-      const stepped = this.machine.step(this.machineState, { kind: "esc" }, this.stepCtx());
-      this.machineState = stepped.state;
-      this.deps.engine.setSketchPreview([]);
-      this.deps.engine.setSketchGhost(null, null);
-      this.clearLiveDimGesture();
+      this.endChainGesture();
       e.stopPropagation();
       e.preventDefault();
     }
   };
+
+  /** End the in-progress chain (Enter / Esc): step the machine's `esc` verb and
+   *  drop everything the gesture owned. The line tool's hint has to be REBUILT —
+   *  its arc affordance is phase-dependent and the chain just left that phase. */
+  private endChainGesture(): void {
+    if (!this.machine || !this.machineState) return;
+    this.machineState = this.machine.step(this.machineState, { kind: "esc" }, this.stepCtx()).state;
+    this.deps.engine.setSketchPreview([]);
+    this.deps.engine.setSketchGhost(null, null);
+    this.clearLiveDimGesture();
+    if (this.machine.id === "line") this.updateLineHint();
+  }
 
   private onKeyUp = (e: KeyboardEvent): void => {
     if (e.key === "Alt") this.altHeld = false;
@@ -2786,6 +3119,8 @@ export class SketchController {
 
   dispose(): void {
     this.disposed = true; // set FIRST: guards every pending rAF + queued write-back
+    this.arcDragging = false;
+    this.extendActive = false;
     this.snapCache = null;
     this.snapCacheKey = null;
     this.clearLiveDimGesture();
@@ -2829,6 +3164,40 @@ function isEditableKeyTarget(target: EventTarget | null): boolean {
     target instanceof HTMLElement &&
     (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
   );
+}
+
+/**
+ * A resolved {@link DragIntent} → the wire's {@link GestureTarget} (SCHEMA §7.4).
+ *
+ * `entityId` carries what each kind addresses: the POINT REF for a `point` drag
+ * (the pre-SP-2 shape, byte-identical on the wire), the bare entity id otherwise.
+ * `role` rides along for `arcEnd`, which needs to know WHICH endpoint was grabbed;
+ * the backend ignores it for the kinds that don't.
+ */
+function gestureTarget(intent: DragIntent): GestureTarget {
+  return {
+    kind: intent.kind,
+    entityId: intent.pointRef,
+    ...(intent.role ? { role: intent.role } : {}),
+    grab: intent.grab,
+  };
+}
+
+/**
+ * Fold one drag response's `curves` into the accumulated set, MEMBER by member.
+ *
+ * A whole-object merge would be wrong: SCHEMA §7.4 reports only what CHANGED in
+ * that step, so a response carrying just `{radius}` for an arc must not erase the
+ * `startAngle`/`endAngle` an earlier step of the same gesture already reported.
+ */
+function mergeCurves(
+  acc: Record<string, CurveParams>,
+  next: Record<string, CurveParams> | undefined,
+): Record<string, CurveParams> {
+  if (!next || Object.keys(next).length === 0) return acc;
+  const out = { ...acc };
+  for (const [id, c] of Object.entries(next)) out[id] = { ...out[id], ...c };
+  return out;
 }
 
 /** A raw engine pick → a {@link FacePickTarget}, or null when it is not a face.

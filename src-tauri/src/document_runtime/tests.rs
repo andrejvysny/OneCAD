@@ -44,6 +44,7 @@ use super::*;
 use crate::dto::{
     BeginGestureDto, DragSolveDto, SketchRegionDto, SketchSolveStatus, SketchUpsertDto,
 };
+use crate::worker::wire::GestureTarget;
 use crate::worker::{MeshProvider, SolverEngine};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -56,6 +57,9 @@ struct FakeState {
     snapshot_counter: u64,
     /// Active gestures: `gestureId → (dragPoint id string, last target)`.
     gestures: HashMap<u64, (String, [f64; 2])>,
+    /// The `drag` target of the most recent `begin_gesture` — the observable that
+    /// proves the runtime passes it through untouched (SCHEMA §7.4).
+    last_gesture_target: Option<crate::worker::wire::GestureTarget>,
     /// How many times `save_checkpoint` was invoked — the observable a skipped mint
     /// is asserted against (a re-save at the same step would leave the count alone).
     checkpoint_saves: usize,
@@ -81,6 +85,10 @@ struct FakeBackend {
     /// (SCHEMA §7.5 `existing`), so a test can warm the promotion cache for an
     /// element id it did not mint in that runtime.
     existing: Mutex<Option<ElementId>>,
+    /// CHANGED curve members every `solve_drag`/`end_gesture` echoes (SCHEMA §7.4
+    /// `curves`). Set by a test to model a solver that reshaped a curve — the
+    /// channel `positions` cannot carry.
+    echo_curves: Mutex<std::collections::BTreeMap<String, crate::dto::CurveParamsDto>>,
     state: Mutex<FakeState>,
 }
 
@@ -93,6 +101,7 @@ impl Default for FakeBackend {
             checkpoints_work: false,
             descriptor: Mutex::new(serde_json::json!({ "fake": true })),
             existing: Mutex::new(None),
+            echo_curves: Mutex::new(std::collections::BTreeMap::new()),
             state: Mutex::new(FakeState::default()),
         }
     }
@@ -374,6 +383,7 @@ impl SolverEngine for FakeBackend {
             status: SketchSolveStatus::FullyConstrained,
             conflicting: vec![],
             solved_positions: std::collections::BTreeMap::new(),
+            solved_curves: std::collections::BTreeMap::new(),
         })
     }
     async fn begin_gesture(
@@ -382,13 +392,14 @@ impl SolverEngine for FakeBackend {
         _sketch_revision: u64,
         gesture_id: u64,
         drag_point: EntityId,
+        target: crate::worker::wire::GestureTarget,
         _solver_policy_hash: &str,
     ) -> Result<BeginGestureDto, EngineError> {
-        self.state
-            .lock()
-            .unwrap()
+        let mut state = self.state.lock().unwrap();
+        state
             .gestures
             .insert(gesture_id, (drag_point.to_string(), [0.0, 0.0]));
+        state.last_gesture_target = Some(target);
         Ok(BeginGestureDto {
             gesture_id,
             ready: true,
@@ -413,6 +424,7 @@ impl SolverEngine for FakeBackend {
             dof: 0,
             conflicting: vec![],
             positions,
+            curves: self.echo_curves.lock().unwrap().clone(),
             solve_micros: 0,
             superseded: false,
         })
@@ -442,6 +454,7 @@ impl SolverEngine for FakeBackend {
             status: SketchSolveStatus::FullyConstrained,
             conflicting: vec![],
             solved_positions: solved,
+            solved_curves: self.echo_curves.lock().unwrap().clone(),
         })
     }
     async fn sketch_regions(&self, _sketch_id: &str) -> Result<Vec<SketchRegionDto>, EngineError> {
@@ -1296,7 +1309,10 @@ async fn sketch_gesture_commits_exactly_one_undo_command() {
 
     // Drag: begin → N drags → pointer-up commits ONE undo command.
     let depth_before = rt.session.undo_depth();
-    let g = rt.begin_gesture(sid, point).await.unwrap();
+    let g = rt
+        .begin_gesture(sid, point, GestureTarget::point(point))
+        .await
+        .unwrap();
     assert!(g.ready);
     rt.solve_drag([5.0, 0.0]).await.unwrap();
     rt.solve_drag([10.0, 2.0]).await.unwrap();
@@ -1321,6 +1337,117 @@ async fn sketch_gesture_commits_exactly_one_undo_command() {
         [0.0, 0.0],
         "undo reverts the drag"
     );
+}
+
+#[tokio::test]
+async fn end_gesture_applies_solved_curves_and_forwards_the_target() {
+    // SP-2: the `curves` channel is what a radius/arcEnd drag reports — `positions`
+    // carries none of it. A solver that reshaped the arc must land in the DOCUMENT,
+    // in the same single undo command as the positions.
+    let backend = Arc::new(FakeBackend::new());
+    let (sid, arc, circle, center) = (
+        SketchId(Uuid::from_u128(0x5d)),
+        EntityId(Uuid::from_u128(0x141)),
+        EntityId(Uuid::from_u128(0x142)),
+        EntityId(Uuid::from_u128(0x140)),
+    );
+    let mut sk = Sketch::on_world_plane(sid, "Curves", WorldPlane::XY);
+    sk.add_entity(SketchEntity::point(
+        center,
+        Vec2::new_unchecked(0.0, 0.0),
+        false,
+        false,
+    ))
+    .unwrap();
+    sk.add_entity(
+        SketchEntity::arc(arc, center, 4.0, 0.0, std::f64::consts::FRAC_PI_2, false).unwrap(),
+    )
+    .unwrap();
+    sk.add_entity(SketchEntity::circle(circle, center, 5.0, false).unwrap())
+        .unwrap();
+
+    *backend.echo_curves.lock().unwrap() = std::collections::BTreeMap::from([
+        (
+            arc.to_string(),
+            crate::dto::CurveParamsDto {
+                radius: Some(11.0),
+                start_angle: Some(-0.25),
+                end_angle: None, // absent ⇒ UNCHANGED, not zero
+            },
+        ),
+        (
+            // An unknown id must be ignored, not panic the commit.
+            EntityId(Uuid::from_u128(0xDEAD)).to_string(),
+            crate::dto::CurveParamsDto {
+                radius: Some(1.0),
+                ..Default::default()
+            },
+        ),
+    ]);
+
+    let mut rt = runtime_with(backend.clone());
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap();
+    rt.enter_sketch(sid).await.unwrap();
+    let depth_before = rt.session.undo_depth();
+
+    let target = GestureTarget {
+        kind: crate::worker::wire::DragKind::ArcEnd,
+        entity: arc,
+        role: Some("end"),
+        grab: Some([9.0, 1.5]),
+    };
+    rt.begin_gesture(sid, center, target).await.unwrap();
+    assert_eq!(
+        backend.state.lock().unwrap().last_gesture_target,
+        Some(target),
+        "the runtime forwards the target verbatim (no rewrite)"
+    );
+    let solved = rt.end_gesture(Some([9.0, 1.5])).await.unwrap();
+    assert_eq!(solved.solved_curves[&arc.to_string()].radius, Some(11.0));
+
+    let doc = rt.session.document().sketch(sid).unwrap();
+    match doc.get_entity(arc).unwrap() {
+        SketchEntity::Arc {
+            radius,
+            start_angle,
+            end_angle,
+            ..
+        } => {
+            assert_eq!(*radius, 11.0, "the arc's radius came from `curves`");
+            assert_eq!(*start_angle, -0.25);
+            assert_eq!(
+                *end_angle,
+                std::f64::consts::FRAC_PI_2,
+                "an absent member is UNCHANGED"
+            );
+        }
+        other => panic!("{other:?} is not an arc"),
+    }
+    match doc.get_entity(circle).unwrap() {
+        SketchEntity::Circle { radius, .. } => {
+            assert_eq!(*radius, 5.0, "an unreported curve is untouched")
+        }
+        other => panic!("{other:?} is not a circle"),
+    }
+    assert_eq!(
+        rt.session.undo_depth(),
+        depth_before + 1,
+        "curves ride the SAME single undo command as positions"
+    );
+
+    // One undo reverts the reshape too (it was applied to the `before` memento).
+    assert!(rt.undo().is_some());
+    match rt
+        .session
+        .document()
+        .sketch(sid)
+        .unwrap()
+        .get_entity(arc)
+        .unwrap()
+    {
+        SketchEntity::Arc { radius, .. } => assert_eq!(*radius, 4.0, "undo reverts the reshape"),
+        other => panic!("{other:?} is not an arc"),
+    }
 }
 
 #[tokio::test]
@@ -1361,7 +1488,9 @@ async fn sketch_mutations_expose_regen_outcomes_to_the_scheduler() {
         Some(RegenHint::ToEnd)
     ));
 
-    rt.begin_gesture(sid, point).await.unwrap();
+    rt.begin_gesture(sid, point, GestureTarget::point(point))
+        .await
+        .unwrap();
     let (_, gesture_outcome) = rt.end_gesture_with_outcome(Some([4.0, 5.0])).await.unwrap();
     assert_eq!(gesture_outcome.regen, RegenHint::ToEnd);
 }
@@ -1394,7 +1523,9 @@ async fn prepare_sketch_regions_refuses_during_a_live_gesture_on_the_same_sketch
     rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap();
     rt.enter_sketch(sid).await.unwrap();
 
-    rt.begin_gesture(sid, point).await.unwrap();
+    rt.begin_gesture(sid, point, GestureTarget::point(point))
+        .await
+        .unwrap();
 
     // `PreparedSketchRegions` has no `Debug` impl, so match manually instead of
     // `expect_err`/`unwrap_err` (both require `T: Debug` for their panic path).
@@ -1428,7 +1559,9 @@ async fn prepare_sketch_regions_allows_a_different_sketch_during_a_live_gesture(
     let sid_b = sk_b.id;
     rt.apply(EditCommand::AddSketch { sketch: sk_b }).unwrap();
 
-    rt.begin_gesture(sid_a, point).await.unwrap();
+    rt.begin_gesture(sid_a, point, GestureTarget::point(point))
+        .await
+        .unwrap();
 
     // Sketch B carries no gesture — A's drag must not block it.
     rt.prepare_sketch_regions(sid_b)
@@ -1446,7 +1579,9 @@ async fn prepare_sketch_regions_ok_again_after_gesture_ends() {
     rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap();
     rt.enter_sketch(sid).await.unwrap();
 
-    rt.begin_gesture(sid, point).await.unwrap();
+    rt.begin_gesture(sid, point, GestureTarget::point(point))
+        .await
+        .unwrap();
     assert!(
         rt.prepare_sketch_regions(sid).is_err(),
         "blocked mid-gesture"
@@ -1468,7 +1603,9 @@ async fn prepare_sketch_regions_ok_again_after_cancel() {
     rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap();
     rt.enter_sketch(sid).await.unwrap();
 
-    rt.begin_gesture(sid, point).await.unwrap();
+    rt.begin_gesture(sid, point, GestureTarget::point(point))
+        .await
+        .unwrap();
     assert!(
         rt.prepare_sketch_regions(sid).is_err(),
         "blocked mid-gesture"
@@ -1490,7 +1627,9 @@ async fn finish_sketch_mid_gesture_clears_active_gesture() {
     rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap();
     rt.enter_sketch(sid).await.unwrap();
 
-    rt.begin_gesture(sid, point).await.unwrap();
+    rt.begin_gesture(sid, point, GestureTarget::point(point))
+        .await
+        .unwrap();
     assert!(rt.active_gesture.is_some(), "gesture is live");
 
     // The Enter/E finish handoff: the frontend's pointer-up cancel lost the
@@ -1513,6 +1652,204 @@ async fn finish_sketch_mid_gesture_clears_active_gesture() {
     assert!(matches!(err, EngineError::OpFailed { .. }));
     let err = rt.end_gesture(None).await.unwrap_err();
     assert!(matches!(err, EngineError::OpFailed { .. }));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SP-0 D3 — the RAII solver-lane claim. The refusals above are check-then-act on
+// `active_gesture`; these pin the claim that actually closes the window, and that
+// EVERY gesture teardown path releases it (the claim is a field of
+// `ActiveGesture`, so `Drop` is the only release site — nothing to forget).
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_held_region_query_refuses_a_new_gesture_until_it_is_driven() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sk, point) = sketch_with_point();
+    let sid = sk.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap();
+    rt.enter_sketch(sid).await.unwrap();
+
+    // Prepared, NOT driven — the window `get_sketch_regions` leaves open while it
+    // awaits the worker with the runtime lock released.
+    let prepared = rt.prepare_sketch_regions(sid).expect("prepare");
+    assert_eq!(
+        rt.solver_lane.owner(sid),
+        Some(super::solver_lane::LaneOwner::RegionQuery)
+    );
+
+    let err = rt
+        .begin_gesture(sid, point, GestureTarget::point(point))
+        .await
+        .unwrap_err();
+    match err {
+        EngineError::OpFailed {
+            message,
+            recoverable,
+            ..
+        } => {
+            assert!(recoverable, "must be recoverable — the user just retries");
+            assert!(message.contains(&sid.to_string()), "{message}");
+            assert!(message.contains("region query"), "{message}");
+        }
+        other => panic!("expected OpFailed, got {other:?}"),
+    }
+    assert!(
+        rt.active_gesture.is_none(),
+        "a refused begin must leave no half-open gesture"
+    );
+
+    prepared.drive().await.expect("drive succeeds");
+    assert_eq!(rt.solver_lane.owner(sid), None, "drive released the claim");
+    rt.begin_gesture(sid, point, GestureTarget::point(point))
+        .await
+        .expect("the query finished ⇒ the drag opens");
+}
+
+#[tokio::test]
+async fn a_held_region_query_on_another_sketch_never_blocks_a_gesture() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sk, point) = sketch_with_point();
+    let sid_a = sk.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap();
+    let sk_b = other_sketch(0x5e);
+    let sid_b = sk_b.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk_b }).unwrap();
+    rt.enter_sketch(sid_a).await.unwrap();
+
+    let prepared_b = rt.prepare_sketch_regions(sid_b).expect("prepare B");
+    rt.begin_gesture(sid_a, point, GestureTarget::point(point))
+        .await
+        .expect("the claim is per sketch, not a global solver mutex");
+    prepared_b.drive().await.expect("drive B succeeds");
+}
+
+#[tokio::test]
+async fn every_gesture_teardown_path_releases_the_lane_claim() {
+    // end_gesture, cancel_sketch and finish_sketch's dangling-gesture clear all
+    // TAKE the `ActiveGesture`; the claim rides along and is released by `Drop`.
+    for (label, teardown) in [
+        ("end_gesture", 0_u8),
+        ("cancel_sketch", 1),
+        ("finish_sketch", 2),
+    ] {
+        let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+        let (sk, point) = sketch_with_point();
+        let sid = sk.id;
+        rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap();
+        rt.enter_sketch(sid).await.unwrap();
+
+        rt.begin_gesture(sid, point, GestureTarget::point(point))
+            .await
+            .unwrap();
+        assert_eq!(
+            rt.solver_lane.owner(sid),
+            Some(super::solver_lane::LaneOwner::Gesture),
+            "{label}: the gesture holds the lane"
+        );
+
+        match teardown {
+            0 => {
+                rt.end_gesture(Some([1.0, 1.0])).await.unwrap();
+            }
+            1 => rt.cancel_sketch(sid).await.unwrap(),
+            _ => {
+                rt.finish_sketch(sid).await.unwrap();
+            }
+        }
+
+        assert_eq!(
+            rt.solver_lane.owner(sid),
+            None,
+            "{label}: the claim must be released"
+        );
+        // The observable consequence: a SECOND region query gets through.
+        rt.prepare_sketch_regions(sid)
+            .unwrap_or_else(|e| panic!("{label}: prepare must be unblocked, got {e:?}"))
+            .drive()
+            .await
+            .expect("drive succeeds");
+    }
+}
+
+#[tokio::test]
+async fn concurrent_region_queries_share_the_lane() {
+    // Two `getSketchRegions` on one sketch are pure reads and already overlap in
+    // the frontend (sketchStaticSync vs the extrude/revolve arm). The claim must
+    // not turn that into a new refusal.
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sk, point) = sketch_with_point();
+    let sid = sk.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap();
+    rt.enter_sketch(sid).await.unwrap();
+
+    let first = rt.prepare_sketch_regions(sid).expect("first");
+    let second = rt.prepare_sketch_regions(sid).expect("second shares");
+    // …but a gesture is still fenced while EITHER is outstanding.
+    assert!(rt
+        .begin_gesture(sid, point, GestureTarget::point(point))
+        .await
+        .is_err());
+    first.drive().await.expect("drive 1");
+    assert!(
+        rt.begin_gesture(sid, point, GestureTarget::point(point))
+            .await
+            .is_err(),
+        "one holder left ⇒ still fenced"
+    );
+    second.drive().await.expect("drive 2");
+    rt.begin_gesture(sid, point, GestureTarget::point(point))
+        .await
+        .expect("lane free");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SP-0 D3 audit of HISTORY-HARDEN H8 — undo/redo never looked at
+// `active_gesture`. Mid-drag, `end_gesture` rebuilds the sketch from the `before`
+// memento captured at begin, so a revert that lands in between is silently
+// resurrected at pointer-up. See `revert_blocked_by_gesture`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn undo_stands_down_while_a_drag_gesture_is_open() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    let (sk, point) = sketch_with_point();
+    let sid = sk.id;
+    rt.apply(EditCommand::AddSketch { sketch: sk }).unwrap();
+    rt.enter_sketch(sid).await.unwrap();
+
+    // One committed edit to aim the undo at.
+    rt.sketch_upsert(
+        sid,
+        vec![SketchEditOp::SetEntityPositions {
+            positions: vec![(point, Vec2::new_unchecked(3.0, 4.0))],
+        }],
+    )
+    .await
+    .unwrap();
+    let depth = rt.undo_depth();
+    assert_eq!(point_at(&rt, sid, point), [3.0, 4.0]);
+
+    rt.begin_gesture(sid, point, GestureTarget::point(point))
+        .await
+        .unwrap();
+    assert!(
+        rt.undo().is_none(),
+        "⌘Z mid-drag must stand down, not corrupt the drag's `before` memento"
+    );
+    assert!(rt.redo().unwrap().is_none(), "so must ⇧⌘Z");
+    assert_eq!(rt.undo_depth(), depth, "the undo stack is untouched");
+
+    // Pointer-up commits normally, and undo works again the moment it does.
+    rt.end_gesture(Some([9.0, 9.0])).await.unwrap();
+    assert!(
+        rt.undo().is_some(),
+        "the gesture ended ⇒ undo is live again"
+    );
+    assert_eq!(
+        point_at(&rt, sid, point),
+        [3.0, 4.0],
+        "the drag is what got reverted — the pre-drag edit survived"
+    );
 }
 
 #[tokio::test]

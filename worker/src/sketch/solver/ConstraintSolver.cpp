@@ -588,6 +588,104 @@ SolverResult ConstraintSolver::solveWithGroupDrag(
     return lastResult;
 }
 
+SolverResult ConstraintSolver::solveWithTargets(const ConstraintSolver::DragTargets& targets) {
+    if (!gcsSystem_) {
+        SolverResult result;
+        result.success = false;
+        result.status = SolverResult::Status::InternalError;
+        result.errorMessage = "PlaneGCS system not available";
+        return result;
+    }
+
+    if (targets.points.empty() && targets.radii.empty()) {
+        SolverResult result;
+        result.success = false;
+        result.status = SolverResult::Status::InvalidInput;
+        result.errorMessage = "No drag targets";
+        return result;
+    }
+
+    // Substep on the LARGEST delta across both channels: a small point move
+    // paired with a large radius change still needs the radius interpolated, or
+    // the first step asks PlaneGCS to jump a discontinuity it cannot follow.
+    std::unordered_map<EntityID, Vec2d> startPositions;
+    startPositions.reserve(targets.points.size());
+    std::unordered_map<EntityID, double> startRadii;
+    startRadii.reserve(targets.radii.size());
+    double maxDeltaMagnitude = 0.0;
+
+    for (const auto& [pointId, targetPos] : targets.points) {
+        auto pointIt = pointsById_.find(pointId);
+        if (pointIt == pointsById_.end() || !pointIt->second) {
+            SolverResult result;
+            result.success = false;
+            result.status = SolverResult::Status::InvalidInput;
+            result.errorMessage = "Drag target point not found";
+            return result;
+        }
+        const Vec2d startPos{pointIt->second->position().X(), pointIt->second->position().Y()};
+        startPositions[pointId] = startPos;
+        const double dx = targetPos.x - startPos.x;
+        const double dy = targetPos.y - startPos.y;
+        maxDeltaMagnitude = std::max(maxDeltaMagnitude, std::sqrt((dx * dx) + (dy * dy)));
+    }
+
+    for (const auto& [curveId, targetRadius] : targets.radii) {
+        double startRadius = 0.0;
+        if (auto circleIt = circlesById_.find(curveId);
+            circleIt != circlesById_.end() && circleIt->second) {
+            startRadius = circleIt->second->radius();
+        } else if (auto arcIt = arcsById_.find(curveId);
+                   arcIt != arcsById_.end() && arcIt->second) {
+            startRadius = arcIt->second->radius();
+        } else {
+            SolverResult result;
+            result.success = false;
+            result.status = SolverResult::Status::InvalidInput;
+            result.errorMessage = "Drag target curve not found";
+            return result;
+        }
+        startRadii[curveId] = startRadius;
+        maxDeltaMagnitude = std::max(maxDeltaMagnitude, std::abs(targetRadius - startRadius));
+    }
+
+    const int substeps = computeDragSubsteps(maxDeltaMagnitude);
+
+    const ConstraintSolver::DragSolveSnapshot snapshot = captureDragSolveSnapshot();
+    SolverResult lastResult;
+    ConstraintSolver::DragTargets intermediate;
+    intermediate.pinnedPoints = targets.pinnedPoints;
+    intermediate.points.reserve(targets.points.size());
+    intermediate.radii.reserve(targets.radii.size());
+    for (int step = 1; step <= substeps; ++step) {
+        intermediate.points.clear();
+        intermediate.radii.clear();
+        const double t = static_cast<double>(step) / static_cast<double>(substeps);
+        for (const auto& [pointId, targetPos] : targets.points) {
+            const Vec2d& startPos = startPositions.at(pointId);
+            intermediate.points[pointId] = Vec2d{
+                .x = startPos.x + ((targetPos.x - startPos.x) * t),
+                .y = startPos.y + ((targetPos.y - startPos.y) * t),
+            };
+        }
+        for (const auto& [curveId, targetRadius] : targets.radii) {
+            const double startRadius = startRadii.at(curveId);
+            intermediate.radii[curveId] = startRadius + ((targetRadius - startRadius) * t);
+        }
+
+        lastResult = solveWithTargetsSingleStep(intermediate);
+        if (!lastResult.success) {
+            restoreDragSolveSnapshot(snapshot);
+            if (lastResult.errorMessage.empty()) {
+                lastResult.errorMessage = "Drag rejected by constraints";
+            }
+            return lastResult;
+        }
+    }
+
+    return lastResult;
+}
+
 ConstraintSolver::DragSolveSnapshot ConstraintSolver::captureDragSolveSnapshot() const {
     ConstraintSolver::DragSolveSnapshot snapshot;
     snapshot.pointPositions.reserve(pointsById_.size());
@@ -763,6 +861,106 @@ SolverResult ConstraintSolver::solveWithGroupDragSingleStep(
     SolverResult result = solve();
     if (!result.success && result.errorMessage.empty()) {
         result.errorMessage = "Group drag rejected by constraints";
+    }
+
+    gcsSystem_->clearByTag(dragTag);
+    gcsSystem_->invalidatedDiagnosis();
+
+    return result;
+}
+
+SolverResult ConstraintSolver::solveWithTargetsSingleStep(
+    const ConstraintSolver::DragTargets& targets) {
+    if (!gcsSystem_) {
+        SolverResult result;
+        result.success = false;
+        result.status = SolverResult::Status::InternalError;
+        result.errorMessage = "PlaneGCS system not available";
+        return result;
+    }
+
+    // The drag tag. Everything added below is TEMPORARY and gesture-scoped: it
+    // is cleared before the next step and again after the solve. Tag −1 is
+    // absent from `gcsTagToConstraint_`, so a drive can never be reported as a
+    // user constraint, and it can never outrank a committed one.
+    constexpr int dragTag = -1;
+    gcsSystem_->clearByTag(dragTag);
+
+    // POINTER STABILITY: PlaneGCS keeps the raw `double*` it is handed until the
+    // solve returns, so every target value must outlive `solve()` at a FIXED
+    // address. A deque never invalidates on push_back; a vector would reallocate
+    // and dangle every pointer already handed over (same invariant as
+    // `pinValues_`, which holds the tag-0 reference-lock pins).
+    std::deque<double> targetValues;
+
+    auto reject = [&](SolverResult::Status status, std::string message) {
+        SolverResult result;
+        result.success = false;
+        result.status = status;
+        result.errorMessage = std::move(message);
+        gcsSystem_->clearByTag(dragTag);
+        gcsSystem_->invalidatedDiagnosis();
+        return result;
+    };
+
+    // Pins first, at their CURRENT position. A pin that is also a target is
+    // skipped — the target wins (see DragTargets).
+    for (const EntityID& pointId : targets.pinnedPoints) {
+        if (targets.points.find(pointId) != targets.points.end()) {
+            continue;
+        }
+        auto pointIt = pointsById_.find(pointId);
+        if (pointIt == pointsById_.end() || !pointIt->second) {
+            continue;  // pinning geometry the solver does not hold is a no-op
+        }
+        GCS::Point gcsPoint = makePoint(pointIt->second);
+        double* x = &targetValues.emplace_back(pointIt->second->position().X());
+        double* y = &targetValues.emplace_back(pointIt->second->position().Y());
+        gcsSystem_->addConstraintCoordinateX(gcsPoint, x, dragTag, true);
+        gcsSystem_->addConstraintCoordinateY(gcsPoint, y, dragTag, true);
+    }
+
+    for (const auto& [pointId, targetPos] : targets.points) {
+        auto pointIt = pointsById_.find(pointId);
+        if (pointIt == pointsById_.end() || !pointIt->second) {
+            return reject(SolverResult::Status::InvalidInput, "Drag target point not found");
+        }
+        GCS::Point gcsPoint = makePoint(pointIt->second);
+        double* x = &targetValues.emplace_back(targetPos.x);
+        double* y = &targetValues.emplace_back(targetPos.y);
+        gcsSystem_->addConstraintCoordinateX(gcsPoint, x, dragTag, true);
+        gcsSystem_->addConstraintCoordinateY(gcsPoint, y, dragTag, true);
+    }
+
+    for (const auto& [curveId, targetRadius] : targets.radii) {
+        double* radius = &targetValues.emplace_back(targetRadius);
+        if (auto circleIt = circlesById_.find(curveId);
+            circleIt != circlesById_.end() && circleIt->second) {
+            SketchPoint* center = nullptr;
+            if (!circleCenter(pointsById_, circleIt->second, center)) {
+                return reject(SolverResult::Status::InvalidInput,
+                              "Drag target circle center not registered");
+            }
+            GCS::Circle gcsCircle = makeCircle(center, circleIt->second);
+            gcsSystem_->addConstraintCircleRadius(gcsCircle, radius, dragTag, true);
+            continue;
+        }
+        if (auto arcIt = arcsById_.find(curveId); arcIt != arcsById_.end() && arcIt->second) {
+            SketchPoint* center = nullptr;
+            if (!arcCenter(pointsById_, arcIt->second, center)) {
+                return reject(SolverResult::Status::InvalidInput,
+                              "Drag target arc center not registered");
+            }
+            GCS::Arc gcsArc = makeArc(center, arcIt->second);
+            gcsSystem_->addConstraintArcRadius(gcsArc, radius, dragTag, true);
+            continue;
+        }
+        return reject(SolverResult::Status::InvalidInput, "Drag target curve not found");
+    }
+
+    SolverResult result = solve();
+    if (!result.success && result.errorMessage.empty()) {
+        result.errorMessage = "Drag rejected by constraints";
     }
 
     gcsSystem_->clearByTag(dragTag);

@@ -523,6 +523,37 @@ public:
     void endGroupDrag();
 
     /**
+     * @brief Generalized direct-manipulation solve (SCHEMA §7.4 gesture kinds).
+     * @param pointTargets Where each named point should go.
+     * @param radiusTargets What each named Arc/Circle radius should become.
+     * @param pinnedPoints Points held at their CURRENT position for this solve.
+     *
+     * The sibling of solveWithDrag for gestures that are not "one point to one
+     * position": `radius` moves no point at all, `arcEnd` needs the sibling
+     * endpoint FREE (pinning every other point over-determines the reshape), and
+     * `entityBody` needs nothing pinned so coupled geometry can follow.
+     *
+     * Unlike solveWithGroupDrag this is NOT rigid-or-reject: the targets are
+     * advisory tag(−1) drives, so a committed constraint that pulls the result
+     * away from the target is a SUCCESS reporting the solved pose. The caller
+     * owns the §7.4 MIN_GEOMETRY_SIZE radius floor and the MIN_ARC_SWEEP guard.
+     */
+    SolveResult solveWithTargets(const std::unordered_map<EntityID, Vec2d>& pointTargets,
+                                 const std::unordered_map<EntityID, double>& radiusTargets,
+                                 const std::unordered_set<EntityID>& pinnedPoints);
+
+    /**
+     * @brief Every point entity the given entity OWNS, in handle order.
+     * @return center, start, end (Arc) · center (Circle/Ellipse) ·
+     *         p0, p1 (Line) · itself (Point) · empty for anything else.
+     *
+     * Handle order is contractual: SCHEMA §7.4 anchors a grab-less `entityBody`
+     * gesture on the FIRST id returned here. An arc with derived (non-entity)
+     * endpoints contributes its center only.
+     */
+    std::vector<EntityID> entityPointIds(EntityID entityId) const;
+
+    /**
      * @brief Get free direction(s) for a point for constrained drag (e.g. Shift-drag).
      * @param pointId Point entity ID (must be a SketchPoint).
      * @return Unit vectors along which the point can move; empty = fixed, 1 = line, 2 = plane.

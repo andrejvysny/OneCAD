@@ -37,6 +37,7 @@ use onecad_core::sketch::{Sketch, SketchEntity, WorldPlane};
 use onecad_lib::document_runtime::DocumentRuntime;
 use onecad_lib::dto::PreviewTrianglesDto;
 use onecad_lib::worker::manager::SupervisorConfig;
+use onecad_lib::worker::wire::GestureTarget;
 use onecad_lib::worker::{resolve_worker_path, MeshProvider, SolverEngine, WorkerManager};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -567,7 +568,9 @@ async fn live_gesture_refuses_region_snapshot_then_unblocks_after_end() {
     .expect("AddSketch");
     rt.enter_sketch(sid).await.expect("enter_sketch");
 
-    rt.begin_gesture(sid, eid(P0)).await.expect("begin_gesture");
+    rt.begin_gesture(sid, eid(P0), GestureTarget::point(eid(P0)))
+        .await
+        .expect("begin_gesture");
 
     let err = match rt.prepare_sketch_regions(sid) {
         Err(e) => e,
@@ -614,7 +617,9 @@ async fn finish_sketch_mid_gesture_clears_it_so_regions_succeed() {
     .expect("AddSketch");
     rt.enter_sketch(sid).await.expect("enter_sketch");
 
-    rt.begin_gesture(sid, eid(P0)).await.expect("begin_gesture");
+    rt.begin_gesture(sid, eid(P0), GestureTarget::point(eid(P0)))
+        .await
+        .expect("begin_gesture");
 
     // The Enter/E finish handoff: the frontend's pointer-up cancel lost the
     // race, so finish_sketch runs while the gesture is still open. It must
@@ -635,6 +640,112 @@ async fn finish_sketch_mid_gesture_clears_it_so_regions_succeed() {
         .expect("drive succeeds")
         .regions;
     assert_eq!(regions_again.len(), 1);
+
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SP-0 D3 — the OTHER direction of the same race, which the gesture-refusal
+// above could not close.
+//
+// `prepare_sketch_regions` captures its sketch under the runtime lock and then
+// `drive()`s it WITHOUT the lock. The refusal above is a check-then-act: it only
+// looks at `active_gesture` at prepare time, so a `beginGesture` that lands
+// during the unlocked drive sails through, and the drive's re-upsert then lands
+// on a worker whose gesture is already open. The `Claim` held by
+// `PreparedSketchRegions` for its whole lifetime closes that window BY
+// CONSTRUCTION.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_region_query_in_flight_refuses_a_new_drag_on_the_same_sketch() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    let sid = SketchId(Uuid::from_u128(0x9E40));
+    rt.apply(EditCommand::AddSketch {
+        sketch: rect_sketch(sid, false),
+    })
+    .expect("AddSketch");
+    rt.enter_sketch(sid).await.expect("enter_sketch");
+
+    // Prepared but NOT yet driven — exactly the window `get_sketch_regions`
+    // leaves open between releasing the runtime lock and the worker round-trip.
+    let prepared = rt
+        .prepare_sketch_regions(sid)
+        .expect("no gesture yet ⇒ prepare succeeds");
+
+    let err = rt
+        .begin_gesture(sid, eid(P0), GestureTarget::point(eid(P0)))
+        .await
+        .expect_err("a region query holding the solver lane must refuse a new drag");
+    assert!(
+        matches!(
+            err,
+            EngineError::OpFailed {
+                recoverable: true,
+                ..
+            }
+        ),
+        "must be a recoverable op failure, got {err:?}"
+    );
+    match &err {
+        EngineError::OpFailed { message, .. } => {
+            assert!(message.contains(&sid.to_string()), "{message}");
+            assert!(message.contains("region query"), "{message}");
+        }
+        other => panic!("expected OpFailed, got {other:?}"),
+    }
+
+    // Driving consumes the query, which drops its claim — the drag is free again.
+    let regions = prepared.drive().await.expect("drive succeeds").regions;
+    assert_eq!(regions.len(), 1, "the rectangle closes into one region");
+
+    rt.begin_gesture(sid, eid(P0), GestureTarget::point(eid(P0)))
+        .await
+        .expect("the region query finished ⇒ the drag opens");
+    rt.end_gesture(None).await.expect("end_gesture");
+
+    wm.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_region_query_on_a_different_sketch_never_blocks_a_drag() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    let sid_a = SketchId(Uuid::from_u128(0x9E41));
+    let sid_b = SketchId(Uuid::from_u128(0x9E42));
+    rt.apply(EditCommand::AddSketch {
+        sketch: rect_sketch(sid_a, false),
+    })
+    .expect("AddSketch A");
+    rt.apply(EditCommand::AddSketch {
+        sketch: rect_sketch(sid_b, false),
+    })
+    .expect("AddSketch B");
+    rt.enter_sketch(sid_a).await.expect("enter_sketch A");
+
+    // The claim is per SKETCH, not a global solver mutex: B's query and A's drag
+    // touch disjoint entries in the worker's `SketchStore`.
+    let prepared_b = rt
+        .prepare_sketch_regions(sid_b)
+        .expect("prepare B succeeds");
+    rt.begin_gesture(sid_a, eid(P0), GestureTarget::point(eid(P0)))
+        .await
+        .expect("B's region query must not block A's drag");
+
+    let regions_b = prepared_b.drive().await.expect("drive B succeeds").regions;
+    assert_eq!(regions_b.len(), 1);
+    rt.end_gesture(None).await.expect("end_gesture");
 
     wm.shutdown().await;
 }

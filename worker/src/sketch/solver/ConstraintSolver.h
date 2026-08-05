@@ -265,6 +265,42 @@ public:
     SolverResult solveWithGroupDrag(const std::unordered_map<EntityID, Vec2d>& targetPositions);
 
     /**
+     * @brief One drag step's worth of intent: where points should go, what radii
+     *        should become, and which points must not move.
+     *
+     * `pinnedPoints` is held at its CURRENT position — the caller chooses the
+     * pin set per gesture kind, because there is no set that is right for all of
+     * them (pinning every other point over-determines an arc-endpoint reshape,
+     * pinning nothing lets a body drag translate the whole sketch).
+     * A point that is both a target and a pin is TARGETED: the target is the
+     * user's intent, the pin is a default.
+     */
+    struct DragTargets {
+        std::unordered_map<EntityID, Vec2d> points;
+        std::unordered_map<EntityID, double> radii;
+        std::unordered_set<EntityID> pinnedPoints;
+    };
+
+    /**
+     * @brief Generalized drag solve: drive point positions AND curve radii
+     *        toward `targets` while holding `targets.pinnedPoints`.
+     *
+     * The point-only cases (`solveWithDrag`, `solveWithGroupDrag`) stay as they
+     * are; this is the superset the SCHEMA §7.4 gesture kinds need — `radius`
+     * moves no point at all, and `arcEnd` needs a pin set neither of the others
+     * can express.
+     *
+     * Targets are ADVISORY: they are temporary tag(−1) drives, so any committed
+     * constraint outranks them and a converged solve that lands away from the
+     * target is still a success. Substepped like the other drag entries; a
+     * substep that fails restores the pre-drag pose and returns.
+     *
+     * The caller owns the SCHEMA §7.4 `MIN_GEOMETRY_SIZE` radius floor — a
+     * radius target is handed to PlaneGCS verbatim.
+     */
+    SolverResult solveWithTargets(const DragTargets& targets);
+
+    /**
      * @brief Apply solution from last successful solve
      *
      * Used when applyPartialSolution is false but caller wants
@@ -402,6 +438,7 @@ private:
     SolverResult solveWithDragSingleStep(EntityID pointId, const Vec2d& targetPos,
                                          const std::unordered_set<EntityID>& pointIdsToFix);
     SolverResult solveWithGroupDragSingleStep(const std::unordered_map<EntityID, Vec2d>& targetPositions);
+    SolverResult solveWithTargetsSingleStep(const DragTargets& targets);
 };
 
 // ========== DOF Calculation Table ==========

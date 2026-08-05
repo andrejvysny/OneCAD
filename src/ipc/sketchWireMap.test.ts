@@ -4,6 +4,7 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  applySolvedCurves,
   applySolvedPositions,
   buildAddSketch,
   buildAddSketchOnDatum,
@@ -13,12 +14,14 @@ import {
   frontendConflictingIds,
   frontendConstraintsFromDto,
   frontendEntitiesFromDto,
+  frontendSolvedCurves,
   frontendSolvedPositions,
   isDimensional,
   marshalUpsert,
   seedIdMapFromWire,
 } from "./sketchWireMap";
 import type { SketchConstraint, SketchEntity } from "./types";
+import { __resetLogForTests, logSnapshot } from "@/debug/log";
 
 let seq = 0;
 const mint = () => `uuid-${++seq}`;
@@ -1001,5 +1004,131 @@ describe("referenceLocked", () => {
     expect(marshalUpsert(map, { entities: both, constraints: [] }, mint)).toEqual([
       { op: "setEntityConstruction", entity: "fr", construction: true },
     ]);
+  });
+});
+
+// ── SP-2 W4: the `curves` channel (SCHEMA §7.4) ──────────────────────────────
+
+describe("frontendSolvedCurves — re-key backend entity UUIDs", () => {
+  it("maps backend entity UUIDs to frontend entity ids", () => {
+    const map = createIdMap("sk", "XY");
+    marshalUpsert(map, { entities: [circle("e1", [0, 0], 5)], constraints: [] }, mint);
+    const uuid = map.entity.get("e1")!;
+    expect(frontendSolvedCurves(map, { [uuid]: { radius: 9 } })).toEqual({ e1: { radius: 9 } });
+  });
+
+  it("drops keys not in the id-map, and returns {} for null/undefined", () => {
+    const map = createIdMap("sk", "XY");
+    marshalUpsert(map, { entities: [circle("e1", [0, 0], 5)], constraints: [] }, mint);
+    expect(frontendSolvedCurves(map, { "not-a-mapped-uuid": { radius: 9 } })).toEqual({});
+    expect(frontendSolvedCurves(map, null)).toEqual({});
+    expect(frontendSolvedCurves(map, undefined)).toEqual({});
+  });
+
+  it("keys off map.entity, NOT map.point (a point uuid is not a curve)", () => {
+    const map = createIdMap("sk", "XY");
+    marshalUpsert(map, { entities: [circle("e1", [0, 0], 5)], constraints: [] }, mint);
+    const centerUuid = map.point.get("e1.Center")!;
+    expect(frontendSolvedCurves(map, { [centerUuid]: { radius: 9 } })).toEqual({});
+  });
+});
+
+describe("frontendSolvedPositions — arc endpoint handles are expected, not unknown", () => {
+  it("does NOT warn for `<uuid>.start`/`.end` keys (superseded by `curves`)", () => {
+    __resetLogForTests();
+    const map = createIdMap("sk", "XY");
+    marshalUpsert(map, { entities: [line("e1", [0, 0], [40, 0])], constraints: [] }, mint);
+    const out = frontendSolvedPositions(map, {
+      "uuid-1": [5, 6],
+      "arc-uuid.start": [1, 1],
+      "arc-uuid.end": [2, 2],
+    });
+    expect(out).toEqual({ "e1.Start": [5, 6] }); // the handles still do not APPLY here
+    expect(logSnapshot().filter((e) => e.level === "warn")).toEqual([]);
+  });
+
+  it("still warns for a genuinely unmapped point uuid", () => {
+    __resetLogForTests();
+    const map = createIdMap("sk", "XY");
+    marshalUpsert(map, { entities: [line("e1", [0, 0], [40, 0])], constraints: [] }, mint);
+    frontendSolvedPositions(map, { "orphan-uuid": [1, 1] });
+    const warns = logSnapshot().filter((e) => e.level === "warn");
+    expect(warns).toHaveLength(1);
+    expect(warns[0].msg).toContain("1 unmapped point key(s)");
+  });
+});
+
+describe("applySolvedCurves — reshape Circle/Arc from solved curve members", () => {
+  const arc = (
+    id: string,
+    center: [number, number],
+    radius: number,
+    startAngle: number,
+    endAngle: number,
+  ): SketchEntity => {
+    // Build it through the SAME derivation re-entry uses, so `start`/`end` are
+    // exactly what the wire would have produced.
+    const [built] = frontendEntitiesFromDto([{ id, type: "Arc", center, radius, startAngle, endAngle }]);
+    return built;
+  };
+
+  it("applies a Circle radius", () => {
+    const out = applySolvedCurves([circle("e1", [3, 4], 5)], { e1: { radius: 12.5 } });
+    expect(out[0]).toMatchObject({ center: [3, 4], radius: 12.5 });
+  });
+
+  it("recomputes an Arc's start/end coords EXACTLY as re-entry derives them", () => {
+    const before = arc("a1", [10, 10], 4, 0, Math.PI / 2);
+    const out = applySolvedCurves([before], {
+      a1: { radius: 7, startAngle: 0.3926, endAngle: 1.9634 },
+    });
+    // The oracle: hydrate the same (center, radius, angles) off the wire.
+    const expected = arc("a1", [10, 10], 7, 0.3926, 1.9634);
+    expect(out[0]).toEqual(expected);
+    expect(out[0].center).toEqual([10, 10]); // the center is NOT a curve member
+  });
+
+  it("a radius-only report keeps the current angles (members are incremental)", () => {
+    const before = arc("a1", [0, 0], 4, 0, Math.PI / 2);
+    const out = applySolvedCurves([before], { a1: { radius: 10 } });
+    expect(out[0]).toEqual(arc("a1", [0, 0], 10, 0, Math.PI / 2));
+  });
+
+  it("an angle-only report keeps the current radius", () => {
+    const before = arc("a1", [0, 0], 4, 0, Math.PI / 2);
+    const out = applySolvedCurves([before], { a1: { endAngle: Math.PI } });
+    expect(out[0]).toEqual(arc("a1", [0, 0], 4, 0, Math.PI));
+  });
+
+  it("clamps a negative radius at 0 and drops non-finite members", () => {
+    expect(applySolvedCurves([circle("e1", [0, 0], 5)], { e1: { radius: -3 } })[0].radius).toBe(0);
+    const same = [circle("e1", [0, 0], 5)];
+    expect(applySolvedCurves(same, { e1: { radius: Number.NaN } })).toBe(same);
+    expect(applySolvedCurves(same, { e1: { radius: Number.POSITIVE_INFINITY } })).toBe(same);
+  });
+
+  it("returns the SAME array reference when nothing changed", () => {
+    const entities = [circle("e1", [0, 0], 5), line("l1", [0, 0], [1, 1])];
+    expect(applySolvedCurves(entities, {})).toBe(entities);
+    expect(applySolvedCurves(entities, null)).toBe(entities);
+    expect(applySolvedCurves(entities, { unknown: { radius: 9 } })).toBe(entities); // unknown id
+    expect(applySolvedCurves(entities, { l1: { radius: 9 } })).toBe(entities); // non-curve
+    expect(applySolvedCurves(entities, { e1: {} })).toBe(entities); // no members
+  });
+
+  it("leaves every other entity's object identity untouched", () => {
+    const entities = [circle("e1", [0, 0], 5), line("l1", [0, 0], [1, 1])];
+    const out = applySolvedCurves(entities, { e1: { radius: 6 } });
+    expect(out).not.toBe(entities);
+    expect(out[1]).toBe(entities[1]);
+    expect(entities[0].radius).toBe(5); // input not mutated
+  });
+
+  it("round-trips with frontendSolvedCurves (client re-key → controller apply)", () => {
+    const map = createIdMap("sk", "XY");
+    const entities = [circle("e1", [0, 0], 5)];
+    marshalUpsert(map, { entities, constraints: [] }, mint);
+    const frontend = frontendSolvedCurves(map, { [map.entity.get("e1")!]: { radius: 8 } });
+    expect(applySolvedCurves(entities, frontend)[0].radius).toBe(8);
   });
 });

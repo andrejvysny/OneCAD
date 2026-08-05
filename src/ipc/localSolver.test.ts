@@ -366,3 +366,142 @@ describe("localSolver sketchUpsert — deterministic conflict detection (mock la
     expect(result.conflicting).toEqual([]);
   });
 });
+
+// ── SP-2 W4: the mock drag gesture honours the §7.4 target KINDS ─────────────
+//
+// Shapes only. This lane is a kinematic echo (see the module header): no
+// constraint propagation, no refusal, no DOF change — those live in the real
+// worker and are asserted in `src-tauri/tests` + the worker ctest suite.
+
+describe("localSolver drag gesture — per-kind echo (mock lane)", () => {
+  const LINE: SketchEntity = { id: "e1", type: "Line", p0: [0, 0], p1: [10, 0] };
+  const CIRCLE: SketchEntity = { id: "c1", type: "Circle", center: [0, 20], radius: 5 };
+  const ARC: SketchEntity = {
+    id: "a1",
+    type: "Arc",
+    center: [60, 0],
+    radius: 4,
+    start: [64, 0],
+    end: [60, 4],
+  };
+
+  async function laneWithSketch() {
+    const lane = createLocalSolverLane({
+      commit: vi.fn(() => Promise.resolve({} as ApplyOperationResult)),
+      latencyMs: () => 0,
+    });
+    await lane.enterSketch("sk");
+    await lane.sketchUpsert("sk", [LINE, CIRCLE, ARC], [] as SketchConstraint[]);
+    return lane;
+  }
+
+  it("point: identity echo, unchanged from before the kinds existed", async () => {
+    const lane = await laneWithSketch();
+    await lane.beginGesture("sk", "e1.Start");
+    const step = await lane.solveDrag([5, 6]);
+    expect(step?.positions).toEqual({ "e1.Start": [5, 6] });
+    expect(step?.curves).toEqual({});
+    expect(step?.seq).toBe(1);
+    const done = await lane.endGesture([5, 6]);
+    expect(done.solvedPositions).toEqual({ "e1.Start": [5, 6] });
+    expect(done.solvedCurves).toEqual({});
+  });
+
+  it("arcEnd: the grabbed endpoint teleports; radius + THAT angle ride on curves", async () => {
+    const lane = await laneWithSketch();
+    await lane.beginGesture("sk", "a1.End", { kind: "arcEnd", entityId: "a1", role: "End" });
+    const step = await lane.solveDrag([60, 10]); // straight above the center
+    expect(step?.positions).toEqual({ "a1.End": [60, 10] });
+    expect(step?.curves!.a1.radius).toBeCloseTo(10, 12);
+    expect(step?.curves!.a1.endAngle).toBeCloseTo(Math.PI / 2, 12);
+    expect(step?.curves!.a1.startAngle).toBeUndefined(); // members are incremental
+  });
+
+  it("arcEnd role Start reports startAngle instead", async () => {
+    const lane = await laneWithSketch();
+    await lane.beginGesture("sk", "a1.Start", { kind: "arcEnd", entityId: "a1", role: "Start" });
+    const step = await lane.solveDrag([48, 0]); // 12 to the LEFT of the center
+    expect(step?.positions).toEqual({ "a1.Start": [48, 0] });
+    expect(step?.curves!.a1.radius).toBeCloseTo(12, 12);
+    expect(step?.curves!.a1.startAngle).toBeCloseTo(Math.PI, 12);
+    expect(step?.curves!.a1.endAngle).toBeUndefined();
+  });
+
+  it("radius: no point moves, and the grab's radial offset holds for the whole drag", async () => {
+    const lane = await laneWithSketch();
+    // Grabbed 7 out from the center on a radius-5 circle ⇒ rOffset = +2.
+    await lane.beginGesture("sk", "c1.Center", { kind: "radius", entityId: "c1", grab: [0, 27] });
+    const step = await lane.solveDrag([0, 32]); // 12 out ⇒ radius 10
+    expect(step?.positions).toEqual({});
+    expect(step?.curves!.c1.radius).toBeCloseTo(10, 12);
+    // A second frame re-derives from the SAME captured offset (no drift).
+    const step2 = await lane.solveDrag([0, 40]); // 20 out ⇒ radius 18
+    expect(step2?.curves!.c1.radius).toBeCloseTo(18, 12);
+  });
+
+  it("radius: an absent grab means no offset, and the drag saturates at the floor", async () => {
+    const lane = await laneWithSketch();
+    await lane.beginGesture("sk", "c1.Center", { kind: "radius", entityId: "c1" });
+    expect((await lane.solveDrag([0, 29]))?.curves!.c1.radius).toBeCloseTo(9, 12);
+    // Dragged onto (and past) the center: clamped at MIN_GEOMETRY_SIZE, never ≤0.
+    expect((await lane.solveDrag([0, 20]))?.curves!.c1.radius).toBe(0.01);
+    // …and it recovers on the way back out (the gesture stays live).
+    expect((await lane.solveDrag([0, 26]))?.curves!.c1.radius).toBeCloseTo(6, 12);
+  });
+
+  it("entityBody: every owned handle translates by target − grab", async () => {
+    const lane = await laneWithSketch();
+    await lane.beginGesture("sk", "e1.Start", { kind: "entityBody", entityId: "e1", grab: [1, 1] });
+    const step = await lane.solveDrag([4, 5]); // delta (3, 4)
+    expect(step?.positions).toEqual({ "e1.Start": [3, 4], "e1.End": [13, 4] });
+    expect(step?.curves).toEqual({});
+    // Always derived from the BEGIN baseline — a dropped frame cannot accumulate.
+    expect((await lane.solveDrag([1, 1]))?.positions).toEqual({ "e1.Start": [0, 0], "e1.End": [10, 0] });
+  });
+
+  it("entityBody without a grab anchors the first owned handle (center < start < end)", async () => {
+    const lane = await laneWithSketch();
+    await lane.beginGesture("sk", "a1.Center", { kind: "entityBody", entityId: "a1" });
+    // Anchor = the arc's CENTER (60,0) ⇒ dragging to (70,10) is a delta of (10,10).
+    const step = await lane.solveDrag([70, 10]);
+    expect(step?.positions).toEqual({
+      "a1.Center": [70, 10],
+      "a1.Start": [74, 10],
+      "a1.End": [70, 14],
+    });
+  });
+
+  it("an unresolvable non-point target reports NOTHING (never degrades to a point drag)", async () => {
+    const lane = await laneWithSketch();
+    await lane.beginGesture("sk", "e1.Start", { kind: "radius", entityId: "ghost" });
+    const step = await lane.solveDrag([5, 5]);
+    expect(step?.positions).toEqual({});
+    expect(step?.curves).toEqual({});
+    const done = await lane.endGesture([5, 5]);
+    expect(done.solvedPositions).toEqual({});
+    expect(done.solvedCurves).toEqual({});
+  });
+
+  it("endGesture without a final target commits nothing on either channel", async () => {
+    const lane = await laneWithSketch();
+    await lane.beginGesture("sk", "c1.Center", { kind: "radius", entityId: "c1" });
+    const done = await lane.endGesture();
+    expect(done.solvedPositions).toEqual({});
+    expect(done.solvedCurves).toEqual({});
+  });
+
+  it("endGesture on a radius drag commits the curve alone", async () => {
+    const lane = await laneWithSketch();
+    await lane.beginGesture("sk", "c1.Center", { kind: "radius", entityId: "c1" });
+    const done = await lane.endGesture([0, 33]);
+    expect(done.solvedPositions).toEqual({});
+    expect(done.solvedCurves?.c1.radius).toBeCloseTo(13, 12);
+  });
+
+  it("sketchUpsert reports both channels empty (an identity solve moves nothing)", async () => {
+    const lane = await laneWithSketch();
+    const up = await lane.sketchUpsert("sk", [LINE], []);
+    expect(up.solvedPositions).toEqual({});
+    expect(up.solvedCurves).toEqual({});
+  });
+});

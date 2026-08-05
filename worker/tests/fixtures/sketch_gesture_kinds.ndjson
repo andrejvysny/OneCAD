@@ -1,0 +1,48 @@
+# The four SCHEMA §7.4 gesture target kinds over the wire, one Begin/Solve/End
+# round-trip each, against ONE sketch (welded rect + free circle + free arc).
+#
+# What each round-trip pins:
+#   entityBody  positions carries EVERY owned point, and the verticals carry the
+#               rect's far corners along (the kind pins nothing).
+#   arcEnd      the answer is an ANGLE — `positions` structurally cannot report
+#               it, so `curves.<arc>.endAngle` is the assertion.
+#   radius      moves NO point at all; `curves.<circle>.radius` is the whole
+#               result. A pre-SP-2 reader sees positions:{} and nothing else.
+#   point       the LEGACY form (`drag.pointId`, no kind) still means exactly
+#               what it meant before the kinds existed.
+# Solved values are `$any`: they come out of PlaneGCS, and pinning their exact
+# doubles here would make this a numerics fixture instead of a wire-shape one
+# (test_sketch_drag_kinds asserts the numbers). sketch_gesture.ndjson is the
+# byte-identical back-compat regression and is deliberately NOT touched.
+# Consume the unsolicited hello (SCHEMA §6) first.
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"SketchUpsert","args":{"sketchId":"gk","plane":{"kind":"XY"},"entities":[{"id":"p1","type":"Point","at":[0,0]},{"id":"p2","type":"Point","at":[20,0]},{"id":"p3","type":"Point","at":[20,20]},{"id":"p4","type":"Point","at":[0,20]},{"id":"l1","type":"Line","p0Ref":"p1","p1Ref":"p2"},{"id":"l2","type":"Line","p0Ref":"p2","p1Ref":"p3"},{"id":"l3","type":"Line","p0Ref":"p3","p1Ref":"p4"},{"id":"l4","type":"Line","p0Ref":"p4","p1Ref":"p1"},{"id":"c1","type":"Circle","center":[50,0],"radius":5},{"id":"a1","type":"Arc","center":[0,50],"radius":8,"startAngle":0,"endAngle":1.5707963267948966}],"constraints":[{"id":"cH1","type":"Horizontal","entities":["l1"]},{"id":"cH3","type":"Horizontal","entities":["l3"]},{"id":"cV2","type":"Vertical","entities":["l2"]},{"id":"cV4","type":"Vertical","entities":["l4"]}]}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"upserted":true,"sketchRevision":1}}}
+# --- entityBody: drag the bottom edge sideways; all four corners follow --------
+{"send":{"v":1,"t":"req","id":2,"verb":"BeginGesture","args":{"sketchId":"gk","sketchRevision":1,"gestureId":61,"drag":{"kind":"entityBody","entity":"l1","grab":[10,0]}}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"result":{"gestureId":61,"ready":true}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"SolveDrag","args":{"gestureId":61,"seq":1,"target":[14,0]}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"result":{"gestureId":61,"seq":1,"status":"success","positions":{"p1":"$any","p2":"$any","p3":"$any","p4":"$any"},"curves":{}}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"EndGesture","args":{"gestureId":61,"commit":{"finalTarget":[14,0]}}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"gestureId":61,"status":"success","sketchRevision":2,"positions":{"p1":"$any","p2":"$any"},"curves":{}}}}
+# --- arcEnd: the reshape lands in `curves`, not in `positions` -----------------
+{"send":{"v":1,"t":"req","id":5,"verb":"BeginGesture","args":{"sketchId":"gk","sketchRevision":2,"gestureId":62,"drag":{"kind":"arcEnd","entity":"a1","role":"end"}}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"gestureId":62,"ready":true}}}
+{"send":{"v":1,"t":"req","id":6,"verb":"SolveDrag","args":{"gestureId":62,"seq":1,"target":[-8,50]}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":true,"result":{"gestureId":62,"seq":1,"status":"success","positions":{"a1.end":"$any"},"curves":{"a1":{"endAngle":"$any"}}}}}
+{"send":{"v":1,"t":"req","id":7,"verb":"EndGesture","args":{"gestureId":62}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"result":{"gestureId":62,"status":"success","sketchRevision":3,"curves":{"a1":{"endAngle":"$any"}}}}}
+# --- radius: no point moves, so `curves` carries the ENTIRE result -------------
+{"send":{"v":1,"t":"req","id":8,"verb":"BeginGesture","args":{"sketchId":"gk","sketchRevision":3,"gestureId":63,"drag":{"kind":"radius","entity":"c1","grab":[55,0]}}}}
+{"expect":{"v":1,"t":"resp","id":8,"ok":true,"result":{"gestureId":63,"ready":true}}}
+{"send":{"v":1,"t":"req","id":9,"verb":"SolveDrag","args":{"gestureId":63,"seq":1,"target":[62,0]}}}
+{"expect":{"v":1,"t":"resp","id":9,"ok":true,"result":{"gestureId":63,"seq":1,"status":"success","positions":{},"curves":{"c1":{"radius":"$any"}}}}}
+{"send":{"v":1,"t":"req","id":10,"verb":"EndGesture","args":{"gestureId":63,"commit":{"finalTarget":[62,0]}}}}
+{"expect":{"v":1,"t":"resp","id":10,"ok":true,"result":{"gestureId":63,"status":"success","sketchRevision":4,"curves":{"c1":{"radius":"$any"}}}}}
+# --- point: the pre-SP-2 form, unchanged (no kind, just a pointId) -------------
+{"send":{"v":1,"t":"req","id":11,"verb":"BeginGesture","args":{"sketchId":"gk","sketchRevision":4,"gestureId":64,"drag":{"pointId":"p3"}}}}
+{"expect":{"v":1,"t":"resp","id":11,"ok":true,"result":{"gestureId":64,"ready":true}}}
+{"send":{"v":1,"t":"req","id":12,"verb":"SolveDrag","args":{"gestureId":64,"seq":1,"pointId":"p3","target":[26,26]}}}
+{"expect":{"v":1,"t":"resp","id":12,"ok":true,"result":{"gestureId":64,"seq":1,"status":"success","positions":{"p3":"$any"},"curves":{}}}}
+{"send":{"v":1,"t":"req","id":13,"verb":"EndGesture","args":{"gestureId":64}}}
+{"expect":{"v":1,"t":"resp","id":13,"ok":true,"result":{"gestureId":64,"status":"success","sketchRevision":5,"positions":{"p3":"$any"}}}}

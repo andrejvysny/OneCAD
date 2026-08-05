@@ -5,8 +5,9 @@
  *         · R revolve · F fillet · B combine/boolean · T move/rotate body
  *         · ⇧I isolate selection
  * Sketch: V select · L line · R rectangle · ⇧R center-rectangle · C circle
- *         · O ellipse · ⇧O offset · A arc · G polygon · S slot · P point
- *         · D dimension · T trim · M mirror · F fillet
+ *         · O ellipse · ⇧O offset · A arc · ⇧A 3-point arc · G polygon · S slot
+ *         · P point
+ *         · D dimension · T trim · ⇧T extend · M mirror · F fillet
  *         · X construction (flip selection / sticky mode)
  * Global: Esc cancel-ladder · Enter finish-sketch (sketch mode) · H home (stub)
  *         · Shift+F zoom-to-fit (frames the SELECTION when it names bodies)
@@ -50,6 +51,20 @@
  *     mnemonic-free leftovers (`w`/`j`/`n`/`q`), exactly as Offset took `⇧O` rather
  *     than surrender `O` to Ellipse. Free in the sketch table, so sketch mode
  *     reaches it through the ordinary cross-mode fallback.
+ *   - `⇧A` (3-point arc, SP-4) is an exact shift chord on the letter its own
+ *     tool family already owns — the two arcs are one shape drawn two ways, so
+ *     they share a letter the way `⇧R` shares `R` with the rectangle. Free in
+ *     BOTH tables, so model mode reaches it through the ordinary cross-mode
+ *     fallback (it is a sketch draw tool, so that starts a sketch with it armed).
+ *     Plain `a` is deliberately NOT in this table: `SketchController` shadows it
+ *     in CAPTURE phase to toggle the line tool's tangent-arc mode, but ONLY while
+ *     a chain is armed on a known tangent — outside that it falls through here
+ *     untouched, and the shadow requires NO shift so `⇧A` always reaches arc3p.
+ *   - `⇧T` (Extend, SP-4) is an exact shift chord on Trim's own letter, same
+ *     reasoning as `⇧A`: Extend IS Trim inverted, so the pair shares a letter.
+ *     Plain `t` is untouched in BOTH modes (sketch Trim, model Transform). `⇧T`
+ *     is free in the model table, so model mode reaches Extend through the
+ *     ordinary cross-mode fallback (a sketch edit tool ⇒ it starts a sketch).
  *   - `⇧O` (Offset, WP-C T2b) is an exact shift chord, like `⇧R`/`⇧?`/`⇧I`, so
  *     plain `o` still resolves to Ellipse. Offset's conventional key IS `O` in
  *     other CAD; Ellipse already holds it here, so Offset takes the chord rather
@@ -126,11 +141,17 @@ export const SKETCH_KEYS: KeyBinding[] = [
   { key: "c", action: { type: "tool", tool: "circle" } },
   { key: "o", action: { type: "tool", tool: "ellipse" } },
   { key: "a", action: { type: "tool", tool: "arc" } },
+  // SP-4 3-point arc. Exact shift chord (the ⇧R precedent), so plain `a` still
+  // resolves to the centre-start-end arc.
+  { key: "a", shift: true, action: { type: "tool", tool: "arc3p" } },
   { key: "g", action: { type: "tool", tool: "polygon" } },
   { key: "s", action: { type: "tool", tool: "slot" } },
   { key: "p", action: { type: "tool", tool: "point" } },
   { key: "d", action: { type: "tool", tool: "dimension" } },
   { key: "t", action: { type: "tool", tool: "trim" } },
+  // SP-4 Extend. Exact shift chord on Trim's own letter (the ⇧R / ⇧A precedent),
+  // so plain `t` still resolves to Trim in sketch mode and to Transform in model.
+  { key: "t", shift: true, action: { type: "tool", tool: "extend" } },
   { key: "m", action: { type: "tool", tool: "mirror" } },
   // WP-C T2b sketch edit tools. See COLLISIONS for why `f` is claimed here and
   // why Offset is a shift chord.

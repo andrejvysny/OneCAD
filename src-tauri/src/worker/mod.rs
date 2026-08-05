@@ -169,13 +169,19 @@ pub trait SolverEngine: Send + Sync {
         sketch: &onecad_core::sketch::Sketch,
     ) -> Result<crate::dto::SketchUpsertDto, EngineError>;
 
-    /// `BeginGesture` (SCHEMA §7.4) — open a drag gesture on a point.
+    /// `BeginGesture` (SCHEMA §7.4) — open a drag gesture.
+    ///
+    /// `target` declares WHAT the pointer grabbed; [`wire::GestureTarget::point`]
+    /// is the plain point drag, whose request stays byte-identical to the pre-SP-2
+    /// form (`drag_point` is what the worker resolves there, per §7.4's "pointId
+    /// wins on the point path").
     async fn begin_gesture(
         &self,
         sketch_id: &str,
         sketch_revision: u64,
         gesture_id: u64,
         drag_point: onecad_core::ids::EntityId,
+        target: wire::GestureTarget,
         solver_policy_hash: &str,
     ) -> Result<crate::dto::BeginGestureDto, EngineError>;
 
@@ -859,6 +865,7 @@ impl SolverEngine for PendingBackend {
         _sketch_revision: u64,
         _gesture_id: u64,
         _drag_point: onecad_core::ids::EntityId,
+        _target: wire::GestureTarget,
         _solver_policy_hash: &str,
     ) -> Result<crate::dto::BeginGestureDto, EngineError> {
         Err(Self::not_ready())

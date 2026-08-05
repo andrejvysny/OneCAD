@@ -1300,14 +1300,52 @@ and the naive count never has to model one. A constraint on the ellipse's center
 ellipse into PlaneGCS is deferred past V1.
 
 #### BeginGesture
-Opens a drag gesture against a specific sketch revision.
+Opens a drag gesture against a specific sketch revision, and declares WHAT the
+pointer grabbed.
 
 ```json
 // req.args
-{ "sketchId": "sk_1", "sketchRevision": 4, "gestureId": 51, "solverPolicyHash": "3e9a…" }
+{ "sketchId": "sk_1", "sketchRevision": 4, "gestureId": 51, "solverPolicyHash": "3e9a…",
+  "drag": { "kind": "radius", "entity": "e7", "grab": [31.2, 4.0] } }
 // result
 { "gestureId": 51, "ready": true }
 ```
+
+The optional `drag` object is `{ "kind"?, "entity"?, "role"?, "grab"?,
+"pointId"? }` and names the gesture's **target kind**:
+
+| `kind` | `entity` | `role` | `grab` | resolves to |
+|---|---|---|---|---|
+| `point` | any (or `pointId`) | `start`\|`end`\|`center`\|`p0`\|`p1` | ignored | one point handle |
+| `arcEnd` | `Arc` | `start`\|`end`, REQUIRED | ignored | that endpoint (a real solver point, §7.3) |
+| `radius` | `Circle`\|`Arc` | ignored | optional | the curve's radius parameter |
+| `entityBody` | any owning ≥1 point | ignored | RECOMMENDED | every point the entity owns |
+
+**An absent `kind` means `point`.** The pre-existing forms — `{"drag":
+{"pointId": …}}` and a bare top-level `pointId` — keep their exact meaning and
+are resolved FIRST; when both `pointId` and `entity` are present **on the
+`point` path** (kind absent or `"point"`), `pointId` wins. A non-`point` kind
+ignores `pointId` entirely — honouring it would silently degrade the gesture to
+a point drag, the exact failure mode the unknown-kind rule below forbids. An
+**unknown** `kind` MUST fail the request (`OP_FAILED`) and MUST NOT
+degrade to `point`: degrading would move a handle the user never grabbed.
+
+A `drag` that names no resolvable target is `REF_UNRESOLVED` — an
+`entity`/`role` pair naming no point, `arcEnd` on a non-arc or on an arc with
+derived (non-entity) endpoints (§7.3), `radius` on a non-curve, `entityBody` on
+an entity that owns no point.
+
+`grab` is the pointer-down position in sketch-plane coordinates. The worker
+derives the per-kind offset from it **ONCE, at `BeginGesture`**, so a gesture
+cannot drift as it is dragged:
+* `entityBody` — the drag delta is `target − grab`, applied to each owned
+  point's `BeginGesture` pose. An absent `grab` anchors on the first owned point
+  in handle order (`center` < `start` < `end`, `p0` < `p1`), which teleports that
+  point to the cursor.
+* `radius` — the radial offset is `|grab − center| − radius`, both read at
+  `BeginGesture`; absent ⇒ `0`.
+* `point`/`arcEnd` — `grab` is IGNORED: the handle teleports to the cursor,
+  byte-identical to the behaviour before the kinds existed.
 
 #### SolveDrag
 Latest-wins incremental solve. Superseded in-flight drags may be dropped; only the
@@ -1323,6 +1361,7 @@ newest `seq` per gesture must resolve.
   "dof": 1,
   "conflicting": [],         // constraint ids in conflict (when status=conflicting)
   "positions": { "e3.start": [42.0, 19.5], "e2.p1": [40.0, 19.5] },  // CHANGED points only
+  "curves": { "e7": { "radius": 12.5 } },                            // CHANGED curve members only
   "solveMicros": 1840
 }
 ```
@@ -1336,6 +1375,42 @@ of the committed sketch for the whole gesture; it is NOT re-derived per drag
 step (a drag pins the non-dragged points, which would spuriously flag the
 committed constraints as redundant). `EndGesture` uses the same precedence.
 
+`positions` reports moved POINTS only, which is not the whole result of a drag:
+a `radius` gesture moves no point at all, an `arcEnd` gesture reshapes the arc's
+radius and angles, and a `Tangent` propagates even a plain `point` drag into a
+neighbouring curve's radius. The additive `curves` channel carries exactly that:
+
+```json
+"curves": { "e7": { "radius": 12.5 }, "e9": { "startAngle": 0.3926, "endAngle": 1.9634 } }
+```
+
+It maps a wire entity id to the members of that curve that **CHANGED**, under
+the same incremental-vs-baseline discipline as `positions`: `SolveDrag` reports
+the delta since the previous report for that gesture, `EndGesture` the delta
+since `BeginGesture`. An entity with nothing changed is omitted; an absent
+`curves` parses as `{}` (optional/additive — all parsers tolerate the missing
+key). It is emitted for **every** `drag.kind`, not only `radius`. An `Ellipse` is
+never reported: it is not registered with the solver (see the deviation above),
+so no drag can move its parameters. Angles are radians CCW from +X and pair with
+`ccw` exactly as §7.6 defines.
+
+Three degenerate guards are NORMATIVE for both verbs:
+* **Radius floor.** A `radius` target is clamped at `MIN_GEOMETRY_SIZE`
+  (0.01 mm) before it reaches the solver, so a drag across the center can never
+  produce a zero or negative radius. It saturates at the floor and recovers on
+  the way back out — the gesture stays live rather than failing.
+* **Arc sweep floor.** An `arcEnd` step whose solved CCW arc EXTENT falls below
+  `MIN_ARC_SWEEP` (1e-3 rad) — or above `2π − MIN_ARC_SWEEP`, the same collapse
+  approached from the other side once angles normalize — MUST be REFUSED: the worker restores the
+  pre-step pose (positions AND curves), answers `status: "partial"`, and leaves
+  the gesture OPEN. A collapsed arc cannot be recovered by dragging further, so
+  the state must never be entered.
+* **`entityBody` targets are ADVISORY.** They are temporary, gesture-scoped
+  drives and every committed constraint outranks them. An entity that converges
+  away from its target because a constraint holds it is `status: "success"`
+  reporting the SOLVED positions — lagging the cursor is the CORRECT answer
+  there, and only non-convergence is `partial`.
+
 #### EndGesture
 Pointer-up: performs the final **exact** solve (Rust commits one undo command from
 its result).
@@ -1347,12 +1422,14 @@ its result).
 { "gestureId": 51, "status": "success", "dof": 0,
   "conflicting": [],   // constraint ids in conflict (non-empty iff status=conflicting); absent ⇒ []
   "positions": { /* final exact positions, changed since BeginGesture */ },
+  "curves": { /* final exact curve members, changed since BeginGesture */ },
   "sketchRevision": 5 }
 ```
 
 `conflicting` follows the same precedence as `SolveDrag`: the final exact solve's
 conflicts, else the gesture-fixed set diagnosed at `BeginGesture`. Optional/additive
-(absent ⇒ `[]`).
+(absent ⇒ `[]`). `curves` is the same additive channel `SolveDrag` defines above,
+baselined at `BeginGesture` (absent ⇒ `{}`).
 
 #### SketchRegions
 Computes closed profile regions for a sketch (for extrude/revolve selection and
@@ -2182,6 +2259,41 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-04 — §7.4 ADDITIVE `BeginGesture.drag.{kind,entity,role,grab}` +
+  `SolveDrag`/`EndGesture` `curves`** (SP-2 direct manipulation; cross-track
+  sign-off recorded in `TODO.md` by the SP-2 gate). **Purely additive in BOTH
+  directions; `protocolVersion` stays 1.** Requests gain four optional members on
+  an object that was itself optional, and **an absent `kind` is defined to mean
+  `point`**, so every request shape a caller can send today keeps its exact
+  meaning. Responses gain one optional map that parses as `{}` when absent.
+  Rationale: `positions` is a point-only channel, and a drag is not point-only.
+  A `radius` gesture moves no point whatsoever; an `arcEnd` gesture reshapes an
+  arc's radius and angles; and even a plain `point` drag propagates through a
+  `Tangent` into a neighbouring curve's radius. The Rust `Arc` is
+  `{center, radius, startAngle, endAngle}` with NO endpoint entities, so
+  `apply_solved_positions` — which moves `Point` entities only — is structurally
+  incapable of receiving any of that. The frontend seam is already documented as
+  open (`src/ipc/sketchWireMap.ts`: arc `<id>.start`/`<id>.end` keys are unmapped
+  and skipped, "coords go stale"); `curves` is what closes it.
+  This also fixes a LATENT silent-revert defect that predates the kinds: a point
+  drag propagating through a `Tangent` changes a radius in the worker's stored
+  wire, Rust never learns of it, and the next `SketchUpsert` quietly reverts the
+  geometry to the stale radius. `curves` is therefore emitted for EVERY kind, not
+  only `radius`.
+  The three degenerate guards (`MIN_GEOMETRY_SIZE` radius floor, `MIN_ARC_SWEEP`
+  refuse-step-with-`partial`, `entityBody` targets advisory / solver-wins) are new
+  NORMATIVE text, not new wire shape.
+  **No fixture bump — 0 files.** No existing shape, id or byte moves: an absent
+  `kind` reproduces the previous request byte-for-byte on the `point` path, and
+  the NDJSON fixtures under `worker/tests/fixtures/` are **subset** matchers, so
+  the extra `curves` key on a response is tolerated by construction — the same
+  argument as the 2026-08-03 `bodyEvents[].rankKey` entry below.
+  `protocol/fixtures/` (`hello` + `echo_error`) is untouched. A NEW fixture,
+  `worker/tests/fixtures/sketch_gesture_kinds.ndjson`, covers the added kinds;
+  the existing `worker/tests/fixtures/sketch_gesture.ndjson` stays
+  **byte-identical** and is the back-compat regression for the absent-`kind`
+  path.
 
 - **2026-08-04 — §7.2 ADDITIVE `editedFrom` + §10 edit-scoped descriptor-tie veto,
   proportional anchor floor, `resolverVersion` 2** (HISTORY-HARDEN H6a, review

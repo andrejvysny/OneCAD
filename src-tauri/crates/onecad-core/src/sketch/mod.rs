@@ -213,6 +213,23 @@ impl Dependents {
     }
 }
 
+/// The CHANGED parameters of one solver-registered curve (SCHEMA §7.4 `curves`),
+/// applied by [`Sketch::apply_solved_curves`].
+///
+/// Every member is optional under the same incremental discipline as the
+/// `positions` channel: the solver reports only what MOVED, so `None` means
+/// "unchanged", never "zero". Angles are radians CCW from +X (§7.6), matching
+/// [`SketchEntity::Arc`]'s own domain — nothing converts here.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct CurveParams {
+    /// New radius (mm) of a `Circle`/`Arc`.
+    pub radius: Option<f64>,
+    /// New start angle (radians) of an `Arc`.
+    pub start_angle: Option<f64>,
+    /// New end angle (radians) of an `Arc`.
+    pub end_angle: Option<f64>,
+}
+
 /// A sketch mutation rejected by validation.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SketchError {
@@ -545,6 +562,69 @@ impl Sketch {
         moved
     }
 
+    /// Applies solver-returned CURVE parameters (SCHEMA §7.4 `SolveDrag`/
+    /// `EndGesture` `curves`) — the companion channel to
+    /// [`apply_solved_positions`](Self::apply_solved_positions).
+    ///
+    /// `positions` is point-only, which is not the whole result of a drag: a
+    /// `radius` gesture moves no point at all, an `arcEnd` gesture reshapes the
+    /// arc's radius + angles, and a `Tangent` propagates even a plain point drag
+    /// into a neighbouring curve's radius. Only [`Circle`](SketchEntity::Circle)
+    /// (radius) and [`Arc`](SketchEntity::Arc) (radius + both angles) carry such
+    /// parameters; an [`Ellipse`](SketchEntity::Ellipse) is never solver-registered
+    /// and is ignored here too, as are non-curve and unknown ids. A non-finite
+    /// member is DROPPED (never written — [`SketchEntity::arc`]/[`circle`] reject
+    /// non-finite at construction, so the invariant must hold here as well), and a
+    /// radius is clamped at ≥ 0 (mirrors C++ `SketchArc::setRadius`).
+    ///
+    /// Returns the number of ENTITIES that changed (not members).
+    ///
+    /// [`circle`]: SketchEntity::circle
+    pub fn apply_solved_curves(&mut self, curves: &[(EntityId, CurveParams)]) -> usize {
+        fn finite(v: Option<f64>) -> Option<f64> {
+            v.filter(|x| x.is_finite())
+        }
+        let mut changed = 0;
+        for (id, params) in curves {
+            let Some(&index) = self.entity_index.get(id) else {
+                continue;
+            };
+            let mut touched = false;
+            match &mut self.entities[index] {
+                SketchEntity::Circle { radius, .. } => {
+                    if let Some(r) = finite(params.radius) {
+                        *radius = r.max(0.0);
+                        touched = true;
+                    }
+                }
+                SketchEntity::Arc {
+                    radius,
+                    start_angle,
+                    end_angle,
+                    ..
+                } => {
+                    if let Some(r) = finite(params.radius) {
+                        *radius = r.max(0.0);
+                        touched = true;
+                    }
+                    if let Some(a) = finite(params.start_angle) {
+                        *start_angle = a;
+                        touched = true;
+                    }
+                    if let Some(a) = finite(params.end_angle) {
+                        *end_angle = a;
+                        touched = true;
+                    }
+                }
+                _ => {}
+            }
+            if touched {
+                changed += 1;
+            }
+        }
+        changed
+    }
+
     fn rebuild_indexes(&mut self) {
         self.rebuild_entity_index();
         self.rebuild_constraint_index();
@@ -734,6 +814,158 @@ mod tests {
         match s.get_entity(p1).unwrap() {
             SketchEntity::Point { at, .. } => assert_eq!([at.x, at.y], [40.0, 0.0]),
             _ => panic!("p1 is a point"),
+        }
+    }
+
+    /// A sketch carrying one circle + one arc (each with its own center point),
+    /// returning `(sketch, circle, arc)`.
+    fn sketch_with_curves() -> (Sketch, EntityId, EntityId) {
+        let (mut s, _, _) = sketch_with_two_points();
+        let (cc, ac) = (eid(0x30), eid(0x31));
+        let (circle, arc) = (eid(0x40), eid(0x41));
+        s.add_entity(SketchEntity::point(
+            cc,
+            Vec2::new_unchecked(10.0, 10.0),
+            false,
+            false,
+        ))
+        .unwrap();
+        s.add_entity(SketchEntity::point(
+            ac,
+            Vec2::new_unchecked(50.0, 0.0),
+            false,
+            false,
+        ))
+        .unwrap();
+        s.add_entity(SketchEntity::circle(circle, cc, 5.0, false).unwrap())
+            .unwrap();
+        s.add_entity(
+            SketchEntity::arc(arc, ac, 4.0, 0.0, std::f64::consts::FRAC_PI_2, false).unwrap(),
+        )
+        .unwrap();
+        (s, circle, arc)
+    }
+
+    fn circle_radius(s: &Sketch, id: EntityId) -> f64 {
+        match s.get_entity(id).unwrap() {
+            SketchEntity::Circle { radius, .. } => *radius,
+            other => panic!("{other:?} is not a circle"),
+        }
+    }
+
+    fn arc_params(s: &Sketch, id: EntityId) -> (f64, f64, f64) {
+        match s.get_entity(id).unwrap() {
+            SketchEntity::Arc {
+                radius,
+                start_angle,
+                end_angle,
+                ..
+            } => (*radius, *start_angle, *end_angle),
+            other => panic!("{other:?} is not an arc"),
+        }
+    }
+
+    #[test]
+    fn apply_solved_curves_writes_circle_radius_and_arc_members() {
+        let (mut s, circle, arc) = sketch_with_curves();
+        let changed = s.apply_solved_curves(&[
+            (
+                circle,
+                CurveParams {
+                    radius: Some(12.5),
+                    ..Default::default()
+                },
+            ),
+            (
+                arc,
+                CurveParams {
+                    radius: Some(9.0),
+                    start_angle: Some(0.25),
+                    end_angle: Some(1.75),
+                },
+            ),
+        ]);
+        assert_eq!(changed, 2, "both curves changed");
+        assert_eq!(circle_radius(&s, circle), 12.5);
+        assert_eq!(arc_params(&s, arc), (9.0, 0.25, 1.75));
+    }
+
+    #[test]
+    fn apply_solved_curves_applies_only_the_members_present() {
+        let (mut s, _, arc) = sketch_with_curves();
+        // Only startAngle changed (the incremental discipline: None ≠ 0).
+        let changed = s.apply_solved_curves(&[(
+            arc,
+            CurveParams {
+                start_angle: Some(-0.5),
+                ..Default::default()
+            },
+        )]);
+        assert_eq!(changed, 1);
+        assert_eq!(
+            arc_params(&s, arc),
+            (4.0, -0.5, std::f64::consts::FRAC_PI_2),
+            "radius + endAngle keep their authored values"
+        );
+        // An entry with nothing set touches nothing and is not counted.
+        assert_eq!(s.apply_solved_curves(&[(arc, CurveParams::default())]), 0);
+    }
+
+    #[test]
+    fn apply_solved_curves_clamps_radius_and_drops_non_finite() {
+        let (mut s, circle, arc) = sketch_with_curves();
+        // A negative radius clamps at 0 rather than storing a negative curve.
+        assert_eq!(
+            s.apply_solved_curves(&[(
+                circle,
+                CurveParams {
+                    radius: Some(-3.0),
+                    ..Default::default()
+                }
+            )]),
+            1
+        );
+        assert_eq!(circle_radius(&s, circle), 0.0);
+        // Non-finite members are dropped — the entity keeps its finite values and
+        // is not counted as changed.
+        let changed = s.apply_solved_curves(&[(
+            arc,
+            CurveParams {
+                radius: Some(f64::NAN),
+                start_angle: Some(f64::INFINITY),
+                end_angle: Some(f64::NEG_INFINITY),
+            },
+        )]);
+        assert_eq!(changed, 0, "an all-non-finite entry changes nothing");
+        assert_eq!(arc_params(&s, arc), (4.0, 0.0, std::f64::consts::FRAC_PI_2));
+    }
+
+    #[test]
+    fn apply_solved_curves_ignores_non_curves_and_unknown_ids() {
+        let (mut s, p0, p1) = sketch_with_two_points();
+        let line = eid(0x20);
+        s.add_entity(SketchEntity::line(line, p0, p1, false))
+            .unwrap();
+        let ell = eid(0x50);
+        s.add_entity(SketchEntity::ellipse(ell, p0, 6.0, 3.0, 0.25, false).unwrap())
+            .unwrap();
+        let radius = CurveParams {
+            radius: Some(99.0),
+            ..Default::default()
+        };
+        let changed = s.apply_solved_curves(&[
+            (line, radius),
+            (p0, radius),
+            (ell, radius),
+            (eid(0xDEAD), radius),
+        ]);
+        assert_eq!(changed, 0, "line/point/ellipse/unknown are all ignored");
+        // The ellipse is never solver-registered — its radii must stay verbatim.
+        match s.get_entity(ell).unwrap() {
+            SketchEntity::Ellipse {
+                major_r, minor_r, ..
+            } => assert_eq!([*major_r, *minor_r], [6.0, 3.0]),
+            other => panic!("{other:?} is not an ellipse"),
         }
     }
 

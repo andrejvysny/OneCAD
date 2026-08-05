@@ -75,8 +75,9 @@ use onecad_core::regen::{
     RegenPlan, RegenPlanner, RegenRequest, RegenSession, ResolveRequest, SnapshotPublisher,
     TessellateSpec,
 };
-use onecad_core::sketch::{Sketch, SketchAttachment, WorldPlane};
+use onecad_core::sketch::{CurveParams, Sketch, SketchAttachment, WorldPlane};
 
+use crate::document_runtime::solver_lane::{Claim, LaneOwner, SolverLaneClaims};
 use crate::dto::{
     default_label, feature_kind, feature_status, feature_status_message, feature_value,
     needs_repair_item_dto, op_type_name, BodyDto, BodyMeshRef, DatumDto, DocStatus, DocumentChange,
@@ -87,7 +88,7 @@ use crate::dto::{
 use crate::error::ApiError;
 use crate::imports::{ImportWorkspace, PreparedImport};
 use crate::mesh_cache::MeshCache;
-use crate::worker::{lod_str, AdoptingEngine, MeshProvider, SolverEngine};
+use crate::worker::{lod_str, wire, AdoptingEngine, MeshProvider, SolverEngine};
 
 /// The `(documentRevision, workerEpoch)` fencing tokens behind an `Arc` so the
 /// regen driver's [`RevisionGate`](onecad_core::regen::RevisionGate) can read them
@@ -240,6 +241,12 @@ struct ActiveGesture {
     before: Sketch,
     /// Next `SolveDrag` seq (monotonic; latest-wins).
     next_seq: u64,
+    /// The solver-lane claim for `sketch_id` (SP-0 D3). Acquired in
+    /// [`begin_gesture`](DocumentRuntime::begin_gesture) BEFORE the upsert that
+    /// opens the worker gesture, and released by `Drop` when this record is taken
+    /// (end / cancel / `finish_sketch`'s dangling-gesture clear) — so there is no
+    /// release site to forget. See [`solver_lane`].
+    _claim: Claim,
 }
 
 /// The pre-session state captured on [`DocumentRuntime::enter_sketch`] so
@@ -263,6 +270,12 @@ struct SketchSession {
 pub struct PreparedSketchRegions {
     sketch: Sketch,
     solver: Arc<dyn SolverEngine>,
+    /// The solver-lane claim for this sketch (SP-0 D3), taken under the runtime
+    /// lock in [`DocumentRuntime::prepare_sketch_regions`] and released by `Drop`
+    /// when [`drive`](Self::drive) consumes `self`. Holding it ACROSS the unlocked
+    /// drive is the whole point: it is what a `beginGesture` landing mid-drive
+    /// collides with. See [`solver_lane`].
+    _claim: Claim,
 }
 
 impl PreparedSketchRegions {
@@ -383,6 +396,9 @@ pub struct DocumentRuntime {
     sketch_solve: BTreeMap<SketchId, (u32, SketchSolveStatus)>,
     /// The active drag gesture, if the pointer is down mid-drag.
     active_gesture: Option<ActiveGesture>,
+    /// Per-sketch solver-lane claims (SP-0 D3) — the RAII fence between a drag
+    /// gesture and a region query on the SAME sketch. See [`solver_lane`].
+    solver_lane: Arc<SolverLaneClaims>,
     /// The open sketch-edit session watermark (B1 squash), set on `enter_sketch`
     /// and consumed on `finish_sketch`/`cancel_sketch`. `None` outside a session.
     sketch_session: Option<SketchSession>,
@@ -544,6 +560,7 @@ impl DocumentRuntime {
             job_seq: 0,
             sketch_solve: BTreeMap::new(),
             active_gesture: None,
+            solver_lane: SolverLaneClaims::new(),
             sketch_session: None,
             gesture_seq: 0,
             promoted: HashMap::new(),
@@ -781,12 +798,12 @@ impl DocumentRuntime {
     }
 
     /// Undoes the newest committed edit. `None` if nothing was undone (read-only,
-    /// an open transaction, or an empty undo stack).
+    /// an open drag gesture, an open transaction, or an empty undo stack).
     ///
     /// See [`revert_report`](Self::revert_report) for what the returned
     /// [`RevertReport`] guarantees.
     pub fn undo(&mut self) -> Option<RevertReport> {
-        if self.read_only {
+        if self.read_only || self.revert_blocked_by_gesture("undo") {
             return None;
         }
         let outcome = self.session.undo()?;
@@ -801,7 +818,7 @@ impl DocumentRuntime {
     /// # Errors
     /// [`DomainError`] if a replayed command fails.
     pub fn redo(&mut self) -> Result<Option<RevertReport>, DomainError> {
-        if self.read_only {
+        if self.read_only || self.revert_blocked_by_gesture("redo") {
             return Ok(None);
         }
         let Some(outcome) = self.session.redo()? else {
@@ -811,6 +828,47 @@ impl DocumentRuntime {
         self.after_mutation();
         self.drop_stale_sketch_session();
         Ok(Some(report))
+    }
+
+    /// Whether a revert must stand down because a drag gesture is open (SP-0 D3
+    /// audit of HISTORY-HARDEN H8).
+    ///
+    /// H8 gave undo/redo a real dirty floor, checkpoint eviction and a
+    /// `RevertToEnd`, but never looked at [`active_gesture`](Self::active_gesture).
+    /// The regen half of that is harmless — replay never issues `SketchUpsert`, so
+    /// it cannot touch the worker's solver store. The DOCUMENT half is not:
+    /// `begin_gesture` snapshots a `before` memento and the runtime lock is
+    /// released between begin and end, so ⌘Z mid-drag (nothing in
+    /// `useShortcuts`/`SketchController` gates it on the pointer being down)
+    /// interleaves like this:
+    ///
+    /// 1. `begin_gesture` captures `before` = sketch S₁;
+    /// 2. `undo` reverts the last edit ⇒ the document holds S₀;
+    /// 3. pointer-up: `end_gesture` builds `after` from **S₁** and commits
+    ///    `SketchDragGesture { before: S₁, after }`, which writes S₁+drag straight
+    ///    back into the document.
+    ///
+    /// The undo is silently un-done — a confident wrong answer, the exact class
+    /// this stack exists to eliminate. Standing down is the same shape the
+    /// `read_only` early-return already uses: `None` ⇒ the api layer emits an
+    /// unchanged projection, schedules no regen and notes no mutation. It is also
+    /// what every mainstream CAD does with an undo chord mid-drag.
+    ///
+    /// Refusing on ANY open gesture (not just one on the reverted sketch) is
+    /// deliberate: the outcome only names a dirty floor, not the sketches an
+    /// inverse restores, so "is this revert the drag's sketch?" is not answerable
+    /// here without over-reaching into the edit layer. A gesture is a momentary
+    /// pointer-down state; refusing for its duration costs nothing.
+    fn revert_blocked_by_gesture(&self, what: &str) -> bool {
+        let Some(g) = self.active_gesture.as_ref() else {
+            return false;
+        };
+        tracing::warn!(
+            sketch = %g.sketch_id,
+            gesture = g.gesture_id,
+            "{what}: refused — a drag gesture is open (its `before` memento would resurrect the reverted state)"
+        );
+        true
     }
 
     /// Turns a session-level [`UndoOutcome`] into the runtime-level [`RevertReport`]:
@@ -2157,9 +2215,20 @@ impl DocumentRuntime {
         sketch_id: SketchId,
     ) -> Result<PreparedSketchRegions, EngineError> {
         // `drive()` runs unlocked and re-upserts this snapshot into the worker's
-        // solver cache; mid-gesture that would clobber the live drag with
-        // pre-drag geometry, so subsequent SolveDrag replies apply onto stale
-        // state. Refuse loudly instead — a different sketch's gesture is fine.
+        // per-sketch `SketchStore` entry. Mid-gesture that is destructive, but NOT
+        // for the reason this comment used to claim: `SolveDrag` never reads the
+        // store (the worker's `Gesture` owns a private `Sketch` clone), so drag
+        // replies cannot "apply onto stale state". The damage is at `EndGesture`,
+        // which commits by reading the store BACK — it would apply the solved drag
+        // positions onto this stale re-upserted clone and `put` them at a revision
+        // derived from the pre-query one, which `SketchStore::put` assigns exactly
+        // and therefore lets REGRESS. Full write-up + the deferred worker-side
+        // monotonicity fix: [`solver_lane`].
+        //
+        // Keep the named refusal (a better message than the claim's) and THEN take
+        // the claim, which is what actually closes the check-then-act window: this
+        // check only looks at `active_gesture` right now, while the claim is held
+        // through the whole unlocked drive.
         if self
             .active_gesture
             .as_ref()
@@ -2169,9 +2238,20 @@ impl DocumentRuntime {
                 "getSketchRegions: sketch {sketch_id} has an active drag gesture — retry after pointer-up"
             )));
         }
+        let sketch = self.sketch_or_err(sketch_id, "getSketchRegions")?;
+        let claim = self
+            .solver_lane
+            .claim(sketch_id, LaneOwner::RegionQuery)
+            .map_err(|held| {
+                op_failed(format!(
+                    "getSketchRegions: {} is in flight for sketch {sketch_id} — retry",
+                    held.describe()
+                ))
+            })?;
         Ok(PreparedSketchRegions {
-            sketch: self.sketch_or_err(sketch_id, "getSketchRegions")?,
+            sketch,
             solver: self.solver.clone(),
+            _claim: claim,
         })
     }
 
@@ -2223,17 +2303,29 @@ impl DocumentRuntime {
     /// the pre-gesture sketch (the `before` memento) so pointer-up can commit **one**
     /// undo command for the whole drag.
     ///
+    /// `target` declares WHAT the pointer grabbed (point handle / arc endpoint /
+    /// radius / whole entity body). [`GestureTarget::point`](wire::GestureTarget::point)
+    /// is the plain point drag every pre-SP-2 caller means. `drag_point` stays the
+    /// gesture's `SolveDrag` handle for all kinds — the worker ignores `pointId`
+    /// off the point path, and the runtime needs a stable per-gesture id anyway.
+    ///
     /// # Errors
     /// [`EngineError`] on a read-only document, an unknown sketch, or a worker failure.
     pub async fn begin_gesture(
         &mut self,
         sketch_id: SketchId,
         drag_point: EntityId,
+        target: wire::GestureTarget,
     ) -> Result<crate::dto::BeginGestureDto, EngineError> {
         if self.read_only {
             return Err(op_failed("beginGesture: read-only document"));
         }
         let sketch = self.sketch_or_err(sketch_id, "beginGesture")?;
+        // SP-0 D3: take the solver lane BEFORE the upsert below, so an in-flight
+        // region query (whose `drive()` runs with the runtime lock released) can
+        // never have this gesture opened underneath it. See [`solver_lane`] for
+        // what the collision corrupts.
+        let claim = self.claim_gesture_lane(sketch_id)?;
         // Ensure the worker holds the current sketch (its BeginGesture reads it).
         let solved = self.solver.sketch_upsert(&sketch).await?;
         self.record_solve(sketch_id, &solved);
@@ -2245,18 +2337,51 @@ impl DocumentRuntime {
                 solved.sketch_revision,
                 gesture_id,
                 drag_point,
+                target,
                 // solverPolicyHash: reserved, always "" — see wire::begin_gesture_args.
                 "",
             )
             .await?;
+        // Assigning here drops any previously active gesture (possibly on another
+        // sketch), releasing its claim with it — the pre-D3 overwrite semantics,
+        // unchanged.
         self.active_gesture = Some(ActiveGesture {
             gesture_id,
             sketch_id,
             drag_point,
             before: sketch,
             next_seq: 1,
+            _claim: claim,
         });
         Ok(ready)
+    }
+
+    /// Takes `sketch_id`'s solver lane for a drag gesture (SP-0 D3).
+    ///
+    /// A contending REGION QUERY is refused: its unlocked `drive()` is exactly what
+    /// the claim exists to fence against. A contending GESTURE is the same sketch's
+    /// own already-open drag, which [`begin_gesture`](Self::begin_gesture) has
+    /// always silently REPLACED (its tail assignment overwrites unconditionally);
+    /// dropping the superseded record here frees the lane so that behavior is
+    /// preserved rather than turned into a new refusal.
+    fn claim_gesture_lane(&mut self, sketch_id: SketchId) -> Result<Claim, EngineError> {
+        match self.solver_lane.claim(sketch_id, LaneOwner::Gesture) {
+            Ok(claim) => Ok(claim),
+            Err(LaneOwner::Gesture) => {
+                drop(self.active_gesture.take());
+                self.solver_lane
+                    .claim(sketch_id, LaneOwner::Gesture)
+                    .map_err(|held| {
+                        op_failed(format!(
+                            "beginGesture: {} is in flight for sketch {sketch_id} — retry",
+                            held.describe()
+                        ))
+                    })
+            }
+            Err(LaneOwner::RegionQuery) => Err(op_failed(format!(
+                "beginGesture: a region query is in flight for sketch {sketch_id} — retry"
+            ))),
+        }
     }
 
     /// One incremental drag solve (SCHEMA §7.4 `SolveDrag`). Fired latest-wins: the
@@ -2320,6 +2445,11 @@ impl DocumentRuntime {
             .await?;
         let mut after = gesture.before.clone();
         after.apply_solved_positions(&typed_positions(&solved.solved_positions));
+        // SP-2: `positions` is point-only. A radius drag moves no point at all, an
+        // arcEnd drag reshapes the arc, and a Tangent propagates even a plain point
+        // drag into a neighbouring radius — without this the worker's store and the
+        // document would silently disagree until the next upsert reverted it.
+        after.apply_solved_curves(&typed_curves(&solved.solved_curves));
         let outcome = self
             .apply(EditCommand::SketchDragGesture {
                 sketch: gesture.sketch_id,
@@ -3327,6 +3457,29 @@ fn typed_positions(positions: &BTreeMap<String, [f64; 2]>) -> Vec<(EntityId, Vec
         .collect()
 }
 
+/// Typed view of a solver `curves` map — the companion to [`typed_positions`].
+/// An unparseable key (not an `EntityId`) is dropped; non-finite MEMBERS are
+/// dropped downstream by [`Sketch::apply_solved_curves`], which also clamps the
+/// radius.
+fn typed_curves(
+    curves: &BTreeMap<String, crate::dto::CurveParamsDto>,
+) -> Vec<(EntityId, CurveParams)> {
+    curves
+        .iter()
+        .filter_map(|(k, c)| {
+            let id = EntityId::from_str(k).ok()?;
+            Some((
+                id,
+                CurveParams {
+                    radius: c.radius,
+                    start_angle: c.start_angle,
+                    end_angle: c.end_angle,
+                },
+            ))
+        })
+        .collect()
+}
+
 /// The wire kind string for an element (SCHEMA §7.5).
 fn kind_str(kind: onecad_core::document::refs::ElementKind) -> &'static str {
     use onecad_core::document::refs::ElementKind;
@@ -3393,6 +3546,7 @@ fn element_ref_input(op: &Operation, index: usize) -> Option<&ElementRef> {
 }
 
 mod ordinal_tripwire;
+pub mod solver_lane;
 
 #[cfg(test)]
 mod tests;

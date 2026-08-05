@@ -13,6 +13,7 @@ import {
   circleCircleIntersections,
   entityIntersections,
   buildSnapCache,
+  SNAP_PX,
   type SnapOptions,
 } from "./snapEngine";
 import type { SketchEntity } from "@/ipc/types";
@@ -424,5 +425,176 @@ describe("Ellipse snap surface", () => {
     const cache = buildSnapCache([ell]);
     expect(cache.points).toEqual([{ point: { x: 0, y: 0 }, kind: "center" }]);
     expect(cache.intersections).toEqual([]);
+  });
+});
+
+// ── SP-5.5: polar tracking ────────────────────────────────────────────────────
+
+describe("computeSnap polar tier", () => {
+  const anchor: Point2 = { x: 0, y: 0 };
+  // Guides + grid off unless a case is about them: the polar tier is what these
+  // assert, and the two tiers below it would otherwise mask an inert polar.
+  const polarBase: SnapOptions = {
+    ...base,
+    enableGrid: false,
+    enableGuideLines: false,
+    enablePolar: true,
+    polarAnchor: anchor,
+  };
+
+  it("snaps onto the 45° ray off the anchor", () => {
+    // (30, 26) misses y = x by 4/√2 ≈ 2.83 world units — inside the 8px reach.
+    const r = computeSnap({ x: 30, y: 26 }, [], polarBase);
+    expect(r.kind).toBe("polar");
+    expect(r.label).toBe("45°");
+    expect(r.point.x).toBeCloseTo(28, 9);
+    expect(r.point.y).toBeCloseTo(28, 9);
+    expect(r.snapped).toBe(true);
+  });
+
+  it("snaps BACKWARDS along a ray — a polar guide is a full line (mod π)", () => {
+    const r = computeSnap({ x: -40, y: 2 }, [], polarBase);
+    expect(r.kind).toBe("polar");
+    expect(r.label).toBe("0°");
+    expect(r.point).toEqual({ x: -40, y: 0 });
+  });
+
+  it("emits an origin+dir guide (never a constant coordinate)", () => {
+    const r = computeSnap({ x: 30, y: 26 }, [], { ...polarBase, polarAnchor: { x: 1, y: 1 } });
+    expect(r.guides).toHaveLength(1);
+    const g = r.guides[0];
+    expect(g.orientation).toBe("polar");
+    if (g.orientation !== "polar") throw new Error("expected a polar guide");
+    expect(g.origin).toEqual({ x: 1, y: 1 });
+    expect(Math.hypot(g.dir.x, g.dir.y)).toBeCloseTo(1, 12);
+  });
+
+  it("picks the NEAREST ray when two are in reach", () => {
+    // 17° out at radius 10 ⇒ 2.96 off the 0° ray and 4.66 off the 45° one, so
+    // BOTH are inside the 8px reach and only ranking decides.
+    const p = { x: 10 * Math.cos(0.3), y: 10 * Math.sin(0.3) };
+    expect(computeSnap(p, [], polarBase).label).toBe("0°");
+  });
+
+  it("is INERT without an anchor — byte-identical to polar off", () => {
+    const opts: SnapOptions = { ...base, enablePolar: true, polarAnchor: null };
+    for (const raw of [{ x: 30, y: 26 }, { x: 3, y: 4 }, { x: 0.5, y: 41 }]) {
+      expect(computeSnap(raw, [hLine], opts)).toEqual(computeSnap(raw, [hLine], base));
+    }
+  });
+
+  it("is INERT when the pref is off, anchor or not", () => {
+    const off: SnapOptions = { ...base, enablePolar: false, polarAnchor: anchor };
+    for (const raw of [{ x: 30, y: 26 }, { x: 3, y: 4 }]) {
+      expect(computeSnap(raw, [hLine], off)).toEqual(computeSnap(raw, [hLine], base));
+    }
+  });
+
+  it("loses to the point ladder (an endpoint still wins outright)", () => {
+    // (41,1) is 1.4 from the line's (40,0) endpoint AND ~1 off the 0° ray.
+    const r = computeSnap({ x: 41, y: 1 }, [hLine], { ...polarBase, enableGuidePoints: true });
+    expect(r.kind).toBe("endpoint");
+    expect(r.point).toEqual({ x: 40, y: 0 });
+  });
+
+  it("beats an H/V guide it strictly out-measures", () => {
+    // 0.5 off the 45° ray; 3 off the vertical guide through x = 33.
+    const opts: SnapOptions = {
+      ...polarBase,
+      enableGuideLines: true,
+      recentPoints: [{ x: 33, y: 90 }],
+    };
+    const r = computeSnap({ x: 30, y: 29.29289321881345 }, [], opts);
+    expect(r.kind).toBe("polar");
+    expect(r.label).toBe("45°");
+  });
+
+  it("LOSES a tie to H/V — a 90° ray never relabels an alignment guide", () => {
+    // The vertical guide through the anchor and the 90° polar ray are the SAME
+    // line, so both miss by 0.2. H/V owns the tie (and the wording).
+    const opts: SnapOptions = { ...polarBase, enableGuideLines: true, recentPoints: [anchor] };
+    const r = computeSnap({ x: 0.2, y: 60 }, [], opts);
+    expect(r.kind).toBe("alignV");
+    expect(r.label).toBe("Vertical");
+    expect(r.guides).toEqual([{ orientation: "vertical", value: 0 }]);
+  });
+
+  it("labels the reference direction Parallel and its normal Perpendicular", () => {
+    // A chain running at 20°: neither the ray nor its normal duplicates 0/45/90/135°.
+    const refDir = { x: Math.cos(0.349), y: Math.sin(0.349) };
+    const along = computeSnap({ x: 30 * refDir.x + 1 * refDir.y, y: 30 * refDir.y - 1 * refDir.x }, [], {
+      ...polarBase,
+      polarRefDir: refDir,
+    });
+    expect(along.label).toBe("Parallel");
+
+    const perp = { x: -refDir.y, y: refDir.x };
+    const across = computeSnap({ x: 30 * perp.x + 1 * perp.y, y: 30 * perp.y - 1 * perp.x }, [], {
+      ...polarBase,
+      polarRefDir: refDir,
+    });
+    expect(across.label).toBe("Perpendicular");
+  });
+
+  it("dedupes mod π — a 45° chain reports 45°, not Parallel", () => {
+    const r = computeSnap({ x: 30, y: 26 }, [], { ...polarBase, polarRefDir: { x: 1, y: 1 } });
+    expect(r.label).toBe("45°");
+  });
+
+  it("dedupes an ANTIPARALLEL reference too (a line has no sense)", () => {
+    const r = computeSnap({ x: -40, y: 2 }, [], { ...polarBase, polarRefDir: { x: -1, y: 0 } });
+    expect(r.label).toBe("0°");
+  });
+
+  it("ignores a degenerate (zero-length) reference direction", () => {
+    const r = computeSnap({ x: 30, y: 26 }, [], { ...polarBase, polarRefDir: { x: 0, y: 0 } });
+    expect(r.label).toBe("45°");
+  });
+
+  it("Alt (suppress) beats polar like every other tier", () => {
+    const r = computeSnap({ x: 30, y: 26 }, [], { ...polarBase, suppress: true });
+    expect(r.kind).toBe("none");
+    expect(r.snapped).toBe(false);
+  });
+});
+
+// ── SP-5.7: the snap radius scales every pixel-gated tier ─────────────────────
+
+describe("computeSnap snapPx", () => {
+  it("defaults to SNAP_PX (8) when omitted", () => {
+    // 7.5 away: inside 8px, outside 5px.
+    expect(computeSnap({ x: 47.5, y: 0 }, [hLine], base).kind).toBe("endpoint");
+    expect(computeSnap({ x: 47.5, y: 0 }, [hLine], { ...base, snapPx: SNAP_PX }).kind).toBe("endpoint");
+    expect(computeSnap({ x: 47.5, y: 0 }, [hLine], { ...base, snapPx: 5 }).kind).not.toBe("endpoint");
+  });
+
+  it("a LARGER radius extends the point ladder's reach", () => {
+    // 10 away: outside 8px, inside 12px.
+    const far = { x: 50, y: 0 };
+    expect(computeSnap(far, [hLine], { ...base, enableGrid: false, enableGuideLines: false }).snapped).toBe(false);
+    expect(computeSnap(far, [hLine], { ...base, snapPx: 12 }).kind).toBe("endpoint");
+  });
+
+  it("scales the guide and polar tiers too (one reach governs all of them)", () => {
+    const opts: SnapOptions = {
+      ...base,
+      enableGrid: false,
+      enableGuidePoints: false,
+      enableOnCurve: false,
+      enablePolar: true,
+      polarAnchor: { x: 0, y: 0 },
+      recentPoints: [{ x: 100, y: 100 }],
+    };
+    // 10 off both the 0° ray and every reference point.
+    const raw = { x: 60, y: 10 };
+    expect(computeSnap(raw, [], { ...opts, snapPx: 8 }).snapped).toBe(false);
+    expect(computeSnap(raw, [], { ...opts, snapPx: 12 }).kind).toBe("polar");
+  });
+
+  it("is scaled by pixelWorld exactly as the default reach is", () => {
+    // snapPx 8 at pixelWorld 0.5 ⇒ a 4-world-unit reach.
+    const opts: SnapOptions = { ...base, pixelWorld: 0.5, enableGrid: false, enableGuideLines: false };
+    expect(computeSnap({ x: 43, y: 0 }, [hLine], opts).kind).toBe("endpoint");
+    expect(computeSnap({ x: 45, y: 0 }, [hLine], opts).snapped).toBe(false);
   });
 });

@@ -43,6 +43,9 @@ export interface DimAuthorContext {
   prevLineId?: string;
   /** Polygon side count — also the batch index of its construction circumcircle. */
   sides?: number;
+  /** The line tool's leg is a TANGENT ARC (SP-4 W3), so its one field is a radius
+   *  and neither `length` nor `angle` describes what commits. */
+  arcMode?: boolean;
 }
 
 /** The previous chain segment: its entity id AND its absolute direction. */
@@ -102,6 +105,12 @@ const selfDistance = (i: number, value: number): DimConstraintSpec => ({
 
 function lineSpecs(anchors: Point2[], locks: DimLocks, ctx: DimAuthorContext): DimConstraintSpec[] {
   if (anchors.length === 0) return []; // committed = [Line]
+  // Arc mode commits an ARC, whose only expressible number is its radius. A
+  // length / angle lock left over from a straight leg describes the segment that
+  // is NOT being committed, so it authors nothing rather than binding the arc.
+  if (ctx.arcMode) {
+    return locks.radius === undefined ? [] : [{ type: "Radius", refs: [0], value: locks.radius }];
+  }
   const out: DimConstraintSpec[] = [];
   if (locks.length !== undefined) out.push(selfDistance(0, locks.length));
   if (locks.angle !== undefined) out.push(...angleLadder(locks.angle, 0, prevSegment(anchors, ctx)));
@@ -130,6 +139,14 @@ function circleSpecs(anchors: Point2[], locks: DimLocks): DimConstraintSpec[] {
 /** The radius is locked in phase 1 and PERSISTS into phase 2, where the arc
  *  commits. The sweep authors nothing — no wire kind expresses it. */
 function arcSpecs(anchors: Point2[], locks: DimLocks): DimConstraintSpec[] {
+  if (anchors.length !== 2 || locks.radius === undefined) return [];
+  return [{ type: "Radius", refs: [0], value: locks.radius }];
+}
+
+/** 3-point arc: the radius is the ONE field, typed in phase 2 where the arc also
+ *  commits. The chord's own length and angle author nothing — a chord is not an
+ *  entity, so no wire kind can name it. */
+function arc3pSpecs(anchors: Point2[], locks: DimLocks): DimConstraintSpec[] {
   if (anchors.length !== 2 || locks.radius === undefined) return [];
   return [{ type: "Radius", refs: [0], value: locks.radius }];
 }
@@ -175,6 +192,8 @@ export function dimConstraintSpecs(
       return circleSpecs(anchors, locks);
     case "arc":
       return arcSpecs(anchors, locks);
+    case "arc3p":
+      return arc3pSpecs(anchors, locks);
     case "polygon":
       return polygonSpecs(anchors, locks, ctx);
     case "slot":

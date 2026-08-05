@@ -382,6 +382,33 @@ pub struct SketchUpsertDto {
     pub conflicting: Vec<String>,
     /// CHANGED point coordinates after the solve, keyed by the point entity id.
     pub solved_positions: std::collections::BTreeMap<String, [f64; 2]>,
+    /// CHANGED curve parameters after the solve (SCHEMA §7.4 `curves`), keyed by
+    /// the curve entity id. Always serialized (no skip), same `conflicting: []`
+    /// precedent — the frontend always sees the key, empty when nothing moved.
+    pub solved_curves: std::collections::BTreeMap<String, CurveParamsDto>,
+}
+
+/// The CHANGED members of one curve in a solve result (SCHEMA §7.4 `curves`).
+///
+/// `positions` is point-only, which is not the whole result of a drag: a `radius`
+/// gesture moves no point, an `arcEnd` gesture reshapes the arc's radius/angles,
+/// and a `Tangent` propagates even a plain point drag into a neighbouring curve's
+/// radius. Members are per-member optional under the same incremental discipline
+/// as `positions` — an absent member is UNCHANGED, never zero — so each one skips
+/// serialization when `None` (mirrors `types.ts CurveParams`). Angles are radians
+/// CCW from +X, the wire domain (`angleUnits.ts` converts for display).
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurveParamsDto {
+    /// New radius (mm) of a `Circle`/`Arc`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f64>,
+    /// New start angle (radians) of an `Arc`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_angle: Option<f64>,
+    /// New end angle (radians) of an `Arc`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_angle: Option<f64>,
 }
 
 /// A `BeginGesture` acknowledgement (SCHEMA §7.4).
@@ -405,6 +432,9 @@ pub struct DragSolveDto {
     pub conflicting: Vec<String>,
     /// CHANGED point coordinates, keyed by point entity id.
     pub positions: std::collections::BTreeMap<String, [f64; 2]>,
+    /// CHANGED curve parameters (SCHEMA §7.4 `curves`), keyed by curve entity id.
+    /// Always serialized (no skip), like `conflicting`.
+    pub curves: std::collections::BTreeMap<String, CurveParamsDto>,
     pub solve_micros: u64,
     /// True when this `seq` was superseded by a newer drag (positions empty).
     pub superseded: bool,
@@ -1458,6 +1488,7 @@ mod tests {
             status: SketchSolveStatus::Conflicting,
             conflicting: vec!["c-a".into(), "c-b".into()],
             solved_positions: std::collections::BTreeMap::new(),
+            solved_curves: std::collections::BTreeMap::new(),
         };
         let v = serde_json::to_value(&dto).unwrap();
         assert_eq!(v["conflicting"], serde_json::json!(["c-a", "c-b"]));
@@ -1483,6 +1514,63 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&session).unwrap()["conflicting"],
             serde_json::json!(["c-a"])
+        );
+    }
+
+    #[test]
+    fn curve_params_dto_skips_absent_members_but_the_map_is_always_emitted() {
+        // Per-MEMBER skip: an absent member means UNCHANGED, so it must not
+        // serialize as `null` (the frontend would write it as a value).
+        let only_radius = CurveParamsDto {
+            radius: Some(12.5),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(only_radius).unwrap();
+        assert_eq!(v, serde_json::json!({ "radius": 12.5 }));
+        let arc = CurveParamsDto {
+            radius: Some(9.0),
+            start_angle: Some(0.25),
+            end_angle: Some(1.75),
+        };
+        assert_eq!(
+            serde_json::to_value(arc).unwrap(),
+            serde_json::json!({ "radius": 9.0, "startAngle": 0.25, "endAngle": 1.75 }),
+            "camelCase members, radians verbatim"
+        );
+        assert_eq!(
+            serde_json::to_value(CurveParamsDto::default()).unwrap(),
+            serde_json::json!({}),
+        );
+
+        // Container-level: NEVER skipped (the `conflicting: []` precedent) — the
+        // frontend always sees the key, empty when nothing moved.
+        let dto = SketchUpsertDto {
+            sketch_id: "sk_1".into(),
+            sketch_revision: 3,
+            dof: 0,
+            status: SketchSolveStatus::FullyConstrained,
+            conflicting: vec![],
+            solved_positions: std::collections::BTreeMap::new(),
+            solved_curves: std::collections::BTreeMap::new(),
+        };
+        assert_eq!(
+            serde_json::to_value(&dto).unwrap()["solvedCurves"],
+            serde_json::json!({})
+        );
+        let drag = DragSolveDto {
+            gesture_id: 51,
+            seq: 2,
+            status: "success".into(),
+            dof: 1,
+            conflicting: vec![],
+            positions: std::collections::BTreeMap::new(),
+            curves: std::collections::BTreeMap::from([("e7".into(), only_radius)]),
+            solve_micros: 0,
+            superseded: false,
+        };
+        assert_eq!(
+            serde_json::to_value(&drag).unwrap()["curves"],
+            serde_json::json!({ "e7": { "radius": 12.5 } })
         );
     }
 

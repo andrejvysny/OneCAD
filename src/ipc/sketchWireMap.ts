@@ -37,6 +37,7 @@
  */
 import type {
   ConstraintPosition,
+  CurveParams,
   SketchConstraint,
   SketchConstraintType,
   SketchEntity,
@@ -986,20 +987,29 @@ export function frontendEntitiesFromDto(dtoEntities: unknown): SketchEntity[] {
 // frontend entities (move line endpoints / circle+arc centers / points).
 
 /**
+ * A worker-minted ARC ENDPOINT handle (`"<arcWireId>.start"` / `".end"`, SCHEMA
+ * §7.4) — never a backend point uuid, so it can never resolve through `map.point`.
+ * Every arc-touching drag now reports these, and the `curves` channel supersedes
+ * them, so they are expected rather than anomalous (see the seam note below).
+ */
+const ARC_ENDPOINT_HANDLE = /\.(start|end)$/;
+
+/**
  * Re-key backend-UUID-keyed `solvedPositions` to the frontend `entityId.Position`
  * keys the entities carry, using `map.point` (frontend `"entityId.Position"` →
  * backend point UUID). Keys not in the id-map are skipped silently with a dev
  * warn (common on re-entry, before the id-map is seeded — the DTO entities are
  * already solved there, so no movement is needed).
  *
- * SEAM (W0b): an arc's endpoints are minted by the WORKER, whose primary handle
- * for them is `"<arcWireId>.start"`/`".end"` (SCHEMA §7.4), not a backend point
- * uuid — so a solve that rotates a welded cap arrives here as unmapped keys and
- * is skipped. That matches the pre-existing behaviour for a solved arc's RADIUS
- * and angles, which this lane has never written back either: the frontend's arc
- * `start`/`end` coordinates go stale until the next re-entry rebuilds them from
- * the wire. Applying them needs the radius echoed on the same path, else the
- * three would disagree — tracked separately.
+ * SEAM (W0b) — CLOSED by SP-2's `curves` channel: an arc's endpoints are minted
+ * by the WORKER, whose primary handle for them is `"<arcWireId>.start"`/`".end"`
+ * (SCHEMA §7.4), not a backend point uuid, so they arrive here as unmapped keys
+ * and are skipped. They are no longer LOST: SCHEMA §7.4 `curves` reports the arc's
+ * solved radius + start/end ANGLES on the very same response, for every drag kind,
+ * and {@link applySolvedCurves} rebuilds the `start`/`end` coordinates from them —
+ * the one path on which radius, angles and coordinates cannot disagree. Those
+ * handles are therefore EXPECTED here (every arc-touching drag reports them) and
+ * are filtered out of the unmapped-key warning below rather than flagged.
  */
 export function frontendSolvedPositions(
   map: SketchIdMap,
@@ -1014,7 +1024,7 @@ export function frontendSolvedPositions(
   for (const [uuid, xy] of Object.entries(dtoPositions)) {
     const key = byUuid.get(uuid);
     if (key) out[key] = xy;
-    else unknown.push(uuid);
+    else if (!ARC_ENDPOINT_HANDLE.test(uuid)) unknown.push(uuid);
   }
   if (unknown.length > 0) {
     logWarn("sketch", `solvedPositions: ${unknown.length} unmapped point key(s) skipped`, {
@@ -1104,6 +1114,113 @@ function moveEntity(e: SketchEntity, g: Record<string, [number, number]>): Sketc
     default:
       return e;
   }
+}
+
+// ── Solved-curves channel (SP-2; SCHEMA §7.4 `curves`) ───────────────────────
+//
+// `positions` is point-only, which is not the whole result of a drag: a `radius`
+// gesture moves no point, an `arcEnd` gesture reshapes an arc's radius+angles
+// (the Rust Arc owns no endpoint ENTITIES), and a `Tangent` propagates even a
+// plain point drag into a neighbouring curve's radius. `curves` carries exactly
+// those members, keyed by curve entity id, under the same incremental discipline.
+
+/**
+ * Re-key backend-UUID-keyed `curves` (SCHEMA §7.4, `SolveDrag`/`EndGesture`) to the
+ * FRONTEND entity ids the sketch entities carry, by reversing `map.entity`. Keys not
+ * in the id-map are dropped with a dev warn — unlike a stale POINT key, an unmapped
+ * curve key means a solved radius/angle silently never lands (the exact staleness
+ * this channel exists to end).
+ */
+export function frontendSolvedCurves(
+  map: SketchIdMap,
+  dtoCurves: Record<string, CurveParams> | undefined | null,
+): Record<string, CurveParams> {
+  const out: Record<string, CurveParams> = {};
+  if (!dtoCurves) return out;
+  const byUuid = new Map<string, string>();
+  for (const [frontendId, uuid] of map.entity) if (!byUuid.has(uuid)) byUuid.set(uuid, frontendId);
+  const unknown: string[] = [];
+  for (const [uuid, params] of Object.entries(dtoCurves)) {
+    const id = byUuid.get(uuid);
+    if (id) out[id] = params;
+    else unknown.push(uuid);
+  }
+  if (unknown.length > 0) {
+    logWarn("sketch", `curves: ${unknown.length} unmapped curve key(s) skipped`, {
+      unknown: unknown.slice(0, 8),
+    });
+  }
+  return out;
+}
+
+/**
+ * Apply frontend-keyed solved `curves` to the sketch entities: a Circle's radius,
+ * an Arc's radius + start/end ANGLES — and, because a frontend Arc stores endpoint
+ * COORDINATES rather than angles, the recomputed `start`/`end` points.
+ *
+ * That recomputation is the exact inverse of the `at()` helper
+ * `frontendEntitiesFromDto` uses to derive an arc's endpoints on re-entry
+ * (`center + radius·[cos θ, sin θ]`; see the `case "Arc"` branch above, the
+ * `const at = …` lines). The two MUST stay consistent: they are the only two
+ * places that turn (center, radius, angle) into a coordinate, and a drag that
+ * disagreed with re-entry would make the arc jump when the sketch is reopened.
+ *
+ * An unspecified member is UNCHANGED (§7.4 incremental discipline), so a
+ * radius-only report keeps the current angles and vice versa. Pure: returns a NEW
+ * array only when something changed (else the same reference — no React churn).
+ * Ids that are unknown, non-curve, or carry no usable member are ignored.
+ */
+export function applySolvedCurves(
+  entities: SketchEntity[],
+  curves: Record<string, CurveParams> | undefined | null,
+): SketchEntity[] {
+  if (!curves || Object.keys(curves).length === 0) return entities;
+  let changed = false;
+  const out = entities.map((e) => {
+    const c = curves[e.id];
+    if (!c) return e;
+    const next = reshapeCurve(e, c);
+    if (next !== e) changed = true;
+    return next;
+  });
+  return changed ? out : entities;
+}
+
+/** A finite number, or undefined (a non-finite member is dropped, never applied). */
+function finite(v: number | undefined): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+/** The angle of `p` about `center`, matching `at()`'s convention (absent ⇒ 0). */
+function angleAbout(center: [number, number], p: [number, number] | undefined): number {
+  return p ? Math.atan2(p[1] - center[1], p[0] - center[0]) : 0;
+}
+
+/** Reshape one Circle/Arc from its CHANGED curve members (immutable). */
+function reshapeCurve(e: SketchEntity, c: CurveParams): SketchEntity {
+  const radius = finite(c.radius);
+  // Clamp ≥0 mirrors the core's `apply_solved_curves` (a negative radius is not
+  // geometry); the 0.01mm floor is the BACKEND's, applied before the solve.
+  const clamped = radius === undefined ? undefined : Math.max(radius, 0);
+  if (e.type === "Circle") return clamped === undefined ? e : { ...e, radius: clamped };
+  if (e.type !== "Arc") return e; // Ellipse is never solver-registered (§7.4)
+  const startAngle = finite(c.startAngle);
+  const endAngle = finite(c.endAngle);
+  if (clamped === undefined && startAngle === undefined && endAngle === undefined) return e;
+  const center = e.center;
+  const r = clamped ?? e.radius;
+  if (!center || r === undefined) return e;
+  // Inverse of frontendEntitiesFromDto's `at()` — keep the two in step.
+  const at = (a: number): [number, number] => [
+    center[0] + r * Math.cos(a),
+    center[1] + r * Math.sin(a),
+  ];
+  return {
+    ...e,
+    radius: r,
+    start: at(startAngle ?? angleAbout(center, e.start)),
+    end: at(endAngle ?? angleAbout(center, e.end)),
+  };
 }
 
 /** One constraint from the worker wire form (`enter_sketch` returns these — the

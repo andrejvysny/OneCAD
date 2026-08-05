@@ -30,6 +30,7 @@ import {
   type DimValues,
 } from "./liveDimension";
 import { DEFAULT_POLYGON_SIDES } from "./toolMachine";
+import { circumcenter, tangentArcTo } from "./arcMath";
 
 /**
  * One tool phase's dimension frame. `measure` reads the gesture's numbers off a
@@ -85,15 +86,17 @@ function one(id: DimFieldId, value: number): DimValues {
 // ── line / slot centreline: length + absolute angle ──────────────────────────
 
 /** `a` → cursor as a length and an ABSOLUTE angle to plane +U. Shared by the line
- *  tool and the slot's centreline phase (identical gesture, identical numbers). */
-function segmentFrame(a: Point2): DimFrame {
+ *  tool, the slot's centreline phase (identical gesture, identical numbers) and
+ *  the 3-point arc's CHORD phase — which passes `drives = false`, because a
+ *  chord is not an entity and no wire kind can express its length or angle. */
+function segmentFrame(a: Point2, drives = true): DimFrame {
   return {
     fields: [
-      field("length", "L", "length", true, (p) => mid(a, p)),
+      field("length", "L", "length", drives, (p) => mid(a, p)),
       // Drives only through the angle LADDER: 0/180 → Horizontal, 90/270 →
       // Vertical, else an Angle against the previous chain segment. A first
       // segment's oblique angle has no reference, so it stays geometry-only.
-      field("angle", "∠", "angle", true, (p) => lerp(a, p, ANGLE_ANCHOR_T)),
+      field("angle", "∠", "angle", drives, (p) => lerp(a, p, ANGLE_ANCHOR_T)),
     ],
     measure: (p) => ({ length: dist(a, p), angle: angleDegOf(a, p) }),
     rebuild: (v, c) => {
@@ -256,20 +259,136 @@ function perpFrame(
   };
 }
 
+// ── 3-point arc: the radius of the arc through two placed endpoints ──────────
+
+/**
+ * `arc3p` phase 2 — ONE field, the RADIUS of the arc through both placed
+ * endpoints and the cursor.
+ *
+ * Stated in the chord's own frame (origin S, +d along the chord, +n its CCW
+ * normal): the centre is forced onto the perpendicular bisector at u = c/2, so
+ * only its HEIGHT k is free, and
+ *
+ *     k = (u² − c·u + v²) / (2v)          R² = k² + (c/2)²
+ *
+ * `rebuild` has that one degree of freedom to spend and three cursor facts to
+ * preserve: where along the chord the cursor sits (u), which side of the chord
+ * the centre is on (sign k), and which side of the centre's own height the
+ * cursor is on — the last is what keeps a minor arc minor instead of flipping to
+ * the major one. A radius below c/2 describes no circle through both endpoints,
+ * so it is CLAMPED to c/2 (the smallest arc that still spans the chord) rather
+ * than rejected mid-gesture.
+ */
+function arcThroughFrame(s: Point2, e: Point2): DimFrame {
+  const ax = axisOf(s, e);
+  const half = dist(s, e) / 2;
+  const along = (p: Point2): number => (p.x - s.x) * ax.d.x + (p.y - s.y) * ax.d.y;
+  /** Centre height in the chord frame; ±∞ for a cursor ON the chord line. */
+  const heightOf = (u: number, v: number): number => (u * u - 2 * half * u + v * v) / (2 * v);
+  const radiusAt = (p: Point2): number => {
+    const ctr = circumcenter(s, e, p);
+    return ctr ? dist(ctr, s) : 0;
+  };
+  return {
+    // Anchored off the CHORD midpoint, not the centre: the centre moves with the
+    // cursor (and runs to infinity as the arc flattens), the chord does not.
+    fields: [field("radius", "R", "length", true, (p) => mid(mid(s, e), p))],
+    measure: (p) => ({ radius: radiusAt(p) }),
+    rebuild: (v, c) => {
+      const off = offsetOf(ax, c);
+      const k0 = heightOf(along(c), off);
+      const r = Math.max(v.radius ?? radiusAt(c), half);
+      const k = side(k0) * Math.sqrt(Math.max(0, r * r - half * half));
+      // A cursor past the circle's own extent along the chord names a u the
+      // circle never reaches: clamp it to the extreme point, so a typed radius is
+      // still exactly the radius that commits. Never clamps in the identity case
+      // (the cursor is on its own circle), so the round-trip stays exact.
+      const u = Math.min(Math.max(along(c), half - r), half + r);
+      const w = Math.sqrt(Math.max(0, r * r - (u - half) * (u - half)));
+      const off2 = k + side(off - k0) * w;
+      return { x: s.x + ax.d.x * u + ax.n.x * off2, y: s.y + ax.d.y * u + ax.n.y * off2 };
+    },
+  };
+}
+
+// ── line tool, arc mode: the radius of the tangent arc off the last anchor ────
+
+/**
+ * The line tool's TANGENT-ARC leg (SP-4 W3) — ONE field, the arc's RADIUS.
+ *
+ * There is exactly one arc leaving `anchor` along `t` through any given cursor
+ * (`tangentArcTo`), so the radius is the whole of what a number can say here. The
+ * frame therefore has one degree of freedom to spend and two cursor facts to
+ * preserve: which SIDE of the tangent the arc bends to (σ, the sign of the signed
+ * centre offset — `startsAtAnchor` reports it, since s > 0 ⇔ CCW ⇔ the arc starts
+ * at the anchor) and how far around it TURNS (θ, the cursor's own sweep).
+ *
+ * Re-radiusing is then a rigid statement: put the centre back on the same side at
+ * the new distance, C' = anchor + σ·R·n, and travel the same turn from the anchor,
+ * cursor' = C' + rot(σ·θ)·(anchor − C'). At R = R_cursor that IS the cursor
+ * (rotating the anchor's radial by the CCW sweep lands on the far end by
+ * definition), so the round-trip is exact rather than merely close.
+ *
+ * A cursor on the tangent ray describes no finite circle: the value set says
+ * nothing that could place a point, so `rebuild` hands the cursor back unchanged.
+ */
+function tangentArcFrame(anchor: Point2, t: Point2): DimFrame {
+  const len = Math.hypot(t.x, t.y);
+  // Unit normal of the tangent — the line every candidate centre sits on.
+  const n: Point2 =
+    len < DEGENERATE ? { x: 0, y: 1 } : { x: -t.y / len, y: t.x / len };
+  return {
+    fields: [field("radius", "R", "length", true, (p) => mid(anchor, p))],
+    measure: (p) => ({ radius: tangentArcTo(anchor, t, p)?.radius ?? 0 }),
+    rebuild: (v, c) => {
+      const arc = tangentArcTo(anchor, t, c);
+      if (!arc) return c;
+      // |R|: a negative typed radius would mirror the arc across its own tangent,
+      // which is a side flip the cursor — not the number — is meant to own.
+      const r = Math.abs(v.radius ?? arc.radius);
+      const sigma = arc.startsAtAnchor ? 1 : -1;
+      const ctr = { x: anchor.x + sigma * r * n.x, y: anchor.y + sigma * r * n.y };
+      const a = sigma * arc.sweep;
+      const cos = Math.cos(a);
+      const sin = Math.sin(a);
+      const vx = anchor.x - ctr.x;
+      const vy = anchor.y - ctr.y;
+      return { x: ctr.x + cos * vx - sin * vy, y: ctr.y + sin * vx + cos * vy };
+    },
+  };
+}
+
 // ── phase table ───────────────────────────────────────────────────────────────
+
+/** What the LINE tool's chain is doing that its anchors cannot say (SP-4 W3). */
+export interface DimChain {
+  /** The next leg is a tangent arc. */
+  arcMode?: boolean;
+  /** The direction the chain leaves its last anchor travelling in. */
+  tangent?: Point2;
+}
 
 /**
  * The frame for `toolId` at the phase `anchors` describes, or null when the tool
  * has no live dimensions there (point tool, phase 0, an unknown id).
  *
- * `sides` is `ToolState.sides` — polygon only.
+ * `sides` is `ToolState.sides` — polygon only. `chain` is the line tool's arc
+ * mode + chain tangent; omitted (the default everywhere else) it changes nothing.
  */
-export function dimFrame(toolId: string, anchors: Point2[], sides?: number): DimFrame | null {
+export function dimFrame(
+  toolId: string,
+  anchors: Point2[],
+  sides?: number,
+  chain?: DimChain,
+): DimFrame | null {
   const n = anchors.length;
   if (n === 0) return null;
   switch (toolId) {
     case "line":
       // Anchors accumulate the whole chain — the ACTIVE vertex is the last one.
+      // In arc mode the leg is an arc, so length + absolute angle stop describing
+      // it and the radius takes over as the single field.
+      if (chain?.arcMode && chain.tangent) return tangentArcFrame(anchors[n - 1], chain.tangent);
       return segmentFrame(anchors[n - 1]);
     case "rect":
       return n === 1 ? boxFrame(anchors[0], 1) : null;
@@ -281,6 +400,11 @@ export function dimFrame(toolId: string, anchors: Point2[], sides?: number): Dim
       if (n === 1) return radialFrame(anchors[0], "radius", "R", true);
       // The sweep authors nothing — no wire kind expresses an arc's own sweep.
       return n === 2 ? arcSweepFrame(anchors[0], anchors[1]) : null;
+    case "arc3p":
+      // Phase 1 is the CHORD: it steers the gesture but is not an entity, so
+      // neither of its numbers can author anything (drives = false).
+      if (n === 1) return segmentFrame(anchors[0], false);
+      return n === 2 ? arcThroughFrame(anchors[0], anchors[1]) : null;
     case "ellipse":
       // Neither axis authors anything: an Ellipse curve takes no constraints.
       if (n === 1) return radialFrame(anchors[0], "major", "a", false);

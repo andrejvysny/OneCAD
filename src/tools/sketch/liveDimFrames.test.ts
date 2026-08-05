@@ -19,11 +19,21 @@ const FRAMES: Array<[string, DimFrame]> = [
   ["circle", must(dimFrame("circle", [P(4, 4)]))],
   ["arc phase 1 (radius)", must(dimFrame("arc", [P(1, 1)]))],
   ["arc phase 2 (sweep)", must(dimFrame("arc", [P(1, 1), P(21, 1)]))],
+  ["arc3p phase 1 (chord)", must(dimFrame("arc3p", [P(3, -4)]))],
+  ["arc3p phase 2 (radius)", must(dimFrame("arc3p", [P(-20, -10), P(20, 30)]))],
   ["ellipse phase 1 (major)", must(dimFrame("ellipse", [P(0, 0)]))],
   ["ellipse phase 2 (minor)", must(dimFrame("ellipse", [P(0, 0), P(30, 10)]))],
   ["polygon", must(dimFrame("polygon", [P(2, -2)], 5))],
   ["slot phase 1 (centreline)", must(dimFrame("slot", [P(-5, -5)]))],
   ["slot phase 2 (width)", must(dimFrame("slot", [P(-5, -5), P(25, 5)]))],
+  [
+    "line arc mode (tangent-arc radius)",
+    must(dimFrame("line", [P(0, 0), P(10, 5)], undefined, { arcMode: true, tangent: P(1, 0) })),
+  ],
+  [
+    "line arc mode (oblique tangent)",
+    must(dimFrame("line", [P(-4, 7)], undefined, { arcMode: true, tangent: P(0.6, 0.8) })),
+  ],
 ];
 
 const PROBES: Point2[] = [
@@ -58,6 +68,7 @@ describe("dimFrame — phase table", () => {
     expect(dimFrame("rect", [P(0, 0), P(1, 1)])).toBeNull();
     expect(dimFrame("circle", [P(0, 0), P(1, 1)])).toBeNull();
     expect(dimFrame("arc", [P(0, 0), P(1, 1), P(2, 2)])).toBeNull();
+    expect(dimFrame("arc3p", [P(0, 0), P(1, 1), P(2, 2)])).toBeNull();
     expect(dimFrame("slot", [P(0, 0), P(1, 1), P(2, 2)])).toBeNull();
   });
 
@@ -78,6 +89,16 @@ describe("dimFrame — phase table", () => {
     expect(drives(dimFrame("arc", [P(0, 0), P(10, 0)]))).toEqual([false]); // sweep
     expect(drives(dimFrame("arc", [P(0, 0)]))).toEqual([true]); // radius
     expect(drives(dimFrame("polygon", [P(0, 0)]))).toEqual([true, false]); // R, n
+    // The 3-point arc's CHORD is not an entity — neither number can author.
+    expect(drives(dimFrame("arc3p", [P(0, 0)]))).toEqual([false, false]);
+    expect(drives(dimFrame("arc3p", [P(0, 0), P(10, 0)]))).toEqual([true]); // radius
+  });
+
+  it("segmentFrame's new `drives` param DEFAULTS to true — line/slot unchanged", () => {
+    const drives = (f: DimFrame | null): boolean[] => must(f).fields.map((s) => s.drives);
+    expect(drives(dimFrame("line", [P(0, 0)]))).toEqual([true, true]);
+    expect(drives(dimFrame("line", [P(0, 0), P(5, 5)]))).toEqual([true, true]);
+    expect(drives(dimFrame("slot", [P(0, 0)]))).toEqual([true, true]);
   });
 });
 
@@ -204,6 +225,177 @@ describe("arc frames", () => {
   it("a start point off the +U axis shifts the sweep origin", () => {
     const frame = must(dimFrame("arc", [ctr, P(0, 20)]));
     expect(frame.measure(P(-20, 0)).angle).toBeCloseTo(90, 9);
+  });
+});
+
+describe("arc3p frames", () => {
+  const S = P(0, 0);
+  const E = P(10, 0);
+  const frame = must(dimFrame("arc3p", [S, E]));
+  /** The radius the frame's own measure reports for a cursor — the arc's radius. */
+  const radiusAt = (p: Point2): number => frame.measure(p).radius!;
+
+  it("phase 1 is the CHORD: the same length + angle numbers as a line", () => {
+    const chord = must(dimFrame("arc3p", [P(10, 20)]));
+    expect(chord.measure(P(40, 20))).toEqual({ length: 30, angle: 0 });
+  });
+
+  it("phase 2 measures the radius of the arc through both endpoints and the cursor", () => {
+    expect(radiusAt(P(5, 5))).toBeCloseTo(5, 9); // semicircle on the chord
+    expect(radiusAt(P(5, -5))).toBeCloseTo(5, 9); // …either side, same number
+    expect(radiusAt(P(5, 2.5))).toBeCloseTo(6.25, 9);
+  });
+
+  it("a cursor ON the chord has no arc — the radius reads 0", () => {
+    expect(radiusAt(P(5, 0))).toBe(0);
+    expect(radiusAt(P(50, 0))).toBe(0);
+  });
+
+  it("a locked radius keeps the cursor's position ALONG the chord and its side", () => {
+    for (const cursor of [P(3, 4), P(3, -4), P(-2, 2), P(11, -9)]) {
+      const p = frame.rebuild({ radius: 9 }, cursor);
+      expect(p.x).toBeCloseTo(cursor.x, 9); // u preserved (chord runs +U here)
+      expect(radiusAt(p)).toBeCloseTo(9, 6);
+      expect(Math.sign(p.y)).toBe(Math.sign(cursor.y));
+    }
+  });
+
+  it("PROPERTY: a typed radius is the radius that commits, across the whole sweep", () => {
+    for (const r of [5.01, 6, 9, 25, 200, 5000]) {
+      for (const cursor of [P(1, 1), P(5, -0.5), P(8, 30), P(-3, -2), P(4.9, 12)]) {
+        expect(radiusAt(frame.rebuild({ radius: r }, cursor))).toBeCloseTo(r, 5);
+      }
+    }
+  });
+
+  it("clamps a cursor past the circle's extent, so the typed radius still holds", () => {
+    // The r=9 circle on this chord spans u ∈ [−4, 14]; the cursor is well past it.
+    const p = frame.rebuild({ radius: 9 }, P(60, 3));
+    expect(p.x).toBeCloseTo(14, 9);
+    expect(radiusAt(p)).toBeCloseTo(9, 6);
+  });
+
+  it("a LARGER radius flattens the bulge toward the chord", () => {
+    const flatter = frame.rebuild({ radius: 20 }, P(5, 1));
+    expect(radiusAt(flatter)).toBeCloseTo(20, 6);
+    expect(flatter.y).toBeGreaterThan(0);
+    expect(flatter.y).toBeLessThan(1);
+  });
+
+  it("keeps a MAJOR arc major (the cursor's side of the centre height)", () => {
+    const major = frame.rebuild({ radius: 8 }, P(5, 9));
+    expect(radiusAt(major)).toBeCloseTo(8, 6);
+    // Past the centre height ⇒ still the far half of the circle, not the near one.
+    expect(major.y).toBeGreaterThan(8);
+  });
+
+  it("CLAMPS a radius below half the chord — the smallest arc that still spans it", () => {
+    const clamped = frame.rebuild({ radius: 1 }, P(5, 3));
+    expect(radiusAt(clamped)).toBeCloseTo(5, 6);
+    expect(clamped).toEqual({ x: 5, y: 5 });
+  });
+
+  it("a degenerate chord stays finite (no NaN)", () => {
+    const degenerate = must(dimFrame("arc3p", [P(2, 2), P(2, 2)]));
+    const p = degenerate.rebuild({ radius: 7 }, P(9, 4));
+    expect(Number.isFinite(p.x)).toBe(true);
+    expect(Number.isFinite(p.y)).toBe(true);
+  });
+
+  it("anchors the R chip between the chord midpoint and the cursor", () => {
+    expect(frame.fields[0].anchor(P(5, 20))).toEqual({ x: 5, y: 10 });
+  });
+});
+
+describe("line arc-mode frame — the tangent arc's radius (SP-4 W3)", () => {
+  const A = P(10, 0);
+  const T = P(1, 0); // the chain leaves the anchor along +U
+  const chain = { arcMode: true, tangent: T };
+  const frame = must(dimFrame("line", [P(0, 0), A], undefined, chain));
+  const radiusAt = (p: Point2): number => frame.measure(p).radius!;
+
+  it("the 4th param DEFAULTS to nothing — a plain line frame is untouched", () => {
+    const plain = must(dimFrame("line", [P(0, 0), A]));
+    expect(plain.fields.map((f) => f.field)).toEqual(["length", "angle"]);
+    // …and arc mode WITHOUT a tangent is still the straight frame (nothing to be
+    // tangent to, so the mode is inert here exactly as it is in the machine).
+    const noTangent = must(dimFrame("line", [P(0, 0), A], undefined, { arcMode: true }));
+    expect(noTangent.fields.map((f) => f.field)).toEqual(["length", "angle"]);
+  });
+
+  it("is ONE driving radius field, anchored between the anchor and the cursor", () => {
+    expect(frame.fields).toHaveLength(1);
+    expect(frame.fields[0]).toMatchObject({ field: "radius", label: "R", domain: "length", drives: true });
+    expect(frame.fields[0].anchor(P(20, 10))).toEqual({ x: 15, y: 5 });
+  });
+
+  it("measures the arc that leaves the anchor along the tangent", () => {
+    expect(radiusAt(P(20, 10))).toBeCloseTo(10, 9); // centre (10,10), quarter turn
+    expect(radiusAt(P(20, -10))).toBeCloseTo(10, 9); // mirrored — same number
+    expect(radiusAt(P(10, 20))).toBeCloseTo(10, 9); // half turn
+  });
+
+  it("a cursor ON the tangent ray has no arc — the radius reads 0", () => {
+    expect(radiusAt(P(30, 0))).toBe(0);
+    expect(radiusAt(P(-30, 0))).toBe(0);
+  });
+
+  /** How far the arc through `q` TURNS off the anchor, in the direction it bends.
+   *  The tangent is +U here, so every centre sits at x = A.x. */
+  const turnOf = (q: Point2): number => {
+    const sgn = Math.sign(q.y - A.y) || 1;
+    const cy = A.y + sgn * radiusAt(q);
+    const d = sgn * (Math.atan2(q.y - cy, q.x - A.x) - Math.atan2(A.y - cy, 0));
+    return ((d % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+  };
+
+  it("a locked radius keeps the SIDE the arc bends to and how far it TURNS", () => {
+    for (const cursor of [P(20, 10), P(20, -10), P(10, 20), P(4, -3)]) {
+      const p = frame.rebuild({ radius: 25 }, cursor);
+      expect(radiusAt(p)).toBeCloseTo(25, 6);
+      // Same side of the tangent line (y = 0 here) …
+      expect(Math.sign(p.y - A.y)).toBe(Math.sign(cursor.y - A.y));
+      // … and the same turn: only the radius moved.
+      expect(turnOf(p)).toBeCloseTo(turnOf(cursor), 6);
+    }
+  });
+
+  it("PROPERTY: a typed radius is the radius that commits, all the way round", () => {
+    for (const r of [0.5, 3, 12.5, 400]) {
+      for (const cursor of [P(11, 1), P(20, 10), P(10, 9), P(2, -6), P(-5, 4), P(13, -0.25)]) {
+        const p = frame.rebuild({ radius: r }, cursor);
+        expect(radiusAt(p)).toBeCloseTo(r, 6);
+        // The arc still leaves the anchor along the tangent: the anchor is one of
+        // its two endpoints, so it is exactly `r` from the rebuilt centre.
+        expect(Math.hypot(p.x - A.x, p.y - A.y)).toBeLessThanOrEqual(2 * r + 1e-9);
+      }
+    }
+  });
+
+  it("a bigger radius sweeps the cursor further out, same side, same turn direction", () => {
+    const near = frame.rebuild({ radius: 10 }, P(20, 10)); // the identity case
+    const far = frame.rebuild({ radius: 40 }, P(20, 10));
+    expect(near).toEqual({ x: 20, y: 10 });
+    expect(far.y).toBeGreaterThan(0);
+    expect(far.x).toBeGreaterThan(near.x);
+  });
+
+  it("|R| — a negative typed radius never mirrors the arc across its own tangent", () => {
+    const p = frame.rebuild({ radius: -12 }, P(20, 10));
+    expect(p.y).toBeGreaterThan(0);
+    expect(radiusAt(p)).toBeCloseTo(12, 6);
+  });
+
+  it("a degenerate cursor (on the tangent ray) hands the cursor back unchanged", () => {
+    const c = P(30, 0);
+    expect(frame.rebuild({ radius: 8 }, c)).toBe(c);
+  });
+
+  it("a degenerate TANGENT stays finite (no NaN)", () => {
+    const dead = must(dimFrame("line", [A], undefined, { arcMode: true, tangent: P(0, 0) }));
+    const c = P(9, 4);
+    expect(dead.measure(c)).toEqual({ radius: 0 });
+    expect(dead.rebuild({ radius: 7 }, c)).toBe(c);
   });
 });
 

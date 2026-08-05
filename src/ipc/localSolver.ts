@@ -19,12 +19,26 @@
  * previewed op. The mock commits into its local document model; the tauri client
  * commits through the real `apply_edit_command`. That difference is injected as
  * the `commit` dependency, so this lane stays commit-agnostic.
+ *
+ * ── The drag gesture here is a KINEMATIC ECHO (SP-2) ─────────────────────────
+ * `beginGesture`/`solveDrag`/`endGesture` honour the §7.4 target KINDS — the
+ * handle keys and `curves` members each kind reports are exactly the real
+ * worker's — but they only ever re-derive geometry from the cursor. There is NO
+ * constraint propagation (a coincident neighbour does not follow, a Tangent does
+ * not push a radius), NO solver refusal (a locked entity is not rejected, an
+ * arc's sweep floor is not enforced) and no DOF change. Those behaviours are the
+ * real PlaneGCS lane's and are covered by `src-tauri/tests` + the worker ctest
+ * suite; asserting them against this module would be asserting the mock. What
+ * this lane exists to prove is the PLUMBING: the shapes flow end to end and the
+ * UI can be driven with no backend at all.
  */
 import type {
   ApplyOperationResult,
   BeginGestureResult,
+  CurveParams,
   DragSolveResult,
   EnterSketchTarget,
+  GestureTarget,
   OperationOp,
   PreviewDraft,
   PreviewFailure,
@@ -145,7 +159,11 @@ export interface LocalSolverLane {
   ): Promise<SketchUpsertResult>;
   finishSketch(sketchId: string): Promise<{ regions: SketchRegion[] }>;
   cancelSketch(sketchId: string): Promise<void>;
-  beginGesture(sketchId: string, dragPointId: string): Promise<BeginGestureResult>;
+  beginGesture(
+    sketchId: string,
+    dragPointId: string,
+    target?: GestureTarget,
+  ): Promise<BeginGestureResult>;
   solveDrag(target: [number, number]): Promise<DragSolveResult | null>;
   endGesture(finalTarget?: [number, number]): Promise<SketchUpsertResult>;
   /** True if a lane session already exists for this sketch id (mock re-entry parity). */
@@ -183,6 +201,134 @@ export interface LocalSolverLane {
   resetPreview(): void;
 }
 
+// ── Mock drag gesture — the §7.4 target kinds, echoed kinematically ──────────
+
+/** SCHEMA §7.4 radius floor (`MIN_GEOMETRY_SIZE`, mm): a radius drag saturates here. */
+const MIN_GEOMETRY_SIZE = 0.01;
+
+/** One open gesture: the kind plus the per-kind offsets captured ONCE at Begin. */
+interface MockGesture {
+  sketchId: string;
+  dragPointId: string;
+  nextSeq: number;
+  kind: GestureTarget["kind"];
+  /** The grabbed entity (frontend id); null on the legacy point path. */
+  entityId: string | null;
+  role: "Start" | "End" | "Center" | null;
+  /** `entityBody`: every owned handle's pose at Begin (targets are ALWAYS derived
+   *  from these, so a dropped frame cannot accumulate drift). */
+  baseline: [string, [number, number]][];
+  /** `entityBody`: the anchor `target − grab` is measured from. */
+  grab: [number, number] | null;
+  /** `radius`: `|grab − center| − radius`, captured at Begin (0 when `grab` absent). */
+  radiusOffset: number;
+}
+
+/** Every point handle an entity OWNS, keyed `"<entityId>.<Position>"`, in §7.4
+ *  handle order (`center` < `start` < `end`, `p0` < `p1`). */
+function ownedHandles(e: SketchEntity): [string, [number, number]][] {
+  const out: [string, [number, number]][] = [];
+  const push = (role: string, p: [number, number] | undefined): void => {
+    if (p) out.push([`${e.id}.${role}`, p]);
+  };
+  switch (e.type) {
+    case "Point":
+      push("Start", e.p0);
+      break;
+    case "Line":
+      push("Start", e.p0);
+      push("End", e.p1);
+      break;
+    case "Circle":
+    case "Ellipse":
+      push("Center", e.center);
+      break;
+    case "Arc":
+      push("Center", e.center);
+      push("Start", e.start);
+      push("End", e.end);
+      break;
+  }
+  return out;
+}
+
+/** Capture the gesture's per-kind offsets ONCE, at Begin — §7.4 requires that a
+ *  live gesture cannot drift as it is dragged. */
+function openGesture(
+  sketchId: string,
+  dragPointId: string,
+  entities: SketchEntity[],
+  target?: GestureTarget,
+): MockGesture {
+  const kind = target?.kind ?? "point";
+  const entityId = target?.entityId ?? null;
+  const entity = entityId === null ? undefined : entities.find((e) => e.id === entityId);
+  // Absent `grab` on an entityBody anchors the FIRST owned handle (it teleports).
+  const baseline = kind === "entityBody" && entity ? ownedHandles(entity) : [];
+  const grab = target?.grab ?? (baseline.length > 0 ? baseline[0][1] : null);
+  const center = entity?.center;
+  const radiusOffset =
+    kind === "radius" && center && target?.grab && entity?.radius !== undefined
+      ? Math.hypot(target.grab[0] - center[0], target.grab[1] - center[1]) - entity.radius
+      : 0;
+  return {
+    sketchId,
+    dragPointId,
+    nextSeq: 1,
+    kind,
+    entityId,
+    role: target?.role ?? null,
+    baseline,
+    grab,
+    radiusOffset,
+  };
+}
+
+/** What one drag step reports: moved point handles + CHANGED curve members. */
+interface GestureEcho {
+  positions: Record<string, [number, number]>;
+  curves: Record<string, CurveParams>;
+}
+
+/** A fresh empty echo. Never a shared constant: a caller that MERGES a drag
+ *  response into an accumulator would otherwise poison every later gesture. */
+const noEcho = (): GestureEcho => ({ positions: {}, curves: {} });
+
+/**
+ * The per-kind echo. `point` is the pre-SP-2 identity echo, unchanged. A non-point
+ * kind whose entity cannot be resolved reports NOTHING rather than degrading to a
+ * point drag — §7.4 forbids the degrade (it would move a handle nobody grabbed);
+ * the real worker answers `REF_UNRESOLVED` at Begin, which this lane cannot.
+ */
+function echoGesture(
+  g: MockGesture,
+  entity: SketchEntity | undefined,
+  target: [number, number],
+): GestureEcho {
+  if (g.kind === "point") return { positions: { [g.dragPointId]: target }, curves: {} };
+  if (g.kind === "entityBody") {
+    if (!g.grab) return noEcho();
+    const [dx, dy] = [target[0] - g.grab[0], target[1] - g.grab[1]];
+    const positions: Record<string, [number, number]> = {};
+    for (const [key, p] of g.baseline) positions[key] = [p[0] + dx, p[1] + dy];
+    return { positions, curves: {} };
+  }
+  const center = entity?.center;
+  if (!entity || !center || g.entityId === null) return noEcho();
+  const reach = Math.hypot(target[0] - center[0], target[1] - center[1]);
+  if (g.kind === "radius") {
+    const radius = Math.max(reach - g.radiusOffset, MIN_GEOMETRY_SIZE);
+    return { positions: {}, curves: { [g.entityId]: { radius } } };
+  }
+  // arcEnd: the grabbed endpoint teleports to the cursor; radius + that endpoint's
+  // angle follow from it (the sibling endpoint follows via `applySolvedCurves`).
+  const role = g.role === "End" ? "End" : "Start";
+  const angle = Math.atan2(target[1] - center[1], target[0] - center[0]);
+  const swept: CurveParams =
+    role === "End" ? { radius: reach, endAngle: angle } : { radius: reach, startAngle: angle };
+  return { positions: { [`${g.entityId}.${role}`]: target }, curves: { [g.entityId]: swept } };
+}
+
 export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
   // Sketch-lane state.
   const sketchSessions = new Map<string, SketchSession>();
@@ -191,9 +337,16 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
   let nextSketchSeq = 1;
   const finishedRegions = new Map<string, SketchRegion[]>();
 
-  // Drag-gesture state (mock identity drag — echoes the target position).
+  // Drag-gesture state (kinematic echo — see the module header).
   let gestureSeq = 0;
-  let activeGesture: { sketchId: string; dragPointId: string; nextSeq: number } | null = null;
+  let activeGesture: MockGesture | null = null;
+
+  /** The gesture's grabbed entity, read LIVE from the session (never cached: an
+   *  upsert mid-gesture would strand a stale copy). */
+  function gestureEntity(g: MockGesture): SketchEntity | undefined {
+    if (g.entityId === null) return undefined;
+    return sketchSessions.get(g.sketchId)?.entities.find((e) => e.id === g.entityId);
+  }
 
   // Preview-lane state.
   const previewSessions = new Map<string, LaneSession>();
@@ -409,8 +562,17 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
       sketchPlanes.set(sketchId, session.plane);
       const rev = (sketchRevisions.get(sketchId) ?? 0) + 1;
       sketchRevisions.set(sketchId, rev);
-      // The local solver is an identity solve (echoes positions) — nothing moved.
-      return { sketchId, sketchRevision: rev, dof, status, conflicting, solvedPositions: {} };
+      // The local solver is an identity solve (echoes positions) — nothing moved,
+      // and with no propagation nothing reshapes a curve either.
+      return {
+        sketchId,
+        sketchRevision: rev,
+        dof,
+        status,
+        conflicting,
+        solvedPositions: {},
+        solvedCurves: {},
+      };
     },
 
     async finishSketch(sketchId: string): Promise<{ regions: SketchRegion[] }> {
@@ -433,10 +595,15 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
       // Real backend discards scratch; the lane keeps the last committed session.
     },
 
-    // ── Drag gesture (mock identity drag: solveDrag echoes the target) ─────────
-    async beginGesture(sketchId: string, dragPointId: string): Promise<BeginGestureResult> {
+    // ── Drag gesture (kinematic echo, per §7.4 target kind) ────────────────────
+    async beginGesture(
+      sketchId: string,
+      dragPointId: string,
+      target?: GestureTarget,
+    ): Promise<BeginGestureResult> {
       await wait(0);
-      activeGesture = { sketchId, dragPointId, nextSeq: 1 };
+      const entities = sketchSessions.get(sketchId)?.entities ?? [];
+      activeGesture = openGesture(sketchId, dragPointId, entities, target);
       return { gestureId: ++gestureSeq, ready: true };
     },
 
@@ -446,13 +613,15 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
       if (!g) return null;
       const seq = g.nextSeq++;
       const session = sketchSessions.get(g.sketchId);
+      const echo = echoGesture(g, gestureEntity(g), target);
       return {
         gestureId: gestureSeq,
         seq,
         status: "success",
         dof: session?.dof ?? 0,
         conflicting: [],
-        positions: { [g.dragPointId]: target },
+        positions: echo.positions,
+        curves: echo.curves,
         solveMicros: 0,
         superseded: false,
       };
@@ -466,13 +635,15 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
       const session = sketchId ? sketchSessions.get(sketchId) : undefined;
       const rev = (sketchRevisions.get(sketchId) ?? 0) + 1;
       if (sketchId) sketchRevisions.set(sketchId, rev);
+      const echo = g && finalTarget ? echoGesture(g, gestureEntity(g), finalTarget) : noEcho();
       return {
         sketchId,
         sketchRevision: rev,
         dof: session?.dof ?? 0,
         status: session?.status ?? "FullyConstrained",
         conflicting: [], // mock lane never conflicts (deterministic)
-        solvedPositions: g && finalTarget ? { [g.dragPointId]: finalTarget } : {},
+        solvedPositions: echo.positions,
+        solvedCurves: echo.curves,
       };
     },
 

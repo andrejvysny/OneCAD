@@ -47,7 +47,8 @@ use onecad_core::sketch::{
 use onecad_protocol::messages::{BinSection, ErrorCode, ErrorObject};
 
 use crate::dto::{
-    DragSolveDto, PreviewTrianglesDto, SketchRegionDto, SketchSolveStatus, SketchUpsertDto,
+    CurveParamsDto, DragSolveDto, PreviewTrianglesDto, SketchRegionDto, SketchSolveStatus,
+    SketchUpsertDto,
 };
 
 use super::{lod_str, StepInspection};
@@ -1272,8 +1273,92 @@ pub fn sketch_upsert_args(sketch: &Sketch) -> Value {
     })
 }
 
+/// What the pointer grabbed (SCHEMA §7.4 `BeginGesture.drag.kind`). The tokens are
+/// camelCase and matched EXACTLY by the worker's `parse_drag_kind` — an unknown one
+/// is `OP_FAILED` there, never degraded to `point` (degrading would move a handle
+/// the user never grabbed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragKind {
+    /// One point handle — the pre-SP-2 gesture, wire-identical to it.
+    Point,
+    /// An arc endpoint: reshapes radius + the swept angle, center held.
+    ArcEnd,
+    /// A curve's radius parameter (moves no point).
+    Radius,
+    /// Every point an entity owns (translates the whole entity).
+    EntityBody,
+}
+
+impl DragKind {
+    /// The exact wire token.
+    #[must_use]
+    pub const fn wire(self) -> &'static str {
+        match self {
+            Self::Point => "point",
+            Self::ArcEnd => "arcEnd",
+            Self::Radius => "radius",
+            Self::EntityBody => "entityBody",
+        }
+    }
+
+    /// Parses a wire token STRICTLY — an unknown token is `None`, and the caller
+    /// MUST reject it rather than fall back to [`Point`](Self::Point) (§7.4).
+    #[must_use]
+    pub fn parse(token: &str) -> Option<Self> {
+        match token {
+            "point" => Some(Self::Point),
+            "arcEnd" => Some(Self::ArcEnd),
+            "radius" => Some(Self::Radius),
+            "entityBody" => Some(Self::EntityBody),
+            _ => None,
+        }
+    }
+}
+
+/// The resolved `BeginGesture.drag` target (SCHEMA §7.4).
+///
+/// `role` is a `&'static str` on purpose: the only legal values are the five §7.4
+/// tokens, so the api layer must MAP a client string onto one (rejecting anything
+/// else) instead of forwarding it — an unresolvable role is `REF_UNRESOLVED` at the
+/// worker, and a typo must fail at the boundary, not silently ride the wire.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GestureTarget {
+    /// What the pointer grabbed.
+    pub kind: DragKind,
+    /// The grabbed entity (the point itself for [`DragKind::Point`]).
+    pub entity: EntityId,
+    /// `start`|`end`|`center`|`p0`|`p1`; REQUIRED for [`DragKind::ArcEnd`].
+    pub role: Option<&'static str>,
+    /// Pointer-down position in sketch-plane coordinates. The worker derives the
+    /// per-kind offset from it ONCE, at `BeginGesture`, so a gesture cannot drift.
+    pub grab: Option<[f64; 2]>,
+}
+
+impl GestureTarget {
+    /// The plain point drag — the default when a client sends no `target`, and the
+    /// one kind that keeps the pre-SP-2 wire form byte for byte.
+    #[must_use]
+    pub const fn point(entity: EntityId) -> Self {
+        Self {
+            kind: DragKind::Point,
+            entity,
+            role: None,
+            grab: None,
+        }
+    }
+}
+
 /// `BeginGesture.args` (SCHEMA §7.4). `drag_point` is the point entity being
 /// dragged — its wire handle is its uuid (points register under their id).
+///
+/// `target` names WHAT the pointer grabbed. [`DragKind::Point`] emits the
+/// pre-SP-2 form **verbatim** (`drag.pointId` + the bare top-level `pointId`, no
+/// `kind` key): §7.4 resolves those first and lets `pointId` win on the point
+/// path, so the legacy request stays byte-identical and `target.entity` is not
+/// consulted there. Every other kind emits `drag.{kind, entity[, role][, grab]}`
+/// and drops both legacy keys — a `pointId` riding along with `kind: "radius"`
+/// would be ignored by the worker anyway, and emitting it would only invite a
+/// reader to degrade the gesture to a point drag.
 ///
 /// `solver_policy_hash` is RESERVED wire plumbing: always `""` today (the sole
 /// caller, `DocumentRuntime::begin_gesture`, hard-codes it) and never read by the
@@ -1286,15 +1371,35 @@ pub fn begin_gesture_args(
     sketch_revision: u64,
     gesture_id: u64,
     drag_point: EntityId,
+    target: &GestureTarget,
     solver_policy_hash: &str,
 ) -> Value {
+    if target.kind == DragKind::Point {
+        return json!({
+            "sketchId": sketch_id,
+            "sketchRevision": sketch_revision,
+            "gestureId": gesture_id,
+            "solverPolicyHash": solver_policy_hash,
+            "drag": { "pointId": drag_point.to_string() },
+            "pointId": drag_point.to_string(),
+        });
+    }
+    let mut drag = json!({
+        "kind": target.kind.wire(),
+        "entity": target.entity.to_string(),
+    });
+    if let Some(role) = target.role {
+        drag["role"] = json!(role);
+    }
+    if let Some([x, y]) = target.grab {
+        drag["grab"] = json!([x, y]);
+    }
     json!({
         "sketchId": sketch_id,
         "sketchRevision": sketch_revision,
         "gestureId": gesture_id,
         "solverPolicyHash": solver_policy_hash,
-        "drag": { "pointId": drag_point.to_string() },
-        "pointId": drag_point.to_string(),
+        "drag": drag,
     })
 }
 
@@ -1357,6 +1462,8 @@ pub fn parse_sketch_upsert(sketch_id: &str, result: &Value) -> SketchUpsertDto {
         // (legacy worker) ⇒ empty, strict back/forward compat.
         conflicting: str_array(result.get("conflicting")),
         solved_positions: parse_positions(result.get("positions")),
+        // Additive since SP-2 (§7.4): a pre-SP-2 worker omits it ⇒ empty.
+        solved_curves: parse_curves(result.get("curves")),
     }
 }
 
@@ -1378,6 +1485,7 @@ pub fn parse_solve_drag(result: &Value) -> DragSolveDto {
         dof: parse_dof(result),
         conflicting: str_array(result.get("conflicting")),
         positions: parse_positions(result.get("positions")),
+        curves: parse_curves(result.get("curves")),
         solve_micros: result
             .get("solveMicros")
             .and_then(Value::as_u64)
@@ -2385,6 +2493,35 @@ fn parse_positions(v: Option<&Value>) -> BTreeMap<String, [f64; 2]> {
         .collect()
 }
 
+/// Parses a solver `curves` map (`{entityId: {radius?, startAngle?, endAngle?}}`)
+/// — SCHEMA §7.4's additive companion to `positions`, carrying what a drag changed
+/// that is NOT a point coordinate (a radius drag moves no point; an arcEnd drag
+/// reshapes the arc; a Tangent propagates a plain point drag into a neighbour's
+/// radius).
+///
+/// The key is absent on a pre-SP-2 worker ⇒ empty map (optional/additive, exactly
+/// like `conflicting`). Members are individually optional: an absent member is
+/// UNCHANGED, never zero. Finiteness is NOT enforced here (mirroring
+/// [`parse_positions`]); the typed apply step drops non-finite values.
+fn parse_curves(v: Option<&Value>) -> BTreeMap<String, CurveParamsDto> {
+    let Some(obj) = v.and_then(Value::as_object) else {
+        return BTreeMap::new();
+    };
+    obj.iter()
+        .filter_map(|(k, members)| {
+            let m = members.as_object()?;
+            Some((
+                k.clone(),
+                CurveParamsDto {
+                    radius: m.get("radius").and_then(Value::as_f64),
+                    start_angle: m.get("startAngle").and_then(Value::as_f64),
+                    end_angle: m.get("endAngle").and_then(Value::as_f64),
+                },
+            ))
+        })
+        .collect()
+}
+
 /// Validates the frame-level binary section table shared by region and mesh
 /// parsers. Alignment gaps are permitted; duplicate names, overlap, overflow,
 /// and out-of-tail sections are not.
@@ -3339,6 +3476,194 @@ mod solver_wire_tests {
             v["point2Position"],
             json!("start"),
             "camelCase field, camelCase value"
+        );
+    }
+
+    /// The pre-SP-2 `BeginGesture.args`, spelled out literally. If the Point branch
+    /// ever drifts from this, every legacy client + the frozen `sketch_gesture`
+    /// fixture drift with it.
+    fn legacy_begin_gesture_json(drag_point: EntityId) -> Value {
+        json!({
+            "sketchId": "sk_1",
+            "sketchRevision": 4,
+            "gestureId": 51,
+            "solverPolicyHash": "",
+            "drag": { "pointId": drag_point.to_string() },
+            "pointId": drag_point.to_string(),
+        })
+    }
+
+    #[test]
+    fn begin_gesture_point_kind_is_byte_identical_to_the_legacy_form() {
+        let p = eid(0x10);
+        let args = begin_gesture_args("sk_1", 4, 51, p, &GestureTarget::point(p), "");
+        let legacy = legacy_begin_gesture_json(p);
+        assert_eq!(args, legacy, "the point branch emits the legacy JSON");
+        assert_eq!(
+            serde_json::to_string(&args).unwrap(),
+            serde_json::to_string(&legacy).unwrap(),
+            "byte-identical serialization (no kind key, both legacy pointId slots)"
+        );
+        assert!(args["drag"].get("kind").is_none(), "no kind key on a point");
+        assert!(args["drag"].get("entity").is_none());
+
+        // `pointId` WINS on the point path (§7.4): a target naming a DIFFERENT
+        // entity does not change the emitted request.
+        let other = GestureTarget {
+            entity: eid(0x99),
+            role: Some("start"),
+            grab: Some([1.0, 2.0]),
+            ..GestureTarget::point(p)
+        };
+        assert_eq!(
+            begin_gesture_args("sk_1", 4, 51, p, &other, ""),
+            legacy,
+            "a point-kind target never adds keys — pointId wins"
+        );
+    }
+
+    #[test]
+    fn begin_gesture_non_point_kinds_drop_the_legacy_keys() {
+        let p = eid(0x10);
+        let arc = eid(0x41);
+        // arcEnd: kind + entity + role, no grab (§7.4 ignores it for this kind).
+        let args = begin_gesture_args(
+            "sk_1",
+            4,
+            51,
+            p,
+            &GestureTarget {
+                kind: DragKind::ArcEnd,
+                entity: arc,
+                role: Some("end"),
+                grab: None,
+            },
+            "",
+        );
+        assert_eq!(
+            args["drag"],
+            json!({ "kind": "arcEnd", "entity": arc.to_string(), "role": "end" })
+        );
+        assert!(
+            args.get("pointId").is_none() && args["drag"].get("pointId").is_none(),
+            "a non-point kind drops BOTH legacy pointId slots"
+        );
+        assert_eq!(args["sketchRevision"], json!(4));
+        assert_eq!(args["gestureId"], json!(51));
+
+        // radius: grab rides, role is absent.
+        let args = begin_gesture_args(
+            "sk_1",
+            4,
+            51,
+            p,
+            &GestureTarget {
+                kind: DragKind::Radius,
+                entity: arc,
+                role: None,
+                grab: Some([31.2, 4.0]),
+            },
+            "",
+        );
+        assert_eq!(
+            args["drag"],
+            json!({ "kind": "radius", "entity": arc.to_string(), "grab": [31.2, 4.0] })
+        );
+
+        // entityBody: grab RECOMMENDED, still optional.
+        let args = begin_gesture_args(
+            "sk_1",
+            4,
+            51,
+            p,
+            &GestureTarget {
+                kind: DragKind::EntityBody,
+                entity: arc,
+                role: None,
+                grab: None,
+            },
+            "",
+        );
+        assert_eq!(
+            args["drag"],
+            json!({ "kind": "entityBody", "entity": arc.to_string() })
+        );
+    }
+
+    #[test]
+    fn drag_kind_tokens_round_trip_and_reject_the_unknown() {
+        for kind in [
+            DragKind::Point,
+            DragKind::ArcEnd,
+            DragKind::Radius,
+            DragKind::EntityBody,
+        ] {
+            assert_eq!(DragKind::parse(kind.wire()), Some(kind));
+        }
+        assert_eq!(DragKind::Point.wire(), "point");
+        assert_eq!(DragKind::ArcEnd.wire(), "arcEnd");
+        assert_eq!(DragKind::Radius.wire(), "radius");
+        assert_eq!(DragKind::EntityBody.wire(), "entityBody");
+        // STRICT: unknown + wrong case are rejected, never degraded to `point`.
+        for bad in ["", "Point", "ARCEND", "arcend", "entitybody", "scale"] {
+            assert_eq!(DragKind::parse(bad), None, "{bad:?} must not parse");
+        }
+    }
+
+    #[test]
+    fn parse_curves_reads_changed_members_and_tolerates_absence() {
+        let result = json!({
+            "gestureId": 51, "seq": 3, "status": "success", "dof": 1,
+            "curves": {
+                "e7": { "radius": 12.5 },
+                "e9": { "startAngle": 0.35, "endAngle": 1.9634 },
+                "e11": { "radius": 4.0, "startAngle": -0.5, "endAngle": 2.0 },
+                "e13": {},
+                "e15": 7,
+            }
+        });
+        let d = parse_solve_drag(&result);
+        assert_eq!(
+            d.curves["e7"],
+            CurveParamsDto {
+                radius: Some(12.5),
+                ..Default::default()
+            },
+            "an absent member stays None (UNCHANGED, not zero)"
+        );
+        assert_eq!(
+            d.curves["e9"],
+            CurveParamsDto {
+                radius: None,
+                start_angle: Some(0.35),
+                end_angle: Some(1.9634),
+            }
+        );
+        assert_eq!(
+            d.curves["e11"],
+            CurveParamsDto {
+                radius: Some(4.0),
+                start_angle: Some(-0.5),
+                end_angle: Some(2.0),
+            }
+        );
+        assert_eq!(d.curves["e13"], CurveParamsDto::default());
+        assert!(
+            !d.curves.contains_key("e15"),
+            "a non-object entry is skipped"
+        );
+
+        // Absent `curves` ⇒ empty, on BOTH parsers (pre-SP-2 worker).
+        let legacy = json!({ "gestureId": 51, "seq": 3, "status": "success", "dof": 1 });
+        assert!(parse_solve_drag(&legacy).curves.is_empty());
+        let end = json!({ "gestureId": 51, "status": "success", "dof": 0, "sketchRevision": 5 });
+        assert!(parse_sketch_upsert("sk_1", &end).solved_curves.is_empty());
+        // EndGesture carries it through the SketchUpsert parser.
+        let end = json!({ "gestureId": 51, "status": "success", "dof": 0, "sketchRevision": 5,
+            "positions": {}, "curves": { "e7": { "radius": 8.25 } } });
+        assert_eq!(
+            parse_sketch_upsert("sk_1", &end).solved_curves["e7"].radius,
+            Some(8.25)
         );
     }
 

@@ -7,6 +7,7 @@ import {
   ellipseTool,
   ellipseDraft,
   arcTool,
+  arc3pTool,
   pointTool,
   polygonTool,
   slotTool,
@@ -17,7 +18,9 @@ import {
   resolveToolConstraints,
   DEFAULT_POLYGON_SIDES,
   type DraftEntity,
+  type ToolContext,
   type ToolMachine,
+  type ToolState,
   type ToolStep,
 } from "./toolMachine";
 import type { SketchConstraint, SketchEntity } from "@/ipc/types";
@@ -102,6 +105,80 @@ describe("arcTool — center → start → end (center-start-end)", () => {
     expect(arc.start).toEqual({ x: 10, y: 0 });
     expect(arc.end!.x).toBeCloseTo(0);
     expect(arc.end!.y).toBeCloseTo(10);
+  });
+});
+
+describe("arc3pTool — start → end → through (3-point arc)", () => {
+  const S = { x: 0, y: 0 };
+  const E = { x: 10, y: 0 };
+
+  it("rubber-bands the CHORD as construction while the second endpoint is placed", () => {
+    const steps = run(arc3pTool, [["click", S], ["move", { x: 6, y: 3 }]]);
+    expect(steps[0].preview).toEqual([]);
+    expect(steps[1].preview).toEqual([
+      { type: "Line", construction: true, p0: S, p1: { x: 6, y: 3 } },
+    ]);
+    expect(steps[1].committed).toBeUndefined();
+  });
+
+  it("previews the arc through the cursor once both endpoints are down", () => {
+    const steps = run(arc3pTool, [["click", S], ["click", E], ["move", { x: 5, y: -5 }]]);
+    expect(steps[1].preview).toEqual([]);
+    expect(steps[2].preview).toEqual([
+      { type: "Arc", center: { x: 5, y: 0 }, radius: 5, start: S, end: E },
+    ]);
+  });
+
+  it("falls back to the chord while the cursor is ON it (no arc exists)", () => {
+    const steps = run(arc3pTool, [["click", S], ["click", E], ["move", { x: 5, y: 0 }]]);
+    expect(steps[2].preview).toEqual([{ type: "Line", construction: true, p0: S, p1: E }]);
+  });
+
+  it("commits the arc bulging to the cursor's side of the chord", () => {
+    const below = run(arc3pTool, [["click", S], ["click", E], ["click", { x: 5, y: -5 }]]);
+    expect(below[2].done).toBe(true);
+    expect(below[2].state.anchors).toEqual([]);
+    expect(below[2].committed).toEqual([
+      { type: "Arc", center: { x: 5, y: 0 }, radius: 5, start: S, end: E },
+    ]);
+  });
+
+  it("SWAPS the endpoints when the through point is on the other arc (CCW convention)", () => {
+    const above = run(arc3pTool, [["click", S], ["click", E], ["click", { x: 5, y: 5 }]]);
+    const arc = above[2].committed![0];
+    expect(arc.start).toEqual(E);
+    expect(arc.end).toEqual(S);
+    expect(arc.center!.x).toBeCloseTo(5, 9);
+    expect(arc.radius).toBeCloseTo(5, 9);
+  });
+
+  it("ignores a second click on top of the first, staying armed on the start", () => {
+    const ctx = { minSize: 4 };
+    const armed = arc3pTool.step(arc3pTool.init(), { kind: "click", pt: S }, ctx);
+    const tooClose = arc3pTool.step(armed.state, { kind: "click", pt: { x: 2, y: 0 } }, ctx);
+    expect(tooClose.state.anchors).toEqual([S]);
+    expect(tooClose.committed).toBeUndefined();
+  });
+
+  it("ignores a third click that makes no usable arc, staying armed on both endpoints", () => {
+    const ctx = { minSize: 4 };
+    let state = arc3pTool.step(arc3pTool.init(), { kind: "click", pt: S }, ctx).state;
+    state = arc3pTool.step(state, { kind: "click", pt: E }, ctx).state;
+    // On the chord (perpendicular distance 0) …
+    const flat = arc3pTool.step(state, { kind: "click", pt: { x: 5, y: 1 } }, ctx);
+    expect(flat.committed).toBeUndefined();
+    expect(flat.state.anchors).toEqual([S, E]);
+    // … and a real bulge commits.
+    const ok = arc3pTool.step(state, { kind: "click", pt: { x: 5, y: 6 } }, ctx);
+    expect(ok.committed).toHaveLength(1);
+    expect(ok.done).toBe(true);
+  });
+
+  it("Esc resets from any phase", () => {
+    const steps = run(arc3pTool, [["click", S], ["click", E], ["esc"]]);
+    expect(steps[2].done).toBe(true);
+    expect(steps[2].state.anchors).toEqual([]);
+    expect(steps[2].preview).toEqual([]);
   });
 });
 
@@ -330,6 +407,184 @@ describe("lineTool — chain end / close semantics (U4)", () => {
     expect(step.committed).toBeUndefined();
     expect(step.done).toBe(true);
     expect(step.state.anchors).toEqual([]);
+  });
+});
+
+// ── SP-4 W3: tangent-arc MODE of the line tool ───────────────────────────────
+
+describe("lineTool — tangent-arc mode (SP-4 W3)", () => {
+  const P = (x: number, y: number): Point2 => ({ x, y });
+  const toggle = (state: ToolState, on?: boolean, ctx?: ToolContext): ToolStep =>
+    lineTool.step(state, { kind: "arcToggle", ...(on !== undefined ? { on } : {}) }, ctx);
+
+  /** A chain with one committed horizontal leg: anchors [(0,0),(10,0)], the
+   *  machine's OWN chainTangent = +U. Every arc below leaves from (10,0). */
+  function chainedOnce(): ToolState {
+    let s = lineTool.step(lineTool.init(), { kind: "click", pt: P(0, 0) }).state;
+    s = lineTool.step(s, { kind: "click", pt: P(10, 0) }).state;
+    return s;
+  }
+
+  it("records chainTangent on a straight commit (the chord direction)", () => {
+    const s = chainedOnce();
+    expect(s.chainTangent).toEqual(P(1, 0));
+    expect(s.arcMode).toBeUndefined();
+  });
+
+  it("arcToggle is INERT with nothing placed, and with an anchor but no tangent", () => {
+    const empty = lineTool.init();
+    expect(toggle(empty).state).toBe(empty); // same object — nothing happened
+
+    const armed = lineTool.step(empty, { kind: "click", pt: P(0, 0) });
+    // One anchor, no committed leg and no ctx seed ⇒ no direction to be tangent to.
+    expect(toggle(armed.state).state).toBe(armed.state);
+    expect(toggle(armed.state).state.arcMode).toBeUndefined();
+  });
+
+  it("ctx.tangent SEEDS the first leg of a chain started on existing geometry", () => {
+    const ctx: ToolContext = { tangent: P(0, 1) };
+    const armed = lineTool.step(lineTool.init(), { kind: "click", pt: P(0, 0) }, ctx);
+    const on = toggle(armed.state, undefined, ctx);
+    expect(on.state.arcMode).toBe(true);
+    // tangentArcTo((0,0), +V, (10,10)) turns CW ⇒ the arc is STATED cursor→anchor.
+    const moved = lineTool.step(on.state, { kind: "move", pt: P(10, 10) }, ctx);
+    expect(moved.preview).toEqual([
+      { type: "Arc", center: P(10, 0), radius: 10, start: P(10, 10), end: P(0, 0) },
+    ]);
+  });
+
+  it("the machine's OWN chainTangent wins over the controller's seed", () => {
+    const ctx: ToolContext = { tangent: P(0, 1) }; // a stale seed
+    const on = toggle(chainedOnce(), true, ctx);
+    const moved = lineTool.step(on.state, { kind: "move", pt: P(20, 10) }, ctx);
+    // Leaving along +U (recorded), not +V (seeded): centre straight above (10,0).
+    expect(moved.preview).toEqual([
+      { type: "Arc", center: P(10, 10), radius: 10, start: P(10, 0), end: P(20, 10) },
+    ]);
+  });
+
+  it("explicit on/off, and a no-change toggle hands the SAME state back", () => {
+    const chained = chainedOnce();
+    const on = toggle(chained, true);
+    expect(on.state.arcMode).toBe(true);
+    expect(toggle(on.state, true).state).toBe(on.state);
+    expect(toggle(on.state, false).state.arcMode).toBe(false);
+    expect(toggle(on.state).state.arcMode).toBe(false); // flip
+  });
+
+  it("falls back to the straight rubber-band when the cursor makes no arc", () => {
+    const on = toggle(chainedOnce(), true);
+    // On the tangent RAY itself: no finite circle exists.
+    const moved = lineTool.step(on.state, { kind: "move", pt: P(20, 0) });
+    expect(moved.preview).toEqual([{ type: "Line", p0: P(10, 0), p1: P(20, 0) }]);
+  });
+
+  it("commits ONE Arc, chains on its EXIT tangent, and auto-clears arc mode", () => {
+    const on = toggle(chainedOnce(), true);
+    const committed = lineTool.step(on.state, { kind: "click", pt: P(20, 10) });
+    expect(committed.committed).toEqual([
+      { type: "Arc", center: P(10, 10), radius: 10, start: P(10, 0), end: P(20, 10) },
+    ]);
+    expect(committed.state.anchors).toEqual([P(0, 0), P(10, 0), P(20, 10)]);
+    expect(committed.done).toBeUndefined(); // the chain keeps going
+    expect(committed.state.arcMode).toBe(false); // one arc per toggle
+    // THE POINT OF `chainTangent`: the exit is the CURVE's, not the chord's. This
+    // quarter turn leaves +U and lands travelling +V — the chord points at 45°.
+    expect(committed.state.chainTangent!.x).toBeCloseTo(0, 12);
+    expect(committed.state.chainTangent!.y).toBeCloseTo(1, 12);
+    expect(committed.committedConstraints).toBeUndefined(); // authors NOTHING
+  });
+
+  it("a second arc leaves along the first one's exit tangent (chained tangency)", () => {
+    const first = lineTool.step(toggle(chainedOnce(), true).state, { kind: "click", pt: P(20, 10) });
+    const on2 = toggle(first.state, true);
+    expect(on2.state.arcMode).toBe(true);
+    const second = lineTool.step(on2.state, { kind: "click", pt: P(30, 20) });
+    const arc = second.committed![0];
+    // Tangency at the shared anchor ⇔ the radius there is PERPENDICULAR to the
+    // incoming exit tangent.
+    const t = first.state.chainTangent!;
+    const rx = arc.center!.x - 20;
+    const ry = arc.center!.y - 10;
+    expect(rx * t.x + ry * t.y).toBeCloseTo(0, 9);
+    expect(second.state.anchors).toHaveLength(4);
+  });
+
+  it("a degenerate arc click is IGNORED — still armed, still in arc mode", () => {
+    const ctx: ToolContext = { minSize: 1 };
+    const on = toggle(chainedOnce(), true, ctx);
+    const ignored = lineTool.step(on.state, { kind: "click", pt: P(30, 0) }, ctx);
+    expect(ignored.committed).toBeUndefined();
+    expect(ignored.state.anchors).toEqual([P(0, 0), P(10, 0)]);
+    expect(ignored.state.arcMode).toBe(true);
+  });
+
+  it("a click back on the last anchor ends the chain, clearing tangent AND mode", () => {
+    const ctx: ToolContext = { minSize: 4 };
+    const on = toggle(chainedOnce(), true, ctx);
+    const ended = lineTool.step(on.state, { kind: "click", pt: P(11, 0) }, ctx);
+    expect(ended.done).toBe(true);
+    expect(ended.state).toEqual({ anchors: [], cursor: null });
+  });
+
+  it("Esc clears the chain tangent and the mode", () => {
+    const on = toggle(chainedOnce(), true);
+    const esc = lineTool.step(on.state, { kind: "esc" });
+    expect(esc.done).toBe(true);
+    expect(esc.state).toEqual({ anchors: [], cursor: null });
+  });
+
+  it("closes the loop with an ARC when the mode is on", () => {
+    const ctx: ToolContext = { minSize: 4 };
+    // Chain (0,0) → (10,0) → (10,10), then arc back to (0,0).
+    let s = chainedOnce();
+    s = lineTool.step(s, { kind: "click", pt: P(10, 10) }, ctx).state;
+    const closed = lineTool.step(toggle(s, true, ctx).state, { kind: "click", pt: P(0, 0) }, ctx);
+    expect(closed.done).toBe(true);
+    expect(closed.committed![0].type).toBe("Arc");
+    expect(closed.state).toEqual({ anchors: [], cursor: null });
+  });
+
+  it("PIN: a chain that never arms arc mode is byte-identical to the straight tool", () => {
+    // `chainTangent` is the ONE field W3 adds to a straight chain — strip it, and
+    // every step must equal exactly what the pre-W3 machine emitted. A stray
+    // `arcMode` (or any other new key) still fails this.
+    const strip = (s: ToolStep): unknown => {
+      const { chainTangent: _t, ...state } = s.state;
+      return { ...s, state };
+    };
+    const steps = run(lineTool, [
+      ["click", P(0, 0)],
+      ["move", P(40, 0)],
+      ["click", P(40, 0)],
+      ["click", P(40, 20)],
+      ["move", P(0, 20)],
+      ["click", P(0, 0)], // closes the loop
+    ]);
+    expect(steps.map(strip)).toEqual([
+      { state: { anchors: [P(0, 0)], cursor: P(0, 0) }, preview: [] },
+      { state: { anchors: [P(0, 0)], cursor: P(40, 0) }, preview: [{ type: "Line", p0: P(0, 0), p1: P(40, 0) }] },
+      {
+        state: { anchors: [P(0, 0), P(40, 0)], cursor: P(40, 0) },
+        preview: [],
+        committed: [{ type: "Line", p0: P(0, 0), p1: P(40, 0) }],
+      },
+      {
+        state: { anchors: [P(0, 0), P(40, 0), P(40, 20)], cursor: P(40, 20) },
+        preview: [],
+        committed: [{ type: "Line", p0: P(40, 0), p1: P(40, 20) }],
+      },
+      {
+        state: { anchors: [P(0, 0), P(40, 0), P(40, 20)], cursor: P(0, 20) },
+        preview: [{ type: "Line", p0: P(40, 20), p1: P(0, 20) }],
+      },
+      {
+        state: { anchors: [], cursor: null },
+        preview: [],
+        committed: [{ type: "Line", p0: P(40, 20), p1: P(0, 0) }],
+        done: true,
+      },
+    ]);
   });
 });
 
@@ -619,10 +874,22 @@ describe("polygonTool — center → vertex, sides 3-12", () => {
 
 describe("sides events are ignored by every non-polygon machine", () => {
   it("leaves the state untouched", () => {
-    for (const m of [lineTool, rectTool, centerRectTool, circleTool, ellipseTool, arcTool, slotTool, pointTool]) {
+    for (const m of [lineTool, rectTool, centerRectTool, circleTool, ellipseTool, arcTool, arc3pTool, slotTool, pointTool]) {
       const armed = m.step(m.init(), { kind: "click", pt: { x: 0, y: 0 } });
       const ignored = m.step(armed.state, { kind: "sides", n: 5 });
       expect(ignored.state).toBe(armed.state);
+      expect(ignored.committed).toBeUndefined();
+    }
+  });
+});
+
+describe("arcToggle events are ignored by every non-line machine", () => {
+  it("leaves the state untouched (same terms as `sides`)", () => {
+    for (const m of [rectTool, centerRectTool, circleTool, ellipseTool, arcTool, arc3pTool, slotTool, pointTool, polygonTool]) {
+      const armed = m.step(m.init(), { kind: "click", pt: { x: 0, y: 0 } });
+      const ignored = m.step(armed.state, { kind: "arcToggle", on: true });
+      expect(ignored.state).toBe(armed.state);
+      expect(ignored.preview).toEqual([]);
       expect(ignored.committed).toBeUndefined();
     }
   });

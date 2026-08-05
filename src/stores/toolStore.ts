@@ -55,11 +55,15 @@ export type SketchTool =
   | "circle"
   | "ellipse"
   | "arc"
+  /** 3-point arc: start → end → a point the arc passes through (SP-4 W2). */
+  | "arc3p"
   | "polygon"
   | "slot"
   | "point"
   | "dimension"
   | "trim"
+  /** Extend: grow an end out to the first entity it reaches (SP-4 W4). */
+  | "extend"
   | "mirror"
   /** 2D corner fillet: round the corner two lines share (WP-C T2b). */
   | "sketchFillet"

@@ -30,12 +30,13 @@ import {
   type DimQuantum,
   type DimValues,
 } from "./liveDimension";
-import { dimFrame, type DimFrame } from "./liveDimFrames";
+import { dimFrame, type DimChain, type DimFrame } from "./liveDimFrames";
 import {
   TOOL_MACHINES,
   type ToolContext,
   type ToolEvent,
   type ToolMachine,
+  type ToolState,
 } from "./toolMachine";
 
 /** Rounding step for a domain; 0 ⇒ do not round (a side COUNT is already whole). */
@@ -84,6 +85,14 @@ export function projectEvent(
   return { kind: event.kind, pt: frame.rebuild(values, event.pt) };
 }
 
+/** The line tool's chain facts for `dimFrame` — the machine's OWN recorded
+ *  tangent first, the controller's seed only while it has none (same precedence
+ *  `lineTool` itself applies, so the chip and the geometry cannot disagree). */
+const chainOf = (state: ToolState, ctx?: ToolContext): DimChain => ({
+  arcMode: state.arcMode,
+  tangent: state.chainTangent ?? ctx?.tangent,
+});
+
 /** Wrap a raw draw machine so it projects locks/quantum and emits chip
  *  descriptors. Identity behaviour when `ctx` carries neither. */
 export function withLiveDims(m: ToolMachine): ToolMachine {
@@ -91,11 +100,11 @@ export function withLiveDims(m: ToolMachine): ToolMachine {
     id: m.id,
     init: () => m.init(),
     step(state, event, ctx?: ToolContext) {
-      const frame = dimFrame(m.id, state.anchors, state.sides);
+      const frame = dimFrame(m.id, state.anchors, state.sides, chainOf(state, ctx));
       const step = m.step(state, projectEvent(frame, event, ctx?.locks, ctx?.quantum), ctx);
       // Describe the phase the gesture landed IN, not the one it came from — and
       // never after `done`, when the machine has already reset to bare anchors.
-      const nextFrame = dimFrame(m.id, step.state.anchors, step.state.sides);
+      const nextFrame = dimFrame(m.id, step.state.anchors, step.state.sides, chainOf(step.state, ctx));
       const cursor = step.state.cursor;
       const dims =
         nextFrame && cursor && !step.done ? describeDims(nextFrame, cursor, ctx?.locks ?? {}) : [];

@@ -243,6 +243,15 @@ export interface SketchUpsertResult {
   conflicting?: string[];
   /** CHANGED point coordinates after the solve, keyed `entityId.point`. */
   solvedPositions?: Record<string, [number, number]>;
+  /**
+   * CHANGED curve parameters after the solve (SCHEMA §7.4 `curves`), keyed by
+   * FRONTEND entity id — the channel `solvedPositions` cannot carry (a radius
+   * moves no point; an arc's radius/angles are not points at all). Both clients
+   * always populate it; optional for the same reason `solvedPositions` is —
+   * hand-written `CadClient` mocks predate it, so consumers read it as
+   * `solvedCurves ?? {}`.
+   */
+  solvedCurves?: Record<string, CurveParams>;
 }
 
 /** One closed profile region (SCHEMA §7.4 SketchRegions). */
@@ -280,6 +289,50 @@ export interface BeginGestureResult {
 }
 
 /**
+ * WHAT the pointer grabbed (SCHEMA §7.4 `BeginGesture.drag`) — the gesture's
+ * TARGET KIND. Optional on `beginGesture`: an absent target means `point`, the
+ * pre-SP-2 gesture, whose request stays byte-identical to the one before the
+ * kinds existed.
+ *
+ * `entityId` is a FRONTEND id; the client translates it to the backend uuid (the
+ * point ref for `point`, the entity uuid for every other kind). An unknown kind
+ * or role is refused at the command boundary rather than degraded to a point
+ * drag — degrading would move a handle the user never grabbed (§7.4).
+ */
+export interface GestureTarget {
+  /** `point` (default) | `arcEnd` | `radius` | `entityBody`. */
+  kind: "point" | "arcEnd" | "radius" | "entityBody";
+  /** The grabbed entity — a point REF (`"e1.Start"`) for `point`, else an entity id. */
+  entityId: string;
+  /** Which handle of `entityId`. REQUIRED for `arcEnd`; ignored by `radius`/`entityBody`. */
+  role?: "Start" | "End" | "Center";
+  /**
+   * Pointer-down position in sketch-plane (u,v). The backend derives the per-kind
+   * offset from it ONCE, at `beginGesture`, so a gesture cannot drift as it is
+   * dragged: `entityBody` moves by `target − grab`, `radius` keeps the radial
+   * offset `|grab − center| − radius`. IGNORED by `point`/`arcEnd` (the handle
+   * teleports to the cursor).
+   */
+  grab?: [number, number];
+}
+
+/**
+ * The CHANGED members of one curve after a solve (SCHEMA §7.4 `curves`).
+ *
+ * Per-member optional under the same incremental discipline as `positions`: an
+ * ABSENT member is UNCHANGED, never zero. Angles are RADIANS CCW from +X — the
+ * wire domain, not the UI degree domain (`angleUnits.ts`).
+ */
+export interface CurveParams {
+  /** New radius (mm) of a Circle/Arc. */
+  radius?: number;
+  /** New start angle (radians) of an Arc. */
+  startAngle?: number;
+  /** New end angle (radians) of an Arc. */
+  endAngle?: number;
+}
+
+/**
  * One incremental drag solve (`SolveDrag`; `DragSolveDto`). Carries the backend
  * `seq` (assigned per drag) so the client drops stale/superseded responses
  * latest-wins. `positions` are a PREVIEW (uncommitted), keyed by point entity id.
@@ -292,6 +345,17 @@ export interface DragSolveResult {
   dof: number;
   conflicting: string[];
   positions: Record<string, [number, number]>;
+  /**
+   * CHANGED curve parameters (SCHEMA §7.4 `curves`), keyed by FRONTEND entity id.
+   * Emitted for EVERY drag kind, not only `radius`: a `Tangent` propagates even a
+   * plain point drag into a neighbouring curve's radius.
+   *
+   * OPTIONAL for the same reason `solvedCurves` is: both real clients always
+   * populate it, but a pre-SP-2 test double has no way to know about a channel
+   * that did not exist when it was written. Consumers read it as `?? {}`, the
+   * idiom `solvedPositions` already established.
+   */
+  curves?: Record<string, CurveParams>;
   solveMicros: number;
   /** True when this `seq` was superseded by a newer drag (positions empty). */
   superseded: boolean;

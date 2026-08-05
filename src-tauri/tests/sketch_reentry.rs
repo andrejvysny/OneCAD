@@ -32,6 +32,7 @@ use onecad_core::sketch::{Constraint, Sketch, SketchEntity, WorldPlane};
 
 use onecad_lib::document_runtime::DocumentRuntime;
 use onecad_lib::worker::manager::SupervisorConfig;
+use onecad_lib::worker::wire::GestureTarget;
 use onecad_lib::worker::{resolve_worker_path, MeshProvider, SolverEngine, WorkerManager};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -208,7 +209,7 @@ fn point_ids(entities: &Value) -> Vec<String> {
 
 /// Drive a full drag gesture (begin → one solve → end-commit) on `drag_point`.
 async fn drag(rt: &mut DocumentRuntime, sid: SketchId, drag_point: EntityId, target: [f64; 2]) {
-    rt.begin_gesture(sid, drag_point)
+    rt.begin_gesture(sid, drag_point, GestureTarget::point(drag_point))
         .await
         .expect("begin_gesture");
     rt.solve_drag(target).await.expect("solve_drag");

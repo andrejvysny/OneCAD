@@ -2180,3 +2180,137 @@ describe("tauriClient metadata-only edit commands", () => {
     expect(settled).toBe(false);
   });
 });
+
+// ── SP-2 W4: gesture target kinds + the `curves` channel (SCHEMA §7.4) ────────
+
+describe("tauriClient gesture targets + curves channel", () => {
+  type BeginPayload = { sketchId: string; dragPoint: string; target?: Record<string, unknown> };
+  type UpsertOp = { op: string; entity?: { kind: string; id: string } };
+
+  /** Enter a sketch holding a Line, a Circle and an Arc, and expose the minted
+   *  backend uuids (read off the upsert ops — the id-map is private). */
+  async function sketchWithCurves(drag?: () => unknown, end?: () => unknown) {
+    const minted = new Map<string, string>();
+    let begin: BeginPayload | undefined;
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "apply_edit_command") return readyProjection(1);
+        if (cmd === "enter_sketch")
+          return { sketchId: (payload as { sketchId: string }).sketchId, plane: XZ_PLANE, entities: [], constraints: [], dof: 4, status: "UnderConstrained" };
+        if (cmd === "sketch_upsert") {
+          // addEntity order per marshalUpsert: the synthesized points, then the
+          // owning entity — so the LAST id of each kind is the entity's own.
+          for (const o of (payload as { ops: UpsertOp[] }).ops ?? []) {
+            if (o.op === "addEntity" && o.entity) minted.set(o.entity.kind, o.entity.id);
+          }
+          return { sketchId: "u", sketchRevision: 1, dof: 3, status: "UnderConstrained", solvedPositions: {}, solvedCurves: {} };
+        }
+        if (cmd === "begin_gesture") {
+          begin = payload as BeginPayload;
+          return { gestureId: 7, ready: true };
+        }
+        if (cmd === "solve_drag") return drag?.();
+        if (cmd === "end_gesture") return end?.();
+      },
+      { shouldMockEvents: true },
+    );
+    const client = createTauriClient();
+    await client.enterSketch({ newOnPlane: "XZ", sketchId: "sk" });
+    await client.sketchUpsert(
+      "sk",
+      [
+        { id: "e1", type: "Line", p0: [0, 0], p1: [40, 0] },
+        { id: "c1", type: "Circle", center: [0, 20], radius: 5 },
+        { id: "a1", type: "Arc", center: [60, 0], radius: 4, start: [64, 0], end: [60, 4] },
+      ],
+      [],
+    );
+    return { client, minted, getBegin: () => begin };
+  }
+
+  it("omits `target` entirely when none is given (pre-SP-2 request unchanged)", async () => {
+    const { client, getBegin } = await sketchWithCurves();
+    await client.beginGesture("sk", "e1.Start");
+    expect(getBegin()).toBeDefined();
+    expect("target" in getBegin()!).toBe(false);
+  });
+
+  it("marshals entityBody/radius/arcEnd against the ENTITY uuid", async () => {
+    const { client, minted, getBegin } = await sketchWithCurves();
+
+    await client.beginGesture("sk", "e1.Start", { kind: "entityBody", entityId: "e1", grab: [1, 2] });
+    expect(getBegin()!.target).toEqual({ kind: "entityBody", entity: minted.get("line"), grab: [1, 2] });
+
+    await client.beginGesture("sk", "c1.Center", { kind: "radius", entityId: "c1", grab: [3, 4] });
+    expect(getBegin()!.target).toEqual({ kind: "radius", entity: minted.get("circle"), grab: [3, 4] });
+
+    await client.beginGesture("sk", "a1.End", { kind: "arcEnd", entityId: "a1", role: "End" });
+    expect(getBegin()!.target).toEqual({ kind: "arcEnd", entity: minted.get("arc"), role: "End" });
+    // No `grab` key at all when the caller omits it (the kind ignores it anyway).
+    expect("grab" in getBegin()!.target!).toBe(false);
+    // Every kind is a real uuid, never a frontend id.
+    expect(minted.get("arc")).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it("a `point` target uses the POINT ref ladder (dragPoint's own mapping)", async () => {
+    const { client, getBegin } = await sketchWithCurves();
+    await client.beginGesture("sk", "e1.Start", { kind: "point", entityId: "e1.Start" });
+    const { target, dragPoint } = getBegin()!;
+    expect(target).toEqual({ kind: "point", entity: dragPoint });
+    expect(dragPoint).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it("THROWS on an unmapped entity rather than sending a non-uuid", async () => {
+    const { client, getBegin } = await sketchWithCurves();
+    await expect(
+      client.beginGesture("sk", "e1.Start", { kind: "radius", entityId: "ghost" }),
+    ).rejects.toThrow(/radius target ghost is not a mapped sketch entity/);
+    // The command never fired — no half-open gesture was armed.
+    expect(getBegin()).toBeUndefined();
+  });
+
+  it("reverse-maps `curves` on BOTH solveDrag and endGesture", async () => {
+    const uuids = new Map<string, string>();
+    const { client, minted } = await sketchWithCurves(
+      () => ({
+        gestureId: 7,
+        seq: 1,
+        status: "success",
+        dof: 1,
+        conflicting: [],
+        positions: {},
+        curves: { [uuids.get("circle")!]: { radius: 12.5 } },
+        solveMicros: 3,
+        superseded: false,
+      }),
+      () => ({
+        sketchId: "u",
+        sketchRevision: 9,
+        dof: 0,
+        status: "FullyConstrained",
+        solvedPositions: {},
+        solvedCurves: { [uuids.get("arc")!]: { radius: 7, startAngle: 0.25, endAngle: 1.5 } },
+      }),
+    );
+    for (const [k, v] of minted) uuids.set(k, v);
+
+    await client.beginGesture("sk", "c1.Center", { kind: "radius", entityId: "c1" });
+    const step = await client.solveDrag([9, 9]);
+    // Keyed by the FRONTEND id "c1" — a `radius` drag reports NO position at all.
+    expect(step?.curves).toEqual({ c1: { radius: 12.5 } });
+    expect(step?.positions).toEqual({});
+
+    const done = await client.endGesture([9, 9]);
+    expect(done.solvedCurves).toEqual({ a1: { radius: 7, startAngle: 0.25, endAngle: 1.5 } });
+  });
+
+  it("curves default to {} when the backend omits the key", async () => {
+    const { client } = await sketchWithCurves(
+      () => ({ gestureId: 7, seq: 1, status: "success", dof: 1, conflicting: [], positions: {}, solveMicros: 0, superseded: false }),
+      () => ({ sketchId: "u", sketchRevision: 2, dof: 0, status: "FullyConstrained", solvedPositions: {} }),
+    );
+    await client.beginGesture("sk", "e1.Start");
+    expect((await client.solveDrag([1, 1]))?.curves).toEqual({});
+    expect((await client.endGesture())?.solvedCurves).toEqual({});
+  });
+});

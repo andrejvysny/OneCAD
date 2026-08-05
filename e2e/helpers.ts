@@ -27,10 +27,12 @@ export type SketchToolLabel =
   | "Circle"
   | "Ellipse"
   | "Arc"
+  | "3-point arc"
   | "Polygon"
   | "Slot"
   | "Point"
-  | "Select";
+  | "Select"
+  | "Extend";
 
 async function bootEditor(page: Page, path: string): Promise<void> {
   await page.goto(path);
@@ -76,8 +78,11 @@ async function canvasBox(page: Page): Promise<{ x: number; y: number; width: num
   return box;
 }
 
-/** Canvas-center-relative offset (px) → absolute page coordinates. */
-async function toPage(page: Page, dx: number, dy: number): Promise<{ x: number; y: number }> {
+/** Canvas-center-relative offset (px) → absolute page coordinates. Exported so a
+ *  spec that needs the raw client pixel (e.g. to feed `screenToPlane` for a
+ *  ground-truth read of what a pixel offset maps to) can compute it without
+ *  duplicating the canvas-box lookup. */
+export async function toPage(page: Page, dx: number, dy: number): Promise<{ x: number; y: number }> {
   const box = await canvasBox(page);
   return { x: box.x + box.width / 2 + dx, y: box.y + box.height / 2 + dy };
 }
@@ -541,6 +546,80 @@ export async function getSketchEntityCount(page: Page): Promise<number> {
     if (!session) throw new Error("getSketchEntityCount: no live sketch session (call before finishing the sketch)");
     return session.entities.length;
   });
+}
+
+/** One live sketch entity, every geometric field any type can carry (Arc's
+ *  center/radius/start/end alongside Line's p0/p1) — the union `SketchEntity`
+ *  itself uses. Fuller than `getSketchSnapshot` (Lines only) / `getSketchCircle`
+ *  / `getSketchEllipse` (one type each): for a spec that needs to read back an
+ *  Arc, or several entity types in the same session, at once. */
+export interface FullEntitySnap {
+  id: string;
+  type: string;
+  construction?: boolean;
+  p0?: [number, number];
+  p1?: [number, number];
+  center?: [number, number];
+  radius?: number;
+  start?: [number, number];
+  end?: [number, number];
+}
+
+/** Every live sketch entity, all geometric fields, id included. Same
+ *  live-session requirement as `getSketchSnapshot` (call before finishing). */
+export async function getSketchEntitiesFull(page: Page): Promise<FullEntitySnap[]> {
+  return page.evaluate(() => {
+    const w = window as unknown as {
+      __stores?: { sketch: { getState(): { session: { entities: FullEntitySnap[] } | null } } };
+    };
+    const session = w.__stores?.sketch.getState().session;
+    if (!session) throw new Error("getSketchEntitiesFull: no live sketch session (call before finishing the sketch)");
+    return session.entities.map((e) => ({ ...e }));
+  });
+}
+
+/** One live sketch constraint, straight off the session (id/type/entities/
+ *  positions/value) — the wire shape `SketchConstraint` itself uses. */
+export interface ConstraintSnap {
+  id: string;
+  type: string;
+  entities: string[];
+  positions?: string[];
+  value?: number;
+}
+
+/** Every live sketch constraint. Same live-session requirement as
+ *  `getSketchSnapshot` (call before finishing the sketch). */
+export async function getSketchConstraints(page: Page): Promise<ConstraintSnap[]> {
+  return page.evaluate(() => {
+    const w = window as unknown as {
+      __stores?: { sketch: { getState(): { session: { constraints: ConstraintSnap[] } | null } } };
+    };
+    const session = w.__stores?.sketch.getState().session;
+    if (!session) throw new Error("getSketchConstraints: no live sketch session (call before finishing the sketch)");
+    return session.constraints.map((c) => ({ ...c }));
+  });
+}
+
+/**
+ * Raycast a CLIENT (page) pixel onto the current sketch plane, through the
+ * engine's OWN `screenToPlane` — the exact forward direction `planePointToClient`
+ * below inverts. Requires `window.__vpEngine` (see openEditorDebug). Ground truth
+ * for "what plane point will this pixel click actually produce": with snapping
+ * disabled (`setSnapPref` for `grid`/`sketchGuideLines`/`polarTracking`) the
+ * SNAPPED point a real click resolves to is bit-identical to this raw raycast, so
+ * a spec can know a click's exact plane coordinates ahead of the click itself.
+ */
+export async function screenToPlane(page: Page, x: number, y: number): Promise<{ x: number; y: number } | null> {
+  return page.evaluate(
+    ({ x, y }) => {
+      const engine = (
+        window as unknown as { __vpEngine?: { screenToPlane(x: number, y: number): { x: number; y: number } | null } }
+      ).__vpEngine;
+      return engine ? engine.screenToPlane(x, y) : null;
+    },
+    { x, y },
+  );
 }
 
 /**

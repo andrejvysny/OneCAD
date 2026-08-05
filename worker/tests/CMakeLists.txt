@@ -39,6 +39,21 @@ add_executable(test_sketch_arc_endpoints test_sketch_arc_endpoints.cpp)
 target_link_libraries(test_sketch_arc_endpoints PRIVATE worker_core)
 add_test(NAME sketch_arc_endpoints COMMAND test_sketch_arc_endpoints)
 
+# --- SP-2 W1: the generalized drag entry `Sketch::solveWithTargets` (point AND
+#     radius targets, explicit pin set, advisory tag(−1) drives) + the
+#     `entityPointIds` handle-order map SCHEMA §7.4's gesture kinds build on. ---
+add_executable(test_solve_with_targets test_solve_with_targets.cpp)
+target_link_libraries(test_solve_with_targets PRIVATE worker_core)
+add_test(NAME solve_with_targets COMMAND test_solve_with_targets)
+
+# --- SP-2 W2: the SCHEMA §7.4 gesture KINDS on the solver lane — the per-kind
+#     pin sets, the grab-derived offsets, the degenerate guards the lane owns
+#     (MIN_GEOMETRY_SIZE radius floor, MIN_ARC_SWEEP refusal) and the additive
+#     `curves` channel. Drives the real verbs through Dispatcher::dispatch_once. ---
+add_executable(test_sketch_drag_kinds test_sketch_drag_kinds.cpp)
+target_link_libraries(test_sketch_drag_kinds PRIVATE worker_core)
+add_test(NAME sketch_drag_kinds COMMAND test_sketch_drag_kinds)
+
 # --- SKETCH-ON-FACE W1a: face-boundary projector + `ProjectFaceBoundary` verb
 #     (SCHEMA §7.6). Unit-level projector calls over self-built OCCT shapes PLUS
 #     verb-level calls through the handler (in-process, real OCCT). ---
@@ -223,10 +238,14 @@ add_test(
 # sketch_redundant / sketch_overconstrained_full / sketch_fully_constrained pin
 # the OverConstrained state + "redundant" drag status (benign DOF-preserving
 # redundancy) and the clean-dof-0 FullyConstrained regression.
+# sketch_gesture_kinds covers the SP-2 §7.4 target kinds (entityBody / arcEnd /
+# radius) + the `curves` channel; sketch_gesture stays the byte-identical
+# back-compat regression for the pre-SP-2 pointId-only form.
 foreach(_fx sketch_upsert sketch_gesture sketch_conflicting sketch_regions
             sketch_unknown_gesture sketch_latest_wins
             sketch_redundant sketch_overconstrained_full sketch_fully_constrained
-            sketch_ellipse_upsert sketch_ellipse_regions sketch_ellipse_gesture)
+            sketch_ellipse_upsert sketch_ellipse_regions sketch_ellipse_gesture
+            sketch_gesture_kinds)
     add_test(
         NAME harness_${_fx}
         COMMAND worker_harness

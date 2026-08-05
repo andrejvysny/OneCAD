@@ -4,7 +4,13 @@
  * one place so an edit outside the controller stays consistent.
  */
 import type { CadClient } from "@/ipc/client";
-import type { SketchConstraint, SketchEntity, SketchSession } from "@/ipc/types";
+import type {
+  ConstraintPosition,
+  SketchConstraint,
+  SketchConstraintType,
+  SketchEntity,
+  SketchSession,
+} from "@/ipc/types";
 import { getViewportEngine } from "@/viewport/engineBridge";
 import { documentStore, docSketchStatus } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
@@ -16,6 +22,7 @@ import { isConflictStatus } from "./dimensionTool";
 import type { ApplicableConstraint } from "./constraintApplicability";
 import { buildAppliedConstraint, buildAppliedDimension } from "./constraintAuthoring";
 import { trimPieces } from "./trimMath";
+import { extendPieces } from "./extendMath";
 import { filletGeometry, type FilletFailure, type LineEnd } from "./sketchFilletMath";
 import { buildChain, offsetChain, type OffsetFailure } from "./offsetMath";
 import { draftToEntityFields, type DraftEntity } from "./toolMachine";
@@ -302,6 +309,158 @@ async function trimEntityNow(
   if (await commitReducedSketch(client, session, entities, constraints, gen)) {
     sketchStore.getState().pushUndoSnapshot(before, { kind: "trim" });
   }
+}
+
+// ── Sketch Extend (SP-4 W4) ───────────────────────────────────────────────────
+//
+// Extend is Trim's counterpart: the end of a line/arc nearest the hover grows
+// along its own continuation until it meets another entity (`extendPieces`).
+//
+// The grown entity REPLACES the original under a FRESH id rather than moving its
+// endpoint in place. Not a style choice: `marshalUpsert` diffs entities BY ID
+// (sketchWireMap.ts), so a moved endpoint on an already-mapped entity emits no
+// wire op at all and the extension would silently never reach the backend. Same
+// reason — and the same shape — as `trimEntityNow` and `filletSketchCornerNow`.
+
+/** Why an extend produced nothing, when it produced nothing. */
+export type ExtendOutcome =
+  | { ok: true }
+  /** No crossing to grow to (or growth below `minSize`) — the CALLER phrases this. */
+  | { ok: false; reason: "noExtension" }
+  /** Locked geometry, a dead session, or a rejected upsert. Each of those already
+   *  published its own hint, so the caller must NOT overwrite it. */
+  | { ok: false; reason: "refused" };
+
+/** How an extend rewrites the constraints that referenced the grown entity. */
+interface ExtendRemap {
+  oldId: string;
+  newId: string;
+  /** The endpoint the extension MOVED. */
+  movedEnd: ConstraintPosition;
+  /** Kind of the grown entity — the cascade differs for a Line vs an Arc. */
+  targetType: SketchEntity["type"];
+}
+
+/**
+ * Which constraint kinds an extend INVALIDATES, per grown entity kind.
+ *
+ * A LINE that grew is longer: every dimension over it, and every `Equal` length
+ * pairing, now states a length the user did not ask for.
+ *
+ * An ARC that grew keeps its centre AND its radius — only the sweep changed — so
+ * `Radius`/`Diameter` (and `Equal`, which for arcs is a radius equality) still
+ * say exactly what the user meant and are re-minted. What DID move are its
+ * endpoints, so the measures taken over them (`Distance`, the two axis
+ * distances, `Angle`) are stale and go.
+ */
+function droppedByExtend(type: SketchConstraintType, targetType: SketchEntity["type"]): boolean {
+  if (targetType === "Arc") {
+    return (
+      type === "Distance" ||
+      type === "HorizontalDistance" ||
+      type === "VerticalDistance" ||
+      type === "Angle"
+    );
+  }
+  return isDimensional(type) || type === "Equal";
+}
+
+/**
+ * Re-author the constraints that referenced the replaced entity onto its
+ * successor, minting FRESH ids (`remapFilletConstraints` documents why a same-id
+ * rewrite emits no wire op).
+ *
+ * Dropped: anything anchored at the endpoint the extension MOVED (that vertex is
+ * somewhere else now — keeping the weld would drag the extension straight back),
+ * plus the per-kind set above. Everything else survives, which is what keeps the
+ * rest of the profile attached: the FAR-end welds, the orientation constraints
+ * (H/V/Parallel/Perpendicular/Tangent/Concentric — an extend changes length, not
+ * direction, and an arc's tangency at an unmoved end is unaffected), and the
+ * whole-entity references (`Fixed`/`OnCurve`/`Midpoint`/`Symmetric`).
+ */
+export function remapExtendConstraints(
+  constraints: SketchConstraint[],
+  remap: ExtendRemap,
+  nextConstraintId: () => string,
+): SketchConstraint[] {
+  const out: SketchConstraint[] = [];
+  for (const c of constraints) {
+    if (!c.entities.includes(remap.oldId)) {
+      out.push(c);
+      continue;
+    }
+    if (c.entities.some((id, i) => id === remap.oldId && c.positions?.[i] === remap.movedEnd)) continue;
+    if (droppedByExtend(c.type, remap.targetType)) continue;
+    out.push({
+      ...c,
+      id: nextConstraintId(),
+      entities: c.entities.map((id) => (id === remap.oldId ? remap.newId : id)),
+    });
+  }
+  return out;
+}
+
+/**
+ * Grow the end of `entityId` nearest `hoverPt` out to the first entity its
+ * continuation reaches, in ONE `sketchUpsert` (⇒ one undo step). `hoverPt` is a
+ * plane (u,v) point; `minSize` is the caller's screen-scaled floor, below which
+ * an extension is too small to be worth an undo step.
+ */
+export function extendEntity(
+  client: CadClient,
+  entityId: string,
+  hoverPt: [number, number],
+  opts: { minSize: number },
+): Promise<ExtendOutcome> {
+  return enqueueSketchMutation(() => extendEntityNow(client, entityId, hoverPt, opts));
+}
+
+async function extendEntityNow(
+  client: CadClient,
+  entityId: string,
+  hoverPt: [number, number],
+  opts: { minSize: number },
+): Promise<ExtendOutcome> {
+  const gen = sketchStore.getState().sessionGeneration;
+  const session = sketchStore.getState().session;
+  if (!session) return { ok: false, reason: "refused" };
+  const target = session.entities.find((e) => e.id === entityId);
+  if (!target) return { ok: false, reason: "refused" };
+  // Extend REPLACES the target — refused outright on locked reference geometry,
+  // exactly like Trim, so the batch is never authored (see LOCKED_GEOMETRY_HINT).
+  if (lockedEntityIds(session.entities).has(entityId)) {
+    viewportStore.getState().setStatusHint(`${LOCKED_GEOMETRY_HINT} — it cannot be extended`);
+    return { ok: false, reason: "refused" };
+  }
+
+  const others = session.entities.filter((e) => e.id !== entityId);
+  const result = extendPieces(target, { x: hoverPt[0], y: hoverPt[1] }, others, opts);
+  if (!result) return { ok: false, reason: "noExtension" };
+
+  const grown: SketchEntity = {
+    id: sketchStore.getState().nextEntityId(),
+    ...draftToEntityFields(result.extended),
+  };
+  // Replace IN PLACE in the array so entity order (and therefore region/profile
+  // ordering downstream) is unchanged — only the id moves.
+  const entities = session.entities.map((e) => (e.id === entityId ? grown : e));
+  const constraints = remapExtendConstraints(
+    session.constraints,
+    {
+      oldId: entityId,
+      newId: grown.id,
+      movedEnd: result.end === "start" ? "Start" : "End",
+      targetType: target.type,
+    },
+    () => sketchStore.getState().nextConstraintId(),
+  );
+
+  const before: SketchSnapshot = { entities: session.entities, constraints: session.constraints };
+  if (await commitReducedSketch(client, session, entities, constraints, gen, "extend")) {
+    sketchStore.getState().pushUndoSnapshot(before, { kind: "extend" });
+    return { ok: true };
+  }
+  return { ok: false, reason: "refused" };
 }
 
 // ── Sketch Fillet (WP-C T2b) ──────────────────────────────────────────────────

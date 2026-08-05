@@ -21,6 +21,7 @@ import type {
   EnterSketchTarget,
   FeatureDependencies,
   FinishSketchResult,
+  GestureTarget,
   Lod,
   NeedsRepairEvent,
   OperationOp,
@@ -222,8 +223,19 @@ export interface CadClient {
   // runs a local identity solve. No frontend caller yet (SketchController point
   // drag lands with M2/M4); wired + tested here so the seam is real.
 
-  /** Open a drag gesture on a sketch point (`dragPointId` = a point entity id). */
-  beginGesture(sketchId: string, dragPointId: string): Promise<BeginGestureResult>;
+  /**
+   * Open a drag gesture on a sketch point (`dragPointId` = a point entity id).
+   *
+   * `target` is OPTIONAL and additive (SCHEMA §7.4): absent ⇒ the plain POINT
+   * drag on `dragPointId`, byte-identical to the request before the gesture kinds
+   * existed. A non-`point` target (`arcEnd`/`radius`/`entityBody`) names what the
+   * pointer really grabbed, and `dragPointId` is then only the fallback handle.
+   */
+  beginGesture(
+    sketchId: string,
+    dragPointId: string,
+    target?: GestureTarget,
+  ): Promise<BeginGestureResult>;
 
   /**
    * One incremental drag solve to `target` (fire-and-forget, latest-wins). Fire

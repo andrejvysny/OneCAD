@@ -9,6 +9,7 @@ import { viewportStore } from "@/stores/viewportStore";
 import { documentStore, seedMockDocument } from "@/stores/documentStore";
 import { settingsStore } from "@/stores/settingsStore";
 import { DEFAULT_THEME } from "@/theme/themes";
+import { DEFAULT_SNAP_RADIUS } from "@/tools/sketch/snapRadius";
 import { DEFAULT_LENGTH_UNIT } from "@/units/lengthUnits";
 import { DEFAULT_RENDER_MODE } from "@/viewport/engine/renderModes";
 import { sketchStore } from "@/stores/sketchStore";
@@ -58,6 +59,14 @@ export function resetStores(): void {
       // click coords, which a zoom-adaptive quantum would move. The live-dim
       // lane opts back in explicitly (SketchController.liveDim.test.ts).
       dimensionRound: false,
+      // OFF here, ON in the app, for exactly the reason above — and one more:
+      // the pointer specs' own `disableSnapping()` helpers enumerate the snap
+      // keys they knew about when they were written, so a tier added later
+      // would silently switch itself back on inside them. Polar re-creates the
+      // H/V alignment those helpers deliberately disabled (its 0°/90° rays run
+      // through the chain anchor), which moves pinned click coords. The polar
+      // lane opts back in explicitly (SketchController.polar.test.ts).
+      polarTracking: false,
       guidePoints3d: true,
       distantEdges: false,
     },
@@ -66,6 +75,7 @@ export function resetStores(): void {
     displayMode: DEFAULT_RENDER_MODE,
     theme: DEFAULT_THEME,
     displayUnit: DEFAULT_LENGTH_UNIT,
+    snapRadius: DEFAULT_SNAP_RADIUS,
   });
   sketchStore.getState().reset();
   toolChipStore.getState().clear();

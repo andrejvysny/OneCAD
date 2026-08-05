@@ -58,6 +58,47 @@ describe("resolveBinding — chamfer tool id + H binding died (FILLET-CHAMFER-UN
   });
 });
 
+describe("resolveBinding — ⇧A is the 3-point arc (SP-4)", () => {
+  it("plain `a` still resolves to the centre-start-end arc", () => {
+    expect(resolveBinding("a", false, "sketch")).toEqual({ type: "tool", tool: "arc" });
+  });
+
+  it("⇧A resolves to arc3p in sketch mode", () => {
+    expect(resolveBinding("a", true, "sketch")).toEqual({ type: "tool", tool: "arc3p" });
+  });
+
+  it("model mode reaches BOTH arcs cross-mode (a draw tool starts a sketch)", () => {
+    expect(resolveBinding("a", false, "model")).toEqual({ type: "tool", tool: "arc" });
+    expect(resolveBinding("a", true, "model")).toEqual({ type: "tool", tool: "arc3p" });
+  });
+
+  it("`a` is claimed only by the sketch table, plain and shifted", () => {
+    expect(MODEL_KEYS.filter((b) => b.key === "a")).toHaveLength(0);
+    expect(SKETCH_KEYS.filter((b) => b.key === "a")).toHaveLength(2);
+  });
+});
+
+describe("resolveBinding — ⇧T is Extend (SP-4)", () => {
+  it("plain `t` is untouched in BOTH modes (sketch Trim / model Transform)", () => {
+    expect(resolveBinding("t", false, "sketch")).toEqual({ type: "tool", tool: "trim" });
+    expect(resolveBinding("t", false, "model")).toEqual({ type: "tool", tool: "transform" });
+  });
+
+  it("⇧T resolves to extend in sketch mode", () => {
+    expect(resolveBinding("t", true, "sketch")).toEqual({ type: "tool", tool: "extend" });
+  });
+
+  it("model mode reaches Extend cross-mode (a sketch edit tool starts a sketch)", () => {
+    expect(resolveBinding("t", true, "model")).toEqual({ type: "tool", tool: "extend" });
+  });
+
+  it("`t` is claimed twice by sketch (plain + chord) and once by model (plain)", () => {
+    expect(SKETCH_KEYS.filter((b) => b.key === "t")).toHaveLength(2);
+    expect(MODEL_KEYS.filter((b) => b.key === "t")).toHaveLength(1);
+    expect(MODEL_KEYS.filter((b) => b.key === "t" && b.shift)).toHaveLength(0);
+  });
+});
+
 describe("resolveBinding — Measure (?) is NOT cross-mode (W2-B)", () => {
   it("arms Measure in model mode", () => {
     expect(resolveBinding("?", true, "model")).toEqual({ type: "tool", tool: "measure" });

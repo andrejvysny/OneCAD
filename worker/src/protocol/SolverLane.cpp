@@ -2,9 +2,11 @@
 #include "protocol/SolverLane.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <numbers>
 #include <optional>
 #include <unordered_set>
 #include <utility>
@@ -13,6 +15,8 @@
 #include "loop/PolygonFill.h"
 #include "loop/RegionTable.h"
 #include "loop/RegionUtils.h"
+#include "sketch/SketchArc.h"
+#include "sketch/SketchCircle.h"
 #include "sketch/SketchPoint.h"
 
 namespace onecad::protocol {
@@ -23,7 +27,16 @@ using nlohmann::json;
 
 namespace {
 
-constexpr double kPosEpsilon = 1e-7;  // "changed point" threshold (mm)
+constexpr double kPosEpsilon = 1e-7;    // "changed point" threshold (mm)
+constexpr double kAngleEpsilon = 1e-9;  // "changed angle" threshold (rad)
+
+// SCHEMA §7.4 arc sweep floor. Lane-owned (like the MIN_GEOMETRY_SIZE radius
+// floor): the solver hands a target to PlaneGCS verbatim, the DEGENERATE guards
+// are the caller's, because only the caller knows the step is a user gesture it
+// may refuse and re-offer.
+constexpr double kMinArcSweep = 1e-3;  // rad
+
+using PointPosMap = std::unordered_map<sk::EntityID, std::pair<double, double>>;
 
 Envelope err(const Envelope& req, const char* code, const std::string& msg) {
     // §8: OP_FAILED / REF_UNRESOLVED are recoverable (session intact); retriable
@@ -39,6 +52,59 @@ bool read_target(const json& p, double& x, double& y) {
     x = t[0].get<double>();
     y = t[1].get<double>();
     return std::isfinite(x) && std::isfinite(y);
+}
+
+// SCHEMA §7.4 `drag.kind` tokens, matched EXACTLY: they are camelCase on the
+// wire and the Rust side emits them verbatim, so case-folding here would only
+// widen what counts as "known". An unknown token is OP_FAILED at the caller.
+bool parse_drag_kind(const std::string& token, DragKind& out) {
+    if (token == "point") {
+        out = DragKind::Point;
+    } else if (token == "arcEnd") {
+        out = DragKind::ArcEnd;
+    } else if (token == "radius") {
+        out = DragKind::Radius;
+    } else if (token == "entityBody") {
+        out = DragKind::EntityBody;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+// Role tokens ARE case-folded — `WireIndex::resolve_point` already lowercases
+// them, so "Start" and "start" must not disagree between the two.
+std::string lower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return s;
+}
+
+// `drag.grab` — the pointer-down position in sketch-plane coordinates.
+bool read_grab(const json& drag, double& x, double& y) {
+    if (!drag.contains("grab")) return false;
+    const json& g = drag["grab"];
+    if (!g.is_array() || g.size() < 2 || !g[0].is_number() || !g[1].is_number()) return false;
+    x = g[0].get<double>();
+    y = g[1].get<double>();
+    return std::isfinite(x) && std::isfinite(y);
+}
+
+// Center point + radius of a Circle/Arc. False for anything else (a `radius`
+// gesture on a non-curve is REF_UNRESOLVED, §7.4).
+bool curve_center_and_radius(const sk::Sketch& sketch, const sk::EntityID& curve,
+                             sk::EntityID& center, double& radius) {
+    if (const auto* c = sketch.getEntityAs<sk::SketchCircle>(curve)) {
+        center = c->centerPointId();
+        radius = c->radius();
+        return true;
+    }
+    if (const auto* a = sketch.getEntityAs<sk::SketchArc>(curve)) {
+        center = a->centerPointId();
+        radius = a->radius();
+        return true;
+    }
+    return false;
 }
 
 std::uint64_t u64(const json& p, const char* key) {
@@ -75,6 +141,95 @@ json changed_positions(const std::unordered_map<sk::EntityID, std::pair<double, 
         if (!handle.empty()) out[handle] = json::array({pos.first, pos.second});
     }
     return out;
+}
+
+// Every SOLVER-REGISTERED curve's parameters by internal id (the `curves`
+// mirror of collect_positions). An Ellipse is deliberately absent: it is not
+// registered with PlaneGCS, so no drag can move it and SCHEMA §7.4 forbids
+// reporting one.
+CurveMap collect_curves(const sk::Sketch& sketch) {
+    CurveMap out;
+    for (const auto& e : sketch.getAllEntities()) {
+        if (!e) continue;
+        if (e->type() == sk::EntityType::Circle) {
+            const auto* c = dynamic_cast<const sk::SketchCircle*>(e.get());
+            if (c) out[c->id()] = CurveParams{c->radius(), 0.0, 0.0, /*has_angles=*/false};
+        } else if (e->type() == sk::EntityType::Arc) {
+            const auto* a = dynamic_cast<const sk::SketchArc*>(e.get());
+            if (a) {
+                out[a->id()] = CurveParams{a->radius(), a->startAngle(), a->endAngle(),
+                                           /*has_angles=*/true};
+            }
+        }
+    }
+    return out;
+}
+
+// {wireEntityId: {changed members}} — the SCHEMA §7.4 `curves` channel, under
+// the same incremental discipline as changed_positions: CHANGED members only,
+// and an entity with nothing changed is omitted entirely. Emitted for EVERY
+// kind, not only `radius`: a Tangent propagates even a plain point drag into a
+// neighbouring curve's radius, and before this channel existed that change
+// reached the worker's store but never Rust (silent revert on the next upsert).
+json changed_curves(const CurveMap& prev, const CurveMap& cur, const wire::WireIndex& index) {
+    json out = json::object();
+    for (const auto& [id, params] : cur) {
+        const auto it = prev.find(id);
+        const bool fresh = it == prev.end();
+        json members = json::object();
+        if (fresh || std::abs(params.radius - it->second.radius) > kPosEpsilon) {
+            members["radius"] = params.radius;
+        }
+        if (params.has_angles) {
+            if (fresh || std::abs(params.start_angle - it->second.start_angle) > kAngleEpsilon) {
+                members["startAngle"] = params.start_angle;
+            }
+            if (fresh || std::abs(params.end_angle - it->second.end_angle) > kAngleEpsilon) {
+                members["endAngle"] = params.end_angle;
+            }
+        }
+        if (members.empty()) continue;
+        const auto wit = index.internal_edge_to_wire.find(id);
+        if (wit != index.internal_edge_to_wire.end()) out[wit->second] = std::move(members);
+    }
+    return out;
+}
+
+// Put the sketch back to a pose it previously REPORTED (positions + curves).
+// PlaneGCS binds its parameters to the live entity fields (see
+// ConstraintSolver::makePoint/makeArc), so writing them here is exactly what the
+// solver's own drag rollback does — and by the time a step returns the tag(−1)
+// drives are already cleared, so nothing stale is left pointing at them. Values
+// are written through the MUTABLE references, not the setters, so an angle is
+// restored verbatim instead of being re-normalized into a different double.
+void restore_pose(sk::Sketch& sketch, const PointPosMap& positions, const CurveMap& curves) {
+    for (const auto& [id, pos] : positions) {
+        if (auto* p = sketch.getEntityAs<sk::SketchPoint>(id)) p->setPosition(pos.first, pos.second);
+    }
+    for (const auto& [id, params] : curves) {
+        if (auto* c = sketch.getEntityAs<sk::SketchCircle>(id)) {
+            c->radius() = params.radius;
+            continue;
+        }
+        if (auto* a = sketch.getEntityAs<sk::SketchArc>(id)) {
+            a->radius() = params.radius;
+            a->startAngle() = params.start_angle;
+            a->endAngle() = params.end_angle;
+        }
+    }
+}
+
+// SCHEMA §7.4 arc sweep floor: |endAngle − startAngle| below MIN_ARC_SWEEP.
+// `sweepAngle()` is the CCW extent in [0, 2pi), and the angles are normalized to
+// (−pi, pi], so "the two angles are numerically equal" surfaces at EITHER end of
+// that range — a hair above 0 (collapsed to a point) or a hair below 2pi (the
+// same collapse taken the other way round the circle). Testing the extent rather
+// than the raw difference catches the wrap case too, which the raw difference
+// misses whenever the pair straddles ±pi.
+bool arc_sweep_collapsed(const sk::SketchArc& arc) {
+    constexpr double kTwoPi = 2.0 * std::numbers::pi_v<double>;
+    const double sweep = arc.sweepAngle();
+    return sweep < kMinArcSweep || sweep > kTwoPi - kMinArcSweep;
 }
 
 std::vector<std::string> map_conflicting(const wire::WireIndex& index,
@@ -212,19 +367,96 @@ Envelope SolverLane::on_begin(const Envelope& req) {
     wire::TranslateResult tr = wire::translate(stored->wire_args);
     if (!tr.ok) return err(req, "OP_FAILED", "BeginGesture: " + tr.error);
 
-    // Resolve the drag point handle ("drag":{"pointId"} or "pointId").
-    std::string point_id;
-    if (args.contains("drag") && args["drag"].is_object()) {
-        point_id = args["drag"].value("pointId", std::string{});
+    // --- SCHEMA §7.4 drag target ---------------------------------------------
+    // The `drag` object declares WHAT the pointer grabbed:
+    // { kind?, entity?, role?, grab?, pointId? }. An absent kind means `point`;
+    // an unknown one is a hard failure (degrading to `point` would move a handle
+    // the user never grabbed).
+    const json drag = (args.contains("drag") && args["drag"].is_object())
+                          ? args["drag"]
+                          : json::object();
+    DragKind kind = DragKind::Point;
+    const std::string kind_token = drag.value("kind", std::string{});
+    if (!kind_token.empty() && !parse_drag_kind(kind_token, kind)) {
+        return err(req, "OP_FAILED", "BeginGesture: unknown drag kind '" + kind_token + "'");
     }
-    if (point_id.empty()) point_id = args.value("pointId", std::string{});
-    sk::EntityID drag_internal;
-    {
-        auto it = tr.index.handle_to_point.find(point_id);
-        if (it != tr.index.handle_to_point.end()) drag_internal = it->second;
-    }
-    if (drag_internal.empty()) {
-        return err(req, "REF_UNRESOLVED", "BeginGesture: unknown drag point '" + point_id + "'");
+    const std::string entity_id = drag.value("entity", std::string{});
+    const std::string role = lower(drag.value("role", std::string{}));
+
+    sk::EntityID drag_internal;  // the point a Point/ArcEnd gesture moves
+    sk::EntityID drag_entity;    // the entity an ArcEnd/Radius/EntityBody gesture owns
+    std::vector<sk::EntityID> body_points;
+
+    switch (kind) {
+        case DragKind::Point: {
+            // The pre-SP-2 forms resolve FIRST and outrank `entity`: a request
+            // carrying both a legacy `pointId` and an `entity` means the point
+            // (§7.4 "pointId wins"). Only for THIS kind — a `pointId` riding
+            // along with kind=radius must never silently become a point drag.
+            std::string point_id = drag.value("pointId", std::string{});
+            if (point_id.empty()) point_id = args.value("pointId", std::string{});
+            if (!point_id.empty()) {
+                const auto it = tr.index.handle_to_point.find(point_id);
+                if (it != tr.index.handle_to_point.end()) drag_internal = it->second;
+            } else if (!entity_id.empty()) {
+                drag_internal = tr.index.resolve_point(entity_id, role);
+            }
+            if (drag_internal.empty()) {
+                const std::string named =
+                    !point_id.empty() ? point_id
+                                      : entity_id + (role.empty() ? "" : "." + role);
+                return err(req, "REF_UNRESOLVED",
+                           "BeginGesture: unknown drag point '" + named + "'");
+            }
+            break;
+        }
+        case DragKind::ArcEnd: {
+            if (role != "start" && role != "end") {
+                return err(req, "REF_UNRESOLVED",
+                           "BeginGesture: arcEnd requires role start|end, got '" + role + "'");
+            }
+            const auto it = tr.index.wire_to_internal.find(entity_id);
+            const sk::SketchArc* arc =
+                it == tr.index.wire_to_internal.end()
+                    ? nullptr
+                    : tr.sketch->getEntityAs<sk::SketchArc>(it->second);
+            // An arc with DERIVED endpoints (§7.3) has no point to drag: its
+            // start/end exist only as computations, so there is nothing the
+            // solver could move. That is unresolvable, not a silent no-op.
+            if (!arc || !arc->hasEndpointPoints()) {
+                return err(req, "REF_UNRESOLVED",
+                           "BeginGesture: arcEnd needs an Arc with endpoint points, got '" +
+                               entity_id + "'");
+            }
+            drag_entity = it->second;
+            drag_internal = role == "start" ? arc->startPointId() : arc->endPointId();
+            break;
+        }
+        case DragKind::Radius: {
+            const auto it = tr.index.wire_to_internal.find(entity_id);
+            sk::EntityID center;
+            double radius = 0.0;
+            if (it == tr.index.wire_to_internal.end() ||
+                !curve_center_and_radius(*tr.sketch, it->second, center, radius)) {
+                return err(req, "REF_UNRESOLVED",
+                           "BeginGesture: radius needs a Circle or Arc, got '" + entity_id + "'");
+            }
+            drag_entity = it->second;
+            break;
+        }
+        case DragKind::EntityBody: {
+            const auto it = tr.index.wire_to_internal.find(entity_id);
+            if (it != tr.index.wire_to_internal.end()) {
+                body_points = tr.sketch->entityPointIds(it->second);
+            }
+            if (body_points.empty()) {
+                return err(req, "REF_UNRESOLVED",
+                           "BeginGesture: entityBody needs an entity owning at least one point, "
+                           "got '" + entity_id + "'");
+            }
+            drag_entity = it->second;
+            break;
+        }
     }
 
     // Build + diagnose the GCS system ONCE. Capture the sketch's inherent
@@ -238,7 +470,13 @@ Envelope SolverLane::on_begin(const Envelope& req) {
     const auto conflicting_internal = tr.sketch->getConflictingConstraints();
     const bool redundant = tr.sketch->hasRedundantConstraints();
 
-    tr.sketch->beginPointDrag(drag_internal);  // drag-fix strategy + rollback snapshot
+    // ONLY the Point kind opens a point drag: `beginPointDrag` pins every OTHER
+    // point, which is right for "one handle to one position" and wrong for all
+    // three new kinds (it over-determines an arc reshape and freezes the
+    // geometry a body drag has to carry). They pin per-kind in `run_step`.
+    if (kind == DragKind::Point) {
+        tr.sketch->beginPointDrag(drag_internal);  // drag-fix strategy + rollback snapshot
+    }
 
     Gesture g;
     g.id = gesture_id;
@@ -250,12 +488,149 @@ Envelope SolverLane::on_begin(const Envelope& req) {
     g.conflicting = map_conflicting(tr.index, conflicting_internal);
     g.baseline = collect_positions(*tr.sketch);
     g.last_reported = g.baseline;
+    g.kind = kind;
+    g.drag_entity = drag_entity;
+    g.body_points = std::move(body_points);
+
+    // The grab-derived offsets are captured HERE, once, from the POST-diagnosis
+    // pose (the same pose `baseline` records) — SCHEMA §7.4: re-deriving them per
+    // step would let the gesture drift under the cursor.
+    g.has_grab = read_grab(drag, g.grab.first, g.grab.second);
+    if (kind == DragKind::EntityBody) {
+        for (const sk::EntityID& pid : g.body_points) {
+            const auto it = g.baseline.find(pid);
+            if (it != g.baseline.end()) g.body_baseline[pid] = it->second;
+        }
+        // No grab ⇒ anchor on the FIRST owned point in handle order, which
+        // teleports that point to the cursor (§7.4).
+        if (!g.has_grab) {
+            const auto it = g.body_baseline.find(g.body_points.front());
+            if (it != g.body_baseline.end()) g.grab = it->second;
+        }
+    } else if (kind == DragKind::Radius && g.has_grab) {
+        sk::EntityID center;
+        double radius = 0.0;
+        if (curve_center_and_radius(*tr.sketch, g.drag_entity, center, radius)) {
+            const auto it = g.baseline.find(center);
+            if (it != g.baseline.end()) {
+                g.radius_offset = std::hypot(g.grab.first - it->second.first,
+                                             g.grab.second - it->second.second) -
+                                  radius;
+            }
+        }
+    }
+
+    g.baseline_curves = collect_curves(*tr.sketch);
+    g.last_reported_curves = g.baseline_curves;
     g.sketch = std::move(tr.sketch);
     g.index = std::move(tr.index);
     gestures_[gesture_id] = std::move(g);
 
     json result = {{"gestureId", gesture_id}, {"ready", true}};
     return Envelope::ok_response(req.id, std::move(result));
+}
+
+// --- one drag step, per SCHEMA §7.4 target kind -----------------------------
+//
+// The pin set is the whole design. There is no single set that serves all four
+// kinds, which is exactly why `Sketch::solveWithTargets` takes an EXPLICIT one:
+//   * Point      — `beginPointDrag`'s pin-everything strategy (unchanged).
+//   * ArcEnd     — everything except the arc's two endpoints.
+//   * Radius     — the curve's center only.
+//   * EntityBody — nothing at all.
+// Each case documents why below. Targets always reach PlaneGCS as tag(−1)
+// drives, so a committed constraint outranks them and an entity that lands away
+// from the cursor is a SUCCESS reporting the solved pose (§7.4).
+sk::SolveResult SolverLane::run_step(Gesture& g, double tx, double ty) {
+    sk::Sketch& sketch = *g.sketch;
+
+    switch (g.kind) {
+        case DragKind::Point:
+            // Byte-identical to the pre-SP-2 lane: one point, one position,
+            // `beginPointDrag`'s pins, `solveWithDrag`.
+            return sketch.solveWithDrag(g.drag_point, sk::Vec2d{tx, ty});
+
+        case DragKind::ArcEnd: {
+            // Pin every point EXCEPT the arc's own two endpoints. The CENTER is
+            // in that set on purpose — a reshape must not translate the arc —
+            // while the SIBLING endpoint is deliberately left free: the four
+            // internal arc rules already tie both endpoints to
+            // center+radius+angles, so pinning the sibling over-determines the
+            // system and the solve could only refuse. Letting it float is what
+            // turns the drag into a reshape (radius + both angles follow).
+            const auto* arc = sketch.getEntityAs<sk::SketchArc>(g.drag_entity);
+            std::unordered_set<sk::EntityID> pins;
+            for (const auto& e : sketch.getAllEntities()) {
+                if (!e || e->type() != sk::EntityType::Point) continue;
+                if (arc && (e->id() == arc->startPointId() || e->id() == arc->endPointId())) {
+                    continue;
+                }
+                pins.insert(e->id());
+            }
+            sk::SolveResult r = sketch.solveWithTargets({{g.drag_point, sk::Vec2d{tx, ty}}}, {},
+                                                        pins);
+            // §7.4 arc sweep floor: a collapsed arc cannot be recovered by
+            // dragging further, so the pose is never entered. Restore what was
+            // last REPORTED (positions AND curves, so the incremental deltas
+            // stay honest) and answer partial with the gesture still OPEN.
+            // (`arc` survives the solve — solving never reallocates entities.)
+            if (r.success && arc && arc_sweep_collapsed(*arc)) {
+                restore_pose(sketch, g.last_reported, g.last_reported_curves);
+                r.success = false;
+                r.errorMessage = "Arc sweep below MIN_ARC_SWEEP";
+            }
+            return r;
+        }
+
+        case DragKind::Radius: {
+            // Pin the center ONLY: the cursor sets the radius and the curve must
+            // not slide sideways, but everything else stays free so a Tangent (or
+            // any other coupling) can propagate the new radius outward.
+            sk::EntityID center;
+            double radius = 0.0;
+            if (!curve_center_and_radius(sketch, g.drag_entity, center, radius)) {
+                sk::SolveResult r;
+                r.success = false;
+                r.errorMessage = "Drag target curve not found";
+                return r;
+            }
+            const auto* center_point = sketch.getEntityAs<sk::SketchPoint>(center);
+            const double cx = center_point ? center_point->position().X() : 0.0;
+            const double cy = center_point ? center_point->position().Y() : 0.0;
+            // CURRENT center, not the baseline one: a constrained center that
+            // moved during the gesture would otherwise shear the radius by
+            // exactly how far it moved.
+            const double target = std::max(
+                std::hypot(tx - cx, ty - cy) - g.radius_offset,
+                sk::constants::MIN_GEOMETRY_SIZE);  // §7.4 floor: never zero/negative
+            std::unordered_set<sk::EntityID> pins;
+            if (!center.empty()) pins.insert(center);
+            return sketch.solveWithTargets({}, {{g.drag_entity, target}}, pins);
+        }
+
+        case DragKind::EntityBody: {
+            // Pin NOTHING. Whatever is welded or constrained to this entity has
+            // to be free to follow, and pinning "the rest of the sketch" would
+            // refuse the drag outright. Targets come from the BeginGesture
+            // baseline plus the cursor delta — always from the baseline, never
+            // accumulated, so a dropped frame costs nothing (latest-wins).
+            const double dx = tx - g.grab.first;
+            const double dy = ty - g.grab.second;
+            std::unordered_map<sk::EntityID, sk::Vec2d> targets;
+            targets.reserve(g.body_points.size());
+            for (const sk::EntityID& pid : g.body_points) {
+                const auto it = g.body_baseline.find(pid);
+                if (it == g.body_baseline.end()) continue;
+                targets[pid] = sk::Vec2d{it->second.first + dx, it->second.second + dy};
+            }
+            return sketch.solveWithTargets(targets, {}, {});
+        }
+    }
+
+    sk::SolveResult unreachable;
+    unreachable.success = false;
+    unreachable.errorMessage = "Unknown drag kind";
+    return unreachable;
 }
 
 // --- SolveDrag --------------------------------------------------------------
@@ -275,13 +650,15 @@ Envelope SolverLane::on_drag(const Envelope& req) {
     if (!read_target(args, tx, ty)) return err(req, "OP_FAILED", "SolveDrag: invalid target");
 
     const auto before = g.last_reported;  // deltas are reported incrementally
+    const auto before_curves = g.last_reported_curves;
     const auto t0 = std::chrono::steady_clock::now();
-    sk::SolveResult r = g.sketch->solveWithDrag(g.drag_point, sk::Vec2d{tx, ty});
+    sk::SolveResult r = run_step(g, tx, ty);
     const auto t1 = std::chrono::steady_clock::now();
     const auto solve_micros =
         std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
 
     const auto cur = collect_positions(*g.sketch);
+    const auto cur_curves = collect_curves(*g.sketch);
 
     // Status precedence (SCHEMA §7.4: success | partial | conflicting | redundant):
     // conflicting > redundant > success, with partial for a non-converged solve.
@@ -303,7 +680,9 @@ Envelope SolverLane::on_drag(const Envelope& req) {
     }
 
     json positions = changed_positions(before, cur, g.index);
+    json curves = changed_curves(before_curves, cur_curves, g.index);
     g.last_reported = cur;
+    g.last_reported_curves = cur_curves;
     g.last_success = r.success;
 
     json result = {
@@ -313,6 +692,9 @@ Envelope SolverLane::on_drag(const Envelope& req) {
         {"dof", g.dof},
         {"conflicting", conflicting},
         {"positions", std::move(positions)},
+        // Additive §7.4 channel: the curve members `positions` structurally
+        // cannot carry. Emitted for every kind (an absent one parses as {}).
+        {"curves", std::move(curves)},
         {"solveMicros", solve_micros},
     };
     return Envelope::ok_response(req.id, std::move(result));
@@ -340,16 +722,21 @@ Envelope SolverLane::on_end(const Envelope& req) {
         args["commit"].contains("finalTarget")) {
         const json ft = args["commit"]["finalTarget"];
         if (ft.is_array() && ft.size() >= 2 && ft[0].is_number() && ft[1].is_number()) {
-            r = g.sketch->solveWithDrag(g.drag_point, sk::Vec2d{ft[0].get<double>(),
-                                                                ft[1].get<double>()});
+            // Same per-kind dispatch the drag steps used — the committed pose
+            // must be produced by the same pin sets that produced the preview.
+            r = run_step(g, ft[0].get<double>(), ft[1].get<double>());
             did_final_drag = true;
         }
     }
-    g.sketch->endPointDrag();
+    // Only the Point kind ever opened a point drag (see on_begin), and
+    // endPointDrag() also owns the failed-gesture rollback — calling it for a
+    // kind that never began one would be a rollback of nothing at best.
+    if (g.kind == DragKind::Point) g.sketch->endPointDrag();
     if (!did_final_drag) r = g.sketch->solve();
 
     const int dof = g.dof;
     const auto cur = collect_positions(*g.sketch);
+    const auto cur_curves = collect_curves(*g.sketch);
 
     // Status precedence matches on_drag (SCHEMA §7.4): conflicting > redundant >
     // success; partial otherwise. Redundancy is the gesture-fixed g.redundant.
@@ -378,6 +765,8 @@ Envelope SolverLane::on_end(const Envelope& req) {
         {"dof", dof},
         {"conflicting", conflicting},
         {"positions", changed_positions(g.baseline, cur, g.index)},
+        // Same additive §7.4 channel as SolveDrag, baselined at BeginGesture.
+        {"curves", changed_curves(g.baseline_curves, cur_curves, g.index)},
         {"sketchRevision", new_rev},
     };
     return Envelope::ok_response(req.id, std::move(result));

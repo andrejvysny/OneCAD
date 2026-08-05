@@ -812,21 +812,101 @@ pub async fn sketch_upsert(
     Ok(result)
 }
 
-/// Opens a drag gesture on a point (`BeginGesture`; SCHEMA §7.4).
+/// What the pointer grabbed (`BeginGesture.drag`; SCHEMA §7.4) — `{kind, entity,
+/// role?, grab?}`. Validated STRICTLY into a [`wire::GestureTarget`]: an unknown
+/// `kind` or `role`, or an unparseable `entity`, is refused here rather than
+/// forwarded, because §7.4 forbids degrading an unrecognized target to a point
+/// drag (it would move a handle the user never grabbed).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GestureTargetArgs {
+    pub kind: String,
+    pub entity: String,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub grab: Option<[f64; 2]>,
+}
+
+/// The five §7.4 `drag.role` tokens, case-folded. Mapping (rather than
+/// forwarding) the client string is what makes the role a `&'static str` on the
+/// wire — a typo fails at this boundary instead of becoming `REF_UNRESOLVED`
+/// three layers down.
+fn parse_gesture_role(role: &str) -> Option<&'static str> {
+    match role.to_ascii_lowercase().as_str() {
+        "start" => Some("start"),
+        "end" => Some("end"),
+        "center" => Some("center"),
+        "p0" => Some("p0"),
+        "p1" => Some("p1"),
+        _ => None,
+    }
+}
+
+impl GestureTargetArgs {
+    fn validate(self) -> Result<wire::GestureTarget, ApiError> {
+        let kind = wire::DragKind::parse(&self.kind).ok_or_else(|| {
+            ApiError::InvalidCommand(format!(
+                "beginGesture: unknown drag kind {:?} (point|arcEnd|radius|entityBody)",
+                self.kind
+            ))
+        })?;
+        let entity = EntityId::from_str(&self.entity).map_err(|e| {
+            ApiError::InvalidCommand(format!("beginGesture: bad entity {:?}: {e}", self.entity))
+        })?;
+        let role = match self.role.as_deref().filter(|r| !r.is_empty()) {
+            None => None,
+            Some(r) => Some(parse_gesture_role(r).ok_or_else(|| {
+                ApiError::InvalidCommand(format!(
+                    "beginGesture: unknown drag role {r:?} (start|end|center|p0|p1)"
+                ))
+            })?),
+        };
+        if kind == wire::DragKind::ArcEnd && !matches!(role, Some("start") | Some("end")) {
+            return Err(ApiError::InvalidCommand(
+                "beginGesture: arcEnd requires role start|end".into(),
+            ));
+        }
+        if let Some(grab) = self.grab {
+            if !grab.iter().all(|v| v.is_finite()) {
+                return Err(ApiError::InvalidCommand(format!(
+                    "beginGesture: non-finite grab {grab:?}"
+                )));
+            }
+        }
+        Ok(wire::GestureTarget {
+            kind,
+            entity,
+            role,
+            grab: self.grab,
+        })
+    }
+}
+
+/// Opens a drag gesture (`BeginGesture`; SCHEMA §7.4).
+///
+/// `target` is OPTIONAL and additive: absent ⇒ the plain point drag on
+/// `drag_point`, whose request stays byte-identical to the pre-SP-2 form, so every
+/// existing caller is unchanged.
 #[tauri::command]
 pub async fn begin_gesture(
     state: State<'_, AppState>,
     sketch_id: String,
     drag_point: String,
+    target: Option<GestureTargetArgs>,
 ) -> Result<BeginGestureDto, ApiError> {
     let id = parse_sketch_id(&sketch_id)?;
     let point = EntityId::from_str(&drag_point)
         .map_err(|e| ApiError::InvalidCommand(format!("bad dragPoint {drag_point:?}: {e}")))?;
+    let target = match target {
+        Some(t) => t.validate()?,
+        None => wire::GestureTarget::point(point),
+    };
     let mut guard = state.runtime.lock().await;
     let rt = guard
         .as_mut()
         .ok_or_else(|| ApiError::NoDocument("beginGesture".into()))?;
-    Ok(rt.begin_gesture(id, point).await?)
+    Ok(rt.begin_gesture(id, point, target).await?)
 }
 
 /// One latest-wins incremental drag solve (`SolveDrag`; preview only).
@@ -1919,6 +1999,68 @@ mod tests {
         let s = now_rfc3339();
         assert_eq!(s.len(), 20, "YYYY-MM-DDThh:mm:ssZ");
         assert!(s.ends_with('Z') && s.contains('T'));
+    }
+
+    #[test]
+    fn gesture_target_args_validate_strictly() {
+        let entity = EntityId(uuid::Uuid::from_u128(0x41));
+        let parse = |v: serde_json::Value| {
+            serde_json::from_value::<GestureTargetArgs>(v)
+                .expect("deserializes")
+                .validate()
+        };
+
+        // Full arcEnd target: kind + entity + role + grab all survive.
+        let ok = parse(serde_json::json!({
+            "kind": "arcEnd", "entity": entity.to_string(), "role": "End", "grab": [1.5, -2.0]
+        }))
+        .expect("valid arcEnd");
+        assert_eq!(
+            ok,
+            wire::GestureTarget {
+                kind: wire::DragKind::ArcEnd,
+                entity,
+                role: Some("end"), // case-folded onto the §7.4 token
+                grab: Some([1.5, -2.0]),
+            }
+        );
+        // Optional members really are optional.
+        let body = parse(serde_json::json!({ "kind": "entityBody", "entity": entity.to_string() }))
+            .expect("valid entityBody");
+        assert_eq!(body.role, None);
+        assert_eq!(body.grab, None);
+
+        // Every rejection: unknown kind (NEVER degraded to point), bad entity,
+        // unknown role, arcEnd without a usable role, non-finite grab.
+        for bad in [
+            serde_json::json!({ "kind": "scale", "entity": entity.to_string() }),
+            serde_json::json!({ "kind": "Point", "entity": entity.to_string() }),
+            serde_json::json!({ "kind": "radius", "entity": "not-a-uuid" }),
+            serde_json::json!({ "kind": "point", "entity": entity.to_string(), "role": "middle" }),
+            serde_json::json!({ "kind": "arcEnd", "entity": entity.to_string() }),
+            serde_json::json!({ "kind": "arcEnd", "entity": entity.to_string(), "role": "center" }),
+        ] {
+            let err = parse(bad.clone()).expect_err(&format!("{bad} must be refused"));
+            assert!(
+                matches!(err, ApiError::InvalidCommand(_)),
+                "{bad} → {err:?} should be an invalid-command error"
+            );
+        }
+
+        // A non-finite `grab` cannot even be spelled in JSON (it stringifies to
+        // null and fails at deserialization), so this guard is asserted against a
+        // directly-constructed value. It matters because the worker's `read_grab`
+        // treats a non-finite grab as ABSENT — which silently turns a body drag
+        // into an anchor teleport instead of failing.
+        let err = GestureTargetArgs {
+            kind: "entityBody".into(),
+            entity: entity.to_string(),
+            role: None,
+            grab: Some([f64::NAN, 0.0]),
+        }
+        .validate()
+        .expect_err("a non-finite grab is refused");
+        assert!(matches!(err, ApiError::InvalidCommand(_)), "{err:?}");
     }
 
     #[test]

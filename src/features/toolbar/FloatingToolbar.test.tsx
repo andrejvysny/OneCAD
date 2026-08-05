@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { FloatingToolbar } from "./FloatingToolbar";
+import { ICON_MONO } from "@/icons/Icon";
 import { resetStores } from "@/test/resetStores";
 
 describe("FloatingToolbar", () => {
@@ -17,6 +18,20 @@ describe("FloatingToolbar", () => {
     expect(screen.getByRole("button", { name: "Select" })).toHaveAttribute(
       "aria-pressed",
       "true",
+    );
+  });
+
+  it("collapses the icon to monochrome on the ACTIVE tool only", () => {
+    // The active button paints its glyph `text-accent`. Without the override
+    // the icon's own accent tone stays a second, near-identical blue and the
+    // two-tone split turns to mush. Idle buttons are neutral ink and must keep
+    // their accent, so the override must NOT be there.
+    render(<FloatingToolbar />);
+    expect(screen.getByRole("button", { name: "Select" }).className).toContain(
+      ICON_MONO,
+    );
+    expect(screen.getByRole("button", { name: "Extrude" }).className).not.toContain(
+      ICON_MONO,
     );
   });
 
@@ -45,7 +60,7 @@ describe("FloatingToolbar", () => {
     // The Model "New sketch" tool enters sketch mode.
     await user.click(screen.getByRole("button", { name: "New sketch" }));
 
-    for (const name of ["Line", "Rectangle", "Circle", "Arc", "Dimension", "Trim", "Mirror"]) {
+    for (const name of ["Line", "Rectangle", "Circle", "Arc", "3-point arc", "Dimension", "Trim", "Extend", "Mirror"]) {
       expect(screen.getByRole("button", { name })).toBeInTheDocument();
     }
     expect(screen.queryByRole("button", { name: "Extrude" })).toBeNull();

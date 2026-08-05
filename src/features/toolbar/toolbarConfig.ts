@@ -60,6 +60,9 @@ export const SKETCH_TOOLS: ToolEntry[] = [
   { id: "circle", icon: "circle", label: "Circle", shortcut: "C" },
   { id: "ellipse", icon: "ellipse", label: "Ellipse", shortcut: "O" },
   { id: "arc", icon: "arc", label: "Arc", shortcut: "A" },
+  // SP-4 — the second arc gesture, next to the first: same shape, the other
+  // three inputs (endpoints + a point on the arc, instead of centre-start-end).
+  { id: "arc3p", icon: "arc3p", label: "3-point arc", shortcut: "⇧A" },
   { sep: true },
   { id: "polygon", icon: "polygon", label: "Polygon", shortcut: "G" },
   { id: "slot", icon: "slot", label: "Slot", shortcut: "S" },
@@ -67,6 +70,9 @@ export const SKETCH_TOOLS: ToolEntry[] = [
   { sep: true },
   { id: "dimension", icon: "dimension", label: "Dimension", shortcut: "D" },
   { id: "trim", icon: "trim", label: "Trim", shortcut: "T" },
+  // SP-4 — Trim's counterpart, immediately after it: the same pick gesture, the
+  // opposite effect, so the pair reads as one decision (cut back / grow out).
+  { id: "extend", icon: "extend", label: "Extend", shortcut: "⇧T" },
   { id: "mirror", icon: "mirror", label: "Mirror", shortcut: "M" },
   // WP-C T2b — the two 2D EDIT tools, grouped with Trim/Mirror (they modify or
   // derive from geometry that already exists, unlike the draw tools above).

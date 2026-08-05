@@ -34,6 +34,7 @@ use onecad_core::regen::{
 };
 
 use onecad_lib::worker::manager::SupervisorConfig;
+use onecad_lib::worker::wire::GestureTarget;
 use onecad_lib::worker::{resolve_worker_path, MeshProvider, SolverEngine, WorkerManager};
 
 fn real_worker() -> Option<PathBuf> {
@@ -564,7 +565,14 @@ async fn real_worker_solver_lane_rectangle_gesture() {
     );
 
     let g = wm
-        .begin_gesture(&sketch.id.to_string(), up.sketch_revision, 51, drag, "")
+        .begin_gesture(
+            &sketch.id.to_string(),
+            up.sketch_revision,
+            51,
+            drag,
+            GestureTarget::point(drag),
+            "",
+        )
         .await
         .expect("BeginGesture");
     assert!(g.ready);
