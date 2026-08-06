@@ -665,12 +665,52 @@ Terminal resp — `PlanPrepared`:
     { "stepIndex": 1, "status": "ok",          "bodyIds": ["body_3"] },
     { "stepIndex": 6, "status": "needsRepair", "refCount": 1 }
   ],
-  "historyPrefixHash": "9c4d…"
+  "historyPrefixHash": "9c4d…",
+
+  // OPTIONAL — present iff req.args carried `artifacts.tessellate` (see below).
+  "artifacts": {
+    "tessellate": {
+      "meshes": [
+        { "bodyId": "body_3", "format": "MESH1", "bin": "mesh:body_3",
+          "lod": "coarse", "totalBytes": 4096, "triangleCount": 12,
+          "sha256": "…", "snapshotId": 5013 }
+      ]
+    }
+  }
 }
+// bin: [ { "name": "mesh:body_3", "off": 0, "len": 4096 } ]
 ```
 
 The prepared snapshot is held in scratch, NOT published. `preparedSnapshotId`
 becomes live only after `AcceptPrepared`.
+
+- **`artifacts.tessellate` (OPTIONAL) — the prepare's inline meshes.** When the
+  request carried an `artifacts.tessellate` rider, the worker tessellates **every
+  body in the prepared scratch** and returns one §7.6-shaped mesh handle per body,
+  with the MESH1 bytes appended to *this* `resp`'s binary tail and addressed by the
+  handle's `bin` section name. `snapshotId` is the prepare's `preparedSnapshotId`.
+  Emitting it is what makes a regen tessellate each body **once** instead of twice
+  (prepare, then a separate `Tessellate` pull per body for the viewport).
+- **ABSENT on the idempotent cached re-return.** Re-sending the same `jobId` while
+  the prepare is still held returns the cached `PlanPrepared` JSON, which carries
+  **no** `artifacts` key — the bytes rode the original `resp`'s tail only, and a
+  cached result referencing `mesh:*` sections that are not in *this* frame would
+  dangle. Readers MUST tolerate the absence.
+- **Readers MUST treat this as a cache, never as geometry authority (Invariant 7).**
+  A missing, truncated, or failing-verification handle degrades to a `Tessellate`
+  pull for that body and MUST NOT fail the plan. In particular a reader MUST verify
+  `totalBytes` + `sha256` and the MESH1 header before using a blob, MUST check the
+  handle's `snapshotId` against `preparedSnapshotId`, and MUST cap total ingest.
+  Rust does exactly this (`worker::wire::parse_plan_artifact_meshes`): a malformed
+  handle is warned and skipped individually; an invalid section table drops the
+  whole artifact set; both leave the plan a normal success.
+- **§5.2 tension (current behavior, documented not blessed).** §5.2 says a payload
+  larger than the negotiated `chunkSize` (default 1 MiB) MUST be chunked. The
+  worker inlines these artifact blobs **regardless of size**, so a dense body can
+  produce a terminal `resp` well past `chunkSize`. That is the shipped behavior and
+  is what this section describes; chunking the artifact lane (or capping which
+  bodies are inlined) is the forward direction, and a reader's ingest cap is the
+  interim guard. The `Tessellate` verb itself is unaffected — it still streams.
 
 #### AcceptPrepared
 Publishes the prepared scratch snapshot into the active session atomically. The
@@ -1085,6 +1125,68 @@ names from OneCAD-CPP `ShellParams`. Added M6a (see the [Changelog](#14-changelo
   **NeedsRepair** ([§9](#9-needsrepair-payload)), never a wrong bind. The result
   **replaces** the shelled body (id preserved; OCCT history folds into its
   partition).
+
+**OffsetFace** (`op.offsetFace`) — Shapr3D-style direct-modeling face offset:
+selected face(s) move along their surface normals, adjacent faces extend/trim
+(`BRepOffset_MakeOffset` per-face `SetOffsetOnFace`, mode Skin, boolean
+Intersection=false, join `GeomAbs_Intersection`). Always MODIFIES `targetBodyId`
+in place — never NewBody, never a body fan-out (>1 output solid ⇒ recoverable
+`OP_FAILED`). V1 scope: planar + cylindrical operative faces. Added 2026-08-06.
+
+```json
+// inputs: [ semanticRef(face) per faceIds entry, in order; + semanticRef(opposite face) LAST iff distanceType == "Total" ]
+// params
+{ "faceIds": ["el_…a1", "el_…b2"],
+  "distance": 2.5,
+  "distanceType": "Offset",       // Offset | Total | Radius | Diameter (default Offset)
+  "chainTangentFaces": true,      // default true — authoring metadata (see below)
+  "oppositeFaceId": "el_…c3",     // Total only, optional + skip-none
+  "targetBodyId": "body_1" }
+```
+
+- `faceIds` mirrors Fillet's `edgeIds` discipline: entries are `ElementId`s (or
+  snapshot-scoped TopoKeys pre-promotion), and `inputs[]` carries the
+  corresponding TYPED semantic refs (descriptor + anchor evidence, one per face,
+  same order) — the ladder ([§10](#10-resolution-ladder)) resolves each;
+  unresolved/ambiguous ⇒ **NeedsRepair** ([§9](#9-needsrepair-payload)), never a
+  guess. **Slot order is NORMATIVE**: operative faces in stored order, then the
+  Total opposite face (when present) LAST — the Rust repair paths
+  (`InputPath::OffsetFaceFace{index}` / `OffsetFaceOpposite`) and the frontend
+  `inputPathFor` table mirror it.
+- `faceIds` is the FULL FROZEN operative set — picked faces PLUS the tangent
+  chain, expanded once at authoring by `PrepareOffsetFace`
+  ([§7.6](#prepareoffsetface)) and persisted. The worker NEVER re-expands at
+  regen (an upstream edit must not silently widen/narrow the operative set);
+  `chainTangentFaces` is retained as authoring metadata for re-edit UX.
+  **Kernel constraint (spike-characterized)**: `BRepOffset_MakeOffset`
+  auto-propagates the offset across G1-tangent junctions, so a resolved
+  operative set whose tangent closure (G1 at ≈1e-4 rad via
+  `BRepLib::ContinuityOfFaces`) contains non-member faces ⇒ recoverable
+  `OP_FAILED` naming the missing faces — the kernel cannot hold them fixed.
+- `distance` is the USER's value, interpreted per `distanceType`; the per-face
+  signed kernel offset `d` is derived EVERY regen from current upstream geometry:
+  - `Offset`: `d = distance` (signed; positive = along the topological outward
+    normal = grows material). Multi-face allowed; the ONLY type valid for a
+    multi-face set that is not a coaxial cylindrical closure.
+  - `Radius` / `Diameter` (cylindrical only): `σ = sign(n_out·r̂)` derived
+    geometrically (boss +1, hole −1; requires `|n_out·r̂| ≈ 1`);
+    `d = σ(distance − R)` for Radius, `d = σ(distance/2 − R)` for Diameter.
+    Valid for ONE face or a coaxial equal-radius same-σ cylindrical set.
+    Preflight `R + σd > tol` — the OCCT negative-radius inside-out result is
+    never allowed.
+  - `Total` (single planar face, chain OFF, `oppositeFaceId` present):
+    thickness `t = n·(p_sel − p_opp)` against the PERSISTED opposite face
+    (re-resolved verbatim each regen, never re-discovered); `d = distance − t`.
+- `|d| ≤ tol` ⇒ identity no-op SUCCESS (body unchanged, `modified` event).
+- Validity gate beyond `IsDone` + `BRepCheck`: exactly one solid, positive
+  finite volume, no self-interference, AND semantic postconditions (each
+  operated plane moved by exactly `d`; each operated cylinder coaxial at the
+  predicted radius). Any miss ⇒ recoverable `OP_FAILED`; the result is never
+  published. Values are NEVER clamped.
+- Lineage: `modified` on `targetBodyId` (+ `rankKey`); element history folds via
+  the offset image (`OffsetFacesFromShapes`/`OffsetEdgesFromShapes` — the public
+  `Generated`/`Modified` lists are empty for faces, spike-characterized) through
+  the partition; image gaps fall to the descriptor ladder.
 
 **LinearPattern** (`op.linearPattern`) — `count` copies of a source body translated
 `spacing` along `direction`. Field names from OneCAD-CPP `LinearPatternParams`
@@ -1820,6 +1922,62 @@ byte-identical across fresh worker processes. The emission order is normative:
 **Lane.** Kernel lane, alongside `ExecutePlan`/`PreviewOp`. It takes no locks
 beyond the brief head copy, so it does not block an in-flight regen.
 
+#### PrepareOffsetFace
+
+Read-only OffsetFace authoring handshake — the first half of the
+[`op.offsetFace`](#73-op-payload-schemas-vertical-slice) freeze. Given the
+user's picked faces, it computes on a copy of the head: the G1 tangent-chain
+closure (`BRepLib::ContinuityOfFaces ≥ G1` at `angleTol` ≈ 1e-4 rad, BFS over
+2-manifold edges, output sorted by face ordinal), the Total opposite-face
+candidate (fail-closed: full-footprint anti-parallel coverage + material-column
+validation, exactly one passing candidate), and the current dimensions that seed
+absolute distance types. Added 2026-08-06.
+
+It does **not** fence, prepare, accept, discard, or — critically — **mint**:
+the response carries snapshot-scoped TopoKeys + descriptor/anchor EVIDENCE only,
+never `ElementId`s. Rust promotes the evidence and mints ids
+([AcquireElementIds](#acquireelementids) path); the frontend then builds the
+final persisted params and runs a final exact [`PreviewOp`](#previewop) with
+them before commit. OffsetFace commits FAIL CLOSED on a missing/failed
+handshake (op-specific strictness — the generic preview barrier's
+timeout-success is not sufficient here).
+
+```json
+// req.args
+{ "snapshotId": 5012,
+  "pickedFaces": [ { "bodyId": "body_3", "topoKey": "f:22" },   // or { "elementId": "el_…4a1" }
+                   { "elementId": "el_…9c" } ],
+  "chainTangentFaces": true,
+  "distanceType": "Offset" }        // Offset | Total | Radius | Diameter
+// result
+{ "snapshotId": 5012,               // ECHO of the head it answered against
+  "targetBodyId": "body_3",
+  "faces": [                        // FULL operative closure, stable face-ordinal order,
+    {                               // picked ∪ tangent chain (picked flagged)
+      "topoKey": "f:22", "picked": true,
+      "anchor": { "worldPoint": [1.0, 2.0, 30.0], "surfaceUv": [0.5, 0.5] },
+      "descriptor": { /* §10 evidence descriptor, verbatim */ } },
+    { "topoKey": "f:23", "picked": false, "anchor": { … }, "descriptor": { … } }
+  ],
+  "oppositeFace": { "topoKey": "f:04", "anchor": { … }, "descriptor": { … } },  // Total only
+  "currentDims": { "radius": 5.0, "thickness": 10.0 },  // keys present when measurable
+  "refusal": null }                 // or { "code", "message", "faces": ["f:31"] }
+```
+
+- **Refusals are answers, not errors** (`ok:true`): `crossBody` (picks span
+  bodies), `unsupportedSurface` (non-planar/non-cylindrical in the closure,
+  naming the faces), `chainMismatch` (`chainTangentFaces:false` but the closure
+  exceeds the picks — the kernel auto-propagates across tangent junctions and
+  cannot hold them fixed, spike-characterized), `noUniqueOpposite` /
+  `notPlanar` / `chainOnTotal` (Total constraints), `notCylindrical` /
+  `mixedAxis` (Radius/Diameter coaxial-set constraints), `nonManifold`.
+- A stale `snapshotId` MUST be refused with `STALE_PREVIEW` semantics (compare
+  [AcquireElementIds](#acquireelementids) `REF_UNRESOLVED`): the closure is
+  about to be FROZEN into a document record, so unlike the advisory §7.5 reads
+  this verb IS snapshot-fenced.
+- Determinism: identical head + identical request ⇒ byte-identical response
+  (ordinal ordering everywhere, no pointer/hash iteration).
+
 ### 7.7 Checkpoints
 
 #### SaveCheckpoint
@@ -2259,6 +2417,46 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-06 — §7.3 NEW op `OffsetFace` (`op.offsetFace`) + §7.6 NEW read-only
+  verb `PrepareOffsetFace`.** Cross-track sign-off recorded as
+  **orchestrator-approved 2026-08-06 (single-repo, both tracks land together)**.
+  Direct-modeling per-face offset (planar + cylindrical V1): params carry the
+  Fillet-discipline `faceIds` + typed `inputs[]` refs (operative faces in stored
+  order, Total `oppositeFaceId` ref LAST — slot order normative for the repair
+  paths), `distance` interpreted per `distanceType`
+  (Offset|Total|Radius|Diameter), mandatory `targetBodyId`, always `modified`
+  lineage (never NewBody / fan-out). The operative set is FROZEN at authoring:
+  `PrepareOffsetFace` computes the G1 tangent closure + Total opposite + current
+  dims on a head copy and returns TopoKey EVIDENCE only (Rust mints, per
+  Invariant 2); the worker never re-expands at regen. Kernel notes pinned by the
+  Phase-0 spike (`worker/tests/test_offsetface_spike.cpp`): tangent
+  auto-propagation ⇒ `chainMismatch` refusal, face history via the offset image
+  (public `Generated`/`Modified` are face-empty), never-clamp + semantic
+  postconditions (exact plane shift / coaxial radius), single-solid gate.
+  Fixtures: `worker/tests/fixtures/executeplan_offsetface.ndjson` (new).
+
+- **2026-08-05 — §7.2 DESCRIPTIVE: document the OPTIONAL `PlanPrepared.artifacts`
+  terminal key.** Cross-track sign-off recorded as **orchestrator-approved
+  2026-08-05 (single-repo, worker unchanged)**. **No wire change of any kind.** The
+  C++ worker has emitted `result.artifacts.tessellate.meshes[]` (with the MESH1
+  blobs in the terminal `resp`'s binary tail) since the `artifacts.tessellate`
+  request rider shipped — `worker/src/session/PlanExecutor.cpp::attach_tessellate`.
+  The §7.2 terminal block simply never described it, so what the worker sent was an
+  undocumented extension that Rust discarded, then re-fetched body-by-body via
+  `Tessellate` — every body tessellated twice per regen. This entry documents the
+  existing shape, pins the two properties readers were already relying on
+  implicitly (present iff the request carried the rider; **absent** on the
+  idempotent cached re-return), and states the Invariant-7 reader rule: it is a
+  cache fill, so any defect degrades to a `Tessellate` pull and never fails a plan.
+  It also records the standing §5.2 tension — the worker inlines these blobs
+  regardless of `chunkSize`; chunking that lane is the forward direction, and the
+  reader-side ingest cap is the interim guard.
+  **No worker change, no `protocolVersion` change, no fixture bump — 0 bytes move.**
+  Rust-side consumer: `worker::wire::parse_plan_artifact_meshes` →
+  `PlanPrepared.artifact_meshes` → `RegenExecutor` mesh sink → the runtime
+  `MeshCache`, seeded strictly inside the same fencing guard that commits the
+  snapshot (a superseded prepare caches nothing).
 
 - **2026-08-04 — §7.4 ADDITIVE `BeginGesture.drag.{kind,entity,role,grab}` +
   `SolveDrag`/`EndGesture` `curves`** (SP-2 direct manipulation; cross-track

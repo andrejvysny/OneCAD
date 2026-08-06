@@ -62,6 +62,17 @@ import type { Vec3 } from "@/tools/preview/depthProjection";
 
 const FRAME_RING = 240; // ?vpdebug frame-interval ring buffer capacity
 
+/**
+ * Hard ceiling on a `captureThumbnail()` data URL, in CHARACTERS.
+ *
+ * base64 costs 4 chars per 3 bytes, so this is ≈256 KiB decoded — comfortably
+ * under the backend's 512 KiB `preview_png` cap (`api::MAX_PREVIEW_PNG_BYTES`),
+ * with margin for the `data:image/png;base64,` prefix and for PNG's poor
+ * compression of a noisy render. Over it we return null rather than hand the
+ * save a payload Rust would only drop.
+ */
+const MAX_THUMBNAIL_CHARS = 340_000;
+
 export interface EngineInitOptions {
   experimentalWebGpu?: boolean;
   /** ?vpdebug — expose window.__vpFrames + a debug overlay label. */
@@ -337,6 +348,14 @@ export class ViewportEngine {
       getRoot: () => this.bodiesRoot,
       getViewportHeight: () => this.viewportSize().height,
       getFocusDistance: () => this.controls?.getDistance() ?? 260,
+      // Device px — the units a fat edge line's `material.resolution` uses. The
+      // Picker flushes it into the edge materials before every raycast (a
+      // LineSegments2 raycast at resolution (0,0) silently finds nothing).
+      getResolution: () => {
+        const { width, height } = this.viewportSize();
+        const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
+        return { w: width * dpr, h: height * dpr };
+      },
       invalidate: () => this.invalidate(),
       isActive: () => this.pickHandlers?.isActive() ?? false,
       onHover: (hit, x, y, alt) => this.pickHandlers?.onHover(hit, x, y, alt),
@@ -642,6 +661,53 @@ export class ViewportEngine {
       const out: number[] = new Array(n);
       for (let i = 0; i < n; i++) out[i] = this.frameTimes[(this.frameTimeCount - n + i) % FRAME_RING];
       w.__vpFrameTimes = out;
+    }
+  }
+
+  /**
+   * A PNG data URL of the current view, long edge ≤ `maxPx` — the thumbnail an
+   * EXPLICIT save persists into the `.onecad` container (the start screen's
+   * recent cards render it). `null` whenever a faithful capture is not possible.
+   *
+   * Why it can force a frame: rendering is ON-DEMAND, so an idle canvas holds
+   * whatever was drawn last (and, right after a resize, may hold nothing at all).
+   * One synchronous `renderFrame()` guarantees the pixels we read back are the
+   * scene as it stands. `preserveDrawingBuffer` (renderer.ts) is what keeps them
+   * readable after the render returns — without it the read yields a blank frame.
+   *
+   * WebGPU returns `null` on purpose: `WebGPURenderer.render()` is ASYNC, so the
+   * frame we just requested is not guaranteed to be in the swap chain when the
+   * synchronous `drawImage` samples it, and the WebGPU canvas is not configured
+   * for buffer preservation either. A blank or half-drawn thumbnail is worse than
+   * none, and the caller treats `null` as "save without a preview".
+   *
+   * NEVER throws — every failure resolves to `null`. A save carries the user's
+   * work; a screenshot is decoration (the backend applies the same rule).
+   */
+  captureThumbnail(maxPx = 512): string | null {
+    const handle = this.rendererHandle;
+    if (this.disposed || !handle || handle.isWebGPU) return null;
+    try {
+      this.renderFrame();
+      const src = handle.renderer.domElement;
+      const sw = src.width;
+      const sh = src.height;
+      if (!sw || !sh) return null;
+      const scale = Math.min(1, maxPx / Math.max(sw, sh)); // downscale only
+      const out = document.createElement("canvas");
+      out.width = Math.max(1, Math.round(sw * scale));
+      out.height = Math.max(1, Math.round(sh * scale));
+      const ctx = out.getContext("2d");
+      if (!ctx) return null;
+      ctx.drawImage(src, 0, 0, out.width, out.height);
+      const url = out.toDataURL("image/png");
+      if (!url.startsWith("data:image/png") || url.length > MAX_THUMBNAIL_CHARS) {
+        return null;
+      }
+      return url;
+    } catch (err) {
+      logWarn("vp", "thumbnail capture failed", { error: String(err) });
+      return null;
     }
   }
 
@@ -1013,6 +1079,43 @@ export class ViewportEngine {
     this.dragHandle.setScale(this.planePixelWorld());
     this.dragHandle.setVisible(true);
     this.invalidate();
+  }
+
+  /**
+   * Show the shared drag ARROW alone — no L1 prism — at `origin` pointing along
+   * `dir`, for a value tool whose own L1 is something else (OffsetFace draws
+   * translucent face clones through the ghost layer instead).
+   *
+   * Reuses the ONE `DragHandle` the extrude tool owns, so it inherits the whole
+   * arrangement already built around it for free: `hitExtrudeHandle` picks it,
+   * `hitTest` folds that into the orbit gate (a press that grabs the arrow never
+   * orbits), the per-frame `setScale` keeps it screen-sized, and `refreshColors`
+   * re-themes it. ONE tool is armed at a time, so a single instance is not a
+   * limitation — but it does mean a caller MUST pair this with
+   * {@link hideValueHandle} on its cancel path, or the next tool inherits a
+   * floating arrow.
+   */
+  showValueHandle(origin: Vec3, dir: Vec3): void {
+    if (this.disposed) return;
+    if (!this.dragHandle) {
+      this.dragHandle = new DragHandle({ root: this.interactionRoot, invalidate: () => this.invalidate() });
+    }
+    this.dragHandle.setAnchor(new THREE.Vector3().fromArray(origin), new THREE.Vector3().fromArray(dir));
+    this.dragHandle.setScale(this.planePixelWorld());
+    this.dragHandle.setVisible(true);
+    this.invalidate();
+  }
+
+  /** Hide the shared drag arrow WITHOUT touching any L1 preview mesh. */
+  hideValueHandle(): void {
+    this.dragHandle?.setVisible(false);
+    this.dragHandle?.setHover(false);
+    this.invalidate();
+  }
+
+  /** True while the shared drag arrow is on screen (gate / introspection probe). */
+  isValueHandleVisible(): boolean {
+    return this.dragHandle?.visible ?? false;
   }
 
   /** Set the live extrude depth on the L1 prism(s) (symmetric grows both ways). */

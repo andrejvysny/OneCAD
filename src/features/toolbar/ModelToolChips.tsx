@@ -24,7 +24,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useToolChipStore, toolChipStore } from "@/stores/toolChipStore";
 import { LENGTH_SUFFIX, formatLength, parseLength } from "@/units/format";
 import { useViewportEngine } from "@/viewport/engineBridge";
-import type { BooleanOperation } from "@/ipc/types";
+import type { BooleanOperation, OffsetDistanceType } from "@/ipc/types";
 import type {
   AlignPhase,
   PatternAxis,
@@ -58,6 +58,19 @@ const BOOLEAN_MODES: { mode: BooleanMode; label: string; testid: string }[] = [
 const EDGE_OPS: { edgeOp: EdgeOpKind; label: string; testid: string }[] = [
   { edgeOp: "Fillet", label: "Fillet", testid: "chip-edgeop-fillet" },
   { edgeOp: "Chamfer", label: "Chamfer", testid: "chip-edgeop-chamfer" },
+];
+
+/**
+ * The armed OFFSET-FACE distance-type segments (SCHEMA §7.3). WHICH of these are
+ * rendered is decided by the controller and passed through the chip store — a
+ * planar face offers `Offset`/`Total`, a cylindrical one `Offset`/`Radius`/
+ * `Diameter`, and a multi-face closure only `Offset`.
+ */
+const OFFSET_DISTANCE_TYPES: { type: OffsetDistanceType; label: string; testid: string }[] = [
+  { type: "Offset", label: "Offset", testid: "chip-offset-type-offset" },
+  { type: "Total", label: "Total", testid: "chip-offset-type-total" },
+  { type: "Radius", label: "Radius", testid: "chip-offset-type-radius" },
+  { type: "Diameter", label: "Diameter", testid: "chip-offset-type-diameter" },
 ];
 
 /**
@@ -98,7 +111,7 @@ function EndConditionSegments({
 }) {
   return (
     <div
-      className="flex overflow-hidden rounded-sm"
+      className="flex overflow-hidden rounded-full"
       role="group"
       aria-label="End condition"
       title={canUseBodyEnds ? undefined : "Through all / To next / To face need an existing body"}
@@ -157,7 +170,7 @@ function DraftSegment({
         title="Draft angle applied to the side faces (degrees)"
         onClick={() => setOpen((v) => !v)}
         className={cn(
-          "rounded-sm px-2 py-1 text-[11.5px] font-medium",
+          "rounded-full px-2 py-1 text-[11.5px] font-medium",
           deg !== 0 || open ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
         )}
       >
@@ -193,7 +206,7 @@ function SegmentToggle<T extends string>({
   testid?: (v: T) => string;
 }) {
   return (
-    <div className="flex overflow-hidden rounded-sm" role="group" aria-label={label}>
+    <div className="flex overflow-hidden rounded-full" role="group" aria-label={label}>
       {options.map((o) => (
         <button
           key={o}
@@ -221,7 +234,7 @@ function CountStepper({ count, onCount }: { count: number; onCount: (n: number) 
         type="button"
         aria-label="Fewer instances"
         onClick={() => onCount(count - 1)}
-        className="flex h-5 w-5 items-center justify-center rounded-sm bg-chip text-ink-3 hover:bg-hover-2"
+        className="flex h-5 w-5 items-center justify-center rounded-full bg-chip text-ink-3 hover:bg-hover-2"
       >
         −
       </button>
@@ -235,7 +248,7 @@ function CountStepper({ count, onCount }: { count: number; onCount: (n: number) 
         type="button"
         aria-label="More instances"
         onClick={() => onCount(count + 1)}
-        className="flex h-5 w-5 items-center justify-center rounded-sm bg-chip text-ink-3 hover:bg-hover-2"
+        className="flex h-5 w-5 items-center justify-center rounded-full bg-chip text-ink-3 hover:bg-hover-2"
       >
         +
       </button>
@@ -249,7 +262,7 @@ function ApplyButton() {
     <button
       type="button"
       onClick={() => toolChipStore.getState().onApply?.()}
-      className="rounded-sm bg-accent px-2 py-1 text-[11.5px] font-medium text-on-accent hover:opacity-90"
+      className="rounded-full bg-accent px-2 py-1 text-[11.5px] font-medium text-on-accent hover:opacity-90"
     >
       Apply
     </button>
@@ -265,7 +278,7 @@ function ConfirmButtons({ onConfirm, onCancel }: { onConfirm?: () => void; onCan
         data-testid="chip-confirm"
         aria-label="Confirm"
         onClick={() => onConfirm?.()}
-        className="rounded-sm bg-accent px-2 py-1 text-[11.5px] font-medium text-on-accent hover:opacity-90"
+        className="rounded-full bg-accent px-2 py-1 text-[11.5px] font-medium text-on-accent hover:opacity-90"
       >
         ✓
       </button>
@@ -274,7 +287,7 @@ function ConfirmButtons({ onConfirm, onCancel }: { onConfirm?: () => void; onCan
         data-testid="chip-cancel"
         aria-label="Cancel"
         onClick={() => onCancel?.()}
-        className="rounded-sm bg-chip px-2 py-1 text-[11.5px] font-medium text-ink-3 hover:bg-hover-2"
+        className="rounded-full bg-chip px-2 py-1 text-[11.5px] font-medium text-ink-3 hover:bg-hover-2"
       >
         ✕
       </button>
@@ -293,7 +306,7 @@ function SymmetricToggle({ pressed, onToggle }: { pressed: boolean; onToggle: ()
       title="Symmetric (hold Alt while dragging)"
       onClick={onToggle}
       className={cn(
-        "rounded-sm px-2 py-1 text-[11.5px] font-medium",
+        "rounded-full px-2 py-1 text-[11.5px] font-medium",
         pressed ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
       )}
     >
@@ -318,7 +331,7 @@ function BooleanModeSegments({
 }) {
   return (
     <div
-      className="flex overflow-hidden rounded-sm"
+      className="flex overflow-hidden rounded-full"
       role="group"
       aria-label="Boolean mode"
       title={canBoolean ? undefined : "Needs an existing body"}
@@ -360,7 +373,7 @@ function EdgeOpSegments({
   onPick: (edgeOp: EdgeOpKind) => void;
 }) {
   return (
-    <div className="flex overflow-hidden rounded-sm" role="group" aria-label="Edge op">
+    <div className="flex overflow-hidden rounded-full" role="group" aria-label="Edge op">
       {EDGE_OPS.map((o) => (
         <button
           key={o.edgeOp}
@@ -377,6 +390,92 @@ function EdgeOpSegments({
         </button>
       ))}
     </div>
+  );
+}
+
+/**
+ * The `[Offset | Total | Radius | Diameter]` segment group on the armed
+ * offset-face cluster (SCHEMA §7.3).
+ *
+ * Only the types in `allowed` are RENDERED — an unavailable one is absent, not
+ * disabled: unlike the boolean modes (which disable at zero bodies and say so in
+ * a title), a `Radius` on a planar face is not "not yet possible", it is not a
+ * thing. Offering it greyed would suggest the face could grow a radius.
+ *
+ * A group with a single member renders nothing at all: one segment is not a
+ * choice, and the `Offset`-only multi-face case has no decision to present.
+ */
+function DistanceTypeSegments({
+  active,
+  allowed,
+  onPick,
+}: {
+  active: OffsetDistanceType;
+  allowed: readonly OffsetDistanceType[];
+  onPick: (t: OffsetDistanceType) => void;
+}) {
+  const shown = OFFSET_DISTANCE_TYPES.filter((o) => allowed.includes(o.type));
+  if (shown.length < 2) return null;
+  return (
+    <div className="flex overflow-hidden rounded-full" role="group" aria-label="Distance type">
+      {shown.map((o) => (
+        <button
+          key={o.type}
+          type="button"
+          data-testid={o.testid}
+          aria-pressed={o.type === active}
+          onClick={() => onPick(o.type)}
+          className={cn(
+            "px-2 py-1 text-[11.5px] font-medium",
+            o.type === active ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
+          )}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * The tangent-chain toggle on the armed offset-face cluster. ON by default: the
+ * kernel auto-propagates an offset across G1-tangent junctions and CANNOT hold a
+ * tangent neighbour fixed (spike-characterized), so switching it off is a
+ * declaration that the closure had better already be complete — and
+ * `PrepareOffsetFace` refuses with `chainMismatch` when it is not.
+ *
+ * Hidden for `Total`, which is single-face with the chain off by definition.
+ */
+function TangentToggle({
+  pressed,
+  disabled,
+  onToggle,
+}: {
+  pressed: boolean;
+  disabled: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      data-testid="chip-offset-tangent"
+      aria-label="Follow tangent faces"
+      aria-pressed={pressed}
+      disabled={disabled}
+      title={
+        disabled
+          ? "A Total thickness measures one face against its opposite — no chain"
+          : "Include tangent-connected faces"
+      }
+      onClick={onToggle}
+      className={cn(
+        "rounded-full px-2 py-1 text-[11.5px] font-medium",
+        pressed ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
+        disabled && "cursor-not-allowed opacity-40 hover:bg-chip",
+      )}
+    >
+      ⌒
+    </button>
   );
 }
 
@@ -434,7 +533,7 @@ function ChamferDistance2Field({
   };
 
   return (
-    <span className="pointer-events-auto inline-flex items-center gap-0.5 rounded-sm border border-border bg-surface px-1 font-mono text-[11px] text-ink-2 shadow-ctrl">
+    <span className="pointer-events-auto inline-flex items-center gap-0.5 rounded-full border border-border bg-surface px-2 font-mono text-[11px] text-ink-2 shadow-popover">
       <span aria-hidden className="text-ink-3">
         ×
       </span>
@@ -481,7 +580,7 @@ function TransformModeSegments({
   onPick: (mode: TransformMode) => void;
 }) {
   return (
-    <div className="flex overflow-hidden rounded-sm" role="group" aria-label="Placement mode">
+    <div className="flex overflow-hidden rounded-full" role="group" aria-label="Placement mode">
       {TRANSFORM_MODES.map((m) => (
         <button
           key={m.mode}
@@ -516,7 +615,7 @@ function CopyToggle({ copy, onToggle }: { copy: boolean; onToggle: (copy: boolea
       title="Keep the originals and place copies (Alt-drag)"
       onClick={() => onToggle(!copy)}
       className={cn(
-        "rounded-sm px-2 py-1 text-[11.5px] font-medium",
+        "rounded-full px-2 py-1 text-[11.5px] font-medium",
         copy ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
       )}
     >
@@ -542,7 +641,7 @@ function AlignButton({ phase, onStart }: { phase: AlignPhase | null; onStart: ()
       title="Align a face flush onto a face of another body"
       onClick={onStart}
       className={cn(
-        "rounded-sm px-2 py-1 text-[11.5px] font-medium",
+        "rounded-full px-2 py-1 text-[11.5px] font-medium",
         phase !== null ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
       )}
     >
@@ -569,6 +668,10 @@ export function ModelToolChips() {
   const copy = useToolChipStore((s) => s.copy);
   const alignPhase = useToolChipStore((s) => s.alignPhase);
   const showEdgeOpSegments = useToolChipStore((s) => s.showEdgeOpSegments);
+  const distanceType = useToolChipStore((s) => s.distanceType);
+  const distanceTypes = useToolChipStore((s) => s.distanceTypes);
+  const chainTangentFaces = useToolChipStore((s) => s.chainTangentFaces);
+  const valueError = useToolChipStore((s) => s.valueError);
   const distance2 = useToolChipStore((s) => s.distance2);
   const endCondition = useToolChipStore((s) => s.endCondition);
   const canUseBodyEnds = useToolChipStore((s) => s.canUseBodyEnds);
@@ -603,7 +706,7 @@ export function ModelToolChips() {
   );
 
   const panel = (children: React.ReactNode) => (
-    <div className="pointer-events-auto inline-flex items-center gap-1 rounded-md border border-border bg-surface p-1 shadow-panel">
+    <div className="pointer-events-auto inline-flex items-center gap-1 rounded-full border border-border bg-surface px-1.5 py-1 shadow-popover">
       {children}
     </div>
   );
@@ -701,7 +804,7 @@ export function ModelToolChips() {
         <button
           type="button"
           onClick={() => toolChipStore.getState().onResetAxis?.()}
-          className="rounded-sm bg-chip px-2 py-1 text-[11px] font-medium text-ink-3 hover:bg-hover-2"
+          className="rounded-full bg-chip px-2 py-1 text-[11px] font-medium text-ink-3 hover:bg-hover-2"
         >
           Axis
         </button>
@@ -760,6 +863,35 @@ export function ModelToolChips() {
           </>,
         )
       : numericChip(LENGTH_SUFFIX);
+  } else if (kind === "offsetFace") {
+    // SCHEMA §7.3 OffsetFace: `[distance] [type segments] [⌒] [✓ ✕]`.
+    //
+    // The panel takes a WARN border while `valueError` is set. The value itself is
+    // never rewritten — a refused entry leaves the last valid number in the field
+    // (SCHEMA §7.3 forbids clamping, and a clamped number would desynchronize the
+    // stored param from the preview the user approved), so the border is the only
+    // signal that the last thing typed did not take.
+    content = (
+      <div
+        className={cn(
+          "pointer-events-auto inline-flex items-center gap-1 rounded-full border bg-surface px-1.5 py-1 shadow-popover",
+          valueError ? "border-warn-border" : "border-border",
+        )}
+      >
+        {clusterInput(LENGTH_SUFFIX)}
+        <DistanceTypeSegments
+          active={distanceType}
+          allowed={distanceTypes}
+          onPick={(t) => toolChipStore.getState().onDistanceType?.(t)}
+        />
+        <TangentToggle
+          pressed={chainTangentFaces}
+          disabled={distanceType === "Total"}
+          onToggle={() => toolChipStore.getState().onChainTangent?.(!chainTangentFaces)}
+        />
+        {confirmButtons}
+      </div>
+    );
   } else if (kind === "hole") {
     // WP-C T3. The cluster's own shape depends on `holeType`, so it lives in its
     // own component; only the shared ✓/✕ pair is added here.
@@ -873,7 +1005,7 @@ export function ModelToolChips() {
     // booleanOp
     content = panel(
       <>
-        <div className="flex overflow-hidden rounded-sm">
+        <div className="flex overflow-hidden rounded-full">
           {BOOLEAN_OPS.map((o) => (
             <button
               key={o}

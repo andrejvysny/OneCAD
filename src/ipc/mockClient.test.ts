@@ -13,8 +13,20 @@ describe("mockClient file seam", () => {
     await expect(mockClient.saveDocument("/tmp/x.onecad")).resolves.toBeUndefined();
   });
 
+  it("saveDocument accepts (and ignores) a previewPng — no container to write it to", async () => {
+    await expect(
+      mockClient.saveDocument("/tmp/x.onecad", "data:image/png;base64,AAAA"),
+    ).resolves.toBeUndefined();
+    await expect(mockClient.saveDocument(undefined, null)).resolves.toBeUndefined();
+  });
+
   it("saveDocumentAs returns a fake .onecad path", async () => {
     const path = await mockClient.saveDocumentAs();
+    expect(path).toMatch(/\.onecad$/);
+  });
+
+  it("saveDocumentAs accepts (and ignores) a previewPng", async () => {
+    const path = await mockClient.saveDocumentAs("data:image/png;base64,AAAA");
     expect(path).toMatch(/\.onecad$/);
   });
 

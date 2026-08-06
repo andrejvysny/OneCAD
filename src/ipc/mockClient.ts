@@ -25,6 +25,8 @@ import type {
   Lod,
   NeedsRepairEvent,
   OperationOp,
+  PrepareOffsetFaceRequest,
+  PrepareOffsetFaceResult,
   PromotedElement,
   SketchAttachTarget,
   SketchPlane,
@@ -46,6 +48,7 @@ import { IMPORT_STEP_OP_TYPE } from "./types";
 import type { WireEditCommand } from "./tauriCommandMap";
 import { bareBodyId, wireParamsOf } from "./tauriCommandMap";
 import { holeValueText } from "@/tools/modelTools/holeMachine";
+import { offsetFaceValue } from "@/tools/preview/faceOffset";
 import type { FaceColor } from "./mockMeshes";
 import {
   concatMesh1,
@@ -64,7 +67,8 @@ import {
   faceMetricsFromMesh,
   massPropertiesFromMesh,
 } from "./mockMeshMetrics";
-import { detectRegions, planeFor, solveDof } from "./mockSketch";
+import { planeFor, solveDof } from "./mockSketch";
+import { detectRegions } from "./mockRegions";
 import type { DatumMeta } from "@/stores/documentStore";
 import { documentStore, emptyDocument } from "@/stores/documentStore";
 
@@ -92,6 +96,21 @@ const snapshot = (title: string): DocumentSnapshot => ({
   title,
 });
 
+/*
+ * Stand-ins for the data-URI thumbnails `list_recents` returns for a container
+ * that has a `preview.png`. Two 1×1 PNGs — the smallest payload that is a REAL
+ * decodable image, so ProjectCard's `<img>` branch (rather than its hatched
+ * empty well) is what the mock lane and the e2e/vitest suites actually exercise.
+ *
+ * Only the first two entries carry one, deliberately: the mixed grid is the
+ * honest shape of a recents list, where an older project saved before this
+ * feature — or one whose capture was refused — has no preview at all.
+ */
+const MOCK_THUMB_A =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR42mPo6JkCAANIAamDtMgRAAAAAElFTkSuQmCC";
+const MOCK_THUMB_B =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR42mOIyesCAAJ+AVW9raoPAAAAAElFTkSuQmCC";
+
 // Varied names + dates (unsorted on purpose — the UI sorts).
 const RECENTS: RecentProject[] = [
   {
@@ -99,12 +118,14 @@ const RECENTS: RecentProject[] = [
     name: "Bracket v2",
     path: "/Users/andrej/CAD/Projects/Bracket v2.onecad",
     modifiedAt: "2026-07-16T14:20:00Z",
+    thumbnail: MOCK_THUMB_A,
   },
   {
     id: "p-enclosure",
     name: "Enclosure rev C",
     path: "/Users/andrej/CAD/Projects/Enclosure rev C.onecad",
     modifiedAt: "2026-07-14T09:05:00Z",
+    thumbnail: MOCK_THUMB_B,
   },
   {
     id: "p-gearbox",
@@ -832,6 +853,46 @@ function mutateOp(op: OperationOp): {
     }
     return { changed: [bodyId], removed: [], label: "Shell", featureId };
   }
+  if (op.opType === "OffsetFace") {
+    // MOCK LIMIT: no real face offset. Moving a face and re-closing the solid is
+    // OCCT's `BRepOffset_MakeOffset`; reproducing it here would be a second,
+    // worse kernel. So the mock does what it does for every other body-MODIFYING
+    // op (Shell, Fillet/Chamfer, Hole): re-emit the target untouched and record
+    // the feature. The GEOMETRY is pinned against the real kernel by
+    // `worker/tests/test_offsetface.cpp` + `src-tauri/tests/offset_face.rs`; what
+    // the mock lane owns is the UI chain — prepare → arm → drag → chip → commit.
+    const bodyId = op.params.targetBodyId || op.inputs?.[0]?.primary.bodyId || "body1";
+    const featureId = op.featureId ?? nextFeatureId();
+    const { valueText, primaryValue, primaryValueKind } = offsetFaceValue(
+      op.params.distance,
+      op.params.distanceType,
+    );
+    const editing = op.featureId !== undefined && mockFeatures.some((f) => f.id === featureId);
+    if (editing) {
+      mockFeatures = mockFeatures.map((f) =>
+        f.id === featureId ? { ...f, valueText, primaryValue, primaryValueKind } : f,
+      );
+    } else {
+      // `kind: "fillet"` mirrors the REAL projection bucket — `dto.rs feature_kind`
+      // folds OffsetFace into the Fillet/Chamfer/Shell dress-up family. `opType`
+      // carries the authored identity every re-edit routes on.
+      mockFeatures = [
+        ...mockFeatures,
+        {
+          id: featureId,
+          kind: "fillet",
+          opType: "OffsetFace",
+          // Matches `dto.rs default_label`.
+          label: "Offset face",
+          valueText,
+          primaryValue,
+          primaryValueKind,
+          status: "ok",
+        },
+      ];
+    }
+    return { changed: [bodyId], removed: [], label: "Offset face", featureId };
+  }
   if (op.opType === "Hole") {
     // MOCK LIMIT: no real drilling. Subtracting a faceted cylinder from the mock
     // box mesh would be a second, worse CSG implementation living in the mock —
@@ -1278,6 +1339,19 @@ function featureValueForParams(
       const d = scalarValue(params.diameter);
       return d === undefined ? none : dimensioned(holeValueText(d), d, "diameter");
     }
+    case "OffsetFace": {
+      const d = scalarValue(params.distance);
+      if (d === undefined) return none;
+      // WHAT the number means is `distanceType`'s to say (dto.rs prefixes the row
+      // `Ø`/`R` for the absolute cylindrical forms), so the text cannot be derived
+      // from the value alone. An absent/unknown type is `Offset` — the wire default.
+      const t = params.distanceType;
+      const v = offsetFaceValue(
+        d,
+        t === "Total" || t === "Radius" || t === "Diameter" ? t : "Offset",
+      );
+      return dimensioned(v.valueText, v.primaryValue, v.primaryValueKind);
+    }
     case "LinearPattern":
     case "CircularPattern":
     case "linearPattern":
@@ -1719,10 +1793,13 @@ export const mockClient: CadClient = {
 
   // Save/export are Rust-owned in the real app; the mock keeps them deterministic
   // (no filesystem): saveDocument is a no-op, Save As / Export return fake paths.
-  async saveDocument(_path?: string) {
+  // `_previewPng` is accepted and DISCARDED: there is no container to write a
+  // preview.png into. Taking the parameter keeps the two clients' signatures in
+  // step so a caller compiles identically against either.
+  async saveDocument(_path?: string, _previewPng?: string | null) {
     await wait(40);
   },
-  async saveDocumentAs() {
+  async saveDocumentAs(_previewPng?: string | null) {
     await wait(40);
     return "/Users/andrej/CAD/Projects/Untitled.onecad";
   },
@@ -1947,6 +2024,56 @@ export const mockClient: CadClient = {
       kind: p.topoKey.startsWith("e:") ? "edge" : "face",
       bodyId,
     }));
+  },
+
+  /**
+   * `PrepareOffsetFace` (SCHEMA §7.6), mock lane.
+   *
+   * MOCK LIMIT — deliberately the IDENTITY closure. The real verb runs
+   * `BRepLib::ContinuityOfFaces` BFS over the head shape, hunts the `Total`
+   * opposite by footprint coverage + material-column validation, and measures the
+   * cylinder it is asked about. None of that exists without OCCT, and a
+   * hand-rolled approximation would be a SECOND, wrong closure that the mock lane
+   * would then certify as green. So: the operative set is exactly the picks
+   * (`picked: true`, no chain), `currentDims` is a fixed pair, and there is no
+   * opposite-face candidate at all.
+   *
+   * What IS real here is the REFUSAL that the tool's arm gate depends on:
+   * `crossBody` when the picks span bodies. That is the one rule the frontend can
+   * evaluate honestly, and it is the one the arm path fails closed on.
+   *
+   * Geometry is pinned against the kernel by `worker/tests/test_offsetface.cpp`
+   * and `src-tauri/tests/offset_face.rs`; what the mock owns is the UI chain.
+   */
+  async prepareOffsetFace(req: PrepareOffsetFaceRequest): Promise<PrepareOffsetFaceResult> {
+    await wait(MESH_LATENCY_MS);
+    const snapshotId = req.snapshotId ?? mockRevision;
+    const bodies = [...new Set(req.pickedFaces.map((p) => p.bodyId ?? ""))];
+    if (bodies.length > 1) {
+      return {
+        snapshotId,
+        targetBodyId: "",
+        faces: [],
+        currentDims: {},
+        refusal: {
+          code: "crossBody",
+          message: "Offset face: every selected face must belong to the same body",
+          faces: req.pickedFaces.map((p) => p.topoKey ?? p.elementId ?? ""),
+        },
+      };
+    }
+    return {
+      snapshotId,
+      targetBodyId: bodies[0] ?? "",
+      faces: req.pickedFaces.map((p) => ({
+        topoKey: p.topoKey ?? p.elementId ?? "",
+        picked: true,
+      })),
+      // MOCK LIMIT: fixed seeds, not a measurement. Enough for the chip to open at
+      // a number for the absolute distance types; never claimed to be the body's.
+      currentDims: { radius: 10, thickness: 10 },
+      refusal: null,
+    };
   },
 
   // ── Topology repair (M4b) ──────────────────────────────────────────────────

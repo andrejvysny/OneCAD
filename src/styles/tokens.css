@@ -139,9 +139,26 @@
   /* Authored for the render-mode WP (not from the prototype): light neutral
      body surface for a professional CAD shaded look. */
   --color-body-fill: #a9aeb6;
-  /* Authored for the render-mode WP (not from the prototype): near-black
-     feature edges. */
+  /* Shaded+edges mode edge — near-black in BOTH themes (Shapr3D convention);
+     wireframe mode uses --color-body-edge-wire instead. */
   --color-body-edge: #3a3f47;
+  /* Wireframe-render-mode edge: no shaded face sits behind it, so it carries
+     its own contrast budget separate from --color-body-edge. */
+  --color-body-edge-wire: #111418;
+
+  /* ---- Sketch entity colors (viewport, F-WP6 constraint states) ---- */
+  /* Under-constrained sketch geometry (sketch base blue); same family as
+     --color-icon-accent by design. */
+  --color-sketch-under: #2d7ff9;
+  /* Fully-constrained sketch geometry. */
+  --color-sketch-done: #1f9d55;
+  /* Selected sketch element/region. */
+  --color-sketch-sel: #d97706;
+
+  /* ---- Viewport interaction ---- */
+  /* Cyan 3D hover highlight — distinct from --color-accent, which drives
+     preview/UI hover states. */
+  --color-viewport-hover: #00acc1;
 
   /* ---- Radii ---- */
   --radius-sm: 6px;
@@ -283,12 +300,23 @@
   --color-toggle-off: #454b53;
 
   /* ---- Body (viewport solids) ---- */
-  /* Darker than the light theme's #a9aeb6 so the now-LIGHT edge lines read
-     against a shaded face. */
+  /* Darker than the light theme's #a9aeb6 so the near-black edge lines still
+     read against a shaded face. */
   --color-body-fill: #7d838c;
+  /* Shaded+edges mode edge — near-black in BOTH themes (Shapr3D convention);
+     wireframe mode uses --color-body-edge-wire instead. */
+  --color-body-edge: #22262c;
   /* INVERTED, and load-bearing: wireframe mode draws edges with no faces
      behind them, so a near-black edge on a dark canvas would be invisible. */
-  --color-body-edge: #cfd4db;
+  --color-body-edge-wire: #cfd4db;
+
+  /* ---- Sketch entity colors (viewport, F-WP6 constraint states) ---- */
+  --color-sketch-under: #5aa2ff;
+  --color-sketch-done: #43c17a;
+  --color-sketch-sel: #f0a24a;
+
+  /* ---- Viewport interaction ---- */
+  --color-viewport-hover: #26c6da;
 }
 
 /*

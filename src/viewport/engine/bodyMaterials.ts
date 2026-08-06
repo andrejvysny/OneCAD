@@ -14,12 +14,26 @@
  * previews without touching committed geometry.
  */
 import * as THREE from "three";
+import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { palette } from "./palette";
+import { cssLineWidth } from "./SketchObject";
 import { MATERIAL_KIND_VERTEX_COLORS, type MaterialKind } from "./renderModes";
+
+/**
+ * Body edge weight, in the DEVICE px a fat line's `linewidth` is measured in
+ * (see SketchObject.cssLineWidth). Exported because the Picker's `Line2`
+ * threshold is derived from it — the raycast's hit radius is
+ * `(linewidth + threshold) / 2`, so a pick tolerance expressed in CSS px has to
+ * subtract the drawn width. One constant, two consumers, no drift.
+ */
+export const BODY_EDGE_WIDTH = cssLineWidth(1.5);
 
 export interface BodyMaterialSet {
   face: THREE.MeshStandardMaterial;
-  edge: THREE.LineBasicMaterial;
+  /** Edges drawn OVER a shaded face (`edgeStyle: "onFaces"`) — near-black outline. */
+  edge: LineMaterial;
+  /** Edges drawn ALONE (`edgeStyle: "standalone"`, wireframe) — inverts per theme. */
+  edgeWire: LineMaterial;
 }
 
 /** Face material state saved just before dimming, reapplied verbatim on restore. */
@@ -79,8 +93,23 @@ export class BodyMaterialLibrary {
     });
     // Edges are an annotation, not a lit surface: tone mapping would lift the
     // near-black token off its design value. Only lit body faces get tone-mapped.
-    const edge = new THREE.LineBasicMaterial({ color: palette.bodyEdge(), toneMapped: false });
-    return { face, edge };
+    //
+    // Fat lines (LineSegments2/LineMaterial): WebGL ignores
+    // LineBasicMaterial.linewidth, so a plain line is stuck at 1px and a body
+    // reads as a wash of hairlines. NOT `transparent` — body edges belong in the
+    // OPAQUE pass exactly as they always have; a transparent edge would be
+    // painted after every opaque body and stop depth-sorting against them.
+    const edge = new LineMaterial({
+      color: palette.bodyEdge().getHex(),
+      linewidth: BODY_EDGE_WIDTH,
+      toneMapped: false,
+    });
+    const edgeWire = new LineMaterial({
+      color: palette.bodyEdgeWire().getHex(),
+      linewidth: BODY_EDGE_WIDTH,
+      toneMapped: false,
+    });
+    return { face, edge, edgeWire };
   }
 
   /**
@@ -144,18 +173,25 @@ export class BodyMaterialLibrary {
    * Theme change: re-read the palette into every live set.
    *
    * Distinct from {@link resetFaceColor}: an active Cut tint is PRESERVED (it
-   * is a state, not a theme), while the edge color — which nothing else ever
-   * updates — is re-read unconditionally. That edge re-read is load-bearing in
-   * wireframe mode, where edges are all that draws.
+   * is a state, not a theme), while the edge colors — which nothing else ever
+   * updates — are re-read unconditionally.
    */
   refreshColors(): void {
     this.applyPaletteColors();
   }
 
+  /**
+   * BOTH edge materials are refreshed, including the one the current render
+   * mode is not using. A mode SWAPS which material the edges point at rather
+   * than recoloring one, so an unrefreshed inactive material looks stale the
+   * instant the user switches modes — the same trap as DragHandle's
+   * matNormal/matHover pair (engine/README.md § Theming).
+   */
   private applyPaletteColors(): void {
     for (const [kind, set] of this.sets) {
       set.face.color.copy(this.baseColor(kind));
       set.edge.color.copy(palette.bodyEdge());
+      set.edgeWire.color.copy(palette.bodyEdgeWire());
     }
   }
 
@@ -174,6 +210,7 @@ export class BodyMaterialLibrary {
     for (const set of this.sets.values()) {
       set.face.dispose();
       set.edge.dispose();
+      set.edgeWire.dispose();
     }
     this.sets.clear();
     this.savedFaceStates.clear();

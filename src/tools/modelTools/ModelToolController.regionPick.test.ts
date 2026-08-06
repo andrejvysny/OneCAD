@@ -104,6 +104,9 @@ function makeEngineMock() {
     hideRevolvePreview: vi.fn(),
     // Cancel-path teardown (fired on every tool switch).
     hideGhostPreview: vi.fn(),
+    hideValueHandle: vi.fn(),
+    showValueHandle: vi.fn(),
+    showGhostPreviewMulti: vi.fn(),
   };
 }
 

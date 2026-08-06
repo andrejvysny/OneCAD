@@ -50,7 +50,15 @@ function paletteHexes(): Set<number> {
   return out;
 }
 
-/** Hexes that exist ONLY in light — seeing one after a dark refresh is stale. */
+/**
+ * Hexes that exist ONLY in light — seeing one after a dark refresh is stale.
+ *
+ * Tokens that are now theme-identical (e.g. bodyEdge, near-black in both
+ * themes) contribute nothing to this set, shrinking it and weakening
+ * expectNoLightLeftovers: a stale near-black edge left over from light mode is
+ * indistinguishable from a fresh dark-mode one, so this check alone cannot
+ * catch that class of staleness for those tokens.
+ */
 function lightOnlyHexes(): Set<number> {
   setTheme("light");
   const light = paletteHexes();
@@ -120,7 +128,7 @@ describe("palette cache is keyed by theme", () => {
   it("a read under dark never returns a light color, even with NO cache reset", () => {
     // Populate the cache under light.
     const lightCanvas = palette.clear().getHex();
-    const lightEdge = palette.bodyEdge().getHex();
+    const lightEdgeWire = palette.bodyEdgeWire().getHex();
 
     // Flip the attribute ONLY — deliberately no resetPaletteCache(). This is the
     // shape of every ordering bug: something reads the palette at a moment the
@@ -129,7 +137,9 @@ describe("palette cache is keyed by theme", () => {
     document.documentElement.dataset.theme = "dark";
 
     expect(palette.clear().getHex()).not.toBe(lightCanvas);
-    expect(palette.bodyEdge().getHex()).not.toBe(lightEdge);
+    // bodyEdgeWire is the token that still inverts per-theme (bodyEdge is now
+    // near-black in both themes, see below).
+    expect(palette.bodyEdgeWire().getHex()).not.toBe(lightEdgeWire);
   });
 
   it("returns a STABLE instance per theme, so .copy() consumers stay cheap", () => {
@@ -162,24 +172,36 @@ describe("palette is theme-aware in jsdom", () => {
   afterEach(() => setTheme("light"));
 
   it("returns different colors per theme for the tokens that invert", () => {
-    const lightEdge = palette.bodyEdge().getHex();
+    const lightEdgeWire = palette.bodyEdgeWire().getHex();
     const lightInk = palette.sketchFull().getHex();
     const lightCanvas = palette.clear().getHex();
 
     setTheme("dark");
 
-    expect(palette.bodyEdge().getHex()).not.toBe(lightEdge);
+    expect(palette.bodyEdgeWire().getHex()).not.toBe(lightEdgeWire);
     expect(palette.sketchFull().getHex()).not.toBe(lightInk);
     expect(palette.clear().getHex()).not.toBe(lightCanvas);
   });
 
-  it("body edges go LIGHT in dark mode — wireframe depends on it", () => {
+  it("wireframe edges go LIGHT in dark mode — wireframe render mode depends on it", () => {
     setTheme("dark");
-    const edge = palette.bodyEdge();
+    const edge = palette.bodyEdgeWire();
     // Perceptually light: every channel well above mid.
     expect(edge.r).toBeGreaterThan(0.6);
     expect(edge.g).toBeGreaterThan(0.6);
     expect(edge.b).toBeGreaterThan(0.6);
+  });
+
+  it("body edge is near-black in BOTH themes — shaded+edges mode, Shapr3D convention", () => {
+    for (const theme of ["light", "dark"] as const) {
+      setTheme(theme);
+      const edge = palette.bodyEdge();
+      // three.js ColorManagement converts sRGB -> linear, so these near-black
+      // token values (see tokens.css --color-body-edge) land well under 0.1 linear.
+      expect(edge.r).toBeLessThan(0.1);
+      expect(edge.g).toBeLessThan(0.1);
+      expect(edge.b).toBeLessThan(0.1);
+    }
   });
 
   it("body edge stays clear of the body fill in BOTH themes", () => {
@@ -277,12 +299,26 @@ describe("refreshColors picks up a theme flip", () => {
     // getEntry() — buildBodyObjects alone returns an entry without registering
     // it, so the highlight would silently build nothing.
     swap("body1", buildBodyObjects(parseMeshPayload(makeBoxMesh()), "body1", 1));
-    layer.setState({ kind: "body", id: "hover-body" }, [{ kind: "body", id: "body1" }]);
+    // All FIVE shared materials at once: hover face + hover edge (cyan), the
+    // per-element selected tint, the lighter whole-body tint, and the selected
+    // edge. Anything left off this call is untested — the materials only reach
+    // the scene graph through a built highlight.
+    layer.setState({ kind: "face", id: "body1#f:1", bodyId: "body1", topoKey: "f:1" }, [
+      { kind: "body", id: "body1" },
+      { kind: "face", id: "body1#f:0", bodyId: "body1", topoKey: "f:0" },
+      { kind: "edge", id: "body1#e:0", bodyId: "body1", topoKey: "e:0" },
+    ]);
 
     setTheme("dark");
     layer.refreshColors();
 
     expectNoLightLeftovers(d.root, lightOnly);
+
+    // Hover is its own material and only appears while something is hovered —
+    // rebuild under the new theme with an edge hovered so the cyan pair shows.
+    layer.setState({ kind: "edge", id: "body1#e:1", bodyId: "body1", topoKey: "e:1" }, []);
+    expectNoLightLeftovers(d.root, lightOnly);
+    layer.dispose();
   });
 
   it("GhostLayer leaves no light-theme color behind", () => {
@@ -470,17 +506,30 @@ describe("BodyMaterialLibrary.refreshColors", () => {
   beforeEach(() => setTheme("light"));
   afterEach(() => setTheme("light"));
 
-  it("re-reads both face and edge for every live set", () => {
+  /*
+   * BOTH edge materials, not just the active one. A render mode SWAPS which of
+   * them the edges point at (renderModes `edgeStyle`), so this is the
+   * DragHandle matNormal/matHover trap in another costume: refresh only the
+   * material in use and the viewport looks correct until the user presses the
+   * display-mode button, at which point it shows the previous theme.
+   */
+  it("re-reads face and BOTH edge materials for every live set", () => {
     const lib = new BodyMaterialLibrary();
     const set = lib.get("standard");
     expect(set.face.color.getHex()).toBe(palette.bodyNeutral().getHex());
     expect(set.edge.color.getHex()).toBe(palette.bodyEdge().getHex());
+    const lightWire = set.edgeWire.color.getHex();
+    expect(lightWire).toBe(palette.bodyEdgeWire().getHex());
 
     setTheme("dark");
     lib.refreshColors();
 
     expect(set.face.color.getHex()).toBe(palette.bodyNeutral().getHex());
     expect(set.edge.color.getHex()).toBe(palette.bodyEdge().getHex());
+    expect(set.edgeWire.color.getHex()).toBe(palette.bodyEdgeWire().getHex());
+    // Non-vacuity: bodyEdge is near-black in both themes, so only edgeWire can
+    // actually prove a refresh happened at all.
+    expect(set.edgeWire.color.getHex()).not.toBe(lightWire);
     lib.dispose();
   });
 

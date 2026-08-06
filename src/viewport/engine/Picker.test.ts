@@ -1,17 +1,30 @@
 /*
- * Picker pure helpers: screen→world line threshold, edge-vs-face preference,
- * and intersection → PickHit resolution through the registry (fake intersections).
+ * Picker pure helpers: screen→world line threshold, the fat-line (Line2) pick
+ * radius, edge-vs-face preference, and intersection → PickHit resolution through
+ * the registry (fake intersections) — plus one end-to-end raycast against a real
+ * LineSegments2, which is the only way to prove what `faceIndex` actually means.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import * as THREE from "three";
+import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
+import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import {
+  Picker,
   linePickThreshold,
+  line2PickThreshold,
   choosePreferredHit,
   secondaryHitWins,
   resolvePick,
   pickKey,
 } from "./Picker";
-import { buildBodyObjects, type MeshEntry } from "../mesh/meshRegistry";
+import { BODY_EDGE_WIDTH } from "./bodyMaterials";
+import {
+  buildBodyObjects,
+  swap,
+  disposeAll,
+  __resetRegistryForTests,
+  type MeshEntry,
+} from "../mesh/meshRegistry";
 import { parseMeshPayload } from "../mesh/parseMeshPayload";
 import { makeBoxMesh, type FaceColor } from "@/ipc/mockMeshes";
 
@@ -29,12 +42,18 @@ function fakeFaceHit(bodyId: string, faceIndex: number): THREE.Intersection {
   } as unknown as THREE.Intersection;
 }
 
-function fakeEdgeHit(bodyId: string, vertexIndex: number, distance = 10): THREE.Intersection {
+/**
+ * A LineSegments2 intersection: `faceIndex` IS the segment ordinal (one instance
+ * per segment), there is no `index`, and `point` lies on the RAY while
+ * `pointOnLine` lies on the segment.
+ */
+function fakeEdgeHit(bodyId: string, segmentOrdinal: number, distance = 10): THREE.Intersection {
   return {
     distance,
-    point: new THREE.Vector3(40, 30, 15),
+    point: new THREE.Vector3(41, 31, 15), // on the ray, off the geometry
+    pointOnLine: new THREE.Vector3(40, 30, 15), // on the segment
     object: Object.assign(new THREE.Object3D(), { userData: { bodyId, kind: "edge" } }),
-    index: vertexIndex,
+    faceIndex: segmentOrdinal,
   } as unknown as THREE.Intersection;
 }
 
@@ -51,6 +70,27 @@ describe("linePickThreshold", () => {
     const cam = new THREE.OrthographicCamera(-100, 100, 50, -50, 0.1, 1000); // height 100
     // 6px of 600px viewport over a 100-unit frustum = 1 world unit.
     expect(linePickThreshold(cam, 600, 260, 6)).toBeCloseTo(1, 5);
+  });
+});
+
+/*
+ * LineSegments2 tests `dist < (linewidth + threshold) / 2` in DEVICE px, so the
+ * threshold has to cancel the drawn width out — otherwise the pick tolerance
+ * would silently change whenever the edge weight or the display's dpr did.
+ */
+describe("line2PickThreshold", () => {
+  /** What three will actually use as the hit radius, in device px. */
+  const radius = (dpr: number, width: number, px?: number) =>
+    (width + line2PickThreshold(dpr, width, px)) / 2;
+
+  it("yields a hit radius of exactly `px` CSS pixels, whatever the line width", () => {
+    expect(radius(1, 1.5, 6)).toBe(6); // 6 CSS px at dpr 1 = 6 device px
+    expect(radius(1, 4, 6)).toBe(6); // a fatter line does not pick wider
+    expect(radius(2, 3, 6)).toBe(12); // 6 CSS px at dpr 2 = 12 device px
+  });
+
+  it("clamps at zero — a line drawn wider than the tolerance picks at its own width", () => {
+    expect(line2PickThreshold(1, 40, 6)).toBe(0);
   });
 });
 
@@ -104,9 +144,22 @@ describe("resolvePick — intersection → PickHit via the registry", () => {
     expect(resolvePick(fakeFaceHit("body1", 11), "face", lookup)!.topoKey).toBe("f:5");
   });
 
-  it("maps an edge segment (vertexIndex>>1) to its edge TopoKey", () => {
+  /*
+   * NO shift. A plain LineSegments reported a VERTEX index (2 per segment); an
+   * instanced LineSegments2 reports the segment ordinal directly as `faceIndex`.
+   * Shifting it here would bind every edge pick to the wrong edge.
+   */
+  it("maps an edge segment ordinal straight to its edge TopoKey", () => {
     expect(resolvePick(fakeEdgeHit("body1", 0), "edge", lookup)!.topoKey).toBe("e:0");
-    expect(resolvePick(fakeEdgeHit("body1", 10), "edge", lookup)!.topoKey).toBe("e:5");
+    expect(resolvePick(fakeEdgeHit("body1", 5), "edge", lookup)!.topoKey).toBe("e:5");
+    expect(resolvePick(fakeEdgeHit("body1", 11), "edge", lookup)!.topoKey).toBe("e:11");
+  });
+
+  it("anchors an edge pick on the SEGMENT, not on the ray", () => {
+    // `point` is where the ray came closest; only `pointOnLine` is on the edge,
+    // and the anchor is what a later AcquireElementIds promotion resolves with.
+    const hit = resolvePick(fakeEdgeHit("body1", 0), "edge", lookup)!;
+    expect([hit.worldPos.x, hit.worldPos.y, hit.worldPos.z]).toEqual([40, 30, 15]);
   });
 
   it("returns null for an unknown body or missing index", () => {
@@ -163,6 +216,99 @@ describe("picking survives the FACE_COLORS de-index", () => {
 
     plain.dispose();
     colored.dispose();
+  });
+});
+
+/*
+ * The fat-line edge path, end to end through a REAL raycast.
+ *
+ * Two things can only be proven here. (1) `faceIndex` really is the segment
+ * ordinal — everything above takes that on faith from a fabricated hit.
+ * (2) LineSegments2's screen-space raycast returns NOTHING when
+ * `material.resolution` is still (0,0), silently and without error. That is the
+ * state of every body before its first rendered frame, which is why the Picker
+ * flushes the resolution itself instead of trusting `onBeforeRender`.
+ */
+describe("Picker → real LineSegments2 raycast", () => {
+  const VIEW = { w: 800, h: 600 };
+  const DPR = 2;
+
+  afterEach(() => {
+    disposeAll();
+    __resetRegistryForTests();
+  });
+
+  /** Camera whose center of view is `target`, `distance` away along `dir`. */
+  function cameraAt(target: THREE.Vector3, dir: THREE.Vector3, distance: number): THREE.Camera {
+    const cam = new THREE.PerspectiveCamera(50, VIEW.w / VIEW.h, 0.1, 5000);
+    cam.up.set(0, 0, 1); // engine invariant: world is Z-up
+    cam.position.copy(target).addScaledVector(dir.normalize(), distance);
+    cam.lookAt(target);
+    cam.updateMatrixWorld(true); // also refreshes matrixWorldInverse
+    return cam;
+  }
+
+  function harness(resolution: { w: number; h: number }) {
+    const entry = boxEntry();
+    swap("body1", entry);
+    const material = new LineMaterial({ linewidth: BODY_EDGE_WIDTH });
+    const line = new LineSegments2(entry.edgeGeometry!, material);
+    line.userData = { bodyId: "body1", kind: "edge" };
+    line.updateMatrixWorld(true);
+    const root = new THREE.Group();
+    root.add(line);
+
+    const canvas = document.createElement("canvas");
+    canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: VIEW.w, height: VIEW.h }) as DOMRect;
+
+    // e:10 is the vertical edge at the (+x,+y) corner — [40,30,-15]..[40,30,15].
+    const target = new THREE.Vector3(40, 30, 0);
+    const camera = cameraAt(target, new THREE.Vector3(1, 1, 0.35), 400);
+
+    const picker = new Picker({
+      canvas,
+      getCamera: () => camera,
+      getRoot: () => root,
+      getViewportHeight: () => VIEW.h,
+      getFocusDistance: () => 400,
+      getResolution: () => resolution,
+      invalidate: vi.fn(),
+      isActive: () => true,
+      onHover: vi.fn(),
+      onPick: vi.fn(),
+    });
+    // Pointer at the canvas center ⇒ NDC (0,0) ⇒ the ray through `target`.
+    return { picker, material, probe: () => picker.probe(VIEW.w / 2, VIEW.h / 2) };
+  }
+
+  it("resolves the edge under the pointer to its own TopoKey", () => {
+    const { picker, probe } = harness({ w: VIEW.w * DPR, h: VIEW.h * DPR });
+    const hit = probe();
+    expect(hit).not.toBeNull();
+    expect(hit!.kind).toBe("edge");
+    expect(hit!.topoKey).toBe("e:10");
+    expect(hit!.bodyId).toBe("body1");
+    // The anchor sits ON the edge: x/y pinned to the corner it runs along.
+    expect(hit!.worldPos.x).toBeCloseTo(40, 3);
+    expect(hit!.worldPos.y).toBeCloseTo(30, 3);
+    picker.dispose();
+  });
+
+  it("flushes the drawing-buffer resolution into the shared edge material", () => {
+    const { picker, material, probe } = harness({ w: VIEW.w * DPR, h: VIEW.h * DPR });
+    expect(material.resolution.x).toBe(0); // nothing has rendered
+    probe();
+    expect([material.resolution.x, material.resolution.y]).toEqual([1600, 1200]);
+    picker.dispose();
+  });
+
+  it("would find NOTHING at resolution (0,0) — the reason the flush exists", () => {
+    // Non-vacuity guard for the test above: neuter the flush (report zeros) and
+    // the identical pick goes silently null.
+    const { picker, probe } = harness({ w: 0, h: 0 });
+    expect(probe()).toBeNull();
+    picker.dispose();
   });
 });
 

@@ -77,6 +77,10 @@ uuid = { workspace = true }
 async-trait = { workspace = true }
 # R-WP11: verify the SHA-256 integrity of assembled MESH1 bulk streams (SCHEMA §5.2).
 sha2 = { workspace = true }
+# Preview thumbnails cross the IPC boundary as base64 (in from `save_document`, out
+# as a `data:` URL in `list_recents`). Already in the lock as a tauri transitive at
+# this exact version — declaring it adds no crate to the build graph.
+base64 = "0.22"
 
 # M5b: crash-marker liveness — `kill(pid, 0)` for the autosave recovery scan
 # (`io::recovery` injects the predicate; the app owns the platform syscall).

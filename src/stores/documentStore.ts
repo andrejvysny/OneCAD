@@ -13,6 +13,19 @@ import type { FeaturePrimaryKind, SketchHostFace, SketchPlane } from "@/ipc/type
 
 export type DocStatus = "empty" | "loading" | "ready";
 
+/**
+ * Where the geometry on screen came from (backend-authoritative; mirrors the
+ * Rust `DocumentProjection::geometry_source`).
+ *
+ * - `"live"` — a regen has published; this IS the document's geometry.
+ * - `"cached"` — nothing has regenerated yet, so the container's LAST-SAVED
+ *   meshes are being served (a reopened document paints instantly instead of
+ *   waiting on the worker). Correct as of the last save and possibly OLDER than
+ *   the timeline the tree shows, which is exactly why the viewport labels it.
+ * - `"none"` — nothing to paint.
+ */
+export type GeometrySource = "none" | "cached" | "live";
+
 export interface BodyMeta {
   id: string;
   name: string;
@@ -139,6 +152,14 @@ export interface DocumentProjection {
    * `features.length` IS the total — a second copy could only ever disagree.
    */
   appliedOps: number;
+  /**
+   * Provenance of the geometry the viewport is showing ({@link GeometrySource}).
+   * Backend-authoritative. A payload from a backend older than the field — and
+   * the mock lane, which omits it — hydrates as `"none"`, the reading that shows
+   * no chip: claiming geometry is live when we were never told so is exactly the
+   * silent-wrong-answer class this codebase refuses.
+   */
+  geometrySource: GeometrySource;
 }
 
 export interface DocumentState extends DocumentProjection {
@@ -304,6 +325,10 @@ export function seedMockDocument(): DocumentProjection {
     ],
     // The whole demo timeline is applied (no rollback bar in the seed).
     appliedOps: 5,
+    // The demo's meshes are synthesized on the spot, not read back from a
+    // container — "live" is the truthful label, and it keeps the cached chip out
+    // of every mock-lane and e2e run.
+    geometrySource: "live",
   };
 }
 
@@ -319,6 +344,7 @@ export function emptyDocument(): DocumentProjection {
     datums: {},
     features: [],
     appliedOps: 0,
+    geometrySource: "none",
   };
 }
 
@@ -416,4 +442,16 @@ export const documentStore = createStore<DocumentState>()((set) => ({
 /** Typed selector hook over the vanilla store. */
 export function useDocumentStore<T>(selector: (s: DocumentState) => T): T {
   return useStore(documentStore, selector);
+}
+
+/**
+ * True while the viewport is painting the container's LAST-SAVED meshes rather
+ * than regenerated ones — the "Last saved geometry" chip's condition.
+ *
+ * A named selector, not an inline lambda, because the chip is not the only thing
+ * that should care: anything offering to MEASURE or EXPORT off screen geometry
+ * has to be able to ask the same question from the same place.
+ */
+export function selectGeometryCached(s: DocumentState): boolean {
+  return s.geometrySource === "cached";
 }

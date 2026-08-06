@@ -18,16 +18,28 @@
 //!   reopen on a FRESH worker (the app spawns a new backend per open) and drive
 //!   the open-regen through the REAL scheduler/driver. Asserts, in order:
 //!   1. the pre-regen projection already lists the saved body (tree parity);
-//!   2. `get_mesh` before the first publish is a MISS (documents the window the
-//!      frontend must survive — this is behavior the viewport retries around);
+//!   2. `get_mesh` before the first publish is a **HIT**, served from the mesh
+//!      caches the explicit save embedded in the container — and the projection
+//!      says `geometrySource == "cached"` so the UI can label it honestly;
 //!   3. the open-regen publishes and its `document-changed` names the body;
-//!   4. `get_mesh` after the publish returns a non-empty MESH1 blob (magic-checked).
+//!   4. `get_mesh` after the publish returns a non-empty MESH1 blob (magic-checked),
+//!      at the LIVE generation, with `geometrySource == "live"`.
+//!
+//!   **Assertion 2 used to pin the opposite** (a documented pre-publish MISS, the
+//!   window the frontend retried around). That window is what the container mesh
+//!   caches exist to close: a reopened document now paints last-saved geometry
+//!   immediately instead of showing an empty viewport for the whole from-0 regen.
+//!   The miss survives only where there is nothing to serve —
+//!   `container_without_mesh_caches_still_misses_before_the_publish` pins that for
+//!   a legacy / autosave-shaped container, so the frontend's retry path stays
+//!   exercised.
 //!
 //! Gated on `ONECAD_WORKER_PATH` (else dev-tree fallback); `ONECAD_REQUIRE_WORKER=1`
 //! hard-fails a missing binary (CI). A missing worker is a quiet local-dev skip.
 
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -43,13 +55,13 @@ use onecad_core::document::record::{
 use onecad_core::document::refs::SketchRegionRef;
 use onecad_core::document::variables::Scalar;
 use onecad_core::edit::EditCommand;
-use onecad_core::ids::{BodyId, ConstraintId, EntityId, RecordId, RegionId, SketchId};
+use onecad_core::ids::{BodyId, ConstraintId, EntityId, RecordId, RegionId, SketchId, SnapshotId};
 use onecad_core::io::container::SaveMeta;
 use onecad_core::math::{Vec2, Vec3};
 use onecad_core::regen::{GeometryEngine, Lod, RegenRequest, RegenScheduler, SchedulerHandle};
 use onecad_core::sketch::{Constraint, CurvePosition, Sketch, SketchEntity, WorldPlane};
 
-use onecad_lib::document_runtime::{DocumentRuntime, RegenReport};
+use onecad_lib::document_runtime::{DocumentRuntime, RegenReport, SaveCaches};
 use onecad_lib::dto::{DocumentChange, DocumentProjection};
 use onecad_lib::worker::manager::SupervisorConfig;
 use onecad_lib::worker::wire::sketch_wire;
@@ -87,6 +99,28 @@ async fn spawn_worker(bin: PathBuf) -> WorkerManager {
         "real worker must connect + handshake + OpenSession"
     );
     wm
+}
+
+/// A [`MeshProvider`] decorator that counts `Tessellate` pulls. The whole point of
+/// the inline `artifacts.tessellate` rider is that a post-regen `get_mesh` needs
+/// ZERO of them — the worker already tessellated every prepared body and shipped
+/// the MESH1 blobs in the `ExecutePlan` terminal's binary tail.
+struct CountingMeshes {
+    inner: Arc<dyn MeshProvider>,
+    fetches: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl MeshProvider for CountingMeshes {
+    async fn fetch_mesh(
+        &self,
+        body: BodyId,
+        lod: Lod,
+        snapshot: SnapshotId,
+    ) -> Result<Vec<u8>, onecad_core::regen::EngineError> {
+        self.fetches.fetch_add(1, Ordering::SeqCst);
+        self.inner.fetch_mesh(body, lod, snapshot).await
+    }
 }
 
 fn runtime_over(wm: &WorkerManager) -> DocumentRuntime {
@@ -332,7 +366,11 @@ async fn saved_document_reopens_and_serves_meshes() {
     // ── Session 2: the EXACT open_document chain on a FRESH worker. ──────────
     let wm2 = spawn_worker(bin).await;
     let engine: Arc<dyn GeometryEngine> = Arc::new(wm2.clone());
-    let meshes: Arc<dyn MeshProvider> = Arc::new(wm2.clone());
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let meshes: Arc<dyn MeshProvider> = Arc::new(CountingMeshes {
+        inner: Arc::new(wm2.clone()),
+        fetches: fetches.clone(),
+    });
     let solver: Arc<dyn SolverEngine> = Arc::new(wm2.clone());
     let rt2 = DocumentRuntime::open(&path, engine, meshes, solver).expect("reopen");
 
@@ -346,15 +384,37 @@ async fn saved_document_reopens_and_serves_meshes() {
 
     let body = BodyId::from_str(&body_id_str).expect("projection body id parses as BodyId");
 
+    assert_eq!(
+        pre.geometry_source, "cached",
+        "the pre-regen projection must say the geometry is LAST-SAVED, not live"
+    );
+
     let runtime2: Runtime = Arc::new(Mutex::new(Some(rt2)));
 
-    // (2) The pre-publish window the frontend must survive: get_mesh is a MISS.
+    // (2) The pre-publish window is now SERVED: the explicit save embedded this
+    //     body's coarse mesh, so the viewport paints before the regen finishes.
+    let cached_bytes = {
+        let mut guard = runtime2.lock().await;
+        let rt = guard.as_mut().expect("open");
+        rt.get_mesh(body, Lod::Coarse, None)
+            .await
+            .expect("the container's mesh cache serves the pre-publish window")
+    };
+    assert_mesh1(&cached_bytes, "container mesh cache");
+    assert_eq!(
+        fetches.load(Ordering::SeqCst),
+        0,
+        "the pre-publish hit comes from the container — no provider call, and no worker \
+         round-trip is even possible before the first publish"
+    );
+    // A caller that PINS a generation still misses: these bytes belong to no
+    // published snapshot, and generations are minted from 1.
     {
         let mut guard = runtime2.lock().await;
         let rt = guard.as_mut().expect("open");
         assert!(
-            rt.get_mesh(body, Lod::Coarse, None).await.is_none(),
-            "before the open-regen publishes, get_mesh is a documented miss"
+            rt.get_mesh(body, Lod::Coarse, Some(1)).await.is_none(),
+            "a generation-pinned request must never be answered with container bytes"
         );
     }
 
@@ -376,8 +436,13 @@ async fn saved_document_reopens_and_serves_meshes() {
         proj.bodies.contains_key(&body_id_str),
         "post-regen projection still lists the body"
     );
+    assert_eq!(
+        proj.geometry_source, "live",
+        "a publish flips the projection off the cached-geometry label"
+    );
 
-    // (4) The viewport fetch: a non-empty MESH1 blob for that body.
+    // (4) The viewport fetch: a non-empty MESH1 blob for that body — served from the
+    //     cache the open-regen SEEDED, so no Tessellate round-trip happens at all.
     let bytes = {
         let mut guard = runtime2.lock().await;
         let rt = guard.as_mut().expect("open");
@@ -385,24 +450,134 @@ async fn saved_document_reopens_and_serves_meshes() {
             .await
             .expect("get_mesh serves the replayed body's mesh")
     };
+    assert_eq!(
+        fetches.load(Ordering::SeqCst),
+        0,
+        "the open-regen's inline artifacts must make the FIRST get_mesh a cache hit — \
+         a Tessellate pull here means the body was tessellated twice"
+    );
+    assert_mesh1(&bytes, "post-publish get_mesh");
+
+    sched2.shutdown();
+    wm2.shutdown().await;
+    eprintln!(
+        "OPEN-RENDER PASS: save → fresh-worker reopen → container cache served {} bytes \
+         BEFORE the regen → open-regen published → get_mesh served {} bytes with {} \
+         Tessellate pulls",
+        cached_bytes.len(),
+        bytes.len(),
+        fetches.load(Ordering::SeqCst)
+    );
+}
+
+/// The complement of assertion 2: a container with **no** mesh caches — a legacy
+/// file, or one written by the autosave lane ([`SaveCaches::none`]) — still misses
+/// before the first publish. The frontend's pre-publish retry path is therefore
+/// still reachable and must stay correct; the caches close the window, they do not
+/// abolish it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn container_without_mesh_caches_still_misses_before_the_publish() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+
+    let wm1 = spawn_worker(bin.clone()).await;
+    let runtime: Runtime = Arc::new(Mutex::new(Some(runtime_over(&wm1))));
+    let (runtime, sched1, mut rx1) = wire_with(runtime).await;
+
+    let outcome = {
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut().expect("open");
+        let sa = SketchId(Uuid::from_u128(0xB));
+        rt.apply(EditCommand::AddOperation {
+            record: sketch_record(SKETCH_A, &rect_sketch(sa, 0x2000, 0.0, 0.0, 30.0, 15.0)),
+            at_cursor: false,
+        })
+        .expect("add sketch op");
+        rt.apply(EditCommand::AddOperation {
+            record: extrude_record(EXTRUDE_A, sa, 12.0),
+            at_cursor: false,
+        })
+        .expect("add extrude op")
+    };
+    sched1.handle(&outcome);
+    let (s, change, _) = recv(&mut rx1).await;
+    assert_eq!(s, "published", "commit published");
+    let body_id_str = change
+        .expect("published change")
+        .changed_bodies
+        .first()
+        .expect("one body")
+        .body_id
+        .clone();
+
+    // The AUTOSAVE lane's payload: document + imports, no cache section at all.
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("no-caches.onecad");
+    {
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut().expect("open");
+        let payload = rt.build_save_payload(save_meta(), SaveCaches::none());
+        DocumentRuntime::write_payload(&path, &payload).expect("write");
+    }
+    sched1.shutdown();
+    wm1.shutdown().await;
+
+    let names = zip_entry_names(&path);
+    assert!(
+        !names.iter().any(|n| n.starts_with("meshes/")),
+        "SaveCaches::none() must write no mesh section, got {names:?}"
+    );
+
+    let wm2 = spawn_worker(bin).await;
+    let engine: Arc<dyn GeometryEngine> = Arc::new(wm2.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(wm2.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(wm2.clone());
+    let mut rt2 = DocumentRuntime::open(&path, engine, meshes, solver).expect("reopen");
+
+    let body = BodyId::from_str(&body_id_str).expect("body id parses");
+    assert!(
+        rt2.projection().bodies.contains_key(&body_id_str),
+        "the tree still renders from the persisted body registry"
+    );
+    assert_eq!(
+        rt2.projection().geometry_source,
+        "none",
+        "no snapshot and no cached meshes ⇒ nothing to paint"
+    );
+    assert!(
+        rt2.get_mesh(body, Lod::Coarse, None).await.is_none(),
+        "without a mesh cache section the pre-publish window is still a MISS"
+    );
+
+    wm2.shutdown().await;
+}
+
+/// Asserts `bytes` is a non-trivial blob leading with the MESH1 magic.
+fn assert_mesh1(bytes: &[u8], what: &str) {
     assert!(
         bytes.len() > 8,
-        "MESH1 blob is non-trivial ({} bytes)",
+        "{what}: MESH1 blob is non-trivial ({} bytes)",
         bytes.len()
     );
     let magic = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     assert_eq!(
         magic,
         0x4D45_5348,
-        "blob leads with the MESH1 magic (LE u32; got stream bytes {:?})",
+        "{what}: blob leads with the MESH1 magic (LE u32; got {:?})",
         &bytes[0..4]
     );
+}
 
-    sched2.shutdown();
-    wm2.shutdown().await;
-    eprintln!(
-        "OPEN-RENDER PASS: save → fresh-worker reopen → open-regen published → \
-         get_mesh served {} bytes",
-        bytes.len()
-    );
+/// Every non-directory entry name inside a container.
+fn zip_entry_names(path: &std::path::Path) -> Vec<String> {
+    let file = std::fs::File::open(path).expect("open container");
+    let mut zip = zip::ZipArchive::new(file).expect("read container zip");
+    (0..zip.len())
+        .filter_map(|i| {
+            let f = zip.by_index(i).ok()?;
+            (!f.is_dir()).then(|| f.name().to_string())
+        })
+        .collect()
 }

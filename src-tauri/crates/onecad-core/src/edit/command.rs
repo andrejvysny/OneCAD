@@ -325,6 +325,19 @@ pub enum InputPath {
     /// bare ids). Slot 1 of the Hole `inputs[]` array; slot 0 is the host BODY and
     /// is not addressable here.
     HoleFace,
+    /// An OffsetFace operative face at `index` (into `face_ids`/`faces`) — slots
+    /// `0..faces.len()` of the op's `inputs[]` array, in stored order.
+    ///
+    /// Writes the WHOLE typed [`ElementRef`], evidence included, and mirrors the
+    /// bare id into `face_ids[index]` (the Fillet dual, not Shell's bare-id-only
+    /// slot).
+    OffsetFaceFace {
+        /// Index of the operative face to rebind.
+        index: usize,
+    },
+    /// An OffsetFace `Total` opposite face (`params.oppositeFace`) — the LAST
+    /// slot of the op's `inputs[]` array, present only while the op carries one.
+    OffsetFaceOpposite,
 }
 
 /// The payload written by [`EditCommand::EditOperationInput`] — a union over the

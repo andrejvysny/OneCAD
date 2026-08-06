@@ -21,7 +21,12 @@
 //!   *through* the op's own params, editing them mints a new key and heals the
 //!   circuit; see [`plan_op_keys`]. The entry map is bounded (fingerprint prune +
 //!   LRU cap) and can be cleared wholesale via
-//!   [`clear_circuit`](WorkerManager::clear_circuit).
+//!   [`clear_circuit`](WorkerManager::clear_circuit);
+//! * **retirement** — [`retire`](WorkerManager::retire) is the supervisor's only
+//!   *terminal* exit besides [`WorkerState::Failed`]: it cancels the handshake, the
+//!   run loop and any backoff sleep, tears the child down gracefully-then-forcibly,
+//!   and never restarts. Without it every document open leaked its predecessor's
+//!   sidecar for the lifetime of the process.
 //!
 //! It implements [`GeometryEngine`] + [`MeshProvider`] by translating core types
 //! to the OCW1 wire via [`wire`](super::wire) over the current
@@ -30,13 +35,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Notify};
 
 use onecad_protocol::client::{ProtocolClient, WorkerEvent};
 use onecad_protocol::messages::{HelloResult, Lane};
@@ -72,6 +77,10 @@ pub enum WorkerState {
     /// The flap budget was exhausted (too many failed starts / rapid deaths) — no
     /// worker. A poison circuit does NOT reach this state (F3).
     Failed,
+    /// **Terminal**: [`WorkerManager::retire`] was called. The supervisor is gone,
+    /// the child is (being) reaped, no restart will ever be attempted and every
+    /// request fails fast. Sticky — nothing can move a manager out of it.
+    Retired,
 }
 
 /// A lifecycle transition broadcast to the app (worker-status event; R-WP11).
@@ -155,6 +164,19 @@ struct Shared {
     poison: Mutex<Poison>,
     lifecycle: broadcast::Sender<WorkerLifecycle>,
     restart_hook: RwLock<Option<RestartHook>>,
+    /// The ONE cancellation signal (see [`WorkerManager::retire`]). Latched once,
+    /// never cleared; read by every supervisor state so a retired manager can never
+    /// reconnect, restart, or bump its epoch.
+    retired: AtomicBool,
+    /// Wakes every await that is parked on [`Shared::retired`] the instant the flag
+    /// latches — the supervisor is otherwise blocked in a handshake, a run-loop
+    /// select, or a multi-second backoff sleep.
+    retire_signal: Notify,
+    /// Set when the supervision task returns — i.e. the manager reached a terminal
+    /// state (`Failed`/`Retired`) AND its child has been reaped. The only way to
+    /// observe that a retirement actually tore the process down rather than merely
+    /// latching a flag.
+    torn_down: AtomicBool,
 }
 
 /// Cap on live poison entries. The map is per-Rust-process and unbounded by
@@ -228,8 +250,52 @@ impl Poison {
 }
 
 impl Shared {
+    /// Publishes a lifecycle state. [`WorkerState::Retired`] is **terminal**: once
+    /// set, nothing overwrites it. That stickiness is what makes retirement race-free
+    /// against a supervisor that is already mid-transition (e.g. about to publish
+    /// `Ready`) when [`WorkerManager::retire`] lands.
     fn set_state(&self, s: WorkerState) {
-        *self.state.lock().unwrap() = s;
+        let mut current = self.state.lock().unwrap();
+        if *current == WorkerState::Retired {
+            return;
+        }
+        *current = s;
+    }
+
+    fn is_retired(&self) -> bool {
+        self.retired.load(Ordering::SeqCst)
+    }
+
+    /// Latches retirement; `true` only on the transition (so `retire` is idempotent).
+    fn latch_retired(&self) -> bool {
+        !self.retired.swap(true, Ordering::SeqCst)
+    }
+
+    /// Resolves as soon as retirement is latched — immediately if it already is.
+    ///
+    /// The waiter is `enable()`d **before** the flag is re-read, and `retire` stores
+    /// the flag **before** it notifies, so the two orderings interlock and a wakeup
+    /// can never be lost (the naive check-then-`notified()` has exactly that race).
+    async fn retired(&self) {
+        loop {
+            let notified = self.retire_signal.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_retired() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// A backoff sleep that wakes early on retirement. `true` ⇒ retired: the caller
+    /// must return instead of reconnecting.
+    async fn sleep_or_retired(&self, delay: Duration) -> bool {
+        tokio::select! {
+            biased;
+            () = self.retired() => true,
+            () = tokio::time::sleep(delay) => self.is_retired(),
+        }
     }
 
     fn client(&self) -> Option<Arc<ProtocolClient>> {
@@ -387,6 +453,9 @@ impl WorkerManager {
             poison: Mutex::new(Poison::default()),
             lifecycle,
             restart_hook: RwLock::new(None),
+            retired: AtomicBool::new(false),
+            retire_signal: Notify::new(),
+            torn_down: AtomicBool::new(false),
         });
         tokio::spawn(supervise(shared.clone()));
         Self { shared }
@@ -427,13 +496,14 @@ impl WorkerManager {
         *self.shared.restart_hook.write().unwrap() = Some(hook);
     }
 
-    /// Awaits [`WorkerState::Ready`] up to `timeout`; `false` on `Failed`/timeout.
+    /// Awaits [`WorkerState::Ready`] up to `timeout`; `false` on
+    /// `Failed`/`Retired`/timeout.
     pub async fn wait_ready(&self, timeout: Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             match self.state() {
                 WorkerState::Ready => return true,
-                WorkerState::Failed => return false,
+                WorkerState::Failed | WorkerState::Retired => return false,
                 _ => {}
             }
             if tokio::time::Instant::now() >= deadline {
@@ -504,13 +574,95 @@ impl WorkerManager {
 
     /// Graceful `Shutdown` (SCHEMA §7.1): ask the worker to flush + exit 0.
     /// Best-effort — a disconnected worker is already gone.
+    ///
+    /// This asks *nicely* and nothing more: the supervisor treats the resulting exit
+    /// as a death and **restarts** the worker. [`retire`](Self::retire) is the
+    /// terminal form and is what a lifecycle owner wants.
     pub async fn shutdown(&self) {
         if let Some(client) = self.shared.client() {
             let _ = client.request("Shutdown", json!({})).await;
         }
     }
 
+    /// **Terminal, idempotent retirement** — the end of this manager's lifecycle.
+    ///
+    /// Every worker process used to outlive its document: the supervisor's only exits
+    /// were `Failed` and "restart forever", so each new/open spawned a sidecar and
+    /// orphaned the previous one for the lifetime of the app. `retire` is the missing
+    /// terminal state.
+    ///
+    /// It latches the ONE cancellation flag, which is observed in **every** supervisor
+    /// state — the OCW1 handshake, the ping/exit run loop, and every backoff sleep —
+    /// so a manager retired while connecting or backing off neither reconnects nor
+    /// restarts. The epoch is deliberately **not** bumped: a retired manager is not a
+    /// restart, and a fence must never see it as one.
+    ///
+    /// Teardown is graceful-then-forced: a best-effort `Shutdown` frame goes out
+    /// fire-and-forget, and the supervise task (which owns the [`tokio::process::Child`])
+    /// reaps it, force-killing after [`RETIRE_GRACE`] if it has not exited on its own.
+    /// `kill_on_drop` remains the backstop for the paths where no child exists yet.
+    ///
+    /// Returns immediately; the child is reaped in the background.
+    pub fn retire(&self) {
+        if !self.shared.latch_retired() {
+            return; // already retired — terminal and idempotent.
+        }
+        // Sticky (see `Shared::set_state`): a supervisor mid-transition cannot undo it.
+        self.shared.set_state(WorkerState::Retired);
+        self.shared.retire_signal.notify_waiters();
+        tracing::info!(epoch = self.epoch().0, "worker retired");
+        // Fire-and-forget the polite stop. A caller with no reactor (a Drop-time or
+        // sync teardown path) simply skips it and the child is force-killed instead.
+        if let (Some(client), Ok(handle)) =
+            (self.shared.client(), tokio::runtime::Handle::try_current())
+        {
+            handle.spawn(async move {
+                let _ = client.request("Shutdown", json!({})).await;
+            });
+        }
+    }
+
+    /// Whether [`retire`](Self::retire) has been called (terminal).
+    #[must_use]
+    pub fn is_retired(&self) -> bool {
+        self.shared.is_retired()
+    }
+
+    /// Whether the supervision task has finished — the manager reached a terminal
+    /// state AND its child process has been reaped. `retire` returns before this is
+    /// true (teardown is asynchronous, bounded by [`RETIRE_GRACE`]); this is how a
+    /// caller (or a test) confirms the process is really gone.
+    #[must_use]
+    pub fn is_torn_down(&self) -> bool {
+        self.shared.torn_down.load(Ordering::SeqCst)
+    }
+
+    /// Awaits [`is_torn_down`](Self::is_torn_down) up to `timeout`.
+    pub async fn wait_torn_down(&self, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if self.is_torn_down() {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Whether both handles drive the **same** supervisor — identity, not equality.
+    /// This is how "the open document adopted the pre-warmed worker" is asserted:
+    /// a second spawn would produce a different `Shared`.
+    #[must_use]
+    pub fn is_same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+
     fn client_or_err(&self) -> Result<Arc<ProtocolClient>, EngineError> {
+        if self.shared.is_retired() {
+            return Err(retired_err());
+        }
         self.shared.client().ok_or_else(not_connected)
     }
 }
@@ -534,6 +686,24 @@ enum Death {
     Exited,
     /// Killed after `max_missed_pings` (hung).
     PingTimeout,
+    /// [`WorkerManager::retire`] latched — terminal, NOT a restart trigger.
+    Retired,
+}
+
+/// How long a retired worker gets to honour its graceful `Shutdown` before it is
+/// force-killed. Bounded so a wedged sidecar can never outlive its manager.
+const RETIRE_GRACE: Duration = Duration::from_millis(500);
+
+/// Reaps `child`: waits up to `grace` for the self-exit the graceful `Shutdown`
+/// should produce, then `SIGKILL`s. Always returns with the child reaped, so
+/// `kill_on_drop` stays a backstop rather than the mechanism.
+async fn terminate_child(child: &mut tokio::process::Child, grace: Duration) {
+    if tokio::time::timeout(grace, child.wait()).await.is_ok() {
+        return;
+    }
+    tracing::warn!("retired worker ignored Shutdown within the grace window — SIGKILL");
+    let _ = child.start_kill();
+    let _ = child.wait().await;
 }
 
 /// The supervision loop: (re)connect, run until death, restart with backoff. A
@@ -542,6 +712,13 @@ enum Death {
 /// Failed (F2). A poisoned plan-key never stops the supervisor (F3) — the worker
 /// keeps restarting so other plans run.
 async fn supervise(shared: Arc<Shared>) {
+    supervise_loop(&shared).await;
+    // The task is returning, so the child (if any) has been reaped — publish that,
+    // because "retired" alone says nothing about whether the process actually died.
+    shared.torn_down.store(true, Ordering::SeqCst);
+}
+
+async fn supervise_loop(shared: &Shared) {
     let mut flap_strikes = 0u32;
     // F6: the restart hook (mark-dirty + enqueue replay) fires on the post-restart
     // READY transition, not at death — so the replay it enqueues dispatches over a
@@ -549,8 +726,20 @@ async fn supervise(shared: Arc<Shared>) {
     // death and the next Ready.
     let mut pending_restart_epoch: Option<u64> = None;
     loop {
-        match spawn_and_connect(&shared).await {
-            Ok((child, client)) => {
+        // Retirement is checked at EVERY point the loop can be entered or resumed
+        // (here, inside the handshake, inside the run loop, and after every backoff
+        // sleep) — a retired manager must never spawn another child.
+        if shared.is_retired() {
+            return;
+        }
+        match spawn_and_connect(shared).await {
+            Ok((mut child, client)) => {
+                if shared.is_retired() {
+                    // Retired mid-handshake: never publish this connection and never
+                    // count it as a life. Reap the child we just spawned and stop.
+                    terminate_child(&mut child, RETIRE_GRACE).await;
+                    return;
+                }
                 *shared.conn.write().unwrap() = Some(client.clone());
                 *shared.hello.lock().unwrap() = Some(client.hello().clone());
                 // A different OCCT build re-keys every poison entry; drop the
@@ -558,7 +747,7 @@ async fn supervise(shared: Arc<Shared>) {
                 // lifetime (memory bound).
                 shared.note_fingerprint(&client.hello().occt.fingerprint);
                 if shared.config.auto_open_session {
-                    let _ = auto_open_session(&shared, &client).await;
+                    let _ = auto_open_session(shared, &client).await;
                 }
                 shared.set_state(WorkerState::Ready);
                 shared.emit(WorkerLifecycle::Ready {
@@ -568,12 +757,20 @@ async fn supervise(shared: Arc<Shared>) {
                 // Fire the deferred restart hook now that the worker is Ready + the
                 // connection is live (F6).
                 if let Some(epoch) = pending_restart_epoch.take() {
-                    fire_restart_hook(&shared, WorkerEpoch(epoch));
+                    fire_restart_hook(shared, WorkerEpoch(epoch));
                 }
                 let ready_at = tokio::time::Instant::now();
 
-                let death = run_until_death(&shared, &client, child).await;
+                let death = run_until_death(shared, &client, child).await;
                 let alive = ready_at.elapsed();
+
+                if matches!(death, Death::Retired) {
+                    // Terminal. Drop the connection but do NOT bump the epoch and do
+                    // NOT emit a transition: retirement is not a restart, and a fence
+                    // that saw a bump here would reject work it should have kept.
+                    *shared.conn.write().unwrap() = None;
+                    return;
+                }
 
                 // Torn down: drop the connection and bump the epoch (fencing).
                 *shared.conn.write().unwrap() = None;
@@ -581,6 +778,7 @@ async fn supervise(shared: Arc<Shared>) {
                 let reason = match death {
                     Death::Exited => "worker exited/crashed",
                     Death::PingTimeout => "worker hung (ping timeout) → SIGKILL",
+                    Death::Retired => unreachable!("handled above"),
                 };
                 shared.set_state(WorkerState::Restarting);
                 shared.emit(WorkerLifecycle::Restarting {
@@ -613,15 +811,24 @@ async fn supervise(shared: Arc<Shared>) {
                         .backoff
                         .get(idx)
                         .copied()
-                        .unwrap_or_else(|| first_delay(&shared));
-                    tokio::time::sleep(delay).await;
+                        .unwrap_or_else(|| first_delay(shared));
+                    if shared.sleep_or_retired(delay).await {
+                        return;
+                    }
                 } else {
                     flap_strikes = 0;
                     // Restart cadence: reuse the first backoff delay for runtime deaths.
-                    tokio::time::sleep(first_delay(&shared)).await;
+                    if shared.sleep_or_retired(first_delay(shared)).await {
+                        return;
+                    }
                 }
             }
             Err(reason) => {
+                // A retirement observed inside `spawn_and_connect` surfaces as a start
+                // failure; it must NOT be announced as a restart or counted as a flap.
+                if shared.is_retired() {
+                    return;
+                }
                 flap_strikes += 1;
                 shared.set_state(WorkerState::Restarting);
                 shared.emit(WorkerLifecycle::Restarting {
@@ -636,7 +843,9 @@ async fn supervise(shared: Arc<Shared>) {
                     return;
                 }
                 let idx = (flap_strikes as usize - 1).min(shared.config.backoff.len() - 1);
-                tokio::time::sleep(shared.config.backoff[idx]).await;
+                if shared.sleep_or_retired(shared.config.backoff[idx]).await {
+                    return;
+                }
             }
         }
     }
@@ -688,9 +897,16 @@ async fn spawn_and_connect(
     }
     let stdout = child.stdout.take().ok_or("child stdout missing")?;
     let stdin = child.stdin.take().ok_or("child stdin missing")?;
-    let client = ProtocolClient::connect(stdout, stdin)
-        .await
-        .map_err(|e| format!("handshake: {e}"))?;
+    // A worker that never sends its hello would park this await forever, so the
+    // handshake is one of the three places retirement MUST be observable. On
+    // cancellation `child` drops here and `kill_on_drop` reaps it.
+    let client = tokio::select! {
+        biased;
+        () = shared.retired() => return Err("retired during handshake".into()),
+        connected = ProtocolClient::connect(stdout, stdin) => {
+            connected.map_err(|e| format!("handshake: {e}"))?
+        }
+    };
     Ok((child, Arc::new(client)))
 }
 
@@ -794,9 +1010,27 @@ async fn run_until_death(
     ticker.tick().await; // consume the immediate first tick.
     loop {
         tokio::select! {
+            // `biased` so retirement WINS a tie. Without it a retire that races the
+            // child's own exit could resolve as `Exited` and bump the epoch.
+            biased;
+            () = shared.retired() => {
+                terminate_child(&mut child, RETIRE_GRACE).await;
+                return Death::Retired;
+            }
             _ = ticker.tick() => {
                 let ping = client.request_timeout("GetWorkerHead", json!({}), shared.config.ping_timeout);
-                match ping.await {
+                // The ping is awaited INSIDE this arm, so it must carry its own
+                // cancellation: a wedged worker parks it for the whole `ping_timeout`
+                // (5 s in production) and the outer select never gets polled again.
+                let pinged = tokio::select! {
+                    biased;
+                    () = shared.retired() => {
+                        terminate_child(&mut child, RETIRE_GRACE).await;
+                        return Death::Retired;
+                    }
+                    pinged = ping => pinged,
+                };
+                match pinged {
                     Ok(resp) if resp.ok => missed = 0,
                     _ => {
                         missed += 1;
@@ -1121,6 +1355,13 @@ async fn stream_plan(shared: Arc<Shared>, request: PlanRequest, tx: mpsc::Sender
         request.ops.len(),
         "PlanRequest.prefix_hashes must be index-aligned with ops"
     );
+    // Retirement is terminal, so it outranks even the poison gate: there is no worker
+    // and there never will be one again. Fail fast with no dispatch and no wait — a
+    // retired manager must never make a caller sit through a readiness timeout.
+    if shared.is_retired() {
+        let _ = tx.send(PlanEvent::Failed(retired_err())).await;
+        return;
+    }
     // One candidate poison key per op (`prefixHash(op) | opRecordId | fingerprint`);
     // the crashing op is one of them, so a poisoned plan is caught up front (F3).
     //
@@ -1149,8 +1390,8 @@ async fn stream_plan(shared: Arc<Shared>, request: PlanRequest, tx: mpsc::Sender
     }
     let Some(client) = shared.client() else {
         let _ = tx
-            .send(PlanEvent::Failed(EngineError::Crashed {
-                message: "worker not connected".into(),
+            .send(PlanEvent::Failed(EngineError::NotConnected {
+                message: "no session yet (handshake not completed, or restarting)".into(),
             }))
             .await;
         return;
@@ -1173,7 +1414,10 @@ async fn stream_plan(shared: Arc<Shared>, request: PlanRequest, tx: mpsc::Sender
     };
     let id = inflight.id;
     shared.inflight.lock().unwrap().insert(job, id);
-    let mut resp_fut = Box::pin(inflight.response());
+    // `response_with_bin`, not `response`: the terminal's binary tail carries the
+    // inline `artifacts.tessellate` MESH1 blobs for every prepared body (SCHEMA §7.2).
+    // Dropping the tail here is what forced a second full tessellation per regen.
+    let mut resp_fut = Box::pin(inflight.response_with_bin());
 
     // Count executed steps so a transport loss can be attributed to the crashing op
     // (= the op at `steps_received`, clamped) rather than the plan's last op (F3).
@@ -1212,9 +1456,10 @@ async fn stream_plan(shared: Arc<Shared>, request: PlanRequest, tx: mpsc::Sender
     let _ = tx.send(event).await;
 }
 
-/// The stream terminal: a wire `resp` (or transport error) vs a local parse error.
+/// The stream terminal: a wire `resp` **with its binary tail** (or transport error)
+/// vs a local parse error. The tail carries the inline tessellate artifacts.
 enum StreamEnd {
-    Resp(Result<onecad_protocol::messages::RespFrame, ProtocolError>),
+    Resp(Result<(onecad_protocol::messages::RespFrame, Vec<u8>), ProtocolError>),
     Local(EngineError),
 }
 
@@ -1230,9 +1475,11 @@ fn finish_plan(
 ) -> PlanEvent {
     match terminal {
         StreamEnd::Local(err) => PlanEvent::Failed(err),
-        StreamEnd::Resp(Ok(resp)) if resp.ok => {
+        StreamEnd::Resp(Ok((resp, tail))) if resp.ok => {
+            let sections = resp.bin.clone();
             let result = resp.result.unwrap_or(Value::Null);
-            match wire::parse_plan_prepared(job, &result) {
+            match wire::parse_plan_prepared_with_artifacts(job, &result, sections.as_deref(), &tail)
+            {
                 Ok(p) => {
                     shared.record_success(op_keys);
                     PlanEvent::Prepared(p)
@@ -1240,7 +1487,7 @@ fn finish_plan(
                 Err(msg) => PlanEvent::Failed(EngineError::Protocol { message: msg }),
             }
         }
-        StreamEnd::Resp(Ok(resp)) => {
+        StreamEnd::Resp(Ok((resp, _tail))) => {
             // Well-framed worker error (recoverable op failure / protocol) — NOT a
             // crash, so the poison counter is untouched.
             let err = resp.error.as_ref().map_or_else(
@@ -1692,6 +1939,28 @@ impl crate::worker::FaceBoundaryProjection for WorkerManager {
         wire::parse_project_face_boundary(&ok_result(resp)?)
             .map_err(|message| EngineError::Protocol { message })
     }
+
+    async fn prepare_offset_face(
+        &self,
+        snapshot: SnapshotId,
+        picks: &[wire::OffsetFacePick<'_>],
+        chain_tangent_faces: bool,
+        distance_type: onecad_core::document::record::OffsetDistanceType,
+    ) -> Result<crate::dto::PrepareOffsetFaceDto, EngineError> {
+        let client = self.client_or_err()?;
+        let resp = client
+            .request(
+                "PrepareOffsetFace",
+                wire::prepare_offset_face_args(snapshot, picks, chain_tangent_faces, distance_type),
+            )
+            .await
+            .map_err(protocol_err)?;
+        // A malformed closure is a PROTOCOL break, never a default: this response
+        // is what the record FREEZES, so a fabricated body id or a silently empty
+        // face list would author an op against the wrong geometry.
+        wire::parse_prepare_offset_face(&ok_result(resp)?)
+            .map_err(|message| EngineError::Protocol { message })
+    }
 }
 
 #[async_trait]
@@ -1740,6 +2009,15 @@ impl crate::worker::StepImport for WorkerManager {
 impl crate::worker::CircuitControl for WorkerManager {
     fn clear_circuit(&self) -> usize {
         WorkerManager::clear_circuit(self)
+    }
+}
+
+#[async_trait]
+impl crate::worker::WorkerReadiness for WorkerManager {
+    async fn wait_ready(&self, timeout: Duration) -> bool {
+        // Delegates to the inherent method (method-call syntax prefers it over
+        // the trait method being implemented, so this is not recursive).
+        WorkerManager::wait_ready(self, timeout).await
     }
 }
 
@@ -1848,65 +2126,16 @@ fn assemble_mesh(
             return Err(protocol("mesh handle has neither inline bin nor streamId"));
         };
 
-    let total = reconcile_field(manifest_total, resp_total, "totalBytes")?;
-    let sha = reconcile_field(manifest_sha, resp_sha, "sha256")?;
+    let total = wire::reconcile_field(manifest_total, resp_total, "totalBytes")?;
+    let sha = wire::reconcile_field(manifest_sha, resp_sha, "sha256")?;
     if total.is_none() && sha.is_none() {
         tracing::warn!(
             "mesh handle carried no totalBytes/sha256 (manifest or resp) — \
              validating MESH1 header only"
         );
     }
-    verify_mesh(&blob, total, sha.as_deref())?;
+    wire::verify_mesh(&blob, total, sha.as_deref())?;
     Ok(blob)
-}
-
-/// Reconciles a manifest-level and a resp-level copy of an integrity field: both
-/// present and unequal ⇒ error; otherwise the present value (manifest preferred),
-/// or `None` when neither carries it (F5).
-fn reconcile_field<T: PartialEq + std::fmt::Display>(
-    manifest: Option<T>,
-    resp: Option<T>,
-    field: &str,
-) -> Result<Option<T>, EngineError> {
-    match (manifest, resp) {
-        (Some(m), Some(r)) => {
-            if m != r {
-                return Err(EngineError::Protocol {
-                    message: format!("mesh {field} mismatch: manifest {m} != resp {r}"),
-                });
-            }
-            Ok(Some(m))
-        }
-        (Some(m), None) => Ok(Some(m)),
-        (None, r) => Ok(r),
-    }
-}
-
-fn verify_mesh(blob: &[u8], total: Option<u64>, sha: Option<&str>) -> Result<(), EngineError> {
-    if let Some(t) = total {
-        if blob.len() as u64 != t {
-            return Err(protocol("MESH1 assembled length != totalBytes"));
-        }
-    }
-    if let Some(want) = sha {
-        if sha256_hex(blob) != want {
-            return Err(protocol("MESH1 SHA-256 mismatch (corrupt stream)"));
-        }
-    }
-    onecad_protocol::mesh::validate_mesh_blob(blob).map_err(|e| EngineError::Protocol {
-        message: format!("MESH1 header invalid: {e}"),
-    })?;
-    Ok(())
-}
-
-fn sha256_hex(data: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(data);
-    let mut s = String::with_capacity(digest.len() * 2);
-    for b in digest {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1914,8 +2143,17 @@ fn sha256_hex(data: &[u8]) -> String {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn not_connected() -> EngineError {
-    EngineError::Crashed {
-        message: "worker not connected (restarting or failed)".into(),
+    EngineError::NotConnected {
+        message: "restarting or failed".into(),
+    }
+}
+
+/// The fail-fast terminal for a retired manager. Distinct from [`not_connected`]
+/// because it is NOT transient: no restart is coming, so a caller must not retry or
+/// wait for readiness.
+fn retired_err() -> EngineError {
+    EngineError::NotConnected {
+        message: "retired (its document was closed, or the app is quitting)".into(),
     }
 }
 
@@ -2176,6 +2414,9 @@ mod poison_tests {
             poison: Mutex::new(Poison::default()),
             lifecycle,
             restart_hook: RwLock::new(None),
+            retired: AtomicBool::new(false),
+            retire_signal: Notify::new(),
+            torn_down: AtomicBool::new(false),
         })
     }
 

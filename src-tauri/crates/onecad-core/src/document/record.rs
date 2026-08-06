@@ -74,6 +74,7 @@ const KNOWN_OP_TYPES: &[&str] = &[
     "ImportStep",
     "TransformBody",
     "Hole",
+    "OffsetFace",
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -309,6 +310,7 @@ pub enum KnownOperation {
     ImportStep(ImportStepParams),
     TransformBody(TransformBodyParams),
     Hole(HoleParams),
+    OffsetFace(OffsetFaceParams),
 }
 
 impl KnownOperation {
@@ -358,6 +360,18 @@ impl KnownOperation {
                 refs
             }
             KnownOperation::Hole(p) => vec![&mut p.face],
+            // NORMATIVE slot order (SCHEMA §7.3 `op.offsetFace`): operative faces
+            // in stored order, then the `Total` opposite face LAST when present.
+            // `wire::wire_op_inputs`, `document_runtime::element_ref_input` and
+            // [`crate::edit::command::InputPath`] all mirror this table; a
+            // divergence is a silent mis-repair (H9).
+            KnownOperation::OffsetFace(p) => {
+                let mut refs: Vec<&mut ElementRef> = p.faces.iter_mut().collect();
+                if let Some(o) = p.opposite_face.as_mut() {
+                    refs.push(o);
+                }
+                refs
+            }
             _ => Vec::new(),
         }
     }
@@ -394,6 +408,7 @@ impl Operation {
                 KnownOperation::ImportStep(_) => "ImportStep",
                 KnownOperation::TransformBody(_) => "TransformBody",
                 KnownOperation::Hole(_) => "Hole",
+                KnownOperation::OffsetFace(_) => "OffsetFace",
             },
             // The frozen node keeps its original tag inside `raw`; report it so a
             // future opType is not mislabelled as one of the known ops.
@@ -577,6 +592,27 @@ impl Operation {
                     inputs.push_element(primary.element.clone());
                 }
             }
+
+            // OffsetFace: the body it modifies IN PLACE, plus every operative face
+            // (and the `Total` opposite face). No C++ analogue (new v2 op). The
+            // body dep is UNCONDITIONAL — unlike Extrude/Shell, `target_body` is a
+            // mandatory field, because an op that only ever modifies an existing
+            // body has no "NewBody" reading in which the dependency is absent.
+            KnownOperation::OffsetFace(p) => {
+                inputs.push_body(p.target_body);
+                for f in &p.face_ids {
+                    inputs.push_element(f.clone());
+                }
+                for r in p.faces.iter().chain(p.opposite_face.iter()) {
+                    if let Some(primary) = &r.primary {
+                        inputs.push_body(primary.body);
+                        inputs.push_element(primary.element.clone());
+                    }
+                }
+                if let Some(id) = &p.opposite_face_id {
+                    inputs.push_element(id.clone());
+                }
+            }
         }
         inputs
     }
@@ -729,6 +765,29 @@ pub enum HoleType {
 /// rivet/aerospace 120°). An arbitrary angle would silently produce a cone no
 /// fastener seats in, so it is refused at the authoring boundary.
 pub const HOLE_CS_ANGLES_DEG: [f64; 4] = [82.0, 90.0, 100.0, 120.0];
+
+/// How [`OffsetFaceParams::distance`] is READ (SCHEMA §7.3 `distanceType` ∈
+/// `Offset` | `Total` | `Radius` | `Diameter`). PascalCase wire values, like the
+/// mode enums above.
+///
+/// The stored number is always the USER's value; the signed per-face kernel
+/// offset is re-derived from current upstream geometry every regen, so "Ø8 stays
+/// Ø8" across a parametric edit. Which types are legal for a given selection is
+/// [`OffsetFaceParams::validate`]'s job — only [`Offset`](Self::Offset) admits a
+/// multi-face set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum OffsetDistanceType {
+    /// Signed delta along the topological outward normal (positive grows
+    /// material). The only type valid for a multi-face selection.
+    #[default]
+    Offset,
+    /// Absolute wall thickness measured against a persisted opposite face.
+    Total,
+    /// Absolute cylinder radius (cylindrical faces only).
+    Radius,
+    /// Absolute cylinder diameter (cylindrical faces only).
+    Diameter,
+}
 
 /// Named sketch plane (SCHEMA §7.3 `plane.kind`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1584,6 +1643,166 @@ impl HoleParams {
     }
 }
 
+/// Direct-modeling face offset (SCHEMA §7.3 `op.offsetFace`, added 2026-08-06;
+/// new v2 op, no OneCAD-CPP analogue — legacy deliberately removed face
+/// push-pull). Selected faces move along their surface normals and the adjacent
+/// faces extend/trim to re-close the solid.
+///
+/// **Lineage is `modified` on [`target_body`](Self::target_body)** — an offset
+/// mints nothing and never fans a body out. That is why `target_body` is a
+/// MANDATORY [`BodyId`] rather than [`ExtrudeParams`]'s optional form: there is
+/// no NewBody reading of this op in which the field could legitimately be absent.
+///
+/// `face_ids` + `faces` are the Fillet dual (see [`FilletParams::edges`]): bare
+/// ids matching SCHEMA's `faceIds`, plus one TYPED [`ElementRef`] per entry
+/// carrying descriptor + anchor evidence so each face is repairable through the
+/// ladder (§10) instead of guessed at. The two lists are kept in LOCKSTEP by
+/// [`validate`](Self::validate) and by the repair write path
+/// ([`InputPath::OffsetFaceFace`](crate::edit::command::InputPath::OffsetFaceFace)).
+///
+/// The operative set is the FULL FROZEN closure — the user's picks PLUS the G1
+/// tangent chain, expanded ONCE at authoring by the `PrepareOffsetFace` handshake
+/// (SCHEMA §7.6) and persisted. The worker never re-expands at regen, so an
+/// upstream edit cannot silently widen or narrow what the op operates on;
+/// `chain_tangent_faces` survives only as authoring metadata for re-edit UX.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OffsetFaceParams {
+    /// The operative faces as bare ids (SCHEMA `faceIds`), in slot order.
+    pub face_ids: Vec<ElementId>,
+    /// The typed per-face semantic refs, one per [`face_ids`](Self::face_ids)
+    /// entry in the SAME order. `default` so a SCHEMA §7.3 wire payload (which
+    /// carries the refs in `inputs[]`, not in params) still parses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub faces: Vec<ElementRef>,
+    /// The USER's value, read per [`distance_type`](Self::distance_type).
+    pub distance: Scalar,
+    #[serde(default)]
+    pub distance_type: OffsetDistanceType,
+    /// Authoring metadata (see the type docs) — `true` by default.
+    #[serde(default = "default_true")]
+    pub chain_tangent_faces: bool,
+    /// The `Total` opposite face as a bare id, mirroring
+    /// [`opposite_face`](Self::opposite_face).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opposite_face_id: Option<ElementId>,
+    /// The `Total` opposite face's typed ref — persisted at authoring and
+    /// re-resolved VERBATIM each regen (never re-discovered, so an inserted wall
+    /// cannot silently retarget the thickness).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opposite_face: Option<ElementRef>,
+    /// The body this op modifies in place (SCHEMA `targetBodyId`).
+    #[serde(rename = "targetBodyId")]
+    pub target_body: BodyId,
+    #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
+    pub extra: Extra,
+}
+
+impl OffsetFaceParams {
+    /// Validates the SCHEMA §7.3 `op.offsetFace` invariants, returning a
+    /// human-facing reason on failure. Checked at every authoring entry point
+    /// (see [`crate::edit::session`]), NOT at deserialize time — same
+    /// single-writer reason as [`HoleParams::validate`].
+    ///
+    /// Nothing here is ever CLAMPED. A clamped value desynchronizes the stored
+    /// param, the preview the user approved and the geometry the next regen
+    /// builds; an out-of-domain value is refused at the boundary instead.
+    ///
+    /// The conditional block is checked BOTH ways (the [`HoleParams`] doctrine):
+    /// an opposite face is required for `Total` **and** rejected for every other
+    /// type, so a stale opposite left behind by a distance-type switch cannot ride
+    /// the record invisibly and resurrect when the type switches back.
+    ///
+    /// # Errors
+    /// A message naming the violated invariant.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.faces.is_empty() {
+            return Err("OffsetFace requires at least one operative face".into());
+        }
+        if self.faces.len() != self.face_ids.len() {
+            return Err(format!(
+                "OffsetFace faces ({}) and faceIds ({}) length mismatch",
+                self.faces.len(),
+                self.face_ids.len()
+            ));
+        }
+        for (i, f) in self.faces.iter().enumerate() {
+            if let Some(primary) = &f.primary {
+                if primary.element != self.face_ids[i] {
+                    return Err(format!(
+                        "OffsetFace face {i}: typed ref element {} != faceIds[{i}] {}",
+                        primary.element, self.face_ids[i]
+                    ));
+                }
+            }
+        }
+        if !self.distance.value.is_finite() {
+            return Err(format!(
+                "OffsetFace distance must be finite (got {})",
+                self.distance.value
+            ));
+        }
+        if self.distance_type != OffsetDistanceType::Offset && self.faces.len() != 1 {
+            return Err(format!(
+                "OffsetFace distanceType {:?} operates on exactly one face (got {})",
+                self.distance_type,
+                self.faces.len()
+            ));
+        }
+        self.validate_opposite()?;
+        match self.distance_type {
+            OffsetDistanceType::Total => {
+                if self.chain_tangent_faces {
+                    return Err(
+                        "OffsetFace distanceType Total requires chainTangentFaces = false".into(),
+                    );
+                }
+            }
+            OffsetDistanceType::Radius | OffsetDistanceType::Diameter => {
+                if self.distance.value <= 0.0 {
+                    return Err(format!(
+                        "OffsetFace distanceType {:?} needs a positive distance (got {})",
+                        self.distance_type, self.distance.value
+                    ));
+                }
+            }
+            OffsetDistanceType::Offset => {}
+        }
+        Ok(())
+    }
+
+    /// The opposite face is present **iff** `distanceType == Total`, and its bare
+    /// id mirrors its typed ref (the same lockstep `faceIds`/`faces` hold).
+    fn validate_opposite(&self) -> Result<(), String> {
+        let total = self.distance_type == OffsetDistanceType::Total;
+        match (&self.opposite_face, total) {
+            (None, true) => {
+                return Err("OffsetFace distanceType Total requires an oppositeFace".into())
+            }
+            (Some(_), false) => {
+                return Err(format!(
+                    "OffsetFace oppositeFace is Total-only (got a {:?} offset)",
+                    self.distance_type
+                ))
+            }
+            _ => {}
+        }
+        match (&self.opposite_face, &self.opposite_face_id) {
+            (Some(_), None) | (None, Some(_)) => {
+                Err("OffsetFace oppositeFace and oppositeFaceId must be set together".into())
+            }
+            (Some(r), Some(id)) => match &r.primary {
+                Some(primary) if &primary.element != id => Err(format!(
+                    "OffsetFace oppositeFace element {} != oppositeFaceId {id}",
+                    primary.element
+                )),
+                _ => Ok(()),
+            },
+            (None, None) => Ok(()),
+        }
+    }
+}
+
 /// `Some(value)` or a "`<field>` is required for a `<kind>` hole" message.
 fn require(s: Option<&Scalar>, field: &str, kind: &str) -> Result<f64, String> {
     s.map(|s| s.value)
@@ -2347,6 +2566,289 @@ mod tests {
             ..countersink_params()
         };
         assert!(p.validate().unwrap_err().contains("counterbore-only"));
+    }
+
+    // ── OffsetFace (SCHEMA §7.3 `op.offsetFace`, 2026-08-06) ────────────────
+
+    fn offset_ref(el: &str) -> ElementRef {
+        ElementRef {
+            primary: Some(crate::document::refs::PrimaryRef {
+                body: body(1),
+                element: ElementId::new(el),
+                kind: crate::document::refs::ElementKind::Face,
+                extra: Extra::new(),
+            }),
+            intent: None,
+            anchor: None,
+            extra: Extra::new(),
+        }
+    }
+
+    /// A canonical single-face `Offset` push-pull.
+    fn offset_params() -> OffsetFaceParams {
+        OffsetFaceParams {
+            face_ids: vec![ElementId::new("el_f1")],
+            faces: vec![offset_ref("el_f1")],
+            distance: Scalar::new(2.5),
+            distance_type: OffsetDistanceType::Offset,
+            chain_tangent_faces: true,
+            opposite_face_id: None,
+            opposite_face: None,
+            target_body: body(1),
+            extra: Extra::new(),
+        }
+    }
+
+    fn offset_total_params() -> OffsetFaceParams {
+        OffsetFaceParams {
+            distance_type: OffsetDistanceType::Total,
+            chain_tangent_faces: false,
+            opposite_face_id: Some(ElementId::new("el_f9")),
+            opposite_face: Some(offset_ref("el_f9")),
+            ..offset_params()
+        }
+    }
+
+    #[test]
+    fn offset_face_is_a_known_op_type() {
+        assert!(KNOWN_OP_TYPES.contains(&"OffsetFace"));
+        let op = Operation::Known(KnownOperation::OffsetFace(offset_params()));
+        assert_eq!(op.op_type(), "OffsetFace");
+        let json = serde_json::to_value(&op).unwrap();
+        assert_eq!(json["opType"], serde_json::json!("OffsetFace"));
+        // Round-trips through the KNOWN gate (never demoted to Opaque).
+        let back: Operation = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            back,
+            Operation::Known(KnownOperation::OffsetFace(_))
+        ));
+    }
+
+    /// The SCHEMA §7.3 wire spelling of every field, plus the two defaults.
+    #[test]
+    fn offset_face_params_round_trip_with_schema_field_names() {
+        let op = Operation::Known(KnownOperation::OffsetFace(offset_total_params()));
+        let json = serde_json::to_value(&op).unwrap();
+        let params = &json["params"];
+        assert_eq!(params["faceIds"], serde_json::json!(["el_f1"]));
+        assert_eq!(params["distance"], serde_json::json!({ "value": 2.5 }));
+        assert_eq!(params["distanceType"], serde_json::json!("Total"));
+        assert_eq!(params["chainTangentFaces"], serde_json::json!(false));
+        assert_eq!(params["oppositeFaceId"], serde_json::json!("el_f9"));
+        assert_eq!(
+            params["targetBodyId"],
+            serde_json::json!(body(1).to_string())
+        );
+        assert_eq!(
+            serde_json::from_value::<Operation>(json).unwrap(),
+            op,
+            "byte-stable round-trip"
+        );
+
+        // Skip-none: an `Offset` push-pull grows NO opposite-face keys.
+        let plain = serde_json::to_value(Operation::Known(KnownOperation::OffsetFace(
+            offset_params(),
+        )))
+        .unwrap();
+        assert!(plain["params"].get("oppositeFaceId").is_none());
+        assert!(plain["params"].get("oppositeFace").is_none());
+    }
+
+    /// Unknown params keys ride through `extra` verbatim (no `deny_unknown_fields`),
+    /// and the two defaulted fields fill in when the payload omits them.
+    #[test]
+    fn offset_face_preserves_unknown_params_keys_and_defaults() {
+        let raw = serde_json::json!({
+            "opType": "OffsetFace",
+            "params": {
+                "faceIds": ["el_f1"],
+                "distance": 2.5,
+                "targetBodyId": body(1).to_string(),
+                "alienKey": { "future": true }
+            }
+        });
+        let op: Operation = serde_json::from_value(raw.clone()).unwrap();
+        let Operation::Known(KnownOperation::OffsetFace(p)) = &op else {
+            panic!("expected OffsetFace");
+        };
+        assert_eq!(p.distance_type, OffsetDistanceType::Offset);
+        assert!(p.chain_tangent_faces, "chainTangentFaces defaults to TRUE");
+        assert!(p.faces.is_empty());
+        let back = serde_json::to_value(&op).unwrap();
+        assert_eq!(back["params"]["alienKey"], raw["params"]["alienKey"]);
+    }
+
+    /// The full SCHEMA §7.3 rejection matrix. Nothing is ever clamped — an
+    /// out-of-domain value is refused so the stored param, the approved preview
+    /// and the next regen can never disagree.
+    #[test]
+    fn offset_face_validate_matrix() {
+        assert!(offset_params().validate().is_ok());
+        assert!(offset_total_params().validate().is_ok());
+
+        // ── the operative set ──
+        let p = OffsetFaceParams {
+            face_ids: vec![],
+            faces: vec![],
+            ..offset_params()
+        };
+        assert!(p.validate().unwrap_err().contains("at least one"));
+        let p = OffsetFaceParams {
+            face_ids: vec![ElementId::new("el_f1"), ElementId::new("el_f2")],
+            ..offset_params()
+        };
+        assert!(p.validate().unwrap_err().contains("length mismatch"));
+        let p = OffsetFaceParams {
+            face_ids: vec![ElementId::new("el_other")],
+            ..offset_params()
+        };
+        assert!(p.validate().unwrap_err().contains("!= faceIds[0]"));
+
+        // ── the distance ──
+        // `Scalar::new` panics on a non-finite value and its Deserialize rejects
+        // one, so this belt is only reachable through a hand-built struct — which
+        // is exactly the caller this validation exists to stop.
+        for bad in [f64::NAN, f64::INFINITY] {
+            let p = OffsetFaceParams {
+                distance: Scalar {
+                    value: bad,
+                    expr: None,
+                },
+                ..offset_params()
+            };
+            assert!(p.validate().unwrap_err().contains("must be finite"));
+        }
+
+        // ── multi-face is Offset-only ──
+        let multi = OffsetFaceParams {
+            face_ids: vec![ElementId::new("el_f1"), ElementId::new("el_f2")],
+            faces: vec![offset_ref("el_f1"), offset_ref("el_f2")],
+            ..offset_params()
+        };
+        assert!(multi.validate().is_ok(), "Offset admits a multi-face set");
+        for t in [
+            OffsetDistanceType::Radius,
+            OffsetDistanceType::Diameter,
+            OffsetDistanceType::Total,
+        ] {
+            let p = OffsetFaceParams {
+                distance_type: t,
+                ..multi.clone()
+            };
+            assert!(p.validate().unwrap_err().contains("exactly one face"));
+        }
+
+        // ── Total: opposite face REQUIRED, chaining OFF ──
+        let p = OffsetFaceParams {
+            distance_type: OffsetDistanceType::Total,
+            chain_tangent_faces: false,
+            ..offset_params()
+        };
+        assert!(p
+            .validate()
+            .unwrap_err()
+            .contains("requires an oppositeFace"));
+        let p = OffsetFaceParams {
+            chain_tangent_faces: true,
+            ..offset_total_params()
+        };
+        assert!(p
+            .validate()
+            .unwrap_err()
+            .contains("chainTangentFaces = false"));
+
+        // ── the opposite face is Total-ONLY, and mirrors its bare id ──
+        for t in [
+            OffsetDistanceType::Offset,
+            OffsetDistanceType::Radius,
+            OffsetDistanceType::Diameter,
+        ] {
+            let p = OffsetFaceParams {
+                distance_type: t,
+                distance: Scalar::new(2.5),
+                chain_tangent_faces: false,
+                ..offset_total_params()
+            };
+            assert!(p.validate().unwrap_err().contains("Total-only"));
+        }
+        let p = OffsetFaceParams {
+            opposite_face_id: None,
+            ..offset_total_params()
+        };
+        assert!(p.validate().unwrap_err().contains("set together"));
+        let p = OffsetFaceParams {
+            opposite_face_id: Some(ElementId::new("el_stale")),
+            ..offset_total_params()
+        };
+        assert!(p.validate().unwrap_err().contains("!= oppositeFaceId"));
+
+        // ── Radius / Diameter are ABSOLUTE ⇒ strictly positive ──
+        for t in [OffsetDistanceType::Radius, OffsetDistanceType::Diameter] {
+            for bad in [0.0, -1.0] {
+                let p = OffsetFaceParams {
+                    distance_type: t,
+                    distance: Scalar::new(bad),
+                    ..offset_params()
+                };
+                assert!(p.validate().unwrap_err().contains("positive distance"));
+            }
+            let p = OffsetFaceParams {
+                distance_type: t,
+                distance: Scalar::new(6.0),
+                ..offset_params()
+            };
+            assert!(p.validate().is_ok());
+        }
+        // An `Offset` delta, by contrast, is SIGNED — negative pulls material in.
+        let p = OffsetFaceParams {
+            distance: Scalar::new(-2.5),
+            ..offset_params()
+        };
+        assert!(p.validate().is_ok());
+    }
+
+    /// The NORMATIVE slot order (SCHEMA §7.3): operative faces in stored order,
+    /// then the `Total` opposite face LAST. `wire_op_inputs`, `element_ref_input`
+    /// and `InputPath` all mirror this table.
+    #[test]
+    fn offset_face_element_refs_are_faces_then_opposite() {
+        let mut op = KnownOperation::OffsetFace(OffsetFaceParams {
+            face_ids: vec![ElementId::new("el_f1"), ElementId::new("el_f2")],
+            faces: vec![offset_ref("el_f1"), offset_ref("el_f2")],
+            ..offset_params()
+        });
+        let ids: Vec<String> = op
+            .element_refs_mut()
+            .iter()
+            .map(|r| r.primary.as_ref().unwrap().element.to_string())
+            .collect();
+        assert_eq!(ids, vec!["el_f1", "el_f2"]);
+
+        let mut total = KnownOperation::OffsetFace(offset_total_params());
+        let ids: Vec<String> = total
+            .element_refs_mut()
+            .iter()
+            .map(|r| r.primary.as_ref().unwrap().element.to_string())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["el_f1", "el_f9"],
+            "opposite face is the LAST slot"
+        );
+    }
+
+    /// The body dependency is UNCONDITIONAL (the field is mandatory) — unlike
+    /// Extrude/Shell, an offset has no NewBody reading in which it is absent.
+    #[test]
+    fn offset_face_derive_inputs_always_depends_on_its_body() {
+        let inputs =
+            Operation::Known(KnownOperation::OffsetFace(offset_total_params())).derive_inputs();
+        assert_eq!(inputs.bodies, vec![body(1)]);
+        assert_eq!(
+            inputs.elements,
+            vec![ElementId::new("el_f1"), ElementId::new("el_f9")]
+        );
+        assert!(inputs.sketches.is_empty());
     }
 
     /// Unknown params keys ride through `extra` verbatim (no `deny_unknown_fields`).

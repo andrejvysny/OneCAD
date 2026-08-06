@@ -29,6 +29,19 @@ export interface GhostLayerDeps {
 export interface GhostInstances {
   entry: MeshEntry;
   transforms: GhostTransform[];
+  /**
+   * Draw only this INDEX slice of the body's geometry (index units — 3 per
+   * triangle, exactly what `HighlightLayer.faceDrawRange` returns). Absent ⇒ the
+   * whole body, which is what every clone-a-body tool wants.
+   *
+   * OffsetFace is the case this exists for: its L1 ghost is a translucent copy of
+   * the OPERATIVE FACES at their offset positions, not of the whole solid — a
+   * whole-body clone floating 2 mm away would show a translation, which is
+   * precisely what an offset is NOT. The geometry stays registry-owned and
+   * zero-copy: a shallow clone that shares the attributes + index carries its own
+   * `drawRange`, which is the same trick `HighlightLayer.buildFace` uses.
+   */
+  range?: { start: number; count: number };
 }
 
 /** Build a THREE.Matrix4 for one ghost transform descriptor. */
@@ -65,6 +78,22 @@ export function ghostMatrix(t: GhostTransform): THREE.Matrix4 {
                     0,                 0,                 0,           1,
   );
   return m;
+}
+
+/**
+ * Shallow clone that SHARES the source's attributes + index (zero-copy), so the
+ * clone can carry its own `drawRange` without duplicating a single vertex. Twin of
+ * `HighlightLayer.shareIndexed`; kept local because the two layers own their
+ * object lifetimes independently and neither may dispose the other's.
+ */
+function shareIndexed(src: THREE.BufferGeometry): THREE.BufferGeometry {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", src.getAttribute("position"));
+  const normal = src.getAttribute("normal");
+  if (normal) g.setAttribute("normal", normal);
+  const index = src.getIndex();
+  if (index) g.setIndex(index);
+  return g;
 }
 
 export class GhostLayer {
@@ -104,9 +133,15 @@ export class GhostLayer {
    */
   showMulti(items: readonly GhostInstances[]): void {
     this.clearMeshes();
-    for (const { entry, transforms } of items) {
+    for (const { entry, transforms, range } of items) {
+      // A ranged item needs its OWN geometry object to carry the drawRange, so it
+      // gets one shallow clone per item (shared attributes — still zero-copy) and
+      // every transform instances that. An unranged item draws the registry
+      // geometry directly, byte-for-byte the behaviour before ranges existed.
+      const geometry = range ? shareIndexed(entry.geometry) : entry.geometry;
+      if (range) geometry.setDrawRange(range.start, range.count);
       for (const t of transforms) {
-        const mesh = new THREE.Mesh(entry.geometry, this.material);
+        const mesh = new THREE.Mesh(geometry, this.material);
         mesh.matrixAutoUpdate = false;
         mesh.matrix.copy(ghostMatrix(t));
         mesh.renderOrder = RENDER_ORDER.GHOST;
@@ -133,6 +168,11 @@ export class GhostLayer {
   }
 
   private clearMeshes(): void {
+    // NOT disposed, deliberately — every ghost geometry (the registry's own, and
+    // the shallow ranged clones above) SHARES the body's BufferAttributes, and
+    // `BufferGeometry.dispose()` frees those shared GL buffers out from under the
+    // real body that is still drawing with them. Same rule, same reason, as
+    // `HighlightLayer.clearObjects`.
     for (const m of this.meshes) this.group.remove(m);
     this.meshes = [];
   }

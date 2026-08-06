@@ -79,20 +79,23 @@ describe("RegionPickLayer.setRegions", () => {
 });
 
 describe("RegionPickLayer tint", () => {
-  it("tints hover (accent) and selection (selected-edge) per region, tokens only", () => {
+  it("tints hover (cyan hover3d) and selection (orange sketchSelected) per region, tokens only", () => {
     const { layer, root } = makeLayer();
     layer.setPlane(IDENTITY_PLANE);
     layer.setRegions([R0, R1]);
 
     const mat = (id: string) => meshFor(root, id).material as THREE.MeshBasicMaterial;
     expect(mat("r0").color.getHex()).toBe(palette.referenceNeutral().getHex());
+    expect(mat("r0").opacity).toBeCloseTo(0.18, 5);
 
     layer.setHover("r1");
-    expect(mat("r1").color.getHex()).toBe(palette.hoverAccent().getHex());
+    expect(mat("r1").color.getHex()).toBe(palette.hover3d().getHex());
+    expect(mat("r1").opacity).toBeCloseTo(0.32, 5);
     expect(mat("r1").opacity).toBeGreaterThan(mat("r0").opacity);
 
     layer.setSelected(["r0"]);
-    expect(mat("r0").color.getHex()).toBe(palette.selectedEdge().getHex());
+    expect(mat("r0").color.getHex()).toBe(palette.sketchSelected().getHex());
+    expect(mat("r0").opacity).toBeCloseTo(0.45, 5);
   });
 
   it("tints MULTIPLE selected regions (Wave 2 multi-select)", () => {
@@ -102,11 +105,12 @@ describe("RegionPickLayer tint", () => {
     const mat = (id: string) => meshFor(root, id).material as THREE.MeshBasicMaterial;
 
     layer.setSelected(["r0", "r1"]);
-    expect(mat("r0").color.getHex()).toBe(palette.selectedEdge().getHex());
-    expect(mat("r1").color.getHex()).toBe(palette.selectedEdge().getHex());
+    expect(mat("r0").color.getHex()).toBe(palette.sketchSelected().getHex());
+    expect(mat("r1").color.getHex()).toBe(palette.sketchSelected().getHex());
 
     layer.setSelected([]); // clears back to neutral
     expect(mat("r0").color.getHex()).toBe(palette.referenceNeutral().getHex());
+    expect(mat("r0").opacity).toBeCloseTo(0.18, 5);
   });
 });
 

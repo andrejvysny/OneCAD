@@ -293,13 +293,32 @@ pub fn run() {
         .setup(|app| {
             // Reclaim import-blob temp directories a previous crash left behind
             // (`ImportWorkspace::drop` never ran). Best-effort, mtime-only, no
-            // daemon — see `crate::imports`.
-            imports::sweep_stale_workspaces(imports::STALE_WORKSPACE_AGE);
+            // daemon — see `crate::imports`. Spawned off the window-creation
+            // critical path: this is GC of a PREVIOUS process's leftovers (a
+            // `read_dir` + `remove_dir_all` walk over the OS temp dir), and the
+            // window must not wait on disk IO to appear. `spawn_blocking` inside
+            // the spawned task keeps the sweep's own blocking IO off the async
+            // runtime too.
+            tauri::async_runtime::spawn(async {
+                let _ = tokio::task::spawn_blocking(|| {
+                    imports::sweep_stale_workspaces(imports::STALE_WORKSPACE_AGE)
+                })
+                .await;
+            });
             // Spawn the single regen scheduler over the shared runtime + app handle.
             let state = app.state::<AppState>();
             // Publish the app handle so the backend factory's worker-status
             // forwarder can emit events (the factory is built before this exists).
             let _ = state.app.set(app.handle().clone());
+            // Pre-warm the geometry sidecar NOW, so the first document open adopts a
+            // worker that is already handshaking instead of paying cold start. It is
+            // spawned onto the async runtime because `WorkerManager::spawn` needs a
+            // Tokio reactor, which the setup hook itself does not run inside; the
+            // handle is published above, so the status forwarder can emit right away.
+            let prewarm = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                prewarm.state::<AppState>().prewarm();
+            });
             let driver = make_regen_driver(
                 state.runtime.clone(),
                 app.handle().clone(),
@@ -363,6 +382,7 @@ pub fn run() {
             api::add_sketch_on_face,
             api::element_info,
             api::query_mass_properties,
+            api::prepare_offset_face,
             api::preview_op,
             api::resolve_refs,
             api::clear_worker_circuit,

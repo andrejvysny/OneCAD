@@ -143,7 +143,7 @@ export function LiveDimField({
 
   return (
     <span
-      className={`pointer-events-auto inline-flex items-center gap-0.5 rounded-sm border bg-surface px-1 font-mono text-[11px] shadow-ctrl ${
+      className={`pointer-events-auto inline-flex items-center gap-0.5 rounded-full border bg-surface px-2 font-mono text-[11px] shadow-popover ${
         isError
           ? "border-traffic-close text-traffic-close"
           : focused || chip.locked

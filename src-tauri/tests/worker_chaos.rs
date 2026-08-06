@@ -530,13 +530,19 @@ async fn convergence_drill_kill_mid_plan_repeatedly() {
                 published = true;
                 break;
             }
-            Outcome::EngineFailed(EngineError::Crashed { .. }) => crashes += 1,
+            // `NotConnected` counts the same as `Crashed`: `wait_ready` above can be
+            // beaten by the scripted kill's own restart, and a dispatch landing in
+            // that window reports the absence of a connection rather than the death.
+            // Same cause, same "no partial publish" guarantee.
+            Outcome::EngineFailed(
+                EngineError::Crashed { .. } | EngineError::NotConnected { .. },
+            ) => crashes += 1,
             other => panic!("partial/unexpected outcome mid-drill: {other:?}"),
         }
     }
     assert!(published, "the document must converge after {iters} kills");
     // Atomicity ("never a partial publish") is enforced by the loop's match arm,
-    // which panics on any non-Published/non-Crashed outcome. The count is `>=`
+    // which panics on any outcome that is neither a publish nor a lost worker. The count is `>=`
     // because a loaded machine can add a transient connection-loss kill or two on
     // top of the `iters` scripted ones — the drill still converges either way.
     assert!(

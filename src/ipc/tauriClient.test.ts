@@ -199,9 +199,25 @@ describe("tauriClient file commands", () => {
     });
     const client = createTauriClient();
     await client.saveDocument();
-    expect(args["save_document"]).toEqual({ path: null });
+    expect(args["save_document"]).toEqual({ path: null, previewPng: null });
     await client.saveDocument("/tmp/a.onecad");
-    expect(args["save_document"]).toEqual({ path: "/tmp/a.onecad" });
+    expect(args["save_document"]).toEqual({ path: "/tmp/a.onecad", previewPng: null });
+  });
+
+  /*
+   * The arg NAME is the contract, not decoration: tauri v2 maps the camelCase
+   * key onto the Rust parameter `preview_png`, so a rename here silently drops
+   * every thumbnail (the command still succeeds — a missing preview is not an
+   * error server-side), which is exactly the kind of failure no other test sees.
+   */
+  it("saveDocument forwards previewPng verbatim under the name Rust expects", async () => {
+    let payload: unknown;
+    mockIPC((cmd, p) => {
+      if (cmd === "save_document") payload = p;
+    });
+    const png = "data:image/png;base64,AAAA";
+    await createTauriClient().saveDocument("/tmp/a.onecad", png);
+    expect(payload).toEqual({ path: "/tmp/a.onecad", previewPng: png });
   });
 
   it("saveDocumentAs shows the save dialog, saves, and returns the chosen path", async () => {
@@ -214,9 +230,22 @@ describe("tauriClient file commands", () => {
     });
     const path = await createTauriClient().saveDocumentAs();
     expect(path).toBe("/chosen.onecad");
-    expect(saved).toEqual({ path: "/chosen.onecad" });
+    expect(saved).toEqual({ path: "/chosen.onecad", previewPng: null });
     expect(seen).toContain("save_file_dialog");
     expect(seen).toContain("save_document");
+  });
+
+  it("saveDocumentAs carries a previewPng through the dialog to the save", async () => {
+    // The first save of a NEW document is always a Save As, so a thumbnail that
+    // only rode on `saveDocument` would never reach a brand-new project.
+    let saved: unknown;
+    mockIPC((cmd, payload) => {
+      if (cmd === "save_file_dialog") return "/chosen.onecad";
+      if (cmd === "save_document") saved = payload;
+    });
+    const png = "data:image/png;base64,BBBB";
+    await createTauriClient().saveDocumentAs(png);
+    expect(saved).toEqual({ path: "/chosen.onecad", previewPng: png });
   });
 
   it("saveDocumentAs returns null and does NOT save when the dialog is cancelled", async () => {
@@ -863,6 +892,7 @@ describe("tauriClient fresh-sketch naming", () => {
       datums: {},
       features: [],
       appliedOps: 0,
+      geometrySource: "live",
     });
     let addName: string | undefined;
     mockIPC(
@@ -1934,6 +1964,56 @@ describe("tauriClient regen-finished correlation", () => {
     expect(viewportStore.getState().statusHint?.message).toBe(
       "Inserted at step 3 of 4 — roll to end to rebuild later features",
     );
+  });
+});
+
+// ── Sticky rebuild-failure hint lifecycle (SAVE/OPEN-CONNECT-RACE rider) ──────
+
+describe("tauriClient sticky rebuild-failure hint", () => {
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  /** Client + the UNCORRELATED failure (no commit awaiter — the open-replay shape). */
+  async function raiseFailedHint(): Promise<void> {
+    mockIPC(() => undefined, { shouldMockEvents: true });
+    createTauriClient();
+    await flush(); // ensureEvents is eager; listeners registered
+    await emit("regen-finished", {
+      revision: 1,
+      outcome: "failed",
+      message: "worker not connected: restarting or failed",
+    });
+    await flush();
+    const hint = viewportStore.getState().statusHint;
+    expect(hint).toMatchObject({ severity: "error", sticky: true });
+    expect(hint?.message).toContain("Geometry rebuild failed — ");
+  }
+
+  it("a later CLEAN publish clears the hint", async () => {
+    await raiseFailedHint();
+    await emit("regen-finished", { revision: 2, outcome: "published" });
+    await flush();
+    expect(viewportStore.getState().statusHint).toBeNull();
+  });
+
+  it("superseded / cancelled / noop retain the hint — nothing was rebuilt", async () => {
+    await raiseFailedHint();
+    for (const outcome of ["superseded", "cancelled", "noop"]) {
+      await emit("regen-finished", { revision: 3, outcome });
+      await flush();
+      expect(viewportStore.getState().statusHint?.message, outcome).toContain(
+        "Geometry rebuild failed — ",
+      );
+    }
+  });
+
+  it("a publish never clears an unrelated sticky hint", async () => {
+    mockIPC(() => undefined, { shouldMockEvents: true });
+    createTauriClient();
+    await flush();
+    viewportStore.getState().setStatusHint("Isolation on — Esc or ⇧I to exit", { sticky: true });
+    await emit("regen-finished", { revision: 2, outcome: "published" });
+    await flush();
+    expect(viewportStore.getState().statusHint?.message).toContain("Isolation");
   });
 });
 

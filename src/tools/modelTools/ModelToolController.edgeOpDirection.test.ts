@@ -74,6 +74,9 @@ function makeEngineMock(opts: { projectPoint?: boolean } = {}) {
     clearPreviewBody: vi.fn(),
     hideRevolvePreview: vi.fn(),
     hideGhostPreview: vi.fn(),
+    hideValueHandle: vi.fn(),
+    showValueHandle: vi.fn(),
+    showGhostPreviewMulti: vi.fn(),
     probePick: vi.fn(() => null),
   };
   // Absent on purpose in the fallback case: real engine mocks predate

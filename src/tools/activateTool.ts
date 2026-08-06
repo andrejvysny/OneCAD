@@ -54,6 +54,8 @@ const MODEL_ONLY: ReadonlySet<Tool> = new Set([
   "fillet",
   "boolean",
   "shell",
+  // OffsetFace moves a face of an existing SOLID — model mode only, like Shell.
+  "offsetFace",
   "linearPattern",
   "circularPattern",
   // A placement moves SOLIDS, which only exist in model mode (WP-B W1).

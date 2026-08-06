@@ -38,6 +38,7 @@
 //! [`cancel`]: GeometryEngine::cancel
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -382,6 +383,24 @@ pub struct StepResult {
     pub message: String,
 }
 
+/// One MESH1 blob the engine already produced for a prepared body and handed back
+/// **with** the terminal prepare, instead of making the caller pull it separately.
+///
+/// A pure cache-fill hint (Invariant 7): it is always legal for this to be empty,
+/// or to omit a body, or to be dropped — the mesh is then simply re-fetched
+/// through [`MeshProvider`](crate::regen::engine)-style tessellation. It must
+/// never be the *only* source of a body's geometry, and it carries no authority
+/// over what the snapshot contains.
+///
+/// The bytes are opaque (Invariant 5: MESH1 travels verbatim) and shared behind an
+/// `Arc` so seeding a cache never re-clones the blob.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedMeshRef {
+    pub body: BodyId,
+    pub lod: Lod,
+    pub bytes: Arc<Vec<u8>>,
+}
+
 /// The terminal `PlanPrepared` (SCHEMA §7.2). The prepared snapshot is held in
 /// **scratch** — it becomes live only after [`GeometryEngine::accept_prepared`].
 #[derive(Debug, Clone, PartialEq)]
@@ -403,6 +422,13 @@ pub struct PlanPrepared {
     pub per_step: Vec<StepResult>,
     /// History-prefix hash of the prepared state (SCHEMA §7.2 `historyPrefixHash`).
     pub history_prefix_hash: HistoryPrefixHash,
+    /// MESH1 blobs the engine tessellated while preparing and returned inline, so
+    /// the caller can seed its mesh cache instead of re-tessellating every body.
+    ///
+    /// **Advisory, never authoritative.** Empty is always valid (an engine that
+    /// inlines nothing, or a re-returned idempotent prepare). See
+    /// [`PreparedMeshRef`].
+    pub artifact_meshes: Vec<PreparedMeshRef>,
 }
 
 /// One item streamed from [`GeometryEngine::execute_plan`]: a per-step event, the
@@ -455,6 +481,16 @@ pub enum EngineError {
     /// restart + replay from last checkpoint/head; a crash **circuit breaker**
     /// fires on a repeated `(historyPrefixHash, opId, occtFingerprint)`.
     Crashed { message: String },
+    /// **No worker connection existed** when the call was made — the sidecar has
+    /// not finished its OCW1 handshake yet, is between restarts, or was retired.
+    ///
+    /// Distinct from [`Crashed`](Self::Crashed), which means a live session
+    /// existed and died. Handling is identical (fatal: mark dirty, no retry
+    /// without a checkpoint); only the report differs. It exists because
+    /// conflating the two rendered a never-connected worker to the user as
+    /// "worker crashed: worker not connected" — a mislabel that sent a startup
+    /// race looking like a kernel crash.
+    NotConnected { message: String },
     /// Protocol violation (bad frame, over-cap length, stale/mismatched
     /// `(documentRevision, workerEpoch)`, unknown verb). Fatal: restart worker
     /// (no resync); Rust reconciles via `GetWorkerHead`.
@@ -480,6 +516,7 @@ impl std::fmt::Display for EngineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Crashed { message } => write!(f, "worker crashed: {message}"),
+            Self::NotConnected { message } => write!(f, "worker not connected: {message}"),
             Self::Protocol { message } => write!(f, "protocol error: {message}"),
             Self::OpFailed {
                 code,

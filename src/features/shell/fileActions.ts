@@ -9,8 +9,30 @@ import { createClient } from "@/ipc/client";
 import { viewportStore } from "@/stores/viewportStore";
 import { documentStore } from "@/stores/documentStore";
 import { appStore } from "@/stores/appStore";
+import { getViewportEngine } from "@/viewport/engineBridge";
 
 const client = createClient();
+
+/**
+ * Best-effort viewport thumbnail for the container's `preview.png`.
+ *
+ * EXPLICIT saves only, and that is the whole design: this reads the live GPU
+ * canvas, so it can only run where a user action already implies a painted
+ * viewport. Autosave is Rust-side and never comes through here, so it simply
+ * keeps whatever preview the container already had.
+ *
+ * Returns `undefined` — never throws, never blocks — when no engine is mounted
+ * (start screen, jsdom, headless), on WebGPU, or on any capture failure. The
+ * save proceeds regardless; the backend applies the same "a screenshot must
+ * never cost the user their work" rule to a malformed or oversized payload.
+ */
+function capturePreview(): string | undefined {
+  try {
+    return getViewportEngine()?.captureThumbnail() ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /** Show a self-clearing success hint (the store auto-dismisses non-sticky hints). */
 function transientHint(message: string): void {
@@ -54,7 +76,7 @@ function refreshRecents(): void {
  */
 export async function saveDocument(): Promise<boolean> {
   try {
-    await client.saveDocument();
+    await client.saveDocument(undefined, capturePreview());
     transientHint(`Saved ${docName()}`);
     refreshRecents();
     return true;
@@ -71,7 +93,10 @@ export async function saveDocument(): Promise<boolean> {
  *  (see `saveDocument`'s return contract). */
 export async function saveDocumentAs(): Promise<boolean> {
   try {
-    const path = await client.saveDocumentAs();
+    // Captured BEFORE the dialog opens — a native modal can obscure or blank the
+    // webview, and after it closes the on-demand canvas may not have repainted.
+    const preview = capturePreview();
+    const path = await client.saveDocumentAs(preview);
     if (!path) return false; // cancelled
     transientHint(`Saved ${baseName(path)}`);
     refreshRecents();

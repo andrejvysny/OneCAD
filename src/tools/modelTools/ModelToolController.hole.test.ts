@@ -30,6 +30,7 @@ import type {
   PreviewResult,
 } from "@/ipc/types";
 import { toolStore } from "@/stores/toolStore";
+import { selectionStore } from "@/stores/selectionStore";
 import { documentStore } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { toolChipStore } from "@/stores/toolChipStore";
@@ -79,6 +80,9 @@ function makeEngineMock() {
     hideRegionPick: vi.fn(),
     hideRevolvePreview: vi.fn(),
     hideGhostPreview: vi.fn(),
+    hideValueHandle: vi.fn(),
+    showValueHandle: vi.fn(),
+    showGhostPreviewMulti: vi.fn(),
     setDatumGhost: vi.fn(),
     mountChip: vi.fn(),
     unmountChip: vi.fn(),
@@ -493,5 +497,113 @@ describe("ModelToolController — Hole", () => {
     await flush();
     expect(debug().holePhase).toBe("idle");
     expect(viewportStore.getState().statusHint?.severity).toBe("error");
+  });
+
+  // ── the seat pick is MODAL: it owns the pointer, and says what it would take ──
+  //
+  // Before this the tool asked for a click with no feedback at all — the picker
+  // is inactive while a model tool is armed, so the ordinary hover tint is gone
+  // and the user clicked blind. Both halves are pinned here: the tint (through
+  // the SAME `selectionStore.setHover` the select tool writes — one hover
+  // writer) and the LMB-orbit gate that stops a jittery click spinning the
+  // camera instead of placing the hole.
+
+  /** A pointer move over the viewport (no press — pure hover). */
+  function moveTo(x = 40, y = 40): void {
+    container.dispatchEvent(
+      new MouseEvent("pointermove", { clientX: x, clientY: y, bubbles: true }),
+    );
+  }
+
+  it("hover-tints the face under the pointer while picking the seat", async () => {
+    build();
+    toolStore.getState().setTool("hole");
+    await flush();
+    moveTo();
+
+    const hover = selectionStore.getState().hover;
+    expect(hover?.kind).toBe("face");
+    expect(hover?.bodyId).toBe("body1");
+    expect(hover?.topoKey).toBe("f:2");
+    expect(hover?.id).toBe("body1#f:2");
+    expect(hover?.anchor?.worldPoint).toEqual([10, 10, 25]);
+  });
+
+  it("does NOT tint a curved face — the click refuses it, so the hover must too", async () => {
+    build();
+    planar = false;
+    toolStore.getState().setTool("hole");
+    await flush();
+    moveTo();
+
+    expect(selectionStore.getState().hover).toBeNull();
+  });
+
+  it("keeps hovering while ARMED (a later click MOVES the hole) and clears on teardown", async () => {
+    build();
+    await armHole();
+    moveTo(50, 50);
+    expect(debug().holePhase).toBe("armed");
+    expect(selectionStore.getState().hover?.topoKey).toBe("f:2");
+
+    // Leaving the tool drops a hover this controller owns…
+    toolStore.getState().setTool("select");
+    await flush();
+    expect(selectionStore.getState().hover).toBeNull();
+
+    // …and never one it does not.
+    const foreign = { kind: "face" as const, id: "other#f:1", bodyId: "other", topoKey: "f:1" };
+    selectionStore.getState().setHover(foreign);
+    toolStore.getState().setTool("hole");
+    await flush();
+    toolStore.getState().setTool("select");
+    await flush();
+    expect(selectionStore.getState().hover).toEqual(foreign);
+  });
+
+  it("suppresses LMB orbit for BOTH pick phases and restores it on every exit", async () => {
+    build();
+    toolStore.getState().setTool("hole");
+    await flush();
+    expect(engineMock.setOrbitSuppressed).toHaveBeenLastCalledWith(true);
+
+    // A successful seat pick keeps it suppressed: the tool stays modal, because
+    // every later click MOVES the hole.
+    clickAt();
+    await flush();
+    expect(debug().holePhase).toBe("armed");
+    expect(engineMock.setOrbitSuppressed).toHaveBeenLastCalledWith(true);
+
+    // Tool switch (the cancel funnel) hands the camera back.
+    toolStore.getState().setTool("select");
+    await flush();
+    expect(engineMock.setOrbitSuppressed).toHaveBeenLastCalledWith(false);
+  });
+
+  it("restores orbit after a COMMIT, not only after a cancel", async () => {
+    build();
+    await armHole();
+    await pump();
+    toolChipStore.getState().onConfirm?.();
+    await flush();
+    await flush();
+
+    expect(debug().holePhase).toBe("idle");
+    expect(engineMock.setOrbitSuppressed).toHaveBeenLastCalledWith(false);
+    expect(selectionStore.getState().hover).toBeNull();
+  });
+
+  it("restores orbit when the viewport disposes the controller mid-pick", async () => {
+    build();
+    toolStore.getState().setTool("hole");
+    await flush();
+    engineMock.setOrbitSuppressed.mockClear();
+
+    controller.dispose();
+
+    // The ENGINE outlives a controller remount, so a stranded suppression would
+    // leave the camera unable to orbit with no tool on screen to explain it.
+    expect(engineMock.setOrbitSuppressed).toHaveBeenCalledWith(false);
+    expect(selectionStore.getState().hover).toBeNull();
   });
 });

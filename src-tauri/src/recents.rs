@@ -13,6 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use onecad_core::io::container;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
@@ -102,6 +103,10 @@ pub fn record(app: &AppHandle, project_path: &Path) {
 
 /// The recents list mapped to the frontend `RecentProject` DTO shape (missing file
 /// ⇒ empty). `id` is the path (unique + stable); `modifiedAt` is the ISO timestamp.
+///
+/// `thumbnail` is left `None` here — this function touches only `recents.json`.
+/// Filling it means opening up to [`MAX_RECENTS`] containers, which is blocking IO;
+/// see [`with_thumbnails`].
 pub fn list(app: &AppHandle) -> Vec<RecentProjectDto> {
     load(app)
         .into_iter()
@@ -113,4 +118,33 @@ pub fn list(app: &AppHandle) -> Vec<RecentProjectDto> {
             thumbnail: None,
         })
         .collect()
+}
+
+/// Fills each entry's `thumbnail` from its container's `preview.png`, as a
+/// `data:image/png;base64,…` URL the start screen can put straight in an `<img>`.
+///
+/// **Blocking** — up to [`MAX_RECENTS`] file reads. Call it inside one
+/// `spawn_blocking` for the whole batch (see [`crate::api::list_recents`]); a
+/// per-entry spawn would cost ten thread hops for ten small reads.
+///
+/// Deliberately takes no [`AppHandle`]: keeping it a pure `Vec → Vec` is what makes
+/// it `Send + 'static` and movable onto the blocking pool.
+///
+/// A project with no preview (never saved by a build that captures one, saved
+/// headless, deleted since, corrupt) simply keeps `None` and the frontend renders
+/// its existing hatch placeholder. `read_preview` collapses every failure mode to
+/// `None` for exactly this reason — a bad file must never break the listing.
+#[must_use]
+pub fn with_thumbnails(mut entries: Vec<RecentProjectDto>) -> Vec<RecentProjectDto> {
+    use base64::Engine as _;
+
+    for entry in &mut entries {
+        entry.thumbnail = container::read_preview(Path::new(&entry.path)).map(|png| {
+            format!(
+                "data:image/png;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(png)
+            )
+        });
+    }
+    entries
 }

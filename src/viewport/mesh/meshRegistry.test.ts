@@ -4,6 +4,7 @@
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import type * as THREE from "three";
+import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
 import * as reg from "./meshRegistry";
 import { parseMeshPayload } from "./parseMeshPayload";
 import { makeBoxMesh, type FaceColor } from "@/ipc/mockMeshes";
@@ -33,6 +34,31 @@ describe("buildBodyObjects", () => {
     expect(entry.edgeGeometry).not.toBeNull();
     expect(entry.faceIndex.count).toBe(6);
     expect(entry.edgeIndex!.count).toBe(12);
+    entry.dispose();
+  });
+
+  /*
+   * Edges are a fat-line geometry: INSTANCED, one instance per segment. That is
+   * why `drawRange` is meaningless on it (HighlightLayer slices the position
+   * array instead) and why a Picker hit reports `faceIndex` = segment ordinal.
+   */
+  it("builds edges as an instanced LineSegmentsGeometry over the expanded segments", () => {
+    const view = parseMeshPayload(makeBoxMesh());
+    const entry = reg.buildBodyObjects(view, "body1", 1);
+
+    expect(entry.edgeGeometry).toBeInstanceOf(LineSegmentsGeometry);
+    // A box: 12 edges, each a 2-point polyline ⇒ 12 segments ⇒ 12 instances.
+    expect(entry.edgeGeometry!.instanceCount).toBe(12);
+    // The array is exposed for the highlight slice, and is the SAME one the
+    // geometry was built from — setPositions retains it by reference.
+    expect(entry.edgeSegmentPositions).toBeInstanceOf(Float32Array);
+    expect(entry.edgeSegmentPositions!.length).toBe(12 * 6); // 2 xyz endpoints
+    expect(entry.edgeGeometry!.getAttribute("instanceStart").array).toBe(
+      entry.edgeSegmentPositions,
+    );
+    // Bounds are computed eagerly by setPositions — the LineSegments2 raycast
+    // needs them before the first render.
+    expect(entry.edgeGeometry!.boundingSphere).not.toBeNull();
     entry.dispose();
   });
 

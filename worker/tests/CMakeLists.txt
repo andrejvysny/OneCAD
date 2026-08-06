@@ -118,6 +118,23 @@ foreach(_t wp6_ladder wp6_ops wp6_extrude wp6_faststode wp6_exportstep wp6_meshe
     add_test(NAME ${_t} COMMAND test_${_t})
 endforeach()
 
+# --- OFFSET-FACE Phase 0: OCCT selective-offset go/no-go spike (pure OCCT,
+#     characterizes BRepOffset_MakeOffset per-face behavior before the op is
+#     built; see the plan's Phase-0 gate). ---
+add_executable(test_offsetface_spike test_offsetface_spike.cpp)
+target_link_libraries(test_offsetface_spike PRIVATE worker_core)
+add_test(NAME offsetface_spike COMMAND test_offsetface_spike)
+
+# --- OFFSET-FACE W1: the `op.offsetFace` executor (SCHEMA §7.3) + the read-only
+#     `PrepareOffsetFace` authoring handshake (§7.6). Exact analytic volumes/radii,
+#     the σ-convention regression, the tangent-closure guard (incl. the 0.75° draft
+#     counterexample), every trap the postconditions exist for, the offset-image
+#     history rebind, and the verb's refusals / fence / determinism. In-process,
+#     real OCCT. ---
+add_executable(test_offsetface test_offsetface.cpp)
+target_link_libraries(test_offsetface PRIVATE worker_core)
+add_test(NAME offsetface COMMAND test_offsetface)
+
 # --- MODEL-HARDEN W3: Revolve boolean-mode multi-solid split-children parity
 #     (`body_<opId>:<k>`, SCHEMA §7.2) — in-process, real OCCT. ---
 add_executable(test_revolve_split test_revolve_split.cpp)
@@ -206,7 +223,7 @@ foreach(_fx executeplan_happy executeplan_fail_step executeplan_needsrepair
             executeplan_fencing executeplan_discard double_executeplan session_reset
             executeplan_deltas tessellate_acquire resolve_refs
             executeplan_region_nomatch export_mesh checkpoint_roundtrip
-            executeplan_linearpattern executeplan_shell
+            executeplan_linearpattern executeplan_shell executeplan_offsetface
             executeplan_ellipse_extrude import_step)
     add_test(
         NAME harness_${_fx}

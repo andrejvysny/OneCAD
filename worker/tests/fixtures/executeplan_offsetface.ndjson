@@ -1,0 +1,40 @@
+# OFFSET-FACE W1 — ExecutePlan OffsetFace (REAL OCCT): sketch -> extrude NewBody ->
+# OffsetFace. The 20x20 rect extruded 25 makes body_op1 (a 6-faced prism, world
+# x in [-20,0], y in [0,20], z in [0,25]); its TOP face is ordinal f:6 (z=25).
+#
+# The OffsetFace step exercises the PRODUCTION reference path, not a shortcut: its
+# `inputs[0]` is a FULLY TYPED face ref (descriptor + anchor evidence, SCHEMA 7.3
+# slot order), so PlanExecutor's resolve_input_refs binds and MINTS `el_top`
+# (elementMapDelta.added) before the op runs, and the op then resolves faceIds[0]
+# through the partition rung. The face moves +2 along its outward normal and the body
+# is MODIFIED IN PLACE — `bodyEvents: [{"kind":"modified","bodyId":"body_op1"}]`,
+# never NewBody and never a fan-out (SCHEMA 7.3).
+#
+# `elementMapDelta.relabeled` carrying `el_top` is the OFFSET-IMAGE history adapter
+# working: BRepOffset's public Generated()/Modified() lists are face-EMPTY
+# (spike-characterized), so without OffsetFacesFromShapes() the tracked face would
+# have stranded into NeedsRepair instead of rebinding.
+#
+# After AcceptPrepared the read-only authoring verb `PrepareOffsetFace` (SCHEMA 7.6)
+# is exercised on the SAME wire: a live call addressed BY ELEMENTID returns the
+# tangent closure as TopoKey EVIDENCE with `refusal:null` and mints nothing, and a
+# stale `snapshotId` is refused with STALE_PREVIEW (this verb is FENCED, unlike the
+# advisory 7.5 reads).
+{"expect":{"v":1,"t":"hello","seq":0}}
+{"send":{"v":1,"t":"req","id":1,"verb":"OpenSession","args":{"documentId":"doc_of","documentRevision":0,"workerEpoch":1,"mode":"determinism"}}}
+{"expect":{"v":1,"t":"resp","id":1,"ok":true,"result":{"sessionOpen":true}}}
+{"send":{"v":1,"t":"req","id":2,"verb":"GetWorkerHead","args":{}}}
+{"expect":{"v":1,"t":"resp","id":2,"ok":true,"result":{"documentRevision":0,"workerEpoch":1,"snapshotId":0,"historyPrefixHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","hasScratch":false}}}
+{"send":{"v":1,"t":"req","id":3,"verb":"ExecutePlan","args":{"jobId":30,"documentRevision":1,"workerEpoch":1,"expectedBaseHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","prefixHashes":["1111111111111111111111111111111111111111111111111111111111111111","2222222222222222222222222222222222222222222222222222222222222222","3333333333333333333333333333333333333333333333333333333333333333"],"targetStep":2,"ops":[{"opType":"Sketch","opId":"op0","stepIndex":0,"params":{"sketchId":"sk1","plane":{"kind":"XY"},"entities":[{"id":"e1","type":"Line","p0":[0,0],"p1":[20,0]},{"id":"e2","type":"Line","p0":[20,0],"p1":[20,20]},{"id":"e3","type":"Line","p0":[20,20],"p1":[0,20]},{"id":"e4","type":"Line","p0":[0,20],"p1":[0,0]}],"constraints":[]}},{"opType":"Extrude","opId":"op1","stepIndex":1,"inputs":[{"primary":{"bodyId":"","elementId":"sk1.region.r0","kind":"face"}}],"params":{"sketchId":"sk1","distance":25.0,"extrudeMode":"Blind","booleanMode":"NewBody"}},{"opType":"OffsetFace","opId":"op2","stepIndex":2,"inputs":[{"primary":{"bodyId":"body_op1","elementId":"el_top","kind":"face"},"intent":{"kind":"face","descriptor":{"adjacencyHash":"2962b7852937cff5","center":[-10.0,10.0,25.0],"curveType":8,"hasNormal":true,"hasTangent":false,"magnitude":400.0,"normal":[0.0,0.0,1.0],"shapeType":4,"size":28.28427153030462,"surfaceType":0,"tangent":[1.0,0.0,0.0]}},"anchor":{"worldPoint":[-10.0,10.0,25.0],"surfaceUv":[0.5,0.5]}}],"params":{"targetBodyId":"body_op1","faceIds":["el_top"],"distance":2.0,"distanceType":"Offset","chainTangentFaces":true}}]}}}
+{"expect":{"v":1,"t":"event","id":3,"event":"planStep","stepIndex":0,"jobId":30,"payload":{"stepIndex":0,"bodyEvents":[]}}}
+{"expect":{"v":1,"t":"event","id":3,"event":"planStep","stepIndex":1,"jobId":30,"payload":{"bodyEvents":[{"kind":"created","bodyId":"body_op1"}],"signatures":{"geometry":"$hex64"}}}}
+{"expect":{"v":1,"t":"event","id":3,"event":"planStep","stepIndex":2,"jobId":30,"payload":{"bodyEvents":[{"kind":"modified","bodyId":"body_op1"}],"needsRepair":[],"elementMapDelta":{"added":[{"elementId":"el_top","topoKey":"f:6","kind":"face","bodyId":"body_op1"}],"relabeled":[{"elementId":"el_top","topoKey":"f:6","kind":"face","bodyId":"body_op1"}],"removed":[]},"signatures":{"geometry":"$hex64"}}}}
+{"expect":{"v":1,"t":"resp","id":3,"ok":true,"jobId":30,"result":{"planPrepared":true,"preparedSnapshotId":1,"lastValidStep":2,"stoppedReason":"completed","perStepResults":[{"stepIndex":0,"status":"ok"},{"stepIndex":1,"status":"ok","bodyIds":["body_op1"]},{"stepIndex":2,"status":"ok","bodyIds":["body_op1"]}],"historyPrefixHash":"3333333333333333333333333333333333333333333333333333333333333333"}}}
+{"send":{"v":1,"t":"req","id":4,"verb":"AcceptPrepared","args":{"jobId":30,"documentRevision":1,"workerEpoch":1}}}
+{"expect":{"v":1,"t":"resp","id":4,"ok":true,"result":{"accepted":true,"snapshotId":1}}}
+{"send":{"v":1,"t":"req","id":5,"verb":"PrepareOffsetFace","args":{"snapshotId":1,"pickedFaces":[{"elementId":"el_top"}],"chainTangentFaces":true,"distanceType":"Offset"}}}
+{"expect":{"v":1,"t":"resp","id":5,"ok":true,"result":{"snapshotId":1,"targetBodyId":"body_op1","refusal":null,"currentDims":{},"faces":[{"topoKey":"f:6","picked":true,"anchor":{"worldPoint":"$present","surfaceUv":"$present"},"descriptor":"$present"}]}}}
+{"send":{"v":1,"t":"req","id":6,"verb":"PrepareOffsetFace","args":{"snapshotId":99,"pickedFaces":[{"elementId":"el_top"}],"chainTangentFaces":true,"distanceType":"Offset"}}}
+{"expect":{"v":1,"t":"resp","id":6,"ok":false,"error":{"code":"STALE_PREVIEW","retriable":false,"detail":{"requested":99,"head":1}}}}
+{"send":{"v":1,"t":"req","id":7,"verb":"Shutdown","args":{}}}
+{"expect":{"v":1,"t":"resp","id":7,"ok":true,"result":{"goodbye":true}}}

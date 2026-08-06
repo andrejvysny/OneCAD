@@ -13,6 +13,7 @@
  *   Chamfer   ← `commitFillet` (edgeOpKind "Chamfer")
  *   Shell     ← `commitShell`
  *   Boolean   ← `commitBoolean`
+ *   OffsetFace ← `commitOffsetFace`
  *
  * The two identity fields a preview adds on top of the commit-site shape are
  * `opId` (the stable RecordId reused by exact preview AND commit, so the backend
@@ -47,6 +48,8 @@ import type {
   FilletParams,
   HoleParams,
   HoleType,
+  OffsetDistanceType,
+  OffsetFaceParams,
   OperationOp,
   OpType,
   PreviewParams,
@@ -396,6 +399,88 @@ function holeOp(s: PreviewSessionState): OperationOp {
   };
 }
 
+// ── OffsetFace ───────────────────────────────────────────────────────────────
+
+const OFFSET_DISTANCE_TYPES = ["Offset", "Total", "Radius", "Diameter"] as const;
+
+/**
+ * Mirrors `ModelToolController.offsetFaceParams`. SCHEMA §7.3 `op.offsetFace`.
+ *
+ * Every guard below restates one of core `OffsetFaceParams::validate`'s, so a
+ * draft the Rust session would reject dies HERE as a structural preview failure
+ * (which blocks the ✓ and names the reason) instead of reaching the kernel:
+ *
+ *  • the operative set is non-empty and every entry is a FACE carrying a bodyId —
+ *    `faceIds`/`faces` lockstep is built from these at the marshalling seam, and a
+ *    ref with no body derives no target;
+ *  • `targetBodyId` equals EVERY face's body. Cross-body dies structurally rather
+ *    than as an OCCT "foreign face silently ignored" (probe-confirmed) no-op;
+ *  • a non-`Offset` type operates on exactly ONE face;
+ *  • `Total` carries its opposite face and has the tangent chain OFF, and no other
+ *    type carries one — the conditional is checked BOTH ways (the HoleParams
+ *    doctrine) so a stale opposite left by a type switch cannot ride along;
+ *  • an absolute distance is positive. Core only demands this for Radius/Diameter;
+ *    a `Total` thickness ≤ 0 has no geometry either, so this is a deliberate,
+ *    strictly-safer superset.
+ *
+ * NOTHING IS CLAMPED. A value outside the domain is refused, never corrected.
+ */
+function offsetFaceOp(s: PreviewSessionState): OperationOp {
+  const distance = Number(s.latestParams.distance);
+  if (!Number.isFinite(distance)) throw new Error("Offset face distance must be finite");
+  const rawType = s.latestParams.distanceType ?? "Offset";
+  if (!OFFSET_DISTANCE_TYPES.includes(rawType as OffsetDistanceType)) {
+    throw new Error(`Unsupported OffsetFace distanceType ${String(rawType)}`);
+  }
+  const distanceType = rawType as OffsetDistanceType;
+  const faces = s.latestParams.faces;
+  if (!Array.isArray(faces) || faces.length === 0) {
+    throw new Error("Offset face requires at least one operative face");
+  }
+  const refs = faces as SemanticRef[];
+  if (refs.some((r) => r?.primary?.kind !== "face" || !r.primary.bodyId)) {
+    throw new Error("Offset face operative faces must each carry a face bodyId");
+  }
+  const targetBodyId = nonEmptyString(s.latestParams.targetBodyId);
+  if (!targetBodyId) throw new Error("Offset face requires targetBodyId");
+  if (refs.some((r) => r.primary.bodyId !== targetBodyId)) {
+    throw new Error("Offset face operates on ONE body — every face must belong to targetBodyId");
+  }
+  if (distanceType !== "Offset" && refs.length !== 1) {
+    throw new Error(`Offset face distanceType ${distanceType} operates on exactly one face`);
+  }
+  const chainTangentFaces = s.latestParams.chainTangentFaces !== false;
+  const opposite = s.latestParams.oppositeFace as SemanticRef | undefined;
+  if (distanceType === "Total") {
+    if (!opposite?.primary?.bodyId) {
+      throw new Error("Offset face distanceType Total requires an opposite face");
+    }
+    if (chainTangentFaces) {
+      throw new Error("Offset face distanceType Total requires chainTangentFaces = false");
+    }
+  } else if (opposite) {
+    throw new Error(`Offset face oppositeFace is Total-only (got a ${distanceType} offset)`);
+  }
+  if (distanceType !== "Offset" && distance <= 0) {
+    throw new Error(`Offset face distanceType ${distanceType} needs a positive distance`);
+  }
+  const params: OffsetFaceParams = {
+    faces: refs,
+    distance,
+    distanceType,
+    chainTangentFaces,
+    targetBodyId,
+  };
+  if (distanceType === "Total" && opposite) params.oppositeFace = opposite;
+  return {
+    opType: "OffsetFace",
+    opId: s.opId,
+    featureId: s.editFeatureId,
+    inputs: [...(s.inputs ?? [])],
+    params,
+  };
+}
+
 // ── Boolean ──────────────────────────────────────────────────────────────────
 
 const BOOLEAN_OPERATIONS = ["Union", "Cut", "Intersect"] as const;
@@ -449,6 +534,7 @@ export const OP_BUILDERS: Partial<Record<OpType, PreviewOpBuilder>> = {
   Shell: shellOp,
   Boolean: booleanOp,
   Hole: holeOp,
+  OffsetFace: offsetFaceOp,
 };
 
 /** True when a preview session can be opened for `opType` (OP_BUILDERS membership). */

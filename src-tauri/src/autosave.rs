@@ -53,7 +53,7 @@ use onecad_core::io::recovery::{
 };
 use onecad_core::io::IoError;
 
-use crate::document_runtime::{DocumentRuntime, SavePayload};
+use crate::document_runtime::{DocumentRuntime, SaveCaches, SavePayload};
 
 /// Quiet window after the last document mutation before an autosave fires
 /// (V1/V2 lifecycle). Constant by design — a debounce, not a fixed cadence: a busy
@@ -134,13 +134,19 @@ pub async fn autosave_current(
         modified: now.clone(),
     };
     // ── Under the runtime lock: snapshot only. No IO, no serialization. ──
+    //    `SaveCaches::none()`: an autosave writes no mesh/preview cache. It fires on
+    //    a timer against a document the user is actively editing, and its container
+    //    is only ever read by crash recovery — which regens from 0 regardless. The
+    //    "paint at open" caches belong to an explicit save.
     let (payload, doc_id, opened) = {
-        let guard = runtime.lock().await;
-        let rt = guard.as_ref()?; // no document open ⇒ zero autosave activity.
+        let mut guard = runtime.lock().await;
+        let rt = guard.as_mut()?; // no document open ⇒ zero autosave activity.
+        let doc_id = rt.document_uuid();
+        let opened = rt.path().map(Path::to_path_buf);
         (
-            rt.build_save_payload(meta),
-            rt.document_uuid(),
-            rt.path().map(Path::to_path_buf),
+            rt.build_save_payload(meta, SaveCaches::none()),
+            doc_id,
+            opened,
         )
     };
 

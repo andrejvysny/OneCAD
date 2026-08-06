@@ -12,7 +12,7 @@
 
 use serde::Serialize;
 
-use onecad_core::document::record::{KnownOperation, Operation};
+use onecad_core::document::record::{KnownOperation, OffsetDistanceType, Operation};
 use onecad_core::history::StepState;
 
 /// Whether a document is open (`src/stores/documentStore.ts` `DocStatus`).
@@ -211,6 +211,17 @@ pub struct DocumentProjection {
     pub applied_ops: usize,
     /// Total op count (timeline length).
     pub total_ops: usize,
+    /// Where the geometry the viewport is currently showing came from — the honest
+    /// answer to "is this the real model?".
+    ///
+    /// * `"live"` — a regen has published; the meshes are this document's geometry.
+    /// * `"cached"` — no publish yet, but the container's LAST-SAVED meshes are
+    ///   resident and being served. Correct as of the last save, and possibly
+    ///   *older* than the timeline the tree is showing (the document may have been
+    ///   saved, edited, saved again with an evicted cache, …). The UI must say so
+    ///   rather than let the user measure or machine off it.
+    /// * `"none"` — nothing to paint yet.
+    pub geometry_source: String,
 }
 
 impl DocumentProjection {
@@ -229,9 +240,18 @@ impl DocumentProjection {
             features: Vec::new(),
             applied_ops: 0,
             total_ops: 0,
+            geometry_source: GEOMETRY_SOURCE_NONE.to_string(),
         }
     }
 }
+
+/// [`DocumentProjection::geometry_source`] — nothing to paint.
+pub const GEOMETRY_SOURCE_NONE: &str = "none";
+/// [`DocumentProjection::geometry_source`] — serving the container's last-saved
+/// meshes while the open-regen runs.
+pub const GEOMETRY_SOURCE_CACHED: &str = "cached";
+/// [`DocumentProjection::geometry_source`] — a regen has published.
+pub const GEOMETRY_SOURCE_LIVE: &str = "live";
 
 /// A handle returned by open/new/close (`src/ipc/types.ts` `DocumentSnapshot`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -531,6 +551,87 @@ pub struct MassPropertiesDto {
     pub principal_moments: [f64; 3],
     /// The principal frame: three unit, right-handed, sign-canonical rows.
     pub principal_axes: [[f64; 3]; 3],
+}
+
+/// One face's snapshot-scoped EVIDENCE from `PrepareOffsetFace` (SCHEMA §7.6).
+///
+/// **Never an identity.** The verb returns `topoKey` + descriptor/anchor evidence
+/// and nothing else, because minting `ElementId`s is Rust's alone (Invariant 2).
+/// The caller promotes this through the `AcquireElementIds` path and only THEN
+/// authors the typed refs a record can hold.
+///
+/// `anchor` and `descriptor` are opaque passthroughs — worker-owned payloads the
+/// core never interprets, forwarded verbatim so nothing is lost in translation.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OffsetFaceEvidenceDto {
+    /// Snapshot-scoped ordinal key (`"f:22"`), valid only against
+    /// [`PrepareOffsetFaceDto::snapshot_id`].
+    pub topo_key: String,
+    /// `true` for a face the USER picked, `false` for one the G1 tangent closure
+    /// added. Always `false` on the `Total` opposite face — SCHEMA emits no
+    /// `picked` key there, and the opposite face is never part of the operative
+    /// set.
+    pub picked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub descriptor: Option<serde_json::Value>,
+}
+
+/// The measurable dimensions that SEED an absolute distance type (SCHEMA §7.6
+/// `currentDims`). A key is absent when the closure has no such reading — a
+/// planar face has no `radius`, and a face with no unique opposite has no
+/// `thickness`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OffsetCurrentDimsDto {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thickness: Option<f64>,
+}
+
+/// A `PrepareOffsetFace` REFUSAL (SCHEMA §7.6) — an answer with `ok:true`, not an
+/// error. `code` ∈ `crossBody` | `unsupportedSurface` | `chainMismatch` |
+/// `noUniqueOpposite` | `notPlanar` | `chainOnTotal` | `notCylindrical` |
+/// `mixedAxis` | `nonManifold`; `faces` names the offending TopoKeys when the code
+/// has any to name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OffsetFaceRefusalDto {
+    pub code: String,
+    pub message: String,
+    pub faces: Vec<String>,
+}
+
+/// `prepare_offset_face` result — the read-only first half of the OffsetFace
+/// authoring transaction (SCHEMA §7.6 `PrepareOffsetFace`).
+///
+/// Carries the FULL operative closure (picks ∪ G1 tangent chain) the record will
+/// freeze, the `Total` opposite candidate, and the seeds for the absolute
+/// distance types. Nothing here is fenced, prepared, accepted or minted by the
+/// worker; `snapshot_id` is the head it ANSWERED against, echoed so the caller can
+/// see it never moved.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareOffsetFaceDto {
+    /// Echo of the head the worker answered against.
+    pub snapshot_id: u64,
+    /// The single body every picked face belongs to (`body_<uuid>` wire form, as
+    /// the worker sent it). Empty on a refusal.
+    pub target_body_id: String,
+    /// The full operative closure in stable face-ordinal order. Empty on a
+    /// refusal.
+    pub faces: Vec<OffsetFaceEvidenceDto>,
+    /// The `Total` opposite-face candidate; `None` for every other distance type
+    /// and whenever no unique candidate passed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opposite_face: Option<OffsetFaceEvidenceDto>,
+    pub current_dims: OffsetCurrentDimsDto,
+    /// `Some` ⇒ the handshake REFUSED and `faces` is not a usable closure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<OffsetFaceRefusalDto>,
 }
 
 /// One previewed body's mesh (`PreviewOp` result → `types.ts PreviewResult`).
@@ -932,9 +1033,14 @@ pub fn feature_kind(op: &Operation) -> FeatureKind {
                 FeatureKind::Extrude
             }
             KnownOperation::Revolve(_) => FeatureKind::Revolve,
-            KnownOperation::Fillet(_) | KnownOperation::Chamfer(_) | KnownOperation::Shell(_) => {
-                FeatureKind::Fillet
-            }
+            // OffsetFace joins the Fillet/Chamfer/Shell dress-up bucket: it is a
+            // face-level modifier of an existing body, not a body producer.
+            // `FeatureKind` is a coarse icon grouping (see `default_label` for why
+            // the label is keyed off the OPERATION instead).
+            KnownOperation::Fillet(_)
+            | KnownOperation::Chamfer(_)
+            | KnownOperation::Shell(_)
+            | KnownOperation::OffsetFace(_) => FeatureKind::Fillet,
             KnownOperation::Boolean(_)
             | KnownOperation::LinearPattern(_)
             | KnownOperation::CircularPattern(_)
@@ -1056,6 +1162,22 @@ pub fn feature_value(op: &Operation) -> FeatureValue {
             p.diameter.value,
             "diameter",
         ),
+        // An offset's one identifying number is its `distance`, but WHAT that
+        // number means is `distanceType`'s to say — so the row is prefixed the way
+        // the user typed it (`Ø` / `R` for the absolute cylindrical forms, the Hole
+        // precedent) rather than always reading as a length. `primary` stays the
+        // raw stored value in every case; only the text differs.
+        KnownOperation::OffsetFace(p) => {
+            let d = p.distance.value;
+            let (text, kind) = match p.distance_type {
+                OffsetDistanceType::Diameter => (format!("Ø{d:.1}"), "diameter"),
+                OffsetDistanceType::Radius => (format!("R{d:.1}"), "length"),
+                OffsetDistanceType::Offset | OffsetDistanceType::Total => {
+                    (format!("{d:.1} mm"), "length")
+                }
+            };
+            FeatureValue::dimensioned(text, d, kind)
+        }
         // The operation IS a boolean row's one editable parameter — without it a
         // re-edit op swap has no visible projection signal at all. NOT a number,
         // so the row carries no `primary` and its value stays read-only.
@@ -1115,6 +1237,7 @@ pub fn default_label(op: &Operation) -> &'static str {
             KnownOperation::ImportStep(_) => "Import",
             KnownOperation::TransformBody(_) => "Move",
             KnownOperation::Hole(_) => "Hole",
+            KnownOperation::OffsetFace(_) => "Offset face",
         },
         // A frozen unknown node keeps its opType as the label rather than
         // masquerading as an Extrude.
@@ -1223,6 +1346,7 @@ mod tests {
             }],
             applied_ops: 1,
             total_ops: 1,
+            geometry_source: GEOMETRY_SOURCE_LIVE.to_string(),
         };
         let v = serde_json::to_value(&proj).unwrap();
         assert_eq!(v["status"], "ready");
@@ -1233,6 +1357,7 @@ mod tests {
         assert_eq!(v["features"][0]["status"], "ok");
         assert_eq!(v["appliedOps"], 1);
         assert_eq!(v["totalOps"], 1);
+        assert_eq!(v["geometrySource"], "live");
         // Datums project camelCase, keyed by id, carrying the resolved basis
         // VERBATIM (the non-standard XY basis — see sketch/plane.rs).
         assert_eq!(v["datums"]["d1"]["kind"], "OffsetFromPlane");

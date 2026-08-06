@@ -26,6 +26,10 @@
 //! - `ONECAD_STUB_EXIT_AFTER_HELLO=1` — exit 0 immediately after the unsolicited
 //!   `hello` (connect-then-die), driving the supervisor's rapid-death restart cap
 //!   (F2). No session/plan is ever served.
+//! - `ONECAD_STUB_HELLO_DELAY_MS=<ms>` — sleep that long BEFORE the unsolicited
+//!   `hello`, so the manager stays un-`Ready` for a known window: the cold-worker
+//!   regen race (a `from: 0` plan dispatched before the handshake lands). Applied
+//!   on every spawn, restarts included.
 //! - `ONECAD_STUB_CRASH_ON_OP=<substr>` — `abort()` mid-plan when an op's `opId`
 //!   contains `<substr>` (the F3 poison test: crash one specific plan's op so its
 //!   crashing-op key poisons while a different plan still runs).
@@ -194,6 +198,13 @@ fn run() -> i32 {
             eprintln!("stub: failed to emit garbage: {err}");
             return 1;
         }
+    }
+
+    // Chaos: stay silent for a known window so the parent's manager is spawned but
+    // NOT yet `Ready` (the cold-worker regen race).
+    if let Some(delay) = env_millis("ONECAD_STUB_HELLO_DELAY_MS") {
+        eprintln!("stub: HELLO_DELAY_MS -> sleeping {delay:?} before hello");
+        std::thread::sleep(delay);
     }
 
     // Unsolicited hello (SCHEMA §6): seq 0.
@@ -1290,6 +1301,16 @@ fn emit_garbage<W: Write>(writer: &mut W) -> std::io::Result<()> {
 /// Read an environment flag as truthy (`1`).
 fn env_flag(key: &str) -> bool {
     std::env::var(key).map(|v| v == "1").unwrap_or(false)
+}
+
+/// Read an environment variable as a millisecond duration. An unset, empty, or
+/// unparsable value means "no delay" — a chaos knob must never make the stub die.
+fn env_millis(key: &str) -> Option<std::time::Duration> {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(std::time::Duration::from_millis)
 }
 
 /// Whether env var `key` equals `verb`.

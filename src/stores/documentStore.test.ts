@@ -7,7 +7,14 @@
  * so each case resets modules and re-imports with the flag toggled.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { documentStore, emptyDocument, nextDatumName, nextSketchName, seedMockDocument } from "./documentStore";
+import {
+  documentStore,
+  emptyDocument,
+  nextDatumName,
+  nextSketchName,
+  seedMockDocument,
+  selectGeometryCached,
+} from "./documentStore";
 import type { DatumMeta, SketchMeta } from "./documentStore";
 
 const TAURI = "__TAURI_INTERNALS__";
@@ -122,6 +129,8 @@ describe("documentStore seeding gate", () => {
       datums: {},
       features: [],
       appliedOps: 0,
+      // Nothing open ⇒ nothing to paint, and so no geometry-provenance chip.
+      geometrySource: "none",
     });
   });
 });
@@ -182,5 +191,35 @@ describe("documentStore datum registry", () => {
   it("the seeded demo document and the empty projection both start with no datums", () => {
     expect(seedMockDocument().datums).toEqual({});
     expect(emptyDocument().datums).toEqual({});
+  });
+});
+
+// ── geometrySource (persisted-cache lane) ─────────────────────────────────────
+
+describe("geometrySource", () => {
+  afterEach(() => documentStore.getState().applySnapshot(seedMockDocument()));
+
+  it("the empty projection has nothing to paint; the demo seed is genuinely live", () => {
+    // The seed synthesizes its meshes locally — it never came out of a container,
+    // so it must not put the mock lane (or e2e) under a "Last saved geometry" chip.
+    expect(emptyDocument().geometrySource).toBe("none");
+    expect(seedMockDocument().geometrySource).toBe("live");
+  });
+
+  it("selectGeometryCached is true for 'cached' ONLY", () => {
+    const store = documentStore.getState();
+    store.applySnapshot({ ...seedMockDocument(), geometrySource: "cached" });
+    expect(selectGeometryCached(documentStore.getState())).toBe(true);
+
+    for (const source of ["live", "none"] as const) {
+      store.applySnapshot({ ...seedMockDocument(), geometrySource: source });
+      expect(selectGeometryCached(documentStore.getState())).toBe(false);
+    }
+  });
+
+  it("applyChange can flip it on its own (a regen publishes without a full snapshot)", () => {
+    documentStore.getState().applySnapshot({ ...seedMockDocument(), geometrySource: "cached" });
+    documentStore.getState().applyChange({ geometrySource: "live" });
+    expect(selectGeometryCached(documentStore.getState())).toBe(false);
   });
 });

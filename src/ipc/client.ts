@@ -29,6 +29,8 @@ import type {
   PreviewParams,
   PreviewResult,
   PreviewSession,
+  PrepareOffsetFaceRequest,
+  PrepareOffsetFaceResult,
   PromotedElement,
   SketchPlane,
   PromotePick,
@@ -75,13 +77,24 @@ export interface CadClient {
    * Save the open document. `path` `undefined` reuses the last save path; a
    * never-saved document then rejects (io error) and the caller falls back to
    * Save As. Rust owns the filesystem write.
+   *
+   * `previewPng` is an OPTIONAL viewport thumbnail (a `data:image/png;base64,…`
+   * URL from `ViewportEngine.captureThumbnail()`; bare base64 is accepted too),
+   * stored as the container's `preview.png` and served back by `listRecents`.
+   * It is decoration, never a precondition: absent, malformed, or oversized, the
+   * backend drops it with a warning and the SAVE STILL SUCCEEDS. Callers pass it
+   * best-effort and must never fail a save because capture failed.
    */
-  saveDocument(path?: string): Promise<void>;
+  saveDocument(path?: string, previewPng?: string | null): Promise<void>;
   /**
    * Save As: show a native save dialog (`.onecad`), save to the chosen path, and
    * return it — or null if the dialog was cancelled.
+   *
+   * Takes `previewPng` for the same reason `saveDocument` does, and it matters
+   * MORE here: a never-saved document's first save is always a Save As, so
+   * without it a brand-new project would land in recents with no thumbnail.
    */
-  saveDocumentAs(): Promise<string | null>;
+  saveDocumentAs(previewPng?: string | null): Promise<string | null>;
   /**
    * Export every body at head to a STEP file. Rust owns the `.step` save dialog +
    * the worker ExportStep verb; resolves to the written path, or null on cancel.
@@ -302,6 +315,25 @@ export interface CadClient {
    * that genuinely encloses no volume.
    */
   massProperties(bodyId: string): Promise<MassProperties>;
+
+  /**
+   * The read-only first half of the OffsetFace authoring transaction
+   * (SCHEMA §7.6 `PrepareOffsetFace`): the G1 tangent closure over the picked
+   * faces, the `Total` opposite candidate, and the `currentDims` that seed an
+   * absolute distance type.
+   *
+   * MINTS NOTHING. The response carries snapshot-scoped TopoKeys plus
+   * descriptor/anchor evidence only; the caller promotes that evidence through
+   * `promoteSelection` (Invariant 2) and only THEN authors the typed params.
+   *
+   * A REFUSAL (`crossBody`, `chainMismatch`, `unsupportedSurface`, …) resolves
+   * SUCCESSFULLY carrying `refusal` — the tool has to explain why it cannot
+   * offset, and a rejection would erase the reason.
+   *
+   * MOCK LIMIT: the mock's closure is the picks themselves (no tangent
+   * expansion, no opposite-face search) with fixed `currentDims`.
+   */
+  prepareOffsetFace(req: PrepareOffsetFaceRequest): Promise<PrepareOffsetFaceResult>;
 
   // ── Topology repair (SCHEMA §9; M4b) ──────────────────────────────────────
 

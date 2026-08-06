@@ -6,6 +6,8 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import * as THREE from "three";
+import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
+import type { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { SketchStaticLayer } from "./SketchStaticLayer";
 import { palette } from "./palette";
 import { planeFor } from "@/ipc/mockSketch";
@@ -79,6 +81,7 @@ describe("SketchStaticLayer.setSketch", () => {
 
     const g = groupFor(sketchRoot, "s1");
     const lines = childOfType<THREE.LineSegments>(g, "LineSegments");
+    const drawLines = g.children.find((c) => c instanceof LineSegments2) as LineSegments2 | undefined;
     const points = childOfType<THREE.Points>(g, "Points");
     const fills = g.children.filter((c) => c.type === "Mesh") as THREE.Mesh[];
     expect(lines).toBeDefined();
@@ -89,6 +92,11 @@ describe("SketchStaticLayer.setSketch", () => {
     // 4 lines → 4 segments → 8 vertices; 8 endpoints (2 per line).
     expect(lines!.geometry.getAttribute("position").count).toBe(8);
     expect(points!.geometry.getAttribute("position").count).toBe(8);
+
+    // Pick proxy is invisible (zero GPU cost); the fat LineSegments2 is what draws.
+    expect(lines!.visible).toBe(false);
+    expect(drawLines).toBeDefined();
+    expect(drawLines).toBeInstanceOf(LineSegments2);
     // Each fill: 4 verts (u,v)→(x,y,0), 2 triangles.
     expect(fills[0].geometry.getAttribute("position").count).toBe(4);
     expect(fills[0].geometry.getIndex()!.count).toBe(6);
@@ -201,32 +209,48 @@ describe("SketchStaticLayer tint", () => {
     });
     const g = groupFor(sketchRoot, "s1");
     const mat = (childOfType<THREE.LineSegments>(g, "LineSegments")!.material as THREE.LineBasicMaterial);
+    const drawMat = (g.children.find((c) => c instanceof LineSegments2) as LineSegments2).material as LineMaterial;
     const fill0 = fillFor(g, "r0").material as THREE.MeshBasicMaterial;
     const fill1 = fillFor(g, "r1").material as THREE.MeshBasicMaterial;
 
-    expect(mat.color.getHex()).toBe(palette.sketchFull().getHex());
+    // Model-mode sketches are ALWAYS blue (sketchUnder), regardless of constraint
+    // status — this layer never renders sketchFull; both the pick-proxy material
+    // and the visible LineSegments2 draw material stay in lockstep.
+    expect(mat.color.getHex()).toBe(palette.sketchUnder().getHex());
+    expect(drawMat.color.getHex()).toBe(palette.sketchUnder().getHex());
     expect(fill0.opacity).toBeCloseTo(0.18, 5);
     expect(fill1.opacity).toBeCloseTo(0.18, 5);
 
     layer.setHover({ kind: "sketchRegion", sketchId: "s1", regionId: "r1" });
-    expect(mat.color.getHex()).toBe(palette.sketchFull().getHex());
+    expect(mat.color.getHex()).toBe(palette.sketchUnder().getHex());
     expect(fill0.opacity).toBeCloseTo(0.18, 5);
     expect(fill1.opacity).toBeCloseTo(0.3, 5);
 
     layer.setSelected([{ kind: "sketchRegion", sketchId: "s1", regionId: "r0" }]);
     expect(fill0.color.getHex()).toBe(palette.sketchSelected().getHex());
-    expect(fill1.color.getHex()).toBe(palette.hoverAccent().getHex());
+    expect(fill1.color.getHex()).toBe(palette.hover3d().getHex());
 
     layer.setHover(null);
     layer.setSelected([]);
-    expect(mat.color.getHex()).toBe(palette.sketchFull().getHex());
+    expect(mat.color.getHex()).toBe(palette.sketchUnder().getHex());
     expect(fill0.opacity).toBeCloseTo(0.18, 5);
     expect(fill1.opacity).toBeCloseTo(0.18, 5);
 
     layer.setSelected([{ kind: "sketch", sketchId: "s1" }]);
     expect(mat.color.getHex()).toBe(palette.sketchSelected().getHex());
+    expect(drawMat.color.getHex()).toBe(palette.sketchSelected().getHex());
     expect(fill0.color.getHex()).toBe(palette.sketchSelected().getHex());
     expect(fill1.color.getHex()).toBe(palette.sketchSelected().getHex());
+  });
+
+  it("tints hover on the whole sketch as cyan (hover3d), matching the DRAW material", () => {
+    const { layer, sketchRoot } = makeLayer();
+    layer.setSketch("s1", { plane: IDENTITY_PLANE, entities: RECT, regions: [] });
+    const g = groupFor(sketchRoot, "s1");
+    const drawMat = (g.children.find((c) => c instanceof LineSegments2) as LineSegments2).material as LineMaterial;
+
+    layer.setHover({ kind: "sketch", sketchId: "s1" });
+    expect(drawMat.color.getHex()).toBe(palette.hover3d().getHex());
   });
 });
 

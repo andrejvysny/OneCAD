@@ -1,0 +1,64 @@
+---
+source: crates/onecad-core/tests/schema_freeze.rs
+expression: rec
+---
+{
+  "recordId": "00000000-0000-0000-0000-000000002ecf",
+  "recordSchemaVersion": 1,
+  "stepIndex": 15,
+  "name": "Offset face 2",
+  "opType": "OffsetFace",
+  "params": {
+    "chainTangentFaces": true,
+    "distance": {
+      "value": 6.0
+    },
+    "distanceType": "Radius",
+    "faceIds": [
+      "el_cyl"
+    ],
+    "faces": [
+      {
+        "anchor": {
+          "worldPoint": [
+            5.0,
+            0.0,
+            10.0
+          ]
+        },
+        "intent": {
+          "descriptor": {
+            "surfaceType": "cylinder"
+          },
+          "kind": "face",
+          "version": 1
+        },
+        "primary": {
+          "bodyId": "00000000-0000-0000-0000-00000000b0d1",
+          "elementId": "el_cyl",
+          "kind": "face"
+        }
+      }
+    ],
+    "targetBodyId": "00000000-0000-0000-0000-00000000b0d1"
+  },
+  "inputs": {
+    "bodies": [
+      "00000000-0000-0000-0000-00000000b0d1"
+    ],
+    "sketches": [],
+    "elements": [
+      "el_cyl"
+    ]
+  },
+  "outputs": [
+    "00000000-0000-0000-0000-00000000b0d1"
+  ],
+  "determinism": {
+    "parallel": false,
+    "occtOptionsHash": "cbf29ce484222325",
+    "tolerancePolicyHash": "b2c9000000000000",
+    "solverPolicyHash": "3e9a000000000000"
+  },
+  "suppressed": false
+}

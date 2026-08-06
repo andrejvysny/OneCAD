@@ -11,7 +11,7 @@
  * put, so no per-frame churn.
  */
 import { createStore, useStore } from "zustand";
-import type { BooleanOperation, HoleType } from "@/ipc/types";
+import type { BooleanOperation, HoleType, OffsetDistanceType } from "@/ipc/types";
 import type { HoleFit } from "@/tools/modelTools/holeStandards";
 import {
   DEFAULT_HOLE_CB_DEPTH,
@@ -178,6 +178,34 @@ export interface HoleChipOpts {
   csAngleDeg?: number;
 }
 
+/**
+ * Handlers the armed OFFSET FACE cluster wires (SCHEMA §7.3):
+ * `[distance] [Offset|Total|Radius|Diameter] [⌒ tangent] [✓] [✕]`.
+ */
+export interface OffsetFaceChipHandlers {
+  onValue: (v: number) => void;
+  onDistanceType: (t: OffsetDistanceType) => void;
+  onChainTangent: (chain: boolean) => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
+/** The armed offset's current state — what the cluster renders and gates on. */
+export interface OffsetFaceChipOpts {
+  distanceType?: OffsetDistanceType;
+  chainTangentFaces?: boolean;
+  /**
+   * Which types the segment group offers. Planarity-driven (planar ⇒
+   * Offset+Total, curved ⇒ Offset+Radius+Diameter) and narrowed to `["Offset"]`
+   * for a multi-face closure, where SCHEMA §7.3 allows nothing else. Omitted ⇒
+   * `["Offset"]`, which renders no choice at all — the honest default for a
+   * selection whose surface type is unknown.
+   */
+  distanceTypes?: readonly OffsetDistanceType[];
+  /** The last typed value was refused as out-of-domain (chip error state). */
+  valueError?: boolean;
+}
+
 /** Handlers the armed DATUM chip wires (offset input + ✓/✕ — DATUM W1). */
 export interface DatumChipHandlers {
   onValue: (v: number) => void;
@@ -193,6 +221,8 @@ export type ChipKind =
   | "revolveAngle"
   | "booleanOp"
   | "shellThickness"
+  /** The armed face-offset cluster (SCHEMA §7.3 OffsetFace). */
+  | "offsetFace"
   | "linearPattern"
   | "circularPattern"
   | "mirror"
@@ -242,6 +272,16 @@ export interface ToolChipState {
    * even when the value is still parked here from an earlier flip.
    */
   distance2: number | null;
+  /** How the armed offset reads its distance (SCHEMA §7.3 `distanceType`). */
+  distanceType: OffsetDistanceType;
+  /** Which distance types the armed offset's segment group offers. */
+  distanceTypes: readonly OffsetDistanceType[];
+  /** Whether the armed offset's frozen closure follows tangent faces. */
+  chainTangentFaces: boolean;
+  /** The last authored value was refused as out-of-domain (never clamped). */
+  valueError: boolean;
+  onDistanceType: ((t: OffsetDistanceType) => void) | null;
+  onChainTangent: ((chain: boolean) => void) | null;
   /** Which profile the armed hole cluster is authoring (WP-C T3). */
   holeType: HoleType;
   /** Armed hole blind depth, or `null` = through-all. */
@@ -364,6 +404,13 @@ export interface ToolChipState {
     onValue: (v: number) => void,
     handlers?: ValueChipHandlers,
   ): void;
+  /** Show the armed offset-face cluster at the operative faces' mean centre. */
+  showOffsetFace(
+    distance: number,
+    worldPos: [number, number, number],
+    handlers: OffsetFaceChipHandlers,
+    opts?: OffsetFaceChipOpts,
+  ): void;
   showLinearPattern(
     axis: PatternAxis,
     count: number,
@@ -440,6 +487,12 @@ export interface ToolChipState {
   setDraftAngle(deg: number): void;
   /** Update just the armed edge-op cluster's authored op (drag flip / segment pick). */
   setEdgeOp(edgeOp: EdgeOpKind): void;
+  /** Update just the armed offset's distance type (segment pick read-back). */
+  setDistanceType(distanceType: OffsetDistanceType): void;
+  /** Update just the armed offset's tangent-chain flag. */
+  setChainTangent(chainTangentFaces: boolean): void;
+  /** Update just the armed offset's value-error flag (a refused entry). */
+  setValueError(valueError: boolean): void;
   /** Update just the armed placement's mode (Move / Rotate). */
   setTransformMode(mode: TransformMode): void;
   /** Update just the armed placement's copy flag (Alt-drag / the Copy segment). */
@@ -472,6 +525,12 @@ const CLEARED = {
   onDistance2: null as ((distance2: number | null) => void) | null,
   showEdgeOpSegments: false,
   onEdgeOp: null,
+  distanceType: "Offset" as OffsetDistanceType,
+  distanceTypes: ["Offset"] as readonly OffsetDistanceType[],
+  chainTangentFaces: true,
+  valueError: false,
+  onDistanceType: null,
+  onChainTangent: null,
   holeType: "simple" as HoleType,
   holeDepth: null as number | null,
   cbDiameter: DEFAULT_HOLE_CB_DIAMETER,
@@ -634,6 +693,23 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
       onCancel: handlers?.onCancel ?? null,
     });
   },
+  showOffsetFace(distance, worldPos, handlers, opts) {
+    set({
+      ...CLEARED,
+      kind: "offsetFace",
+      value: distance,
+      worldPos,
+      distanceType: opts?.distanceType ?? "Offset",
+      distanceTypes: opts?.distanceTypes ?? ["Offset"],
+      chainTangentFaces: opts?.chainTangentFaces ?? true,
+      valueError: opts?.valueError ?? false,
+      onValue: handlers.onValue,
+      onDistanceType: handlers.onDistanceType,
+      onChainTangent: handlers.onChainTangent,
+      onConfirm: handlers.onConfirm,
+      onCancel: handlers.onCancel,
+    });
+  },
   showLinearPattern(axis, count, spacing, worldPos, handlers) {
     set({
       ...CLEARED,
@@ -718,6 +794,15 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
   },
   setDistance2(distance2) {
     set({ distance2 });
+  },
+  setDistanceType(distanceType) {
+    set({ distanceType });
+  },
+  setChainTangent(chainTangentFaces) {
+    set({ chainTangentFaces });
+  },
+  setValueError(valueError) {
+    set({ valueError });
   },
   setTransformMode(transformMode) {
     set({ transformMode });

@@ -1,13 +1,15 @@
 /*
  * BodyObject render-mode matrix (W3).
  *
- * A mode is expressed as CHILD visibility (face Mesh / edge LineSegments) plus
- * the kind of shared material set the children point at — never as a
+ * A mode is expressed as CHILD visibility (face Mesh / edge LineSegments2) plus
+ * the kind of shared material set the children point at, and — for edges — which
+ * of that set's two edge materials the mode's `edgeStyle` names. Never a
  * `material.wireframe` flip, which would leak onto every other body sharing that
  * set.
  */
 import { describe, it, expect, afterEach } from "vitest";
 import * as THREE from "three";
+import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import { buildBodyObject } from "./BodyObject";
 import { BodyMaterialLibrary } from "./bodyMaterials";
 import { DEFAULT_RENDER_MODE, RENDER_MODES, vertexColorKind } from "./renderModes";
@@ -29,9 +31,7 @@ function handleFor(mesh: ArrayBuffer = makeBoxMesh()) {
   const library = new BodyMaterialLibrary();
   const handle = buildBodyObject(entry, library);
   const face = handle.group.children.find((c) => c.userData.kind === "face") as THREE.Mesh;
-  const edges = handle.group.children.find(
-    (c) => c.userData.kind === "edge",
-  ) as THREE.LineSegments;
+  const edges = handle.group.children.find((c) => c.userData.kind === "edge") as LineSegments2;
   return { handle, face, edges, entry, library };
 }
 
@@ -69,6 +69,31 @@ describe("BodyObjectHandle.applyMode", () => {
     const set = library.get(RENDER_MODES.wireframe.materialKind);
     handle.applyMode(RENDER_MODES.wireframe);
     expect(face.material).toBe(set.face);
+    expect(edges.material).toBe(set.edgeWire);
+    entry.dispose();
+    library.dispose();
+  });
+
+  /*
+   * The edge material follows `edgeStyle`, not the mode id: edges over a shaded
+   * face are a near-black OUTLINE, edges drawn alone must invert with the theme
+   * or they vanish on a dark canvas. Both live in the same shared set, so the
+   * mode swaps the pointer rather than recoloring one material.
+   */
+  it("edgeStyle selects the edge material: onFaces → edge, standalone → edgeWire", () => {
+    const { handle, edges, entry, library } = handleFor();
+    const set = library.get(RENDER_MODES.shadedEdges.materialKind);
+
+    handle.applyMode(RENDER_MODES.shadedEdges);
+    expect(RENDER_MODES.shadedEdges.edgeStyle).toBe("onFaces");
+    expect(edges.material).toBe(set.edge);
+
+    handle.applyMode(RENDER_MODES.wireframe);
+    expect(RENDER_MODES.wireframe.edgeStyle).toBe("standalone");
+    expect(edges.material).toBe(set.edgeWire);
+
+    // …and back, so the swap is not one-way.
+    handle.applyMode(RENDER_MODES.shadedEdges);
     expect(edges.material).toBe(set.edge);
     entry.dispose();
     library.dispose();
@@ -91,9 +116,25 @@ describe("BodyObjectHandle.applyMode", () => {
 describe("buildBodyObject", () => {
   it("materials the children at BUILD time — previews never get an applyMode call", () => {
     const { face, edges, entry, library } = handleFor();
-    const set = library.get(RENDER_MODES[DEFAULT_RENDER_MODE].materialKind);
+    const def = RENDER_MODES[DEFAULT_RENDER_MODE];
+    const set = library.get(def.materialKind);
     expect(face.material).toBe(set.face);
-    expect(edges.material).toBe(set.edge);
+    // The default mode's edgeStyle, not just "whatever `edge` is".
+    expect(edges.material).toBe(def.edgeStyle === "standalone" ? set.edgeWire : set.edge);
+    entry.dispose();
+    library.dispose();
+  });
+
+  /*
+   * Fat lines, not THREE.LineSegments: WebGL clamps LineBasicMaterial.linewidth
+   * to 1 device px, so a body's edges would render as sub-CSS-pixel hairlines on
+   * any HiDPI display. The type also decides how the Picker reads a hit
+   * (faceIndex = segment ordinal, vs a plain line's vertex index).
+   */
+  it("draws edges as a LineSegments2 over the entry's instanced geometry", () => {
+    const { edges, entry, library } = handleFor();
+    expect(edges).toBeInstanceOf(LineSegments2);
+    expect(edges.geometry).toBe(entry.edgeGeometry);
     entry.dispose();
     library.dispose();
   });

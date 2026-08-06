@@ -37,6 +37,8 @@ export type ModelTool =
   | "fillet"
   | "boolean"
   | "shell"
+  /** Direct-modelling face offset (SCHEMA §7.3 OffsetFace). */
+  | "offsetFace"
   | "linearPattern"
   | "circularPattern"
   | "mirror"

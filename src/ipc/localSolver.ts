@@ -55,7 +55,7 @@ import type {
 } from "./types";
 import { makeExtrudeBodyMesh } from "./mockMeshes";
 import { lookupMockFace, mockProjectedContent } from "./mockFaceGeometry";
-import { detectRegions, planeFor, solveSketch } from "./mockSketch";
+import { planeFor, solveSketch } from "./mockSketch";
 import { profileFromRegion, type PrismProfile } from "@/tools/preview/prismPreview";
 import { buildPreviewOp, supportsPreview, type PreviewSessionState } from "./previewOps";
 import { mintRecordId } from "./tauriCommandMap";
@@ -579,6 +579,11 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
       await wait(SKETCH_LATENCY_MS);
       const session = sketchSessions.get(sketchId);
       if (session) {
+        // Dynamic: mockRegions pulls in three's ShapeUtils/Vector2, and this
+        // lane is shared with the real (tauri) client, which never calls this
+        // path — keeping the import here, not static, keeps three out of the
+        // entry chunk on the real lane.
+        const { detectRegions } = await import("./mockRegions");
         const regions = detectRegions(session.entities);
         finishedRegions.set(sketchId, regions); // cache for extrude synthesis
         return { regions };

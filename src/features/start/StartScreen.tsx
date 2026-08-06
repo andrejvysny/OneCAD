@@ -7,6 +7,7 @@ import { Icon } from "@/icons/Icon";
 import { useAppStore } from "@/stores/appStore";
 import type { RecentProject } from "@/ipc/types";
 import { RecentGrid } from "./RecentGrid";
+import { RecentGridSkeleton } from "./RecentGridSkeleton";
 import { RecoveryCard } from "./RecoveryCard";
 import { SortMenu, type SortKey } from "./SortMenu";
 
@@ -57,6 +58,22 @@ export function StartScreen() {
   useEffect(() => {
     if (recoveryStatus === "idle") void checkRecovery();
   }, [recoveryStatus, checkRecovery]);
+
+  // Idle-prefetch the editor chunk (App.tsx's lazy() import, EXACT same
+  // specifier) once recents have loaded, so New-project rarely blocks on a
+  // cold fetch of the ~130-module editor tree. Deliberately NO setTimeout
+  // fallback: jsdom has no requestIdleCallback, which keeps that whole tree
+  // out of every StartScreen vitest run; an older Safari merely loses the
+  // prefetch and falls back to the ordinary lazy-load-on-navigate path.
+  useEffect(() => {
+    if (recentsStatus !== "ready") return;
+    const id = window.requestIdleCallback?.(() => {
+      void import("@/features/shell/EditorScreen");
+    });
+    return () => {
+      if (id !== undefined) window.cancelIdleCallback?.(id);
+    };
+  }, [recentsStatus]);
 
   const list = useMemo(
     () => filterSort(recents, query, sort),
@@ -123,12 +140,15 @@ export function StartScreen() {
           <SortMenu value={sort} onChange={setSort} />
         </div>
 
-        {ready && list.length > 0 && (
-          <RecentGrid projects={list} onOpen={openProject} />
-        )}
-        {ready && list.length === 0 && (
-          <EmptyState searching={query.length > 0} />
-        )}
+        <div aria-busy={!ready}>
+          {!ready && <RecentGridSkeleton />}
+          {ready && list.length > 0 && (
+            <RecentGrid projects={list} onOpen={openProject} />
+          )}
+          {ready && list.length === 0 && (
+            <EmptyState searching={query.length > 0} />
+          )}
+        </div>
       </div>
     </div>
   );

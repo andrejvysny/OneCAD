@@ -22,7 +22,8 @@ import { SketchStaticSync } from "./sketchStaticSync";
 import { DatumSync } from "./datumSync";
 import { setViewportEngine } from "./engineBridge";
 import { viewLabelForDirection } from "@/features/viewcube/ViewCube";
-import { viewportStore } from "@/stores/viewportStore";
+import { useViewportStore, viewportStore } from "@/stores/viewportStore";
+import { selectGeometryCached, useDocumentStore } from "@/stores/documentStore";
 import { settingsStore } from "@/stores/settingsStore";
 import { toolStore } from "@/stores/toolStore";
 import {
@@ -35,15 +36,6 @@ import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { createClient } from "@/ipc/client";
 import { promoteOne } from "@/ipc/promote";
-import {
-  emitMockDocumentChanged,
-  mockMeshKey,
-  resetMockSketches,
-  resetMockDocument,
-  setMockLatency,
-} from "@/ipc/mockClient";
-import type { SketchEntity } from "@/ipc/types";
-import { documentStore } from "@/stores/documentStore";
 import { SketchController } from "@/tools/sketch/SketchController";
 import { ModelToolController } from "@/tools/modelTools/ModelToolController";
 import { setModelToolController } from "@/tools/modelTools/modelToolBridge";
@@ -91,6 +83,31 @@ export function refFromModelHits(
 }
 
 /**
+ * Which geometry-status chip the viewport overlays, if any.
+ *
+ * Two facts, one slot, so the precedence has to be explicit:
+ *  - PENDING WINS. Meshes are actively landing, so labelling the frame "last
+ *    saved" would be stale before it finished rendering. It still defers to a
+ *    sticky error hint (a body-load failure is the more actionable signal), and
+ *    that suppression does NOT promote `cached` — the geometry is mid-swap
+ *    either way.
+ *  - CACHED does NOT defer to the error hint. Cached geometry plus a regen
+ *    failure is precisely the state the user must be told about: the hint says
+ *    the rebuild failed, the chip says what is on screen instead. Hiding one
+ *    would leave stale geometry looking live.
+ */
+export function viewportGeometryChip(
+  ready: boolean,
+  geometryPending: boolean,
+  errorHintActive: boolean,
+  geometryCached: boolean,
+): "pending" | "cached" | null {
+  if (!ready) return null;
+  if (geometryPending) return errorHintActive ? null : "pending";
+  return geometryCached ? "cached" : null;
+}
+
+/**
  * Promote a face/edge pick to a persistent Rust-minted ElementId (SCHEMA §7.5)
  * and write it back onto the still-selected ref. Fire-and-forget; a failed / stale
  * promotion leaves the transient topoKey ref intact (the tool falls back to it)
@@ -104,8 +121,15 @@ function promotePick(client: ReturnType<typeof createClient>, ref: EntityRef): v
     const sel = selectionStore.getState();
     // Only if the ref is still selected (selection may have moved on).
     if (!sel.selected.some((r) => r.id === ref.id)) return;
+    // Both ids, never `id`: that stays the pick-time `${bodyId}#${topoKey}`
+    // identity `sameRef`/toggle compare on. The backend RESOLVED the pick, so its
+    // topoKey is the authority on which element the mesh names right now.
     sel.set(
-      sel.selected.map((r) => (r.id === ref.id ? { ...r, elementId: promoted.elementId } : r)),
+      sel.selected.map((r) =>
+        r.id === ref.id
+          ? { ...r, elementId: promoted.elementId, topoKey: promoted.topoKey || r.topoKey }
+          : r,
+      ),
     );
   });
 }
@@ -127,6 +151,13 @@ export function ViewportRoot({ className }: { className?: string }) {
   const [sketching, setSketching] = useState(
     () => toolStore.getState().mode === "sketch",
   );
+  const geometryPending = useViewportStore((s) => s.geometryPending);
+  // Defer to the sticky failure hint (StatusBar) rather than showing both at
+  // once — a body load failure is the more specific, more actionable signal.
+  const errorHintActive =
+    useViewportStore((s) => s.statusHint?.severity) === "error";
+  const geometryCached = useDocumentStore(selectGeometryCached);
+  const chip = viewportGeometryChip(ready, geometryPending, errorHintActive, geometryCached);
 
   // Mirror sketch mode for the placeholder styling (before the engine is ready).
   useEffect(() => {
@@ -381,65 +412,26 @@ export function ViewportRoot({ className }: { className?: string }) {
         applySketchSelection();
         cleanups.push(sketchSelectionStore.subscribe(applySketchSelection));
 
-        // ?vpdemo — drive the mock box through the FULL onDocumentChanged path.
-        if (hasFlag("vpdemo")) {
-          emitMockDocumentChanged({
-            revision: 1,
-            changedBodies: [{ bodyId: "body1", meshKey: mockMeshKey("body1", "coarse") }],
-            removedBodies: [],
+        // ?vpdemo / ?sketchdemo / ?toolsdemo — demo-only flags, handled by a
+        // dynamically-imported dev module (devDemos.ts) so the mock-kernel
+        // import it needs never rides along into a production bundle:
+        // `import.meta.env.DEV` is statically false in a prod build, so
+        // Rollup dead-code-eliminates the whole `import("./devDemos")` call
+        // — the demo flags are simply dead in production. In dev/e2e this
+        // costs one microtask of delay versus the old synchronous block;
+        // every e2e assertion that depends on these flags already polls
+        // (`toPass`/`expect.poll`) rather than asserting immediately after
+        // navigation, so that tick is invisible there.
+        const vpdemo = hasFlag("vpdemo");
+        const sketchdemo = hasFlag("sketchdemo");
+        const toolsdemo = hasFlag("toolsdemo");
+        if (import.meta.env.DEV && (vpdemo || sketchdemo || toolsdemo)) {
+          void import("./devDemos").then((m) => {
+            // Re-checked AFTER the await: StrictMode double-mount may have
+            // torn this effect down while the dynamic import was in flight.
+            if (cancelled) return;
+            m.runDemoFlags({ engine, client, container, modelToolController, vpdemo, sketchdemo, toolsdemo });
           });
-        }
-
-        // ?sketchdemo — enter sketch mode on the seeded XY sketch (no backend;
-        // the mock enterSketch does it). Pass an explicit id (skip the plane
-        // picker) so the demo is deterministic. Proves the sketch UX end to end.
-        if (hasFlag("sketchdemo")) {
-          resetMockSketches();
-          toolStore.getState().setMode("sketch", "sketch2");
-        }
-
-        // ?toolsdemo — seed a finished rectangle sketch + a window harness so the
-        // 60fps gate can arm/drag/commit extrude and read frame timing.
-        if (hasFlag("toolsdemo")) {
-          resetMockSketches();
-          resetMockDocument();
-          const sid = "toolsketch";
-          let regionRef: EntityRef | null = null;
-          const rect: SketchEntity[] = [
-            { id: "e1", type: "Line", p0: [-30, -20], p1: [30, -20] },
-            { id: "e2", type: "Line", p0: [30, -20], p1: [30, 20] },
-            { id: "e3", type: "Line", p0: [30, 20], p1: [-30, 20] },
-            { id: "e4", type: "Line", p0: [-30, 20], p1: [-30, -20] },
-          ];
-          void (async () => {
-            await client.enterSketch({ newOnPlane: "XY", sketchId: sid });
-            await client.sketchUpsert(sid, rect, []);
-            const finish = await client.finishSketch(sid);
-            if (finish.regions[0]) {
-              regionRef = sketchRegionRef(sid, finish.regions[0].regionId);
-            }
-            documentStore.getState().addSketch({
-              id: sid,
-              name: "Sketch T",
-              visible: true,
-              dof: 0,
-              status: "ok",
-              geometryToken: `mock:${sid}:v1`,
-            });
-          })();
-          (window as unknown as { __toolsGate?: unknown }).__toolsGate = {
-            setLatency: (ms: number) => setMockLatency(ms),
-            engine,
-            controller: modelToolController,
-            container,
-            client,
-            stores: { selectionStore, toolStore, documentStore },
-            arm: () => {
-              if (!regionRef) return;
-              selectionStore.getState().set([regionRef]);
-              toolStore.getState().setTool("extrude");
-            },
-          };
         }
 
         // store → engine (projection, grid)
@@ -515,7 +507,13 @@ export function ViewportRoot({ className }: { className?: string }) {
       // NOTE: `className` supplies the positioning (absolute inset…). It already
       // establishes a containing block for the engine's absolute canvas, so do
       // NOT add `relative` here — it would conflict and collapse the height.
-      className={cn("overflow-hidden bg-canvas", className)}
+      // No `overflow-hidden`: the engine's chip layer (`chipLayer()` in
+      // ViewportEngine, `chipLayerEl`) is appended here as a sibling of the
+      // overlay, and edge-anchored chips must be able to spill past this box's
+      // edge rather than get clipped. Safe to leave unclipped because every
+      // other child — canvas, overlay, placeholder — is `absolute inset-0`, so
+      // nothing else can escape this container's bounds.
+      className={cn("bg-canvas", className)}
     >
       {/* The engine appends its own <canvas> here (absolute, inset-0). */}
       <div
@@ -535,6 +533,34 @@ export function ViewportRoot({ className }: { className?: string }) {
             {sketching
               ? "[ 2D sketch grid — canvas placeholder ]"
               : "[ 3D viewport — loading engine… ]"}
+          </span>
+        </div>
+      )}
+      {chip === "pending" && (
+        <div
+          data-testid="geometry-pending"
+          // Non-interactive: e2e clicks the canvas constantly, and this chip
+          // must never intercept a pick.
+          className="pointer-events-none absolute inset-0 z-[2] flex items-center justify-center"
+        >
+          <span className="flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-1.5 text-[12.5px] font-medium text-ink-5 shadow-panel">
+            Rebuilding geometry…
+          </span>
+        </div>
+      )}
+      {chip === "cached" && (
+        <div
+          data-testid="geometry-cached"
+          // Same non-interactive rule as the pending chip — never intercept a pick.
+          // Anchored TOP-centre, not dead-centre like its sibling: "Rebuilding
+          // geometry…" is transient, but this one persists for as long as nothing
+          // has regenerated (potentially a whole read-only session), and a pill
+          // parked over the middle of the model would obscure the very geometry it
+          // is describing.
+          className="pointer-events-none absolute inset-x-0 top-3 z-[2] flex justify-center"
+        >
+          <span className="flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-1.5 text-[12.5px] font-medium text-ink-5 shadow-panel">
+            Last saved geometry
           </span>
         </div>
       )}

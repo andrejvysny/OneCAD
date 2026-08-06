@@ -1,0 +1,87 @@
+---
+source: crates/onecad-core/tests/schema_freeze.rs
+expression: rec
+---
+{
+  "recordId": "00000000-0000-0000-0000-000000002ece",
+  "recordSchemaVersion": 1,
+  "stepIndex": 14,
+  "name": "Offset face 1",
+  "opType": "OffsetFace",
+  "params": {
+    "chainTangentFaces": true,
+    "distance": {
+      "value": 2.5
+    },
+    "distanceType": "Offset",
+    "faceIds": [
+      "el_f1",
+      "el_f2"
+    ],
+    "faces": [
+      {
+        "anchor": {
+          "worldPoint": [
+            0.0,
+            0.0,
+            10.0
+          ]
+        },
+        "intent": {
+          "descriptor": {
+            "surfaceType": "plane"
+          },
+          "kind": "face",
+          "version": 1
+        },
+        "primary": {
+          "bodyId": "00000000-0000-0000-0000-00000000b0d1",
+          "elementId": "el_f1",
+          "kind": "face"
+        }
+      },
+      {
+        "anchor": {
+          "worldPoint": [
+            40.0,
+            0.0,
+            10.0
+          ]
+        },
+        "intent": {
+          "descriptor": {
+            "surfaceType": "plane"
+          },
+          "kind": "face",
+          "version": 1
+        },
+        "primary": {
+          "bodyId": "00000000-0000-0000-0000-00000000b0d1",
+          "elementId": "el_f2",
+          "kind": "face"
+        }
+      }
+    ],
+    "targetBodyId": "00000000-0000-0000-0000-00000000b0d1"
+  },
+  "inputs": {
+    "bodies": [
+      "00000000-0000-0000-0000-00000000b0d1"
+    ],
+    "sketches": [],
+    "elements": [
+      "el_f1",
+      "el_f2"
+    ]
+  },
+  "outputs": [
+    "00000000-0000-0000-0000-00000000b0d1"
+  ],
+  "determinism": {
+    "parallel": false,
+    "occtOptionsHash": "cbf29ce484222325",
+    "tolerancePolicyHash": "b2c9000000000000",
+    "solverPolicyHash": "3e9a000000000000"
+  },
+  "suppressed": false
+}

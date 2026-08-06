@@ -28,9 +28,10 @@ use onecad_core::ids::{
 use onecad_core::regen::{
     AcceptResult, AcquireRequest, CheckpointArtifacts, ElementMapDelta, EngineError, Fencing,
     GeometryEngine, HistoryPrefixHash, Lod, OpFailureCode, OpenSessionRequest, Outcome, PlanEvent,
-    PlanPrepared, PlanRequest, PlanStepEvent, RefResolution, RegenRequest, ResolveRequest,
-    RestoreRequest, RestoreResult, Signature, StepResult, StepSignatures, StepStatus,
-    StoppedReason, TessellateRequest, TessellateResult, WorkerElementEvidence, WorkerHead,
+    PlanPrepared, PlanRequest, PlanStepEvent, PreparedMeshRef, RefResolution, RegenRequest,
+    ResolveRequest, RestoreRequest, RestoreResult, Signature, StepResult, StepSignatures,
+    StepStatus, StoppedReason, TessellateRequest, TessellateResult, WorkerElementEvidence,
+    WorkerHead,
 };
 
 use onecad_core::document::refs::{
@@ -63,6 +64,9 @@ struct FakeState {
     /// How many times `save_checkpoint` was invoked — the observable a skipped mint
     /// is asserted against (a re-save at the same step would leave the count alone).
     checkpoint_saves: usize,
+    /// How many times `fetch_mesh` was invoked — the observable the inline-artifact
+    /// path is pinned against (a seeded cache must fetch ZERO times).
+    mesh_fetches: usize,
 }
 
 struct FakeBackend {
@@ -77,6 +81,9 @@ struct FakeBackend {
     plan_fails: bool,
     /// When set, `save_checkpoint` returns artifacts instead of `Unsupported`.
     checkpoints_work: bool,
+    /// When set, the terminal `PlanPrepared` carries an inline MESH1 artifact per
+    /// created body (what the real worker's `artifacts.tessellate` rider produces).
+    inline_meshes: bool,
     /// The opaque descriptor `acquire_element_ids` echoes per pick. Mutable so a
     /// test can move the promotion cache's evidence between two promotions of the
     /// SAME element and prove which stamp an edit kept (H5 fill-iff-None).
@@ -99,6 +106,7 @@ impl Default for FakeBackend {
             solver_fails: false,
             plan_fails: false,
             checkpoints_work: false,
+            inline_meshes: false,
             descriptor: Mutex::new(serde_json::json!({ "fake": true })),
             existing: Mutex::new(None),
             echo_curves: Mutex::new(std::collections::BTreeMap::new()),
@@ -143,8 +151,27 @@ impl FakeBackend {
         }
     }
 
+    /// A backend that inlines a MESH1 artifact per prepared body into the terminal
+    /// `PlanPrepared` — the real worker's `artifacts.tessellate` behavior.
+    fn with_inline_meshes() -> Self {
+        Self {
+            inline_meshes: true,
+            ..Self::default()
+        }
+    }
+
     fn checkpoint_saves(&self) -> usize {
         self.state.lock().unwrap().checkpoint_saves
+    }
+
+    fn mesh_fetches(&self) -> usize {
+        self.state.lock().unwrap().mesh_fetches
+    }
+
+    /// The blob the INLINE artifact carries — deliberately distinct from
+    /// [`Self::fetch_mesh`]'s bytes so a test can tell which lane served a mesh.
+    fn inline_bytes(body: BodyId) -> Vec<u8> {
+        format!("MESH1-INLINE:{body}").into_bytes()
     }
 
     /// Re-points the descriptor every later `acquire_element_ids` echoes.
@@ -206,9 +233,17 @@ impl GeometryEngine for FakeBackend {
             let mut events = Vec::new();
             let mut per_step: Vec<StepResult> = Vec::new();
             let mut last_valid: Option<usize> = None;
+            let mut artifact_meshes: Vec<PreparedMeshRef> = Vec::new();
             for op in &request.ops {
                 let step = op.step_index;
                 let body_ids = self.bodies_for(step, op.record_id);
+                if self.inline_meshes {
+                    artifact_meshes.extend(body_ids.iter().map(|b| PreparedMeshRef {
+                        body: *b,
+                        lod: Lod::Coarse,
+                        bytes: Arc::new(Self::inline_bytes(*b)),
+                    }));
+                }
                 let body_events: Vec<BodyLifecycleEvent> = body_ids
                     .iter()
                     .map(|b| BodyLifecycleEvent::Created { body: *b })
@@ -238,6 +273,7 @@ impl GeometryEngine for FakeBackend {
                 stopped_reason: StoppedReason::Completed,
                 per_step,
                 history_prefix_hash: echo_hash(&request, last_valid),
+                artifact_meshes,
             }));
             events
         };
@@ -362,6 +398,7 @@ impl MeshProvider for FakeBackend {
         lod: Lod,
         _snapshot: SnapshotId,
     ) -> Result<Vec<u8>, EngineError> {
+        self.state.lock().unwrap().mesh_fetches += 1;
         Ok(format!("MESH1:{body}:{}", crate::worker::lod_str(lod)).into_bytes())
     }
 }
@@ -739,6 +776,96 @@ async fn mesh_cache_miss_then_hit_returns_identical_bytes() {
 }
 
 #[tokio::test]
+async fn regen_seeds_the_mesh_cache_from_inline_plan_artifacts() {
+    // The whole point: the engine already tessellated every prepared body and shipped
+    // the blobs with the terminal prepare, so the FIRST post-regen `get_mesh` must be
+    // a cache HIT — zero `fetch_mesh` calls, ever.
+    let backend = Arc::new(FakeBackend::with_inline_meshes());
+    let mut rt = runtime_with(backend.clone());
+    rt.apply(add_extrude(0x10, 10.0)).unwrap();
+    let report = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert!(matches!(report.outcome, Outcome::Published(_)));
+
+    let body = BodyId(Uuid::from_u128(0x10));
+    let bytes = rt
+        .get_mesh(body, Lod::Coarse, None)
+        .await
+        .expect("the seeded cache serves the body");
+    assert_eq!(
+        *bytes,
+        FakeBackend::inline_bytes(body),
+        "the INLINE artifact bytes were served (not the pull path's)"
+    );
+    assert_eq!(
+        backend.mesh_fetches(),
+        0,
+        "a seeded cache must never re-tessellate"
+    );
+
+    // And it is a real cache entry: the second call hands back the same Arc.
+    let again = rt.get_mesh(body, Lod::Coarse, None).await.expect("hit");
+    assert!(Arc::ptr_eq(&bytes, &again));
+    assert_eq!(backend.mesh_fetches(), 0);
+}
+
+#[tokio::test]
+async fn superseded_regen_never_seeds_the_mesh_cache() {
+    // Fencing gates the cache fill exactly as it gates the commit: a prepare that
+    // loses the window race published nothing, so its inline meshes must be dropped
+    // — caching them would serve geometry the document never adopted.
+    let backend = Arc::new(FakeBackend::with_inline_meshes());
+    let mut rt = runtime_with(backend.clone());
+    rt.apply(add_extrude(0x10, 25.0)).unwrap();
+
+    let prepared = rt
+        .begin_regen(RegenRequest::ToEnd { from: 0 })
+        .expect("non-empty plan");
+    rt.apply(add_extrude(0x11, 10.0)).unwrap(); // bumps the fencing revision
+    let driven = prepared.drive(CancelToken::new()).await;
+    let report = rt.finish_regen(driven);
+
+    assert!(
+        matches!(report.outcome, Outcome::Superseded),
+        "{:?}",
+        report.outcome
+    );
+    assert!(
+        rt.mesh_cache.is_empty(),
+        "a superseded prepare seeded {} cache entries",
+        rt.mesh_cache.len()
+    );
+
+    // The converging regen at the new revision DOES seed — still zero fetches.
+    let converge = rt
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert!(matches!(converge.outcome, Outcome::Published(_)));
+    for seed in [0x10u128, 0x11] {
+        let body = BodyId(Uuid::from_u128(seed));
+        let bytes = rt.get_mesh(body, Lod::Coarse, None).await.expect("seeded");
+        assert_eq!(*bytes, FakeBackend::inline_bytes(body));
+    }
+    assert_eq!(backend.mesh_fetches(), 0);
+}
+
+#[tokio::test]
+async fn regen_without_inline_artifacts_still_pulls() {
+    // Invariant 7: the artifacts are acceleration. An engine that inlines nothing
+    // (the default fake, a retransmitted prepare) must still render via the pull.
+    let backend = Arc::new(FakeBackend::new());
+    let mut rt = runtime_with(backend.clone());
+    rt.apply(add_extrude(0x10, 10.0)).unwrap();
+    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+
+    let body = BodyId(Uuid::from_u128(0x10));
+    assert!(rt.get_mesh(body, Lod::Coarse, None).await.is_some());
+    assert_eq!(backend.mesh_fetches(), 1, "fell back to exactly one pull");
+}
+
+#[tokio::test]
 async fn regen_report_builds_document_change_payload() {
     let mut rt = runtime_with(Arc::new(FakeBackend::new()));
     rt.apply(add_extrude(0x10, 10.0)).unwrap();
@@ -854,7 +981,7 @@ async fn build_and_write_payload_produce_the_same_container_as_save() {
         .await;
 
     // Lane A: snapshot, then write with NO `&self` in sight.
-    let payload = rt.build_save_payload(test_save_meta());
+    let payload = rt.build_save_payload(test_save_meta(), SaveCaches::explicit());
     DocumentRuntime::write_payload(&split_path, &payload).unwrap();
     // Lane B: the legacy in-place save.
     rt.save(&save_path, test_save_meta()).unwrap();
@@ -880,13 +1007,272 @@ fn save_payload_shares_import_blob_bytes_instead_of_copying_them() {
     let mut rt = runtime_with(Arc::new(FakeBackend::new()));
     let sha = seed_import_blob(&mut rt, b"ISO-10303-21; a large source file".to_vec());
 
-    let payload = rt.build_save_payload(test_save_meta());
+    let payload = rt.build_save_payload(test_save_meta(), SaveCaches::explicit());
     let live = &rt.imports[&sha].bytes;
     let snapshotted = &payload.imports[&sha].bytes;
     assert!(
         Arc::ptr_eq(live, snapshotted),
         "the payload must share the blob allocation, not deep-copy it"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Container caches: what an explicit save embeds so the next open paints at once
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn explicit_save_embeds_the_head_meshes_and_autosave_embeds_none() {
+    let backend = Arc::new(FakeBackend::with_inline_meshes());
+    let mut rt = runtime_with(backend);
+    rt.apply(add_extrude(0x10, 25.0)).unwrap();
+    rt.apply(add_extrude(0x11, 10.0)).unwrap();
+    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+
+    let explicit = rt.build_save_payload(test_save_meta(), SaveCaches::explicit());
+    let mut persisted: Vec<(BodyId, Vec<u8>)> = explicit
+        .caches
+        .meshes
+        .iter()
+        .map(|m| {
+            assert_eq!(m.lod, "coarse", "V1 persists the coarse tier only");
+            (m.body, m.bytes.as_ref().clone())
+        })
+        .collect();
+    persisted.sort_by_key(|(b, _)| *b);
+    assert_eq!(
+        persisted,
+        vec![
+            (
+                BodyId(Uuid::from_u128(0x10)),
+                FakeBackend::inline_bytes(BodyId(Uuid::from_u128(0x10)))
+            ),
+            (
+                BodyId(Uuid::from_u128(0x11)),
+                FakeBackend::inline_bytes(BodyId(Uuid::from_u128(0x11)))
+            ),
+        ],
+        "every head body whose mesh is resident is embedded, verbatim"
+    );
+
+    let auto = rt.build_save_payload(test_save_meta(), SaveCaches::none());
+    assert!(
+        auto.caches.is_empty(),
+        "the autosave lane embeds no cache section at all"
+    );
+}
+
+/// A body whose mesh the LRU already evicted is simply not persisted — the save
+/// must never fetch or tessellate to fill the cache, because it runs under the
+/// single-writer lock.
+#[tokio::test]
+async fn a_save_persists_only_already_resident_meshes() {
+    let backend = Arc::new(FakeBackend::with_inline_meshes());
+    let mut rt = runtime_with(backend);
+    rt.apply(add_extrude(0x10, 25.0)).unwrap();
+    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert_eq!(rt.mesh_cache.len(), 1, "the regen seeded one blob");
+
+    rt.mesh_cache.clear();
+    let payload = rt.build_save_payload(test_save_meta(), SaveCaches::explicit());
+    assert!(
+        payload.caches.meshes.is_empty(),
+        "an evicted mesh is skipped, not re-fetched under the lock"
+    );
+}
+
+/// The 64 MiB per-save budget truncates by ascending body id, so the same document
+/// always drops the same tail — a save must not produce a different container on
+/// each run.
+#[tokio::test]
+async fn saved_mesh_budget_truncates_deterministically() {
+    let backend = Arc::new(FakeBackend::with_inline_meshes());
+    let mut rt = runtime_with(backend);
+    for seed in [0x10u128, 0x11, 0x12] {
+        rt.apply(add_extrude(seed, 25.0)).unwrap();
+    }
+    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    let generation = rt.latest_snapshot.as_ref().expect("published").generation;
+
+    // Three blobs at 33 MiB: the first fits the 64 MiB budget, the second would
+    // exceed it, and the walk stops there.
+    let big = MAX_SAVED_MESH_BYTES / 2 + 1;
+    for seed in [0x10u128, 0x11, 0x12] {
+        rt.mesh_cache.put(
+            MeshKey {
+                body: BodyId(Uuid::from_u128(seed)),
+                lod: Lod::Coarse,
+                generation,
+            },
+            Arc::new(vec![0u8; big]),
+        );
+    }
+
+    let first = rt.build_save_payload(test_save_meta(), SaveCaches::explicit());
+    assert_eq!(
+        first
+            .caches
+            .meshes
+            .iter()
+            .map(|m| m.body)
+            .collect::<Vec<_>>(),
+        vec![BodyId(Uuid::from_u128(0x10))],
+        "only the lowest-id body fits the budget"
+    );
+
+    let second = rt.build_save_payload(test_save_meta(), SaveCaches::explicit());
+    assert_eq!(
+        second
+            .caches
+            .meshes
+            .iter()
+            .map(|m| m.body)
+            .collect::<Vec<_>>(),
+        first
+            .caches
+            .meshes
+            .iter()
+            .map(|m| m.body)
+            .collect::<Vec<_>>(),
+        "truncation is deterministic — the same document drops the same tail"
+    );
+}
+
+/// A save that carries no viewport capture must CARRY FORWARD the thumbnail the
+/// document already has. Erasing it would blank the start-screen card of every
+/// project saved from a window that could not produce a capture.
+#[tokio::test]
+async fn save_without_a_capture_carries_the_preview_forward() {
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    rt.apply(add_extrude(0x10, 25.0)).unwrap();
+
+    // Nothing captured yet ⇒ nothing written.
+    let bare = rt.build_save_payload(test_save_meta(), SaveCaches::explicit());
+    assert_eq!(bare.caches.preview_png, None);
+
+    let first = b"\x89PNG\r\n\x1a\nfirst".to_vec();
+    let captured = rt.build_save_payload(
+        test_save_meta(),
+        SaveCaches {
+            meshes: true,
+            preview_png: Some(first.clone()),
+        },
+    );
+    assert_eq!(captured.caches.preview_png, Some(first.clone()));
+
+    // …and every later capture-less save re-writes the SAME picture.
+    let carried = rt.build_save_payload(test_save_meta(), SaveCaches::explicit());
+    assert_eq!(
+        carried.caches.preview_png,
+        Some(first.clone()),
+        "a capture-less save must not erase the thumbnail"
+    );
+
+    // A fresh capture replaces it.
+    let second = b"\x89PNG\r\n\x1a\nsecond".to_vec();
+    let replaced = rt.build_save_payload(
+        test_save_meta(),
+        SaveCaches {
+            meshes: true,
+            preview_png: Some(second.clone()),
+        },
+    );
+    assert_eq!(replaced.caches.preview_png, Some(second.clone()));
+
+    // The autosave lane never writes one, even though the runtime is holding it.
+    let auto = rt.build_save_payload(test_save_meta(), SaveCaches::none());
+    assert_eq!(auto.caches.preview_png, None);
+
+    // And it survives a save → reopen round-trip.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("preview.onecad");
+    rt.save(&path, test_save_meta()).unwrap();
+
+    let backend = Arc::new(FakeBackend::new());
+    let engine: Arc<dyn GeometryEngine> = backend.clone();
+    let meshes: Arc<dyn MeshProvider> = backend.clone();
+    let solver: Arc<dyn SolverEngine> = backend;
+    let mut reopened = DocumentRuntime::open(&path, engine, meshes, solver).unwrap();
+    let round_tripped = reopened.build_save_payload(test_save_meta(), SaveCaches::explicit());
+    assert_eq!(
+        round_tripped.caches.preview_png,
+        Some(second),
+        "the preview is loaded at open and carried by the next save"
+    );
+    assert_eq!(
+        onecad_core::io::container::read_preview(&path),
+        round_tripped.caches.preview_png,
+        "and the light start-screen lane reads the same bytes"
+    );
+}
+
+/// The pre-publish window is served from the container, and only from it: a
+/// non-MESH1 entry never reaches the viewport, and the first publish retires the
+/// whole set.
+#[tokio::test]
+async fn cached_meshes_serve_before_the_first_publish_and_are_dropped_after() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cached.onecad");
+    let body = BodyId(Uuid::from_u128(0x10));
+
+    {
+        let mut rt = runtime_with(Arc::new(FakeBackend::with_inline_meshes()));
+        rt.apply(add_extrude(0x10, 25.0)).unwrap();
+        rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+            .await;
+        // The fake's inline bytes are not real MESH1, so hand-write a container
+        // whose one mesh entry IS — this test is about the serving rule, not the
+        // fake's blob format.
+        let mut payload = rt.build_save_payload(test_save_meta(), SaveCaches::explicit());
+        payload.caches.meshes = vec![onecad_core::io::container::MeshCache {
+            body,
+            lod: "coarse".into(),
+            bytes: Arc::new(minimal_mesh1()),
+        }];
+        DocumentRuntime::write_payload(&path, &payload).unwrap();
+    }
+
+    let backend = Arc::new(FakeBackend::with_inline_meshes());
+    let engine: Arc<dyn GeometryEngine> = backend.clone();
+    let meshes: Arc<dyn MeshProvider> = backend.clone();
+    let solver: Arc<dyn SolverEngine> = backend.clone();
+    let mut rt = DocumentRuntime::open(&path, engine, meshes, solver).unwrap();
+
+    assert_eq!(rt.projection().geometry_source, "cached");
+    assert_eq!(
+        rt.get_mesh(body, Lod::Coarse, None).await.as_deref(),
+        Some(&minimal_mesh1()),
+        "the container blob is served verbatim before any publish"
+    );
+    assert_eq!(
+        backend.mesh_fetches(),
+        0,
+        "serving the container cache costs no provider round-trip"
+    );
+
+    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert!(
+        rt.cached_meshes.is_empty(),
+        "the first publish retires the container cache"
+    );
+    assert_eq!(rt.projection().geometry_source, "live");
+    assert_eq!(
+        rt.get_mesh(body, Lod::Coarse, None).await.as_deref(),
+        Some(&FakeBackend::inline_bytes(body)),
+        "and every later fetch comes from the published snapshot"
+    );
+}
+
+/// A 64-byte MESH1 blob with an empty section table — the smallest thing
+/// `validate_mesh_blob` accepts.
+fn minimal_mesh1() -> Vec<u8> {
+    let mut buf = vec![0u8; 64];
+    buf[0..4].copy_from_slice(&0x4D45_5348u32.to_le_bytes());
+    buf[4..6].copy_from_slice(&1u16.to_le_bytes());
+    buf
 }
 
 #[tokio::test]
@@ -900,7 +1286,7 @@ async fn mark_saved_keeps_the_document_dirty_when_an_edit_lands_mid_write() {
     let mut rt = runtime_with(Arc::new(FakeBackend::new()));
     rt.apply(add_extrude(0x10, 25.0)).unwrap();
 
-    let payload = rt.build_save_payload(test_save_meta());
+    let payload = rt.build_save_payload(test_save_meta(), SaveCaches::explicit());
     let revision = rt.revision();
     DocumentRuntime::write_payload(&path, &payload).unwrap();
     // …an edit lands while the container was being deflated.
@@ -918,7 +1304,7 @@ async fn mark_saved_keeps_the_document_dirty_when_an_edit_lands_mid_write() {
     );
 
     // The quiet case still goes clean.
-    let payload = rt.build_save_payload(test_save_meta());
+    let payload = rt.build_save_payload(test_save_meta(), SaveCaches::explicit());
     let revision = rt.revision();
     DocumentRuntime::write_payload(&path, &payload).unwrap();
     rt.mark_saved(&path, revision);
@@ -2015,6 +2401,72 @@ fn hole_face_input_hydrates_at_slot_1() {
         "the stored evidence must ride the hydration, not just the id"
     );
     assert!(element_ref_input(&rec.op, 2).is_none());
+}
+
+/// The OffsetFace slot table (SCHEMA §7.3, normative): operative faces occupy
+/// `0..faces.len()`, the `Total` opposite face is the LAST slot. `element_ref_input`
+/// must agree with `wire::wire_op_inputs` slot for slot — a divergence hydrates a
+/// refId-only `resolve_refs` from the WRONG face, so the dry-run and the real
+/// regen would disagree about the same repair.
+#[test]
+fn offset_face_inputs_hydrate_faces_then_the_opposite_face() {
+    use onecad_core::document::record::{OffsetDistanceType, OffsetFaceParams};
+
+    let body = BodyId(Uuid::from_u128(0xBA));
+    let at = |el: &str, p: Vec3| ElementRef {
+        primary: Some(PrimaryRef {
+            body,
+            element: ElementId::new(el),
+            kind: ElementKind::Face,
+            extra: Default::default(),
+        }),
+        intent: None,
+        anchor: Some(AnchorIntent {
+            world_point: p,
+            surface_uv: None,
+            local_frame: None,
+            adjacency_hint: None,
+            extra: Default::default(),
+        }),
+        extra: Default::default(),
+    };
+    let top = Vec3::new_unchecked(1.0, 0.0, 10.0);
+    let under = Vec3::new_unchecked(1.0, 0.0, 0.0);
+    let op = Operation::Known(KnownOperation::OffsetFace(OffsetFaceParams {
+        face_ids: vec![ElementId::new("f:1"), ElementId::new("f:2")],
+        faces: vec![at("f:1", top), at("f:2", top)],
+        distance: Scalar::new(12.0),
+        distance_type: OffsetDistanceType::Offset,
+        chain_tangent_faces: true,
+        opposite_face_id: Some(ElementId::new("f:9")),
+        opposite_face: Some(at("f:9", under)),
+        target_body: body,
+        extra: Default::default(),
+    }));
+
+    for (slot, el) in [(0usize, "f:1"), (1, "f:2"), (2, "f:9")] {
+        let r = element_ref_input(&op, slot).unwrap_or_else(|| panic!("slot {slot}"));
+        assert_eq!(r.primary.as_ref().unwrap().element.as_str(), el);
+    }
+    assert_eq!(
+        element_ref_input(&op, 2)
+            .and_then(|r| r.anchor.as_ref())
+            .map(|a| a.world_point),
+        Some(under),
+        "the stored evidence rides the hydration, not just the id"
+    );
+    assert!(element_ref_input(&op, 3).is_none());
+
+    // With no opposite face the table ends at the operative set — nothing
+    // collapses into the vacated last slot.
+    let Operation::Known(KnownOperation::OffsetFace(mut p)) = op else {
+        panic!("expected OffsetFace");
+    };
+    p.opposite_face = None;
+    p.opposite_face_id = None;
+    let plain = Operation::Known(KnownOperation::OffsetFace(p));
+    assert!(element_ref_input(&plain, 1).is_some());
+    assert!(element_ref_input(&plain, 2).is_none());
 }
 
 #[tokio::test]

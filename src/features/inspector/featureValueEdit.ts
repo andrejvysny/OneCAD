@@ -34,6 +34,10 @@ const WIRE_FIELD: Record<string, string> = {
   Chamfer: "radius",
   Shell: "thickness",
   Hole: "diameter",
+  // The USER's value, whatever `distanceType` says it means (SCHEMA §7.3). The
+  // row edits the number, never the type — swapping Offset⇄Diameter changes the
+  // operative closure the record froze, which is a tool gesture, not a scalar patch.
+  OffsetFace: "distance",
 };
 
 /** The wire params field a feature's primary value commits into, or null. */

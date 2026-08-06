@@ -16,8 +16,8 @@ use onecad_core::document::datum::DatumPlane;
 use onecad_core::document::record::PlaneKind;
 use onecad_core::document::record::{
     BooleanMode, BooleanOp, BooleanParams, ChamferParams, ExtrudeMode, ExtrudeParams, FilletParams,
-    HoleParams, HoleType, KnownOperation, Operation, OperationRecord, RevolveParams, ShellParams,
-    SketchOpParams, SketchPlaneRef,
+    HoleParams, HoleType, KnownOperation, OffsetDistanceType, OffsetFaceParams, Operation,
+    OperationRecord, RevolveParams, ShellParams, SketchOpParams, SketchPlaneRef,
 };
 use onecad_core::document::refs::{
     AnchorIntent, AxisRef, ElementKind, ElementRef, PrimaryRef, SketchRegionRef,
@@ -2451,6 +2451,242 @@ fn hole_face_rebind_refuses_an_evidence_only_ref_and_a_mismatched_op() {
         "expected a path/op mismatch rejection, got: {err}"
     );
     assert_eq!(stored_shell_faces(&sess), vec!["el_a"], "record untouched");
+}
+
+// ── OffsetFace repair slots (SCHEMA §7.3, 2026-08-06) ───────────────────────
+
+/// An `Offset` push-pull over `faces`, or a `Total` one when `opposite` is set.
+fn offset_face_op(faces: &[&str], opposite: Option<&str>) -> Operation {
+    Operation::Known(KnownOperation::OffsetFace(OffsetFaceParams {
+        face_ids: faces.iter().map(|f| ElementId::new(*f)).collect(),
+        faces: faces.iter().map(|f| face_ref_at(BX(), f)).collect(),
+        distance: Scalar::new(2.5),
+        distance_type: match opposite {
+            Some(_) => OffsetDistanceType::Total,
+            None => OffsetDistanceType::Offset,
+        },
+        chain_tangent_faces: opposite.is_none(),
+        opposite_face_id: opposite.map(ElementId::new),
+        opposite_face: opposite.map(|o| face_ref_at(BX(), o)),
+        target_body: BX(),
+        extra: Default::default(),
+    }))
+}
+
+fn offset_face_doc(faces: &[&str], opposite: Option<&str>) -> DocumentSession {
+    let mut doc = Document::new(DocumentId(u(0x60)));
+    doc.bodies.register(BodyMeta::new(BX(), "b", rid(0)));
+    doc.timeline = Timeline::from_records(vec![record(
+        rid(1),
+        "Offset face",
+        offset_face_op(faces, opposite),
+        vec![BX()],
+    )]);
+    DocumentSession::new(doc)
+}
+
+fn stored_offset(sess: &DocumentSession) -> OffsetFaceParams {
+    let Operation::Known(KnownOperation::OffsetFace(p)) =
+        &sess.document().timeline.record(0).unwrap().op
+    else {
+        panic!("expected the stored OffsetFace");
+    };
+    p.clone()
+}
+
+/// `OffsetFaceFace{k}` writes the WHOLE typed ref (evidence included, the Fillet
+/// dual — not shell's bare-id slot) AND keeps the `faceIds` mirror in lockstep.
+#[test]
+fn offset_face_rebind_writes_the_typed_ref_and_mirrors_the_bare_id() {
+    let mut sess = offset_face_doc(&["el_a", "el_b"], None);
+    let before = json(sess.document());
+
+    sess.apply(EditCommand::EditOperationInput {
+        record: rid(1),
+        path: InputPath::OffsetFaceFace { index: 1 },
+        reference: InputRef::Element(face_ref_at(BX(), "el_fresh")),
+    })
+    .expect("offset operative-face rebind");
+
+    let p = stored_offset(&sess);
+    assert_eq!(
+        p.face_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec!["el_a", "el_fresh"],
+        "the bare id mirror follows the typed ref"
+    );
+    assert_eq!(
+        p.faces[1].primary.as_ref().map(|x| x.element.to_string()),
+        Some("el_fresh".to_string())
+    );
+    assert!(
+        p.faces[1].anchor.is_some(),
+        "an OffsetFace slot is a typed ElementRef, so the anchor evidence SURVIVES"
+    );
+    assert!(sess.undo().is_some());
+    assert_eq!(json(sess.document()), before, "undo restores the offset");
+
+    // Append exactly at the end grows BOTH lists (the fillet rule).
+    let mut sess = offset_face_doc(&["el_a"], None);
+    sess.apply(EditCommand::EditOperationInput {
+        record: rid(1),
+        path: InputPath::OffsetFaceFace { index: 1 },
+        reference: InputRef::Element(face_ref_at(BX(), "el_new")),
+    })
+    .expect("append at the end");
+    let p = stored_offset(&sess);
+    assert_eq!(p.faces.len(), 2);
+    assert_eq!(p.face_ids.len(), 2);
+}
+
+/// `OffsetFaceOpposite` addresses the LAST slot — the `Total` opposite face — and
+/// keeps `oppositeFaceId` in lockstep with the typed ref.
+#[test]
+fn offset_face_opposite_rebind_targets_the_last_slot() {
+    let mut sess = offset_face_doc(&["el_a"], Some("el_under"));
+    let before = json(sess.document());
+
+    sess.apply(EditCommand::EditOperationInput {
+        record: rid(1),
+        path: InputPath::OffsetFaceOpposite,
+        reference: InputRef::Element(face_ref_at(BX(), "el_under2")),
+    })
+    .expect("offset opposite-face rebind");
+
+    let p = stored_offset(&sess);
+    assert_eq!(
+        p.opposite_face_id.as_ref().map(ToString::to_string),
+        Some("el_under2".to_string())
+    );
+    assert_eq!(
+        p.opposite_face
+            .as_ref()
+            .and_then(|r| r.primary.as_ref())
+            .map(|x| x.element.to_string()),
+        Some("el_under2".to_string())
+    );
+    assert_eq!(
+        p.face_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec!["el_a"],
+        "the operative set is untouched"
+    );
+    assert!(sess.undo().is_some());
+    assert_eq!(json(sess.document()), before, "undo restores the offset");
+}
+
+#[test]
+fn offset_face_rebind_refuses_out_of_range_evidence_only_and_mismatched_ops() {
+    let mut sess = offset_face_doc(&["el_a"], None);
+    // A gap PAST the end would leave a hole the worker reads as a face it was
+    // never given.
+    let err = sess
+        .apply(EditCommand::EditOperationInput {
+            record: rid(1),
+            path: InputPath::OffsetFaceFace { index: 2 },
+            reference: InputRef::Element(face_ref_at(BX(), "el_new")),
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("out of range"),
+        "expected an out-of-range rejection, got: {err}"
+    );
+    assert_eq!(stored_offset(&sess).faces.len(), 1, "record untouched");
+
+    // An intent-only ref would silently fall back to the ladder on the very slot
+    // the user just re-picked BY HAND.
+    for path in [
+        InputPath::OffsetFaceFace { index: 0 },
+        InputPath::OffsetFaceOpposite,
+    ] {
+        let err = sess
+            .apply(EditCommand::EditOperationInput {
+                record: rid(1),
+                path,
+                reference: InputRef::Element(evidence_only_ref()),
+            })
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("primary element id"),
+            "expected a primary-id rejection, got: {err}"
+        );
+    }
+
+    // The path/op pairing is checked: an offset path on a Shell is a mis-repair.
+    let mut shell = shell_doc(&["el_a"]);
+    let err = shell
+        .apply(EditCommand::EditOperationInput {
+            record: rid(1),
+            path: InputPath::OffsetFaceFace { index: 0 },
+            reference: InputRef::Element(face_ref_at(BX(), "el_x")),
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("does not match the operation type"),
+        "expected a path/op mismatch rejection, got: {err}"
+    );
+    assert_eq!(stored_shell_faces(&shell), vec!["el_a"], "record untouched");
+}
+
+/// The SCHEMA §7.3 conditionals are enforced on BOTH authoring entry points —
+/// `AddOperation` and `UpdateOperationParams` — so a params edit cannot smuggle in
+/// a shape the add path rejects.
+#[test]
+fn offset_face_validation_runs_on_add_and_update() {
+    let mut sess = offset_face_doc(&["el_a"], None);
+
+    // add: multi-face is Offset-only.
+    let mut bad = offset_face_op(&["el_a", "el_b"], None);
+    if let Operation::Known(KnownOperation::OffsetFace(p)) = &mut bad {
+        p.distance_type = OffsetDistanceType::Radius;
+    }
+    let err = sess
+        .apply(EditCommand::AddOperation {
+            record: record(rid(2), "Offset face", bad, vec![BX()]),
+            at_cursor: false,
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("exactly one face"),
+        "expected a face-count rejection, got: {err}"
+    );
+
+    // update: a `Total` opposite face stranded by a distance-type switch.
+    let mut stale = offset_face_op(&["el_a"], Some("el_under"));
+    if let Operation::Known(KnownOperation::OffsetFace(p)) = &mut stale {
+        p.distance_type = OffsetDistanceType::Offset;
+    }
+    let err = sess
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(1),
+            op: stale,
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("Total-only"),
+        "expected a stale-opposite rejection, got: {err}"
+    );
+
+    // update: the faces/faceIds lockstep.
+    let mut broken = offset_face_op(&["el_a"], None);
+    if let Operation::Known(KnownOperation::OffsetFace(p)) = &mut broken {
+        p.face_ids.push(ElementId::new("el_orphan"));
+    }
+    let err = sess
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(1),
+            op: broken,
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("length mismatch"),
+        "expected a lockstep rejection, got: {err}"
+    );
 }
 
 // ── (h) HISTORY-HARDEN H8: undo/redo thread a real dirty floor ───────────────

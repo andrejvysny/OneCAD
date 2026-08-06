@@ -486,3 +486,95 @@ describe("extrude draft segment", () => {
     expect(screen.getByText("°")).toBeInTheDocument();
   });
 });
+
+/*
+ * OffsetFace cluster (SCHEMA §7.3). Two rules with no other visible surface:
+ * WHICH distance types the segment group offers (planarity- and count-driven,
+ * decided by the controller and passed through the store), and the fact that a
+ * refused value is NEVER written back into the field.
+ */
+describe("offset-face cluster", () => {
+  beforeEach(() => {
+    setViewportEngine(fakeEngine());
+    toolChipStore.getState().clear();
+  });
+  afterEach(() => {
+    setViewportEngine(null);
+    toolChipStore.getState().clear();
+  });
+
+  const handlers = () => ({
+    onValue: vi.fn(),
+    onDistanceType: vi.fn(),
+    onChainTangent: vi.fn(),
+    onConfirm: vi.fn(),
+    onCancel: vi.fn(),
+  });
+
+  const show = (h: ReturnType<typeof handlers>, opts: Record<string, unknown> = {}) => {
+    act(() => toolChipStore.getState().showOffsetFace(2.5, WORLD, h, opts));
+  };
+
+  it("renders the distance, the ✓/✕ pair and the tangent toggle", () => {
+    render(<ModelToolChips />);
+    show(handlers());
+    expect(screen.getByLabelText("Dimension value")).toHaveValue("2.5");
+    expect(screen.getByTestId("chip-confirm")).toBeInTheDocument();
+    expect(screen.getByTestId("chip-offset-tangent")).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("renders NO segment group for a multi-face closure (Offset is the only option)", () => {
+    render(<ModelToolChips />);
+    // One segment is not a choice — offering a lone "Offset" button would imply
+    // there is something else to pick.
+    show(handlers(), { distanceTypes: ["Offset"] });
+    expect(screen.queryByTestId("chip-offset-type-offset")).toBeNull();
+    expect(screen.queryByTestId("chip-offset-type-radius")).toBeNull();
+  });
+
+  it("a PLANAR single face offers Offset + Total only", () => {
+    render(<ModelToolChips />);
+    show(handlers(), { distanceTypes: ["Offset", "Total"] });
+    expect(screen.getByTestId("chip-offset-type-offset")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("chip-offset-type-total")).toBeInTheDocument();
+    // ABSENT, not disabled: a planar face does not have a radius to grey out.
+    expect(screen.queryByTestId("chip-offset-type-radius")).toBeNull();
+    expect(screen.queryByTestId("chip-offset-type-diameter")).toBeNull();
+  });
+
+  it("a CURVED single face offers Offset + Radius + Diameter only", () => {
+    render(<ModelToolChips />);
+    show(handlers(), { distanceTypes: ["Offset", "Radius", "Diameter"], distanceType: "Diameter" });
+    expect(screen.getByTestId("chip-offset-type-diameter")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("chip-offset-type-radius")).toBeInTheDocument();
+    expect(screen.queryByTestId("chip-offset-type-total")).toBeNull();
+  });
+
+  it("dispatches the picked distance type and the tangent toggle", () => {
+    render(<ModelToolChips />);
+    const h = handlers();
+    show(h, { distanceTypes: ["Offset", "Total"] });
+    fireEvent.click(screen.getByTestId("chip-offset-type-total"));
+    expect(h.onDistanceType).toHaveBeenCalledWith("Total");
+    fireEvent.click(screen.getByTestId("chip-offset-tangent"));
+    expect(h.onChainTangent).toHaveBeenCalledWith(false);
+  });
+
+  it("DISABLES the tangent toggle for Total (single face, chain off by definition)", () => {
+    render(<ModelToolChips />);
+    const h = handlers();
+    show(h, { distanceType: "Total", chainTangentFaces: false, distanceTypes: ["Offset", "Total"] });
+    const toggle = screen.getByTestId("chip-offset-tangent");
+    expect(toggle).toBeDisabled();
+    fireEvent.click(toggle);
+    expect(h.onChainTangent).not.toHaveBeenCalled();
+  });
+
+  it("keeps showing the last VALID value while the error state is set", () => {
+    render(<ModelToolChips />);
+    show(handlers(), { valueError: true });
+    // SCHEMA §7.3 forbids clamping, so the refused entry is simply not stored —
+    // the field still reads the number that WAS accepted.
+    expect(screen.getByLabelText("Dimension value")).toHaveValue("2.5");
+  });
+});

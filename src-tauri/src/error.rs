@@ -88,6 +88,7 @@ impl From<EngineError> for ApiError {
                 "engine: op failed"
             ),
             EngineError::Crashed { .. }
+            | EngineError::NotConnected { .. }
             | EngineError::Protocol { .. }
             | EngineError::Timeout { .. } => {
                 tracing::debug!(error = %e, "engine: worker-class failure → ApiError::Worker");
@@ -97,6 +98,7 @@ impl From<EngineError> for ApiError {
         match e {
             EngineError::OpFailed { .. } => ApiError::OpFailed(e.to_string()),
             EngineError::Crashed { .. }
+            | EngineError::NotConnected { .. }
             | EngineError::Protocol { .. }
             | EngineError::Timeout { .. } => ApiError::Worker(e.to_string()),
             EngineError::Cancelled => ApiError::OpFailed("cancelled".into()),
@@ -113,5 +115,21 @@ mod tests {
         let value = serde_json::to_value(ApiError::StalePreview("snapshot moved".into())).unwrap();
         assert_eq!(value["kind"], "stalePreview");
         assert_eq!(value["message"], "snapshot moved");
+    }
+
+    /// A never-connected worker is handled exactly like a crash (kind `"worker"`)
+    /// but must not be REPORTED as one: the user-visible string used to read
+    /// "worker crashed: worker not connected", which sent a startup race looking
+    /// like a kernel crash.
+    #[test]
+    fn not_connected_is_a_worker_error_that_never_claims_a_crash() {
+        let value = serde_json::to_value(ApiError::from(EngineError::NotConnected {
+            message: "restarting or failed".into(),
+        }))
+        .unwrap();
+        assert_eq!(value["kind"], "worker");
+        let message = value["message"].as_str().expect("message is a string");
+        assert!(message.contains("worker not connected"), "{message}");
+        assert!(!message.contains("crashed"), "{message}");
     }
 }

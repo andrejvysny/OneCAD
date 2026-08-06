@@ -40,6 +40,9 @@ function makeEngineMock() {
   return {
     showGhostPreview: vi.fn(),
     hideGhostPreview: vi.fn(),
+    hideValueHandle: vi.fn(),
+    showValueHandle: vi.fn(),
+    showGhostPreviewMulti: vi.fn(),
     probePick: vi.fn(() => null),
     hideExtrudePreview: vi.fn(),
     clearPreviewBody: vi.fn(),
@@ -305,5 +308,72 @@ describe("ModelToolController boolean kernel preview", () => {
     controller = undefined as unknown as ModelToolController; // afterEach must not double-dispose
 
     expect(clientMock.endPreview).toHaveBeenCalledWith(expect.any(String), false);
+  });
+
+  // ── the tool-body pick is MODAL ────────────────────────────────────────────
+  //
+  // "Pick the tool body to combine" used to be the whole of the feedback: the
+  // picker is inactive while a model tool is armed, so nothing lit up under the
+  // pointer and an LMB drag orbited the camera instead of resolving the click.
+
+  /** Point at `bodyId` and move the pointer (no press — pure hover). */
+  function hoverBody(bodyId: string): void {
+    (engineMock.probePick as unknown as { mockReturnValue(v: unknown): void }).mockReturnValue({
+      bodyId,
+      kind: "face",
+      topoKey: "f:0",
+      distance: 1,
+      worldPos: { x: 1, y: 2, z: 3 },
+    });
+    container.dispatchEvent(
+      new MouseEvent("pointermove", { clientX: 10, clientY: 10, bubbles: true }),
+    );
+  }
+
+  function startPick(): void {
+    selectionStore.getState().set([{ kind: "body", id: "body1" }]);
+    toolStore.getState().setTool("boolean");
+  }
+
+  it("hover-tints the WHOLE candidate body — a body pick, not a face pick", () => {
+    build();
+    startPick();
+    hoverBody("body2");
+
+    const hover = selectionStore.getState().hover;
+    expect(hover?.kind).toBe("body");
+    expect(hover?.id).toBe("body2");
+  });
+
+  it("does NOT tint the target body — combining a body with itself is refused", () => {
+    build();
+    startPick();
+    hoverBody("body1");
+    expect(selectionStore.getState().hover).toBeNull();
+  });
+
+  it("drops the hover and restores orbit once the tool body is picked", async () => {
+    build();
+    startPick();
+    expect(engineMock.setOrbitSuppressed).toHaveBeenLastCalledWith(true);
+    hoverBody("body2");
+    expect(selectionStore.getState().hover).not.toBeNull();
+
+    controller.forceBooleanPick("body2");
+    await flush();
+
+    // Armed boolean is chip-driven — no drag of its own — so orbit goes back.
+    expect(engineMock.setOrbitSuppressed).toHaveBeenLastCalledWith(false);
+    expect(selectionStore.getState().hover).toBeNull();
+  });
+
+  it("restores orbit on a tool switch out of an unresolved pick", async () => {
+    build();
+    startPick();
+    expect(engineMock.setOrbitSuppressed).toHaveBeenLastCalledWith(true);
+
+    toolStore.getState().setTool("select");
+    await flush();
+    expect(engineMock.setOrbitSuppressed).toHaveBeenLastCalledWith(false);
   });
 });

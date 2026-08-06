@@ -44,7 +44,12 @@ export type TokenName =
   | "--color-plane-yz"
   | "--color-traffic-close"
   | "--color-body-fill"
-  | "--color-body-edge";
+  | "--color-body-edge"
+  | "--color-body-edge-wire"
+  | "--color-sketch-under"
+  | "--color-sketch-done"
+  | "--color-sketch-sel"
+  | "--color-viewport-hover";
 
 // rgb() mirrors of the token values in tokens.css (non-browser fallback only).
 // MUST be kept in step with tokens.css by hand — nothing enforces it, because
@@ -72,6 +77,11 @@ const FALLBACK: Record<ResolvedTheme, Record<TokenName, string>> = {
     "--color-traffic-close": "rgb(255, 95, 87)",
     "--color-body-fill": "rgb(169, 174, 182)",
     "--color-body-edge": "rgb(58, 63, 71)",
+    "--color-body-edge-wire": "rgb(17, 20, 24)",
+    "--color-sketch-under": "rgb(45, 127, 249)",
+    "--color-sketch-done": "rgb(31, 157, 85)",
+    "--color-sketch-sel": "rgb(217, 119, 6)",
+    "--color-viewport-hover": "rgb(0, 172, 193)",
   },
   dark: {
     "--color-border": "rgb(52, 56, 63)",
@@ -94,7 +104,12 @@ const FALLBACK: Record<ResolvedTheme, Record<TokenName, string>> = {
     // Traffic lights are macOS constants — identical in both themes.
     "--color-traffic-close": "rgb(255, 95, 87)",
     "--color-body-fill": "rgb(125, 131, 140)",
-    "--color-body-edge": "rgb(207, 212, 219)",
+    "--color-body-edge": "rgb(34, 38, 44)",
+    "--color-body-edge-wire": "rgb(207, 212, 219)",
+    "--color-sketch-under": "rgb(90, 162, 255)",
+    "--color-sketch-done": "rgb(67, 193, 122)",
+    "--color-sketch-sel": "rgb(240, 162, 74)",
+    "--color-viewport-hover": "rgb(38, 198, 218)",
   },
 };
 
@@ -156,24 +171,34 @@ export const palette = {
   clear: () => tokenColor("--color-canvas"),
   /** Neutral body face material. */
   bodyNeutral: () => tokenColor("--color-body-fill"),
-  /** Body edge lines. */
+  /** Body edge lines (shaded+edges render mode) — near-black in BOTH themes. */
   bodyEdge: () => tokenColor("--color-body-edge"),
+  /** Wireframe-mode edge lines — no shaded face behind them, so this one DOES invert (light in dark theme) for legibility. */
+  bodyEdgeWire: () => tokenColor("--color-body-edge-wire"),
   /** Neutral gray for reference/overlay layers — deliberately NOT the body fill, which is lighter. */
   referenceNeutral: () => tokenColor("--color-ink-5"),
-  /** Hover accent (face + edge highlight). */
+  /** Hover accent (face + edge highlight) — previews/UI hover states. */
   hoverAccent: () => tokenColor("--color-accent"),
-  /** Selected face tint. */
+  /** Cyan 3D-viewport hover (hovering a body/face/edge in the scene) — distinct from hoverAccent. */
+  hover3d: () => tokenColor("--color-viewport-hover"),
+  /** Selected face tint (UI-side; panels/lists). */
   selectedTint: () => tokenColor("--color-sel-bg"),
+  /**
+   * Selected face/body FILL in the 3D viewport — the saturated accent blue.
+   * Deliberately NOT `--color-sel-bg`: that pale list-row tint all but vanishes
+   * blended over the gray body fill, so a selected face read as unselected.
+   */
+  selected3d: () => tokenColor("--color-accent"),
   /** Selected edge / outline color. */
   selectedEdge: () => tokenColor("--color-sel-text"),
 
   // ── Sketch entity colors, by constraint state (F-WP6) ──
-  /** Under-constrained sketch geometry (the working accent). */
-  sketchUnder: () => tokenColor("--color-accent"),
-  /** Fully-constrained sketch geometry. */
-  sketchFull: () => tokenColor("--color-ink"),
-  /** Selected sketch geometry. */
-  sketchSelected: () => tokenColor("--color-sel-text"),
+  /** Under-constrained sketch geometry (sketch base blue). */
+  sketchUnder: () => tokenColor("--color-sketch-under"),
+  /** Fully-constrained sketch geometry — green. */
+  sketchFull: () => tokenColor("--color-sketch-done"),
+  /** Selected sketch geometry — orange. */
+  sketchSelected: () => tokenColor("--color-sketch-sel"),
   /** Construction (dashed) geometry. */
   sketchConstruction: () => tokenColor("--color-ink-5"),
   /** Host-face reference geometry (`referenceLocked`) — SOLID, recessive. */

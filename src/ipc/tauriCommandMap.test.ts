@@ -333,6 +333,116 @@ describe("operationToEditCommand — M6b op wire mappings", () => {
     });
   });
 
+  /*
+   * OffsetFace (SCHEMA §7.3 `op.offsetFace`). The expectations below are the
+   * FROZEN Rust serde form, transcribed 1:1 from
+   * `crates/onecad-core/tests/snapshots/schema_freeze__operation_offsetface_*.snap`
+   * — `faceIds` (bare) + `faces` (typed) in lockstep, `distance` a Scalar,
+   * `distanceType`/`chainTangentFaces` bare, the `oppositeFace*` pair skip-if-none,
+   * and `targetBodyId` a BARE uuid (`BodyId` is `#[serde(transparent)]`).
+   */
+  it("OffsetFace maps faceIds + typed faces in LOCKSTEP (core validates the pairing)", () => {
+    const op: OperationOp = {
+      opType: "OffsetFace",
+      params: {
+        faces: [
+          {
+            primary: { bodyId: "body_b0d1", elementId: "el_f1", kind: "face" },
+            anchor: { worldPoint: [0, 0, 10] },
+          },
+          {
+            primary: { bodyId: "body_b0d1", elementId: "el_f2", kind: "face" },
+            anchor: { worldPoint: [40, 0, 10] },
+          },
+        ],
+        distance: 2.5,
+        distanceType: "Offset",
+        chainTangentFaces: true,
+        targetBodyId: "body_b0d1",
+      },
+    };
+    expect(addedParams(op)).toEqual({
+      faceIds: ["el_f1", "el_f2"],
+      faces: [
+        {
+          primary: { bodyId: "b0d1", elementId: "el_f1", kind: "face" },
+          anchor: { worldPoint: [0, 0, 10] },
+        },
+        {
+          primary: { bodyId: "b0d1", elementId: "el_f2", kind: "face" },
+          anchor: { worldPoint: [40, 0, 10] },
+        },
+      ],
+      distance: { value: 2.5 },
+      distanceType: "Offset",
+      chainTangentFaces: true,
+      // `body_` STRIPPED: a promoted pick carries the worker wire form, and the
+      // core EditCommand serde takes only the bare uuid.
+      targetBodyId: "b0d1",
+    });
+  });
+
+  it("OffsetFace Total carries BOTH oppositeFaceId and oppositeFace", () => {
+    const op: OperationOp = {
+      opType: "OffsetFace",
+      params: {
+        faces: [{ primary: { bodyId: "b0d1", elementId: "el_top", kind: "face" } }],
+        distance: 12,
+        distanceType: "Total",
+        chainTangentFaces: false,
+        oppositeFace: {
+          primary: { bodyId: "b0d1", elementId: "el_bottom", kind: "face" },
+          anchor: { worldPoint: [0, 0, 0] },
+        },
+        targetBodyId: "b0d1",
+      },
+    };
+    expect(addedParams(op)).toMatchObject({
+      faceIds: ["el_top"],
+      distanceType: "Total",
+      chainTangentFaces: false,
+      oppositeFaceId: "el_bottom",
+      oppositeFace: {
+        primary: { bodyId: "b0d1", elementId: "el_bottom", kind: "face" },
+        anchor: { worldPoint: [0, 0, 0] },
+      },
+    });
+  });
+
+  it("OffsetFace DROPS a stale opposite on a non-Total type (gated on the TYPE)", () => {
+    // The holeParams rule restated: a caller that re-types away from Total must
+    // marshal a clean record, not one the Rust session has to reject.
+    const params = addedParams({
+      opType: "OffsetFace",
+      params: {
+        faces: [{ primary: { bodyId: "b0d1", elementId: "el_cyl", kind: "face" } }],
+        distance: 6,
+        distanceType: "Radius",
+        chainTangentFaces: true,
+        oppositeFace: { primary: { bodyId: "b0d1", elementId: "el_stale", kind: "face" } },
+        targetBodyId: "b0d1",
+      },
+    });
+    expect("oppositeFace" in params).toBe(false);
+    expect("oppositeFaceId" in params).toBe(false);
+    expect(params.distanceType).toBe("Radius");
+  });
+
+  it("OffsetFace labels as `Offset face` (matching dto.rs default_label)", () => {
+    expect(
+      opLabelFor({
+        opType: "OffsetFace",
+        params: {
+          faces: [{ primary: { bodyId: "b", elementId: "el", kind: "face" } }],
+          distance: 1,
+          distanceType: "Offset",
+          chainTangentFaces: true,
+          targetBodyId: "b",
+        },
+      }),
+    ).toBe("Offset face");
+  });
+
   it("LinearPattern maps direction (Vec3 array) + spacing (Scalar) + count (bare u32) + fuseResult", () => {
     const op: OperationOp = {
       opType: "LinearPattern",
@@ -789,6 +899,26 @@ describe("inputPathFor mirrors the Rust wire_op_inputs slot table", () => {
       rustSlots: ["body", "body"],
       paths: [null, null],
     },
+    {
+      // NORMATIVE slot order (SCHEMA §7.3): operative faces in stored order, then
+      // the Total opposite LAST. Mirrors Rust `InputPath::OffsetFaceFace{index}` /
+      // `OffsetFaceOpposite`.
+      name: "offsetFace Offset: one slot per operative face, no opposite",
+      opType: "OffsetFace",
+      rustSlots: ["face", "face"],
+      params: { faceIds: ["el_a", "el_b"], distanceType: "Offset" },
+      paths: [
+        { path: "offsetFaceFace", index: 0 },
+        { path: "offsetFaceFace", index: 1 },
+      ],
+    },
+    {
+      name: "offsetFace Total: the opposite face is the LAST slot",
+      opType: "OffsetFace",
+      rustSlots: ["face", "face"],
+      params: { faceIds: ["el_top"], oppositeFace: faceRef, distanceType: "Total" },
+      paths: [{ path: "offsetFaceFace", index: 0 }, { path: "offsetFaceOpposite" }],
+    },
     { name: "sketch: hostFace is core-only ⇒ no slots", opType: "Sketch", rustSlots: [], paths: [] },
     { name: "loft: profile sketches only", opType: "Loft", rustSlots: [], paths: [] },
     { name: "sweep: profile + path sketches only", opType: "Sweep", rustSlots: [], paths: [] },
@@ -813,6 +943,13 @@ describe("inputPathFor mirrors the Rust wire_op_inputs slot table", () => {
     expect(inputPathFor("NoSuchOp", 0)).toBeNull();
     expect(inputPathFor("Fillet", -1)).toBeNull();
     expect(inputPathFor("Fillet", 0.5)).toBeNull();
+  });
+
+  it("an OffsetFace with NO stored params refuses rather than guessing the opposite slot", () => {
+    // The opposite's INDEX is `faceIds.length`, which nothing else knows — a guess
+    // would rebind a different face than the one the user clicked.
+    expect(inputPathFor("OffsetFace", 0)).toBeNull();
+    expect(inputPathFor("OffsetFace", 1)).toBeNull();
   });
 
   it("an Extrude with NO stored params refuses rather than guessing a direction", () => {

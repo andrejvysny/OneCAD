@@ -1,5 +1,8 @@
 /*
- * Mock sketch "solver" + region detection (MOCK-ONLY, no real geometry kernel).
+ * Mock sketch "solver" + region-detection HELPERS (MOCK-ONLY, no real geometry
+ * kernel). `detectRegions` itself lives in `./mockRegions` — split out so this
+ * module (imported by every mock-lane consumer) does not drag three.js's
+ * `ShapeUtils`/`Vector2` into the app entry chunk.
  *
  * The real solver is the C++ worker's PlaneGCS actor (SCHEMA §7.4). Until it is
  * wired in, these pure functions give the frontend a plausible, deterministic
@@ -11,10 +14,8 @@ import type {
   SketchEntity,
   SketchPlane,
   SketchPlaneKind,
-  SketchRegion,
   SketchSolveStatus,
 } from "./types";
-import { ShapeUtils, Vector2 } from "three";
 import { ellipseParams, sampleEllipse } from "@/tools/sketch/ellipseMath";
 import { detectConflicts } from "./mockConflicts";
 
@@ -132,23 +133,12 @@ export function solveSketch(
   return { dof, status: conflicting.length > 0 ? "Conflicting" : status, conflicting };
 }
 
-// ── Region detection (MOCK — single closed loop, or circles) ─────────────────
+// ── Region-detection helpers ──────────────────────────────────────────────────
 //
-// LIMITS: detects (a) each SELF-CLOSED curve (Circle or Ellipse) as its own
-// region and (b) a SINGLE closed loop of lines/arcs (every vertex degree 2,
-// connected). No self-intersection handling. The real worker computes proper
-// regions via LoopDetector (SCHEMA §7.4 SketchRegions). regionId here is a mock
-// hash, NOT the normative FNV-1a-64 over 16-byte UUIDs the worker/Rust agree on.
-//
-// NESTING (mock subset): a self-closed curve whose interior lies wholly INSIDE
-// the closed loop creates TWO selectable planar cells: the disc, plus the
-// enclosing loop with it as a hole. This matches CAD profile semantics: clicking
-// the disc extrudes a cylinder; clicking the surrounding material extrudes a
-// tube. One that is separated from, or crosses, the loop stays its own region.
-//
-// An Ellipse is treated exactly like a Circle here (W3 P3): it is closed, its
-// sampled polygon has area πab, and it is star-shaped about its centre — the two
-// properties the fill + nesting code actually depend on.
+// `detectRegions` itself (the exported entry point) lives in `./mockRegions`
+// (bundle split — it's the only entry-reachable importer of three's
+// `ShapeUtils`/`Vector2`). Everything below is exported so that module can build
+// on it one-way; nothing here is dead code despite looking internal-only.
 
 const QUANT = 1e6; // 1e-6 endpoint-match tolerance
 const key = (p: [number, number]): string =>
@@ -226,50 +216,8 @@ export function orderedClosedLoop(entities: SketchEntity[]): { ids: string[]; po
   return key(cursor) === key(start) ? { ids, points } : null;
 }
 
-/**
- * Ear-clip triangulation of a closed loop with optional holes, in plane-local
- * (u,v). Output layout matches the real worker lane (SolverLane ear_clip):
- * positions are the outer ring's vertices followed by each hole ring's vertices
- * (no synthetic hub vertex), indices are ear-clip triples normalized CCW.
- *
- * Topology contract (SCHEMA §7.4): every hole-bridge diagonal earcut introduces
- * is shared by exactly two triangles, so the only single-use edges are the real
- * outer and hole boundaries — the property `prismPreview.profileFromRegion`
- * recovers the rings from. Valid for ANY simple polygon: the previous centroid
- * fan was exact only for star-shaped loops and filled OUTSIDE the boundary on
- * concave ones (fill/edge mismatch on screen, and `regionAtPoint` hit-testing
- * clicks outside the profile).
- */
-function loopTriangles(
-  outerIn: [number, number][],
-  holesIn: [number, number][][],
-): { positions: number[]; indices: number[] } {
-  const outer = signedArea(outerIn) < 0 ? [...outerIn].reverse() : outerIn;
-  const holes = holesIn.map((h) => (signedArea(h) > 0 ? [...h].reverse() : h));
-  const contour = outer.map(([x, y]) => new Vector2(x, y));
-  const holeContours = holes.map((h) => h.map(([x, y]) => new Vector2(x, y)));
-  const faces = ShapeUtils.triangulateShape(contour, holeContours);
-
-  // Flatten AFTER triangulateShape: it trims a duplicated closing point in
-  // place, and earcut's indices address the trimmed rings.
-  const positions: number[] = [];
-  for (const ring of [contour, ...holeContours]) for (const p of ring) positions.push(p.x, p.y);
-
-  const indices: number[] = [];
-  for (const [a, b, c] of faces) {
-    const cross =
-      (positions[b * 2] - positions[a * 2]) * (positions[c * 2 + 1] - positions[a * 2 + 1]) -
-      (positions[b * 2 + 1] - positions[a * 2 + 1]) * (positions[c * 2] - positions[a * 2]);
-    // Normalize winding to CCW; keep zero-area slivers as-is (dropping one would
-    // change edge-use counts and fabricate a boundary in ring recovery).
-    if (cross >= 0) indices.push(a, b, c);
-    else indices.push(a, c, b);
-  }
-  return { positions, indices };
-}
-
 /** Signed area of a polygon (CCW positive). */
-function signedArea(pts: [number, number][]): number {
+export function signedArea(pts: [number, number][]): number {
   let a = 0;
   for (let i = 0; i < pts.length; i++) {
     const [x0, y0] = pts[i];
@@ -280,7 +228,7 @@ function signedArea(pts: [number, number][]): number {
 }
 
 /** Ray-cast point-in-polygon. */
-function pointInPolygon(p: [number, number], poly: [number, number][]): boolean {
+export function pointInPolygon(p: [number, number], poly: [number, number][]): boolean {
   let inside = false;
   for (let i = 0; i < poly.length; i++) {
     const [ax, ay] = poly[i];
@@ -294,7 +242,7 @@ function pointInPolygon(p: [number, number], poly: [number, number][]): boolean 
 }
 
 /** Shortest distance from `p` to the polygon's boundary. */
-function distanceToBoundary(p: [number, number], poly: [number, number][]): number {
+export function distanceToBoundary(p: [number, number], poly: [number, number][]): number {
   let best = Infinity;
   for (let i = 0; i < poly.length; i++) {
     const [ax, ay] = poly[i];
@@ -321,7 +269,7 @@ function circlePolygon(center: [number, number], radius: number, segments = 32):
 /** Fan-triangulate a closed ring about an interior `center` into plane-local
  *  (u,v) preview tris. Valid for any ring star-shaped about that centre — true
  *  for both a sampled circle and a sampled ellipse. */
-function fanTriangles(center: [number, number], ring: [number, number][]): {
+export function fanTriangles(center: [number, number], ring: [number, number][]): {
   positions: number[];
   indices: number[];
 } {
@@ -338,14 +286,14 @@ function fanTriangles(center: [number, number], ring: [number, number][]): {
  * `reach` is the largest distance from `center` to the curve (radius / semi-major):
  * the conservative clearance used by the nesting test.
  */
-interface ClosedCurve {
+export interface ClosedCurve {
   entity: SketchEntity;
   center: [number, number];
   polygon: [number, number][];
   reach: number;
 }
 
-function closedCurveOf(e: SketchEntity): ClosedCurve | null {
+export function closedCurveOf(e: SketchEntity): ClosedCurve | null {
   if (e.type === "Circle") {
     if (!e.center || !e.radius) return null;
     return { entity: e, center: e.center, polygon: circlePolygon(e.center, e.radius), reach: e.radius };
@@ -358,57 +306,6 @@ function closedCurveOf(e: SketchEntity): ClosedCurve | null {
     return { entity: e, center: p.center, polygon: sampleEllipse(p, 32), reach: p.majorR };
   }
   return null;
-}
-
-export function detectRegions(entities: SketchEntity[]): SketchRegion[] {
-  const regions: SketchRegion[] = [];
-  const live = entities.filter((e) => !e.construction);
-  const loop = orderedClosedLoop(live);
-
-  // A self-closed curve (circle OR ellipse) wholly inside the closed loop is both a
-  // selectable disc cell and a hole boundary of the enclosing cell. "Wholly inside"
-  // = centre inside AND the whole curve clear of the boundary, so a crossing one
-  // stays independent. `reach` (radius / semi-major) makes that clearance test
-  // conservative for a rotated ellipse without sampling the boundary distance.
-  const holes: ClosedCurve[] = [];
-  const free: ClosedCurve[] = [];
-  for (const e of live) {
-    const curve = closedCurveOf(e);
-    if (!curve) continue;
-    const nested =
-      loop !== null &&
-      pointInPolygon(curve.center, loop.points) &&
-      distanceToBoundary(curve.center, loop.points) > curve.reach;
-    (nested ? holes : free).push(curve);
-  }
-
-  for (const c of [...free, ...holes]) {
-    regions.push({
-      regionId: mockRegionId([c.entity.id]),
-      outerLoop: [c.entity.id],
-      holes: [],
-      previewTriangles: { ...fanTriangles(c.center, c.polygon), holesSubtracted: 0 },
-    });
-  }
-
-  if (loop) {
-    regions.push({
-      // A cell's identity includes its material boundary, not only its outer
-      // wire. Adding/removing a hole must invalidate an armed profile.
-      regionId: mockRegionId([...loop.ids, ...holes.map((hole) => hole.entity.id)]),
-      outerLoop: loop.ids,
-      holes: holes.map((h) => [h.entity.id]),
-      previewTriangles: {
-        ...loopTriangles(
-          loop.points,
-          holes.map((h) => h.polygon),
-        ),
-        holesSubtracted: holes.length,
-      },
-    });
-  }
-
-  return regions;
 }
 
 // ── util ─────────────────────────────────────────────────────────────────────

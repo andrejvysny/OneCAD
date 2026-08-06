@@ -50,7 +50,7 @@ use onecad_lib::worker::manager::SupervisorConfig;
 use onecad_lib::worker::wire::{body_id_wire, sketch_wire};
 use onecad_lib::worker::{
     resolve_worker_path, CircuitControl, ElementQuery, FaceBoundaryProjection, MeshProvider,
-    PreviewEngine, SolverEngine, StepImport, WorkerManager,
+    PreviewEngine, SolverEngine, StepImport, WorkerManager, WorkerReadiness,
 };
 
 use onecad_protocol::mesh::{f32_le, u32_le, validate_mesh_blob, MeshHeaderView};
@@ -105,6 +105,7 @@ fn app_state_over(wm: &WorkerManager) -> AppState {
         let face_projection: Arc<dyn FaceBoundaryProjection> = Arc::new(wm.clone());
         let step_import: Arc<dyn StepImport> = Arc::new(wm.clone());
         let circuit: Arc<dyn CircuitControl> = Arc::new(wm.clone());
+        let readiness: Arc<dyn WorkerReadiness> = Arc::new(wm.clone());
         (
             engine,
             meshes,
@@ -115,6 +116,7 @@ fn app_state_over(wm: &WorkerManager) -> AppState {
             face_projection,
             step_import,
             circuit,
+            readiness,
         )
     }))
 }

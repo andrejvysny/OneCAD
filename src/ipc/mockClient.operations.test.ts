@@ -370,6 +370,103 @@ describe("mockClient operations", () => {
     expect(shells[0].valueText).toBe("4.0 mm");
   });
 
+  it("OffsetFace adds a distance feature in the FILLET bucket + re-emits the target", async () => {
+    const face = {
+      primary: { bodyId: "body1", elementId: "el_f2", kind: "face" as const },
+      anchor: { worldPoint: [0, 0, 10] as [number, number, number] },
+    };
+    const created = await mockClient.applyOperation({
+      opType: "OffsetFace",
+      inputs: [face],
+      params: {
+        faces: [face],
+        distance: 2.5,
+        distanceType: "Offset",
+        chainTangentFaces: true,
+        targetBodyId: "body1",
+      },
+    });
+    expect(created.changedBodies.map((b) => b.bodyId)).toContain("body1");
+    const offset = created.features.find((f) => f.opType === "OffsetFace");
+    // `kind` mirrors the REAL projection: `dto.rs feature_kind` folds OffsetFace
+    // into the Fillet/Chamfer/Shell dress-up bucket. Matching `dto.rs default_label`.
+    expect(offset?.kind).toBe("fillet");
+    expect(offset?.label).toBe("Offset face");
+    expect(offset?.valueText).toBe("2.5 mm");
+    expect(offset?.primaryValue).toBe(2.5);
+    expect(created.opLabel).toBe("Offset face");
+
+    // A re-edit updates in place rather than appending.
+    const edited = await mockClient.applyOperation({
+      opType: "OffsetFace",
+      featureId: offset!.id,
+      inputs: [face],
+      params: {
+        faces: [face],
+        distance: 4,
+        distanceType: "Offset",
+        chainTangentFaces: true,
+        targetBodyId: "body1",
+      },
+    });
+    const rows = edited.features.filter((f) => f.opType === "OffsetFace");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].valueText).toBe("4.0 mm");
+  });
+
+  it("OffsetFace row text follows distanceType (mirrors dto.rs feature_value)", async () => {
+    const face = {
+      primary: { bodyId: "body1", elementId: "el_cyl", kind: "face" as const },
+    };
+    const res = await mockClient.applyOperation({
+      opType: "OffsetFace",
+      inputs: [face],
+      params: {
+        faces: [face],
+        distance: 8,
+        distanceType: "Diameter",
+        chainTangentFaces: true,
+        targetBodyId: "body1",
+      },
+    });
+    const row = res.features.find((f) => f.opType === "OffsetFace");
+    expect(row?.valueText).toBe("Ø8.0");
+    expect(row?.primaryValueKind).toBe("diameter");
+  });
+
+  it("prepareOffsetFace returns the picks as the closure and REFUSES a cross-body pick", async () => {
+    const ok = await mockClient.prepareOffsetFace({
+      pickedFaces: [
+        { bodyId: "body1", topoKey: "f:2" },
+        { bodyId: "body1", topoKey: "f:3" },
+      ],
+      chainTangentFaces: true,
+      distanceType: "Offset",
+    });
+    expect(ok.refusal).toBeNull();
+    expect(ok.targetBodyId).toBe("body1");
+    // MOCK LIMIT: the closure is the picks themselves (no G1 tangent expansion),
+    // so every entry is flagged `picked`.
+    expect(ok.faces).toEqual([
+      { topoKey: "f:2", picked: true },
+      { topoKey: "f:3", picked: true },
+    ]);
+    expect(ok.currentDims).toEqual({ radius: 10, thickness: 10 });
+
+    const refused = await mockClient.prepareOffsetFace({
+      pickedFaces: [
+        { bodyId: "body1", topoKey: "f:2" },
+        { bodyId: "body2", topoKey: "f:0" },
+      ],
+      chainTangentFaces: true,
+      distanceType: "Offset",
+    });
+    // A refusal is an ANSWER (SCHEMA §7.6 `ok:true`), not a rejection.
+    expect(refused.refusal?.code).toBe("crossBody");
+    expect(refused.faces).toEqual([]);
+    expect(refused.targetBodyId).toBe("");
+  });
+
   it("LinearPattern / CircularPattern add ×count features (documented mock limit)", async () => {
     const lin = await mockClient.applyOperation({
       opType: "LinearPattern",

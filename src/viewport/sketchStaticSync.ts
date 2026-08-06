@@ -9,10 +9,20 @@
  *     edited (its live SketchObject owns it) and REFETCH it on exit (geometry likely
  *     changed while editing).
  *   - selectionStore → mirror sketch selection + hover into the layer's tint.
+ *   - documentStore.revision → retry the sketches whose region fetch FAILED.
  *
  * Per-sketch fetch is latest-wins (a superseded fetch is dropped, meshSync loadSeq
  * pattern) and detach-guarded (StrictMode-safe). The engine owns the layer's
  * disposal (engine.dispose); detach just unsubscribes.
+ *
+ * Region-fetch retry: a rejected `getSketchRegions` degrades to curves-only, and the
+ * sketch is then marked loaded — so without a retry a fetch that lost a race with a
+ * not-yet-ready worker left that sketch permanently unfilled (nothing else refetches
+ * it: `syncSketches` only reloads on a geometryToken change). `revision` is the retry
+ * signal: it is the backend-authoritative publish stamp, hydrated from the
+ * `projection-updated` that EVERY regen completion emits, and bumped by the mock
+ * lane's commit path — one signal, both lanes. Worker-ready is deliberately NOT the
+ * signal: it fires before the replay that produces the regions.
  */
 import type { CadClient } from "@/ipc/client";
 import { documentStore, type SketchMeta } from "@/stores/documentStore";
@@ -46,20 +56,28 @@ export class SketchStaticSync {
   private fetchCounter = 0;
   /** Sketch ids currently built into the layer. */
   private readonly loaded = new Set<string>();
+  /** Sketch ids whose region fetch rejected, awaiting the next published revision. */
+  private readonly regionRetry = new Set<string>();
 
   attach(engine: ViewportEngine, client: CadClient): void {
     this.client = client;
     this.layer = engine.getSketchStaticLayer();
     this.detached = false;
 
-    // documentStore sketches (identity change ⇒ diff added / removed / visibility).
+    // documentStore sketches (identity change ⇒ diff added / removed / visibility),
+    // plus revision (⇒ retry the sketches whose regions never arrived).
     let prevSketches = documentStore.getState().sketches;
+    let prevRevision = documentStore.getState().revision;
     this.syncSketches({}, prevSketches); // initial sweep
     this.unsubs.push(
       documentStore.subscribe((s) => {
         if (s.sketches !== prevSketches) {
           this.syncSketches(prevSketches, s.sketches);
           prevSketches = s.sketches;
+        }
+        if (s.revision !== prevRevision) {
+          prevRevision = s.revision;
+          this.retryFailedRegions();
         }
       }),
     );
@@ -112,6 +130,7 @@ export class SketchStaticSync {
         this.layer?.removeSketch(id);
         this.loaded.delete(id);
         this.fetchSeq.delete(id);
+        this.regionRetry.delete(id);
         this.reconcileRegionRefs(id, new Set());
       }
     }
@@ -137,6 +156,14 @@ export class SketchStaticSync {
     if (!client || this.detached) return;
     const token = ++this.fetchCounter;
     this.fetchSeq.set(id, token);
+    // An attempt is now in flight, so this id is no longer PENDING a retry — it is
+    // re-armed below only if the region fetch rejects again. Clearing it here is what
+    // keeps a retry that races a token-driven reload from double-fetching.
+    this.regionRetry.delete(id);
+    // Captured so a rejection can tell whether a publish landed DURING this fetch —
+    // that publish already ran retryFailedRegions against an empty set, so waiting
+    // for the next one could strand the sketch curves-only forever.
+    const revisionAtStart = documentStore.getState().revision;
 
     let session;
     try {
@@ -146,8 +173,25 @@ export class SketchStaticSync {
     }
     if (this.detached || this.fetchSeq.get(id) !== token) return;
 
-    // Fill is best-effort: a reject or zero regions degrades to curves-only.
-    const finish = await client.getSketchRegions(id).catch(() => ({ regions: [] }));
+    // Fill is best-effort: a reject or zero regions degrades to curves-only. A reject
+    // can simply mean the fetch lost a race with a still-connecting worker, so the id
+    // is queued for the next published revision rather than left unfilled forever.
+    let finish: Awaited<ReturnType<CadClient["getSketchRegions"]>>;
+    try {
+      finish = await client.getSketchRegions(id);
+    } catch {
+      finish = { regions: [] };
+      if (this.fetchSeq.get(id) === token) {
+        this.regionRetry.add(id);
+        // A publish that landed mid-fetch has already been consumed by an empty
+        // retry sweep — grant its attempt now instead of waiting for a publish
+        // that may never come. Bounded: the retry captures the NEW revision, so a
+        // second rejection with no further publish just re-queues.
+        if (documentStore.getState().revision !== revisionAtStart) {
+          queueMicrotask(() => this.retryFailedRegions());
+        }
+      }
+    }
     if (this.detached || this.fetchSeq.get(id) !== token) return;
 
     this.reconcileRegionRefs(
@@ -164,6 +208,18 @@ export class SketchStaticSync {
   /** Refetch a sketch's geometry (e.g. after exiting its edit session). */
   private refetch(id: string): void {
     if (documentStore.getState().sketches[id]?.visible) void this.loadSketch(id);
+  }
+
+  /**
+   * Re-attempt every sketch whose regions never arrived. Driven by a NEW published
+   * revision only, so a permanently failing fetch costs one attempt per publish and
+   * can never spin.
+   */
+  private retryFailedRegions(): void {
+    for (const id of [...this.regionRetry]) {
+      if (this.isEditing(id)) continue; // the live SketchObject owns it
+      this.refetch(id);
+    }
   }
 
   private isEditing(id: string): boolean {
@@ -203,6 +259,7 @@ export class SketchStaticSync {
     this.fetchSeq.clear();
     this.fetchCounter = 0;
     this.loaded.clear();
+    this.regionRetry.clear();
     // The engine owns the layer's disposal (engine.dispose); nothing to free here.
     this.layer = null;
     this.client = null;

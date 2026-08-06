@@ -3,8 +3,10 @@
  * driven from.
  *
  * A mode is DATA, not a switch statement: `faceVisible` / `edgeVisible` say
- * which of a BodyObject's two children draw, and `materialKind` says which
- * shared material set they draw with. Adding a mode (xray, ghost, …) is a new
+ * which of a BodyObject's two children draw, `materialKind` says which shared
+ * material set they draw with, and `edgeStyle` says which of that set's two edge
+ * materials the edges take (edges over a shaded face read differently from edges
+ * that ARE the drawing). Adding a mode (xray, ghost, …) is a new
  * entry here plus, if it needs different shading, a new {@link MaterialKind}
  * that BodyMaterialLibrary knows how to build — no per-mode branching in the
  * BodyObject, the ingest controller, or the store.
@@ -53,12 +55,24 @@ export function vertexColorKind(kind: MaterialKind): MaterialKind {
 
 export type RenderModeId = "shaded" | "shadedEdges" | "wireframe";
 
+/**
+ * Which of a material set's two edge materials a mode draws edges with.
+ *
+ * `onFaces` = there is a shaded face behind every edge, so the edge is an
+ * OUTLINE and stays near-black in both themes (Shapr3D convention).
+ * `standalone` = the edges are the entire drawing, so they must invert with the
+ * theme or a dark canvas swallows them. See `palette.bodyEdge` /
+ * `palette.bodyEdgeWire`.
+ */
+export type EdgeStyle = "onFaces" | "standalone";
+
 export interface RenderModeDef {
   id: RenderModeId;
   label: string;
   faceVisible: boolean;
   edgeVisible: boolean;
   materialKind: MaterialKind;
+  edgeStyle: EdgeStyle;
 }
 
 export const RENDER_MODES: Record<RenderModeId, RenderModeDef> = {
@@ -68,6 +82,9 @@ export const RENDER_MODES: Record<RenderModeId, RenderModeDef> = {
     faceVisible: true,
     edgeVisible: false,
     materialKind: "standard",
+    // Edges do not draw here at all; the style still says what they WOULD be,
+    // so nothing has to special-case a mode with edgeVisible: false.
+    edgeStyle: "onFaces",
   },
   shadedEdges: {
     id: "shadedEdges",
@@ -75,6 +92,7 @@ export const RENDER_MODES: Record<RenderModeId, RenderModeDef> = {
     faceVisible: true,
     edgeVisible: true,
     materialKind: "standard",
+    edgeStyle: "onFaces",
   },
   wireframe: {
     id: "wireframe",
@@ -82,6 +100,7 @@ export const RENDER_MODES: Record<RenderModeId, RenderModeDef> = {
     faceVisible: false,
     edgeVisible: true,
     materialKind: "standard",
+    edgeStyle: "standalone",
   },
 };
 

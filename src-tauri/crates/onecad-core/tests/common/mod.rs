@@ -9,8 +9,9 @@ use uuid::Uuid;
 use onecad_core::document::record::{
     BooleanMode, BooleanOp, BooleanParams, ChamferParams, CircularPatternParams,
     DeterminismSettings, ExtrudeMode, ExtrudeParams, FilletParams, KnownOperation,
-    LinearPatternParams, LoftParams, MirrorBodyParams, OpaqueOperation, Operation, OperationRecord,
-    PlaneKind, RevolveParams, ShellParams, SketchOpParams, SketchPlaneRef, SweepParams,
+    LinearPatternParams, LoftParams, MirrorBodyParams, OffsetDistanceType, OffsetFaceParams,
+    OpaqueOperation, Operation, OperationRecord, PlaneKind, RevolveParams, ShellParams,
+    SketchOpParams, SketchPlaneRef, SweepParams,
 };
 use onecad_core::document::refs::{
     AnchorIntent, AxisRef, ElementKind, ElementRef, IntentQuery, LocalFrame, PrimaryRef,
@@ -316,6 +317,84 @@ pub fn op_mirror() -> Operation {
     }))
 }
 
+/// A face ref on `body_a` carrying identity + anchor evidence (the shape
+/// `PrepareOffsetFace` evidence promotes into).
+pub fn offset_face_ref(el: &str, surface: &str, x: f64) -> ElementRef {
+    ElementRef {
+        primary: Some(PrimaryRef {
+            body: body_a(),
+            element: ElementId::new(el),
+            kind: ElementKind::Face,
+            extra: Default::default(),
+        }),
+        intent: Some(IntentQuery {
+            version: 1,
+            kind: ElementKind::Face,
+            descriptor: serde_json::json!({ "surfaceType": surface }),
+            extra: Default::default(),
+        }),
+        anchor: Some(AnchorIntent {
+            world_point: v3(x, 0.0, 10.0),
+            surface_uv: None,
+            local_frame: None,
+            adjacency_hint: None,
+            extra: Default::default(),
+        }),
+        extra: Default::default(),
+    }
+}
+
+/// A MULTI-face `Offset` push-pull: two operative faces (the pick plus a tangent
+/// chain member), no opposite face, chaining on. The only distance type a
+/// multi-face set admits.
+pub fn op_offset_face_offset_multi() -> Operation {
+    Operation::Known(KnownOperation::OffsetFace(OffsetFaceParams {
+        face_ids: vec![ElementId::new("el_f1"), ElementId::new("el_f2")],
+        faces: vec![
+            offset_face_ref("el_f1", "plane", 0.0),
+            offset_face_ref("el_f2", "plane", 40.0),
+        ],
+        distance: Scalar::new(2.5),
+        distance_type: OffsetDistanceType::Offset,
+        chain_tangent_faces: true,
+        opposite_face_id: None,
+        opposite_face: None,
+        target_body: body_a(),
+        extra: Default::default(),
+    }))
+}
+
+/// A single-face absolute `Radius` resize of a cylindrical face.
+pub fn op_offset_face_radius() -> Operation {
+    Operation::Known(KnownOperation::OffsetFace(OffsetFaceParams {
+        face_ids: vec![ElementId::new("el_cyl")],
+        faces: vec![offset_face_ref("el_cyl", "cylinder", 5.0)],
+        distance: Scalar::new(6.0),
+        distance_type: OffsetDistanceType::Radius,
+        chain_tangent_faces: true,
+        opposite_face_id: None,
+        opposite_face: None,
+        target_body: body_a(),
+        extra: Default::default(),
+    }))
+}
+
+/// A single-face `Total` thickness set against a persisted opposite face —
+/// chaining OFF, as the type requires.
+pub fn op_offset_face_total() -> Operation {
+    Operation::Known(KnownOperation::OffsetFace(OffsetFaceParams {
+        face_ids: vec![ElementId::new("el_top")],
+        faces: vec![offset_face_ref("el_top", "plane", 0.0)],
+        distance: Scalar::new(12.0),
+        distance_type: OffsetDistanceType::Total,
+        chain_tangent_faces: false,
+        opposite_face_id: Some(ElementId::new("el_bottom")),
+        opposite_face: Some(offset_face_ref("el_bottom", "plane", 0.0)),
+        target_body: body_a(),
+        extra: Default::default(),
+    }))
+}
+
 /// An unknown-`opType` op, captured as a frozen node.
 pub fn op_opaque() -> Operation {
     let mut raw = serde_json::Map::new();
@@ -365,5 +444,17 @@ pub fn canonical_records() -> Vec<(&'static str, OperationRecord)> {
         ("sweep", record(11, "Sweep 1", op_sweep())),
         ("mirror_body", record(12, "Mirror 1", op_mirror())),
         ("opaque_frozen", record(13, "Frozen 1", op_opaque())),
+        (
+            "offsetface_offset_multi",
+            record(14, "Offset face 1", op_offset_face_offset_multi()),
+        ),
+        (
+            "offsetface_radius",
+            record(15, "Offset face 2", op_offset_face_radius()),
+        ),
+        (
+            "offsetface_total",
+            record(16, "Offset face 3", op_offset_face_total()),
+        ),
     ]
 }

@@ -8,6 +8,8 @@ import { mockClient } from "@/ipc/mockClient";
 import { viewportStore } from "@/stores/viewportStore";
 import { documentStore, seedMockDocument } from "@/stores/documentStore";
 import { saveDocument, saveDocumentAs, exportStep, exportStl, exportObj, insertStep } from "./fileActions";
+import { setViewportEngine } from "@/viewport/engineBridge";
+import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import type { ApplyOperationResult } from "@/ipc/types";
 
 beforeEach(() => {
@@ -133,5 +135,63 @@ describe("fileActions", () => {
     vi.spyOn(mockClient, "exportObj").mockResolvedValue(null);
     await exportObj();
     expect(hint()).toBeNull();
+  });
+});
+
+// ── Explicit-save thumbnail (persisted-cache lane) ───────────────────────────
+//
+// The engine bridge is a module singleton, so a fake engine can be registered
+// directly — no viewport, no WebGL. What is pinned: the capture reaches the
+// client on BOTH explicit save paths, and NOTHING about it can fail a save.
+
+describe("fileActions save thumbnail", () => {
+  const PNG = "data:image/png;base64,AAAA";
+  /** Register a stand-in engine exposing only what capturePreview() calls. */
+  function stubEngine(captureThumbnail: () => string | null): void {
+    setViewportEngine({ captureThumbnail } as unknown as ViewportEngine);
+  }
+
+  afterEach(() => setViewportEngine(null));
+
+  it("Save passes the captured thumbnail (path undefined = reuse the last path)", async () => {
+    stubEngine(() => PNG);
+    const save = vi.spyOn(mockClient, "saveDocument");
+    await saveDocument();
+    expect(save).toHaveBeenCalledWith(undefined, PNG);
+  });
+
+  it("Save As passes the thumbnail too — a new document's first save is a Save As", async () => {
+    stubEngine(() => PNG);
+    const saveAs = vi
+      .spyOn(mockClient, "saveDocumentAs")
+      .mockResolvedValue("/Users/andrej/CAD/Foo.onecad");
+    await saveDocumentAs();
+    expect(saveAs).toHaveBeenCalledWith(PNG);
+  });
+
+  it("no engine mounted ⇒ undefined, and the save still succeeds", async () => {
+    setViewportEngine(null);
+    const save = vi.spyOn(mockClient, "saveDocument");
+    await saveDocument();
+    expect(save).toHaveBeenCalledWith(undefined, undefined);
+    expect(hint()).toBe("Saved Bracket v2");
+  });
+
+  it("a refused capture (WebGPU / oversize) ⇒ undefined, and the save still succeeds", async () => {
+    stubEngine(() => null);
+    const save = vi.spyOn(mockClient, "saveDocument");
+    await saveDocument();
+    expect(save).toHaveBeenCalledWith(undefined, undefined);
+    expect(hint()).toBe("Saved Bracket v2");
+  });
+
+  it("a THROWING capture never reaches the user — the save proceeds unpreviewed", async () => {
+    stubEngine(() => {
+      throw new Error("context lost");
+    });
+    const save = vi.spyOn(mockClient, "saveDocument");
+    await saveDocument();
+    expect(save).toHaveBeenCalledWith(undefined, undefined);
+    expect(hint()).toBe("Saved Bracket v2");
   });
 });

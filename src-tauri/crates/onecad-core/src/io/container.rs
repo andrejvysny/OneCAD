@@ -18,6 +18,24 @@
 //! are Stored (already compact — deflating burns CPU for ~nothing). Entries under
 //! 64 bytes are Stored regardless (deflate framing exceeds any saving).
 //!
+//! What the app actually WRITES today: `document.json`, `timeline/ops.jsonl`,
+//! `imports/`, and — on an **explicit** save only — `meshes/<bodyId>.coarse.mesh`
+//! plus `preview.png` (the "paint last-saved geometry at open" caches). An
+//! autosave writes no cache section at all, and `checkpoints/` is never written
+//! (SCHEMA §7.7 V2 policy: worker restore is in-session-map-only).
+//!
+//! # Mesh cache entry names
+//!
+//! [`mesh_cache_path`] / [`parse_mesh_cache_path`] are an exact inverse pair.
+//! Both components are percent-escaped for `%` and `:` — `:` is illegal in a
+//! Windows filename, and the SCHEMA §2 N-body wire form (`body_<opId>:<k>`) puts
+//! one in the id family this path is named after. A core [`BodyId`] is a bare
+//! UUID today, so the escape never fires for the body component; it is symmetric
+//! anyway so a colon-bearing component can never mint an unopenable container.
+//! `/` and `..` are deliberately NOT escaped — [`guard_authored_name`] must stay
+//! the traversal gate, and escaping them would turn a rejection into a silent
+//! rename.
+//!
 //! # Atomic save
 //!
 //! [`ContainerWriter::save`] writes to a sibling temp file (`.<name>.tmp-<nonce>`),
@@ -39,7 +57,9 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use zip::result::ZipError;
 use zip::{CompressionMethod, ZipArchive};
@@ -71,6 +91,89 @@ pub const MESHES_DIR: &str = "meshes/";
 pub const CHECKPOINTS_DIR: &str = "checkpoints/";
 /// Optional preview thumbnail path.
 pub const PREVIEW_PATH: &str = "preview.png";
+/// Mesh cache entry suffix (`meshes/<bodyId>.<lod>.mesh`).
+const MESH_EXT: &str = ".mesh";
+
+/// The archive path for a mesh cache blob: `meshes/<bodyId>.<lod>.mesh`, with both
+/// components percent-escaped (see the module docs). The exact inverse of
+/// [`parse_mesh_cache_path`].
+#[must_use]
+pub fn mesh_cache_path(body: BodyId, lod: &str) -> String {
+    format!(
+        "{MESHES_DIR}{}.{}{MESH_EXT}",
+        escape_component(&body.to_string()),
+        escape_component(lod)
+    )
+}
+
+/// Splits a `meshes/<bodyId>.<lod>.mesh` entry name into its `(body, lod)`.
+///
+/// `None` for anything else — a foreign, misnamed or nested entry under `meshes/`
+/// is IGNORED rather than guessed at (the [`parse_import_blob_path`] precedent),
+/// so a container written by a future build still opens here.
+#[must_use]
+pub fn parse_mesh_cache_path(path: &str) -> Option<(BodyId, String)> {
+    let rest = path.strip_prefix(MESHES_DIR)?;
+    if rest.contains('/') {
+        return None;
+    }
+    let stem = rest.strip_suffix(MESH_EXT)?;
+    // The body component is a UUID (never contains `.`), so the FIRST dot splits.
+    let (body, lod) = stem.split_once('.')?;
+    if lod.is_empty() {
+        return None;
+    }
+    let body = BodyId::from_str(&unescape_component(body)).ok()?;
+    Some((body, unescape_component(lod)))
+}
+
+/// Percent-escapes the two characters an entry-name component may not carry
+/// verbatim: `%` (the escape marker itself — encoded FIRST so unescaping is exact)
+/// and `:` (illegal in a Windows filename).
+fn escape_component(s: &str) -> String {
+    if !s.contains(['%', ':']) {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '%' => out.push_str("%25"),
+            ':' => out.push_str("%3A"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// The exact inverse of [`escape_component`]. An escape this writer never emits is
+/// left VERBATIM rather than decoded: a foreign name must not silently become a
+/// different id (it will simply fail the `BodyId` parse and be skipped).
+fn unescape_component(s: &str) -> String {
+    if !s.contains('%') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let rest = &s[i..];
+        if let Some(tail) = rest.strip_prefix("%25") {
+            out.push('%');
+            i = s.len() - tail.len();
+        } else if let Some(tail) = rest
+            .strip_prefix("%3A")
+            .or_else(|| rest.strip_prefix("%3a"))
+        {
+            out.push(':');
+            i = s.len() - tail.len();
+        } else {
+            let c = rest.chars().next().unwrap_or('%');
+            out.push(c);
+            i += c.len_utf8();
+        }
+    }
+    out
+}
 
 // ── Caps (decompression-bomb / DoS guards) ───────────────────────────────────
 
@@ -87,6 +190,10 @@ pub const MAX_BLOB_BYTES: u64 = 1024 * MB;
 pub const MAX_TOTAL_BYTES: u64 = 4096 * MB;
 /// Whole-container cap on entry count.
 pub const MAX_ENTRIES: usize = 10_000;
+/// Cap for the standalone [`read_preview`] path. Far below [`MAX_BLOB_BYTES`]: a
+/// start-screen thumbnail is a small viewport capture, and this read runs 10× per
+/// listing with no document open to justify the memory.
+pub const MAX_PREVIEW_BYTES: u64 = 2 * MB;
 /// Below this size, entries are Stored (deflate framing is not worth it).
 const STORE_THRESHOLD: usize = 64;
 
@@ -102,7 +209,15 @@ pub struct MeshCache {
     /// The level-of-detail tag (e.g. `"coarse"`) — used verbatim in the filename.
     pub lod: String,
     /// The MESH1 bytes (opaque to the core).
-    pub bytes: Vec<u8>,
+    ///
+    /// Behind an `Arc` for the same reason
+    /// [`ImportBlob::bytes`](super::imports::ImportBlob::bytes) is (VF-B7): the app
+    /// assembles this carrier while holding its single-writer lock, from blobs it
+    /// already holds behind an `Arc` in its mesh LRU. A `Vec<u8>` here would turn
+    /// that assembly into a `memcpy` of the whole persisted mesh budget under the
+    /// lock. The writer's own copy into a [`Section`] still happens — but off the
+    /// lock, on the blocking thread, where it belongs.
+    pub bytes: Arc<Vec<u8>>,
 }
 
 /// A checkpoint artifact pair (`checkpoints/<step>.json` + optional `.bin`).
@@ -302,11 +417,11 @@ fn build_sections(
         });
     }
     for mesh in &caches.meshes {
-        let path = format!("{MESHES_DIR}{}.{}.mesh", mesh.body, mesh.lod);
+        let path = mesh_cache_path(mesh.body, &mesh.lod);
         guard_authored_name(&path)?;
         sections.push(Section {
             path,
-            bytes: mesh.bytes.clone(),
+            bytes: mesh.bytes.as_ref().clone(),
         });
     }
     for cp in &caches.checkpoints {
@@ -499,6 +614,19 @@ pub enum CacheRead {
     Missing,
 }
 
+/// One `meshes/<bodyId>.<lod>.mesh` entry present in a container — its identity
+/// and archive path, **without reading any bytes**. Read the blob with
+/// [`LoadedContainer::read_caches`] (one archive open for the whole batch).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeshCacheEntry {
+    /// The body the mesh belongs to.
+    pub body: BodyId,
+    /// The level-of-detail tag, decoded from the filename.
+    pub lod: String,
+    /// The full archive entry path (the key for [`LoadedContainer::read_caches`]).
+    pub path: String,
+}
+
 /// An opened container: the manifest, the load outcome (document + policy), and
 /// lazy access to cache blobs.
 #[derive(Debug)]
@@ -596,16 +724,78 @@ impl LoadedContainer {
         if self.outcome.stale_caches {
             return Ok(CacheRead::Stale);
         }
+        let mut archive = self.reopen()?;
+        self.read_cache_from(&mut archive, path)
+    }
+
+    /// Reads MANY cache blobs with **one** archive open — the open-time batch form
+    /// of [`read_cache`](LoadedContainer::read_cache), whose per-call reopen costs a
+    /// full central-directory parse each time.
+    ///
+    /// Returns one `(path, CacheRead)` per input, in input order. A container whose
+    /// caches are known stale short-circuits to all-[`Stale`](CacheRead::Stale)
+    /// without touching the archive at all.
+    ///
+    /// # Errors
+    /// [`IoError`] on a filesystem, traversal or size-cap failure.
+    pub fn read_caches<S: AsRef<str>>(&self, paths: &[S]) -> IoResult<Vec<(String, CacheRead)>> {
+        if self.outcome.stale_caches {
+            return Ok(paths
+                .iter()
+                .map(|p| (p.as_ref().to_string(), CacheRead::Stale))
+                .collect());
+        }
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut archive = self.reopen()?;
+        let mut out = Vec::with_capacity(paths.len());
+        for p in paths {
+            let path = p.as_ref();
+            out.push((path.to_string(), self.read_cache_from(&mut archive, path)?));
+        }
+        Ok(out)
+    }
+
+    /// Every `meshes/<bodyId>.<lod>.mesh` entry the manifest lists, parsed to its
+    /// identity. **No bytes are read** — pair it with
+    /// [`read_caches`](LoadedContainer::read_caches). An entry whose name does not
+    /// parse is omitted (never an error).
+    #[must_use]
+    pub fn mesh_cache_entries(&self) -> Vec<MeshCacheEntry> {
+        self.cache_entries()
+            .into_iter()
+            .filter_map(|e| {
+                parse_mesh_cache_path(&e.path).map(|(body, lod)| MeshCacheEntry {
+                    body,
+                    lod,
+                    path: e.path.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// Reopens the source archive for a lazy read.
+    fn reopen(&self) -> IoResult<ZipArchive<std::io::BufReader<std::fs::File>>> {
+        let file = std::fs::File::open(&self.source)?;
+        ZipArchive::new(std::io::BufReader::new(file))
+            .map_err(|e| IoError::Corrupt(format!("reopen archive: {e}")))
+    }
+
+    /// One cache read against an ALREADY-open archive. Callers must have checked
+    /// `stale_caches` first (this does not).
+    fn read_cache_from<R: Read + Seek>(
+        &self,
+        archive: &mut ZipArchive<R>,
+        path: &str,
+    ) -> IoResult<CacheRead> {
         let Some(entry) = self.manifest.entry(path) else {
             return Ok(CacheRead::Missing);
         };
         if path == DOCUMENT_PATH || path == OPS_PATH || path.starts_with(IMPORTS_DIR) {
             return Ok(CacheRead::Missing); // not a cache
         }
-        let file = std::fs::File::open(&self.source)?;
-        let mut archive = ZipArchive::new(std::io::BufReader::new(file))
-            .map_err(|e| IoError::Corrupt(format!("reopen archive: {e}")))?;
-        match read_named(&mut archive, path, MAX_BLOB_BYTES)? {
+        match read_named(archive, path, MAX_BLOB_BYTES)? {
             Some(bytes) => {
                 if sha256_hex(&bytes) == entry.sha256 {
                     Ok(CacheRead::Present(bytes))
@@ -616,6 +806,41 @@ impl LoadedContainer {
             None => Ok(CacheRead::Missing),
         }
     }
+}
+
+/// Reads ONLY the `preview.png` cache out of a container, for a start-screen
+/// listing — deliberately **not** [`ContainerReader::open`].
+///
+/// A recents listing renders up to ten cards and needs one small PNG from each.
+/// `open` would, per file, parse + hash-verify `document.json`, run the migration
+/// chain, and cross-validate `timeline/ops.jsonl` — the whole document pipeline,
+/// for a thumbnail. This walks the ZIP directory (entry-count guard), reads the
+/// manifest, and reads the one entry, bounded at [`MAX_PREVIEW_BYTES`].
+///
+/// **Integrity:** the bytes are verified against the manifest's own
+/// `entries[preview.png].sha256` — the same content hash
+/// [`read_cache`](LoadedContainer::read_cache) checks. Freshness (`opsHash`) is
+/// deliberately NOT consulted: a preview is a picture of the last save, and a
+/// document whose caches went stale still had that picture taken. A tampered or
+/// truncated PNG fails the hash and yields `None`.
+///
+/// **Every failure mode is `None`.** Missing entry, missing manifest row,
+/// oversized blob, hash mismatch, corrupt/absent/hostile archive — all of it. The
+/// return type says so directly: there is no error a caller could act on, and a
+/// thumbnail must never break a listing.
+#[must_use]
+pub fn read_preview(path: &Path) -> Option<Vec<u8>> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut archive = ZipArchive::new(std::io::BufReader::new(file)).ok()?;
+    if archive.len() > MAX_ENTRIES {
+        return None;
+    }
+    let manifest_bytes = read_named(&mut archive, MANIFEST_PATH, MAX_MANIFEST_BYTES).ok()??;
+    let manifest: Manifest = serde_json::from_slice(&manifest_bytes).ok()?;
+    manifest.validate_identity().ok()?;
+    let expected = &manifest.entry(PREVIEW_PATH)?.sha256;
+    let bytes = read_named(&mut archive, PREVIEW_PATH, MAX_PREVIEW_BYTES).ok()??;
+    (sha256_hex(&bytes) == *expected).then_some(bytes)
 }
 
 /// Reads v2 `.onecad` containers with attack-surface guards.
@@ -1044,7 +1269,7 @@ mod tests {
             meshes: vec![MeshCache {
                 body,
                 lod: "coarse".into(),
-                bytes: b"MESH1....".to_vec(),
+                bytes: Arc::new(b"MESH1....".to_vec()),
             }],
             checkpoints: vec![CheckpointCache {
                 step: 3,
@@ -1086,7 +1311,7 @@ mod tests {
             meshes: vec![MeshCache {
                 body: BodyId(Uuid::from_u128(0xB0)),
                 lod: "../../evil".into(), // hostile LOD tag
-                bytes: vec![1, 2, 3],
+                bytes: Arc::new(vec![1, 2, 3]),
             }],
             ..ContainerCaches::none()
         };
@@ -1096,5 +1321,255 @@ mod tests {
         ));
         // The target was never created (failure before any commit).
         assert!(!path.exists());
+    }
+
+    // ── Mesh cache entry naming ──────────────────────────────────────────────
+
+    #[test]
+    fn mesh_cache_path_and_parse_are_inverses() {
+        let body = BodyId(Uuid::from_u128(0xB0));
+        let path = mesh_cache_path(body, "coarse");
+        assert_eq!(path, format!("{MESHES_DIR}{body}.coarse{MESH_EXT}"));
+        assert_eq!(
+            parse_mesh_cache_path(&path),
+            Some((body, "coarse".to_string()))
+        );
+    }
+
+    /// A `:`-bearing component (SCHEMA §2's `body_<opId>:<k>` split-child family)
+    /// must round-trip through `%3A` — a literal colon is an illegal Windows
+    /// filename and would make the container unopenable on that platform.
+    #[test]
+    fn colon_in_a_component_round_trips_as_percent_3a() {
+        let body = BodyId(Uuid::from_u128(0xB0));
+        let path = mesh_cache_path(body, "coarse:0");
+        assert!(
+            path.ends_with("coarse%3A0.mesh"),
+            "the colon must be escaped, got {path}"
+        );
+        assert!(!path.contains(':'), "no literal colon survives: {path}");
+        assert_eq!(
+            parse_mesh_cache_path(&path),
+            Some((body, "coarse:0".to_string())),
+            "and it decodes back to the exact component"
+        );
+        // The escape marker itself round-trips (so escaping is injective).
+        let literal = mesh_cache_path(body, "a%3Ab");
+        assert_eq!(
+            parse_mesh_cache_path(&literal),
+            Some((body, "a%3Ab".to_string())),
+            "a literal `%3A` in the component is NOT confused with an escaped colon"
+        );
+    }
+
+    #[test]
+    fn parse_mesh_cache_path_rejects_foreign_names() {
+        for bad in [
+            "meshes/not-a-uuid.coarse.mesh",
+            "meshes/nested/dir.coarse.mesh",
+            "meshes/00000000-0000-0000-0000-0000000000b0.coarse.brep",
+            "meshes/00000000-0000-0000-0000-0000000000b0.mesh", // no lod component
+            "geometry/00000000-0000-0000-0000-0000000000b0.coarse.mesh",
+            "meshes/../escape.coarse.mesh",
+        ] {
+            assert_eq!(parse_mesh_cache_path(bad), None, "{bad} must not parse");
+        }
+    }
+
+    // ── Batch cache reads ────────────────────────────────────────────────────
+
+    #[test]
+    fn mesh_entries_and_batch_read_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.onecad");
+        let d = doc(1, 10.0);
+        let a = BodyId(Uuid::from_u128(0xB0));
+        let b = BodyId(Uuid::from_u128(0xB1));
+        let caches = ContainerCaches {
+            meshes: vec![
+                MeshCache {
+                    body: a,
+                    lod: "coarse".into(),
+                    bytes: Arc::new(b"MESH1-a".to_vec()),
+                },
+                MeshCache {
+                    body: b,
+                    lod: "coarse".into(),
+                    bytes: Arc::new(b"MESH1-b".to_vec()),
+                },
+            ],
+            preview_png: Some(vec![0x89, 0x50, 0x4e, 0x47]),
+            ..ContainerCaches::none()
+        };
+        ContainerWriter::save(&path, &d, &caches, &meta()).unwrap();
+
+        let loaded = ContainerReader::open(&path).unwrap();
+        let mut entries = loaded.mesh_cache_entries();
+        entries.sort_by_key(|x| x.body);
+        assert_eq!(entries.len(), 2, "preview.png is not a mesh entry");
+        assert_eq!(entries[0].body, a);
+        assert_eq!(entries[0].lod, "coarse");
+        assert_eq!(entries[1].body, b);
+
+        let paths: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
+        let read = loaded.read_caches(&paths).unwrap();
+        assert_eq!(
+            read,
+            vec![
+                (paths[0].clone(), CacheRead::Present(b"MESH1-a".to_vec())),
+                (paths[1].clone(), CacheRead::Present(b"MESH1-b".to_vec())),
+            ],
+            "batch read returns one result per input, in input order"
+        );
+        // The preview is still reachable through the generic single read.
+        assert_eq!(
+            loaded.read_cache(PREVIEW_PATH).unwrap(),
+            CacheRead::Present(vec![0x89, 0x50, 0x4e, 0x47])
+        );
+    }
+
+    #[test]
+    fn batch_read_reports_every_entry_stale_when_the_container_is() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.onecad");
+        let caches = ContainerCaches {
+            meshes: vec![MeshCache {
+                body: BodyId(Uuid::from_u128(0xB0)),
+                lod: "coarse".into(),
+                bytes: Arc::new(b"MESH1-a".to_vec()),
+            }],
+            ..ContainerCaches::none()
+        };
+        ContainerWriter::save(&path, &doc(1, 10.0), &caches, &meta()).unwrap();
+        rewrite_manifest_ops_hash(&path, "deadbeef");
+
+        let loaded = ContainerReader::open(&path).unwrap();
+        let paths: Vec<String> = loaded
+            .mesh_cache_entries()
+            .iter()
+            .map(|e| e.path.clone())
+            .collect();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(
+            loaded.read_caches(&paths).unwrap(),
+            vec![(paths[0].clone(), CacheRead::Stale)]
+        );
+    }
+
+    // ── read_preview (the start-screen lane) ─────────────────────────────────
+
+    #[test]
+    fn read_preview_returns_the_verified_png() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.onecad");
+        let png = vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+        let caches = ContainerCaches {
+            preview_png: Some(png.clone()),
+            ..ContainerCaches::none()
+        };
+        ContainerWriter::save(&path, &doc(1, 10.0), &caches, &meta()).unwrap();
+        assert_eq!(read_preview(&path), Some(png));
+    }
+
+    /// A stale `opsHash` invalidates the GEOMETRY caches, not the picture of the
+    /// last save. `read_preview` must still serve it.
+    #[test]
+    fn read_preview_ignores_cache_staleness() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.onecad");
+        let caches = ContainerCaches {
+            preview_png: Some(vec![1, 2, 3, 4]),
+            ..ContainerCaches::none()
+        };
+        ContainerWriter::save(&path, &doc(1, 10.0), &caches, &meta()).unwrap();
+        rewrite_manifest_ops_hash(&path, "deadbeef");
+        assert_eq!(read_preview(&path), Some(vec![1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn read_preview_is_none_for_absent_missing_and_corrupt() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A container with NO preview section.
+        let plain = tmp.path().join("plain.onecad");
+        ContainerWriter::save(&plain, &doc(1, 10.0), &ContainerCaches::none(), &meta()).unwrap();
+        assert_eq!(read_preview(&plain), None, "no preview.png entry");
+
+        // A path that is not a file at all.
+        assert_eq!(read_preview(&tmp.path().join("nope.onecad")), None);
+
+        // Not a ZIP.
+        let garbage = tmp.path().join("garbage.onecad");
+        std::fs::write(&garbage, b"definitely not a zip archive").unwrap();
+        assert_eq!(read_preview(&garbage), None, "corrupt archive");
+    }
+
+    #[test]
+    fn read_preview_rejects_a_tampered_png() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.onecad");
+        let caches = ContainerCaches {
+            preview_png: Some(vec![0x89, 0x50, 0x4e, 0x47]),
+            ..ContainerCaches::none()
+        };
+        ContainerWriter::save(&path, &doc(1, 10.0), &caches, &meta()).unwrap();
+        rewrite_entry(&path, PREVIEW_PATH, b"hostile replacement bytes");
+        assert_eq!(
+            read_preview(&path),
+            None,
+            "the manifest sha no longer matches"
+        );
+    }
+
+    /// The 2 MiB cap is enforced on the DECOMPRESSED stream, so a small deflated
+    /// entry that inflates past it still yields `None` rather than the bytes.
+    #[test]
+    fn read_preview_rejects_an_oversized_png() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.onecad");
+        let png = vec![0x41u8; (MAX_PREVIEW_BYTES + 1) as usize];
+        let caches = ContainerCaches {
+            preview_png: Some(png),
+            ..ContainerCaches::none()
+        };
+        ContainerWriter::save(&path, &doc(1, 10.0), &caches, &meta()).unwrap();
+        // Sanity: the full reader (1 GB cap) DOES serve it — only the light lane caps.
+        let loaded = ContainerReader::open(&path).unwrap();
+        assert!(matches!(
+            loaded.read_cache(PREVIEW_PATH).unwrap(),
+            CacheRead::Present(_)
+        ));
+        assert_eq!(read_preview(&path), None, "over MAX_PREVIEW_BYTES");
+    }
+
+    /// Replaces one entry's bytes inside a container, leaving the manifest (and
+    /// therefore its sha) untouched — the tamper case.
+    fn rewrite_entry(path: &Path, target: &str, replacement: &[u8]) {
+        let bytes = std::fs::read(path).unwrap();
+        let mut archive = ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+        for i in 0..archive.len() {
+            let mut f = archive.by_index(i).unwrap();
+            if f.is_dir() {
+                continue;
+            }
+            let name = f.name().to_string();
+            let mut buf = Vec::new();
+            f.read_to_end(&mut buf).unwrap();
+            entries.push((name, buf));
+        }
+        drop(archive);
+        let out = std::fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(out);
+        for (name, buf) in entries {
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(CompressionMethod::Stored);
+            zip.start_file(&name, opts).unwrap();
+            if name == target {
+                zip.write_all(replacement).unwrap();
+            } else {
+                zip.write_all(&buf).unwrap();
+            }
+        }
+        zip.finish().unwrap();
     }
 }

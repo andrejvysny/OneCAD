@@ -78,7 +78,7 @@ function fakeClient(regions: SketchRegion[] = []) {
 let sync: SketchStaticSync | null = null;
 
 beforeEach(() => {
-  documentStore.setState({ sketches: {} });
+  documentStore.setState({ sketches: {}, revision: 0 });
   toolStore.setState({ mode: "model" });
   viewportStore.setState({ activeSketchId: null });
   selectionStore.getState().set([]);
@@ -315,6 +315,95 @@ describe("SketchStaticSync fill degradation + selection mirror", () => {
     await tick();
 
     expect(layer.setSketch).toHaveBeenCalledWith("s1", expect.objectContaining({ regions: [] }));
+  });
+
+  it("retries a failed region fetch when a later regen publishes", async () => {
+    // The open-a-project shape: the region fetch races a not-yet-ready worker and
+    // rejects, the sketch is built curves-only, and NOTHING would refetch it (its
+    // geometryToken never changes) until the gated first regen publishes.
+    documentStore.setState({ sketches: { s1: meta("s1", true) } });
+    const layer = fakeLayer();
+    const client = fakeClient([REGION]);
+    client.getSketchRegions.mockRejectedValueOnce(new Error("worker not connected"));
+    sync = new SketchStaticSync();
+    sync.attach(fakeEngine(layer), client);
+    await tick();
+    expect(layer.setSketch).toHaveBeenLastCalledWith("s1", expect.objectContaining({ regions: [] }));
+
+    documentStore.setState({ revision: 1 });
+    await tick();
+
+    expect(client.getSketchRegions).toHaveBeenCalledTimes(2);
+    expect(layer.setSketch).toHaveBeenLastCalledWith(
+      "s1",
+      expect.objectContaining({ regions: [REGION] }),
+    );
+  });
+
+  it("does not retry a sketch whose regions arrived, and never spins", async () => {
+    documentStore.setState({ sketches: { s1: meta("s1", true) } });
+    const layer = fakeLayer();
+    const client = fakeClient([REGION]);
+    sync = new SketchStaticSync();
+    sync.attach(fakeEngine(layer), client);
+    await tick();
+    expect(client.getSketchRegions).toHaveBeenCalledOnce();
+
+    documentStore.setState({ revision: 1 });
+    documentStore.setState({ revision: 2 });
+    await tick();
+    expect(client.getSketchRegions).toHaveBeenCalledOnce();
+  });
+
+  it("re-attempts a still-failing fetch once per publish, not in a loop", async () => {
+    documentStore.setState({ sketches: { s1: meta("s1", true) } });
+    const layer = fakeLayer();
+    const client = fakeClient();
+    client.getSketchRegions.mockRejectedValue(new Error("still not connected"));
+    sync = new SketchStaticSync();
+    sync.attach(fakeEngine(layer), client);
+    await tick();
+    expect(client.getSketchRegions).toHaveBeenCalledTimes(1);
+
+    documentStore.setState({ revision: 1 });
+    await tick();
+    expect(client.getSketchRegions).toHaveBeenCalledTimes(2);
+
+    // No further publish ⇒ no further attempt (the retry is edge-triggered).
+    await tick();
+    await tick();
+    expect(client.getSketchRegions).toHaveBeenCalledTimes(2);
+  });
+
+  it("grants a publish that landed DURING the failing fetch (no stranded curves-only)", async () => {
+    // The publish's retry sweep runs while the fetch is still in flight, so it sees
+    // an empty retry set; without the missed-revision grant the sketch would then
+    // wait for a publish that may never come.
+    documentStore.setState({ sketches: { s1: meta("s1", true) } });
+    const layer = fakeLayer();
+    const client = fakeClient([REGION]);
+    let rejectFirst!: (e: Error) => void;
+    client.getSketchRegions.mockImplementationOnce(
+      () =>
+        new Promise((_res, rej) => {
+          rejectFirst = rej;
+        }),
+    );
+    sync = new SketchStaticSync();
+    sync.attach(fakeEngine(layer), client);
+    await tick();
+
+    documentStore.setState({ revision: 1 }); // publish lands mid-fetch
+    await tick();
+    rejectFirst(new Error("worker not connected")); // fetch fails AFTER the publish
+    await tick();
+    await tick(); // the microtask-scheduled immediate retry resolves
+
+    expect(client.getSketchRegions).toHaveBeenCalledTimes(2);
+    expect(layer.setSketch).toHaveBeenLastCalledWith(
+      "s1",
+      expect.objectContaining({ regions: [REGION] }),
+    );
   });
 
   it("mirrors sketch selection + hover into the layer tint", async () => {

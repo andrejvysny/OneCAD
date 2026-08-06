@@ -1,7 +1,14 @@
 /*
- * BodyObject — a body's scene presence: a face Mesh + an edge LineSegments,
- * both wrapping the registry's zero-copy geometry. The face material carries a
- * polygonOffset so edge lines sit cleanly on top without z-fighting.
+ * BodyObject — a body's scene presence: a face Mesh + a fat-line edge
+ * LineSegments2, both wrapping the registry's zero-copy geometry. The face
+ * material carries a polygonOffset so edge lines sit cleanly on top without
+ * z-fighting.
+ *
+ * Edges are LineSegments2 (addons `lines/`, the OriginTriad/SketchObject
+ * precedent) because WebGL ignores LineBasicMaterial.linewidth: a real body is
+ * hundreds of hairlines at 1 device px, which reads as grey fuzz on a HiDPI
+ * display instead of a drawn outline. The Picker raycasts these natively (see
+ * Picker.ts) — no invisible pick proxy, because it gathers via traverseVisible.
  *
  * Materials come from a BodyMaterialLibrary and are SHARED across every body
  * drawing in the same render mode — a BodyObject owns neither geometry
@@ -10,8 +17,9 @@
  * resolve an intersection back to a body + element.
  */
 import * as THREE from "three";
+import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import type { MeshEntry } from "../mesh/meshRegistry";
-import type { BodyMaterialLibrary } from "./bodyMaterials";
+import type { BodyMaterialLibrary, BodyMaterialSet } from "./bodyMaterials";
 import {
   DEFAULT_RENDER_MODE,
   RENDER_MODES,
@@ -20,13 +28,20 @@ import {
   type RenderModeDef,
 } from "./renderModes";
 
+/** The edge material a mode's {@link RenderModeDef.edgeStyle} names. */
+function edgeMaterial(set: BodyMaterialSet, def: RenderModeDef) {
+  return def.edgeStyle === "standalone" ? set.edgeWire : set.edge;
+}
+
 export interface BodyObjectHandle {
   bodyId: string;
   group: THREE.Group;
   setVisible(visible: boolean): void;
   /**
    * Apply a render-mode descriptor: toggle the two CHILDREN to the mode's
-   * face/edge visibility, then point both at the mode's shared material set.
+   * face/edge visibility, then point both at the mode's shared material set —
+   * the edges at whichever of that set's two edge materials the mode's
+   * `edgeStyle` names (outline-over-faces vs. standalone wireframe).
    *
    * Deliberately NOT `material.wireframe = true` for the wireframe mode, on two
    * counts: the edge LineSegments already carry the kernel's real topological
@@ -57,7 +72,8 @@ export function buildBodyObject(entry: MeshEntry, library: BodyMaterialLibrary):
   const kindFor = (def: RenderModeDef): MaterialKind =>
     entry.hasVertexColors ? vertexColorKind(def.materialKind) : def.materialKind;
 
-  const materials = library.get(kindFor(RENDER_MODES[DEFAULT_RENDER_MODE]));
+  const defaultDef = RENDER_MODES[DEFAULT_RENDER_MODE];
+  const materials = library.get(kindFor(defaultDef));
   const group = new THREE.Group();
   group.name = `body:${entry.bodyId}`;
   group.userData.bodyId = entry.bodyId;
@@ -67,9 +83,9 @@ export function buildBodyObject(entry: MeshEntry, library: BodyMaterialLibrary):
   faceMesh.userData.kind = "face";
   group.add(faceMesh);
 
-  let edges: THREE.LineSegments | null = null;
+  let edges: LineSegments2 | null = null;
   if (entry.edgeGeometry) {
-    edges = new THREE.LineSegments(entry.edgeGeometry, materials.edge);
+    edges = new LineSegments2(entry.edgeGeometry, edgeMaterial(materials, defaultDef));
     edges.userData.bodyId = entry.bodyId;
     edges.userData.kind = "edge";
     group.add(edges);
@@ -87,7 +103,7 @@ export function buildBodyObject(entry: MeshEntry, library: BodyMaterialLibrary):
       faceMesh.material = set.face;
       if (edges) {
         edges.visible = def.edgeVisible;
-        edges.material = set.edge;
+        edges.material = edgeMaterial(set, def);
       }
     },
   };

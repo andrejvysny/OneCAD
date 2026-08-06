@@ -2,8 +2,8 @@
  * Keyboard bindings (F-WP3) — data-driven, mode-scoped.
  *
  * Model:  V select · S new-sketch (enters sketch mode) · D datum plane · E extrude
- *         · R revolve · F fillet · B combine/boolean · T move/rotate body
- *         · ⇧I isolate selection
+ *         · R revolve · F fillet · B combine/boolean · K shell · ⇧O offset face
+ *         · T move/rotate body · ⇧I isolate selection
  * Sketch: V select · L line · R rectangle · ⇧R center-rectangle · C circle
  *         · O ellipse · ⇧O offset · A arc · ⇧A 3-point arc · G polygon · S slot
  *         · P point
@@ -68,8 +68,14 @@
  *   - `⇧O` (Offset, WP-C T2b) is an exact shift chord, like `⇧R`/`⇧?`/`⇧I`, so
  *     plain `o` still resolves to Ellipse. Offset's conventional key IS `O` in
  *     other CAD; Ellipse already holds it here, so Offset takes the chord rather
- *     than a mnemonic-free letter. Free in the model table, so model mode reaches
- *     it through the ordinary cross-mode fallback.
+ *     than a mnemonic-free letter.
+ *   - `⇧O` is now claimed in BOTH tables: sketch ⇧O is the 2D Offset tool, model
+ *     ⇧O is the 3D Offset face (SCHEMA §7.3). SAME operation, one dimension
+ *     apart, so one chord means one thing in both modes — mode-resolved exactly
+ *     like `F` (2D vs 3D fillet), `T`, `D` and `R`. This deliberately RETIRES the
+ *     old cross-mode `⇧O`-in-model-mode → sketch-offset fallback (which STARTED A
+ *     SKETCH): with a face selected, ⇧O in model mode now means "offset that
+ *     face", which is what a modeller pressing it there is asking for.
  *
  * AUTO-MODE: a key bound only in the OTHER mode resolves cross-mode (tool
  * actions only) so shortcuts drive the automatic mode switch — see
@@ -108,6 +114,8 @@ export const MODEL_KEYS: KeyBinding[] = [
   // M6b model ops (K/P/C/M are free in model mode; C/M also serve sketch tools
   // in sketch mode, resolved by `mode` exactly as R does — revolve vs rectangle).
   { key: "k", action: { type: "tool", tool: "shell" } },
+  // OffsetFace. An exact shift chord — see COLLISIONS on ⇧O.
+  { key: "o", shift: true, action: { type: "tool", tool: "offsetFace" } },
   { key: "p", action: { type: "tool", tool: "linearPattern" } },
   { key: "c", action: { type: "tool", tool: "circularPattern" } },
   { key: "m", action: { type: "tool", tool: "mirror" } },

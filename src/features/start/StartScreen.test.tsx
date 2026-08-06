@@ -79,7 +79,11 @@ describe("StartScreen", () => {
 
     // Editor shell (F-WP3) mounts — its titlebar File menu is a stable marker
     // (AUTO-MODE deleted the Model⇄Sketch toggle; the mode is tool-derived now).
-    expect(await screen.findByRole("button", { name: "File" })).toBeInTheDocument();
+    // Longer timeout: EditorScreen is now a lazy chunk (App.tsx), and a cold
+    // vite-node transform of its ~130-module tree can exceed the 1000ms default.
+    expect(
+      await screen.findByRole("button", { name: "File" }, { timeout: 5000 }),
+    ).toBeInTheDocument();
   });
 
   // ── Import STEP (start-screen lane) ───────────────────────────────────────
@@ -94,7 +98,10 @@ describe("StartScreen", () => {
 
     await user.click(screen.getByRole("button", { name: /Import STEP/ }));
 
-    expect(await screen.findByRole("button", { name: "File" })).toBeInTheDocument();
+    // Longer timeout: EditorScreen is a lazy chunk now (see the New-project test).
+    expect(
+      await screen.findByRole("button", { name: "File" }, { timeout: 5000 }),
+    ).toBeInTheDocument();
     expect(stepDialog).toHaveBeenCalledTimes(1);
     expect(openDialog).not.toHaveBeenCalled();
     expect(appStore.getState().importError).toBeNull();

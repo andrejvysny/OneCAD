@@ -58,6 +58,8 @@ import type {
   Lod,
   NeedsRepairEvent,
   OperationOp,
+  PrepareOffsetFaceRequest,
+  PrepareOffsetFaceResult,
   PromotedElement,
   PromotePick,
   RecentProject,
@@ -148,6 +150,7 @@ const CMD = {
   addSketchOnFace: "add_sketch_on_face",
   elementInfo: "element_info",
   massProperties: "query_mass_properties",
+  prepareOffsetFace: "prepare_offset_face",
   previewOp: "preview_op",
   resolveRefs: "resolve_refs",
   clearWorkerCircuit: "clear_worker_circuit",
@@ -535,6 +538,13 @@ export function createTauriClient(): CadClient {
     documentStore.getState().regenStarted();
   }
 
+  /**
+   * Prefix of the sticky status-bar hint {@link onRegenFinishedEvent} raises for an
+   * UNCORRELATED regen failure. Exported so the handler can recognize — and a test
+   * can pin — that a later clean publish clears exactly this hint and no other.
+   */
+  const REGEN_FAILED_HINT_PREFIX = "Geometry rebuild failed — ";
+
   function onRegenFinishedEvent(rf: RegenFinished): void {
     // Paired with `regen-started`, CLAMPED at zero in the store: a no-op regen
     // finishes without ever having started, so completions outnumber starts.
@@ -553,7 +563,7 @@ export function createTauriClient(): CadClient {
       // viewport just quietly shows nothing.
       if (awaiters.size === 0) {
         const reason = rf.message ?? failed[0]?.message ?? "see the history list";
-        viewportStore.getState().setStatusHint(`Geometry rebuild failed — ${reason}`, {
+        viewportStore.getState().setStatusHint(`${REGEN_FAILED_HINT_PREFIX}${reason}`, {
           severity: "error",
           sticky: true,
         });
@@ -563,6 +573,16 @@ export function createTauriClient(): CadClient {
         "ipc",
         `regen-finished: outcome=${rf.outcome} rev=${rf.revision} srcRev=${rf.sourceRevision ?? "?"}`,
       );
+      // Only a clean publish clears the sticky failure hint (this branch already
+      // excludes publishes carrying failedSteps): superseded/cancelled/noop rebuilt
+      // nothing, so the error must stay on screen. Clear only OUR hint — the
+      // exitIsolate discipline.
+      if (
+        rf.outcome === "published" &&
+        viewportStore.getState().statusHint?.message.startsWith(REGEN_FAILED_HINT_PREFIX)
+      ) {
+        viewportStore.getState().setStatusHint(null);
+      }
     }
     resolveRegenFinished(rf);
   }
@@ -1472,6 +1492,36 @@ export function createTauriClient(): CadClient {
     return call<MassProperties>(CMD.massProperties, { bodyId: wireBodyId });
   }
 
+  /**
+   * `PrepareOffsetFace` (SCHEMA §7.6) — the read-only OffsetFace authoring
+   * handshake. Snapshot-FENCED, unlike the advisory §7.5 reads: the closure it
+   * returns is about to be FROZEN into a document record, so a stale head is
+   * refused rather than answered against different topology.
+   *
+   * `snapshotId` defaults to the transport's own `currentSnapshotId` — the same
+   * value `promoteSelection` fences with. A caller that has no snapshot to hand
+   * (every caller today) must not invent one.
+   *
+   * A REFUSAL comes back inside the result, not as a rejection (`ok:true`
+   * semantics); only a malformed request or a dead worker rejects.
+   */
+  async function prepareOffsetFace(req: PrepareOffsetFaceRequest): Promise<PrepareOffsetFaceResult> {
+    return call<PrepareOffsetFaceResult>(CMD.prepareOffsetFace, {
+      snapshotId: req.snapshotId ?? currentSnapshotId,
+      // Same `body_<uuid>` wire form promoteSelection uses; `document-changed`
+      // hands the frontend a bare uuid. The two address rungs are MUTUALLY
+      // EXCLUSIVE on the wire (the command rejects a pick carrying both), so an
+      // empty string is normalized away rather than sent as a present-but-blank key.
+      pickedFaces: req.pickedFaces.map((p) => ({
+        bodyId: p.bodyId ? (p.bodyId.startsWith("body_") ? p.bodyId : `body_${p.bodyId}`) : null,
+        topoKey: p.elementId ? null : (p.topoKey ?? null),
+        elementId: p.elementId ?? null,
+      })),
+      chainTangentFaces: req.chainTangentFaces,
+      distanceType: req.distanceType,
+    });
+  }
+
   async function promoteSelection(bodyId: string, picks: PromotePick[]): Promise<PromotedElement[]> {
     // promote_selection wants the `body_<uuid>` wire form; document-changed hands
     // the frontend a bare uuid, so prefix it here (get_mesh keeps the bare form).
@@ -1531,15 +1581,20 @@ export function createTauriClient(): CadClient {
       return call<string | null>(CMD.stepFileDialog);
     },
 
-    async saveDocument(path?: string): Promise<void> {
+    async saveDocument(path?: string, previewPng?: string | null): Promise<void> {
       // `path` null ⇒ the backend reuses the last save path (an unsaved document
       // with no path rejects with an io error; the caller falls back to Save As).
-      await call<void>(CMD.saveDocument, { path: path ?? null });
+      // `previewPng` null ⇒ no thumbnail this save; the container keeps whatever
+      // preview it already had. tauri v2 maps `previewPng` → Rust `preview_png`.
+      await call<void>(CMD.saveDocument, {
+        path: path ?? null,
+        previewPng: previewPng ?? null,
+      });
     },
-    async saveDocumentAs(): Promise<string | null> {
+    async saveDocumentAs(previewPng?: string | null): Promise<string | null> {
       const path = await call<string | null>(CMD.saveFileDialog);
       if (!path) return null; // cancelled
-      await call<void>(CMD.saveDocument, { path });
+      await call<void>(CMD.saveDocument, { path, previewPng: previewPng ?? null });
       return path;
     },
     async exportStep(): Promise<string | null> {
@@ -1635,6 +1690,7 @@ export function createTauriClient(): CadClient {
     faceSketchPlane,
     elementInfo,
     massProperties,
+    prepareOffsetFace,
     resolveRefs,
     applyEditCommand,
     clearWorkerCircuit,

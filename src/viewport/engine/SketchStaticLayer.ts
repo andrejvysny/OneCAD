@@ -3,13 +3,15 @@
  * sketch in MODEL mode (Fusion-style). One group per sketch id, keyed under a
  * root group in `sketchRoot`:
  *   - fills  : one selectable mesh per triangulated profile region,
- *   - curves : thin LineSegments for the entity outlines,
+ *   - curves : a fat `LineSegments2` DRAW pass (dpr-normalized CSS-px width,
+ *     see `SketchObject.cssLineWidth`) plus a plain, invisible `LineSegments`
+ *     PICK PROXY carrying the same geometry — see `hitTest` below for why,
  *   - dots   : constant-size THREE.Points at entity vertices.
  *
  * Everything is authored in plane (u,v) coordinates inside a group carrying the
  * plane basis matrix (see sketchBasis), so local (u,v,0) → world. This layer does
  * NOT reuse SketchObject (that one is edit-mode bound); it reuses the pure
- * `entityPolyline` + palette + planeBasisMatrix only.
+ * `entityPolyline` + `cssLineWidth` + palette + planeBasisMatrix only.
  *
  * State it renders: per-sketch visibility (tree eye), the ONE sketch being edited
  * (hidden — the live SketchObject owns it), hover + selection tint. Picking
@@ -20,8 +22,11 @@
  * raycast right after setSketch resolves even before the next render frame.
  */
 import * as THREE from "three";
+import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
+import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
+import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
 import type { SketchEntity, SketchPlane, SketchRegion } from "@/ipc/types";
-import { entityPolyline } from "./SketchObject";
+import { cssLineWidth, entityPolyline } from "./SketchObject";
 import { planeBasisMatrix } from "./sketchBasis";
 import { palette } from "./palette";
 import { RENDER_ORDER } from "./renderOrder";
@@ -29,6 +34,7 @@ import { RENDER_ORDER } from "./renderOrder";
 const FILL_OPACITY = 0.18;
 const FILL_OPACITY_ACTIVE = 0.3;
 const DOT_SIZE = 5;
+const STATIC_CURVE_WIDTH = cssLineWidth(2);
 
 export interface SketchStaticData {
   plane: SketchPlane;
@@ -61,8 +67,12 @@ interface StaticFill {
 
 interface StaticEntry {
   group: THREE.Group;
+  /** PICK PROXY: invisible plain LineSegments, geometry-only — see hitTest. */
   lines: THREE.LineSegments;
   lineMat: THREE.LineBasicMaterial;
+  /** DRAW pass: the fat line the user actually sees. */
+  drawLines: LineSegments2;
+  drawLineMat: LineMaterial;
   points: THREE.Points;
   pointsMat: THREE.PointsMaterial;
   fills: Map<string, StaticFill>;
@@ -165,7 +175,7 @@ export class SketchStaticLayer {
       const fillGeo = buildFillGeometry(region);
       if (!fillGeo) continue;
       const fillMat = new THREE.MeshBasicMaterial({
-        color: palette.hoverAccent(),
+        color: palette.hover3d(),
         transparent: true,
         opacity: FILL_OPACITY,
         depthWrite: false,
@@ -189,20 +199,45 @@ export class SketchStaticLayer {
     // tinted/stippled by it. Depth test stays on: bodies still occlude.
     const segPos: number[] = [];
     for (const e of entities) polylineToSegments(entityPolyline(e), segPos);
+
+    // PICK PROXY: a plain LineSegments, kept invisible. `hitTest` raycasts an
+    // EXPLICIT object list (not traverseVisible), so an invisible object costs
+    // zero GPU — the renderer skips it before buffer upload — while this class
+    // still gives bare-`new THREE.Raycaster(...)` (no camera/resolution) test
+    // compatibility and world-unit `Line.threshold` semantics that
+    // LineSegments2's raycast (camera+resolution dependent) cannot. Body edges
+    // (P3) will raycast the visible LineSegments2 natively instead, because
+    // the Picker gathers pickable objects via `traverseVisible`.
     const lineGeo = new THREE.BufferGeometry();
     lineGeo.setAttribute("position", new THREE.Float32BufferAttribute(segPos, 3));
     lineGeo.computeBoundingSphere();
     const lineMat = new THREE.LineBasicMaterial({
-      color: palette.sketchFull(),
+      color: palette.sketchUnder(),
       transparent: true,
       depthWrite: false,
       toneMapped: false,
     });
     const lines = new THREE.LineSegments(lineGeo, lineMat);
+    lines.visible = false;
     lines.renderOrder = RENDER_ORDER.STATIC_CURVES;
     lines.userData.sketchId = id;
     lines.userData.sketchStaticKind = "sketch";
     group.add(lines);
+
+    // DRAW pass: fat LineSegments2, dpr-normalized CSS-px width (SketchObject
+    // precedent) — this is what actually paints on screen.
+    const drawLineGeo = new LineSegmentsGeometry();
+    drawLineGeo.setPositions(segPos);
+    const drawLineMat = new LineMaterial({
+      color: palette.sketchUnder().getHex(),
+      linewidth: STATIC_CURVE_WIDTH,
+      transparent: true,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    const drawLines = new LineSegments2(drawLineGeo, drawLineMat);
+    drawLines.renderOrder = RENDER_ORDER.STATIC_CURVES;
+    group.add(drawLines);
 
     // Vertex dots.
     const dotPos: number[] = [];
@@ -224,7 +259,7 @@ export class SketchStaticLayer {
 
     this.root.add(group);
     group.updateMatrixWorld(true);
-    return { group, lines, lineMat, points, pointsMat, fills, visible: true };
+    return { group, lines, lineMat, drawLines, drawLineMat, points, pointsMat, fills, visible: true };
   }
 
   removeSketch(id: string): void {
@@ -291,9 +326,10 @@ export class SketchStaticLayer {
     const color = sketchSelected
       ? palette.sketchSelected()
       : sketchHovered
-        ? palette.hoverAccent()
-        : palette.sketchFull();
+        ? palette.hover3d()
+        : palette.sketchUnder();
     e.lineMat.color.copy(color);
+    e.drawLineMat.color.copy(color);
     e.pointsMat.color.copy(color);
     for (const [regionId, fill] of e.fills) {
       const regionKey = sketchStaticHitKey({ kind: "sketchRegion", sketchId: id, regionId });
@@ -303,7 +339,7 @@ export class SketchStaticLayer {
         (this.hover?.kind === "sketchRegion" &&
           this.hover.sketchId === id &&
           this.hover.regionId === regionId);
-      fill.mat.color.copy(selected ? palette.sketchSelected() : palette.hoverAccent());
+      fill.mat.color.copy(selected ? palette.sketchSelected() : palette.hover3d());
       fill.mat.opacity = selected || hovered ? FILL_OPACITY_ACTIVE : FILL_OPACITY;
     }
   }
@@ -344,6 +380,8 @@ export class SketchStaticLayer {
   private disposeEntry(e: StaticEntry): void {
     e.lines.geometry.dispose();
     e.lineMat.dispose();
+    e.drawLines.geometry.dispose();
+    e.drawLineMat.dispose();
     e.points.geometry.dispose();
     e.pointsMat.dispose();
     for (const fill of e.fills.values()) {

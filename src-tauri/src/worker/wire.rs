@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use onecad_core::document::body::BodyLifecycleEvent;
-use onecad_core::document::record::{ExtrudeMode, KnownOperation, Operation};
+use onecad_core::document::record::{ExtrudeMode, KnownOperation, OffsetDistanceType, Operation};
 use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef};
 use onecad_core::document::repair::RepairItem;
 use onecad_core::ids::{
@@ -33,10 +33,10 @@ use onecad_core::math::{Vec2, Vec3};
 use onecad_core::regen::{
     AcceptResult, AcquireRequest, BodySelector, CheckpointArtifact, CheckpointArtifacts,
     CheckpointEnvelope, Diagnostic, ElementMapDelta, ElementMapEntry, EngineError,
-    HistoryPrefixHash, OpFailureCode, OpenSessionRequest, PlanPrepared, PlanRequest, PlanStepEvent,
-    PlannedOp, RefResolution, ResolveOutcome, ResolveRequest, RestoreRequest, SessionMode,
-    Severity, Signature, StepResult, StepSignatures, StepStatus, StoppedReason, TessellateRequest,
-    WorkerElementEvidence, WorkerHead, ARTIFACT_SCHEMA_VERSION,
+    HistoryPrefixHash, Lod, OpFailureCode, OpenSessionRequest, PlanPrepared, PlanRequest,
+    PlanStepEvent, PlannedOp, PreparedMeshRef, RefResolution, ResolveOutcome, ResolveRequest,
+    RestoreRequest, SessionMode, Severity, Signature, StepResult, StepSignatures, StepStatus,
+    StoppedReason, TessellateRequest, WorkerElementEvidence, WorkerHead, ARTIFACT_SCHEMA_VERSION,
 };
 use onecad_core::sketch::WorldPlane;
 use onecad_core::sketch::{
@@ -51,7 +51,7 @@ use crate::dto::{
     SketchUpsertDto,
 };
 
-use super::{lod_str, StepInspection};
+use super::{lod_from_str, lod_str, StepInspection};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // BodyId ↔ wire (`body_<opId>`)
@@ -73,7 +73,7 @@ use super::{lod_str, StepInspection};
 // across reopen and cannot be cross-contaminated between documents/tests.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use onecad_core::document::body::split_child_uuid;
 
@@ -504,6 +504,24 @@ fn wire_op_inputs(
         Operation::Known(KnownOperation::Hole(p)) => {
             vec![body_input_ref(p.target_body), element_ref_wire(&p.face)]
         }
+        // OffsetFace: the operative faces in stored order, then the `Total`
+        // opposite face LAST when present (SCHEMA §7.3 — the slot order is
+        // NORMATIVE and is mirrored verbatim by `KnownOperation::element_refs_mut`,
+        // `document_runtime::element_ref_input` and `InputPath::OffsetFaceFace` /
+        // `OffsetFaceOpposite`).
+        //
+        // Typed refs ONLY — deliberately no bare-`faceIds` fallback like
+        // `edge_input_refs`'. OffsetFace is new in v2 and its session validation
+        // requires the `faces`/`faceIds` lockstep, so a bare-id-only record cannot
+        // be authored; synthesizing element-only refs for one would add slots the
+        // three mirroring tables do not have, which is the H9 silent-mis-repair
+        // hazard. `params.targetBodyId` carries the operated body.
+        Operation::Known(KnownOperation::OffsetFace(p)) => p
+            .faces
+            .iter()
+            .chain(p.opposite_face.iter())
+            .map(element_ref_wire)
+            .collect(),
         Operation::Known(KnownOperation::Extrude(p)) => {
             let mut v = Vec::new();
             if p.mode == ExtrudeMode::ToFace {
@@ -796,12 +814,32 @@ fn parse_diagnostics(v: Option<&Value>) -> Vec<Diagnostic> {
 // PlanPrepared (SCHEMA §7.2)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Parses a terminal `PlanPrepared` result. `job` is the [`JobId`] Rust sent (the
-/// executor checks the prepare is for *this* job), not re-parsed from the wire.
+/// Parses a terminal `PlanPrepared` result, ignoring any inline mesh artifacts.
 ///
 /// # Errors
 /// A human reason on a missing `preparedSnapshotId` or a malformed `bodyIds`.
 pub fn parse_plan_prepared(job: JobId, result: &Value) -> Result<PlanPrepared, String> {
+    parse_plan_prepared_with_artifacts(job, result, None, &[])
+}
+
+/// Parses a terminal `PlanPrepared` result, lifting the optional inline
+/// `artifacts.tessellate` meshes out of the resp's binary tail (SCHEMA §7.2).
+/// `job` is the [`JobId`] Rust sent (the executor checks the prepare is for *this*
+/// job), not re-parsed from the wire.
+///
+/// The artifacts are a **cache fill only** — a missing or malformed one degrades
+/// to the `Tessellate` pull and never fails the plan (see
+/// [`parse_plan_artifact_meshes`]).
+///
+/// # Errors
+/// A human reason on a missing `preparedSnapshotId` or a malformed `bodyIds`.
+/// Never on an artifact defect.
+pub fn parse_plan_prepared_with_artifacts(
+    job: JobId,
+    result: &Value,
+    sections: Option<&[BinSection]>,
+    tail: &[u8],
+) -> Result<PlanPrepared, String> {
     let prepared_snapshot_id = SnapshotId(
         result
             .get("preparedSnapshotId")
@@ -830,7 +868,268 @@ pub fn parse_plan_prepared(job: JobId, result: &Value) -> Result<PlanPrepared, S
                 .unwrap_or("")
                 .to_string(),
         ),
+        artifact_meshes: parse_plan_artifact_meshes(result, sections, tail)
+            .into_iter()
+            .map(|m| PreparedMeshRef {
+                body: m.body,
+                lod: m.lod,
+                bytes: m.bytes,
+            })
+            .collect(),
     })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inline tessellate artifacts on the ExecutePlan terminal (SCHEMA §7.2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The most inline artifact geometry one `ExecutePlan` terminal may contribute
+/// (256 MiB). A frame that large is already pathological; the cap keeps a
+/// misbehaving worker from making Rust allocate the whole tail into the cache.
+const ARTIFACT_INGEST_CAP: usize = 256 * 1024 * 1024;
+
+/// One MESH1 blob lifted from an `ExecutePlan` terminal's inline tessellate
+/// artifact — a body's mesh the worker already computed while preparing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedMesh {
+    pub body: BodyId,
+    pub lod: Lod,
+    pub bytes: Arc<Vec<u8>>,
+}
+
+/// Lifts `result.artifacts.tessellate.meshes[]` (SCHEMA §7.2, §7.6-shaped handles)
+/// out of the terminal resp's binary tail.
+///
+/// **This never fails a plan.** The artifacts are an optimization: they let Rust
+/// seed its mesh cache instead of issuing one `Tessellate` round-trip per body.
+/// Every absence and every defect therefore degrades to "not cached" — the pull
+/// path still serves that body (Invariant 7: a cache is acceleration, never a
+/// correctness input):
+///
+/// * no `artifacts` key at all (an idempotent cached re-return deliberately omits
+///   it, and a request without `artifacts.tessellate` never gets one) ⇒ empty;
+/// * a bad section table ⇒ empty (all of it, since offsets can no longer be trusted);
+/// * one malformed handle (unparseable body id, wrong `snapshotId`, missing/OOB
+///   `bin`, `totalBytes`/`sha256` mismatch, invalid MESH1 header) ⇒ `warn` + skip
+///   **that** handle; the rest are still ingested;
+/// * past [`ARTIFACT_INGEST_CAP`] total bytes ⇒ `warn` once and stop.
+#[must_use]
+pub fn parse_plan_artifact_meshes(
+    result: &Value,
+    sections: Option<&[BinSection]>,
+    tail: &[u8],
+) -> Vec<PreparedMesh> {
+    parse_artifact_meshes_capped(result, sections, tail, ARTIFACT_INGEST_CAP)
+}
+
+/// [`parse_plan_artifact_meshes`] with an explicit ingest cap, so the truncation
+/// rule is testable without allocating a quarter-gigabyte fixture.
+fn parse_artifact_meshes_capped(
+    result: &Value,
+    sections: Option<&[BinSection]>,
+    tail: &[u8],
+    cap: usize,
+) -> Vec<PreparedMesh> {
+    let handles = result
+        .get("artifacts")
+        .and_then(|a| a.get("tessellate"))
+        .and_then(|t| t.get("meshes"))
+        .and_then(Value::as_array);
+    let Some(handles) = handles else {
+        // A retransmitted (idempotent cached) prepare, or a plan whose request carried
+        // no tessellate rider. Logged with `handles = 0` so "why did this regen still
+        // pull every mesh?" is answerable from the lane alone.
+        log_artifact_parse(0, 0, tail.len());
+        return Vec::new();
+    };
+    // The prepared scratch snapshot every handle must belong to. A handle stamped
+    // with a different snapshot is evidence of a worker mixing preparations, which
+    // would cache the WRONG geometry under this publish's generation.
+    let prepared_snapshot = result.get("preparedSnapshotId").and_then(Value::as_u64);
+
+    let by_name =
+        match validate_bin_sections("PlanPrepared artifacts", sections.unwrap_or(&[]), tail) {
+            Ok(map) => map,
+            Err(msg) => {
+                tracing::warn!(
+                    handles = handles.len(),
+                    "PlanPrepared tessellate artifacts dropped (section table invalid): {msg} \
+                 — falling back to Tessellate pulls"
+                );
+                log_artifact_parse(0, handles.len(), tail.len());
+                return Vec::new();
+            }
+        };
+
+    let mut meshes = Vec::with_capacity(handles.len());
+    let mut ingested = 0usize;
+    for handle in handles {
+        match artifact_mesh(handle, prepared_snapshot, &by_name, tail) {
+            Ok(mesh) => {
+                if ingested.saturating_add(mesh.bytes.len()) > cap {
+                    tracing::warn!(
+                        cap,
+                        ingested,
+                        kept = meshes.len(),
+                        total = handles.len(),
+                        "PlanPrepared tessellate artifacts exceeded the ingest cap — \
+                         remaining bodies fall back to Tessellate pulls"
+                    );
+                    break;
+                }
+                ingested += mesh.bytes.len();
+                meshes.push(mesh);
+            }
+            Err(msg) => tracing::warn!(
+                "PlanPrepared tessellate artifact skipped ({msg}) — that body falls back \
+                 to a Tessellate pull"
+            ),
+        }
+    }
+    log_artifact_parse(meshes.len(), handles.len(), tail.len());
+    meshes
+}
+
+/// The one observability line for the artifact lane, emitted on EVERY terminal
+/// prepare — once per regen, never on a drag-frequency path. `artifact_meshes = 0`
+/// with `handles = 0` is the retransmit / no-rider shape; a large `tail_bytes` is
+/// the §5.2 inline-past-`chunkSize` case worth noticing.
+fn log_artifact_parse(artifact_meshes: usize, handles: usize, tail_bytes: usize) {
+    tracing::info!(
+        artifact_meshes,
+        handles,
+        tail_bytes,
+        "PlanPrepared: inline tessellate artifacts parsed"
+    );
+}
+
+/// Decodes and verifies ONE §7.6 mesh handle against the resp tail.
+fn artifact_mesh(
+    handle: &Value,
+    prepared_snapshot: Option<u64>,
+    by_name: &HashMap<&str, &BinSection>,
+    tail: &[u8],
+) -> Result<PreparedMesh, String> {
+    let body_str = handle
+        .get("bodyId")
+        .and_then(Value::as_str)
+        .ok_or("mesh handle missing bodyId")?;
+    let body = parse_body_id(body_str)?;
+    // `format` is informational; only MESH1 is transportable here (Invariant 5).
+    match handle.get("format").and_then(Value::as_str) {
+        None | Some("MESH1") => {}
+        Some(other) => {
+            return Err(format!(
+                "mesh handle {body_str:?} format {other:?} != MESH1"
+            ))
+        }
+    }
+    if let (Some(want), Some(got)) = (
+        prepared_snapshot,
+        handle.get("snapshotId").and_then(Value::as_u64),
+    ) {
+        if want != got {
+            return Err(format!(
+                "mesh handle {body_str:?} snapshotId {got} != preparedSnapshotId {want}"
+            ));
+        }
+    }
+    // Inline only: an ExecutePlan artifact never streams (the worker appends the
+    // blob to this very resp's tail), so a `streamId` handle has no frames to join.
+    let name = handle
+        .get("bin")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("mesh handle {body_str:?} has no inline `bin` section"))?;
+    let section = by_name
+        .get(name)
+        .ok_or_else(|| format!("mesh handle {body_str:?} names absent bin section {name:?}"))?;
+    let start = section.off as usize;
+    let end = start
+        .checked_add(section.len as usize)
+        .ok_or_else(|| format!("mesh handle {body_str:?} bin section range overflow"))?;
+    let blob = tail
+        .get(start..end)
+        .ok_or_else(|| format!("mesh handle {body_str:?} bin section {name:?} out of range"))?;
+
+    let total = handle.get("totalBytes").and_then(Value::as_u64);
+    let sha = handle.get("sha256").and_then(Value::as_str);
+    verify_mesh(blob, total, sha).map_err(|e| match e {
+        EngineError::Protocol { message } => format!("mesh handle {body_str:?}: {message}"),
+        other => format!("mesh handle {body_str:?}: {other:?}"),
+    })?;
+
+    Ok(PreparedMesh {
+        body,
+        // Unknown ⇒ Coarse, matching the pull path's tolerant reading. The rider
+        // Rust attaches is Coarse, so this is the identity in practice.
+        lod: lod_from_str(
+            handle
+                .get("lod")
+                .and_then(Value::as_str)
+                .unwrap_or("coarse"),
+        ),
+        bytes: Arc::new(blob.to_vec()),
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MESH1 integrity (shared by the Tessellate pull and the inline plan artifacts)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Reconciles a manifest-level and a resp-level copy of an integrity field: both
+/// present and unequal ⇒ error; otherwise the present value (manifest preferred),
+/// or `None` when neither carries it (F5).
+///
+/// # Errors
+/// [`EngineError::Protocol`] when both copies are present and disagree.
+pub(super) fn reconcile_field<T: PartialEq + std::fmt::Display>(
+    manifest: Option<T>,
+    resp: Option<T>,
+    field: &str,
+) -> Result<Option<T>, EngineError> {
+    match (manifest, resp) {
+        (Some(m), Some(r)) => {
+            if m != r {
+                return Err(EngineError::Protocol {
+                    message: format!("mesh {field} mismatch: manifest {m} != resp {r}"),
+                });
+            }
+            Ok(Some(m))
+        }
+        (Some(m), None) => Ok(Some(m)),
+        (None, r) => Ok(r),
+    }
+}
+
+/// Verifies a MESH1 blob's declared size + SHA-256 (when declared) and validates
+/// its header (Invariant 5 forward-verbatim).
+///
+/// # Errors
+/// [`EngineError::Protocol`] on a length mismatch, a digest mismatch, or an
+/// invalid MESH1 header.
+pub(super) fn verify_mesh(
+    blob: &[u8],
+    total: Option<u64>,
+    sha: Option<&str>,
+) -> Result<(), EngineError> {
+    if let Some(t) = total {
+        if blob.len() as u64 != t {
+            return Err(EngineError::Protocol {
+                message: "MESH1 assembled length != totalBytes".into(),
+            });
+        }
+    }
+    if let Some(want) = sha {
+        if crate::imports::sha256_hex(blob) != want {
+            return Err(EngineError::Protocol {
+                message: "MESH1 SHA-256 mismatch (corrupt stream)".into(),
+            });
+        }
+    }
+    onecad_protocol::mesh::validate_mesh_blob(blob).map_err(|e| EngineError::Protocol {
+        message: format!("MESH1 header invalid: {e}"),
+    })?;
+    Ok(())
 }
 
 fn parse_per_step(v: Option<&Value>) -> Result<Vec<StepResult>, String> {
@@ -2094,6 +2393,175 @@ pub fn parse_project_face_boundary(result: &Value) -> Result<Option<ProjectionPa
     }))
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// OffsetFace authoring handshake (SCHEMA §7.6 `PrepareOffsetFace`)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One `pickedFaces[]` entry (SCHEMA §7.6 `PrepareOffsetFace`): the same two
+/// mutually-exclusive addressing rungs [`FaceAddress`] models, plus the `bodyId`
+/// the `topoKey` rung resolves against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OffsetFacePick<'a> {
+    /// The picked face's body. Required by the `topoKey` rung; the `elementId`
+    /// rung overwrites it from the partition entry, so it is optional there.
+    pub body: Option<BodyId>,
+    pub address: FaceAddress<'a>,
+}
+
+/// `PrepareOffsetFace.args` (SCHEMA §7.6) — the READ-ONLY half of the OffsetFace
+/// authoring transaction.
+///
+/// Rust sends picks and reads back TopoKey EVIDENCE; it never asks the worker for
+/// an `ElementId` and the worker never mints one (Invariant 2). `snapshotId` is a
+/// real fence here, unlike the advisory §7.5 reads: the closure this returns is
+/// about to be FROZEN into a document record, so a stale head must be refused
+/// rather than answered.
+#[must_use]
+pub fn prepare_offset_face_args(
+    snapshot: SnapshotId,
+    picks: &[OffsetFacePick<'_>],
+    chain_tangent_faces: bool,
+    distance_type: OffsetDistanceType,
+) -> Value {
+    let picked: Vec<Value> = picks
+        .iter()
+        .map(|p| {
+            let mut entry = json!({});
+            if let Some(b) = p.body {
+                entry["bodyId"] = Value::String(body_id_wire(b));
+            }
+            p.address.write_into(&mut entry);
+            entry
+        })
+        .collect();
+    json!({
+        "snapshotId": snapshot.0,
+        "pickedFaces": picked,
+        "chainTangentFaces": chain_tangent_faces,
+        "distanceType": offset_distance_type_wire(distance_type),
+    })
+}
+
+/// The SCHEMA §7.3/§7.6 wire spelling of an [`OffsetDistanceType`].
+///
+/// Goes through the core serde rather than a hand-written table so the two can
+/// never drift: the params `distanceType` and this verb's argument are the SAME
+/// enumeration, and a divergence would refuse a perfectly good handshake.
+fn offset_distance_type_wire(t: OffsetDistanceType) -> String {
+    serde_json::to_value(t)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "Offset".into())
+}
+
+/// Parses a `PrepareOffsetFace` result into the frontend DTO (SCHEMA §7.6).
+///
+/// **A `refusal` is an ANSWER, not an error** — `crossBody`, `chainMismatch`,
+/// `unsupportedSurface` and friends all arrive with `ok:true` and are handed to
+/// the caller intact, so the tool can explain itself instead of failing blank.
+/// A structurally malformed result IS an error: the caller is about to freeze
+/// this closure into a record, and a defaulted `targetBodyId` or a silently empty
+/// `faces` list would freeze the WRONG one.
+///
+/// `descriptor` and `anchor` ride through as opaque `serde_json::Value`s — they
+/// are worker-owned evidence the core never interprets (Invariant 2), and Rust
+/// re-emits them verbatim when it authors the typed refs.
+///
+/// # Errors
+/// A human reason naming the malformed field.
+pub fn parse_prepare_offset_face(
+    result: &Value,
+) -> Result<crate::dto::PrepareOffsetFaceDto, String> {
+    let snapshot_id = result
+        .get("snapshotId")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "PrepareOffsetFace: result is missing `snapshotId`".to_string())?;
+    let target_body_id = result
+        .get("targetBodyId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let refusal = parse_offset_refusal(result.get("refusal"))?;
+    // A refusal answers INSTEAD of a closure, so the shape checks below are only
+    // meaningful on the accepting path.
+    if refusal.is_none() && target_body_id.is_empty() {
+        return Err("PrepareOffsetFace: accepted result carries no `targetBodyId`".into());
+    }
+    let faces = match result.get("faces") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(parse_offset_face_evidence)
+            .collect::<Result<Vec<_>, _>>()?,
+        None | Some(Value::Null) => Vec::new(),
+        Some(_) => return Err("PrepareOffsetFace: `faces` must be an array".into()),
+    };
+    if refusal.is_none() && faces.is_empty() {
+        return Err("PrepareOffsetFace: accepted result carries an empty `faces` closure".into());
+    }
+    let opposite_face = match result.get("oppositeFace") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(parse_offset_face_evidence(v)?),
+    };
+    let dims = result.get("currentDims");
+    Ok(crate::dto::PrepareOffsetFaceDto {
+        snapshot_id,
+        target_body_id,
+        faces,
+        opposite_face,
+        current_dims: crate::dto::OffsetCurrentDimsDto {
+            radius: offset_finite(dims, "radius"),
+            thickness: offset_finite(dims, "thickness"),
+        },
+        refusal,
+    })
+}
+
+/// A `currentDims` reading, present only when the worker could measure it. A
+/// non-finite number is dropped rather than surfaced — an absent seed makes the
+/// tool ask for a value, a `NaN` seed would render as one.
+fn offset_finite(dims: Option<&Value>, key: &str) -> Option<f64> {
+    dims?
+        .get(key)
+        .and_then(Value::as_f64)
+        .filter(|v| v.is_finite())
+}
+
+fn parse_offset_face_evidence(v: &Value) -> Result<crate::dto::OffsetFaceEvidenceDto, String> {
+    let topo_key = v
+        .get("topoKey")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "PrepareOffsetFace: a face entry is missing `topoKey`".to_string())?;
+    Ok(crate::dto::OffsetFaceEvidenceDto {
+        topo_key: topo_key.to_string(),
+        picked: v.get("picked").and_then(Value::as_bool).unwrap_or(false),
+        anchor: v.get("anchor").filter(|a| !a.is_null()).cloned(),
+        descriptor: v.get("descriptor").filter(|d| !d.is_null()).cloned(),
+    })
+}
+
+fn parse_offset_refusal(
+    v: Option<&Value>,
+) -> Result<Option<crate::dto::OffsetFaceRefusalDto>, String> {
+    let Some(v) = v.filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let code = v
+        .get("code")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "PrepareOffsetFace: `refusal` is missing `code`".to_string())?;
+    Ok(Some(crate::dto::OffsetFaceRefusalDto {
+        code: code.to_string(),
+        message: v
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        faces: str_array(v.get("faces")),
+    }))
+}
+
 /// Parses an `AcquireElementIds` result into worker evidence (Rust then mints the
 /// ids via [`mint_element_ids`](onecad_core::regen::mint_element_ids)). A worker
 /// `elementId` (echoed existing binding) rides through as `existing`. `fallback_body`
@@ -3092,6 +3560,230 @@ mod tests {
         let p = parse_plan_prepared(job, &result).unwrap();
         assert_eq!(p.last_valid_step, None);
         assert_eq!(p.stopped_reason, StoppedReason::NeedsRepair);
+    }
+
+    // ── Inline tessellate artifacts (SCHEMA §7.2 `artifacts.tessellate`) ─────
+    //
+    // The contract under test is the degradation rule: these bytes are a cache
+    // fill, so EVERY defect must cost at most that one body's fast path — never
+    // the plan, never the other bodies.
+
+    const SNAP: u64 = 5013;
+
+    /// A minimal but valid MESH1 blob (64-byte header, `sectionCount = 0`), padded
+    /// with `extra` trailing zero bytes so two bodies get distinguishable blobs.
+    fn mesh1(extra: usize) -> Vec<u8> {
+        let mut b = vec![0u8; 64 + extra];
+        b[0x00..0x04].copy_from_slice(&0x4D45_5348u32.to_le_bytes()); // "MESH" (LE)
+        b[0x04..0x06].copy_from_slice(&1u16.to_le_bytes()); // version
+        b
+    }
+
+    /// A §7.6 mesh handle over `blob`, all integrity fields correct.
+    fn handle(body: &str, section: &str, blob: &[u8]) -> Value {
+        json!({
+            "bodyId": body,
+            "format": "MESH1",
+            "bin": section,
+            "lod": "coarse",
+            "totalBytes": blob.len(),
+            "triangleCount": 0,
+            "sha256": crate::imports::sha256_hex(blob),
+            "snapshotId": SNAP,
+        })
+    }
+
+    /// A terminal `PlanPrepared` result carrying `handles`, plus the section table
+    /// and tail that back them (blobs laid out back-to-back in handle order).
+    fn artifact_fixture(blobs: &[(&str, Vec<u8>)]) -> (Value, Vec<BinSection>, Vec<u8>) {
+        let mut sections = Vec::new();
+        let mut tail = Vec::new();
+        let mut handles = Vec::new();
+        for (body, blob) in blobs {
+            let name = format!("mesh:{body}");
+            sections.push(BinSection {
+                name: name.clone(),
+                off: tail.len() as u32,
+                len: blob.len() as u32,
+            });
+            handles.push(handle(body, &name, blob));
+            tail.extend_from_slice(blob);
+        }
+        let result = json!({
+            "planPrepared": true, "preparedSnapshotId": SNAP, "lastValidStep": 0,
+            "stoppedReason": "completed", "perStepResults": [], "historyPrefixHash": "9c4d",
+            "artifacts": { "tessellate": { "meshes": handles } },
+        });
+        (result, sections, tail)
+    }
+
+    #[test]
+    fn artifact_meshes_parse_both_bodies_including_a_split_child() {
+        let op = Uuid::from_u128(0x10);
+        let plain = format!("body_{op}");
+        let child = format!("body_{op}:0");
+        let (result, sections, tail) = artifact_fixture(&[
+            (plain.as_str(), mesh1(0)),
+            (child.as_str(), mesh1(16)), // distinguishable length
+        ]);
+
+        let meshes = parse_plan_artifact_meshes(&result, Some(&sections), &tail);
+        assert_eq!(meshes.len(), 2, "both handles ingested");
+        assert_eq!(meshes[0].body, BodyId(op));
+        assert_eq!(meshes[0].lod, Lod::Coarse);
+        assert_eq!(meshes[0].bytes.len(), 64);
+        assert_eq!(
+            meshes[1].body,
+            parse_body_id(&child).unwrap(),
+            "split-child `body_<uuid>:<k>` maps to the derived uuid"
+        );
+        assert_eq!(meshes[1].bytes.len(), 80, "the right slice per section");
+
+        // And the terminal parse carries them onto PlanPrepared.
+        let p = parse_plan_prepared_with_artifacts(
+            JobId(Uuid::from_u128(7)),
+            &result,
+            Some(&sections),
+            &tail,
+        )
+        .unwrap();
+        assert_eq!(p.artifact_meshes.len(), 2);
+        assert_eq!(p.prepared_snapshot_id, SnapshotId(SNAP));
+    }
+
+    #[test]
+    fn missing_artifacts_key_is_empty_not_an_error() {
+        // The RETRANSMIT shape: the worker's idempotent cached re-return deliberately
+        // carries NO artifacts (its bytes rode the original resp's tail only).
+        let result = json!({
+            "planPrepared": true, "preparedSnapshotId": SNAP, "lastValidStep": 0,
+            "stoppedReason": "completed", "perStepResults": [], "historyPrefixHash": "9c4d",
+        });
+        assert!(parse_plan_artifact_meshes(&result, None, &[]).is_empty());
+        assert!(parse_plan_artifact_meshes(&result, Some(&[]), &[]).is_empty());
+        let p = parse_plan_prepared_with_artifacts(JobId(Uuid::from_u128(7)), &result, None, &[])
+            .expect("a retransmit still parses as a normal prepare");
+        assert!(p.artifact_meshes.is_empty());
+        assert_eq!(p.prepared_snapshot_id, SnapshotId(SNAP));
+    }
+
+    #[test]
+    fn sha_mismatch_skips_only_that_handle() {
+        let a = format!("body_{}", Uuid::from_u128(0x10));
+        let b = format!("body_{}", Uuid::from_u128(0x11));
+        let (mut result, sections, tail) =
+            artifact_fixture(&[(a.as_str(), mesh1(0)), (b.as_str(), mesh1(0))]);
+        result["artifacts"]["tessellate"]["meshes"][0]["sha256"] =
+            json!("00000000000000000000000000000000000000000000000000000000deadbeef");
+
+        let meshes = parse_plan_artifact_meshes(&result, Some(&sections), &tail);
+        assert_eq!(
+            meshes.len(),
+            1,
+            "the corrupt handle is dropped, not the plan"
+        );
+        assert_eq!(meshes[0].body, BodyId(Uuid::from_u128(0x11)));
+    }
+
+    #[test]
+    fn total_bytes_mismatch_skips_only_that_handle() {
+        let a = format!("body_{}", Uuid::from_u128(0x10));
+        let b = format!("body_{}", Uuid::from_u128(0x11));
+        let (mut result, sections, tail) =
+            artifact_fixture(&[(a.as_str(), mesh1(0)), (b.as_str(), mesh1(0))]);
+        result["artifacts"]["tessellate"]["meshes"][0]["totalBytes"] = json!(999);
+
+        let meshes = parse_plan_artifact_meshes(&result, Some(&sections), &tail);
+        assert_eq!(meshes.len(), 1);
+        assert_eq!(meshes[0].body, BodyId(Uuid::from_u128(0x11)));
+    }
+
+    #[test]
+    fn out_of_bounds_section_drops_the_artifacts_wholesale() {
+        // An OOB section means the offsets cannot be trusted at all, so nothing is
+        // ingested — but the PLAN still parses (the pull path serves every body).
+        let a = format!("body_{}", Uuid::from_u128(0x10));
+        let (result, mut sections, tail) = artifact_fixture(&[(a.as_str(), mesh1(0))]);
+        sections[0].len = tail.len() as u32 + 1;
+
+        assert!(parse_plan_artifact_meshes(&result, Some(&sections), &tail).is_empty());
+        let p = parse_plan_prepared_with_artifacts(
+            JobId(Uuid::from_u128(7)),
+            &result,
+            Some(&sections),
+            &tail,
+        )
+        .expect("a bad section table never fails the plan");
+        assert!(p.artifact_meshes.is_empty());
+    }
+
+    #[test]
+    fn absent_bin_section_skips_only_that_handle() {
+        let a = format!("body_{}", Uuid::from_u128(0x10));
+        let b = format!("body_{}", Uuid::from_u128(0x11));
+        let (mut result, sections, tail) =
+            artifact_fixture(&[(a.as_str(), mesh1(0)), (b.as_str(), mesh1(0))]);
+        result["artifacts"]["tessellate"]["meshes"][0]["bin"] = json!("mesh:nope");
+
+        let meshes = parse_plan_artifact_meshes(&result, Some(&sections), &tail);
+        assert_eq!(meshes.len(), 1);
+        assert_eq!(meshes[0].body, BodyId(Uuid::from_u128(0x11)));
+    }
+
+    #[test]
+    fn bad_mesh1_magic_skips_only_that_handle() {
+        let a = format!("body_{}", Uuid::from_u128(0x10));
+        let b = format!("body_{}", Uuid::from_u128(0x11));
+        let mut bad = mesh1(0);
+        bad[0] = 0xFF; // not "MESH"
+        let (result, sections, tail) =
+            artifact_fixture(&[(a.as_str(), bad), (b.as_str(), mesh1(0))]);
+
+        let meshes = parse_plan_artifact_meshes(&result, Some(&sections), &tail);
+        assert_eq!(meshes.len(), 1, "a non-MESH1 blob never reaches the cache");
+        assert_eq!(meshes[0].body, BodyId(Uuid::from_u128(0x11)));
+    }
+
+    #[test]
+    fn wrong_snapshot_id_skips_that_handle() {
+        // Geometry stamped with a DIFFERENT prepare would be cached under this
+        // publish's generation — the one defect that would be a correctness bug.
+        let a = format!("body_{}", Uuid::from_u128(0x10));
+        let (mut result, sections, tail) = artifact_fixture(&[(a.as_str(), mesh1(0))]);
+        result["artifacts"]["tessellate"]["meshes"][0]["snapshotId"] = json!(SNAP + 1);
+        assert!(parse_plan_artifact_meshes(&result, Some(&sections), &tail).is_empty());
+    }
+
+    #[test]
+    fn unparseable_body_id_skips_that_handle() {
+        let a = format!("body_{}", Uuid::from_u128(0x10));
+        let (mut result, sections, tail) = artifact_fixture(&[(a.as_str(), mesh1(0))]);
+        result["artifacts"]["tessellate"]["meshes"][0]["bodyId"] = json!("not-a-body");
+        assert!(parse_plan_artifact_meshes(&result, Some(&sections), &tail).is_empty());
+    }
+
+    #[test]
+    fn ingest_cap_truncates_and_keeps_the_prefix() {
+        // The production cap is 256 MiB; the rule is exercised at a scale a test can
+        // allocate. Once the running total would pass it, ingestion stops and the
+        // remaining bodies fall back to the pull.
+        let a = format!("body_{}", Uuid::from_u128(0x10));
+        let b = format!("body_{}", Uuid::from_u128(0x11));
+        let c = format!("body_{}", Uuid::from_u128(0x12));
+        let (result, sections, tail) = artifact_fixture(&[
+            (a.as_str(), mesh1(0)),  // 64
+            (b.as_str(), mesh1(0)),  // 64 ⇒ 128 total
+            (c.as_str(), mesh1(16)), // 80 ⇒ would be 208 > 200
+        ]);
+
+        let meshes = parse_artifact_meshes_capped(&result, Some(&sections), &tail, 200);
+        assert_eq!(meshes.len(), 2, "stopped at the cap");
+        assert_eq!(meshes[1].body, BodyId(Uuid::from_u128(0x11)));
+        // Uncapped, all three ride through.
+        assert_eq!(
+            parse_plan_artifact_meshes(&result, Some(&sections), &tail).len(),
+            3
+        );
     }
 
     #[test]
@@ -4198,6 +4890,96 @@ mod body_wire_tests {
         assert_eq!(w["inputs"][0]["primary"]["kind"], json!("edge"));
     }
 
+    /// SCHEMA §7.3 (2026-08-06) `op.offsetFace`: the params lower every scalar +
+    /// the bare `faceIds`, `targetBodyId` crosses in the worker's `body_<uuid>`
+    /// form, and `inputs[]` carries the typed refs in the NORMATIVE slot order
+    /// (operative faces in stored order, `Total` opposite LAST).
+    #[test]
+    fn wire_op_offset_face_lowers_params_and_the_normative_slot_order() {
+        use onecad_core::document::record::{OffsetDistanceType, OffsetFaceParams};
+
+        let body = BodyId(Uuid::from_u128(0x68));
+        let face = |el: &str| ElementRef {
+            primary: Some(PrimaryRef {
+                body,
+                element: ElementId::new(el),
+                kind: ElementKind::Face,
+                extra: Default::default(),
+            }),
+            intent: None,
+            anchor: Some(onecad_core::document::refs::AnchorIntent {
+                world_point: Vec3::new_unchecked(1.0, 2.0, 3.0),
+                surface_uv: None,
+                local_frame: None,
+                adjacency_hint: None,
+                extra: Default::default(),
+            }),
+            extra: Default::default(),
+        };
+        let lower = |p: OffsetFaceParams| {
+            let op = Operation::Known(KnownOperation::OffsetFace(p));
+            let inputs = op.derive_inputs();
+            wire_op(&planned(op, inputs))
+        };
+
+        let multi = lower(OffsetFaceParams {
+            face_ids: vec![ElementId::new("el_f1"), ElementId::new("el_f2")],
+            faces: vec![face("el_f1"), face("el_f2")],
+            distance: Scalar::new(2.5),
+            distance_type: OffsetDistanceType::Offset,
+            chain_tangent_faces: true,
+            opposite_face_id: None,
+            opposite_face: None,
+            target_body: body,
+            extra: Default::default(),
+        });
+        assert_eq!(multi["opType"], json!("OffsetFace"));
+        assert_eq!(multi["params"]["faceIds"], json!(["el_f1", "el_f2"]));
+        assert_eq!(multi["params"]["distance"], json!({ "value": 2.5 }));
+        assert_eq!(multi["params"]["distanceType"], json!("Offset"));
+        assert_eq!(multi["params"]["chainTangentFaces"], json!(true));
+        assert_eq!(
+            multi["params"]["targetBodyId"],
+            json!(body_id_wire(body)),
+            "the worker keys its BodyStore by body_<uuid>, not a bare uuid"
+        );
+        // Skip-none: an `Offset` push-pull emits no opposite-face keys at all.
+        assert!(multi["params"].get("oppositeFaceId").is_none());
+        assert!(multi["params"].get("oppositeFace").is_none());
+        // Slot table: one typed ref per operative face, in stored order.
+        let slots = multi["inputs"].as_array().expect("inputs[]");
+        assert_eq!(slots.len(), 2);
+        assert_eq!(slots[0]["primary"]["elementId"], json!("el_f1"));
+        assert_eq!(slots[1]["primary"]["elementId"], json!("el_f2"));
+        assert_eq!(
+            slots[0]["primary"]["bodyId"],
+            json!(body_id_wire(body)),
+            "a nested primary.bodyId is rewritten to wire form too"
+        );
+
+        let total = lower(OffsetFaceParams {
+            face_ids: vec![ElementId::new("el_top")],
+            faces: vec![face("el_top")],
+            distance: Scalar::new(12.0),
+            distance_type: OffsetDistanceType::Total,
+            chain_tangent_faces: false,
+            opposite_face_id: Some(ElementId::new("el_bottom")),
+            opposite_face: Some(face("el_bottom")),
+            target_body: body,
+            extra: Default::default(),
+        });
+        assert_eq!(total["params"]["distanceType"], json!("Total"));
+        assert_eq!(total["params"]["oppositeFaceId"], json!("el_bottom"));
+        let slots = total["inputs"].as_array().expect("inputs[]");
+        assert_eq!(slots.len(), 2);
+        assert_eq!(slots[0]["primary"]["elementId"], json!("el_top"));
+        assert_eq!(
+            slots[1]["primary"]["elementId"],
+            json!("el_bottom"),
+            "the Total opposite face is the LAST slot"
+        );
+    }
+
     /// SCHEMA §7.3 (2026-08-03): a two-distance chamfer's second leg reaches the
     /// worker as `params.distance2`, and an equal-leg one emits NO such key — the
     /// wire form of every existing chamfer is byte-identical.
@@ -4573,6 +5355,13 @@ mod body_wire_tests {
                 json!({ "targetBodyId": b, "face": face_ref, "point": [0,0,0], "axis": [0,0,-1], "depth": null, "holeType": "simple", "diameter": 5.0 }),
                 1,
             ),
+            // OffsetFace: one stampable slot per operative face, plus the `Total`
+            // opposite face — every ref is typed, so every slot takes evidence.
+            (
+                "OffsetFace",
+                json!({ "targetBodyId": b, "faceIds": ["el_2"], "faces": [face_ref], "distance": 2.5, "distanceType": "Total", "chainTangentFaces": false, "oppositeFaceId": "el_2", "oppositeFace": face_ref }),
+                2,
+            ),
         ];
 
         for (op_type, params, expected) in &cases {
@@ -4618,10 +5407,11 @@ mod body_wire_tests {
                 | KnownOperation::MirrorBody(_)
                 | KnownOperation::ImportStep(_)
                 | KnownOperation::TransformBody(_)
-                | KnownOperation::Hole(_) => {}
+                | KnownOperation::Hole(_)
+                | KnownOperation::OffsetFace(_) => {}
             }
         }
-        assert_eq!(cases.len(), 15, "one fixture per KnownOperation variant");
+        assert_eq!(cases.len(), 16, "one fixture per KnownOperation variant");
     }
 
     // ── HISTORY-HARDEN H9 — the repair SLOT TABLE ───────────────────────────
@@ -4837,6 +5627,21 @@ mod body_wire_tests {
                 json!({ "sourceSha256": "aa", "sourceCodec": "step", "sourceName": "x.step" }),
                 vec![],
             ),
+            (
+                "offsetFace: one slot per operative face, in `faces` order",
+                "OffsetFace",
+                json!({ "targetBodyId": b, "faceIds": ["el_2", "el_2"], "faces": [face_ref, face_ref], "distance": 2.5, "chainTangentFaces": true }),
+                vec!["face", "face"],
+            ),
+            (
+                // The `Total` opposite face is the LAST slot — a mapper that
+                // assumed "every slot is an operative face" would rebind the
+                // thickness reference as if it were part of the moved set.
+                "offsetFace Total: the opposite face is the LAST slot",
+                "OffsetFace",
+                json!({ "targetBodyId": b, "faceIds": ["el_2"], "faces": [face_ref], "distance": 12.0, "distanceType": "Total", "chainTangentFaces": false, "oppositeFaceId": "el_2", "oppositeFace": face_ref }),
+                vec!["face", "face"],
+            ),
         ];
 
         for (name, op_type, params, expected) in &cases {
@@ -4857,5 +5662,182 @@ mod body_wire_tests {
                 "{name}: inputs[] slot table — got {wired}"
             );
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PrepareOffsetFace codec (SCHEMA §7.6, 2026-08-06)
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod prepare_offset_face_tests {
+    use super::*;
+
+    fn body() -> BodyId {
+        BodyId(Uuid::from_u128(0x70))
+    }
+
+    #[test]
+    fn args_render_both_addressing_rungs_and_the_wire_body_form() {
+        let picks = [
+            OffsetFacePick {
+                body: Some(body()),
+                address: FaceAddress::TopoKey("f:22"),
+            },
+            OffsetFacePick {
+                body: None,
+                address: FaceAddress::ElementId("el_9c"),
+            },
+        ];
+        let args = prepare_offset_face_args(
+            SnapshotId(5012),
+            &picks,
+            false,
+            OffsetDistanceType::Diameter,
+        );
+        assert_eq!(args["snapshotId"], json!(5012));
+        assert_eq!(args["chainTangentFaces"], json!(false));
+        assert_eq!(args["distanceType"], json!("Diameter"));
+
+        let picked = args["pickedFaces"].as_array().expect("pickedFaces[]");
+        assert_eq!(picked[0]["bodyId"], json!(body_id_wire(body())));
+        assert_eq!(picked[0]["topoKey"], json!("f:22"));
+        assert!(
+            picked[0].get("elementId").is_none(),
+            "the two rungs are mutually exclusive — the worker branches on the \
+             PRESENCE of elementId"
+        );
+        assert_eq!(picked[1]["elementId"], json!("el_9c"));
+        assert!(picked[1].get("topoKey").is_none());
+        assert!(picked[1].get("bodyId").is_none());
+    }
+
+    /// Every distance type spells identically on the verb and in the op's own
+    /// `distanceType` param — they are the SAME enumeration.
+    #[test]
+    fn args_distance_type_matches_the_params_spelling() {
+        for t in [
+            OffsetDistanceType::Offset,
+            OffsetDistanceType::Total,
+            OffsetDistanceType::Radius,
+            OffsetDistanceType::Diameter,
+        ] {
+            let picks = [OffsetFacePick {
+                body: Some(body()),
+                address: FaceAddress::TopoKey("f:1"),
+            }];
+            let args = prepare_offset_face_args(SnapshotId(1), &picks, true, t);
+            assert_eq!(args["distanceType"], serde_json::to_value(t).unwrap());
+        }
+    }
+
+    fn accepted() -> Value {
+        json!({
+            "snapshotId": 5012,
+            "targetBodyId": "body_00000000-0000-0000-0000-000000000070",
+            "faces": [
+                { "topoKey": "f:22", "picked": true,
+                  "anchor": { "worldPoint": [1.0, 2.0, 30.0] },
+                  "descriptor": { "surfaceType": "plane" } },
+                { "topoKey": "f:23", "picked": false,
+                  "anchor": { "worldPoint": [4.0, 2.0, 30.0] },
+                  "descriptor": { "surfaceType": "plane" } }
+            ],
+            "oppositeFace": { "topoKey": "f:04",
+                              "anchor": { "worldPoint": [1.0, 2.0, 0.0] },
+                              "descriptor": { "surfaceType": "plane" } },
+            "currentDims": { "radius": 5.0, "thickness": 10.0 },
+            "refusal": null
+        })
+    }
+
+    #[test]
+    fn parses_an_accepted_closure_verbatim() {
+        let dto = parse_prepare_offset_face(&accepted()).expect("accepted result");
+        assert_eq!(dto.snapshot_id, 5012);
+        assert_eq!(
+            dto.target_body_id,
+            "body_00000000-0000-0000-0000-000000000070"
+        );
+        assert_eq!(dto.faces.len(), 2);
+        assert_eq!(dto.faces[0].topo_key, "f:22");
+        assert!(dto.faces[0].picked, "the user's pick is flagged");
+        assert!(
+            !dto.faces[1].picked,
+            "a face the tangent closure added is not"
+        );
+        assert_eq!(
+            dto.faces[0].descriptor,
+            Some(json!({ "surfaceType": "plane" })),
+            "worker-owned evidence rides through verbatim"
+        );
+        let opposite = dto.opposite_face.expect("Total opposite candidate");
+        assert_eq!(opposite.topo_key, "f:04");
+        assert!(
+            !opposite.picked,
+            "SCHEMA emits no `picked` on the opposite face — it is never operative"
+        );
+        assert_eq!(dto.current_dims.radius, Some(5.0));
+        assert_eq!(dto.current_dims.thickness, Some(10.0));
+        assert!(dto.refusal.is_none());
+    }
+
+    /// A refusal is an ANSWER (`ok:true`), so it parses cleanly even though it
+    /// carries no closure — the tool has to explain WHY it cannot offset.
+    #[test]
+    fn parses_a_refusal_without_a_closure() {
+        let dto = parse_prepare_offset_face(&json!({
+            "snapshotId": 5012,
+            "targetBodyId": "",
+            "faces": [],
+            "currentDims": {},
+            "refusal": { "code": "chainMismatch",
+                         "message": "tangent faces would move too",
+                         "faces": ["f:31"] }
+        }))
+        .expect("a refusal is a successful answer");
+        let refusal = dto.refusal.expect("refusal");
+        assert_eq!(refusal.code, "chainMismatch");
+        assert_eq!(refusal.faces, vec!["f:31".to_string()]);
+        assert!(dto.faces.is_empty());
+        assert_eq!(dto.current_dims.radius, None);
+    }
+
+    /// A structurally broken result is a PROTOCOL break, never a default: this
+    /// response is what the record FREEZES.
+    #[test]
+    fn rejects_a_malformed_result() {
+        // No snapshot echo ⇒ nothing to compare the freeze against.
+        assert!(parse_prepare_offset_face(&json!({ "targetBodyId": "body_1" })).is_err());
+        // Accepted but bodyless ⇒ the op would name no body to modify.
+        assert!(parse_prepare_offset_face(&json!({
+            "snapshotId": 1, "targetBodyId": "", "faces": [{ "topoKey": "f:1" }]
+        }))
+        .is_err());
+        // Accepted but empty ⇒ an operative set with nothing in it.
+        assert!(parse_prepare_offset_face(&json!({
+            "snapshotId": 1, "targetBodyId": "body_1", "faces": []
+        }))
+        .is_err());
+        // A face entry with no topoKey has no evidence to promote.
+        assert!(parse_prepare_offset_face(&json!({
+            "snapshotId": 1, "targetBodyId": "body_1", "faces": [{ "picked": true }]
+        }))
+        .is_err());
+        // A refusal with no code cannot be explained to anyone.
+        assert!(parse_prepare_offset_face(&json!({
+            "snapshotId": 1, "targetBodyId": "", "faces": [], "refusal": { "message": "no" }
+        }))
+        .is_err());
+    }
+
+    /// A non-finite `currentDims` reading is DROPPED, not surfaced: an absent seed
+    /// makes the tool ask for a value, a `NaN` seed would render as one.
+    #[test]
+    fn drops_a_non_finite_current_dim() {
+        let mut r = accepted();
+        r["currentDims"] = json!({ "radius": "oops" });
+        let dto = parse_prepare_offset_face(&r).expect("accepted");
+        assert_eq!(dto.current_dims.radius, None);
+        assert_eq!(dto.current_dims.thickness, None);
     }
 }

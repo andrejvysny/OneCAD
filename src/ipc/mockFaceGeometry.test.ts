@@ -15,7 +15,8 @@ import {
   worldToPlaneUv,
 } from "./mockFaceGeometry";
 import { BOX_SIZE, boxCorners } from "./mockMeshes";
-import { detectRegions, solveDof } from "./mockSketch";
+import { solveDof } from "./mockSketch";
+import { detectRegions } from "./mockRegions";
 
 describe("planeFromPointNormal — the ported in-plane axis rule", () => {
   it("a +Z normal reproduces the named XY basis EXACTLY (the +X-seed fallback)", () => {

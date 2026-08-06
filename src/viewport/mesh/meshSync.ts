@@ -39,7 +39,8 @@ import { buildBodyObject, type BodyObjectHandle } from "../engine/BodyObject";
 import { BodyMaterialLibrary } from "../engine/bodyMaterials";
 import { coerceRenderMode, RENDER_MODES, type RenderModeDef } from "../engine/renderModes";
 import { parseMeshPayload } from "./parseMeshPayload";
-import { buildBodyObjects, disposeAll, refreshFaceColors, remove, swap } from "./meshRegistry";
+import { buildBodyObjects, disposeAll, getEntry, refreshFaceColors, remove, swap } from "./meshRegistry";
+import { rebindSelectionForBody } from "./rebindPick";
 
 const DEFAULT_LOD: Lod = "coarse";
 
@@ -153,6 +154,27 @@ export class MeshIngest {
     for (const id of [...this.bodyObjects.keys()]) {
       if (!(id in bodies)) this.dropBody(id);
     }
+    this.updateGeometryPending();
+  }
+
+  /**
+   * "Rebuilding geometry…" chip (viewportStore.geometryPending): true while the
+   * document is READY but at least one VISIBLE body still has no scene object —
+   * the empty-viewport window after open, before the first mesh (or a retry)
+   * lands. COUNT-based, not "any mesh landed": with N visible bodies, only some
+   * of which have loaded, the chip must stay up until every one of them has.
+   * Scoped to visible bodies only — a body the tree eye hid stays irrelevant.
+   */
+  private updateGeometryPending(): void {
+    const { status, bodies } = documentStore.getState();
+    let visible = 0;
+    let loaded = 0;
+    for (const [id, meta] of Object.entries(bodies)) {
+      if (!meta.visible) continue;
+      visible++;
+      if (this.bodyObjects.has(id)) loaded++;
+    }
+    viewportStore.getState().setGeometryPending(status === "ready" && visible > loaded);
   }
 
   private onDocumentChanged(change: DocumentChange): void {
@@ -277,7 +299,12 @@ export class MeshIngest {
 
       const view = parseMeshPayload(buffer);
       const entry = buildBodyObjects(view, bodyId, ++this.meshRev);
+      const prevEntry = getEntry(bodyId); // read BEFORE the swap — the rebind's evidence
       swap(bodyId, entry);
+      // A regen renumbers TopoKeys, so a selection made before it names nothing
+      // after it and its highlight would silently vanish. Re-point the refs at the
+      // geometry they still mean BEFORE the highlight rebuild below reads them.
+      rebindSelectionForBody(bodyId, prevEntry, entry);
 
       // Rebuild the scene object (remove old, add new).
       const old = this.bodyObjects.get(bodyId);
@@ -287,6 +314,7 @@ export class MeshIngest {
       handle.applyMode(this.currentModeDef());
       this.engine.bodiesRoot.add(handle.group);
       this.bodyObjects.set(bodyId, handle);
+      this.updateGeometryPending();
 
       this.engine.refreshHighlights();
       this.engine.invalidate();
@@ -327,12 +355,16 @@ export class MeshIngest {
     this.loadSeq.delete(bodyId);
     this.pending.delete(bodyId);
     remove(bodyId);
+    this.updateGeometryPending();
     this.engine?.refreshHighlights();
     this.engine?.invalidate();
   }
 
   detach(): void {
     this.detached = true;
+    // Force the chip off immediately — the store it targets outlives this
+    // instance, and a stale `true` would strand it visible after teardown.
+    viewportStore.getState().setGeometryPending(false);
     this.bodyLoadedListeners.clear();
     for (const u of this.unsubs.splice(0)) u();
     // Clear highlights BEFORE disposing geometry so no clone references freed buffers.

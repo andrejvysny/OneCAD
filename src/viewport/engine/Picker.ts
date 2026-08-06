@@ -1,24 +1,35 @@
 /*
- * Picker — rAF-coalesced raycast over body face meshes + edge LineSegments.
+ * Picker — rAF-coalesced raycast over body face meshes + fat edge LineSegments2.
  *
  * Hover follows the pointer (coalesced to one raycast per frame) and fires only
  * when the hit CHANGES, so an idle pointer schedules no frames (render-on-demand
- * preserved). Edges win over faces within a screen-space tolerance: the ray's
- * `Line.threshold` is scaled to ~6px at the focus distance, and an edge hit is
- * preferred when it is no farther than the face hit (+bias) — so a boundary edge
- * lying on a face surface is selectable, while an occluded edge is not.
+ * preserved). Edges win over faces within a screen-space tolerance: an edge hit
+ * is preferred when it is no farther than the face hit (+bias) — so a boundary
+ * edge lying on a face surface is selectable, while an occluded edge is not.
  *
- * (Plan notes Line2 for edges; current edges are plain LineSegments, so we drive
- * `raycaster.params.Line.threshold` in world units, derived from px + camera.)
+ * Body edges are LineSegments2 (P3), whose raycast is SCREEN-SPACE: the hit
+ * radius is `(material.linewidth + params.Line2.threshold) / 2` in the DEVICE px
+ * `material.resolution` is expressed in. Two consequences this class owns:
+ *   - the threshold is derived from the drawn edge width so the effective radius
+ *     lands on EDGE_PICK_PX CSS px regardless of the line's weight or the dpr
+ *     (see {@link line2PickThreshold}), and
+ *   - `material.resolution` is flushed before every raycast, because a raycast
+ *     that happens before the first render would otherwise see (0,0) and return
+ *     silently — no hits, no error.
+ * `params.Line.threshold` (world units) is still driven: LineSegments2 reports a
+ * world-space `distance`, so it remains the right unit for the face-vs-edge bias.
  *
  * A hit resolves through the mesh registry: triangle index → face id, or segment
- * index → edge id (both lazy TopoKey/ElementId decode). Click captures the world
- * anchor for a future AcquireElementIds promotion. The engine owns store wiring
- * via the onHover/onPick callbacks (this class stays store-agnostic).
+ * ordinal → edge id (both lazy TopoKey/ElementId decode). Click captures the
+ * world anchor for a future AcquireElementIds promotion. The engine owns store
+ * wiring via the onHover/onPick callbacks (this class stays store-agnostic).
  */
 import * as THREE from "three";
+import type { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import type { MeshEntry } from "../mesh/meshRegistry";
 import { getEntry } from "../mesh/meshRegistry";
+import { BODY_EDGE_WIDTH } from "./bodyMaterials";
+import { MAX_DPR } from "./SketchObject";
 
 export interface PickHit {
   bodyId: string;
@@ -60,6 +71,29 @@ export function linePickThreshold(
   const oc = camera as THREE.OrthographicCamera;
   const worldPerPx = (oc.top - oc.bottom) / h;
   return px * worldPerPx;
+}
+
+/**
+ * `raycaster.params.Line2.threshold` that makes a LineSegments2 pick radius
+ * exactly `px` CSS pixels.
+ *
+ * LineSegments2 tests `distance < (material.linewidth + threshold) / 2` in
+ * device px, so the drawn width has to be SUBTRACTED out — otherwise a fatter
+ * edge would silently pick wider than a thin one. Clamped at 0: a line drawn
+ * wider than the tolerance already picks at its own half-width, and a negative
+ * threshold would be read as `0` by three anyway (`threshold || 0`).
+ */
+export function line2PickThreshold(
+  dpr: number,
+  edgeWidthDevice: number,
+  px = EDGE_PICK_PX,
+): number {
+  return Math.max(0, 2 * px * dpr - edgeWidthDevice);
+}
+
+/** The renderer's capped device-pixel ratio — the units fat-line widths use. */
+function cappedDpr(): number {
+  return Math.min(typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1, MAX_DPR);
 }
 
 /**
@@ -108,6 +142,9 @@ export function resolvePick(
 
   let id: string | null = null;
   let surfaceHint: PickHit["surfaceHint"];
+  // LineSegments2 reports `point` on the RAY and `pointOnLine` on the segment;
+  // the anchor we promote must be the one that lies on the geometry.
+  let worldPos = hit.point;
   if (kind === "face") {
     if (hit.faceIndex == null) return null;
     id = entry.faceIndex.idAt(hit.faceIndex);
@@ -119,8 +156,13 @@ export function resolvePick(
       surfaceHint = { normal: [n.x, n.y, n.z] };
     }
   } else {
-    if (hit.index == null || !entry.edgeIndex) return null;
-    id = entry.edgeIndex.idAt(hit.index >> 1); // 2 verts per segment
+    // LineSegments2 is INSTANCED — one instance per segment — so its
+    // intersection carries `faceIndex` = the segment ordinal directly, and no
+    // `index` at all. (A plain LineSegments reported a VERTEX index, which is
+    // why this used to shift by one.)
+    if (hit.faceIndex == null || !entry.edgeIndex) return null;
+    id = entry.edgeIndex.idAt(hit.faceIndex);
+    worldPos = hit.pointOnLine ?? hit.point;
   }
   if (id == null) return null;
 
@@ -131,7 +173,7 @@ export function resolvePick(
     topoKey: id,
     elementId: isElementId ? id : undefined,
     distance: hit.distance,
-    worldPos: hit.point.clone(),
+    worldPos: worldPos.clone(),
     surfaceHint,
   };
 }
@@ -149,6 +191,13 @@ export interface PickerDeps {
   getRoot: () => THREE.Object3D; // bodiesRoot
   getViewportHeight: () => number;
   getFocusDistance: () => number;
+  /**
+   * Drawing-buffer size in DEVICE px (canvas CSS size × capped dpr) — the units
+   * a fat line's `material.resolution` is expressed in. Injected rather than
+   * read off the renderer so the resolution self-flush below is testable in
+   * jsdom, where nothing ever renders.
+   */
+  getResolution: () => { w: number; h: number };
   invalidate: () => void;
   /** Picking is only live in this mode (model + select); returns false in sketch mode. */
   isActive: () => boolean;
@@ -300,6 +349,10 @@ export class Picker {
       this.deps.getFocusDistance(),
     );
     this.raycaster.params.Line = { threshold };
+    // Screen-space tolerance for the fat edge lines (see line2PickThreshold).
+    this.raycaster.params.Line2 = {
+      threshold: line2PickThreshold(cappedDpr(), BODY_EDGE_WIDTH),
+    };
 
     const faceObjects: THREE.Object3D[] = [];
     const edgeObjects: THREE.Object3D[] = [];
@@ -309,10 +362,36 @@ export class Picker {
       if (o.userData.kind === "face") faceObjects.push(o);
       else if (o.userData.kind === "edge") edgeObjects.push(o);
     });
+    this.flushEdgeResolution(edgeObjects);
 
     const faceHit = this.raycaster.intersectObjects(faceObjects, false)[0] ?? null;
     const edgeHit = this.raycaster.intersectObjects(edgeObjects, false)[0] ?? null;
     return choosePreferredHit(faceHit, edgeHit, threshold);
+  }
+
+  /**
+   * Push the current drawing-buffer size into every gathered edge material.
+   *
+   * `LineSegments2.onBeforeRender` keeps `resolution` current for DRAWING, but
+   * its raycast bails out silently when `resolution` is still (0,0) — which is
+   * exactly the state of a body whose first frame has not rendered yet (an
+   * orbit-gating `hasHitAt` on pointerdown can arrive first). Mirrors
+   * `SketchStaticLayer.hitTest`'s matrixWorld self-flush: a hit-test must not
+   * depend on a render having happened.
+   *
+   * Materials are SHARED per material kind, so one write per unique material is
+   * enough — the Set keeps N bodies from costing N writes.
+   */
+  private flushEdgeResolution(edgeObjects: readonly THREE.Object3D[]): void {
+    if (edgeObjects.length === 0) return;
+    const { w, h } = this.deps.getResolution();
+    const seen = new Set<LineMaterial>();
+    for (const o of edgeObjects) {
+      const mat = (o as THREE.Mesh).material as LineMaterial | undefined;
+      if (!mat?.resolution || seen.has(mat)) continue;
+      mat.resolution.set(w, h);
+      seen.add(mat);
+    }
   }
 
   dispose(): void {

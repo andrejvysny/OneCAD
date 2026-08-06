@@ -62,7 +62,7 @@ function Segments<T extends string>({
   label: string;
 }) {
   return (
-    <div className="flex overflow-hidden rounded-sm" role="group" aria-label={label}>
+    <div className="flex overflow-hidden rounded-full" role="group" aria-label={label}>
       {options.map((o) => (
         <button
           key={o.value}
@@ -125,7 +125,7 @@ function ThroughOrDepthField({
   };
 
   return (
-    <span className="pointer-events-auto inline-flex items-center gap-0.5 rounded-sm border border-border bg-surface px-1 font-mono text-[11px] text-ink-2 shadow-ctrl">
+    <span className="pointer-events-auto inline-flex items-center gap-0.5 rounded-full border border-border bg-surface px-2 font-mono text-[11px] text-ink-2 shadow-popover">
       <span aria-hidden className="text-ink-3">
         ↧
       </span>
@@ -186,7 +186,7 @@ function DimField({
   };
 
   return (
-    <span className="pointer-events-auto inline-flex items-center gap-0.5 rounded-sm border border-border bg-surface px-1 font-mono text-[11px] text-ink-2 shadow-ctrl">
+    <span className="pointer-events-auto inline-flex items-center gap-0.5 rounded-full border border-border bg-surface px-2 font-mono text-[11px] text-ink-2 shadow-popover">
       <span aria-hidden className="text-ink-3">
         {label}
       </span>
@@ -231,7 +231,7 @@ function StandardsPicker({ onPick }: { onPick: (thread: string, fit: HoleFit) =>
         aria-expanded={open}
         aria-label="Standard sizes"
         onClick={() => setOpen((v) => !v)}
-        className="rounded-sm bg-chip px-2 py-1 text-[11.5px] font-medium text-ink-3 hover:bg-hover-2"
+        className="rounded-full bg-chip px-2 py-1 text-[11.5px] font-medium text-ink-3 hover:bg-hover-2"
       >
         Std ▾
       </button>
@@ -278,7 +278,7 @@ function FragmentRow({
             onPick(thread, f.fit);
             setOpen(false);
           }}
-          className="rounded-sm bg-chip px-1.5 py-0.5 font-mono text-[11px] text-ink-3 hover:bg-hover-2"
+          className="rounded-full bg-chip px-1.5 py-0.5 font-mono text-[11px] text-ink-3 hover:bg-hover-2"
         >
           ·
         </button>

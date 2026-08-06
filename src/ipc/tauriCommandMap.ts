@@ -36,6 +36,8 @@ import type {
   FilletParams,
   LinearPatternParams,
   MirrorBodyParams,
+  OffsetDistanceType,
+  OffsetFaceParams,
   OperationOp,
   RevolveParams,
   SemanticRef,
@@ -140,6 +142,34 @@ interface WireHoleParams {
   csAngleDeg: WireScalar | null;
 }
 
+/**
+ * Rust `OffsetFaceParams` (record.rs; SCHEMA §7.3 `op.offsetFace`).
+ *
+ * DUAL-FIELD, the Fillet discipline — NOT Shell's bare-id one: `faceIds[i]` is the
+ * bare ElementId and `faces[i]` is the TYPED ref carrying the anchor evidence the
+ * ladder rebinds with, and core's own validator REJECTS the record unless
+ * `faces[i].primary.elementId === faceIds[i]` at every index. Any command that
+ * rewrites one must rewrite both, in the same order.
+ *
+ * `oppositeFace`/`oppositeFaceId` are the same pair for the `Total` opposite and
+ * are skip-if-none on the Rust side, so a non-`Total` offset must marshal WITHOUT
+ * either key — an authored `null` is not the same as an absent field here, and
+ * core rejects an opposite on any other distance type.
+ *
+ * `faces` is `skip_serializing_if = "Vec::is_empty"` on Rust, so a record round
+ * -tripped through the backend never carries an empty array; neither does this.
+ */
+interface WireOffsetFaceParams {
+  faceIds: string[];
+  faces: WireElementRef[];
+  distance: WireScalar;
+  distanceType: OffsetDistanceType;
+  chainTangentFaces: boolean;
+  oppositeFaceId?: string;
+  oppositeFace?: WireElementRef;
+  targetBodyId: string;
+}
+
 /** Rust `ShellParams` (record.rs). `openFaces` are bare ElementIds/TopoKeys. */
 interface WireShellParams {
   thickness: WireScalar;
@@ -214,6 +244,7 @@ type WireOperation = (
   | { opType: "MirrorBody"; params: WireMirrorBodyParams }
   | { opType: "TransformBody"; params: WireTransformBodyParams }
   | { opType: "Hole"; params: WireHoleParams }
+  | { opType: "OffsetFace"; params: WireOffsetFaceParams }
 ) & { opId?: string };
 
 /** A minimal real `OperationRecord` (every other field defaults on the Rust side). */
@@ -234,7 +265,9 @@ export type WireInputPath =
   | { path: "filletEdges"; index: number }
   | { path: "shellOpenFaces"; index: number }
   | { path: "holeFace" }
-  | { path: "extrudeTargetFace"; second: boolean };
+  | { path: "extrudeTargetFace"; second: boolean }
+  | { path: "offsetFaceFace"; index: number }
+  | { path: "offsetFaceOpposite" };
 
 /**
  * The payload of an `EditOperationInput` (Rust `InputRef`, externally tagged,
@@ -463,6 +496,40 @@ function holeParams(p: HoleParams): WireHoleParams {
   };
 }
 
+/**
+ * SCHEMA §7.3 `op.offsetFace`. The typed `faces` and the bare `faceIds` are built
+ * from the SAME `SemanticRef[]` in the SAME pass, so the lockstep core validates
+ * (`faces[i].primary.elementId === faceIds[i]`) holds by construction and cannot
+ * drift the way two independent derivations would.
+ *
+ * `bareBodyId` on every body: a fresh pick carries a bare uuid, a PROMOTED one
+ * carries the worker's `body_<uuid>` wire form, and the core `EditCommand` serde
+ * accepts only the former (`BodyId` is `#[serde(transparent)]`). The same reason
+ * `faceElementRef` / `holeParams` normalize.
+ *
+ * The `Total` opposite pair is emitted ONLY for `distanceType === "Total"`, gated
+ * on the TYPE rather than on presence — the `holeParams` rule restated: a caller
+ * that leaves a stale opposite on params it has just re-typed marshals a clean
+ * record instead of one the Rust session must reject.
+ */
+function offsetFaceParams(p: OffsetFaceParams): WireOffsetFaceParams {
+  const faces = p.faces.map(faceElementRef);
+  const wire: WireOffsetFaceParams = {
+    faceIds: faces.map((f) => f.primary?.elementId ?? ""),
+    faces,
+    distance: scalar(p.distance),
+    distanceType: p.distanceType,
+    chainTangentFaces: p.chainTangentFaces,
+    targetBodyId: bareBodyId(p.targetBodyId),
+  };
+  if (p.distanceType === "Total" && p.oppositeFace) {
+    const opposite = faceElementRef(p.oppositeFace);
+    wire.oppositeFaceId = opposite.primary?.elementId ?? "";
+    wire.oppositeFace = opposite;
+  }
+  return wire;
+}
+
 function booleanParams(p: BooleanParams): WireBooleanParams {
   return {
     operation: p.operation,
@@ -567,6 +634,8 @@ export function wireOperation(op: OperationOp): WireOperation {
       return { ...identity, opType: "TransformBody", params: transformBodyParams(op.params) };
     case "Hole":
       return { ...identity, opType: "Hole", params: holeParams(op.params) };
+    case "OffsetFace":
+      return { ...identity, opType: "OffsetFace", params: offsetFaceParams(op.params) };
   }
 }
 
@@ -649,6 +718,10 @@ export function opLabelFor(op: OperationOp): string {
     // "Move", so the status hint must not say "TransformBody".
     case "TransformBody":
       return "Move";
+    // Matches `dto.rs default_label` — the history row reads "Offset face", so the
+    // status hint must not say "OffsetFace".
+    case "OffsetFace":
+      return "Offset face";
     default:
       return op.opType;
   }
@@ -816,6 +889,11 @@ export function inputPathFor(
       return slotIndex === 1 ? { path: "holeFace" } : null;
     case "Extrude":
       return extrudeTargetFacePath(slotIndex, params);
+    // `inputs` = [operative faces in stored order, then the Total opposite LAST].
+    // NORMATIVE slot order (SCHEMA §7.3), mirroring Rust
+    // `InputPath::OffsetFaceFace{index}` / `OffsetFaceOpposite`.
+    case "OffsetFace":
+      return offsetFacePath(slotIndex, params);
     // Whole-body slots (Boolean `[target, tool]`, pattern/mirror source,
     // TransformBody targets) and the ops with no `inputs[]` at all (Sketch,
     // Revolve — its axis is an AxisRef, Loft, Sweep, ImportStep).
@@ -843,6 +921,30 @@ function extrudeTargetFacePath(
   }
   const second = slots[slotIndex];
   return second === undefined ? null : { path: "extrudeTargetFace", second };
+}
+
+/**
+ * The OffsetFace slot at `slotIndex`. Operative faces occupy `0..faceIds.length`
+ * in stored order; the `Total` opposite is the LAST slot and is present only while
+ * the op actually carries one.
+ *
+ * Needs the stored params for the same reason Extrude's arm does: the opposite
+ * slot's INDEX is `faceIds.length`, which nothing else here knows. Without them
+ * this yields `null` (re-pick in the feature editor) rather than guessing — a
+ * guessed index would rebind a DIFFERENT face than the one the user clicked,
+ * which is the silent-mis-repair class the H9 lockstep rule exists to prevent.
+ */
+function offsetFacePath(
+  slotIndex: number,
+  params?: Record<string, unknown>,
+): WireInputPath | null {
+  if (!params) return null;
+  const faceIds = params.faceIds;
+  if (!Array.isArray(faceIds)) return null;
+  if (slotIndex < faceIds.length) return { path: "offsetFaceFace", index: slotIndex };
+  // Total only: `oppositeFace` is skip-if-none, so its absence means no slot.
+  if (slotIndex === faceIds.length && params.oppositeFace) return { path: "offsetFaceOpposite" };
+  return null;
 }
 
 /**

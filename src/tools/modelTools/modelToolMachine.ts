@@ -10,8 +10,9 @@
  *   dragging   — pointer owns the handle/edge (params track the drag)
  *   committing — pointer released; awaiting the exact L2 result before select
  */
-import type { BooleanOperation, TransformBodyParams } from "@/ipc/types";
+import type { BooleanOperation, OffsetDistanceType, TransformBodyParams } from "@/ipc/types";
 import { EDGE_OP_FLIP_HOLD, EDGE_OP_MIN_VALUE } from "@/tools/preview/filletRadius";
+import { DEFAULT_OFFSET_DISTANCE, OFFSET_MIN_MAGNITUDE } from "@/tools/preview/faceOffset";
 import { WORLD_AXIS } from "@/tools/preview/patternPreview";
 import type { Vec3 } from "@/tools/preview/depthProjection";
 
@@ -906,6 +907,218 @@ export function shellStep(s: ShellFsm, e: ShellEvent): ShellStep {
     case "cancel":
       if (s.phase === "idle") return { state: s, effect: "none" };
       return { state: shellInit(), effect: "cancel" };
+  }
+}
+
+// ── Offset face ──────────────────────────────────────────────────────────────
+//
+// OffsetFace arms from a FACE selection, like Shell — but the selected faces are
+// the ones that MOVE, not the ones that are removed, and the gesture is Extrude's
+// (a real 3D arrow along the mean normal) rather than a screen-space value drag.
+// Release keeps the tool ARMED; commit is the explicit `confirm`.
+//
+// Two rules are the whole reason this needs a reducer of its own:
+//
+// DRAG BELONGS TO `Offset` ALONE. `Total`/`Radius`/`Diameter` are ABSOLUTE — a
+// diameter of "however far you dragged" is meaningless, and there is no zero to
+// drag from. They are seeded from `PrepareOffsetFace.currentDims` (the `seed`
+// event) and authored numerically. `drag` is therefore INERT for them, not
+// re-scaled: a silently reinterpreted drag would author a diameter the user never
+// typed.
+//
+// NOTHING IS CLAMPED. SCHEMA §7.3 is explicit that OffsetFace values are never
+// clamped, and the reason is not pedantry: a clamped value desynchronizes the
+// stored param, the preview the user approved, and the geometry the next regen
+// builds. An out-of-domain entry is REJECTED — the state keeps its last valid
+// value and `valueError` goes true so the chip can say so — and `confirm` is
+// refused outright at a degenerate magnitude.
+
+export { DEFAULT_OFFSET_DISTANCE };
+
+/** Which distance types a face selection may offer (chip gating, planarity-driven). */
+export const OFFSET_TYPES_PLANAR: readonly OffsetDistanceType[] = ["Offset", "Total"];
+export const OFFSET_TYPES_CURVED: readonly OffsetDistanceType[] = ["Offset", "Radius", "Diameter"];
+
+export interface OffsetFaceFsm {
+  phase: ModelPhase;
+  /** The USER's value, in the domain `distanceType` names. Signed for `Offset`. */
+  distance: number;
+  distanceType: OffsetDistanceType;
+  /** Authoring metadata once the closure is frozen; `Total` requires it OFF. */
+  chainTangentFaces: boolean;
+  /** Size of the FROZEN operative closure (picks ∪ tangent chain), not the picks. */
+  faceCount: number;
+  /** Whether the user has authored a distance (blocks the type-switch reseed). */
+  touched: boolean;
+  /** The last entry was refused as out-of-domain — the chip renders its error state. */
+  valueError: boolean;
+}
+
+export type OffsetFaceEvent =
+  | {
+      kind: "arm";
+      faceCount: number;
+      distance?: number;
+      distanceType?: OffsetDistanceType;
+      chainTangentFaces?: boolean;
+      touched?: boolean;
+    }
+  /** Absolute-type seed from `PrepareOffsetFace.currentDims` (transformStep precedent). */
+  | { kind: "seed"; distance: number }
+  | { kind: "grab" }
+  | { kind: "drag"; distance: number }
+  | { kind: "setDistance"; distance: number }
+  | { kind: "setDistanceType"; distanceType: OffsetDistanceType }
+  | { kind: "setChainTangent"; chainTangentFaces: boolean }
+  | { kind: "release" }
+  | { kind: "confirm" }
+  | { kind: "commitFailed" }
+  | { kind: "settle" }
+  | { kind: "cancel" };
+
+export interface OffsetFaceStep {
+  state: OffsetFaceFsm;
+  effect: ToolEffect;
+}
+
+export function offsetFaceInit(): OffsetFaceFsm {
+  return {
+    phase: "idle",
+    distance: DEFAULT_OFFSET_DISTANCE,
+    distanceType: "Offset",
+    chainTangentFaces: true,
+    faceCount: 0,
+    touched: false,
+    valueError: false,
+  };
+}
+
+/** True while the tool accepts parameter edits (armed OR mid-drag). */
+function offsetEditable(s: OffsetFaceFsm): boolean {
+  return s.phase === "armed" || s.phase === "dragging";
+}
+
+/** Only `Offset` reads a signed value; the three absolute types must be positive. */
+export function offsetValueInDomain(distance: number, type: OffsetDistanceType): boolean {
+  if (!Number.isFinite(distance)) return false;
+  return type === "Offset" ? true : distance > 0;
+}
+
+/**
+ * Whether the armed offset may be committed. Distinct from
+ * {@link offsetValueInDomain}: a `0.0004 mm` offset is a legal number to HOLD
+ * (the user is mid-typing) but SCHEMA §7.3 rebuilds it to an identity no-op, so
+ * writing a history row for it would produce a feature that visibly does nothing.
+ */
+export function offsetCanConfirm(s: OffsetFaceFsm): boolean {
+  if (s.faceCount <= 0) return false;
+  if (!Number.isFinite(s.distance)) return false;
+  return s.distanceType === "Offset"
+    ? Math.abs(s.distance) >= OFFSET_MIN_MAGNITUDE
+    : s.distance > 0;
+}
+
+export function offsetFaceStep(s: OffsetFaceFsm, e: OffsetFaceEvent): OffsetFaceStep {
+  switch (e.kind) {
+    case "arm": {
+      if (e.faceCount <= 0) return { state: offsetFaceInit(), effect: "none" };
+      const distanceType = e.distanceType ?? "Offset";
+      // A multi-face closure can only be an `Offset` (SCHEMA §7.3) — an arm that
+      // asks otherwise is refused rather than silently downgraded, so a caller
+      // cannot believe it armed a Radius over four faces.
+      if (distanceType !== "Offset" && e.faceCount !== 1) {
+        return { state: offsetFaceInit(), effect: "none" };
+      }
+      return {
+        state: {
+          ...offsetFaceInit(),
+          phase: "armed",
+          distance: e.distance ?? DEFAULT_OFFSET_DISTANCE,
+          distanceType,
+          // `Total` measures against an opposite face and forbids the chain.
+          chainTangentFaces: distanceType === "Total" ? false : (e.chainTangentFaces ?? true),
+          faceCount: e.faceCount,
+          touched: e.touched === true,
+        },
+        effect: "begin",
+      };
+    }
+    case "seed":
+      // The absolute types' opening number comes from the kernel's measurement of
+      // the CURRENT face, not from a default — so it lands after the arm and only
+      // while the user has not authored one of their own.
+      if (!offsetEditable(s) || s.touched) return { state: s, effect: "none" };
+      if (!offsetValueInDomain(e.distance, s.distanceType)) return { state: s, effect: "none" };
+      return { state: { ...s, distance: e.distance, valueError: false }, effect: "update" };
+    case "grab":
+      // Only a free `Offset` has a drag at all — there is no arrow for the absolute
+      // types, so a grab there is a caller bug rather than a phase to enter.
+      if (s.phase !== "armed" || s.distanceType !== "Offset") return { state: s, effect: "none" };
+      return { state: { ...s, phase: "dragging" }, effect: "none" };
+    case "drag":
+      if (s.phase !== "dragging" || s.distanceType !== "Offset") return { state: s, effect: "none" };
+      if (!Number.isFinite(e.distance)) return { state: s, effect: "none" };
+      return { state: { ...s, distance: e.distance, touched: true, valueError: false }, effect: "update" };
+    case "setDistance":
+      if (!offsetEditable(s)) return { state: s, effect: "none" };
+      // REJECTED, not clamped: keep the last valid value and flag the entry so the
+      // chip can render its error state (see the block header).
+      if (!offsetValueInDomain(e.distance, s.distanceType)) {
+        return { state: { ...s, valueError: true }, effect: "none" };
+      }
+      return { state: { ...s, distance: e.distance, touched: true, valueError: false }, effect: "update" };
+    case "setDistanceType": {
+      if (!offsetEditable(s)) return { state: s, effect: "none" };
+      // Only ONE face can carry an absolute type — the chip does not offer them for
+      // a wider closure, so reaching here is a caller bug, not a value to store.
+      if (e.distanceType !== "Offset" && s.faceCount !== 1) return { state: s, effect: "none" };
+      if (e.distanceType === s.distanceType) return { state: s, effect: "none" };
+      // PRISTINE RESEED (the fillet `setEdgeOp` precedent): an untouched arm takes
+      // the new type's own default, because a 2 mm delta is not a 2 mm diameter.
+      // Once the user has authored a number that number is theirs and survives.
+      // The controller re-seeds an untouched ABSOLUTE type from `currentDims`
+      // immediately afterwards; `DEFAULT_OFFSET_DISTANCE` is only the floor that
+      // keeps the state in-domain until it does.
+      const distance = s.touched ? s.distance : DEFAULT_OFFSET_DISTANCE;
+      return {
+        state: {
+          ...s,
+          distanceType: e.distanceType,
+          // `Total` forbids the tangent chain (core validates it); every other type
+          // keeps whatever the user set.
+          chainTangentFaces: e.distanceType === "Total" ? false : s.chainTangentFaces,
+          distance,
+          valueError: false,
+        },
+        // The operative CLOSURE depends on the type (Total re-runs prepare with the
+        // chain off), so this is a re-arm request, not a params update.
+        effect: "begin",
+      };
+    }
+    case "setChainTangent":
+      if (!offsetEditable(s)) return { state: s, effect: "none" };
+      // `Total` is single-face with the chain off, by definition.
+      if (s.distanceType === "Total") return { state: s, effect: "none" };
+      if (e.chainTangentFaces === s.chainTangentFaces) return { state: s, effect: "none" };
+      // Toggling changes the CLOSURE the record freezes, so the handshake has to
+      // run again — a params update would keep the old operative set.
+      return { state: { ...s, chainTangentFaces: e.chainTangentFaces }, effect: "begin" };
+    case "release":
+      // Release does NOT commit — it keeps the tool armed at the dragged distance.
+      if (s.phase !== "dragging") return { state: s, effect: "none" };
+      return { state: { ...s, phase: "armed" }, effect: "update" };
+    case "confirm":
+      if (s.phase !== "armed") return { state: s, effect: "none" };
+      if (!offsetCanConfirm(s)) return { state: { ...s, valueError: true }, effect: "none" };
+      return { state: { ...s, phase: "committing" }, effect: "commit" };
+    case "commitFailed":
+      if (s.phase !== "committing") return { state: s, effect: "none" };
+      return { state: { ...s, phase: "armed" }, effect: "none" };
+    case "settle":
+      return { state: offsetFaceInit(), effect: "none" };
+    case "cancel":
+      if (s.phase === "idle") return { state: s, effect: "none" };
+      return { state: offsetFaceInit(), effect: "cancel" };
   }
 }
 

@@ -41,7 +41,7 @@ use onecad_core::io::recovery::{scan_stale_markers, RecoveryOffer};
 use onecad_core::regen::{RegenRequest, ResolveRef, ResolveRequest};
 
 use crate::autosave;
-use crate::document_runtime::{DocumentRuntime, RegenReport};
+use crate::document_runtime::{DocumentRuntime, RegenReport, SaveCaches};
 use crate::dto::{
     BeginGestureDto, DocumentProjection, DocumentSnapshotDto, DragSolveDto, FeatureDependenciesDto,
     FinishSketchDto, PromotedElementDto, RecentProjectDto, RecoveryInfoDto, ResolveRefDto,
@@ -57,6 +57,137 @@ use crate::worker::{lod_from_str, wire};
 // Lifecycle
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Builds this document's backend and opens `path` over it, rolling the staged
+/// backend swap back if the container will not load
+/// ([`AppState::rollback_backend`]) — so a bad file leaves the CURRENTLY open
+/// document untouched, worker included.
+///
+/// On success the swap is left **staged**: the caller publishes the runtime and only
+/// then calls [`AppState::commit_backend`].
+///
+/// Factored out of [`open_document`] / [`recover_document`] deliberately. Those take
+/// a concrete `AppHandle`, which `tauri::test::mock_app` (a `MockRuntime`) cannot
+/// produce, so the rollback contract would otherwise be untestable — see
+/// `tests/prewarm.rs`.
+pub fn open_runtime_over_new_backend(
+    state: &AppState,
+    path: &Path,
+) -> Result<DocumentRuntime, ApiError> {
+    let (engine, meshes, solver) = state.make_backend();
+    DocumentRuntime::open(path, engine, meshes, solver).map_err(|e| {
+        state.rollback_backend();
+        ApiError::from(e)
+    })
+}
+
+/// Async sibling of [`open_runtime_over_new_backend`] — the same swap + open +
+/// rollback-on-`Err` contract, but off the async executor thread.
+///
+/// `DocumentRuntime::open` does sync zip parsing (`ContainerReader::open`) plus
+/// import-blob materialization to temp files: blocking IO that, run directly on a
+/// `#[tauri::command]`'s task, stalls every OTHER in-flight async command sharing
+/// that worker thread with it (there is no `spawn_blocking` boundary today).
+/// [`tokio::task::spawn_blocking`] moves that work to the blocking pool instead.
+///
+/// Rollback fires on BOTH failure paths: `DocumentRuntime::open` returning `Err`
+/// (unchanged contract) and the blocking task itself not completing
+/// (`JoinError` — a panic) — either way [`AppState::make_backend`]'s staged swap
+/// must not be left dangling, or a surviving document loses its worker for
+/// nothing.
+pub async fn open_runtime_over_new_backend_blocking(
+    state: &AppState,
+    path: PathBuf,
+) -> Result<DocumentRuntime, ApiError> {
+    let (engine, meshes, solver) = state.make_backend();
+    match tokio::task::spawn_blocking(move || DocumentRuntime::open(&path, engine, meshes, solver))
+        .await
+    {
+        Ok(Ok(rt)) => Ok(rt),
+        Ok(Err(e)) => {
+            state.rollback_backend();
+            Err(ApiError::from(e))
+        }
+        Err(join_err) => {
+            state.rollback_backend();
+            Err(ApiError::Internal(format!(
+                "document open task did not complete: {join_err}"
+            )))
+        }
+    }
+}
+
+/// Fires the `from: 0` regen a freshly opened/imported/recovered document needs,
+/// gated on the backend's [`WorkerReadiness`](crate::worker::WorkerReadiness)
+/// rather than enqueued immediately.
+///
+/// **The cold-worker regen race**: an immediate request can beat a still-
+/// connecting worker — `execute_plan` on a not-yet-`Ready` worker fails fast
+/// ([`EngineError::NotConnected`](onecad_core::regen::EngineError::NotConnected))
+/// as `PlanEvent::Failed`, and a
+/// from-0 plan has **no retry**: the executor's checkpoint-retry path needs a
+/// prior successful attempt to fall back to, and there isn't one yet. With
+/// [`AppState::prewarm`] the wait below resolves near-instantly in the common
+/// case — it only pays real latency on a genuinely cold start.
+///
+/// Spawned rather than awaited so the command still returns immediately; on
+/// timeout the request still fires (best-effort), and a failure surfaces through
+/// the normal `regen-finished` event path instead of silently never running.
+///
+/// Production timeout is fixed at 8 s ([`schedule_initial_regen`]); the wait
+/// itself is factored out with an explicit `timeout` so a test can inject a
+/// short one instead of paying out the real window.
+///
+/// `still_current` is consulted AFTER the wait: the gate can outlive its document
+/// — a close/open during the window retires the worker this readiness watches and
+/// installs a NEW runtime whose own gate is pending — and a stale gate firing then
+/// would race that document's handshake with a from-0 replay it never asked for
+/// (or supersede its active regen). The scheduler is global, so the request alone
+/// carries no document identity; the probe supplies it.
+fn spawn_gated_regen<C, Fut>(
+    readiness: std::sync::Arc<dyn crate::worker::WorkerReadiness>,
+    sched: crate::state::SharedScheduler,
+    timeout: std::time::Duration,
+    still_current: C,
+) where
+    C: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = bool> + Send,
+{
+    tauri::async_runtime::spawn(async move {
+        let _ = readiness.wait_ready(timeout).await;
+        if !still_current().await {
+            return;
+        }
+        if let Some(handle) = sched.get() {
+            handle.request(RegenRequest::ToEnd { from: 0 });
+        }
+    });
+}
+
+/// Production entry point for [`spawn_gated_regen`] — the 8 s window is generous
+/// relative to [`AppState::prewarm`]'s near-instant common case, while still
+/// bounding how long a genuinely stuck cold start can silently withhold the
+/// document's first regen. The document uuid captured here is the staleness probe:
+/// the gate fires only while the SAME document is still the open one.
+async fn schedule_initial_regen(state: &AppState) {
+    let expected = match state.runtime.lock().await.as_ref() {
+        Some(rt) => rt.document_uuid(),
+        None => return, // no document — nothing to rebuild
+    };
+    let runtime = state.runtime.clone();
+    spawn_gated_regen(
+        state.readiness(),
+        state.scheduler.clone(),
+        std::time::Duration::from_secs(8),
+        move || async move {
+            runtime
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|rt| rt.document_uuid() == expected)
+        },
+    );
+}
+
 /// Creates a blank document and opens it (`CadClient.newDocument`).
 #[tauri::command]
 pub async fn new_document(
@@ -71,6 +202,10 @@ pub async fn new_document(
         rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
         (snapshot_of(rt), rt.projection())
     };
+    // The new runtime is published, so the previous document's worker is now
+    // unreachable — retire it (see `AppState::make_backend`'s two-phase contract).
+    // Nothing between the swap and here can fail, so there is no rollback arm.
+    state.commit_backend();
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
     Ok(snapshot)
 }
@@ -91,8 +226,7 @@ pub async fn open_document(
     app: AppHandle,
     path: String,
 ) -> Result<DocumentSnapshotDto, ApiError> {
-    let (engine, meshes, solver) = state.make_backend();
-    let rt = DocumentRuntime::open(Path::new(&path), engine, meshes, solver)?;
+    let rt = open_runtime_over_new_backend_blocking(&state, PathBuf::from(&path)).await?;
     let (snapshot, projection) = {
         let mut guard = state.runtime.lock().await;
         *guard = Some(rt);
@@ -100,12 +234,12 @@ pub async fn open_document(
         rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
         (snapshot_of(rt), rt.projection())
     };
+    state.commit_backend();
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
     recents::record(&app, Path::new(&path));
-    // Rebuild geometry from the loaded (all-Dirty) timeline.
-    if let Some(sched) = state.scheduler.get() {
-        sched.request(RegenRequest::ToEnd { from: 0 });
-    }
+    // Rebuild geometry from the loaded (all-Dirty) timeline, once the worker can
+    // actually serve it (readiness-gated — see `schedule_initial_regen`).
+    schedule_initial_regen(&state).await;
     Ok(snapshot)
 }
 
@@ -134,9 +268,16 @@ pub async fn import_step(
     // Worker round-trip FIRST, with no lock held and no runtime published (the
     // R-WP11 rule); the backend was just built, so `state.step_import()` is this
     // document's worker.
-    let prepared = crate::imports::prepare_import(&*state.step_import(), Path::new(&path)).await?;
+    //
+    // `appStore.importStep` catches a failure here and leaves the user on their
+    // current document, so both fallible steps must roll the staged backend swap back
+    // — that document is still live and still needs its own worker.
+    let prepared = crate::imports::prepare_import(&*state.step_import(), Path::new(&path))
+        .await
+        .inspect_err(|_| state.rollback_backend())?;
     let mut rt = DocumentRuntime::new_blank(engine, meshes, solver);
-    rt.add_import_record(&prepared, false)?;
+    rt.add_import_record(&prepared, false)
+        .inspect_err(|_| state.rollback_backend())?;
     let (snapshot, projection) = {
         let mut guard = state.runtime.lock().await;
         *guard = Some(rt);
@@ -144,10 +285,9 @@ pub async fn import_step(
         rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
         (snapshot_of(rt), rt.projection())
     };
+    state.commit_backend();
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
-    if let Some(sched) = state.scheduler.get() {
-        sched.request(RegenRequest::ToEnd { from: 0 });
-    }
+    schedule_initial_regen(&state).await;
     state.note_mutation();
     Ok(snapshot)
 }
@@ -199,6 +339,14 @@ pub async fn insert_step(
 /// path; an unsaved document with no path is an error (the frontend's Save action
 /// then falls back to Save As). Records the saved path in the recents store.
 ///
+/// `preview_png` is an optional base64 PNG capture of the viewport, stored as the
+/// container's `preview.png` and served to the start screen by
+/// [`list_recents`](crate::api::list_recents). It is **entirely optional**: a
+/// frontend that does not send it (and Tauri passes `None` for an argument the
+/// caller omits entirely) keeps whatever thumbnail the document already had, and a
+/// malformed or oversized capture is dropped with a warning. A thumbnail never
+/// fails a save.
+///
 /// ## Off the single-writer lock (VF-B7 / plan F1a)
 ///
 /// The two slow parts of a save — the worker `SaveCheckpoint` round-trip and the
@@ -227,7 +375,9 @@ pub async fn save_document(
     state: State<'_, AppState>,
     app: AppHandle,
     path: Option<String>,
+    preview_png: Option<String>,
 ) -> Result<(), ApiError> {
+    let preview_png = decode_preview_png(preview_png);
     // ── 1. Locked: target path + checkpoint admission + engine handle. ──
     let (target, document_id, ticket, engine) = {
         let guard = state.runtime.lock().await;
@@ -266,12 +416,17 @@ pub async fn save_document(
 
     // ── 3. Locked: snapshot the bytes-to-be + the revision they describe. ──
     let (payload, revision) = {
-        let guard = state.runtime.lock().await;
+        let mut guard = state.runtime.lock().await;
         let rt = guard
-            .as_ref()
+            .as_mut()
             .filter(|rt| rt.document_uuid() == document_id)
             .ok_or_else(|| ApiError::NoDocument("save".into()))?;
-        (rt.build_save_payload(save_meta()), rt.revision())
+        let revision = rt.revision();
+        let caches = SaveCaches {
+            meshes: true,
+            preview_png,
+        };
+        (rt.build_save_payload(save_meta(), caches), revision)
     };
 
     // ── 4. Unlocked, persistence lane: write + clear the crash-recovery state. ──
@@ -301,6 +456,59 @@ pub async fn save_document(
     }
     recents::record(&app, &target);
     Ok(())
+}
+
+/// Hard cap on a decoded viewport capture (512 KiB). A start-screen card is a few
+/// hundred pixels; anything past this is not a thumbnail, and the container reader
+/// caps at 2 MiB anyway ([`MAX_PREVIEW_BYTES`]) — rejecting here means we never
+/// write a `preview.png` that our own reader would refuse.
+///
+/// [`MAX_PREVIEW_BYTES`]: onecad_core::io::container::MAX_PREVIEW_BYTES
+const MAX_PREVIEW_PNG_BYTES: usize = 512 * 1024;
+
+/// Decodes the frontend's base64 viewport capture for
+/// [`save_document`](crate::api::save_document).
+///
+/// Accepts either bare base64 or a full `data:image/png;base64,…` URL (what
+/// `canvas.toDataURL()` produces) — the standard alphabet contains no `,`, so the
+/// last comma can only be the data-URL separator.
+///
+/// **Every failure is `None` with a warning, never an error.** A save carries the
+/// user's work; a thumbnail is decoration. Refusing to persist a document because
+/// its screenshot was malformed would be an absurd trade.
+fn decode_preview_png(encoded: Option<String>) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+
+    let raw = encoded?;
+    if raw.is_empty() {
+        return None;
+    }
+    // Bound BEFORE decoding: base64 inflates 3 bytes into 4, so anything past
+    // 2× the byte cap cannot be under it and must not be allocated.
+    if raw.len() > MAX_PREVIEW_PNG_BYTES * 2 {
+        tracing::warn!(
+            encoded_len = raw.len(),
+            "save: preview capture is far over the {MAX_PREVIEW_PNG_BYTES}-byte cap — dropped"
+        );
+        return None;
+    }
+    let b64 = raw.rsplit_once(',').map_or(raw.as_str(), |(_, tail)| tail);
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(b64) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::warn!(error = %e, "save: preview capture is not valid base64 — dropped");
+            return None;
+        }
+    };
+    if bytes.len() > MAX_PREVIEW_PNG_BYTES {
+        tracing::warn!(
+            len = bytes.len(),
+            cap = MAX_PREVIEW_PNG_BYTES,
+            "save: preview capture is over the cap — dropped"
+        );
+        return None;
+    }
+    Some(bytes)
 }
 
 /// Exports every body at head to a STEP file (`CadClient.exportStep`). `path`
@@ -404,6 +612,10 @@ pub async fn close_document(state: State<'_, AppState>, app: AppHandle) -> Resul
     if let (Some(id), Some(root)) = (closed, autosave::autosave_root(&app)) {
         autosave::clear_recovery_state(&root, id);
     }
+    // The closed document's worker can serve nothing now: retire it (this is the
+    // process leak — it used to live until the app quit) and pre-warm its
+    // replacement so the next open is instant. Exactly one sidecar stays alive.
+    state.rewarm();
     let _ = app.emit(events::PROJECTION_UPDATED, &DocumentProjection::empty());
     Ok(())
 }
@@ -442,6 +654,10 @@ pub async fn confirm_exit(app: AppHandle) {
     if let (Some(id), Some(root)) = (document_id, autosave::autosave_root(&app)) {
         autosave::clear_recovery_state(&root, id);
     }
+    // The single funnel every real quit passes through (⌘Q and the window-close
+    // button both route here via `events::CLOSE_REQUESTED`), so this is where both
+    // worker slots are retired — once, and before the event loop unwinds.
+    app.state::<AppState>().retire_all();
     app.state::<crate::ExitGuard>().clear();
     app.exit(0);
 }
@@ -507,8 +723,8 @@ pub async fn recover_document(
         return Ok(None);
     }
     // Restore: open the autosave container as the live document.
-    let (engine, meshes, solver) = state.make_backend();
-    let mut rt = DocumentRuntime::open(&offer.autosave_path, engine, meshes, solver)?;
+    let mut rt =
+        open_runtime_over_new_backend_blocking(&state, offer.autosave_path.clone()).await?;
     rt.mark_recovered(offer.marker.opened_path.clone());
     let (snapshot, projection) = {
         let mut guard = state.runtime.lock().await;
@@ -517,16 +733,16 @@ pub async fn recover_document(
         rt.adopt_current_epoch(); // VF-B4: a restart before this insert never reached it.
         (snapshot_of(rt), rt.projection())
     };
+    state.commit_backend();
     // Consume the marker (the autosave is superseded on the next save/close). The
     // autosave file itself is kept so a re-crash before the next tick still recovers.
     if let Some(root) = &root {
         let _ = onecad_core::io::recovery::remove_marker(root, offer.document_id);
     }
     let _ = app.emit(events::PROJECTION_UPDATED, &projection);
-    // Rebuild geometry from the recovered (all-Dirty) timeline.
-    if let Some(sched) = state.scheduler.get() {
-        sched.request(RegenRequest::ToEnd { from: 0 });
-    }
+    // Rebuild geometry from the recovered (all-Dirty) timeline, once the worker
+    // can actually serve it (readiness-gated — see `schedule_initial_regen`).
+    schedule_initial_regen(&state).await;
     Ok(Some(snapshot))
 }
 
@@ -1589,6 +1805,138 @@ pub async fn query_mass_properties(
         .map_err(Into::into)
 }
 
+/// One picked face for [`prepare_offset_face`] — `{bodyId?, topoKey?, elementId?}`
+/// (SCHEMA §7.6 `pickedFaces[]`).
+///
+/// The two addressing rungs are mutually exclusive on the wire (the worker
+/// branches on the PRESENCE of `elementId`), so a pick carrying both is rejected
+/// here rather than letting a stale id shadow a good topoKey.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OffsetFacePickInput {
+    #[serde(default)]
+    pub body_id: Option<String>,
+    #[serde(default)]
+    pub topo_key: Option<String>,
+    #[serde(default)]
+    pub element_id: Option<String>,
+}
+
+/// The read-only first half of the OffsetFace authoring transaction
+/// (`PrepareOffsetFace`; SCHEMA §7.6): the G1 tangent closure over the picked
+/// faces, the `Total` opposite candidate, and the `currentDims` that seed an
+/// absolute distance type.
+///
+/// A pure READ, like [`element_info`]: it neither fences nor prepares, accepts,
+/// discards — nor, critically, MINTS. The response carries snapshot-scoped
+/// TopoKeys and descriptor/anchor EVIDENCE only; Rust promotes that evidence and
+/// mints the `ElementId`s through [`promote_selection`] (Invariant 2), and the
+/// caller then authors the final params and runs one exact [`preview_op`] with
+/// them before committing. Worker IO runs OUTSIDE the runtime lock (the R-WP11
+/// rule); the lock is taken only for the document-presence check.
+///
+/// A REFUSAL (`crossBody`, `chainMismatch`, `unsupportedSurface`, …) comes back
+/// as a successful result carrying
+/// [`refusal`](crate::dto::PrepareOffsetFaceDto::refusal) — the tool needs to
+/// explain *why* it cannot offset, and an error would erase the reason.
+#[tauri::command]
+#[tracing::instrument(
+    skip_all,
+    fields(snapshot = snapshot_id, picks = picked_faces.len()),
+    err(Display)
+)]
+pub async fn prepare_offset_face(
+    state: State<'_, AppState>,
+    snapshot_id: u64,
+    picked_faces: Vec<OffsetFacePickInput>,
+    chain_tangent_faces: bool,
+    distance_type: Option<String>,
+) -> Result<crate::dto::PrepareOffsetFaceDto, ApiError> {
+    if picked_faces.is_empty() {
+        return Err(ApiError::InvalidCommand(
+            "prepareOffsetFace: at least one picked face is required".into(),
+        ));
+    }
+    // Parsed through the CORE enum so the command can never send a spelling the
+    // op's own `distanceType` param would reject.
+    let distance_type: onecad_core::document::record::OffsetDistanceType =
+        match distance_type.as_deref() {
+            None => Default::default(),
+            Some(s) => {
+                serde_json::from_value(serde_json::Value::String(s.to_string())).map_err(|_| {
+                    ApiError::InvalidCommand(format!(
+                        "prepareOffsetFace: unknown distanceType {s:?} \
+                         (Offset | Total | Radius | Diameter)"
+                    ))
+                })?
+            }
+        };
+    // Bodies + address rungs are resolved BEFORE the round-trip so a malformed
+    // pick is a caller error, never a half-sent request.
+    let mut bodies: Vec<Option<BodyId>> = Vec::with_capacity(picked_faces.len());
+    for (i, p) in picked_faces.iter().enumerate() {
+        let element = p.element_id.as_deref().filter(|s| !s.is_empty());
+        let topo = p.topo_key.as_deref().filter(|s| !s.is_empty());
+        match (element, topo) {
+            (None, None) => {
+                return Err(ApiError::InvalidCommand(format!(
+                    "prepareOffsetFace: pick {i} carries neither elementId nor topoKey"
+                )))
+            }
+            (Some(_), Some(_)) => {
+                return Err(ApiError::InvalidCommand(format!(
+                    "prepareOffsetFace: pick {i} carries BOTH elementId and topoKey — the two \
+                     rungs are mutually exclusive (SCHEMA §7.6)"
+                )))
+            }
+            _ => {}
+        }
+        let body = match p.body_id.as_deref().filter(|s| !s.is_empty()) {
+            Some(b) => Some(wire::parse_body_id(b).map_err(ApiError::InvalidCommand)?),
+            // The `elementId` rung resolves its own body from the partition entry;
+            // the `topoKey` rung has nothing to resolve against without one.
+            None if topo.is_some() => {
+                return Err(ApiError::InvalidCommand(format!(
+                    "prepareOffsetFace: pick {i} addresses a topoKey but carries no bodyId"
+                )))
+            }
+            None => None,
+        };
+        bodies.push(body);
+    }
+    let picks: Vec<wire::OffsetFacePick<'_>> = picked_faces
+        .iter()
+        .zip(&bodies)
+        .map(|(p, body)| {
+            let address = match p.element_id.as_deref().filter(|s| !s.is_empty()) {
+                Some(id) => wire::FaceAddress::ElementId(id),
+                None => wire::FaceAddress::TopoKey(p.topo_key.as_deref().unwrap_or_default()),
+            };
+            wire::OffsetFacePick {
+                body: *body,
+                address,
+            }
+        })
+        .collect();
+    {
+        // Presence check only — the lock is NOT held across the worker round-trip.
+        let guard = state.runtime.lock().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("prepareOffsetFace".into()))?;
+    }
+    state
+        .face_projection()
+        .prepare_offset_face(
+            SnapshotId(snapshot_id),
+            &picks,
+            chain_tangent_faces,
+            distance_type,
+        )
+        .await
+        .map_err(Into::into)
+}
+
 /// Dry-run ladder resolution for repair dialogs (`ResolveRefs`; SCHEMA §7.5) —
 /// binds nothing.
 #[tauri::command]
@@ -1693,9 +2041,22 @@ pub async fn clear_worker_circuit(state: State<'_, AppState>) -> Result<usize, A
 /// Recent projects for the start screen, read from the persisted recents store at
 /// `<app_config_dir>/recents.json` (a missing file ⇒ empty). Written on every
 /// successful open/save by [`recents::record`].
+///
+/// Each card's `thumbnail` is that project's container `preview.png` as a `data:`
+/// URL. Those are up to ten small file reads, so they run in ONE `spawn_blocking`
+/// rather than on the async runtime — and if that task somehow fails, the listing
+/// still returns, just without pictures.
 #[tauri::command]
 pub async fn list_recents(app: AppHandle) -> Result<Vec<RecentProjectDto>, ApiError> {
-    Ok(recents::list(&app))
+    let entries = recents::list(&app);
+    let with_previews = entries.clone();
+    match tokio::task::spawn_blocking(move || recents::with_thumbnails(with_previews)).await {
+        Ok(list) => Ok(list),
+        Err(e) => {
+            tracing::warn!(error = %e, "recents: thumbnail read task failed — listing without previews");
+            Ok(entries)
+        }
+    }
 }
 
 /// Shows a native open dialog (Rust owns the dialog; `tauri-plugin-dialog` Rust
@@ -2120,5 +2481,205 @@ mod tests {
         let (_, second) = parse_preview_operation(raw).unwrap();
         assert_eq!(first, second);
         assert_eq!(RecordId::from_str(&first).unwrap().to_string(), first);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // `spawn_gated_regen` — the cold-worker regen race fix
+    // ─────────────────────────────────────────────────────────────────────
+    //
+    // Neither scripted readiness type touches a real worker: `Never` sleeps out
+    // the timeout and reports not-ready (mirrors `PendingBackend`); `Already`
+    // resolves instantly (mirrors an adopted, already-`Ready` `WorkerManager`
+    // under `AppState::prewarm`). The scheduler side is a REAL
+    // `onecad_core::regen::RegenScheduler` over a driver that just echoes the
+    // request onto a channel — enough to observe "the request fired", without
+    // a `DocumentRuntime` in the loop.
+
+    mod readiness_gate {
+        use std::sync::{Arc, OnceLock};
+        use std::time::Duration;
+
+        use tokio::sync::mpsc::unbounded_channel;
+
+        use onecad_core::regen::{Outcome, RegenDirective, RegenRequest, RegenScheduler};
+
+        use crate::state::SharedScheduler;
+        use crate::worker::WorkerReadiness;
+
+        use super::super::spawn_gated_regen;
+
+        /// Never reports ready; sleeps out the caller's timeout first so the
+        /// gate's "fire anyway on timeout" behavior is genuinely exercised
+        /// rather than racing a same-tick return.
+        struct Never;
+        #[async_trait::async_trait]
+        impl WorkerReadiness for Never {
+            async fn wait_ready(&self, timeout: Duration) -> bool {
+                tokio::time::sleep(timeout).await;
+                false
+            }
+        }
+
+        /// Readiness the test opens by hand, so the window BEFORE it resolves —
+        /// the one the cold-worker race lived in — is directly observable.
+        /// `notify_one` stores a permit, so releasing the latch before the gate
+        /// gets to await it is not a lost wakeup.
+        struct Latch(Arc<tokio::sync::Notify>);
+        #[async_trait::async_trait]
+        impl WorkerReadiness for Latch {
+            async fn wait_ready(&self, timeout: Duration) -> bool {
+                tokio::time::timeout(timeout, self.0.notified())
+                    .await
+                    .is_ok()
+            }
+        }
+
+        /// Reports ready immediately (the `AppState::prewarm` common case).
+        struct Already;
+        #[async_trait::async_trait]
+        impl WorkerReadiness for Already {
+            async fn wait_ready(&self, _timeout: Duration) -> bool {
+                true
+            }
+        }
+
+        /// A live `RegenScheduler` whose driver echoes every request's `request`
+        /// onto an unbounded channel and reports `NoOp` (no `DocumentRuntime`
+        /// needed to observe "the request fired").
+        fn recording_scheduler() -> (
+            SharedScheduler,
+            tokio::sync::mpsc::UnboundedReceiver<RegenRequest>,
+        ) {
+            let (tx, rx) = unbounded_channel();
+            let driver = move |directive: RegenDirective| {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send(directive.request);
+                    Outcome::NoOp
+                }
+            };
+            let (scheduler, handle) = RegenScheduler::new(driver);
+            tokio::spawn(scheduler.run());
+            let shared: SharedScheduler = Arc::new(OnceLock::new());
+            shared.set(handle).expect("freshly-constructed OnceLock");
+            (shared, rx)
+        }
+
+        /// The load-bearing half of the fix: while the worker is still connecting,
+        /// NOTHING reaches the scheduler. Firing into that window is what produced
+        /// "worker not connected" on every open of a project with geometry — a
+        /// from-0 plan has no retry path, so that first failure was terminal.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn withholds_the_request_until_readiness_resolves() {
+            let (sched, mut rx) = recording_scheduler();
+            let latch = Arc::new(tokio::sync::Notify::new());
+            spawn_gated_regen(
+                Arc::new(Latch(latch.clone())),
+                sched.clone(),
+                Duration::from_secs(30),
+                || async { true },
+            );
+
+            assert!(
+                tokio::time::timeout(Duration::from_millis(150), rx.recv())
+                    .await
+                    .is_err(),
+                "no regen request may reach the scheduler before readiness resolves"
+            );
+
+            latch.notify_one();
+            let got = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("the request fires as soon as readiness resolves")
+                .expect("scheduler channel stayed open");
+            assert!(
+                matches!(got, RegenRequest::ToEnd { from: 0 }),
+                "got {got:?}"
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn fires_the_request_after_timeout_when_never_ready() {
+            let (sched, mut rx) = recording_scheduler();
+            // `sched` is kept alive here for the rest of the test — mirroring
+            // `AppState` retaining its OWN `SharedScheduler` reference in
+            // production. Moving the only strong reference into the spawned
+            // task would drop the `SchedulerHandle`'s sender the instant that
+            // task finishes, racing (and sometimes beating) the scheduler's own
+            // poll of the in-flight driver future.
+            spawn_gated_regen(
+                Arc::new(Never),
+                sched.clone(),
+                Duration::from_millis(20),
+                || async { true },
+            );
+
+            let got = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("the request must still fire once the timeout elapses")
+                .expect("scheduler channel stayed open");
+            assert!(
+                matches!(got, RegenRequest::ToEnd { from: 0 }),
+                "got {got:?}"
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn fires_promptly_when_already_ready() {
+            let (sched, mut rx) = recording_scheduler();
+            // A generous timeout the fast path must never actually wait out.
+            // `sched` stays alive for the same reason as the sibling test above.
+            spawn_gated_regen(
+                Arc::new(Already),
+                sched.clone(),
+                Duration::from_secs(30),
+                || async { true },
+            );
+
+            let got = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("an already-ready readiness must not wait anywhere near the timeout")
+                .expect("scheduler channel stayed open");
+            assert!(
+                matches!(got, RegenRequest::ToEnd { from: 0 }),
+                "got {got:?}"
+            );
+        }
+
+        /// A gate whose document was replaced while it waited must NOT fire:
+        /// the scheduler is global, so a stale from-0 request would land on the
+        /// NEW document — racing its own still-connecting worker (the exact
+        /// failure this gate exists to prevent) or superseding its active regen.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn skips_when_the_document_was_replaced_while_waiting() {
+            let (sched, mut rx) = recording_scheduler();
+            spawn_gated_regen(
+                Arc::new(Already),
+                sched.clone(),
+                Duration::from_secs(30),
+                || async { false }, // the close/open-during-wait shape
+            );
+
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), rx.recv())
+                    .await
+                    .is_err(),
+                "a stale gate must never reach the scheduler"
+            );
+        }
+
+        /// `PendingBackend` — the production no-worker fallback — must itself
+        /// report not-ready immediately rather than hanging the caller's timeout
+        /// budget (it's a distinct behavior from `Never` above, which sleeps
+        /// deliberately to exercise the gate's timeout path).
+        #[tokio::test]
+        async fn pending_backend_reports_not_ready_without_waiting() {
+            let result = tokio::time::timeout(
+                Duration::from_millis(200),
+                crate::worker::PendingBackend.wait_ready(Duration::from_secs(30)),
+            )
+            .await;
+            assert_eq!(result, Ok(false), "PendingBackend never becomes ready");
+        }
     }
 }

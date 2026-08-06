@@ -57,6 +57,8 @@ function makeEngineMock() {
     showGhostPreview: vi.fn(),
     showGhostPreviewMulti: vi.fn(),
     hideGhostPreview: vi.fn(),
+    hideValueHandle: vi.fn(),
+    showValueHandle: vi.fn(),
     setPreviewReplacedBodyIds: vi.fn(),
     probePick(this: { hit: PickHit | null }): PickHit | null {
       return this.hit;

@@ -52,6 +52,10 @@ const OPTYPE_ICON: Record<string, IconName> = {
   // A hole buckets under `kind: "boolean"` too (it is a body MODIFIER, not a
   // dress-up op), so it needs its own entry to avoid the boolean glyph.
   Hole: "hole",
+  // OffsetFace folds into the Fillet/Chamfer/Shell dress-up bucket (`dto.rs
+  // feature_kind`), so without this entry every offset row would show the fillet
+  // glyph. `pushpull` is the toolbar's own glyph for the tool.
+  OffsetFace: "pushpull",
   // An import buckets under `kind: "boolean"` in the projection (interim), so
   // without this entry every imported body's row would show the boolean glyph.
   [IMPORT_STEP_OP_TYPE]: "import",

@@ -63,17 +63,18 @@ use onecad_core::ids::{
     SnapshotId, TopoKey, WorkerEpoch,
 };
 use onecad_core::io::container::{
-    ContainerCaches, ContainerReader, ContainerWriter, LoadedContainer, SaveMeta, CHECKPOINTS_DIR,
+    CacheRead, ContainerCaches, ContainerReader, ContainerWriter, LoadedContainer,
+    MeshCache as MeshCacheBlob, SaveMeta, CHECKPOINTS_DIR, PREVIEW_PATH,
 };
 use onecad_core::io::imports::{ImportBlob, ImportBlobs};
 use onecad_core::io::IoError;
 use onecad_core::math::Vec2;
 use onecad_core::regen::{
     mint_element_ids, AcquireRequest, CancelToken, CheckpointArtifacts, CheckpointStore,
-    EngineError, GeometryEngine, InMemoryCheckpointStore, Lod, MeshKey, ModelSnapshot, Outcome,
-    Pick, PlanArtifacts, PlanContext, PlanRequest, PolicyVersions, RefResolution, RegenExecutor,
-    RegenPlan, RegenPlanner, RegenRequest, RegenSession, ResolveRequest, SnapshotPublisher,
-    TessellateSpec,
+    EngineError, GeometryEngine, InMemoryCheckpointStore, Lod, MeshKey, MeshSink, ModelSnapshot,
+    Outcome, Pick, PlanArtifacts, PlanContext, PlanRequest, PolicyVersions, RefResolution,
+    RegenExecutor, RegenPlan, RegenPlanner, RegenRequest, RegenSession, ResolveRequest,
+    SnapshotPublisher, TessellateSpec,
 };
 use onecad_core::sketch::{CurveParams, Sketch, SketchAttachment, WorldPlane};
 
@@ -83,7 +84,8 @@ use crate::dto::{
     needs_repair_item_dto, op_type_name, BodyDto, BodyMeshRef, DatumDto, DocStatus, DocumentChange,
     DocumentProjection, FailedStep, FeatureDependenciesDto, FeatureDto, FinishSketchDto,
     NeedsRepairItemDto, PromotedElementDto, SketchDto, SketchHostFaceDto, SketchSessionDto,
-    SketchSolveStatus, SketchStatus, SketchUpsertDto,
+    SketchSolveStatus, SketchStatus, SketchUpsertDto, GEOMETRY_SOURCE_CACHED, GEOMETRY_SOURCE_LIVE,
+    GEOMETRY_SOURCE_NONE,
 };
 use crate::error::ApiError;
 use crate::imports::{ImportWorkspace, PreparedImport};
@@ -345,6 +347,67 @@ pub struct SavePayload {
     meta: SaveMeta,
 }
 
+/// Which "open paints immediately" caches a save embeds in the container.
+///
+/// The distinction is **explicit save vs autosave**, not a tuning knob. An
+/// explicit save is a user-intended checkpoint of the work and is worth spending
+/// container bytes on so the next open can paint last-saved geometry before the
+/// from-0 regen finishes. An autosave fires on a timer, competes with live
+/// editing, and its container is only ever read by crash recovery — which regens
+/// from 0 anyway. So autosave writes [`SaveCaches::none`] and the two lanes never
+/// argue about it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SaveCaches {
+    /// Embed the head snapshot's coarse meshes (`meshes/<bodyId>.coarse.mesh`),
+    /// bounded by [`MAX_SAVED_MESH_BYTES`].
+    pub meshes: bool,
+    /// A PNG viewport capture to store as `preview.png`.
+    ///
+    /// `None` **carries forward** whatever preview the document already has: a
+    /// save from a window that produced no capture (headless, a backgrounded
+    /// webview, an older frontend) must not erase the thumbnail the start screen
+    /// is showing. Only a `Some` replaces it.
+    pub preview_png: Option<Vec<u8>>,
+}
+
+impl SaveCaches {
+    /// Persist nothing (the autosave lane).
+    #[must_use]
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// The explicit-save lane with no viewport capture: meshes on, preview carried
+    /// forward.
+    #[must_use]
+    pub fn explicit() -> Self {
+        Self {
+            meshes: true,
+            preview_png: None,
+        }
+    }
+
+    /// Whether this lane writes ANY cache section. False only for
+    /// [`none`](Self::none) — which is what keeps an autosave container free of a
+    /// `preview.png` it would otherwise inherit through the carry-forward rule.
+    #[must_use]
+    pub fn persists_caches(&self) -> bool {
+        self.meshes || self.preview_png.is_some()
+    }
+}
+
+/// Budget for the mesh caches ONE save embeds (64 MiB). A document dense enough to
+/// blow through this is one where the container write, not the regen, becomes the
+/// thing the user waits on — and the caches are pure acceleration (Invariant 7), so
+/// truncating is always sound. The bodies that fit still paint at open; the rest
+/// arrive with the regen.
+pub const MAX_SAVED_MESH_BYTES: usize = 64 * 1024 * 1024;
+
+/// Budget for the mesh caches ONE open loads back (256 MiB) — matches
+/// [`crate::mesh_cache::DEFAULT_BYTE_CAPACITY`], since these blobs occupy the same
+/// role (resident MESH1 bytes) until the first publish retires them.
+pub const MAX_LOADED_MESH_BYTES: usize = 256 * 1024 * 1024;
+
 /// One entry of the promotion cache (see [`DocumentRuntime::promoted`]).
 ///
 /// The `descriptor` is the worker's opaque evidence for the element as it stood in
@@ -380,6 +443,21 @@ pub struct DocumentRuntime {
     dirty: bool,
     read_only: bool,
     mesh_cache: MeshCache,
+    /// MESH1 blobs read back from the container at **open** — the last-saved
+    /// geometry, keyed WITHOUT a generation because it belongs to no live snapshot.
+    ///
+    /// This is the whole point of the feature: a reopened document paints its
+    /// bodies immediately instead of staring at an empty viewport for the whole
+    /// from-0 worker regen. It is served only in the pre-publish window
+    /// ([`get_mesh`](Self::get_mesh)) and dropped at the first
+    /// [`commit_snapshot`](Self::commit_snapshot) — once real geometry exists,
+    /// serving saved bytes could show a body the current timeline no longer
+    /// produces.
+    cached_meshes: HashMap<(BodyId, Lod), Arc<Vec<u8>>>,
+    /// The document's `preview.png`, loaded at open and rewritten by an explicit
+    /// save that carries a capture. Held so a capture-less save can carry it
+    /// forward instead of erasing the start screen's thumbnail.
+    preview_png: Option<Arc<Vec<u8>>>,
     latest_snapshot: Option<Arc<ModelSnapshot>>,
     /// The worker epoch [`latest_snapshot`](Self::latest_snapshot) was produced under.
     /// Only that worker still holds the head geometry, so it is the only one a
@@ -505,6 +583,9 @@ impl DocumentRuntime {
         // `ImportStep` steps cannot replay. Loaded eagerly (unlike caches) because
         // regen starts immediately after open and the worker needs real files.
         rt.load_import_blobs(&loaded);
+        // Last-saved geometry + thumbnail. Eager for the same reason: the whole
+        // value is being resident BEFORE the open-regen's first publish.
+        rt.load_open_caches(&loaded);
         Ok(rt)
     }
 
@@ -548,6 +629,8 @@ impl DocumentRuntime {
             dirty: false,
             read_only,
             mesh_cache: MeshCache::new(),
+            cached_meshes: HashMap::new(),
+            preview_png: None,
             latest_snapshot: None,
             // No snapshot yet; `prepare_checkpoint` refuses before the first publish
             // regardless, and the first commit stamps the real value.
@@ -1110,6 +1193,7 @@ impl DocumentRuntime {
             job: Some(job),
             base_hash_prefix,
             step_count,
+            mesh_sink: MeshSink::default(),
         })
     }
 
@@ -1165,6 +1249,9 @@ impl DocumentRuntime {
             job: None,
             base_hash_prefix: String::new(),
             step_count: 0,
+            // No worker round-trip ⇒ no inline artifacts. A CLEAR publishes NO
+            // geometry, so there is nothing to cache either way.
+            mesh_sink: MeshSink::default(),
         })
     }
 
@@ -1222,6 +1309,7 @@ impl DocumentRuntime {
             job,
             base_hash_prefix,
             step_count,
+            mesh_sink,
         } = driven;
         let job = JobLabel(job);
         // The revision this regen was PREPARED for (fenced at begin_regen). Threaded
@@ -1240,6 +1328,14 @@ impl DocumentRuntime {
             if same_instance && self.fencing.get() == expected {
                 let snapshot_id = snap.id.0;
                 let (changed, removed) = self.commit_snapshot(scratch, snap, lod, &prior);
+                // The worker already tessellated every one of these bodies while
+                // preparing and shipped the MESH1 blobs in the plan terminal's tail.
+                // Seed them now so the `document-changed` this commit is about to emit
+                // resolves to cache HITS instead of one Tessellate round-trip per body.
+                // INSIDE the commit guard on purpose: the same fencing check that gates
+                // `commit_snapshot` gates the cache fill, so geometry the document did
+                // not adopt can never be served for its generation.
+                self.seed_mesh_cache(&mesh_sink);
                 // Write the just-produced body provenance back onto the records so the
                 // dependency graph gains its body edges (see `sync_record_outputs`).
                 self.sync_record_outputs(&executed);
@@ -1445,6 +1541,16 @@ impl DocumentRuntime {
         let prev_snapshot = self.latest_snapshot.as_ref().map(|s| s.id);
         self.regen = scratch;
         self.latest_snapshot = Some(snap.clone());
+        // First publish retires the container's last-saved geometry: real geometry
+        // now exists, and these blobs describe a document state the timeline may
+        // already have moved past.
+        if !self.cached_meshes.is_empty() {
+            tracing::debug!(
+                entries = self.cached_meshes.len(),
+                "regen: first publish — dropping the container's last-saved mesh cache"
+            );
+            self.cached_meshes.clear();
+        }
         // VF-M4: the promotion cache is snapshot-keyed, so a commit retires every
         // generation but {this one, the one before it} — the window the
         // descriptor-pinned reuse rung reads. Ordered AFTER the tripwire evaluate
@@ -1575,19 +1681,38 @@ impl DocumentRuntime {
     ///
     /// Bytes are returned behind an `Arc` so the command hands the webview a
     /// zero-copy [`tauri::ipc::Response`].
+    ///
+    /// ## The pre-publish window
+    ///
+    /// Before the first snapshot this serves [`cached_meshes`](Self::cached_meshes)
+    /// — the geometry the last explicit save embedded in the container — so a
+    /// reopened document paints instantly rather than after the from-0 regen. Two
+    /// bounds keep that honest:
+    ///
+    /// * **Only until the first publish.** The moment a snapshot exists the cache is
+    ///   gone (`commit_snapshot` clears it) and this never consults it again.
+    /// * **Only for an unpinned generation.** `None`/`0` means "whatever is current";
+    ///   the snapshot publisher mints generations from **1**, so no caller can ever
+    ///   have asked for these bytes by generation. A request that names a specific
+    ///   generation is asking for a snapshot that does not exist here, and gets a
+    ///   miss rather than bytes from a different one.
     pub async fn get_mesh(
         &mut self,
         body: BodyId,
         lod: Lod,
         generation: Option<u64>,
     ) -> Option<Arc<Vec<u8>>> {
-        let (gen, snap_id, latest_gen) = {
-            let snap = self.latest_snapshot.as_ref()?;
+        let Some((gen, snap_id, latest_gen)) = self.latest_snapshot.as_ref().map(|snap| {
             (
                 generation.unwrap_or(snap.generation),
                 snap.id,
                 snap.generation,
             )
+        }) else {
+            if matches!(generation, None | Some(0)) {
+                return self.cached_meshes.get(&(body, lod)).cloned();
+            }
+            return None;
         };
         let key = MeshKey {
             body,
@@ -1607,21 +1732,53 @@ impl DocumentRuntime {
         Some(arc)
     }
 
+    /// Drains a just-committed regen's inline MESH1 artifacts into the cache, so the
+    /// [`get_mesh`](Self::get_mesh) calls the `document-changed` event triggers hit
+    /// instead of re-tessellating geometry the worker already produced.
+    ///
+    /// Callable **only** from the committing branch of
+    /// [`finish_regen`](Self::finish_regen): the keys carry the published
+    /// generation, which is meaningful only once that publish is the live snapshot.
+    fn seed_mesh_cache(&mut self, sink: &MeshSink) {
+        let seeded = {
+            let mut guard = sink
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *guard)
+        };
+        if seeded.is_empty() {
+            return;
+        }
+        let bytes: usize = seeded.iter().map(|(_, b)| b.len()).sum();
+        for (key, blob) in seeded {
+            self.mesh_cache.put(key, blob);
+        }
+        tracing::debug!(
+            meshes = self.mesh_cache.len(),
+            bytes,
+            "regen: seeded the mesh cache from the plan's inline tessellate artifacts"
+        );
+    }
+
     // ── Save ─────────────────────────────────────────────────────────────────
 
-    /// Atomically saves the document (+ merged regen geometry outputs) to `path`.
+    /// Atomically saves the document (+ merged regen geometry outputs) to `path`,
+    /// on the **explicit-save** cache policy ([`SaveCaches::explicit`]).
     /// Timestamps come from the caller (the pure core never reads the wall clock).
     ///
     /// Checkpoints are **not** written: they are in-session acceleration only (SCHEMA
     /// §7.7 V2 policy). Worker restore is in-session-map-only, so a container-loaded
     /// checkpoint could never actually be restored — it only cost container growth and
-    /// a replay detour.
+    /// a replay detour. Meshes and the preview thumbnail ARE written: unlike a
+    /// checkpoint they need no worker session to be useful, they are read straight
+    /// into the viewport at open, and they are the only thing that lets a reopened
+    /// document paint before its from-0 regen finishes.
     ///
     /// # Errors
     /// [`IoError`] on a serialization / filesystem failure; the target is left
     /// untouched on any failure.
     pub fn save(&mut self, path: &Path, meta: SaveMeta) -> Result<(), IoError> {
-        let payload = self.build_save_payload(meta);
+        let payload = self.build_save_payload(meta, SaveCaches::explicit());
         let revision = self.revision();
         Self::write_payload(path, &payload)?;
         self.mark_saved(path, revision);
@@ -1636,21 +1793,99 @@ impl DocumentRuntime {
     /// [`write_payload`](Self::write_payload), so a save/autosave never blocks an
     /// edit. The import carrier is cloned by refcount, not by `memcpy` (the blob
     /// bytes live behind an `Arc`).
+    ///
+    /// `&mut self` because a save that carries a viewport capture ADOPTS it as the
+    /// document's live preview here — one step, under the lock, so the "carry
+    /// forward when the next save has none" rule can never observe a half-applied
+    /// state. Everything else is still a snapshot: the mesh side only `peek`s the
+    /// LRU (no recency perturbation, no IO).
     #[must_use]
-    pub fn build_save_payload(&self, meta: SaveMeta) -> SavePayload {
+    pub fn build_save_payload(&mut self, meta: SaveMeta, caches: SaveCaches) -> SavePayload {
         let mut doc = self.session.document().clone();
         // Merge regen-derived outputs so a reopen shows the tree before regen.
         doc.bodies = self.saved_bodies();
         doc.elements = self.regen.elements.clone();
         doc.repair = self.regen.repair.clone();
+        // `none()` (the autosave lane) writes NO cache section at all; any other
+        // lane writes the preview it has, fresh capture or carried forward.
+        let persists = caches.persists_caches();
+        if let Some(png) = caches.preview_png {
+            self.preview_png = Some(Arc::new(png));
+        }
         SavePayload {
             doc,
-            // Checkpoints are in-session only (SCHEMA §7.7 V2 policy), and no other
-            // cache class is persisted in V1 — so a save is document-only + imports.
-            caches: ContainerCaches::none(),
+            caches: ContainerCaches {
+                geometry: BTreeMap::new(),
+                meshes: if caches.meshes {
+                    self.saved_mesh_caches()
+                } else {
+                    Vec::new()
+                },
+                // Checkpoints are in-session only (SCHEMA §7.7 V2 policy).
+                checkpoints: Vec::new(),
+                preview_png: persists
+                    .then(|| self.preview_png.as_ref().map(|p| p.as_ref().clone()))
+                    .flatten(),
+            },
             imports: self.imports.clone(),
             meta,
         }
+    }
+
+    /// The mesh cache entries an explicit save embeds: every body of the head
+    /// snapshot whose **coarse** MESH1 blob is already resident.
+    ///
+    /// `peek` only — this runs under the single-writer lock, so it must not fetch,
+    /// tessellate, or even perturb LRU recency. A body whose blob was already
+    /// evicted is simply not persisted; it arrives with the open-regen like before.
+    ///
+    /// Body order is sorted by id (deterministic across processes), which also makes
+    /// the [`MAX_SAVED_MESH_BYTES`] truncation deterministic: the same document
+    /// always drops the same tail.
+    fn saved_mesh_caches(&self) -> Vec<MeshCacheBlob> {
+        let Some(snap) = self.latest_snapshot.as_ref() else {
+            return Vec::new();
+        };
+        let mut bodies: Vec<BodyId> = snap.bodies.iter().map(|b| b.body).collect();
+        bodies.sort_unstable();
+        bodies.dedup();
+
+        let mut out = Vec::new();
+        let mut bytes = 0usize;
+        let mut dropped = 0usize;
+        for (i, body) in bodies.iter().enumerate() {
+            let key = MeshKey {
+                body: *body,
+                lod: Lod::Coarse,
+                generation: snap.generation,
+            };
+            let Some(blob) = self.mesh_cache.peek(&key) else {
+                continue;
+            };
+            if bytes + blob.len() > MAX_SAVED_MESH_BYTES {
+                dropped = bodies.len() - i;
+                break;
+            }
+            bytes += blob.len();
+            // `blob` is the LRU's own `Arc` — the carrier shares the allocation
+            // rather than copying it (VF-B7; the writer's copy happens off-lock).
+            out.push(MeshCacheBlob {
+                body: *body,
+                lod: lod_str(Lod::Coarse).to_string(),
+                bytes: blob,
+            });
+        }
+        if dropped > 0 {
+            tracing::info!(
+                persisted = out.len(),
+                dropped,
+                bytes,
+                budget = MAX_SAVED_MESH_BYTES,
+                "save: mesh cache budget reached — the remaining bodies will paint after the \
+                 open-regen instead of immediately"
+            );
+        }
+        out
     }
 
     /// Writes a [`SavePayload`] to `path` atomically. Deliberately **takes no
@@ -1699,16 +1934,18 @@ impl DocumentRuntime {
     /// **without** touching the live save path or the dirty flag — a crash-recovery
     /// snapshot, not a real save. Reuses the same atomic [`ContainerWriter`] the
     /// autosave layout ([`io::recovery`]) points at. Timestamps come from the caller
-    /// (the pure core never reads the wall clock). No checkpoint cache is written
-    /// (in-session-only policy — see [`save`](Self::save)).
+    /// (the pure core never reads the wall clock). No cache section is written at
+    /// all: no checkpoints (in-session-only policy — see [`save`](Self::save)), and
+    /// no meshes/preview ([`SaveCaches::none`] — a recovery container is read once,
+    /// by a path that regens from 0 anyway).
     ///
     /// [`io::recovery`]: onecad_core::io::recovery
     ///
     /// # Errors
     /// [`IoError`] on a serialization / filesystem failure; the target is left
     /// untouched on any failure.
-    pub fn write_autosave(&self, path: &Path, meta: SaveMeta) -> Result<(), IoError> {
-        Self::write_payload(path, &self.build_save_payload(meta))
+    pub fn write_autosave(&mut self, path: &Path, meta: SaveMeta) -> Result<(), IoError> {
+        Self::write_payload(path, &self.build_save_payload(meta, SaveCaches::none()))
     }
 
     /// The document's stable id (the autosave container + crash-marker key,
@@ -1833,6 +2070,86 @@ impl DocumentRuntime {
                 ),
             }
         }
+    }
+
+    /// Loads the "paint at open" caches out of a just-opened container: the
+    /// `preview.png` thumbnail and every `meshes/<bodyId>.<lod>.mesh` blob.
+    ///
+    /// Everything here is best-effort by construction (Invariant 7: a cache
+    /// degrades performance, never correctness). A stale container, an unreadable
+    /// entry, a blob that is not valid MESH1 — all of it degrades to "no cached
+    /// geometry", which is exactly the behavior before this feature existed.
+    ///
+    /// **Staleness is all-or-nothing.** A container-level `opsHash` mismatch means
+    /// the timeline no longer matches the geometry those blobs were tessellated
+    /// from, so painting ANY of them would show the user a body their document does
+    /// not describe. One log line, then nothing is loaded.
+    fn load_open_caches(&mut self, loaded: &LoadedContainer) {
+        match loaded.read_cache(PREVIEW_PATH) {
+            Ok(CacheRead::Present(bytes)) => self.preview_png = Some(Arc::new(bytes)),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "open: preview.png unreadable — no thumbnail"),
+        }
+
+        let entries = loaded.mesh_cache_entries();
+        if entries.is_empty() {
+            return;
+        }
+        if loaded.outcome.stale_caches {
+            tracing::info!(
+                entries = entries.len(),
+                "open: container mesh caches are STALE (opsHash mismatch) — skipping all of them; \
+                 the viewport stays empty until the open-regen publishes"
+            );
+            return;
+        }
+        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        let reads = match loaded.read_caches(&paths) {
+            Ok(reads) => reads,
+            Err(e) => {
+                tracing::warn!(error = %e, "open: mesh cache batch read failed — none loaded");
+                return;
+            }
+        };
+
+        let mut bytes_total = 0usize;
+        let mut skipped = 0usize;
+        for (entry, (_, read)) in entries.iter().zip(reads) {
+            let blob = match read {
+                CacheRead::Present(bytes) => bytes,
+                CacheRead::Stale | CacheRead::Missing => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+            if let Err(e) = onecad_protocol::mesh::validate_mesh_blob(&blob) {
+                tracing::warn!(
+                    body = %entry.body, error = %e,
+                    "open: container mesh cache entry is not valid MESH1 — skipped"
+                );
+                skipped += 1;
+                continue;
+            }
+            if bytes_total + blob.len() > MAX_LOADED_MESH_BYTES {
+                tracing::info!(
+                    loaded = self.cached_meshes.len(),
+                    bytes = bytes_total,
+                    "open: mesh cache budget reached — remaining entries wait for the regen"
+                );
+                break;
+            }
+            bytes_total += blob.len();
+            self.cached_meshes.insert(
+                (entry.body, crate::worker::lod_from_str(&entry.lod)),
+                Arc::new(blob),
+            );
+        }
+        tracing::info!(
+            loaded = self.cached_meshes.len(),
+            skipped,
+            bytes = bytes_total,
+            "open: seeded last-saved geometry from the container (paints before the regen)"
+        );
     }
 
     /// Names the bodies an `ImportStep` just minted from the STEP product names
@@ -2082,6 +2399,21 @@ impl DocumentRuntime {
             // (`appliedOps < totalOps` ⇒ ops sit beyond the rollback bar).
             applied_ops: doc.timeline.cursor(),
             total_ops: doc.timeline.len(),
+            geometry_source: self.geometry_source().to_string(),
+        }
+    }
+
+    /// Which geometry the viewport is being fed right now (see
+    /// [`DocumentProjection::geometry_source`]). Mirrors exactly what
+    /// [`get_mesh`](Self::get_mesh) will serve: a snapshot wins, else the
+    /// container's last-saved meshes, else nothing.
+    fn geometry_source(&self) -> &'static str {
+        if self.latest_snapshot.is_some() {
+            GEOMETRY_SOURCE_LIVE
+        } else if !self.cached_meshes.is_empty() {
+            GEOMETRY_SOURCE_CACHED
+        } else {
+            GEOMETRY_SOURCE_NONE
         }
     }
 
@@ -2894,6 +3226,12 @@ pub struct PreparedRegen {
     base_hash_prefix: String,
     /// Number of compiled ops (0 on the CLEAR path).
     step_count: usize,
+    /// Collects the MESH1 blobs the worker inlined into the `ExecutePlan` terminal.
+    /// Drained into the runtime's [`MeshCache`] by
+    /// [`finish_regen`](DocumentRuntime::finish_regen) — and ONLY inside the branch
+    /// that commits, so a superseded regen's geometry is dropped with the sink.
+    /// Always empty on the CLEAR path (no worker round-trip).
+    mesh_sink: MeshSink,
 }
 
 /// Renders an optional [`JobId`] for the regen lane: the bare uuid, or `clear` for
@@ -2979,6 +3317,7 @@ impl PreparedRegen {
             job,
             base_hash_prefix,
             step_count,
+            mesh_sink,
         } = self;
         // The phase-2 span. Everything the executor awaits nests inside it — INCLUDING
         // the `onecad_protocol::frames` tx/rx events, which is the join from a regen to
@@ -2996,7 +3335,9 @@ impl PreparedRegen {
         let outcome = match work {
             PreparedWork::Plan { plan_req, engine } => {
                 let gate = move || fencing.get();
-                let executor = RegenExecutor::new(*engine);
+                // The executor deposits the terminal prepare's inline meshes here on a
+                // PUBLISH; phase 3 decides whether that publish actually commits.
+                let executor = RegenExecutor::new(*engine).with_mesh_sink(mesh_sink.clone());
                 executor
                     .run(*plan_req, &mut scratch, &gate, &cancel, &publisher)
                     .instrument(span.clone())
@@ -3025,6 +3366,7 @@ impl PreparedRegen {
             job,
             base_hash_prefix,
             step_count,
+            mesh_sink,
         }
     }
 }
@@ -3099,6 +3441,8 @@ pub struct DrivenRegen {
     job: Option<JobId>,
     base_hash_prefix: String,
     step_count: usize,
+    /// The inline meshes phase 2 collected — see [`PreparedRegen::mesh_sink`].
+    mesh_sink: MeshSink,
 }
 
 /// Logs once when an opened container still carries the pre-V2 `checkpoints/` cache.
@@ -3527,6 +3871,14 @@ fn element_ref_input(op: &Operation, index: usize) -> Option<&ElementRef> {
         KnownOperation::Chamfer(p) => p.edges.get(index),
         // `inputs[0]` is the host body ref (no element), `inputs[1]` the host face.
         KnownOperation::Hole(p) => (index == 1).then_some(&p.face),
+        // Operative faces in stored order, then the `Total` opposite face LAST —
+        // the SCHEMA §7.3 normative slot table `wire_op_inputs` lowers.
+        KnownOperation::OffsetFace(p) => match p.faces.get(index) {
+            Some(f) => Some(f),
+            None => (index == p.faces.len())
+                .then_some(p.opposite_face.as_ref())
+                .flatten(),
+        },
         KnownOperation::Extrude(p) => {
             let mut faces: Vec<&ElementRef> = Vec::new();
             if p.mode == ExtrudeMode::ToFace {

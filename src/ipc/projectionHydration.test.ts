@@ -280,3 +280,33 @@ describe("projectionToStore — the rollback cursor", () => {
     expect(projectionToStore(wire).features).toHaveLength(wire.totalOps!);
   });
 });
+
+// ── geometrySource (persisted-cache lane) ─────────────────────────────────────
+
+describe("projectionToStore — geometrySource", () => {
+  it("carries the backend's value through verbatim", () => {
+    expect(projectionToStore(proj(1, { geometrySource: "cached" })).geometrySource).toBe("cached");
+    expect(projectionToStore(proj(1, { geometrySource: "live" })).geometrySource).toBe("live");
+    expect(projectionToStore(proj(1, { geometrySource: "none" })).geometrySource).toBe("none");
+  });
+
+  it("an ABSENT field reads as 'none' — no chip, never an assumed 'live'", () => {
+    // The mock lane and any backend older than the field omit it. Defaulting to
+    // "live" would label cached geometry as authoritative on exactly the builds
+    // that cannot tell us otherwise.
+    expect(projectionToStore(proj(1)).geometrySource).toBe("none");
+  });
+
+  it("an UNRECOGNISED token reads as 'none' rather than being trusted", () => {
+    const wire = proj(1);
+    // Deliberately off-contract: what a NEWER backend could send. The cast is the
+    // test — TypeScript cannot police a value that crossed the IPC boundary.
+    (wire as { geometrySource?: string }).geometrySource = "stale-from-the-future";
+    expect(projectionToStore(wire).geometrySource).toBe("none");
+  });
+
+  it("reaches the store through the full apply path", () => {
+    applyProjectionToStore(proj(42, { geometrySource: "cached" }));
+    expect(documentStore.getState().geometrySource).toBe("cached");
+  });
+});

@@ -105,6 +105,9 @@ function makeEngineMock() {
     setRevolveAngle: vi.fn(),
     hideRevolvePreview: vi.fn(),
     hideGhostPreview: vi.fn(),
+    hideValueHandle: vi.fn(),
+    showValueHandle: vi.fn(),
+    showGhostPreviewMulti: vi.fn(),
     probePick: vi.fn(() => null),
   };
 }

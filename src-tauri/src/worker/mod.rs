@@ -336,6 +336,32 @@ pub trait FaceBoundaryProjection: Send + Sync {
         plane: &onecad_core::sketch::SketchPlane,
         scope: wire::ProjectionScope,
     ) -> Result<Option<onecad_core::sketch::ProjectionPayload>, EngineError>;
+
+    /// `PrepareOffsetFace` (SCHEMA §7.6) — the read-only OffsetFace authoring
+    /// handshake: the G1 tangent closure over the picked faces, the `Total`
+    /// opposite candidate, and the dimensions that seed an absolute distance type.
+    ///
+    /// On this trait rather than a ninth backend facet for the same reason
+    /// `QueryMassProperties` sits on [`ElementQuery`]: SCHEMA files it in §7.6
+    /// beside `ProjectFaceBoundary`, and it is the same KIND of call — a
+    /// read-only, non-minting FACE query served by the same `WorkerManager` off a
+    /// copy of the head. It differs only in what it reports.
+    ///
+    /// It is **snapshot-FENCED** rather than advisory, unlike the §7.5 reads: the
+    /// closure it returns is about to be frozen into a document record, so a stale
+    /// head is refused (`STALE_PREVIEW`) instead of answered.
+    ///
+    /// No `Option`: a REFUSAL (`crossBody`, `chainMismatch`, …) is a successful
+    /// answer carried in
+    /// [`PrepareOffsetFaceDto::refusal`](crate::dto::PrepareOffsetFaceDto::refusal),
+    /// so there is no "that face is gone" reading left for `None` to mean.
+    async fn prepare_offset_face(
+        &self,
+        snapshot: SnapshotId,
+        picks: &[wire::OffsetFacePick<'_>],
+        chain_tangent_faces: bool,
+        distance_type: onecad_core::document::record::OffsetDistanceType,
+    ) -> Result<crate::dto::PrepareOffsetFaceDto, EngineError>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -462,6 +488,31 @@ pub trait CircuitControl: Send + Sync {
 /// Blanket-implemented, so any type that is both is a `Backend`.
 pub trait Backend: GeometryEngine + MeshProvider {}
 impl<T: GeometryEngine + MeshProvider> Backend for T {}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Worker readiness gate (cold-worker regen race)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Whether the backend's worker has completed its OCW1 handshake — the gate a
+/// freshly opened/imported/recovered document's first (`from: 0`) regen request
+/// waits on before firing.
+///
+/// Without this, `new_document`/`open_document`/`import_step`/`recover_document`
+/// enqueue that request the instant the command returns, which can race a
+/// still-connecting worker: `execute_plan` on a not-yet-`Ready`
+/// [`WorkerManager`] fails fast ([`EngineError::NotConnected`]) as
+/// `PlanEvent::Failed`, and a from-0 plan has **no retry** — the executor's
+/// checkpoint-retry path needs a prior successful attempt to fall back to. With
+/// [`AppState::prewarm`](crate::state::AppState::prewarm) the wait below resolves
+/// near-instantly in the common case; it only pays real latency on a genuinely
+/// cold start with no pre-warmed worker.
+#[async_trait]
+pub trait WorkerReadiness: Send + Sync {
+    /// Awaits readiness up to `timeout`. `true` once the worker can serve a plan;
+    /// `false` on timeout, or immediately for a backend (e.g. [`PendingBackend`])
+    /// that can never become ready.
+    async fn wait_ready(&self, timeout: std::time::Duration) -> bool;
+}
 
 /// The wire string for a [`Lod`] (`"coarse"`/`"medium"`/`"fine"`; SCHEMA §7.6).
 #[must_use]
@@ -831,6 +882,16 @@ impl FaceBoundaryProjection for PendingBackend {
     ) -> Result<Option<onecad_core::sketch::ProjectionPayload>, EngineError> {
         Err(Self::not_ready())
     }
+
+    async fn prepare_offset_face(
+        &self,
+        _snapshot: SnapshotId,
+        _picks: &[wire::OffsetFacePick<'_>],
+        _chain_tangent_faces: bool,
+        _distance_type: onecad_core::document::record::OffsetDistanceType,
+    ) -> Result<crate::dto::PrepareOffsetFaceDto, EngineError> {
+        Err(Self::not_ready())
+    }
 }
 
 #[async_trait]
@@ -848,6 +909,15 @@ impl CircuitControl for PendingBackend {
     /// No worker ⇒ no circuit ⇒ nothing to clear.
     fn clear_circuit(&self) -> usize {
         0
+    }
+}
+
+#[async_trait]
+impl WorkerReadiness for PendingBackend {
+    /// No worker ⇒ never ready — returns immediately rather than burning the
+    /// timeout.
+    async fn wait_ready(&self, _timeout: std::time::Duration) -> bool {
+        false
     }
 }
 

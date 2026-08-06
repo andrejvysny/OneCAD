@@ -412,6 +412,8 @@ impl GeometryEngine for FakeEngine {
                         stopped_reason: stopped,
                         per_step,
                         history_prefix_hash,
+                        // The scripted engine inlines no geometry — the pull path.
+                        artifact_meshes: Vec::new(),
                     }));
                 }
                 None

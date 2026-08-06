@@ -1,0 +1,87 @@
+---
+source: crates/onecad-core/tests/schema_freeze.rs
+expression: rec
+---
+{
+  "recordId": "00000000-0000-0000-0000-000000002ed0",
+  "recordSchemaVersion": 1,
+  "stepIndex": 16,
+  "name": "Offset face 3",
+  "opType": "OffsetFace",
+  "params": {
+    "chainTangentFaces": false,
+    "distance": {
+      "value": 12.0
+    },
+    "distanceType": "Total",
+    "faceIds": [
+      "el_top"
+    ],
+    "faces": [
+      {
+        "anchor": {
+          "worldPoint": [
+            0.0,
+            0.0,
+            10.0
+          ]
+        },
+        "intent": {
+          "descriptor": {
+            "surfaceType": "plane"
+          },
+          "kind": "face",
+          "version": 1
+        },
+        "primary": {
+          "bodyId": "00000000-0000-0000-0000-00000000b0d1",
+          "elementId": "el_top",
+          "kind": "face"
+        }
+      }
+    ],
+    "oppositeFace": {
+      "anchor": {
+        "worldPoint": [
+          0.0,
+          0.0,
+          10.0
+        ]
+      },
+      "intent": {
+        "descriptor": {
+          "surfaceType": "plane"
+        },
+        "kind": "face",
+        "version": 1
+      },
+      "primary": {
+        "bodyId": "00000000-0000-0000-0000-00000000b0d1",
+        "elementId": "el_bottom",
+        "kind": "face"
+      }
+    },
+    "oppositeFaceId": "el_bottom",
+    "targetBodyId": "00000000-0000-0000-0000-00000000b0d1"
+  },
+  "inputs": {
+    "bodies": [
+      "00000000-0000-0000-0000-00000000b0d1"
+    ],
+    "sketches": [],
+    "elements": [
+      "el_top",
+      "el_bottom"
+    ]
+  },
+  "outputs": [
+    "00000000-0000-0000-0000-00000000b0d1"
+  ],
+  "determinism": {
+    "parallel": false,
+    "occtOptionsHash": "cbf29ce484222325",
+    "tolerancePolicyHash": "b2c9000000000000",
+    "solverPolicyHash": "3e9a000000000000"
+  },
+  "suppressed": false
+}

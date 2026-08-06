@@ -77,9 +77,9 @@ awaited construction resolves after disposal).
 | `HtmlOverlayDriver.ts`| Projects world→screen and writes DOM transforms per frame.     |
 | `palette.ts`         | Reads design tokens (tokens.css) via getComputedStyle; cached.  |
 | `lightRig.ts`        | Pure camera-relative key/fill positions (floored key elevation).|
-| `BodyObject.ts`      | Per-body face Mesh + edge LineSegments; shared body materials.  |
+| `BodyObject.ts`      | Per-body face Mesh + fat edge `LineSegments2`; shared materials.|
 | `Picker.ts`          | rAF-coalesced raycast → face/edge PickHit; edge screen-bias.    |
-| `HighlightLayer.ts`  | Hover/selected highlight via shared-attribute drawRange clones. |
+| `HighlightLayer.ts`  | Hover/selected highlight: shared-attribute faces, sliced edges. |
 | `DragHandle.ts`      | Extrude depth handle: screen-scaled arrow + fat pick cylinder.  |
 | `TransformGizmo.ts`  | Placement gizmo: 3 arrows / 3 plane quads / 3 rings (WP-B W2).  |
 
@@ -102,12 +102,57 @@ zustand — double-buffered swap, old geometry disposed one frame later via
 empty on document close). `../mesh/meshSync.ts` (`MeshIngest`) is the app glue:
 `document-changed` → fetch visible bodies → swap → BodyObject in `bodiesRoot`.
 
-Picking raycasts `bodiesRoot`; a triangle/segment index is mapped to a face/edge
-id by binary search over the MESH1 ranges (`../mesh/faceRangeIndex.ts`), decoding
-the id string LAZILY on pick. Highlights are shallow-cloned geometries that SHARE
-the body's BufferAttributes and only narrow `drawRange` — so they own no GPU
-buffers and are never disposed (that would free the shared buffers). Orbit is
-suppressed when an LMB drag starts on geometry (`CadOrbitControls` `hitTest` seam).
+Picking raycasts `bodiesRoot`; a triangle/segment ordinal is mapped to a
+face/edge id by binary search over the MESH1 ranges (`../mesh/faceRangeIndex.ts`),
+decoding the id string LAZILY on pick. Orbit is suppressed when an LMB drag
+starts on geometry (`CadOrbitControls` `hitTest` seam).
+
+**Body edges are fat lines (`LineSegments2`)** — WebGL clamps
+`LineBasicMaterial.linewidth` to one device pixel, which on a HiDPI display is a
+half-CSS-pixel hairline. `Picker.ts` raycasts them NATIVELY (it gathers via
+`traverseVisible`, so a hidden pick proxy would be gathered too). Three
+consequences the Picker owns, none of which apply to plain lines:
+
+- an intersection carries **`faceIndex` = the segment ordinal directly** (the
+  geometry is instanced, one instance per segment) and **no `index`**. There is
+  no `>> 1`; adding one binds every edge pick to the wrong edge.
+- the anchor is **`pointOnLine`** (on the segment), not `point` (on the ray).
+- the raycast is **screen-space**: the hit radius is
+  `(material.linewidth + raycaster.params.Line2.threshold) / 2` in the device px
+  `material.resolution` is expressed in. `line2PickThreshold` cancels the drawn
+  width out so the tolerance stays `EDGE_PICK_PX` CSS px at any weight or dpr,
+  and the Picker **flushes `material.resolution` itself before every raycast** —
+  at (0,0), which is where a body sits until its first rendered frame,
+  `LineSegments2.raycast` returns silently with no hits. `params.Line.threshold`
+  (world units) is still driven, because the face-vs-edge preference bias
+  arbitrates on the world-space `distance` both hit kinds report.
+
+Highlights are two shapes. FACE and BODY overlays are shallow-cloned geometries
+that SHARE the body's BufferAttributes and only narrow `drawRange` — they own no
+GPU buffers and are never disposed (that would free the shared buffers). EDGE
+overlays cannot do that: `drawRange` is meaningless on an instanced geometry, so
+each one builds a `LineSegmentsGeometry` over a `subarray` VIEW of the entry's
+`edgeSegmentPositions` (CPU-side still zero-copy, but its own GL buffer) and IS
+disposed on rebuild/teardown. `HighlightLayer.clearObjects` discriminates on
+`isLineSegmentsGeometry`.
+
+`SketchStaticLayer` (model-mode, non-editable presence of every sketch) picks
+DIFFERENTLY: its `hitTest` raycasts an explicit object list it maintains itself,
+not `traverseVisible`. Each sketch's curves are therefore two objects sharing one
+geometry — a fat, VISIBLE `LineSegments2` draw pass (dpr-normalized CSS-px width,
+`SketchObject.cssLineWidth`) and a plain, INVISIBLE `LineSegments` pick proxy
+that `hitTest` raycasts instead. An invisible object costs no GPU (the renderer
+skips it before buffer upload), and the proxy keeps world-unit `Line.threshold`
+semantics and bare-`Raycaster` (no camera/resolution) test compatibility. The
+explicit-list gather is what makes a proxy possible there and impossible for
+body edges.
+
+**WebGPU limitation.** `three/examples/jsm/lines/*` is WebGLRenderer-only (the
+WebGPU build lives under `lines/webgpu/`). `OriginTriad`, `SketchObject`,
+`SketchStaticLayer` and now **body edges** all depend on it, so the flag-gated
+WebGPU backend would lose the triad, sketch curves and every body edge — the
+same class of gap as the missing PMREM environment. WebGL is the default
+(F-WP4); a WebGPU line path is a later concern for all four together.
 
 ## Scene graph
 
@@ -115,7 +160,7 @@ suppressed when an LMB drag starts on geometry (`CadOrbitControls` `hitTest` sea
 scene
 ├── HemisphereLight + key/fill DirectionalLights (camera-relative rig)
 ├── GridPlane           (world XY, Z=0)
-├── bodiesRoot          (body face Mesh + edge LineSegments — F-WP5)
+├── bodiesRoot          (body face Mesh + fat edge LineSegments2 — F-WP5)
 ├── sketchRoot          (sketch entities — later WP)
 └── interactionRoot     (hover/selected highlight meshes — F-WP5)
 ```
@@ -202,10 +247,11 @@ Two shapes of layer need different treatment:
 
 - **Material recolor** — copy fresh palette colors into existing materials.
   Watch for materials that are SWAPPED rather than recolored (`DragHandle`,
-  `SketchObject`'s nine `LineMaterial`s): the *inactive* one must be refreshed
-  too, or it appears stale the moment the user hovers. `SketchObject`'s
-  materials are built from `color.getHex()` — a value snapshot, not a live
-  reference.
+  `SketchObject`'s nine `LineMaterial`s, `BodyMaterialLibrary`'s edge pair): the
+  *inactive* one must be refreshed too, or it appears stale the moment the user
+  hovers — or, for the edge pair, the moment they press the display-mode button.
+  Materials built from `color.getHex()` (`SketchObject`, both edge materials)
+  hold a value snapshot, not a live reference.
 - **Geometry rebuild** — `GridPlane` bakes the minor-line fade toward the clear
   color into a per-vertex buffer, and `OriginTriad` bakes axis colors the same
   way. Both need the attribute rewritten, not a material touched.
@@ -236,9 +282,19 @@ Light levels are a theme × backend table (`LIGHT_LEVELS`), not just a backend
 split: the hemisphere light's ground half IS the canvas token, so in dark it
 must come down or it muddies undersides.
 
-`--color-body-edge` INVERTS in dark. That is not cosmetic — wireframe mode draws
-edges with no faces behind them, so a near-black edge on a dark canvas would be
-invisible.
+**Body edges are TWO tokens, not one**, and `BodyMaterialSet` carries a material
+for each. Which one a body draws with is decided by the render mode's
+`edgeStyle` (`renderModes.ts`), never by a branch in `BodyObject`:
+
+| `edgeStyle`  | modes                | token                    | why                                                                                            |
+| ------------ | -------------------- | ------------------------ | ---------------------------------------------------------------------------------------------- |
+| `onFaces`    | shaded, shaded+edges | `--color-body-edge`      | there is a lit face behind every edge, so it is an OUTLINE — near-black in BOTH themes (Shapr3D) |
+| `standalone` | wireframe            | `--color-body-edge-wire` | the edges ARE the drawing, so this one INVERTS or a dark canvas swallows them                   |
+
+`applyPaletteColors` refreshes both materials unconditionally — see the
+swapped-material trap above. A theme flip while in shaded+edges must still leave
+the wireframe material current, because the swap happens on the next button
+press with no palette read in between.
 
 ## Testing note
 

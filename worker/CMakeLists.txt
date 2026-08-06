@@ -71,6 +71,10 @@ add_library(worker_core STATIC
     src/ops/FilletChamferOp.cpp
     # --- M6a: breadth ops (Shell / Linear+Circular pattern / MirrorBody) ---
     src/ops/ShellOp.cpp
+    # --- OFFSET-FACE W1: direct-modeling per-face offset (`op.offsetFace`, §7.3)
+    #     + its read-only authoring handshake (`PrepareOffsetFace`, §7.6). ---
+    src/ops/OffsetFaceOp.cpp
+    src/session/PrepareOffsetFace.cpp
     src/ops/PatternOp.cpp
     src/ops/MirrorOp.cpp
     # --- WP-B W0: rigid multi-target placement (`TransformBody`, SCHEMA §7.3) ---

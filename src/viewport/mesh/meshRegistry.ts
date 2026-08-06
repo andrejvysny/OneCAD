@@ -4,7 +4,7 @@
  * GPU geometry is heavy, imperative, and must be disposed deterministically, so
  * it never belongs in a projection store. `buildBodyObjects` turns a parsed
  * BodyMeshView into THREE geometry with ZERO-COPY attributes (positions/normals/
- * index alias the MESH1 blob directly); edges are expanded into LineSegments
+ * index alias the MESH1 blob directly); edges are expanded into fat-line segment
  * endpoints (the only non-trivial transform). `swap` double-buffers: the new
  * entry is published immediately and the old one is disposed on the NEXT frame
  * (via flushDisposals) so nothing that referenced it this frame reads freed
@@ -12,6 +12,7 @@
  * after a document closes.
  */
 import * as THREE from "three";
+import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
 import { logError } from "@/debug/log";
 import type { BodyMeshView } from "./parseMeshPayload";
 import { TopoIndex } from "./faceRangeIndex";
@@ -28,13 +29,24 @@ export interface MeshEntry {
    * therefore picking and highlight drawRanges, is identical either way).
    */
   readonly geometry: THREE.BufferGeometry;
-  /** Edges: expanded LineSegments endpoints (null when the mesh has no edges). */
-  readonly edgeGeometry: THREE.BufferGeometry | null;
+  /**
+   * Edges: expanded segment endpoints as a FAT-line geometry (null when the
+   * mesh has no edges). `setPositions` retains the array BY REFERENCE — no
+   * CPU-side copy — and computes the bounds eagerly, which the LineSegments2
+   * raycast needs before the first render.
+   */
+  readonly edgeGeometry: LineSegmentsGeometry | null;
+  /**
+   * The very array `edgeGeometry` was built from (xyzxyz per segment), kept so
+   * HighlightLayer can slice one edge's segments out of it without re-expanding
+   * the polylines. Null when the mesh has no edges.
+   */
+  readonly edgeSegmentPositions: Float32Array | null;
   /** Triangle index → face ordinal → lazy face id. */
   readonly faceIndex: TopoIndex;
   /** Segment ordinal → edge ordinal → lazy edge id (null when no edges). */
   readonly edgeIndex: TopoIndex | null;
-  /** Packed {firstSeg, segCount} per edge, for edge-highlight drawRange (null when no edges). */
+  /** Packed {firstSeg, segCount} per edge, for the edge-highlight slice (null when no edges). */
   readonly edgeSegmentRanges: Uint32Array | null;
   /** True when `geometry` carries a baked per-vertex `color` attribute. */
   readonly hasVertexColors: boolean;
@@ -76,19 +88,23 @@ export function buildBodyObjects(view: BodyMeshView, bodyId: string, meshRev: nu
 
   const faceIndex = new TopoIndex(view.faceRanges, view.faceCount, view.faceIdOffsets, view.faceIdChars);
 
-  let edgeGeometry: THREE.BufferGeometry | null = null;
+  let edgeGeometry: LineSegmentsGeometry | null = null;
+  let edgeSegmentPositions: Float32Array | null = null;
   let edgeIndex: TopoIndex | null = null;
   let edgeSegmentRanges: Uint32Array | null = null;
 
   if (view.hasEdges && view.edgeRanges && view.edgePositions && view.edgeIdOffsets && view.edgeIdChars) {
-    const { positions, segRanges, segTotal } = expandEdgeSegments(
+    const { positions, segRanges } = expandEdgeSegments(
       view.edgePositions,
       view.edgeRanges,
       view.edgeCount,
     );
-    edgeGeometry = new THREE.BufferGeometry();
-    edgeGeometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    edgeGeometry.setDrawRange(0, segTotal * 2);
+    // Fat lines are instanced quads: one INSTANCE per segment, so `instanceCount`
+    // (set by setPositions) is the whole draw extent — `setDrawRange` is
+    // meaningless on this geometry and is deliberately not called.
+    edgeGeometry = new LineSegmentsGeometry();
+    edgeGeometry.setPositions(positions);
+    edgeSegmentPositions = positions;
     edgeSegmentRanges = segRanges;
     edgeIndex = new TopoIndex(segRanges, view.edgeCount, view.edgeIdOffsets, view.edgeIdChars);
   }
@@ -101,6 +117,7 @@ export function buildBodyObjects(view: BodyMeshView, bodyId: string, meshRev: nu
     view,
     geometry,
     edgeGeometry,
+    edgeSegmentPositions,
     faceIndex,
     edgeIndex,
     edgeSegmentRanges,

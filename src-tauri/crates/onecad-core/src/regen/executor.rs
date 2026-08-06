@@ -71,7 +71,7 @@
 //! and returns [`Outcome::Cancelled`] — the live session untouched.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::sync::watch;
 
@@ -83,7 +83,8 @@ use crate::ids::{DocumentRevision, JobId, RecordId, WorkerEpoch};
 
 use super::engine::{
     Diagnostic, EngineError, Fencing, GeometryEngine, PlanEvent, PlanPrepared, PlanRequest,
-    PlanStepEvent, RestoreRequest, Severity, StepSignatures, StepStatus, StoppedReason,
+    PlanStepEvent, PreparedMeshRef, RestoreRequest, Severity, StepSignatures, StepStatus,
+    StoppedReason,
 };
 use super::planner::{HistoryPrefixHash, RegenPlanner};
 use super::snapshot::{
@@ -338,18 +339,40 @@ impl Scratch {
 // The executor
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Where a run deposits the MESH1 blobs an engine inlined into its terminal
+/// prepare, already keyed by the [`MeshKey`] the publish minted.
+///
+/// The executor only APPENDS; draining (and deciding whether the commit that owns
+/// them actually landed) belongs to the caller — a superseded regen simply drops
+/// the sink. Plain `std::sync::Mutex`: the lock is held for a `Vec` extend and is
+/// never held across an `await`.
+pub type MeshSink = Arc<Mutex<Vec<(MeshKey, Arc<Vec<u8>>)>>>;
+
 /// Drives plan execution and the accept/discard handshake over a
 /// [`GeometryEngine`].
 #[derive(Debug)]
 pub struct RegenExecutor<E: GeometryEngine> {
     engine: E,
+    /// Optional cache-fill channel for inline prepared meshes (see [`MeshSink`]).
+    mesh_sink: Option<MeshSink>,
 }
 
 impl<E: GeometryEngine> RegenExecutor<E> {
     /// An executor over `engine`.
     #[must_use]
     pub fn new(engine: E) -> Self {
-        Self { engine }
+        Self {
+            engine,
+            mesh_sink: None,
+        }
+    }
+
+    /// Collects the terminal prepare's inline meshes into `sink`, keyed by the
+    /// generation the publish mints. Nothing is deposited unless the run PUBLISHES.
+    #[must_use]
+    pub fn with_mesh_sink(mut self, sink: MeshSink) -> Self {
+        self.mesh_sink = Some(sink);
+        self
     }
 
     /// The wrapped engine.
@@ -764,7 +787,34 @@ impl<E: GeometryEngine> RegenExecutor<E> {
             diagnostics,
             repair_summary,
         });
+        // Key the inline meshes with the SAME generation `bodies_with_generation`
+        // just stamped onto the published bodies — that is what makes them cache
+        // HITS for the `get_mesh` this publish is about to trigger.
+        self.seed_mesh_sink(&prepared.artifact_meshes, snapshot.generation);
         Outcome::Published(snapshot)
+    }
+
+    /// Deposits a published prepare's inline meshes into the sink (no-op without
+    /// one). Called ONLY on the publish path: a discarded / superseded prepare must
+    /// never seed a cache with geometry the document never adopted.
+    fn seed_mesh_sink(&self, meshes: &[PreparedMeshRef], generation: u64) {
+        let Some(sink) = &self.mesh_sink else {
+            return;
+        };
+        if meshes.is_empty() {
+            return;
+        }
+        let mut guard = sink.lock().unwrap_or_else(PoisonError::into_inner);
+        guard.extend(meshes.iter().map(|m| {
+            (
+                MeshKey {
+                    body: m.body,
+                    lod: m.lod,
+                    generation,
+                },
+                m.bytes.clone(),
+            )
+        }));
     }
 
     /// Cooperative-cancel path: cancel, **bounded-drain** the channel (the terminal

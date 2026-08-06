@@ -43,6 +43,26 @@ interface ToolDebugSurface {
   edgeOpAxisSource?: string;
   /** The CHAMFER second leg (`null` = equal-leg — SCHEMA §7.3, 2026-08-03). */
   edgeOpDistance2?: number | null;
+  // ── OffsetFace (SCHEMA §7.3 + §7.6) ────────────────────────────────────────
+  offsetFacePhase?: string;
+  offsetDistance?: number;
+  offsetDistanceType?: string;
+  offsetChainTangent?: boolean;
+  /**
+   * The FROZEN operative closure the record will hold — picks ∪ the worker's G1
+   * tangent chain. Distinct from the number of faces the user selected, which is
+   * the entire point of the `PrepareOffsetFace` handshake and has no other surface.
+   */
+  offsetFaceCount?: number;
+  /**
+   * The document revision the newest successful handshake answered against, or
+   * `null` when there is none. This IS the commit gate: a ✓ with no valid
+   * handshake, or one frozen against an older head, is refused.
+   */
+  offsetPrepared?: number | null;
+  /** True when the 3D arrow + ghost lane is unavailable (curved / diverging faces). */
+  offsetDegraded?: boolean;
+  offsetValueError?: boolean;
 }
 
 export async function toolPhases(page: Page): Promise<ToolDebugSurface | undefined> {
@@ -218,11 +238,16 @@ export async function clickAt(page: Page, at: { x: number; y: number }): Promise
 }
 
 /** Wait until the named model tool reports `armed` on the debug surface. */
-export async function expectArmed(page: Page, which: "fillet" | "shell"): Promise<void> {
+export async function expectArmed(
+  page: Page,
+  which: "fillet" | "shell" | "offsetFace",
+): Promise<void> {
   await expect
     .poll(async () => {
       const d = await toolPhases(page);
-      return which === "fillet" ? d?.filletPhase : d?.shellPhase;
+      if (which === "fillet") return d?.filletPhase;
+      if (which === "shell") return d?.shellPhase;
+      return d?.offsetFacePhase;
     })
     .toBe("armed");
 }

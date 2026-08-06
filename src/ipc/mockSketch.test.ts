@@ -4,11 +4,11 @@ import {
   solveDof,
   solveSketch,
   freeDegrees,
-  detectRegions,
   orderedClosedLoop,
   mockRegionId,
   constraintFreedom,
 } from "./mockSketch";
+import { detectRegions } from "./mockRegions";
 import type { SketchConstraint, SketchEntity } from "./types";
 
 const rect: SketchEntity[] = [

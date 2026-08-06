@@ -36,6 +36,10 @@
 
   <body>
     <div id="root"></div>
+    <!-- Painted before any JS module runs (see vite-splash-plugin.ts for the
+         injected <style>). Sibling of #root, right after it, on purpose: the
+         `#root:not(:empty)+#splash{display:none}` rule depends on that order. -->
+    <div id="splash" aria-hidden="true">OneCAD<span class="dot"></span></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

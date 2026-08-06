@@ -36,6 +36,9 @@ export const MODEL_TOOLS: ToolEntry[] = [
   { id: "boolean", icon: "boolean", label: "Combine", shortcut: "B" },
   { sep: true },
   { id: "shell", icon: "shell", label: "Shell", shortcut: "K" },
+  // SCHEMA §7.3 OffsetFace — the other in-place body modifier, next to Shell.
+  // `pushpull` is the live registry glyph for "move this face"; no new icon.
+  { id: "offsetFace", icon: "pushpull", label: "Offset face", shortcut: "⇧O" },
   // WP-C T3 — a machined feature, grouped with Shell (both modify a host body in
   // place rather than producing a new one).
   { id: "hole", icon: "hole", label: "Hole", shortcut: "\u21e7H" },

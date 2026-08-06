@@ -53,6 +53,8 @@ function makeEngineMock() {
     showGhostPreview: vi.fn(),
     showGhostPreviewMulti: vi.fn(),
     hideGhostPreview: vi.fn(),
+    hideValueHandle: vi.fn(),
+    showValueHandle: vi.fn(),
     setPreviewReplacedBodyIds: vi.fn(),
     probePick: vi.fn(() => null),
     hideExtrudePreview: vi.fn(),

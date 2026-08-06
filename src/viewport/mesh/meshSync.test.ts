@@ -571,6 +571,77 @@ describe("MeshIngest empty-mesh bounded retry", () => {
   });
 });
 
+// ── geometryPending chip (viewportStore) ──────────────────────────────────
+describe("MeshIngest geometryPending", () => {
+  it("attach with visible bodies + no meshes yet -> pending true", async () => {
+    setBodies({ body1: true });
+    const engine = fakeEngine();
+    // Never resolves within this test's synchronous window: pending must be
+    // true the instant the store status is ready, before any fetch settles.
+    const { client } = fakeClient(vi.fn(() => new Promise<ArrayBuffer>(() => {})));
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+
+    expect(viewportStore.getState().geometryPending).toBe(true);
+  });
+
+  it("all visible bodies' meshes land -> pending false", async () => {
+    setBodies({ body1: true, body2: true });
+    const engine = fakeEngine();
+    const { client } = fakeClient();
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    await tick();
+
+    expect(viewportStore.getState().geometryPending).toBe(false);
+  });
+
+  it("2 visible bodies, only 1 mesh landed -> STILL pending (count-based)", async () => {
+    setBodies({ body1: true, body2: true });
+    const engine = fakeEngine();
+    // body1 resolves immediately; body2 never resolves in this window.
+    const getMesh = vi.fn((id: string) =>
+      id === "body1" ? Promise.resolve(makeBoxMesh()) : new Promise<ArrayBuffer>(() => {}),
+    );
+    const { client } = fakeClient(getMesh);
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    await tick();
+
+    expect(bodyGroup(engine, "body1")).toBeDefined();
+    expect(bodyGroup(engine, "body2")).toBeUndefined();
+    expect(viewportStore.getState().geometryPending).toBe(true);
+  });
+
+  it("detach forces pending false", async () => {
+    setBodies({ body1: true });
+    const engine = fakeEngine();
+    const { client } = fakeClient(vi.fn(() => new Promise<ArrayBuffer>(() => {})));
+    ingest = new MeshIngest();
+    ingest.attach(engine, client);
+    expect(viewportStore.getState().geometryPending).toBe(true);
+
+    ingest.detach();
+    ingest = null;
+    expect(viewportStore.getState().geometryPending).toBe(false);
+  });
+
+  it("document not ready -> pending false even with unloaded visible bodies", async () => {
+    documentStore.setState({ status: "loading" });
+    try {
+      setBodies({ body1: true });
+      const engine = fakeEngine();
+      const { client } = fakeClient(vi.fn(() => new Promise<ArrayBuffer>(() => {})));
+      ingest = new MeshIngest();
+      ingest.attach(engine, client);
+
+      expect(viewportStore.getState().geometryPending).toBe(false);
+    } finally {
+      documentStore.setState({ status: "ready" }); // restore for other tests
+    }
+  });
+});
+
 describe("MeshIngest load-failure surfacing", () => {
   it("a rejected mesh fetch surfaces an error hint and does not block other bodies", async () => {
     setBodies({ bad: true, good: true });

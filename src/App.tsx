@@ -1,10 +1,27 @@
-import { useEffect } from "react";
-import DevGallery from "@/app/DevGallery";
+import { lazy, Suspense, useEffect, useLayoutEffect } from "react";
 import { StartScreen } from "@/features/start/StartScreen";
-import { EditorScreen } from "@/features/shell/EditorScreen";
 import { UnsavedChangesDialog } from "@/features/shell/UnsavedChangesDialog";
 import { createClient } from "@/ipc/client";
 import { appStore, useAppStore } from "@/stores/appStore";
+
+// Code-split: the editor tree (three.js, viewport engine, model/sketch tools)
+// and the dev gallery are both large and not needed for the start screen's
+// first paint. StartScreen idle-prefetches the editor chunk with the EXACT
+// same specifier (see its effect) so the New-project transition rarely blocks
+// on a cold fetch.
+const EditorScreen = lazy(() =>
+  import("@/features/shell/EditorScreen").then((m) => ({ default: m.EditorScreen })),
+);
+const DevGallery = lazy(() => import("@/app/DevGallery"));
+
+/** Full-screen boot fallback shown while a lazy screen chunk loads. */
+function BootPanel() {
+  return (
+    <div className="flex h-full w-full items-center justify-center bg-canvas text-ink">
+      <span className="text-[16px] font-bold tracking-[-0.01em]">OneCAD</span>
+    </div>
+  );
+}
 
 /**
  * App shell: switches between the start screen and the (placeholder) editor.
@@ -27,6 +44,15 @@ function App() {
   // Playwright can exercise them without the start-screen click-through.
   const forceEditor = params.has("vpdemo") || params.has("sketchdemo") || params.has("toolsdemo");
 
+  // Index.html paints a static splash before any JS runs; drop it once React
+  // has something to show. useLayoutEffect (not useEffect) so removal happens
+  // before the browser paints the first real frame, avoiding a flash of both.
+  // Optional chaining: absent under jsdom (index.html isn't loaded in tests)
+  // and after StrictMode's double-invoke already removed it once.
+  useLayoutEffect(() => {
+    document.getElementById("splash")?.remove();
+  }, []);
+
   useEffect(() => {
     return createClient().onCloseRequested(() => {
       void appStore.getState().requestClose("quit");
@@ -43,7 +69,10 @@ function App() {
 
   return (
     <>
-      {body}
+      {/* StartScreen is eager (never suspends); DevGallery/EditorScreen are the
+          two lazy chunks this boundary covers. UnsavedChangesDialog stays
+          OUTSIDE it — it must stay mountable even while a screen is loading. */}
+      <Suspense fallback={<BootPanel />}>{body}</Suspense>
       <UnsavedChangesDialog />
     </>
   );

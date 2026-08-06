@@ -587,6 +587,9 @@ impl DocumentSession {
         validate_transform_body(&record.op)?;
         // Hole params must satisfy the SCHEMA §7.3 conditional blocks (all paths).
         validate_hole(&record.op)?;
+        // OffsetFace params must satisfy the SCHEMA §7.3 lockstep + distance-type
+        // invariants (all entry paths).
+        validate_offset_face(&record.op)?;
         // F8: re-derive the uniform input view for Known ops (self-healing — don't
         // trust caller-supplied `inputs`; mirrors `update_operation_params` and the
         // record deserialize path). An Opaque frozen node keeps its stored inputs.
@@ -678,6 +681,9 @@ impl DocumentSession {
         validate_transform_body(&op)?;
         // Hole params must satisfy the SCHEMA §7.3 conditional blocks (all paths).
         validate_hole(&op)?;
+        // OffsetFace params must satisfy the SCHEMA §7.3 lockstep + distance-type
+        // invariants (all entry paths).
+        validate_offset_face(&op)?;
         let mut nr = prior.clone();
         nr.op = op;
         // A sanctioned Fillet⇄Chamfer swap is the only path that can strand the
@@ -1679,6 +1685,24 @@ fn validate_hole(op: &Operation) -> Result<(), DomainError> {
     p.validate().map_err(DomainError::Validation)
 }
 
+/// Validates a [`KnownOperation::OffsetFace`] record's params: the
+/// `faceIds`/`faces` lockstep (the Fillet discipline of
+/// [`validate_fillet_lockstep`], but MANDATORY here — an OffsetFace with no typed
+/// refs has nothing for the ladder to rebind), a finite distance, and the SCHEMA
+/// §7.3 distance-type conditionals (see
+/// [`OffsetFaceParams::validate`](crate::document::record::OffsetFaceParams::validate)).
+/// Non-offset and opaque ops are trivially valid.
+///
+/// Enforced here for the same single-writer reason as [`validate_hole`], and with
+/// the same both-ways strictness: a `Total` opposite face stranded by a
+/// distance-type switch would otherwise ride the record invisibly.
+fn validate_offset_face(op: &Operation) -> Result<(), DomainError> {
+    let Operation::Known(KnownOperation::OffsetFace(p)) = op else {
+        return Ok(());
+    };
+    p.validate().map_err(DomainError::Validation)
+}
+
 /// The bodies whose GEOMETRY a `TransformBody` record moves — the "target
 /// lineage" the SCHEMA §7.3 edit-safety gate is scoped to.
 ///
@@ -2053,6 +2077,31 @@ fn set_input(
             }
             p.face = face;
         }
+        (InputPath::OffsetFaceFace { index }, KnownOperation::OffsetFace(p)) => {
+            set_offset_face(
+                &mut p.faces,
+                &mut p.face_ids,
+                *index,
+                want_element(reference)?,
+            )?;
+        }
+        (InputPath::OffsetFaceOpposite, KnownOperation::OffsetFace(p)) => {
+            let face = want_element(reference)?;
+            // Same bar as `set_offset_face`/`set_fillet_edge`: an explicit rebind
+            // must carry an explicit id, or the slot the user just re-picked BY
+            // HAND would fall straight back through to the ladder.
+            let element = face
+                .primary
+                .as_ref()
+                .map(|p| p.element.clone())
+                .ok_or_else(|| {
+                    DomainError::InvalidReference(
+                        "an offset-face opposite ref must carry a primary element id".into(),
+                    )
+                })?;
+            p.opposite_face_id = Some(element);
+            p.opposite_face = Some(face);
+        }
         _ => {
             return Err(DomainError::InvalidReference(
                 "input path does not match the operation type / reference kind".into(),
@@ -2098,6 +2147,47 @@ fn set_fillet_edge(
         edge_ids.push(element);
     } else {
         edge_ids[index] = element;
+    }
+    Ok(())
+}
+
+/// Sets OffsetFace operative face `index`, keeping the typed `faces` ref and the
+/// bare `face_ids` element id consistent (both must be populated — see
+/// [`OffsetFaceParams`](crate::document::record::OffsetFaceParams)). The typed ref
+/// must carry a `primary` element id.
+///
+/// Same bounds/append discipline as [`set_fillet_edge`]: overwrite a slot, append
+/// exactly at the end, refuse a gap past it.
+fn set_offset_face(
+    faces: &mut Vec<ElementRef>,
+    face_ids: &mut Vec<crate::ids::ElementId>,
+    index: usize,
+    reference: ElementRef,
+) -> Result<(), DomainError> {
+    let element = reference
+        .primary
+        .as_ref()
+        .map(|p| p.element.clone())
+        .ok_or_else(|| {
+            DomainError::InvalidReference(
+                "an offset-face operative ref must carry a primary element id".into(),
+            )
+        })?;
+    let len = faces.len().max(face_ids.len());
+    if index > len {
+        return Err(DomainError::InvalidReference(format!(
+            "offset face index {index} out of range (len {len})"
+        )));
+    }
+    if index == faces.len() {
+        faces.push(reference);
+    } else {
+        faces[index] = reference;
+    }
+    if index == face_ids.len() {
+        face_ids.push(element);
+    } else {
+        face_ids[index] = element;
     }
     Ok(())
 }

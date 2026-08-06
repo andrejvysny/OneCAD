@@ -89,6 +89,12 @@ export interface ViewportState {
    * whenever a model tool arms.
    */
   isolatedBodyIds: string[] | null;
+  /**
+   * True while the document is READY but at least one visible body has no
+   * scene object yet (the open-to-first-mesh window). Owned by `MeshIngest`
+   * (`src/viewport/mesh/meshSync.ts`); drives the "Rebuilding geometry…" chip.
+   */
+  geometryPending: boolean;
   setPendingExtrude(sketchId: string | null): void;
   setProjection(p: Projection): void;
   toggleGrid(): void;
@@ -127,6 +133,8 @@ export interface ViewportState {
    * document close) runs after the preview has already been cancelled.
    */
   toggleIsolate(): void;
+  /** Set (no-op-guarded to avoid render churn) whether geometry is still loading. */
+  setGeometryPending(pending: boolean): void;
 }
 
 export const viewportStore = createStore<ViewportState>()((set, get) => ({
@@ -143,6 +151,7 @@ export const viewportStore = createStore<ViewportState>()((set, get) => ({
   statusHint: null,
   pendingExtrudeSketch: null,
   isolatedBodyIds: null,
+  geometryPending: false,
 
   setPendingExtrude(sketchId) {
     set({ pendingExtrudeSketch: sketchId });
@@ -227,6 +236,10 @@ export const viewportStore = createStore<ViewportState>()((set, get) => ({
     if (getViewportEngine()?.hasPreviewHiddenBodies()) return;
     if (get().isolatedBodyIds !== null) get().exitIsolate();
     else get().isolateSelection();
+  },
+
+  setGeometryPending(pending) {
+    if (get().geometryPending !== pending) set({ geometryPending: pending });
   },
 }));
 

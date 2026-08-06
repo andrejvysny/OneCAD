@@ -20,6 +20,7 @@
 #include "ops/HoleOp.h"
 #include "ops/ImportOp.h"
 #include "ops/MirrorOp.h"
+#include "ops/OffsetFaceOp.h"
 #include "ops/TransformOp.h"
 #include "ops/OpTypes.h"
 #include "ops/PatternOp.h"
@@ -246,6 +247,7 @@ ops::OpOutcome run_single_op(ScratchJob& job, const json& op, const std::string&
     if (op_type == "Fillet") return ops::execute_fillet(octx, op, op_id);
     if (op_type == "Chamfer") return ops::execute_chamfer(octx, op, op_id);
     if (op_type == "Shell") return ops::execute_shell(octx, op, op_id);
+    if (op_type == "OffsetFace") return ops::execute_offset_face(octx, op, op_id);
     if (op_type == "Hole") return ops::execute_hole(octx, op, op_id);
     if (op_type == "LinearPattern") return ops::execute_linear_pattern(octx, op, op_id);
     if (op_type == "CircularPattern") return ops::execute_circular_pattern(octx, op, op_id);

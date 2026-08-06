@@ -22,7 +22,12 @@ import type {
   FeatureRecord,
   FilletParams,
   HoleParams,
+  OffsetCurrentDims,
+  OffsetDistanceType,
+  OffsetFaceEvidence,
+  OffsetFaceParams,
   OperationOp,
+  PrepareOffsetFaceResult,
   PreviewDraft,
   PreviewFailure,
   PreviewParams,
@@ -35,7 +40,8 @@ import type {
   SketchSession,
 } from "@/ipc/types";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
-import { buildAddDatumPlane, updateScalarParamsCommand } from "@/ipc/tauriCommandMap";
+import type { PickHit } from "@/viewport/engine/Picker";
+import { bareBodyId, buildAddDatumPlane, updateScalarParamsCommand } from "@/ipc/tauriCommandMap";
 import { mintUuid } from "@/ipc/sketchWireMap";
 import { promoteOne } from "@/ipc/promote";
 import { toFeatureMeta } from "@/ipc/projectionHydration";
@@ -68,6 +74,15 @@ import { averageOutward, edgeOutward } from "@/tools/preview/edgeDirection";
 import { axisSplitsRegion, type LatheAxis } from "@/tools/preview/lathePreview";
 import { angleFromDrag, snapRevolveAngle, clampAngle, angleFromValueText } from "@/tools/preview/revolveAngle";
 import { thicknessFromValueText } from "@/tools/preview/shellThickness";
+import {
+  distanceFromValueText,
+  ghostOffsets,
+  offsetAnchorFor,
+  offsetAxisFor,
+  DEFAULT_OFFSET_DISTANCE,
+} from "@/tools/preview/faceOffset";
+import { faceDrawRange } from "@/viewport/engine/HighlightLayer";
+import type { GhostInstances } from "@/viewport/engine/GhostLayer";
 import {
   holeFsmFromParams,
   holeInit,
@@ -129,6 +144,11 @@ import {
   revolveStep as revolveStepRaw,
   shellInit,
   shellStep as shellStepRaw,
+  offsetFaceInit,
+  offsetFaceStep as offsetFaceStepRaw,
+  offsetCanConfirm,
+  OFFSET_TYPES_CURVED,
+  OFFSET_TYPES_PLANAR,
   linearPatternInit,
   linearPatternStep as linearPatternStepRaw,
   circularPatternInit,
@@ -157,6 +177,7 @@ import {
   type FilletFsm,
   type RevolveFsm,
   type ShellFsm,
+  type OffsetFaceFsm,
   type LinearPatternFsm,
   type CircularPatternFsm,
   type MirrorFsm,
@@ -181,6 +202,7 @@ const filletStep = withPhaseLog("edgeOp", filletStepRaw);
 const revolveStep = withPhaseLog("revolve", revolveStepRaw);
 const booleanStep = withPhaseLog("boolean", booleanStepRaw);
 const shellStep = withPhaseLog("shell", shellStepRaw);
+const offsetFaceStep = withPhaseLog("offsetFace", offsetFaceStepRaw);
 const linearPatternStep = withPhaseLog("linearPattern", linearPatternStepRaw);
 const circularPatternStep = withPhaseLog("circularPattern", circularPatternStepRaw);
 const mirrorStep = withPhaseLog("mirror", mirrorStepRaw);
@@ -296,6 +318,11 @@ const EDGE_OP_TRAILING_MS = 160;
 const EDGE_OP_DRAG_TRAILING_MS = 80;
 /** Shell hollows the whole solid — the dearest of the three; one floor, no drag tier. */
 const SHELL_TRAILING_MS = 200;
+/**
+ * OffsetFace rebuilds the solid through `BRepOffset_MakeOffset` — dearer than a
+ * prism sweep, cheaper than a full hollow, so it takes the edge-op floor.
+ */
+const OFFSET_FACE_TRAILING_MS = 160;
 
 /**
  * Status hint shown for as long as a hole is armed. It names the RE-CLICK
@@ -342,7 +369,18 @@ export function __setExactPreviewTimeoutForTests(ms: number): void {
 /** The presentation policy `viewportStore.setStatusHint` accepts (severity + stickiness). */
 type StatusHintOpts = Parameters<ViewportState["setStatusHint"]>[1];
 
-type ExactPreviewOutcome = { ok: true } | { ok: false; error: PreviewFailure };
+/**
+ * `timedOut` distinguishes "the kernel confirmed this candidate" from "we gave up
+ * waiting". The generic barrier treats BOTH as `ok` on purpose (the backend
+ * re-validates a commit authoritatively, so the barrier must never wedge one
+ * behind a preview that never answers) — but OffsetFace FAILS CLOSED on it: its
+ * operative closure was frozen by a separate handshake, and committing one the
+ * kernel never got to evaluate is exactly the "silently wrong" outcome the whole
+ * authoring transaction exists to prevent.
+ */
+type ExactPreviewOutcome =
+  | { ok: true; timedOut: boolean }
+  | { ok: false; error: PreviewFailure };
 
 /**
  * Result of the shared previewed-commit sequence (fillet/chamfer + shell).
@@ -368,7 +406,7 @@ export interface ModelToolDeps {
   debug?: boolean;
 }
 
-type DragKind = "extrude" | "fillet" | "revolve" | "shell" | "transform" | null;
+type DragKind = "extrude" | "fillet" | "revolve" | "shell" | "offsetFace" | "transform" | null;
 
 /**
  * One placement gizmo gesture (WP-B W2). Everything is captured AT GRAB and the
@@ -453,7 +491,7 @@ interface ToolPreviewSession {
 }
 
 /** Which tool owns the currently open preview sessions (drives hints + params). */
-type PreviewOwner = "extrude" | "revolve" | "edgeOp" | "shell" | "boolean" | "hole";
+type PreviewOwner = "extrude" | "revolve" | "edgeOp" | "shell" | "offsetFace" | "boolean" | "hole";
 
 export class ModelToolController {
   private extrude: ExtrudeFsm = extrudeInit();
@@ -585,6 +623,54 @@ export class ModelToolController {
   /** Stored params of the shell being re-edited (thickness-only edit preserves faces). */
   private shellStoredParams: Record<string, unknown> | undefined;
 
+  // ── OffsetFace context (SCHEMA §7.3 + §7.6) ────────────────────────────────
+  //
+  // Everything below the FSM is AUTHORING TRANSACTION state, not tool state: the
+  // operative closure is computed once by `PrepareOffsetFace`, promoted to
+  // Rust-minted ids, and then FROZEN. A commit that cannot prove it still holds
+  // (see `offsetPreparedRevision`) refuses rather than writing a record whose
+  // faces were resolved against a head that has since moved.
+  private offsetFace: OffsetFaceFsm = offsetFaceInit();
+  /** The USER's picks, retained so a type / tangent toggle can re-run prepare. */
+  private offsetPicks: EntityRef[] = [];
+  /** The FROZEN operative closure as typed refs — exactly what the record holds. */
+  private offsetFaces: SemanticRef[] = [];
+  /** Snapshot TopoKeys parallel to {@link offsetFaces} (local mesh lookups only). */
+  private offsetTopoKeys: string[] = [];
+  /** The `Total` opposite face's typed ref; undefined for every other type. */
+  private offsetOppositeFace: SemanticRef | undefined;
+  /** The one body the closure belongs to (bare id, as the selection carries it). */
+  private offsetTargetBodyId = "";
+  /** Planar frames of the closure, in `offsetFaces` order. Empty ⇒ degraded. */
+  private offsetFrames: PlanarFaceFrame[] = [];
+  /** Index slices for the L1 ghost, parallel to {@link offsetFrames}. */
+  private offsetRanges: { start: number; count: number }[] = [];
+  /** The mean-normal drag axis; null ⇒ no honest arrow (degraded gesture). */
+  private offsetAxis: Vec3 | null = null;
+  /** World anchor for the arrow + chip (mean of the operative face centres). */
+  private offsetAnchor: Vec3 = [0, 0, 0];
+  /** `currentDims` from the newest successful prepare (absolute-type seeds). */
+  private offsetDims: OffsetCurrentDims = {};
+  /**
+   * The `documentStore.revision` the newest successful prepare answered against,
+   * or null when there is no valid handshake. The COMMIT GATE: a closure frozen
+   * against an older head names TopoKeys that may now designate different
+   * topology, and no offset is better than the wrong one.
+   */
+  private offsetPreparedRevision: number | null = null;
+  /** No frames / diverging normals ⇒ screen-space value drag, no arrow, no ghost. */
+  private offsetDegraded = false;
+  /** True once an exact candidate replaced the L1 ghost (re-shown on failure). */
+  private offsetGhostHidden = false;
+  /** Grab-delta bookkeeping: the value + axis depth captured AT the press. */
+  private offsetStartDistance = DEFAULT_OFFSET_DISTANCE;
+  private offsetGrabDepth = 0;
+  private offsetDownX = 0;
+  private offsetDownY = 0;
+  private offsetEditFeatureId: string | undefined;
+  /** Stored params of the offset being re-edited (distance-only edit keeps faces). */
+  private offsetStoredParams: Record<string, unknown> | undefined;
+
   // Hole context (WP-C T3): the FSM holds every param; only identity lives here.
   private hole: HoleFsm = holeInit();
   private holeEditFeatureId: string | undefined;
@@ -632,6 +718,8 @@ export class ModelToolController {
   private alignMovingFrame: PlanarFaceFrame | null = null;
   /** Whether THIS controller currently owns the selection store's hover. */
   private alignHidHover = false;
+  /** Same flag for the MODAL PICK phases' hover (see `setToolHover`). */
+  private toolHoverSet = false;
 
   /**
    * Datum-plane tool context (DATUM W1), null when the tool is not armed.
@@ -815,6 +903,17 @@ export class ModelToolController {
       this.cancelShell();
       this.resetToSelect("Model changed — re-select faces", { severity: "info", sticky: true });
       this.updateDebug();
+      return;
+    }
+    // OffsetFace fails closed for the same reason and one more: its operative
+    // closure was FROZEN by a handshake against the previous head, so a moved
+    // document invalidates the whole authoring transaction, not just the picks.
+    const offsetArmed =
+      this.offsetFace.phase === "armed" || this.offsetFace.phase === "dragging";
+    if (offsetArmed && !this.offsetEditFeatureId) {
+      this.cancelOffsetFace();
+      this.resetToSelect("Model changed — re-select faces", { severity: "info", sticky: true });
+      this.updateDebug();
     }
   }
 
@@ -843,12 +942,16 @@ export class ModelToolController {
     // previous tool's transient state first.
     this.invalidateArm();
     this.commitGen++;
+    // Before the sweep: the per-tool cancels below reset the FSMs this hover was
+    // keyed to, and `selectionStore` outlives every one of them.
+    this.clearToolHover();
     this.cancelRegionPick();
     this.cancelPreview();
     this.cancelFillet();
     this.cancelBoolean();
     this.cancelRevolve();
     this.cancelShell();
+    this.cancelOffsetFace();
     this.cancelHole();
     this.cancelPattern();
     this.cancelTransform();
@@ -872,6 +975,7 @@ export class ModelToolController {
     else if (tool === "fillet") void this.armEdgeOpFromSelection("Fillet", { auto: true });
     else if (tool === "boolean") this.startBooleanFromSelection();
     else if (tool === "shell") void this.armShellFromSelection();
+    else if (tool === "offsetFace") void this.armOffsetFaceFromSelection();
     else if (tool === "hole") this.startHole();
     else if (tool === "linearPattern") this.armLinearFromSelection();
     else if (tool === "circularPattern") this.armCircularFromSelection();
@@ -1411,6 +1515,7 @@ export class ModelToolController {
       anchor: { worldPoint: worldTriple },
     };
     this.extrude = extrudeStep(this.extrude, { kind: "pickFace", ref }).state;
+    this.clearToolHover();
     this.engine.setOrbitSuppressed(false);
     // A refused promotion leaves the target on its anchor alone — degraded, not
     // aborted — so `promoteOne`'s hint must not be overwritten by the arm hint.
@@ -1424,6 +1529,7 @@ export class ModelToolController {
     if (this.extrude.phase !== "facePick") return;
     this.extrude = extrudeStep(this.extrude, { kind: "cancelFacePick" }).state;
     toolChipStore.setState({ endCondition: this.extrude.endCondition });
+    this.clearToolHover();
     this.engine.setOrbitSuppressed(false);
     viewportStore.getState().setStatusHint(this.armHintFor("extrude"), { sticky: true });
     this.sendPreview();
@@ -1456,6 +1562,11 @@ export class ModelToolController {
     toolChipStore.getState().setBooleanMode(mode);
     this.engine.setPreviewTint(mode === "Cut" ? "cut" : "normal");
     if (targetPick) {
+      // Modal: the next click picks a body, so an LMB drag must not spin the
+      // camera out from under it. Cleared at every EXIT (see the pick + cancel
+      // paths below) rather than here — the `false` arm of this branch also runs
+      // for an armed REVOLVE, whose own drag suppression must survive it.
+      this.engine.setOrbitSuppressed(true);
       const verb = mode === "Cut" ? "Cut from" : "Add to";
       viewportStore.getState().setStatusHint(`Click a body to ${verb} · Esc for New Body`, { sticky: true });
     } else {
@@ -1480,6 +1591,9 @@ export class ModelToolController {
     const hit = this.engine.probePick(clientX, clientY);
     if (!hit || hit.bodyId.startsWith("preview:")) return; // reject preview bodies
     this.extrude = extrudeStep(this.extrude, { kind: "pickTarget", bodyId: hit.bodyId }).state;
+    this.clearToolHover();
+    // Back to armed: the extrude handle is grabbed by hitting it, so orbit is free.
+    this.engine.setOrbitSuppressed(false);
     this.applyBooleanState(this.extrude.booleanMode, false, "extrude");
     this.sendPreview();
   }
@@ -1490,6 +1604,8 @@ export class ModelToolController {
     const hit = this.engine.probePick(clientX, clientY);
     if (!hit || hit.bodyId.startsWith("preview:")) return;
     this.revolve = revolveStep(this.revolve, { kind: "pickTarget", bodyId: hit.bodyId }).state;
+    this.clearToolHover();
+    // Orbit STAYS suppressed: an armed revolve's drag is the angle (see `tryPickRevolveAxis`).
     this.applyBooleanState(this.revolve.booleanMode, false, "revolve");
     this.sendPreview();
   }
@@ -1514,10 +1630,14 @@ export class ModelToolController {
   private cancelTargetPick(): void {
     if (this.extrude.phase === "targetPick") {
       this.extrude = extrudeStep(this.extrude, { kind: "cancelTargetPick" }).state;
+      this.clearToolHover();
+      this.engine.setOrbitSuppressed(false); // back to armed — orbit is free again
       this.applyBooleanState("NewBody", false, "extrude");
       this.sendPreview();
     } else if (this.revolve.phase === "targetPick") {
       this.revolve = revolveStep(this.revolve, { kind: "cancelTargetPick" }).state;
+      this.clearToolHover();
+      // Orbit STAYS suppressed: an armed revolve's drag is the angle.
       this.applyBooleanState("NewBody", false, "revolve");
       this.sendPreview();
     }
@@ -1961,6 +2081,10 @@ export class ModelToolController {
         angle: startAngle,
         ...(hostSeed ? { boolean: hostSeed } : {}),
       }).state; // → axisPick
+      // Modal, like the region pick: a click takes the axis line, so an LMB drag
+      // must not spin the camera instead. (MMB/RMB pan and the wheel are
+      // untouched — `setOrbitSuppressed` gates the LMB orbit only.)
+      this.deps.engine.setOrbitSuppressed(true);
       this.deps.engine.showRevolveAxisCandidates(
         this.plane,
         this.revolveAxisCandidates.map((k) => ({ a: k.a, b: k.b })),
@@ -2002,7 +2126,9 @@ export class ModelToolController {
     this.revolveAxisLineId = null;
     this.revolveArmedDown = false;
     if (this.dragging === "revolve") this.dragging = null;
-    this.deps.engine.setOrbitSuppressed(false);
+    // STILL suppressed: this drops back into axis-pick, which is modal in exactly
+    // the same way the first one was — not to a free-orbit armed state.
+    this.deps.engine.setOrbitSuppressed(true);
     this.deps.engine.hideRevolvePreview();
     this.engine.setPreviewTint("normal");
     if (this.plane) {
@@ -2870,6 +2996,8 @@ export class ModelToolController {
     }
     this.boolean = booleanStep(booleanInit(), { kind: "start", targetBodyId: body.id }).state;
     toolStore.setState({ phase: "armed" });
+    // Modal: the click picks the tool BODY, so an LMB drag must not orbit instead.
+    this.deps.engine.setOrbitSuppressed(true);
     viewportStore.getState().setStatusHint("Pick the tool body to combine", { sticky: true });
     this.updateDebug();
   }
@@ -3099,6 +3227,701 @@ export class ModelToolController {
     await this.armShell([], featureId, thickness);
   }
 
+  // ── offset face (SCHEMA §7.3 OffsetFace + §7.6 PrepareOffsetFace) ──────────
+  //
+  // Shell's ARMING (face selection → chip → kernel preview → explicit confirm)
+  // with Extrude's MANIPULATOR (a real 3D arrow along the mean face normal,
+  // `axisDepthFromRay`, orbit left free) and an L1 ghost of the moving faces.
+  //
+  // The part that is neither tool's is the AUTHORING TRANSACTION. Every other op
+  // here builds its params from what the user picked; this one cannot, because the
+  // operative set is not the picks — the kernel auto-propagates an offset across
+  // G1-tangent junctions and cannot hold a tangent neighbour fixed, so the set that
+  // will actually move has to be computed by the worker BEFORE anything is
+  // authored. `PrepareOffsetFace` does that, returns EVIDENCE only (never ids —
+  // minting is Rust's alone), and the arm path promotes every returned face before
+  // it will arm at all. A refusal, a failed promotion, or a document that moves
+  // afterwards all mean the same thing: no arm, or no commit. FAIL CLOSED
+  // throughout — this op's whole point is that the frozen set is trustworthy.
+
+  private async armOffsetFaceFromSelection(): Promise<void> {
+    const faces = selectionStore.getState().selected.filter((r) => r.kind === "face");
+    if (faces.length === 0) {
+      viewportStore
+        .getState()
+        .setStatusHint("Select faces to offset, then Offset face", { sticky: true });
+      return;
+    }
+    // The body set comes from the FACE refs, not `selectedBodyIds()` (which reads
+    // whole-body selections): an offset is defined against ONE body, and a
+    // cross-body pick has no target to name. Refused here as well as by the
+    // backend's own `crossBody` refusal — the local check costs no round trip.
+    const bodies = [...new Set(faces.map((f) => f.bodyId ?? ""))];
+    if (bodies.length > 1) {
+      viewportStore
+        .getState()
+        .setStatusHint("Offset face: every selected face must belong to the same body", {
+          severity: "error",
+          sticky: true,
+        });
+      return;
+    }
+    if (!bodies[0]) {
+      viewportStore.getState().setStatusHint("Offset face: that selection has no body", {
+        severity: "error",
+        sticky: true,
+      });
+      return;
+    }
+    this.offsetPicks = faces;
+    await this.armOffsetFace();
+  }
+
+  /**
+   * Run the handshake and — only if it succeeded — arm. `distanceType`/`chain`
+   * default to a fresh arm's; a chip toggle re-enters here with its new pair,
+   * because both CHANGE THE CLOSURE and a params update would keep the old one.
+   */
+  private async armOffsetFace(
+    distanceType: OffsetDistanceType = "Offset",
+    chainTangentFaces = true,
+    seedDistance?: number,
+  ): Promise<void> {
+    const gen = ++this.armGen;
+    // A re-arm supersedes the previous closure's preview session outright: its
+    // draft names faces that are about to be replaced.
+    this.closePreviewSessions();
+    this.engine.hideGhostPreview();
+    this.offsetGhostHidden = false;
+    const kept = this.offsetFace.phase === "idle" ? undefined : this.offsetFace;
+    if (!(await this.prepareOffsetClosure(gen, distanceType, chainTangentFaces))) {
+      // Refused: the hint is already published and NOTHING is armed. A partial arm
+      // here would be a tool holding a closure the worker declined to compute.
+      if (gen === this.armGen) {
+        this.offsetFace = offsetFaceInit();
+        this.engine.hideValueHandle();
+        toolChipStore.getState().clear();
+        this.updateDebug();
+      }
+      return;
+    }
+    if (gen !== this.armGen) return;
+    const distance = seedDistance ?? this.seedOffsetDistance(distanceType, kept);
+    const step = offsetFaceStep(offsetFaceInit(), {
+      kind: "arm",
+      faceCount: this.offsetFaces.length,
+      distance,
+      distanceType,
+      chainTangentFaces,
+      touched: kept?.touched === true,
+    });
+    if (step.effect !== "begin") {
+      // The reducer refused the arm (a non-Offset type over a multi-face closure).
+      // Say so rather than leaving a tool that looks active and does nothing.
+      viewportStore.getState().setStatusHint(
+        `Offset face: ${distanceType} operates on exactly one face (this selection resolved to ${this.offsetFaces.length})`,
+        { severity: "error", sticky: true },
+      );
+      this.offsetFace = offsetFaceInit();
+      this.updateDebug();
+      return;
+    }
+    this.offsetFace = step.state;
+    toolStore.setState({ phase: "armed" });
+    // Orbit stays FREE while a real arrow exists (the extrude rule: the handle is
+    // hit-tested, so a press that misses it is an orbit). The degraded gesture has
+    // no handle to miss, so it claims every press and must suppress orbit.
+    this.deps.engine.setOrbitSuppressed(this.offsetDegraded);
+    const hint = this.offsetArmHint();
+    this.previewArmHint = hint;
+    viewportStore.getState().setStatusHint(hint, { sticky: true });
+    this.showOffsetFaceChip();
+    this.applyOffsetFaceState();
+    this.updateDebug();
+    await this.openOffsetFacePreview(gen);
+  }
+
+  /** The arm hint — it has to name the CLOSURE, which may exceed the picks. */
+  private offsetArmHint(): string {
+    const n = this.offsetFaces.length;
+    const chained = n - this.offsetPicks.length;
+    const face = `${n} face${n > 1 ? "s" : ""}`;
+    const tail = chained > 0 ? ` (+${chained} tangent)` : "";
+    return this.offsetDegraded
+      ? `Offset ${face}${tail} — drag or type a distance · Enter or ✓ to apply`
+      : `Offset ${face}${tail} — drag the arrow or type · Enter or ✓ to apply`;
+  }
+
+  /**
+   * The distance a (re-)arm opens at. An ABSOLUTE type seeds from the kernel's own
+   * measurement (`currentDims`) — "Ø8" must open at the hole's real diameter, not
+   * at a made-up default — and only while the user has not authored one of their
+   * own (the fillet pristine-reseed rule).
+   */
+  private seedOffsetDistance(type: OffsetDistanceType, kept?: OffsetFaceFsm): number {
+    if (kept?.touched) return kept.distance;
+    if (type === "Radius" && this.offsetDims.radius !== undefined) return this.offsetDims.radius;
+    if (type === "Diameter" && this.offsetDims.radius !== undefined) {
+      return this.offsetDims.radius * 2;
+    }
+    if (type === "Total" && this.offsetDims.thickness !== undefined) {
+      return this.offsetDims.thickness;
+    }
+    return type === "Offset" ? (kept?.distance ?? DEFAULT_OFFSET_DISTANCE) : DEFAULT_OFFSET_DISTANCE;
+  }
+
+  /**
+   * The authoring handshake: `PrepareOffsetFace` → promote every returned face →
+   * freeze the typed refs. Returns false (with a published hint) on ANY of the
+   * ways it can decline; the caller must not arm on a false.
+   *
+   * A REFUSAL is an ordinary answer here (SCHEMA §7.6 `ok:true`), and its message
+   * is what the user reads — dropping it for a generic "could not offset" would
+   * throw away the only explanation they get.
+   */
+  private async prepareOffsetClosure(
+    gen: number,
+    distanceType: OffsetDistanceType,
+    chainTangentFaces: boolean,
+  ): Promise<boolean> {
+    const picks = this.offsetPicks;
+    const bodyId = picks[0]?.bodyId ?? "";
+    if (picks.length === 0 || !bodyId) return false;
+    this.offsetPreparedRevision = null; // no valid handshake until this one lands
+    let res: PrepareOffsetFaceResult;
+    try {
+      res = await this.deps.client.prepareOffsetFace({
+        // The two address rungs are mutually exclusive on the wire; a promoted
+        // pick's ElementId is the stronger one, so it wins where present.
+        pickedFaces: picks.map((p) => ({
+          bodyId: p.bodyId,
+          elementId: p.elementId,
+          topoKey: p.elementId ? undefined : p.topoKey,
+        })),
+        chainTangentFaces,
+        distanceType,
+      });
+    } catch (e) {
+      if (gen !== this.armGen) return false;
+      viewportStore.getState().setStatusHint(`Offset face unavailable: ${errMessage(e)}`, {
+        severity: "error",
+        sticky: true,
+      });
+      return false;
+    }
+    if (gen !== this.armGen) return false;
+    if (res.refusal) {
+      viewportStore.getState().setStatusHint(res.refusal.message, {
+        severity: "error",
+        sticky: true,
+      });
+      return false;
+    }
+    if (res.faces.length === 0) {
+      viewportStore.getState().setStatusHint("Offset face: that selection resolved to no faces", {
+        severity: "error",
+        sticky: true,
+      });
+      return false;
+    }
+    // The worker answers in its own `body_<uuid>` wire form; the selection holds a
+    // bare id. Compared through `bareBodyId` so the two forms of the SAME body
+    // agree — and a genuine disagreement still refuses rather than binding the
+    // closure to a body the user did not pick.
+    if (res.targetBodyId && bareBodyId(res.targetBodyId) !== bareBodyId(bodyId)) {
+      viewportStore.getState().setStatusHint("Offset face: the closure resolved to another body", {
+        severity: "error",
+        sticky: true,
+      });
+      return false;
+    }
+    const faces: SemanticRef[] = [];
+    const keys: string[] = [];
+    for (const ev of res.faces) {
+      const ref = await this.promoteOffsetEvidence(gen, bodyId, ev);
+      if (gen !== this.armGen) return false;
+      if (!ref) return false; // `promoteOne` published the stale-pick hint
+      faces.push(ref);
+      keys.push(ev.topoKey);
+    }
+    let opposite: SemanticRef | undefined;
+    if (res.oppositeFace) {
+      const ref = await this.promoteOffsetEvidence(gen, bodyId, res.oppositeFace);
+      if (gen !== this.armGen) return false;
+      if (!ref) return false;
+      opposite = ref;
+    }
+    if (distanceType === "Total" && !opposite) {
+      viewportStore
+        .getState()
+        .setStatusHint("Offset face: no unique opposite face for a total thickness", {
+          severity: "error",
+          sticky: true,
+        });
+      return false;
+    }
+    this.offsetFaces = faces;
+    this.offsetTopoKeys = keys;
+    this.offsetOppositeFace = opposite;
+    this.offsetTargetBodyId = bodyId;
+    this.offsetDims = res.currentDims;
+    this.offsetPreparedRevision = documentStore.getState().revision;
+    this.resolveOffsetFrames();
+    return true;
+  }
+
+  /**
+   * One evidence entry → the typed `SemanticRef` the record holds.
+   *
+   * `bodyId` is the SELECTION's (bare) form, never the promotion's: `promoteOne`
+   * answers in the worker's `body_<uuid>` wire form, and the preview builder
+   * compares each face's body against `targetBodyId` for equality — mixing the two
+   * spellings would fail that guard for a perfectly good closure.
+   *
+   * An already-promoted pick short-circuits: a face the user picked may already
+   * carry an ElementId, and re-promoting it is a round trip for the same answer.
+   */
+  private async promoteOffsetEvidence(
+    gen: number,
+    bodyId: string,
+    ev: OffsetFaceEvidence,
+  ): Promise<SemanticRef | null> {
+    const worldPoint =
+      (ev.anchor?.worldPoint as Vec3 | undefined) ??
+      this.offsetPicks.find((p) => p.topoKey === ev.topoKey)?.anchor?.worldPoint;
+    const anchor = worldPoint ? { worldPoint } : undefined;
+    const known = this.offsetPicks.find((p) => p.topoKey === ev.topoKey && p.elementId);
+    if (known?.elementId) {
+      return { primary: { bodyId, elementId: known.elementId, kind: "face" }, anchor };
+    }
+    const promoted = await promoteOne(this.client, bodyId, {
+      topoKey: ev.topoKey,
+      anchor,
+    });
+    if (gen !== this.armGen) return null;
+    // A REFUSED promotion is fatal here, unlike the hole seat's degraded path: an
+    // OffsetFace record stores typed refs whose `primary.elementId` must equal its
+    // own `faceIds[i]` (core validates the lockstep), so there is no anchor-only
+    // form of this op to fall back to.
+    if (!promoted?.elementId) return null;
+    return { primary: { bodyId, elementId: promoted.elementId, kind: "face" }, anchor };
+  }
+
+  /**
+   * Resolve the closure's planar frames off the LOCAL mesh — the drag axis, the
+   * chip/arrow anchor and the L1 ghost slices, all from one pass.
+   *
+   * DEGRADES rather than guesses. A cylindrical face has no planar frame at all
+   * (`faceFrame` refuses it), and a set whose normals diverge has no honest mean —
+   * either way `offsetDegraded` goes true and the tool falls back to the
+   * screen-space value drag with no arrow and no ghost. Planarity here is a HINT
+   * for the interaction only; the kernel remains the authority on what the offset
+   * actually does.
+   */
+  private resolveOffsetFrames(): void {
+    this.offsetFrames = [];
+    this.offsetRanges = [];
+    this.offsetAxis = null;
+    this.offsetDegraded = true;
+    const entry = getEntry(this.offsetTargetBodyId);
+    const frames: PlanarFaceFrame[] = [];
+    const ranges: { start: number; count: number }[] = [];
+    if (entry) {
+      for (const topoKey of this.offsetTopoKeys) {
+        const ordinal = entry.faceIndex.ordinalForId(topoKey);
+        if (ordinal < 0) break;
+        const frame = faceFrame(entry.view, ordinal);
+        if (!frame) break; // curved (or degenerate) — no planar frame to offset along
+        frames.push(frame);
+        ranges.push(faceDrawRange(entry.view.faceRanges, ordinal));
+      }
+    }
+    // Anchor first: it is worth having even when the axis is not (the chip has to
+    // hang somewhere), so it falls back to the first pick's own anchor point.
+    this.offsetAnchor =
+      (frames.length === this.offsetTopoKeys.length ? offsetAnchorFor(frames) : null) ??
+      (this.offsetPicks[0]?.anchor?.worldPoint as Vec3 | undefined) ??
+      [0, 0, 0];
+    if (frames.length !== this.offsetTopoKeys.length) return; // partial ⇒ degraded
+    const axis = offsetAxisFor(frames);
+    if (!axis) return;
+    this.offsetFrames = frames;
+    this.offsetRanges = ranges;
+    this.offsetAxis = axis;
+    this.offsetDegraded = false;
+  }
+
+  /** Which distance types this closure may offer (the chip's segment group). */
+  private offsetAllowedTypes(): readonly OffsetDistanceType[] {
+    // SCHEMA §7.3: only `Offset` admits a multi-face set that is not a coaxial
+    // cylindrical closure, and the frontend never authors the coaxial case.
+    if (this.offsetFaces.length !== 1) return ["Offset"];
+    // Planarity drives the rest. A face with a planar frame can measure a Total
+    // thickness against an opposite; a curved one is the Radius/Diameter case.
+    // Both lists still travel through prepare, whose refusals are authoritative.
+    return this.offsetFrames.length === 1 ? OFFSET_TYPES_PLANAR : OFFSET_TYPES_CURVED;
+  }
+
+  /** (Re)publish the armed offset cluster with the FSM's current numbers. */
+  private showOffsetFaceChip(): void {
+    const s = this.offsetFace;
+    toolChipStore.getState().showOffsetFace(
+      s.distance,
+      this.offsetAnchor,
+      {
+        onValue: (v) => this.onOffsetFaceChip(v),
+        onDistanceType: (t) => this.onOffsetDistanceType(t),
+        onChainTangent: (c) => this.onOffsetChainTangent(c),
+        onConfirm: () => void this.commitOffsetFace(),
+        onCancel: () => toolStore.getState().setTool("select"),
+      },
+      {
+        distanceType: s.distanceType,
+        chainTangentFaces: s.chainTangentFaces,
+        distanceTypes: this.offsetEditFeatureId ? [s.distanceType] : this.offsetAllowedTypes(),
+        valueError: s.valueError,
+      },
+    );
+  }
+
+  /**
+   * Redraw the arrow + the L1 ghost for the FSM's current distance.
+   *
+   * The ghost is one translucent clone of EACH operative face, translated along
+   * THAT face's own normal — not one clone of the body along the mean, which for a
+   * tangent chain would show a rigid translation instead of an offset. It is
+   * dropped as soon as an exact kernel candidate lands (`offsetGhostHidden`), and
+   * comes back if that candidate later fails.
+   */
+  private applyOffsetFaceState(): void {
+    if (this.offsetDegraded || !this.offsetAxis) return;
+    const d = this.offsetFace.distance;
+    const axis = this.offsetAxis;
+    const origin: Vec3 = [
+      this.offsetAnchor[0] + axis[0] * d,
+      this.offsetAnchor[1] + axis[1] * d,
+      this.offsetAnchor[2] + axis[2] * d,
+    ];
+    this.engine.showValueHandle(origin, axis);
+    if (this.offsetGhostHidden) return;
+    const entry = getEntry(this.offsetTargetBodyId);
+    if (!entry) return;
+    const offsets = ghostOffsets(this.offsetFrames, d);
+    if (offsets.length !== this.offsetRanges.length) return;
+    const items: GhostInstances[] = offsets.map((offset, i) => ({
+      entry,
+      range: this.offsetRanges[i],
+      transforms: [{ kind: "translate", offset } as GhostTransform],
+    }));
+    this.engine.showGhostPreviewMulti(items);
+  }
+
+  /** Open the ONE kernel-preview session an armed offset drives. */
+  private async openOffsetFacePreview(gen: number): Promise<void> {
+    let params: PreviewParams;
+    try {
+      params = this.offsetFacePreviewParams();
+    } catch {
+      return; // not yet a complete offset — nothing honest to preview
+    }
+    const draft: PreviewDraft = { opType: "OffsetFace", inputs: [...this.offsetFaces], params };
+    let session: PreviewSession;
+    try {
+      session = await this.deps.client.beginPreview(draft);
+    } catch (error) {
+      if (gen !== this.armGen) return;
+      traceWarn("extrude", `OffsetFace preview session failed: ${errMessage(error)}`);
+      return;
+    }
+    if (gen !== this.armGen) {
+      void this.deps.client.endPreview(session.sessionId, false);
+      return;
+    }
+    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [] }];
+    this.previewOwner = "offsetFace";
+    this.previewParamsFn = () => this.offsetFacePreviewParams();
+    this.previewPending = false;
+    this.previewFailure = null;
+    this.stalePreviewRetryAttempted = false;
+    this.throttle.reset();
+    this.throttle.setTrailingMs(OFFSET_FACE_TRAILING_MS);
+    this.sendPreview();
+    this.updateDebug();
+  }
+
+  /** Complete canonical OffsetFace params for both exact preview and commit. */
+  private offsetFaceParams(distance = this.offsetFace.distance): OffsetFaceParams {
+    const s = this.offsetFace;
+    const params: OffsetFaceParams = {
+      faces: [...this.offsetFaces],
+      distance,
+      distanceType: s.distanceType,
+      chainTangentFaces: s.chainTangentFaces,
+      targetBodyId: this.offsetTargetBodyId,
+    };
+    // Total-ONLY, gated on the type rather than on presence: a stale opposite left
+    // behind by a type switch must never ride the record (core rejects it).
+    if (s.distanceType === "Total" && this.offsetOppositeFace) {
+      params.oppositeFace = this.offsetOppositeFace;
+    }
+    return params;
+  }
+
+  private offsetFacePreviewParams(distance = this.offsetFace.distance): PreviewParams {
+    return { ...this.offsetFaceParams(distance) };
+  }
+
+  private onOffsetFaceChip(v: number): void {
+    const step = offsetFaceStep(this.offsetFace, { kind: "setDistance", distance: v });
+    this.offsetFace = step.state;
+    // The chip re-renders the STATE's value, not the typed one: a refused entry is
+    // never written back, so the field must show the last value that was accepted.
+    toolChipStore.getState().setValue(this.offsetFace.distance);
+    toolChipStore.getState().setValueError(this.offsetFace.valueError);
+    if (step.effect !== "update") return;
+    this.applyOffsetFaceState();
+    this.sendPreview();
+    this.updateDebug();
+  }
+
+  /** A distance-type segment pick. Re-runs the handshake: the closure depends on it. */
+  private onOffsetDistanceType(t: OffsetDistanceType): void {
+    const step = offsetFaceStep(this.offsetFace, { kind: "setDistanceType", distanceType: t });
+    if (step.effect !== "begin") return;
+    this.offsetFace = step.state;
+    toolChipStore.getState().setDistanceType(step.state.distanceType);
+    toolChipStore.getState().setChainTangent(step.state.chainTangentFaces);
+    void this.armOffsetFace(step.state.distanceType, step.state.chainTangentFaces);
+  }
+
+  /** The tangent toggle. Also a re-arm — a wider/narrower closure is a new op. */
+  private onOffsetChainTangent(chain: boolean): void {
+    const step = offsetFaceStep(this.offsetFace, {
+      kind: "setChainTangent",
+      chainTangentFaces: chain,
+    });
+    if (step.effect !== "begin") return;
+    this.offsetFace = step.state;
+    toolChipStore.getState().setChainTangent(step.state.chainTangentFaces);
+    void this.armOffsetFace(step.state.distanceType, step.state.chainTangentFaces);
+  }
+
+  /**
+   * Apply the armed offset. The RE-EDIT path is a distance-only scalar merge (no
+   * lane session, no handshake — the stored record already owns its closure); a
+   * FRESH offset runs the previewed-commit sequence under OP-SPECIFIC STRICTNESS.
+   *
+   * Three preconditions the generic barrier does not give us, and why each is here:
+   *  1. a successful handshake for the CURRENT document revision — the frozen
+   *     TopoKeys were resolved against that head, and a moved head can silently
+   *     re-point them;
+   *  2. no outstanding preview failure — the ✓ is blocked while the newest
+   *     candidate is a refusal (the house rule);
+   *  3. an exact candidate that ACTUALLY LANDED for the final params. The generic
+   *     barrier proceeds on timeout by design; here that would commit a frozen
+   *     closure the kernel never evaluated.
+   */
+  private async commitOffsetFace(): Promise<void> {
+    const editFeatureId = this.offsetEditFeatureId;
+    if (editFeatureId) {
+      await this.commitOffsetFaceEdit(editFeatureId);
+      return;
+    }
+    if (this.offsetFaces.length === 0) {
+      this.cancelOffsetFace();
+      toolStore.getState().setTool("select");
+      return;
+    }
+    if (this.offsetFace.phase !== "armed") return;
+    if (
+      this.offsetPreparedRevision === null ||
+      this.offsetPreparedRevision !== documentStore.getState().revision
+    ) {
+      viewportStore
+        .getState()
+        .setStatusHint("Offset face: the model changed — re-select the faces", {
+          severity: "error",
+          sticky: true,
+        });
+      return;
+    }
+    if (this.previewFailure) {
+      viewportStore
+        .getState()
+        .setStatusHint(`Cannot apply invalid preview: ${this.previewFailure.message}`, {
+          severity: "error",
+          sticky: true,
+        });
+      return;
+    }
+    const step = offsetFaceStep(this.offsetFace, { kind: "confirm" });
+    if (step.effect !== "commit") {
+      // The reducer refused a degenerate magnitude. Nothing is clamped — say what
+      // the domain is and leave the number exactly as the user left it.
+      this.offsetFace = step.state;
+      toolChipStore.getState().setValueError(true);
+      viewportStore.getState().setStatusHint(
+        this.offsetFace.distanceType === "Offset"
+          ? "Offset face: that distance is too small to change anything"
+          : `Offset face: a ${this.offsetFace.distanceType} must be greater than zero`,
+        { severity: "error", sticky: true },
+      );
+      return;
+    }
+    this.offsetFace = step.state; // → committing (excludes us from the stale-arm guard)
+    toolStore.setState({ phase: "committing" });
+    const gen = ++this.commitGen;
+    const params = this.offsetFaceParams();
+    const outcome = await this.commitPreviewedOp(
+      { opType: "OffsetFace", inputs: [...this.offsetFaces], params },
+      gen,
+      { requireExactPreview: true },
+    );
+    if (outcome.kind === "superseded") return;
+    if (outcome.kind === "failed") {
+      this.offsetFace = offsetFaceStep(this.offsetFace, { kind: "commitFailed" }).state; // → armed
+      toolStore.setState({ phase: "armed" });
+      viewportStore
+        .getState()
+        .setStatusHint(`Offset face failed: ${outcome.reason}`, { severity: "error", sticky: true });
+      this.offsetGhostHidden = false;
+      this.applyOffsetFaceState();
+      await this.openOffsetFacePreview(this.armGen); // re-arm the preview (work kept)
+      this.updateDebug();
+      return;
+    }
+    this.applyResult(outcome.res);
+    this.teardownPreviewedTool();
+    this.engine.hideValueHandle();
+    this.engine.hideGhostPreview();
+    this.resetOffsetFaceState();
+    this.resetToSelect("Face offset");
+    this.updateDebug();
+  }
+
+  /** Distance-only parametric re-edit — deep-merges into the stored params. */
+  private async commitOffsetFaceEdit(editFeatureId: string): Promise<void> {
+    const distance = this.offsetFace.distance;
+    if (!offsetCanConfirm(this.offsetFace)) {
+      toolChipStore.getState().setValueError(true);
+      viewportStore.getState().setStatusHint("Offset face: that distance is out of range", {
+        severity: "error",
+        sticky: true,
+      });
+      return;
+    }
+    // Move to `committing` so the revision bump this commit causes does not read
+    // as an external model change and cancel our own arm.
+    const step = offsetFaceStep(this.offsetFace, { kind: "confirm" });
+    if (step.effect === "commit") this.offsetFace = step.state;
+    this.deps.engine.setOrbitSuppressed(false);
+    toolChipStore.getState().clear();
+    let failure: string | null = null;
+    try {
+      // A re-edit changes ONLY the distance: deep-merge into the stored params so
+      // the frozen closure, the opposite face and the target survive verbatim (a
+      // whole-params replace would wipe every one of them).
+      if (!this.offsetStoredParams) {
+        throw new Error("Stored Offset face parameters are unavailable");
+      }
+      const res = await this.client.applyEditCommand(
+        updateScalarParamsCommand(editFeatureId, "OffsetFace", this.offsetStoredParams, {
+          distance: { value: distance },
+        }),
+      );
+      this.applyResult(res);
+    } catch (e) {
+      failure = errMessage(e);
+    }
+    this.resetOffsetFaceState();
+    if (failure !== null) {
+      this.resetToSelect(`Offset face failed: ${failure}`, { severity: "error", sticky: true });
+    } else {
+      this.resetToSelect("Offset distance updated");
+    }
+    this.updateDebug();
+  }
+
+  /**
+   * Re-arm the offset tool on an existing OffsetFace feature (distance re-edit).
+   *
+   * L1-ONLY, like every other re-edit here: `PreviewOp` runs against the CURRENT
+   * head, so previewing an existing feature would double-apply it. It also runs NO
+   * handshake — the record's closure is already frozen and re-preparing would
+   * compute a new one against today's geometry, quietly replacing the operative
+   * set the user authored.
+   */
+  async editOffsetFaceFeature(featureId: string): Promise<void> {
+    const feat = documentStore.getState().features.find((f) => f.id === featureId);
+    // Gate on `opType`, NEVER `kind`: `dto.rs feature_kind` folds OffsetFace into
+    // the `fillet` bucket, so a `kind` guard would be unsatisfiable on the real lane.
+    if (!feat || feat.opType !== "OffsetFace") return;
+    const stored = await this.deps.client.getOperationParams(featureId).catch(() => undefined);
+    const distance = feat.primaryValue ?? distanceFromValueText(feat.valueText);
+    const storedType = stored?.distanceType;
+    const distanceType: OffsetDistanceType =
+      storedType === "Total" || storedType === "Radius" || storedType === "Diameter"
+        ? storedType
+        : "Offset";
+    toolStore.getState().setTool("offsetFace"); // fires cancelOffsetFace
+    this.offsetStoredParams = stored; // set AFTER the tool-change cancel
+    this.offsetEditFeatureId = featureId;
+    const gen = ++this.armGen;
+    // `faceCount: 1` keeps the FSM out of its bail path — a re-edit has no fresh
+    // picks (the fillet/shell re-edit seed rule).
+    this.offsetFace = offsetFaceStep(offsetFaceInit(), {
+      kind: "arm",
+      faceCount: 1,
+      distance,
+      distanceType,
+      chainTangentFaces: stored?.chainTangentFaces !== false,
+      touched: true,
+    }).state;
+    if (gen !== this.armGen) return;
+    toolStore.setState({ phase: "armed" });
+    this.offsetAnchor = [0, 0, 0];
+    this.showOffsetFaceChip();
+    viewportStore
+      .getState()
+      .setStatusHint("Edit offset distance — type a value, Enter to apply", { sticky: true });
+    this.updateDebug();
+  }
+
+  /** Every field the offset lane owns, back to its idle value. */
+  private resetOffsetFaceState(): void {
+    this.offsetFace = offsetFaceInit();
+    this.offsetPicks = [];
+    this.offsetFaces = [];
+    this.offsetTopoKeys = [];
+    this.offsetOppositeFace = undefined;
+    this.offsetTargetBodyId = "";
+    this.offsetFrames = [];
+    this.offsetRanges = [];
+    this.offsetAxis = null;
+    this.offsetAnchor = [0, 0, 0];
+    this.offsetDims = {};
+    this.offsetPreparedRevision = null;
+    this.offsetDegraded = false;
+    this.offsetGhostHidden = false;
+    this.offsetEditFeatureId = undefined;
+    this.offsetStoredParams = undefined;
+  }
+
+  private cancelOffsetFace(): void {
+    // Release any open offset lane session FIRST (see cancelFillet).
+    this.closePreviewSessions();
+    this.previewArmHint = null;
+    this.deps.engine.setOrbitSuppressed(false);
+    // R3: the drag arrow is the ONE shared `DragHandle`, so a cancel that left it
+    // visible would hand the next tool a floating arrow it never asked for.
+    this.engine.hideValueHandle();
+    this.engine.hideGhostPreview();
+    this.resetOffsetFaceState();
+    if (this.dragging === "offsetFace") this.dragging = null;
+    toolChipStore.getState().clear();
+    this.updateDebug(); // republish the now-idle phase (a tool switch has no other hook)
+  }
+
   // ── hole (WP-C T3) ─────────────────────────────────────────────────────────
   //
   // Two-phase gesture, like the datum tool: activate → click a PLANAR face →
@@ -3114,6 +3937,9 @@ export class ModelToolController {
 
   private startHole(): void {
     this.hole = holeStep(this.hole, { kind: "start" }).state;
+    // Modal for BOTH phases: the first click places the seat and every later one
+    // MOVES it, so an LMB drag must never become an orbit that eats the click.
+    this.deps.engine.setOrbitSuppressed(true);
     viewportStore
       .getState()
       .setStatusHint("Click a flat face to place the hole · Esc cancels", { sticky: true });
@@ -3384,6 +4210,8 @@ export class ModelToolController {
     this.hole = holeInit();
     this.holeEditFeatureId = undefined;
     this.holeTopoKey = undefined;
+    this.clearToolHover();
+    this.deps.engine.setOrbitSuppressed(false);
     toolChipStore.getState().clear();
     this.resetToSelect(hint, failed ? { severity: "error", sticky: true } : undefined);
     this.updateDebug();
@@ -3416,6 +4244,9 @@ export class ModelToolController {
     this.armGen++; // the async startHole path must not clobber the seed
     this.holeEditFeatureId = featureId; // set AFTER the tool-change cancel
     this.hole = seeded;
+    // `setTool` above is a no-op when the hole tool is ALREADY active, so the
+    // `startHole` suppression cannot be relied on here — re-assert it.
+    this.deps.engine.setOrbitSuppressed(true);
     this.showHoleChip();
     viewportStore.getState().setStatusHint(HOLE_ARMED_HINT, { sticky: true });
     this.updateDebug();
@@ -3425,6 +4256,8 @@ export class ModelToolController {
     // Release any open hole lane session FIRST (see cancelFillet).
     this.closePreviewSessions();
     this.previewArmHint = null;
+    this.clearToolHover();
+    this.deps.engine.setOrbitSuppressed(false);
     this.hole = holeInit();
     this.holeEditFeatureId = undefined;
     this.holeTopoKey = undefined;
@@ -4105,6 +4938,10 @@ export class ModelToolController {
     }
     this.alignMovingFrame = null;
     this.transform = transformStep(this.transform, { kind: "beginAlign" }).state;
+    // Modal for the two picks: an armed placement leaves orbit free (the gizmo is
+    // grabbed by hitting it), but a click that means "take THIS face" must not be
+    // swallowed by a camera spin. `endAlign` hands it back.
+    this.deps.engine.setOrbitSuppressed(true);
     this.publishTransformState();
     this.publishAlignHint();
   }
@@ -4115,6 +4952,8 @@ export class ModelToolController {
     this.transform = transformStep(this.transform, { kind: "alignCancel" }).state;
     if (this.transform.alignPhase !== "pickDest") this.alignMovingFrame = null;
     this.clearAlignHover();
+    // The LAST rung out of the flow is an exit like any other — hand orbit back.
+    if (this.transform.alignPhase === null) this.deps.engine.setOrbitSuppressed(false);
     this.publishTransformState();
     this.publishAlignHint();
   }
@@ -4123,6 +4962,7 @@ export class ModelToolController {
   private endAlign(): void {
     this.alignMovingFrame = null;
     this.clearAlignHover();
+    this.deps.engine.setOrbitSuppressed(false);
   }
 
   /** The prompt for whichever pick is outstanding — or the armed hint when none. */
@@ -4166,6 +5006,58 @@ export class ModelToolController {
   private clearAlignHover(): void {
     if (!this.alignHidHover) return;
     this.alignHidHover = false;
+    selectionStore.getState().setHover(null);
+  }
+
+  // ── modal-pick hover (the align pattern, generalised) ────────────────────────
+  //
+  // Every MODAL PICK phase — the hole seat, the boolean tool body, extrude's
+  // ToFace and both boolean target picks — used to ask for a click with no
+  // feedback at all: the picker is inactive while a model tool is armed, so the
+  // ordinary hover tint is gone and the user clicks blind, learning what was
+  // under the pointer only from what happens next. These two share the align
+  // sub-flow's ONE HOVER WRITER contract verbatim (tint via
+  // `selectionStore.setHover`, cleared only by whoever set it), so no second
+  // highlight path exists and there is no contention to arbitrate.
+
+  /**
+   * Tint what a click would take right now.
+   *
+   * `allow` is the phase's own filter and MUST restate what the click handler
+   * refuses: a tint on an element the click then rejects is worse than none.
+   * `as: "body"` tints the WHOLE body for the phases whose click takes a body
+   * (boolean tool / boolean target) rather than the face under the pointer.
+   */
+  private setToolHover(
+    hit: PickHit | null,
+    opts: { as: "element" | "body"; allow?: (h: PickHit) => boolean },
+  ): void {
+    if (!hit || (opts.allow && !opts.allow(hit))) {
+      this.clearToolHover();
+      return;
+    }
+    const ref: EntityRef =
+      opts.as === "body"
+        ? { kind: "body", id: hit.bodyId }
+        : {
+            kind: hit.kind,
+            id: topoRefId(hit.bodyId, hit.topoKey),
+            bodyId: hit.bodyId,
+            topoKey: hit.topoKey,
+            elementId: hit.elementId,
+            anchor: { worldPoint: [hit.worldPos.x, hit.worldPos.y, hit.worldPos.z] },
+          };
+    const sel = selectionStore.getState();
+    // Unchanged hover ⇒ no store write ⇒ no repaint (render-on-demand holds).
+    if (sel.hover?.kind === ref.kind && sel.hover.id === ref.id) return;
+    sel.setHover(ref);
+    this.toolHoverSet = true;
+  }
+
+  /** Drop a modal-pick hover THIS controller set (never one somebody else owns). */
+  private clearToolHover(): void {
+    if (!this.toolHoverSet) return;
+    this.toolHoverSet = false;
     selectionStore.getState().setHover(null);
   }
 
@@ -4246,8 +5138,7 @@ export class ModelToolController {
       angleDeg: solved.rotate.angleDeg,
       rotAxisVec: solved.rotate.axis,
     }).state;
-    this.alignMovingFrame = null;
-    this.clearAlignHover();
+    this.endAlign(); // solved ⇒ the picks are done: drop the hover, restore orbit
     this.publishTransformState();
     viewportStore
       .getState()
@@ -4586,6 +5477,9 @@ export class ModelToolController {
       this.shell = shellStep(this.shell, { kind: "grab" }).state;
       toolStore.setState({ phase: "dragging" });
       this.updateDebug();
+    } else if (this.offsetFace.phase === "armed" && this.startOffsetFaceGrab(e)) {
+      // Handled inside the helper (which decides between the ARROW grab and the
+      // degraded screen-space drag, and declines a press that is neither).
     } else if (this.revolve.phase === "armed") {
       // Defer grab to the first move: a plain click (no move) commits 360° instead.
       this.revolveArmedDown = true;
@@ -4594,6 +5488,72 @@ export class ModelToolController {
       this.revolveStartAngle = this.revolve.angle;
     }
   };
+
+  /**
+   * Claim a press for the armed offset, or decline it. Returns whether the drag
+   * started.
+   *
+   * Two gestures, one tool. With a real arrow (`!offsetDegraded`) only a press ON
+   * the handle counts, exactly like Extrude — every other press stays available to
+   * orbit and select, which is why orbit is not suppressed there. In the DEGRADED
+   * case there is no handle to hit-test, so the tool claims every viewport press
+   * (the fillet/shell rule) and the chip is excluded so its ✓ stays clickable.
+   *
+   * Both capture their start value AT THE PRESS and report DIFFERENCES against it —
+   * the grab point is never the arrow's origin, and taking the absolute depth
+   * would jump the face to the cursor on the first frame.
+   */
+  private startOffsetFaceGrab(e: PointerEvent): boolean {
+    // Only a free `Offset` has a drag at all: `Total`/`Radius`/`Diameter` are
+    // absolute values with no zero to drag from, so they are typed, never dragged.
+    if (this.offsetFace.distanceType !== "Offset") return false;
+    if (!this.offsetDegraded) {
+      if (!this.offsetAxis) return false;
+      if (!this.engine.hitExtrudeHandle(e.clientX, e.clientY)) return false;
+      const ray = this.engine.screenRay(e.clientX, e.clientY);
+      if (!ray) return false;
+      this.offsetGrabDepth = axisDepthFromRay(ray.origin, ray.dir, this.offsetAnchor, this.offsetAxis);
+      this.engine.setExtrudeHandleHover(true);
+    } else {
+      if (this.isExcludedClickAwayTarget(e.target)) return false;
+    }
+    this.dragging = "offsetFace";
+    this.offsetDownX = e.clientX;
+    this.offsetDownY = e.clientY;
+    this.offsetStartDistance = this.offsetFace.distance;
+    this.offsetFace = offsetFaceStep(this.offsetFace, { kind: "grab" }).state;
+    toolStore.setState({ phase: "dragging" });
+    this.updateDebug();
+    return true;
+  }
+
+  /** One drag frame for the armed offset (both gestures land here). */
+  private applyOffsetFaceDrag(e: PointerEvent): void {
+    let distance: number;
+    if (!this.offsetDegraded && this.offsetAxis) {
+      const ray = this.engine.screenRay(e.clientX, e.clientY);
+      if (!ray) return;
+      const depth = axisDepthFromRay(ray.origin, ray.dir, this.offsetAnchor, this.offsetAxis);
+      // GRAB-DELTA, not the absolute depth: the arrow already sits at
+      // `anchor + axis·distance`, so the pointer's own offset from the grab is the
+      // only thing that may move the value.
+      distance = this.offsetStartDistance + (depth - this.offsetGrabDepth);
+    } else {
+      // Degraded: raw screen deltas along the up-is-positive axis, the same
+      // mapping the edge ops use when no world direction is resolvable.
+      distance = signedValueFromDrag(
+        this.offsetStartDistance,
+        e.clientX - this.offsetDownX,
+        e.clientY - this.offsetDownY,
+        SCREEN_UP_AXIS,
+        { worldPerPx: this.engine.planePixelWorld() },
+      );
+    }
+    this.offsetFace = offsetFaceStep(this.offsetFace, { kind: "drag", distance }).state;
+    toolChipStore.getState().setValue(this.offsetFace.distance);
+    this.applyOffsetFaceState();
+    this.sendPreview();
+  }
 
   private onPointerMove = (e: PointerEvent): void => {
     if (Math.abs(e.clientX - this.downX) > DRAG_PX || Math.abs(e.clientY - this.downY) > DRAG_PX) {
@@ -4612,6 +5572,42 @@ export class ModelToolController {
     // Align pick owns the pointer: tint the face it would take, nothing else.
     if (this.transform.alignPhase !== null) {
       this.updateAlignHover(e.clientX, e.clientY);
+      return;
+    }
+    // The remaining MODAL PICK phases, in `onPointerUp`'s routing order. Each
+    // owns the pointer outright (none of them has a drag gesture) and each filter
+    // is its click handler's refusal restated — see `setToolHover`.
+    if (this.hole.phase === "facePick" || this.hole.phase === "armed") {
+      this.setToolHover(this.engine.probePick(e.clientX, e.clientY), {
+        as: "element",
+        // A curved seat is refused by the click (`tryPickHoleFace`), so it must
+        // not light up as if it were takeable.
+        allow: (h) =>
+          h.kind === "face" &&
+          !h.bodyId.startsWith("preview:") &&
+          this.holeFaceFrame(h.bodyId, h.topoKey) !== null,
+      });
+      return;
+    }
+    if (this.boolean.phase === "pickTool") {
+      this.setToolHover(this.engine.probePick(e.clientX, e.clientY), {
+        as: "body",
+        allow: (h) => !h.bodyId.startsWith("preview:") && h.bodyId !== this.boolean.targetBodyId,
+      });
+      return;
+    }
+    if (this.extrude.phase === "facePick") {
+      this.setToolHover(this.engine.probePick(e.clientX, e.clientY), {
+        as: "element",
+        allow: (h) => h.kind === "face" && !h.bodyId.startsWith("preview:"),
+      });
+      return;
+    }
+    if (this.extrude.phase === "targetPick" || this.revolve.phase === "targetPick") {
+      this.setToolHover(this.engine.probePick(e.clientX, e.clientY), {
+        as: "body",
+        allow: (h) => !h.bodyId.startsWith("preview:"),
+      });
       return;
     }
     if (this.dragging === "transform") {
@@ -4666,6 +5662,8 @@ export class ModelToolController {
       this.shell = shellStep(this.shell, { kind: "drag", thickness }).state;
       toolChipStore.getState().setValue(thickness);
       this.sendPreview();
+    } else if (this.dragging === "offsetFace") {
+      this.applyOffsetFaceDrag(e);
     } else if (this.dragging === "revolve") {
       this.applyRevolveDrag(e.clientX);
     } else if (this.revolveArmedDown && this.moved && this.downButton === 0 && this.revolve.phase === "armed") {
@@ -4677,6 +5675,10 @@ export class ModelToolController {
     } else if (this.revolve.phase === "axisPick") {
       this.updateRevolveAxisHover(e.clientX, e.clientY);
     } else if (this.extrude.phase === "armed") {
+      this.engine.setExtrudeHandleHover(this.engine.hitExtrudeHandle(e.clientX, e.clientY));
+    } else if (this.offsetFace.phase === "armed" && !this.offsetDegraded) {
+      // The offset arrow IS the extrude drag handle (one shared instance), so its
+      // hover reads through the same probe.
       this.engine.setExtrudeHandleHover(this.engine.hitExtrudeHandle(e.clientX, e.clientY));
     } else if (this.transform.phase === "armed") {
       this.engine.setTransformGizmoHover(this.engine.hitTransformGizmo(e.clientX, e.clientY));
@@ -4756,6 +5758,17 @@ export class ModelToolController {
       this.updateDebug();
       return;
     }
+    if (this.dragging === "offsetFace") {
+      // Release KEEPS the tool armed at the dragged distance (no implicit commit):
+      // the live kernel preview + editable chip stay, Enter / ✓ applies.
+      this.dragging = null;
+      this.engine.setExtrudeHandleHover(false);
+      this.offsetFace = offsetFaceStep(this.offsetFace, { kind: "release" }).state; // → armed
+      toolStore.setState({ phase: "armed" });
+      this.sendPreview();
+      this.updateDebug();
+      return;
+    }
     if (this.dragging === "revolve") {
       // Release keeps the revolve armed at the final angle (no implicit commit);
       // Enter / chip-✓ / click-away confirm.
@@ -4826,17 +5839,27 @@ export class ModelToolController {
     if (this.isExcludedClickAwayTarget(e.target)) return;
     if (this.extrude.phase === "armed") void this.confirmExtrude();
     else if (this.revolve.phase === "armed") void this.confirmRevolve();
+    else if (this.offsetFace.phase === "armed") void this.commitOffsetFace();
   };
 
-  /** True while an extrude/revolve is armed and no modal pick owns the pointer. */
+  /** True while an extrude/revolve/offset is armed and no modal pick owns the pointer. */
   private isArmedForClickAway(): boolean {
     if (this.regionPick) return false;
+    // OffsetFace joins ONLY in its handle gesture. The DEGRADED variant claims
+    // every viewport press as a value drag (there is no arrow to miss), and a tool
+    // that owns the press cannot also treat it as a click-away — the same reason
+    // the edge ops and shell are absent from this list entirely.
+    if (this.offsetFace.phase === "armed" && !this.offsetDegraded) return true;
     return this.extrude.phase === "armed" || this.revolve.phase === "armed";
   }
 
   /** A press that grabs the depth handle is a re-drag, not a click-away (extrude). */
   private pressGrabsHandle(x: number, y: number): boolean {
     if (this.extrude.phase === "armed") return this.engine.hitExtrudeHandle(x, y);
+    // Same shared handle, same rule: a press ON the offset arrow starts a drag.
+    if (this.offsetFace.phase === "armed" && !this.offsetDegraded) {
+      return this.engine.hitExtrudeHandle(x, y);
+    }
     // Revolve: any press is a potential angle drag — the moved-check decides commit
     // vs drag on release, so never suppress the click-away arm here.
     return false;
@@ -4970,8 +5993,8 @@ export class ModelToolController {
     if (this.previewOwner === "extrude" || this.previewOwner === "revolve") {
       viewportStore.getState().setStatusHint(this.armHintFor(this.previewOwner), { sticky: true });
     } else if (this.previewArmHint) {
-      // edgeOp / shell: no `armHintFor` entry, so the owner parks its own arm hint
-      // here at arm time and gets the status line back verbatim.
+      // edgeOp / shell / offsetFace: no `armHintFor` entry, so the owner parks its
+      // own arm hint here at arm time and gets the status line back verbatim.
       viewportStore.getState().setStatusHint(this.previewArmHint, { sticky: true });
     } else {
       viewportStore.getState().setStatusHint(null);
@@ -5069,6 +6092,13 @@ export class ModelToolController {
       this.engine.setPreviewBody(entry);
       es.previewBodyIds.push(previewId);
     }
+    // The kernel's exact result SUPERSEDES the L1 ghost. Both on screen at once
+    // would show the faces twice — once where they are going, once where they
+    // actually ended up — and the ghost is the less true of the two.
+    if (this.previewOwner === "offsetFace" && bodies.length > 0 && !this.offsetGhostHidden) {
+      this.offsetGhostHidden = true;
+      this.engine.hideGhostPreview();
+    }
   }
 
   /** The armed op's display noun — the prefix on every preview-lane message. */
@@ -5081,6 +6111,8 @@ export class ModelToolController {
         return this.edgeOpKind;
       case "shell":
         return "Shell";
+      case "offsetFace":
+        return "Offset face";
       case "boolean":
         return "Boolean";
       default:
@@ -5092,6 +6124,12 @@ export class ModelToolController {
     traceWarn("extrude", `preview failure (kind=${error.kind}): ${error.message}`);
     this.previewFailure = error;
     this.clearPreviewPending();
+    // The exact candidate is gone; bring the L1 ghost back so the user is not left
+    // looking at the last GOOD mesh while the tool reports a failure.
+    if (this.previewOwner === "offsetFace" && this.offsetGhostHidden) {
+      this.offsetGhostHidden = false;
+      this.applyOffsetFaceState();
+    }
     if (error.kind === "stalePreview" && !this.stalePreviewRetryAttempted) {
       this.stalePreviewRetryAttempted = true;
       this.sendPreview(true);
@@ -5116,13 +6154,14 @@ export class ModelToolController {
     const stale = this.exactPreviewWaiters.get(sessionId);
     if (stale) {
       clearTimeout(stale.timer);
-      stale.resolve({ ok: true });
+      // A superseded barrier reports `timedOut` too: it never saw its result either.
+      stale.resolve({ ok: true, timedOut: true });
       this.exactPreviewWaiters.delete(sessionId);
     }
     return new Promise<ExactPreviewOutcome>((resolve) => {
       const timer = setTimeout(() => {
         this.exactPreviewWaiters.delete(sessionId);
-        resolve({ ok: true });
+        resolve({ ok: true, timedOut: true });
       }, exactPreviewTimeoutMs);
       this.exactPreviewWaiters.set(sessionId, { timer, resolve });
     });
@@ -5135,7 +6174,7 @@ export class ModelToolController {
     if (!waiter) return;
     clearTimeout(waiter.timer);
     this.exactPreviewWaiters.delete(r.sessionId);
-    waiter.resolve(r.error ? { ok: false, error: r.error } : { ok: true });
+    waiter.resolve(r.error ? { ok: false, error: r.error } : { ok: true, timedOut: false });
   }
 
   /**
@@ -5145,7 +6184,10 @@ export class ModelToolController {
   private clearExactPreviewWaiters(): void {
     for (const w of this.exactPreviewWaiters.values()) {
       clearTimeout(w.timer);
-      w.resolve({ ok: true });
+      // Released without an answer — `timedOut` so a strict caller cannot read a
+      // torn-down barrier as kernel confirmation. (The awaiting commit re-checks
+      // `commitGen` immediately after, so the outcome is usually irrelevant.)
+      w.resolve({ ok: true, timedOut: true });
     }
     this.exactPreviewWaiters.clear();
   }
@@ -5502,9 +6544,17 @@ export class ModelToolController {
   private async commitPreviewedOp(
     fallback: OperationOp,
     gen: number,
+    opts: { requireExactPreview?: boolean } = {},
   ): Promise<PreviewCommitOutcome> {
     const es = this.previewSessions[0];
     if (!es) {
+      // OP-SPECIFIC STRICTNESS (OffsetFace): a missing lane session means the
+      // kernel never evaluated this op at all. For every other tool that costs the
+      // preview and nothing more; for an op whose operative set was frozen by a
+      // separate handshake it would commit a record nothing has checked.
+      if (opts.requireExactPreview) {
+        return { kind: "failed", reason: "the kernel preview is unavailable" };
+      }
       try {
         const res = await this.client.applyOperation(fallback);
         if (gen !== this.commitGen) return { kind: "superseded" };
@@ -5535,6 +6585,14 @@ export class ModelToolController {
       void this.client.endPreview(es.session.sessionId, false);
       this.releaseCommittedSession(es);
       return { kind: "failed", reason: exact.error.message };
+    }
+    // The barrier proceeds on TIMEOUT by design (see its doc comment). A strict
+    // caller refuses that: "the kernel has not answered" is not "the kernel
+    // approved", and the difference matters for an op carrying a frozen closure.
+    if (opts.requireExactPreview && exact.timedOut) {
+      void this.client.endPreview(es.session.sessionId, false);
+      this.releaseCommittedSession(es);
+      return { kind: "failed", reason: "the kernel did not confirm this offset in time" };
     }
     let res: ApplyOperationResult | null;
     try {
@@ -5792,6 +6850,10 @@ export class ModelToolController {
   private pickBooleanTool(toolBodyId: string): void {
     this.boolean = booleanStep(this.boolean, { kind: "pickTool", toolBodyId }).state;
     if (this.boolean.phase !== "armed") return;
+    // The pick phase is over and the armed boolean is chip-driven (no drag at
+    // all), so orbit — and the hover this controller owned — go back.
+    this.clearToolHover();
+    this.deps.engine.setOrbitSuppressed(false);
     // Fallback highlight while the kernel preview is still pending (mock lane: the
     // ONLY feedback, since it never produces a candidate mesh — real lane: replaced
     // the moment the exact candidate + `replacedBodyIds` hide land, since those
@@ -6085,6 +7147,10 @@ export class ModelToolController {
     this.booleanEditFeatureId = featureId;
     this.booleanStoredParams = stored;
     toolStore.setState({ phase: "armed" });
+    // `setTool("boolean")` above may have run `startBooleanFromSelection`, which
+    // suppresses orbit for its pick phase. This re-edit is chip-only and never
+    // reaches that phase, so hand orbit straight back.
+    this.deps.engine.setOrbitSuppressed(false);
 
     // The tool body is normally RETIRED (consumed by the original commit) — there is
     // nothing to highlight, so the re-edit is chip-only. Highlight the pair only in
@@ -6281,6 +7347,21 @@ export class ModelToolController {
       // readout e2e has of a value whose chip shows `=` rather than a number.
       edgeOpDistance2: this.fillet.distance2,
       shellPhase: this.shell.phase,
+      // OffsetFace (SCHEMA §7.3). `offsetFaceCount` is the FROZEN CLOSURE, not the
+      // picks — the difference between the two is the whole point of the
+      // `PrepareOffsetFace` handshake and has no other visible surface.
+      // `offsetPrepared` is the commit gate: null means no valid handshake, so a
+      // ✓ would refuse.
+      offsetFacePhase: this.offsetFace.phase,
+      offsetDistance: this.offsetFace.distance,
+      offsetDistanceType: this.offsetFace.distanceType,
+      offsetChainTangent: this.offsetFace.chainTangentFaces,
+      offsetFaceCount: this.offsetFaces.length,
+      offsetPrepared: this.offsetPreparedRevision,
+      // Whether the 3D arrow + ghost lane is live, or the tool fell back to the
+      // screen-space value drag (a curved face, or normals that diverge too far).
+      offsetDegraded: this.offsetDegraded,
+      offsetValueError: this.offsetFace.valueError,
       // Hole tool (WP-C T3). The picked seat and every conditional dimension are
       // published: the chip cluster renders only the ACTIVE profile's fields, so
       // this is the only surface on which e2e can see that the other profile's
@@ -6382,6 +7463,7 @@ export class ModelToolController {
       this.revolve.phase,
       this.fillet.phase,
       this.shell.phase,
+      this.offsetFace.phase,
       this.boolean.phase,
     ].join("|");
     if (sig !== this.lastPhaseSig) {
@@ -6391,6 +7473,7 @@ export class ModelToolController {
         revolve: this.revolve.phase,
         edgeOp: this.fillet.phase,
         shell: this.shell.phase,
+        offsetFace: this.offsetFace.phase,
         boolean: this.boolean.phase,
         previewOwner: this.previewOwner,
         sessions: this.previewSessions.length,
@@ -6480,6 +7563,11 @@ export class ModelToolController {
         void this.commitShell();
         return;
       }
+      if (this.offsetFace.phase === "armed") {
+        e.preventDefault();
+        void this.commitOffsetFace();
+        return;
+      }
       if (this.hole.phase === "armed") {
         e.preventDefault();
         void this.commitHole();
@@ -6558,6 +7646,10 @@ export class ModelToolController {
   private cancelPreview(): void {
     // Cancel the exact-region Extrude preview session (tool switched / Esc).
     this.closePreviewSessions();
+    // Extrude's ToFace / boolean-target picks are modal; this is their teardown
+    // funnel, so it is where an un-exited one must give the camera back.
+    this.clearToolHover();
+    this.engine.setOrbitSuppressed(false);
     this.negativeDragHintShown = false;
     this.extrudeStoredParams = undefined;
     this.commitBodyUnsub?.();
@@ -6601,6 +7693,8 @@ export class ModelToolController {
     // already tore it down via `cancelPreview`, or the tool never reached `armed`).
     this.closePreviewSessions();
     this.previewArmHint = null;
+    this.clearToolHover();
+    this.deps.engine.setOrbitSuppressed(false);
     this.boolean = booleanInit();
     this.booleanEditFeatureId = undefined;
     this.booleanStoredParams = undefined;
@@ -6641,6 +7735,7 @@ export class ModelToolController {
       clearTimeout(this.commitRevolveBodyTimer);
       this.commitRevolveBodyTimer = null;
     }
+    this.clearToolHover();
     this.deps.engine.setOrbitSuppressed(false);
     this.engine.hideRevolvePreview();
     this.engine.setPreviewTint("normal");
@@ -6668,6 +7763,7 @@ export class ModelToolController {
     this.cancelBoolean();
     this.cancelRevolve();
     this.cancelShell();
+    this.cancelOffsetFace();
     this.cancelHole();
     this.cancelPattern();
     this.cancelTransform();
@@ -6682,6 +7778,11 @@ export class ModelToolController {
     // Supersede any in-flight commit sequence: its awaits resume after teardown
     // (the barrier + body waits are released below) and must not touch dead state.
     this.commitGen++;
+    // …and any in-flight ARM, for the same reason. An arm can be several awaits
+    // deep (OffsetFace: one handshake round trip plus one promotion per face), and
+    // a disposed controller's continuation would otherwise finish arming and
+    // publish tool state — including the `?vpdebug` surface — after teardown.
+    this.invalidateArm();
     // Drop the datum tool's picker/ghost/chip: a viewport remount disposes the
     // controller mid-arm, and the chip store outlives it (it is a zustand store,
     // not engine state) — without this the chip would survive with dead handlers.
@@ -6693,6 +7794,11 @@ export class ModelToolController {
     // Same again for the align sub-flow's hover: `selectionStore` outlives this
     // controller, so a remount mid-pick would leave a face tinted for ever.
     this.endAlign();
+    // …and for the modal-pick hover, for the same reason. `setOrbitSuppressed` is
+    // reasserted here too: the ENGINE outlives a controller remount, so a
+    // dispose mid-pick would otherwise strand the camera unable to orbit.
+    this.clearToolHover();
+    this.deps.engine.setOrbitSuppressed(false);
     const c = this.deps.container;
     c.removeEventListener("pointerdown", this.onPointerDown);
     c.removeEventListener("pointermove", this.onPointerMove);

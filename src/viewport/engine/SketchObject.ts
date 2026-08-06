@@ -12,7 +12,10 @@
  *   - an in-progress PREVIEW channel (rubber-band) the tool machines drive.
  *
  * Line2 needs the material `resolution` in device pixels for correct width, so
- * the engine calls `update(...)` every frame with the viewport size.
+ * the engine calls `update(...)` every frame with the viewport size (already
+ * dpr-multiplied by the caller). `linewidth` is therefore also a device-px
+ * value — see `cssLineWidth()` below, which the width constants are built
+ * from so they read as their CSS-px name on any display.
  *
  * Line2 import note: `three/addons/lines/Line2.js` is WebGLRenderer-only (the
  * WebGPU build lives under `lines/webgpu/`). We are WebGL-default (F-WP4), so the
@@ -31,9 +34,30 @@ import type { DraftEntity } from "@/tools/sketch/toolMachine";
 import { ellipseParams, sampleEllipse } from "@/tools/sketch/ellipseMath";
 
 const ARC_SEGMENTS = 64;
-const LINE_WIDTH = 2;
-const PREVIEW_WIDTH = 1.5;
-const TRIM_GHOST_WIDTH = 3.5;
+
+/**
+ * Fat-line `linewidth` (LineMaterial) is measured in DEVICE px — the same
+ * units `update()` feeds `resolution` (ViewportEngine calls it with
+ * `width*dpr, height*dpr` every frame). A bare CSS-px number here would render
+ * half as wide as intended on a 2x display. Widths below are authored in CSS
+ * px and multiplied by this cap; the cap value (2) mirrors ViewportEngine's
+ * own `MAX_DPR` (renderer.setPixelRatio cap) so a linewidth and the
+ * `resolution` it's measured against stay in the same units even past 2x
+ * displays. Not imported directly — SketchObject has no reason to depend on
+ * ViewportEngine — so keep this value in step with it by hand.
+ */
+export const MAX_DPR = 2;
+
+/** CSS px → device px for a fat-line `linewidth`, using the shared DPR cap. */
+export function cssLineWidth(cssPx: number): number {
+  const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+  return cssPx * Math.min(dpr, MAX_DPR);
+}
+
+const LINE_WIDTH = cssLineWidth(2.5);
+const PREVIEW_WIDTH = cssLineWidth(2);
+const TRIM_GHOST_WIDTH = cssLineWidth(3.5);
+const SELECTED_WIDTH = cssLineWidth(3);
 
 /** Flat local xyz (z=0) polyline for an entity, in plane coords. */
 export function entityPolyline(e: {
@@ -191,8 +215,8 @@ export class SketchObject {
     this.matUnder = mk(palette.sketchUnder());
     this.matFull = mk(palette.sketchFull());
     this.matConflict = mk(palette.sketchConflict());
-    this.matSelected = mk(palette.sketchSelected());
-    this.matHover = mk(palette.hoverAccent());
+    this.matSelected = mk(palette.sketchSelected(), { linewidth: SELECTED_WIDTH });
+    this.matHover = mk(palette.hover3d());
     this.matConstruction = mk(palette.sketchConstruction(), { dashed: true, dashSize: 3, gapSize: 2 });
     // SOLID, deliberately: construction is dashed because it is not real
     // geometry, whereas reference geometry IS real (it bounds regions) — it just
@@ -233,7 +257,7 @@ export class SketchObject {
     this.matFull.color.copy(palette.sketchFull());
     this.matConflict.color.copy(palette.sketchConflict());
     this.matSelected.color.copy(palette.sketchSelected());
-    this.matHover.color.copy(palette.hoverAccent());
+    this.matHover.color.copy(palette.hover3d());
     this.matConstruction.color.copy(palette.sketchConstruction());
     this.matReference.color.copy(palette.sketchReference());
     this.matPreview.color.copy(palette.sketchUnder());

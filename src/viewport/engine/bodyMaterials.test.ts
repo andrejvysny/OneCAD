@@ -6,13 +6,22 @@
  * already customised comes back exactly as it was — and a set created WHILE
  * dimmed (its "prior" being the constructor defaults) undims correctly too.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import * as THREE from "three";
-import { BodyMaterialLibrary } from "./bodyMaterials";
-import { palette } from "./palette";
+import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
+import { BodyMaterialLibrary, BODY_EDGE_WIDTH } from "./bodyMaterials";
+import { palette, resetPaletteCache } from "./palette";
 
 /** Multiply identity for a vertex-colored material (computed, never a hex literal). */
 const WHITE_HEX = new THREE.Color(1, 1, 1).getHex();
+
+/** Put the document in `theme` and drop the cache so getters re-resolve. */
+function setTheme(theme: "light" | "dark"): void {
+  document.documentElement.dataset.theme = theme;
+  resetPaletteCache();
+}
+
+afterEach(() => setTheme("light"));
 
 describe("BodyMaterialLibrary.get", () => {
   it("hands back the SAME set on every call for a kind (shared materials)", () => {
@@ -22,6 +31,7 @@ describe("BodyMaterialLibrary.get", () => {
     expect(b).toBe(a);
     expect(b.face).toBe(a.face);
     expect(b.edge).toBe(a.edge);
+    expect(b.edgeWire).toBe(a.edgeWire);
     lib.dispose();
   });
 
@@ -41,6 +51,78 @@ describe("BodyMaterialLibrary.get", () => {
     expect(edge.color.getHex()).toBe(palette.bodyEdge().getHex());
     // Edges are annotation, not lit surface — they render their token exactly.
     expect(edge.toneMapped).toBe(false);
+    lib.dispose();
+  });
+});
+
+/*
+ * Edges are FAT lines (LineSegments2/LineMaterial), because WebGL ignores
+ * LineBasicMaterial.linewidth — a plain line is stuck at one device pixel, which
+ * on a HiDPI display is a half-CSS-pixel hairline. The two edge materials are a
+ * pair: the mode's `edgeStyle` picks between them (renderModes.ts).
+ */
+describe("BodyMaterialSet edge materials", () => {
+  it("are LineMaterials at the shared body-edge width, in the OPAQUE pass", () => {
+    const lib = new BodyMaterialLibrary();
+    const { edge, edgeWire } = lib.get("standard");
+
+    for (const m of [edge, edgeWire]) {
+      expect(m).toBeInstanceOf(LineMaterial);
+      expect(m.linewidth).toBe(BODY_EDGE_WIDTH);
+      expect(m.toneMapped).toBe(false);
+      // NOT transparent: body edges belong in the opaque pass, where they still
+      // depth-sort against the bodies they outline.
+      expect(m.transparent).toBe(false);
+    }
+    expect(edge).not.toBe(edgeWire);
+    lib.dispose();
+  });
+
+  it("edge is near-black in BOTH themes; edgeWire inverts", () => {
+    const lib = new BodyMaterialLibrary();
+    setTheme("light");
+    const lightEdge = lib.get("standard").edge.color.getHex();
+    const lightWire = lib.get("standard").edgeWire.color.getHex();
+
+    setTheme("dark");
+    lib.refreshColors();
+    const set = lib.get("standard");
+
+    expect(set.edge.color.getHex()).toBe(palette.bodyEdge().getHex());
+    expect(set.edgeWire.color.getHex()).toBe(palette.bodyEdgeWire().getHex());
+    // The outline token barely moves (near-black either way); the wireframe one
+    // must flip to stay legible on a dark canvas.
+    expect(set.edgeWire.color.getHex()).not.toBe(lightWire);
+    expect(set.edge.color.r).toBeLessThan(0.1);
+    expect(new THREE.Color(lightEdge).r).toBeLessThan(0.1);
+    lib.dispose();
+  });
+
+  /*
+   * The inactive-material trap (DragHandle matNormal/matHover precedent): a mode
+   * SWAPS which edge material the lines point at, so a refresh that only touched
+   * the one currently in use would look correct until the user hit the display
+   * button, then show the previous theme.
+   */
+  it("refreshColors updates the material the current mode is NOT using", () => {
+    const lib = new BodyMaterialLibrary();
+    setTheme("light");
+    const set = lib.get("standard");
+    const lightWire = set.edgeWire.color.getHex();
+
+    setTheme("dark");
+    lib.refreshColors();
+
+    expect(set.edgeWire.color.getHex()).not.toBe(lightWire);
+    lib.dispose();
+  });
+
+  it("a set created AFTER a theme flip is born with both new colors", () => {
+    const lib = new BodyMaterialLibrary();
+    setTheme("dark");
+    const set = lib.get("standard");
+    expect(set.edge.color.getHex()).toBe(palette.bodyEdge().getHex());
+    expect(set.edgeWire.color.getHex()).toBe(palette.bodyEdgeWire().getHex());
     lib.dispose();
   });
 });
@@ -121,16 +203,18 @@ describe("BodyMaterialLibrary shadedVertex kind", () => {
 });
 
 describe("BodyMaterialLibrary.dispose", () => {
-  it("disposes every created set", () => {
+  it("disposes every material of every created set", () => {
     const lib = new BodyMaterialLibrary();
-    const { face, edge } = lib.get("standard");
+    const { face, edge, edgeWire } = lib.get("standard");
     const faceSpy = vi.spyOn(face, "dispose");
     const edgeSpy = vi.spyOn(edge, "dispose");
+    const wireSpy = vi.spyOn(edgeWire, "dispose");
 
     lib.dispose();
 
     expect(faceSpy).toHaveBeenCalled();
     expect(edgeSpy).toHaveBeenCalled();
+    expect(wireSpy).toHaveBeenCalled();
   });
 });
 

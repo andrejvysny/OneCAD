@@ -19,9 +19,9 @@ import { planeBasisMatrix } from "./sketchBasis";
 import { palette } from "./palette";
 import { RENDER_ORDER } from "./renderOrder";
 
-const FILL_OPACITY = 0.2;
+const FILL_OPACITY = 0.18;
 const FILL_OPACITY_HOVER = 0.32;
-const FILL_OPACITY_SELECTED = 0.42;
+const FILL_OPACITY_SELECTED = 0.45;
 
 export interface RegionPickDeps {
   root: THREE.Object3D; // interactionRoot
@@ -150,7 +150,7 @@ export class RegionPickLayer {
       const hovered = id === this.hoverId;
       // Selected wins over hover (a selected region stays highlighted while hovered).
       e.mat.color.copy(
-        selected ? palette.selectedEdge() : hovered ? palette.hoverAccent() : palette.referenceNeutral(),
+        selected ? palette.sketchSelected() : hovered ? palette.hover3d() : palette.referenceNeutral(),
       );
       e.mat.opacity = selected ? FILL_OPACITY_SELECTED : hovered ? FILL_OPACITY_HOVER : FILL_OPACITY;
     }

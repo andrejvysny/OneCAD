@@ -51,7 +51,7 @@ use onecad_core::io::recovery::{autosave_path, marker_path};
 use onecad_core::regen::GeometryEngine;
 
 use onecad_lib::autosave;
-use onecad_lib::document_runtime::DocumentRuntime;
+use onecad_lib::document_runtime::{DocumentRuntime, SaveCaches};
 use onecad_lib::imports::{prepare_import, PreparedImport};
 use onecad_lib::worker::manager::SupervisorConfig;
 use onecad_lib::worker::{resolve_worker_path, MeshProvider, SolverEngine, WorkerManager};
@@ -294,8 +294,11 @@ async fn save_and_autosave_leave_a_consistent_recovery_state() {
     let autosaving = spawn_autosave(&runtime, &app_data, &lane);
     let saving = {
         let payload = {
-            let guard = runtime.lock().await;
-            guard.as_ref().unwrap().build_save_payload(save_meta())
+            let mut guard = runtime.lock().await;
+            guard
+                .as_mut()
+                .unwrap()
+                .build_save_payload(save_meta(), SaveCaches::explicit())
         };
         let lane = lane.clone();
         let app_data = app_data.clone();

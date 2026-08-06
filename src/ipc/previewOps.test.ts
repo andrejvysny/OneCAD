@@ -21,6 +21,7 @@ import { OP_BUILDERS, buildPreviewOp, supportsPreview, type PreviewSessionState 
 import { createLocalSolverLane } from "./localSolver";
 import type {
   ApplyOperationResult,
+  OffsetFaceParams,
   OperationOp,
   OpType,
   PreviewParams,
@@ -446,9 +447,205 @@ describe("previewOps builder validation", () => {
   });
 });
 
+// ── OffsetFace (SCHEMA §7.3 `op.offsetFace`) ─────────────────────────────────
+//
+// Every guard here restates one of core `OffsetFaceParams::validate`'s, so a draft
+// the Rust session would reject dies as a STRUCTURAL preview failure (which blocks
+// the ✓ and names the reason) instead of reaching the kernel.
+
+const OFFSET_FACE = (bodyId = "body1", elementId = "el-f2"): SemanticRef => ({
+  primary: { bodyId, elementId, kind: "face" },
+  anchor: { worldPoint: [0, 0, 10] },
+});
+
+describe("previewOps offsetFaceOp mirrors commitOffsetFace", () => {
+  it("builds the canonical multi-face Offset", () => {
+    const faces = [OFFSET_FACE("body1", "el-a"), OFFSET_FACE("body1", "el-b")];
+    const op = buildPreviewOp(
+      session({
+        opType: "OffsetFace",
+        inputs: faces,
+        latestParams: {
+          faces,
+          distance: 2.5,
+          distanceType: "Offset",
+          chainTangentFaces: true,
+          targetBodyId: "body1",
+        },
+      }),
+    );
+    expect(op).toEqual({
+      opType: "OffsetFace",
+      opId: OP_ID,
+      featureId: undefined,
+      inputs: faces,
+      params: {
+        faces,
+        distance: 2.5,
+        distanceType: "Offset",
+        chainTangentFaces: true,
+        targetBodyId: "body1",
+      },
+    });
+  });
+
+  it("carries the Total opposite face and nothing else does", () => {
+    const face = OFFSET_FACE("body1", "el-top");
+    const opposite = OFFSET_FACE("body1", "el-bottom");
+    const op = buildPreviewOp(
+      session({
+        opType: "OffsetFace",
+        latestParams: {
+          faces: [face],
+          distance: 12,
+          distanceType: "Total",
+          chainTangentFaces: false,
+          oppositeFace: opposite,
+          targetBodyId: "body1",
+        },
+      }),
+    );
+    expect(op.params).toMatchObject({ distanceType: "Total", oppositeFace: opposite });
+  });
+
+  it("defaults chainTangentFaces to true (the wire default)", () => {
+    const op = buildPreviewOp(
+      session({
+        opType: "OffsetFace",
+        latestParams: { faces: [OFFSET_FACE()], distance: 1, targetBodyId: "body1" },
+      }),
+    );
+    expect(op.params).toMatchObject({ distanceType: "Offset", chainTangentFaces: true });
+  });
+
+  it.each([
+    [
+      "a non-finite distance",
+      { faces: [OFFSET_FACE()], distance: Number.NaN, targetBodyId: "body1" },
+      /must be finite/,
+    ],
+    [
+      "an unknown distanceType",
+      { faces: [OFFSET_FACE()], distance: 1, distanceType: "Sideways" as never, targetBodyId: "body1" },
+      /Unsupported OffsetFace distanceType/,
+    ],
+    ["an empty operative set", { faces: [], distance: 1, targetBodyId: "body1" }, /at least one operative face/],
+    [
+      "a non-face ref",
+      {
+        faces: [{ primary: { bodyId: "body1", elementId: "el", kind: "edge" as const } }],
+        distance: 1,
+        targetBodyId: "body1",
+      },
+      /must each carry a face bodyId/,
+    ],
+    [
+      "a face with no body",
+      {
+        faces: [{ primary: { bodyId: "", elementId: "el", kind: "face" as const } }],
+        distance: 1,
+        targetBodyId: "body1",
+      },
+      /must each carry a face bodyId/,
+    ],
+    ["no targetBodyId", { faces: [OFFSET_FACE()], distance: 1 }, /requires targetBodyId/],
+    [
+      "a CROSS-BODY closure",
+      { faces: [OFFSET_FACE("body1"), OFFSET_FACE("body2")], distance: 1, targetBodyId: "body1" },
+      /every face must belong to targetBodyId/,
+    ],
+    [
+      "an absolute type over several faces",
+      {
+        faces: [OFFSET_FACE("body1", "a"), OFFSET_FACE("body1", "b")],
+        distance: 6,
+        distanceType: "Radius" as const,
+        targetBodyId: "body1",
+      },
+      /operates on exactly one face/,
+    ],
+    [
+      "Total with no opposite face",
+      {
+        faces: [OFFSET_FACE()],
+        distance: 12,
+        distanceType: "Total" as const,
+        chainTangentFaces: false,
+        targetBodyId: "body1",
+      },
+      /requires an opposite face/,
+    ],
+    [
+      "Total with the tangent chain still on",
+      {
+        faces: [OFFSET_FACE()],
+        distance: 12,
+        distanceType: "Total" as const,
+        chainTangentFaces: true,
+        oppositeFace: OFFSET_FACE("body1", "el-bottom"),
+        targetBodyId: "body1",
+      },
+      /requires chainTangentFaces = false/,
+    ],
+    [
+      "an opposite face on a non-Total offset (the conditional, checked BOTH ways)",
+      {
+        faces: [OFFSET_FACE()],
+        distance: 2,
+        distanceType: "Offset" as const,
+        oppositeFace: OFFSET_FACE("body1", "el-bottom"),
+        targetBodyId: "body1",
+      },
+      /oppositeFace is Total-only/,
+    ],
+    [
+      "a non-positive Radius",
+      {
+        faces: [OFFSET_FACE()],
+        distance: 0,
+        distanceType: "Radius" as const,
+        targetBodyId: "body1",
+      },
+      /needs a positive distance/,
+    ],
+    [
+      "a non-positive Diameter",
+      {
+        faces: [OFFSET_FACE()],
+        distance: -8,
+        distanceType: "Diameter" as const,
+        targetBodyId: "body1",
+      },
+      /needs a positive distance/,
+    ],
+  ])("throws on %s", (_name, latestParams, pattern) => {
+    expect(() => buildPreviewOp(session({ opType: "OffsetFace", latestParams }))).toThrow(pattern);
+  });
+
+  it("ACCEPTS a negative Offset — shrinking is a legal direction", () => {
+    const op = buildPreviewOp(
+      session({
+        opType: "OffsetFace",
+        latestParams: { faces: [OFFSET_FACE()], distance: -2.5, targetBodyId: "body1" },
+      }),
+    );
+    expect(op.opType).toBe("OffsetFace");
+    expect((op.params as OffsetFaceParams).distance).toBe(-2.5);
+  });
+});
+
 describe("previewOps supportsPreview", () => {
-  it("accepts the seven kernel-previewable opTypes", () => {
-    for (const t of ["Extrude", "Revolve", "Fillet", "Chamfer", "Shell", "Boolean", "Hole"] as const) {
+  it("accepts the kernel-previewable opTypes", () => {
+    for (const t of [
+      "Extrude",
+      "Revolve",
+      "Fillet",
+      "Chamfer",
+      "Shell",
+      "Boolean",
+      "Hole",
+      "OffsetFace",
+    ] as const) {
       expect(supportsPreview(t)).toBe(true);
       expect(OP_BUILDERS[t]).toBeTypeOf("function");
     }
@@ -515,6 +712,24 @@ describe("localSolver beginPreview accepts every builder-backed opType", () => {
           holeType: "simple" as const,
           diameter: 6,
           depth: null,
+        },
+      },
+    ],
+    [
+      "OffsetFace",
+      {
+        opType: "OffsetFace" as const,
+        params: {
+          faces: [
+            {
+              primary: { bodyId: "b", elementId: "el", kind: "face" as const },
+              anchor: { worldPoint: [0, 0, 1] as [number, number, number] },
+            },
+          ],
+          distance: 2,
+          distanceType: "Offset" as const,
+          chainTangentFaces: true,
+          targetBodyId: "b",
         },
       },
     ],
@@ -634,7 +849,7 @@ describe("localSolver mock-lane local synthesis table", () => {
     expect(seen[0]?.mesh?.byteLength).toBeGreaterThan(0);
   });
 
-  it.each(["Revolve", "Fillet", "Chamfer", "Shell", "Hole"] as const)(
+  it.each(["Revolve", "Fillet", "Chamfer", "Shell", "Hole", "OffsetFace"] as const)(
     "settles the epoch for %s with NO faked geometry",
     async (opType) => {
       const { lane } = makeLane();
@@ -645,7 +860,20 @@ describe("localSolver mock-lane local synthesis table", () => {
           ? { angleDeg: 90 }
           : opType === "Shell"
             ? { thickness: 1, openFaces: ["f"], targetBodyId: "b" }
-            : opType === "Hole"
+            : opType === "OffsetFace"
+              ? {
+                  faces: [
+                    {
+                      primary: { bodyId: "b", elementId: "el", kind: "face" as const },
+                      anchor: { worldPoint: [0, 0, 1] as [number, number, number] },
+                    },
+                  ],
+                  distance: 2,
+                  distanceType: "Offset" as const,
+                  chainTangentFaces: true,
+                  targetBodyId: "b",
+                }
+              : opType === "Hole"
               ? {
                   targetBodyId: "b",
                   face: { primary: { bodyId: "b", elementId: "el", kind: "face" as const } },

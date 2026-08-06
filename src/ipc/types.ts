@@ -659,6 +659,20 @@ export interface DocumentProjectionWire {
   appliedOps?: number;
   /** Total op count (timeline length). See {@link appliedOps}. */
   totalOps?: number;
+  /**
+   * Where the geometry the viewport is showing came from (backend-authoritative).
+   *
+   * - `"live"` — a regen has published; this IS the document's geometry.
+   * - `"cached"` — no publish yet, but the container's LAST-SAVED meshes are being
+   *   served so a reopened document paints immediately. Correct as of the last
+   *   save, and possibly older than the timeline the tree shows — the UI must
+   *   label it rather than let the user measure off it.
+   * - `"none"` — nothing to paint yet.
+   *
+   * Optional: the mock lane omits it. The chip that renders `"cached"` lands in a
+   * follow-up wave; the field exists so both sides of the seam agree today.
+   */
+  geometrySource?: "none" | "cached" | "live";
 }
 
 /** The `regen-finished` payload (F-WP8 flag 3). `sourceRevision` is the revision
@@ -722,7 +736,9 @@ export type OpType =
   /** Rigid placement of a body selection (SCHEMA §7.3; WP-B W0/W1). */
   | "TransformBody"
   /** Machined hole on a planar face (SCHEMA §7.3; WP-C T3). */
-  | "Hole";
+  | "Hole"
+  /** Direct-modelling face offset (SCHEMA §7.3 `op.offsetFace`, 2026-08-06). */
+  | "OffsetFace";
 
 /** Extrude end condition (SCHEMA §7.3 ExtrudeParams). */
 export type ExtrudeMode = "Blind" | "ThroughAll" | "Symmetric" | "ToNext" | "ToFace";
@@ -859,6 +875,118 @@ export interface HoleParams {
   cbDepth?: number | null;
   csDiameter?: number | null;
   csAngleDeg?: number | null;
+}
+
+/**
+ * How an {@link OffsetFaceParams.distance} is READ (SCHEMA §7.3 `distanceType`).
+ * PascalCase on the wire, like the mode enums above.
+ *
+ * `Offset` is the only type valid for a multi-face selection and the only one the
+ * frontend lets a DRAG author — the three absolute forms are numeric input seeded
+ * from `PrepareOffsetFace.currentDims` (a drag has no meaningful zero for them).
+ */
+export type OffsetDistanceType = "Offset" | "Total" | "Radius" | "Diameter";
+
+/**
+ * Face-offset op params (SCHEMA §7.3 `op.offsetFace`, Rust `OffsetFaceParams`).
+ *
+ * `faces` is the FULL FROZEN operative set — the user's picks PLUS the G1 tangent
+ * closure `PrepareOffsetFace` computed at authoring time. The worker NEVER
+ * re-expands it at regen, so the array a commit sends is the array every future
+ * rebuild operates on. Typed refs (the Fillet `edges` model, NOT Shell's bare
+ * ids): each one carries the anchor evidence the resolution ladder rebinds with.
+ *
+ * `oppositeFace` is `Total`-only and REQUIRED there — core validates the
+ * conditional BOTH ways, so a stale opposite left behind by a distance-type
+ * switch must be cleared, never carried.
+ *
+ * `targetBodyId` is MANDATORY: an in-place op always depends on its body.
+ */
+export interface OffsetFaceParams {
+  faces: SemanticRef[];
+  /** The USER's value, read per {@link OffsetFaceParams.distanceType}. Never clamped. */
+  distance: number;
+  distanceType: OffsetDistanceType;
+  /** Authoring metadata after the closure is frozen (re-edit UX only). */
+  chainTangentFaces: boolean;
+  /** `Total` only — persisted at authoring and re-resolved verbatim each regen. */
+  oppositeFace?: SemanticRef;
+  targetBodyId: string;
+}
+
+// ── PrepareOffsetFace (SCHEMA §7.6) — the read-only authoring handshake ───────
+//
+// The first half of the OffsetFace freeze: the worker computes the G1 tangent
+// closure, the Total opposite candidate and the seeds for the absolute distance
+// types. It MINTS NOTHING — the response carries snapshot-scoped TopoKeys plus
+// descriptor/anchor evidence only (Invariant 2: ElementIds are Rust's alone), so
+// the caller promotes the evidence before authoring any params.
+
+/** One picked face addressed for {@link CadClient.prepareOffsetFace}. */
+export interface OffsetFacePick {
+  bodyId?: string;
+  /** Snapshot-scoped ordinal key. MUTUALLY EXCLUSIVE with `elementId`. */
+  topoKey?: string;
+  elementId?: string;
+}
+
+/** One face's snapshot-scoped evidence from `PrepareOffsetFace`. Never an identity. */
+export interface OffsetFaceEvidence {
+  topoKey: string;
+  /** `true` for a face the USER picked, `false` for one the tangent closure added. */
+  picked: boolean;
+  anchor?: { worldPoint?: [number, number, number]; surfaceUv?: [number, number] };
+  /** Opaque worker-owned descriptor, forwarded verbatim (never interpreted here). */
+  descriptor?: unknown;
+}
+
+/** Measurable dimensions that SEED an absolute distance type. Keys are absent when
+ *  the closure has no such reading (a planar face has no radius). */
+export interface OffsetCurrentDims {
+  radius?: number;
+  thickness?: number;
+}
+
+/**
+ * A `PrepareOffsetFace` REFUSAL — an ANSWER (`ok:true`), not an error. The tool
+ * needs to explain *why* it cannot offset, and an error would erase the reason.
+ */
+export interface OffsetFaceRefusal {
+  /** `crossBody` | `unsupportedSurface` | `chainMismatch` | `noUniqueOpposite` |
+   *  `notPlanar` | `chainOnTotal` | `notCylindrical` | `mixedAxis` | `nonManifold`. */
+  code: string;
+  message: string;
+  /** The offending TopoKeys, when the code has any to name. */
+  faces: string[];
+}
+
+/** `prepareOffsetFace` request (SCHEMA §7.6 `req.args`). */
+export interface PrepareOffsetFaceRequest {
+  /**
+   * The head the closure is computed against. OPTIONAL because only the transport
+   * knows it: `tauriClient` owns `currentSnapshotId` (the same value it fences
+   * `promoteSelection` with) and fills it in, and the mock has no snapshots at
+   * all. A caller that passes one pins the fence explicitly.
+   */
+  snapshotId?: number;
+  pickedFaces: OffsetFacePick[];
+  chainTangentFaces: boolean;
+  distanceType: OffsetDistanceType;
+}
+
+/** `prepareOffsetFace` result (SCHEMA §7.6 `result`; Rust `PrepareOffsetFaceDto`). */
+export interface PrepareOffsetFaceResult {
+  /** Echo of the head the worker answered against. */
+  snapshotId: number;
+  /** The single body every picked face belongs to. Empty on a refusal. */
+  targetBodyId: string;
+  /** The full operative closure (picks ∪ tangent chain). Empty on a refusal. */
+  faces: OffsetFaceEvidence[];
+  /** The `Total` opposite candidate; absent for every other type. */
+  oppositeFace?: OffsetFaceEvidence;
+  currentDims: OffsetCurrentDims;
+  /** Present ⇒ the handshake REFUSED and `faces` is not a usable closure. */
+  refusal?: OffsetFaceRefusal | null;
 }
 
 /**
@@ -1018,6 +1146,13 @@ export type OperationOp =
       featureId?: string;
       inputs?: SemanticRef[];
       params: HoleParams;
+    }
+  | {
+      opType: "OffsetFace";
+      opId?: string;
+      featureId?: string;
+      inputs?: SemanticRef[];
+      params: OffsetFaceParams;
     };
 
 /**
@@ -1134,7 +1269,8 @@ export type PreviewParams = Partial<ExtrudeParams> &
   Partial<FilletParams> &
   Partial<ShellParams> &
   Partial<BooleanParams> &
-  Partial<HoleParams> & { [k: string]: unknown };
+  Partial<HoleParams> &
+  Partial<OffsetFaceParams> & { [k: string]: unknown };
 
 /** `beginPreview` draft — the base op the drag will refine. */
 export interface PreviewDraft {

@@ -287,3 +287,151 @@ describe("ViewportEngine.getBoundsForBodies", () => {
     engine.dispose();
   });
 });
+
+/*
+ * captureThumbnail — the explicit-save preview (persisted-cache lane).
+ *
+ * jsdom implements neither a 2D context nor toDataURL, so both are spied onto
+ * HTMLCanvasElement.prototype. That is enough to pin what actually matters here
+ * and cannot be checked in a browser-free suite otherwise: that a frame is
+ * FORCED before the read-back (rendering is on-demand, so an idle canvas holds a
+ * stale buffer), the downscale arithmetic, and every null path.
+ */
+describe("ViewportEngine.captureThumbnail", () => {
+  const DATA_URL = "data:image/png;base64,AAAA";
+  let drawImage: ReturnType<typeof vi.fn>;
+  let toDataURL: ReturnType<typeof vi.spyOn>;
+  let getContext: ReturnType<typeof vi.spyOn>;
+
+  /** Give the mocked renderer a source canvas of `w`×`h` device pixels. */
+  function sourceCanvas(w: number, h: number): HTMLCanvasElement {
+    const el = document.createElement("canvas");
+    el.width = w;
+    el.height = h;
+    mocks.renderer.domElement = el;
+    return el;
+  }
+
+  beforeEach(() => {
+    drawImage = vi.fn();
+    getContext = vi
+      .spyOn(HTMLCanvasElement.prototype, "getContext")
+      .mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D);
+    toDataURL = vi
+      .spyOn(HTMLCanvasElement.prototype, "toDataURL")
+      .mockReturnValue(DATA_URL);
+  });
+
+  afterEach(() => {
+    getContext.mockRestore();
+    toDataURL.mockRestore();
+    mocks.renderer.domElement = null as unknown as HTMLCanvasElement;
+  });
+
+  it("is null before init — there is no renderer to read back from", () => {
+    expect(new ViewportEngine().captureThumbnail()).toBeNull();
+  });
+
+  it("forces ONE render, then downscales the long edge to maxPx (aspect kept)", async () => {
+    const { canvas, overlay } = newDom();
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+    flushFrame();
+    const framesBefore = engine.frameCount;
+
+    const src = sourceCanvas(1024, 768);
+    const url = engine.captureThumbnail(512);
+
+    expect(url).toBe(DATA_URL);
+    // The forced frame is the point: on-demand rendering means the drawing buffer
+    // may otherwise hold a stale (or post-resize blank) image.
+    expect(engine.frameCount).toBe(framesBefore + 1);
+    expect(toDataURL).toHaveBeenCalledWith("image/png");
+    // 1024×768 at scale 0.5 → 512×384, and the source is drawn to fill it.
+    expect(drawImage).toHaveBeenCalledWith(src, 0, 0, 512, 384);
+    engine.dispose();
+  });
+
+  it("never UPSCALES a canvas smaller than maxPx", async () => {
+    const { canvas, overlay } = newDom();
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+    const src = sourceCanvas(200, 100);
+
+    expect(engine.captureThumbnail(512)).toBe(DATA_URL);
+    expect(drawImage).toHaveBeenCalledWith(src, 0, 0, 200, 100);
+    engine.dispose();
+  });
+
+  it("is null on WebGPU — its render() is async, so the read-back is not the frame", async () => {
+    mocks.createRenderer.mockResolvedValueOnce({
+      renderer: mocks.renderer,
+      isWebGPU: true,
+      dispose: mocks.handleDispose,
+    });
+    const { canvas, overlay } = newDom();
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+    sourceCanvas(1024, 768);
+
+    expect(engine.captureThumbnail()).toBeNull();
+    expect(toDataURL).not.toHaveBeenCalled();
+    engine.dispose();
+  });
+
+  it("is null for a zero-sized canvas (pre-layout / detached)", async () => {
+    const { canvas, overlay } = newDom();
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+    sourceCanvas(0, 0);
+
+    expect(engine.captureThumbnail()).toBeNull();
+    engine.dispose();
+  });
+
+  it("is null when no 2D context is available", async () => {
+    const { canvas, overlay } = newDom();
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+    sourceCanvas(64, 64);
+    getContext.mockReturnValue(null);
+
+    expect(engine.captureThumbnail()).toBeNull();
+    engine.dispose();
+  });
+
+  it("is null when the encoded PNG exceeds the size cap Rust would reject anyway", async () => {
+    const { canvas, overlay } = newDom();
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+    sourceCanvas(64, 64);
+    toDataURL.mockReturnValue(`data:image/png;base64,${"A".repeat(400_000)}`);
+
+    expect(engine.captureThumbnail()).toBeNull();
+    engine.dispose();
+  });
+
+  it("swallows a throwing toDataURL (a tainted/lost canvas must not fail a save)", async () => {
+    const { canvas, overlay } = newDom();
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+    sourceCanvas(64, 64);
+    toDataURL.mockImplementation(() => {
+      throw new Error("SecurityError");
+    });
+
+    expect(() => engine.captureThumbnail()).not.toThrow();
+    expect(engine.captureThumbnail()).toBeNull();
+    engine.dispose();
+  });
+
+  it("is null after dispose()", async () => {
+    const { canvas, overlay } = newDom();
+    const engine = new ViewportEngine();
+    await engine.init(canvas, overlay, {});
+    sourceCanvas(64, 64);
+    engine.dispose();
+
+    expect(engine.captureThumbnail()).toBeNull();
+  });
+});

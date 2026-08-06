@@ -80,7 +80,7 @@ describe("SketchObject — referenceLocked material", () => {
   it("still tints on hover and selection (locked geometry is selectable)", () => {
     const { obj, root } = build([seg("locked", true)]);
     obj.setHover(["locked"]);
-    expect(colorsOf(root, ["locked"]).get("locked")).toBe(palette.hoverAccent().getHex());
+    expect(colorsOf(root, ["locked"]).get("locked")).toBe(palette.hover3d().getHex());
     obj.setSelection(["locked"]);
     expect(colorsOf(root, ["locked"]).get("locked")).toBe(palette.sketchSelected().getHex());
     obj.dispose();

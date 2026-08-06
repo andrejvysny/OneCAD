@@ -97,6 +97,11 @@ export class DragHandle {
     this.deps.invalidate();
   }
 
+  /** True while the arrow is on screen (the engine's introspection probe). */
+  get visible(): boolean {
+    return this.group.visible;
+  }
+
   /** True when `raycaster` hits the handle's (fat) pick envelope. */
   raycast(raycaster: THREE.Raycaster): boolean {
     if (!this.group.visible) return false;

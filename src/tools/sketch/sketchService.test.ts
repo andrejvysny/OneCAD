@@ -8,7 +8,8 @@ import {
   undoSketch,
 } from "./sketchService";
 import { mockClient, resetMockSketches } from "@/ipc/mockClient";
-import { detectRegions, planeFor } from "@/ipc/mockSketch";
+import { planeFor } from "@/ipc/mockSketch";
+import { detectRegions } from "@/ipc/mockRegions";
 import { sketchStore } from "@/stores/sketchStore";
 import { viewportStore } from "@/stores/viewportStore";
 import type { CadClient } from "@/ipc/client";

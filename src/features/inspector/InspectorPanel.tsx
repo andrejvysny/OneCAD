@@ -71,6 +71,11 @@ function editFeature(item: FeatureMeta): void {
     case "Shell":
       void c?.editShellFeature(item.id);
       return;
+    case "OffsetFace":
+      // Distance-only re-edit: the frozen operative closure (and the Total
+      // opposite) live in the stored params and are never re-picked here.
+      void c?.editOffsetFaceFeature(item.id);
+      return;
     case "LinearPattern":
       void c?.editLinearPatternFeature(item.id);
       return;

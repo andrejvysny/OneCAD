@@ -103,6 +103,13 @@ export function projectionToStore(p: DocumentProjectionWire): DocumentProjection
     // `features` are built from ALL timeline records and `total_ops` is
     // `timeline.len()` (document_runtime.rs), so `features.length` IS the total.
     appliedOps: Math.min(p.appliedOps ?? features.length, features.length),
+    // Absent (mock lane, or a backend older than the field) ⇒ "none": no chip.
+    // Anything unrecognised is treated the same way rather than trusted — the
+    // chip must never be driven by a token this build does not understand.
+    geometrySource:
+      p.geometrySource === "cached" || p.geometrySource === "live"
+        ? p.geometrySource
+        : "none",
   };
 }
 

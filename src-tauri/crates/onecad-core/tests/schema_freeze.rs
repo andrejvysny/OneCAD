@@ -14,7 +14,8 @@ mod common;
 
 use common::*;
 use onecad_core::document::record::{
-    BooleanMode, ExtrudeMode, ExtrudeParams, KnownOperation, Operation, OperationRecord,
+    BooleanMode, ExtrudeMode, ExtrudeParams, KnownOperation, OffsetDistanceType, Operation,
+    OperationRecord,
 };
 use onecad_core::document::refs::AxisRef;
 use onecad_core::document::variables::Scalar;
@@ -200,8 +201,84 @@ fn derive_inputs_matches_cpp_extract_dependencies() {
         (vec![], vec![sketch_1(), SketchId(uid(0x5C03))], vec![])
     );
 
+    // offsetFace: the modified body (UNCONDITIONAL — the field is mandatory) +
+    // every operative face, then the `Total` opposite face last.
+    assert_eq!(
+        inputs_of(&op_offset_face_offset_multi()),
+        (
+            vec![body_a()],
+            vec![],
+            vec![ElementId::new("el_f1"), ElementId::new("el_f2")]
+        )
+    );
+    assert_eq!(
+        inputs_of(&op_offset_face_total()),
+        (
+            vec![body_a()],
+            vec![],
+            vec![ElementId::new("el_top"), ElementId::new("el_bottom")]
+        )
+    );
+
     // opaque: no typed deps.
     assert_eq!(inputs_of(&op_opaque()), (vec![], vec![], vec![]));
+}
+
+/// SCHEMA §7.3 `op.offsetFace` (2026-08-06), verbatim shape: bare `faceIds` +
+/// the scalars, with the typed refs riding `inputs[]` rather than params. It must
+/// parse with `faces` EMPTY and the defaults filled in — the worker never echoes
+/// the core-only typed lists back.
+#[test]
+fn schema_7_3_offset_face_payload_parses() {
+    let json = serde_json::json!({
+        "opType": "OffsetFace",
+        "params": {
+            "faceIds": ["el_a1", "el_b2"],
+            "distance": 2.5,
+            "distanceType": "Offset",
+            "chainTangentFaces": true,
+            "targetBodyId": body_a().to_string()
+        }
+    });
+    match serde_json::from_value::<Operation>(json).unwrap() {
+        Operation::Known(KnownOperation::OffsetFace(p)) => {
+            assert_eq!(p.distance.value, 2.5);
+            assert_eq!(p.distance_type, OffsetDistanceType::Offset);
+            assert_eq!(p.target_body, body_a());
+            assert_eq!(
+                p.face_ids,
+                vec![ElementId::new("el_a1"), ElementId::new("el_b2")]
+            );
+            assert!(p.faces.is_empty(), "typed refs ride inputs[], not params");
+            assert!(p.opposite_face.is_none());
+        }
+        other => panic!("expected OffsetFace, got {other:?}"),
+    }
+
+    // Defaults: an omitted `distanceType` is `Offset`, an omitted
+    // `chainTangentFaces` is TRUE (not serde's `bool::default()`).
+    let defaults = serde_json::json!({
+        "opType": "OffsetFace",
+        "params": { "faceIds": ["el_a1"], "distance": 1.0, "targetBodyId": body_a().to_string() }
+    });
+    match serde_json::from_value::<Operation>(defaults).unwrap() {
+        Operation::Known(KnownOperation::OffsetFace(p)) => {
+            assert_eq!(p.distance_type, OffsetDistanceType::Offset);
+            assert!(p.chain_tangent_faces);
+        }
+        other => panic!("expected OffsetFace, got {other:?}"),
+    }
+
+    // `targetBodyId` is MANDATORY — an offset always modifies a body in place, so
+    // there is no NewBody reading in which it could be absent (unlike Extrude).
+    let no_body = serde_json::json!({
+        "opType": "OffsetFace",
+        "params": { "faceIds": ["el_a1"], "distance": 1.0 }
+    });
+    assert!(
+        serde_json::from_value::<Operation>(no_body).is_err(),
+        "a known op with malformed params must ERROR, never demote to Opaque (M1)"
+    );
 }
 
 #[test]
