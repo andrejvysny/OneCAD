@@ -63,11 +63,15 @@ export default defineConfig(async ({ mode }) => ({
     },
     // Pre-transform the boot-critical chain on server start. The editor tree is
     // lazy now (App.tsx code split), so without this the first navigation into
-    // the editor pays the whole ~130-module cold transform.
+    // the editor pays the whole ~130-module cold transform. Warmup runs in the
+    // background and never blocks a request, so listing the editor files costs
+    // first paint nothing while making the first editor click instant even if
+    // StartScreen's idle-prefetch has not fired yet.
     warmup: {
       clientFiles: [
         "./src/main.tsx",
         "./src/App.tsx",
+        "./src/features/start/StartScreen.tsx",
         "./src/features/shell/EditorScreen.tsx",
         "./src/viewport/ViewportRoot.tsx",
       ],

@@ -1,4 +1,12 @@
-@import "tailwindcss";
+/* `source(none)` disables Tailwind v4's automatic content detection, which walks
+   the whole repo from the git root. That walk is catastrophic here: `src-tauri/
+   target` is ~58 GB of Rust build artifacts and `worker/build` another ~160 MB,
+   and the scan blocked the very first `GET /` of every `vite dev` for ~30 s.
+   The class sources are `src/` plus `index.html` — nothing else — so declare
+   them explicitly and keep the scan bounded. */
+@import "tailwindcss" source(none);
+@source "../";
+@source "../../index.html";
 @import "./tokens.css";
 
 @layer base {

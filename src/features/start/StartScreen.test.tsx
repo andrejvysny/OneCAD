@@ -192,3 +192,43 @@ describe("StartScreen", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+describe("StartScreen — boot failure", () => {
+  it("shows a retry affordance instead of an endless skeleton when recents fail", async () => {
+    const user = userEvent.setup();
+    const spy = vi
+      .spyOn(mockClient, "listRecents")
+      .mockRejectedValueOnce(new Error("backend down"));
+    render(<StartScreen />);
+
+    expect(
+      await screen.findByText("Could not load the start screen."),
+    ).toBeInTheDocument();
+    // The skeleton is what a stuck "loading" would leave on screen forever;
+    // the error branch must REPLACE it, not sit next to it.
+    expect(document.querySelector(".animate-pulse")).toBeNull();
+
+    spy.mockResolvedValueOnce([]);
+    await user.click(screen.getByRole("button", { name: "Retry recents" }));
+
+    await waitFor(() =>
+      expect(appStore.getState().recentsStatus).toBe("ready"),
+    );
+    expect(
+      screen.queryByText("Could not load the start screen."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers a recovery retry when only the recovery probe failed", async () => {
+    appStore.setState({ recentsStatus: "ready", recoveryStatus: "idle" });
+    vi.spyOn(mockClient, "checkRecovery").mockRejectedValueOnce(new Error("nope"));
+    render(<StartScreen />);
+
+    expect(
+      await screen.findByRole("button", { name: "Retry recovery" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Retry recents" }),
+    ).not.toBeInTheDocument();
+  });
+});

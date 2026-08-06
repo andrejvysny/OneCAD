@@ -209,3 +209,44 @@ describe("appStore unsaved-changes guard", () => {
     expect(appStore.getState().document).not.toBeNull();
   });
 });
+
+describe("appStore start-screen loads — failure is captured, never re-thrown", () => {
+  beforeEach(() => {
+    resetStores();
+    appStore.setState({ recents: [], recentsStatus: "idle", recovery: null, recoveryStatus: "idle" });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("loadRecents records `error` and resolves (a rejection would land in every void call site)", async () => {
+    vi.spyOn(mockClient, "listRecents").mockRejectedValue(new Error("backend down"));
+
+    await expect(appStore.getState().loadRecents()).resolves.toBeUndefined();
+
+    expect(appStore.getState().recentsStatus).toBe("error");
+    expect(appStore.getState().recents).toEqual([]);
+  });
+
+  it("checkRecovery records `error` and resolves", async () => {
+    vi.spyOn(mockClient, "checkRecovery").mockRejectedValue(new Error("backend down"));
+
+    await expect(appStore.getState().checkRecovery()).resolves.toBeUndefined();
+
+    expect(appStore.getState().recoveryStatus).toBe("error");
+  });
+
+  it("a retry after a failure recovers to `ready`", async () => {
+    const spy = vi
+      .spyOn(mockClient, "listRecents")
+      .mockRejectedValueOnce(new Error("backend down"));
+    await appStore.getState().loadRecents();
+    expect(appStore.getState().recentsStatus).toBe("error");
+
+    spy.mockResolvedValueOnce([]);
+    await appStore.getState().loadRecents();
+
+    expect(appStore.getState().recentsStatus).toBe("ready");
+  });
+});

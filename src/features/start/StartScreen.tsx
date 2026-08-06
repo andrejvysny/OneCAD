@@ -80,6 +80,7 @@ export function StartScreen() {
     [recents, query, sort],
   );
   const ready = recentsStatus === "ready";
+  const bootError = recentsStatus === "error" || recoveryStatus === "error";
 
   return (
     <div className="flex h-full w-full items-center justify-center bg-canvas-start font-ui text-ink">
@@ -141,7 +142,34 @@ export function StartScreen() {
         </div>
 
         <div aria-busy={!ready}>
-          {!ready && <RecentGridSkeleton />}
+          {!ready && !bootError && <RecentGridSkeleton />}
+          {bootError && (
+            <div className="flex flex-col items-center gap-3 pb-5 pt-9 text-center">
+              <div className="text-[12.5px] text-traffic-close">
+                Could not load the start screen.
+              </div>
+              <div className="flex gap-2">
+                {recentsStatus === "error" && (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => void loadRecents()}
+                  >
+                    Retry recents
+                  </Button>
+                )}
+                {recoveryStatus === "error" && (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => void checkRecovery()}
+                  >
+                    Retry recovery
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
           {ready && list.length > 0 && (
             <RecentGrid projects={list} onOpen={openProject} />
           )}

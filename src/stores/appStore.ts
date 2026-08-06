@@ -10,13 +10,14 @@ import { createClient } from "@/ipc/client";
 import { resetDocumentScopedUi } from "@/ipc/documentLifecycle";
 import { documentStore, emptyDocument } from "@/stores/documentStore";
 import { saveDocument } from "@/features/shell/fileActions";
+import { logError } from "@/debug/log";
 import type { DocumentSnapshot, RecentProject, RecoveryInfo } from "@/ipc/types";
 
 const client = createClient();
 
 type Screen = "start" | "editor";
-type RecentsStatus = "idle" | "loading" | "ready";
-type RecoveryStatus = "idle" | "loading" | "ready";
+type RecentsStatus = "idle" | "loading" | "ready" | "error";
+type RecoveryStatus = "idle" | "loading" | "ready" | "error";
 
 /**
  * Which close path is awaiting confirmation:
@@ -112,10 +113,22 @@ export const appStore = createStore<AppState>()((set, get) => {
     pendingCloseIntent: null,
     importError: null,
 
+    /**
+     * A failure lands in `recentsStatus: "error"` and is NOT re-thrown — same
+     * rule as `importStep`. Three actions below call this as `void loadRecents()`
+     * after a document swap, so a rejection here would surface as an unhandled
+     * rejection at call sites that deliberately do not await it. The status is
+     * the report; `StartScreen` renders the retry affordance off it.
+     */
     async loadRecents() {
       set({ recentsStatus: "loading" });
-      const recents = await client.listRecents();
-      set({ recents, recentsStatus: "ready" });
+      try {
+        const recents = await client.listRecents();
+        set({ recents, recentsStatus: "ready" });
+      } catch (e) {
+        logError("app", "listRecents FAILED", { error: e });
+        set({ recentsStatus: "error" });
+      }
     },
 
     async newProject() {
@@ -174,10 +187,16 @@ export const appStore = createStore<AppState>()((set, get) => {
       void get().loadRecents();
     },
 
+    /** Captured, not re-thrown — see `loadRecents`. */
     async checkRecovery() {
       set({ recoveryStatus: "loading" });
-      const recovery = await client.checkRecovery();
-      set({ recovery, recoveryStatus: "ready" });
+      try {
+        const recovery = await client.checkRecovery();
+        set({ recovery, recoveryStatus: "ready" });
+      } catch (e) {
+        logError("app", "checkRecovery FAILED", { error: e });
+        set({ recoveryStatus: "error" });
+      }
     },
 
     async recoverDocument() {
