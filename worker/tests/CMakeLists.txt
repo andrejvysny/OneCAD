@@ -110,6 +110,12 @@ foreach(_t wp5_plan wp5_partition_history wp5_mesh1)
     add_test(NAME ${_t} COMMAND test_${_t})
 endforeach()
 
+# Curved display mesh policy: Fine must stay visibly smoother than transient
+# coarse, including selected-edge polylines.
+add_executable(test_tessellation_quality test_tessellation_quality.cpp)
+target_link_libraries(test_tessellation_quality PRIVATE worker_core)
+add_test(NAME tessellation_quality COMMAND test_tessellation_quality)
+
 # --- W-WP6: resolution-ladder calibration + new ops + fast-mode ordering (finding 3)
 #     + STEP export (in-process, real OCCT). ---
 foreach(_t wp6_ladder wp6_ops wp6_extrude wp6_faststode wp6_exportstep wp6_meshexport wp6_split wp6_checkpoint)

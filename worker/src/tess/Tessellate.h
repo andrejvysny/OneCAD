@@ -6,10 +6,11 @@
 // persistent ElementId (IDS_HAVE_ELEMENTIDS). Meshing parallelism never affects the
 // ids or the ordinal (Invariant 5).
 //
-// LOD tiers (deflection relative to the body bbox diagonal, per the migration
-// plan): coarse/medium/fine. Planar prisms/booleans (the W-WP5 corpus) tessellate
-// identically across tiers (2 triangles per planar rectangular face), so the corpus
-// meshes are byte-stable.
+// LOD tiers: coarse/medium/fine. Deflection is both bbox-relative and bounded by
+// tier-specific absolute limits. Fine is committed display/export quality (5 degree
+// angular cap); coarse remains suitable for transient interaction. Planar
+// prisms/booleans tessellate identically across tiers (2 triangles per rectangular
+// face), so the W-WP5 corpus meshes are byte-stable.
 #pragma once
 
 #include <cstdint>

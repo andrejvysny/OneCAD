@@ -8,12 +8,14 @@
  * rather than pasted, so resizing the seed body cannot leave a stale literal
  * passing.
  *
- * The cylinder cases pin the opposite property: the mock draws a FACETED 24-gon
+ * The cylinder cases pin the opposite property: the mock draws a tessellated
  * prism, and the metrics must report that prism honestly rather than the smooth
  * cylinder it stands for.
  */
 import { describe, it, expect } from "vitest";
 import { BOX_SIZE, makeBoxMesh, makeCylinderMesh } from "./mockMeshes";
+import { visualSegmentsForClosedCurve } from "@/tools/preview/visualTessellation";
+import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
 import {
   edgeMetricsFromMesh,
   faceMetricsFromMesh,
@@ -126,6 +128,15 @@ describe("massPropertiesFromMesh — the cylinder is a FACETED prism, honestly",
     expect(mp.centroid[1]).toBeCloseTo(0, 6);
     expect(mp.centroid[2]).toBeCloseTo(0, 6); // makeCylinderMesh straddles z = 0
   });
+
+  it("uses the shared visual curve policy unless a caller explicitly overrides it", () => {
+    const segments = visualSegmentsForClosedCurve(R);
+    const visual = parseMeshPayload(makeCylinderMesh(R, H));
+    const explicit = parseMeshPayload(makeCylinderMesh(R, H, 24));
+    expect(visual.triangleCount).toBe(segments * 4);
+    expect(visual.edgePointCount).toBe(segments * 2 + 4);
+    expect(explicit.triangleCount).toBe(24 * 4);
+  });
 });
 
 describe("faceMetricsFromMesh", () => {
@@ -159,7 +170,7 @@ describe("faceMetricsFromMesh", () => {
   });
 
   it("a CURVED face is reported non-planar", () => {
-    // The cylinder's side is 24 quads with 24 different normals. Calling it
+    // The cylinder's side is tessellated quads with different normals. Calling it
     // planar would let the measure tool treat it as a plane.
     const side = faceMetricsFromMesh(makeCylinderMesh(), "f:0");
     expect(side!.planar).toBe(false);

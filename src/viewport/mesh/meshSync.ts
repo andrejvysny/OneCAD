@@ -42,7 +42,8 @@ import { parseMeshPayload } from "./parseMeshPayload";
 import { buildBodyObjects, disposeAll, getEntry, refreshFaceColors, remove, swap } from "./meshRegistry";
 import { rebindSelectionForBody } from "./rebindPick";
 
-const DEFAULT_LOD: Lod = "coarse";
+/** Committed bodies use the worker's display-quality tier; drag previews choose separately. */
+const DEFAULT_LOD: Lod = "fine";
 
 /** Bounded retry for a `get_mesh` miss (mesh not regenerated/cached yet). */
 const EMPTY_MESH_RETRIES = 3;

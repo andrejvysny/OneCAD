@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { latheLocal, latheSegmentsFor, axisSplitsRegion, type Vec2 } from "./lathePreview";
+import { VISUAL_MAX_ANGLE_DEG, visualSegmentsForSweep } from "./visualTessellation";
 
 // Axis = the line u=0 (direction +v); a square profile 5 units to its right.
 const AXIS = { a: [0, -10] as Vec2, b: [0, 10] as Vec2 };
@@ -11,9 +12,11 @@ const SQUARE: Vec2[] = [
 ];
 
 describe("latheSegmentsFor", () => {
-  it("uses ~15° per segment, floored at 2", () => {
-    expect(latheSegmentsFor(90)).toBe(6);
-    expect(latheSegmentsFor(360)).toBe(24);
+  it("uses the shared visual quality policy, floored at 2", () => {
+    expect(latheSegmentsFor(90)).toBe(Math.ceil(90 / VISUAL_MAX_ANGLE_DEG));
+    expect(latheSegmentsFor(360)).toBe(Math.ceil(360 / VISUAL_MAX_ANGLE_DEG));
+    expect(latheSegmentsFor(360, 100)).toBe(visualSegmentsForSweep(360, 100));
+    expect(latheSegmentsFor(360, 100)).toBeGreaterThan(latheSegmentsFor(360));
     expect(latheSegmentsFor(0)).toBe(2);
   });
 });
@@ -41,16 +44,16 @@ describe("latheLocal geometry", () => {
 
   it("counts (segments+1)·ringN verts, plus 2 caps for a partial sweep", () => {
     const g = latheLocal(SQUARE, AXIS, 90);
-    expect(g.segments).toBe(6);
+    expect(g.segments).toBe(18);
     expect(g.ringCount).toBe(4);
-    expect(g.positions.length / 3).toBe(7 * 4 + 2);
+    expect(g.positions.length / 3).toBe(19 * 4 + 2);
     expect(g.indices.length % 3).toBe(0);
   });
 
   it("a full 360° sweep closes on itself with no caps", () => {
     const g = latheLocal(SQUARE, AXIS, 360);
-    expect(g.segments).toBe(24);
-    expect(g.positions.length / 3).toBe(25 * 4); // no cap verts
+    expect(g.segments).toBe(72);
+    expect(g.positions.length / 3).toBe(73 * 4); // no cap verts
     const base = g.segments * g.ringCount;
     for (let i = 0; i < 4; i++) {
       expect(g.positions[(base + i) * 3]).toBeCloseTo(g.positions[i * 3], 4);

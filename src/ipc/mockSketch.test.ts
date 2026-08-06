@@ -4,6 +4,7 @@ import {
   solveDof,
   solveSketch,
   freeDegrees,
+  closedCurveOf,
   orderedClosedLoop,
   mockRegionId,
   constraintFreedom,
@@ -121,6 +122,28 @@ describe("detectRegions", () => {
   });
 });
 
+describe("closedCurveOf — visual tessellation parity", () => {
+  it("uses the shared high-quality sampling density for circles and ellipses", () => {
+    const circle = closedCurveOf({ id: "c", type: "Circle", center: [0, 0], radius: 5 })!;
+    const ellipse = closedCurveOf({
+      id: "e",
+      type: "Ellipse",
+      center: [0, 0],
+      majorR: 10,
+      minorR: 4,
+      rotation: 0,
+    })!;
+    expect(circle.polygon).toHaveLength(72);
+    expect(ellipse.polygon).toHaveLength(72);
+  });
+
+  it("raises the polygon resolution for a large round profile", () => {
+    const small = closedCurveOf({ id: "small", type: "Circle", center: [0, 0], radius: 5 })!;
+    const large = closedCurveOf({ id: "large", type: "Circle", center: [0, 0], radius: 100 })!;
+    expect(large.polygon.length).toBeGreaterThan(small.polygon.length);
+  });
+});
+
 describe("orderedClosedLoop + mockRegionId", () => {
   it("walks the rectangle into a 4-segment cycle", () => {
     const loop = orderedClosedLoop(rect);
@@ -163,7 +186,7 @@ describe("detectRegions — nested circle creates two cells", () => {
       const cy = tris.positions[c * 2 + 1];
       area += Math.abs(((bx - ax) * (cy - ay) - (by - ay) * (cx - ax)) / 2);
     }
-    // 32-gon slightly under-approximates the disc; a FILLED hole would be 800.
+    // The visual polygon slightly under-approximates the disc; a filled hole would be 800.
     expect(area).toBeGreaterThan(745);
     expect(area).toBeLessThan(755);
   });
@@ -206,7 +229,7 @@ describe("detectRegions — nested circle creates two cells", () => {
           2,
       );
     }
-    // 800 − 2·π·3² ≈ 743.5 (32-gon holes slightly under-approximate the discs).
+    // 800 − 2·π·3² ≈ 743.5 (visual polygon holes slightly under-approximate the discs).
     expect(area).toBeGreaterThan(741);
     expect(area).toBeLessThan(746);
   });
@@ -311,7 +334,7 @@ describe("Ellipse — mock solver + region parity", () => {
           2,
       );
     }
-    // 32-gon slightly under-approximates π·10·4 ≈ 125.7 (same as the circle case).
+    // The visual polygon slightly under-approximates π·10·4 ≈ 125.7.
     expect(area).toBeGreaterThan(120);
     expect(area).toBeLessThan(126);
   });

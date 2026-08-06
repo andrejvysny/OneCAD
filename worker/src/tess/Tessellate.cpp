@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <map>
 
 #include <BRepAdaptor_Curve.hxx>
@@ -37,18 +38,100 @@ std::uint16_t lod_code(const std::string& lod) {
     return 0;  // coarse
 }
 
-// Deflection tiers relative to the bbox diagonal (migration plan).
+// Display tessellation policy, in model units (mm for native documents).
+//
+// A relative-only deflection makes a small fillet on a large body visibly
+// faceted. Keep the tier relationship, but clamp each tier to an absolute
+// window. Fine is the committed display/export quality: its 5 degree angular
+// cap controls round silhouettes even when the linear cap is reached.
 void deflections(const std::string& lod, double diag, double& lin, double& ang) {
-    double rel = 0.05, a = 0.8;  // coarse
+    double rel = 0.01;
+    double min_lin = 0.01;
+    double max_lin = 0.5;
+    double a = 0.5;  // coarse: transient interaction quality
     if (lod == "medium") {
-        rel = 0.02;
-        a = 0.5;
+        rel = 0.0025;
+        min_lin = 0.002;
+        max_lin = 0.15;
+        a = 0.21;
     } else if (lod == "fine") {
-        rel = 0.005;
-        a = 0.2;
+        rel = 0.0005;
+        min_lin = 0.0001;
+        max_lin = 0.05;
+        a = 0.08726646259971647;  // 5 degrees
     }
-    lin = std::max(diag * rel, 1e-3);
+    lin = std::clamp(diag * rel, min_lin, max_lin);
     ang = a;
+}
+
+double point_to_segment_distance(const gp_Pnt& point, const gp_Pnt& start,
+                                 const gp_Pnt& end) {
+    const gp_Vec segment(start, end);
+    const double length_squared = segment.SquareMagnitude();
+    if (length_squared <= 1e-24) return point.Distance(start);
+
+    const gp_Vec from_start(start, point);
+    const double t = std::clamp(from_start.Dot(segment) / length_squared, 0.0, 1.0);
+    return point.Distance(start.Translated(segment.Multiplied(t)));
+}
+
+struct CurveSample {
+    double parameter = 0.0;
+    gp_Pnt point;
+    gp_Vec tangent;
+    bool has_tangent = false;
+};
+
+CurveSample sample_curve(const BRepAdaptor_Curve& curve, double parameter) {
+    CurveSample sample;
+    sample.parameter = parameter;
+    try {
+        curve.D1(parameter, sample.point, sample.tangent);
+        sample.has_tangent = sample.tangent.SquareMagnitude() > 1e-24;
+    } catch (...) {
+        sample.point = curve.Value(parameter);
+    }
+    return sample;
+}
+
+bool exceeds_angular_deflection(const CurveSample& start, const CurveSample& end,
+                                double angular_deflection) {
+    if (!start.has_tangent || !end.has_tangent) return false;
+    gp_Vec start_tangent = start.tangent;
+    gp_Vec end_tangent = end.tangent;
+    start_tangent.Normalize();
+    end_tangent.Normalize();
+    const double cosine = std::clamp(start_tangent.Dot(end_tangent), -1.0, 1.0);
+    return std::acos(cosine) > angular_deflection;
+}
+
+// Sample edges to the same chordal and angular policy as BRepMesh. This avoids
+// the old fixed 16-span outline, which visibly disagreed with Fine face meshes.
+std::vector<gp_Pnt> sample_edge(const BRepAdaptor_Curve& curve, double lin,
+                                double ang) {
+    const CurveSample first = sample_curve(curve, curve.FirstParameter());
+    const CurveSample last = sample_curve(curve, curve.LastParameter());
+    std::vector<gp_Pnt> points;
+    points.reserve(32);
+    points.push_back(first.point);
+
+    constexpr int kMaxDepth = 16;
+    std::function<void(const CurveSample&, const CurveSample&, int)> subdivide;
+    subdivide = [&](const CurveSample& start, const CurveSample& end, int depth) {
+        const double midpoint_parameter = (start.parameter + end.parameter) * 0.5;
+        const CurveSample midpoint = sample_curve(curve, midpoint_parameter);
+        const bool needs_chord_split =
+            point_to_segment_distance(midpoint.point, start.point, end.point) > lin;
+        const bool needs_angle_split = exceeds_angular_deflection(start, end, ang);
+        if ((needs_chord_split || needs_angle_split) && depth < kMaxDepth) {
+            subdivide(start, midpoint, depth + 1);
+            subdivide(midpoint, end, depth + 1);
+            return;
+        }
+        points.push_back(end.point);
+    };
+    subdivide(first, last, 0);
+    return points;
 }
 
 // TopoKey → minted ElementId lookup for one body (empty map when no partition).
@@ -185,13 +268,12 @@ BodyMesh tessellate_body(const TopoDS_Shape& shape, const std::string& body_id,
             std::uint32_t point_count = 0;
             try {
                 BRepAdaptor_Curve curve(edge);
-                const double f = curve.FirstParameter();
-                const double l = curve.LastParameter();
-                // Deterministic sampling: straight edges → 2 points; else 16 spans.
-                const int spans = (curve.GetType() == GeomAbs_Line) ? 1 : 16;
-                for (int s = 0; s <= spans; ++s) {
-                    const double u = f + (l - f) * (static_cast<double>(s) / spans);
-                    const gp_Pnt p = curve.Value(u);
+                const std::vector<gp_Pnt> points =
+                    (curve.GetType() == GeomAbs_Line)
+                        ? std::vector<gp_Pnt>{curve.Value(curve.FirstParameter()),
+                                              curve.Value(curve.LastParameter())}
+                        : sample_edge(curve, lin, ang);
+                for (const gp_Pnt& p : points) {
                     mi.edge_positions.push_back(static_cast<float>(p.X()));
                     mi.edge_positions.push_back(static_cast<float>(p.Y()));
                     mi.edge_positions.push_back(static_cast<float>(p.Z()));

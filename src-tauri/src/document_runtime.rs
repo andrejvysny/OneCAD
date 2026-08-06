@@ -408,6 +408,11 @@ pub const MAX_SAVED_MESH_BYTES: usize = 64 * 1024 * 1024;
 /// role (resident MESH1 bytes) until the first publish retires them.
 pub const MAX_LOADED_MESH_BYTES: usize = 256 * 1024 * 1024;
 
+/// Tessellation tier for committed document geometry. Drag-time preview defaults
+/// to coarse in the preview command; it must not lower the fidelity of a
+/// published body or its persisted open-paint cache.
+const DISPLAY_LOD: Lod = Lod::Fine;
+
 /// One entry of the promotion cache (see [`DocumentRuntime::promoted`]).
 ///
 /// The `descriptor` is the worker's opaque evidence for the element as it stood in
@@ -1132,7 +1137,7 @@ impl DocumentRuntime {
         let (plan_rev, epoch) = self.fencing.get();
         let artifacts = PlanArtifacts {
             tessellate: Some(TessellateSpec {
-                lod: Lod::Coarse,
+                lod: DISPLAY_LOD,
                 include_edges: true,
             }),
         };
@@ -1187,7 +1192,7 @@ impl DocumentRuntime {
             publisher: self.publisher.clone(),
             instance: self.instance,
             expected: (plan_rev, epoch),
-            lod: Lod::Coarse,
+            lod: DISPLAY_LOD,
             prior,
             executed,
             job: Some(job),
@@ -1238,7 +1243,7 @@ impl DocumentRuntime {
             publisher: self.publisher.clone(),
             instance: self.instance,
             expected: (plan_rev, epoch),
-            lod: Lod::Coarse,
+            lod: DISPLAY_LOD,
             prior,
             // Nothing executed ⇒ no record's `outputs` is refreshed. Every op in range is
             // suppressed, and `sync_record_outputs` skips suppressed records anyway (their
@@ -1833,7 +1838,7 @@ impl DocumentRuntime {
     }
 
     /// The mesh cache entries an explicit save embeds: every body of the head
-    /// snapshot whose **coarse** MESH1 blob is already resident.
+    /// snapshot whose display-quality MESH1 blob is already resident.
     ///
     /// `peek` only — this runs under the single-writer lock, so it must not fetch,
     /// tessellate, or even perturb LRU recency. A body whose blob was already
@@ -1856,7 +1861,7 @@ impl DocumentRuntime {
         for (i, body) in bodies.iter().enumerate() {
             let key = MeshKey {
                 body: *body,
-                lod: Lod::Coarse,
+                lod: DISPLAY_LOD,
                 generation: snap.generation,
             };
             let Some(blob) = self.mesh_cache.peek(&key) else {
@@ -1871,7 +1876,7 @@ impl DocumentRuntime {
             // rather than copying it (VF-B7; the writer's copy happens off-lock).
             out.push(MeshCacheBlob {
                 body: *body,
-                lod: lod_str(Lod::Coarse).to_string(),
+                lod: lod_str(DISPLAY_LOD).to_string(),
                 bytes: blob,
             });
         }

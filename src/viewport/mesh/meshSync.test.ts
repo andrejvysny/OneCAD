@@ -54,7 +54,7 @@ function setBodies(bodies: Record<string, boolean>) {
 
 const changed = (bodyId: string): DocumentChange => ({
   revision: 1,
-  changedBodies: [{ bodyId, meshKey: `${bodyId}:coarse:1` }],
+  changedBodies: [{ bodyId, meshKey: `${bodyId}:fine:1` }],
   removedBodies: [],
 });
 
@@ -108,7 +108,7 @@ describe("MeshIngest onDocumentChanged", () => {
     emit(changed("body1"));
     await tick();
 
-    expect(getMesh).toHaveBeenCalledWith("body1", "coarse");
+    expect(getMesh).toHaveBeenCalledWith("body1", "fine");
     expect(reg.getEntry("body1")).toBeDefined();
     expect(engine.bodiesRoot.children.length).toBe(1);
     expect(engine.refreshHighlights).toHaveBeenCalled();
@@ -158,7 +158,7 @@ describe("MeshIngest initial sweep (bodies already in the store at attach)", () 
     await tick();
 
     expect(getMesh).toHaveBeenCalledTimes(1);
-    expect(getMesh).toHaveBeenCalledWith("body1", "coarse");
+    expect(getMesh).toHaveBeenCalledWith("body1", "fine");
     expect(reg.getEntry("body1")).toBeDefined();
     expect(reg.getEntry("body2")).toBeUndefined();
     expect(engine.bodiesRoot.children.length).toBe(1);
@@ -196,7 +196,7 @@ describe("MeshIngest visibility + detach", () => {
 
     setBodies({ body1: true }); // flip visible → lazy fetch
     await tick();
-    expect(getMesh).toHaveBeenCalledWith("body1", "coarse");
+    expect(getMesh).toHaveBeenCalledWith("body1", "fine");
     expect(reg.getEntry("body1")).toBeDefined();
   });
 
@@ -407,7 +407,7 @@ describe("MeshIngest isolation", () => {
     setBodies({ body1: true, body2: true }); // eye flips body2 on, still isolated away
     await tick();
 
-    expect(getMesh).toHaveBeenCalledWith("body2", "coarse"); // fetched (kept fresh)
+    expect(getMesh).toHaveBeenCalledWith("body2", "fine"); // fetched (kept fresh)
     expect(bodyGroup(engine, "body2")!.visible).toBe(false); // but masked
 
     viewportStore.setState({ isolatedBodyIds: null });

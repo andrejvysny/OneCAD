@@ -10,6 +10,7 @@
 import { FLAG, SEC, parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
 import { prismLocal, type PrismProfile } from "@/tools/preview/prismPreview";
 import { latheLocal, type LatheAxis } from "@/tools/preview/lathePreview";
+import { visualSegmentsForClosedCurve } from "@/tools/preview/visualTessellation";
 import {
   applyPlacementToNormal,
   applyPlacementToPoint,
@@ -353,7 +354,12 @@ export function makeBoxMesh(
 // ── Cylinder (radial segments; side face + 2 caps) ───────────────────────────
 
 /** Side face `f:0` + top cap `f:1` + bottom cap `f:2`; top/bottom circle + seam edges. */
-export function makeCylinderMesh(radius = 25, height = 60, segments = 24, lod = 0): ArrayBuffer {
+export function makeCylinderMesh(
+  radius = 25,
+  height = 60,
+  segments = visualSegmentsForClosedCurve(radius),
+  lod = 0,
+): ArrayBuffer {
   const zTop = height / 2;
   const zBot = -height / 2;
   const positions: number[] = [];

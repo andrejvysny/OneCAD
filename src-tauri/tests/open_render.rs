@@ -396,7 +396,7 @@ async fn saved_document_reopens_and_serves_meshes() {
     let cached_bytes = {
         let mut guard = runtime2.lock().await;
         let rt = guard.as_mut().expect("open");
-        rt.get_mesh(body, Lod::Coarse, None)
+        rt.get_mesh(body, Lod::Fine, None)
             .await
             .expect("the container's mesh cache serves the pre-publish window")
     };
@@ -413,7 +413,7 @@ async fn saved_document_reopens_and_serves_meshes() {
         let mut guard = runtime2.lock().await;
         let rt = guard.as_mut().expect("open");
         assert!(
-            rt.get_mesh(body, Lod::Coarse, Some(1)).await.is_none(),
+            rt.get_mesh(body, Lod::Fine, Some(1)).await.is_none(),
             "a generation-pinned request must never be answered with container bytes"
         );
     }
@@ -446,7 +446,7 @@ async fn saved_document_reopens_and_serves_meshes() {
     let bytes = {
         let mut guard = runtime2.lock().await;
         let rt = guard.as_mut().expect("open");
-        rt.get_mesh(body, Lod::Coarse, None)
+        rt.get_mesh(body, Lod::Fine, None)
             .await
             .expect("get_mesh serves the replayed body's mesh")
     };
@@ -547,7 +547,7 @@ async fn container_without_mesh_caches_still_misses_before_the_publish() {
         "no snapshot and no cached meshes ⇒ nothing to paint"
     );
     assert!(
-        rt2.get_mesh(body, Lod::Coarse, None).await.is_none(),
+        rt2.get_mesh(body, Lod::Fine, None).await.is_none(),
         "without a mesh cache section the pre-publish window is still a MISS"
     );
 

@@ -17,6 +17,7 @@ import type {
   SketchSolveStatus,
 } from "./types";
 import { ellipseParams, sampleEllipse } from "@/tools/sketch/ellipseMath";
+import { visualSegmentsForClosedCurve } from "@/tools/preview/visualTessellation";
 import { detectConflicts } from "./mockConflicts";
 
 // ── Canonical planes — SCHEMA §7.3 EXACT bases (non-standard XY basis) ───────
@@ -256,8 +257,9 @@ export function distanceToBoundary(p: [number, number], poly: [number, number][]
   return best;
 }
 
-/** Sample a circle into a CCW polygon. */
-function circlePolygon(center: [number, number], radius: number, segments = 32): [number, number][] {
+/** Sample a circle into a CCW polygon at the shared visual quality. */
+function circlePolygon(center: [number, number], radius: number): [number, number][] {
+  const segments = visualSegmentsForClosedCurve(radius);
   const pts: [number, number][] = [];
   for (let i = 0; i < segments; i++) {
     const a = (i / segments) * Math.PI * 2;
@@ -301,9 +303,12 @@ export function closedCurveOf(e: SketchEntity): ClosedCurve | null {
   if (e.type === "Ellipse") {
     const p = ellipseParams(e);
     if (!p || p.majorR <= 0 || p.minorR <= 0) return null;
-    // 32 samples, matching `circlePolygon` — the fill/containment resolution the
-    // rest of this mock is tuned for (the RENDERER samples at 72; this is fill only).
-    return { entity: e, center: p.center, polygon: sampleEllipse(p, 32), reach: p.majorR };
+    return {
+      entity: e,
+      center: p.center,
+      polygon: sampleEllipse(p, visualSegmentsForClosedCurve(p.majorR)),
+      reach: p.majorR,
+    };
   }
   return null;
 }

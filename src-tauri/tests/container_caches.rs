@@ -390,7 +390,7 @@ async fn stale_container_serves_no_cached_geometry() {
         let mut rt = open_over(&wm, &fresh);
         assert_eq!(rt.projection().geometry_source, "cached");
         let bytes = rt
-            .get_mesh(body, Lod::Coarse, None)
+            .get_mesh(body, Lod::Fine, None)
             .await
             .expect("fresh container serves its cache");
         onecad_protocol::mesh::validate_mesh_blob(&bytes)
@@ -406,14 +406,14 @@ async fn stale_container_serves_no_cached_geometry() {
         "a stale container has no paintable geometry"
     );
     assert!(
-        rt.get_mesh(body, Lod::Coarse, None).await.is_none(),
+        rt.get_mesh(body, Lod::Fine, None).await.is_none(),
         "not one stale blob may be served"
     );
     // …and it still opens, regens, and publishes normally.
     let report = regen(&mut rt).await;
     published(&report, "stale reopen");
     assert_eq!(rt.projection().geometry_source, "live");
-    assert!(rt.get_mesh(body, Lod::Coarse, None).await.is_some());
+    assert!(rt.get_mesh(body, Lod::Fine, None).await.is_some());
 
     wm.shutdown().await;
 }
@@ -443,7 +443,7 @@ async fn publish_retires_the_container_cache() {
     let mut rt = open_over(&wm, &path);
 
     let cached = rt
-        .get_mesh(body, Lod::Coarse, None)
+        .get_mesh(body, Lod::Fine, None)
         .await
         .expect("pre-publish hit");
 
@@ -452,12 +452,12 @@ async fn publish_retires_the_container_cache() {
     assert!(generation >= 1, "generations are minted from 1");
 
     let live = rt
-        .get_mesh(body, Lod::Coarse, None)
+        .get_mesh(body, Lod::Fine, None)
         .await
         .expect("post-publish hit");
     onecad_protocol::mesh::validate_mesh_blob(&live).expect("valid MESH1");
     assert!(
-        rt.get_mesh(body, Lod::Coarse, Some(generation))
+        rt.get_mesh(body, Lod::Fine, Some(generation))
             .await
             .is_some(),
         "the live generation is addressable by number"
@@ -544,12 +544,12 @@ fn non_mesh1_cache_entries_are_skipped() {
         meshes: vec![
             MeshCache {
                 body: good,
-                lod: "coarse".into(),
+                lod: "fine".into(),
                 bytes: Arc::new(minimal_mesh1()),
             },
             MeshCache {
                 body: bad,
-                lod: "coarse".into(),
+                lod: "fine".into(),
                 bytes: Arc::new(b"this is definitely not MESH1".to_vec()),
             },
         ],
@@ -567,14 +567,14 @@ fn non_mesh1_cache_entries_are_skipped() {
         "cached",
         "the ONE valid blob still counts as paintable geometry"
     );
-    let served = tokio_block_on(rt.get_mesh(good, Lod::Coarse, None));
+    let served = tokio_block_on(rt.get_mesh(good, Lod::Fine, None));
     assert_eq!(
         served.as_deref().map(Vec::as_slice),
         Some(minimal_mesh1().as_slice()),
         "the valid blob is served verbatim"
     );
     assert!(
-        tokio_block_on(rt.get_mesh(bad, Lod::Coarse, None)).is_none(),
+        tokio_block_on(rt.get_mesh(bad, Lod::Fine, None)).is_none(),
         "the non-MESH1 blob was skipped at open and is never served"
     );
 }

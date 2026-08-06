@@ -19,6 +19,8 @@
  * RevolvePreview / makeRevolveBodyMesh), exactly as prismPreview + PreviewMesh do.
  */
 
+import { visualSegmentsForSweep } from "./visualTessellation";
+
 export type Vec2 = [number, number];
 
 export interface LatheAxis {
@@ -39,10 +41,9 @@ export interface LatheLocal {
   ringCount: number;
 }
 
-/** Coarse angular segment count for a sweep of `angleDeg` (~15°/segment, ≥2). */
-export function latheSegmentsFor(angleDeg: number): number {
-  const a = Math.max(0, Math.min(360, Math.abs(angleDeg)));
-  return Math.max(2, Math.ceil(a / 15));
+/** Visual angular segment count for a sweep at `radius` from its axis. */
+export function latheSegmentsFor(angleDeg: number, radius = 0): number {
+  return visualSegmentsForSweep(angleDeg, radius);
 }
 
 /**
@@ -69,14 +70,14 @@ export function axisSplitsRegion(a: Vec2, b: Vec2, ring: Vec2[], eps = 1e-6): bo
  * Sweep a profile ring (plane u,v) around the in-plane `axis` line by `angleDeg`,
  * returning a surface-of-revolution mesh in plane-local coords. For a partial
  * sweep (<360°) the two end rings are capped (fan around each ring centroid) so
- * the coarse translucent L1 preview reads as a solid; a full sweep closes on
+ * the translucent L1 preview reads as a solid; a full sweep closes on
  * itself (the last ring coincides with the first) and needs no caps.
  */
 export function latheLocal(
   ring: Vec2[],
   axis: LatheAxis,
   angleDeg: number,
-  segments = latheSegmentsFor(angleDeg),
+  segments?: number,
 ): LatheLocal {
   const ringN = ring.length;
   const ax = axis.a[0];
@@ -89,7 +90,6 @@ export function latheLocal(
 
   const angleRad = (Math.max(0, Math.min(360, angleDeg)) * Math.PI) / 180;
   const full = angleRad >= Math.PI * 2 - 1e-6;
-  const steps = Math.max(1, segments);
 
   // Per ring point: foot on the axis, in-plane perpendicular r, and mz = (D×r)_z.
   const footU: number[] = [];
@@ -111,6 +111,8 @@ export function latheLocal(
     perpV.push(rv);
     mz.push(dx * rv - dy * ru);
   }
+  const radialExtent = Math.max(0, ...mz.map(Math.abs));
+  const steps = Math.max(1, segments ?? latheSegmentsFor(angleDeg, radialExtent));
 
   const positions: number[] = [];
   for (let j = 0; j <= steps; j++) {

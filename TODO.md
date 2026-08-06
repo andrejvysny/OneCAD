@@ -1,5 +1,13 @@
 # OneCAD-Tauri Migration TODO
 
+## MESH-FIDELITY (2026-08-06) — GATE PASSED
+
+- [x] Worker: Fine uses clamped absolute+relative deflection with a 5-degree angular cap; coarse remains bounded for drag. Focused ctest `tessellation_quality` proves a cylinder Fine mesh is >=3x denser than coarse.
+- [x] Worker: curved topology-edge polylines use the same adaptive chordal/angular policy (Fine exceeds the retired 16 spans); `tessellation_quality`, `wp5_mesh1`, and `wp6_meshexport` pass.
+- [x] Runtime/viewer: `DISPLAY_LOD=Fine` drives regen artifacts, published keys, fetches, and explicit-save/open-paint caches; preview defaults coarse. Focused Rust 73+5+2, meshSync 31.
+- [x] Mock/L1: one pure policy (5-degree cap + 0.02mm chord error) drives closed sketch curves, default cylinder meshes, and lathes; explicit mock segment overrides survive. Focused Vitest 67/67 + `npx tsc --noEmit` pass.
+- [x] Gate: worker ctest 96/96; real-worker cache integration 7/7; targeted frontend suite 98/98; `bun run build`, `cargo fmt --all --check`, workspace clippy, and diff check pass.
+
 Plan: `~/.claude/plans/act-as-senior-software-transient-popcorn.md` (approved 2026-07-16).
 Tracks: W = C++ worker, R = Rust core, F = frontend. Gates in **bold**.
 

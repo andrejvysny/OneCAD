@@ -230,6 +230,7 @@ impl GeometryEngine for FakeBackend {
             let snapshot_id = SnapshotId(5000 + st.snapshot_counter);
             let job = request.job_id;
 
+            let artifact_lod = request.artifacts.tessellate.as_ref().map(|spec| spec.lod);
             let mut events = Vec::new();
             let mut per_step: Vec<StepResult> = Vec::new();
             let mut last_valid: Option<usize> = None;
@@ -237,10 +238,10 @@ impl GeometryEngine for FakeBackend {
             for op in &request.ops {
                 let step = op.step_index;
                 let body_ids = self.bodies_for(step, op.record_id);
-                if self.inline_meshes {
+                if let (true, Some(lod)) = (self.inline_meshes, artifact_lod) {
                     artifact_meshes.extend(body_ids.iter().map(|b| PreparedMeshRef {
                         body: *b,
-                        lod: Lod::Coarse,
+                        lod,
                         bytes: Arc::new(Self::inline_bytes(*b)),
                     }));
                 }
@@ -759,14 +760,14 @@ async fn mesh_cache_miss_then_hit_returns_identical_bytes() {
 
     let body = BodyId(Uuid::from_u128(0x10));
     let first = rt
-        .get_mesh(body, Lod::Coarse, None)
+        .get_mesh(body, DISPLAY_LOD, None)
         .await
         .expect("miss → fetch");
-    let expected = b"MESH1:00000000-0000-0000-0000-000000000010:coarse".to_vec();
+    let expected = b"MESH1:00000000-0000-0000-0000-000000000010:fine".to_vec();
     assert_eq!(*first, expected, "provider bytes served verbatim");
 
     let second = rt
-        .get_mesh(body, Lod::Coarse, None)
+        .get_mesh(body, DISPLAY_LOD, None)
         .await
         .expect("cache hit");
     assert!(
@@ -790,7 +791,7 @@ async fn regen_seeds_the_mesh_cache_from_inline_plan_artifacts() {
 
     let body = BodyId(Uuid::from_u128(0x10));
     let bytes = rt
-        .get_mesh(body, Lod::Coarse, None)
+        .get_mesh(body, DISPLAY_LOD, None)
         .await
         .expect("the seeded cache serves the body");
     assert_eq!(
@@ -805,7 +806,7 @@ async fn regen_seeds_the_mesh_cache_from_inline_plan_artifacts() {
     );
 
     // And it is a real cache entry: the second call hands back the same Arc.
-    let again = rt.get_mesh(body, Lod::Coarse, None).await.expect("hit");
+    let again = rt.get_mesh(body, DISPLAY_LOD, None).await.expect("hit");
     assert!(Arc::ptr_eq(&bytes, &again));
     assert_eq!(backend.mesh_fetches(), 0);
 }
@@ -844,7 +845,7 @@ async fn superseded_regen_never_seeds_the_mesh_cache() {
     assert!(matches!(converge.outcome, Outcome::Published(_)));
     for seed in [0x10u128, 0x11] {
         let body = BodyId(Uuid::from_u128(seed));
-        let bytes = rt.get_mesh(body, Lod::Coarse, None).await.expect("seeded");
+        let bytes = rt.get_mesh(body, DISPLAY_LOD, None).await.expect("seeded");
         assert_eq!(*bytes, FakeBackend::inline_bytes(body));
     }
     assert_eq!(backend.mesh_fetches(), 0);
@@ -861,7 +862,7 @@ async fn regen_without_inline_artifacts_still_pulls() {
         .await;
 
     let body = BodyId(Uuid::from_u128(0x10));
-    assert!(rt.get_mesh(body, Lod::Coarse, None).await.is_some());
+    assert!(rt.get_mesh(body, DISPLAY_LOD, None).await.is_some());
     assert_eq!(backend.mesh_fetches(), 1, "fell back to exactly one pull");
 }
 
@@ -882,7 +883,7 @@ async fn regen_report_builds_document_change_payload() {
     // meshKey = "<bodyId>:<lod>:<generation>" (matches the mock's mockMeshKey).
     assert!(
         ref_.mesh_key
-            .starts_with(&format!("{}:coarse:", ref_.body_id)),
+            .starts_with(&format!("{}:fine:", ref_.body_id)),
         "{}",
         ref_.mesh_key
     );
@@ -894,7 +895,7 @@ async fn get_mesh_without_geometry_is_a_miss() {
     let mut rt = runtime_with(Arc::new(FakeBackend::new()));
     // No regen yet → no snapshot → get_mesh returns None (not a panic).
     let got = rt
-        .get_mesh(BodyId(Uuid::from_u128(0x10)), Lod::Coarse, None)
+        .get_mesh(BodyId(Uuid::from_u128(0x10)), DISPLAY_LOD, None)
         .await;
     assert!(got.is_none());
 }
@@ -1035,7 +1036,7 @@ async fn explicit_save_embeds_the_head_meshes_and_autosave_embeds_none() {
         .meshes
         .iter()
         .map(|m| {
-            assert_eq!(m.lod, "coarse", "V1 persists the coarse tier only");
+            assert_eq!(m.lod, "fine", "V1 persists the display-quality tier only");
             (m.body, m.bytes.as_ref().clone())
         })
         .collect();
@@ -1103,7 +1104,7 @@ async fn saved_mesh_budget_truncates_deterministically() {
         rt.mesh_cache.put(
             MeshKey {
                 body: BodyId(Uuid::from_u128(seed)),
-                lod: Lod::Coarse,
+                lod: DISPLAY_LOD,
                 generation,
             },
             Arc::new(vec![0u8; big]),
@@ -1228,7 +1229,7 @@ async fn cached_meshes_serve_before_the_first_publish_and_are_dropped_after() {
         let mut payload = rt.build_save_payload(test_save_meta(), SaveCaches::explicit());
         payload.caches.meshes = vec![onecad_core::io::container::MeshCache {
             body,
-            lod: "coarse".into(),
+            lod: "fine".into(),
             bytes: Arc::new(minimal_mesh1()),
         }];
         DocumentRuntime::write_payload(&path, &payload).unwrap();
@@ -1242,7 +1243,7 @@ async fn cached_meshes_serve_before_the_first_publish_and_are_dropped_after() {
 
     assert_eq!(rt.projection().geometry_source, "cached");
     assert_eq!(
-        rt.get_mesh(body, Lod::Coarse, None).await.as_deref(),
+        rt.get_mesh(body, DISPLAY_LOD, None).await.as_deref(),
         Some(&minimal_mesh1()),
         "the container blob is served verbatim before any publish"
     );
@@ -1260,7 +1261,7 @@ async fn cached_meshes_serve_before_the_first_publish_and_are_dropped_after() {
     );
     assert_eq!(rt.projection().geometry_source, "live");
     assert_eq!(
-        rt.get_mesh(body, Lod::Coarse, None).await.as_deref(),
+        rt.get_mesh(body, DISPLAY_LOD, None).await.as_deref(),
         Some(&FakeBackend::inline_bytes(body)),
         "and every later fetch comes from the published snapshot"
     );
