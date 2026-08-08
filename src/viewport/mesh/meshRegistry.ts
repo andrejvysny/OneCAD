@@ -54,7 +54,7 @@ export interface MeshEntry {
   /** The body color this entry was baked with (undefined = theme neutral). */
   readonly bodyColor?: Rgba;
   /** User-authored face colors this entry was baked with, keyed by the mesh id (ElementId or TopoKey). */
-  readonly authoredFaceColors?: Map<string, Rgba>;
+  readonly authoredFaceColors?: ReadonlyMap<string, Rgba>;
   /**
    * Theme change: re-bake the color attribute against the CURRENT body-fill
    * token. Only unset faces move — authored colors are data, not a token — so
@@ -81,7 +81,7 @@ export function buildBodyObjects(
   bodyId: string,
   meshRev: number,
   bodyColor?: Rgba,
-  authoredFaceColors?: Map<string, Rgba>,
+  authoredFaceColors?: ReadonlyMap<string, Rgba>,
 ): MeshEntry {
   const geometry = new THREE.BufferGeometry();
   // `drawRange` counts INDICES when the geometry is indexed and VERTICES when it
@@ -159,7 +159,7 @@ function buildFaceGeometry(
   geometry: THREE.BufferGeometry,
   view: BodyMeshView,
   bodyColor?: Rgba,
-  authoredFaceColors?: Map<string, Rgba>,
+  authoredFaceColors?: ReadonlyMap<string, Rgba>,
 ): THREE.BufferAttribute | null {
   if (!needsVertexColors(view, bodyColor, authoredFaceColors)) {
     geometry.setAttribute("position", new THREE.BufferAttribute(view.positions, 3));

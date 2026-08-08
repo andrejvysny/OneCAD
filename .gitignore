@@ -19,8 +19,11 @@ src-tauri/gen/schemas
 # Bundled worker sidecar binaries (produced by scripts/build-worker.sh)
 src-tauri/binaries/
 
-# C++ worker build tree
+# C++ worker build trees — `worker/build` is the default; alternates come from
+# ONECAD_WORKER_BUILD_DIR (e.g. `worker/build-pinned` for a pinned-OCCT build,
+# `worker/build-8.0.1-rust` in CI).
 worker/build
+worker/build-*
 
 # Playwright CLI session artifacts (screenshots/logs from manual verification)
 .playwright-cli/

@@ -58,7 +58,7 @@ export function rgbaToLinear(c: Rgba): THREE.Color {
 export function needsVertexColors(
   view: BodyMeshView,
   bodyColor?: Rgba,
-  authoredFaceColors?: Map<string, Rgba>,
+  authoredFaceColors?: ReadonlyMap<string, Rgba>,
 ): boolean {
   return (
     hasAuthoredFaceColors(view.faceColors) || bodyColor !== undefined || (authoredFaceColors?.size ?? 0) > 0
@@ -104,7 +104,7 @@ export function deIndexTriangles(view: BodyMeshView): {
 export function bakeFaceColors(
   view: BodyMeshView,
   bodyColor?: Rgba,
-  authoredFaceColors?: Map<string, Rgba>,
+  authoredFaceColors?: ReadonlyMap<string, Rgba>,
   target?: Float32Array,
 ): Float32Array {
   const floats = view.indices.length * 3;

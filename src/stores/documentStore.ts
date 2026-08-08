@@ -9,7 +9,7 @@
  */
 import { createStore, useStore } from "zustand";
 
-import type { FeaturePrimaryKind, SketchHostFace, SketchPlane } from "@/ipc/types";
+import type { FeaturePrimaryKind, Rgba, SketchHostFace, SketchPlane } from "@/ipc/types";
 
 export type DocStatus = "empty" | "loading" | "ready";
 
@@ -31,9 +31,9 @@ export interface BodyMeta {
   name: string;
   visible: boolean;
   /** User-authored body color as `[r, g, b, a]`. Absent = theme neutral body fill. */
-  color?: [number, number, number, number];
+  color?: Rgba;
   /** User-authored face colors keyed by persistent `ElementId`. */
-  faceColors?: Record<string, [number, number, number, number]>;
+  faceColors?: Record<string, Rgba>;
 }
 
 /** 'under' = under-constrained, 'over' = over-constrained (mock statuses). */

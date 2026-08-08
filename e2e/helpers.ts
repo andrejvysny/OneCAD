@@ -143,6 +143,15 @@ export async function clickAtAwaitingDofChange(page: Page, dx: number, dy: numbe
  * appears, which doubles as the engine-ready gate.
  */
 export async function enterSketchViaPlanePicker(page: Page): Promise<void> {
+  // Settle the MODEL camera first. `enterSketch` aims along the plane normal at
+  // `controls.getDistance()` — the sketch view INHERITS the model camera's
+  // distance — and that distance sets `planePixelWorld`, which in turn sets the
+  // draw tools' screen-constant reject radius (`minSize`) and the zoom-adaptive
+  // dimension quantum. Entering while the initial-load fit is still moving
+  // therefore makes both of those non-deterministic run to run, which is what
+  // made `sketch-degenerate` and `live-dim-mouse-rounding` flaky. Callers that
+  // settle AFTER entering are too late: the distance has already been captured.
+  await waitForCameraSettled(page);
   await page.getByRole("button", { name: "New sketch", exact: true }).click();
   // Plane-pick phase chrome (activeSketchId still null).
   await expect(page.getByText("Select a sketch plane")).toBeVisible();
@@ -265,6 +274,11 @@ export async function findFaceOnBody(
   page: Page,
   bodyId?: string,
 ): Promise<{ x: number; y: number; bodyId: string; topoKey: string }> {
+  // The returned pixel is only meaningful for the camera it was probed under, and
+  // the initial-load auto-fit is debounced — probing mid-fit yields a point on a
+  // face that is about to move (or shrink), which is how "no second pixel far
+  // enough on the same face" showed up intermittently. Settle first.
+  await waitForCameraSettled(page);
   let found: { x: number; y: number; bodyId: string; topoKey: string } | null = null;
   await expect(async () => {
     found = await page.evaluate((want) => {
@@ -339,10 +353,18 @@ export function constraintToolbar(page: Page): Locator {
  */
 export async function waitForCameraSettled(page: Page): Promise<void> {
   const STABLE_WINDOW_MS = 350;
+  // "No tween in flight" is NOT enough: the initial-load auto-fit is debounced,
+  // so a fit can be scheduled-but-not-started and would begin moving the camera
+  // after this helper already returned — invalidating any client coordinate the
+  // caller computed from a probe. `autoFitPending` covers that window.
   const isSettled = (): Promise<boolean> =>
     page.evaluate(() => {
-      const engine = (window as unknown as { __vpEngine?: { controls?: { tween: unknown } | null } }).__vpEngine;
-      return !engine?.controls?.tween;
+      const engine = (
+        window as unknown as {
+          __vpEngine?: { controls?: { tween: unknown } | null; autoFitPending?: boolean };
+        }
+      ).__vpEngine;
+      return !engine?.controls?.tween && !engine?.autoFitPending;
     });
 
   await expect(async () => {

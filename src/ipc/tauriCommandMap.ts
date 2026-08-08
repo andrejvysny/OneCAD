@@ -40,6 +40,7 @@ import type {
   OffsetFaceParams,
   OperationOp,
   RevolveParams,
+  Rgba,
   SemanticRef,
   HoleParams,
   ShellParams,
@@ -324,12 +325,12 @@ export type WireEditCommand =
   | { cmd: "setVisibility"; target: WireVisibilityTarget; visible: boolean }
   | { cmd: "renameBody"; body: string; name: string }
   | { cmd: "renameSketch"; sketch: string; name: string }
-  | { cmd: "setBodyColor"; body: string; color: [number, number, number, number] | null }
+  | { cmd: "setBodyColor"; body: string; color: Rgba | null }
   | {
       cmd: "setFaceColor";
       body: string;
       elementId: string;
-      color: [number, number, number, number] | null;
+      color: Rgba | null;
     }
   // ── Datum planes (DATUM W1) — also `RegenHint::None`, same metadata-only
   // transport. `addDatumPlane` carries the RAW core `DatumPlane` struct, so it
@@ -1027,7 +1028,7 @@ export function setSketchVisibilityCommand(sketchId: string, visible: boolean): 
 /** `SetBodyColor` — set or clear a body's authored color. */
 export function setBodyColorCommand(
   bodyId: string,
-  color: [number, number, number, number] | null,
+  color: Rgba | null,
 ): WireEditCommand {
   return { cmd: "setBodyColor", body: bareBodyId(bodyId), color };
 }
@@ -1036,7 +1037,7 @@ export function setBodyColorCommand(
 export function setFaceColorCommand(
   bodyId: string,
   elementId: string,
-  color: [number, number, number, number] | null,
+  color: Rgba | null,
 ): WireEditCommand {
   return { cmd: "setFaceColor", body: bareBodyId(bodyId), elementId, color };
 }

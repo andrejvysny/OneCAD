@@ -214,17 +214,51 @@ test("the inline value editor is disabled while a model tool is armed", async ({
   const featureId = await drawAndExtrude(page);
   await openTimelineOn(page, featureId);
 
+  // SCOPED to the row on purpose: the model-tool chip's depth field carries the
+  // same "Dimension value" label, so a page-wide locator conflates "the history
+  // row's inline editor is open" with "a tool chip exists" — which is exactly
+  // what this test must tell apart once arming Extrude shows a chip.
+  const rowEditor = page.getByTestId(`history-row-${featureId}`).getByLabel("Dimension value");
+
   // Select tool ⇒ editable.
   await page.getByTestId(`history-value-${featureId}`).click();
-  await expect(page.getByLabel("Dimension value")).toBeVisible();
+  await expect(rowEditor).toBeVisible();
   await page.keyboard.press("Escape");
 
   // Arm Extrude: the row's value must go read-only immediately, without a
   // re-selection — and stay read-only under a click.
-  await page.getByRole("button", { name: "Extrude", exact: true }).click();
-  await expect(page.getByLabel("Dimension value")).toHaveCount(0);
+  //
+  // The toolbar is applicability-gated (`toolApplicability.ts`, landed with
+  // multi-region extrude): Extrude enables on a sketch-region / sketch selection,
+  // or on the document's SOLE visible sketch. Committing the extrude HIDES its
+  // sketch, so at this point none of the three holds and the button is
+  // `aria-disabled` — the click would wait out the whole test timeout. Re-show the
+  // sketch we drew (the eye toggle a user would flip) rather than changing the
+  // SELECTION, which has to stay on the history row for the rest of this test.
+  const sketchId = await page.evaluate(() => {
+    const ids = Object.keys(
+      (
+        window as unknown as {
+          __stores?: { document: { getState(): { sketches: Record<string, unknown> } } };
+        }
+      ).__stores?.document.getState().sketches ?? {},
+    );
+    return ids[ids.length - 1] ?? "";
+  });
+  expect(sketchId).not.toBe("");
+  await page.evaluate((id) => {
+    (
+      window as unknown as {
+        __stores?: { document: { getState(): { setVisibility(id: string, v: boolean): void } } };
+      }
+    ).__stores?.document.getState().setVisibility(id, true);
+  }, sketchId);
+  const extrudeBtn = page.getByRole("button", { name: "Extrude", exact: true });
+  await expect(extrudeBtn).toBeEnabled();
+  await extrudeBtn.click();
+  await expect(rowEditor).toHaveCount(0);
   await page.getByTestId(`history-value-${featureId}`).click();
-  await expect(page.getByLabel("Dimension value")).toHaveCount(0);
+  await expect(rowEditor).toHaveCount(0);
   // The value itself is still READABLE — only the editing affordance is gated.
   await expect(page.getByTestId(`history-value-${featureId}`)).toBeVisible();
 });

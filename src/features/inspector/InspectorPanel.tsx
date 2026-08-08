@@ -37,6 +37,7 @@ import { deleteConstraints } from "@/tools/sketch/sketchService";
 import type { SketchStatus } from "@/stores/documentStore";
 import { IMPORT_STEP_OP_TYPE } from "@/ipc/types";
 import type { SketchConstraint, SketchEntity } from "@/ipc/types";
+import { palette } from "@/viewport/engine/palette";
 
 /** Delete one constraint (row × button) — fire-and-forget, mirrors useShortcuts'
  * deleteEntities call: the service re-solves + writes the session back, so the
@@ -629,8 +630,19 @@ function BodyAppearanceSection({ bodyId }: { bodyId: string }) {
   );
 }
 
+/**
+ * The swatch value for a body/face with NO authored color. `<input type="color">`
+ * only speaks `#rrggbb`, so the neutral body-fill TOKEN is resolved through the
+ * same palette the viewport uses — a raw hex literal here would both break the
+ * hex gate (tokens.css is the sole source of design colors) and freeze the
+ * swatch at the light theme's value while the viewport followed the dark one.
+ */
+function neutralSwatchHex(): string {
+  return `#${palette.bodyNeutral().getHexString()}`;
+}
+
 function rgbaToHex(c: Rgba | undefined): string {
-  if (!c) return "#a9aeb6";
+  if (!c) return neutralSwatchHex();
   const toHex = (n: number) => Math.max(0, Math.min(255, n)).toString(16).padStart(2, "0");
   return `#${toHex(c[0])}${toHex(c[1])}${toHex(c[2])}`;
 }

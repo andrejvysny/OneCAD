@@ -71,14 +71,24 @@ readonly METADATA_DIR="${PREFIX}/share/onecad"
 readonly CMAKE_METADATA="${METADATA_DIR}/occt-build.cmake"
 readonly JSON_METADATA="${METADATA_DIR}/occt-build.json"
 
-# Keep this sorted. The configured cache is checked against this string before
-# the build; metadata never records unverified requested values.
-readonly OPTION_KEYS=(
-    BUILD_LIBRARY_TYPE BUILD_MODULE_Draw BUILD_USE_PCH CMAKE_BUILD_TYPE
-    USE_DRACO USE_FFMPEG USE_FREEIMAGE USE_FREETYPE USE_OPENGL USE_RAPIDJSON
-    USE_TBB USE_TCL USE_TK USE_VTK
-)
+# The configured cache is normalized to EFFECTIVE configuration and checked
+# against this string before the build; metadata never records unverified
+# requested values. The normalizer (and why a literal presence check is wrong for
+# OCCT's dependent options) lives in scripts/occt-fingerprint.sh.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly SCRIPT_DIR
+# shellcheck source=./occt-fingerprint.sh
+. "${SCRIPT_DIR}/occt-fingerprint.sh"
+
 readonly NORMALIZED_OPTIONS="BUILD_LIBRARY_TYPE=Shared,BUILD_MODULE_Draw=OFF,BUILD_USE_PCH=OFF,CMAKE_BUILD_TYPE=Release,USE_DRACO=OFF,USE_FFMPEG=OFF,USE_FREEIMAGE=OFF,USE_FREETYPE=OFF,USE_OPENGL=OFF,USE_RAPIDJSON=OFF,USE_TBB=OFF,USE_TCL=OFF,USE_TK=OFF,USE_VTK=OFF"
+# The policy is restated here so an edit (or a pre-set env override) on either
+# side cannot silently change what a real build is fingerprinted against.
+if [[ "$OCCT_OPTION_POLICY" != "$NORMALIZED_OPTIONS" ]]; then
+    echo "fingerprint policy mismatch between build-pinned-occt.sh and occt-fingerprint.sh" >&2
+    echo "  build script: $NORMALIZED_OPTIONS" >&2
+    echo "  normalizer:   $OCCT_OPTION_POLICY" >&2
+    exit 1
+fi
 
 metadata_matches() {
     [[ -f "$CMAKE_METADATA" ]] &&
@@ -130,22 +140,7 @@ cmake -S "$SOURCE_DIR" -B "$BUILD_DIR" -G Ninja \
     -DUSE_TK=OFF \
     -DUSE_VTK=OFF
 
-actual_options=""
-for key in "${OPTION_KEYS[@]}"; do
-    value="$(sed -n "s/^${key}:[^=]*=//p" "$BUILD_DIR/CMakeCache.txt" | tail -n 1)"
-    if [[ -z "$value" ]]; then
-        echo "configured OCCT cache omitted required option: $key" >&2
-        exit 1
-    fi
-    [[ -n "$actual_options" ]] && actual_options+=","
-    actual_options+="${key}=${value}"
-done
-if [[ "$actual_options" != "$NORMALIZED_OPTIONS" ]]; then
-    echo "configured OCCT options differ from fingerprint policy" >&2
-    echo "expected: $NORMALIZED_OPTIONS" >&2
-    echo "actual:   $actual_options" >&2
-    exit 1
-fi
+occt_verify_options "$BUILD_DIR/CMakeCache.txt" >/dev/null || exit 1
 
 echo "==> Building OCCT ${VERSION}"
 cmake --build "$BUILD_DIR" --parallel "${ONECAD_OCCT_JOBS:-3}"

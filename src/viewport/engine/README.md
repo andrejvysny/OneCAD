@@ -84,9 +84,11 @@ awaited construction resolves after disposal).
 | `TransformGizmo.ts`  | Placement gizmo: 3 arrows / 3 plane quads / 3 rings (WP-B W2).  |
 
 Both grab gizmos follow the same wiring, and a new one should too: created lazily
-by `ViewportEngine`, rescaled to `planePixelWorld()` every frame, folded into the
-orbit-gating `hitTest` (so a press that grabs a handle never orbits the camera),
-refreshed in `applyTheme()`, and disposed with the engine. `TransformGizmo` is a
+by `ViewportEngine`, rescaled to `planePixelWorld()` every frame, hit-tested on
+LMB-down so a press that lands on a handle grabs it instead of falling through to
+selection, refreshed in `applyTheme()`, and disposed with the engine. Orbit itself
+never collides with this — it is RMB+Shift, a different button entirely.
+`TransformGizmo` is a
 deliberate SIBLING of `DragHandle` rather than a generalisation of it — the
 extrude handle is a one-axis depth grab on a hot, e2e-covered path, and the two
 share nothing beyond "screen-scaled overlay mesh".

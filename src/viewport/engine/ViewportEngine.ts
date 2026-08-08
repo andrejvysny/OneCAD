@@ -95,6 +95,8 @@ export interface PickHandlers {
 const MAX_DPR = 2;
 /** Generous pick radius for always-visible sketch curves (easier than body edges). */
 const SKETCH_PICK_PX = 8;
+/** Trailing-edge delay for the initial-load auto-fit — see `requestAutoFit`. */
+const AUTO_FIT_SETTLE_MS = 250;
 const Z0_PLANE = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
 
 /*
@@ -186,6 +188,8 @@ export class ViewportEngine {
   private scene = new THREE.Scene();
   private rig = new CameraRig(76);
   private controls: CadOrbitControls | null = null;
+  /** Pending debounced auto-fit — see {@link requestAutoFit}. */
+  private autoFitTimer: ReturnType<typeof setTimeout> | null = null;
   private grid: GridPlane | null = null;
   private triad: OriginTriad | null = null;
   private readonly overlayDriver = new HtmlOverlayDriver();
@@ -326,13 +330,6 @@ export class ViewportEngine {
       element: this.canvas,
       onChange: this.handleCameraChanged,
       getBounds: this.getSceneBounds,
-      // Orbit gating: an LMB drag that STARTS on pickable geometry (or the
-      // extrude drag handle) selects/drags (no orbit); empty space orbits.
-      hitTest: (x, y) =>
-        (this.picker?.hasHitAt(x, y) ?? false) ||
-        this.hitExtrudeHandle(x, y) ||
-        this.hitTransformGizmo(x, y) !== null ||
-        (this.planePicker?.visible === true && this.planePickerHitTest(x, y) !== null),
       getDevicePref: opts.getDevicePref,
       isDragActive: opts.isDragActive,
       onDeviceChange: opts.onDeviceChange,
@@ -792,7 +789,46 @@ export class ViewportEngine {
   }
 
   fitView(): void {
+    this.cancelAutoFit();
     this.controls?.fitView();
+  }
+
+  /**
+   * Debounced whole-scene fit for the INITIAL load burst.
+   *
+   * Bodies stream in one at a time, so fitting on the first only frames whichever
+   * body arrived first — wrong for a multi-body assembly. Each call restarts the
+   * timer, so the fit lands once on the trailing edge with the full bounds.
+   *
+   * The debounce lives HERE, not in the React bridge, because a fit that is
+   * merely *scheduled* still moves the camera later — and anything asking "has
+   * the camera settled?" (an e2e helper computing screen coordinates, a
+   * screenshot, a pick) would otherwise get `true` while a tween was still 250 ms
+   * away from starting. `autoFitPending` makes that window observable, and every
+   * path that takes the camera away from auto-framing — an explicit `fitView`,
+   * `fitToBodies`, entering a sketch, or `dispose()` — cancels it.
+   */
+  requestAutoFit(delayMs = AUTO_FIT_SETTLE_MS): void {
+    if (this.disposed) return;
+    if (this.autoFitTimer !== null) clearTimeout(this.autoFitTimer);
+    this.autoFitTimer = setTimeout(() => {
+      this.autoFitTimer = null;
+      if (this.disposed) return;
+      this.controls?.fitView();
+    }, delayMs);
+  }
+
+  /** True while a {@link requestAutoFit} is scheduled but has not run yet. */
+  get autoFitPending(): boolean {
+    return this.autoFitTimer !== null;
+  }
+
+  /** Drop any scheduled auto-fit — the camera is being aimed by someone else. */
+  cancelAutoFit(): void {
+    if (this.autoFitTimer !== null) {
+      clearTimeout(this.autoFitTimer);
+      this.autoFitTimer = null;
+    }
   }
 
   /**
@@ -801,6 +837,7 @@ export class ViewportEngine {
    * id must never leave the camera pointing at nothing.
    */
   fitToBodies(bodyIds: readonly string[]): void {
+    this.cancelAutoFit();
     this.controls?.fitView(this.getBoundsForBodies(bodyIds) ?? undefined);
   }
 
@@ -835,6 +872,16 @@ export class ViewportEngine {
 
   snapToViewDirection(dir: THREE.Vector3): void {
     this.controls?.snapToViewDirection(dir);
+  }
+
+  /** Ungated orbit by screen deltas — ViewCube drag. */
+  orbitBy(dx: number, dy: number): void {
+    this.controls?.orbitBy(dx, dy);
+  }
+
+  /** Stop any in-flight snap tween before a ViewCube drag takes the wheel. */
+  cancelViewAnimation(): void {
+    this.controls?.cancelAnimation();
   }
 
   private getSceneBounds = (): THREE.Box3 | null => {
@@ -880,6 +927,9 @@ export class ViewportEngine {
     this.sketch.setSession(plane, entities, status);
     this.snapIndicator?.setPlane(plane);
 
+    // The sketch aims the camera along the plane normal; a queued auto-fit
+    // landing mid-session would fight it (and be saved as the "restore" pose).
+    this.cancelAutoFit();
     this.savedView = this.controls?.getViewState() ?? null;
     const normal = new THREE.Vector3().fromArray(plane.normal);
     const origin = new THREE.Vector3().fromArray(plane.origin);
@@ -1647,6 +1697,7 @@ export class ViewportEngine {
     this.disposed = true;
     this.initialized = false;
 
+    this.cancelAutoFit();
     if (this.rafPending) cancelAnimationFrame(this.rafId);
     this.rafPending = false;
 

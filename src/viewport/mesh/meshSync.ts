@@ -27,7 +27,7 @@
  * here rather than in the engine because the bodyId→handle map lives here.
  */
 import type { CadClient } from "@/ipc/client";
-import type { DocumentChange, Lod } from "@/ipc/types";
+import type { DocumentChange, Lod, Rgba } from "@/ipc/types";
 import type { BodyMeta } from "@/stores/documentStore";
 import { trace } from "@/debug/trace";
 import { logError } from "@/debug/log";
@@ -52,8 +52,8 @@ const EMPTY_MESH_RETRIES = 3;
 const EMPTY_MESH_RETRY_MS = 300;
 
 function colorsEqual(
-  a: [number, number, number, number] | undefined,
-  b: [number, number, number, number] | undefined,
+  a: Rgba | undefined,
+  b: Rgba | undefined,
 ): boolean {
   if (a === b) return true;
   if (!a || !b) return false;
@@ -61,8 +61,8 @@ function colorsEqual(
 }
 
 function faceColorsEqual(
-  a: Record<string, [number, number, number, number]> | undefined,
-  b: Record<string, [number, number, number, number]> | undefined,
+  a: Record<string, Rgba> | undefined,
+  b: Record<string, Rgba> | undefined,
 ): boolean {
   if (a === b) return true;
   if (!a || !b) return false;
@@ -317,10 +317,10 @@ export class MeshIngest {
   private async resolveAuthoredFaceColors(
     bodyId: string,
     view: BodyMeshView,
-    faceColorsMeta: Record<string, [number, number, number, number]> | undefined,
-  ): Promise<Map<string, [number, number, number, number]> | undefined> {
+    faceColorsMeta: Record<string, Rgba> | undefined,
+  ): Promise<Map<string, Rgba> | undefined> {
     if (!faceColorsMeta || Object.keys(faceColorsMeta).length === 0) return undefined;
-    const out = new Map<string, [number, number, number, number]>();
+    const out = new Map<string, Rgba>();
     if (view.idsHaveElementIds) {
       // The mesh ids ARE persistent ElementIds, so authored colors map straight on.
       for (const [elementId, rgba] of Object.entries(faceColorsMeta)) out.set(elementId, rgba);

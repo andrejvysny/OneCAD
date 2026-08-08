@@ -102,7 +102,7 @@ worker/             C++20 OCCT sidecar + its CTest suite
 protocol/           SCHEMA.md (OCW1) and mesh_format.md (MESH1) normative contracts
 corpus/             read-only legacy correctness oracle
 e2e/                Playwright specs (mock-client lane)
-docs/               DEBUGGING · MANUAL_GATES_RUN · PACKAGING · postmortems
+docs/               DEBUGGING · PACKAGING · qa/ (release gates + triage) · postmortems
 CURRENT_STATE.md    session history — read before changing code
 TODO.md             gate records + follow-ups
 ```

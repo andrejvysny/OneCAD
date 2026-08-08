@@ -554,8 +554,14 @@ export interface ResolveRefRequest {
 // edit/regen. Field-identical to `documentStore.DocumentProjection` so the
 // hydration bridge writes the store 1:1 (F-WP8 flag 2).
 
-/** sRGB+A color as `[r, g, b, a]` with each channel in `0..255`. */
-export type Rgba = [number, number, number, number];
+/**
+ * sRGB+A color as `[r, g, b, a]` with each channel in `0..255`.
+ *
+ * READONLY on purpose: a color is a value, never mutated in place. Keeping it
+ * readonly is what lets the mesh fixtures/`mockMeshes.FaceColor` (also readonly)
+ * flow into every consumer without a cast.
+ */
+export type Rgba = readonly [number, number, number, number];
 
 /** One body in the projection (mirrors `documentStore.BodyMeta`). */
 export interface BodyProjection {

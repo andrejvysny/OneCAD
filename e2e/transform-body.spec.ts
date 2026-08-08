@@ -61,7 +61,14 @@ async function bodyBounds(
     const min = [Infinity, Infinity, Infinity];
     const max = [-Infinity, -Infinity, -Infinity];
     node.traverse((o) => {
-      if (!o.isMesh) return;
+      // FACE mesh only. The edge layer is a fat-line `Line2`, whose `isMesh` is
+      // ALSO true and whose `position` attribute is the instanced unit-quad
+      // TEMPLATE (-1,-1,0)…(1,2,0) — the real segment endpoints live in
+      // `instanceStart`/`instanceEnd`. Folding that template into the bbox
+      // clamps min to ≤ -1 and max to ≥ 1 for every body, so any expectation
+      // whose true value sits inside that box silently reads -1 instead. That
+      // is what made four placement cases fail while the geometry was correct.
+      if (!o.isMesh || (o.userData as { kind?: string } | undefined)?.kind !== "face") return;
       const g = o.geometry as
         | { attributes?: { position?: { array: ArrayLike<number>; count: number } } }
         | undefined;

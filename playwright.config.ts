@@ -28,7 +28,15 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 1 : 0,
+  // NO retries, in CI or locally. A retried pass reads as green, and that is
+  // exactly how the debounced auto-fit regression (ViewportRoot → ViewportEngine
+  // `requestAutoFit`) survived: every failure it caused was intermittent, so CI's
+  // single retry hid a real product defect while the local lane went hard red.
+  // The flakes that motivated the retry are root-caused now — camera state read
+  // before it settled, and a spec helper folding the fat-line edge layer into a
+  // bbox — so a red run means a defect, which is the only signal worth gating on.
+  // Re-introduce a retry only with a named, understood source of nondeterminism.
+  retries: 0,
   reporter: process.env.CI ? "line" : "list",
   timeout: 45_000,
   expect: { timeout: 8_000 },
@@ -47,7 +55,10 @@ export default defineConfig({
       ],
     },
   },
-  projects: [{ name: "chromium", use: { browserName: "chromium" } }],
+  projects: [
+    { name: "chromium", use: { browserName: "chromium" } },
+    { name: "webkit", use: { browserName: "webkit", launchOptions: { args: [] } } },
+  ],
   webServer: {
     command: `bun run dev -- --port ${PORT} --strictPort`,
     url: BASE_URL,

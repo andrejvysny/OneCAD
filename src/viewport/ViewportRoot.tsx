@@ -250,22 +250,12 @@ export function ViewportRoot({ className }: { className?: string }) {
 
         // Auto-fit the camera once loading settles. Bodies stream in one at a
         // time, so fitting on the first only frames whichever body loads
-        // first — wrong for multi-body assemblies. Debounce to the trailing
-        // edge of the load burst instead, re-fitting as bigger bounds arrive.
-        const FIT_SETTLE_MS = 250;
-        let fitSettleTimer: ReturnType<typeof setTimeout> | null = null;
-        cleanups.push(
-          meshIngest.onBodyLoaded(() => {
-            if (fitSettleTimer !== null) clearTimeout(fitSettleTimer);
-            fitSettleTimer = setTimeout(() => {
-              fitSettleTimer = null;
-              engine.fitView();
-            }, FIT_SETTLE_MS);
-          }),
-        );
-        cleanups.push(() => {
-          if (fitSettleTimer !== null) clearTimeout(fitSettleTimer);
-        });
+        // first — wrong for multi-body assemblies. The engine owns the debounce
+        // (`requestAutoFit`) so that a fit which is scheduled but not yet running
+        // is visible as `engine.autoFitPending`: a bridge-local timer moved the
+        // camera 250 ms after everything else already believed it had settled.
+        cleanups.push(meshIngest.onBodyLoaded(() => engine.requestAutoFit()));
+        cleanups.push(() => engine.cancelAutoFit());
 
         // Wake-up repaint: on-demand rendering means a tab/window that was hidden
         // or a compositor that dropped the last frame shows stale/blank content

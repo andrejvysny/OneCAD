@@ -14,6 +14,8 @@ import { bakeFaceColors, deIndexTriangles, hasAuthoredFaceColors } from "./faceC
 import { parseMeshPayload } from "./parseMeshPayload";
 import { palette, resetPaletteCache } from "../engine/palette";
 import { makeBoxMesh, type FaceColor } from "@/ipc/mockMeshes";
+import { makeBodyMeshViewFixture } from "@/test/fixtures/bodyMeshView";
+import type { Rgba } from "@/ipc/types";
 
 /** f:0 red, f:4 blue, the other four faces unset. */
 const RED: FaceColor = [214, 74, 62, 255];
@@ -153,32 +155,11 @@ describe("bakeFaceColors", () => {
 
   it("applies authored face colors keyed by ElementId when the mesh ids are ElementIds", () => {
     const id = "el_top";
-    const chars = new TextEncoder().encode(id);
-    const view = {
-      positions: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]),
-      normals: new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]),
-      indices: new Uint32Array([0, 1, 2]),
-      faceRanges: new Uint32Array([0, 1]),
-      faceCount: 1,
-      faceIdOffsets: new Uint32Array([0, chars.length]),
-      faceIdChars: chars,
-      edgeRanges: null,
-      edgePositions: null,
-      edgeIdOffsets: null,
-      edgeIdChars: null,
-      hasEdges: false,
-      edgeCount: 0,
-      faceColors: null,
-      faceBboxes: null,
-      bboxMin: [0, 0, 0] as const,
-      bboxMax: [1, 1, 0] as const,
-      hasNormals: true,
-      hasFaceBboxes: false,
-      hasFaceColors: false,
+    const view = makeBodyMeshViewFixture({
+      faces: [{ id, triangles: [[0, 1, 2]] }],
       idsHaveElementIds: true,
-    };
-    const authored = new Map<string, [number, number, number, number]>();
-    authored.set(id, RED);
+    });
+    const authored = new Map<string, Rgba>([[id, RED]]);
     const baked = bakeFaceColors(view, undefined, authored);
     expect(vertexColor(baked, 0)).toEqual(linear(RED));
     expect(vertexColor(baked, 1)).toEqual(linear(RED));

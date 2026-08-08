@@ -10,8 +10,19 @@ env:
   OCCT_COMPARISON_BUILD_ID: onecad-occt-7.9.3-a016080bf673-kp1
 
 jobs:
+  # Fast, dependency-free gate on the OCCT build fingerprint normalizer. Runs
+  # BEFORE the hour-long OCCT builds so a broken policy fails in seconds.
+  occt-fingerprint:
+    name: occt-fingerprint
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fingerprint normalizer tests
+        run: scripts/tests/occt-fingerprint.test.sh
+
   occt-8-0-1:
     name: build OCCT 8.0.1
+    needs: occt-fingerprint
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -19,7 +30,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/onecad-occt/8.0.1
-          key: occt-macos-14-8.0.1-b8f597c67781-${{ env.OCCT_PRIMARY_BUILD_ID }}-${{ hashFiles('scripts/build-pinned-occt.sh') }}
+          key: occt-macos-14-8.0.1-b8f597c67781-${{ env.OCCT_PRIMARY_BUILD_ID }}-${{ hashFiles('scripts/build-pinned-occt.sh', 'scripts/occt-fingerprint.sh') }}
       - name: Install build tool
         run: brew install ninja
       - name: Build pinned OCCT
@@ -207,7 +218,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/onecad-occt/7.9.3
-          key: occt-macos-14-7.9.3-a016080bf673-${{ env.OCCT_COMPARISON_BUILD_ID }}-${{ hashFiles('scripts/build-pinned-occt.sh') }}
+          key: occt-macos-14-7.9.3-a016080bf673-${{ env.OCCT_COMPARISON_BUILD_ID }}-${{ hashFiles('scripts/build-pinned-occt.sh', 'scripts/occt-fingerprint.sh') }}
       - name: Install dependencies
         run: brew install boost eigen nlohmann-json ninja
       - name: Build pinned comparison OCCT
@@ -282,7 +293,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/onecad-occt/7.9.3
-          key: occt-macos-14-7.9.3-a016080bf673-${{ env.OCCT_COMPARISON_BUILD_ID }}-${{ hashFiles('scripts/build-pinned-occt.sh') }}
+          key: occt-macos-14-7.9.3-a016080bf673-${{ env.OCCT_COMPARISON_BUILD_ID }}-${{ hashFiles('scripts/build-pinned-occt.sh', 'scripts/occt-fingerprint.sh') }}
       - name: Install dependencies
         run: brew install boost eigen nlohmann-json ninja
       - name: Build pinned persistence OCCT
