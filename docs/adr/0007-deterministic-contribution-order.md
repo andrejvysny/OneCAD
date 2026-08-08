@@ -26,10 +26,18 @@ group    = "modeling.modify"
 priority = 200
 ```
 
-Iteration order is `(group, priority, insertion index)`, where insertion index is
-only a last-resort tiebreak for two contributions that declared identical
-placement. The same set of contributions must produce the same UI order on every
-run, regardless of registration order.
+Iteration order is `(priority, insertion index)`, where insertion index is only a
+last-resort tiebreak for two contributions that declared the same priority. The
+same set of contributions must produce the same UI order on every run,
+regardless of registration order.
+
+**`group` is NOT a sort key** — it is consumer metadata, and the consumer decides
+what to do with it (the toolbar draws a separator wherever the group changes
+between two adjacent entries). Sorting by group first would order the UI by the
+group's NAME, alphabetically, which is never the intended visual order:
+`modeling.create` would precede `modeling.solid` by accident of spelling rather
+than by intent. A group is therefore expected to be a contiguous run of
+priorities, and it is the priorities that put it there.
 
 Sections are ordered by category: owner-specific primary sections, then platform
 sections, then third-party sections.

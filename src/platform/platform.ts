@@ -17,6 +17,7 @@ import type {
   PanelContribution,
   ToolDefinition,
   ViewportContribution,
+  TreeProvider,
   WorkspaceDefinition,
 } from "./contributions";
 import { createEventBus, type EventBus } from "./events";
@@ -68,6 +69,7 @@ export interface ModuleScope {
   registerPanel(entry: PanelContribution): Disposable;
   registerInspectorSection(entry: InspectorContribution): Disposable;
   registerViewportContribution(entry: ViewportContribution): Disposable;
+  registerTreeProvider(entry: TreeProvider): Disposable;
   registerWorkspace(entry: WorkspaceDefinition): Disposable;
   registerService<T>(id: ServiceId, impl: T): Disposable;
   subscribe<T = unknown>(id: EventId, fn: (payload: T) => void): Disposable;
@@ -82,6 +84,7 @@ export interface Platform {
   readonly panels: Registry<PanelContribution>;
   readonly inspector: Registry<InspectorContribution>;
   readonly viewport: Registry<ViewportContribution>;
+  readonly tree: Registry<TreeProvider>;
   readonly workspaces: Registry<WorkspaceDefinition>;
   readonly services: ServiceRegistry;
   readonly events: EventBus;
@@ -158,6 +161,7 @@ export function createPlatform(): Platform {
   const panels = createRegistry<PanelContribution>("panel");
   const inspector = createRegistry<InspectorContribution>("inspector section");
   const viewport = createRegistry<ViewportContribution>("viewport contribution");
+  const tree = createRegistry<TreeProvider>("tree provider");
   const workspaces = createRegistry<WorkspaceDefinition>("workspace");
   const services = createServiceRegistry();
   const events = createEventBus();
@@ -173,6 +177,7 @@ export function createPlatform(): Platform {
     panels,
     inspector,
     viewport,
+    tree,
     workspaces,
     services,
     events,
@@ -276,6 +281,7 @@ export function createPlatform(): Platform {
         registerPanel: (e) => track(panels.register(owner, e)),
         registerInspectorSection: (e) => track(inspector.register(owner, e)),
         registerViewportContribution: (e) => track(viewport.register(owner, e)),
+        registerTreeProvider: (e) => track(tree.register(owner, e)),
         registerWorkspace: (e) => track(workspaces.register(owner, e)),
         registerService: (id, impl) => track(services.register(owner, id, impl)),
         subscribe: (id, fn) => track(events.subscribe(owner, id, fn)),
@@ -300,6 +306,7 @@ export function createPlatform(): Platform {
       panels.disposeOwner(owner);
       inspector.disposeOwner(owner);
       viewport.disposeOwner(owner);
+      tree.disposeOwner(owner);
       workspaces.disposeOwner(owner);
       services.disposeOwner(owner);
       events.disposeOwner(owner);

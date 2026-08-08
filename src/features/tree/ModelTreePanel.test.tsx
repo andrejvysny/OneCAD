@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ModelTreePanel } from "./ModelTreePanel";
 import { selectionStore } from "@/stores/selectionStore";
@@ -7,12 +7,14 @@ import { documentStore } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { mockClient } from "@/ipc/mockClient";
 import { resetStores } from "@/test/resetStores";
+import { renderWithPlatform } from "@/test/renderWithPlatform";
+import { contributeModelingTree } from "@/modules/modeling/treeProvider";
 
 describe("ModelTreePanel", () => {
   beforeEach(() => resetStores());
 
   it("renders the prototype tree (Body 1 + Sketch 2/4/5) with Sketch 2 selected", () => {
-    render(<ModelTreePanel />);
+    renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
     expect(screen.getByRole("option", { name: /Body 1/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /Sketch 4/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /Sketch 2/ })).toHaveAttribute(
@@ -23,7 +25,7 @@ describe("ModelTreePanel", () => {
 
   it("selects a row on click", async () => {
     const user = userEvent.setup();
-    render(<ModelTreePanel />);
+    renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
     await user.click(screen.getByRole("option", { name: /Body 1/ }));
     expect(selectionStore.getState().selected).toEqual([
       { kind: "body", id: "body1" },
@@ -41,7 +43,7 @@ describe("ModelTreePanel", () => {
   it("toggles visibility through a SetVisibility command without changing selection", async () => {
     const user = userEvent.setup();
     const apply = vi.spyOn(mockClient, "applyEditCommand");
-    render(<ModelTreePanel />);
+    renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
     await user.click(screen.getByRole("option", { name: /Body 1/ }));
 
     expect(documentStore.getState().sketches.sketch2.visible).toBe(true);
@@ -64,6 +66,17 @@ describe("ModelTreePanel", () => {
     await apply.mock.results[0]?.value; // drain — see the rename test's note
     apply.mockRestore();
   });
+
+  it("opens settings from the bottom sidebar button", async () => {
+    const user = userEvent.setup();
+    renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    expect(screen.getByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Close settings" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Settings" })).not.toBeInTheDocument(),
+    );
+  });
 });
 
 describe("ModelTreePanel — context menu", () => {
@@ -71,7 +84,7 @@ describe("ModelTreePanel — context menu", () => {
 
   const openMenuOn = async (name: RegExp) => {
     const user = userEvent.setup();
-    render(<ModelTreePanel />);
+    renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
     await user.pointer({ keys: "[MouseRight]", target: screen.getByRole("option", { name }) });
     return user;
   };
@@ -121,7 +134,7 @@ describe("ModelTreePanel — inline rename", () => {
   /** Right-click a row → Rename → the focused inline field. */
   async function startRename(name: RegExp) {
     const user = userEvent.setup();
-    render(<ModelTreePanel />);
+    renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
     await user.pointer({ keys: "[MouseRight]", target: screen.getByRole("option", { name }) });
     await user.click(screen.getByTestId("tree-menu-rename"));
     return { user, field: screen.getByRole("textbox") };
@@ -172,7 +185,7 @@ describe("ModelTreePanel — inline rename", () => {
 
   it("F2 renames the single selected row", async () => {
     const user = userEvent.setup();
-    render(<ModelTreePanel />);
+    renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
     await user.click(screen.getByRole("option", { name: /Body 1/ }));
     await user.keyboard("{F2}");
     const field = screen.getByRole("textbox");
@@ -185,7 +198,7 @@ describe("ModelTreePanel — inline rename", () => {
       { kind: "body", id: "body1" },
       { kind: "sketch", id: "sketch4" },
     ]);
-    render(<ModelTreePanel />);
+    renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
     await user.keyboard("{F2}");
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
   });
@@ -202,7 +215,7 @@ describe("ModelTreePanel — inline rename", () => {
         body2: { id: "body2", name: "Body 2", visible: true },
       },
     });
-    const { rerender } = render(<ModelTreePanel />);
+    const { rerender } = renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
     const dimmed = (name: RegExp) =>
       screen.getByRole("option", { name }).className.includes("opacity-50");
 
@@ -231,7 +244,7 @@ describe("ModelTreePanel — Reattach (H9)", () => {
   it("offers Reattach… on a sketch row and dispatches the picked target", async () => {
     const user = userEvent.setup();
     const reattach = vi.spyOn(mockClient, "reattachSketch");
-    render(<ModelTreePanel />);
+    renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
     await user.pointer({
       keys: "[MouseRight]",
       target: screen.getByRole("option", { name: /Sketch 4/ }),
@@ -246,7 +259,7 @@ describe("ModelTreePanel — Reattach (H9)", () => {
 
   it("does NOT offer it on a BODY row (only a sketch has an attachment)", async () => {
     const user = userEvent.setup();
-    render(<ModelTreePanel />);
+    renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
     await user.pointer({
       keys: "[MouseRight]",
       target: screen.getByRole("option", { name: /Body 1/ }),
@@ -269,7 +282,7 @@ describe("ModelTreePanel — Reattach (H9)", () => {
       },
     });
     const user = userEvent.setup();
-    render(<ModelTreePanel />);
+    renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
     await user.pointer({
       keys: "[MouseRight]",
       target: screen.getByRole("option", { name: /Sketch 4/ }),

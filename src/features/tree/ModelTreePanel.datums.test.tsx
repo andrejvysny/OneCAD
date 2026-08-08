@@ -4,7 +4,7 @@
  * referenced-guard rejection surfacing as a sticky hint with nothing removed).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ModelTreePanel } from "./ModelTreePanel";
 import { selectionStore } from "@/stores/selectionStore";
@@ -13,6 +13,8 @@ import { toolStore } from "@/stores/toolStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { mockClient, mockAttachSketchToDatum } from "@/ipc/mockClient";
 import { resetStores } from "@/test/resetStores";
+import { renderWithPlatform } from "@/test/renderWithPlatform";
+import { contributeModelingTree } from "@/modules/modeling/treeProvider";
 
 function datum(id: string, name: string): DatumMeta {
   return {
@@ -39,7 +41,7 @@ describe("ModelTreePanel — Datums section", () => {
 
   it("renders a row per projection datum, with NO eye (a datum has no visibility)", () => {
     documentStore.getState().addDatum(datum("d2", "Datum 2"));
-    render(<ModelTreePanel />);
+    renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
     const rows = screen.getAllByRole("option", { name: /Datum \d/ });
     expect(rows).toHaveLength(2);
     expect(datumOptions()).toContainElement(rows[0]);
@@ -48,13 +50,13 @@ describe("ModelTreePanel — Datums section", () => {
 
   it("the section is empty (but present) when the document has no datums", () => {
     documentStore.getState().applyChange({ datums: {} });
-    render(<ModelTreePanel />);
+    renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
     expect(datumOptions()).toBeEmptyDOMElement();
   });
 
   it("a click selects the datum ref", async () => {
     const user = userEvent.setup();
-    render(<ModelTreePanel />);
+    renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
     await user.click(screen.getByRole("option", { name: /Datum 1/ }));
     expect(selectionStore.getState().selected).toEqual([{ kind: "datum", id: "d1" }]);
     expect(screen.getByRole("option", { name: /Datum 1/ })).toHaveAttribute("aria-selected", "true");
@@ -62,7 +64,7 @@ describe("ModelTreePanel — Datums section", () => {
 
   it("a DOUBLE-click selects the datum AND enters sketch mode with no target (the on-datum entry)", async () => {
     const user = userEvent.setup();
-    render(<ModelTreePanel />);
+    renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
     await user.dblClick(screen.getByRole("option", { name: /Datum 1/ }));
     // The controller's tryEnterOnSelectedDatum reads the selection; activeSketchId
     // must stay null so it is a NEW sketch, not a re-open of an existing one.
@@ -73,7 +75,7 @@ describe("ModelTreePanel — Datums section", () => {
 
   it("the context menu offers ONLY delete — no rename, no visibility", async () => {
     const user = userEvent.setup();
-    render(<ModelTreePanel />);
+    renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
     await user.pointer({ keys: "[MouseRight]", target: screen.getByRole("option", { name: /Datum 1/ }) });
     expect(screen.getByTestId("tree-menu-datum-delete")).toBeInTheDocument();
     expect(screen.queryByTestId("tree-menu-rename")).not.toBeInTheDocument();
@@ -83,7 +85,7 @@ describe("ModelTreePanel — Datums section", () => {
   it("delete is a TWO-CLICK confirm and removes the row", async () => {
     const apply = vi.spyOn(mockClient, "applyEditCommand");
     const user = userEvent.setup();
-    render(<ModelTreePanel />);
+    renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
     await user.pointer({ keys: "[MouseRight]", target: screen.getByRole("option", { name: /Datum 1/ }) });
 
     await user.click(screen.getByTestId("tree-menu-datum-delete"));
@@ -103,7 +105,7 @@ describe("ModelTreePanel — Datums section", () => {
     // (the same seam `enterSketch({newOnDatum})` uses).
     mockAttachSketchToDatum("sk-hosted", "d1");
     const user = userEvent.setup();
-    render(<ModelTreePanel />);
+    renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
     await user.pointer({ keys: "[MouseRight]", target: screen.getByRole("option", { name: /Datum 1/ }) });
     await user.click(screen.getByTestId("tree-menu-datum-delete"));
     await user.click(screen.getByTestId("tree-menu-datum-delete-confirm"));
@@ -121,7 +123,7 @@ describe("ModelTreePanel — Datums section", () => {
   it("F2 ignores a datum selection (there is no RenameDatum command)", async () => {
     const user = userEvent.setup();
     selectionStore.getState().set([{ kind: "datum", id: "d1" }]);
-    render(<ModelTreePanel />);
+    renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
     await user.keyboard("{F2}");
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
   });

@@ -36,6 +36,7 @@ export type TypeId = Branded<"TypeId">;
 export type EntityId = Branded<"EntityId">;
 export type InspectorContributionId = Branded<"InspectorContributionId">;
 export type ViewportContributionId = Branded<"ViewportContributionId">;
+export type TreeProviderId = Branded<"TreeProviderId">;
 
 /** Thrown for every malformed or unauthorized id. Carries a stable `code`. */
 export class IdError extends Error {

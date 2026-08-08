@@ -19,6 +19,7 @@
 import { Slots, type ModuleScope } from "@/platform";
 import { ModelingPanels } from "./panelIds";
 import { contributeInspectorSections } from "./inspectorSections";
+import { contributeModelingTree } from "./treeProvider";
 
 import { ConstraintBadgeLayer } from "@/features/sketch/ConstraintBadgeLayer";
 import { LiveDimChips } from "@/features/sketch/LiveDimChips";
@@ -90,6 +91,10 @@ export function contributeModelingUi(scope: ModuleScope): void {
   // The inspector's own sections. Registered with the rest of the editor UI, so
   // they come and go with the panel that hosts them.
   contributeInspectorSections(scope);
+
+  // Modeling's rows in the shared model tree. The panel renders providers, not
+  // bodies/sketches/datums, so a second module can add its own section here.
+  contributeModelingTree(scope);
 
   scope.registerPanel({
     id: ModelingPanels.RepairBanner,

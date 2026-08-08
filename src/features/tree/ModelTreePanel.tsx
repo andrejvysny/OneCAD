@@ -3,28 +3,17 @@ import { SectionLabel } from "@/ui/SectionLabel";
 import { MenuItem } from "@/ui/MenuItem";
 import { Popover } from "@/ui/Popover";
 import { useDocumentStore } from "@/stores/documentStore";
-import { selectionStore, useSelectionStore, type EntityKind } from "@/stores/selectionStore";
-import { useToolStore } from "@/stores/toolStore";
+import { selectionStore, useSelectionStore } from "@/stores/selectionStore";
 import { useViewportStore } from "@/stores/viewportStore";
+import { usePlatform, useRegistryEntries, type TreeNode } from "@/platform";
+import type { IconName } from "@/icons/paths";
 import { TreeRow } from "./TreeRow";
 import { ReattachPopover } from "@/features/sketch/ReattachPopover";
 import { reattachSketch } from "@/features/sketch/reattachActions";
-import {
-  deleteDatum,
-  deleteSketch,
-  renameBody,
-  renameSketch,
-  setBodyVisible,
-  setSketchVisible,
-} from "./treeActions";
-
-/** Which row the shared context menu is currently anchored to. */
-type MenuTarget = {
-  kind: "body" | "sketch" | "datum";
-  id: string;
-  name: string;
-  visible: boolean;
-};
+import { Button } from "@/ui/Button";
+import { Icon } from "@/icons/Icon";
+import { SettingsModal } from "@/features/settings/SettingsModal";
+import { deleteDatum, deleteSketch } from "./treeActions";
 
 /**
  * Docked model tree: BODIES + SKETCHES + DATUMS sections driven by the document
@@ -42,36 +31,46 @@ type MenuTarget = {
  * selected row inline.
  */
 export function ModelTreePanel() {
-  const bodies = useDocumentStore((s) => s.bodies);
+  const platform = usePlatform();
+  const providers = useRegistryEntries(platform.tree);
+  // These four subscriptions exist SO THAT the provider's `sections()` reads are
+  // fresh: the provider is a projection over `getState()`, and the host owns
+  // re-rendering (see TreeProvider's contract). They are load-bearing even
+  // though nothing below reads their values directly.
+  useDocumentStore((s) => s.bodies);
+  useDocumentStore((s) => s.sketches);
+  useDocumentStore((s) => s.datums);
+  useSelectionStore((s) => s.selected);
+  useViewportStore((s) => s.isolatedBodyIds);
   const sketches = useDocumentStore((s) => s.sketches);
-  const datums = useDocumentStore((s) => s.datums);
-  const selected = useSelectionStore((s) => s.selected);
-  const select = useSelectionStore((s) => s.set);
-  const setMode = useToolStore((s) => s.setMode);
-  const isolated = useViewportStore((s) => s.isolatedBodyIds);
 
-  const [menu, setMenu] = useState<MenuTarget | null>(null);
+  const sections = providers.flatMap((p) => p.sections());
+  const nodeOf = (id: string) => sections.flatMap((s) => s.nodes).find((n) => n.id === id);
+
+  /** Which row the shared context menu is anchored to. Re-resolved each render:
+   *  node objects are rebuilt by the provider on every projection. */
+  const [menu, setMenu] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   // H9 reattach: the sketch whose target picker is open. A SECOND popover, opened
   // from the same row anchor after the context menu closes.
   const [reattaching, setReattaching] = useState<string | null>(null);
   const anchor = useRef<HTMLElement | null>(null);
 
-  const isSelected = (kind: EntityKind, id: string) =>
-    selected.some((r) => r.kind === kind && r.id === id);
+  const menuNode = menu === null ? null : (nodeOf(menu) ?? null);
 
   const closeMenu = useCallback(() => {
     setMenu(null);
     setConfirmDelete(false);
   }, []);
 
-  const openMenu = (target: MenuTarget) => (e: ReactMouseEvent<HTMLDivElement>) => {
+  const openMenu = (node: TreeNode) => (e: ReactMouseEvent<HTMLDivElement>) => {
     e.preventDefault();
     anchor.current = e.currentTarget;
     setConfirmDelete(false);
-    setMenu(target);
-    select([{ kind: target.kind, id: target.id }]);
+    setMenu(node.id);
+    node.select();
   };
 
   // F2 renames the selected row. Scoped to a single body/sketch selection so it
@@ -94,80 +93,60 @@ export function ModelTreePanel() {
     return () => window.removeEventListener("keydown", onKey);
   }, [closeMenu]);
 
-  const commitRename = (kind: "body" | "sketch", id: string) => (name: string) => {
+  const commitRename = (node: TreeNode) => (name: string) => {
     setRenaming(null);
-    void (kind === "body" ? renameBody(id, name) : renameSketch(id, name));
+    node.rename?.(name);
   };
 
   return (
-    <div className="absolute bottom-[34px] left-0 top-0 z-20 w-[220px] overflow-auto border-r border-border bg-panel pb-1.5">
-      <SectionLabel className="px-[14px] pb-1 pt-3">Bodies</SectionLabel>
-      <div role="listbox" aria-label="Bodies">
-        {Object.values(bodies).map((b) => (
-          <TreeRow
-            key={b.id}
-            name={b.name}
-            icon="cube"
-            visible={b.visible}
-            // Isolated AWAY → dim the row (the eye still reports the document's
-            // own visibility; isolation is a transient viewport mask).
-            dimmed={isolated !== null && !isolated.includes(b.id)}
-            selected={isSelected("body", b.id)}
-            onSelect={() => select([{ kind: "body", id: b.id }])}
-            onToggleVisible={(v) => void setBodyVisible(b.id, v)}
-            onContextMenu={openMenu({ kind: "body", id: b.id, name: b.name, visible: b.visible })}
-            editing={renaming === b.id}
-            onRenameCommit={commitRename("body", b.id)}
-            onRenameCancel={() => setRenaming(null)}
-          />
+    <div className="absolute bottom-[34px] left-0 top-0 z-20 flex w-[220px] flex-col border-r border-border bg-panel">
+      <div className="min-h-0 flex-1 overflow-auto pb-1.5">
+        {sections.map((section) => (
+          <div key={section.id}>
+            <SectionLabel className="px-[14px] pb-1 pt-3">{section.title}</SectionLabel>
+            <div role="listbox" aria-label={section.title}>
+              {section.nodes.map((node) => (
+                <TreeRow
+                  key={node.id}
+                  name={node.label}
+                  icon={node.icon as IconName}
+                  // Absent `visible` ⇒ the row has no visibility fact ⇒ no eye.
+                  visible={node.visible}
+                  dimmed={node.dimmed}
+                  selected={node.selected}
+                  onSelect={node.select}
+                  onToggleVisible={node.toggleVisible}
+                  onActivate={node.activate}
+                  onContextMenu={openMenu(node)}
+                  editing={renaming === node.id}
+                  onRenameCommit={node.rename ? commitRename(node) : undefined}
+                  onRenameCancel={() => setRenaming(null)}
+                />
+              ))}
+            </div>
+          </div>
         ))}
       </div>
 
-      <SectionLabel className="px-[14px] pb-1 pt-3">Sketches</SectionLabel>
-      <div role="listbox" aria-label="Sketches">
-        {Object.values(sketches).map((s) => (
-          <TreeRow
-            key={s.id}
-            name={s.name}
-            icon="pen"
-            visible={s.visible}
-            selected={isSelected("sketch", s.id)}
-            onSelect={() => select([{ kind: "sketch", id: s.id }])}
-            onToggleVisible={(v) => void setSketchVisible(s.id, v)}
-            onActivate={() => setMode("sketch", s.id)}
-            onContextMenu={openMenu({ kind: "sketch", id: s.id, name: s.name, visible: s.visible })}
-            editing={renaming === s.id}
-            onRenameCommit={commitRename("sketch", s.id)}
-            onRenameCancel={() => setRenaming(null)}
-          />
-        ))}
+      <div className="border-t border-border p-2">
+        <Button
+          variant="ghost"
+          size="md"
+          className="w-full justify-start"
+          aria-label="Open settings"
+          onClick={() => setSettingsOpen(true)}
+        >
+          <Icon name="settings" size={14} strokeWidth={1.8} />
+          Settings
+        </Button>
       </div>
 
-      <SectionLabel className="px-[14px] pb-1 pt-3">Datums</SectionLabel>
-      <div role="listbox" aria-label="Datums">
-        {Object.values(datums).map((d) => (
-          <TreeRow
-            key={d.id}
-            name={d.name}
-            icon="datum"
-            // No eye: a datum carries no visibility fact in the document.
-            selected={isSelected("datum", d.id)}
-            onSelect={() => select([{ kind: "datum", id: d.id }])}
-            onActivate={() => {
-              select([{ kind: "datum", id: d.id }]);
-              setMode("sketch");
-            }}
-            onContextMenu={openMenu({ kind: "datum", id: d.id, name: d.name, visible: true })}
-          />
-        ))}
-      </div>
-
-      {menu && (
+      {menuNode && (
         // Keyed by the target so re-opening on a DIFFERENT row re-runs the
         // Popover's anchor-measuring effect (it keys off `open`, and the ref
         // object identity never changes).
         <Popover
-          key={`${menu.kind}:${menu.id}`}
+          key={`${menuNode.kind}:${menuNode.id}`}
           open
           onClose={closeMenu}
           anchorRef={anchor}
@@ -175,33 +154,31 @@ export function ModelTreePanel() {
           width={170}
           className="p-1"
         >
-          {/* Rename + Hide/Show are body/sketch-only: DATUM W1 ships no
-              RenameDatum command and a datum has no visibility fact, so offering
-              either would be a dead affordance. */}
-          {menu.kind !== "datum" && (
-            <>
-              <MenuItem
-                label="Rename"
-                shortcut="F2"
-                data-testid="tree-menu-rename"
-                onClick={() => {
-                  closeMenu();
-                  setRenaming(menu.id);
-                }}
-              />
-              <MenuItem
-                label={menu.visible ? "Hide" : "Show"}
-                data-testid="tree-menu-visibility"
-                onClick={() => {
-                  closeMenu();
-                  void (menu.kind === "body"
-                    ? setBodyVisible(menu.id, !menu.visible)
-                    : setSketchVisible(menu.id, !menu.visible));
-                }}
-              />
-            </>
+          {/* Rename and Hide/Show are offered when the NODE declares them.
+              DATUM W1 ships no RenameDatum command and a datum has no visibility
+              fact, so its node supplies neither and the items disappear. */}
+          {menuNode.rename && (
+            <MenuItem
+              label="Rename"
+              shortcut="F2"
+              data-testid="tree-menu-rename"
+              onClick={() => {
+                closeMenu();
+                setRenaming(menuNode.id);
+              }}
+            />
           )}
-          {menu.kind === "datum" && (
+          {menuNode.toggleVisible && (
+            <MenuItem
+              label={menuNode.visible ? "Hide" : "Show"}
+              data-testid="tree-menu-visibility"
+              onClick={() => {
+                closeMenu();
+                menuNode.toggleVisible?.(!menuNode.visible);
+              }}
+            />
+          )}
+          {menuNode.kind === "datum" && (
             // Two-click confirm, same idiom as the sketch delete below. The
             // backend refuses while a sketch is hosted on the datum; treeActions
             // surfaces that rejection as a sticky hint.
@@ -213,7 +190,7 @@ export function ModelTreePanel() {
                   data-testid="tree-menu-datum-delete-confirm"
                   onClick={() => {
                     closeMenu();
-                    void deleteDatum(menu.id);
+                    void deleteDatum(menuNode.id);
                   }}
                 />
               ) : (
@@ -226,19 +203,19 @@ export function ModelTreePanel() {
               )}
             </>
           )}
-          {menu.kind === "sketch" && (
+          {menuNode.kind === "sketch" && (
             <>
               {/* H9 REATTACH. Offered only for a sketch that is NOT face-hosted:
                   a face-hosted sketch's frame comes from the face and its
                   projected boundary is expressed in it, so moving it to a world
                   plane / datum would silently reinterpret that boundary with
                   nothing to re-project it (`reattachSketch` docs). */}
-              {!sketches[menu.id]?.hostFace && (
+              {!sketches[menuNode.id]?.hostFace && (
                 <MenuItem
                   label="Reattach…"
                   data-testid="tree-menu-reattach"
                   onClick={() => {
-                    const id = menu.id;
+                    const id = menuNode.id;
                     closeMenu();
                     setReattaching(id);
                   }}
@@ -254,7 +231,7 @@ export function ModelTreePanel() {
                   data-testid="tree-menu-delete-confirm"
                   onClick={() => {
                     closeMenu();
-                    void deleteSketch(menu.id);
+                    void deleteSketch(menuNode.id);
                   }}
                 />
               ) : (
@@ -282,6 +259,8 @@ export function ModelTreePanel() {
           }}
         />
       )}
+
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }

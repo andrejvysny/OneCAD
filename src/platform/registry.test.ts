@@ -178,6 +178,21 @@ describe("registry — deterministic order", () => {
     expect(orderOf([ids[1], ids[0], ids[2]])).toEqual(expected);
   });
 
+  it("does NOT sort by group — priority alone decides (ADR-0007)", () => {
+    // Groups deliberately spelled so that alphabetical order is the REVERSE of
+    // the intended one. A registry that sorted by group first would return
+    // "aaa.late" before "zzz.early", which is the failure the ADR describes:
+    // the UI would order itself by how a group happens to be spelled.
+    const r = createRegistry<Entry>("thing");
+    r.register(MODELING, entry("onecad.modeling.late", 200, "aaa.group"));
+    r.register(MODELING, entry("onecad.modeling.early", 100, "zzz.group"));
+
+    expect(r.entries().map((e) => e.id)).toEqual([
+      "onecad.modeling.early",
+      "onecad.modeling.late",
+    ]);
+  });
+
   it("falls back to registration order only for an exact priority tie", () => {
     const r = createRegistry<Entry>("thing");
     r.register(MODELING, entry("onecad.modeling.second", 100));

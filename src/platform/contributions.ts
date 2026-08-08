@@ -24,6 +24,7 @@ import type {
   ToolId,
   TypeId,
   ViewportContributionId,
+  TreeProviderId,
   WorkspaceId,
 } from "./ids";
 
@@ -147,6 +148,54 @@ export interface InspectorContribution extends Contribution {
   readonly title?: string;
   canRender(ctx: InspectorContext): boolean;
   readonly component: ContributionComponent;
+}
+
+// ── Model tree ───────────────────────────────────────────────────────────────
+
+/**
+ * One row. The host renders it and routes the gestures back; it never learns
+ * what the row IS.
+ *
+ * `select` and `activate` are SEPARATE because click and double-click mean
+ * different things on every row shipped today — a sketch row selects on click
+ * and re-opens its sketch on double-click. Collapsing them would either change
+ * behavior or push the owner's selection semantics back into the generic panel.
+ *
+ * An ABSENT capability is the way to say a row does not have it: a datum carries
+ * no visibility fact in the document, so it supplies no `toggleVisible` and the
+ * host renders no eye. That is different from `visible: false`.
+ */
+export interface TreeNode {
+  readonly id: string;
+  readonly label: string;
+  readonly icon: string;
+  /** Owner-defined row category. Opaque to the host. */
+  readonly kind: string;
+  readonly selected: boolean;
+  /** Rendered dimmed — shown but not currently in play. */
+  readonly dimmed?: boolean;
+  /** Absent ⇒ this row has no visibility fact at all. */
+  readonly visible?: boolean;
+  select(): void;
+  activate?(): void;
+  toggleVisible?(next: boolean): void;
+  rename?(next: string): void;
+}
+
+export interface TreeSection {
+  readonly id: string;
+  readonly title: string;
+  readonly nodes: readonly TreeNode[];
+}
+
+/**
+ * A source of tree rows. `sections()` is read during the host's render, so the
+ * host is responsible for re-rendering when the underlying data changes — the
+ * provider is a projection, not a subscription.
+ */
+export interface TreeProvider extends Contribution {
+  readonly id: TreeProviderId;
+  sections(): readonly TreeSection[];
 }
 
 /**
