@@ -27,6 +27,8 @@ import type { DevicePref, InputDevice } from "./navInput";
 import { GridPlane } from "./GridPlane";
 import { OriginTriad } from "./OriginTriad";
 import { HtmlOverlayDriver } from "./HtmlOverlayDriver";
+import { ViewportContributionHost } from "./ContributionHost";
+import type { Registry, ViewportContribution } from "@/platform";
 import { palette } from "./palette";
 import { Picker, linePickThreshold, type PickHit, type PickModifiers } from "./Picker";
 import { HighlightLayer } from "./HighlightLayer";
@@ -51,7 +53,6 @@ import { TransformGizmo, type GizmoHit } from "./TransformGizmo";
 import { RevolvePreview, type AxisCandidate } from "./RevolvePreview";
 import { PlanePicker, type PickablePlane } from "./PlanePicker";
 import { lightRigPose, type LightRigPose } from "./lightRig";
-import { DatumLayer, datumGhostPlane, type DatumVisual } from "./DatumLayer";
 import { GhostLayer, type GhostInstances } from "./GhostLayer";
 import type { LatheAxis } from "@/tools/preview/lathePreview";
 import type { GhostTransform } from "@/tools/preview/patternPreview";
@@ -235,8 +236,19 @@ export class ViewportEngine {
   // Always-visible document sketches in MODEL mode (Fusion-style static layer).
   private sketchStatic: SketchStaticLayer | null = null;
 
-  // Always-visible datum (reference) planes + the datum tool's ghost (DATUM W1).
-  private datumLayer: DatumLayer | null = null;
+  /**
+   * Where `ViewportContribution`s attach. A child of `interactionRoot` so
+   * contributed geometry sits in the same band as the built-in interaction
+   * layers, and one group so the host can hit-test or clear them together.
+   */
+  readonly contributionsRoot = new THREE.Group();
+  private readonly contributions = new ViewportContributionHost({
+    root: this.contributionsRoot,
+    overlay: this.overlayDriver,
+    getOverlayEl: () => this.overlayEl,
+    invalidate: () => this.invalidate(),
+    raycastFromClient: (x, y) => this.raycastFromClient(x, y),
+  });
 
   // Sketch mode (F-WP6).
   private overlayEl: HTMLElement | null = null;
@@ -364,8 +376,9 @@ export class ViewportEngine {
       secondaryHoverKey: (x, y) => {
         const hit = this.sketchStaticHitTest(x, y);
         if (hit) return sketchStaticHitKey(hit);
-        const datumId = this.datumHitTest(x, y);
-        return datumId ? `datum:${datumId}` : null;
+        // Built-ins first, then contributions in registry order — reversing this
+        // would change which token hover fires on where two layers overlap.
+        return this.contributions.secondaryHover(x, y);
       },
     });
 
@@ -428,7 +441,7 @@ export class ViewportEngine {
 
     this.highlights?.refreshColors();
     this.planePicker?.refreshColors();
-    this.datumLayer?.refreshColors();
+    this.contributions.applyTheme();
     this.regionPickLayer?.refreshColors();
     this.sketch?.refreshColors();
     this.sketchStatic?.refreshColors();
@@ -486,6 +499,7 @@ export class ViewportEngine {
   }
 
   private buildScene(): void {
+    this.interactionRoot.add(this.contributionsRoot);
     // Ambient floor. The ground half is the canvas token, so unlit undersides
     // settle toward the background instead of a hard-coded blue-gray.
     const levels = lightLevels(false);
@@ -629,8 +643,10 @@ export class ViewportEngine {
     if (this.planePicker?.visible) {
       this.planePicker.update(camera, height);
     }
-    // Datum quads hold a constant on-screen size (they ARE the hit geometry).
-    this.datumLayer?.update(camera, height);
+    // Viewport contributions get their frame HERE, at the ladder position the
+    // datum layer used to occupy — the order is painter's-ladder sensitive
+    // (engine/README.md § render order).
+    this.contributions.runFrame(camera, height);
     if (this.sketch) {
       this.sketch.update(width * dpr, height * dpr, this.controls.getTarget(), this.controls.getDistance());
     }
@@ -1400,74 +1416,34 @@ export class ViewportEngine {
     this.planePicker?.setHover(null);
   }
 
-  // ---- Datum (reference) planes — DATUM W1 ----
+  // ---- Viewport contributions ----
   //
-  // Persistent document content, so the layer is always live in model mode (the
-  // datumSync controller drives it from documentStore.datums). Deliberately NOT
-  // in the orbit gate (SketchStaticLayer convention): clicking empty space near a
-  // datum still orbits.
+  // The datum layer used to live here as six engine methods. It is a
+  // `ViewportContribution` owned by `onecad.modeling` now (see
+  // `modules/modeling/datumViewport.ts`); what stays is the HOST side.
 
-  /** The datum layer (lazy). Null before `init()` — there is no overlay host yet. */
-  private ensureDatumLayer(): DatumLayer | null {
-    if (this.disposed || !this.overlayEl) return null;
-    if (!this.datumLayer) {
-      this.datumLayer = new DatumLayer({
-        root: this.interactionRoot,
-        overlay: this.overlayDriver,
-        overlayEl: this.overlayEl,
-        invalidate: () => this.invalidate(),
-      });
-    }
-    return this.datumLayer;
+  /**
+   * Follow a contribution registry for this engine's life. Called by
+   * `ViewportRoot` once the platform is in reach; passing `null` detaches.
+   */
+  setContributionRegistry(registry: Registry<ViewportContribution> | null): void {
+    this.contributions.setRegistry(registry);
   }
 
-  /** Reconcile the rendered datum planes against the projection (add/remove/move). */
-  syncDatums(metas: readonly DatumVisual[]): void {
-    const layer = this.ensureDatumLayer();
-    if (!layer) return;
-    layer.syncDatums(metas);
-    // Size the quads now, not on the next frame: a hit-test can raycast them
-    // before the render loop runs, and the quads ARE the hit geometry.
-    layer.update(this.rig.getCamera(), this.viewportSize().height);
-  }
-
-  /** The datum plane under a client point, or null. Pure (no hover mutation). */
-  datumHitTest(clientX: number, clientY: number): string | null {
-    if (!this.datumLayer) return null;
-    const ndc = this.clientToNdc(clientX, clientY);
-    if (!ndc || Math.abs(ndc.x) > 1 || Math.abs(ndc.y) > 1) return null;
-    this.raycaster.setFromCamera(ndc, this.rig.getCamera());
-    return this.datumLayer.hitTest(this.raycaster);
-  }
-
-  setDatumHover(id: string | null): void {
-    this.datumLayer?.setHover(id);
-  }
-
-  setDatumSelected(ids: readonly string[]): void {
-    this.datumLayer?.setSelected(ids);
+  /** Ids of the attached contributions, in run order (introspection / tests). */
+  get contributionIds(): string[] {
+    return this.contributions.attachedIds;
   }
 
   /**
-   * Show the datum TOOL's live ghost quad for `baseKind` offset by `offset`, or
-   * hide it with `baseKind: null`. The frame comes from `datumGhostPlane` — the
-   * one place the frontend derives a datum basis, because nothing is committed
-   * yet and there is no backend frame to read (see DatumLayer's module doc).
+   * A raycaster set from a client point, or null when it is off-canvas. Shared
+   * with contributions so a layer never re-derives the projection maths.
    */
-  setDatumGhost(baseKind: PickablePlane | null, offset: number, label?: string): void {
-    if (baseKind === null) {
-      this.datumLayer?.setGhost(null);
-      return;
-    }
-    const layer = this.ensureDatumLayer();
-    if (!layer) return;
-    layer.setGhost(datumGhostPlane(baseKind, offset), label);
-    layer.update(this.rig.getCamera(), this.viewportSize().height);
-  }
-
-  /** True while the datum tool ghost is on screen (gate/introspection probe). */
-  isDatumGhostVisible(): boolean {
-    return this.datumLayer?.ghostVisible ?? false;
+  raycastFromClient(clientX: number, clientY: number): THREE.Raycaster | null {
+    const ndc = this.clientToNdc(clientX, clientY);
+    if (!ndc || Math.abs(ndc.x) > 1 || Math.abs(ndc.y) > 1) return null;
+    this.raycaster.setFromCamera(ndc, this.rig.getCamera());
+    return this.raycaster;
   }
 
   /** Raycast a client point onto an ARBITRARY sketch plane → plane (u,v). */
@@ -1724,8 +1700,8 @@ export class ViewportEngine {
     this.sketchStatic?.dispose();
     this.sketchStatic = null;
 
-    this.datumLayer?.dispose();
-    this.datumLayer = null;
+    this.contributions.dispose();
+    this.interactionRoot.remove(this.contributionsRoot);
 
     // Model-tool previews.
     this.previewMesh?.dispose();

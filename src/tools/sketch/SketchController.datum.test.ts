@@ -22,6 +22,22 @@ import { documentStore, type DatumMeta } from "@/stores/documentStore";
 import { selectionStore } from "@/stores/selectionStore";
 import { resetStores } from "@/test/resetStores";
 
+// The datum layer is a viewport CONTRIBUTION now, so its imperative surface is
+// published through `modules/modeling/datumViewport` rather than hung off the
+// engine. Same fakes, one seam over.
+import { getDatumVisuals } from "@/modules/modeling/datumViewport";
+
+vi.mock("@/modules/modeling/datumViewport", () => ({ getDatumVisuals: vi.fn() }));
+
+const datumVisualsMock = {
+  sync: vi.fn(),
+  hitTest: vi.fn((): string | null => null),
+  setHover: vi.fn(),
+  setSelected: vi.fn(),
+  setGhost: vi.fn(),
+  ghostVisible: false,
+};
+
 /** The datum's resolved frame — deliberately NOT the canonical XY basis, so a
  *  re-derivation anywhere on the frontend would show up as a different plane. */
 const DATUM_PLANE: SketchPlane = {
@@ -69,8 +85,6 @@ describe("SketchController — sketch on a datum plane", () => {
       clearPlanePickerHover: vi.fn(),
       // W3: the plane-pick phase falls through to a body FACE (probePick).
       probePick: vi.fn(() => null),
-      datumHitTest: vi.fn(() => datumHit),
-      setDatumHover: vi.fn(),
       enterSketch: vi.fn(),
       exitSketch: vi.fn(),
       setSketchDrawingActive: vi.fn(),
@@ -96,6 +110,9 @@ describe("SketchController — sketch on a datum plane", () => {
     resetStores();
     planeHit = null;
     datumHit = null;
+    datumVisualsMock.hitTest.mockImplementation(() => datumHit);
+    datumVisualsMock.setHover.mockClear();
+    vi.mocked(getDatumVisuals).mockReturnValue(datumVisualsMock);
     documentStore.getState().addDatum(datum());
     engineMock = makeEngineMock();
     clientMock = makeClientMock();
@@ -219,12 +236,12 @@ describe("SketchController — sketch on a datum plane", () => {
 
     datumHit = "d1";
     container.dispatchEvent(new MouseEvent("pointermove", { clientX: 5, clientY: 5, bubbles: true }));
-    expect(engineMock.setDatumHover).toHaveBeenLastCalledWith("d1");
+    expect(datumVisualsMock.setHover).toHaveBeenLastCalledWith("d1");
     expect(engineMock.clearPlanePickerHover).toHaveBeenCalled();
 
     datumHit = null;
     container.dispatchEvent(new MouseEvent("pointermove", { clientX: 6, clientY: 6, bubbles: true }));
-    expect(engineMock.setDatumHover).toHaveBeenLastCalledWith(null);
+    expect(datumVisualsMock.setHover).toHaveBeenLastCalledWith(null);
     expect(engineMock.planePickerHover).toHaveBeenLastCalledWith(6, 6);
   });
 
@@ -246,9 +263,9 @@ describe("SketchController — sketch on a datum plane", () => {
   it("leaving the pick phase clears the datum hover tint", async () => {
     toolStore.getState().setMode("sketch");
     await flush();
-    engineMock.setDatumHover.mockClear();
+    datumVisualsMock.setHover.mockClear();
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     await flush();
-    expect(engineMock.setDatumHover).toHaveBeenCalledWith(null);
+    expect(datumVisualsMock.setHover).toHaveBeenCalledWith(null);
   });
 });

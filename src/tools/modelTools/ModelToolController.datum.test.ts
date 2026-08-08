@@ -18,6 +18,22 @@ import { viewportStore } from "@/stores/viewportStore";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { resetStores } from "@/test/resetStores";
 
+// The datum layer is a viewport CONTRIBUTION now, so its imperative surface is
+// published through `modules/modeling/datumViewport` rather than hung off the
+// engine. Same fakes, one seam over.
+import { getDatumVisuals } from "@/modules/modeling/datumViewport";
+
+vi.mock("@/modules/modeling/datumViewport", () => ({ getDatumVisuals: vi.fn() }));
+
+const datumVisualsMock = {
+  sync: vi.fn(),
+  hitTest: vi.fn((): string | null => null),
+  setHover: vi.fn(),
+  setSelected: vi.fn(),
+  setGhost: vi.fn(),
+  ghostVisible: false,
+};
+
 const okEdit: ApplyOperationResult = {
   revision: 7,
   features: [],
@@ -39,7 +55,6 @@ describe("ModelToolController — datum plane tool", () => {
     setPlanePickerVisible: ReturnType<typeof vi.fn>;
     planePickerHover: ReturnType<typeof vi.fn>;
     planePickerHitTest: ReturnType<typeof vi.fn>;
-    setDatumGhost: ReturnType<typeof vi.fn>;
     [k: string]: unknown;
   };
   let clientMock: { applyEditCommand: ReturnType<typeof vi.fn>; [k: string]: unknown };
@@ -50,7 +65,6 @@ describe("ModelToolController — datum plane tool", () => {
       setPlanePickerVisible: vi.fn(),
       planePickerHover: vi.fn(),
       planePickerHitTest: vi.fn(() => planeHit),
-      setDatumGhost: vi.fn(),
       // Everything the shared cancel sweep touches on any tool switch.
       setOrbitSuppressed: vi.fn(),
       hideRegionPick: vi.fn(),
@@ -100,6 +114,8 @@ describe("ModelToolController — datum plane tool", () => {
 
   beforeEach(() => {
     resetStores();
+    datumVisualsMock.setGhost.mockClear();
+    vi.mocked(getDatumVisuals).mockReturnValue(datumVisualsMock);
     documentStore.getState().applyChange({ datums: {} });
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -144,7 +160,7 @@ describe("ModelToolController — datum plane tool", () => {
     expect(debug().datumBase).toBe("XY");
     expect(debug().datumOffset).toBe(10);
     // Ghost at the seed offset, labelled with the GEOMETRIC plane name.
-    expect(engineMock.setDatumGhost).toHaveBeenLastCalledWith("XY", 10, "XY");
+    expect(datumVisualsMock.setGhost).toHaveBeenLastCalledWith("XY", 10, "XY");
 
     const chip = toolChipStore.getState();
     expect(chip.kind).toBe("datumOffset");
@@ -159,7 +175,7 @@ describe("ModelToolController — datum plane tool", () => {
     armAndPickBase("XZ");
     expect(debug().datumBase).toBe("XZ"); // stored kind: the repo one
     expect(toolChipStore.getState().label).toBe("YZ"); // shown: the geometric one
-    expect(engineMock.setDatumGhost).toHaveBeenLastCalledWith("XZ", 10, "YZ");
+    expect(datumVisualsMock.setGhost).toHaveBeenLastCalledWith("XZ", 10, "YZ");
   });
 
   it("editing the chip offset moves the ghost live", () => {
@@ -167,7 +183,7 @@ describe("ModelToolController — datum plane tool", () => {
     toolChipStore.getState().onValue?.(35);
     expect(debug().datumOffset).toBe(35);
     expect(toolChipStore.getState().value).toBe(35);
-    expect(engineMock.setDatumGhost).toHaveBeenLastCalledWith("XY", 35, "XY");
+    expect(datumVisualsMock.setGhost).toHaveBeenLastCalledWith("XY", 35, "XY");
   });
 
   it("the chip ✓ commits AddDatumPlane with the picked base + offset, then resets to select", async () => {
@@ -194,7 +210,7 @@ describe("ModelToolController — datum plane tool", () => {
     expect(toolStore.getState().modelTool).toBe("select");
     expect(debug().datumPhase).toBe("idle");
     expect(toolChipStore.getState().kind).toBe("none");
-    expect(engineMock.setDatumGhost).toHaveBeenLastCalledWith(null, 0);
+    expect(datumVisualsMock.setGhost).toHaveBeenLastCalledWith(null, 0);
     expect(viewportStore.getState().statusHint?.message).toBe("Datum 1 created");
   });
 
@@ -267,7 +283,7 @@ describe("ModelToolController — datum plane tool", () => {
   it("Esc during the OFFSET phase drops the ghost + chip and returns to select", () => {
     armAndPickBase("XY");
     key("Escape");
-    expect(engineMock.setDatumGhost).toHaveBeenLastCalledWith(null, 0);
+    expect(datumVisualsMock.setGhost).toHaveBeenLastCalledWith(null, 0);
     expect(toolChipStore.getState().kind).toBe("none");
     expect(debug().datumPhase).toBe("idle");
     expect(toolStore.getState().modelTool).toBe("select");

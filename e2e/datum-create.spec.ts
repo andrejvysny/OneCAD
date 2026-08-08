@@ -50,8 +50,8 @@ test.describe("datum plane — create", () => {
     expect(
       await page.evaluate(
         () =>
-          (window as unknown as { __vpEngine?: { isDatumGhostVisible(): boolean } }).__vpEngine
-            ?.isDatumGhostVisible() ?? false,
+          (window as unknown as { __datumVisuals?: { ghostVisible: boolean } }).__datumVisuals
+            ?.ghostVisible ?? false,
       ),
     ).toBe(true);
     // Still nothing in the tree: the offset phase commits NOTHING on its own.
@@ -132,8 +132,8 @@ test.describe("datum plane — create", () => {
     expect(
       await page.evaluate(
         () =>
-          (window as unknown as { __vpEngine?: { isDatumGhostVisible(): boolean } }).__vpEngine
-            ?.isDatumGhostVisible() ?? false,
+          (window as unknown as { __datumVisuals?: { ghostVisible: boolean } }).__datumVisuals
+            ?.ghostVisible ?? false,
       ),
     ).toBe(false);
   });

@@ -59,7 +59,7 @@ async function findFaceClearOfPickerChrome(page: Page): Promise<{ x: number; y: 
           __vpEngine?: {
             probePick(x: number, y: number): { kind: string; topoKey: string } | null;
             planePickerHitTest(x: number, y: number): string | null;
-            datumHitTest(x: number, y: number): string | null;
+
             sketchStaticHitTest(x: number, y: number): unknown;
           };
         }
@@ -72,7 +72,12 @@ async function findFaceClearOfPickerChrome(page: Page): Promise<{ x: number; y: 
         for (let x = rect.left + step; x <= rect.right - step; x += step) {
           const hit = engine.probePick(x, y);
           if (!hit || hit.kind !== "face") continue;
-          if (engine.planePickerHitTest(x, y) || engine.datumHitTest(x, y)) continue;
+          if (
+            engine.planePickerHitTest(x, y) ||
+            (window as unknown as { __datumVisuals?: { hitTest(x: number, y: number): string | null } })
+              .__datumVisuals?.hitTest(x, y)
+          )
+            continue;
           if (engine.sketchStaticHitTest(x, y)) continue;
           return { x, y, topoKey: hit.topoKey };
         }

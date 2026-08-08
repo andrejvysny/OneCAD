@@ -6,7 +6,12 @@
  * HERE. Importing `ui.ts` for an id would drag the whole editor chunk into the
  * startup bundle and undo the code split `App.tsx` documents.
  */
-import { contributionId, type PanelId, type TreeProviderId } from "@/platform";
+import {
+  contributionId,
+  type PanelId,
+  type TreeProviderId,
+  type ViewportContributionId,
+} from "@/platform";
 import { MODELING_MODULE_ID } from "./manifest";
 
 const panelId = (name: string) =>
@@ -34,3 +39,11 @@ export const ModelingTreeProvider: TreeProviderId = contributionId<TreeProviderI
   MODELING_MODULE_ID,
   "onecad.modeling.tree.provider",
 );
+
+/** Modeling's in-scene viewport layers. */
+export const ModelingViewport = {
+  Datums: contributionId<ViewportContributionId>(
+    MODELING_MODULE_ID,
+    "onecad.modeling.viewport.datums",
+  ),
+} as const;

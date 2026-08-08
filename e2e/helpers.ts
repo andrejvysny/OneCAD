@@ -228,7 +228,9 @@ export async function findPlaneQuad(
 
 /**
  * Hit-scan the canvas for a real client pixel over a DATUM plane quad, via the
- * engine's own `datumHitTest`. Returns the pixel plus the datum id found there.
+ * datum layer's own `hitTest` (published at `window.__datumVisuals` — the layer
+ * is a viewport CONTRIBUTION now, so the probe follows it off the engine).
+ * Returns the pixel plus the datum id found there.
  * Same rationale as `findPlaneQuad`: a datum sits at an arbitrary offset with no
  * closed-form screen position.
  */
@@ -237,15 +239,15 @@ export async function findDatumQuad(page: Page): Promise<{ x: number; y: number;
   await expect(async () => {
     found = await page.evaluate(() => {
       const engine = (
-        window as unknown as { __vpEngine?: { datumHitTest(x: number, y: number): string | null } }
-      ).__vpEngine;
+        window as unknown as { __datumVisuals?: { hitTest(x: number, y: number): string | null } }
+      ).__datumVisuals;
       const canvas = document.querySelector('[data-testid="viewport-canvas"] canvas') as HTMLCanvasElement | null;
       if (!engine || !canvas) return null;
       const rect = canvas.getBoundingClientRect();
       const step = 8;
       for (let y = rect.top + step; y <= rect.bottom - step; y += step) {
         for (let x = rect.left + step; x <= rect.right - step; x += step) {
-          const id = engine.datumHitTest(x, y);
+          const id = engine.hitTest(x, y);
           if (id) return { x, y, id };
         }
       }

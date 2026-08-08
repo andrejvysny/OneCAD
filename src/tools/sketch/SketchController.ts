@@ -28,6 +28,7 @@ import type {
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import type { PickablePlane } from "@/viewport/engine/PlanePicker";
 import type { Point2 } from "@/viewport/engine/sketchBasis";
+import { getDatumVisuals } from "@/modules/modeling/datumViewport";
 import { chooseGridStep } from "@/viewport/engine/GridPlane";
 import { toolStore } from "@/stores/toolStore";
 import { viewportStore, type Projection, type StatusSeverity } from "@/stores/viewportStore";
@@ -802,7 +803,7 @@ export class SketchController {
     this.setFaceHover(null); // before the hint clear below — it would restore the prompt
     this.planePickHint = null;
     this.deps.engine.setPlanePickerVisible(false);
-    this.deps.engine.setDatumHover(null); // datums stay visible; drop the pick tint
+    getDatumVisuals()?.setHover(null); // datums stay visible; drop the pick tint
     viewportStore.getState().setStatusHint(null);
   }
 
@@ -1313,8 +1314,8 @@ export class SketchController {
     // is offset off the origin, so the ray can hit both, and the datum is the
     // thing the user deliberately created.
     if (this.planePicking) {
-      const datumId = this.deps.engine.datumHitTest(e.clientX, e.clientY);
-      this.deps.engine.setDatumHover(datumId);
+      const datumId = getDatumVisuals()?.hitTest(e.clientX, e.clientY) ?? null;
+      getDatumVisuals()?.setHover(datumId);
       if (datumId) {
         this.deps.engine.clearPlanePickerHover();
         this.setFaceHover(null);
@@ -1458,7 +1459,7 @@ export class SketchController {
       // and the quads are chrome the picker itself raised, so they win over
       // whatever model geometry happens to lie under them; the face is the
       // fallback that makes "S with nothing selected, then click the part" work.
-      const datumId = this.deps.engine.datumHitTest(e.clientX, e.clientY);
+      const datumId = getDatumVisuals()?.hitTest(e.clientX, e.clientY) ?? null;
       if (datumId) {
         void this.confirmDatumPick(datumId);
         return;

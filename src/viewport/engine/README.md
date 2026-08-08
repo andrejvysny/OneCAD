@@ -229,6 +229,14 @@ the way CSS does — it has to be told.
 unrelated happens to rebuild it. `themeRefresh.test.ts` covers this per layer;
 each of those tests has been negative-checked by neutering the implementation.
 
+**The same invariant binds a `ViewportContribution`**, one indirection out: a
+contributed layer is not in `applyTheme()`'s list at all, so it must subscribe
+through `ViewportContext.onThemeChange`. The engine cannot tell that it did not
+— there is nothing to omit and nothing to throw — which makes a forgotten
+subscription strictly harder to spot than a missing `applyTheme()` line. The
+datum layer (the first contribution) is covered by a negative-checked case in
+`themeRefresh.test.ts`; any layer added the same way needs one too.
+
 The sequence, driven from `ViewportRoot` on `subscribeResolvedTheme`:
 
 ```

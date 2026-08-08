@@ -13,6 +13,9 @@
  * palette, a shortcut and addon automation without knowing any of them exist.
  */
 import type { ComponentType } from "react";
+// Type-only: see ADR-0009. v1 has one host renderer, and an in-scene
+// contribution is a Three.js object by construction (slots.ts).
+import type { Camera, Object3D, Raycaster } from "three";
 import type { Contribution, Disposable } from "./registry";
 import type { SlotId } from "./slots";
 import type {
@@ -199,12 +202,60 @@ export interface TreeProvider extends Contribution {
 }
 
 /**
- * What a viewport contribution is handed. `invalidate` is the whole point: the
- * renderer is on-demand, so a contribution asks for a frame instead of running
- * its own animation loop (docs/ARCHITECTURE.md §7).
+ * A projected HTML label the host positions every frame. The host owns the
+ * overlay element and the projection; a contribution owns the element's content.
+ *
+ * This exists so a layer never receives the overlay HOST — handing out the
+ * engine's driver would put a renderer internal in the platform's public
+ * surface, and the label would then be positioned by whoever grabbed it.
+ */
+export interface ViewportLabelHandle {
+  /** Move the anchor. Coordinates are world-space, Z-up (docs/ARCHITECTURE.md §7). */
+  setPosition(world: { x: number; y: number; z: number }): void;
+  dispose(): void;
+}
+
+/**
+ * What a viewport contribution is handed.
+ *
+ * `invalidate` is the point of the on-demand renderer: a contribution asks for a
+ * frame instead of running its own animation loop (docs/ARCHITECTURE.md §7).
+ * Everything else here exists because a real in-scene layer needs it — the datum
+ * layer, ported onto this contract, needs every one.
+ *
+ * The Three.js types are a deliberate, type-only coupling: v1 has exactly one
+ * host renderer and `slots.ts` already describes in-scene contributions as
+ * Three.js objects (ADR-0009). The forbidden edge is `@/viewport`, not the
+ * rendering library.
  */
 export interface ViewportContext {
   invalidate(): void;
+  /** Host-owned group. A contribution adds its own objects and removes them on dispose. */
+  readonly root: Object3D;
+  createLabel(element: HTMLElement): ViewportLabelHandle;
+  /**
+   * Runs inside the host's render loop, at the layer position in the painter's
+   * ladder. NOT a place to start an animation — it fires only on frames the host
+   * was already going to draw.
+   */
+  onFrame(cb: (camera: Camera, viewportHeight: number) => void): Disposable;
+  /**
+   * Fires after the host has switched palettes. A layer that reads theme colors
+   * MUST subscribe: the host cannot tell that it did not, so a missed
+   * subscription is a silent staleness bug (see viewport/engine/README.md).
+   */
+  onThemeChange(cb: () => void): Disposable;
+  /**
+   * A raycaster already set from a client point, or null when the point is
+   * outside the canvas. Contributions do not get the camera's projection maths.
+   */
+  raycastFromClient(clientX: number, clientY: number): Raycaster | null;
+  /**
+   * Contribute a hover token for the host's pick pass, consulted only when
+   * nothing closer was hit. Built-ins are asked first, then contributions in
+   * registry order, and the first non-null answer wins.
+   */
+  registerSecondaryHover(fn: (clientX: number, clientY: number) => string | null): Disposable;
 }
 
 export interface ViewportContribution extends Contribution {

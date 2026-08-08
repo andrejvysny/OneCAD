@@ -28,7 +28,7 @@ import { planeBasisMatrix } from "./sketchBasis";
 import { palette } from "./palette";
 import { RENDER_ORDER } from "./renderOrder";
 import { worldPerPixel } from "./screenScale";
-import type { HtmlOverlayDriver } from "./HtmlOverlayDriver";
+import type { ViewportLabelHandle } from "@/platform";
 
 /** The minimum a datum needs to be drawn (a structural subset of `DatumMeta`). */
 export interface DatumVisual {
@@ -40,10 +40,14 @@ export interface DatumVisual {
   resolvedValid: boolean;
 }
 
+/**
+ * Shaped from `ViewportContext` — this layer is a viewport CONTRIBUTION now, so
+ * it takes the host's projected-label façade rather than the overlay driver
+ * itself (ADR-0009).
+ */
 export interface DatumLayerDeps {
-  root: THREE.Object3D; // interactionRoot
-  overlay: HtmlOverlayDriver;
-  overlayEl: HTMLElement;
+  root: THREE.Object3D;
+  createLabel: (element: HTMLElement) => ViewportLabelHandle;
   invalidate: () => void;
 }
 
@@ -58,8 +62,6 @@ const OPACITY_ACTIVE = 0.24;
 const OPACITY_UNRESOLVED = 0.05;
 const OUTLINE_OPACITY = 0.45;
 const GHOST_OPACITY = 0.2;
-const GHOST_ID = "__datum_ghost";
-const LABEL_PREFIX = "__datum_label_";
 
 /**
  * The frame a freshly authored `OffsetFromPlane` datum will land on: slide the
@@ -102,7 +104,7 @@ interface DatumQuad {
   mat: THREE.MeshBasicMaterial;
   outline: THREE.LineLoop;
   outlineMat: THREE.LineBasicMaterial;
-  labelEl: HTMLElement;
+  label: ViewportLabelHandle;
 }
 
 /** Identity of a datum's rendered state (name + frame) — a change rebuilds it. */
@@ -137,7 +139,7 @@ export class DatumLayer {
   private ghostMesh: THREE.Mesh | null = null;
   private ghostOutline: THREE.LineLoop | null = null;
   private ghostEl: HTMLElement | null = null;
-  private ghostRegistered = false;
+  private ghostLabel: ViewportLabelHandle | null = null;
 
   constructor(private readonly deps: DatumLayerDeps) {
     this.root.name = "datumRoot";
@@ -212,12 +214,8 @@ export class DatumLayer {
     s.pointerEvents = "none";
     s.background = "var(--color-chip)";
     s.color = "var(--color-ink-3)";
-    this.deps.overlayEl.appendChild(labelEl);
-    this.deps.overlay.register(
-      LABEL_PREFIX + meta.id,
-      labelEl,
-      new THREE.Vector3().fromArray(meta.plane.origin),
-    );
+    const label = this.deps.createLabel(labelEl);
+    label.setPosition(new THREE.Vector3().fromArray(meta.plane.origin));
 
     return {
       id: meta.id,
@@ -230,7 +228,7 @@ export class DatumLayer {
       mat,
       outline,
       outlineMat,
-      labelEl,
+      label,
     };
   }
 
@@ -240,8 +238,7 @@ export class DatumLayer {
     quad.outline.geometry.dispose();
     quad.outlineMat.dispose();
     this.root.remove(quad.group);
-    this.deps.overlay.unregister(LABEL_PREFIX + quad.id);
-    quad.labelEl.remove();
+    quad.label.dispose();
   }
 
   /** Ids of the datums currently rendered (introspection / tests). */
@@ -306,11 +303,10 @@ export class DatumLayer {
   setGhost(plane: SketchPlane | null, label?: string): void {
     if (!plane) {
       if (this.ghostGroup) this.ghostGroup.visible = false;
-      if (this.ghostRegistered) {
-        this.deps.overlay.unregister(GHOST_ID);
-        this.ghostRegistered = false;
-      }
-      if (this.ghostEl) this.ghostEl.style.display = "none";
+      // The label is DISPOSED rather than hidden: the host re-shows every
+      // registered label it can project, so a display:none one would flicker back.
+      this.ghostLabel?.dispose();
+      this.ghostLabel = null;
       this.deps.invalidate();
       return;
     }
@@ -326,12 +322,8 @@ export class DatumLayer {
     el.textContent = label ?? "";
     el.style.display = label ? "" : "none";
     const origin = new THREE.Vector3().fromArray(plane.origin);
-    if (!this.ghostRegistered) {
-      this.deps.overlay.register(GHOST_ID, el, origin);
-      this.ghostRegistered = true;
-    } else {
-      this.deps.overlay.setWorldPos(GHOST_ID, origin);
-    }
+    this.ghostLabel ??= this.deps.createLabel(el);
+    this.ghostLabel.setPosition(origin);
     this.deps.invalidate();
   }
 
@@ -376,7 +368,6 @@ export class DatumLayer {
     s.pointerEvents = "none";
     s.background = "var(--color-sel-bg)";
     s.color = "var(--color-sel-text)";
-    this.deps.overlayEl.appendChild(el);
 
     this.ghostGroup = group;
     this.ghostMat = mat;
@@ -436,8 +427,8 @@ export class DatumLayer {
   dispose(): void {
     for (const q of this.quads.values()) this.destroyQuad(q);
     this.quads.clear();
-    if (this.ghostRegistered) this.deps.overlay.unregister(GHOST_ID);
-    this.ghostRegistered = false;
+    this.ghostLabel?.dispose();
+    this.ghostLabel = null;
     this.ghostMesh?.geometry.dispose();
     this.ghostMat?.dispose();
     this.ghostOutline?.geometry.dispose();

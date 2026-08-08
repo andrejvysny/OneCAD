@@ -15,7 +15,28 @@ function makeLayer(): {
   const overlay = new HtmlOverlayDriver();
   const overlayEl = document.createElement("div");
   const invalidate = vi.fn();
-  const layer = new DatumLayer({ root, overlay, overlayEl, invalidate });
+  // A stand-in for the HOST's projected-label facade (ViewportContext.createLabel,
+  // implemented in ContributionHost over this same driver). The layer is a
+  // viewport contribution now, so it no longer receives the driver itself —
+  // every assertion below still reads the driver, through the facade.
+  let seq = 0;
+  const createLabel = (element: HTMLElement) => {
+    const id = `test_label_${seq++}`;
+    overlayEl.appendChild(element);
+    const pos = new THREE.Vector3();
+    overlay.register(id, element, pos);
+    return {
+      setPosition: (w: { x: number; y: number; z: number }) => {
+        pos.set(w.x, w.y, w.z);
+        overlay.setWorldPos(id, pos);
+      },
+      dispose: () => {
+        overlay.unregister(id);
+        element.remove();
+      },
+    };
+  };
+  const layer = new DatumLayer({ root, createLabel, invalidate });
   return { layer, root, overlay, overlayEl, invalidate };
 }
 

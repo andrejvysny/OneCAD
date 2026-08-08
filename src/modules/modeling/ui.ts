@@ -20,6 +20,7 @@ import { Slots, type ModuleScope } from "@/platform";
 import { ModelingPanels } from "./panelIds";
 import { contributeInspectorSections } from "./inspectorSections";
 import { contributeModelingTree } from "./treeProvider";
+import { createDatumViewportContribution } from "./datumViewport";
 
 import { ConstraintBadgeLayer } from "@/features/sketch/ConstraintBadgeLayer";
 import { LiveDimChips } from "@/features/sketch/LiveDimChips";
@@ -95,6 +96,10 @@ export function contributeModelingUi(scope: ModuleScope): void {
   // Modeling's rows in the shared model tree. The panel renders providers, not
   // bodies/sketches/datums, so a second module can add its own section here.
   contributeModelingTree(scope);
+
+  // Datum planes are an IN-SCENE layer, not a panel. Registered with the rest of
+  // the editor UI so the engine's host attaches it as soon as both exist.
+  scope.registerViewportContribution(createDatumViewportContribution());
 
   scope.registerPanel({
     id: ModelingPanels.RepairBanner,

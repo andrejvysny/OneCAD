@@ -10,6 +10,8 @@
  * A hatched placeholder is shown until the engine is ready (and stays if WebGL
  * is unavailable, e.g. jsdom), so the shell degrades gracefully.
  */
+import { useOptionalPlatform } from "@/platform";
+import { getDatumVisuals } from "@/modules/modeling/datumViewport";
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/ui/cn";
 import { logWarn } from "@/debug/log";
@@ -145,6 +147,10 @@ function hasFlag(name: string): boolean {
 }
 
 export function ViewportRoot({ className }: { className?: string }) {
+  // Optional, not required: `ViewportRoot` is rendered bare by its own unit test
+  // and by dev harnesses. No platform ⇒ no contributed layers, which is the
+  // honest degradation — the built-in scene still renders.
+  const platform = useOptionalPlatform();
   const containerRef = useRef<HTMLDivElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
   const [ready, setReady] = useState(false);
@@ -210,6 +216,14 @@ export function ViewportRoot({ className }: { className?: string }) {
         setViewportEngine(engine);
         setReady(true);
 
+        // ── Viewport contributions (in-scene layers) ──
+        // Handed the REGISTRY, not a snapshot: modeling's layers register when
+        // the editor mounts while this init() is still awaiting the renderer, so
+        // whichever side lost that race would be dropped by a one-shot attach.
+        // The engine stays subscribed and disposes what it attached.
+        engine.setContributionRegistry(platform?.viewport ?? null);
+        cleanups.push(() => engine.setContributionRegistry(null));
+
         // ── Mesh ingestion (pull model) ──
         const client = createClient();
         const meshIngest = new MeshIngest();
@@ -239,7 +253,7 @@ export function ViewportRoot({ className }: { className?: string }) {
 
         // ── Always-visible datum (reference) planes (DATUM W1) ──
         const datumSync = new DatumSync();
-        datumSync.attach(engine);
+        datumSync.attach();
         cleanups.push(() => datumSync.detach());
 
         // Missed-event race: projection-updated may fire before these listeners
@@ -304,7 +318,7 @@ export function ViewportRoot({ className }: { className?: string }) {
         // and sketches are the things you are actually modelling, a datum is
         // reference scaffolding, so it only wins where nothing else is hit.
         const datumRefAt = (x: number, y: number): EntityRef | null => {
-          const id = engine.datumHitTest(x, y);
+          const id = getDatumVisuals()?.hitTest(x, y) ?? null;
           return id ? { kind: "datum", id } : null;
         };
         engine.configurePicking({

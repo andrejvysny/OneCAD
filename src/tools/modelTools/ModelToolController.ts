@@ -42,6 +42,7 @@ import type {
 } from "@/ipc/types";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import type { PickHit } from "@/viewport/engine/Picker";
+import { getDatumVisuals } from "@/modules/modeling/datumViewport";
 import { bareBodyId, buildAddDatumPlane, updateScalarParamsCommand } from "@/ipc/tauriCommandMap";
 import { mintUuid } from "@/ipc/sketchWireMap";
 import { promoteOne } from "@/ipc/promote";
@@ -5455,7 +5456,7 @@ export class ModelToolController {
     // The chip shows the base plane's GEOMETRIC name ("XY"/"XZ"/"YZ" by world
     // normal); the repo `kind` — which is legacy-swapped — is what gets stored.
     const label = geometricLabel(ghost.normal);
-    this.engine.setDatumGhost(base, state.offset, label);
+    getDatumVisuals()?.setGhost(base, state.offset, label);
     // The chip anchors ONCE (armed-chip convention): the ghost slides with the
     // offset, the chip stays where the plane was picked.
     toolChipStore.getState().showDatum(state.offset, ghost.origin, label, {
@@ -5479,7 +5480,7 @@ export class ModelToolController {
     if (!state || state.base === null) return;
     state.offset = offset;
     toolChipStore.getState().setValue(offset);
-    this.engine.setDatumGhost(state.base, offset, geometricLabel(datumGhostPlane(state.base, 0).normal));
+    getDatumVisuals()?.setGhost(state.base, offset, geometricLabel(datumGhostPlane(state.base, 0).normal));
     this.updateDebug();
   }
 
@@ -5520,7 +5521,7 @@ export class ModelToolController {
     if (!this.datum) return;
     this.datum = null;
     this.engine.setPlanePickerVisible(false);
-    this.engine.setDatumGhost(null, 0);
+    getDatumVisuals()?.setGhost(null, 0);
     toolChipStore.getState().clear();
     this.updateDebug(); // republish the now-idle phase (a tool switch has no other hook)
   }

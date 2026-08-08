@@ -21,6 +21,7 @@ import { DragHandle } from "./DragHandle";
 import { TransformGizmo } from "./TransformGizmo";
 import { PreviewMesh } from "./PreviewMesh";
 import { RevolvePreview } from "./RevolvePreview";
+import { DatumLayer, datumGhostPlane } from "./DatumLayer";
 import { BodyMaterialLibrary } from "./bodyMaterials";
 import {
   buildBodyObjects,
@@ -317,6 +318,38 @@ describe("refreshColors picks up a theme flip", () => {
     // Hover is its own material and only appears while something is hovered —
     // rebuild under the new theme with an edge hovered so the cyan pair shows.
     layer.setState({ kind: "edge", id: "body1#e:1", bodyId: "body1", topoKey: "e:1" }, []);
+    expectNoLightLeftovers(d.root, lightOnly);
+    layer.dispose();
+  });
+
+  it("DatumLayer leaves no light-theme color behind", () => {
+    // NEW with the viewport-contribution port. DatumLayer had NO case here, and
+    // it is the one layer the host can no longer list in applyTheme() by hand:
+    // it subscribes through `ViewportContext.onThemeChange`, so a forgotten
+    // subscription is invisible to the engine. Negative-checked by neutering
+    // `DatumLayer.refreshColors()` and confirming this goes red.
+    const lightOnly = lightOnlyHexes();
+    setTheme("light");
+    const d = deps();
+    const labels: HTMLElement[] = [];
+    const layer = new DatumLayer({
+      root: d.root,
+      invalidate: d.invalidate,
+      createLabel: (el) => {
+        labels.push(el);
+        return { setPosition: () => {}, dispose: () => el.remove() };
+      },
+    });
+    // Both material families: a committed quad (fill + outline) AND the tool
+    // ghost, which is built lazily and would otherwise never be traversed.
+    layer.syncDatums([
+      { id: "d1", name: "Base", plane: datumGhostPlane("XY", 10), resolvedValid: true },
+    ]);
+    layer.setGhost(datumGhostPlane("XY", 25), "XY");
+
+    setTheme("dark");
+    layer.refreshColors();
+
     expectNoLightLeftovers(d.root, lightOnly);
     layer.dispose();
   });
