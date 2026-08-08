@@ -26,11 +26,27 @@ function firstCard(): HTMLElement {
   return screen.getAllByTitle(/\.onecad$/)[0];
 }
 
+/** The header action button, not the sidebar utility duplicate. */
+function headerImportButton(): HTMLElement {
+  return within(screen.getByRole("main")).getByRole("button", { name: /Import/ });
+}
+
 describe("StartScreen", () => {
   it("loads and renders recent projects", async () => {
     render(<StartScreen />);
     expect(await screen.findByText("Bracket v2")).toBeInTheDocument();
     expect(screen.getByText("Gearbox mount")).toBeInTheDocument();
+  });
+
+  it("opens settings from the bottom sidebar item", async () => {
+    const user = userEvent.setup();
+    render(<StartScreen />);
+    await user.click(screen.getByRole("button", { name: "Settings" }));
+    expect(screen.getByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Close settings" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Settings" })).not.toBeInTheDocument(),
+    );
   });
 
   it("filters recents by case-insensitive name substring", async () => {
@@ -87,36 +103,58 @@ describe("StartScreen", () => {
     ).toBeInTheDocument();
   });
 
-  // ── Import STEP (start-screen lane) ───────────────────────────────────────
+  // ── Unified import (start-screen lane) ────────────────────────────────────
 
-  it("Import STEP opens the imported document in the editor", async () => {
+  it("imports a STEP file into a new document", async () => {
     const user = userEvent.setup();
-    // The dialog must be the STEP-filtered one: `openFileDialog` filters `.onecad`,
-    // so routing this button through it made a STEP file unpickable.
-    const stepDialog = vi.spyOn(mockClient, "stepFileDialog");
-    const openDialog = vi.spyOn(mockClient, "openFileDialog");
+    vi.spyOn(mockClient, "importFileDialog").mockResolvedValue(
+      "/Users/andrej/CAD/Projects/Imported.step",
+    );
+    const importStep = vi.spyOn(mockClient, "importStep");
+    const openDocument = vi.spyOn(mockClient, "openDocument");
     render(<App />);
 
-    await user.click(screen.getByRole("button", { name: /Import STEP/ }));
+    await user.click(headerImportButton());
 
     // Longer timeout: EditorScreen is a lazy chunk now (see the New-project test).
     expect(
       await screen.findByRole("button", { name: "File" }, { timeout: 5000 }),
     ).toBeInTheDocument();
-    expect(stepDialog).toHaveBeenCalledTimes(1);
-    expect(openDialog).not.toHaveBeenCalled();
+    expect(importStep).toHaveBeenCalledWith("/Users/andrej/CAD/Projects/Imported.step");
+    expect(openDocument).not.toHaveBeenCalled();
     expect(appStore.getState().importError).toBeNull();
   });
 
-  it("a cancelled STEP dialog is a silent no-op (no error, no screen change)", async () => {
+  it("opens a project file as a project", async () => {
     const user = userEvent.setup();
-    vi.spyOn(mockClient, "stepFileDialog").mockResolvedValue(null);
+    vi.spyOn(mockClient, "importFileDialog").mockResolvedValue(
+      "/Users/andrej/CAD/Projects/Imported.onecad",
+    );
+    const openDocument = vi.spyOn(mockClient, "openDocument");
     const importStep = vi.spyOn(mockClient, "importStep");
+    render(<App />);
+
+    await user.click(headerImportButton());
+
+    expect(
+      await screen.findByRole("button", { name: "File" }, { timeout: 5000 }),
+    ).toBeInTheDocument();
+    expect(openDocument).toHaveBeenCalledWith("/Users/andrej/CAD/Projects/Imported.onecad");
+    expect(importStep).not.toHaveBeenCalled();
+    expect(appStore.getState().importError).toBeNull();
+  });
+
+  it("a cancelled import dialog is a silent no-op (no error, no screen change)", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(mockClient, "importFileDialog").mockResolvedValue(null);
+    const importStep = vi.spyOn(mockClient, "importStep");
+    const openDocument = vi.spyOn(mockClient, "openDocument");
     render(<StartScreen />);
 
-    await user.click(screen.getByRole("button", { name: /Import STEP/ }));
+    await user.click(headerImportButton());
 
     await waitFor(() => expect(importStep).not.toHaveBeenCalled());
+    expect(openDocument).not.toHaveBeenCalled();
     expect(appStore.getState().screen).toBe("start");
     expect(appStore.getState().importError).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
@@ -129,12 +167,15 @@ describe("StartScreen", () => {
    */
   it("shows an inline reason when the import fails, staying on the start screen", async () => {
     const user = userEvent.setup();
+    vi.spyOn(mockClient, "importFileDialog").mockResolvedValue(
+      "/Users/andrej/CAD/Projects/Imported.step",
+    );
     vi.spyOn(mockClient, "importStep").mockRejectedValueOnce(
       new Error("io error: not a STEP file"),
     );
     render(<StartScreen />);
 
-    await user.click(screen.getByRole("button", { name: /Import STEP/ }));
+    await user.click(headerImportButton());
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Import failed: io error: not a STEP file",

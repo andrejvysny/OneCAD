@@ -2362,6 +2362,12 @@ pub async fn open_file_dialog(app: AppHandle) -> Result<Option<String>, ApiError
     Ok(pick_file(app, false).await)
 }
 
+/// Shows the unified start-screen import dialog (OneCAD + STEP/STP).
+#[tauri::command]
+pub async fn import_file_dialog(app: AppHandle) -> Result<Option<String>, ApiError> {
+    Ok(pick_import_file(app).await)
+}
+
 /// Shows a native save dialog. Resolves to the chosen path or `None`.
 #[tauri::command]
 pub async fn save_file_dialog(app: AppHandle) -> Result<Option<String>, ApiError> {
@@ -2393,6 +2399,23 @@ async fn pick_file(app: AppHandle, save: bool) -> Option<String> {
     } else {
         dialog.pick_file(cb);
     }
+    rx.await
+        .ok()
+        .flatten()
+        .and_then(|f| f.into_path().ok())
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Shows the unified import open dialog for STEP/STP and OneCAD files.
+async fn pick_import_file(app: AppHandle) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("OneCAD / STEP", &["onecad", "step", "stp"])
+        .pick_file(move |file: Option<tauri_plugin_dialog::FilePath>| {
+            let _ = tx.send(file);
+        });
     rx.await
         .ok()
         .flatten()

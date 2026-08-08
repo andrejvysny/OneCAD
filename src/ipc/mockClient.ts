@@ -1912,6 +1912,10 @@ export const mockClient: CadClient = {
     mockRecovery = null;
     return snap;
   },
+  async importFileDialog() {
+    await wait(40);
+    return "/Users/andrej/CAD/Projects/Imported.onecad";
+  },
   async openFileDialog() {
     await wait(40);
     // Rust returns the real chosen path in F-WP8; here we fake a pick.

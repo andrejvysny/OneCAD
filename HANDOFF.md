@@ -1,3 +1,152 @@
+# Handoff — Platform refactor (Milestones 1 + 2), and what comes next
+
+Session 4 · 2026-08-08
+
+> **TWO LIVE THREADS.** This file now carries both. Session 4 (below) is the
+> Platform/module refactor and is COMMITTED as `4145f3f`. Session 3 (further
+> down, unchanged) is the Advanced-Fillet roadmap and is still the live handoff
+> for that program — its § "VF-M5 gate regression" is the diagnosis behind P1
+> here. Read whichever thread you are picking up; read both before pushing.
+
+## Goal
+
+Reorganize OneCAD so future capabilities (FEM, TechDraw, CAM, third-party
+addons) can be added as clean modules, without redesigning the modeling engine
+or changing any user-visible behavior.
+
+The principle: **modeling stops being synonymous with OneCAD and becomes the
+first privileged built-in module running on the OneCAD Platform.**
+
+## Original plan
+
+`~/.claude/plans/velvety-leaping-adleman.md` — seven waves, W0…W7. Scope was
+fixed with the user up front: Milestone 1 (frontend platform, spec §195) **plus**
+Milestone 2 (module-namespaced persistence, spec §196); **no file moves**;
+branded namespaced ids with the `ModelTool`/`SketchTool` unions retained.
+
+Out of scope by decision: SDK package, test addon, addon manifest/loader/host,
+GitHub install, resource-store generalization, dynamic Tauri router, crate
+extraction, and everything in spec §193.
+
+## Done so far (and why)
+
+All seven waves landed and are committed as `4145f3f`. Full wave-by-wave detail
+is in `TODO.md` § PLATFORM REFACTOR; the reasoning worth carrying:
+
+- **Contracts first, refactor second.** Four frozen behavior contracts went into
+  `src/test/contracts/` BEFORE anything moved: toolbar arrangement, the three
+  keymap tables + cross-mode opt-out, editor mount order, inspector section
+  order. `src/test/contracts/README.md` states the rule that makes them worth
+  anything: a probe may change when the mechanism changes, a contract may not be
+  edited to make a refactor pass.
+- **The probes are non-tautological by construction.** The toolbar assertion runs
+  against `toolbarFromRegistry` — the arrangement rebuilt FROM the platform
+  registry — not against the descriptor table that fed the registry, or it would
+  only prove the table equals itself. The keymap probe compares `resolveBinding`
+  to an independently written oracle over every (key, shift, mode) triple.
+  `architecture.test.ts` carries a POSITIVE CONTROL, because every other
+  assertion in it expects an empty list, which is also what a broken scanner
+  returns.
+- **Registration happens on EDITOR MOUNT, not at bootstrap.** `App.tsx`
+  code-splits the editor deliberately and `StartScreen` idle-prefetches that
+  exact specifier; hoisting nineteen feature imports into the startup bundle to
+  satisfy an architectural preference would make the start screen pay for the
+  editor. This forced two real design changes: `platform.createScope(owner)` for
+  independent child scopes, and a teardown fix — a scope disposes what IT
+  registered and never sweeps the owner, or the editor's short-lived scope would
+  tear down the module's bootstrap registrations.
+- **Tool ids are scope-qualified** (`…tool.model.mirror` vs `…tool.sketch.mirror`)
+  because `select` and `mirror` exist in both unions meaning different things; a
+  flat map would have let one silently shadow the other.
+- **Separators are derived from group boundaries.** `group` is consumer metadata,
+  `priority` is the sort key — so palette order can never start following module
+  load timing.
+- **Two slots were added deliberately** (`viewport.chrome`, `shell.notification`).
+  Without them the frozen mount order cannot be reproduced with contiguous slot
+  regions, and mount order is load-bearing (a past defect had tool chips render
+  under the side panels and become unclickable).
+- **Module state lives in `document.json`** (ADR-0004), skip-if-empty in both the
+  document and the manifest, so existing files serialize byte-identically: no
+  container bump, no user migration. `ModuleId` validates on AUTHORING only —
+  deserialization is permissive because refusing an id a stricter build dislikes
+  would destroy exactly the data preservation exists to protect.
+- **Programmatic writes use the user's path.** `EditCommand::SetModuleState` has
+  a memento inverse; there is no separate mutation lane for automation.
+
+Deviations from the spec, each with the reason recorded in `TODO.md`:
+`onecad.shell.workspace.design` rather than `onecad.workspace.design` (a
+contribution id must sit under its owner's namespace, and the workspace composes
+several modules); no `platform_invoke` router (three typed commands until the
+addon host needs one).
+
+### Dead ends / things already ruled out
+
+- **Do not point `build-worker.sh` at `/opt/homebrew/opt/occt-8.0.1`.** It is a
+  plain Homebrew install with no `share/onecad/occt-build.json`, so CMake aborts
+  with "OCCT artifact metadata is absent". This session mis-reported that as a
+  repo blocker; it is not. Use `~/.onecad-occt/8.0.1` and
+  `worker/build-pinned` — see § How to resume in the Session 3 thread below.
+- **A single full-suite e2e failure is not evidence.** `filletChamfer.spec:169`
+  failed once in a full run and passed 13/13 in isolation. The four `theme.spec`
+  failures are the real, reproducible, pre-existing ones.
+- **Do not split the commit.** M1 (frontend) and M2 (Rust) were gated as one
+  tree; splitting produces at least one commit that does not build, because
+  `platform/index.ts` exports `documentState`, which needs the M2 client methods.
+- **Do not `git checkout -b` in this tree.** A concurrent session shares the
+  working directory; branching silently redirects THEIR commits too.
+
+## How to resume
+
+1. Run the `handoff` skill with "resume".
+2. Re-read `CLAUDE.md` — it gained a § "Architecture laws" section that binds new
+   code — then `docs/ARCHITECTURE.md` (normative) and `docs/adr/0001`–`0008`
+   (why). Those three are the standing rules for this program.
+3. Work `TODO.md` § NEXT SESSION, which has the full checklist. The shape:
+   - **P0 (do first, ~30 min).** Manual `tauri dev` smoke — the only
+     Definition-of-Done item with no evidence. Then rebuild the sidecar against
+     the pinned prefix and re-run the worker lane so the numbers describe HEAD.
+     `topology_rebind::h6a_flagship_edit_lane_fillet_survives_and_reopens_clean`
+     is EXPECTED to fail there; that is P1, not a refactor regression.
+   - **P1.** Close the VF-M5 gate regression. Belongs to the other session —
+     check `git log` for new `wip:` commits and coordinate before starting. The
+     diagnosis is already written in the Session 3 thread below; do not re-derive
+     it.
+   - **P2.** Finish Milestone 1: toolbar reads the registry live; inspector
+     sections, tree nodes and viewport layers become real contributions (the
+     contracts exist with zero producers); move `zoomFit`/`home` off modeling.
+     Mechanical — the golden tests already pin every answer.
+   - **P3.** Milestone 3: `@onecad/sdk` + a bundled test addon that imports
+     nothing else. **Do P2 first** — an SDK frozen over a half-converted surface
+     freezes the wrong shape.
+4. Suites, all expected green except where noted:
+   ```bash
+   bunx tsc --noEmit && bun run test        # 221 files / 3796
+   bunx playwright test                     # 386 pass / 4 fail (theme.spec, pre-existing)
+   cd src-tauri && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
+   ```
+
+## Open questions
+
+- **Push?** `master` is 5 commits ahead of `origin/master`, nothing pushed. Two
+  of those commits (`685efc2`, `069bb48`) are the concurrent session's in-flight
+  `wip:` work. Coordinate before `git push`.
+- **P1 fix direction** — keep the anchor-exact carve-out enabled until a genuine
+  restore signal is plumbed, or plumb one now? Recorded as a choice, not decided.
+- **Four untracked paths** (`.opencode/`, `.agents/`, `STEP/`, `skills-lock.json`)
+  still want a `.gitignore` entry rather than a commit. Nobody has decided.
+- **Should `TitleBar`/`StatusBar`/`NavPill`/`CornerCluster` stay an
+  `onecad.shell` module**, or go back to being permanent hard-coded structure?
+  Implemented as a module for consistency; the simpler alternative is defensible.
+
+## Pointers
+
+- Tasks → `TODO.md` § NEXT SESSION · Snapshot → `CURRENT_STATE.md`
+- Architecture laws → `docs/ARCHITECTURE.md` · decisions → `docs/adr/`
+- Frozen behavior contracts → `src/test/contracts/README.md`
+- Plan → `~/.claude/plans/velvety-leaping-adleman.md`
+
+---
+
 # Handoff — Advanced-Fillet roadmap (M0 · M1 · M2)
 
 Session 3 · 2026-08-08
@@ -239,6 +388,10 @@ the whole suite. They land with M4.
 
 ## How to resume
 
+0. `master` is **4 commits ahead of `origin/master` and unpushed**; the working
+   tree is clean apart from four deliberately-untracked paths. Two of those
+   commits are a concurrent session's `wip:` work — do not push without
+   coordinating (see § Open questions).
 1. Run the `handoff` skill with "resume".
 2. Re-read `CLAUDE.md` (kernelbench + protocol conventions) and `TODO.md`
    § ADVANCED-FILLET ROADMAP, especially the **15 agent constraints** — they are
@@ -275,26 +428,46 @@ the whole suite. They land with M4.
 6. **KBR case-v1 stays frozen.** Never edit `case.rs` or `case-v1.schema.json`.
    `examples/` is NOT contractual; `regressions/` and `presets/` are.
 
+## VF-M5 gate regression (read before resume)
+
+**The `from_zero_replay` gate in `069bb48` is WRONG and re-opens the defect-fix
+gate.** Real-worker lane (`ONECAD_REQUIRE_WORKER=1 cargo test --workspace`,
+worker built from HEAD) fails
+`topology_rebind::h6a_flagship_edit_lane_fillet_survives_and_reopens_clean`
+(`needsRepair` expected 0, observed 1). Baseline worker passes the same —
+regression is the gate. Root cause: V1 has no checkpoint plumbing, so the
+setup gate `partition.size() == 0` (worker `PlanExecutor`) is ALWAYS true and
+the gate degenerates to `edited_from.is_present()`; the flagship edit lane
+(`ToEnd { from: 1 }`, carries `edited_from`) is falsely treated as a
+from-zero-replay → anchor-exact carve-out off → model flagged `NeedsRepair`.
+The VF-M5 scenario (stale world anchors after a real checkpoint RESTORE) cannot
+occur in V1 — there are no restores. Fix: keep the carve-out enabled until a
+genuine `baseCheckpoint`/restore signal is plumbed into the plan, or plumb one.
+See `CURRENT_STATE.md` for the full writeup. Rebuild the worker before
+re-running the real-worker lane — the on-disk sidecar `worker/build/` is
+currently a stale pre-gate build (19:37).
+
 ## Open questions
 
-- **Commit boundary.** Nothing is committed. ~50 of my files are interleaved with
-  a second session's in-flight work in the same tree, and this is now two
-  sessions' worth. Splitting them cleanly gets harder the longer both stack up.
-  The M2-part-2 files are cleanly separable — everything under
-  `worker/src/benchmark/`, `worker/tools/kernelbench-runner/`,
-  `src-tauri/crates/onecad-kernelbench/`, and `bench/robustness/` is mine and
-  touches nothing the other session has open.
-- **A second session is actively editing this tree** — `TitleBar.tsx`,
-  `ViewCube.tsx`, `CadOrbitControls.ts`, `Picker.ts` (removed `hasHitAt`),
-  `ModelToolController.ts`, `FileMenu.tsx`, `StartScreen.tsx`, `appStore.ts`,
-  `document_runtime/tests.rs`, and it added a **webkit** Playwright project
-  (suite 190 → 386). Two failures are theirs: `theme.spec:121,145`
-  (`getByRole('button', {name: /^Appearance:/})` not found, from their
-  `TitleBar.tsx`) and webkit-only `boolean-preview`.
-- **`src/ipc/mockClient.import.test.ts:106` currently fails `tsc`**
-  (`'snap' is possibly 'null'`) — their uncommitted file, and the *same* class of
-  bug M0.2 fixed: vitest is green (209 files / 3698 tests) because it does not
-  typecheck. `bun run build` is red until they fix it.
+- **Commit boundary — RESOLVED, but read this before pushing.** The backlog was
+  split into four commits on `master` at this session's close (see
+  `CURRENT_STATE.md` for hashes). Two of them, `685efc2` and `069bb48`, are a
+  CONCURRENT SESSION'S in-flight work, committed as `wip:` so it was not left
+  loose; their message bodies say plainly that this session neither authored nor
+  gated them. **Nothing is pushed.** If that session is still running it will
+  keep editing these files, so coordinate before `git push` — a force-push or a
+  rebase over their in-flight tree is the thing to avoid.
+- **The `wip:` commits carry a known-red build.** `bun run build` fails on
+  `src/ipc/mockClient.import.test.ts:106` (`'snap' is possibly 'null'`), which is
+  now committed inside `685efc2`. Same class as the M0.2 bug: vitest is green
+  (209 files / 3698 tests) because it does not typecheck. Not a M2 problem —
+  M2 is Rust + C++ only — but `master` does not currently build the frontend.
+- **Two e2e failures belong to that session, not to this work:**
+  `theme.spec:121,145` (`getByRole('button', {name: /^Appearance:/})` not found,
+  from their `TitleBar.tsx`) and webkit-only `boolean-preview`.
+- **Four paths are deliberately untracked:** `.opencode/` (61 MB), `.agents/`,
+  `STEP/`, `skills-lock.json`. They want a `.gitignore` entry, not a commit;
+  nobody has decided which.
 
 ## Pointers
 

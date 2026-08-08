@@ -88,6 +88,8 @@ export interface CadClient {
    * when the dialog is cancelled.
    */
   importProject(): Promise<DocumentSnapshot | null>;
+  /** Pick a STEP or OneCAD file for the unified start-screen import button. */
+  importFileDialog(): Promise<string | null>;
   /**
    * Read one module's slice of the open document. `null` when the module has
    * none. The payload is returned untouched — the caller is its only reader.

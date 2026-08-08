@@ -138,6 +138,7 @@ const CMD = {
   exportStepFile: "export_step_file",
   exportStlFile: "export_stl_file",
   exportObjFile: "export_obj_file",
+  importFileDialog: "import_file_dialog",
   openFileDialog: "open_file_dialog",
   stepFileDialog: "step_file_dialog",
   saveFileDialog: "save_file_dialog",
@@ -1619,6 +1620,9 @@ export function createTauriClient(): CadClient {
       const snap = await call<DocumentSnapshotDto | null>(CMD.importProject);
       if (snap) resetCorrelation();
       return snap;
+    },
+    async importFileDialog(): Promise<string | null> {
+      return call<string | null>(CMD.importFileDialog);
     },
     insertStep,
     // Module-owned document state (ADR-0004). The payload is passed through

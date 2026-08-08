@@ -61,7 +61,7 @@ export function ToolButton({
               ),
         )}
       >
-        <Icon name={icon} size={18} strokeWidth={1.7} />
+        <Icon name={icon} size={20} strokeWidth={1.7} />
       </button>
     </Tooltip>
   );

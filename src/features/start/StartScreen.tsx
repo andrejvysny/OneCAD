@@ -9,6 +9,7 @@ import { RecentGridSkeleton } from "./RecentGridSkeleton";
 import { RecoveryCard } from "./RecoveryCard";
 import { SortMenu, type SortKey } from "./SortMenu";
 import { StartSidebar } from "./StartSidebar";
+import { SettingsModal } from "@/features/settings/SettingsModal";
 
 const APP_VERSION = "v0.1.0";
 
@@ -43,7 +44,7 @@ function filterSort(
 
 /**
  * Start screen — variant 1b "sidebar + grid": a full-window layout with a
- * fixed nav rail (wordmark, Recent/Starred/Templates, Import STEP) on the left
+ * fixed nav rail (wordmark, Recent/Starred/Templates, Import) on the left
  * and a searchable + sortable recent-projects grid filling the rest.
  */
 export function StartScreen() {
@@ -55,9 +56,7 @@ export function StartScreen() {
   const revealRecent = useAppStore((s) => s.revealRecent);
   const newProject = useAppStore((s) => s.newProject);
   const openProject = useAppStore((s) => s.openProject);
-  const openDialogAndOpen = useAppStore((s) => s.openDialogAndOpen);
-  const importStep = useAppStore((s) => s.importStep);
-  const importProject = useAppStore((s) => s.importProject);
+  const importFromDialog = useAppStore((s) => s.importFromDialog);
   const importError = useAppStore((s) => s.importError);
   const recovery = useAppStore((s) => s.recovery);
   const recoveryStatus = useAppStore((s) => s.recoveryStatus);
@@ -68,6 +67,7 @@ export function StartScreen() {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortKey>("date");
   const [nav, setNav] = useState<StartNavKey>("recent");
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
     if (recentsStatus === "idle") void loadRecents();
@@ -134,13 +134,12 @@ export function StartScreen() {
         <StartSidebar
           active={nav}
           onNavigate={setNav}
-          onImportStep={() => void importStep()}
-          onImportProject={() => void importProject()}
+          onOpenSettings={() => setSettingsOpen(true)}
           version={APP_VERSION}
         />
 
         <main className="flex-1 overflow-auto bg-surface px-8 pb-7 pt-0">
-          {/* Header: section title · search · sort · Open · New project */}
+          {/* Header: section title · search · sort · Import · New project */}
           <div className="mb-5 flex items-center gap-2.5">
             <h1 className="text-[17px] font-bold tracking-[-0.01em] text-ink">
               {NAV_TITLE[nav]}
@@ -159,8 +158,9 @@ export function StartScreen() {
                 <SortMenu value={sort} onChange={setSort} />
               </>
             )}
-            <Button variant="secondary" size="lg" onClick={() => void openDialogAndOpen()}>
-              Open…
+            <Button variant="secondary" size="lg" onClick={() => void importFromDialog()}>
+              <Icon name="import" size={15} strokeWidth={1.7} />
+              Import…
             </Button>
             <Button variant="primary" size="lg" onClick={() => void newProject()}>
               <Icon name="plus" size={15} strokeWidth={2} />
@@ -235,6 +235,8 @@ export function StartScreen() {
           )}
         </main>
       </div>
+
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }

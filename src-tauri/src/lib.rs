@@ -395,6 +395,7 @@ pub fn run() {
             api::rename_recent_project,
             api::delete_recent_project,
             api::reveal_in_file_manager,
+            api::import_file_dialog,
             api::open_file_dialog,
             api::step_file_dialog,
             api::save_file_dialog,

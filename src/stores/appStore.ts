@@ -43,7 +43,7 @@ export interface AppState {
    *  UnsavedChangesDialog. See `requestClose` / `confirmClose`. */
   pendingCloseIntent: PendingCloseIntent;
   /**
-   * Why the last start-screen STEP import failed (null = none pending).
+   * Why the last start-screen import failed (null = none pending).
    *
    * The editor's status-bar hint is the wrong surface for this lane: a failed
    * import leaves the user ON the start screen, where the StatusBar is not
@@ -76,6 +76,7 @@ export interface AppState {
   openDialogAndOpen(): Promise<void>;
   importStep(): Promise<void>;
   importProject(): Promise<void>;
+  importFromDialog(): Promise<void>;
   closeProject(): Promise<void>;
   checkRecovery(): Promise<void>;
   recoverDocument(): Promise<void>;
@@ -115,6 +116,12 @@ export const appStore = createStore<AppState>()((set, get) => {
   const resetIfReplacing = () => {
     if (get().document) resetDocumentScopedUi();
   };
+
+  function importKind(path: string): "project" | "step" {
+    const lower = path.toLowerCase();
+    if (lower.endsWith(".step") || lower.endsWith(".stp")) return "step";
+    return "project";
+  }
 
   /** The actual close/quit action once nothing (or nothing further) blocks it —
    *  a clean-document bypass, or a confirmed discard/save. */
@@ -231,6 +238,24 @@ export const appStore = createStore<AppState>()((set, get) => {
       if (!snap) return; // cancelled — silent
       resetIfReplacing();
       enter(snap);
+    },
+
+    async importFromDialog() {
+      set({ importError: null });
+      const path = await client.importFileDialog();
+      if (!path) return; // cancelled — silent, nothing to report
+      try {
+        if (importKind(path) === "step") {
+          resetIfReplacing();
+          enter(await client.importStep(path));
+        } else {
+          resetIfReplacing();
+          enter(await client.openDocument(path));
+          void get().loadRecents();
+        }
+      } catch (e) {
+        set({ importError: e instanceof Error ? e.message : String(e) });
+      }
     },
 
     async closeProject() {

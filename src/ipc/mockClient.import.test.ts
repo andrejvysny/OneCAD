@@ -114,6 +114,10 @@ describe("mockClient STEP import", () => {
     expect(Object.values(doc().bodies).some((b) => b.name === "Imported 1")).toBe(true);
   });
 
+  it("importFileDialog returns a unified OneCAD/STEP pick", async () => {
+    expect(await mockClient.importFileDialog()).toBe("/Users/andrej/CAD/Projects/Imported.onecad");
+  });
+
   it("resetMockDocument restarts the import numbering", async () => {
     await mockClient.insertStep();
     documentStore.setState(seedMockDocument());

@@ -118,11 +118,23 @@ describe("tauriClient command marshalling", () => {
     mockIPC((cmd) => {
       if (cmd === "list_recents")
         return [{ id: "a", name: "A", path: "/a.onecad", modifiedAt: "2026-01-01T00:00:00Z" }];
+      if (cmd === "import_file_dialog") return "/chosen.step";
       if (cmd === "open_file_dialog") return "/chosen.onecad";
     });
     const client = createTauriClient();
     expect(await client.listRecents()).toHaveLength(1);
+    expect(await client.importFileDialog()).toBe("/chosen.step");
     expect(await client.openFileDialog()).toBe("/chosen.onecad");
+  });
+
+  it("importFileDialog invokes import_file_dialog with no args", async () => {
+    const payloads: Record<string, unknown> = {};
+    mockIPC((cmd, payload) => {
+      payloads[cmd] = payload;
+      if (cmd === "import_file_dialog") return "/parts/Imported.onecad";
+    });
+    expect(await createTauriClient().importFileDialog()).toBe("/parts/Imported.onecad");
+    expect(payloads["import_file_dialog"]).toEqual({});
   });
 
   it("openFileDialog resolves null on cancel", async () => {
