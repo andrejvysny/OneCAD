@@ -98,6 +98,19 @@ describe("mockClient STEP import", () => {
     expect(Object.values(doc().bodies).some((b) => b.name === "Imported 1")).toBe(true);
   });
 
+  it("the project lane returns a snapshot with the appended import row", async () => {
+    const featuresBefore = doc().features.length;
+
+    const snap = await mockClient.importProject();
+
+    expect(snap.title).toBe("ImportedProject");
+    // Same fabrication as an in-document STEP: the imported body + history row
+    // land in the projection through the shared `importStepAndEmit` path.
+    expect(doc().features).toHaveLength(featuresBefore + 1);
+    expect(doc().features[doc().features.length - 1].opType).toBe("ImportStep");
+    expect(Object.values(doc().bodies).some((b) => b.name === "Imported 1")).toBe(true);
+  });
+
   it("resetMockDocument restarts the import numbering", async () => {
     await mockClient.insertStep();
     documentStore.setState(seedMockDocument());

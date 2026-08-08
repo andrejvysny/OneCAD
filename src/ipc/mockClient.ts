@@ -38,6 +38,7 @@ import type {
   ResolveCandidate,
   ResolveRefRequest,
   ResolveRefResult,
+  Rgba,
   SketchConstraintType,
   SketchEntity,
   SketchSession,
@@ -313,8 +314,8 @@ const featureParams = new Map<string, Record<string, unknown>>(
 interface MockMeta {
   name?: string;
   visible: boolean;
-  color?: [number, number, number, number];
-  faceColors?: Record<string, [number, number, number, number]>;
+  color?: Rgba;
+  faceColors?: Record<string, Rgba>;
 }
 const mockBodyMeta = new Map<string, MockMeta>();
 const mockSketchMeta = new Map<string, MockMeta>();
@@ -370,8 +371,8 @@ function reassertMockMetadata(): void {
 }
 
 function colorsEqual(
-  a: [number, number, number, number] | undefined,
-  b: [number, number, number, number] | undefined,
+  a: Rgba | undefined,
+  b: Rgba | undefined,
 ): boolean {
   if (a === b) return true;
   if (!a || !b) return false;
@@ -379,8 +380,8 @@ function colorsEqual(
 }
 
 function faceColorsEqual(
-  a: Record<string, [number, number, number, number]> | undefined,
-  b: Record<string, [number, number, number, number]> | undefined,
+  a: Record<string, Rgba> | undefined,
+  b: Record<string, Rgba> | undefined,
 ): boolean {
   if (a === b) return true;
   if (!a || !b) return false;
@@ -1645,7 +1646,7 @@ async function mockApplyEditCommand(command: WireEditCommand): Promise<ApplyOper
     }
     case "setFaceColor": {
       const prev = mockBodyMeta.get(command.body);
-      const next: Record<string, [number, number, number, number]> = { ...(prev?.faceColors ?? {}) };
+      const next: Record<string, Rgba> = { ...(prev?.faceColors ?? {}) };
       if (command.color === null) delete next[command.elementId];
       else next[command.elementId] = command.color;
       writeMockMeta("body", command.body, {
@@ -1861,6 +1862,11 @@ export const mockClient: CadClient = {
     await wait();
     importStepAndEmit();
     return snapshot(basename(path));
+  },
+  async importProject() {
+    await wait();
+    importStepAndEmit();
+    return snapshot("ImportedProject");
   },
   async closeDocument() {
     await wait();

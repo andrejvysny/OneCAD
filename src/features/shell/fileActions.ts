@@ -165,6 +165,20 @@ export async function insertStep(): Promise<void> {
   }
 }
 
+/**
+ * Import Project…: append another `.onecad` document's timeline to the OPEN
+ * document. Rust owns the `.onecad` dialog. A cancelled dialog is a no-op.
+ */
+export async function importProject(): Promise<void> {
+  try {
+    const snap = await client.importProject();
+    if (!snap) return; // cancelled
+    transientHint("Project imported");
+  } catch (e) {
+    errorHint(`Import project failed: ${message(e)}`);
+  }
+}
+
 /** "Imported 1 body" / "Imported 3 bodies" — the import success confirmation. */
 function bodyCountHint(count: number): string {
   return `Imported ${count} ${count === 1 ? "body" : "bodies"}`;

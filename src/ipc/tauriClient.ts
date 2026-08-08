@@ -125,6 +125,7 @@ const CMD = {
   openDocument: "open_document",
   importStep: "import_step",
   insertStep: "insert_step",
+  importProject: "import_project",
   closeDocument: "close_document",
   checkRecovery: "check_recovery",
   recoverDocument: "recover_document",
@@ -1606,6 +1607,12 @@ export function createTauriClient(): CadClient {
       await ensureEvents();
       const snap = await call<DocumentSnapshotDto>(CMD.importStep, { path });
       resetCorrelation();
+      return snap;
+    },
+    async importProject(): Promise<DocumentSnapshot | null> {
+      await ensureEvents();
+      const snap = await call<DocumentSnapshotDto | null>(CMD.importProject);
+      if (snap) resetCorrelation();
       return snap;
     },
     insertStep,

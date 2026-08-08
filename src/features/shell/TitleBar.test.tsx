@@ -1,73 +1,71 @@
 /*
- * Title-bar appearance toggle: a one-click shortcut that cycles the PREFERENCE
- * in registry order. The full three-way picker lives in the display popover;
- * this only has to stay in step with it and never become ambiguous about what
- * the current value is.
+ * Title-bar home button: left-most control, next to FileMenu. Routes through
+ * closeProject() -> appStore.requestClose("close") — the ONE shared entry
+ * point every close/quit path uses — so a dirty document arms the
+ * UnsavedChangesDialog instead of discarding work, and a clean one returns
+ * straight to the start screen.
  */
 import { describe, it, expect, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TitleBar } from "./TitleBar";
-import { settingsStore } from "@/stores/settingsStore";
-import { THEME_ORDER } from "@/theme/themes";
+import { appStore } from "@/stores/appStore";
+import { documentStore } from "@/stores/documentStore";
 import { resetStores } from "@/test/resetStores";
 
-describe("TitleBar appearance toggle", () => {
+function openDocument(dirty: boolean): void {
+  appStore.setState({
+    screen: "editor",
+    document: { documentId: "doc-1", title: "Untitled" },
+    pendingCloseIntent: null,
+  });
+  documentStore.setState({ dirty });
+}
+
+describe("TitleBar home button", () => {
   beforeEach(() => {
     localStorage.clear();
     resetStores();
+    openDocument(false);
   });
 
-  it("names the CURRENT preference, so the changing icon is never ambiguous", () => {
-    settingsStore.setState({ theme: "dark" });
+  it("is the left-most control, before FileMenu", () => {
     render(<TitleBar />);
-    expect(screen.getByRole("button", { name: "Appearance: Dark" })).toBeInTheDocument();
-  });
-
-  it("cycles Light → Dark → System → Light, in registry order", async () => {
-    const user = userEvent.setup();
-    settingsStore.setState({ theme: "light" });
-    const { rerender } = render(<TitleBar />);
-
-    const seen: string[] = [];
-    for (let i = 0; i < THEME_ORDER.length; i++) {
-      await user.click(screen.getByRole("button", { name: /^Appearance:/ }));
-      rerender(<TitleBar />);
-      seen.push(settingsStore.getState().theme);
-    }
-
-    expect(seen).toEqual(["dark", "system", "light"]);
-  });
-
-  it("writes the preference through to localStorage", async () => {
-    const user = userEvent.setup();
-    settingsStore.setState({ theme: "light" });
-    render(<TitleBar />);
-
-    await user.click(screen.getByRole("button", { name: "Appearance: Light" }));
-
-    const raw = localStorage.getItem("onecad.settings");
-    expect(JSON.parse(raw!).state.theme).toBe("dark");
-  });
-
-  it("covers every registered theme — a new one cannot be silently skipped", async () => {
-    const user = userEvent.setup();
-    settingsStore.setState({ theme: THEME_ORDER[0] });
-    const { rerender } = render(<TitleBar />);
-
-    const visited = new Set<string>([THEME_ORDER[0]]);
-    for (let i = 0; i < THEME_ORDER.length; i++) {
-      await user.click(screen.getByRole("button", { name: /^Appearance:/ }));
-      rerender(<TitleBar />);
-      visited.add(settingsStore.getState().theme);
-    }
-
-    expect([...visited].sort()).toEqual([...THEME_ORDER].sort());
+    const buttons = screen.getAllByRole("button");
+    expect(buttons[0]).toHaveAccessibleName("Close project and return to start screen");
   });
 
   it("does not carry the Tauri drag region — that would swallow the click", () => {
     render(<TitleBar />);
-    const btn = screen.getByRole("button", { name: /^Appearance:/ });
+    const btn = screen.getByRole("button", { name: /^Close project/ });
     expect(btn).not.toHaveAttribute("data-tauri-drag-region");
+  });
+
+  it("clean document: click returns straight to the start screen, no prompt", async () => {
+    const user = userEvent.setup();
+    render(<TitleBar />);
+
+    await user.click(screen.getByRole("button", { name: /^Close project/ }));
+
+    await waitFor(() => expect(appStore.getState().screen).toBe("start"));
+    expect(appStore.getState().document).toBeNull();
+    expect(appStore.getState().pendingCloseIntent).toBeNull();
+  });
+
+  it("dirty document: click arms the save/discard/cancel prompt and stays open", async () => {
+    const user = userEvent.setup();
+    openDocument(true);
+    render(<TitleBar />);
+
+    await user.click(screen.getByRole("button", { name: /^Close project/ }));
+
+    expect(appStore.getState().pendingCloseIntent).toBe("close");
+    expect(appStore.getState().screen).toBe("editor");
+    expect(appStore.getState().document).not.toBeNull();
+  });
+
+  it("no appearance toggle in the title bar", () => {
+    render(<TitleBar />);
+    expect(screen.queryByRole("button", { name: /^Appearance:/ })).not.toBeInTheDocument();
   });
 });

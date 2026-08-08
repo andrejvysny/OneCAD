@@ -55,7 +55,8 @@ use onecad_core::document::record::{
 use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, IntentQuery};
 use onecad_core::document::repair::RepairItem;
 use onecad_core::document::Document;
-use onecad_core::edit::{CommandOutcome, DocumentSession, EditCommand, SketchEditOp, UndoOutcome};
+use onecad_core::edit::session::{empty_outcome, merge_outcome, DocumentSession};
+use onecad_core::edit::{CommandOutcome, EditCommand, SketchEditOp, UndoOutcome};
 use onecad_core::error::DomainError;
 use onecad_core::history::{DependencyGraph, StepState, Timeline};
 use onecad_core::ids::{
@@ -66,7 +67,7 @@ use onecad_core::io::container::{
     CacheRead, ContainerCaches, ContainerReader, ContainerWriter, LoadedContainer,
     MeshCache as MeshCacheBlob, SaveMeta, CHECKPOINTS_DIR, PREVIEW_PATH,
 };
-use onecad_core::io::imports::{ImportBlob, ImportBlobs};
+use onecad_core::io::imports::{ImportBlob, ImportBlobs, MAX_IMPORT_BLOB_BYTES};
 use onecad_core::io::IoError;
 use onecad_core::math::Vec2;
 use onecad_core::regen::{
@@ -1575,7 +1576,13 @@ impl DocumentRuntime {
         // The caller has already fenced (tokens unchanged since begin_regen), so the
         // live epoch IS the one this geometry was computed under.
         self.head_epoch = self.fencing.get().1;
-        self.dirty = true;
+        // NOT `self.dirty = true` here. A genuine edit already dirties via
+        // `after_mutation` at apply()/undo()/redo() time, before any regen
+        // starts — setting it again here is redundant for that case. But
+        // this path ALSO runs for edit-free regens (open_document's from-0
+        // replay, a worker-restart replay), and unconditionally dirtying
+        // there wrongly flags a freshly-opened, unmodified document as
+        // unsaved.
         self.apply_ordinal_tripwire(tripwire);
         let changed: Vec<(BodyId, MeshKey)> =
             snap.bodies.iter().map(|b| (b.body, b.mesh_key)).collect();
@@ -2004,6 +2011,12 @@ impl DocumentRuntime {
         at_cursor: bool,
     ) -> Result<CommandOutcome, ApiError> {
         for (sha, blob) in &prepared.blobs {
+            if blob.bytes.len() as u64 > MAX_IMPORT_BLOB_BYTES {
+                return Err(ApiError::Io(format!(
+                    "import blob {sha} is {} bytes, over the {MAX_IMPORT_BLOB_BYTES}-byte limit",
+                    blob.bytes.len()
+                )));
+            }
             self.import_workspace
                 .materialize(sha, blob.codec, &blob.bytes)
                 .map_err(|e| {
@@ -2035,6 +2048,88 @@ impl DocumentRuntime {
                 .insert(record_id, prepared.product_names.clone());
         }
         Ok(outcome)
+    }
+
+    /// Imports another `.onecad` project's timeline and sketches into this document.
+    ///
+    /// The source records are appended at the rollback cursor (same lane as
+    /// "Import STEP…"). Source [`RecordId`]s are preserved so worker-minted body ids
+    /// stay deterministic; if any collide with this document the import is refused.
+    /// Source sketches are added with their original ids; collisions are also refused.
+    /// Import blobs referenced by source `ImportStep` records are copied into this
+    /// document's carrier and workspace.
+    ///
+    /// This is a static snapshot: editing the source file later does NOT update this
+    /// document (live XREF is out of scope for V1).
+    pub fn import_project(&mut self, path: &std::path::Path) -> Result<CommandOutcome, ApiError> {
+        use onecad_core::io::project_import::{
+            find_import_collisions, read_project_for_import, ImportCollisions,
+        };
+
+        let imported = read_project_for_import(path).map_err(|e| ApiError::Io(e.to_string()))?;
+
+        if let Some(collision) = find_import_collisions(self.session.document(), &imported) {
+            return Err(ApiError::InvalidCommand(match collision {
+                ImportCollisions::RecordId(id) => {
+                    format!("cannot import: source record id {id} already exists in this document")
+                }
+                ImportCollisions::SketchId(id) => {
+                    format!("cannot import: source sketch id {id} already exists in this document")
+                }
+            }));
+        }
+
+        // Stage every import blob the source timeline references.
+        for (sha, blob) in &imported.import_blobs {
+            if blob.bytes.len() as u64 > MAX_IMPORT_BLOB_BYTES {
+                return Err(ApiError::Io(format!(
+                    "import blob {sha} is {} bytes, over the {MAX_IMPORT_BLOB_BYTES}-byte limit",
+                    blob.bytes.len()
+                )));
+            }
+            self.import_workspace
+                .materialize(sha, blob.codec, &blob.bytes)
+                .map_err(|e| {
+                    ApiError::Io(format!(
+                        "cannot stage import source {sha} for the geometry worker: {e}"
+                    ))
+                })?;
+            self.imports.insert(sha.clone(), blob.clone());
+        }
+
+        self.session.begin_transaction("Import Project");
+        let mut combined = empty_outcome();
+        for record in imported.records {
+            let name = record.name.clone();
+            let record_id = record.record_id;
+            let outcome = self
+                .session
+                .apply(EditCommand::AddOperation {
+                    record,
+                    at_cursor: true,
+                })
+                .map_err(ApiError::from)?;
+            merge_outcome(&mut combined, &outcome);
+            tracing::info!(record = %record_id, name = %name, "importProject: appended record");
+        }
+        for (sketch_id, sketch) in imported.sketches {
+            let outcome = self
+                .session
+                .apply(EditCommand::AddSketch { sketch })
+                .map_err(ApiError::from)?;
+            merge_outcome(&mut combined, &outcome);
+            tracing::info!(sketch = %sketch_id, "importProject: added sketch");
+        }
+        if let Some(outcome) = self.session.end_transaction() {
+            merge_outcome(&mut combined, &outcome);
+        }
+
+        tracing::info!(
+            path = %path.display(),
+            records = combined.dirty.as_ref().map_or(0, |d| d.to.saturating_sub(d.from) + 1),
+            "importProject: imported"
+        );
+        Ok(combined)
     }
 
     /// The import blobs currently carried (a save writes the referenced subset).

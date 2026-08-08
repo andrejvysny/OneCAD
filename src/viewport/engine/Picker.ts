@@ -236,12 +236,6 @@ export class Picker {
     c.addEventListener("pointerleave", this.onPointerLeave);
   }
 
-  /** Orbit hit-test seam: is there pickable geometry under this client point? */
-  hasHitAt(clientX: number, clientY: number): boolean {
-    if (!this.deps.isActive()) return false;
-    return this.raycast(clientX, clientY) != null;
-  }
-
   /**
    * One-shot pick regardless of `isActive` — for tools that own picking directly
    * (boolean tool-body pick). Returns the resolved hit or null.
@@ -374,8 +368,8 @@ export class Picker {
    *
    * `LineSegments2.onBeforeRender` keeps `resolution` current for DRAWING, but
    * its raycast bails out silently when `resolution` is still (0,0) — which is
-   * exactly the state of a body whose first frame has not rendered yet (an
-   * orbit-gating `hasHitAt` on pointerdown can arrive first). Mirrors
+   * exactly the state of a body whose first frame has not rendered yet (a
+   * pick on pointerdown can arrive first). Mirrors
    * `SketchStaticLayer.hitTest`'s matrixWorld self-flush: a hit-test must not
    * depend on a render having happened.
    *

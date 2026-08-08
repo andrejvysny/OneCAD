@@ -1,5 +1,5 @@
 /*
- * ViewCube — a DOM CSS-3D cube (62px, prototype 1c) synced to the camera.
+ * ViewCube — a DOM CSS-3D cube (48px, prototype 1c) synced to the camera.
  *
  * The cube's orientation follows the camera via inverse camera quaternion (with
  * a Y-flip: Three is Y-up, CSS is Y-down). Faces are placed in the WORLD frame;
@@ -7,7 +7,7 @@
  * canonical view (250ms slerp handled by CadOrbitControls). No React re-render
  * on camera move — the transform is written straight to the DOM.
  */
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type PointerEvent as ReactPointerEvent } from "react";
 import * as THREE from "three";
 import { cn } from "@/ui/cn";
 import { Tooltip } from "@/ui/Tooltip";
@@ -23,7 +23,10 @@ interface FaceDef {
   up: THREE.Vector3;
 }
 
-const HALF = 31; // cube is 62px
+const HALF = 24; // cube is 48px
+
+/** px of movement before a press on the cube counts as a drag, not a click. */
+const DRAG_THRESHOLD = 4;
 
 export const FACES: FaceDef[] = [
   { name: "FRONT", normal: new THREE.Vector3(0, -1, 0), up: new THREE.Vector3(0, 0, 1) },
@@ -109,6 +112,9 @@ export function ViewCube() {
   const engine = useViewportEngine();
   const label = useViewportStore((s) => s.cameraViewLabel);
   const cubeRef = useRef<HTMLDivElement>(null);
+  /** Set after a drag so the following click is swallowed (no snap). */
+  const suppressClickRef = useRef(false);
+  const dragTeardownRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     const el = cubeRef.current;
@@ -122,8 +128,45 @@ export function ViewCube() {
     return engine.onCameraChanged(apply);
   }, [engine]);
 
+  // Drop any in-flight drag listeners if the cube unmounts mid-gesture.
+  useEffect(() => () => dragTeardownRef.current?.(), []);
+
+  const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    engine?.cancelViewAnimation(); // grabbing the cube stops a snap tween
+    const start = { x: e.clientX, y: e.clientY };
+    let last = start;
+    let dragged = false;
+
+    const onMove = (ev: PointerEvent): void => {
+      const dx = ev.clientX - last.x;
+      const dy = ev.clientY - last.y;
+      if (dragged) {
+        engine?.orbitBy(dx, dy);
+      } else if (
+        Math.hypot(ev.clientX - start.x, ev.clientY - start.y) > DRAG_THRESHOLD
+      ) {
+        dragged = true;
+        suppressClickRef.current = true;
+        engine?.orbitBy(dx, dy);
+      }
+      last = { x: ev.clientX, y: ev.clientY };
+    };
+
+    const onUp = (): void => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      dragTeardownRef.current = null;
+    };
+
+    dragTeardownRef.current = onUp;
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  };
+
   return (
-    <Tooltip label="ViewCube — click a face to orient">
+    <Tooltip label="ViewCube — drag to orbit, click a face to orient">
       <div
         role="group"
         aria-label={`ViewCube (${label})`}
@@ -132,12 +175,20 @@ export function ViewCube() {
       >
         <div
           ref={cubeRef}
-          className="absolute inset-0"
+          className="absolute inset-0 touch-none select-none"
           style={{
             transformStyle: "preserve-3d",
             transform: cssMatrix3d(
               cubeContainerMatrix({ x: 0, y: 0, z: 0, w: 1 }),
             ),
+          }}
+          onPointerDown={onPointerDown}
+          onClickCapture={(e) => {
+            if (suppressClickRef.current) {
+              suppressClickRef.current = false;
+              e.stopPropagation();
+              e.preventDefault();
+            }
           }}
         >
           {FACES.map((f) => (
@@ -149,13 +200,15 @@ export function ViewCube() {
                 engine?.snapToViewDirection(f.normal.clone())
               }
               className={cn(
-                "absolute inset-0 flex cursor-pointer items-center justify-center",
+                "absolute flex cursor-grab items-center justify-center active:cursor-grabbing",
                 "rounded-[2px] border border-border bg-surface text-[10px] font-semibold",
                 "tracking-[0.06em] text-ink-4 shadow-ctrl",
                 "hover:bg-sel-bg hover:text-accent",
                 "focus-visible:shadow-focus-ring focus-visible:outline-none",
               )}
               style={{
+                width: HALF * 2,
+                height: HALF * 2,
                 transform: cssMatrix3d(faceMatrix(f.normal, f.up)),
                 backfaceVisibility: "hidden",
                 WebkitBackfaceVisibility: "hidden",

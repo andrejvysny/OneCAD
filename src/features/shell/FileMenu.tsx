@@ -7,6 +7,7 @@ import {
   exportObj,
   exportStep,
   exportStl,
+  importProject,
   insertStep,
   openDocumentDialog,
   saveDocument,
@@ -58,6 +59,7 @@ export function FileMenu() {
         {/* Import lands in the Open/Save group, ABOVE the Export separator: it
             mutates the open document, so it belongs with the input actions. */}
         <MenuItem label="Import STEP…" onClick={() => run(insertStep)} />
+        <MenuItem label="Import Project…" onClick={() => run(importProject)} />
         <div aria-hidden="true" className="my-1 h-px bg-border" />
         <MenuItem label="Close Project" shortcut="⌘W" onClick={() => run(closeProject)} />
         <div aria-hidden="true" className="my-1 h-px bg-border" />

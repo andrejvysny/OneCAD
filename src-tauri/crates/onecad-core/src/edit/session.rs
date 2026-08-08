@@ -1582,7 +1582,7 @@ impl DocumentSession {
 
 // ── Free helpers ─────────────────────────────────────────────────────────────
 
-fn empty_outcome() -> CommandOutcome {
+pub fn empty_outcome() -> CommandOutcome {
     CommandOutcome {
         projection_delta: ProjectionDelta::default(),
         dirty: None,
@@ -1591,7 +1591,7 @@ fn empty_outcome() -> CommandOutcome {
 }
 
 /// Merges `o` into `acc` (transaction batching).
-fn merge_outcome(acc: &mut CommandOutcome, o: &CommandOutcome) {
+pub fn merge_outcome(acc: &mut CommandOutcome, o: &CommandOutcome) {
     acc.projection_delta.merge(&o.projection_delta);
     acc.dirty = union_dirty(acc.dirty, o.dirty);
     acc.regen = stronger_regen(acc.regen, o.regen);

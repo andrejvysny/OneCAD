@@ -14,6 +14,7 @@ type StartSidebarProps = {
   active: StartNavKey;
   onNavigate: (key: StartNavKey) => void;
   onImportStep: () => void;
+  onImportProject: () => void;
   version: string;
 };
 
@@ -22,7 +23,7 @@ type StartSidebarProps = {
  * and a bottom-of-rail Import STEP utility link + version stamp. Active-row
  * styling mirrors `TreeRow`'s bg-sel-bg/text-sel-text convention.
  */
-export function StartSidebar({ active, onNavigate, onImportStep, version }: StartSidebarProps) {
+export function StartSidebar({ active, onNavigate, onImportStep, onImportProject, version }: StartSidebarProps) {
   return (
     <div className="flex h-full w-[220px] shrink-0 flex-col border-r border-border bg-panel px-3 pb-3 pt-0">
       <div className="mb-4 px-2 text-[15px] font-bold tracking-[-0.01em] text-ink">OneCAD</div>
@@ -57,6 +58,14 @@ export function StartSidebar({ active, onNavigate, onImportStep, version }: Star
       >
         <Icon name="import" size={13} strokeWidth={1.7} />
         Import STEP…
+      </button>
+      <button
+        type="button"
+        onClick={onImportProject}
+        className="mb-2 flex h-7 cursor-pointer items-center gap-2 rounded-sm px-2 text-left font-ui text-[12.5px] text-ink-4 hover:bg-hover-2 hover:text-ink-2"
+      >
+        <Icon name="import" size={13} strokeWidth={1.7} />
+        Import Project…
       </button>
       <MonoValue className="px-2 text-[11px] text-ink-7">{version}</MonoValue>
     </div>

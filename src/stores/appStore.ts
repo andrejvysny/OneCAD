@@ -75,6 +75,7 @@ export interface AppState {
   openProject(path: string): Promise<void>;
   openDialogAndOpen(): Promise<void>;
   importStep(): Promise<void>;
+  importProject(): Promise<void>;
   closeProject(): Promise<void>;
   checkRecovery(): Promise<void>;
   recoverDocument(): Promise<void>;
@@ -223,6 +224,13 @@ export const appStore = createStore<AppState>()((set, get) => {
       } catch (e) {
         set({ importError: e instanceof Error ? e.message : String(e) });
       }
+    },
+
+    async importProject() {
+      const snap = await client.importProject();
+      if (!snap) return; // cancelled — silent
+      resetIfReplacing();
+      enter(snap);
     },
 
     async closeProject() {

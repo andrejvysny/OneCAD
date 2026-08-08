@@ -81,6 +81,12 @@ export interface CadClient {
   /** Import a STEP file at `path` into a new document. */
   importStep(path: string): Promise<DocumentSnapshot>;
   /**
+   * Import another `.onecad` project. If a document is open the source timeline
+   * is appended to it; otherwise a fresh document is created. Resolves `null`
+   * when the dialog is cancelled.
+   */
+  importProject(): Promise<DocumentSnapshot | null>;
+  /**
    * Close the open document, dropping the runtime + caches and returning to the
    * start screen. The backend emits an empty projection so the editor clears.
    * Safe to call when no document is open (no-op).

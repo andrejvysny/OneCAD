@@ -5536,9 +5536,8 @@ export class ModelToolController {
     if (e.button !== 0) return;
 
     // The placement gizmo claims a press that lands ON a handle and nothing else
-    // — every other press while armed stays available to orbit / select, which is
-    // why this tool needs no orbit-suppression of its own (the engine's `hitTest`
-    // already folds `hitTransformGizmo` in, exactly like the extrude handle).
+    // — every other press while armed stays available to select (orbit is RMB+
+    // Shift now, so it never collides with LMB regardless of what this tool does).
     // …but not while an align pick owns the pointer: the gizmo is hidden then,
     // and a press that still grabbed it would eat the face click (W2.5).
     if (this.transform.phase === "armed" && this.transform.alignPhase === null) {

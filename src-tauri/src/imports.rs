@@ -180,7 +180,7 @@ impl ImportWorkspace {
         bytes: &[u8],
     ) -> std::io::Result<PathBuf> {
         let path = self.dir.join(format!("{sha256}.{}", codec.extension()));
-        if self.entries.iter().any(|(s, p)| s == sha256 && p == &path) {
+        if self.entries.iter().any(|(s, p)| s == sha256 && p == &path) && path.is_file() {
             return Ok(path);
         }
         std::fs::create_dir_all(&self.dir)?;
@@ -207,8 +207,36 @@ impl Drop for ImportWorkspace {
     }
 }
 
+/// True if `pid` names a process that is currently alive.
+#[cfg(unix)]
+fn is_process_alive(pid: u32) -> bool {
+    // `kill(pid, 0)` returns 0 if the process exists and we have permission to
+    // signal it, without actually delivering a signal.
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn is_process_alive(_pid: u32) -> bool {
+    // On platforms where we cannot check, treat unknown processes as alive so we
+    // never delete a workspace that might still be in use.
+    true
+}
+
+/// Parses the `<pid>` component from a workspace directory name formatted as
+/// `<documentId>-<pid>-<seq>`. The document id may itself contain '-' characters,
+/// so the pid is the second-to-last '-' separated component.
+fn parse_workspace_pid(name: &str) -> Option<u32> {
+    let mut parts = name.rsplit('-');
+    let _seq = parts.next()?;
+    let pid_str = parts.next()?;
+    pid_str.parse::<u32>().ok()
+}
+
 /// Removes `onecad-imports/*` directories older than `max_age` — workspaces a crash
 /// (or a kill -9) left behind, since [`ImportWorkspace::drop`] never ran.
+///
+/// Directories whose embedded process id is still alive are preserved, even if old,
+/// so a second running instance never deletes another live instance's workspace.
 ///
 /// Best-effort and cheap: one directory listing plus an mtime stat each, no
 /// recursion into live directories, every failure ignored. Safe to call at every
@@ -230,7 +258,16 @@ pub fn sweep_stale_workspaces(max_age: Duration) -> usize {
             .ok()
             .and_then(|m| now.duration_since(m).ok())
             .is_some_and(|age| age > max_age);
-        if stale && std::fs::remove_dir_all(entry.path()).is_ok() {
+        if !stale {
+            continue;
+        }
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if parse_workspace_pid(&name_str).is_some_and(is_process_alive) {
+            tracing::debug!(dir = %entry.path().display(), "skipping live import workspace");
+            continue;
+        }
+        if std::fs::remove_dir_all(entry.path()).is_ok() {
             removed += 1;
         }
     }
@@ -329,6 +366,13 @@ pub async fn prepare_import(
     let geometry_bytes = inspection.geometry_bytes.clone().ok_or_else(|| {
         ApiError::Worker("InspectStep returned no geometry bytes for the conversion lane".into())
     })?;
+    if geometry_bytes.len() as u64 > MAX_IMPORT_BLOB_BYTES {
+        return Err(ApiError::Io(format!(
+            "converted geometry is {:.1} MiB — over the {} MiB import limit",
+            geometry_bytes.len() as f64 / (1024.0 * 1024.0),
+            MAX_IMPORT_BLOB_BYTES / (1024 * 1024),
+        )));
+    }
     let geometry_sha = sha256_hex(&geometry_bytes);
 
     let mut diagnostics = inspection.diagnostics.clone();
@@ -521,5 +565,103 @@ mod tests {
             .expect("materialize");
         sweep_stale_workspaces(STALE_WORKSPACE_AGE);
         assert!(path.is_file(), "a just-created workspace is never stale");
+    }
+
+    #[test]
+    fn materialize_rewrites_file_deleted_behind_its_back() {
+        let mut ws = ImportWorkspace::new(DocumentId::new());
+        let sha = sha256_hex(b"will-be-purged");
+        let path = ws
+            .materialize(&sha, ImportSourceCodec::Brep, b"solid bytes")
+            .expect("materialize");
+        assert!(path.is_file());
+
+        // Simulate a temp-directory purge or a cross-instance sweep that removes
+        // the file while this workspace still owns the digest.
+        std::fs::remove_file(&path).expect("remove simulated purge");
+        assert!(!path.is_file());
+
+        let again = ws
+            .materialize(&sha, ImportSourceCodec::Brep, b"solid bytes")
+            .expect("re-materialize must restore the file");
+        assert_eq!(again, path);
+        assert!(
+            path.is_file(),
+            "re-materialize must recreate a missing file"
+        );
+        assert_eq!(
+            resolve_blob_path(&sha),
+            path.to_string_lossy(),
+            "lowering must resolve the restored path"
+        );
+    }
+
+    #[test]
+    fn sweep_skips_live_pids_and_removes_dead_ones() {
+        let root = std::env::temp_dir().join(WORKSPACE_ROOT);
+        std::fs::create_dir_all(&root).expect("workspace root");
+
+        // A directory bound to the current process must survive.
+        let live_dir = root.join(format!("doc-live-{}-0", std::process::id()));
+        std::fs::create_dir_all(&live_dir).expect("live dir");
+
+        // A directory bound to a process that has already exited must be swept.
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn child");
+        let dead_pid = child.id();
+        let _ = child.wait();
+        let dead_dir = root.join(format!("doc-dead-{dead_pid}-0"));
+        std::fs::create_dir_all(&dead_dir).expect("dead dir");
+
+        // Age the directories by a tiny amount so zero max_age treats them as stale.
+        std::thread::sleep(Duration::from_millis(10));
+        sweep_stale_workspaces(Duration::ZERO);
+
+        assert!(live_dir.exists(), "live-pid workspace must not be swept");
+        assert!(!dead_dir.exists(), "dead-pid workspace must be swept");
+
+        let _ = std::fs::remove_dir_all(&live_dir);
+    }
+
+    /// A [`StepImport`] that returns geometry bytes larger than the per-blob cap.
+    struct OverCapGeometry;
+
+    #[async_trait::async_trait]
+    impl StepImport for OverCapGeometry {
+        async fn inspect_step(
+            &self,
+            _path: &Path,
+            _include_geometry: bool,
+        ) -> Result<StepInspection, onecad_core::regen::EngineError> {
+            Ok(StepInspection {
+                solid_count: 1,
+                source_unit: "MM".into(),
+                bbox: ([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]),
+                product_names: vec!["thing".into()],
+                geometry_codec: "xbf".into(),
+                geometry_format: 4,
+                diagnostics: Vec::new(),
+                geometry_bytes: Some(vec![0u8; (MAX_IMPORT_BLOB_BYTES + 1) as usize]),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn an_over_cap_converted_geometry_is_rejected() {
+        let dir = std::env::temp_dir().join(format!("onecad-cap-converted-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("huge.step");
+        std::fs::write(&path, b"x").expect("create");
+
+        let err = prepare_import(&OverCapGeometry, &path)
+            .await
+            .expect_err("over-cap converted geometry must be rejected");
+        let message = err.to_string();
+        assert!(
+            matches!(err, ApiError::Io(_)) && message.contains("256"),
+            "the rejection must NAME the cap so the user knows the limit, got {message:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

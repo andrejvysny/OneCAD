@@ -57,6 +57,7 @@ export function StartScreen() {
   const openProject = useAppStore((s) => s.openProject);
   const openDialogAndOpen = useAppStore((s) => s.openDialogAndOpen);
   const importStep = useAppStore((s) => s.importStep);
+  const importProject = useAppStore((s) => s.importProject);
   const importError = useAppStore((s) => s.importError);
   const recovery = useAppStore((s) => s.recovery);
   const recoveryStatus = useAppStore((s) => s.recoveryStatus);
@@ -134,6 +135,7 @@ export function StartScreen() {
           active={nav}
           onNavigate={setNav}
           onImportStep={() => void importStep()}
+          onImportProject={() => void importProject()}
           version={APP_VERSION}
         />
 

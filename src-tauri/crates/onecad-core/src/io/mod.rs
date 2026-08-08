@@ -56,6 +56,7 @@ pub mod history_io;
 pub mod imports;
 pub mod manifest;
 pub mod migrate;
+pub mod project_import;
 pub mod recovery;
 pub mod sketch_io;
 

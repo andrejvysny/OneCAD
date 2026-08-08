@@ -2,11 +2,11 @@
  * CadOrbitControls — a small custom orbit controller (no three examples dep).
  *
  * MOUSE
- *   LMB drag             = turntable orbit: yaw about WORLD Z, pitch clamped to
- *                          ±(90° − ε). Orbit is SUPPRESSED when the drag starts on
- *                          pickable geometry (that gesture is a selection click);
- *                          dragging from empty space orbits (`hitTest` seam).
- *   MMB / RMB drag       = pan in the view plane.
+ *   LMB drag             = selection / tool drags ONLY. Never orbits — left
+ *                          button is fully reserved for pick/gizmo/sketch gestures.
+ *   RMB + Shift drag     = turntable orbit: yaw about WORLD Z, pitch clamped to
+ *                          ±(90° − ε).
+ *   MMB drag / RMB drag  = pan in the view plane (RMB pans when Shift is not held).
  *   Wheel                = zoom-to-cursor dolly (persp) / frustum zoom (ortho).
  *
  * TRACKPAD (macOS + Windows precision touchpads — the Fusion 360 convention)
@@ -167,12 +167,6 @@ export interface OrbitOptions {
   onChange: () => void;
   /** Scene bounds for Fit; null when empty. */
   getBounds: () => THREE.Box3 | null;
-  /**
-   * Orbit gating: is there pickable geometry under this client point? When it
-   * returns true on LMB-down, orbit is suppressed for that gesture (a selection
-   * click). Absent ⇒ LMB always orbits (previous behaviour).
-   */
-  hitTest?: (clientX: number, clientY: number) => boolean;
   /** User's input-device preference. Absent ⇒ "auto". */
   getDevicePref?: () => DevicePref;
   /**
@@ -194,7 +188,6 @@ export class CadOrbitControls {
   private readonly el: HTMLElement;
   private readonly onChange: () => void;
   private readonly getBounds: () => THREE.Box3 | null;
-  private readonly hitTest: ((x: number, y: number) => boolean) | null;
   private readonly getDevicePref: () => DevicePref;
   private readonly isDragActive: () => boolean;
   private readonly onDeviceChange: ((device: InputDevice) => void) | null;
@@ -210,8 +203,6 @@ export class CadOrbitControls {
   private button = -1;
   private lastPinch = 0;
   private tween: Tween | null = null;
-  /** True while an LMB gesture began on geometry (orbit suppressed). */
-  private orbitSuppressed = false;
   /** Sticky suppression of LMB orbit (sketch drawing tools own LMB). */
   private lmbOrbitSuppressed = false;
   /** Pure reducer state for wheel + gesture routing. */
@@ -225,7 +216,6 @@ export class CadOrbitControls {
     this.el = opts.element;
     this.onChange = opts.onChange;
     this.getBounds = opts.getBounds;
-    this.hitTest = opts.hitTest ?? null;
     this.getDevicePref = opts.getDevicePref ?? (() => "auto");
     this.isDragActive = opts.isDragActive ?? (() => false);
     this.onDeviceChange = opts.onDeviceChange ?? null;
@@ -272,12 +262,7 @@ export class CadOrbitControls {
   private onPointerDown = (e: PointerEvent): void => {
     this.el.setPointerCapture(e.pointerId);
     this.pointers.set(e.pointerId, new THREE.Vector2(e.clientX, e.clientY));
-    if (this.pointers.size === 1) {
-      this.button = e.button;
-      // Suppress orbit for an LMB gesture that starts on geometry (selection).
-      this.orbitSuppressed =
-        e.button === 0 && this.hitTest !== null && this.hitTest(e.clientX, e.clientY);
-    }
+    if (this.pointers.size === 1) this.button = e.button;
     if (this.pointers.size === 2) this.lastPinch = this.pinchDistance();
     this.tween = null; // user input cancels any animation
   };
@@ -295,9 +280,11 @@ export class CadOrbitControls {
       this.applyPinchZoom(this.pinchDistance());
       return;
     }
-    // Middle and right buttons pan (CAD convention); left button orbits.
-    if (this.button === 1 || this.button === 2) this.pan(dx, dy);
-    else this.orbit(dx, dy);
+    // RMB + Shift orbits; middle button and plain right button pan (CAD
+    // convention). Left button never orbits — it is reserved for
+    // selection / tool drags, handled outside this controller.
+    if (this.button === 2 && e.shiftKey) this.orbit(dx, dy);
+    else if (this.button === 1 || this.button === 2) this.pan(dx, dy);
   };
 
   private onPointerUp = (e: PointerEvent): void => {
@@ -306,10 +293,7 @@ export class CadOrbitControls {
       this.el.releasePointerCapture(e.pointerId);
     }
     if (this.pointers.size < 2) this.lastPinch = 0;
-    if (this.pointers.size === 0) {
-      this.button = -1;
-      this.orbitSuppressed = false;
-    }
+    if (this.pointers.size === 0) this.button = -1;
   };
 
   private onWheel = (e: WheelEvent): void => {
@@ -393,21 +377,37 @@ export class CadOrbitControls {
     this.lmbOrbitSuppressed = suppressed;
   }
 
-  /** LMB-drag orbit — gated by the pointer-gesture suppression flags. */
+  /** RMB+Shift-drag orbit — gated by the modal-tool suppression flag. */
   private orbit(dx: number, dy: number): void {
-    if (this.orbitSuppressed || this.lmbOrbitSuppressed) return; // gesture started on geometry / sketch tool
+    if (this.lmbOrbitSuppressed) return; // a modal tool (LMB-driven) owns the drag
     this.applyOrbit(dx, dy);
   }
 
   /**
    * The orbit math itself, ungated. Shift+scroll orbit routes here directly: the
-   * suppression flags above exist to stop an LMB DRAG from orbiting while a tool
+   * suppression flag above exists to stop a pointer-drag orbit while a modal tool
    * owns the pointer, and a wheel gesture cannot collide with a pointer drag.
    */
   private applyOrbit(dx: number, dy: number): void {
     this.yaw -= dx * ORBIT_SPEED;
     this.pitch = clampPitch(this.pitch + dy * ORBIT_SPEED);
     this.commit();
+  }
+
+  /**
+   * Public ungated orbit by raw screen deltas — the path a ViewCube drag uses.
+   * Same turntable math + speed as the RMB+Shift drag so both gestures feel
+   * identical. Never runs through the LMB-suppression flag (the cube owns its
+   * pointer). Direction is drag-following: the grabbed cube spins with the
+   * pointer, matching RMB-orbit's `yaw -= dx`.
+   */
+  orbitBy(dx: number, dy: number): void {
+    this.applyOrbit(dx, dy);
+  }
+
+  /** Stop any in-flight snap/zoom tween (a ViewCube drag grabs the camera). */
+  cancelAnimation(): void {
+    this.tween = null;
   }
 
   private pan(dx: number, dy: number): void {

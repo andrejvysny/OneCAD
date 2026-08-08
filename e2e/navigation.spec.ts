@@ -167,6 +167,32 @@ test.describe("viewport navigation", () => {
     expect(dist(after.dir, before.dir)).toBeCloseTo(0, 6);
   });
 
+  test("a right-button + Shift drag orbits", async ({ page }) => {
+    const c = await centre(page);
+    const before = await camera(page);
+    await page.mouse.move(c.x, c.y);
+    await page.keyboard.down("Shift");
+    await page.mouse.down({ button: "right" });
+    await page.mouse.move(c.x + 80, c.y, { steps: 4 });
+    await page.mouse.up({ button: "right" });
+    await page.keyboard.up("Shift");
+    const after = await camera(page);
+    expect(dist(after.dir, before.dir)).toBeGreaterThan(0);
+  });
+
+  test("a left-button drag never orbits", async ({ page }) => {
+    const c = await centre(page);
+    const before = await camera(page);
+    // Off to the side of the model, so the drag starts on empty space and
+    // would previously have orbited.
+    await page.mouse.move(c.x - 200, c.y - 150);
+    await page.mouse.down({ button: "left" });
+    await page.mouse.move(c.x - 120, c.y - 150, { steps: 4 });
+    await page.mouse.up({ button: "left" });
+    const after = await camera(page);
+    expect(dist(after.dir, before.dir)).toBeCloseTo(0, 6);
+  });
+
   test("orbiting near the top view does not self-align", async ({ page }) => {
     await setDevicePref(page, "trackpad");
     // Drive the pitch up towards the pole in steps, recording the view direction.

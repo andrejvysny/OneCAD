@@ -353,6 +353,7 @@ pub fn run() {
             api::open_document,
             api::import_step,
             api::insert_step,
+            api::import_project,
             api::save_document,
             api::export_step_file,
             api::export_stl_file,

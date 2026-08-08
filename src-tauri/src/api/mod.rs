@@ -335,6 +335,45 @@ pub async fn insert_step(
     Ok(Some(projection))
 }
 
+/// Imports another `.onecad` project into the open document, or into a fresh blank
+/// document if none is open. Rust owns the dialog; `Ok(None)` means the user
+/// cancelled. Responds like [`open_document`] when a new document is created.
+#[tauri::command]
+#[tracing::instrument(skip_all, err(Display))]
+pub async fn import_project(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<Option<DocumentSnapshotDto>, ApiError> {
+    let Some(path) = pick_file(app.clone(), false).await else {
+        return Ok(None);
+    };
+    let (snapshot, projection, outcome) = {
+        let mut guard = state.runtime.lock().await;
+        let create_new = guard.is_none();
+        let outcome = if create_new {
+            let (engine, meshes, solver) = state.make_backend();
+            let mut rt = DocumentRuntime::new_blank(engine, meshes, solver);
+            let outcome = rt.import_project(Path::new(&path))?;
+            rt.adopt_current_epoch();
+            *guard = Some(rt);
+            outcome
+        } else {
+            let rt = guard
+                .as_mut()
+                .ok_or_else(|| ApiError::NoDocument("importProject".into()))?;
+            rt.import_project(Path::new(&path))?
+        };
+        let rt = guard.as_ref().unwrap();
+        (snapshot_of(rt), rt.projection(), outcome)
+    };
+    let _ = app.emit(events::PROJECTION_UPDATED, &projection);
+    if let Some(sched) = state.scheduler.get() {
+        sched.handle(&outcome);
+    }
+    state.note_mutation();
+    Ok(Some(snapshot))
+}
+
 /// Saves the open document (`CadClient` save). `path` `None` reuses the last save
 /// path; an unsaved document with no path is an error (the frontend's Save action
 /// then falls back to Save As). Records the saved path in the recents store.

@@ -239,7 +239,7 @@ describe("CadOrbitControls — macOS trackpad orbit direction", () => {
     expect(h.controls.getDistance()).toBeGreaterThan(before);
   });
 
-  it("leaves LMB-drag orbit direction untouched on macOS", () => {
+  it("leaves RMB+Shift-drag orbit direction untouched on macOS", () => {
     setPlatform("MacIntel");
     Object.assign(HTMLElement.prototype, {
       setPointerCapture: () => {},
@@ -249,10 +249,21 @@ describe("CadOrbitControls — macOS trackpad orbit direction", () => {
     const h = setup();
     const yaw = h.controls.yaw;
     h.el.dispatchEvent(
-      new MouseEvent("pointerdown", { button: 0, clientX: 500, clientY: 400, bubbles: true }),
+      new MouseEvent("pointerdown", {
+        button: 2,
+        shiftKey: true,
+        clientX: 500,
+        clientY: 400,
+        bubbles: true,
+      }),
     );
     h.el.dispatchEvent(
-      new MouseEvent("pointermove", { clientX: 560, clientY: 400, bubbles: true }),
+      new MouseEvent("pointermove", {
+        shiftKey: true,
+        clientX: 560,
+        clientY: 400,
+        bubbles: true,
+      }),
     );
     // dx > 0 ⇒ yaw decreases — same as off-mac; the flip is wheel-orbit only.
     expect(h.controls.yaw).toBeLessThan(yaw);
@@ -264,8 +275,10 @@ describe("CadOrbitControls — pointer buttons", () => {
     const ev = new MouseEvent("pointerdown", { button, clientX: x, clientY: y, bubbles: true });
     el.dispatchEvent(ev);
   }
-  function move(el: HTMLElement, x: number, y: number): void {
-    el.dispatchEvent(new MouseEvent("pointermove", { clientX: x, clientY: y, bubbles: true }));
+  function move(el: HTMLElement, x: number, y: number, shiftKey = false): void {
+    el.dispatchEvent(
+      new MouseEvent("pointermove", { clientX: x, clientY: y, shiftKey, bubbles: true }),
+    );
   }
 
   beforeEach(() => {
@@ -277,12 +290,14 @@ describe("CadOrbitControls — pointer buttons", () => {
     });
   });
 
-  it("orbits on a left-button drag", () => {
+  it("never orbits on a left-button drag — LMB is reserved for selection/tools", () => {
     const h = setup();
+    const before = h.controls.getTarget().clone();
     const yaw = h.controls.yaw;
     down(h.el, 0);
     move(h.el, 560, 400);
-    expect(h.controls.yaw).not.toBe(yaw);
+    expect(h.controls.yaw).toBe(yaw);
+    expect(h.controls.getTarget().distanceTo(before)).toBeCloseTo(0, 9);
   });
 
   it("pans on a middle-button drag", () => {
@@ -295,7 +310,7 @@ describe("CadOrbitControls — pointer buttons", () => {
     expect(h.controls.yaw).toBe(yaw);
   });
 
-  it("pans on a right-button drag rather than orbiting", () => {
+  it("pans on a plain right-button drag", () => {
     const h = setup();
     const before = h.controls.getTarget().clone();
     const yaw = h.controls.yaw;
@@ -303,6 +318,16 @@ describe("CadOrbitControls — pointer buttons", () => {
     move(h.el, 560, 400);
     expect(h.controls.getTarget().distanceTo(before)).toBeGreaterThan(0);
     expect(h.controls.yaw).toBe(yaw);
+  });
+
+  it("orbits on a right-button + Shift drag", () => {
+    const h = setup();
+    const before = h.controls.getTarget().clone();
+    const yaw = h.controls.yaw;
+    down(h.el, 2);
+    move(h.el, 560, 400, true);
+    expect(h.controls.yaw).not.toBe(yaw);
+    expect(h.controls.getTarget().distanceTo(before)).toBeCloseTo(0, 9);
   });
 
   it("suppresses the context menu", () => {
@@ -356,5 +381,45 @@ describe("CadOrbitControls — teardown", () => {
     const before = h.controls.getDistance();
     wheel(h.el, { deltaY: 120 });
     expect(h.controls.getDistance()).toBe(before);
+  });
+});
+
+describe("CadOrbitControls — ViewCube drag API", () => {
+  it("orbitBy applies turntable deltas: yaw -= dx·speed, pitch += dy·speed", () => {
+    const h = setup();
+    const yaw = h.controls.yaw;
+    const pitch = h.controls.pitch;
+    h.controls.orbitBy(10, 5);
+    expect(h.controls.yaw).toBeCloseTo(yaw - 10 * 0.008, 9);
+    expect(h.controls.pitch).toBeCloseTo(pitch + 5 * 0.008, 9);
+  });
+
+  it("orbitBy clamps pitch just inside the poles", () => {
+    const h = setup();
+    h.controls.orbitBy(0, 1_000_000);
+    expect(h.controls.pitch).toBeLessThan(Math.PI / 2);
+  });
+
+  it("orbitBy orbits even while LMB orbit is suppressed (cube owns its pointer)", () => {
+    const h = setup();
+    h.controls.setLmbOrbitSuppressed(true);
+    const yaw = h.controls.yaw;
+    h.controls.orbitBy(10, 0);
+    expect(h.controls.yaw).not.toBe(yaw);
+  });
+
+  it("orbitBy does not move the target", () => {
+    const h = setup();
+    const before = h.controls.getTarget().clone();
+    h.controls.orbitBy(10, 10);
+    expect(h.controls.getTarget().distanceTo(before)).toBeCloseTo(0, 9);
+  });
+
+  it("cancelAnimation stops an in-flight snap tween", () => {
+    const h = setup();
+    h.controls.snapToViewDirection(new THREE.Vector3(0, 0, 1)); // animates
+    expect(h.controls.update(performance.now() + 1_000)).toBe(true);
+    h.controls.cancelAnimation();
+    expect(h.controls.update(performance.now() + 2_000)).toBe(false);
   });
 });

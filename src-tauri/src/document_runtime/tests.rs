@@ -963,7 +963,7 @@ async fn save_then_reopen_round_trips_the_document() {
     let engine: Arc<dyn GeometryEngine> = backend.clone();
     let meshes: Arc<dyn MeshProvider> = backend.clone();
     let solver: Arc<dyn SolverEngine> = backend;
-    let reopened = DocumentRuntime::open(&path, engine, meshes, solver).unwrap();
+    let mut reopened = DocumentRuntime::open(&path, engine, meshes, solver).unwrap();
     let proj = reopened.projection();
     assert_eq!(proj.features.len(), 1);
     assert_eq!(proj.features[0].value_text, "25.0 mm");
@@ -973,6 +973,153 @@ async fn save_then_reopen_round_trips_the_document() {
         "merged regen body persisted"
     );
     assert!(!reopened.is_dirty());
+
+    // Production doesn't stop at `open()` — `schedule_initial_regen` fires the
+    // same from-0 replay right after, to rebuild geometry never re-derived
+    // from the saved timeline. That replay carries no edit behind it, so it
+    // must not fabricate dirt either (a regression this test previously
+    // missed: it asserted clean BEFORE the replay ran).
+    reopened
+        .run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    assert!(
+        !reopened.is_dirty(),
+        "the from-0 replay open triggers is not an edit — must stay clean"
+    );
+}
+
+#[tokio::test]
+async fn import_project_appends_source_records_and_sketches() {
+    use onecad_core::io::container::SaveMeta;
+
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("source.onecad");
+    let source_records = [0x20u128, 0x21];
+
+    // Build a SOURCE document with two features + a saved container.
+    {
+        let mut src = runtime_with(Arc::new(FakeBackend::new()));
+        for seed in source_records {
+            src.apply(add_extrude(seed, 10.0)).unwrap();
+        }
+        src.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+            .await;
+        src.save(
+            &source_path,
+            SaveMeta {
+                app_version: "0.1.0-test".into(),
+                occt_fingerprint: None,
+                created: "2026-08-03T00:00:00Z".into(),
+                modified: "2026-08-03T00:00:00Z".into(),
+            },
+        )
+        .unwrap();
+    }
+
+    // Import into a DIFFERENT document (distinct record ids → no collision).
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    rt.apply(add_extrude(0x10, 5.0)).unwrap();
+    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    let before = rt.projection().features.len();
+
+    let _ = rt.import_project(&source_path).unwrap();
+
+    let proj = rt.projection();
+    assert_eq!(
+        proj.features.len(),
+        before + source_records.len(),
+        "the import appends every source record to the open timeline"
+    );
+    assert!(
+        proj.features.len() >= source_records.len(),
+        "every source feature landed in the projection"
+    );
+}
+
+#[tokio::test]
+async fn import_project_refuses_a_colliding_record_id() {
+    use onecad_core::io::container::SaveMeta;
+
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("source.onecad");
+
+    // Source and target SHARE a record id (0x10), so the merge would be ambiguous.
+    {
+        let mut src = runtime_with(Arc::new(FakeBackend::new()));
+        src.apply(add_extrude(0x10, 10.0)).unwrap();
+        src.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+            .await;
+        src.save(
+            &source_path,
+            SaveMeta {
+                app_version: "0.1.0-test".into(),
+                occt_fingerprint: None,
+                created: "2026-08-03T00:00:00Z".into(),
+                modified: "2026-08-03T00:00:00Z".into(),
+            },
+        )
+        .unwrap();
+    }
+
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    rt.apply(add_extrude(0x10, 5.0)).unwrap();
+    rt.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+        .await;
+    let features_before = rt.projection().features.len();
+
+    let err = rt.import_project(&source_path).unwrap_err();
+
+    assert!(
+        err.to_string().contains("already exists"),
+        "a shared record id is refused with a collision error, got: {err}"
+    );
+    assert_eq!(
+        rt.projection().features.len(),
+        features_before,
+        "a refused import leaves the target untouched"
+    );
+}
+
+#[tokio::test]
+async fn import_project_into_a_blank_runtime_succeeds() {
+    use onecad_core::io::container::SaveMeta;
+
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("source.onecad");
+
+    {
+        let mut src = runtime_with(Arc::new(FakeBackend::new()));
+        src.apply(add_extrude(0x30, 12.0)).unwrap();
+        src.run_regen(RegenRequest::ToEnd { from: 0 }, CancelToken::new())
+            .await;
+        src.save(
+            &source_path,
+            SaveMeta {
+                app_version: "0.1.0-test".into(),
+                occt_fingerprint: None,
+                created: "2026-08-03T00:00:00Z".into(),
+                modified: "2026-08-03T00:00:00Z".into(),
+            },
+        )
+        .unwrap();
+    }
+
+    // The start-screen lane: no document is open, so the import seeds a fresh one.
+    let mut rt = runtime_with(Arc::new(FakeBackend::new()));
+    rt.import_project(&source_path).unwrap();
+
+    let proj = rt.projection();
+    assert_eq!(
+        proj.features.len(),
+        1,
+        "a blank doc adopts the imported record"
+    );
+    assert!(
+        proj.features[0].value_text.contains("12.0"),
+        "the imported feature kept its authored params: {:?}",
+        proj.features[0].value_text
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
