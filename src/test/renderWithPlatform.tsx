@@ -14,26 +14,39 @@
  */
 import type { ReactElement, ReactNode } from "react";
 import { render, type RenderOptions, type RenderResult } from "@testing-library/react";
-import { createPlatform, PlatformProvider, type Platform } from "@/platform";
+import { createPlatform, PlatformProvider, type ModuleScope, type Platform } from "@/platform";
 import { registerModelingModule } from "@/modules/modeling/register";
+import { MODELING_MODULE_ID } from "@/modules/modeling/manifest";
 
 export interface PlatformRenderResult extends RenderResult {
   readonly platform: Platform;
 }
 
-/** A booted platform with the modeling module active. */
-export function bootTestPlatform(): Platform {
+/**
+ * A booted platform with the modeling module active.
+ *
+ * `contribute` runs against an EDITOR-MOUNT-style child scope, the same way
+ * `EditorShell` registers UI. It is a parameter rather than a default because
+ * pulling `ui.ts` in unconditionally would drag every editor component into
+ * every suite that only needs a tool registry.
+ */
+export function bootTestPlatform(contribute?: (scope: ModuleScope) => void): Platform {
   const platform = createPlatform();
   registerModelingModule(platform);
   platform.initializeSync();
+  contribute?.(platform.createScope(MODELING_MODULE_ID));
   return platform;
 }
 
 export function renderWithPlatform(
   ui: ReactElement,
-  options: RenderOptions & { platform?: Platform } = {},
+  options: RenderOptions & {
+    platform?: Platform;
+    contribute?: (scope: ModuleScope) => void;
+  } = {},
 ): PlatformRenderResult {
-  const { platform = bootTestPlatform(), ...renderOptions } = options;
+  const { platform: given, contribute, ...renderOptions } = options;
+  const platform = given ?? bootTestPlatform(contribute);
   const result = render(ui, {
     ...renderOptions,
     wrapper: ({ children }: { children: ReactNode }) => (

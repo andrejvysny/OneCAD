@@ -1,10 +1,12 @@
 import { beforeEach, describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
+import { screen, fireEvent, act, waitFor } from "@testing-library/react";
 import { InspectorPanel } from "@/features/inspector/InspectorPanel";
 import { repairStore } from "@/stores/repairStore";
 import { mockClient } from "@/ipc/mockClient";
 import { documentStore } from "@/stores/documentStore";
 import { resetStores } from "@/test/resetStores";
+import { renderWithPlatform } from "@/test/renderWithPlatform";
+import { contributeInspectorSections } from "@/modules/modeling/inspectorSections";
 import type { NeedsRepairEvent } from "@/ipc/types";
 
 const oneItem = (opId: string, refId: string): NeedsRepairEvent => ({
@@ -23,7 +25,7 @@ beforeEach(() => resetStores());
 
 describe("RepairPanel (inspector repair state)", () => {
   it("renders the repair panel with the feature label from the projection", () => {
-    render(<InspectorPanel />);
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     openRepair("f3", "f3.input0"); // f3 = the seeded Fillet feature
     expect(screen.getByText("Repair references")).toBeInTheDocument();
     expect(screen.getByText("Fillet")).toBeInTheDocument();
@@ -31,14 +33,14 @@ describe("RepairPanel (inspector repair state)", () => {
   });
 
   it("falls back to an opId prefix when the feature is not in the projection", () => {
-    render(<InspectorPanel />);
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     openRepair("op_deadbeef99", "op_deadbeef99.input0");
     expect(screen.getByText(/Feature op_dea/)).toBeInTheDocument();
   });
 
   it("expanding an item calls resolveRefs and renders candidates sorted by score", async () => {
     const spy = vi.spyOn(mockClient, "resolveRefs");
-    render(<InspectorPanel />);
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     openRepair("f3", "f3.input0");
 
     fireEvent.click(screen.getByTestId("repair-item-head-f3.input0"));
@@ -57,7 +59,7 @@ describe("RepairPanel (inspector repair state)", () => {
   it("choosing a candidate promotes it then sends an EditOperationInput rebind", async () => {
     const promote = vi.spyOn(mockClient, "promoteSelection");
     const apply = vi.spyOn(mockClient, "applyEditCommand");
-    render(<InspectorPanel />);
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     openRepair("f3", "f3.input0");
 
     fireEvent.click(screen.getByTestId("repair-item-head-f3.input0"));
@@ -80,7 +82,7 @@ describe("RepairPanel (inspector repair state)", () => {
   });
 
   it("the close affordance dismisses the panel", () => {
-    render(<InspectorPanel />);
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     openRepair("f3", "f3.input0");
     fireEvent.click(screen.getByTestId("repair-close"));
     expect(repairStore.getState().panelOpen).toBe(false);
@@ -100,7 +102,7 @@ describe("RepairPanel — a slot with no rebind path (H9)", () => {
       ],
     });
     const spy = vi.spyOn(mockClient, "resolveRefs");
-    render(<InspectorPanel />);
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     openRepair("h1", "h1.input0");
 
     fireEvent.click(screen.getByTestId("repair-item-head-h1.input0"));
@@ -119,7 +121,7 @@ describe("RepairPanel — a slot with no rebind path (H9)", () => {
         { id: "h1", kind: "extrude", opType: "Hole", label: "Hole", valueText: "", status: "needsRepair" },
       ],
     });
-    render(<InspectorPanel />);
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     openRepair("h1", "h1.input1"); // slot 1 = host face
     fireEvent.click(screen.getByTestId("repair-item-head-h1.input1"));
     await screen.findByText("91%");

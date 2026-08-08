@@ -10,12 +10,14 @@
  * by InspectorPanel.test.tsx.
  */
 import { describe, it, expect, beforeEach } from "vitest";
-import { render, act } from "@testing-library/react";
+import { act } from "@testing-library/react";
 import { InspectorPanel } from "./InspectorPanel";
 import { selectionStore } from "@/stores/selectionStore";
 import { toolStore } from "@/stores/toolStore";
 import { sketchStore } from "@/stores/sketchStore";
 import { resetStores } from "@/test/resetStores";
+import { renderWithPlatform } from "@/test/renderWithPlatform";
+import { contributeInspectorSections } from "@/modules/modeling/inspectorSections";
 import type { SketchSession } from "@/ipc/types";
 import {
   INSPECTOR_SECTIONS_CONTRACT,
@@ -46,19 +48,19 @@ describe("inspector section order", () => {
   beforeEach(() => resetStores());
 
   it("EMPTY state renders no sections", () => {
-    const { container } = render(<InspectorPanel />);
+    const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => selectionStore.getState().clear());
     expect(sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.empty]);
   });
 
   it("a body renders Appearance before History", () => {
-    const { container } = render(<InspectorPanel />);
+    const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => selectionStore.getState().set([{ kind: "body", id: "body1" }]));
     expect(sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.body]);
   });
 
   it("a promoted face renders Appearance before History", () => {
-    const { container } = render(<InspectorPanel />);
+    const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() =>
       selectionStore.getState().set([
         { kind: "face", id: "body1#f:0", bodyId: "body1", topoKey: "f:0", elementId: "el_top" },
@@ -68,7 +70,7 @@ describe("inspector section order", () => {
   });
 
   it("an edge renders History only — Appearance is faces and bodies", () => {
-    const { container } = render(<InspectorPanel />);
+    const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() =>
       selectionStore
         .getState()
@@ -78,13 +80,13 @@ describe("inspector section order", () => {
   });
 
   it("a sketch renders History before Constraints", () => {
-    const { container } = render(<InspectorPanel />);
+    const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => selectionStore.getState().set([{ kind: "sketch", id: "sketch2" }]));
     expect(sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.sketch]);
   });
 
   it("a sketch region renders the same sections as its owning sketch", () => {
-    const { container } = render(<InspectorPanel />);
+    const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() =>
       selectionStore.getState().set([
         {
@@ -99,7 +101,7 @@ describe("inspector section order", () => {
   });
 
   it("sketch mode renders Constraints whether or not the session has any", () => {
-    const { container } = render(<InspectorPanel />);
+    const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => {
       toolStore.getState().setMode("sketch", "sketch2");
       sketchStore.getState().setSession(emptySession());
@@ -118,7 +120,7 @@ describe("inspector section order", () => {
   });
 
   it("a selected feature leads with History", () => {
-    const { container } = render(<InspectorPanel />);
+    const { container } = renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => selectionStore.getState().set([{ kind: "feature", id: "op1" }]));
     // Dependency sections are data-driven and arrive async, so only the frozen
     // prefix is asserted — what matters is that History stays first.

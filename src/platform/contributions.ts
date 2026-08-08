@@ -132,6 +132,14 @@ export interface PanelContribution extends Contribution {
 
 export interface InspectorContext {
   readonly selection: readonly SelectionRef[];
+  /**
+   * Opaque scope tokens active right now — the SAME currency as
+   * `ToolDefinition.scopes`, and just as uninterpreted here. A section that is
+   * only meaningful inside its module's mode gates on one of these; the
+   * alternative was an `InspectorContext.mode`, which would teach the platform
+   * a modeling concept it has no business knowing.
+   */
+  readonly scopes: readonly string[];
 }
 
 export interface InspectorContribution extends Contribution {

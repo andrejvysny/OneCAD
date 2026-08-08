@@ -18,6 +18,7 @@
  */
 import { Slots, type ModuleScope } from "@/platform";
 import { ModelingPanels } from "./panelIds";
+import { contributeInspectorSections } from "./inspectorSections";
 
 import { ConstraintBadgeLayer } from "@/features/sketch/ConstraintBadgeLayer";
 import { LiveDimChips } from "@/features/sketch/LiveDimChips";
@@ -85,6 +86,10 @@ export function contributeModelingUi(scope: ModuleScope): void {
     priority: 100,
     component: InspectorPanel,
   });
+
+  // The inspector's own sections. Registered with the rest of the editor UI, so
+  // they come and go with the panel that hosts them.
+  contributeInspectorSections(scope);
 
   scope.registerPanel({
     id: ModelingPanels.RepairBanner,

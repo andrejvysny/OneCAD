@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, act, fireEvent } from "@testing-library/react";
+import { screen, act, fireEvent } from "@testing-library/react";
 import { InspectorPanel } from "./InspectorPanel";
 import { selectionStore } from "@/stores/selectionStore";
 import { toolStore } from "@/stores/toolStore";
@@ -10,6 +10,8 @@ import { getMockLatency, mockClient } from "@/ipc/mockClient";
 import { setModelToolController } from "@/tools/modelTools/modelToolBridge";
 import type { ModelToolController } from "@/tools/modelTools/ModelToolController";
 import { resetStores } from "@/test/resetStores";
+import { renderWithPlatform } from "@/test/renderWithPlatform";
+import { contributeInspectorSections } from "@/modules/modeling/inspectorSections";
 import { flushSketchMutations } from "@/tools/sketch/sketchService";
 import type { SketchConstraint, SketchSession } from "@/ipc/types";
 
@@ -29,7 +31,7 @@ describe("InspectorPanel", () => {
   beforeEach(() => resetStores());
 
   it("shows the SELECTION state for the default sketch selection", () => {
-    render(<InspectorPanel />);
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     expect(screen.getByText("Sketch 2")).toBeInTheDocument();
     expect(screen.getByText("Sketch")).toBeInTheDocument();
     expect(screen.getByText("Under-constrained · DOF 3")).toBeInTheDocument();
@@ -38,7 +40,7 @@ describe("InspectorPanel", () => {
   });
 
   it("shows body status + full history when a body is selected", () => {
-    render(<InspectorPanel />);
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => selectionStore.getState().set([{ kind: "body", id: "body1" }]));
 
     expect(screen.getByText("Body 1")).toBeInTheDocument();
@@ -54,7 +56,7 @@ describe("InspectorPanel", () => {
   });
 
   it("shows face status + appearance when a promoted face is selected", () => {
-    render(<InspectorPanel />);
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() =>
       selectionStore.getState().set([
         {
@@ -75,7 +77,7 @@ describe("InspectorPanel", () => {
   });
 
   it("shows the owning sketch when a filled region is selected", () => {
-    render(<InspectorPanel />);
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() =>
       selectionStore.getState().set([
         {
@@ -93,13 +95,13 @@ describe("InspectorPanel", () => {
   });
 
   it("shows the EMPTY state when nothing is selected", () => {
-    render(<InspectorPanel />);
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => selectionStore.getState().clear());
     expect(screen.getByText("Nothing selected")).toBeInTheDocument();
   });
 
   it("shows the SKETCH state (DOF card + one row per live constraint) in sketch mode", () => {
-    render(<InspectorPanel />);
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => {
       toolStore.getState().setMode("sketch", "sketch2");
       // Live sketch session drives the CONSTRAINTS panel (no hardcoded demo data).
@@ -134,7 +136,7 @@ describe("InspectorPanel", () => {
   });
 
   it("shows the empty-constraints hint when the sketch has none", () => {
-    render(<InspectorPanel />);
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => {
       toolStore.getState().setMode("sketch", "sketch2");
       sketchStore.getState().setSession(sessionWithConstraints([]));
@@ -158,7 +160,7 @@ describe("InspectorPanel", () => {
           { id: "f-fi", kind: "fillet", opType: "Fillet", label: "Fillet", valueText: "2.0 mm", status: "ok" },
         ],
       });
-      render(<InspectorPanel />);
+      renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
       act(() => selectionStore.getState().set([{ kind: "body", id: "body1" }]));
 
       fireEvent.doubleClick(screen.getByTestId("history-row-f-ch"));
@@ -178,7 +180,7 @@ describe("InspectorPanel", () => {
       documentStore.setState({
         features: [{ id: "f-bool", kind: "boolean", opType: "Boolean", label: "Union", valueText: "", status: "ok" }],
       });
-      render(<InspectorPanel />);
+      renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
       act(() => selectionStore.getState().set([{ kind: "body", id: "body1" }]));
 
       fireEvent.doubleClick(screen.getByTestId("history-row-f-bool"));
@@ -203,7 +205,7 @@ describe("InspectorPanel", () => {
           { id: "f-imp", kind: "boolean", opType: "ImportStep", label: "Import", valueText: "", status: "ok" },
         ],
       });
-      render(<InspectorPanel />);
+      renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
       act(() => selectionStore.getState().set([{ kind: "body", id: "body1" }]));
 
       fireEvent.doubleClick(screen.getByTestId("history-row-f-imp"));
@@ -238,7 +240,7 @@ describe("InspectorPanel", () => {
         },
       ],
     });
-    render(<InspectorPanel />);
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => selectionStore.getState().set([{ kind: "feature", id: "f-a" }]));
 
     expect(screen.getByTestId("history-row-f-b").className).toContain("opacity-60");
@@ -262,7 +264,7 @@ describe("InspectorPanel", () => {
           },
         ],
       });
-      render(<InspectorPanel />);
+      renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
       act(() => selectionStore.getState().set([{ kind: "feature", id: "f-b" }]));
 
       await act(async () => {
@@ -323,7 +325,7 @@ describe("InspectorPanel", () => {
       ) as never,
     });
     try {
-      render(<InspectorPanel />);
+      renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
       act(() => selectionStore.getState().set([{ kind: "feature", id: "f-a" }]));
 
       fireEvent.click(screen.getByTestId("history-value-f-a"));
@@ -355,7 +357,7 @@ describe("InspectorPanel", () => {
 
   it("GUARD — arming a model tool turns every row's value read-only, live", async () => {
     await timelineForInlineEdit();
-    render(<InspectorPanel />);
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => selectionStore.getState().set([{ kind: "feature", id: "f-a" }]));
     fireEvent.click(screen.getByTestId("history-value-f-a"));
     expect(await screen.findByLabelText("Dimension value")).toBeInTheDocument();
@@ -370,7 +372,7 @@ describe("InspectorPanel", () => {
 
   it("GUARD — a row past the rollback cursor is read-only", async () => {
     await timelineForInlineEdit();
-    render(<InspectorPanel />);
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => selectionStore.getState().set([{ kind: "feature", id: "f-a" }]));
     fireEvent.click(screen.getByTestId("history-value-f-c"));
     await new Promise((r) => setTimeout(r, 300));
@@ -384,7 +386,7 @@ describe("InspectorPanel", () => {
         .getState()
         .features.map((f) => (f.id === "f-b" ? { ...f, suppressed: true } : f)),
     });
-    render(<InspectorPanel />);
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => selectionStore.getState().set([{ kind: "feature", id: "f-a" }]));
     expect(screen.getByTestId("history-value-f-b")).toHaveTextContent("1 mm");
     fireEvent.click(screen.getByTestId("history-value-f-b"));
@@ -418,7 +420,7 @@ describe("InspectorPanel", () => {
       .spyOn(mockClient, "setSketchDimension")
       .mockResolvedValue({ sketchId: "sketch2", sketchRevision: 2, dof: 2, status: "UnderConstrained" });
     try {
-      render(<InspectorPanel />);
+      renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
       act(() => selectionStore.getState().set([{ kind: "feature", id: "f-s" }]));
 
       // The section loads over TWO round-trips (params → sketch), so await the
@@ -443,7 +445,7 @@ describe("InspectorPanel", () => {
   });
 
   it("wires each row's delete button to deleteConstraints (re-solves + drops the row)", async () => {
-    render(<InspectorPanel />);
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => {
       toolStore.getState().setMode("sketch", "sketch2");
       sketchStore.getState().setSession(
@@ -488,7 +490,7 @@ describe("InspectorPanel", () => {
         id === "f-b" ? { upstream: ["f-a"], downstream: [] } : { upstream: [], downstream: ["f-b"] },
       );
       try {
-        render(<InspectorPanel />);
+        renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
         act(() => selectionStore.getState().set([{ kind: "feature", id: "f-b" }]));
 
         expect(await screen.findByText("Depends on")).toBeInTheDocument();
@@ -509,7 +511,7 @@ describe("InspectorPanel", () => {
         .spyOn(mockClient, "featureDependencies")
         .mockResolvedValue({ upstream: [], downstream: ["f-b"] });
       try {
-        render(<InspectorPanel />);
+        renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
         act(() => selectionStore.getState().set([{ kind: "feature", id: "f-a" }]));
 
         expect(await screen.findByText("Used by")).toBeInTheDocument();
@@ -526,7 +528,7 @@ describe("InspectorPanel", () => {
         .spyOn(mockClient, "featureDependencies")
         .mockResolvedValue({ upstream: [], downstream: [] });
       try {
-        render(<InspectorPanel />);
+        renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
         act(() => selectionStore.getState().set([{ kind: "feature", id: "f-a" }]));
 
         await vi.waitFor(() => expect(deps).toHaveBeenCalled());
@@ -543,7 +545,7 @@ describe("InspectorPanel", () => {
         .spyOn(mockClient, "featureDependencies")
         .mockResolvedValue({ upstream: ["ghost-id"], downstream: [] });
       try {
-        render(<InspectorPanel />);
+        renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
         act(() => selectionStore.getState().set([{ kind: "feature", id: "f-b" }]));
 
         expect(await screen.findByTestId("feature-dep-upstream-ghost-id")).toHaveTextContent(
@@ -560,7 +562,7 @@ describe("InspectorPanel", () => {
         .spyOn(mockClient, "featureDependencies")
         .mockResolvedValue({ upstream: [], downstream: ["f-b"] });
       try {
-        render(<InspectorPanel />);
+        renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
         act(() => selectionStore.getState().set([{ kind: "feature", id: "f-a" }]));
         await screen.findByText("Used by"); // the panel's own fetch landed
 
