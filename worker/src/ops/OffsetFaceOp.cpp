@@ -395,7 +395,7 @@ FaceResolution resolve_face_refs(OpContext& ctx, const json& op, const std::stri
         refs.reserve(pending.size());
         for (const PendingLadder& p : pending) refs.push_back(p.ref);
         const std::vector<em::LadderResolution> res = em::resolve_descriptor_stage(
-            target_shape, target_id, refs, em::LadderEditContext{ctx.post_upstream_edit});
+            target_shape, target_id, refs, em::LadderEditContext{ctx.post_upstream_edit, ctx.from_zero_replay});
         for (std::size_t k = 0; k < res.size() && k < pending.size(); ++k) {
             if (res[k].outcome == em::LadderOutcome::AutoBind && !res[k].bound_shape.IsNull() &&
                 res[k].bound_shape.ShapeType() == TopAbs_FACE) {

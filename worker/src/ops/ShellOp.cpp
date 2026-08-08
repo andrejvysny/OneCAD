@@ -106,7 +106,7 @@ OpOutcome execute_shell(OpContext& ctx, const json& op, const std::string& op_id
 
     if (!ladder_refs.empty()) {
         const std::vector<em::LadderResolution> res = em::resolve_descriptor_stage(
-            target_shape, target_id, ladder_refs, em::LadderEditContext{ctx.post_upstream_edit});
+            target_shape, target_id, ladder_refs, em::LadderEditContext{ctx.post_upstream_edit, ctx.from_zero_replay});
         for (const em::LadderResolution& r : res) {
             if (r.outcome == em::LadderOutcome::AutoBind && !r.bound_shape.IsNull() &&
                 r.bound_shape.ShapeType() == TopAbs_FACE) {

@@ -315,22 +315,13 @@ void test_edit_scoped_drift_veto_needs_repair() {
     }
 }
 
-// (7b) B3 TELEPORT — the ACCEPTED RESIDUAL. An edit that parks an EXACT congruent
-// twin precisely at the stale anchor while moving the original away still
-// auto-binds, to the twin, silently.
+// (7b) B3 TELEPORT — on a CHECKPOINT replay the anchor-exact carve-out is correct:
+// the incremental path's `apply_placement` keeps anchors fresh, so an exact twin AT
+// the anchor genuinely did not move. It auto-binds.
 //
-// This is NOT an oversight and the assertion below is deliberate: the case is
-// LOCALLY UNDECIDABLE. The worker sees two candidates with byte-identical
-// descriptors, one of them exactly at the anchor, and no evidence that
-// distinguishes "it never moved" from "something else moved onto it". Refusing it
-// means refusing the anchor-exact carve-out, which regresses the flagship gesture
-// (see `h6a_edit_lane_*` on the Rust side: a fillet on a plain box, whose four
-// vertical edges are exact twins, would then NeedsRepair after every upstream
-// edit). Accepted and documented by the HISTORY-HARDEN H6a decision; the fix is
-// reserved for the future from-0 history rung, which has the lineage this stage
-// lacks.
-//
-// If a later wave closes it, THIS TEST FLIPS — that visibility is the point.
+// On a FROM-0 replay there is no migrated partition; the stored anchor can be stale,
+// and the same carve-out would bless a congruent decoy parked at the stale anchor
+// (VF-M5). `LadderEditContext::from_zero_replay` disables the carve-out there.
 void test_edit_scoped_teleport_is_the_accepted_residual() {
     const TwinScene s = b3_twin_scene(0.0);  // twin EXACTLY at the stale anchor
     const auto res = em::resolve_descriptor_stage(s.box, "body", {s.ref},
@@ -339,8 +330,19 @@ void test_edit_scoped_teleport_is_the_accepted_residual() {
     if (res.empty()) return;
     dump_top2("teleport", res[0]);
     check(res[0].outcome == em::LadderOutcome::AutoBind,
-          "teleport: an exact twin AT the stale anchor still binds — ACCEPTED H6a "
-          "residual (locally undecidable; flips when the history rung lands)");
+          "teleport: checkpoint replay keeps the anchor-exact carve-out");
+
+    const auto res_from0 = em::resolve_descriptor_stage(
+        s.box, "body", {s.ref}, em::LadderEditContext{/*post_upstream_edit=*/true,
+                                                     /*from_zero_replay=*/true});
+    check(res_from0.size() == 1, "teleport-from0: one resolution");
+    if (res_from0.empty()) return;
+    dump_top2("teleport-from0", res_from0[0]);
+    check(res_from0[0].outcome == em::LadderOutcome::NeedsRepair,
+          "teleport: from-0 replay with edit context must NOT auto-bind a stale "
+          "anchor (VF-M5)");
+    check(res_from0[0].reason == "ambiguous",
+          "teleport-from0: reason ambiguous");
 }
 
 // (8) REOPEN SEMANTICS — the drift scene with NO edit context is a from-0 replay:

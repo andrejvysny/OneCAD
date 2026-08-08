@@ -41,6 +41,9 @@ struct OpContext {
     // stored anchor its refs carry may be STALE — ops that run the resolution ladder
     // themselves forward this as `elementmap::LadderEditContext` (SCHEMA §10 veto).
     bool post_upstream_edit = false;
+    // True iff this plan is a from-0 replay with an edit context. See
+    // `LadderEditContext::from_zero_replay` for why this matters.
+    bool from_zero_replay = false;
 };
 
 // One op's result. On Ok: body_events / body_ids / delta / needs_repair are the

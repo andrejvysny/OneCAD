@@ -73,6 +73,11 @@ struct LadderEditContext {
     // True iff the plan carried `editedFrom = k` AND the step owning these refs is
     // strictly AFTER k. Default false ⇒ pre-v2 behaviour, byte for byte.
     bool post_upstream_edit = false;
+    // True iff this is a from-0 replay with an edit context. Anchors are world-frozen
+    // at ref-authoring time and the incremental path's `apply_placement` migration is
+    // not available, so the anchor-exact carve-out that is safe on a checkpoint replay
+    // can bless a stale anchor here. Disable the carve-out on this path (VF-M5).
+    bool from_zero_replay = false;
 };
 
 enum class LadderOutcome { AutoBind, NeedsRepair };

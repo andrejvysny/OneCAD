@@ -129,7 +129,7 @@ std::vector<em::LadderResolution> resolve_edge_refs(
         }
     }
     const std::vector<em::LadderResolution> fallback = em::resolve_descriptor_stage(
-        target_shape, target_id, unresolved, em::LadderEditContext{ctx.post_upstream_edit});
+        target_shape, target_id, unresolved, em::LadderEditContext{ctx.post_upstream_edit, ctx.from_zero_replay});
     for (std::size_t i = 0; i < fallback.size(); ++i) {
         results[unresolved_indices[i]] = fallback[i];
     }

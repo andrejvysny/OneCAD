@@ -115,7 +115,7 @@ TopoDS_Face resolve_host_face(OpContext& ctx, const TopoDS_Shape& target_shape,
     }
     std::vector<em::LadderRef> refs{std::move(ref)};
     const std::vector<em::LadderResolution> res = em::resolve_descriptor_stage(
-        target_shape, target_id, refs, em::LadderEditContext{ctx.post_upstream_edit});
+        target_shape, target_id, refs, em::LadderEditContext{ctx.post_upstream_edit, ctx.from_zero_replay});
     if (!res.empty() && res[0].outcome == em::LadderOutcome::AutoBind &&
         !res[0].bound_shape.IsNull() && res[0].bound_shape.ShapeType() == TopAbs_FACE) {
         return TopoDS::Face(res[0].bound_shape);

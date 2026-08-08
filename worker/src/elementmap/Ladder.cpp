@@ -298,7 +298,14 @@ std::vector<LadderResolution> resolve_descriptor_stage(const TopoDS_Shape& body_
                     r.anchor.world_point, pool.shapes[aj], pool.descriptors[aj].center);
                 const bool anchor_exact =
                     winner_anchor_dist <= kAnchorExactEps * anchor_scale(body_diag);
-                anchor_decided_a_tie = descriptor_tie && !anchor_exact;
+                // From-0 replay with an edit context has no migrated partition, so a
+                // stored anchor can be stale. The anchor-exact carve-out that keeps
+                // legitimate "element did not move" resolutions working on a checkpoint
+                // replay would here bless a congruent decoy parked at the stale anchor
+                // (VF-M5). On this path we require descriptor evidence to separate the
+                // candidates; otherwise it is NeedsRepair.
+                const bool allow_anchor_exact = !edit.from_zero_replay;
+                anchor_decided_a_tie = descriptor_tie && (!anchor_exact || !allow_anchor_exact);
             }
 
             if (anchor_decided_a_tie) {

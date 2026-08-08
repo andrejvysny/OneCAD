@@ -257,7 +257,7 @@ struct ExecResult {
 // / Boolean run OCCT; other verbs are UNSUPPORTED this WP.
 ops::OpOutcome run_single_op(ScratchJob& job, const json& op, const std::string& op_id,
                              std::string& last_sketch_id, const onecad::CancelToken& cancel,
-                             bool post_upstream_edit) {
+                             bool post_upstream_edit, bool from_zero_replay) {
     const std::string op_type = get_str(op, "opType");
     const json params = (op.contains("params") && op["params"].is_object()) ? op["params"] : json::object();
 
@@ -270,7 +270,8 @@ ops::OpOutcome run_single_op(ScratchJob& job, const json& op, const std::string&
 
     const OpDeterminism det = read_determinism(op);
     ops::OpContext octx{job.bodies,       &job.sketches,    job.partition, &last_sketch_id,
-                        det.parallel,     det.occt_options, &cancel,       post_upstream_edit};
+                        det.parallel,     det.occt_options, &cancel,       post_upstream_edit,
+                        from_zero_replay};
 
     if (op_type == "Extrude") return ops::execute_extrude(octx, op, op_id);
     if (op_type == "Boolean") return ops::execute_boolean(octx, op, op_id);
@@ -374,11 +375,13 @@ CandidateResult execute_candidate_op(ScratchJob& job, const json& op,
     CandidateSnapshot snapshot = snapshot_candidate(job, last_sketch_id);
     const bool post_edit = step_is_post_edit(job, op);
 
-    resolve_input_refs(job, op, op_id, em::LadderEditContext{post_edit}, result.delta,
+    resolve_input_refs(job, op, op_id,
+                       em::LadderEditContext{post_edit, job.from_zero_replay}, result.delta,
                        result.needs_repair);
     if (result.needs_repair.empty()) {
         merge_outcome(
-            result, run_single_op(job, op, op_id, last_sketch_id, cancel, post_edit));
+            result, run_single_op(job, op, op_id, last_sketch_id, cancel, post_edit,
+                                  job.from_zero_replay));
     } else {
         result.status = CandidateResult::Status::NeedsRepair;
     }
@@ -580,6 +583,7 @@ Envelope handle_execute_plan(Session& session, const Envelope& req, HandlerConte
     if (args.contains("editedFrom") && args["editedFrom"].is_number_unsigned()) {
         job.edited_from = args["editedFrom"].get<std::uint64_t>();
     }
+    job.from_zero_replay = job.edited_from.has_value() && job.partition.size() == 0;
 
     const ExecResult exec = execute_ops(job, ops, job_id, req.id, ctx);
     if (exec.status == ExecStatus::Cancelled) {

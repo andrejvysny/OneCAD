@@ -209,7 +209,7 @@ ToFaceResolve resolve_to_face(OpContext& ctx, const json& face_ref, const gp_Pnt
     }
     std::vector<em::LadderRef> refs{r};
     const std::vector<em::LadderResolution> res = em::resolve_descriptor_stage(
-        rec->geom, bid, refs, em::LadderEditContext{ctx.post_upstream_edit});
+        rec->geom, bid, refs, em::LadderEditContext{ctx.post_upstream_edit, ctx.from_zero_replay});
     if (res.empty() || res[0].outcome != em::LadderOutcome::AutoBind || res[0].bound_shape.IsNull()) {
         out.needs_repair = res.empty() ? json::object() : res[0].to_needs_repair_json();
         return out;
