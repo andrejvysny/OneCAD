@@ -61,13 +61,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::document::body::{BodyMeta, BodyRegistry};
 use crate::document::datum::{resolve_datum, DatumContext, DatumKind, DatumPlane};
 use crate::document::record::{KnownOperation, Operation, OperationRecord};
-use crate::document::refs::ElementRef;
+use crate::document::refs::{ElementKind, ElementRef};
 use crate::document::repair::{LadderLevel, RepairItem, RepairReason};
 use crate::document::variables::{Scalar, Variable, VariableTable};
 use crate::document::Document;
 use crate::error::DomainError;
 use crate::history::{DependencyGraph, DirtyRange, Timeline};
-use crate::ids::{BodyId, RecordId, SketchId};
+use crate::ids::{BodyId, ElementId, RecordId, SketchId};
 use crate::math::Vec2;
 use crate::sketch::{Constraint, Sketch, SketchAttachment, SketchEntity, SketchError};
 
@@ -551,6 +551,12 @@ impl DocumentSession {
             EditCommand::AddBody { body } => self.add_body(body.clone()),
             EditCommand::DeleteBody { body } => self.delete_body(*body),
             EditCommand::RenameBody { body, name } => self.rename_body(*body, name.clone()),
+            EditCommand::SetBodyColor { body, color } => self.set_body_color(*body, *color),
+            EditCommand::SetFaceColor {
+                body,
+                element_id,
+                color,
+            } => self.set_face_color(*body, element_id.clone(), *color),
             EditCommand::SetVisibility { target, visible } => {
                 self.set_visibility(*target, *visible)
             }
@@ -1251,6 +1257,43 @@ impl DocumentSession {
         ))
     }
 
+    fn set_body_color(
+        &mut self,
+        id: BodyId,
+        color: Option<[u8; 4]>,
+    ) -> Result<(CommandOutcome, Inverse), DomainError> {
+        if !self.document.bodies.contains(id) {
+            return Err(DomainError::Validation(format!("body {id} not found")));
+        }
+        let prior = self.document.bodies.clone();
+        self.document.bodies.set_color(id, color);
+        Ok((
+            CommandOutcome::metadata_only(ProjectionDelta::body(id)),
+            Inverse::RestoreBodies {
+                registry: Box::new(prior),
+            },
+        ))
+    }
+
+    fn set_face_color(
+        &mut self,
+        id: BodyId,
+        face: ElementId,
+        color: Option<[u8; 4]>,
+    ) -> Result<(CommandOutcome, Inverse), DomainError> {
+        if !self.document.bodies.contains(id) {
+            return Err(DomainError::Validation(format!("body {id} not found")));
+        }
+        let prior = self.document.bodies.clone();
+        self.document.bodies.set_face_color(id, face, color);
+        Ok((
+            CommandOutcome::metadata_only(ProjectionDelta::body(id)),
+            Inverse::RestoreBodies {
+                registry: Box::new(prior),
+            },
+        ))
+    }
+
     fn set_visibility(
         &mut self,
         target: VisibilityTarget,
@@ -1575,17 +1618,25 @@ fn stronger_regen(a: RegenHint, b: RegenHint) -> RegenHint {
 /// Validates fillet/chamfer edge consistency (F2): when the typed `edges` list
 /// is populated it must stay in lockstep with the bare `edge_ids` — equal length,
 /// and each typed ref's `primary.element` (when present) must equal the parallel
-/// `edge_ids` entry. An intent-only ref (`primary` = `None`) is accepted
-/// positionally (matched by count alone). An empty `edges` list is the legacy
-/// bare-ids form and is always accepted (the operated body binds at regen time).
+/// `edge_ids` entry. Version-1 frozen closures require a complete EDGE primary on
+/// every ref; only legacy records may use the empty or intent-only form.
 /// Non-fillet/chamfer ops and opaque ops are trivially valid.
 fn validate_fillet_lockstep(op: &Operation) -> Result<(), DomainError> {
-    let (edge_ids, edges) = match op {
-        Operation::Known(KnownOperation::Fillet(p)) => (&p.edge_ids, &p.edges),
-        Operation::Known(KnownOperation::Chamfer(p)) => (&p.edge_ids, &p.edges),
+    let (edge_ids, edges, closure_version) = match op {
+        Operation::Known(KnownOperation::Fillet(p)) => {
+            (&p.edge_ids, &p.edges, p.tangent_closure_version)
+        }
+        Operation::Known(KnownOperation::Chamfer(p)) => {
+            (&p.edge_ids, &p.edges, p.tangent_closure_version)
+        }
         _ => return Ok(()),
     };
     if edges.is_empty() {
+        if closure_version == Some(1) {
+            return Err(DomainError::Validation(
+                "version-1 tangent closure requires full typed edge refs".into(),
+            ));
+        }
         return Ok(());
     }
     if edges.len() != edge_ids.len() {
@@ -1596,6 +1647,13 @@ fn validate_fillet_lockstep(op: &Operation) -> Result<(), DomainError> {
         )));
     }
     for (i, e) in edges.iter().enumerate() {
+        if closure_version == Some(1)
+            && !matches!(e.primary.as_ref(), Some(primary) if primary.kind == ElementKind::Edge)
+        {
+            return Err(DomainError::Validation(format!(
+                "version-1 tangent closure edge {i} requires an EDGE primary"
+            )));
+        }
         if let Some(primary) = &e.primary {
             if primary.element != edge_ids[i] {
                 return Err(DomainError::Validation(format!(
@@ -1623,6 +1681,16 @@ fn validate_fillet_lockstep(op: &Operation) -> Result<(), DomainError> {
 /// deserialize time for the same single-writer reason as [`validate_import_step`]:
 /// a document authored by another build still opens and round-trips.
 fn validate_edge_op_distances(op: &Operation) -> Result<(), DomainError> {
+    let closure_version = match op {
+        Operation::Known(KnownOperation::Fillet(p)) => p.tangent_closure_version,
+        Operation::Known(KnownOperation::Chamfer(p)) => p.tangent_closure_version,
+        _ => None,
+    };
+    if closure_version.is_some_and(|version| version != 1) {
+        return Err(DomainError::Validation(
+            "tangentClosureVersion must be 1 when present".into(),
+        ));
+    }
     match op {
         Operation::Known(KnownOperation::Chamfer(p)) => {
             p.validate().map_err(DomainError::Validation)

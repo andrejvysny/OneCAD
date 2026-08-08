@@ -94,6 +94,24 @@ function makeClientMock(opts: { deferPreview?: boolean } = {}) {
     onPreviewResult: vi.fn((_cb: (r: PreviewResult) => void) => () => {}),
     finishSketch: vi.fn(() => Promise.resolve({ regions: [] })),
     getSketchRegions: vi.fn(() => Promise.resolve({ regions: [] })),
+    prepareEdgeOp: vi.fn(() =>
+      Promise.resolve({
+        snapshotId: 1,
+        targetBodyId: "body_body1",
+        edges: [{
+          topoKey: "e:0",
+          elementId: "el-edge-0",
+          bodyId: "body_body1",
+          kind: "edge" as const,
+          picked: true,
+          anchor: EDGE.anchor,
+        }],
+        refusal: null,
+      }),
+    ),
+    promoteSelection: vi.fn(() =>
+      Promise.resolve([{ topoKey: "e:0", elementId: "el-edge-0", kind: "edge", bodyId: "body1" }]),
+    ),
     beginPreview: vi.fn((_d: PreviewDraft) => {
       const session: PreviewSession = { sessionId: `pv-${++seq}`, previewBodyId: `pb-${seq}` };
       if (!opts.deferPreview) return Promise.resolve(session);

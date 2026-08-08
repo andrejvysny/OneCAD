@@ -22,6 +22,7 @@
 #include "TopoDS_Shape.hxx"
 #include "elementmap/ElementMapPartition.h"
 #include "nlohmann/json.hpp"
+#include "session/PlanExecutor.h"
 #include "session/PreviewOp.h"
 #include "session/HistoryHash.h"
 #include "session/ScratchJob.h"
@@ -158,6 +159,22 @@ void check_head_untouched(Session& s, const HeadFingerprint& before, const char*
 }  // namespace
 
 int main() {
+    {
+        onecad::session::CandidateResult failed;
+        failed.status = onecad::session::CandidateResult::Status::Failed;
+        failed.error_code = "OP_FAILED";
+        failed.error_message = "terminal";
+        for (int i = 0; i < 70; ++i) {
+            failed.diagnostics.push_back(
+                json{{"severity", "warning"}, {"code", "ADVISORY"}, {"message", "bounded"}});
+        }
+        failed.diagnostics.push_back(json{{"severity", 7}, {"code", "BAD"}, {"message", "bad"}});
+        const json bounded = onecad::session::candidate_diagnostics(failed);
+        CHECK(bounded.size() == 64);
+        CHECK(bounded.back()["severity"] == "error");
+        CHECK(bounded.back()["message"] == "terminal");
+    }
+
     Session session;
     session.open("doc", 1, 1, "normal");
 
@@ -372,6 +389,35 @@ int main() {
             session, preview_req(json{{"op", op}, {"sketchId", "sk1"}}));
         CHECK(resp.error.has_value());
         CHECK(resp.error->code == "OP_FAILED");
+        CHECK(resp.error->detail.has_value());
+        const json diagnostics = resp.error->detail.value().value("diagnostics", json::array());
+        CHECK(diagnostics.size() == 1);
+        CHECK(diagnostics[0]["severity"] == "error");
+        CHECK(diagnostics[0]["code"] == "OP_FAILED");
+        CHECK(diagnostics[0]["stage"] == "build");
+
+        json sketch_op = {{"opType", "Sketch"},
+                          {"opId", "op_diag_sketch"},
+                          {"stepIndex", 0},
+                          {"params", rect_sketch_args(10, 10)}};
+        sketch_op["params"]["sketchId"] = "sk1";
+        op["stepIndex"] = 1;
+        const json args = {{"jobId", 77},
+                           {"documentRevision", 1},
+                           {"workerEpoch", 1},
+                           {"expectedBaseHash", onecad::session::kEmptyPrefixHash},
+                           {"prefixHashes", json::array({"diag-sketch", "diag-op"})},
+                           {"targetStep", 1},
+                           {"ops", json::array({sketch_op, op})}};
+        onecad::CancelToken cancel;
+        onecad::protocol::HandlerContext ctx{cancel, [](int) {}, [](Envelope&) {}};
+        const Envelope plan = onecad::session::handle_execute_plan(
+            session, Envelope::request(77, "ExecutePlan", args), ctx);
+        CHECK(!plan.error.has_value());
+        CHECK(plan.result["stoppedReason"] == "opFailed");
+        const json terminal = plan.result["perStepResults"][1]["diagnostics"];
+        CHECK(terminal.dump() == diagnostics.dump());
+        CHECK(session.discard_prepared(77));
         check_head_untouched(session, base, "invalid mode");
     }
 

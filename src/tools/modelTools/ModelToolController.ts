@@ -27,6 +27,7 @@ import type {
   OffsetFaceEvidence,
   OffsetFaceParams,
   OperationOp,
+  PrepareEdgeOpResult,
   PrepareOffsetFaceResult,
   PreviewDraft,
   PreviewFailure,
@@ -92,6 +93,7 @@ import {
   type HoleFsm,
 } from "./holeMachine";
 import { holeStandardPatch } from "./holeStandards";
+import { getToolApplicability, resolveTargetSketchId } from "./toolApplicability";
 import type { HoleChipOpts } from "@/stores/toolChipStore";
 import {
   measureAdd,
@@ -614,6 +616,8 @@ export class ModelToolController {
   private filletEditFeatureId: string | undefined;
   /** Stored params of the fillet being re-edited (radius-only edit preserves edges). */
   private filletStoredParams: Record<string, unknown> | undefined;
+  /** Document revision whose prepared tangent closure `filletEdges` represents. */
+  private filletPreparedRevision: number | null = null;
 
   // Shell context (mirrors fillet: face selection + vertical thickness drag).
   private shellFaces: EntityRef[] = [];
@@ -1083,47 +1087,81 @@ export class ModelToolController {
   }
 
   private armExtrudeFromSelection(): void {
-    const regions = selectionStore
-      .getState()
-      .selected.filter((ref) => ref.kind === "sketchRegion");
-    if (regions.length === 1) {
-      void this.armExtrude(regions[0].sketchId, regions[0].regionId);
+    const selected = selectionStore.getState().selected;
+    const verdict = getToolApplicability("extrude", selected, this.applicabilityCtx());
+    const picked = selected.filter((ref) => ref.kind === "sketchRegion");
+    if (picked.length > 0 && verdict.enabled) {
+      void this.armExtrudeRegions(picked[0].sketchId, picked.map((ref) => ref.regionId));
       return;
     }
-    if (regions.length > 1) {
-      // Extrude is single-profile by design (EXTRUDE-REGION-PARITY): the boundary
-      // rejects >1, so refuse here with the actionable message.
+    // Nothing region-typed selected: tool-first UX. A selected sketch (or the
+    // document's sole visible sketch) opens the region PICK.
+    if (picked.length === 0) {
+      const sketchId = this.pickTargetSketchId();
+      if (sketchId) {
+        void this.armExtrudePick(sketchId);
+        return;
+      }
+    }
+    viewportStore
+      .getState()
+      .setStatusHint(verdict.reason ?? null, { severity: verdict.severity, sticky: true });
+  }
+
+  /**
+   * Arm extrude on the EXACT regions the selection names. Region acquisition is a
+   * pure `getSketchRegions` read (no `finishSketch` side effect), so this works on
+   * a reopened sketch with no live backend session and authors no timeline record
+   * at arm time.
+   */
+  private async armExtrudeRegions(sketchId: string, regionIds: string[]): Promise<void> {
+    const gen = ++this.armGen;
+    let read: { regions: SketchRegion[] };
+    try {
+      read = await this.deps.client.getSketchRegions(sketchId);
+    } catch (error) {
+      if (gen !== this.armGen) return;
       viewportStore
         .getState()
-        .setStatusHint("Extrude takes exactly one region — deselect down to one", {
+        .setStatusHint(`Cannot read sketch regions: ${errMessage(error)}`, {
           severity: "error",
           sticky: true,
         });
       return;
     }
-    // Nothing selected: tool-first UX. A selected sketch (or the document's sole
-    // visible sketch) opens the region PICK — never a guessed profile, and never a
-    // dead-end where the pressed tool ignores every click.
-    const sketchId = this.pickTargetSketchId();
-    if (sketchId) {
-      void this.armExtrudePick(sketchId);
-      return;
+    if (gen !== this.armGen) return;
+    const bound: SketchRegion[] = [];
+    const profiles: PrismProfile[] = [];
+    for (const id of regionIds) {
+      const region = read.regions.find((candidate) => candidate.regionId === id);
+      const profile = region ? profileFromRegion(region) : null;
+      if (!region || !profile) {
+        const available = read.regions.map((candidate) => candidate.regionId).join(", ") || "none";
+        this.resetToSelect(`Extrude region ${id} is stale or invalid; available: ${available}`, {
+          severity: "error",
+          sticky: true,
+        });
+        return;
+      }
+      bound.push(region);
+      profiles.push(profile);
     }
-    viewportStore
-      .getState()
-      .setStatusHint("Select a sketch region (or a sketch) to extrude", {
-        severity: "info",
-        sticky: true,
-      });
+    const session = await this.deps.client.getSketch(sketchId);
+    if (gen !== this.armGen) return;
+    await this.beginExtrudeArmed(sketchId, bound, profiles, session.plane);
   }
 
   /** The sketch a region pick targets when no region is selected yet: an explicitly
    *  selected sketch wins; else the document's SOLE visible sketch; else null. */
   private pickTargetSketchId(): string | null {
-    const selected = selectionStore.getState().selected.find((r) => r.kind === "sketch");
-    if (selected) return selected.id;
-    const visible = Object.values(documentStore.getState().sketches).filter((s) => s.visible);
-    return visible.length === 1 ? visible[0].id : null;
+    return resolveTargetSketchId(selectionStore.getState().selected, this.applicabilityCtx());
+  }
+
+  /** Sketch-existence slice `toolApplicability.ts` needs for its extrude/revolve
+   *  document-level fallback — kept as a private helper so every applicability
+   *  call site derives it identically. */
+  private applicabilityCtx(): { sketches: Record<string, { id: string; visible: boolean }> } {
+    return { sketches: documentStore.getState().sketches };
   }
 
   /** Tool-first entry: fetch the sketch's regions and open the extrude region pick. */
@@ -1189,8 +1227,8 @@ export class ModelToolController {
   }
 
   /**
-   * Arm Extrude for the exact selected region. The array-shaped internals are
-   * retained for renderer plumbing, but this boundary accepts exactly one profile.
+   * Arm Extrude for the exact selected region(s). Accepts one or more regions;
+   * the preview/commit machinery already opens one lane session per region.
    */
   private async beginExtrudeArmed(
     sketchId: string,
@@ -1200,10 +1238,10 @@ export class ModelToolController {
     editFeatureId?: string,
     startDepth = DEFAULT_EXTRUDE_DEPTH,
   ): Promise<void> {
-    if (regions.length !== 1 || profiles.length !== 1) {
+    if (regions.length === 0 || profiles.length === 0) {
       viewportStore
         .getState()
-        .setStatusHint("Extrude requires exactly one closed sketch region", {
+        .setStatusHint("Extrude requires at least one closed sketch region", {
           severity: "error",
           sticky: true,
         });
@@ -1694,22 +1732,14 @@ export class ModelToolController {
     this.engine.showRegionPick(session.plane, pickable);
     this.engine.setRegionSelected([]);
     this.engine.setOrbitSuppressed(true); // modal: click picks a region, not orbit
-    if (kind === "extrude") {
-      // Extrude is single-profile: the first region click arms it directly — no
-      // toggle set, no confirm chip (tryPickRegion short-circuits on kind).
-      viewportStore
-        .getState()
-        .setStatusHint("Click the region to extrude · Esc cancels", { sticky: true });
-    } else {
-      viewportStore.getState().setStatusHint(
-        `Select regions to ${noun} — click to toggle · Enter to confirm`,
-        { sticky: true },
-      );
-      toolChipStore.getState().showRegionSelect(0, chipWorld, {
-        onConfirm: () => this.confirmRegionSelect(),
-        onCancel: () => toolStore.getState().setTool("select"),
-      });
-    }
+    viewportStore.getState().setStatusHint(
+      `Select regions to ${noun} — click to toggle · Enter to confirm`,
+      { sticky: true },
+    );
+    toolChipStore.getState().showRegionSelect(0, chipWorld, {
+      onConfirm: () => this.confirmRegionSelect(),
+      onCancel: () => toolStore.getState().setTool("select"),
+    });
     this.updateDebug();
   }
 
@@ -1730,11 +1760,10 @@ export class ModelToolController {
       return;
     }
     if (kind === "extrude") {
-      // Single-profile boundary — the pick hands over exactly one region.
       void this.beginExtrudeArmed(
         sketchId,
-        [valid[0]],
-        [validProfiles[0]],
+        valid,
+        validProfiles,
         session.plane,
         editFeatureId,
         startValue,
@@ -1761,12 +1790,6 @@ export class ModelToolController {
     if (!p) return;
     const id = regionAtPoint(ctx.regions, p.x, p.y);
     if (!id) return;
-    // Extrude is single-profile: the first region click resolves the pick.
-    if (ctx.kind === "extrude") {
-      this.lastRegionClickId = null;
-      this.resolveRegionPick([id]);
-      return;
-    }
     // Double-click accelerator: a second click on the SAME region within the window
     // = select only it + confirm immediately.
     const now = performance.now();
@@ -1825,28 +1848,23 @@ export class ModelToolController {
     // Revolve with a region already picked could revolve a DIFFERENT region than
     // the one on screen. Unlike extrude (single-profile by design), revolve keeps
     // its N-region commit loop, so every selected region is bound.
-    const picked = selectionStore
-      .getState()
-      .selected.filter((ref) => ref.kind === "sketchRegion");
-    if (picked.length > 0) {
-      const sketchId = picked[0].sketchId;
-      if (picked.some((ref) => ref.sketchId !== sketchId)) {
-        viewportStore
-          .getState()
-          .setStatusHint("Revolve takes regions from one sketch — deselect the others", {
-            severity: "error",
-            sticky: true,
-          });
-        return;
-      }
-      void this.armRevolveRegions(sketchId, picked.map((ref) => ref.regionId));
+    const selected = selectionStore.getState().selected;
+    const verdict = getToolApplicability("revolve", selected, this.applicabilityCtx());
+    const picked = selected.filter((ref) => ref.kind === "sketchRegion");
+    if (picked.length > 0 && verdict.enabled) {
+      void this.armRevolveRegions(picked[0].sketchId, picked.map((ref) => ref.regionId));
       return;
     }
     // Nothing region-typed selected: the same tool-first ladder as extrude —
     // explicit sketch selection wins, else the document's sole visible sketch.
-    const sketchId = this.pickTargetSketchId();
-    if (sketchId) void this.armRevolve(sketchId);
-    else viewportStore.getState().setStatusHint("Select a sketch to revolve", { sticky: true });
+    if (picked.length === 0) {
+      const sketchId = this.pickTargetSketchId();
+      if (sketchId) {
+        void this.armRevolve(sketchId);
+        return;
+      }
+    }
+    viewportStore.getState().setStatusHint(verdict.reason ?? null, { severity: verdict.severity, sticky: true });
   }
 
   /**
@@ -2690,13 +2708,16 @@ export class ModelToolController {
     kind: EdgeOpKind,
     opts?: { auto?: boolean },
   ): Promise<void> {
-    const edges = selectionStore.getState().selected.filter((r) => r.kind === "edge");
+    const selected = selectionStore.getState().selected;
+    const edges = selected.filter((r) => r.kind === "edge");
     if (edges.length === 0) {
-      viewportStore.getState().setStatusHint(`Select edges, then ${kind}`, { sticky: true });
+      const verdict = getToolApplicability("fillet", selected, this.applicabilityCtx());
+      viewportStore.getState().setStatusHint(verdict.reason ?? `Select edges, then ${kind}`, { sticky: true });
       return;
     }
     const gen = ++this.armGen;
-    this.filletEdges = edges;
+    if (!(await this.prepareEdgeClosure(gen, kind, edges))) return;
+    if (gen !== this.armGen) return;
     this.filletEditFeatureId = undefined;
     this.computeEdgeOpOutward();
     // Direction-driven typing is armed ONLY on the bisector tier. The bbox proxy is
@@ -2707,7 +2728,7 @@ export class ModelToolController {
     const size = kind === "Chamfer" ? DEFAULT_CHAMFER_DISTANCE : DEFAULT_FILLET_RADIUS;
     this.fillet = filletStep(filletInit(), {
       kind: "arm",
-      edgeCount: edges.length,
+      edgeCount: this.filletEdges.length,
       radius: size,
       edgeOp: kind,
       auto,
@@ -2717,7 +2738,13 @@ export class ModelToolController {
     const hint = this.edgeOpArmHint();
     this.previewArmHint = hint;
     viewportStore.getState().setStatusHint(hint, { sticky: true });
-    const anchor = edges[0].anchor?.worldPoint ?? [0, 0, 0];
+    this.showEdgeOpChip(size);
+    this.updateDebug();
+    await this.openEdgeOpPreview(gen);
+  }
+
+  private showEdgeOpChip(size: number): void {
+    const anchor = this.filletEdges[0].anchor?.worldPoint ?? [0, 0, 0];
     toolChipStore.getState().showFillet(
       size,
       anchor,
@@ -2734,8 +2761,87 @@ export class ModelToolController {
         onDistance2: (v) => this.onEdgeOpDistance2(v),
       },
     );
-    this.updateDebug();
-    await this.openEdgeOpPreview(gen);
+  }
+
+  private async prepareEdgeClosure(
+    gen: number,
+    kind: EdgeOpKind,
+    picks: EntityRef[],
+  ): Promise<boolean> {
+    this.filletPreparedRevision = null;
+    let res: PrepareEdgeOpResult;
+    try {
+      res = await this.client.prepareEdgeOp({
+        mode: kind,
+        pickedEdges: picks.map((pick) => ({
+          bodyId: pick.bodyId,
+          // The selection's TopoKey names the exact fenced snapshot and lets the
+          // response return promotion evidence. ElementId is the fallback only.
+          topoKey: pick.topoKey,
+          elementId: pick.topoKey ? undefined : pick.elementId,
+        })),
+        chainTangentEdges: true,
+      });
+    } catch (error) {
+      if (gen !== this.armGen) return false;
+      this.publishEdgePrepareFailure(kind, errMessage(error));
+      return false;
+    }
+    if (gen !== this.armGen) return false;
+    if (res.refusal) {
+      this.publishEdgePrepareFailure(kind, res.refusal.message);
+      return false;
+    }
+    return this.adoptPreparedEdges(gen, kind, picks, res);
+  }
+
+  private adoptPreparedEdges(
+    gen: number,
+    kind: EdgeOpKind,
+    picks: EntityRef[],
+    res: PrepareEdgeOpResult,
+  ): boolean {
+    const bodyId = picks[0]?.bodyId ?? "";
+    if (!bodyId || bareBodyId(res.targetBodyId) !== bareBodyId(bodyId) || res.edges.length === 0) {
+      this.publishEdgePrepareFailure(kind, "the closure resolved to invalid topology");
+      return false;
+    }
+    try {
+      const topoKeys = new Set(res.edges.map((edge) => edge.topoKey));
+      if (topoKeys.size !== res.edges.length) throw new Error("prepared closure contains duplicate edges");
+      this.filletEdges = res.edges.map((edge) => {
+        if (
+          edge.kind !== "edge" ||
+          !edge.elementId ||
+          bareBodyId(edge.bodyId) !== bareBodyId(bodyId)
+        ) {
+          throw new Error(`edge ${edge.topoKey} was not promoted`);
+        }
+        const anchor = edge.anchor?.worldPoint
+          ? { worldPoint: edge.anchor.worldPoint, surfaceUv: edge.anchor.surfaceUv }
+          : picks.find((pick) => pick.topoKey === edge.topoKey)?.anchor;
+        return {
+          kind: "edge" as const,
+          id: topoRefId(bodyId, edge.topoKey),
+          bodyId,
+          topoKey: edge.topoKey,
+          elementId: edge.elementId,
+          anchor,
+        };
+      });
+      this.filletPreparedRevision = documentStore.getState().revision;
+      return true;
+    } catch (error) {
+      if (gen === this.armGen) this.publishEdgePrepareFailure(kind, errMessage(error));
+      return false;
+    }
+  }
+
+  private publishEdgePrepareFailure(kind: EdgeOpKind, reason: string): void {
+    viewportStore.getState().setStatusHint(`${kind} unavailable: ${reason}`, {
+      severity: "error",
+      sticky: true,
+    });
   }
 
   /** The armed edge op's status line, naming the CURRENT type (a drag flip or a
@@ -2947,8 +3053,9 @@ export class ModelToolController {
     const params: FilletParams = {
       mode: this.edgeOpKind,
       radius,
-      edgeIds: this.filletEdges.map((e) => e.topoKey ?? e.id),
+      edgeIds: this.filletEdges.map((e) => e.elementId ?? ""),
       chainTangentEdges: true,
+      tangentClosureVersion: 1,
     };
     // SCHEMA §7.3 (2026-08-03): the second leg is CHAMFER-ONLY, and absent means
     // equal-leg. The FSM KEEPS the user's number across a type flip (so flipping
@@ -2989,9 +3096,11 @@ export class ModelToolController {
   }
 
   private startBooleanFromSelection(): void {
-    const body = selectionStore.getState().selected.find((r) => r.kind === "body");
+    const selected = selectionStore.getState().selected;
+    const body = selected.find((r) => r.kind === "body");
     if (!body) {
-      viewportStore.getState().setStatusHint("Select the target body, then pick the tool body", { sticky: true });
+      const verdict = getToolApplicability("boolean", selected, this.applicabilityCtx());
+      viewportStore.getState().setStatusHint(verdict.reason ?? null, { sticky: true });
       return;
     }
     this.boolean = booleanStep(booleanInit(), { kind: "start", targetBodyId: body.id }).state;
@@ -3010,9 +3119,11 @@ export class ModelToolController {
   // needs OCCT) — the visible preview is the kernel's exact candidate.
 
   private async armShellFromSelection(): Promise<void> {
-    const faces = selectionStore.getState().selected.filter((r) => r.kind === "face");
+    const selected = selectionStore.getState().selected;
+    const faces = selected.filter((r) => r.kind === "face");
     if (faces.length === 0) {
-      viewportStore.getState().setStatusHint("Select faces to remove, then Shell", { sticky: true });
+      const verdict = getToolApplicability("shell", selected, this.applicabilityCtx());
+      viewportStore.getState().setStatusHint(verdict.reason ?? null, { sticky: true });
       return;
     }
     await this.armShell(faces);
@@ -3245,35 +3356,19 @@ export class ModelToolController {
   // throughout — this op's whole point is that the frozen set is trustworthy.
 
   private async armOffsetFaceFromSelection(): Promise<void> {
-    const faces = selectionStore.getState().selected.filter((r) => r.kind === "face");
-    if (faces.length === 0) {
-      viewportStore
-        .getState()
-        .setStatusHint("Select faces to offset, then Offset face", { sticky: true });
+    const selected = selectionStore.getState().selected;
+    // The body cross-check comes from the FACE refs, not `selectedBodyIds()`
+    // (which reads whole-body selections): an offset is defined against ONE
+    // body, and a cross-body pick has no target to name. Refused here as well
+    // as by the backend's own `crossBody` refusal — the local check costs no
+    // round trip. Encoded in `toolApplicability.ts` (single source of truth
+    // with the toolbar's gray-out check).
+    const verdict = getToolApplicability("offsetFace", selected, this.applicabilityCtx());
+    if (!verdict.enabled) {
+      viewportStore.getState().setStatusHint(verdict.reason ?? null, { severity: verdict.severity, sticky: true });
       return;
     }
-    // The body set comes from the FACE refs, not `selectedBodyIds()` (which reads
-    // whole-body selections): an offset is defined against ONE body, and a
-    // cross-body pick has no target to name. Refused here as well as by the
-    // backend's own `crossBody` refusal — the local check costs no round trip.
-    const bodies = [...new Set(faces.map((f) => f.bodyId ?? ""))];
-    if (bodies.length > 1) {
-      viewportStore
-        .getState()
-        .setStatusHint("Offset face: every selected face must belong to the same body", {
-          severity: "error",
-          sticky: true,
-        });
-      return;
-    }
-    if (!bodies[0]) {
-      viewportStore.getState().setStatusHint("Offset face: that selection has no body", {
-        severity: "error",
-        sticky: true,
-      });
-      return;
-    }
-    this.offsetPicks = faces;
+    this.offsetPicks = selected.filter((r) => r.kind === "face");
     await this.armOffsetFace();
   }
 
@@ -4274,7 +4369,8 @@ export class ModelToolController {
   private armLinearFromSelection(): void {
     const bodyId = this.firstSelectedBodyId();
     if (!bodyId) {
-      viewportStore.getState().setStatusHint("Select a body to pattern", { sticky: true });
+      const verdict = getToolApplicability("linearPattern", selectionStore.getState().selected, this.applicabilityCtx());
+      viewportStore.getState().setStatusHint(verdict.reason ?? null, { sticky: true });
       return;
     }
     this.armLinear(bodyId);
@@ -4352,7 +4448,8 @@ export class ModelToolController {
   private armCircularFromSelection(): void {
     const bodyId = this.firstSelectedBodyId();
     if (!bodyId) {
-      viewportStore.getState().setStatusHint("Select a body to pattern", { sticky: true });
+      const verdict = getToolApplicability("circularPattern", selectionStore.getState().selected, this.applicabilityCtx());
+      viewportStore.getState().setStatusHint(verdict.reason ?? null, { sticky: true });
       return;
     }
     this.armCircular(bodyId);
@@ -4437,7 +4534,8 @@ export class ModelToolController {
   private armMirrorFromSelection(): void {
     const bodyId = this.firstSelectedBodyId();
     if (!bodyId) {
-      viewportStore.getState().setStatusHint("Select a body to mirror", { sticky: true });
+      const verdict = getToolApplicability("mirror", selectionStore.getState().selected, this.applicabilityCtx());
+      viewportStore.getState().setStatusHint(verdict.reason ?? null, { sticky: true });
       return;
     }
     this.armMirror(bodyId);
@@ -4664,7 +4762,8 @@ export class ModelToolController {
   private armTransformFromSelection(): void {
     const targets = this.selectedBodyIds();
     if (targets.length === 0) {
-      viewportStore.getState().setStatusHint("Select a body to move", { sticky: true });
+      const verdict = getToolApplicability("transform", selectionStore.getState().selected, this.applicabilityCtx());
+      viewportStore.getState().setStatusHint(verdict.reason ?? null, { sticky: true });
       return;
     }
     void this.armTransformResolvingFold(targets);
@@ -6592,7 +6691,7 @@ export class ModelToolController {
     if (opts.requireExactPreview && exact.timedOut) {
       void this.client.endPreview(es.session.sessionId, false);
       this.releaseCommittedSession(es);
-      return { kind: "failed", reason: "the kernel did not confirm this offset in time" };
+      return { kind: "failed", reason: "the kernel did not confirm this operation in time" };
     }
     let res: ApplyOperationResult | null;
     try {
@@ -6649,6 +6748,16 @@ export class ModelToolController {
       return;
     }
     if (this.fillet.phase !== "armed") return;
+    if (
+      this.filletPreparedRevision === null ||
+      this.filletPreparedRevision !== documentStore.getState().revision
+    ) {
+      viewportStore.getState().setStatusHint(`${kind} selection changed — re-pick edges`, {
+        severity: "error",
+        sticky: true,
+      });
+      return;
+    }
     if (this.previewFailure) {
       traceWarn("extrude", `${kind} confirm BLOCKED by preview failure: ${this.previewFailure.message}`);
       viewportStore
@@ -6668,6 +6777,7 @@ export class ModelToolController {
     const outcome = await this.commitPreviewedOp(
       { opType: kind, inputs: this.edgeOpInputs(), params: this.edgeOpParams() },
       gen,
+      { requireExactPreview: true },
     );
     if (outcome.kind === "superseded") return;
     if (outcome.kind === "failed") {
@@ -6686,6 +6796,7 @@ export class ModelToolController {
     this.filletEditFeatureId = undefined;
     this.filletStoredParams = undefined;
     this.filletEdges = [];
+    this.filletPreparedRevision = null;
     this.resetToSelect(
       `${kind === "Chamfer" ? "Chamfered" : "Filleted"} ${edgeCount} edge${edgeCount > 1 ? "s" : ""}`,
     );
@@ -6739,6 +6850,7 @@ export class ModelToolController {
     this.filletEditFeatureId = undefined;
     this.filletStoredParams = undefined;
     this.filletEdges = [];
+    this.filletPreparedRevision = null;
     if (failure !== null) {
       this.resetToSelect(`${kind} failed: ${failure}`, { severity: "error", sticky: true });
     } else {
@@ -6790,6 +6902,7 @@ export class ModelToolController {
     this.cancelFillet();
     this.filletStoredParams = stored; // set AFTER the tool-change cancel
     this.filletEdges = [];
+    this.filletPreparedRevision = null;
     this.filletEditFeatureId = featureId;
     // edgeCount 1 keeps the FSM out of its bail path (a re-edit has no picks yet).
     // `auto:false` — a re-edit opens the COMMITTED type; there is no fresh pick and
@@ -7673,6 +7786,7 @@ export class ModelToolController {
     this.deps.engine.setOrbitSuppressed(false);
     this.fillet = filletInit(); // carries edgeOp back to "Fillet"
     this.filletEdges = [];
+    this.filletPreparedRevision = null;
     this.filletOutward = null;
     this.filletTangent = null;
     this.filletAxis = SCREEN_UP_AXIS;

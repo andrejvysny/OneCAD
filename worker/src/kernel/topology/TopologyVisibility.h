@@ -9,7 +9,6 @@
 #include <GeomAbs_Shape.hxx>
 #include <Precision.hxx>
 #include <TopAbs_Orientation.hxx>
-#include <TopTools_ListIteratorOfListOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>

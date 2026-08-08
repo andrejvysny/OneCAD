@@ -34,6 +34,14 @@ pub struct BodyDto {
     pub id: String,
     pub name: String,
     pub visible: bool,
+    /// User-authored body color as sRGB+A (`[r,g,b,a]`). `None` means "use the
+    /// theme's neutral body fill".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<[u8; 4]>,
+    /// User-authored per-face colors keyed by persistent `ElementId`. Omitted when
+    /// empty so the wire stays lean for bodies without face colors.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub face_colors: std::collections::BTreeMap<String, [u8; 4]>,
 }
 
 /// Sketch solve status (`documentStore.ts` `SketchStatus`).
@@ -634,6 +642,41 @@ pub struct PrepareOffsetFaceDto {
     pub refusal: Option<OffsetFaceRefusalDto>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeOpEvidenceDto {
+    pub topo_key: String,
+    pub picked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub element_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub descriptor: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeOpRefusalDto {
+    pub code: String,
+    pub message: String,
+    pub edges: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareEdgeOpDto {
+    pub snapshot_id: u64,
+    pub target_body_id: String,
+    pub edges: Vec<EdgeOpEvidenceDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<EdgeOpRefusalDto>,
+}
+
 /// One previewed body's mesh (`PreviewOp` result → `types.ts PreviewResult`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -903,6 +946,8 @@ fn candidate_dto(c: onecad_core::document::repair::RepairCandidate) -> ResolveCa
 pub struct FailedStep {
     pub record_id: String,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<onecad_core::regen::Diagnostic>,
 }
 
 /// The `regen-finished` event payload so the frontend correlation resolves
@@ -923,6 +968,9 @@ pub struct RegenFinished {
     /// surfaces WHY. Absent for any other outcome.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Structured kernel evidence for a hard failure or published failed step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<onecad_core::regen::Diagnostic>,
     /// Per-record failure detail for a PUBLISHED regen that nonetheless left one or
     /// more timeline steps in `Error` (MODEL-HARDEN finding 1). Empty (omitted) on a
     /// clean publish and on every non-published outcome. The frontend awaiter checks
@@ -1308,6 +1356,8 @@ mod tests {
                 id: "b1".into(),
                 name: "Body 1".into(),
                 visible: true,
+                color: None,
+                face_colors: std::collections::BTreeMap::new(),
             },
         );
         let mut datums = std::collections::BTreeMap::new();
@@ -1420,6 +1470,7 @@ mod tests {
             edge_ids: vec![ElementId::new("e:14")],
             edges: vec![],
             chain_tangent_edges: true,
+            tangent_closure_version: None,
             extra: Default::default(),
         }));
         check(&fillet, "2.0 mm", Some(2.0), Some("length"));
@@ -1431,6 +1482,7 @@ mod tests {
             edge_ids: vec![ElementId::new("e:14")],
             edges: vec![],
             chain_tangent_edges: true,
+            tangent_closure_version: None,
             extra: Default::default(),
         }));
         check(&chamfer, "1.0×2.5 mm", Some(1.0), Some("length"));
@@ -1547,6 +1599,7 @@ mod tests {
                 edge_ids: vec![ElementId::new("e:14")],
                 edges: vec![],
                 chain_tangent_edges: true,
+                tangent_closure_version: None,
                 extra: Default::default(),
             }))
         };
@@ -1767,6 +1820,7 @@ mod tests {
             source_revision: 7,
             outcome: "published".into(),
             message: None,
+            diagnostics: Vec::new(),
             failed_steps: Vec::new(),
             affected_bodies: std::collections::BTreeMap::new(),
         };
@@ -1781,9 +1835,23 @@ mod tests {
         affected.insert("rec-extrude".to_string(), vec!["body-1".to_string()]);
         let with = RegenFinished {
             outcome: "published".into(),
+            diagnostics: vec![onecad_core::regen::Diagnostic {
+                severity: onecad_core::regen::Severity::Error,
+                code: "FILLET_WALKING_FAILED".into(),
+                message: "fillet failed".into(),
+                stage: Some("build".into()),
+                evidence: Some(serde_json::json!({"contour": {"index": 1}})),
+            }],
             failed_steps: vec![FailedStep {
                 record_id: "rec-revolve".into(),
                 message: "axis not found".into(),
+                diagnostics: vec![onecad_core::regen::Diagnostic {
+                    severity: onecad_core::regen::Severity::Error,
+                    code: "AXIS_FAILED".into(),
+                    message: "axis not found".into(),
+                    stage: None,
+                    evidence: None,
+                }],
             }],
             affected_bodies: affected,
             ..clean
@@ -1791,6 +1859,9 @@ mod tests {
         let v = serde_json::to_value(&with).unwrap();
         assert_eq!(v["failedSteps"][0]["recordId"], "rec-revolve");
         assert_eq!(v["failedSteps"][0]["message"], "axis not found");
+        assert_eq!(v["failedSteps"][0]["diagnostics"][0]["code"], "AXIS_FAILED");
+        assert_eq!(v["diagnostics"][0]["code"], "FILLET_WALKING_FAILED");
+        assert_eq!(v["diagnostics"][0]["stage"], "build");
         assert_eq!(
             v["affectedBodies"]["rec-extrude"],
             serde_json::json!(["body-1"])

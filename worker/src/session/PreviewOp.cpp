@@ -26,11 +26,14 @@ struct PreviewRequest {
     std::uint64_t snapshot_id = 0;
 };
 
-Envelope err(const Envelope& req, const char* code, const std::string& msg) {
+Envelope err(const Envelope& req, const char* code, const std::string& msg,
+             json diagnostics = json::array()) {
     // A preview never mutates anything, so every failure is recoverable by
     // definition — the session is untouched whatever happened.
-    return Envelope::error_response(req.id,
-                                    protocol::ErrorInfo{code, msg, /*retriable=*/false});
+    std::optional<json> detail;
+    if (!diagnostics.empty()) detail = json{{"diagnostics", std::move(diagnostics)}};
+    return Envelope::error_response(
+        req.id, protocol::ErrorInfo{code, msg, /*retriable=*/false, std::move(detail)});
 }
 
 json empty_result(std::uint64_t snapshot_id, json needs_repair = json::array()) {
@@ -254,7 +257,8 @@ Envelope handle_preview_op(Session& session, const Envelope& req,
             outcome.error_code.empty() ? "OP_FAILED" : outcome.error_code;
         return err(req, code.c_str(),
                    outcome.error_message.empty() ? "PreviewOp: op failed"
-                                                 : outcome.error_message);
+                                                 : outcome.error_message,
+                   candidate_diagnostics(outcome));
     }
     return build_response(req, input, job, outcome);
 }

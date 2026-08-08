@@ -29,6 +29,7 @@ if [[ ! -d "$APP" ]]; then
     echo "bundle-dylibs.sh: not an app bundle directory: $APP" >&2
     exit 2
 fi
+APP="$(cd "$APP" && pwd -P)"
 
 MACOS_DIR="$APP/Contents/MacOS"
 FRAMEWORKS_DIR="$APP/Contents/Frameworks"
@@ -49,11 +50,14 @@ fi
 
 mkdir -p "$FRAMEWORKS_DIR"
 
-# A dependency is bundleable if it lives under a Homebrew / local prefix — i.e. it
-# is not one of the /usr/lib + /System libraries the OS guarantees on every Mac.
+# Bundle every resolved absolute non-system dependency. Pinned CI artifacts live
+# under $RUNNER_TEMP, so limiting this to Homebrew would ship a worker whose OCCT
+# dylibs disappear with the runner.
 is_bundleable() {
     case "$1" in
-        /opt/homebrew/* | /usr/local/*) return 0 ;;
+        "$FRAMEWORKS_DIR"/*) return 1 ;;
+        /System/* | /usr/lib/* | @*) return 1 ;;
+        /*) [[ -f "$1" ]] ;;
         *) return 1 ;;
     esac
 }
@@ -63,6 +67,43 @@ is_bundleable() {
 # path is the first whitespace-delimited field of each dep line.
 deps_of() {
     otool -L "$1" | tail -n +2 | awk '{print $1}'
+}
+
+rpaths_of() {
+    otool -l "$1" | awk '
+        $1 == "cmd" && $2 == "LC_RPATH" { in_rpath = 1; next }
+        in_rpath && $1 == "path" { print $2; in_rpath = 0 }
+    '
+}
+
+expand_path_token() {
+    local value="$1"
+    local loader="$2"
+    value="${value//@loader_path/$(dirname "$loader")}"
+    value="${value//@executable_path/$MACOS_DIR}"
+    printf '%s\n' "$value"
+}
+
+# Source-built OCCT uses @rpath install names. Resolve them through the current
+# Mach-O's LC_RPATH entries so the original dylibs can be copied into the bundle.
+resolve_dep() {
+    local owner="$1"
+    local dep="$2"
+    if [[ "$dep" != @rpath/* ]]; then
+        expand_path_token "$dep" "$owner"
+        return
+    fi
+    local suffix="${dep#@rpath/}"
+    local rpath candidate
+    while IFS= read -r rpath; do
+        [[ -z "$rpath" ]] && continue
+        candidate="$(expand_path_token "$rpath" "$owner")/$suffix"
+        if [[ -f "$candidate" ]]; then
+            printf '%s/%s\n' "$(cd "$(dirname "$candidate")" && pwd -P)" "$(basename "$candidate")"
+            return
+        fi
+    done < <(rpaths_of "$owner")
+    printf '%s\n' "$dep"
 }
 
 # Breadth-first transitive closure of bundleable dependencies, discovered against
@@ -76,8 +117,9 @@ idx=0
 while [[ $idx -lt ${#WORKLIST[@]} ]]; do
     current="${WORKLIST[$idx]}"
     idx=$((idx + 1))
-    while IFS= read -r dep; do
-        [[ -z "$dep" ]] && continue
+    while IFS= read -r dep_ref; do
+        [[ -z "$dep_ref" ]] && continue
+        dep="$(resolve_dep "$current" "$dep_ref")"
         is_bundleable "$dep" || continue
         if printf '%s\n' "$SEEN" | grep -qxF "$dep"; then
             continue
@@ -115,6 +157,21 @@ rewrite_refs() {
 rewrite_refs "$WORKER"
 for dep in "${CLOSURE_LIST[@]}"; do
     rewrite_refs "$FRAMEWORKS_DIR/$(basename "$dep")"
+done
+
+strip_local_rpaths() {
+    local target="$1"
+    local rpath
+    while IFS= read -r rpath; do
+        if [[ "$rpath" == /* ]]; then
+            install_name_tool -delete_rpath "$rpath" "$target"
+        fi
+    done < <(rpaths_of "$target")
+}
+
+strip_local_rpaths "$WORKER"
+for dep in "${CLOSURE_LIST[@]}"; do
+    strip_local_rpaths "$FRAMEWORKS_DIR/$(basename "$dep")"
 done
 
 # Add the Frameworks rpath to the worker; tolerate it already being present.

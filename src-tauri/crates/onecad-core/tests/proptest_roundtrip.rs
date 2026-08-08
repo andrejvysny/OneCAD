@@ -269,6 +269,7 @@ fn operation_strategy() -> impl Strategy<Value = Operation> {
                 edge_ids: edges.into_iter().map(ElementId::new).collect(),
                 edges: vec![],
                 chain_tangent_edges: chain,
+                tangent_closure_version: None,
                 extra,
             }))
         });
@@ -286,6 +287,7 @@ fn operation_strategy() -> impl Strategy<Value = Operation> {
                 edge_ids: edges.into_iter().map(ElementId::new).collect(),
                 edges: vec![],
                 chain_tangent_edges: chain,
+                tangent_closure_version: None,
                 extra,
             }))
         });

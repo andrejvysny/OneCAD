@@ -514,6 +514,7 @@ fn fillet_with_stamped_intent() -> OperationRecord {
             extra: Default::default(),
         }],
         chain_tangent_edges: false,
+        tangent_closure_version: None,
         extra: Default::default(),
     }));
     OperationRecord::new(rid(0x5), 0, "Fillet", op)

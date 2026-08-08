@@ -356,6 +356,7 @@ fn fillet_record(
             edge_ids: vec![edge_el],
             edges: vec![edge_ref],
             chain_tangent_edges: false,
+            tangent_closure_version: None,
             extra: Default::default(),
         })),
     )
@@ -1203,6 +1204,7 @@ async fn fillet_reedit_swaps_to_chamfer_and_regens() {
             extra: Default::default(),
         }],
         chain_tangent_edges: false,
+        tangent_closure_version: None,
         extra: Default::default(),
     }));
     rt.apply(EditCommand::UpdateOperationParams {
@@ -1298,6 +1300,7 @@ fn chamfer_op_on(setup: &FilletedBox, radius: f64, distance2: Option<f64>) -> Op
             extra: Default::default(),
         }],
         chain_tangent_edges: false,
+        tangent_closure_version: None,
         extra: Default::default(),
     }))
 }
@@ -1482,6 +1485,7 @@ fn fillet_op(setup: &FilletedBox, radius: f64) -> Operation {
             extra: Default::default(),
         }],
         chain_tangent_edges: false,
+        tangent_closure_version: None,
         extra: Default::default(),
     }))
 }

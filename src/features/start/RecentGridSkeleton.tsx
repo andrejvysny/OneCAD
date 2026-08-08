@@ -7,11 +7,11 @@
 export function RecentGridSkeleton() {
   return (
     <div
-      className="grid animate-pulse grid-cols-3 gap-3"
+      className="grid animate-pulse grid-cols-[repeat(auto-fill,minmax(210px,1fr))] gap-4"
       aria-hidden="true"
       role="presentation"
     >
-      {Array.from({ length: 6 }, (_, i) => (
+      {Array.from({ length: 8 }, (_, i) => (
         <div
           key={i}
           className="overflow-hidden rounded-lg border border-border bg-surface"

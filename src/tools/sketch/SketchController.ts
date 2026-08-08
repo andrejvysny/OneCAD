@@ -31,12 +31,7 @@ import type { Point2 } from "@/viewport/engine/sketchBasis";
 import { chooseGridStep } from "@/viewport/engine/GridPlane";
 import { toolStore } from "@/stores/toolStore";
 import { viewportStore, type Projection, type StatusSeverity } from "@/stores/viewportStore";
-import {
-  documentStore,
-  docSketchStatus,
-  nextSketchName,
-  type SketchMeta,
-} from "@/stores/documentStore";
+import { documentStore, docSketchStatus, nextSketchName } from "@/stores/documentStore";
 import { selectionStore, topoRefId } from "@/stores/selectionStore";
 import { sketchSelectionStore, sameSketchSel, type SketchSel } from "@/stores/sketchSelectionStore";
 import { settingsStore } from "@/stores/settingsStore";
@@ -197,10 +192,9 @@ const DEFAULT_OFFSET_DISTANCE = 5;
 const PLANE_PICK_PROMPT = "Select a plane to start the sketch — Esc to cancel";
 
 /**
- * A model face offered as a sketch host — from a selection ref, a plane-pick
- * click, or a viewport double-click. Deliberately NOT `PickHit`: the controller
- * must not depend on Three.js types, and the three producers carry the anchor in
- * three different shapes.
+ * A model face offered as a sketch host — from a selection ref or a plane-pick
+ * click. Deliberately NOT `PickHit`: the controller must not depend on Three.js
+ * types, and the two producers carry the anchor in different shapes.
  */
 export interface FacePickTarget {
   bodyId: string;
@@ -209,31 +203,6 @@ export interface FacePickTarget {
   /** Persistent Rust-minted id when already promoted; else promoted on demand. */
   elementId?: string;
   worldPoint?: [number, number, number];
-}
-
-/**
- * The id of the NEWEST sketch hosted on `elementId`, or null.
- *
- * Matching is on the ElementId alone: it is Rust-minted and globally unique, and
- * deliberately does NOT embed a BodyId (the identity rule), so a body check would
- * be redundant. "Newest" is the LAST entry in projection iteration order.
- *
- * CAVEAT (flagged, not fixed): the real backend projects sketches from a
- * `BTreeMap` keyed by SketchId, so that order is uuid-lexicographic, not creation
- * order — with TWO sketches on the SAME face the "newest" picked here is
- * arbitrary-but-deterministic rather than genuinely newest. Both are valid hosts,
- * so the failure mode is "re-entered the other coincident sketch", never a wrong
- * bind. The mock lane inserts in creation order, so it is literally newest there.
- */
-export function newestSketchOnFace(
-  sketches: Record<string, SketchMeta>,
-  elementId: string,
-): string | null {
-  let found: string | null = null;
-  for (const s of Object.values(sketches)) {
-    if (s.hostFace?.elementId === elementId) found = s.id;
-  }
-  return found;
 }
 
 export interface SketchControllerDeps {
@@ -327,10 +296,6 @@ export class SketchController {
   // hover highlight + prompt only churn on an actual change, and so every
   // teardown path (`endPlanePick`) can drop them.
   private faceHover: FacePickTarget | null = null;
-  // A double-click face entry is in flight (W3 trigger c). Separate from
-  // `entering`: the RE-ENTER branch flips the mode and must leave `entering`
-  // clear so the resulting `enter()` actually opens the session.
-  private faceEntryInFlight = false;
 
   private downX = 0;
   private downY = 0;
@@ -721,10 +686,9 @@ export class SketchController {
   /**
    * Promote (if needed) + PREFLIGHT one picked face into an `enterSketch` target.
    *
-   * The single funnel all three entry triggers share (selected face, plane-pick
-   * click, viewport double-click), so the identity rules live in exactly one
-   * place. Pure resolution — it opens nothing and touches no store, which is what
-   * lets the double-click path validate a face BEFORE flipping the mode.
+   * The single funnel both entry triggers share (selected face, plane-pick
+   * click), so the identity rules live in exactly one place. Pure resolution —
+   * it opens nothing and touches no store.
    *
    * `faceSketchPlane` is validation-only here; the frame it returns is the
    * BACKEND's (the kernel's own face descriptor + the lock-tested in-plane axis
@@ -777,66 +741,6 @@ export class SketchController {
       anchor: pick.worldPoint ? { worldPoint: pick.worldPoint } : undefined,
     });
     return promoted?.elementId;
-  }
-
-  /**
-   * Double-click a model FACE in model mode → sketch on it (W3 trigger c).
-   *
-   * Re-entry wins over creation: a face that ALREADY hosts a sketch opens that
-   * sketch (the newest — see `newestSketchOnFace`) through the same
-   * `setMode('sketch', id)` path the static-sketch double-click uses, rather than
-   * stacking a second identical projected boundary on the same plane.
-   *
-   * A fresh create validates BEFORE it flips the mode, so a non-planar face
-   * reports and leaves the user exactly where they were — no sketch chrome, no
-   * plane picker, no mode change.
-   */
-  async enterOnFace(pick: FacePickTarget): Promise<void> {
-    if (this.faceEntryInFlight || this.entering || this.disposed) return;
-    if (toolStore.getState().mode !== "model") return; // model-mode gesture only
-    this.faceEntryInFlight = true;
-    try {
-      // ONE promotion for both branches: the re-entry match is by ElementId, and
-      // a second promote for the create branch would be a redundant round-trip.
-      const elementId = await this.promoteFace(pick);
-      if (this.disposed || toolStore.getState().mode !== "model") return;
-      if (!elementId) {
-        viewportStore
-          .getState()
-          .setStatusHint("Cannot sketch on that face: it could not be identified", { severity: "error" });
-        return;
-      }
-      const existing = newestSketchOnFace(documentStore.getState().sketches, elementId);
-      if (existing) {
-        // Deliberately NOT guarded by `entering`: the mode flip is what makes
-        // `enter()` open the session, and `enter()` no-ops while it is set.
-        toolStore.getState().setMode("sketch", existing);
-        return;
-      }
-      const resolved = await this.resolveFaceHost({ ...pick, elementId });
-      if (this.disposed || toolStore.getState().mode !== "model") return;
-      if (resolved.kind !== "ok") {
-        viewportStore.getState().setStatusHint(
-          resolved.kind === "refused"
-            ? resolved.reason
-            : "Cannot sketch on that face: it could not be identified",
-          { severity: "error" },
-        );
-        return; // model mode untouched — the double-click simply did nothing
-      }
-      this.entering = true; // `enter()` no-ops on the mode flip below; we own the open
-      try {
-        sketchSelectionStore.getState().clear();
-        toolStore.getState().setMode("sketch");
-        const opened = await this.openSession({ newOnFace: resolved.target, plane: resolved.plane });
-        if (!opened) this.failOutOfSketchMode();
-      } finally {
-        this.entering = false;
-        this.drainPendingSwitch();
-      }
-    } finally {
-      this.faceEntryInFlight = false;
-    }
   }
 
   /**

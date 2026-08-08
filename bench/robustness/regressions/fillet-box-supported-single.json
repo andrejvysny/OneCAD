@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "caseId": "fillet-box-supported-single",
+  "generator": {
+    "name": "fillet-foundation",
+    "version": 1,
+    "seed": "0000000000000001"
+  },
+  "geometryRecipe": {
+    "type": "box",
+    "dimensions": [20, 16, 12],
+    "featureIndex": 0
+  },
+  "geometryTags": ["analytic", "box", "planar-supports", "single-edge"],
+  "operation": {
+    "type": "fillet",
+    "radius": 2,
+    "continuity": "g1",
+    "radiusMode": "constant",
+    "selector": {
+      "mode": "single",
+      "topologyRole": "verticalEdge",
+      "provenance": {
+        "generator": "fillet-foundation",
+        "recipeType": "box",
+        "featureIndex": 0
+      },
+      "anchors": [
+        { "kind": "edgeMidpoint", "point": [0, 0, 6], "frame": "recipeLocal" }
+      ],
+      "surfaceDescriptors": [
+        { "curveKind": "line", "adjacentSurfaceKinds": ["plane", "plane"] }
+      ],
+      "adjacency": { "relation": "single" }
+    }
+  },
+  "expectedDomain": "supported",
+  "validators": [
+    { "type": "constantRadius", "required": true },
+    { "type": "generatedBlendFace", "required": true },
+    { "type": "cylindricalRadius", "required": true },
+    { "type": "g1BoundaryTangency", "required": true },
+    { "type": "materialChange", "required": true, "direction": "decrease" },
+    { "type": "remoteSupportsUnchanged", "required": true },
+    { "type": "deepAudit", "required": true }
+  ],
+  "metamorphs": [
+    { "type": "translation", "vector": [1000, -2000, 3000] },
+    {
+      "type": "rotation",
+      "angleDegrees": 17.137,
+      "axis": [1, 2, 3],
+      "center": "inputCentroid"
+    }
+  ],
+  "search": {
+    "parameter": "operation.radius",
+    "knownSuccess": 2,
+    "upperBound": 20,
+    "growthFactor": 2,
+    "maxProbes": 256,
+    "relativePrecision": 0.000001,
+    "absolutePrecision": 0.000001,
+    "relativeOffsets": [0.01, 0.0001, 0.000001, 0.00000001]
+  },
+  "limits": {
+    "resources": {
+      "wallTimeMs": 10000,
+      "addressSpaceBytes": 2147483648,
+      "stdoutBytes": 1048576,
+      "stderrBytes": 1048576,
+      "artifactBytes": 67108864
+    },
+    "quality": {
+      "maxVertexTolerance": 0.001,
+      "maxEdgeTolerance": 0.001,
+      "maxFaceTolerance": 0.001
+    }
+  }
+}

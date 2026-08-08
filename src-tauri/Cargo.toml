@@ -5,6 +5,7 @@ members = [
     "crates/onecad-protocol",
     "crates/onecad-worker-stub",
     "crates/onecad-regen",
+    "crates/onecad-kernelbench",
 ]
 
 # Shared dependency versions for every workspace member. Individual crates
@@ -81,6 +82,9 @@ sha2 = { workspace = true }
 # as a `data:` URL in `list_recents`). Already in the lock as a tauri transitive at
 # this exact version — declaring it adds no crate to the build graph.
 base64 = "0.22"
+# Recents card management: move a deleted project to the OS trash instead of
+# a permanent `remove_file` (macOS/Windows/Linux).
+trash = "5"
 
 # M5b: crash-marker liveness — `kill(pid, 0)` for the autosave recovery scan
 # (`io::recovery` injects the predicate; the app owns the platform syscall).

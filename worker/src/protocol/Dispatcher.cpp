@@ -74,11 +74,10 @@ Envelope Dispatcher::execute(const Job& job, const std::function<void(Envelope&)
                    static_cast<long long>(elapsed_ms()));
         return resp;
     } catch (const Standard_Failure& f) {
-        // OCCT exceptions derive from Standard_Transient, NOT std::exception, so
-        // they'd otherwise escape this boundary -> std::terminate. Same recoverable
-        // op-failure contract as below (SCHEMA §8 OP_FAILED): session untouched.
+        // `GetMessageString()` is shared by OCCT 7.9 and 8.0; `what()` and
+        // `ExceptionType()` are not available on the comparison kernel.
         const char* msg = f.GetMessageString();
-        const std::string message = (msg && *msg) ? msg : f.DynamicType()->Name();
+        const std::string message = (msg && *msg) ? msg : "Standard_Failure";
         WLOG_ERROR("handler for verb '%s' id %llu threw Standard_Failure after %lld ms: %s",
                    req.verb.c_str(), static_cast<unsigned long long>(req.id),
                    static_cast<long long>(elapsed_ms()), message.c_str());

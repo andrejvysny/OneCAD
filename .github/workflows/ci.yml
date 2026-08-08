@@ -2,78 +2,353 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
 
+env:
+  OCCT_PRIMARY_BUILD_ID: onecad-occt-8.0.1-b8f597c67781-kp1
+  OCCT_COMPARISON_BUILD_ID: onecad-occt-7.9.3-a016080bf673-kp1
+
 jobs:
-  rust:
-    name: rust
+  occt-8-0-1:
+    name: build OCCT 8.0.1
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache pinned OCCT
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/onecad-occt/8.0.1
+          key: occt-macos-14-8.0.1-b8f597c67781-${{ env.OCCT_PRIMARY_BUILD_ID }}-${{ hashFiles('scripts/build-pinned-occt.sh') }}
+      - name: Install build tool
+        run: brew install ninja
+      - name: Build pinned OCCT
+        run: >-
+          scripts/build-pinned-occt.sh
+          --version 8.0.1
+          --prefix "$RUNNER_TEMP/onecad-occt/8.0.1"
+          --build-dir "$RUNNER_TEMP/onecad-occt-build/8.0.1"
+          --build-id "$OCCT_PRIMARY_BUILD_ID"
+      - name: Package OCCT artifact
+        run: tar -czf "$RUNNER_TEMP/onecad-occt-8.0.1.tar.gz" -C "$RUNNER_TEMP/onecad-occt/8.0.1" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: onecad-occt-8.0.1-macos-14
+          path: ${{ runner.temp }}/onecad-occt-8.0.1.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  worker-8-0-1:
+    name: worker-8.0.1
+    needs: occt-8-0-1
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install worker dependencies
+        run: brew install boost eigen nlohmann-json ninja
+      - uses: actions/download-artifact@v4
+        with:
+          name: onecad-occt-8.0.1-macos-14
+          path: ${{ runner.temp }}/onecad-occt-artifact
+      - name: Extract OCCT artifact
+        run: |
+          mkdir -p "$RUNNER_TEMP/onecad-occt/8.0.1"
+          tar -xzf "$RUNNER_TEMP/onecad-occt-artifact/onecad-occt-8.0.1.tar.gz" \
+            -C "$RUNNER_TEMP/onecad-occt/8.0.1"
+      - name: Stdout hygiene gate
+        run: scripts/check-worker-stdout-hygiene.sh
+      - name: Configure worker
+        run: |
+          cmake -S worker -B worker/build-8.0.1 -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DONECAD_OCCT_ROOT="$RUNNER_TEMP/onecad-occt/8.0.1" \
+            -DONECAD_OCCT_VERSION=8.0.1 \
+            -DONECAD_OCCT_BUILD_ID="$OCCT_PRIMARY_BUILD_ID" \
+            -DONECAD_WORKER_BUILD_DIR="$GITHUB_WORKSPACE/worker/build-8.0.1"
+      - name: Build worker
+        run: cmake --build worker/build-8.0.1 --parallel 3
+      - name: Full worker suite
+        run: ctest --test-dir worker/build-8.0.1 --output-on-failure
+      - name: Edge-op safety determinism
+        run: |
+          ./worker/build-8.0.1/tests/test_edge_op_failure >edge-op-safety-a.ndjson
+          ./worker/build-8.0.1/tests/test_edge_op_failure >edge-op-safety-b.ndjson
+          cmp edge-op-safety-a.ndjson edge-op-safety-b.ndjson
+      - name: Selftest version and build ID
+        run: |
+          set -o pipefail
+          ONECAD_WORKER_LOG=debug ./worker/build-8.0.1/onecad-worker --selftest 2>&1 | tee worker-selftest.log
+          grep -F "selftest OK (occt 8.0.1," worker-selftest.log
+          grep -F "build ${OCCT_PRIMARY_BUILD_ID}," worker-selftest.log
+          grep -F "fingerprint 0a6a1dce34181289" worker-selftest.log
+          grep -E "^ONECAD_OCCT_BUILD_ID(:[^=]*)?=${OCCT_PRIMARY_BUILD_ID}$" \
+            worker/build-8.0.1/CMakeCache.txt
+      - name: Packaging linkage smoke
+        run: |
+          app="$RUNNER_TEMP/OneCAD.app"
+          mkdir -p "$app/Contents/MacOS"
+          cp worker/build-8.0.1/onecad-worker "$app/Contents/MacOS/onecad-worker"
+          scripts/bundle-dylibs.sh "$app"
+          test -n "$(find "$app/Contents/Frameworks" -name 'libTK*.dylib' -print -quit)"
+          scripts/bundle-dylibs.sh "$app"
+          mkdir -p "$RUNNER_TEMP/relocated"
+          mv "$app" "$RUNNER_TEMP/relocated/OneCAD.app"
+          app="$RUNNER_TEMP/relocated/OneCAD.app"
+          mv "$RUNNER_TEMP/onecad-occt/8.0.1" "$RUNNER_TEMP/onecad-occt/8.0.1.hidden"
+          "$app/Contents/MacOS/onecad-worker" --selftest
+          : >packaged-linkage.txt
+          : >packaged-paths.txt
+          while IFS= read -r -d '' binary; do
+            if file "$binary" | grep -q 'Mach-O'; then
+              printf '\n== %s ==\n' "$binary" >>packaged-linkage.txt
+              otool -L "$binary" >>packaged-linkage.txt
+              otool -l "$binary" >>packaged-linkage.txt
+              otool -L "$binary" | tail -n +2 | awk '{print $1}' >>packaged-paths.txt
+              otool -l "$binary" | awk '
+                $1 == "cmd" && $2 == "LC_RPATH" { in_rpath = 1; next }
+                in_rpath && $1 == "path" { print $2; in_rpath = 0 }
+              ' >>packaged-paths.txt
+            fi
+          done < <(find "$app/Contents/MacOS" "$app/Contents/Frameworks" -type f -print0)
+          cat packaged-linkage.txt
+          if grep -Ei '/opt/homebrew/opt/(occt|opencascade)' packaged-paths.txt; then
+            echo "packaged worker resolved mutable Homebrew OCCT" >&2
+            exit 1
+          fi
+          if grep -F "$RUNNER_TEMP" packaged-paths.txt; then
+            echo "packaged worker retained runner-local linkage" >&2
+            exit 1
+          fi
+          mv "$RUNNER_TEMP/onecad-occt/8.0.1.hidden" "$RUNNER_TEMP/onecad-occt/8.0.1"
+  rust-8-0-1:
+    name: rust-8.0.1
+    needs: occt-8-0-1
     runs-on: macos-14
     defaults:
       run:
         working-directory: src-tauri
     steps:
       - uses: actions/checkout@v4
-      - name: Install rustfmt + clippy
+      - name: Install worker dependencies
+        working-directory: .
+        run: brew install boost eigen nlohmann-json ninja
+      - uses: actions/download-artifact@v4
+        with:
+          name: onecad-occt-8.0.1-macos-14
+          path: ${{ runner.temp }}/onecad-occt-artifact
+      - name: Extract OCCT artifact
+        working-directory: .
+        run: |
+          mkdir -p "$RUNNER_TEMP/onecad-occt/8.0.1"
+          tar -xzf "$RUNNER_TEMP/onecad-occt-artifact/onecad-occt-8.0.1.tar.gz" \
+            -C "$RUNNER_TEMP/onecad-occt/8.0.1"
+      - name: Build and stage worker
+        working-directory: .
+        run: |
+          scripts/check-worker-stdout-hygiene.sh
+          cmake -S worker -B worker/build-8.0.1-rust -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DONECAD_OCCT_ROOT="$RUNNER_TEMP/onecad-occt/8.0.1" \
+            -DONECAD_OCCT_VERSION=8.0.1 \
+            -DONECAD_OCCT_BUILD_ID="$OCCT_PRIMARY_BUILD_ID" \
+            -DONECAD_WORKER_BUILD_DIR="$GITHUB_WORKSPACE/worker/build-8.0.1-rust"
+          cmake --build worker/build-8.0.1-rust --parallel 3
+          triple="$(rustc -Vv | sed -n 's/^host: //p')"
+          mkdir -p src-tauri/binaries
+          cp worker/build-8.0.1-rust/onecad-worker "src-tauri/binaries/onecad-worker-${triple}"
+          chmod +x "src-tauri/binaries/onecad-worker-${triple}"
+      - name: Install rustfmt and clippy
         run: rustup component add rustfmt clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-      # Build AND STAGE the C++ sidecar first: `bundle.externalBin` makes Tauri's
-      # build script require src-tauri/binaries/onecad-worker-<triple> to exist,
-      # and clippy/test both compile the app crate (and thus its build script) —
-      # so staging must precede every cargo invocation that touches the app crate.
-      # The script configures, builds, and stages under the rustc host triple.
-      # The real-worker / m2 gates also need the binary (ONECAD_REQUIRE_WORKER).
-      - name: Install OCCT toolchain
-        working-directory: .
-        run: brew install opencascade boost eigen nlohmann-json || true
-      - name: Build + stage worker
-        working-directory: .
-        run: scripts/build-worker.sh Release
       - name: fmt
         run: cargo fmt --all --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: test
+      - name: Full workspace tests
         env:
-          ONECAD_WORKER_PATH: ${{ github.workspace }}/worker/build/onecad-worker
-          # Hard-fail (not a green skip) if the worker build step regressed and no
-          # binary resolves — the worker-backed gates (m2/wire_contract/topology_rebind)
-          # must actually run in CI (M4a MINOR-2).
+          ONECAD_WORKER_PATH: ${{ github.workspace }}/worker/build-8.0.1-rust/onecad-worker
           ONECAD_REQUIRE_WORKER: "1"
         run: cargo test --workspace
+      - name: Kernelbench T0 gate
+        env:
+          ONECAD_KERNELBENCH_RUNNER: ${{ github.workspace }}/worker/build-8.0.1-rust/onecad-kernelbench-runner
+        run: |
+          set +e
+          cargo run -p onecad-kernelbench -- run \
+            --suite fillet/foundation --preset t0 --backend both \
+            --out-dir ../worker/build-8.0.1-rust/kernelbench-t0
+          bench_exit=$?
+          set -e
+          report_exit=0
+          cargo run -p onecad-kernelbench -- report \
+            ../worker/build-8.0.1-rust/kernelbench-t0/results.jsonl \
+            --json ../worker/build-8.0.1-rust/kernelbench-t0/summary.json || report_exit=$?
+          if [ "$bench_exit" -eq 0 ]; then
+            exit "$report_exit"
+          fi
+          exit "$bench_exit"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kernelbench-t0-occt-8.0.1
+          path: worker/build-8.0.1-rust/kernelbench-t0
+          if-no-files-found: warn
+          retention-days: 14
 
-  worker:
-    name: worker
+  worker-7-9-3:
+    name: worker-7.9.3 (informational)
+    continue-on-error: true
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-      # These steps are skipped until worker/CMakeLists.txt exists (evaluated
-      # after checkout so hashFiles can see the tree). Once the worker lands they
-      # run for real — no continue-on-error.
-      - name: Install OCCT toolchain
-        if: hashFiles('worker/CMakeLists.txt') != ''
-        run: brew install opencascade boost eigen nlohmann-json || true
-      - name: Stdout hygiene gate
-        if: hashFiles('worker/CMakeLists.txt') != ''
-        # worker stdout carries OCW1 frames ONLY; this job runs raw cmake
-        # (not scripts/build-worker.sh), so the gate needs its own step here.
-        run: scripts/check-worker-stdout-hygiene.sh
-      - name: Configure
-        if: hashFiles('worker/CMakeLists.txt') != ''
-        run: cmake -S worker -B worker/build -DCMAKE_BUILD_TYPE=Release
-      - name: Build
-        if: hashFiles('worker/CMakeLists.txt') != ''
-        run: cmake --build worker/build --parallel
-      - name: Test
-        if: hashFiles('worker/CMakeLists.txt') != ''
-        run: ctest --test-dir worker/build --output-on-failure
-      - name: Selftest smoke (debug logging)
-        if: hashFiles('worker/CMakeLists.txt') != ''
+      - name: Cache pinned OCCT
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/onecad-occt/7.9.3
+          key: occt-macos-14-7.9.3-a016080bf673-${{ env.OCCT_COMPARISON_BUILD_ID }}-${{ hashFiles('scripts/build-pinned-occt.sh') }}
+      - name: Install dependencies
+        run: brew install boost eigen nlohmann-json ninja
+      - name: Build pinned comparison OCCT
+        run: >-
+          scripts/build-pinned-occt.sh
+          --version 7.9.3
+          --prefix "$RUNNER_TEMP/onecad-occt/7.9.3"
+          --build-dir "$RUNNER_TEMP/onecad-occt-build/7.9.3"
+          --build-id "$OCCT_COMPARISON_BUILD_ID"
+      - name: Configure comparison worker
+        run: |
+          cmake -S worker -B worker/build-7.9.3 -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DONECAD_OCCT_ROOT="$RUNNER_TEMP/onecad-occt/7.9.3" \
+            -DONECAD_OCCT_VERSION=7.9.3 \
+            -DONECAD_OCCT_BUILD_ID="$OCCT_COMPARISON_BUILD_ID" \
+            -DONECAD_WORKER_BUILD_DIR="$GITHUB_WORKSPACE/worker/build-7.9.3"
+          cmake --build worker/build-7.9.3 --parallel 3
+      - name: Focused safety characterization
+        run: |
+          mkdir -p worker/characterization-7.9.3
+          ./worker/build-7.9.3/tests/test_edge_op_failure \
+            >worker/characterization-7.9.3/results-a.ndjson
+          ./worker/build-7.9.3/tests/test_edge_op_failure \
+            >worker/characterization-7.9.3/results-b.ndjson
+          cmp worker/characterization-7.9.3/results-a.ndjson \
+            worker/characterization-7.9.3/results-b.ndjson
+          cp worker/characterization-7.9.3/results-a.ndjson \
+            worker/characterization-7.9.3/results.ndjson
+          output="worker/characterization-7.9.3/suite-results.ndjson"
+          for case_name in preview_op wp6_ops wp6_checkpoint import_step xcaf_import; do
+            set +e
+            ctest --test-dir worker/build-7.9.3 --output-on-failure \
+              -R "^${case_name}$" >"worker/characterization-7.9.3/${case_name}.log" 2>&1
+            status=$?
+            set -e
+            printf '{"kind":"case","caseId":"%s","exitCode":%d}\n' \
+              "$case_name" "$status" >>"$output"
+          done
+      - name: Kernelbench safety characterization
         env:
-          ONECAD_WORKER_LOG: debug
-        run: ./worker/build/onecad-worker --selftest
+          ONECAD_KERNELBENCH_RUNNER: ${{ github.workspace }}/worker/build-7.9.3/onecad-kernelbench-runner
+        run: |
+          set +e
+          cargo run --manifest-path src-tauri/Cargo.toml -p onecad-kernelbench -- \
+            run-case bench/robustness/regressions/fillet-box-expected-limit-oversized.json \
+            --backend both --out-dir worker/characterization-7.9.3/kernelbench
+          bench_exit=$?
+          set -e
+          report_exit=0
+          cargo run --manifest-path src-tauri/Cargo.toml -p onecad-kernelbench -- \
+            report worker/characterization-7.9.3/kernelbench/results.jsonl \
+            --json worker/characterization-7.9.3/kernelbench/summary.json || report_exit=$?
+          if [ "$bench_exit" -eq 0 ]; then
+            exit "$report_exit"
+          fi
+          exit "$bench_exit"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: worker-7.9.3-characterization
+          path: worker/characterization-7.9.3
+          if-no-files-found: error
+          retention-days: 14
+
+  persistence-producer-7-9-3:
+    name: persistence-producer-7.9.3
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache pinned OCCT
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/onecad-occt/7.9.3
+          key: occt-macos-14-7.9.3-a016080bf673-${{ env.OCCT_COMPARISON_BUILD_ID }}-${{ hashFiles('scripts/build-pinned-occt.sh') }}
+      - name: Install dependencies
+        run: brew install boost eigen nlohmann-json ninja
+      - name: Build pinned persistence OCCT
+        run: >-
+          scripts/build-pinned-occt.sh
+          --version 7.9.3
+          --prefix "$RUNNER_TEMP/onecad-occt/7.9.3"
+          --build-dir "$RUNNER_TEMP/onecad-occt-build/7.9.3"
+          --build-id "$OCCT_COMPARISON_BUILD_ID"
+      - name: Build minimal persistence producer
+        run: |
+          cmake -S worker -B worker/build-persistence-7.9.3 -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DONECAD_OCCT_ROOT="$RUNNER_TEMP/onecad-occt/7.9.3" \
+            -DONECAD_OCCT_VERSION=7.9.3 \
+            -DONECAD_OCCT_BUILD_ID="$OCCT_COMPARISON_BUILD_ID" \
+            -DONECAD_WORKER_BUILD_DIR="$GITHUB_WORKSPACE/worker/build-persistence-7.9.3"
+          cmake --build worker/build-persistence-7.9.3 \
+            --target test_occt_persistence --parallel 3
+      - name: Produce 7.9.3 persistence artifact
+        run: |
+          mkdir -p "$RUNNER_TEMP/occt-persistence"
+          ./worker/build-persistence-7.9.3/tests/test_occt_persistence produce \
+            "$RUNNER_TEMP/occt-persistence"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: occt-7.9.3-persistence
+          path: ${{ runner.temp }}/occt-persistence
+          if-no-files-found: error
+          retention-days: 7
+
+  persistence-7-to-8:
+    name: persistence-7.9.3-to-8.0.1
+    needs: [occt-8-0-1, persistence-producer-7-9-3]
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install worker dependencies
+        run: brew install boost eigen nlohmann-json ninja
+      - uses: actions/download-artifact@v4
+        with:
+          name: onecad-occt-8.0.1-macos-14
+          path: ${{ runner.temp }}/onecad-occt-artifact
+      - name: Extract OCCT artifact
+        run: |
+          mkdir -p "$RUNNER_TEMP/onecad-occt/8.0.1"
+          tar -xzf "$RUNNER_TEMP/onecad-occt-artifact/onecad-occt-8.0.1.tar.gz" \
+            -C "$RUNNER_TEMP/onecad-occt/8.0.1"
+      - uses: actions/download-artifact@v4
+        with:
+          name: occt-7.9.3-persistence
+          path: ${{ runner.temp }}/occt-persistence
+      - name: Build 8.0.1 persistence reader
+        run: |
+          cmake -S worker -B worker/build-persistence-8.0.1 -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DONECAD_OCCT_ROOT="$RUNNER_TEMP/onecad-occt/8.0.1" \
+            -DONECAD_OCCT_VERSION=8.0.1 \
+            -DONECAD_OCCT_BUILD_ID="$OCCT_PRIMARY_BUILD_ID" \
+            -DONECAD_WORKER_BUILD_DIR="$GITHUB_WORKSPACE/worker/build-persistence-8.0.1"
+          cmake --build worker/build-persistence-8.0.1 \
+            --target test_occt_persistence --parallel 3
+      - name: Reopen 7.9.3 persistence under 8.0.1
+        run: >-
+          ./worker/build-persistence-8.0.1/tests/test_occt_persistence consume
+          "$RUNNER_TEMP/occt-persistence"
 
   frontend:
     name: frontend
@@ -82,14 +357,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
       - name: Install
-        run: bun install --frozen-lockfile || bun install
+        run: bun install --frozen-lockfile
       - name: Build
         run: bun run build
       - name: Test
-        # Guarded on a "test" script actually existing in package.json.
-        run: |
-          if grep -q '"test"' package.json; then
-            bun run test
-          else
-            echo "no test script in package.json — skipping"
-          fi
+        run: bun run test

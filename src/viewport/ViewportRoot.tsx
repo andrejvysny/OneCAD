@@ -248,16 +248,24 @@ export function ViewportRoot({ className }: { className?: string }) {
         // revision, so a stale response here can never clobber newer state.
         void client.getProjection().catch(() => {});
 
-        // Auto-fit the camera once, the first time a body finishes loading.
-        let fitted = false;
+        // Auto-fit the camera once loading settles. Bodies stream in one at a
+        // time, so fitting on the first only frames whichever body loads
+        // first — wrong for multi-body assemblies. Debounce to the trailing
+        // edge of the load burst instead, re-fitting as bigger bounds arrive.
+        const FIT_SETTLE_MS = 250;
+        let fitSettleTimer: ReturnType<typeof setTimeout> | null = null;
         cleanups.push(
           meshIngest.onBodyLoaded(() => {
-            if (!fitted) {
-              fitted = true;
+            if (fitSettleTimer !== null) clearTimeout(fitSettleTimer);
+            fitSettleTimer = setTimeout(() => {
+              fitSettleTimer = null;
               engine.fitView();
-            }
+            }, FIT_SETTLE_MS);
           }),
         );
+        cleanups.push(() => {
+          if (fitSettleTimer !== null) clearTimeout(fitSettleTimer);
+        });
 
         // Wake-up repaint: on-demand rendering means a tab/window that was hidden
         // or a compositor that dropped the last frame shows stale/blank content
@@ -351,11 +359,8 @@ export function ViewportRoot({ className }: { className?: string }) {
         // fights armed model tools or the region-pick double-click accelerator
         // (those run while a model tool is active, not "select").
         //
-        // A miss falls through to a body FACE (SKETCH-ON-FACE W3): the same
-        // gesture that re-opens a sketch re-opens the sketch already hosted on
-        // that face, or starts one there. The sketch layer keeps priority — a
-        // face sketch lies FLUSH on its host, so the two are always coincident
-        // and the sketch is the more specific target. ──
+        // A miss falls through to a body FACE → select the whole connected body
+        // (sketch-from-face lives on `S` with a face selected, not here). ──
         const onDblClick = (e: MouseEvent) => {
           const s = toolStore.getState();
           if (s.mode !== "model" || s.modelTool !== "select") return;
@@ -366,15 +371,10 @@ export function ViewportRoot({ className }: { className?: string }) {
           }
           const face = engine.probePick(e.clientX, e.clientY);
           if (!face || face.kind !== "face") return;
-          // A DIRECT call, not a selection mutation + `S`: routing through the
-          // selection would make the entry depend on pick side effects that the
-          // double-click's own first click already owns.
-          void sketchController.enterOnFace({
-            bodyId: face.bodyId,
-            topoKey: face.topoKey,
-            elementId: face.elementId,
-            worldPoint: [face.worldPos.x, face.worldPos.y, face.worldPos.z],
-          });
+          const ref: EntityRef = { kind: "body", id: face.bodyId };
+          const sel = selectionStore.getState();
+          if (e.shiftKey || e.metaKey) sel.toggle(ref);
+          else sel.set([ref]);
         };
         container.addEventListener("dblclick", onDblClick);
         cleanups.push(() => container.removeEventListener("dblclick", onDblClick));

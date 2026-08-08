@@ -54,10 +54,10 @@ export function cssLineWidth(cssPx: number): number {
   return cssPx * Math.min(dpr, MAX_DPR);
 }
 
-const LINE_WIDTH = cssLineWidth(2.5);
-const PREVIEW_WIDTH = cssLineWidth(2);
-const TRIM_GHOST_WIDTH = cssLineWidth(3.5);
-const SELECTED_WIDTH = cssLineWidth(3);
+const LINE_WIDTH = cssLineWidth(2);
+const PREVIEW_WIDTH = cssLineWidth(1.5);
+const TRIM_GHOST_WIDTH = cssLineWidth(3);
+const SELECTED_WIDTH = cssLineWidth(2.5);
 
 /** Flat local xyz (z=0) polyline for an entity, in plane coords. */
 export function entityPolyline(e: {

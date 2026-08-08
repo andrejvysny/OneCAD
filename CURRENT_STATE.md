@@ -1,3 +1,43 @@
+## BODY/FACE COLOR (2026-08-07) — GATE PASSED
+Implemented user-authored body color and per-face color. Rust persists both in `BodyMeta` (`color` and `face_colors: BTreeMap<ElementId, [u8; 4]>`), exposes `SetBodyColor` and `SetFaceColor` commands, and projects them through `BodyDto`. Frontend stores and actions carry the new fields with optimistic writes; mock client implements both and resolves persisted elementIds back to current topoKeys. Mesh pipeline bakes body and face colors into vertex colors via `faceColors.ts`, looking up authored face colors by the mesh's actual id (ElementId when `idsHaveElementIds`, else TopoKey via `elementInfo` fallback). `meshSync` rebuilds on color changes. InspectorPanel has an Appearance section for body and face selections with color picker + opacity slider + reset (face section re-added after it was dropped from the file; face status/name/DOF handling corrected).
+FINAL GATE: `cargo fmt --all --check`, workspace `clippy -D warnings`, and `cargo test --workspace --all-targets` all green; `bun run build` and `bun run test` green (206 files / 3636 tests). Added focused regression tests: Rust face-color serde round-trip; Vitest face-color wire payload + clear.
+Deferred follow-up: real-worker interactive smoke (command is wired; rendering verified on mock lane), and imported STEP per-face colors are not yet keyed by persistent id.
+
+## KERNELBENCH KBR-0 + FILLET SLICE (2026-08-07) — GATE PASSED
+First end-to-end OCCT robustness benchmark (`onecad-kernelbench` Rust
+supervisor + `onecad-kernelbench-runner` C++ child), differential raw-OCCT vs
+production `FilletBuilder`, landed and gated. Resumed a session left with C++
+non-buildable (interrupted semantic-selector refactor: `Geometry.cpp`
+referenced removed `SelectorSpec` fields). Fixed by inspecting live files, not
+trusting the handoff doc's claims of what was already done — several were
+stale or wrong. Root-caused two bugs invisible to unit tests, only found by
+actually executing T0: `suite.rs` emitted exactly one `surfaceDescriptor`
+regardless of anchor count, silently crashing every disconnected/multiple-edge
+box case (8/12 supported cases) at runtime; overflow-wedge cases used the
+wrong selector mode entirely (anchor coordinates re-derived from a standalone
+OCCT probe program, not from docs, since `BRepPrimAPI_MakeWedge`'s taper axis
+isn't what the header comment implies). Also closed: ordinal-free semantic
+selector now resolves by nearest-anchor matching (tolerance + uniqueness, no
+OCCT ordinals ever persisted); `BRepCheck_Analyzer` silently reports an
+empty solid as valid, so `exactValid` now also requires `faces > 0`; several
+Rust supervisor gaps (search-result validation was missing `probeRadius`
+entirely — every real search record failed strict validation; supervisor
+artifact writes weren't cumulative-capped; macOS `RLIMIT_AS` is unreliable,
+gated to RSS-polling only). Biggest lift: metamorph (translated/rotated
+variant) evidence was fabricated (`surfaceSamplesMatch` aliased to an
+unrelated bool). Replaced with genuine evidence — worker emits deterministic
+face-centroid + probe-point shape signatures, new `metamorph.rs` inverse-
+transforms and compares them within tolerance; verified via real T0 execution,
+not just unit tests. FINAL GATE: worker CTest 106/106 · Rust workspace
+fmt/clippy/test all green (worker-backed) · kernelbench unit+integration 35/35
+· T0 both-backend 136/136 pass, replay 136/136 stable, differential 136/136
+same-status, metamorph 48 pass/0 fail/16 correctly-notRun · search-critical
+transition found near 16 mm · 332 generated cases/presets/results schema-valid
+under Draft 2020-12 · `git diff --check` clean. Deferred: dedicated per-
+scenario CTest fixtures (proven via real T0 run instead), boolean/later ops,
+history adapter, Windows resource limits — all out of original scope. Details:
+TODO.md § KERNELBENCH KBR-0.
+
 ## HISTORY-HARDEN (2026-08-04, plan `act-as-senior-software-mutable-turing.md`) — COMPLETE
 Parametric history hardened end-to-end: change past decisions like professional
 CAD. 10 waves, 6 gate commits (df15632→3ab2a22), internal adversarial review

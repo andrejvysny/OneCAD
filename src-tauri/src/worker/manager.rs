@@ -1961,6 +1961,25 @@ impl crate::worker::FaceBoundaryProjection for WorkerManager {
         wire::parse_prepare_offset_face(&ok_result(resp)?)
             .map_err(|message| EngineError::Protocol { message })
     }
+
+    async fn prepare_edge_op(
+        &self,
+        snapshot: SnapshotId,
+        mode: wire::EdgeOpMode,
+        picks: &[wire::EdgeOpPick<'_>],
+        chain_tangent_edges: bool,
+    ) -> Result<crate::dto::PrepareEdgeOpDto, EngineError> {
+        let client = self.client_or_err()?;
+        let resp = client
+            .request(
+                "PrepareEdgeOp",
+                wire::prepare_edge_op_args(snapshot, mode, picks, chain_tangent_edges),
+            )
+            .await
+            .map_err(protocol_err)?;
+        wire::parse_prepare_edge_op(&ok_result(resp)?)
+            .map_err(|message| EngineError::Protocol { message })
+    }
 }
 
 #[async_trait]

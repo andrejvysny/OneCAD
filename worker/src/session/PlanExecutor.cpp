@@ -195,7 +195,38 @@ void emit_plan_step(HandlerContext& ctx, std::uint64_t req_id, std::uint64_t job
 }
 
 json fail_diagnostic(const std::string& code, const std::string& message) {
-    return json{{"severity", "error"}, {"code", code}, {"message", message}};
+    return json{{"severity", "error"},
+                {"code", code.size() <= 128 ? code : "OP_FAILED"},
+                {"message", !message.empty() && message.size() <= 4096
+                                ? message
+                                : "Operation failed"},
+                {"stage", "build"}};
+}
+
+std::optional<json> bounded_diagnostic(const json& value) {
+    if (!value.is_object() || !value.contains("severity") ||
+        !value["severity"].is_string() || !value.contains("code") ||
+        !value["code"].is_string() || !value.contains("message") ||
+        !value["message"].is_string()) {
+        return std::nullopt;
+    }
+    const std::string severity = value["severity"].get<std::string>();
+    const std::string code = value["code"].get<std::string>();
+    const std::string message = value["message"].get<std::string>();
+    if ((severity != "info" && severity != "warning" && severity != "error") ||
+        code.empty() || code.size() > 128 || message.empty() || message.size() > 4096) {
+        return std::nullopt;
+    }
+    json bounded = {{"severity", severity}, {"code", code}, {"message", message}};
+    if (value.contains("stage") && value["stage"].is_string()) {
+        const std::string stage = value["stage"].get<std::string>();
+        if (stage.size() <= 64) bounded["stage"] = stage;
+    }
+    if (value.contains("evidence") && value["evidence"].is_object() &&
+        value["evidence"].dump().size() <= 65'536) {
+        bounded["evidence"] = value["evidence"];
+    }
+    return bounded;
 }
 
 // Determinism policy for one op: parallel flag + occtOptions (SCHEMA §7.3). Rust
@@ -358,6 +389,26 @@ CandidateResult execute_candidate_op(ScratchJob& job, const json& op,
     return result;
 }
 
+json candidate_diagnostics(const CandidateResult& candidate) {
+    json diagnostics = json::array();
+    const bool failed = candidate.status == CandidateResult::Status::Failed ||
+                        candidate.status == CandidateResult::Status::Unsupported;
+    const std::size_t advisory_limit = failed ? 63 : 64;
+    bool has_error_diagnostic = false;
+    for (const json& diagnostic : candidate.diagnostics) {
+        if (diagnostics.size() >= advisory_limit) break;
+        if (const auto bounded = bounded_diagnostic(diagnostic)) {
+            has_error_diagnostic = has_error_diagnostic || (*bounded)["severity"] == "error";
+            diagnostics.push_back(*bounded);
+        }
+    }
+    if (failed && !has_error_diagnostic) {
+        diagnostics.push_back(
+            fail_diagnostic(candidate.error_code, candidate.error_message));
+    }
+    return diagnostics;
+}
+
 namespace {
 
 // Drive the ordered op slice into `job`, streaming one planStep per executed step
@@ -388,7 +439,6 @@ ExecResult execute_ops(ScratchJob& job, const json& ops, std::uint64_t job_id, s
         }
         if (ctx.cancel.cancelled()) { res.status = ExecStatus::Cancelled; return res; }
 
-        json diagnostics = json::array();
         CandidateResult candidate;
 
         if (op_id.find("__fail") != std::string::npos) {
@@ -408,14 +458,7 @@ ExecResult execute_ops(ScratchJob& job, const json& ops, std::uint64_t job_id, s
             res.status = ExecStatus::Cancelled;
             return res;
         }
-        // Advisory op diagnostics first, so a failure diagnostic stays LAST — the
-        // `opFailed` branch below reads `diagnostics.back()` as the step message.
-        for (json& d : candidate.diagnostics) diagnostics.push_back(std::move(d));
-        if (candidate.status == CandidateResult::Status::Failed ||
-            candidate.status == CandidateResult::Status::Unsupported) {
-            diagnostics.push_back(
-                fail_diagnostic(candidate.error_code, candidate.error_message));
-        }
+        const json diagnostics = candidate_diagnostics(candidate);
 
         if (candidate.status == CandidateResult::Status::Ok) {
             emit_plan_step(ctx, req_id, job_id, step_index, candidate.body_events,
@@ -448,6 +491,7 @@ ExecResult execute_ops(ScratchJob& job, const json& ops, std::uint64_t job_id, s
             StepResult r;
             r.step_index = step_index;
             r.status = "opFailed";
+            r.diagnostics = diagnostics;
             // Carry the op's §8 message into perStepResults (the failed step emits no
             // planStep, so this is the only channel to Rust — see the emit below).
             if (!diagnostics.empty()) r.message = diagnostics.back().value("message", "");
@@ -567,6 +611,7 @@ Envelope handle_execute_plan(Session& session, const Envelope& req, HandlerConte
         // a failed step emits no planStep event, so its diagnostic would otherwise be
         // worker-local. Additive (readers ignore unknown keys; §4).
         if (!ps.message.empty()) e["message"] = ps.message;
+        if (!ps.diagnostics.empty()) e["diagnostics"] = ps.diagnostics;
         per_step.push_back(std::move(e));
     }
     json last_valid = job.last_valid_step.has_value() ? json(*job.last_valid_step) : json(nullptr);

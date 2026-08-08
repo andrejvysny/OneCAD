@@ -172,6 +172,7 @@ fn fillet(id: RecordId, body: BodyId, el: &str, out: BodyId) -> OperationRecord 
         edge_ids: vec![ElementId::new(el)],
         edges: vec![edge_ref(body, el)],
         chain_tangent_edges: true,
+        tangent_closure_version: None,
         extra: Default::default(),
     }));
     record(id, "Fillet", op, vec![out])
@@ -946,6 +947,7 @@ fn fillet_op(edge_ids: &[&str], edges: Vec<ElementRef>) -> Operation {
         edge_ids: edge_ids.iter().map(|e| ElementId::new(*e)).collect(),
         edges,
         chain_tangent_edges: true,
+        tangent_closure_version: None,
         extra: Default::default(),
     }))
 }
@@ -1032,6 +1034,7 @@ fn chamfer_op(edge_ids: &[&str], edges: Vec<ElementRef>, radius: f64) -> Operati
         edge_ids: edge_ids.iter().map(|e| ElementId::new(*e)).collect(),
         edges,
         chain_tangent_edges: true,
+        tangent_closure_version: None,
         extra: Default::default(),
     }))
 }
@@ -1069,6 +1072,22 @@ fn edge_op_facts(op: &Operation) -> (Vec<String>, usize, f64, Option<String>) {
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
     )
+}
+
+fn set_closure_version(op: &mut Operation, version: Option<u8>) {
+    match op {
+        Operation::Known(KnownOperation::Fillet(p)) => p.tangent_closure_version = version,
+        Operation::Known(KnownOperation::Chamfer(p)) => p.tangent_closure_version = version,
+        _ => panic!("not an edge op"),
+    }
+}
+
+fn closure_version(op: &Operation) -> Option<u8> {
+    match op {
+        Operation::Known(KnownOperation::Fillet(p)) => p.tangent_closure_version,
+        Operation::Known(KnownOperation::Chamfer(p)) => p.tangent_closure_version,
+        _ => panic!("not an edge op"),
+    }
 }
 
 #[test]
@@ -1114,6 +1133,11 @@ fn update_operation_params_swaps_fillet_to_chamfer() {
 
     let rec = sess.document().timeline.record_by_id(rid(1)).unwrap();
     assert_eq!(rec.op.op_type(), "Chamfer", "the record IS a chamfer now");
+    assert_eq!(
+        closure_version(&rec.op),
+        None,
+        "legacy absence stays absent"
+    );
     let (ids, typed, radius, mode) = edge_op_facts(&rec.op);
     assert_eq!(ids, vec!["e1".to_string()], "edgeIds preserved");
     assert_eq!(typed, 1, "typed edge refs preserved");
@@ -1146,6 +1170,109 @@ fn update_operation_params_swaps_fillet_to_chamfer() {
     let again = sess.document().timeline.record_by_id(rid(1)).unwrap();
     assert_eq!(again.op.op_type(), "Chamfer", "redo re-applies the swap");
     assert_eq!(edge_op_facts(&again.op).2, 3.5, "redo restores the size");
+}
+
+#[test]
+fn prepared_closure_version_survives_fillet_chamfer_swap() {
+    let mut sess = fillet_doc("e1");
+    let mut prepared_fillet = fillet_op(&["e1"], vec![edge_ref(BX(), "e1")]);
+    set_closure_version(&mut prepared_fillet, Some(1));
+    sess.apply(EditCommand::UpdateOperationParams {
+        record: rid(1),
+        op: prepared_fillet,
+    })
+    .expect("seed prepared closure");
+
+    let mut prepared_chamfer = chamfer_op(&["e1"], vec![edge_ref(BX(), "e1")], 3.0);
+    set_closure_version(&mut prepared_chamfer, Some(1));
+    sess.apply(EditCommand::UpdateOperationParams {
+        record: rid(1),
+        op: prepared_chamfer,
+    })
+    .expect("prepared Fillet to Chamfer swap");
+
+    let rec = sess.document().timeline.record_by_id(rid(1)).unwrap();
+    assert_eq!(rec.op.op_type(), "Chamfer");
+    assert_eq!(closure_version(&rec.op), Some(1));
+    assert_eq!(edge_op_facts(&rec.op).0, vec!["e1".to_string()]);
+}
+
+#[test]
+fn edge_closure_version_is_optional_and_only_version_one_is_writable() {
+    let legacy = fillet_op(&["e1"], vec![edge_ref(BX(), "e1")]);
+    let legacy_bytes = serde_json::to_vec(&legacy).expect("serialize legacy fillet");
+    let legacy_json: serde_json::Value =
+        serde_json::from_slice(&legacy_bytes).expect("parse legacy bytes");
+    assert!(
+        legacy_json["params"].get("tangentClosureVersion").is_none(),
+        "legacy records must remain byte-shape stable"
+    );
+
+    let reopened: Operation =
+        serde_json::from_slice(&legacy_bytes).expect("deserialize literal legacy record");
+    let mut legacy_session = fillet_doc("e1");
+    legacy_session
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(1),
+            op: reopened,
+        })
+        .expect("legacy no-op re-edit");
+    let saved = serde_json::to_vec(
+        &legacy_session
+            .document()
+            .timeline
+            .record_by_id(rid(1))
+            .unwrap()
+            .op,
+    )
+    .expect("save re-edited legacy record");
+    assert_eq!(
+        saved, legacy_bytes,
+        "legacy re-edit/save must be byte-stable"
+    );
+
+    let mut sess = fillet_doc("e1");
+    let mut missing_refs = fillet_op(&["e1"], Vec::new());
+    set_closure_version(&mut missing_refs, Some(1));
+    let err = sess
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(1),
+            op: missing_refs,
+        })
+        .expect_err("versioned closure without typed refs must be rejected");
+    assert!(err.to_string().contains("full typed edge refs"));
+
+    let mut intent_only = fillet_op(
+        &["e1"],
+        vec![ElementRef {
+            primary: None,
+            intent: None,
+            anchor: None,
+            extra: Default::default(),
+        }],
+    );
+    set_closure_version(&mut intent_only, Some(1));
+    let err = sess
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(1),
+            op: intent_only,
+        })
+        .expect_err("versioned closure requires an EDGE primary");
+    assert!(err.to_string().contains("EDGE primary"));
+
+    let mut invalid = fillet_op(&["e1"], vec![edge_ref(BX(), "e1")]);
+    set_closure_version(&mut invalid, Some(2));
+    let err = sess
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(1),
+            op: invalid,
+        })
+        .expect_err("unknown closure policy must be rejected");
+    assert!(err.to_string().contains("tangentClosureVersion"));
+    assert_eq!(
+        closure_version(&sess.document().timeline.record_by_id(rid(1)).unwrap().op),
+        None
+    );
 }
 
 #[test]

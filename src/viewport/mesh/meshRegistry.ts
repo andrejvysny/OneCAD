@@ -16,7 +16,8 @@ import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeome
 import { logError } from "@/debug/log";
 import type { BodyMeshView } from "./parseMeshPayload";
 import { TopoIndex } from "./faceRangeIndex";
-import { bakeFaceColors, deIndexTriangles, hasAuthoredFaceColors } from "./faceColors";
+import { bakeFaceColors, deIndexTriangles, needsVertexColors } from "./faceColors";
+import type { Rgba } from "@/ipc/types";
 
 export interface MeshEntry {
   readonly bodyId: string;
@@ -50,6 +51,10 @@ export interface MeshEntry {
   readonly edgeSegmentRanges: Uint32Array | null;
   /** True when `geometry` carries a baked per-vertex `color` attribute. */
   readonly hasVertexColors: boolean;
+  /** The body color this entry was baked with (undefined = theme neutral). */
+  readonly bodyColor?: Rgba;
+  /** User-authored face colors this entry was baked with, keyed by the mesh id (ElementId or TopoKey). */
+  readonly authoredFaceColors?: Map<string, Rgba>;
   /**
    * Theme change: re-bake the color attribute against the CURRENT body-fill
    * token. Only unset faces move — authored colors are data, not a token — so
@@ -71,12 +76,18 @@ export let leakTripwireCount = 0;
  * call {@link swap} to publish it. Face attributes are zero-copy views over the
  * MESH1 blob; only the edge segment buffer is materialised.
  */
-export function buildBodyObjects(view: BodyMeshView, bodyId: string, meshRev: number): MeshEntry {
+export function buildBodyObjects(
+  view: BodyMeshView,
+  bodyId: string,
+  meshRev: number,
+  bodyColor?: Rgba,
+  authoredFaceColors?: Map<string, Rgba>,
+): MeshEntry {
   const geometry = new THREE.BufferGeometry();
   // `drawRange` counts INDICES when the geometry is indexed and VERTICES when it
   // is not — and de-indexing produces exactly `indices.length` vertices, so the
   // same count is right in both arms (and so are HighlightLayer's face ranges).
-  const colorAttr = buildFaceGeometry(geometry, view);
+  const colorAttr = buildFaceGeometry(geometry, view, bodyColor, authoredFaceColors);
   geometry.setDrawRange(0, view.indices.length);
   const bmin = view.bboxMin;
   const bmax = view.bboxMax;
@@ -122,9 +133,11 @@ export function buildBodyObjects(view: BodyMeshView, bodyId: string, meshRev: nu
     edgeIndex,
     edgeSegmentRanges,
     hasVertexColors: colorAttr !== null,
+    bodyColor,
+    authoredFaceColors,
     rebakeFaceColors() {
       if (!colorAttr || disposed) return;
-      bakeFaceColors(view, colorAttr.array as Float32Array);
+      bakeFaceColors(view, bodyColor, authoredFaceColors, colorAttr.array as Float32Array);
       colorAttr.needsUpdate = true;
     },
     dispose() {
@@ -145,8 +158,10 @@ export function buildBodyObjects(view: BodyMeshView, bodyId: string, meshRev: nu
 function buildFaceGeometry(
   geometry: THREE.BufferGeometry,
   view: BodyMeshView,
+  bodyColor?: Rgba,
+  authoredFaceColors?: Map<string, Rgba>,
 ): THREE.BufferAttribute | null {
-  if (!hasAuthoredFaceColors(view.faceColors)) {
+  if (!needsVertexColors(view, bodyColor, authoredFaceColors)) {
     geometry.setAttribute("position", new THREE.BufferAttribute(view.positions, 3));
     if (view.normals) {
       geometry.setAttribute("normal", new THREE.BufferAttribute(view.normals, 3));
@@ -160,7 +175,7 @@ function buildFaceGeometry(
   const { positions, normals } = deIndexTriangles(view);
   geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
   if (normals) geometry.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
-  const colorAttr = new THREE.BufferAttribute(bakeFaceColors(view), 3);
+  const colorAttr = new THREE.BufferAttribute(bakeFaceColors(view, bodyColor, authoredFaceColors), 3);
   geometry.setAttribute("color", colorAttr);
   return colorAttr;
 }

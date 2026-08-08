@@ -124,6 +124,31 @@ function makeClientMock(
     }),
     finishSketch: vi.fn(() => Promise.resolve({ regions: [] })),
     getSketchRegions: vi.fn(() => Promise.resolve({ regions: [] })),
+    prepareEdgeOp: vi.fn(() =>
+      Promise.resolve({
+        snapshotId: 1,
+        targetBodyId: "body_body1",
+        edges: EDGES.map((edge) => ({
+          topoKey: edge.topoKey ?? "",
+          elementId: `el-edge-${edge.topoKey?.slice(2)}`,
+          bodyId: "body_body1",
+          kind: "edge" as const,
+          picked: true,
+          anchor: edge.anchor,
+        })),
+        refusal: null,
+      }),
+    ),
+    promoteSelection: vi.fn((_bodyId: string, picks: { topoKey: string }[]) =>
+      Promise.resolve(
+        picks.map((pick) => ({
+          topoKey: pick.topoKey,
+          elementId: `el-edge-${pick.topoKey.slice(2)}`,
+          kind: "edge",
+          bodyId: "body1",
+        })),
+      ),
+    ),
     beginPreview: vi.fn((_d: PreviewDraft) =>
       Promise.resolve({ sessionId: `pv-${++seq}`, previewBodyId: `pb-${seq}` }),
     ),
@@ -247,7 +272,10 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     const draft = clientMock.beginPreview.mock.calls[0][0] as PreviewDraft;
     expect(draft.opType).toBe("Fillet");
     // Same source array, same order — this is the invariant previewOps enforces.
-    expect(draft.params.edgeIds).toEqual(["e:5", "e:9"]);
+    expect(draft.params.edgeIds).toEqual(["el-edge-5", "el-edge-9"]);
+    expect(draft.params.tangentClosureVersion).toBe(1);
+    expect(clientMock.prepareEdgeOp).toHaveBeenCalledTimes(1);
+    expect(clientMock.promoteSelection).not.toHaveBeenCalled();
     expect((draft.inputs ?? []).map((r: SemanticRef) => r.primary.elementId)).toEqual([
       "el-edge-5",
       "el-edge-9",
@@ -311,7 +339,7 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     const next = lastUpdate();
     expect(next.epoch).toBeGreaterThan(first.epoch);
     expect(next.params.radius).toBe(5);
-    expect(next.params.edgeIds).toEqual(["e:5", "e:9"]); // selection unchanged
+    expect(next.params.edgeIds).toEqual(["el-edge-5", "el-edge-9"]); // minted identities unchanged
   });
 
   it("a drag release keeps the tool ARMED and never commits", async () => {
@@ -372,6 +400,7 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     expect(viewportStore.getState().statusHint?.severity).not.toBe("error");
 
     toolChipStore.getState().onConfirm?.();
+    answerPreview(); // strict fresh-edge commit requires the FINAL exact epoch
     await flush();
     await flush();
     expect(clientMock.endPreview).toHaveBeenCalledWith("pv-1", true);
@@ -403,6 +432,7 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     const beforeCommit = lastUpdate().epoch;
 
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    answerPreview(); // answer the FINAL re-flushed epoch, not the earlier live one
     await flush();
     await flush();
 
@@ -446,6 +476,7 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     expect(clientMock.beginPreview).toHaveBeenCalledTimes(1);
 
     toolChipStore.getState().onConfirm?.();
+    answerPreview();
     await flush();
     await flush();
 
@@ -520,6 +551,7 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     await armFillet();
     answerPreview();
     toolChipStore.getState().onConfirm?.();
+    answerPreview();
     await flush();
     await flush();
 

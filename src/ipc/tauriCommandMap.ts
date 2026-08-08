@@ -103,6 +103,7 @@ interface WireFilletParams {
    */
   edges?: WireElementRef[];
   chainTangentEdges: boolean;
+  tangentClosureVersion?: 1;
 }
 
 /** Rust `ElementRef` (refs.rs — identity + evidence + anchor; camelCase). */
@@ -323,6 +324,13 @@ export type WireEditCommand =
   | { cmd: "setVisibility"; target: WireVisibilityTarget; visible: boolean }
   | { cmd: "renameBody"; body: string; name: string }
   | { cmd: "renameSketch"; sketch: string; name: string }
+  | { cmd: "setBodyColor"; body: string; color: [number, number, number, number] | null }
+  | {
+      cmd: "setFaceColor";
+      body: string;
+      elementId: string;
+      color: [number, number, number, number] | null;
+    }
   // ── Datum planes (DATUM W1) — also `RegenHint::None`, same metadata-only
   // transport. `addDatumPlane` carries the RAW core `DatumPlane` struct, so it
   // must satisfy that struct's serde (see `buildAddDatumPlane`).
@@ -435,6 +443,9 @@ function filletParams(p: FilletParams, inputs?: SemanticRef[]): WireFilletParams
   // to reject.
   if (p.mode === "Chamfer" && p.distance2 !== undefined && p.distance2 > 0) {
     wire.distance2 = scalar(p.distance2);
+  }
+  if (p.tangentClosureVersion !== undefined) {
+    wire.tangentClosureVersion = p.tangentClosureVersion;
   }
   // R-WP2.1 dual rule: carry the typed `edges` in LOCKSTEP with `edgeIds`, built from
   // the op's per-edge SemanticRefs (`OperationOp.inputs`). Each typed ref supplies the
@@ -741,6 +752,7 @@ export interface CurrentFilletParams {
   /** Typed refs, parallel to `edgeIds` (may be shorter for a legacy fillet). */
   edges?: WireElementRef[];
   chainTangentEdges?: boolean;
+  tangentClosureVersion?: 1;
 }
 
 /**
@@ -808,12 +820,16 @@ export function rewriteFilletEdgeParams(
   while (edges.length < len) edges.push({});
   edgeIds[index] = elementId; // bare id (lockstep)
   edges[index] = ref; // typed ref (lockstep)
-  return {
+  const wire: WireFilletParams = {
     radius: scalar(current.radius),
     edgeIds,
     edges,
     chainTangentEdges: current.chainTangentEdges ?? true,
   };
+  if (current.tangentClosureVersion !== undefined) {
+    wire.tangentClosureVersion = current.tangentClosureVersion;
+  }
+  return wire;
 }
 
 /** `UpdateOperationParams` for a rewritten Fillet (the pinned dual-field path). */
@@ -1008,6 +1024,23 @@ export function setSketchVisibilityCommand(sketchId: string, visible: boolean): 
   return { cmd: "setVisibility", target: { sketch: sketchId }, visible };
 }
 
+/** `SetBodyColor` — set or clear a body's authored color. */
+export function setBodyColorCommand(
+  bodyId: string,
+  color: [number, number, number, number] | null,
+): WireEditCommand {
+  return { cmd: "setBodyColor", body: bareBodyId(bodyId), color };
+}
+
+/** `SetFaceColor` — set or clear a face color by persistent `ElementId`. */
+export function setFaceColorCommand(
+  bodyId: string,
+  elementId: string,
+  color: [number, number, number, number] | null,
+): WireEditCommand {
+  return { cmd: "setFaceColor", body: bareBodyId(bodyId), elementId, color };
+}
+
 /** `RenameBody` — the body's user-authored name (durable across regen + save). */
 export function renameBodyCommand(bodyId: string, name: string): WireEditCommand {
   return { cmd: "renameBody", body: bareBodyId(bodyId), name };
@@ -1097,6 +1130,10 @@ export function editCommandLabel(cmd: WireEditCommand): string {
     case "renameBody":
     case "renameSketch":
       return "Rename";
+    case "setBodyColor":
+      return "Set body color";
+    case "setFaceColor":
+      return "Set face color";
     case "addDatumPlane":
       return "Create datum plane";
     case "deleteDatum":

@@ -4,9 +4,10 @@ import userEvent from "@testing-library/user-event";
 import App from "@/App";
 import { StartScreen } from "./StartScreen";
 import { appStore } from "@/stores/appStore";
-import { mockClient } from "@/ipc/mockClient";
+import { mockClient, resetMockRecents } from "@/ipc/mockClient";
 
 beforeEach(() => {
+  resetMockRecents();
   appStore.setState({
     screen: "start",
     recents: [],
@@ -230,5 +231,79 @@ describe("StartScreen — boot failure", () => {
     expect(
       screen.queryByRole("button", { name: "Retry recents" }),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("StartScreen — project card menu", () => {
+  it("opens the overflow menu with rename / reveal / delete", async () => {
+    const user = userEvent.setup();
+    render(<StartScreen />);
+    await screen.findByText("Bracket v2");
+
+    await user.click(screen.getByRole("button", { name: "Bracket v2 options" }));
+
+    expect(screen.getByRole("menuitem", { name: "Rename" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: "Reveal in Finder" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Delete" })).toBeInTheDocument();
+  });
+
+  it("renames a project via the card menu", async () => {
+    const user = userEvent.setup();
+    render(<StartScreen />);
+    await screen.findByText("Bracket v2");
+
+    await user.click(screen.getByRole("button", { name: "Bracket v2 options" }));
+    await user.click(screen.getByRole("menuitem", { name: "Rename" }));
+    await user.clear(screen.getByLabelText("Rename Bracket v2"));
+    await user.type(screen.getByLabelText("Rename Bracket v2"), "Bracket v3{Enter}");
+
+    expect(await screen.findByText("Bracket v3")).toBeInTheDocument();
+    expect(screen.queryByText("Bracket v2")).not.toBeInTheDocument();
+  });
+
+  it("reverts a rename that collides with an existing project name", async () => {
+    const user = userEvent.setup();
+    render(<StartScreen />);
+    await screen.findByText("Bracket v2");
+    await screen.findByText("Enclosure rev C");
+
+    await user.click(screen.getByRole("button", { name: "Bracket v2 options" }));
+    await user.click(screen.getByRole("menuitem", { name: "Rename" }));
+    await user.clear(screen.getByLabelText("Rename Bracket v2"));
+    await user.type(screen.getByLabelText("Rename Bracket v2"), "Enclosure rev C{Enter}");
+
+    // The collision rejects (mockClient throws); nothing was refetched, so the
+    // original name is still what's on screen — no toast, just a revert.
+    expect(await screen.findByText("Bracket v2")).toBeInTheDocument();
+  });
+
+  it("deletes a project via the two-click confirm", async () => {
+    const user = userEvent.setup();
+    render(<StartScreen />);
+    await screen.findByText("Bracket v2");
+
+    await user.click(screen.getByRole("button", { name: "Bracket v2 options" }));
+    await user.click(screen.getByRole("menuitem", { name: "Delete" }));
+    await user.click(screen.getByRole("menuitem", { name: "Confirm delete" }));
+
+    await waitFor(() =>
+      expect(screen.queryByText("Bracket v2")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("reveals a project in the file manager", async () => {
+    const user = userEvent.setup();
+    const spy = vi.spyOn(mockClient, "revealInFileManager");
+    render(<StartScreen />);
+    await screen.findByText("Bracket v2");
+
+    await user.click(screen.getByRole("button", { name: "Bracket v2 options" }));
+    await user.click(screen.getByRole("menuitem", { name: "Reveal in Finder" }));
+
+    await waitFor(() =>
+      expect(spy).toHaveBeenCalledWith("/Users/andrej/CAD/Projects/Bracket v2.onecad"),
+    );
   });
 });

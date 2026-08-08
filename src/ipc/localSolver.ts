@@ -59,6 +59,7 @@ import { planeFor, solveSketch } from "./mockSketch";
 import { profileFromRegion, type PrismProfile } from "@/tools/preview/prismPreview";
 import { buildPreviewOp, supportsPreview, type PreviewSessionState } from "./previewOps";
 import { mintRecordId } from "./tauriCommandMap";
+import { parseOperationDiagnostics } from "./operationDiagnostics";
 import { trace } from "@/debug/trace";
 
 /** Simulated latency for sketch enter/finish round-trips (independent of the doc latency). */
@@ -70,7 +71,7 @@ function previewFailure(error: unknown): PreviewFailure {
   let kind: PreviewFailure["kind"] = "unknown";
   let message = error instanceof Error ? error.message : String(error);
   if (typeof error === "object" && error !== null) {
-    const candidate = error as { kind?: unknown; message?: unknown };
+    const candidate = error as { kind?: unknown; message?: unknown; diagnostics?: unknown };
     if (
       candidate.kind === "opFailed" ||
       candidate.kind === "invalidCommand" ||
@@ -83,10 +84,15 @@ function previewFailure(error: unknown): PreviewFailure {
     }
     if (typeof candidate.message === "string") message = candidate.message;
   }
+  const diagnostics =
+    typeof error === "object" && error !== null
+      ? parseOperationDiagnostics((error as { diagnostics?: unknown }).diagnostics)
+      : undefined;
   return {
     kind,
     message,
     structural: kind !== "opFailed" && kind !== "stalePreview",
+    diagnostics,
   };
 }
 

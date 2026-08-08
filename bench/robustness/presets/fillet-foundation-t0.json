@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "presetId": "fillet-foundation-t0",
+  "suite": "fillet/foundation",
+  "generator": {
+    "name": "fillet-foundation",
+    "version": 1,
+    "prng": "splitmix64",
+    "integerToDouble": "top53-div-2pow53",
+    "selectorContract": "semantic-v1",
+    "seed": "6f6e656361647430"
+  },
+  "caseCounts": {
+    "supportedAnalyticBox": 12,
+    "expectedLimitOversized": 4,
+    "exploratoryValence3": 8,
+    "exploratoryValence4": 8,
+    "exploratoryOverflowWedge": 4
+  },
+  "metamorphCoverage": {
+    "domains": ["supported", "expectedLimit"],
+    "baseCases": 16,
+    "translation": [1000, -2000, 3000],
+    "rotation": {
+      "angleDegrees": 17.137,
+      "axis": [1, 2, 3],
+      "center": "inputCentroid"
+    }
+  },
+  "expectedVariants": 68,
+  "backends": ["raw-occt", "onecad"],
+  "repeats": 2,
+  "expectedRecords": 136,
+  "expectedChildRuns": 272,
+  "limits": {
+    "resources": {
+      "wallTimeMs": 10000,
+      "addressSpaceBytes": 2147483648,
+      "stdoutBytes": 1048576,
+      "stderrBytes": 1048576,
+      "artifactBytes": 67108864
+    },
+    "quality": {}
+  },
+  "searchDefaults": {
+    "parameter": "operation.radius",
+    "growthFactor": 2,
+    "maxProbes": 256,
+    "relativePrecision": 0.000001,
+    "absolutePrecision": 0.000001,
+    "relativeOffsets": [0.01, 0.0001, 0.000001, 0.00000001]
+  }
+}

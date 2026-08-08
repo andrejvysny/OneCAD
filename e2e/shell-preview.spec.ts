@@ -36,9 +36,25 @@ async function armShell(page: Page): Promise<void> {
 
 test("Shell asks for faces when nothing is selected", async ({ page }) => {
   await openEditorDebug(page);
-  await page.getByRole("button", { name: "Shell", exact: true }).click();
+  // The toolbar button itself is disabled with nothing selected (below) — this
+  // scenario is the reactive fallback for reaching the tool without it, e.g. the
+  // keyboard shortcut, same pattern as filletChamfer.spec.ts's equivalent test.
+  await page.keyboard.press("k");
   await expect(page.getByText("Select faces to remove, then Shell")).toBeVisible();
   expect((await toolPhases(page))?.shellPhase).toBe("idle");
+});
+
+test("the Shell toolbar button grays out and explains why when nothing is selected", async ({ page }) => {
+  await openEditorDebug(page);
+  const shellButton = page.getByRole("button", { name: "Shell", exact: true });
+  await expect(shellButton).toHaveAttribute("aria-disabled", "true");
+  await shellButton.hover();
+  await expect(page.getByRole("tooltip")).toHaveText("Select faces to remove, then Shell");
+  // A disabled button is truly inert — clicking it must not arm the tool
+  // (no debug-surface tool switch ever fires, so assert on the DOM instead).
+  await shellButton.click({ force: true });
+  await expect(shellButton).toHaveAttribute("aria-pressed", "false");
+  await expect(page.getByTestId("chip-confirm")).toHaveCount(0);
 });
 
 test("a released shell drag stays ARMED and commits nothing", async ({ page }) => {

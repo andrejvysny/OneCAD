@@ -26,7 +26,7 @@ import { MATERIAL_KIND_VERTEX_COLORS, type MaterialKind } from "./renderModes";
  * `(linewidth + threshold) / 2`, so a pick tolerance expressed in CSS px has to
  * subtract the drawn width. One constant, two consumers, no drift.
  */
-export const BODY_EDGE_WIDTH = cssLineWidth(1.5);
+export const BODY_EDGE_WIDTH = cssLineWidth(1.25);
 
 export interface BodyMaterialSet {
   face: THREE.MeshStandardMaterial;

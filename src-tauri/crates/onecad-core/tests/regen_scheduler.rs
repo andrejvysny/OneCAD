@@ -143,6 +143,7 @@ fn published(generation: u64) -> Arc<ModelSnapshot> {
         step_states: vec![],
         signatures: None,
         diagnostics: vec![],
+        diagnostics_by_step: std::collections::BTreeMap::new(),
         repair_summary: RepairSummary::default(),
     })
 }

@@ -16,7 +16,6 @@
 #include <gp_XYZ.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
-#include <TopTools_ListIteratorOfListOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 
 #include "elementmap/Scoring.h"

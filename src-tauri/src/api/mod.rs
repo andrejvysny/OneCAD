@@ -1822,6 +1822,113 @@ pub struct OffsetFacePickInput {
     pub element_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeOpPickInput {
+    #[serde(default)]
+    pub body_id: Option<String>,
+    #[serde(default)]
+    pub topo_key: Option<String>,
+    #[serde(default)]
+    pub element_id: Option<String>,
+}
+
+fn edge_op_mode(value: &str) -> Result<wire::EdgeOpMode, ApiError> {
+    match value {
+        "Fillet" => Ok(wire::EdgeOpMode::Fillet),
+        "Chamfer" => Ok(wire::EdgeOpMode::Chamfer),
+        _ => Err(ApiError::InvalidCommand(
+            "prepareEdgeOp: unknown mode".into(),
+        )),
+    }
+}
+
+fn edge_op_bodies(picks: &[EdgeOpPickInput]) -> Result<Vec<Option<BodyId>>, ApiError> {
+    picks
+        .iter()
+        .enumerate()
+        .map(|(index, pick)| {
+            let element = pick.element_id.as_deref().filter(|value| !value.is_empty());
+            let topo = pick.topo_key.as_deref().filter(|value| !value.is_empty());
+            if element.is_some() == topo.is_some() {
+                return Err(ApiError::InvalidCommand(format!(
+                    "prepareEdgeOp: pick {index} must carry exactly one address"
+                )));
+            }
+            let body = pick
+                .body_id
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .map(wire::parse_body_id)
+                .transpose()
+                .map_err(ApiError::InvalidCommand)?;
+            if topo.is_some() && body.is_none() {
+                return Err(ApiError::InvalidCommand(format!(
+                    "prepareEdgeOp: pick {index} topoKey has no bodyId"
+                )));
+            }
+            Ok(body)
+        })
+        .collect()
+}
+
+fn attach_edge_identities(
+    prepared: &mut crate::dto::PrepareEdgeOpDto,
+    promoted: &[PromotedElementDto],
+) -> Result<(), ApiError> {
+    for edge in &mut prepared.edges {
+        let identity = promoted
+            .iter()
+            .find(|item| item.topo_key == edge.topo_key)
+            .filter(|item| item.kind == "edge")
+            .ok_or_else(|| {
+                ApiError::Internal("prepared edge promotion returned mismatched identity".into())
+            })?;
+        edge.element_id = Some(identity.element_id.clone());
+        edge.body_id = Some(identity.body_id.clone());
+        edge.kind = Some(identity.kind.clone());
+    }
+    Ok(())
+}
+
+fn wire_edge_op_picks<'a>(
+    picks: &'a [EdgeOpPickInput],
+    bodies: &'a [Option<BodyId>],
+) -> Vec<wire::EdgeOpPick<'a>> {
+    picks
+        .iter()
+        .zip(bodies)
+        .map(|(pick, body)| wire::EdgeOpPick {
+            body: *body,
+            address: match pick.element_id.as_deref().filter(|value| !value.is_empty()) {
+                Some(id) => wire::FaceAddress::ElementId(id),
+                None => wire::FaceAddress::TopoKey(pick.topo_key.as_deref().unwrap_or_default()),
+            },
+        })
+        .collect()
+}
+
+async fn promote_prepared_edges(
+    state: &AppState,
+    prepared: &mut crate::dto::PrepareEdgeOpDto,
+) -> Result<DocumentProjection, ApiError> {
+    let body = wire::parse_body_id(&prepared.target_body_id).map_err(ApiError::Internal)?;
+    let picks = prepared
+        .edges
+        .iter()
+        .map(|edge| (TopoKey::new(edge.topo_key.clone()), None))
+        .collect();
+    let mut guard = state.runtime.lock().await;
+    let runtime = guard
+        .as_mut()
+        .ok_or_else(|| ApiError::NoDocument("prepareEdgeOp".into()))?;
+    let promoted = runtime
+        .promote_selection(SnapshotId(prepared.snapshot_id), body, picks)
+        .await?;
+    attach_edge_identities(prepared, &promoted)?;
+    Ok(runtime.projection())
+}
+
 /// The read-only first half of the OffsetFace authoring transaction
 /// (`PrepareOffsetFace`; SCHEMA §7.6): the G1 tangent closure over the picked
 /// faces, the `Total` opposite candidate, and the `currentDims` that seed an
@@ -1935,6 +2042,42 @@ pub async fn prepare_offset_face(
         )
         .await
         .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn prepare_edge_op(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    snapshot_id: u64,
+    mode: String,
+    picked_edges: Vec<EdgeOpPickInput>,
+    chain_tangent_edges: bool,
+) -> Result<crate::dto::PrepareEdgeOpDto, ApiError> {
+    if picked_edges.is_empty() {
+        return Err(ApiError::InvalidCommand(
+            "prepareEdgeOp: at least one picked edge is required".into(),
+        ));
+    }
+    let mode = edge_op_mode(&mode)?;
+    let bodies = edge_op_bodies(&picked_edges)?;
+    let picks = wire_edge_op_picks(&picked_edges, &bodies);
+    {
+        let guard = state.runtime.lock().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("prepareEdgeOp".into()))?;
+    }
+    let mut prepared = state
+        .face_projection()
+        .prepare_edge_op(SnapshotId(snapshot_id), mode, &picks, chain_tangent_edges)
+        .await
+        .map_err(ApiError::from)?;
+    if prepared.refusal.is_some() {
+        return Ok(prepared);
+    }
+    let projection = promote_prepared_edges(state.inner(), &mut prepared).await?;
+    let _ = app.emit(events::PROJECTION_UPDATED, &projection);
+    Ok(prepared)
 }
 
 /// Dry-run ladder resolution for repair dialogs (`ResolveRefs`; SCHEMA §7.5) —
@@ -2057,6 +2200,36 @@ pub async fn list_recents(app: AppHandle) -> Result<Vec<RecentProjectDto>, ApiEr
             Ok(entries)
         }
     }
+}
+
+/// Renames a recent project's `.onecad` file on disk and its `recents.json` entry
+/// (start-screen card menu). See [`recents::rename`] for the exact rules (name
+/// validation, collision refusal).
+#[tauri::command]
+#[tracing::instrument(skip_all, fields(path = %path, new_name = %new_name), err(Display))]
+pub async fn rename_recent_project(
+    app: AppHandle,
+    path: String,
+    new_name: String,
+) -> Result<(), ApiError> {
+    recents::rename(&app, Path::new(&path), &new_name)?;
+    Ok(())
+}
+
+/// Moves a recent project's `.onecad` file to the OS trash and drops its
+/// `recents.json` entry (start-screen card menu). See [`recents::remove`].
+#[tauri::command]
+#[tracing::instrument(skip_all, fields(path = %path), err(Display))]
+pub async fn delete_recent_project(app: AppHandle, path: String) -> Result<(), ApiError> {
+    recents::remove(&app, Path::new(&path))
+}
+
+/// Reveals a recent project's `.onecad` file in the OS file manager (start-screen
+/// card menu). See [`recents::reveal`].
+#[tauri::command]
+#[tracing::instrument(skip_all, fields(path = %path), err(Display))]
+pub async fn reveal_in_file_manager(path: String) -> Result<(), ApiError> {
+    recents::reveal(Path::new(&path))
 }
 
 /// Shows a native open dialog (Rust owns the dialog; `tauri-plugin-dialog` Rust
@@ -2273,6 +2446,7 @@ pub fn emit_regen_events(app: &AppHandle, report: &RegenReport, projection: &Doc
             source_revision: report.source_revision,
             outcome: report.outcome_str().to_string(),
             message: report.failure_message(),
+            diagnostics: report.diagnostics.clone(),
             // Finding 1: a published-but-partially-failed regen carries per-record
             // failure + created/modified-body maps so a correlated apply resolves its
             // own commit precisely (never mistaking sibling republishes for success).

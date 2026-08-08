@@ -24,7 +24,9 @@ import { canEditFeatureValue, commitFeatureValue } from "./featureValueEdit";
 import { ConstraintList, isDimensionalConstraint, visibleConstraints } from "./ConstraintList";
 import { RepairPanel } from "@/features/repair/RepairPanel";
 import { suppressFeature, rollToIndex, deleteFeature } from "./historyActions";
+import { setBodyColor, setFaceColor } from "@/features/tree/treeActions";
 import { cn } from "@/ui/cn";
+import type { Rgba } from "@/ipc/types";
 import { sketchStatusText, sketchStatusSentence } from "@/features/sketch/constraintStatus";
 import { CONSTRAINT_PRESENTATION } from "@/features/sketch/constraintCatalog";
 import { DimensionInput } from "@/features/sketch/DimensionInput";
@@ -260,15 +262,28 @@ function SelectionState({
   features: FeatureMeta[];
 }) {
   const isBody = sel.kind === "body";
+  const isFace = sel.kind === "face";
+  const isEdge = sel.kind === "edge";
+  const isSketch = sel.kind === "sketch" || sel.kind === "sketchRegion";
   const sketchId = sel.kind === "sketchRegion" ? sel.sketchId : sel.id;
-  const name = bodies[sel.id]?.name ?? sketches[sketchId]?.name ?? "";
-  const statusName = isBody ? "Solid body" : sel.kind === "sketchRegion" ? "Sketch profile" : "Sketch";
+  const name = isFace || isEdge
+    ? bodies[sel.bodyId ?? ""]?.name ?? ""
+    : bodies[sel.id]?.name ?? sketches[sketchId]?.name ?? "";
+  const statusName = isBody
+    ? "Solid body"
+    : isFace
+      ? "Face"
+      : isEdge
+        ? "Edge"
+        : sel.kind === "sketchRegion"
+          ? "Sketch profile"
+          : "Sketch";
   // Body → its full lineage (Sketch 1 / Extrude / Fillet); sketch → the extrude
   // that consumed it (prototype's two hardcoded HISTORY arrays).
   const history = isBody
     ? features.slice(0, 3)
     : features.filter((f) => f.kind === "extrude").slice(0, 1);
-  const showDof = !isBody;
+  const showDof = isSketch;
   const dof = sketches[sketchId]?.dof ?? 0;
 
   return (
@@ -279,6 +294,20 @@ function SelectionState({
         <div className="mt-1 text-[12px] font-medium text-warn">
           Under-constrained · DOF {dof}
         </div>
+      )}
+
+      {isBody && (
+        <>
+          <SectionLabel className="pb-1.5 pt-4">Appearance</SectionLabel>
+          <BodyAppearanceSection bodyId={sel.id} />
+        </>
+      )}
+
+      {isFace && sel.bodyId && sel.elementId && (
+        <>
+          <SectionLabel className="pb-1.5 pt-4">Appearance</SectionLabel>
+          <FaceAppearanceSection bodyId={sel.bodyId} elementId={sel.elementId} />
+        </>
       )}
 
       <SectionLabel className="pb-1.5 pt-4">History</SectionLabel>
@@ -504,6 +533,117 @@ function SketchDimensions({ featureId }: { featureId: string }) {
       ))}
     </>
   );
+}
+
+function FaceAppearanceSection({ bodyId, elementId }: { bodyId: string; elementId: string }) {
+  const color = useDocumentStore((s) => s.bodies[bodyId]?.faceColors?.[elementId]);
+  const [hex, setHex] = useState(() => rgbaToHex(color));
+  useEffect(() => setHex(rgbaToHex(color)), [color]);
+  const alpha = color?.[3] ?? 255;
+  const alphaPct = Math.round((alpha / 255) * 100);
+
+  return (
+    <div>
+      <div className="flex items-center gap-2">
+        <input
+          type="color"
+          value={hex}
+          onChange={(e) =>
+            void setFaceColor(bodyId, elementId, hexToRgba(e.target.value, alpha / 255))
+          }
+          className="h-8 w-8 cursor-pointer rounded border-0 bg-transparent p-0"
+          aria-label="Face color"
+        />
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={0.01}
+          value={alpha / 255}
+          onChange={(e) => {
+            const a = Math.round(Number(e.target.value) * 255);
+            const base = color ? color.slice(0, 3) : hexToRgb(hex);
+            void setFaceColor(bodyId, elementId, [base[0], base[1], base[2], a]);
+          }}
+          className="flex-1"
+          aria-label="Face opacity"
+        />
+        <span className="w-8 text-right text-[11px] text-ink-5">{alphaPct}%</span>
+      </div>
+      {color && (
+        <button
+          type="button"
+          onClick={() => void setFaceColor(bodyId, elementId, null)}
+          className="mt-2 text-[11px] text-ink-5 hover:text-ink"
+        >
+          Reset to default
+        </button>
+      )}
+    </div>
+  );
+}
+
+function BodyAppearanceSection({ bodyId }: { bodyId: string }) {
+  const color = useDocumentStore((s) => s.bodies[bodyId]?.color);
+  const [hex, setHex] = useState(() => rgbaToHex(color));
+  useEffect(() => setHex(rgbaToHex(color)), [color]);
+  const alpha = color?.[3] ?? 255;
+  const alphaPct = Math.round((alpha / 255) * 100);
+
+  return (
+    <div>
+      <div className="flex items-center gap-2">
+        <input
+          type="color"
+          value={hex}
+          onChange={(e) => void setBodyColor(bodyId, hexToRgba(e.target.value, alpha / 255))}
+          className="h-8 w-8 cursor-pointer rounded border-0 bg-transparent p-0"
+          aria-label="Body color"
+        />
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={0.01}
+          value={alpha / 255}
+          onChange={(e) => {
+            const a = Math.round(Number(e.target.value) * 255);
+            const base = color ? color.slice(0, 3) : hexToRgb(hex);
+            void setBodyColor(bodyId, [base[0], base[1], base[2], a]);
+          }}
+          className="flex-1"
+          aria-label="Body opacity"
+        />
+        <span className="w-8 text-right text-[11px] text-ink-5">{alphaPct}%</span>
+      </div>
+      {color && (
+        <button
+          type="button"
+          onClick={() => void setBodyColor(bodyId, null)}
+          className="mt-2 text-[11px] text-ink-5 hover:text-ink"
+        >
+          Reset to default
+        </button>
+      )}
+    </div>
+  );
+}
+
+function rgbaToHex(c: Rgba | undefined): string {
+  if (!c) return "#a9aeb6";
+  const toHex = (n: number) => Math.max(0, Math.min(255, n)).toString(16).padStart(2, "0");
+  return `#${toHex(c[0])}${toHex(c[1])}${toHex(c[2])}`;
+}
+
+function hexToRgb(hex: string): [number, number, number] {
+  const normalized = hex.replace("#", "");
+  const bigint = Number.parseInt(normalized.length === 3 ? normalized.split("").map((c) => c + c).join("") : normalized, 16);
+  return [(bigint >> 16) & 255, (bigint >> 8) & 255, bigint & 255];
+}
+
+function hexToRgba(hex: string, alpha01: number): Rgba {
+  const [r, g, b] = hexToRgb(hex);
+  return [r, g, b, Math.round(Math.max(0, Math.min(1, alpha01)) * 255)];
 }
 
 function SketchState({

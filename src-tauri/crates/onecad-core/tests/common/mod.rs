@@ -185,6 +185,7 @@ pub fn op_fillet() -> Operation {
         edge_ids: vec![elem_e14(), elem_e15()],
         edges: vec![],
         chain_tangent_edges: true,
+        tangent_closure_version: None,
         extra: Default::default(),
     }))
 }
@@ -196,6 +197,7 @@ pub fn op_chamfer() -> Operation {
         edge_ids: vec![elem_e14()],
         edges: vec![],
         chain_tangent_edges: true,
+        tangent_closure_version: None,
         extra: Default::default(),
     }))
 }
@@ -235,6 +237,7 @@ pub fn op_fillet_with_edge_refs() -> Operation {
             intent_only,
         ],
         chain_tangent_edges: true,
+        tangent_closure_version: None,
         extra: Default::default(),
     }))
 }

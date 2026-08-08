@@ -30,6 +30,10 @@ export interface BodyMeta {
   id: string;
   name: string;
   visible: boolean;
+  /** User-authored body color as `[r, g, b, a]`. Absent = theme neutral body fill. */
+  color?: [number, number, number, number];
+  /** User-authored face colors keyed by persistent `ElementId`. */
+  faceColors?: Record<string, [number, number, number, number]>;
 }
 
 /** 'under' = under-constrained, 'over' = over-constrained (mock statuses). */

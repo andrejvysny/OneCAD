@@ -32,7 +32,9 @@
  */
 import * as THREE from "three";
 import { palette } from "../engine/palette";
+import { TopoIndex } from "./faceRangeIndex";
 import type { BodyMeshView } from "./parseMeshPayload";
+import type { Rgba } from "@/ipc/types";
 
 /** Alpha 0 = "unset" (mesh_format.md §4 type 12). */
 const UNSET_ALPHA = 0;
@@ -45,6 +47,22 @@ export function hasAuthoredFaceColors(faceColors: Uint8Array | null): boolean {
     if (faceColors[i] !== UNSET_ALPHA) return true;
   }
   return false;
+}
+
+/** Convert an sRGB+A tuple to a THREE.Color in linear working space. */
+export function rgbaToLinear(c: Rgba): THREE.Color {
+  return new THREE.Color().setRGB(c[0] / U8_MAX, c[1] / U8_MAX, c[2] / U8_MAX, THREE.SRGBColorSpace);
+}
+
+/** True when the mesh needs de-indexed vertex colors (authored/import face colors or a body color). */
+export function needsVertexColors(
+  view: BodyMeshView,
+  bodyColor?: Rgba,
+  authoredFaceColors?: Map<string, Rgba>,
+): boolean {
+  return (
+    hasAuthoredFaceColors(view.faceColors) || bodyColor !== undefined || (authoredFaceColors?.size ?? 0) > 0
+  );
 }
 
 /**
@@ -78,15 +96,21 @@ export function deIndexTriangles(view: BodyMeshView): {
 /**
  * Bake the per-vertex colors for a DE-INDEXED geometry: `3 · 3·T` floats in
  * three's linear working space. Unset faces (and any triangle no face range
- * claims) get the CURRENT body-fill token, which is why this is re-runnable —
- * `target`, when it is the right length, is rewritten in place so a theme flip
- * costs no allocation and no attribute swap.
+ * claims) fall back to `bodyColor` when present, else the CURRENT body-fill
+ * token. Authored face colors from the mesh override `bodyColor`. The function
+ * is re-runnable — `target`, when it is the right length, is rewritten in place
+ * so a theme flip costs no allocation and no attribute swap.
  */
-export function bakeFaceColors(view: BodyMeshView, target?: Float32Array): Float32Array {
+export function bakeFaceColors(
+  view: BodyMeshView,
+  bodyColor?: Rgba,
+  authoredFaceColors?: Map<string, Rgba>,
+  target?: Float32Array,
+): Float32Array {
   const floats = view.indices.length * 3;
   const out = target && target.length === floats ? target : new Float32Array(floats);
 
-  const fallback = palette.bodyNeutral(); // already working (linear) space
+  const fallback = bodyColor ? rgbaToLinear(bodyColor) : palette.bodyNeutral();
   for (let i = 0; i < floats; i += 3) {
     out[i] = fallback.r;
     out[i + 1] = fallback.g;
@@ -94,17 +118,24 @@ export function bakeFaceColors(view: BodyMeshView, target?: Float32Array): Float
   }
 
   const fc = view.faceColors;
-  if (!fc) return out;
-
   const c = new THREE.Color();
+  const topo = new TopoIndex(view.faceRanges, view.faceCount, view.faceIdOffsets, view.faceIdChars);
+
   for (let f = 0; f < view.faceCount; f++) {
-    if (fc[f * 4 + 3] === UNSET_ALPHA) continue; // unset ⇒ keep the body token
-    c.setRGB(
-      fc[f * 4] / U8_MAX,
-      fc[f * 4 + 1] / U8_MAX,
-      fc[f * 4 + 2] / U8_MAX,
-      THREE.SRGBColorSpace,
-    );
+    const id = topo.idAt(f);
+    const authored = id ? authoredFaceColors?.get(id) : undefined;
+    if (authored) {
+      c.copy(rgbaToLinear(authored));
+    } else if (fc && fc[f * 4 + 3] !== UNSET_ALPHA) {
+      c.setRGB(
+        fc[f * 4] / U8_MAX,
+        fc[f * 4 + 1] / U8_MAX,
+        fc[f * 4 + 2] / U8_MAX,
+        THREE.SRGBColorSpace,
+      );
+    } else {
+      continue; // unset ⇒ keep fallback
+    }
     const firstTri = view.faceRanges[f * 2];
     const triCount = view.faceRanges[f * 2 + 1];
     for (let t = firstTri; t < firstTri + triCount; t++) {

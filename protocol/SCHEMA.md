@@ -359,7 +359,7 @@ Worker → Rust:
   "result": {
     "protocolVersion": 1,
     "workerVersion": "0.1.0",
-    "occt": { "version": "7.9.3", "fingerprint": "9a1c33f0e7b24d10" },
+    "occt": { "version": "8.0.1", "fingerprint": "9a1c33f0e7b24d10" },
     "quantizationVersion": 1,
     "solverPolicyVersion": 1,
     "capabilities": [
@@ -377,8 +377,10 @@ Rust verifies `protocolVersion == 1` and applies the fingerprint policy
 deterministic rebuild → read-only on failure. Rust then drives
 [`OpenSession`](#71-lifecycle).
 
-- `occt.fingerprint`: 64-bit hash of `{occtVersion, build flags, relevant
-  algorithm knobs}`. Governs BREP/checkpoint cache compatibility.
+- `occt.fingerprint`: 64-bit hash of `{occtVersion, sourceCommit,
+  normalizedBuildOptions, buildId, kernelPolicyVersion}`. Governs
+  BREP/checkpoint cache compatibility. Per-operation `occtOptions` remain part
+  of operation/history hashing and are not duplicated into this global value.
 - `quantizationVersion`: descriptor quantization scheme (currently `1` = `1e-6`
   quantization, FNV-1a 64-bit; see [§10](#10-resolution-ladder)).
 - `solverPolicyVersion`: PlaneGCS policy/tuning revision.
@@ -576,6 +578,14 @@ Per-step `event`s (`event:"planStep"`), one per executed step:
 }
 ```
 
+`diagnostics[]` is additive structured evidence. Required fields are
+`severity` (`"info" | "warning" | "error"`), `code` (≤128 bytes), and
+`message` (≤4096 bytes). Optional `stage` is ≤64 bytes. Optional `evidence` is a
+JSON object whose encoded size is ≤64 KiB; producers also bound every contained
+array. Readers ignore and log malformed diagnostic entries or optional fields;
+malformed diagnostics never invalidate an otherwise valid frame. At most 64
+diagnostics are consumed per carrier.
+
 - `elementMapDelta.added` / `.relabeled` entries carry a **REQUIRED `bodyId`**:
   `{ elementId, topoKey, kind, bodyId }`. A single step can create/modify several
   bodies, so each element names its owning body **explicitly** — Rust folds the
@@ -663,7 +673,12 @@ Terminal resp — `PlanPrepared`:
   "perStepResults": [
     { "stepIndex": 0, "status": "ok",          "bodyIds": ["body_3"] },
     { "stepIndex": 1, "status": "ok",          "bodyIds": ["body_3"] },
-    { "stepIndex": 6, "status": "needsRepair", "refCount": 1 }
+    { "stepIndex": 6, "status": "needsRepair", "refCount": 1 },
+    { "stepIndex": 7, "status": "opFailed", "message": "Fillet failed",
+      "diagnostics": [
+        { "severity": "error", "code": "FILLET_WALKING_FAILED",
+          "message": "Fillet failed", "stage": "build", "evidence": {} }
+      ] }
   ],
   "historyPrefixHash": "9c4d…",
 
@@ -1038,17 +1053,31 @@ chamfer distance).
 
 ```json
 // Fillet params
-{ "mode": "Fillet", "radius": 2.0, "edgeIds": ["e:14", "e:15"], "chainTangentEdges": true }
+{ "mode": "Fillet", "radius": 2.0, "edgeIds": ["el_…14", "el_…15"],
+  "chainTangentEdges": true, "tangentClosureVersion": 1 }
 // Chamfer params (equal-leg)
-{ "mode": "Chamfer", "radius": 1.0, "edgeIds": ["e:14"], "chainTangentEdges": true }
+{ "mode": "Chamfer", "radius": 1.0, "edgeIds": ["el_…14"],
+  "chainTangentEdges": true, "tangentClosureVersion": 1 }
 // Chamfer params (two-distance, 2026-08-03 — Chamfer only, optional + skip-none)
-{ "mode": "Chamfer", "radius": 1.0, "distance2": 2.5, "edgeIds": ["e:14"], "chainTangentEdges": true }
+{ "mode": "Chamfer", "radius": 1.0, "distance2": 2.5, "edgeIds": ["el_…14"],
+  "chainTangentEdges": true, "tangentClosureVersion": 1 }
 ```
 
 `edgeIds` entries are TopoKeys (snapshot-scoped) or `ElementId`s; the worker
 resolves each through the ladder ([§10](#10-resolution-ladder)). The `inputs[]`
 array carries the corresponding semantic refs (one per edge) supplying descriptor
 + anchor evidence.
+
+Fresh records store the full OCCT-authoritative contour closure returned by
+`PrepareEdgeOp`, use Rust-minted `ElementId`s in `edgeIds`, and carry
+`tangentClosureVersion:1`. Its absence identifies a legacy record: regeneration
+keeps the historical seed-only behavior, and re-edit MUST NOT add the field.
+Version 1 regeneration requires the current contour union to equal the stored
+closure exactly, deduplicates the build to one seed per contour, and refuses
+drift with diagnostic `EDGE_OP_TANGENT_CLOSURE_CHANGED` (top-level `OP_FAILED`,
+never `NeedsRepair`). Fillet⇄Chamfer swaps preserve the stored closure and
+version. `chainTangentEdges:false` means exact picks; authoring refuses
+`chainMismatch` when OCCT would expand beyond them.
 
 - `distance2` (Chamfer only, optional, skip-none): asymmetric two-distance
   chamfer — `radius` is the distance on the FIRST adjacent face of each edge
@@ -1060,6 +1089,22 @@ array carries the corresponding semantic refs (one per edge) supplying descripto
   Fillet⇄Chamfer `updateOperationParams` swap requires field-identical params —
   a Chamfer carrying `distance2` is NOT flippable to Fillet (the edit is
   rejected with the standard allow-list reason) until `distance2` is cleared.
+
+Fillet execution is constant-radius only. `radius` MUST be finite and at least
+`1e-3` mm. The worker MUST NOT clamp it or retry with a different radius. OCCT
+contours are authoritative: duplicate requested edges on one contour are built
+once, and every requested edge MUST belong to a known contour. A successful
+contour MUST retain a constant law equal to the requested radius and publish
+generated blend-face evidence.
+
+Before publication, Fillet rejects null/invalid/non-single-solid/non-positive
+results, self-interference, OCCT partial results, and `BadShape`. Shape audit
+evidence records solid count, volume, self-interference count, and per-kind
+input/output maximum tolerances. Tolerances are measured only in this milestone;
+they are not mutated and no uncalibrated tolerance-growth rejection applies.
+`Simulate()`/`Sect()` are characterization tools only and never production
+acceptance gates. Kernel refusals retain top-level `OP_FAILED` or
+`GEOMETRY_INVALID` and attach bounded `FILLET_*` diagnostics through §8.
 
 **Hole** (`op.hole`) — machined hole on a planar face: simple / counterbore /
 countersink, parametric as ONE feature. Added 2026-08-03 (WP-C T3).
@@ -1765,6 +1810,10 @@ session head and returns the resulting bodies' MESH1. Nothing is committed.
   `GEOMETRY_INVALID`), never partial mutation. Callers may retain the last good
   mesh for a transient geometric miss, but structural binding failures must be
   surfaced and must disable commit.
+- A failed preview MAY carry the same bounded `diagnostics[]` as its candidate
+  `ExecutePlan` step under `error.detail.diagnostics`. The arrays MUST be
+  byte-equivalent for the same candidate. `error.code` remains the §8 taxonomy
+  code; operation-specific `FILLET_*` values are diagnostic codes only.
 - **Lane.** This is kernel-lane work; it shares the OCCT single-writer thread
   with `ExecutePlan`. It deliberately does NOT ride the solver lane, whose
   latest-wins coalescing is specific to `SolveDrag`. Callers are expected to bound
@@ -1921,6 +1970,45 @@ byte-identical across fresh worker processes. The emission order is normative:
 
 **Lane.** Kernel lane, alongside `ExecutePlan`/`PreviewOp`. It takes no locks
 beyond the brief head copy, so it does not block an in-flight regen.
+
+#### PrepareEdgeOp
+
+Read-only, snapshot-fenced Fillet/Chamfer authoring handshake. OCCT contour
+membership is execution authority; the worker first verifies the shared
+`EdgeChainer` gives the same closure, then returns deterministic edge evidence.
+It mints no ids. Rust batch-promotes the entire accepted response atomically;
+partial promotion fails the arm before any id/cache mutation. A fresh closure
+must receive a successful final exact `PreviewOp` response before commit; timeout
+is refusal, not approval.
+
+The JSON below is the worker result. The Tauri command promotes that exact batch
+against the echoed `snapshotId` before returning it to the frontend and adds
+`elementId`, `bodyId`, and `kind:"edge"` to every accepted `edges[]` entry. A
+head change between preparation and promotion rejects the whole command.
+
+```json
+// req.args
+{ "snapshotId": 5012,
+  "mode": "Fillet",
+  "pickedEdges": [ { "bodyId": "body_3", "topoKey": "e:4" } ],
+  "chainTangentEdges": true }
+// accepted result
+{ "snapshotId": 5012,
+  "targetBodyId": "body_3",
+  "edges": [
+    { "topoKey": "e:4", "picked": true,
+      "anchor": { "worldPoint": [1.0, 2.0, 3.0] }, "descriptor": { } },
+    { "topoKey": "e:5", "picked": false,
+      "anchor": { "worldPoint": [2.0, 2.0, 3.0] }, "descriptor": { } }
+  ],
+  "refusal": null }
+```
+
+- Each pick uses exactly one address: `{bodyId,topoKey}` or `{elementId}`.
+- Refusals are successful answers with empty closure: `crossBody`,
+  `unsupportedEdge`, or `chainMismatch`; they carry `{code,message,edges}`.
+- Missing/stale `snapshotId` refuses; identical head + request gives a
+  byte-identical ordinal-ordered response.
 
 #### PrepareOffsetFace
 
@@ -2131,6 +2219,10 @@ Errors are returned in a terminal `resp` with `ok:false` and an `error` object:
 ```json
 { "code": "OP_FAILED", "message": "human-readable", "detail": { … }, "retriable": false }
 ```
+
+For recoverable kernel failures, `detail.diagnostics` MAY carry the bounded
+structured array defined in §7.2. It is optional for compatibility. Readers
+ignore malformed optional detail while retaining the valid top-level error.
 
 | Class | `code` | Session effect | Recovery |
 |-------|--------|----------------|----------|
@@ -2417,6 +2509,31 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-07 — §7.3/§7.6 frozen Fillet/Chamfer tangent intent** (F2,
+  cross-track sign-off in one repository). Added read-only `PrepareEdgeOp`,
+  optional `tangentClosureVersion:1`, atomic batch promotion, exact-preview
+  commit, contour deduplication, and structured closure-drift refusal. Legacy
+  records remain byte-shape stable and execute seed-only behavior.
+
+- **2026-08-07 — §7.3 constant Fillet execution hardened** (F1,
+  cross-track sign-off in one repository). Constant-law assignment, contour
+  deduplication, partial-result rejection, structural/self-interference audit,
+  history-safe builder lifetime, and bounded `FILLET_*` evidence are now
+  normative. No wire shape changed; no fixture bump required.
+
+- **2026-08-07 — §6 OCCT fingerprint input made reproducible** (K0,
+  cross-track sign-off in one repository). Primary worker builds require exact
+  OCCT 8.0.1 from a caller-selected artifact. Fingerprints now include OCCT
+  version, pinned source commit, normalized build options, build id, and OneCAD
+  kernel-policy version. Per-operation `occtOptions` remain history-hashed.
+  Existing wire shape is unchanged; no fixture bump required.
+
+- **2026-08-07 — §7.2/§7.6/§8 structured failure diagnostics** (D1,
+  cross-track sign-off in one repository). Failed `perStepResults[]` and preview
+  `error.detail` may carry the same bounded diagnostic array; top-level error
+  codes remain unchanged. Additive optional fields; legacy readers and missing
+  arrays remain compatible. No canonical fixture bump required.
 
 - **2026-08-06 — §7.3 NEW op `OffsetFace` (`op.offsetFace`) + §7.6 NEW read-only
   verb `PrepareOffsetFace`.** Cross-track sign-off recorded as

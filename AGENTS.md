@@ -1,85 +1,44 @@
-# AGENTS.md — OneCAD-Tauri
+# Repository Guidelines
 
-High-signal guide for OpenCode sessions. Full architecture and correctness rules live in `CLAUDE.md`; live state and gate tracker in `CURRENT_STATE.md` and `TODO.md`.
+## Project Structure
 
-## Toolchain
+OneCAD is a four-layer parametric CAD application. `src/` contains the React 19, Zustand, and Three.js frontend; tests are usually colocated as `*.test.ts(x)`. `src-tauri/` is both the Tauri app and Rust workspace; pure domain crates live in `src-tauri/crates/`. `worker/` is the C++20 OCCT sidecar and its CTest suite. `protocol/SCHEMA.md` and `protocol/mesh_format.md` define the OCW1/MESH1 contract. Playwright specs are in `e2e/`; `corpus/` is a read-only legacy correctness oracle.
 
-- Use **bun** (`bun.lock`). `package-lock.json` is stale — ignore it.
-- Rust workspace root is `src-tauri/`, not repo root. Run cargo commands from there.
-- macOS CI uses Homebrew OCCT 7.9.3 (`brew install opencascade boost eigen nlohmann-json`). apt's OCCT 7.6.3 is too old; the Linux dev container uses conda-forge OCCT at `/opt/occt793`.
-- No `opencode.json` exists; follow this file plus `CLAUDE.md`.
+Read `CURRENT_STATE.md` and `TODO.md` before changing code. Record gate results and follow-ups in `TODO.md`; preserve unrelated worktree changes.
 
-## Critical build order
+## Build, Test, and Development
 
-1. Build/stage the C++ worker **first**:
-   ```bash
-   scripts/build-worker.sh Release   # default
-   ```
-   This copies `worker/build/onecad-worker` → `src-tauri/binaries/onecad-worker-<rust-host-triple>`.
-2. Then run frontend or Rust commands. Tauri's `bundle.externalBin` makes the build script require the staged sidecar; **any cargo command that compiles the app crate (clippy, test, build) fails without it**.
+Use Bun; `package-lock.json` is stale. Common frontend commands are:
 
-## Everyday commands
-
-### Frontend
 ```bash
 bun install
-bun run dev          # Vite, port 1420 strictPort
-bun run build        # tsc && vite build
-bun run test         # vitest run
-bunx vitest run src/tools/sketch/snapEngine.test.ts
-bunx vitest run -t "test name"
+bun run dev       # Vite on port 1420
+bun run build     # TypeScript check and production bundle
+bun run test      # Vitest
+bun run e2e       # Playwright mock-client lane
 ```
 
-### e2e (mock lane only — no Tauri/C++)
-```bash
-bun run e2e
-bunx playwright test e2e/line.spec.ts
-```
-- Default port is **4177** (`E2E_PORT`), deliberately not 1420.
-- SwiftShader launch flags are load-bearing; without WebGL2 the `ViewportEngine` never starts and no drawing flow runs.
+Build and stage the worker before running Cargo commands that compile the app:
 
-### C++ worker
 ```bash
 scripts/build-worker.sh Release
 ctest --test-dir worker/build --output-on-failure
-ctest --test-dir worker/build -R test_wp6_extrude
-```
-
-### Rust (run from `src-tauri/`)
-```bash
+cd src-tauri
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ONECAD_WORKER_PATH=$PWD/../worker/build/onecad-worker ONECAD_REQUIRE_WORKER=1 cargo test --workspace
-cargo test --test m2_gate
 ```
-- `ONECAD_REQUIRE_WORKER=1` turns a missing worker into a hard failure; use it whenever the worker-backed gates (`m2_gate`, `wire_contract`, `topology_rebind`, `sketch_*`, etc.) must actually run.
-- Without it, resolution falls back to `../worker/build/onecad-worker` (`worker::DEV_WORKER_PATH`).
 
-### Headless replay CLI
-```bash
-cargo run -p onecad-regen -- path/to/doc.onecad
-```
-Replays a saved container through the same `DocumentRuntime`/`WorkerManager` path as the app.
+The staging step is required because Tauri bundles the worker as an external sidecar. Use `ONECAD_REQUIRE_WORKER=1` for worker-backed gates so a missing binary cannot produce a skipped pass.
 
-## Architecture seams
+## Coding and Contract Rules
 
-- 4 layers: `src/` React/Three.js frontend → `src-tauri/src/` Tauri command wrappers → `src-tauri/crates/onecad-core/` pure domain → `worker/` C++20 OCCT sidecar. OCW1 frames over stdio; canonical contract is `protocol/SCHEMA.md`.
-- `src/ipc/client.ts` (`CadClient`) is the **single backend seam**. `mockClient` runs in browser/vitest/Playwright; `tauriClient` is selected by `__TAURI_INTERNALS__`. Keep additions append-only so both impls stay in sync.
-- `src/ipc/localSolver.ts` is shared by both clients for sketch solve and drag preview; only `commit` differs.
-- `src/ipc/angleUnits.ts` is the single source for sketch deg↔rad conversions; three marshalling sites depend on it.
-- `src/viewport/engine/` is an imperative Three.js engine, no react-three-fiber. Hard invariant: **world is Z-up, right-handed**; never rotate `scene`/`bodiesRoot`/any root group to "fix" camera orientation.
-- `src/styles/tokens.css` is the sole color source. No raw hex in `*.ts`/`*.tsx` (including test fallbacks). Verify with:
-  ```bash
-  grep -rn '#[0-9a-fA-F]\{6\}' src --include='*.ts' --include='*.tsx'
-  ```
+Use strict TypeScript, functional React components, and existing naming/style patterns. Keep `src/styles/tokens.css` as the sole color source: do not add raw hex literals to TypeScript/TSX. The viewport is imperative Three.js and permanently Z-up/right-handed; do not rotate root scene groups to compensate for camera issues.
 
-## Workflow conventions
+Treat protocol documents as normative. Wire changes require compatible Rust/C++ updates, fixtures, and cross-track sign-off. Worker `stdout` carries frames only; write logs to `stderr`.
 
-- Read `CURRENT_STATE.md` and `TODO.md` before planning any change.
-- `TODO.md` records gate outcomes; update it as part of the work, not after.
-- Commits happen at gate boundaries only.
-- `corpus/` is a read-only oracle from `OneCAD-CPP` at frozen commit `b4ddccc`; never edit it.
+## Tests, Commits, and Reviews
 
-## Knowledge graph
+Run the smallest relevant suite first, then appropriate frontend, worker, and Rust gates. Add focused regression tests beside changed code; use Playwright for browser flows. CI runs these lanes on macOS.
 
-- `graphify-out/` exists (gitignored). Prefer `graphify query "..."`, `graphify path "A" "B"`, or `graphify explain "Name"` before raw grep. Update after code changes with `graphify update .`.
+Use concise imperative commits, commonly `feat(scope): description`, `fix: description`, or `docs: description`. Commit only at a completed gate. Do not auto-commit, push, or pull. PRs should describe behavior, tests, protocol/fixture implications, and screenshots for UI changes; link the relevant issue when available.

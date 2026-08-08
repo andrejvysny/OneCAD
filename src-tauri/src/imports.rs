@@ -301,10 +301,13 @@ pub async fn prepare_import(
     // metadata and the canonical replay bytes the record will use (SCHEMA §7.8).
     let inspection: StepInspection = importer.inspect_step(path, true).await?;
     if inspection.solid_count == 0 {
-        return Err(ApiError::OpFailed(format!(
-            "no solid recovered from {} — nothing to import",
-            path.display()
-        )));
+        return Err(ApiError::OpFailed {
+            message: format!(
+                "no solid recovered from {} — nothing to import",
+                path.display()
+            ),
+            diagnostics: Vec::new(),
+        });
     }
     // The WORKER names its preferred replay codec; Rust does not hardcode one. An
     // unknown value is a hard stop rather than a fallback: authoring a record under

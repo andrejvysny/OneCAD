@@ -1,0 +1,506 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onecad.dev/schemas/kernelbench/result-v1.schema.json",
+  "title": "OneCAD kernelbench result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "caseId",
+    "generator",
+    "backend",
+    "kernel",
+    "modeler",
+    "expectedDomain",
+    "verdict",
+    "executionState",
+    "operationState",
+    "failureClass",
+    "diagnostics",
+    "inputAudit",
+    "outputAudit",
+    "validators",
+    "selectionEvidence",
+    "timing",
+    "resource",
+    "metamorph",
+    "search",
+    "shapeSignature",
+    "artifacts",
+    "inputDigest",
+    "normalizedDigest"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "caseId": { "$ref": "#/$defs/safeId" },
+    "generator": { "$ref": "#/$defs/generator" },
+    "backend": { "enum": ["raw-occt", "onecad"] },
+    "kernel": { "$ref": "#/$defs/identity" },
+    "modeler": { "$ref": "#/$defs/identity" },
+    "expectedDomain": {
+      "enum": ["supported", "expectedLimit", "exploratory", "outsideProductDomain"]
+    },
+    "verdict": { "enum": ["pass", "fail", "characterization"] },
+    "executionState": {
+      "enum": [
+        "completed",
+        "exception",
+        "crash",
+        "timeout",
+        "invalidRequest",
+        "outputOverflow",
+        "memoryLimit",
+        "environmentError"
+      ]
+    },
+    "operationState": {
+      "enum": ["success", "rejected", "partial", "badShape", "notRun"]
+    },
+    "failureClass": {
+      "enum": [
+        "none",
+        "schema",
+        "environment",
+        "exception",
+        "crash",
+        "timeout",
+        "outputOverflow",
+        "memoryLimit",
+        "kernelRejected",
+        "partialResult",
+        "badShape",
+        "auditFailed",
+        "semanticFailed",
+        "nondeterministic",
+        "publicationInvalid",
+        "inputMismatch",
+        "internal"
+      ]
+    },
+    "diagnostics": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/diagnostic" }
+    },
+    "inputAudit": { "$ref": "#/$defs/nullableAudit" },
+    "outputAudit": { "$ref": "#/$defs/nullableAudit" },
+    "validators": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/validatorResult" }
+    },
+    "selectionEvidence": {
+      "type": "array",
+      "maxItems": 128,
+      "items": { "$ref": "#/$defs/selection" }
+    },
+    "timing": { "$ref": "#/$defs/timing" },
+    "resource": { "$ref": "#/$defs/resource" },
+    "metamorph": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/metamorphEvidence" }
+      ]
+    },
+    "search": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/searchEvidence" }
+      ]
+    },
+    "shapeSignature": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/shapeSignature" }
+      ]
+    },
+    "artifacts": { "$ref": "#/$defs/artifacts" },
+    "inputDigest": { "$ref": "#/$defs/digest" },
+    "normalizedDigest": { "$ref": "#/$defs/digest" },
+    "replay": { "$ref": "#/$defs/replayEvidence" },
+    "differential": { "$ref": "#/$defs/differentialEvidence" },
+    "campaignVariant": { "$ref": "#/$defs/campaignVariant" }
+  },
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "semanticId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "finiteNumber": {
+      "type": "number",
+      "minimum": -1000000000000000,
+      "maximum": 1000000000000000
+    },
+    "nonNegativeNumber": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1000000000000000
+    },
+    "generator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "seed"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "version": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "seed": { "type": "string", "pattern": "^[0-9a-f]{16}$" }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "buildId"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "buildId": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "phase", "message"],
+      "properties": {
+        "code": { "$ref": "#/$defs/safeId" },
+        "phase": {
+          "enum": ["request", "generation", "selection", "operation", "audit", "validation", "supervisor"]
+        },
+        "message": { "type": "string", "maxLength": 4096 }
+      }
+    },
+    "nullableAudit": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/audit" }
+      ]
+    },
+    "audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "productionAudit",
+        "exactValid",
+        "selfInterferenceFree",
+        "closedManifold",
+        "counts",
+        "massProperties",
+        "bounds",
+        "tolerances",
+        "microTopology"
+      ],
+      "properties": {
+        "productionAudit": { "enum": ["pass", "fail", "notRun"] },
+        "exactValid": { "type": "boolean" },
+        "selfInterferenceFree": { "type": "boolean" },
+        "closedManifold": { "type": "boolean" },
+        "counts": { "$ref": "#/$defs/topologyCounts" },
+        "massProperties": { "$ref": "#/$defs/massProperties" },
+        "bounds": { "$ref": "#/$defs/bounds" },
+        "tolerances": { "$ref": "#/$defs/tolerances" },
+        "microTopology": { "$ref": "#/$defs/microTopology" }
+      }
+    },
+    "topologyCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["solids", "shells", "faces", "edges", "vertices"],
+      "properties": {
+        "solids": { "$ref": "#/$defs/count" },
+        "shells": { "$ref": "#/$defs/count" },
+        "faces": { "$ref": "#/$defs/count" },
+        "edges": { "$ref": "#/$defs/count" },
+        "vertices": { "$ref": "#/$defs/count" }
+      }
+    },
+    "count": { "type": "integer", "minimum": 0, "maximum": 10000000 },
+    "vector3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": { "$ref": "#/$defs/finiteNumber" }
+    },
+    "massProperties": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["volume", "area", "centroid", "inertia"],
+      "properties": {
+        "volume": { "$ref": "#/$defs/nonNegativeNumber" },
+        "area": { "$ref": "#/$defs/nonNegativeNumber" },
+        "centroid": { "$ref": "#/$defs/vector3" },
+        "inertia": {
+          "type": "array",
+          "minItems": 9,
+          "maxItems": 9,
+          "items": { "$ref": "#/$defs/finiteNumber" }
+        }
+      }
+    },
+    "bounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minimum", "maximum", "diagonal"],
+      "properties": {
+        "minimum": { "$ref": "#/$defs/vector3" },
+        "maximum": { "$ref": "#/$defs/vector3" },
+        "diagonal": { "$ref": "#/$defs/nonNegativeNumber" }
+      }
+    },
+    "tolerances": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vertex", "edge", "face"],
+      "properties": {
+        "vertex": { "$ref": "#/$defs/distribution" },
+        "edge": { "$ref": "#/$defs/distribution" },
+        "face": { "$ref": "#/$defs/distribution" }
+      }
+    },
+    "distribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "maximum", "mean", "p95"],
+      "properties": {
+        "count": { "$ref": "#/$defs/count" },
+        "maximum": { "$ref": "#/$defs/nonNegativeNumber" },
+        "mean": { "$ref": "#/$defs/nonNegativeNumber" },
+        "p95": { "$ref": "#/$defs/nonNegativeNumber" }
+      }
+    },
+    "microTopology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["microEdgeCount", "minimumEdgeRatio", "sliverFaceCount", "minimumFaceRatio"],
+      "properties": {
+        "microEdgeCount": { "$ref": "#/$defs/count" },
+        "minimumEdgeRatio": { "$ref": "#/$defs/nonNegativeNumber" },
+        "sliverFaceCount": { "$ref": "#/$defs/count" },
+        "minimumFaceRatio": { "$ref": "#/$defs/nonNegativeNumber" }
+      }
+    },
+    "validatorResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "required", "status", "metrics", "diagnostics"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/semanticId" },
+        "required": { "type": "boolean" },
+        "status": { "enum": ["pass", "fail", "notApplicable", "notRun"] },
+        "metrics": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/metric" }
+        },
+        "diagnostics": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/diagnostic" }
+        }
+      }
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value"],
+      "properties": {
+        "name": { "$ref": "#/$defs/semanticId" },
+        "value": { "$ref": "#/$defs/finiteNumber" },
+        "unit": { "type": "string", "maxLength": 32 }
+      }
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provenance", "topologyRole", "anchor", "surface", "adjacency"],
+      "properties": {
+        "provenance": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "topologyRole": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "anchor": { "$ref": "#/$defs/vector3" },
+        "surface": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "adjacency": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "type": "string", "maxLength": 128 }
+        }
+      }
+    },
+    "timing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["wallMs", "operationMs", "auditMs"],
+      "properties": {
+        "wallMs": { "$ref": "#/$defs/nonNegativeNumber" },
+        "operationMs": { "$ref": "#/$defs/nonNegativeNumber" },
+        "auditMs": { "$ref": "#/$defs/nonNegativeNumber" }
+      }
+    },
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["peakRssBytes", "exitCode", "signal", "stderrTruncated"],
+      "properties": {
+        "peakRssBytes": { "type": ["integer", "null"], "minimum": 0 },
+        "exitCode": { "type": ["integer", "null"], "minimum": 0, "maximum": 255 },
+        "signal": { "type": ["integer", "null"], "minimum": 1, "maximum": 255 },
+        "stderrTruncated": { "type": "boolean" }
+      }
+    },
+    "metamorphEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["variant", "status", "normalizedPropertiesMatch", "semanticEvidenceMatch", "surfaceSamplesMatch", "pointClassificationMatch"],
+      "properties": {
+        "variant": { "$ref": "#/$defs/safeId" },
+        "status": { "enum": ["pass", "fail", "notRun"] },
+        "normalizedPropertiesMatch": { "type": "boolean" },
+        "semanticEvidenceMatch": { "type": "boolean" },
+        "surfaceSamplesMatch": { "type": "boolean" },
+        "pointClassificationMatch": { "type": "boolean" }
+      }
+    },
+    "shapeSignature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rotationCenter", "faceSamples", "pointClassifications"],
+      "properties": {
+        "rotationCenter": { "$ref": "#/$defs/vector3" },
+        "faceSamples": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/faceSample" }
+        },
+        "pointClassifications": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/pointClassification" }
+        }
+      }
+    },
+    "faceSample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["point", "surfaceKind"],
+      "properties": {
+        "point": { "$ref": "#/$defs/vector3" },
+        "surfaceKind": { "enum": ["plane", "cylinder", "cone", "other"] }
+      }
+    },
+    "pointClassification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["point", "state"],
+      "properties": {
+        "point": { "$ref": "#/$defs/vector3" },
+        "state": { "enum": ["in", "out", "on", "unknown"] }
+      }
+    },
+    "replayEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stable", "digest"],
+      "properties": {
+        "stable": { "type": "boolean" },
+        "digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "differentialEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classification"],
+      "properties": {
+        "classification": {
+          "enum": [
+            "rescued",
+            "onecad-regression",
+            "input-mismatch",
+            "status-difference",
+            "same-status"
+          ]
+        }
+      }
+    },
+    "campaignVariant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "enum": ["base", "translated", "rotated"] },
+        "translation": { "$ref": "#/$defs/vector3" },
+        "rotation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["axis", "angleDegrees"],
+          "properties": {
+            "axis": { "$ref": "#/$defs/vector3" },
+            "angleDegrees": { "$ref": "#/$defs/finiteNumber" }
+          }
+        }
+      }
+    },
+    "searchEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["parameter", "probeRadius", "probeCount", "monotonicObserved", "transitions"],
+      "properties": {
+        "parameter": { "const": "operation.radius" },
+        "probeRadius": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1000000000000
+        },
+        "probeCount": { "type": "integer", "minimum": 0, "maximum": 4096 },
+        "monotonicObserved": { "type": "boolean" },
+        "transitions": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/transition" }
+        }
+      }
+    },
+    "transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lower", "upper", "lowerState", "upperState"],
+      "properties": {
+        "lower": { "$ref": "#/$defs/nonNegativeNumber" },
+        "upper": { "$ref": "#/$defs/nonNegativeNumber" },
+        "lowerState": { "enum": ["success", "rejected", "invalid"] },
+        "upperState": { "enum": ["success", "rejected", "invalid"] }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonicalCase", "request", "stderr", "inputShape", "outputShape"],
+      "properties": {
+        "canonicalCase": { "$ref": "#/$defs/nullablePath" },
+        "request": { "$ref": "#/$defs/nullablePath" },
+        "stderr": { "$ref": "#/$defs/nullablePath" },
+        "inputShape": { "$ref": "#/$defs/nullablePath" },
+        "outputShape": { "$ref": "#/$defs/nullablePath" }
+      }
+    },
+    "nullablePath": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+        }
+      ]
+    }
+  }
+}

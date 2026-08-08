@@ -53,6 +53,27 @@ describe("InspectorPanel", () => {
     expect(screen.queryByText("Under-constrained · DOF 3")).toBeNull();
   });
 
+  it("shows face status + appearance when a promoted face is selected", () => {
+    render(<InspectorPanel />);
+    act(() =>
+      selectionStore.getState().set([
+        {
+          kind: "face",
+          id: "body1#f:0",
+          bodyId: "body1",
+          topoKey: "f:0",
+          elementId: "el_top",
+        },
+      ]),
+    );
+
+    expect(screen.getByText("Body 1")).toBeInTheDocument();
+    expect(screen.getByText("Face")).toBeInTheDocument();
+    expect(screen.getByLabelText("Face color")).toBeInTheDocument();
+    expect(screen.getByLabelText("Face opacity")).toBeInTheDocument();
+    expect(screen.queryByText("Under-constrained · DOF")).toBeNull();
+  });
+
   it("shows the owning sketch when a filled region is selected", () => {
     render(<InspectorPanel />);
     act(() =>

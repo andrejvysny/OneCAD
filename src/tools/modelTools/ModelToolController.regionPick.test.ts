@@ -194,7 +194,7 @@ describe("ModelToolController region pick", () => {
     expect(controller.extrudeActive).toBe(true);
   });
 
-  it("(a-multi) multiple selected regions are rejected (extrude is single-profile)", async () => {
+  it("(a-multi) multiple selected regions arm extrude on all of them", async () => {
     build(() => Promise.resolve({ regions: [R0, R1] }));
     selectionStore.getState().set([
       { kind: "sketchRegion", id: "r0-ref", sketchId: "sk", regionId: "r0" },
@@ -203,9 +203,10 @@ describe("ModelToolController region pick", () => {
     toolStore.getState().setTool("extrude");
     await flush();
 
-    expect(clientMock.beginPreview).not.toHaveBeenCalled();
-    expect(controller.extrudeActive).toBe(false);
-    expect(viewportStore.getState().statusHint?.message).toMatch(/exactly one/);
+    expect(controller.extrudeActive).toBe(true);
+    expect(clientMock.beginPreview).toHaveBeenCalledTimes(2);
+    expect(clientMock.beginPreview.mock.calls[0][0].regionId).toBe("r0");
+    expect(clientMock.beginPreview.mock.calls[1][0].regionId).toBe("r1");
   });
 
   it("(a-whole) whole-sketch selection opens the region PICK — never a guessed profile", async () => {
@@ -222,7 +223,7 @@ describe("ModelToolController region pick", () => {
     expect(controller.extrudeActive).toBe(false);
   });
 
-  it("(a-whole-click) a click on a region during the extrude pick arms it immediately", async () => {
+  it("(a-whole-click) a double-click on a region during the extrude pick arms it immediately", async () => {
     build(() => Promise.resolve({ regions: [R0, R1] }));
     selectionStore.getState().set([{ kind: "sketch", id: "sk" }]);
     toolStore.getState().setTool("extrude");
@@ -230,7 +231,10 @@ describe("ModelToolController region pick", () => {
     await flush();
     expect(engineMock.showRegionPick).toHaveBeenCalled();
 
+    // A double-click on the same region selects only it and confirms immediately.
     click(120, 120); // inside R1's fixture square (identity screen→plane mapping)
+    await flush();
+    click(120, 120);
     await flush();
     await flush();
 

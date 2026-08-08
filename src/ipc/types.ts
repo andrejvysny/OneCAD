@@ -554,11 +554,16 @@ export interface ResolveRefRequest {
 // edit/regen. Field-identical to `documentStore.DocumentProjection` so the
 // hydration bridge writes the store 1:1 (F-WP8 flag 2).
 
+/** sRGB+A color as `[r, g, b, a]` with each channel in `0..255`. */
+export type Rgba = [number, number, number, number];
+
 /** One body in the projection (mirrors `documentStore.BodyMeta`). */
 export interface BodyProjection {
   id: string;
   name: string;
   visible: boolean;
+  /** User-authored body color. Absent = theme neutral body fill. */
+  color?: Rgba;
 }
 
 /**
@@ -686,6 +691,8 @@ export interface RegenFinished {
   outcome: string;
   /** Failure reason for `outcome === "failed"` (SCHEMA §8). Absent otherwise. */
   message?: string;
+  /** Bounded structured kernel evidence; absent for legacy/clean terminals. */
+  diagnostics?: OperationDiagnostic[];
   /**
    * Records whose POST-regen step state is Error, even when the regen itself
    * published (other steps' geometry). A commit correlated to this completion whose
@@ -693,7 +700,7 @@ export interface RegenFinished {
    * must NOT correlate as success off the sibling `document-changed` (MODEL-HARDEN).
    * Present only when non-empty; the mock lane omits it.
    */
-  failedSteps?: Array<{ recordId: string; message: string }>;
+  failedSteps?: Array<{ recordId: string; message: string; diagnostics?: OperationDiagnostic[] }>;
   /**
    * Per record-id, the body ids that op created (incl. split children) or modified
    * in THIS published regen. Lets a correlated commit scope its result bodies to
@@ -822,6 +829,8 @@ export interface FilletParams {
   /** TopoKeys (snapshot-scoped) or ElementIds; resolved through the ladder. */
   edgeIds: string[];
   chainTangentEdges?: boolean;
+  /** Present only on freshly prepared records; absence preserves legacy seed-only execution. */
+  tangentClosureVersion?: 1;
 }
 
 /** Standalone body-body boolean op params (SCHEMA §7.3 BooleanParams). */
@@ -987,6 +996,47 @@ export interface PrepareOffsetFaceResult {
   currentDims: OffsetCurrentDims;
   /** Present ⇒ the handshake REFUSED and `faces` is not a usable closure. */
   refusal?: OffsetFaceRefusal | null;
+}
+
+// ── PrepareEdgeOp — shared Fillet/Chamfer authoring handshake ────────────────
+
+export interface EdgeOpPick {
+  bodyId?: string;
+  /** Snapshot-scoped ordinal key. MUTUALLY EXCLUSIVE with `elementId`. */
+  topoKey?: string;
+  elementId?: string;
+}
+
+export interface EdgeOpEvidence {
+  topoKey: string;
+  picked: boolean;
+  /** Rust-minted persistent identity; present on every accepted edge. */
+  elementId: string;
+  bodyId: string;
+  kind: "edge";
+  anchor?: { worldPoint?: [number, number, number]; surfaceUv?: [number, number] };
+  /** Opaque worker-owned descriptor. */
+  descriptor?: unknown;
+}
+
+export interface EdgeOpRefusal {
+  code: string;
+  message: string;
+  edges: string[];
+}
+
+export interface PrepareEdgeOpRequest {
+  snapshotId?: number;
+  mode: "Fillet" | "Chamfer";
+  pickedEdges: EdgeOpPick[];
+  chainTangentEdges: boolean;
+}
+
+export interface PrepareEdgeOpResult {
+  snapshotId: number;
+  targetBodyId: string;
+  edges: EdgeOpEvidence[];
+  refusal?: EdgeOpRefusal | null;
 }
 
 /**
@@ -1242,6 +1292,8 @@ export interface ApplyOperationResult {
    *  (MODEL-HARDEN W0.5). Empty changedBodies + this ⇒ a hard failure, not a no-op.
    *  The mock lane never sets it. */
   errorMessage?: string;
+  /** Structured evidence for `errorMessage`; separate from NeedsRepair evidence. */
+  diagnostics?: OperationDiagnostic[];
   /**
    * The timeline CURSOR after the edit (applied op count), H7b.
    *
@@ -1310,6 +1362,17 @@ export interface PreviewFailure {
   structural: boolean;
   /** Backend repair evidence retained for the future repair UI. */
   evidence?: unknown[];
+  /** Kernel failure evidence; never overloaded with NeedsRepair evidence. */
+  diagnostics?: OperationDiagnostic[];
+}
+
+/** Additive worker operation diagnostic (SCHEMA §7.2/§8). */
+export interface OperationDiagnostic {
+  severity: "info" | "warning" | "error";
+  code: string;
+  message: string;
+  stage?: string;
+  evidence?: Record<string, unknown>;
 }
 
 /**

@@ -173,6 +173,8 @@ pub struct RegenReport {
     /// into `regen-finished` `failedSteps` so a from-0 regen that publishes sibling
     /// bodies but fails the newly-committed op is not mistaken for a commit success.
     pub failed_steps: Vec<FailedStep>,
+    /// Structured diagnostics retained with their regen terminal.
+    pub diagnostics: Vec<onecad_core::regen::Diagnostic>,
     /// Per-record-id, the bodies each op CREATED or MODIFIED in this PUBLISHED regen
     /// (`document-changed` wire form). Empty on non-published outcomes. Threaded into
     /// `regen-finished` `affectedBodies` for precise per-commit correlation.
@@ -1083,6 +1085,7 @@ impl DocumentRuntime {
             removed: Vec::new(),
             needs_repair: Vec::new(),
             failed_steps: Vec::new(),
+            diagnostics: Vec::new(),
             affected_bodies: BTreeMap::new(),
         }
     }
@@ -1359,7 +1362,8 @@ impl DocumentRuntime {
                 // newly-committed op in Error (stale axis/region). Derive the per-record
                 // failure + created/modified-body maps from the just-committed regen
                 // mirror so the frontend correlates its own commit's recordId precisely.
-                let failed_steps = failed_steps_of(&self.regen.timeline);
+                let failed_steps = failed_steps_of(&self.regen.timeline, &snap.diagnostics_by_step);
+                let diagnostics = snap.diagnostics.clone();
                 let affected_bodies = affected_bodies_of(&self.regen.timeline, &self.regen.bodies);
                 let report = RegenReport {
                     outcome,
@@ -1370,6 +1374,7 @@ impl DocumentRuntime {
                     removed,
                     needs_repair,
                     failed_steps,
+                    diagnostics,
                     affected_bodies,
                 };
                 log_regen_outcome(job, &base_hash_prefix, step_count, &report);
@@ -1392,6 +1397,7 @@ impl DocumentRuntime {
                 removed: Vec::new(),
                 needs_repair: Vec::new(),
                 failed_steps: Vec::new(),
+                diagnostics: Vec::new(),
                 affected_bodies: BTreeMap::new(),
             };
             log_regen_outcome(job, &base_hash_prefix, step_count, &report);
@@ -1422,6 +1428,10 @@ impl DocumentRuntime {
         } else {
             outcome
         };
+        let diagnostics = match &outcome {
+            Outcome::EngineFailed(EngineError::OpFailed { diagnostics, .. }) => diagnostics.clone(),
+            _ => Vec::new(),
+        };
         let report = RegenReport {
             outcome,
             revision: self.fencing.revision().0,
@@ -1431,6 +1441,7 @@ impl DocumentRuntime {
             removed: Vec::new(),
             needs_repair: Vec::new(),
             failed_steps: Vec::new(),
+            diagnostics,
             affected_bodies: BTreeMap::new(),
         };
         log_regen_outcome(job, &base_hash_prefix, step_count, &report);
@@ -2335,6 +2346,12 @@ impl DocumentRuntime {
                     id: b.id.to_string(),
                     name: b.name.clone(),
                     visible: b.visible,
+                    color: b.color,
+                    face_colors: b
+                        .face_colors
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), *v))
+                        .collect(),
                 },
             );
         }
@@ -2968,6 +2985,10 @@ impl DocumentRuntime {
         picks: Vec<(TopoKey, Option<AnchorIntent>)>,
     ) -> Result<Vec<PromotedElementDto>, EngineError> {
         self.gate_stale_pick(snapshot)?;
+        let mut requested_keys: Vec<String> = picks
+            .iter()
+            .map(|(topo_key, _)| topo_key.as_str().to_string())
+            .collect();
         let req = AcquireRequest {
             snapshot_id: snapshot,
             body,
@@ -2977,6 +2998,22 @@ impl DocumentRuntime {
                 .collect(),
         };
         let mut evidence = self.engine.acquire_element_ids(req).await?;
+        let mut returned_keys: Vec<String> = evidence
+            .iter()
+            .filter(|entry| entry.body == body)
+            .map(|entry| entry.topo_key.as_str().to_string())
+            .collect();
+        requested_keys.sort();
+        returned_keys.sort();
+        if returned_keys != requested_keys || evidence.len() != requested_keys.len() {
+            return Err(EngineError::OpFailed {
+                code: onecad_core::regen::OpFailureCode::RefUnresolved,
+                recoverable: true,
+                message: "element promotion returned an incomplete or mismatched batch — re-pick"
+                    .into(),
+                diagnostics: Vec::new(),
+            });
+        }
         // Rust owns id identity: seed `existing` from the promotion cache so a
         // re-pick of the same (snapshot, body, topoKey) reuses the id (Invariant 1).
         let prev_gen = self.previous_promotion_generation(snapshot);
@@ -3061,6 +3098,7 @@ impl DocumentRuntime {
                 "pick was taken against snapshot {}; head is {} — re-pick",
                 snapshot.0, head.id.0
             ),
+            diagnostics: Vec::new(),
         })
     }
 
@@ -3286,6 +3324,16 @@ fn log_regen_outcome(job: JobLabel, base: &str, steps: usize, report: &RegenRepo
             "regen: FAILED step"
         );
     }
+    for diagnostic in report.diagnostics.iter().take(64) {
+        tracing::warn!(
+            job = %job,
+            code = %diagnostic.code,
+            stage = diagnostic.stage.as_deref().unwrap_or(""),
+            evidence = ?diagnostic.evidence,
+            message = %diagnostic.message,
+            "regen: diagnostic"
+        );
+    }
 }
 
 /// What a [`PreparedRegen`] actually does in phase 2.
@@ -3423,6 +3471,7 @@ fn drive_clear(
         step_states,
         signatures: None,
         diagnostics: Vec::new(),
+        diagnostics_by_step: BTreeMap::new(),
         repair_summary: onecad_core::regen::RepairSummary::default(),
     });
     Outcome::Published(snapshot)
@@ -3488,7 +3537,10 @@ fn reintern_split_children(bodies: &[onecad_core::document::body::BodyMeta]) {
 /// source (MODEL-HARDEN finding 1). A published from-0 regen can leave the newly
 /// committed op in Error while republishing OTHER bodies; without this the awaiter
 /// would read that as a blanket commit success.
-fn failed_steps_of(timeline: &Timeline) -> Vec<FailedStep> {
+fn failed_steps_of(
+    timeline: &Timeline,
+    diagnostics_by_step: &BTreeMap<usize, Vec<onecad_core::regen::Diagnostic>>,
+) -> Vec<FailedStep> {
     timeline
         .records()
         .iter()
@@ -3497,6 +3549,10 @@ fn failed_steps_of(timeline: &Timeline) -> Vec<FailedStep> {
             Some(StepState::Error { reason }) => Some(FailedStep {
                 record_id: rec.record_id.to_string(),
                 message: reason.clone(),
+                diagnostics: diagnostics_by_step
+                    .get(&i)
+                    .map(|items| items.iter().take(64).cloned().collect())
+                    .unwrap_or_default(),
             }),
             _ => None,
         })
@@ -3532,6 +3588,10 @@ fn merge_body_metadata(regen: &BodyRegistry, doc: &BodyRegistry) -> BodyRegistry
     for meta in doc.bodies() {
         merged.set_name(meta.id, meta.name.clone());
         merged.set_visible(meta.id, meta.visible);
+        merged.set_color(meta.id, meta.color);
+        // Face colors are user intent; overlay them onto the regen mirror so the
+        // projection and the saved registry both carry them.
+        merged.set_face_colors(meta.id, meta.face_colors.clone());
     }
     merged
 }
@@ -3789,6 +3849,7 @@ fn op_failed(message: impl Into<String>) -> onecad_core::regen::EngineError {
         code: onecad_core::regen::OpFailureCode::OpFailed,
         recoverable: true,
         message: message.into(),
+        diagnostics: Vec::new(),
     }
 }
 

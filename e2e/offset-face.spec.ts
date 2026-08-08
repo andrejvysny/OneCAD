@@ -74,7 +74,10 @@ async function armOffsetFace(
 
 test("Offset face asks for faces when nothing is selected", async ({ page }) => {
   await openEditorDebug(page, { mockBody: true });
-  await offsetTool(page).click();
+  // The toolbar button itself is disabled with nothing selected (below) — this
+  // scenario is the reactive fallback for reaching the tool without it, e.g. the
+  // keyboard shortcut, same pattern as filletChamfer.spec.ts's equivalent test.
+  await page.keyboard.press("Shift+O");
   await expect(page.getByText("Select faces to offset, then Offset face")).toBeVisible();
   expect((await toolPhases(page))?.offsetFacePhase).toBe("idle");
   // No handshake, so nothing was frozen and a ✓ could not commit anything.
@@ -84,11 +87,24 @@ test("Offset face asks for faces when nothing is selected", async ({ page }) => 
 test("a CROSS-BODY selection is refused and never arms", async ({ page }) => {
   await openEditorDebug(page, { mockBody: true });
   await seedSelection(page, [await realFace(page), FOREIGN_FACE]);
-  await offsetTool(page).click();
+  await page.keyboard.press("Shift+O");
   // An offset is defined against ONE body: a pick spanning two has no target to
   // name, so the tool refuses rather than binding to whichever came first.
   await expect(page.getByText(/must belong to the same body/)).toBeVisible();
   expect((await toolPhases(page))?.offsetFacePhase).toBe("idle");
+  await expect(page.getByTestId("chip-confirm")).toHaveCount(0);
+});
+
+test("the Offset face toolbar button grays out and explains why for a cross-body selection", async ({ page }) => {
+  await openEditorDebug(page, { mockBody: true });
+  await seedSelection(page, [await realFace(page), FOREIGN_FACE]);
+  await expect(offsetTool(page)).toHaveAttribute("aria-disabled", "true");
+  await offsetTool(page).hover();
+  await expect(page.getByRole("tooltip")).toHaveText(/must belong to the same body/);
+  // A disabled button is truly inert — clicking it must not arm the tool
+  // (no debug-surface tool switch ever fires, so assert on the DOM instead).
+  await offsetTool(page).click({ force: true });
+  await expect(offsetTool(page)).toHaveAttribute("aria-pressed", "false");
   await expect(page.getByTestId("chip-confirm")).toHaveCount(0);
 });
 

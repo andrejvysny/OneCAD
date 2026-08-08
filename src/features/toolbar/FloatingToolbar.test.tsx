@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { FloatingToolbar } from "./FloatingToolbar";
 import { ICON_MONO } from "@/icons/Icon";
 import { resetStores } from "@/test/resetStores";
+import { selectionStore } from "@/stores/selectionStore";
 
 describe("FloatingToolbar", () => {
   beforeEach(() => resetStores());
@@ -80,5 +81,55 @@ describe("FloatingToolbar", () => {
       "aria-pressed",
       "false",
     );
+  });
+
+  it("grays out gated tools by default (only sketch2 selected) but keeps Extrude/Revolve enabled via the sketch fallback", () => {
+    render(<FloatingToolbar />);
+    for (const name of ["Extrude", "Revolve", "Select", "New sketch", "Datum plane", "Hole", "Measure"]) {
+      expect(screen.getByRole("button", { name })).toHaveAttribute("aria-disabled", "false");
+    }
+    for (const name of ["Fillet / Chamfer", "Combine", "Shell", "Offset face", "Linear pattern", "Circular pattern", "Mirror", "Move"]) {
+      expect(screen.getByRole("button", { name })).toHaveAttribute("aria-disabled", "true");
+    }
+  });
+
+  it("selecting a body enables the body-gated tools but not the edge/face-gated ones", () => {
+    selectionStore.getState().set([{ kind: "body", id: "body1" }]);
+    render(<FloatingToolbar />);
+    for (const name of ["Combine", "Linear pattern", "Circular pattern", "Mirror", "Move"]) {
+      expect(screen.getByRole("button", { name })).toHaveAttribute("aria-disabled", "false");
+    }
+    for (const name of ["Fillet / Chamfer", "Shell", "Offset face"]) {
+      expect(screen.getByRole("button", { name })).toHaveAttribute("aria-disabled", "true");
+    }
+  });
+
+  it("selecting an edge enables only Fillet among the gated tools", () => {
+    selectionStore.getState().set([{ kind: "edge", id: "e1", bodyId: "body1" }]);
+    render(<FloatingToolbar />);
+    expect(screen.getByRole("button", { name: "Fillet / Chamfer" })).toHaveAttribute("aria-disabled", "false");
+    for (const name of ["Combine", "Shell", "Offset face", "Linear pattern", "Circular pattern", "Mirror", "Move"]) {
+      expect(screen.getByRole("button", { name })).toHaveAttribute("aria-disabled", "true");
+    }
+  });
+
+  it("clicking a disabled button does not change the active tool", async () => {
+    const user = userEvent.setup();
+    render(<FloatingToolbar />);
+    await user.click(screen.getByRole("button", { name: "Shell" }));
+    expect(screen.getByRole("button", { name: "Select" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Shell" })).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("the ACTIVE tool is exempt from its own gray-out (must not disable mid-gesture)", async () => {
+    const user = userEvent.setup();
+    selectionStore.getState().set([{ kind: "body", id: "body1" }]);
+    render(<FloatingToolbar />);
+    await user.click(screen.getByRole("button", { name: "Combine" }));
+    expect(screen.getByRole("button", { name: "Combine" })).toHaveAttribute("aria-pressed", "true");
+    // Clearing the selection mid-gesture would normally gray Combine out —
+    // but it's the active tool, so it stays enabled.
+    act(() => selectionStore.getState().clear());
+    expect(screen.getByRole("button", { name: "Combine" })).toHaveAttribute("aria-disabled", "false");
   });
 });

@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::ids::{BodyId, RecordId};
+use crate::ids::{BodyId, ElementId, RecordId};
 
 /// Domain-separation prefix for deriving an ordinal-child `BodyId` uuid from its
 /// `body_<opId>:<k>` wire form (SCHEMA §2, M5a). MUST stay byte-identical to the wire
@@ -110,6 +110,16 @@ pub struct BodyMeta {
     pub name: String,
     /// Whether the body is shown in the viewport.
     pub visible: bool,
+    /// User-authored body color as sRGB+A (`[r,g,b,a]`). `None` means "use the
+    /// theme's neutral body fill". Additive + skipped when `None` ⇒ legacy
+    /// documents serialize byte-identically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<[u8; 4]>,
+    /// User-authored per-face colors keyed by persistent `ElementId`. Empty maps
+    /// are skipped so legacy documents and bodies without face colors stay
+    /// byte-identical.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub face_colors: BTreeMap<ElementId, [u8; 4]>,
     /// The op that first produced this body.
     pub created_by: RecordId,
     /// The ordinal-child origin (SCHEMA §2 `body_<opId>:<k>`), when this body was
@@ -147,6 +157,8 @@ impl BodyMeta {
             id,
             name: name.into(),
             visible: true,
+            color: None,
+            face_colors: BTreeMap::new(),
             created_by,
             split_of: None,
             geom_stamp: None,
@@ -411,7 +423,48 @@ impl BodyRegistry {
         }
     }
 
-    /// The deterministic merge winner (V1/V2 appendix C): **prefer `target`** if
+    /// Sets a body's authored color. Returns `false` if the body is not active.
+    pub fn set_color(&mut self, id: BodyId, color: Option<[u8; 4]>) -> bool {
+        match self.bodies.iter_mut().find(|b| b.id == id) {
+            Some(b) => {
+                b.color = color;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Sets or clears a face's authored color. Returns `false` if the body is not active.
+    pub fn set_face_color(&mut self, id: BodyId, face: ElementId, color: Option<[u8; 4]>) -> bool {
+        match self.bodies.iter_mut().find(|b| b.id == id) {
+            Some(b) => {
+                match color {
+                    Some(c) => {
+                        b.face_colors.insert(face, c);
+                    }
+                    None => {
+                        b.face_colors.remove(&face);
+                    }
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Replace the entire face-color map for a body. Returns `false` if the body is
+    /// not active.
+    pub fn set_face_colors(&mut self, id: BodyId, colors: BTreeMap<ElementId, [u8; 4]>) -> bool {
+        match self.bodies.iter_mut().find(|b| b.id == id) {
+            Some(b) => {
+                b.face_colors = colors;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The deterministic merge winner (V1/V2 appendix C): **prefer `target** if
     /// it is among `inputs`, **else the lowest creation index**, **else the
     /// lowest `BodyId`** (UUID order). Returns `None` for an empty input set.
     #[must_use]
@@ -495,6 +548,8 @@ impl BodyRegistry {
                         id: child,
                         name: pm.name.clone(),
                         visible: pm.visible,
+                        color: pm.color,
+                        face_colors: pm.face_colors.clone(),
                         created_by: pm.created_by,
                         split_of: None, // the survivor inherits the parent identity
                         geom_stamp: pm.geom_stamp,
@@ -519,6 +574,8 @@ impl BodyRegistry {
                     id: winner,
                     name: m.name,
                     visible: m.visible,
+                    color: m.color,
+                    face_colors: m.face_colors.clone(),
                     created_by: m.created_by,
                     split_of: None, // merge winner keeps its own identity
                     geom_stamp: m.geom_stamp,
@@ -732,6 +789,60 @@ mod tests {
             back.get(bid(1)).unwrap().geom_stamp,
             Some([8_500_000_000, 8_500_000, 0, 0, 6])
         );
+    }
+
+    #[test]
+    fn color_is_absent_from_the_wire_until_authored_and_survives_round_trip() {
+        let mut reg = BodyRegistry::new();
+        reg.fold(0, rid(1), BodyLifecycleEvent::Created { body: bid(1) });
+        let v = serde_json::to_value(&reg).unwrap();
+        assert!(
+            v["bodies"][0].get("color").is_none(),
+            "byte-stable for documents without authored body colors"
+        );
+
+        assert!(reg.set_color(bid(1), Some([10, 20, 30, 240])));
+        assert!(
+            !reg.set_color(bid(99), Some([1, 2, 3, 4])),
+            "unknown body ⇒ no-op"
+        );
+        let v = serde_json::to_value(&reg).unwrap();
+        assert_eq!(
+            v["bodies"][0]["color"],
+            serde_json::json!([10, 20, 30, 240])
+        );
+        let back: BodyRegistry = serde_json::from_value(v).unwrap();
+        assert_eq!(back, reg, "colors survive a save/reopen round trip");
+        assert_eq!(back.get(bid(1)).unwrap().color, Some([10, 20, 30, 240]));
+    }
+
+    #[test]
+    fn face_colors_are_absent_from_wire_until_authored_and_survive_round_trip() {
+        let mut reg = BodyRegistry::new();
+        reg.fold(0, rid(1), BodyLifecycleEvent::Created { body: bid(1) });
+        let v = serde_json::to_value(&reg).unwrap();
+        assert!(
+            v["bodies"][0].get("faceColors").is_none(),
+            "byte-stable for documents without authored face colors"
+        );
+
+        let face = ElementId::new("face1");
+        assert!(reg.set_face_color(bid(1), face.clone(), Some([20, 30, 40, 250])));
+        assert!(!reg.set_face_color(bid(99), face.clone(), Some([1, 2, 3, 4])));
+        let v = serde_json::to_value(&reg).unwrap();
+        assert_eq!(
+            v["bodies"][0]["faceColors"]["face1"],
+            serde_json::json!([20, 30, 40, 250])
+        );
+        let back: BodyRegistry = serde_json::from_value(v).unwrap();
+        assert_eq!(back, reg, "face colors survive a save/reopen round trip");
+        assert_eq!(
+            back.get(bid(1)).unwrap().face_colors.get(&face).copied(),
+            Some([20, 30, 40, 250])
+        );
+
+        assert!(reg.set_face_color(bid(1), face, None));
+        assert!(reg.get(bid(1)).unwrap().face_colors.is_empty());
     }
 
     #[test]

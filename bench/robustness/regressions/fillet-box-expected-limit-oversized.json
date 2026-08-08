@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "caseId": "fillet-box-expected-limit-oversized",
+  "generator": {
+    "name": "fillet-foundation",
+    "version": 1,
+    "seed": "0000000000000002"
+  },
+  "geometryRecipe": {
+    "type": "box",
+    "dimensions": [10, 10, 10],
+    "featureIndex": 1
+  },
+  "geometryTags": ["analytic", "box", "oversized-radius", "single-edge"],
+  "operation": {
+    "type": "fillet",
+    "radius": 11,
+    "continuity": "g1",
+    "radiusMode": "constant",
+    "selector": {
+      "mode": "single",
+      "topologyRole": "verticalEdge",
+      "provenance": {
+        "generator": "fillet-foundation",
+        "recipeType": "box",
+        "featureIndex": 1
+      },
+      "anchors": [
+        { "kind": "edgeMidpoint", "point": [0, 0, 5], "frame": "recipeLocal" }
+      ],
+      "surfaceDescriptors": [
+        { "curveKind": "line", "adjacentSurfaceKinds": ["plane", "plane"] }
+      ],
+      "adjacency": { "relation": "single" }
+    }
+  },
+  "expectedDomain": "expectedLimit",
+  "validators": [
+    { "type": "deepAudit", "required": true }
+  ],
+  "metamorphs": [
+    { "type": "translation", "vector": [1000, -2000, 3000] },
+    {
+      "type": "rotation",
+      "angleDegrees": 17.137,
+      "axis": [1, 2, 3],
+      "center": "inputCentroid"
+    }
+  ],
+  "limits": {
+    "resources": {
+      "wallTimeMs": 10000,
+      "addressSpaceBytes": 2147483648,
+      "stdoutBytes": 1048576,
+      "stderrBytes": 1048576,
+      "artifactBytes": 67108864
+    },
+    "quality": {}
+  }
+}

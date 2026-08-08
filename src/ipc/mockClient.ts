@@ -27,6 +27,8 @@ import type {
   OperationOp,
   PrepareOffsetFaceRequest,
   PrepareOffsetFaceResult,
+  PrepareEdgeOpRequest,
+  PrepareEdgeOpResult,
   PromotedElement,
   SketchAttachTarget,
   SketchPlane,
@@ -50,6 +52,8 @@ import { bareBodyId, wireParamsOf } from "./tauriCommandMap";
 import { holeValueText } from "@/tools/modelTools/holeMachine";
 import { offsetFaceValue } from "@/tools/preview/faceOffset";
 import type { FaceColor } from "./mockMeshes";
+import { parseMeshPayload } from "@/viewport/mesh/parseMeshPayload";
+import { TopoIndex } from "@/viewport/mesh/faceRangeIndex";
 import {
   concatMesh1,
   makeBoxMesh,
@@ -69,7 +73,7 @@ import {
 } from "./mockMeshMetrics";
 import { planeFor, solveDof } from "./mockSketch";
 import { detectRegions } from "./mockRegions";
-import type { DatumMeta } from "@/stores/documentStore";
+import type { BodyMeta, DatumMeta } from "@/stores/documentStore";
 import { documentStore, emptyDocument } from "@/stores/documentStore";
 
 const LATENCY_MS = 120;
@@ -112,7 +116,7 @@ const MOCK_THUMB_B =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR42mOIyesCAAJ+AVW9raoPAAAAAElFTkSuQmCC";
 
 // Varied names + dates (unsorted on purpose — the UI sorts).
-const RECENTS: RecentProject[] = [
+const MOCK_BASE_RECENTS: RecentProject[] = [
   {
     id: "p-bracket",
     name: "Bracket v2",
@@ -158,6 +162,15 @@ const RECENTS: RecentProject[] = [
     modifiedAt: "2026-06-02T13:00:00Z",
   },
 ];
+
+/** Mutable working copy `rename`/`delete` operate on — see `resetMockRecents`. */
+let RECENTS: RecentProject[] = MOCK_BASE_RECENTS.map((p) => ({ ...p }));
+
+/** Test seam: restore the recents list to its seeded state (undoes a mock
+ *  rename/delete from a prior test). */
+export function resetMockRecents(): void {
+  RECENTS = MOCK_BASE_RECENTS.map((p) => ({ ...p }));
+}
 
 // ── Crash recovery (start screen) — test-seeded seam ────────────────────────
 //
@@ -300,15 +313,20 @@ const featureParams = new Map<string, Record<string, unknown>>(
 interface MockMeta {
   name?: string;
   visible: boolean;
+  color?: [number, number, number, number];
+  faceColors?: Record<string, [number, number, number, number]>;
 }
 const mockBodyMeta = new Map<string, MockMeta>();
 const mockSketchMeta = new Map<string, MockMeta>();
+/** Persistent elementId → (bodyId, topoKey) for mock `elementInfo` resolution. */
+const mockElementIdToTopoKey = new Map<string, { bodyId: string; topoKey: string }>();
 
 function seedMockMetadata(): void {
   mockBodyMeta.clear();
   mockSketchMeta.clear();
   const s = documentStore.getState();
-  for (const b of Object.values(s.bodies)) mockBodyMeta.set(b.id, { visible: b.visible });
+  for (const b of Object.values(s.bodies))
+    mockBodyMeta.set(b.id, { visible: b.visible, color: b.color, faceColors: b.faceColors });
   for (const k of Object.values(s.sketches)) mockSketchMeta.set(k.id, { visible: k.visible });
 }
 seedMockMetadata();
@@ -322,8 +340,20 @@ function reassertMockMetadata(): void {
     const row = bodies[id];
     if (!row) continue;
     const name = meta.name ?? row.name;
-    if (row.visible === meta.visible && row.name === name) continue;
+    const color = meta.color ?? row.color;
+    const faceColors = meta.faceColors ?? row.faceColors;
+    if (
+      row.visible === meta.visible &&
+      row.name === name &&
+      colorsEqual(row.color, color) &&
+      faceColorsEqual(row.faceColors, faceColors)
+    )
+      continue;
     bodies[id] = { ...row, name, visible: meta.visible };
+    if (color !== undefined) bodies[id].color = color;
+    else delete bodies[id].color;
+    if (faceColors !== undefined && Object.keys(faceColors).length > 0) bodies[id].faceColors = faceColors;
+    else delete bodies[id].faceColors;
     bodiesChanged = true;
   }
   const sketches = { ...s.sketches };
@@ -339,6 +369,27 @@ function reassertMockMetadata(): void {
   if (bodiesChanged || sketchesChanged) s.applyChange({ bodies, sketches });
 }
 
+function colorsEqual(
+  a: [number, number, number, number] | undefined,
+  b: [number, number, number, number] | undefined,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3];
+}
+
+function faceColorsEqual(
+  a: Record<string, [number, number, number, number]> | undefined,
+  b: Record<string, [number, number, number, number]> | undefined,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  const ak = Object.keys(a);
+  if (ak.length !== Object.keys(b).length) return false;
+  for (const k of ak) if (!colorsEqual(a[k], b[k])) return false;
+  return true;
+}
+
 /** Record + apply one metadata mutation (the `setVisibility`/`rename*` arms). */
 function writeMockMeta(kind: "body" | "sketch", id: string, patch: Partial<MockMeta>): void {
   const registry = kind === "body" ? mockBodyMeta : mockSketchMeta;
@@ -346,7 +397,16 @@ function writeMockMeta(kind: "body" | "sketch", id: string, patch: Partial<MockM
   const row = kind === "body" ? s.bodies[id] : s.sketches[id];
   // Adopt the row's CURRENT state on first touch, so renaming a body never also
   // resurrects it (the patch is the only thing this command means to change).
-  const current = registry.get(id) ?? { visible: row?.visible ?? true, name: row?.name };
+  const current =
+    registry.get(id) ??
+    (kind === "body"
+      ? {
+          visible: row?.visible ?? true,
+          name: row?.name,
+          color: (row as BodyMeta).color,
+          faceColors: (row as BodyMeta).faceColors,
+        }
+      : { visible: row?.visible ?? true, name: row?.name });
   registry.set(id, { ...current, ...patch });
   reassertMockMetadata();
 }
@@ -1578,6 +1638,22 @@ async function mockApplyEditCommand(command: WireEditCommand): Promise<ApplyOper
       mockRevision += 1;
       return { ...noopResult(), opLabel: "Rename" };
     }
+    case "setBodyColor": {
+      writeMockMeta("body", command.body, { color: command.color ?? undefined });
+      mockRevision += 1;
+      return { ...noopResult(), opLabel: command.color ? "Set body color" : "Reset body color" };
+    }
+    case "setFaceColor": {
+      const prev = mockBodyMeta.get(command.body);
+      const next: Record<string, [number, number, number, number]> = { ...(prev?.faceColors ?? {}) };
+      if (command.color === null) delete next[command.elementId];
+      else next[command.elementId] = command.color;
+      writeMockMeta("body", command.body, {
+        faceColors: Object.keys(next).length > 0 ? next : undefined,
+      });
+      mockRevision += 1;
+      return { ...noopResult(), opLabel: command.color ? "Set face color" : "Reset face color" };
+    }
     // ── Datum planes (DATUM W1) — also RegenHint::None, no document-changed ──
     case "addDatumPlane": {
       const d = command.datum;
@@ -1742,6 +1818,31 @@ export const mockClient: CadClient = {
   async listRecents() {
     await wait();
     return RECENTS.map((p) => ({ ...p }));
+  },
+  async renameRecentProject(path, newName) {
+    await wait();
+    const trimmed = newName.trim();
+    if (!trimmed) throw new Error("project name cannot be empty");
+    if (trimmed.includes("/") || trimmed.includes("\\")) {
+      throw new Error("project name cannot contain a path separator");
+    }
+    const entry = RECENTS.find((p) => p.path === path);
+    if (!entry) return; // already gone — nothing to rename
+    const dir = path.slice(0, path.lastIndexOf("/") + 1);
+    const newPath = `${dir}${trimmed}.onecad`;
+    if (newPath !== path && RECENTS.some((p) => p.path === newPath)) {
+      throw new Error(`a project named "${trimmed}" already exists here`);
+    }
+    entry.path = newPath;
+    entry.name = trimmed;
+  },
+  async deleteRecentProject(path) {
+    await wait();
+    const i = RECENTS.findIndex((p) => p.path === path);
+    if (i !== -1) RECENTS.splice(i, 1);
+  },
+  async revealInFileManager() {
+    await wait();
   },
   async newDocument() {
     await wait();
@@ -1931,7 +2032,28 @@ export const mockClient: CadClient = {
     topoKey?: string,
   ): Promise<ElementInfo | null> {
     await wait(MESH_LATENCY_MS);
-    const key = topoKey ?? elementId;
+    let key = topoKey;
+    if (!key && elementId) {
+      const mapped = mockElementIdToTopoKey.get(elementId);
+      if (mapped?.bodyId === bodyId) {
+        key = mapped.topoKey;
+      } else if (elementId.startsWith("el_")) {
+        // Deterministic scan: find the face whose promoted id matches the stored
+        // elementId so persisted face colors resolve after reload.
+        const blob = mockBodyMesh(bodyId);
+        const view = parseMeshPayload(blob);
+        const topo = new TopoIndex(view.faceRanges, view.faceCount, view.faceIdOffsets, view.faceIdChars);
+        for (let f = 0; f < view.faceCount; f++) {
+          const tk = topo.idAt(f);
+          if (!tk) continue;
+          if (`el_${mockElementHash(`${bodyId}#${tk}`)}` === elementId) {
+            key = tk;
+            mockElementIdToTopoKey.set(elementId, { bodyId, topoKey: tk });
+            break;
+          }
+        }
+      }
+    }
     if (!key) return null;
     const h = mockElementHash(`${bodyId}#${key}`);
     const at = (i: number) => parseInt(h.slice(i, i + 2), 16); // 0..255
@@ -2018,12 +2140,16 @@ export const mockClient: CadClient = {
   // Deterministic mock promotion (Invariant 1: same pick → same id).
   async promoteSelection(bodyId: string, picks: PromotePick[]): Promise<PromotedElement[]> {
     await wait(MESH_LATENCY_MS);
-    return picks.map((p) => ({
-      topoKey: p.topoKey,
-      elementId: `el_${mockElementHash(`${bodyId}#${p.topoKey}`)}`,
-      kind: p.topoKey.startsWith("e:") ? "edge" : "face",
-      bodyId,
-    }));
+    return picks.map((p) => {
+      const elementId = `el_${mockElementHash(`${bodyId}#${p.topoKey}`)}`;
+      mockElementIdToTopoKey.set(elementId, { bodyId, topoKey: p.topoKey });
+      return {
+        topoKey: p.topoKey,
+        elementId,
+        kind: p.topoKey.startsWith("e:") ? "edge" : "face",
+        bodyId,
+      };
+    });
   },
 
   /**
@@ -2072,6 +2198,36 @@ export const mockClient: CadClient = {
       // MOCK LIMIT: fixed seeds, not a measurement. Enough for the chip to open at
       // a number for the absolute distance types; never claimed to be the body's.
       currentDims: { radius: 10, thickness: 10 },
+      refusal: null,
+    };
+  },
+
+  async prepareEdgeOp(req: PrepareEdgeOpRequest): Promise<PrepareEdgeOpResult> {
+    await wait(MESH_LATENCY_MS);
+    const snapshotId = req.snapshotId ?? mockRevision;
+    const bodies = [...new Set(req.pickedEdges.map((p) => p.bodyId ?? ""))];
+    if (bodies.length > 1) {
+      return {
+        snapshotId,
+        targetBodyId: "",
+        edges: [],
+        refusal: {
+          code: "crossBody",
+          message: `${req.mode}: every selected edge must belong to the same body`,
+          edges: req.pickedEdges.map((p) => p.topoKey ?? p.elementId ?? ""),
+        },
+      };
+    }
+    return {
+      snapshotId,
+      targetBodyId: bodies[0] ?? "",
+      edges: req.pickedEdges.map((p) => ({
+        topoKey: p.topoKey ?? p.elementId ?? "",
+        picked: true,
+        elementId: p.elementId ?? `el_mock_${(p.topoKey ?? "edge").replace(":", "_")}`,
+        bodyId: bodies[0] ?? "",
+        kind: "edge" as const,
+      })),
       refusal: null,
     };
   },

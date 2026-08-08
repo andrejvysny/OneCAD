@@ -28,6 +28,7 @@
  */
 import type { CadClient } from "@/ipc/client";
 import type { DocumentChange, Lod } from "@/ipc/types";
+import type { BodyMeta } from "@/stores/documentStore";
 import { trace } from "@/debug/trace";
 import { logError } from "@/debug/log";
 import { documentStore } from "@/stores/documentStore";
@@ -39,6 +40,7 @@ import { buildBodyObject, type BodyObjectHandle } from "../engine/BodyObject";
 import { BodyMaterialLibrary } from "../engine/bodyMaterials";
 import { coerceRenderMode, RENDER_MODES, type RenderModeDef } from "../engine/renderModes";
 import { parseMeshPayload } from "./parseMeshPayload";
+import type { BodyMeshView } from "./parseMeshPayload";
 import { buildBodyObjects, disposeAll, getEntry, refreshFaceColors, remove, swap } from "./meshRegistry";
 import { rebindSelectionForBody } from "./rebindPick";
 
@@ -48,6 +50,30 @@ const DEFAULT_LOD: Lod = "fine";
 /** Bounded retry for a `get_mesh` miss (mesh not regenerated/cached yet). */
 const EMPTY_MESH_RETRIES = 3;
 const EMPTY_MESH_RETRY_MS = 300;
+
+function colorsEqual(
+  a: [number, number, number, number] | undefined,
+  b: [number, number, number, number] | undefined,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3];
+}
+
+function faceColorsEqual(
+  a: Record<string, [number, number, number, number]> | undefined,
+  b: Record<string, [number, number, number, number]> | undefined,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  const ak = Object.keys(a);
+  const bk = Object.keys(b);
+  if (ak.length !== bk.length) return false;
+  for (const k of ak) {
+    if (!colorsEqual(a[k], b[k])) return false;
+  }
+  return true;
+}
 
 export class MeshIngest {
   private engine: ViewportEngine | null = null;
@@ -82,6 +108,7 @@ export class MeshIngest {
     // EVERY applied projection reconciles scene ↔ store, so a body whose mesh
     // event was missed (or whose first fetch hit the pre-publish window) is
     // picked up on the next projection instead of staying invisible forever.
+    // Body-color edits are metadata-only (no regen), so the mesh is rebuilt here.
     let prev = documentStore.getState().bodies;
     this.unsubs.push(
       documentStore.subscribe((s) => {
@@ -89,6 +116,7 @@ export class MeshIngest {
           const old = prev;
           prev = s.bodies;
           this.onVisibilityChanged(old, s.bodies);
+          this.onColorChanged(old, s.bodies);
           this.reconcile();
         }
       }),
@@ -188,8 +216,8 @@ export class MeshIngest {
   }
 
   private onVisibilityChanged(
-    prev: Record<string, { visible: boolean }>,
-    next: Record<string, { visible: boolean }>,
+    prev: Record<string, BodyMeta>,
+    next: Record<string, BodyMeta>,
   ): void {
     for (const [id, meta] of Object.entries(next)) {
       const was = prev[id]?.visible;
@@ -202,6 +230,23 @@ export class MeshIngest {
         // Lazy-load on first show. Gated on the DOCUMENT fact, not the effective
         // one: fetching a body that isolation is currently masking costs one
         // mesh but keeps it fresh, and `loadBody` applies the mask on arrival.
+        void this.loadBody(id, DEFAULT_LOD);
+      }
+    }
+  }
+
+  private onColorChanged(
+    prev: Record<string, BodyMeta>,
+    next: Record<string, BodyMeta>,
+  ): void {
+    for (const [id, meta] of Object.entries(next)) {
+      const was = prev[id]?.color;
+      const now = meta.color;
+      const wasFaces = prev[id]?.faceColors;
+      const nowFaces = meta.faceColors;
+      if (colorsEqual(was, now) && faceColorsEqual(wasFaces, nowFaces)) continue;
+      // Rebuild only bodies that are already in the scene; reconcile handles the rest.
+      if (this.bodyObjects.has(id) || (next[id]?.visible ?? true)) {
         void this.loadBody(id, DEFAULT_LOD);
       }
     }
@@ -269,11 +314,35 @@ export class MeshIngest {
     this.engine?.invalidate();
   }
 
+  private async resolveAuthoredFaceColors(
+    bodyId: string,
+    view: BodyMeshView,
+    faceColorsMeta: Record<string, [number, number, number, number]> | undefined,
+  ): Promise<Map<string, [number, number, number, number]> | undefined> {
+    if (!faceColorsMeta || Object.keys(faceColorsMeta).length === 0) return undefined;
+    const out = new Map<string, [number, number, number, number]>();
+    if (view.idsHaveElementIds) {
+      // The mesh ids ARE persistent ElementIds, so authored colors map straight on.
+      for (const [elementId, rgba] of Object.entries(faceColorsMeta)) out.set(elementId, rgba);
+    } else if (this.client) {
+      // Mesh ids are snapshot TopoKeys; resolve each persisted ElementId to its
+      // current TopoKey. This is the fallback path for bodies whose partition has
+      // not yet been stamped with ElementIds.
+      for (const [elementId, rgba] of Object.entries(faceColorsMeta)) {
+        const info = await this.client.elementInfo(bodyId, elementId);
+        if (info?.topoKey) out.set(info.topoKey, rgba);
+      }
+    }
+    return out.size > 0 ? out : undefined;
+  }
+
   private async loadBody(bodyId: string, lod: Lod, attempt = 0): Promise<void> {
     if (!this.client || !this.engine || !this.materials) return;
     const token = (this.loadSeq.get(bodyId) ?? 0) + 1;
     this.loadSeq.set(bodyId, token);
     this.pending.add(bodyId);
+    const bodyColor = documentStore.getState().bodies[bodyId]?.color;
+    const faceColorsMeta = documentStore.getState().bodies[bodyId]?.faceColors;
 
     try {
       const buffer = await this.client.getBodyMesh(bodyId, lod);
@@ -299,7 +368,14 @@ export class MeshIngest {
       }
 
       const view = parseMeshPayload(buffer);
-      const entry = buildBodyObjects(view, bodyId, ++this.meshRev);
+      const authoredFaceColors = await this.resolveAuthoredFaceColors(bodyId, view, faceColorsMeta);
+      const entry = buildBodyObjects(
+        view,
+        bodyId,
+        ++this.meshRev,
+        bodyColor,
+        authoredFaceColors,
+      );
       const prevEntry = getEntry(bodyId); // read BEFORE the swap — the rebind's evidence
       swap(bodyId, entry);
       // A regen renumbers TopoKeys, so a selection made before it names nothing

@@ -1,6 +1,18 @@
 cmake_minimum_required(VERSION 3.25)
 project(onecad-worker VERSION 0.1.0 LANGUAGES CXX)
 
+set(ONECAD_OCCT_ROOT "" CACHE PATH "Root of caller-selected OCCT installation")
+set(ONECAD_OCCT_VERSION "8.0.1" CACHE STRING "Exact OCCT version required by this worker build")
+set(ONECAD_OCCT_BUILD_ID "local" CACHE STRING "Stable identity of the OCCT build artifact")
+set(ONECAD_WORKER_BUILD_DIR "${CMAKE_BINARY_DIR}" CACHE PATH "Expected worker binary directory")
+
+file(REAL_PATH "${CMAKE_BINARY_DIR}" _onecad_actual_build_dir)
+file(REAL_PATH "${ONECAD_WORKER_BUILD_DIR}" _onecad_requested_build_dir BASE_DIRECTORY "${CMAKE_SOURCE_DIR}")
+if(NOT _onecad_actual_build_dir STREQUAL _onecad_requested_build_dir)
+    message(FATAL_ERROR
+        "ONECAD_WORKER_BUILD_DIR (${_onecad_requested_build_dir}) must match the active CMake binary directory (${_onecad_actual_build_dir})")
+endif()
+
 # --- Language standard ---
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -12,11 +24,41 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # --- Dependency discovery (OCCT / Eigen3 / Boost) ---
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Dependencies.cmake)
 
-# --- RPATH so the worker finds Homebrew OCCT dylibs when run in-tree, and
-#     bundled Frameworks when shipped inside the Tauri app bundle (M3). ---
-set(CMAKE_BUILD_RPATH   "/opt/homebrew/lib;@executable_path/../Frameworks")
-set(CMAKE_INSTALL_RPATH "/opt/homebrew/lib;@executable_path/../Frameworks")
+# --- RPATH follows the resolved OCCT artifact; no machine-local prefix. ---
+set(CMAKE_BUILD_RPATH "${OpenCASCADE_LIBRARY_DIR};@executable_path/../Frameworks")
+set(CMAKE_INSTALL_RPATH "${OpenCASCADE_LIBRARY_DIR};@executable_path/../Frameworks")
 set(CMAKE_MACOSX_RPATH ON)
+
+set(ONECAD_OCCT_SOURCE_COMMIT "unknown")
+set(ONECAD_OCCT_NORMALIZED_BUILD_OPTIONS
+    "type=${OpenCASCADE_BUILD_TYPE},shared=${OpenCASCADE_BUILD_SHARED_LIBS},tbb=${OpenCASCADE_WITH_TBB},freetype=${OpenCASCADE_WITH_FREETYPE},freeimage=${OpenCASCADE_WITH_FREEIMAGE},vtk=${OpenCASCADE_WITH_VTK},ffmpeg=${OpenCASCADE_WITH_FFMPEG},gles2=${OpenCASCADE_WITH_GLES2}")
+if(ONECAD_OCCT_ROOT AND EXISTS "${ONECAD_OCCT_ROOT}/share/onecad/occt-build.cmake")
+    include("${ONECAD_OCCT_ROOT}/share/onecad/occt-build.cmake")
+    if(ONECAD_OCCT_SOURCE_COMMIT STREQUAL "unknown" OR
+       NOT DEFINED ONECAD_OCCT_BUILT_ID OR ONECAD_OCCT_BUILT_ID STREQUAL "" OR
+       ONECAD_OCCT_NORMALIZED_BUILD_OPTIONS STREQUAL "")
+        message(FATAL_ERROR
+            "OCCT artifact metadata is incomplete; rebuild it with scripts/build-pinned-occt.sh")
+    endif()
+    if(DEFINED ONECAD_OCCT_BUILT_ID)
+        if(ONECAD_OCCT_BUILD_ID STREQUAL "local")
+            set(ONECAD_OCCT_BUILD_ID "${ONECAD_OCCT_BUILT_ID}")
+        elseif(NOT ONECAD_OCCT_BUILD_ID STREQUAL ONECAD_OCCT_BUILT_ID)
+            message(FATAL_ERROR
+                "ONECAD_OCCT_BUILD_ID (${ONECAD_OCCT_BUILD_ID}) does not match artifact metadata (${ONECAD_OCCT_BUILT_ID})")
+        endif()
+    endif()
+elseif(ONECAD_OCCT_BUILD_ID STREQUAL "local" OR ONECAD_OCCT_BUILD_ID STREQUAL "")
+    message(FATAL_ERROR
+        "OCCT artifact metadata is absent; set a unique ONECAD_OCCT_BUILD_ID or use scripts/build-pinned-occt.sh")
+else()
+    # External exact roots remain usable for development, but never share the
+    # default provenance token with another binary-compatible build.
+    set(ONECAD_OCCT_SOURCE_COMMIT "external:${ONECAD_OCCT_BUILD_ID}")
+endif()
+set(ONECAD_KERNEL_POLICY_VERSION "1")
+set(ONECAD_OCCT_FINGERPRINT_SEED
+    "occtVersion=${OpenCASCADE_VERSION}|sourceCommit=${ONECAD_OCCT_SOURCE_COMMIT}|buildOptions=${ONECAD_OCCT_NORMALIZED_BUILD_OPTIONS}|buildId=${ONECAD_OCCT_BUILD_ID}|kernelPolicyVersion=${ONECAD_KERNEL_POLICY_VERSION}")
 
 # ---------------------------------------------------------------------------
 # Vendored PlaneGCS (FreeCAD Sketcher solver) — added BEFORE the first-party
@@ -63,6 +105,12 @@ add_library(worker_core STATIC
     src/elementmap/Scoring.cpp
     src/elementmap/Assignment.cpp
     src/elementmap/Ladder.cpp
+    src/kernel/diagnostics/OperationDiagnostic.cpp
+    src/kernel/validation/ShapeAudit.cpp
+    src/kernel/fillet/FilletAnalyzer.cpp
+    src/kernel/fillet/FilletBuilder.cpp
+    src/kernel/fillet/EdgeContour.cpp
+    src/kernel/fillet/FilletSemanticChecks.cpp
     src/ops/OpCommon.cpp
     src/ops/ExtrudeOp.cpp
     src/ops/BooleanOp.cpp
@@ -75,6 +123,7 @@ add_library(worker_core STATIC
     #     + its read-only authoring handshake (`PrepareOffsetFace`, §7.6). ---
     src/ops/OffsetFaceOp.cpp
     src/session/PrepareOffsetFace.cpp
+    src/session/PrepareEdgeOp.cpp
     src/ops/PatternOp.cpp
     src/ops/MirrorOp.cpp
     # --- WP-B W0: rigid multi-target placement (`TransformBody`, SCHEMA §7.3) ---
@@ -159,6 +208,13 @@ target_link_libraries(worker_core
     planegcs           # vendored solver (linked now; used by W-WP3 sketch solver)
 )
 
+target_compile_definitions(worker_core PUBLIC
+    ONECAD_OCCT_VERSION="${ONECAD_OCCT_VERSION}"
+    ONECAD_OCCT_BUILD_ID="${ONECAD_OCCT_BUILD_ID}"
+    ONECAD_OCCT_FINGERPRINT_SEED="${ONECAD_OCCT_FINGERPRINT_SEED}"
+    ONECAD_KERNEL_POLICY_VERSION=${ONECAD_KERNEL_POLICY_VERSION}
+)
+
 if(OpenCASCADE_LIBRARY_DIR)
     target_link_directories(worker_core PUBLIC ${OpenCASCADE_LIBRARY_DIR})
 endif()
@@ -176,3 +232,5 @@ enable_testing()
 add_subdirectory(tests)
 add_subdirectory(tools/harness)
 add_subdirectory(tools/solverbench)
+add_subdirectory(tools/filletbench)
+add_subdirectory(tools/kernelbench-runner)

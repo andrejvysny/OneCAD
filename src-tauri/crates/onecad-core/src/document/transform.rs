@@ -97,6 +97,7 @@ mod tests {
             edge_ids: vec![ElementId::new("el_1")],
             edges: vec![],
             chain_tangent_edges: false,
+            tangent_closure_version: None,
             extra: Default::default(),
         }))
     }

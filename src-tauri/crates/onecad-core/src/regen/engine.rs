@@ -295,7 +295,8 @@ impl ElementMapDelta {
 }
 
 /// Severity of a step [`Diagnostic`] (SCHEMA §7.2 `diagnostics[].severity`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Severity {
     Info,
     Warning,
@@ -305,11 +306,16 @@ pub enum Severity {
 /// A structured, non-fatal diagnostic emitted for a step (SCHEMA §7.2
 /// `diagnostics`). An `Error`-severity diagnostic on a failed step supplies the
 /// human-facing reason folded into [`StepState::Error`](crate::history::StepState).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Diagnostic {
     pub severity: Severity,
     pub code: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<serde_json::Value>,
 }
 
 /// One `planStep` event (SCHEMA §7.2): the per-step result the executor folds.
@@ -381,6 +387,8 @@ pub struct StepResult {
     /// Empty otherwise. A failed step emits no `planStep` event, so this is the only
     /// channel carrying the failure reason to the snapshot's `StepState::Error`.
     pub message: String,
+    /// Structured failure evidence. Empty for legacy workers and successful steps.
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 /// One MESH1 blob the engine already produced for a prepared body and handed back
@@ -503,6 +511,7 @@ pub enum EngineError {
         code: OpFailureCode,
         recoverable: bool,
         message: String,
+        diagnostics: Vec<Diagnostic>,
     },
     /// Cooperative cancellation (SCHEMA `CANCELLED`). The in-flight job is
     /// dropped; the session is intact. The terminal frame is never dropped.
@@ -522,6 +531,7 @@ impl std::fmt::Display for EngineError {
                 code,
                 recoverable,
                 message,
+                ..
             } => write!(
                 f,
                 "op failed ({code:?}, recoverable={recoverable}): {message}"
@@ -959,6 +969,7 @@ mod tests {
             code: OpFailureCode::OpFailed,
             recoverable: true,
             message: "boom".into(),
+            diagnostics: vec![],
         };
         assert!(e.to_string().contains("recoverable=true"));
     }

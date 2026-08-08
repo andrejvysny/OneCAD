@@ -29,6 +29,8 @@ import type {
   PreviewParams,
   PreviewResult,
   PreviewSession,
+  PrepareEdgeOpRequest,
+  PrepareEdgeOpResult,
   PrepareOffsetFaceRequest,
   PrepareOffsetFaceResult,
   PromotedElement,
@@ -54,6 +56,24 @@ import { createTauriClient } from "./tauriClient";
 export interface CadClient {
   /** Recent projects for the start screen list. */
   listRecents(): Promise<RecentProject[]>;
+  /**
+   * Rename a recent project's `.onecad` file on disk (start-screen card menu).
+   * Rust owns the fs rename + the `recents.json` update; rejects on an empty
+   * name or a collision with an existing file. Caller refetches `listRecents`
+   * afterward — this does not return the updated entry.
+   */
+  renameRecentProject(path: string, newName: string): Promise<void>;
+  /**
+   * Move a recent project's `.onecad` file to the OS trash (start-screen card
+   * menu) — recoverable, not a permanent delete. Rust owns the trash move + the
+   * `recents.json` removal.
+   */
+  deleteRecentProject(path: string): Promise<void>;
+  /**
+   * Reveal a recent project's `.onecad` file in the OS file manager (Finder /
+   * Explorer / platform equivalent), selected where the platform supports it.
+   */
+  revealInFileManager(path: string): Promise<void>;
   /** Create a blank document and open it. */
   newDocument(): Promise<DocumentSnapshot>;
   /** Open an existing .onecad project at `path`. */
@@ -334,6 +354,9 @@ export interface CadClient {
    * expansion, no opposite-face search) with fixed `currentDims`.
    */
   prepareOffsetFace(req: PrepareOffsetFaceRequest): Promise<PrepareOffsetFaceResult>;
+
+  /** Read-only, snapshot-fenced Fillet/Chamfer tangent-closure preparation. */
+  prepareEdgeOp(req: PrepareEdgeOpRequest): Promise<PrepareEdgeOpResult>;
 
   // ── Topology repair (SCHEMA §9; M4b) ──────────────────────────────────────
 

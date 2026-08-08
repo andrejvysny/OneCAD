@@ -322,6 +322,7 @@ fn fillet_record(rec: u128, body: BodyId, at: Vec3, radius: f64) -> OperationRec
             edge_ids: vec![edge.clone()],
             edges: vec![anchored_ref(body, &edge, ElementKind::Edge, at)],
             chain_tangent_edges: false,
+            tangent_closure_version: None,
             extra: Default::default(),
         })),
     )
@@ -339,6 +340,7 @@ fn chamfer_record(rec: u128, body: BodyId, at: Vec3, distance: f64) -> Operation
             edge_ids: vec![edge.clone()],
             edges: vec![anchored_ref(body, &edge, ElementKind::Edge, at)],
             chain_tangent_edges: false,
+            tangent_closure_version: None,
             extra: Default::default(),
         })),
     )
@@ -739,6 +741,7 @@ async fn edge_op_preview_without_typed_edges_fails_loudly() {
         edge_ids: vec![ElementId::new("el_edge_pick")],
         edges: vec![],
         chain_tangent_edges: false,
+        tangent_closure_version: None,
         extra: Default::default(),
     }));
     let err = wm

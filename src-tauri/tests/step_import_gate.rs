@@ -623,6 +623,7 @@ fn fillet_record(rec: u128, body: BodyId, edge_el: &ElementId, anchor: Vec3) -> 
             edge_ids: vec![edge_el.clone()],
             edges: vec![edge_ref(body, edge_el, anchor)],
             chain_tangent_edges: false,
+            tangent_closure_version: None,
             extra: Default::default(),
         })),
     )

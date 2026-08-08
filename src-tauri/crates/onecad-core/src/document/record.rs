@@ -1060,6 +1060,8 @@ pub struct FilletParams {
     pub edges: Vec<ElementRef>,
     #[serde(default = "default_true")]
     pub chain_tangent_edges: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tangent_closure_version: Option<u8>,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     pub extra: Extra,
 }
@@ -1089,6 +1091,8 @@ pub struct ChamferParams {
     pub edges: Vec<ElementRef>,
     #[serde(default = "default_true")]
     pub chain_tangent_edges: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tangent_closure_version: Option<u8>,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     pub extra: Extra,
 }

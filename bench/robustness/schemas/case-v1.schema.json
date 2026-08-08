@@ -1,0 +1,443 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onecad.dev/schemas/kernelbench/case-v1.schema.json",
+  "title": "OneCAD kernelbench case v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "caseId",
+    "generator",
+    "geometryRecipe",
+    "geometryTags",
+    "operation",
+    "expectedDomain",
+    "validators",
+    "metamorphs",
+    "limits"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "caseId": { "$ref": "#/$defs/safeId" },
+    "generator": { "$ref": "#/$defs/generator" },
+    "geometryRecipe": { "$ref": "#/$defs/geometryRecipe" },
+    "geometryTags": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/safeId" }
+    },
+    "operation": { "$ref": "#/$defs/operation" },
+    "expectedDomain": {
+      "enum": [
+        "supported",
+        "expectedLimit",
+        "exploratory",
+        "outsideProductDomain"
+      ]
+    },
+    "validators": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": { "$ref": "#/$defs/validator" }
+    },
+    "metamorphs": {
+      "type": "array",
+      "maxItems": 16,
+      "items": { "$ref": "#/$defs/metamorph" }
+    },
+    "search": { "$ref": "#/$defs/search" },
+    "limits": { "$ref": "#/$defs/limits" }
+  },
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "positiveNumber": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1000000000000
+    },
+    "nonNegativeNumber": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1000000000000
+    },
+    "generator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "seed"],
+      "properties": {
+        "name": { "const": "fillet-foundation" },
+        "version": { "const": 1 },
+        "seed": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$"
+        }
+      }
+    },
+    "geometryRecipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "dimensions", "featureIndex"],
+      "properties": {
+        "type": {
+          "enum": ["box", "valence3Corner", "valence4Corner", "overflowWedge"]
+        },
+        "dimensions": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "$ref": "#/$defs/positiveNumber" }
+        },
+        "featureIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        }
+      }
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "radius", "continuity", "radiusMode", "selector"],
+      "properties": {
+        "type": { "const": "fillet" },
+        "radius": { "$ref": "#/$defs/positiveNumber" },
+        "continuity": { "const": "g1" },
+        "radiusMode": { "const": "constant" },
+        "selector": { "$ref": "#/$defs/selector" }
+      }
+    },
+    "selector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "topologyRole",
+        "provenance",
+        "anchors",
+        "surfaceDescriptors",
+        "adjacency"
+      ],
+      "properties": {
+        "mode": {
+          "enum": ["single", "disconnected", "multiple", "cornerIncident"]
+        },
+        "topologyRole": {
+          "enum": ["verticalEdge", "cornerIncidentEdge", "overflowEdge"]
+        },
+        "provenance": { "$ref": "#/$defs/selectorProvenance" },
+        "anchors": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/selectorAnchor" }
+        },
+        "surfaceDescriptors": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/surfaceDescriptor" }
+        },
+        "adjacency": { "$ref": "#/$defs/selectorAdjacency" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "single" } } },
+          "then": {
+            "properties": {
+              "anchors": { "maxItems": 1 },
+              "adjacency": {
+                "properties": { "relation": { "const": "single" } }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "mode": { "const": "disconnected" } } },
+          "then": {
+            "properties": {
+              "anchors": { "minItems": 2 },
+              "adjacency": {
+                "properties": { "relation": { "const": "pairwiseDisconnected" } }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "mode": { "const": "multiple" } } },
+          "then": {
+            "properties": {
+              "anchors": { "minItems": 2 },
+              "adjacency": {
+                "properties": { "relation": { "const": "unconstrained" } }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "mode": { "const": "cornerIncident" } } },
+          "then": {
+            "properties": {
+              "topologyRole": { "const": "cornerIncidentEdge" },
+              "anchors": {
+                "maxItems": 1,
+                "items": {
+                  "properties": { "kind": { "const": "commonVertex" } }
+                }
+              },
+              "adjacency": {
+                "properties": { "relation": { "const": "incidentToCommonVertex" } }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "selectorProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generator", "recipeType", "featureIndex"],
+      "properties": {
+        "generator": { "const": "fillet-foundation" },
+        "recipeType": {
+          "enum": ["box", "valence3Corner", "valence4Corner", "overflowWedge"]
+        },
+        "featureIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        }
+      }
+    },
+    "selectorAnchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "point", "frame"],
+      "properties": {
+        "kind": { "enum": ["edgeMidpoint", "commonVertex"] },
+        "point": { "$ref": "#/$defs/vector3" },
+        "frame": { "const": "recipeLocal" }
+      }
+    },
+    "surfaceDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["curveKind", "adjacentSurfaceKinds"],
+      "properties": {
+        "curveKind": { "enum": ["line", "analyticCurve"] },
+        "adjacentSurfaceKinds": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "enum": ["plane", "cylinder", "cone", "other"] }
+        }
+      }
+    },
+    "selectorAdjacency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relation"],
+      "properties": {
+        "relation": {
+          "enum": [
+            "single",
+            "pairwiseDisconnected",
+            "unconstrained",
+            "incidentToCommonVertex"
+          ]
+        }
+      }
+    },
+    "validator": {
+      "oneOf": [
+        { "$ref": "#/$defs/simpleValidator" },
+        { "$ref": "#/$defs/toleranceValidator" },
+        { "$ref": "#/$defs/metamorphValidator" }
+      ]
+    },
+    "simpleValidator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "required"],
+      "properties": {
+        "type": {
+          "enum": [
+            "constantRadius",
+            "generatedBlendFace",
+            "cylindricalRadius",
+            "g1BoundaryTangency",
+            "materialChange",
+            "remoteSupportsUnchanged",
+            "deepAudit"
+          ]
+        },
+        "required": { "type": "boolean" },
+        "direction": { "enum": ["decrease", "increase"] }
+      }
+    },
+    "toleranceValidator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "required", "absolute", "relative"],
+      "properties": {
+        "type": {
+          "enum": ["radiusTolerance", "tangencyTolerance", "materialTolerance"]
+        },
+        "required": { "type": "boolean" },
+        "absolute": { "$ref": "#/$defs/nonNegativeNumber" },
+        "relative": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "metamorphValidator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "required", "surfaceSamples", "pointTolerance"],
+      "properties": {
+        "type": { "const": "metamorphicEquivalence" },
+        "required": { "type": "boolean" },
+        "surfaceSamples": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "pointTolerance": { "$ref": "#/$defs/nonNegativeNumber" }
+      }
+    },
+    "metamorph": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "vector"],
+          "properties": {
+            "type": { "const": "translation" },
+            "vector": { "$ref": "#/$defs/vector3" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "angleDegrees", "axis", "center"],
+          "properties": {
+            "type": { "const": "rotation" },
+            "angleDegrees": {
+              "type": "number",
+              "minimum": -360,
+              "maximum": 360
+            },
+            "axis": { "$ref": "#/$defs/vector3" },
+            "center": { "const": "inputCentroid" }
+          }
+        }
+      ]
+    },
+    "vector3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "number",
+        "minimum": -1000000000000,
+        "maximum": 1000000000000
+      }
+    },
+    "search": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parameter",
+        "knownSuccess",
+        "upperBound",
+        "growthFactor",
+        "maxProbes",
+        "relativePrecision",
+        "absolutePrecision",
+        "relativeOffsets"
+      ],
+      "properties": {
+        "parameter": { "const": "operation.radius" },
+        "knownSuccess": { "$ref": "#/$defs/positiveNumber" },
+        "upperBound": { "$ref": "#/$defs/positiveNumber" },
+        "growthFactor": {
+          "type": "number",
+          "exclusiveMinimum": 1,
+          "maximum": 16
+        },
+        "maxProbes": {
+          "type": "integer",
+          "minimum": 8,
+          "maximum": 4096
+        },
+        "relativePrecision": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 0.01
+        },
+        "absolutePrecision": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "relativeOffsets": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "prefixItems": [
+            { "const": 0.01 },
+            { "const": 0.0001 },
+            { "const": 0.000001 },
+            { "const": 0.00000001 }
+          ],
+          "items": false
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resources", "quality"],
+      "properties": {
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "wallTimeMs",
+            "addressSpaceBytes",
+            "stdoutBytes",
+            "stderrBytes",
+            "artifactBytes"
+          ],
+          "properties": {
+            "wallTimeMs": { "type": "integer", "minimum": 1, "maximum": 3600000 },
+            "addressSpaceBytes": { "type": "integer", "minimum": 16777216, "maximum": 68719476736 },
+            "stdoutBytes": { "type": "integer", "minimum": 1024, "maximum": 16777216 },
+            "stderrBytes": { "type": "integer", "minimum": 1024, "maximum": 16777216 },
+            "artifactBytes": { "type": "integer", "minimum": 1024, "maximum": 1073741824 }
+          }
+        },
+        "quality": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxVertexTolerance": { "$ref": "#/$defs/nonNegativeNumber" },
+            "maxEdgeTolerance": { "$ref": "#/$defs/nonNegativeNumber" },
+            "maxFaceTolerance": { "$ref": "#/$defs/nonNegativeNumber" },
+            "maxMicroEdges": { "type": "integer", "minimum": 0, "maximum": 10000000 },
+            "maxSliverFaces": { "type": "integer", "minimum": 0, "maximum": 10000000 }
+          }
+        }
+      }
+    }
+  }
+}

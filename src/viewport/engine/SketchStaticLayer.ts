@@ -34,7 +34,7 @@ import { RENDER_ORDER } from "./renderOrder";
 const FILL_OPACITY = 0.18;
 const FILL_OPACITY_ACTIVE = 0.3;
 const DOT_SIZE = 5;
-const STATIC_CURVE_WIDTH = cssLineWidth(2);
+const STATIC_CURVE_WIDTH = cssLineWidth(1.5);
 
 export interface SketchStaticData {
   plane: SketchPlane;

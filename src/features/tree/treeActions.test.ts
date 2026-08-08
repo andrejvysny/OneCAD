@@ -9,6 +9,8 @@ import {
   deleteSketch,
   renameBody,
   renameSketch,
+  setBodyColor,
+  setFaceColor,
   setBodyVisible,
   setSketchVisible,
 } from "./treeActions";
@@ -77,6 +79,71 @@ describe("treeActions — wire payloads", () => {
       name: "Profile",
     });
     expect(sketch("sketch4").name).toBe("Profile");
+    apply.mockRestore();
+  });
+
+  it("setBodyColor sends SetBodyColor with a bare body id + rgba", async () => {
+    const apply = vi.spyOn(mockClient, "applyEditCommand");
+    await setBodyColor("body1", [255, 128, 64, 200]);
+    expect(apply.mock.calls[0][0]).toEqual({
+      cmd: "setBodyColor",
+      body: "body1",
+      color: [255, 128, 64, 200],
+    });
+    expect(body("body1").color).toEqual([255, 128, 64, 200]);
+    apply.mockRestore();
+  });
+
+  it("setBodyColor clears color with null", async () => {
+    documentStore.setState({
+      bodies: {
+        body1: { id: "body1", name: "Body 1", visible: true, color: [1, 2, 3, 4] },
+      },
+    });
+    const apply = vi.spyOn(mockClient, "applyEditCommand");
+    await setBodyColor("body1", null);
+    expect(apply.mock.calls[0][0]).toEqual({
+      cmd: "setBodyColor",
+      body: "body1",
+      color: null,
+    });
+    expect(body("body1").color).toBeUndefined();
+    apply.mockRestore();
+  });
+
+  it("setFaceColor sends SetFaceColor with a bare body id + element id + rgba", async () => {
+    const apply = vi.spyOn(mockClient, "applyEditCommand");
+    await setFaceColor("body1", "el_abc", [255, 128, 64, 200]);
+    expect(apply.mock.calls[0][0]).toEqual({
+      cmd: "setFaceColor",
+      body: "body1",
+      elementId: "el_abc",
+      color: [255, 128, 64, 200],
+    });
+    expect(body("body1").faceColors).toEqual({ el_abc: [255, 128, 64, 200] });
+    apply.mockRestore();
+  });
+
+  it("setFaceColor clears a face color with null", async () => {
+    documentStore.setState({
+      bodies: {
+        body1: {
+          id: "body1",
+          name: "Body 1",
+          visible: true,
+          faceColors: { el_abc: [1, 2, 3, 4] },
+        },
+      },
+    });
+    const apply = vi.spyOn(mockClient, "applyEditCommand");
+    await setFaceColor("body1", "el_abc", null);
+    expect(apply.mock.calls[0][0]).toEqual({
+      cmd: "setFaceColor",
+      body: "body1",
+      elementId: "el_abc",
+      color: null,
+    });
+    expect(body("body1").faceColors).toBeUndefined();
     apply.mockRestore();
   });
 });

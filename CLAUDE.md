@@ -29,13 +29,14 @@ bun run tauri dev
 
 ### C++ worker sidecar
 ```bash
-scripts/build-worker.sh Release      # cmake configure + build + STAGE the sidecar
+ONECAD_OCCT_ROOT=/path/to/occt-prefix scripts/build-worker.sh Release
+                                      # configure + build + STAGE the sidecar
 ctest --test-dir worker/build --output-on-failure
 ctest --test-dir worker/build -R test_wp6_extrude   # single ctest
 ```
 `build-worker.sh` copies `worker/build/onecad-worker` → `src-tauri/binaries/onecad-worker-<rust-host-triple>`. **`bundle.externalBin` makes Tauri's build script require that staged file to exist**, so staging must precede *any* cargo command that compiles the app crate (clippy and test both do). Build the worker first, always.
 
-Deps: OCCT 7.9.3, boost, eigen, nlohmann-json (`brew install opencascade boost eigen nlohmann-json`). apt's OCCT 7.6.3 is too old; the Linux dev container uses conda-forge OCCT at `/opt/occt793`.
+Deps: boost, eigen, nlohmann-json (`brew install boost eigen nlohmann-json`). OCCT is **8.0.1**, built from pinned source tag `V8_0_1` with `scripts/build-pinned-occt.sh`. Pass its prefix through `ONECAD_OCCT_ROOT`; CMake requires the selected version exactly and derives runtime paths from the resolved artifact. CI gates 8.0.1; 7.9.3 is comparison-only.
 
 ### Rust (run from `src-tauri/`)
 ```bash
@@ -62,7 +63,7 @@ src-tauri/src/  Tauri app crate: #[tauri::command] wrappers → DocumentRuntime 
   ↕ trait seams (GeometryEngine / MeshProvider)
 src-tauri/crates/onecad-core/   pure domain: document, history, regen, sketch, io. No Tauri.
   ↕ OCW1 frames over stdio (protocol/SCHEMA.md)
-worker/         C++20 sidecar: OCCT 7.9.3 kernel + vendored PlaneGCS solver
+worker/         C++20 sidecar: OCCT 8.0.1 kernel + vendored PlaneGCS solver
 ```
 
 Supporting crates: `onecad-protocol` (OCW1 codec, MESH1 validator, `ProtocolClient`), `onecad-worker-stub` (deterministic fake worker binary for chaos tests), `onecad-regen` (headless replay CLI, runs in CI).

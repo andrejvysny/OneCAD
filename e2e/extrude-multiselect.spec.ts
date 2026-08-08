@@ -15,13 +15,10 @@ import {
 } from "./helpers";
 
 /*
- * V1 Extrude is intentionally single-profile. Persistent region selection may
- * contain several cells, but invoking Extrude must reject that ambiguity rather
- * than choosing the first cell or authoring hidden N-operation behavior.
+ * Extrude supports multi-profile selection: multiple closed regions in the same
+ * sketch are extruded together with the same parameters.
  */
-test("multiple selected regions are rejected without preview or commit", async ({
-  page,
-}) => {
+test("multiple selected regions are extruded together", async ({ page }) => {
   await openEditorDebug(page);
   await bodyOptions(page).first().getByRole("switch").click();
   const visibleSeedSketches = page
@@ -78,7 +75,11 @@ test("multiple selected regions are rejected without preview or commit", async (
   await page.keyboard.up("Shift");
 
   await page.getByRole("button", { name: "Extrude", exact: true }).click();
-  await expect(page.getByText("Extrude takes exactly one region — deselect down to one")).toBeVisible();
-  await expect(page.getByText(/^Drag the arrow to set depth/)).toHaveCount(0);
-  await expect(bodyOptions(page)).toHaveCount(bodiesBefore);
+  await expect(page.getByText(/^Drag the arrow to set depth/)).toBeVisible();
+
+  // Confirm the armed extrude — both regions are extruded into two separate bodies.
+  await page.keyboard.press("Enter");
+  await waitForCameraSettled(page);
+
+  await expect(bodyOptions(page)).toHaveCount(bodiesBefore + 2);
 });

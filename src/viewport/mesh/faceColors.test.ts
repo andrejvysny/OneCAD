@@ -123,7 +123,7 @@ describe("bakeFaceColors", () => {
 
     document.documentElement.dataset.theme = "dark";
     resetPaletteCache();
-    const again = bakeFaceColors(v, baked);
+    const again = bakeFaceColors(v, undefined, undefined, baked);
 
     expect(again).toBe(baked); // same array, no attribute swap needed
     // guard: the token really moved
@@ -137,7 +137,7 @@ describe("bakeFaceColors", () => {
   it("allocates a fresh array when the target is the wrong length", () => {
     const v = coloredBox();
     const tooSmall = new Float32Array(3);
-    const out = bakeFaceColors(v, tooSmall);
+    const out = bakeFaceColors(v, undefined, undefined, tooSmall);
     expect(out).not.toBe(tooSmall);
     expect(out.length).toBe(v.indices.length * 3);
   });
@@ -149,5 +149,39 @@ describe("bakeFaceColors", () => {
     for (let i = 0; i < v.indices.length; i++) {
       expect(vertexColor(baked, i)).toEqual(neutral);
     }
+  });
+
+  it("applies authored face colors keyed by ElementId when the mesh ids are ElementIds", () => {
+    const id = "el_top";
+    const chars = new TextEncoder().encode(id);
+    const view = {
+      positions: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]),
+      normals: new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]),
+      indices: new Uint32Array([0, 1, 2]),
+      faceRanges: new Uint32Array([0, 1]),
+      faceCount: 1,
+      faceIdOffsets: new Uint32Array([0, chars.length]),
+      faceIdChars: chars,
+      edgeRanges: null,
+      edgePositions: null,
+      edgeIdOffsets: null,
+      edgeIdChars: null,
+      hasEdges: false,
+      edgeCount: 0,
+      faceColors: null,
+      faceBboxes: null,
+      bboxMin: [0, 0, 0] as const,
+      bboxMax: [1, 1, 0] as const,
+      hasNormals: true,
+      hasFaceBboxes: false,
+      hasFaceColors: false,
+      idsHaveElementIds: true,
+    };
+    const authored = new Map<string, [number, number, number, number]>();
+    authored.set(id, RED);
+    const baked = bakeFaceColors(view, undefined, authored);
+    expect(vertexColor(baked, 0)).toEqual(linear(RED));
+    expect(vertexColor(baked, 1)).toEqual(linear(RED));
+    expect(vertexColor(baked, 2)).toEqual(linear(RED));
   });
 });

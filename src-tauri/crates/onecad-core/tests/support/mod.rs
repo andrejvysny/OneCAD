@@ -331,6 +331,7 @@ impl GeometryEngine for FakeEngine {
                             status: StepStatus::Ok,
                             body_ids: bodies,
                             message: String::new(),
+                            diagnostics: vec![],
                         });
                         last_valid = Some(step);
                     }
@@ -349,29 +350,25 @@ impl GeometryEngine for FakeEngine {
                             status: StepStatus::NeedsRepair,
                             body_ids: vec![],
                             message: String::new(),
+                            diagnostics: vec![],
                         });
                         stopped = StoppedReason::NeedsRepair;
                         break;
                     }
                     StepScript::Fail { code } => {
-                        events.push(PlanEvent::Step(PlanStepEvent {
-                            step_index: step,
-                            body_events: vec![],
-                            body_rank_keys: Default::default(),
-                            element_map_delta: ElementMapDelta::default(),
-                            needs_repair: vec![],
-                            signatures: sigs(step),
-                            diagnostics: vec![Diagnostic {
-                                severity: Severity::Error,
-                                code: format!("{code:?}"),
-                                message: format!("scripted op failure at step {step}"),
-                            }],
-                        }));
+                        let diagnostic = Diagnostic {
+                            severity: Severity::Error,
+                            code: format!("{code:?}"),
+                            message: format!("scripted op failure at step {step}"),
+                            stage: None,
+                            evidence: None,
+                        };
                         per_step.push(StepResult {
                             step_index: step,
                             status: StepStatus::OpFailed,
                             body_ids: vec![],
                             message: String::new(),
+                            diagnostics: vec![diagnostic],
                         });
                         stopped = StoppedReason::OpFailed;
                         break;
@@ -525,6 +522,7 @@ impl GeometryEngine for FakeEngine {
             code: OpFailureCode::Unsupported,
             recoverable: true,
             message: "fake engine does not save checkpoints".into(),
+            diagnostics: vec![],
         })
     }
 

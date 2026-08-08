@@ -18,10 +18,13 @@ import {
   deleteDatumCommand,
   renameBodyCommand,
   renameSketchCommand,
+  setBodyColorCommand,
+  setFaceColorCommand,
   setBodyVisibilityCommand,
   setSketchVisibilityCommand,
   type WireEditCommand,
 } from "@/ipc/tauriCommandMap";
+import type { Rgba } from "@/ipc/types";
 import { toFeatureMeta } from "@/ipc/projectionHydration";
 import type { ApplyOperationResult } from "@/ipc/types";
 import { documentStore } from "@/stores/documentStore";
@@ -60,6 +63,31 @@ function writeName(kind: "body" | "sketch", id: string, name: string): void {
     const row = s.sketches[id];
     if (row) s.applyChange({ sketches: { ...s.sketches, [id]: { ...row, name } } });
   }
+}
+
+/** Local body-color write (the optimistic half + the revert half). */
+function writeColor(id: string, color?: Rgba): void {
+  const s = documentStore.getState();
+  const row = s.bodies[id];
+  if (!row) return;
+  const next: typeof row = { ...row };
+  if (color === undefined) delete next.color;
+  else next.color = color;
+  s.applyChange({ bodies: { ...s.bodies, [id]: next } });
+}
+
+/** Local face-color write (the optimistic half + the revert half). */
+function writeFaceColor(id: string, elementId: string, color?: Rgba): void {
+  const s = documentStore.getState();
+  const row = s.bodies[id];
+  if (!row) return;
+  const next: typeof row = { ...row };
+  const faces = { ...(next.faceColors ?? {}) };
+  if (color === undefined) delete faces[elementId];
+  else faces[elementId] = color;
+  if (Object.keys(faces).length === 0) delete next.faceColors;
+  else next.faceColors = faces;
+  s.applyChange({ bodies: { ...s.bodies, [id]: next } });
 }
 
 /**
@@ -103,6 +131,32 @@ export async function setSketchVisible(sketchId: string, visible: boolean): Prom
     setSketchVisibilityCommand(sketchId, visible),
     () => documentStore.getState().setVisibility(sketchId, before ?? true),
     visible ? "Show sketch" : "Hide sketch",
+  );
+}
+
+/** Set or clear a body's authored color (`SetBodyColor`). Optimistic; reverts on rejection. */
+export async function setBodyColor(bodyId: string, color: Rgba | null): Promise<boolean> {
+  const before = documentStore.getState().bodies[bodyId]?.color;
+  writeColor(bodyId, color ?? undefined);
+  return dispatch(
+    setBodyColorCommand(bodyId, color),
+    () => writeColor(bodyId, before),
+    color ? "Set body color" : "Reset body color",
+  );
+}
+
+/** Set or clear a face color (`SetFaceColor`). Optimistic; reverts on rejection. */
+export async function setFaceColor(
+  bodyId: string,
+  elementId: string,
+  color: Rgba | null,
+): Promise<boolean> {
+  const before = documentStore.getState().bodies[bodyId]?.faceColors?.[elementId];
+  writeFaceColor(bodyId, elementId, color ?? undefined);
+  return dispatch(
+    setFaceColorCommand(bodyId, elementId, color),
+    () => writeFaceColor(bodyId, elementId, before),
+    color ? "Set face color" : "Reset face color",
   );
 }
 

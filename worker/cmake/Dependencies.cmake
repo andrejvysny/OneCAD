@@ -14,28 +14,22 @@
 # ---------------------------------------------------------------------------
 # 1. OpenCASCADE (OCCT)  — REQUIRED
 # ---------------------------------------------------------------------------
-find_package(OpenCASCADE)
-if(NOT OpenCASCADE_FOUND)
-    set(POSSIBLE_OCCT_DIRS
-        "/opt/homebrew/lib/cmake/opencascade"
-        "/usr/local/lib/cmake/opencascade"
-        "/opt/homebrew/opt/opencascade/lib/cmake/opencascade"
-        "/usr/lib/cmake/opencascade"
-        "/usr/lib/x86_64-linux-gnu/cmake/opencascade"
-        "/usr/lib/aarch64-linux-gnu/cmake/opencascade"
-    )
-    foreach(DIR ${POSSIBLE_OCCT_DIRS})
-        if(EXISTS ${DIR})
-            message(STATUS "Found potential OpenCASCADE config at: ${DIR}")
-            set(OpenCASCADE_DIR ${DIR})
-            find_package(OpenCASCADE REQUIRED)
-            break()
-        endif()
-    endforeach()
+# Caller-selected root is authoritative. Without it, exact config-mode discovery
+# remains available for developer toolchains that set OpenCASCADE_DIR or
+# CMAKE_PREFIX_PATH explicitly.
+if(ONECAD_OCCT_ROOT)
+    set(OpenCASCADE_DIR "${ONECAD_OCCT_ROOT}/lib/cmake/opencascade")
+    find_package(OpenCASCADE ${ONECAD_OCCT_VERSION} EXACT REQUIRED CONFIG
+        PATHS "${OpenCASCADE_DIR}" NO_DEFAULT_PATH)
+else()
+    find_package(OpenCASCADE ${ONECAD_OCCT_VERSION} EXACT REQUIRED CONFIG)
 endif()
 
-if(NOT OpenCASCADE_FOUND)
-    message(FATAL_ERROR "OpenCASCADE not found. Please install it.")
+set(OpenCASCADE_VERSION
+    "${OpenCASCADE_MAJOR_VERSION}.${OpenCASCADE_MINOR_VERSION}.${OpenCASCADE_MAINTENANCE_VERSION}")
+if(NOT OpenCASCADE_VERSION STREQUAL ONECAD_OCCT_VERSION)
+    message(FATAL_ERROR
+        "Resolved OCCT ${OpenCASCADE_VERSION}; expected exact ${ONECAD_OCCT_VERSION}")
 endif()
 
 # Drop OCCT's Draw/Test harness libraries (TKDraw, TKQADraw, TKTopTest,
@@ -50,6 +44,7 @@ endif()
 list(FILTER OpenCASCADE_LIBRARIES EXCLUDE REGEX "Draw|DRAW|Test|TKDCAF")
 message(STATUS "OpenCASCADE libraries (harness libs filtered): ${OpenCASCADE_LIBRARIES}")
 message(STATUS "OpenCASCADE Version: ${OpenCASCADE_VERSION}")
+message(STATUS "OpenCASCADE Root: ${OpenCASCADE_INSTALL_PREFIX}")
 
 # ---------------------------------------------------------------------------
 # 2. Eigen3  — header-only, REQUIRED (backs PlaneGCS)

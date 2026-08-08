@@ -26,12 +26,12 @@ use onecad_core::ids::{
     BodyId, DocumentId, DocumentRevision, JobId, RecordId, SnapshotId, WorkerEpoch,
 };
 use onecad_core::regen::{
-    AcceptResult, AcquireRequest, CheckpointArtifacts, ElementMapDelta, EngineError, Fencing,
-    GeometryEngine, HistoryPrefixHash, Lod, OpFailureCode, OpenSessionRequest, Outcome, PlanEvent,
-    PlanPrepared, PlanRequest, PlanStepEvent, PreparedMeshRef, RefResolution, RegenRequest,
-    ResolveRequest, RestoreRequest, RestoreResult, Signature, StepResult, StepSignatures,
-    StepStatus, StoppedReason, TessellateRequest, TessellateResult, WorkerElementEvidence,
-    WorkerHead,
+    AcceptResult, AcquireRequest, CheckpointArtifacts, Diagnostic, ElementMapDelta, EngineError,
+    Fencing, GeometryEngine, HistoryPrefixHash, Lod, OpFailureCode, OpenSessionRequest, Outcome,
+    PlanEvent, PlanPrepared, PlanRequest, PlanStepEvent, PreparedMeshRef, RefResolution,
+    RegenRequest, ResolveRequest, RestoreRequest, RestoreResult, Severity, Signature, StepResult,
+    StepSignatures, StepStatus, StoppedReason, TessellateRequest, TessellateResult,
+    WorkerElementEvidence, WorkerHead,
 };
 
 use onecad_core::document::refs::{
@@ -92,6 +92,8 @@ struct FakeBackend {
     /// (SCHEMA §7.5 `existing`), so a test can warm the promotion cache for an
     /// element id it did not mint in that runtime.
     existing: Mutex<Option<ElementId>>,
+    /// Simulates a worker that resolves only a prefix of an AcquireElementIds batch.
+    partial_acquire: bool,
     /// CHANGED curve members every `solve_drag`/`end_gesture` echoes (SCHEMA §7.4
     /// `curves`). Set by a test to model a solver that reshaped a curve — the
     /// channel `positions` cannot carry.
@@ -109,6 +111,7 @@ impl Default for FakeBackend {
             inline_meshes: false,
             descriptor: Mutex::new(serde_json::json!({ "fake": true })),
             existing: Mutex::new(None),
+            partial_acquire: false,
             echo_curves: Mutex::new(std::collections::BTreeMap::new()),
             state: Mutex::new(FakeState::default()),
         }
@@ -200,6 +203,16 @@ fn sigs(step: usize) -> StepSignatures {
     }
 }
 
+fn kernel_diagnostic() -> Diagnostic {
+    Diagnostic {
+        severity: Severity::Error,
+        code: "FILLET_WALKING_FAILED".into(),
+        message: "fake plan failure".into(),
+        stage: Some("build".into()),
+        evidence: Some(serde_json::json!({"contour": {"index": 1}})),
+    }
+}
+
 /// The opaque history-prefix token a well-behaved worker echoes (mirrors the
 /// executor's expectation, so verification passes by construction).
 fn echo_hash(request: &PlanRequest, last_valid: Option<usize>) -> HistoryPrefixHash {
@@ -223,6 +236,7 @@ impl GeometryEngine for FakeBackend {
                 code: OpFailureCode::OpFailed,
                 recoverable: false,
                 message: "fake plan failure".into(),
+                diagnostics: vec![kernel_diagnostic()],
             })]
         } else {
             let mut st = self.state.lock().unwrap();
@@ -263,6 +277,7 @@ impl GeometryEngine for FakeBackend {
                     status: StepStatus::Ok,
                     body_ids,
                     message: String::new(),
+                    diagnostics: vec![],
                 });
                 last_valid = Some(step);
             }
@@ -341,6 +356,7 @@ impl GeometryEngine for FakeBackend {
                 code: OpFailureCode::Unsupported,
                 recoverable: true,
                 message: "fake".into(),
+                diagnostics: vec![],
             });
         }
         self.state.lock().unwrap().checkpoint_saves += 1;
@@ -364,7 +380,8 @@ impl GeometryEngine for FakeBackend {
         // Echo one evidence entry per pick (empty `existing` — Rust mints the id).
         // `kind` follows the TopoKey prefix (`f:`/`e:`/`v:`), as the real worker's
         // `kind_of_prefix` does — a fillet's edge pick must not come back a face.
-        Ok(r.picks
+        let mut evidence: Vec<_> = r
+            .picks
             .into_iter()
             .map(|p| WorkerElementEvidence {
                 kind: match p.topo_key.as_str().as_bytes().first() {
@@ -378,7 +395,11 @@ impl GeometryEngine for FakeBackend {
                 descriptor: Some(self.descriptor.lock().unwrap().clone()),
                 existing: self.existing.lock().unwrap().clone(),
             })
-            .collect())
+            .collect();
+        if self.partial_acquire && evidence.len() > 1 {
+            evidence.pop();
+        }
+        Ok(evidence)
     }
     async fn resolve_refs(&self, _r: ResolveRequest) -> Result<Vec<RefResolution>, EngineError> {
         Ok(vec![])
@@ -412,6 +433,7 @@ impl SolverEngine for FakeBackend {
                 code: OpFailureCode::OpFailed,
                 recoverable: true,
                 message: "fake solver failure".into(),
+                diagnostics: vec![],
             });
         }
         Ok(SketchUpsertDto {
@@ -573,6 +595,7 @@ fn fillet_record(seed: u128, body: BodyId, edge: &str, anchor: Vec3) -> Operatio
         edge_ids: vec![el],
         edges: vec![edge_ref],
         chain_tangent_edges: false,
+        tangent_closure_version: None,
         extra: Default::default(),
     }));
     OperationRecord::new(RecordId(Uuid::from_u128(seed)), 0, "Fillet", op)
@@ -668,15 +691,26 @@ async fn projection_prefers_document_body_metadata() {
         visible: false,
     })
     .unwrap();
+    rt.apply(EditCommand::SetBodyColor {
+        body,
+        color: Some([10, 20, 30, 240]),
+    })
+    .unwrap();
 
     // The regen row is untouched — the projection is an OVERLAY, not a mutation of
     // the mirror (which the next regen would overwrite anyway).
     assert_ne!(rt.regen.bodies.get(body).unwrap().name, "Bracket");
     assert!(rt.regen.bodies.get(body).unwrap().visible);
+    assert!(rt.regen.bodies.get(body).unwrap().color.is_none());
 
     let dto = rt.projection().bodies.remove(&body.to_string()).unwrap();
     assert_eq!(dto.name, "Bracket", "the document's name wins");
     assert!(!dto.visible, "the document's visibility wins");
+    assert_eq!(
+        dto.color,
+        Some([10, 20, 30, 240]),
+        "the document's color wins"
+    );
 
     // A from-0 regen rebuilds the registry from `BodyRegistry::new()` (default name,
     // visible) — user intent must still win, and it is what a save writes.
@@ -685,9 +719,11 @@ async fn projection_prefers_document_body_metadata() {
     let dto = rt.projection().bodies.remove(&body.to_string()).unwrap();
     assert_eq!(dto.name, "Bracket");
     assert!(!dto.visible);
+    assert_eq!(dto.color, Some([10, 20, 30, 240]));
     let saved = rt.merged_bodies();
     let meta = saved.get(body).unwrap();
     assert_eq!((meta.name.as_str(), meta.visible), ("Bracket", false));
+    assert_eq!(meta.color, Some([10, 20, 30, 240]));
 }
 
 #[tokio::test]
@@ -2264,6 +2300,38 @@ async fn promote_selection_mints_ids_and_is_stable() {
     );
 }
 
+#[tokio::test]
+async fn promote_selection_rejects_partial_batch_without_minting() {
+    let backend = Arc::new(FakeBackend {
+        partial_acquire: true,
+        ..FakeBackend::default()
+    });
+    let mut rt = runtime_with(backend);
+    let body = BodyId(Uuid::from_u128(0xB0));
+    let before_promoted = rt.promoted.len();
+    let before_elements = rt.regen.elements.len();
+
+    let err = rt
+        .promote_selection(
+            SnapshotId(5),
+            body,
+            vec![(TopoKey::new("e:1"), None), (TopoKey::new("e:2"), None)],
+        )
+        .await
+        .expect_err("a partial promotion batch must fail closed");
+
+    assert!(matches!(
+        err,
+        EngineError::OpFailed {
+            code: onecad_core::regen::OpFailureCode::RefUnresolved,
+            recoverable: true,
+            ..
+        }
+    ));
+    assert_eq!(rt.promoted.len(), before_promoted);
+    assert_eq!(rt.regen.elements.len(), before_elements);
+}
+
 /// VF-M3, the RUST half of the stale-pick gate, isolated from the worker's.
 ///
 /// The real worker refuses a stale `snapshotId` too (SCHEMA §7.5), so a
@@ -2610,7 +2678,8 @@ fn failed_steps_maps_errored_records_with_their_reason() {
             },
         )
         .unwrap();
-    let failed = failed_steps_of(&timeline);
+    let diagnostics = BTreeMap::from([(1, vec![kernel_diagnostic()])]);
+    let failed = failed_steps_of(&timeline, &diagnostics);
     assert_eq!(
         failed.len(),
         1,
@@ -2618,6 +2687,7 @@ fn failed_steps_maps_errored_records_with_their_reason() {
     );
     assert_eq!(failed[0].record_id, bad.record_id.to_string());
     assert_eq!(failed[0].message, "revolve axis lineId not found");
+    assert_eq!(failed[0].diagnostics[0].code, "FILLET_WALKING_FAILED");
 }
 
 #[test]
@@ -2900,6 +2970,7 @@ async fn engine_failure_without_moved_fencing_reports_failed() {
         .await;
     assert_eq!(report.outcome_str(), "failed");
     assert!(report.failure_message().is_some());
+    assert_eq!(report.diagnostics[0].code, "FILLET_WALKING_FAILED");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

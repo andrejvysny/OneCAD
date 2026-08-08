@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onecad.dev/schemas/kernelbench/preset-v1.schema.json",
+  "title": "OneCAD kernelbench preset v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "presetId",
+    "suite",
+    "generator",
+    "caseCounts",
+    "metamorphCoverage",
+    "expectedVariants",
+    "backends",
+    "repeats",
+    "expectedRecords",
+    "expectedChildRuns",
+    "limits",
+    "searchDefaults"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "presetId": { "const": "fillet-foundation-t0" },
+    "suite": { "const": "fillet/foundation" },
+    "generator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "prng",
+        "integerToDouble",
+        "selectorContract",
+        "seed"
+      ],
+      "properties": {
+        "name": { "const": "fillet-foundation" },
+        "version": { "const": 1 },
+        "prng": { "const": "splitmix64" },
+        "integerToDouble": { "const": "top53-div-2pow53" },
+        "selectorContract": { "const": "semantic-v1" },
+        "seed": { "type": "string", "pattern": "^[0-9a-f]{16}$" }
+      }
+    },
+    "caseCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "supportedAnalyticBox",
+        "expectedLimitOversized",
+        "exploratoryValence3",
+        "exploratoryValence4",
+        "exploratoryOverflowWedge"
+      ],
+      "properties": {
+        "supportedAnalyticBox": { "const": 12 },
+        "expectedLimitOversized": { "const": 4 },
+        "exploratoryValence3": { "const": 8 },
+        "exploratoryValence4": { "const": 8 },
+        "exploratoryOverflowWedge": { "const": 4 }
+      }
+    },
+    "metamorphCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["domains", "baseCases", "translation", "rotation"],
+      "properties": {
+        "domains": { "const": ["supported", "expectedLimit"] },
+        "baseCases": { "const": 16 },
+        "translation": { "const": [1000, -2000, 3000] },
+        "rotation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["angleDegrees", "axis", "center"],
+          "properties": {
+            "angleDegrees": { "const": 17.137 },
+            "axis": { "const": [1, 2, 3] },
+            "center": { "const": "inputCentroid" }
+          }
+        }
+      }
+    },
+    "expectedVariants": { "const": 68 },
+    "backends": { "const": ["raw-occt", "onecad"] },
+    "repeats": { "const": 2 },
+    "expectedRecords": { "const": 136 },
+    "expectedChildRuns": { "const": 272 },
+    "limits": { "$ref": "#/$defs/limits" },
+    "searchDefaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parameter",
+        "growthFactor",
+        "maxProbes",
+        "relativePrecision",
+        "absolutePrecision",
+        "relativeOffsets"
+      ],
+      "properties": {
+        "parameter": { "const": "operation.radius" },
+        "growthFactor": { "const": 2 },
+        "maxProbes": { "const": 256 },
+        "relativePrecision": { "const": 0.000001 },
+        "absolutePrecision": { "const": 0.000001 },
+        "relativeOffsets": { "const": [0.01, 0.0001, 0.000001, 0.00000001] }
+      }
+    }
+  },
+  "$defs": {
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resources", "quality"],
+      "properties": {
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "wallTimeMs",
+            "addressSpaceBytes",
+            "stdoutBytes",
+            "stderrBytes",
+            "artifactBytes"
+          ],
+          "properties": {
+            "wallTimeMs": { "type": "integer", "minimum": 1, "maximum": 3600000 },
+            "addressSpaceBytes": { "type": "integer", "minimum": 16777216, "maximum": 68719476736 },
+            "stdoutBytes": { "type": "integer", "minimum": 1024, "maximum": 16777216 },
+            "stderrBytes": { "type": "integer", "minimum": 1024, "maximum": 16777216 },
+            "artifactBytes": { "type": "integer", "minimum": 1024, "maximum": 1073741824 }
+          }
+        },
+        "quality": {
+          "type": "object",
+          "additionalProperties": false,
+          "maxProperties": 0
+        }
+      }
+    }
+  }
+}

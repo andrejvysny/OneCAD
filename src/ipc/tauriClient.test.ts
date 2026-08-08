@@ -1393,6 +1393,51 @@ describe("tauriClient preview seam (local) + commit delegation", () => {
     unsub();
   });
 
+  it("keeps kernel diagnostics separate on a rejected exact preview", async () => {
+    const diagnostics = [
+      {
+        severity: "error",
+        code: "FILLET_WALKING_FAILED",
+        message: "failed while advancing contour",
+        stage: "build",
+        evidence: { contour: { index: 1 } },
+      },
+    ];
+    mockIPC((cmd) => {
+      if (cmd === "get_sketch") {
+        return {
+          sketchId: "sk",
+          plane: XZ_PLANE,
+          entities: [],
+          constraints: [],
+          dof: 0,
+          status: "FullyConstrained",
+        };
+      }
+      if (cmd === "get_sketch_regions") return { regions: [PREVIEW_REGION] };
+      if (cmd === "preview_op") {
+        return Promise.reject({ kind: "opFailed", message: "fillet failed", diagnostics });
+      }
+    });
+    const client = createTauriClient();
+    await client.getSketch("sk");
+    await client.getSketchRegions("sk");
+    const seen: Array<{ error?: { diagnostics?: unknown[]; evidence?: unknown[] } }> = [];
+    const unsub = client.onPreviewResult((result) => seen.push(result));
+    const session = await client.beginPreview({
+      opType: "Extrude",
+      sketchId: "sk",
+      regionId: "r",
+      params: { distance: 10 },
+    });
+    client.updatePreview(session.sessionId, { distance: 20 }, 1);
+    await tick();
+
+    expect(seen[0]?.error?.diagnostics).toEqual(diagnostics);
+    expect(seen[0]?.error?.evidence).toBeUndefined();
+    unsub();
+  });
+
   it("endPreview(commit) materializes the op through apply_edit_command", async () => {
     const cmds: string[] = [];
     mockIPC(
@@ -1661,6 +1706,79 @@ describe("tauriClient promoteSelection", () => {
   });
 });
 
+describe("tauriClient prepareEdgeOp", () => {
+  it("uses the published snapshot and preserves mutually-exclusive edge addresses", async () => {
+    let args: Record<string, unknown> | undefined;
+    mockIPC(
+      (cmd, payload) => {
+        if (cmd === "prepare_edge_op") {
+          args = payload as Record<string, unknown>;
+          return {
+            snapshotId: 5012,
+            targetBodyId: "body_uuid-1",
+            edges: [{ topoKey: "e:4", elementId: "el_4", bodyId: "body_uuid-1", kind: "edge", picked: true }],
+            refusal: null,
+          };
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const client = createTauriClient();
+    const unsub = client.onDocumentChanged(() => {});
+    await tick();
+    await emit("document-changed", {
+      revision: 3,
+      snapshotId: 5012,
+      changedBodies: [],
+      removedBodies: [],
+    });
+    await tick();
+
+    const result = await client.prepareEdgeOp({
+      mode: "Fillet",
+      chainTangentEdges: true,
+      pickedEdges: [
+        { bodyId: "uuid-1", topoKey: "e:4" },
+        { elementId: "el_9" },
+      ],
+    });
+
+    expect(result.edges[0].topoKey).toBe("e:4");
+    expect(args?.snapshotId).toBe(5012);
+    expect(args?.mode).toBe("Fillet");
+    expect(args?.chainTangentEdges).toBe(true);
+    expect(args?.pickedEdges).toEqual([
+      { bodyId: "body_uuid-1", topoKey: "e:4", elementId: null },
+      { bodyId: null, topoKey: null, elementId: "el_9" },
+    ]);
+    unsub();
+  });
+
+  it("rejects a prepared closure whose echoed snapshot is stale", async () => {
+    mockIPC(
+      (cmd) =>
+        cmd === "prepare_edge_op"
+          ? {
+              snapshotId: 8,
+              targetBodyId: "body_uuid-1",
+              edges: [{ topoKey: "e:4", elementId: "el_4", bodyId: "body_uuid-1", kind: "edge", picked: true }],
+              refusal: null,
+            }
+          : undefined,
+      { shouldMockEvents: true },
+    );
+    const client = createTauriClient();
+    await expect(
+      client.prepareEdgeOp({
+        snapshotId: 7,
+        mode: "Fillet",
+        chainTangentEdges: true,
+        pickedEdges: [{ bodyId: "uuid-1", topoKey: "e:4" }],
+      }),
+    ).rejects.toThrow("stale");
+  });
+});
+
 // ── Projection hydration bridge (projection-updated → documentStore) ──────────
 
 describe("tauriClient projection hydration", () => {
@@ -1800,6 +1918,14 @@ describe("tauriClient regen-finished correlation", () => {
                 sourceRevision: 12,
                 outcome: "failed",
                 message: "worker crashed: boom",
+                diagnostics: [
+                  {
+                    severity: "error",
+                    code: "FILLET_WALKING_FAILED",
+                    message: "worker crashed: boom",
+                    stage: "build",
+                  },
+                ],
               }),
             0,
           );
@@ -1813,6 +1939,7 @@ describe("tauriClient regen-finished correlation", () => {
     expect(res.revision).toBe(12);
     expect(res.changedBodies).toEqual([]); // failure → empty bodies (no throw)
     expect(res.errorMessage).toBe("worker crashed: boom");
+    expect(res.diagnostics?.[0]?.code).toBe("FILLET_WALKING_FAILED");
   });
 
   it("does NOT resolve off a regen-finished whose sourceRevision is below the commit's R", async () => {
@@ -1856,7 +1983,19 @@ describe("tauriClient regen-finished correlation", () => {
               revision: 10,
               sourceRevision: 9,
               outcome: "published",
-              failedSteps: [{ recordId: recordId as string, message: "extrude self-intersects" }],
+              failedSteps: [
+                {
+                  recordId: recordId as string,
+                  message: "extrude self-intersects",
+                  diagnostics: [
+                    {
+                      severity: "error",
+                      code: "FILLET_WALKING_FAILED",
+                      message: "extrude self-intersects",
+                    },
+                  ],
+                },
+              ],
             });
           }, 0);
           return readyProjection(9); // R = 9
@@ -1868,6 +2007,7 @@ describe("tauriClient regen-finished correlation", () => {
     const res = await createTauriClient().applyOperation(op);
     expect(res.changedBodies).toEqual([]); // NOT the published "other" body
     expect(res.errorMessage).toBe("extrude self-intersects");
+    expect(res.diagnostics?.[0]?.code).toBe("FILLET_WALKING_FAILED");
     expect(res.revision).toBe(10);
   });
 

@@ -87,6 +87,14 @@ struct RestoreOutcome {
     std::string stored_hash;        // the checkpoint's history-prefix hash
 };
 
+// Immutable published-state copy for snapshot-fenced read-only handlers. All
+// fields are captured under one `Session::mu_` acquisition.
+struct PublishedStateSnapshot {
+    std::uint64_t snapshot_id = 0;
+    BodyStore bodies;
+    elementmap::ElementMapPartition partition;
+};
+
 class Session {
 public:
     Session() = default;
@@ -147,6 +155,15 @@ public:
     BodyStore bodies_copy() const;
     elementmap::ElementMapPartition partition_copy() const;
     std::uint64_t current_snapshot_id() const;
+
+    // Atomically fence `expected_snapshot_id` and copy its bodies + partition.
+    // Returns nullopt when the requested snapshot is no longer published.
+    std::optional<PublishedStateSnapshot> published_state_at(
+        std::uint64_t expected_snapshot_id) const {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (snapshot_id_ != expected_snapshot_id) return std::nullopt;
+        return PublishedStateSnapshot{snapshot_id_, bodies_, partition_};
+    }
 
     // DiscardPrepared / cancel / failure: drop the scratch (best-effort). Returns
     // whether a scratch was dropped.

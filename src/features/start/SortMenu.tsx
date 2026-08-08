@@ -17,7 +17,7 @@ type SortMenuProps = {
 /**
  * Recent-projects sort dropdown (prototype 1a, lines 63-70): a hairline chevron
  * button that opens a 150px menu of "Date modified" / "Name". The menu is
- * right-aligned (bottom-end) so it stays inside the card's right edge.
+ * right-aligned (bottom-end) so it stays inside the window's right edge.
  */
 export function SortMenu({ value, onChange }: SortMenuProps) {
   const [open, setOpen] = useState(false);

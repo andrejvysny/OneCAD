@@ -86,12 +86,19 @@ describe("filletParams — R-WP2.1 dual edge rule (AddOperation from UI selectio
         { primary: { bodyId: `body_${bodyUuid}`, kind: "edge" }, anchor: { worldPoint: [1, 2, 3] } },
         { primary: { bodyId: bodyUuid, kind: "edge" }, anchor: { worldPoint: [4, 5, 6] } },
       ],
-      params: { mode: "Fillet", radius: 2, edgeIds: ["e:5", "e:9"], chainTangentEdges: true },
+      params: {
+        mode: "Fillet",
+        radius: 2,
+        edgeIds: ["e:5", "e:9"],
+        chainTangentEdges: true,
+        tangentClosureVersion: 1,
+      },
     };
     const p = addedParams(op);
     expect(p.radius).toEqual({ value: 2 });
     expect(p.edgeIds).toEqual(["e:5", "e:9"]);
     expect(p.chainTangentEdges).toBe(true);
+    expect(p.tangentClosureVersion).toBe(1);
     const edges = p.edges as WireElementRef[];
     expect(edges).toHaveLength(2);
     // bodyId stripped to the bare uuid; primary.element == edgeIds[i] (F2 lockstep).
@@ -111,6 +118,7 @@ describe("filletParams — R-WP2.1 dual edge rule (AddOperation from UI selectio
     const p = addedParams(op);
     expect(p.edgeIds).toEqual(["e:3"]);
     expect("edges" in p).toBe(false);
+    expect("tangentClosureVersion" in p).toBe(false);
   });
 
   it("marshals a bare-`edgeIds` fillet when the op carries no inputs (legacy path)", () => {
@@ -204,6 +212,7 @@ describe("rewriteFilletEdgeParams — the dual edge_ids/edges lockstep rule", ()
       { primary: { bodyId: "b1", elementId: "el_c", kind: "edge" } },
     ],
     chainTangentEdges: true,
+    tangentClosureVersion: 1,
   };
 
   it("replaces ONLY the target slot in BOTH arrays, keeping siblings", () => {
@@ -220,6 +229,7 @@ describe("rewriteFilletEdgeParams — the dual edge_ids/edges lockstep rule", ()
     // radius passes through as a Scalar; chain flag preserved.
     expect(params.radius).toEqual({ value: 2 });
     expect(params.chainTangentEdges).toBe(true);
+    expect(params.tangentClosureVersion).toBe(1);
   });
 
   it("keeps edgeIds[index] and edges[index].primary.elementId identical", () => {
@@ -235,6 +245,7 @@ describe("rewriteFilletEdgeParams — the dual edge_ids/edges lockstep rule", ()
     expect(params.edgeIds).toEqual(["el_a", "el_b"]);
     expect(params.edges).toHaveLength(2);
     expect(params.edges?.[1].primary?.elementId).toBe("el_b");
+    expect("tangentClosureVersion" in params).toBe(false);
   });
 
   it("wraps into an UpdateOperationParams command (opType Fillet)", () => {

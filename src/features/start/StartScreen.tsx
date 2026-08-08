@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/ui/Button";
 import { TextInput } from "@/ui/TextInput";
-import { SectionLabel } from "@/ui/SectionLabel";
-import { MonoValue } from "@/ui/MonoValue";
 import { Icon } from "@/icons/Icon";
 import { useAppStore } from "@/stores/appStore";
 import type { RecentProject } from "@/ipc/types";
@@ -10,8 +8,23 @@ import { RecentGrid } from "./RecentGrid";
 import { RecentGridSkeleton } from "./RecentGridSkeleton";
 import { RecoveryCard } from "./RecoveryCard";
 import { SortMenu, type SortKey } from "./SortMenu";
+import { StartSidebar } from "./StartSidebar";
 
 const APP_VERSION = "v0.1.0";
+
+/** Sidebar nav sections (prototype 1b). Only "recent" has a real backing list. */
+export type StartNavKey = "recent" | "starred" | "templates";
+
+const NAV_TITLE: Record<StartNavKey, string> = {
+  recent: "Recent",
+  starred: "Starred",
+  templates: "Templates",
+};
+
+const NAV_EMPTY_HINT: Record<"starred" | "templates", string> = {
+  starred: "No starred projects yet.",
+  templates: "No templates yet.",
+};
 
 /** Filter (case-insensitive substring on name) + sort — mirrors prototype 1a. */
 function filterSort(
@@ -29,14 +42,17 @@ function filterSort(
 }
 
 /**
- * Start screen — variant 1a "card on canvas": a centered 780px card holding the
- * wordmark, the New / Open / Import actions, and the searchable + sortable
- * recent-projects grid.
+ * Start screen — variant 1b "sidebar + grid": a full-window layout with a
+ * fixed nav rail (wordmark, Recent/Starred/Templates, Import STEP) on the left
+ * and a searchable + sortable recent-projects grid filling the rest.
  */
 export function StartScreen() {
   const recents = useAppStore((s) => s.recents);
   const recentsStatus = useAppStore((s) => s.recentsStatus);
   const loadRecents = useAppStore((s) => s.loadRecents);
+  const renameRecent = useAppStore((s) => s.renameRecent);
+  const deleteRecent = useAppStore((s) => s.deleteRecent);
+  const revealRecent = useAppStore((s) => s.revealRecent);
   const newProject = useAppStore((s) => s.newProject);
   const openProject = useAppStore((s) => s.openProject);
   const openDialogAndOpen = useAppStore((s) => s.openDialogAndOpen);
@@ -50,6 +66,7 @@ export function StartScreen() {
 
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortKey>("date");
+  const [nav, setNav] = useState<StartNavKey>("recent");
 
   useEffect(() => {
     if (recentsStatus === "idle") void loadRecents();
@@ -58,6 +75,22 @@ export function StartScreen() {
   useEffect(() => {
     if (recoveryStatus === "idle") void checkRecovery();
   }, [recoveryStatus, checkRecovery]);
+
+  // A project deleted/renamed outside the app (Finder, another process) while
+  // the start screen sits idle only clears on the next `loadRecents()` call —
+  // refresh on refocus so that happens without an explicit reload. Mirrors
+  // `ViewportRoot.tsx`'s wake listener verbatim.
+  useEffect(() => {
+    const onWake = () => {
+      if (recentsStatus === "ready") void loadRecents();
+    };
+    document.addEventListener("visibilitychange", onWake);
+    window.addEventListener("focus", onWake);
+    return () => {
+      document.removeEventListener("visibilitychange", onWake);
+      window.removeEventListener("focus", onWake);
+    };
+  }, [recentsStatus, loadRecents]);
 
   // Idle-prefetch the editor chunk (App.tsx's lazy() import, EXACT same
   // specifier) once recents have loaded, so New-project rarely blocks on a
@@ -83,100 +116,122 @@ export function StartScreen() {
   const bootError = recentsStatus === "error" || recoveryStatus === "error";
 
   return (
-    <div className="flex h-full w-full items-center justify-center bg-canvas-start font-ui text-ink">
-      <div className="w-[780px] max-w-[calc(100%-32px)] rounded-lg border border-border bg-surface px-7 pb-7 pt-[26px] shadow-start-card">
-        {/* Wordmark + version */}
-        <div className="mb-[18px] flex items-baseline gap-2">
-          <span className="text-[16px] font-bold tracking-[-0.01em] text-ink">
-            OneCAD
-          </span>
-          <span className="flex-1" />
-          <MonoValue className="text-[11px] text-ink-6">{APP_VERSION}</MonoValue>
-        </div>
+    <div className="flex h-full w-full flex-col font-ui text-ink">
+      {/* Invisible full-width titlebar: the window uses titleBarStyle "Overlay"
+          (macOS draws the traffic lights over the webview, no native bar), and
+          this screen has no TitleBar.tsx of its own — without a drag region the
+          whole top edge is dead. Spans sidebar + main so dragging works anywhere
+          along the top, not just over the sidebar. Split into two panes colored
+          to match what sits directly beneath each — a single flat tint would
+          show as a seam against the sidebar/main boundary below it. */}
+      <div className="flex h-9 w-full flex-none" aria-hidden="true">
+        <div data-tauri-drag-region className="w-[220px] shrink-0 border-r border-border bg-panel" />
+        <div data-tauri-drag-region className="flex-1 bg-surface" />
+      </div>
 
-        {/* Primary actions */}
-        <div className="mb-[22px] flex gap-2.5">
-          <Button variant="primary" size="lg" onClick={() => void newProject()}>
-            <Icon name="plus" size={15} strokeWidth={2} />
-            New project
-          </Button>
-          <Button variant="secondary" size="lg" onClick={() => void openDialogAndOpen()}>
-            Open…
-          </Button>
-          <Button variant="secondary" size="lg" onClick={() => void importStep()}>
-            <Icon name="import" size={15} />
-            Import STEP…
-          </Button>
-        </div>
+      <div className="flex flex-1 overflow-hidden">
+        <StartSidebar
+          active={nav}
+          onNavigate={setNav}
+          onImportStep={() => void importStep()}
+          version={APP_VERSION}
+        />
 
-        {/* Import failure — the StatusBar this would normally use is editor-only
-            chrome, and a failed import leaves the user right here. */}
-        {importError && (
-          <div role="alert" className="mb-[22px] text-[12.5px] text-traffic-close">
-            Import failed: {importError}
+        <main className="flex-1 overflow-auto bg-surface px-8 pb-7 pt-0">
+          {/* Header: section title · search · sort · Open · New project */}
+          <div className="mb-5 flex items-center gap-2.5">
+            <h1 className="text-[17px] font-bold tracking-[-0.01em] text-ink">
+              {NAV_TITLE[nav]}
+            </h1>
+            <span className="flex-1" />
+            {nav === "recent" && (
+              <>
+                <TextInput
+                  leadingIcon="search"
+                  placeholder="Search projects…"
+                  aria-label="Search projects"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  wrapperClassName="w-[220px]"
+                />
+                <SortMenu value={sort} onChange={setSort} />
+              </>
+            )}
+            <Button variant="secondary" size="lg" onClick={() => void openDialogAndOpen()}>
+              Open…
+            </Button>
+            <Button variant="primary" size="lg" onClick={() => void newProject()}>
+              <Icon name="plus" size={15} strokeWidth={2} />
+              New project
+            </Button>
           </div>
-        )}
 
-        {/* Crash-recovery offer (a crashed session left an autosave) */}
-        {recovery && (
-          <RecoveryCard
-            recovery={recovery}
-            onRestore={recoverDocument}
-            onDiscard={discardRecovery}
-          />
-        )}
-
-        {/* Recent header: label · search · sort */}
-        <div className="mb-[14px] flex items-center gap-2.5">
-          <SectionLabel>Recent projects</SectionLabel>
-          <span className="flex-1" />
-          <TextInput
-            leadingIcon="search"
-            placeholder="Search projects…"
-            aria-label="Search projects"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            wrapperClassName="w-[220px]"
-          />
-          <SortMenu value={sort} onChange={setSort} />
-        </div>
-
-        <div aria-busy={!ready}>
-          {!ready && !bootError && <RecentGridSkeleton />}
-          {bootError && (
-            <div className="flex flex-col items-center gap-3 pb-5 pt-9 text-center">
-              <div className="text-[12.5px] text-traffic-close">
-                Could not load the start screen.
-              </div>
-              <div className="flex gap-2">
-                {recentsStatus === "error" && (
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => void loadRecents()}
-                  >
-                    Retry recents
-                  </Button>
-                )}
-                {recoveryStatus === "error" && (
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => void checkRecovery()}
-                  >
-                    Retry recovery
-                  </Button>
-                )}
-              </div>
+          {/* Import failure — the StatusBar this would normally use is editor-only
+              chrome, and a failed import leaves the user right here. */}
+          {importError && (
+            <div role="alert" className="mb-5 text-[12.5px] text-traffic-close">
+              Import failed: {importError}
             </div>
           )}
-          {ready && list.length > 0 && (
-            <RecentGrid projects={list} onOpen={openProject} />
+
+          {/* Crash-recovery offer (a crashed session left an autosave) */}
+          {recovery && (
+            <RecoveryCard
+              recovery={recovery}
+              onRestore={recoverDocument}
+              onDiscard={discardRecovery}
+            />
           )}
-          {ready && list.length === 0 && (
-            <EmptyState searching={query.length > 0} />
+
+          {nav !== "recent" ? (
+            <div className="pb-5 pt-9 text-center text-[12.5px] text-ink-6">
+              {NAV_EMPTY_HINT[nav]}
+            </div>
+          ) : (
+            <div aria-busy={!ready}>
+              {!ready && !bootError && <RecentGridSkeleton />}
+              {bootError && (
+                <div className="flex flex-col items-center gap-3 pb-5 pt-9 text-center">
+                  <div className="text-[12.5px] text-traffic-close">
+                    Could not load the start screen.
+                  </div>
+                  <div className="flex gap-2">
+                    {recentsStatus === "error" && (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => void loadRecents()}
+                      >
+                        Retry recents
+                      </Button>
+                    )}
+                    {recoveryStatus === "error" && (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => void checkRecovery()}
+                      >
+                        Retry recovery
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              )}
+              {ready && list.length > 0 && (
+                <RecentGrid
+                  projects={list}
+                  onOpen={openProject}
+                  onRename={renameRecent}
+                  onDelete={deleteRecent}
+                  onReveal={revealRecent}
+                />
+              )}
+              {ready && list.length === 0 && (
+                <EmptyState searching={query.length > 0} />
+              )}
+            </div>
           )}
-        </div>
+        </main>
       </div>
     </div>
   );

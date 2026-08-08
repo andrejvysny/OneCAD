@@ -54,6 +54,23 @@ export interface AppState {
   importError: string | null;
 
   loadRecents(): Promise<void>;
+  /**
+   * Rename a recent project's `.onecad` file (card menu). Returns `false` on
+   * failure (empty name, name collision, fs error) — caught + logged here, not
+   * thrown, so the card's inline-rename input can revert without a rejection
+   * crossing a `void`-called action (same rule as `loadRecents`). Refreshes
+   * `recents` on success.
+   */
+  renameRecent(path: string, newName: string): Promise<boolean>;
+  /**
+   * Move a recent project's `.onecad` file to the OS trash (card menu). Returns
+   * `false` on failure, same reasoning as `renameRecent`. Refreshes `recents`
+   * on success.
+   */
+  deleteRecent(path: string): Promise<boolean>;
+  /** Reveal a recent project's file in the OS file manager (card menu). Best-
+   *  effort — a failure is logged, not surfaced (nothing to revert in the UI). */
+  revealRecent(path: string): Promise<void>;
   newProject(): Promise<void>;
   openProject(path: string): Promise<void>;
   openDialogAndOpen(): Promise<void>;
@@ -128,6 +145,36 @@ export const appStore = createStore<AppState>()((set, get) => {
       } catch (e) {
         logError("app", "listRecents FAILED", { error: e });
         set({ recentsStatus: "error" });
+      }
+    },
+
+    async renameRecent(path, newName) {
+      try {
+        await client.renameRecentProject(path, newName);
+        void get().loadRecents();
+        return true;
+      } catch (e) {
+        logError("app", "renameRecent FAILED", { error: e });
+        return false;
+      }
+    },
+
+    async deleteRecent(path) {
+      try {
+        await client.deleteRecentProject(path);
+        void get().loadRecents();
+        return true;
+      } catch (e) {
+        logError("app", "deleteRecent FAILED", { error: e });
+        return false;
+      }
+    },
+
+    async revealRecent(path) {
+      try {
+        await client.revealInFileManager(path);
+      } catch (e) {
+        logError("app", "revealRecent FAILED", { error: e });
       }
     },
 

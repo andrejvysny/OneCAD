@@ -785,29 +785,65 @@ fn parse_signatures(v: Option<&Value>) -> StepSignatures {
 }
 
 fn parse_diagnostics(v: Option<&Value>) -> Vec<Diagnostic> {
-    v.and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .map(|d| Diagnostic {
-                    severity: match d.get("severity").and_then(Value::as_str) {
-                        Some("error") => Severity::Error,
-                        Some("info") => Severity::Info,
-                        _ => Severity::Warning,
-                    },
-                    code: d
-                        .get("code")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                    message: d
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                })
-                .collect()
+    let Some(array) = v.and_then(Value::as_array) else {
+        if v.is_some_and(|value| !value.is_null()) {
+            tracing::warn!("worker diagnostics ignored: expected array");
+        }
+        return Vec::new();
+    };
+    array
+        .iter()
+        .take(64)
+        .filter_map(|value| {
+            let Some(object) = value.as_object() else {
+                tracing::warn!("worker diagnostic ignored: expected object");
+                return None;
+            };
+            let (Some(code), Some(message)) = (
+                object.get("code").and_then(Value::as_str),
+                object.get("message").and_then(Value::as_str),
+            ) else {
+                tracing::warn!("worker diagnostic ignored: malformed required fields");
+                return None;
+            };
+            if code.len() > 128 || message.len() > 4096 {
+                tracing::warn!("worker diagnostic ignored: text exceeds bounds");
+                return None;
+            }
+            let severity = match object.get("severity").and_then(Value::as_str) {
+                Some("error") => Severity::Error,
+                Some("info") => Severity::Info,
+                Some("warning") => Severity::Warning,
+                _ => {
+                    tracing::warn!("worker diagnostic ignored: malformed severity");
+                    return None;
+                }
+            };
+            let stage = object
+                .get("stage")
+                .and_then(Value::as_str)
+                .filter(|stage| stage.len() <= 64)
+                .map(str::to_owned);
+            if object.contains_key("stage") && stage.is_none() {
+                tracing::warn!("worker diagnostic stage ignored: malformed or oversized");
+            }
+            let evidence = object.get("evidence").and_then(|evidence| {
+                if evidence.is_object() && evidence.to_string().len() <= 65_536 {
+                    Some(evidence.clone())
+                } else {
+                    tracing::warn!("worker diagnostic evidence ignored: malformed or oversized");
+                    None
+                }
+            });
+            Some(Diagnostic {
+                severity,
+                code: code.to_owned(),
+                message: message.to_owned(),
+                stage,
+                evidence,
+            })
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1149,6 +1185,7 @@ fn parse_per_step(v: Option<&Value>) -> Result<Vec<StepResult>, String> {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string(),
+                diagnostics: parse_diagnostics(r.get("diagnostics")),
             })
         })
         .collect()
@@ -1506,10 +1543,20 @@ pub fn map_error(err: &ErrorObject) -> EngineError {
         message = %err.message,
         "worker error frame"
     );
+    let diagnostic_value = match err.detail.as_ref() {
+        Some(detail) if detail.is_object() => detail.get("diagnostics"),
+        Some(_) => {
+            tracing::warn!("worker error detail ignored: expected object");
+            None
+        }
+        None => None,
+    };
+    let diagnostics = parse_diagnostics(diagnostic_value);
     let op = |code| EngineError::OpFailed {
         code,
         recoverable: true,
         message: err.message.clone(),
+        diagnostics: diagnostics.clone(),
     };
     match err.code {
         ErrorCode::OpFailed => op(OpFailureCode::OpFailed),
@@ -2390,6 +2437,120 @@ pub fn parse_project_face_boundary(result: &Value) -> Result<Option<ProjectionPa
             .unwrap_or(u32::MAX),
         points,
         entities,
+    }))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edge-op authoring handshake (`PrepareEdgeOp`)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeOpMode {
+    Fillet,
+    Chamfer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EdgeOpPick<'a> {
+    pub body: Option<BodyId>,
+    pub address: FaceAddress<'a>,
+}
+
+#[must_use]
+pub fn prepare_edge_op_args(
+    snapshot: SnapshotId,
+    mode: EdgeOpMode,
+    picks: &[EdgeOpPick<'_>],
+    chain_tangent_edges: bool,
+) -> Value {
+    let picked: Vec<Value> = picks
+        .iter()
+        .map(|pick| {
+            let mut entry = json!({});
+            if let Some(body) = pick.body {
+                entry["bodyId"] = Value::String(body_id_wire(body));
+            }
+            pick.address.write_into(&mut entry);
+            entry
+        })
+        .collect();
+    json!({
+        "snapshotId": snapshot.0,
+        "mode": match mode { EdgeOpMode::Fillet => "Fillet", EdgeOpMode::Chamfer => "Chamfer" },
+        "pickedEdges": picked,
+        "chainTangentEdges": chain_tangent_edges,
+    })
+}
+
+pub fn parse_prepare_edge_op(result: &Value) -> Result<crate::dto::PrepareEdgeOpDto, String> {
+    let snapshot_id = result
+        .get("snapshotId")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "PrepareEdgeOp: result is missing `snapshotId`".to_string())?;
+    let target_body_id = result
+        .get("targetBodyId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let refusal = parse_edge_op_refusal(result.get("refusal"))?;
+    let edges = match result.get("edges") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(parse_edge_op_evidence)
+            .collect::<Result<Vec<_>, _>>()?,
+        None | Some(Value::Null) => Vec::new(),
+        Some(_) => return Err("PrepareEdgeOp: `edges` must be an array".into()),
+    };
+    if refusal.is_none() && (target_body_id.is_empty() || edges.is_empty()) {
+        return Err("PrepareEdgeOp: accepted result has no body or closure".into());
+    }
+    Ok(crate::dto::PrepareEdgeOpDto {
+        snapshot_id,
+        target_body_id,
+        edges,
+        refusal,
+    })
+}
+
+fn parse_edge_op_evidence(v: &Value) -> Result<crate::dto::EdgeOpEvidenceDto, String> {
+    let topo_key = v
+        .get("topoKey")
+        .and_then(Value::as_str)
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| "PrepareEdgeOp: edge is missing `topoKey`".to_string())?;
+    Ok(crate::dto::EdgeOpEvidenceDto {
+        topo_key: topo_key.to_string(),
+        picked: v.get("picked").and_then(Value::as_bool).unwrap_or(false),
+        element_id: None,
+        body_id: None,
+        kind: None,
+        anchor: v.get("anchor").filter(|value| !value.is_null()).cloned(),
+        descriptor: v
+            .get("descriptor")
+            .filter(|value| !value.is_null())
+            .cloned(),
+    })
+}
+
+fn parse_edge_op_refusal(
+    value: Option<&Value>,
+) -> Result<Option<crate::dto::EdgeOpRefusalDto>, String> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let code = value
+        .get("code")
+        .and_then(Value::as_str)
+        .filter(|code| !code.is_empty())
+        .ok_or_else(|| "PrepareEdgeOp: refusal is missing `code`".to_string())?;
+    Ok(Some(crate::dto::EdgeOpRefusalDto {
+        code: code.to_string(),
+        message: value
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        edges: str_array(value.get("edges")),
     }))
 }
 
@@ -3551,6 +3712,65 @@ mod tests {
     }
 
     #[test]
+    fn failed_terminal_diagnostics_keep_optional_evidence_and_ignore_bad_detail() {
+        let job = JobId(Uuid::from_u128(8));
+        let result = json!({
+            "preparedSnapshotId": 12,
+            "lastValidStep": null,
+            "stoppedReason": "opFailed",
+            "perStepResults": [{
+                "stepIndex": 0,
+                "status": "opFailed",
+                "message": "fillet failed",
+                "diagnostics": [{
+                    "severity": "error",
+                    "code": "FILLET_WALKING_FAILED",
+                    "message": "fillet failed",
+                    "stage": "build",
+                    "evidence": {"metrics": {"requestedRadius": 11.0}}
+                }, {
+                    "severity": "error",
+                    "code": "BAD_OPTIONAL",
+                    "message": "still usable",
+                    "stage": 7,
+                    "evidence": []
+                }]
+            }],
+            "historyPrefixHash": "e3b0"
+        });
+        let prepared = parse_plan_prepared(job, &result).unwrap();
+        let diagnostics = &prepared.per_step[0].diagnostics;
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0].stage.as_deref(), Some("build"));
+        assert!(diagnostics[0].evidence.is_some());
+        assert!(diagnostics[1].stage.is_none());
+        assert!(diagnostics[1].evidence.is_none());
+    }
+
+    #[test]
+    fn diagnostic_bounds_drop_excess_and_malformed_optional_fields() {
+        let valid = json!({"severity": "info", "code": "OK", "message": "usable"});
+        let many = Value::Array(std::iter::repeat_n(valid.clone(), 65).collect());
+        assert_eq!(parse_diagnostics(Some(&many)).len(), 64);
+
+        let bounded = json!([
+            {"severity": "error", "code": "x".repeat(129), "message": "ignored"},
+            {
+                "severity": "warning",
+                "code": "KEPT",
+                "message": "usable",
+                "stage": "x".repeat(65),
+                "evidence": {"value": "x".repeat(65_537)}
+            }
+        ]);
+        let parsed = parse_diagnostics(Some(&bounded));
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].code, "KEPT");
+        assert!(parsed[0].stage.is_none());
+        assert!(parsed[0].evidence.is_none());
+    }
+
+    #[test]
     fn plan_prepared_base_only_last_valid_null() {
         let job = JobId(Uuid::from_u128(1));
         let result = json!({
@@ -3807,6 +4027,39 @@ mod tests {
                 recoverable: true,
                 ..
             }
+        ));
+
+        let e = map_error(&ErrorObject {
+            code: ErrorCode::OpFailed,
+            message: "top-level remains usable".into(),
+            detail: Some(json!({"diagnostics": "malformed"})),
+            retriable: false,
+        });
+        assert!(matches!(
+            e,
+            EngineError::OpFailed {
+                diagnostics,
+                ..
+            } if diagnostics.is_empty()
+        ));
+
+        let e = map_error(&ErrorObject {
+            code: ErrorCode::GeometryInvalid,
+            message: "top-level remains usable".into(),
+            detail: Some(json!({
+                "diagnostics": [
+                    {"severity": "future", "code": "BAD", "message": "ignored"},
+                    {"severity": "error", "code": "GOOD", "message": "kept"}
+                ]
+            })),
+            retriable: false,
+        });
+        assert!(matches!(
+            e,
+            EngineError::OpFailed {
+                diagnostics,
+                ..
+            } if diagnostics.len() == 1 && diagnostics[0].code == "GOOD"
         ));
     }
 }
@@ -4875,6 +5128,7 @@ mod body_wire_tests {
             edge_ids: vec![ElementId::new("e:14")],
             edges: vec![],
             chain_tangent_edges: false,
+            tangent_closure_version: None,
             extra: Default::default(),
         }));
         // The graph-view carries the operated body at bodies[0] (as the plan would
@@ -4995,6 +5249,7 @@ mod body_wire_tests {
                 edge_ids: vec![ElementId::new("e:14")],
                 edges: vec![],
                 chain_tangent_edges: true,
+                tangent_closure_version: None,
                 extra: Default::default(),
             }));
             let mut inputs = OperationInputs::default();
@@ -5156,6 +5411,7 @@ mod body_wire_tests {
                     edge_ids: vec![ElementId::new("e:14"), ElementId::new("e:15")],
                     edges: vec![edge_ref(edge_body, "e:14"), edge_ref(edge_body, "e:15")],
                     chain_tangent_edges: true,
+                    tangent_closure_version: None,
                     extra: Default::default(),
                 })),
             ),
@@ -5167,6 +5423,7 @@ mod body_wire_tests {
                     edge_ids: vec![ElementId::new("e:16")],
                     edges: vec![edge_ref(edge_body, "e:16")],
                     chain_tangent_edges: true,
+                    tangent_closure_version: None,
                     extra: Default::default(),
                 })),
             ),
@@ -5662,6 +5919,90 @@ mod body_wire_tests {
                 "{name}: inputs[] slot table — got {wired}"
             );
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PrepareEdgeOp codec
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod prepare_edge_op_tests {
+    use super::*;
+
+    fn body() -> BodyId {
+        BodyId(Uuid::from_u128(0x70))
+    }
+
+    #[test]
+    fn args_render_mode_fence_chain_and_both_addressing_rungs() {
+        let picks = [
+            EdgeOpPick {
+                body: Some(body()),
+                address: FaceAddress::TopoKey("e:4"),
+            },
+            EdgeOpPick {
+                body: None,
+                address: FaceAddress::ElementId("el_9"),
+            },
+        ];
+        let args = prepare_edge_op_args(SnapshotId(5012), EdgeOpMode::Chamfer, &picks, false);
+        assert_eq!(args["snapshotId"], json!(5012));
+        assert_eq!(args["mode"], json!("Chamfer"));
+        assert_eq!(args["chainTangentEdges"], json!(false));
+        assert_eq!(
+            args["pickedEdges"][0]["bodyId"],
+            json!(body_id_wire(body()))
+        );
+        assert_eq!(args["pickedEdges"][0]["topoKey"], json!("e:4"));
+        assert!(args["pickedEdges"][0].get("elementId").is_none());
+        assert_eq!(args["pickedEdges"][1]["elementId"], json!("el_9"));
+        assert!(args["pickedEdges"][1].get("topoKey").is_none());
+    }
+
+    #[test]
+    fn parses_accepted_closure_and_refusal() {
+        let accepted = parse_prepare_edge_op(&json!({
+            "snapshotId": 5012,
+            "targetBodyId": "body_1",
+            "edges": [
+                { "topoKey": "e:4", "picked": true, "anchor": { "worldPoint": [1,2,3] } },
+                { "topoKey": "e:5", "picked": false, "descriptor": { "curveType": 0 } }
+            ],
+            "refusal": null
+        }))
+        .expect("accepted closure");
+        assert_eq!(accepted.edges.len(), 2);
+        assert!(accepted.edges[0].picked);
+        assert_eq!(
+            accepted.edges[1].descriptor,
+            Some(json!({ "curveType": 0 }))
+        );
+
+        let refused = parse_prepare_edge_op(&json!({
+            "snapshotId": 5012,
+            "targetBodyId": "",
+            "edges": [],
+            "refusal": { "code": "chainMismatch", "message": "expanded", "edges": ["e:5"] }
+        }))
+        .expect("refusal is an answer");
+        assert_eq!(refused.refusal.expect("refusal").code, "chainMismatch");
+    }
+
+    #[test]
+    fn rejects_malformed_accepted_results() {
+        assert!(parse_prepare_edge_op(&json!({ "targetBodyId": "body_1" })).is_err());
+        assert!(parse_prepare_edge_op(&json!({
+            "snapshotId": 1, "targetBodyId": "", "edges": [{ "topoKey": "e:1" }]
+        }))
+        .is_err());
+        assert!(parse_prepare_edge_op(&json!({
+            "snapshotId": 1, "targetBodyId": "body_1", "edges": []
+        }))
+        .is_err());
+        assert!(parse_prepare_edge_op(&json!({
+            "snapshotId": 1, "targetBodyId": "body_1", "edges": [{ "picked": true }]
+        }))
+        .is_err());
     }
 }
 

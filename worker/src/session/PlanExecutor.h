@@ -58,6 +58,10 @@ CandidateResult execute_candidate_op(ScratchJob& job, const nlohmann::json& op,
                                      std::string& last_sketch_id,
                                      const onecad::CancelToken& cancel);
 
+// Stable diagnostic projection shared by ExecutePlan and PreviewOp. Op findings
+// retain order; the terminal failure diagnostic is last.
+nlohmann::json candidate_diagnostics(const CandidateResult& candidate);
+
 // ExecutePlan (kernel lane): fence → execute into scratch (streaming planStep
 // events via ctx.emit) → terminal PlanPrepared / PROTOCOL_ERROR / CANCELLED.
 protocol::Envelope handle_execute_plan(Session& session, const protocol::Envelope& req,

@@ -10,7 +10,6 @@ import {
   planePointToClient,
   clickAtClient,
   bodyOptions,
-  sketchOptions,
   findExtrudeHandle,
   extrudeDebug,
   getFeatureLabels,
@@ -350,40 +349,80 @@ test("W3(b): the plane picker accepts a body FACE — S with nothing selected, t
   expect(await hostFaceOf(page, sid as string)).toMatchObject({ bodyId: expect.any(String) });
 });
 
-test("W3(c): double-clicking a face creates a sketch there, then RE-ENTERS that same sketch", async ({ page }) => {
+/** The live selection array (`__stores.selection`, dev-only). */
+async function selectedRefs(page: Page): Promise<Array<{ kind: string; id: string }>> {
+  return page.evaluate(() => {
+    const w = window as unknown as {
+      __stores?: { selection: { getState(): { selected: Array<{ kind: string; id: string }> } } };
+    };
+    return w.__stores?.selection.getState().selected ?? [];
+  });
+}
+
+/** The live tool mode (`__stores.tool`, dev-only). */
+async function toolMode(page: Page): Promise<string | undefined> {
+  return page.evaluate(() => {
+    const w = window as unknown as { __stores?: { tool: { getState(): { mode: string } } } };
+    return w.__stores?.tool.getState().mode;
+  });
+}
+
+test("double-clicking a face selects the whole body, not a sketch (moved to S)", async ({ page }) => {
   await openEditorDebug(page, { mockBody: true });
   await hideVisibleSketches(page);
 
-  const face = await findFaceClearOfPickerChrome(page);
+  const face = await findFaceOnBody(page);
 
-  // ── first double-click: nothing hosted there yet ⇒ create ──────────────────
+  // A plain click first selects just the FACE — proves the double-click below
+  // REPLACES that, it does not merely add to it.
+  await clickAtClient(page, face.x, face.y);
+  expect((await selectedRefs(page))[0]?.kind).toBe("face");
+
   await page.mouse.dblclick(face.x, face.y);
-  await expect(page.getByText(/^Editing /)).toBeVisible({ timeout: 10_000 });
-  await waitForCameraSettled(page);
-  const first = await activeSketchId(page);
-  expect(first).toBeTruthy();
-  expect(await lockedEntityIds(page)).toHaveLength(4);
-  // The row records its host — this is the ONLY thing the re-entry below matches on.
-  const host = await hostFaceOf(page, first as string);
-  expect(host?.elementId).toBeTruthy();
 
-  await page.keyboard.press("Enter"); // finish back to model mode
+  expect(await selectedRefs(page)).toEqual([{ kind: "body", id: face.bodyId }]);
+  expect(await toolMode(page), "double-click must never enter sketch mode").toBe("model");
   await expect(page.getByText(/^Editing /)).toHaveCount(0);
-  await waitForCameraSettled(page);
 
-  // Hide the new sketch. Its projected boundary lies FLUSH on the host face, so
-  // while visible the static-sketch branch of the double-click would claim the
-  // gesture and the hostFace lookup would never be exercised.
+  // Sketch-from-face now lives on S with a face selected (unaffected by this
+  // change) — re-picking the face and pressing S still opens a sketch on it.
+  await clickAtClient(page, face.x, face.y);
+  await page.keyboard.press("s");
+  await expect(page.getByText(/^Editing /)).toBeVisible({ timeout: 10_000 });
+});
+
+test("shift+double-click a face toggles its body into, then out of, the selection", async ({ page }) => {
+  await openEditorDebug(page, { mockBody: true });
   await hideVisibleSketches(page);
 
-  // ── second double-click on the SAME face: re-enter, never a second sketch ──
-  const sketchRowsBefore = await sketchOptions(page).count();
-  await page.mouse.dblclick(face.x, face.y);
-  await expect(page.getByText(/^Editing /)).toBeVisible({ timeout: 10_000 });
-  await waitForCameraSettled(page);
+  const face = await findFaceOnBody(page);
 
-  expect(await activeSketchId(page), "the same sketch is re-entered, not a new one").toBe(first);
-  expect(await sketchOptions(page).count()).toBe(sketchRowsBefore);
+  // Seed an unrelated selection so "extend" is distinguishable from "replace".
+  // Its identity is opaque to selectionStore.set — it need not resolve to a real
+  // datum, only to stay untouched by the double-click below.
+  const seed = { kind: "datum", id: "seed-for-extend-test" };
+  await page.evaluate((ref) => {
+    const w = window as unknown as {
+      __stores?: { selection: { getState(): { set(refs: unknown[]): void } } };
+    };
+    w.__stores?.selection.getState().set([ref]);
+  }, seed);
+
+  await page.keyboard.down("Shift");
+  await page.mouse.dblclick(face.x, face.y);
+  await page.keyboard.up("Shift");
+
+  expect(await selectedRefs(page)).toEqual(
+    expect.arrayContaining([seed, { kind: "body", id: face.bodyId }]),
+  );
+  expect((await selectedRefs(page)).length).toBe(2);
+
+  // Shift+double-click the SAME body again removes it (toggle), leaving the seed.
+  await page.keyboard.down("Shift");
+  await page.mouse.dblclick(face.x, face.y);
+  await page.keyboard.up("Shift");
+
+  expect(await selectedRefs(page)).toEqual([seed]);
 });
 
 test("a NON-PLANAR face refuses to host a sketch and falls back to the plane picker", async ({ page }) => {

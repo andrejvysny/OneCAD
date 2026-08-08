@@ -692,6 +692,13 @@ impl<E: GeometryEngine> RegenExecutor<E> {
         session.elements = scratch.elements;
 
         // Apply per-step states from the authoritative PlanPrepared summary.
+        for result in &prepared.per_step {
+            if planned_steps.contains(&result.step_index) && !result.diagnostics.is_empty() {
+                scratch
+                    .diagnostics_by_step
+                    .insert(result.step_index, result.diagnostics.clone());
+            }
+        }
         let status_by_step: BTreeMap<usize, StepStatus> = prepared
             .per_step
             .iter()
@@ -744,11 +751,15 @@ impl<E: GeometryEngine> RegenExecutor<E> {
             .diagnostics_by_step
             .values()
             .flatten()
+            .take(64)
             .cloned()
             .collect();
         // F23: surface the Completed⇒target invariant as a diagnostic in release
         // builds too (the debug_assert only fires in debug).
         if !completed_reached_target {
+            if diagnostics.len() == 64 {
+                diagnostics.pop();
+            }
             diagnostics.push(Diagnostic {
                 severity: Severity::Warning,
                 code: "PREPARE_INVARIANT".into(),
@@ -757,6 +768,8 @@ impl<E: GeometryEngine> RegenExecutor<E> {
                      {last_planned} (target {target})",
                     prepared.last_valid_step
                 ),
+                stage: None,
+                evidence: None,
             });
         }
         // Report the planned steps' states PLUS every seeded-gate step: the gate
@@ -785,6 +798,7 @@ impl<E: GeometryEngine> RegenExecutor<E> {
             step_states,
             signatures,
             diagnostics,
+            diagnostics_by_step: scratch.diagnostics_by_step,
             repair_summary,
         });
         // Key the inline meshes with the SAME generation `bodies_with_generation`

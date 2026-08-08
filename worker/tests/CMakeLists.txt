@@ -124,6 +124,30 @@ foreach(_t wp6_ladder wp6_ops wp6_extrude wp6_faststode wp6_exportstep wp6_meshe
     add_test(NAME ${_t} COMMAND test_${_t})
 endforeach()
 
+# F0: oversized Fillet/Chamfer must refuse without fallback geometry or state
+# mutation. Also emits deterministic NDJSON for the 7.9.3 comparison artifact.
+add_executable(test_edge_op_failure test_edge_op_failure.cpp)
+target_link_libraries(test_edge_op_failure PRIVATE worker_core)
+add_test(NAME edge_op_failure COMMAND test_edge_op_failure)
+
+# F2: the frozen tangent closure is valid only while our deterministic chainer
+# agrees exactly with both OCCT local-operation contour implementations.
+add_executable(test_edge_contours test_edge_contours.cpp)
+target_link_libraries(test_edge_contours PRIVATE worker_core)
+add_test(NAME edge_contours COMMAND test_edge_contours)
+
+add_executable(test_prepare_edge_op test_prepare_edge_op.cpp)
+target_link_libraries(test_prepare_edge_op PRIVATE worker_core)
+add_test(NAME prepare_edge_op COMMAND test_prepare_edge_op)
+
+# F1: constant-radius fillet construction, structured failure evidence, OCCT
+# history, and non-gating simulation/vertex characterization.
+foreach(_t fillet_builder fillet_diagnostics fillet_history fillet_characterization)
+    add_executable(test_${_t} test_${_t}.cpp)
+    target_link_libraries(test_${_t} PRIVATE worker_core)
+    add_test(NAME ${_t} COMMAND test_${_t})
+endforeach()
+
 # --- OFFSET-FACE Phase 0: OCCT selective-offset go/no-go spike (pure OCCT,
 #     characterizes BRepOffset_MakeOffset per-face behavior before the op is
 #     built; see the plan's Phase-0 gate). ---
@@ -217,6 +241,26 @@ add_test(NAME import_step COMMAND test_import_step)
 add_executable(test_xcaf_import test_xcaf_import.cpp)
 target_link_libraries(test_xcaf_import PRIVATE worker_core)
 add_test(NAME xcaf_import COMMAND test_xcaf_import)
+
+# Cross-version producer/consumer binary. CI writes under 7.9.3 and reads the
+# exact artifact under 8.0.1; it is not a same-build CTest. Keep this target
+# independent of worker_core so comparison-worker compile drift cannot block
+# the shipping kernel's required one-way persistence gate.
+add_library(occt_persistence_codec STATIC
+    ../src/io/BrepCodec.cpp
+    ../src/io/OcafApp.cpp
+    ../src/io/XcafCodec.cpp
+)
+target_include_directories(occt_persistence_codec PUBLIC
+    ${PROJECT_SOURCE_DIR}/src
+    ${OpenCASCADE_INCLUDE_DIR}
+)
+target_link_libraries(occt_persistence_codec PUBLIC ${OpenCASCADE_LIBRARIES})
+if(OpenCASCADE_LIBRARY_DIR)
+    target_link_directories(occt_persistence_codec PUBLIC ${OpenCASCADE_LIBRARY_DIR})
+endif()
+add_executable(test_occt_persistence test_occt_persistence.cpp)
+target_link_libraries(test_occt_persistence PRIVATE occt_persistence_codec)
 
 # --- Region-with-hole extrude: volume-checked (GProp) hole subtraction, incl. a
 #     no-hole negative control (in-process, real OCCT). ---

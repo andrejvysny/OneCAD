@@ -362,6 +362,14 @@ pub trait FaceBoundaryProjection: Send + Sync {
         chain_tangent_faces: bool,
         distance_type: onecad_core::document::record::OffsetDistanceType,
     ) -> Result<crate::dto::PrepareOffsetFaceDto, EngineError>;
+
+    async fn prepare_edge_op(
+        &self,
+        snapshot: SnapshotId,
+        mode: wire::EdgeOpMode,
+        picks: &[wire::EdgeOpPick<'_>],
+        chain_tangent_edges: bool,
+    ) -> Result<crate::dto::PrepareEdgeOpDto, EngineError>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -890,6 +898,16 @@ impl FaceBoundaryProjection for PendingBackend {
         _chain_tangent_faces: bool,
         _distance_type: onecad_core::document::record::OffsetDistanceType,
     ) -> Result<crate::dto::PrepareOffsetFaceDto, EngineError> {
+        Err(Self::not_ready())
+    }
+
+    async fn prepare_edge_op(
+        &self,
+        _snapshot: SnapshotId,
+        _mode: wire::EdgeOpMode,
+        _picks: &[wire::EdgeOpPick<'_>],
+        _chain_tangent_edges: bool,
+    ) -> Result<crate::dto::PrepareEdgeOpDto, EngineError> {
         Err(Self::not_ready())
     }
 }

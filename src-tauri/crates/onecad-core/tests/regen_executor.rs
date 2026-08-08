@@ -228,6 +228,9 @@ async fn op_failure_marks_error_and_publishes_m_minus_one() {
         "failed step is Error"
     );
     assert_eq!(session.timeline.state(2), Some(&StepState::Dirty));
+    assert_eq!(snap.diagnostics_by_step.len(), 1);
+    assert_eq!(snap.diagnostics_by_step[&1][0].code, "GeometryInvalid");
+    assert_eq!(snap.diagnostics, snap.diagnostics_by_step[&1]);
     assert_eq!(exec.engine().log().accepts.len(), 1);
 }
 

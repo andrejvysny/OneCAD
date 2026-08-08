@@ -40,6 +40,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { trace, traceWarn } from "@/debug/trace";
 import { logDebug, logError, logWarn } from "@/debug/log";
 import type { CadClient } from "./client";
+import { parseOperationDiagnostics } from "./operationDiagnostics";
 import type {
   ApplyOperationResult,
   BeginGestureResult,
@@ -58,8 +59,11 @@ import type {
   Lod,
   NeedsRepairEvent,
   OperationOp,
+  OperationDiagnostic,
   PrepareOffsetFaceRequest,
   PrepareOffsetFaceResult,
+  PrepareEdgeOpRequest,
+  PrepareEdgeOpResult,
   PromotedElement,
   PromotePick,
   RecentProject,
@@ -114,6 +118,9 @@ import { viewportStore } from "@/stores/viewportStore";
 // ── Command + event names (must match src-tauri/src/api + events.rs) ──────────
 const CMD = {
   listRecents: "list_recents",
+  renameRecentProject: "rename_recent_project",
+  deleteRecentProject: "delete_recent_project",
+  revealInFileManager: "reveal_in_file_manager",
   newDocument: "new_document",
   openDocument: "open_document",
   importStep: "import_step",
@@ -151,6 +158,7 @@ const CMD = {
   elementInfo: "element_info",
   massProperties: "query_mass_properties",
   prepareOffsetFace: "prepare_offset_face",
+  prepareEdgeOp: "prepare_edge_op",
   previewOp: "preview_op",
   resolveRefs: "resolve_refs",
   clearWorkerCircuit: "clear_worker_circuit",
@@ -184,6 +192,7 @@ const METADATA_ONLY_CMDS: ReadonlySet<string> = new Set([
   "setVisibility",
   "renameBody",
   "renameSketch",
+  "setBodyColor",
   // Datums are core-owned state that never crosses the OCW1 wire, so adding or
   // deleting one publishes a projection and fires NO regen either.
   "addDatumPlane",
@@ -302,9 +311,15 @@ export function __lastSketchSolvedForTests(): SketchUpsertDto | null {
 /** Normalize a rejected command (Rust `ApiError {kind, message}`) into an Error. */
 function toClientError(e: unknown): Error {
   if (e && typeof e === "object" && "kind" in e) {
-    const { kind, message } = e as { kind: string; message?: string };
+    const { kind, message, diagnostics } = e as {
+      kind: string;
+      message?: string;
+      diagnostics?: unknown;
+    };
     const err = new Error(message ? `${kind}: ${message}` : kind);
-    (err as Error & { kind?: string }).kind = kind;
+    const typed = err as Error & { kind?: string; diagnostics?: OperationDiagnostic[] };
+    typed.kind = kind;
+    typed.diagnostics = parseOperationDiagnostics(diagnostics);
     return err;
   }
   return e instanceof Error ? e : new Error(String(e));
@@ -420,6 +435,7 @@ export function createTauriClient(): CadClient {
     change: DocumentChange | null;
     revision: number;
     errorMessage?: string;
+    diagnostics?: OperationDiagnostic[];
   }
   interface Awaiter {
     targetRev: number | null; // R; null until the command returns its projection
@@ -484,7 +500,12 @@ export function createTauriClient(): CadClient {
         if (failed || rf.outcome === "failed") {
           // This op's step errored (even if the regen published other bodies), or the
           // whole regen failed ⇒ FAILURE: empty bodies + the reason.
-          settle(a, { change: null, revision: rf.revision, errorMessage: failed?.message ?? rf.message });
+          settle(a, {
+            change: null,
+            revision: rf.revision,
+            errorMessage: failed?.message ?? rf.message,
+            diagnostics: failed?.diagnostics ?? rf.diagnostics,
+          });
         } else {
           // Success — scope to this op's own bodies (incl. split children).
           const change = a.pendingChange ?? lastPublishedChange;
@@ -499,6 +520,7 @@ export function createTauriClient(): CadClient {
           change: null,
           revision: rf.revision,
           errorMessage: rf.outcome === "failed" ? rf.message : undefined,
+          diagnostics: rf.outcome === "failed" ? rf.diagnostics : undefined,
         });
       }
     }
@@ -793,6 +815,7 @@ export function createTauriClient(): CadClient {
       totalOps: projection.totalOps,
     };
     if (resolved?.errorMessage) result.errorMessage = resolved.errorMessage;
+    if (resolved?.diagnostics) result.diagnostics = resolved.diagnostics;
     return result;
   }
 
@@ -1522,6 +1545,24 @@ export function createTauriClient(): CadClient {
     });
   }
 
+  async function prepareEdgeOp(req: PrepareEdgeOpRequest): Promise<PrepareEdgeOpResult> {
+    const snapshotId = req.snapshotId ?? currentSnapshotId;
+    const result = await call<PrepareEdgeOpResult>(CMD.prepareEdgeOp, {
+      snapshotId,
+      mode: req.mode,
+      pickedEdges: req.pickedEdges.map((p) => ({
+        bodyId: p.bodyId ? (p.bodyId.startsWith("body_") ? p.bodyId : `body_${p.bodyId}`) : null,
+        topoKey: p.elementId ? null : (p.topoKey ?? null),
+        elementId: p.elementId ?? null,
+      })),
+      chainTangentEdges: req.chainTangentEdges,
+    });
+    if (result.snapshotId !== snapshotId || currentSnapshotId !== snapshotId) {
+      throw new Error("prepared edge closure is stale — re-pick");
+    }
+    return result;
+  }
+
   async function promoteSelection(bodyId: string, picks: PromotePick[]): Promise<PromotedElement[]> {
     // promote_selection wants the `body_<uuid>` wire form; document-changed hands
     // the frontend a bare uuid, so prefix it here (get_mesh keeps the bare form).
@@ -1537,6 +1578,15 @@ export function createTauriClient(): CadClient {
   return {
     async listRecents(): Promise<RecentProject[]> {
       return call<RecentProject[]>(CMD.listRecents);
+    },
+    async renameRecentProject(path: string, newName: string): Promise<void> {
+      await call<void>(CMD.renameRecentProject, { path, newName });
+    },
+    async deleteRecentProject(path: string): Promise<void> {
+      await call<void>(CMD.deleteRecentProject, { path });
+    },
+    async revealInFileManager(path: string): Promise<void> {
+      await call<void>(CMD.revealInFileManager, { path });
     },
     async newDocument(): Promise<DocumentSnapshot> {
       // Events BEFORE the command: the pre-regen projection (and a fast open-regen's
@@ -1691,6 +1741,7 @@ export function createTauriClient(): CadClient {
     elementInfo,
     massProperties,
     prepareOffsetFace,
+    prepareEdgeOp,
     resolveRefs,
     applyEditCommand,
     clearWorkerCircuit,

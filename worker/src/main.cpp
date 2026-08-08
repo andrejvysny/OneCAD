@@ -32,6 +32,7 @@
 #include "session/FaceProjection.h"
 #include "session/MassProperties.h"
 #include "session/PrepareOffsetFace.h"
+#include "session/PrepareEdgeOp.h"
 #include "session/PlanExecutor.h"
 #include "session/PreviewOp.h"
 #include "session/Session.h"
@@ -69,13 +70,13 @@ void redirect_occt_to_stderr() {
     messenger->AddPrinter(new Message_PrinterOStream("cerr", Standard_False, Message_Info));
 }
 
-// occt.fingerprint (SCHEMA §2/§6): a 64-bit FNV-1a hash of the OCCT version
-// string, rendered as 16 lowercase hex chars ($hex64). Deterministic. A real
-// fingerprint also folds in build flags + algorithm knobs (W-WP4+); the version
-// string is the stable pre-W-WP4 stand-in that still satisfies the wire format.
-std::string occt_fingerprint(const std::string& occt_version) {
+// occt.fingerprint (SCHEMA §2/§6): 64-bit FNV-1a over reproducibility metadata,
+// rendered as 16 lowercase hex chars ($hex64). Operation-local OCCT options stay
+// in history hashes; this seed covers only the global kernel compatibility axis.
+std::string occt_fingerprint() {
+    const std::string seed = ONECAD_OCCT_FINGERPRINT_SEED;
     std::uint64_t h = 14695981039346656037ULL;  // FNV-1a 64-bit offset basis
-    for (unsigned char c : occt_version) {
+    for (unsigned char c : seed) {
         h ^= c;
         h *= 1099511628211ULL;  // FNV-1a 64-bit prime
     }
@@ -94,7 +95,7 @@ nlohmann::json make_hello_result() {
         {"occt",
          {
              {"version", occt_version},
-             {"fingerprint", occt_fingerprint(occt_version)},
+             {"fingerprint", occt_fingerprint()},
          }},
         {"quantizationVersion", kQuantizationVersion},
         {"solverPolicyVersion", kSolverPolicyVersion},
@@ -307,6 +308,11 @@ void register_verbs(Dispatcher& dispatcher, SolverLane& solver_lane, Session& se
         [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {
             return onecad::session::handle_prepare_offset_face(session, r);
         });
+    dispatcher.register_verb(
+        "PrepareEdgeOp",
+        [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {
+            return onecad::session::handle_prepare_edge_op(session, r);
+        });
     // --- W-WP6: STEP export (SCHEMA §7.8, D2) ---
     dispatcher.register_verb(
         "ExportStep",
@@ -360,7 +366,8 @@ int run_selftest() {
     const nlohmann::json hello = make_hello_result();
     const bool hello_ok =
         hello.value("protocolVersion", 0) == kProtocolVersion && hello.contains("occt") &&
-        hello["occt"].contains("version") &&
+        hello["occt"].value("version", std::string{}) == ONECAD_OCCT_VERSION &&
+        std::string(ONECAD_OCCT_BUILD_ID).size() > 0 &&
         hello["occt"].value("fingerprint", std::string{}).size() == 16;
     if (!hello_ok) {
         WLOG_ERROR("selftest FAILED: unexpected hello payload: %s", hello.dump().c_str());
@@ -384,8 +391,10 @@ int run_selftest() {
         return 1;
     }
 
-    WLOG_INFO("selftest OK (occt %s, upsert dof=%d)",
+    WLOG_INFO("selftest OK (occt %s, build %s, fingerprint %s, upsert dof=%d)",
               hello["occt"]["version"].get<std::string>().c_str(),
+              ONECAD_OCCT_BUILD_ID,
+              hello["occt"]["fingerprint"].get<std::string>().c_str(),
               up.result.value("dof", -1));
     return 0;
 }

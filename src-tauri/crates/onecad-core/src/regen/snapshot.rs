@@ -9,6 +9,7 @@
 //! so render/pick consumers always observe the latest snapshot (double-buffer
 //! swap, V1/V2 §11.2) and never a torn intermediate state.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -89,6 +90,8 @@ pub struct ModelSnapshot {
     pub signatures: Option<StepSignatures>,
     /// Accumulated diagnostics across the executed span.
     pub diagnostics: Vec<Diagnostic>,
+    /// Transient step ownership retained for failure correlation and logging.
+    pub diagnostics_by_step: BTreeMap<usize, Vec<Diagnostic>>,
     /// Compact repair summary.
     pub repair_summary: RepairSummary,
 }
@@ -174,6 +177,7 @@ mod tests {
             step_states: vec![],
             signatures: None,
             diagnostics: vec![],
+            diagnostics_by_step: BTreeMap::new(),
             repair_summary: RepairSummary::default(),
         }
     }

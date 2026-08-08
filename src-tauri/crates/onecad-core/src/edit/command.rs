@@ -33,7 +33,9 @@ use crate::document::datum::DatumPlane;
 use crate::document::record::{Operation, OperationRecord};
 use crate::document::refs::{AxisRef, ElementRef, SketchRegionRef};
 use crate::document::variables::{Scalar, Variable};
-use crate::ids::{BodyId, ConstraintId, DatumPlaneId, EntityId, RecordId, SketchId, VariableId};
+use crate::ids::{
+    BodyId, ConstraintId, DatumPlaneId, ElementId, EntityId, RecordId, SketchId, VariableId,
+};
 use crate::math::Vec2;
 use crate::sketch::{Constraint, Sketch, SketchAttachment, SketchEntity, SketchPlane};
 
@@ -162,6 +164,22 @@ pub enum EditCommand {
         /// Visible (`true`) or hidden (`false`).
         visible: bool,
     },
+    /// Set a body's authored color. `None` clears it back to the neutral body fill.
+    SetBodyColor {
+        /// Target body.
+        body: BodyId,
+        /// sRGB+A color (`[r,g,b,a]`), or `None` to use the theme default.
+        color: Option<[u8; 4]>,
+    },
+    /// Set or clear a face's authored color. `None` removes the override.
+    SetFaceColor {
+        /// Target body.
+        body: BodyId,
+        /// Persistent face identity (Rust-minted `ElementId`).
+        element_id: ElementId,
+        /// sRGB+A color (`[r,g,b,a]`), or `None` to fall back to the body color.
+        color: Option<[u8; 4]>,
+    },
     /// Add a datum plane (C++ `AddDatumPlaneCommand`).
     ///
     /// The caller supplies the PARAMETRIC definition only; the session resolves
@@ -219,6 +237,8 @@ impl EditCommand {
             Self::AddBody { .. } => "Add Body",
             Self::DeleteBody { .. } => "Delete Body",
             Self::RenameBody { .. } => "Rename Body",
+            Self::SetBodyColor { .. } => "Set Body Color",
+            Self::SetFaceColor { .. } => "Set Face Color",
             Self::SetVisibility { .. } => "Toggle Visibility",
             Self::AddDatumPlane { .. } => "Create Datum Plane",
             Self::DeleteDatum { .. } => "Delete Datum Plane",
