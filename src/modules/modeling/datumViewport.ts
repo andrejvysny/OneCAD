@@ -39,10 +39,36 @@ export interface DatumVisuals {
 }
 
 let current: DatumVisuals | null = null;
+const listeners = new Set<(visuals: DatumVisuals | null) => void>();
 
 /** The live datum visuals, or null before the viewport attaches them. */
 export function getDatumVisuals(): DatumVisuals | null {
   return current;
+}
+
+/**
+ * Told when the visuals appear or go away, and CALLED IMMEDIATELY with the
+ * current value.
+ *
+ * This exists because the two halves start independently: `DatumSync` pushes the
+ * projection's datums the moment it attaches, while the contribution attaches
+ * whenever the viewport host reconciles. Whichever runs second has to catch up —
+ * and if it is the contribution, the sweep `DatumSync` already performed went
+ * into a null and the datums stay invisible until an unrelated store change.
+ * A subscriber replays its state here instead.
+ */
+export function onDatumVisualsChanged(
+  listener: (visuals: DatumVisuals | null) => void,
+): () => void {
+  listeners.add(listener);
+  listener(current);
+  return () => listeners.delete(listener);
+}
+
+function publish(visuals: DatumVisuals | null): void {
+  current = visuals;
+  publishDebug(visuals);
+  for (const l of [...listeners]) l(visuals);
 }
 
 /**
@@ -116,15 +142,11 @@ export function createDatumViewportContribution(): ViewportContribution {
           return layer.ghostVisible;
         },
       };
-      current = api;
-      publishDebug(api);
+      publish(api);
 
       return {
         dispose() {
-          if (current === api) {
-            current = null;
-            publishDebug(null);
-          }
+          if (current === api) publish(null);
           hover.dispose();
           theme.dispose();
           frame.dispose();

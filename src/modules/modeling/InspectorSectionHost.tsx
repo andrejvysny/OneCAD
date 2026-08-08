@@ -16,6 +16,7 @@
  * sections.
  */
 import { useMemo } from "react";
+import { logError } from "@/debug/log";
 import {
   ContributionBoundary,
   unsafeId,
@@ -23,6 +24,7 @@ import {
   useRegistryEntries,
   type EntityId,
   type InspectorContext,
+  type InspectorContribution,
   type SelectionRef,
   type TypeId,
 } from "@/platform";
@@ -61,6 +63,27 @@ export function useInspectorContext(): InspectorContext {
   );
 }
 
+/**
+ * `canRender` runs OUTSIDE the section's own `ContributionBoundary` — the
+ * boundary can only catch what its children throw, and admission is decided
+ * before there are any children. An unguarded predicate that throws would
+ * therefore escape past the section and take out the whole inspector panel
+ * through the shell's boundary. A throwing predicate is treated as "does not
+ * admit", which is the safe reading: a section that cannot decide is a section
+ * that does not render.
+ */
+function admits(section: InspectorContribution, ctx: InspectorContext): boolean {
+  try {
+    return section.canRender(ctx);
+  } catch (err) {
+    logError("err", `inspector canRender failed: ${section.id}`, {
+      contributionId: section.id,
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
+
 /** Every registered section that admits the current context, in registry order. */
 export function InspectorSectionHost() {
   const platform = usePlatform();
@@ -70,7 +93,7 @@ export function InspectorSectionHost() {
   return (
     <>
       {sections
-        .filter((s) => s.canRender(ctx))
+        .filter((s) => admits(s, ctx))
         .map((s) => (
           <ContributionBoundary key={s.id} contributionId={s.id}>
             <s.component />

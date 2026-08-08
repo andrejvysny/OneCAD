@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useReducer,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { SectionLabel } from "@/ui/SectionLabel";
 import { MenuItem } from "@/ui/MenuItem";
 import { Popover } from "@/ui/Popover";
@@ -43,6 +50,16 @@ export function ModelTreePanel() {
   useSelectionStore((s) => s.selected);
   useViewportStore((s) => s.isolatedBodyIds);
   const sketches = useDocumentStore((s) => s.sketches);
+
+  // A provider whose data the host does NOT already watch (any non-modeling one)
+  // announces its own changes; without this its rows would be frozen at mount.
+  const [, bumpProviders] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => {
+    const subs = providers.map((p) => p.subscribe?.(bumpProviders)).filter((d) => d !== undefined);
+    return () => {
+      for (const d of subs) d.dispose();
+    };
+  }, [providers]);
 
   const sections = providers.flatMap((p) => p.sections());
   const nodeOf = (id: string) => sections.flatMap((s) => s.nodes).find((n) => n.id === id);

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ModelTreePanel } from "./ModelTreePanel";
 import { selectionStore } from "@/stores/selectionStore";
@@ -8,6 +8,8 @@ import { viewportStore } from "@/stores/viewportStore";
 import { mockClient } from "@/ipc/mockClient";
 import { resetStores } from "@/test/resetStores";
 import { renderWithPlatform } from "@/test/renderWithPlatform";
+import { contributionId, type TreeProviderId } from "@/platform";
+import { MODELING_MODULE_ID } from "@/modules/modeling/manifest";
 import { contributeModelingTree } from "@/modules/modeling/treeProvider";
 
 describe("ModelTreePanel", () => {
@@ -290,5 +292,55 @@ describe("ModelTreePanel — Reattach (H9)", () => {
     expect(screen.queryByTestId("tree-menu-reattach")).toBeNull();
     // Delete is still there — the row is not otherwise crippled.
     expect(screen.getByTestId("tree-menu-delete")).toBeInTheDocument();
+  });
+});
+
+describe("ModelTreePanel — foreign tree providers", () => {
+  beforeEach(() => resetStores());
+
+  it("re-renders when a provider announces its rows changed", async () => {
+    // A provider backed by data the panel does NOT watch (i.e. any non-modeling
+    // one) is otherwise frozen at mount: the registry never changes and neither
+    // do modeling's stores, so nothing re-runs sections().
+    let label = "Before";
+    let notify: (() => void) | null = null;
+    renderWithPlatform(<ModelTreePanel />, {
+      contribute: (scope) =>
+        scope.registerTreeProvider({
+          id: contributionId<TreeProviderId>(
+            MODELING_MODULE_ID,
+            "onecad.modeling.tree.foreign",
+          ),
+          priority: 500,
+          sections: () => [
+            {
+              id: "foreign.section",
+              title: "Foreign",
+              nodes: [
+                {
+                  id: "n1",
+                  label,
+                  icon: "cube",
+                  kind: "foreign",
+                  selected: false,
+                  select: () => {},
+                },
+              ],
+            },
+          ],
+          subscribe: (onChange) => {
+            notify = onChange;
+            return { dispose: () => {} };
+          },
+        }),
+    });
+
+    expect(screen.getByText("Before")).toBeInTheDocument();
+
+    label = "After";
+    await act(async () => {
+      notify?.();
+    });
+    expect(screen.getByText("After")).toBeInTheDocument();
   });
 });

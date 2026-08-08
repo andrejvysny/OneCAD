@@ -11,9 +11,18 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { DatumSync, datumVisuals } from "./datumSync";
 import { documentStore, type DatumMeta } from "@/stores/documentStore";
 import { selectionStore } from "@/stores/selectionStore";
-import { getDatumVisuals } from "@/modules/modeling/datumViewport";
+import { getDatumVisuals, onDatumVisualsChanged } from "@/modules/modeling/datumViewport";
 
-vi.mock("@/modules/modeling/datumViewport", () => ({ getDatumVisuals: vi.fn() }));
+vi.mock("@/modules/modeling/datumViewport", () => ({
+  getDatumVisuals: vi.fn(),
+  // The real one fires IMMEDIATELY with the current value — that immediate call
+  // is the catch-up path, so a fake that only registers would hide the bug it
+  // exists to prevent.
+  onDatumVisualsChanged: vi.fn((listener: (v: unknown) => void) => {
+    listener((getDatumVisuals as unknown as () => unknown)());
+    return () => {};
+  }),
+}));
 
 function datum(id: string, name: string, z = 10): DatumMeta {
   return {
@@ -150,5 +159,35 @@ describe("DatumSync", () => {
 
     expect(engine.sync).not.toHaveBeenCalled();
     expect(engine.setSelected).not.toHaveBeenCalled();
+  });
+});
+
+describe("DatumSync — the visuals arriving LATE", () => {
+  it("replays the full sweep when the contribution attaches after attach()", () => {
+    // The two halves start independently: DatumSync attaches with the document,
+    // the datum layer attaches when the viewport host reconciles. If the layer
+    // lands second, a one-shot push at attach() went into a null and the datums
+    // stay invisible until some unrelated store change happens to re-push them.
+    const captured: ((v: unknown) => void)[] = [];
+    vi.mocked(onDatumVisualsChanged).mockImplementationOnce((listener) => {
+      captured.push(listener as (v: unknown) => void); // captured, deliberately NOT fired
+      return () => {};
+    });
+    vi.mocked(getDatumVisuals).mockReturnValue(undefined as never);
+
+    documentStore.getState().applyChange({ datums: { d1: datum("d1", "Base") } });
+    sync = new DatumSync();
+    sync.attach();
+
+    const late = fakeVisuals();
+    expect(late.sync).not.toHaveBeenCalled();
+
+    vi.mocked(getDatumVisuals).mockReturnValue(late);
+    for (const listener of captured) listener(late);
+
+    expect(late.sync).toHaveBeenCalledWith([
+      expect.objectContaining({ id: "d1", name: "Base" }),
+    ]);
+    expect(late.setSelected).toHaveBeenCalled();
   });
 });

@@ -12,7 +12,7 @@
  * the contribution has published, and does nothing while none are attached. The
  * contribution owns disposal; detach just unsubscribes.
  */
-import { getDatumVisuals } from "@/modules/modeling/datumViewport";
+import { getDatumVisuals, onDatumVisualsChanged } from "@/modules/modeling/datumViewport";
 import { documentStore, type DatumMeta } from "@/stores/documentStore";
 import { selectionStore } from "@/stores/selectionStore";
 import type { DatumVisual } from "./engine/DatumLayer";
@@ -34,7 +34,6 @@ export class DatumSync {
     // documentStore.datums (identity change ⇒ re-sync; the LAYER diffs by id +
     // frame, so an unrelated projection that replaces the record object is cheap).
     let prevDatums = documentStore.getState().datums;
-    getDatumVisuals()?.sync(datumVisuals(prevDatums)); // initial sweep
     this.unsubs.push(
       documentStore.subscribe((s) => {
         if (s.datums === prevDatums) return;
@@ -51,8 +50,22 @@ export class DatumSync {
       visuals?.setSelected(sel.selected.filter((r) => r.kind === "datum").map((r) => r.id));
       visuals?.setHover(sel.hover?.kind === "datum" ? sel.hover.id : null);
     };
-    applySelection();
     this.unsubs.push(selectionStore.subscribe(applySelection));
+
+    // THE FULL SWEEP RUNS WHENEVER THE VISUALS APPEAR, not just now. The layer
+    // is a viewport contribution, so it attaches on the host's schedule, not
+    // ours: pushing once at attach() drops everything on the floor whenever the
+    // contribution lands second, and the datums stay invisible until an
+    // unrelated store change happens to re-push them. `onDatumVisualsChanged`
+    // fires immediately with the current value, so this also covers the case
+    // where the contribution was already there.
+    this.unsubs.push(
+      onDatumVisualsChanged((visuals) => {
+        if (!visuals) return;
+        visuals.sync(datumVisuals(documentStore.getState().datums));
+        applySelection();
+      }),
+    );
   }
 
   detach(): void {

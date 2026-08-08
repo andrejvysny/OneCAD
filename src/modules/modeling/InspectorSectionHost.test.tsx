@@ -175,4 +175,28 @@ describe("InspectorSectionHost", () => {
     );
     expect(seen[0]?.subElement).toBeUndefined();
   });
+  it("a throwing canRender does not take the panel down with it", () => {
+    // canRender runs BEFORE the section has a ContributionBoundary — the boundary
+    // only catches what its children throw — so an unguarded predicate escapes
+    // past the section and kills the whole inspector.
+    renderWithPlatform(<InspectorSectionHost />, {
+      contribute: (scope) => {
+        scope.registerInspectorSection({
+          id: id("probe.badPredicate"),
+          priority: 100,
+          canRender: () => {
+            throw new Error("predicate blew up");
+          },
+          component: Late,
+        });
+        scope.registerInspectorSection({
+          id: id("probe.healthy"),
+          priority: 200,
+          canRender: () => true,
+          component: Late,
+        });
+      },
+    });
+    expect(screen.getByText("LATE")).toBeInTheDocument();
+  });
 });

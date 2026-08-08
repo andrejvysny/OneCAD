@@ -192,13 +192,19 @@ export interface TreeSection {
 }
 
 /**
- * A source of tree rows. `sections()` is read during the host's render, so the
- * host is responsible for re-rendering when the underlying data changes — the
- * provider is a projection, not a subscription.
+ * A source of tree rows. `sections()` is a PROJECTION read during the host's
+ * render — it must be cheap and must not subscribe to anything itself.
+ *
+ * `subscribe` is how a provider says its rows changed. It is optional only
+ * because the built-in modeling provider is backed by stores the host already
+ * watches for its own reasons; ANY provider whose data the host does not
+ * otherwise observe MUST implement it, or its rows will silently never update
+ * after mount.
  */
 export interface TreeProvider extends Contribution {
   readonly id: TreeProviderId;
   sections(): readonly TreeSection[];
+  subscribe?(onChange: () => void): Disposable;
 }
 
 /**

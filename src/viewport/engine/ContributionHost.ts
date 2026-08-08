@@ -47,6 +47,13 @@ let labelSeq = 0;
 export class ViewportContributionHost {
   /** Attached contributions in REGISTRY order — the order frames and hovers run in. */
   private readonly attached: Attached[] = [];
+  /**
+   * Ids that threw and were detached. Held back from re-attachment while their
+   * registration still exists: reconcile() runs on every registry notification,
+   * so without this a contribution whose frame callback throws is re-attached by
+   * the next unrelated register/dispose and throws again, forever.
+   */
+  private readonly failed = new Set<string>();
   private registry: Registry<ViewportContribution> | null = null;
   private unsubscribe: (() => void) | null = null;
   private disposed = false;
@@ -75,24 +82,34 @@ export class ViewportContributionHost {
     const entries = this.registry.entries();
     const live = new Set(entries.map((e) => e.id as string));
 
+    // A contribution that failed is forgotten once its registration goes away,
+    // so a re-register is a genuine second chance rather than a replay of the
+    // same crash.
+    for (const id of [...this.failed]) if (!live.has(id)) this.failed.delete(id);
+
     // Removals first, reverse order, so teardown sees a consistent world.
+    let changed = false;
     for (let i = this.attached.length - 1; i >= 0; i--) {
       const a = this.attached[i];
       if (live.has(a.id)) continue;
       this.attached.splice(i, 1);
       this.safeDispose(a);
+      changed = true;
     }
 
     const have = new Set(this.attached.map((a) => a.id));
-    let added = false;
     for (const entry of entries) {
-      if (have.has(entry.id as string)) continue;
-      if (this.attach(entry)) added = true;
+      const id = entry.id as string;
+      if (have.has(id) || this.failed.has(id)) continue;
+      if (this.attach(entry)) changed = true;
     }
     // Keep the array in registry order even when something attached late.
     const rank = new Map(entries.map((e, i) => [e.id as string, i]));
     this.attached.sort((a, b) => (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0));
-    if (added) this.deps.invalidate();
+    // A REMOVAL needs the frame just as much as an addition: disposal takes the
+    // objects out of the scene graph, and on an on-demand renderer nothing else
+    // schedules a repaint — the last framebuffer would keep showing them.
+    if (changed) this.deps.invalidate();
   }
 
   private attach(entry: ViewportContribution): boolean {
@@ -118,7 +135,7 @@ export class ViewportContributionHost {
     } catch (err) {
       // Roll back whatever the failed attach managed to register, so a broken
       // contribution cannot leave a label or a frame callback behind.
-      for (const l of labels) l.dispose();
+      for (const l of [...labels]) l.dispose();
       logError("err", "viewport contribution attach failed", {
         contributionId: id,
         message: err instanceof Error ? err.message : String(err),
@@ -132,8 +149,15 @@ export class ViewportContributionHost {
       themes,
       hovers,
       dispose: () => {
-        handle.dispose();
-        for (const l of labels) l.dispose();
+        try {
+          handle.dispose();
+        } finally {
+          // Snapshot: each label's dispose() splices itself out of `labels`, so
+          // iterating the live array skips every second one. `finally`: a
+          // contribution's own disposer throwing must not strand host-owned
+          // overlay items.
+          for (const l of [...labels]) l.dispose();
+        }
       },
     });
     return true;
@@ -211,7 +235,10 @@ export class ViewportContributionHost {
       });
       const i = this.attached.indexOf(a);
       if (i >= 0) this.attached.splice(i, 1);
+      this.failed.add(a.id);
       this.safeDispose(a);
+      // Its objects just left the scene graph — schedule the frame that shows that.
+      this.deps.invalidate();
       return false;
     }
   }
@@ -228,8 +255,10 @@ export class ViewportContributionHost {
   }
 
   private detachAll(): void {
+    const had = this.attached.length > 0;
     for (const a of this.attached.reverse()) this.safeDispose(a);
     this.attached.length = 0;
+    if (had && !this.disposed) this.deps.invalidate();
   }
 
   /** Ids currently attached, in run order (introspection / tests). */

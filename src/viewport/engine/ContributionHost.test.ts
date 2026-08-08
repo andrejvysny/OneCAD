@@ -232,4 +232,139 @@ describe("ViewportContributionHost", () => {
     expect(overlay.size).toBe(0);
     expect(overlayEl.childElementCount).toBe(0);
   });
+  // ── hardening (Codex implementation review) ────────────────────────────────
+
+  it("schedules a frame when a contribution is REMOVED, not only when one is added", () => {
+    const log: string[] = [];
+    const scope = platform.createScope(MODELING_MODULE_ID);
+    scope.registerViewportContribution(probe("a", log).contribution);
+
+    const { host, invalidate } = makeHost();
+    host.setRegistry(platform.viewport);
+    invalidate.mockClear();
+
+    scope.dispose();
+    // Disposal took its objects out of the scene graph. On an on-demand renderer
+    // nothing else schedules a repaint, so the last framebuffer would keep
+    // showing them.
+    expect(invalidate).toHaveBeenCalled();
+  });
+
+  it("schedules a frame when setRegistry(null) detaches everything", () => {
+    const log: string[] = [];
+    platform.scopeFor(MODELING_MODULE_ID).registerViewportContribution(probe("a", log).contribution);
+    const { host, invalidate } = makeHost();
+    host.setRegistry(platform.viewport);
+    invalidate.mockClear();
+
+    host.setRegistry(null);
+    expect(invalidate).toHaveBeenCalled();
+  });
+
+  it("does NOT re-attach a contribution that already threw, on the next registry change", () => {
+    const log: string[] = [];
+    const scope = platform.scopeFor(MODELING_MODULE_ID);
+    scope.registerViewportContribution({
+      id: id("boom"),
+      priority: 100,
+      attach(ctx) {
+        log.push("boom:attach");
+        ctx.onFrame(() => {
+          throw new Error("frame failed");
+        });
+        return { dispose: () => {} };
+      },
+    });
+
+    const { host } = makeHost();
+    host.setRegistry(platform.viewport);
+    host.runFrame(camera, 800);
+    expect(host.attachedIds).toEqual([]);
+
+    // Any unrelated registration re-runs reconcile(). Without the failed-set the
+    // crashed contribution comes straight back and throws on the next frame,
+    // forever.
+    scope.registerViewportContribution(probe("other", log).contribution);
+    expect(host.attachedIds).toEqual([id("other")]);
+    expect(log.filter((l) => l === "boom:attach")).toHaveLength(1);
+  });
+
+  it("gives a re-REGISTERED contribution a genuine second chance", () => {
+    const log: string[] = [];
+    const scope = platform.createScope(MODELING_MODULE_ID);
+    const bad: ViewportContribution = {
+      id: id("boom"),
+      priority: 100,
+      attach(ctx) {
+        log.push("boom:attach");
+        ctx.onFrame(() => {
+          throw new Error("frame failed");
+        });
+        return { dispose: () => {} };
+      },
+    };
+    scope.registerViewportContribution(bad);
+
+    const { host } = makeHost();
+    host.setRegistry(platform.viewport);
+    host.runFrame(camera, 800);
+
+    // Registration GONE, then back: the suppression is keyed to the old
+    // registration, not to the id forever.
+    scope.dispose();
+    platform.createScope(MODELING_MODULE_ID).registerViewportContribution(bad);
+    expect(host.attachedIds).toEqual([id("boom")]);
+    expect(log.filter((l) => l === "boom:attach")).toHaveLength(2);
+  });
+
+  it("releases EVERY label on detach, not every second one", () => {
+    const scope = platform.createScope(MODELING_MODULE_ID);
+    scope.registerViewportContribution({
+      id: id("multi"),
+      attach(ctx) {
+        // Three, because the bug (splicing the array being iterated) leaves the
+        // middle one behind and two would look like an off-by-one.
+        //
+        // Deliberately NOT disposed by the contribution: that is what puts the
+        // HOST's fallback loop in charge, which is the code path under test. A
+        // contribution that tidies up after itself hides the defect entirely.
+        ctx.createLabel(document.createElement("div"));
+        ctx.createLabel(document.createElement("div"));
+        ctx.createLabel(document.createElement("div"));
+        return { dispose: () => {} };
+      },
+    });
+
+    const { host, overlay, overlayEl } = makeHost();
+    host.setRegistry(platform.viewport);
+    expect(overlay.size).toBe(3);
+
+    scope.dispose();
+    expect(overlay.size).toBe(0);
+    expect(overlayEl.childElementCount).toBe(0);
+  });
+
+  it("reclaims host-owned labels even when the contribution's own disposer throws", () => {
+    const scope = platform.createScope(MODELING_MODULE_ID);
+    scope.registerViewportContribution({
+      id: id("badDispose"),
+      attach(ctx) {
+        ctx.createLabel(document.createElement("div"));
+        ctx.createLabel(document.createElement("div"));
+        return {
+          dispose: () => {
+            throw new Error("dispose failed");
+          },
+        };
+      },
+    });
+
+    const { host, overlay, overlayEl } = makeHost();
+    host.setRegistry(platform.viewport);
+    expect(overlay.size).toBe(2);
+
+    scope.dispose();
+    expect(overlay.size, "a throwing disposer must not strand overlay items").toBe(0);
+    expect(overlayEl.childElementCount).toBe(0);
+  });
 });

@@ -240,7 +240,8 @@ grep '"target":"onecad_protocol::frames"' logs/dev.jsonl
 - `window.__logsDump()` — same, pretty-printed JSON string. This is exactly what e2e's `fe-logs.json` attachment contains (see § 11).
 - `window.__logsClear()` — empties the ring.
 - `window.__stores` — 12 keys: `document, sketch, viewport, tool, settings, selection, measure, app, toolChip, worker, repair, sketchSelection` (`src/main.tsx` ~line 68-81).
-- `window.__vpEngine` — only under `?vpdebug`; raycast/hit-test methods (`planePickerHitTest`, `datumHitTest`, `probePick`, `hitExtrudeHandle`) and `debugSnapshot()` (theme/clearColor).
+- `window.__vpEngine` — only under `?vpdebug`; raycast/hit-test methods (`planePickerHitTest`, `probePick`, `hitExtrudeHandle`) and `debugSnapshot()` (theme/clearColor).
+- `window.__datumVisuals` — DEV builds; the datum layer's own `hitTest(x, y)` / `ghostVisible`. It moved off `__vpEngine` when datum planes became a viewport CONTRIBUTION (`modules/modeling/datumViewport`), so the engine no longer has `datumHitTest`. Null until the contribution attaches.
 - `window.__extrudePreview` — only under `?vpdebug`; `ModelToolController.updateDebug()` phase snapshot (`phase`, `revolvePhase`, `filletPhase`, `shellPhase`, `edgeOpKind`, `edgeOpAuto`, `edgeOpAxisSource`, `l1Present`).
 
 ## 11. e2e artifacts (`e2e/fixtures.ts`)
