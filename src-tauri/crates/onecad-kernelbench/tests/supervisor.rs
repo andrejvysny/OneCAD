@@ -37,7 +37,7 @@ fn execute(body: &str, configure: impl FnOnce(&mut Case)) -> Value {
     };
     runner::execute(
         &runner_path,
-        &case,
+        &case.prepared(),
         Backend::RawOcct,
         &variant,
         directory.path(),
@@ -88,7 +88,7 @@ fn supervisor_artifacts_respect_cumulative_cap() {
     };
     let result = runner::execute(
         &runner_path,
-        &case,
+        &case.prepared(),
         Backend::RawOcct,
         &variant,
         directory.path(),

@@ -1,7 +1,9 @@
 add_library(benchmark_core STATIC
     ../../src/benchmark/CaseParser.cpp
+    ../../src/benchmark/CaseParserV2.cpp
     ../../src/benchmark/SelectorParser.cpp
     ../../src/benchmark/Geometry.cpp
+    ../../src/benchmark/GeometrySupportPair.cpp
     ../../src/benchmark/DeepAudit.cpp
     ../../src/benchmark/FilletRun.cpp
     ../../src/benchmark/Artifacts.cpp
@@ -25,3 +27,7 @@ add_test(NAME kernelbench_runner_schema
 add_executable(test_kernelbench_audit audit_fixtures.cpp)
 target_link_libraries(test_kernelbench_audit PRIVATE benchmark_core)
 add_test(NAME kernelbench_audit COMMAND test_kernelbench_audit)
+
+add_executable(test_kernelbench_case_v2 case_v2_fixtures.cpp)
+target_link_libraries(test_kernelbench_case_v2 PRIVATE benchmark_core)
+add_test(NAME kernelbench_case_v2 COMMAND test_kernelbench_case_v2)

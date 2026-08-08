@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 
-use crate::case::Case;
 use crate::metamorph;
+use crate::prepared::PreparedCase;
 use crate::result::{attach_replay, is_red, refresh_digest, Backend};
 use crate::runner;
 use crate::suite::{GeneratedCase, Variant};
@@ -39,12 +39,7 @@ pub fn run_cases(
 fn apply_metamorph(records: &mut [Value], generated: &[GeneratedCase]) {
     let tolerances: BTreeMap<&str, f64> = generated
         .iter()
-        .map(|item| {
-            (
-                item.case.case_id.as_str(),
-                metamorph::point_tolerance(&item.case),
-            )
-        })
+        .map(|item| (item.case.case_id.as_str(), item.case.point_tolerance))
         .collect();
     let mut groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
     for (index, record) in records.iter().enumerate() {
@@ -169,7 +164,7 @@ fn validator_signature(value: &Value) -> Vec<(String, String)> {
 
 pub fn run_one(
     runner_path: &Path,
-    case: Case,
+    case: PreparedCase,
     variant: Variant,
     backends: &[Backend],
     out_dir: &Path,
@@ -184,7 +179,7 @@ pub fn run_one(
 
 fn run_repeated(
     runner_path: &Path,
-    case: &Case,
+    case: &PreparedCase,
     backend: Backend,
     variant: &Variant,
     out_dir: &Path,
@@ -207,7 +202,7 @@ fn run_repeated(
 
 pub(crate) fn artifact_dir(
     out_dir: &Path,
-    case: &Case,
+    case: &PreparedCase,
     backend: Backend,
     variant: &Variant,
 ) -> std::path::PathBuf {

@@ -1,0 +1,756 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onecad.dev/schemas/kernelbench/case-v2.schema.json",
+  "title": "OneCAD kernelbench case v2",
+  "description": "Benchmark INTENT, deliberately not shaped like a persisted OneCAD operation record: a case says what geometry to build, what modeling intent to request, and what must hold afterwards. case-v1 is frozen and still the T0 reproducibility contract; v2 is where the generator matrix grows. The two are read by version, never merged.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "caseId",
+    "generator",
+    "geometry",
+    "operation",
+    "selector",
+    "expectedDomain",
+    "validators",
+    "metamorphs",
+    "limits"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "caseId": { "$ref": "#/$defs/safeId" },
+    "generator": { "$ref": "#/$defs/generator" },
+    "geometry": { "$ref": "#/$defs/geometry" },
+    "operation": { "$ref": "#/$defs/operation" },
+    "selector": {
+      "description": "Top-level in v2 (v1 nested it under the operation): the same geometry+selection is reused across operations, and a selector that resolves is a precondition for the operation rather than part of it.",
+      "$ref": "#/$defs/selector"
+    },
+    "expectedDomain": {
+      "description": "What OneCAD promises for this case. `supported` gates; `expectedLimit` passes on a safe deterministic refusal; `exploratory` is characterization; `outsideProductDomain` is recorded but never gates.",
+      "enum": ["supported", "expectedLimit", "exploratory", "outsideProductDomain"]
+    },
+    "validators": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 48,
+      "items": { "$ref": "#/$defs/validator" }
+    },
+    "metamorphs": {
+      "type": "array",
+      "maxItems": 32,
+      "items": { "$ref": "#/$defs/metamorph" }
+    },
+    "search": { "$ref": "#/$defs/search" },
+    "limits": { "$ref": "#/$defs/limits" }
+  },
+
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "positiveNumber": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1000000000000
+    },
+    "nonNegativeNumber": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1000000000000
+    },
+    "vector3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "number",
+        "minimum": -1000000000000,
+        "maximum": 1000000000000
+      }
+    },
+    "unitInterval": { "type": "number", "minimum": 0, "maximum": 1 },
+
+    "generator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "name", "version", "seed"],
+      "properties": {
+        "family": {
+          "description": "The operation family this case exercises. Only fillet exists today; the field is what lets chamfer/shell/boolean matrices share this schema instead of forking it.",
+          "enum": ["fillet"]
+        },
+        "name": {
+          "description": "The concrete generator. `fillet-foundation` reproduces the v1 recipe set; `fillet-matrix` is the expanded support-surface / topology / conditioning matrix.",
+          "enum": ["fillet-foundation", "fillet-matrix"]
+        },
+        "version": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "seed": {
+          "description": "Every generated case must be reproducible from its seed alone.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$"
+        }
+      }
+    },
+
+    "geometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["recipe", "parameters", "tags"],
+      "properties": {
+        "recipe": { "$ref": "#/$defs/recipeName" },
+        "parameters": {
+          "description": "Recipe-specific inputs. Strict per recipe (see the allOf below) — a free-form bag would let a typo generate silently different geometry.",
+          "$ref": "#/$defs/recipeParameters"
+        },
+        "tags": {
+          "description": "Cluster labels for reporting (e.g. `nearTangent`, `microScale`, `seam`). Reporting only — they never change execution.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/safeId" }
+        },
+        "scaleBand": {
+          "description": "Which relative-scale band this instance was generated at. Present when the recipe was swept across bands; absent means the recipe's natural size. Exposes absolute-tolerance assumptions.",
+          "enum": ["micro", "unit", "kilo", "mega"]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "recipe": {
+                "enum": ["box", "valence3Corner", "valence4Corner", "overflowWedge"]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "parameters": { "required": ["dimensions", "featureIndex"] }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "recipe": { "const": "supportPair" } } },
+          "then": {
+            "properties": {
+              "parameters": { "required": ["supportA", "supportB", "dihedralDegrees"] }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "recipe": { "const": "valenceCorner" } } },
+          "then": { "properties": { "parameters": { "required": ["valence"] } } }
+        }
+      ]
+    },
+
+    "recipeName": {
+      "description": "box / valence3Corner / valence4Corner / overflowWedge are the v1 recipes, kept so a v1 case has a v2 equivalent. `supportPair` spans the support-surface matrix, `valenceCorner` the 3..8 corner sweep, and the rest are the deliberately difficult topologies.",
+      "enum": [
+        "box",
+        "valence3Corner",
+        "valence4Corner",
+        "overflowWedge",
+        "supportPair",
+        "valenceCorner",
+        "shortEdge",
+        "microEdge",
+        "sliverNeighborFace",
+        "tinyNeighborFace",
+        "periodicSeam",
+        "nearSeamEdge",
+        "faceNearlyConsumed",
+        "faceFullyConsumed",
+        "blendCollision"
+      ]
+    },
+
+    "recipeParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dimensions": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "$ref": "#/$defs/positiveNumber" }
+        },
+        "featureIndex": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "supportA": { "$ref": "#/$defs/supportSurface" },
+        "supportB": { "$ref": "#/$defs/supportSurface" },
+        "dihedralDegrees": {
+          "description": "Angle between the two supports at the shared edge. The sweep runs 90 / 45 / 10 / 1 / 0.1 / 0.01 / 0.001 and their near-tangent complements; the bounds here allow the whole range without permitting a degenerate 0.",
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 180
+        },
+        "valence": {
+          "description": "Edges meeting at the selected vertex.",
+          "type": "integer",
+          "minimum": 3,
+          "maximum": 8
+        },
+        "convexity": { "$ref": "#/$defs/convexity" },
+        "edgeLength": { "$ref": "#/$defs/positiveNumber" },
+        "neighborSize": {
+          "description": "Size of the deliberately small/sliver neighbouring face, in the recipe's own units.",
+          "$ref": "#/$defs/positiveNumber"
+        },
+        "seamOffset": {
+          "description": "Distance from the periodic seam for near-seam recipes. 0 means ON the seam.",
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "consumptionRatio": {
+          "description": "Fraction of the target face the requested blend is expected to eat. >=1 means fully consumed.",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 4
+        },
+        "separation": {
+          "description": "Distance between two blends that are meant to collide (or not).",
+          "$ref": "#/$defs/nonNegativeNumber"
+        }
+      }
+    },
+
+    "supportSurface": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "description": "`bspline` is exploratory by policy — freeform supports are generated but do not gate.",
+          "enum": ["plane", "cylinder", "cone", "sphere", "torus", "bspline"]
+        },
+        "radius": { "$ref": "#/$defs/positiveNumber" },
+        "minorRadius": { "$ref": "#/$defs/positiveNumber" },
+        "halfAngleDegrees": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 90
+        },
+        "degree": { "type": "integer", "minimum": 1, "maximum": 8 },
+        "controlPoints": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 256
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "enum": ["cylinder", "sphere"] } } },
+          "then": { "required": ["radius"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "cone" } } },
+          "then": { "required": ["radius", "halfAngleDegrees"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "torus" } } },
+          "then": { "required": ["radius", "minorRadius"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "bspline" } } },
+          "then": { "required": ["degree", "controlPoints"] }
+        }
+      ]
+    },
+
+    "convexity": { "enum": ["convex", "concave", "mixed"] },
+
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "definition"],
+      "properties": {
+        "type": { "const": "fillet" },
+        "definition": { "$ref": "#/$defs/filletDefinition" }
+      }
+    },
+
+    "filletDefinition": {
+      "description": "Mirrors the kernel-level FilletDefinition rather than the persisted history record: a radius law plus a continuity request. Adding a law is an additive change here — it must not require a schemaVersion bump.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["radiusLaw", "continuity"],
+      "properties": {
+        "radiusLaw": { "$ref": "#/$defs/radiusLaw" },
+        "continuity": {
+          "description": "g2 stays out until a curvature oracle proves OCCT's SetContinuity actually delivers it — an option is not a capability.",
+          "enum": ["g1"]
+        },
+        "sizeType": {
+          "description": "Radius is the only size type that exists today. Chord width arrives only once a solver measures the RESULTING chord rather than converting by formula.",
+          "enum": ["radius"]
+        }
+      }
+    },
+
+    "radiusLaw": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "radius"],
+          "properties": {
+            "mode": { "const": "constant" },
+            "radius": { "$ref": "#/$defs/positiveNumber" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "startRadius", "endRadius"],
+          "properties": {
+            "mode": { "const": "linear" },
+            "startRadius": { "$ref": "#/$defs/positiveNumber" },
+            "endRadius": { "$ref": "#/$defs/positiveNumber" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "points"],
+          "properties": {
+            "mode": { "const": "controlPoints" },
+            "points": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 64,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["parameter", "radius"],
+                "properties": {
+                  "parameter": {
+                    "description": "Normalized position along the contour.",
+                    "$ref": "#/$defs/unitInterval"
+                  },
+                  "radius": { "$ref": "#/$defs/positiveNumber" }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+
+    "selector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "topologyRole", "provenance", "anchors", "surfaceDescriptors", "adjacency"],
+      "properties": {
+        "mode": {
+          "enum": [
+            "single",
+            "disconnected",
+            "multiple",
+            "chain",
+            "closedContour",
+            "cornerIncident"
+          ]
+        },
+        "topologyRole": {
+          "enum": [
+            "verticalEdge",
+            "cornerIncidentEdge",
+            "overflowEdge",
+            "supportPairEdge",
+            "seamEdge",
+            "shortEdge"
+          ]
+        },
+        "convexity": { "$ref": "#/$defs/convexity" },
+        "vertexValence": { "type": "integer", "minimum": 3, "maximum": 8 },
+        "provenance": { "$ref": "#/$defs/selectorProvenance" },
+        "anchors": {
+          "description": "Recipe-local anchor points matched to real topology by nearest-anchor resolution. No OCCT ordinal is ever persisted, and a runner-up inside tolerance is an ambiguous match rather than a guess.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/selectorAnchor" }
+        },
+        "surfaceDescriptors": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/surfaceDescriptor" }
+        },
+        "adjacency": { "$ref": "#/$defs/selectorAdjacency" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "single" } } },
+          "then": {
+            "properties": {
+              "anchors": { "maxItems": 1 },
+              "adjacency": { "properties": { "relation": { "const": "single" } } }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "mode": { "const": "disconnected" } } },
+          "then": {
+            "properties": {
+              "anchors": { "minItems": 2 },
+              "adjacency": {
+                "properties": { "relation": { "const": "pairwiseDisconnected" } }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "mode": { "const": "multiple" } } },
+          "then": {
+            "properties": {
+              "anchors": { "minItems": 2 },
+              "adjacency": { "properties": { "relation": { "const": "unconstrained" } } }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "mode": { "const": "chain" } } },
+          "then": {
+            "properties": {
+              "anchors": { "minItems": 2 },
+              "adjacency": { "properties": { "relation": { "const": "tangentChain" } } }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "mode": { "const": "closedContour" } } },
+          "then": {
+            "properties": {
+              "anchors": { "minItems": 3 },
+              "adjacency": { "properties": { "relation": { "const": "closedLoop" } } }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "mode": { "const": "cornerIncident" } } },
+          "then": {
+            "properties": {
+              "topologyRole": { "const": "cornerIncidentEdge" },
+              "anchors": {
+                "maxItems": 1,
+                "items": { "properties": { "kind": { "const": "commonVertex" } } }
+              },
+              "adjacency": {
+                "properties": { "relation": { "const": "incidentToCommonVertex" } }
+              }
+            }
+          }
+        }
+      ]
+    },
+
+    "selectorProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generator", "recipe"],
+      "properties": {
+        "generator": { "enum": ["fillet-foundation", "fillet-matrix"] },
+        "recipe": { "$ref": "#/$defs/recipeName" },
+        "featureIndex": { "type": "integer", "minimum": 0, "maximum": 65535 }
+      }
+    },
+
+    "selectorAnchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "point", "frame"],
+      "properties": {
+        "kind": { "enum": ["edgeMidpoint", "commonVertex"] },
+        "point": { "$ref": "#/$defs/vector3" },
+        "frame": { "const": "recipeLocal" }
+      }
+    },
+
+    "surfaceDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["curveKind", "adjacentSurfaceKinds"],
+      "properties": {
+        "curveKind": { "enum": ["line", "analyticCurve", "bsplineCurve"] },
+        "adjacentSurfaceKinds": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "enum": ["plane", "cylinder", "cone", "sphere", "torus", "bspline", "other"]
+          }
+        }
+      }
+    },
+
+    "selectorAdjacency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relation"],
+      "properties": {
+        "relation": {
+          "enum": [
+            "single",
+            "pairwiseDisconnected",
+            "unconstrained",
+            "tangentChain",
+            "closedLoop",
+            "incidentToCommonVertex"
+          ]
+        }
+      }
+    },
+
+    "validator": {
+      "oneOf": [
+        { "$ref": "#/$defs/simpleValidator" },
+        { "$ref": "#/$defs/toleranceValidator" },
+        { "$ref": "#/$defs/metamorphValidator" },
+        { "$ref": "#/$defs/radiusLawValidator" }
+      ]
+    },
+
+    "simpleValidator": {
+      "description": "Checks on the RESULT geometry. Never on what the OCCT builder claims it configured — v1's semantic check was essentially 'the requested constant radius was assigned and some blend face appeared', which a wrong-but-plausible surface passes.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "required"],
+      "properties": {
+        "type": {
+          "enum": [
+            "constantRadius",
+            "generatedBlendFace",
+            "cylindricalRadius",
+            "g1BoundaryTangency",
+            "materialChange",
+            "remoteSupportsUnchanged",
+            "deepAudit",
+            "crossSectionProfile",
+            "supportTangency",
+            "noSelfIntersection",
+            "manifold",
+            "toleranceGrowth",
+            "microTopology"
+          ]
+        },
+        "required": { "type": "boolean" },
+        "direction": { "enum": ["decrease", "increase"] }
+      }
+    },
+
+    "toleranceValidator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "required", "absolute", "relative"],
+      "properties": {
+        "type": {
+          "enum": [
+            "radiusTolerance",
+            "tangencyTolerance",
+            "materialTolerance",
+            "crossSectionTolerance"
+          ]
+        },
+        "required": { "type": "boolean" },
+        "absolute": { "$ref": "#/$defs/nonNegativeNumber" },
+        "relative": { "$ref": "#/$defs/unitInterval" }
+      }
+    },
+
+    "metamorphValidator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "required", "surfaceSamples", "pointTolerance"],
+      "properties": {
+        "type": { "const": "metamorphicEquivalence" },
+        "required": { "type": "boolean" },
+        "surfaceSamples": { "type": "integer", "minimum": 1, "maximum": 4096 },
+        "pointTolerance": { "$ref": "#/$defs/nonNegativeNumber" }
+      }
+    },
+
+    "radiusLawValidator": {
+      "description": "Samples the produced blend and checks the radius actually follows the requested law — the point of variable radius is that the LAW is real, not that the builder accepted it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "required", "samples", "absolute", "relative"],
+      "properties": {
+        "type": { "const": "radiusLawFollowed" },
+        "required": { "type": "boolean" },
+        "samples": { "type": "integer", "minimum": 2, "maximum": 1024 },
+        "absolute": { "$ref": "#/$defs/nonNegativeNumber" },
+        "relative": { "$ref": "#/$defs/unitInterval" }
+      }
+    },
+
+    "metamorph": {
+      "description": "A transform (or reordering) that must not change whether the operation succeeds. A difference is a CONDITIONING finding, not a generic operation failure.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "vector"],
+          "properties": {
+            "type": { "enum": ["translation", "farOriginTranslation"] },
+            "vector": { "$ref": "#/$defs/vector3" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "angleDegrees", "axis", "center"],
+          "properties": {
+            "type": { "const": "rotation" },
+            "angleDegrees": { "type": "number", "minimum": -360, "maximum": 360 },
+            "axis": { "$ref": "#/$defs/vector3" },
+            "center": { "const": "inputCentroid" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "normal", "center"],
+          "properties": {
+            "type": { "const": "mirror" },
+            "normal": { "$ref": "#/$defs/vector3" },
+            "center": { "const": "inputCentroid" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "factor", "center"],
+          "properties": {
+            "type": { "const": "uniformScale" },
+            "factor": { "$ref": "#/$defs/positiveNumber" },
+            "center": { "const": "inputCentroid" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "parameter", "relativeDelta"],
+          "properties": {
+            "type": { "const": "parameterEpsilon" },
+            "parameter": { "const": "operation.radius" },
+            "relativeDelta": {
+              "description": "Signed relative nudge; a result that flips on ±ε is instability, not a limit.",
+              "type": "number",
+              "minimum": -0.01,
+              "maximum": 0.01
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "order"],
+          "properties": {
+            "type": { "const": "edgeOrderPermutation" },
+            "order": {
+              "description": "A permutation of the selector's anchor indices. Selecting the same edges in another order is the same modeling intent.",
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 64,
+              "uniqueItems": true,
+              "items": { "type": "integer", "minimum": 0, "maximum": 63 }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "anchorIndex"],
+          "properties": {
+            "type": { "const": "contourSeed" },
+            "anchorIndex": { "type": "integer", "minimum": 0, "maximum": 63 }
+          }
+        }
+      ]
+    },
+
+    "search": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parameter",
+        "knownSuccess",
+        "upperBound",
+        "growthFactor",
+        "maxProbes",
+        "relativePrecision",
+        "absolutePrecision",
+        "relativeOffsets"
+      ],
+      "properties": {
+        "parameter": { "const": "operation.radius" },
+        "knownSuccess": { "$ref": "#/$defs/positiveNumber" },
+        "upperBound": { "$ref": "#/$defs/positiveNumber" },
+        "growthFactor": { "type": "number", "exclusiveMinimum": 1, "maximum": 16 },
+        "maxProbes": { "type": "integer", "minimum": 8, "maximum": 4096 },
+        "relativePrecision": { "type": "number", "exclusiveMinimum": 0, "maximum": 0.01 },
+        "absolutePrecision": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+        "relativeOffsets": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "prefixItems": [
+            { "const": 0.01 },
+            { "const": 0.0001 },
+            { "const": 0.000001 },
+            { "const": 0.00000001 }
+          ],
+          "items": false
+        }
+      }
+    },
+
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resources", "quality"],
+      "properties": {
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "wallTimeMs",
+            "addressSpaceBytes",
+            "stdoutBytes",
+            "stderrBytes",
+            "artifactBytes"
+          ],
+          "properties": {
+            "wallTimeMs": { "type": "integer", "minimum": 1, "maximum": 3600000 },
+            "addressSpaceBytes": {
+              "type": "integer",
+              "minimum": 16777216,
+              "maximum": 68719476736
+            },
+            "stdoutBytes": { "type": "integer", "minimum": 1024, "maximum": 16777216 },
+            "stderrBytes": { "type": "integer", "minimum": 1024, "maximum": 16777216 },
+            "artifactBytes": { "type": "integer", "minimum": 1024, "maximum": 1073741824 }
+          }
+        },
+        "quality": {
+          "description": "Per-case ceilings only. Quality bands are benchmark observations; this must not become a generic production tolerance threshold.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxVertexTolerance": { "$ref": "#/$defs/nonNegativeNumber" },
+            "maxEdgeTolerance": { "$ref": "#/$defs/nonNegativeNumber" },
+            "maxFaceTolerance": { "$ref": "#/$defs/nonNegativeNumber" },
+            "maxMicroEdges": { "type": "integer", "minimum": 0, "maximum": 10000000 },
+            "maxSliverFaces": { "type": "integer", "minimum": 0, "maximum": 10000000 }
+          }
+        }
+      }
+    }
+  }
+}

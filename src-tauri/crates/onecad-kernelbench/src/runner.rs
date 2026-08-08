@@ -1,9 +1,9 @@
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-use crate::case::Case;
 use crate::child;
 use crate::digest::sha256_value;
+use crate::prepared::PreparedCase;
 use crate::result::{complete_result, refresh_digest, Backend};
 use crate::suite::Variant;
 use crate::{AppError, AppResult};
@@ -63,14 +63,14 @@ fn runner_name() -> &'static str {
 
 pub fn execute(
     runner: &Path,
-    case: &Case,
+    case: &PreparedCase,
     backend: Backend,
     variant: &Variant,
     artifact_dir: &Path,
 ) -> Value {
-    let input_value = json!({"case":case,"variant":variant});
+    let input_value = json!({"case":case.json,"variant":variant});
     let input_digest = sha256_value(&input_value);
-    let request = json!({"schemaVersion":1,"case":case,"backend":backend.wire(),"variant":variant,"artifactDir":artifact_dir});
+    let request = json!({"schemaVersion":1,"case":case.json,"backend":backend.wire(),"variant":variant,"artifactDir":artifact_dir});
     let mut value = match child::run(runner, case, backend, &request) {
         Ok(value) => complete_result(value, case, backend, &input_digest),
         Err(value) => complete_result(value, case, backend, &input_digest),
@@ -81,7 +81,7 @@ pub fn execute(
     value
 }
 
-fn enforce_artifacts(value: &mut Value, case: &Case, directory: &Path) {
+fn enforce_artifacts(value: &mut Value, case: &PreparedCase, directory: &Path) {
     let safe_paths = value
         .get("artifacts")
         .and_then(Value::as_object)
@@ -93,7 +93,12 @@ fn enforce_artifacts(value: &mut Value, case: &Case, directory: &Path) {
     }
 }
 
-fn retain_supervisor_artifacts(value: &mut Value, case: &Case, request: &Value, directory: &Path) {
+fn retain_supervisor_artifacts(
+    value: &mut Value,
+    case: &PreparedCase,
+    request: &Value,
+    directory: &Path,
+) {
     if value.get("executionState").and_then(Value::as_str) == Some("completed") {
         return;
     }
@@ -108,7 +113,7 @@ fn retain_supervisor_artifacts(value: &mut Value, case: &Case, request: &Value, 
     write_json_artifact(
         directory,
         "case.json",
-        &json!(case),
+        &case.json,
         value,
         "canonicalCase",
         &mut remaining,

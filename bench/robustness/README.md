@@ -78,8 +78,42 @@ threshold.
 - `schemas/result-v1.schema.json`: compact JSONL result format, including the
   nullable `shapeSignature` metamorphic-evidence block.
 - `schemas/preset-v1.schema.json`: strict frozen-preset format.
+- `schemas/case-v2.schema.json`: the expanded matrix format. A SEPARATE format,
+  not an extension: v1 is frozen, and neither version is readable as the other
+  (`schemaVersion` is a hard const on both sides, in the schema, in Rust, and in
+  the C++ parser).
 - `presets/fillet-foundation-t0.json`: frozen T0 generation contract.
+- `examples/`: illustrative cases. NOT contractual — `regressions/` is.
 - `regressions/`: reviewed, replayable cases. It is not the legacy corpus.
+
+## Suites
+
+| Suite | Preset | Case format | What it sweeps |
+| --- | --- | --- | --- |
+| `fillet/foundation` | `t0` | v1 | Box / valence / overflow recipes; edges between two PLANES. |
+| `fillet/matrix` | `m1` | v2 | Support-surface pairs: plane↔plane, plane↔cylinder, cylinder↔cylinder, plane↔cone, swept over the dihedral angle. |
+
+`supportPair` geometry has two constructions. The prismatic pairs
+(plane|cylinder × plane|cylinder) are one 2D profile extruded along Z, so the
+shared edge is a straight vertical line through the origin and the dihedral is
+free over `(0, 180)`. The plane↔cone pair is a frustum's base circle, where the
+dihedral is `90 - halfAngle` by construction — the generator rebuilds it from
+the half angle and REFUSES a case that declares anything else, rather than
+quietly generating different geometry than the file describes.
+
+A blend needs room. For a prismatic pair the usable throat is
+`R·(1 - cos θ)`, where `R` is the tightest curved support (or half a planar
+support's width when neither is curved). Measured against OCCT 8.0.1: every pair
+blends at 0.20 of that throat, and the cylinder↔cylinder lens refuses at 0.40.
+Supported cases sit at 0.04–0.16.
+
+Not every validator is recipe-agnostic. `cylindricalRadius` counts EVERY
+cylindrical face in the output against the requested radius, so a cylindrical
+support reads as a blend of the wrong radius, and `g1BoundaryTangency` only
+recognises plane↔cylinder tangency pairs. Both are emitted only for all-planar
+pairs. Their general replacements are expressible in case-v2 but not implemented
+in the runner; an unimplemented validator reports `notApplicable`, which fails a
+required check rather than passing it.
 
 Cases and artifact paths use restricted identifiers. A selector records its
 generator provenance, topology role, recipe-local anchors, surface descriptors,

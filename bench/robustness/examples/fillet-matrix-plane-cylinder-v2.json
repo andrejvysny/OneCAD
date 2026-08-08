@@ -1,0 +1,206 @@
+{
+  "schemaVersion": 2,
+  "caseId": "example.fillet-matrix.plane-cylinder.90deg.unit",
+  "generator": {
+    "family": "fillet",
+    "name": "fillet-matrix",
+    "version": 1,
+    "seed": "0123456789abcdef"
+  },
+  "geometry": {
+    "recipe": "supportPair",
+    "parameters": {
+      "supportA": {
+        "kind": "plane"
+      },
+      "supportB": {
+        "kind": "cylinder",
+        "radius": 20
+      },
+      "dihedralDegrees": 90,
+      "convexity": "convex",
+      "edgeLength": 50
+    },
+    "tags": [
+      "support-pair",
+      "plane-cylinder",
+      "orthogonal"
+    ],
+    "scaleBand": "unit"
+  },
+  "operation": {
+    "type": "fillet",
+    "definition": {
+      "radiusLaw": {
+        "mode": "constant",
+        "radius": 3
+      },
+      "continuity": "g1",
+      "sizeType": "radius"
+    }
+  },
+  "selector": {
+    "mode": "single",
+    "topologyRole": "supportPairEdge",
+    "convexity": "convex",
+    "provenance": {
+      "generator": "fillet-matrix",
+      "recipe": "supportPair"
+    },
+    "anchors": [
+      {
+        "kind": "edgeMidpoint",
+        "point": [
+          0,
+          0,
+          25
+        ],
+        "frame": "recipeLocal"
+      }
+    ],
+    "surfaceDescriptors": [
+      {
+        "curveKind": "line",
+        "adjacentSurfaceKinds": [
+          "plane",
+          "cylinder"
+        ]
+      }
+    ],
+    "adjacency": {
+      "relation": "single"
+    }
+  },
+  "expectedDomain": "supported",
+  "validators": [
+    {
+      "type": "constantRadius",
+      "required": true
+    },
+    {
+      "type": "generatedBlendFace",
+      "required": true
+    },
+    {
+      "type": "cylindricalRadius",
+      "required": false
+    },
+    {
+      "type": "g1BoundaryTangency",
+      "required": false
+    },
+    {
+      "type": "supportTangency",
+      "required": false
+    },
+    {
+      "type": "crossSectionProfile",
+      "required": false
+    },
+    {
+      "type": "noSelfIntersection",
+      "required": false
+    },
+    {
+      "type": "manifold",
+      "required": false
+    },
+    {
+      "type": "materialChange",
+      "required": true,
+      "direction": "decrease"
+    },
+    {
+      "type": "remoteSupportsUnchanged",
+      "required": true
+    },
+    {
+      "type": "deepAudit",
+      "required": true
+    },
+    {
+      "type": "radiusTolerance",
+      "required": true,
+      "absolute": 0.0001,
+      "relative": 0.001
+    },
+    {
+      "type": "crossSectionTolerance",
+      "required": false,
+      "absolute": 0.0001,
+      "relative": 0.001
+    },
+    {
+      "type": "metamorphicEquivalence",
+      "required": false,
+      "surfaceSamples": 64,
+      "pointTolerance": 1e-06
+    }
+  ],
+  "metamorphs": [
+    {
+      "type": "translation",
+      "vector": [
+        1000,
+        -2000,
+        3000
+      ]
+    },
+    {
+      "type": "rotation",
+      "angleDegrees": 17.137,
+      "axis": [
+        1,
+        2,
+        3
+      ],
+      "center": "inputCentroid"
+    },
+    {
+      "type": "mirror",
+      "normal": [
+        0,
+        1,
+        0
+      ],
+      "center": "inputCentroid"
+    },
+    {
+      "type": "uniformScale",
+      "factor": 10,
+      "center": "inputCentroid"
+    },
+    {
+      "type": "farOriginTranslation",
+      "vector": [
+        1000000,
+        -1000000,
+        1000000
+      ]
+    },
+    {
+      "type": "parameterEpsilon",
+      "parameter": "operation.radius",
+      "relativeDelta": 1e-06
+    },
+    {
+      "type": "parameterEpsilon",
+      "parameter": "operation.radius",
+      "relativeDelta": -1e-06
+    }
+  ],
+  "limits": {
+    "resources": {
+      "wallTimeMs": 10000,
+      "addressSpaceBytes": 2147483648,
+      "stdoutBytes": 1048576,
+      "stderrBytes": 1048576,
+      "artifactBytes": 67108864
+    },
+    "quality": {
+      "maxVertexTolerance": 0.001,
+      "maxEdgeTolerance": 0.001,
+      "maxFaceTolerance": 0.001
+    }
+  }
+}

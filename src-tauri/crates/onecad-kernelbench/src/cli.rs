@@ -3,11 +3,14 @@ use std::path::PathBuf;
 
 use crate::campaign;
 use crate::case::Case;
+use crate::case_v2::CaseV2;
+use crate::prepared::PreparedCase;
 use crate::report;
 use crate::result::Backend;
 use crate::runner;
 use crate::search;
 use crate::suite::{self, Variant, VariantName};
+use crate::suite_v2;
 use crate::{AppError, AppResult};
 
 pub fn run(args: Vec<String>) -> AppResult<i32> {
@@ -68,23 +71,42 @@ fn run_suite(args: Arguments) -> AppResult<i32> {
         &["--suite", "--preset", "--backend", "--out-dir"],
         &["--runner"],
     )?;
-    if flag(&args, "--suite")? != "fillet/foundation" || flag(&args, "--preset")? != "t0" {
-        return Err(AppError::cli("unsupported suite or preset"));
-    }
+    let cases = match (flag(&args, "--suite")?, flag(&args, "--preset")?) {
+        ("fillet/foundation", "t0") => suite::t0(),
+        ("fillet/matrix", "m1") => suite_v2::m1(),
+        _ => return Err(AppError::cli("unsupported suite or preset")),
+    };
     let backends = parse_backend(flag(&args, "--backend")?)?;
     let runner = runner::resolve_runner(optional_path(&args, "--runner"))?;
     campaign::run_cases(
         &runner,
-        &suite::t0(),
+        &cases,
         &backends,
         &PathBuf::from(flag(&args, "--out-dir")?),
     )
 }
 
+/// A case file names its own format. Dispatching on `schemaVersion` is what
+/// keeps a v2 document from being read through v1's rules, which would
+/// benchmark different intent than the file describes.
+fn load_case(path: &PathBuf) -> AppResult<PreparedCase> {
+    let bytes = std::fs::read(path).map_err(|e| AppError::cli(format!("case: {e}")))?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|e| AppError::cli(format!("case: {e}")))?;
+    match value
+        .get("schemaVersion")
+        .and_then(serde_json::Value::as_u64)
+    {
+        Some(1) => Ok(Case::load(path)?.prepared()),
+        Some(2) => Ok(CaseV2::load(path)?.prepared()),
+        _ => Err(AppError::cli("case schemaVersion must be 1 or 2")),
+    }
+}
+
 fn run_case(args: Arguments) -> AppResult<i32> {
     require_positionals(&args, 1)?;
     require_flags(&args, &["--backend", "--out-dir"], &["--runner"])?;
-    let case = Case::load(&PathBuf::from(&args.positionals[0]))?;
+    let case = load_case(&PathBuf::from(&args.positionals[0]))?;
     let backends = parse_backend(flag(&args, "--backend")?)?;
     let runner = runner::resolve_runner(optional_path(&args, "--runner"))?;
     let variant = Variant {
@@ -175,7 +197,7 @@ fn usage() -> AppError {
 }
 
 fn print_usage() {
-    eprintln!("onecad-kernelbench run --suite fillet/foundation --preset t0 --backend raw-occt|onecad|both [--runner PATH] --out-dir DIR");
+    eprintln!("onecad-kernelbench run --suite fillet/foundation --preset t0 | --suite fillet/matrix --preset m1 --backend raw-occt|onecad|both [--runner PATH] --out-dir DIR");
     eprintln!("onecad-kernelbench run-case CASE.json --backend raw-occt|onecad|both [--runner PATH] --out-dir DIR");
     eprintln!("onecad-kernelbench search-critical CASE.json --param operation.radius --backend raw-occt|onecad|both [--runner PATH] --out-dir DIR");
     eprintln!("onecad-kernelbench report RESULTS.jsonl --json SUMMARY.json");

@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::case::{Case, ExpectedDomain, Generator};
+use crate::case::{ExpectedDomain, Generator};
 use crate::digest::normalized_digest;
+use crate::prepared::PreparedCase;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
@@ -36,7 +37,7 @@ pub struct ReplayEvidence {
 }
 
 pub fn synthetic_result(
-    case: &Case,
+    case: &PreparedCase,
     backend: Backend,
     failure: &str,
     execution: Value,
@@ -120,7 +121,7 @@ fn empty_artifacts() -> Value {
 
 pub fn complete_result(
     mut value: Value,
-    case: &Case,
+    case: &PreparedCase,
     backend: Backend,
     input_digest: &str,
 ) -> Value {

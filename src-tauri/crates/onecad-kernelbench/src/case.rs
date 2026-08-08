@@ -364,7 +364,10 @@ mod tests {
     #[test]
     fn generated_suite_satisfies_strict_case_validation() {
         for generated in crate::suite::t0() {
-            generated.case.validate().unwrap();
+            // The suite hands the supervisor a prepared case, so re-read the
+            // canonical document it will actually put on the wire.
+            let case: Case = serde_json::from_value(generated.case.json).unwrap();
+            case.validate().unwrap();
         }
     }
 

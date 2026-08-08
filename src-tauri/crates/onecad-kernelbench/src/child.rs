@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::case::Case;
+use crate::prepared::PreparedCase;
 use crate::result::{synthetic_result, Backend};
 use crate::result_validation;
 
@@ -16,7 +16,7 @@ struct Captured {
 
 pub fn run(
     runner: &std::path::Path,
-    case: &Case,
+    case: &PreparedCase,
     backend: Backend,
     request: &Value,
 ) -> Result<Value, Value> {
@@ -158,7 +158,7 @@ fn wait_child(
 }
 
 fn child_result(
-    case: &Case,
+    case: &PreparedCase,
     backend: Backend,
     outcome: ProcessOutcome,
     stdout: Captured,
@@ -221,7 +221,11 @@ fn child_result(
     Ok(value)
 }
 
-fn parse_stdout(case: &Case, backend: Backend, bytes: &[u8]) -> Result<Value, &'static str> {
+fn parse_stdout(
+    case: &PreparedCase,
+    backend: Backend,
+    bytes: &[u8],
+) -> Result<Value, &'static str> {
     let text = std::str::from_utf8(bytes).map_err(|_| "invalid-json")?;
     let lines: Vec<_> = text
         .lines()
@@ -236,7 +240,13 @@ fn parse_stdout(case: &Case, backend: Backend, bytes: &[u8]) -> Result<Value, &'
         .map_err(|_| "invalid-json")
 }
 
-fn failure(case: &Case, backend: Backend, class: &str, execution: Value, stderr: &str) -> Value {
+fn failure(
+    case: &PreparedCase,
+    backend: Backend,
+    class: &str,
+    execution: Value,
+    stderr: &str,
+) -> Value {
     synthetic_result(case, backend, class, execution, &bounded_text(stderr, 4096))
 }
 

@@ -216,7 +216,7 @@ impl Executor for RunnerExecutor<'_> {
         let _ = std::fs::create_dir_all(&artifact_dir);
         let mut record = runner::execute(
             self.runner,
-            &self.case,
+            &self.case.prepared(),
             self.backend,
             &variant,
             &artifact_dir,

@@ -31,7 +31,7 @@ pub struct Rotation {
 
 #[derive(Clone, Debug)]
 pub struct GeneratedCase {
-    pub case: Case,
+    pub case: crate::prepared::PreparedCase,
     pub variant: Variant,
 }
 
@@ -406,7 +406,7 @@ fn generated(case: Case, name: VariantName) -> GeneratedCase {
         angle_degrees: 17.137,
     });
     GeneratedCase {
-        case,
+        case: case.prepared(),
         variant: Variant {
             name,
             translation,

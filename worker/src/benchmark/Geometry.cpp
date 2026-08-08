@@ -1,5 +1,7 @@
 #include "benchmark/Geometry.h"
 
+#include "benchmark/GeometrySupportPair.h"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -73,14 +75,27 @@ TopoDS_Shape make_pyramid(const std::vector<double> &dimensions) {
   return {};
 }
 
-TopoDS_Shape make_shape(const CaseSpec &benchmark_case) {
-  const auto &d = benchmark_case.dimensions;
-  if (benchmark_case.recipe_type == "box" ||
-      benchmark_case.recipe_type == "valence3Corner")
-    return BRepPrimAPI_MakeBox(d[0], d[1], d[2]).Shape();
-  if (benchmark_case.recipe_type == "valence4Corner")
-    return make_pyramid(d);
-  return BRepPrimAPI_MakeWedge(d[0], d[1], d[2], d[0] * 0.25).Shape();
+bool make_shape(const CaseSpec &benchmark_case, TopoDS_Shape &out,
+                std::string &error) {
+  const std::string &recipe = benchmark_case.recipe;
+  if (recipe == "supportPair")
+    return make_support_pair(benchmark_case.parameters, out, error);
+  const auto &d = benchmark_case.parameters.dimensions;
+  if (d.size() != 3) {
+    error = "recipe '" + recipe + "' is not generated yet";
+    return false;
+  }
+  if (recipe == "box" || recipe == "valence3Corner")
+    out = BRepPrimAPI_MakeBox(d[0], d[1], d[2]).Shape();
+  else if (recipe == "valence4Corner")
+    out = make_pyramid(d);
+  else if (recipe == "overflowWedge")
+    out = BRepPrimAPI_MakeWedge(d[0], d[1], d[2], d[0] * 0.25).Shape();
+  else {
+    error = "recipe '" + recipe + "' is not generated yet";
+    return false;
+  }
+  return true;
 }
 
 struct EdgeInfo {
@@ -152,7 +167,7 @@ std::vector<EdgeInfo> edges_at_vertex(const std::vector<EdgeInfo> &edges,
 std::vector<EdgeInfo> role_edges(const CaseSpec &benchmark_case,
                                  const TopoDS_Shape &shape) {
   std::vector<EdgeInfo> edges = sorted_edges(shape);
-  if (benchmark_case.recipe_type != "box")
+  if (benchmark_case.recipe != "box")
     return edges;
   edges.erase(std::remove_if(edges.begin(), edges.end(), [](const EdgeInfo &edge) {
                 const double z = std::abs(edge.chord.Z());
@@ -222,7 +237,7 @@ std::vector<TopoDS_Edge> select_corner_incident(const CaseSpec &benchmark_case,
   if (!nearest_unique(distances, best, error))
     return {};
   const std::size_t target_valence =
-      benchmark_case.recipe_type == "valence4Corner" ? 4 : 3;
+      benchmark_case.recipe == "valence4Corner" ? 4 : 3;
   const std::vector<EdgeInfo> group = edges_at_vertex(edges, vertices[best]);
   if (group.size() != target_valence) {
     error = "semantic selector anchor vertex has unexpected valence";
@@ -338,7 +353,8 @@ bool generate_geometry(const CaseSpec &benchmark_case,
                        std::string &error) {
   std::uint64_t seed = std::stoull(benchmark_case.generator.seed, nullptr, 16);
   (void)unit_double(seed);
-  out.shape = make_shape(benchmark_case);
+  if (!make_shape(benchmark_case, out.shape, error))
+    return false;
   if (out.shape.IsNull()) {
     error = "generator produced a null shape";
     return false;
@@ -367,8 +383,9 @@ bool generate_geometry(const CaseSpec &benchmark_case,
   nlohmann::json evidence = nlohmann::json::array();
   for (std::size_t i = 0; i < out.selected_edges.size(); ++i) {
     const EdgeInfo edge = describe_edge(out.selected_edges[i]);
-    evidence.push_back({{"provenance", "generator:" + benchmark_case.recipe_type +
-                                          ":feature:" + std::to_string(benchmark_case.feature_index)},
+    evidence.push_back({{"provenance",
+                         "generator:" + benchmark_case.recipe + ":feature:" +
+                             std::to_string(benchmark_case.parameters.feature_index)},
                         {"topologyRole", benchmark_case.selector.topology_role},
                         {"anchor", {edge.midpoint.X(), edge.midpoint.Y(), edge.midpoint.Z()}},
                         {"surface", curve_name(out.selected_edges[i])},

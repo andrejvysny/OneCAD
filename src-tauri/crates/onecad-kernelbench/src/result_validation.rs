@@ -1,7 +1,8 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::case::{Case, ExpectedDomain, Generator};
+use crate::case::{ExpectedDomain, Generator};
+use crate::prepared::PreparedCase;
 use crate::result::{Backend, Verdict};
 use crate::result_validation_blocks as blocks;
 
@@ -140,7 +141,11 @@ pub struct ValidatedState {
     pub operation: OperationState,
 }
 
-pub fn validate(value: &Value, case: &Case, backend: Backend) -> Result<ValidatedState, String> {
+pub fn validate(
+    value: &Value,
+    case: &PreparedCase,
+    backend: Backend,
+) -> Result<ValidatedState, String> {
     let parsed: RunnerResult =
         serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
     validate_identity(

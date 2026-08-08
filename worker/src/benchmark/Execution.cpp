@@ -90,9 +90,19 @@ json identity(const std::string &name, const std::string &version,
   return {{"name", name}, {"version", version}, {"buildId", build_id}};
 }
 
+// The RESULT schema is frozen at v1, so the generator block is emitted as its
+// v1 subset rather than echoed from the case. A case-v2 generator additionally
+// names an operation `family`, and passing that through would make every v2
+// result fail the supervisor's strict result validation.
+json generator_identity(const GeneratorSpec &generator) {
+  return {{"name", generator.name},
+          {"version", generator.version},
+          {"seed", generator.seed}};
+}
+
 json base_result(const Request &request) {
   return {{"schemaVersion", 1}, {"caseId", request.benchmark_case.case_id},
-          {"generator", request.benchmark_case.canonical["generator"]},
+          {"generator", generator_identity(request.benchmark_case.generator)},
           {"backend", request.backend},
           {"kernel", identity("OCCT", ONECAD_OCCT_VERSION, ONECAD_OCCT_BUILD_ID)},
           {"modeler", identity(request.backend == "onecad" ? "OneCAD" : "raw-occt",

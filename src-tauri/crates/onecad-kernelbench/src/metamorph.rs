@@ -1,7 +1,5 @@
 use serde_json::Value;
 
-use crate::case::{Case, ValidatorType};
-
 pub struct MetamorphComparison {
     pub surface_samples_match: bool,
     pub point_classification_match: bool,
@@ -47,19 +45,6 @@ pub fn compare(base: &Value, variant: &Value, tolerance: f64) -> Option<Metamorp
         surface_samples_match,
         point_classification_match,
     })
-}
-
-pub fn point_tolerance(case: &Case) -> f64 {
-    case.validators
-        .iter()
-        .find(|validator| {
-            matches!(
-                validator.validator_type,
-                ValidatorType::MetamorphicEquivalence
-            )
-        })
-        .and_then(|validator| validator.point_tolerance)
-        .unwrap_or(1e-6)
 }
 
 type LabeledPoint = ([f64; 3], String);
