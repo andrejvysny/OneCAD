@@ -82,6 +82,7 @@
  * `resolveBinding` and `tools/activateTool.ts`.
  */
 import type { EditorMode, Tool } from "@/stores/toolStore";
+import { bindingsForScope, type BindingScope } from "@/modules/modeling/bindings";
 
 export type ShortcutAction =
   | { type: "tool"; tool: Tool }
@@ -101,88 +102,24 @@ export interface KeyBinding {
   action: ShortcutAction;
 }
 
-export const MODEL_KEYS: KeyBinding[] = [
-  { key: "v", action: { type: "tool", tool: "select" } },
-  { key: "s", action: { type: "enterSketch" } },
-  // D = Datum plane (DATUM W1). Free in the model table; sketch mode's own `d`
-  // (Dimension) shadows it there, so the two never collide (see COLLISIONS).
-  { key: "d", action: { type: "tool", tool: "datum" } },
-  { key: "e", action: { type: "tool", tool: "extrude" } },
-  { key: "r", action: { type: "tool", tool: "revolve" } },
-  { key: "f", action: { type: "tool", tool: "fillet" } },
-  { key: "b", action: { type: "tool", tool: "boolean" } },
-  // M6b model ops (K/P/C/M are free in model mode; C/M also serve sketch tools
-  // in sketch mode, resolved by `mode` exactly as R does — revolve vs rectangle).
-  { key: "k", action: { type: "tool", tool: "shell" } },
-  // OffsetFace. An exact shift chord — see COLLISIONS on ⇧O.
-  { key: "o", shift: true, action: { type: "tool", tool: "offsetFace" } },
-  { key: "p", action: { type: "tool", tool: "linearPattern" } },
-  { key: "c", action: { type: "tool", tool: "circularPattern" } },
-  { key: "m", action: { type: "tool", tool: "mirror" } },
-  // T = Move/rotate a body selection (WP-B W1). Sketch mode's own `t` (Trim)
-  // shadows it there, exactly like D (datum vs dimension). Claiming it here also
-  // stops model-mode `t` falling through cross-mode and STARTING A SKETCH with
-  // Trim, which is what it did while the model table had no `t` of its own.
-  { key: "t", action: { type: "tool", tool: "transform" } },
-  // WP-C T3 Hole. An exact shift chord — see COLLISIONS on why plain `h` cannot
-  // be claimed here.
-  { key: "h", shift: true, action: { type: "tool", tool: "hole" } },
-  // W2-B Measure. `?` (⇧/) is free in BOTH tables and reads as "what is this?".
-  // Declared as an exact shift chord, exactly like sketch ⇧R, so it can never be
-  // claimed by a plain-key press. It is in NO_CROSS_MODE below — see there.
-  { key: "?", shift: true, action: { type: "tool", tool: "measure" } },
-  // W3 isolate. `i` was free in BOTH tables; declared as an exact shift chord
-  // (like ⇧R / ⇧?) so a plain `i` stays available. MODEL-scoped on purpose and
-  // NOT a `tool` action, so the cross-mode fallback can never fire it while
-  // drawing — isolating bodies mid-sketch would hide the very geometry the
-  // sketch is being drawn against.
-  { key: "i", shift: true, action: { type: "isolate" } },
-];
+/*
+ * The three tables are DERIVED from `@/modules/modeling/bindings` — the module
+ * that owns the tools owns which keys exist. What stays here is how a key
+ * RESOLVES: mode precedence, exact-chord matching, and the cross-mode fallback
+ * with its opt-out. The exported shapes are unchanged, so every call site and
+ * every test keeps working.
+ */
+function tableFor(scope: BindingScope): KeyBinding[] {
+  return bindingsForScope(scope).map(({ key, shift, action }) =>
+    shift === undefined ? { key, action } : { key, shift, action },
+  );
+}
 
-export const SKETCH_KEYS: KeyBinding[] = [
-  { key: "v", action: { type: "tool", tool: "select" } },
-  { key: "l", action: { type: "tool", tool: "line" } },
-  { key: "r", action: { type: "tool", tool: "rect" } },
-  // W2-B: exact-match shift chord — plain `r` above still resolves to `rect`
-  // because `resolveBinding` compares `Boolean(b.shift) === shift`.
-  { key: "r", shift: true, action: { type: "tool", tool: "centerRect" } },
-  { key: "c", action: { type: "tool", tool: "circle" } },
-  { key: "o", action: { type: "tool", tool: "ellipse" } },
-  { key: "a", action: { type: "tool", tool: "arc" } },
-  // SP-4 3-point arc. Exact shift chord (the ⇧R precedent), so plain `a` still
-  // resolves to the centre-start-end arc.
-  { key: "a", shift: true, action: { type: "tool", tool: "arc3p" } },
-  { key: "g", action: { type: "tool", tool: "polygon" } },
-  { key: "s", action: { type: "tool", tool: "slot" } },
-  { key: "p", action: { type: "tool", tool: "point" } },
-  { key: "d", action: { type: "tool", tool: "dimension" } },
-  { key: "t", action: { type: "tool", tool: "trim" } },
-  // SP-4 Extend. Exact shift chord on Trim's own letter (the ⇧R / ⇧A precedent),
-  // so plain `t` still resolves to Trim in sketch mode and to Transform in model.
-  { key: "t", shift: true, action: { type: "tool", tool: "extend" } },
-  { key: "m", action: { type: "tool", tool: "mirror" } },
-  // WP-C T2b sketch edit tools. See COLLISIONS for why `f` is claimed here and
-  // why Offset is a shift chord.
-  { key: "f", action: { type: "tool", tool: "sketchFillet" } },
-  { key: "o", shift: true, action: { type: "tool", tool: "sketchOffset" } },
-  // X flips construction geometry (W1-B): with a sketch selection it flips those
-  // entities, with none it toggles the sticky construction draw mode. Sketch-scoped
-  // only — the action is NOT a `tool`, so the cross-mode fallback never leaks it
-  // into model mode (where X is still free).
-  { key: "x", action: { type: "toggleConstruction" } },
-  // Delete/Backspace remove the current sketch selection. Sketch-scoped only;
-  // in model mode they fall through (no binding). The handler additionally lets
-  // the key fall through when nothing is selected (see useShortcuts).
-  { key: "Delete", action: { type: "deleteSketchSelection" } },
-  { key: "Backspace", action: { type: "deleteSketchSelection" } },
-];
+export const MODEL_KEYS: KeyBinding[] = tableFor("model");
 
-export const GLOBAL_KEYS: KeyBinding[] = [
-  { key: "Escape", action: { type: "cancel" } },
-  { key: "Enter", action: { type: "finishSketch" } },
-  { key: "h", action: { type: "home" } },
-  { key: "f", shift: true, action: { type: "zoomFit" } },
-];
+export const SKETCH_KEYS: KeyBinding[] = tableFor("sketch");
+
+export const GLOBAL_KEYS: KeyBinding[] = tableFor("global");
 
 export function modeKeys(mode: EditorMode): KeyBinding[] {
   return mode === "sketch" ? SKETCH_KEYS : MODEL_KEYS;

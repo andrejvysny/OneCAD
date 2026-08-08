@@ -71,7 +71,9 @@ use super::imports::{
     import_sections, parse_import_blob_path, verify_blob, ImportBlobError, ImportBlobInfo,
     ImportBlobResult, ImportBlobs, IMPORTS_DIR, MAX_IMPORT_BLOB_BYTES,
 };
-use super::manifest::{Manifest, ManifestEntry, CONTAINER_VERSION, GLOBAL_SCHEMA_VERSION, MAGIC};
+use super::manifest::{
+    Manifest, ManifestEntry, ModuleDescriptor, CONTAINER_VERSION, GLOBAL_SCHEMA_VERSION, MAGIC,
+};
 use super::migrate::{LoadOutcome, MigrationRegistry};
 use super::{document_io, history_io, sha256_hex, Diagnostic, IoError, IoResult};
 
@@ -479,6 +481,21 @@ fn build_manifest(document: &Document, meta: &SaveMeta, sections: &[Section]) ->
         modified: meta.modified.clone(),
         ops_hash: history_io::ops_hash(document.timeline.records()),
         entries,
+        // Derived, never authored: the document's own module table is the single
+        // source of truth, so the manifest can never disagree with it.
+        modules: document
+            .modules
+            .iter()
+            .map(|(id, state)| {
+                (
+                    id.clone(),
+                    ModuleDescriptor {
+                        schema_version: state.schema_version,
+                        extra: Default::default(),
+                    },
+                )
+            })
+            .collect(),
         extra: Default::default(),
     }
 }
@@ -1062,6 +1079,7 @@ fn cross_validate_ops<R: Read + Seek>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::modules::{ModuleId, ModuleState};
     use crate::document::record::{
         BooleanMode, ExtrudeMode, ExtrudeParams, KnownOperation, Operation,
     };
@@ -1122,6 +1140,163 @@ mod tests {
         assert_eq!(
             serde_json::to_value(loaded.document()).unwrap(),
             serde_json::to_value(&d).unwrap()
+        );
+    }
+
+    /// W0 baseline for the Platform refactor: state this build cannot interpret
+    /// must survive a full edit cycle, not merely a single serde round trip.
+    ///
+    /// This is the generalized form of the guarantee module/addon namespaces will
+    /// rely on — the writer re-emits what the reader could not understand, across
+    /// open → modify → save → reopen. Pinned now so a later change to the document
+    /// mirror cannot quietly drop it.
+    #[test]
+    fn unknown_document_state_survives_open_modify_save() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.onecad");
+
+        let mut authored = doc(1, 10.0);
+        let foreign = serde_json::json!({ "schemaVersion": 3, "payload": { "note": "keep me" } });
+        authored
+            .extra
+            .insert("comExampleFoo".into(), foreign.clone());
+        ContainerWriter::save(&path, &authored, &ContainerCaches::none(), &meta()).unwrap();
+
+        // Open, make a real modeling change, save again through the normal path.
+        let opened = ContainerReader::open(&path).unwrap();
+        let mut edited = opened.document().clone();
+        assert_eq!(edited.extra.get("comExampleFoo"), Some(&foreign));
+        edited.timeline.insert_at_cursor(extrude(0x12, 25.0));
+        ContainerWriter::save(&path, &edited, &ContainerCaches::none(), &meta()).unwrap();
+
+        let reopened = ContainerReader::open(&path).unwrap();
+        assert_eq!(
+            reopened.document().extra.get("comExampleFoo"),
+            Some(&foreign),
+            "unknown document state must round-trip verbatim through an edit"
+        );
+        assert_eq!(
+            reopened.document().timeline.len(),
+            3,
+            "the modeling edit must still have been persisted"
+        );
+    }
+
+    /// ADR-0004: adding module state must not change what an existing document
+    /// serializes to. A stray `"modules": {}` would be a silent format change on
+    /// every file the user re-saves.
+    #[test]
+    fn a_document_without_module_state_serializes_no_module_keys() {
+        let d = doc(1, 10.0);
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(
+            !json.contains("\"modules\""),
+            "an empty module table must not be written: {json}"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.onecad");
+        ContainerWriter::save(&path, &d, &ContainerCaches::none(), &meta()).unwrap();
+        let loaded = ContainerReader::open(&path).unwrap();
+        assert!(loaded.manifest.modules.is_empty());
+        assert!(!serde_json::to_string(&loaded.manifest)
+            .unwrap()
+            .contains("\"modules\""));
+    }
+
+    /// The manifest's descriptor table is what makes "this project uses an addon
+    /// you do not have" answerable without parsing the payload.
+    #[test]
+    fn the_manifest_describes_every_module_the_document_carries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.onecad");
+
+        let mut d = doc(1, 10.0);
+        d.modules.insert(
+            ModuleId::parse("com.example.foo").unwrap(),
+            ModuleState::new(3, serde_json::json!({ "a": 1 })),
+        );
+        d.modules.insert(
+            ModuleId::parse("onecad.modeling").unwrap(),
+            ModuleState::new(1, serde_json::json!({})),
+        );
+        ContainerWriter::save(&path, &d, &ContainerCaches::none(), &meta()).unwrap();
+
+        let loaded = ContainerReader::open(&path).unwrap();
+        let modules = &loaded.manifest.modules;
+        assert_eq!(modules.len(), 2);
+        assert_eq!(
+            modules[&ModuleId::parse("com.example.foo").unwrap()].schema_version,
+            3
+        );
+        assert_eq!(
+            modules[&ModuleId::parse("onecad.modeling").unwrap()].schema_version,
+            1
+        );
+    }
+
+    /// ADR-0005, the guarantee third-party document state rests on: state whose
+    /// module is not installed survives a real editing cycle untouched.
+    #[test]
+    fn unknown_module_state_survives_open_modify_save() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.onecad");
+        let foreign = ModuleId::parse("com.example.absent").unwrap();
+        let payload = serde_json::json!({
+            "cost": { "currency": "EUR", "value": 12.5 },
+            "refs": { "body-1": ["a", "b"] },
+            "unicode": "påyload"
+        });
+
+        let mut authored = doc(1, 10.0);
+        authored
+            .modules
+            .insert(foreign.clone(), ModuleState::new(7, payload.clone()));
+        ContainerWriter::save(&path, &authored, &ContainerCaches::none(), &meta()).unwrap();
+
+        // Open with NOTHING that understands `com.example.absent`, make a real
+        // modeling change, and save through the ordinary path.
+        let opened = ContainerReader::open(&path).unwrap();
+        let mut edited = opened.document().clone();
+        edited.timeline.insert_at_cursor(extrude(0x12, 25.0));
+        ContainerWriter::save(&path, &edited, &ContainerCaches::none(), &meta()).unwrap();
+
+        let reopened = ContainerReader::open(&path).unwrap();
+        let survived = reopened
+            .document()
+            .modules
+            .get(&foreign)
+            .expect("the absent module's state must still be there");
+        assert_eq!(survived.schema_version, 7);
+        assert_eq!(survived.payload, payload, "payload must be byte-equal");
+        assert_eq!(
+            reopened.document().timeline.len(),
+            3,
+            "and the modeling edit must have persisted"
+        );
+        assert_eq!(reopened.manifest.modules[&foreign].schema_version, 7);
+    }
+
+    #[test]
+    fn a_module_id_this_build_would_refuse_still_round_trips() {
+        // A document written by a newer build (or a laxer tool) must not become
+        // unloadable — refusing it would destroy the data preservation protects.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.onecad");
+        let odd = ModuleId::from_stored("Not.A.Valid.Id!".into());
+        assert!(ModuleId::parse(odd.as_str()).is_err());
+
+        let mut d = doc(1, 10.0);
+        d.modules.insert(
+            odd.clone(),
+            ModuleState::new(1, serde_json::json!({ "x": 1 })),
+        );
+        ContainerWriter::save(&path, &d, &ContainerCaches::none(), &meta()).unwrap();
+
+        let reopened = ContainerReader::open(&path).unwrap();
+        assert_eq!(
+            reopened.document().modules[&odd].payload,
+            serde_json::json!({ "x": 1 })
         );
     }
 

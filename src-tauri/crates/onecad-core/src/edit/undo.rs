@@ -21,6 +21,7 @@
 
 use crate::document::body::BodyRegistry;
 use crate::document::datum::DatumPlane;
+use crate::document::modules::{ModuleId, ModuleState};
 use crate::document::record::OperationRecord;
 use crate::document::repair::RepairState;
 use crate::document::variables::VariableTable;
@@ -107,6 +108,13 @@ pub enum Inverse {
         /// The prior variable table.
         table: Box<VariableTable>,
     },
+    /// Undo of a module-state write: restore that module's prior slice.
+    RestoreModuleState {
+        /// Owning module/addon.
+        module: ModuleId,
+        /// The prior slice, or `None` if the module had no state.
+        prior: Option<Box<ModuleState>>,
+    },
     /// Undo of an edit that changed the repair state.
     RestoreRepair {
         /// The prior repair state.
@@ -156,6 +164,10 @@ impl Inverse {
             Inverse::RestoreSketch { id, .. } => doc.sketch_dirty_step(*id),
             // Display-only: no timeline step regenerates differently.
             Inverse::RestoreSketchVisibility { .. } => None,
+            // Module state is not an input to any timeline step — the platform
+            // cannot interpret it, so no operation can depend on it. Restoring it
+            // regenerates nothing.
+            Inverse::RestoreModuleState { .. } => None,
             // Whole-collection mementos. `RestoreBodies` (names/visibility, but also
             // every row adopted from regen since the reverted edit), `RestoreDatum`
             // (a datum a sketch frame was stamped from), `RestoreVariables` (a bare
@@ -212,6 +224,14 @@ impl Inverse {
                 }
                 None => {
                     doc.sketch_visibility.remove(&id);
+                }
+            },
+            Inverse::RestoreModuleState { module, prior } => match prior {
+                Some(state) => {
+                    doc.modules.insert(module, *state);
+                }
+                None => {
+                    doc.modules.remove(&module);
                 }
             },
             Inverse::RestoreBodies { registry } => doc.bodies = *registry,

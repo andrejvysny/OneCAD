@@ -10,7 +10,7 @@
 //! The DTO layer lives in the app crate so `onecad-core` stays tauri-free and its
 //! frozen file-format serde is never coupled to a UI wire shape.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use onecad_core::document::record::{KnownOperation, OffsetDistanceType, Operation};
 use onecad_core::history::StepState;
@@ -267,6 +267,30 @@ pub const GEOMETRY_SOURCE_LIVE: &str = "live";
 pub struct DocumentSnapshotDto {
     pub document_id: String,
     pub title: String,
+}
+
+/// One module's slice of the document (`types.ts` `ModuleState`).
+///
+/// The payload is opaque to everything but the owning module — it crosses this
+/// boundary as arbitrary JSON and is never inspected on the way (ADR-0005).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModuleStateDto {
+    /// Owning module/addon id (reverse-DNS).
+    pub module_id: String,
+    /// The schema version the OWNING module wrote this payload at.
+    pub schema_version: u32,
+    /// Module-owned data.
+    pub payload: serde_json::Value,
+}
+
+/// What a document records about a module it carries state for (`types.ts`
+/// `DocumentModule`). Enough to report a missing addon without decoding its data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentModuleDto {
+    pub module_id: String,
+    pub schema_version: u32,
 }
 
 /// One recent-project entry for the start screen (`types.ts` `RecentProject`).

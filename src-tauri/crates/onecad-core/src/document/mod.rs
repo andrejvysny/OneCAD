@@ -24,6 +24,7 @@
 pub mod body;
 pub mod datum;
 pub mod element_index;
+pub mod modules;
 pub mod record;
 pub mod refs;
 pub mod repair;
@@ -37,6 +38,7 @@ use serde::{Deserialize, Serialize};
 use crate::document::body::BodyRegistry;
 use crate::document::datum::DatumPlane;
 use crate::document::element_index::ElementIndex;
+use crate::document::modules::ModuleStateTable;
 use crate::document::record::{KnownOperation, Operation, OperationRecord};
 use crate::document::refs::Extra;
 use crate::document::repair::RepairState;
@@ -123,6 +125,12 @@ pub struct Document {
     pub repair: RepairState,
     /// Named selection sets (minimal).
     pub named_selections: Vec<NamedSelection>,
+    /// Module-owned state, keyed by owning module/addon id (ADR-0004).
+    ///
+    /// The document STORES these slices and never interprets them. A slice whose
+    /// module is not installed is carried through load and save untouched, which
+    /// is what lets a project survive a missing addon (ADR-0005).
+    pub modules: ModuleStateTable,
     /// Document-level unknown keys, preserved verbatim.
     pub extra: Extra,
 }
@@ -144,6 +152,7 @@ impl Document {
             elements: ElementIndex::new(),
             repair: RepairState::new(),
             named_selections: Vec::new(),
+            modules: ModuleStateTable::new(),
             extra: Extra::new(),
         }
     }
@@ -272,6 +281,10 @@ struct DocumentData {
     repair: RepairState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     named_selections: Vec<NamedSelection>,
+    /// Skipped when empty, so every document written before module state existed
+    /// keeps serializing byte-identically (ADR-0004 — no format break).
+    #[serde(default, skip_serializing_if = "ModuleStateTable::is_empty")]
+    modules: ModuleStateTable,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     extra: Extra,
 }
@@ -291,6 +304,7 @@ impl From<Document> for DocumentData {
             elements: d.elements,
             repair: d.repair,
             named_selections: d.named_selections,
+            modules: d.modules,
             extra: d.extra,
         }
     }
@@ -324,6 +338,7 @@ impl From<DocumentData> for Document {
             elements: w.elements,
             repair: w.repair,
             named_selections: w.named_selections,
+            modules: w.modules,
             extra: w.extra,
         }
     }

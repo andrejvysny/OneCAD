@@ -46,11 +46,13 @@ import type {
   BeginGestureResult,
   CurveParams,
   DocumentChange,
+  DocumentModule,
   DocumentProjectionWire,
   DocumentSnapshot,
   DragSolveResult,
   ElementInfo,
   MassProperties,
+  ModuleState,
   EnterSketchTarget,
   FeatureDependencies,
   FeatureRecord,
@@ -126,6 +128,9 @@ const CMD = {
   importStep: "import_step",
   insertStep: "insert_step",
   importProject: "import_project",
+  getModuleState: "get_module_state",
+  setModuleState: "set_module_state",
+  listDocumentModules: "list_document_modules",
   closeDocument: "close_document",
   checkRecovery: "check_recovery",
   recoverDocument: "recover_document",
@@ -1616,6 +1621,24 @@ export function createTauriClient(): CadClient {
       return snap;
     },
     insertStep,
+    // Module-owned document state (ADR-0004). The payload is passed through
+    // untouched in both directions — this lane has no schema for it.
+    getModuleState(moduleId: string): Promise<ModuleState | null> {
+      return call<ModuleState | null>(CMD.getModuleState, { moduleId });
+    },
+    setModuleState(
+      moduleId: string,
+      state: { schemaVersion: number; payload: unknown } | null,
+    ): Promise<void> {
+      return call<void>(CMD.setModuleState, {
+        moduleId,
+        schemaVersion: state?.schemaVersion ?? null,
+        payload: state?.payload ?? null,
+      });
+    },
+    listDocumentModules(): Promise<DocumentModule[]> {
+      return call<DocumentModule[]>(CMD.listDocumentModules);
+    },
     async closeDocument(): Promise<void> {
       await call<void>(CMD.closeDocument);
       resetCorrelation();

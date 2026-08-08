@@ -30,6 +30,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use onecad_core::document::modules::{ModuleId, ModuleState};
 use onecad_core::document::record::Operation;
 use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, PrimaryRef};
 use onecad_core::edit::{EditCommand, SketchEditOp};
@@ -43,9 +44,9 @@ use onecad_core::regen::{RegenRequest, ResolveRef, ResolveRequest};
 use crate::autosave;
 use crate::document_runtime::{DocumentRuntime, RegenReport, SaveCaches};
 use crate::dto::{
-    BeginGestureDto, DocumentProjection, DocumentSnapshotDto, DragSolveDto, FeatureDependenciesDto,
-    FinishSketchDto, PromotedElementDto, RecentProjectDto, RecoveryInfoDto, ResolveRefDto,
-    SketchOnFaceDto, SketchSessionDto, SketchUpsertDto,
+    BeginGestureDto, DocumentModuleDto, DocumentProjection, DocumentSnapshotDto, DragSolveDto,
+    FeatureDependenciesDto, FinishSketchDto, ModuleStateDto, PromotedElementDto, RecentProjectDto,
+    RecoveryInfoDto, ResolveRefDto, SketchOnFaceDto, SketchSessionDto, SketchUpsertDto,
 };
 use crate::error::ApiError;
 use crate::events;
@@ -868,6 +869,89 @@ fn edit_command_summary(command: &EditCommand) -> String {
             .and_then(|v| v.get("cmd").and_then(|c| c.as_str()).map(String::from))
             .unwrap_or_else(|| "unknown".into()),
     }
+}
+
+// ── Module-owned document state (ADR-0004) ───────────────────────────────────
+
+/// Reads one module's slice of the open document (`CadClient.getModuleState`).
+///
+/// Returns `None` when the module has no state here. The payload crosses this
+/// boundary untouched — the backend has no schema for it (ADR-0005).
+#[tauri::command]
+pub async fn get_module_state(
+    state: State<'_, AppState>,
+    module_id: String,
+) -> Result<Option<ModuleStateDto>, ApiError> {
+    let module = parse_module_id(&module_id)?;
+    let guard = state.runtime.lock().await;
+    let rt = guard
+        .as_ref()
+        .ok_or_else(|| ApiError::NoDocument("get_module_state".into()))?;
+    Ok(rt.module_state(&module).map(|s| ModuleStateDto {
+        module_id,
+        schema_version: s.schema_version,
+        payload: s.payload,
+    }))
+}
+
+/// Writes or clears one module's slice (`CadClient.setModuleState`).
+///
+/// Goes through the ordinary transaction path, so a programmatic write is as
+/// undoable as a user edit — there is no separate mutation lane
+/// (docs/ARCHITECTURE.md §9).
+#[tauri::command]
+pub async fn set_module_state(
+    state: State<'_, AppState>,
+    module_id: String,
+    schema_version: Option<u32>,
+    payload: Option<serde_json::Value>,
+) -> Result<(), ApiError> {
+    let module = parse_module_id(&module_id)?;
+    // Absent payload = clear. A `schemaVersion` without a payload is a caller
+    // bug, not a clear: refuse it rather than silently discarding their data.
+    let next = match (schema_version, payload) {
+        (Some(schema_version), Some(payload)) => Some(ModuleState::new(schema_version, payload)),
+        (None, None) => None,
+        _ => {
+            return Err(ApiError::InvalidCommand(
+                "set_module_state needs both schemaVersion and payload, or neither".into(),
+            ))
+        }
+    };
+    let mut guard = state.runtime.lock().await;
+    let rt = guard
+        .as_mut()
+        .ok_or_else(|| ApiError::NoDocument("set_module_state".into()))?;
+    rt.set_module_state(module, next)
+        .map_err(|e| ApiError::InvalidCommand(e.to_string()))?;
+    state.note_mutation();
+    Ok(())
+}
+
+/// Every module the open document carries state for (`CadClient.listDocumentModules`).
+///
+/// This is how the app can say "this project uses an addon you do not have"
+/// instead of silently ignoring that module's data (spec §43).
+#[tauri::command]
+pub async fn list_document_modules(
+    state: State<'_, AppState>,
+) -> Result<Vec<DocumentModuleDto>, ApiError> {
+    let guard = state.runtime.lock().await;
+    let rt = guard
+        .as_ref()
+        .ok_or_else(|| ApiError::NoDocument("list_document_modules".into()))?;
+    Ok(rt
+        .document_modules()
+        .into_iter()
+        .map(|(id, schema_version)| DocumentModuleDto {
+            module_id: id.to_string(),
+            schema_version,
+        })
+        .collect())
+}
+
+fn parse_module_id(value: &str) -> Result<ModuleId, ApiError> {
+    ModuleId::parse(value).map_err(|e| ApiError::InvalidCommand(e.to_string()))
 }
 
 /// Undoes the last committed edit (`CadClient.undo`).

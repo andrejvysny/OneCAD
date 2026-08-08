@@ -1,13 +1,84 @@
 # OneCAD-Tauri Migration TODO
 
+## PLATFORM REFACTOR — Milestones 1 + 2 (2026-08-08, plan `velvety-leaping-adleman.md`) — IN FLIGHT
+
+Architecture-only refactor: modeling stops being synonymous with OneCAD and becomes the first built-in module on a Platform, and `.onecad` gains namespaced module state that survives a round trip without its owner installed. **No user-visible change, no modeling behavior change.** Out of scope: SDK package, test addon, addon manifest/loader/host, GitHub install, resource-store generalization, dynamic Tauri router, crate extraction, any file moves.
+
+Laws: `docs/ARCHITECTURE.md` (normative) + `docs/adr/0001`–`0008` + the new CLAUDE.md § Architecture laws.
+
+### Recorded baseline (W0, measured — not inherited from a doc)
+- `bunx tsc --noEmit` was **RED** on `src/ipc/mockClient.import.test.ts:106` (`'snap' is possibly 'null'`, from concurrent commit `685efc2`). Fixed by narrowing, no cast. Now green.
+- `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` against the **staged** sidecar (`worker/build/onecad-worker`, built 19:37, pre-VF-M5-gate): **1033 passed / 0 failed**. The VF-M5 red recorded in this file does NOT reproduce on that binary — consistent with the note that it needs a worker built from HEAD.
+- Worker could NOT be rebuilt here: `scripts/build-worker.sh` aborts with "OCCT artifact metadata is absent" for `/opt/homebrew/opt/occt-8.0.1` (no `occt-build.json`; that prefix is not a `build-pinned-occt.sh` product). **Unrelated to this refactor — flagged, not worked around.** The VF-M5 FOLLOW-UP gate below therefore stays open and unverified from here.
+- Frontend baseline at W0 close: vitest **213 files / 3720 tests** green; `cargo fmt --all --check` + workspace `clippy -D warnings` clean; `cargo test -p onecad-core --lib` 242/0.
+
+### W0 — invariants captured ✅
+- [x] Frozen behavior contracts in `src/test/contracts/` (+ a README stating they may not be edited to make a refactor pass): toolbar arrangement, the three keymap tables + cross-mode opt-out, editor mount order, inspector section order per state.
+- [x] Four golden probes: `toolbarConfig.golden.test.ts`, `keymap.golden.test.ts` (full (key, shift, mode) resolution matrix against an independently-written oracle, not a call into the code under test), `editorMountOrder.golden.test.ts` (JSX scan; becomes a registry scan at W3 against the SAME contract), `InspectorPanel.golden.test.tsx`.
+- [x] CORRECTED ASSUMPTION while writing them: the inspector's Constraints section is UNCONDITIONAL in sketch mode (label + "No constraints yet.") — the contract records shipped behavior, not the guess.
+- [x] Rust `unknown_document_state_survives_open_modify_save` in `io/container.rs` — the W5 guarantee rehearsed on today's `Document.extra` lane: open → real modeling edit → save → reopen, foreign key byte-equal.
+- [x] `docs/ARCHITECTURE.md`, `docs/adr/README.md` + ADR-0001…0008, CLAUDE.md § Architecture laws.
+
+### W1 — platform core ✅ (pure addition, nothing wired)
+- [x] `src/platform/ids.ts` — branded ids + reverse-DNS owner validation + namespace enforcement (an addon cannot construct an `onecad.*` contribution id).
+- [x] `src/platform/registry.ts` — owner-scoped generic registry. Duplicate id ⇒ throw naming the holder; foreign namespace ⇒ throw; order is `(priority, insertion index)` with `group` as consumer metadata, NOT a sort key (group names sort alphabetically, which is never the intended visual order); snapshot reference is cached because `useSyncExternalStore` loops on a fresh array per call.
+- [x] `src/platform/contributions.ts` — Command / Tool / Panel / Inspector / Viewport / Workspace contracts, domain-neutral (scopes are opaque strings so the platform never learns "model"/"sketch"). `ViewportContext.invalidate()` is the on-demand-render seam.
+- [x] `src/platform/{slots,events,services,platform}.ts` — closed slot list, owned event subscriptions, service registry with a naming `require()`, module lifecycle with dependency topo-sort, cycle + missing-dependency rejection, and a failed activation that leaves nothing registered.
+- [x] `src/platform/react/` — `PlatformProvider` (context, never a global singleton), `SlotHost` (renders no wrapper DOM — these are absolutely-positioned overlays and a wrapper would change stacking), `ContributionBoundary` (per-contribution isolation; the app-level boundary's full-screen fallback is the wrong shape for a 260px panel).
+- [x] Tests 46/46: ownership, stale-handle safety, duplicate + namespace rejection, order independent of registration order, tie-break, notification, dependency order, cycle, failed-activation cleanup, scope teardown completeness, slot render order, error isolation.
+
+### W2 — modeling owns its tools, commands and bindings ✅
+- [x] `src/modules/modeling/tools.ts` + `bindings.ts` are now the SINGLE source of truth for the palette and the three key tables. `features/toolbar/toolbarConfig.ts` and `shortcuts/keymap.ts` DERIVE from them and keep their exported shapes, so every call site and test is untouched. Resolution rules (mode precedence, exact chord, cross-mode fallback + opt-out) stay in `keymap.ts` — the module owns WHICH keys exist, the shortcut layer owns HOW one resolves.
+- [x] Descriptors are discriminated on `scope`, so a sketch-only tool placed in the model table is a compile error, and consumers narrow without a cast.
+- [x] Separators are DERIVED from group boundaries rather than authored — `group` is consumer metadata, `priority` is the sort key.
+- [x] Ids are SCOPE-QUALIFIED (`…tool.model.mirror` vs `…tool.sketch.mirror`): `select` and `mirror` exist in both unions and mean different things, so a flat map would have let one shadow the other.
+- [x] `registryToolbar.ts` rebuilds the arrangement FROM the registry — the golden assertion runs against that, not against the table the registry was built from, or it would only prove the table equals itself.
+- [x] Tool activation and command execution DELEGATE to the existing `activateTool` / `runAction`, so a registry-driven invocation and a toolbar click cannot diverge.
+- [x] `ToolDefinition.shortcutLabel` added: Measure binds ⇧/ but is written "?", so glyph and chord are not derivable from each other.
+
+### W3 — EditorShell + slot hosting ✅
+- [x] `src/app/shell/EditorShell.tsx` renders permanent structure + one `SlotHost` per region; the 19 concrete imports are gone. `EditorScreen.tsx` is now a one-line bridge so `App.tsx`'s code-split specifier and `StartScreen`'s idle prefetch keep working.
+- [x] Contributions register on EDITOR MOUNT, not at bootstrap: the editor tree is a deliberate code-split chunk, and hoisting those imports into the startup bundle to satisfy an architectural preference would make the start screen pay for the editor. That needed `platform.createScope(owner)` (independent child scope) and a fix to scope teardown — `dispose()` no longer sweeps the whole owner, which would have let the editor's scope tear down the module's bootstrap registrations.
+- [x] Panel ids live in `panelIds.ts`, split from the files that import components, so a workspace definition can name a panel without dragging the editor chunk in.
+- [x] TWO NEW SLOTS, deliberately: `viewport.chrome` (controls anchored to the viewport frame — nav pill, corner cluster; they sit above the docked panels, unlike scene-tracking overlays) and `shell.notification` (banners). Without them the frozen mount order could not be reproduced with contiguous slot regions.
+- [x] The mount-order probe was REPLACED (JSX scan → registry scan) against the SAME frozen contract, plus two new checks: every registered panel lands in a region the shell actually renders, and re-registration after teardown is collision-free (StrictMode double-invokes).
+
+### W4 — default workspace + composition root ✅
+- [x] `src/app/bootstrap.ts` — `bootstrapOneCAD()` creates the Platform, registers `onecad.shell` + `onecad.modeling`, initializes in dependency order. It lives in `app/` and NOT in `platform/`: the composition root is the only place allowed to know both sides.
+- [x] `App.tsx` builds it in a state initializer and wraps the tree in `PlatformProvider` — no global singleton, and every existing test that renders `<App/>` keeps working with no setup.
+- [x] `platform.initializeSync()` added because the React root must have a Platform on its FIRST render; it throws if a module's `activate` is async, so the restriction is visible at startup rather than as a half-built registry.
+- [x] `onecad.shell.workspace.design` reproduces the current layout declaratively. NAMING DEVIATION recorded: the spec sketches `onecad.workspace.design`, but a contribution id must sit under its owner's namespace, and this workspace is owned by `onecad.shell` because it composes several modules. No workspace switcher in the UI.
+
+### W5 — Rust module-owned document state ✅
+- [x] `onecad_core::document::modules` — `ModuleId` (reverse-DNS, validated on AUTHORING only), `ModuleState { schemaVersion, payload }`, `ModuleStateTable`. Deserialization is deliberately permissive: refusing an id a stricter build dislikes would destroy exactly the data preservation exists to protect.
+- [x] `Document.modules` + the `DocumentData` mirror, `skip_serializing_if` empty — pinned by test that a document without module state writes NO `"modules"` key, in the document and in the manifest. No container-version bump, no user-document migration.
+- [x] `Manifest.modules` descriptor table, DERIVED from the document at save so the two can never disagree — this is what makes "this project uses an addon you do not have" answerable without decoding a payload.
+- [x] `EditCommand::SetModuleState` + `Inverse::RestoreModuleState`, dirty floor `None` (no timeline step can consume state the platform cannot interpret). Programmatic writes therefore use the SAME transaction path as user edits.
+- [x] Proofs: unknown-module state byte-equal across open → real modeling edit → save → reopen; a module id this build would refuse still round-trips; undo restores the PRIOR slice rather than merely deleting the new one; clear-then-undo restores.
+
+### W6 — wire + missing-module reporting ✅
+- [x] `ModuleStateDto` / `DocumentModuleDto`; three typed Tauri commands (`get_module_state`, `set_module_state`, `list_document_modules`). NO dynamic router — spec §97's `platform_invoke` is deferred to the addon-host effort, where it will have a consumer.
+- [x] `CadClient` gains three append-only methods; `tauriClient` and `mockClient` both implement them, so the whole persistence lane is exercisable with no backend. `set_module_state` refuses a `schemaVersion` without a payload rather than silently treating it as a clear.
+- [x] `src/platform/documentState.ts` — the service binds the module id at construction, so a module cannot address another module's slice by accident. `missingModules()` reports, never blocks.
+
+### W7 — enforcement + gate ✅
+- [x] `src/platform/architecture.test.ts` scans the real import graph: Platform must not import `@/features`, `@/tools`, `@/modules`, `@/stores`, `@/viewport`, `@/app`; modules must not import the shell or deep-path into the platform. Carries a POSITIVE CONTROL (an edge that really exists) because every other assertion expects an empty list — which is also what a broken scanner returns.
+
+### Flagged seams (carried forward, not fixed here)
+- `zoomFit` / `home` are registered as MODELING commands because that is where their bindings live today; they are really view-navigation and belong to the platform once a selection/viewport service exists.
+- The toolbar component still renders from the derived `MODEL_TOOLS`/`SKETCH_TOOLS` arrays rather than reading the registry live; `toolbarFromRegistry` exists and is proven, so the swap is mechanical.
+- Inspector sections, tree nodes and viewport layers are NOT yet contributions — `InspectorContribution` / `ViewportContribution` / `TreeProvider` exist as contracts with no producers.
+- Module state is stored in `document.json` (ADR-0004); moving to `modules/<id>/state.json` later is a container-format change.
+- `scripts/build-worker.sh` cannot configure against `/opt/homebrew/opt/occt-8.0.1` ("OCCT artifact metadata is absent") — pre-existing, unrelated, blocks rebuilding the sidecar from HEAD here.
+
 ## VF-M5+VF-M6 DEFECT FIXES + IMPORT PROJECT (2026-08-08) — GATE PASSED
 
 Defect fixes from the review round (worker ladder + import blob lifecycle), then the "Import Project" feature: append another `.onecad` document's timeline to the open document. Assembly/joints explicitly out of scope; static import now, live/XREF later.
 
 ### VF-M5 — from-0 replay rebases onto stale WORLD anchors
 - [x] Root cause: on a from-0 replay an inherited edit ("ALL" buckets, whose refs were animated to the source model) resolves WORLD anchors through the post-edit scene; the replayed model telerecorders scored anchor-exact, which vetoed their legit `NeedsRepair` — replay silently misassigned. The far-edge blend captured it and anchor-rebased nothing.
-- [x] Fix: from-0 replay now runs with edit-context `from_zero_replay`, which disables the anchor-exact carve-out during that loop. The checkpoint path (from-zero carrying the user's original edit) still binds AutoBind; the from-ZERO (checkpoint-recreated) replay surfaces the same case as `NeedsRepair` + "ambiguous" so a follow-up repair/step runs as authored.
-- [x] Plumbed `from_zero_replay` through `LadderEditContext` → `ScratchJob` → `PlanExecutor` → into the four edit ops (`Shell/Hole/Fillet-Chamfer/Extrude`); `job.partition.size()==0` is the from-zero gate. Worker ctest 106/106, kernelbench green.
+- [x] Fix (attempt, RE-OPENED — see VF-M5 FOLLOW-UP below): from-0 replay now runs with edit-context `from_zero_replay`, which disables the anchor-exact carve-out during that loop. The checkpoint path (from-zero carrying the user's original edit) still binds AutoBind; the from-ZERO (checkpoint-recreated) replay surfaces the same case as `NeedsRepair` + "ambiguous" so a follow-up repair/step runs as authored. **The gate as built regresses the flagship real-worker edit lane and must be reworked — V1 has no checkpoint restore, so the carve-out should stay ON until a genuine restore basis is plumbed.**
+- [x] Plumbed `from_zero_replay` through `LadderEditContext` → `ScratchJob` → `PlanExecutor` → into the four edit ops (`Shell/Hole/Fillet-Chamfer/Extrude`); `job.partition.size()==0` is the from-zero gate — **WRONG as a discriminator, see FOLLOW-UP**
 - [x] Docs: gap-closed note in `protocol/IRR/SCHEMA.md` + `docs/qa/…` (records the accepted residual + the gap this runs through).
 
 ### VF-M6 — import-blob lifecycle (3 defects)
@@ -30,6 +101,12 @@ Defect fixes from the review round (worker ladder + import blob lifecycle), then
 
 ### Gate
 - [x] `bun run build` (tsc+vite) green · vitest **209 files / 3697 tests** · Playwright `project-import`/`step-import` spec **12/12** · full Playwright **386/390** (4 pre-existing `theme.spec` failures root-caused to the WORK `TitleBar` changes, not this package) · worker ctest **106/106** · `cargo fmt --all --check` · workspace clippy `-D warnings` · `cargo test -p onecad --lib` **253 passed / 0 failed**. Full `cargo test --workspace` (real-worker lane) and kernelbench left for the follow-up gate below.
+
+### VF-M5 FOLLOW-UP — real-worker lane RED (RE-OPENS the VF-M5 gate)
+- [ ] `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` against a worker built from HEAD **FAILS** `topology_rebind::h6a_flagship_edit_lane_fillet_survives_and_reopens_clean` (`needsRepair` expected 0, got 1). Baseline worker (gate stashed + rebuilt) passes ⇒ THE GATE IS THE REGRESSION.
+- [ ] Root cause: no checkpoint plumbing in V1 ⇒ `job.partition.size() == 0` (`PlanExecutor`) is ALWAYS true, so `from_zero_replay` degenerates to `edited_from.is_some()` and the flagship edit lane (`ToEnd { from: 1 }`) is mis-flagged as from-zero-replay → anchor-exact carve-out disabled → `NeedsRepair`. The true VF-M5 hazard can't occur in V1 (no restores).
+- [ ] Fix direction: keep the anchor-exact carve-out ON until a real `baseCheckpoint`/restore signal is plumbed (or plumb one into the plan). Document re-derive on the real-worker lane before closing.
+- [ ] Note: the on-disk sidecar `worker/build/onecad-worker` (19:37) is a stale pre-gate build — rebuild from HEAD before re-running.
 
 ## ADVANCED-FILLET ROADMAP — M0 REPRODUCIBLE-GREEN + M1 QA-AUTOMATION (2026-08-08) — GATE PASSED
 
@@ -104,7 +181,14 @@ The cross-language half: the worker can now execute a `schemaVersion: 2` case, a
 ### Gate — M2 part 2
 `ctest` **107/107** on the pinned OCCT 8.0.1 worker (106 → 107, the new `kernelbench_case_v2`) · `cargo fmt --all --check` · workspace `clippy -D warnings` clean · kernelbench **56 lib + 5 integration** (50 → 56) · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1032 passed / 0 failed** across 73 targets against the pinned worker (1000 → 1032) · **T0 both-backend UNCHANGED: 136/136 pass, replay 136 stable, metamorph 48 pass / 0 fail / 16 notRun, differential 136 same-status, `gatingFailures: 0`** · **M1 both-backend: 120 records, 114 pass + 6 characterization (the near-tangent exploratory refusals), replay 120 stable, metamorph 72 pass / 0 fail, differential 120 same-status, `gatingFailures: 0`, p50 10.3 ms / p95 62.3 ms** · the committed v2 example executes through `run-case` on both backends, pass + replay-stable · ajv-valid under Draft 2020-12.
 
-### Next (unstarted) — see HANDOFF.md for the resume recipe
+### M3 — metamorph execution (NEXT, unstarted)
+- [ ] `VariantSpec` (`worker/src/benchmark/Types.h`) and `suite::Variant` carry only translation + rotation. The v2 metamorph set is expressible in the schema and validated on BOTH sides already — mirror, uniformScale, farOriginTranslation, parameterEpsilon, edgeOrderPermutation, contourSeed — but none of them are executed. Widening that pair is the work.
+- [ ] `apply_variant` (`Geometry.cpp`) needs the mirror and uniform-scale transforms, and `metamorph.rs` needs the matching inverse so the shape-signature comparison stays genuine rather than fabricated (see KBR-0: that evidence was fabricated once already).
+- [ ] `parameterEpsilon` is not a shape transform — it perturbs the requested radius, so it belongs on the request side, not in `apply_variant`.
+- [ ] `edgeOrderPermutation` / `contourSeed` reorder the SELECTION, not the geometry; they exercise the selector's order-independence.
+- [ ] Gate: T0 must stay 136/136 with `gatingFailures: 0`, and `m1` must stay at 0 gating failures with the new variants included.
+
+### Then — see HANDOFF.md for the resume recipe
 M3 metamorph execution (the v2 metamorph set — mirror, uniformScale, farOriginTranslation, parameterEpsilon, edgeOrderPermutation, contourSeed — is expressible and validated on both sides but only translation/rotation are EXECUTED) → M4 failure taxonomy + the recipe-agnostic validators (`supportTangency`, `crossSectionProfile`, `noSelfIntersection`, `manifold`, `toleranceGrowth`, `microTopology`), which is what unblocks required validators on curved-support pairs → M5 `--jobs/--shard/--resume` → M6 minimizer + regression promotion → M7 SQLite ingest + static HTML dashboard → M8 large characterization campaign incl. the `scaleBand` sweep (production fillet algorithms still UNTOUCHED) → M9 baseline KPIs → M10 `FilletBuilder(FilletDefinition)` → M11 OCCT capability spike → M12 variable radius → M13 critical-radius diagnostics → M14 second campaign → M15 first evidence-driven rescue strategy → M16 measure rescue improvement → M17 chord width / verified G2 / overflow / corners → M18 Shapr3D goldens → M19 DirectEditPlanner + reblend. KBR case-v1 stays frozen.
 
 Also still open from M2 part 2: the remaining v2 recipes (`valenceCorner`, `shortEdge`, `microEdge`, `sliverNeighborFace`, `tinyNeighborFace`, `periodicSeam`, `nearSeamEdge`, `faceNearlyConsumed`, `faceFullyConsumed`, `blendCollision`) parse but refuse at generation by name; sphere/torus/bspline supports likewise; concave support pairs likewise.

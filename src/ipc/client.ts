@@ -13,11 +13,13 @@ import type {
   ApplyOperationResult,
   BeginGestureResult,
   DocumentChange,
+  DocumentModule,
   DocumentProjectionWire,
   DocumentSnapshot,
   DragSolveResult,
   ElementInfo,
   MassProperties,
+  ModuleState,
   EnterSketchTarget,
   FeatureDependencies,
   FinishSketchResult,
@@ -86,6 +88,21 @@ export interface CadClient {
    * when the dialog is cancelled.
    */
   importProject(): Promise<DocumentSnapshot | null>;
+  /**
+   * Read one module's slice of the open document. `null` when the module has
+   * none. The payload is returned untouched — the caller is its only reader.
+   */
+  getModuleState(moduleId: string): Promise<ModuleState | null>;
+  /**
+   * Write (`state`) or clear (`null`) one module's slice. Goes through the same
+   * transaction path as a user edit, so it is undoable.
+   */
+  setModuleState(moduleId: string, state: { schemaVersion: number; payload: unknown } | null): Promise<void>;
+  /**
+   * Every module the open document carries state for. Lets the app report a
+   * missing addon instead of silently ignoring its data.
+   */
+  listDocumentModules(): Promise<DocumentModule[]>;
   /**
    * Close the open document, dropping the runtime + caches and returning to the
    * start screen. The backend emits an empty projection so the editor clears.

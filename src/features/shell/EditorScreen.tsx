@@ -1,78 +1,12 @@
-import { useEffect } from "react";
-import { useShortcuts } from "@/shortcuts/useShortcuts";
-import { createClient } from "@/ipc/client";
-import { workerStore } from "@/stores/workerStore";
-import { repairStore } from "@/stores/repairStore";
-import { TitleBar } from "./TitleBar";
-import { StatusBar } from "./StatusBar";
-import { NavPill } from "./NavPill";
-import { CornerCluster } from "./CornerCluster";
-import { FloatingToolbar } from "@/features/toolbar/FloatingToolbar";
-import { ModelToolChips } from "@/features/toolbar/ModelToolChips";
-import { MeasureOverlay } from "@/features/measure/MeasureOverlay";
-import { MeasurePanel } from "@/features/measure/MeasurePanel";
-import { ModelTreePanel } from "@/features/tree/ModelTreePanel";
-import { InspectorPanel } from "@/features/inspector/InspectorPanel";
-import { RepairBanner } from "@/features/repair/RepairBanner";
-import { RepairMarkerOverlay } from "@/features/repair/RepairMarkerOverlay";
-import { TimelineStoppedBanner } from "@/features/repair/TimelineStoppedBanner";
-import { SketchChromeBar } from "@/features/sketch/SketchChromeBar";
-import { ConstraintBadgeLayer } from "@/features/sketch/ConstraintBadgeLayer";
-import { LiveDimChips } from "@/features/sketch/LiveDimChips";
-import { ConstraintContextChips } from "@/features/sketch/ConstraintContextChips";
-import { SketchConstraintToolbar } from "@/features/sketch/SketchConstraintToolbar";
-import { ViewportRoot } from "@/viewport/ViewportRoot";
-
-/**
- * Editor shell — docked sidebars (left model tree, right inspector) with
- * floating chrome (centered toolbar, status bar, nav pill, corner cluster)
- * over the live Three.js viewport (ViewportRoot). ViewportRoot renders the
- * real canvas and falls back to a hatched placeholder while the engine loads.
- * The status-bar strip occupies the bottom 34px, so the viewport sits above it.
+/*
+ * EditorScreen — the editor route.
+ *
+ * The screen's structure moved to `@/app/shell/EditorShell`, which knows only
+ * layout slots; the feature panels that used to be imported here are now
+ * contributions registered by `onecad.modeling` and `onecad.shell`
+ * (docs/ARCHITECTURE.md §6).
+ *
+ * This file stays as the route's entry point because `App.tsx` code-splits on
+ * this exact specifier and `StartScreen` idle-prefetches the same one.
  */
-export function EditorScreen() {
-  useShortcuts();
-
-  // Relay the C++ sidecar's worker-status events into the store the status bar
-  // reads (the real client listens to the backend; the mock never emits).
-  useEffect(() => {
-    return createClient().onWorkerStatus((s) => workerStore.getState().set(s));
-  }, []);
-
-  // Relay `needs-repair` events into the repair store (drives the banner + panel).
-  // Emitted after every published regen — empty items means repairs cleared.
-  useEffect(() => {
-    return createClient().onNeedsRepair((e) => repairStore.getState().applyEvent(e));
-  }, []);
-
-  // NOTE: the `close-requested` subscription + <UnsavedChangesDialog/> live in
-  // App.tsx, NOT here — the start screen must hear the event too, else the Rust
-  // ExitGuard latches on the first attempt and the app becomes unclosable.
-
-  return (
-    <div className="flex h-full w-full select-none flex-col overflow-hidden bg-surface font-ui">
-      <TitleBar />
-      <div className="relative min-h-0 flex-1">
-        <ViewportRoot className="absolute inset-x-0 bottom-[34px] top-0" />
-        <ConstraintBadgeLayer />
-        <LiveDimChips />
-        <ConstraintContextChips />
-        <ModelToolChips />
-        <MeasureOverlay />
-        <RepairMarkerOverlay />
-        <MeasurePanel />
-
-        <FloatingToolbar />
-        <SketchChromeBar />
-        <SketchConstraintToolbar />
-        <ModelTreePanel />
-        <InspectorPanel />
-        <RepairBanner />
-        <TimelineStoppedBanner />
-        <CornerCluster />
-        <NavPill />
-        <StatusBar />
-      </div>
-    </div>
-  );
-}
+export { EditorShell as EditorScreen } from "@/app/shell/EditorShell";

@@ -180,6 +180,9 @@ export function resetMockRecents(): void {
 // `checkRecovery` reports it; `recoverDocument` accepts (restore) or discards it.
 let mockRecovery: RecoveryInfo | null = null;
 
+/** In-memory module slices, keyed by module id (the mock's `document.modules`). */
+const mockModuleState = new Map<string, { schemaVersion: number; payload: unknown }>();
+
 /** Test seam: seed (or clear) the crash-recovery offer the start screen checks. */
 export function setMockRecovery(r: RecoveryInfo | null): void {
   mockRecovery = r ? { ...r } : null;
@@ -1868,8 +1871,31 @@ export const mockClient: CadClient = {
     importStepAndEmit();
     return snapshot("ImportedProject");
   },
+  // Module-owned document state (ADR-0004). The mock keeps it in memory so the
+  // whole lane — including a module writing and reading its own slice — is
+  // exercisable with no backend.
+  async getModuleState(moduleId: string) {
+    await wait();
+    const state = mockModuleState.get(moduleId);
+    return state ? { moduleId, ...structuredClone(state) } : null;
+  },
+  async setModuleState(
+    moduleId: string,
+    state: { schemaVersion: number; payload: unknown } | null,
+  ) {
+    await wait();
+    if (state === null) mockModuleState.delete(moduleId);
+    else mockModuleState.set(moduleId, structuredClone(state));
+  },
+  async listDocumentModules() {
+    await wait();
+    return [...mockModuleState.entries()]
+      .map(([moduleId, s]) => ({ moduleId, schemaVersion: s.schemaVersion }))
+      .sort((a, b) => a.moduleId.localeCompare(b.moduleId));
+  },
   async closeDocument() {
     await wait();
+    mockModuleState.clear();
     documentStore.getState().applySnapshot(emptyDocument());
   },
   async checkRecovery() {

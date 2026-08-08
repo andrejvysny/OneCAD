@@ -841,6 +841,7 @@ fn valid_manifest_bytes() -> Vec<u8> {
         modified: String::new(),
         ops_hash: String::new(),
         entries: Vec::new(),
+        modules: Default::default(),
         extra: Default::default(),
     };
     serde_json::to_vec(&manifest).unwrap()

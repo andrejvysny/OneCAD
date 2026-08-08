@@ -1,0 +1,101 @@
+/*
+ * Modeling's UI contributions.
+ *
+ * These used to be nineteen imports at the top of `EditorScreen.tsx`. They are
+ * now registrations, so the shell no longer knows that Extrude, the model tree
+ * or the sketch chrome exist (spec §195).
+ *
+ * ORDER IS LOAD-BEARING. These are absolutely-positioned siblings over the
+ * viewport, so DOM order decides stacking inside a z-index band — a past defect
+ * had tool chips render UNDER the side panels and become unclickable. Priorities
+ * here reproduce the shipped mount order exactly, and
+ * `src/test/contracts/shellContract.ts` is the gate.
+ *
+ * Registered when the EDITOR mounts, not at bootstrap: the editor tree is a
+ * deliberate code-split chunk (see `App.tsx`), and pulling these imports into the
+ * startup bundle to satisfy an architectural preference would make the start
+ * screen pay for the editor.
+ */
+import { Slots, type ModuleScope } from "@/platform";
+import { ModelingPanels } from "./panelIds";
+
+import { ConstraintBadgeLayer } from "@/features/sketch/ConstraintBadgeLayer";
+import { LiveDimChips } from "@/features/sketch/LiveDimChips";
+import { ConstraintContextChips } from "@/features/sketch/ConstraintContextChips";
+import { ModelToolChips } from "@/features/toolbar/ModelToolChips";
+import { MeasureOverlay } from "@/features/measure/MeasureOverlay";
+import { RepairMarkerOverlay } from "@/features/repair/RepairMarkerOverlay";
+import { MeasurePanel } from "@/features/measure/MeasurePanel";
+import { FloatingToolbar } from "@/features/toolbar/FloatingToolbar";
+import { SketchChromeBar } from "@/features/sketch/SketchChromeBar";
+import { SketchConstraintToolbar } from "@/features/sketch/SketchConstraintToolbar";
+import { ModelTreePanel } from "@/features/tree/ModelTreePanel";
+import { InspectorPanel } from "@/features/inspector/InspectorPanel";
+import { RepairBanner } from "@/features/repair/RepairBanner";
+import { TimelineStoppedBanner } from "@/features/repair/TimelineStoppedBanner";
+
+export { ModelingPanels };
+
+/** Registers modeling's editor UI into `scope`, in the shipped mount order. */
+export function contributeModelingUi(scope: ModuleScope): void {
+  const overlays = [
+    { id: ModelingPanels.ConstraintBadgeLayer, component: ConstraintBadgeLayer },
+    { id: ModelingPanels.LiveDimChips, component: LiveDimChips },
+    { id: ModelingPanels.ConstraintContextChips, component: ConstraintContextChips },
+    { id: ModelingPanels.ModelToolChips, component: ModelToolChips },
+    { id: ModelingPanels.MeasureOverlay, component: MeasureOverlay },
+    { id: ModelingPanels.RepairMarkerOverlay, component: RepairMarkerOverlay },
+    { id: ModelingPanels.MeasurePanel, component: MeasurePanel },
+  ];
+  overlays.forEach((p, i) =>
+    scope.registerPanel({ ...p, slot: Slots.ViewportOverlay, priority: 100 + i * 10 }),
+  );
+
+  scope.registerPanel({
+    id: ModelingPanels.FloatingToolbar,
+    slot: Slots.ToolbarPrimary,
+    priority: 100,
+    component: FloatingToolbar,
+  });
+
+  scope.registerPanel({
+    id: ModelingPanels.SketchChromeBar,
+    slot: Slots.ToolbarContextual,
+    priority: 100,
+    component: SketchChromeBar,
+  });
+  scope.registerPanel({
+    id: ModelingPanels.SketchConstraintToolbar,
+    slot: Slots.ToolbarContextual,
+    priority: 110,
+    component: SketchConstraintToolbar,
+  });
+
+  scope.registerPanel({
+    id: ModelingPanels.ModelTree,
+    slot: Slots.ShellLeft,
+    title: "Model",
+    priority: 100,
+    component: ModelTreePanel,
+  });
+  scope.registerPanel({
+    id: ModelingPanels.Inspector,
+    slot: Slots.ShellRight,
+    title: "Inspector",
+    priority: 100,
+    component: InspectorPanel,
+  });
+
+  scope.registerPanel({
+    id: ModelingPanels.RepairBanner,
+    slot: Slots.ShellNotification,
+    priority: 100,
+    component: RepairBanner,
+  });
+  scope.registerPanel({
+    id: ModelingPanels.TimelineStoppedBanner,
+    slot: Slots.ShellNotification,
+    priority: 110,
+    component: TimelineStoppedBanner,
+  });
+}

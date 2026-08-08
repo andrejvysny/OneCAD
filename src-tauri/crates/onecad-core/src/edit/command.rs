@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::document::body::BodyMeta;
 use crate::document::datum::DatumPlane;
+use crate::document::modules::{ModuleId, ModuleState};
 use crate::document::record::{Operation, OperationRecord};
 use crate::document::refs::{AxisRef, ElementRef, SketchRegionRef};
 use crate::document::variables::{Scalar, Variable};
@@ -156,6 +157,17 @@ pub enum EditCommand {
         /// New name.
         name: String,
     },
+    /// Write (or clear) one module's slice of the document (ADR-0004).
+    ///
+    /// Programmatic writes by a module or addon go through the SAME transaction
+    /// path as a user edit, so automation stays undoable, redoable and
+    /// observable — there is no separate mutation lane (docs/ARCHITECTURE.md §9).
+    SetModuleState {
+        /// Owning module/addon.
+        module: ModuleId,
+        /// The new slice, or `None` to remove the module's state entirely.
+        state: Option<ModuleState>,
+    },
     /// Set body or sketch visibility (C++ `ToggleVisibilityCommand`, whose
     /// `ItemType` is `Body` | `Sketch`).
     SetVisibility {
@@ -237,6 +249,7 @@ impl EditCommand {
             Self::AddBody { .. } => "Add Body",
             Self::DeleteBody { .. } => "Delete Body",
             Self::RenameBody { .. } => "Rename Body",
+            Self::SetModuleState { .. } => "Set Module State",
             Self::SetBodyColor { .. } => "Set Body Color",
             Self::SetFaceColor { .. } => "Set Face Color",
             Self::SetVisibility { .. } => "Toggle Visibility",

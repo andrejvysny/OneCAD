@@ -1,8 +1,10 @@
-import { lazy, Suspense, useEffect, useLayoutEffect } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useState } from "react";
 import { StartScreen } from "@/features/start/StartScreen";
 import { UnsavedChangesDialog } from "@/features/shell/UnsavedChangesDialog";
 import { createClient } from "@/ipc/client";
 import { appStore, useAppStore } from "@/stores/appStore";
+import { PlatformProvider } from "@/platform";
+import { bootstrapOneCAD } from "@/app/bootstrap";
 
 // Code-split: the editor tree (three.js, viewport engine, model/sketch tools)
 // and the dev gallery are both large and not needed for the start screen's
@@ -37,6 +39,11 @@ function BootPanel() {
  * unless there really are unsaved changes.
  */
 function App() {
+  // The Platform is built once, here, and passed down — never imported as a
+  // global. Building it in a state initializer keeps it available on the FIRST
+  // render (a screen may mount contributions immediately) and keeps every test
+  // that renders <App/> working without extra setup.
+  const [platform] = useState(bootstrapOneCAD);
   const screen = useAppStore((s) => s.screen);
   const params = new URLSearchParams(window.location.search);
   const showGallery = params.has("gallery");
@@ -68,13 +75,13 @@ function App() {
   );
 
   return (
-    <>
+    <PlatformProvider platform={platform}>
       {/* StartScreen is eager (never suspends); DevGallery/EditorScreen are the
           two lazy chunks this boundary covers. UnsavedChangesDialog stays
           OUTSIDE it — it must stay mountable even while a screen is loading. */}
       <Suspense fallback={<BootPanel />}>{body}</Suspense>
       <UnsavedChangesDialog />
-    </>
+    </PlatformProvider>
   );
 }
 

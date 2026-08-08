@@ -146,6 +146,21 @@ Blast-radius hint — highest-degree nodes are `EngineError`, `DocumentRuntime`,
 - Extraction is per-language and cannot cross the stdio frame boundary, so Rust↔C++ coupling is largely invisible to it. `protocol/SCHEMA.md` stays the normative contract there — the graph never overrides it.
 - The graph describes structure, not intent. `CURRENT_STATE.md`, `TODO.md`, and this file remain authoritative for *why*.
 
+## Architecture laws (Platform refactor, in progress)
+
+`docs/ARCHITECTURE.md` is normative; `docs/adr/` records why. The migration is incremental — these rules bind NEW code even where old code has not moved behind them yet. `TODO.md` tracks which waves have landed.
+
+- **Platform code MUST NOT depend on modeling implementation.** `src/platform/**` may not import `@/features`, `@/tools`, `@/modules`, or a modeling store.
+- **New UI SHOULD register through a contribution registry**, not by adding an import to the editor shell. The shell knows slots, not features.
+- **Cross-module communication MUST use public services**, never another module's internals.
+- **New document state MUST belong to a module namespace**, and unknown module state MUST be preserved verbatim across load/save.
+- **Document mutation MUST go through transactions** — there is no separate programmatic path that skips undo.
+- **Do not expose OCCT worker APIs to addons**, and do not let a future module treat the worker as a general backend. It is `onecad.modeling`'s geometry service.
+- **Do not add addon-defined modeling operations.** `KnownOperation` stays a typed enum; `Operation::Opaque` is forward compatibility, not a plugin execution path.
+- **Contribution order is explicit** (`group`, `priority`) and must not depend on module load order.
+- **A contribution id must start with its owner's id.** Duplicate ids are a hard failure, never last-one-wins.
+- `src/test/contracts/` holds frozen behavior contracts (toolbar, keymap, editor mount order, inspector sections). A refactor may change the probe that reads the production side; it may NOT edit a contract to go green.
+
 ## Working conventions
 
 - Commits happen at gate boundaries only, and `TODO.md` records the gate outcome + any flagged seams. Update it as part of the work, not after.

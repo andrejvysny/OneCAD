@@ -48,6 +48,7 @@ use uuid::Uuid;
 
 use onecad_core::document::body::{BodyLifecycleEvent, BodyRegistry};
 use onecad_core::document::element_index::ElementEntry;
+use onecad_core::document::modules::{ModuleId, ModuleState};
 use onecad_core::document::record::{
     ExtrudeMode, KnownOperation, Operation, OperationRecord, PlaneKind, SketchOpParams,
     SketchPlaneRef,
@@ -740,6 +741,44 @@ impl DocumentRuntime {
     #[must_use]
     pub fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    /// One module's slice of the document, if it has any (ADR-0004).
+    ///
+    /// The payload is returned as-is: this layer has no schema for it and must
+    /// not normalize what it cannot read.
+    #[must_use]
+    pub fn module_state(&self, module: &ModuleId) -> Option<ModuleState> {
+        self.session.document().modules.get(module).cloned()
+    }
+
+    /// Every module this document carries state for, with its schema version.
+    ///
+    /// Enough to report "this project uses an addon you do not have installed"
+    /// without decoding a single payload.
+    #[must_use]
+    pub fn document_modules(&self) -> Vec<(ModuleId, u32)> {
+        self.session
+            .document()
+            .modules
+            .iter()
+            .map(|(id, state)| (id.clone(), state.schema_version))
+            .collect()
+    }
+
+    /// Writes or clears one module's slice, through the ordinary transaction
+    /// path — so a programmatic write is as undoable as a user edit
+    /// (docs/ARCHITECTURE.md §9).
+    ///
+    /// # Errors
+    /// [`DomainError`] when the document is read-only.
+    pub fn set_module_state(
+        &mut self,
+        module: ModuleId,
+        state: Option<ModuleState>,
+    ) -> Result<(), DomainError> {
+        self.apply(EditCommand::SetModuleState { module, state })
+            .map(|_| ())
     }
 
     /// The scheduler-facing subscription to the latest published snapshot.

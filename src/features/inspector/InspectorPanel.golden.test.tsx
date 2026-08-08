@@ -1,0 +1,130 @@
+/*
+ * Inspector section-order GOLDEN probe (Platform refactor W0).
+ *
+ * The inspector is the surface most exposed to the refactor: once its blocks
+ * become registered contributions, their order could quietly start following
+ * registration time instead of an explicit priority. This pins the shipped
+ * section order per selection state against a frozen contract.
+ *
+ * It asserts ORDER and PRESENCE only — the content of each section stays covered
+ * by InspectorPanel.test.tsx.
+ */
+import { describe, it, expect, beforeEach } from "vitest";
+import { render, act } from "@testing-library/react";
+import { InspectorPanel } from "./InspectorPanel";
+import { selectionStore } from "@/stores/selectionStore";
+import { toolStore } from "@/stores/toolStore";
+import { sketchStore } from "@/stores/sketchStore";
+import { resetStores } from "@/test/resetStores";
+import type { SketchSession } from "@/ipc/types";
+import {
+  INSPECTOR_SECTIONS_CONTRACT,
+  INSPECTOR_FEATURE_PREFIX_CONTRACT,
+} from "@/test/contracts/inspectorContract";
+
+/** `SectionLabel` renders a div carrying this tracking class — its only marker. */
+const SECTION_CLASS = "tracking-[0.07em]";
+
+function sectionsOf(container: HTMLElement): string[] {
+  return [...container.querySelectorAll("div")]
+    .filter((el) => el.className.includes(SECTION_CLASS))
+    .map((el) => el.textContent?.trim() ?? "");
+}
+
+function emptySession(): SketchSession {
+  return {
+    sketchId: "sketch2",
+    plane: { kind: "XY", origin: [0, 0, 0], xAxis: [0, 1, 0], yAxis: [-1, 0, 0], normal: [0, 0, 1] },
+    entities: [],
+    constraints: [],
+    dof: 3,
+    status: "UnderConstrained",
+  };
+}
+
+describe("inspector section order", () => {
+  beforeEach(() => resetStores());
+
+  it("EMPTY state renders no sections", () => {
+    const { container } = render(<InspectorPanel />);
+    act(() => selectionStore.getState().clear());
+    expect(sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.empty]);
+  });
+
+  it("a body renders Appearance before History", () => {
+    const { container } = render(<InspectorPanel />);
+    act(() => selectionStore.getState().set([{ kind: "body", id: "body1" }]));
+    expect(sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.body]);
+  });
+
+  it("a promoted face renders Appearance before History", () => {
+    const { container } = render(<InspectorPanel />);
+    act(() =>
+      selectionStore.getState().set([
+        { kind: "face", id: "body1#f:0", bodyId: "body1", topoKey: "f:0", elementId: "el_top" },
+      ]),
+    );
+    expect(sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.face]);
+  });
+
+  it("an edge renders History only — Appearance is faces and bodies", () => {
+    const { container } = render(<InspectorPanel />);
+    act(() =>
+      selectionStore
+        .getState()
+        .set([{ kind: "edge", id: "body1#e:0", bodyId: "body1", topoKey: "e:0" }]),
+    );
+    expect(sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.edge]);
+  });
+
+  it("a sketch renders History before Constraints", () => {
+    const { container } = render(<InspectorPanel />);
+    act(() => selectionStore.getState().set([{ kind: "sketch", id: "sketch2" }]));
+    expect(sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.sketch]);
+  });
+
+  it("a sketch region renders the same sections as its owning sketch", () => {
+    const { container } = render(<InspectorPanel />);
+    act(() =>
+      selectionStore.getState().set([
+        {
+          kind: "sketchRegion",
+          id: '["sketch2","r_profile"]',
+          sketchId: "sketch2",
+          regionId: "r_profile",
+        },
+      ]),
+    );
+    expect(sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.sketchRegion]);
+  });
+
+  it("sketch mode renders Constraints whether or not the session has any", () => {
+    const { container } = render(<InspectorPanel />);
+    act(() => {
+      toolStore.getState().setMode("sketch", "sketch2");
+      sketchStore.getState().setSession(emptySession());
+    });
+    // Unconditional: an empty sketch shows the label over "No constraints yet.",
+    // so the panel does not reflow when the first constraint lands.
+    expect(sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.sketchMode]);
+
+    act(() =>
+      sketchStore.getState().setSession({
+        ...emptySession(),
+        constraints: [{ id: "c1", type: "Horizontal", entities: ["l1"] }],
+      }),
+    );
+    expect(sectionsOf(container)).toEqual([...INSPECTOR_SECTIONS_CONTRACT.sketchMode]);
+  });
+
+  it("a selected feature leads with History", () => {
+    const { container } = render(<InspectorPanel />);
+    act(() => selectionStore.getState().set([{ kind: "feature", id: "op1" }]));
+    // Dependency sections are data-driven and arrive async, so only the frozen
+    // prefix is asserted — what matters is that History stays first.
+    const sections = sectionsOf(container);
+    expect(sections.slice(0, INSPECTOR_FEATURE_PREFIX_CONTRACT.length)).toEqual([
+      ...INSPECTOR_FEATURE_PREFIX_CONTRACT,
+    ]);
+  });
+});

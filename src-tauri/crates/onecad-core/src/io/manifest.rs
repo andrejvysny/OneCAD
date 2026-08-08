@@ -11,8 +11,11 @@
 //! preview) is a *stale cache*, reported and skipped (Invariant 7: a cache
 //! degrades performance, never correctness).
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
+use crate::document::modules::ModuleId;
 use crate::document::refs::Extra;
 use crate::ids::DocumentId;
 
@@ -50,6 +53,17 @@ pub struct ManifestEntry {
     pub sha256: String,
 }
 
+/// What a document records about one module's state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModuleDescriptor {
+    /// The schema version the OWNING module wrote its payload at.
+    pub schema_version: u32,
+    /// Unknown keys, preserved verbatim (forward-compat).
+    #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
+    pub extra: Extra,
+}
+
 /// Top-level container manifest (`manifest.json`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -81,6 +95,15 @@ pub struct Manifest {
     /// Per-entry integrity table (excludes `manifest.json` itself).
     #[serde(default)]
     pub entries: Vec<ManifestEntry>,
+    /// Which modules/addons this document carries state for, and at which schema
+    /// version (ADR-0004). Derived from the document at save.
+    ///
+    /// This is what lets OneCAD say "this project uses com.example.foo, which is
+    /// not installed" instead of silently ignoring that module's data. Skipped
+    /// when empty, so documents written before module state existed keep their
+    /// exact bytes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub modules: BTreeMap<ModuleId, ModuleDescriptor>,
     /// Unknown top-level keys, preserved verbatim (forward-compat).
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     pub extra: Extra,
@@ -139,6 +162,7 @@ mod tests {
                 path: super::super::container::DOCUMENT_PATH.into(),
                 sha256: "dd".into(),
             }],
+            modules: BTreeMap::new(),
             extra: Extra::new(),
         }
     }

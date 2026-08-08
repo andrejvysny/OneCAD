@@ -1,10 +1,21 @@
 /*
- * Floating-toolbar tool sets (F-WP3), one per mode, extracted from prototype 1c
- * (Component.MD / Component.SK, lines 503-523). Separators reproduce the
- * prototype grouping exactly.
+ * Floating-toolbar tool sets.
+ *
+ * The arrangement itself now lives with the module that owns the tools
+ * (`@/modules/modeling/tools`); this file is the toolbar's view of it. The
+ * exported shapes are unchanged, so every call site and every test keeps working
+ * — what moved is ownership, not behavior.
+ *
+ * Separators are derived, not authored: a group is a contiguous run of
+ * priorities, and a separator is drawn wherever the group changes (ADR-0007).
  */
 import type { IconName } from "@/icons/paths";
 import type { EditorMode, Tool } from "@/stores/toolStore";
+import {
+  descriptorsForScope,
+  type ModelingToolDescriptor,
+  type ToolScope,
+} from "@/modules/modeling/tools";
 
 export interface ToolItem {
   id: Tool;
@@ -23,67 +34,28 @@ export function isSeparator(e: ToolEntry): e is ToolSeparator {
   return "sep" in e;
 }
 
-export const MODEL_TOOLS: ToolEntry[] = [
-  { id: "select", icon: "select", label: "Select", shortcut: "V" },
-  { id: "sketch", icon: "sketch", label: "New sketch", shortcut: "S" },
-  // DATUM W1 — a construction tool, grouped with "New sketch" (both author a
-  // surface to draw on) rather than with the solid-modelling ops below.
-  { id: "datum", icon: "datum", label: "Datum plane", shortcut: "D" },
-  { sep: true },
-  { id: "extrude", icon: "extrude", label: "Extrude", shortcut: "E" },
-  { id: "revolve", icon: "revolve", label: "Revolve", shortcut: "R" },
-  { id: "fillet", icon: "fillet", label: "Fillet / Chamfer", shortcut: "F" },
-  { id: "boolean", icon: "boolean", label: "Combine", shortcut: "B" },
-  { sep: true },
-  { id: "shell", icon: "shell", label: "Shell", shortcut: "K" },
-  // SCHEMA §7.3 OffsetFace — the other in-place body modifier, next to Shell.
-  // `pushpull` is the live registry glyph for "move this face"; no new icon.
-  { id: "offsetFace", icon: "pushpull", label: "Offset face", shortcut: "⇧O" },
-  // WP-C T3 — a machined feature, grouped with Shell (both modify a host body in
-  // place rather than producing a new one).
-  { id: "hole", icon: "hole", label: "Hole", shortcut: "\u21e7H" },
-  { id: "linearPattern", icon: "linearPattern", label: "Linear pattern", shortcut: "P" },
-  { id: "circularPattern", icon: "circularPattern", label: "Circular pattern", shortcut: "C" },
-  { id: "mirror", icon: "mirrorBody", label: "Mirror", shortcut: "M" },
-  // WP-B W1 — a PLACEMENT, not a modelling op: it changes where a body is, never
-  // its shape. Grouped with the other body-level ops above.
-  { id: "transform", icon: "move", label: "Move", shortcut: "T" },
-  { sep: true },
-  // W2-B — grouped alone at the tail: Measure is the only READ-ONLY tool in the
-  // set (it writes nothing to the timeline), so it does not belong with the ops.
-  { id: "measure", icon: "measure", label: "Measure", shortcut: "?" },
-];
+function itemOf(d: ModelingToolDescriptor): ToolItem {
+  return { id: d.tool, icon: d.icon, label: d.label, shortcut: d.shortcut };
+}
 
-export const SKETCH_TOOLS: ToolEntry[] = [
-  { id: "select", icon: "select", label: "Select", shortcut: "V" },
-  { sep: true },
-  { id: "line", icon: "line", label: "Line", shortcut: "L" },
-  { id: "rect", icon: "rect", label: "Rectangle", shortcut: "R" },
-  { id: "centerRect", icon: "centerRect", label: "Center rectangle", shortcut: "⇧R" },
-  { id: "circle", icon: "circle", label: "Circle", shortcut: "C" },
-  { id: "ellipse", icon: "ellipse", label: "Ellipse", shortcut: "O" },
-  { id: "arc", icon: "arc", label: "Arc", shortcut: "A" },
-  // SP-4 — the second arc gesture, next to the first: same shape, the other
-  // three inputs (endpoints + a point on the arc, instead of centre-start-end).
-  { id: "arc3p", icon: "arc3p", label: "3-point arc", shortcut: "⇧A" },
-  { sep: true },
-  { id: "polygon", icon: "polygon", label: "Polygon", shortcut: "G" },
-  { id: "slot", icon: "slot", label: "Slot", shortcut: "S" },
-  { id: "point", icon: "point", label: "Point", shortcut: "P" },
-  { sep: true },
-  { id: "dimension", icon: "dimension", label: "Dimension", shortcut: "D" },
-  { id: "trim", icon: "trim", label: "Trim", shortcut: "T" },
-  // SP-4 — Trim's counterpart, immediately after it: the same pick gesture, the
-  // opposite effect, so the pair reads as one decision (cut back / grow out).
-  { id: "extend", icon: "extend", label: "Extend", shortcut: "⇧T" },
-  { id: "mirror", icon: "mirror", label: "Mirror", shortcut: "M" },
-  // WP-C T2b — the two 2D EDIT tools, grouped with Trim/Mirror (they modify or
-  // derive from geometry that already exists, unlike the draw tools above).
-  // The 2D fillet reuses the model `fillet` glyph deliberately: it is the same
-  // operation one dimension down, and the two live in different toolbars.
-  { id: "sketchFillet", icon: "fillet", label: "Fillet", shortcut: "F" },
-  { id: "sketchOffset", icon: "offset", label: "Offset", shortcut: "⇧O" },
-];
+/** Descriptors in registry order, with a separator at each group boundary. */
+export function toolEntriesFor(descriptors: readonly ModelingToolDescriptor[]): ToolEntry[] {
+  const entries: ToolEntry[] = [];
+  let group: string | null = null;
+  for (const d of descriptors) {
+    if (group !== null && d.group !== group) entries.push({ sep: true });
+    group = d.group;
+    entries.push(itemOf(d));
+  }
+  return entries;
+}
+
+function entriesForScope(scope: ToolScope): ToolEntry[] {
+  return toolEntriesFor(descriptorsForScope(scope));
+}
+
+export const MODEL_TOOLS: ToolEntry[] = entriesForScope("model");
+export const SKETCH_TOOLS: ToolEntry[] = entriesForScope("sketch");
 
 export function toolsForMode(mode: EditorMode): ToolEntry[] {
   return mode === "sketch" ? SKETCH_TOOLS : MODEL_TOOLS;

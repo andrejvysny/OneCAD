@@ -1401,3 +1401,22 @@ export interface PreviewResult {
   /** True for the final exact mesh delivered on commit. */
   committed?: boolean;
 }
+
+/**
+ * One module's slice of the document (ADR-0004).
+ *
+ * `payload` is opaque to everything but the owning module: it crosses the wire
+ * as arbitrary JSON and is never inspected on the way (ADR-0005).
+ */
+export interface ModuleState {
+  moduleId: string;
+  /** The schema version the OWNING module wrote this payload at. */
+  schemaVersion: number;
+  payload: unknown;
+}
+
+/** What a document records about a module it carries state for. */
+export interface DocumentModule {
+  moduleId: string;
+  schemaVersion: number;
+}

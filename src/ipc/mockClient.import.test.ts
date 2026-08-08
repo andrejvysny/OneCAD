@@ -103,6 +103,9 @@ describe("mockClient STEP import", () => {
 
     const snap = await mockClient.importProject();
 
+    // `null` is the user-cancelled-the-picker case on the real lane; the mock
+    // always fabricates, so a null here is the mock breaking its own contract.
+    if (!snap) throw new Error("mockClient.importProject() returned null");
     expect(snap.title).toBe("ImportedProject");
     // Same fabrication as an in-document STEP: the imported body + history row
     // land in the projection through the shared `importStepAndEmit` path.

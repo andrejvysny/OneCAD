@@ -60,6 +60,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::document::body::{BodyMeta, BodyRegistry};
 use crate::document::datum::{resolve_datum, DatumContext, DatumKind, DatumPlane};
+use crate::document::modules::{ModuleId, ModuleState};
 use crate::document::record::{KnownOperation, Operation, OperationRecord};
 use crate::document::refs::{ElementKind, ElementRef};
 use crate::document::repair::{LadderLevel, RepairItem, RepairReason};
@@ -551,6 +552,9 @@ impl DocumentSession {
             EditCommand::AddBody { body } => self.add_body(body.clone()),
             EditCommand::DeleteBody { body } => self.delete_body(*body),
             EditCommand::RenameBody { body, name } => self.rename_body(*body, name.clone()),
+            EditCommand::SetModuleState { module, state } => {
+                self.set_module_state(module.clone(), state.clone())
+            }
             EditCommand::SetBodyColor { body, color } => self.set_body_color(*body, *color),
             EditCommand::SetFaceColor {
                 body,
@@ -1253,6 +1257,34 @@ impl DocumentSession {
             CommandOutcome::metadata_only(ProjectionDelta::body(id)),
             Inverse::RestoreBodies {
                 registry: Box::new(prior),
+            },
+        ))
+    }
+
+    /// Writes or clears one module's slice. The payload is stored VERBATIM: the
+    /// platform has no schema for it and must not normalize what it cannot read
+    /// (ADR-0005).
+    fn set_module_state(
+        &mut self,
+        module: ModuleId,
+        state: Option<ModuleState>,
+    ) -> Result<(CommandOutcome, Inverse), DomainError> {
+        let prior = self.document.modules.get(&module).cloned();
+        match state {
+            Some(next) => {
+                self.document.modules.insert(module.clone(), next);
+            }
+            None => {
+                self.document.modules.remove(&module);
+            }
+        }
+        Ok((
+            // No projection changes: module state is not part of the modeling
+            // projection, and no timeline step can consume it.
+            CommandOutcome::metadata_only(ProjectionDelta::new()),
+            Inverse::RestoreModuleState {
+                module,
+                prior: prior.map(Box::new),
             },
         ))
     }
@@ -2646,7 +2678,7 @@ fn entity_with_construction(e: &SketchEntity, construction: bool) -> SketchEntit
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::{ConstraintId, EntityId};
+    use crate::ids::{ConstraintId, DocumentId, EntityId};
     use crate::sketch::WorldPlane;
     use uuid::Uuid;
 
@@ -2681,6 +2713,86 @@ mod tests {
         s.add_entity(SketchEntity::circle(eid(3), eid(1), 5.0, false).unwrap())
             .unwrap();
         s
+    }
+
+    // ── module state (ADR-0004 / ADR-0005) ──────────────────────────────────
+
+    fn module(id: &str) -> crate::document::modules::ModuleId {
+        crate::document::modules::ModuleId::parse(id).unwrap()
+    }
+
+    #[test]
+    fn module_state_is_written_verbatim_and_undoes_exactly() {
+        let mut session = DocumentSession::new(Document::new(DocumentId(Uuid::from_u128(1))));
+        let foo = module("com.example.foo");
+        let payload = serde_json::json!({ "note": "keep me", "nested": [1, 2, 3] });
+
+        session
+            .apply(EditCommand::SetModuleState {
+                module: foo.clone(),
+                state: Some(ModuleState::new(2, payload.clone())),
+            })
+            .expect("writing module state is always valid");
+
+        let stored = &session.document().modules[&foo];
+        assert_eq!(stored.schema_version, 2);
+        // Verbatim: the platform has no schema for this and must not normalize it.
+        assert_eq!(stored.payload, payload);
+
+        session.undo().expect("module writes are undoable");
+        assert!(!session.document().modules.contains_key(&foo));
+
+        session.redo().expect("and redoable");
+        assert_eq!(session.document().modules[&foo].payload, payload);
+    }
+
+    #[test]
+    fn overwriting_module_state_restores_the_prior_slice_on_undo() {
+        let mut session = DocumentSession::new(Document::new(DocumentId(Uuid::from_u128(1))));
+        let foo = module("com.example.foo");
+        let first = ModuleState::new(1, serde_json::json!({ "v": 1 }));
+        let second = ModuleState::new(2, serde_json::json!({ "v": 2 }));
+
+        for state in [first.clone(), second.clone()] {
+            session
+                .apply(EditCommand::SetModuleState {
+                    module: foo.clone(),
+                    state: Some(state),
+                })
+                .unwrap();
+        }
+        assert_eq!(session.document().modules[&foo], second);
+
+        session.undo().unwrap();
+        assert_eq!(
+            session.document().modules[&foo],
+            first,
+            "undo must restore the prior slice, not merely delete the new one"
+        );
+    }
+
+    #[test]
+    fn clearing_module_state_removes_it_and_undo_brings_it_back() {
+        let mut session = DocumentSession::new(Document::new(DocumentId(Uuid::from_u128(1))));
+        let foo = module("com.example.foo");
+        let state = ModuleState::new(1, serde_json::json!({ "v": 1 }));
+
+        session
+            .apply(EditCommand::SetModuleState {
+                module: foo.clone(),
+                state: Some(state.clone()),
+            })
+            .unwrap();
+        session
+            .apply(EditCommand::SetModuleState {
+                module: foo.clone(),
+                state: None,
+            })
+            .unwrap();
+        assert!(!session.document().modules.contains_key(&foo));
+
+        session.undo().unwrap();
+        assert_eq!(session.document().modules[&foo], state);
     }
 
     #[test]
