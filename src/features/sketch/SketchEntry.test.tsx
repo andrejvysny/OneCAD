@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { FloatingToolbar } from "@/features/toolbar/FloatingToolbar";
 import { toolStore } from "@/stores/toolStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { selectionStore } from "@/stores/selectionStore";
 import { resetStores } from "@/test/resetStores";
+import { renderWithPlatform } from "@/test/renderWithPlatform";
 
 /**
  * F-WP6 sketch-entry-from-toolbar flow: clicking the model "New sketch" tool
@@ -19,7 +20,7 @@ describe("sketch entry from the toolbar", () => {
 
   it("enters sketch mode with no target (plane-pick phase)", async () => {
     const user = userEvent.setup();
-    render(<FloatingToolbar />);
+    renderWithPlatform(<FloatingToolbar />);
     expect(toolStore.getState().mode).toBe("model");
     const before = selectionStore.getState().selected;
 

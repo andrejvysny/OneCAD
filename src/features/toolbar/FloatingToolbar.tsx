@@ -1,11 +1,14 @@
+import { useMemo } from "react";
 import { cn } from "@/ui/cn";
 import { useToolStore, activeTool, type Tool } from "@/stores/toolStore";
 import { activateTool } from "@/tools/activateTool";
 import { useSelectionStore } from "@/stores/selectionStore";
 import { useDocumentStore } from "@/stores/documentStore";
 import { getToolApplicability, type ToolApplicability } from "@/tools/modelTools/toolApplicability";
+import { usePlatform, useRegistryEntries } from "@/platform";
+import { toolbarFromRegistry } from "@/modules/modeling/registryToolbar";
 import { ToolButton } from "./ToolButton";
-import { toolsForMode, isSeparator } from "./toolbarConfig";
+import { isSeparator } from "./toolbarConfig";
 
 const ALWAYS_ENABLED: ToolApplicability = { enabled: true };
 
@@ -23,6 +26,14 @@ const ALWAYS_ENABLED: ToolApplicability = { enabled: true };
  * selection precondition). The ACTIVE tool is exempt from its own check —
  * without this, a tool like Boolean would gray itself out mid-gesture the
  * moment its own arm handshake changes the selection shape it started from.
+ *
+ * The arrangement is read from the platform TOOL REGISTRY on every render, not
+ * from a module-load-time table: a tool registered (or disposed) after mount has
+ * to reach the toolbar, which is the whole point of the registry. `useRegistryEntries`
+ * is the subscription — it returns the registry's cached, reference-stable
+ * snapshot — and the projection is memoized off it, because `toolbarFromRegistry`
+ * allocates a fresh array per call and would loop `useSyncExternalStore` if it
+ * were the snapshot itself.
  */
 export function FloatingToolbar() {
   const mode = useToolStore((s) => s.mode);
@@ -30,7 +41,14 @@ export function FloatingToolbar() {
   const selected = useSelectionStore((s) => s.selected);
   const sketches = useDocumentStore((s) => s.sketches);
 
-  const entries = toolsForMode(mode);
+  const platform = usePlatform();
+  const tools = useRegistryEntries(platform.tools);
+  const entries = useMemo(
+    () => toolbarFromRegistry(platform, mode),
+    // `tools` is the subscription: a registry change gives a new snapshot
+    // reference, which is what re-runs the projection.
+    [platform, tools, mode],
+  );
 
   const pick = (id: Tool) => {
     void activateTool(id);

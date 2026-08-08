@@ -65,11 +65,52 @@ Laws: `docs/ARCHITECTURE.md` (normative) + `docs/adr/0001`–`0008` + the new CL
 - [x] `src/platform/architecture.test.ts` scans the real import graph: Platform must not import `@/features`, `@/tools`, `@/modules`, `@/stores`, `@/viewport`, `@/app`; modules must not import the shell or deep-path into the platform. Carries a POSITIVE CONTROL (an edge that really exists) because every other assertion expects an empty list — which is also what a broken scanner returns.
 
 ### Flagged seams (carried forward, not fixed here)
-- `zoomFit` / `home` are registered as MODELING commands because that is where their bindings live today; they are really view-navigation and belong to the platform once a selection/viewport service exists.
-- The toolbar component still renders from the derived `MODEL_TOOLS`/`SKETCH_TOOLS` arrays rather than reading the registry live; `toolbarFromRegistry` exists and is proven, so the swap is mechanical.
-- Inspector sections, tree nodes and viewport layers are NOT yet contributions — `InspectorContribution` / `ViewportContribution` / `TreeProvider` exist as contracts with no producers.
+- `zoomFit` / `home` are registered as MODELING commands because that is where their bindings live today; they are really view-navigation and belong to the platform once a selection/viewport service exists. — **P2 W11.**
+- ~~The toolbar component still renders from the derived `MODEL_TOOLS`/`SKETCH_TOOLS` arrays~~ — **CLOSED by P2 W8.**
+- Inspector sections, tree nodes and viewport layers are NOT yet contributions — `InspectorContribution` / `ViewportContribution` / `TreeProvider` exist as contracts with no producers. — **P2 W9/W10/W12.**
+- **DECISION OWED before P3 — is the toolbar extensible?** W8 made it read the registry live, but it stays a MODELING PROJECTION: `registryToolbar.ts:52` skips any tool id absent from modeling's reverse map, and `FloatingToolbar` activates through `activateTool` (the store `Tool` union) rather than `ToolDefinition.activate`. So an addon could register a valid tool and be silently absent from the toolbar. Opening it needs applicability to become a contribution concern (`toolApplicability.ts` is typed on the modeling `Tool` union) and `ToolEntry` to give way to `ToolDefinition` — which changes the currency the frozen toolbar contract is written in. P3 freezes the SDK surface over whichever answer we pick, so pick it first.
 - Module state is stored in `document.json` (ADR-0004); moving to `modules/<id>/state.json` later is a container-format change.
-- `scripts/build-worker.sh` cannot configure against `/opt/homebrew/opt/occt-8.0.1` ("OCCT artifact metadata is absent") — pre-existing, unrelated, blocks rebuilding the sidecar from HEAD here.
+- **CORRECTED (was mis-reported as a blocker):** `scripts/build-worker.sh` failed with "OCCT artifact metadata is absent" only because it was pointed at `/opt/homebrew/opt/occt-8.0.1`, a plain Homebrew install. The PINNED prefix `~/.onecad-occt/8.0.1` carries `share/onecad/occt-build.json` and configures fine. Nothing is blocked. CONSEQUENCE: this session's worker-backed 1045/0 ran against `worker/build/onecad-worker` (19:37), which HANDOFF.md § VF-M5 identifies as a **stale pre-gate build** — so it did not exercise `069bb48`'s worker changes. Re-run against a HEAD build before trusting that number for the worker lane (see NEXT SESSION P1).
+
+## NEXT SESSION — three work packages (2026-08-08, handoff)
+
+Read `HANDOFF.md` § Session 4 first. P1 is another program's open gate; P2 finishes what the platform refactor left half-done; P3 is the next real tranche. **Do P2 before P3** — an SDK frozen over a half-converted surface freezes the wrong shape.
+
+### P0 — verify before touching anything (30 min)
+- [ ] Manual smoke, the only Definition-of-Done item with no evidence: `bun run tauri dev` → open an existing project, extrude, fillet, undo, save, reopen. Chrome and layout must look identical to before `4145f3f`. Any visual difference is a slot-order or z-index regression — `src/test/contracts/shellContract.ts` is the contract it violated.
+- [ ] Rebuild the sidecar against the PINNED prefix and re-run the worker lane, so the numbers describe HEAD:
+      ```bash
+      ONECAD_OCCT_ROOT="$HOME/.onecad-occt/8.0.1" \
+      ONECAD_WORKER_BUILD_DIR="$PWD/worker/build-pinned" scripts/build-worker.sh Release
+      ctest --test-dir worker/build-pinned --output-on-failure          # expect 107/107
+      cd src-tauri && ONECAD_WORKER_PATH=$PWD/../worker/build-pinned/onecad-worker \
+        ONECAD_REQUIRE_WORKER=1 cargo test --workspace
+      ```
+      EXPECTED: `topology_rebind::h6a_flagship_edit_lane_fillet_survives_and_reopens_clean` FAILS. That is P1, not a platform-refactor regression — it is the VF-M5 gate that `069bb48` opened.
+
+### P1 — close the VF-M5 gate regression (NOT this refactor's work; coordinate first)
+Full diagnosis already exists in `HANDOFF.md` § "VF-M5 gate regression" and § VF-M5 FOLLOW-UP above. Summary of the fix direction, not a re-derivation:
+- [ ] The discriminator is wrong. Worker `PlanExecutor` uses `job.partition.size() == 0` to mean "from-zero replay", but V1 has no checkpoint plumbing so that is ALWAYS true — the gate degenerates to `edited_from.is_some()` and the flagship edit lane (`ToEnd { from: 1 }`) is falsely treated as a replay, disabling the anchor-exact carve-out and flagging `NeedsRepair`.
+- [ ] Two acceptable resolutions; pick one and record which in `TODO.md`:
+      (a) keep the anchor-exact carve-out ON until a genuine `baseCheckpoint`/restore signal exists (smallest, restores the flagship lane, leaves VF-M5's real hazard unaddressed — acceptable because that hazard cannot occur without restores);
+      (b) plumb a real restore signal into the plan and gate on THAT.
+- [ ] Red-first: the failing test above is the gate. Do not weaken it.
+- [ ] Also open and belonging to the same session: `theme.spec:121,145` fail on both chromium and webkit (`getByRole('button', {name: /^Appearance:/})` not found, from their `TitleBar.tsx`). 4 failures across both projects, unchanged by the platform refactor.
+- [ ] **Coordinate before starting.** A concurrent session owns this tree and this package. Check `git log` for new `wip:` commits first.
+
+### P2 — finish Milestone 1 (plan `~/.claude/plans/resume-parallel-muffin.md`, Codex-reviewed terra/high → revise, 3 blockers + 4 high all folded)
+- [x] **W8 — toolbar reads the registry live.** `FloatingToolbar` now takes `usePlatform()` + `useRegistryEntries(platform.tools)` and memoizes `toolbarFromRegistry` off that snapshot — the projection allocates a fresh array per call and would loop `useSyncExternalStore` as the snapshot itself. `toolbarConfig.ts` was NOT deleted as first planned: `src/test/contracts/toolbarContract.ts:6` imports `ToolEntry` from it, and rewriting that import edits a frozen contract file. It shrank to the entry shape (`ToolItem`/`ToolSeparator`/`ToolEntry`/`isSeparator`) and is now the contract's type anchor; the runtime derivation (`MODEL_TOOLS`/`SKETCH_TOOLS`/`toolsForMode`/`toolEntriesFor`) is gone. Golden probe moved to `modules/modeling/registryToolbar.golden.test.ts` (probe follows the mechanism; contract does not move) and gained a live-registry case: disposing modeling's scope empties the toolbar. New `src/test/renderWithPlatform.tsx` boots a REAL platform (not a stub registry, which would let a registration bug pass) for `FloatingToolbar.test.tsx` + `SketchEntry.test.tsx`, which rendered bare.
+- [ ] **Inspector sections become contributions.** `InspectorContribution` exists in `src/platform/contributions.ts` with ZERO producers. Convert `InspectorPanel.tsx`'s sections (Appearance ×2, History, Constraints, Dimensions, dependency lists) into registrations owned by `onecad.modeling`, rendered by a slot host over `Slots.InspectorSection`. Gate: `InspectorPanel.golden.test.tsx` must pass UNMODIFIED — it pins section order per selection state, including that Constraints is unconditional in sketch mode.
+- [ ] **Tree provider abstraction.** `ModelTreePanel.tsx` hardcodes three literal sections (bodies `:104-124`, sketches `:126-144`, datums `:146-163`). Introduce the `TreeProvider` shape from spec §95 beneath the existing rendering, with modeling as the only provider. Do NOT change the visible tree.
+- [ ] **Move view navigation off modeling.** `zoomFit` and `home` are registered as `onecad.modeling.command.*` because that is where their bindings live; they are platform view concerns. Needs a platform viewport service first — see P3's dependency note.
+- [ ] **Viewport layer contributions.** `ViewportContribution` also has zero producers. The engine's layers stay constructed inside `ViewportEngine.ts` (that is deliberate — the host owns the renderer); what is missing is the seam that lets a NON-modeling module add a layer. Add one producer to prove the contract, e.g. re-express `DatumLayer` through it.
+
+### P3 — Milestone 3: SDK boundary + bundled test addon (the next real tranche)
+Validates the boundary on OneCAD's own code before any third party sees it (spec §197).
+- [ ] `@onecad/sdk` — a package that re-exports ONLY the public surface: ids, contribution contracts, `ModuleScope`, the document-state service, selection/event types. It must NOT re-export `createPlatform`, the registries' internals, or anything from `@/features`/`@/tools`.
+- [ ] A bundled test addon (an architectural fixture, NOT a product feature) that registers a command, a panel, an inspector section, a viewport contribution and its own document namespace — importing `@onecad/sdk` and nothing else.
+- [ ] Extend `src/platform/architecture.test.ts`: the addon's imports must resolve only to the SDK. That test already carries a positive control; keep that pattern.
+- [ ] Prerequisite from P2: the addon cannot contribute an inspector section until inspector sections have a host.
 
 ## VF-M5+VF-M6 DEFECT FIXES + IMPORT PROJECT (2026-08-08) — GATE PASSED
 
@@ -98,6 +139,7 @@ Defect fixes from the review round (worker ladder + import blob lifecycle), then
 - [x] `mockClient.importProject()` — merges the STEP-import fabrication (one body + `Import` row) so the whole frontend lane is mockable. Mock-unit test covers the appended snapshot.
 - [x] `FileMenu` "Import Project…" (Open/Save group, above the Export hairline) → `fileActions.importProject` (dialog-backed, cancel = no-op) — shines one hint "Project imported".
 - [x] `StartScreen` — sidebar "Import Project…" below Import STEP→; both entry points pinned by `e2e/project-import.spec.ts` (in-editor + start-screen lanes).
+- [x] Unified start-screen import — the header button now says `Import…`, and the start screen routes `.onecad` vs STEP/STP by extension through one dialog. Sidebar duplicate removed. Gate: focused vitest on `StartScreen`, `tauriClient`, and `mockClient.import` green; `cd src-tauri && ONECAD_REQUIRE_WORKER=1 cargo test --workspace --lib` green.
 
 ### Gate
 - [x] `bun run build` (tsc+vite) green · vitest **209 files / 3697 tests** · Playwright `project-import`/`step-import` spec **12/12** · full Playwright **386/390** (4 pre-existing `theme.spec` failures root-caused to the WORK `TitleBar` changes, not this package) · worker ctest **106/106** · `cargo fmt --all --check` · workspace clippy `-D warnings` · `cargo test -p onecad --lib` **253 passed / 0 failed**. Full `cargo test --workspace` (real-worker lane) and kernelbench left for the follow-up gate below.
