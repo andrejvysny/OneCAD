@@ -96,10 +96,11 @@ export const MODELING_BINDINGS: readonly ModelingBindingDescriptor[] = [
   { key: "Backspace", action: { type: "deleteSketchSelection" }, scope: "sketch" },
 
   // ── global ─────────────────────────────────────────────────────────────────
+  // Global in REACH, modeling in meaning. The two view-navigation chords that
+  // used to sit here (`h` home, `⇧F` zoom-fit) belong to the host and moved to
+  // `@/modules/shell/bindings` — see docs/ARCHITECTURE.md §7.
   { key: "Escape", action: { type: "cancel" }, scope: "global" },
   { key: "Enter", action: { type: "finishSketch" }, scope: "global" },
-  { key: "h", action: { type: "home" }, scope: "global" },
-  { key: "f", shift: true, action: { type: "zoomFit" }, scope: "global" },
 ];
 
 export function bindingsForScope(scope: BindingScope): readonly ModelingBindingDescriptor[] {

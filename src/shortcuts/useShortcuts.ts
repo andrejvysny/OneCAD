@@ -26,6 +26,7 @@ import {
   saveDocument,
   saveDocumentAs,
 } from "@/features/shell/fileActions";
+import { viewportNavigation } from "@/modules/shell/viewportNavigation";
 import { resolveBinding, type ShortcutAction } from "./keymap";
 
 function isEditableTarget(el: EventTarget | null): boolean {
@@ -145,14 +146,17 @@ export function runAction(action: ShortcutAction): void {
     case "cancel":
       runCancel();
       break;
+    // Through the shell's navigation implementation, NOT the store directly:
+    // the command and the keystroke must be the same call, or the two drift.
     case "zoomFit":
-      viewportStore.getState().zoomFit();
+      viewportNavigation.zoomFit();
       break;
     case "isolate":
+      // Isolation stays modeling — it masks BODIES, which the host knows nothing about.
       viewportStore.getState().toggleIsolate();
       break;
     case "home":
-      viewportStore.getState().homeView();
+      viewportNavigation.home();
       break;
   }
 }

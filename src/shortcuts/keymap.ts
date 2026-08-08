@@ -83,6 +83,7 @@
  */
 import type { EditorMode, Tool } from "@/stores/toolStore";
 import { bindingsForScope, type BindingScope } from "@/modules/modeling/bindings";
+import { SHELL_GLOBAL_BINDINGS } from "@/modules/shell/bindings";
 
 export type ShortcutAction =
   | { type: "tool"; tool: Tool }
@@ -119,7 +120,17 @@ export const MODEL_KEYS: KeyBinding[] = tableFor("model");
 
 export const SKETCH_KEYS: KeyBinding[] = tableFor("sketch");
 
-export const GLOBAL_KEYS: KeyBinding[] = tableFor("global");
+/*
+ * Two owners, one table. Modeling's globals are global in reach but modeling in
+ * meaning (cancel, finish sketch); the shell's are view navigation, which
+ * docs/ARCHITECTURE.md §7 puts with the host. Concatenated in that order, which
+ * is the shipped order.
+ *
+ * Still a STATIC merge, not a read of the command registry: `useShortcuts`
+ * installs a window keydown handler outside React, so a registry-driven keymap
+ * is its own change (TODO.md § flagged seams).
+ */
+export const GLOBAL_KEYS: KeyBinding[] = [...tableFor("global"), ...SHELL_GLOBAL_BINDINGS];
 
 export function modeKeys(mode: EditorMode): KeyBinding[] {
   return mode === "sketch" ? SKETCH_KEYS : MODEL_KEYS;

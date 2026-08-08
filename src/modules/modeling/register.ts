@@ -76,9 +76,7 @@ const COMMAND_ACTIONS: Readonly<Record<ModelingCommandKey, { title: string; acti
       action: { type: "deleteSketchSelection" },
     },
     toggleConstruction: { title: "Construction geometry", action: { type: "toggleConstruction" } },
-    zoomFit: { title: "Zoom to fit", action: { type: "zoomFit" } },
     isolate: { title: "Isolate selection", action: { type: "isolate" } },
-    home: { title: "Home view", action: { type: "home" } },
   };
 
 function commandDefinition(key: ModelingCommandKey, priority: number): CommandDefinition {

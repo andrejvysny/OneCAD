@@ -64,9 +64,9 @@ export const ModelingCommands = {
   cancel: "onecad.modeling.command.cancel",
   deleteSketchSelection: "onecad.modeling.command.deleteSketchSelection",
   toggleConstruction: "onecad.modeling.command.toggleConstruction",
-  zoomFit: "onecad.modeling.command.zoomFit",
+  // Isolation masks BODIES, so it stays modeling. `zoomFit` and `home` do NOT:
+  // they are view navigation and moved to `onecad.shell` (ARCHITECTURE.md §7).
   isolate: "onecad.modeling.command.isolate",
-  home: "onecad.modeling.command.home",
 } as const;
 
 export type ModelingCommandKey = keyof typeof ModelingCommands;
