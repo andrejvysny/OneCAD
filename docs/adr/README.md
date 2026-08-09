@@ -19,5 +19,6 @@ down. `docs/ARCHITECTURE.md` states the laws; these records say why.
 | [0008](0008-branded-ids-unions-retained.md) | Namespaced branded IDs, with the internal unions retained |
 | [0009](0009-viewport-context-is-threejs-shaped.md) | The viewport contract is Three.js-shaped in v1 |
 | [0010](0010-tool-activation-is-host-owned.md) | Tool activation and availability are host-owned, module-reported |
+| [0011](0011-shortcuts-module-ruleset-then-registry.md) | Shortcuts: the module ruleset resolves first, the registry second |
 
 Status values: `Proposed`, `Accepted`, `Superseded by NNNN`.

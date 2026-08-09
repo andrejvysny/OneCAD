@@ -24,6 +24,7 @@ import { createEventBus, type EventBus } from "./events";
 import type { EventId, ModuleId, OwnerId, ServiceId } from "./ids";
 import { createRegistry, type Disposable, type Registry } from "./registry";
 import { createServiceRegistry, type ServiceRegistry } from "./services";
+import { createShortcutService, type ShortcutService } from "./shortcuts";
 import { createToolHost, type ToolHost } from "./toolHost";
 
 export interface ModuleManifest {
@@ -91,6 +92,8 @@ export interface Platform {
   readonly events: EventBus;
   /** Who is active, and the activate/deactivate handshake. See `toolHost.ts`. */
   readonly toolHost: ToolHost;
+  /** Chord → registration, with a deterministic conflict rule. `shortcuts.ts`. */
+  readonly shortcuts: ShortcutService;
 
   registerModule(def: ModuleDefinition): void;
   /** Activates every registered module in dependency order. Idempotent guard. */
@@ -169,6 +172,7 @@ export function createPlatform(): Platform {
   const services = createServiceRegistry();
   const events = createEventBus();
   const toolHost = createToolHost(tools);
+  const shortcuts = createShortcutService(commands, tools, toolHost);
 
   const definitions = new Map<ModuleId, ModuleDefinition>();
   const states = new Map<ModuleId, ModuleState>();
@@ -186,6 +190,7 @@ export function createPlatform(): Platform {
     services,
     events,
     toolHost,
+    shortcuts,
 
     registerModule(def) {
       if (initialized) {

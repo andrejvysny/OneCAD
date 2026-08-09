@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, act } from "@testing-library/react";
+import { act } from "@testing-library/react";
 import { resolveBinding } from "./keymap";
 import { useShortcuts } from "./useShortcuts";
 import { toolStore } from "@/stores/toolStore";
@@ -10,6 +10,16 @@ import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
 import { planeFor } from "@/ipc/mockSketch";
 import type { SketchEntity } from "@/ipc/types";
 import { resetStores } from "@/test/resetStores";
+import { bootTestPlatform, renderWithPlatform } from "@/test/renderWithPlatform";
+import {
+  addonId,
+  contributionId,
+  type CommandId,
+  type ModuleScope,
+  type Platform,
+  type ToolId,
+} from "@/platform";
+import { ModelingScopes } from "@/modules/modeling/manifest";
 import { flushSketchMutations, redoSketch, undoSketch } from "@/tools/sketch/sketchService";
 import { setModelToolController } from "@/tools/modelTools/modelToolBridge";
 import type { ModelToolController } from "@/tools/modelTools/ModelToolController";
@@ -41,6 +51,13 @@ function Harness() {
   useShortcuts();
   return null;
 }
+
+/*
+ * `useShortcuts` reads the tool/command registries for chords the built-in
+ * tables do not claim, so it needs a Platform. Probe follows the mechanism; the
+ * frozen keymap contract it asserts against is untouched.
+ */
+const render = (ui: React.ReactElement) => renderWithPlatform(ui);
 
 describe("keymap resolveBinding", () => {
   it("resolves the same letter to different tools per mode", () => {
@@ -408,5 +425,136 @@ describe("X — construction geometry", () => {
     });
     expect(flags()).toEqual([false]);
     expect(sketchStore.getState().constructionMode).toBe(false); // never fell back to the mode
+  });
+});
+
+/*
+ * The registry lane (P2.5 WP2).
+ *
+ * `defaultShortcut` used to be write-only — three producers filled it in and no
+ * reader ever looked. These are the cases that prove a contribution can now
+ * reach the keyboard WITHOUT being able to take a built-in chord away.
+ */
+describe("useShortcuts — contributed chords", () => {
+  const VENDOR = addonId("com.example.foo");
+
+  beforeEach(() => resetStores());
+
+  function withContribution(
+    register: (scope: ModuleScope) => void,
+  ): { platform: Platform } {
+    const platform = bootTestPlatform();
+    register(platform.createScope(VENDOR));
+    renderWithPlatform(<Harness />, { platform });
+    return { platform };
+  }
+
+  it("fires a contributed command's chord", () => {
+    const execute = vi.fn(() => ({ status: "done" as const }));
+    withContribution((scope) =>
+      scope.registerCommand({
+        id: contributionId<CommandId>(VENDOR, "com.example.foo.command.inspect"),
+        title: "Inspect",
+        defaultShortcut: { key: "j" },
+        execute,
+      }),
+    );
+
+    press("j");
+
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it("activates a contributed tool's chord through the tool host", async () => {
+    const activate = vi.fn();
+    const id = contributionId<ToolId>(VENDOR, "com.example.foo.tool.inspect");
+    const { platform } = withContribution((scope) =>
+      scope.registerTool({
+        id,
+        title: "Inspect",
+        defaultShortcut: { key: "j" },
+        activate,
+        deactivate: () => {},
+      }),
+    );
+
+    // Crossing an owner boundary awaits the outgoing tool's `deactivate` first,
+    // so activation lands on a microtask.
+    await act(async () => {
+      press("j");
+      await flush();
+    });
+
+    expect(activate).toHaveBeenCalledOnce();
+    expect(platform.toolHost.activeToolId()).toBe(id);
+  });
+
+  it("CANNOT shadow a built-in chord", () => {
+    const execute = vi.fn(() => ({ status: "done" as const }));
+    withContribution((scope) =>
+      scope.registerCommand({
+        id: contributionId<CommandId>(VENDOR, "com.example.foo.command.steal"),
+        title: "Steal E",
+        defaultShortcut: { key: "e" }, // model Extrude owns this
+        execute,
+      }),
+    );
+
+    press("e");
+
+    expect(toolStore.getState().modelTool).toBe("extrude");
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("an ambiguous chord runs NEITHER contribution", () => {
+    const first = vi.fn(() => ({ status: "done" as const }));
+    const second = vi.fn(() => ({ status: "done" as const }));
+    const other = addonId("com.example.bar");
+    const platform = bootTestPlatform();
+    platform.createScope(VENDOR).registerCommand({
+      id: contributionId<CommandId>(VENDOR, "com.example.foo.command.a"),
+      title: "A",
+      defaultShortcut: { key: "j" },
+      execute: first,
+    });
+    platform.createScope(other).registerCommand({
+      id: contributionId<CommandId>(other, "com.example.bar.command.b"),
+      title: "B",
+      defaultShortcut: { key: "j" },
+      execute: second,
+    });
+    renderWithPlatform(<Harness />, { platform });
+
+    press("j");
+
+    // Picking one by load order is exactly what must not happen.
+    expect(first).not.toHaveBeenCalled();
+    expect(second).not.toHaveBeenCalled();
+  });
+
+  it("respects the contribution's declared scope", () => {
+    const execute = vi.fn(() => ({ status: "done" as const }));
+    withContribution((scope) =>
+      scope.registerCommand({
+        id: contributionId<CommandId>(VENDOR, "com.example.foo.command.sketchOnly"),
+        title: "Sketch only",
+        defaultShortcut: { key: "j" },
+        scopes: [ModelingScopes.Sketch],
+        execute,
+      }),
+    );
+
+    press("j"); // model mode
+    expect(execute).not.toHaveBeenCalled();
+
+    act(() => toolStore.getState().setMode("sketch"));
+    press("j");
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it("leaves a chord nobody claims alone", () => {
+    withContribution(() => {});
+    const ev = press("j");
+    expect(ev.defaultPrevented).toBe(false);
   });
 });

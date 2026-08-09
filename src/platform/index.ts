@@ -13,6 +13,7 @@ export * from "./events";
 export * from "./services";
 export * from "./platform";
 export * from "./toolHost";
+export * from "./shortcuts";
 export * from "./documentState";
 export {
   PlatformProvider,

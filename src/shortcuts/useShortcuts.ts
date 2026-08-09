@@ -27,6 +27,9 @@ import {
   saveDocumentAs,
 } from "@/features/shell/fileActions";
 import { viewportNavigation } from "@/modules/shell/viewportNavigation";
+import { ModelingScopes } from "@/modules/modeling/manifest";
+import { usePlatform, type Platform } from "@/platform";
+import { logWarn } from "@/debug/log";
 import { resolveBinding, type ShortcutAction } from "./keymap";
 
 function isEditableTarget(el: EventTarget | null): boolean {
@@ -161,7 +164,22 @@ export function runAction(action: ShortcutAction): void {
   }
 }
 
+/**
+ * The scope tokens active right now, as the registries understand them.
+ *
+ * Modeling owns these strings (its tools are registered with them), so the
+ * mapping lives with the caller of `resolveBinding` rather than in the platform,
+ * which must not learn what "sketch mode" is.
+ */
+function activeScopes(): readonly string[] {
+  return [
+    toolStore.getState().mode === "sketch" ? ModelingScopes.Sketch : ModelingScopes.Model,
+  ];
+}
+
 export function useShortcuts(): void {
+  const platform = usePlatform();
+
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       // Undo / redo own the ⌘Z / ⇧⌘Z (and Ctrl+Y) chords (F-WP7). In SKETCH mode
@@ -210,7 +228,14 @@ export function useShortcuts(): void {
       if (isEditableTarget(e.target)) return;
       if (e.repeat) return;
       const action = resolveBinding(e.key, e.shiftKey, toolStore.getState().mode);
-      if (!action) return;
+      if (!action) {
+        // Nothing in the built-in tables claims this chord — ask the registries.
+        // This is the only lane a contributed `defaultShortcut` can fire through,
+        // and it deliberately runs SECOND: the frozen keymap contract describes
+        // the built-in answers, and a registration must not be able to shadow one.
+        runRegisteredShortcut(platform, e);
+        return;
+      }
       // Delete/Backspace only swallow the key when a sketch entity is selected;
       // an empty selection falls through so the key keeps its default meaning.
       if (
@@ -224,5 +249,33 @@ export function useShortcuts(): void {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [platform]);
+}
+
+/**
+ * Fire a chord claimed by a registration rather than by the built-in tables.
+ *
+ * An AMBIGUOUS chord activates nothing and says so. Picking a winner by load
+ * order is the failure this architecture exists to prevent, and a keystroke that
+ * silently ran the wrong addon's command would be the worst place to allow it.
+ */
+function runRegisteredShortcut(platform: Platform, e: KeyboardEvent): void {
+  const chord = { key: e.key, shift: e.shiftKey };
+  const scopes = activeScopes();
+
+  const target = platform.shortcuts.resolve(chord, scopes);
+  if (!target) {
+    const conflict = platform.shortcuts.conflictFor(chord, scopes);
+    if (conflict) {
+      logWarn("shortcut", "chord claimed by more than one contribution — ignored", {
+        key: chord.key,
+        shift: chord.shift,
+        candidates: conflict.candidates.map((c) => c.id),
+      });
+    }
+    return;
+  }
+
+  e.preventDefault();
+  void platform.shortcuts.run(target);
 }
