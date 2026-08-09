@@ -47,3 +47,13 @@ blob-report/
 
 # graphify knowledge graph (rebuild locally: /graphify .)
 graphify-out/
+
+# Agent tooling and scratch inputs — not project source.
+# `.opencode/` alone is ~61 MB; TODO.md had recorded these as wanting an ignore
+# entry rather than a commit, and this is that entry.
+.agents/
+.opencode/
+skills-lock.json
+
+# Sample CAD exports used for manual import testing.
+STEP/
