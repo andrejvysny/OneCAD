@@ -109,6 +109,28 @@ settings, document state, resources.
   its registrations and subscriptions.
 - Ordering is explicit (`group`, `priority`) and deterministic. It must never
   depend on module load order.
+- A contribution's own predicate (`canActivate`, `canRender`) is read during the
+  host's render, so the OWNER announces when its answer changed (`subscribe`).
+  A host must never watch a module's state on that module's behalf.
+- A host must survive open-ended fields it did not mint: an unknown `icon`
+  renders a placeholder, it does not throw inside a row.
+- Contributions are addressed by (owner, id). Ids are namespaced, and where an
+  id is provider-local (tree rows) the HOST composes the pair — it must not
+  resolve one id space globally.
+
+## 6a. Two API surfaces
+
+`@/platform` is the INTERNAL host API: `createPlatform`, the registries,
+`ModuleScope`, the React host components. Built-in modules, compiled into the app
+and versioned with it, use it.
+
+`@onecad/sdk` is the PUBLIC extension API, and it is deliberately narrower.
+Addons receive an `ExtensionContext` — registration plus the few services an
+extension legitimately needs — and never the platform, another owner's scope, the
+IPC client, a store or the renderer. Whatever an addon can reach is what OneCAD
+must keep working forever; the host's composition root is not on that list
+(ADR-0013). `react`, `react-dom` and `three` are host-provided, never bundled by
+an addon.
 
 ## 7. Viewport
 

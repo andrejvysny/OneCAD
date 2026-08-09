@@ -9,7 +9,8 @@
     /* Path aliases */
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["src/*"],
+      "@onecad/sdk": ["src/sdk/index.ts"]
     },
 
     /* Bundler mode */

@@ -37,6 +37,9 @@ export default defineConfig(async ({ mode }) => ({
 
   resolve: {
     alias: {
+      // The SDK is aliased rather than published: a real package buys nothing
+      // until something outside this repo builds against it (P2.5 plan).
+      "@onecad/sdk": "/src/sdk/index.ts",
       "@": "/src",
     },
   },

@@ -14,6 +14,7 @@ export * from "./services";
 export * from "./platform";
 export * from "./toolHost";
 export * from "./shortcuts";
+export * from "./extension";
 export * from "./documentState";
 export {
   PlatformProvider,

@@ -85,6 +85,34 @@ P3 does not start over a surface where three registries are generic at the contr
 - [x] **The 3 remaining Playwright failures are PRE-EXISTING and are not this work.** All three are `boolean-preview.spec.ts` (chromium :276, webkit :227 + :276). Verified by bisect in a throwaway worktree: the same test fails on `4145f3f` (before P2) and on `cf75bda` (before the Platform refactor entirely). Symptom, from the failing run's `fe-logs`: after the sketch is re-shown between the two extrudes, the click on the circle region does not select it — Extrude then arms in multi-select ("Select regions to extrude") instead of the depth drag. `sketchHitTestReady` already passed, so the sketch WAS hit-testable; the suspect is the click racing the visibility commit's projection push. Machine-dependent: the 2026-08-08 full run had it green.
 - [ ] **Manual `tauri dev` smoke still owed** (open project → extrude → fillet → undo → save → reopen). Unchanged from P0 below: the one Definition-of-Done item with no evidence.
 
+### WP1 — generic tool runtime ✅ (`4b8ec0d`, ADR-0010)
+- [x] `ToolHost` on the platform owns the active id + the activate/deactivate handshake; `FloatingToolbar` renders `ToolDefinition`s directly (title/icon/shortcutLabel, `group` boundary ⇒ separator, `priority` ⇒ order) and activates through the host. `toolFromId` no longer stands between a registration and the screen.
+- [x] Modeling stays authoritative and REPORTS: `toolStore` changes are mirrored into the host, so AUTO-MODE, the Esc ladder and self-arming controllers cannot leave the highlight disagreeing with the store. `deactivate()` runs only on a CROSS-owner swap.
+- [x] `canActivate` returns `ToolAvailability` (the toolbar has always explained WHY a tool is grayed) and gained `subscribe(onChange)` — the same staleness rule W14 gave `TreeProvider`. Modeling backs every tool with ONE shared emitter over two stores.
+- [x] A tool with NO scopes now appears everywhere (`CommandDefinition.scopes`'s documented "empty ⇒ always"); the old projection dropped that case, which made a zero-knowledge contribution impossible. Icons resolve defensively — `def.icon` is an open string and the old cast crashed inside `Icon`.
+- [x] **Real regression caught by e2e**: `mirror` is in BOTH tool unions, so routing every tool through the model applicability matrix disabled the SKETCH Mirror tool with nothing selected. Applicability is model-scope only, with a vitest case pinning it.
+- [x] `toolbarFromRegistry` demoted to the golden probe's projection (the contract is written in `ToolEntry` and may not be edited); new case pins that a FOREIGN registration leaves modeling's arrangement byte-identical.
+
+### WP2 — registered shortcuts reach the keyboard ✅ (`eb59b6d`, ADR-0011)
+- [x] `defaultShortcut` was write-only — three producers, no reader. `platform.shortcuts` resolves chords over both registries; `useShortcuts` asks modifier chords → `resolveBinding` → the registry, in that order, so a contribution CANNOT shadow a built-in and the golden keymap oracle stays byte-identical.
+- [x] Conflicts never resolve by load order: scope-specific → explicit priority → built-in over addon → otherwise the chord fires NOTHING and is reported. A keystroke does not bypass `canExecute`. The ⌘-chords stay hardcoded and are explicitly not addon-reachable in v1.
+
+### WP3 — tree public surface + settings ✅ (`7dee177`, ADR-0012)
+- [x] Rows are addressed by `(providerId, nodeId)`. Ids stay provider-local: demanding globally unique ids pushes a naming burden onto every contributor to fix a host bug.
+- [x] Modeling's provider implements `subscribe`; the host dropped its five modeling store subscriptions and now watches only providers.
+- [x] `TreeNodeAction` is command-backed with a declarative `confirm`, so a row action is reachable from a palette rather than living inside one popover. Delete-datum/delete-sketch became modeling commands; the panel lost its `kind` branches for them. **Reattach stays the one flagged modeling-specific branch** — it needs a fact the node does not carry AND a second anchored popover.
+- [x] Settings moved from `ModelTreePanel` to the shell's `StatusBar`. `settingsStore` ownership is untouched and out of scope.
+
+### WP4 — module lifecycle ✅ (`bbe1ceb`)
+- [x] `ModuleDefinition.deactivate` was declared and called from NOWHERE. It now runs on `disposeOwner` and `platform.dispose()`, before the registrations go, in reverse initialization order. Not for a failed activation, not for a short-lived child scope, and a throw does not abort disposal. New `deactivating` state; `platform.dispose()` also sweeps the registries per owner (it only walked tracked scopes).
+
+### WP5/WP6/WP7 — SDK boundary + reference addon + enforcement (ADR-0013)
+- [x] `@onecad/sdk` → `src/sdk/` (tsconfig + vite alias; not published — a real package buys nothing until something outside this repo builds against it). Re-exports ids + checked constructors, `Disposable`, the contribution contracts, `Slots`, `SelectionRef`, document-state types and `ExtensionContext`.
+- [x] `ExtensionContext` replaces `ModuleScope` for addons: same registrations, no `platform`, no `createScope`, and `document.state` pre-bound to the addon's namespace. Narrowed BY CONSTRUCTION, not by cast — a cast leaves `platform` present at runtime. `createExtensionContext`/`registerExtension` are host-side and absent from the SDK.
+- [x] `src/addons/reference/` contributes command + tool + panel + inspector section + tree section with a command-backed action + viewport layer + workspace + its own document namespace, over its OWN domain type (`com.onecadtest.reference.item`), importing `@onecad/sdk` and `react` only. Tests drive the REAL toolbar, tree, shortcut lane and viewport host.
+- [x] **Deliberately NOT registered in `bootstrap.ts`** — shipping a fake "Widgets" panel into the product UI to prove an architectural point is a worse trade than proving it in tests. It becomes the addon loader's first package when the loader lands.
+- [x] `architecture.test.ts` enforces both directions (addon ⇏ application, SDK ⇏ application implementation), plus a runtime-surface snapshot of the SDK barrel and an explicit "the SDK does not export the host" check. Both new rules carry the positive-control pattern.
+
 ## NEXT SESSION — three work packages (2026-08-08, handoff)
 
 Read `HANDOFF.md` § Session 4 first. P1 is another program's open gate; P2 finishes what the platform refactor left half-done; P3 is the next real tranche. **Do P2 before P3** — an SDK frozen over a half-converted surface freezes the wrong shape.

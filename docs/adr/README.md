@@ -21,5 +21,6 @@ down. `docs/ARCHITECTURE.md` states the laws; these records say why.
 | [0010](0010-tool-activation-is-host-owned.md) | Tool activation and availability are host-owned, module-reported |
 | [0011](0011-shortcuts-module-ruleset-then-registry.md) | Shortcuts: the module ruleset resolves first, the registry second |
 | [0012](0012-tree-rows-are-provider-scoped.md) | Tree rows are provider-scoped, and row actions are commands |
+| [0013](0013-sdk-is-a-narrower-surface-than-the-platform.md) | `@onecad/sdk` is a narrower surface than `@/platform` |
 
 Status values: `Proposed`, `Accepted`, `Superseded by NNNN`.
