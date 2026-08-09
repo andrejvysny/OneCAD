@@ -290,3 +290,146 @@ describe("events", () => {
     expect(fn).toHaveBeenCalledWith({ n: 7 });
   });
 });
+
+/*
+ * Module lifecycle (P2.5 WP4).
+ *
+ * `deactivate` was declared on `ModuleDefinition` and called from nowhere — a
+ * hook in a contract about to become public that never fired. These pin what it
+ * now promises, including the parts that must NOT happen.
+ */
+describe("module deactivation", () => {
+  const A = moduleId("onecad.a");
+  const B = moduleId("onecad.b");
+
+  it("runs on disposeOwner, before the registrations go", () => {
+    const platform = createPlatform();
+    const seen: string[] = [];
+    platform.registerModule({
+      id: A,
+      version: "1.0.0",
+      activate: (scope) => {
+        scope.registerCommand({
+          id: contributionId<CommandId>(A, "onecad.a.command.go"),
+          title: "Go",
+          execute: () => ({ status: "done" as const }),
+        });
+      },
+      deactivate: (scope) => {
+        // Still reachable: a module cleaning up must be able to see what it owns.
+        seen.push(`commands:${scope.platform.commands.size}`);
+      },
+    });
+    platform.initializeSync();
+
+    platform.disposeOwner(A);
+
+    expect(seen).toEqual(["commands:1"]);
+    expect(platform.commands.size).toBe(0);
+    expect(platform.moduleState(A)).toBe("disposed");
+  });
+
+  it("runs on platform.dispose(), in reverse initialization order", () => {
+    const platform = createPlatform();
+    const order: string[] = [];
+    platform.registerModule({
+      id: A,
+      version: "1.0.0",
+      activate: () => {},
+      deactivate: () => {
+        order.push("a");
+      },
+    });
+    platform.registerModule({
+      id: B,
+      version: "1.0.0",
+      dependsOn: [A],
+      activate: () => {},
+      deactivate: () => {
+        order.push("b");
+      },
+    });
+    platform.initializeSync();
+
+    platform.dispose();
+
+    // B was built on A, so B says goodbye while A is still ready.
+    expect(order).toEqual(["b", "a"]);
+  });
+
+  it("does NOT run for a module whose activation failed", () => {
+    const platform = createPlatform();
+    const deactivate = vi.fn();
+    platform.registerModule({
+      id: A,
+      version: "1.0.0",
+      activate: () => {
+        throw new Error("boom");
+      },
+      deactivate,
+    });
+    expect(() => platform.initializeSync()).toThrow(ModuleError);
+
+    platform.disposeOwner(A);
+
+    // It never finished building the world it would be tearing down.
+    expect(deactivate).not.toHaveBeenCalled();
+  });
+
+  it("does NOT run when a short-lived child scope is disposed", () => {
+    const platform = createPlatform();
+    const deactivate = vi.fn();
+    platform.registerModule({ id: A, version: "1.0.0", activate: () => {}, deactivate });
+    platform.initializeSync();
+
+    // The editor screen's pattern: an independent scope under the same owner.
+    platform.createScope(A).dispose();
+
+    expect(deactivate).not.toHaveBeenCalled();
+    expect(platform.moduleState(A)).toBe("ready");
+  });
+
+  it("a throwing deactivate still lets the registrations go", () => {
+    const platform = createPlatform();
+    platform.registerModule({
+      id: A,
+      version: "1.0.0",
+      activate: (scope) => {
+        scope.registerCommand({
+          id: contributionId<CommandId>(A, "onecad.a.command.go"),
+          title: "Go",
+          execute: () => ({ status: "done" as const }),
+        });
+      },
+      deactivate: () => {
+        throw new Error("goodbye failed");
+      },
+    });
+    platform.initializeSync();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    expect(() => platform.disposeOwner(A)).not.toThrow();
+
+    // Refusing to unload because a goodbye failed would leave the platform
+    // holding contributions nobody owns.
+    expect(platform.commands.size).toBe(0);
+    expect(error).toHaveBeenCalled();
+    error.mockRestore();
+  });
+
+  it("dispose() sweeps registrations a scope never tracked", () => {
+    const platform = createPlatform();
+    platform.registerModule({ id: A, version: "1.0.0", activate: () => {} });
+    platform.initializeSync();
+    // Registered straight against the registry, not through the scope.
+    platform.commands.register(A, {
+      id: contributionId<CommandId>(A, "onecad.a.command.untracked"),
+      title: "Untracked",
+      execute: () => ({ status: "done" as const }),
+    });
+
+    platform.dispose();
+
+    expect(platform.commands.size).toBe(0);
+  });
+});
