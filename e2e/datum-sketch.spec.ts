@@ -117,8 +117,8 @@ test.describe("datum plane — sketch host", () => {
 
     // ── try to delete the datum out from under it ──
     await datumOptions(page).first().click({ button: "right" });
-    await page.getByTestId("tree-menu-datum-delete").click();
-    await page.getByTestId("tree-menu-datum-delete-confirm").click();
+    await page.getByTestId("tree-action-onecad.modeling.command.deleteDatum.action").click();
+    await page.getByTestId("tree-action-onecad.modeling.command.deleteDatum.action-confirm").click();
 
     // Refused, and the message says WHICH sketch is in the way.
     await expect(page.getByText(/Delete datum failed:.*referenced by 1 sketch/)).toBeVisible();
@@ -130,9 +130,9 @@ test.describe("datum plane — sketch host", () => {
     await createDatum(page);
 
     await datumOptions(page).first().click({ button: "right" });
-    await page.getByTestId("tree-menu-datum-delete").click();
+    await page.getByTestId("tree-action-onecad.modeling.command.deleteDatum.action").click();
     await expect(datumOptions(page)).toHaveCount(1); // first click only arms
-    await page.getByTestId("tree-menu-datum-delete-confirm").click();
+    await page.getByTestId("tree-action-onecad.modeling.command.deleteDatum.action-confirm").click();
 
     await expect(datumOptions(page)).toHaveCount(0);
     await expect(page.getByText("Datum deleted")).toBeVisible();

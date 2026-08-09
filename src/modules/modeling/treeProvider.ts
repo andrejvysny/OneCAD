@@ -16,13 +16,16 @@
  *   sketches— double-click re-opens that sketch
  *   datums  — no visibility fact at all, double-click starts a sketch on it
  */
-import type { ModuleScope, TreeSection } from "@/platform";
+import type { CommandId, Disposable, ModuleScope, TreeNodeAction, TreeSection } from "@/platform";
 import { ModelingTreeProvider } from "./panelIds";
+import { ModelingTreeCommands } from "./ids";
 import { documentStore } from "@/stores/documentStore";
 import { selectionStore } from "@/stores/selectionStore";
 import { toolStore } from "@/stores/toolStore";
 import { viewportStore } from "@/stores/viewportStore";
 import {
+  deleteDatum,
+  deleteSketch,
   renameBody,
   renameSketch,
   setBodyVisible,
@@ -38,6 +41,20 @@ const isSelected = (kind: TreeRowKind, id: string): boolean =>
 const select = (kind: TreeRowKind, id: string) => () => {
   selectionStore.getState().set([{ kind, id }]);
 };
+
+/**
+ * Delete, as a declared action rather than a `kind === "datum"` branch in the
+ * panel. `confirm` keeps the shipped two-click idiom — destructive, and the tree
+ * has no undo affordance in reach — without the host knowing what a datum is.
+ */
+const deleteAction = (title: string, commandId: string): TreeNodeAction => ({
+  id: `${commandId}.action`,
+  title,
+  commandId: commandId as CommandId,
+  danger: true,
+  group: "danger",
+  confirm: "Confirm delete",
+});
 
 export function modelingTreeSections(): readonly TreeSection[] {
   const { bodies, sketches, datums } = documentStore.getState();
@@ -77,6 +94,7 @@ export function modelingTreeSections(): readonly TreeSection[] {
         activate: () => setMode("sketch", s.id),
         toggleVisible: (v) => void setSketchVisible(s.id, v),
         rename: (name) => void renameSketch(s.id, name),
+        actions: [deleteAction("Delete sketch", ModelingTreeCommands.deleteSketch)],
       })),
     },
     {
@@ -99,16 +117,80 @@ export function modelingTreeSections(): readonly TreeSection[] {
         },
         // No `rename`: DATUM W1 ships no RenameDatum command, so offering the
         // affordance would be a dead end.
+        actions: [deleteAction("Delete datum", ModelingTreeCommands.deleteDatum)],
       })),
     },
   ];
 }
 
+/**
+ * Announce that `sections()` would now project something different.
+ *
+ * The panel used to hold five modeling store subscriptions of its own "so that
+ * the provider's reads are fresh" — a generic host watching one module's stores
+ * on that module's behalf, which no second provider could ever benefit from.
+ * Every provider now says when its own rows moved, and the host watches nothing.
+ */
+function subscribeToProjection(onChange: () => void): Disposable {
+  const unsubscribes = [
+    documentStore.subscribe(onChange),
+    selectionStore.subscribe(onChange),
+    viewportStore.subscribe(onChange),
+  ];
+  return {
+    dispose: () => {
+      for (const u of unsubscribes) u();
+    },
+  };
+}
+
+/** The row actions, as real commands: reachable from a palette, not only a menu. */
+function contributeTreeCommands(scope: ModuleScope): void {
+  const selectedId = (kind: TreeRowKind): string | undefined =>
+    selectionStore.getState().selected.find((r) => r.kind === kind)?.id;
+
+  scope.registerCommand({
+    id: ModelingTreeCommands.deleteSketch as CommandId,
+    title: "Delete sketch",
+    group: "modeling.tree",
+    canExecute: () => ({
+      enabled: selectedId("sketch") !== undefined,
+      reason: "Select a sketch first",
+    }),
+    execute: () => {
+      const id = selectedId("sketch");
+      if (!id) return { status: "cancelled" as const };
+      void deleteSketch(id);
+      return { status: "done" as const };
+    },
+  });
+
+  scope.registerCommand({
+    id: ModelingTreeCommands.deleteDatum as CommandId,
+    title: "Delete datum",
+    group: "modeling.tree",
+    canExecute: () => ({
+      enabled: selectedId("datum") !== undefined,
+      reason: "Select a datum first",
+    }),
+    execute: () => {
+      const id = selectedId("datum");
+      if (!id) return { status: "cancelled" as const };
+      // The backend refuses while a sketch is hosted on the datum; `treeActions`
+      // surfaces that rejection as a sticky hint.
+      void deleteDatum(id);
+      return { status: "done" as const };
+    },
+  });
+}
+
 /** Registers modeling's rows. Exported so a test can drive the real registration. */
 export function contributeModelingTree(scope: ModuleScope): void {
+  contributeTreeCommands(scope);
   scope.registerTreeProvider({
     id: ModelingTreeProvider,
     priority: 100,
     sections: modelingTreeSections,
+    subscribe: subscribeToProjection,
   });
 }

@@ -1,4 +1,7 @@
+import { useState } from "react";
 import { cn } from "@/ui/cn";
+import { Icon } from "@/icons/Icon";
+import { SettingsModal } from "@/features/settings/SettingsModal";
 import { SegmentedToggle } from "@/ui/SegmentedToggle";
 import { MonoValue } from "@/ui/MonoValue";
 import { useToolStore } from "@/stores/toolStore";
@@ -17,6 +20,7 @@ import {
  * Persp/Ortho toggle · FOV (dimmed in ortho) · live mono X/Y/Z read-out.
  */
 export function StatusBar() {
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const mode = useToolStore((s) => s.mode);
   const sel = useSelectionStore(primarySelection);
   const projection = useViewportStore((s) => s.projection);
@@ -92,6 +96,20 @@ export function StatusBar() {
       <MonoValue className="whitespace-pre text-[11.5px]">
         {formatCursor(cursor, displayUnit)}
       </MonoValue>
+      {/* APPLICATION settings, so shell chrome — it was mounted from
+          `ModelTreePanel`, which made "which application-wide preferences exist"
+          a model-tree responsibility and gave the tree a reason to import a
+          feature it has nothing to do with. */}
+      <span aria-hidden="true" className="h-[14px] w-px bg-border" />
+      <button
+        type="button"
+        aria-label="Open settings"
+        onClick={() => setSettingsOpen(true)}
+        className="flex h-[22px] w-[22px] cursor-pointer items-center justify-center rounded-sm border-none bg-transparent text-ink-4 hover:bg-hover hover:text-ink-2"
+      >
+        <Icon name="settings" size={14} strokeWidth={1.8} />
+      </button>
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }

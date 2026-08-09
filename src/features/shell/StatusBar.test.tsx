@@ -112,3 +112,24 @@ describe("StatusBar regen busy (H7b)", () => {
     expect(screen.getByTestId("regen-busy")).toBeInTheDocument();
   });
 });
+
+describe("StatusBar — settings", () => {
+  beforeEach(() => resetStores());
+
+  /*
+   * Settings is APPLICATION chrome. It was mounted from `ModelTreePanel`, which
+   * made "which application-wide preferences exist" a model-tree responsibility
+   * — the kind of small cross-cutting dependency that quietly undoes module
+   * boundaries. `ModelTreePanel.test.tsx` asserts it is no longer there.
+   */
+  it("opens and closes the settings dialog", async () => {
+    const user = userEvent.setup();
+    render(<StatusBar />);
+
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
+    expect(screen.getByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Close settings" }));
+    expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
+  });
+});

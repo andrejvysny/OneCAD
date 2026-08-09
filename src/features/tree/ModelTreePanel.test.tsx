@@ -7,8 +7,8 @@ import { documentStore } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { mockClient } from "@/ipc/mockClient";
 import { resetStores } from "@/test/resetStores";
-import { renderWithPlatform } from "@/test/renderWithPlatform";
-import { contributionId, type TreeProviderId } from "@/platform";
+import { bootTestPlatform, renderWithPlatform } from "@/test/renderWithPlatform";
+import { addonId, contributionId, type Platform, type TreeProviderId } from "@/platform";
 import { MODELING_MODULE_ID } from "@/modules/modeling/manifest";
 import { contributeModelingTree } from "@/modules/modeling/treeProvider";
 
@@ -69,15 +69,9 @@ describe("ModelTreePanel", () => {
     apply.mockRestore();
   });
 
-  it("opens settings from the bottom sidebar button", async () => {
-    const user = userEvent.setup();
+  it("does not own Settings — that is application chrome, and lives in the StatusBar", () => {
     renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
-    await user.click(screen.getByRole("button", { name: "Open settings" }));
-    expect(screen.getByRole("dialog", { name: "Settings" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Close settings" }));
-    await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "Settings" })).not.toBeInTheDocument(),
-    );
+    expect(screen.queryByRole("button", { name: "Open settings" })).toBeNull();
   });
 });
 
@@ -95,7 +89,7 @@ describe("ModelTreePanel — context menu", () => {
     await openMenuOn(/Body 1/);
     expect(screen.getByTestId("tree-menu-rename")).toBeInTheDocument();
     expect(screen.getByTestId("tree-menu-visibility")).toHaveTextContent("Hide");
-    expect(screen.queryByTestId("tree-menu-delete")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("tree-action-onecad.modeling.command.deleteSketch.action")).not.toBeInTheDocument();
   });
 
   it("shows Show (not Hide) for an already-hidden row", async () => {
@@ -121,9 +115,9 @@ describe("ModelTreePanel — context menu", () => {
   it("sketch delete is a TWO-CLICK confirm (the HistoryList idiom)", async () => {
     const del = vi.spyOn(mockClient, "deleteSketch");
     const user = await openMenuOn(/Sketch 4/);
-    await user.click(screen.getByTestId("tree-menu-delete"));
+    await user.click(screen.getByTestId("tree-action-onecad.modeling.command.deleteSketch.action"));
     expect(del).not.toHaveBeenCalled(); // first click only arms
-    await user.click(screen.getByTestId("tree-menu-delete-confirm"));
+    await user.click(screen.getByTestId("tree-action-onecad.modeling.command.deleteSketch.action-confirm"));
     await waitFor(() => expect(del).toHaveBeenCalledWith("sketch4"));
     await waitFor(() => expect(documentStore.getState().sketches.sketch4).toBeUndefined());
     del.mockRestore();
@@ -291,7 +285,7 @@ describe("ModelTreePanel — Reattach (H9)", () => {
     });
     expect(screen.queryByTestId("tree-menu-reattach")).toBeNull();
     // Delete is still there — the row is not otherwise crippled.
-    expect(screen.getByTestId("tree-menu-delete")).toBeInTheDocument();
+    expect(screen.getByTestId("tree-action-onecad.modeling.command.deleteSketch.action")).toBeInTheDocument();
   });
 });
 
@@ -342,5 +336,105 @@ describe("ModelTreePanel — foreign tree providers", () => {
       notify?.();
     });
     expect(screen.getByText("After")).toBeInTheDocument();
+  });
+});
+
+/*
+ * The public-surface cases (P2.5 WP3). A second provider is the thing the tree
+ * host existed for and had never actually been given.
+ */
+describe("ModelTreePanel — a second provider", () => {
+  const VENDOR = addonId("com.example.foo");
+  /** Deliberately the SAME node id modeling mints for its seeded body. */
+  const COLLIDING_ID = "body1";
+
+  beforeEach(() => resetStores());
+
+  function foreignProvider(platform: Platform, onSelect = () => {}): void {
+    platform.createScope(VENDOR).registerTreeProvider({
+      id: contributionId<TreeProviderId>(VENDOR, "com.example.foo.tree.items"),
+      priority: 200,
+      sections: () => [
+        {
+          id: "com.example.foo.tree.section",
+          title: "Items",
+          nodes: [
+            {
+              id: COLLIDING_ID,
+              label: "Vendor item",
+              icon: "no-such-glyph",
+              kind: "com.example.foo.item",
+              selected: false,
+              select: onSelect,
+            },
+          ],
+        },
+      ],
+    });
+  }
+
+  it("renders its rows alongside modeling's, unknown icon and all", () => {
+    const platform = bootTestPlatform(contributeModelingTree);
+    foreignProvider(platform);
+    renderWithPlatform(<ModelTreePanel />, { platform });
+
+    expect(screen.getByRole("listbox", { name: "Items" })).toBeInTheDocument();
+    // The old panel cast `node.icon as IconName`, which threw inside `Icon`.
+    expect(screen.getByRole("option", { name: /Vendor item/ })).toBeInTheDocument();
+  });
+
+  it("a colliding node id does not cross-wire the context menu", async () => {
+    const user = userEvent.setup();
+    const platform = bootTestPlatform(contributeModelingTree);
+    foreignProvider(platform);
+    renderWithPlatform(<ModelTreePanel />, { platform });
+
+    // Right-click the FOREIGN row whose id equals modeling's body id. Resolving
+    // rows by `node.id` alone would hand back modeling's body here, and its menu
+    // (Rename / Hide) would appear over someone else's row.
+    await user.pointer({
+      keys: "[MouseRight]",
+      target: screen.getByRole("option", { name: /Vendor item/ }),
+    });
+
+    expect(screen.queryByTestId("tree-menu-rename")).toBeNull();
+    expect(screen.queryByTestId("tree-menu-visibility")).toBeNull();
+  });
+
+  it("updates its rows from its OWN subscription, with no store the host watches", async () => {
+    let label = "First";
+    let notify: (() => void) | undefined;
+    const platform = bootTestPlatform();
+    platform.createScope(VENDOR).registerTreeProvider({
+          id: contributionId<TreeProviderId>(VENDOR, "com.example.foo.tree.items"),
+          sections: () => [
+            {
+              id: "com.example.foo.tree.section",
+              title: "Items",
+              nodes: [
+                {
+                  id: "item-1",
+                  label,
+                  icon: "cube",
+                  kind: "com.example.foo.item",
+                  selected: false,
+                  select: () => {},
+                },
+              ],
+            },
+          ],
+      subscribe: (onChange) => {
+        notify = onChange;
+        return { dispose: () => (notify = undefined) };
+      },
+    });
+    renderWithPlatform(<ModelTreePanel />, { platform });
+
+    expect(screen.getByRole("option", { name: /First/ })).toBeInTheDocument();
+
+    label = "Second";
+    act(() => notify?.());
+
+    expect(screen.getByRole("option", { name: /Second/ })).toBeInTheDocument();
   });
 });

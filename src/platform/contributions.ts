@@ -193,6 +193,35 @@ export interface InspectorContribution extends Contribution {
  * no visibility fact in the document, so it supplies no `toggleVisible` and the
  * host renders no eye. That is different from `visible: false`.
  */
+/**
+ * A row-scoped menu item.
+ *
+ * `commandId` rather than a callback, so the same action is reachable from a
+ * palette, a keystroke and automation instead of existing only inside one
+ * popover — the split docs/ARCHITECTURE.md §6 draws between a command and the UI
+ * that offers it.
+ *
+ * WHICH ROW: opening a row's menu SELECTS that row first (the host calls
+ * `select()`), so the command reads its target through the ordinary selection
+ * path rather than through a private argument only this menu could supply.
+ *
+ * `confirm` makes the two-click destructive idiom declarative: the host renders
+ * this label as a second step before running anything. Without it, "delete"
+ * items would each re-implement their own confirmation and drift.
+ */
+export interface TreeNodeAction {
+  readonly id: string;
+  readonly title: string;
+  readonly commandId: CommandId;
+  readonly icon?: string;
+  /** Rendered as destructive. */
+  readonly danger?: boolean;
+  /** Consumer-visible cluster — the host draws a separator between groups. */
+  readonly group?: string;
+  /** Present ⇒ the item first becomes this label, and only then runs. */
+  readonly confirm?: string;
+}
+
 export interface TreeNode {
   readonly id: string;
   readonly label: string;
@@ -208,6 +237,8 @@ export interface TreeNode {
   activate?(): void;
   toggleVisible?(next: boolean): void;
   rename?(next: string): void;
+  /** Extra context-menu items beyond the capabilities above. */
+  readonly actions?: readonly TreeNodeAction[];
 }
 
 export interface TreeSection {

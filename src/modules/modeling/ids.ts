@@ -71,6 +71,19 @@ export const ModelingCommands = {
 
 export type ModelingCommandKey = keyof typeof ModelingCommands;
 
+/**
+ * Row actions offered by modeling's `TreeProvider`.
+ *
+ * Separate from `ModelingCommands` because these register with the EDITOR-mount
+ * scope, alongside the tree provider that offers them — the tree is editor
+ * chrome, and registering them at bootstrap would advertise commands whose UI is
+ * not loaded. They act on the selected row: opening a row menu selects it first.
+ */
+export const ModelingTreeCommands = {
+  deleteSketch: "onecad.modeling.command.deleteSketch",
+  deleteDatum: "onecad.modeling.command.deleteDatum",
+} as const;
+
 export function modelToolId(tool: ModelTool): ToolId {
   return ModelingModelTools[tool] as ToolId;
 }

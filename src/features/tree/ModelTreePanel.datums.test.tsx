@@ -77,7 +77,7 @@ describe("ModelTreePanel — Datums section", () => {
     const user = userEvent.setup();
     renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
     await user.pointer({ keys: "[MouseRight]", target: screen.getByRole("option", { name: /Datum 1/ }) });
-    expect(screen.getByTestId("tree-menu-datum-delete")).toBeInTheDocument();
+    expect(screen.getByTestId("tree-action-onecad.modeling.command.deleteDatum.action")).toBeInTheDocument();
     expect(screen.queryByTestId("tree-menu-rename")).not.toBeInTheDocument();
     expect(screen.queryByTestId("tree-menu-visibility")).not.toBeInTheDocument();
   });
@@ -88,10 +88,10 @@ describe("ModelTreePanel — Datums section", () => {
     renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
     await user.pointer({ keys: "[MouseRight]", target: screen.getByRole("option", { name: /Datum 1/ }) });
 
-    await user.click(screen.getByTestId("tree-menu-datum-delete"));
+    await user.click(screen.getByTestId("tree-action-onecad.modeling.command.deleteDatum.action"));
     expect(apply).not.toHaveBeenCalled(); // first click only arms
 
-    await user.click(screen.getByTestId("tree-menu-datum-delete-confirm"));
+    await user.click(screen.getByTestId("tree-action-onecad.modeling.command.deleteDatum.action-confirm"));
     await waitFor(() =>
       expect(apply).toHaveBeenCalledWith({ cmd: "deleteDatum", datum: "d1" }),
     );
@@ -107,8 +107,8 @@ describe("ModelTreePanel — Datums section", () => {
     const user = userEvent.setup();
     renderWithPlatform(<ModelTreePanel />, { contribute: contributeModelingTree });
     await user.pointer({ keys: "[MouseRight]", target: screen.getByRole("option", { name: /Datum 1/ }) });
-    await user.click(screen.getByTestId("tree-menu-datum-delete"));
-    await user.click(screen.getByTestId("tree-menu-datum-delete-confirm"));
+    await user.click(screen.getByTestId("tree-action-onecad.modeling.command.deleteDatum.action"));
+    await user.click(screen.getByTestId("tree-action-onecad.modeling.command.deleteDatum.action-confirm"));
 
     await waitFor(() => {
       const hint = viewportStore.getState().statusHint;

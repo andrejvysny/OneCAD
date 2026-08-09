@@ -191,7 +191,7 @@ test.describe("sketch reattach (H9)", () => {
     });
 
     await sketchOptions(page).first().click({ button: "right" });
-    await expect(page.getByTestId("tree-menu-delete")).toBeVisible();
+    await expect(page.getByTestId("tree-action-onecad.modeling.command.deleteSketch.action")).toBeVisible();
     await expect(page.getByTestId("tree-menu-reattach")).toHaveCount(0);
   });
 });
