@@ -47,7 +47,7 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
-use crate::document::refs::{AxisRef, ElementRef, Extra, SketchRegionRef};
+use crate::document::refs::{AxisRef, ElementKind, ElementRef, Extra, SketchRegionRef};
 use crate::document::variables::Scalar;
 use crate::ids::{BodyId, ElementId, RecordId, SketchId};
 use crate::math::Vec3;
@@ -330,15 +330,12 @@ impl KnownOperation {
     /// reach the ladder. It would only churn the golden-pinned history-prefix hash
     /// for zero effect (the WP-FIX W4 no-backfill discipline).
     ///
-    /// **No `Shell` arm.** `ShellParams::open_faces` are bare [`ElementId`]s with
-    /// no ref slot to carry evidence — `wire::face_input_refs` renders them
-    /// element-only. Giving Shell descriptor evidence needs a params-shape change,
-    /// not a hydration pass. Recorded gap.
     #[must_use]
     pub fn element_refs_mut(&mut self) -> Vec<&mut ElementRef> {
         match self {
             KnownOperation::Fillet(p) => p.edges.iter_mut().collect(),
             KnownOperation::Chamfer(p) => p.edges.iter_mut().collect(),
+            KnownOperation::Shell(p) => p.faces.iter_mut().collect(),
             // The two ToFace gates mirror `wire_op_inputs` exactly: a `target_face`
             // left over from a mode the op no longer runs in is NOT lowered, so
             // stamping evidence on it would move the params hash for a ref the
@@ -1122,12 +1119,18 @@ impl ChamferParams {
 
 /// Shell parameters (OneCAD-CPP `ShellParams` `OperationRecord.h:122-125`).
 /// `target_body` is the shelled body (C++ supplies it via the `BodyRef` input).
+///
+/// `faces` is the typed home for each `open_faces` entry. New authored records
+/// keep both lists in lockstep so descriptor/anchor evidence reaches the worker's
+/// reference ladder. Empty remains valid for legacy bare-id records.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShellParams {
     pub thickness: Scalar,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub open_faces: Vec<ElementId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub faces: Vec<ElementRef>,
     #[serde(
         rename = "targetBodyId",
         default,
@@ -1137,6 +1140,48 @@ pub struct ShellParams {
     pub target_body: Option<BodyId>,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     pub extra: Extra,
+}
+
+impl ShellParams {
+    /// Validates typed face evidence against its legacy id view and operated body.
+    /// Empty `faces` remains the only legacy form.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.faces.is_empty() {
+            return Ok(());
+        }
+        if self.faces.len() != self.open_faces.len() {
+            return Err(format!(
+                "shell faces ({}) and openFaces ({}) length mismatch",
+                self.faces.len(),
+                self.open_faces.len()
+            ));
+        }
+        let target = self
+            .target_body
+            .ok_or_else(|| "typed shell faces require targetBodyId".to_string())?;
+        for (index, reference) in self.faces.iter().enumerate() {
+            let primary = reference
+                .primary
+                .as_ref()
+                .ok_or_else(|| format!("shell face {index} requires a FACE primary"))?;
+            if primary.kind != ElementKind::Face {
+                return Err(format!("shell face {index} requires a FACE primary"));
+            }
+            if primary.element != self.open_faces[index] {
+                return Err(format!(
+                    "shell face {index}: typed ref element {} != openFaces[{index}] {}",
+                    primary.element, self.open_faces[index]
+                ));
+            }
+            if primary.body != target {
+                return Err(format!(
+                    "shell face {index}: typed ref body {} != targetBodyId {target}",
+                    primary.body
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Standalone boolean parameters (OneCAD-CPP `BooleanParams`
@@ -2570,6 +2615,32 @@ mod tests {
             ..countersink_params()
         };
         assert!(p.validate().unwrap_err().contains("counterbore-only"));
+    }
+
+    #[test]
+    fn shell_typed_faces_serialize_and_legacy_empty_round_trips() {
+        let legacy = serde_json::json!({
+            "opType": "Shell",
+            "params": {
+                "thickness": 2.0,
+                "openFaces": ["el_f1"],
+                "targetBodyId": body(1).to_string()
+            }
+        });
+        let legacy_op: Operation = serde_json::from_value(legacy).unwrap();
+        let legacy_json = serde_json::to_value(&legacy_op).unwrap();
+        assert!(legacy_json["params"].get("faces").is_none());
+
+        let mut typed = KnownOperation::Shell(ShellParams {
+            thickness: Scalar::new(2.0),
+            open_faces: vec![ElementId::new("el_f1")],
+            faces: vec![offset_ref("el_f1")],
+            target_body: Some(body(1)),
+            extra: Extra::new(),
+        });
+        assert_eq!(typed.element_refs_mut().len(), 1);
+        let json = serde_json::to_value(Operation::Known(typed)).unwrap();
+        assert!(json["params"]["faces"].is_array());
     }
 
     // ── OffsetFace (SCHEMA §7.3 `op.offsetFace`, 2026-08-06) ────────────────

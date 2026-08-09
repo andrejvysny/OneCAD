@@ -202,10 +202,9 @@ export type EnterSketchTarget =
    *
    * `topoKey` rides along when the caller has it (SKETCH-ON-FACE W2): the real
    * lane creates the sketch through `add_sketch_on_face`, which walks the SAME
-   * two-rung ladder as `face_sketch_plane` — topoKey FIRST, because a
-   * just-promoted, never-consumed `elementId` is genuinely absent from the
-   * worker's on-demand element-map partition. Dropping it here would make the
-   * pick-a-face-then-sketch flow fail to resolve at all.
+   * two-rung ladder as `face_sketch_plane`. A successful promotion now binds the
+   * `elementId` into the same unchanged worker head; `topoKey` remains useful as
+   * snapshot-scoped pre-promotion evidence and defense against stale UI state.
    */
   | {
       newOnFace: {
@@ -848,8 +847,10 @@ export interface BooleanParams {
 
 /**
  * Shell op params (Rust `ShellParams`). `openFaces` are the removed faces
- * (ElementIds or snapshot TopoKeys, resolved through the ladder); `thickness` is
- * the wall thickness. `targetBodyId` is the shelled body.
+ * (ElementIds or snapshot TopoKeys, resolved through the ladder); new authoring
+ * supplies the matching semantic refs through `OperationOp.inputs`, which the
+ * command mapper persists as typed `faces`. `thickness` is the wall thickness.
+ * `targetBodyId` is the shelled body.
  */
 export interface ShellParams {
   thickness: number;
@@ -908,8 +909,8 @@ export type OffsetDistanceType = "Offset" | "Total" | "Radius" | "Diameter";
  * `faces` is the FULL FROZEN operative set — the user's picks PLUS the G1 tangent
  * closure `PrepareOffsetFace` computed at authoring time. The worker NEVER
  * re-expands it at regen, so the array a commit sends is the array every future
- * rebuild operates on. Typed refs (the Fillet `edges` model, NOT Shell's bare
- * ids): each one carries the anchor evidence the resolution ladder rebinds with.
+ * rebuild operates on. Typed refs (the Fillet `edges` / new Shell `faces` model):
+ * each carries the anchor evidence the resolution ladder rebinds with.
  *
  * `oppositeFace` is `Total`-only and REQUIRED there — core validates the
  * conditional BOTH ways, so a stale opposite left behind by a distance-type
@@ -1339,9 +1340,9 @@ export interface PreviewDraft {
   regionId?: string;
   /**
    * Typed op inputs, carried verbatim into the session. Load-bearing for
-   * Fillet/Chamfer ONLY — `wireOperation` drops an op's top-level inputs
-   * everywhere else, and `filletParams` synthesizes the typed `params.edges` from
-   * these (in lockstep with `params.edgeIds`). Shell/Boolean bodies ride
+   * Fillet/Chamfer and Shell — `wireOperation` drops an op's top-level inputs,
+   * then the param mappers synthesize typed `params.edges` / `params.faces` from
+   * these in lockstep with their bare-id arrays. Boolean bodies ride
    * `params.targetBodyId`/`toolBodyId`. See `ipc/previewOps.ts`.
    */
   inputs?: SemanticRef[];

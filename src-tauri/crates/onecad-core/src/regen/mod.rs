@@ -48,13 +48,13 @@ pub use checkpoint::{
     RestoreResult, StoredCheckpoint, ARTIFACT_SCHEMA_VERSION,
 };
 pub use engine::{
-    mint_element_ids, AcceptResult, AcquireRequest, BodySelector, Diagnostic, ElementMapDelta,
-    ElementMapEntry, EngineError, Fencing, GeometryEngine, MeshHandle, OpFailureCode,
-    OpenSessionRequest, Pick, PlanArtifacts, PlanEvent, PlanPrepared, PlanRequest, PlanStepEvent,
-    PlannedOp, PolicyVersions, PreparedMeshRef, RefResolution, ResolveOutcome, ResolveRef,
-    ResolveRequest, RestoreRequest, SessionMode, Severity, Signature, StepResult, StepSignatures,
-    StepStatus, StoppedReason, TessellateRequest, TessellateResult, TessellateSpec,
-    WorkerElementEvidence, WorkerHead,
+    mint_element_ids, AcceptResult, AcquireRequest, BindElementIdsRequest, BodySelector,
+    Diagnostic, ElementBinding, ElementMapDelta, ElementMapEntry, EngineError, Fencing,
+    GeometryEngine, MeshHandle, OpFailureCode, OpenSessionRequest, Pick, PlanArtifacts, PlanEvent,
+    PlanPrepared, PlanRequest, PlanStepEvent, PlannedOp, PolicyVersions, PreparedMeshRef,
+    RefResolution, ResolveOutcome, ResolveRef, ResolveRequest, RestoreRequest, SessionMode,
+    Severity, Signature, StepResult, StepSignatures, StepStatus, StoppedReason, TessellateRequest,
+    TessellateResult, TessellateSpec, WorkerElementEvidence, WorkerHead,
 };
 pub use executor::{CancelToken, MeshSink, Outcome, RegenExecutor, RegenSession, RevisionGate};
 pub use planner::{

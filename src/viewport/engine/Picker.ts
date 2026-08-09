@@ -166,7 +166,10 @@ export function resolvePick(
   }
   if (id == null) return null;
 
-  const isElementId = entry.view.idsHaveElementIds;
+  // IDS_HAVE_ELEMENTIDS is body-wide: one tracked element sets it even while
+  // untracked labels remain snapshot-scoped `f:N` / `e:N` TopoKeys. Classify the
+  // chosen label itself using Rust's `el_` ElementId contract.
+  const isElementId = id.startsWith("el_");
   return {
     bodyId,
     kind,

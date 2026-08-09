@@ -2238,17 +2238,15 @@ async fn measure_element_info_reports_exact_kernel_quantities() {
         .expect("promote top face");
     let face_el = promoted[0].element_id.clone();
 
-    // RUNG 1 of the read ladder — and the reason it exists. A promoted id is
-    // minted by RUST; the worker's partition only gains an entry when an OP
-    // resolves the element as an input, so an ElementId lookup on a fresh pick
-    // is legitimately ABSENT. Pinned here so the ladder is not "optimised" away.
+    // REF-FRESH-1: promotion installs the Rust-minted id into the same unchanged
+    // worker head before returning. TopoKey lookup below remains an independent
+    // measurement path, not a repair for a missing direct binding.
     assert!(
         ElementQuery::query_element(&wm, snap_id, body, &face_el)
             .await
             .expect("QueryElement(by elementId)")
-            .is_none(),
-        "a promoted-but-unconsumed ElementId is not in the worker partition — \
-         this is what makes the topoKey rung load-bearing"
+            .is_some(),
+        "a promoted ElementId must be directly queryable on the unchanged head"
     );
 
     let face = ElementQuery::query_element_by_topo_key(&wm, snap_id, body, &top_key)

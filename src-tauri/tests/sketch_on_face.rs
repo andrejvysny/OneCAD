@@ -6,17 +6,10 @@
 //! otherwise crate-private). No IPC / webview dispatch is simulated; this is a
 //! direct async fn call against a real `tauri::State<AppState>`.
 //!
-//! THE LATENT (see `api::face_sketch_plane` before this fix): the command
-//! resolved its picked face by ElementId ALONE. The worker's element-map
-//! partition mints entries ONLY when an OP resolves the id as an input
-//! (`PlanExecutor::resolve_input_refs`) — `AcquireElementIds`/`promote_selection`
-//! mints the id in RUST and never tells the worker. So a JUST-PROMOTED,
-//! never-consumed face id is genuinely absent from the partition, and
-//! `face_sketch_plane` failed loudly for exactly the "sketch on the face you
-//! just selected" flow `SketchController.tryEnterOnSelectedFace` drives — the
-//! feature's single most common path. Fixed by trying the topoKey rung FIRST,
-//! mirroring `element_info`'s ladder (see `api::element_info`,
-//! `wire_contract::measure_element_info_reports_exact_kernel_quantities`).
+//! Historical latent: the command once resolved a newly promoted face by an id
+//! that Rust had never installed in the worker. REF-FRESH-1 now makes that id a
+//! direct same-head binding; the TopoKey-first rung remains the snapshot-scoped
+//! evidence path and defense-in-depth fallback used by `face_sketch_plane`.
 //!
 //! Gated on `ONECAD_WORKER_PATH` / `ONECAD_REQUIRE_WORKER` like every other
 //! worker-backed test in this suite (see `wire_contract.rs`'s `real_worker`).
@@ -408,25 +401,21 @@ async fn face_sketch_plane_resolves_a_promoted_unconsumed_face_via_the_topo_key_
     assert_eq!(view.face_count, 6, "the extruded rect is a 6-faced box");
     let top_key = top_face_pick(&view, &mesh);
 
-    // Promote the pick to a Rust-minted ElementId — and deliberately consume it
-    // in NOTHING: no extrude/fillet/etc. references it, so the worker's
-    // element-map partition never gains an entry for it (the exact latent).
+    // Promote the pick to a Rust-minted ElementId without consuming it in any op.
+    // REF-FRESH-1 requires promotion itself to install the direct same-head binding.
     let promoted = rt
         .promote_selection(snap_id, body, vec![(TopoKey::new(&top_key), None)])
         .await
         .expect("promote top face");
     let face_el = promoted[0].element_id.clone();
 
-    // Pin WHY the ladder is load-bearing — same fact `element_info`'s own test
-    // pins (`wire_contract::measure_element_info_reports_exact_kernel_quantities`):
-    // a promoted-but-unconsumed id is genuinely absent from the partition.
+    // The just-promoted id resolves directly before any topology change or op use.
     assert!(
         ElementQuery::query_element(&wm, snap_id, body, &face_el)
             .await
             .expect("QueryElement(by elementId)")
-            .is_none(),
-        "a promoted-but-unconsumed ElementId is not in the worker partition — \
-         this is what makes face_sketch_plane's topoKey rung load-bearing"
+            .is_some(),
+        "a promoted ElementId must be installed in the unchanged worker head"
     );
 
     // Ground truth for the assertion below: the picked face's OWN descriptor.
@@ -455,8 +444,8 @@ async fn face_sketch_plane_resolves_a_promoted_unconsumed_face_via_the_topo_key_
     )
     .await
     .expect(
-        "face_sketch_plane must resolve a promoted-but-unconsumed face via the \
-         topoKey rung, exactly like element_info's ladder",
+        "face_sketch_plane must resolve a promoted face from same-head identity \
+         plus snapshot-scoped TopoKey evidence",
     );
 
     for (axis, got, want) in [

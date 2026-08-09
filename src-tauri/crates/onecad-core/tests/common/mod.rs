@@ -246,6 +246,7 @@ pub fn op_shell() -> Operation {
     Operation::Known(KnownOperation::Shell(ShellParams {
         thickness: Scalar::new(1.5),
         open_faces: vec![ElementId::new("f:3")],
+        faces: vec![],
         target_body: Some(body_a()),
         extra: Default::default(),
     }))

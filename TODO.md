@@ -1,5 +1,68 @@
 # OneCAD-Tauri Migration TODO
 
+## REF-H0 — Fresh Subelement Identity Contract (2026-08-09) — COMPLETE
+
+Goal: a face, edge, or vertex promoted from the current published snapshot resolves
+directly and uniquely on that unchanged worker head. Shell, OffsetFace, Hole, and
+Fillet must consume the same trusted identity path; ambiguity thresholds and
+operation-specific ordinal fallbacks remain unchanged.
+
+### Investigation
+- [x] Reproduce root cause from live code/history: `AcquireElementIds` returns worker
+  evidence, Rust mints and caches the `ElementId`, but the authoritative worker-head
+  `ElementMapPartition` never receives that binding. `PrepareOffsetFace` then treats
+  the fresh id as authoritative and refuses its inevitable partition miss.
+- [x] Confirm Shell's separate persistence gap: legacy `ShellParams.openFaces`
+  stores bare ids, so Rust discards the frontend's typed face evidence before
+  `PreviewOp` and full replay. The contract now adds typed `ShellParams.faces` in
+  strict lockstep while preserving absent/empty legacy compatibility.
+- [x] Audit `body_<uuid>` normalization: frontend/Rust/worker conversions are
+  consistent in the clean-box path; not the root cause.
+- [x] Audit mesh face/edge ordinals: tessellation and resolver use the same
+  `TopExp::MapShapes` domains; not the root cause.
+- [x] Find secondary MESH1 defect: partially persistent id tables mix `el_*` and
+  TopoKeys, while the picker treats every label as persistent when the body-global
+  flag is set.
+
+### Red-first contracts
+- [x] Box face/edge/vertex `AcquireElementIds` round trip: same head resolves
+  `unchanged`, same id and TopoKey; `QueryElement(elementId)` reports present.
+- [x] `AcquireElementIds` then `PrepareOffsetFace` with the returned id succeeds.
+- [x] Fresh promoted top-face Shell `PreviewOp` returns no `NeedsRepair`, without a
+  prior operation pre-seeding the partition.
+- [x] MESH1 mixed-id pick classifies `el_*` as persistent and `f:N`/`e:N` as
+  snapshot-scoped evidence.
+
+### Implementation
+- [x] Implement internal `BindElementIds`: validate exact/idempotent evidence and
+  atomically install the full Rust-minted batch into the snapshot-fenced worker
+  head; promotion returns and caches only after bind succeeds.
+- [x] Make identity reads use one atomic published-state snapshot.
+- [x] Implement `ShellParams.faces` in strict order/id lockstep with `openFaces` so
+  preview, full replay, save/reopen, and fresh-worker replay retain typed evidence;
+  accept absent/empty `faces` only for legacy bare-id behavior.
+- [x] Fix shared preview diagnostics to report actual tool/op, never `extrude` for
+  Shell/OffsetFace/Hole.
+- [x] Keep safe refusal: no threshold relaxation, first-candidate fallback, or
+  operation-specific identity path.
+
+### Verification
+- [x] Run focused worker ctests and real-worker Rust identity/OffsetFace/Shell tests.
+- [x] Re-run Fillet fresh selection lifecycle without manual repair.
+- [x] Run worker build + ctest, Cargo fmt/clippy/workspace tests, focused frontend
+  tests, TypeScript, and production build.
+- [x] Review final diff; preserve unrelated sketch/live-dimension worktree changes.
+
+Gate: worker CTest 110/110; real-worker Rust workspace green; fmt + clippy
+`-D warnings` green; focused frontend 127/127; full Vitest 240 files / 4051 tests;
+`npx tsc --noEmit` + production build green. Fresh Shell cold reopen publishes
+`needsRepair=0` at volume 2224; fresh promoted Fillet commit publishes
+`needsRepair=0`. Final Shell body/load hardening: onecad-core 259 unit + 176
+integration tests green; persisted foreign-body typed refs fail closed.
+
+### Unresolved questions
+- None.
+
 ## EXTRUDE DIRECT MANIPULATION — moving two-way arrow + dimension-only chip (2026-08-09, plan `simplify-this-chip-in-optimized-unicorn.md`) — FE GATE PASSED
 
 Applying an extrude was a form, not a gesture: a twelve-control chip demanded every

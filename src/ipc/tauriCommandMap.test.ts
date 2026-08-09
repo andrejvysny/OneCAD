@@ -331,17 +331,62 @@ describe("operationToEditCommand — M6b op wire mappings", () => {
     expect("opId" in command.record).toBe(false);
   });
 
-  it("Shell maps thickness (Scalar) + openFaces + targetBodyId", () => {
+  it("Shell maps openFaces + typed faces in lockstep", () => {
     const op: OperationOp = {
       opType: "Shell",
-      inputs: [{ primary: { bodyId: "body1", kind: "face" } }],
+      inputs: [
+        {
+          primary: { bodyId: "body_body1", elementId: "el_a", kind: "face" },
+          anchor: { worldPoint: [0, 0, 10] },
+        },
+        {
+          primary: { bodyId: "body_body1", elementId: "el_b", kind: "face" },
+          anchor: { worldPoint: [20, 0, 10] },
+        },
+      ],
       params: { thickness: 2.5, openFaces: ["el_a", "el_b"], targetBodyId: "body1" },
     };
     expect(addedParams(op)).toEqual({
       thickness: { value: 2.5 },
       openFaces: ["el_a", "el_b"],
+      faces: [
+        {
+          primary: { bodyId: "body1", elementId: "el_a", kind: "face" },
+          anchor: { worldPoint: [0, 0, 10] },
+        },
+        {
+          primary: { bodyId: "body1", elementId: "el_b", kind: "face" },
+          anchor: { worldPoint: [20, 0, 10] },
+        },
+      ],
       targetBodyId: "body1",
     });
+  });
+
+  it("Shell preserves legacy bare openFaces when typed inputs are absent", () => {
+    const op: OperationOp = {
+      opType: "Shell",
+      params: { thickness: 2.5, openFaces: ["el_a"], targetBodyId: "body1" },
+    };
+    expect(addedParams(op)).toEqual({
+      thickness: { value: 2.5 },
+      openFaces: ["el_a"],
+      targetBodyId: "body1",
+    });
+  });
+
+  it("Shell rejects mismatched typed identity instead of rewriting it", () => {
+    const op: OperationOp = {
+      opType: "Shell",
+      inputs: [
+        {
+          primary: { bodyId: "body_body1", elementId: "el_wrong", kind: "face" },
+          anchor: { worldPoint: [0, 0, 10] },
+        },
+      ],
+      params: { thickness: 2.5, openFaces: ["el_expected"], targetBodyId: "body1" },
+    };
+    expect(() => addedParams(op)).toThrow(/must match openFaces and targetBodyId in lockstep/);
   });
 
   /*

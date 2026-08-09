@@ -1514,6 +1514,7 @@ mod tests {
         let shell = Operation::Known(KnownOperation::Shell(ShellParams {
             thickness: Scalar::new(1.5),
             open_faces: Vec::new(),
+            faces: Vec::new(),
             target_body: None,
             extra: Default::default(),
         }));
@@ -1674,6 +1675,7 @@ mod tests {
         let shell = Operation::Known(KnownOperation::Shell(ShellParams {
             thickness: Scalar::new(2.0),
             open_faces: Vec::new(),
+            faces: Vec::new(),
             target_body: None,
             extra: Default::default(),
         }));

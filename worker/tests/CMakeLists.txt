@@ -356,6 +356,12 @@ add_test(
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/execute_plan_checkpoint_fallback.ndjson
 )
+add_test(
+    NAME canonical_bind_element_ids
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/bind_element_ids.ndjson
+)
 
 # W-WP3c: interop smoke — replay the Rust-authored contract via the harness (no
 # Rust compiled here; live Rust<->C++ interop is W-WP4/R-WP11). See the script

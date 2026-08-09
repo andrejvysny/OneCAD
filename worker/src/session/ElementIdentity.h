@@ -6,13 +6,15 @@
 //     {topoKey, kind, bodyId, descriptor, anchor echo}; RUST mints the id (the
 //     worker echoes an existing id only when the live partition already holds one
 //     for that binding — Invariant 1). The worker stores NOTHING here.
+//   * BindElementIds — atomically install Rust-minted ids into the unchanged
+//     authoritative head partition.
 //   * QueryElement — look up a current binding (by elementId, or by
 //     {topoKey, bodyId}) within a snapshot; no mutation.
 //   * ResolveRefs — dry-run ladder for repair dialogs; W-WP5 minimal (history/
 //     descriptor echo, no scoring — that is W-WP6).
 //
-// All three operate on COPIES of the live session state (Session::bodies_copy /
-// partition_copy), so they never touch the head lock while resolving.
+// Read verbs atomically fence-and-copy the published state. Bind validates and
+// commits its complete batch under one session lock.
 #pragma once
 
 #include "protocol/Envelope.h"
@@ -21,6 +23,7 @@
 namespace onecad::session {
 
 protocol::Envelope handle_acquire_element_ids(Session& session, const protocol::Envelope& req);
+protocol::Envelope handle_bind_element_ids(Session& session, const protocol::Envelope& req);
 protocol::Envelope handle_query_element(Session& session, const protocol::Envelope& req);
 protocol::Envelope handle_resolve_refs(Session& session, const protocol::Envelope& req);
 

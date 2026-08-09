@@ -43,7 +43,10 @@ use onecad_core::document::refs::{
 };
 use onecad_core::document::variables::Scalar;
 use onecad_core::edit::{EditCommand, InputPath, InputRef};
-use onecad_core::ids::{BodyId, ConstraintId, ElementId, EntityId, RecordId, RegionId, SketchId};
+use onecad_core::ids::{
+    BodyId, ConstraintId, ElementId, EntityId, RecordId, RegionId, SketchId, SnapshotId, TopoKey,
+};
+use onecad_core::io::container::SaveMeta;
 use onecad_core::math::{Vec2, Vec3};
 use onecad_core::regen::{CancelToken, GeometryEngine, Lod, ModelSnapshot, Outcome, RegenRequest};
 use onecad_core::sketch::{Constraint, CurvePosition, Sketch, SketchEntity, WorldPlane};
@@ -95,6 +98,22 @@ fn runtime_over(wm: &WorkerManager) -> DocumentRuntime {
     let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
     let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
     DocumentRuntime::new_blank(engine, meshes, solver)
+}
+
+fn open_over(wm: &WorkerManager, path: &std::path::Path) -> DocumentRuntime {
+    let engine: Arc<dyn GeometryEngine> = Arc::new(wm.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
+    DocumentRuntime::open(path, engine, meshes, solver).expect("reopen saved Shell document")
+}
+
+fn save_meta() -> SaveMeta {
+    SaveMeta {
+        app_version: "ref-h0-shell".into(),
+        occt_fingerprint: None,
+        created: "2026-08-09T00:00:00Z".into(),
+        modified: "2026-08-09T00:00:00Z".into(),
+    }
 }
 
 fn add_op(rt: &mut DocumentRuntime, record: OperationRecord) {
@@ -276,8 +295,8 @@ fn extrude_record(rec: u128, sketch: SketchId, dist: f64) -> OperationRecord {
 }
 
 /// A `ToFace` extrude whose direction-1 target is `face` — used only to MINT the
-/// element id into the partition (`resolve_input_refs`) so a later bare-`openFaces`
-/// Shell can bind it, which is the production tracking path (`breadth_ops.rs`).
+/// element id into the partition (`resolve_input_refs`) for compatibility-path
+/// tests that exercise history-installed identities.
 fn extrude_to_face_record(rec: u128, sketch: SketchId, face: ElementRef) -> OperationRecord {
     let mut params = extrude_params(sketch, 1.0, ExtrudeMode::ToFace);
     params.target_face = Some(face);
@@ -311,8 +330,13 @@ fn anchored_ref(body: BodyId, element: &ElementId, kind: ElementKind, at: Vec3) 
     }
 }
 
-fn fillet_record(rec: u128, body: BodyId, at: Vec3, radius: f64) -> OperationRecord {
-    let edge = ElementId::new("el_edge_pick");
+fn fillet_record(
+    rec: u128,
+    body: BodyId,
+    edge: &ElementId,
+    at: Vec3,
+    radius: f64,
+) -> OperationRecord {
     OperationRecord::new(
         RecordId(Uuid::from_u128(rec)),
         0,
@@ -320,7 +344,7 @@ fn fillet_record(rec: u128, body: BodyId, at: Vec3, radius: f64) -> OperationRec
         Operation::Known(KnownOperation::Fillet(FilletParams {
             radius: Scalar::new(radius),
             edge_ids: vec![edge.clone()],
-            edges: vec![anchored_ref(body, &edge, ElementKind::Edge, at)],
+            edges: vec![anchored_ref(body, edge, ElementKind::Edge, at)],
             chain_tangent_edges: false,
             tangent_closure_version: None,
             extra: Default::default(),
@@ -328,8 +352,13 @@ fn fillet_record(rec: u128, body: BodyId, at: Vec3, radius: f64) -> OperationRec
     )
 }
 
-fn chamfer_record(rec: u128, body: BodyId, at: Vec3, distance: f64) -> OperationRecord {
-    let edge = ElementId::new("el_edge_pick");
+fn chamfer_record(
+    rec: u128,
+    body: BodyId,
+    edge: &ElementId,
+    at: Vec3,
+    distance: f64,
+) -> OperationRecord {
     OperationRecord::new(
         RecordId(Uuid::from_u128(rec)),
         0,
@@ -338,7 +367,7 @@ fn chamfer_record(rec: u128, body: BodyId, at: Vec3, distance: f64) -> Operation
             radius: Scalar::new(distance),
             distance2: None,
             edge_ids: vec![edge.clone()],
-            edges: vec![anchored_ref(body, &edge, ElementKind::Edge, at)],
+            edges: vec![anchored_ref(body, edge, ElementKind::Edge, at)],
             chain_tangent_edges: false,
             tangent_closure_version: None,
             extra: Default::default(),
@@ -346,14 +375,30 @@ fn chamfer_record(rec: u128, body: BodyId, at: Vec3, distance: f64) -> Operation
     )
 }
 
-fn shell_record(rec: u128, body: BodyId, faces: Vec<ElementId>, thickness: f64) -> OperationRecord {
+fn shell_record(
+    rec: u128,
+    body: BodyId,
+    faces: Vec<ElementRef>,
+    thickness: f64,
+) -> OperationRecord {
+    let open_faces = faces
+        .iter()
+        .map(|face| {
+            face.primary
+                .as_ref()
+                .expect("authored Shell face has a primary")
+                .element
+                .clone()
+        })
+        .collect();
     OperationRecord::new(
         RecordId(Uuid::from_u128(rec)),
         0,
         "Shell",
         Operation::Known(KnownOperation::Shell(ShellParams {
             thickness: Scalar::new(thickness),
-            open_faces: faces,
+            open_faces,
+            faces,
             target_body: Some(body),
             extra: Default::default(),
         })),
@@ -369,6 +414,10 @@ const SEC_INDICES: u32 = 3;
 const SEC_FACE_RANGES: u32 = 4;
 const SEC_FACE_ID_OFFS: u32 = 5;
 const SEC_FACE_ID_CHARS: u32 = 6;
+const SEC_EDGE_RANGES: u32 = 7;
+const SEC_EDGE_POSITIONS: u32 = 8;
+const SEC_EDGE_ID_OFFS: u32 = 9;
+const SEC_EDGE_ID_CHARS: u32 = 10;
 
 fn vertex(blob: &[u8], pbase: usize, i: usize) -> [f64; 3] {
     let o = pbase + i * 12;
@@ -399,9 +448,15 @@ fn mesh_volume(view: &MeshHeaderView, blob: &[u8]) -> f64 {
     (vol6 / 6.0).abs()
 }
 
-fn id_table(view: &MeshHeaderView, blob: &[u8], count: usize) -> Vec<String> {
-    let offs = view.section(SEC_FACE_ID_OFFS).expect("id-offs");
-    let chars = view.section(SEC_FACE_ID_CHARS).expect("id-chars");
+fn id_table(
+    view: &MeshHeaderView,
+    blob: &[u8],
+    offs_ty: u32,
+    chars_ty: u32,
+    count: usize,
+) -> Vec<String> {
+    let offs = view.section(offs_ty).expect("id-offs");
+    let chars = view.section(chars_ty).expect("id-chars");
     let (obase, cbase) = (offs.offset as usize, chars.offset as usize);
     (0..count)
         .map(|i| {
@@ -418,7 +473,13 @@ fn top_face_pick(view: &MeshHeaderView, blob: &[u8]) -> (String, Vec3) {
     let idx = view.section(SEC_INDICES).expect("INDICES");
     let pos = view.section(SEC_POSITIONS).expect("POSITIONS");
     let (frbase, ibase, pbase) = (fr.offset as usize, idx.offset as usize, pos.offset as usize);
-    let keys = id_table(view, blob, view.face_count as usize);
+    let keys = id_table(
+        view,
+        blob,
+        SEC_FACE_ID_OFFS,
+        SEC_FACE_ID_CHARS,
+        view.face_count as usize,
+    );
     let mut best: Option<(usize, f64, Vec3)> = None;
     for f in 0..view.face_count as usize {
         let first = u32_le(blob, frbase + f * 8) as usize;
@@ -447,20 +508,75 @@ fn top_face_pick(view: &MeshHeaderView, blob: &[u8]) -> (String, Vec3) {
 }
 
 /// Midpoint of the box's top edge running along +X (at `y = ymin`, `z = zmax`).
-///
-/// An anchor EXACTLY on an edge's midpoint is what makes the ladder bind it
-/// outright: the anchor feature scores 1.0 there while every other edge centre on
-/// the body sits a large fraction of the body diagonal away, so the auto-bind gate
-/// (score ≥0.85 AND margin ≥0.10) is cleared without ambiguity. Anchoring on a
-/// FACE centroid instead — equidistant from all four of its edges — is a symmetric
-/// tie and correctly resolves to NeedsRepair, which is why `fillet_body_context`
-/// in `wire_contract.rs` has to hedge and this file does not.
 fn top_x_edge_midpoint(view: &MeshHeaderView) -> Vec3 {
     Vec3::new_unchecked(
         f64::from(view.bbox_min[0] + view.bbox_max[0]) / 2.0,
         f64::from(view.bbox_min[1]),
         f64::from(view.bbox_max[2]),
     )
+}
+
+fn edge_polyline_stats(blob: &[u8], base: usize, first: usize, count: usize) -> (Vec3, [f64; 3]) {
+    let (mut lo, mut hi, mut sum) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3], [0.0; 3]);
+    for point in first..first + count {
+        let offset = base + point * 12;
+        let value = [
+            f32_le(blob, offset) as f64,
+            f32_le(blob, offset + 4) as f64,
+            f32_le(blob, offset + 8) as f64,
+        ];
+        for axis in 0..3 {
+            lo[axis] = lo[axis].min(value[axis]);
+            hi[axis] = hi[axis].max(value[axis]);
+            sum[axis] += value[axis];
+        }
+    }
+    let n = count as f64;
+    (
+        Vec3::new_unchecked(sum[0] / n, sum[1] / n, sum[2] / n),
+        [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]],
+    )
+}
+
+/// Decode MESH1 edge ranges + ids and pick the edge nearest the box's top-X
+/// midpoint. Returns the real snapshot-scoped TopoKey and polyline centroid.
+fn top_x_edge_pick(view: &MeshHeaderView, blob: &[u8]) -> (String, Vec3) {
+    assert!(
+        view.has_edges(),
+        "MESH1 must carry edges for the fillet pick"
+    );
+    let ranges = view.section(SEC_EDGE_RANGES).expect("EDGE_RANGES");
+    let positions = view.section(SEC_EDGE_POSITIONS).expect("EDGE_POSITIONS");
+    let keys = id_table(
+        view,
+        blob,
+        SEC_EDGE_ID_OFFS,
+        SEC_EDGE_ID_CHARS,
+        view.edge_count as usize,
+    );
+    let target = top_x_edge_midpoint(view);
+    let (rbase, pbase) = (ranges.offset as usize, positions.offset as usize);
+    let mut best: Option<(usize, f64, Vec3, [f64; 3])> = None;
+    for edge in 0..view.edge_count as usize {
+        let first = u32_le(blob, rbase + edge * 8) as usize;
+        let count = u32_le(blob, rbase + edge * 8 + 4) as usize;
+        if count == 0 {
+            continue;
+        }
+        let (centroid, span) = edge_polyline_stats(blob, pbase, first, count);
+        let distance = (centroid.x - target.x).powi(2)
+            + (centroid.y - target.y).powi(2)
+            + (centroid.z - target.z).powi(2);
+        if best.as_ref().is_none_or(|(_, d, _, _)| distance < *d) {
+            best = Some((edge, distance, centroid, span));
+        }
+    }
+    let (edge, _, centroid, span) = best.expect("at least one mesh edge");
+    assert!(
+        span[0] > span[1] && span[0] > span[2],
+        "picked edge runs along X"
+    );
+    (keys[edge].clone(), centroid)
 }
 
 /// The length of that edge (the X span) — the fillet/chamfer sweeps along it.
@@ -474,8 +590,13 @@ async fn body_mesh(rt: &mut DocumentRuntime, body: BodyId) -> Arc<Vec<u8>> {
         .expect("fetch body mesh")
 }
 
-/// Builds a `w × h` rect extruded `depth` as body A and returns its id.
-async fn build_box_a(rt: &mut DocumentRuntime, w: f64, h: f64, depth: f64) -> BodyId {
+/// Builds a `w × h` rect extruded `depth` as body A and returns its id + head.
+async fn build_box_a_at_head(
+    rt: &mut DocumentRuntime,
+    w: f64,
+    h: f64,
+    depth: f64,
+) -> (BodyId, SnapshotId) {
     let sa = SketchId(Uuid::from_u128(0xA));
     add_op(
         rt,
@@ -484,7 +605,11 @@ async fn build_box_a(rt: &mut DocumentRuntime, w: f64, h: f64, depth: f64) -> Bo
     add_op(rt, extrude_record(EXTRUDE_A, sa, depth));
     let rep = regen_all(rt).await;
     let _ = published(&rep, "box A");
-    body_of(EXTRUDE_A)
+    (body_of(EXTRUDE_A), SnapshotId(rep.snapshot_id))
+}
+
+async fn build_box_a(rt: &mut DocumentRuntime, w: f64, h: f64, depth: f64) -> BodyId {
+    build_box_a_at_head(rt, w, h, depth).await.0
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -496,7 +621,7 @@ async fn build_box_a(rt: &mut DocumentRuntime, w: f64, h: f64, depth: f64) -> Bo
 /// record and assert the two volumes agree.
 async fn edge_op_preview_equals_commit(
     op_name: &str,
-    make: fn(u128, BodyId, Vec3, f64) -> OperationRecord,
+    make: fn(u128, BodyId, &ElementId, Vec3, f64) -> OperationRecord,
 ) {
     let Some(bin) = real_worker() else {
         eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
@@ -504,7 +629,7 @@ async fn edge_op_preview_equals_commit(
     };
     let wm = spawn_worker(bin).await;
     let mut rt = runtime_over(&wm);
-    let body_a = build_box_a(&mut rt, 40.0, 20.0, 25.0).await;
+    let (body_a, snapshot) = build_box_a_at_head(&mut rt, 40.0, 20.0, 25.0).await;
 
     let plain = body_mesh(&mut rt, body_a).await;
     let plain_view = validate_mesh_blob(&plain).expect("box A MESH1 validates");
@@ -514,11 +639,32 @@ async fn edge_op_preview_equals_commit(
         (plain_volume - 20000.0).abs() < 1.0,
         "40×20×25 = 20000, got {plain_volume}"
     );
-    let anchor = top_x_edge_midpoint(&plain_view);
+    let (topo_key, anchor) = top_x_edge_pick(&plain_view, &plain);
     let edge_len = x_span(&plain_view);
+    let promoted = rt
+        .promote_selection(
+            snapshot,
+            body_a,
+            vec![(
+                TopoKey::new(&topo_key),
+                Some(AnchorIntent {
+                    world_point: anchor,
+                    surface_uv: None,
+                    local_frame: None,
+                    adjacency_hint: None,
+                    extra: Default::default(),
+                }),
+            )],
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{op_name}: promote fresh edge pick: {error}"));
+    assert_eq!(promoted.len(), 1, "{op_name}: one promoted edge");
+    assert_eq!(promoted[0].topo_key, topo_key);
+    assert_eq!(promoted[0].kind, "edge");
+    let edge = ElementId::new(&promoted[0].element_id);
 
     let head_before = rt.projection().revision;
-    let candidate = make(OP_TAIL, body_a, anchor, 2.0);
+    let candidate = make(OP_TAIL, body_a, &edge, anchor, 2.0);
 
     let preview = wm
         .preview_op(
@@ -532,7 +678,7 @@ async fn edge_op_preview_equals_commit(
         .unwrap_or_else(|e| panic!("{op_name} PreviewOp reaches the worker: {e}"));
     assert!(
         preview.needs_repair.is_empty(),
-        "{op_name}: the edge-midpoint anchor must auto-bind, got {:?}",
+        "{op_name}: freshly promoted edge must resolve in preview, got {:?}",
         preview.needs_repair
     );
     assert_eq!(
@@ -587,7 +733,7 @@ async fn edge_op_preview_equals_commit(
     let snap = published(&rep, op_name);
     assert_eq!(
         snap.repair_summary.needs_repair_count, 0,
-        "{op_name} commit resolves the same edge the preview did"
+        "{op_name}: fresh edge select → promote → commit must need no repair"
     );
     let committed = body_mesh(&mut rt, body_a).await;
     let committed_view = validate_mesh_blob(&committed).expect("committed MESH1");
@@ -620,6 +766,122 @@ async fn chamfer_preview_matches_the_commit() {
 // Shell: the candidate IS the committed cup
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// REF-H0: a face promoted on the current head must be directly usable by Shell
+/// milliseconds later, without another operation first installing its id into the
+/// worker partition. This is the real viewport authoring order:
+/// box -> TopoKey pick -> AcquireElementIds -> Shell PreviewOp.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn freshly_promoted_shell_face_previews_without_repair() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin.clone()).await;
+    let mut rt = runtime_over(&wm);
+
+    let sa = SketchId(Uuid::from_u128(0xA));
+    add_op(
+        &mut rt,
+        sketch_record(SKETCH_A, &rect_sketch(sa, 0x1000, 0.0, 0.0, 20.0, 20.0)),
+    );
+    add_op(&mut rt, extrude_record(EXTRUDE_A, sa, 25.0));
+    let report = regen_all(&mut rt).await;
+    let snapshot = SnapshotId(report.snapshot_id);
+    let stock = published(&report, "fresh shell stock");
+    assert_eq!(stock.repair_summary.needs_repair_count, 0);
+
+    let body = body_of(EXTRUDE_A);
+    let mesh = body_mesh(&mut rt, body).await;
+    let view = validate_mesh_blob(&mesh).expect("fresh shell stock MESH1 validates");
+    assert_eq!(view.face_count, 6, "the stock is a six-face box");
+    let (topo_key, centroid) = top_face_pick(&view, &mesh);
+    let anchor = AnchorIntent {
+        world_point: centroid,
+        surface_uv: None,
+        local_frame: None,
+        adjacency_hint: None,
+        extra: Default::default(),
+    };
+    let promoted = rt
+        .promote_selection(
+            snapshot,
+            body,
+            vec![(TopoKey::new(&topo_key), Some(anchor))],
+        )
+        .await
+        .expect("AcquireElementIds promotes the top face on the current head");
+    assert_eq!(promoted.len(), 1);
+    let open_face = ElementId::new(&promoted[0].element_id);
+    let promoted_ref = anchored_ref(body, &open_face, ElementKind::Face, centroid);
+    let candidate = shell_record(OP_TAIL, body, vec![promoted_ref], 1.0);
+    let Operation::Known(KnownOperation::Shell(params)) = &candidate.op else {
+        unreachable!("shell_record authors Shell")
+    };
+    assert_eq!(params.faces.len(), params.open_faces.len());
+    assert!(
+        params.faces[0].anchor.is_some(),
+        "typed pick evidence retained"
+    );
+
+    let preview = wm
+        .preview_op(
+            candidate.op.clone(),
+            candidate.record_id.to_string(),
+            None,
+            None,
+            Lod::Coarse,
+        )
+        .await
+        .expect("fresh Shell PreviewOp reaches the worker");
+    assert!(
+        preview.needs_repair.is_empty(),
+        "freshly promoted face must resolve exactly on the unchanged head, got {:?}",
+        preview.needs_repair
+    );
+
+    assert_eq!(preview.changed_bodies, vec![body.to_string()]);
+    assert_eq!(preview.bodies.len(), 1);
+    let candidate_mesh = &preview.bodies[0].mesh;
+    let candidate_view = validate_mesh_blob(candidate_mesh).expect("fresh Shell preview MESH1");
+    let volume = mesh_volume(&candidate_view, candidate_mesh);
+    assert!(
+        (volume - 2224.0).abs() < 2.0,
+        "shell(20×20×25, t=1, top open) = 2224, got {volume}"
+    );
+
+    add_op(&mut rt, candidate);
+    let committed = regen_all(&mut rt).await;
+    assert_eq!(
+        published(&committed, "fresh Shell commit")
+            .repair_summary
+            .needs_repair_count,
+        0
+    );
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("fresh-shell.onecad");
+    rt.save(&path, save_meta()).expect("save typed Shell");
+    wm.shutdown().await;
+
+    let wm2 = spawn_worker(bin).await;
+    let mut reopened = open_over(&wm2, &path);
+    let replay = regen_all(&mut reopened).await;
+    assert_eq!(
+        published(&replay, "fresh-worker Shell replay")
+            .repair_summary
+            .needs_repair_count,
+        0,
+        "typed Shell face must survive save/reopen on a cold worker"
+    );
+    let reopened_mesh = body_mesh(&mut reopened, body).await;
+    let reopened_view = validate_mesh_blob(&reopened_mesh).expect("reopened Shell MESH1");
+    let reopened_volume = mesh_volume(&reopened_view, &reopened_mesh);
+    assert!(
+        (reopened_volume - 2224.0).abs() < 2.0,
+        "reopened shell volume = 2224, got {reopened_volume}"
+    );
+    wm2.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shell_preview_matches_the_commit() {
     let Some(bin) = real_worker() else {
@@ -641,10 +903,9 @@ async fn shell_preview_matches_the_commit() {
     let (_top_key, centroid) = top_face_pick(&plain_view, &plain);
     assert!(centroid.z > 24.0, "top face at z≈25, got {}", centroid.z);
 
-    // `ShellParams` carries only BARE ElementIds (no anchor rides the wire — see
-    // `wire.rs face_input_refs`), so the open face must already be TRACKED in the
-    // partition. A ToFace extrude claiming the same elementId mints it during the
-    // same regen, which is the production tracking path (`breadth_ops.rs`).
+    // Keep both identity forms plus anchor evidence in the candidate. The ToFace
+    // producer retains this test's older history-installed-id coverage; REF-H0
+    // above separately pins the direct fresh-promotion path.
     let open_face = ElementId::new("el_shell_top");
     let face_ref = anchored_ref(body_a, &open_face, ElementKind::Face, centroid);
     let scol = SketchId(Uuid::from_u128(0xC0));
@@ -652,7 +913,10 @@ async fn shell_preview_matches_the_commit() {
         &mut rt,
         sketch_record(SKETCH_COL, &rect_sketch(scol, 0x3000, 5.0, 5.0, 5.0, 5.0)),
     );
-    add_op(&mut rt, extrude_to_face_record(EXTRUDE_COL, scol, face_ref));
+    add_op(
+        &mut rt,
+        extrude_to_face_record(EXTRUDE_COL, scol, face_ref.clone()),
+    );
     let report = regen_all(&mut rt).await;
     let rep = published(&report, "ToFace tracking column");
     assert_eq!(
@@ -661,7 +925,7 @@ async fn shell_preview_matches_the_commit() {
     );
 
     let head_before = rt.projection().revision;
-    let candidate = shell_record(OP_TAIL, body_a, vec![open_face], 1.0);
+    let candidate = shell_record(OP_TAIL, body_a, vec![face_ref], 1.0);
 
     let preview = wm
         .preview_op(
@@ -769,29 +1033,14 @@ async fn edge_op_preview_without_typed_edges_fails_loudly() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HISTORY-HARDEN H9 — `InputPath::ShellOpenFaces`, and the weakness it inherits
+// HISTORY-HARDEN H9 — `InputPath::ShellOpenFaces` preserves typed evidence
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A shell's open face can be RE-PICKED through
-/// `EditOperationInput{InputPath::ShellOpenFaces{k}}`, and the re-pick lands
-/// because it writes the ElementId DIRECTLY — the resolution ladder is not
-/// involved in an explicit user rebind.
-///
-/// **The recorded weakness (expected-weak, pinned deliberately).**
-/// `ShellParams::open_faces` is a bare `Vec<ElementId>`, so the descriptor/anchor
-/// evidence on the ref the user picked has NOWHERE to be stored and is dropped
-/// (`edit/session.rs set_shell_open_face`). A shell open face is therefore
-/// anchor-less on the wire (`wire.rs face_input_refs`) and depends entirely on the
-/// worker's partition tracking: re-pick an id the partition does not track and the
-/// step goes NeedsRepair with no candidate rung to fall back on. That is the
-/// honest V1 behaviour and this test states it in both directions:
-///  (a) rebinding to an UNTRACKED id → NeedsRepair, geometry unchanged;
-///  (b) rebinding back to the tracked id → the cup rebuilds to the same volume.
-///
-/// Closing this properly needs a typed `ShellParams::faces` slot (a params change
-/// + a SCHEMA §7.3 amendment), which is out of H9's scope.
+/// A Shell open-face re-pick updates `openFaces` and its parallel typed ref. The
+/// typed anchor must survive authoring and let an otherwise unknown id resolve on
+/// replay without NeedsRepair.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shell_open_face_rebind_writes_through_but_carries_no_evidence() {
+async fn shell_open_face_rebind_preserves_typed_evidence() {
     let Some(bin) = real_worker() else {
         eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
         return;
@@ -803,9 +1052,8 @@ async fn shell_open_face_rebind_writes_through_but_carries_no_evidence() {
     let plain_view = validate_mesh_blob(&plain).expect("box A MESH1 validates");
     let (_top_key, centroid) = top_face_pick(&plain_view, &plain);
 
-    // Same partition-tracking setup as `shell_preview_matches_the_commit`: a ToFace
-    // extrude MINTS the open face's ElementId during the regen, which is the only
-    // way a bare-id shell face can bind at all.
+    // Seed the initial id through the historical ToFace path, then prove a re-pick
+    // no longer loses its stronger typed evidence.
     let open_face = ElementId::new("el_shell_top");
     let face_ref = anchored_ref(body_a, &open_face, ElementKind::Face, centroid);
     let scol = SketchId(Uuid::from_u128(0xC0));
@@ -813,12 +1061,12 @@ async fn shell_open_face_rebind_writes_through_but_carries_no_evidence() {
         &mut rt,
         sketch_record(SKETCH_COL, &rect_sketch(scol, 0x3000, 5.0, 5.0, 5.0, 5.0)),
     );
-    add_op(&mut rt, extrude_to_face_record(EXTRUDE_COL, scol, face_ref));
-    let shell = RecordId(Uuid::from_u128(OP_TAIL));
     add_op(
         &mut rt,
-        shell_record(OP_TAIL, body_a, vec![open_face.clone()], 1.0),
+        extrude_to_face_record(EXTRUDE_COL, scol, face_ref.clone()),
     );
+    let shell = RecordId(Uuid::from_u128(OP_TAIL));
+    add_op(&mut rt, shell_record(OP_TAIL, body_a, vec![face_ref], 1.0));
     let rep = regen_all(&mut rt).await;
     assert_eq!(
         published(&rep, "shell").repair_summary.needs_repair_count,
@@ -832,9 +1080,8 @@ async fn shell_open_face_rebind_writes_through_but_carries_no_evidence() {
         "shell(20×20×25, t=1, top open) = 2224, got {cup_volume}"
     );
 
-    // (a) Re-pick an id the partition does NOT track. The ref carries a perfectly
-    // good anchor, but the bare-id slot cannot store it, so nothing can rescue the
-    // binding — NeedsRepair, deterministically, never a guessed face.
+    // Re-pick an id the partition does not track. Its typed anchor must remain in
+    // the record and disambiguate the same top face during replay.
     rt.apply(EditCommand::EditOperationInput {
         record: shell,
         path: InputPath::ShellOpenFaces { index: 0 },
@@ -846,64 +1093,33 @@ async fn shell_open_face_rebind_writes_through_but_carries_no_evidence() {
         )),
     })
     .expect("ShellOpenFaces{0} is accepted for a Shell record");
-    // The write-through IS observable in the record even though the evidence is not.
-    let stored = rt
-        .operation_params(shell)
-        .expect("shell params")
-        .get("openFaces")
-        .cloned()
-        .expect("openFaces");
+    let stored = rt.operation_params(shell).expect("shell params");
     assert_eq!(
-        stored,
+        stored["openFaces"],
         serde_json::json!(["el_never_minted"]),
-        "the rebind wrote the bare id into slot 0"
+        "the rebind updated the bare id"
     );
-    let broken = regen_all(&mut rt).await;
-    let snap = published(&broken, "untracked shell face");
     assert_eq!(
-        snap.repair_summary.needs_repair_count, 1,
-        "an untracked open face has NO evidence rung to fall back on — this is the \
-         recorded weakness of a bare-id slot, not a bug in the rebind"
+        stored["faces"][0]["anchor"]["worldPoint"],
+        serde_json::json!([centroid.x, centroid.y, centroid.z]),
+        "the rebind retained typed anchor evidence"
     );
-    let after = body_mesh(&mut rt, body_a).await;
-    let after_view = validate_mesh_blob(&after).expect("post-break MESH1");
-    let after_volume = mesh_volume(&after_view, &after);
-    assert!(
-        (after_volume - 10000.0).abs() < 1.0,
-        "the un-shelled box is back (10000) — the step did not run, and certainly \
-         did not open some other face: got {after_volume}"
-    );
-
-    // (b) Re-pick the TRACKED id: an explicit rebind writes the id directly, so it
-    // binds without the ladder ever being consulted. The cup comes back exactly.
-    rt.apply(EditCommand::EditOperationInput {
-        record: shell,
-        path: InputPath::ShellOpenFaces { index: 0 },
-        reference: InputRef::Element(anchored_ref(
-            body_a,
-            &open_face,
-            ElementKind::Face,
-            centroid,
-        )),
-    })
-    .expect("re-pick the tracked open face");
-    let rep = regen_all(&mut rt).await;
+    let rebound = regen_all(&mut rt).await;
     assert_eq!(
-        published(&rep, "repaired shell")
+        published(&rebound, "typed shell rebind")
             .repair_summary
             .needs_repair_count,
-        0
+        0,
+        "typed evidence resolves the re-picked face"
     );
     let fixed = body_mesh(&mut rt, body_a).await;
-    let fixed_view = validate_mesh_blob(&fixed).expect("repaired MESH1");
+    let fixed_view = validate_mesh_blob(&fixed).expect("rebound MESH1");
     let fixed_volume = mesh_volume(&fixed_view, &fixed);
     assert!(
         (fixed_volume - cup_volume).abs() < 1.0,
-        "the repaired shell must rebuild the SAME cup: want {cup_volume}, got {fixed_volume}"
+        "typed rebind must rebuild the same cup: want {cup_volume}, got {fixed_volume}"
     );
-    eprintln!(
-        "H9 ShellOpenFaces rebind PASS: cup {cup_volume} → broken {after_volume} → {fixed_volume}"
-    );
+    eprintln!("H9 typed ShellOpenFaces rebind PASS: {cup_volume} == {fixed_volume}");
     wm.shutdown().await;
 }
 
@@ -925,7 +1141,17 @@ async fn shell_open_face_rebind_refuses_out_of_range_and_identity_less_refs() {
     let shell = RecordId(Uuid::from_u128(OP_TAIL));
     add_op(
         &mut rt,
-        shell_record(OP_TAIL, body_a, vec![ElementId::new("el_a")], 1.0),
+        shell_record(
+            OP_TAIL,
+            body_a,
+            vec![anchored_ref(
+                body_a,
+                &ElementId::new("el_a"),
+                ElementKind::Face,
+                centroid,
+            )],
+            1.0,
+        ),
     );
 
     let err = rt
@@ -953,7 +1179,7 @@ async fn shell_open_face_rebind_refuses_out_of_range_and_identity_less_refs() {
             path: InputPath::ShellOpenFaces { index: 0 },
             reference: InputRef::Element(anchor_only),
         })
-        .expect_err("a bare-id slot needs a primary element id");
+        .expect_err("a lockstep Shell slot needs a primary element id");
     assert!(
         format!("{err}").contains("primary element id"),
         "expected a primary-id rejection, got: {err}"

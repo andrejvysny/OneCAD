@@ -1,9 +1,12 @@
 // Session.cpp — see Session.h.
 #include "session/Session.h"
 
+#include <algorithm>
+#include <cctype>
 #include <utility>
 
 #include "session/HistoryHash.h"
+#include "util/Log.h"
 
 namespace onecad::session {
 
@@ -13,6 +16,68 @@ namespace {
 ErrorInfo protocol_error(std::string message, nlohmann::json detail) {
     return ErrorInfo{"PROTOCOL_ERROR", std::move(message), /*retriable=*/false,
                      std::move(detail)};
+}
+
+ErrorInfo bind_error(std::string code, std::string message, std::size_t index) {
+    return ErrorInfo{std::move(code), "BindElementIds: " + std::move(message), false,
+                     nlohmann::json{{"bindingIndex", index}}};
+}
+
+bool valid_element_id(const std::string& id) {
+    if (!id.starts_with("el_") || id.size() == 3) return false;
+    return std::all_of(id.begin() + 3, id.end(), [](unsigned char c) {
+        return std::isalnum(c) || c == '_' || c == '-';
+    });
+}
+
+char prefix_for_kind(const std::string& kind) {
+    if (kind == "face") return 'f';
+    if (kind == "edge") return 'e';
+    if (kind == "vertex") return 'v';
+    return 0;
+}
+
+bool valid_topo_key(const std::string& key, char prefix) {
+    if (key.size() < 3 || key[0] != prefix || key[1] != ':' || key[2] == '0') return false;
+    return std::all_of(key.begin() + 2, key.end(), [](unsigned char c) {
+        return std::isdigit(c);
+    });
+}
+
+const elementmap::PartitionEntry* binding_at(
+    const elementmap::ElementMapPartition& partition, const std::string& body_id,
+    const std::string& topo_key) {
+    for (const auto* entry : partition.entries_for_body(body_id)) {
+        if (entry->topo_key == topo_key) return entry;
+    }
+    return nullptr;
+}
+
+std::optional<ErrorInfo> stage_binding(const BodyStore& bodies,
+                                       elementmap::ElementMapPartition& staged,
+                                       const ElementBindingInput& binding, std::size_t index) {
+    if (binding.body_id.empty() || !valid_element_id(binding.element_id))
+        return bind_error("PROTOCOL_ERROR", "malformed bodyId or elementId", index);
+    const char prefix = prefix_for_kind(binding.kind);
+    if (prefix == 0 || !valid_topo_key(binding.topo_key, prefix))
+        return bind_error("PROTOCOL_ERROR", "kind and topoKey do not match", index);
+    const BodyRecord* body = bodies.get(binding.body_id);
+    if (!body) return bind_error("REF_UNRESOLVED", "body not found", index);
+    const TopoDS_Shape shape = elementmap::ElementMapPartition::shape_for_topokey(
+        body->geom, binding.topo_key);
+    if (shape.IsNull()) return bind_error("REF_UNRESOLVED", "topoKey not found", index);
+
+    const auto kind = elementmap::ElementMapPartition::kind_from_name(binding.kind);
+    const auto* by_id = staged.find(binding.element_id);
+    const auto* by_topo = binding_at(staged, binding.body_id, binding.topo_key);
+    if (by_id && (by_id->body_id != binding.body_id || by_id->topo_key != binding.topo_key ||
+                  by_id->kind != kind))
+        return bind_error("REF_UNRESOLVED", "elementId conflicts with existing binding", index);
+    if (by_topo && by_topo->element_id != binding.element_id)
+        return bind_error("REF_UNRESOLVED", "topoKey conflicts with existing binding", index);
+    if (!by_id) staged.mint(binding.body_id, binding.element_id, kind, shape, body->geom,
+                            binding.anchor);
+    return std::nullopt;
 }
 }  // namespace
 
@@ -248,6 +313,57 @@ elementmap::ElementMapPartition Session::partition_copy() const {
 std::uint64_t Session::current_snapshot_id() const {
     std::lock_guard<std::mutex> lk(mu_);
     return snapshot_id_;
+}
+
+std::optional<PublishedStateSnapshot> Session::published_state_at(
+    std::optional<std::uint64_t> expected_snapshot_id, std::uint64_t* head_snapshot_id) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (head_snapshot_id) *head_snapshot_id = snapshot_id_;
+    if (expected_snapshot_id && snapshot_id_ != *expected_snapshot_id) return std::nullopt;
+    return PublishedStateSnapshot{snapshot_id_, bodies_, partition_};
+}
+
+BindElementsOutcome Session::bind_element_ids(
+    std::uint64_t expected_snapshot_id, const std::vector<ElementBindingInput>& bindings) {
+    std::lock_guard<std::mutex> lk(mu_);
+    BindElementsOutcome out;
+    WLOG_DEBUG("ref_identity verb=BindElementIds requested=%llu head=%llu batch=%zu phase=start",
+               static_cast<unsigned long long>(expected_snapshot_id),
+               static_cast<unsigned long long>(snapshot_id_), bindings.size());
+    if (snapshot_id_ != expected_snapshot_id) {
+        out.error = ErrorInfo{
+            "REF_UNRESOLVED", "BindElementIds: stale snapshot", false,
+            nlohmann::json{{"requested", expected_snapshot_id}, {"head", snapshot_id_}}};
+        WLOG_DEBUG(
+            "ref_identity verb=BindElementIds requested=%llu head=%llu batch=%zu "
+            "outcome=ref_unresolved reason=stale-snapshot",
+            static_cast<unsigned long long>(expected_snapshot_id),
+            static_cast<unsigned long long>(snapshot_id_), bindings.size());
+        return out;
+    }
+    elementmap::ElementMapPartition staged = partition_;
+    for (std::size_t i = 0; i < bindings.size(); ++i) {
+        if (auto error = stage_binding(bodies_, staged, bindings[i], i)) {
+            out.error = std::move(*error);
+            WLOG_DEBUG(
+                "ref_identity verb=BindElementIds requested=%llu head=%llu batch=%zu "
+                "outcome=rejected bindingIndex=%zu code=%s",
+                static_cast<unsigned long long>(expected_snapshot_id),
+                static_cast<unsigned long long>(snapshot_id_), bindings.size(), i,
+                out.error.code.c_str());
+            return out;
+        }
+    }
+    partition_ = std::move(staged);
+    out.ok = true;
+    for (const auto& binding : bindings) {
+        out.bound.push_back(BoundElement{binding.body_id, binding.topo_key, binding.element_id,
+                                         binding.kind});
+    }
+    WLOG_DEBUG("ref_identity verb=BindElementIds requested=%llu head=%llu batch=%zu outcome=bound",
+               static_cast<unsigned long long>(expected_snapshot_id),
+               static_cast<unsigned long long>(snapshot_id_), bindings.size());
+    return out;
 }
 
 bool Session::discard_prepared(std::uint64_t /*job_id*/) {

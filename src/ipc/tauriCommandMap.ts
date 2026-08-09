@@ -147,7 +147,7 @@ interface WireHoleParams {
 /**
  * Rust `OffsetFaceParams` (record.rs; SCHEMA §7.3 `op.offsetFace`).
  *
- * DUAL-FIELD, the Fillet discipline — NOT Shell's bare-id one: `faceIds[i]` is the
+ * DUAL-FIELD, the Fillet and newly-authored Shell discipline: `faceIds[i]` is the
  * bare ElementId and `faces[i]` is the TYPED ref carrying the anchor evidence the
  * ladder rebinds with, and core's own validator REJECTS the record unless
  * `faces[i].primary.elementId === faceIds[i]` at every index. Any command that
@@ -172,10 +172,11 @@ interface WireOffsetFaceParams {
   targetBodyId: string;
 }
 
-/** Rust `ShellParams` (record.rs). `openFaces` are bare ElementIds/TopoKeys. */
+/** Rust `ShellParams` (record.rs). Empty `faces` is the legacy bare-id form. */
 interface WireShellParams {
   thickness: WireScalar;
   openFaces: string[];
+  faces?: WireElementRef[];
   targetBodyId?: string;
 }
 
@@ -550,11 +551,31 @@ function booleanParams(p: BooleanParams): WireBooleanParams {
   };
 }
 
-function shellParams(p: ShellParams): WireShellParams {
+function shellParams(p: ShellParams, inputs?: SemanticRef[]): WireShellParams {
+  const openFaces = [...p.openFaces];
   const wire: WireShellParams = {
     thickness: scalar(p.thickness),
-    openFaces: [...p.openFaces],
+    openFaces,
   };
+  // Truly absent inputs preserve legacy bare-id records. Once a caller supplies
+  // typed inputs, fail closed: never rewrite mismatched identity to manufacture
+  // lockstep, because that could attach valid evidence to the wrong face.
+  if (inputs && inputs.length > 0) {
+    const targetBodyId = p.targetBodyId ? bareBodyId(p.targetBodyId) : undefined;
+    const valid =
+      inputs.length === openFaces.length &&
+      inputs.every(
+        (ref, index) =>
+          ref.primary.kind === "face" &&
+          ref.primary.elementId === openFaces[index] &&
+          Boolean(ref.primary.bodyId) &&
+          (targetBodyId === undefined || bareBodyId(ref.primary.bodyId) === targetBodyId),
+      );
+    if (!valid) {
+      throw new Error("Shell inputs must match openFaces and targetBodyId in lockstep");
+    }
+    wire.faces = inputs.map(faceElementRef);
+  }
   if (p.targetBodyId !== undefined) wire.targetBodyId = p.targetBodyId;
   return wire;
 }
@@ -635,7 +656,7 @@ export function wireOperation(op: OperationOp): WireOperation {
     case "Boolean":
       return { ...identity, opType: "Boolean", params: booleanParams(op.params) };
     case "Shell":
-      return { ...identity, opType: "Shell", params: shellParams(op.params) };
+      return { ...identity, opType: "Shell", params: shellParams(op.params, op.inputs) };
     case "LinearPattern":
       return { ...identity, opType: "LinearPattern", params: linearPatternParams(op.params) };
     case "CircularPattern":
@@ -896,9 +917,9 @@ export function inputPathFor(
     case "Fillet":
     case "Chamfer":
       return { path: "filletEdges", index: slotIndex };
-    // `inputs[k]` = `openFaces[k]`, a BARE ElementId list. The rebind writes the
-    // id and works, but the ref's evidence has nowhere to live (see the Rust
-    // `InputPath::ShellOpenFaces` docs) — a shell open face is anchor-only.
+    // `inputs[k]` = `faces[k]` (typed) / `openFaces[k]` (bare). New records carry
+    // both; the core updates both in lockstep. Legacy bare-only records retain
+    // this path for repair compatibility.
     case "Shell":
       return { path: "shellOpenFaces", index: slotIndex };
     // `inputs` = `[host body, host face]`. Slot 0 is a whole body.

@@ -64,6 +64,7 @@ use std::sync::Arc;
 use zip::result::ZipError;
 use zip::{CompressionMethod, ZipArchive};
 
+use crate::document::record::{KnownOperation, Operation};
 use crate::document::Document;
 use crate::ids::BodyId;
 
@@ -910,6 +911,7 @@ impl ContainerReader {
             manifest.global_schema_version,
             GLOBAL_SCHEMA_VERSION,
         )?;
+        validate_persisted_shells(&document)?;
 
         let mut diagnostics = migrated.diagnostics;
 
@@ -940,6 +942,19 @@ impl ContainerReader {
             source: path.to_path_buf(),
         })
     }
+}
+
+/// Rejects typed Shell records whose dependency view and worker input view differ.
+fn validate_persisted_shells(document: &Document) -> IoResult<()> {
+    for record in document.timeline.records() {
+        let Operation::Known(KnownOperation::Shell(params)) = &record.op else {
+            continue;
+        };
+        params.validate().map_err(|message| {
+            IoError::Corrupt(format!("Shell operation {}: {message}", record.record_id))
+        })?;
+    }
+    Ok(())
 }
 
 /// Validates the archive directory up front: entry count, path traversal, and the
@@ -1081,10 +1096,11 @@ mod tests {
     use super::*;
     use crate::document::modules::{ModuleId, ModuleState};
     use crate::document::record::{
-        BooleanMode, ExtrudeMode, ExtrudeParams, KnownOperation, Operation,
+        BooleanMode, ExtrudeMode, ExtrudeParams, KnownOperation, Operation, ShellParams,
     };
+    use crate::document::refs::{ElementKind, ElementRef, PrimaryRef};
     use crate::document::variables::Scalar;
-    use crate::ids::{DocumentId, RecordId};
+    use crate::ids::{BodyId, DocumentId, ElementId, RecordId};
     use uuid::Uuid;
 
     fn extrude(seed: u128, distance: f64) -> crate::document::record::OperationRecord {
@@ -1141,6 +1157,45 @@ mod tests {
             serde_json::to_value(loaded.document()).unwrap(),
             serde_json::to_value(&d).unwrap()
         );
+    }
+
+    #[test]
+    fn open_rejects_shell_typed_face_from_foreign_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("foreign-shell-face.onecad");
+        let target = BodyId(Uuid::from_u128(0x20));
+        let foreign = BodyId(Uuid::from_u128(0x21));
+        let face = ElementId::new("el_face");
+        let op = Operation::Known(KnownOperation::Shell(ShellParams {
+            thickness: Scalar::new(2.0),
+            open_faces: vec![face.clone()],
+            faces: vec![ElementRef {
+                primary: Some(PrimaryRef {
+                    body: foreign,
+                    element: face,
+                    kind: ElementKind::Face,
+                    extra: Default::default(),
+                }),
+                intent: None,
+                anchor: None,
+                extra: Default::default(),
+            }],
+            target_body: Some(target),
+            extra: Default::default(),
+        }));
+        let mut document = Document::new(DocumentId(Uuid::from_u128(0x22)));
+        document
+            .timeline
+            .insert_at_cursor(crate::document::record::OperationRecord::new(
+                RecordId(Uuid::from_u128(0x23)),
+                0,
+                "Shell",
+                op,
+            ));
+        ContainerWriter::save(&path, &document, &ContainerCaches::none(), &meta()).unwrap();
+
+        let err = ContainerReader::open(&path).unwrap_err();
+        assert!(err.to_string().contains("typed ref body"));
     }
 
     /// W0 baseline for the Platform refactor: state this build cannot interpret

@@ -277,6 +277,11 @@ void register_verbs(Dispatcher& dispatcher, SolverLane& solver_lane, Session& se
             return onecad::session::handle_acquire_element_ids(session, r);
         });
     dispatcher.register_verb(
+        "BindElementIds",
+        [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {
+            return onecad::session::handle_bind_element_ids(session, r);
+        });
+    dispatcher.register_verb(
         "QueryElement",
         [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {
             return onecad::session::handle_query_element(session, r);

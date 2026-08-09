@@ -94,6 +94,8 @@ struct FakeBackend {
     existing: Mutex<Option<ElementId>>,
     /// Simulates a worker that resolves only a prefix of an AcquireElementIds batch.
     partial_acquire: bool,
+    /// Simulates the head changing between AcquireElementIds and BindElementIds.
+    bind_fails: bool,
     /// CHANGED curve members every `solve_drag`/`end_gesture` echoes (SCHEMA §7.4
     /// `curves`). Set by a test to model a solver that reshaped a curve — the
     /// channel `positions` cannot carry.
@@ -112,6 +114,7 @@ impl Default for FakeBackend {
             descriptor: Mutex::new(serde_json::json!({ "fake": true })),
             existing: Mutex::new(None),
             partial_acquire: false,
+            bind_fails: false,
             echo_curves: Mutex::new(std::collections::BTreeMap::new()),
             state: Mutex::new(FakeState::default()),
         }
@@ -400,6 +403,20 @@ impl GeometryEngine for FakeBackend {
             evidence.pop();
         }
         Ok(evidence)
+    }
+    async fn bind_element_ids(
+        &self,
+        _r: onecad_core::regen::BindElementIdsRequest,
+    ) -> Result<(), EngineError> {
+        if self.bind_fails {
+            return Err(EngineError::OpFailed {
+                code: onecad_core::regen::OpFailureCode::RefUnresolved,
+                recoverable: true,
+                message: "fake bind fence refused".into(),
+                diagnostics: vec![],
+            });
+        }
+        Ok(())
     }
     async fn resolve_refs(&self, _r: ResolveRequest) -> Result<Vec<RefResolution>, EngineError> {
         Ok(vec![])
@@ -2477,6 +2494,34 @@ async fn promote_selection_rejects_partial_batch_without_minting() {
     ));
     assert_eq!(rt.promoted.len(), before_promoted);
     assert_eq!(rt.regen.elements.len(), before_elements);
+}
+
+#[tokio::test]
+async fn promote_selection_bind_failure_commits_no_rust_state() {
+    let backend = Arc::new(FakeBackend {
+        bind_fails: true,
+        ..FakeBackend::default()
+    });
+    let mut rt = runtime_with(backend);
+    let body = BodyId(Uuid::from_u128(0xB0));
+
+    let err = rt
+        .promote_selection(SnapshotId(5), body, vec![(TopoKey::new("f:1"), None)])
+        .await
+        .expect_err("a refused worker bind must abort promotion");
+
+    assert!(matches!(
+        err,
+        EngineError::OpFailed {
+            code: onecad_core::regen::OpFailureCode::RefUnresolved,
+            ..
+        }
+    ));
+    assert!(rt.promoted.is_empty(), "promotion cache remains untouched");
+    assert!(
+        rt.regen.elements.is_empty(),
+        "document element index remains untouched"
+    );
 }
 
 /// VF-M3, the RUST half of the stale-pick gate, isolated from the worker's.

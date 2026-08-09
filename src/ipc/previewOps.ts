@@ -298,8 +298,8 @@ function edgeOpBuilder(kind: "Fillet" | "Chamfer"): PreviewOpBuilder {
 /**
  * Mirrors `ModelToolController.commitShell`. `targetBodyId` is the shelled body
  * (the call site takes it from the first picked face); the open faces are the
- * removed ones. See the module header on why `inputs` is passed through but does
- * not reach the wire.
+ * removed ones. `inputs` carries their semantic evidence so `wireOperation`
+ * persists typed `faces` in lockstep with `openFaces`.
  */
 function shellOp(s: PreviewSessionState): OperationOp {
   const thickness = Number(s.latestParams.thickness);

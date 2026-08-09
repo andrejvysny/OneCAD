@@ -548,6 +548,13 @@ impl GeometryEngine for FakeEngine {
         Ok(vec![])
     }
 
+    async fn bind_element_ids(
+        &self,
+        _req: onecad_core::regen::BindElementIdsRequest,
+    ) -> Result<(), EngineError> {
+        Ok(())
+    }
+
     async fn resolve_refs(&self, _req: ResolveRequest) -> Result<Vec<RefResolution>, EngineError> {
         Ok(vec![])
     }

@@ -95,6 +95,27 @@ struct PublishedStateSnapshot {
     elementmap::ElementMapPartition partition;
 };
 
+struct ElementBindingInput {
+    std::string body_id;
+    std::string topo_key;
+    std::string element_id;
+    std::string kind;
+    nlohmann::json anchor;
+};
+
+struct BoundElement {
+    std::string body_id;
+    std::string topo_key;
+    std::string element_id;
+    std::string kind;
+};
+
+struct BindElementsOutcome {
+    bool ok = false;
+    protocol::ErrorInfo error;
+    std::vector<BoundElement> bound;
+};
+
 class Session {
 public:
     Session() = default;
@@ -147,23 +168,22 @@ public:
     AcceptOutcome accept_prepared(std::uint64_t job_id, std::uint64_t document_revision,
                                   std::uint64_t worker_epoch);
 
-    // Copies of the live published state, taken under `mu_`, for the element-
-    // identity handlers (AcquireElementIds / QueryElement / ResolveRefs, SCHEMA
-    // §7.5). Those verbs are stateless w.r.t. the worker (they resolve evidence
-    // from the current snapshot's shapes and never mutate), so operating on a copy
-    // keeps them off the head lock while they run.
+    // Legacy independently locked copies. New element-identity handlers use
+    // `published_state_at` so the snapshot fence and both stores are one read.
     BodyStore bodies_copy() const;
     elementmap::ElementMapPartition partition_copy() const;
     std::uint64_t current_snapshot_id() const;
 
-    // Atomically fence `expected_snapshot_id` and copy its bodies + partition.
-    // Returns nullopt when the requested snapshot is no longer published.
+    // Atomically fence an optional snapshot claim and copy bodies + partition.
+    // A missing claim reads the current head for legacy callers.
     std::optional<PublishedStateSnapshot> published_state_at(
-        std::uint64_t expected_snapshot_id) const {
-        std::lock_guard<std::mutex> lk(mu_);
-        if (snapshot_id_ != expected_snapshot_id) return std::nullopt;
-        return PublishedStateSnapshot{snapshot_id_, bodies_, partition_};
-    }
+        std::optional<std::uint64_t> expected_snapshot_id,
+        std::uint64_t* head_snapshot_id = nullptr) const;
+
+    // Validate the complete Rust-owned binding batch against one unchanged head,
+    // then publish its partition update atomically under the same lock.
+    BindElementsOutcome bind_element_ids(std::uint64_t expected_snapshot_id,
+                                         const std::vector<ElementBindingInput>& bindings);
 
     // DiscardPrepared / cancel / failure: drop the scratch (best-effort). Returns
     // whether a scratch was dropped.

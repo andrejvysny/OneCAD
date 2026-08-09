@@ -54,10 +54,10 @@ use onecad_core::ids::{
     BodyId, DocumentId, DocumentRevision, EntityId, JobId, RecordId, SnapshotId, WorkerEpoch,
 };
 use onecad_core::regen::{
-    AcceptResult, AcquireRequest, BodySelector, CheckpointArtifacts, EngineError, Fencing,
-    GeometryEngine, Lod, OpenSessionRequest, PlanEvent, PlanRequest, RefResolution, ResolveRequest,
-    RestoreRequest, RestoreResult, SessionMode, TessellateRequest, TessellateResult,
-    WorkerElementEvidence, WorkerHead,
+    AcceptResult, AcquireRequest, BindElementIdsRequest, BodySelector, CheckpointArtifacts,
+    EngineError, Fencing, GeometryEngine, Lod, OpenSessionRequest, PlanEvent, PlanRequest,
+    RefResolution, ResolveRequest, RestoreRequest, RestoreResult, SessionMode, TessellateRequest,
+    TessellateResult, WorkerElementEvidence, WorkerHead,
 };
 use onecad_core::sketch::Sketch;
 
@@ -1214,6 +1214,16 @@ impl GeometryEngine for WorkerManager {
             .await
             .map_err(protocol_err)?;
         ok_result(resp).map(|r| wire::parse_acquire_evidence(&r, fallback))
+    }
+
+    async fn bind_element_ids(&self, req: BindElementIdsRequest) -> Result<(), EngineError> {
+        let client = self.client_or_err()?;
+        let resp = client
+            .request("BindElementIds", wire::bind_element_ids_args(&req))
+            .await
+            .map_err(protocol_err)?;
+        wire::validate_bind_element_ids_result(&req, &ok_result(resp)?)
+            .map_err(|message| EngineError::Protocol { message })
     }
 
     async fn resolve_refs(&self, req: ResolveRequest) -> Result<Vec<RefResolution>, EngineError> {

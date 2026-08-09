@@ -1358,6 +1358,7 @@ fn update_operation_params_still_refuses_other_op_type_changes() {
     let shell = Operation::Known(KnownOperation::Shell(ShellParams {
         thickness: s(1.0),
         open_faces: vec![ElementId::new("f1")],
+        faces: vec![],
         target_body: Some(BX()),
         extra: Default::default(),
     }));
@@ -2348,6 +2349,7 @@ fn shell_op(open_faces: &[&str]) -> Operation {
     Operation::Known(KnownOperation::Shell(ShellParams {
         thickness: s(1.5),
         open_faces: open_faces.iter().map(|f| ElementId::new(*f)).collect(),
+        faces: open_faces.iter().map(|f| face_ref_at(BX(), f)).collect(),
         target_body: Some(BX()),
         extra: Default::default(),
     }))
@@ -2411,17 +2413,10 @@ fn stored_shell_faces(sess: &DocumentSession) -> Vec<String> {
     p.open_faces.iter().map(|f| f.to_string()).collect()
 }
 
-/// `ShellOpenFaces{k}` overwrites slot `k` with the ref's PRIMARY element id, and
-/// appends exactly at the end — the same bounds discipline `set_fillet_edge` uses.
-///
-/// The evidence on the supplied ref (anchor/descriptor) is DROPPED, because
-/// `ShellParams::open_faces` is a bare `Vec<ElementId>` with nowhere to put it.
-/// That is the recorded weakness of a shell rebind: an explicit re-pick writes the
-/// id and works, but nothing survives to feed the ladder's descriptor rung on the
-/// NEXT edit. Pinned so a future typed `ShellParams::faces` shows up as a
-/// deliberate change here rather than as a silent behaviour shift.
+/// `ShellOpenFaces{k}` updates the bare id and typed evidence in lockstep, with
+/// the same overwrite/append bounds discipline as `set_fillet_edge`.
 #[test]
-fn shell_open_face_rebind_writes_the_bare_id_and_drops_evidence() {
+fn shell_open_face_rebind_preserves_typed_evidence() {
     let mut sess = shell_doc(&["el_a", "el_b"]);
     let before = json(sess.document());
     sess.apply(EditCommand::EditOperationInput {
@@ -2431,11 +2426,15 @@ fn shell_open_face_rebind_writes_the_bare_id_and_drops_evidence() {
     })
     .expect("shell open-face rebind");
     assert_eq!(stored_shell_faces(&sess), vec!["el_a", "el_fresh"]);
-    // Only the id landed — the params carry no place for the anchor.
     let v = json(sess.document());
     assert_eq!(
         v["timeline"]["records"][0]["params"]["openFaces"],
         serde_json::json!(["el_a", "el_fresh"])
+    );
+    assert_eq!(
+        v["timeline"]["records"][0]["params"]["faces"][1]["anchor"]["worldPoint"],
+        serde_json::json!([1.0, 2.0, 3.0]),
+        "the re-picked face keeps its anchor evidence"
     );
     // …and the derived inputs follow the rewritten slot.
     assert_eq!(
@@ -2457,6 +2456,37 @@ fn shell_open_face_rebind_writes_the_bare_id_and_drops_evidence() {
 }
 
 #[test]
+fn legacy_single_shell_repair_adopts_face_body_as_target() {
+    let mut doc = Document::new(DocumentId(u(0x60)));
+    doc.bodies.register(BodyMeta::new(BX(), "b", rid(0)));
+    let op = Operation::Known(KnownOperation::Shell(ShellParams {
+        thickness: s(1.5),
+        open_faces: vec![ElementId::new("el_legacy")],
+        faces: Vec::new(),
+        target_body: None,
+        extra: Default::default(),
+    }));
+    doc.timeline = Timeline::from_records(vec![record(rid(1), "Shell", op, vec![BX()])]);
+    let mut session = DocumentSession::new(doc);
+
+    session
+        .apply(EditCommand::EditOperationInput {
+            record: rid(1),
+            path: InputPath::ShellOpenFaces { index: 0 },
+            reference: InputRef::Element(face_ref_at(BX(), "el_fresh")),
+        })
+        .expect("legacy Shell repair");
+
+    let Operation::Known(KnownOperation::Shell(params)) =
+        &session.document().timeline.record(0).unwrap().op
+    else {
+        panic!("expected Shell");
+    };
+    assert_eq!(params.target_body, Some(BX()));
+    assert_eq!(params.faces[0].primary.as_ref().unwrap().body, BX());
+}
+
+#[test]
 fn shell_open_face_rebind_refuses_out_of_range_and_evidence_only_refs() {
     let mut sess = shell_doc(&["el_a"]);
     // A gap PAST the end is out of range — appending at 2 into a 1-length list
@@ -2474,7 +2504,7 @@ fn shell_open_face_rebind_refuses_out_of_range_and_evidence_only_refs() {
     );
     assert_eq!(stored_shell_faces(&sess), vec!["el_a"], "record untouched");
 
-    // An intent-only ref has no id to write into a bare-id list.
+    // An intent-only ref has no id for the lockstep bare-id list.
     let err = sess
         .apply(EditCommand::EditOperationInput {
             record: rid(1),
@@ -2523,8 +2553,7 @@ fn hole_face_rebind_writes_the_whole_typed_ref() {
     );
     assert!(
         p.face.anchor.is_some(),
-        "the hole face slot is a typed ElementRef, so the anchor evidence must SURVIVE \
-         (this is what distinguishes it from the shell bare-id slot)"
+        "the hole face slot is typed, so anchor evidence must survive"
     );
     assert_eq!(
         sess.document().timeline.record(0).unwrap().inputs.elements,
@@ -2621,8 +2650,8 @@ fn stored_offset(sess: &DocumentSession) -> OffsetFaceParams {
     p.clone()
 }
 
-/// `OffsetFaceFace{k}` writes the WHOLE typed ref (evidence included, the Fillet
-/// dual — not shell's bare-id slot) AND keeps the `faceIds` mirror in lockstep.
+/// `OffsetFaceFace{k}` writes the whole typed ref and keeps its bare mirror in
+/// lockstep, matching the Shell/Fillet dual-field discipline.
 #[test]
 fn offset_face_rebind_writes_the_typed_ref_and_mirrors_the_bare_id() {
     let mut sess = offset_face_doc(&["el_a", "el_b"], None);

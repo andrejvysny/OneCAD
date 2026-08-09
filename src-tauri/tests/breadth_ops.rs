@@ -6,8 +6,7 @@
 //! * `circular_pattern_three` — 3× box about a far Z-axis ⇒ EXACT 30000.
 //! * `mirror_body_fuse` — box + its mirror across x=0 merged ⇒ EXACT 20000.
 //! * `shell_box_open_top` — hollow a 20×20×25 box (t=2) ⇒ EXACT 4112 when the open
-//!   face resolves (a ToFace op pre-tracks it), else a CLEAN NeedsRepair (the bare
-//!   `open_faces` schema carries no anchor — `fillet_body_context` philosophy).
+//!   face resolves from its typed identity/evidence ref.
 //! * `linear_pattern_deterministic_across_processes` — two FRESH worker processes
 //!   yield the identical pattern body signature + volume (Invariant 5).
 //! * `pattern_tracks_upstream_extrude_edit` — editing the source extrude's depth
@@ -355,14 +354,30 @@ fn mirror_record(
     )
 }
 
-fn shell_record(rec: u128, body: BodyId, faces: Vec<ElementId>, thickness: f64) -> OperationRecord {
+fn shell_record(
+    rec: u128,
+    body: BodyId,
+    faces: Vec<ElementRef>,
+    thickness: f64,
+) -> OperationRecord {
+    let open_faces = faces
+        .iter()
+        .map(|face| {
+            face.primary
+                .as_ref()
+                .expect("authored Shell face has a primary")
+                .element
+                .clone()
+        })
+        .collect();
     OperationRecord::new(
         RecordId(Uuid::from_u128(rec)),
         0,
         "Shell",
         Operation::Known(KnownOperation::Shell(ShellParams {
             thickness: Scalar::new(thickness),
-            open_faces: faces,
+            open_faces,
+            faces,
             target_body: Some(body),
             extra: Default::default(),
         })),
@@ -625,7 +640,7 @@ async fn mirror_body_fuse() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Shell — hollow a 20×20×25 box, t=2 ⇒ EXACT 4112 (open face pre-tracked via ToFace)
+// Shell — hollow a 20×20×25 box, t=2 ⇒ EXACT 4112 (typed top-face ref)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -638,10 +653,8 @@ async fn shell_box_open_top() {
     let mut rt = runtime_over(&wm);
     let body_a = build_box_a(&mut rt, 25.0).await;
 
-    // The open (removed) face is box A's top cap. ShellParams carries only a bare
-    // ElementId, so we PRE-TRACK it: a ToFace extrude whose targetFace claims the SAME
-    // elementId + a top-centroid anchor mints it into the partition (resolve_input_refs)
-    // during the same regen, BEFORE the shell step — the production tracking path.
+    // The open (removed) face is box A's top cap. Keep its typed ref in ShellParams
+    // so identity plus anchor evidence reaches the shared resolver.
     let mesh_a = body_mesh(&mut rt, body_a).await;
     let view_a = validate_mesh_blob(&mesh_a).expect("box A MESH1 validates");
     assert_eq!(view_a.face_count, 6, "box A has 6 faces");
@@ -673,36 +686,26 @@ async fn shell_box_open_top() {
         &mut rt,
         sketch_record(SKETCH_COL, &rect_sketch(scol, 0x3000, 5.0, 5.0, 5.0, 5.0)),
     );
-    add_op(&mut rt, extrude_to_face_record(EXTRUDE_COL, scol, face_ref));
-    // Shell box A, removing that tracked top face.
     add_op(
         &mut rt,
-        shell_record(OP_SHELL, body_a, vec![open_face], 2.0),
+        extrude_to_face_record(EXTRUDE_COL, scol, face_ref.clone()),
     );
+    // Shell box A, removing that typed top face.
+    add_op(&mut rt, shell_record(OP_SHELL, body_a, vec![face_ref], 2.0));
 
     let rep = regen_all(&mut rt).await;
     let snap = published(&rep, "shell");
 
-    if snap.repair_summary.needs_repair_count == 0 {
-        let mesh = body_mesh(&mut rt, body_a).await;
-        let view = validate_mesh_blob(&mesh).expect("shelled box MESH1 validates");
-        let vol = mesh_volume(&view, &mesh);
-        // 10000 − inner cavity 16×16×23 (5888) = 4112 (exact box arithmetic).
-        assert!(
-            (vol - 4112.0).abs() < 2.0,
-            "shell(20×20×25, t=2, top open) = 10000 − 5888 = 4112, got {vol}"
-        );
-        eprintln!("Shell PASS: APPLIED — hollow volume {vol} == 4112");
-    } else {
-        // Clean NeedsRepair — the open-face ref did not confidently resolve (the bare
-        // `open_faces` schema carries no anchor). Still proves the wire + dispatch +
-        // ladder path (never a crash / wrong bind / OP_FAILED). Exact-volume shell is
-        // pinned in the worker ctest `m6a_ops`.
-        eprintln!(
-            "Shell PASS: CLEAN NeedsRepair ({} refs) — wire + resolution path OK",
-            snap.repair_summary.needs_repair_count
-        );
-    }
+    assert_eq!(snap.repair_summary.needs_repair_count, 0);
+    let mesh = body_mesh(&mut rt, body_a).await;
+    let view = validate_mesh_blob(&mesh).expect("shelled box MESH1 validates");
+    let vol = mesh_volume(&view, &mesh);
+    // 10000 − inner cavity 16×16×23 (5888) = 4112 (exact box arithmetic).
+    assert!(
+        (vol - 4112.0).abs() < 2.0,
+        "shell(20×20×25, t=2, top open) = 10000 − 5888 = 4112, got {vol}"
+    );
+    eprintln!("Shell PASS: APPLIED — hollow volume {vol} == 4112");
     wm.shutdown().await;
 }
 

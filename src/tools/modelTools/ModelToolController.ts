@@ -3166,7 +3166,10 @@ export class ModelToolController {
       // The chip stays armed and usable: commitEdgeOp falls back to a plain
       // applyOperation when no session exists, so a lane refusal costs the
       // preview, never the tool.
-      traceWarn("extrude", `${this.edgeOpKind} preview session failed: ${errMessage(error)}`);
+      traceWarn(
+        this.edgeOpKind.toLowerCase(),
+        `${this.edgeOpKind} preview session failed: ${errMessage(error)}`,
+      );
       return;
     }
     if (gen !== this.armGen) {
@@ -3321,10 +3324,9 @@ export class ModelToolController {
 
   /**
    * Open the ONE kernel-preview session an armed shell drives. The open faces and
-   * the shelled body both come from `this.shellFaces` — `inputs` is passed through
-   * for symmetry but never reaches the wire for a Shell (`wireOperation` drops an
-   * op's top-level inputs; Rust's `derive_inputs` mints them from
-   * `params.targetBodyId` / `params.openFaces`). See `ipc/previewOps.ts`.
+   * the shelled body both come from `this.shellFaces`. `wireOperation` uses the
+   * typed `inputs` to persist `params.faces` beside `params.openFaces`; Rust then
+   * derives worker inputs from that typed evidence. See `ipc/previewOps.ts`.
    */
   private async openShellPreview(gen: number): Promise<void> {
     const draft: PreviewDraft = {
@@ -3337,7 +3339,7 @@ export class ModelToolController {
       session = await this.deps.client.beginPreview(draft);
     } catch (error) {
       if (gen !== this.armGen) return;
-      traceWarn("extrude", `Shell preview session failed: ${errMessage(error)}`);
+      traceWarn("shell", `Shell preview session failed: ${errMessage(error)}`);
       return;
     }
     if (gen !== this.armGen) {
@@ -3873,7 +3875,7 @@ export class ModelToolController {
       session = await this.deps.client.beginPreview(draft);
     } catch (error) {
       if (gen !== this.armGen) return;
-      traceWarn("extrude", `OffsetFace preview session failed: ${errMessage(error)}`);
+      traceWarn("offsetFace", `OffsetFace preview session failed: ${errMessage(error)}`);
       return;
     }
     if (gen !== this.armGen) {
@@ -4347,7 +4349,7 @@ export class ModelToolController {
       session = await this.deps.client.beginPreview(draft);
     } catch (error) {
       if (gen !== this.armGen) return;
-      traceWarn("extrude", `Hole preview session failed: ${errMessage(error)}`);
+      traceWarn("hole", `Hole preview session failed: ${errMessage(error)}`);
       return;
     }
     if (gen !== this.armGen) {
@@ -6396,13 +6398,21 @@ export class ModelToolController {
         return "Offset face";
       case "boolean":
         return "Boolean";
+      case "hole":
+        return "Hole";
       default:
         return "Extrude";
     }
   }
 
+  /** Structured-log tag for whichever tool owns the shared preview lane. */
+  private previewOwnerTag(): string {
+    if (this.previewOwner === "edgeOp") return this.edgeOpKind.toLowerCase();
+    return this.previewOwner ?? "extrude";
+  }
+
   private onPreviewFailure(error: PreviewFailure): void {
-    traceWarn("extrude", `preview failure (kind=${error.kind}): ${error.message}`);
+    traceWarn(this.previewOwnerTag(), `preview failure (kind=${error.kind}): ${error.message}`);
     this.previewFailure = error;
     this.clearPreviewPending();
     // The exact candidate is gone; bring the L1 ghost back so the user is not left
@@ -6943,7 +6953,10 @@ export class ModelToolController {
       return;
     }
     if (this.previewFailure) {
-      traceWarn("extrude", `${kind} confirm BLOCKED by preview failure: ${this.previewFailure.message}`);
+      traceWarn(
+        kind.toLowerCase(),
+        `${kind} confirm BLOCKED by preview failure: ${this.previewFailure.message}`,
+      );
       viewportStore
         .getState()
         .setStatusHint(`Cannot apply invalid preview: ${this.previewFailure.message}`, {

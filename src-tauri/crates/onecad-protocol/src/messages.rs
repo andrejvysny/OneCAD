@@ -649,6 +649,7 @@ mod tests {
             // is what makes "Rust reads what the worker executes" checkable.
             "execute_plan_ordinary.ndjson",
             "execute_plan_checkpoint_fallback.ndjson",
+            "bind_element_ids.ndjson",
         ] {
             let path = format!("{dir}/{name}");
             let text =
@@ -666,7 +667,7 @@ mod tests {
                     // Concrete driver frame: must parse strictly into Frame.
                     let parsed: Frame = serde_json::from_value(frame.clone())
                         .unwrap_or_else(|e| panic!("{name}:{} send into Frame: {e}", lineno + 1));
-                    // The two fixtures only send `req` frames.
+                    // Canonical fixtures only drive concrete `req` frames.
                     assert!(matches!(parsed, Frame::Req(_)), "{name}:{}", lineno + 1);
                     sends += 1;
                 } else if let Some(matcher) = directive.get("expect") {

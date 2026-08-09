@@ -343,12 +343,10 @@ pub enum InputPath {
     RevolveAxis,
     /// A shell's removed (open) face at `index` (into `open_faces`).
     ///
-    /// `ShellParams::open_faces` is a `Vec<ElementId>` — bare ids, no typed
-    /// per-face ref — so this arm writes ONLY `ref.primary.element`. The
-    /// descriptor/anchor evidence on the supplied ref is therefore DROPPED: a
-    /// shell open face has no slot to store it in, so an explicit user re-pick is
-    /// the only thing that can move it (the ladder's descriptor rung is not
-    /// available to it). See `wire::wire_op_inputs`'s Shell arm.
+    /// New Shell records keep typed `faces` and bare `open_faces` in lockstep;
+    /// this path writes the complete ref evidence plus its primary element id.
+    /// Legacy bare-only multi-face records must be re-authored as a complete typed
+    /// set rather than partially fabricating evidence.
     ShellOpenFaces {
         /// Index of the open face to rebind.
         index: usize,
@@ -362,8 +360,8 @@ pub enum InputPath {
     /// `0..faces.len()` of the op's `inputs[]` array, in stored order.
     ///
     /// Writes the WHOLE typed [`ElementRef`], evidence included, and mirrors the
-    /// bare id into `face_ids[index]` (the Fillet dual, not Shell's bare-id-only
-    /// slot).
+    /// bare id into `face_ids[index]` (the same dual-field discipline as Fillet
+    /// and newly-authored Shell records).
     OffsetFaceFace {
         /// Index of the operative face to rebind.
         index: usize,

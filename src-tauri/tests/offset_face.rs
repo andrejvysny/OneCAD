@@ -1058,6 +1058,53 @@ async fn destructive_edit_is_deterministic_needs_repair_then_repairable() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn freshly_promoted_face_prepares_on_same_head() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let sid = SketchId(Uuid::from_u128(0xE01));
+    let (body, snapshot) = build_box(&mut rt, sid, 25.0).await;
+    let (faces, _) = head_faces(&mut rt, body).await;
+    let top = top_face(&faces).topo_key.clone();
+
+    let promoted = rt
+        .promote_selection(snapshot, body, vec![(TopoKey::new(&top), None)])
+        .await
+        .expect("AcquireElementIds promotes the top face on the current head");
+    assert_eq!(promoted.len(), 1);
+    assert_eq!(promoted[0].topo_key, top);
+    assert_eq!(promoted[0].body_id, body_id_wire(body));
+
+    let picks = [OffsetFacePick {
+        body: Some(body),
+        address: FaceAddress::ElementId(&promoted[0].element_id),
+    }];
+    let prepared = FaceBoundaryProjection::prepare_offset_face(
+        &wm,
+        snapshot,
+        &picks,
+        true,
+        OffsetDistanceType::Offset,
+    )
+    .await
+    .expect("a freshly promoted face resolves on the same unchanged head");
+
+    assert!(
+        prepared.refusal.is_none(),
+        "the unchanged box cap is accepted: {prepared:?}"
+    );
+    assert_eq!(prepared.target_body_id, body_id_wire(body));
+    assert!(
+        prepared.faces.iter().any(|face| face.topo_key == top),
+        "the operative closure contains the promoted top face"
+    );
+    wm.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn prepare_offset_face_handshake_and_fence() {
     let Some(bin) = real_worker() else {
         eprintln!("skip: no worker binary");

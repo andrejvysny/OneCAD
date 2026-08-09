@@ -682,6 +682,25 @@ pub struct AcquireRequest {
     pub picks: Vec<Pick>,
 }
 
+/// One Rust-minted binding to install into the unchanged worker head after
+/// [`AcquireRequest`] evidence has been validated (REF-FRESH-1).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ElementBinding {
+    pub element_id: ElementId,
+    pub topo_key: TopoKey,
+    pub body: BodyId,
+    pub kind: ElementKind,
+    pub anchor: Option<AnchorIntent>,
+}
+
+/// Snapshot-fenced installation of Rust-owned ids into the worker's authoritative
+/// current-head partition (SCHEMA §7.5 `BindElementIds`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BindElementIdsRequest {
+    pub snapshot_id: SnapshotId,
+    pub bindings: Vec<ElementBinding>,
+}
+
 /// The worker's resolved binding for one pick (SCHEMA §7.5 — the worker returns
 /// `topoKey → (kind, descriptor, anchor)`; **Rust mints the `ElementId`**).
 ///
@@ -908,6 +927,10 @@ pub trait GeometryEngine: Send + Sync {
         &self,
         req: AcquireRequest,
     ) -> Result<Vec<WorkerElementEvidence>, EngineError>;
+
+    /// `BindElementIds` (SCHEMA §7.5) — atomically installs Rust-minted ids into
+    /// the unchanged worker head. Returns only after direct lookup is available.
+    async fn bind_element_ids(&self, req: BindElementIdsRequest) -> Result<(), EngineError>;
 
     /// `ResolveRefs` (SCHEMA §7.5) — dry-run ladder execution for repair dialogs.
     async fn resolve_refs(&self, req: ResolveRequest) -> Result<Vec<RefResolution>, EngineError>;

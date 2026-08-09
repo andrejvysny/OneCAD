@@ -301,6 +301,7 @@ fn operation_strategy() -> impl Strategy<Value = Operation> {
             Operation::Known(KnownOperation::Shell(ShellParams {
                 thickness,
                 open_faces: faces.into_iter().map(ElementId::new).collect(),
+                faces: vec![],
                 target_body: target,
                 extra: Default::default(),
             }))

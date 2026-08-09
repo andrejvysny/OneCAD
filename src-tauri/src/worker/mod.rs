@@ -29,9 +29,10 @@ use onecad_core::document::body::BodyLifecycleEvent;
 use onecad_core::document::record::Operation;
 use onecad_core::ids::{BodyId, DocumentId, JobId, SnapshotId, WorkerEpoch};
 use onecad_core::regen::{
-    AcceptResult, AcquireRequest, CheckpointArtifacts, EngineError, Fencing, GeometryEngine, Lod,
-    OpenSessionRequest, PlanEvent, PlanRequest, RefResolution, ResolveRequest, RestoreRequest,
-    RestoreResult, TessellateRequest, TessellateResult, WorkerElementEvidence, WorkerHead,
+    AcceptResult, AcquireRequest, BindElementIdsRequest, CheckpointArtifacts, EngineError, Fencing,
+    GeometryEngine, Lod, OpenSessionRequest, PlanEvent, PlanRequest, RefResolution, ResolveRequest,
+    RestoreRequest, RestoreResult, TessellateRequest, TessellateResult, WorkerElementEvidence,
+    WorkerHead,
 };
 
 pub mod manager;
@@ -232,14 +233,11 @@ pub trait ElementQuery: Send + Sync {
     /// `QueryElement` **by ElementId** (SCHEMA §7.5) — the element's current
     /// binding + descriptor. `Ok(None)` when the element is not present.
     ///
-    /// IMPORTANT — what "not present" means here. The worker's element-map
-    /// partition mints entries **on demand**, and the only thing that mints one
-    /// is an OP resolving it as an input (`PlanExecutor resolve_input_refs`).
-    /// `AcquireElementIds` returns *evidence*; RUST mints the id and the worker
-    /// never hears about it. So an id that has been promoted but not yet CONSUMED
-    /// by an operation is legitimately absent from the partition, and this lookup
-    /// returns `None` for it. Use [`ElementQuery::query_element_by_topo_key`] for
-    /// a fresh pick — the two together are the read ladder (see `api::element_info`).
+    /// A successful promotion atomically binds the Rust-minted id into the
+    /// unchanged worker head before returning (REF-FRESH-1). Therefore a freshly
+    /// promoted id must be present here; `None` means stale/missing identity, not
+    /// an expected pre-consumption state. The TopoKey form remains useful for
+    /// snapshot-scoped evidence before promotion.
     async fn query_element(
         &self,
         snapshot: SnapshotId,
@@ -734,6 +732,9 @@ impl GeometryEngine for AdoptingEngine {
     ) -> Result<Vec<WorkerElementEvidence>, EngineError> {
         self.inner.acquire_element_ids(req).await
     }
+    async fn bind_element_ids(&self, req: BindElementIdsRequest) -> Result<(), EngineError> {
+        self.inner.bind_element_ids(req).await
+    }
     async fn resolve_refs(&self, req: ResolveRequest) -> Result<Vec<RefResolution>, EngineError> {
         self.inner.resolve_refs(req).await
     }
@@ -801,6 +802,9 @@ impl GeometryEngine for PendingBackend {
         &self,
         _r: AcquireRequest,
     ) -> Result<Vec<WorkerElementEvidence>, EngineError> {
+        Err(Self::not_ready())
+    }
+    async fn bind_element_ids(&self, _r: BindElementIdsRequest) -> Result<(), EngineError> {
         Err(Self::not_ready())
     }
     async fn resolve_refs(&self, _r: ResolveRequest) -> Result<Vec<RefResolution>, EngineError> {

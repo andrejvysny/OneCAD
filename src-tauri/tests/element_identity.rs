@@ -38,9 +38,9 @@
 //! `PlanExecutor::resolve_input_refs` mints a worker partition entry for it and the
 //! next `AcquireElementIds` echoes that binding — the reuse rung would never run and
 //! the case would not be red-first for it. An independent second body leaves the
-//! host face promoted-but-unconsumed (exactly the state `sketch_on_face.rs` pins as
-//! absent from the partition), so the rung is the ONLY thing that can return the
-//! same id.
+//! host face untouched. Its binding correctly exists on the original head, but a
+//! full replay publishes a new head without guessing topology history; the
+//! descriptor-pinned Rust reuse rung then returns and reinstalls the same id.
 //!
 //! Gated on `ONECAD_WORKER_PATH` / `ONECAD_REQUIRE_WORKER` like every other
 //! worker-backed test in this suite (see `wire_contract.rs`'s `real_worker`).
@@ -63,7 +63,10 @@ use onecad_core::ids::{
     BodyId, ConstraintId, ElementId, EntityId, RecordId, RegionId, SketchId, SnapshotId, TopoKey,
 };
 use onecad_core::math::{Vec2, Vec3};
-use onecad_core::regen::{CancelToken, EngineError, GeometryEngine, Outcome, RegenRequest};
+use onecad_core::regen::{
+    CancelToken, EngineError, GeometryEngine, Outcome, RegenRequest, ResolveOutcome, ResolveRef,
+    ResolveRequest,
+};
 use onecad_core::sketch::{Constraint, CurvePosition, Sketch, SketchEntity, WorldPlane};
 
 use onecad_lib::document_runtime::{DocumentRuntime, RegenReport};
@@ -518,6 +521,113 @@ async fn box_document(rt: &mut DocumentRuntime) -> (BodyId, SnapshotId, String) 
     (body, snap, top_face_pick(&view, &mesh))
 }
 
+fn box_topo_keys() -> Vec<TopoKey> {
+    [("f", 6_u32), ("e", 12), ("v", 8)]
+        .into_iter()
+        .flat_map(|(kind, count)| {
+            (1..=count).map(move |ordinal| TopoKey::new(format!("{kind}:{ordinal}")))
+        })
+        .collect()
+}
+
+fn primary_only_ref(body: BodyId, element_id: &str, kind: &str) -> ElementRef {
+    let kind = match kind {
+        "face" => ElementKind::Face,
+        "edge" => ElementKind::Edge,
+        "vertex" => ElementKind::Vertex,
+        other => panic!("unexpected promoted kind `{other}`"),
+    };
+    ElementRef {
+        primary: Some(PrimaryRef {
+            body,
+            element: ElementId::new(element_id),
+            kind,
+            extra: Default::default(),
+        }),
+        intent: None,
+        anchor: None,
+        extra: Default::default(),
+    }
+}
+
+async fn assert_fresh_identity(
+    wm: &WorkerManager,
+    rt: &DocumentRuntime,
+    snap: SnapshotId,
+    body: BodyId,
+    topo_key: &str,
+    element_id: &str,
+    kind: &str,
+) {
+    let info = ElementQuery::query_element(wm, snap, body, element_id)
+        .await
+        .expect("QueryElement(by freshly promoted elementId)");
+    let resolutions = rt
+        .resolve_refs(ResolveRequest {
+            snapshot_id: snap,
+            refs: vec![ResolveRef {
+                ref_id: format!("fresh.{topo_key}"),
+                element: primary_only_ref(body, element_id, kind),
+            }],
+        })
+        .await
+        .expect("ResolveRefs(fresh primary-only ref)");
+
+    let info = info.unwrap_or_else(|| {
+        panic!(
+            "REF-FRESH-1: `{element_id}` for `{topo_key}` is absent from unchanged worker head; \
+             ResolveRefs returned {:?}",
+            resolutions.first().map(|resolution| &resolution.outcome)
+        )
+    });
+    assert_eq!(info.element_id, element_id, "REF-FRESH-1: id changed");
+    assert_eq!(info.topo_key, topo_key, "REF-FRESH-1: TopoKey changed");
+    assert_eq!(info.kind, kind, "REF-FRESH-1: kind changed");
+    assert_eq!(resolutions.len(), 1, "one result per fresh ref");
+    match &resolutions[0].outcome {
+        ResolveOutcome::Unchanged {
+            element_id: Some(id),
+        } => {
+            assert_eq!(id.as_str(), element_id, "REF-FRESH-1: resolve changed id");
+        }
+        outcome => panic!("REF-FRESH-1: expected unchanged, got {outcome:?}"),
+    }
+}
+
+// REF-H0 — freshly acquired identity must be exact on the unchanged worker head.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_box_subelements_round_trip_on_unchanged_head() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let (engine, meshes, solver) = app_state_over(&wm).make_backend();
+    let mut rt = DocumentRuntime::new_blank(engine, meshes, solver);
+    let (body, snap, _) = box_document(&mut rt).await;
+    let keys = box_topo_keys();
+    let picks = keys.iter().cloned().map(|key| (key, None)).collect();
+    let promoted = rt
+        .promote_selection(snap, body, picks)
+        .await
+        .expect("promote all box subelements");
+
+    assert_eq!(promoted.len(), keys.len(), "all box subelements promoted");
+    for item in &promoted {
+        assert_fresh_identity(
+            &wm,
+            &rt,
+            snap,
+            body,
+            &item.topo_key,
+            &item.element_id,
+            &item.kind,
+        )
+        .await;
+    }
+    wm.shutdown().await;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // VF-M3 — a pick addressed to a superseded snapshot is REFUSED
 // ─────────────────────────────────────────────────────────────────────────────
@@ -723,15 +833,16 @@ async fn unchanged_face_keeps_its_id_across_a_regen() {
          geometry — otherwise this case is testing the renumber path, not the pin"
     );
 
-    // The id must NOT have been absorbed by the worker partition: nothing consumed
-    // it, so the reuse rung is the only thing that can answer.
+    // A fresh full regen published a different head. The same-head binding is not
+    // topology history and therefore is not silently carried across that rebuild;
+    // descriptor-pinned Rust reuse must reinstall it during the next promotion.
     assert!(
         ElementQuery::query_element(&wm, snap2, body, &id1)
             .await
             .expect("QueryElement(by elementId)")
             .is_none(),
-        "a promoted-but-unconsumed id is absent from the worker partition — which is \
-         what makes the descriptor-pinned Rust rung load-bearing here"
+        "a prior-head promotion is absent after a full rebuild — descriptor-pinned \
+         Rust reuse must reinstall it on the new head"
     );
 
     let second = rt

@@ -1181,22 +1181,32 @@ names from OneCAD-CPP `ShellParams`. Added M6a (see the [Changelog](#14-changelo
 ```json
 // inputs: [ semanticRef(face) per open face — kind "face" ]
 // params
-{ "thickness": 2.0, "targetBodyId": "body_1", "openFaces": ["el_…7c", "el_…8d"] }
+{ "thickness": 2.0, "targetBodyId": "body_1",
+  "openFaces": ["el_…7c", "el_…8d"],
+  "faces": [
+    { /* typed ElementRef for el_…7c: descriptor + anchor evidence */ },
+    { /* typed ElementRef for el_…8d: descriptor + anchor evidence */ }
+  ] }
 ```
 
 - `thickness` is the (positive) wall thickness; the worker offsets **inward**
   (`BRepOffsetAPI_MakeThickSolid::MakeThickSolidByJoin(target, removed,
   −thickness, …)`, OneCAD-CPP parity). `thickness < 1e-3` ⇒ recoverable
   `OP_FAILED` ("Shell thickness too small").
-- `openFaces` entries are `ElementId`s (bare). **Unlike Fillet/Chamfer edges, the
-  frozen `ShellParams` carries no per-face typed ref**, so the `inputs[]` face refs
-  are **element-only** (no `intent`/`anchor`). The worker resolves each on the
-  predecessor snapshot via the partition-tracked binding (an id already minted by
-  an earlier op / this plan's `resolve_input_refs`) OR the descriptor+anchor
-  ladder ([§10](#10-resolution-ladder)); a face that resolves via neither ⇒
-  **NeedsRepair** ([§9](#9-needsrepair-payload)), never a wrong bind. The result
-  **replaces** the shelled body (id preserved; OCCT history folds into its
-  partition).
+- `openFaces` remains the ordered bare-`ElementId` compatibility field. `faces`
+  carries the corresponding typed face refs (descriptor + anchor evidence).
+  **Lockstep is normative:** a non-empty `faces` array has the same length and
+  order as `openFaces`, and each `faces[i].primary.elementId` equals
+  `openFaces[i]`; every typed primary is kind `face` and its `bodyId` equals
+  `targetBodyId`. A mismatch fails closed before geometry. New authoring MUST
+  persist non-empty `faces` and derive `inputs[]` from that same array.
+- Absent or empty `faces` is accepted only as legacy compatibility and retains the
+  historical bare-id resolution path. A reader MUST NOT invent descriptor/anchor
+  evidence for such a record. Either path resolves on the predecessor snapshot
+  through the partition binding and shared ladder ([§10](#10-resolution-ladder));
+  unresolved or ambiguous ⇒ **NeedsRepair** ([§9](#9-needsrepair-payload)), never
+  a guessed face. The result **replaces** the shelled body (id preserved; OCCT
+  history folds into its partition).
 
 **OffsetFace** (`op.offsetFace`) — Shapr3D-style direct-modeling face offset:
 selected face(s) move along their surface normals, adjacent faces extend/trim
@@ -1741,8 +1751,9 @@ Promotes snapshot-scoped TopoKeys to persistent, globally-unique `ElementId`s
 // req.args
 { "snapshotId": 5012, "bodyId": "body_3",
   "picks": [ { "topoKey": "f:22", "anchor": { "worldPoint": [1,2,3], "surfaceUv": [0.5,0.5] } } ] }
-// result
-{ "ids": [ { "topoKey": "f:22", "elementId": "el_00000000000004a1", "kind": "face" } ] }
+// worker result: authoritative evidence; elementId is present only for an existing binding
+{ "ids": [ { "topoKey": "f:22", "elementId": "", "bodyId": "body_3", "kind": "face",
+             "descriptor": { … }, "anchor": { … } } ] }
 ```
 
 A `snapshotId` that is present and does not equal the worker's current head
@@ -1751,11 +1762,64 @@ evidence ([§9](#9-needsrepair-payload)), so promoting a pick taken against a
 superseded snapshot would mint a persistent id for an arbitrary element); an
 absent `snapshotId` is "no claim" and is resolved against the head.
 
-Note: `elementId` is **minted by Rust**, not the worker — the worker returns the
-resolved `topoKey → (kind, descriptor, anchor)` binding and Rust assigns/echoes
-the persistent id it owns. When Rust already holds an id for that stable element,
-the worker's response includes the existing binding so Rust returns the same id
+`AcquireElementIds` is read-only. `elementId` is **minted by Rust**, not the
+worker: the worker returns authoritative `topoKey → (bodyId, kind, descriptor,
+anchor)` evidence and any already-installed id. Rust reuses that id or mints its
+own, then MUST complete [`BindElementIds`](#bindelementids) against the echoed
+head before a promotion command returns the id to the frontend. When Rust already
+holds an id for the same stable element, it supplies that id to the bind step
 (Invariant 1: an ElementId never changes because geometry changed).
+
+#### BindElementIds
+
+Internal Rust→worker completion of ID-on-demand promotion. It installs
+Rust-minted ids into the authoritative current-head `ElementMapPartition`; it is
+not a frontend authoring verb.
+
+```json
+// req.args
+{ "snapshotId": 5012,
+  "bindings": [
+    { "elementId": "el_00000000000004a1", "bodyId": "body_3",
+      "topoKey": "f:22", "kind": "face",
+      "anchor": { … } }
+  ] }
+// result
+{ "bound": [
+    { "elementId": "el_00000000000004a1", "bodyId": "body_3",
+      "topoKey": "f:22", "kind": "face" }
+  ] }
+```
+
+- `snapshotId` is REQUIRED and MUST equal the worker head. A mismatch returns
+  `REF_UNRESOLVED` with requested/head detail and changes nothing.
+- The worker validates the whole batch against one locked published-head view:
+  body and TopoKey exist there; TopoKey kind agrees with the OCCT shape kind;
+  every `ElementId` is well formed; and neither the batch nor the head maps an id
+  or topology element inconsistently. The worker recomputes the descriptor from
+  that exact current-head shape; descriptor evidence is never trusted back from
+  Rust. Validation failure changes nothing.
+- Installation is atomic. Only after every entry validates does the worker
+  publish every binding into the current head partition. Geometry,
+  `snapshotId`, signatures, and meshes do not change. A subsequent
+  `QueryElement(elementId)` or `ResolveRefs` on that head MUST observe the whole
+  batch, never a prefix.
+- The request is idempotent only for an exact existing identity binding: same
+  snapshot, id, body, TopoKey, kind, and shape succeeds as a no-op and does not
+  overwrite its stored descriptor/anchor. Reusing an id for different identity,
+  binding one topology element to another id, or conflicting duplicate entries
+  fails closed; it MUST NOT overwrite an existing mapping. The successful
+  `bound[]` response preserves request order and exactly echoes each accepted
+  `elementId`, `bodyId`, `topoKey`, and `kind`; Rust MUST validate that exact echo
+  before treating promotion as committed.
+
+Thus a promotion is `AcquireElementIds → Rust mint/reuse → BindElementIds` as one
+Rust-side transaction. Rust inserts only the minted/reused id and forwards the
+worker's body, TopoKey, kind, and anchor unchanged. It MUST NOT update its
+promotion cache or return the promoted refs until the bind succeeds; a bind
+refusal leaves the Rust cache and frontend unchanged. This establishes
+REF-FRESH-1: a freshly promoted ref resolves directly and uniquely on the same
+unchanged head.
 
 #### QueryElement
 Looks up an element's current binding within a snapshot (no mutation).
@@ -2050,12 +2114,13 @@ absolute distance types. Added 2026-08-06.
 
 It does **not** fence, prepare, accept, discard, or — critically — **mint**:
 the response carries snapshot-scoped TopoKeys + descriptor/anchor EVIDENCE only,
-never `ElementId`s. Rust promotes the evidence and mints ids
-([AcquireElementIds](#acquireelementids) path); the frontend then builds the
-final persisted params and runs a final exact [`PreviewOp`](#previewop) with
-them before commit. OffsetFace commits FAIL CLOSED on a missing/failed
-handshake (op-specific strictness — the generic preview barrier's
-timeout-success is not sufficient here).
+never `ElementId`s. Rust promotes the evidence through the snapshot-fenced
+[`AcquireElementIds`](#acquireelementids) →
+[`BindElementIds`](#bindelementids) transaction; the frontend then builds the
+final persisted params and runs a final exact [`PreviewOp`](#previewop) with them
+before commit. OffsetFace commits FAIL CLOSED on a missing/failed handshake
+(op-specific strictness — the generic preview barrier's timeout-success is not
+sufficient here).
 
 ```json
 // req.args
@@ -2544,6 +2609,18 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-09 — §7.5 internal `BindElementIds`; §7.3 typed Shell face refs**
+  (REF-H0, cross-track sign-off in one repository). `AcquireElementIds`
+  remains read-only and Rust remains the sole `ElementId` minting authority;
+  promotion now completes only after snapshot-fenced, exact, idempotent, atomic
+  installation into the authoritative worker-head partition. This makes a fresh
+  id directly resolvable on the unchanged head instead of forcing descriptor
+  fallback. `ShellParams.faces` add typed face evidence in lockstep with the
+  retained `openFaces` ids; absent/empty `faces` preserves legacy bare-id
+  behavior without synthesizing evidence. Additive version-1 contract refinement.
+  `protocol/fixtures/bind_element_ids.ndjson` signs off the Rust parser and C++
+  harness on face/edge/vertex direct hits plus invalid-batch rollback.
 
 - **2026-08-09 — §7.2 ADDITIVE `checkpointFallbackReplay`; §13 lockstep note**
   (VF-M5, cross-track sign-off in one repository). Closes the residual left when the
@@ -3169,11 +3246,13 @@ sign-off) once fixtures exist.
   OneCAD-CPP `RegenerationEngine` construction verbatim (Shell:
   `BRepOffsetAPI_MakeThickSolid::MakeThickSolidByJoin` with a **negative** offset;
   patterns: `BRepBuilderAPI_Transform` + chained `BRepAlgoAPI_Fuse` or a compound,
-  step angle `angleDeg/count`; mirror: `gp_Trsf::SetMirror`). **Shell** replaces
-  its body (Modify lineage; OCCT history → partition) and resolves its **bare**
-  open-face refs (frozen `ShellParams` carries no per-face anchor) via the
-  partition-tracked binding or the [§10](#10-resolution-ladder) ladder — a face
-  that resolves via neither ⇒ NeedsRepair ([§9](#9-needsrepair-payload)).
+  step angle `angleDeg/count`; mirror: `gp_Trsf::SetMirror`). At M6a, **Shell**
+  replaced its body (Modify lineage; OCCT history → partition) and resolved
+  open-face refs, originally frozen as bare ids, via the partition-tracked binding
+  or the [§10](#10-resolution-ladder) ladder — a face that resolves via neither ⇒
+  NeedsRepair ([§9](#9-needsrepair-payload)). This historical bare-only shape
+  remains the legacy empty-`faces` case; the 2026-08-09 REF-H0 entry supersedes it
+  for new authoring with typed lockstep evidence.
   **Patterns/MirrorBody** mint ONE new `body_<opId>` (NewBody lineage; source
   preserved; empty `elementMapDelta`). No `protocolVersion` bump (still 1 —
   pre-implementation contract extension). Fixtures:

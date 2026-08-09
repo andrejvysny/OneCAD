@@ -26,7 +26,7 @@ import {
   type MeshEntry,
 } from "../mesh/meshRegistry";
 import { parseMeshPayload } from "../mesh/parseMeshPayload";
-import { makeBoxMesh, type FaceColor } from "@/ipc/mockMeshes";
+import { encodeMesh1, makeBoxMesh, type FaceColor } from "@/ipc/mockMeshes";
 
 function boxEntry(): MeshEntry {
   return buildBodyObjects(parseMeshPayload(makeBoxMesh()), "body1", 1);
@@ -164,6 +164,35 @@ describe("resolvePick — intersection → PickHit via the registry", () => {
 
   it("returns null for an unknown body or missing index", () => {
     expect(resolvePick(fakeFaceHit("ghost", 0), "face", lookup)).toBeNull();
+  });
+
+  it("classifies ids individually when an ElementId-labelled mesh still contains TopoKeys", () => {
+    const mixed = buildBodyObjects(
+      parseMeshPayload(
+        encodeMesh1({
+          positions: [0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0, 0, 3, 0, 0, 2, 1, 0],
+          faces: [
+            { triangles: [[0, 1, 2]], id: "f:0" },
+            { triangles: [[3, 4, 5]], id: "el_face" },
+          ],
+          idsHaveElementIds: true,
+        }),
+      ),
+      "mixed",
+      1,
+    );
+    const mixedLookup = (id: string) => (id === "mixed" ? mixed : undefined);
+
+    expect(resolvePick(fakeFaceHit("mixed", 0), "face", mixedLookup)).toMatchObject({
+      topoKey: "f:0",
+      elementId: undefined,
+    });
+    expect(resolvePick(fakeFaceHit("mixed", 1), "face", mixedLookup)).toMatchObject({
+      topoKey: "el_face",
+      elementId: "el_face",
+    });
+
+    mixed.dispose();
   });
 });
 

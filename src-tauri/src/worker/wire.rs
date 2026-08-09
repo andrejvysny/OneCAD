@@ -31,12 +31,13 @@ use onecad_core::ids::{
 };
 use onecad_core::math::{Vec2, Vec3};
 use onecad_core::regen::{
-    AcceptResult, AcquireRequest, BodySelector, CheckpointArtifact, CheckpointArtifacts,
-    CheckpointEnvelope, Diagnostic, ElementMapDelta, ElementMapEntry, EngineError,
-    HistoryPrefixHash, Lod, OpFailureCode, OpenSessionRequest, PlanPrepared, PlanRequest,
-    PlanStepEvent, PlannedOp, PreparedMeshRef, RefResolution, ResolveOutcome, ResolveRequest,
-    RestoreRequest, SessionMode, Severity, Signature, StepResult, StepSignatures, StepStatus,
-    StoppedReason, TessellateRequest, WorkerElementEvidence, WorkerHead, ARTIFACT_SCHEMA_VERSION,
+    AcceptResult, AcquireRequest, BindElementIdsRequest, BodySelector, CheckpointArtifact,
+    CheckpointArtifacts, CheckpointEnvelope, Diagnostic, ElementMapDelta, ElementMapEntry,
+    EngineError, HistoryPrefixHash, Lod, OpFailureCode, OpenSessionRequest, PlanPrepared,
+    PlanRequest, PlanStepEvent, PlannedOp, PreparedMeshRef, RefResolution, ResolveOutcome,
+    ResolveRequest, RestoreRequest, SessionMode, Severity, Signature, StepResult, StepSignatures,
+    StepStatus, StoppedReason, TessellateRequest, WorkerElementEvidence, WorkerHead,
+    ARTIFACT_SCHEMA_VERSION,
 };
 use onecad_core::sketch::WorldPlane;
 use onecad_core::sketch::{
@@ -474,12 +475,11 @@ fn wire_op_inputs(
         Operation::Known(KnownOperation::Boolean(p)) => {
             vec![body_input_ref(p.target_body), body_input_ref(p.tool_body)]
         }
-        // Shell: one semantic ref per removed (open) face. ShellParams carries only
-        // bare ElementIds, so these are element-only face refs (mirrors Fillet's
-        // bare-`edge_ids` fallback); the worker resolves each through the ladder or its
-        // partition-tracked binding (§10). The shelled body rides in `params`.
+        // Shell: one semantic ref per removed face. New records carry typed refs
+        // with descriptor/anchor evidence; legacy bare-id records retain the safe
+        // element-only fallback. The shelled body rides in `params`.
         Operation::Known(KnownOperation::Shell(p)) => {
-            face_input_refs(&p.open_faces, &inputs.bodies)
+            face_input_refs(&p.faces, &p.open_faces, &inputs.bodies)
         }
         // Linear/Circular pattern + MirrorBody: a whole-body ref to the SOURCE body
         // (the axis/plane/spacing ride in `params`; §7.3). Mirrors Boolean's body refs;
@@ -572,14 +572,12 @@ fn edge_input_refs(edges: &[ElementRef], edge_ids: &[ElementId], bodies: &[BodyI
         .collect()
 }
 
-/// Shell open-face refs: a bare `{primary:{bodyId, elementId, kind:"face"}}` per open
-/// face id. `ShellParams` carries only bare [`ElementId`]s (no typed per-face ref), so
-/// no descriptor/anchor rides — this mirrors [`edge_input_refs`]'s element-only fallback.
-/// The shelled body — the op's graph-view `bodies[0]` (`ShellParams` derives it from
-/// `params.targetBodyId`, SCHEMA §7.3) — is attached as `primary.bodyId` in the worker's
-/// `body_<uuid>` form so `ShellOp` can group + resolve the faces (ladder §10, or the
-/// partition-tracked binding). With no body input the ref stays element-only.
-fn face_input_refs(face_ids: &[ElementId], bodies: &[BodyId]) -> Vec<Value> {
+/// Shell open-face refs: prefer typed evidence. Legacy bare-id records retain an
+/// element-only fallback, attaching the operated body when known.
+fn face_input_refs(faces: &[ElementRef], face_ids: &[ElementId], bodies: &[BodyId]) -> Vec<Value> {
+    if !faces.is_empty() {
+        return faces.iter().map(element_ref_wire).collect();
+    }
     face_ids
         .iter()
         .map(|id| {
@@ -1981,7 +1979,7 @@ fn required_nonempty_string(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Element identity (SCHEMA §7.5) — AcquireElementIds / ResolveRefs
+// Element identity (SCHEMA §7.5) — Acquire / Bind / Resolve
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// `AcquireElementIds.args` (SCHEMA §7.5) — promote TopoKeys to persistent ids.
@@ -2003,6 +2001,60 @@ pub fn acquire_element_ids_args(req: &AcquireRequest) -> Value {
         "bodyId": body_id_wire(req.body),
         "picks": picks,
     })
+}
+
+/// `BindElementIds.args` (SCHEMA §7.5) — snapshot-fenced, all-or-nothing
+/// installation of Rust-minted ids into the authoritative worker head.
+#[must_use]
+pub fn bind_element_ids_args(req: &BindElementIdsRequest) -> Value {
+    let bindings: Vec<Value> = req
+        .bindings
+        .iter()
+        .map(|binding| {
+            let mut value = json!({
+                "bodyId": body_id_wire(binding.body),
+                "topoKey": binding.topo_key.as_str(),
+                "elementId": binding.element_id.as_str(),
+                "kind": element_kind_str(binding.kind),
+            });
+            if let Some(anchor) = &binding.anchor {
+                value["anchor"] = anchor_to_wire(anchor);
+            }
+            value
+        })
+        .collect();
+    json!({ "snapshotId": req.snapshot_id.0, "bindings": bindings })
+}
+
+/// Validates the worker's exact, order-preserving binding echo. A successful
+/// response is the promotion commit point: every id is now directly queryable.
+pub fn validate_bind_element_ids_result(
+    req: &BindElementIdsRequest,
+    result: &Value,
+) -> Result<(), String> {
+    let bound = result
+        .get("bound")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "BindElementIds: missing bound array".to_string())?;
+    if bound.len() != req.bindings.len() {
+        return Err(format!(
+            "BindElementIds: expected {} bindings, got {}",
+            req.bindings.len(),
+            bound.len()
+        ));
+    }
+    for (index, (actual, expected)) in bound.iter().zip(&req.bindings).enumerate() {
+        let matches = actual.get("bodyId").and_then(Value::as_str)
+            == Some(body_id_wire(expected.body).as_str())
+            && actual.get("topoKey").and_then(Value::as_str) == Some(expected.topo_key.as_str())
+            && actual.get("elementId").and_then(Value::as_str)
+                == Some(expected.element_id.as_str())
+            && actual.get("kind").and_then(Value::as_str) == Some(element_kind_str(expected.kind));
+        if !matches {
+            return Err(format!("BindElementIds: mismatched bound[{index}]"));
+        }
+    }
+    Ok(())
 }
 
 /// `QueryElement` args (SCHEMA §7.5) — look an element up inside a snapshot.
@@ -3102,6 +3154,14 @@ fn curve_position_role(p: CurvePosition) -> &'static str {
 
 fn anchor_to_wire(anchor: &AnchorIntent) -> Value {
     serde_json::to_value(anchor).unwrap_or_else(|_| json!({}))
+}
+
+fn element_kind_str(kind: ElementKind) -> &'static str {
+    match kind {
+        ElementKind::Face => "face",
+        ElementKind::Edge => "edge",
+        ElementKind::Vertex => "vertex",
+    }
 }
 
 fn parse_dof(result: &Value) -> u32 {
@@ -4907,6 +4967,45 @@ mod solver_wire_tests {
     }
 
     #[test]
+    fn bind_element_ids_args_and_exact_echo() {
+        use onecad_core::regen::ElementBinding;
+
+        let body = BodyId(Uuid::from_u128(3));
+        let req = BindElementIdsRequest {
+            snapshot_id: SnapshotId(5012),
+            bindings: vec![ElementBinding {
+                element_id: ElementId::new("el_face"),
+                topo_key: TopoKey::new("f:2"),
+                body,
+                kind: ElementKind::Face,
+                anchor: None,
+            }],
+        };
+        let args = bind_element_ids_args(&req);
+        assert_eq!(args["snapshotId"], 5012);
+        assert_eq!(args["bindings"][0]["bodyId"], body_id_wire(body));
+        assert_eq!(args["bindings"][0]["topoKey"], "f:2");
+        assert_eq!(args["bindings"][0]["elementId"], "el_face");
+        assert_eq!(args["bindings"][0]["kind"], "face");
+
+        let ok = json!({ "bound": [{
+            "bodyId": body_id_wire(body),
+            "topoKey": "f:2",
+            "elementId": "el_face",
+            "kind": "face"
+        }] });
+        assert!(validate_bind_element_ids_result(&req, &ok).is_ok());
+        let wrong = json!({ "bound": [{
+            "bodyId": body_id_wire(body),
+            "topoKey": "f:3",
+            "elementId": "el_face",
+            "kind": "face"
+        }] });
+        assert!(validate_bind_element_ids_result(&req, &wrong).is_err());
+        assert!(validate_bind_element_ids_result(&req, &json!({ "bound": [] })).is_err());
+    }
+
+    #[test]
     fn resolve_refs_parses_all_three_outcomes() {
         let result = json!({ "resolutions": [
             // M4a shape: `elementId` in its own slot (Rust-minted), `topoKey` = evidence.
@@ -5386,6 +5485,17 @@ mod body_wire_tests {
             anchor: None,
             extra: Default::default(),
         };
+        let face_ref = |body: BodyId, element: &str| ElementRef {
+            primary: Some(PrimaryRef {
+                body,
+                element: ElementId::new(element),
+                kind: ElementKind::Face,
+                extra: Default::default(),
+            }),
+            intent: None,
+            anchor: None,
+            extra: Default::default(),
+        };
 
         let mut extrude = extrude_cut(target);
         extrude.profile = Some(profile.clone());
@@ -5438,6 +5548,7 @@ mod body_wire_tests {
                 Operation::Known(KnownOperation::Shell(ShellParams {
                     thickness: Scalar::new(1.5),
                     open_faces: vec![ElementId::new("el_f1")],
+                    faces: vec![face_ref(target, "el_f1")],
                     target_body: Some(target),
                     extra: Default::default(),
                 })),
@@ -5525,8 +5636,7 @@ mod body_wire_tests {
     /// fallback, a `hostFace`, a hole face). The fixtures are JSON so the required
     /// params keys are the wire's own; the discriminator for "typed semantic ref" on
     /// the wire side is the presence of `anchor` — only `element_ref_wire` emits it,
-    /// while the element-only fallbacks (`edge_input_refs`' bare path,
-    /// `face_input_refs`, `body_input_ref`) render `primary` alone.
+    /// while legacy element-only fallbacks and `body_input_ref` render `primary` alone.
     #[test]
     fn element_refs_mut_covers_exactly_the_wire_typed_ref_slots() {
         let b = "00000000-0000-0000-0000-0000000000b0";
@@ -5570,12 +5680,10 @@ mod body_wire_tests {
                 json!({ "radius": 1.0, "edgeIds": ["el_1"], "edges": [edge_ref] }),
                 1,
             ),
-            // Shell's open faces are bare ElementIds — element-only on the wire, no
-            // ref slot to stamp. RECORDED GAP (see `element_refs_mut`'s docs).
             (
                 "Shell",
-                json!({ "thickness": 1.5, "openFaces": ["el_2"], "targetBodyId": b }),
-                0,
+                json!({ "thickness": 1.5, "openFaces": ["el_2"], "faces": [face_ref], "targetBodyId": b }),
+                1,
             ),
             (
                 "Boolean",

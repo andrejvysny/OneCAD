@@ -1590,7 +1590,9 @@ async fn h5b_destructive_edit_is_deterministic_needs_repair() {
     // the STORED fillet edge ref, so it returns the IDENTICAL evidence as passing the
     // full ref. Before the fix the lean request resolved against an EMPTY bodyId → a
     // degenerate "No candidates" even when the explicit ref surfaces candidates.
-    let snap_id = SnapshotId(report.snapshot_id);
+    // The deterministic replay above published a newer head. ResolveRefs is
+    // snapshot-fenced, so the repair dialog must use the current report token.
+    let snap_id = SnapshotId(report2.snapshot_id);
     let ref_id = rt
         .repair_items()
         .iter()

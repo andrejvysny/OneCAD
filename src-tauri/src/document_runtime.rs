@@ -72,11 +72,11 @@ use onecad_core::io::imports::{ImportBlob, ImportBlobs, MAX_IMPORT_BLOB_BYTES};
 use onecad_core::io::IoError;
 use onecad_core::math::Vec2;
 use onecad_core::regen::{
-    mint_element_ids, AcquireRequest, CancelToken, CheckpointArtifacts, CheckpointStore,
-    EngineError, GeometryEngine, InMemoryCheckpointStore, Lod, MeshKey, MeshSink, ModelSnapshot,
-    Outcome, Pick, PlanArtifacts, PlanContext, PlanRequest, PolicyVersions, RefResolution,
-    RegenExecutor, RegenPlan, RegenPlanner, RegenRequest, RegenSession, ResolveRequest,
-    SnapshotPublisher, TessellateSpec,
+    mint_element_ids, AcquireRequest, BindElementIdsRequest, CancelToken, CheckpointArtifacts,
+    CheckpointStore, ElementBinding, EngineError, GeometryEngine, InMemoryCheckpointStore, Lod,
+    MeshKey, MeshSink, ModelSnapshot, Outcome, Pick, PlanArtifacts, PlanContext, PlanRequest,
+    PolicyVersions, RefResolution, RegenExecutor, RegenPlan, RegenPlanner, RegenRequest,
+    RegenSession, ResolveRequest, SnapshotPublisher, TessellateSpec,
 };
 use onecad_core::sketch::{CurveParams, Sketch, SketchAttachment, WorldPlane};
 
@@ -3176,6 +3176,22 @@ impl DocumentRuntime {
             }
         }
         let minted = mint_element_ids(evidence);
+        let bindings = minted
+            .iter()
+            .map(|(element_id, evidence)| ElementBinding {
+                element_id: element_id.clone(),
+                topo_key: evidence.topo_key.clone(),
+                body: evidence.body,
+                kind: evidence.kind,
+                anchor: evidence.anchor.clone(),
+            })
+            .collect();
+        self.engine
+            .bind_element_ids(BindElementIdsRequest {
+                snapshot_id: snapshot,
+                bindings,
+            })
+            .await?;
         let mut out = Vec::with_capacity(minted.len());
         for (id, ev) in minted {
             self.promoted.insert(
@@ -4053,10 +4069,9 @@ fn element_ref_is_empty(r: &ElementRef) -> bool {
 
 /// The `index`-th topological input [`ElementRef`] of an op, in the SAME order the
 /// wire `inputs[]` array carries (mirrors `wire::wire_op_inputs`): fillet/chamfer
-/// `edges`, extrude ToFace target faces, and a Hole's host face at slot **1** (slot
-/// 0 is the host BODY, which is not an element ref). Ops whose inputs are whole
-/// bodies (Boolean / pattern / mirror) or bare ids (Shell open faces) expose no
-/// typed element ref here, so a refId-only resolve for them stays un-hydrated.
+/// `edges`, Shell open faces, extrude ToFace target faces, and a Hole's host face
+/// at slot **1** (slot 0 is the host BODY, which is not an element ref). Ops whose
+/// inputs are whole bodies (Boolean / pattern / mirror) expose no typed element ref.
 ///
 /// H9: the Hole arm closes the H5 divergence — `wire_op_inputs` and
 /// `element_refs_mut` both cover `HoleParams::face`, so a refId-only
@@ -4069,6 +4084,7 @@ fn element_ref_input(op: &Operation, index: usize) -> Option<&ElementRef> {
     match k {
         KnownOperation::Fillet(p) => p.edges.get(index),
         KnownOperation::Chamfer(p) => p.edges.get(index),
+        KnownOperation::Shell(p) => p.faces.get(index),
         // `inputs[0]` is the host body ref (no element), `inputs[1]` the host face.
         KnownOperation::Hole(p) => (index == 1).then_some(&p.face),
         // Operative faces in stored order, then the `Total` opposite face LAST —

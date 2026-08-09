@@ -36,8 +36,14 @@
 #include <cstdio>
 #include <string>
 
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <TopoDS_Shape.hxx>
+#include <gp_Ax1.hxx>
+#include <gp_Dir.hxx>
+#include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
+#include <gp_Vec.hxx>
 
 #include "nlohmann/json.hpp"
 #include "protocol/Envelope.h"
@@ -70,7 +76,7 @@ void check(bool cond, const std::string& msg) {
 
 // Drive a Session to a published head holding one 10 mm cube. Returns the head
 // snapshot id (the worker mints it at AcceptPrepared).
-std::uint64_t publish_cube(Session& session) {
+std::uint64_t publish_cube(Session& session, bool transformed = false) {
     session.open("doc_1", /*documentRevision=*/0, /*workerEpoch=*/3, "determinism");
     auto fence = session.fence_and_clone(/*jobId=*/1, /*documentRevision=*/0, /*workerEpoch=*/3,
                                          onecad::session::kEmptyPrefixHash);
@@ -80,7 +86,14 @@ std::uint64_t publish_cube(Session& session) {
     job.partition = fence.cloned_partition;
     job.prepared_snapshot_id = fence.prepared_snapshot_id;
     job.history_prefix_hash = std::string(64, 'a');
-    job.bodies.create(kBody, "op_a", BRepPrimAPI_MakeBox(kBox, kBox, kBox).Shape());
+    TopoDS_Shape cube = BRepPrimAPI_MakeBox(kBox, kBox, kBox).Shape();
+    if (transformed) {
+        gp_Trsf placement;
+        placement.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 0.37);
+        placement.SetTranslationPart(gp_Vec(23.0, -11.0, 7.0));
+        cube = BRepBuilderAPI_Transform(cube, placement, true).Shape();
+    }
+    job.bodies.create(kBody, "op_a", cube);
     session.store_prepared(std::move(job));
     const auto accepted = session.accept_prepared(/*jobId=*/1, /*documentRevision=*/0,
                                                   /*workerEpoch=*/3);
@@ -91,6 +104,40 @@ std::uint64_t publish_cube(Session& session) {
 Envelope acquire(Session& session, json args) {
     return onecad::session::handle_acquire_element_ids(
         session, Envelope::request(/*id=*/7, "AcquireElementIds", std::move(args)));
+}
+
+Envelope bind(Session& session, std::uint64_t snapshot, json bindings) {
+    return onecad::session::handle_bind_element_ids(
+        session, Envelope::request(8, "BindElementIds",
+                                   json{{"snapshotId", snapshot},
+                                        {"bindings", std::move(bindings)}}));
+}
+
+Envelope query(Session& session, std::uint64_t snapshot, const std::string& element_id) {
+    return onecad::session::handle_query_element(
+        session, Envelope::request(9, "QueryElement",
+                                   json{{"snapshotId", snapshot},
+                                        {"elementId", element_id}}));
+}
+
+Envelope resolve(Session& session, std::uint64_t snapshot, json refs) {
+    return onecad::session::handle_resolve_refs(
+        session, Envelope::request(10, "ResolveRefs",
+                                   json{{"snapshotId", snapshot}, {"refs", std::move(refs)}}));
+}
+
+json binding(const char* topo_key, const char* element_id, const char* kind) {
+    return json{{"bodyId", kBody},
+                {"topoKey", topo_key},
+                {"elementId", element_id},
+                {"kind", kind}};
+}
+
+json primary_ref(const char* ref_id, const char* element_id, const char* kind) {
+    return json{{"refId", ref_id},
+                {"primary", json{{"bodyId", kBody},
+                                 {"elementId", element_id},
+                                 {"kind", kind}}}};
 }
 
 bool is_error(const Envelope& resp, const std::string& code) {
@@ -170,11 +217,97 @@ void test_anchor_veto() {
     check(id_count(corner) == 1, "anchor at a face corner still binds");
 }
 
+void test_bind_query_resolve_round_trip(bool transformed) {
+    Session session;
+    const std::uint64_t head = publish_cube(session, transformed);
+    const json bindings = json::array({binding("f:1", "el_face", "face"),
+                                       binding("e:1", "el_edge", "edge"),
+                                       binding("v:1", "el_vertex", "vertex")});
+    const Envelope installed = bind(session, head, bindings);
+    check(installed.ok == true, "BindElementIds: face/edge/vertex batch succeeds");
+    check(installed.result.value("bound", json::array()).size() == 3,
+          "BindElementIds: result echoes all bindings");
+
+    for (const json& expected : bindings) {
+        const std::string id = expected["elementId"].get<std::string>();
+        const Envelope found = query(session, head, id);
+        check(found.ok == true && found.result.value("present", false), id + " query present");
+        check(found.result.value("topoKey", "") == expected["topoKey"].get<std::string>(),
+              id + " query preserves topoKey");
+        check(found.result.value("kind", "") == expected["kind"].get<std::string>(),
+              id + " query preserves kind");
+    }
+
+    const json refs = json::array({primary_ref("r_face", "el_face", "face"),
+                                   primary_ref("r_edge", "el_edge", "edge"),
+                                   primary_ref("r_vertex", "el_vertex", "vertex")});
+    const Envelope resolved = resolve(session, head, refs);
+    check(resolved.ok == true, "ResolveRefs: bound batch resolves");
+    const json outcomes = resolved.result.value("resolutions", json::array());
+    check(outcomes.size() == 3, "ResolveRefs: one result per primary-only ref");
+    for (std::size_t i = 0; i < outcomes.size(); ++i) {
+        check(outcomes[i].value("outcome", "") == "unchanged", "ResolveRefs: unchanged");
+        check(outcomes[i].value("elementId", "") ==
+                  refs[i]["primary"]["elementId"].get<std::string>(),
+              "ResolveRefs: same elementId");
+        check(outcomes[i].value("topoKey", "") == bindings[i]["topoKey"].get<std::string>(),
+              "ResolveRefs: same topoKey");
+    }
+    check(bind(session, head, bindings).ok == true, "exact rebind is idempotent");
+    check(session.partition_copy().size() == 3, "idempotent rebind adds no entries");
+}
+
+void test_identity_snapshot_fences() {
+    Session session;
+    const std::uint64_t head = publish_cube(session);
+    const Envelope stale_bind =
+        bind(session, head + 1, json::array({binding("f:1", "el_stale", "face")}));
+    check(is_error(stale_bind, "REF_UNRESOLVED"), "stale BindElementIds refused");
+    check(!query(session, head, "el_stale").result.value("present", true),
+          "stale bind mutates nothing");
+    check(is_error(query(session, head + 1, "el_missing"), "REF_UNRESOLVED"),
+          "stale QueryElement refused");
+    check(is_error(resolve(session, head + 1, json::array()), "REF_UNRESOLVED"),
+          "stale ResolveRefs refused");
+}
+
+void test_invalid_batches_are_atomic() {
+    Session session;
+    const std::uint64_t head = publish_cube(session);
+    const json wrong_kind = json::array({binding("v:1", "el_partial", "vertex"),
+                                         binding("e:1", "el_wrong", "face")});
+    check(bind(session, head, wrong_kind).ok == false, "kind/topoKey mismatch refused");
+    check(!query(session, head, "el_partial").result.value("present", true),
+          "invalid batch installs no valid prefix");
+
+    check(bind(session, head, json::array({binding("f:1", "el_base", "face")})).ok == true,
+          "setup: base binding installed");
+    const json id_conflict = json::array({binding("v:1", "el_partial", "vertex"),
+                                          binding("f:2", "el_base", "face")});
+    check(bind(session, head, id_conflict).ok == false, "same id on different topoKey refused");
+    check(!query(session, head, "el_partial").result.value("present", true),
+          "id-conflict batch is atomic");
+
+    const json topo_conflict = json::array({binding("v:1", "el_partial", "vertex"),
+                                            binding("f:1", "el_other", "face")});
+    check(bind(session, head, topo_conflict).ok == false,
+          "same topoKey with different id refused");
+    check(!query(session, head, "el_partial").result.value("present", true),
+          "topo-conflict batch is atomic");
+    const Envelope base = query(session, head, "el_base");
+    check(base.result.value("present", false) && base.result.value("topoKey", "") == "f:1",
+          "failed batches preserve prior binding");
+}
+
 }  // namespace
 
 int main() {
     test_snapshot_gate();
     test_anchor_veto();
+    test_bind_query_resolve_round_trip(false);
+    test_bind_query_resolve_round_trip(true);
+    test_identity_snapshot_fences();
+    test_invalid_batches_are_atomic();
     if (g_failures == 0) std::fprintf(stderr, "element_identity_gate: OK\n");
     return g_failures;
 }

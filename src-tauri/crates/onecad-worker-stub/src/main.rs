@@ -346,6 +346,7 @@ fn handle_req<W: Write>(writer: &mut W, state: &mut StubState, req: ReqFrame) ->
         "SketchRegions" => handle_sketch_regions(writer, state, &req),
         // --- element identity (SCHEMA §7.5) ---
         "AcquireElementIds" => handle_acquire_element_ids(writer, state, &req),
+        "BindElementIds" => handle_bind_element_ids(writer, state, &req),
         "ResolveRefs" => handle_resolve_refs(writer, state, &req),
         unknown => {
             // Well-framed but protocol-illegal: terminal error resp (SCHEMA §8).
@@ -927,6 +928,36 @@ fn handle_acquire_element_ids<W: Write>(
     }
     let stamp = state.stamp();
     write_resp_value(writer, req.id, stamp, json!({ "ids": ids }), &[], &[])
+}
+
+/// `BindElementIds` echo for the geometry-free stub. The real worker validates
+/// shapes and installs atomically; this lane pins only the cross-language wire
+/// contract so Rust promotion can complete against the fake sidecar.
+fn handle_bind_element_ids<W: Write>(
+    writer: &mut W,
+    state: &mut StubState,
+    req: &ReqFrame,
+) -> Result<(), ProtocolError> {
+    let bound = req
+        .args
+        .get("bindings")
+        .and_then(Value::as_array)
+        .map(|bindings| {
+            bindings
+                .iter()
+                .map(|binding| {
+                    json!({
+                        "bodyId": binding.get("bodyId").cloned().unwrap_or(Value::Null),
+                        "topoKey": binding.get("topoKey").cloned().unwrap_or(Value::Null),
+                        "elementId": binding.get("elementId").cloned().unwrap_or(Value::Null),
+                        "kind": binding.get("kind").cloned().unwrap_or(Value::Null),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let stamp = state.stamp();
+    write_resp_value(writer, req.id, stamp, json!({ "bound": bound }), &[], &[])
 }
 
 /// `ResolveRefs` (SCHEMA §7.5): a deterministic dry run — an already-bound ref is

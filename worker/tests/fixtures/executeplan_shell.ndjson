@@ -1,6 +1,6 @@
 # M6a — ExecutePlan Shell (REAL OCCT): sketch -> extrude NewBody -> Shell. The
-# 20x20 rect extruded 25 makes body_op1; the Shell removes a bare open-face ref
-# (ShellParams carries only bare ElementIds, no descriptor/anchor), so on a fresh
+# 20x20 rect extruded 25 makes body_op1; this LEGACY Shell fixture intentionally
+# omits additive typed `faces` and carries no descriptor/anchor, so on a fresh
 # box the ref resolves to NO confident candidate -> a CLEAN NeedsRepair STATE
 # (SCHEMA §9, not an error). This proves Shell is DISPATCHED (not UNSUPPORTED) and
 # its open-face resolution runs the ladder. The plan prepares m-1 (the extrude).

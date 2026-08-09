@@ -589,6 +589,8 @@ impl DocumentSession {
         }
         // F2: fillet/chamfer `edges`/`edge_ids` must be in lockstep (all entry paths).
         validate_fillet_lockstep(&record.op)?;
+        // Shell typed refs preserve evidence and must mirror `openFaces`.
+        validate_shell_lockstep(&record.op)?;
         // SCHEMA §7.3: `distance2` is Chamfer-only and positive (all entry paths).
         validate_edge_op_distances(&record.op)?;
         // ImportStep params must name a real content-addressed blob (all entry paths).
@@ -683,6 +685,8 @@ impl DocumentSession {
         let type_changed = !same_op_type(&prior.op, &op);
         // F2: fillet/chamfer `edges`/`edge_ids` must be in lockstep (all entry paths).
         validate_fillet_lockstep(&op)?;
+        // Shell typed refs preserve evidence and must mirror `openFaces`.
+        validate_shell_lockstep(&op)?;
         // SCHEMA §7.3: `distance2` is Chamfer-only and positive (all entry paths).
         validate_edge_op_distances(&op)?;
         // ImportStep params must name a real content-addressed blob (all entry paths).
@@ -795,6 +799,7 @@ impl DocumentSession {
         let prior = self.document.timeline.record(index).unwrap().clone();
         let mut nr = prior.clone();
         set_input(&mut nr.op, path, reference)?;
+        validate_shell_lockstep(&nr.op)?;
         nr.inputs = nr.op.derive_inputs();
 
         let mut recs = self.document.timeline.records().to_vec();
@@ -1698,6 +1703,16 @@ fn validate_fillet_lockstep(op: &Operation) -> Result<(), DomainError> {
     Ok(())
 }
 
+/// Validates Shell's typed `faces` against the parallel bare `open_faces` list.
+/// Empty typed refs remain readable for legacy records; once present, every slot
+/// must carry the matching FACE primary so new writes cannot discard evidence.
+fn validate_shell_lockstep(op: &Operation) -> Result<(), DomainError> {
+    let Operation::Known(KnownOperation::Shell(p)) = op else {
+        return Ok(());
+    };
+    p.validate().map_err(DomainError::Validation)
+}
+
 /// Validates the SCHEMA §7.3 (2026-08-03) two-distance chamfer rules on both
 /// edge ops:
 ///
@@ -2162,7 +2177,11 @@ fn set_input(
             p.tool_body = want_body(reference)?;
         }
         (InputPath::ShellOpenFaces { index }, KnownOperation::Shell(p)) => {
-            set_shell_open_face(&mut p.open_faces, *index, &want_element(reference)?)?;
+            let face = want_element(reference)?;
+            if p.target_body.is_none() {
+                p.target_body = face.primary.as_ref().map(|primary| primary.body);
+            }
+            set_shell_open_face(&mut p.faces, &mut p.open_faces, *index, face)?;
         }
         (InputPath::HoleFace, KnownOperation::Hole(p)) => {
             let face = want_element(reference)?;
@@ -2292,32 +2311,42 @@ fn set_offset_face(
     Ok(())
 }
 
-/// Sets shell open face `index` to the supplied ref's PRIMARY element id, with the
-/// same bounds/append discipline as [`set_fillet_edge`] (overwrite a slot, append
-/// exactly at the end, refuse a gap past it).
-///
-/// `open_faces` is a bare-id list, so the ref's descriptor/anchor evidence has
-/// nowhere to live and is deliberately dropped — pinned by
-/// `shell_open_face_rebind_writes_the_bare_id_and_drops_evidence`.
+/// Sets shell open face `index`, preserving the typed ref and keeping its primary
+/// element id in lockstep with `open_faces`.
 fn set_shell_open_face(
+    faces: &mut Vec<ElementRef>,
     open_faces: &mut Vec<crate::ids::ElementId>,
     index: usize,
-    reference: &ElementRef,
+    reference: ElementRef,
 ) -> Result<(), DomainError> {
-    let element = reference
-        .primary
-        .as_ref()
-        .map(|p| p.element.clone())
-        .ok_or_else(|| {
-            DomainError::InvalidReference(
-                "a shell open-face ref must carry a primary element id".into(),
-            )
-        })?;
-    if index > open_faces.len() {
+    let primary = reference.primary.as_ref().ok_or_else(|| {
+        DomainError::InvalidReference(
+            "a shell open-face ref must carry a primary element id".into(),
+        )
+    })?;
+    if primary.kind != ElementKind::Face {
+        return Err(DomainError::InvalidReference(
+            "a shell open-face ref must carry a FACE primary".into(),
+        ));
+    }
+    let element = primary.element.clone();
+    let upgrades_legacy_single = faces.is_empty() && open_faces.len() == 1 && index == 0;
+    if faces.len() != open_faces.len() && !upgrades_legacy_single {
+        return Err(DomainError::InvalidReference(
+            "cannot partially rebind a legacy multi-face shell; re-author all typed face refs"
+                .into(),
+        ));
+    }
+    let len = faces.len().max(open_faces.len());
+    if index > len {
         return Err(DomainError::InvalidReference(format!(
-            "shell open face index {index} out of range (len {})",
-            open_faces.len()
+            "shell open face index {index} out of range (len {len})"
         )));
+    }
+    if index == faces.len() {
+        faces.push(reference);
+    } else {
+        faces[index] = reference;
     }
     if index == open_faces.len() {
         open_faces.push(element);
@@ -3234,5 +3263,95 @@ mod tests {
             apply_sketch_ops(&out, &set).is_ok(),
             "negative signed distance via SetDimension stays accepted"
         );
+    }
+
+    fn shell_face(element: &str, kind: ElementKind) -> ElementRef {
+        ElementRef {
+            primary: Some(crate::document::refs::PrimaryRef {
+                body: BodyId(Uuid::from_u128(9)),
+                element: ElementId::new(element),
+                kind,
+                extra: Default::default(),
+            }),
+            intent: None,
+            anchor: Some(crate::document::refs::AnchorIntent {
+                world_point: crate::math::Vec3::new_unchecked(1.0, 2.0, 3.0),
+                surface_uv: None,
+                local_frame: None,
+                adjacency_hint: Some("top".into()),
+                extra: Default::default(),
+            }),
+            extra: Default::default(),
+        }
+    }
+
+    fn shell_op(open_faces: Vec<ElementId>, faces: Vec<ElementRef>) -> Operation {
+        Operation::Known(KnownOperation::Shell(
+            crate::document::record::ShellParams {
+                thickness: Scalar::new(2.0),
+                open_faces,
+                faces,
+                target_body: Some(BodyId(Uuid::from_u128(9))),
+                extra: Default::default(),
+            },
+        ))
+    }
+
+    #[test]
+    fn shell_typed_faces_require_lockstep_face_primaries() {
+        assert!(validate_shell_lockstep(&shell_op(vec![ElementId::new("f1")], vec![])).is_ok());
+        assert!(validate_shell_lockstep(&shell_op(
+            vec![ElementId::new("f1")],
+            vec![shell_face("f1", ElementKind::Face)]
+        ))
+        .is_ok());
+        for bad in [
+            shell_op(
+                vec![ElementId::new("f1"), ElementId::new("f2")],
+                vec![shell_face("f1", ElementKind::Face)],
+            ),
+            shell_op(
+                vec![ElementId::new("f1")],
+                vec![shell_face("f2", ElementKind::Face)],
+            ),
+            shell_op(
+                vec![ElementId::new("f1")],
+                vec![shell_face("f1", ElementKind::Edge)],
+            ),
+        ] {
+            assert!(validate_shell_lockstep(&bad).is_err());
+        }
+
+        let mut wrong_body = shell_face("f1", ElementKind::Face);
+        wrong_body.primary.as_mut().unwrap().body = BodyId(Uuid::from_u128(10));
+        let err = validate_shell_lockstep(&shell_op(vec![ElementId::new("f1")], vec![wrong_body]))
+            .unwrap_err();
+        assert!(err.to_string().contains("!= targetBodyId"));
+    }
+
+    #[test]
+    fn shell_rebind_preserves_typed_evidence_and_updates_bare_id() {
+        let mut faces = Vec::new();
+        let mut open_faces = vec![ElementId::new("legacy")];
+        let reference = shell_face("fresh", ElementKind::Face);
+        set_shell_open_face(&mut faces, &mut open_faces, 0, reference.clone()).unwrap();
+        assert_eq!(faces, vec![reference]);
+        assert_eq!(open_faces, vec![ElementId::new("fresh")]);
+    }
+
+    #[test]
+    fn legacy_shell_append_is_rejected_without_panicking() {
+        let mut faces = Vec::new();
+        let mut open_faces = vec![ElementId::new("legacy")];
+        let err = set_shell_open_face(
+            &mut faces,
+            &mut open_faces,
+            1,
+            shell_face("fresh", ElementKind::Face),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("re-author all typed face refs"));
+        assert!(faces.is_empty());
+        assert_eq!(open_faces, vec![ElementId::new("legacy")]);
     }
 }

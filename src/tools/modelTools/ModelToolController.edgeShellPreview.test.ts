@@ -32,6 +32,7 @@ import { documentStore } from "@/stores/documentStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { toolChipStore } from "@/stores/toolChipStore";
 import { resetStores } from "@/test/resetStores";
+import { __resetLogForTests, logSnapshot } from "@/debug/log";
 
 const okResult = (): ApplyOperationResult => ({
   revision: 2,
@@ -215,6 +216,7 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     controller?.dispose();
     container.remove();
     __setExactPreviewTimeoutForTests(4000);
+    __resetLogForTests({ enabled: false });
   });
 
   // The `chamfer` tool id is dead (FILLET-CHAMFER-UNIFY W2): every arm goes
@@ -316,6 +318,7 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     const draft = clientMock.beginPreview.mock.calls[0][0] as PreviewDraft;
     expect(draft.opType).toBe("Shell");
     expect(draft.params.openFaces).toEqual(["el-face-2"]);
+    expect(draft.inputs?.map((ref) => ref.primary.elementId)).toEqual(draft.params.openFaces);
     expect(draft.params.targetBodyId).toBe("body1");
   });
 
@@ -411,8 +414,17 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
 
   it("a shell preview failure blocks its ✓ too", async () => {
     build();
+    __resetLogForTests();
     await armShell();
     failPreview("thickness exceeds the thinnest wall");
+
+    expect(logSnapshot()).toContainEqual(
+      expect.objectContaining({
+        level: "warn",
+        tag: "shell",
+        msg: "preview failure (kind=invalidCommand): thickness exceeds the thinnest wall",
+      }),
+    );
 
     toolChipStore.getState().onConfirm?.();
     await flush();
