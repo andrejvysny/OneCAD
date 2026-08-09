@@ -1,15 +1,16 @@
 /*
- * Registry → toolbar projection.
+ * Registry → toolbar projection, and the scope token the toolbar filters on.
  *
- * The toolbar's arrangement can be rebuilt from the platform tool registry alone:
- * scope selects the set, `priority` orders it, and a group change is a separator.
- * That is what makes "the toolbar is a set of contributions" a fact rather than a
- * claim — the golden contract is asserted against THIS, not against the
- * descriptor table it was built from.
+ * `toolbarFromRegistry` is now a PROBE-FACING projection: `FloatingToolbar`
+ * renders `ToolDefinition`s directly (a projection into modeling's `Tool` union
+ * is exactly what made a third-party tool disappear from the toolbar), while the
+ * frozen contract in `src/test/contracts/toolbarContract.ts` is written in
+ * `ToolEntry`. A contract may not be edited to follow a refactor, so the probe
+ * keeps rebuilding that shape FROM the registry — never from the descriptor table
+ * the registry was populated from, or it would only prove the table equals itself.
  *
- * The toolbar component switches to this when the shell becomes slot-hosted; it
- * lives here (not in `features/toolbar`) because the mapping from a tool id back
- * to a store-level `Tool` literal is modeling's business.
+ * It lives here (not in `features/toolbar`) because the mapping from a tool id
+ * back to a store-level `Tool` literal is modeling's business.
  */
 import type { Platform, ToolDefinition } from "@/platform";
 import type { IconName } from "@/icons/paths";
@@ -35,8 +36,17 @@ export function toolFromId(id: string): { scope: ToolScope; tool: Tool } | undef
   return undefined;
 }
 
-const scopeToken = (scope: ToolScope): string =>
+/**
+ * The scope token an editor mode shows tools for.
+ *
+ * The toolbar filters registrations on this, so a contribution that wants to
+ * appear alongside modeling's tools declares it — and one that declares no scope
+ * at all appears in every mode (`CommandDefinition.scopes`'s "empty ⇒ always").
+ */
+export const toolbarScopeToken = (scope: ToolScope): string =>
   scope === "sketch" ? ModelingScopes.Sketch : ModelingScopes.Model;
+
+const scopeToken = toolbarScopeToken;
 
 /** Registered modeling tools for one scope, in registry order. */
 export function registeredTools(platform: Platform, scope: ToolScope): readonly ToolDefinition[] {

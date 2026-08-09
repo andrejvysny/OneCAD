@@ -13,15 +13,27 @@
 import { activateTool } from "@/tools/activateTool";
 import { runAction } from "@/shortcuts/useShortcuts";
 import type { ShortcutAction } from "@/shortcuts/keymap";
+import { documentStore } from "@/stores/documentStore";
+import { selectionStore } from "@/stores/selectionStore";
+import { activeTool, toolStore, type ModelTool, type SketchTool } from "@/stores/toolStore";
+import { getToolApplicability } from "@/tools/modelTools/toolApplicability";
 import type {
   CommandDefinition,
+  Disposable,
   ModuleScope,
   Platform,
   Shortcut,
   ToolDefinition,
 } from "@/platform";
 import { MODELING_MODULE_ID, ModelingScopes } from "./manifest";
-import { modelToolId, sketchToolId, ModelingCommands, type ModelingCommandKey } from "./ids";
+import {
+  modelToolId,
+  sketchToolId,
+  ModelingCommands,
+  ModelingModelTools,
+  ModelingSketchTools,
+  type ModelingCommandKey,
+} from "./ids";
 import {
   MODELING_TOOL_DESCRIPTORS,
   type ModelingToolDescriptor,
@@ -45,6 +57,46 @@ function shortcutOf(d: ModelingToolDescriptor): Shortcut | undefined {
     : { key: binding.key, shift: binding.shift };
 }
 
+/**
+ * One store subscription behind every tool's `subscribe`.
+ *
+ * Availability is a function of the selection and of which sketches exist. Wiring
+ * each of the ~30 tools to both stores directly would install 60 subscriptions
+ * for one fact; this installs two, lazily, and drops them when the last listener
+ * goes — so a headless test that never renders the toolbar touches no store.
+ */
+const availability = (() => {
+  const listeners = new Set<() => void>();
+  let stop: (() => void) | undefined;
+
+  const fire = () => {
+    for (const l of [...listeners]) l();
+  };
+
+  return {
+    listen(onChange: () => void): Disposable {
+      listeners.add(onChange);
+      if (!stop) {
+        const a = selectionStore.subscribe(fire);
+        const b = documentStore.subscribe(fire);
+        stop = () => {
+          a();
+          b();
+        };
+      }
+      return {
+        dispose: () => {
+          listeners.delete(onChange);
+          if (listeners.size === 0 && stop) {
+            stop();
+            stop = undefined;
+          }
+        },
+      };
+    },
+  };
+})();
+
 function toolDefinition(d: ModelingToolDescriptor): ToolDefinition {
   return {
     id: toolIdOf(d),
@@ -55,6 +107,32 @@ function toolDefinition(d: ModelingToolDescriptor): ToolDefinition {
     scopes: [scopeToken(d.scope)],
     defaultShortcut: shortcutOf(d),
     shortcutLabel: d.shortcut,
+    // The applicability matrix, unchanged and unmoved — it is still the same
+    // rule `ModelToolController`'s arm guards use, so a button cannot show
+    // enabled and then fail on click. What changed is WHO asks: the toolbar
+    // used to call `getToolApplicability` on a modeling `Tool` literal, which
+    // no third-party tool could ever have. Reads modeling's own stores rather
+    // than `ctx`: the platform's `SelectionRef` is a different currency, and
+    // round-tripping through it would only add a lossy translation.
+    //
+    // MODEL SCOPE ONLY, and that is load-bearing rather than an optimisation.
+    // Sketch tools are pure pointer gestures with no selection precondition, and
+    // the matrix is keyed on the `Tool` union where `mirror` means the model
+    // MirrorBody op — the very collision scope-qualified ids exist for
+    // (`ids.ts`). Handing it a sketch literal disables the sketch Mirror tool
+    // whenever no body is selected.
+    ...(d.scope === "model"
+      ? {
+          canActivate: () =>
+            getToolApplicability(d.tool, selectionStore.getState().selected, {
+              sketches: documentStore.getState().sketches,
+            }),
+          // The answer above moves with the selection (and with which sketches
+          // exist), neither of which a generic toolbar watches. One shared
+          // emitter for all of modeling's tools, not one subscription per tool.
+          subscribe: (onChange: () => void) => availability.listen(onChange),
+        }
+      : {}),
     // AUTO-MODE lives in `activateTool`: picking a sketch tool from model mode
     // enters sketch mode, and vice versa. Routing through it is what keeps a
     // registry activation identical to a toolbar click.
@@ -104,6 +182,33 @@ function commandDefinition(key: ModelingCommandKey, priority: number): CommandDe
   };
 }
 
+/** `toolStore`'s current tool as a registry id. */
+function activeToolId(): ToolId {
+  const state = toolStore.getState();
+  const tool = activeTool(state);
+  return (
+    state.mode === "sketch"
+      ? ModelingSketchTools[tool as SketchTool]
+      : ModelingModelTools[tool as ModelTool]
+  ) as ToolId;
+}
+
+/**
+ * Keep the platform's active-tool id in step with `toolStore`.
+ *
+ * `toolStore` stays authoritative for modeling's own tools — AUTO-MODE, the Esc
+ * ladder and every controller that arms itself write there, not here. This
+ * REPORTS those writes so the host mirrors one truth instead of holding a second
+ * one, which is what lets the toolbar highlight by `ToolId` without modeling and
+ * the platform ever disagreeing about what is active.
+ */
+function bridgeActiveTool(scope: ModuleScope): void {
+  const push = () => scope.platform.toolHost.report(activeToolId());
+  push(); // the store already has a tool at activation
+  const unsubscribe = toolStore.subscribe(push);
+  scope.own({ dispose: unsubscribe });
+}
+
 /** Registers every modeling contribution into `scope`. Exported for tests. */
 export function contributeModeling(scope: ModuleScope): void {
   for (const d of MODELING_TOOL_DESCRIPTORS) scope.registerTool(toolDefinition(d));
@@ -113,6 +218,8 @@ export function contributeModeling(scope: ModuleScope): void {
     scope.registerCommand(commandDefinition(key, priority));
     priority += 10;
   }
+
+  bridgeActiveTool(scope);
 }
 
 export function registerModelingModule(platform: Platform): void {

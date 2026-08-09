@@ -24,6 +24,7 @@ import { createEventBus, type EventBus } from "./events";
 import type { EventId, ModuleId, OwnerId, ServiceId } from "./ids";
 import { createRegistry, type Disposable, type Registry } from "./registry";
 import { createServiceRegistry, type ServiceRegistry } from "./services";
+import { createToolHost, type ToolHost } from "./toolHost";
 
 export interface ModuleManifest {
   readonly id: ModuleId;
@@ -88,6 +89,8 @@ export interface Platform {
   readonly workspaces: Registry<WorkspaceDefinition>;
   readonly services: ServiceRegistry;
   readonly events: EventBus;
+  /** Who is active, and the activate/deactivate handshake. See `toolHost.ts`. */
+  readonly toolHost: ToolHost;
 
   registerModule(def: ModuleDefinition): void;
   /** Activates every registered module in dependency order. Idempotent guard. */
@@ -165,6 +168,7 @@ export function createPlatform(): Platform {
   const workspaces = createRegistry<WorkspaceDefinition>("workspace");
   const services = createServiceRegistry();
   const events = createEventBus();
+  const toolHost = createToolHost(tools);
 
   const definitions = new Map<ModuleId, ModuleDefinition>();
   const states = new Map<ModuleId, ModuleState>();
@@ -181,6 +185,7 @@ export function createPlatform(): Platform {
     workspaces,
     services,
     events,
+    toolHost,
 
     registerModule(def) {
       if (initialized) {

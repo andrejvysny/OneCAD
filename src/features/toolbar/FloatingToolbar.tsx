@@ -1,58 +1,69 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useReducer } from "react";
 import { cn } from "@/ui/cn";
-import { useToolStore, activeTool, type Tool } from "@/stores/toolStore";
-import { activateTool } from "@/tools/activateTool";
-import { useSelectionStore } from "@/stores/selectionStore";
-import { useDocumentStore } from "@/stores/documentStore";
-import { getToolApplicability, type ToolApplicability } from "@/tools/modelTools/toolApplicability";
-import { usePlatform, useRegistryEntries } from "@/platform";
-import { toolbarFromRegistry } from "@/modules/modeling/registryToolbar";
-import { ToolButton } from "./ToolButton";
-import { isSeparator } from "./toolbarConfig";
+import { useToolStore } from "@/stores/toolStore";
+import {
+  usePlatform,
+  useRegistryEntries,
+  useActiveToolId,
+  type ToolAvailability,
+  type ToolDefinition,
+} from "@/platform";
+import { toolbarScopeToken } from "@/modules/modeling/registryToolbar";
+import { ToolButton, toolbarIcon } from "./ToolButton";
 
-const ALWAYS_ENABLED: ToolApplicability = { enabled: true };
+const ALWAYS_ENABLED: ToolAvailability = { enabled: true };
 
 /**
  * Centered floating tool pill (prototype 1c). Swaps its tool set with the mode
- * and tints its background in sketch mode (toolbar-sketch token). Every pick
- * routes through `activateTool` — AUTO-MODE: picking a tool can itself cross
- * the mode boundary (a sketch tool from model mode starts a sketch; a model
- * tool from sketch mode finishes it), there is no manual mode toggle.
+ * and tints its background in sketch mode (toolbar-sketch token).
  *
- * Model-tool buttons gray out when the current selection doesn't satisfy that
- * tool's precondition — same rule `ModelToolController`'s arm functions gate
- * on (`toolApplicability.ts`), so a button never shows enabled and then fails
- * on click. Sketch-tool buttons are untouched (pure pointer gestures, no
- * selection precondition). The ACTIVE tool is exempt from its own check —
- * without this, a tool like Boolean would gray itself out mid-gesture the
- * moment its own arm handshake changes the selection shape it started from.
+ * WHAT IT RENDERS IS THE `ToolDefinition`, not a projection of it into a modeling
+ * `Tool` literal. That projection is why a registered tool used to vanish here
+ * unless modeling's reverse map knew its id, which made "the toolbar is a set of
+ * contributions" true of the registry and false of the screen. Presentation
+ * (`title`, `icon`, `shortcutLabel`), placement (`group` boundary ⇒ separator,
+ * `priority` ⇒ order), availability (`canActivate`) and activation
+ * (`platform.toolHost`) now all come off the definition.
  *
- * The arrangement is read from the platform TOOL REGISTRY on every render, not
- * from a module-load-time table: a tool registered (or disposed) after mount has
- * to reach the toolbar, which is the whole point of the registry. `useRegistryEntries`
- * is the subscription — it returns the registry's cached, reference-stable
- * snapshot — and the projection is memoized off it, because `toolbarFromRegistry`
- * allocates a fresh array per call and would loop `useSyncExternalStore` if it
- * were the snapshot itself.
+ * Membership is by SCOPE: a tool declaring the active scope's token appears, and
+ * a tool declaring NO scopes appears in every scope — the same "empty ⇒ always"
+ * rule `CommandDefinition.scopes` states. Dropping the unscoped case (as the old
+ * projection did) would have made a zero-knowledge contribution impossible.
+ *
+ * A tool is never gated on its own `canActivate` while it is ACTIVE: a tool like
+ * Boolean changes the selection with its own arm handshake and would otherwise
+ * gray itself out mid-gesture.
+ *
+ * The registry is read live — `useRegistryEntries` is the subscription — and the
+ * filter is memoized off that snapshot, because a fresh array per render would
+ * loop `useSyncExternalStore` if it were the snapshot itself.
  */
 export function FloatingToolbar() {
   const mode = useToolStore((s) => s.mode);
-  const current = useToolStore(activeTool);
-  const selected = useSelectionStore((s) => s.selected);
-  const sketches = useDocumentStore((s) => s.sketches);
-
   const platform = usePlatform();
   const tools = useRegistryEntries(platform.tools);
+  const activeId = useActiveToolId();
+
+  const token = toolbarScopeToken(mode);
   const entries = useMemo(
-    () => toolbarFromRegistry(platform, mode),
-    // `tools` is the subscription: a registry change gives a new snapshot
-    // reference, which is what re-runs the projection.
-    [platform, tools, mode],
+    () =>
+      tools.filter(
+        (t) => t.scopes === undefined || t.scopes.length === 0 || t.scopes.includes(token),
+      ),
+    // `tools` is the subscription: a registry change gives a new snapshot.
+    [tools, token],
   );
 
-  const pick = (id: Tool) => {
-    void activateTool(id);
-  };
+  // `canActivate` is a predicate read during render, so the owner has to say when
+  // its answer moved. Re-rendering is all this needs to do — the predicates are
+  // re-read below. Without it the buttons would keep their mount-time verdict.
+  const [, bump] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => {
+    const subs = entries.map((t) => t.subscribe?.(bump)).filter((d) => d !== undefined);
+    return () => {
+      for (const s of subs) s.dispose();
+    };
+  }, [entries]);
 
   return (
     <div
@@ -64,34 +75,43 @@ export function FloatingToolbar() {
         mode === "sketch" ? "bg-toolbar-sketch" : "bg-surface",
       )}
     >
-      {entries.map((e, i) => {
-        if (isSeparator(e)) {
-          return (
-            <span
-              key={`sep-${i}`}
-              aria-hidden="true"
-              className="mx-1 h-5 w-px bg-border"
-            />
-          );
-        }
-        const isCurrent = current === e.id;
-        const verdict =
-          mode === "model" && !isCurrent
-            ? getToolApplicability(e.id, selected, { sketches })
-            : ALWAYS_ENABLED;
-        return (
-          <ToolButton
-            key={e.id}
-            icon={e.icon}
-            label={e.label}
-            shortcut={e.shortcut}
-            active={isCurrent}
-            onClick={() => pick(e.id)}
-            disabled={!verdict.enabled}
-            disabledReason={verdict.reason}
-          />
-        );
-      })}
+      {entries.map((def, i) => (
+        <ToolEntry
+          key={def.id}
+          def={def}
+          active={def.id === activeId}
+          separated={i > 0 && def.group !== entries[i - 1]?.group}
+          onPick={() => void platform.toolHost.activate(def.id)}
+        />
+      ))}
     </div>
+  );
+}
+
+function ToolEntry({
+  def,
+  active,
+  separated,
+  onPick,
+}: {
+  def: ToolDefinition;
+  active: boolean;
+  separated: boolean;
+  onPick: () => void;
+}) {
+  const verdict = active ? ALWAYS_ENABLED : (def.canActivate?.({ selection: [], scopes: [] }) ?? ALWAYS_ENABLED);
+  return (
+    <>
+      {separated && <span aria-hidden="true" className="mx-1 h-5 w-px bg-border" />}
+      <ToolButton
+        icon={toolbarIcon(def.icon)}
+        label={def.title}
+        shortcut={def.shortcutLabel ?? ""}
+        active={active}
+        onClick={onPick}
+        disabled={!verdict.enabled}
+        disabledReason={verdict.reason}
+      />
+    </>
   );
 }

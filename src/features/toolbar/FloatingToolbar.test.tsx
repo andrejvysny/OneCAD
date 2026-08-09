@@ -4,8 +4,17 @@ import userEvent from "@testing-library/user-event";
 import { FloatingToolbar } from "./FloatingToolbar";
 import { ICON_MONO } from "@/icons/Icon";
 import { resetStores } from "@/test/resetStores";
-import { renderWithPlatform } from "@/test/renderWithPlatform";
+import { bootTestPlatform, renderWithPlatform } from "@/test/renderWithPlatform";
 import { selectionStore } from "@/stores/selectionStore";
+import {
+  addonId,
+  contributionId,
+  type ModuleScope,
+  type Platform,
+  type ToolDefinition,
+  type ToolId,
+} from "@/platform";
+import { ModelingScopes } from "@/modules/modeling/manifest";
 
 describe("FloatingToolbar", () => {
   beforeEach(() => resetStores());
@@ -114,12 +123,126 @@ describe("FloatingToolbar", () => {
     }
   });
 
+  it("sketch tools are never gated on the model applicability matrix", async () => {
+    // `mirror` is a member of BOTH unions and means different things: the model
+    // one needs a body selected, the sketch one is a pointer gesture. Asking the
+    // matrix about the sketch tool disabled it with nothing selected, which is
+    // what `e2e/sketch-mirror.spec.ts` caught.
+    const user = userEvent.setup();
+    renderWithPlatform(<FloatingToolbar />);
+    await user.click(screen.getByRole("button", { name: "New sketch" }));
+
+    for (const name of ["Mirror", "Line", "Trim", "Select"]) {
+      expect(screen.getByRole("button", { name }), name).toHaveAttribute(
+        "aria-disabled",
+        "false",
+      );
+    }
+  });
+
   it("clicking a disabled button does not change the active tool", async () => {
     const user = userEvent.setup();
     renderWithPlatform(<FloatingToolbar />);
     await user.click(screen.getByRole("button", { name: "Shell" }));
     expect(screen.getByRole("button", { name: "Select" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "Shell" })).toHaveAttribute("aria-pressed", "false");
+  });
+
+  /*
+   * The point of WP1. Every case below uses a tool from an owner modeling has
+   * never heard of — the exact shape that used to be dropped by
+   * `registryToolbar`'s reverse-map lookup and vanish from the screen while
+   * sitting in the registry.
+   */
+  describe("a tool from a foreign owner", () => {
+    const FOREIGN = addonId("com.example.foo");
+    const FOREIGN_TOOL = contributionId<ToolId>(FOREIGN, "com.example.foo.tool.inspect");
+
+    function contributeForeign(
+      platform: Platform,
+      overrides: Partial<ToolDefinition> = {},
+    ): { activated: string[]; scope: ModuleScope } {
+      const activated: string[] = [];
+      const scope = platform.createScope(FOREIGN);
+      scope.registerTool({
+        id: FOREIGN_TOOL,
+        title: "Inspect",
+        icon: "select",
+        shortcutLabel: "I",
+        scopes: [ModelingScopes.Model],
+        activate: () => {
+          activated.push("activate");
+        },
+        deactivate: () => {},
+        ...overrides,
+      });
+      return { activated, scope };
+    }
+
+    it("reaches the toolbar, activates on click, and highlights", async () => {
+      const user = userEvent.setup();
+      const platform = bootTestPlatform();
+      const { activated } = contributeForeign(platform);
+      renderWithPlatform(<FloatingToolbar />, { platform });
+
+      const button = screen.getByRole("button", { name: "Inspect" });
+      await user.click(button);
+
+      expect(activated).toEqual(["activate"]);
+      expect(screen.getByRole("button", { name: "Inspect" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      // ...and modeling's own tool gave up the highlight, without either side
+      // knowing about the other.
+      expect(screen.getByRole("button", { name: "Select" })).toHaveAttribute(
+        "aria-pressed",
+        "false",
+      );
+    });
+
+    it("leaves the toolbar when its registration is disposed", async () => {
+      const platform = bootTestPlatform();
+      const { scope } = contributeForeign(platform);
+      renderWithPlatform(<FloatingToolbar />, { platform });
+      expect(screen.getByRole("button", { name: "Inspect" })).toBeInTheDocument();
+
+      await act(async () => scope.dispose());
+
+      expect(screen.queryByRole("button", { name: "Inspect" })).toBeNull();
+    });
+
+    it("declaring NO scopes shows it in both modes", async () => {
+      const user = userEvent.setup();
+      const platform = bootTestPlatform();
+      contributeForeign(platform, { scopes: undefined });
+      renderWithPlatform(<FloatingToolbar />, { platform });
+
+      expect(screen.getByRole("button", { name: "Inspect" })).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "New sketch" }));
+      expect(screen.getByRole("button", { name: "Inspect" })).toBeInTheDocument();
+    });
+
+    it("is grayed out with ITS OWN reason when canActivate says no", () => {
+      const platform = bootTestPlatform();
+      contributeForeign(platform, {
+        canActivate: () => ({ enabled: false, reason: "Pick something first" }),
+      });
+      renderWithPlatform(<FloatingToolbar />, { platform });
+
+      expect(screen.getByRole("button", { name: "Inspect" })).toHaveAttribute(
+        "aria-disabled",
+        "true",
+      );
+    });
+
+    it("renders a placeholder for an icon the registry does not have", () => {
+      const platform = bootTestPlatform();
+      contributeForeign(platform, { icon: "no-such-glyph" });
+      // The old cast (`def.icon as IconName`) made this a crash inside `Icon`.
+      renderWithPlatform(<FloatingToolbar />, { platform });
+      expect(screen.getByRole("button", { name: "Inspect" })).toBeInTheDocument();
+    });
   });
 
   it("the ACTIVE tool is exempt from its own gray-out (must not disable mid-gesture)", async () => {

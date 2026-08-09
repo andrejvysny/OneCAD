@@ -95,7 +95,9 @@ describe("modeling module registration", () => {
 
   it("a tool activation routes through the shared dispatcher", async () => {
     const { activateTool } = await import("@/tools/activateTool");
-    await platform.tools.get(ModelingModelTools.extrude)?.activate({ selection: [] });
+    await platform.tools
+      .get(ModelingModelTools.extrude)
+      ?.activate({ selection: [], scopes: [] });
     expect(activateTool).toHaveBeenCalledWith("extrude");
   });
 

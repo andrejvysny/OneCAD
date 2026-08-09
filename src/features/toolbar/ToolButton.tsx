@@ -1,7 +1,22 @@
 import { cn } from "@/ui/cn";
 import { Tooltip } from "@/ui/Tooltip";
 import { ICON_MONO, Icon } from "@/icons/Icon";
-import type { IconName } from "@/icons/paths";
+import { ICONS, type IconName } from "@/icons/paths";
+
+/** Shown for an icon name the registry does not have. */
+const UNKNOWN_ICON: IconName = "overflow";
+
+/**
+ * Resolve a contributed icon name against the registry.
+ *
+ * `ToolDefinition.icon` is an open `string` — it has to be, since the platform
+ * cannot know a third party's glyph — while `Icon` indexes a closed registry and
+ * would throw on a miss. A tool with a typo'd or unshipped icon renders the
+ * placeholder instead of taking the toolbar down with it.
+ */
+export function toolbarIcon(name: string | undefined): IconName {
+  return name !== undefined && name in ICONS ? (name as IconName) : UNKNOWN_ICON;
+}
 
 type ToolButtonProps = {
   icon: IconName;

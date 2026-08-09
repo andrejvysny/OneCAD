@@ -103,7 +103,17 @@ export interface CommandDefinition extends Contribution {
 
 export interface ToolContext {
   readonly selection: readonly SelectionRef[];
+  /** The same opaque scope tokens `CommandContext` carries. */
+  readonly scopes: readonly string[];
 }
+
+/**
+ * Same shape as `CommandAvailability`, and deliberately so: a toolbar that grays
+ * a tool out must be able to say WHY, exactly as a disabled command does. A bare
+ * boolean would have thrown that away the moment the toolbar stopped reading
+ * modeling's `getToolApplicability` (which has carried a reason all along).
+ */
+export type ToolAvailability = CommandAvailability;
 
 export interface ToolDefinition extends Contribution {
   readonly id: ToolId;
@@ -116,7 +126,22 @@ export interface ToolDefinition extends Contribution {
    */
   readonly shortcutLabel?: string;
   readonly scopes?: readonly string[];
-  canActivate?(ctx: ToolContext): boolean;
+  /**
+   * Absent ⇒ always available. The host must not gate the ACTIVE tool on this:
+   * a tool whose own arm handshake changes the selection would otherwise disable
+   * itself mid-gesture.
+   */
+  canActivate?(ctx: ToolContext): ToolAvailability;
+  /**
+   * Announce that `canActivate`'s ANSWER may have changed.
+   *
+   * `canActivate` is a plain predicate read during the host's render, exactly
+   * like `TreeProvider.sections()` — so a tool whose availability depends on
+   * state the host does not otherwise watch MUST implement this, or its button
+   * will keep showing the answer it had at mount. Absent ⇒ the answer never
+   * changes on its own.
+   */
+  subscribe?(onChange: () => void): Disposable;
   activate(ctx: ToolContext): void | Promise<void>;
   deactivate(ctx: ToolContext): void | Promise<void>;
 }

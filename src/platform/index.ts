@@ -12,7 +12,14 @@ export * from "./contributions";
 export * from "./events";
 export * from "./services";
 export * from "./platform";
+export * from "./toolHost";
 export * from "./documentState";
-export { PlatformProvider, usePlatform, useOptionalPlatform, useRegistryEntries } from "./react/PlatformProvider";
+export {
+  PlatformProvider,
+  usePlatform,
+  useOptionalPlatform,
+  useRegistryEntries,
+  useActiveToolId,
+} from "./react/PlatformProvider";
 export { SlotHost, useSlotContributions } from "./react/SlotHost";
 export { ContributionBoundary } from "./react/ContributionBoundary";

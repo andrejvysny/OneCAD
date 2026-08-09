@@ -11,11 +11,11 @@
  * equals itself.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createPlatform, type Platform } from "@/platform";
+import { addonId, contributionId, createPlatform, type Platform, type ToolId } from "@/platform";
 import { MODEL_TOOLS_CONTRACT, SKETCH_TOOLS_CONTRACT } from "@/test/contracts/toolbarContract";
 import { isSeparator } from "@/features/toolbar/toolbarConfig";
 import { registerModelingModule } from "./register";
-import { MODELING_MODULE_ID } from "./manifest";
+import { MODELING_MODULE_ID, ModelingScopes } from "./manifest";
 import { toolbarFromRegistry } from "./registryToolbar";
 
 vi.mock("@/tools/activateTool", () => ({ activateTool: vi.fn(async () => {}) }));
@@ -63,10 +63,28 @@ describe("toolbar contract", () => {
 
   it("a tool disposed after boot leaves the projection", () => {
     // The point of reading the registry live: the arrangement is not frozen at
-    // module load. Proven by removal, because an addition would need a tool id
-    // modeling's reverse map does not have (see TODO.md § toolbar extensibility).
+    // module load.
     expect(toolbarFromRegistry(platform, "model").length).toBeGreaterThan(0);
     platform.scopeFor(MODELING_MODULE_ID).dispose();
     expect(toolbarFromRegistry(platform, "model")).toEqual([]);
+  });
+
+  it("a FOREIGN tool does not disturb the frozen arrangement", () => {
+    // The toolbar itself now renders every registration, foreign ones included
+    // (`FloatingToolbar.test.tsx`). This projection is the CONTRACT's shape, and
+    // the contract is modeling's arrangement — so a third-party registration must
+    // leave it byte-identical rather than appearing in the middle of it.
+    const foreign = addonId("com.example.foo");
+    platform.createScope(foreign).registerTool({
+      id: contributionId<ToolId>(foreign, "com.example.foo.tool.inspect"),
+      title: "Inspect",
+      icon: "select",
+      scopes: [ModelingScopes.Model],
+      priority: 105, // deliberately between two modeling tools
+      activate: () => {},
+      deactivate: () => {},
+    });
+
+    expect(toolbarFromRegistry(platform, "model")).toEqual([...MODEL_TOOLS_CONTRACT]);
   });
 });

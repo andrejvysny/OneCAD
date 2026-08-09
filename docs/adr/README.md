@@ -17,5 +17,7 @@ down. `docs/ARCHITECTURE.md` states the laws; these records say why.
 | [0006](0006-registration-ownership.md) | Every registration has an owner and an owner-scoped teardown |
 | [0007](0007-deterministic-contribution-order.md) | Contribution order is explicit, never load-order |
 | [0008](0008-branded-ids-unions-retained.md) | Namespaced branded IDs, with the internal unions retained |
+| [0009](0009-viewport-context-is-threejs-shaped.md) | The viewport contract is Three.js-shaped in v1 |
+| [0010](0010-tool-activation-is-host-owned.md) | Tool activation and availability are host-owned, module-reported |
 
 Status values: `Proposed`, `Accepted`, `Superseded by NNNN`.

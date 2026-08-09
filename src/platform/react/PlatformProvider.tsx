@@ -7,6 +7,7 @@
  * contribution needs arrives through this provider.
  */
 import { createContext, useContext, useSyncExternalStore, type ReactNode } from "react";
+import type { ToolId } from "../ids";
 import type { Platform } from "../platform";
 import type { Contribution, Registry } from "../registry";
 
@@ -43,4 +44,10 @@ export function useOptionalPlatform(): Platform | null {
  */
 export function useRegistryEntries<T extends Contribution>(registry: Registry<T>): readonly T[] {
   return useSyncExternalStore(registry.subscribe, registry.entries, registry.entries);
+}
+
+/** The active tool id, or null. Same subscription contract as above. */
+export function useActiveToolId(): ToolId | null {
+  const { toolHost } = usePlatform();
+  return useSyncExternalStore(toolHost.subscribe, toolHost.activeToolId, toolHost.activeToolId);
 }
