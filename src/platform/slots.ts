@@ -42,6 +42,14 @@ export const Slots = {
 
   /** Non-blocking banners and notices across the top of the work area. */
   ShellNotification: "shell.notification",
+  /**
+   * Window-filling modal surfaces — the command palette, the extensions
+   * manager, a confirmation sheet. Distinct from `shell.notification` because a
+   * notice sits INSIDE the layout and takes space, while these cover it and own
+   * focus until dismissed. A contribution here is expected to render nothing
+   * until its own open-state says otherwise; the host mounts them all.
+   */
+  ShellOverlay: "shell.overlay",
 
   /** A section inside the inspector panel. */
   InspectorSection: "inspector.section",

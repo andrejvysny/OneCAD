@@ -3,6 +3,7 @@ import { cn } from "@/ui/cn";
 import { Icon } from "@/icons/Icon";
 import { EyeToggle } from "@/ui/EyeToggle";
 import { TextInput } from "@/ui/TextInput";
+import { MonoValue } from "@/ui/MonoValue";
 import type { IconName } from "@/icons/paths";
 
 type TreeRowProps = {
@@ -24,6 +25,18 @@ type TreeRowProps = {
    * the persisted `visible` value so the two never look like one thing.
    */
   dimmed?: boolean;
+  /**
+   * Short trailing value ("500 N", "not installed"). Right-aligned mono, and it
+   * survives truncation ahead of the label: a row whose meaning lives in the
+   * value must not lose the value first.
+   */
+  meta?: string;
+  /**
+   * The row names something wrong (a missing owner, an unresolved reference).
+   * Caution treatment, and deliberately NOT the same as `dimmed`: dimmed means
+   * "not in play right now", this means "look at me".
+   */
+  problem?: boolean;
   /** Double-click activator (sketch rows enter sketch mode). */
   onActivate?: () => void;
   /** Right-click → the tree's shared context menu (anchored to this row). */
@@ -52,6 +65,8 @@ export function TreeRow({
   onSelect,
   onToggleVisible,
   dimmed = false,
+  meta,
+  problem = false,
   onActivate,
   onContextMenu,
   editing = false,
@@ -96,7 +111,11 @@ export function TreeRow({
       onContextMenu={onContextMenu}
       className={cn(
         "mx-2 my-px flex h-8 cursor-default items-center gap-2 rounded-sm px-2",
-        selected ? "bg-sel-bg text-sel-text" : "text-tree-label hover:bg-hover-2",
+        selected
+          ? "bg-sel-bg text-sel-text"
+          : problem
+            ? "text-warn hover:bg-hover-2"
+            : "text-tree-label hover:bg-hover-2",
         dimmed && "opacity-50",
       )}
     >
@@ -120,7 +139,10 @@ export function TreeRow({
           }}
         />
       ) : (
-        <span className="flex-1 text-[13px]">{name}</span>
+        <span className="min-w-0 flex-1 truncate text-[13px]">{name}</span>
+      )}
+      {!editing && meta && (
+        <MonoValue className="flex-none text-[11px] text-ink-6">{meta}</MonoValue>
       )}
       {onToggleVisible && (
         <span

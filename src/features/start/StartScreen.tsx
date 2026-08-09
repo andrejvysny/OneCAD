@@ -10,6 +10,8 @@ import { RecoveryCard } from "./RecoveryCard";
 import { SortMenu, type SortKey } from "./SortMenu";
 import { StartSidebar } from "./StartSidebar";
 import { SettingsModal } from "@/features/settings/SettingsModal";
+import { ExtensionsManager } from "@/features/extensions/ExtensionsManager";
+import { extensionsStore } from "@/stores/extensionsStore";
 
 const APP_VERSION = "v0.1.0";
 
@@ -117,7 +119,9 @@ export function StartScreen() {
   const bootError = recentsStatus === "error" || recoveryStatus === "error";
 
   return (
-    <div className="flex h-full w-full flex-col font-ui text-ink">
+    // `relative`: the extensions manager is an `absolute inset-0` overlay and
+    // needs this element as its containing block (the editor gives it one too).
+    <div className="relative flex h-full w-full flex-col font-ui text-ink">
       {/* Invisible full-width titlebar: the window uses titleBarStyle "Overlay"
           (macOS draws the traffic lights over the webview, no native bar), and
           this screen has no TitleBar.tsx of its own — without a drag region the
@@ -135,6 +139,7 @@ export function StartScreen() {
           active={nav}
           onNavigate={setNav}
           onOpenSettings={() => setSettingsOpen(true)}
+          onOpenExtensions={() => extensionsStore.getState().openManager()}
           version={APP_VERSION}
         />
 
@@ -237,6 +242,10 @@ export function StartScreen() {
       </div>
 
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      {/* Mounted directly rather than through a slot: the start screen has no
+          slot hosts (its whole point is not to pull the editor chunk in), and
+          the manager reaches only the platform registries. */}
+      <ExtensionsManager />
     </div>
   );
 }

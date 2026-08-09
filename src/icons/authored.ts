@@ -34,6 +34,31 @@ export const AUTHORED_ICONS = {
   ], // Starred (line 102)
   template: [{ d: "M4.5 7.5h15v12h-15zM8 7.5V5h8v2.5" }], // Templates (line 103)
 
+  /*
+   * ---- Modular platform chrome (prototype turn 2, "Modular platform") ----
+   *
+   * Single-tone by the policy above: a workspace lozenge, an extension, a
+   * caution mark and a progress ring each name a SURFACE, not an operation, so
+   * none of them has a verb to accent.
+   */
+  // Extension / add-on. Prototype 2a workspace menu ADD-ONS row (line 62).
+  puzzle: [
+    {
+      d: "M10 4.5a2 2 0 1 1 4 0H18v3.5a2 2 0 1 1 0 4V15.5h-4a2 2 0 1 0-4 0H6v-3.5a2 2 0 1 0 0-4V4.5h4z",
+    },
+  ],
+  // Workspace selector lozenge. Prototype 2a title bar (line 49).
+  workspace: [{ d: "M12 4l8 8-8 8-8-8 8-8z" }],
+  // Caution. Prototype 2a missing-extension banner (line 71).
+  alert: [{ d: "M12 4.5L21 19H3L12 4.5zM12 10v4M12 16.8v.4" }],
+  // Background work in flight — an open ring, the static form of the status
+  // bar's spinner (prototype 2a tasks chip, line 204).
+  tasks: [{ d: "M20.5 12a8.5 8.5 0 1 1-4.3-7.4" }],
+  // Analysis study. Prototype 2a Simulation explorer STUDIES row (I2.study).
+  study: [{ d: "M4.5 19.5v-15h9L18.5 9v10.5h-14zM13 4.5V9h5.5" }],
+  // Applied load. Prototype 2a Simulation toolbar (I2.load).
+  load: [{ d: "M12 4v9M8.5 10L12 13.5 15.5 10M5 17.5h14" }],
+
   // ---- Appearance (DARK-MODE WP; not from the prototype) ----
   // One glyph per ThemePref, so the title-bar button always shows the CURRENT
   // preference rather than a generic "theme" symbol.

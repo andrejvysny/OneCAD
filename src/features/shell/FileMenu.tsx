@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
-import { Icon } from "@/icons/Icon";
 import { Popover } from "@/ui/Popover";
+import { TitleBarButton } from "./TitleBarButton";
+import { RenameDocumentDialog } from "./RenameDocumentDialog";
 import { MenuItem } from "@/ui/MenuItem";
 import {
   closeProject,
@@ -23,6 +24,7 @@ import {
  */
 export function FileMenu() {
   const [open, setOpen] = useState(false);
+  const [renaming, setRenaming] = useState(false);
   const btn = useRef<HTMLButtonElement | null>(null);
 
   const run = (action: () => void | Promise<unknown>) => {
@@ -32,18 +34,18 @@ export function FileMenu() {
 
   return (
     <div data-tauri-drag-region className="relative">
-      <button
+      {/* No `data-tauri-drag-region` here: it makes the OS swallow the press
+          into a window drag, and this button would stop opening its menu. */}
+      <TitleBarButton
         ref={btn}
-        type="button"
-        data-tauri-drag-region
+        menu
+        active={open}
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="menu"
         aria-expanded={open}
-        className="flex h-[26px] cursor-pointer items-center gap-1 rounded-sm px-2 font-ui text-[12.5px] font-medium text-ink-3 hover:bg-hover"
       >
         File
-        <Icon name="chevronDown" size={11} strokeWidth={2} className="text-ink-5" />
-      </button>
+      </TitleBarButton>
 
       <Popover
         open={open}
@@ -56,6 +58,17 @@ export function FileMenu() {
         <MenuItem label="Open…" shortcut="⌘O" onClick={() => run(openDocumentDialog)} />
         <MenuItem label="Save" shortcut="⌘S" onClick={() => run(saveDocument)} />
         <MenuItem label="Save As…" shortcut="⇧⌘S" onClick={() => run(saveDocumentAs)} />
+        {/* Renaming belongs with the other document-identity actions, next to
+            Save As… — which is what you reach for when the name has to reach
+            the disk (see `RenameDocumentDialog`). */}
+        <MenuItem
+          label="Rename…"
+          data-testid="file-menu-rename"
+          onClick={() => {
+            setOpen(false);
+            setRenaming(true);
+          }}
+        />
         {/* Import lands in the Open/Save group, ABOVE the Export separator: it
             mutates the open document, so it belongs with the input actions. */}
         <MenuItem label="Import STEP…" onClick={() => run(insertStep)} />
@@ -67,6 +80,8 @@ export function FileMenu() {
         <MenuItem label="Export STL…" onClick={() => run(exportStl)} />
         <MenuItem label="Export OBJ…" onClick={() => run(exportObj)} />
       </Popover>
+
+      <RenameDocumentDialog open={renaming} onClose={() => setRenaming(false)} />
     </div>
   );
 }

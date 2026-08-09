@@ -4,14 +4,19 @@
  * point every close/quit path uses — so a dirty document arms the
  * UnsavedChangesDialog instead of discarding work, and a clean one returns
  * straight to the start screen.
+ *
+ * Rendered through `renderWithPlatform` since the bar gained the workspace
+ * switcher, which reads the workspace registry — a bare `render` would only
+ * prove the component throws without a provider.
  */
 import { describe, it, expect, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TitleBar } from "./TitleBar";
 import { appStore } from "@/stores/appStore";
 import { documentStore } from "@/stores/documentStore";
 import { resetStores } from "@/test/resetStores";
+import { renderWithPlatform } from "@/test/renderWithPlatform";
 
 function openDocument(dirty: boolean): void {
   appStore.setState({
@@ -30,20 +35,20 @@ describe("TitleBar home button", () => {
   });
 
   it("is the left-most control, before FileMenu", () => {
-    render(<TitleBar />);
+    renderWithPlatform(<TitleBar />);
     const buttons = screen.getAllByRole("button");
     expect(buttons[0]).toHaveAccessibleName("Close project and return to start screen");
   });
 
   it("does not carry the Tauri drag region — that would swallow the click", () => {
-    render(<TitleBar />);
+    renderWithPlatform(<TitleBar />);
     const btn = screen.getByRole("button", { name: /^Close project/ });
     expect(btn).not.toHaveAttribute("data-tauri-drag-region");
   });
 
   it("clean document: click returns straight to the start screen, no prompt", async () => {
     const user = userEvent.setup();
-    render(<TitleBar />);
+    renderWithPlatform(<TitleBar />);
 
     await user.click(screen.getByRole("button", { name: /^Close project/ }));
 
@@ -55,7 +60,7 @@ describe("TitleBar home button", () => {
   it("dirty document: click arms the save/discard/cancel prompt and stays open", async () => {
     const user = userEvent.setup();
     openDocument(true);
-    render(<TitleBar />);
+    renderWithPlatform(<TitleBar />);
 
     await user.click(screen.getByRole("button", { name: /^Close project/ }));
 
@@ -65,7 +70,7 @@ describe("TitleBar home button", () => {
   });
 
   it("no appearance toggle in the title bar", () => {
-    render(<TitleBar />);
+    renderWithPlatform(<TitleBar />);
     expect(screen.queryByRole("button", { name: /^Appearance:/ })).not.toBeInTheDocument();
   });
 });

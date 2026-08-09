@@ -25,6 +25,7 @@ import { DatumSync } from "./datumSync";
 import { setViewportEngine } from "./engineBridge";
 import { viewLabelForDirection } from "@/features/viewcube/ViewCube";
 import { useViewportStore, viewportStore } from "@/stores/viewportStore";
+import { layersStore } from "@/stores/layersStore";
 import { selectGeometryCached, useDocumentStore } from "@/stores/documentStore";
 import { settingsStore } from "@/stores/settingsStore";
 import { toolStore } from "@/stores/toolStore";
@@ -451,6 +452,28 @@ export function ViewportRoot({ className }: { className?: string }) {
               lastGrid = s.gridVisible;
               engine.setGridVisible(s.gridVisible);
             }
+          }),
+        );
+
+        // store → engine (viewport layers). Seeded once, then diffed, for the
+        // same reason the grid is: the subscriber fires on EVERY store write.
+        let lastLayers = layersStore.getState().visible;
+        engine.setLayerVisible("bodies", lastLayers.bodies);
+        engine.setLayerVisible("sketches", lastLayers.sketches);
+        engine.setLayerVisible("contributions", lastLayers.datums);
+        cleanups.push(
+          layersStore.subscribe((s) => {
+            if (s.visible === lastLayers) return;
+            if (s.visible.bodies !== lastLayers.bodies) {
+              engine.setLayerVisible("bodies", s.visible.bodies);
+            }
+            if (s.visible.sketches !== lastLayers.sketches) {
+              engine.setLayerVisible("sketches", s.visible.sketches);
+            }
+            if (s.visible.datums !== lastLayers.datums) {
+              engine.setLayerVisible("contributions", s.visible.datums);
+            }
+            lastLayers = s.visible;
           }),
         );
 

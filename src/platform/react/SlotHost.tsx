@@ -25,8 +25,22 @@ export function useSlotContributions(slot: SlotId): readonly PanelContribution[]
   return panels.filter((p) => p.slot === slot);
 }
 
-export function SlotHost({ slot }: { slot: SlotId }) {
-  const contributions = useSlotContributions(slot);
+/**
+ * `filter` is how a WORKSPACE hides a panel without the platform learning what
+ * a workspace is. The host passes a predicate; this file never asks where it
+ * came from. Doing it the other way — SlotHost reading the active-workspace
+ * store — would put an application store inside `src/platform/**`, which is the
+ * one import direction the whole refactor exists to forbid.
+ */
+export function SlotHost({
+  slot,
+  filter,
+}: {
+  slot: SlotId;
+  filter?: (panel: PanelContribution) => boolean;
+}) {
+  const all = useSlotContributions(slot);
+  const contributions = filter ? all.filter(filter) : all;
   return (
     <>
       {contributions.map((c) => (

@@ -9,6 +9,7 @@ import { toolStore, activeTool } from "@/stores/toolStore";
 import { selectionStore } from "@/stores/selectionStore";
 import { sketchSelectionStore } from "@/stores/sketchSelectionStore";
 import { viewportStore } from "@/stores/viewportStore";
+import { paletteStore } from "@/stores/paletteStore";
 import { createClient } from "@/ipc/client";
 import {
   deleteEntities,
@@ -208,6 +209,14 @@ export function useShortcuts(): void {
       if (mod && !e.shiftKey && (e.key === "w" || e.key === "W")) {
         e.preventDefault();
         void closeProject();
+        return;
+      }
+      // ⌘K opens the command palette. Handled ABOVE the editable-target bail on
+      // purpose: it is the one chord that must work while a field has focus,
+      // including the palette's own input (where it toggles back shut).
+      if (mod && !e.shiftKey && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        paletteStore.getState().toggle();
         return;
       }
       // Leave remaining OS / app chords (Cmd/Ctrl/Alt) to their owners; Shift ok.

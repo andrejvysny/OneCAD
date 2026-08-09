@@ -1,3 +1,23 @@
+## MODULAR-PLATFORM UI (2026-08-09, design turn 2 via `claude_design` MCP) — FE GATE PASSED
+
+The first DELIBERATE user-visible change since the platform refactor. Implements the design project's turn 2 ("Modular platform — workspaces, extensions, palette, missing add-ons", options 2a-2d) on the existing Platform, plus two follow-ups the user asked for mid-wave: one title-bar button geometry, and document rename moved out of the title bar into File.
+
+**THE RULE THAT SHAPED EVERY SCREEN: bind it, or say it is not there.** Where a real seam existed the UI reads it — the workspace menu is a projection of `platform.workspaces`, the palette is a projection of `commands` + `tools` + `workspaces` with no opt-in and no palette registry of its own, and the missing-extension banner / details dialog / "Unavailable data" explorer section are all the real `listDocumentModules()` diff against `platform.moduleIds()` (ADR-0005 made visible at last). Where no seam exists the screen says so: Extensions ▸ Browse and ▸ Updates render "no registry configured" rather than a mock catalog, because dead Install buttons teach users the feature is broken and fake listings outlive the mock; enable/disable and uninstall are ABSENT rather than inert; Simulation/Drawing/Visualization are real registered arrangements that switch modeling's tools OFF and name what is missing, instead of offering Extrude under a "Drawing" label.
+
+WORKSPACES BECAME RUNTIME (the piece P2.5 deferred). `SlotHost` gained a `filter` predicate and `modules/shell/workspaceLayout.ts` resolves it — the platform still never learns what a workspace is, because `src/platform/**` may not import an application store. The rule is CONSERVATIVE: a panel is hidden only on an explicit `visible:false` placement or a user override. "Unlisted ⇒ hidden" reads tidier and would silently swallow every tool overlay the moment a tool grew a chip.
+
+ALSO REAL: `ViewportEngine.setLayerVisible()` toggles `bodiesRoot`/`sketchRoot`/`contributionsRoot` for the new bottom-left Layers menu (grid reuses the existing `viewportStore` flag — one piece of state, two entry points); collapsible explorer sections with `TreeNode.meta`/`problem` and `TreeSection.defaultCollapsed`/`emptyNote` (additive platform contract); a Customize-workspace sheet whose panels, tool groups and layers are all DERIVED from the registries; `TitleBarButton`, one 28px control replacing three hand-rolled geometries sitting in a row.
+
+STILL UI-ONLY, AND FLAGGED: the background-tasks chip has a real `begin/setProgress/end` API and draws an indeterminate bar when `progress` is undefined — nothing calls it, because regen is request/response over OCW1 with no progress frames. Rename (File ▸ Rename…) writes `DocumentState.displayTitle`, a session override kept OUT of `title` because `title` is backend-authoritative and every projection replaces it; there is no `RenameDocument` in the protocol, so the dialog says the file on disk is unchanged instead of implying a save. Both are next-tranche backend work.
+
+SEAM WORTH WATCHING: `CommandPalette` imports `useModelingToolContext` — shell UI reaching one specific module, because evaluating `canExecute` needs a real selection context and no neutral selection SERVICE exists. Precedent is `ViewportRoot` → `datumViewport`; the fix is a module-published context service.
+
+`src/test/contracts/shellContract.ts` was AMENDED, not worked around: six new shell contributions, nothing existing moved, and the decision is recorded in TODO.md as the contracts README requires.
+
+GATE: `bunx tsc --noEmit` clean · `bun run build` green · vitest **236 files / 3986 tests** (from 227/3919) · hex-token grep 0 · Playwright **387 passed / 3 failed**. Rust/ctest untouched by this wave.
+The three e2e failures are NOT this work, and that was checked rather than assumed: `sketch-reattach` (chromium) passes 3/3 on an isolated re-run — a load flake; both webkit `boolean-preview` failures reproduce DETERMINISTICALLY in a clean worktree at HEAD `352ddd1`, i.e. before any of this. That is the same pre-existing failure CURRENT_STATE already bisected to before the Platform refactor.
+STILL OWED: manual Mac smoke — the workspace filter and the new `shell.overlay` region are layout changes no jsdom test can prove.
+
 ## P2.5 — GENERIC EXTENSION SEMANTICS + SDK BOUNDARY (2026-08-09, plan `act-as-senior-software-encapsulated-balloon.md`) — GATE PASSED
 
 Finished the seams that were generic at the CONTRACT and modeling-specific at the RUNTIME, then froze a public SDK over the result. Committed as `c9779a3` (WP0) · `4b8ec0d` (WP1) · `eb59b6d` (WP2) · `7dee177` (WP3) · `bbe1ceb` (WP4) · `2006f6d` (WP5-7). NOT pushed.

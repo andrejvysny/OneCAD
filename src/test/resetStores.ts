@@ -46,7 +46,9 @@ export function resetStores(): void {
   // Go through the action too, to cancel any pending auto-dismiss timer the
   // previous test armed (setState alone would leave the module timer running).
   viewportStore.getState().setStatusHint(null);
-  documentStore.setState(seedMockDocument());
+  // `displayTitle` is session state OUTSIDE the projection, so seeding the
+  // projection alone would leak one test's rename into the next.
+  documentStore.setState({ ...seedMockDocument(), displayTitle: null });
   settingsStore.setState({
     snapTo: {
       grid: true,

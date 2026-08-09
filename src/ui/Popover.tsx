@@ -8,7 +8,7 @@ import {
 import { createPortal } from "react-dom";
 import { cn } from "./cn";
 
-type Placement = "bottom-start" | "bottom-end" | "left-start";
+type Placement = "bottom-start" | "bottom-end" | "left-start" | "top-start";
 
 type PopoverProps = {
   open: boolean;
@@ -51,6 +51,12 @@ export function Popover({
       const r = anchor.getBoundingClientRect();
       if (placement === "left-start") {
         setPos({ left: r.left - width - 12, top: r.top });
+      } else if (placement === "top-start") {
+        // Anchored ABOVE, which needs the panel's own height — unknown until it
+        // has rendered. Measuring it here (the effect runs after the commit that
+        // mounted it) is why this branch reads `panel` and the others do not.
+        const h = panel.current?.offsetHeight ?? 0;
+        setPos({ left: r.left, top: r.top - h - 6 });
       } else if (placement === "bottom-end") {
         // Right edge aligned to the anchor's right edge (menus near a boundary).
         setPos({ left: r.right - width, top: r.bottom + 6 });

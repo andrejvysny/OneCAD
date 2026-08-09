@@ -15,13 +15,25 @@
  * tree is a deliberate code-split chunk (see `App.tsx`) and the start screen must
  * not pay for it. They are owned by a scope that dies with this screen.
  */
-import { useEffect, useLayoutEffect } from "react";
+import { useEffect, useLayoutEffect, useMemo } from "react";
 import { useShortcuts } from "@/shortcuts/useShortcuts";
 import { createClient } from "@/ipc/client";
 import { workerStore } from "@/stores/workerStore";
 import { repairStore } from "@/stores/repairStore";
+import { extensionsStore } from "@/stores/extensionsStore";
+import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { ViewportRoot } from "@/viewport/ViewportRoot";
-import { SlotHost, Slots, usePlatform, type Platform, type SlotId } from "@/platform";
+import {
+  SlotHost,
+  Slots,
+  usePlatform,
+  useRegistryEntries,
+  type PanelContribution,
+  type Platform,
+  type SlotId,
+} from "@/platform";
+import { activeWorkspace, resolvePanelVisibility } from "@/modules/shell/workspaceLayout";
+import { DEFAULT_WORKSPACE_ID } from "@/modules/shell/workspaceIds";
 import { MODELING_MODULE_ID } from "@/modules/modeling/manifest";
 import { contributeModelingUi } from "@/modules/modeling/ui";
 import { SHELL_MODULE_ID, contributeShellChrome } from "@/modules/shell/register";
@@ -40,6 +52,9 @@ export const EDITOR_REGIONS: readonly (SlotId | "viewport")[] = [
   Slots.ShellNotification,
   Slots.ViewportChrome,
   Slots.ShellBottom,
+  // LAST, and deliberately: a modal has to cover every region above it, and DOM
+  // order is what decides that inside a z-index band.
+  Slots.ShellOverlay,
 ];
 
 /** Registers the editor's contributions for as long as the editor is mounted. */
@@ -58,10 +73,37 @@ function useEditorContributions(platform: Platform): void {
   }, [platform]);
 }
 
+/**
+ * The active workspace's answer to "is this panel on screen right now?".
+ *
+ * Resolved HERE rather than inside `SlotHost` because `src/platform/**` may not
+ * import an application store; the platform takes a predicate and never learns
+ * what a workspace is. See `modules/shell/workspaceLayout.ts` for the rule.
+ */
+function usePanelFilter(platform: Platform): (panel: PanelContribution) => boolean {
+  const workspaces = useRegistryEntries(platform.workspaces);
+  const activeId = useWorkspaceStore((s) => s.activeId);
+  const hidden = useWorkspaceStore((s) => s.hiddenPanels[s.activeId]);
+  return useMemo(() => {
+    const workspace = activeWorkspace(workspaces, activeId, DEFAULT_WORKSPACE_ID);
+    return resolvePanelVisibility(workspace, hidden ?? []).isVisible;
+  }, [workspaces, activeId, hidden]);
+}
+
 export function EditorShell() {
   const platform = usePlatform();
   useEditorContributions(platform);
   useShortcuts();
+  const isVisible = usePanelFilter(platform);
+
+  // Which of this document's modules this build does not have. Real data: the
+  // Rust layer answers `listDocumentModules`, and the diff is what the
+  // missing-extension banner reports (ADR-0005 — preserved, and SAID SO).
+  useEffect(() => {
+    const store = extensionsStore.getState();
+    store.reset();
+    void store.refresh(platform.moduleIds());
+  }, [platform]);
 
   // Relay the C++ sidecar's worker-status events into the store the status bar
   // reads (the real client listens to the backend; the mock never emits).
@@ -81,13 +123,13 @@ export function EditorShell() {
 
   return (
     <div className="flex h-full w-full select-none flex-col overflow-hidden bg-surface font-ui">
-      <SlotHost slot={Slots.ShellTop} />
+      <SlotHost slot={Slots.ShellTop} filter={isVisible} />
       <div className="relative min-h-0 flex-1">
         {EDITOR_REGIONS.map((region) =>
           region === "viewport" ? (
             <ViewportRoot key={region} className="absolute inset-x-0 bottom-[34px] top-0" />
           ) : (
-            <SlotHost key={region} slot={region} />
+            <SlotHost key={region} slot={region} filter={isVisible} />
           ),
         )}
       </div>

@@ -21,6 +21,7 @@ export {
   usePlatform,
   useOptionalPlatform,
   useRegistryEntries,
+  useRegistryRegistrations,
   useActiveToolId,
 } from "./react/PlatformProvider";
 export { SlotHost, useSlotContributions } from "./react/SlotHost";

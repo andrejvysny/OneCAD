@@ -1,3 +1,5 @@
+import { documentStore } from "@/stores/documentStore";
+import { extensionsStore } from "@/stores/extensionsStore";
 import { repairStore } from "@/stores/repairStore";
 import { selectionStore } from "@/stores/selectionStore";
 import { sketchStore } from "@/stores/sketchStore";
@@ -25,4 +27,12 @@ export function resetDocumentScopedUi(): void {
   repairStore.getState().reset();
   sketchStore.getState().reset();
   toolChipStore.getState().clear();
+  // The missing-extension notice and its dismissal are per-DOCUMENT: a new file
+  // gets the notice offered again, and the outgoing file's missing modules must
+  // not be reported against it. `EditorShell` re-runs the diff on mount, but a
+  // document swapped WITHOUT remounting the editor never triggers that.
+  extensionsStore.getState().reset();
+  // The rename override names ONE document. `applySnapshot` already drops it on
+  // a documentId change; this covers the mock lane, which carries no id.
+  documentStore.getState().setDisplayTitle(null);
 }

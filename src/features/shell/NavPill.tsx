@@ -1,5 +1,8 @@
+import { useRef, type Ref } from "react";
 import { cn } from "@/ui/cn";
 import { Tooltip } from "@/ui/Tooltip";
+import { LayersMenu } from "@/features/layers/LayersMenu";
+import { useLayersStore } from "@/stores/layersStore";
 import { Icon } from "@/icons/Icon";
 import type { IconName } from "@/icons/paths";
 import { useViewportStore } from "@/stores/viewportStore";
@@ -12,6 +15,7 @@ function NavButton({
   active = false,
   disabled = false,
   onClick,
+  ref,
 }: {
   icon: IconName;
   label: string;
@@ -20,10 +24,12 @@ function NavButton({
   active?: boolean;
   disabled?: boolean;
   onClick: () => void;
+  ref?: Ref<HTMLButtonElement>;
 }) {
   return (
     <Tooltip label={label}>
       <button
+        ref={ref}
         type="button"
         aria-label={label}
         aria-pressed={active}
@@ -60,6 +66,9 @@ export function NavPill() {
   const toggleIsolate = useViewportStore((s) => s.toggleIsolate);
   const isolated = useViewportStore((s) => s.isolatedBodyIds !== null);
   const hasBodySelection = useSelectionStore((s) => selectedBodyIds(s.selected).length > 0);
+  const layersOpen = useLayersStore((s) => s.open);
+  const toggleLayers = useLayersStore((s) => s.toggleOpen);
+  const layersBtn = useRef<HTMLButtonElement | null>(null);
 
   return (
     <div className="absolute bottom-[46px] left-[228px] z-[25] flex gap-0.5 rounded-md border border-border bg-surface p-[3px] shadow-ctrl">
@@ -74,11 +83,14 @@ export function NavPill() {
         onClick={toggleIsolate}
       />
       <NavButton
+        ref={layersBtn}
         icon="layers"
-        label="View presets"
+        label="Viewport layers"
         strokeWidth={1.6}
-        onClick={() => {}}
+        active={layersOpen}
+        onClick={toggleLayers}
       />
+      <LayersMenu anchorRef={layersBtn} />
     </div>
   );
 }

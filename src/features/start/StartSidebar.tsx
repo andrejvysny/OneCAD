@@ -14,6 +14,7 @@ type StartSidebarProps = {
   active: StartNavKey;
   onNavigate: (key: StartNavKey) => void;
   onOpenSettings: () => void;
+  onOpenExtensions: () => void;
   version: string;
 };
 
@@ -26,6 +27,7 @@ export function StartSidebar({
   active,
   onNavigate,
   onOpenSettings,
+  onOpenExtensions,
   version,
 }: StartSidebarProps) {
   return (
@@ -55,6 +57,19 @@ export function StartSidebar({
 
       <span className="flex-1" />
 
+      {/* Extensions sits with Settings, BELOW the rule — it is application
+          configuration, not project content, so grouping it with
+          Recent/Starred/Templates would have said the opposite (prototype 2d). */}
+      <div aria-hidden="true" className="mx-2 my-2 h-px bg-border" />
+      <button
+        type="button"
+        data-testid="start-extensions"
+        onClick={onOpenExtensions}
+        className="mb-0.5 flex h-8 cursor-pointer items-center gap-2 rounded-sm px-2 text-left font-ui text-[13px] text-ink-3 hover:bg-hover-2"
+      >
+        <Icon name="puzzle" size={14} strokeWidth={1.6} />
+        Extensions
+      </button>
       <button
         type="button"
         onClick={onOpenSettings}

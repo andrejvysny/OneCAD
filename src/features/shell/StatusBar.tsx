@@ -2,6 +2,7 @@ import { useState } from "react";
 import { cn } from "@/ui/cn";
 import { Icon } from "@/icons/Icon";
 import { SettingsModal } from "@/features/settings/SettingsModal";
+import { TasksChip } from "@/features/tasks/TasksChip";
 import { SegmentedToggle } from "@/ui/SegmentedToggle";
 import { MonoValue } from "@/ui/MonoValue";
 import { useToolStore } from "@/stores/toolStore";
@@ -74,6 +75,8 @@ export function StatusBar() {
       <span className={cn("font-medium", showDof ? "text-warn" : "text-ink-6")}>
         {dofText}
       </span>
+      {/* Renders nothing while nothing is running (prototype 2a). */}
+      <TasksChip />
       <span className="flex-1" />
       <SegmentedToggle
         ariaLabel="Projection"

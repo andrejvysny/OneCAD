@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useReducer } from "react";
 import { cn } from "@/ui/cn";
 import { useToolStore } from "@/stores/toolStore";
+import { useWorkspaceStore } from "@/stores/workspaceStore";
 import {
   usePlatform,
   useRegistryEntries,
@@ -50,14 +51,24 @@ export function FloatingToolbar() {
   // selection or the scope could only ever answer "no" (Codex review, P2.5).
   const context = useModelingToolContext();
 
+  // Tool groups the user switched off in "Customize workspace…". Filtering
+  // here rather than in the registry is deliberate: the tool stays registered,
+  // reachable by shortcut and by the command palette — the workspace only
+  // decides what earns toolbar real estate.
+  const hiddenGroups = useWorkspaceStore((s) => s.hiddenToolGroups[s.activeId]);
+
   const token = toolbarScopeToken(mode);
   const entries = useMemo(
-    () =>
-      tools.filter(
-        (t) => t.scopes === undefined || t.scopes.length === 0 || t.scopes.includes(token),
-      ),
+    () => {
+      const hidden = new Set(hiddenGroups ?? []);
+      return tools.filter(
+        (t) =>
+          (t.scopes === undefined || t.scopes.length === 0 || t.scopes.includes(token)) &&
+          !(t.group !== undefined && hidden.has(t.group)),
+      );
+    },
     // `tools` is the subscription: a registry change gives a new snapshot.
-    [tools, token],
+    [tools, token, hiddenGroups],
   );
 
   // `canActivate` is a predicate read during render, so the owner has to say when

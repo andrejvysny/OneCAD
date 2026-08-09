@@ -800,6 +800,31 @@ export class ViewportEngine {
     this.invalidate();
   }
 
+  /**
+   * Show or hide a whole VIEWPORT LAYER — the Layers menu's control.
+   *
+   * Distinct from per-entity visibility, which is a DOCUMENT fact the backend
+   * owns and `SetVisibility` persists. This is a transient view filter: nothing
+   * here is written anywhere, and reopening the document brings every layer
+   * back. Toggling the group is deliberately how it is done — Three's raycaster
+   * skips invisible objects, so a hidden layer stops being pickable too, which
+   * is what "hidden" has to mean for a filter that exists to get things out of
+   * the way.
+   *
+   * `contributions` covers in-scene contributions as a group (datums today).
+   */
+  setLayerVisible(layer: "bodies" | "sketches" | "contributions", visible: boolean): void {
+    const root =
+      layer === "bodies"
+        ? this.bodiesRoot
+        : layer === "sketches"
+          ? this.sketchRoot
+          : this.contributionsRoot;
+    if (root.visible === visible) return;
+    root.visible = visible;
+    this.invalidate();
+  }
+
   homeView(): void {
     this.controls?.homeView(true);
   }

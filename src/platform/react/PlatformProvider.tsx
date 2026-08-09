@@ -9,7 +9,7 @@
 import { createContext, useContext, useSyncExternalStore, type ReactNode } from "react";
 import type { ToolId } from "../ids";
 import type { Platform } from "../platform";
-import type { Contribution, Registry } from "../registry";
+import type { Contribution, Registered, Registry } from "../registry";
 
 const PlatformContext = createContext<Platform | null>(null);
 
@@ -44,6 +44,21 @@ export function useOptionalPlatform(): Platform | null {
  */
 export function useRegistryEntries<T extends Contribution>(registry: Registry<T>): readonly T[] {
   return useSyncExternalStore(registry.subscribe, registry.entries, registry.entries);
+}
+
+/**
+ * The same, with ownership metadata.
+ *
+ * Separate from `useRegistryEntries` rather than replacing it: WHO registered a
+ * contribution is a question only a few surfaces ask (the workspace menu splits
+ * built-ins from add-ons, the extensions manager lists by owner), and handing
+ * every consumer the owner would invite reading it where the id alone is the
+ * right currency.
+ */
+export function useRegistryRegistrations<T extends Contribution>(
+  registry: Registry<T>,
+): readonly Registered<T>[] {
+  return useSyncExternalStore(registry.subscribe, registry.registrations, registry.registrations);
 }
 
 /** The active tool id, or null. Same subscription contract as above. */

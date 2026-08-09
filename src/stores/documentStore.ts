@@ -174,6 +174,23 @@ export interface DocumentState extends DocumentProjection {
    * The status bar shows "Rebuilding…" while it is > 0.
    */
   regenBusy: number;
+  /**
+   * A name the user typed in the title bar, or null.
+   *
+   * NOT a projection fact, and deliberately kept OUT of `title`: `title` is
+   * backend-authoritative and every `projection-updated` replaces it, so a
+   * local write there would silently revert on the next regen.
+   *
+   * FLAGGED — this is display-only. There is no `RenameDocument` command in the
+   * protocol yet (the Rust runtime derives its title from the file it was
+   * loaded from, and `renameRecentProject` needs a path the editor does not
+   * hold), so nothing here reaches disk. Renaming persistently is a Save As
+   * until that command lands. Cleared whenever a DIFFERENT document arrives —
+   * carrying one document's nickname onto another would be worse than losing it.
+   */
+  displayTitle: string | null;
+  /** Set (or clear, with null) the local title override. */
+  setDisplayTitle(title: string | null): void;
   /** A regen job started (`regen-started`). */
   regenStarted(): void;
   /** A regen job completed (`regen-finished`). CLAMPED at zero: a no-op regen
@@ -366,6 +383,11 @@ function initialDocument(): DocumentProjection {
 export const documentStore = createStore<DocumentState>()((set) => ({
   ...initialDocument(),
   regenBusy: 0,
+  displayTitle: null,
+
+  setDisplayTitle(displayTitle) {
+    set({ displayTitle });
+  },
 
   regenStarted() {
     set((s) => ({ regenBusy: s.regenBusy + 1 }));
@@ -380,7 +402,16 @@ export const documentStore = createStore<DocumentState>()((set) => ({
   },
 
   applySnapshot(snapshot) {
-    set(snapshot);
+    set((s) => ({
+      ...snapshot,
+      // A nickname belongs to ONE document. `documentId` is absent on the mock
+      // lane (same-document semantics), where a snapshot never means "a
+      // different file", so the override survives there.
+      displayTitle:
+        snapshot.documentId !== undefined && snapshot.documentId !== s.documentId
+          ? null
+          : s.displayTitle,
+    }));
   },
 
   applyChange(change) {

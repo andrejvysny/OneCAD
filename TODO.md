@@ -113,6 +113,49 @@ P3 does not start over a surface where three registries are generic at the contr
 - [x] **Deliberately NOT registered in `bootstrap.ts`** — shipping a fake "Widgets" panel into the product UI to prove an architectural point is a worse trade than proving it in tests. It becomes the addon loader's first package when the loader lands.
 - [x] `architecture.test.ts` enforces both directions (addon ⇏ application, SDK ⇏ application implementation), plus a runtime-surface snapshot of the SDK barrel and an explicit "the SDK does not export the host" check. Both new rules carry the positive-control pattern.
 
+## MODULAR-PLATFORM UI (2026-08-09) — design turn 2 implemented, FE gate PASSED
+
+Source: `claude.ai/design/p/f68f85fa` → `OneCAD UI Explorations.dc.html`, turn 2
+("Modular platform — workspaces, extensions, palette, missing add-ons"), options
+2a–2d. Read via the `claude_design` MCP; nothing from the design project is
+vendored into the repo.
+
+**This is the first DELIBERATE user-visible change since the platform refactor.**
+`src/test/contracts/shellContract.ts` was amended for it (six new shell
+contributions, nothing existing moved) — recorded here because the contracts
+README requires an explicit decision, never a refactor-driven edit.
+
+### What is REAL (bound to something that exists)
+- [x] **Workspace selector** in the title bar, projected off `platform.workspaces`. Four shell workspaces registered (Design + Simulation/Drawing/Visualization); an add-on's workspace lands in its own ADD-ONS group automatically, and an empty group renders nothing.
+- [x] **Workspace panel filtering**: `SlotHost` takes a `filter` predicate; `modules/shell/workspaceLayout.ts` resolves it. Rule is CONSERVATIVE — a panel is hidden only on an explicit `visible:false` placement or a user override. "Unlisted ⇒ hidden" would silently swallow every tool overlay.
+- [x] **⌘K command palette**, projected off `commands` + `tools` + `workspaces` registries. No palette registry: anything registered is findable, nothing opts in. Disabled entries stay visible with their owner's `reason`.
+- [x] **Missing-extension banner + details dialog + "Unavailable data" explorer section**, all from the REAL `listDocumentModules()` ⋂ `platform.moduleIds()` diff. This is ADR-0005 made visible.
+- [x] **Extensions manager** — Installed tab lists real modules with their lifecycle state and a count of what each contributed.
+- [x] **Viewport layers menu** on the NavPill's previously-dead "View presets" button. New `ViewportEngine.setLayerVisible()` toggles `bodiesRoot`/`sketchRoot`/`contributionsRoot`; grid reuses the existing `viewportStore` flag (one piece of state, two entry points).
+- [x] **Collapsible explorer sections** + `TreeNode.meta` / `TreeNode.problem` / `TreeSection.defaultCollapsed` / `TreeSection.emptyNote` (additive platform contract).
+- [x] **Customize workspace sheet** — panels/tool groups/layers all DERIVED from the registries, never enumerated. Tool-group hiding filters `FloatingToolbar` only; the tool stays registered and reachable by shortcut and palette.
+- [x] **Start-screen Extensions entry** (2d), with Settings below the rule — configuration, not project content.
+- [x] **Title-bar buttons unified** behind one `TitleBarButton` (28px · 6px radius · ghost). Home/File/workspace/⌘K were three different hand-rolled geometries in a row.
+- [x] **File ▸ Rename…** (moved out of the title bar at user request — a title inside the drag region is a rename you trigger by accident).
+
+### What is UI-ONLY, and why (no backend exists)
+- **Extensions Browse / Updates** render an explicit "no registry configured" empty state. Deliberately NOT a mock catalog: dead Install buttons teach users the feature is broken, and fake listings outlive the mock. There is no addon loader (`platform/extension.ts` closing note).
+- **Enable/disable + uninstall** are absent rather than inert — a half-unloaded built-in module is not a state the app is designed to run in.
+- **Background-tasks chip** (`tasksStore`, status bar) has a real `begin/setProgress/end` API and renders an INDETERMINATE bar when `progress` is undefined. Nothing calls it yet: regen is request/response over OCW1 with no progress frames. **FLAGGED** — first producer should be regen once the protocol can report progress.
+- **Simulation / Drawing / Visualization** are real registered arrangements with no module behind them: each switches modeling's tool surfaces OFF and shows a `WorkspacePlaceholder` naming what is missing. Leaving Extrude on screen under "Drawing" would have been worse.
+- **Rename is display-only** (`DocumentState.displayTitle`). There is no `RenameDocument` in the protocol — the Rust runtime derives the title from the file it loaded, and `renameRecentProject` needs a path the editor does not hold. The dialog SAYS the file is untouched. **FLAGGED — next backend tranche.**
+
+### Flagged seams
+- `CommandPalette` imports `useModelingToolContext` from `@/modules/modeling`. Shell UI reaching a specific module: the palette needs a real selection context to evaluate `canExecute`, and no neutral selection SERVICE exists yet. Precedent: `ViewportRoot` → `datumViewport`. Fix is a module-published context service, not a cast.
+- `paletteStore`/`workspaceStore`/`layersStore` overrides are session-only — nothing persists yet.
+- `Popover` gained `top-start`, which measures the panel after mount (one frame at the seeded position, same as every other placement).
+
+### Gate (2026-08-09)
+- `bunx tsc --noEmit` clean · `bun run build` green · vitest **236 files / 3986 tests** green (was 227/3919; +9 files) · hex-token grep empty · Playwright **387 passed / 3 failed**.
+- The 3 e2e failures are pre-existing, verified not assumed: `sketch-reattach` (chromium) passes 3/3 isolated (load flake); both webkit `boolean-preview` failures reproduce in a clean worktree at HEAD `352ddd1` — the same failure already bisected to before the Platform refactor.
+- Rust/ctest untouched by this wave.
+- REMAINING: manual Mac smoke (`bun run tauri dev`) — the workspace filter and the new `shell.overlay` region are layout changes no jsdom test can prove.
+
 ## NEXT SESSION — three work packages (2026-08-08, handoff)
 
 Read `HANDOFF.md` § Session 4 first. P1 is another program's open gate; P2 finishes what the platform refactor left half-done; P3 is the next real tranche. **Do P2 before P3** — an SDK frozen over a half-converted surface freezes the wrong shape.

@@ -231,6 +231,18 @@ export interface TreeNode {
   readonly selected: boolean;
   /** Rendered dimmed — shown but not currently in play. */
   readonly dimmed?: boolean;
+  /**
+   * A short trailing value the row carries (a load magnitude, "not installed").
+   * Right-aligned mono, and NOT a second label: the host truncates the label
+   * before it truncates this, so a row whose meaning lives in the value keeps it.
+   */
+  readonly meta?: string;
+  /**
+   * The row names something wrong (missing owner, unresolved reference). The
+   * host tints it with the caution treatment. Opaque to the host beyond that —
+   * WHAT is wrong is the owner's to say, through `meta` or an action.
+   */
+  readonly problem?: boolean;
   /** Absent ⇒ this row has no visibility fact at all. */
   readonly visible?: boolean;
   select(): void;
@@ -245,6 +257,19 @@ export interface TreeSection {
   readonly id: string;
   readonly title: string;
   readonly nodes: readonly TreeNode[];
+  /**
+   * How the section OPENS the first time this workspace shows it. The user's
+   * later expand/collapse wins and is remembered by the host — this is a
+   * default, not a controlled value, which is why the provider is not asked to
+   * hold the open/closed state it would otherwise have to thread through
+   * `sections()` on every render.
+   */
+  readonly defaultCollapsed?: boolean;
+  /**
+   * Shown under the section when it has no rows — "Run Solve to see results."
+   * An empty section with nothing to say renders as a bare header instead.
+   */
+  readonly emptyNote?: string;
 }
 
 /**
