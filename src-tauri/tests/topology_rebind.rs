@@ -54,7 +54,7 @@ use onecad_core::regen::{
 use onecad_core::sketch::{Constraint, CurvePosition, Sketch, SketchEntity, WorldPlane};
 
 use onecad_lib::document_runtime::{DocumentRuntime, RegenReport};
-use onecad_lib::worker::manager::SupervisorConfig;
+use onecad_lib::worker::manager::{SupervisorConfig, WorkerState};
 use onecad_lib::worker::wire::sketch_wire;
 use onecad_lib::worker::{resolve_worker_path, MeshProvider, SolverEngine, WorkerManager};
 
@@ -274,6 +274,13 @@ fn rect_at(sid: SketchId, base: u128, x0: f64, y0: f64, w: f64, h: f64) -> Sketc
 }
 
 fn sketch_record(sk: &Sketch) -> OperationRecord {
+    sketch_record_as(SKETCH_REC, sk)
+}
+
+/// [`sketch_record`] under an explicit RecordId, so a fixture can place a SECOND
+/// sketch in the same timeline. The `step_index` argument of `OperationRecord::new`
+/// is advisory — the timeline position comes from `AddOperation { at_cursor }`.
+fn sketch_record_as(rec: u128, sk: &Sketch) -> OperationRecord {
     let (_plane, entities, constraints) = sketch_wire(sk);
     let params = SketchOpParams {
         sketch: sk.id,
@@ -284,7 +291,7 @@ fn sketch_record(sk: &Sketch) -> OperationRecord {
         extra: Default::default(),
     };
     OperationRecord::new(
-        RecordId(Uuid::from_u128(SKETCH_REC)),
+        RecordId(Uuid::from_u128(rec)),
         0,
         "Sketch",
         Operation::Known(KnownOperation::Sketch(params)),
@@ -313,8 +320,13 @@ fn extrude_op(sketch: SketchId, region: &str, dist: f64) -> Operation {
 }
 
 fn extrude_record(sketch: SketchId, region: &str, dist: f64) -> OperationRecord {
+    extrude_record_as(EXTRUDE_REC, sketch, region, dist)
+}
+
+/// [`extrude_record`] under an explicit RecordId — see [`sketch_record_as`].
+fn extrude_record_as(rec: u128, sketch: SketchId, region: &str, dist: f64) -> OperationRecord {
     OperationRecord::new(
-        RecordId(Uuid::from_u128(EXTRUDE_REC)),
+        RecordId(Uuid::from_u128(rec)),
         1,
         "Extrude",
         extrude_op(sketch, region, dist),
@@ -2667,5 +2679,259 @@ async fn h5_benign_large_edit_measures_the_ladder() {
         );
     }
 
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VF-M5 — the TELEPORT scene and its two lanes (WP0.0)
+//
+// `from_zero_replay` gates exactly ONE thing: the anchor-exact carve-out inside
+// the post-edit descriptor-tie veto (`Ladder.cpp`). Reaching it needs geometry
+// where the anchor-exact winner is the WRONG element — a congruent decoy parked
+// precisely on the stale anchor while the authored element moved away.
+//
+// Two constraints shaped this scene, both measured rather than assumed:
+//
+//  * The comb sketch sits at step 2, behind a throwaway body. A sketch at step 0
+//    can only be regenerated with `ToEnd { from: 0 }`, which claims no
+//    `editedFrom`, so `post_upstream_edit` is false and the veto never arms.
+//    That is why every H5 test uses `regen_all` and why none of them reach here.
+//  * The authored rib ends 48 mm from the anchor. At 20 mm the ordinary
+//    auto-bind margin gate (0.10) refuses first (measured margin 0.0745) and the
+//    carve-out never gets to decide, which would make the fixture vacuous.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const DUMMY_SK_REC: u128 = 0x5d00;
+const DUMMY_EX_REC: u128 = 0xe100;
+
+/// Rib placements. Both ribs are `RIB_NARROW`, so they are exact descriptor twins
+/// and volume can never discriminate between them — the centroid is the evidence.
+const TP_BEFORE_LEFT: (f64, f64) = (24.0, RIB_NARROW); // [24,36],   mid 30 — the twin
+const TP_BEFORE_RIGHT: (f64, f64) = (54.0, RIB_NARROW); // [54,66],   mid 60 — AUTHORED
+const TP_AFTER_LEFT: (f64, f64) = (54.0, RIB_NARROW); // [54,66],   mid 60 — DECOY, on the anchor
+const TP_AFTER_RIGHT: (f64, f64) = (102.0, RIB_NARROW); // [102,114], mid 108 — AUTHORED, moved
+
+fn rib_mid(rib: (f64, f64)) -> f64 {
+    rib.0 + rib.1 / 2.0
+}
+
+/// Steps 0,1 — a throwaway body parked far away, so the comb sketch lands at step 2.
+async fn teleport_prefix(rt: &mut DocumentRuntime) -> BodyId {
+    let dummy_sid = SketchId(Uuid::from_u128(0x5DD));
+    add_op(
+        rt,
+        sketch_record_as(
+            DUMMY_SK_REC,
+            &rect_at(dummy_sid, 0x9000, 200.0, 0.0, 10.0, 10.0),
+        ),
+    );
+    add_op(rt, extrude_record_as(DUMMY_EX_REC, dummy_sid, "", 10.0));
+    let rep = regen_all(rt).await;
+    let _ = published(&rep, "teleport prefix");
+    rep.changed[0].0
+}
+
+/// Steps 2,3,4 — the comb, and a fillet on the AUTHORED (right) rib's top edge.
+async fn teleport_suffix(
+    wm: &WorkerManager,
+    rt: &mut DocumentRuntime,
+    sid: SketchId,
+    dummy_body: BodyId,
+) -> (BodyId, Vec3) {
+    add_op(
+        rt,
+        sketch_record_as(
+            SKETCH_REC,
+            &comb_sketch(sid, TP_BEFORE_LEFT, TP_BEFORE_RIGHT),
+        ),
+    );
+    add_op(rt, extrude_record_as(EXTRUDE_REC, sid, "", COMB_DEPTH));
+    let rep = regen_all(rt).await;
+    let _ = published(&rep, "teleport comb");
+    let body = rep
+        .changed
+        .iter()
+        .map(|c| c.0)
+        .find(|b| *b != dummy_body)
+        .expect("the comb body is the one the second extrude minted");
+
+    let mesh = body_mesh(rt, body).await;
+    let view = validate_mesh_blob(&mesh).expect("comb MESH1 validates");
+    let target = sketch_to_world(rib_mid(TP_BEFORE_RIGHT), RIB_TOP, 0.0);
+    let (edge_key, centroid, edge_len) = edge_pick_near(&view, &mesh, target);
+    assert!(
+        (edge_len - RIB_NARROW).abs() < 0.1,
+        "picked the authored rib's top edge (len {edge_len:.3})"
+    );
+    let anchor = AnchorIntent {
+        world_point: centroid,
+        surface_uv: None,
+        local_frame: None,
+        adjacency_hint: None,
+        extra: Default::default(),
+    };
+    let promoted = rt
+        .promote_selection(
+            SnapshotId(rep.snapshot_id),
+            body,
+            vec![(TopoKey::new(&edge_key), Some(anchor))],
+        )
+        .await
+        .expect("promote the authored rib's top edge");
+    let edge_el = ElementId::new(promoted[0].element_id.clone());
+    add_op(rt, fillet_record(body, edge_el, centroid, H5_RADIUS));
+    let fil = regen_all(rt).await;
+    let snap = published(&fil, "teleport fillet").clone();
+    assert_eq!(
+        snap.repair_summary.needs_repair_count, 0,
+        "precondition: the fillet APPLIES on the clean comb"
+    );
+    let (vol, _) = exact_mass(wm, body).await;
+    let removed = comb_volume(TP_BEFORE_LEFT.1, TP_BEFORE_RIGHT.1) - vol;
+    assert!(
+        (removed - fillet_removed(H5_RADIUS, RIB_NARROW)).abs() < 1e-6 * vol,
+        "precondition: the fillet removed the analytic wedge, got {removed:.6}"
+    );
+    (body, centroid)
+}
+
+/// The TELEPORT edit: the authored rib slides 60 → 108, its congruent twin slides
+/// 30 → 60, landing EXACTLY on the authored rib's stale anchor.
+fn teleport_edit(rt: &mut DocumentRuntime, sid: SketchId) {
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(SKETCH_REC)),
+        op: sketch_record(&comb_sketch(sid, TP_AFTER_LEFT, TP_AFTER_RIGHT)).op,
+    })
+    .expect("teleport the ribs");
+}
+
+/// Which rib did the fillet consume? Congruent ribs remove identical volume, so
+/// the only evidence is where the mass went: removing `removed` at sketch `u`
+/// shifts the body centroid's world Y (world Y **is** sketch u through
+/// [`sketch_to_world`]) by `removed·(Yc − u)/V`. The decoy sits BELOW the
+/// unfilleted centroid and the authored rib ABOVE it, so the two predictions have
+/// opposite sign and cannot be confused.
+fn teleport_bound_decoy(removed: f64, vol: f64, centroid_y: f64) -> bool {
+    let a_base = COMB_SPAN * BASE_TOP;
+    let a_rib = RIB_NARROW * (RIB_TOP - BASE_TOP);
+    let (ud, ua) = (rib_mid(TP_AFTER_LEFT), rib_mid(TP_AFTER_RIGHT));
+    let yc = (a_base * COMB_SPAN / 2.0 + a_rib * ud + a_rib * ua) / (a_base + 2.0 * a_rib);
+    let y_if_decoy = yc + removed * (yc - ud) / vol;
+    let y_if_authored = yc + removed * (yc - ua) / vol;
+    (centroid_y - y_if_decoy).abs() < (centroid_y - y_if_authored).abs()
+}
+
+/// **CHARACTERIZATION, not a gate.** On the ORDINARY edit lane the teleport is the
+/// documented, accepted residual (`Ladder.cpp` "TELEPORT residual", the H6a
+/// decision): the carve-out blesses a congruent decoy parked at the stale anchor,
+/// and locally there is nothing to separate them. VF-M5 does NOT change this lane —
+/// `checkpointFallbackReplay` is false here — so this test pins the boundary and
+/// must keep reporting the same thing after the protocol field lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn vfm5_teleport_on_the_ordinary_edit_lane_is_the_accepted_residual() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let sid = SketchId(Uuid::from_u128(0x5003));
+
+    let dummy = teleport_prefix(&mut rt).await;
+    let (body, anchor) = teleport_suffix(&wm, &mut rt, sid, dummy).await;
+    teleport_edit(&mut rt, sid);
+
+    let edited = regen_from(&mut rt, 2).await;
+    let snap = published(&edited, "teleport ordinary edit").clone();
+    let needs_repair = snap.repair_summary.needs_repair_count;
+    let (vol, c) = exact_mass(&wm, body).await;
+    let removed = comb_volume(TP_AFTER_LEFT.1, TP_AFTER_RIGHT.1) - vol;
+    let decoy = teleport_bound_decoy(removed, vol, c[1]);
+    eprintln!(
+        "VF-M5 ordinary lane: anchor=({:.1},{:.1},{:.1}) needsRepair={needs_repair} \
+         removed={removed:.4} centroidY={:.5} boundDecoy={decoy}",
+        anchor.x, anchor.y, anchor.z, c[1]
+    );
+
+    // Pins the SHIPPED behaviour, so a change here is a deliberate decision and not
+    // a side effect of the VF-M5 work: the ordinary lane still binds the decoy.
+    assert_eq!(
+        needs_repair, 0,
+        "the ordinary edit lane keeps the anchor-exact carve-out (H6a)"
+    );
+    assert!(
+        decoy,
+        "the accepted residual IS the decoy bind — if this flipped, the ordinary \
+         lane changed and that is out of VF-M5's scope"
+    );
+    wm.shutdown().await;
+}
+
+/// **LANE D — the VF-M5 gate.** The same teleport, but reached through the F12
+/// fallback: the plan selects a checkpoint, the worker cannot restore it, and the
+/// executor re-plans as a replay-from-0 that KEEPS its `editedFrom`
+/// (`regen/executor.rs`, `AttemptOutcome::RetryFromZero`). The anchors were frozen
+/// against a basis this replay does not reproduce, so the carve-out must NOT bless
+/// the decoy here even though it legitimately does on the ordinary lane.
+///
+/// RED before the `checkpointFallbackReplay` protocol field exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn vfm5_lane_d_checkpoint_fallback_replay_must_not_bind_the_decoy() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let sid = SketchId(Uuid::from_u128(0x5004));
+
+    // Steps 0,1 → checkpoint at head (step 1), i.e. BEFORE the step the edit
+    // dirties, which is what makes the planner able to select it.
+    let dummy = teleport_prefix(&mut rt).await;
+    rt.take_checkpoint_at_head().await;
+    assert_eq!(rt.checkpoint_count(), 1, "checkpoint minted at step 1");
+
+    let (body, _anchor) = teleport_suffix(&wm, &mut rt, sid, dummy).await;
+    teleport_edit(&mut rt, sid);
+
+    // Kill the worker: the restart is a new process whose in-session checkpoint map
+    // is EMPTY, so the restore reports `restored:false` and the executor takes F12.
+    let epoch_before = wm.epoch().0;
+    wm.shutdown().await;
+    let mut restarted = false;
+    for _ in 0..200 {
+        if wm.epoch().0 > epoch_before && wm.state() == WorkerState::Ready {
+            restarted = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(restarted, "worker restarted after the kill");
+    rt.on_worker_restart(wm.epoch());
+
+    let edited = regen_from(&mut rt, 2).await;
+    assert!(
+        rt.last_regen_used_checkpoint(),
+        "precondition: the plan SELECTED the checkpoint, so the restore path is reached"
+    );
+    let snap = published(&edited, "teleport F12 replay").clone();
+    let needs_repair = snap.repair_summary.needs_repair_count;
+    let (vol, c) = exact_mass(&wm, body).await;
+    let removed = comb_volume(TP_AFTER_LEFT.1, TP_AFTER_RIGHT.1) - vol;
+    let decoy = teleport_bound_decoy(removed, vol, c[1]);
+    eprintln!(
+        "VF-M5 LANE D: needsRepair={needs_repair} removed={removed:.4} \
+         centroidY={:.5} boundDecoy={decoy}",
+        c[1]
+    );
+
+    assert!(
+        !(decoy && needs_repair == 0),
+        "SILENT WRONG BIND on a checkpoint-fallback replay: the fillet consumed the \
+         DECOY parked on the stale anchor (removed {removed:.4}, centroidY {:.5}) and \
+         reported no repair. The anchors were frozen against a basis this replay does \
+         not reproduce, so the anchor-exact carve-out must be disabled here.",
+        c[1]
+    );
     wm.shutdown().await;
 }

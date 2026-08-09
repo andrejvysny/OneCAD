@@ -223,6 +223,12 @@ pub fn execute_plan_args(req: &PlanRequest) -> Value {
     if let Some(edited_from) = req.edited_from {
         args["editedFrom"] = json!(edited_from);
     }
+    // OPTIONAL `checkpointFallbackReplay` (SCHEMA §7.2), same omission rule: the
+    // key appears ONLY when true, so an ordinary plan is byte-identical to what it
+    // was before this field existed and `false` never has to be spelled out.
+    if req.checkpoint_fallback_replay {
+        args["checkpointFallbackReplay"] = json!(true);
+    }
     if let Some(t) = &req.artifacts.tessellate {
         args["artifacts"] =
             json!({ "tessellate": { "lod": lod_str(t.lod), "includeEdges": t.include_edges } });

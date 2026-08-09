@@ -391,6 +391,9 @@ impl RegenPlan {
             // compiled. The caller that owns the triggering `RegenRequest` stamps it
             // via `PlanRequest::with_edited_from` (SCHEMA §7.2).
             edited_from: None,
+            // Likewise: only the executor's F12 fallback may claim this, and it
+            // stamps it via `PlanRequest::as_checkpoint_fallback_replay`.
+            checkpoint_fallback_replay: false,
         }
     }
 }

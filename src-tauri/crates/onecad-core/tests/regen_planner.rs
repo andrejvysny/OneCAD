@@ -403,6 +403,57 @@ async fn checkpoint_restore_drift_retries_from_zero() {
     );
     assert_eq!(log.plans[0].ops.len(), 4, "retry replays all 4 steps");
     assert_eq!(exec.engine().restore_calls(), 1, "restore attempted once");
+    // SCHEMA §7.2: the retry — and ONLY the retry — claims the fallback provenance.
+    // Without this the worker cannot tell it from an ordinary replay-from-0, which
+    // is the whole of VF-M5 (see topology_rebind.rs lane D).
+    assert!(
+        log.plans[0].checkpoint_fallback_replay,
+        "the F12 retry MUST mark itself as a checkpoint-fallback replay"
+    );
+}
+
+#[tokio::test]
+async fn an_ordinary_plan_never_claims_the_checkpoint_fallback() {
+    // The negative control for the assertion above: a plain from-0 regen with no
+    // checkpoint in play is byte-identical in shape to the F12 retry, so the flag
+    // is the ONLY thing separating them and it must stay off here.
+    let tl = timeline_of(3);
+    let plan = RegenPlanner::plan(
+        &tl,
+        &DependencyGraph::new(),
+        &[],
+        RegenRequest::ToEnd { from: 0 },
+        &default_ctx(),
+    );
+    assert!(plan.restore.is_none(), "precondition: no checkpoint chosen");
+    let req = plan.into_request(
+        JOB,
+        REV,
+        EPOCH,
+        PolicyVersions::default(),
+        PlanArtifacts::default(),
+    );
+    assert!(
+        !req.checkpoint_fallback_replay,
+        "into_request defaults the claim to absent"
+    );
+
+    let exec = RegenExecutor::new(FakeEngine::all_ok());
+    let mut session = RegenSession::with_timeline(tl);
+    let publisher = SnapshotPublisher::new();
+    let gate = move || (REV, EPOCH);
+    let cancel = CancelToken::new();
+    let out = exec
+        .run(req, &mut session, &gate, &cancel, &publisher)
+        .await;
+    assert!(matches!(out, Outcome::Published(_)), "got {out:?}");
+    let log = exec.engine().log();
+    assert_eq!(log.plans.len(), 1);
+    assert!(
+        !log.plans[0].checkpoint_fallback_replay,
+        "an ordinary regen must never claim it — that claim disables the §10 \
+         anchor-exact carve-out and would NeedsRepair the shipped edit lane"
+    );
 }
 
 #[tokio::test]

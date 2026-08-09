@@ -2471,6 +2471,7 @@ mod poison_tests {
             target_step: 1,
             artifacts: PlanArtifacts::default(),
             edited_from: None,
+            checkpoint_fallback_replay: false,
         }
     }
 

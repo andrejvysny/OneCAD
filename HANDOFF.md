@@ -428,7 +428,18 @@ the whole suite. They land with M4.
 6. **KBR case-v1 stays frozen.** Never edit `case.rs` or `case-v1.schema.json`.
    `examples/` is NOT contractual; `regressions/` and `presets/` are.
 
-## VF-M5 gate regression (read before resume)
+## VF-M5 gate regression (RESOLVED 2026-08-09 — kept for the record)
+
+**Both halves are now closed, and one claim below is FALSE.** The regression was
+real and was fixed by `from_zero_replay = false`. But "V1 has no checkpoint
+plumbing / there are no restores" is wrong: checkpoints are plumbed end to end and
+the regen executor's F12 fallback reaches exactly the hazardous lane. That residual
+is now closed by the SCHEMA §7.2 `checkpointFallbackReplay` field, which is the
+"plumb one" option this note offered — proven red-first by
+`topology_rebind::vfm5_lane_d_checkpoint_fallback_replay_must_not_bind_the_decoy`.
+See `TODO.md` § VF-M5 RESIDUAL. The text below is the original note, unedited.
+
+### Original note
 
 **The `from_zero_replay` gate in `069bb48` is WRONG and re-opens the defect-fix
 gate.** Real-worker lane (`ONECAD_REQUIRE_WORKER=1 cargo test --workspace`,

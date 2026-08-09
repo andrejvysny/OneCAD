@@ -1186,6 +1186,35 @@ fn planner_hash_decoupled_from_wire_body_form() {
         serde_json::json!(2),
         "the edit lane stamps the step index verbatim"
     );
+
+    // (4) SCHEMA §7.2 `checkpointFallbackReplay`, same omission rule. Only the
+    //     executor's F12 fallback claims it, so an ordinary plan must be byte
+    //     identical to what it was before the field existed — `false` is never
+    //     spelled out, and it is never `null`.
+    assert!(
+        args.get("checkpointFallbackReplay").is_none(),
+        "an ordinary plan OMITS the key entirely: {args}"
+    );
+    assert!(
+        edited.get("checkpointFallbackReplay").is_none(),
+        "an ordinary EDIT plan omits it too — the two flags are independent: {edited}"
+    );
+    let fallback = execute_plan_args(
+        &req.clone()
+            .with_edited_from(Some(2))
+            .as_checkpoint_fallback_replay(),
+    );
+    assert_eq!(
+        fallback["checkpointFallbackReplay"],
+        serde_json::json!(true),
+        "the F12 fallback claims it, and carries its editedFrom forward"
+    );
+    assert_eq!(
+        fallback["editedFrom"],
+        serde_json::json!(2),
+        "the retry re-plans but the EDIT CONTEXT is a property of why the regen was \
+         requested, so it rides along"
+    );
 }
 
 /// The golden history-prefix hash of the fixed one-Boolean document above. Pinned so

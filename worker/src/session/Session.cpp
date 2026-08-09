@@ -134,10 +134,15 @@ FenceOutcome Session::fence_and_clone(std::uint64_t job_id,
 
     // Fencing: expectedBaseHash must equal the head's historyPrefixHash — EXCEPT for
     // a from-0 plan (D5). A from-0 plan is one with NO base checkpoint AND
-    // expectedBaseHash == the empty-prefix anchor (kEmptyPrefixHash). V1 has no
-    // checkpoint plumbing (SaveCheckpoint/RestoreCheckpoint UNSUPPORTED — the worker
-    // never reads baseCheckpoint), so "no base checkpoint" holds trivially and a
-    // from-0 plan is exactly one whose expectedBaseHash is the empty anchor.
+    // expectedBaseHash == the empty-prefix anchor (kEmptyPrefixHash).
+    //
+    // `ExecutePlan` does not read `baseCheckpoint` — a restore is a SEPARATE verb
+    // (io/Checkpoint.cpp `RestoreCheckpoint`, which Rust calls before the plan) —
+    // so "no base checkpoint" is not something this function can observe and a
+    // from-0 plan is identified here purely by its empty-anchor expectedBaseHash.
+    // (An earlier comment claimed checkpoints were UNSUPPORTED in V1. They are not:
+    // they are plumbed end to end, and a plan whose restore failed arrives here as
+    // an ordinary from-0 plan carrying `checkpointFallbackReplay` — see §7.2.)
     //
     // D5: a from-0 plan is ALWAYS base-valid — its base IS empty by definition, so
     // the precondition is satisfiable regardless of the head. The RegenPlanner always

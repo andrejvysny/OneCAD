@@ -480,6 +480,7 @@ failure/NeedsRepair preparing snapshot `m−1`, and ends with a terminal
   "prefixHashes": [ "a1b2…", "c3d4…", "e5f6…" ],  // opaque per-executed-op tokens
   "baseCheckpoint": { "stepIndex": 2, "checkpointId": "ckpt_9" },  // optional
   "editedFrom": 4,                            // optional — step of the upstream content edit
+  "checkpointFallbackReplay": true,           // optional — this replay stands in for a failed checkpoint plan
   "policyVersions": { "quantizationVersion": 1, "solverPolicyVersion": 1,
                       "descriptorVersion": 1, "resolverVersion": 1, "signatureVersion": 1 },
   "targetStep": 6,
@@ -561,6 +562,32 @@ failure/NeedsRepair preparing snapshot `m−1`, and ends with a terminal
   requested. The worker MUST tolerate its absence (pre-`resolverVersion`-2
   behaviour) and SHOULD treat a non-integer value as absent rather than as an
   error, per [§4](#4-json-encoding-rules).
+
+- **`checkpointFallbackReplay` (OPTIONAL) — the replay-provenance declaration.**
+  `true` iff this plan is a replay **substituted for a checkpoint plan that failed
+  before its first `planStep`** — a restore that reported `restored:false`, a
+  restore that reported drift, or a pre-step engine failure or crash. Rust's regen
+  executor sets it on that fallback re-plan and **nowhere else**; absent (the
+  default) means an ordinary regen, including an ordinary replay-from-0.
+  It carries no fencing and changes no geometry. It gates exactly one thing: the
+  **anchor-exact carve-out** inside the [§10](#10-resolution-ladder) descriptor-tie
+  veto. Stored anchors are world-frozen at ref-authoring time; on this lane the
+  basis they were frozen against is one the restore failed to reproduce, so an
+  element sitting exactly on a stored anchor has NOT demonstrably "stayed put" and
+  must not be allowed to settle a tie. On every other lane the carve-out stays ON —
+  the teleport case there (an edit that parks a congruent twin precisely at the
+  stale anchor) remains the accepted, documented residual.
+  **Why this cannot be derived worker-side.** The fallback re-plan and an ordinary
+  replay-from-0 are byte-identical as plans: same empty `expectedBaseHash` anchor,
+  same absent `baseCheckpoint`, same op list. Partition emptiness does not stand in
+  for it either — under [D5](#72-regen) *every* from-0 plan clones an empty base, so
+  that discriminator is true of every ordinary regen and degenerates to
+  `editedFrom.is_some()`, which vetoes the ordinary edit lane. Only Rust knows the
+  provenance, so only Rust may declare it.
+  The worker MUST tolerate its absence and SHOULD treat a non-boolean value as
+  absent rather than as an error, per [§4](#4-json-encoding-rules). It is meaningful
+  only together with `editedFrom` — the veto it gates is itself edit-scoped — but
+  the two are independent fields and either may appear without the other.
 
 Per-step `event`s (`event:"planStep"`), one per executed step:
 
@@ -2499,6 +2526,14 @@ and back Invariant 5 and checkpoint drift detection.
   (`protocol/fixtures/`) + cross-track sign-off (worker + Rust + orchestrator).**
 - Golden fixtures in `protocol/fixtures/` are the executable form of this
   contract; both sides run them in CI.
+- **App and worker deploy LOCKSTEP, by construction.** The worker ships as a Tauri
+  `bundle.externalBin` sidecar staged into the app bundle, so a build cannot pair a
+  new Rust side with an old worker binary. An OPTIONAL additive field therefore does
+  not need capability negotiation — but it does need this to stay true: nothing may
+  resolve the worker from outside the bundle in a shipping configuration
+  (`ONECAD_WORKER_PATH` is a development and test seam only). A field whose absence
+  silently degrades CORRECTNESS rather than performance — such as
+  [`checkpointFallbackReplay`](#72-regen) — relies on this property.
 
 ---
 
@@ -2509,6 +2544,22 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-09 — §7.2 ADDITIVE `checkpointFallbackReplay`; §13 lockstep note**
+  (VF-M5, cross-track sign-off in one repository). Closes the residual left when the
+  from-zero-replay gate was disabled: the hazardous lane is the regen executor's
+  post-restore-failure fallback, and it is indistinguishable from an ordinary
+  replay-from-0 in the plan, so the worker cannot infer it. Rust now declares it and
+  the worker gates the §10 anchor-exact carve-out on that declaration alone. The
+  ordinary edit lane is UNCHANGED — its teleport case remains the accepted residual.
+  Omitted when false, so an ordinary plan's `args` are byte-identical to the prior
+  text and **no bump is required for existing fixtures**. Evidence, split by what
+  each artifact actually proves: the BEHAVIOUR is proven end to end by
+  `src-tauri/tests/topology_rebind.rs` lane D (RED before this entry, green after)
+  with the unchanged ordinary lane pinned beside it; the new canonical fixtures
+  `protocol/fixtures/execute_plan_{ordinary,checkpoint_fallback}.ndjson` prove only
+  CROSS-LANGUAGE PARSE AGREEMENT — that both tracks read the field and that a
+  worker accepts a plan carrying it. They are not a second behavioural proof.
 
 - **2026-08-07 — §7.3/§7.6 frozen Fillet/Chamfer tangent intent** (F2,
   cross-track sign-off in one repository). Added read-only `PrepareEdgeOp`,

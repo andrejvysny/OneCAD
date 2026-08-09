@@ -77,10 +77,11 @@ struct LadderEditContext {
     // are world-frozen at ref-authoring time, so the anchor-exact carve-out can
     // bless a stale one there; disable it on that path (VF-M5).
     //
-    // NEVER SET BY THE PLAN LANE TODAY — the plan carries no signal that separates
-    // that replay from an ordinary one (see ScratchJob.h). The behaviour below is
-    // exercised by `worker/tests/test_wp6_ladder.cpp`, which constructs this
-    // context directly, so the mechanism stays covered while the wiring waits.
+    // Carried by the plan's OPTIONAL `checkpointFallbackReplay` (SCHEMA §7.2), which
+    // only the Rust executor's F12 fallback sets — an ordinary replay-from-0 is
+    // indistinguishable as a plan, so this cannot be derived worker-side (ScratchJob.h).
+    // Covered end to end by `src-tauri/tests/topology_rebind.rs` (VF-M5 lane D) and at
+    // unit level by `worker/tests/test_wp6_ladder.cpp`.
     bool from_zero_replay = false;
 };
 

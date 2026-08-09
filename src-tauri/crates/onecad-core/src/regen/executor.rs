@@ -426,7 +426,14 @@ impl<E: GeometryEngine> RegenExecutor<E> {
                 // is still post-edit, so the veto must stay armed (SCHEMA §7.2/§10).
                 let from_zero = RegenPlanner::without_checkpoint(&session.timeline, target)
                     .into_request(job, plan_rev, epoch, policy, artifacts)
-                    .with_edited_from(edited_from);
+                    .with_edited_from(edited_from)
+                    // SCHEMA §7.2: the ONLY place this may be claimed. The anchors
+                    // this replay resolves against were frozen for a basis the
+                    // checkpoint attempt failed to reproduce, so the §10
+                    // anchor-exact carve-out must not rescue a descriptor tie here
+                    // (VF-M5 lane D). An ordinary replay-from-0 is byte-identical
+                    // as a PLAN, which is exactly why the worker cannot infer it.
+                    .as_checkpoint_fallback_replay();
                 if from_zero.start_step().is_none() {
                     return Outcome::NoOp;
                 }

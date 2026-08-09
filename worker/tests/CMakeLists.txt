@@ -340,6 +340,22 @@ add_test(
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/echo_error.ndjson
 )
+# SCHEMA §7.2 `checkpointFallbackReplay` (VF-M5). The pair differs by that field
+# (plus the `editedFrom` it rides with) and expects IDENTICAL frames: the field
+# must be read and must not perturb a plan with nothing to gate. The behavioural
+# proof lives in the Rust lane-D test — see the fixture headers.
+add_test(
+    NAME canonical_execute_plan_ordinary
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/execute_plan_ordinary.ndjson
+)
+add_test(
+    NAME canonical_execute_plan_checkpoint_fallback
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/execute_plan_checkpoint_fallback.ndjson
+)
 
 # W-WP3c: interop smoke — replay the Rust-authored contract via the harness (no
 # Rust compiled here; live Rust<->C++ interop is W-WP4/R-WP11). See the script

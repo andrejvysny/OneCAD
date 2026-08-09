@@ -641,7 +641,15 @@ mod tests {
     #[test]
     fn ndjson_fixtures_parse_into_message_types() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../protocol/fixtures");
-        for name in ["hello.ndjson", "echo_error.ndjson"] {
+        for name in [
+            "hello.ndjson",
+            "echo_error.ndjson",
+            // SCHEMA §7.2 `checkpointFallbackReplay` (VF-M5). The pair differs by
+            // that field alone and expects the same result, so parsing both here
+            // is what makes "Rust reads what the worker executes" checkable.
+            "execute_plan_ordinary.ndjson",
+            "execute_plan_checkpoint_fallback.ndjson",
+        ] {
             let path = format!("{dir}/{name}");
             let text =
                 std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));

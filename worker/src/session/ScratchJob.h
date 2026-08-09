@@ -68,12 +68,11 @@ struct ScratchJob {
     // stored anchor can be stale. Disables the anchor-exact carve-out in the
     // descriptor-tie veto (VF-M5).
     //
-    // ALWAYS FALSE TODAY — not because that lane cannot happen (it can: the Rust
-    // executor's F12 fallback replays from 0 after an unusable checkpoint restore,
-    // keeping its editedFrom), but because the plan carries no field that tells the
-    // two apart, and partition emptiness does NOT stand in for one: it is true of
-    // every ordinary regen and mis-flags the shipped edit lane. See PlanExecutor.cpp
-    // where this is set, and TODO.md § VF-M5 RESIDUAL for the protocol change.
+    // Carried by the plan's OPTIONAL `checkpointFallbackReplay` (SCHEMA §7.2) and by
+    // NOTHING ELSE. It cannot be derived here: an ordinary replay-from-0 and the Rust
+    // executor's F12 fallback are byte-identical as plans, and partition emptiness —
+    // the discriminator a previous attempt used — is true of every ordinary regen
+    // (D5) and so mis-flagged the shipped edit lane.
     bool from_zero_replay = false;
 
     // The scratch body state (clone of live at fence time, mutated by ops).

@@ -217,6 +217,25 @@ pub struct PlanRequest {
     /// the right to settle a descriptor tie with a stored anchor, because an upstream
     /// edit moved the geometry that anchor was captured against (SCHEMA §10 veto).
     pub edited_from: Option<usize>,
+    /// OPTIONAL `checkpointFallbackReplay` (SCHEMA §7.2): this plan is a replay
+    /// substituted for a checkpoint plan that failed **before its first
+    /// `planStep`** — restore failure, restore drift, or a pre-step engine failure
+    /// or crash. `false` ⇒ the field is OMITTED from the wire.
+    ///
+    /// Set by exactly one place, the executor's F12 fallback
+    /// ([`AttemptOutcome::RetryFromZero`](super::executor)); an ordinary regen —
+    /// including an ordinary replay-from-0 — never claims it. Note the discriminator
+    /// is the PROVENANCE of the replay, not "replays from zero": the two are
+    /// indistinguishable in the plan itself, which is why the worker cannot derive
+    /// this and a previous attempt to infer it from an empty partition turned every
+    /// ordinary edit into a false `NeedsRepair`.
+    ///
+    /// Its only effect is worker-side: the stored world anchors were frozen against
+    /// a basis this replay does not reproduce, so the anchor-exact carve-out in the
+    /// SCHEMA §10 descriptor-tie veto MUST NOT rescue a tie. On the ordinary edit
+    /// lane that carve-out stays ON — the teleport residual there is accepted and
+    /// documented (H6a), and this field deliberately does not change it.
+    pub checkpoint_fallback_replay: bool,
 }
 
 impl PlanRequest {
@@ -248,6 +267,14 @@ impl PlanRequest {
     #[must_use]
     pub fn with_edited_from(mut self, edited_from: Option<usize>) -> Self {
         self.edited_from = edited_from;
+        self
+    }
+
+    /// Marks this plan as the executor's checkpoint-fallback replay (SCHEMA §7.2
+    /// `checkpointFallbackReplay`). See the field for why only the F12 lane may.
+    #[must_use]
+    pub fn as_checkpoint_fallback_replay(mut self) -> Self {
+        self.checkpoint_fallback_replay = true;
         self
     }
 }
