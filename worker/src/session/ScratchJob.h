@@ -64,10 +64,13 @@ struct ScratchJob {
     // descriptor-tie veto applies (SCHEMA §10).
     std::optional<std::uint64_t> edited_from;
 
-    // True iff this plan is a from-0 replay (`partition` starts empty) AND it carries
-    // an edit context. Captured at fence time because `partition` is populated as ops
-    // execute. Used to disable the anchor-exact carve-out in the descriptor-tie veto
-    // (VF-M5): without a migrated partition, stored anchors can be stale.
+    // True iff this plan replays onto a RESTORED basis, where a stored anchor can be
+    // stale because the geometry it was frozen against was not reproduced. Disables
+    // the anchor-exact carve-out in the descriptor-tie veto (VF-M5).
+    //
+    // ALWAYS FALSE IN V1 — there is no checkpoint restore to produce such a basis, and
+    // partition emptiness does NOT stand in for one (see PlanExecutor.cpp, where this
+    // is set). Wiring it to any always-true condition mis-flags the ordinary edit lane.
     bool from_zero_replay = false;
 
     // The scratch body state (clone of live at fence time, mutated by ops).

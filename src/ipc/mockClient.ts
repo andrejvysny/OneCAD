@@ -1912,9 +1912,16 @@ export const mockClient: CadClient = {
     mockRecovery = null;
     return snap;
   },
+  // The unified start-screen import picker. `appStore.importFromDialog` routes on
+  // the EXTENSION, so the mock has to be able to hand back either kind or the
+  // STEP half of that router is unreachable from a browser lane: `?mockimport=step`
+  // picks it. Same dev-only URL-flag pattern as `?vpdemo` (ViewportRoot.tsx:145).
   async importFileDialog() {
     await wait(40);
-    return "/Users/andrej/CAD/Projects/Imported.onecad";
+    const kind = new URLSearchParams(window.location.search).get("mockimport");
+    return kind === "step"
+      ? "/Users/andrej/CAD/Projects/Imported.step"
+      : "/Users/andrej/CAD/Projects/Imported.onecad";
   },
   async openFileDialog() {
     await wait(40);

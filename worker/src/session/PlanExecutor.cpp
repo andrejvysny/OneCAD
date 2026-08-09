@@ -583,7 +583,26 @@ Envelope handle_execute_plan(Session& session, const Envelope& req, HandlerConte
     if (args.contains("editedFrom") && args["editedFrom"].is_number_unsigned()) {
         job.edited_from = args["editedFrom"].get<std::uint64_t>();
     }
-    job.from_zero_replay = job.edited_from.has_value() && job.partition.size() == 0;
+    // VF-M5 gate, DELIBERATELY OFF in V1.
+    //
+    // The hazard it guards is a replay rebuilt on a RESTORED basis: the stored
+    // anchors were frozen against geometry the restore did not reproduce, so the
+    // anchor-exact carve-out can bless a congruent decoy parked at a stale anchor.
+    // `partition.size() == 0` was used as the discriminator, but it cannot express
+    // that: the RegenPlanner emits full-replay-from-0 plans for EVERY regen, and
+    // `Session::fence_and_clone` clones an empty base for those (D5) — so the
+    // partition is empty on every plan and the gate degenerated to
+    // `editedFrom.is_some()`, i.e. to "any user edit". That turned the ordinary
+    // edit lane (`ToEnd { from: 1 }`, anchor-exact fillet) into `NeedsRepair`
+    // (`src-tauri/tests/topology_rebind.rs` H6a).
+    //
+    // V1 has no restore: SaveCheckpoint/RestoreCheckpoint are UNSUPPORTED and the
+    // worker never reads `baseCheckpoint`, so the hazard cannot occur and the
+    // carve-out stays on. Re-enable this from a genuine restored-basis signal on the
+    // plan when checkpoints are plumbed — never from partition emptiness.
+    // `LadderEditContext::from_zero_replay` and its ladder behaviour stay wired and
+    // stay covered by `worker/tests/test_wp6_ladder.cpp`.
+    job.from_zero_replay = false;
 
     const ExecResult exec = execute_ops(job, ops, job_id, req.id, ctx);
     if (exec.status == ExecStatus::Cancelled) {

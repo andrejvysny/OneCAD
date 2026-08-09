@@ -47,6 +47,20 @@ async function pickTheme(page: Page, name: "Light" | "Dark" | "System"): Promise
   await page.keyboard.press("Escape");
 }
 
+/**
+ * Open Settings ▸ Display and hand back its Appearance tablist.
+ *
+ * Scoped to the dialog: "Display" as a substring also matches the viewport's
+ * "Display mode: …" button, and both the popover and the modal render a tablist
+ * named "Appearance".
+ */
+async function openSettingsAppearance(page: Page) {
+  await page.getByRole("button", { name: "Open settings" }).click();
+  const dialog = page.getByRole("dialog", { name: "Settings" });
+  await dialog.getByRole("button", { name: "Display", exact: true }).click();
+  return dialog.getByRole("tablist", { name: "Appearance" });
+}
+
 test("picking Dark re-themes the chrome AND the 3D viewport", async ({ page }) => {
   await page.emulateMedia({ colorScheme: "light" });
   await openEditorDebug(page);
@@ -118,40 +132,42 @@ test("the appearance control reports the current preference when reopened", asyn
   await expect(page.getByRole("tab", { name: "System" })).toHaveAttribute("aria-selected", "false");
 });
 
-test("the title-bar toggle cycles the theme and re-themes the viewport", async ({ page }) => {
+/*
+ * There is deliberately NO appearance toggle in the title bar — the two controls
+ * are the display popover and the Settings modal (pinned by
+ * `src/features/shell/TitleBar.test.tsx`). The pair below is what the old
+ * title-bar-toggle tests were really protecting: two writers, one preference,
+ * and the second writer must drive the ENGINE and not just the store.
+ */
+test("the Settings modal drives the theme and re-themes the viewport", async ({ page }) => {
   await page.emulateMedia({ colorScheme: "light" });
   await openEditorDebug(page);
   await waitForCameraSettled(page);
 
-  // Fresh install defaults to System, which on a light OS resolves light.
-  const toggle = page.getByRole("button", { name: /^Appearance:/ });
-  await expect(toggle).toHaveAccessibleName("Appearance: System");
+  await expect.poll(() => rootTheme(page)).toBe("light");
   const lightClear = (await engineTheme(page)).clearColor;
 
-  // System → Light (still light), then Light → Dark.
-  await toggle.click();
-  await expect(toggle).toHaveAccessibleName("Appearance: Light");
-  await expect.poll(() => rootTheme(page)).toBe("light");
+  const appearance = await openSettingsAppearance(page);
+  await appearance.getByRole("tab", { name: "Dark" }).click();
 
-  await toggle.click();
-  await expect(toggle).toHaveAccessibleName("Appearance: Dark");
   await expect.poll(() => rootTheme(page)).toBe("dark");
-
-  // The button must drive the ENGINE, not just the store.
   await expect.poll(async () => (await engineTheme(page)).theme).toBe("dark");
   expect((await engineTheme(page)).clearColor).not.toBe(lightClear);
 });
 
-test("the title-bar toggle and the popover control stay in step", async ({ page }) => {
+test("the Settings modal and the popover control stay in step", async ({ page }) => {
   await openEditorDebug(page);
 
   await pickTheme(page, "Dark");
-  await expect(page.getByRole("button", { name: /^Appearance:/ })).toHaveAccessibleName(
-    "Appearance: Dark",
+  const appearance = await openSettingsAppearance(page);
+  await expect(appearance.getByRole("tab", { name: "Dark" })).toHaveAttribute(
+    "aria-selected",
+    "true",
   );
 
-  // ...and back the other way: the toggle's write shows up in the popover.
-  await page.getByRole("button", { name: /^Appearance:/ }).click(); // Dark → System
+  // ...and back the other way: the modal's write shows up in the popover.
+  await appearance.getByRole("tab", { name: "System" }).click();
+  await page.getByRole("button", { name: "Close settings" }).click();
   await page.getByRole("button", { name: /^Display mode/ }).click();
   await expect(page.getByRole("tab", { name: "System" })).toHaveAttribute("aria-selected", "true");
 });

@@ -215,10 +215,13 @@ test("double-clicking an imported history row hints instead of opening an editor
   await expect.poll(() => armedChipKind(page)).toBe("filletRadius");
 });
 
-test("the start screen's Import STEP opens the editor with the imported body", async ({ page }) => {
-  await page.goto("/");
+test("the start screen's Import… opens the editor with the imported STEP body", async ({ page }) => {
+  // ONE import button now; `appStore.importFromDialog` routes on the extension the
+  // picker returns. `?mockimport=step` makes the mock picker return a `.step` path,
+  // which is the only way to reach the STEP half of that router from a browser lane.
+  await page.goto("/?mockimport=step");
 
-  await page.getByRole("button", { name: /Import STEP/ }).click();
+  await page.getByRole("button", { name: /^Import…$/ }).click();
 
   // The editor shell mounted (the File menu is its stable marker), carrying the
   // imported body + its history row.
