@@ -14,6 +14,15 @@ import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 
 const WORLD: [number, number, number] = [0, 0, 0];
 
+/**
+ * Reveal the extrude cluster's collapsed controls. Everything but the dimension
+ * now lives behind `⋯` (see `ExtrudeChipControls`), so a test that asserts an
+ * end condition, the draft segment, ⇔ or a boolean segment must open it first.
+ */
+const openOverflow = (): void => {
+  fireEvent.click(screen.getByTestId("chip-overflow"));
+};
+
 /** A fake engine that hosts the chip in the document so the portal is queryable. */
 function fakeEngine(): ViewportEngine {
   return {
@@ -112,6 +121,7 @@ describe("ModelToolChips (M6b)", () => {
     expect(screen.getByLabelText("Dimension value")).toHaveValue("24.5");
     expect(screen.getByText("mm")).toBeInTheDocument();
 
+    openOverflow();
     const sym = screen.getByTestId("chip-symmetric");
     expect(sym).toHaveAttribute("aria-pressed", "false");
     fireEvent.click(sym);
@@ -126,9 +136,11 @@ describe("ModelToolChips (M6b)", () => {
   it("⇔ toggle reflects a pressed seed; re-edit (showSymmetric:false) hides it", () => {
     render(<ModelToolChips />);
     act(() => toolChipStore.getState().showExtrude(10, WORLD, extrudeHandlers(), { symmetric: true }));
+    openOverflow();
     expect(screen.getByTestId("chip-symmetric")).toHaveAttribute("aria-pressed", "true");
 
     act(() => toolChipStore.getState().showExtrude(10, WORLD, extrudeHandlers(), { showSymmetric: false }));
+    openOverflow();
     expect(screen.queryByTestId("chip-symmetric")).toBeNull();
     // ✓ / ✕ still present in a re-edit cluster.
     expect(screen.getByTestId("chip-confirm")).toBeInTheDocument();
@@ -160,6 +172,7 @@ describe("ModelToolChips (M6b)", () => {
       }),
     );
 
+    openOverflow();
     expect(screen.getByTestId("chip-bool-newbody")).toHaveAttribute("aria-pressed", "true");
     fireEvent.click(screen.getByTestId("chip-bool-cut"));
     expect(h.onBooleanMode).toHaveBeenCalledWith("Cut");
@@ -173,6 +186,7 @@ describe("ModelToolChips (M6b)", () => {
         canBoolean: false,
       }),
     );
+    openOverflow();
     expect(screen.getByTestId("chip-bool-add")).toBeDisabled();
     expect(screen.getByTestId("chip-bool-cut")).toBeDisabled();
     expect(screen.getByTestId("chip-bool-newbody")).not.toBeDisabled();
@@ -182,6 +196,7 @@ describe("ModelToolChips (M6b)", () => {
   it("omits the boolean segment group in a re-edit cluster (showBooleanSegments off)", () => {
     render(<ModelToolChips />);
     act(() => toolChipStore.getState().showExtrude(10, WORLD, extrudeHandlers(), { showBooleanSegments: false }));
+    openOverflow();
     expect(screen.queryByTestId("chip-bool-cut")).toBeNull();
   });
 
@@ -375,6 +390,7 @@ describe("extrude end-condition segments", () => {
         { showEndConditions: true, ...opts },
       );
     });
+    openOverflow(); // the segments live behind `⋯` now
     return onEndCondition;
   };
 
@@ -447,6 +463,7 @@ describe("extrude draft segment", () => {
         { showDraft: true, ...opts },
       );
     });
+    openOverflow(); // the segment lives behind `⋯` now
     return onDraftAngle;
   };
 
@@ -576,5 +593,205 @@ describe("offset-face cluster", () => {
     // SCHEMA §7.3 forbids clamping, so the refused entry is simply not stored —
     // the field still reads the number that WAS accepted.
     expect(screen.getByLabelText("Dimension value")).toHaveValue("2.5");
+  });
+});
+
+/*
+ * ANCHOR LIFECYCLE — the extrude chip travels with its arrow, and the arrow moves
+ * every drag frame. The mount effect UNMOUNTS on an anchor change (the host is
+ * detached from the DOM), so the live position MUST come through `moveChip`, not
+ * through a `worldPos` store write: a detached input loses focus, and
+ * `DimensionInput` commits on blur.
+ */
+describe("ModelToolChips anchor lifecycle", () => {
+  function trackingEngine() {
+    const mountChip = vi.fn(
+      (_id: string, el: HTMLElement, _world?: unknown, _placement?: unknown) =>
+        document.body.appendChild(el),
+    );
+    const unmountChip = vi.fn((_id: string, el: HTMLElement) => el.remove());
+    const moveChip = vi.fn();
+    setViewportEngine({ mountChip, unmountChip, moveChip } as unknown as ViewportEngine);
+    return { mountChip, unmountChip, moveChip };
+  }
+
+  beforeEach(() => toolChipStore.getState().clear());
+  afterEach(() => {
+    setViewportEngine(null);
+    toolChipStore.getState().clear();
+  });
+
+  it("mounts ONCE per arm and forwards the axis placement", () => {
+    const { mountChip, unmountChip } = trackingEngine();
+    render(<ModelToolChips />);
+    act(() =>
+      toolChipStore.getState().showExtrude(
+        10,
+        [0, 0, 10],
+        { onValue: vi.fn(), onSymmetric: vi.fn(), onConfirm: vi.fn(), onCancel: vi.fn() },
+        { anchorAxisFrom: [0, 0, 0], anchorOffsetPx: 56 },
+      ),
+    );
+    expect(mountChip).toHaveBeenCalledTimes(1);
+    expect(mountChip.mock.calls[0][3]).toEqual({ axisFrom: [0, 0, 0], offsetPx: 56 });
+    expect(unmountChip).not.toHaveBeenCalled();
+  });
+
+  it("a live VALUE change never remounts the chip, and keeps the focused input", () => {
+    const { mountChip, unmountChip } = trackingEngine();
+    render(<ModelToolChips />);
+    act(() =>
+      toolChipStore.getState().showExtrude(
+        10,
+        [0, 0, 10],
+        { onValue: vi.fn(), onSymmetric: vi.fn(), onConfirm: vi.fn(), onCancel: vi.fn() },
+        { anchorAxisFrom: [0, 0, 0], anchorOffsetPx: 56 },
+      ),
+    );
+    const host = screen.getByTestId("model-tool-chip");
+    const input = screen.getByLabelText("Dimension value");
+    input.focus();
+
+    // 30 drag frames' worth of store churn — value + symmetric, exactly what the
+    // controller writes. The anchor is NOT among them by design.
+    act(() => {
+      for (let i = 0; i < 30; i++) {
+        toolChipStore.getState().setValue(10 + i);
+        toolChipStore.getState().setSymmetric(i % 2 === 0);
+      }
+    });
+
+    expect(mountChip).toHaveBeenCalledTimes(1);
+    expect(unmountChip).not.toHaveBeenCalled();
+    expect(screen.getByTestId("model-tool-chip")).toBe(host);
+    expect(document.activeElement).toBe(screen.getByLabelText("Dimension value"));
+  });
+
+  it("a chip WITHOUT an axis placement passes no placement at all", () => {
+    const { mountChip } = trackingEngine();
+    render(<ModelToolChips />);
+    act(() => toolChipStore.getState().showShell(2, WORLD, vi.fn()));
+    expect(mountChip.mock.calls[0][3]).toEqual({ axisFrom: undefined, offsetPx: undefined });
+  });
+});
+
+/*
+ * THE COLLAPSED EXTRUDE CHIP. The point of the overflow is that the chip carries
+ * a dimension and nothing else — but a setting the user cannot see must still be
+ * ANNOUNCED, and a boolean mode the drag direction changes on its own must be
+ * readable without opening anything.
+ */
+describe("extrude overflow", () => {
+  const handlers = () => ({
+    onValue: vi.fn(),
+    onSymmetric: vi.fn(),
+    onConfirm: vi.fn(),
+    onCancel: vi.fn(),
+    onBooleanMode: vi.fn(),
+    onEndCondition: vi.fn(),
+    onDraftAngle: vi.fn(),
+  });
+  const show = (opts: Record<string, unknown> = {}, h = handlers()) => {
+    act(() =>
+      toolChipStore.getState().showExtrude(10, WORLD, h, {
+        showEndConditions: true,
+        showBooleanSegments: true,
+        showDraft: true,
+        canBoolean: true,
+        ...opts,
+      }),
+    );
+    return h;
+  };
+
+  beforeEach(() => {
+    setViewportEngine(fakeEngine());
+    toolChipStore.getState().clear();
+  });
+  afterEach(() => {
+    setViewportEngine(null);
+    toolChipStore.getState().clear();
+  });
+
+  it("collapses to the dimension, ⋯, ✓ and ✕ — nothing else", () => {
+    render(<ModelToolChips />);
+    show();
+    expect(screen.getByLabelText("Dimension value")).toBeInTheDocument();
+    expect(screen.getByTestId("chip-overflow")).toBeInTheDocument();
+    expect(screen.getByTestId("chip-confirm")).toBeInTheDocument();
+    expect(screen.getByTestId("chip-cancel")).toBeInTheDocument();
+    for (const hidden of ["chip-end-blind", "chip-draft", "chip-symmetric", "chip-bool-cut"]) {
+      expect(screen.queryByTestId(hidden)).toBeNull();
+    }
+  });
+
+  it("the ⋯ button READS OUT the resolved boolean mode", () => {
+    render(<ModelToolChips />);
+    show({ booleanMode: "Add" });
+    expect(screen.getByTestId("chip-mode-readout")).toHaveTextContent("Add");
+    // …and follows a mode the DRAG resolved, with no user interaction.
+    act(() => toolChipStore.getState().setBooleanMode("Cut"));
+    expect(screen.getByTestId("chip-mode-readout")).toHaveTextContent("Cut");
+  });
+
+  it("a re-edit with no boolean segments shows the neutral ⋯ glyph", () => {
+    render(<ModelToolChips />);
+    show({ showBooleanSegments: false });
+    expect(screen.getByTestId("chip-mode-readout")).toHaveTextContent("⋯");
+  });
+
+  it("raises a dot when a HIDDEN setting is non-default, and not otherwise", () => {
+    render(<ModelToolChips />);
+    show();
+    expect(screen.queryByTestId("chip-overflow-dot")).toBeNull();
+
+    show({ draftAngleDeg: 7 });
+    expect(screen.getByTestId("chip-overflow-dot")).toBeInTheDocument();
+
+    show({ symmetric: true });
+    expect(screen.getByTestId("chip-overflow-dot")).toBeInTheDocument();
+
+    show({ endCondition: "ThroughAll", canUseBodyEnds: true });
+    expect(screen.getByTestId("chip-overflow-dot")).toBeInTheDocument();
+  });
+
+  it("toggles open/closed, and an OUTSIDE press dismisses it", () => {
+    render(<ModelToolChips />);
+    show();
+    openOverflow();
+    expect(screen.getByTestId("chip-overflow-panel")).toBeInTheDocument();
+
+    openOverflow();
+    expect(screen.queryByTestId("chip-overflow-panel")).toBeNull();
+
+    openOverflow();
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryByTestId("chip-overflow-panel")).toBeNull();
+  });
+
+  it("a press INSIDE the panel keeps it open", () => {
+    render(<ModelToolChips />);
+    const h = show();
+    openOverflow();
+    fireEvent.pointerDown(screen.getByTestId("chip-bool-cut"));
+    fireEvent.click(screen.getByTestId("chip-bool-cut"));
+    expect(h.onBooleanMode).toHaveBeenCalledWith("Cut");
+    expect(screen.getByTestId("chip-overflow-panel")).toBeInTheDocument();
+  });
+
+  it("a fresh arm reopens COLLAPSED", () => {
+    render(<ModelToolChips />);
+    show();
+    openOverflow();
+    expect(screen.getByTestId("chip-overflow-panel")).toBeInTheDocument();
+    // A new arm anchors somewhere else; the panel must not survive it.
+    act(() =>
+      toolChipStore.getState().showExtrude(10, [0, 0, 40], handlers(), {
+        showEndConditions: true,
+        showBooleanSegments: true,
+        showDraft: true,
+      }),
+    );
+    expect(screen.queryByTestId("chip-overflow-panel")).toBeNull();
   });
 });

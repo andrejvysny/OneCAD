@@ -61,6 +61,9 @@ const project = (w: readonly number[]): { x: number; y: number } => ({ x: w[0], 
 function makeEngineMock(opts: { projectPoint?: boolean } = {}) {
   const engine: Record<string, unknown> = {
     setOrbitSuppressed: vi.fn(),
+    setExtrudeHandle: vi.fn(),
+    moveChip: vi.fn(),
+    probeMaterial: vi.fn(() => null),
     planePixelWorld: vi.fn(() => 1),
     setExtrudeDepth: vi.fn(),
     setPreviewTint: vi.fn(),

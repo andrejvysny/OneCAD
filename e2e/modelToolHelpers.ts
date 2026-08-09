@@ -251,3 +251,26 @@ export async function expectArmed(
     })
     .toBe("armed");
 }
+
+/**
+ * Open the armed EXTRUDE chip's `⋯` overflow, where the end conditions, draft,
+ * symmetric toggle and boolean segments now live — the collapsed chip carries a
+ * dimension and nothing else.
+ *
+ * Idempotent: the button toggles, so it is only clicked when the panel is closed.
+ */
+export async function openExtrudeOverflow(page: Page): Promise<void> {
+  const panel = page.getByTestId("chip-overflow-panel");
+  if (await panel.isVisible().catch(() => false)) return;
+  await page.getByTestId("chip-overflow").click();
+  await expect(panel).toBeVisible();
+}
+
+/** Close the extrude `⋯` overflow if it is open (a floating panel can cover the
+ *  arrow, and a press on the panel is deliberately NOT a depth grab). */
+export async function closeExtrudeOverflow(page: Page): Promise<void> {
+  const panel = page.getByTestId("chip-overflow-panel");
+  if (!(await panel.isVisible().catch(() => false))) return;
+  await page.getByTestId("chip-overflow").click();
+  await expect(panel).toBeHidden();
+}

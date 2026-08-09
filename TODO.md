@@ -1,5 +1,79 @@
 # OneCAD-Tauri Migration TODO
 
+## EXTRUDE DIRECT MANIPULATION — moving two-way arrow + dimension-only chip (2026-08-09, plan `simplify-this-chip-in-optimized-unicorn.md`) — FE GATE PASSED
+
+Applying an extrude was a form, not a gesture: a twelve-control chip demanded every
+decision before the user saw a result, while the arrow sat frozen at the profile
+centroid and the chip sat on top of the prism. The arrow is now the operation — it
+travels with the depth, points where material is going, reads two-way until the
+first grab, and turns destructive on a Cut; the chip carries a dimension, a `⋯` and
+✓/✕, and rides beside the arrowhead. **Extrude only** by decision; revolve, fillet,
+hole, offset-face and transform keep today's clusters, and the new seams
+(`DragHandle.setAxis`, overlay `axisFrom`, `ChipPlacement`) are built to generalize.
+
+**TWO LATENT DEFECTS FOUND WHILE VALIDATING THE DESIGN, FIXED FIRST.**
+- *The grab was a ratchet waiting for a moving arrow.* The drag reported the
+  ABSOLUTE axis projection (`axisDepthFromRay`), which only ever worked because the
+  arrow never moved. Anchored at `centroid + normal·depth`, every re-grab would add
+  an arrow-length to the depth — and `commitExtrudeAtHandle` re-grabs on each
+  `toPass` retry, so it would have drifted in the gate lane immediately. Now
+  grab-relative, exactly like the offset-face arrow. `forceExtrudeGrab` zeroes the
+  grab basis, which collapses to the old absolute mapping and keeps the depth-exact
+  unit tests meaningful.
+- *A press on the chip already started a depth drag.* The chip layer is a sibling of
+  the canvas overlay inside the container the controller listens on, and the extrude
+  branch — unlike fillet/shell/offset — never excluded chip targets. Parking the chip
+  at the arrowhead would have made ✓ and the value field eat the grab.
+
+DECISIONS WORTH CARRYING:
+- **Two-way means UNDECIDED, not symmetric.** One glyph, one meaning: the second head
+  retires at the first grab, and a symmetric extrude keeps a single head at the
+  `+|depth|` face. The pick envelope tracks the drawn heads — a permanently symmetric
+  envelope would reach backwards through the prism and the body (`depthTest:false`,
+  no occlusion test in `raycast`) and swallow selection clicks.
+- **`inside`, not `gap ≈ 0`, decides "into material".** A sketch coplanar with a body
+  face reads gap ≈ 0 on BOTH sides; only the side whose ray exits through a BACK face
+  actually starts in the solid. This is what lets the rule generalize past
+  `hostFace` — a sketch on a datum plane through a block now cuts — without turning
+  every coplanar second extrude into a wrong silent Cut.
+- **The chip's live position never goes through the store.** `worldPos` is the mount
+  effect's key, so a per-frame write would unmount the chip: focus lost and
+  `commitOnBlur` firing on half-typed text. The controller calls `engine.moveChip`.
+- **`offsetPx` is clearance to the chip's near EDGE.** The driver adds half the
+  element's own size as a CSS percentage, so no layout read per frame. A centre-based
+  offset was tried first and the chip still covered the arrow — which the e2e lane
+  caught as an unclickable handle, because the chip-exclusion guard was already in.
+- **The `⋯` button is a READOUT.** It shows the resolved boolean mode and raises a dot
+  for any other non-default, because a mode the drag changes on its own must never
+  change out of sight. `e2e/sketch-on-face.spec.ts` asserts that readout rather than
+  the segments: a dismiss-on-outside-press popover cannot stay open across a drag.
+- **Esc still cancels the TOOL, not the popover.** The controller owns Escape from a
+  window listener registered in capture at construction, so nothing mounted later can
+  preempt it; racing listener order to fake "first Esc closes" would be worse than Esc
+  meaning one thing everywhere. Dismissal is an outside press or a second `⋯` click.
+- `maybeNegativeDragHint` RETIRED — the arrow's colour, the prism tint and the `⋯`
+  readout say it, and with the auto lane generalized its precondition rarely held.
+
+BUG THE E2E LANE CAUGHT (and no unit test could): `LineSegments2` **extends Mesh**, so
+the probe's `isMesh` filter admitted the fat edge lines, whose `raycast` reads
+`raycaster.params.Line2` and throws on a plain raycaster — every extrude arm died in
+the browser while jsdom stayed green. The probe now takes `userData.kind === "face"`.
+
+GATE: `bunx tsc --noEmit` clean · `bun run build` green · vitest **240 files / 4040
+tests** (from 236/3986) · hex gate 0 · Playwright chromium: the 25-spec
+extrude/boolean/tree/revolve set **25/25**, with `revolve-commit` green UNMODIFIED
+(proof the shared `BooleanModeSegments` was not collapsed out from under it).
+NOT RUN: Rust, ctest, webkit — untouched by this wave.
+STILL OWED: the manual `tauri dev` smoke, which is the only thing that can prove the
+UX itself (arrow follows, chip never covers the prism, push-in cuts / pull-out joins).
+
+FLAGGED: in the mock e2e lane the material probe finds committed face meshes, but the
+generalized rule's coverage lives in `materialProbe.test.ts` +
+`ModelToolController.extrudeGesture.test.ts`; the datum-plane-through-a-body case has
+no e2e of its own yet. NEXT: generalize the moving arrow to revolve/offset-face, and
+decide whether `tree-visibility.spec.ts` should hide its seed body.
+
+
 ## PLATFORM REFACTOR — Milestones 1 + 2 (2026-08-08, plan `velvety-leaping-adleman.md`) — IN FLIGHT
 
 Architecture-only refactor: modeling stops being synonymous with OneCAD and becomes the first built-in module on a Platform, and `.onecad` gains namespaced module state that survives a round trip without its owner installed. **No user-visible change, no modeling behavior change.** Out of scope: SDK package, test addon, addon manifest/loader/host, GitHub install, resource-store generalization, dynamic Tauri router, crate extraction, any file moves.

@@ -302,6 +302,8 @@ function makeEngineMock() {
     updateSketchSession: vi.fn(),
     screenToPlane: vi.fn((x: number, y: number) => ({ x, y })),
     planePixelWorld: vi.fn(() => 1),
+    setExtrudeHandle: vi.fn(),
+    probeMaterial: vi.fn(() => null),
     getCameraDistance: vi.fn(() => 100),
   };
 }

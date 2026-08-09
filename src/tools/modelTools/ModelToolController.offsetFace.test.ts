@@ -84,6 +84,9 @@ const OTHER_BODY_FACE: EntityRef = {
 function makeEngineMock() {
   return {
     setOrbitSuppressed: vi.fn(),
+    setExtrudeHandle: vi.fn(),
+    moveChip: vi.fn(),
+    probeMaterial: vi.fn(() => null),
     planePixelWorld: vi.fn(() => 1),
     hitExtrudeHandle: vi.fn(() => true),
     hitTransformGizmo: vi.fn(() => null),

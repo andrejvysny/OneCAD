@@ -32,6 +32,17 @@ import {
   type MirrorFsm,
 } from "./modelToolMachine";
 
+/**
+ * What a FACE-HOSTED sketch's seed carries: the host is flush against the profile
+ * on the side its face looks away from, so pushing that way starts INSIDE it.
+ * `materialSeed` synthesizes exactly this rather than raycasting a coplanar face.
+ */
+const HOST_SIDES = {
+  pos: null,
+  neg: { bodyId: "host1", gap: 0, inside: true },
+};
+
+
 describe("extrude FSM", () => {
   it("runs the Wave 1 gesture arm → grab → drag → release(armed) → confirm → settle", () => {
     let s = extrudeInit();
@@ -150,7 +161,7 @@ describe("extrude FSM", () => {
     const step = extrudeStep(extrudeInit(), {
       kind: "arm",
       depth: 5,
-      boolean: { mode: "Add", targetBodyId: "host1", auto: true },
+      boolean: { mode: "Add", targetBodyId: "host1", auto: true, sides: HOST_SIDES },
     });
     expect(step.effect).toBe("begin");
     expect(step.state.phase).toBe("armed");
@@ -168,7 +179,7 @@ describe("extrude FSM", () => {
   it("an auto drag flips with the direction: away from the host = Add, into it = Cut", () => {
     const armed = extrudeStep(extrudeInit(), {
       kind: "arm",
-      boolean: { mode: "Add", targetBodyId: "host1", auto: true },
+      boolean: { mode: "Add", targetBodyId: "host1", auto: true, sides: HOST_SIDES },
     }).state;
     let s = extrudeStep(armed, { kind: "grab" }).state;
 
@@ -191,7 +202,7 @@ describe("extrude FSM", () => {
   it("a SYMMETRIC drag never flips (it grows both ways — there is no direction)", () => {
     const armed = extrudeStep(extrudeInit(), {
       kind: "arm",
-      boolean: { mode: "Add", targetBodyId: "host1", auto: true },
+      boolean: { mode: "Add", targetBodyId: "host1", auto: true, sides: HOST_SIDES },
     }).state;
     const dragging = extrudeStep(armed, { kind: "grab" }).state;
     const sym = extrudeStep(dragging, { kind: "drag", depth: -9, symmetric: true });
@@ -207,7 +218,7 @@ describe("extrude FSM", () => {
   it("a manual setBooleanMode kills the auto lane — the override sticks past a sign change", () => {
     const armed = extrudeStep(extrudeInit(), {
       kind: "arm",
-      boolean: { mode: "Add", targetBodyId: "host1", auto: true },
+      boolean: { mode: "Add", targetBodyId: "host1", auto: true, sides: HOST_SIDES },
     }).state;
     const manual = extrudeStep(armed, { kind: "setBooleanMode", mode: "Add", targetBodyId: "host1" });
     expect(manual.state.booleanAuto).toBe(false);
@@ -221,7 +232,7 @@ describe("extrude FSM", () => {
   it("a NewBody override on a host-seeded arm clears the target and the auto lane", () => {
     const armed = extrudeStep(extrudeInit(), {
       kind: "arm",
-      boolean: { mode: "Add", targetBodyId: "host1", auto: true },
+      boolean: { mode: "Add", targetBodyId: "host1", auto: true, sides: HOST_SIDES },
     }).state;
     const plain = extrudeStep(armed, { kind: "setBooleanMode", mode: "NewBody" });
     expect(plain.state.booleanMode).toBe("NewBody");
@@ -235,7 +246,7 @@ describe("extrude FSM", () => {
   it("a targetPick override clears the auto lane too (mode chosen, target still open)", () => {
     const armed = extrudeStep(extrudeInit(), {
       kind: "arm",
-      boolean: { mode: "Add", targetBodyId: "host1", auto: true },
+      boolean: { mode: "Add", targetBodyId: "host1", auto: true, sides: HOST_SIDES },
     }).state;
     const pick = extrudeStep(armed, { kind: "setBooleanMode", mode: "Cut", needsPick: true });
     expect(pick.state.phase).toBe("targetPick");

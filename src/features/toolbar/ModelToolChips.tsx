@@ -20,8 +20,9 @@ import { createPortal } from "react-dom";
 import { cn } from "@/ui/cn";
 import { DimensionInput } from "@/features/sketch/DimensionInput";
 import { HoleChipCluster } from "./HoleChipCluster";
+import { BooleanModeSegments, ExtrudeOverflow } from "./ExtrudeChipControls";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { useToolChipStore, toolChipStore } from "@/stores/toolChipStore";
+import { useToolChipStore, toolChipStore, MODEL_TOOL_CHIP_ID } from "@/stores/toolChipStore";
 import { LENGTH_SUFFIX, formatLength, parseLength } from "@/units/format";
 import { useViewportEngine } from "@/viewport/engineBridge";
 import type { BooleanOperation, OffsetDistanceType } from "@/ipc/types";
@@ -29,13 +30,11 @@ import type {
   AlignPhase,
   PatternAxis,
   MirrorPlane,
-  BooleanMode,
   EdgeOpKind,
-  ExtrudeEndCondition,
   TransformMode,
 } from "@/tools/modelTools/modelToolMachine";
 
-const CHIP_ID = "__model_tool_chip";
+const CHIP_ID = MODEL_TOOL_CHIP_ID;
 const BOOLEAN_OPS: BooleanOperation[] = ["Union", "Cut", "Intersect"];
 const PATTERN_AXES: PatternAxis[] = ["X", "Y", "Z"];
 const MIRROR_PLANES: MirrorPlane[] = ["XY", "XZ", "YZ"];
@@ -44,13 +43,6 @@ const MIRROR_PLANES: MirrorPlane[] = ["XY", "XZ", "YZ"];
 const TRANSFORM_MODES: { mode: TransformMode; label: string; testid: string }[] = [
   { mode: "move", label: "Move", testid: "chip-transform-move" },
   { mode: "rotate", label: "Rotate", testid: "chip-transform-rotate" },
-];
-
-/** The armed-cluster boolean segments: New Body / Add / Cut (Wave 2). */
-const BOOLEAN_MODES: { mode: BooleanMode; label: string; testid: string }[] = [
-  { mode: "NewBody", label: "New Body", testid: "chip-bool-newbody" },
-  { mode: "Add", label: "Add", testid: "chip-bool-add" },
-  { mode: "Cut", label: "Cut", testid: "chip-bool-cut" },
 ];
 
 /** The armed-edge-op segments (FILLET-CHAMFER-UNIFY): the explicit override of
@@ -81,109 +73,6 @@ const OFFSET_DISTANCE_TYPES: { type: OffsetDistanceType; label: string; testid: 
  * the field) is how the user returns to equal-leg.
  */
 const EQUAL_LEG_TEXT = "=";
-
-/**
- * The armed-extrude end-condition segments (MODEL-OPS W1). `Symmetric` is NOT
- * here — it stays the ⇔ toggle, so there is one control per concept.
- * `ToNext`/`ToFace` need an existing body to reach, so they disable at zero
- * bodies rather than being offered and failing at commit.
- */
-const END_CONDITIONS: {
-  end: ExtrudeEndCondition;
-  label: string;
-  testid: string;
-  needsBody: boolean;
-}[] = [
-  { end: "Blind", label: "Blind", testid: "chip-end-blind", needsBody: false },
-  { end: "ThroughAll", label: "Through all", testid: "chip-end-throughall", needsBody: true },
-  { end: "ToNext", label: "To next", testid: "chip-end-tonext", needsBody: true },
-  { end: "ToFace", label: "To face", testid: "chip-end-toface", needsBody: true },
-];
-
-function EndConditionSegments({
-  active,
-  canUseBodyEnds,
-  onPick,
-}: {
-  active: ExtrudeEndCondition;
-  canUseBodyEnds: boolean;
-  onPick: (end: ExtrudeEndCondition) => void;
-}) {
-  return (
-    <div
-      className="flex overflow-hidden rounded-full"
-      role="group"
-      aria-label="End condition"
-      title={canUseBodyEnds ? undefined : "Through all / To next / To face need an existing body"}
-    >
-      {END_CONDITIONS.map((c) => {
-        const disabled = c.needsBody && !canUseBodyEnds;
-        return (
-          <button
-            key={c.end}
-            type="button"
-            data-testid={c.testid}
-            aria-pressed={c.end === active}
-            disabled={disabled}
-            onClick={() => onPick(c.end)}
-            className={cn(
-              "px-2 py-1 text-[11.5px] font-medium",
-              c.end === active ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
-              disabled && "cursor-not-allowed opacity-40 hover:bg-chip",
-            )}
-          >
-            {c.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-/**
- * The [Draft] segment on the armed extrude cluster (WP-C3). `ExtrudeParams`
- * has carried `draftAngleDeg` end-to-end since W-WP6 (the worker applies it with
- * `BRepOffsetAPI_DraftAngle`), but no UI ever authored one — this is that
- * surface.
- *
- * It stays COLLAPSED at 0 so the common no-draft extrude keeps a two-control
- * chip, and expands into a degrees input on click. A NON-ZERO draft is always
- * visible in the button label, because a drafted prism looks nearly identical to
- * a straight one at small angles and the number is the only honest readout.
- */
-function DraftSegment({
-  deg,
-  onDeg,
-  onConfirm,
-}: {
-  deg: number;
-  onDeg: (deg: number) => void;
-  onConfirm: () => void;
-}) {
-  const [open, setOpen] = useState(deg !== 0);
-  return (
-    <>
-      <button
-        type="button"
-        data-testid="chip-draft"
-        aria-pressed={open}
-        title="Draft angle applied to the side faces (degrees)"
-        onClick={() => setOpen((v) => !v)}
-        className={cn(
-          "rounded-full px-2 py-1 text-[11.5px] font-medium",
-          deg !== 0 || open ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
-        )}
-      >
-        {deg === 0 ? "Draft" : `Draft ${deg}°`}
-      </button>
-      {open && (
-        <span data-testid="chip-draft-input">
-          <DimensionInput value={deg} suffix="°" onCommit={onDeg} onConfirm={onConfirm} />
-        </span>
-      )}
-    </>
-  );
-}
 
 /** A segmented toggle row (axis / plane pickers), styled like the boolean op row. */
 function SegmentToggle<T extends string>({
@@ -292,68 +181,6 @@ function ConfirmButtons({ onConfirm, onCancel }: { onConfirm?: () => void; onCan
         ✕
       </button>
     </>
-  );
-}
-
-/** The ⇔ symmetric toggle on the armed extrude cluster (Alt-drag syncs it). */
-function SymmetricToggle({ pressed, onToggle }: { pressed: boolean; onToggle: () => void }) {
-  return (
-    <button
-      type="button"
-      data-testid="chip-symmetric"
-      aria-label="Symmetric"
-      aria-pressed={pressed}
-      title="Symmetric (hold Alt while dragging)"
-      onClick={onToggle}
-      className={cn(
-        "rounded-full px-2 py-1 text-[11.5px] font-medium",
-        pressed ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
-      )}
-    >
-      ⇔
-    </button>
-  );
-}
-
-/**
- * The New Body / Add / Cut segment group on the armed extrude/revolve cluster
- * (Wave 2). Disabled (all three) when no existing body can be a boolean target;
- * the disabled group carries the "Needs an existing body" title.
- */
-function BooleanModeSegments({
-  active,
-  canBoolean,
-  onPick,
-}: {
-  active: BooleanMode;
-  canBoolean: boolean;
-  onPick: (mode: BooleanMode) => void;
-}) {
-  return (
-    <div
-      className="flex overflow-hidden rounded-full"
-      role="group"
-      aria-label="Boolean mode"
-      title={canBoolean ? undefined : "Needs an existing body"}
-    >
-      {BOOLEAN_MODES.map((b) => (
-        <button
-          key={b.mode}
-          type="button"
-          data-testid={b.testid}
-          aria-pressed={b.mode === active}
-          disabled={!canBoolean && b.mode !== "NewBody"}
-          onClick={() => onPick(b.mode)}
-          className={cn(
-            "px-2 py-1 text-[11.5px] font-medium",
-            b.mode === active ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
-            !canBoolean && b.mode !== "NewBody" && "cursor-not-allowed opacity-40 hover:bg-chip",
-          )}
-        >
-          {b.label}
-        </button>
-      ))}
-    </div>
   );
 }
 
@@ -681,6 +508,8 @@ export function ModelToolChips() {
   const suffix = useToolChipStore((s) => s.suffix);
   const label = useToolChipStore((s) => s.label);
   const worldPos = useToolChipStore((s) => s.worldPos);
+  const anchorAxisFrom = useToolChipStore((s) => s.anchorAxisFrom);
+  const anchorOffsetPx = useToolChipStore((s) => s.anchorOffsetPx);
   /** Whether the armed owner wired a ✓ (fillet/shell: fresh arm yes, re-edit no). */
   const hasConfirm = useToolChipStore((s) => s.onConfirm !== null);
   // A plain DOM host, created once; the engine owns its DOM position.
@@ -694,7 +523,15 @@ export function ModelToolChips() {
 
   useEffect(() => {
     if (!engine || kind === "none" || !worldPos) return;
-    engine.mountChip(CHIP_ID, host, worldPos);
+    // `anchorKey` is the ARM's anchor, not a live one: a chip whose anchor tracks
+    // the gesture (extrude) is moved by the controller through `engine.moveChip`,
+    // never by a store write — this effect UNMOUNTS on every change, and a chip
+    // detached mid-drag loses input focus and fires `commitOnBlur` on half-typed
+    // text. See the header of `toolChipStore`.
+    engine.mountChip(CHIP_ID, host, worldPos, {
+      axisFrom: anchorAxisFrom ?? undefined,
+      offsetPx: anchorOffsetPx || undefined,
+    });
     return () => engine.unmountChip(CHIP_ID, host);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [engine, kind, anchorKey, host]);
@@ -758,42 +595,36 @@ export function ModelToolChips() {
       />
     ) : null;
 
-  const endConditionSegments = showEndConditions ? (
-    <EndConditionSegments
-      active={endCondition}
-      canUseBodyEnds={canUseBodyEnds}
-      onPick={(c) => toolChipStore.getState().onEndCondition?.(c)}
-    />
-  ) : null;
-
-  // Keyed on the anchor so a fresh arm reopens collapsed (or seeded, on a
-  // re-edit) instead of inheriting the previous arm's expanded state.
-  const draftSegment = showDraft ? (
-    <DraftSegment
-      key={`draft-${anchorKey}`}
-      deg={draftAngleDeg}
-      onDeg={(d) => toolChipStore.getState().onDraftAngle?.(d)}
-      onConfirm={() => toolChipStore.getState().onConfirm?.()}
-    />
-  ) : null;
-
   let content: React.ReactNode;
   if (kind === "extrudeDepth") {
+    // THE DIMENSION AND NOTHING ELSE. The arrow states the direction, the tint
+    // states Add vs Cut, and everything that is neither goes behind `⋯` — keyed
+    // on the anchor so a fresh arm reopens collapsed instead of inheriting the
+    // previous arm's expanded state.
     content = panel(
       <>
         {/* A distance is meaningless for the non-Blind end conditions — the
             kernel derives it — so the numeric input hides rather than showing a
             value that does not drive the result. */}
         {endCondition === "Blind" && clusterInput(LENGTH_SUFFIX)}
-        {endConditionSegments}
-        {draftSegment}
-        {showSymmetric && endCondition === "Blind" && (
-          <SymmetricToggle
-            pressed={symmetric}
-            onToggle={() => toolChipStore.getState().onSymmetric?.(!symmetric)}
-          />
-        )}
-        {booleanSegments}
+        <ExtrudeOverflow
+          key={`overflow-${anchorKey}`}
+          endCondition={endCondition}
+          canUseBodyEnds={canUseBodyEnds}
+          showEndConditions={showEndConditions}
+          onEndCondition={(c) => toolChipStore.getState().onEndCondition?.(c)}
+          draftAngleDeg={draftAngleDeg}
+          showDraft={showDraft}
+          onDraftAngle={(d) => toolChipStore.getState().onDraftAngle?.(d)}
+          symmetric={symmetric}
+          showSymmetric={showSymmetric}
+          onSymmetric={(sym) => toolChipStore.getState().onSymmetric?.(sym)}
+          booleanMode={booleanMode}
+          canBoolean={canBoolean}
+          showBooleanSegments={showBooleanSegments}
+          onBooleanMode={(m) => toolChipStore.getState().onBooleanMode?.(m)}
+          onConfirm={() => toolChipStore.getState().onConfirm?.()}
+        />
         {confirmButtons}
       </>,
     );

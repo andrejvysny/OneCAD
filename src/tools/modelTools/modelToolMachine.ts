@@ -15,6 +15,9 @@ import { EDGE_OP_FLIP_HOLD, EDGE_OP_MIN_VALUE } from "@/tools/preview/filletRadi
 import { DEFAULT_OFFSET_DISTANCE, OFFSET_MIN_MAGNITUDE } from "@/tools/preview/faceOffset";
 import { WORLD_AXIS } from "@/tools/preview/patternPreview";
 import type { Vec3 } from "@/tools/preview/depthProjection";
+// The geometric half of the direction rule. `materialProbe` imports only the
+// `BooleanMode` TYPE back, so the cycle is erased at runtime.
+import { autoModeFor, NO_MATERIAL, type AutoMode, type MaterialSides } from "./materialProbe";
 
 export type ModelPhase = "idle" | "armed" | "dragging" | "committing";
 
@@ -66,12 +69,18 @@ export interface BooleanSeed {
   mode: BooleanMode;
   targetBodyId: string;
   /**
-   * EXTRUDE ONLY: while set, the DRAG DIRECTION owns the mode (away from the host
-   * = Add, into it = Cut). Any explicit `setBooleanMode` clears it, so a manual
+   * EXTRUDE ONLY: while set, the DRAG DIRECTION owns the mode (into material =
+   * Cut, away = Add). Any explicit `setBooleanMode` clears it, so a manual
    * override sticks for the rest of the session. Revolve has no direction to read
    * — its arm seeds the mode and ignores this flag.
    */
   auto?: boolean;
+  /**
+   * What the controller's ray probe found on each side of the sketch plane. This
+   * is what generalizes the auto lane past face-hosted sketches: a sketch on a
+   * datum plane cutting through a body now has material to read too.
+   */
+  sides?: MaterialSides;
 }
 
 export type ExtrudePhase =
@@ -110,6 +119,8 @@ export interface ExtrudeFsm {
   targetBodyId: string | null;
   /** The drag direction still owns `booleanMode` — see {@link BooleanSeed.auto}. */
   booleanAuto: boolean;
+  /** Material found on each side of the sketch plane (drives the auto lane). */
+  sides: MaterialSides;
   /** Direction-1 end condition. */
   endCondition: ExtrudeEndCondition;
   /** Draft angle in DEGREES (0 = no draft). */
@@ -172,6 +183,7 @@ export function extrudeInit(): ExtrudeFsm {
     booleanMode: "NewBody",
     targetBodyId: null,
     booleanAuto: false,
+    sides: NO_MATERIAL,
     endCondition: "Blind",
     draftAngleDeg: 0,
     twoDirections: false,
@@ -184,15 +196,22 @@ export function extrudeInit(): ExtrudeFsm {
 }
 
 /**
- * The mode a drag frame lands on while the arm is still host-seeded: pulling AWAY
- * from the host adds material, pushing INTO it cuts. Depth 0 keeps the current
- * mode (a gesture crossing zero must not blink through a third state), and a
- * SYMMETRIC extrude grows both ways so it has no direction to read.
+ * The mode a drag frame lands on while the arm is still direction-driven: growing
+ * INTO material cuts, growing away from it joins. The geometry half of the rule
+ * lives in {@link autoModeFor}; this only decides whether the lane is live at all.
+ *
+ * A SYMMETRIC extrude grows both ways, so it has no direction to read and holds
+ * whatever mode it had.
  */
-function autoBooleanMode(s: ExtrudeFsm, depth: number, symmetric: boolean): BooleanMode {
-  if (!s.booleanAuto || !s.targetBodyId || symmetric) return s.booleanMode;
-  if (!Number.isFinite(depth) || depth === 0) return s.booleanMode;
-  return depth < 0 ? "Cut" : "Add";
+function autoBoolean(s: ExtrudeFsm, depth: number, symmetric: boolean): AutoMode {
+  const held: AutoMode = { mode: s.booleanMode, targetBodyId: s.targetBodyId };
+  if (!s.booleanAuto || symmetric) return held;
+  return autoModeFor(s.sides, depth, held);
+}
+
+/** `AutoMode` → the FSM's own field names. */
+function applyAuto(a: AutoMode): Pick<ExtrudeFsm, "booleanMode" | "targetBodyId"> {
+  return { booleanMode: a.mode, targetBodyId: a.targetBodyId };
 }
 
 export function extrudeStep(s: ExtrudeFsm, e: ExtrudeEvent): ExtrudeStep {
@@ -211,6 +230,7 @@ export function extrudeStep(s: ExtrudeFsm, e: ExtrudeEvent): ExtrudeStep {
                 booleanMode: seed.mode,
                 targetBodyId: seed.targetBodyId,
                 booleanAuto: seed.auto === true,
+                sides: seed.sides ?? NO_MATERIAL,
               }
             : {}),
         },
@@ -228,7 +248,7 @@ export function extrudeStep(s: ExtrudeFsm, e: ExtrudeEvent): ExtrudeStep {
           ...s,
           depth: e.depth,
           symmetric,
-          booleanMode: autoBooleanMode(s, e.depth, symmetric),
+          ...applyAuto(autoBoolean(s, e.depth, symmetric)),
         },
         effect: "update",
       };

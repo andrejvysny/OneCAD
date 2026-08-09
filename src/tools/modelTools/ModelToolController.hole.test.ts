@@ -68,6 +68,9 @@ const FACE_HIT = {
 function makeEngineMock() {
   return {
     setOrbitSuppressed: vi.fn(),
+    setExtrudeHandle: vi.fn(),
+    moveChip: vi.fn(),
+    probeMaterial: vi.fn(() => null),
     hitExtrudeHandle: vi.fn(() => false),
     hitTransformGizmo: vi.fn(() => null),
     setExtrudeHandleHover: vi.fn(),

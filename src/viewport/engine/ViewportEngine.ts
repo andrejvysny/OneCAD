@@ -48,7 +48,7 @@ import type { SketchEntity, SketchPlane, SketchRegion, SketchSolveStatus } from 
 import type { SnapResult } from "@/tools/sketch/snapEngine";
 import type { DraftEntity } from "@/tools/sketch/toolMachine";
 import { PreviewMesh } from "./PreviewMesh";
-import { DragHandle } from "./DragHandle";
+import { DragHandle, type DragHandleMode } from "./DragHandle";
 import { TransformGizmo, type GizmoHit } from "./TransformGizmo";
 import { RevolvePreview, type AxisCandidate } from "./RevolvePreview";
 import { PlanePicker, type PickablePlane } from "./PlanePicker";
@@ -83,6 +83,36 @@ export interface EngineInitOptions {
   getDevicePref?: () => DevicePref;
   isDragActive?: () => boolean;
   onDeviceChange?: (device: InputDevice) => void;
+}
+
+/** What a material probe found along a ray (see {@link ViewportEngine.probeMaterial}). */
+export interface MaterialProbeHit {
+  bodyId: string;
+  /** Distance from the ray origin to the first surface, in world units. */
+  gap: number;
+  /**
+   * True when the ray EXITED through a back face, i.e. it started inside the
+   * solid. This — not a near-zero `gap` — is what separates "the profile is
+   * embedded in material" from "the profile is tangent to a face": a sketch
+   * coplanar with a body's top face reads gap ≈ 0 on both sides, but only the
+   * side that goes INTO the body exits through a back face.
+   */
+  inside: boolean;
+}
+
+/**
+ * How far along the ray the probe starts, in world units (mm). Skips the surface
+ * the ray origin may be sitting exactly on — a face-hosted sketch is coplanar
+ * with its host face, and the tessellation of that face carries its own error.
+ */
+const PROBE_SKIN = 0.05;
+
+/** Optional axis placement for a mounted chip (see {@link ViewportEngine.mountChip}). */
+export interface ChipPlacement {
+  /** The other end of the axis the chip should sit beside. */
+  axisFrom?: Vec3;
+  /** Perpendicular screen-space distance from that axis, in CSS pixels. */
+  offsetPx?: number;
 }
 
 /** Store-wiring seam the viewport bridge supplies for picking (engine stays store-agnostic). */
@@ -1191,10 +1221,88 @@ export class ViewportEngine {
     if (!this.dragHandle) {
       this.dragHandle = new DragHandle({ root: this.interactionRoot, invalidate: () => this.invalidate() });
     }
-    this.dragHandle.setAnchor(new THREE.Vector3().fromArray(origin), new THREE.Vector3().fromArray(dir));
+    // The instance is SHARED with extrude, which drives a two-way mode and a
+    // destructive tint. A value tool must never inherit either: OffsetFace always
+    // passes `dir = +axis` even for a negative distance, so a flipped red arrow
+    // would be a lie about the direction it is going to move the face.
+    this.dragHandle.reset();
+    this.dragHandle.setAxis(new THREE.Vector3().fromArray(origin), new THREE.Vector3().fromArray(dir));
     this.dragHandle.setScale(this.planePixelWorld());
     this.dragHandle.setVisible(true);
     this.invalidate();
+  }
+
+  /**
+   * Re-anchor the extrude arrow WITHOUT touching the L1 prisms — the per-frame
+   * counterpart of {@link showExtrudePreviews}, which rebuilds the profiles.
+   *
+   * `mode` is `twoWay` while the arm has not chosen a direction yet; `destructive`
+   * mirrors the preview tint so the arrow reads as a Cut on the same frame the
+   * prism does.
+   */
+  setExtrudeHandle(origin: Vec3, dir: Vec3, mode: DragHandleMode, destructive: boolean): void {
+    if (this.disposed || !this.dragHandle) return;
+    this.dragHandle.setAxis(
+      new THREE.Vector3().fromArray(origin),
+      new THREE.Vector3().fromArray(dir),
+      mode,
+    );
+    this.dragHandle.setDestructive(destructive);
+    this.dragHandle.setScale(this.planePixelWorld());
+  }
+
+  /**
+   * First committed body along `dir` from `origin`, or null.
+   *
+   * Only `bodiesRoot` is searched: the L2 preview lives in the separate
+   * `previewRoot`, so a live preview can never be mistaken for material. The
+   * `preview:` id filter is belt-and-braces on top of that, and the mesh a hidden
+   * body owns is skipped by three's own visibility rule — a caller that cares
+   * WHY a body is hidden (isolation vs the tree eye) must re-check its own store.
+   */
+  probeMaterial(origin: Vec3, dir: Vec3): MaterialProbeHit | null {
+    if (this.disposed) return null;
+    const d = new THREE.Vector3().fromArray(dir);
+    if (d.lengthSq() < 1e-12) return null;
+    d.normalize();
+    // Rendering is on demand, so the last frame's matrices may predate the newest
+    // body; a probe runs once per arm, which is cheap enough to refresh them.
+    this.bodiesRoot.updateMatrixWorld(true);
+    const ray = new THREE.Raycaster(new THREE.Vector3().fromArray(origin), d, PROBE_SKIN, Infinity);
+    // FACE MESHES ONLY, gathered by hand. `bodiesRoot` also carries the fat edge
+    // lines, and `LineSegments2` EXTENDS Mesh — an `isMesh` filter admits it, and
+    // its `raycast` then reads `raycaster.params.Line2`, which a plain raycaster
+    // does not have, and throws. Edges are not material anyway. The same walk
+    // drops whatever an invisible ancestor owns.
+    const meshes: THREE.Object3D[] = [];
+    const walk = (node: THREE.Object3D): void => {
+      if (!node.visible) return;
+      if ((node as THREE.Mesh).isMesh && node.userData.kind === "face") meshes.push(node);
+      for (const child of node.children) walk(child);
+    };
+    for (const child of this.bodiesRoot.children) walk(child);
+    for (const hit of ray.intersectObjects(meshes, false)) {
+      let node: THREE.Object3D | null = hit.object;
+      let bodyId = "";
+      while (node && node !== this.bodiesRoot) {
+        const id = String(node.userData.bodyId ?? "");
+        if (id) {
+          bodyId = id;
+          break;
+        }
+        node = node.parent;
+      }
+      if (!bodyId || bodyId.startsWith("preview:")) continue;
+      const face = hit.face;
+      const inside = face
+        ? face.normal
+            .clone()
+            .applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld))
+            .dot(d) > 0
+        : false;
+      return { bodyId, gap: hit.distance, inside };
+    }
+    return null;
   }
 
   /** Hide the shared drag arrow WITHOUT touching any L1 preview mesh. */
@@ -1575,17 +1683,27 @@ export class ViewportEngine {
     return this.chipLayerEl;
   }
 
-  /** Register a DOM chip in the chip layer, positioned at `world` each frame. */
-  mountChip(id: string, el: HTMLElement, world: Vec3): void {
+  /**
+   * Register a DOM chip in the chip layer, positioned at `world` each frame.
+   *
+   * `axisFrom` + `offsetPx` place it BESIDE the axis `axisFrom → world` instead of
+   * centered on it — what keeps a value chip off the geometry its own arrow is
+   * driving. Omitted, the chip is centered exactly as before.
+   */
+  mountChip(id: string, el: HTMLElement, world: Vec3, placement?: ChipPlacement): void {
     const layer = this.chipLayer();
     if (!layer) return;
     layer.appendChild(el);
-    this.overlayDriver.register(id, el, new THREE.Vector3().fromArray(world));
+    this.overlayDriver.register(id, el, new THREE.Vector3().fromArray(world), {
+      axisFrom: placement?.axisFrom ? new THREE.Vector3().fromArray(placement.axisFrom) : undefined,
+      offsetPx: placement?.offsetPx,
+    });
     this.invalidate();
   }
 
-  moveChip(id: string, world: Vec3): void {
+  moveChip(id: string, world: Vec3, axisFrom?: Vec3): void {
     this.overlayDriver.setWorldPos(id, new THREE.Vector3().fromArray(world));
+    if (axisFrom) this.overlayDriver.setAxisFrom(id, new THREE.Vector3().fromArray(axisFrom));
     this.invalidate();
   }
 

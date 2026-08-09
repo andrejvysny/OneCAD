@@ -284,8 +284,11 @@ test("sketch on a picked face: the projected boundary is seeded, locked, and ext
 
   // ── (f) HOST-BOOLEAN: the op defaults to MODIFYING the host, not a new body ─
   // This sketch is hosted on that body's face, so the arm opens on Add against it
-  // — the Shapr3D push/pull expectation. `New Body` is still one click away.
-  await expect(page.getByTestId("chip-bool-add")).toHaveAttribute("aria-pressed", "true");
+  // — the Shapr3D push/pull expectation. The segments themselves are behind the
+  // chip's `⋯`; the COLLAPSED readout is what the user sees change, and it is
+  // what this spec asserts, because a dismiss-on-outside-press popover cannot
+  // stay open across a viewport drag.
+  await expect(page.getByTestId("chip-mode-readout")).toHaveText("Add");
   expect((await extrudeDebug(page))?.booleanMode).toBe("Add");
 
   // Direction-aware, live: the +depth screen direction is (handle − plane point),
@@ -298,14 +301,14 @@ test("sketch on a picked face: the projected boundary is seeded, locked, and ext
   await dragExtrudeTo(page, into);
   expect((await extrudeDebug(page))?.depth as number).toBeLessThan(0); // really went in
   expect((await extrudeDebug(page))?.booleanMode).toBe("Cut");
-  await expect(page.getByTestId("chip-bool-cut")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByTestId("chip-mode-readout")).toHaveText("Cut");
 
   // …and back out again — the flip is live in BOTH directions, so the commit
   // below is an additive push/pull.
   await dragExtrudeTo(page, armedHandle);
   expect((await extrudeDebug(page))?.depth as number).toBeGreaterThan(0);
   expect((await extrudeDebug(page))?.booleanMode).toBe("Add");
-  await expect(page.getByTestId("chip-bool-add")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByTestId("chip-mode-readout")).toHaveText("Add");
 
   await page.keyboard.press("Enter"); // explicit confirm → commit
   await expect(extrudeBtn).not.toHaveAttribute("aria-pressed", "true", { timeout: 10_000 });

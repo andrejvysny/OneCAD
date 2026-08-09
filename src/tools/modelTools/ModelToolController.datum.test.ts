@@ -67,6 +67,9 @@ describe("ModelToolController — datum plane tool", () => {
       planePickerHitTest: vi.fn(() => planeHit),
       // Everything the shared cancel sweep touches on any tool switch.
       setOrbitSuppressed: vi.fn(),
+    setExtrudeHandle: vi.fn(),
+    moveChip: vi.fn(),
+    probeMaterial: vi.fn(() => null),
       hideRegionPick: vi.fn(),
       setRegionHover: vi.fn(),
       setRegionSelected: vi.fn(),

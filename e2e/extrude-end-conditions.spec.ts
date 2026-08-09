@@ -12,6 +12,7 @@ import {
   getSketchSnapshot,
   planePointToClient,
 } from "./helpers";
+import { openExtrudeOverflow } from "./modelToolHelpers";
 
 /*
  * MODEL-OPS W1 — the extrude end conditions are reachable from the UI.
@@ -79,6 +80,10 @@ test("the end-condition segments author ThroughAll and enter/escape the ToFace p
   await expect(targetVisibility).toHaveAttribute("aria-checked", "true");
   await page.getByRole("button", { name: "Extrude", exact: true }).click();
   await expect(page.getByText(/^Drag the arrow to set depth/)).toBeVisible();
+
+  // The end conditions live behind the chip's `⋯` now — the collapsed chip
+  // carries the dimension alone.
+  await openExtrudeOverflow(page);
 
   // Blind is the default and drives the distance input.
   await expect(page.getByTestId("chip-end-blind")).toHaveAttribute("aria-pressed", "true");

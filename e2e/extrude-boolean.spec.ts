@@ -14,6 +14,7 @@ import {
   planePointToClient,
   commitExtrudeAtHandle,
 } from "./helpers";
+import { openExtrudeOverflow, closeExtrudeOverflow } from "./modelToolHelpers";
 
 /*
  * MODEL-HARDEN Wave 2 — extrude boolean modes (mock lane).
@@ -80,6 +81,11 @@ test("extrude boolean: Cut segment visible + auto-targets the sole body; commit 
   await page.getByRole("button", { name: "Extrude", exact: true }).click();
   await expect(page.getByText(/^Drag the arrow to set depth/)).toBeVisible();
 
+  // The collapsed chip READS OUT the resolved mode; the segments themselves are
+  // behind `⋯`.
+  await expect(page.getByTestId("chip-mode-readout")).toBeVisible();
+  await openExtrudeOverflow(page);
+
   // The boolean segment group is offered (an existing body enables Add / Cut).
   await expect(page.getByTestId("chip-bool-cut")).toBeVisible();
   await expect(page.getByTestId("chip-bool-cut")).toBeEnabled();
@@ -89,7 +95,9 @@ test("extrude boolean: Cut segment visible + auto-targets the sole body; commit 
   await expect.poll(async () => (await extrudeDebug(page))?.booleanMode).toBe("Cut");
   expect((await extrudeDebug(page))?.booleanTargetId).toBeTruthy();
 
-  // Commit: one drag + Enter.
+  // Commit: one drag + Enter. The panel closes first — it floats over the
+  // viewport, and a press on it is deliberately NOT a depth grab.
+  await closeExtrudeOverflow(page);
   await commitExtrudeAtHandle(page);
 
   // A Cut commits a timeline row but NO new body (mock CSG limit) — count unchanged.

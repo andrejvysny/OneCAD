@@ -9,7 +9,22 @@
  * `value`/`count`/`axis`/`plane`/`op` update live during a chip edit (cheap: one
  * tiny input re-renders); the `worldPos` anchor is set once per arm and stays
  * put, so no per-frame churn.
+ *
+ * A chip whose anchor MOVES with the gesture (extrude, whose arrow travels with
+ * the prism) is repositioned by the controller calling `engine.moveChip` directly
+ * — never by writing `worldPos` here. `ModelToolChips` keys its mount effect on
+ * that anchor, so a per-frame store write would UNMOUNT and remount the chip
+ * every frame: focus lost, `commitOnBlur` firing on half-typed text, collapsible
+ * segments resetting. The store holds the arm-time anchor; the engine owns the
+ * live position.
  */
+/**
+ * Overlay-driver id of the single mounted tool chip. Lives HERE, not in the React
+ * component, so the imperative controllers can reposition the chip through
+ * `engine.moveChip` without a tool layer importing a feature component.
+ */
+export const MODEL_TOOL_CHIP_ID = "__model_tool_chip";
+
 import { createStore, useStore } from "zustand";
 import type { BooleanOperation, HoleType, OffsetDistanceType } from "@/ipc/types";
 import type { HoleFit } from "@/tools/modelTools/holeStandards";
@@ -70,6 +85,10 @@ export interface ExtrudeChipOpts {
   draftAngleDeg?: number;
   /** Whether to render the [Draft] segment at all (default false). */
   showDraft?: boolean;
+  /** Sit BESIDE the axis from this point to `worldPos` (the profile centroid). */
+  anchorAxisFrom?: [number, number, number];
+  /** Perpendicular screen distance from that axis, in CSS pixels. */
+  anchorOffsetPx?: number;
 }
 
 /** Handlers the armed revolve cluster wires (MODEL-HARDEN Wave 1 + 2). */
@@ -323,6 +342,14 @@ export interface ToolChipState {
   label: string;
   /** World anchor for the overlay driver, or null. */
   worldPos: [number, number, number] | null;
+  /**
+   * The other end of the axis this chip should sit BESIDE (extrude: the profile
+   * centroid, with `worldPos` at the arrowhead). Null centers the chip on
+   * `worldPos`, which is what every other chip does.
+   */
+  anchorAxisFrom: [number, number, number] | null;
+  /** Perpendicular screen distance from that axis, in CSS pixels. */
+  anchorOffsetPx: number;
   /** Committed value from the editable chip (Enter/blur). */
   onValue: ((v: number) => void) | null;
   /** Symmetric toggled (armed extrude cluster). */
@@ -557,6 +584,8 @@ const CLEARED = {
   suffix: "",
   label: "",
   worldPos: null,
+  anchorAxisFrom: null,
+  anchorOffsetPx: 0,
   onValue: null,
   onSymmetric: null,
   onConfirm: null,
@@ -591,6 +620,8 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
       regionCount: opts?.regionCount ?? 1,
       draftAngleDeg: opts?.draftAngleDeg ?? 0,
       showDraft: opts?.showDraft ?? false,
+      anchorAxisFrom: opts?.anchorAxisFrom ?? null,
+      anchorOffsetPx: opts?.anchorOffsetPx ?? 0,
       onValue: handlers.onValue,
       onSymmetric: handlers.onSymmetric,
       onConfirm: handlers.onConfirm,

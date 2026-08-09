@@ -60,7 +60,14 @@ import { logDebug } from "@/debug/log";
 import { viewportStore, type ViewportState } from "@/stores/viewportStore";
 import { documentStore, nextAppliedOps, nextDatumName, type SketchMeta } from "@/stores/documentStore";
 import { selectionStore, topoRefId, type EntityRef } from "@/stores/selectionStore";
-import { toolChipStore } from "@/stores/toolChipStore";
+import { toolChipStore, MODEL_TOOL_CHIP_ID } from "@/stores/toolChipStore";
+import {
+  autoModeFor,
+  hasMaterial,
+  NO_MATERIAL,
+  type MaterialSides,
+  type SideProbe,
+} from "./materialProbe";
 import { profileFromRegion, profileBounds, type PrismProfile } from "@/tools/preview/prismPreview";
 import { regionAtPoint } from "@/tools/preview/regionPick";
 import { axisDepthFromRay, normalize, type Vec3 } from "@/tools/preview/depthProjection";
@@ -212,6 +219,16 @@ const mirrorStep = withPhaseLog("mirror", mirrorStepRaw);
 const transformStep = withPhaseLog("transform", transformStepRaw);
 
 const DRAG_PX = 4;
+
+/**
+ * Clearance from the extrude axis to the chip's NEAR EDGE, in screen pixels (the
+ * overlay driver adds half the chip's own size on top — see `offsetForAxis`).
+ *
+ * It only has to clear the arrow's fat pick envelope (`CONE_RADIUS_PX * HIT_PAD`
+ * ≈ 11 px), and it MUST: a chip pixel over the arrow is a chip that eats the
+ * grab, because `onPointerDown` excludes chip targets by design.
+ */
+const CHIP_AXIS_OFFSET_PX = 26;
 
 /** Set-equality over body ids (order-insensitive; ids are unique per selection). */
 function sameIdSet(a: readonly string[], b: readonly string[]): boolean {
@@ -551,6 +568,22 @@ export class ModelToolController {
   private plane: SketchPlane | null = null;
   private centroidWorld: Vec3 = [0, 0, 0];
   private normal: Vec3 = [0, 0, 1];
+  /**
+   * The extrude drag's grab basis: the depth the arm held at the press, and the
+   * axis projection of the press itself. A frame reports
+   * `extrudeStartDepth + (raw - extrudeGrabDepth)`, so the pointer's own travel
+   * since the grab is the only thing that moves the value. Both stay 0 on the
+   * `forceExtrudeGrab` path, which collapses that back to the absolute mapping.
+   */
+  private extrudeStartDepth = 0;
+  private extrudeGrabDepth = 0;
+  /**
+   * Whether this arm has been grabbed yet. Until it has, the arrow draws BOTH
+   * heads: the sign is genuinely undecided, and a single head pointing along
+   * +normal would claim otherwise. Symmetric is deliberately NOT drawn two-way —
+   * one glyph, one meaning.
+   */
+  private extrudeGrabbed = false;
   private lastArmedSketch: string | null = null;
   /** `lastArmedSketch`'s geometryToken at arm time — a change invalidates the arm. */
   private armedSketchToken: string | null = null;
@@ -564,7 +597,6 @@ export class ModelToolController {
   /** Fresh commits wait for the matching exact candidate before materializing. */
   private readonly exactPreviewWaiters = new Map<string, ExactPreviewWaiter>();
   /** One-shot "choose Cut" hint fired on the first depth sign-flip while bodies exist. */
-  private negativeDragHintShown = false;
   /** Double-click accelerator bookkeeping (region multi-select: same region twice). */
   private lastRegionClickId: string | null = null;
   private lastRegionClickAt = 0;
@@ -1252,32 +1284,36 @@ export class ModelToolController {
     this.plane = plane;
     this.lastArmedSketch = sketchId;
     this.armedSketchToken = documentStore.getState().sketches[sketchId]?.geometryToken ?? null;
-    this.negativeDragHintShown = false;
     this.previewFailure = null;
     this.stalePreviewRetryAttempted = false;
-    // HOST-BOOLEAN: a FRESH arm off a face-hosted sketch defaults to modifying its
-    // host body. A re-edit is excluded — its commit deep-merges the STORED params,
-    // so seeding a default here would be a lie about what the ✓ re-targets.
-    const hostSeed = editFeatureId ? null : this.hostBooleanSeed(sketchId, true);
     // WP-C3: a RE-EDIT opens on the record's own draft angle (the commit writes
     // the armed value back, so a 0 seed would silently drop a stored draft). A
     // fresh arm has no record to read and opens at 0.
     const storedDraft = editFeatureId
       ? storedScalar(this.extrudeStoredParams?.draftAngleDeg)
       : 0;
-    this.extrude = extrudeStep(extrudeInit(), {
-      kind: "arm",
-      depth: startDepth,
-      draft: storedDraft,
-      ...(hostSeed ? { boolean: hostSeed } : {}),
-    }).state;
 
     const centroid = combinedCentroidWorld(plane, profiles);
     this.centroidWorld = centroid;
     this.normal = normalize(this.plane.normal as Vec3);
 
+    // The boolean seed is resolved AFTER the plane basis, because the probe half
+    // of it raycasts along that normal from inside each profile. A re-edit is
+    // excluded — its commit deep-merges the STORED params, so seeding a default
+    // here would be a lie about what the ✓ re-targets.
+    const seed = editFeatureId ? null : this.materialSeed(sketchId, true, profiles, startDepth);
+    this.extrude = extrudeStep(extrudeInit(), {
+      kind: "arm",
+      depth: startDepth,
+      draft: storedDraft,
+      ...(seed ? { boolean: seed } : {}),
+    }).state;
+
     this.engine.showExtrudePreviews(this.plane, profiles, this.centroidWorld, this.normal);
     this.engine.setExtrudeDepth(startDepth, false);
+    // A fresh arm has not chosen a direction yet — the arrow opens two-way.
+    this.extrudeGrabbed = false;
+    this.syncExtrudeHandle();
 
     // Open one preview session per region. A superseded arm (gen bumped mid-await)
     // tears its own sessions down so no lane session leaks.
@@ -1332,9 +1368,7 @@ export class ModelToolController {
     viewportStore.getState().setStatusHint(
       editFeatureId
         ? "Approximate feature-edit preview; final geometry updates on Apply"
-        : n > 1
-          ? `Drag the arrow to set depth for ${n} regions · Enter, ✓, or click away to confirm`
-          : "Drag the arrow to set depth · Enter, ✓, or click away to confirm",
+        : this.armHintFor("extrude", n),
       { sticky: true },
     );
 
@@ -1372,6 +1406,10 @@ export class ModelToolController {
         // state, which a re-edit has already loaded from the record.
         showDraft: true,
         draftAngleDeg: this.extrude.draftAngleDeg,
+        // Sit BESIDE the extrude axis, not on it: the chip's anchor is the
+        // arrowhead, and the prism grows along exactly that line.
+        anchorAxisFrom: this.centroidWorld,
+        anchorOffsetPx: CHIP_AXIS_OFFSET_PX,
       },
     );
 
@@ -1380,17 +1418,55 @@ export class ModelToolController {
   }
 
   private chipWorld(): Vec3 {
+    return this.extrudeHeadWorld(this.extrude.depth);
+  }
+
+  /**
+   * Where the arrow's TAIL sits for a given depth — the far face of the prism, so
+   * the arrow extends past the geometry it is driving instead of being buried in
+   * it. Symmetric grows both ways from the centroid (`PreviewMesh.setDepth`), so
+   * the head marks the +|depth| face.
+   */
+  private extrudeHeadWorld(depth: number): Vec3 {
+    const d = this.extrude.symmetric ? Math.abs(depth) : depth;
     return [
-      this.centroidWorld[0] + this.normal[0] * 8,
-      this.centroidWorld[1] + this.normal[1] * 8,
-      this.centroidWorld[2] + this.normal[2] * 8,
+      this.centroidWorld[0] + this.normal[0] * d,
+      this.centroidWorld[1] + this.normal[1] * d,
+      this.centroidWorld[2] + this.normal[2] * d,
     ];
+  }
+
+  /**
+   * Re-anchor the arrow onto the CURRENT depth. Called from every place the depth,
+   * the symmetry or the resolved boolean mode can change — the arrow is the
+   * primary readout of all three now that the chip carries only a dimension.
+   *
+   * A zero depth passes a zero direction on purpose: `DragHandle.setAxis` holds
+   * its previous orientation there rather than snapping to an arbitrary flip.
+   */
+  private syncExtrudeHandle(): void {
+    if (!this.plane) return;
+    const depth = this.extrude.depth;
+    const sign = this.extrude.symmetric ? 1 : Math.sign(depth);
+    const dir: Vec3 = [this.normal[0] * sign, this.normal[1] * sign, this.normal[2] * sign];
+    const head = this.extrudeHeadWorld(depth);
+    this.engine.setExtrudeHandle(
+      head,
+      dir,
+      this.extrudeGrabbed ? "forward" : "twoWay",
+      this.extrude.booleanMode === "Cut",
+    );
+    // The chip rides the arrowhead. Straight to the engine, NEVER through
+    // `toolChipStore.worldPos`: that field is the mount effect's key, so writing
+    // it per frame would remount the chip and drop the focus out of its input.
+    this.engine.moveChip(MODEL_TOOL_CHIP_ID, head, this.centroidWorld);
   }
 
   private onExtrudeChip(v: number): void {
     if (this.extrude.phase !== "armed" && this.extrude.phase !== "dragging") return;
     this.extrude = extrudeStep(this.extrude, { kind: "setDepth", depth: v }).state;
     this.engine.setExtrudeDepth(v, this.extrude.symmetric);
+    this.syncExtrudeHandle(); // a typed depth moves the arrow exactly like a drag
     toolChipStore.getState().setValue(v);
     this.sendPreview();
   }
@@ -1400,6 +1476,7 @@ export class ModelToolController {
     if (this.extrude.phase !== "armed" && this.extrude.phase !== "dragging") return;
     this.extrude = extrudeStep(this.extrude, { kind: "setSymmetric", symmetric }).state;
     this.engine.setExtrudeDepth(this.extrude.depth, symmetric);
+    this.syncExtrudeHandle();
     toolChipStore.getState().setSymmetric(symmetric);
     this.sendPreview();
   }
@@ -1447,27 +1524,101 @@ export class ModelToolController {
   }
 
   /**
-   * The boolean default a FRESH arm off `sketchId` opens with (SKETCH-ON-FACE
-   * HOST-BOOLEAN). A sketch hosted on a model face belongs to that body, so the
-   * op it drives modifies the HOST instead of spawning a new body — the Shapr3D
-   * push/pull expectation, and the whole point of sketching on your part.
+   * The boolean default a FRESH arm off `sketchId` opens with, and the material
+   * the DRAG DIRECTION will read.
    *
-   * `hostFace` is the projection row's own record (`SketchDto.hostFace`), read
-   * SYNCHRONOUSLY from the same store row the arm already reads its
-   * `geometryToken` from, so this adds no round-trip to the arm path.
+   * Two sources, one answer:
+   *  - A sketch hosted on a model FACE belongs to that body (`SketchDto.hostFace`,
+   *    read synchronously from the same store row the arm already reads its
+   *    `geometryToken` from, so this adds no round-trip). It opens on Add against
+   *    the host, and its host counts as material flush against the −normal side —
+   *    which is exactly what makes `depth < 0` read as Cut.
+   *  - Any other sketch gets a RAY PROBE of the real scene. This is the
+   *    generalization: a sketch on a datum plane slicing through a body used to
+   *    open on NewBody with nothing but a text hint.
    *
-   * A world- or datum-hosted sketch, a host body that is gone, or a host that is
-   * HIDDEN all fall back to today's NewBody behaviour: an Add/Cut against a body
-   * the user cannot see would be a silent surprise, and `resolveBooleanTarget`
-   * counts only visible bodies for exactly that reason.
+   * A host body that is gone or HIDDEN falls back to NewBody: an Add/Cut against
+   * a body the user cannot see would be a silent surprise, which is the same
+   * reason `resolveBooleanTarget` counts only visible bodies.
    */
-  private hostBooleanSeed(sketchId: string, directionAware: boolean): BooleanSeed | null {
+  private materialSeed(
+    sketchId: string,
+    directionAware: boolean,
+    profiles: PrismProfile[],
+    depth: number,
+  ): BooleanSeed | null {
     const doc = documentStore.getState();
     const host = doc.sketches[sketchId]?.hostFace;
-    if (!host) return null;
-    const body = doc.bodies[host.bodyId];
+    if (host) {
+      const body = doc.bodies[host.bodyId];
+      if (body && body.visible !== false) {
+        // The host is flush against the profile on the side the face looks away
+        // from — a synthetic probe, because the mesh of a coplanar face is not a
+        // reliable thing to raycast against.
+        const flush: SideProbe = { bodyId: host.bodyId, gap: 0, inside: true };
+        return {
+          mode: "Add",
+          targetBodyId: host.bodyId,
+          auto: directionAware,
+          sides: { pos: null, neg: flush },
+        };
+      }
+    }
+    if (!directionAware) return null;
+    const sides = this.probeMaterialSides(profiles);
+    if (!hasMaterial(sides)) return null;
+    // Opening mode: whatever the ARMED depth already resolves to, so the chip and
+    // the first exact preview agree with the arrow before the user moves anything.
+    const opened = autoModeFor(sides, depth, { mode: "NewBody", targetBodyId: null });
+    if (!opened.targetBodyId) {
+      return { mode: "NewBody", targetBodyId: "", auto: true, sides };
+    }
+    return { mode: opened.mode, targetBodyId: opened.targetBodyId, auto: true, sides };
+  }
+
+  /**
+   * Ray-probe the committed bodies on both sides of the sketch plane.
+   *
+   * ONE RAY PER REGION, from a point KNOWN to be inside that region (the centroid
+   * of its largest cap triangle) — the combined bbox centroid the arrow uses can
+   * sit in empty space between two regions, or in an annulus' hole.
+   *
+   * Run at ARM time, synchronously, before the first `sendPreview()`: the exact
+   * preview hides the very bodies being probed for
+   * (`setPreviewReplacedBodyIds`), and three's raycaster skips invisible objects.
+   */
+  private probeMaterialSides(profiles: PrismProfile[]): MaterialSides {
+    if (!this.plane || typeof this.engine.probeMaterial !== "function") return NO_MATERIAL;
+    const n = this.normal;
+    const back: Vec3 = [-n[0], -n[1], -n[2]];
+    let pos: SideProbe | null = null;
+    let neg: SideProbe | null = null;
+    for (const origin of this.probeOrigins(profiles)) {
+      pos = strongerProbe(pos, this.probeVisible(origin, n));
+      neg = strongerProbe(neg, this.probeVisible(origin, back));
+    }
+    return { pos, neg };
+  }
+
+  /** One probe, dropped when it lands on a body the user cannot see. Visibility is
+   *  re-checked against the DOCUMENT rather than inherited from the scene graph:
+   *  a body hidden by isolation is not a legal boolean target either. */
+  private probeVisible(origin: Vec3, dir: Vec3): SideProbe | null {
+    const hit = this.engine.probeMaterial(origin, dir);
+    if (!hit) return null;
+    const body = documentStore.getState().bodies[hit.bodyId];
     if (!body || body.visible === false) return null;
-    return { mode: "Add", targetBodyId: host.bodyId, auto: directionAware };
+    return hit;
+  }
+
+  /** Interior sample point per armed profile, in world space. */
+  private probeOrigins(profiles: PrismProfile[]): Vec3[] {
+    const plane = this.plane;
+    if (!plane) return [];
+    const origins = profiles
+      .map((p) => profileSampleWorld(plane, p))
+      .filter((o): o is Vec3 => o !== null);
+    return origins.length > 0 ? origins : [this.centroidWorld];
   }
 
   /**
@@ -1614,12 +1765,24 @@ export class ModelToolController {
     this.updateDebug();
   }
 
-  /** The standard "drag/confirm" arm hint for a tool (restored after a target pick). */
-  private armHintFor(tool: "extrude" | "revolve"): string {
+  /**
+   * The standard "drag/confirm" arm hint for a tool (restored after a target pick).
+   *
+   * When the probe found material, the hint SAYS the direction rule out loud —
+   * the boolean segments are behind the chip's `⋯` now, so this and the arrow's
+   * own colour are what teach it. `regions` overrides the session count for the
+   * arm itself, which sets the hint before the sessions exist.
+   */
+  private armHintFor(tool: "extrude" | "revolve", regions?: number): string {
     if (tool === "extrude") {
-      return this.previewSessions.length > 1
-        ? `Drag the arrow to set depth for ${this.previewSessions.length} regions · Enter, ✓, or click away to confirm`
-        : "Drag the arrow to set depth · Enter, ✓, or click away to confirm";
+      const n = regions ?? this.previewSessions.length;
+      const head =
+        n > 1 ? `Drag the arrow to set depth for ${n} regions` : "Drag the arrow to set depth";
+      const rule =
+        this.extrude.booleanAuto && hasMaterial(this.extrude.sides)
+          ? " · one way adds material, the other cuts"
+          : "";
+      return `${head}${rule} · Enter, ✓, or click away to confirm`;
     }
     return "Drag to set angle · Enter, ✓, or click away to revolve";
   }
@@ -1647,22 +1810,6 @@ export class ModelToolController {
     // Orbit STAYS suppressed: an armed revolve's drag is the angle (see `tryPickRevolveAxis`).
     this.applyBooleanState(this.revolve.booleanMode, false, "revolve");
     this.sendPreview();
-  }
-
-  /**
-   * One-shot hint on the first depth sign-flip (negative drag) while a boolean
-   * target exists and the mode is still NewBody — nudges toward Cut. Non-sticky.
-   */
-  private maybeNegativeDragHint(depth: number): void {
-    if (this.negativeDragHintShown || depth >= 0) return;
-    // A host-seeded arm already FLIPPED to Cut on this same frame — the mode change
-    // itself is the affordance, and telling the user to "choose Cut" they are
-    // already in would be noise. The tip still serves every non-host sketch.
-    if (this.extrude.booleanAuto) return;
-    if (this.extrude.booleanMode !== "NewBody") return;
-    if (!this.resolveBooleanTarget().canBoolean) return;
-    this.negativeDragHintShown = true;
-    viewportStore.getState().setStatusHint("Tip: choose Cut to remove material");
   }
 
   /** Esc during targetPick: revert to armed(NewBody), clear the Cut tint. */
@@ -2094,7 +2241,7 @@ export class ModelToolController {
       // HOST-BOOLEAN, revolve half: a face-hosted sketch defaults to Add on its host.
       // NO direction logic — a revolve sweeps around an axis rather than pushing into
       // or away from the host — so the seeded mode holds until the chip changes it.
-      const hostSeed = this.hostBooleanSeed(sketchId, false);
+      const hostSeed = this.materialSeed(sketchId, false, [], 0);
       this.revolve = revolveStep(revolveInit(), {
         kind: "arm",
         angle: startAngle,
@@ -5546,9 +5693,26 @@ export class ModelToolController {
       if (grab && this.startGizmoDrag(grab, e.clientX, e.clientY, e.altKey)) return;
     }
 
-    if (this.extrude.phase === "armed" && this.engine.hitExtrudeHandle(e.clientX, e.clientY)) {
+    // The chip layer is a SIBLING of the canvas overlay inside the same container
+    // this controller listens on, so a press on the chip bubbles here. The arrow
+    // is depth-tested out of existence (`depthTest: false`) and hit-tested against
+    // a fat envelope, so a chip pixel can sit over it — and then ✓ / the value
+    // input would start a depth drag instead. Same exclusion the fillet, shell and
+    // degraded-offset branches already apply.
+    if (
+      this.extrude.phase === "armed" &&
+      !this.isExcludedClickAwayTarget(e.target) &&
+      this.engine.hitExtrudeHandle(e.clientX, e.clientY)
+    ) {
       this.dragging = "extrude";
+      const ray = this.engine.screenRay(e.clientX, e.clientY);
+      this.extrudeStartDepth = this.extrude.depth;
+      this.extrudeGrabDepth = ray
+        ? axisDepthFromRay(ray.origin, ray.dir, this.centroidWorld, this.normal)
+        : this.extrude.depth;
       this.extrude = extrudeStep(this.extrude, { kind: "grab" }).state;
+      this.extrudeGrabbed = true;
+      this.syncExtrudeHandle(); // the second head retires once a direction is owned
       this.engine.setExtrudeHandleHover(true);
       toolStore.setState({ phase: "dragging" });
       this.updateDebug(); // publish the live "dragging" phase to the debug surface
@@ -5718,7 +5882,12 @@ export class ModelToolController {
     if (this.dragging === "extrude") {
       const ray = this.engine.screenRay(e.clientX, e.clientY);
       if (!ray) return;
-      const depth = axisDepthFromRay(ray.origin, ray.dir, this.centroidWorld, this.normal);
+      // GRAB-DELTA, not the absolute depth. The arrow now travels with the prism
+      // (`syncExtrudeHandle`), so grabbing it mid-shaft at depth D and reporting
+      // the absolute projection would add an arrow-length to D on EVERY re-grab —
+      // a ratchet. Same fix, same reason as the offset-face arrow (`:5635`).
+      const raw = axisDepthFromRay(ray.origin, ray.dir, this.centroidWorld, this.normal);
+      const depth = this.extrudeStartDepth + (raw - this.extrudeGrabDepth);
       const modeBefore = this.extrude.booleanMode;
       this.extrude = extrudeStep(this.extrude, { kind: "drag", depth, symmetric: this.altHeld }).state;
       this.engine.setExtrudeDepth(this.extrude.depth, this.extrude.symmetric);
@@ -5732,7 +5901,10 @@ export class ModelToolController {
       if (this.extrude.booleanMode !== modeBefore) {
         this.applyBooleanState(this.extrude.booleanMode, false, "extrude");
       }
-      this.maybeNegativeDragHint(this.extrude.depth);
+      // AFTER the mode resolves: the arrow carries the destructive tint too, and
+      // a Cut that only reddened the prism would leave the primary affordance
+      // saying the opposite of what the op is about to do.
+      this.syncExtrudeHandle();
       this.sendPreview();
       this.updateDebug(); // publish live phase ("dragging") + depth to the debug surface
     } else if (this.dragging === "fillet") {
@@ -5980,10 +6152,20 @@ export class ModelToolController {
     return this.deps.engine;
   }
 
-  /** Gate/test hook: grab the extrude handle without a real pointerdown. */
+  /**
+   * Gate/test hook: grab the extrude handle without a real pointerdown.
+   *
+   * There is no press to project, so the grab basis is ZEROED rather than
+   * captured — `start + (raw - grab)` collapses to `raw`, i.e. the absolute
+   * mapping the drag used before it became grab-relative. That is what the gate
+   * helpers and the depth-exact unit tests drive.
+   */
   forceExtrudeGrab(): void {
     if (this.extrude.phase !== "armed") return;
     this.dragging = "extrude";
+    this.extrudeStartDepth = 0;
+    this.extrudeGrabDepth = 0;
+    this.extrudeGrabbed = true;
     this.extrude = extrudeStep(this.extrude, { kind: "grab" }).state;
     toolStore.setState({ phase: "dragging" });
   }
@@ -6537,6 +6719,9 @@ export class ModelToolController {
     this.engine.showExtrudePreviews(this.plane, profiles, this.centroidWorld, this.normal);
     this.engine.setExtrudeDepth(this.extrude.depth, this.extrude.symmetric);
     this.engine.setPreviewTint(this.extrude.booleanMode === "Cut" ? "cut" : "normal");
+    // `showExtrudePreviews` re-anchors the arrow at the CENTROID; the arm is mid-
+    // gesture, so put it back on the depth it actually holds.
+    this.syncExtrudeHandle();
     this.throttle.reset();
     this.sendPreview();
     this.updateDebug();
@@ -6599,7 +6784,6 @@ export class ModelToolController {
     this.extrude = extrudeStep(this.extrude, { kind: "settle" }).state;
     this.engine.setPreviewTint("normal");
     this.throttle.reset();
-    this.negativeDragHintShown = false;
     const uniqueBodyIds = bodyIds.filter((id, i, a) => a.indexOf(id) === i);
     let completionHint: string;
     if (uniqueBodyIds.length > 0) {
@@ -7529,6 +7713,11 @@ export class ModelToolController {
       angle: this.revolve.angle,
       // Boolean state plus exact Extrude/Revolve region context.
       booleanTargetId: this.extrude.targetBodyId ?? this.revolve.targetBodyId ?? null,
+      // What the direction rule has to work with — the only way to tell "no
+      // material either way" from "the probe never ran" when a lane looks inert.
+      booleanAuto: this.extrude.booleanAuto,
+      materialPos: this.extrude.sides.pos,
+      materialNeg: this.extrude.sides.neg,
       regionCount: this.previewSessions.length || this.revolveRegionIds.length || 1,
       selectedRegionIds: this.regionPick
         ? [...this.regionPick.select.selected]
@@ -7763,7 +7952,6 @@ export class ModelToolController {
     // funnel, so it is where an un-exited one must give the camera back.
     this.clearToolHover();
     this.engine.setOrbitSuppressed(false);
-    this.negativeDragHintShown = false;
     this.extrudeStoredParams = undefined;
     this.commitBodyUnsub?.();
     this.commitBodyUnsub = null;
@@ -8036,6 +8224,47 @@ function combinedCentroidWorld(plane: SketchPlane, profiles: PrismProfile[]): Ve
   }
   const c = planePointToWorld(plane, { x: (minU + maxU) / 2, y: (minV + maxV) / 2 });
   return [c.x, c.y, c.z];
+}
+
+/**
+ * A point KNOWN to be inside `profile`, in world space — the centroid of its
+ * largest cap triangle.
+ *
+ * The bbox centroid the arrow is anchored at is fine as a visual anchor but wrong
+ * as a probe origin: for an annulus it lands in the hole, and across two regions
+ * it lands in the gap between them. A triangle of the region's own triangulation
+ * cannot be outside the region, and the largest one is the most robust against
+ * slivers.
+ */
+function profileSampleWorld(plane: SketchPlane, profile: PrismProfile): Vec3 | null {
+  const { positions, indices } = profile.cap;
+  let bestArea = -1;
+  let best: { u: number; v: number } | null = null;
+  for (let i = 0; i + 2 < indices.length; i += 3) {
+    const [a, b, c] = [indices[i], indices[i + 1], indices[i + 2]];
+    const ax = positions[a * 2];
+    const ay = positions[a * 2 + 1];
+    const bx = positions[b * 2];
+    const by = positions[b * 2 + 1];
+    const cx = positions[c * 2];
+    const cy = positions[c * 2 + 1];
+    const area = Math.abs((bx - ax) * (cy - ay) - (cx - ax) * (by - ay));
+    if (area > bestArea) {
+      bestArea = area;
+      best = { u: (ax + bx + cx) / 3, v: (ay + by + cy) / 3 };
+    }
+  }
+  if (!best) return null;
+  const w = planePointToWorld(plane, { x: best.u, y: best.v });
+  return [w.x, w.y, w.z];
+}
+
+/** Prefer a probe that STARTS inside material; otherwise the nearer surface. */
+function strongerProbe(a: SideProbe | null, b: SideProbe | null): SideProbe | null {
+  if (!a) return b;
+  if (!b) return a;
+  if (a.inside !== b.inside) return a.inside ? a : b;
+  return b.gap < a.gap ? b : a;
 }
 
 /** World centroid over N pickable regions (the region-select chip anchor). */

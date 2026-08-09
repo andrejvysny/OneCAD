@@ -13,6 +13,7 @@ import {
   planePointToClient,
   extrudeDebug,
 } from "./helpers";
+import { openExtrudeOverflow } from "./modelToolHelpers";
 
 /*
  * WP-C3 — the extrude DRAFT ANGLE is authorable (mock lane).
@@ -103,7 +104,9 @@ test("the [Draft] segment authors an angle that survives the commit and the re-e
   await armExtrudeOnFreshRectangle(page);
   const bodiesBefore = await bodyOptions(page).count();
 
-  // (1) A fresh arm opens COLLAPSED at zero draft — the common extrude is unchanged.
+  // (1) A fresh arm opens COLLAPSED at zero draft — the common extrude is
+  // unchanged. Draft itself now lives behind the chip's `⋯`.
+  await openExtrudeOverflow(page);
   await expect(page.getByTestId("chip-draft")).toHaveText("Draft");
   await expect(draftInput(page)).toHaveCount(0);
   expect((await extrudeDebug(page))?.draftAngleDeg).toBe(0);
@@ -132,6 +135,7 @@ test("the [Draft] segment authors an angle that survives the commit and the re-e
   await expect(row).toBeVisible();
   await row.dblclick();
   await expect.poll(async () => (await extrudeDebug(page))?.draftAngleDeg).toBe(10);
+  await openExtrudeOverflow(page);
   await expect(page.getByTestId("chip-draft")).toHaveText("Draft 10°");
   await expect(draftInput(page)).toHaveValue("10"); // a stored draft opens expanded
 });
@@ -142,6 +146,7 @@ test("the draft input clamps to the legacy ±89° range", async ({ page }) => {
   // ±90° would make the side face parallel to the extrude direction (a degenerate
   // prism), so the legacy dialog's own range is the ceiling — and the chip reads
   // the CLAMPED state back, never the typed text.
+  await openExtrudeOverflow(page);
   await page.getByTestId("chip-draft").click();
   await draftInput(page).fill("200");
   await page.keyboard.press("Tab");

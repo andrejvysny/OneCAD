@@ -81,6 +81,9 @@ function makeEngineMock() {
     // directly in pointer space.
     screenToPlaneOn: vi.fn((_plane: SketchPlane, x: number, y: number) => ({ x, y })),
     setOrbitSuppressed: vi.fn(),
+    setExtrudeHandle: vi.fn(),
+    moveChip: vi.fn(),
+    probeMaterial: vi.fn(() => null),
     setRegionSelected: vi.fn(),
     planePixelWorld: vi.fn(() => 1),
     probePick: vi.fn(() => null),
