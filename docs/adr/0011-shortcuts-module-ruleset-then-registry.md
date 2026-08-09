@@ -43,8 +43,10 @@ the worst place to allow an arbitrary winner.
 **Scope tokens are supplied by the caller.** `useShortcuts` maps the editor mode
 to modeling's scope tokens; the platform only intersects opaque strings.
 
-**A keystroke does not bypass `canExecute`.** The palette and the toolbar respect
-the gate; so does the keyboard.
+**A keystroke does not bypass `canExecute`** — and it asks with the SAME context
+resolution ran against. Passing an empty context to `run` (the first
+implementation) meant a scope-gated contributed command resolved correctly and
+then refused to execute, which is worse than never resolving.
 
 ## Consequences
 

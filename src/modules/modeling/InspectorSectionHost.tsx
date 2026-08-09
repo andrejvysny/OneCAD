@@ -19,46 +19,20 @@ import { useMemo } from "react";
 import { logError } from "@/debug/log";
 import {
   ContributionBoundary,
-  unsafeId,
   usePlatform,
   useRegistryEntries,
-  type EntityId,
   type InspectorContext,
   type InspectorContribution,
-  type SelectionRef,
-  type TypeId,
 } from "@/platform";
-import { useSelectionStore, type EntityRef } from "@/stores/selectionStore";
+import { useSelectionStore } from "@/stores/selectionStore";
 import { useToolStore } from "@/stores/toolStore";
-import { MODELING_MODULE_ID, ModelingScopes } from "./manifest";
-
-/**
- * Modeling `EntityRef` → platform `SelectionRef`.
- *
- * `subElement` carries the ELEMENT id only, never the topoKey: a topoKey is
- * snapshot-scoped evidence, and letting it stand in here would make an
- * unpromoted face look promoted to every consumer's `canRender`.
- */
-function toSelectionRef(ref: EntityRef): SelectionRef {
-  // `unsafeId` rather than `contributionId`: these are RUNTIME ids minted by the
-  // kernel and the selection store, not authored contribution ids, so there is no
-  // reverse-DNS namespace to validate against.
-  return {
-    entityId: unsafeId<EntityId>(ref.id),
-    owner: MODELING_MODULE_ID,
-    typeId: unsafeId<TypeId>(ref.kind),
-    ...(ref.elementId ? { subElement: ref.elementId } : {}),
-  };
-}
+import { scopeTokensFor, toSelectionRef } from "./selectionContext";
 
 export function useInspectorContext(): InspectorContext {
   const selected = useSelectionStore((s) => s.selected);
   const mode = useToolStore((s) => s.mode);
   return useMemo(
-    () => ({
-      selection: selected.map(toSelectionRef),
-      scopes: [mode === "sketch" ? ModelingScopes.Sketch : ModelingScopes.Model],
-    }),
+    () => ({ selection: selected.map(toSelectionRef), scopes: scopeTokensFor(mode) }),
     [selected, mode],
   );
 }

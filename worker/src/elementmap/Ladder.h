@@ -73,13 +73,14 @@ struct LadderEditContext {
     // True iff the plan carried `editedFrom = k` AND the step owning these refs is
     // strictly AFTER k. Default false ⇒ pre-v2 behaviour, byte for byte.
     bool post_upstream_edit = false;
-    // True iff this replay runs on a RESTORED basis. Anchors are world-frozen at
-    // ref-authoring time, so when the basis was restored rather than rebuilt the
-    // anchor-exact carve-out can bless a stale anchor; disable it on that path (VF-M5).
+    // True iff this replay runs on a basis a restore failed to reproduce. Anchors
+    // are world-frozen at ref-authoring time, so the anchor-exact carve-out can
+    // bless a stale one there; disable it on that path (VF-M5).
     //
-    // NEVER SET IN V1 — there is no checkpoint restore (see ScratchJob.h). The
-    // behaviour below is exercised by `worker/tests/test_wp6_ladder.cpp`, which
-    // constructs this context directly.
+    // NEVER SET BY THE PLAN LANE TODAY — the plan carries no signal that separates
+    // that replay from an ordinary one (see ScratchJob.h). The behaviour below is
+    // exercised by `worker/tests/test_wp6_ladder.cpp`, which constructs this
+    // context directly, so the mechanism stays covered while the wiring waits.
     bool from_zero_replay = false;
 };
 

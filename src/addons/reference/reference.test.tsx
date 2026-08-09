@@ -20,8 +20,11 @@ import {
   type DocumentStateService,
   type ModuleDocumentState,
 } from "@/platform";
-import { moduleId } from "@/platform/ids";
+import { contributionId, moduleId, type ToolContext, type ToolId } from "@/platform";
 import { resetStores } from "@/test/resetStores";
+import { selectionStore } from "@/stores/selectionStore";
+import { ModelingScopes } from "@/modules/modeling/manifest";
+import { modelingContext } from "@/modules/modeling/selectionContext";
 import { contributeModelingTree } from "@/modules/modeling/treeProvider";
 import { registerModelingModule } from "@/modules/modeling/register";
 import { MODELING_MODULE_ID } from "@/modules/modeling/manifest";
@@ -248,5 +251,67 @@ describe("reference addon", () => {
 
     handle?.dispose();
     expect(themeDisposer).toHaveBeenCalled();
+  });
+});
+
+/*
+ * Context plumbing (post-review hardening).
+ *
+ * Codex review, P2.5: every host handed contributions an EMPTY `ToolContext` /
+ * `CommandContext`. Modeling never noticed — it reads its own stores — but for
+ * an addon, which has no stores, a context that is always empty makes
+ * `canActivate`/`canExecute` unusable. These drive the real hosts with a real
+ * selection.
+ */
+describe("reference addon — contexts", () => {
+  beforeEach(() => resetStores());
+
+  it("its tool is asked with the REAL selection and scope", async () => {
+    const { platform } = await bootWithAddon();
+    const seen: ToolContext[] = [];
+    // Re-register a probe tool under the addon's own namespace.
+    const probeId = contributionId<ToolId>(
+      REFERENCE_ADDON_ID,
+      "com.onecadtest.reference.tool.probe",
+    );
+    platform.createScope(REFERENCE_ADDON_ID).registerTool({
+      id: probeId,
+      title: "Probe",
+      canActivate: (ctx) => {
+        seen.push(ctx);
+        return { enabled: true };
+      },
+      activate: () => {},
+      deactivate: () => {},
+    });
+    selectionStore.getState().set([{ kind: "body", id: "body1" }]);
+    withPlatform(platform, <FloatingToolbar />);
+
+    const last = seen[seen.length - 1];
+    expect(last?.selection).toHaveLength(1);
+    expect(last?.selection[0]).toMatchObject({ entityId: "body1", typeId: "body" });
+    expect(last?.scopes).toEqual([ModelingScopes.Model]);
+  });
+
+  it("its selection-gated command runs with that selection through the keyboard lane", async () => {
+    const { platform } = await bootWithAddon();
+    const command = platform.commands.get(ReferenceIds.selectionCommand);
+    expect(command).toBeDefined();
+
+    // Nothing selected ⇒ its own gate refuses, and `run` must respect that.
+    // (The mock document boots with Sketch 2 selected, so clear it explicitly.)
+    selectionStore.getState().clear();
+    const target = platform.shortcuts.resolve({ key: "d", shift: true }, [ModelingScopes.Model]);
+    expect(target?.id).toBe(ReferenceIds.selectionCommand);
+    await platform.shortcuts.run(target!, modelingContext());
+    expect(platform.tree.get(ReferenceIds.tree)?.sections()[0]?.nodes[0]?.label).toBe("Widget A");
+
+    // With a selection it runs, and SEES it.
+    selectionStore.getState().set([{ kind: "body", id: "body1" }]);
+    await platform.shortcuts.run(target!, modelingContext());
+
+    expect(platform.tree.get(ReferenceIds.tree)?.sections()[0]?.nodes[0]?.label).toBe(
+      `Saw 1 in ${ModelingScopes.Model}`,
+    );
   });
 });

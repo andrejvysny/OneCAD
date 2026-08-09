@@ -32,11 +32,31 @@ controller write; `register.ts` subscribes to it and calls `toolHost.report(id)`
 The host mirrors one truth rather than holding a second one, so no entry point
 can leave the highlight disagreeing with the store.
 
-**`deactivate()` runs only on a CROSS-owner swap.** Modules are already exclusive
-internally, so calling it on every same-owner swap would insert a teardown into a
-flow that never had one. Crossing an owner boundary is the case nobody handles
-today and the one where two modules would otherwise both believe they hold the
-pointer.
+**`deactivate()` runs only on a CROSS-owner swap** — and on `report()` as well as
+on `activate()`. Modules are already exclusive internally, so calling it on every
+same-owner swap would insert a teardown into a flow that never had one. Crossing
+an owner boundary is the case nobody handles today and the one where two modules
+would otherwise both believe they hold the pointer.
+
+The `report()` half is not obvious and was missed on the first pass (Codex
+review): a built-in tool chord goes straight into modeling's own dispatcher and
+reaches the host only as a report, so a hand-over implemented on `activate()`
+alone would strand an active addon tool every time the user pressed `E`.
+
+**Activation is transactional.** A tool whose `activate` throws does not stay
+highlighted: the host rolls back to the previous tool when it was never torn down
+(same owner), and to "nothing active" when it was (cross-owner) — claiming
+otherwise would highlight a tool that has already disposed itself. A generation
+counter makes the rollback lose to a NEWER report, exactly as a success would.
+`activate()` never rejects: every caller is a click handler or a keystroke with
+nothing useful to do with the error.
+
+**Contexts are real.** `canActivate`, `activate` and `deactivate` receive the
+current selection and scope tokens, translated from modeling's `EntityRef`s by
+`modules/modeling/selectionContext.ts`. Handing every contribution an empty
+context (the first implementation) makes `ToolContext` decorative: modeling never
+notices because it reads its own stores, but an addon has none, so a tool gating
+on the selection could only ever answer "no".
 
 **`canActivate` returns `ToolAvailability`, not `boolean`**, and gained an
 optional `subscribe(onChange)`. The reason matters: the toolbar has always

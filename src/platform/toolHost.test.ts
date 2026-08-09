@@ -152,3 +152,166 @@ describe("tool host", () => {
     expect(host.activeToolId()).toBe(other);
   });
 });
+
+/*
+ * State integrity (post-review hardening).
+ *
+ * Codex review, P2.5: `report` changed the active id without deactivating a
+ * cross-owner outgoing tool, and a failed `activate` left the failed tool
+ * highlighted. Both are reachable from shipped paths — a built-in tool chord
+ * goes into modeling's own dispatcher and reaches the host only as a report.
+ */
+describe("tool host — hand-over and failure", () => {
+  it("report() deactivates a cross-owner outgoing tool", () => {
+    const { tools, host, calls } = setup();
+    const theirs = toolId(MODULE_B, "one");
+    const mine = toolId(MODULE_A, "one");
+    tools.register(MODULE_B, tool(theirs, calls));
+    tools.register(MODULE_A, tool(mine, calls));
+    host.report(theirs);
+    calls.length = 0;
+
+    // The keyboard lane runs modeling's own dispatcher and only REPORTS the
+    // result. Without a hand-over here both owners believe they are active.
+    host.report(mine);
+
+    expect(calls).toEqual([`deactivate:${theirs}`]);
+    expect(host.activeToolId()).toBe(mine);
+  });
+
+  it("report() does NOT deactivate on a same-owner change", () => {
+    const { tools, host, calls } = setup();
+    const first = toolId(MODULE_A, "one");
+    const second = toolId(MODULE_A, "two");
+    tools.register(MODULE_A, tool(first, calls));
+    tools.register(MODULE_A, tool(second, calls));
+    host.report(first);
+    calls.length = 0;
+
+    host.report(second);
+
+    expect(calls).toEqual([]);
+  });
+
+  it("report(null) deactivates the outgoing tool", () => {
+    const { tools, host, calls } = setup();
+    const id = toolId(MODULE_A, "one");
+    tools.register(MODULE_A, tool(id, calls));
+    host.report(id);
+    calls.length = 0;
+
+    host.report(null);
+
+    expect(calls).toEqual([`deactivate:${id}`]);
+    expect(host.activeToolId()).toBeNull();
+  });
+
+  it("a tool that throws on activate does not stay active", async () => {
+    const { tools, host } = setup();
+    const good = toolId(MODULE_A, "good");
+    const bad = toolId(MODULE_A, "bad");
+    tools.register(MODULE_A, tool(good));
+    tools.register(MODULE_A, {
+      ...tool(bad),
+      activate: () => {
+        throw new Error("cannot arm");
+      },
+    });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    await host.activate(good);
+
+    await host.activate(bad);
+
+    // Same owner ⇒ the previous tool was never torn down ⇒ it is still the truth.
+    expect(host.activeToolId()).toBe(good);
+    expect(error).toHaveBeenCalled();
+    error.mockRestore();
+  });
+
+  it("a CROSS-owner activation failure leaves nothing active, not a torn-down tool", async () => {
+    const { tools, host } = setup();
+    const mine = toolId(MODULE_A, "one");
+    const theirs = toolId(MODULE_B, "one");
+    tools.register(MODULE_A, tool(mine));
+    tools.register(MODULE_B, {
+      ...tool(theirs),
+      activate: () => Promise.reject(new Error("cannot arm")),
+    });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    await host.activate(mine);
+
+    await host.activate(theirs);
+
+    // `mine` was deactivated by the hand-over, so claiming it is active again
+    // would highlight a tool that has already torn itself down.
+    expect(host.activeToolId()).toBeNull();
+    error.mockRestore();
+  });
+
+  it("a failed activation does not undo a NEWER report", async () => {
+    const { tools, host } = setup();
+    const slow = toolId(MODULE_A, "slow");
+    const other = toolId(MODULE_A, "other");
+    tools.register(MODULE_A, {
+      ...tool(slow),
+      activate: async () => {
+        await Promise.resolve();
+        throw new Error("cannot arm");
+      },
+    });
+    tools.register(MODULE_A, tool(other));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const pending = host.activate(slow);
+    host.report(other);
+    await pending;
+
+    expect(host.activeToolId()).toBe(other);
+    error.mockRestore();
+  });
+
+  it("activate() never rejects — a click handler has nothing to do with the error", async () => {
+    const { tools, host } = setup();
+    const bad = toolId(MODULE_A, "bad");
+    tools.register(MODULE_A, {
+      ...tool(bad),
+      activate: () => Promise.reject(new Error("cannot arm")),
+    });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(host.activate(bad)).resolves.toBeUndefined();
+
+    error.mockRestore();
+  });
+
+  it("passes the caller's context to activate and deactivate", async () => {
+    const tools = createRegistry<ToolDefinition>("tool");
+    const host = createToolHost(tools);
+    const seen: unknown[] = [];
+    const mine = toolId(MODULE_A, "one");
+    const theirs = toolId(MODULE_B, "one");
+    tools.register(MODULE_A, {
+      ...tool(mine),
+      deactivate: (ctx) => {
+        seen.push(["deactivate", ctx]);
+      },
+    });
+    tools.register(MODULE_B, {
+      ...tool(theirs),
+      activate: (ctx) => {
+        seen.push(["activate", ctx]);
+      },
+    });
+    const ctx = { selection: [], scopes: ["onecad.demo.scope.model"] };
+    await host.activate(mine);
+
+    await host.activate(theirs, ctx);
+
+    // An addon tool that gates on the scope it was activated in cannot do so if
+    // the host always hands it an empty context.
+    expect(seen).toEqual([
+      ["deactivate", ctx],
+      ["activate", ctx],
+    ]);
+  });
+});

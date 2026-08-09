@@ -64,13 +64,16 @@ struct ScratchJob {
     // descriptor-tie veto applies (SCHEMA §10).
     std::optional<std::uint64_t> edited_from;
 
-    // True iff this plan replays onto a RESTORED basis, where a stored anchor can be
-    // stale because the geometry it was frozen against was not reproduced. Disables
-    // the anchor-exact carve-out in the descriptor-tie veto (VF-M5).
+    // True iff this plan replays onto a basis a restore failed to reproduce, where a
+    // stored anchor can be stale. Disables the anchor-exact carve-out in the
+    // descriptor-tie veto (VF-M5).
     //
-    // ALWAYS FALSE IN V1 — there is no checkpoint restore to produce such a basis, and
-    // partition emptiness does NOT stand in for one (see PlanExecutor.cpp, where this
-    // is set). Wiring it to any always-true condition mis-flags the ordinary edit lane.
+    // ALWAYS FALSE TODAY — not because that lane cannot happen (it can: the Rust
+    // executor's F12 fallback replays from 0 after an unusable checkpoint restore,
+    // keeping its editedFrom), but because the plan carries no field that tells the
+    // two apart, and partition emptiness does NOT stand in for one: it is true of
+    // every ordinary regen and mis-flags the shipped edit lane. See PlanExecutor.cpp
+    // where this is set, and TODO.md § VF-M5 RESIDUAL for the protocol change.
     bool from_zero_replay = false;
 
     // The scratch body state (clone of live at fence time, mutated by ops).

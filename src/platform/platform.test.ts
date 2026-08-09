@@ -433,3 +433,100 @@ describe("module deactivation", () => {
     expect(platform.commands.size).toBe(0);
   });
 });
+
+/*
+ * Unload completeness (post-review hardening).
+ *
+ * Codex review, P2.5: `disposeOwner` swept the REGISTRIES but never disposed the
+ * owner's scope, so everything tied to a module's lifetime with `scope.own` —
+ * modeling's `toolStore` bridge, a contribution's timer, an addon's socket —
+ * outlived the module. And `dispose()` walked `definitions` insertion order
+ * while claiming reverse INITIALIZATION order, which differ whenever a dependent
+ * is registered before its dependency.
+ */
+describe("owner unload", () => {
+  const A = moduleId("onecad.a");
+  const B = moduleId("onecad.b");
+
+  it("disposeOwner disposes what the module tied to its own lifetime", () => {
+    const platform = createPlatform();
+    const released = vi.fn();
+    platform.registerModule({
+      id: A,
+      version: "1.0.0",
+      activate: (scope) => {
+        scope.own({ dispose: released });
+      },
+    });
+    platform.initializeSync();
+
+    platform.disposeOwner(A);
+
+    // A registry sweep cannot reach this: `own` resources live in the scope.
+    expect(released).toHaveBeenCalledOnce();
+  });
+
+  it("dispose() disposes owned resources too", () => {
+    const platform = createPlatform();
+    const released = vi.fn();
+    platform.registerModule({
+      id: A,
+      version: "1.0.0",
+      activate: (scope) => {
+        scope.own({ dispose: released });
+      },
+    });
+    platform.initializeSync();
+
+    platform.dispose();
+
+    expect(released).toHaveBeenCalledOnce();
+  });
+
+  it("unloading twice is a no-op, not a double dispose", () => {
+    const platform = createPlatform();
+    const released = vi.fn();
+    platform.registerModule({
+      id: A,
+      version: "1.0.0",
+      activate: (scope) => {
+        scope.own({ dispose: released });
+      },
+    });
+    platform.initializeSync();
+
+    platform.disposeOwner(A);
+    platform.disposeOwner(A);
+
+    expect(released).toHaveBeenCalledOnce();
+  });
+
+  it("deactivates in DEPENDENCY order even when registration order disagrees", () => {
+    const platform = createPlatform();
+    const order: string[] = [];
+    // B depends on A but is registered FIRST. Activation is topo-sorted (A then
+    // B); reversing the registration map would tear A down while B was live.
+    platform.registerModule({
+      id: B,
+      version: "1.0.0",
+      dependsOn: [A],
+      activate: () => {},
+      deactivate: () => {
+        order.push("b");
+      },
+    });
+    platform.registerModule({
+      id: A,
+      version: "1.0.0",
+      activate: () => {},
+      deactivate: () => {
+        order.push("a");
+      },
+    });
+    platform.initializeSync();
+
+    platform.dispose();
+
+    expect(order).toEqual(["b", "a"]);
+  });
+});

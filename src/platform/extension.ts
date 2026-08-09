@@ -30,7 +30,7 @@ import type {
   WorkspaceDefinition,
 } from "./contributions";
 import type { DocumentStateService } from "./documentState";
-import type { EventId, ModuleId, OwnerId, ServiceId, ToolId } from "./ids";
+import type { EventId, OwnerId, ServiceId, ToolId } from "./ids";
 import type { ModuleScope } from "./platform";
 import type { Disposable } from "./registry";
 
@@ -87,7 +87,8 @@ export interface ExtensionContext {
 /** What an addon's entry point looks like. */
 export interface ExtensionDefinition {
   activate(context: ExtensionContext): void | Promise<void>;
-  deactivate?(context: ExtensionContext): void | Promise<void>;
+  /** Synchronous, for the reason `ModuleDefinition.deactivate` states. */
+  deactivate?(context: ExtensionContext): void;
 }
 
 /**
@@ -141,33 +142,16 @@ export function createExtensionContext(
   };
 }
 
-/**
- * Register an addon as a module.
+/*
+ * There is deliberately NO `registerExtension` here.
  *
- * An addon IS a module to the platform — same lifecycle, same owner-scoped
- * teardown — it simply never sees the scope. `deactivate` is wired through, so
- * an addon's goodbye runs under the same rules as a built-in's (WP4).
+ * It existed briefly and was wrong in a way worth recording: it typed the
+ * manifest as `ModuleId`, but every addon id is an `AddonId` — a disjoint brand
+ * — so the one caller it was written for could not have used it without a cast.
+ * Nothing did use it, which is exactly how a broken adapter survives review.
+ *
+ * Registration is the LOADER's decision (which owner id, which lifetime, what
+ * happens when activation fails, whether a failed addon disables itself), and
+ * the loader does not exist yet. `createExtensionContext` is the piece that has
+ * a real consumer today; the rest waits for the caller that defines its shape.
  */
-export function registerExtension(
-  platform: { registerModule(def: import("./platform").ModuleDefinition): void },
-  manifest: { id: ModuleId; version: string; dependsOn?: readonly ModuleId[] },
-  definition: ExtensionDefinition,
-  documentStateFor: (owner: ModuleId) => DocumentStateService,
-): void {
-  const contexts = new Map<string, ExtensionContext>();
-  const contextFor = (scope: ModuleScope): ExtensionContext => {
-    const existing = contexts.get(scope.owner);
-    if (existing) return existing;
-    const created = createExtensionContext(scope, documentStateFor(manifest.id));
-    contexts.set(scope.owner, created);
-    return created;
-  };
-
-  platform.registerModule({
-    ...manifest,
-    activate: (scope) => definition.activate(contextFor(scope)),
-    deactivate: definition.deactivate
-      ? (scope) => definition.deactivate?.(contextFor(scope))
-      : undefined,
-  });
-}

@@ -33,9 +33,16 @@ get wrong. The narrowing is **by construction** — a fresh object with the allo
 methods — not by casting a scope to a smaller type, because a cast leaves
 `platform` present at runtime one `as` away from anything.
 
-**`createExtensionContext` and `registerExtension` are host-side and absent from
-the SDK.** An addon that could build its own context could hand itself the scope
-the context exists to hide.
+**`createExtensionContext` is host-side and absent from the SDK.** An addon that
+could build its own context could hand itself the scope the context exists to
+hide.
+
+A `registerExtension` adapter was written alongside it and has been **removed**:
+it typed its manifest as `ModuleId` while every addon id is an `AddonId` (a
+disjoint brand), so no addon could have called it without a cast — and nothing
+did, which is how a broken adapter survives review. Registration is the loader's
+decision (which owner id, which lifetime, what a failed activation does), and the
+loader does not exist yet.
 
 **The SDK's runtime surface is snapshot-tested.** Seven runtime values today
 (`Slots`, `addonId`, `contributionId`, `isSlotId`, `isOwnerIdShape`,

@@ -19,7 +19,7 @@
  * chord still tied after all three activates NOTHING and is reported — a silent
  * arbitrary winner is the failure mode this whole architecture exists to avoid.
  */
-import type { CommandDefinition, Shortcut, ToolDefinition } from "./contributions";
+import type { CommandContext, CommandDefinition, Shortcut, ToolDefinition } from "./contributions";
 import type { CommandId, OwnerId, ToolId } from "./ids";
 import type { Registry } from "./registry";
 import { DEFAULT_PRIORITY } from "./registry";
@@ -59,9 +59,18 @@ export interface ShortcutService {
   conflictFor(chord: Chord, scopes: readonly string[]): ShortcutConflict | null;
   /** Every chord claimed by more than one registration, for diagnostics. */
   conflicts(scopes: readonly string[]): readonly ShortcutConflict[];
-  /** Execute a resolved target: run the command, or activate the tool. */
-  run(target: ShortcutTarget): Promise<void>;
+  /**
+   * Execute a resolved target: run the command, or activate the tool.
+   *
+   * `ctx` is the SAME context resolution ran against. Dropping it here was a real
+   * defect: a scope-gated contributed command resolved correctly and then refused
+   * to execute, because `canExecute` was asked about an empty context (Codex
+   * review, P2.5).
+   */
+  run(target: ShortcutTarget, ctx?: CommandContext): Promise<void>;
 }
+
+const EMPTY_CONTEXT: CommandContext = { selection: [], scopes: [] };
 
 const norm = (key: string): string => (key.length === 1 ? key.toLowerCase() : key);
 
@@ -178,17 +187,17 @@ export function createShortcutService(
       return out;
     },
 
-    async run(target) {
+    async run(target, ctx = EMPTY_CONTEXT) {
       if (target.kind === "tool") {
-        await toolHost.activate(target.id as ToolId);
+        await toolHost.activate(target.id as ToolId, ctx);
         return;
       }
       const command = commands.get(target.id);
       // Availability is the command's own answer; a keystroke must not bypass a
       // gate the palette and the toolbar both respect.
       if (!command) return;
-      if (command.canExecute && !command.canExecute({ selection: [], scopes: [] }).enabled) return;
-      await command.execute({ selection: [], scopes: [] });
+      if (command.canExecute && !command.canExecute(ctx).enabled) return;
+      await command.execute(ctx);
     },
   };
 }

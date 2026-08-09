@@ -27,7 +27,7 @@ import {
   saveDocumentAs,
 } from "@/features/shell/fileActions";
 import { viewportNavigation } from "@/modules/shell/viewportNavigation";
-import { ModelingScopes } from "@/modules/modeling/manifest";
+import { modelingContext } from "@/modules/modeling/selectionContext";
 import { usePlatform, type Platform } from "@/platform";
 import { logWarn } from "@/debug/log";
 import { resolveBinding, type ShortcutAction } from "./keymap";
@@ -164,19 +164,6 @@ export function runAction(action: ShortcutAction): void {
   }
 }
 
-/**
- * The scope tokens active right now, as the registries understand them.
- *
- * Modeling owns these strings (its tools are registered with them), so the
- * mapping lives with the caller of `resolveBinding` rather than in the platform,
- * which must not learn what "sketch mode" is.
- */
-function activeScopes(): readonly string[] {
-  return [
-    toolStore.getState().mode === "sketch" ? ModelingScopes.Sketch : ModelingScopes.Model,
-  ];
-}
-
 export function useShortcuts(): void {
   const platform = usePlatform();
 
@@ -261,7 +248,11 @@ export function useShortcuts(): void {
  */
 function runRegisteredShortcut(platform: Platform, e: KeyboardEvent): void {
   const chord = { key: e.key, shift: e.shiftKey };
-  const scopes = activeScopes();
+  // The SAME context resolution runs against is what the target is executed with
+  // — a scope-gated command that resolves and then refuses is worse than one
+  // that never resolved.
+  const context = modelingContext();
+  const scopes = context.scopes;
 
   const target = platform.shortcuts.resolve(chord, scopes);
   if (!target) {
@@ -277,5 +268,5 @@ function runRegisteredShortcut(platform: Platform, e: KeyboardEvent): void {
   }
 
   e.preventDefault();
-  void platform.shortcuts.run(target);
+  void platform.shortcuts.run(target, context);
 }

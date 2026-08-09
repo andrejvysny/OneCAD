@@ -86,9 +86,10 @@ export type {
 export { Slots, isSlotId, type SlotId } from "@/platform/slots";
 
 // ── The extension surface ────────────────────────────────────────────────────
-// `createExtensionContext` and `registerExtension` are host-side and NOT here:
-// an addon that could build its own context could hand itself the scope the
-// context exists to hide.
+// `createExtensionContext` is host-side and NOT here: an addon that could build
+// its own context could hand itself the scope the context exists to hide. The
+// snapshot test below keeps that true by listing what this barrel exports at
+// RUNTIME, so a host constructor cannot arrive through a re-export.
 export type {
   ExtensionContext,
   ExtensionDefinition,

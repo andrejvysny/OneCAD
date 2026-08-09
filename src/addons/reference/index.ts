@@ -72,6 +72,10 @@ export const ReferenceIds = {
     REFERENCE_ADDON_ID,
     "com.onecadtest.reference.workspace.widgets",
   ),
+  selectionCommand: contributionId<CommandId>(
+    REFERENCE_ADDON_ID,
+    "com.onecadtest.reference.command.describeSelection",
+  ),
 } as const;
 
 /**
@@ -105,6 +109,26 @@ export function createReferenceAddon(seed?: readonly Widget[]): ExtensionDefinit
           const n = store.get().widgets.length + 1;
           store.add({ id: `w${n}`, name: `Widget ${n}`, enabled: true });
           persist(context);
+          return { status: "done" as const };
+        },
+      });
+
+      // A SELECTION-gated command: it exists to prove the host hands a real
+      // `CommandContext` to `canExecute`/`execute`, not an empty one.
+      context.registerCommand({
+        id: ReferenceIds.selectionCommand,
+        title: "Describe selection",
+        group: "reference",
+        defaultShortcut: { key: "d", shift: true },
+        canExecute: (ctx) => ({
+          enabled: ctx.selection.length > 0,
+          reason: "Select something first",
+        }),
+        execute: (ctx) => {
+          store.rename(
+            store.get().widgets[0]?.id ?? "",
+            `Saw ${ctx.selection.length} in ${ctx.scopes.join(",") || "no scope"}`,
+          );
           return { status: "done" as const };
         },
       });

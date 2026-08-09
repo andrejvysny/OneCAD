@@ -43,11 +43,18 @@ export interface ModuleDefinition extends ModuleManifest {
    * what it registered. For teardown of owned resources prefer `scope.own()`:
    * this hook is for work a disposer cannot express (flushing, telling a peer).
    *
+   * SYNCHRONOUS, unlike `activate`. Every disposal call site is synchronous — a
+   * React cleanup function, `disposeOwner`, `dispose()` — so an `async`
+   * implementation would have its post-`await` half run against a world whose
+   * registrations were already swept. The type says so rather than the runtime
+   * discovering it: an async goodbye is a design the platform cannot honour, not
+   * an error to report at teardown time.
+   *
    * A throwing `deactivate` does not abort disposal — the registrations still
    * go. Refusing to unload because a module's goodbye failed would leave the
    * platform holding contributions nobody owns.
    */
-  deactivate?(scope: ModuleScope): void | Promise<void>;
+  deactivate?(scope: ModuleScope): void;
 }
 
 /**
@@ -219,19 +226,29 @@ export function createPlatform(): Platform {
     if (!def?.deactivate || states.get(owner as ModuleId) !== "ready") return;
     states.set(owner as ModuleId, "deactivating");
     try {
-      const result = def.deactivate(platform.scopeFor(owner)) as unknown;
-      if (result instanceof Promise) {
-        // Disposal is synchronous everywhere it is called from (React cleanup,
-        // `disposeOwner`). Awaiting here would tear the registrations down while
-        // the module still believed it was live, so an async `deactivate` is
-        // reported rather than silently half-run.
-        void result.catch(() => {});
-        throw new Error("deactivate() returned a promise; disposal is synchronous");
-      }
+      // `scopeFor`, not `createScope`: the module must be handed the scope it
+      // actually registered through. `scopeFor` creates one only if the module
+      // never took a scope, in which case there is nothing for it to see anyway.
+      def.deactivate(platform.scopeFor(owner));
     } catch (cause) {
       // A failed goodbye must not keep the platform holding orphan contributions.
       console.error(`module "${owner}" deactivate() failed`, cause);
     }
+  };
+
+  /**
+   * Unload one owner: goodbye → its scope's own disposers → a defensive sweep.
+   *
+   * The scope disposal is not optional. `sweep` only empties the REGISTRIES;
+   * everything a module tied to its lifetime with `scope.own` (modeling's
+   * `toolStore` bridge, a contribution's timer, an addon's socket) lives only in
+   * the scope, and skipping it leaks exactly the resources ownership exists to
+   * reclaim. The sweep stays as well, for registrations made outside a scope.
+   */
+  const unload = (owner: OwnerId): void => {
+    runDeactivate(owner);
+    scopes.get(owner)?.dispose();
+    sweep(owner);
   };
 
   const platform: Platform = {
@@ -366,21 +383,31 @@ export function createPlatform(): Platform {
     },
 
     disposeOwner(owner) {
-      runDeactivate(owner);
-      sweep(owner);
+      unload(owner);
       if (definitions.has(owner as ModuleId)) states.set(owner as ModuleId, "disposed");
     },
 
     dispose() {
-      // Reverse initialization order: a module tears down while the ones it was
-      // built on are still ready, mirroring `scope.dispose()`'s own rule.
-      const order = [...definitions.keys()].reverse();
-      for (const id of order) runDeactivate(id);
+      // Reverse INITIALIZATION order — the dependency-resolved one, not
+      // `definitions` insertion order. Registering a dependent before its
+      // dependency is legal (the topo sort fixes activation), so reversing the
+      // map would tear a module down while something built on it was still live,
+      // which is the opposite of the guarantee `scope.dispose()` gives inside a
+      // module. A cycle or missing dependency cannot throw here: it would have
+      // thrown at `initialize`, and an un-initialized platform has nothing to
+      // deactivate, so an unordered fallback is safe.
+      let order: OwnerId[];
+      try {
+        order = initializationOrder([...definitions.values()])
+          .map((d) => d.id)
+          .reverse();
+      } catch {
+        order = [...definitions.keys()].reverse();
+      }
+      for (const id of order) unload(id);
+      // Any scope left belongs to an owner with no module (an editor-mount child
+      // scope, an addon registered without a module definition).
       for (const scope of [...scopes.values()]) scope.dispose();
-      // Sweep the registries too. `scope.dispose()` only drops what a SCOPE
-      // tracked, so anything registered under an owner by another route would
-      // otherwise survive a platform that reports itself disposed.
-      for (const id of order) sweep(id);
       for (const id of definitions.keys()) states.set(id, "disposed");
       definitions.clear();
       // Deliberately reusable: with `definitions` cleared this is an empty

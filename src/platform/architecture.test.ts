@@ -45,6 +45,28 @@ function offenders(sources: Sources, forbidden: readonly string[], skip: (f: str
   return found;
 }
 
+/**
+ * Specifiers that climb out of their own subtree.
+ *
+ * `../thing` inside `src/addons/reference/` is fine (the addon's own files);
+ * `../../platform` is not. Counting the leading `../` segments against the file's
+ * depth below the scanned root is enough to tell them apart, and it needs no
+ * module resolution.
+ */
+function escapees(sources: Sources, skip: (f: string) => boolean): string[] {
+  const found: string[] = [];
+  for (const [file, source] of Object.entries(sources)) {
+    if (skip(file)) continue;
+    // `../addons/reference/index.ts` → depth 2 below `src/addons`.
+    const depth = file.replace(/^\.\.\//, "").split("/").length - 2;
+    for (const specifier of importsOf(source)) {
+      const climbs = specifier.match(/^(\.\.\/)+/)?.[0].length ?? 0;
+      if (climbs > 0 && climbs / 3 > depth) found.push(`${file} → ${specifier}`);
+    }
+  }
+  return found;
+}
+
 describe("platform dependency rules", () => {
   it("finds the files it is supposed to be checking", () => {
     // A glob that silently matches nothing would make every rule below vacuous.
@@ -141,6 +163,24 @@ describe("SDK dependency rules", () => {
         (file) => file.includes(".test."),
       ),
     ).toEqual([]);
+  });
+
+  it("...and cannot walk OUT of its own folder to get there", () => {
+    // The alias list above is not a boundary on its own: `../../platform` reaches
+    // exactly the same code and would have passed it (Codex review, P2.5). A
+    // specifier that climbs out of `src/addons/` is the escape hatch, whatever it
+    // lands on.
+    expect(escapees(addonSources, (file) => file.includes(".test."))).toEqual([]);
+  });
+
+  it("the escape-hatch scanner works", () => {
+    // Positive control for the rule above: it must FIND a climbing specifier.
+    const fake: Sources = {
+      "../addons/reference/sneaky.ts": 'import { createPlatform } from "../../platform";',
+    };
+    expect(escapees(fake, () => false)).toEqual([
+      "../addons/reference/sneaky.ts → ../../platform",
+    ]);
   });
 
   it("the SDK re-exports the platform and nothing else", () => {

@@ -6,9 +6,11 @@ import {
   useRegistryEntries,
   useActiveToolId,
   type ToolAvailability,
+  type ToolContext,
   type ToolDefinition,
 } from "@/platform";
 import { toolbarScopeToken } from "@/modules/modeling/registryToolbar";
+import { useModelingToolContext } from "@/modules/modeling/selectionContext";
 import { ToolButton, toolbarIcon } from "./ToolButton";
 
 const ALWAYS_ENABLED: ToolAvailability = { enabled: true };
@@ -43,6 +45,10 @@ export function FloatingToolbar() {
   const platform = usePlatform();
   const tools = useRegistryEntries(platform.tools);
   const activeId = useActiveToolId();
+  // The context a contributed tool is ASKED and ACTIVATED with. Handing every
+  // tool an empty one made `ToolContext` decorative: a tool that gates on the
+  // selection or the scope could only ever answer "no" (Codex review, P2.5).
+  const context = useModelingToolContext();
 
   const token = toolbarScopeToken(mode);
   const entries = useMemo(
@@ -81,7 +87,8 @@ export function FloatingToolbar() {
           def={def}
           active={def.id === activeId}
           separated={i > 0 && def.group !== entries[i - 1]?.group}
-          onPick={() => void platform.toolHost.activate(def.id)}
+          context={context}
+          onPick={() => void platform.toolHost.activate(def.id, context)}
         />
       ))}
     </div>
@@ -92,14 +99,16 @@ function ToolEntry({
   def,
   active,
   separated,
+  context,
   onPick,
 }: {
   def: ToolDefinition;
   active: boolean;
   separated: boolean;
+  context: ToolContext;
   onPick: () => void;
 }) {
-  const verdict = active ? ALWAYS_ENABLED : (def.canActivate?.({ selection: [], scopes: [] }) ?? ALWAYS_ENABLED);
+  const verdict = active ? ALWAYS_ENABLED : (def.canActivate?.(context) ?? ALWAYS_ENABLED);
   return (
     <>
       {separated && <span aria-hidden="true" className="mx-1 h-5 w-px bg-border" />}
