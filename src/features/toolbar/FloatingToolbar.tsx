@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useReducer } from "react";
+import { Fragment, useEffect, useMemo, useReducer } from "react";
 import { cn } from "@/ui/cn";
 import { useToolStore } from "@/stores/toolStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
@@ -13,6 +13,7 @@ import {
 import { toolbarScopeToken } from "@/modules/modeling/registryToolbar";
 import { useModelingToolContext } from "@/modules/modeling/selectionContext";
 import { ToolButton, toolbarIcon } from "./ToolButton";
+import { ToolFlyout } from "./ToolFlyout";
 
 const ALWAYS_ENABLED: ToolAvailability = { enabled: true };
 
@@ -71,6 +72,30 @@ export function FloatingToolbar() {
     [tools, token, hiddenGroups],
   );
 
+  // Collapse family members (`ToolDefinition.flyout`) into one slot per family,
+  // keeping registry order: a family sits where its first member was.
+  const slots = useMemo(
+    () => {
+      const out: RenderSlot[] = [];
+      const families = new Map<string, ToolDefinition[]>();
+      for (const t of entries) {
+        if (t.flyout !== undefined) {
+          let members = families.get(t.flyout);
+          if (members === undefined) {
+            members = [];
+            families.set(t.flyout, members);
+            out.push({ kind: "flyout", family: t.flyout, members });
+          }
+          members.push(t);
+        } else {
+          out.push({ kind: "single", def: t });
+        }
+      }
+      return out;
+    },
+    [entries],
+  );
+
   // `canActivate` is a predicate read during render, so the owner has to say when
   // its answer moved. Re-rendering is all this needs to do — the predicates are
   // re-read below. Without it the buttons would keep their mount-time verdict.
@@ -82,6 +107,9 @@ export function FloatingToolbar() {
     };
   }, [entries]);
 
+  const flyoutDefault = useToolStore((s) => s.flyoutDefault);
+  const setFlyoutDefault = useToolStore((s) => s.setFlyoutDefault);
+
   return (
     <div
       role="toolbar"
@@ -92,46 +120,79 @@ export function FloatingToolbar() {
         mode === "sketch" ? "bg-toolbar-sketch" : "bg-surface",
       )}
     >
-      {entries.map((def, i) => (
-        <ToolEntry
-          key={def.id}
-          def={def}
-          active={def.id === activeId}
-          separated={i > 0 && def.group !== entries[i - 1]?.group}
-          context={context}
-          onPick={() => void platform.toolHost.activate(def.id, context)}
-        />
-      ))}
+      {slots.map((slot, i) => {
+        const group = slot.kind === "single" ? slot.def.group : slot.members[0]?.group;
+        const separated = i > 0 && group !== groupOf(slots[i - 1]);
+        if (slot.kind === "flyout" && slot.members.length >= 2) {
+          // A family whose other members were hidden collapses back to one chip.
+          const stickyId = flyoutDefault[slot.family];
+          const sticky = slot.members.find((m) => m.id === stickyId) ?? slot.members[0];
+          return (
+            <Fragment key={slot.family}>
+              {separated && <Separator />}
+              <ToolFlyout
+                members={slot.members}
+                sticky={sticky}
+                activeId={activeId}
+                context={context}
+                onPick={(def) => {
+                  setFlyoutDefault(slot.family, def.id);
+                  void platform.toolHost.activate(def.id, context);
+                }}
+              />
+            </Fragment>
+          );
+        }
+        const def = slot.kind === "single" ? slot.def : slot.members[0];
+        return (
+          <Fragment key={def.id}>
+            {separated && <Separator />}
+            <ToolEntry
+              def={def}
+              active={def.id === activeId}
+              context={context}
+              onPick={() => void platform.toolHost.activate(def.id, context)}
+            />
+          </Fragment>
+        );
+      })}
     </div>
   );
 }
 
+function Separator() {
+  return <span aria-hidden="true" className="mx-1 h-5 w-px bg-border" />;
+}
+
+function groupOf(slot: RenderSlot): string | undefined {
+  return slot.kind === "single" ? slot.def.group : slot.members[0]?.group;
+}
+
+type RenderSlot =
+  | { kind: "single"; def: ToolDefinition }
+  | { kind: "flyout"; family: string; members: ToolDefinition[] };
+
 function ToolEntry({
   def,
   active,
-  separated,
   context,
   onPick,
 }: {
   def: ToolDefinition;
   active: boolean;
-  separated: boolean;
   context: ToolContext;
   onPick: () => void;
 }) {
   const verdict = active ? ALWAYS_ENABLED : (def.canActivate?.(context) ?? ALWAYS_ENABLED);
   return (
-    <>
-      {separated && <span aria-hidden="true" className="mx-1 h-5 w-px bg-border" />}
-      <ToolButton
-        icon={toolbarIcon(def.icon)}
-        label={def.title}
-        shortcut={def.shortcutLabel ?? ""}
-        active={active}
-        onClick={onPick}
-        disabled={!verdict.enabled}
-        disabledReason={verdict.reason}
-      />
-    </>
+    <ToolButton
+      icon={toolbarIcon(def.icon)}
+      label={def.title}
+      shortcut={def.shortcutLabel ?? ""}
+      active={active}
+      onClick={onPick}
+      disabled={!verdict.enabled}
+      disabledReason={verdict.reason}
+    />
   );
 }

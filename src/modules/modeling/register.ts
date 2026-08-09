@@ -104,6 +104,7 @@ function toolDefinition(d: ModelingToolDescriptor): ToolDefinition {
     icon: d.icon,
     group: d.group,
     priority: d.priority,
+    flyout: d.family,
     scopes: [scopeToken(d.scope)],
     defaultShortcut: shortcutOf(d),
     shortcutLabel: d.shortcut,

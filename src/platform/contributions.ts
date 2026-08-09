@@ -119,6 +119,13 @@ export interface ToolDefinition extends Contribution {
   readonly id: ToolId;
   readonly title: string;
   readonly icon?: string;
+  /**
+   * Opaque family key: tools sharing one render as a single split button whose
+   * menu lists every member (e.g. rectangle-by-diagonal vs by-centre). Absent ⇒
+   * standalone button. Like `group` and `CommandDefinition.scopes`, the strings
+   * are opaque to the platform — it only routes them past the toolbar.
+   */
+  readonly flyout?: string;
   readonly defaultShortcut?: Shortcut;
   /**
    * How the chord is WRITTEN in the UI. Not derivable from `defaultShortcut`:

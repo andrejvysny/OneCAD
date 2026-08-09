@@ -21,6 +21,7 @@
  * Extrude armed). Omit it for the legacy defaults (line / select).
  */
 import { createStore, useStore } from "zustand";
+import type { ToolId } from "@/platform";
 import { viewportStore } from "./viewportStore";
 import { selectionStore } from "./selectionStore";
 import { documentStore } from "./documentStore";
@@ -91,6 +92,13 @@ export interface ToolState {
   modelTool: ModelTool;
   sketchTool: SketchTool;
   phase: InteractionPhase;
+  /**
+   * The flyout family's last-picked member (`family` key → member `ToolId`).
+   * The toolbar's split button activates this member on a plain click; absent ⇒
+   * the lowest-priority member is the default. Keyed by the OPAQUE family id so
+   * a foreign tool's flyout can remember a choice without modeling knowing it.
+   */
+  flyoutDefault: Partial<Record<string, ToolId>>;
   /** Enter/exit a mode. `sketchId` targets an existing sketch; omit it to start
    *  a new sketch (activeSketchId stays null → the controller shows the plane picker).
    *  `opts.tool` keeps a caller-chosen tool across the transition (auto-switch);
@@ -98,6 +106,8 @@ export interface ToolState {
   setMode(mode: EditorMode, sketchId?: string, opts?: { tool?: Tool }): void;
   /** Set the active tool for the *current* mode. */
   setTool(tool: Tool): void;
+  /** Remember the flyout family's last-picked member (the split button's default). */
+  setFlyoutDefault(family: string, tool: ToolId): void;
 }
 
 export const toolStore = createStore<ToolState>()((set, get) => ({
@@ -105,6 +115,7 @@ export const toolStore = createStore<ToolState>()((set, get) => ({
   modelTool: "select",
   sketchTool: "line",
   phase: "idle",
+  flyoutDefault: {},
 
   setMode(mode, sketchId, opts) {
     if (mode === "sketch") {
@@ -132,6 +143,10 @@ export const toolStore = createStore<ToolState>()((set, get) => ({
     } else {
       set({ modelTool: tool as ModelTool, phase: phaseFor(tool) });
     }
+  },
+
+  setFlyoutDefault(family, tool) {
+    set({ flyoutDefault: { ...get().flyoutDefault, [family]: tool } });
   },
 }));
 

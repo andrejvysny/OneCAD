@@ -29,6 +29,12 @@ interface ToolPresentation {
   readonly shortcut: string;
   readonly group: string;
   readonly priority: number;
+  /**
+   * The flyout family this tool belongs to (opaque key). Members sharing a key
+   * render as ONE split button: the lowest-priority member is the default, the
+   * others live in its dropdown. Absent ⇒ the tool owns its own button.
+   */
+  readonly family?: string;
 }
 
 /**
@@ -61,8 +67,10 @@ export const MODEL_TOOL_DESCRIPTORS: readonly ModelToolDescriptor[] = [
   { tool: "shell", scope: "model", icon: "shell", label: "Shell", shortcut: "K", group: "model.modify", priority: 300 },
   { tool: "offsetFace", scope: "model", icon: "pushpull", label: "Offset face", shortcut: "⇧O", group: "model.modify", priority: 310 },
   { tool: "hole", scope: "model", icon: "hole", label: "Hole", shortcut: "⇧H", group: "model.modify", priority: 320 },
-  { tool: "linearPattern", scope: "model", icon: "linearPattern", label: "Linear pattern", shortcut: "P", group: "model.modify", priority: 330 },
-  { tool: "circularPattern", scope: "model", icon: "circularPattern", label: "Circular pattern", shortcut: "C", group: "model.modify", priority: 340 },
+  { tool: "linearPattern", scope: "model", icon: "linearPattern", label: "Linear pattern", shortcut: "P", group: "model.modify", priority: 330, family: "onecad.modeling.flyout.model.pattern" },
+  // Circular repeats the same verb with the other arrangement, so the pair shares
+  // one split button — the menu is where the two gestures differ.
+  { tool: "circularPattern", scope: "model", icon: "circularPattern", label: "Circular pattern", shortcut: "C", group: "model.modify", priority: 340, family: "onecad.modeling.flyout.model.pattern" },
   { tool: "mirror", scope: "model", icon: "mirrorBody", label: "Mirror", shortcut: "M", group: "model.modify", priority: 350 },
   // A PLACEMENT, not a modelling op: it changes where a body is, never its shape.
   { tool: "transform", scope: "model", icon: "move", label: "Move", shortcut: "T", group: "model.modify", priority: 360 },
@@ -76,13 +84,13 @@ export const SKETCH_TOOL_DESCRIPTORS: readonly SketchToolDescriptor[] = [
   { tool: "select", scope: "sketch", icon: "select", label: "Select", shortcut: "V", group: "sketch.select", priority: 100 },
 
   { tool: "line", scope: "sketch", icon: "line", label: "Line", shortcut: "L", group: "sketch.draw", priority: 200 },
-  { tool: "rect", scope: "sketch", icon: "rect", label: "Rectangle", shortcut: "R", group: "sketch.draw", priority: 210 },
-  { tool: "centerRect", scope: "sketch", icon: "centerRect", label: "Center rectangle", shortcut: "⇧R", group: "sketch.draw", priority: 220 },
-  { tool: "circle", scope: "sketch", icon: "circle", label: "Circle", shortcut: "C", group: "sketch.draw", priority: 230 },
-  { tool: "ellipse", scope: "sketch", icon: "ellipse", label: "Ellipse", shortcut: "O", group: "sketch.draw", priority: 240 },
-  { tool: "arc", scope: "sketch", icon: "arc", label: "Arc", shortcut: "A", group: "sketch.draw", priority: 250 },
+  { tool: "rect", scope: "sketch", icon: "rect", label: "Rectangle", shortcut: "R", group: "sketch.draw", priority: 210, family: "onecad.modeling.flyout.sketch.rect" },
+  { tool: "centerRect", scope: "sketch", icon: "centerRect", label: "Center rectangle", shortcut: "⇧R", group: "sketch.draw", priority: 220, family: "onecad.modeling.flyout.sketch.rect" },
+  { tool: "circle", scope: "sketch", icon: "circle", label: "Circle", shortcut: "C", group: "sketch.draw", priority: 230, family: "onecad.modeling.flyout.sketch.curve" },
+  { tool: "ellipse", scope: "sketch", icon: "ellipse", label: "Ellipse", shortcut: "O", group: "sketch.draw", priority: 240, family: "onecad.modeling.flyout.sketch.curve" },
+  { tool: "arc", scope: "sketch", icon: "arc", label: "Arc", shortcut: "A", group: "sketch.draw", priority: 250, family: "onecad.modeling.flyout.sketch.arc" },
   // The second arc gesture, next to the first: same shape, the other three inputs.
-  { tool: "arc3p", scope: "sketch", icon: "arc3p", label: "3-point arc", shortcut: "⇧A", group: "sketch.draw", priority: 260 },
+  { tool: "arc3p", scope: "sketch", icon: "arc3p", label: "3-point arc", shortcut: "⇧A", group: "sketch.draw", priority: 260, family: "onecad.modeling.flyout.sketch.arc" },
 
   { tool: "polygon", scope: "sketch", icon: "polygon", label: "Polygon", shortcut: "G", group: "sketch.shapes", priority: 300 },
   { tool: "slot", scope: "sketch", icon: "slot", label: "Slot", shortcut: "S", group: "sketch.shapes", priority: 310 },

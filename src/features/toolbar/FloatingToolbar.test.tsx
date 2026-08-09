@@ -71,8 +71,12 @@ describe("FloatingToolbar", () => {
     // The Model "New sketch" tool enters sketch mode.
     await user.click(screen.getByRole("button", { name: "New sketch" }));
 
-    for (const name of ["Line", "Rectangle", "Circle", "Arc", "3-point arc", "Dimension", "Trim", "Extend", "Mirror"]) {
+    for (const name of ["Line", "Rectangle", "Circle", "Arc", "Dimension", "Trim", "Extend", "Mirror"]) {
       expect(screen.getByRole("button", { name })).toBeInTheDocument();
+    }
+    // Family variants are folded behind their flyout's chevron, not buttons.
+    for (const name of ["Center rectangle", "Ellipse", "3-point arc"]) {
+      expect(screen.queryByRole("button", { name })).toBeNull();
     }
     expect(screen.queryByRole("button", { name: "Extrude" })).toBeNull();
     // Sketch mode defaults to the Line tool.
@@ -98,7 +102,7 @@ describe("FloatingToolbar", () => {
     for (const name of ["Extrude", "Revolve", "Select", "New sketch", "Datum plane", "Hole", "Measure"]) {
       expect(screen.getByRole("button", { name })).toHaveAttribute("aria-disabled", "false");
     }
-    for (const name of ["Fillet / Chamfer", "Combine", "Shell", "Offset face", "Linear pattern", "Circular pattern", "Mirror", "Move"]) {
+    for (const name of ["Fillet / Chamfer", "Combine", "Shell", "Offset face", "Linear pattern", "Mirror", "Move"]) {
       expect(screen.getByRole("button", { name })).toHaveAttribute("aria-disabled", "true");
     }
   });
@@ -106,7 +110,7 @@ describe("FloatingToolbar", () => {
   it("selecting a body enables the body-gated tools but not the edge/face-gated ones", () => {
     selectionStore.getState().set([{ kind: "body", id: "body1" }]);
     renderWithPlatform(<FloatingToolbar />);
-    for (const name of ["Combine", "Linear pattern", "Circular pattern", "Mirror", "Move"]) {
+    for (const name of ["Combine", "Linear pattern", "Mirror", "Move"]) {
       expect(screen.getByRole("button", { name })).toHaveAttribute("aria-disabled", "false");
     }
     for (const name of ["Fillet / Chamfer", "Shell", "Offset face"]) {
@@ -118,7 +122,7 @@ describe("FloatingToolbar", () => {
     selectionStore.getState().set([{ kind: "edge", id: "e1", bodyId: "body1" }]);
     renderWithPlatform(<FloatingToolbar />);
     expect(screen.getByRole("button", { name: "Fillet / Chamfer" })).toHaveAttribute("aria-disabled", "false");
-    for (const name of ["Combine", "Shell", "Offset face", "Linear pattern", "Circular pattern", "Mirror", "Move"]) {
+    for (const name of ["Combine", "Shell", "Offset face", "Linear pattern", "Mirror", "Move"]) {
       expect(screen.getByRole("button", { name })).toHaveAttribute("aria-disabled", "true");
     }
   });
