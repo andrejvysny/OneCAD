@@ -64,6 +64,17 @@ import type { Vec3 } from "@/tools/preview/depthProjection";
 const FRAME_RING = 240; // ?vpdebug frame-interval ring buffer capacity
 
 /**
+ * Lets the engine ask the sketch-fetch owner (`SketchStaticSync`) whether the
+ * pickable sketch geometry is currently in the layer. The engine owns picking but
+ * not the fetch lifecycle, so it cannot answer this itself.
+ */
+export interface SketchStaticReadinessProvider {
+  isSettled(): boolean;
+  /** Runs `cb` when settled (immediately if already). Returns a canceller. */
+  onSettled(cb: () => void): () => void;
+}
+
+/**
  * Hard ceiling on a `captureThumbnail()` data URL, in CHARACTERS.
  *
  * base64 costs 4 chars per 3 bytes, so this is ≈256 KiB decoded — comfortably
@@ -265,6 +276,7 @@ export class ViewportEngine {
 
   // Always-visible document sketches in MODEL mode (Fusion-style static layer).
   private sketchStatic: SketchStaticLayer | null = null;
+  private sketchStaticReadiness: SketchStaticReadinessProvider | null = null;
 
   /**
    * Where `ViewportContribution`s attach. A child of `interactionRoot` so
@@ -1738,6 +1750,54 @@ export class ViewportEngine {
       threshold: linePickThreshold(camera, this.viewportSize().height, this.getCameraDistance(), SKETCH_PICK_PX),
     };
     return this.sketchStatic.hitTest(this.raycaster);
+  }
+
+  /**
+   * Who can answer "is the pickable sketch geometry currently trustworthy?".
+   * Supplied by `SketchStaticSync`, which owns the fetch lifecycle; null before it
+   * attaches, and then everything is treated as settled (there is nothing in
+   * flight to wait for).
+   */
+  setSketchStaticReadiness(readiness: SketchStaticReadinessProvider | null): void {
+    this.sketchStaticReadiness = readiness;
+  }
+
+  /**
+   * The PICK-time form of {@link sketchStaticHitTest}, which distinguishes the two
+   * cases a bare `null` conflates:
+   *
+   *   - `miss`      — the ray really hit no sketch. Clearing the selection is right.
+   *   - `unsettled` — a reload has the fills out of the layer, so the ray CANNOT
+   *                   hit them. Clearing here is the boolean-preview defect: the
+   *                   click reads as empty space, the region never gets selected,
+   *                   and the tool arms in multi-select instead.
+   *
+   * Deliberately atomic: the state is read WITH the hit, in the same call, because
+   * a readiness flag polled beforehand can go stale between the poll and the pick —
+   * which is exactly how the original spec's `sketchHitTestReady` gate passed
+   * immediately before a failure.
+   */
+  sketchStaticPickState(
+    clientX: number,
+    clientY: number,
+  ): { state: "hit"; hit: SketchStaticHit } | { state: "miss" | "unsettled"; hit: null } {
+    const hit = this.sketchStaticHitTest(clientX, clientY);
+    if (hit) return { state: "hit", hit };
+    const settled = this.sketchStaticReadiness?.isSettled() ?? true;
+    return { state: settled ? "miss" : "unsettled", hit: null };
+  }
+
+  /**
+   * Run `cb` once the sketch layer is settled (immediately if it already is).
+   * Returns a canceller so a superseded pick cannot fire late.
+   */
+  sketchStaticWhenSettled(cb: () => void): () => void {
+    const readiness = this.sketchStaticReadiness;
+    if (!readiness) {
+      cb();
+      return () => {};
+    }
+    return readiness.onSettled(cb);
   }
 
   // ---- Picking / highlighting (F-WP5) ----

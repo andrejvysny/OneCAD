@@ -54,6 +54,7 @@ function fakeLayer() {
 function fakeEngine(layer: ReturnType<typeof fakeLayer>) {
   return {
     getSketchStaticLayer: () => layer as unknown as SketchStaticLayer,
+    setSketchStaticReadiness: vi.fn(),
   } as unknown as ViewportEngine;
 }
 
@@ -223,6 +224,87 @@ describe("SketchStaticSync document diff", () => {
       { kind: "body", id: "b1" },
     ]);
     expect(selectionStore.getState().hover).toBeNull();
+  });
+
+  // ── boolean-preview root cause #1 ─────────────────────────────────────────
+  it("does NOT drop region refs when the region fetch REJECTS", async () => {
+    documentStore.setState({ sketches: { s1: meta("s1", true, "geometry-v1") } });
+    const layer = fakeLayer();
+    const client = fakeClient([REGION]);
+    sync = new SketchStaticSync();
+    sync.attach(fakeEngine(layer), client);
+    await tick();
+
+    const live = sketchRegionRef("s1", "r-keep");
+    selectionStore.getState().set([live]);
+
+    // The refreshed fetch fails. An empty region set from a FAILED fetch is not
+    // evidence that the region disappeared — reconciling against it wiped every
+    // live sketchRegion ref, which is how a just-clicked region lost its selection
+    // and Extrude armed in multi-select instead of the depth drag.
+    client.getSketchRegions.mockRejectedValueOnce(new Error("worker not connected"));
+    documentStore.setState({ sketches: { s1: meta("s1", true, "geometry-v2") } });
+    await tick();
+
+    expect(selectionStore.getState().selected).toEqual([live]);
+  });
+
+  // ── boolean-preview root cause #2 ─────────────────────────────────────────
+  it("reports UNSETTLED across a reload and releases waiters once the fills are back", async () => {
+    documentStore.setState({ sketches: { s1: meta("s1", true, "geometry-v1") } });
+    const layer = fakeLayer();
+    let resolveSketch!: (s: SketchSession) => void;
+    const client = fakeClient([REGION]);
+    sync = new SketchStaticSync();
+    sync.attach(fakeEngine(layer), client);
+    await tick();
+    expect(sync.isSettled()).toBe(true);
+
+    // Hold the refetch open: this is the window in which `removeSketch` has already
+    // torn the fills out, so a hit test CANNOT hit them.
+    client.getSketch.mockImplementationOnce(
+      () => new Promise<SketchSession>((res) => { resolveSketch = res; }),
+    );
+    documentStore.setState({ sketches: { s1: meta("s1", true, "geometry-v2") } });
+    await tick();
+
+    expect(layer.removeSketch).toHaveBeenCalledWith("s1");
+    expect(sync.isSettled()).toBe(false);
+    let released = false;
+    sync.onSettled(() => { released = true; });
+    expect(released).toBe(false);
+
+    resolveSketch({
+      sketchId: "s1",
+      plane: PLANE,
+      entities: [],
+      constraints: [],
+      dof: 0,
+      status: "FullyConstrained",
+    });
+    await tick();
+
+    expect(sync.isSettled()).toBe(true);
+    expect(released).toBe(true);
+  });
+
+  it("releases deferred picks on detach rather than swallowing them", async () => {
+    documentStore.setState({ sketches: { s1: meta("s1", true, "geometry-v1") } });
+    const layer = fakeLayer();
+    const client = fakeClient([REGION]);
+    sync = new SketchStaticSync();
+    sync.attach(fakeEngine(layer), client);
+    await tick();
+
+    client.getSketch.mockImplementationOnce(() => new Promise<SketchSession>(() => {}));
+    documentStore.setState({ sketches: { s1: meta("s1", true, "geometry-v2") } });
+    await tick();
+    expect(sync.isSettled()).toBe(false);
+
+    let released = false;
+    sync.onSettled(() => { released = true; });
+    sync.detach();
+    expect(released).toBe(true);
   });
 });
 

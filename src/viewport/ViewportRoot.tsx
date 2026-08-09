@@ -18,7 +18,11 @@ import { logWarn } from "@/debug/log";
 import { ViewportEngine } from "./engine/ViewportEngine";
 import { resetPaletteCache } from "./engine/palette";
 import { getResolvedTheme, subscribeResolvedTheme } from "@/theme/themeController";
-import { secondaryHitWins, type PickHit } from "./engine/Picker";
+import {
+  secondaryHitWins,
+  type PickHit,
+  type PickModifiers,
+} from "./engine/Picker";
 import { MeshIngest } from "./mesh/meshSync";
 import { SketchStaticSync } from "./sketchStaticSync";
 import { DatumSync } from "./datumSync";
@@ -322,21 +326,47 @@ export function ViewportRoot({ className }: { className?: string }) {
           const id = getDatumVisuals()?.hitTest(x, y) ?? null;
           return id ? { kind: "datum", id } : null;
         };
-        engine.configurePicking({
-          isActive: isPickingActive,
-          onHover: (hit, x, y, alt) => {
-            const sel = selectionStore.getState();
-            const sketchHit = engine.sketchStaticHitTest(x, y);
-            sel.setHover(refFromModelHits(hit, sketchHit, alt) ?? datumRefAt(x, y));
-          },
-          onPick: (hit, mods, x, y) => {
-            const sel = selectionStore.getState();
-            const sketchHit = engine.sketchStaticHitTest(x, y);
-            const ref = refFromModelHits(hit, sketchHit, mods.alt) ?? datumRefAt(x, y);
-            if (!ref) {
-              sel.clear();
+        // A pick deferred because the sketch layer was mid-reload. At most one is
+        // outstanding: a newer pick cancels it, so a stale click can never land
+        // after the user has moved on.
+        let cancelDeferredPick: (() => void) | null = null;
+        cleanups.push(() => {
+          cancelDeferredPick?.();
+          cancelDeferredPick = null;
+        });
+        const runPick = (
+          hit: PickHit | null,
+          mods: PickModifiers,
+          x: number,
+          y: number,
+          deferred: boolean,
+        ): void => {
+          const sel = selectionStore.getState();
+          const pick = engine.sketchStaticPickState(x, y);
+          const ref = refFromModelHits(hit, pick.hit, mods.alt) ?? datumRefAt(x, y);
+          if (!ref) {
+            // A sketch reload has the fills out of the layer, so the ray CANNOT hit
+            // them — this is not "the user clicked empty space", and clearing here is
+            // the boolean-preview defect. Replay the click's screen point once the
+            // layer settles so the user's intent survives the round trip.
+            //
+            // `deferred` bounds it to ONE retry: if a fresh reload started while we
+            // waited, treat it as a real miss rather than chasing the layer forever.
+            if (pick.state === "unsettled" && !deferred) {
+              cancelDeferredPick?.();
+              cancelDeferredPick = engine.sketchStaticWhenSettled(() => {
+                cancelDeferredPick = null;
+                runPick(hit, mods, x, y, true);
+              });
               return;
             }
+            cancelDeferredPick?.();
+            cancelDeferredPick = null;
+            sel.clear();
+            return;
+          }
+          cancelDeferredPick?.();
+          cancelDeferredPick = null;
             // Measure: the pick is a READ, so it always REPLACES the selection
             // (a modifier-extended multi-select would not mean anything to a
             // two-element measurement) and routes to the controller, which owns
@@ -344,18 +374,29 @@ export function ViewportRoot({ className }: { className?: string }) {
             // this handler is unchanged, including the promotion below — the
             // controller re-promotes only if this fire-and-forget one has not
             // landed by the time it needs an id.
-            if (isMeasuring()) {
-              sel.set([ref]);
-              void modelToolController.measurePick(ref);
-              return;
-            }
-            if (mods.shift || mods.meta) sel.toggle(ref);
-            else sel.set([ref]);
-            // Promote face/edge picks to a persistent ElementId (mock mints ids;
-            // the real client routes to AcquireElementIds). Promoted id flows back
-            // onto the selected ref, exactly as the mock does.
-            promotePick(client, ref);
+          if (isMeasuring()) {
+            sel.set([ref]);
+            void modelToolController.measurePick(ref);
+            return;
+          }
+          if (mods.shift || mods.meta) sel.toggle(ref);
+          else sel.set([ref]);
+          // Promote face/edge picks to a persistent ElementId (mock mints ids;
+          // the real client routes to AcquireElementIds). Promoted id flows back
+          // onto the selected ref, exactly as the mock does.
+          promotePick(client, ref);
+        };
+        engine.configurePicking({
+          isActive: isPickingActive,
+          onHover: (hit, x, y, alt) => {
+            const sel = selectionStore.getState();
+            // Hover deliberately keeps the plain hit test: a hover that misses during
+            // a reload is transient and self-correcting, and deferring it would make
+            // the highlight lag the pointer.
+            const sketchHit = engine.sketchStaticHitTest(x, y);
+            sel.setHover(refFromModelHits(hit, sketchHit, alt) ?? datumRefAt(x, y));
           },
+          onPick: (hit, mods, x, y) => runPick(hit, mods, x, y, false),
         });
         cleanups.push(() => engine.configurePicking(null));
 

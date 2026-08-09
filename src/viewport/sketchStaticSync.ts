@@ -58,11 +58,31 @@ export class SketchStaticSync {
   private readonly loaded = new Set<string>();
   /** Sketch ids whose region fetch rejected, awaiting the next published revision. */
   private readonly regionRetry = new Set<string>();
+  /**
+   * Sketch ids whose PICKABLE geometry is currently missing or being replaced.
+   *
+   * A token-driven reload tears the fills out of the layer and only puts them back
+   * two awaited round trips later; in that window `sketchStaticHitTest` answers
+   * `null`, which is indistinguishable from "the user clicked empty space". Polling
+   * a readiness flag before the click cannot close that — the window can open
+   * between the poll and the pick — so consumers ask for the SETTLED state at pick
+   * time and defer instead (see `ViewportEngine.sketchStaticPickState`).
+   */
+  private readonly refilling = new Set<string>();
+  /** One-shot callbacks waiting for `refilling` to drain. */
+  private readonly settledWaiters = new Set<() => void>();
 
   attach(engine: ViewportEngine, client: CadClient): void {
     this.client = client;
     this.layer = engine.getSketchStaticLayer();
     this.detached = false;
+    // The engine owns picking but not the fetch lifecycle, so it asks US whether the
+    // pickable set is currently trustworthy.
+    engine.setSketchStaticReadiness({
+      isSettled: () => this.isSettled(),
+      onSettled: (cb) => this.onSettled(cb),
+    });
+    this.unsubs.push(() => engine.setSketchStaticReadiness(null));
 
     // documentStore sketches (identity change ⇒ diff added / removed / visibility),
     // plus revision (⇒ retry the sketches whose regions never arrived).
@@ -131,7 +151,10 @@ export class SketchStaticSync {
         this.loaded.delete(id);
         this.fetchSeq.delete(id);
         this.regionRetry.delete(id);
+        // A DELETED sketch is authoritative: its regions really are gone, so
+        // reconciling here is correct (unlike a failed fetch, which is not).
         this.reconcileRegionRefs(id, new Set());
+        this.clearRefilling(id);
       }
     }
     for (const [id, meta] of Object.entries(next)) {
@@ -139,14 +162,22 @@ export class SketchStaticSync {
       if (!before) {
         if (meta.visible) void this.loadSketch(id);
       } else if (before.geometryToken !== meta.geometryToken) {
-        // Never leave old fills pickable while the replacement is in flight.
+        // Never leave old fills pickable while the replacement is in flight. The
+        // sketch is UNSETTLED from here until `loadSketch` puts the new fills in,
+        // so a pick landing in the gap defers rather than reading "empty space".
         this.layer?.removeSketch(id);
         this.loaded.delete(id);
         this.fetchSeq.delete(id);
-        if (meta.visible && !this.isEditing(id)) void this.loadSketch(id);
+        if (meta.visible && !this.isEditing(id)) {
+          this.markRefilling(id);
+          void this.loadSketch(id);
+        }
       } else if (before.visible !== meta.visible) {
         if (this.loaded.has(id)) this.layer?.setVisible(id, meta.visible);
-        else if (meta.visible) void this.loadSketch(id); // lazy-load on first show
+        else if (meta.visible) {
+          this.markRefilling(id);
+          void this.loadSketch(id); // lazy-load on first show
+        }
       }
     }
   }
@@ -169,18 +200,31 @@ export class SketchStaticSync {
     try {
       session = await client.getSketch(id);
     } catch {
-      return; // unknown / not readable — skip (curves appear once it is readable)
+      // Unknown / not readable — skip (curves appear once it is readable). The
+      // refill will not land, so stop holding picks for it.
+      this.clearRefilling(id);
+      return;
     }
-    if (this.detached || this.fetchSeq.get(id) !== token) return;
+    if (this.detached || this.fetchSeq.get(id) !== token) {
+      // Superseded: the NEWER load owns the refill flag, so do not clear it here or
+      // a pick would be released against a layer that is still empty.
+      if (this.detached) this.clearRefilling(id);
+      return;
+    }
 
     // Fill is best-effort: a reject or zero regions degrades to curves-only. A reject
     // can simply mean the fetch lost a race with a still-connecting worker, so the id
     // is queued for the next published revision rather than left unfilled forever.
     let finish: Awaited<ReturnType<CadClient["getSketchRegions"]>>;
+    // A REJECTED region fetch is not evidence that regions disappeared, so it must
+    // not be reconciled against the live selection — doing so dropped every
+    // `sketchRegion` ref for this sketch on a transient failure.
+    let regionsAreAuthoritative = true;
     try {
       finish = await client.getSketchRegions(id);
     } catch {
       finish = { regions: [] };
+      regionsAreAuthoritative = false;
       if (this.fetchSeq.get(id) === token) {
         this.regionRetry.add(id);
         // A publish that landed mid-fetch has already been consumed by an empty
@@ -192,17 +236,24 @@ export class SketchStaticSync {
         }
       }
     }
-    if (this.detached || this.fetchSeq.get(id) !== token) return;
+    if (this.detached || this.fetchSeq.get(id) !== token) {
+      if (this.detached) this.clearRefilling(id);
+      return;
+    }
 
-    this.reconcileRegionRefs(
-      id,
-      new Set(finish.regions.map((region) => region.regionId)),
-    );
+    if (regionsAreAuthoritative) {
+      this.reconcileRegionRefs(
+        id,
+        new Set(finish.regions.map((region) => region.regionId)),
+      );
+    }
     this.loaded.add(id);
     this.layer?.setSketch(id, { plane: session.plane, entities: session.entities, regions: finish.regions });
     // Re-assert the current tree visibility (the editing-hide override is applied by
     // the layer against its tracked editing id).
     this.layer?.setVisible(id, documentStore.getState().sketches[id]?.visible ?? true);
+    // The fills are back and pickable — release any pick that deferred on them.
+    this.clearRefilling(id);
   }
 
   /** Refetch a sketch's geometry (e.g. after exiting its edit session). */
@@ -253,6 +304,38 @@ export class SketchStaticSync {
     this.layer?.setEditingSketch(mode === "sketch" ? activeId : null);
   }
 
+  /** True when every sketch's pickable geometry is in the layer (no refill in flight). */
+  isSettled(): boolean {
+    return this.refilling.size === 0;
+  }
+
+  /**
+   * Run `cb` once the layer is settled — immediately if it already is. Returns a
+   * canceller, because a pick that is superseded (another pick, a mode change)
+   * must not fire late.
+   */
+  onSettled(cb: () => void): () => void {
+    if (this.isSettled()) {
+      cb();
+      return () => {};
+    }
+    this.settledWaiters.add(cb);
+    return () => this.settledWaiters.delete(cb);
+  }
+
+  private markRefilling(id: string): void {
+    this.refilling.add(id);
+  }
+
+  private clearRefilling(id: string): void {
+    if (!this.refilling.delete(id)) return;
+    if (!this.isSettled()) return;
+    for (const cb of [...this.settledWaiters]) {
+      this.settledWaiters.delete(cb);
+      cb();
+    }
+  }
+
   detach(): void {
     this.detached = true;
     for (const u of this.unsubs.splice(0)) u();
@@ -260,6 +343,13 @@ export class SketchStaticSync {
     this.fetchCounter = 0;
     this.loaded.clear();
     this.regionRetry.clear();
+    // Release every deferred pick: nothing will refill after a detach, and a waiter
+    // that never fires is a click silently swallowed.
+    this.refilling.clear();
+    for (const cb of [...this.settledWaiters]) {
+      this.settledWaiters.delete(cb);
+      cb();
+    }
     // The engine owns the layer's disposal (engine.dispose); nothing to free here.
     this.layer = null;
     this.client = null;

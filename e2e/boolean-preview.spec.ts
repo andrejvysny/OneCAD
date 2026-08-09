@@ -52,22 +52,34 @@ async function documentBodyIds(page: Page): Promise<string[]> {
   );
 }
 
+/**
+ * Wait until the point is genuinely pickable — the ATOMIC tri-state, not a bare
+ * hit test.
+ *
+ * A poll can only ever say "it was hittable a moment ago": the sketch layer tears
+ * its fills out for two awaited round trips on every reload, so the window can open
+ * between this poll and the click. That is why the previous version of this helper
+ * passed immediately before the failure it was supposed to prevent. The real fix is
+ * in the product — an unsettled pick DEFERS instead of clearing the selection
+ * (`ViewportRoot.runPick`) — and this helper now reads the same tri-state so it
+ * cannot report ready while a refill is in flight.
+ */
 async function sketchHitTestReady(page: Page, client: { x: number; y: number }): Promise<void> {
   await expect
     .poll(() =>
       page.evaluate(
         ({ x, y }) =>
-          Boolean(
-            (
-              window as unknown as {
-                __vpEngine?: { sketchStaticHitTest(x: number, y: number): unknown };
-              }
-            ).__vpEngine?.sketchStaticHitTest(x, y),
-          ),
+          (
+            window as unknown as {
+              __vpEngine?: {
+                sketchStaticPickState(x: number, y: number): { state: string };
+              };
+            }
+          ).__vpEngine?.sketchStaticPickState(x, y).state ?? "no-engine",
         client,
       ),
     )
-    .toBe(true);
+    .toBe("hit");
 }
 
 /** Extrude the region at `sketchId`/plane point `pt` (already selected via a
