@@ -90,6 +90,16 @@ async function extrudeRegionAt(
   pt: { x: number; y: number },
   before: string[],
 ): Promise<string> {
+  // The camera MUST be settled before a plane point is projected to client
+  // coordinates. Re-showing a sketch (which `twoBodies` does between the two
+  // extrudes) schedules the debounced auto-fit, and a fit that starts after the
+  // projection invalidates the coordinate — `waitForCameraSettled` exists for
+  // exactly this and covers the scheduled-but-not-started window.
+  //
+  // Measured: without it the second pick reports `state:"miss"` with NO body hit
+  // and NO sketch hit, i.e. the ray lands on empty space, and Extrude then arms
+  // multi-select. It is not a hit-precedence or refill problem.
+  await waitForCameraSettled(page);
   const client = await planePointToClient(page, plane, pt);
   await sketchHitTestReady(page, client);
   await clickAtClient(page, client.x, client.y);
@@ -221,9 +231,19 @@ async function bodySceneVisible(page: Page, bodyId: string): Promise<boolean | n
  * pinned (no other e2e spec exercises this shared button); the coordinate click
  * is the robust workaround, mirroring `findBodyScreenPoint`'s own raw-canvas
  * approach for the same class of overlay-positioned element.
+ *
+ * The retry asserts the OUTCOME, not the rect. The previous version only checked
+ * that a rect existed, so the click itself could silently miss (the chip is
+ * overlay-positioned and can move between measuring and clicking) and the helper
+ * still returned "successfully" — leaving the caller to time out on a lane that
+ * was never applied. Re-clicking is safe because each attempt re-checks first:
+ * once the lane has closed the loop exits without touching the button again.
  */
 async function clickApplyButton(page: Page): Promise<void> {
+  const laneClosed = async (): Promise<boolean> =>
+    ((await extrudeDebug(page))?.previewOwner ?? null) === null;
   await expect(async () => {
+    if (await laneClosed()) return;
     const rect = await page.evaluate(() => {
       const apply = Array.from(document.querySelectorAll("button")).find(
         (b) => b.textContent === "Apply",
@@ -233,7 +253,8 @@ async function clickApplyButton(page: Page): Promise<void> {
     expect(rect).not.toBeNull();
     const r = rect as unknown as { x: number; y: number; width: number; height: number };
     await page.mouse.click(r.x + r.width / 2, r.y + r.height / 2);
-  }).toPass({ timeout: 10_000, intervals: [200, 400, 800] });
+    expect(await laneClosed()).toBe(true);
+  }).toPass({ timeout: 15_000, intervals: [200, 400, 800, 1200] });
 }
 
 test("boolean preview: picking the tool body opens the lane and hides it; Esc restores it", async ({
