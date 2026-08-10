@@ -1,5 +1,34 @@
 # OneCAD-Tauri Migration TODO
 
+## SELF-HOSTED RUNNER — Linux benchmark host, S1-S4 ladder (2026-08-10) — GATE PASSED
+
+`.github/workflows/self-hosted.yml`, `workflow_dispatch` ONLY. Runner `prx-lxc` = Proxmox LXC 107 "GithubRunner", Debian 13 trixie, unprivileged, **4 cores / 8 GB / 70 GB**. Purpose: long campaigns move off the Mac (wall-clock is free there); the Mac keeps the fast iteration lane.
+
+- [x] **SECURITY — the repo is PUBLIC and the runner is on the home LAN.** Self-hosted jobs are in their own workflow because `ci.yml` triggers on unfiltered `pull_request:`; a fork PR reaching a self-hosted job executes the fork's code on that hardware. Every job additionally re-checks `github.repository` + `github.event_name`. Never add `pull_request`/`pull_request_target` there. 0 forks today.
+- [x] **S1 environment report.** Container shipped with only curl/tar/python3/perl and **no sudo**. One-time root install via `pct exec 107`: `git ca-certificates build-essential cmake ninja-build pkg-config libboost-dev libeigen3-dev nlohmann-json3-dev`, then `libx11-dev libxext-dev libxmu-dev libxi-dev libgl-dev libglu1-mesa-dev`. gcc 14.2.0 · cmake 3.31.6 · ninja 1.12.1. (`git`'s absence is not cosmetic: `actions/checkout` silently falls back to the REST tarball, leaving no `.git`.)
+- [x] **S2 pinned OCCT 8.0.1 from source.** Artifact provenance byte-identical to macOS (same `sourceCommit`, `buildId`, normalized option list). 120 MB prefix / 49 `libTK*.so`. Persistent prefix outside the workspace + an assert that a second invocation prints "Reusing pinned OCCT", so the 40-90 min build is paid once.
+  - OCCT's `TKService` compiles against Xlib on Linux where macOS uses Cocoa. Installing X11 headers is the correct fix, NOT `USE_XLIB=OFF`: `HAVE_XLIB` is auto-detected and absent from the pinned option policy, so headers cannot move the fingerprint, whereas suppressing the module either edits the policy or lets two materially different builds share one fingerprint.
+- [x] **S3 worker + ctest.** **`ctest` 110/110** and **`fingerprint 0a6a1dce34181289` identical to macOS** — the seed is `occtVersion|sourceCommit|buildOptions|buildId|kernelPolicyVersion`, all platform-independent, and that design now has evidence. Edge-op determinism `cmp` byte-identical.
+- [x] **S4 kernelbench T0, both backends.** 136 records · `gatingFailures` 0 · replay 136 stable / 0 unstable · metamorph 48 passed / 0 failed · differential 136 same-status — semantically identical to the macOS baseline. Timing **p50 29.7 ms / p95 993 ms** vs macOS 10.3 / 62.3 (4 shared LXC cores); M5 sizing must use these, not the Mac numbers.
+
+### Three repo defects the port surfaced (all fixed)
+- [x] **`json_fwd.hpp` was never vendored** next to `json.hpp`, and nothing declares it — there is no `find_package(nlohmann_json)` in the build. Six benchmark headers resolved it from the system. macOS was green only because Homebrew also ships 3.12.0; Debian's 3.11.3 puts a second inline ABI namespace into `nlohmann` and every `json_pointer` reference goes ambiguous. **This was a live latent failure on the shipping platform** — any Homebrew bump past 3.12.0 breaks macOS identically. `VENDOR.txt` already stated the invariant this restores.
+- [x] **`DT_RUNPATH` is not transitive.** GNU ld defaults to `--enable-new-dtags`, so the OCCT path resolved only the worker's own `DT_NEEDED` entries; all 26 OCCT-internal edges (`libTKOffset -> libTKG2d`) fell through to the system path and the worker died at startup. OCCT's libraries carry no RPATH of their own. `-Wl,--disable-new-dtags` under `if(NOT APPLE)` restores transitive `DT_RPATH`; the macOS link line is unchanged.
+- [x] **`std::reverse` without `<algorithm>`** in `test_polygon_fill.cpp` — libc++ transitive, libstdc++ not. FLAGGED: 34 more files use `std::u?int*_t` without `<cstdint>` and currently compile only by transitive luck; a separate hygiene sweep, not landed here.
+
+### Digests are platform-dependent; semantics are not
+- [x] Same pinned OCCT 8.0.1, identical build id AND identical 16-hex fingerprint, yet **182 of 272 digest values differ**: `translated` inputDigest **0/32** (translation is exact in FP) · `rotated` **32/32** (trig) · `base` **20/72** — precisely the trig-built shapes (all 8 `valence4`, `overflow-02/-03`); every box and `valence3` is bit-identical · `normalizedDigest` **130/136**.
+- [x] The 1e-9 quantization CANNOT fix this: rounding to a grid narrows but never closes boundary straddles, and with thousands of quantized values per record a straddle is near-certain. A digest is a **same-host** regression tripwire only.
+- [x] `digests.json` keyed `suite|case|backend|variant|platform` (256 macOS rows migrated to `darwin-arm64`, 136 `linux-x64` rows recorded). `record` only replaces the current platform's rows; `compare` on an unrecorded platform exits 3.
+- [x] **`semantics.json` is new and NOT platform-keyed** — the portability claim. Verified by running T0 on macOS against the baseline recorded on Linux: both hosts satisfy the same row. Timing and tolerance distributions excluded (host properties, not kernel behaviour).
+- [x] Consequence for M5: "byte-identical `results.jsonl` across `--jobs`/`--shard`/`--resume`" stays valid (same host, same binary). Any CROSS-host claim must be semantic.
+
+### Still open
+- [ ] **USER:** Settings → Actions → General → "Fork pull request workflows from outside collaborators" must require approval. Not readable via REST for a public repo. Consider making the repo private.
+- [ ] `m1` has `darwin-arm64` rows only; record `linux-x64` when the suite next runs there.
+- [ ] `CLAUDE.md` still tells contributors to `brew install nlohmann-json`; that package is now inert (no `find_package`). Fold into the doc pass.
+- [ ] The 34 `<cstdint>` transitive-include cases above.
+
 ## REF-H0 — Fresh Subelement Identity Contract (2026-08-09) — COMPLETE
 
 Goal: a face, edge, or vertex promoted from the current published snapshot resolves
