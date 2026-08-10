@@ -1,3 +1,23 @@
+# CI — two lanes.
+#
+# SELF-HOSTED (Linux/x86_64, Proxmox LXC 107) carries the bulk of the work. Its
+# OCCT prefix and worker build tree are PERSISTENT, so the 40-90 min kernel build
+# is paid once rather than restored from cache on every run.
+#
+# macOS stays the SHIPPING gate and is deliberately not reducible to the Linux
+# lane: the packaging linkage smoke has no Linux equivalent (otool, a relocated
+# .app, bundle-dylibs.sh), webkit is the closest proxy for the WKWebView Tauri
+# actually ships on, and kernelbench digests are platform-keyed — a Linux-only
+# CI would gate `linux-x64` rows and let macOS drift through unnoticed.
+#
+# SECURITY — why every self-hosted job carries the same `if:`.
+# This repository is PUBLIC and the runner is a container on a private LAN. A
+# workflow triggered by a pull request FROM A FORK runs that fork's code on the
+# runner, so self-hosted jobs are gated to events whose code is already trusted:
+# a push to this repo, or a PR whose head branch lives in this repo. Fork PRs
+# fall back to GitHub-hosted runners (see `hosted-frontend`) and still get the
+# full macOS gate. Do not remove those conditions, and do not add a self-hosted
+# job without one.
 name: CI
 
 on:
@@ -8,10 +28,167 @@ on:
 env:
   OCCT_PRIMARY_BUILD_ID: onecad-occt-8.0.1-b8f597c67781-kp1
   OCCT_COMPARISON_BUILD_ID: onecad-occt-7.9.3-a016080bf673-kp1
+  # Persistent paths on the self-hosted runner, shared with self-hosted.yml so
+  # both lanes reuse one incremental build. actions/checkout runs `git clean
+  # -ffdx`, so anything inside the workspace would be deleted between jobs.
+  OCCT_PREFIX: /home/github-runner/.onecad-occt/8.0.1
+  LINUX_WORKER_BUILD: /home/github-runner/worker-build/8.0.1
 
 jobs:
-  # Fast, dependency-free gate on the OCCT build fingerprint normalizer. Runs
-  # BEFORE the hour-long OCCT builds so a broken policy fails in seconds.
+  # ── Self-hosted lane (trusted events only) ─────────────────────────────────
+
+  linux-frontend:
+    name: linux-frontend
+    if: >-
+      github.repository == 'andrejvysny/OneCAD'
+      && (github.event_name == 'push'
+      || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install
+        run: bun install --frozen-lockfile
+      - name: Build
+        run: bun run build
+      - name: Test
+        run: bun run test
+
+  linux-worker:
+    name: linux-worker
+    if: >-
+      github.repository == 'andrejvysny/OneCAD'
+      && (github.event_name == 'push'
+      || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require the pinned OCCT prefix
+        # Built once by self-hosted.yml's s2-occt stage. Failing loudly here beats
+        # a 90-minute implicit rebuild inside a per-push job.
+        run: |
+          set -euo pipefail
+          if [ ! -f "$OCCT_PREFIX/share/onecad/occt-build.cmake" ]; then
+            echo "::error::no pinned OCCT at $OCCT_PREFIX — run self-hosted.yml stage s2-occt"
+            exit 1
+          fi
+      - name: Stdout hygiene gate
+        run: scripts/check-worker-stdout-hygiene.sh
+      - name: Configure worker
+        run: |
+          set -euo pipefail
+          cmake -S worker -B "$LINUX_WORKER_BUILD" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DONECAD_OCCT_ROOT="$OCCT_PREFIX" \
+            -DONECAD_OCCT_VERSION=8.0.1 \
+            -DONECAD_OCCT_BUILD_ID="$OCCT_PRIMARY_BUILD_ID" \
+            -DONECAD_WORKER_BUILD_DIR="$LINUX_WORKER_BUILD"
+      - name: Build worker
+        run: cmake --build "$LINUX_WORKER_BUILD" --parallel 3
+      - name: Selftest version, build ID, and fingerprint
+        # The fingerprint is seeded from occtVersion|sourceCommit|buildOptions|
+        # buildId|kernelPolicyVersion — all platform-independent — so Linux must
+        # agree with macOS on 0a6a1dce34181289 or the kernel identity is not
+        # portable and nothing downstream is comparable across the two lanes.
+        run: |
+          set -euo pipefail
+          ONECAD_WORKER_LOG=debug "$LINUX_WORKER_BUILD/onecad-worker" --selftest 2>&1 \
+            | tee worker-selftest.log
+          grep -F "selftest OK (occt 8.0.1," worker-selftest.log
+          grep -F "build ${OCCT_PRIMARY_BUILD_ID}," worker-selftest.log
+          grep -F "fingerprint 0a6a1dce34181289" worker-selftest.log
+      - name: Full worker suite
+        run: ctest --test-dir "$LINUX_WORKER_BUILD" --output-on-failure
+      - name: Edge-op safety determinism
+        run: |
+          set -euo pipefail
+          "$LINUX_WORKER_BUILD/tests/test_edge_op_failure" >edge-op-safety-a.ndjson
+          "$LINUX_WORKER_BUILD/tests/test_edge_op_failure" >edge-op-safety-b.ndjson
+          cmp edge-op-safety-a.ndjson edge-op-safety-b.ndjson
+
+  linux-kernelbench:
+    name: linux-kernelbench
+    needs: linux-worker
+    if: >-
+      github.repository == 'andrejvysny/OneCAD'
+      && (github.event_name == 'push'
+      || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Rust toolchain (userland; the runner has no sudo)
+        run: |
+          set -euo pipefail
+          if ! command -v cargo >/dev/null 2>&1 && [ ! -x "$HOME/.cargo/bin/cargo" ]; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain stable
+          fi
+          echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
+      - name: Kernelbench unit + supervisor tests
+        # `-p`, not `--workspace`: the app crate's build script requires a staged
+        # sidecar (bundle.externalBin) and pulls in GTK/WebKitGTK on Linux.
+        # `--workspace` is the macOS lane's job.
+        working-directory: src-tauri
+        run: cargo test -p onecad-kernelbench
+      - name: T0 campaign, both backends
+        working-directory: src-tauri
+        env:
+          ONECAD_KERNELBENCH_RUNNER: /home/github-runner/worker-build/8.0.1/onecad-kernelbench-runner
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/kernelbench-t0"
+          echo "KB_OUT=$out" >>"$GITHUB_ENV"
+          cargo run -p onecad-kernelbench -- \
+            run --suite fillet/foundation --preset t0 --backend both --out-dir "$out"
+          cargo run -p onecad-kernelbench -- \
+            report "$out/results.jsonl" --json "$out/summary.json"
+      - name: Digest baseline (linux-x64) and cross-host semantics
+        # Digests are platform-keyed because they are NOT portable (see
+        # scripts/kernelbench-manifest.mjs); this compares linux-x64 against
+        # linux-x64, so a difference is a real regression. The semantics baseline
+        # is shared with macOS and carries the portability claim.
+        run: |
+          set -euo pipefail
+          node scripts/kernelbench-manifest.mjs compare \
+            "$KB_OUT" "fillet/foundation:t0" bench/robustness/baselines/digests.json
+          node scripts/kernelbench-manifest.mjs semantic-compare \
+            "$KB_OUT" "fillet/foundation:t0" bench/robustness/baselines/semantics.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kernelbench-t0-linux
+          path: ${{ runner.temp }}/kernelbench-t0
+          if-no-files-found: warn
+          retention-days: 14
+
+  # ── Fork-PR fallback ───────────────────────────────────────────────────────
+
+  hosted-frontend:
+    name: hosted-frontend (fork PRs)
+    # The mirror image of linux-frontend's condition, so exactly one of the two
+    # runs and a fork PR is never left without a frontend check.
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install
+        run: bun install --frozen-lockfile
+      - name: Build
+        run: bun run build
+      - name: Test
+        run: bun run test
+
+  # ── macOS shipping gate (GitHub-hosted; runs for every event, forks included) ─
+
   occt-fingerprint:
     name: occt-fingerprint
     runs-on: macos-14
@@ -95,6 +272,7 @@ jobs:
           grep -E "^ONECAD_OCCT_BUILD_ID(:[^=]*)?=${OCCT_PRIMARY_BUILD_ID}$" \
             worker/build-8.0.1/CMakeCache.txt
       - name: Packaging linkage smoke
+        # macOS-ONLY, and the main reason this job cannot move to the Linux lane.
         run: |
           app="$RUNNER_TEMP/OneCAD.app"
           mkdir -p "$app/Contents/MacOS"
@@ -131,6 +309,7 @@ jobs:
             exit 1
           fi
           mv "$RUNNER_TEMP/onecad-occt/8.0.1.hidden" "$RUNNER_TEMP/onecad-occt/8.0.1"
+
   rust-8-0-1:
     name: rust-8.0.1
     needs: occt-8-0-1
@@ -200,6 +379,19 @@ jobs:
             exit "$report_exit"
           fi
           exit "$bench_exit"
+      - name: Digest baseline (darwin-arm64) and cross-host semantics
+        # The macOS half of the platform-keyed digest gate. Without this, a
+        # Linux-only kernelbench lane would let a darwin-arm64 digest move
+        # through unnoticed — which is precisely what platform-keying costs if
+        # only one platform is ever compared.
+        working-directory: .
+        run: |
+          set -euo pipefail
+          out=worker/build-8.0.1-rust/kernelbench-t0
+          node scripts/kernelbench-manifest.mjs compare \
+            "$out" "fillet/foundation:t0" bench/robustness/baselines/digests.json
+          node scripts/kernelbench-manifest.mjs semantic-compare \
+            "$out" "fillet/foundation:t0" bench/robustness/baselines/semantics.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -208,81 +400,73 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  worker-7-9-3:
-    name: worker-7.9.3 (informational)
-    continue-on-error: true
+  e2e-webkit:
+    name: e2e-webkit
     runs-on: macos-14
+    # WKWebView is what Tauri ships on macOS, so this half of the browser matrix
+    # is fidelity-critical and stays on macOS. Chromium is the cheap half and
+    # belongs on the Linux runner — it is held back only until the container has
+    # Playwright's browser libraries, which needs one root install:
+    #   apt-get install -y --no-install-recommends libnss3 libnspr4 libatk1.0-0 \
+    #     libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 \
+    #     libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 \
+    #     libasound2 libatspi2.0-0 fonts-liberation
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - name: Cache pinned OCCT
+      - uses: oven-sh/setup-bun@v2
+      - name: Install
+        run: bun install --frozen-lockfile
+      - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
-          path: ${{ runner.temp }}/onecad-occt/7.9.3
-          key: occt-macos-14-7.9.3-a016080bf673-${{ env.OCCT_COMPARISON_BUILD_ID }}-${{ hashFiles('scripts/build-pinned-occt.sh', 'scripts/occt-fingerprint.sh') }}
-      - name: Install dependencies
-        run: brew install boost eigen nlohmann-json ninja
-      - name: Build pinned comparison OCCT
-        run: >-
-          scripts/build-pinned-occt.sh
-          --version 7.9.3
-          --prefix "$RUNNER_TEMP/onecad-occt/7.9.3"
-          --build-dir "$RUNNER_TEMP/onecad-occt-build/7.9.3"
-          --build-id "$OCCT_COMPARISON_BUILD_ID"
-      - name: Configure comparison worker
-        run: |
-          cmake -S worker -B worker/build-7.9.3 -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DONECAD_OCCT_ROOT="$RUNNER_TEMP/onecad-occt/7.9.3" \
-            -DONECAD_OCCT_VERSION=7.9.3 \
-            -DONECAD_OCCT_BUILD_ID="$OCCT_COMPARISON_BUILD_ID" \
-            -DONECAD_WORKER_BUILD_DIR="$GITHUB_WORKSPACE/worker/build-7.9.3"
-          cmake --build worker/build-7.9.3 --parallel 3
-      - name: Focused safety characterization
-        run: |
-          mkdir -p worker/characterization-7.9.3
-          ./worker/build-7.9.3/tests/test_edge_op_failure \
-            >worker/characterization-7.9.3/results-a.ndjson
-          ./worker/build-7.9.3/tests/test_edge_op_failure \
-            >worker/characterization-7.9.3/results-b.ndjson
-          cmp worker/characterization-7.9.3/results-a.ndjson \
-            worker/characterization-7.9.3/results-b.ndjson
-          cp worker/characterization-7.9.3/results-a.ndjson \
-            worker/characterization-7.9.3/results.ndjson
-          output="worker/characterization-7.9.3/suite-results.ndjson"
-          for case_name in preview_op wp6_ops wp6_checkpoint import_step xcaf_import; do
-            set +e
-            ctest --test-dir worker/build-7.9.3 --output-on-failure \
-              -R "^${case_name}$" >"worker/characterization-7.9.3/${case_name}.log" 2>&1
-            status=$?
-            set -e
-            printf '{"kind":"case","caseId":"%s","exitCode":%d}\n' \
-              "$case_name" "$status" >>"$output"
-          done
-      - name: Kernelbench safety characterization
-        env:
-          ONECAD_KERNELBENCH_RUNNER: ${{ github.workspace }}/worker/build-7.9.3/onecad-kernelbench-runner
-        run: |
-          set +e
-          cargo run --manifest-path src-tauri/Cargo.toml -p onecad-kernelbench -- \
-            run-case bench/robustness/regressions/fillet-box-expected-limit-oversized.json \
-            --backend both --out-dir worker/characterization-7.9.3/kernelbench
-          bench_exit=$?
-          set -e
-          report_exit=0
-          cargo run --manifest-path src-tauri/Cargo.toml -p onecad-kernelbench -- \
-            report worker/characterization-7.9.3/kernelbench/results.jsonl \
-            --json worker/characterization-7.9.3/kernelbench/summary.json || report_exit=$?
-          if [ "$bench_exit" -eq 0 ]; then
-            exit "$report_exit"
-          fi
-          exit "$bench_exit"
+          path: ~/Library/Caches/ms-playwright
+          key: playwright-macos-14-${{ hashFiles('bun.lock') }}
+      - name: Install webkit
+        run: bunx playwright install webkit
+      - name: Run
+        run: bun run e2e -- --project=webkit
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: failure()
         with:
-          name: worker-7.9.3-characterization
-          path: worker/characterization-7.9.3
-          if-no-files-found: error
+          name: e2e-webkit-results
+          path: test-results
+          if-no-files-found: ignore
           retention-days: 14
+
+  e2e-chromium:
+    name: e2e-chromium
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install
+        run: bun install --frozen-lockfile
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-ubuntu-${{ hashFiles('bun.lock') }}
+      - name: Install chromium
+        run: bunx playwright install --with-deps chromium
+      - name: Run
+        run: bun run e2e -- --project=chromium
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-chromium-results
+          path: test-results
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ── Cross-version document compatibility ───────────────────────────────────
+  # The 7.9.3 WORKER characterization job is gone (it never compiled: four
+  # benchmark sites call `failure.what()`, absent from 7.9.3's Standard_Failure,
+  # and `continue-on-error` masked it on every run). These two remain because
+  # they answer a different question — a document written by the older kernel
+  # must still reopen under the shipping one — and they build only the
+  # `test_occt_persistence` target, which never touches the benchmark sources.
 
   persistence-producer-7-9-3:
     name: persistence-producer-7.9.3
@@ -360,16 +544,3 @@ jobs:
         run: >-
           ./worker/build-persistence-8.0.1/tests/test_occt_persistence consume
           "$RUNNER_TEMP/occt-persistence"
-
-  frontend:
-    name: frontend
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      - name: Install
-        run: bun install --frozen-lockfile
-      - name: Build
-        run: bun run build
-      - name: Test
-        run: bun run test
