@@ -23,6 +23,7 @@ on:
         default: s1-environment
         options:
           - s1-environment
+          - s2-occt
 
 # Long campaigns must never run two at a time: the runner has 4 cores and one
 # persistent OCCT prefix. Queue instead of cancelling — a cancelled campaign
@@ -33,6 +34,17 @@ concurrency:
 
 permissions:
   contents: read
+
+env:
+  # Must stay identical to ci.yml's OCCT_PRIMARY_BUILD_ID: the build id is part
+  # of the fingerprint seed (worker/CMakeLists.txt:60), so a divergence here
+  # would silently produce a different kernel identity than the shipping gate.
+  OCCT_PRIMARY_BUILD_ID: onecad-occt-8.0.1-b8f597c67781-kp1
+  # Persistent, outside the workspace. Self-hosted runners keep state between
+  # runs, so the 40-90 min source build is a one-time cost; build-pinned-occt.sh
+  # short-circuits on matching metadata (scripts/build-pinned-occt.sh:100-103).
+  OCCT_PREFIX: /home/github-runner/.onecad-occt/8.0.1
+  OCCT_BUILD_DIR: /home/github-runner/.onecad-occt/_build/8.0.1
 
 jobs:
   s1-environment:
@@ -132,5 +144,127 @@ jobs:
         with:
           name: runner-environment-report
           path: runner-report
+          if-no-files-found: warn
+          retention-days: 30
+
+  s2-occt:
+    name: S2 — pinned OCCT 8.0.1
+    if: >-
+      github.repository == 'andrejvysny/OneCAD'
+      && github.event_name == 'workflow_dispatch'
+      && inputs.stage == 's2-occt'
+    runs-on: [self-hosted, Linux, X64]
+    # First build from source is 40-90 min at --parallel 3; a resumed or
+    # already-installed prefix returns in seconds.
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Disk guard
+        # Source tree + build tree + install prefix need roughly 15 GB. Failing
+        # here beats failing 70 minutes into a link step with ENOSPC.
+        run: |
+          set -euo pipefail
+          avail_kb=$(df -Pk "$HOME" | awk 'NR==2 {print $4}')
+          echo "available under $HOME: $((avail_kb / 1024 / 1024)) GiB"
+          if [ "$avail_kb" -lt $((15 * 1024 * 1024)) ]; then
+            echo "::error::need at least 15 GiB free to build OCCT from source"
+            exit 1
+          fi
+
+      - name: Build pinned OCCT 8.0.1
+        # ONECAD_OCCT_JOBS defaults to 3 (scripts/build-pinned-occt.sh:146),
+        # which is the right ceiling here: 4 cores but only 8 GB of RAM, and
+        # OCCT has translation units that peak well above 1 GB under gcc.
+        run: |
+          set -euo pipefail
+          scripts/build-pinned-occt.sh \
+            --version 8.0.1 \
+            --prefix "$OCCT_PREFIX" \
+            --build-dir "$OCCT_BUILD_DIR" \
+            --build-id "$OCCT_PRIMARY_BUILD_ID"
+
+      - name: Assert artifact provenance
+        # The 16-hex runtime fingerprint (0a6a1dce34181289) comes from the
+        # worker's own --selftest and is therefore asserted in S3. What IS
+        # checkable here is the fingerprint's INPUT: source commit, build id and
+        # the normalized effective option list. Expected values are read back
+        # out of the script so this assertion cannot drift away from it.
+        run: |
+          set -euo pipefail
+          python3 - "$OCCT_PREFIX/share/onecad/occt-build.json" <<'PY'
+          import json, re, sys, pathlib
+
+          meta = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          script = pathlib.Path("scripts/build-pinned-occt.sh").read_text()
+
+          def literal(name):
+              m = re.search(rf'^(?:readonly )?{name}="([^"]*)"', script, re.M)
+              if not m:
+                  sys.exit(f"cannot read {name} from build-pinned-occt.sh")
+              return m.group(1)
+
+          expected = {
+              "version": "8.0.1",
+              "tag": "V8_0_1",
+              "sourceCommit": "b8f597c677811d1f9f4d8a97f5ae2825c0353a42",
+              "normalizedBuildOptions": literal("NORMALIZED_OPTIONS"),
+              "kernelPolicyVersion": int(literal("KERNEL_POLICY_VERSION")),
+          }
+          expected["buildId"] = __import__("os").environ["OCCT_PRIMARY_BUILD_ID"]
+
+          print(json.dumps(meta, indent=2))
+          bad = [f"{k}: expected {v!r}, got {meta.get(k)!r}"
+                 for k, v in expected.items() if meta.get(k) != v]
+          if bad:
+              sys.exit("artifact provenance mismatch:\n  " + "\n  ".join(bad))
+          print("provenance OK")
+          PY
+
+      - name: Prove the persistent prefix short-circuits
+        # The whole point of installing outside the workspace: a second
+        # invocation must reuse, not rebuild. If this ever rebuilds, every
+        # later rung silently pays the 40-90 min tax again.
+        run: |
+          set -euo pipefail
+          out=$(scripts/build-pinned-occt.sh \
+            --version 8.0.1 \
+            --prefix "$OCCT_PREFIX" \
+            --build-dir "$OCCT_BUILD_DIR" \
+            --build-id "$OCCT_PRIMARY_BUILD_ID")
+          echo "$out"
+          case "$out" in
+            *"Reusing pinned OCCT"*) echo "short-circuit OK" ;;
+            *) echo "::error::second invocation did not reuse the prefix"; exit 1 ;;
+          esac
+
+      - name: Report artifact
+        if: always()
+        run: |
+          set +e
+          out=occt-report
+          mkdir -p "$out"
+          exec > >(tee "$out/occt.txt") 2>&1
+          echo "=== prefix ==="
+          du -sh "$OCCT_PREFIX" 2>/dev/null
+          ls -1 "$OCCT_PREFIX" 2>/dev/null
+          echo
+          echo "=== metadata ==="
+          cat "$OCCT_PREFIX/share/onecad/occt-build.json" 2>/dev/null
+          cat "$OCCT_PREFIX/share/onecad/occt-build.cmake" 2>/dev/null
+          echo
+          echo "=== libraries ==="
+          ls -1 "$OCCT_PREFIX"/lib/libTK*.so* 2>/dev/null | head -20
+          ls -1 "$OCCT_PREFIX"/lib/libTK*.so 2>/dev/null | wc -l
+          echo
+          echo "=== disk ==="
+          du -sh "$OCCT_BUILD_DIR" "${OCCT_BUILD_DIR}-source" "${OCCT_BUILD_DIR}-downloads" 2>/dev/null
+          df -h "$HOME" | tail -1
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: occt-8.0.1-report
+          path: occt-report
           if-no-files-found: warn
           retention-days: 30
