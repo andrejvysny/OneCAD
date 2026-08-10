@@ -100,11 +100,55 @@ export async function clickAt(page: Page, dx: number, dy: number): Promise<void>
   await page.mouse.up();
 }
 
-/** Select a sketch drawing tool from the floating toolbar and confirm it armed. */
+/**
+ * Select a sketch drawing tool from the floating toolbar and confirm it armed.
+ *
+ * Since the tool FAMILIES landed (`d81f758`) the toolbar shows one slot per
+ * family — Rectangle and Center rectangle share a slot, as do Circle and
+ * Ellipse — so a non-default member has no button of its own until it is
+ * picked from the family's flyout. The slot then REMEMBERS it, which is why the
+ * direct hit is tried first: it covers both the default member and any member
+ * already made sticky by an earlier call in the same test.
+ *
+ * The flyout is discovered rather than hardcoded (open each `… options`
+ * chevron, look for the menuitem, close it again if absent) so adding a family
+ * member does not mean editing a table here.
+ */
 export async function selectSketchTool(page: Page, label: SketchToolLabel): Promise<void> {
   const btn = page.getByRole("button", { name: label, exact: true });
+  // `count()` does NOT auto-wait, so it must never be the first thing asked of a
+  // toolbar that may still be mounting — waitFor is what distinguishes "this tool
+  // lives behind a flyout" from "the toolbar has not painted yet".
+  try {
+    await btn.waitFor({ state: "visible", timeout: 2_000 });
+  } catch {
+    await pickFromToolFlyout(page, label);
+  }
   await btn.click();
   await expect(btn).toHaveAttribute("aria-pressed", "true");
+}
+
+/** Open the family flyout that owns `label` and make it the slot's sticky tool. */
+async function pickFromToolFlyout(page: Page, label: string): Promise<void> {
+  const chevrons = page.getByRole("button", { name: /\soptions$/ });
+  await chevrons.first().waitFor({ state: "visible" });
+  const count = await chevrons.count();
+  for (let i = 0; i < count; i += 1) {
+    const chevron = chevrons.nth(i);
+    await chevron.click();
+    // The row renders title and shortcut as adjacent spans with no separator, so
+    // its accessible name is "EllipseO" / "Center rectangle⇧R" — matching the
+    // TITLE span exactly is the only stable hook that survives a shortcut change.
+    const item = page
+      .getByRole("menuitem")
+      .filter({ has: page.locator(`span:text-is(${JSON.stringify(label)})`) });
+    if (await item.isVisible().catch(() => false)) {
+      await item.click();
+      return;
+    }
+    await chevron.click(); // wrong family — close it and try the next
+  }
+  throw new Error(`no toolbar button or flyout member named "${label}"`);
 }
 
 /** The status-bar DOF pill (e.g. "DOF: 3"). Sketch mode always shows it. */

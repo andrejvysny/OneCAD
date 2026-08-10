@@ -66,7 +66,11 @@ test("the O key arms the ellipse tool (and never shadows E = extrude)", async ({
   await enterSketchViaPlanePicker(page);
 
   const ellipseBtn = page.getByRole("button", { name: "Ellipse", exact: true });
-  await expect(ellipseBtn).not.toHaveAttribute("aria-pressed", "true");
+  // Ellipse shares a toolbar slot with Circle (family `sketch.curve`), and the
+  // slot opens on its default member — so before `o` there is no Ellipse button
+  // at all, which is a STRONGER statement than "present but unpressed". Pressing
+  // `o` has to both arm the tool and pull it into the slot.
+  await expect(ellipseBtn).toHaveCount(0);
   await page.keyboard.press("o");
   await expect(ellipseBtn).toHaveAttribute("aria-pressed", "true");
 
