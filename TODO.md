@@ -23,8 +23,25 @@
 - [x] **`semantics.json` is new and NOT platform-keyed** — the portability claim. Verified by running T0 on macOS against the baseline recorded on Linux: both hosts satisfy the same row. Timing and tolerance distributions excluded (host properties, not kernel behaviour).
 - [x] Consequence for M5: "byte-identical `results.jsonl` across `--jobs`/`--shard`/`--resume`" stays valid (same host, same binary). Any CROSS-host claim must be semantic.
 
+### Full verification sweep at `cb88ba9` (2026-08-10)
+All four suites run on macOS with the three worker fixes in place, plus the manifest tool exercised against both suites and both platforms.
+
+- [x] **ctest 110/110** · `cargo fmt --all --check` · `clippy --workspace --all-targets -D warnings` · `cargo test --workspace` with `ONECAD_REQUIRE_WORKER=1` — all green, so the vendored `json_fwd.hpp` and the `NOT APPLE` link-option guard leave macOS untouched.
+- [x] **vitest 241 files / 4102 tests, all pass** · `bun run build` green.
+- [x] **Manifest tool, tested rather than assumed.** `fillet/matrix:m1` 120 rows unchanged (the migration path I had NOT previously exercised) · `t0` 136 rows unchanged · macOS satisfies the Linux-recorded semantics row · guards: unrecorded platform → 3, bad mode → 2, missing semantics suite → 3 · **negative controls**: a tampered digest and a tampered `gatingFailures` both correctly report a mismatch · census 392 rows (`darwin-arm64` 256, `linux-x64` 136), every key 5 fields.
+- [x] **DT_RPATH verified at the ELF level on Linux**, not inferred from a green build: tag `0x0f RPATH` (not `0x1d RUNPATH`) and **0 unresolved libraries, down from 26**.
+- [x] Runner after the full ladder: 4.8 GB used of 69 GB. Persistent state ~1 GB (OCCT prefix 120 MB, worker build 142 MB, cargo 97 MB, workspace 638 MB).
+
+### Two stale claims corrected by that sweep
+- **`InspectorPanel.test.tsx:341` is CI-FLAKY, not broken.** `ci.yml` went red at `cb88ba9` on `expected "applyEditCommand" to be called at least once`; the preceding commit `b344ab6` was green with byte-identical frontend code (the only delta was `TODO.md`), the file passes 5/5 locally in isolation and 4102/4102 in the full suite, and a rerun of the SAME sha went green. It is a `vi.waitFor` timing out under CI load (that run spent 102 s in environment setup alone). **A flaky test inside a gate is a WP0.2 blocker** — wiring Playwright/vitest as required checks makes this fail the branch at random.
+- **`HANDOFF.md:126`'s "4 fail (theme.spec, pre-existing)" is stale.** `theme.spec.ts` passes clean. A full-suite run under CPU contention reported 19 failures; re-running the 7 non-sketch ones in isolation (`offset-face`, `theme` ×2, `transform-body`, `history-inline-dimension`, `multiregion`, `point`) gave **38/38 pass**. They were contention artifacts of running vitest and Playwright concurrently — `workers: 1` + `retries: 0` makes this suite timing-sensitive, so e2e must be run alone.
+
+### Playwright: 380/392, and the 12 are exactly WP0.1's scope
+Re-run in isolation, deterministic and symmetric (6 chromium + 6 webkit), all four spec files from the landed sketch-angle work: `center-rect` ×1, `ellipse` ×3, `live-dim-line` ×1, `sketch-reattach` ×1, per browser. This confirms the plan's WP0.1 estimate exactly — the specs encode the OLD absolute-heading semantics and must be reconciled against the signed-turn chip before Playwright can be a CI gate.
+
 ### Still open
 - [ ] **USER:** Settings → Actions → General → "Fork pull request workflows from outside collaborators" must require approval. Not readable via REST for a public repo. Consider making the repo private.
+- [ ] De-flake `InspectorPanel.test.tsx:341` before vitest/Playwright become required checks (WP0.2).
 - [ ] `m1` has `darwin-arm64` rows only; record `linux-x64` when the suite next runs there.
 - [ ] `CLAUDE.md` still tells contributors to `brew install nlohmann-json`; that package is now inert (no `find_package`). Fold into the doc pass.
 - [ ] The 34 `<cstdint>` transitive-include cases above.
