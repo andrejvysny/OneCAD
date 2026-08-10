@@ -476,10 +476,16 @@ describe("ModelToolController Wave 2", () => {
     clientMock.endPreview.mockClear();
 
     controller.editExtrudeFeature("ex-1"); // tool is ALREADY extrude → setTool is a no-op
-    await flush();
     // The prior session was ended (finding 10 — no leak), and a fresh one armed.
-    expect(clientMock.endPreview).toHaveBeenCalledWith(expect.any(String), false);
-    expect(clientMock.beginPreview).toHaveBeenCalledTimes(2);
+    //
+    // Waited for, not flushed: `flush()` is a single setTimeout(0), i.e. ONE
+    // macrotask tick, while this path awaits endPreview and then beginPreview.
+    // On a loaded machine one tick does not drain both, which is how this went
+    // red in CI and passed 18/18 in isolation.
+    await vi.waitFor(() => {
+      expect(clientMock.endPreview).toHaveBeenCalledWith(expect.any(String), false);
+      expect(clientMock.beginPreview).toHaveBeenCalledTimes(2);
+    });
   });
 
   it("clears stale L2 preview bodies before re-arming after a partial failure (finding 11)", async () => {

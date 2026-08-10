@@ -19,6 +19,16 @@ import {
   commitExtrudeAtHandle,
 } from "./helpers";
 
+/**
+ * The boolean lane opens behind a body pick, a `Combine` arm and a preview
+ * round-trip. The 5 s these polls originally carried is a local-machine number:
+ * on a loaded CI runner the chain has exceeded it (previewOwner still null),
+ * which reads as "the tool never took ownership" when it simply had not yet.
+ * The assertions are unchanged — only the deadline, which was never a property
+ * of the code under test.
+ */
+const BOOLEAN_LANE_TIMEOUT = 20_000;
+
 /*
  * Boolean kernel-preview LIFECYCLE (mock lane) — the standalone Boolean tool.
  *
@@ -288,14 +298,14 @@ test("boolean preview: picking the tool body opens the lane and hides it; Esc re
   await expect(page.getByText(/Choose Union \/ Cut \/ Intersect/)).toBeVisible();
 
   await expect
-    .poll(async () => (await extrudeDebug(page))?.previewOwner, { timeout: 5_000 })
+    .poll(async () => (await extrudeDebug(page))?.previewOwner, { timeout: BOOLEAN_LANE_TIMEOUT })
     .toBe("boolean");
   expect((await extrudeDebug(page))?.previewSessionCount).toBe(1);
   expect((await extrudeDebug(page))?.sessionId).not.toBeNull();
 
   // The mock lane's one truthful preview half: the tool body is hidden the moment
   // its exact (mesh-less) candidate result lands.
-  await expect.poll(async () => bodySceneVisible(page, toolId), { timeout: 5_000 }).toBe(false);
+  await expect.poll(async () => bodySceneVisible(page, toolId), { timeout: BOOLEAN_LANE_TIMEOUT }).toBe(false);
   await expect.poll(async () => bodySceneVisible(page, targetId)).toBe(true); // target stays shown
 
   // Esc cancels: the lane releases (`endPreview(false)`) and the tool body's
@@ -316,7 +326,7 @@ test("boolean commit: two bodies → pick target + tool → Apply lands ONE surv
   const toolPoint = await findBodyScreenPoint(page, toolId);
   await clickAtClient(page, toolPoint.x, toolPoint.y);
   await expect
-    .poll(async () => (await extrudeDebug(page))?.previewOwner, { timeout: 5_000 })
+    .poll(async () => (await extrudeDebug(page))?.previewOwner, { timeout: BOOLEAN_LANE_TIMEOUT })
     .toBe("boolean");
 
   await clickApplyButton(page);
@@ -325,7 +335,7 @@ test("boolean commit: two bodies → pick target + tool → Apply lands ONE surv
   // fusion — same bookkeeping a real commit performs): the surviving row is exactly
   // the target among the two just created, plus the hidden seed.
   await expect
-    .poll(async () => (await extrudeDebug(page))?.previewOwner, { timeout: 5_000 })
+    .poll(async () => (await extrudeDebug(page))?.previewOwner, { timeout: BOOLEAN_LANE_TIMEOUT })
     .toBeNull();
   await expect(bodyOptions(page)).toHaveCount(2);
   const remaining = await documentBodyIds(page);
