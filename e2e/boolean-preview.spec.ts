@@ -295,7 +295,12 @@ test("boolean preview: picking the tool body opens the lane and hides it; Esc re
   // Pick the tool body on canvas — a real raycast click (pickBooleanTool's armGen path).
   const toolPoint = await findBodyScreenPoint(page, toolId);
   await clickAtClient(page, toolPoint.x, toolPoint.y);
-  await expect(page.getByText(/Choose Union \/ Cut \/ Intersect/)).toBeVisible();
+  // Same deadline as the lane polls below, and for the same reason: this hint
+  // appears only once the pick has round-tripped, so the default expect timeout
+  // is a local-machine number here too.
+  await expect(page.getByText(/Choose Union \/ Cut \/ Intersect/)).toBeVisible({
+    timeout: BOOLEAN_LANE_TIMEOUT,
+  });
 
   await expect
     .poll(async () => (await extrudeDebug(page))?.previewOwner, { timeout: BOOLEAN_LANE_TIMEOUT })

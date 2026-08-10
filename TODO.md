@@ -1,5 +1,43 @@
 # OneCAD-Tauri Migration TODO
 
+## TRACK A — a CI that means something (2026-08-10)
+
+Goal: before any R1 work, make "green" a fact CI enforces rather than a claim verified by hand. Four work packages, all landed.
+
+### A1 — the inline-edit test was a REAL race, not a slow deadline
+- [x] **My first diagnosis was wrong and the second attempt found the mechanism.** I read `InspectorPanel.test.tsx`'s failure as an arbitrary wall-clock deadline and widened it; it went red again in CI **with a 4 s budget**, on an assertion whose work is pure microtasks — which a timeout cannot explain.
+- [x] Actual cause: `DimensionInput.commit()` reads the `text` STATE and calls `onCommit` only when the formatted new value differs from the current one. Firing `change` and `keyDown` inside ONE `act` nests their flushes into the outer scope, so the `keyDown` handler can still close over the pre-change text — `formatValue(n) === formatValue(value)` holds, the commit is CORRECTLY skipped, and `applyEditCommand` never fires. Split into two `act` scopes so Enter runs against a component that has re-rendered.
+
+### A2 — the 12 red e2e specs were THREE unrelated causes, not one
+The plan (and `TODO.md`) attributed all 12 to the live-dim tree. Wrong on 10 of them.
+- [x] **Toolbar flyout families (8 of 12).** `d81f758` made the toolbar one slot per family, so Center rectangle (behind Rectangle) and Ellipse (behind Circle) have no button until picked from a flyout. `selectSketchTool` now tries the direct button, then DISCOVERS the owning flyout by opening each chevron rather than hardcoding a family table. Menu rows concatenate title+shortcut with no separator (`"EllipseO"`), so the title span is matched exactly. Note for future helpers: **`count()` does not auto-wait** and must never be the first thing asked of a mounting toolbar.
+- [x] **Extrude gesture + a wrong precondition (2).** Confirming from the armed state leaves depth at zero and nothing commits (UNIFY-UX), so a real handle grab is required — restored as a shared `dragExtrudeDepth`, filling an orphaned docstring that had lost its function. The body-COUNT precondition was wrong in EITHER drag direction: the rectangle overlaps the seeded body, so auto Add/Cut resolves to `Cut` and the extrude modifies `body1`. Correct behaviour, irrelevant to reattach — the precondition now asserts a moved revision.
+- [x] **The angle change (2), and production is right.** The chip is withheld on a first segment because `angleLadder` authors nothing without a `prev`, so a drivable-looking chip would be a lie. The spec now types on a chained second leg. Two things the rewrite had to learn from the code: the field types the **visual corner angle**, not the raw turn (`cornerAngleOf = 180 - |turn|`, so a typed 30 is a 30° corner and a 150° turn), and geometry cannot be asserted with absolute headings — the plane's +U runs opposite to screen +x and leg 2 is stored end-first — so it measures the undirected corner at the shared vertex.
+- [x] **Full Playwright suite 392/392** locally, both browsers, run alone.
+
+### A3 — `worker-7.9.3` deleted
+- [x] It never compiled (four benchmark sites call `failure.what()`, absent from 7.9.3's `Standard_Failure`) and `continue-on-error` masked that on EVERY run including green ones. The two persistence jobs stay: different question, and they build only `test_occt_persistence`, which never touches the benchmark sources.
+
+### A4 — `ci.yml` split into two lanes, self-hosted + macOS shipping gate
+- [x] **Self-hosted (Linux):** `linux-worker` (hygiene, build, selftest+fingerprint, ctest 110/110, edge-op determinism) and `linux-kernelbench` (`-p onecad-kernelbench`, T0 both backends, linux-x64 digest gate, cross-host semantics gate). Uses the PERSISTENT OCCT prefix, so the 40-90 min kernel build is paid once.
+- [x] **macOS shipping gate:** packaging linkage smoke (no Linux equivalent), `cargo test --workspace`, both e2e projects, persistence pair.
+- [x] **SECURITY:** every self-hosted job is gated to trusted code — a push to this repo, or a PR whose head branch lives here. Fork PRs get the full GitHub-hosted lane. User has since set fork-PR approval in Settings → Actions as the backstop.
+- [x] **e2e is now gated in CI** — chromium and webkit, 392 executions.
+
+### The finding that changed a design decision: digests are SAME-MACHINE
+- [x] The macOS digest gate failed comparing **darwin-arm64 against a darwin-arm64 baseline**: same pinned OCCT source, same build id, same architecture, but GitHub's `macos-14` AppleClang is not the laptop's — and the trig-heavy `valence4-*` family moved. So platform-keying (yesterday's conclusion) is still too coarse.
+- [x] The digest gate therefore runs **only on the self-hosted runner**, the one persistent machine. Both lanes gate the portable thing: **semantics**. `bench/robustness/baselines/README.md` records the measurement.
+
+### Two CI-only flakes, both "a local-machine number standing in for a condition"
+- [x] `ModelToolController.wave2` asserted straight after `flush()` — a single `setTimeout(0)`, ONE macrotask tick — while `editExtrudeFeature` awaits `endPreview` then `beginPreview`. Passed 18/18 in isolation, red in CI. Now waits for the condition.
+- [x] `boolean-preview`'s lane polls carried 5 s; the lane opens behind a body pick, a Combine arm and a preview round-trip. It passed on both browsers in one CI run and failed on both in the next — a deadline flake. Raised to 20 s behind a named constant, assertions unchanged.
+
+### Still open
+- [ ] **Runner root installs** (Proxmox SSH was refusing connections, so these could not be done): `unzip` (blocks `setup-bun`, which is why `frontend` is GitHub-hosted) and Playwright's chromium libraries. The exact one-liner is in `ci.yml` above `e2e-chromium`. Both jobs move to the runner once they land.
+- [ ] **`boolean-preview` on ubuntu chromium** fails a body pick that succeeds on macOS chromium — a plausible SwiftShader/GL difference and a real finding. Chromium runs on macOS meanwhile; investigating this is what would let the whole e2e lane move to the runner.
+- [ ] **OPEN DECISION — `retries` in CI.** With e2e gated, the suite runs ~99.5% clean: 195/196 per job, with a DIFFERENT spec failing each run (`boolean-preview`, `tree-visibility`, live-dim…). Every one so far has been a local-machine deadline standing in for a condition, and each is individually fixable — but it is a long tail. `playwright.config.ts` sets `retries: 0` deliberately, with the rationale that retries once hid flakes that were invisible in CI and hard-red locally (`TODO.md` OPEN DECISION, and the config's own comment). That rationale predates e2e being a gate at all. Choose: keep 0 and grind the tail down, or `retries: 1` on CI only and keep grinding without a red gate.
+- [ ] Nothing is a REQUIRED check yet — worth turning on once the retries decision lands, so the gate actually blocks.
+
 ## SELF-HOSTED RUNNER — Linux benchmark host, S1-S4 ladder (2026-08-10) — GATE PASSED
 
 `.github/workflows/self-hosted.yml`, `workflow_dispatch` ONLY. Runner `prx-lxc` = Proxmox LXC 107 "GithubRunner", Debian 13 trixie, unprivileged, **4 cores / 8 GB / 70 GB**. Purpose: long campaigns move off the Mac (wall-clock is free there); the Mac keeps the fast iteration lane.
