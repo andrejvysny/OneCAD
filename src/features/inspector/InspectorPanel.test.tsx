@@ -308,6 +308,8 @@ describe("InspectorPanel", () => {
     });
   }
 
+  // 15 s test budget so the two 4 s waits above cannot be guillotined by the 5 s
+  // default before they have had their say.
   it("commits an inline value edit as ONE params patch on the stored op", async () => {
     await timelineForInlineEdit();
     const params = vi
@@ -338,9 +340,20 @@ describe("InspectorPanel", () => {
       });
       // The commit is fire-and-forget from the row, so wait for it to LAND rather
       // than assume one microtask flush drained both round-trips.
-      await vi.waitFor(() => expect(apply).toHaveBeenCalled());
-      await vi.waitFor(() =>
-        expect(documentStore.getState().features.find((f) => f.id === "f-a")?.primaryValue).toBe(30),
+      //
+      // The explicit timeouts are load insurance, not slow code: both round-trips
+      // are `mockResolvedValue` stubs, so the commit is pure microtasks and lands
+      // in well under a millisecond on an idle machine. But `vi.waitFor` budgets
+      // WALL-CLOCK, and vitest runs files in parallel workers, so a starved event
+      // loop can blow the 1 s default while the assertion itself is fine — this
+      // test went red in CI and green on rerun at the same sha. The assertion is
+      // unchanged ("it gets called"); only the arbitrary deadline moved.
+      const settle = { timeout: 4_000 };
+      await vi.waitFor(() => expect(apply).toHaveBeenCalled(), settle);
+      await vi.waitFor(
+        () =>
+          expect(documentStore.getState().features.find((f) => f.id === "f-a")?.primaryValue).toBe(30),
+        settle,
       );
 
       expect(apply.mock.calls[0][0]).toEqual({
@@ -353,7 +366,7 @@ describe("InspectorPanel", () => {
       params.mockRestore();
       apply.mockRestore();
     }
-  });
+  }, 15_000);
 
   it("GUARD — arming a model tool turns every row's value read-only, live", async () => {
     await timelineForInlineEdit();
