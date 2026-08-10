@@ -334,8 +334,19 @@ describe("InspectorPanel", () => {
       // The field opens one double-click threshold later (HistoryList keeps the
       // row's dblclick re-edit alive), so await it rather than reading it back.
       const input = await screen.findByLabelText("Dimension value");
+      // TWO act scopes, deliberately. `DimensionInput.commit()` reads the `text`
+      // STATE and only calls `onCommit` when the formatted new value differs
+      // from the current one — so Enter must run against a component that has
+      // already re-rendered with "30". Firing both inside ONE act nests their
+      // flushes into the outer scope, letting the keyDown handler close over the
+      // pre-change text; `formatValue(n) === formatValue(value)` then holds and
+      // the commit is correctly skipped, so `applyEditCommand` is never called.
+      // That is a real race, not slow code: it went red in CI with a 4 s budget
+      // on an assertion whose work is microtasks.
       await act(async () => {
         fireEvent.change(input, { target: { value: "30" } });
+      });
+      await act(async () => {
         fireEvent.keyDown(input, { key: "Enter" });
       });
       // The commit is fire-and-forget from the row, so wait for it to LAND rather
