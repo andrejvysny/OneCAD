@@ -28,6 +28,17 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Dependencies.cmake)
 set(CMAKE_BUILD_RPATH "${OpenCASCADE_LIBRARY_DIR};@executable_path/../Frameworks")
 set(CMAKE_INSTALL_RPATH "${OpenCASCADE_LIBRARY_DIR};@executable_path/../Frameworks")
 set(CMAKE_MACOSX_RPATH ON)
+if(NOT APPLE)
+    # GNU ld defaults to --enable-new-dtags, which emits DT_RUNPATH instead of
+    # DT_RPATH. DT_RUNPATH is NOT transitive: it resolves only the binary's own
+    # DT_NEEDED entries, so OCCT's inter-library edges (libTKOffset -> libTKG2d,
+    # 26 of them) fall through to the system search path and the worker dies at
+    # startup with "cannot open shared object file". OCCT's own libraries carry
+    # no RPATH/RUNPATH, so nothing downstream can recover it. DT_RPATH IS
+    # transitive, which is what makes the single OCCT lib dir above sufficient —
+    # the behaviour macOS already gets from LC_RPATH.
+    add_link_options(-Wl,--disable-new-dtags)
+endif()
 
 set(ONECAD_OCCT_SOURCE_COMMIT "unknown")
 set(ONECAD_OCCT_NORMALIZED_BUILD_OPTIONS
