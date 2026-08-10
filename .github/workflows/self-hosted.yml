@@ -47,9 +47,11 @@ env:
   # short-circuits on matching metadata (scripts/build-pinned-occt.sh:100-103).
   OCCT_PREFIX: /home/github-runner/.onecad-occt/8.0.1
   OCCT_BUILD_DIR: /home/github-runner/.onecad-occt/_build/8.0.1
-  # Worker build tree lives in the workspace, which the runner keeps between
-  # runs, so S3 rebuilds incrementally.
-  WORKER_BUILD: worker/build-8.0.1
+  # Worker build tree lives OUTSIDE the workspace. actions/checkout runs
+  # `git clean -ffdx` on every job, so anything inside the workspace is deleted
+  # before the job body starts — an in-workspace build tree would be wiped
+  # between S3 and S4, and S3 could never build incrementally either.
+  WORKER_BUILD: /home/github-runner/worker-build/8.0.1
   KERNELBENCH_OUT: /home/github-runner/kernelbench
 
 jobs:
@@ -266,6 +268,7 @@ jobs:
           echo "=== disk ==="
           du -sh "$OCCT_BUILD_DIR" "${OCCT_BUILD_DIR}-source" "${OCCT_BUILD_DIR}-downloads" 2>/dev/null
           df -h "$HOME" | tail -1
+          exit 0
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -307,7 +310,7 @@ jobs:
             -DONECAD_OCCT_ROOT="$OCCT_PREFIX" \
             -DONECAD_OCCT_VERSION=8.0.1 \
             -DONECAD_OCCT_BUILD_ID="$OCCT_PRIMARY_BUILD_ID" \
-            -DONECAD_WORKER_BUILD_DIR="$GITHUB_WORKSPACE/$WORKER_BUILD"
+            -DONECAD_WORKER_BUILD_DIR="$WORKER_BUILD"
 
       - name: Build worker
         # `-k 0` keeps ninja going after the first failure. The step still fails,
@@ -353,6 +356,7 @@ jobs:
           ctest --test-dir "$WORKER_BUILD" -N >"$out/ctest-list.txt" 2>&1
           ldd "./$WORKER_BUILD/onecad-worker" >"$out/worker-ldd.txt" 2>&1
           ls -1 "$WORKER_BUILD"/onecad-* >"$out/binaries.txt" 2>&1
+          exit 0
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -403,7 +407,7 @@ jobs:
       - name: T0 campaign, both backends
         working-directory: src-tauri
         env:
-          ONECAD_KERNELBENCH_RUNNER: ${{ github.workspace }}/worker/build-8.0.1/onecad-kernelbench-runner
+          ONECAD_KERNELBENCH_RUNNER: /home/github-runner/worker-build/8.0.1/onecad-kernelbench-runner
         run: |
           set -euo pipefail
           mkdir -p "$KERNELBENCH_OUT"
@@ -456,6 +460,7 @@ jobs:
           cp "$KERNELBENCH_OUT/t0/results.jsonl" "$out/" 2>/dev/null
           cp "$KERNELBENCH_OUT/t0/summary.json" "$out/" 2>/dev/null
           cp digest-compare.txt "$out/" 2>/dev/null
+          exit 0
 
       - uses: actions/upload-artifact@v4
         if: always()
