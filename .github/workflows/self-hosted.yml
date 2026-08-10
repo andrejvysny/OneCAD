@@ -24,6 +24,8 @@ on:
         options:
           - s1-environment
           - s2-occt
+          - s3-worker
+          - s4-kernelbench
 
 # Long campaigns must never run two at a time: the runner has 4 cores and one
 # persistent OCCT prefix. Queue instead of cancelling — a cancelled campaign
@@ -45,6 +47,10 @@ env:
   # short-circuits on matching metadata (scripts/build-pinned-occt.sh:100-103).
   OCCT_PREFIX: /home/github-runner/.onecad-occt/8.0.1
   OCCT_BUILD_DIR: /home/github-runner/.onecad-occt/_build/8.0.1
+  # Worker build tree lives in the workspace, which the runner keeps between
+  # runs, so S3 rebuilds incrementally.
+  WORKER_BUILD: worker/build-8.0.1
+  KERNELBENCH_OUT: /home/github-runner/kernelbench
 
 jobs:
   s1-environment:
@@ -266,5 +272,191 @@ jobs:
         with:
           name: occt-8.0.1-report
           path: occt-report
+          if-no-files-found: warn
+          retention-days: 30
+
+  s3-worker:
+    name: S3 — worker build + ctest
+    if: >-
+      github.repository == 'andrejvysny/OneCAD'
+      && github.event_name == 'workflow_dispatch'
+      && inputs.stage == 's3-worker'
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require the S2 prefix
+        run: |
+          set -euo pipefail
+          if [ ! -f "$OCCT_PREFIX/share/onecad/occt-build.cmake" ]; then
+            echo "::error::no pinned OCCT at $OCCT_PREFIX — run stage s2-occt first"
+            exit 1
+          fi
+
+      - name: Stdout hygiene gate
+        run: scripts/check-worker-stdout-hygiene.sh
+
+      - name: Configure worker
+        # Mirrors ci.yml's worker-8-0-1 job. ONECAD_OCCT_BUILD_ID must match the
+        # artifact metadata or CMakeLists fails loudly (worker/CMakeLists.txt:46).
+        run: |
+          set -euo pipefail
+          cmake -S worker -B "$WORKER_BUILD" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DONECAD_OCCT_ROOT="$OCCT_PREFIX" \
+            -DONECAD_OCCT_VERSION=8.0.1 \
+            -DONECAD_OCCT_BUILD_ID="$OCCT_PRIMARY_BUILD_ID" \
+            -DONECAD_WORKER_BUILD_DIR="$GITHUB_WORKSPACE/$WORKER_BUILD"
+
+      - name: Build worker
+        run: cmake --build "$WORKER_BUILD" --parallel 3
+
+      - name: Selftest — version, build id, and the 16-hex fingerprint
+        # This is the assertion S2 could not make: the fingerprint is computed at
+        # runtime from occtVersion|sourceCommit|buildOptions|buildId|policy
+        # (worker/CMakeLists.txt:60-61). Every term is platform-independent, so
+        # macOS/arm64 and Linux/x86_64 must agree on 0a6a1dce34181289. If they do
+        # not, the kernel identity is not portable and nothing downstream is
+        # comparable across hosts.
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          ONECAD_WORKER_LOG=debug "./$WORKER_BUILD/onecad-worker" --selftest 2>&1 \
+            | tee worker-selftest.log
+          grep -F "selftest OK (occt 8.0.1," worker-selftest.log
+          grep -F "build ${OCCT_PRIMARY_BUILD_ID}," worker-selftest.log
+          grep -F "fingerprint 0a6a1dce34181289" worker-selftest.log
+
+      - name: Full worker suite
+        run: ctest --test-dir "$WORKER_BUILD" --output-on-failure
+
+      - name: Edge-op safety determinism
+        run: |
+          set -euo pipefail
+          "./$WORKER_BUILD/tests/test_edge_op_failure" >edge-op-safety-a.ndjson
+          "./$WORKER_BUILD/tests/test_edge_op_failure" >edge-op-safety-b.ndjson
+          cmp edge-op-safety-a.ndjson edge-op-safety-b.ndjson
+
+      - name: Report artifact
+        if: always()
+        run: |
+          set +e
+          out=worker-report
+          mkdir -p "$out"
+          cp worker-selftest.log "$out/" 2>/dev/null
+          cp edge-op-safety-a.ndjson "$out/" 2>/dev/null
+          ctest --test-dir "$WORKER_BUILD" -N >"$out/ctest-list.txt" 2>&1
+          ldd "./$WORKER_BUILD/onecad-worker" >"$out/worker-ldd.txt" 2>&1
+          ls -1 "$WORKER_BUILD"/onecad-* >"$out/binaries.txt" 2>&1
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: worker-linux-report
+          path: worker-report
+          if-no-files-found: warn
+          retention-days: 30
+
+  s4-kernelbench:
+    name: S4 — kernelbench T0 + cross-platform digest verdict
+    if: >-
+      github.repository == 'andrejvysny/OneCAD'
+      && github.event_name == 'workflow_dispatch'
+      && inputs.stage == 's4-kernelbench'
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Require the S3 runner binary
+        run: |
+          set -euo pipefail
+          if [ ! -x "$WORKER_BUILD/onecad-kernelbench-runner" ]; then
+            echo "::error::no kernelbench runner — run stage s3-worker first"
+            exit 1
+          fi
+
+      - name: Rust toolchain (userland; no root needed)
+        run: |
+          set -euo pipefail
+          if ! command -v cargo >/dev/null 2>&1 && [ ! -x "$HOME/.cargo/bin/cargo" ]; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain stable
+          fi
+          echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
+
+      - name: Kernelbench unit + supervisor tests
+        # Deliberately -p, not --workspace: the app crate's build script requires
+        # a staged sidecar (bundle.externalBin) and pulls in GTK/WebKitGTK on
+        # Linux. Neither is needed to exercise the benchmark supervisor.
+        working-directory: src-tauri
+        run: cargo test -p onecad-kernelbench
+
+      - name: T0 campaign, both backends
+        working-directory: src-tauri
+        env:
+          ONECAD_KERNELBENCH_RUNNER: ${{ github.workspace }}/worker/build-8.0.1/onecad-kernelbench-runner
+        run: |
+          set -euo pipefail
+          mkdir -p "$KERNELBENCH_OUT"
+          cargo run -p onecad-kernelbench -- \
+            run --suite fillet/foundation --preset t0 --backend both \
+            --out-dir "$KERNELBENCH_OUT/t0"
+          cargo run -p onecad-kernelbench -- \
+            report "$KERNELBENCH_OUT/t0/results.jsonl" \
+            --json "$KERNELBENCH_OUT/t0/summary.json"
+
+      - name: Cross-platform digest verdict
+        # THE question this whole ladder exists to answer. The baselines in
+        # bench/robustness/baselines/digests.json were recorded on macOS/arm64
+        # and normalizedDigest quantizes to 1e-9; a different arch, libm and
+        # compiler (gcc 14 here vs AppleClang there) may move a value past that.
+        #
+        # A digest difference is a FINDING, not a broken job: it says the
+        # baselines must become platform-keyed. Only a tool-level error (exit 2
+        # usage, exit 3 missing results) reds this step.
+        run: |
+          set -uo pipefail
+          node scripts/kernelbench-manifest.mjs compare \
+            "$KERNELBENCH_OUT/t0" "fillet/foundation:t0" \
+            bench/robustness/baselines/digests.json \
+            2>&1 | tee digest-compare.txt
+          rc=${PIPESTATUS[0]}
+          case "$rc" in
+            0) verdict="MATCH — digests are identical across macOS/arm64 and Linux/x86_64; baselines stay global" ;;
+            1) verdict="DIFFER — digests are platform-dependent; baselines must become platform-keyed" ;;
+            *) echo "::error::compare tool failed with exit $rc (not a digest difference)"; exit "$rc" ;;
+          esac
+          echo "VERDICT: $verdict"
+          {
+            echo "## S4 cross-platform digest verdict"
+            echo
+            echo "$verdict"
+            echo
+            echo '```'
+            head -40 digest-compare.txt
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+          [ "$rc" -eq 0 ] || echo "::warning::$verdict"
+
+      - name: Report artifact
+        if: always()
+        run: |
+          set +e
+          out=kernelbench-report
+          mkdir -p "$out"
+          cp "$KERNELBENCH_OUT/t0/results.jsonl" "$out/" 2>/dev/null
+          cp "$KERNELBENCH_OUT/t0/summary.json" "$out/" 2>/dev/null
+          cp digest-compare.txt "$out/" 2>/dev/null
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kernelbench-t0-linux
+          path: kernelbench-report
           if-no-files-found: warn
           retention-days: 30
