@@ -310,7 +310,11 @@ jobs:
             -DONECAD_WORKER_BUILD_DIR="$GITHUB_WORKSPACE/$WORKER_BUILD"
 
       - name: Build worker
-        run: cmake --build "$WORKER_BUILD" --parallel 3
+        # `-k 0` keeps ninja going after the first failure. The step still fails,
+        # but one run surfaces EVERY compile error instead of one per cycle —
+        # which matters while porting to a second toolchain, where libstdc++
+        # exposes transitive-include assumptions libc++ hid.
+        run: cmake --build "$WORKER_BUILD" --parallel 3 -- -k 0
 
       - name: Selftest — version, build id, and the 16-hex fingerprint
         # This is the assertion S2 could not make: the fingerprint is computed at

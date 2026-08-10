@@ -14,6 +14,7 @@
 //      and corrupt the prism's side walls.
 //
 // No test framework (matches the prototype style): exit code == failure count.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <vector>
