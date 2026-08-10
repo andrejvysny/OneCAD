@@ -329,7 +329,7 @@ jobs:
         run: |
           set -euo pipefail
           set -o pipefail
-          ONECAD_WORKER_LOG=debug "./$WORKER_BUILD/onecad-worker" --selftest 2>&1 \
+          ONECAD_WORKER_LOG=debug "$WORKER_BUILD/onecad-worker" --selftest 2>&1 \
             | tee worker-selftest.log
           grep -F "selftest OK (occt 8.0.1," worker-selftest.log
           grep -F "build ${OCCT_PRIMARY_BUILD_ID}," worker-selftest.log
@@ -341,8 +341,8 @@ jobs:
       - name: Edge-op safety determinism
         run: |
           set -euo pipefail
-          "./$WORKER_BUILD/tests/test_edge_op_failure" >edge-op-safety-a.ndjson
-          "./$WORKER_BUILD/tests/test_edge_op_failure" >edge-op-safety-b.ndjson
+          "$WORKER_BUILD/tests/test_edge_op_failure" >edge-op-safety-a.ndjson
+          "$WORKER_BUILD/tests/test_edge_op_failure" >edge-op-safety-b.ndjson
           cmp edge-op-safety-a.ndjson edge-op-safety-b.ndjson
 
       - name: Report artifact
@@ -354,7 +354,7 @@ jobs:
           cp worker-selftest.log "$out/" 2>/dev/null
           cp edge-op-safety-a.ndjson "$out/" 2>/dev/null
           ctest --test-dir "$WORKER_BUILD" -N >"$out/ctest-list.txt" 2>&1
-          ldd "./$WORKER_BUILD/onecad-worker" >"$out/worker-ldd.txt" 2>&1
+          ldd "$WORKER_BUILD/onecad-worker" >"$out/worker-ldd.txt" 2>&1
           ls -1 "$WORKER_BUILD"/onecad-* >"$out/binaries.txt" 2>&1
           exit 0
 
