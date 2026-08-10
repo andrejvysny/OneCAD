@@ -5,8 +5,26 @@ sha256:   aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63
 obtained: 2026-07-16
 license:  MIT (see header block at top of json.hpp)
 
+nlohmann/json_fwd.hpp — matching forward declarations
+version:  3.12.0
+source:   https://raw.githubusercontent.com/nlohmann/json/v3.12.0/single_include/nlohmann/json_fwd.hpp
+sha256:   fb6aa70cbece087f37ab4685c182b287c53be54f785f981b9db9d30d2d028b37
+obtained: 2026-08-10
+license:  MIT (see header block at top of json_fwd.hpp)
+
 Note: Homebrew ships nlohmann-json 3.12.0 as the *split* multi-header
 distribution (json.hpp #includes ~31 nlohmann/ sub-headers), which is not
 self-contained. We vendor the official single-header amalgamation of the
 same version so the worker build has no external include-path dependency on
 Homebrew for JSON.
+
+json_fwd.hpp is vendored for the SAME reason and was originally missed. Six
+benchmark headers (`worker/src/benchmark/{CaseParser,DeepAudit,Execution,
+Artifacts,SelectorParser,SemanticValidation}.h`) include <nlohmann/json_fwd.hpp>
+for forward declarations only. With no vendored copy that resolved to whatever
+the system happened to install, and nothing declares the dependency — there is
+no find_package(nlohmann_json) anywhere in the build. macOS stayed green purely
+because Homebrew also ships 3.12.0. On Debian 13 (nlohmann-json3-dev 3.11.3) the
+two headers put DIFFERENT inline ABI namespaces into namespace nlohmann, and
+every reference to json_pointer becomes ambiguous. Keep both files at the same
+version; the ABI-tag guard at the top of each only fires when both are vendored.
