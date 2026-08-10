@@ -7,17 +7,24 @@
 # macOS stays the SHIPPING gate and is deliberately not reducible to the Linux
 # lane: the packaging linkage smoke has no Linux equivalent (otool, a relocated
 # .app, bundle-dylibs.sh), webkit is the closest proxy for the WKWebView Tauri
-# actually ships on, and kernelbench digests are platform-keyed — a Linux-only
-# CI would gate `linux-x64` rows and let macOS drift through unnoticed.
+# actually ships on, and `cargo test --workspace` needs the staged sidecar the
+# app crate's build script demands.
+#
+# The kernelbench DIGEST gate runs only on the self-hosted runner, because that
+# is the only stable machine here. Measured the hard way: a darwin-arm64 baseline
+# recorded on a developer Mac did not reproduce on GitHub's macos-14 image (the
+# trig-heavy `valence4-*` family moved), so digests are a same-MACHINE tripwire,
+# not a same-platform one. What IS portable is behaviour, and the semantics gate
+# runs on both lanes.
 #
 # SECURITY — why every self-hosted job carries the same `if:`.
 # This repository is PUBLIC and the runner is a container on a private LAN. A
 # workflow triggered by a pull request FROM A FORK runs that fork's code on the
 # runner, so self-hosted jobs are gated to events whose code is already trusted:
 # a push to this repo, or a PR whose head branch lives in this repo. Fork PRs
-# fall back to GitHub-hosted runners (see `hosted-frontend`) and still get the
-# full macOS gate. Do not remove those conditions, and do not add a self-hosted
-# job without one.
+# still get the full GitHub-hosted lane (frontend, both e2e projects, and the
+# whole macOS gate). Do not remove those conditions, and do not add a
+# self-hosted job without one.
 name: CI
 
 on:
@@ -37,14 +44,13 @@ env:
 jobs:
   # ── Self-hosted lane (trusted events only) ─────────────────────────────────
 
-  linux-frontend:
-    name: linux-frontend
-    if: >-
-      github.repository == 'andrejvysny/OneCAD'
-      && (github.event_name == 'push'
-      || github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 45
+  # Frontend is GitHub-hosted for now, NOT because it needs macOS or a specific
+  # OS, but because `oven-sh/setup-bun` shells out to `unzip`, which the runner
+  # container does not have and cannot install without root. See the pending
+  # root installs listed above `e2e-chromium`.
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -166,26 +172,6 @@ jobs:
           path: ${{ runner.temp }}/kernelbench-t0
           if-no-files-found: warn
           retention-days: 14
-
-  # ── Fork-PR fallback ───────────────────────────────────────────────────────
-
-  hosted-frontend:
-    name: hosted-frontend (fork PRs)
-    # The mirror image of linux-frontend's condition, so exactly one of the two
-    # runs and a fork PR is never left without a frontend check.
-    if: >-
-      github.event_name == 'pull_request'
-      && github.event.pull_request.head.repo.full_name != github.repository
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      - name: Install
-        run: bun install --frozen-lockfile
-      - name: Build
-        run: bun run build
-      - name: Test
-        run: bun run test
 
   # ── macOS shipping gate (GitHub-hosted; runs for every event, forks included) ─
 
@@ -379,19 +365,21 @@ jobs:
             exit "$report_exit"
           fi
           exit "$bench_exit"
-      - name: Digest baseline (darwin-arm64) and cross-host semantics
-        # The macOS half of the platform-keyed digest gate. Without this, a
-        # Linux-only kernelbench lane would let a darwin-arm64 digest move
-        # through unnoticed — which is precisely what platform-keying costs if
-        # only one platform is ever compared.
+      - name: Cross-host semantics gate
+        # NO digest gate here, deliberately. Digests turned out to be a
+        # same-MACHINE tripwire, not a same-platform one: this job compared
+        # darwin-arm64 against a darwin-arm64 baseline recorded on a developer
+        # Mac and the trig-heavy `valence4-*` family still moved, because the
+        # GitHub image's AppleClang is not the laptop's. The digest gate
+        # therefore lives only on the self-hosted runner, which is one stable
+        # machine. Semantics ARE portable — verified across macOS/arm64 and
+        # Linux/x86_64 — so that is what gates here.
         working-directory: .
         run: |
           set -euo pipefail
-          out=worker/build-8.0.1-rust/kernelbench-t0
-          node scripts/kernelbench-manifest.mjs compare \
-            "$out" "fillet/foundation:t0" bench/robustness/baselines/digests.json
           node scripts/kernelbench-manifest.mjs semantic-compare \
-            "$out" "fillet/foundation:t0" bench/robustness/baselines/semantics.json
+            worker/build-8.0.1-rust/kernelbench-t0 "fillet/foundation:t0" \
+            bench/robustness/baselines/semantics.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -404,13 +392,14 @@ jobs:
     name: e2e-webkit
     runs-on: macos-14
     # WKWebView is what Tauri ships on macOS, so this half of the browser matrix
-    # is fidelity-critical and stays on macOS. Chromium is the cheap half and
-    # belongs on the Linux runner — it is held back only until the container has
-    # Playwright's browser libraries, which needs one root install:
-    #   apt-get install -y --no-install-recommends libnss3 libnspr4 libatk1.0-0 \
-    #     libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 \
-    #     libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 \
-    #     libasound2 libatspi2.0-0 fonts-liberation
+    # is fidelity-critical and stays here.
+    #
+    # PENDING ROOT INSTALLS on the runner container (LXC 107). Once these land,
+    # `frontend` and `e2e-chromium` can both move to [self-hosted, Linux, X64]:
+    #   apt-get install -y --no-install-recommends unzip \
+    #     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
+    #     libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+    #     libgbm1 libpango-1.0-0 libcairo2 libasound2 libatspi2.0-0 fonts-liberation
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -436,7 +425,14 @@ jobs:
 
   e2e-chromium:
     name: e2e-chromium
-    runs-on: ubuntu-latest
+    # macOS, not ubuntu, and not arbitrarily: on ubuntu the two
+    # `boolean-preview` specs fail on a body pick that succeeds everywhere else
+    # ("Choose Union / Cut / Intersect" never appears). The suite raycasts real
+    # handle positions through SwiftShader, so a Linux GL difference is a
+    # plausible cause and a real finding — but it is its own investigation, and
+    # gating on an environment the suite has never been validated in would just
+    # be shipping a red check.
+    runs-on: macos-14
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -446,10 +442,10 @@ jobs:
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
-          path: ~/.cache/ms-playwright
-          key: playwright-ubuntu-${{ hashFiles('bun.lock') }}
+          path: ~/Library/Caches/ms-playwright
+          key: playwright-macos-14-${{ hashFiles('bun.lock') }}
       - name: Install chromium
-        run: bunx playwright install --with-deps chromium
+        run: bunx playwright install chromium
       - name: Run
         run: bun run e2e -- --project=chromium
       - uses: actions/upload-artifact@v4

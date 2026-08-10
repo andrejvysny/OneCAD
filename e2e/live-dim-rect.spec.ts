@@ -56,6 +56,12 @@ test("typing width + height on the rect chip drives exact extents and authors tw
   // ── Typed rect: chips visible with sane values before anything is typed ─────
   await clickAt(page, -140, -90); // corner
   await hoverAt(page, 20, 40);
+  // The chips repopulate on the frame AFTER the pointer moves, so a single read
+  // can catch the degenerate pre-move state (cursor still on the corner, extents
+  // 0) on a slow machine. Poll for a real width before reading the set.
+  await expect
+    .poll(async () => (await getLiveDims(page)).find((d) => d.field === "width")?.value ?? 0)
+    .toBeGreaterThan(0);
   const dims = await getLiveDims(page);
   const width = dims.find((d) => d.field === "width");
   const height = dims.find((d) => d.field === "height");

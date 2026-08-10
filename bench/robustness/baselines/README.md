@@ -67,9 +67,14 @@ and identical 16-hex kernel fingerprint — 182 of 272 digest values differ:
 
 The 1e-9 quantization does not make a digest portable: rounding to a grid
 narrows but never closes boundary straddles, and with thousands of quantized
-values per record a straddle is near-certain. A digest is therefore a SAME-HOST
-regression tripwire. Comparing one across hosts would report a kernel regression
-every time.
+values per record a straddle is near-certain.
+
+It is narrower still than "same platform". A `darwin-arm64` baseline recorded on
+a developer Mac did NOT reproduce on GitHub's `macos-14` image — same pinned OCCT
+source, same build id, same architecture, but a different AppleClang — and the
+same trig-heavy `valence4-*` family moved. A digest is therefore a **same-machine**
+regression tripwire. It is gated only on the self-hosted runner, which is one
+persistent machine; the ephemeral CI images gate semantics instead.
 
 What IS portable is behaviour, and `semantics.json` pins it: records,
 gatingFailures, counts by verdict/domain/failureClass/backend/generator,

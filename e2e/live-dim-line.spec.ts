@@ -62,6 +62,12 @@ test("typing a length + corner angle on the second chain leg drives an exact seg
 
   // ── Leg 2: NOW there is an angle chip, because there is a reference ────────
   await hoverAt(page, 20, -20);
+  // The chips repopulate on the frame AFTER the pointer moves, so a single read
+  // can catch the degenerate pre-move state (cursor still on the anchor, length
+  // 0) on a slow machine. Poll for a real length before reading the set.
+  await expect
+    .poll(async () => (await getLiveDims(page)).find((d) => d.field === "length")?.value ?? 0)
+    .toBeGreaterThan(0);
   const dims = await getLiveDims(page);
   const lengthField = dims.find((d) => d.field === "length");
   const angleField = dims.find((d) => d.field === "angle");
