@@ -81,13 +81,49 @@ interface OverlayItem {
    */
   axisFrom?: THREE.Vector3;
   offsetPx?: number;
+  /**
+   * Items sharing a cluster id are laid out as ONE group: neighbours are kept a
+   * minimum vertical distance apart in screen px, so chips can never overlap
+   * no matter how close their world anchors project (a short line, a shared
+   * circle anchor). Members keep their own anchors unadjusted whenever those
+   * already project far enough apart — the gap is a floor, not a magnet.
+   */
+  clusterId?: string;
+  /**
+   * A dashed leader connecting the raw anchor point to the offset chip —
+   * created only for items that opt into `axisFrom`/`offsetPx`. Owned by the
+   * driver (not the caller) so `mountChip`/`unmountChip` stay one element.
+   */
+  leaderEl?: HTMLElement;
+}
+
+/** Below this screen-px length the leader is hidden — an offset chip that
+ *  happens to project right back onto its anchor doesn't need a stub line. */
+const LEADER_MIN_LEN_PX = 4;
+
+function createLeaderEl(): HTMLElement {
+  const el = document.createElement("div");
+  el.style.position = "absolute";
+  el.style.left = "0";
+  el.style.top = "0";
+  el.style.height = "0";
+  el.style.borderTop = "1px dashed var(--color-border-strong)";
+  el.style.transformOrigin = "0 0";
+  el.style.pointerEvents = "none";
+  el.style.willChange = "transform, width";
+  return el;
 }
 
 /** Extra placement for an axis-anchored item. */
 export interface OverlayPlacement {
   axisFrom?: THREE.Vector3;
   offsetPx?: number;
+  clusterId?: string;
 }
+
+/** Default screen gap between neighbours within an overlay cluster. Deliberately
+ *  larger than the worst chip height so a cluster reads as one stacked set. */
+export const CLUSTER_GAP_PX = 24;
 
 export class HtmlOverlayDriver {
   private readonly items = new Map<string, OverlayItem>();
@@ -98,11 +134,18 @@ export class HtmlOverlayDriver {
     el.style.left = "0";
     el.style.top = "0";
     el.style.willChange = "transform";
+    let leaderEl: HTMLElement | undefined;
+    if (placement?.axisFrom && el.parentElement) {
+      leaderEl = createLeaderEl();
+      el.parentElement.insertBefore(leaderEl, el);
+    }
     this.items.set(id, {
       el,
       worldPos: worldPos.clone(),
       axisFrom: placement?.axisFrom?.clone(),
       offsetPx: placement?.offsetPx,
+      clusterId: placement?.clusterId,
+      leaderEl,
     });
   }
 
@@ -118,6 +161,8 @@ export class HtmlOverlayDriver {
   }
 
   unregister(id: string): void {
+    const item = this.items.get(id);
+    item?.leaderEl?.remove();
     this.items.delete(id);
   }
 
@@ -132,15 +177,30 @@ export class HtmlOverlayDriver {
       camera.projectionMatrix,
       camera.matrixWorldInverse,
     );
-    for (const { el, worldPos, axisFrom, offsetPx } of this.items.values()) {
+    interface Placed {
+      el: HTMLElement;
+      x: number;
+      y: number;
+      edge: string;
+      visible: boolean;
+      clusterId?: string;
+      leaderEl?: HTMLElement;
+      /** Raw (pre-offset) anchor projection — the leader's other endpoint. */
+      anchorX?: number;
+      anchorY?: number;
+    }
+    const placed: Placed[] = [];
+    for (const { el, worldPos, axisFrom, offsetPx, clusterId, leaderEl } of this.items.values()) {
       const p = projectToScreen(worldPos, this.viewProj, width, height);
       if (!p.visible) {
-        el.style.display = "none";
+        placed.push({ el, x: p.x, y: p.y, edge: "", visible: false, clusterId, leaderEl });
         continue;
       }
       let x = p.x;
       let y = p.y;
       let edge = "";
+      let anchorX: number | undefined;
+      let anchorY: number | undefined;
       if (axisFrom && offsetPx) {
         // The tail only supplies a DIRECTION, so an off-screen tail is still
         // usable — but a tail BEHIND the camera projects through a negative w and
@@ -153,9 +213,51 @@ export class HtmlOverlayDriver {
         // the clearance to its near edge, whatever its width. Percentages resolve
         // against the element's border box, and translations compose additively.
         edge = ` translate(${ux * 50}%, ${uy * 50}%)`;
+        anchorX = p.x;
+        anchorY = p.y;
       }
-      el.style.display = "";
-      el.style.transform = `translate(-50%, -50%) translate(${x}px, ${y}px)${edge}`;
+      placed.push({ el, x, y, edge, visible: true, clusterId, leaderEl, anchorX, anchorY });
+    }
+    // Screen-space cluster resolution: keep cluster neighbours at least
+    // `CLUSTER_GAP_PX` apart along screen +y (downward), propagating the push
+    // down a long cluster. Invisible members are skipped — a chip alone behind
+    // the camera has no neighbour to push or be pushed by.
+    const clusters = new Map<string, Placed[]>();
+    for (const it of placed) {
+      if (!it.clusterId) continue;
+      const group = clusters.get(it.clusterId);
+      if (group) group.push(it);
+      else clusters.set(it.clusterId, [it]);
+    }
+    for (const group of clusters.values()) {
+      let prevY: number | null = null;
+      for (const it of group) {
+        if (!it.visible) continue;
+        if (prevY !== null) it.y = Math.max(it.y, prevY + CLUSTER_GAP_PX);
+        prevY = it.y;
+      }
+    }
+    for (const it of placed) {
+      if (!it.visible) {
+        it.el.style.display = "none";
+        if (it.leaderEl) it.leaderEl.style.display = "none";
+        continue;
+      }
+      it.el.style.display = "";
+      it.el.style.transform = `translate(-50%, -50%) translate(${it.x}px, ${it.y}px)${it.edge}`;
+      if (it.leaderEl && it.anchorX !== undefined && it.anchorY !== undefined) {
+        const ldx = it.x - it.anchorX;
+        const ldy = it.y - it.anchorY;
+        const len = Math.hypot(ldx, ldy);
+        if (len < LEADER_MIN_LEN_PX) {
+          it.leaderEl.style.display = "none";
+        } else {
+          it.leaderEl.style.display = "";
+          it.leaderEl.style.width = `${len}px`;
+          const angleDeg = (Math.atan2(ldy, ldx) * 180) / Math.PI;
+          it.leaderEl.style.transform = `translate(${it.anchorX}px, ${it.anchorY}px) rotate(${angleDeg}deg)`;
+        }
+      }
     }
   }
 

@@ -34,7 +34,6 @@ export interface LiveDimChipField {
   locked: boolean;
   /** False ⇒ the number drives geometry but authors NO constraint (honest rule). */
   drives: boolean;
-  offsetIndex: number;
 }
 
 /** World-space chip anchors, keyed by field. Read via `getState()` only. */
@@ -46,6 +45,11 @@ export type LiveDimAnchors = Partial<Record<DimFieldId, Vec3>>;
  * move — never has to import a React module.
  */
 export const liveDimChipId = (field: DimFieldId): string => `__live_dim_${field}`;
+
+/** Overlay cluster id shared by every host of one chip set. The driver keeps
+ *  the hosts a constant screen distance apart, so chips never overlap no matter
+ *  how close their world anchors project (a short line's length + angle). */
+export const LIVE_DIM_CLUSTER_ID = "__live_dim_cluster";
 
 /** Which quadrant of the cursor the chips sit in (screen-edge flip). */
 export type LiveDimPlacement = "tr" | "tl" | "br" | "bl";
@@ -150,7 +154,6 @@ function sameFields(a: LiveDimChipField[], b: LiveDimChipField[]): boolean {
       f.label === g.label &&
       f.locked === g.locked &&
       f.drives === g.drives &&
-      f.offsetIndex === g.offsetIndex &&
       Math.abs(f.value - g.value) < EPS
     );
   });

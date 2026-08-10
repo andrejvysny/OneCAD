@@ -4,7 +4,7 @@
  * forbids a spec importing another spec, hence a module of its own.
  */
 import { expect, type Page } from "@playwright/test";
-import { CANVAS } from "./helpers";
+import { CANVAS, findExtrudeHandle } from "./helpers";
 
 /**
  * Seed a face/edge selection straight into the selection store.
@@ -103,6 +103,78 @@ export async function dragBy(page: Page, dx: number, dy: number): Promise<void> 
   await page.mouse.down();
   await page.mouse.move(x + dx, y + dy, { steps: 4 });
   await page.mouse.up();
+}
+
+/**
+ * Press-drag-release the armed edge op's real 3D handle (UNIFY-UX Phase 1) —
+ * fillet/chamfer now require a genuine grab on it, just like extrude/offset-face,
+ * whenever the picked edges resolved a world axis (`edgeOpAxisSource !== "screen"`).
+ * `findExtrudeHandle` is tool-agnostic (the same shared `hitExtrudeHandle` probe),
+ * so it locates the fillet handle exactly as it locates extrude's.
+ *
+ * The settle wait is load-bearing in WebKit specifically, and ONLY when the drag
+ * is the very first interaction after arming (nothing else yet gave the engine's
+ * on-demand render a natural chance to run): `showValueHandle`'s `invalidate()`
+ * schedules a repaint, but WebKit's headless compositor can lag well behind the
+ * store update that unblocks a test's `armed`-phase poll, so a `mouse.down()` at
+ * a JS-verified-hot point can still land on a matrixWorld/hit-region that hasn't
+ * caught up — reproduced directly: `filletPhase` never reaches `"dragging"` and
+ * the chip value never moves at all, with NO error, just silently inert. Every
+ * OTHER call site in this spec drags after at least one prior chip interaction
+ * (a segment click, an overflow toggle) and has never needed this — the extra
+ * round trip already gave WebKit the time this buys explicitly. Chromium never
+ * needs it; the wait is a harmless no-op there.
+ */
+export async function dragEdgeOpHandle(page: Page, dx: number, dy: number): Promise<void> {
+  await page.waitForTimeout(300);
+  const h = await findExtrudeHandle(page);
+  await page.mouse.move(h.x, h.y);
+  await page.mouse.down();
+  await page.mouse.move(h.x + dx, h.y + dy, { steps: 4 });
+  await page.mouse.up();
+}
+
+/**
+ * Open the armed FILLET/CHAMFER chip's own `⋯` overflow, where the
+ * [Fillet|Chamfer] toggle and the chamfer second leg now live (UNIFY-UX Phase 1
+ * — see `EdgeOpChipControls`). Idempotent, mirroring `openExtrudeOverflow`.
+ */
+export async function openFilletOverflow(page: Page): Promise<void> {
+  const panel = page.getByTestId("chip-fillet-overflow-panel");
+  if (await panel.isVisible().catch(() => false)) return;
+  await page.getByTestId("chip-fillet-overflow").click();
+  await expect(panel).toBeVisible();
+}
+
+/** Close the fillet `⋯` overflow if open — the panel can float over the handle,
+ *  and a press meant for the handle must not land on it instead. */
+export async function closeFilletOverflow(page: Page): Promise<void> {
+  const panel = page.getByTestId("chip-fillet-overflow-panel");
+  if (!(await panel.isVisible().catch(() => false))) return;
+  await page.getByTestId("chip-fillet-overflow").click();
+  await expect(panel).toBeHidden();
+}
+
+/**
+ * Open the armed REVOLVE chip's own `⋯` overflow, where the New Body / Add / Cut
+ * segments now live (UNIFY-UX Phase 2 — see `RevolveChipControls`). Idempotent,
+ * mirroring `openExtrudeOverflow`/`openFilletOverflow`.
+ */
+export async function openRevolveOverflow(page: Page): Promise<void> {
+  const panel = page.getByTestId("chip-revolve-overflow-panel");
+  if (await panel.isVisible().catch(() => false)) return;
+  await page.getByTestId("chip-revolve-overflow").click();
+  await expect(panel).toBeVisible();
+}
+
+/** Close the revolve `⋯` overflow if open — revolve's whole-viewport angle drag
+ *  has no chip-target exclusion of its own, so a floating panel left open could
+ *  eat a press meant for the canvas. */
+export async function closeRevolveOverflow(page: Page): Promise<void> {
+  const panel = page.getByTestId("chip-revolve-overflow-panel");
+  if (!(await panel.isVisible().catch(() => false))) return;
+  await page.getByTestId("chip-revolve-overflow").click();
+  await expect(panel).toBeHidden();
 }
 
 /** One placement-gizmo handle (WP-B W2), as `hitTransformGizmo` reports it. */

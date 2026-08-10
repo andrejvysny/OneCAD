@@ -223,15 +223,6 @@ describe("SketchController — construction draw mode", () => {
     expect(circle.construction).toBeFalsy();
   });
 
-  it("mode ON: a construction line still gets the H/V ghost hint (it is still solved)", () => {
-    sketchStore.getState().toggleConstructionMode();
-    click(0, 0);
-    move(50, 0); // horizontal within tolerance
-    // The ghost reads the RAW machine preview, so the modifier can't suppress the
-    // hint for geometry that WILL be auto-constrained Horizontal at commit.
-    expect(engineMock.setSketchGhost).toHaveBeenCalledWith("H", { x: 50, y: 0 });
-  });
-
   it("mode ON: the arc's own construction radius rubber-band is unaffected", async () => {
     sketchStore.getState().toggleConstructionMode();
     await setTool("arc");

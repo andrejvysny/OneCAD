@@ -136,6 +136,109 @@ generalized rule's coverage lives in `materialProbe.test.ts` +
 no e2e of its own yet. NEXT: generalize the moving arrow to revolve/offset-face, and
 decide whether `tree-visibility.spec.ts` should hide its seed body.
 
+## UNIFY-UX — Fillet/Revolve/Extrude chip parity (2026-08-09, plan `act-as-senior-ui-ux-tranquil-sparrow.md`) — FE GATE PASSED
+
+Goal, from a user UI/UX review against Shapr3D/Fusion 360: unify the three tools'
+armed-chip UX. Extrude already had a moving two-way arrow + leader-lined chip (see
+above); Fillet/Chamfer had NO 3D handle at all (a whole-viewport screen-space claim)
+and its chip sat centered directly ON the picked edge; Revolve showed nothing in the
+viewport until both a face AND an axis were picked, guided only by a StatusBar string.
+Landed in 4 phases, reusing the shared chip/store/overlay infra the extrude wave built
+to generalize rather than growing three divergent implementations.
+
+DECISIONS WORTH CARRYING:
+- **Phase 0 (shared infra).** `ChipAnchorOpts` (`anchorAxisFrom`/`anchorOffsetPx`)
+  promoted from `ExtrudeChipOpts`-only onto `EdgeOpChipOpts`/`RevolveChipOpts` too, with
+  a shared `DEFAULT_CHIP_OFFSET_PX` (`toolChipStore.ts`) applied whenever an axis is
+  given but no explicit offset — default-ON, not a per-call-site magic number.
+  `HtmlOverlayDriver` now draws an actual DASHED LEADER LINE from the raw anchor to the
+  offset chip position (previously the offset only repositioned the chip; no line
+  existed) — a plain absolutely-positioned bordered `<div>`, rotated/scaled per frame,
+  matching the driver's existing zero-React-render discipline. It piggybacks on
+  whatever already mutates `worldPos`/`axisFrom` each frame (`setWorldPos`/
+  `setAxisFrom`, called by `moveChip`) — no second write path, so extrude's
+  continuously-moving arrow never desyncs from its line (regression-pinned:
+  `HtmlOverlayDriver.test.ts` "tracks a LIVE move"). `ChipOverflow` extracted from
+  `ExtrudeChipControls`'s `ExtrudeOverflow` as the shared `⋯`-button-plus-popover shell;
+  extrude's own `chip-mode-readout` testid preserved via an override prop so the
+  existing e2e/vitest contract didn't need touching.
+- **Phase 1 (Fillet/Chamfer).** Reused `showValueHandle`/`hideValueHandle` (the same
+  shared `DragHandle` instance extrude/offset-face already use) whenever
+  `filletAxisSource !== "screen"` (a resolvable bisector/bbox direction); the degraded
+  ("screen") tier keeps the old whole-viewport claim unchanged. Per explicit user
+  decision, grabbing the handle is now REQUIRED in the non-degraded case — mirrors
+  offset-face's `offsetDegraded` press-gating exactly, narrows "claims every press" to
+  "claims presses on the handle," and click-away stays excluded for the degraded tier
+  only, unchanged. Chip anchor moved from the raw picked-edge point to the handle's own
+  base/tip pair, so it's leader-lined off the arrow instead of sitting on the edge.
+  [Fillet|Chamfer] + the chamfer second leg moved behind a new `EdgeOpOverflow` (own
+  file `EdgeOpChipControls.tsx`) — per user decision, NOT left inline, even though it's
+  flipped more often than extrude's collapsed settings.
+- **Phase 2 (Revolve).** New `revolveAxisPick` chip kind — text + ✕ only, anchored at
+  the profile centroid — fills the axisPick phase's total silence (previously: zero
+  chip, faint unlabeled candidate lines, a StatusBar string). A NEW screen-fixed,
+  `pointer-events-none` top-anchored banner (`ViewportRoot.tsx`, `revolve-empty-hint`)
+  covers the truly-nothing-selected state — the ONLY existing precedent for a
+  viewport-space (not StatusBar, not world-anchored) hint in this codebase is the
+  `chip==="cached"` pill, reused rather than inventing new visual language. Derived
+  from existing reactive state only (`toolStore.modelTool==="revolve" &&
+  toolChipStore.kind==="none"`) — no new controller-to-store plumbing needed, since
+  BOTH new/existing revolve phases now publish a chip kind, leaving `"none"` true only
+  during the genuine gap. Armed chip leader-lined off one axis-line endpoint
+  (`revolveChipAxisFrom`). Boolean segments moved behind a new `RevolveOverflow`
+  (`RevolveChipControls.tsx`); the Axis-reset button stays inline (primary action, per
+  plan). Per explicit user decision: NO rotate-handle gizmo this wave — angle doesn't
+  map cleanly onto `DragHandle`'s linear forward/twoWay model; the leader-lined chip +
+  already-existing live lathe preview covers the gap for v1.
+- **Phase 3 (Extrude).** Pure dedupe/regression pass: local `CHIP_AXIS_OFFSET_PX`
+  removed in favor of the Phase-0 shared constant directly; the new leader-line code
+  path verified against the ONE thing that could desync it (extrude's per-frame
+  `moveChip`-driven arrow) via a dedicated `HtmlOverlayDriver` test rather than
+  eyeballing it — see above.
+
+WEBKIT-ONLY E2E FLAKE, FOUND AND FIXED WHILE VALIDATING FILLET'S NEW HANDLE: the FIRST
+drag right after arming (no prior chip interaction to let a natural render happen) could
+land a `mouse.down()` on a handle a JS-side hit-test had JUST confirmed hot, and
+silently do nothing — reproduced directly: `hitExtrudeHandle` at the identical point
+flips true→false→true across consecutive calls in WebKit headless specifically
+(Chromium never showed it). A 300ms settle wait in the new `dragEdgeOpHandle` e2e helper
+(`modelToolHelpers.ts`) fixes it — every OTHER handle-drag call site in this codebase
+already has a prior interaction that incidentally buys the same margin, which is why
+this never surfaced before. Verified with 20/20 repeat-each runs across both browsers
+post-fix (0/10–9/10 failing before it, depending on the mitigation attempt).
+
+GATE: `bunx tsc --noEmit` clean · `bun run build` green · hex-gate 0 on touched files ·
+vitest **240 files / 4060 tests** (from 240/4051 pre-wave — +9: 4 leader-line + 1
+live-move regression in `HtmlOverlayDriver.test.ts`, 4 in `ModelToolChips.test.tsx` for
+the two new overflows/axisPick chip) · Playwright chromium+webkit, FULL suite (69 spec
+files): **380/392 passed**. The 12 failures (`center-rect`, `ellipse` ×3,
+`live-dim-line`, `sketch-reattach` — ×2 browsers) are ALL in sketch-drawing /
+live-dimension specs, whose source (`LiveDimChips.tsx`, `liveDimStore.ts`,
+`SketchController.ts`, `liveDimFrames.ts`, `liveDimension.ts`, `liveToolMachines.ts`,
+`CornerCluster.tsx`) was mid-edit in this same working tree from a CONCURRENT session
+before and during this wave (uncommitted, not touched by this diff) — same pattern the
+EXTRUDE DIRECT MANIPULATION gate above flagged and preserved. Zero overlap with any
+file this wave touched; every spec that exercises a file this wave DID touch
+(`filletChamfer.spec.ts` 26/26, `revolve-{commit,preview,region}.spec.ts` 8/8 incl. 2
+new guidance-banner cases, `extrude-{commit-gesture,boolean,draft,end-conditions,
+multiselect}.spec.ts`, `offset-face.spec.ts`, `shell-preview.spec.ts`,
+`boolean-preview.spec.ts`, `sketch-{on-face,fillet,hole-extrude,offset}.spec.ts`,
+`history-inline-dimension.spec.ts`, `tree-visibility.spec.ts`) is green.
+NOT RUN from here: Rust, ctest (untouched by this wave — no worker/backend changes).
+NOT INVESTIGATED further: the 12 pre-existing sketch/live-dim failures above — outside
+this wave's scope and file set, belongs to the concurrent session's own gate.
+
+### Unresolved questions
+- Dashed leader-line visual spec (color/dash pattern/min-max length) has no design
+  token yet — engineering default used (`--color-border-strong`, 1px dashed, hidden
+  under 4px), needs a design pass.
+- Revolve's pre-axisPick copy ("Pick an axis line", "Select a sketch region to
+  revolve") is a placeholder pending copy review.
+- Whether `hitExtrudeHandle`/`showValueHandle`/etc. get renamed now that fillet is a
+  third caller (e.g. `hitValueHandle`) — naming-only, not blocking.
+- Revolve rotate-handle gizmo and Fillet's whole-viewport-vs-handle-required tradeoff
+  were explicit user calls for v1; both are flagged in the plan as revisitable.
+
 
 ## PLATFORM REFACTOR — Milestones 1 + 2 (2026-08-08, plan `velvety-leaping-adleman.md`) — IN FLIGHT
 

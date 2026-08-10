@@ -74,11 +74,14 @@ describe("dimFrame — phase table", () => {
 
   it("exposes the documented Tab order per phase", () => {
     const order = (f: DimFrame | null): string[] => must(f).fields.map((s) => s.field);
-    expect(order(dimFrame("line", [P(0, 0)]))).toEqual(["length", "angle"]);
+    // A FIRST leg has no previous segment to angle against — length only.
+    expect(order(dimFrame("line", [P(0, 0)]))).toEqual(["length"]);
+    expect(order(dimFrame("line", [P(0, 0), P(5, 5)]))).toEqual(["length", "angle"]);
     expect(order(dimFrame("rect", [P(0, 0)]))).toEqual(["width", "height"]);
     expect(order(dimFrame("circle", [P(0, 0)]))).toEqual(["diameter", "radius"]);
     // Radius first: an ARMED digit types the radius, Tab reaches the side count.
     expect(order(dimFrame("polygon", [P(0, 0)]))).toEqual(["radius", "sides"]);
+    expect(order(dimFrame("slot", [P(0, 0)]))).toEqual(["length"]);
     expect(order(dimFrame("slot", [P(0, 0), P(10, 0)]))).toEqual(["width"]);
   });
 
@@ -89,16 +92,17 @@ describe("dimFrame — phase table", () => {
     expect(drives(dimFrame("arc", [P(0, 0), P(10, 0)]))).toEqual([false]); // sweep
     expect(drives(dimFrame("arc", [P(0, 0)]))).toEqual([true]); // radius
     expect(drives(dimFrame("polygon", [P(0, 0)]))).toEqual([true, false]); // R, n
-    // The 3-point arc's CHORD is not an entity — neither number can author.
-    expect(drives(dimFrame("arc3p", [P(0, 0)]))).toEqual([false, false]);
+    // The 3-point arc's CHORD is a leg with no previous segment — length only,
+    // and not an entity, so it cannot author anything either.
+    expect(drives(dimFrame("arc3p", [P(0, 0)]))).toEqual([false]);
     expect(drives(dimFrame("arc3p", [P(0, 0), P(10, 0)]))).toEqual([true]); // radius
   });
 
   it("segmentFrame's new `drives` param DEFAULTS to true — line/slot unchanged", () => {
     const drives = (f: DimFrame | null): boolean[] => must(f).fields.map((s) => s.drives);
-    expect(drives(dimFrame("line", [P(0, 0)]))).toEqual([true, true]);
+    expect(drives(dimFrame("line", [P(0, 0)]))).toEqual([true]);
     expect(drives(dimFrame("line", [P(0, 0), P(5, 5)]))).toEqual([true, true]);
-    expect(drives(dimFrame("slot", [P(0, 0)]))).toEqual([true, true]);
+    expect(drives(dimFrame("slot", [P(0, 0)]))).toEqual([true]);
   });
 });
 
@@ -480,7 +484,8 @@ describe("slot width frame — FULL width, side preserved", () => {
 
 describe("chip anchors", () => {
   it("puts extents at their midpoint and angles ~30% out from the vertex", () => {
-    const [length, angle] = must(dimFrame("line", [P(0, 0)])).fields;
+    // Chained: a counter leg exists, so the scalar frame exposes its ∠ chip.
+    const [length, angle] = must(dimFrame("line", [P(0, 0), P(0, 0)])).fields;
     expect(length.anchor(P(100, 0))).toEqual({ x: 50, y: 0 });
     expect(angle.anchor(P(100, 0)).x).toBeCloseTo(30, 9);
     expect(angle.anchor(P(100, 0)).y).toBeCloseTo(0, 9);

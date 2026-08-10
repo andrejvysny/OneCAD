@@ -53,8 +53,6 @@ export interface ToolDimension {
   locked: boolean;
   /** Authors a driving constraint on commit? See the HONEST RULE above. */
   drives: boolean;
-  /** Stagger index among co-anchored fields (badgeLayout technique). */
-  offsetIndex: number;
 }
 
 /** Rounding granularity per domain (mm / degrees). */
@@ -264,31 +262,16 @@ export function liveDimStep(s: LiveDimState, e: LiveDimEvent): LiveDimStep {
 
 // ── descriptors ───────────────────────────────────────────────────────────────
 
-/** Quantized anchor grouping key — guards float noise between two chips that are
- *  really "the same" anchor (badgeLayout.ts precedent). */
-const ANCHOR_QUANT = 1e-4;
-const anchorKey = (p: Point2): string =>
-  `${Math.round(p.x / ANCHOR_QUANT)},${Math.round(p.y / ANCHOR_QUANT)}`;
-
-/** Stagger co-anchored chips into a row instead of stacking them. Deterministic:
- *  the frame's field list IS the Tab order, so indices never reshuffle. */
-function assignOffsets(dims: ToolDimension[]): ToolDimension[] {
-  const seen = new Map<string, number>();
-  for (const d of dims) {
-    const key = anchorKey(d.anchor);
-    const n = seen.get(key) ?? 0;
-    d.offsetIndex = n;
-    seen.set(key, n + 1);
-  }
-  return dims;
-}
-
 /**
  * Assemble the chip descriptors for one frame at one cursor position.
  *
  * A LOCKED field reads its locked value verbatim — the cursor has already been
  * rebuilt through it (`projectEvent`), so measuring would only reintroduce float
  * drift into a number the user typed.
+ *
+ * Chips keep the frame's own anchors — separation is the overlay driver's job:
+ * hosts in one cluster (the whole chip set) are held a constant screen distance
+ * apart per frame, so a short line's length + angle chips never overlap.
  */
 export function describeDims(
   frame: DimMeasureFrame,
@@ -296,16 +279,13 @@ export function describeDims(
   locks: DimLocks,
 ): ToolDimension[] {
   const measured = frame.measure(cursor);
-  return assignOffsets(
-    frame.fields.map((spec) => ({
-      field: spec.field,
-      label: spec.label,
-      domain: spec.domain,
-      value: locks[spec.field] ?? measured[spec.field] ?? 0,
-      anchor: spec.anchor(cursor),
-      locked: locks[spec.field] !== undefined,
-      drives: spec.drives,
-      offsetIndex: 0,
-    })),
-  );
+  return frame.fields.map((spec) => ({
+    field: spec.field,
+    label: spec.label,
+    domain: spec.domain,
+    value: locks[spec.field] ?? measured[spec.field] ?? 0,
+    anchor: spec.anchor(cursor),
+    locked: locks[spec.field] !== undefined,
+    drives: spec.drives,
+  }));
 }

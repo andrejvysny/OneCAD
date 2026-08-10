@@ -1,7 +1,13 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import { openEditorDebug, getFeatureLabels, bodyOptions } from "./helpers";
-import { seedSelection, toolPhases, dragInCanvas, dragBy } from "./modelToolHelpers";
+import {
+  seedSelection,
+  toolPhases,
+  dragEdgeOpHandle,
+  openFilletOverflow,
+  closeFilletOverflow,
+} from "./modelToolHelpers";
 
 /*
  * FILLET-CHAMFER-UNIFY W2 — the `chamfer` TOOL ID and its `H` binding are dead;
@@ -35,9 +41,9 @@ const EDGE_REF = {
   bodyId: "body1",
   topoKey: "e:5",
   elementId: "el-edge-5",
-  // Anchors the chip ON the edge (and so OFF the canvas centre, which `dragBy`
-  // presses) — anchoring at the world origin instead puts the chip's own DOM
-  // over the centre press point and the drag silently never reaches the canvas.
+  // Anchors the chip (and the real 3D handle it's now leader-lined off of, since
+  // this edge resolves the bisector tier — UNIFY-UX Phase 1) ON the edge, not at
+  // the world origin, which real MESH1 tier math needs to be honest anyway.
   anchor: { worldPoint: EDGE_MID },
 };
 
@@ -52,8 +58,10 @@ async function armFillet(page: Page): Promise<void> {
  *  replacement for the old dedicated `chamfer` tool id / arm helper. */
 async function armChamferViaSegment(page: Page): Promise<void> {
   await armFillet(page);
+  await openFilletOverflow(page);
   await page.getByTestId("chip-edgeop-chamfer").click();
   await expect.poll(async () => (await toolPhases(page))?.edgeOpKind).toBe("Chamfer");
+  await closeFilletOverflow(page); // the popover can float over the handle
 }
 
 /** The screen direction one world step of "away from the body" points, via the
@@ -108,7 +116,10 @@ function d2Field(page: Page) {
   return page.getByLabel("Second distance");
 }
 
-/** Open the timeline and double-click the row `id` (the parametric re-edit entry). */
+/** Open the timeline and double-click the row `id` (the parametric re-edit entry).
+ *  A re-edit has no picks of its own — `filletOutward` never resolves, so it stays
+ *  DEGRADED (no 3D handle) — but its [Fillet|Chamfer] segments still live behind
+ *  the overflow, so every caller needs it open regardless. */
 async function reopenRow(page: Page, id: string): Promise<void> {
   await bodyOptions(page).first().click();
   await page.getByTestId("history-row-f3").click();
@@ -116,6 +127,7 @@ async function reopenRow(page: Page, id: string): Promise<void> {
   await expect(row).toBeVisible();
   await row.dblclick();
   await expect.poll(async () => (await toolPhases(page))?.filletPhase).toBe("armed");
+  await openFilletOverflow(page);
 }
 
 // ── the unified tool + the dead `chamfer` id / `H` binding ───────────────────
@@ -177,16 +189,22 @@ test("a bisector-tier arm is direction-driven: drag INTO the body types a Chamfe
   expect(armed?.edgeOpKind).toBe("Fillet");
 
   const away = await awayOnScreen(page);
-  await dragBy(page, -away.x * 140, -away.y * 140); // INTO the body
+  // UNIFY-UX Phase 1: the bisector tier resolved, so a real handle exists and the
+  // drag has to start ON it — the delta math is press-relative, so the direction
+  // vector below still drives the same type flip regardless of where the press
+  // itself lands.
+  await dragEdgeOpHandle(page, -away.x * 140, -away.y * 140); // INTO the body
 
   await expect.poll(async () => (await toolPhases(page))?.edgeOpKind).toBe("Chamfer");
+  await openFilletOverflow(page);
   await expect(page.getByTestId("chip-edgeop-chamfer")).toHaveAttribute("aria-pressed", "true");
   expect(await chipValue(page)).toBeGreaterThan(1); // a MAGNITUDE, never negative
   // A flip is not a commit — the tool is still armed on the same edges.
   await expect.poll(async () => (await toolPhases(page))?.filletPhase).toBe("armed");
+  await closeFilletOverflow(page); // the popover can float over the handle
 
   // …and the gesture is reversible: dragging back out re-types to Fillet.
-  await dragBy(page, away.x * 200, away.y * 200);
+  await dragEdgeOpHandle(page, away.x * 200, away.y * 200);
   await expect.poll(async () => (await toolPhases(page))?.edgeOpKind).toBe("Fillet");
 });
 
@@ -195,18 +213,20 @@ test("an explicit segment pick LOCKS the type against any later drag", async ({ 
   expect((await toolPhases(page))?.edgeOpAuto).toBe(true);
 
   // Picking the ACTIVE segment changes no op — it ends the direction-driven lane.
+  await openFilletOverflow(page);
   await page.getByTestId("chip-edgeop-fillet").click();
   await expect.poll(async () => (await toolPhases(page))?.edgeOpAuto).toBe(false);
   expect((await toolPhases(page))?.edgeOpKind).toBe("Fillet");
+  await closeFilletOverflow(page); // the popover can float over the handle
 
   const away = await awayOnScreen(page);
-  await dragBy(page, -away.x * 200, -away.y * 200); // hard INTO the body
+  await dragEdgeOpHandle(page, -away.x * 200, -away.y * 200); // hard INTO the body
   expect((await toolPhases(page))?.edgeOpKind).toBe("Fillet"); // no re-type
   // The locked type projects the drag onto its own half-line: bottomed at the
   // minimum rather than bouncing back up as a magnitude would.
   expect(await chipValue(page)).toBeCloseTo(0.1, 5);
 
-  await dragBy(page, away.x * 200, away.y * 200);
+  await dragEdgeOpHandle(page, away.x * 200, away.y * 200);
   expect(await chipValue(page)).toBeGreaterThan(1); // …and it recovers, still a Fillet
   expect((await toolPhases(page))?.edgeOpKind).toBe("Fillet");
 });
@@ -217,7 +237,7 @@ test("a released drag stays ARMED and commits nothing", async ({ page }) => {
   await armChamferViaSegment(page);
   const before = await getFeatureLabels(page);
 
-  await dragInCanvas(page, 180, 120);
+  await dragEdgeOpHandle(page, 0, -40);
 
   await expect.poll(async () => (await toolPhases(page))?.filletPhase).toBe("armed");
   await expect(page.getByTestId("chip-confirm")).toBeVisible();
@@ -232,7 +252,7 @@ test("the visible ✓ commits Chamfer after a flip", async ({ page }) => {
   await armChamferViaSegment(page);
   const before = await getFeatureLabels(page);
 
-  await dragInCanvas(page, 180, 120);
+  await dragEdgeOpHandle(page, 0, -40);
   await page.getByTestId("chip-confirm").click();
 
   await expect.poll(async () => (await getFeatureLabels(page)).length).toBe(before.length + 1);
@@ -296,6 +316,7 @@ test("a committed Fillet row re-edits its TYPE: dblclick → Chamfer segment →
   // (3) Double-click re-opens it armed on its COMMITTED type, with the segments.
   await row.dblclick();
   await expect.poll(async () => (await toolPhases(page))?.filletPhase).toBe("armed");
+  await openFilletOverflow(page);
   await expect(page.getByTestId("chip-edgeop-fillet")).toHaveAttribute("aria-pressed", "true");
   // The re-edit opens the committed type with the drag lane OFF — only an explicit
   // segment may re-type a committed op.
@@ -322,6 +343,7 @@ test("a committed Fillet row re-edits its TYPE: dblclick → Chamfer segment →
 
 test("a Chamfer arm gains a second-distance field; a Fillet arm does not", async ({ page }) => {
   await armFillet(page);
+  await openFilletOverflow(page);
   // SCHEMA §7.3 forbids a Fillet from carrying `distance2`, so the field that
   // authors it must not even be reachable there.
   await expect(d2Field(page)).toHaveCount(0);
@@ -337,6 +359,7 @@ test("a Chamfer arm gains a second-distance field; a Fillet arm does not", async
 
 test("arm Chamfer → type a second distance → commit: the row reads `d1×d2`", async ({ page }) => {
   await armChamferViaSegment(page);
+  await openFilletOverflow(page);
   const before = await getFeatureLabels(page);
 
   await d2Field(page).fill("2.5");
@@ -358,6 +381,7 @@ test("a two-distance chamfer BLOCKS the type flip, and allows it once d2 is clea
   // (1) Commit a two-distance chamfer this spec owns (the seeded mock rows carry
   // no stored params, so a re-edit has to run against one authored here).
   await armChamferViaSegment(page);
+  await openFilletOverflow(page);
   await d2Field(page).fill("2.5");
   await d2Field(page).press("Enter");
   await expect.poll(async () => (await lastFeature(page)).label).toBe("Chamfer");

@@ -43,7 +43,7 @@ import { promoteOne } from "@/ipc/promote";
 import { planePointToWorld } from "@/viewport/engine/sketchBasis";
 import { buildSnapCache, computeSnap, type SnapCandidateCache, type SnapResult } from "./snapEngine";
 import { SNAP_RADIUS_PX } from "./snapRadius";
-import { inferConstraints, inferHV, entityPoints } from "./autoConstrain";
+import { inferConstraints, entityPoints } from "./autoConstrain";
 import { entityEndTangent, unitDir } from "./arcMath";
 import {
   commitDimensionConstraint,
@@ -174,14 +174,14 @@ const LIVE_DIM_TYPE_KEY = /^[0-9.\-]$/;
  * promises something the pref can turn off. Polygon has its own (side count).
  */
 const DRAW_TOOL_HINT: Record<string, string> = {
-  line: "Line — click to place · type a number for length · Tab for angle",
+  line: "Line — click to place · type a number for length",
   rect: "Rectangle — click a corner · type a number for width · Tab for height",
   centerRect: "Center rectangle — click the centre · type a number for width · Tab for height",
   circle: "Circle — click the centre · type a number for diameter · Tab for radius",
   arc: "Arc — click the centre · type a number for radius",
   arc3p: "3-point arc — click the start · type a number for the chord",
   ellipse: "Ellipse — click the centre · type a number for the major axis",
-  slot: "Slot — click to place · type a number for length · Tab for angle",
+  slot: "Slot — click to place · type a number for length",
 };
 
 /** Seed parameters for the WP-C T2b sketch edit tools, in document mm. Sticky
@@ -1383,10 +1383,6 @@ export class SketchController {
       const stepped = this.machine.step(this.machineState, { kind: "move", pt: snap.point }, this.stepCtx());
       this.machineState = stepped.state;
       this.deps.engine.setSketchPreview(this.decorate(stepped.preview));
-      // The RAW preview feeds the H/V ghost: `updateGhost` deliberately ignores
-      // construction drafts (the arc radius rubber-band), but a construction-mode
-      // line still gets H/V auto-constrained at commit, so the hint must still show.
-      this.updateGhost(stepped.preview, snap.point);
       this.syncLiveDims(stepped.dims ?? []);
       this.updateLiveDimPlacement(ev.clientX, ev.clientY);
     });
@@ -1688,7 +1684,6 @@ export class SketchController {
     const stepped = this.machine.step(this.machineState, { kind: "move", pt: cursor }, this.stepCtx());
     this.machineState = stepped.state;
     this.deps.engine.setSketchPreview(this.decorate(stepped.preview));
-    this.updateGhost(stepped.preview, stepped.state.cursor ?? cursor);
     this.syncLiveDims(stepped.dims ?? []);
   }
 
@@ -2889,16 +2884,6 @@ export class SketchController {
     return drafts.map((d) => (d.construction ? d : { ...d, construction: true }));
   }
 
-  private updateGhost(preview: DraftEntity[], cursor: Point2): void {
-    const line = preview.find((d) => d.type === "Line" && !d.construction && d.p0 && d.p1);
-    if (!line || !line.p0 || !line.p1) {
-      this.deps.engine.setSketchGhost(null, null);
-      return;
-    }
-    const hv = inferHVDraft(line.p0, line.p1);
-    this.deps.engine.setSketchGhost(hv, hv ? cursor : null);
-  }
-
   // ── keyboard (Alt suppress + Enter/Esc end chain) ─────────────────────────
 
   private onKeyDown = (e: KeyboardEvent): void => {
@@ -3160,11 +3145,4 @@ function offsetFailureHint(f: OffsetFailure): string {
     case "segmentVanished":
       return "Offset too large — a segment of the chain would vanish";
   }
-}
-
-/** H/V inference for the ghost glyph — delegates to the shared `inferHV` (one source
- *  of truth for the ±5° tolerance) and maps its tokens to the glyph's short codes. */
-function inferHVDraft(p0: Point2, p1: Point2): "H" | "V" | null {
-  const hv = inferHV([p0.x, p0.y], [p1.x, p1.y]);
-  return hv === "Horizontal" ? "H" : hv === "Vertical" ? "V" : null;
 }

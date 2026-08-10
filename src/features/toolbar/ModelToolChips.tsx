@@ -20,17 +20,17 @@ import { createPortal } from "react-dom";
 import { cn } from "@/ui/cn";
 import { DimensionInput } from "@/features/sketch/DimensionInput";
 import { HoleChipCluster } from "./HoleChipCluster";
-import { BooleanModeSegments, ExtrudeOverflow } from "./ExtrudeChipControls";
-import { useSettingsStore } from "@/stores/settingsStore";
+import { ExtrudeOverflow } from "./ExtrudeChipControls";
+import { EdgeOpOverflow } from "./EdgeOpChipControls";
+import { RevolveOverflow } from "./RevolveChipControls";
 import { useToolChipStore, toolChipStore, MODEL_TOOL_CHIP_ID } from "@/stores/toolChipStore";
-import { LENGTH_SUFFIX, formatLength, parseLength } from "@/units/format";
+import { LENGTH_SUFFIX } from "@/units/format";
 import { useViewportEngine } from "@/viewport/engineBridge";
 import type { BooleanOperation, OffsetDistanceType } from "@/ipc/types";
 import type {
   AlignPhase,
   PatternAxis,
   MirrorPlane,
-  EdgeOpKind,
   TransformMode,
 } from "@/tools/modelTools/modelToolMachine";
 
@@ -45,13 +45,6 @@ const TRANSFORM_MODES: { mode: TransformMode; label: string; testid: string }[] 
   { mode: "rotate", label: "Rotate", testid: "chip-transform-rotate" },
 ];
 
-/** The armed-edge-op segments (FILLET-CHAMFER-UNIFY): the explicit override of
- *  the drag direction's automatic choice. */
-const EDGE_OPS: { edgeOp: EdgeOpKind; label: string; testid: string }[] = [
-  { edgeOp: "Fillet", label: "Fillet", testid: "chip-edgeop-fillet" },
-  { edgeOp: "Chamfer", label: "Chamfer", testid: "chip-edgeop-chamfer" },
-];
-
 /**
  * The armed OFFSET-FACE distance-type segments (SCHEMA §7.3). WHICH of these are
  * rendered is decided by the controller and passed through the chip store — a
@@ -64,15 +57,6 @@ const OFFSET_DISTANCE_TYPES: { type: OffsetDistanceType; label: string; testid: 
   { type: "Radius", label: "Radius", testid: "chip-offset-type-radius" },
   { type: "Diameter", label: "Diameter", testid: "chip-offset-type-diameter" },
 ];
-
-/**
- * What the CHAMFER second-leg field shows when there is no second leg: the two
- * legs are EQUAL. Deliberately a glyph, not an empty field — a blank would read
- * as "unset, and I do not know what happens", while `=` states the equal-leg
- * semantics SCHEMA §7.3 gives an absent `distance2`. Typing it back (or clearing
- * the field) is how the user returns to equal-leg.
- */
-const EQUAL_LEG_TEXT = "=";
 
 /** A segmented toggle row (axis / plane pickers), styled like the boolean op row. */
 function SegmentToggle<T extends string>({
@@ -185,42 +169,6 @@ function ConfirmButtons({ onConfirm, onCancel }: { onConfirm?: () => void; onCan
 }
 
 /**
- * The [Fillet | Chamfer] segment group on the armed edge-op cluster. Both
- * segments are always available — unlike the boolean modes there is no
- * precondition to check (any picked edge can take either op; whether OCCT
- * accepts the SIZE is what the live preview failure reports). A drag that
- * re-types the op moves the pressed segment, so this doubles as the readout of
- * what the direction just chose.
- */
-function EdgeOpSegments({
-  active,
-  onPick,
-}: {
-  active: EdgeOpKind;
-  onPick: (edgeOp: EdgeOpKind) => void;
-}) {
-  return (
-    <div className="flex overflow-hidden rounded-full" role="group" aria-label="Edge op">
-      {EDGE_OPS.map((o) => (
-        <button
-          key={o.edgeOp}
-          type="button"
-          data-testid={o.testid}
-          aria-pressed={o.edgeOp === active}
-          onClick={() => onPick(o.edgeOp)}
-          className={cn(
-            "px-2 py-1 text-[11.5px] font-medium",
-            o.edgeOp === active ? "bg-sel-bg text-sel-text" : "bg-chip text-ink-3 hover:bg-hover-2",
-          )}
-        >
-          {o.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-/**
  * The `[Offset | Total | Radius | Diameter]` segment group on the armed
  * offset-face cluster (SCHEMA §7.3).
  *
@@ -303,94 +251,6 @@ function TangentToggle({
     >
       ⌒
     </button>
-  );
-}
-
-/**
- * The CHAMFER second-distance field (SCHEMA §7.3, 2026-08-03 — WP-C T2a). Rendered
- * ONLY while the armed edge op is a Chamfer, immediately right of the first
- * distance, so the cluster reads `[d1] [d2] [Fillet|Chamfer] [✓ ✕]`.
- *
- * Not a `DimensionInput`: this field's domain is `number | null`, and the
- * equal-leg state has no number to show. `DimensionInput` also owns the
- * `aria-label="Dimension value"` every spec uses to reach the FIRST distance, so
- * a second instance of it would make that locator ambiguous.
- *
- * Commit rules (mirroring the cluster's own): Enter applies the text and then
- * confirms the op; blur applies it; Esc reverts the text to the committed value.
- * Empty or `=` commits `null` — equal-leg. A value the length parser refuses is
- * reverted rather than silently read as a partial number.
- */
-function ChamferDistance2Field({
-  value,
-  onValue,
-  onConfirm,
-}: {
-  value: number | null;
-  onValue: (v: number | null) => void;
-  onConfirm?: () => void;
-}) {
-  const unit = useSettingsStore((s) => s.displayUnit);
-  const shown = (v: number | null) => (v === null ? EQUAL_LEG_TEXT : formatLength(v, unit));
-  const [text, setText] = useState(() => shown(value));
-
-  // Re-render the SAME value when the committed second leg or the display unit
-  // changes; never commits, so a unit switch cannot dirty the document.
-  useEffect(() => {
-    setText(shown(value));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [value, unit]);
-
-  const commit = (): void => {
-    const trimmed = text.trim();
-    if (trimmed === "" || trimmed === EQUAL_LEG_TEXT) {
-      if (value !== null) onValue(null);
-      setText(EQUAL_LEG_TEXT);
-      return;
-    }
-    const n = parseLength(trimmed, unit);
-    // SCHEMA §7.3 requires `distance2 > 0` when present, and the backend refuses
-    // anything else — so a rejected entry reverts rather than authoring it.
-    if (n === undefined || n === null || !Number.isFinite(n) || n <= 0) {
-      setText(shown(value));
-      return;
-    }
-    if (n !== value) onValue(n);
-    setText(shown(n));
-  };
-
-  return (
-    <span className="pointer-events-auto inline-flex items-center gap-0.5 rounded-full border border-border bg-surface px-2 font-mono text-[11px] text-ink-2 shadow-popover">
-      <span aria-hidden className="text-ink-3">
-        ×
-      </span>
-      <input
-        aria-label="Second distance"
-        data-testid="chip-chamfer-d2"
-        className={cn(
-          "bg-transparent text-right outline-none",
-          unit === "mm" ? "w-9" : "w-14",
-        )}
-        value={text}
-        inputMode="decimal"
-        placeholder={EQUAL_LEG_TEXT}
-        title="Second chamfer distance — '=' for equal legs"
-        onChange={(e) => setText(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            e.stopPropagation();
-            commit();
-            onConfirm?.();
-          } else if (e.key === "Escape") {
-            e.preventDefault();
-            e.stopPropagation();
-            setText(shown(value));
-          }
-        }}
-      />
-    </span>
   );
 }
 
@@ -565,35 +425,33 @@ export function ModelToolChips() {
       onCancel={() => toolChipStore.getState().onCancel?.()}
     />
   );
-  const booleanSegments = showBooleanSegments ? (
-    <BooleanModeSegments
-      active={booleanMode}
+  // The boolean segments now live behind revolve's own `⋯` (UNIFY-UX Phase 2) —
+  // keyed on the anchor so a fresh axis pick reopens collapsed.
+  const revolveOverflow = showBooleanSegments ? (
+    <RevolveOverflow
+      key={`overflow-${anchorKey}`}
+      booleanMode={booleanMode}
       canBoolean={canBoolean}
-      onPick={(m) => toolChipStore.getState().onBooleanMode?.(m)}
+      onBooleanMode={(m) => toolChipStore.getState().onBooleanMode?.(m)}
     />
   ) : null;
 
   // Only the FRESH edge-op arm sets this flag; the shell shares the value-chip
   // branch below (`shellThickness`) and the edge-op re-edit renders the bare
-  // numeric chip, so neither can reach the segments.
-  const edgeOpSegments = showEdgeOpSegments ? (
-    <EdgeOpSegments active={edgeOp} onPick={(k) => toolChipStore.getState().onEdgeOp?.(k)} />
+  // numeric chip, so neither can reach the overflow. [Fillet|Chamfer] + the
+  // chamfer second leg both live behind it (UNIFY-UX Phase 1) — keyed on the
+  // anchor so a fresh arm reopens collapsed instead of inheriting the previous
+  // arm's expanded state, mirroring extrude's `⋯`.
+  const edgeOpOverflow = showEdgeOpSegments ? (
+    <EdgeOpOverflow
+      key={`overflow-${anchorKey}`}
+      edgeOp={edgeOp}
+      onEdgeOp={(k) => toolChipStore.getState().onEdgeOp?.(k)}
+      distance2={distance2}
+      onDistance2={(v) => toolChipStore.getState().onDistance2?.(v)}
+      onConfirm={() => toolChipStore.getState().onConfirm?.()}
+    />
   ) : null;
-
-  // The second chamfer distance rides with the segments and ONLY while the armed
-  // op is a Chamfer — a Fillet has no second leg, and SCHEMA §7.3 forbids it from
-  // carrying one, so showing the field there would offer an edit the wire refuses.
-  // Keyed on the anchor so a fresh arm opens at `=` rather than inheriting the
-  // previous arm's typed text.
-  const chamferD2 =
-    showEdgeOpSegments && edgeOp === "Chamfer" ? (
-      <ChamferDistance2Field
-        key={`d2-${anchorKey}`}
-        value={distance2}
-        onValue={(v) => toolChipStore.getState().onDistance2?.(v)}
-        onConfirm={() => toolChipStore.getState().onConfirm?.()}
-      />
-    ) : null;
 
   let content: React.ReactNode;
   if (kind === "extrudeDepth") {
@@ -639,8 +497,31 @@ export function ModelToolChips() {
         >
           Axis
         </button>
-        {booleanSegments}
+        {revolveOverflow}
         {confirmButtons}
+      </>,
+    );
+  } else if (kind === "revolveAxisPick") {
+    // No value armed yet — a text-only instructional chip (UNIFY-UX Phase 2),
+    // mirroring the regionSelect chip's shape minus the confirm half: there is
+    // nothing here for ✓ to commit.
+    content = panel(
+      <>
+        <span
+          data-testid="chip-revolve-axis-hint"
+          className="px-2 py-1 text-[11.5px] font-medium text-ink-2"
+        >
+          Pick an axis line
+        </span>
+        <button
+          type="button"
+          data-testid="chip-cancel"
+          aria-label="Cancel"
+          onClick={() => toolChipStore.getState().onCancel?.()}
+          className="rounded-full bg-chip px-2 py-1 text-[11.5px] font-medium text-ink-3 hover:bg-hover-2"
+        >
+          ✕
+        </button>
       </>,
     );
   } else if (kind === "datumOffset") {
@@ -688,8 +569,7 @@ export function ModelToolChips() {
       ? panel(
           <>
             {clusterInput(LENGTH_SUFFIX)}
-            {chamferD2}
-            {edgeOpSegments}
+            {edgeOpOverflow}
             {confirmButtons}
           </>,
         )

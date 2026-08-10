@@ -32,7 +32,8 @@ import { useViewportStore, viewportStore } from "@/stores/viewportStore";
 import { layersStore } from "@/stores/layersStore";
 import { selectGeometryCached, useDocumentStore } from "@/stores/documentStore";
 import { settingsStore } from "@/stores/settingsStore";
-import { toolStore } from "@/stores/toolStore";
+import { toolStore, useToolStore } from "@/stores/toolStore";
+import { useToolChipStore } from "@/stores/toolChipStore";
 import {
   selectionStore,
   sketchRegionRef,
@@ -169,6 +170,16 @@ export function ViewportRoot({ className }: { className?: string }) {
     useViewportStore((s) => s.statusHint?.severity) === "error";
   const geometryCached = useDocumentStore(selectGeometryCached);
   const chip = viewportGeometryChip(ready, geometryPending, errorHintActive, geometryCached);
+
+  // UNIFY-UX Phase 2: Revolve armed with nothing usable selected yet has no
+  // world anchor to hang a chip off of — StatusBar alone was easy to miss (the
+  // gap this closes). `kind === "none"` is true for exactly this idle stretch:
+  // both the axisPick and armed phases now publish their own chip kind, so this
+  // condition clears itself the moment either resolves.
+  const revolveMode = useToolStore((s) => s.mode);
+  const revolveTool = useToolStore((s) => s.modelTool);
+  const revolveChipKind = useToolChipStore((s) => s.kind);
+  const revolveEmpty = ready && revolveMode === "model" && revolveTool === "revolve" && revolveChipKind === "none";
 
   // Mirror sketch mode for the placeholder styling (before the engine is ready).
   useEffect(() => {
@@ -629,6 +640,19 @@ export function ViewportRoot({ className }: { className?: string }) {
         >
           <span className="flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-1.5 text-[12.5px] font-medium text-ink-5 shadow-panel">
             Last saved geometry
+          </span>
+        </div>
+      )}
+      {revolveEmpty && (
+        <div
+          data-testid="revolve-empty-hint"
+          // Same non-interactive, top-anchored idiom as the "cached" chip above —
+          // the only existing precedent for a viewport-space (not StatusBar,
+          // not world-anchored) instructional banner in this codebase.
+          className="pointer-events-none absolute inset-x-0 top-3 z-[2] flex justify-center"
+        >
+          <span className="flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-1.5 text-[12.5px] font-medium text-ink-5 shadow-panel">
+            Select a sketch region to revolve
           </span>
         </div>
       )}

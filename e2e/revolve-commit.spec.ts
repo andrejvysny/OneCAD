@@ -13,6 +13,7 @@ import {
   extrudeDebug,
   CANVAS,
 } from "./helpers";
+import { openRevolveOverflow, closeRevolveOverflow } from "./modelToolHelpers";
 
 /*
  * MODEL-HARDEN Wave 1 — the revolve commit gesture (mock lane).
@@ -72,8 +73,10 @@ test("revolve: axis pick → armed 360° → drag angle → release stays armed 
   expect((await extrudeDebug(page))?.revolvePhase).toBe("armed");
   await expect(page.getByLabel("Dimension value")).toHaveValue("360");
   // Wave 2: an existing body (the mock's seeded Body 1) offers the boolean segments
-  // on the armed revolve cluster.
+  // on the armed revolve cluster — behind its own `⋯` since UNIFY-UX Phase 2.
+  await openRevolveOverflow(page);
   await expect(page.getByTestId("chip-bool-cut")).toBeVisible();
+  await closeRevolveOverflow(page);
 
   // Drag the angle, then release — the tool must STAY armed (no implicit commit).
   const box = await page.locator(CANVAS).boundingBox();
@@ -96,4 +99,49 @@ test("revolve: axis pick → armed 360° → drag angle → release stays armed 
   await page.keyboard.press("Enter");
   await expect(bodyOptions(page)).toHaveCount(bodiesBefore + 1);
   await expect(bodyOptions(page).last()).toHaveAttribute("aria-selected", "true");
+});
+
+/*
+ * UNIFY-UX Phase 2 — Revolve's in-viewport guidance. Before this, the ONLY
+ * feedback for "nothing selected" or "axis not picked yet" was a small
+ * StatusBar string; both states now also get a real viewport-space element:
+ * a screen-fixed banner with nothing selected, a leader-anchored chip once a
+ * profile is bound but no axis chosen.
+ */
+test("Revolve guidance: an empty-state banner before any pick, an axis-hint chip during axisPick", async ({
+  page,
+}) => {
+  await openEditorDebug(page);
+
+  // Nothing selected, no sketch in the seeded document yet — the empty-state
+  // banner is the only in-viewport feedback (StatusBar carries the rest).
+  await page.getByRole("button", { name: "Revolve", exact: true }).click();
+  await expect(page.getByTestId("revolve-empty-hint")).toBeVisible();
+  await expect(page.getByTestId("chip-revolve-axis-hint")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Select", exact: true }).click();
+  await enterSketchViaPlanePicker(page);
+  await waitForCameraSettled(page);
+  await selectSketchTool(page, "Rectangle");
+  await clickAt(page, -150, -110);
+  await clickAt(page, 150, 110);
+  await expect(dofPill(page)).toHaveText(/^DOF: [1-9]\d*$/);
+  await page.keyboard.press("Enter");
+  await waitForCameraSettled(page);
+
+  await page.getByRole("listbox", { name: "Sketches" }).getByRole("option").last().click();
+  await page.getByRole("button", { name: "Revolve", exact: true }).click();
+
+  // A profile is bound now, but no axis yet — the empty-state banner is gone
+  // (the chip store's `kind` moved off "none") and the axis-hint chip is up.
+  await expect(page.getByTestId("revolve-empty-hint")).toHaveCount(0);
+  await expect(page.getByTestId("chip-revolve-axis-hint")).toHaveText("Pick an axis line");
+
+  // ✕ backs all the way out to Select — there is no value yet to keep armed.
+  await page.getByTestId("chip-cancel").click();
+  await expect(page.getByRole("button", { name: "Select", exact: true })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(page.getByTestId("chip-revolve-axis-hint")).toHaveCount(0);
 });

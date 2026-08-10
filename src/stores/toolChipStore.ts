@@ -25,6 +25,14 @@
  */
 export const MODEL_TOOL_CHIP_ID = "__model_tool_chip";
 
+/**
+ * Perpendicular screen clearance (CSS px) an armed cluster's chip sits off its
+ * axis when `anchorAxisFrom` is supplied but the caller doesn't override it —
+ * one shared constant instead of every tool guessing its own pixel value.
+ * Originated as extrude-only `CHIP_AXIS_OFFSET_PX`.
+ */
+export const DEFAULT_CHIP_OFFSET_PX = 26;
+
 import { createStore, useStore } from "zustand";
 import type { BooleanOperation, HoleType, OffsetDistanceType } from "@/ipc/types";
 import type { HoleFit } from "@/tools/modelTools/holeStandards";
@@ -44,6 +52,20 @@ import type {
   TransformMode,
 } from "@/tools/modelTools/modelToolMachine";
 
+/**
+ * Leader-lined offset placement any armed cluster's chip can opt into —
+ * sit BESIDE the axis `anchorAxisFrom → worldPos` instead of centered on
+ * `worldPos`. Originally extrude-only; every `*ChipOpts` below now extends it
+ * so fillet/revolve get the same off-geometry, leader-lined chip.
+ */
+export interface ChipAnchorOpts {
+  /** Sit BESIDE the axis from this point to `worldPos`. */
+  anchorAxisFrom?: [number, number, number];
+  /** Perpendicular screen distance from that axis, in CSS pixels — defaults
+   *  to `DEFAULT_CHIP_OFFSET_PX` when `anchorAxisFrom` is set but this isn't. */
+  anchorOffsetPx?: number;
+}
+
 /** Handlers the armed extrude cluster wires (MODEL-HARDEN Wave 1 + 2). */
 export interface ExtrudeChipHandlers {
   onValue: (v: number) => void;
@@ -59,7 +81,7 @@ export interface ExtrudeChipHandlers {
 }
 
 /** Extra armed-cluster options (symmetric seed; hide the ⇔ toggle in re-edit). */
-export interface ExtrudeChipOpts {
+export interface ExtrudeChipOpts extends ChipAnchorOpts {
   symmetric?: boolean;
   /** Seed the end-condition segment (W1; default Blind). */
   endCondition?: ExtrudeEndCondition;
@@ -85,10 +107,6 @@ export interface ExtrudeChipOpts {
   draftAngleDeg?: number;
   /** Whether to render the [Draft] segment at all (default false). */
   showDraft?: boolean;
-  /** Sit BESIDE the axis from this point to `worldPos` (the profile centroid). */
-  anchorAxisFrom?: [number, number, number];
-  /** Perpendicular screen distance from that axis, in CSS pixels. */
-  anchorOffsetPx?: number;
 }
 
 /** Handlers the armed revolve cluster wires (MODEL-HARDEN Wave 1 + 2). */
@@ -102,10 +120,16 @@ export interface RevolveChipHandlers {
 }
 
 /** Extra armed-revolve-cluster options (boolean segments — Wave 2). */
-export interface RevolveChipOpts {
+export interface RevolveChipOpts extends ChipAnchorOpts {
   booleanMode?: BooleanMode;
   canBoolean?: boolean;
   showBooleanSegments?: boolean;
+}
+
+/** The only handler the axisPick chip wires — ✕ falls back to select, exactly
+ *  like the regionSelect chip's cancel (there's no value yet to confirm). */
+export interface RevolveAxisPickChipHandlers {
+  onCancel: () => void;
 }
 
 /** Handlers the region-select chip wires (Wave 2 multi-region). */
@@ -130,7 +154,7 @@ export interface ValueChipHandlers {
  * arm renders the [Fillet|Chamfer] segments; the parametric re-edit chip passes
  * none and stays the bare numeric chip it always was.
  */
-export interface EdgeOpChipOpts {
+export interface EdgeOpChipOpts extends ChipAnchorOpts {
   /** Seed the segment group's active op (default Fillet). */
   edgeOp?: EdgeOpKind;
   /** Whether to render the segment group at all (fresh arm only). */
@@ -238,6 +262,9 @@ export type ChipKind =
   | "datumOffset"
   | "filletRadius"
   | "revolveAngle"
+  /** Revolve's axisPick phase (UNIFY-UX Phase 2): a face/region is bound but no
+   *  axis chosen yet — a text-only instructional chip, no value, no confirm. */
+  | "revolveAxisPick"
   | "booleanOp"
   | "shellThickness"
   /** The armed face-offset cluster (SCHEMA §7.3 OffsetFace). */
@@ -399,6 +426,12 @@ export interface ToolChipState {
     handlers: RevolveChipHandlers,
     opts?: RevolveChipOpts,
   ): void;
+  /** Show the revolve axisPick chip `[ Pick an axis line ✕ ]` at the profile
+   *  centroid — the fresh arm's only feedback before an axis is chosen. */
+  showRevolveAxisPick(
+    worldPos: [number, number, number],
+    handlers: RevolveAxisPickChipHandlers,
+  ): void;
   /** Show the armed datum chip `[ <base> · offset mm ✓ ✕ ]` at the ghost origin. */
   showDatum(
     offset: number,
@@ -531,6 +564,23 @@ export interface ToolChipState {
   clear(): void;
 }
 
+/**
+ * Resolves the anchor pair for `set()`: an `anchorAxisFrom` with no explicit
+ * `anchorOffsetPx` gets the shared default rather than silently collapsing to
+ * a centered chip (an omitted offset used to mean "0px", i.e. no offset at
+ * all — the opposite of what supplying an axis is for).
+ */
+function resolveChipAnchor(opts?: ChipAnchorOpts): {
+  anchorAxisFrom: [number, number, number] | null;
+  anchorOffsetPx: number;
+} {
+  const anchorAxisFrom = opts?.anchorAxisFrom ?? null;
+  return {
+    anchorAxisFrom,
+    anchorOffsetPx: anchorAxisFrom ? (opts?.anchorOffsetPx ?? DEFAULT_CHIP_OFFSET_PX) : 0,
+  };
+}
+
 const CLEARED = {
   kind: "none" as ChipKind,
   value: 0,
@@ -620,8 +670,7 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
       regionCount: opts?.regionCount ?? 1,
       draftAngleDeg: opts?.draftAngleDeg ?? 0,
       showDraft: opts?.showDraft ?? false,
-      anchorAxisFrom: opts?.anchorAxisFrom ?? null,
-      anchorOffsetPx: opts?.anchorOffsetPx ?? 0,
+      ...resolveChipAnchor(opts),
       onValue: handlers.onValue,
       onSymmetric: handlers.onSymmetric,
       onConfirm: handlers.onConfirm,
@@ -644,6 +693,7 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
       onEdgeOp: opts?.onEdgeOp ?? null,
       distance2: opts?.distance2 ?? null,
       onDistance2: opts?.onDistance2 ?? null,
+      ...resolveChipAnchor(opts),
     });
   },
   showRevolve(value, worldPos, handlers, opts) {
@@ -660,7 +710,11 @@ export const toolChipStore = createStore<ToolChipState>()((set) => ({
       onConfirm: handlers.onConfirm,
       onCancel: handlers.onCancel,
       onBooleanMode: handlers.onBooleanMode ?? null,
+      ...resolveChipAnchor(opts),
     });
+  },
+  showRevolveAxisPick(worldPos, handlers) {
+    set({ ...CLEARED, kind: "revolveAxisPick", worldPos, onCancel: handlers.onCancel });
   },
   showDatum(offset, worldPos, baseLabel, handlers) {
     set({

@@ -23,6 +23,18 @@ const openOverflow = (): void => {
   fireEvent.click(screen.getByTestId("chip-overflow"));
 };
 
+/** Reveal the fillet cluster's [Fillet|Chamfer] toggle + chamfer second leg,
+ *  which now live behind their own `⋯` (see `EdgeOpChipControls`). */
+const openFilletOverflow = (): void => {
+  fireEvent.click(screen.getByTestId("chip-fillet-overflow"));
+};
+
+/** Reveal the revolve cluster's New Body / Add / Cut segments, which now live
+ *  behind their own `⋯` (see `RevolveChipControls`). */
+const openRevolveOverflow = (): void => {
+  fireEvent.click(screen.getByTestId("chip-revolve-overflow"));
+};
+
 /** A fake engine that hosts the chip in the document so the portal is queryable. */
 function fakeEngine(): ViewportEngine {
   return {
@@ -231,9 +243,21 @@ describe("ModelToolChips (M6b)", () => {
     return onEdgeOp;
   };
 
-  it("armed edge-op cluster renders the segments, marks the active op, and dispatches", () => {
+  it("the fillet overflow readout tracks the active op and marks Chamfer non-default", () => {
+    render(<ModelToolChips />);
+    edgeOpCluster({ edgeOp: "Fillet" });
+    expect(screen.getByTestId("chip-fillet-overflow-readout")).toHaveTextContent("Fillet");
+    expect(screen.queryByTestId("chip-fillet-overflow-dot")).toBeNull();
+
+    act(() => toolChipStore.getState().setEdgeOp("Chamfer"));
+    expect(screen.getByTestId("chip-fillet-overflow-readout")).toHaveTextContent("Chamfer");
+    expect(screen.getByTestId("chip-fillet-overflow-dot")).toBeInTheDocument();
+  });
+
+  it("armed edge-op cluster renders the segments behind `⋯`, marks the active op, and dispatches", () => {
     render(<ModelToolChips />);
     const onEdgeOp = edgeOpCluster({ edgeOp: "Fillet" });
+    openFilletOverflow();
 
     expect(screen.getByTestId("chip-edgeop-fillet")).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByTestId("chip-edgeop-chamfer")).toHaveAttribute("aria-pressed", "false");
@@ -246,16 +270,19 @@ describe("ModelToolChips (M6b)", () => {
   it("the pressed segment follows a live setEdgeOp (the drag-direction flip)", () => {
     render(<ModelToolChips />);
     edgeOpCluster({ edgeOp: "Fillet" });
+    openFilletOverflow();
     act(() => toolChipStore.getState().setEdgeOp("Chamfer"));
     expect(screen.getByTestId("chip-edgeop-chamfer")).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByTestId("chip-edgeop-fillet")).toHaveAttribute("aria-pressed", "false");
   });
 
   // Opt-in only. (The EDGE-OP re-edit now DOES ask for them — W3 — but a bare
-  // `showFillet` with no opts must still render none.)
-  it("omits the segments unless the arm asks for them", () => {
+  // `showFillet` with no opts must still render neither the overflow nor its
+  // segments.)
+  it("omits the overflow (and its segments) unless the arm asks for them", () => {
     render(<ModelToolChips />);
     act(() => toolChipStore.getState().showFillet(2, WORLD, vi.fn()));
+    expect(screen.queryByTestId("chip-fillet-overflow")).toBeNull();
     expect(screen.queryByTestId("chip-edgeop-fillet")).toBeNull();
   });
 
@@ -266,6 +293,7 @@ describe("ModelToolChips (M6b)", () => {
   it("the second-distance field appears ONLY while the armed op is a Chamfer", () => {
     render(<ModelToolChips />);
     edgeOpCluster({ edgeOp: "Fillet" });
+    openFilletOverflow();
     // A Fillet has no second leg and SCHEMA §7.3 forbids it from carrying one.
     expect(screen.queryByTestId("chip-chamfer-d2")).toBeNull();
 
@@ -282,6 +310,7 @@ describe("ModelToolChips (M6b)", () => {
     render(<ModelToolChips />);
     const onDistance2 = vi.fn();
     edgeOpCluster({ edgeOp: "Chamfer", onDistance2 });
+    openFilletOverflow();
     expect(d2Field().value).toBe("=");
 
     fireEvent.change(d2Field(), { target: { value: "2.5" } });
@@ -293,6 +322,7 @@ describe("ModelToolChips (M6b)", () => {
     render(<ModelToolChips />);
     const onDistance2 = vi.fn();
     edgeOpCluster({ edgeOp: "Chamfer", distance2: 2.5, onDistance2 });
+    openFilletOverflow();
     expect(d2Field().value).toBe("2.5"); // a re-edit opens seeded
 
     fireEvent.change(d2Field(), { target: { value: "" } });
@@ -312,6 +342,7 @@ describe("ModelToolChips (M6b)", () => {
     render(<ModelToolChips />);
     const onDistance2 = vi.fn();
     edgeOpCluster({ edgeOp: "Chamfer", distance2: 2.5, onDistance2 });
+    openFilletOverflow();
     for (const bad of ["0", "-1", "2abc"]) {
       fireEvent.change(d2Field(), { target: { value: bad } });
       fireEvent.blur(d2Field());
@@ -333,6 +364,7 @@ describe("ModelToolChips (M6b)", () => {
         { showEdgeOpSegments: true, edgeOp: "Chamfer", onDistance2 },
       ),
     );
+    openFilletOverflow();
     fireEvent.change(d2Field(), { target: { value: "3" } });
     fireEvent.keyDown(d2Field(), { key: "Enter" });
     expect(onDistance2).toHaveBeenCalledWith(3);
@@ -340,15 +372,14 @@ describe("ModelToolChips (M6b)", () => {
   });
 
   // Shell shares the value-chip branch (`shellThickness`) — it must never grow an
-  // edge-op picker just by living next door.
-  it("the shell chip renders NO edge-op segments", () => {
+  // edge-op overflow just by living next door.
+  it("the shell chip renders NO edge-op overflow", () => {
     render(<ModelToolChips />);
     act(() =>
       toolChipStore.getState().showShell(2, WORLD, vi.fn(), { onConfirm: vi.fn(), onCancel: vi.fn() }),
     );
     expect(screen.getByTestId("chip-confirm")).toBeInTheDocument(); // the armed cluster IS up
-    expect(screen.queryByTestId("chip-edgeop-fillet")).toBeNull();
-    expect(screen.queryByTestId("chip-edgeop-chamfer")).toBeNull();
+    expect(screen.queryByTestId("chip-fillet-overflow")).toBeNull();
   });
 
   it("armed revolve cluster: degree value + Axis reset + ✓/✕ dispatch through the handlers", () => {
@@ -365,6 +396,43 @@ describe("ModelToolChips (M6b)", () => {
     expect(h.onConfirm).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByTestId("chip-cancel"));
     expect(h.onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("omits the revolve overflow unless the arm asks for boolean segments", () => {
+    const h = { onValue: vi.fn(), onResetAxis: vi.fn(), onConfirm: vi.fn(), onCancel: vi.fn() };
+    render(<ModelToolChips />);
+    act(() => toolChipStore.getState().showRevolve(360, WORLD, h));
+    expect(screen.queryByTestId("chip-revolve-overflow")).toBeNull();
+  });
+
+  it("the revolve overflow holds New Body / Add / Cut and dispatches onBooleanMode", () => {
+    const h = { onValue: vi.fn(), onResetAxis: vi.fn(), onConfirm: vi.fn(), onCancel: vi.fn(), onBooleanMode: vi.fn() };
+    render(<ModelToolChips />);
+    act(() =>
+      toolChipStore.getState().showRevolve(360, WORLD, h, {
+        showBooleanSegments: true,
+        canBoolean: true,
+        booleanMode: "NewBody",
+      }),
+    );
+    expect(screen.queryByTestId("chip-bool-cut")).toBeNull(); // collapsed by default
+    expect(screen.getByTestId("chip-revolve-overflow-readout")).toHaveTextContent("New");
+
+    openRevolveOverflow();
+    expect(screen.getByTestId("chip-bool-newbody")).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByTestId("chip-bool-cut"));
+    expect(h.onBooleanMode).toHaveBeenCalledWith("Cut");
+  });
+
+  it("the axisPick chip shows the hint and dispatches ✕ through onCancel", () => {
+    const onCancel = vi.fn();
+    render(<ModelToolChips />);
+    act(() => toolChipStore.getState().showRevolveAxisPick(WORLD, { onCancel }));
+
+    expect(screen.getByTestId("chip-revolve-axis-hint")).toHaveTextContent("Pick an axis line");
+    expect(screen.queryByLabelText("Dimension value")).toBeNull(); // no value yet to edit
+    fireEvent.click(screen.getByTestId("chip-cancel"));
+    expect(onCancel).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -124,6 +124,9 @@ export interface ChipPlacement {
   axisFrom?: Vec3;
   /** Perpendicular screen-space distance from that axis, in CSS pixels. */
   offsetPx?: number;
+  /** Chips sharing a cluster id never overlap — the overlay driver keeps each
+   *  neighbour `CLUSTER_GAP_PX` apart in screen space (see HtmlOverlayDriver). */
+  clusterId?: string;
 }
 
 /** Store-wiring seam the viewport bridge supplies for picking (engine stays store-agnostic). */
@@ -1709,6 +1712,7 @@ export class ViewportEngine {
     this.overlayDriver.register(id, el, new THREE.Vector3().fromArray(world), {
       axisFrom: placement?.axisFrom ? new THREE.Vector3().fromArray(placement.axisFrom) : undefined,
       offsetPx: placement?.offsetPx,
+      clusterId: placement?.clusterId,
     });
     this.invalidate();
   }

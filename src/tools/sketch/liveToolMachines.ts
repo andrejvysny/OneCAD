@@ -26,6 +26,7 @@ import {
   describeDims,
   roundTo,
   type DimDomain,
+  type DimFieldId,
   type DimLocks,
   type DimQuantum,
   type DimValues,
@@ -45,6 +46,20 @@ function quantumFor(domain: DimDomain, q: DimQuantum): number {
   return domain === "length" ? q.length : 0;
 }
 
+/** Domain of a measured value by field id — used when the phase HIDES that id as
+ *  a chip (a first line leg hides its ∠), where no frame spec carries the domain. */
+const DOMAIN_BY_ID: Record<DimFieldId, DimDomain> = {
+  length: "length",
+  angle: "angle",
+  width: "length",
+  height: "length",
+  radius: "length",
+  diameter: "length",
+  major: "length",
+  minor: "length",
+  sides: "count",
+};
+
 /** With exactly one half of an alias pair LOCKED, the other's measured value is a
  *  stale second opinion about the same geometry — drop it so `rebuild` cannot
  *  pick the wrong one (see `DIM_ALIASES`). */
@@ -60,6 +75,10 @@ function dropAliasedSiblings(values: DimValues, locks: DimLocks | undefined): vo
  * Re-place a pointer event's point so every field of the current phase reads its
  * locked value, or its measured value rounded to the quantum. Non-pointer verbs
  * (`esc`, `sides`) and phases with no frame pass through untouched.
+ *
+ * ROUNDING covers EVERY value `measure` returns, not only the phase's exposed
+ * chips — a first line leg hides its ∠ field until a reference leg exists, yet
+ * its absolute angle must still snap to whole degrees.
  */
 export function projectEvent(
   frame: DimFrame | null,
@@ -71,15 +90,24 @@ export function projectEvent(
   const hasLocks = locks !== undefined && Object.keys(locks).length > 0;
   if (!hasLocks && !quantum) return event; // transparency — see the header
   const values = frame.measure(event.pt);
-  for (const spec of frame.fields) {
-    const locked = locks?.[spec.field];
+  const byId = new Map(frame.fields.map((f) => [f.field, f]));
+  // Lock / round EVERY measured value, not only the fields a chip exposes this
+  // phase: a first line leg hides its ∠ field until a reference leg exists, yet
+  // an angle lock must still steer geometry and a cursor angle must still snap
+  // to whole degrees. Chip showing is a display concern, not a math one.
+  for (const id of Object.keys(values) as DimFieldId[]) {
+    const locked = locks?.[id];
     if (locked !== undefined) {
-      values[spec.field] = locked;
+      values[id] = locked;
       continue;
     }
-    const measured = values[spec.field];
+    const spec = byId.get(id);
+    const measured = values[id];
     if (!quantum || measured === undefined) continue;
-    values[spec.field] = roundTo(measured, quantumFor(spec.domain, quantum));
+    // A hidden field has no chip spec this phase — its id still tells the domain.
+    const domain = spec?.domain ?? DOMAIN_BY_ID[id];
+    if (!domain) continue;
+    values[id] = roundTo(measured, quantumFor(domain, quantum));
   }
   dropAliasedSiblings(values, locks);
   return { kind: event.kind, pt: frame.rebuild(values, event.pt) };

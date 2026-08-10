@@ -72,8 +72,10 @@ export function CornerCluster() {
   const snapBtnRef = useRef<HTMLButtonElement | null>(null);
 
   return (
-    <div className="absolute right-[296px] top-3 z-[25] flex flex-col items-center gap-2">
-      <ViewCube />
+    <div className="absolute right-[264px] top-3 z-[25] flex flex-col items-center gap-2">
+      <div className="-translate-x-4">
+        <ViewCube />
+      </div>
 
       {/* The label carries the current mode — a bare "Display mode" on a
           tri-state control says nothing about which mode is active. */}

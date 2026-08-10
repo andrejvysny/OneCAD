@@ -469,13 +469,21 @@ describe("SketchController live dimensions (Wave 3 chips + typing)", () => {
     click(0, 0);
     move(30, 0);
     expect(chips().open).toBe(true);
-    expect(chips().fields.map((f) => f.field)).toEqual(["length", "angle"]);
+    // A FIRST leg has no line to be angled against — only the length chip lives.
+    expect(chips().fields.map((f) => f.field)).toEqual(["length"]);
     expect(fieldValue("length")).toBeCloseTo(30, 9);
 
     type("5");
     expect(chips().focus).toBe("length");
     expect(chips().text).toBe("5"); // the opening character is already in the field
     expect(internals().liveDim.locks).toEqual({}); // …but nothing is pinned yet
+  });
+
+  it("a chained SECOND leg gains the angle chip (sketching against a line)", () => {
+    click(0, 0);
+    click(10, 0); // commits leg 1 and chains
+    move(30, 0);
+    expect(chips().fields.map((f) => f.field)).toEqual(["length", "angle"]);
   });
 
   it("with no anchor placed there is no dimension, so no chip and no capture", () => {
@@ -491,10 +499,10 @@ describe("SketchController live dimensions (Wave 3 chips + typing)", () => {
     click(0, 0);
     engineMock.moveChip.mockClear();
     move(30, 0);
-    expect(engineMock.moveChip).toHaveBeenCalledTimes(2); // length + angle
+    // One field on a first leg — the angle chip is withheld until a reference.
+    expect(engineMock.moveChip).toHaveBeenCalledTimes(1);
     expect(engineMock.moveChip.mock.calls.map((c: unknown[]) => c[0])).toEqual([
       "__live_dim_length",
-      "__live_dim_angle",
     ]);
   });
 
@@ -548,6 +556,7 @@ describe("SketchController live dimensions (Wave 3 chips + typing)", () => {
 
   it("Tab locks the field it leaves and cycles to the next", () => {
     click(0, 0);
+    click(10, 0); // a chained second leg → a reference exists, so the ∠ chip returns
     move(30, 0);
     type("5");
     handlers().onTab(false, 50);
@@ -614,7 +623,8 @@ describe("SketchController live dimensions (Wave 3 chips + typing)", () => {
   // the second field, so the typed gesture never committed.
   it("a stale blur from the field Tab just left does NOT steal the new field's focus", () => {
     click(0, 0);
-    move(30, 20); // oblique — both length and angle chips live
+    click(10, 0); // chain a second leg so BOTH chips live (oblique, against a line)
+    move(30, 20);
     type("5");
     handlers().onTab(false, 50); // lock length, FSM focus → angle
     expect(internals().liveDim.focus).toBe("angle");

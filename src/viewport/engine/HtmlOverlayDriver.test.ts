@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import * as THREE from "three";
-import { projectToScreen, HtmlOverlayDriver } from "./HtmlOverlayDriver";
+import { projectToScreen, HtmlOverlayDriver, CLUSTER_GAP_PX } from "./HtmlOverlayDriver";
 
 function viewProjFor(camera: THREE.Camera): THREE.Matrix4 {
   camera.updateMatrixWorld();
@@ -160,5 +160,181 @@ describe("HtmlOverlayDriver", () => {
     const diag = 40 * Math.SQRT1_2;
     expect(x).toBeCloseTo(200 + diag, 4); // the fixed fallback, not a garbage direction
     expect(y).toBeCloseTo(200 - diag, 4);
+  });
+
+  /*
+   * CLUSTERS. A short line's length + angle chips project to nearly the same
+   * screen point — the driver must keep cluster neighbours a constant screen
+   * distance apart instead of letting them stack on top of each other.
+   */
+
+  it("cluster neighbours that project onto the same point get the gap applied", () => {
+    const cam = camAt(10);
+    const driver = new HtmlOverlayDriver();
+    const a = document.createElement("div");
+    const b = document.createElement("div");
+    const at = new THREE.Vector3(0, 0, 0);
+    driver.register("a", a, at, { clusterId: "c" });
+    driver.register("b", b, at, { clusterId: "c" }); // registered AFTER a
+    driver.update(cam, 400, 400);
+    const [, ya] = xyOf(a);
+    const [, yb] = xyOf(b);
+    expect(yb - ya).toBeCloseTo(CLUSTER_GAP_PX, 4);
+  });
+
+  it("cluster members already far enough apart are NOT pushed", () => {
+    const cam = camAt(10);
+    const driver = new HtmlOverlayDriver();
+    const a = document.createElement("div");
+    const b = document.createElement("div");
+    const bare = document.createElement("div");
+    driver.register("a", a, new THREE.Vector3(0, 0, 0), { clusterId: "c" });
+    // World +Y is UP the screen; a point far BELOW a projects well past the gap.
+    driver.register("b", b, new THREE.Vector3(0, -5, 0), { clusterId: "c" });
+    driver.register("bare", bare, new THREE.Vector3(0, -5, 0));
+    driver.update(cam, 400, 400);
+    // b is already beyond the gap below a, so its cluster y equals its raw
+    // projection — the gap is a floor, not a magnet.
+    expect(xyOf(b)[1]).toBeCloseTo(xyOf(bare)[1], 4);
+  });
+
+  it("items WITHOUT a cluster id never push each other (they may overlap)", () => {
+    const cam = camAt(10);
+    const driver = new HtmlOverlayDriver();
+    const a = document.createElement("div");
+    const b = document.createElement("div");
+    const at = new THREE.Vector3(0, 0, 0);
+    driver.register("a", a, at);
+    driver.register("b", b, at);
+    driver.update(cam, 400, 400);
+    expect(xyOf(a)).toEqual(xyOf(b));
+  });
+
+  it("an invisible cluster member is skipped — it pushes nobody and is not pushed", () => {
+    const cam = camAt(10);
+    const driver = new HtmlOverlayDriver();
+    const a = document.createElement("div");
+    const hidden = document.createElement("div");
+    const bare = document.createElement("div");
+    driver.register("a", a, new THREE.Vector3(0, 0, 0), { clusterId: "c" });
+    driver.register("hidden", hidden, new THREE.Vector3(0, 0, 30), { clusterId: "c" }); // behind
+    driver.register("bare", bare, new THREE.Vector3(0, 0, 0));
+    driver.update(cam, 400, 400);
+    expect(hidden.style.display).toBe("none");
+    expect(xyOf(a)).toEqual(xyOf(bare)); // the visible member keeps its own spot
+  });
+
+  /*
+   * LEADER LINE. An axis-anchored chip (fillet/revolve, generalized off extrude
+   * in UNIFY-UX Phase 0) now draws a dashed line from the raw anchor to its
+   * offset position, so the offset reads as "this chip belongs to that point"
+   * rather than an unexplained jump. Only created for items registered WITH an
+   * axis AND a real DOM parent (`mountChip` always appends before registering —
+   * a parent-less item, as every other test above uses, gets none, matching
+   * "no visible change" for anything that doesn't opt in).
+   */
+
+  it("an axis-anchored item with a DOM parent gets a leader line sibling", () => {
+    const cam = camAt(10);
+    const driver = new HtmlOverlayDriver();
+    const parent = document.createElement("div");
+    const chip = document.createElement("div");
+    parent.appendChild(chip);
+    driver.register("chip", chip, new THREE.Vector3(0, 2, 0), {
+      axisFrom: new THREE.Vector3(0, 0, 0),
+      offsetPx: 40,
+    });
+    // Inserted BEFORE the chip, so the chip's own content paints on top.
+    expect(parent.children.length).toBe(2);
+    expect(parent.children[1]).toBe(chip);
+    const leader = parent.children[0] as HTMLElement;
+    expect(leader.style.borderTop).toContain("dashed");
+
+    driver.update(cam, 400, 400);
+    // The line spans from the raw anchor projection to the offset chip position —
+    // a horizontal offset here, so it has real width and (near) zero rotation.
+    expect(Number.parseFloat(leader.style.width)).toBeCloseTo(40, 0);
+  });
+
+  it("an item WITHOUT a DOM parent at register-time gets no leader line", () => {
+    const cam = camAt(10);
+    const driver = new HtmlOverlayDriver();
+    const chip = document.createElement("div"); // never appended anywhere
+    driver.register("chip", chip, new THREE.Vector3(0, 2, 0), {
+      axisFrom: new THREE.Vector3(0, 0, 0),
+      offsetPx: 40,
+    });
+    driver.update(cam, 400, 400);
+    // No sibling was ever created — nothing to assert on but that this doesn't throw
+    // and the chip itself still positions normally.
+    expect(chip.style.transform).toContain("translate");
+  });
+
+  it("a leader line shorter than the minimum is hidden, not drawn as a stub", () => {
+    const cam = camAt(10);
+    const driver = new HtmlOverlayDriver();
+    const parent = document.createElement("div");
+    const chip = document.createElement("div");
+    parent.appendChild(chip);
+    // A 1px offset is below LEADER_MIN_LEN_PX — the chip essentially sits on its
+    // own anchor, so the line would be an invisible stub rather than a real leader.
+    driver.register("chip", chip, new THREE.Vector3(0, 2, 0), {
+      axisFrom: new THREE.Vector3(0, 0, 0),
+      offsetPx: 1,
+    });
+    driver.update(cam, 400, 400);
+    const leader = parent.children[0] as HTMLElement;
+    expect(leader.style.display).toBe("none");
+  });
+
+  it("a leader line hides when its chip goes off-screen, and unregister removes it", () => {
+    const cam = camAt(10);
+    const driver = new HtmlOverlayDriver();
+    const parent = document.createElement("div");
+    const chip = document.createElement("div");
+    parent.appendChild(chip);
+    driver.register("chip", chip, new THREE.Vector3(0, 0, 30), {
+      // behind the camera
+      axisFrom: new THREE.Vector3(0, 0, 0),
+      offsetPx: 40,
+    });
+    driver.update(cam, 400, 400);
+    const leader = parent.children[0] as HTMLElement;
+    expect(leader.style.display).toBe("none");
+
+    driver.unregister("chip");
+    expect(parent.children.length).toBe(1); // the leader line is gone, chip untouched by the driver
+    expect(parent.contains(chip)).toBe(true);
+  });
+
+  it("the leader line tracks a LIVE move (setWorldPos/setAxisFrom), not just the register-time position", () => {
+    // Extrude's arrow travels with the depth every drag frame via `moveChip`
+    // (`ViewportEngine.moveChip` → `setWorldPos` + `setAxisFrom`), never a
+    // re-register — this is the exact path the leader line must piggyback on
+    // (UNIFY-UX Phase 3 regression gate) or it would lag behind the chip.
+    const cam = camAt(10);
+    const driver = new HtmlOverlayDriver();
+    const parent = document.createElement("div");
+    const chip = document.createElement("div");
+    parent.appendChild(chip);
+    driver.register("chip", chip, new THREE.Vector3(0, 2, 0), {
+      axisFrom: new THREE.Vector3(0, 0, 0),
+      offsetPx: 40,
+    });
+    driver.update(cam, 400, 400);
+    const leader = parent.children[0] as HTMLElement;
+    const transformBefore = leader.style.transform;
+
+    // Simulate a depth drag: both ends move, still live-mutating the SAME item.
+    driver.setWorldPos("chip", new THREE.Vector3(0, 5, 0));
+    driver.setAxisFrom("chip", new THREE.Vector3(0, 1, 0));
+    driver.update(cam, 400, 400);
+
+    // The offset MAGNITUDE (width) is `offsetPx`, a constant — unchanged by
+    // design. Its POSITION must still move with the new anchor, or the line
+    // would keep pointing at the drag's stale starting point.
+    expect(leader.style.transform).not.toBe(transformBefore);
+    // And the chip itself moved too, in lockstep — no desync between the two.
+    expect(xyOf(chip)[1]).toBeLessThan(200); // world +Y projects UP the screen
   });
 });

@@ -82,11 +82,20 @@ describe("withLiveDims — chip descriptors", () => {
     expect(steps[0].dims).toBeUndefined();
   });
 
-  it("emits the phase's fields once the gesture is armed", () => {
+  it("emits the phase's fields once the gesture is armed — length only on a first leg", () => {
     const steps = run(LIVE_TOOL_MACHINES.line, [["click", P(0, 0)], ["move", P(30, 40)]]);
-    expect(steps[1].dims?.map((d) => d.field)).toEqual(["length", "angle"]);
+    expect(steps[1].dims?.map((d) => d.field)).toEqual(["length"]);
     expect(steps[1].dims?.[0].value).toBeCloseTo(50, 9);
     expect(steps[1].dims?.[0].locked).toBe(false);
+  });
+
+  it("a chained SECOND leg regains the angle chip (sketching against a line)", () => {
+    const steps = run(LIVE_TOOL_MACHINES.line, [
+      ["click", P(0, 0)],
+      ["click", P(40, 0)], // commits leg 1 and chains
+      ["move", P(30, 40)],
+    ]);
+    expect(steps[2].dims?.map((d) => d.field)).toEqual(["length", "angle"]);
   });
 
   it("follows the tool through its phases", () => {
@@ -119,7 +128,8 @@ describe("withLiveDims — chip descriptors", () => {
     const steps = run(LIVE_TOOL_MACHINES.line, [["click", P(0, 0)], ["move", P(18, 24)]], ctx);
     const length = steps[1].dims?.find((d) => d.field === "length");
     expect(length).toMatchObject({ locked: true, value: 50 });
-    expect(steps[1].dims?.find((d) => d.field === "angle")).toMatchObject({ locked: false });
+    // A first leg exposes no angle chip — nothing to report for it.
+    expect(steps[1].dims?.find((d) => d.field === "angle")).toBeUndefined();
   });
 
   it("reports the polygon side count as non-driving alongside its radius", () => {
@@ -209,12 +219,15 @@ describe("withLiveDims — quantum rounding", () => {
     expect(dist(P(0, 0), steps[1].committed?.[0].p1 as Point2)).toBeCloseTo(22.4, 9);
   });
 
-  it("rounds a cursor-placed angle to whole degrees", () => {
-    const steps = run(LIVE_TOOL_MACHINES.line, [["click", P(0, 0)], ["move", P(10, 0.9)]], {
+  it("rounds a cursor-placed angle to whole degrees (geometry, chip or not)", () => {
+    const steps = run(LIVE_TOOL_MACHINES.line, [["click", P(0, 0)], ["click", P(10, 0.9)]], {
       quantum,
     });
-    const angle = steps[1].dims?.find((d) => d.field === "angle");
-    expect(angle?.value).toBeCloseTo(5, 6); // atan2 ⇒ 5.143° ⇒ 5°
+    // atan2 ⇒ 5.143° ⇒ 5°; the ∠ chip is hidden on a first leg, but the curve
+    // the cursor steers still commits the rounded direction.
+    const p1 = steps[1].committed?.[0].p1 as Point2;
+    expect(p1.x).toBeCloseTo(10 * Math.cos((5 * Math.PI) / 180), 9);
+    expect(p1.y).toBeCloseTo(10 * Math.sin((5 * Math.PI) / 180), 9);
   });
 
   it("NEVER re-rounds a locked value — the typed number wins outright", () => {

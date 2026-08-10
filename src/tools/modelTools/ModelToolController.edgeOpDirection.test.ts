@@ -68,7 +68,11 @@ function makeEngineMock(opts: { projectPoint?: boolean } = {}) {
     setExtrudeDepth: vi.fn(),
     setPreviewTint: vi.fn(),
     setExtrudeHandleHover: vi.fn(),
-    hitExtrudeHandle: vi.fn(() => false),
+    // UNIFY-UX Phase 1: a resolved bisector-tier axis now gets a real handle, and
+    // only a press ON it starts the drag (the extrude/offset-face rule) — every
+    // `drag()` helper below presses at a fixed synthetic point, not a projected
+    // handle position, so this always hits, mirroring `extrudeGesture.test.ts`.
+    hitExtrudeHandle: vi.fn(() => true),
     screenRay: vi.fn(() => null),
     hideExtrudePreview: vi.fn(),
     isExtrudePreviewVisible: vi.fn(() => false),

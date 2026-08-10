@@ -276,13 +276,14 @@ describe("describeDims", () => {
     expect(dims[1]).toMatchObject({ field: "angle", value: 45, locked: false });
   });
 
-  it("staggers co-anchored fields and restarts per anchor", () => {
+  it("one chip per frame field, whatever its anchor (separation is the driver's job)", () => {
     const dims = describeDims(stubFrame({ x: 1, y: 2 }), { x: 0, y: 0 }, {});
-    // length + angle share an anchor; radius sits elsewhere.
-    expect(dims.map((d) => d.offsetIndex)).toEqual([0, 1, 0]);
+    // length + angle share an anchor; radius sits elsewhere — the chip set still
+    // exposes all three, since the overlay driver keeps each its own anchor.
+    expect(dims.map((d) => d.field)).toEqual(["length", "angle", "radius"]);
   });
 
-  it("groups anchors that differ only by float noise", () => {
+  it("keeps each field's own anchor (a collision is resolved per frame, not merged)", () => {
     const frame: DimMeasureFrame = {
       fields: [
         { field: "width", label: "W", domain: "length", drives: true, anchor: () => ({ x: 5, y: 5 }) },
@@ -296,7 +297,9 @@ describe("describeDims", () => {
       ],
       measure: () => ({ width: 1, height: 2 }),
     };
-    expect(describeDims(frame, { x: 0, y: 0 }, {}).map((d) => d.offsetIndex)).toEqual([0, 1]);
+    const dims = describeDims(frame, { x: 0, y: 0 }, {});
+    expect(dims.map((d) => d.field)).toEqual(["width", "height"]);
+    expect(dims[1].anchor).toEqual({ x: 5 + 1e-12, y: 5 - 1e-12 }); // untouched float noise
   });
 
   it("falls back to 0 for a field the frame did not measure", () => {

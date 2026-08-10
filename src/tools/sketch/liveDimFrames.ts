@@ -85,19 +85,30 @@ function one(id: DimFieldId, value: number): DimValues {
 
 // ── line / slot centreline: length + absolute angle ──────────────────────────
 
-/** `a` → cursor as a length and an ABSOLUTE angle to plane +U. Shared by the line
- *  tool, the slot's centreline phase (identical gesture, identical numbers) and
- *  the 3-point arc's CHORD phase — which passes `drives = false`, because a
- *  chord is not an entity and no wire kind can express its length or angle. */
-function segmentFrame(a: Point2, drives = true): DimFrame {
-  return {
-    fields: [
-      field("length", "L", "length", drives, (p) => mid(a, p)),
+/**
+ * `a` → cursor as a length and an ABSOLUTE angle to plane +U. Shared by the line
+ * tool, the slot's centreline phase (identical gesture, identical numbers) and
+ * the 3-point arc's CHORD phase — which passes `drives = false`, because a
+ * chord is not an entity and no wire kind can express its length or angle.
+ *
+ * The ANGLE chip is opt-in (`showAngle`): it appears only when the gesture is
+ * sketching AGAINST a reference — for the line tool that is a previous chain
+ * segment (`anchors.length ≥ 2`), the one thing a typed angle can genuinely be
+ * measured and constrained against. A FIRST segment's absolute angle to plane
+ * +U has no reference (oblique values author nothing; H/V is auto-inferred at
+ * commit), so a floating "∠ 0°/45°" chip there is noise, and it is withheld.
+ */
+function segmentFrame(a: Point2, drives = true, showAngle = false): DimFrame {
+  const fields: DimFieldSpec[] = [field("length", "L", "length", drives, (p) => mid(a, p))];
+  if (showAngle) {
+    fields.push(
       // Drives only through the angle LADDER: 0/180 → Horizontal, 90/270 →
-      // Vertical, else an Angle against the previous chain segment. A first
-      // segment's oblique angle has no reference, so it stays geometry-only.
+      // Vertical, else an Angle against the previous chain segment.
       field("angle", "∠", "angle", drives, (p) => lerp(a, p, ANGLE_ANCHOR_T)),
-    ],
+    );
+  }
+  return {
+    fields,
     measure: (p) => ({ length: dist(a, p), angle: angleDegOf(a, p) }),
     rebuild: (v, c) => {
       const len = v.length ?? dist(a, c);
@@ -389,7 +400,10 @@ export function dimFrame(
       // In arc mode the leg is an arc, so length + absolute angle stop describing
       // it and the radius takes over as the single field.
       if (chain?.arcMode && chain.tangent) return tangentArcFrame(anchors[n - 1], chain.tangent);
-      return segmentFrame(anchors[n - 1]);
+      // The chain accumulated every placed vertex — the ACTIVE leg is the one
+      // leaving the last one. Only a leg against a PREVIOUS segment has an angle
+      // to be measured and authored ($showAngle); a first leg draws freely.
+      return segmentFrame(anchors[n - 1], true, anchors.length >= 2);
     case "rect":
       return n === 1 ? boxFrame(anchors[0], 1) : null;
     case "centerRect":
@@ -402,8 +416,9 @@ export function dimFrame(
       return n === 2 ? arcSweepFrame(anchors[0], anchors[1]) : null;
     case "arc3p":
       // Phase 1 is the CHORD: it steers the gesture but is not an entity, so
-      // neither of its numbers can author anything (drives = false).
-      if (n === 1) return segmentFrame(anchors[0], false);
+      // neither of its numbers can author anything (drives = false) and it has
+      // no line to be angled against (no angle chip, either).
+      if (n === 1) return segmentFrame(anchors[0], false, false);
       return n === 2 ? arcThroughFrame(anchors[0], anchors[1]) : null;
     case "ellipse":
       // Neither axis authors anything: an Ellipse curve takes no constraints.
@@ -412,7 +427,9 @@ export function dimFrame(
     case "polygon":
       return n === 1 ? polygonFrame(anchors[0], sides ?? DEFAULT_POLYGON_SIDES) : null;
     case "slot":
-      if (n === 1) return segmentFrame(anchors[0]);
+      // The centreline is a FIRST segment too — it has no previous chain leg to
+      // be angled against, so only its length is a live chip.
+      if (n === 1) return segmentFrame(anchors[0], true, false);
       return n === 2 ? perpFrame(anchors[0], anchors[1], "width", "W", true, 2) : null;
     default:
       return null;

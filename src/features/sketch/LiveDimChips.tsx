@@ -17,6 +17,7 @@ import { useToolStore } from "@/stores/toolStore";
 import { useViewportEngine } from "@/viewport/engineBridge";
 import {
   liveDimChipId,
+  LIVE_DIM_CLUSTER_ID,
   liveDimStore,
   useLiveDimStore,
   type LiveDimPlacement,
@@ -36,9 +37,6 @@ const PLACEMENT_CLASS: Record<LiveDimPlacement, string> = {
   br: "translate-x-3 translate-y-3",
   bl: "-translate-x-full translate-y-3",
 };
-
-/** Vertical stagger between chips that share an anchor, in px. */
-const STAGGER_PX = -20;
 
 function hostFor(hosts: Map<DimFieldId, HTMLDivElement>, field: DimFieldId): HTMLDivElement {
   const existing = hosts.get(field);
@@ -76,7 +74,10 @@ export function LiveDimChips() {
       const at = anchors[field];
       if (!at) continue;
       const host = hostFor(hosts.current, field);
-      engine.mountChip(liveDimChipId(field), host, at);
+      // The whole set is ONE overlay cluster: the driver keeps its hosts a
+      // constant screen gap apart, so chips never overlap while their anchors
+      // may project arbitrarily close together (a short line).
+      engine.mountChip(liveDimChipId(field), host, at, { clusterId: LIVE_DIM_CLUSTER_ID });
       mounted.push([liveDimChipId(field), host]);
     }
     return () => {
@@ -90,10 +91,7 @@ export function LiveDimChips() {
     <>
       {fields.map((chip) =>
         createPortal(
-          <span
-            className={`inline-block ${PLACEMENT_CLASS[placement]}`}
-            style={chip.offsetIndex > 0 ? { marginTop: chip.offsetIndex * STAGGER_PX } : undefined}
-          >
+          <span className={`inline-block ${PLACEMENT_CLASS[placement]}`}>
             <LiveDimField
               chip={chip}
               focused={focus === chip.field}

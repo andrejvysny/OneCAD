@@ -60,7 +60,7 @@ import { logDebug } from "@/debug/log";
 import { viewportStore, type ViewportState } from "@/stores/viewportStore";
 import { documentStore, nextAppliedOps, nextDatumName, type SketchMeta } from "@/stores/documentStore";
 import { selectionStore, topoRefId, type EntityRef } from "@/stores/selectionStore";
-import { toolChipStore, MODEL_TOOL_CHIP_ID } from "@/stores/toolChipStore";
+import { toolChipStore, MODEL_TOOL_CHIP_ID, DEFAULT_CHIP_OFFSET_PX } from "@/stores/toolChipStore";
 import {
   autoModeFor,
   hasMaterial,
@@ -220,15 +220,6 @@ const transformStep = withPhaseLog("transform", transformStepRaw);
 
 const DRAG_PX = 4;
 
-/**
- * Clearance from the extrude axis to the chip's NEAR EDGE, in screen pixels (the
- * overlay driver adds half the chip's own size on top — see `offsetForAxis`).
- *
- * It only has to clear the arrow's fat pick envelope (`CONE_RADIUS_PX * HIT_PAD`
- * ≈ 11 px), and it MUST: a chip pixel over the arrow is a chip that eats the
- * grab, because `onPointerDown` excludes chip targets by design.
- */
-const CHIP_AXIS_OFFSET_PX = 26;
 
 /** Set-equality over body ids (order-insensitive; ids are unique per selection). */
 function sameIdSet(a: readonly string[], b: readonly string[]): boolean {
@@ -646,6 +637,11 @@ export class ModelToolController {
    * trusting it there would silently author the wrong op.
    */
   private filletAxisSource: "bisector" | "bbox" | "screen" = "screen";
+  /** No honest world axis to put a handle on (the offset-face rule): the tool
+   *  falls back to claiming every viewport press as a screen-space value drag. */
+  private get filletDegraded(): boolean {
+    return this.filletAxisSource === "screen" || !this.filletOutward;
+  }
   private filletEditFeatureId: string | undefined;
   /** Stored params of the fillet being re-edited (radius-only edit preserves edges). */
   private filletStoredParams: Record<string, unknown> | undefined;
@@ -1409,7 +1405,7 @@ export class ModelToolController {
         // Sit BESIDE the extrude axis, not on it: the chip's anchor is the
         // arrowhead, and the prism grows along exactly that line.
         anchorAxisFrom: this.centroidWorld,
-        anchorOffsetPx: CHIP_AXIS_OFFSET_PX,
+        anchorOffsetPx: DEFAULT_CHIP_OFFSET_PX,
       },
     );
 
@@ -2229,12 +2225,17 @@ export class ModelToolController {
       this.deps.engine.showRevolvePreview(this.plane, profile.ring, this.revolveAxis, startAngle);
       toolStore.setState({ phase: "armed" });
       viewportStore.getState().setStatusHint("Drag or type an angle · Enter to apply", { sticky: true });
-      toolChipStore.getState().showRevolve(startAngle, this.revolveChipWorld(), {
-        onValue: (v) => this.onRevolveChip(v),
-        onResetAxis: () => this.resetRevolveAxis(),
-        onConfirm: () => void this.confirmRevolve(),
-        onCancel: () => toolStore.getState().setTool("select"),
-      });
+      toolChipStore.getState().showRevolve(
+        startAngle,
+        this.revolveChipWorld(),
+        {
+          onValue: (v) => this.onRevolveChip(v),
+          onResetAxis: () => this.resetRevolveAxis(),
+          onConfirm: () => void this.confirmRevolve(),
+          onCancel: () => toolStore.getState().setTool("select"),
+        },
+        { anchorAxisFrom: this.revolveChipAxisFrom() },
+      );
     } else {
       this.revolveAxis = null;
       this.revolveAxisLineId = null;
@@ -2262,12 +2263,27 @@ export class ModelToolController {
           : "Draw a sketch line to use as the revolve axis",
         { sticky: true },
       );
+      // In-viewport guidance for the axisPick gap the StatusBar alone was easy to
+      // miss on (UNIFY-UX Phase 2) — no world axis exists yet, so it hangs off the
+      // profile centroid rather than a leader-lined point.
+      toolChipStore.getState().showRevolveAxisPick(this.centroidWorld, {
+        onCancel: () => toolStore.getState().setTool("select"),
+      });
     }
     this.updateDebug();
   }
 
   private revolveChipWorld(): Vec3 {
     return this.chipWorld();
+  }
+
+  /** The armed revolve chip's leader-line anchor: one endpoint of the picked
+   *  axis line, projected to world — `undefined` once no axis/plane is known
+   *  (a re-edit whose stored axis failed to resolve never reaches this). */
+  private revolveChipAxisFrom(): Vec3 | undefined {
+    if (!this.plane || !this.revolveAxis) return undefined;
+    const w = planePointToWorld(this.plane, { x: this.revolveAxis.a[0], y: this.revolveAxis.a[1] });
+    return [w.x, w.y, w.z];
   }
 
   private onRevolveChip(v: number): void {
@@ -2303,8 +2319,10 @@ export class ModelToolController {
         this.revolveAxisCandidates.map((k) => ({ a: k.a, b: k.b })),
       );
     }
-    toolChipStore.getState().clear();
     viewportStore.getState().setStatusHint("Pick axis line", { sticky: true });
+    toolChipStore.getState().showRevolveAxisPick(this.centroidWorld, {
+      onCancel: () => toolStore.getState().setTool("select"),
+    });
     toolStore.setState({ phase: "armed" });
     this.updateDebug();
   }
@@ -2362,8 +2380,13 @@ export class ModelToolController {
         onCancel: () => toolStore.getState().setTool("select"),
         onBooleanMode: (mode) => this.onRevolveBooleanMode(mode),
       },
-      // The RESOLVED mode, not a literal — a host-seeded arm opens on Add.
-      { showBooleanSegments: true, canBoolean, booleanMode: this.revolve.booleanMode },
+      {
+        // The RESOLVED mode, not a literal — a host-seeded arm opens on Add.
+        showBooleanSegments: true,
+        canBoolean,
+        booleanMode: this.revolve.booleanMode,
+        anchorAxisFrom: this.revolveChipAxisFrom(),
+      },
     );
     viewportStore.getState().setStatusHint(this.armHintFor("revolve"), { sticky: true });
     toolStore.setState({ phase: "armed" });
@@ -2882,7 +2905,16 @@ export class ModelToolController {
       auto,
     }).state;
     toolStore.setState({ phase: "armed" });
-    this.deps.engine.setOrbitSuppressed(true); // modal: drag adjusts the size, not orbit
+    // A resolved world axis gets a real handle (the extrude/offset-face rule): only
+    // a press ON it starts the drag, everything else stays free to orbit/select. The
+    // "screen" tier has no honest axis to put a handle on, so it keeps claiming
+    // every viewport press — orbit suppressed there, exactly as before this change.
+    if (this.filletDegraded) {
+      this.engine.hideValueHandle();
+    } else {
+      this.engine.showValueHandle(this.filletAnchor, this.filletOutward as Vec3);
+    }
+    this.deps.engine.setOrbitSuppressed(this.filletDegraded);
     const hint = this.edgeOpArmHint();
     this.previewArmHint = hint;
     viewportStore.getState().setStatusHint(hint, { sticky: true });
@@ -2892,7 +2924,19 @@ export class ModelToolController {
   }
 
   private showEdgeOpChip(size: number): void {
-    const anchor = this.filletEdges[0].anchor?.worldPoint ?? [0, 0, 0];
+    // Sit BESIDE the handle, leader-lined off its base, instead of centered ON the
+    // picked edge — mirrors extrude's `worldPos` = arrowhead, `anchorAxisFrom` =
+    // base. Only when a handle actually exists: a degraded arm has no axis, so its
+    // chip stays centered on the picked point, exactly as before this change.
+    const outward = this.filletOutward;
+    const degraded = this.filletDegraded || !outward;
+    const anchor: [number, number, number] = degraded
+      ? this.filletEdges[0].anchor?.worldPoint ?? [0, 0, 0]
+      : [
+          this.filletAnchor[0] + outward[0],
+          this.filletAnchor[1] + outward[1],
+          this.filletAnchor[2] + outward[2],
+        ];
     toolChipStore.getState().showFillet(
       size,
       anchor,
@@ -2907,6 +2951,7 @@ export class ModelToolController {
         onEdgeOp: (k) => this.onEdgeOpChip(k),
         distance2: this.fillet.distance2,
         onDistance2: (v) => this.onEdgeOpDistance2(v),
+        anchorAxisFrom: degraded ? undefined : this.filletAnchor,
       },
     );
   }
@@ -5718,11 +5763,17 @@ export class ModelToolController {
       this.engine.setExtrudeHandleHover(true);
       toolStore.setState({ phase: "dragging" });
       this.updateDebug(); // publish the live "dragging" phase to the debug surface
-    } else if (this.fillet.phase === "armed" && !this.isExcludedClickAwayTarget(e.target)) {
-      // An armed edge op claims EVERY viewport press as a value drag (there is no
-      // handle to hit-test) — which is exactly why it has no click-away commit.
-      // The chip lives inside the container's overlay, so a press ON the chip must
-      // NOT be swallowed as a drag: excluding it is what makes the ✓ clickable.
+    } else if (
+      this.fillet.phase === "armed" &&
+      !this.isExcludedClickAwayTarget(e.target) &&
+      (this.filletDegraded || this.engine.hitExtrudeHandle(e.clientX, e.clientY))
+    ) {
+      // A resolved axis gets a real handle (the extrude/offset-face rule): only a
+      // press ON it starts the drag, and orbit/select stay free everywhere else.
+      // DEGRADED has no handle to hit-test, so it still claims every viewport press
+      // — which is exactly why it has no click-away commit. The chip lives inside
+      // the container's overlay, so a press ON the chip must NOT be swallowed as a
+      // drag either way: excluding it is what makes the ✓ clickable.
       this.dragging = "fillet";
       this.filletDownX = e.clientX;
       this.filletDownY = e.clientY;
@@ -5732,6 +5783,7 @@ export class ModelToolController {
         this.fillet.edgeOp === "Chamfer" ? -this.fillet.radius : this.fillet.radius;
       this.filletAxis = this.edgeOpScreenAxis(); // per grab — the camera may have orbited
       this.fillet = filletStep(this.fillet, { kind: "grabEdge" }).state;
+      if (!this.filletDegraded) this.engine.setExtrudeHandleHover(true);
       toolStore.setState({ phase: "dragging" });
       this.throttle.setTrailingMs(EDGE_OP_DRAG_TRAILING_MS); // live while the pointer owns it
       this.updateDebug();
@@ -5953,6 +6005,8 @@ export class ModelToolController {
       // The offset arrow IS the extrude drag handle (one shared instance), so its
       // hover reads through the same probe.
       this.engine.setExtrudeHandleHover(this.engine.hitExtrudeHandle(e.clientX, e.clientY));
+    } else if (this.fillet.phase === "armed" && !this.filletDegraded) {
+      this.engine.setExtrudeHandleHover(this.engine.hitExtrudeHandle(e.clientX, e.clientY));
     } else if (this.transform.phase === "armed") {
       this.engine.setTransformGizmoHover(this.engine.hitTransformGizmo(e.clientX, e.clientY));
     }
@@ -6016,6 +6070,7 @@ export class ModelToolController {
       // Release KEEPS the tool armed at the dragged size (no implicit commit) —
       // the live kernel preview + editable chip stay, Enter / ✓ applies.
       this.dragging = null;
+      if (!this.filletDegraded) this.engine.setExtrudeHandleHover(false);
       this.fillet = filletStep(this.fillet, { kind: "release" }).state; // → armed
       toolStore.setState({ phase: "armed" });
       this.throttle.setTrailingMs(EDGE_OP_TRAILING_MS); // back to the armed floor
@@ -7985,6 +8040,10 @@ export class ModelToolController {
     this.closePreviewSessions();
     this.previewArmHint = null;
     this.deps.engine.setOrbitSuppressed(false);
+    // R3 (offset-face precedent): the drag arrow is the ONE shared `DragHandle`, so
+    // a cancel that left it visible would hand the next tool a floating arrow it
+    // never asked for.
+    this.engine.hideValueHandle();
     this.fillet = filletInit(); // carries edgeOp back to "Fillet"
     this.filletEdges = [];
     this.filletPreparedRevision = null;

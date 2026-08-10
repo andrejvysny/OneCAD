@@ -48,7 +48,6 @@ function chip(over: Partial<LiveDimChipField> = {}): LiveDimChipField {
     value: 30,
     locked: false,
     drives: true,
-    offsetIndex: 0,
     ...over,
   };
 }
