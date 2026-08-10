@@ -47,3 +47,43 @@ the pin, and `kernel`/`modeler` fields in each record carry the provenance.
 
 The comparator itself is proven by mutating one saved digest and watching the
 compare fail; do that again if you change the script.
+
+## Platform scope (2026-08-10)
+
+`digests.json` is keyed
+`suite:preset|caseId|backend|variant|platform` — `darwin-arm64`, `linux-x64`.
+`semantics.json` is keyed by suite alone and is deliberately NOT platform-scoped.
+
+The split is measured, not precautionary. Running T0 on macOS/arm64/AppleClang
+and Linux/x86_64/gcc 14 against the same pinned OCCT 8.0.1 — identical build id
+and identical 16-hex kernel fingerprint — 182 of 272 digest values differ:
+
+| what | changed |
+|---|---|
+| `translated` inputDigest | 0 / 32 — translation is exact in floating point |
+| `rotated` inputDigest | 32 / 32 — the transform goes through trig |
+| `base` inputDigest | 20 / 72 — exactly the trig-built shapes (all 8 `valence4`, `overflow-02/-03`); every box and `valence3` is bit-identical |
+| `normalizedDigest` | 130 / 136 — OCCT's own arithmetic diverges |
+
+The 1e-9 quantization does not make a digest portable: rounding to a grid
+narrows but never closes boundary straddles, and with thousands of quantized
+values per record a straddle is near-certain. A digest is therefore a SAME-HOST
+regression tripwire. Comparing one across hosts would report a kernel regression
+every time.
+
+What IS portable is behaviour, and `semantics.json` pins it: records,
+gatingFailures, counts by verdict/domain/failureClass/backend/generator,
+differential classification, replay stability, metamorph outcome, critical
+transitions. Both hosts satisfy the same row. Timing and tolerance distributions
+are excluded — they describe the machine, not the kernel.
+
+Recording a new platform:
+
+```bash
+node scripts/kernelbench-manifest.mjs record          <out-dir> <suite:preset> bench/robustness/baselines/digests.json
+node scripts/kernelbench-manifest.mjs semantic-record <out-dir> <suite:preset> bench/robustness/baselines/semantics.json
+```
+
+`ONECAD_BENCH_PLATFORM` overrides the detected platform, for recording from an
+artifact produced on another host. `compare` on a platform with no rows exits 3
+rather than reporting every row as missing.

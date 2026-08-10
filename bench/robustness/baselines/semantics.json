@@ -1,0 +1,40 @@
+{
+  "fillet/foundation:t0": {
+    "schemaVersion": 1,
+    "records": 136,
+    "gatingFailures": 0,
+    "counts": {
+      "backend": {
+        "onecad": 68,
+        "raw-occt": 68
+      },
+      "domain": {
+        "expectedLimit": 24,
+        "exploratory": 40,
+        "supported": 72
+      },
+      "failureClass": {
+        "kernelRejected": 24,
+        "none": 112
+      },
+      "generator": {
+        "fillet-foundation": 136
+      },
+      "verdict": {
+        "pass": 136
+      }
+    },
+    "differential": {
+      "same-status": 136
+    },
+    "replay": {
+      "stable": 136,
+      "unstable": 0
+    },
+    "metamorph": {
+      "failed": 0,
+      "passed": 48
+    },
+    "criticalTransitions": []
+  }
+}

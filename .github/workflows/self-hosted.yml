@@ -418,41 +418,38 @@ jobs:
             report "$KERNELBENCH_OUT/t0/results.jsonl" \
             --json "$KERNELBENCH_OUT/t0/summary.json"
 
-      - name: Cross-platform digest verdict
-        # THE question this whole ladder exists to answer. The baselines in
-        # bench/robustness/baselines/digests.json were recorded on macOS/arm64
-        # and normalizedDigest quantizes to 1e-9; a different arch, libm and
-        # compiler (gcc 14 here vs AppleClang there) may move a value past that.
-        #
-        # A digest difference is a FINDING, not a broken job: it says the
-        # baselines must become platform-keyed. Only a tool-level error (exit 2
-        # usage, exit 3 missing results) reds this step.
+      - name: Digest baseline — same-host regression gate
+        # Digests are platform-keyed (see scripts/kernelbench-manifest.mjs for
+        # the measurement that forced it: translation is bit-exact across hosts,
+        # anything through trig is not). This compares linux-x64 rows against
+        # linux-x64 rows, so a difference IS a regression and reds the job.
         run: |
-          # `set +e` is load-bearing: the step inherits `-e`, so without it the
-          # pipeline aborts on a digest difference and the classification below
-          # never runs — turning a recorded finding into an unexplained red.
-          set +e -u -o pipefail
+          set -euo pipefail
           node scripts/kernelbench-manifest.mjs compare \
             "$KERNELBENCH_OUT/t0" "fillet/foundation:t0" \
             bench/robustness/baselines/digests.json \
             2>&1 | tee digest-compare.txt
-          rc=${PIPESTATUS[0]}
-          case "$rc" in
-            0) verdict="MATCH — digests are identical across macOS/arm64 and Linux/x86_64; baselines stay global" ;;
-            1) verdict="DIFFER — digests are platform-dependent; baselines must become platform-keyed" ;;
-            *) echo "::error::compare tool failed with exit $rc (not a digest difference)"; exit "$rc" ;;
-          esac
-          echo "VERDICT: $verdict"
+
+      - name: Semantics — cross-host equivalence gate
+        # The portability claim, and the reason the digest split is acceptable:
+        # a different arch, libm and compiler may move the bits, but they must
+        # not move a single verdict, domain, failure class, differential
+        # classification, replay outcome or metamorph result. This baseline is
+        # NOT platform-keyed — both hosts are asserted against the same row.
+        run: |
+          set -euo pipefail
+          node scripts/kernelbench-manifest.mjs semantic-compare \
+            "$KERNELBENCH_OUT/t0" "fillet/foundation:t0" \
+            bench/robustness/baselines/semantics.json \
+            2>&1 | tee semantic-compare.txt
           {
-            echo "## S4 cross-platform digest verdict"
-            echo
-            echo "$verdict"
+            echo "## S4 — kernelbench T0 on $(uname -m)"
             echo
             echo '```'
-            head -40 digest-compare.txt
+            cat semantic-compare.txt
+            tail -1 digest-compare.txt
             echo '```'
           } >>"$GITHUB_STEP_SUMMARY"
-          [ "$rc" -eq 0 ] || echo "::warning::$verdict"
 
       - name: Report artifact
         if: always()
@@ -462,7 +459,7 @@ jobs:
           mkdir -p "$out"
           cp "$KERNELBENCH_OUT/t0/results.jsonl" "$out/" 2>/dev/null
           cp "$KERNELBENCH_OUT/t0/summary.json" "$out/" 2>/dev/null
-          cp digest-compare.txt "$out/" 2>/dev/null
+          cp digest-compare.txt semantic-compare.txt "$out/" 2>/dev/null
           exit 0
 
       - uses: actions/upload-artifact@v4
