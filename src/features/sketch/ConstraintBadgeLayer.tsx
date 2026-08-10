@@ -16,8 +16,12 @@ import { planePointToWorld } from "@/viewport/engine/sketchBasis";
 import { createClient } from "@/ipc/client";
 import { editConstraintValue } from "@/tools/sketch/sketchService";
 import { LENGTH_SUFFIX } from "@/units/format";
-import { layoutBadges } from "./badgeLayout";
+import { anchorKey, layoutBadges } from "./badgeLayout";
 import { DimensionInput } from "./DimensionInput";
+
+/** Screen-px clearance from the entity axis to a badge's near edge — the
+ *  driver shifts the badge the rest of the way by half its own size. */
+const BADGE_OFFSET_PX = 10;
 
 export function ConstraintBadgeLayer() {
   const mode = useToolStore((s) => s.mode);
@@ -47,7 +51,16 @@ export function ConstraintBadgeLayer() {
     for (const b of badges) {
       const el = refs.current.get(b.id);
       if (!el) continue;
-      overlay.register(b.id, el, planePointToWorld(plane, b.at));
+      // `axisFrom` ties the badge to its owning entity with a leader line and
+      // a direction-correct perpendicular offset (a leader-anchored badge
+      // reads as "belonging to that line/circle" even at a busy shared
+      // vertex); `clusterId` keeps co-anchored badges (same quantized point)
+      // a floor apart on top of that.
+      overlay.register(b.id, el, planePointToWorld(plane, b.at), {
+        axisFrom: b.axisFrom ? planePointToWorld(plane, b.axisFrom) : undefined,
+        offsetPx: BADGE_OFFSET_PX,
+        clusterId: anchorKey(b.at),
+      });
       ids.push(b.id);
     }
     engine.invalidate();
@@ -69,7 +82,11 @@ export function ConstraintBadgeLayer() {
         // row via offsetIndex instead of stacking directly on top of each
         // other — the overlay driver owns `transform` on the wrapper div
         // below (per-frame world→screen), so the stagger lives on the inner
-        // span as a plain marginLeft that composes with it untouched.
+        // span as a plain marginLeft that composes with it untouched. The
+        // driver itself now supplies the direction-correct perpendicular
+        // nudge (via `axisFrom`/`offsetPx` on `overlay.register`) — a fixed
+        // CSS translate here would be wrong whenever the entity isn't
+        // oriented the way a fixed up-right nudge assumes.
         const staggerStyle = b.offsetIndex > 0 ? { marginLeft: b.offsetIndex * 16 } : undefined;
         return (
           <div
@@ -82,9 +99,7 @@ export function ConstraintBadgeLayer() {
             {b.editable && b.value !== undefined ? (
               <span
                 style={staggerStyle}
-                className={`inline-block -translate-y-4 translate-x-2${
-                  isConflicting ? " rounded-sm border border-traffic-close" : ""
-                }`}
+                className={`inline-block${isConflicting ? " rounded-sm border border-traffic-close" : ""}`}
               >
                 <DimensionInput
                   value={b.value}
@@ -101,7 +116,7 @@ export function ConstraintBadgeLayer() {
               <span
                 title={b.kind}
                 style={staggerStyle}
-                className={`inline-flex h-4 min-w-4 -translate-y-3.5 translate-x-2 items-center justify-center rounded-sm border bg-surface px-1 text-[10px] font-semibold leading-none shadow-ctrl ${
+                className={`inline-flex h-4 min-w-4 items-center justify-center rounded-sm border bg-surface px-1 text-[10px] font-semibold leading-none shadow-ctrl ${
                   isConflicting ? "border-traffic-close text-traffic-close" : "border-border text-accent"
                 }`}
               >

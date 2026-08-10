@@ -198,6 +198,24 @@ describe("HtmlOverlayDriver", () => {
     expect(xyOf(b)[1]).toBeCloseTo(xyOf(bare)[1], 4);
   });
 
+  it("cluster push-down follows actual screen position, not registration order", () => {
+    const cam = camAt(10);
+    const driver = new HtmlOverlayDriver();
+    const below = document.createElement("div");
+    const above = document.createElement("div");
+    // "below" is registered FIRST but projects BELOW "above" (world +Y is up
+    // the screen, so a smaller Y is lower on screen). A push-down keyed on
+    // registration order would treat "below" as the top of the group and
+    // never push it down to clear "above" — reversing their visual order.
+    driver.register("below", below, new THREE.Vector3(0, -1, 0), { clusterId: "c" });
+    driver.register("above", above, new THREE.Vector3(0, 1, 0), { clusterId: "c" });
+    driver.update(cam, 400, 400);
+    const [, yBelow] = xyOf(below);
+    const [, yAbove] = xyOf(above);
+    expect(yBelow).toBeGreaterThan(yAbove);
+    expect(yBelow - yAbove).toBeGreaterThanOrEqual(CLUSTER_GAP_PX);
+  });
+
   it("items WITHOUT a cluster id never push each other (they may overlap)", () => {
     const cam = camAt(10);
     const driver = new HtmlOverlayDriver();

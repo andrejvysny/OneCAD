@@ -23,6 +23,7 @@
  */
 import type { Point2 } from "@/viewport/engine/sketchBasis";
 import {
+  foldSigned180,
   norm360,
   type DimFieldId,
   type DimFieldSpec,
@@ -73,7 +74,8 @@ const field = (
   domain: DimFieldSpec["domain"],
   drives: boolean,
   anchor: (p: Point2) => Point2,
-): DimFieldSpec => ({ field: id, label, domain, drives, anchor });
+  clusterId?: string,
+): DimFieldSpec => ({ field: id, label, domain, drives, anchor, clusterId });
 
 /** Single-field value set. Written through a local rather than as a computed-key
  *  literal so the union-typed key stays a `DimFieldId`, not a `string` index. */
@@ -83,36 +85,76 @@ function one(id: DimFieldId, value: number): DimValues {
   return out;
 }
 
-// ── line / slot centreline: length + absolute angle ──────────────────────────
+// ── line / slot centreline: length + angle against a reference ───────────────
+
+/** Shared by every `segmentFrame` — its length + angle anchors sit close
+ *  together on a short segment and are meant to visually pair up. */
+const SEGMENT_CLUSTER = "segment-len-ang";
 
 /**
- * `a` → cursor as a length and an ABSOLUTE angle to plane +U. Shared by the line
- * tool, the slot's centreline phase (identical gesture, identical numbers) and
- * the 3-point arc's CHORD phase — which passes `drives = false`, because a
- * chord is not an entity and no wire kind can express its length or angle.
- *
- * The ANGLE chip is opt-in (`showAngle`): it appears only when the gesture is
- * sketching AGAINST a reference — for the line tool that is a previous chain
- * segment (`anchors.length ≥ 2`), the one thing a typed angle can genuinely be
- * measured and constrained against. A FIRST segment's absolute angle to plane
- * +U has no reference (oblique values author nothing; H/V is auto-inferred at
- * commit), so a floating "∠ 0°/45°" chip there is noise, and it is withheld.
+ * The chain's reference direction — the ABSOLUTE heading of the segment
+ * ending at the second-to-last anchor, when a previous leg exists. Shared by
+ * the live angle chip (`segmentFrame`, below) and constraint authoring
+ * (`liveDimConstraints.ts`'s `prevSegment`) so the two can never disagree
+ * about which direction a chained angle is measured against.
  */
-function segmentFrame(a: Point2, drives = true, showAngle = false): DimFrame {
-  const fields: DimFieldSpec[] = [field("length", "L", "length", drives, (p) => mid(a, p))];
-  if (showAngle) {
+export function chainRefAngleDeg(anchors: Point2[]): number | undefined {
+  const n = anchors.length;
+  return n < 2 ? undefined : angleDegOf(anchors[n - 2], anchors[n - 1]);
+}
+
+/**
+ * `a` → cursor as a length and an angle. Shared by the line tool, the slot's
+ * centreline phase (identical gesture, identical numbers) and the 3-point
+ * arc's CHORD phase — which passes `drives = false`, because a chord is not
+ * an entity and no wire kind can express its length or angle.
+ *
+ * The ANGLE chip is opt-in (`refAngleDeg`): it appears only when the gesture
+ * is sketching AGAINST a reference — for the line tool that is a previous
+ * chain segment (`chainRefAngleDeg`), the one thing a typed angle can
+ * genuinely be measured and constrained against. A FIRST segment has no
+ * reference (oblique values author nothing; H/V is auto-inferred at commit),
+ * so a floating "∠" chip there is noise, and it is withheld.
+ *
+ * WITH a reference, the angle is the SIGNED turn from it, folded to the
+ * SHORTER arc `(-180°, 180°]` — matching exactly what
+ * `liveDimConstraints.ts`'s `angleLadder` authors as the driving `Angle`
+ * constraint's value, so the live chip and the committed constraint are never
+ * two different numbers. Reflex values (270°, 258°…) never appear: the
+ * LONGER way round is never what the chip shows, only the direction and
+ * magnitude of the actual turn away from the previous leg. WITHOUT a
+ * reference, the angle stays the raw absolute heading to plane +U (unchanged
+ * from before — the arc3p chord and a first segment have nothing to fold
+ * against).
+ */
+function segmentFrame(a: Point2, drives = true, refAngleDeg?: number): DimFrame {
+  const fields: DimFieldSpec[] = [
+    field("length", "L", "length", drives, (p) => mid(a, p), SEGMENT_CLUSTER),
+  ];
+  if (refAngleDeg !== undefined) {
     fields.push(
       // Drives only through the angle LADDER: 0/180 → Horizontal, 90/270 →
       // Vertical, else an Angle against the previous chain segment.
+      //
+      // NO clusterId: this anchor is provisional anyway — the controller
+      // (`SketchController.syncAngleReference`) unconditionally overrides it
+      // to the arc preview's own bisector, a FIXED spot relative to the arc's
+      // grid-constant radius. Sharing a cluster with `length` would let
+      // `HtmlOverlayDriver`'s screen-space push-apart drag it back off that
+      // spot whenever the (length-dependent, moving) length chip lands close
+      // by — exactly the "sometimes escapes the arc" bug this avoids.
       field("angle", "∠", "angle", drives, (p) => lerp(a, p, ANGLE_ANCHOR_T)),
     );
   }
+  const angleOf = (p: Point2): number =>
+    refAngleDeg === undefined ? angleDegOf(a, p) : foldSigned180(angleDegOf(a, p) - refAngleDeg);
   return {
     fields,
-    measure: (p) => ({ length: dist(a, p), angle: angleDegOf(a, p) }),
+    measure: (p) => ({ length: dist(a, p), angle: angleOf(p) }),
     rebuild: (v, c) => {
       const len = v.length ?? dist(a, c);
-      const th = (v.angle ?? angleDegOf(a, c)) / DEG;
+      const rel = v.angle ?? angleOf(c);
+      const th = (refAngleDeg === undefined ? rel : refAngleDeg + rel) / DEG;
       return { x: a.x + len * Math.cos(th), y: a.y + len * Math.sin(th) };
     },
   };
@@ -158,10 +200,13 @@ const resolveRadius = (v: DimValues, fallback: number): number =>
 
 function circleFrame(ctr: Point2): DimFrame {
   const anchor = (p: Point2): Point2 => mid(ctr, p);
+  // Diameter and radius share ONE anchor point by construction — cluster them
+  // so they separate instead of stacking exactly on top of each other.
+  const cluster = "circle-r-d";
   return {
     fields: [
-      field("diameter", "Ø", "length", true, anchor),
-      field("radius", "R", "length", true, anchor),
+      field("diameter", "Ø", "length", true, anchor, cluster),
+      field("radius", "R", "length", true, anchor, cluster),
     ],
     measure: (p) => ({ diameter: 2 * dist(ctr, p), radius: dist(ctr, p) }),
     rebuild: (v, c) => radial(ctr, resolveRadius(v, dist(ctr, c)), c),
@@ -402,8 +447,8 @@ export function dimFrame(
       if (chain?.arcMode && chain.tangent) return tangentArcFrame(anchors[n - 1], chain.tangent);
       // The chain accumulated every placed vertex — the ACTIVE leg is the one
       // leaving the last one. Only a leg against a PREVIOUS segment has an angle
-      // to be measured and authored ($showAngle); a first leg draws freely.
-      return segmentFrame(anchors[n - 1], true, anchors.length >= 2);
+      // to be measured and authored; a first leg draws freely.
+      return segmentFrame(anchors[n - 1], true, chainRefAngleDeg(anchors));
     case "rect":
       return n === 1 ? boxFrame(anchors[0], 1) : null;
     case "centerRect":
@@ -418,7 +463,7 @@ export function dimFrame(
       // Phase 1 is the CHORD: it steers the gesture but is not an entity, so
       // neither of its numbers can author anything (drives = false) and it has
       // no line to be angled against (no angle chip, either).
-      if (n === 1) return segmentFrame(anchors[0], false, false);
+      if (n === 1) return segmentFrame(anchors[0], false);
       return n === 2 ? arcThroughFrame(anchors[0], anchors[1]) : null;
     case "ellipse":
       // Neither axis authors anything: an Ellipse curve takes no constraints.
@@ -429,7 +474,7 @@ export function dimFrame(
     case "slot":
       // The centreline is a FIRST segment too — it has no previous chain leg to
       // be angled against, so only its length is a live chip.
-      if (n === 1) return segmentFrame(anchors[0], true, false);
+      if (n === 1) return segmentFrame(anchors[0], true);
       return n === 2 ? perpFrame(anchors[0], anchors[1], "width", "W", true, 2) : null;
     default:
       return null;

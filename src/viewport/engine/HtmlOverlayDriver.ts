@@ -222,6 +222,16 @@ export class HtmlOverlayDriver {
     // `CLUSTER_GAP_PX` apart along screen +y (downward), propagating the push
     // down a long cluster. Invisible members are skipped — a chip alone behind
     // the camera has no neighbour to push or be pushed by.
+    //
+    // The push-down loop assumes its group is already ordered top-to-bottom —
+    // it only ever pushes a member DOWN to clear the one before it. Grouping
+    // by `this.items`' Map iteration order (registration order) instead of
+    // actual projected y breaks that assumption: an item registered earlier
+    // but now projecting BELOW a later-registered sibling would still be
+    // treated as "first" and never get pushed, while the sibling above it
+    // gets shoved further down. Sorting by y first (stable, so exact ties keep
+    // registration order) makes the group's order match the invariant the
+    // push-down math assumes.
     const clusters = new Map<string, Placed[]>();
     for (const it of placed) {
       if (!it.clusterId) continue;
@@ -230,6 +240,7 @@ export class HtmlOverlayDriver {
       else clusters.set(it.clusterId, [it]);
     }
     for (const group of clusters.values()) {
+      group.sort((a, b) => a.y - b.y);
       let prevY: number | null = null;
       for (const it of group) {
         if (!it.visible) continue;

@@ -106,6 +106,8 @@ import {
   type LiveDimState,
   type ToolDimension,
 } from "./liveDimension";
+import { chainRefAngleDeg } from "./liveDimFrames";
+import { arcPreviewSweep } from "./angleArcPreview";
 import {
   liveDimChipId,
   liveDimStore,
@@ -1376,7 +1378,10 @@ export class SketchController {
       const snap = this.snapAt(ev.clientX, ev.clientY);
       if (!snap) return;
       this.lastSnap = snap;
-      const showHints = settingsStore.getState().show.snappingHints;
+      // A live-dim chip set already says everything the hint label would —
+      // showing both lets the snap hint visually collide with the chips it
+      // has nothing new to add next to (SP-1 UX).
+      const showHints = settingsStore.getState().show.snappingHints && !this.liveDimsOpen;
       this.deps.engine.setSketchSnap(snap, showHints);
       // Dimension mode: the indicator aids aiming; there is no rubber-band preview.
       if (!this.machine || !this.machineState) return;
@@ -1592,15 +1597,75 @@ export class SketchController {
       const at = anchors[d.field];
       if (at) this.deps.engine.moveChip(liveDimChipId(d.field), at);
     }
+    this.syncAngleReference(dims, plane);
   }
 
   /** The chips are gone: close the store (React unmounts the hosts, which is what
    *  unregisters them from the overlay). Idempotent. */
   private closeLiveDims(): void {
     this.liveDims = [];
-    if (!this.liveDimsOpen) return;
-    this.liveDimsOpen = false;
-    liveDimStore.getState().clear();
+    if (this.liveDimsOpen) {
+      this.liveDimsOpen = false;
+      liveDimStore.getState().clear();
+    }
+    this.deps.engine.setSketchAngleReference(null);
+    this.deps.engine.setSketchAnglePreview(null);
+  }
+
+  /** Arc-preview radius, in grid-minor-cell multiples — a CONSTANT distance
+   *  from the vertex regardless of the leg's own length (a 259 mm leg and a
+   *  67 mm leg get the same-size arc), and zoom-adaptive like everything
+   *  else keyed off `chooseGridStep` (dimQuantum, snap gridStep) so it reads
+   *  as a consistent screen size across zoom levels too. Deliberately NOT
+   *  clamped to the leg's own length — a length-based cap is exactly the
+   *  variable-size behaviour this constant exists to replace. */
+  private static readonly ANGLE_ARC_RADIUS_GRID_MULTIPLE = 3;
+
+  /** Fraction of the arc's own radius the angle LABEL sits at along the
+   *  bisector — close to the dashed arc itself rather than deep toward the
+   *  vertex, so it reads as "the label FOR this arc", not just any nearby
+   *  number in the pie slice. */
+  private static readonly ANGLE_LABEL_RADIUS_FRACTION = 0.85;
+
+  /**
+   * Tint the reference segment and draw the dashed angle-preview arc while a
+   * chained leg's angle chip is live — both derived from the SAME
+   * `chainRefAngleDeg` the chip itself measures against (`liveDimFrames.ts`),
+   * so the highlight, the arc and the number on screen can never disagree.
+   *
+   * The angle chip itself is a plain annotation now (no pill chrome — see
+   * `LiveDimField.tsx`'s `isCornerAngleLabel`), so its anchor is moved OFF
+   * `segmentFrame`'s own (camera-agnostic, length-fraction-based) position
+   * and onto the bisector of the swept arc instead — the arc's radius is a
+   * grid/zoom-driven constant `segmentFrame` has no way to know, so only the
+   * controller, which already computes it for the arc, can place the label
+   * to match.
+   */
+  private syncAngleReference(dims: ToolDimension[], plane: SketchPlane): void {
+    const angleDim = dims.find((d) => d.field === "angle");
+    const lengthDim = dims.find((d) => d.field === "length");
+    const anchors = this.machineState?.anchors;
+    const refDeg = anchors ? chainRefAngleDeg(anchors) : undefined;
+    if (!angleDim || !lengthDim || refDeg === undefined || !this.lastChainLineId || !anchors) {
+      this.deps.engine.setSketchAngleReference(null);
+      this.deps.engine.setSketchAnglePreview(null);
+      return;
+    }
+    this.deps.engine.setSketchAngleReference(this.lastChainLineId);
+    const sweep = arcPreviewSweep(refDeg, angleDim.value);
+    const gridMinor = chooseGridStep(this.deps.engine.getCameraDistance()).minor;
+    const radius = gridMinor * SketchController.ANGLE_ARC_RADIUS_GRID_MULTIPLE;
+    const center = anchors[anchors.length - 1];
+    this.deps.engine.setSketchAnglePreview({ center, radius, fromDeg: sweep.fromDeg, toDeg: sweep.toDeg });
+
+    const bisectorRad = ((sweep.fromDeg + sweep.toDeg) / 2 / 180) * Math.PI;
+    const labelRadius = radius * SketchController.ANGLE_LABEL_RADIUS_FRACTION;
+    const labelPoint = {
+      x: center.x + labelRadius * Math.cos(bisectorRad),
+      y: center.y + labelRadius * Math.sin(bisectorRad),
+    };
+    const w = planePointToWorld(plane, labelPoint);
+    this.deps.engine.moveChip(liveDimChipId("angle"), [w.x, w.y, w.z]);
   }
 
   /** Flip the chips to the quadrant with room. Cheap, and computed at most once

@@ -29,9 +29,10 @@ import type { SketchEntity, SketchPlane, SketchSolveStatus } from "@/ipc/types";
 import { GridPlane } from "./GridPlane";
 import { palette } from "./palette";
 import { RENDER_ORDER } from "./renderOrder";
-import { planeBasisMatrix, worldToPlanePoint } from "./sketchBasis";
+import { planeBasisMatrix, worldToPlanePoint, type Point2 } from "./sketchBasis";
 import type { DraftEntity } from "@/tools/sketch/toolMachine";
 import { ellipseParams, sampleEllipse } from "@/tools/sketch/ellipseMath";
+import { angleArcPoints } from "@/tools/sketch/angleArcPreview";
 
 const ARC_SEGMENTS = 64;
 
@@ -58,6 +59,9 @@ const LINE_WIDTH = cssLineWidth(2);
 const PREVIEW_WIDTH = cssLineWidth(1.5);
 const TRIM_GHOST_WIDTH = cssLineWidth(3);
 const SELECTED_WIDTH = cssLineWidth(2.5);
+/** The angle-preview arc is a lightweight annotation glyph, not geometry —
+ *  thinner than every real entity line so it never competes with them. */
+const ANGLE_ARC_WIDTH = cssLineWidth(1);
 
 /** Flat local xyz (z=0) polyline for an entity, in plane coords. */
 export function entityPolyline(e: {
@@ -138,6 +142,8 @@ export class SketchObject {
   private readonly previewGroup = new THREE.Group();
   // Destructive doomed-piece overlay (Trim tool hover), above committed entities.
   private readonly trimGhostGroup = new THREE.Group();
+  // Dashed angle-preview arc (live angle chip ↔ its reference segment).
+  private readonly angleArcGroup = new THREE.Group();
   private readonly grid: GridPlane;
   private readonly tint: THREE.Mesh;
   private readonly points: THREE.Points;
@@ -148,6 +154,8 @@ export class SketchObject {
   private status: SketchSolveStatus = "UnderConstrained";
   private selected = new Set<string>();
   private hovered = new Set<string>();
+  /** The chain segment a live angle chip is measured against, or null. */
+  private angleRefId: string | null = null;
 
   // Shared line materials, by state.
   private readonly matUnder: LineMaterial;
@@ -157,8 +165,10 @@ export class SketchObject {
   private readonly matHover: LineMaterial;
   private readonly matConstruction: LineMaterial;
   private readonly matReference: LineMaterial;
+  private readonly matAngleRef: LineMaterial;
   private readonly matPreview: LineMaterial;
   private readonly matTrimGhost: LineMaterial;
+  private readonly matAngleArc: LineMaterial;
   private readonly allMaterials: LineMaterial[];
 
   private readonly _basis = new THREE.Matrix4();
@@ -166,7 +176,7 @@ export class SketchObject {
 
   constructor(private readonly deps: SketchObjectDeps) {
     this.planeGroup.name = "sketchPlane";
-    this.planeGroup.add(this.entityGroup, this.previewGroup, this.trimGhostGroup);
+    this.planeGroup.add(this.entityGroup, this.previewGroup, this.trimGhostGroup, this.angleArcGroup);
     deps.sketchRoot.add(this.planeGroup);
 
     // Plane tint quad (large, low alpha) + adaptive grid, both plane-local.
@@ -222,8 +232,17 @@ export class SketchObject {
     // geometry, whereas reference geometry IS real (it bounds regions) — it just
     // is not YOURS to move. Colour carries the difference, not the stroke.
     this.matReference = mk(palette.sketchReference());
+    this.matAngleRef = mk(palette.sketchAngleRef(), { linewidth: SELECTED_WIDTH });
     this.matPreview = mk(palette.sketchUnder(), { linewidth: PREVIEW_WIDTH, transparent: true, opacity: 0.9 });
     this.matTrimGhost = mk(palette.destructive(), { linewidth: TRIM_GHOST_WIDTH, transparent: true, opacity: 0.95 });
+    this.matAngleArc = mk(palette.sketchAngleRef(), {
+      linewidth: ANGLE_ARC_WIDTH,
+      dashed: true,
+      dashSize: 3,
+      gapSize: 2,
+      transparent: true,
+      opacity: 0.9,
+    });
     this.allMaterials = [
       this.matUnder,
       this.matFull,
@@ -232,8 +251,10 @@ export class SketchObject {
       this.matHover,
       this.matConstruction,
       this.matReference,
+      this.matAngleRef,
       this.matPreview,
       this.matTrimGhost,
+      this.matAngleArc,
     ];
   }
 
@@ -260,8 +281,10 @@ export class SketchObject {
     this.matHover.color.copy(palette.hover3d());
     this.matConstruction.color.copy(palette.sketchConstruction());
     this.matReference.color.copy(palette.sketchReference());
+    this.matAngleRef.color.copy(palette.sketchAngleRef());
     this.matPreview.color.copy(palette.sketchUnder());
     this.matTrimGhost.color.copy(palette.destructive());
+    this.matAngleArc.color.copy(palette.sketchAngleRef());
   }
 
   setVisible(visible: boolean): void {
@@ -333,6 +356,29 @@ export class SketchObject {
     this.deps.invalidate();
   }
 
+  /**
+   * Replace the dashed angle-preview arc (live angle chip ↔ its reference
+   * segment), or clear it. `fromDeg`/`toDeg` are ABSOLUTE headings — see
+   * `angleArcPreview.ts` for why a direct sweep between them is already the
+   * shorter arc, with no re-folding needed here.
+   */
+  setAnglePreview(arc: { center: Point2; radius: number; fromDeg: number; toDeg: number } | null): void {
+    for (const c of [...this.angleArcGroup.children]) this.disposeLine(c);
+    this.angleArcGroup.clear();
+    if (arc && arc.radius > 1e-9) {
+      const positions: number[] = [];
+      for (const p of angleArcPoints(arc.center, arc.radius, arc.fromDeg, arc.toDeg)) {
+        positions.push(p.x, p.y, 0);
+      }
+      if (positions.length >= 6) {
+        const line = this.buildLine(positions, this.matAngleArc);
+        line.renderOrder = RENDER_ORDER.ANGLE_ARC_PREVIEW;
+        this.angleArcGroup.add(line);
+      }
+    }
+    this.deps.invalidate();
+  }
+
   /** Recolor from the current selection (sketch entity ids). */
   setSelection(selectedIds: Iterable<string>): void {
     this.selected = new Set(selectedIds);
@@ -343,6 +389,16 @@ export class SketchObject {
   /** Recolor from the current hover (sketch entity ids). Selection wins over hover. */
   setHover(hoveredIds: Iterable<string>): void {
     this.hovered = new Set(hoveredIds);
+    this.rebuildEntities();
+    this.deps.invalidate();
+  }
+
+  /** Tint the chain segment a live angle chip is measured against, or clear
+   *  it. Selection/hover still win — the entity stays selectable/hoverable
+   *  like anything else while it happens to be the angle reference. */
+  setAngleReference(id: string | null): void {
+    if (this.angleRefId === id) return;
+    this.angleRefId = id;
     this.rebuildEntities();
     this.deps.invalidate();
   }
@@ -376,11 +432,13 @@ export class SketchObject {
         ? this.matSelected
         : this.hovered.has(e.id)
           ? this.matHover
-          : e.referenceLocked
-            ? this.matReference
-            : e.construction
-              ? this.matConstruction
-              : statusMat;
+          : this.angleRefId === e.id
+            ? this.matAngleRef
+            : e.referenceLocked
+              ? this.matReference
+              : e.construction
+                ? this.matConstruction
+                : statusMat;
       this.entityGroup.add(this.buildLine(positions, mat));
     }
   }
@@ -421,6 +479,7 @@ export class SketchObject {
     for (const c of [...this.entityGroup.children]) if (c !== this.points) this.disposeLine(c);
     for (const c of [...this.previewGroup.children]) this.disposeLine(c);
     for (const c of [...this.trimGhostGroup.children]) this.disposeLine(c);
+    for (const c of [...this.angleArcGroup.children]) this.disposeLine(c);
     this.points.geometry.dispose();
     this.pointsMat.dispose();
     (this.tint.geometry as THREE.BufferGeometry).dispose();

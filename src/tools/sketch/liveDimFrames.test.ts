@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { dimFrame, type DimFrame } from "./liveDimFrames";
+import { chainRefAngleDeg, dimFrame, type DimFrame } from "./liveDimFrames";
 import type { Point2 } from "@/viewport/engine/sketchBasis";
 
 const P = (x: number, y: number): Point2 => ({ x, y });
@@ -145,6 +145,65 @@ describe("line / slot centreline frame", () => {
   });
 });
 
+describe("chainRefAngleDeg", () => {
+  it("is undefined with fewer than two anchors — no reference exists yet", () => {
+    expect(chainRefAngleDeg([])).toBeUndefined();
+    expect(chainRefAngleDeg([P(0, 0)])).toBeUndefined();
+  });
+
+  it("is the ABSOLUTE heading of the LAST committed leg (its final two anchors)", () => {
+    expect(chainRefAngleDeg([P(0, 0), P(10, 0)])).toBeCloseTo(0, 9);
+    expect(chainRefAngleDeg([P(0, 0), P(0, 10)])).toBeCloseTo(90, 9);
+    // A third anchor moves the reference to the LATEST leg, not the first one.
+    expect(chainRefAngleDeg([P(0, 0), P(0, 10), P(20, 10)])).toBeCloseTo(0, 9);
+  });
+});
+
+describe("line frame, CHAINED (a reference segment exists) — signed shortest-arc angle", () => {
+  // Previous leg ran P(0,0) → P(0,10): an absolute heading of 90°. The ACTIVE
+  // leg leaves the last anchor, P(0,10).
+  const anchors = [P(0, 0), P(0, 10)];
+  const a = anchors[1];
+  const frame = must(dimFrame("line", anchors));
+
+  it("measures the SIGNED turn away from the reference, not the absolute heading", () => {
+    // Cursor straight up from `a`: absolute heading 90° = the SAME direction
+    // as the reference itself ⇒ zero turn.
+    expect(frame.measure(P(a.x, a.y + 30)).angle).toBeCloseTo(0, 9);
+    // Cursor to the right: absolute heading 0°, a −90° turn from the 90° ref.
+    expect(frame.measure(P(a.x + 30, a.y)).angle).toBeCloseTo(-90, 9);
+    // Cursor to the left: absolute heading 180°, a +90° turn from the 90° ref.
+    expect(frame.measure(P(a.x - 30, a.y)).angle).toBeCloseTo(90, 9);
+  });
+
+  it("never reports a reflex angle — always the shorter arc, signed", () => {
+    // Cursor almost back the way the reference came from: absolute heading
+    // ~270°+ε, i.e. a huge "the long way round" delta from 90° (≈180°+ε) —
+    // must fold to the SHORT way instead of the reflex ~180°+ε value.
+    const cursor = P(a.x + 30 * Math.cos((269 * Math.PI) / 180), a.y + 30 * Math.sin((269 * Math.PI) / 180));
+    const angle = frame.measure(cursor).angle!;
+    expect(angle).toBeDefined();
+    expect(Math.abs(angle)).toBeLessThanOrEqual(180);
+  });
+
+  it("rebuild(measure(p), p) round-trips exactly across the ±180° seam", () => {
+    for (const deg of [0, 1, 89, 90, 91, 179, 180, -1, -90, -179, -180]) {
+      const th = (deg * Math.PI) / 180;
+      const p = P(a.x + 30 * Math.cos(th), a.y + 30 * Math.sin(th));
+      const rebuilt = frame.rebuild(frame.measure(p), p);
+      expect(rebuilt.x).toBeCloseTo(p.x, 6);
+      expect(rebuilt.y).toBeCloseTo(p.y, 6);
+    }
+  });
+
+  it("a locked signed angle turns the SAME direction the number reads", () => {
+    // −90° from a 90°-absolute reference points straight along world +X.
+    const p = frame.rebuild({ angle: -90 }, P(a.x + 5, a.y + 5));
+    expect(p.x).toBeGreaterThan(a.x);
+    expect(p.y).toBeCloseTo(a.y, 6);
+  });
+});
+
 describe("rect / centerRect frames", () => {
   const a = P(10, 10);
   const rect = must(dimFrame("rect", [a]));
@@ -176,6 +235,16 @@ describe("rect / centerRect frames", () => {
   it("a zero-extent cursor picks the POSITIVE side rather than collapsing", () => {
     expect(rect.rebuild({ width: 80, height: 40 }, a)).toEqual({ x: 90, y: 50 });
   });
+
+  it("width and height are NOT forced into a shared overlay cluster", () => {
+    // They sit at genuinely different screen anchors (top edge vs side edge) —
+    // collapsing them into one cluster would throw that away and stack them
+    // near the box centre instead (the reported "chips randomly placed" bug).
+    const width = rect.fields.find((f) => f.field === "width")!;
+    const height = rect.fields.find((f) => f.field === "height")!;
+    expect(width.clusterId).toBeUndefined();
+    expect(height.clusterId).toBeUndefined();
+  });
 });
 
 describe("circle frame — Ø and R are two views of one number", () => {
@@ -198,6 +267,13 @@ describe("circle frame — Ø and R are two views of one number", () => {
 
   it("falls back to plane +U when the cursor sits on the centre", () => {
     expect(frame.rebuild({ radius: 10 }, ctr)).toEqual({ x: 15, y: 5 });
+  });
+
+  it("diameter and radius share one overlay cluster (their anchors coincide)", () => {
+    const diameter = frame.fields.find((f) => f.field === "diameter")!;
+    const radius = frame.fields.find((f) => f.field === "radius")!;
+    expect(diameter.clusterId).toBeDefined();
+    expect(diameter.clusterId).toBe(radius.clusterId);
   });
 });
 
@@ -489,6 +565,15 @@ describe("chip anchors", () => {
     expect(length.anchor(P(100, 0))).toEqual({ x: 50, y: 0 });
     expect(angle.anchor(P(100, 0)).x).toBeCloseTo(30, 9);
     expect(angle.anchor(P(100, 0)).y).toBeCloseTo(0, 9);
+  });
+
+  it("the angle field carries no clusterId — the controller pins its own anchor", () => {
+    // `SketchController.syncAngleReference` unconditionally overrides this
+    // chip's position to the arc preview's bisector; a shared cluster would
+    // let `HtmlOverlayDriver`'s screen-space push-apart drag it back off that
+    // fixed spot whenever the (length-dependent) length chip lands nearby.
+    const [, angle] = must(dimFrame("line", [P(0, 0), P(0, 0)])).fields;
+    expect(angle.clusterId).toBeUndefined();
   });
 
   it("puts a rect's W on its horizontal edge and H on its vertical one", () => {

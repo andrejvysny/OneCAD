@@ -6,7 +6,9 @@ import {
   zoomToCursor,
   shortestAngleLerp,
   easeInOutCubic,
+  yawForPlaneXAxis,
 } from "./CadOrbitControls";
+import { CameraRig } from "./CameraRig";
 
 describe("clampPitch", () => {
   it("clamps to just inside ±90°", () => {
@@ -32,6 +34,65 @@ describe("sphericalToOffset (turntable, yaw about Z)", () => {
   it("radius is preserved", () => {
     const o = sphericalToOffset(1.1, 0.4, 7);
     expect(o.length()).toBeCloseTo(7, 6);
+  });
+});
+
+/*
+ * yawForPlaneXAxis / viewAlongNormal — entering a sketch must put the PLANE's
+ * own xAxis on screen-right, not a generic "world +X is right" heading. The
+ * XY sketch plane's pinned basis (SCHEMA §"non-standard XY basis") is
+ * xAxis = world +Y — a generic X-right pole heading gets it backwards (SP-1
+ * W/H swap bug).
+ */
+describe("yawForPlaneXAxis", () => {
+  it("XY plane's own xAxis (world +Y) yaws to 0 — right vector becomes +Y", () => {
+    const yaw = yawForPlaneXAxis(new THREE.Vector3(0, 1, 0));
+    expect(yaw).toBeCloseTo(0, 9);
+  });
+
+  it("XZ plane's own xAxis (world +Y) matches its already-correct normal-derived yaw (0)", () => {
+    const yaw = yawForPlaneXAxis(new THREE.Vector3(0, 1, 0));
+    expect(yaw).toBeCloseTo(0, 9);
+  });
+
+  it("YZ plane's own xAxis (world −X) matches its already-correct normal-derived yaw (π/2)", () => {
+    const yaw = yawForPlaneXAxis(new THREE.Vector3(-1, 0, 0));
+    expect(yaw).toBeCloseTo(Math.PI / 2, 9);
+  });
+
+  it("a naive world +X axis yaws to −π/2 (today's old default pole heading)", () => {
+    const yaw = yawForPlaneXAxis(new THREE.Vector3(1, 0, 0));
+    expect(yaw).toBeCloseTo(-Math.PI / 2, 9);
+  });
+
+  it("returns null for a tilted (non-horizontal) plane axis — no exact zero-roll match", () => {
+    expect(yawForPlaneXAxis(new THREE.Vector3(0, 0.7, 0.7))).toBeNull();
+  });
+});
+
+describe("viewAlongNormal + CameraRig — plane axis ends up on screen-right/up", () => {
+  const ORIGIN = new THREE.Vector3(0, 0, 0);
+  const R = 100;
+
+  function offsetFor(yaw: number, pitch: number): THREE.Vector3 {
+    const cp = Math.cos(pitch);
+    return new THREE.Vector3(R * cp * Math.cos(yaw), R * cp * Math.sin(yaw), R * Math.sin(pitch));
+  }
+  const rightVector = (rig: CameraRig) => new THREE.Vector3().setFromMatrixColumn(rig.persp.matrixWorld, 0);
+  const upVector = (rig: CameraRig) => new THREE.Vector3().setFromMatrixColumn(rig.persp.matrixWorld, 1);
+  // Pole pitch, matching `viewAlongNormal`'s `clampPitch(asin(normal.z))` for a Z-pole normal.
+  const POLE_PITCH = clampPitch(Math.PI / 2);
+
+  it("XY plane (xAxis world +Y, yAxis world −X): screen-right/up match the plane's own axes", () => {
+    const rig = new CameraRig();
+    const yaw = yawForPlaneXAxis(new THREE.Vector3(0, 1, 0))!;
+    rig.apply(ORIGIN, offsetFor(yaw, POLE_PITCH), R);
+    const right = rightVector(rig);
+    const up = upVector(rig);
+    expect(right.x).toBeCloseTo(0, 3);
+    expect(right.y).toBeCloseTo(1, 3); // plane xAxis = world +Y
+    expect(up.x).toBeCloseTo(-1, 3); // plane yAxis = world −X
+    expect(up.y).toBeCloseTo(0, 3);
   });
 });
 

@@ -24,6 +24,16 @@ export interface ConstraintBadge {
    * to stagger co-anchored badges into a row instead of stacking them.
    */
   offsetIndex: number;
+  /**
+   * The other end of the axis this badge sits BESIDE (`HtmlOverlayDriver`'s
+   * `axisFrom`) — a line endpoint for a line-anchored badge, a point on the
+   * boundary for a centre-anchored one. Undefined for a point-only badge
+   * (Coincident/Fixed), which has no direction to tether a leader line to.
+   * This is what makes a badge visually read as "belonging to that entity"
+   * at a busy shared vertex, instead of floating at a fixed screen offset
+   * that assumes an orientation the entity may not have.
+   */
+  axisFrom?: Point2;
 }
 
 const mid = (a: [number, number], b: [number, number]): Point2 => ({ x: (a[0] + b[0]) / 2, y: (a[1] + b[1]) / 2 });
@@ -52,6 +62,22 @@ export function entityAnchor(e: SketchEntity): Point2 | null {
   return null;
 }
 
+/**
+ * The other end of the axis a badge on `e` sits BESIDE — an endpoint for a
+ * Line (the axis IS the line itself, so a leader from it to the midpoint
+ * anchor runs ALONG the line, putting the perpendicular offset off to the
+ * side), or a point on the boundary for a circular entity (radius direction
+ * from its centre anchor). Undefined for a Point — it has no direction.
+ */
+function axisFromFor(e: SketchEntity): Point2 | undefined {
+  if (e.type === "Line" && e.p0) return { x: e.p0[0], y: e.p0[1] };
+  if (e.center) {
+    const r = e.type === "Ellipse" ? e.majorR : e.radius;
+    if (r) return { x: e.center[0] + r, y: e.center[1] };
+  }
+  return undefined;
+}
+
 function badgeFor(c: SketchConstraint, byId: Map<string, SketchEntity>): ConstraintBadge | null {
   const first = byId.get(c.entities[0]);
   if (!first) return null;
@@ -62,8 +88,19 @@ function badgeFor(c: SketchConstraint, byId: Map<string, SketchEntity>): Constra
     case "Coincident": {
       const at =
         c.type === "Coincident" ? entityPointCoord(first, c.positions?.[0] ?? "Start") : entityAnchor(first);
+      // A Coincident badge sits at a shared POINT, not along an entity's own
+      // axis — no direction to tether a leader to, so it stays centred as before.
+      const axisFrom = c.type === "Coincident" ? undefined : axisFromFor(first);
       return at
-        ? { id: c.id, glyph: CONSTRAINT_PRESENTATION[c.type].glyph, kind: c.type, at, editable: false, offsetIndex: 0 }
+        ? {
+            id: c.id,
+            glyph: CONSTRAINT_PRESENTATION[c.type].glyph,
+            kind: c.type,
+            at,
+            editable: false,
+            offsetIndex: 0,
+            axisFrom,
+          }
         : null;
     }
     case "Parallel":
@@ -77,7 +114,15 @@ function badgeFor(c: SketchConstraint, byId: Map<string, SketchEntity>): Constra
     case "Fixed": {
       const at = entityAnchor(first);
       return at
-        ? { id: c.id, glyph: CONSTRAINT_PRESENTATION[c.type].glyph, kind: c.type, at, editable: false, offsetIndex: 0 }
+        ? {
+            id: c.id,
+            glyph: CONSTRAINT_PRESENTATION[c.type].glyph,
+            kind: c.type,
+            at,
+            editable: false,
+            offsetIndex: 0,
+            axisFrom: axisFromFor(first),
+          }
         : null;
     }
     case "Distance":
@@ -93,7 +138,16 @@ function badgeFor(c: SketchConstraint, byId: Map<string, SketchEntity>): Constra
       // other dimensional kind is a length in mm and renders in it (WP-C2).
       const glyph =
         c.type === "Angle" ? `${formatUnitless(value)}°` : formatDimensionValue(value);
-      return { id: c.id, glyph, kind: c.type, at, editable: true, value, offsetIndex: 0 };
+      return {
+        id: c.id,
+        glyph,
+        kind: c.type,
+        at,
+        editable: true,
+        value,
+        offsetIndex: 0,
+        axisFrom: axisFromFor(first),
+      };
     }
     default:
       return null;
@@ -104,7 +158,7 @@ function badgeFor(c: SketchConstraint, byId: Map<string, SketchEntity>): Constra
  *  entity midpoint/center) round-trip float coords identically, but this
  *  guards against float noise between two badges that are "the same" anchor. */
 const ANCHOR_QUANT = 1e-4;
-function anchorKey(at: Point2): string {
+export function anchorKey(at: Point2): string {
   const q = (n: number) => Math.round(n / ANCHOR_QUANT) * ANCHOR_QUANT;
   return `${q(at.x)},${q(at.y)}`;
 }

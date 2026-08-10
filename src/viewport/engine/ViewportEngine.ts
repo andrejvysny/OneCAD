@@ -1019,8 +1019,9 @@ export class ViewportEngine {
     this.savedView = this.controls?.getViewState() ?? null;
     const normal = new THREE.Vector3().fromArray(plane.normal);
     const origin = new THREE.Vector3().fromArray(plane.origin);
+    const xAxis = new THREE.Vector3().fromArray(plane.xAxis);
     const dist = this.controls?.getDistance() ?? 260;
-    this.controls?.viewAlongNormal(normal, origin, dist, true);
+    this.controls?.viewAlongNormal(normal, origin, dist, true, xAxis);
     this.invalidate();
   }
 
@@ -1049,6 +1050,17 @@ export class ViewportEngine {
 
   setSketchHover(ids: Iterable<string>): void {
     this.sketch?.setHover(ids);
+  }
+
+  /** Tint the chain segment a live angle chip is measured against, or clear it. */
+  setSketchAngleReference(id: string | null): void {
+    this.sketch?.setAngleReference(id);
+  }
+
+  /** Show/clear the dashed angle-preview arc between a chained leg and its
+   *  reference direction — both headings ABSOLUTE (plane +U = 0°). */
+  setSketchAnglePreview(arc: { center: Point2; radius: number; fromDeg: number; toDeg: number } | null): void {
+    this.sketch?.setAnglePreview(arc);
   }
 
   setSketchSnap(snap: SnapResult | null, showHints: boolean): void {

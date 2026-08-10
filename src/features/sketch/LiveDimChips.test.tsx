@@ -28,10 +28,10 @@ const mounted = new Map<string, HTMLElement>();
 
 function fakeEngine(): ViewportEngine {
   return {
-    mountChip: (id: string, el: HTMLElement) => {
+    mountChip: vi.fn((id: string, el: HTMLElement) => {
       mounted.set(id, el);
       document.body.appendChild(el);
-    },
+    }),
     moveChip: vi.fn(),
     unmountChip: (id: string, el: HTMLElement) => {
       mounted.delete(id);
@@ -58,6 +58,8 @@ const ANCHORS: LiveDimAnchors = {
   radius: [0, 1, 0],
   sides: [0, 0, 1],
   major: [1, 1, 0],
+  width: [2, 0, 0],
+  height: [0, 2, 0],
 };
 
 function makeHandlers(): LiveDimHandlers & Record<string, ReturnType<typeof vi.fn>> {
@@ -95,11 +97,13 @@ describe("placementFor", () => {
 
 describe("LiveDimChips", () => {
   let handlers: ReturnType<typeof makeHandlers>;
+  let engine: ViewportEngine;
 
   beforeEach(() => {
     resetStores();
     mounted.clear();
-    setViewportEngine(fakeEngine());
+    engine = fakeEngine();
+    setViewportEngine(engine);
     toolStore.getState().setMode("sketch", "sketch1");
     handlers = makeHandlers();
   });
@@ -128,7 +132,10 @@ describe("LiveDimChips", () => {
 
   it("mounts ONE engine-hosted chip per field, and unmounts them on clear", () => {
     render(<LiveDimChips />);
-    show([chip(), chip({ field: "angle", label: "∠", domain: "angle", value: 30 })]);
+    // drives: false here (an arc sweep, say) — mount/unmount is what this
+    // test is about; the drives+angle corner-angle display transform has its
+    // own dedicated tests below.
+    show([chip(), chip({ field: "angle", label: "∠", domain: "angle", value: 30, drives: false })]);
 
     expect([...mounted.keys()]).toEqual(["__live_dim_length", "__live_dim_angle"]);
     expect(screen.getByTestId("live-dim-length")).toHaveValue("30");
@@ -137,6 +144,32 @@ describe("LiveDimChips", () => {
     act(() => liveDimStore.getState().clear());
     expect([...mounted.keys()]).toEqual([]);
     expect(screen.queryByTestId("live-dim-length")).toBeNull();
+  });
+
+  it("gives each field its own overlay cluster unless the frame opted two in together", () => {
+    render(<LiveDimChips />);
+    show([
+      chip({ field: "length", clusterId: "segment-len-ang" }),
+      chip({ field: "angle", label: "∠", domain: "angle", value: 30, clusterId: "segment-len-ang" }),
+    ]);
+
+    const calls = (engine.mountChip as ReturnType<typeof vi.fn>).mock.calls;
+    const clusterOf = (id: string) => calls.find((c) => c[0] === id)?.[3]?.clusterId;
+    // Opted-in siblings (length+angle on a segment) share the frame's cluster id.
+    expect(clusterOf("__live_dim_length")).toBe("segment-len-ang");
+    expect(clusterOf("__live_dim_angle")).toBe("segment-len-ang");
+  });
+
+  it("a field with no clusterId is its own cluster of one, not lumped with siblings", () => {
+    render(<LiveDimChips />);
+    // A box's width/height carry no clusterId (they sit at different edges).
+    show([chip({ field: "width", label: "W" }), chip({ field: "height", label: "H" })]);
+
+    const calls = (engine.mountChip as ReturnType<typeof vi.fn>).mock.calls;
+    const clusterOf = (id: string) => calls.find((c) => c[0] === id)?.[3]?.clusterId;
+    const widthCluster = clusterOf("__live_dim_width");
+    const heightCluster = clusterOf("__live_dim_height");
+    expect(widthCluster).not.toBe(heightCluster);
   });
 
   it("names each field for assistive tech without colliding with DimensionInput", () => {
@@ -224,7 +257,7 @@ describe("LiveDimChips", () => {
     expect(handlers.onEnter).not.toHaveBeenCalled();
   });
 
-  it("an arc SWEEP refuses 0 and 360; a line heading folds any angle into [0,360)", () => {
+  it("an arc SWEEP refuses 0 and 360", () => {
     const sweep = chip({ field: "angle", label: "∠", domain: "angle", value: 90, drives: false });
     render(<LiveDimChips />);
     show([sweep]);
@@ -232,12 +265,50 @@ describe("LiveDimChips", () => {
     act(() => liveDimStore.getState().setFocus("angle", "360"));
     fireEvent.keyDown(screen.getByTestId("live-dim-angle"), { key: "Enter" });
     expect(handlers.onEnter).not.toHaveBeenCalled();
+  });
 
-    act(() => liveDimStore.getState().clear());
-    show([chip({ field: "angle", label: "∠", domain: "angle", value: 90, drives: true })]);
-    act(() => liveDimStore.getState().setFocus("angle", "-30"));
+  it("a chained leg's angle chip DISPLAYS the visual corner angle, not the stored turn", () => {
+    render(<LiveDimChips />);
+    // Stored turn = 71° (matches the dashed arc's own 180−71=109° sweep —
+    // see `angleArcPreview.ts`'s `arcPreviewSweep`).
+    show([chip({ field: "angle", label: "∠", domain: "angle", value: 71, drives: true })]);
+    expect(screen.getByTestId("live-dim-angle")).toHaveValue("109");
+  });
+
+  it("the corner-angle field renders as a plain annotation, not a pill chip", () => {
+    render(<LiveDimChips />);
+    show([
+      chip(), // length — keeps the pill
+      chip({ field: "angle", label: "∠", domain: "angle", value: 71, drives: true }),
+    ]);
+
+    const lengthWrapper = screen.getByTestId("live-dim-length").parentElement!;
+    expect(lengthWrapper.className).toMatch(/rounded-full/);
+    expect(screen.getByText("L")).toBeInTheDocument(); // length keeps its glyph label
+
+    const angleWrapper = screen.getByTestId("live-dim-angle").parentElement!;
+    expect(angleWrapper.className).not.toMatch(/rounded-full/);
+    expect(angleWrapper.className).not.toMatch(/border/);
+    expect(angleWrapper.className).not.toMatch(/bg-surface/);
+    expect(screen.queryByText("∠")).not.toBeInTheDocument(); // no glyph label — it sits inside the arc itself
+  });
+
+  it("typing a new corner angle keeps the CURRENT turn's sign", () => {
+    render(<LiveDimChips />);
+    show([chip({ field: "angle", label: "∠", domain: "angle", value: 71, drives: true })]);
+    // Positive stored turn ⇒ typing "90" (a square corner) resolves to +90.
+    act(() => liveDimStore.getState().setFocus("angle", "90"));
     fireEvent.keyDown(screen.getByTestId("live-dim-angle"), { key: "Enter" });
-    expect(handlers.onEnter).toHaveBeenCalledWith(330);
+    expect(handlers.onEnter).toHaveBeenCalledWith(90);
+  });
+
+  it("a NEGATIVE stored turn's sign carries into a freshly-typed corner angle", () => {
+    render(<LiveDimChips />);
+    show([chip({ field: "angle", label: "∠", domain: "angle", value: -71, drives: true })]);
+    expect(screen.getByTestId("live-dim-angle")).toHaveValue("109"); // |−71| ⇒ same corner
+    act(() => liveDimStore.getState().setFocus("angle", "150"));
+    fireEvent.keyDown(screen.getByTestId("live-dim-angle"), { key: "Enter" });
+    expect(handlers.onEnter).toHaveBeenCalledWith(-30); // sign −1 × (180 − 150)
   });
 
   it("a side count is CLAMPED, not refused", () => {

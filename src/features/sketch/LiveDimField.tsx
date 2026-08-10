@@ -20,7 +20,7 @@ import { useEffect, useRef, useState } from "react";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { LengthUnitId } from "@/units/lengthUnits";
 import { formatLength, formatUnitless, lengthSuffix, parseLength } from "@/units/format";
-import { norm360 } from "@/tools/sketch/liveDimension";
+import { foldSigned180 } from "@/tools/sketch/liveDimension";
 import type { LiveDimChipField } from "@/stores/liveDimStore";
 
 const ERROR_FLASH_MS = 400;
@@ -48,6 +48,34 @@ export interface LiveDimFieldProps {
 type Parsed = { ok: true; value: number | null } | { ok: false };
 
 /**
+ * A chained leg's angle field STORES (and drives geometry/authoring with) the
+ * SIGNED turn away from continuing straight (`liveDimFrames.ts`'s
+ * `segmentFrame` — 0° = straight, ±180° = doubled back) because that is what
+ * `liveDimConstraints.ts` needs to match the committed `Angle` constraint
+ * bit-for-bit. But the dashed arc preview (`angleArcPreview.ts`'s
+ * `arcPreviewSweep`) necessarily shows the VISUAL CORNER angle between the
+ * two rays meeting at the vertex — 180° for a straight line, 90° for a
+ * square corner — which is a DIFFERENT number (`corner = 180 − |turn|`).
+ * Showing the raw turn value next to that arc reads as wrong (a 71° chip
+ * next to a dashed sweep that visibly spans ~109°). These two functions
+ * convert ONLY at the display/input boundary — `chip.value` itself, and
+ * everything downstream of it (geometry, authoring), stays the turn value.
+ *
+ * The corner angle is unsigned (it can't tell CW from CCW), so recovering a
+ * turn from a freshly-typed corner needs a sign from somewhere — the CURRENT
+ * (pre-edit) `chip.value`'s own sign, i.e. whichever side the gesture is
+ * already on. Same "zero reads positive" convention as `liveDimFrames.ts`'s
+ * `side()`.
+ */
+function cornerAngleOf(turnDeg: number): number {
+  return 180 - Math.abs(turnDeg);
+}
+function turnFromCornerAngle(cornerDeg: number, currentTurnDeg: number): number {
+  const sign = currentTurnDeg < 0 ? -1 : 1;
+  return foldSigned180(sign * (180 - cornerDeg));
+}
+
+/**
  * Read the field's text in its own domain. Lengths accept a unit suffix and emit
  * MILLIMETRES; angles and counts are unit-blind (a degree is a degree in an inch
  * session). `Number` rather than `parseFloat` on purpose — `parseFloat("25abc")`
@@ -68,15 +96,16 @@ function parseChip(chip: LiveDimChipField, text: string, unit: LengthUnitId): Pa
     return { ok: true, value: Math.min(MAX_SIDES, Math.max(MIN_SIDES, Math.round(n))) };
   }
   // The one angle with a RANGE is the arc's sweep, where 0 and 360 both mean "no
-  // arc". It is identifiable as the angle field that authors nothing — a line or
-  // slot heading is absolute and folds freely into [0, 360).
+  // arc". It is identifiable as the angle field that authors nothing — a
+  // chained leg types the VISUAL CORNER angle (see `turnFromCornerAngle`).
   if (!chip.drives) return n > 0 && n < 360 ? { ok: true, value: n } : { ok: false };
-  return { ok: true, value: norm360(n) };
+  return { ok: true, value: turnFromCornerAngle(n, chip.value) };
 }
 
 function formatChip(chip: LiveDimChipField, unit: LengthUnitId): string {
   if (chip.domain === "length") return formatLength(chip.value, unit);
   if (chip.domain === "count") return String(Math.round(chip.value));
+  if (chip.domain === "angle" && chip.drives) return formatUnitless(cornerAngleOf(chip.value));
   return formatUnitless(chip.value);
 }
 
@@ -140,18 +169,29 @@ export function LiveDimField({
   // Only a LENGTH in a non-mm unit renders enough decimals to need the wide
   // field ("0.0394 in" for 1 mm); mm stays prototype-exact at 36px.
   const wide = chip.domain === "length" && unit !== "mm";
+  // A chained leg's angle sits INSIDE the dashed arc preview (its anchor is
+  // moved there — `SketchController.syncAngleReference`) as plain annotation
+  // text matching the arc's own color, not a separate floating pill chip —
+  // still a real input underneath (focus/type/Tab/lock all work identically).
+  const isCornerAngleLabel = chip.field === "angle" && chip.drives;
 
   return (
     <span
-      className={`pointer-events-auto inline-flex items-center gap-0.5 rounded-full border bg-surface px-2 font-mono text-[11px] shadow-popover ${
-        isError
-          ? "border-traffic-close text-traffic-close"
-          : focused || chip.locked
-            ? "border-accent text-ink-2"
-            : "border-border text-ink-3"
-      }`}
+      className={
+        isCornerAngleLabel
+          ? `pointer-events-auto inline-flex items-center font-mono text-[11px] ${
+              isError ? "text-traffic-close" : focused || chip.locked ? "text-accent" : "text-sketch-angle-ref"
+            }`
+          : `pointer-events-auto inline-flex items-center gap-0.5 rounded-full border bg-surface px-2 font-mono text-[11px] shadow-popover ${
+              isError
+                ? "border-traffic-close text-traffic-close"
+                : focused || chip.locked
+                  ? "border-accent text-ink-2"
+                  : "border-border text-ink-3"
+            }`
+      }
     >
-      <span className="text-ink-5">{chip.label}</span>
+      {!isCornerAngleLabel && <span className="text-ink-5">{chip.label}</span>}
       <input
         ref={ref}
         aria-label={`Live ${chip.field}`}

@@ -49,6 +49,7 @@ export type TokenName =
   | "--color-sketch-under"
   | "--color-sketch-done"
   | "--color-sketch-sel"
+  | "--color-sketch-angle-ref"
   | "--color-viewport-hover";
 
 // rgb() mirrors of the token values in tokens.css (non-browser fallback only).
@@ -81,6 +82,7 @@ const FALLBACK: Record<ResolvedTheme, Record<TokenName, string>> = {
     "--color-sketch-under": "rgb(45, 127, 249)",
     "--color-sketch-done": "rgb(31, 157, 85)",
     "--color-sketch-sel": "rgb(217, 119, 6)",
+    "--color-sketch-angle-ref": "rgb(139, 92, 246)",
     "--color-viewport-hover": "rgb(0, 172, 193)",
   },
   dark: {
@@ -109,6 +111,7 @@ const FALLBACK: Record<ResolvedTheme, Record<TokenName, string>> = {
     "--color-sketch-under": "rgb(90, 162, 255)",
     "--color-sketch-done": "rgb(67, 193, 122)",
     "--color-sketch-sel": "rgb(240, 162, 74)",
+    "--color-sketch-angle-ref": "rgb(167, 139, 250)",
     "--color-viewport-hover": "rgb(38, 198, 218)",
   },
 };
@@ -199,6 +202,8 @@ export const palette = {
   sketchFull: () => tokenColor("--color-sketch-done"),
   /** Selected sketch geometry — orange. */
   sketchSelected: () => tokenColor("--color-sketch-sel"),
+  /** The chain segment a live angle chip is measured against — violet. */
+  sketchAngleRef: () => tokenColor("--color-sketch-angle-ref"),
   /** Construction (dashed) geometry. */
   sketchConstruction: () => tokenColor("--color-ink-5"),
   /** Host-face reference geometry (`referenceLocked`) — SOLID, recessive. */

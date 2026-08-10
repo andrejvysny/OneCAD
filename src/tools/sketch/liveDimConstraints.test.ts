@@ -44,17 +44,19 @@ describe("dimConstraintSpecs — line", () => {
     ]);
   });
 
-  it("an oblique angle becomes an Angle RELATIVE to the previous chain segment", () => {
-    // Previous segment ran +U (0°); the typed absolute angle is 37°.
+  it("an oblique angle becomes an Angle against the previous chain segment", () => {
+    // Previous segment ran +U (0°); the chip's SIGNED turn away from it is 37°
+    // (coincides with the absolute heading here since the reference is 0°).
     const specs = dimConstraintSpecs("line", [P(0, 0), P(10, 0)], { angle: 37 }, { prevLineId: "prev" });
     expect(specs).toEqual([
       { type: "Angle", refs: [{ id: "prev" }, 0], value: 37 },
     ]);
   });
 
-  it("subtracts the previous segment's own direction", () => {
-    // Previous segment ran straight up (90°); typed 37° absolute ⇒ 53° between.
-    const specs = dimConstraintSpecs("line", [P(0, 0), P(0, 10)], { angle: 37 }, { prevLineId: "prev" });
+  it("resolves through the previous segment's own direction, not plane +U", () => {
+    // Previous segment ran straight up (90°); the chip shows the SIGNED turn
+    // away from IT — a −53° turn (back toward +U) authors a 53° magnitude.
+    const specs = dimConstraintSpecs("line", [P(0, 0), P(0, 10)], { angle: -53 }, { prevLineId: "prev" });
     expect(specs).toHaveLength(1);
     expect(specs[0].value).toBeCloseTo(53, 9);
   });

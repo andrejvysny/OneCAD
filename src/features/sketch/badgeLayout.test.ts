@@ -64,6 +64,23 @@ describe("layoutBadges", () => {
     expect(layoutBadges(null)).toEqual([]);
   });
 
+  it("gives a line-anchored badge its endpoint as the leader axisFrom", () => {
+    const h = badges.find((b) => b.id === "k1")!;
+    // e1 is p0=[0,0], p1=[40,0] — the leader runs from p0 to the midpoint.
+    expect(h.axisFrom).toEqual({ x: 0, y: 0 });
+  });
+
+  it("gives a circle-anchored badge a point on its boundary as axisFrom", () => {
+    const r = badges.find((b) => b.id === "k4")!;
+    // c1 centre=[10,10], radius=5 — boundary point along +U from the centre.
+    expect(r.axisFrom).toEqual({ x: 15, y: 10 });
+  });
+
+  it("a Coincident badge has no axisFrom — it sits at a shared point, not along an axis", () => {
+    const c = badges.find((b) => b.id === "k2")!;
+    expect(c.axisFrom).toBeUndefined();
+  });
+
   it("assigns offsetIndex 0/1 to k1+k3, which co-anchor at e1's midpoint", () => {
     const h = badges.find((b) => b.id === "k1")!;
     const d = badges.find((b) => b.id === "k3")!;

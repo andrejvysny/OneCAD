@@ -59,6 +59,8 @@ export const RENDER_ORDER = {
   REGION_FILL: 5,
   /** Trim doomed-piece ghost — above committed entities + markers. */
   TRIM_GHOST: 5,
+  /** Dashed angle-preview arc (live angle chip ↔ its reference segment). */
+  ANGLE_ARC_PREVIEW: 5,
   /** Snap guide lines / snap glyph marker. */
   SNAP_GUIDES: 5,
   SNAP_MARKER: 6,

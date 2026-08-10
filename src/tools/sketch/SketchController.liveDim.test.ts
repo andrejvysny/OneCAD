@@ -69,6 +69,8 @@ function makeEngineMock() {
     moveChip: vi.fn(),
     setSketchGhost: vi.fn(),
     setSketchTrimGhost: vi.fn(),
+    setSketchAngleReference: vi.fn(),
+    setSketchAnglePreview: vi.fn(),
     setSketchSnap: vi.fn(),
     updateSketchSession: vi.fn(),
     screenToPlane: vi.fn((x: number, y: number) => ({ x, y })),
@@ -479,11 +481,74 @@ describe("SketchController live dimensions (Wave 3 chips + typing)", () => {
     expect(internals().liveDim.locks).toEqual({}); // …but nothing is pinned yet
   });
 
+  it("suppresses the snap hint label while a live-dim chip set is open", () => {
+    // Before any chips are open, the hint preference is honored as-is.
+    move(5, 0);
+    expect(engineMock.setSketchSnap).toHaveBeenLastCalledWith(expect.anything(), true);
+
+    click(0, 0);
+    move(30, 0); // opens the chip set
+    move(31, 0); // one frame later `liveDimsOpen` is reflected in `showHints`
+    expect(chips().open).toBe(true);
+    expect(engineMock.setSketchSnap).toHaveBeenLastCalledWith(expect.anything(), false);
+
+    // Closing the gesture (Escape) restores the hint.
+    type("Escape");
+    move(32, 0);
+    expect(chips().open).toBe(false);
+    expect(engineMock.setSketchSnap).toHaveBeenLastCalledWith(expect.anything(), true);
+  });
+
   it("a chained SECOND leg gains the angle chip (sketching against a line)", () => {
     click(0, 0);
     click(10, 0); // commits leg 1 and chains
     move(30, 0);
     expect(chips().fields.map((f) => f.field)).toEqual(["length", "angle"]);
+  });
+
+  it("a chained leg highlights its reference segment and previews the angle arc", async () => {
+    click(0, 0);
+    click(10, 0); // commits leg 1 (the reference) and chains
+    await flushSketchMutations();
+    const refId = entities()[0].id;
+    move(30, 0);
+
+    expect(engineMock.setSketchAngleReference).toHaveBeenLastCalledWith(refId);
+    // fromDeg is the OUTGOING ray of the reference segment (180° from its
+    // incoming/authoring direction, 0°) — the visible half of the old line
+    // extending from the vertex, per `arcPreviewSweep`.
+    expect(engineMock.setSketchAnglePreview).toHaveBeenLastCalledWith(
+      expect.objectContaining({ center: { x: 10, y: 0 }, fromDeg: 180 }),
+    );
+
+    // Escape drops the gesture — both clear.
+    type("Escape");
+    expect(engineMock.setSketchAngleReference).toHaveBeenLastCalledWith(null);
+    expect(engineMock.setSketchAnglePreview).toHaveBeenLastCalledWith(null);
+  });
+
+  it("the angle chip's anchor moves to the arc's bisector, not segmentFrame's own anchor", async () => {
+    click(0, 0);
+    click(10, 0); // commits leg 1 (reference), vertex at (10, 0)
+    await flushSketchMutations();
+    move(30, 0); // new leg heads +x (0°); reference's outgoing ray is 180° ⇒ sweep 180→360
+
+    // chooseGridStep(100).minor = 5 mm (pinned by this file's CAMERA_DISTANCE
+    // comment) ⇒ arc radius = 5 × 3 = 15, label radius = 15 × 0.85 = 12.75;
+    // bisector of [180°, 360°] = 270° (straight down in plane coords) ⇒
+    // label at (10, 0) + 12.75 × (0, −1).
+    const angleCalls = engineMock.moveChip.mock.calls.filter((c) => c[0] === "__live_dim_angle");
+    const [, lastAt] = angleCalls[angleCalls.length - 1];
+    expect(lastAt[0]).toBeCloseTo(10, 6);
+    expect(lastAt[1]).toBeCloseTo(-12.75, 6);
+  });
+
+  it("a FIRST leg (no reference yet) never highlights or previews", () => {
+    click(0, 0);
+    move(30, 0);
+    expect(chips().fields.map((f) => f.field)).toEqual(["length"]); // no angle chip
+    expect(engineMock.setSketchAngleReference).toHaveBeenLastCalledWith(null);
+    expect(engineMock.setSketchAnglePreview).toHaveBeenLastCalledWith(null);
   });
 
   it("with no anchor placed there is no dimension, so no chip and no capture", () => {

@@ -53,6 +53,8 @@ export interface ToolDimension {
   locked: boolean;
   /** Authors a driving constraint on commit? See the HONEST RULE above. */
   drives: boolean;
+  /** See `DimFieldSpec.clusterId`. */
+  clusterId?: string;
 }
 
 /** Rounding granularity per domain (mm / degrees). */
@@ -78,6 +80,15 @@ export interface DimFieldSpec {
   domain: DimDomain;
   drives: boolean;
   anchor(pt: Point2): Point2;
+  /**
+   * Overlay cluster this chip shares with siblings whose anchors are meant to
+   * COINCIDE (diameter+radius on a circle, length+angle on a short segment).
+   * Undefined ⇒ this chip is its own cluster of one: it keeps its own
+   * per-field anchor (e.g. a box's width sits at the top edge, height at the
+   * side edge) instead of being forced into one shared vertical stack with
+   * fields that were never meant to sit near each other.
+   */
+  clusterId?: string;
 }
 
 /**
@@ -158,6 +169,15 @@ export const roundTo = (v: number, q: number): number => (q > 0 ? Math.round(v /
 export function norm360(deg: number): number {
   const d = deg % 360;
   return d < 0 ? d + 360 : d;
+}
+
+/** Fold a signed angle into (-180, 180] — the SHORTER of the two turns that
+ *  reach it, signed by direction (CCW positive). Used for an angle measured
+ *  relative to a reference direction, where a reflex value (270°, 258°…)
+ *  would be the LONGER way round and read as backwards. */
+export function foldSigned180(deg: number): number {
+  const d = norm360(deg);
+  return d > 180 ? d - 360 : d;
 }
 
 // ── input FSM ─────────────────────────────────────────────────────────────────
@@ -287,5 +307,6 @@ export function describeDims(
     anchor: spec.anchor(cursor),
     locked: locks[spec.field] !== undefined,
     drives: spec.drives,
+    clusterId: spec.clusterId,
   }));
 }

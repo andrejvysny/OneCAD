@@ -17,7 +17,6 @@ import { useToolStore } from "@/stores/toolStore";
 import { useViewportEngine } from "@/viewport/engineBridge";
 import {
   liveDimChipId,
-  LIVE_DIM_CLUSTER_ID,
   liveDimStore,
   useLiveDimStore,
   type LiveDimPlacement,
@@ -69,15 +68,22 @@ export function LiveDimChips() {
   useEffect(() => {
     if (!engine || fieldKey === "") return;
     const anchors = liveDimStore.getState().anchors;
+    // `clusterId` is a per-frame, per-field constant (set by `dimFrame`) — it
+    // never changes without the field SET also changing, so reading it here
+    // via getState() (rather than subscribing) is safe, same as `anchors`.
+    const clusterIds = new Map(liveDimStore.getState().fields.map((f) => [f.field, f.clusterId]));
     const mounted: Array<[string, HTMLDivElement]> = [];
     for (const field of fieldKey.split(",") as DimFieldId[]) {
       const at = anchors[field];
       if (!at) continue;
       const host = hostFor(hosts.current, field);
-      // The whole set is ONE overlay cluster: the driver keeps its hosts a
-      // constant screen gap apart, so chips never overlap while their anchors
-      // may project arbitrarily close together (a short line).
-      engine.mountChip(liveDimChipId(field), host, at, { clusterId: LIVE_DIM_CLUSTER_ID });
+      // Fields that share a `clusterId` (e.g. a circle's Ø + R) are kept a
+      // constant screen gap apart; a field with none is its own cluster of
+      // one, so it keeps its real per-field anchor instead of being forced
+      // into one shared stack with fields that were never meant to sit near
+      // it (a box's W and H, say).
+      const clusterId = clusterIds.get(field) ?? liveDimChipId(field);
+      engine.mountChip(liveDimChipId(field), host, at, { clusterId });
       mounted.push([liveDimChipId(field), host]);
     }
     return () => {

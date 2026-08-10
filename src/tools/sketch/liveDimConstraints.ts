@@ -23,6 +23,7 @@
 import type { ConstraintPosition, SketchConstraint, SketchConstraintType, SketchEntity } from "@/ipc/types";
 import type { Point2 } from "@/viewport/engine/sketchBasis";
 import { norm360, type DimLocks } from "./liveDimension";
+import { chainRefAngleDeg } from "./liveDimFrames";
 
 /** A batch index, or an entity id from OUTSIDE this step's committed array. */
 export type DimRef = number | { id: string };
@@ -54,7 +55,6 @@ interface AnglePrev {
   angleDeg: number;
 }
 
-const DEG = 180 / Math.PI;
 /** Locked angles come off the 1° quantized ladder or a typed whole number, so an
  *  exact-match epsilon is all the ladder rungs need. */
 const ANGLE_EPS = 1e-6;
@@ -69,28 +69,37 @@ function foldTo0_180(deg: number): number {
 }
 
 /**
- * Absolute typed angle → the strongest constraint that expresses it:
- * axis-aligned ⇒ Horizontal / Vertical (one entity, no value); otherwise an
- * `Angle` against the previous chain segment; otherwise NOTHING — an oblique
- * first segment has no reference, and inventing one would be a lie.
+ * Typed angle → the strongest constraint that expresses it: axis-aligned ⇒
+ * Horizontal / Vertical (one entity, no value); otherwise an `Angle` against
+ * the previous chain segment; otherwise NOTHING — an oblique first segment
+ * has no reference, and inventing one would be a lie.
+ *
+ * `deg` is ABSOLUTE when there is no `prev` to be relative to (unchanged),
+ * and the chip's own SIGNED turn away from `prev.angleDeg` when there is
+ * (`liveDimFrames.ts`'s `segmentFrame` — the live chip shows exactly this
+ * number, never a different one from what gets authored here). Folding the
+ * resolved absolute heading `t` back through `near()` against 0/90/180/270
+ * reproduces the OLD absolute-angle ladder exactly; the `Angle` value itself
+ * is `foldTo0_180(deg)` — `deg` already IS the signed delta the old code
+ * computed as `t − prev.angleDeg`, so the authored VALUE is bit-for-bit
+ * unchanged, only its live-chip representation is.
  */
 function angleLadder(deg: number, ref: DimRef, prev: AnglePrev | null): DimConstraintSpec[] {
-  const t = norm360(deg);
+  const t = norm360(prev ? prev.angleDeg + deg : deg);
   if (near(t, 0) || near(t, 180)) return [{ type: "Horizontal", refs: [ref] }];
   if (near(t, 90) || near(t, 270)) return [{ type: "Vertical", refs: [ref] }];
   if (!prev) return [];
-  return [{ type: "Angle", refs: [{ id: prev.id }, ref], value: foldTo0_180(t - prev.angleDeg) }];
+  return [{ type: "Angle", refs: [{ id: prev.id }, ref], value: foldTo0_180(deg) }];
 }
 
-/** The chain segment BEFORE the one being committed, when there is one. Its
- *  direction comes from the accumulated anchors — the same two points the
- *  previously committed line was drawn through. */
+/** The chain segment BEFORE the one being committed, when there is one — its
+ *  direction is `chainRefAngleDeg` (`liveDimFrames.ts`), the SAME reference
+ *  the live angle chip measured against, so the chip and the authored
+ *  constraint can never disagree about which direction is "0". */
 function prevSegment(anchors: Point2[], ctx: DimAuthorContext): AnglePrev | null {
-  const n = anchors.length;
-  if (!ctx.prevLineId || n < 2) return null;
-  const a = anchors[n - 2];
-  const b = anchors[n - 1];
-  return { id: ctx.prevLineId, angleDeg: norm360(Math.atan2(b.y - a.y, b.x - a.x) * DEG) };
+  const angleDeg = chainRefAngleDeg(anchors);
+  if (!ctx.prevLineId || angleDeg === undefined) return null;
+  return { id: ctx.prevLineId, angleDeg };
 }
 
 /** A Distance pinning one line's own two endpoints (`committed[i]`). */

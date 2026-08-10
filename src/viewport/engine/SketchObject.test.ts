@@ -86,3 +86,65 @@ describe("SketchObject — referenceLocked material", () => {
     obj.dispose();
   });
 });
+
+describe("SketchObject — angle reference highlight + arc preview", () => {
+  it("tints the referenced entity in its own color, distinct from every other state", () => {
+    const { obj, root } = build([seg("a"), seg("ref", true)]); // "ref" is also referenceLocked
+    obj.setAngleReference("ref");
+    const colors = colorsOf(root, ["a", "ref"]);
+    expect(colors.get("ref")).toBe(palette.sketchAngleRef().getHex());
+    expect(colors.get("ref")).not.toBe(palette.sketchReference().getHex());
+    obj.dispose();
+  });
+
+  it("selection and hover still win over the angle reference", () => {
+    const { obj, root } = build([seg("ref")]);
+    obj.setAngleReference("ref");
+    obj.setHover(["ref"]);
+    expect(colorsOf(root, ["ref"]).get("ref")).toBe(palette.hover3d().getHex());
+    obj.setHover([]);
+    obj.setSelection(["ref"]);
+    expect(colorsOf(root, ["ref"]).get("ref")).toBe(palette.sketchSelected().getHex());
+    obj.dispose();
+  });
+
+  it("clearing with null drops the tint back to its status color", () => {
+    const { obj, root } = build([seg("ref")]);
+    obj.setAngleReference("ref");
+    obj.setAngleReference(null);
+    expect(colorsOf(root, ["ref"]).get("ref")).toBe(palette.sketchUnder().getHex());
+    obj.dispose();
+  });
+
+  it("draws a dashed arc line for a non-degenerate preview, and none below the length floor", () => {
+    const { obj, root } = build([]);
+    obj.setAnglePreview({ center: { x: 0, y: 0 }, radius: 10, fromDeg: 0, toDeg: 90 });
+    const lines: Line2[] = [];
+    root.traverse((o) => {
+      if (o instanceof Line2) lines.push(o);
+    });
+    expect(lines.length).toBe(1);
+    expect((lines[0].material as LineMaterial).dashed).toBe(true);
+    expect((lines[0].material as LineMaterial).color.getHex()).toBe(palette.sketchAngleRef().getHex());
+
+    obj.setAnglePreview({ center: { x: 0, y: 0 }, radius: 0, fromDeg: 0, toDeg: 90 });
+    const after: Line2[] = [];
+    root.traverse((o) => {
+      if (o instanceof Line2) after.push(o);
+    });
+    expect(after.length).toBe(0); // a zero-radius preview draws nothing
+    obj.dispose();
+  });
+
+  it("null clears a previously drawn preview", () => {
+    const { obj, root } = build([]);
+    obj.setAnglePreview({ center: { x: 0, y: 0 }, radius: 10, fromDeg: 0, toDeg: 45 });
+    obj.setAnglePreview(null);
+    const lines: Line2[] = [];
+    root.traverse((o) => {
+      if (o instanceof Line2) lines.push(o);
+    });
+    expect(lines.length).toBe(0);
+    obj.dispose();
+  });
+});

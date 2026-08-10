@@ -126,6 +126,36 @@ export function yawForDirection(d: THREE.Vector3): number {
   return Math.hypot(d.x, d.y) < POLE_EPS ? CANONICAL_POLE_YAW : Math.atan2(d.y, d.x);
 }
 
+/** Below this, a plane's own xAxis counts as flat enough to be the turntable's
+ *  horizontal `_right` exactly (see `yawForPlaneXAxis`). */
+const PLANE_AXIS_VERTICAL_EPS = 1e-6;
+
+/**
+ * The yaw that makes the turntable's `_right` (`CameraRig.orient`'s
+ * `(-offset.y, offset.x, 0)`, normalized) equal a sketch plane's OWN `xAxis` —
+ * so entering a sketch puts the plane's horizontal axis on screen-right and
+ * its vertical axis on screen-up, whatever that plane's own basis happens to
+ * be (SCHEMA §"Hard invariant — non-standard XY basis": the XY plane's own
+ * xAxis is world +Y, not +X, ported verbatim from OneCAD-CPP — a generic
+ * "X-right" pole heading gets that one materially wrong).
+ *
+ * Only solvable when `xAxis` itself is horizontal (`xAxis.z ≈ 0`) — the
+ * turntable's `_right` is ALWAYS horizontal by construction (`CameraRig`'s
+ * deliberate no-independent-roll design), so a genuinely tilted plane's own
+ * axis has no exact zero-roll match. Null there; the caller falls back to the
+ * normal-only heading (today's behaviour, unchanged for a tilted plane).
+ *
+ * Derivation: turntable `_right(yaw) = (-sin(yaw), cos(yaw), 0)` (independent
+ * of pitch). Solving `_right(yaw) = xAxis` for a unit horizontal `xAxis`
+ * gives `yaw = atan2(-xAxis.x, xAxis.y)`.
+ */
+export function yawForPlaneXAxis(xAxis: THREE.Vector3): number | null {
+  if (Math.abs(xAxis.z) > PLANE_AXIS_VERTICAL_EPS) return null;
+  const len = Math.hypot(xAxis.x, xAxis.y);
+  if (len < POLE_EPS) return null; // degenerate axis, nothing to align to
+  return Math.atan2(-xAxis.x / len, xAxis.y / len);
+}
+
 /**
  * macOS "natural" scrolling delivers wheel deltas inverted relative to finger
  * motion, so scroll-direction orbit feels backwards there — the model tilts
@@ -535,10 +565,22 @@ export class CadOrbitControls {
   /**
    * Look straight at a sketch plane: camera on the +normal side, target at the
    * plane origin. `normal` is the plane normal (target→camera direction).
+   *
+   * `xAxis`, when given and not tilted out of the horizontal (see
+   * `yawForPlaneXAxis`), puts the PLANE's own horizontal axis on screen-right
+   * instead of a generic X-right heading — the two only coincide when the
+   * plane's xAxis happens to be world +X, which the pinned XY sketch plane's
+   * basis (world +Y) deliberately is not.
    */
-  viewAlongNormal(normal: THREE.Vector3, target: THREE.Vector3, distance: number, animated = true): void {
+  viewAlongNormal(
+    normal: THREE.Vector3,
+    target: THREE.Vector3,
+    distance: number,
+    animated = true,
+    xAxis?: THREE.Vector3,
+  ): void {
     const d = normal.clone().normalize();
-    const yaw = yawForDirection(d);
+    const yaw = (xAxis && yawForPlaneXAxis(xAxis)) ?? yawForDirection(d);
     const pitch = clampPitch(Math.asin(Math.max(-1, Math.min(1, d.z))));
     this.setView({ yaw, pitch, distance, target: target.clone() }, animated);
   }

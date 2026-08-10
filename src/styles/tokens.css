@@ -154,6 +154,9 @@
   --color-sketch-done: #1f9d55;
   /* Selected sketch element/region. */
   --color-sketch-sel: #d97706;
+  /* The chain segment a live angle chip is measured against — distinct from
+     every other sketch state color so it never reads as under/done/selected. */
+  --color-sketch-angle-ref: #8b5cf6;
 
   /* ---- Viewport interaction ---- */
   /* Cyan 3D hover highlight — distinct from --color-accent, which drives
@@ -314,6 +317,7 @@
   --color-sketch-under: #5aa2ff;
   --color-sketch-done: #43c17a;
   --color-sketch-sel: #f0a24a;
+  --color-sketch-angle-ref: #a78bfa;
 
   /* ---- Viewport interaction ---- */
   --color-viewport-hover: #26c6da;
