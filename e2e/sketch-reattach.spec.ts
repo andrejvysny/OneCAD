@@ -11,6 +11,7 @@ import {
   clickAt,
   dofPill,
   bodyOptions,
+  dragExtrudeDepth,
 } from "./helpers";
 
 /*
@@ -89,6 +90,10 @@ async function buildSketchAndExtrude(page: Page): Promise<string> {
 
   await page.getByRole("button", { name: "Extrude", exact: true }).click();
   await expect(page.getByText(/^Drag the arrow to set depth/)).toBeVisible();
+  // The depth must come from a real handle grab: confirming straight from the
+  // armed state leaves it at zero and nothing commits at all (UNIFY-UX,
+  // `7d7c82a`).
+  await dragExtrudeDepth(page);
   await page.getByTestId("model-tool-chip").getByTestId("chip-confirm").click();
   await expect(page.getByText(/^Drag the arrow to set depth/)).toHaveCount(0);
 
@@ -100,9 +105,14 @@ test.describe("sketch reattach (H9)", () => {
     page,
   }) => {
     await openEditorDebug(page);
-    const bodiesBefore = await bodyOptions(page).count();
+    // The precondition this test needs is "an extrude committed onto the new
+    // sketch", which is what a moved revision proves. It is deliberately NOT a
+    // body COUNT: the rectangle overlaps the seeded body, so auto Add/Cut
+    // resolves to Cut in either drag direction and the extrude modifies `body1`
+    // rather than adding one — correct behaviour, and irrelevant to reattach.
+    const revBeforeBuild = await revision(page);
     await buildSketchAndExtrude(page);
-    expect(await bodyOptions(page).count()).toBeGreaterThan(bodiesBefore);
+    expect(await revision(page)).toBeGreaterThan(revBeforeBuild);
     await createDatum(page);
 
     // The newest sketch row is the one just drawn.

@@ -773,12 +773,32 @@ export async function extrudeDebug(page: Page): Promise<Record<string, unknown> 
 }
 
 /**
- * Drive the MODEL-HARDEN Wave 1 commit gesture on the armed extrude: grab the real
- * depth handle, drag, RELEASE (which now KEEPS the tool armed — no implicit
- * commit), assert it stayed armed via the debug surface, then press Enter to
- * confirm. `ModelToolController` commits only on this explicit confirm (Enter /
- * chip-✓ / click-away); a release alone just sets the depth and stays armed.
+ * Drive the commit gesture on the armed extrude: grab the real depth handle,
+ * drag, then RELEASE — which KEEPS the tool armed (no implicit commit). The
+ * caller still has to confirm explicitly (Enter / chip-✓ / click-away), because
+ * `ModelToolController` commits only on that.
+ *
+ * Since UNIFY-UX (`7d7c82a`) a genuine grab is REQUIRED: confirming without one
+ * leaves the depth at zero and no body is created, which is a silent no-op from
+ * a spec's point of view. The grab is retried because the handle's screen
+ * position depends on a settled camera, and a miss must not be read as "extrude
+ * is broken" — the phase check turns a missed grab into a retry, not a failure.
  */
+export async function dragExtrudeDepth(page: Page, dy = -20): Promise<void> {
+  await expect(async () => {
+    const { x, y } = await findExtrudeHandle(page);
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x, y + dy, { steps: 4 });
+    const phase = (await extrudeDebug(page))?.phase;
+    if (phase !== "dragging") {
+      await page.mouse.up();
+      throw new Error(`extrude grab missed — phase was ${String(phase)}`);
+    }
+  }).toPass({ timeout: 10_000, intervals: [200, 400, 800] });
+  await page.mouse.up();
+}
+
 // ── Live dimension chips (SP-1 W4) ───────────────────────────────────────────
 
 /** One live dimension chip's renderable facts, as read straight off the store
