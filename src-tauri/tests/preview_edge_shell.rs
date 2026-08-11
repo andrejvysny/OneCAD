@@ -1008,7 +1008,7 @@ async fn edge_op_preview_without_typed_edges_fails_loudly() {
         tangent_closure_version: None,
         extra: Default::default(),
     }));
-    let err = wm
+    let preview = wm
         .preview_op(
             bare,
             Uuid::from_u128(OP_TAIL).to_string(),
@@ -1017,10 +1017,14 @@ async fn edge_op_preview_without_typed_edges_fails_loudly() {
             Lod::Coarse,
         )
         .await
-        .expect_err("a body-less fillet must not preview as a success");
-    let text = err.to_string();
+        .expect("a recoverable ownership failure is a valid preview response");
+    let repair = preview
+        .needs_repair
+        .first()
+        .expect("a body-less fillet must need repair");
+    let text = repair.to_string();
     assert!(
-        text.contains("body input") || text.contains("body"),
+        text.contains("operated body") || text.contains("body"),
         "the failure NAMES the missing body binding: {text}"
     );
     eprintln!("bare-edgeIds fillet preview correctly refused: {text}");

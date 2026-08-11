@@ -35,6 +35,7 @@ import type {
   PromotePick,
   RecentProject,
   RecoveryInfo,
+  SaveOutcome,
   ResolveCandidate,
   ResolveRefRequest,
   ResolveRefResult,
@@ -602,7 +603,12 @@ function insertAtMockCursor(featureId: string): void {
 
 /** Stamp the timeline cursor onto a result (H7b: the cursor rides the edit result). */
 function withCursor(res: ApplyOperationResult): ApplyOperationResult {
-  return { ...res, appliedOps: mockAppliedOps, totalOps: mockFeatures.length };
+  return {
+    ...res,
+    appliedOps: mockAppliedOps,
+    totalOps: mockFeatures.length,
+    terminal: res.terminal ?? "published",
+  };
 }
 
 function nextBodyId(): string {
@@ -1189,6 +1195,7 @@ function noopResult(): ApplyOperationResult {
     changedBodies: [],
     removedBodies: [],
     features: mockFeatures.map(cloneFeature),
+    terminal: "noop",
   };
 }
 
@@ -1319,7 +1326,10 @@ function mockResolveRefs(refs: ResolveRefRequest[]): ResolveRefResult[] {
       },
     ];
     return {
+      snapshotId: r.snapshotId ?? 0,
+      revision: r.revision ?? 0,
       refId: r.refId,
+      bodyId: r.primary?.bodyId,
       outcome: "needsRepair",
       ladderFailed: "descriptor",
       reason: "ambiguous",
@@ -1936,16 +1946,26 @@ export const mockClient: CadClient = {
   },
 
   // Save/export are Rust-owned in the real app; the mock keeps them deterministic
-  // (no filesystem): saveDocument is a no-op, Save As / Export return fake paths.
+  // (no filesystem): save adopts a plausible path and reports the same outcome
+  // shape as Rust, so replacement guards exercise the clean-result contract.
   // `_previewPng` is accepted and DISCARDED: there is no container to write a
   // preview.png into. Taking the parameter keeps the two clients' signatures in
   // step so a caller compiles identically against either.
-  async saveDocument(_path?: string, _previewPng?: string | null) {
+  async saveDocument(path?: string, _previewPng?: string | null): Promise<SaveOutcome> {
     await wait(40);
+    const document = documentStore.getState();
+    return {
+      documentId: document.documentId ?? "mock-document",
+      savedRevision: document.revision,
+      currentRevision: document.revision,
+      clean: true,
+      path: path ?? `/Users/andrej/CAD/Projects/${document.title || "Untitled"}.onecad`,
+      title: path ? basename(path) : document.title,
+    };
   },
-  async saveDocumentAs(_previewPng?: string | null) {
+  async saveDocumentAs(_previewPng?: string | null): Promise<SaveOutcome | null> {
     await wait(40);
-    return "/Users/andrej/CAD/Projects/Untitled.onecad";
+    return this.saveDocument("/Users/andrej/CAD/Projects/Untitled.onecad");
   },
   async exportStep() {
     await wait(40);
@@ -2181,7 +2201,11 @@ export const mockClient: CadClient = {
   },
 
   // Deterministic mock promotion (Invariant 1: same pick → same id).
-  async promoteSelection(bodyId: string, picks: PromotePick[]): Promise<PromotedElement[]> {
+  async promoteSelection(
+    bodyId: string,
+    picks: PromotePick[],
+    _snapshotId?: number,
+  ): Promise<PromotedElement[]> {
     await wait(MESH_LATENCY_MS);
     return picks.map((p) => {
       const elementId = `el_${mockElementHash(`${bodyId}#${p.topoKey}`)}`;

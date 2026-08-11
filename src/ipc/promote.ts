@@ -8,10 +8,9 @@
  *
  * That turns "promote failed" from a theoretical worker error into an ORDINARY
  * outcome the user can hit by picking, editing, and then acting on the old pick.
- * Every call site therefore degrades the same way: DROP the promotion, keep the
- * transient TopoKey ref the tool already holds, and tell the user to pick again.
- * A tool must never abort or fall through to a guessed element — the whole point
- * of the refusal is that no id is better than the wrong id.
+ * It reports that outcome uniformly; each caller decides whether its gesture can
+ * keep a non-persistent ref. A target that would be authored into a record must
+ * fail closed rather than degrade to an anchor-only reference.
  */
 import type { CadClient } from "@/ipc/client";
 import type { PromotePick, PromotedElement } from "@/ipc/types";
@@ -39,10 +38,13 @@ export async function promoteOne(
   client: CadClient,
   bodyId: string,
   pick: PromotePick,
+  snapshotId?: number,
 ): Promise<PromotedElement | null> {
   let promoted: PromotedElement[];
   try {
-    promoted = await client.promoteSelection(bodyId, [pick]);
+    promoted = snapshotId === undefined
+      ? await client.promoteSelection(bodyId, [pick])
+      : await client.promoteSelection(bodyId, [pick], snapshotId);
   } catch {
     stalePickHint();
     return null;

@@ -50,6 +50,12 @@ OpOutcome execute_shell(OpContext& ctx, const json& op, const std::string& op_id
     const json params =
         (op.contains("params") && op["params"].is_object()) ? op["params"] : json::object();
 
+    if (std::vector<json> repairs = operation_ref_ownership_repairs(op, op_id); !repairs.empty()) {
+        OpOutcome out;
+        out.needs_repair = std::move(repairs);
+        return out;
+    }
+
     // --- target body (predecessor snapshot — Invariant 3) ---
     const std::string target_id = target_body_of(op, params);
     if (target_id.empty()) {

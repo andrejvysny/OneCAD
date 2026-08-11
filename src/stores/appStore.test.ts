@@ -98,6 +98,25 @@ describe("appStore unsaved-changes guard", () => {
     expect(appStore.getState().document).not.toBeNull();
   });
 
+  it("confirmClose('save') keeps the dialog open when an edit races a successful write", async () => {
+    vi.spyOn(mockClient, "saveDocument").mockResolvedValueOnce({
+      documentId: "doc-1",
+      savedRevision: 3,
+      currentRevision: 4,
+      clean: false,
+      path: "/tmp/doc.onecad",
+      title: "doc",
+    });
+    openDocument(true);
+    await appStore.getState().requestClose("close");
+
+    await appStore.getState().confirmClose("save");
+
+    expect(appStore.getState().pendingCloseIntent).toBe("close");
+    expect(appStore.getState().screen).toBe("editor");
+    expect(documentStore.getState().dirty).toBe(true);
+  });
+
   it("quit intent: a clean document bypasses the dialog and calls confirmExit directly", async () => {
     const confirmExitSpy = vi.spyOn(mockClient, "confirmExit");
 
@@ -207,6 +226,35 @@ describe("appStore unsaved-changes guard", () => {
     expect(appStore.getState().pendingCloseIntent).toBeNull();
     expect(appStore.getState().screen).toBe("editor");
     expect(appStore.getState().document).not.toBeNull();
+  });
+
+  it("dirty Open prompts before its native dialog, and cancel preserves the editor", async () => {
+    const openDialog = vi.spyOn(mockClient, "openFileDialog");
+    openDocument(true);
+
+    await appStore.getState().openDialogAndOpen();
+
+    expect(appStore.getState().pendingCloseIntent).toBe("replacement");
+    expect(openDialog).not.toHaveBeenCalled();
+
+    await appStore.getState().confirmClose("cancel");
+
+    expect(openDialog).not.toHaveBeenCalled();
+    expect(appStore.getState().screen).toBe("editor");
+    expect(appStore.getState().document?.documentId).toBe("doc-1");
+  });
+
+  it("discarding a dirty Open runs the chosen replacement exactly once", async () => {
+    const openDialog = vi.spyOn(mockClient, "openFileDialog").mockResolvedValue("/tmp/next.onecad");
+    const openDocumentSpy = vi.spyOn(mockClient, "openDocument");
+    openDocument(true);
+
+    await appStore.getState().openDialogAndOpen();
+    await appStore.getState().confirmClose("discard");
+
+    expect(openDialog).toHaveBeenCalledTimes(1);
+    expect(openDocumentSpy).toHaveBeenCalledWith("/tmp/next.onecad");
+    expect(appStore.getState().pendingCloseIntent).toBeNull();
   });
 });
 

@@ -623,6 +623,12 @@ OpOutcome execute_offset_face(OpContext& ctx, const json& op, const std::string&
     const json params =
         (op.contains("params") && op["params"].is_object()) ? op["params"] : json::object();
 
+    if (std::vector<json> repairs = operation_ref_ownership_repairs(op, op_id); !repairs.empty()) {
+        OpOutcome out;
+        out.needs_repair = std::move(repairs);
+        return out;
+    }
+
     // --- target body (MANDATORY — SCHEMA §7.3) --------------------------------
     const std::string target_id = read_str(params, "targetBodyId");
     if (target_id.empty()) {

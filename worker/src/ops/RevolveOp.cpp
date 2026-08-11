@@ -20,6 +20,7 @@
 #include <gp_Pnt.hxx>
 
 #include "elementmap/ElementMapPartition.h"
+#include "elementmap/Ladder.h"
 #include "modeling/BooleanMode.h"
 #include "ops/OpCommon.h"
 #include "sketch/Sketch.h"
@@ -30,6 +31,7 @@
 namespace onecad::ops {
 
 using nlohmann::json;
+namespace em = onecad::elementmap;
 
 namespace {
 
@@ -110,16 +112,9 @@ bool axis_from_sketch_line(const OpContext& ctx, const std::string& sketch_id,
 }
 
 // Axis from a straight body edge (RegenerationEngine.cpp:1173-1191).
-bool axis_from_edge(const OpContext& ctx, const std::string& body_id, const std::string& edge_id,
-                    gp_Ax1& axis_out, std::string& err) {
-    const session::BodyRecord* rec = ctx.bodies.get(body_id);
-    if (!rec) {
-        err = "Revolve: axis edge body not found: " + body_id;
-        return false;
-    }
-    const TopoDS_Shape sub = elementmap::ElementMapPartition::shape_for_topokey(rec->geom, edge_id);
+bool axis_from_straight_edge(const TopoDS_Shape& sub, gp_Ax1& axis_out, std::string& err) {
     if (sub.IsNull() || sub.ShapeType() != TopAbs_EDGE) {
-        err = "Revolve: axis edge not resolved: " + edge_id;
+        err = "Revolve: axis edge is missing or deleted";
         return false;
     }
     BRepAdaptor_Curve curve(TopoDS::Edge(sub));
@@ -130,6 +125,91 @@ bool axis_from_edge(const OpContext& ctx, const std::string& body_id, const std:
     const gp_Lin lin = curve.Line();
     axis_out = gp_Ax1(lin.Location(), lin.Direction());
     return true;
+}
+
+// The typed companion is authoritative whenever it is present. In particular, do
+// NOT use `edgeId` as an ordinal fallback after the ladder misses: an upstream
+// edit could make that ordinal name a different edge. Legacy payloads still take
+// the separate, byte-compatible route below.
+enum class TypedAxisStatus { Resolved, NeedsRepair, Refused };
+
+TypedAxisStatus axis_from_typed_edge(const OpContext& ctx, const json& axis,
+                                     const std::string& op_id, gp_Ax1& axis_out,
+                                     json& needs_repair, std::string& err) {
+    const json& edge_ref = axis["edgeRef"];
+    if (!edge_ref.is_object() || !edge_ref.contains("primary") || !edge_ref["primary"].is_object()) {
+        err = "Revolve: typed axis edgeRef requires primary edge binding";
+        return TypedAxisStatus::Refused;
+    }
+    const json& primary = edge_ref["primary"];
+    const std::string body_id = read_str(axis, "bodyId");
+    const std::string ref_body = read_str(primary, "bodyId");
+    if (body_id.empty() || ref_body.empty() || ref_body != body_id) {
+        err = "Revolve: typed axis edge belongs to a different body";
+        return TypedAxisStatus::Refused;
+    }
+    if (read_str(primary, "kind") != "edge") {
+        err = "Revolve: typed axis ref must be an edge";
+        return TypedAxisStatus::Refused;
+    }
+
+    em::LadderRef ref = em::ladder_ref_from_input(edge_ref, op_id + ".input0");
+    if (ref.element_id.empty()) {
+        err = "Revolve: typed axis edgeRef requires elementId";
+        return TypedAxisStatus::Refused;
+    }
+    const session::BodyRecord* rec = ctx.bodies.get(body_id);
+    if (!rec || rec->geom.IsNull()) {
+        err = "Revolve: typed axis edge body not found: " + body_id;
+        return TypedAxisStatus::Refused;
+    }
+    if (const em::PartitionEntry* entry = ctx.partition.find(ref.element_id)) {
+        if (entry->body_id != body_id || entry->kind != em::km::ElementKind::Edge) {
+            err = "Revolve: typed axis edge binding is foreign or not an edge";
+            return TypedAxisStatus::Refused;
+        }
+        const TopoDS_Shape sub = em::ElementMapPartition::shape_for_topokey(rec->geom, entry->topo_key);
+        if (sub.IsNull() || sub.ShapeType() != TopAbs_EDGE) {
+            needs_repair = json{{"refId", op_id + ".input0"},
+                                {"elementId", ref.element_id},
+                                {"ladderFailed", "history"},
+                                {"reason", "no-candidates"},
+                                {"candidates", json::array()},
+                                {"anchor", ref.anchor_json},
+                                {"uiLabel", "Revolve axis edge was deleted"}};
+            return TypedAxisStatus::NeedsRepair;
+        }
+        return axis_from_straight_edge(sub, axis_out, err) ? TypedAxisStatus::Resolved
+                                                           : TypedAxisStatus::Refused;
+    }
+
+    const std::vector<em::LadderResolution> resolved = em::resolve_descriptor_stage(
+        rec->geom, body_id, {ref}, em::LadderEditContext{ctx.post_upstream_edit, ctx.from_zero_replay});
+    if (resolved.empty() || resolved[0].outcome != em::LadderOutcome::AutoBind) {
+        needs_repair = resolved.empty() ? json{{"refId", op_id + ".input0"},
+                                               {"elementId", ref.element_id},
+                                               {"ladderFailed", "descriptor"},
+                                               {"reason", "no-candidates"},
+                                               {"candidates", json::array()},
+                                               {"anchor", ref.anchor_json},
+                                               {"uiLabel", "Revolve axis edge could not be resolved"}}
+                                         : resolved[0].to_needs_repair_json();
+        return TypedAxisStatus::NeedsRepair;
+    }
+    return axis_from_straight_edge(resolved[0].bound_shape, axis_out, err)
+               ? TypedAxisStatus::Resolved
+               : TypedAxisStatus::Refused;
+}
+
+bool axis_from_legacy_edge(const OpContext& ctx, const std::string& body_id, const std::string& edge_id,
+                           gp_Ax1& axis_out, std::string& err) {
+    const session::BodyRecord* rec = ctx.bodies.get(body_id);
+    if (!rec) {
+        err = "Revolve: axis edge body not found: " + body_id;
+        return false;
+    }
+    return axis_from_straight_edge(
+        elementmap::ElementMapPartition::shape_for_topokey(rec->geom, edge_id), axis_out, err);
 }
 
 }  // namespace
@@ -166,7 +246,19 @@ OpOutcome execute_revolve(OpContext& ctx, const json& op, const std::string& op_
             axis_ok = axis_from_sketch_line(ctx, read_str(ax, "sketchId"), read_str(ax, "lineId"),
                                             axis, aerr);
         } else if (kind == "edge") {
-            axis_ok = axis_from_edge(ctx, read_str(ax, "bodyId"), read_str(ax, "edgeId"), axis, aerr);
+            if (ax.contains("edgeRef")) {
+                json repair;
+                const TypedAxisStatus status = axis_from_typed_edge(ctx, ax, op_id, axis, repair, aerr);
+                if (status == TypedAxisStatus::NeedsRepair) {
+                    OpOutcome out;
+                    out.needs_repair.push_back(std::move(repair));
+                    return out;
+                }
+                axis_ok = status == TypedAxisStatus::Resolved;
+            } else {
+                axis_ok = axis_from_legacy_edge(ctx, read_str(ax, "bodyId"), read_str(ax, "edgeId"),
+                                                axis, aerr);
+            }
         }
     }
     if (!axis_ok) {
@@ -220,7 +312,10 @@ OpOutcome execute_revolve(OpContext& ctx, const json& op, const std::string& op_
     // Publish the successor: a single-solid result modifies the target in place; a
     // multi-solid boolean result splits into deterministic children `body_<opId>:<k>`
     // (SCHEMA §2, §7.2, D1 — parity with ExtrudeOp/BooleanOp).
-    publish_boolean_result(ctx, op_id, target_id, br.shape, builder.get(), out);
+    if (publish_boolean_result(ctx, op_id, target_id, br.shape, builder.get(), out) ==
+        BooleanPublishResult::Empty) {
+        return OpOutcome::fail("OP_FAILED", "Revolve boolean produced no solids");
+    }
     return out;
 }
 

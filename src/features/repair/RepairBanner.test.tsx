@@ -6,6 +6,7 @@ import type { NeedsRepairEvent } from "@/ipc/types";
 
 const evt = (revision: number, n: number): NeedsRepairEvent => ({
   revision,
+  snapshotId: revision * 100,
   items: Array.from({ length: n }, (_, i) => ({
     opId: "op_5",
     refId: `op_5.input${i}`,
@@ -45,7 +46,7 @@ describe("RepairBanner", () => {
     render(<RepairBanner />);
     act(() => repairStore.getState().applyEvent(evt(5, 2)));
     expect(screen.getByTestId("repair-banner")).toBeInTheDocument();
-    act(() => repairStore.getState().applyEvent({ revision: 6, items: [] }));
+    act(() => repairStore.getState().applyEvent({ revision: 6, snapshotId: 600, items: [] }));
     expect(screen.queryByTestId("repair-banner")).toBeNull();
   });
 });

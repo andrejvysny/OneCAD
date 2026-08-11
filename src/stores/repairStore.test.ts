@@ -12,6 +12,7 @@ const item = (refId: string, opId = "op_5", candidateCount = 2) => ({
 
 const event = (revision: number, refIds: string[]): NeedsRepairEvent => ({
   revision,
+  snapshotId: revision * 100,
   items: refIds.map((r) => item(r)),
 });
 
@@ -31,7 +32,7 @@ describe("repairStore", () => {
     repairStore.getState().setExpanded("op_5.input0");
     expect(repairStore.getState().panelOpen).toBe(true);
 
-    repairStore.getState().applyEvent({ revision: 8, items: [] });
+    repairStore.getState().applyEvent({ revision: 8, snapshotId: 800, items: [] });
     const s = repairStore.getState();
     expect(s.items).toHaveLength(0);
     expect(s.panelOpen).toBe(false);
@@ -74,5 +75,14 @@ describe("repairStore", () => {
     repairStore.getState().setExpanded("op_5.input1");
     repairStore.getState().applyEvent(event(2, ["op_5.input0"]));
     expect(repairStore.getState().expandedRefId).toBeNull();
+  });
+
+  it("drops an out-of-order event instead of resurrecting older candidates", () => {
+    repairStore.getState().applyEvent(event(8, ["op_5.input0"]));
+    repairStore.getState().applyEvent(event(7, ["op_5.input1"]));
+    const state = repairStore.getState();
+    expect(state.revision).toBe(8);
+    expect(state.snapshotId).toBe(800);
+    expect(state.items.map((item) => item.refId)).toEqual(["op_5.input0"]);
   });
 });

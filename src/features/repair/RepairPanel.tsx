@@ -19,7 +19,27 @@ type CandidateLoad =
   // input, or an op with no addressable slots). Showing clickable candidates here
   // would send a command the backend can only reject — say so instead.
   | { status: "not-rebindable" }
-  | { status: "ready"; candidates: ResolveCandidate[] };
+  | {
+      status: "ready";
+      candidates: ResolveCandidate[];
+      snapshotId: number;
+      revision: number;
+      bodyId?: string;
+    };
+
+function loadKey(revision: number, snapshotId: number, refId: string): string {
+  return `${revision}:${snapshotId}:${refId}`;
+}
+
+function isCurrentRepair(refId: string, revision: number, snapshotId: number): boolean {
+  const state = repairStore.getState();
+  return (
+    state.revision === revision &&
+    state.snapshotId === snapshotId &&
+    state.expandedRefId === refId &&
+    state.items.some((item) => item.refId === refId)
+  );
+}
 
 /** Humanize a repair reason token for display. */
 function reasonText(reason: string): string {
@@ -54,6 +74,8 @@ function refTail(refId: string): string {
  */
 export function RepairPanel() {
   const items = useRepairStore((s) => s.items);
+  const revision = useRepairStore((s) => s.revision);
+  const snapshotId = useRepairStore((s) => s.snapshotId);
   const expandedRefId = useRepairStore((s) => s.expandedRefId);
   const features = useDocumentStore((s) => s.features);
   const [loads, setLoads] = useState<Record<string, CandidateLoad>>({});
@@ -69,41 +91,72 @@ export function RepairPanel() {
   );
 
   const expand = useCallback((item: NeedsRepairItem) => {
-    const next = repairStore.getState().expandedRefId === item.refId ? null : item.refId;
+    const state = repairStore.getState();
+    const eventRevision = state.revision;
+    const eventSnapshotId = state.snapshotId;
+    const next = state.expandedRefId === item.refId ? null : item.refId;
     repairStore.getState().setExpanded(next);
     // A cached `not-rebindable` verdict is NOT sticky: it is derived from the
     // item's op TYPE, which comes from the projection — so a verdict reached
     // before the projection hydrated must be re-taken on the next expand rather
     // than telling the user forever that a rebindable slot cannot be rebound.
-    const cached = loads[item.refId];
+    const key = loadKey(eventRevision, eventSnapshotId, item.refId);
+    const cached = loads[key];
     if (next && (!cached || cached.status === "not-rebindable")) {
-      setLoads((s) => ({ ...s, [item.refId]: { status: "loading" } }));
+      setLoads((s) => ({ ...s, [key]: { status: "loading" } }));
       // Resolve the slot's InputPath FIRST: with no path there is nothing a click
       // could do, so the candidate fetch would only offer a doomed affordance.
       repairInputPath(item)
         .then(async (path) => {
+          if (!isCurrentRepair(item.refId, eventRevision, eventSnapshotId)) return;
           if (!path) {
-            setLoads((s) => ({ ...s, [item.refId]: { status: "not-rebindable" } }));
+            setLoads((s) => ({ ...s, [key]: { status: "not-rebindable" } }));
             return;
           }
-          const results = await createClient().resolveRefs([{ refId: item.refId }]);
+          const results = await createClient().resolveRefs([
+            { refId: item.refId, snapshotId: eventSnapshotId, revision: eventRevision },
+          ]);
+          if (!isCurrentRepair(item.refId, eventRevision, eventSnapshotId)) return;
           const r = results.find((x) => x.refId === item.refId) ?? results[0];
+          if (
+            !r ||
+            r.refId !== item.refId ||
+            r.snapshotId !== eventSnapshotId ||
+            r.revision !== eventRevision
+          ) {
+            throw new Error("Repair candidates expired — reopen this reference");
+          }
           const candidates = [...(r?.candidates ?? [])].sort((a, b) => b.score - a.score);
-          setLoads((s) => ({ ...s, [item.refId]: { status: "ready", candidates } }));
-        })
-        .catch((e: unknown) => {
           setLoads((s) => ({
             ...s,
-            [item.refId]: { status: "error", message: e instanceof Error ? e.message : String(e) },
+            [key]: {
+              status: "ready",
+              candidates,
+              snapshotId: r.snapshotId,
+              revision: r.revision,
+              bodyId: r.bodyId,
+            },
+          }));
+        })
+        .catch((e: unknown) => {
+          if (!isCurrentRepair(item.refId, eventRevision, eventSnapshotId)) return;
+          setLoads((s) => ({
+            ...s,
+            [key]: { status: "error", message: e instanceof Error ? e.message : String(e) },
           }));
         });
     }
   }, [loads]);
 
-  const choose = useCallback(async (item: NeedsRepairItem, candidate: ResolveCandidate) => {
+  const choose = useCallback(async (
+    item: NeedsRepairItem,
+    candidate: ResolveCandidate,
+    load: Extract<CandidateLoad, { status: "ready" }>,
+  ) => {
+    if (!isCurrentRepair(item.refId, load.revision, load.snapshotId)) return;
     setBusyRefId(item.refId);
     try {
-      await rebindCandidate(item, candidate);
+      await rebindCandidate(item, candidate, load.snapshotId);
     } finally {
       setBusyRefId(null);
       repairStore.getState().setHoveredWorldPos(null);
@@ -133,7 +186,7 @@ export function RepairPanel() {
       <div>
         {items.map((item) => {
           const open = expandedRefId === item.refId;
-          const load = loads[item.refId];
+          const load = loads[loadKey(revision, snapshotId, item.refId)];
           const busy = busyRefId === item.refId;
           return (
             <div
@@ -192,7 +245,7 @@ export function RepairPanel() {
                         refId={item.refId}
                         candidate={c}
                         disabled={busy}
-                        onChoose={() => void choose(item, c)}
+                        onChoose={() => void choose(item, c, load)}
                       />
                     ))}
                 </div>

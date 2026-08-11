@@ -1654,9 +1654,9 @@ fn stronger_regen(a: RegenHint, b: RegenHint) -> RegenHint {
 
 /// Validates fillet/chamfer edge consistency (F2): when the typed `edges` list
 /// is populated it must stay in lockstep with the bare `edge_ids` — equal length,
-/// and each typed ref's `primary.element` (when present) must equal the parallel
-/// `edge_ids` entry. Version-1 frozen closures require a complete EDGE primary on
-/// every ref; only legacy records may use the empty or intent-only form.
+/// and every typed ref must carry the matching EDGE primary on one operated body.
+/// Empty `edges` remains the only legacy form; a mixed typed/intent-only list has
+/// no unambiguous owner and must not reach the worker's descriptor fallback.
 /// Non-fillet/chamfer ops and opaque ops are trivially valid.
 fn validate_fillet_lockstep(op: &Operation) -> Result<(), DomainError> {
     let (edge_ids, edges, closure_version) = match op {
@@ -1683,21 +1683,33 @@ fn validate_fillet_lockstep(op: &Operation) -> Result<(), DomainError> {
             edge_ids.len()
         )));
     }
+    let mut target_body = None;
     for (i, e) in edges.iter().enumerate() {
-        if closure_version == Some(1)
-            && !matches!(e.primary.as_ref(), Some(primary) if primary.kind == ElementKind::Edge)
-        {
+        let primary = e.primary.as_ref().ok_or_else(|| {
+            DomainError::Validation(format!(
+                "fillet/chamfer edge {i}: typed ref requires an EDGE primary"
+            ))
+        })?;
+        if primary.kind != ElementKind::Edge {
             return Err(DomainError::Validation(format!(
-                "version-1 tangent closure edge {i} requires an EDGE primary"
+                "fillet/chamfer edge {i}: typed ref requires an EDGE primary"
             )));
         }
-        if let Some(primary) = &e.primary {
-            if primary.element != edge_ids[i] {
+        if primary.element != edge_ids[i] {
+            return Err(DomainError::Validation(format!(
+                "fillet/chamfer edge {i}: typed ref element {} != edgeIds[{i}] {}",
+                primary.element, edge_ids[i]
+            )));
+        }
+        if let Some(target) = target_body {
+            if primary.body != target {
                 return Err(DomainError::Validation(format!(
-                    "fillet/chamfer edge {i}: typed ref element {} != edgeIds[{i}] {}",
-                    primary.element, edge_ids[i]
+                    "fillet/chamfer edge {i}: typed ref body {} != operated body {target}",
+                    primary.body
                 )));
             }
+        } else {
+            target_body = Some(primary.body);
         }
     }
     Ok(())
@@ -2149,7 +2161,30 @@ fn set_input(
             }
         }
         (InputPath::RevolveAxis, KnownOperation::Revolve(p)) => {
-            p.axis = Some(want_axis(reference)?);
+            match reference {
+                // Repair candidates are semantic edge refs. Write both the typed
+                // evidence and the legacy mirror in one transaction; later replay
+                // always takes the typed path when it exists.
+                InputRef::Element(edge_ref) => {
+                    let primary = edge_ref.primary.as_ref().ok_or_else(|| {
+                        DomainError::InvalidReference(
+                            "revolve axis edge ref requires a primary binding".into(),
+                        )
+                    })?;
+                    if primary.kind != crate::document::refs::ElementKind::Edge {
+                        return Err(DomainError::InvalidReference(
+                            "revolve axis ref must be an edge".into(),
+                        ));
+                    }
+                    p.axis = Some(crate::document::refs::AxisRef::Element {
+                        body: primary.body,
+                        edge: primary.element.clone(),
+                        edge_ref: Some(edge_ref.clone()),
+                        extra: Default::default(),
+                    });
+                }
+                _ => p.axis = Some(want_axis(reference)?),
+            }
         }
         (InputPath::ExtrudeProfile, KnownOperation::Revolve(p)) => {
             p.profile = Some(want_region(reference)?);
@@ -3327,6 +3362,59 @@ mod tests {
         let err = validate_shell_lockstep(&shell_op(vec![ElementId::new("f1")], vec![wrong_body]))
             .unwrap_err();
         assert!(err.to_string().contains("!= targetBodyId"));
+    }
+
+    #[test]
+    fn edge_ops_require_one_typed_operated_body() {
+        let edge_ids = vec![ElementId::new("e1"), ElementId::new("e2")];
+        let mut foreign = shell_face("e2", ElementKind::Edge);
+        foreign.primary.as_mut().unwrap().body = BodyId(Uuid::from_u128(10));
+        for op in [
+            Operation::Known(KnownOperation::Fillet(
+                crate::document::record::FilletParams {
+                    radius: Scalar::new(2.0),
+                    edge_ids: edge_ids.clone(),
+                    edges: vec![shell_face("e1", ElementKind::Edge), foreign.clone()],
+                    chain_tangent_edges: false,
+                    tangent_closure_version: None,
+                    extra: Default::default(),
+                },
+            )),
+            Operation::Known(KnownOperation::Chamfer(
+                crate::document::record::ChamferParams {
+                    radius: Scalar::new(2.0),
+                    distance2: None,
+                    edge_ids: edge_ids.clone(),
+                    edges: vec![shell_face("e1", ElementKind::Edge), foreign.clone()],
+                    chain_tangent_edges: false,
+                    tangent_closure_version: None,
+                    extra: Default::default(),
+                },
+            )),
+        ] {
+            let err = validate_fillet_lockstep(&op).unwrap_err();
+            assert!(err.to_string().contains("operated body"));
+        }
+
+        let intent_only = Operation::Known(KnownOperation::Fillet(
+            crate::document::record::FilletParams {
+                radius: Scalar::new(2.0),
+                edge_ids: vec![ElementId::new("e1")],
+                edges: vec![ElementRef {
+                    primary: None,
+                    intent: None,
+                    anchor: None,
+                    extra: Default::default(),
+                }],
+                chain_tangent_edges: false,
+                tangent_closure_version: None,
+                extra: Default::default(),
+            },
+        ));
+        assert!(validate_fillet_lockstep(&intent_only)
+            .unwrap_err()
+            .to_string()
+            .contains("EDGE primary"));
     }
 
     #[test]

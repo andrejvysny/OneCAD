@@ -1,5 +1,15 @@
 # OneCAD-Tauri Migration TODO
 
+## MODEL-CORRECTNESS-P0 + REF-OWNERSHIP-AND-SNAPSHOT P1 (2026-08-11) — COMPLETE
+
+- [x] P0 — deferred replacement guard; authoritative `SaveOutcome`; classified terminals; zero-solid Boolean refusal; circular `angle / count`; semantic Draft refusal; per-session preview ownership; Boolean re-arm.
+- [x] P1A — typed-ref local ownership before ladder scoring; stale ToFace/Hole promotion and OffsetFace adoption fences.
+- [x] P1B — provenance-versioned repair candidates; additive typed Revolve body-edge axis with no ordinal fallback.
+  - [x] `ResolveRefs` echoes `{revision, snapshotId, refId, bodyId}`; candidate loads key on that tuple, old events/loads/clicks cannot promote stale ordinals. Focused FE 32/32; Rust lib 256/256.
+- [~] Gates — worker Release + CTest 112/112; Cargo fmt/clippy/workspace worker tests; `npx tsc --noEmit`; Bun build; Vitest 241 files / 4114 tests all pass. Focused Playwright Chromium+WebKit retries 0: 8/8 pass. Full Playwright retries 0 remains flaky: final run 387/392 (Chromium Hole/Revolve/repair-hover/sketch-multi-object); manual Tauri smoke and T0 digest/semantic campaign not run.
+
+Gate evidence: baseline `1c11d49`; `scripts/build-worker.sh Release`; `ctest --test-dir worker/build --output-on-failure`; `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `ONECAD_WORKER_PATH=$PWD/../worker/build/onecad-worker ONECAD_REQUIRE_WORKER=1 cargo test --workspace`; `npx tsc --noEmit`; `bun run build`; `bun run test`; `bunx playwright test e2e/repair-rebind-multibody.spec.ts e2e/sketch-multi-object.spec.ts --project=chromium --project=webkit --retries=0`. Untracked roadmap bundle intentionally untouched.
+
 ## TRACK A — a CI that means something (2026-08-10)
 
 Goal: before any R1 work, make "green" a fact CI enforces rather than a claim verified by hand. Four work packages, all landed.

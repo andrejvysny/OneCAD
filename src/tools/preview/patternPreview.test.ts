@@ -76,8 +76,12 @@ describe("circular pattern placement", () => {
     expect(circularAnglesDeg(360, 4)).toEqual([0, 90, 180, 270]);
   });
 
-  it("circularAnglesDeg spreads a partial sweep across count−1 gaps", () => {
-    expect(circularAnglesDeg(180, 3)).toEqual([0, 90, 180]);
+  it("circularAnglesDeg follows the worker rule for a partial sweep", () => {
+    expect(circularAnglesDeg(180, 3)).toEqual([0, 60, 120]);
+  });
+
+  it("circularAnglesDeg keeps negative partial sweeps on the same count divisor", () => {
+    expect(circularAnglesDeg(-180, 3)).toEqual([0, -60, -120]);
   });
 
   it("circularGhostTransforms yields count−1 rotate clones about the axis", () => {

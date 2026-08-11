@@ -163,6 +163,7 @@ fn axis_strategy() -> impl Strategy<Value = Option<AxisRef>> {
             Some(AxisRef::Element {
                 body,
                 edge: ElementId::new(e),
+                edge_ref: None,
                 extra,
             })
         }),

@@ -268,6 +268,7 @@ export type WireInputPath =
   | { path: "filletEdges"; index: number }
   | { path: "shellOpenFaces"; index: number }
   | { path: "holeFace" }
+  | { path: "revolveAxis" }
   | { path: "extrudeTargetFace"; second: boolean }
   | { path: "offsetFaceFace"; index: number }
   | { path: "offsetFaceOpposite" };
@@ -925,6 +926,14 @@ export function inputPathFor(
     // `inputs` = `[host body, host face]`. Slot 0 is a whole body.
     case "Hole":
       return slotIndex === 1 ? { path: "holeFace" } : null;
+    // A typed body-edge axis is the sole semantic input. Sketch-line and legacy
+    // edge axes have no slot, so require the stored typed companion before
+    // exposing a repair action.
+    case "Revolve":
+      return slotIndex === 0 && params?.axis && typeof params.axis === "object" &&
+          (params.axis as Record<string, unknown>).edgeRef
+        ? { path: "revolveAxis" }
+        : null;
     case "Extrude":
       return extrudeTargetFacePath(slotIndex, params);
     // `inputs` = [operative faces in stored order, then the Total opposite LAST].
@@ -933,8 +942,7 @@ export function inputPathFor(
     case "OffsetFace":
       return offsetFacePath(slotIndex, params);
     // Whole-body slots (Boolean `[target, tool]`, pattern/mirror source,
-    // TransformBody targets) and the ops with no `inputs[]` at all (Sketch,
-    // Revolve — its axis is an AxisRef, Loft, Sweep, ImportStep).
+    // TransformBody targets) and the ops with no addressable `inputs[]`.
     default:
       return null;
   }

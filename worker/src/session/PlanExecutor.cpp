@@ -21,6 +21,7 @@
 #include "ops/ImportOp.h"
 #include "ops/MirrorOp.h"
 #include "ops/OffsetFaceOp.h"
+#include "ops/OpCommon.h"
 #include "ops/TransformOp.h"
 #include "ops/OpTypes.h"
 #include "ops/PatternOp.h"
@@ -375,9 +376,15 @@ CandidateResult execute_candidate_op(ScratchJob& job, const json& op,
     CandidateSnapshot snapshot = snapshot_candidate(job, last_sketch_id);
     const bool post_edit = step_is_post_edit(job, op);
 
-    resolve_input_refs(job, op, op_id,
-                       em::LadderEditContext{post_edit, job.from_zero_replay}, result.delta,
-                       result.needs_repair);
+    // Generic resolution is intentionally body-agnostic: a ref normally resolves
+    // against the body it names. Target-bound operations first reject a typed ref
+    // that claims another body, so descriptor fallback cannot retarget it.
+    result.needs_repair = ops::operation_ref_ownership_repairs(op, op_id);
+    if (result.needs_repair.empty()) {
+        resolve_input_refs(job, op, op_id,
+                           em::LadderEditContext{post_edit, job.from_zero_replay}, result.delta,
+                           result.needs_repair);
+    }
     if (result.needs_repair.empty()) {
         merge_outcome(
             result, run_single_op(job, op, op_id, last_sketch_id, cancel, post_edit,

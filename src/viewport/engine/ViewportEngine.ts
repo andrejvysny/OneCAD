@@ -1682,11 +1682,23 @@ export class ViewportEngine {
     this.previewHiddenBodies.clear();
   }
 
-  /** Remove ALL L2 preview bodies from the scene (registry entries dropped by the caller). */
-  clearPreviewBody(): void {
-    for (const handle of this.previewBodies.values()) this.previewRoot.remove(handle.group);
-    this.previewBodies.clear();
-    this.restorePreviewHiddenBodies();
+  /**
+   * Remove L2 preview bodies. With ids, preserve other preview sessions and their
+   * replacement claims; without ids, release whole preview lane.
+   */
+  clearPreviewBody(bodyIds?: readonly string[]): void {
+    if (bodyIds) {
+      for (const id of bodyIds) {
+        const handle = this.previewBodies.get(id);
+        if (!handle) continue;
+        this.previewRoot.remove(handle.group);
+        this.previewBodies.delete(id);
+      }
+    } else {
+      for (const handle of this.previewBodies.values()) this.previewRoot.remove(handle.group);
+      this.previewBodies.clear();
+      this.restorePreviewHiddenBodies();
+    }
     this.invalidate();
   }
 

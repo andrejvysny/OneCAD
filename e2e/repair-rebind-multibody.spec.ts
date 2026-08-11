@@ -38,13 +38,13 @@ async function pushNeedsRepair(page: Page, items: RepairItemLike[]): Promise<voi
       __stores?: {
         repair: {
           getState(): {
-            applyEvent(e: { revision: number; items: RepairItemLike[] }): void;
+            applyEvent(e: { revision: number; snapshotId: number; items: RepairItemLike[] }): void;
             openPanel(): void;
           };
         };
       };
     };
-    w.__stores?.repair.getState().applyEvent({ revision: 9, items: payload });
+    w.__stores?.repair.getState().applyEvent({ revision: 9, snapshotId: 9, items: payload });
   }, items);
 }
 

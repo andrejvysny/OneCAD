@@ -1050,9 +1050,10 @@ object; the wire layer FLATTENS it (`src-tauri/src/worker/wire.rs`
 flat form; a nested `params.profile` is not consumed by the worker.
 
 `inputs[]` still carries genuine semantic refs for elements that DO need the
-ladder — the Extrude `ToFace` target face, fillet/chamfer edges, shell open
-faces. For a plain `Blind` extrude `inputs[]` is empty; Revolve's `inputs[]` is
-always empty (its axis rides in `params.axis`).
+ladder — the Extrude `ToFace` target face, typed Revolve body-edge axis,
+fillet/chamfer edges, and shell open faces. For a plain `Blind` extrude `inputs[]`
+is empty. A legacy Revolve axis keeps `inputs: []`; a typed body-edge axis owns
+exactly `inputs[0]`, which is the same `params.axis.edgeRef` evidence.
 
 Corrected 2026-07-26 — see [Changelog](#14-changelog). The earlier prose here
 described a `SketchRegion` semantic ref in `inputs[]` that no layer has ever
@@ -1061,18 +1062,29 @@ produced or consumed.
 **Revolve** (`op.revolve`) — field names from OneCAD-CPP `RevolveParams`.
 
 ```json
-// inputs: [] — profile is flat params.sketchId/regionId (see "Profile binding")
+// inputs: [] for sketch-line/legacy-edge axes; typed body-edge axis echoes edgeRef at inputs[0]
 // params
 {
   "sketchId": "sk_1",
   "regionId": "r_ac127d8846949…",
   "angleDeg": 360.0,
   "axis": { "kind": "sketchLine", "sketchId": "sk_1", "lineId": "e1" },
-              // axis.kind ∈ "sketchLine" {sketchId,lineId} | "edge" {bodyId,edgeId} | "none"
+              // axis.kind ∈ "sketchLine" {sketchId,lineId} | "edge" {bodyId,edgeId,edgeRef?} | "none"
   "booleanMode": "NewBody",       // NewBody | Add | Cut | Intersect
   "targetBodyId": ""
 }
 ```
+
+A legacy edge axis is exactly `{kind:"edge",bodyId,edgeId}` and remains
+byte-compatible. New edge-axis records add `edgeRef`, an ordinary versioned
+semantic reference (`{primary:{bodyId,elementId,kind:"edge"},intent:{version,…},anchor}`),
+and duplicate that object at `inputs[0]`. When `edgeRef` is present it is
+authoritative: the worker resolves it through the partition/descriptor ladder and
+never falls back to the snapshot-ordinal `edgeId`. Its `primary.bodyId` MUST equal
+the legacy `bodyId`; a malformed, foreign, or curved axis is named refused, while
+missing/deleted/ambiguous typed edges surface `NeedsRepair` with refId
+`<opId>.input0`. Repair writes `edgeRef.primary` and the legacy `bodyId`/`edgeId`
+together. This is additive; old readers may continue to use the legacy pair.
 
 **Fillet** (`op.fillet`) and **Chamfer** (`op.chamfer`) — split ops sharing the
 OneCAD-CPP `FilletChamferParams` shape (`mode` distinguishes; radius doubles as
@@ -1174,6 +1186,11 @@ OneCAD-CPP `BooleanParams` (`operation` ∈ Union/Cut/Intersect; distinct from t
 ```
 
 `operation` ∈ `Union` | `Cut` | `Intersect`.
+
+- A zero-solid `Cut` or `Intersect` is a recoverable `OP_FAILED`: the target and
+  tool remain intact, no body lifecycle event or mesh is emitted, and the caller
+  may revise the operation. Complete-consumption deletion is not implicit in this
+  standalone operation.
 
 **Shell** (`op.shell`) — hollow a body, removing (opening) selected faces. Field
 names from OneCAD-CPP `ShellParams`. Added M6a (see the [Changelog](#14-changelog)).
@@ -1842,12 +1859,18 @@ without binding anything.
   "refs": [ { "refId": "op_5.input0", "primary": {…}, "intent": {…}, "anchor": {…} } ] }
 // result
 { "resolutions": [
-    { "refId": "op_5.input0", "outcome": "autoBind",   "elementId": "el_…", "score": 0.94, "margin": 0.31 },
-    { "refId": "op_5.input1", "outcome": "needsRepair", "needsRepair": { /* §9 */ } }
+    { "snapshotId": 5012, "revision": 44, "refId": "op_5.input0", "bodyId": "body_3",
+      "outcome": "autoBind", "elementId": "el_…", "score": 0.94, "margin": 0.31 },
+    { "snapshotId": 5012, "revision": 44, "refId": "op_5.input1", "bodyId": "body_3",
+      "outcome": "needsRepair", "needsRepair": { /* §9 */ } }
 ] }
 ```
 
 `outcome` ∈ `autoBind` | `needsRepair` | `unchanged`.
+Every resolution carries the exact `snapshotId`, document `revision`, `refId`, and
+the `bodyId` used to enumerate candidates when one exists. A client MUST cache a
+candidate set by `{revision, snapshotId, refId}` and MUST promote its TopoKeys only
+against that echoed snapshot; a mismatch requires a fresh resolve, never ordinal reuse.
 
 ### 7.6 Geometry
 

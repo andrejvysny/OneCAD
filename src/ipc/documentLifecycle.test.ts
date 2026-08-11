@@ -31,6 +31,7 @@ function dirtyDocumentScopedUi(): void {
   selectionStore.getState().setHover({ kind: "body", id: "body1" });
   repairStore.getState().applyEvent({
     revision: 3,
+    snapshotId: 300,
     items: [{ opId: "f3", refId: "f3.input1", reason: "ambiguous", candidateCount: 2 }],
   });
   repairStore.getState().openPanel();

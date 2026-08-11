@@ -124,6 +124,7 @@ terminal frame is left for the following `expect`. Use for `ExecutePlan`, whose
 |------|--------|
 | [`hello.ndjson`](./hello.ndjson) | handshake happy path: unsolicited `hello` with all version fields, then `OpenSession` |
 | [`echo_error.ndjson`](./echo_error.ndjson) | unknown verb → `PROTOCOL_ERROR` terminal `resp` shape |
+| [`boolean_empty_refusal.ndjson`](./boolean_empty_refusal.ndjson) | zero-solid standalone Boolean refuses without lifecycle events |
 
 Planned (per plan M0/M1 co-sign gate): `capabilities`, `cancellation`,
 `malformed_frame`, `chunked_mesh`, `crash_restart`, `execute_plan_prefix_atomic`,

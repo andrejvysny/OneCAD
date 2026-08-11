@@ -180,6 +180,7 @@ export const REPAIR_NOT_REBINDABLE =
 export async function rebindCandidate(
   item: NeedsRepairItem,
   candidate: ResolveCandidate,
+  snapshotId?: number,
 ): Promise<boolean> {
   const path = await repairInputPath(item);
   if (!path) {
@@ -203,7 +204,7 @@ export async function rebindCandidate(
     const promoted = await promoteOne(client, bodyId, {
       topoKey: candidate.topoKey,
       anchor: { worldPoint: candidate.worldPos },
-    });
+    }, snapshotId);
     if (!promoted) return false;
     // The candidate's TopoKey decides `primary.kind` — a hole/shell slot binds a
     // FACE, and mislabelling it as an edge would poison the descriptor rung.

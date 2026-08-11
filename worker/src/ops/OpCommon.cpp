@@ -27,6 +27,7 @@
 #include "loop/LoopDetector.h"
 #include "loop/RegionTable.h"
 #include "loop/RegionUtils.h"
+#include "elementmap/Ladder.h"
 #include "ops/CancelProgress.h"
 #include "sketch/WireSketch.h"
 
@@ -49,6 +50,151 @@ double read_scalar(const json& params, const char* key, double dflt) {
 std::string read_str(const json& o, const char* key, const std::string& dflt) {
     if (o.is_object() && o.contains(key) && o[key].is_string()) return o[key].get<std::string>();
     return dflt;
+}
+
+namespace {
+
+json ownership_repair(const json& input, const std::string& ref_id,
+                      const std::string& message) {
+    json anchor = json::object();
+    std::string element_id;
+    if (input.is_object()) {
+        if (input.contains("anchor") && input["anchor"].is_object()) anchor = input["anchor"];
+        if (input.contains("primary") && input["primary"].is_object()) {
+            element_id = read_str(input["primary"], "elementId");
+        }
+    }
+    return json{{"refId", ref_id},
+                {"elementId", element_id},
+                {"ladderFailed", "descriptor"},
+                {"reason", "no-candidates"},
+                {"scoringVersion", elementmap::kResolverVersion},
+                {"candidates", json::array()},
+                {"anchor", std::move(anchor)},
+                {"uiLabel", message}};
+}
+
+const json* input_at(const json& op, std::size_t index) {
+    if (!op.contains("inputs") || !op["inputs"].is_array() || index >= op["inputs"].size()) {
+        return nullptr;
+    }
+    return &op["inputs"][index];
+}
+
+const json* primary_of(const json* input) {
+    if (input == nullptr || !input->is_object() || !input->contains("primary") ||
+        !(*input)["primary"].is_object()) {
+        return nullptr;
+    }
+    return &(*input)["primary"];
+}
+
+void append_face_ownership_repair(std::vector<json>& out, const json* input,
+                                  const std::string& ref_id, const std::string& target_id,
+                                  const char* op_name) {
+    const json* primary = primary_of(input);
+    if (primary == nullptr || read_str(*primary, "kind") != "face") {
+        out.push_back(ownership_repair(input ? *input : json(), ref_id,
+                                       std::string(op_name) + " requires a typed face primary"));
+        return;
+    }
+    const std::string body_id = read_str(*primary, "bodyId");
+    if (body_id.empty() || body_id != target_id) {
+        out.push_back(ownership_repair(
+            *input, ref_id, std::string(op_name) + " face primary body " +
+                                 (body_id.empty() ? "<missing>" : body_id) +
+                                 " does not match target body " + target_id));
+    }
+}
+
+}  // namespace
+
+std::vector<json> operation_ref_ownership_repairs(const json& op, const std::string& op_id) {
+    std::vector<json> out;
+    const std::string type = read_str(op, "opType");
+    const json params = op.contains("params") && op["params"].is_object()
+                            ? op["params"]
+                            : json::object();
+
+    if (type == "Fillet" || type == "Chamfer") {
+        std::string target_id;
+        if (!op.contains("inputs") || !op["inputs"].is_array()) return out;
+        for (std::size_t i = 0; i < op["inputs"].size(); ++i) {
+            const json& input = op["inputs"][i];
+            const json* primary = primary_of(&input);
+            const std::string ref_id = op_id + ".input" + std::to_string(i);
+            if (primary == nullptr || read_str(*primary, "kind") != "edge") {
+                out.push_back(ownership_repair(
+                    input, ref_id, type + " requires every typed edge ref to carry an edge primary"));
+                continue;
+            }
+            const std::string body_id = read_str(*primary, "bodyId");
+            if (body_id.empty()) {
+                out.push_back(ownership_repair(input, ref_id,
+                                                type + " edge primary has no operated body"));
+                continue;
+            }
+            if (target_id.empty()) {
+                target_id = body_id;
+            } else if (body_id != target_id) {
+                out.push_back(ownership_repair(
+                    input, ref_id, type + " edge primary body " + body_id +
+                                       " does not match operated body " + target_id));
+            }
+        }
+        return out;
+    }
+
+    if (type == "Shell") {
+        std::string target_id = read_str(params, "targetBodyId");
+        if (target_id.empty() && op.contains("inputs") && op["inputs"].is_array()) {
+            for (const json& input : op["inputs"]) {
+                const json* primary = primary_of(&input);
+                if (primary != nullptr && read_str(*primary, "kind") == "face") {
+                    target_id = read_str(*primary, "bodyId");
+                    if (!target_id.empty()) break;
+                }
+            }
+        }
+        if (target_id.empty()) return out;
+        if (!op.contains("inputs") || !op["inputs"].is_array()) return out;
+        for (std::size_t i = 0; i < op["inputs"].size(); ++i) {
+            const json* input = input_at(op, i);
+            const json* primary = primary_of(input);
+            if (primary != nullptr && read_str(*primary, "kind") == "body") continue;
+            append_face_ownership_repair(out, input, op_id + ".input" + std::to_string(i),
+                                         target_id, "Shell");
+        }
+        return out;
+    }
+
+    if (type == "Hole") {
+        const std::string target_id = read_str(params, "targetBodyId");
+        if (target_id.empty()) return out;
+        // SCHEMA §7.3 reserves slot 0 for the host body and slot 1 for the host
+        // face. Keep the positional contract even when a malformed primary lacks
+        // its `kind`: otherwise it could slip through to `params.face` fallback.
+        if (const json* face_input = input_at(op, 1)) {
+            append_face_ownership_repair(out, face_input, op_id + ".input1", target_id,
+                                         "Hole");
+        } else if (params.contains("face") && params["face"].is_object()) {
+            append_face_ownership_repair(out, &params["face"], op_id + ".input1", target_id,
+                                         "Hole");
+        }
+        return out;
+    }
+
+    if (type == "OffsetFace") {
+        const std::string target_id = read_str(params, "targetBodyId");
+        if (target_id.empty()) return out;
+        if (!op.contains("inputs") || !op["inputs"].is_array()) return out;
+        for (std::size_t i = 0; i < op["inputs"].size(); ++i) {
+            append_face_ownership_repair(out, input_at(op, i),
+                                         op_id + ".input" + std::to_string(i), target_id,
+                                         "OffsetFace");
+        }
+    }
+    return out;
 }
 
 std::optional<TopoDS_Face> build_profile_face(const json& sketch_params,
@@ -280,10 +426,13 @@ std::vector<TopoDS_Shape> ordered_solids(const TopoDS_Shape& shape) {
     return solids;
 }
 
-void publish_boolean_result(OpContext& ctx, const std::string& op_id,
-                            const std::string& target_id, const TopoDS_Shape& result,
-                            BRepBuilderAPI_MakeShape* builder, OpOutcome& out) {
+BooleanPublishResult publish_boolean_result(OpContext& ctx, const std::string& op_id,
+                                            const std::string& target_id,
+                                            const TopoDS_Shape& result,
+                                            BRepBuilderAPI_MakeShape* builder,
+                                            OpOutcome& out) {
     const std::vector<RankedSolid> solids = ranked_solids(result);
+    if (solids.empty()) return BooleanPublishResult::Empty;
     if (solids.size() <= 1) {
         // Single body: modify the target in place (BodyId PRESERVED — corpus invariant).
         ctx.bodies.create(target_id, op_id, result);
@@ -297,7 +446,7 @@ void publish_boolean_result(OpContext& ctx, const std::string& op_id,
         if (solids.size() == 1) key = solids[0].key;
         out.body_events.push_back({"modified", target_id, key});
         out.body_ids.push_back(target_id);
-        return;
+        return BooleanPublishResult::Published;
     }
     // Split: the target is REPLACED by k deterministic children `body_<opId>:<k>`
     // (SCHEMA §2, D1). Emit a Deleted for the parent + a Created per child. The
@@ -313,6 +462,7 @@ void publish_boolean_result(OpContext& ctx, const std::string& op_id,
         out.body_events.push_back({"created", child_id, solids[k].key});
         out.body_ids.push_back(child_id);
     }
+    return BooleanPublishResult::Published;
 }
 
 }  // namespace onecad::ops

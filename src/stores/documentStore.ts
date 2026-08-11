@@ -9,7 +9,13 @@
  */
 import { createStore, useStore } from "zustand";
 
-import type { FeaturePrimaryKind, Rgba, SketchHostFace, SketchPlane } from "@/ipc/types";
+import type {
+  FeaturePrimaryKind,
+  Rgba,
+  SaveOutcome,
+  SketchHostFace,
+  SketchPlane,
+} from "@/ipc/types";
 
 export type DocStatus = "empty" | "loading" | "ready";
 
@@ -202,6 +208,8 @@ export interface DocumentState extends DocumentProjection {
   applySnapshot(snapshot: DocumentProjection): void;
   /** Merge a partial projection delta (backend change event). */
   applyChange(change: Partial<DocumentProjection>): void;
+  /** Adopt the authoritative result of a save without waiting for a later event. */
+  applySaveOutcome(outcome: SaveOutcome): void;
   /** Local visibility flip for a body or sketch (drives the tree eye toggle). */
   setVisibility(id: string, visible: boolean): void;
   /** Register a sketch (e.g. a freshly created one) in the tree/registry. */
@@ -416,6 +424,20 @@ export const documentStore = createStore<DocumentState>()((set) => ({
 
   applyChange(change) {
     set(change);
+  },
+
+  applySaveOutcome(outcome) {
+    set((s) => {
+      if (s.documentId !== undefined && s.documentId !== outcome.documentId) return {};
+      return {
+        revision: outcome.currentRevision,
+        dirty: !outcome.clean,
+        title: outcome.title,
+        // Save As changes the backend title, so an older session-only nickname
+        // must not mask the authoritative filename.
+        displayTitle: null,
+      };
+    });
   },
 
   setVisibility(id, visible) {

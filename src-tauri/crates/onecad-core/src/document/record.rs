@@ -357,6 +357,15 @@ impl KnownOperation {
                 refs
             }
             KnownOperation::Hole(p) => vec![&mut p.face],
+            // A typed body-edge Revolve axis is an `inputs[0]` semantic ref.
+            // Legacy axes intentionally have no slot, preserving their payload.
+            KnownOperation::Revolve(p) => match p.axis.as_mut() {
+                Some(AxisRef::Element {
+                    edge_ref: Some(edge_ref),
+                    ..
+                }) => vec![edge_ref],
+                _ => Vec::new(),
+            },
             // NORMATIVE slot order (SCHEMA §7.3 `op.offsetFace`): operative faces
             // in stored order, then the `Total` opposite face LAST when present.
             // `wire::wire_op_inputs`, `document_runtime::element_ref_input` and
@@ -468,6 +477,17 @@ impl Operation {
                 }
                 match &p.axis {
                     Some(AxisRef::SketchLine { sketch, .. }) => inputs.push_sketch(*sketch),
+                    Some(AxisRef::Element {
+                        edge_ref: Some(edge_ref),
+                        ..
+                    }) => {
+                        // `edgeRef` wins for new records. A malformed typed ref
+                        // contributes no legacy fallback: the worker refuses it.
+                        if let Some(primary) = &edge_ref.primary {
+                            inputs.push_body(primary.body);
+                            inputs.push_element(primary.element.clone());
+                        }
+                    }
                     Some(AxisRef::Element { body, edge, .. }) => {
                         inputs.push_body(*body);
                         inputs.push_element(edge.clone());
@@ -1626,6 +1646,20 @@ impl HoleParams {
     /// # Errors
     /// A message naming the violated invariant.
     pub fn validate(&self) -> Result<(), String> {
+        let primary = self
+            .face
+            .primary
+            .as_ref()
+            .ok_or_else(|| "Hole face requires a FACE primary".to_string())?;
+        if primary.kind != ElementKind::Face {
+            return Err("Hole face requires a FACE primary".into());
+        }
+        if primary.body != self.target_body {
+            return Err(format!(
+                "Hole face body {} != targetBodyId {}",
+                primary.body, self.target_body
+            ));
+        }
         if !self.point.is_finite() {
             return Err("Hole point has a non-finite component".into());
         }
@@ -1776,13 +1810,24 @@ impl OffsetFaceParams {
             ));
         }
         for (i, f) in self.faces.iter().enumerate() {
-            if let Some(primary) = &f.primary {
-                if primary.element != self.face_ids[i] {
-                    return Err(format!(
-                        "OffsetFace face {i}: typed ref element {} != faceIds[{i}] {}",
-                        primary.element, self.face_ids[i]
-                    ));
-                }
+            let primary = f
+                .primary
+                .as_ref()
+                .ok_or_else(|| format!("OffsetFace face {i} requires a FACE primary"))?;
+            if primary.kind != ElementKind::Face {
+                return Err(format!("OffsetFace face {i} requires a FACE primary"));
+            }
+            if primary.element != self.face_ids[i] {
+                return Err(format!(
+                    "OffsetFace face {i}: typed ref element {} != faceIds[{i}] {}",
+                    primary.element, self.face_ids[i]
+                ));
+            }
+            if primary.body != self.target_body {
+                return Err(format!(
+                    "OffsetFace face {i}: typed ref body {} != targetBodyId {}",
+                    primary.body, self.target_body
+                ));
             }
         }
         if !self.distance.value.is_finite() {
@@ -1840,13 +1885,28 @@ impl OffsetFaceParams {
             (Some(_), None) | (None, Some(_)) => {
                 Err("OffsetFace oppositeFace and oppositeFaceId must be set together".into())
             }
-            (Some(r), Some(id)) => match &r.primary {
-                Some(primary) if &primary.element != id => Err(format!(
-                    "OffsetFace oppositeFace element {} != oppositeFaceId {id}",
-                    primary.element
-                )),
-                _ => Ok(()),
-            },
+            (Some(r), Some(id)) => {
+                let primary = r
+                    .primary
+                    .as_ref()
+                    .ok_or_else(|| "OffsetFace oppositeFace requires a FACE primary".to_string())?;
+                if primary.kind != ElementKind::Face {
+                    return Err("OffsetFace oppositeFace requires a FACE primary".into());
+                }
+                if &primary.element != id {
+                    return Err(format!(
+                        "OffsetFace oppositeFace element {} != oppositeFaceId {id}",
+                        primary.element
+                    ));
+                }
+                if primary.body != self.target_body {
+                    return Err(format!(
+                        "OffsetFace oppositeFace body {} != targetBodyId {}",
+                        primary.body, self.target_body
+                    ));
+                }
+                Ok(())
+            }
             (None, None) => Ok(()),
         }
     }
@@ -2490,6 +2550,22 @@ mod tests {
         .validate()
         .is_ok());
 
+        let p = HoleParams {
+            face: ElementRef {
+                primary: None,
+                ..hole_face_ref()
+            },
+            ..hole_params()
+        };
+        assert!(p.validate().unwrap_err().contains("FACE primary"));
+        let mut foreign_face = hole_face_ref();
+        foreign_face.primary.as_mut().unwrap().body = body(2);
+        let p = HoleParams {
+            face: foreign_face,
+            ..hole_params()
+        };
+        assert!(p.validate().unwrap_err().contains("!= targetBodyId"));
+
         // ── dimensions ──
         for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             let p = HoleParams {
@@ -2778,6 +2854,24 @@ mod tests {
             ..offset_params()
         };
         assert!(p.validate().unwrap_err().contains("!= faceIds[0]"));
+        let p = OffsetFaceParams {
+            faces: vec![ElementRef {
+                primary: None,
+                ..offset_ref("el_f1")
+            }],
+            ..offset_params()
+        };
+        assert!(p
+            .validate()
+            .unwrap_err()
+            .contains("requires a FACE primary"));
+        let mut foreign_face = offset_ref("el_f1");
+        foreign_face.primary.as_mut().unwrap().body = body(2);
+        let p = OffsetFaceParams {
+            faces: vec![foreign_face],
+            ..offset_params()
+        };
+        assert!(p.validate().unwrap_err().contains("!= targetBodyId"));
 
         // ── the distance ──
         // `Scalar::new` panics on a non-finite value and its Deserialize rejects

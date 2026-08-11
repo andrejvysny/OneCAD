@@ -56,6 +56,7 @@
 #include "elementmap/ElementMapPartition.h"
 #include "nlohmann/json.hpp"
 #include "ops/HoleOp.h"
+#include "ops/OpCommon.h"
 #include "ops/OpTypes.h"
 #include "ops/ShellOp.h"
 #include "session/BodyStore.h"
@@ -255,6 +256,54 @@ void test_topokey_gate() {
           "hazard precondition: A and B have different face counts");
 }
 
+// ── 1b. P1A — typed refs cannot cross an operation's target boundary ─────────
+// The generic ladder remains intentionally body-neutral. This preflight runs before
+// it, so an explicit foreign primary is persisted as NeedsRepair rather than being
+// scored against a congruent decoy on the operation target.
+void test_operation_local_ref_ownership() {
+    const auto ref = [](const char* body, const char* element, const char* kind) {
+        return json{{"primary", {{"bodyId", body}, {"elementId", element}, {"kind", kind}}}};
+    };
+    const auto repairs = [](const json& op) {
+        return ops::operation_ref_ownership_repairs(op, op.at("opId").get<std::string>());
+    };
+
+    for (const char* type : {"Fillet", "Chamfer"}) {
+        const json op = {{"opType", type},
+                         {"opId", std::string("op_") + type},
+                         {"inputs", json::array({ref(kBodyA, "e_a", "edge"),
+                                                   ref(kBodyB, "e_b", "edge")})}};
+        const auto got = repairs(op);
+        check(got.size() == 1 && got[0]["refId"] == std::string("op_") + type + ".input1",
+              std::string(type) + ": mixed-body edge is NeedsRepair before fallback");
+    }
+
+    const json shell = {{"opType", "Shell"},
+                        {"opId", "op_shell_foreign"},
+                        {"params", {{"targetBodyId", kBodyB}}},
+                        {"inputs", json::array({ref(kBodyA, "f_a", "face")})}};
+    check(!repairs(shell).empty(), "Shell: foreign face is NeedsRepair before fallback");
+
+    const json hole = {{"opType", "Hole"},
+                       {"opId", "op_hole_foreign"},
+                       {"params", {{"targetBodyId", kBodyB}}},
+                       {"inputs", json::array({body_input(kBodyB), ref(kBodyA, "f_a", "face")})}};
+    check(!repairs(hole).empty(), "Hole: foreign face is NeedsRepair before fallback");
+
+    const json offset = {{"opType", "OffsetFace"},
+                         {"opId", "op_offset_foreign"},
+                         {"params", {{"targetBodyId", kBodyB}}},
+                         {"inputs", json::array({ref(kBodyA, "f_a", "face")})}};
+    check(!repairs(offset).empty(), "OffsetFace: foreign face is NeedsRepair before fallback");
+
+    const json intent_only = {{"opType", "Fillet"},
+                              {"opId", "op_legacy_intent"},
+                              {"inputs", json::array({{{"intent", {{"kind", "edge"}}}}})}};
+    const auto legacy = repairs(intent_only);
+    check(legacy.size() == 1 && legacy[0]["elementId"].get<std::string>().empty(),
+          "intent-only legacy ref is classified without inventing an owner");
+}
+
 // ── 2. Hole — the SILENT wrong drill ─────────────────────────────────────────
 // The ref's own descriptor (a cylinder face) cannot bind anywhere on a box, so the
 // ONLY thing that could produce geometry here is the foreign ordinal. The point sits
@@ -369,6 +418,7 @@ void test_shell_wrong_wall() {
 
 int main() {
     test_topokey_gate();
+    test_operation_local_ref_ownership();
     test_hole_silent_wrong_drill();
     test_hole_wrong_seat();
     test_shell_wrong_wall();

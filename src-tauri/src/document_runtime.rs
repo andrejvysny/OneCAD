@@ -538,6 +538,13 @@ pub struct DocumentRuntime {
     import_names: HashMap<RecordId, Vec<String>>,
 }
 
+fn title_for_path(path: &Path) -> String {
+    path.file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or_else(|| "Document".to_string())
+}
+
 impl DocumentRuntime {
     /// A fresh blank document ("Untitled").
     #[must_use]
@@ -574,10 +581,7 @@ impl DocumentRuntime {
         let loaded = ContainerReader::open(path)?;
         let read_only = loaded.outcome.read_only;
         let doc = loaded.document().clone();
-        let title = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Document".to_string());
+        let title = title_for_path(path);
         let mut rt = Self::from_document(
             doc,
             title,
@@ -1977,11 +1981,13 @@ impl DocumentRuntime {
     /// clearing `dirty` unconditionally would advertise unsaved work as saved. The
     /// path is adopted either way — the file at `path` is a real (if slightly older)
     /// container, and a subsequent Save must target it rather than re-prompting.
-    pub fn mark_saved(&mut self, path: &Path, revision_at_build: DocumentRevision) {
+    pub fn mark_saved(&mut self, path: &Path, revision_at_build: DocumentRevision) -> bool {
         self.path = Some(path.to_path_buf());
+        self.title = title_for_path(path);
         let now = self.fencing.revision();
         if now == revision_at_build {
             self.dirty = false;
+            true
         } else {
             tracing::info!(
                 "save: document stays DIRTY — edits landed during the container write \
@@ -1989,6 +1995,7 @@ impl DocumentRuntime {
                 revision_at_build.0,
                 now.0
             );
+            false
         }
     }
 
@@ -3297,6 +3304,10 @@ impl DocumentRuntime {
         &self,
         mut req: ResolveRequest,
     ) -> Result<Vec<RefResolution>, EngineError> {
+        // Candidate TopoKeys are ordinals into one snapshot. Unlike a generic
+        // advisory read, this response can be promoted, so never enumerate a
+        // newer head under the caller's older snapshot provenance.
+        self.gate_stale_pick(req.snapshot_id)?;
         for r in &mut req.refs {
             if element_ref_is_empty(&r.element) {
                 if let Some(stored) = self.stored_input_ref(&r.ref_id) {
@@ -3305,6 +3316,15 @@ impl DocumentRuntime {
             }
         }
         self.engine.resolve_refs(req).await
+    }
+
+    /// The stored ref body's identity is the body used by repair candidate
+    /// enumeration. It accompanies the snapshot/revision provenance to the UI.
+    #[must_use]
+    pub fn repair_candidate_body(&self, ref_id: &str) -> Option<String> {
+        self.stored_input_ref(ref_id)
+            .and_then(|reference| reference.primary)
+            .map(|primary| primary.body.to_string())
     }
 
     /// The STORED [`ElementRef`] at the op-input slot a repair `refId`
@@ -4069,7 +4089,7 @@ fn element_ref_is_empty(r: &ElementRef) -> bool {
 
 /// The `index`-th topological input [`ElementRef`] of an op, in the SAME order the
 /// wire `inputs[]` array carries (mirrors `wire::wire_op_inputs`): fillet/chamfer
-/// `edges`, Shell open faces, extrude ToFace target faces, and a Hole's host face
+/// `edges`, a typed Revolve body-edge axis, Shell open faces, extrude ToFace target faces, and a Hole's host face
 /// at slot **1** (slot 0 is the host BODY, which is not an element ref). Ops whose
 /// inputs are whole bodies (Boolean / pattern / mirror) expose no typed element ref.
 ///
@@ -4082,6 +4102,13 @@ fn element_ref_input(op: &Operation, index: usize) -> Option<&ElementRef> {
         return None;
     };
     match k {
+        KnownOperation::Revolve(p) => match p.axis.as_ref() {
+            Some(onecad_core::document::refs::AxisRef::Element {
+                edge_ref: Some(edge_ref),
+                ..
+            }) if index == 0 => Some(edge_ref),
+            _ => None,
+        },
         KnownOperation::Fillet(p) => p.edges.get(index),
         KnownOperation::Chamfer(p) => p.edges.get(index),
         KnownOperation::Shell(p) => p.faces.get(index),

@@ -172,6 +172,9 @@ pub struct FaceRef {
 /// round-trip tests pin this behaviour.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
+// Keep `edgeRef` inline: boxing would change this public, serde-visible shape's
+// ergonomic mutation path for little runtime gain (axes are persisted sparsely).
+#[allow(clippy::large_enum_variant)]
 pub enum AxisRef {
     /// A line entity inside a sketch (SCHEMA `kind:"sketchLine"`).
     SketchLine {
@@ -183,12 +186,19 @@ pub enum AxisRef {
         extra: Extra,
     },
     /// A body edge (SCHEMA `kind:"edge"`; C++ `EdgeRef{bodyId, edgeId}`).
+    ///
+    /// `edge` is the legacy byte-compatible identifier. New records carry
+    /// `edge_ref` too: a versioned semantic reference that supplies the
+    /// descriptor/anchor evidence needed to repair the axis. When present it is
+    /// authoritative; the legacy id remains solely for old readers.
     #[serde(rename = "edge")]
     Element {
         #[serde(rename = "bodyId")]
         body: BodyId,
         #[serde(rename = "edgeId")]
         edge: ElementId,
+        #[serde(default, skip_serializing_if = "Option::is_none", rename = "edgeRef")]
+        edge_ref: Option<ElementRef>,
         #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
         extra: Extra,
     },
@@ -214,6 +224,21 @@ mod tests {
                 "axis-level unknown key must survive round-trip: {json}"
             );
         }
+    }
+
+    #[test]
+    fn typed_edge_axis_keeps_legacy_companion_and_evidence() {
+        let axis: AxisRef = serde_json::from_str(
+            r#"{"kind":"edge","bodyId":"00000000-0000-0000-0000-000000000003","edgeId":"e:9","edgeRef":{"primary":{"bodyId":"00000000-0000-0000-0000-000000000003","elementId":"el_axis","kind":"edge"},"intent":{"version":1,"kind":"edge","descriptor":{"curveType":0}},"anchor":{"worldPoint":[1,2,3]}}}"#,
+        )
+        .unwrap();
+        let AxisRef::Element { edge, edge_ref, .. } = axis else {
+            panic!("expected edge axis");
+        };
+        assert_eq!(edge.as_str(), "e:9", "legacy field survives unchanged");
+        let typed = edge_ref.expect("typed companion");
+        assert_eq!(typed.primary.unwrap().element.as_str(), "el_axis");
+        assert_eq!(typed.intent.unwrap().version, 1);
     }
 
     /// M2: an alien key at the `localFrame` level round-trips via `LocalFrame.extra`.

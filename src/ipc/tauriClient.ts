@@ -70,6 +70,8 @@ import type {
   PromotePick,
   RecentProject,
   RecoveryInfo,
+  RegenTerminal,
+  SaveOutcome,
   RegenFinished,
   ResolveRefRequest,
   ResolveRefResult,
@@ -441,6 +443,7 @@ export function createTauriClient(): CadClient {
   interface Resolved {
     change: DocumentChange | null;
     revision: number;
+    terminal: RegenTerminal;
     errorMessage?: string;
     diagnostics?: OperationDiagnostic[];
   }
@@ -488,7 +491,7 @@ export function createTauriClient(): CadClient {
       if (a.recordId !== undefined) {
         a.pendingChange = change; // authoritative outcome comes with regen-finished
       } else {
-        settle(a, { change, revision: change.revision });
+        settle(a, { change, revision: change.revision, terminal: "published" });
       }
     }
   }
@@ -510,6 +513,7 @@ export function createTauriClient(): CadClient {
           settle(a, {
             change: null,
             revision: rf.revision,
+            terminal: "failed",
             errorMessage: failed?.message ?? rf.message,
             diagnostics: failed?.diagnostics ?? rf.diagnostics,
           });
@@ -519,6 +523,7 @@ export function createTauriClient(): CadClient {
           settle(a, {
             change: scopeChange(change, rf.affectedBodies?.[a.recordId], rf.revision),
             revision: rf.revision,
+            terminal: rf.outcome === "noop" ? "noop" : "published",
           });
         }
       } else if (rf.outcome !== "published") {
@@ -526,6 +531,7 @@ export function createTauriClient(): CadClient {
         settle(a, {
           change: null,
           revision: rf.revision,
+          terminal: rf.outcome === "failed" ? "failed" : "noop",
           errorMessage: rf.outcome === "failed" ? rf.message : undefined,
           diagnostics: rf.outcome === "failed" ? rf.diagnostics : undefined,
         });
@@ -662,7 +668,11 @@ export function createTauriClient(): CadClient {
             // recordId path settles on the regen-finished sibling — buffer only.
             awaiter.pendingChange = lastPublishedChange;
           } else {
-            settle(awaiter, { change: lastPublishedChange, revision: lastPublishedChange.revision });
+            settle(awaiter, {
+              change: lastPublishedChange,
+              revision: lastPublishedChange.revision,
+              terminal: "published",
+            });
           }
         }
       },
@@ -768,6 +778,7 @@ export function createTauriClient(): CadClient {
           appliedOps: projection.appliedOps,
           totalOps: projection.totalOps,
           errorMessage: "Operation added while history is rolled back — roll forward to apply",
+          terminal: "noop",
         };
       }
       // A commit that landed INSIDE the applied prefix but with drafts still
@@ -820,6 +831,7 @@ export function createTauriClient(): CadClient {
       // None` command, forever).
       appliedOps: projection.appliedOps,
       totalOps: projection.totalOps,
+      terminal: resolved?.terminal ?? "timeout",
     };
     if (resolved?.errorMessage) result.errorMessage = resolved.errorMessage;
     if (resolved?.diagnostics) result.diagnostics = resolved.diagnostics;
@@ -860,6 +872,7 @@ export function createTauriClient(): CadClient {
       // post-regen one independently.
       features: projection.features,
       opLabel: "Import",
+      terminal: resolved?.terminal ?? "timeout",
     };
     if (resolved?.errorMessage) result.errorMessage = resolved.errorMessage;
     return result;
@@ -1394,8 +1407,9 @@ export function createTauriClient(): CadClient {
     // no ElementRef, so callers usually pass `refId` only and the backend resolves
     // the stored ref by id. (SEAM: if the backend requires a full ElementRef the
     // needs-repair event must surface it — reported.)
+    const requestedSnapshotId = refs[0]?.snapshotId ?? currentSnapshotId;
     const out = await call<ResolveRefResult[]>(CMD.resolveRefs, {
-      snapshotId: currentSnapshotId,
+      snapshotId: requestedSnapshotId,
       refs: refs.map((r) => ({ refId: r.refId, primary: r.primary, anchor: r.anchor })),
     });
     return out.map((r) => ({ ...r, candidates: r.candidates ?? [] }));
@@ -1536,8 +1550,9 @@ export function createTauriClient(): CadClient {
    * semantics); only a malformed request or a dead worker rejects.
    */
   async function prepareOffsetFace(req: PrepareOffsetFaceRequest): Promise<PrepareOffsetFaceResult> {
-    return call<PrepareOffsetFaceResult>(CMD.prepareOffsetFace, {
-      snapshotId: req.snapshotId ?? currentSnapshotId,
+    const snapshotId = req.snapshotId ?? currentSnapshotId;
+    const result = await call<PrepareOffsetFaceResult>(CMD.prepareOffsetFace, {
+      snapshotId,
       // Same `body_<uuid>` wire form promoteSelection uses; `document-changed`
       // hands the frontend a bare uuid. The two address rungs are MUTUALLY
       // EXCLUSIVE on the wire (the command rejects a pick carrying both), so an
@@ -1550,6 +1565,10 @@ export function createTauriClient(): CadClient {
       chainTangentFaces: req.chainTangentFaces,
       distanceType: req.distanceType,
     });
+    if (result.snapshotId !== snapshotId || currentSnapshotId !== snapshotId) {
+      throw new Error("prepared offset-face closure is stale — re-pick");
+    }
+    return result;
   }
 
   async function prepareEdgeOp(req: PrepareEdgeOpRequest): Promise<PrepareEdgeOpResult> {
@@ -1570,12 +1589,16 @@ export function createTauriClient(): CadClient {
     return result;
   }
 
-  async function promoteSelection(bodyId: string, picks: PromotePick[]): Promise<PromotedElement[]> {
+  async function promoteSelection(
+    bodyId: string,
+    picks: PromotePick[],
+    snapshotId = currentSnapshotId,
+  ): Promise<PromotedElement[]> {
     // promote_selection wants the `body_<uuid>` wire form; document-changed hands
     // the frontend a bare uuid, so prefix it here (get_mesh keeps the bare form).
     const wireBodyId = bodyId.startsWith("body_") ? bodyId : `body_${bodyId}`;
     const out = await call<PromotedElementDto[]>(CMD.promoteSelection, {
-      snapshotId: currentSnapshotId,
+      snapshotId,
       bodyId: wireBodyId,
       picks: picks.map((p) => ({ topoKey: p.topoKey, anchor: p.anchor })),
     });
@@ -1665,21 +1688,20 @@ export function createTauriClient(): CadClient {
       return call<string | null>(CMD.stepFileDialog);
     },
 
-    async saveDocument(path?: string, previewPng?: string | null): Promise<void> {
+    async saveDocument(path?: string, previewPng?: string | null): Promise<SaveOutcome> {
       // `path` null ⇒ the backend reuses the last save path (an unsaved document
       // with no path rejects with an io error; the caller falls back to Save As).
       // `previewPng` null ⇒ no thumbnail this save; the container keeps whatever
       // preview it already had. tauri v2 maps `previewPng` → Rust `preview_png`.
-      await call<void>(CMD.saveDocument, {
+      return call<SaveOutcome>(CMD.saveDocument, {
         path: path ?? null,
         previewPng: previewPng ?? null,
       });
     },
-    async saveDocumentAs(previewPng?: string | null): Promise<string | null> {
+    async saveDocumentAs(previewPng?: string | null): Promise<SaveOutcome | null> {
       const path = await call<string | null>(CMD.saveFileDialog);
       if (!path) return null; // cancelled
-      await call<void>(CMD.saveDocument, { path, previewPng: previewPng ?? null });
-      return path;
+      return call<SaveOutcome>(CMD.saveDocument, { path, previewPng: previewPng ?? null });
     },
     async exportStep(): Promise<string | null> {
       // Rust owns the `.step` save dialog + the worker ExportStep verb; a cancel

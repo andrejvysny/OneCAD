@@ -250,6 +250,26 @@ describe("ModelToolController — Hole", () => {
     });
   });
 
+  it("keeps a stale face promotion in facePick until the user picks again", async () => {
+    build();
+    clientMock.promoteSelection.mockResolvedValueOnce([]);
+    toolStore.getState().setTool("hole");
+    await flush();
+    clickAt();
+    await flush();
+
+    expect(debug().holePhase).toBe("facePick");
+    expect(debug().holePoint).toBeNull();
+    expect(toolChipStore.getState().kind).toBe("none");
+    expect(clientMock.beginPreview).not.toHaveBeenCalled();
+    expect(viewportStore.getState().statusHint?.message).toBe("Selection is out of date — pick again");
+
+    clickAt();
+    await flush();
+    expect(debug().holePhase).toBe("armed");
+    expect(clientMock.beginPreview).toHaveBeenCalledTimes(1);
+  });
+
   it("REFUSES a non-planar face inline and stays in facePick", async () => {
     build();
     planar = false;

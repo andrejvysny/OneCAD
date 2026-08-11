@@ -123,6 +123,7 @@ describe("TimelineStoppedBanner", () => {
     act(() =>
       repairStore.getState().applyEvent({
         revision: 7,
+        snapshotId: 700,
         items: [{ opId: "op_1", refId: "op_1.input0", reason: "ambiguous", candidateCount: 2 }],
       }),
     );

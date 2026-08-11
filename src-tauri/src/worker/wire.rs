@@ -24,7 +24,7 @@ use uuid::Uuid;
 
 use onecad_core::document::body::BodyLifecycleEvent;
 use onecad_core::document::record::{ExtrudeMode, KnownOperation, OffsetDistanceType, Operation};
-use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef};
+use onecad_core::document::refs::{AnchorIntent, AxisRef, ElementKind, ElementRef};
 use onecad_core::document::repair::RepairItem;
 use onecad_core::ids::{
     BodyId, DocumentRevision, ElementId, EntityId, JobId, SnapshotId, TopoKey, WorkerEpoch,
@@ -466,6 +466,16 @@ fn wire_op_inputs(
     inputs: &onecad_core::document::record::OperationInputs,
 ) -> Value {
     let refs: Vec<Value> = match operation {
+        // Typed Revolve body-edge axes use the normal semantic-input route so
+        // descriptor stamping, pre-op ladder resolution and repair provenance
+        // all agree on `<opId>.input0`. A legacy axis remains byte-identical.
+        Operation::Known(KnownOperation::Revolve(p)) => match p.axis.as_ref() {
+            Some(AxisRef::Element {
+                edge_ref: Some(edge_ref),
+                ..
+            }) => vec![element_ref_wire(edge_ref)],
+            _ => Vec::new(),
+        },
         Operation::Known(KnownOperation::Fillet(p)) => {
             edge_input_refs(&p.edges, &p.edge_ids, &inputs.bodies)
         }
@@ -5513,6 +5523,7 @@ mod body_wire_tests {
                     axis: Some(AxisRef::Element {
                         body: target,
                         edge: ElementId::new("e:2"),
+                        edge_ref: None,
                         extra: Default::default(),
                     }),
                     boolean_mode: BooleanMode::Cut,
@@ -5602,6 +5613,7 @@ mod body_wire_tests {
             axis: Some(AxisRef::Element {
                 body: axis_body,
                 edge: ElementId::new("e:2"),
+                edge_ref: None,
                 extra: Default::default(),
             }),
             boolean_mode: BooleanMode::Cut,
@@ -5618,6 +5630,45 @@ mod body_wire_tests {
             "edge-axis body → wire form (defect 4)"
         );
         assert_eq!(w["params"]["targetBodyId"], json!(body_id_wire(target)));
+    }
+
+    #[test]
+    fn wire_op_typed_revolve_axis_emits_one_repairable_input() {
+        let body = BodyId(Uuid::from_u128(0x91));
+        let typed = ElementRef {
+            primary: Some(PrimaryRef {
+                body,
+                element: ElementId::new("el_axis"),
+                kind: ElementKind::Edge,
+                extra: Default::default(),
+            }),
+            intent: Some(onecad_core::document::refs::IntentQuery {
+                version: 1,
+                kind: ElementKind::Edge,
+                descriptor: json!({ "curveType": 0 }),
+                extra: Default::default(),
+            }),
+            anchor: None,
+            extra: Default::default(),
+        };
+        let op = Operation::Known(KnownOperation::Revolve(RevolveParams {
+            profile: None,
+            angle_deg: Scalar::new(90.0),
+            axis: Some(AxisRef::Element {
+                body,
+                edge: ElementId::new("e:stale-legacy"),
+                edge_ref: Some(typed),
+                extra: Default::default(),
+            }),
+            boolean_mode: BooleanMode::NewBody,
+            target_body: None,
+            extra: Default::default(),
+        }));
+        let wire = wire_op(&planned(op.clone(), op.derive_inputs()));
+        assert_eq!(wire["params"]["axis"]["edgeId"], json!("e:stale-legacy"));
+        assert_eq!(wire["inputs"].as_array().map(Vec::len), Some(1));
+        assert_eq!(wire["inputs"][0]["primary"]["elementId"], json!("el_axis"));
+        assert_eq!(wire["inputs"][0], wire["params"]["axis"]["edgeRef"]);
     }
 
     // ── HISTORY-HARDEN H5 — op-set agreement ────────────────────────────────
@@ -5664,11 +5715,11 @@ mod body_wire_tests {
                 json!({ "distance": 5.0, "draftAngleDeg": 0.0, "distance2": 0.0, "extrudeMode": "ToFace", "targetFace": face_ref, "twoDirections": true, "extrudeMode2": "ToFace", "targetFace2": face_ref, "booleanMode": "NewBody" }),
                 2,
             ),
-            // Revolve's edge axis is an `AxisRef`, not an `ElementRef` — no slot.
+            // A typed Revolve edge axis is a semantic `inputs[0]` companion.
             (
                 "Revolve",
-                json!({ "angleDeg": 90.0, "booleanMode": "NewBody", "axis": { "kind": "edge", "bodyId": b, "edgeId": "e:2" } }),
-                0,
+                json!({ "angleDeg": 90.0, "booleanMode": "NewBody", "axis": { "kind": "edge", "bodyId": b, "edgeId": "e:2", "edgeRef": edge_ref } }),
+                1,
             ),
             (
                 "Fillet",
@@ -5945,10 +5996,10 @@ mod body_wire_tests {
                 vec!["face"],
             ),
             (
-                "revolve: the axis is an AxisRef, not an inputs[] slot",
+                "revolve typed edge axis: edgeRef is inputs[0]",
                 "Revolve",
-                json!({ "angleDeg": 90.0, "booleanMode": "NewBody", "axis": { "kind": "edge", "bodyId": b, "edgeId": "e:2" } }),
-                vec![],
+                json!({ "angleDeg": 90.0, "booleanMode": "NewBody", "axis": { "kind": "edge", "bodyId": b, "edgeId": "e:2", "edgeRef": edge_ref("el_axis") } }),
+                vec!["edge"],
             ),
             (
                 "linearPattern: the source body",

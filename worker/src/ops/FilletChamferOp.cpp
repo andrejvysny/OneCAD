@@ -358,6 +358,11 @@ OpOutcome publish_result(OpContext& ctx, const std::string& target_id,
 
 OpOutcome run(OpContext& ctx, const json& op, const std::string& op_id, Mode mode) {
     const char* name = mode == Mode::Fillet ? "Fillet" : "Chamfer";
+    if (std::vector<json> repairs = operation_ref_ownership_repairs(op, op_id); !repairs.empty()) {
+        OpOutcome out;
+        out.needs_repair = std::move(repairs);
+        return out;
+    }
     const std::string target_id = target_body_of(op);
     if (target_id.empty()) {
         return OpOutcome::fail("OP_FAILED", std::string(name) + " requires body input");

@@ -269,6 +269,22 @@ pub struct DocumentSnapshotDto {
     pub title: String,
 }
 
+/// Authoritative state after a completed save (`src/ipc/types.ts` `SaveOutcome`).
+///
+/// A container write can race a later edit because it deliberately runs outside
+/// the runtime lock. `clean` is therefore a result field, not an implication of
+/// command success: close/replacement flows may proceed only when it is true.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveOutcomeDto {
+    pub document_id: String,
+    pub saved_revision: u64,
+    pub current_revision: u64,
+    pub clean: bool,
+    pub path: String,
+    pub title: String,
+}
+
 /// One module's slice of the document (`types.ts` `ModuleState`).
 ///
 /// The payload is opaque to everything but the owning module — it crosses this
@@ -835,7 +851,14 @@ pub struct ResolveCandidateDto {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolveRefDto {
+    /// Exact published snapshot that enumerated this candidate set.
+    pub snapshot_id: u64,
+    /// Document revision current while the candidate set was enumerated.
+    pub revision: u64,
     pub ref_id: String,
+    /// Body used to enumerate the candidate TopoKeys, when the stored ref names one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_id: Option<String>,
     /// `autoBind` | `needsRepair` | `unchanged`.
     pub outcome: String,
     /// The bound `ElementId` (empty ⇒ omitted). For `autoBind`/`unchanged` this is
@@ -874,14 +897,22 @@ impl ResolveRefDto {
     /// repair-UI DTO (SCHEMA §7.5/§9). Un-lossy: the `needsRepair` path carries the
     /// ranked candidates + reason + anchor the old DTO dropped.
     #[must_use]
-    pub fn from_resolution(r: onecad_core::regen::RefResolution) -> Self {
+    pub fn from_resolution(
+        r: onecad_core::regen::RefResolution,
+        snapshot_id: u64,
+        revision: u64,
+        body_id: Option<String>,
+    ) -> Self {
         use onecad_core::regen::ResolveOutcome;
         let non_empty = |id: onecad_core::ids::ElementId| {
             let s = id.as_str().to_string();
             (!s.is_empty()).then_some(s)
         };
         let base = |ref_id: String, outcome: &str| ResolveRefDto {
+            snapshot_id,
+            revision,
             ref_id,
+            body_id: body_id.clone(),
             outcome: outcome.to_string(),
             element_id: None,
             topo_key: None,
@@ -1049,6 +1080,8 @@ pub struct NeedsRepairItemDto {
 #[serde(rename_all = "camelCase")]
 pub struct NeedsRepairEvent {
     pub revision: u64,
+    /// Snapshot that produced `items`; candidate TopoKeys are valid only here.
+    pub snapshot_id: u64,
     pub items: Vec<NeedsRepairItemDto>,
 }
 
@@ -1900,16 +1933,24 @@ mod tests {
     fn resolve_ref_dto_autobind_carries_id_and_topokey_evidence() {
         use onecad_core::ids::{ElementId, TopoKey};
         use onecad_core::regen::{RefResolution, ResolveOutcome};
-        let dto = ResolveRefDto::from_resolution(RefResolution {
-            ref_id: "op_5.input0".into(),
-            outcome: ResolveOutcome::AutoBind {
-                element_id: ElementId::new("el_top"),
-                score: 0.94,
-                margin: 0.31,
-                topo_key: Some(TopoKey::new("f:1")),
+        let dto = ResolveRefDto::from_resolution(
+            RefResolution {
+                ref_id: "op_5.input0".into(),
+                outcome: ResolveOutcome::AutoBind {
+                    element_id: ElementId::new("el_top"),
+                    score: 0.94,
+                    margin: 0.31,
+                    topo_key: Some(TopoKey::new("f:1")),
+                },
             },
-        });
+            5012,
+            44,
+            Some("body_3".into()),
+        );
         let v = serde_json::to_value(&dto).unwrap();
+        assert_eq!(v["snapshotId"], 5012);
+        assert_eq!(v["revision"], 44);
+        assert_eq!(v["bodyId"], "body_3");
         assert_eq!(v["outcome"], "autoBind");
         assert_eq!(v["elementId"], "el_top");
         assert_eq!(v["topoKey"], "f:1");
@@ -1918,15 +1959,20 @@ mod tests {
         assert!(v.get("candidates").is_none(), "no candidates on autoBind");
 
         // Unminted dry-run autoBind: empty id ⇒ elementId omitted, topoKey kept.
-        let dto = ResolveRefDto::from_resolution(RefResolution {
-            ref_id: "op_5.input1".into(),
-            outcome: ResolveOutcome::AutoBind {
-                element_id: ElementId::new(""),
-                score: 0.9,
-                margin: 0.2,
-                topo_key: Some(TopoKey::new("f:3")),
+        let dto = ResolveRefDto::from_resolution(
+            RefResolution {
+                ref_id: "op_5.input1".into(),
+                outcome: ResolveOutcome::AutoBind {
+                    element_id: ElementId::new(""),
+                    score: 0.9,
+                    margin: 0.2,
+                    topo_key: Some(TopoKey::new("f:3")),
+                },
             },
-        });
+            5012,
+            44,
+            Some("body_3".into()),
+        );
         let v = serde_json::to_value(&dto).unwrap();
         assert!(v.get("elementId").is_none(), "empty id ⇒ omitted");
         assert_eq!(v["topoKey"], "f:3");
@@ -1976,10 +2022,15 @@ mod tests {
             seeded: false,
             ordinal_anchor: None,
         };
-        let dto = ResolveRefDto::from_resolution(RefResolution {
-            ref_id: "op_6.input0".into(),
-            outcome: ResolveOutcome::NeedsRepair(item),
-        });
+        let dto = ResolveRefDto::from_resolution(
+            RefResolution {
+                ref_id: "op_6.input0".into(),
+                outcome: ResolveOutcome::NeedsRepair(item),
+            },
+            5012,
+            44,
+            Some("body_3".into()),
+        );
         let v = serde_json::to_value(&dto).unwrap();
         assert_eq!(v["outcome"], "needsRepair");
         assert_eq!(v["elementId"], "el_last");

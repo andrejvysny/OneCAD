@@ -517,11 +517,7 @@ fn edit_operation_input_all_paths() {
             "revolve axis",
             rid(5),
             InputPath::RevolveAxis,
-            InputRef::Axis(AxisRef::Element {
-                body: BX(),
-                edge: ElementId::new("el_axis"),
-                extra: Default::default(),
-            }),
+            InputRef::Element(edge_ref(BX(), "el_axis")),
         ),
     ];
 

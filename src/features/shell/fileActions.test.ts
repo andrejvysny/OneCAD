@@ -12,6 +12,17 @@ import { setViewportEngine } from "@/viewport/engineBridge";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
 import type { ApplyOperationResult } from "@/ipc/types";
 
+function saveOutcome(path = "/Users/andrej/CAD/Foo.onecad", clean = true) {
+  return {
+    documentId: "mock-document",
+    savedRevision: 5,
+    currentRevision: 5,
+    clean,
+    path,
+    title: path.split("/").pop()?.replace(/\.onecad$/, "") ?? "Document",
+  };
+}
+
 beforeEach(() => {
   viewportStore.getState().setStatusHint(null);
   documentStore.setState(seedMockDocument()); // title "Bracket v2"
@@ -32,7 +43,7 @@ describe("fileActions", () => {
     );
     const saveAs = vi
       .spyOn(mockClient, "saveDocumentAs")
-      .mockResolvedValue("/Users/andrej/CAD/Foo.onecad");
+      .mockResolvedValue(saveOutcome());
 
     await saveDocument();
 
@@ -164,7 +175,7 @@ describe("fileActions save thumbnail", () => {
     stubEngine(() => PNG);
     const saveAs = vi
       .spyOn(mockClient, "saveDocumentAs")
-      .mockResolvedValue("/Users/andrej/CAD/Foo.onecad");
+      .mockResolvedValue(saveOutcome());
     await saveDocumentAs();
     expect(saveAs).toHaveBeenCalledWith(PNG);
   });

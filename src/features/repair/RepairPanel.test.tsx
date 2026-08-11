@@ -11,6 +11,7 @@ import type { NeedsRepairEvent } from "@/ipc/types";
 
 const oneItem = (opId: string, refId: string): NeedsRepairEvent => ({
   revision: 7,
+  snapshotId: 700,
   items: [{ opId, refId, reason: "ambiguous", scoringVersion: 1, candidateCount: 2 }],
 });
 
@@ -46,7 +47,9 @@ describe("RepairPanel (inspector repair state)", () => {
     fireEvent.click(screen.getByTestId("repair-item-head-f3.input0"));
     // H9: the slot's InputPath is resolved FIRST (a slot with no path never
     // fetches candidates), so the resolveRefs call is one tick behind the click.
-    await waitFor(() => expect(spy).toHaveBeenCalledWith([{ refId: "f3.input0" }]));
+    await waitFor(() =>
+      expect(spy).toHaveBeenCalledWith([{ refId: "f3.input0", snapshotId: 700, revision: 7 }]),
+    );
 
     // The canned candidates arrive (mock latency) — highest score first.
     await screen.findByText("91%");
@@ -79,6 +82,63 @@ describe("RepairPanel (inspector repair state)", () => {
     });
     promote.mockRestore();
     apply.mockRestore();
+  });
+
+  it("drops a late candidate load after a newer repair event", async () => {
+    let finish: ((value: Awaited<ReturnType<typeof mockClient.resolveRefs>>) => void) | undefined;
+    const resolve = vi.spyOn(mockClient, "resolveRefs").mockImplementation(
+      () =>
+        new Promise((done: (value: Awaited<ReturnType<typeof mockClient.resolveRefs>>) => void) => {
+          finish = done;
+        }),
+    );
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    openRepair("f3", "f3.input0");
+    fireEvent.click(screen.getByTestId("repair-item-head-f3.input0"));
+    await waitFor(() => expect(resolve).toHaveBeenCalled());
+
+    act(() =>
+      repairStore.getState().applyEvent({
+        revision: 8,
+        snapshotId: 800,
+        items: [{ opId: "f3", refId: "f3.input0", reason: "ambiguous", candidateCount: 1 }],
+      }),
+    );
+    finish?.([
+      {
+        snapshotId: 700,
+        revision: 7,
+        refId: "f3.input0",
+        bodyId: "body1",
+        outcome: "needsRepair",
+        candidates: [
+          { topoKey: "e:7", score: 0.91, margin: 0.02, worldPos: [12, 3.5, 0], summary: "edge" },
+        ],
+      },
+    ]);
+
+    await waitFor(() => expect(screen.queryByTestId("repair-candidate-f3.input0-e:7")).toBeNull());
+    resolve.mockRestore();
+  });
+
+  it("does not promote a row retained from an older repair event", async () => {
+    const promote = vi.spyOn(mockClient, "promoteSelection");
+    renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+    openRepair("f3", "f3.input0");
+    fireEvent.click(screen.getByTestId("repair-item-head-f3.input0"));
+    const candidate = (await screen.findAllByTestId(/^repair-candidate-f3\.input0-/))[0];
+
+    act(() =>
+      repairStore.getState().applyEvent({
+        revision: 8,
+        snapshotId: 800,
+        items: [{ opId: "f3", refId: "f3.input0", reason: "ambiguous", candidateCount: 1 }],
+      }),
+    );
+    fireEvent.click(candidate);
+
+    expect(promote).not.toHaveBeenCalled();
+    promote.mockRestore();
   });
 
   it("the close affordance dismisses the panel", () => {

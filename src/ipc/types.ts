@@ -50,6 +50,20 @@ export interface DocumentSnapshot {
   title: string;
 }
 
+/**
+ * Authoritative state after a completed container write.  A save can succeed
+ * while an edit races the write, so callers must use `clean` rather than
+ * treating command resolution itself as permission to replace/close a document.
+ */
+export interface SaveOutcome {
+  documentId: string;
+  savedRevision: number;
+  currentRevision: number;
+  clean: boolean;
+  path: string;
+  title: string;
+}
+
 /** Level-of-detail tier for a mesh fetch (deflection relative to bbox diagonal). */
 export type Lod = "coarse" | "medium" | "fine";
 
@@ -448,7 +462,7 @@ export interface MassProperties {
 //
 // These MIRROR the Rust DTOs in `src-tauri/src/dto.rs` (camelCase serde):
 //   NeedsRepairItem  == NeedsRepairItemDto  (lean banner/badge summary)
-//   NeedsRepairEvent == NeedsRepairEvent    (`{revision, items}`; empty ⇒ cleared)
+//   NeedsRepairEvent == NeedsRepairEvent    (`{revision, snapshotId, items}`; empty ⇒ cleared)
 //   ResolveCandidate == ResolveCandidateDto (one ranked candidate)
 //   ResolveRefResult == ResolveRefDto       (the un-lossy dry-run resolution)
 
@@ -481,6 +495,8 @@ export interface NeedsRepairItem {
  */
 export interface NeedsRepairEvent {
   revision: number;
+  /** Snapshot that produced the repairs; candidate TopoKeys are valid only here. */
+  snapshotId: number;
   items: NeedsRepairItem[];
 }
 
@@ -516,7 +532,13 @@ export interface ResolveCandidate {
  * plus `reason`/`ladderFailed`/`anchor`; on `autoBind`/`unchanged` the bound id.
  */
 export interface ResolveRefResult {
+  /** Exact snapshot that enumerated this candidate set. */
+  snapshotId: number;
+  /** Document revision current during candidate enumeration. */
+  revision: number;
   refId: string;
+  /** Body used for candidate enumeration, when the stored ref names one. */
+  bodyId?: string;
   /** `autoBind` | `needsRepair` | `unchanged`. */
   outcome: string;
   elementId?: string;
@@ -543,6 +565,9 @@ export interface ResolveRefResult {
  */
 export interface ResolveRefRequest {
   refId: string;
+  /** Candidate provenance supplied by the repair event. */
+  snapshotId?: number;
+  revision?: number;
   primary?: { bodyId: string; elementId?: string; kind: "body" | "face" | "edge" | "vertex" };
   anchor?: { worldPoint?: [number, number, number]; surfaceUv?: [number, number] };
 }
@@ -684,6 +709,9 @@ export interface DocumentProjectionWire {
    */
   geometrySource?: "none" | "cached" | "live";
 }
+
+/** Every terminal a correlated regeneration can report. */
+export type RegenTerminal = "published" | "noop" | "needsRepair" | "failed" | "timeout";
 
 /** The `regen-finished` payload (F-WP8 flag 3). `sourceRevision` is the revision
  *  the regen was fenced against at `begin_regen` (MODEL-HARDEN W0.5 commit
@@ -1314,6 +1342,12 @@ export interface ApplyOperationResult {
   /** Timeline LENGTH after the edit — always `features.length`; sent for symmetry
    *  with {@link ApplyOperationResult.appliedOps} and cross-checked in tests. */
   totalOps?: number;
+  /**
+   * Classified transport terminal, populated by both clients. Optional only for
+   * compatibility with legacy test fixtures while callers migrate from body-count
+   * inference; no production result may omit it.
+   */
+  terminal?: RegenTerminal;
 }
 
 // ── Two-level preview (NEW_SPEC §15) ─────────────────────────────────────────

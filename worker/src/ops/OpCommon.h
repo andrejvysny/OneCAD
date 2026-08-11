@@ -35,6 +35,13 @@ double read_scalar(const nlohmann::json& params, const char* key, double dflt);
 // params.<key> as a string, or `dflt`.
 std::string read_str(const nlohmann::json& o, const char* key, const std::string& dflt = "");
 
+// Operation-local semantic-ref ownership preflight. The generic ladder deliberately
+// accepts refs against their own named bodies; these operations instead require
+// their typed sub-element refs to belong to one operated body. Returns §9-shaped
+// NeedsRepair state for persisted malformed records, before any resolver fallback.
+std::vector<nlohmann::json> operation_ref_ownership_repairs(
+    const nlohmann::json& op, const std::string& op_id);
+
 // Build one selectable planar-cell face from a solved Sketch op. Publication and
 // lookup use the same RegionTable. A non-empty `region_id` MUST resolve uniquely
 // against its canonical id (or one unambiguous legacy outer-loop id); stale or
@@ -90,6 +97,8 @@ std::vector<RankedSolid> ranked_solids(const TopoDS_Shape& shape);
 // need the deterministic order (StepRead, Extrude/Hole emptiness probes) use.
 std::vector<TopoDS_Shape> ordered_solids(const TopoDS_Shape& shape);
 
+enum class BooleanPublishResult { Published, Empty };
+
 // Publish a boolean / boolean-mode-Cut result into the scratch as the successor of
 // `target_id`. A SINGLE-solid result MODIFIES `target_id` in place (BodyId preserved
 // — corpus invariant — + OCCT history applied to its partition). A MULTI-solid
@@ -99,8 +108,14 @@ std::vector<TopoDS_Shape> ordered_solids(const TopoDS_Shape& shape);
 // applied). On a split, the parent's referenced-element partition entries are dropped
 // (a rebuildable ID-on-demand cache; a later ref re-mints against a child or
 // NeedsRepairs) — no confident 1:1 child assignment exists.
-void publish_boolean_result(OpContext& ctx, const std::string& op_id,
-                            const std::string& target_id, const TopoDS_Shape& result,
-                            BRepBuilderAPI_MakeShape* builder, OpOutcome& out);
+//
+// An empty result is deliberately NOT published. The caller chooses the operation's
+// lifecycle policy before mutating any body: standalone Boolean and Revolve refuse,
+// while Extrude retains its separately specified deletion behavior.
+BooleanPublishResult publish_boolean_result(OpContext& ctx, const std::string& op_id,
+                                            const std::string& target_id,
+                                            const TopoDS_Shape& result,
+                                            BRepBuilderAPI_MakeShape* builder,
+                                            OpOutcome& out);
 
 }  // namespace onecad::ops

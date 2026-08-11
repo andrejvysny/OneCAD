@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <BRepGProp.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <GProp_GProps.hxx>
 #include <TopExp.hxx>
@@ -366,6 +367,45 @@ void test_revolve_pappus() {
     }
 }
 
+// A typed body-edge axis resolves its semantic companion, never the legacy
+// snapshot ordinal. `edgeId` is deliberately nonsense: changing it must not
+// change the result once `edgeRef` is present.
+void test_revolve_typed_edge_axis_wins() {
+    json sk;
+    sk["sketchId"] = "sk1";
+    sk["plane"] = json{{"kind", "XY"}};
+    sk["entities"] = json::array({
+        json{{"id", "r1"}, {"type", "Line"}, {"p0", {10, 0}}, {"p1", {20, 0}}},
+        json{{"id", "r2"}, {"type", "Line"}, {"p0", {20, 0}}, {"p1", {20, 10}}},
+        json{{"id", "r3"}, {"type", "Line"}, {"p0", {20, 10}}, {"p1", {10, 10}}},
+        json{{"id", "r4"}, {"type", "Line"}, {"p0", {10, 10}}, {"p1", {10, 0}}},
+    });
+    sk["constraints"] = json::array();
+
+    const TopoDS_Shape axis_shape =
+        BRepBuilderAPI_MakeEdge(gp_Pnt(-20, 0, 0), gp_Pnt(20, 0, 0)).Shape();
+    const TopoDS_Shape axis_edge = edge_by_center(axis_shape, 0, 0, 0);
+    BodyStore bodies;
+    bodies.create("body_axis", "axis_source", axis_shape);
+    em::ElementMapPartition part;
+    part.mint("body_axis", "el_axis", km::ElementKind::Edge, axis_edge, axis_shape,
+              json{{"worldPoint", {0.0, 0.0, 0.0}}});
+
+    Ctx c;
+    c.sketches.push_back({"sk1", sk});
+    c.last_sketch = "sk1";
+    ops::OpContext ctx = c.make(bodies, part);
+    const json typed = edge_input("body_axis", "el_axis", axis_edge, 0, 0, 0);
+    json op = {{"opType", "Revolve"}, {"opId", "typed_axis"}, {"inputs", json::array({typed})},
+               {"params", {{"sketchId", "sk1"}, {"angleDeg", 360.0}, {"booleanMode", "NewBody"},
+                           {"axis", {{"kind", "edge"}, {"bodyId", "body_axis"},
+                                     {"edgeId", "e:999"}, {"edgeRef", typed}}}}}};
+    const ops::OpOutcome out = ops::execute_revolve(ctx, op, "typed_axis");
+    check(out.status == ops::OpOutcome::Status::Ok, "revolve typed axis: Ok");
+    check(out.needs_repair.empty(), "revolve typed axis: no NeedsRepair");
+    check(bodies.contains("body_typed_axis"), "revolve typed axis: typed edge won over legacy ordinal");
+}
+
 // --- Revolve angle too small → OP_FAILED. ---
 void test_revolve_angle_too_small() {
     json sk;
@@ -404,6 +444,7 @@ int main() {
     test_fillet_radius_too_small();
     test_fillet_ambiguous_edge_needs_repair();
     test_revolve_pappus();
+    test_revolve_typed_edge_axis_wins();
     test_revolve_angle_too_small();
     if (g_failures == 0) std::fprintf(stderr, "wp6_ops: OK\n");
     return g_failures;

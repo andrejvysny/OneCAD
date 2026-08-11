@@ -28,7 +28,7 @@ type RecoveryStatus = "idle" | "loading" | "ready" | "error";
  *    `cancelExit` (see `CadClient.onCloseRequested`).
  * `null` = no prompt pending.
  */
-export type PendingCloseIntent = "close" | "quit" | null;
+export type PendingCloseIntent = "close" | "quit" | "replacement" | null;
 
 export interface AppState {
   screen: Screen;
@@ -94,6 +94,12 @@ export interface AppState {
    */
   requestClose(intent: "close" | "quit"): Promise<void>;
   /**
+   * Guard a document-replacing continuation with the same Save / Don't Save /
+   * Cancel dialog as close. The continuation is intentionally not run until the
+   * user has either discarded or received a CLEAN authoritative save result.
+   */
+  requestReplacement(continuation: () => Promise<void>): Promise<void>;
+  /**
    * Resolve a pending prompt from the UnsavedChangesDialog.
    *  - "cancel"  — clears the intent; for "quit" also releases the backend's
    *    re-entrancy guard (without exiting) so a later attempt prompts again.
@@ -107,6 +113,7 @@ export interface AppState {
 }
 
 export const appStore = createStore<AppState>()((set, get) => {
+  let pendingReplacement: (() => Promise<void>) | null = null;
   const enter = (document: DocumentSnapshot) =>
     set({ screen: "editor", document });
 
@@ -187,26 +194,33 @@ export const appStore = createStore<AppState>()((set, get) => {
     },
 
     async newProject() {
-      // Reset BEFORE the swap: mounted controllers must cancel their preview
-      // sessions while the outgoing document's refs still resolve.
-      resetIfReplacing();
-      enter(await client.newDocument());
+      await get().requestReplacement(async () => {
+        resetIfReplacing();
+        const document = await client.newDocument();
+        enter(document);
+      });
     },
 
     async openProject(path) {
-      resetIfReplacing();
-      enter(await client.openDocument(path));
-      // The backend recorded this open in the recents store; refresh so the
-      // start-screen list reflects it (newest first) next time it renders.
-      void get().loadRecents();
+      await get().requestReplacement(async () => {
+        resetIfReplacing();
+        const document = await client.openDocument(path);
+        enter(document);
+        // The backend recorded this open in the recents store; refresh so the
+        // start-screen list reflects it (newest first) next time it renders.
+        void get().loadRecents();
+      });
     },
 
     async openDialogAndOpen() {
-      const path = await client.openFileDialog();
-      if (!path) return; // cancelled — nothing swapped, so nothing to invalidate
-      resetIfReplacing();
-      enter(await client.openDocument(path));
-      void get().loadRecents();
+      await get().requestReplacement(async () => {
+        const path = await client.openFileDialog();
+        if (!path) return; // cancelled — nothing swapped, so nothing to invalidate
+        resetIfReplacing();
+        const document = await client.openDocument(path);
+        enter(document);
+        void get().loadRecents();
+      });
     },
 
     /**
@@ -222,40 +236,49 @@ export const appStore = createStore<AppState>()((set, get) => {
      * `.onecad`, which made a STEP file unpickable from this button.
      */
     async importStep() {
-      set({ importError: null });
-      const path = await client.stepFileDialog();
-      if (!path) return; // cancelled — silent, nothing to report
-      try {
-        resetIfReplacing();
-        enter(await client.importStep(path));
-      } catch (e) {
-        set({ importError: e instanceof Error ? e.message : String(e) });
-      }
+      await get().requestReplacement(async () => {
+        set({ importError: null });
+        const path = await client.stepFileDialog();
+        if (!path) return; // cancelled — silent, nothing to report
+        try {
+          resetIfReplacing();
+          const document = await client.importStep(path);
+          enter(document);
+        } catch (e) {
+          set({ importError: e instanceof Error ? e.message : String(e) });
+        }
+      });
     },
 
     async importProject() {
-      const snap = await client.importProject();
-      if (!snap) return; // cancelled — silent
-      resetIfReplacing();
-      enter(snap);
+      await get().requestReplacement(async () => {
+        const snap = await client.importProject();
+        if (!snap) return; // cancelled — silent
+        resetIfReplacing();
+        enter(snap);
+      });
     },
 
     async importFromDialog() {
-      set({ importError: null });
-      const path = await client.importFileDialog();
-      if (!path) return; // cancelled — silent, nothing to report
-      try {
-        if (importKind(path) === "step") {
-          resetIfReplacing();
-          enter(await client.importStep(path));
-        } else {
-          resetIfReplacing();
-          enter(await client.openDocument(path));
-          void get().loadRecents();
+      await get().requestReplacement(async () => {
+        set({ importError: null });
+        const path = await client.importFileDialog();
+        if (!path) return; // cancelled — silent, nothing to report
+        try {
+          if (importKind(path) === "step") {
+            resetIfReplacing();
+            const document = await client.importStep(path);
+            enter(document);
+          } else {
+            resetIfReplacing();
+            const document = await client.openDocument(path);
+            enter(document);
+            void get().loadRecents();
+          }
+        } catch (e) {
+          set({ importError: e instanceof Error ? e.message : String(e) });
         }
-      } catch (e) {
-        set({ importError: e instanceof Error ? e.message : String(e) });
-      }
+      });
     },
 
     async closeProject() {
@@ -280,12 +303,16 @@ export const appStore = createStore<AppState>()((set, get) => {
     },
 
     async recoverDocument() {
-      resetIfReplacing();
-      const snap = await client.recoverDocument(true);
-      set({ recovery: null, recoveryStatus: "ready" });
-      if (snap) enter(snap);
-      // The recovered open counts as a recent; refresh the start-screen list.
-      void get().loadRecents();
+      await get().requestReplacement(async () => {
+        resetIfReplacing();
+        const document = await client.recoverDocument(true);
+        set({ recovery: null, recoveryStatus: "ready" });
+        if (document) {
+          enter(document);
+        }
+        // The recovered open counts as a recent; refresh the start-screen list.
+        void get().loadRecents();
+      });
     },
 
     async discardRecovery() {
@@ -305,6 +332,7 @@ export const appStore = createStore<AppState>()((set, get) => {
       // quit. Release it before the intent is replaced (or resolved by the
       // clean-document fast path below, which never reaches `confirmExit`).
       if (pending === "quit") await client.cancelExit();
+      pendingReplacement = null;
       if (!documentStore.getState().dirty) {
         set({ pendingCloseIntent: null });
         await proceed(intent);
@@ -313,19 +341,40 @@ export const appStore = createStore<AppState>()((set, get) => {
       set({ pendingCloseIntent: intent });
     },
 
+    async requestReplacement(continuation) {
+      const pending = get().pendingCloseIntent;
+      if (pending === "replacement") return;
+      if (pending === "quit") await client.cancelExit();
+      pendingReplacement = null;
+      if (!get().document || !documentStore.getState().dirty) {
+        set({ pendingCloseIntent: null });
+        await continuation();
+        return;
+      }
+      pendingReplacement = continuation;
+      set({ pendingCloseIntent: "replacement" });
+    },
+
     async confirmClose(action) {
       const intent = get().pendingCloseIntent;
       if (!intent) return; // nothing pending
       if (action === "cancel") {
         set({ pendingCloseIntent: null });
+        pendingReplacement = null;
         if (intent === "quit") await client.cancelExit();
         return;
       }
       if (action === "save") {
-        const saved = await saveDocument();
-        if (!saved) return; // failure/cancel — stay open (saveDocument surfaced the hint)
+        const outcome = await saveDocument();
+        if (!outcome?.clean) return; // failure/cancel/racing edit — stay open
       }
       set({ pendingCloseIntent: null });
+      if (intent === "replacement") {
+        const continuation = pendingReplacement;
+        pendingReplacement = null;
+        await continuation?.();
+        return;
+      }
       await proceed(intent);
     },
   };

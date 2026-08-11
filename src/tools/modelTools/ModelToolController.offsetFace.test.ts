@@ -352,6 +352,16 @@ describe("ModelToolController OffsetFace", () => {
     expect(clientMock.beginPreview).not.toHaveBeenCalled();
   });
 
+  it("does NOT promote or adopt a closure after the snapshot fence refuses it", async () => {
+    build(() => Promise.reject(new Error("prepared offset-face closure is stale — re-pick")));
+    await arm();
+
+    expect(debug().offsetFacePhase).toBe("idle");
+    expect(clientMock.promoteSelection).not.toHaveBeenCalled();
+    expect(clientMock.beginPreview).not.toHaveBeenCalled();
+    expect(viewportStore.getState().statusHint?.message).toContain("stale");
+  });
+
   it("opens ONE preview session owned by offsetFace, with the frozen refs as inputs", async () => {
     build();
     await arm();

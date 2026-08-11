@@ -40,6 +40,7 @@ import type {
   PromotePick,
   RecentProject,
   RecoveryInfo,
+  SaveOutcome,
   ResolveRefRequest,
   ResolveRefResult,
   SketchAttachTarget,
@@ -130,16 +131,16 @@ export interface CadClient {
    * backend drops it with a warning and the SAVE STILL SUCCEEDS. Callers pass it
    * best-effort and must never fail a save because capture failed.
    */
-  saveDocument(path?: string, previewPng?: string | null): Promise<void>;
+  saveDocument(path?: string, previewPng?: string | null): Promise<SaveOutcome>;
   /**
    * Save As: show a native save dialog (`.onecad`), save to the chosen path, and
-   * return it — or null if the dialog was cancelled.
+   * return the authoritative outcome — or null if the dialog was cancelled.
    *
    * Takes `previewPng` for the same reason `saveDocument` does, and it matters
    * MORE here: a never-saved document's first save is always a Save As, so
    * without it a brand-new project would land in recents with no thumbnail.
    */
-  saveDocumentAs(previewPng?: string | null): Promise<string | null>;
+  saveDocumentAs(previewPng?: string | null): Promise<SaveOutcome | null>;
   /**
    * Export every body at head to a STEP file. Rust owns the `.step` save dialog +
    * the worker ExportStep verb; resolves to the written path, or null on cancel.
@@ -312,7 +313,12 @@ export interface CadClient {
    * `ElementId`s. The real client routes to `AcquireElementIds`; the mock mints
    * deterministic ids. Promoted ids flow back into the selection refs.
    */
-  promoteSelection(bodyId: string, picks: PromotePick[]): Promise<PromotedElement[]>;
+  promoteSelection(
+    bodyId: string,
+    picks: PromotePick[],
+    /** Explicit candidate provenance; omitted only for a fresh live pick. */
+    snapshotId?: number,
+  ): Promise<PromotedElement[]>;
 
   /**
    * Resolve a picked planar FACE to the sketch plane a sketch on it would freeze

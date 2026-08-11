@@ -15,6 +15,8 @@ import type { NeedsRepairEvent, NeedsRepairItem } from "@/ipc/types";
 export interface RepairState {
   /** Revision the current `items` belong to (0 before any event). */
   revision: number;
+  /** Snapshot the current repair event was derived from. */
+  snapshotId: number;
   /** The refs still needing repair (empty ⇒ nothing to repair). */
   items: NeedsRepairItem[];
   /** Whether the repair panel is open (banner click / NeedsRepair selection). */
@@ -43,6 +45,7 @@ export interface RepairState {
 
 const INITIAL = {
   revision: 0,
+  snapshotId: 0,
   items: [] as NeedsRepairItem[],
   panelOpen: false,
   expandedRefId: null as string | null,
@@ -65,6 +68,9 @@ export const repairStore = createStore<RepairState>()((set) => ({
       logDebug("repair", "repairs cleared", { revision: event.revision });
     }
     set((s) => {
+      // Event delivery is asynchronous. A late N event must never resurrect
+      // TopoKeys already superseded by a published N+1 repair set.
+      if (event.revision < s.revision) return s;
       const cleared = event.items.length === 0;
       // Keep an expanded ref only if it still needs repair after the new event.
       const stillExpanded =
@@ -73,6 +79,7 @@ export const repairStore = createStore<RepairState>()((set) => ({
           : null;
       return {
         revision: event.revision,
+        snapshotId: event.snapshotId,
         items: event.items,
         // Cleared repairs auto-dismiss the panel; otherwise leave it as the user left it.
         panelOpen: cleared ? false : s.panelOpen,

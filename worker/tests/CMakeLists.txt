@@ -178,6 +178,11 @@ add_executable(test_revolve_boolean_modes test_revolve_boolean_modes.cpp)
 target_link_libraries(test_revolve_boolean_modes PRIVATE worker_core)
 add_test(NAME revolve_boolean_modes COMMAND test_revolve_boolean_modes)
 
+# --- P0: standalone Boolean must refuse, not publish, a zero-solid result. ---
+add_executable(test_boolean_empty test_boolean_empty.cpp)
+target_link_libraries(test_boolean_empty PRIVATE worker_core)
+add_test(NAME boolean_empty COMMAND test_boolean_empty)
+
 # --- M6a: breadth ops (Shell / Linear+Circular pattern / MirrorBody) numerics. ---
 add_executable(test_m6a_ops test_m6a_ops.cpp)
 target_link_libraries(test_m6a_ops PRIVATE worker_core)
@@ -361,6 +366,12 @@ add_test(
     COMMAND worker_harness
             --worker $<TARGET_FILE:onecad-worker>
             --fixture ${PROTOCOL_FIXTURES}/bind_element_ids.ndjson
+)
+add_test(
+    NAME canonical_boolean_empty_refusal
+    COMMAND worker_harness
+            --worker $<TARGET_FILE:onecad-worker>
+            --fixture ${PROTOCOL_FIXTURES}/boolean_empty_refusal.ndjson
 )
 
 # W-WP3c: interop smoke — replay the Rust-authored contract via the harness (no

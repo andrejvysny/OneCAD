@@ -121,16 +121,17 @@ export function linearOffsets(direction: Vec3, spacing: number, count: number): 
 
 /**
  * Per-instance angle (DEGREES) INCLUDING the original (0°) at index 0. A full
- * 360° sweep divides by `count` so the last instance does not overlap the first;
- * a partial sweep divides by `count − 1` so the instances span the given angle.
+ * The worker/protocol rule divides every sweep by `count`, so the preview's clone
+ * transforms are exactly the committed placements. The last partial instance is
+ * therefore one step short of the requested sweep; including that terminal point
+ * would be a separate product-semantics change.
  */
 export function circularAnglesDeg(totalDeg: number, count: number): number[] {
   const n = Math.max(1, Math.floor(count));
   if (n === 1) return [0];
-  const full = Math.abs(Math.abs(totalDeg) - 360) < 1e-6 || Math.abs(totalDeg) >= 360;
-  const step = full ? totalDeg / n : totalDeg / (n - 1);
+  const step = totalDeg / n;
   const out: number[] = [];
-  for (let k = 0; k < n; k++) out.push(step * k);
+  for (let k = 0; k < n; k++) out.push(k === 0 ? 0 : step * k);
   return out;
 }
 

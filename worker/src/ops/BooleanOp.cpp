@@ -52,7 +52,10 @@ OpOutcome execute_boolean(OpContext& ctx, const json& op, const std::string& op_
     // Publish the successor of the target: a single-solid result MODIFIES it in place
     // (BodyId preserved — corpus c invariant); a multi-solid result SPLITS into
     // deterministic children `body_<opId>:<k>` (SCHEMA §2, D1).
-    publish_boolean_result(ctx, op_id, target_id, br.shape, builder.get(), out);
+    if (publish_boolean_result(ctx, op_id, target_id, br.shape, builder.get(), out) ==
+        BooleanPublishResult::Empty) {
+        return OpOutcome::fail("OP_FAILED", "Boolean produced no solids");
+    }
 
     // The tool is consumed by the operation: drop its body + partition entries.
     ctx.bodies.erase(tool_id);

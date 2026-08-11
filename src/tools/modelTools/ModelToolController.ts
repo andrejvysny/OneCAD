@@ -499,6 +499,8 @@ interface ToolPreviewSession {
   lastAppliedEpoch: number;
   /** Mesh-registry ids for every exact candidate body in the newest result. */
   previewBodyIds: string[];
+  /** Committed bodies hidden by this session's exact candidate. */
+  replacedBodyIds: string[];
 }
 
 /** Which tool owns the currently open preview sessions (drives hints + params). */
@@ -1348,6 +1350,7 @@ export class ModelToolController {
         profile: profiles[i],
         lastAppliedEpoch: 0,
         previewBodyIds: [],
+        replacedBodyIds: [],
       });
     }
     this.previewSessions = sessions;
@@ -1685,15 +1688,16 @@ export class ModelToolController {
     const gen = this.armGen;
     const worldTriple: [number, number, number] = [hit.worldPos.x, hit.worldPos.y, hit.worldPos.z];
     let elementId = hit.elementId;
-    let stale = false;
     if (!elementId && hit.topoKey) {
       const promoted = await promoteOne(this.client, hit.bodyId, {
         topoKey: hit.topoKey,
         anchor: { worldPoint: worldTriple },
       });
       if (gen !== this.armGen) return; // re-armed while awaiting — drop
-      elementId = promoted?.elementId;
-      stale = promoted === null;
+      // A stale pick must remain a pick. An anchor-only ToFace ref would let a
+      // later resolver reinterpret the stale face against different topology.
+      if (!promoted?.elementId) return;
+      elementId = promoted.elementId;
     }
     if (this.extrude.phase !== "facePick") return;
     const ref: SemanticRef = {
@@ -1703,9 +1707,7 @@ export class ModelToolController {
     this.extrude = extrudeStep(this.extrude, { kind: "pickFace", ref }).state;
     this.clearToolHover();
     this.engine.setOrbitSuppressed(false);
-    // A refused promotion leaves the target on its anchor alone — degraded, not
-    // aborted — so `promoteOne`'s hint must not be overwritten by the arm hint.
-    if (!stale) viewportStore.getState().setStatusHint(this.armHintFor("extrude"), { sticky: true });
+    viewportStore.getState().setStatusHint(this.armHintFor("extrude"), { sticky: true });
     this.sendPreview();
     this.updateDebug();
   }
@@ -2489,6 +2491,7 @@ export class ModelToolController {
         profile: this.revolveProfiles[i],
         lastAppliedEpoch: 0,
         previewBodyIds: [],
+        replacedBodyIds: [],
       });
     }
     this.previewSessions = sessions;
@@ -3221,7 +3224,7 @@ export class ModelToolController {
       void this.deps.client.endPreview(session.sessionId, false);
       return;
     }
-    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [] }];
+    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [] }];
     this.previewOwner = "edgeOp";
     this.previewParamsFn = () => this.edgeOpPreviewParams();
     this.previewPending = false;
@@ -3391,7 +3394,7 @@ export class ModelToolController {
       void this.deps.client.endPreview(session.sessionId, false);
       return;
     }
-    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [] }];
+    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [] }];
     this.previewOwner = "shell";
     this.previewParamsFn = () => this.shellPreviewParams();
     this.previewPending = false;
@@ -3927,7 +3930,7 @@ export class ModelToolController {
       void this.deps.client.endPreview(session.sessionId, false);
       return;
     }
-    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [] }];
+    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [] }];
     this.previewOwner = "offsetFace";
     this.previewParamsFn = () => this.offsetFacePreviewParams();
     this.previewPending = false;
@@ -4290,15 +4293,16 @@ export class ModelToolController {
 
     const gen = ++this.armGen;
     let elementId = hit.elementId;
-    let stale = false;
     if (!elementId && hit.topoKey) {
       const promoted = await promoteOne(this.client, hit.bodyId, {
         topoKey: hit.topoKey,
         anchor: { worldPoint: point },
       });
       if (gen !== this.armGen) return; // re-armed while awaiting — drop
-      elementId = promoted?.elementId;
-      stale = promoted === null;
+      // A stale pick must stay in face-pick mode. The Hole seat cannot degrade
+      // to an anchor-only ref without making a later rebind author a new face.
+      if (!promoted?.elementId) return;
+      elementId = promoted.elementId;
     }
     if (toolStore.getState().modelTool !== "hole") return;
     const face: SemanticRef = {
@@ -4313,9 +4317,7 @@ export class ModelToolController {
       point,
     }).state;
     this.showHoleChip();
-    // A refused promotion leaves the seat on its anchor alone — degraded, not
-    // aborted — so `promoteOne`'s hint must not be overwritten by the arm hint.
-    if (!stale) viewportStore.getState().setStatusHint(HOLE_ARMED_HINT, { sticky: true });
+    viewportStore.getState().setStatusHint(HOLE_ARMED_HINT, { sticky: true });
     this.previewArmHint = this.holeEditFeatureId ? null : HOLE_ARMED_HINT;
     this.updateDebug();
     // A re-edit runs L1-only: PreviewOp executes against the CURRENT head, so
@@ -4401,7 +4403,7 @@ export class ModelToolController {
       void this.deps.client.endPreview(session.sessionId, false);
       return;
     }
-    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [] }];
+    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [] }];
     this.previewOwner = "hole";
     this.previewParamsFn = () => this.holePreviewParams();
     this.previewPending = false;
@@ -6381,6 +6383,7 @@ export class ModelToolController {
       if (!fresh) return; // stale drag result — discard
       es.lastAppliedEpoch = r.epoch;
       if (r.error) {
+        this.clearPreviewCandidate(es);
         this.onPreviewFailure(r.error);
       } else if (r.bodies || r.mesh) {
         this.previewFailure = null;
@@ -6407,7 +6410,10 @@ export class ModelToolController {
     } else {
       // Secondary sessions don't touch the throttle; per-session lastAppliedEpoch
       // is the only staleness guard (they follow the primary's epochs).
-      if (r.error) this.onPreviewFailure(r.error);
+      if (r.error) {
+        this.clearPreviewCandidate(es);
+        this.onPreviewFailure(r.error);
+      }
       else if (r.bodies || r.mesh) this.applyPreviewBodies(es, r);
       es.lastAppliedEpoch = r.epoch;
     }
@@ -6418,10 +6424,11 @@ export class ModelToolController {
     const bodies =
       result.bodies ??
       (result.mesh ? [{ bodyId: result.bodyId, mesh: result.mesh }] : []);
-    this.engine.clearPreviewBody();
+    this.engine.clearPreviewBody(es.previewBodyIds);
     for (const id of es.previewBodyIds) removeMesh(id);
     es.previewBodyIds = [];
-    this.engine.setPreviewReplacedBodyIds(result.replacedBodyIds ?? []);
+    es.replacedBodyIds = result.replacedBodyIds ?? [];
+    this.syncPreviewReplacedBodies();
     for (let i = 0; i < bodies.length; i++) {
       const previewId = `${es.session.previewBodyId}:${i}`;
       const view = parseMeshPayload(bodies[i].mesh);
@@ -6437,6 +6444,25 @@ export class ModelToolController {
       this.offsetGhostHidden = true;
       this.engine.hideGhostPreview();
     }
+  }
+
+  /** Hide union of committed bodies claimed by live exact-preview sessions. */
+  private syncPreviewReplacedBodies(): void {
+    // Lightweight test engines predate exact-candidate visibility claims. Runtime
+    // engine always implements this; keeping the seam optional avoids coupling
+    // unrelated controller tests to a rendering-only method.
+    (this.engine as Partial<ViewportEngine>).setPreviewReplacedBodyIds?.([
+      ...new Set(this.previewSessions.flatMap((session) => session.replacedBodyIds)),
+    ]);
+  }
+
+  /** Remove only failed/superseded session's exact candidate and visibility claim. */
+  private clearPreviewCandidate(es: ToolPreviewSession): void {
+    this.engine.clearPreviewBody(es.previewBodyIds);
+    for (const id of es.previewBodyIds) removeMesh(id);
+    es.previewBodyIds = [];
+    es.replacedBodyIds = [];
+    this.syncPreviewReplacedBodies();
   }
 
   /** The armed op's display noun — the prefix on every preview-lane message. */
@@ -6540,8 +6566,7 @@ export class ModelToolController {
 
   private removeExactPreviewMeshes(es: ToolPreviewSession): void {
     removeMesh(es.session.previewBodyId);
-    for (const id of es.previewBodyIds) removeMesh(id);
-    es.previewBodyIds = [];
+    this.clearPreviewCandidate(es);
   }
 
   /**
@@ -7227,18 +7252,11 @@ export class ModelToolController {
       { kind: "body", id: this.boolean.targetBodyId! },
       { kind: "body", id: toolBodyId },
     ]);
-    const world = this.bodyCenter(toolBodyId);
-    toolChipStore.getState().showBoolean(
-      this.boolean.op,
-      world,
-      (op) => this.setBooleanOp(op),
-      () => void this.commitBoolean(),
-    );
+    this.showArmedBooleanChip();
     // `previewArmHint` is what `clearPreviewPending`/`onPreviewResult` restore the
     // status line to once the kernel answers (boolean has no `armHintFor` entry —
     // same seam edgeOp/shell use).
     const hint = "Choose Union / Cut / Intersect, then Apply";
-    this.previewArmHint = hint;
     viewportStore.getState().setStatusHint(hint, { sticky: true });
     this.updateDebug();
     void this.armBooleanPreview();
@@ -7249,6 +7267,20 @@ export class ModelToolController {
     toolChipStore.getState().setOp(op);
     this.engine.setPreviewTint(op === "Cut" ? "cut" : "normal");
     this.sendPreview();
+  }
+
+  /** Re-publish full Boolean controls after every failed preview/commit re-arm. */
+  private showArmedBooleanChip(): void {
+    const target = this.boolean.targetBodyId;
+    const tool = this.boolean.toolBodyId;
+    if (!target || !tool) return;
+    toolChipStore.getState().showBoolean(
+      this.boolean.op,
+      this.bodyCenter(tool),
+      (op) => this.setBooleanOp(op),
+      () => void this.commitBoolean(),
+    );
+    this.previewArmHint = "Choose Union / Cut / Intersect, then Apply";
   }
 
   /** Complete canonical Boolean params for both exact preview and commit — the
@@ -7304,12 +7336,13 @@ export class ModelToolController {
       return;
     }
     this.openBooleanPreviewSession(session, draft);
+    this.showArmedBooleanChip();
   }
 
   /** Wire a freshly opened Boolean session into the shared preview lane and send
    *  the first exact request. Shared by the initial arm and a post-failure re-arm. */
   private openBooleanPreviewSession(session: PreviewSession, draft: PreviewDraft): void {
-    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [] }];
+    this.previewSessions = [{ session, draft, lastAppliedEpoch: 0, previewBodyIds: [], replacedBodyIds: [] }];
     this.previewOwner = "boolean";
     this.previewParamsFn = () => this.booleanPreviewParams();
     this.previewFailure = null;
@@ -7462,6 +7495,8 @@ export class ModelToolController {
     this.previewParamsFn = null;
 
     const draft = this.booleanPreviewDraft();
+    // Keep retry/cancel usable even while opening replacement preview stalls.
+    this.showArmedBooleanChip();
     const session = await this.deps.client.beginPreview(draft);
     if (gen !== this.commitGen) {
       void this.deps.client.endPreview(session.sessionId, false); // superseded — don't leak

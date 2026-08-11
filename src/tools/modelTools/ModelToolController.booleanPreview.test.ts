@@ -262,6 +262,8 @@ describe("ModelToolController boolean kernel preview", () => {
     expect(toolStore.getState().phase).toBe("armed"); // re-armed, work kept
     expect(toolStore.getState().modelTool).toBe("boolean");
     expect(clientMock.beginPreview).toHaveBeenCalledTimes(2); // preview RE-ARMED (in flight)
+    expect(toolChipStore.getState().kind).toBe("booleanOp");
+    expect(toolChipStore.getState().onApply).toBeTypeOf("function");
     const hint = viewportStore.getState().statusHint;
     expect(hint?.severity).toBe("error");
     expect(hint?.message).toContain("self-intersecting geometry");

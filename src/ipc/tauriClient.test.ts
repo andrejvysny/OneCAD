@@ -232,16 +232,26 @@ describe("tauriClient file commands", () => {
     expect(payload).toEqual({ path: "/tmp/a.onecad", previewPng: png });
   });
 
-  it("saveDocumentAs shows the save dialog, saves, and returns the chosen path", async () => {
+  it("saveDocumentAs shows the save dialog, saves, and returns its outcome", async () => {
     const seen: string[] = [];
     let saved: unknown;
     mockIPC((cmd, payload) => {
       seen.push(cmd);
       if (cmd === "save_file_dialog") return "/chosen.onecad";
-      if (cmd === "save_document") saved = payload;
+      if (cmd === "save_document") {
+        saved = payload;
+        return {
+          documentId: "doc-1",
+          savedRevision: 3,
+          currentRevision: 3,
+          clean: true,
+          path: "/chosen.onecad",
+          title: "chosen",
+        };
+      }
     });
-    const path = await createTauriClient().saveDocumentAs();
-    expect(path).toBe("/chosen.onecad");
+    const outcome = await createTauriClient().saveDocumentAs();
+    expect(outcome).toMatchObject({ path: "/chosen.onecad", clean: true, title: "chosen" });
     expect(saved).toEqual({ path: "/chosen.onecad", previewPng: null });
     expect(seen).toContain("save_file_dialog");
     expect(seen).toContain("save_document");
@@ -1149,6 +1159,7 @@ describe("tauriClient edit + correlation", () => {
     expect(res.removedBodies).toEqual([]);
     expect(res.features).toHaveLength(1);
     expect(res.opLabel).toBe("Union");
+    expect(res.terminal).toBe("published");
   });
 
   it("applyOperation falls back to the pre-regen projection when no regen fires", async () => {
@@ -1162,6 +1173,7 @@ describe("tauriClient edit + correlation", () => {
     } as OperationOp);
     expect(res.revision).toBe(5);
     expect(res.changedBodies).toEqual([]);
+    expect(res.terminal).toBe("timeout");
   });
 
   it("undo invokes undo and reports the removed bodies from the regen", async () => {
@@ -1791,6 +1803,58 @@ describe("tauriClient prepareEdgeOp", () => {
   });
 });
 
+describe("tauriClient prepareOffsetFace", () => {
+  const request = {
+    chainTangentFaces: true,
+    distanceType: "Offset" as const,
+    pickedFaces: [{ bodyId: "uuid-1", topoKey: "f:4" }],
+  };
+  const result = {
+    snapshotId: 7,
+    targetBodyId: "body_uuid-1",
+    faces: [{ topoKey: "f:4", picked: true }],
+    currentDims: {},
+    refusal: null,
+  };
+
+  it("rejects a closure whose echoed snapshot differs from the admitted head", async () => {
+    mockIPC(
+      (cmd) => (cmd === "prepare_offset_face" ? { ...result, snapshotId: 8 } : undefined),
+      { shouldMockEvents: true },
+    );
+    const client = createTauriClient();
+
+    await expect(client.prepareOffsetFace({ ...request, snapshotId: 7 })).rejects.toThrow("stale");
+  });
+
+  it("rejects a once-valid closure when the published head moves while it waits", async () => {
+    let resolve!: (value: typeof result) => void;
+    mockIPC(
+      (cmd) =>
+        cmd === "prepare_offset_face"
+          ? new Promise<typeof result>((r) => {
+              resolve = r;
+            })
+          : undefined,
+      { shouldMockEvents: true },
+    );
+    const client = createTauriClient();
+    const unsub = client.onDocumentChanged(() => {});
+    await tick();
+    await emit("document-changed", { revision: 7, snapshotId: 7, changedBodies: [], removedBodies: [] });
+    await tick();
+
+    const pending = client.prepareOffsetFace(request);
+    await tick();
+    await emit("document-changed", { revision: 8, snapshotId: 8, changedBodies: [], removedBodies: [] });
+    await tick();
+    resolve(result);
+
+    await expect(pending).rejects.toThrow("stale");
+    unsub();
+  });
+});
+
 // ── Projection hydration bridge (projection-updated → documentStore) ──────────
 
 describe("tauriClient projection hydration", () => {
@@ -1888,6 +1952,7 @@ describe("tauriClient regen-finished correlation", () => {
     const res = await createTauriClient().applyOperation(op);
     expect(res.revision).toBe(12); // from regen-finished, not the pre-regen 11
     expect(res.changedBodies).toEqual([]); // noop → no body delta
+    expect(res.terminal).toBe("noop");
   });
 
   it("IGNORES a superseded regen-finished and resolves off the covering publish (rapid-commit)", async () => {
@@ -1952,6 +2017,7 @@ describe("tauriClient regen-finished correlation", () => {
     expect(res.changedBodies).toEqual([]); // failure → empty bodies (no throw)
     expect(res.errorMessage).toBe("worker crashed: boom");
     expect(res.diagnostics?.[0]?.code).toBe("FILLET_WALKING_FAILED");
+    expect(res.terminal).toBe("failed");
   });
 
   it("does NOT resolve off a regen-finished whose sourceRevision is below the commit's R", async () => {

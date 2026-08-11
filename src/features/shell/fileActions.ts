@@ -10,6 +10,7 @@ import { viewportStore } from "@/stores/viewportStore";
 import { documentStore } from "@/stores/documentStore";
 import { appStore } from "@/stores/appStore";
 import { getViewportEngine } from "@/viewport/engineBridge";
+import type { SaveOutcome } from "@/ipc/types";
 
 const client = createClient();
 
@@ -59,12 +60,17 @@ function baseName(path: string): string {
   return file.replace(/\.[^.]+$/, "");
 }
 
-function docName(): string {
-  return documentStore.getState().title || "document";
-}
-
 function refreshRecents(): void {
   void appStore.getState().loadRecents();
+}
+
+function adoptSaveOutcome(outcome: SaveOutcome): void {
+  documentStore.getState().applySaveOutcome(outcome);
+  const message = outcome.clean
+    ? `Saved ${outcome.title}`
+    : `Saved ${outcome.title} — newer changes remain unsaved`;
+  viewportStore.getState().setStatusHint(message, outcome.clean ? undefined : { sticky: true });
+  refreshRecents();
 }
 
 /**
@@ -74,36 +80,34 @@ function refreshRecents(): void {
  * any failure or a cancelled Save As dialog — the error hint (if any) is already
  * surfaced here, so callers just need the boolean.
  */
-export async function saveDocument(): Promise<boolean> {
+export async function saveDocument(): Promise<SaveOutcome | null> {
   try {
-    await client.saveDocument(undefined, capturePreview());
-    transientHint(`Saved ${docName()}`);
-    refreshRecents();
-    return true;
+    const outcome = await client.saveDocument(undefined, capturePreview());
+    adoptSaveOutcome(outcome);
+    return outcome;
   } catch (e) {
     if (isNoPathError(e)) {
       return saveDocumentAs();
     }
     errorHint(`Save failed: ${message(e)}`);
-    return false;
+    return null;
   }
 }
 
 /** ⇧⌘S: dialog + save. A cancelled dialog is a no-op (no hint), resolving `false`
  *  (see `saveDocument`'s return contract). */
-export async function saveDocumentAs(): Promise<boolean> {
+export async function saveDocumentAs(): Promise<SaveOutcome | null> {
   try {
     // Captured BEFORE the dialog opens — a native modal can obscure or blank the
     // webview, and after it closes the on-demand canvas may not have repainted.
     const preview = capturePreview();
-    const path = await client.saveDocumentAs(preview);
-    if (!path) return false; // cancelled
-    transientHint(`Saved ${baseName(path)}`);
-    refreshRecents();
-    return true;
+    const outcome = await client.saveDocumentAs(preview);
+    if (!outcome) return null; // cancelled
+    adoptSaveOutcome(outcome);
+    return outcome;
   } catch (e) {
     errorHint(`Save failed: ${message(e)}`);
-    return false;
+    return null;
   }
 }
 

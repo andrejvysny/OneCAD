@@ -8,26 +8,29 @@ import { describe, it, expect } from "vitest";
 import { mockClient, setMockRecovery } from "./mockClient";
 
 describe("mockClient file seam", () => {
-  it("saveDocument resolves (no-op, no throw) with or without a path", async () => {
-    await expect(mockClient.saveDocument()).resolves.toBeUndefined();
-    await expect(mockClient.saveDocument("/tmp/x.onecad")).resolves.toBeUndefined();
+  it("saveDocument returns an authoritative outcome with or without a path", async () => {
+    await expect(mockClient.saveDocument()).resolves.toMatchObject({ clean: true });
+    await expect(mockClient.saveDocument("/tmp/x.onecad")).resolves.toMatchObject({
+      path: "/tmp/x.onecad",
+      title: "x",
+    });
   });
 
   it("saveDocument accepts (and ignores) a previewPng — no container to write it to", async () => {
     await expect(
       mockClient.saveDocument("/tmp/x.onecad", "data:image/png;base64,AAAA"),
-    ).resolves.toBeUndefined();
-    await expect(mockClient.saveDocument(undefined, null)).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ clean: true });
+    await expect(mockClient.saveDocument(undefined, null)).resolves.toMatchObject({ clean: true });
   });
 
   it("saveDocumentAs returns a fake .onecad path", async () => {
-    const path = await mockClient.saveDocumentAs();
-    expect(path).toMatch(/\.onecad$/);
+    const outcome = await mockClient.saveDocumentAs();
+    expect(outcome?.path).toMatch(/\.onecad$/);
   });
 
   it("saveDocumentAs accepts (and ignores) a previewPng", async () => {
-    const path = await mockClient.saveDocumentAs("data:image/png;base64,AAAA");
-    expect(path).toMatch(/\.onecad$/);
+    const outcome = await mockClient.saveDocumentAs("data:image/png;base64,AAAA");
+    expect(outcome?.path).toMatch(/\.onecad$/);
   });
 
   it("exportStep returns a fake .step path", async () => {

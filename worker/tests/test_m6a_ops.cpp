@@ -2,12 +2,15 @@
 // MirrorBody), in-process via the op executors (real OCCT). Exact box arithmetic +
 // the resolution paths (ladder + partition-tracked) + recoverable guards. No
 // framework: exit code == failure count.
+#include <algorithm>
 #include <cstdio>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS_Shape.hxx>
@@ -15,6 +18,7 @@
 #include "elementmap/ElementMapPartition.h"
 #include "nlohmann/json.hpp"
 #include "ops/MirrorOp.h"
+#include "ops/OpCommon.h"
 #include "ops/OpTypes.h"
 #include "ops/PatternOp.h"
 #include "ops/ShellOp.h"
@@ -41,6 +45,15 @@ void check_near(double got, double want, double tol, const std::string& msg) {
 }
 
 double vol(const TopoDS_Shape& s) { return onecad::session::shape_volume(s); }
+
+double polar_angle_deg(const TopoDS_Shape& shape, double axis_x, double axis_y) {
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(shape, props);
+    const gp_Pnt center = props.CentreOfMass();
+    double angle = std::atan2(center.Y() - axis_y, center.X() - axis_x) * 180.0 / M_PI;
+    if (angle < 0.0) angle += 360.0;
+    return angle;
+}
 std::size_t face_count(const TopoDS_Shape& s) {
     return onecad::session::compute_shape_metrics(s).face_count;
 }
@@ -263,6 +276,35 @@ void test_circular_pattern() {
     }
 }
 
+// ── CircularPattern partial sweep: same `angleDeg / count` formula as SCHEMA/FE. ──
+void test_circular_pattern_partial_sweep() {
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(20.0, 20.0, 25.0).Shape();
+    BodyStore bodies;
+    bodies.create("body_src", "op0", box);
+    em::ElementMapPartition part;
+    json op = {{"opType", "CircularPattern"}, {"opId", "opcp_partial"},
+               {"params", {{"sourceBodyId", "body_src"}, {"axisOrigin", {0, -100, 0}},
+                           {"axisDirection", {0, 0, 1}}, {"angleDeg", 180.0}, {"count", 3},
+                           {"fuseResult", false}}}};
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    ops::OpOutcome oc = ops::execute_circular_pattern(ctx, op, "opcp_partial");
+    check(oc.status == ops::OpOutcome::Status::Ok, "circpat(partial): Ok");
+    if (!bodies.contains("body_opcp_partial")) return;
+
+    std::vector<double> angles;
+    for (const TopoDS_Shape& solid : ops::ordered_solids(bodies.get("body_opcp_partial")->geom)) {
+        angles.push_back(polar_angle_deg(solid, 0.0, -100.0));
+    }
+    std::sort(angles.begin(), angles.end());
+    check(angles.size() == 3, "circpat(partial): source plus two cloned solids");
+    if (angles.size() != 3) return;
+    check_near(angles[1] - angles[0], 60.0, 1e-6,
+               "circpat(partial): second instance is 180 / 3 = 60 degrees away");
+    check_near(angles[2] - angles[1], 60.0, 1e-6,
+               "circpat(partial): third instance is 120 degrees, not terminal 180");
+}
+
 // ── MirrorBody: mirror the box about x=0 (no fuse) → mirrored 10000 on −X. ──────
 void test_mirror_no_fuse() {
     const TopoDS_Shape box = BRepPrimAPI_MakeBox(20.0, 20.0, 25.0).Shape();  // [0,20]³-ish
@@ -315,6 +357,7 @@ int main() {
     test_linear_pattern_compound();
     test_linear_pattern_guards();
     test_circular_pattern();
+    test_circular_pattern_partial_sweep();
     test_mirror_no_fuse();
     test_mirror_fuse();
     if (g_failures == 0) std::fprintf(stderr, "m6a_ops: OK\n");

@@ -49,6 +49,12 @@ constexpr double kThroughAllFallback = 1.0e5;    // RegenerationEngine.cpp:856
 constexpr double kDraftAngleEpsilon = 1e-4;      // RegenerationEngine.cpp:59
 constexpr double kSideFaceDotThreshold = 0.9;    // RegenerationEngine.cpp:60
 
+double solid_volume(const TopoDS_Shape& shape) {
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(shape, props);
+    return props.Mass();
+}
+
 std::string input_body(const json& op, std::size_t index) {
     if (!op.contains("inputs") || !op["inputs"].is_array() || op["inputs"].size() <= index) return "";
     const json& in = op["inputs"][index];
@@ -253,6 +259,8 @@ std::optional<TopoDS_Shape> apply_draft(const TopoDS_Shape& shape,
 
         BRepOffsetAPI_DraftAngle draft(shape);
         const gp_Pln neutral_plane = plane;
+        std::size_t eligible_faces = 0;
+        std::size_t added_faces = 0;
         for (TopExp_Explorer exp(shape, TopAbs_FACE); exp.More(); exp.Next()) {
             const TopoDS_Face face = TopoDS::Face(exp.Current());
             BRepAdaptor_Surface surf(face, true);
@@ -260,11 +268,31 @@ std::optional<TopoDS_Shape> apply_draft(const TopoDS_Shape& shape,
             gp_Dir face_normal = surf.Plane().Axis().Direction();
             if (face.Orientation() == TopAbs_REVERSED) face_normal.Reverse();
             if (std::abs(face_normal.Dot(draft_dir)) > kSideFaceDotThreshold) continue;  // top/bottom
+            ++eligible_faces;
             draft.Add(face, draft_dir, angle_rad, neutral_plane, true);
-            if (!draft.AddDone()) draft.Remove(face);
+            if (!draft.AddDone()) {
+                draft.Remove(face);
+            } else {
+                ++added_faces;
+            }
+        }
+        if (eligible_faces == 0) {
+            error = "Extrude draft refused: no eligible planar side faces";
+            return std::nullopt;
+        }
+        if (added_faces == 0) {
+            error = "Extrude draft refused: no eligible side faces accepted";
+            return std::nullopt;
         }
         draft.Build();
-        if (draft.IsDone() && !draft.Shape().IsNull()) return draft.Shape();
+        if (draft.IsDone() && !draft.Shape().IsNull()) {
+            const double before = solid_volume(shape);
+            const double after = solid_volume(draft.Shape());
+            const double tolerance = std::max(1e-9, std::abs(before) * 1e-10);
+            if (std::abs(after - before) > tolerance) return draft.Shape();
+            error = "Extrude draft refused: draft left shape unchanged";
+            return std::nullopt;
+        }
         error = "Extrude draft failed";
     } catch (const Standard_Failure& failure) {
         error = std::string("Extrude draft failed: ") +

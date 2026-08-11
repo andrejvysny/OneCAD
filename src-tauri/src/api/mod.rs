@@ -46,7 +46,8 @@ use crate::document_runtime::{DocumentRuntime, RegenReport, SaveCaches};
 use crate::dto::{
     BeginGestureDto, DocumentModuleDto, DocumentProjection, DocumentSnapshotDto, DragSolveDto,
     FeatureDependenciesDto, FinishSketchDto, ModuleStateDto, PromotedElementDto, RecentProjectDto,
-    RecoveryInfoDto, ResolveRefDto, SketchOnFaceDto, SketchSessionDto, SketchUpsertDto,
+    RecoveryInfoDto, ResolveRefDto, SaveOutcomeDto, SketchOnFaceDto, SketchSessionDto,
+    SketchUpsertDto,
 };
 use crate::error::ApiError;
 use crate::events;
@@ -416,7 +417,7 @@ pub async fn save_document(
     app: AppHandle,
     path: Option<String>,
     preview_png: Option<String>,
-) -> Result<(), ApiError> {
+) -> Result<SaveOutcomeDto, ApiError> {
     let preview_png = decode_preview_png(preview_png);
     // ── 1. Locked: target path + checkpoint admission + engine handle. ──
     let (target, document_id, ticket, engine) = {
@@ -481,21 +482,36 @@ pub async fn save_document(
     .await?;
 
     // ── 5. Locked: adopt the path; go clean only if nothing was edited mid-write. ──
-    {
+    let outcome = {
         let mut guard = state.runtime.lock().await;
         match guard
             .as_mut()
             .filter(|rt| rt.document_uuid() == document_id)
         {
-            Some(rt) => rt.mark_saved(&target, revision),
-            None => tracing::warn!(
-                "save: the document closed while its container was being written; \
-                 the file at {target:?} is complete but no live document adopts it"
-            ),
+            Some(rt) => {
+                let clean = rt.mark_saved(&target, revision);
+                SaveOutcomeDto {
+                    document_id: rt.document_id(),
+                    saved_revision: revision.0,
+                    current_revision: rt.revision().0,
+                    clean,
+                    path: target.to_string_lossy().into_owned(),
+                    title: rt.title().to_string(),
+                }
+            }
+            None => {
+                tracing::warn!(
+                    "save: the document closed while its container was being written; \
+                     the file at {target:?} is complete but no live document adopts it"
+                );
+                return Err(ApiError::NoDocument(
+                    "save completed after document close".into(),
+                ));
+            }
         }
-    }
+    };
     recents::record(&app, &target);
-    Ok(())
+    Ok(outcome)
 }
 
 /// Hard cap on a decoded viewport capture (512 KiB). A start-screen card is a few
@@ -2221,17 +2237,22 @@ pub async fn resolve_refs(
             })
             .collect(),
     };
-    let resolutions = {
+    let results = {
         let guard = state.runtime.lock().await;
         let rt = guard
             .as_ref()
             .ok_or_else(|| ApiError::NoDocument("resolveRefs".into()))?;
-        rt.resolve_refs(req).await?
+        let resolutions = rt.resolve_refs(req).await?;
+        let revision = rt.projection().revision;
+        resolutions
+            .into_iter()
+            .map(|resolution| {
+                let body_id = rt.repair_candidate_body(&resolution.ref_id);
+                ResolveRefDto::from_resolution(resolution, snapshot_id, revision, body_id)
+            })
+            .collect()
     };
-    Ok(resolutions
-        .into_iter()
-        .map(ResolveRefDto::from_resolution)
-        .collect())
+    Ok(results)
 }
 
 /// The stored params of an operation record (read-only; `CadClient.getOperationParams`)
@@ -2605,6 +2626,7 @@ pub fn emit_regen_events(app: &AppHandle, report: &RegenReport, projection: &Doc
             events::NEEDS_REPAIR,
             crate::dto::NeedsRepairEvent {
                 revision: report.revision,
+                snapshot_id: report.snapshot_id,
                 items: report.needs_repair.clone(),
             },
         );

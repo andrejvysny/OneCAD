@@ -6,8 +6,10 @@
  * tool-switch tears every open preview session down. Engine + client are faked.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { Vector3 } from "three";
 import { ModelToolController, __setExactPreviewTimeoutForTests } from "./ModelToolController";
 import type { ViewportEngine } from "@/viewport/engine/ViewportEngine";
+import type { PickHit } from "@/viewport/engine/Picker";
 import type { CadClient } from "@/ipc/client";
 import type {
   ApplyOperationResult,
@@ -94,7 +96,7 @@ function makeEngineMock() {
     hideValueHandle: vi.fn(),
     showValueHandle: vi.fn(),
     showGhostPreviewMulti: vi.fn(),
-    probePick: vi.fn(() => null),
+    probePick: vi.fn<(clientX: number, clientY: number) => PickHit | null>(() => null),
   };
 }
 
@@ -117,6 +119,7 @@ function makeClientMock(
     applyOperation: vi.fn(() => Promise.resolve(okResult())),
     applyEditCommand: vi.fn(() => Promise.resolve(okResult())),
     undo: vi.fn(() => Promise.resolve(okResult())),
+    promoteSelection: vi.fn(() => Promise.resolve([{ topoKey: "f:2", elementId: "el-face-2", kind: "face" }])),
     getOperationParams: vi.fn(() =>
       Promise.resolve({
         profile: { sketchId: "sk", regionId: "r0" },
@@ -151,7 +154,12 @@ describe("ModelToolController commit gesture (Wave 1)", () => {
         bodyCbs.push(cb);
         return () => {};
       },
+      debug: true,
     });
+  }
+
+  function debug(): Record<string, unknown> {
+    return (window as unknown as { __extrudePreview: Record<string, unknown> }).__extrudePreview;
   }
 
   beforeEach(() => {
@@ -387,6 +395,39 @@ describe("ModelToolController commit gesture (Wave 1)", () => {
 
     expect(clientMock.endPreview).toHaveBeenCalledWith(expect.any(String), false);
     expect(controller.extrudeActive).toBe(false);
+  });
+
+  it("keeps a stale ToFace promotion in facePick without sending an anchor-only preview", async () => {
+    build();
+    documentStore.setState({ bodies: { body1: { id: "body1", name: "Body 1", visible: true } } });
+    await armExtrude();
+    toolChipStore.getState().onEndCondition?.("ToFace");
+    await flush();
+    expect(debug().phase).toBe("facePick");
+
+    engineMock.probePick.mockReturnValue({
+      kind: "face",
+      bodyId: "body1",
+      topoKey: "f:2",
+      distance: 1,
+      worldPos: new Vector3(2, 3, 4),
+    });
+    clientMock.promoteSelection.mockResolvedValueOnce([]);
+    const sentBefore = clientMock.updatePreview.mock.calls.length;
+    pointer("pointerdown", 10, 10, 0, 1);
+    pointer("pointerup", 10, 10, 0, 0);
+    await flush();
+
+    expect(debug().phase).toBe("facePick");
+    expect(debug().hasTargetFace).toBe(false);
+    expect(clientMock.updatePreview).toHaveBeenCalledTimes(sentBefore);
+    expect(viewportStore.getState().statusHint?.message).toBe("Selection is out of date — pick again");
+
+    pointer("pointerdown", 10, 10, 0, 1);
+    pointer("pointerup", 10, 10, 0, 0);
+    await flush();
+    expect(debug().phase).toBe("armed");
+    expect(debug().hasTargetFace).toBe(true);
   });
 
   // ── commit-time exact-preview barrier (EXTRUDE-REGION-PARITY P3) ─────────────

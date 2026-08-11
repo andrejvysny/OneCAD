@@ -1492,7 +1492,10 @@ async fn mark_saved_keeps_the_document_dirty_when_an_edit_lands_mid_write() {
     DocumentRuntime::write_payload(&path, &payload).unwrap();
     // …an edit lands while the container was being deflated.
     rt.apply(add_extrude(0x11, 40.0)).unwrap();
-    rt.mark_saved(&path, revision);
+    assert!(
+        !rt.mark_saved(&path, revision),
+        "a save racing an edit must report non-clean"
+    );
 
     assert_eq!(
         rt.path(),
@@ -1508,8 +1511,13 @@ async fn mark_saved_keeps_the_document_dirty_when_an_edit_lands_mid_write() {
     let payload = rt.build_save_payload(test_save_meta(), SaveCaches::explicit());
     let revision = rt.revision();
     DocumentRuntime::write_payload(&path, &payload).unwrap();
-    rt.mark_saved(&path, revision);
+    assert!(rt.mark_saved(&path, revision));
     assert!(!rt.is_dirty(), "no interleaved edit ⇒ the save is clean");
+    assert_eq!(
+        rt.title(),
+        "model",
+        "Save As adopts the authoritative path title"
+    );
 }
 
 #[tokio::test]
@@ -2633,6 +2641,51 @@ fn parse_input_ref_id_and_element_ref_input() {
     let r = element_ref_input(&rec2.op, 0).expect("edge 0 ref");
     assert_eq!(r.primary.as_ref().unwrap().element.as_str(), "e:5");
     assert!(element_ref_input(&rec2.op, 1).is_none());
+}
+
+#[test]
+fn typed_revolve_axis_hydrates_at_input_zero() {
+    let body = BodyId(Uuid::from_u128(0xB8));
+    let edge_ref = ElementRef {
+        primary: Some(PrimaryRef {
+            body,
+            element: ElementId::new("el_axis"),
+            kind: ElementKind::Edge,
+            extra: Default::default(),
+        }),
+        intent: None,
+        anchor: Some(AnchorIntent {
+            world_point: Vec3::new_unchecked(1.0, 2.0, 3.0),
+            surface_uv: None,
+            local_frame: None,
+            adjacency_hint: None,
+            extra: Default::default(),
+        }),
+        extra: Default::default(),
+    };
+    let op = Operation::Known(KnownOperation::Revolve(RevolveParams {
+        profile: None,
+        angle_deg: Scalar::new(90.0),
+        axis: Some(AxisRef::Element {
+            body,
+            edge: ElementId::new("e:legacy"),
+            edge_ref: Some(edge_ref),
+            extra: Default::default(),
+        }),
+        boolean_mode: BooleanMode::NewBody,
+        target_body: None,
+        extra: Default::default(),
+    }));
+    let hydrated = element_ref_input(&op, 0).expect("typed axis at input0");
+    assert_eq!(
+        hydrated.primary.as_ref().unwrap().element.as_str(),
+        "el_axis"
+    );
+    assert_eq!(
+        hydrated.anchor.as_ref().unwrap().world_point,
+        Vec3::new_unchecked(1.0, 2.0, 3.0)
+    );
+    assert!(element_ref_input(&op, 1).is_none());
 }
 
 /// H9 (closing an H5 follow-up): a Hole's `inputs[]` is `[host body, host face]`

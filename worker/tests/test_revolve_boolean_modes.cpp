@@ -63,11 +63,11 @@ json sketch_op(const std::string& op_id, int step, const std::string& sid,
 // `body_events` collects the Revolve step's bodyEvents. (Session holds a mutex ⇒
 // non-movable, passed by reference.) Generalizes test_revolve_split.cpp's run_plan
 // so each case below only states its box/axis/profile numbers + booleanMode.
-void run_plan(Session& s, std::vector<json>& body_events,
-              double box_u0, double box_v0, double box_u1, double box_v1, double box_h,
-              double axis_u, double axis_v0, double axis_v1,
-              double prof_u0, double prof_v0, double prof_u1, double prof_v1,
-              const std::string& boolean_mode) {
+Envelope run_plan(Session& s, std::vector<json>& body_events,
+                  double box_u0, double box_v0, double box_u1, double box_v1, double box_h,
+                  double axis_u, double axis_v0, double axis_v1,
+                  double prof_u0, double prof_v0, double prof_u1, double prof_v1,
+                  const std::string& boolean_mode) {
     s.open("doc", 0, 3, "determinism");
 
     json tool_ents = rect("t", prof_u0, prof_v0, prof_u1, prof_v1);
@@ -99,10 +99,12 @@ void run_plan(Session& s, std::vector<json>& body_events,
                  {"expectedBaseHash", kEmpty},
                  {"prefixHashes", json::array({"a", "b", "c", "d"})},
                  {"targetStep", 3}, {"ops", ops}};
-    onecad::session::handle_execute_plan(s, Envelope::request(1, "ExecutePlan", args), ctx);
+    Envelope prepared =
+        onecad::session::handle_execute_plan(s, Envelope::request(1, "ExecutePlan", args), ctx);
     onecad::session::handle_accept_prepared(
         s, Envelope::request(1, "AcceptPrepared",
                              json{{"jobId", 1}, {"documentRevision", 0}, {"workerEpoch", 3}}));
+    return prepared;
 }
 
 double vol_of(Session& s, const std::string& bid) {
@@ -259,12 +261,42 @@ void test_intersect_single_solid_zslab() {
           "revolve-intersect: volume == 3200 (20·40·4 z-slab, exact — radial band non-binding)");
 }
 
+// --- Case 4: a disjoint Intersect produces zero solids and must refuse. ---
+void test_intersect_disjoint_refuses() {
+    // The target and radial washer are exactly the disjoint Cut fixture above; an
+    // Intersect would be a valid-but-empty OCCT compound. It must not replace the
+    // target with an unmeshable empty body or consume any existing body.
+    Session s;
+    std::vector<json> body_events;
+    const Envelope prepared = run_plan(s, body_events,
+                                       -10, -10, 40, 10, 30.0,
+                                       0, 0, 20,
+                                       50, 5, 60, 25,
+                                       "Intersect");
+
+    check(prepared.ok == true, "revolve-empty: recoverable operation failure still prepares prefix");
+    check(prepared.result.value("stoppedReason", "") == "opFailed",
+          "revolve-empty: stops at the refused revolve step");
+    const json& steps = prepared.result["perStepResults"];
+    check(steps.size() == 4 && steps[3].value("status", "") == "opFailed",
+          "revolve-empty: failed step is reported as opFailed");
+    check(steps.size() == 4 && steps[3].value("message", "") == "Revolve boolean produced no solids",
+          "revolve-empty: refusal reason reaches the plan result");
+
+    const onecad::session::BodyStore bodies = s.bodies_copy();
+    check(bodies.contains("body_op1") && bodies.all().size() == 1,
+          "revolve-empty: prefix target remains the only published body");
+    check(std::abs(vol_of(s, "body_op1") - 30000.0) < 1e-3,
+          "revolve-empty: target geometry is unchanged");
+}
+
 }  // namespace
 
 int main() {
     test_add_tool_fully_inside();
     test_cut_removes_nothing();
     test_intersect_single_solid_zslab();
+    test_intersect_disjoint_refuses();
     if (g_failures == 0) std::fprintf(stderr, "revolve_boolean_modes: OK\n");
     return g_failures;
 }
