@@ -719,6 +719,8 @@ export class ModelToolController {
 
   // Pattern / mirror context (chip-driven; ghost clones of the source body).
   private patternEditFeatureId: string | undefined;
+  private patternResultPolicyVersion: 2 | undefined;
+  private patternFuseResult = false;
 
   /**
    * The record a placement commit will REWRITE — either a fold target the backend
@@ -4591,8 +4593,12 @@ export class ModelToolController {
     seedCount?: number,
     seedAxis?: PatternAxis,
     seedSpacing?: number,
+    resultPolicyVersion?: 2,
+    fuseResult?: boolean,
   ): void {
     this.patternEditFeatureId = editFeatureId;
+    this.patternResultPolicyVersion = editFeatureId ? resultPolicyVersion : 2;
+    this.patternFuseResult = editFeatureId ? fuseResult ?? true : false;
     this.linear = linearPatternStep(linearPatternInit(), {
       kind: "arm",
       bodyId,
@@ -4647,7 +4653,16 @@ export class ModelToolController {
       opType: "LinearPattern",
       featureId: editFeatureId,
       inputs: [{ primary: { bodyId, kind: "body" } }],
-      params: { sourceBodyId: bodyId, direction: WORLD_AXIS[axis], spacing, count, fuseResult: true },
+      params: {
+        sourceBodyId: bodyId,
+        direction: WORLD_AXIS[axis],
+        spacing,
+        count,
+        fuseResult: this.patternFuseResult,
+        ...(this.patternResultPolicyVersion === undefined
+          ? {}
+          : { resultPolicyVersion: this.patternResultPolicyVersion }),
+      },
     };
     await this.commitPattern(op, bodyId, `Linear pattern ×${count}`);
   }
@@ -4670,8 +4685,12 @@ export class ModelToolController {
     seedCount?: number,
     seedAxis?: PatternAxis,
     seedAngle?: number,
+    resultPolicyVersion?: 2,
+    fuseResult?: boolean,
   ): void {
     this.patternEditFeatureId = editFeatureId;
+    this.patternResultPolicyVersion = editFeatureId ? resultPolicyVersion : 2;
+    this.patternFuseResult = editFeatureId ? fuseResult ?? true : false;
     this.circular = circularPatternStep(circularPatternInit(), {
       kind: "arm",
       bodyId,
@@ -4732,7 +4751,10 @@ export class ModelToolController {
         axisDirection: WORLD_AXIS[axis],
         angleDeg: angle,
         count,
-        fuseResult: true,
+        fuseResult: this.patternFuseResult,
+        ...(this.patternResultPolicyVersion === undefined
+          ? {}
+          : { resultPolicyVersion: this.patternResultPolicyVersion }),
       },
     };
     await this.commitPattern(op, bodyId, `Circular pattern ×${count}`);
@@ -4813,6 +4835,8 @@ export class ModelToolController {
     this.circular = circularPatternInit();
     this.mirror = mirrorInit();
     this.patternEditFeatureId = undefined;
+    this.patternResultPolicyVersion = undefined;
+    this.patternFuseResult = false;
     if (failure !== null) {
       this.resetToSelect(`Pattern failed: ${failure}`, { severity: "error", sticky: true });
     } else {
@@ -4853,7 +4877,9 @@ export class ModelToolController {
     const spacing = scalarNumber(stored?.spacing);
     const count = typeof stored?.count === "number" ? stored.count : countFromValueText(feat.valueText);
     toolStore.getState().setTool("linearPattern");
-    this.armLinear(bodyId, featureId, count, axis, spacing);
+    const resultPolicyVersion = stored?.resultPolicyVersion === 2 ? 2 : undefined;
+    const fuseResult = typeof stored?.fuseResult === "boolean" ? stored.fuseResult : true;
+    this.armLinear(bodyId, featureId, count, axis, spacing, resultPolicyVersion, fuseResult);
   }
 
   /** Circular-pattern counterpart of `editLinearPatternFeature` — same contract,
@@ -4879,7 +4905,9 @@ export class ModelToolController {
     const angle = scalarNumber(stored?.angleDeg);
     const count = typeof stored?.count === "number" ? stored.count : countFromValueText(feat.valueText);
     toolStore.getState().setTool("circularPattern");
-    this.armCircular(bodyId, featureId, count, axis, angle);
+    const resultPolicyVersion = stored?.resultPolicyVersion === 2 ? 2 : undefined;
+    const fuseResult = typeof stored?.fuseResult === "boolean" ? stored.fuseResult : true;
+    this.armCircular(bodyId, featureId, count, axis, angle, resultPolicyVersion, fuseResult);
   }
 
   /** Mirror counterpart of `editLinearPatternFeature` — seeds the mirror plane from
@@ -8142,6 +8170,8 @@ export class ModelToolController {
     this.circular = circularPatternInit();
     this.mirror = mirrorInit();
     this.patternEditFeatureId = undefined;
+    this.patternResultPolicyVersion = undefined;
+    this.patternFuseResult = false;
     toolChipStore.getState().clear();
   }
 

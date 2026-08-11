@@ -194,18 +194,10 @@ std::optional<OpOutcome> build_fillet(
 }
 
 std::optional<OpOutcome> validate_chamfer(const TopoDS_Shape& result) {
-    if (result.IsNull()) {
-        return OpOutcome::fail("GEOMETRY_INVALID", "Chamfer produced null shape");
-    }
-    if (!BRepCheck_Analyzer(result).IsValid()) {
-        return OpOutcome::fail("GEOMETRY_INVALID", "Chamfer produced invalid shape");
-    }
-    TopTools_IndexedMapOfShape solids;
-    TopExp::MapShapes(result, TopAbs_SOLID, solids);
-    const double volume = session::shape_volume(result);
-    if (solids.Extent() != 1 || !std::isfinite(volume) || volume <= 0.0) {
-        return OpOutcome::fail("GEOMETRY_INVALID", "Chamfer produced non-solid geometry");
-    }
+    const kernel::validation::PublicationDecision decision = publication_decision(
+        result, kernel::validation::single_solid_policy(
+                    "Chamfer", kernel::validation::PublicationTier::TierB));
+    if (!decision.publishable()) return OpOutcome::fail(decision.code, decision.message);
     return std::nullopt;
 }
 

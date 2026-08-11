@@ -17,12 +17,9 @@
 //   * guards: `count < 2`, `|spacing| < 1e-9` (linear) / zero direction, a
 //     transform/fuse failure → recoverable OP_FAILED (SCHEMA §8; session intact).
 //
-// LINEAGE: the result is a first-seen body (ID-on-demand, SCHEMA §7.5) — no
-// pre-existing tracked elements, so the elementMapDelta is EMPTY (as Extrude
-// NewBody). Legacy `rebindBody` re-descriptored every face generically (no
-// per-instance ordinal naming); the V2 partition mints a pattern face on demand
-// when first referenced, its descriptor (center/normal) naturally distinguishing
-// the instance — so no eager per-instance naming is required.
+// V2 `resultPolicyVersion:2` keeps source as instance zero. Non-fused patterns
+// create only `body_<opId>:<k>` children for transformed instance `k+1`; fused
+// patterns modify source in place. Pattern faces remain ID-on-demand.
 #pragma once
 
 #include <string>

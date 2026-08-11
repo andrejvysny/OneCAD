@@ -287,16 +287,16 @@ OpOutcome execute_hole(OpContext& ctx, const json& op, const std::string& op_id)
     if (!br.error_code.empty()) {
         return OpOutcome::fail(br.error_code, "Hole cut failed: " + br.error_message);
     }
-    if (br.shape.IsNull()) {
-        return OpOutcome::fail("GEOMETRY_INVALID", "Hole produced null shape");
-    }
-    if (ordered_solids(br.shape).empty()) {
-        // A hole that consumed its whole host is not a hole. Publishing an empty
-        // compound as a "modified" body would leave an unmeshable ghost.
-        return OpOutcome::fail("OP_FAILED", "Hole removed the entire host body");
-    }
-    if (!BRepCheck_Analyzer(br.shape).IsValid()) {
-        return OpOutcome::fail("GEOMETRY_INVALID", "Hole produced invalid shape");
+    kernel::validation::PublicationPolicy policy;
+    policy.name = "Hole";
+    policy.max_solid_count = -1;  // Legacy Hole preserves its documented split-host residual.
+    policy.tier = kernel::validation::PublicationTier::TierB;
+    const kernel::validation::PublicationDecision decision = publication_decision(br.shape, policy);
+    if (!decision.publishable()) {
+        if (ordered_solids(br.shape).empty()) {
+            return OpOutcome::fail("OP_FAILED", "Hole removed the entire host body");
+        }
+        return OpOutcome::fail(decision.code, decision.message);
     }
 
     // --- publish the MODIFIED host (id preserved) + rebind partition via history ---

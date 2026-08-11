@@ -341,6 +341,7 @@ fn operation_strategy() -> impl Strategy<Value = Operation> {
                 spacing,
                 count,
                 fuse_result: fuse,
+                result_policy_version: None,
                 extra: Default::default(),
             }))
         });
@@ -361,6 +362,7 @@ fn operation_strategy() -> impl Strategy<Value = Operation> {
                 angle_deg: angle,
                 count,
                 fuse_result: fuse,
+                result_policy_version: None,
                 extra: Default::default(),
             }))
         });

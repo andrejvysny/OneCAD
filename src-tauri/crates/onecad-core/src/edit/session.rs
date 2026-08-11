@@ -418,6 +418,18 @@ impl DocumentSession {
         adopted
     }
 
+    /// Copies body-level display metadata onto a newly minted derived child.
+    /// Face colors stay source-local because their ElementIds do not cross bodies.
+    pub fn inherit_body_display_metadata(&mut self, source: BodyId, child: BodyId) -> bool {
+        let Some(source_meta) = self.document.bodies.get(source) else {
+            return false;
+        };
+        let visible = source_meta.visible;
+        let color = source_meta.color;
+        self.document.bodies.set_visible(child, visible)
+            && self.document.bodies.set_color(child, color)
+    }
+
     /// **Regen-lane** repair-gate seeding (VF-B6) — plants `items` as seeded gates
     /// with NO command inverse.
     ///

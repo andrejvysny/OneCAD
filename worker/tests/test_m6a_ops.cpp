@@ -182,7 +182,7 @@ void test_shell_thickness_too_small() {
           "shell: thickness too small → OP_FAILED (recoverable)");
 }
 
-// ── LinearPattern: 3× 20×20×25 box, spacing 40 along +X → 3 disjoint ⇒ 30000. ──
+// ── LinearPattern: touching copies fuse into one 60×20×25 solid. ───────
 void test_linear_pattern() {
     const TopoDS_Shape box = BRepPrimAPI_MakeBox(20.0, 20.0, 25.0).Shape();  // vol 10000
     BodyStore bodies;
@@ -190,7 +190,7 @@ void test_linear_pattern() {
     em::ElementMapPartition part;
     json op = {{"opType", "LinearPattern"}, {"opId", "oplp"},
                {"params", {{"sourceBodyId", "body_src"}, {"direction", {1, 0, 0}},
-                           {"spacing", 40.0}, {"count", 3}, {"fuseResult", true}}}};
+                           {"spacing", 20.0}, {"count", 3}, {"fuseResult", true}}}};
     Ctx c;
     ops::OpContext ctx = c.make(bodies, part);
     ops::OpOutcome oc = ops::execute_linear_pattern(ctx, op, "oplp");
@@ -200,7 +200,7 @@ void test_linear_pattern() {
     check(oc.delta.empty(), "linpat: empty delta (ID-on-demand NewBody)");
     check(bodies.contains("body_src"), "linpat: source body preserved");
     if (bodies.contains("body_oplp")) {
-        check_near(vol(bodies.get("body_oplp")->geom), 30000.0, 1.0, "linpat: 3 × 10000 (disjoint)");
+        check_near(vol(bodies.get("body_oplp")->geom), 30000.0, 1.0, "linpat: fused volume 30000");
     }
 }
 
@@ -220,6 +220,62 @@ void test_linear_pattern_compound() {
     if (bodies.contains("body_oplp2")) {
         check_near(vol(bodies.get("body_oplp2")->geom), 30000.0, 1.0, "linpat(compound): 30000");
     }
+}
+
+// ── LinearPattern V2 non-fuse: source is instance 0; children are instances 1..N-1. ──
+void test_linear_pattern_v2_preserves_source() {
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(20.0, 20.0, 25.0).Shape();
+    BodyStore bodies;
+    bodies.create("body_src", "op0", box);
+    em::ElementMapPartition part;
+    json op = {{"opType", "LinearPattern"}, {"opId", "oplpv2"},
+               {"params", {{"sourceBodyId", "body_src"}, {"direction", {1, 0, 0}},
+                           {"spacing", 40.0}, {"count", 4}, {"fuseResult", false},
+                           {"resultPolicyVersion", 2}}}};
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    const ops::OpOutcome oc = ops::execute_linear_pattern(ctx, op, "oplpv2");
+    check(oc.status == ops::OpOutcome::Status::Ok, "linpat(v2): Ok");
+    check(oc.body_events.size() == 3 && oc.body_ids.size() == 3,
+          "linpat(v2): creates count - 1 children only");
+    check(bodies.contains("body_src") && !bodies.contains("body_oplpv2"),
+          "linpat(v2): source survives; no legacy aggregate body");
+    for (int k = 0; k < 3; ++k) {
+        const std::string child = "body_oplpv2:" + std::to_string(k);
+        check(bodies.contains(child), "linpat(v2): deterministic child id");
+        if (bodies.contains(child)) {
+            check_near(vol(bodies.get(child)->geom), 10000.0, 1.0,
+                       "linpat(v2): child is one source instance");
+            check_near(onecad::session::compute_shape_metrics(bodies.get(child)->geom).bbox_min[0],
+                       40.0 * (k + 1), 1e-6, "linpat(v2): child ordinal matches instance");
+            check(bodies.get(child)->face_colors.empty(),
+                  "linpat(v2): child does not inherit source face identities/colors");
+        }
+    }
+    for (const auto& event : oc.body_events) {
+        check(event.body_id != "body_src", "linpat(v2): source emits no lifecycle event");
+    }
+}
+
+void test_linear_pattern_v2_fused_modifies_source() {
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(20.0, 20.0, 25.0).Shape();
+    BodyStore bodies;
+    bodies.create("body_src", "op0", box);
+    em::ElementMapPartition part;
+    json op = {{"opType", "LinearPattern"}, {"opId", "oplpv2f"},
+               {"params", {{"sourceBodyId", "body_src"}, {"direction", {1, 0, 0}},
+                           {"spacing", 20.0}, {"count", 3}, {"fuseResult", true},
+                           {"resultPolicyVersion", 2}}}};
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    const ops::OpOutcome oc = ops::execute_linear_pattern(ctx, op, "oplpv2f");
+    check(oc.status == ops::OpOutcome::Status::Ok, "linpat(v2 fused): Ok");
+    check(oc.body_events.size() == 1 && oc.body_events[0].kind == "modified" &&
+              oc.body_events[0].body_id == "body_src",
+          "linpat(v2 fused): source modified in place");
+    check(!bodies.contains("body_oplpv2f"), "linpat(v2 fused): no duplicate result body");
+    check_near(vol(bodies.get("body_src")->geom), 30000.0, 1.0,
+               "linpat(v2 fused): source holds fused result");
 }
 
 // ── LinearPattern guards. ─────────────────────────────────────────────────────
@@ -254,6 +310,35 @@ void test_linear_pattern_guards() {
         check(oc.status == ops::OpOutcome::Status::Failed && oc.error_code == "REF_UNRESOLVED",
               "linpat: missing source → REF_UNRESOLVED");
     }
+    {
+        json op = {{"opType", "LinearPattern"}, {"opId", "oplpD"},
+                   {"params", {{"sourceBodyId", "body_src"}, {"direction", {1, 0}},
+                               {"spacing", 40.0}, {"count", "3"}, {"fuseResult", true}}}};
+        ops::OpContext ctx = c.make(bodies, part);
+        ops::OpOutcome oc = ops::execute_linear_pattern(ctx, op, "oplpD");
+        check(oc.status == ops::OpOutcome::Status::Failed && oc.error_code == "OP_FAILED",
+              "linpat: malformed present fields → OP_FAILED");
+    }
+    {
+        json op = {{"opType", "LinearPattern"}, {"opId", "oplpE"},
+                   {"params", {{"sourceBodyId", "body_src"}, {"direction", {1, 0, 0}},
+                               {"spacing", 40.0}, {"count", 3}, {"fuseResult", "true"}}}};
+        ops::OpContext ctx = c.make(bodies, part);
+        ops::OpOutcome oc = ops::execute_linear_pattern(ctx, op, "oplpE");
+        check(oc.status == ops::OpOutcome::Status::Failed && oc.error_code == "OP_FAILED",
+              "linpat: non-boolean fuseResult → OP_FAILED");
+    }
+    {
+        json op = {{"opType", "LinearPattern"}, {"opId", "oplpF"},
+                   {"params", {{"sourceBodyId", "body_src"}, {"direction", {1, 0, 0}},
+                               {"spacing", 40.0}, {"count", 3}, {"fuseResult", true}}}};
+        ops::OpContext ctx = c.make(bodies, part);
+        ops::OpOutcome oc = ops::execute_linear_pattern(ctx, op, "oplpF");
+        check(oc.status == ops::OpOutcome::Status::Failed &&
+                  oc.error_code == "PATTERN_DISJOINT_RESULT",
+              "linpat: fused disjoint result → PATTERN_DISJOINT_RESULT");
+        check(!bodies.contains("body_oplpF"), "linpat: refusal does not mint a body");
+    }
 }
 
 // ── CircularPattern: 3× box around a Z-axis far away → 3 disjoint ⇒ 30000. ─────
@@ -265,11 +350,11 @@ void test_circular_pattern() {
     json op = {{"opType", "CircularPattern"}, {"opId", "opcp"},
                {"params", {{"sourceBodyId", "body_src"}, {"axisOrigin", {0, -100, 0}},
                            {"axisDirection", {0, 0, 1}}, {"angleDeg", 360.0}, {"count", 3},
-                           {"fuseResult", true}}}};
+                           {"fuseResult", false}}}};
     Ctx c;
     ops::OpContext ctx = c.make(bodies, part);
     ops::OpOutcome oc = ops::execute_circular_pattern(ctx, op, "opcp");
-    check(oc.status == ops::OpOutcome::Status::Ok, "circpat: Ok");
+    check(oc.status == ops::OpOutcome::Status::Ok, "circpat(legacy compound): Ok");
     check(oc.body_events.size() == 1 && oc.body_events[0].kind == "created", "circpat: NewBody created");
     if (bodies.contains("body_opcp")) {
         check_near(vol(bodies.get("body_opcp")->geom), 30000.0, 2.0, "circpat: 3 × 10000 (disjoint)");
@@ -346,6 +431,21 @@ void test_mirror_fuse() {
     }
 }
 
+void test_mirror_strict_params() {
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(20.0, 20.0, 25.0).Shape();
+    BodyStore bodies;
+    bodies.create("body_src", "op0", box);
+    em::ElementMapPartition part;
+    json op = {{"opType", "MirrorBody"}, {"opId", "opmir_bad"},
+               {"params", {{"sourceBodyId", "body_src"}, {"planePoint", {0, 0, 0}},
+                           {"planeNormal", {1, 0, 0}}, {"fuseWithOriginal", 1}}}};
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    const ops::OpOutcome oc = ops::execute_mirror_body(ctx, op, "opmir_bad");
+    check(oc.status == ops::OpOutcome::Status::Failed && oc.error_code == "OP_FAILED",
+          "mirror: non-boolean fuseWithOriginal → OP_FAILED");
+}
+
 }  // namespace
 
 int main() {
@@ -355,11 +455,14 @@ int main() {
     test_shell_thickness_too_small();
     test_linear_pattern();
     test_linear_pattern_compound();
+    test_linear_pattern_v2_preserves_source();
+    test_linear_pattern_v2_fused_modifies_source();
     test_linear_pattern_guards();
     test_circular_pattern();
     test_circular_pattern_partial_sweep();
     test_mirror_no_fuse();
     test_mirror_fuse();
+    test_mirror_strict_params();
     if (g_failures == 0) std::fprintf(stderr, "m6a_ops: OK\n");
     return g_failures;
 }

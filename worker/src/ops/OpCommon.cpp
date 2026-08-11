@@ -28,6 +28,7 @@
 #include "loop/RegionTable.h"
 #include "loop/RegionUtils.h"
 #include "elementmap/Ladder.h"
+#include "kernel/validation/ShapeAudit.h"
 #include "ops/CancelProgress.h"
 #include "sketch/WireSketch.h"
 
@@ -47,9 +48,48 @@ double read_scalar(const json& params, const char* key, double dflt) {
     return dflt;
 }
 
+bool read_scalar_strict(const json& params, const char* key, double dflt,
+                        double& value_out, std::string& error_out) {
+    value_out = dflt;
+    if (!params.is_object() || !params.contains(key)) return true;
+    const json& value = params[key];
+    if (value.is_number()) {
+        value_out = value.get<double>();
+    } else if (value.is_object() && value.contains("value") && value["value"].is_number()) {
+        value_out = value["value"].get<double>();
+    } else {
+        error_out = std::string(key) + " must be a finite scalar";
+        return false;
+    }
+    if (!std::isfinite(value_out)) {
+        error_out = std::string(key) + " must be a finite scalar";
+        return false;
+    }
+    return true;
+}
+
 std::string read_str(const json& o, const char* key, const std::string& dflt) {
     if (o.is_object() && o.contains(key) && o[key].is_string()) return o[key].get<std::string>();
     return dflt;
+}
+
+bool read_bool_strict(const json& params, const char* key, bool dflt,
+                      bool& value_out, std::string& error_out) {
+    value_out = dflt;
+    if (!params.is_object() || !params.contains(key)) return true;
+    if (!params[key].is_boolean()) {
+        error_out = std::string(key) + " must be a boolean";
+        return false;
+    }
+    value_out = params[key].get<bool>();
+    return true;
+}
+
+kernel::validation::PublicationDecision publication_decision(
+    const TopoDS_Shape& shape, const kernel::validation::PublicationPolicy& policy) {
+    const kernel::validation::ShapeEvidence evidence =
+        kernel::validation::collect_shape_evidence(shape, policy.tier);
+    return kernel::validation::evaluate_publication_policy(evidence, policy);
 }
 
 namespace {

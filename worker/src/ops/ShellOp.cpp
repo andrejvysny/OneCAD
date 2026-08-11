@@ -68,7 +68,11 @@ OpOutcome execute_shell(OpContext& ctx, const json& op, const std::string& op_id
     const TopoDS_Shape target_shape = target_rec->geom;
 
     // --- thickness guard (signed '<' per RegenerationEngine.cpp:1455) ---
-    const double thickness = read_scalar(params, "thickness", 0.0);
+    double thickness = 0.0;
+    std::string thickness_error;
+    if (!read_scalar_strict(params, "thickness", 0.0, thickness, thickness_error)) {
+        return OpOutcome::fail("OP_FAILED", thickness_error);
+    }
     if (thickness < kMinValue) {
         return OpOutcome::fail("OP_FAILED", "Shell thickness too small");
     }
@@ -155,11 +159,11 @@ OpOutcome execute_shell(OpContext& ctx, const json& op, const std::string& op_id
         return OpOutcome::fail("OP_FAILED", "Shell operation failed");
     }
 
-    if (result.IsNull()) {
-        return OpOutcome::fail("GEOMETRY_INVALID", "Shell produced null shape");
-    }
-    if (!BRepCheck_Analyzer(result).IsValid()) {
-        return OpOutcome::fail("GEOMETRY_INVALID", "Shell produced invalid shape");
+    const kernel::validation::PublicationDecision decision = publication_decision(
+        result, kernel::validation::single_solid_policy(
+                    "Shell", kernel::validation::PublicationTier::TierB));
+    if (!decision.publishable()) {
+        return OpOutcome::fail(decision.code, decision.message);
     }
 
     // --- publish the modified body (id preserved) + rebind partition via history ---

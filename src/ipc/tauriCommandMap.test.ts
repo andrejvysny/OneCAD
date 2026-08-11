@@ -515,10 +515,10 @@ describe("operationToEditCommand — M6b op wire mappings", () => {
     ).toBe("Offset face");
   });
 
-  it("LinearPattern maps direction (Vec3 array) + spacing (Scalar) + count (bare u32) + fuseResult", () => {
+  it("LinearPattern maps versioned lineage with direction, Scalar spacing, and bare count", () => {
     const op: OperationOp = {
       opType: "LinearPattern",
-      params: { sourceBodyId: "body1", direction: [1, 0, 0], spacing: 20, count: 4 },
+      params: { sourceBodyId: "body1", direction: [1, 0, 0], spacing: 20, count: 4, resultPolicyVersion: 2 },
     };
     const params = addedParams(op);
     expect(params).toEqual({
@@ -527,6 +527,7 @@ describe("operationToEditCommand — M6b op wire mappings", () => {
       spacing: { value: 20 },
       count: 4,
       fuseResult: true, // Rust `default_true`
+      resultPolicyVersion: 2,
     });
     // count is a bare number, NOT a Scalar object.
     expect(typeof params.count).toBe("number");

@@ -489,6 +489,12 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
 
     // --- boolean mode dispatch ---
     if (*boolean_mode == app::BooleanMode::NewBody) {
+        const kernel::validation::PublicationDecision decision = publication_decision(
+            tool_shape, kernel::validation::single_solid_policy(
+                            "Extrude", kernel::validation::PublicationTier::TierA));
+        if (!decision.publishable()) {
+            return OpOutcome::fail(decision.code, decision.message);
+        }
         const std::string bid = "body_" + op_id;
         ctx.bodies.create(bid, op_id, tool_shape);
         out.body_events.push_back({"created", bid, {}});  // no rankKey: no ordinal ranked
@@ -510,6 +516,15 @@ OpOutcome execute_extrude(OpContext& ctx, const json& op, const std::string& op_
                                        ctx.occt_options, ctx.cancel, builder);
     if (br.error_code == "CANCELLED") return OpOutcome::cancelled();
     if (!br.error_code.empty()) return OpOutcome::fail(br.error_code, br.error_message);
+    kernel::validation::PublicationPolicy policy;
+    policy.name = "Extrude boolean";
+    policy.max_solid_count = -1;
+    policy.tier = kernel::validation::PublicationTier::TierB;
+    policy.allow_empty_lifecycle = true;
+    const kernel::validation::PublicationDecision decision = publication_decision(br.shape, policy);
+    if (!decision.publishable() && !decision.lifecycle_only()) {
+        return OpOutcome::fail(decision.code, decision.message);
+    }
 
     // A complete Cut/Intersect removes the target. Publishing an empty compound as
     // a modified body would leave an unmeshable ghost in the document.

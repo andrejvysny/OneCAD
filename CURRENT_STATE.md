@@ -1,14 +1,18 @@
 ## MODELING CORRECTNESS P2-P4 — LIVE DELTA (2026-08-11)
 
-Reviewed implementation commit `055d31f`, OCCT 8.0.1 fingerprint
-`0a6a1dce34181289`. Implemented:
-P2 exact analytic CurveFragments/BReps, v2 region identity, bounded refinement,
-and cancellation. Not implemented: uniform publication policy, real-worker corpus
-executor. P4 coverage manifest/classifier is implemented and CI-checked.
-P2 gate: worker CTest, real-worker Rust, TypeScript/Vitest, and zero-retry browser
-lanes pass. Manual Tauri and completed unchanged T0 remain open.
-Gate passed: worker CTest 112/112; Chromium 196/196 and WebKit 196/196 with
-retries 0. See
+Reviewed current uncommitted worktree, OCCT 8.0.1 fingerprint
+`0a6a1dce34181289`. Implemented: P2 exact analytic CurveFragments/BReps, v2
+region identity, bounded refinement, and cancellation; P3 Tier A/B publication
+evidence, strict worker readers, Pattern/Transform limits, and Pattern V2 body
+lineage. V2 non-fused Pattern preserves source instance zero and mints only
+`body_<opId>:<k>` transformed children; V2 fused Pattern modifies source in place.
+Absent version remains V1. P3 contract rows, Transform/import policy, and UI-mode
+disposition remain open. P4 coverage manifest/classifier is implemented and
+CI-checked; real-worker corpus executor remains open.
+Current gates: CTest 113/113; real-worker Rust workspace; fmt/clippy; TypeScript;
+targeted Pattern/IPC Vitest 89; Bun build. Prior P2 browser evidence: Chromium
+196/196 and WebKit 196/196 with retries 0. Manual Tauri and completed unchanged T0
+remain open. See
 `OneCAD-modeling-correctness-roadmap/04-live-implementation-delta.md`.
 
 ## MODULAR-PLATFORM UI (2026-08-09, design turn 2 via `claude_design` MCP) — FE GATE PASSED

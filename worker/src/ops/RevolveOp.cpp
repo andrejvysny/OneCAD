@@ -218,9 +218,16 @@ OpOutcome execute_revolve(OpContext& ctx, const json& op, const std::string& op_
     const json params =
         (op.contains("params") && op["params"].is_object()) ? op["params"] : json::object();
 
-    const double angle_deg = read_scalar(params, "angleDeg", 360.0);
+    double angle_deg = 360.0;
+    std::string angle_error;
+    if (!read_scalar_strict(params, "angleDeg", 360.0, angle_deg, angle_error)) {
+        return OpOutcome::fail("OP_FAILED", "Revolve " + angle_error);
+    }
     if (std::abs(angle_deg) < kMinAngleDeg) {
         return OpOutcome::fail("OP_FAILED", "Revolve angle too small");
+    }
+    if (std::abs(angle_deg) > 360.0) {
+        return OpOutcome::fail("OP_FAILED", "Revolve angleDeg must be within [-360, 360]");
     }
     const double angle_rad = angle_deg * M_PI / 180.0;  // no 360 special-case (parity)
 
@@ -296,6 +303,12 @@ OpOutcome execute_revolve(OpContext& ctx, const json& op, const std::string& op_
 
     OpOutcome out;
     if (boolean_mode == app::BooleanMode::NewBody) {
+        const kernel::validation::PublicationDecision decision = publication_decision(
+            tool_shape, kernel::validation::single_solid_policy(
+                            "Revolve", kernel::validation::PublicationTier::TierA));
+        if (!decision.publishable()) {
+            return OpOutcome::fail(decision.code, decision.message);
+        }
         const std::string bid = "body_" + op_id;  // D1 worker-minted NewBody id
         ctx.bodies.create(bid, op_id, tool_shape);
         out.body_events.push_back({"created", bid});
@@ -316,6 +329,15 @@ OpOutcome execute_revolve(OpContext& ctx, const json& op, const std::string& op_
                                        ctx.occt_options, ctx.cancel, builder);
     if (br.error_code == "CANCELLED") return OpOutcome::cancelled();
     if (!br.error_code.empty()) return OpOutcome::fail(br.error_code, br.error_message);
+    kernel::validation::PublicationPolicy policy;
+    policy.name = "Revolve boolean";
+    policy.max_solid_count = -1;
+    policy.tier = kernel::validation::PublicationTier::TierB;
+    policy.allow_empty_lifecycle = true;
+    const kernel::validation::PublicationDecision decision = publication_decision(br.shape, policy);
+    if (!decision.publishable() && !decision.lifecycle_only()) {
+        return OpOutcome::fail(decision.code, decision.message);
+    }
 
     // Publish the successor: a single-solid result modifies the target in place; a
     // multi-solid boolean result splits into deterministic children `body_<opId>:<k>`

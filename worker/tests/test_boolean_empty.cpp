@@ -84,11 +84,27 @@ void test_complete_cut() {
                   BRepPrimAPI_MakeBox(gp_Pnt(-5.0, -5.0, -5.0), 20.0, 20.0, 20.0).Shape(),
                   "Cut");
 }
+
+void test_invalid_operation() {
+    Fixture fixture;
+    fixture.bodies.create("body_target", "seed_target", BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape());
+    fixture.bodies.create("body_tool", "seed_tool", BRepPrimAPI_MakeBox(5.0, 5.0, 5.0).Shape());
+    const json op = {{"opType", "Boolean"}, {"opId", "op_invalid"},
+                     {"params", {{"operation", "Bogus"}, {"targetBodyId", "body_target"},
+                                 {"toolBodyId", "body_tool"}}}};
+    ops::OpContext context = fixture.context();
+    const ops::OpOutcome outcome = ops::execute_boolean(context, op, "op_invalid");
+    check(outcome.status == ops::OpOutcome::Status::Failed && outcome.error_code == "OP_FAILED",
+          "invalid boolean token is refused instead of defaulting to Union");
+    check(fixture.bodies.contains("body_target") && fixture.bodies.contains("body_tool"),
+          "invalid boolean token preserves both bodies");
+}
 }  // namespace
 
 int main() {
     test_disjoint_intersect();
     test_complete_cut();
+    test_invalid_operation();
     if (g_failures == 0) std::fprintf(stderr, "boolean_empty: OK\n");
     return g_failures;
 }

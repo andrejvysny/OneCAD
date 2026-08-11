@@ -23,6 +23,7 @@
 #include <gp_Pln.hxx>
 
 #include "modeling/BooleanMode.h"
+#include "kernel/validation/ShapeAudit.h"
 #include "nlohmann/json.hpp"
 #include "ops/OpTypes.h"  // OpContext / OpOutcome / session::BodyEvent
 #include "util/Cancel.h"
@@ -32,8 +33,22 @@ namespace onecad::ops {
 // A dimensional param: bare number OR {value, expr?} object (SCHEMA §7.3).
 double read_scalar(const nlohmann::json& params, const char* key, double dflt);
 
+// As `read_scalar`, but malformed PRESENT data is an error instead of a default.
+// Absence keeps legacy defaults until an operation versions its authoring contract.
+bool read_scalar_strict(const nlohmann::json& params, const char* key, double dflt,
+                        double& value_out, std::string& error_out);
+
 // params.<key> as a string, or `dflt`.
 std::string read_str(const nlohmann::json& o, const char* key, const std::string& dflt = "");
+
+// As `json::value`, but malformed PRESENT boolean data is never silently coerced.
+bool read_bool_strict(const nlohmann::json& params, const char* key, bool dflt,
+                      bool& value_out, std::string& error_out);
+
+// Collect policy-tier evidence and classify one operation result. Callers own
+// lifecycle changes only after this returns `Publishable` or `LifecycleOnly`.
+kernel::validation::PublicationDecision publication_decision(
+    const TopoDS_Shape& shape, const kernel::validation::PublicationPolicy& policy);
 
 // Operation-local semantic-ref ownership preflight. The generic ladder deliberately
 // accepts refs against their own named bodies; these operations instead require

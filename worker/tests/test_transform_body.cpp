@@ -418,6 +418,32 @@ void test_guards() {
         check(oc.status == ops::OpOutcome::Status::Failed && oc.error_code == "OP_FAILED",
               "guard: zero axis with angleDeg != 0 ⇒ OP_FAILED");
     }
+    {
+        ops::OpContext ctx = c.make(bodies, part);
+        json op = transform_op("opg", {"body_1"}, 1.0, 0.0, 0.0);
+        op["params"]["translate"] = json::array({1.0, 0.0});
+        const ops::OpOutcome oc = ops::execute_transform_body(ctx, op, "opg");
+        check(oc.status == ops::OpOutcome::Status::Failed && oc.error_code == "OP_FAILED",
+              "guard: short translate vector ⇒ OP_FAILED");
+    }
+    {
+        ops::OpContext ctx = c.make(bodies, part);
+        json op = transform_op("opg", {"body_1"}, 1.0, 0.0, 0.0);
+        op["params"]["copy"] = "false";
+        const ops::OpOutcome oc = ops::execute_transform_body(ctx, op, "opg");
+        check(oc.status == ops::OpOutcome::Status::Failed && oc.error_code == "OP_FAILED",
+              "guard: non-boolean copy ⇒ OP_FAILED");
+    }
+    {
+        ops::OpContext ctx = c.make(bodies, part);
+        json op = transform_op("opg", {"body_1"}, 1.0, 0.0, 0.0);
+        json targets = json::array();
+        for (int i = 0; i < 129; ++i) targets.push_back("body_" + std::to_string(i));
+        op["params"]["targets"] = std::move(targets);
+        const ops::OpOutcome oc = ops::execute_transform_body(ctx, op, "opg");
+        check(oc.status == ops::OpOutcome::Status::Failed && oc.error_code == "OP_FAILED",
+              "guard: oversized targets array ⇒ OP_FAILED");
+    }
     // A multi-target placement whose SECOND target is missing must leave the FIRST
     // one untouched (resolve-all-before-mutate).
     {

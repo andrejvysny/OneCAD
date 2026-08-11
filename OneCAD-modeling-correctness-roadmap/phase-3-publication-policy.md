@@ -5,6 +5,11 @@ Prerequisites: Phase 0; Phase 1 for semantic-ref operations
 Priority: P1 systemic correctness  
 Gate name: `UNIFORM-PUBLICATION-POLICY`
 
+Status: partially implemented 2026-08-11. Shared Tier A/B evidence, strict readers,
+Pattern/Transform limits, and Pattern V2 lineage are live. The required
+machine-readable operation contract, Transform/import rows, and UI mode disposition
+remain open.
+
 ## Rationale
 
 OneCAD currently has operation-specific validation ranging from Fillet and OffsetFace's deep checks to Pattern/Mirror/Transform/Revolve NewBody's null-only or no checks. The same malformed topology can be accepted or refused depending on operation order. Several operations also publish multiple solids under one BodyId while downstream tools assume one solid.
@@ -100,7 +105,7 @@ Do not make Tier C the default interactive path until measured.
 
 ## Operation policy table
 
-| Operation | Proposed result policy |
+| Operation | Current result policy |
 |---|---|
 | Extrude/Revolve NewBody | exactly one valid positive-volume solid |
 | Extrude/Revolve Add/Cut/Intersect | zero/one/many classified by Boolean lifecycle policy; splits deterministic |
@@ -110,8 +115,8 @@ Do not make Tier C the default interactive path until measured.
 | Shell | exactly one Tier B solid |
 | Hole | legacy absent-version records preserve the documented one-body multi-solid residual; any new refusal policy is versioned for new records and still mints no split children |
 | OffsetFace | retain existing one-solid, volume, SI and movement checks; route evidence through common result shape |
-| Linear/Circular Pattern fuse | exactly one connected Tier B solid or named refusal |
-| Linear/Circular Pattern non-fuse | versioned deterministic child bodies recommended for new records; legacy one-body compound preserved only under legacy version |
+| Linear/Circular Pattern V2 fuse | exactly one connected Tier B solid, modifying source in place; otherwise `PATTERN_DISJOINT_RESULT` |
+| Linear/Circular Pattern V2 non-fuse | source is unchanged instance zero; create deterministic instance-ordinal children only; V1 absence retains one-body behavior |
 | Mirror no-fuse | exactly one mirrored solid |
 | Mirror fuse | exactly one connected Tier B solid or named refusal |
 | Transform move/copy | validate each result as one solid unless the source is explicitly classified as legacy multi-solid |
@@ -134,32 +139,49 @@ Relevant source:
 - `worker/src/ops/OffsetFaceOp.cpp:857-903`
 - `worker/src/ops/OpCommon.cpp`
 
+### Implementation status
+
+`ShapeAudit` now emits generic evidence evaluated by shared Tier A/B publication
+policy. It gates Extrude/Revolve, Boolean, Fillet/Chamfer, Shell, Hole, fused
+Pattern, and Mirror. Tolerance metrics remain diagnostic pending calibrated
+per-operation ceilings. The machine-readable fourteen-field contract artifact is
+still required before this phase is complete.
+
 ## Work package 3.2 — Pattern output semantics
 
-### Decision required
+### Decision — V2 source-preserving lineage
 
-Current protocol says both fused and non-fused Pattern produce one new body. A non-fused compound can contain several solids under one BodyId. A disjoint OCCT Fuse can do the same despite `fuseResult=true`.
+`resultPolicyVersion` is absent for frozen V1 records. Newly authored records use
+literal `2`; unsupported present values refuse. V1 preserves source and publishes
+one source-inclusive result body `body_<opId>`.
 
-Recommended new-record semantics:
+V2 treats source as instance zero:
 
-- `fuseResult=true`: one connected solid; otherwise refuse with `PATTERN_DISJOINT_RESULT`.
-- `fuseResult=false`: one deterministic child body per instance, including or excluding the original according to a separately explicit source-preservation rule.
+- `fuseResult=false`: source remains unchanged and emits no lifecycle event. Count
+  `N` creates exactly `N−1` children `body_<opId>:<k>`, where child `k` is
+  transformed instance `k+1`. No source-location duplicate exists.
+- `fuseResult=true`: source BodyId is modified in place with one connected fused
+  result; a disconnected result refuses `PATTERN_DISJOINT_RESULT`.
+- Children inherit source body visibility/color only. Face identity and face colors
+  are not shared; persistent face identity is minted on demand.
+- Re-edit preserves V1 absence and V2 fuse mode. V2 count reduction removes only
+  tail children; retained child IDs are stable. Suppression removes children only.
 
 Compatibility:
 
-- Add `resultPolicyVersion` or equivalent to newly authored pattern records.
-- Legacy absence executes current one-body behavior.
-- Re-edit of a legacy feature must not silently add the version.
-- Child BodyIds follow existing D1 `<opId>:<k>` rules and need ordinal/lineage evidence based on instance index, not geometry rank.
+- `resultPolicyVersion:2` is authored by the frontend; legacy re-edit does not add it.
+- Child BodyIds follow D1 `<opId>:<k>` but ordinal means instance index, never
+  geometric rank.
 
 ### Tests
 
 - touching, overlapping and disjoint instances,
-- source included exactly once,
+- source included exactly once with no source-location duplicate,
+- V2 non-fused source emits neither `modified` nor `deleted`,
 - negative spacing/angle,
-- copy ordering and save/reopen,
-- downstream Fillet on a chosen child,
-- undo and re-edit.
+- child ordering, tail-only count edits, suppression, undo, and save/reopen,
+- downstream operation consuming source,
+- direct ExecutePlan lifecycle capture.
 
 ## Work package 3.3 — Mirror and Hole result semantics
 
@@ -180,7 +202,8 @@ Hole:
 Audit and decide:
 
 - feature Intersect for Extrude/Revolve exists in core and worker but not UI,
-- Pattern `fuseResult` exists in core/worker but is hard-coded in UI,
+- Pattern V2 authoring defaults to non-fused; re-edit preserves stored fuse mode.
+  Exposing a user fuse-mode control remains an explicit UI decision,
 - Mirror `fuseWithOriginal` exists in core/worker but UI hard-codes false,
 - body-edge Revolve axis is typed but not correctly persistent/exposed.
 

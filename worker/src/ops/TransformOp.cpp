@@ -25,35 +25,45 @@ namespace {
 constexpr double kPi = 3.14159265358979323846;
 // Below this an axis is treated as degenerate (squared length; matches MirrorOp).
 constexpr double kMinAxisLen2 = 1e-20;
+constexpr std::size_t kMaxTransformTargets = 128;
 
-// A scalar at `index` of a JSON array: bare number OR {value, expr?} (SCHEMA §7.3
-// — the Rust core normalizes to the object form on write, hand-authored payloads
-// may carry a bare number; readers MUST accept both).
-double scalar_at(const json& arr, std::size_t index, double dflt) {
-    if (!arr.is_array() || index >= arr.size()) return dflt;
-    const json& v = arr[index];
-    if (v.is_number()) return v.get<double>();
-    if (v.is_object() && v.contains("value") && v["value"].is_number()) {
-        return v["value"].get<double>();
+bool read_scalar_value(const json& value, double& result) {
+    if (value.is_number()) {
+        result = value.get<double>();
+    } else if (value.is_object() && value.contains("value") && value["value"].is_number()) {
+        result = value["value"].get<double>();
+    } else {
+        return false;
     }
-    return dflt;
+    return std::isfinite(result);
 }
 
-// A `[x, y, z]` triple from `holder[key]` (falls back to the supplied default).
-bool read_vec3(const json& holder, const char* key, double& x, double& y, double& z) {
-    if (!holder.is_object() || !holder.contains(key)) return false;
-    const json& v = holder[key];
-    if (!v.is_array() || v.size() < 3) return false;
-    if (!v[0].is_number() || !v[1].is_number() || !v[2].is_number()) return false;
-    x = v[0].get<double>();
-    y = v[1].get<double>();
-    z = v[2].get<double>();
+bool read_translate(const json& params, double& x, double& y, double& z, std::string& err) {
+    if (!params.contains("translate")) return true;
+    const json& values = params["translate"];
+    if (!values.is_array() || values.size() != 3 || !read_scalar_value(values[0], x) ||
+        !read_scalar_value(values[1], y) || !read_scalar_value(values[2], z)) {
+        err = "TransformBody translate must be a finite 3-vector";
+        return false;
+    }
     return true;
 }
 
-bool all_finite(std::initializer_list<double> vs) {
-    for (double v : vs) {
-        if (!std::isfinite(v)) return false;
+bool read_vec3(const json& holder, const char* key, double& x, double& y, double& z,
+               std::string& err) {
+    if (!holder.contains(key)) return true;
+    const json& v = holder[key];
+    if (!v.is_array() || v.size() != 3 || !v[0].is_number() || !v[1].is_number() ||
+        !v[2].is_number()) {
+        err = std::string("TransformBody rotate.") + key + " must be a finite 3-vector";
+        return false;
+    }
+    x = v[0].get<double>();
+    y = v[1].get<double>();
+    z = v[2].get<double>();
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
+        err = std::string("TransformBody rotate.") + key + " must be a finite 3-vector";
+        return false;
     }
     return true;
 }
@@ -73,6 +83,10 @@ bool parse_placement(const json& params, Placement& out, std::string& err) {
         err = "TransformBody requires a non-empty targets array";
         return false;
     }
+    if (params["targets"].size() > kMaxTransformTargets) {
+        err = "TransformBody targets exceed maximum of " + std::to_string(kMaxTransformTargets);
+        return false;
+    }
     for (const json& t : params["targets"]) {
         if (!t.is_string() || t.get<std::string>().empty()) {
             err = "TransformBody targets must be non-empty body id strings";
@@ -88,23 +102,24 @@ bool parse_placement(const json& params, Placement& out, std::string& err) {
         out.targets.push_back(id);
     }
 
-    const json& tr = params.contains("translate") ? params["translate"] : json::array();
-    const double tx = scalar_at(tr, 0, 0.0);
-    const double ty = scalar_at(tr, 1, 0.0);
-    const double tz = scalar_at(tr, 2, 0.0);
+    double tx = 0.0, ty = 0.0, tz = 0.0;
+    if (!read_translate(params, tx, ty, tz, err)) return false;
 
     double cx = 0.0, cy = 0.0, cz = 0.0;
     double ax = 0.0, ay = 0.0, az = 1.0;
     double angle_deg = 0.0;
-    if (params.contains("rotate") && params["rotate"].is_object()) {
+    if (params.contains("rotate")) {
+        if (!params["rotate"].is_object()) {
+            err = "TransformBody rotate must be an object";
+            return false;
+        }
         const json& rot = params["rotate"];
-        read_vec3(rot, "center", cx, cy, cz);
-        read_vec3(rot, "axis", ax, ay, az);
-        angle_deg = read_scalar(rot, "angleDeg", 0.0);
-    }
-    if (!all_finite({tx, ty, tz, cx, cy, cz, ax, ay, az, angle_deg})) {
-        err = "TransformBody has a non-finite placement component";
-        return false;
+        if (!read_vec3(rot, "center", cx, cy, cz, err) ||
+            !read_vec3(rot, "axis", ax, ay, az, err) ||
+            !read_scalar_strict(rot, "angleDeg", 0.0, angle_deg, err)) {
+            if (err.rfind("angleDeg", 0) == 0) err = "TransformBody rotate." + err;
+            return false;
+        }
     }
     const double axis_len2 = ax * ax + ay * ay + az * az;
     if (angle_deg != 0.0 && axis_len2 < kMinAxisLen2) {
@@ -123,8 +138,7 @@ bool parse_placement(const json& params, Placement& out, std::string& err) {
     translation.SetTranslation(gp_Vec(tx, ty, tz));
     out.trsf = translation * rotation;
 
-    out.copy = params.value("copy", false);
-    return true;
+    return read_bool_strict(params, "copy", false, out.copy, err);
 }
 
 // The §2 minted id of the `copy: true` result for target index `k` of `n`.
@@ -162,6 +176,7 @@ OpOutcome execute_transform_body(OpContext& ctx, const json& op, const std::stri
     OpOutcome out;
     const std::size_t n = placement.targets.size();
     for (std::size_t k = 0; k < n; ++k) {
+        if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
         const std::string& target_id = placement.targets[k];
         TopoDS_Shape result;
         BRepBuilderAPI_Transform builder(placement.trsf);

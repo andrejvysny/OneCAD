@@ -321,6 +321,37 @@ describe("ModelToolController pattern/mirror re-edit honesty", () => {
         }),
       }),
     );
+    expect(clientMock.applyOperation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        params: expect.not.objectContaining({ resultPolicyVersion: expect.anything() }),
+      }),
+    );
+  });
+
+  it("re-edit preserves a stored v2 pattern lineage policy", async () => {
+    build();
+    clientMock.getOperationParams.mockResolvedValue({
+      sourceBodyId: "body1",
+      direction: [1, 0, 0],
+      spacing: { value: 20 },
+      count: 3,
+      fuseResult: false,
+      resultPolicyVersion: 2,
+    });
+    documentStore.setState({
+      features: [{ id: "feat-lp", kind: "boolean", opType: "LinearPattern", label: "Linear Pattern", valueText: "×3", status: "ok" }],
+    });
+
+    await controller.editLinearPatternFeature("feat-lp");
+    await flush();
+    toolChipStore.getState().onApply?.();
+    await flush();
+
+    expect(clientMock.applyOperation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        params: expect.objectContaining({ resultPolicyVersion: 2, fuseResult: false }),
+      }),
+    );
   });
 
   it("the pattern commit's done hint SURVIVES its reset to select", async () => {

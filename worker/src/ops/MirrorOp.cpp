@@ -1,6 +1,7 @@
 // MirrorOp.cpp — see MirrorOp.h. Ports RegenerationEngine.cpp buildMirrorBody.
 #include "ops/MirrorOp.h"
 
+#include <cmath>
 #include <string>
 
 #include <BRepAlgoAPI_Fuse.hxx>
@@ -23,12 +24,12 @@ namespace {
 bool read_vec3(const json& params, const char* key, double& x, double& y, double& z) {
     if (!params.is_object() || !params.contains(key)) return false;
     const json& v = params[key];
-    if (!v.is_array() || v.size() < 3) return false;
+    if (!v.is_array() || v.size() != 3) return false;
     if (!v[0].is_number() || !v[1].is_number() || !v[2].is_number()) return false;
     x = v[0].get<double>();
     y = v[1].get<double>();
     z = v[2].get<double>();
-    return true;
+    return std::isfinite(x) && std::isfinite(y) && std::isfinite(z);
 }
 
 }  // namespace
@@ -57,7 +58,11 @@ OpOutcome execute_mirror_body(OpContext& ctx, const json& op, const std::string&
         return OpOutcome::fail("OP_FAILED", "MirrorBody plane normal is zero");
     }
 
-    const bool fuse_with_original = params.value("fuseWithOriginal", false);
+    bool fuse_with_original = false;
+    std::string bool_error;
+    if (!read_bool_strict(params, "fuseWithOriginal", false, fuse_with_original, bool_error)) {
+        return OpOutcome::fail("OP_FAILED", bool_error);
+    }
 
     if (ctx.cancel && ctx.cancel->cancelled()) return OpOutcome::cancelled();
 
@@ -90,6 +95,13 @@ OpOutcome execute_mirror_body(OpContext& ctx, const json& op, const std::string&
     if (result.IsNull()) {
         return OpOutcome::fail("GEOMETRY_INVALID", "MirrorBody produced null shape");
     }
+    const kernel::validation::PublicationTier tier =
+        fuse_with_original ? kernel::validation::PublicationTier::TierB
+                           : kernel::validation::PublicationTier::TierA;
+    const kernel::validation::PublicationDecision decision = publication_decision(
+        result, kernel::validation::single_solid_policy(
+                    fuse_with_original ? "MirrorBody fused result" : "MirrorBody result", tier));
+    if (!decision.publishable()) return OpOutcome::fail(decision.code, decision.message);
 
     // NewBody lineage: fresh body `body_<opId>` (D1); the source body is preserved.
     OpOutcome out;

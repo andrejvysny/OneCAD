@@ -132,6 +132,17 @@ void test_shape_audit_policy() {
             box_audit.tolerances.vertex <= 1.0e-7,
         "analytic box tolerances stay within measured ceiling");
 
+  const validation::PublicationPolicy tier_a_policy =
+      validation::single_solid_policy("Tier A box", validation::PublicationTier::TierA);
+  const validation::ShapeEvidence fast_box =
+      validation::collect_shape_evidence(box, validation::PublicationTier::TierA);
+  check(validation::evaluate_publication_policy(fast_box, tier_a_policy).publishable(),
+        "Tier A policy accepts fast valid-solid evidence");
+  const validation::PublicationPolicy tier_b_policy =
+      validation::single_solid_policy("Tier B box", validation::PublicationTier::TierB);
+  check(!validation::evaluate_publication_policy(fast_box, tier_b_policy).publishable(),
+        "Tier B policy refuses missing self-interference evidence");
+
   const validation::ShapeAuditResult edge_audit =
       validation::audit_shape(ft::all_edges(box).front());
   check(edge_audit.solid_count == 0 && !edge_audit.publishable(),
@@ -163,6 +174,21 @@ void test_shape_audit_policy() {
   check(overlap_audit.self_interference_checked &&
             overlap_audit.self_interference_count > 0,
         "overlapping solids report self-interference");
+  check(!validation::evaluate_publication_policy(overlap_audit, tier_b_policy).publishable(),
+        "Tier B policy refuses overlapping solids");
+
+  validation::PublicationPolicy empty_lifecycle;
+  empty_lifecycle.name = "Boolean";
+  empty_lifecycle.min_solid_count = 0;
+  empty_lifecycle.max_solid_count = -1;
+  empty_lifecycle.require_positive_volume = false;
+  empty_lifecycle.allow_empty_lifecycle = true;
+  TopoDS_Compound empty_compound;
+  builder.MakeCompound(empty_compound);
+  const validation::ShapeEvidence fast_empty = validation::collect_shape_evidence(
+      empty_compound, validation::PublicationTier::TierA);
+  check(validation::evaluate_publication_policy(fast_empty, empty_lifecycle).lifecycle_only(),
+        "policy separates explicit empty lifecycle from refusal");
 }
 
 void test_executor_radius_contract() {

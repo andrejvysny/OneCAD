@@ -912,6 +912,18 @@ fn default_true() -> bool {
     true
 }
 
+fn de_pattern_result_policy_version<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u8>, D::Error> {
+    match Option::<u8>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(2) => Ok(Some(2)),
+        Some(version) => Err(de::Error::custom(format!(
+            "Pattern resultPolicyVersion must be 2, got {version}"
+        ))),
+    }
+}
+
 /// Deserializes an optional `BodyId` where an empty string means "no body"
 /// (SCHEMA §7.3 sends `"targetBodyId": ""` for the `NewBody` case).
 fn de_opt_body_id<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<BodyId>, D::Error> {
@@ -1238,6 +1250,14 @@ pub struct LinearPatternParams {
     pub count: u32,
     #[serde(default = "default_true")]
     pub fuse_result: bool,
+    /// Absent records retain v1 one-body output semantics. Version 2 is authored
+    /// explicitly and makes child/body lineage part of the persisted contract.
+    #[serde(
+        default,
+        deserialize_with = "de_pattern_result_policy_version",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub result_policy_version: Option<u8>,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     pub extra: Extra,
 }
@@ -1263,6 +1283,13 @@ pub struct CircularPatternParams {
     pub count: u32,
     #[serde(default = "default_true")]
     pub fuse_result: bool,
+    /// See [`LinearPatternParams::result_policy_version`].
+    #[serde(
+        default,
+        deserialize_with = "de_pattern_result_policy_version",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub result_policy_version: Option<u8>,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     pub extra: Extra,
 }
@@ -3037,5 +3064,20 @@ mod tests {
         let op: Operation = serde_json::from_value(raw.clone()).unwrap();
         let back = serde_json::to_value(&op).unwrap();
         assert_eq!(back["params"]["alienKey"], raw["params"]["alienKey"]);
+    }
+
+    #[test]
+    fn pattern_result_policy_version_is_absent_or_v2_only() {
+        let legacy = serde_json::json!({
+            "opType": "LinearPattern",
+            "params": {"direction": [1.0, 0.0, 0.0], "spacing": 1.0, "count": 2}
+        });
+        assert!(serde_json::from_value::<Operation>(legacy).is_ok());
+        let unsupported = serde_json::json!({
+            "opType": "LinearPattern",
+            "params": {"direction": [1.0, 0.0, 0.0], "spacing": 1.0, "count": 2,
+                       "resultPolicyVersion": 1}
+        });
+        assert!(serde_json::from_value::<Operation>(unsupported).is_err());
     }
 }

@@ -1377,6 +1377,14 @@ impl DocumentRuntime {
         if let Outcome::Published(snap) = &outcome {
             if same_instance && self.fencing.get() == expected {
                 let snapshot_id = snap.id.0;
+                let existing_body_metadata: HashSet<BodyId> = self
+                    .session
+                    .document()
+                    .bodies
+                    .bodies()
+                    .iter()
+                    .map(|meta| meta.id)
+                    .collect();
                 let (changed, removed) = self.commit_snapshot(scratch, snap, lod, &prior);
                 // The worker already tessellated every one of these bodies while
                 // preparing and shipped the MESH1 blobs in the plan terminal's tail.
@@ -1396,6 +1404,7 @@ impl DocumentRuntime {
                 // Give every just-published body a document metadata row, so the body
                 // commands (rename / visibility) can address it at all.
                 self.session.adopt_regen_bodies(&self.regen.bodies);
+                self.inherit_v2_pattern_child_display_metadata(&existing_body_metadata);
                 // Post-commit: the live repair state now reflects this regen. A lean
                 // per-item set drives the `needs-repair` event (empty ⇒ repairs
                 // cleared → banner drop).
@@ -1705,6 +1714,40 @@ impl DocumentRuntime {
     fn sync_record_outputs(&mut self, executed: &BTreeSet<RecordId>) {
         let produced = produced_bodies_of(&self.regen.timeline, &self.regen.bodies);
         self.session.sync_record_outputs(&produced, executed);
+    }
+
+    fn inherit_v2_pattern_child_display_metadata(&mut self, existing: &HashSet<BodyId>) {
+        let inherit: Vec<(BodyId, Vec<BodyId>)> = self
+            .session
+            .document()
+            .timeline
+            .records()
+            .iter()
+            .filter_map(|record| match &record.op {
+                Operation::Known(KnownOperation::LinearPattern(params))
+                    if params.result_policy_version == Some(2) && !params.fuse_result =>
+                {
+                    params
+                        .source_body
+                        .map(|source| (source, record.outputs.clone()))
+                }
+                Operation::Known(KnownOperation::CircularPattern(params))
+                    if params.result_policy_version == Some(2) && !params.fuse_result =>
+                {
+                    params
+                        .source_body
+                        .map(|source| (source, record.outputs.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        for (source, children) in inherit {
+            for child in children {
+                if child != source && !existing.contains(&child) {
+                    self.session.inherit_body_display_metadata(source, child);
+                }
+            }
+        }
     }
 
     /// The body registry the document should be *seen* and *saved* with:
@@ -3788,7 +3831,7 @@ fn merge_body_metadata_for_save(regen: &BodyRegistry, doc: &BodyRegistry) -> Bod
 }
 
 /// The rows of a loaded `document.bodies` that seed the regen mirror at open: every row
-/// EXCEPT those produced by a currently-suppressed record (TRUST F4).
+/// EXCEPT those produced by a currently-suppressed record or a removed V2 pattern tail.
 ///
 /// The mirror is seeded from the persisted registry so a reopen renders saved geometry
 /// before the first regen. Since a save now also persists the metadata rows of bodies
@@ -3805,12 +3848,51 @@ fn seed_regen_bodies(doc: &Document) -> BodyRegistry {
         .filter(|r| r.suppressed)
         .map(|r| r.record_id)
         .collect();
-    if suppressed.is_empty() {
+    let active_v2_pattern_children: HashSet<BodyId> = doc
+        .timeline
+        .records()
+        .iter()
+        .filter_map(|record| match &record.op {
+            Operation::Known(KnownOperation::LinearPattern(params))
+                if params.result_policy_version == Some(2)
+                    && !params.fuse_result
+                    && !record.suppressed =>
+            {
+                Some(record.outputs.iter().copied())
+            }
+            Operation::Known(KnownOperation::CircularPattern(params))
+                if params.result_policy_version == Some(2)
+                    && !params.fuse_result
+                    && !record.suppressed =>
+            {
+                Some(record.outputs.iter().copied())
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    if suppressed.is_empty() && active_v2_pattern_children.is_empty() {
         return doc.bodies.clone();
     }
     let mut seeded = doc.bodies.clone();
     for meta in doc.bodies.bodies().to_vec() {
-        if suppressed.contains(&meta.created_by) {
+        let is_v2_pattern_child = doc.timeline.records().iter().any(|record| {
+            if record.record_id != meta.created_by {
+                return false;
+            }
+            match &record.op {
+                Operation::Known(KnownOperation::LinearPattern(params)) => {
+                    params.result_policy_version == Some(2) && !params.fuse_result
+                }
+                Operation::Known(KnownOperation::CircularPattern(params)) => {
+                    params.result_policy_version == Some(2) && !params.fuse_result
+                }
+                _ => false,
+            }
+        });
+        if suppressed.contains(&meta.created_by)
+            || (is_v2_pattern_child && !active_v2_pattern_children.contains(&meta.id))
+        {
             seeded.remove(meta.id);
         }
     }

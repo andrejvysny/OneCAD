@@ -107,7 +107,7 @@ A frame with no binary payload sets `binLen = 0` and omits `bin` (or sets `bin:
 | `sketchRevision` | JSON integer (`u64`) | Rust-owned sketch revision. |
 | `gestureId` | JSON integer (`u64`) | Rust-assigned drag-gesture id. |
 | `streamId` | JSON integer (`u64`) | Worker-assigned bulk-stream id, unique per connection. |
-| `BodyId` | JSON string | Opaque, globally unique (e.g. `"body_7"`). **Minting is split (D1):** a **NewBody** body is **worker-minted deterministic** `body_<opId>` (the `opId` is the Rust-minted op record id, so replay is stable); an op whose result is **N > 1 ordered bodies** (today: a boolean split; the rule is generic to any N-body op, e.g. a multi-solid import) mints `body_<opId>:<k>` with deterministic `k`-ordering, while an op producing exactly **one** new body always mints the plain `body_<opId>` form (mirror/pattern precedent). Rust **adopts** these ids from `planStep` `bodyEvents` at `AcceptPrepared` time, validating format (`body_` prefix + a known `opId` in the plan) and uniqueness, and **rejects** the prepared plan (`PROTOCOL_ERROR`, discard — never publish) on malformation/collision. All *other* body ids (bodies loaded from a saved document) stay Rust-minted; **imported** bodies (§7.3 `ImportStep`) are worker-minted ordinal children under the N-body rule above. See [§7.2](#72-regen--executeplan). |
+| `BodyId` | JSON string | Opaque, globally unique (e.g. `"body_7"`). **Minting is split (D1):** a **NewBody** body is **worker-minted deterministic** `body_<opId>` (the `opId` is the Rust-minted op record id, so replay is stable); an op whose result is **N > 1 ordered bodies** (today: a boolean split; the rule is generic to any N-body op, e.g. a multi-solid import) mints `body_<opId>:<k>` with deterministic `k`-ordering, while an op producing exactly **one** new body normally mints the plain `body_<opId>` form. **Pattern V2 is a source-preserving exception:** non-fused count `N` creates `N−1` ordinal children, and fused V2 creates no new body because it modifies source in place. Rust **adopts** these ids from `planStep` `bodyEvents` at `AcceptPrepared` time, validating format (`body_` prefix + a known `opId` in the plan) and uniqueness, and **rejects** the prepared plan (`PROTOCOL_ERROR`, discard — never publish) on malformation/collision. All *other* body ids (bodies loaded from a saved document) stay Rust-minted; **imported** bodies (§7.3 `ImportStep`) are worker-minted ordinal children under the N-body rule above. See [§7.2](#72-regen--executeplan). |
 | `ElementId` | JSON string | Opaque, Rust-minted, **globally unique and DOES NOT embed BodyId** (e.g. `"el_00000000000004a1"`). Partition membership (which body an element belongs to) is a *mapping*, never encoded in the id. |
 | `TopoKey` | JSON string | **Snapshot-scoped** topology address: `"<kind>:<index>"`, kind ∈ `f` (face) / `e` (edge) / `v` (vertex) / `b` (body). Example `"f:22"`. Valid only within the `snapshotId` that produced it. NEW scheme (OneCAD-CPP used path-style ids; this protocol uses compact snapshot-scoped TopoKeys promoted on demand to `ElementId`). |
 | hash | JSON string, lowercase hex, no `0x` | 64-bit hash → 16 hex chars (e.g. `"cbf29ce484222325"`). SHA-256 → 64 hex chars. Applies to `expectedBaseHash`, `historyPrefixHash`, all signatures, `brepContentHash`, `contentHash`, `tolerancePolicyHash`, `solverPolicyHash`, `occtFingerprint`, chunk `sha256`. |
@@ -1297,16 +1297,25 @@ in place — never NewBody, never a body fan-out (>1 output solid ⇒ recoverabl
 ```json
 // inputs: [ semanticRef(source body) ]
 // params
-{ "sourceBodyId": "body_1", "direction": [1,0,0], "spacing": 40.0, "count": 3, "fuseResult": true }
+{ "sourceBodyId": "body_1", "direction": [1,0,0], "spacing": 40.0, "count": 3,
+  "fuseResult": false, "resultPolicyVersion": 2 }
 ```
 
-- `count ≥ 2` (else recoverable `OP_FAILED`); `|spacing| ≥ 1e-9`; `direction`
-  non-zero (normalized). Instance `i ∈ [1, count)` is translated `direction·spacing·i`.
-- `fuseResult` (default `true`): `true` ⇒ source + instances FUSED into one solid;
-  `false` ⇒ gathered into one compound. **Either way the op produces ONE new body
-  `body_<opId>`** (NewBody lineage — the source body is preserved). The result
-  INCLUDES the source geometry (OneCAD-CPP parity). Empty `elementMapDelta`
-  (ID-on-demand; a pattern face is minted when first referenced).
+- `count` is an integer `[2,128]`; `|spacing| ≥ 1e-9`; `direction` non-zero
+  (normalized). Instance `i ∈ [1, count)` is translated `direction·spacing·i`.
+- **Absent `resultPolicyVersion` is frozen V1:** `fuseResult:true` fuses source +
+  instances into one connected legacy result body `body_<opId>`; `false` gathers the
+  same into one compound body. The source is preserved.
+- **`resultPolicyVersion:2`:** source is instance zero. With `fuseResult:false`, it
+  emits exactly `count−1` created children `body_<opId>:<k>`, where child `k` is
+  transformed instance `k+1`; source emits no lifecycle event and stays unchanged.
+  With `fuseResult:true`, the connected fused result modifies `sourceBodyId` in place;
+  a disconnected result refuses `PATTERN_DISJOINT_RESULT`. New child bodies inherit
+  source body visibility/color, but not source face identities or face colors. A
+  present `resultPolicyVersion` MUST be integer `2`; re-edit preserves both legacy
+  absence and stored `fuseResult`. Count reduction removes only tail children;
+  retained child IDs remain stable, and suppression removes children without
+  modifying source.
 
 **CircularPattern** (`op.circularPattern`) — `count` copies rotated about an axis.
 Field names from OneCAD-CPP `CircularPatternParams` (flat `axisX/Y/Z` +
@@ -1316,13 +1325,14 @@ Field names from OneCAD-CPP `CircularPatternParams` (flat `axisX/Y/Z` +
 // inputs: [ semanticRef(source body) ]
 // params
 { "sourceBodyId": "body_1", "axisOrigin": [0,0,0], "axisDirection": [0,0,1],
-  "angleDeg": 360.0, "count": 3, "fuseResult": true }
+  "angleDeg": 360.0, "count": 3, "fuseResult": false, "resultPolicyVersion": 2 }
 ```
 
-- `count ≥ 2`; `axisDirection` non-zero. The per-instance step angle is
+- `count` is an integer `[2,128]`; `axisDirection` non-zero. The per-instance step angle is
   `angleDeg / count` (OneCAD-CPP parity — divides by `count`, **not** `count−1`);
   instance `i ∈ [1, count)` is rotated `step·i` about `(axisOrigin, axisDirection)`.
-- `fuseResult` + lineage identical to LinearPattern.
+- `fuseResult`, `resultPolicyVersion`, child ordinal mapping, and lineage are identical
+  to LinearPattern.
 
 **MirrorBody** (`op.mirrorBody`) — reflect a source body across a plane. Field names
 from OneCAD-CPP `MirrorBodyParams` (flat `planePointX/Y/Z` + `planeNormalX/Y/Z` →
@@ -2639,6 +2649,14 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-08-11 — §2, §7.2, §7.3 Pattern V2 publication/lineage policy.**
+  `resultPolicyVersion` absent remains frozen V1; present values are literal `2`.
+  V2 non-fused Pattern preserves source as instance zero and creates only ordinal
+  children for transformed instances. V2 fused Pattern modifies source in place
+  and requires one connected result. This supersedes the M6a statement below that
+  Patterns always mint one `body_<opId>`; that statement is V1-only. Additive
+  parameter semantics and lifecycle behavior; legacy fixture bytes remain valid.
+
 - **2026-08-09 — §7.5 internal `BindElementIds`; §7.3 typed Shell face refs**
   (REF-H0, cross-track sign-off in one repository). `AcquireElementIds`
   remains read-only and Rust remains the sole `ElementId` minting authority;
@@ -3282,8 +3300,9 @@ sign-off) once fixtures exist.
   NeedsRepair ([§9](#9-needsrepair-payload)). This historical bare-only shape
   remains the legacy empty-`faces` case; the 2026-08-09 REF-H0 entry supersedes it
   for new authoring with typed lockstep evidence.
-  **Patterns/MirrorBody** mint ONE new `body_<opId>` (NewBody lineage; source
-  preserved; empty `elementMapDelta`). No `protocolVersion` bump (still 1 —
+  **V1 Patterns/MirrorBody** mint ONE new `body_<opId>` (NewBody lineage; source
+  preserved; empty `elementMapDelta`). Pattern V2 is superseded by the 2026-08-11
+  entry above. No `protocolVersion` bump (still 1 —
   pre-implementation contract extension). Fixtures:
   `worker/tests/fixtures/executeplan_linearpattern.ndjson` (full apply),
   `worker/tests/fixtures/executeplan_shell.ndjson` (bare-ref → NeedsRepair). No

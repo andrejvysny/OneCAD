@@ -117,7 +117,11 @@ FilletBuildResult FilletBuilder::accept_result() {
   }
   const validation::ShapeAuditResult output_audit =
       validation::audit_shape(shape);
-  if (!output_audit.publishable()) {
+  const validation::PublicationDecision decision =
+      validation::evaluate_publication_policy(
+          output_audit,
+          validation::single_solid_policy("Fillet", validation::PublicationTier::TierB));
+  if (!decision.publishable()) {
     return fail_with_diagnostic("GEOMETRY_INVALID",
                                 "Fillet result failed shape audit",
                                 "FILLET_INVALID_RESULT", output_audit);
@@ -144,7 +148,11 @@ FilletBuildResult FilletBuilder::build(const onecad::CancelToken *cancel) {
         "FILLET_RADIUS_INVALID");
   }
   input_audit_ = validation::audit_shape(body_);
-  if (!input_audit_.publishable()) {
+  const validation::PublicationDecision input_decision =
+      validation::evaluate_publication_policy(
+          input_audit_,
+          validation::single_solid_policy("Fillet input", validation::PublicationTier::TierB));
+  if (!input_decision.publishable()) {
     return fail_with_diagnostic("GEOMETRY_INVALID",
                                 "Fillet input body failed shape audit",
                                 "FILLET_INPUT_INVALID");

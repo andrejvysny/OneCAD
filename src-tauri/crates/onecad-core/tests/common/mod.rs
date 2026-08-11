@@ -269,6 +269,7 @@ pub fn op_linear_pattern() -> Operation {
         spacing: Scalar::new(10.0),
         count: 3,
         fuse_result: true,
+        result_policy_version: None,
         extra: Default::default(),
     }))
 }
@@ -281,6 +282,7 @@ pub fn op_circular_pattern() -> Operation {
         angle_deg: Scalar::new(360.0),
         count: 4,
         fuse_result: true,
+        result_policy_version: None,
         extra: Default::default(),
     }))
 }

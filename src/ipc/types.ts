@@ -1090,6 +1090,8 @@ export interface LinearPatternParams {
   spacing: number;
   count: number;
   fuseResult?: boolean;
+  /** Absent preserves legacy one-body publication; 2 enables versioned lineage. */
+  resultPolicyVersion?: 2;
 }
 
 /**
@@ -1103,6 +1105,8 @@ export interface CircularPatternParams {
   angleDeg: number;
   count: number;
   fuseResult?: boolean;
+  /** Absent preserves legacy one-body publication; 2 enables versioned lineage. */
+  resultPolicyVersion?: 2;
 }
 
 /**

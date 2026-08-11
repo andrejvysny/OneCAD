@@ -2,6 +2,7 @@
 #include "ops/BooleanOp.h"
 
 #include <memory>
+#include <optional>
 
 #include <BRepBuilderAPI_MakeShape.hxx>
 #include <TopoDS_Shape.hxx>
@@ -14,10 +15,11 @@ namespace onecad::ops {
 using nlohmann::json;
 
 namespace {
-app::BooleanMode mode_of(const std::string& op) {
+std::optional<app::BooleanMode> mode_of(const std::string& op) {
     if (op == "Cut") return app::BooleanMode::Cut;
     if (op == "Intersect") return app::BooleanMode::Intersect;
-    return app::BooleanMode::Add;  // Union / default
+    if (op == "Union") return app::BooleanMode::Add;
+    return std::nullopt;
 }
 }  // namespace
 
@@ -27,7 +29,11 @@ OpOutcome execute_boolean(OpContext& ctx, const json& op, const std::string& op_
 
     const std::string target_id = read_str(params, "targetBodyId");
     const std::string tool_id = read_str(params, "toolBodyId");
-    const app::BooleanMode mode = mode_of(read_str(params, "operation", "Union"));
+    if (params.contains("operation") && !params["operation"].is_string()) {
+        return OpOutcome::fail("OP_FAILED", "Boolean operation must be a string");
+    }
+    const std::optional<app::BooleanMode> mode = mode_of(read_str(params, "operation", "Union"));
+    if (!mode) return OpOutcome::fail("OP_FAILED", "Boolean operation is unsupported");
 
     const session::BodyRecord* target_rec = ctx.bodies.get(target_id);
     if (!target_rec) {
@@ -43,10 +49,19 @@ OpOutcome execute_boolean(OpContext& ctx, const json& op, const std::string& op_
     const TopoDS_Shape old_target = target_rec->geom;
     const TopoDS_Shape tool_shape = tool_rec->geom;
     std::shared_ptr<BRepBuilderAPI_MakeShape> builder;
-    BooleanResult br = checked_boolean(old_target, tool_shape, mode, ctx.parallel, ctx.occt_options,
+    BooleanResult br = checked_boolean(old_target, tool_shape, *mode, ctx.parallel, ctx.occt_options,
                                        ctx.cancel, builder);
     if (br.error_code == "CANCELLED") return OpOutcome::cancelled();
     if (!br.error_code.empty()) return OpOutcome::fail(br.error_code, br.error_message);
+    kernel::validation::PublicationPolicy policy;
+    policy.name = "Boolean";
+    policy.max_solid_count = -1;
+    policy.tier = kernel::validation::PublicationTier::TierB;
+    policy.allow_empty_lifecycle = true;
+    const kernel::validation::PublicationDecision decision = publication_decision(br.shape, policy);
+    if (!decision.publishable() && !decision.lifecycle_only()) {
+        return OpOutcome::fail(decision.code, decision.message);
+    }
 
     OpOutcome out;
     // Publish the successor of the target: a single-solid result MODIFIES it in place

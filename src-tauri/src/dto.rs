@@ -1603,6 +1603,7 @@ mod tests {
                 spacing: Scalar::new(20.0),
                 count: 4,
                 fuse_result: true,
+                result_policy_version: None,
                 extra: Default::default(),
             },
         ));
@@ -1687,6 +1688,7 @@ mod tests {
             spacing: Scalar::new(20.0),
             count: 4,
             fuse_result: true,
+            result_policy_version: None,
             extra: Default::default(),
         }));
         // A LinearPattern record's FeatureDto: kind Boolean, opType "LinearPattern".

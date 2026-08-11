@@ -188,6 +188,12 @@ add_executable(test_m6a_ops test_m6a_ops.cpp)
 target_link_libraries(test_m6a_ops PRIVATE worker_core)
 add_test(NAME m6a_ops COMMAND test_m6a_ops)
 
+# --- P3 Pattern V2: ExecutePlan lifecycle must preserve source and create only
+#     transformed ordinal children. ---
+add_executable(test_pattern_v2_plan test_pattern_v2_plan.cpp)
+target_link_libraries(test_pattern_v2_plan PRIVATE worker_core)
+add_test(NAME pattern_v2_plan COMMAND test_pattern_v2_plan)
+
 # --- WP-C T3: `Hole` numerics — EXACT analytic volumes (through-all / blind /
 #     counterbore / countersink) against the exact BRep via GProp, the point
 #     re-projection fences, the non-planar-seat + cb/cs guards, and bit-equal

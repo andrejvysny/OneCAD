@@ -38,6 +38,8 @@ The review used the connected GitHub repository and a read-only clone. The sandb
 For implementation status, use `04-live-implementation-delta.md`, then live
 repository state (`CURRENT_STATE.md`, `TODO.md`, source and gates). The remaining
 bundle files are a reviewed baseline and roadmap, not live-status authority.
+Phase 3 is partially implemented in the live worktree; its resolved Pattern V2
+lineage contract is recorded in the live delta and `protocol/SCHEMA.md`.
 
 ## Highest-value first gate
 

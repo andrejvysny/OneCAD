@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
+use onecad_core::document::body::split_child_uuid;
 use onecad_core::document::record::{
     BooleanMode, CircularPatternParams, ExtrudeMode, ExtrudeParams, KnownOperation,
     LinearPatternParams, MirrorBodyParams, Operation, OperationRecord, PlaneKind, ShellParams,
@@ -32,6 +33,7 @@ use onecad_core::document::refs::{
 use onecad_core::document::variables::Scalar;
 use onecad_core::edit::EditCommand;
 use onecad_core::ids::{BodyId, ConstraintId, ElementId, EntityId, RecordId, RegionId, SketchId};
+use onecad_core::io::container::SaveMeta;
 use onecad_core::math::{Vec2, Vec3};
 use onecad_core::regen::{CancelToken, GeometryEngine, Lod, ModelSnapshot, Outcome, RegenRequest};
 use onecad_core::sketch::{Constraint, CurvePosition, Sketch, SketchEntity, WorldPlane};
@@ -305,9 +307,26 @@ fn linear_pattern_record(
             spacing: Scalar::new(spacing),
             count,
             fuse_result: fuse,
+            result_policy_version: None,
             extra: Default::default(),
         })),
     )
+}
+
+fn linear_pattern_v2_record(
+    rec: u128,
+    source: BodyId,
+    dir: Vec3,
+    spacing: f64,
+    count: u32,
+    fuse: bool,
+) -> OperationRecord {
+    let mut record = linear_pattern_record(rec, source, dir, spacing, count, fuse);
+    let Operation::Known(KnownOperation::LinearPattern(params)) = &mut record.op else {
+        unreachable!("linear_pattern_record constructs LinearPattern");
+    };
+    params.result_policy_version = Some(2);
+    record
 }
 
 fn circular_pattern_record(
@@ -330,6 +349,7 @@ fn circular_pattern_record(
             angle_deg: Scalar::new(angle_deg),
             count,
             fuse_result: fuse,
+            result_policy_version: None,
             extra: Default::default(),
         })),
     )
@@ -509,7 +529,7 @@ async fn build_box_a(rt: &mut DocumentRuntime, depth: f64) -> BodyId {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// LinearPattern — 3 disjoint boxes ⇒ EXACT 30000
+// LinearPattern — legacy non-fused compound, 3 disjoint boxes ⇒ EXACT 30000
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -531,7 +551,7 @@ async fn linear_pattern_three_boxes() {
             Vec3::new_unchecked(0.0, 1.0, 0.0),
             40.0,
             3,
-            true,
+            false,
         ),
     );
     let rep = regen_all(&mut rt).await;
@@ -550,11 +570,208 @@ async fn linear_pattern_three_boxes() {
         "linear pattern = 3 × 10000 (disjoint) = 30000, got {vol}"
     );
     wm.shutdown().await;
-    eprintln!("LinearPattern PASS: volume {vol} == 30000 (3 disjoint boxes)");
+    eprintln!("LinearPattern PASS: legacy compound volume {vol} == 30000");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn linear_pattern_v2_preserves_source_and_child_ids() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+    let source = build_box_a(&mut rt, 25.0).await;
+    rt.apply(EditCommand::SetBodyColor {
+        body: source,
+        color: Some([12, 34, 56, 255]),
+    })
+    .expect("source color");
+    add_op(
+        &mut rt,
+        linear_pattern_v2_record(
+            OP_PATTERN,
+            source,
+            Vec3::new_unchecked(1.0, 0.0, 0.0),
+            40.0,
+            4,
+            false,
+        ),
+    );
+    let _ = published(&regen_all(&mut rt).await, "v2 linear pattern");
+    let children: Vec<BodyId> = (0..3)
+        .map(|k| BodyId(split_child_uuid(Uuid::from_u128(OP_PATTERN), k)))
+        .collect();
+    let source_mesh = body_mesh(&mut rt, source).await;
+    let source_view = validate_mesh_blob(&source_mesh).expect("source MESH1 validates");
+    assert_eq!(
+        rt.head_body_ids().len(),
+        4,
+        "source plus count - 1 children"
+    );
+    assert!(
+        rt.head_body_ids().contains(&source),
+        "source BodyId survives"
+    );
+    for (k, child) in children.iter().copied().enumerate() {
+        assert!(rt.head_body_ids().contains(&child), "child {k} exists");
+        assert_eq!(
+            rt.body_meta(child).expect("child metadata").color,
+            Some([12, 34, 56, 255]),
+            "new child inherits source body color"
+        );
+        let mesh = body_mesh(&mut rt, child).await;
+        let view = validate_mesh_blob(&mesh).expect("child MESH1 validates");
+        assert!((mesh_volume(&view, &mesh) - 10_000.0).abs() < 1.0);
+        assert!(
+            (f64::from(view.bbox_min[0])
+                - (f64::from(source_view.bbox_min[0]) + 40.0 * (k + 1) as f64))
+                .abs()
+                < 0.5
+        );
+    }
+
+    add_op(
+        &mut rt,
+        mirror_record(
+            OP_MIRROR,
+            source,
+            Vec3::new_unchecked(0.0, 0.0, 0.0),
+            Vec3::new_unchecked(1.0, 0.0, 0.0),
+            false,
+        ),
+    );
+    let _ = published(&regen_all(&mut rt).await, "downstream source mirror");
+    assert!(
+        rt.head_body_ids().contains(&source),
+        "downstream source ref remains live"
+    );
+
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(OP_PATTERN)),
+        op: linear_pattern_v2_record(
+            OP_PATTERN,
+            source,
+            Vec3::new_unchecked(1.0, 0.0, 0.0),
+            55.0,
+            2,
+            false,
+        )
+        .op,
+    })
+    .expect("reduce v2 pattern count");
+    let _ = published(&regen_all(&mut rt).await, "reduced v2 linear pattern");
+    assert!(rt.head_body_ids().contains(&children[0]));
+    assert!(!rt.head_body_ids().contains(&children[1]));
+    assert!(!rt.head_body_ids().contains(&children[2]));
+    assert!(rt.head_body_ids().contains(&source));
+
+    rt.apply(EditCommand::UpdateOperationParams {
+        record: RecordId(Uuid::from_u128(OP_PATTERN)),
+        op: linear_pattern_v2_record(
+            OP_PATTERN,
+            source,
+            Vec3::new_unchecked(1.0, 0.0, 0.0),
+            55.0,
+            4,
+            false,
+        )
+        .op,
+    })
+    .expect("restore v2 pattern count");
+    let _ = published(&regen_all(&mut rt).await, "restored v2 linear pattern");
+    for child in &children {
+        assert!(
+            rt.head_body_ids().contains(child),
+            "child id survives count re-edit"
+        );
+    }
+    let suppress = |suppressed| EditCommand::SetOperationSuppression {
+        record: RecordId(Uuid::from_u128(OP_PATTERN)),
+        suppressed,
+        cascade: false,
+    };
+    rt.apply(suppress(true)).expect("suppress v2 pattern only");
+    let _ = published(&regen_all(&mut rt).await, "suppressed v2 pattern");
+    assert!(
+        rt.head_body_ids().contains(&source),
+        "suppression keeps source"
+    );
+    assert!(
+        rt.head_body_ids().contains(&body_of(OP_MIRROR)),
+        "source downstream remains live"
+    );
+    for child in &children {
+        assert!(
+            !rt.head_body_ids().contains(child),
+            "suppression removes only pattern child"
+        );
+    }
+    rt.undo().expect("undo pattern suppression");
+    let _ = published(&regen_all(&mut rt).await, "undo v2 pattern suppression");
+    for child in &children {
+        assert!(
+            rt.head_body_ids().contains(child),
+            "undo restores deterministic child id"
+        );
+    }
+
+    rt.apply(suppress(true)).expect("suppress before save");
+    let _ = published(
+        &regen_all(&mut rt).await,
+        "suppressed v2 pattern before save",
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("v2-pattern.onecad");
+    rt.save(
+        &path,
+        SaveMeta {
+            app_version: "0.1.0-test".into(),
+            occt_fingerprint: None,
+            created: "2026-08-11T00:00:00Z".into(),
+            modified: "2026-08-11T00:00:00Z".into(),
+        },
+    )
+    .expect("save suppressed v2 pattern");
+    let engine: Arc<dyn GeometryEngine> = Arc::new(wm.clone());
+    let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
+    let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
+    let mut reopened = DocumentRuntime::open(&path, engine, meshes, solver).expect("reopen");
+    assert!(
+        reopened.head_body_ids().contains(&source),
+        "reopen keeps source live"
+    );
+    for child in &children {
+        assert!(
+            !reopened.head_body_ids().contains(child),
+            "reopen hides stale suppressed child"
+        );
+    }
+    reopened
+        .apply(suppress(false))
+        .expect("unsuppress after reopen");
+    let _ = published(&regen_all(&mut reopened).await, "reopened v2 pattern");
+    assert_eq!(
+        reopened.body_meta(source).expect("source metadata").color,
+        Some([12, 34, 56, 255]),
+        "source color survives save/reopen"
+    );
+    for child in children {
+        assert!(
+            reopened.head_body_ids().contains(&child),
+            "reopen recreates stable child id"
+        );
+        assert_eq!(
+            reopened.body_meta(child).expect("child metadata").color,
+            Some([12, 34, 56, 255]),
+            "recreated child inherits source color"
+        );
+    }
+    wm.shutdown().await;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CircularPattern — 3 boxes about a far Z-axis ⇒ EXACT 30000
+// CircularPattern — legacy non-fused compound, 3 boxes ⇒ EXACT 30000
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -577,7 +794,7 @@ async fn circular_pattern_three() {
             Vec3::new_unchecked(0.0, 0.0, 1.0),
             360.0,
             3,
-            true,
+            false,
         ),
     );
     let rep = regen_all(&mut rt).await;
@@ -592,7 +809,7 @@ async fn circular_pattern_three() {
         "circular pattern = 3 × 10000 (disjoint) = 30000, got {vol}"
     );
     wm.shutdown().await;
-    eprintln!("CircularPattern PASS: volume {vol} == 30000");
+    eprintln!("CircularPattern PASS: legacy compound volume {vol} == 30000");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -734,7 +951,7 @@ async fn linear_pattern_deterministic_across_processes() {
                 Vec3::new_unchecked(0.0, 1.0, 0.0),
                 40.0,
                 3,
-                true,
+                false,
             ),
         );
         let rep = regen_all(&mut rt).await;
@@ -791,7 +1008,7 @@ async fn pattern_tracks_upstream_extrude_edit() {
             Vec3::new_unchecked(0.0, 1.0, 0.0),
             40.0,
             3,
-            true,
+            false,
         ),
     );
     let rep0 = regen_all(&mut rt).await;

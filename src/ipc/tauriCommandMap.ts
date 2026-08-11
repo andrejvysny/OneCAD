@@ -192,6 +192,7 @@ interface WireLinearPatternParams {
   spacing: WireScalar;
   count: number;
   fuseResult: boolean;
+  resultPolicyVersion?: 2;
 }
 
 /**
@@ -205,6 +206,7 @@ interface WireCircularPatternParams {
   angleDeg: WireScalar;
   count: number;
   fuseResult: boolean;
+  resultPolicyVersion?: 2;
 }
 
 /**
@@ -589,6 +591,7 @@ function linearPatternParams(p: LinearPatternParams): WireLinearPatternParams {
     fuseResult: p.fuseResult ?? true,
   };
   if (p.sourceBodyId !== undefined) wire.sourceBodyId = p.sourceBodyId;
+  if (p.resultPolicyVersion !== undefined) wire.resultPolicyVersion = p.resultPolicyVersion;
   return wire;
 }
 
@@ -601,6 +604,7 @@ function circularPatternParams(p: CircularPatternParams): WireCircularPatternPar
     fuseResult: p.fuseResult ?? true,
   };
   if (p.sourceBodyId !== undefined) wire.sourceBodyId = p.sourceBodyId;
+  if (p.resultPolicyVersion !== undefined) wire.resultPolicyVersion = p.resultPolicyVersion;
   return wire;
 }
 
