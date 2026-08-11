@@ -868,6 +868,7 @@ Envelope SolverLane::on_regions(const Envelope& req) {
     json result = {
         {"sketchId", sketch_id},
         {"sketchRevision", stored->revision},
+        {"regionIdentityVersion", 2},
         {"regions", std::move(regions)},
     };
     Envelope resp = Envelope::ok_response(req.id, std::move(result));

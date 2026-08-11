@@ -448,6 +448,7 @@ async fn an_extrude_off_a_face_hosted_sketch_lands_on_that_frame() {
         profile: Some(onecad_core::document::refs::SketchRegionRef {
             sketch: sid,
             region: RegionId::new(""),
+            region_identity_version: None,
             extra: Default::default(),
         }),
         distance: onecad_core::document::variables::Scalar::new(5.0),

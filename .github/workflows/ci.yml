@@ -60,6 +60,10 @@ jobs:
         run: bun run build
       - name: Test
         run: bun run test
+      - name: Modeling evidence manifest
+        run: |
+          node scripts/verify-modeling-coverage.mjs
+          scripts/tests/verify-modeling-coverage.test.sh
 
   linux-worker:
     name: linux-worker

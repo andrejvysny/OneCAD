@@ -774,6 +774,7 @@ export class ModelToolController {
   private revolveProfile: PrismProfile | null = null;
   private revolveProfiles: PrismProfile[] = [];
   private revolveRegionIds: string[] = [];
+  private revolveRegionIdentityVersions: Array<number | undefined> = [];
   private revolveSketchId: string | null = null;
   private revolveRegionId: string | null = null;
   private revolveEditFeatureId: string | undefined;
@@ -1319,7 +1320,13 @@ export class ModelToolController {
     for (let i = 0; i < regions.length; i++) {
       const params = this.extrudePreviewParams(startDepth);
       if (editFeatureId) params.featureId = editFeatureId;
-      const draft: PreviewDraft = { opType: "Extrude", sketchId, regionId: regions[i].regionId, params };
+      const draft: PreviewDraft = {
+        opType: "Extrude",
+        sketchId,
+        regionId: regions[i].regionId,
+        regionIdentityVersion: regions[i].regionIdentityVersion,
+        params,
+      };
       let session: PreviewSession;
       try {
         session = await this.deps.client.beginPreview(draft);
@@ -2195,6 +2202,7 @@ export class ModelToolController {
     this.revolveProfile = profile;
     this.revolveProfiles = profiles;
     this.revolveRegionIds = regions.map((r) => r.regionId);
+    this.revolveRegionIdentityVersions = regions.map((r) => r.regionIdentityVersion);
     this.revolveSketchId = sketchId;
     this.revolveRegionId = region.regionId;
     this.revolveEditFeatureId = editFeatureId;
@@ -2459,6 +2467,7 @@ export class ModelToolController {
         opType: "Revolve",
         sketchId,
         regionId: regionIds[i],
+        regionIdentityVersion: this.revolveRegionIdentityVersions[i],
         params: this.revolvePreviewParams(),
       };
       let session: PreviewSession;
@@ -2694,6 +2703,7 @@ export class ModelToolController {
           opType: "Revolve",
           sketchId,
           regionId: regionIds[k],
+          regionIdentityVersion: this.revolveRegionIdentityVersions[k],
           inputs: [{ primary: { bodyId: "", kind: "face" }, anchor: {} }],
           params: { angleDeg: angle, axis, booleanMode, ...(targetBodyId ? { targetBodyId } : {}) },
         };
@@ -2770,6 +2780,7 @@ export class ModelToolController {
     viewportStore.getState().setStatusHint(msg, { severity: "error", sticky: true });
     if (this.revolveRegionIds.length) {
       this.revolveRegionIds = this.revolveRegionIds.slice(k);
+      this.revolveRegionIdentityVersions = this.revolveRegionIdentityVersions.slice(k);
       this.revolveProfiles = this.revolveProfiles.slice(k);
       this.revolveRegionId = this.revolveRegionIds[0] ?? this.revolveRegionId;
       this.revolveProfile = this.revolveProfiles[0] ?? this.revolveProfile;
@@ -2856,6 +2867,7 @@ export class ModelToolController {
     this.revolveProfile = null;
     this.revolveProfiles = [];
     this.revolveRegionIds = [];
+    this.revolveRegionIdentityVersions = [];
     this.revolveAxis = null;
     this.revolveAxisLineId = null;
     this.revolveAxisCandidates = [];
@@ -8152,6 +8164,7 @@ export class ModelToolController {
     this.revolveProfile = null;
     this.revolveProfiles = [];
     this.revolveRegionIds = [];
+    this.revolveRegionIdentityVersions = [];
     this.revolveAxis = null;
     this.revolveAxisLineId = null;
     this.revolveAxisCandidates = [];

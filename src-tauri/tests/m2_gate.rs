@@ -265,6 +265,7 @@ fn extrude_op_record(sketch: SketchId, region: RegionId) -> OperationRecord {
         profile: Some(SketchRegionRef {
             sketch,
             region,
+            region_identity_version: None,
             extra: Default::default(),
         }),
         distance: Scalar::new(EXTRUDE_DIST),

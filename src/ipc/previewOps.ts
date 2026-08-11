@@ -72,6 +72,7 @@ export interface PreviewSessionState {
   editFeatureId?: string;
   sketchId?: string;
   regionId?: string;
+  regionIdentityVersion?: number;
   /** Verbatim from `PreviewDraft.inputs` — see the Fillet/Chamfer note above. */
   inputs?: SemanticRef[];
   /** Newest complete immutable params snapshot the caller pushed. */
@@ -191,6 +192,7 @@ function extrudeOp(s: PreviewSessionState): OperationOp {
     opId: s.opId,
     sketchId: s.sketchId,
     regionId: s.regionId,
+    regionIdentityVersion: s.regionIdentityVersion,
     featureId: s.editFeatureId,
     inputs: [{ primary: { bodyId: "", kind: "face" }, anchor: {} }],
     params,
@@ -233,6 +235,7 @@ function revolveOp(s: PreviewSessionState): OperationOp {
     opId: s.opId,
     sketchId: s.sketchId,
     regionId: s.regionId,
+    regionIdentityVersion: s.regionIdentityVersion,
     featureId: s.editFeatureId,
     inputs: [{ primary: { bodyId: "", kind: "face" }, anchor: {} }],
     params: { angleDeg, axis, booleanMode, ...(targetBodyId ? { targetBodyId } : {}) },

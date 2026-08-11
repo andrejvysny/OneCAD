@@ -20,7 +20,9 @@
 #define ONECAD_CORE_LOOP_LOOP_DETECTOR_H
 
 #include "../sketch/SketchTypes.h"
+#include "CurveFragment.h"
 #include <cmath>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -89,6 +91,9 @@ struct Loop {
 
     /// Sampled polygon used for area/containment tests
     std::vector<sk::Vec2d> polygon;
+
+    /// Exact source intervals for planarized edges, in wire-edge order.
+    std::vector<CurveFragment> fragments;
 
     /// Bounding box
     sk::Vec2d boundsMin{0, 0};
@@ -203,6 +208,10 @@ struct LoopDetectorConfig {
     /// Whether to planarize intersections by splitting edges
     bool planarizeIntersections = false;
 
+    /// Experimental exact fragment path. Disabled until planar-cell traversal
+    /// is proven equivalent to the established tessellated detector.
+    bool exactAnalyticFragments = false;
+
     /// Tessellation tolerance for arcs/circles (mm)
     double tessellationTolerance = 0.05;
 
@@ -220,6 +229,15 @@ struct LoopDetectorConfig {
 
     /// Maximum circle segments
     int maxCircleSegments = 512;
+
+    /// Bound exact refinement work before the quadratic pair pass begins.
+    size_t maxPlanarizedCurvePairs = 4096;
+
+    /// Bound fragments emitted after analytic splitting.
+    size_t maxPlanarizedFragments = 8192;
+
+    /// Cooperative cancellation hook for bounded analytic refinement.
+    std::function<bool()> isCancelled;
 };
 
 /**

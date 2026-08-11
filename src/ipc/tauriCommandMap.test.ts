@@ -331,6 +331,22 @@ describe("operationToEditCommand — M6b op wire mappings", () => {
     expect("opId" in command.record).toBe(false);
   });
 
+  it("preserves a v2 region identity version inside the stored profile", () => {
+    const command = operationToEditCommand({
+      opType: "Extrude",
+      sketchId: "sk",
+      regionId: "r_v2",
+      regionIdentityVersion: 2,
+      params: { distance: 5 },
+    });
+    if (command.cmd !== "addOperation") throw new Error("expected addOperation");
+    expect((command.record.params as { profile?: unknown }).profile).toEqual({
+      sketchId: "sk",
+      regionId: "r_v2",
+      regionIdentityVersion: 2,
+    });
+  });
+
   it("Shell maps openFaces + typed faces in lockstep", () => {
     const op: OperationOp = {
       opType: "Shell",

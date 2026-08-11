@@ -270,6 +270,8 @@ export interface SketchUpsertResult {
 /** One closed profile region (SCHEMA §7.4 SketchRegions). */
 export interface SketchRegion {
   regionId: string;
+  /** Identity format returned with this region; undefined is mock/legacy-only. */
+  regionIdentityVersion?: number;
   outerLoop: string[];
   holes: string[][];
   /**
@@ -286,6 +288,8 @@ export interface SketchRegion {
 
 /** `finishSketch` result — the profiles an extrude/revolve can consume. */
 export interface FinishSketchResult {
+  /** Canonical region-id format; production P2 worker responses use 2. */
+  regionIdentityVersion?: number;
   regions: SketchRegion[];
 }
 
@@ -1155,6 +1159,8 @@ export type OperationOp =
       featureId?: string;
       sketchId: string;
       regionId: string;
+      /** Absent retains the persisted v1 profile lookup semantics. */
+      regionIdentityVersion?: number;
       inputs?: SemanticRef[];
       params: ExtrudeParams;
     }
@@ -1164,6 +1170,8 @@ export type OperationOp =
       featureId?: string;
       sketchId: string;
       regionId: string;
+      /** Absent retains the persisted v1 profile lookup semantics. */
+      regionIdentityVersion?: number;
       inputs?: SemanticRef[];
       params: RevolveParams;
     }
@@ -1372,6 +1380,8 @@ export interface PreviewDraft {
   opType: OpType;
   sketchId?: string;
   regionId?: string;
+  /** Forwarded into a new `SketchRegionRef`; absent preserves v1 storage. */
+  regionIdentityVersion?: number;
   /**
    * Typed op inputs, carried verbatim into the session. Load-bearing for
    * Fillet/Chamfer and Shell — `wireOperation` drops an op's top-level inputs,

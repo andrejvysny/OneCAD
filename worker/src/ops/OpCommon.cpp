@@ -198,7 +198,9 @@ std::vector<json> operation_ref_ownership_repairs(const json& op, const std::str
 }
 
 std::optional<TopoDS_Face> build_profile_face(const json& sketch_params,
-                                              const std::string& region_id, std::string& err) {
+                                              const std::string& region_id,
+                                              std::optional<int> region_identity_version,
+                                              std::string& err) {
     // Sketch params → live Sketch (plane + entities + constraints). Mirrors
     // RegenerationEngine.cpp:1639-1667 buildFaceFromSketchRegion, but the sketch
     // is supplied inline in the plan (deterministic replay) rather than looked up
@@ -216,8 +218,15 @@ std::optional<TopoDS_Face> build_profile_face(const json& sketch_params,
         return std::nullopt;
     }
 
+    if (region_identity_version.has_value() && *region_identity_version != 2) {
+        err = "profile: unsupported regionIdentityVersion " +
+              std::to_string(*region_identity_version);
+        return std::nullopt;
+    }
+    loop::LoopDetectorConfig detection_config = loop::makeRegionDetectionConfig();
+    detection_config.exactAnalyticFragments = region_identity_version == 2;
     loop::LoopDetector detector;
-    detector.setConfig(loop::makeRegionDetectionConfig());
+    detector.setConfig(detection_config);
     const loop::LoopDetectionResult det = detector.detect(*tr.sketch);
     const auto map_edge = [&](const sk::EntityID& internalId) {
         const auto it = tr.index.internal_edge_to_wire.find(internalId);
@@ -234,25 +243,55 @@ std::optional<TopoDS_Face> build_profile_face(const json& sketch_params,
         return std::nullopt;
     }
 
+    const bool exact_identity = region_identity_version == 2;
+    if (exact_identity && region_id.empty()) {
+        err = "profile: regionIdentityVersion 2 requires regionId";
+        return std::nullopt;
+    }
     const loop::RegionDefinition* selected = &table.regions.front();
     if (!region_id.empty()) {
+        std::optional<loop::RegionTable> exact_alias_table;
+        bool exact_legacy_ambiguous = false;
+        if (!exact_identity) {
+            loop::LoopDetectorConfig exact_config = loop::makeRegionDetectionConfig();
+            exact_config.exactAnalyticFragments = true;
+            loop::LoopDetector exact_detector;
+            exact_detector.setConfig(exact_config);
+            const loop::LoopDetectionResult exact_detection = exact_detector.detect(*tr.sketch);
+            exact_alias_table = loop::buildRegionTable(
+                exact_detection, map_edge, sk::constants::COINCIDENCE_TOLERANCE);
+            if (exact_alias_table->success) {
+                exact_legacy_ambiguous = std::count_if(
+                    exact_alias_table->regions.begin(), exact_alias_table->regions.end(),
+                    [&](const loop::RegionDefinition& region) {
+                        return region.legacyId == region_id;
+                    }) > 1;
+            }
+        }
         std::vector<const loop::RegionDefinition*> matches;
         std::vector<std::string> available;
         available.reserve(table.regions.size());
         for (const loop::RegionDefinition& region : table.regions) {
             available.push_back(region.id);
-            if (region.id == region_id || region.legacyId == region_id) {
+            if (region.id == region_id || (!exact_identity && region.legacyId == region_id)) {
                 matches.push_back(&region);
             }
         }
-        if (matches.size() != 1) {
+        if (exact_legacy_ambiguous || matches.size() != 1) {
+            if (exact_alias_table.has_value() && exact_alias_table->success) {
+                    available.clear();
+                    for (const loop::RegionDefinition& region : exact_alias_table->regions) {
+                        available.push_back(region.id);
+                    }
+            }
             std::string avail;
             for (std::size_t i = 0; i < available.size(); ++i) {
                 if (i) avail += ", ";
                 avail += available[i];
             }
             const std::string reason =
-                matches.empty() ? "matched no selectable region" : "is ambiguous";
+                !exact_legacy_ambiguous && matches.empty() ? "matched no selectable region" :
+                                                             "is ambiguous";
             err = "profile: regionId '" + region_id + "' " + reason +
                   " (available: [" + avail + "])";
             return std::nullopt;
@@ -271,6 +310,11 @@ std::optional<TopoDS_Face> build_profile_face(const json& sketch_params,
         return std::nullopt;
     }
     return fr.face;
+}
+
+std::optional<TopoDS_Face> build_profile_face(const json& sketch_params,
+                                              const std::string& region_id, std::string& err) {
+    return build_profile_face(sketch_params, region_id, std::nullopt, err);
 }
 
 bool planar_face_plane_normal(const TopoDS_Face& face, gp_Pln& plane_out, gp_Dir& normal_out) {

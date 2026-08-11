@@ -267,6 +267,7 @@ fn extrude_record(rec: u128, sketch: SketchId, dist: f64) -> OperationRecord {
         profile: Some(SketchRegionRef {
             sketch,
             region: RegionId::new(""), // empty ⇒ V1 first-region fallback
+            region_identity_version: None,
             extra: Default::default(),
         }),
         distance: Scalar::new(dist),
@@ -767,6 +768,7 @@ fn region_extrude_record(rec: u128, sketch: SketchId, region: &str, dist: f64) -
         p.profile = Some(SketchRegionRef {
             sketch,
             region: RegionId::new(region),
+            region_identity_version: None,
             extra: Default::default(),
         });
     }

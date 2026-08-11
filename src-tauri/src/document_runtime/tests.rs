@@ -43,7 +43,7 @@ use onecad_core::sketch::{Sketch, SketchEntity, WorldPlane};
 
 use super::*;
 use crate::dto::{
-    BeginGestureDto, DragSolveDto, SketchRegionDto, SketchSolveStatus, SketchUpsertDto,
+    BeginGestureDto, DragSolveDto, FinishSketchDto, SketchSolveStatus, SketchUpsertDto,
 };
 use crate::worker::wire::GestureTarget;
 use crate::worker::{MeshProvider, SolverEngine};
@@ -534,8 +534,11 @@ impl SolverEngine for FakeBackend {
             solved_curves: self.echo_curves.lock().unwrap().clone(),
         })
     }
-    async fn sketch_regions(&self, _sketch_id: &str) -> Result<Vec<SketchRegionDto>, EngineError> {
-        Ok(vec![])
+    async fn sketch_regions(&self, _sketch_id: &str) -> Result<FinishSketchDto, EngineError> {
+        Ok(FinishSketchDto {
+            region_identity_version: 2,
+            regions: vec![],
+        })
     }
 }
 
@@ -2059,6 +2062,7 @@ async fn sketch_mutations_expose_regen_outcomes_to_the_scheduler() {
     params.profile = Some(SketchRegionRef {
         sketch: sid,
         region: RegionId::new("r_profile"),
+        region_identity_version: None,
         extra: Default::default(),
     });
     dependent.inputs = dependent.op.derive_inputs();

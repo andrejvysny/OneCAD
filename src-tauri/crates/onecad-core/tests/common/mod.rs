@@ -56,6 +56,7 @@ pub fn profile() -> SketchRegionRef {
     SketchRegionRef {
         sketch: sketch_1(),
         region: region_0(),
+        region_identity_version: None,
         extra: Default::default(),
     }
 }
@@ -291,6 +292,7 @@ pub fn op_loft() -> Operation {
             SketchRegionRef {
                 sketch: SketchId(uid(0x5C02)),
                 region: RegionId::new("r1"),
+                region_identity_version: None,
                 extra: Default::default(),
             },
         ],

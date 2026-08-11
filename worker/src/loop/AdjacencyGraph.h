@@ -3,8 +3,10 @@
 #define ONECAD_CORE_LOOP_ADJACENCY_GRAPH_H
 
 #include "../sketch/SketchTypes.h"
+#include "CurveFragment.h"
 
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -27,10 +29,13 @@ struct GraphEdge {
     bool isCircle = false;
     sk::Vec2d startPos{};
     sk::Vec2d endPos{};
+    sk::Vec2d startTangent{};
+    sk::Vec2d endTangent{};
     sk::Vec2d centerPos{};
     double radius = 0.0;
     double startAngle = 0.0;
     double endAngle = 0.0;
+    std::optional<CurveFragment> fragment;
 };
 
 struct AdjacencyGraph {
@@ -38,6 +43,8 @@ struct AdjacencyGraph {
     std::vector<GraphEdge> edges;
     std::unordered_map<sk::EntityID, int> nodeByPointId;
     std::unordered_map<sk::EntityID, int> edgeByEntity;
+    std::string errorMessage;
+    std::vector<CurveFragment> closedCurves;
 
     int findOrCreateNode(const sk::Vec2d& pos,
                          const std::optional<sk::EntityID>& pointId,

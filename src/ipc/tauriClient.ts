@@ -300,6 +300,7 @@ interface SketchRegionDto {
   previewTriangles?: { positions: number[]; indices: number[]; holesSubtracted?: number };
 }
 interface FinishSketchDto {
+  regionIdentityVersion: number;
   regions: SketchRegionDto[];
 }
 interface PromotedElementDto {
@@ -1186,12 +1187,13 @@ export function createTauriClient(): CadClient {
     const dto = await call<FinishSketchDto>(CMD.finishSketch, { sketchId: backendSketchId });
     const regions = dto.regions.map((r): SketchRegion => ({
       regionId: r.regionId,
+      regionIdentityVersion: dto.regionIdentityVersion,
       outerLoop: r.outerLoop,
       holes: r.holes,
       previewTriangles: r.previewTriangles,
     }));
     lane.cacheFinishedRegions(sketchId, regions); // feed the local L2 preview
-    return { regions };
+    return { regionIdentityVersion: dto.regionIdentityVersion, regions };
   }
 
   /** Read-only region derivation for model-mode selection and unopened sketches. */
@@ -1200,12 +1202,13 @@ export function createTauriClient(): CadClient {
     const dto = await call<FinishSketchDto>(CMD.getSketchRegions, { sketchId: backendSketchId });
     const regions = dto.regions.map((r): SketchRegion => ({
       regionId: r.regionId,
+      regionIdentityVersion: dto.regionIdentityVersion,
       outerLoop: r.outerLoop,
       holes: r.holes,
       previewTriangles: r.previewTriangles,
     }));
     lane.cacheFinishedRegions(sketchId, regions);
-    return { regions };
+    return { regionIdentityVersion: dto.regionIdentityVersion, regions };
   }
 
   /** Pure read of a sketch's authoritative geometry (always-visible layer). Does NOT

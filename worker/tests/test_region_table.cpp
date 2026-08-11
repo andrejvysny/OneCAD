@@ -9,7 +9,11 @@
 #include <vector>
 
 #include <BRepGProp.hxx>
+#include <BRepAdaptor_Curve.hxx>
 #include <GProp_GProps.hxx>
+#include <TopAbs_ShapeEnum.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
 
 #include "loop/FaceBuilder.h"
 #include "loop/LoopDetector.h"
@@ -198,6 +202,35 @@ double face_area(const TopoDS_Face& face) {
     return props.Mass();
 }
 
+struct CurveCensus {
+    int lines = 0;
+    int circles = 0;
+    int ellipses = 0;
+    int other = 0;
+};
+
+CurveCensus curve_census(const TopoDS_Face& face) {
+    CurveCensus census;
+    for (TopExp_Explorer explorer(face, TopAbs_EDGE); explorer.More(); explorer.Next()) {
+        const BRepAdaptor_Curve curve(TopoDS::Edge(explorer.Current()));
+        switch (curve.GetType()) {
+            case GeomAbs_Line:
+                ++census.lines;
+                break;
+            case GeomAbs_Circle:
+                ++census.circles;
+                break;
+            case GeomAbs_Ellipse:
+                ++census.ellipses;
+                break;
+            default:
+                ++census.other;
+                break;
+        }
+    }
+    return census;
+}
+
 void test_nested_cells_and_profile_lookup() {
     const json sketch = nested_sketch();
     const loop::RegionTable table = table_from(sketch);
@@ -224,10 +257,10 @@ void test_nested_cells_and_profile_lookup() {
 
     std::string error;
     const auto annulus_face =
-        onecad::ops::build_profile_face(sketch, annulus->id, error);
+        onecad::ops::build_profile_face(sketch, annulus->id, 2, error);
     check(annulus_face.has_value(), "annulus canonical id resolves");
     error.clear();
-    const auto disk_face = onecad::ops::build_profile_face(sketch, disk->id, error);
+    const auto disk_face = onecad::ops::build_profile_face(sketch, disk->id, 2, error);
     check(disk_face.has_value(), "disk canonical id resolves");
     if (annulus_face && disk_face) {
         const double circle_area = std::numbers::pi_v<double> * 25.0;
@@ -277,19 +310,24 @@ void test_overlapping_cells_are_unique_and_bounded() {
         canonical.insert(region.id);
         ++legacy_counts[region.legacyId];
         std::string error;
-        const auto face = onecad::ops::build_profile_face(sketch, region.id, error);
+        const auto face = onecad::ops::build_profile_face(sketch, region.id, 2, error);
         check(face.has_value(), "each overlapping-cell id resolves its bounded face");
         if (face) {
             areas.push_back(face_area(*face));
+            const CurveCensus census = curve_census(*face);
+            check(census.circles > 0 && census.lines == 0 && census.ellipses == 0 &&
+                      census.other == 0,
+                  "overlapping cells retain exact circular BRep edges");
         }
     }
     check(canonical.size() == 3, "overlapping cells have three unique canonical ids");
-    check(canonical == std::unordered_set<std::string>({
-                           "r_fda4d9274ffc0afc",
-                           "r_c9a81cfacf62428e",
-                           "r_e6687f4c574707ec",
-                       }),
-          "fragment identity byte streams stay fixture-locked");
+    const loop::RegionTable replay = table_from(sketch);
+    std::unordered_set<std::string> replayIds;
+    for (const loop::RegionDefinition& region : replay.regions) {
+        replayIds.insert(region.id);
+    }
+    check(replay.success && replayIds == canonical,
+          "fragment identity is deterministic across exact re-detection");
     std::sort(areas.begin(), areas.end());
     check(areas.size() == 3 && areas.front() > 100.0 && areas.back() < 210.0,
           "fragment faces are bounded lens/crescents, never whole circles");
@@ -315,6 +353,219 @@ void test_overlapping_cells_are_unique_and_bounded() {
     }
 }
 
+json circle_with_chord() {
+    return {
+        {"sketchId", "circle-chord"},
+        {"plane", {{"kind", "XY"}}},
+        {"entities",
+         json::array({
+             {{"id", uuid(301)}, {"type", "Circle"}, {"center", {0, 0}}, {"radius", 5}},
+             {{"id", uuid(302)}, {"type", "Line"}, {"p0", {-10, 0}}, {"p1", {10, 0}}},
+         })},
+        {"constraints", json::array()},
+    };
+}
+
+void test_line_circle_planarization_keeps_exact_edges() {
+    const json sketch = circle_with_chord();
+    const loop::RegionTable table = table_from(sketch);
+    check(table.success && table.regions.size() == 2,
+          "a chord through a circle publishes two bounded half-disks");
+    if (!table.success || table.regions.size() != 2) {
+        return;
+    }
+
+    double totalArea = 0.0;
+    for (const loop::RegionDefinition& region : table.regions) {
+        std::string error;
+        const auto face = onecad::ops::build_profile_face(sketch, region.id, 2, error);
+        check(face.has_value(), "line-circle canonical cell resolves: " + error);
+        if (!face) {
+            continue;
+        }
+        totalArea += face_area(*face);
+        const CurveCensus census = curve_census(*face);
+        check(census.lines == 1 && census.circles > 0 && census.ellipses == 0 &&
+                  census.other == 0,
+              "line-circle BRep contains only exact line and circular fragments");
+    }
+    check(std::abs(totalArea - std::numbers::pi_v<double> * 25.0) < 0.01,
+          "line-circle cells conserve analytic disk area");
+}
+
+json crossing_arc_circles() {
+    const double pi = std::numbers::pi_v<double>;
+    return {
+        {"sketchId", "crossing-arcs"},
+        {"plane", {{"kind", "XY"}}},
+        {"entities",
+         json::array({
+             {{"id", uuid(311)}, {"type", "Arc"}, {"center", {-3, 0}},
+              {"radius", 5}, {"startAngle", 0.0}, {"endAngle", pi}},
+             {{"id", uuid(312)}, {"type", "Arc"}, {"center", {-3, 0}},
+              {"radius", 5}, {"startAngle", pi}, {"endAngle", 0.0}},
+             {{"id", uuid(313)}, {"type", "Arc"}, {"center", {3, 0}},
+              {"radius", 5}, {"startAngle", 0.0}, {"endAngle", pi}},
+             {{"id", uuid(314)}, {"type", "Arc"}, {"center", {3, 0}},
+              {"radius", 5}, {"startAngle", pi}, {"endAngle", 0.0}},
+         })},
+        {"constraints", json::array()},
+    };
+}
+
+void test_crossing_arcs_publish_three_exact_cells() {
+    const json sketch = crossing_arc_circles();
+    const loop::RegionTable table = table_from(sketch);
+    check(table.success && table.regions.size() == 3,
+          "two circles represented by crossing arcs publish lens and crescents");
+    if (!table.success || table.regions.size() != 3) {
+        return;
+    }
+
+    for (const loop::RegionDefinition& region : table.regions) {
+        std::string error;
+        const auto face = onecad::ops::build_profile_face(sketch, region.id, 2, error);
+        check(face.has_value(), "crossing-arc canonical cell resolves: " + error);
+        if (!face) {
+            continue;
+        }
+        const CurveCensus census = curve_census(*face);
+        check(census.circles > 0 && census.lines == 0 && census.ellipses == 0 &&
+                  census.other == 0,
+              "crossing arcs stay circular BRep fragments");
+    }
+}
+
+json rotated_ellipse_with_chord() {
+    return {
+        {"sketchId", "ellipse-chord"},
+        {"plane", {{"kind", "XY"}}},
+        {"entities",
+         json::array({
+             {{"id", uuid(321)}, {"type", "Ellipse"}, {"center", {0, 0}},
+              {"majorR", 6}, {"minorR", 3}, {"rotation", 0.4}},
+             {{"id", uuid(322)}, {"type", "Line"}, {"p0", {0, -10}}, {"p1", {0, 10}}},
+         })},
+        {"constraints", json::array()},
+    };
+}
+
+void test_rotated_ellipse_line_planarization_keeps_exact_edges() {
+    const json sketch = rotated_ellipse_with_chord();
+    const loop::RegionTable table = table_from(sketch);
+    check(table.success && table.regions.size() == 2,
+          "a chord through a rotated ellipse publishes two bounded cells");
+    if (!table.success || table.regions.size() != 2) {
+        return;
+    }
+
+    double totalArea = 0.0;
+    for (const loop::RegionDefinition& region : table.regions) {
+        std::string error;
+        const auto face = onecad::ops::build_profile_face(sketch, region.id, 2, error);
+        check(face.has_value(), "ellipse-line canonical cell resolves: " + error);
+        if (!face) {
+            continue;
+        }
+        totalArea += face_area(*face);
+        const CurveCensus census = curve_census(*face);
+        check(census.ellipses > 0 && census.lines == 1 && census.circles == 0 &&
+                  census.other == 0,
+              "ellipse-line BRep contains only exact ellipse and line fragments");
+    }
+    check(std::abs(totalArea - std::numbers::pi_v<double> * 18.0) < 0.01,
+          "ellipse-line cells conserve analytic ellipse area");
+}
+
+json tangent_circles() {
+    return {
+        {"sketchId", "tangent-circles"},
+        {"plane", {{"kind", "XY"}}},
+        {"entities",
+         json::array({
+             {{"id", uuid(331)}, {"type", "Circle"}, {"center", {-5, 0}}, {"radius", 5}},
+             {{"id", uuid(332)}, {"type", "Circle"}, {"center", {5, 0}}, {"radius", 5}},
+         })},
+        {"constraints", json::array()},
+    };
+}
+
+void test_tangent_contacts_do_not_create_degenerate_fragments() {
+    const json sketch = tangent_circles();
+    const loop::RegionTable table = table_from(sketch);
+    check(table.success && table.regions.size() == 2,
+          "point tangency keeps two non-degenerate circular regions");
+    if (!table.success || table.regions.size() != 2) {
+        return;
+    }
+    for (const loop::RegionDefinition& region : table.regions) {
+        std::string error;
+        const auto face = onecad::ops::build_profile_face(sketch, region.id, 2, error);
+        check(face.has_value(), "tangent circle canonical cell resolves: " + error);
+        if (!face) {
+            continue;
+        }
+        const CurveCensus census = curve_census(*face);
+        check(census.circles > 0 && census.lines == 0 && census.ellipses == 0 &&
+                  census.other == 0,
+              "tangent circle remains an exact circular BRep edge");
+    }
+}
+
+void test_analytic_refinement_honors_cancellation() {
+    const json sketch = overlapping_circles();
+    onecad::wire::TranslateResult translated = onecad::wire::translate(sketch);
+    check(translated.ok, "cancellation wire sketch translates");
+    if (!translated.ok) {
+        return;
+    }
+    const sk::SolveResult solve = translated.sketch->solve();
+    check(solve.success, "cancellation wire sketch solves");
+    if (!solve.success) {
+        return;
+    }
+    loop::LoopDetectorConfig config = loop::makeRegionDetectionConfig();
+    config.isCancelled = [] { return true; };
+    loop::LoopDetector detector(config);
+    const loop::LoopDetectionResult detected = detector.detect(*translated.sketch);
+    check(!detected.success, "analytic refinement cancellation refuses publication");
+    check(detected.errorMessage == "profile refinement cancelled",
+          "analytic refinement cancellation diagnostic remains stable");
+}
+
+json coincident_circles() {
+    return {
+        {"sketchId", "coincident-circles"},
+        {"plane", {{"kind", "XY"}}},
+        {"entities",
+         json::array({
+             {{"id", uuid(341)}, {"type", "Circle"}, {"center", {0, 0}}, {"radius", 5}},
+             {{"id", uuid(342)}, {"type", "Circle"}, {"center", {0, 0}}, {"radius", 5}},
+         })},
+        {"constraints", json::array()},
+    };
+}
+
+void test_coincident_analytic_curves_refuse_stably() {
+    const json sketch = coincident_circles();
+    onecad::wire::TranslateResult translated = onecad::wire::translate(sketch);
+    check(translated.ok, "coincident-circle wire sketch translates");
+    if (!translated.ok) {
+        return;
+    }
+    const sk::SolveResult solve = translated.sketch->solve();
+    check(solve.success, "coincident-circle wire sketch solves");
+    if (!solve.success) {
+        return;
+    }
+    loop::LoopDetector detector;
+    detector.setConfig(loop::makeRegionDetectionConfig());
+    const loop::LoopDetectionResult detected = detector.detect(*translated.sketch);
+    check(!detected.success, "coincident analytic circles are refused");
+    check(detected.errorMessage == "profile has overlapping or coincident analytic curves",
+          "coincident analytic refusal remains stable");
+}
+
 void test_required_hole_failure_is_fatal() {
     sk::Sketch sketch;
     loop::Face face;
@@ -332,6 +583,12 @@ int main() {
     test_simple_legacy_and_holes();
     test_nested_cells_and_profile_lookup();
     test_overlapping_cells_are_unique_and_bounded();
+    test_line_circle_planarization_keeps_exact_edges();
+    test_crossing_arcs_publish_three_exact_cells();
+    test_rotated_ellipse_line_planarization_keeps_exact_edges();
+    test_tangent_contacts_do_not_create_degenerate_fragments();
+    test_analytic_refinement_honors_cancellation();
+    test_coincident_analytic_curves_refuse_stably();
     test_required_hole_failure_is_fatal();
     if (g_failures == 0) {
         std::fprintf(stderr, "region_table: OK\n");

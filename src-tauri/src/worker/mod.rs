@@ -208,7 +208,7 @@ pub trait SolverEngine: Send + Sync {
     async fn sketch_regions(
         &self,
         sketch_id: &str,
-    ) -> Result<Vec<crate::dto::SketchRegionDto>, EngineError>;
+    ) -> Result<crate::dto::FinishSketchDto, EngineError>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -982,7 +982,7 @@ impl SolverEngine for PendingBackend {
     async fn sketch_regions(
         &self,
         _sketch_id: &str,
-    ) -> Result<Vec<crate::dto::SketchRegionDto>, EngineError> {
+    ) -> Result<crate::dto::FinishSketchDto, EngineError> {
         Err(Self::not_ready())
     }
 }

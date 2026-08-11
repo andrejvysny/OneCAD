@@ -1012,7 +1012,8 @@ OneCAD-CPP `ExtrudeParams`.
 // params
 {
   "sketchId": "sk_1",             // profile sketch (see "Profile binding")
-  "regionId": "r_ac127d8846949…", // omitted ⇒ first-region fallback
+  "regionId": "r_ac127d8846949…",
+  "regionIdentityVersion": 2,    // required for newly authored profiles
   "distance": 25.0,
   "draftAngleDeg": 0.0,
   "extrudeMode": "Blind",         // Blind | ThroughAll | Symmetric | ToNext | ToFace
@@ -1043,7 +1044,8 @@ carried as **flat `params.sketchId` + `params.regionId`**, NOT as a semantic ref
 in `inputs[]`. A region is identified by the derived `regionId` (§7.4), which is
 already a stable, content-addressed identity — it needs no anchor/intent evidence
 and no ladder, so the semantic-ref machinery does not apply to it. Rust's core
-`ExtrudeParams`/`RevolveParams` hold a typed `profile { sketchId, regionId }`
+`ExtrudeParams`/`RevolveParams` hold a typed `profile { sketchId, regionId,
+regionIdentityVersion? }`
 object; the wire layer FLATTENS it (`src-tauri/src/worker/wire.rs`
 `lift_profile_to_params`) and the worker reads the flat keys
 (`worker/src/ops/OpCommon.cpp` `build_profile_face`). Producers MUST send the
@@ -1067,6 +1069,7 @@ produced or consumed.
 {
   "sketchId": "sk_1",
   "regionId": "r_ac127d8846949…",
+  "regionIdentityVersion": 2,
   "angleDeg": 360.0,
   "axis": { "kind": "sketchLine", "sketchId": "sk_1", "lineId": "e1" },
               // axis.kind ∈ "sketchLine" {sketchId,lineId} | "edge" {bodyId,edgeId,edgeRef?} | "none"
@@ -1641,7 +1644,7 @@ preview fill).
 { "sketchId": "sk_1" }
 // result
 {
-  "sketchId": "sk_1", "sketchRevision": 5,
+  "sketchId": "sk_1", "sketchRevision": 5, "regionIdentityVersion": 2,
   "regions": [
     {
       "regionId": "r0",
@@ -1672,8 +1675,9 @@ preview fill).
 
   - `L` is the lexicographically smallest cyclic rotation of the oriented loop's
     length-prefixed tokens (outer normalized CCW; holes CW).
-  - A token is the mapped base wire UUID, followed by `#segN_pM` when that base
-    entity was subdivided by an intersection, then `:f` or `:r` for traversal.
+  - A token is the mapped base wire UUID, followed for a fragment by its curve
+    kind and start/end parameters normalized to the authored base range at 1e-9,
+    then `:f` or `:r` for traversal. Tessellation indices are never identity.
   - Each hole loop is canonicalized independently; the resulting hole strings
     are sorted and length-prefixed before concatenation.
 
@@ -1722,19 +1726,21 @@ preview fill).
   partial triangle list — a partial fill reads as a wrong boundary to the
   ring-recovery consumers above.
 
-- **Known V1 limitation — intersection-fragment boundaries are chords.** Cells
-  produced by curve-curve intersection splitting (fragment edges, e.g. the lens
-  and crescents of two overlapping circles) currently build their committed
-  faces from the planarized polygon (chord approximation of arcs), not trimmed
-  analytic curves; the polygon fill visually agrees with the committed solid.
-  Plain and nested (hole-bearing) cells are exact. **This applies to `Ellipse`
-  fragment cells identically**: a PURE (unsplit) ellipse loop builds an exact
-  `Geom_Ellipse` edge — an extrude of one is analytic, with a single lateral
-  face and volume π·`majorR`·`minorR`·distance — but an ellipse cut by another
-  curve contributes chord fragments like any arc. `previewTriangles` is a
+- **Region identity version.** `SketchRegions` always emits
+  `regionIdentityVersion: 2`. New `SketchRegionRef`s persist that version and
+  version-2 profile lookup requires one exact canonical id; an empty/stale id
+  refuses. An absent persisted version is V1: it replays the legacy detector and
+  may use its first-region fallback. A legacy outer id aliases only when unique;
+  an exact-v2 ambiguity refuses and lists v2 candidates.
+
+- **Exact fragment BReps.** Supported Line/Circle/Arc/Ellipse fragments are
+  intersected with `Geom2dAPI_InterCurveCurve`, then built as trimmed analytic
+  BRep edges with shared endpoints. Tessellation remains only for planar walk,
+  containment, and preview fill; it is never a committed fragment edge. Positive
+  overlap/coincidence refuses; point tangencies collapse to one split. `previewTriangles` is a
   tessellation in **both** cases (region area/fill for an ellipse is a sampled
-  polygon and therefore slightly under-reports the analytic π·a·b). Lifting
-  fragments to analytic trimmed wires is tracked in `TODO.md` backlog.
+  polygon and therefore slightly under-reports the analytic π·a·b); it is
+  display/selection evidence, never committed topology.
 
 ### 7.5 Element identity
 
@@ -3393,7 +3399,8 @@ sign-off) once fixtures exist.
   (code-to-spec; **orchestrator-approved 2026-07-19**).
   [§7.3](#73-op-payload-schemas-vertical-slice), [§7.4](#74-sketch-solver-lane). The
   Rust wire layer lifts the core-only `profile` (`SketchRegionRef {sketchId,
-  regionId}`) to top-level `params.sketchId` + `params.regionId` (dropping the
+  regionId, regionIdentityVersion?}`) to top-level `params.sketchId` +
+  `params.regionId` + optional `params.regionIdentityVersion` (dropping the
   `profile` wrapper — §7.3 has no `profile`; Extrude AND Revolve), and the worker's
   `build_profile_face` selects the closed region whose normative FNV `regionId`
   ([§7.4](#74-sketch-solver-lane) `derive_region_id`, `r_<hash>`) matches. **Strict
@@ -3402,8 +3409,9 @@ sign-off) once fixtures exist.
   the available ids; downstream is blocked, publish ≤ m−1), **never** a silent fallback
   to a different region (a stale id after a sketch edit must fail loudly, not extrude a
   wrong profile — the "never a silent wrong bind" principle). An **empty/absent**
-  `regionId` keeps the V1 **first-region** fallback (single-region sketches; the
-  region-selection micro-slice does not yet author a real id everywhere). Additive:
+  `regionId` keeps the V1 **first-region** fallback only when
+  `regionIdentityVersion` is absent (single-region sketches; the region-selection
+  micro-slice does not yet author a real id everywhere). Additive:
   `perStepResults[].message` on a failed step carries the §8 recoverable reason (a
   failed step emits no `planStep`, so this is its only channel to Rust; readers ignore
   unknown keys, §4). This closes the M2 `last_sketch_id` + first-region binding gap

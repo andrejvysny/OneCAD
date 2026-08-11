@@ -265,6 +265,7 @@ fn extrude_params(sketch: SketchId, dist: f64, mode: ExtrudeMode) -> ExtrudePara
         profile: Some(SketchRegionRef {
             sketch,
             region: RegionId::new(""), // empty ⇒ V1 first-region fallback
+            region_identity_version: None,
             extra: Default::default(),
         }),
         distance: Scalar::new(dist),

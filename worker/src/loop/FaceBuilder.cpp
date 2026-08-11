@@ -13,13 +13,16 @@
 
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRep_Builder.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #include <GC_MakeCircle.hxx>
 #include <GC_MakeSegment.hxx>
 #include <Geom_Circle.hxx>
 #include <Geom_Ellipse.hxx>
+#include <Geom_Line.hxx>
 #include <Geom_TrimmedCurve.hxx>
 #include <ShapeFix_Wire.hxx>
 #include <TopoDS.hxx>
@@ -31,6 +34,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <unordered_map>
 
 namespace onecad::core::loop {
 
@@ -113,8 +117,12 @@ Loop orientLoop(const Loop& loop, bool shouldBeCCW) {
     if (isCCW != shouldBeCCW) {
         std::reverse(oriented.wire.edges.begin(), oriented.wire.edges.end());
         std::reverse(oriented.wire.forward.begin(), oriented.wire.forward.end());
-        for (size_t i = 0; i < oriented.wire.forward.size(); ++i) {
+    for (size_t i = 0; i < oriented.wire.forward.size(); ++i) {
             oriented.wire.forward[i] = !oriented.wire.forward[i];
+        }
+        std::reverse(oriented.fragments.begin(), oriented.fragments.end());
+        for (CurveFragment& fragment : oriented.fragments) {
+            fragment.forward = !fragment.forward;
         }
         std::reverse(oriented.polygon.begin(), oriented.polygon.end());
         oriented.signedArea = -oriented.signedArea;
@@ -378,6 +386,80 @@ std::optional<TopoDS_Edge> FaceBuilder::createEdge(const sk::EntityID& entityId,
     }
 }
 
+std::optional<TopoDS_Edge> FaceBuilder::createFragmentEdge(const CurveFragment& fragment,
+                                                            const sk::Sketch& sketch,
+                                                            const gp_Pln& plane,
+                                                            const TopoDS_Vertex& start,
+                                                            const TopoDS_Vertex& end,
+                                                            bool forward) const {
+    const sk::SketchEntity* entity = sketch.getEntity(fragment.baseEntityId);
+    if (!entity) return std::nullopt;
+
+    try {
+        Handle(Geom_Curve) curve;
+        if (fragment.kind == CurveFragmentKind::Line) {
+            const auto* line = sketch.getEntityAs<sk::SketchLine>(fragment.baseEntityId);
+            const auto* first = line ? sketch.getEntityAs<sk::SketchPoint>(line->startPointId()) : nullptr;
+            const auto* last = line ? sketch.getEntityAs<sk::SketchPoint>(line->endPointId()) : nullptr;
+            if (!first || !last) return std::nullopt;
+            gp_Pnt a = toGpPnt(first->x(), first->y(), plane);
+            gp_Pnt b = toGpPnt(last->x(), last->y(), plane);
+            if (a.Distance(b) < config_.edgeTolerance) return std::nullopt;
+            curve = new Geom_Line(gp_Lin(a, gp_Dir(gp_Vec(a, b))));
+        } else if (fragment.kind == CurveFragmentKind::Arc ||
+                   fragment.kind == CurveFragmentKind::Circle) {
+            const sk::SketchCircle* circle = nullptr;
+            const sk::SketchArc* arc = nullptr;
+            if (fragment.kind == CurveFragmentKind::Arc) {
+                arc = sketch.getEntityAs<sk::SketchArc>(fragment.baseEntityId);
+            } else {
+                circle = sketch.getEntityAs<sk::SketchCircle>(fragment.baseEntityId);
+            }
+            const sk::EntityID centerId = arc ? arc->centerPointId() :
+                                          (circle ? circle->centerPointId() : sk::EntityID{});
+            const auto* centerPoint = sketch.getEntityAs<sk::SketchPoint>(centerId);
+            const double radius = arc ? arc->radius() : (circle ? circle->radius() : 0.0);
+            if (!centerPoint || radius <= 0.0) return std::nullopt;
+            curve = new Geom_Circle(gp_Circ(gp_Ax2(toGpPnt(centerPoint->x(), centerPoint->y(), plane),
+                                                    plane.Axis().Direction(),
+                                                    plane.Position().XDirection()), radius));
+        } else if (fragment.kind == CurveFragmentKind::Ellipse) {
+            const auto* ellipse = sketch.getEntityAs<sk::SketchEllipse>(fragment.baseEntityId);
+            const auto* centerPoint = ellipse ? sketch.getEntityAs<sk::SketchPoint>(ellipse->centerPointId()) : nullptr;
+            if (!ellipse || !centerPoint || ellipse->majorRadius() <= 0.0 || ellipse->minorRadius() <= 0.0) {
+                return std::nullopt;
+            }
+            const gp_Ax3& ax3 = plane.Position();
+            const gp_Dir& xDir = ax3.XDirection();
+            const gp_Dir& yDir = ax3.YDirection();
+            const double cosine = std::cos(ellipse->rotation());
+            const double sine = std::sin(ellipse->rotation());
+            const gp_Dir major(xDir.X() * cosine + yDir.X() * sine,
+                               xDir.Y() * cosine + yDir.Y() * sine,
+                               xDir.Z() * cosine + yDir.Z() * sine);
+            curve = new Geom_Ellipse(gp_Elips(gp_Ax2(toGpPnt(centerPoint->x(), centerPoint->y(), plane),
+                                                       plane.Axis().Direction(), major),
+                                             ellipse->majorRadius(), ellipse->minorRadius()));
+        } else {
+            return std::nullopt;
+        }
+
+        // OCCT interprets descending periodic parameters as the complementary
+        // branch. Build every trimmed curve in its increasing source interval
+        // and reverse only the topological orientation for a backwards walk.
+        BRepBuilderAPI_MakeEdge edgeMaker(curve, start, end,
+                                          fragment.firstParameter, fragment.lastParameter);
+        if (!edgeMaker.IsDone()) return std::nullopt;
+        TopoDS_Edge edge = edgeMaker.Edge();
+        if (!forward) edge.Reverse();
+        return edge;
+    } catch (const Standard_Failure&) {
+        return std::nullopt;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
 WireBuildResult FaceBuilder::buildWire(const Loop& loop, const sk::Sketch& sketch) const {
     gp_Pln plane = sketchPlaneToGpPln(sketch.getPlane());
     return buildWire(loop, sketch, plane);
@@ -405,7 +487,52 @@ WireBuildResult FaceBuilder::buildWire(const Loop& loop, const sk::Sketch& sketc
     try {
         BRepBuilderAPI_MakeWire wireMaker;
 
-        if (auto closedBaseId = singleClosedCurveBaseId(loop, sketch)) {
+        const bool wholeClosedFragment = loop.fragments.size() == 1 &&
+            (loop.fragments.front().kind == CurveFragmentKind::Circle ||
+             loop.fragments.front().kind == CurveFragmentKind::Ellipse) &&
+            distanceSquared(loop.fragments.front().startPoint, loop.fragments.front().endPoint) <=
+                config_.edgeTolerance * config_.edgeTolerance;
+        const bool hasExactFragments = !loop.fragments.empty() && !wholeClosedFragment;
+        if (hasExactFragments && loop.fragments.size() != loop.wire.edges.size()) {
+            result.errorMessage = "Analytic fragment count does not match wire edges";
+            return result;
+        }
+
+        if (hasExactFragments) {
+            std::unordered_map<std::string, TopoDS_Vertex> vertices;
+            const double snap = std::max(config_.edgeTolerance, 1e-9);
+            const auto vertexFor = [&](const sk::Vec2d& point) {
+                const std::string key = std::to_string(std::llround(point.x / snap)) + "," +
+                                        std::to_string(std::llround(point.y / snap));
+                const auto found = vertices.find(key);
+                if (found != vertices.end()) return found->second;
+                BRepBuilderAPI_MakeVertex vertexMaker(toGpPnt(point, plane));
+                TopoDS_Vertex vertex = vertexMaker.Vertex();
+                BRep_Builder builder;
+                builder.UpdateVertex(vertex, config_.edgeTolerance);
+                vertices.emplace(key, vertex);
+                return vertex;
+            };
+
+            for (std::size_t i = 0; i < loop.fragments.size(); ++i) {
+                const CurveFragment& fragment = loop.fragments[i];
+                const TopoDS_Vertex start = vertexFor(fragment.startPoint);
+                const TopoDS_Vertex end = vertexFor(fragment.endPoint);
+                auto edge = createFragmentEdge(fragment, sketch, plane, start, end,
+                                               fragment.forward);
+                if (!edge.has_value()) {
+                    result.errorMessage = "Failed to create exact analytic fragment: " +
+                                          fragment.baseEntityId;
+                    return result;
+                }
+                wireMaker.Add(*edge);
+                if (wireMaker.Error() != BRepBuilderAPI_WireDone) {
+                    result.errorMessage = std::string("Analytic wire build reported: ") +
+                                          wireErrorToString(wireMaker.Error());
+                    return result;
+                }
+            }
+        } else if (auto closedBaseId = singleClosedCurveBaseId(loop, sketch)) {
             auto edge = createEdge(*closedBaseId, sketch, plane, loop.signedArea >= 0.0);
             if (!edge.has_value()) {
                 result.errorMessage = "Failed to create edge for entity: " + *closedBaseId;
@@ -483,7 +610,7 @@ WireBuildResult FaceBuilder::buildWire(const Loop& loop, const sk::Sketch& sketc
         TopoDS_Wire wire = wireMaker.Wire();
 
         // Attempt gap repair if enabled
-        if (config_.repairGaps) {
+        if (config_.repairGaps && !hasExactFragments) {
             Handle(ShapeFix_Wire) wireFix = new ShapeFix_Wire(wire, TopoDS_Face(), config_.edgeTolerance);
             wireFix->SetMaxTolerance(config_.maxGapSize);
             wireFix->FixConnected();

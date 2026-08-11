@@ -53,7 +53,7 @@ interface WireScalar {
 }
 
 interface WireExtrudeParams {
-  profile?: { sketchId: string; regionId: string };
+  profile?: { sketchId: string; regionId: string; regionIdentityVersion?: number };
   distance: WireScalar;
   draftAngleDeg: WireScalar;
   extrudeMode: ExtrudeMode;
@@ -78,7 +78,7 @@ type WireAxisRef =
   | { kind: "edge"; bodyId: string; edgeId: string };
 
 interface WireRevolveParams {
-  profile?: { sketchId: string; regionId: string };
+  profile?: { sketchId: string; regionId: string; regionIdentityVersion?: number };
   /** Rust `angleDeg` Scalar — DEGREES (no radians conversion). */
   angleDeg: WireScalar;
   axis?: WireAxisRef;
@@ -635,7 +635,13 @@ export function wireOperation(op: OperationOp): WireOperation {
       const params = extrudeParams(op.params);
       // The profile is a SketchRegionRef; the ids are real once R-WP12 lands.
       if (op.sketchId && op.regionId) {
-        params.profile = { sketchId: op.sketchId, regionId: op.regionId };
+        params.profile = {
+          sketchId: op.sketchId,
+          regionId: op.regionId,
+          ...(op.regionIdentityVersion === undefined
+            ? {}
+            : { regionIdentityVersion: op.regionIdentityVersion }),
+        };
       }
       return { ...identity, opType: "Extrude", params };
     }
@@ -643,7 +649,13 @@ export function wireOperation(op: OperationOp): WireOperation {
       const params = revolveParams(op.params);
       // The profile is a SketchRegionRef (ids real once R-WP12 lands, as Extrude).
       if (op.sketchId && op.regionId) {
-        params.profile = { sketchId: op.sketchId, regionId: op.regionId };
+        params.profile = {
+          sketchId: op.sketchId,
+          regionId: op.regionId,
+          ...(op.regionIdentityVersion === undefined
+            ? {}
+            : { regionIdentityVersion: op.regionIdentityVersion }),
+        };
       }
       return { ...identity, opType: "Revolve", params };
     }

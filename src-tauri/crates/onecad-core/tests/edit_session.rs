@@ -77,6 +77,7 @@ fn profile() -> SketchRegionRef {
     SketchRegionRef {
         sketch: S1(),
         region: RegionId::new("r0"),
+        region_identity_version: None,
         extra: Default::default(),
     }
 }
@@ -490,6 +491,7 @@ fn edit_operation_input_all_paths() {
             InputRef::Region(SketchRegionRef {
                 sketch: sid(9),
                 region: RegionId::new("r9"),
+                region_identity_version: None,
                 extra: Default::default(),
             }),
         ),

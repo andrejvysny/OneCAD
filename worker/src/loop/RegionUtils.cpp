@@ -223,6 +223,7 @@ LoopDetectorConfig makeRegionDetectionConfig() {
     config.resolveHoles = true;
     config.validate = true;
     config.planarizeIntersections = true;
+    config.exactAnalyticFragments = true;
     return config;
 }
 

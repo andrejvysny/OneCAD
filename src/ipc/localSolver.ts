@@ -38,6 +38,7 @@ import type {
   CurveParams,
   DragSolveResult,
   EnterSketchTarget,
+  FinishSketchResult,
   GestureTarget,
   OperationOp,
   PreviewDraft,
@@ -163,7 +164,7 @@ export interface LocalSolverLane {
     entities: SketchEntity[],
     constraints: SketchConstraint[],
   ): Promise<SketchUpsertResult>;
-  finishSketch(sketchId: string): Promise<{ regions: SketchRegion[] }>;
+  finishSketch(sketchId: string): Promise<FinishSketchResult>;
   cancelSketch(sketchId: string): Promise<void>;
   beginGesture(
     sketchId: string,
@@ -581,7 +582,7 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
       };
     },
 
-    async finishSketch(sketchId: string): Promise<{ regions: SketchRegion[] }> {
+    async finishSketch(sketchId: string): Promise<FinishSketchResult> {
       await wait(SKETCH_LATENCY_MS);
       const session = sketchSessions.get(sketchId);
       if (session) {
@@ -592,12 +593,12 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
         const { detectRegions } = await import("./mockRegions");
         const regions = detectRegions(session.entities);
         finishedRegions.set(sketchId, regions); // cache for extrude synthesis
-        return { regions };
+        return { regionIdentityVersion: 2, regions };
       }
       // Sessionless finish (the model-mode record guarantee): answer from the
       // cache instead of clobbering it with [] — the armed preview lane still
       // resolves its profile from finishedRegions on a re-arm.
-      return { regions: finishedRegions.get(sketchId) ?? [] };
+      return { regionIdentityVersion: 2, regions: finishedRegions.get(sketchId) ?? [] };
     },
 
     async cancelSketch(_sketchId: string): Promise<void> {
@@ -681,6 +682,7 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
         previewBodyId,
         sketchId: draft.sketchId,
         regionId: draft.regionId,
+        regionIdentityVersion: draft.regionIdentityVersion,
         inputs: draft.inputs,
         plane,
         profile,

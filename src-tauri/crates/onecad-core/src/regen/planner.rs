@@ -1013,6 +1013,7 @@ mod tests {
         p.profile = Some(crate::document::refs::SketchRegionRef {
             sketch,
             region: crate::ids::RegionId::new(""),
+            region_identity_version: None,
             extra: Default::default(),
         });
         rec.inputs = rec.op.derive_inputs();

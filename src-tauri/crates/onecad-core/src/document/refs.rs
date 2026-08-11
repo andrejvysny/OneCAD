@@ -124,6 +124,9 @@ pub struct SketchRegionRef {
     pub sketch: SketchId,
     #[serde(rename = "regionId")]
     pub region: RegionId,
+    /// Absent is a persisted v1 profile and deliberately retains legacy lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region_identity_version: Option<u32>,
     #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
     pub extra: Extra,
 }
@@ -207,6 +210,29 @@ pub enum AxisRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sketch_region_version_is_optional_and_round_trips() {
+        let legacy: SketchRegionRef = serde_json::from_str(
+            r#"{"sketchId":"00000000-0000-0000-0000-000000000001","regionId":"r0"}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.region_identity_version, None);
+        assert!(serde_json::to_value(&legacy)
+            .unwrap()
+            .get("regionIdentityVersion")
+            .is_none());
+
+        let current: SketchRegionRef = serde_json::from_str(
+            r#"{"sketchId":"00000000-0000-0000-0000-000000000001","regionId":"r0","regionIdentityVersion":2}"#,
+        )
+        .unwrap();
+        assert_eq!(current.region_identity_version, Some(2));
+        assert_eq!(
+            serde_json::to_value(&current).unwrap()["regionIdentityVersion"],
+            serde_json::json!(2)
+        );
+    }
 
     /// M2: an alien key beside `kind` on an `AxisRef` variant round-trips via the
     /// per-variant `extra` map (internally-tagged codec honours the flatten).

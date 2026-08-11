@@ -125,6 +125,7 @@ fn region_ref() -> impl Strategy<Value = SketchRegionRef> {
         SketchRegionRef {
             sketch,
             region: RegionId::new(r),
+            region_identity_version: None,
             extra,
         }
     })

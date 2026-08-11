@@ -43,10 +43,14 @@ std::vector<nlohmann::json> operation_ref_ownership_repairs(
     const nlohmann::json& op, const std::string& op_id);
 
 // Build one selectable planar-cell face from a solved Sketch op. Publication and
-// lookup use the same RegionTable. A non-empty `region_id` MUST resolve uniquely
-// against its canonical id (or one unambiguous legacy outer-loop id); stale or
-// ambiguous ids fail with the available canonical ids. Empty retains the V1
-// first-region fallback for old documents only.
+// lookup use the same RegionTable. Version 2 requires one exact canonical id;
+// absent keeps the legacy detector and its documented first-region fallback.
+std::optional<TopoDS_Face> build_profile_face(const nlohmann::json& sketch_params,
+                                              const std::string& region_id,
+                                              std::optional<int> region_identity_version,
+                                              std::string& err);
+
+// Compatibility overload for direct V1 callers and fixtures.
 std::optional<TopoDS_Face> build_profile_face(const nlohmann::json& sketch_params,
                                               const std::string& region_id, std::string& err);
 

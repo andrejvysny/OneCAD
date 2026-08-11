@@ -2428,14 +2428,14 @@ export const mockClient: CadClient = {
       const regions = detectRegions(session.entities);
       lane.cacheSketchPlane(sketchId, session.plane);
       lane.cacheFinishedRegions(sketchId, regions);
-      return { regions };
+      return { regionIdentityVersion: 2, regions };
     }
     if (documentStore.getState().sketches[sketchId]) {
       const plane = planeFor("XY");
       const regions = detectRegions(seededSketchRectangle());
       lane.cacheSketchPlane(sketchId, plane);
       lane.cacheFinishedRegions(sketchId, regions);
-      return { regions };
+      return { regionIdentityVersion: 2, regions };
     }
     throw new Error(`getSketchRegions: unknown sketch ${sketchId}`);
   },

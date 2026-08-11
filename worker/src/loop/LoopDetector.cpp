@@ -16,8 +16,21 @@
 #include <limits>
 #include <numbers>
 #include <optional>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
+
+#include <Geom2dAPI_InterCurveCurve.hxx>
+#include <Geom2dAPI_ProjectPointOnCurve.hxx>
+#include <Geom2d_Circle.hxx>
+#include <Geom2d_Ellipse.hxx>
+#include <Geom2d_Line.hxx>
+#include <Geom2d_TrimmedCurve.hxx>
+#include <gp_Ax2d.hxx>
+#include <gp_Circ2d.hxx>
+#include <gp_Dir2d.hxx>
+#include <gp_Elips2d.hxx>
+#include <gp_Lin2d.hxx>
 
 namespace onecad::core::loop {
 
@@ -121,11 +134,77 @@ void appendArcSamples(std::vector<sk::Vec2d>& points,
     }
 }
 
-struct Segment {
+struct BroadSegment {
     sk::Vec2d start;
     sk::Vec2d end;
     sk::EntityID baseId;
+    std::size_t sourceIndex = 0;
 };
+
+struct AnalyticSource {
+    CurveFragment fragment;
+    Handle(Geom2d_Curve) basis;
+    Handle(Geom2d_Curve) bounded;
+    bool closed = false;
+};
+
+struct CurveSplit {
+    double parameter = 0.0;
+    sk::Vec2d point{};
+};
+
+struct ProfileTolerancePolicy {
+    double coincidence = 1e-7;
+
+    static ProfileTolerancePolicy forSources(const std::vector<AnalyticSource>& sources,
+                                             double configuredMaximum) {
+        double minimumX = std::numeric_limits<double>::infinity();
+        double minimumY = std::numeric_limits<double>::infinity();
+        double maximumX = -std::numeric_limits<double>::infinity();
+        double maximumY = -std::numeric_limits<double>::infinity();
+        for (const AnalyticSource& source : sources) {
+            const double span = source.fragment.lastParameter - source.fragment.firstParameter;
+            for (const double fraction : {0.0, 0.25, 0.5, 0.75, 1.0}) {
+                const gp_Pnt2d point = source.basis->Value(
+                    source.fragment.firstParameter + span * fraction);
+                minimumX = std::min(minimumX, point.X());
+                minimumY = std::min(minimumY, point.Y());
+                maximumX = std::max(maximumX, point.X());
+                maximumY = std::max(maximumY, point.Y());
+            }
+        }
+        const double extent = std::max({maximumX - minimumX, maximumY - minimumY, 1.0});
+        const double maximum = std::max(configuredMaximum, 1e-9);
+        return {std::clamp(extent * 1e-7, std::min(1e-7, maximum), maximum)};
+    }
+};
+
+bool shareAuthoredEndpoint(const AnalyticSource& first, const AnalyticSource& second,
+                           double tolerance) {
+    if (first.closed || second.closed) return false;
+    const double toleranceSquared = tolerance * tolerance;
+    return distanceSquared(first.fragment.startPoint, second.fragment.startPoint) <= toleranceSquared ||
+           distanceSquared(first.fragment.startPoint, second.fragment.endPoint) <= toleranceSquared ||
+           distanceSquared(first.fragment.endPoint, second.fragment.startPoint) <= toleranceSquared ||
+           distanceSquared(first.fragment.endPoint, second.fragment.endPoint) <= toleranceSquared;
+}
+
+bool pointsShareSupport(const AnalyticSource& source, const AnalyticSource& other,
+                        double tolerance) {
+    const double span = source.fragment.lastParameter - source.fragment.firstParameter;
+    for (const double fraction : {0.0, 0.37, 0.73}) {
+        const gp_Pnt2d point = source.basis->Value(source.fragment.firstParameter + span * fraction);
+        Geom2dAPI_ProjectPointOnCurve projection(point, other.basis);
+        if (projection.NbPoints() == 0 || projection.LowerDistance() > tolerance) return false;
+    }
+    return true;
+}
+
+bool shareAnalyticSupport(const AnalyticSource& first, const AnalyticSource& second,
+                          double tolerance) {
+    return pointsShareSupport(first, second, tolerance) &&
+           pointsShareSupport(second, first, tolerance);
+}
 
 struct SplitPoint {
     double t = 0.0;
@@ -247,6 +326,128 @@ std::vector<sk::Vec2d> tessellateEllipsePoints(const sk::Vec2d& center,
     return points;
 }
 
+std::optional<AnalyticSource> makeAnalyticSource(const sk::SketchEntity& entity,
+                                                  const sk::Sketch& sketch) {
+    AnalyticSource source;
+    source.fragment.baseEntityId = entity.id();
+
+    if (entity.type() == sk::EntityType::Line) {
+        const auto* line = dynamic_cast<const sk::SketchLine*>(&entity);
+        if (!line) return std::nullopt;
+        const auto* start = sketch.getEntityAs<sk::SketchPoint>(line->startPointId());
+        const auto* end = sketch.getEntityAs<sk::SketchPoint>(line->endPointId());
+        if (!start || !end) return std::nullopt;
+        const sk::Vec2d a = toVec2(start->position());
+        const sk::Vec2d b = toVec2(end->position());
+        const double length = std::sqrt(distanceSquared(a, b));
+        if (length <= 0.0) return std::nullopt;
+        source.fragment.kind = CurveFragmentKind::Line;
+        source.fragment.firstParameter = 0.0;
+        source.fragment.lastParameter = length;
+        source.fragment.startPoint = a;
+        source.fragment.endPoint = b;
+        source.basis = new Geom2d_Line(gp_Lin2d(gp_Pnt2d(a.x, a.y),
+                                                gp_Dir2d((b.x - a.x) / length,
+                                                         (b.y - a.y) / length)));
+        source.bounded = new Geom2d_TrimmedCurve(source.basis, 0.0, length);
+        source.fragment.sourceFirstParameter = source.fragment.firstParameter;
+        source.fragment.sourceLastParameter = source.fragment.lastParameter;
+        return source;
+    }
+
+    const sk::SketchPoint* centerPoint = nullptr;
+    if (entity.type() == sk::EntityType::Arc) {
+        const auto* arc = dynamic_cast<const sk::SketchArc*>(&entity);
+        if (!arc || arc->radius() <= 0.0) return std::nullopt;
+        centerPoint = sketch.getEntityAs<sk::SketchPoint>(arc->centerPointId());
+        if (!centerPoint) return std::nullopt;
+        const sk::Vec2d center = toVec2(centerPoint->position());
+        source.fragment.kind = CurveFragmentKind::Arc;
+        source.fragment.firstParameter = arc->startAngle();
+        source.fragment.lastParameter = arc->startAngle() + arc->sweepAngle();
+        source.fragment.startPoint = {center.x + arc->radius() * std::cos(source.fragment.firstParameter),
+                                      center.y + arc->radius() * std::sin(source.fragment.firstParameter)};
+        source.fragment.endPoint = {center.x + arc->radius() * std::cos(source.fragment.lastParameter),
+                                    center.y + arc->radius() * std::sin(source.fragment.lastParameter)};
+        source.basis = new Geom2d_Circle(gp_Circ2d(gp_Ax2d(gp_Pnt2d(center.x, center.y),
+                                                           gp_Dir2d(1.0, 0.0)),
+                                                  arc->radius()));
+        source.bounded = new Geom2d_TrimmedCurve(source.basis, source.fragment.firstParameter,
+                                                   source.fragment.lastParameter);
+        source.fragment.sourceFirstParameter = source.fragment.firstParameter;
+        source.fragment.sourceLastParameter = source.fragment.lastParameter;
+        return source;
+    }
+
+    if (entity.type() == sk::EntityType::Circle) {
+        const auto* circle = dynamic_cast<const sk::SketchCircle*>(&entity);
+        if (!circle || circle->radius() <= 0.0) return std::nullopt;
+        centerPoint = sketch.getEntityAs<sk::SketchPoint>(circle->centerPointId());
+        if (!centerPoint) return std::nullopt;
+        const sk::Vec2d center = toVec2(centerPoint->position());
+        source.fragment.kind = CurveFragmentKind::Circle;
+        source.fragment.firstParameter = 0.0;
+        source.fragment.lastParameter = 2.0 * std::numbers::pi_v<double>;
+        source.fragment.startPoint = {center.x + circle->radius(), center.y};
+        source.fragment.endPoint = source.fragment.startPoint;
+        source.basis = new Geom2d_Circle(gp_Circ2d(gp_Ax2d(gp_Pnt2d(center.x, center.y),
+                                                           gp_Dir2d(1.0, 0.0)),
+                                                  circle->radius()));
+        source.bounded = new Geom2d_TrimmedCurve(source.basis, 0.0,
+                                                   source.fragment.lastParameter);
+        source.closed = true;
+        source.fragment.sourceFirstParameter = source.fragment.firstParameter;
+        source.fragment.sourceLastParameter = source.fragment.lastParameter;
+        return source;
+    }
+
+    if (entity.type() != sk::EntityType::Ellipse) return std::nullopt;
+    const auto* ellipse = dynamic_cast<const sk::SketchEllipse*>(&entity);
+    if (!ellipse || ellipse->majorRadius() <= 0.0 || ellipse->minorRadius() <= 0.0) {
+        return std::nullopt;
+    }
+    centerPoint = sketch.getEntityAs<sk::SketchPoint>(ellipse->centerPointId());
+    if (!centerPoint) return std::nullopt;
+    const sk::Vec2d center = toVec2(centerPoint->position());
+    const double rotation = ellipse->rotation();
+    source.fragment.kind = CurveFragmentKind::Ellipse;
+    source.fragment.firstParameter = 0.0;
+    source.fragment.lastParameter = 2.0 * std::numbers::pi_v<double>;
+    source.fragment.startPoint = {center.x + ellipse->majorRadius() * std::cos(rotation),
+                                  center.y + ellipse->majorRadius() * std::sin(rotation)};
+    source.fragment.endPoint = source.fragment.startPoint;
+    source.basis = new Geom2d_Ellipse(
+        gp_Elips2d(gp_Ax2d(gp_Pnt2d(center.x, center.y),
+                           gp_Dir2d(std::cos(rotation), std::sin(rotation))),
+                   ellipse->majorRadius(), ellipse->minorRadius()));
+    source.bounded = new Geom2d_TrimmedCurve(source.basis, 0.0,
+                                               source.fragment.lastParameter);
+    source.closed = true;
+    source.fragment.sourceFirstParameter = source.fragment.firstParameter;
+    source.fragment.sourceLastParameter = source.fragment.lastParameter;
+    return source;
+}
+
+void addCurveSplit(std::vector<CurveSplit>& splits, double parameter,
+                   const sk::Vec2d& point, double tolerance) {
+    for (const CurveSplit& existing : splits) {
+        if (std::abs(existing.parameter - parameter) <= tolerance) return;
+    }
+    splits.push_back({parameter, point});
+}
+
+std::optional<double> projectCurveParameter(const AnalyticSource& source,
+                                            const gp_Pnt2d& point,
+                                            double tolerance) {
+    Geom2dAPI_ProjectPointOnCurve projector(point, source.basis,
+                                             source.fragment.firstParameter,
+                                             source.fragment.lastParameter);
+    if (projector.NbPoints() == 0 || projector.LowerDistance() > tolerance) {
+        return std::nullopt;
+    }
+    return projector.LowerDistanceParameter();
+}
+
 std::string makeCycleKey(const std::vector<sk::EntityID>& edges) {
     std::vector<sk::EntityID> sorted = edges;
     std::sort(sorted.begin(), sorted.end());
@@ -343,6 +544,10 @@ void reverseLoop(Loop& loop) {
     for (size_t i = 0; i < loop.wire.forward.size(); ++i) {
         loop.wire.forward[i] = !loop.wire.forward[i];
     }
+    std::reverse(loop.fragments.begin(), loop.fragments.end());
+    for (CurveFragment& fragment : loop.fragments) {
+        fragment.forward = !fragment.forward;
+    }
     std::reverse(loop.polygon.begin(), loop.polygon.end());
     loop.signedArea = -loop.signedArea;
 }
@@ -375,12 +580,27 @@ LoopDetectionResult LoopDetector::detect(const sk::Sketch& sketch,
         result.errorMessage = "Failed to build adjacency graph";
         return result;
     }
+    if (!graph->errorMessage.empty()) {
+        result.success = false;
+        result.errorMessage = graph->errorMessage;
+        return result;
+    }
 
     std::vector<Loop> loops;
     std::unordered_set<sk::EntityID> edgesInLoops;
 
     if (config_.planarizeIntersections) {
         loops = findFaces(*graph);
+        for (const CurveFragment& fragment : graph->closedCurves) {
+            Loop closedCurveLoop;
+            closedCurveLoop.wire.edges.push_back(fragment.baseEntityId);
+            closedCurveLoop.wire.forward.push_back(true);
+            closedCurveLoop.wire.startPoint = fragment.baseEntityId;
+            closedCurveLoop.wire.endPoint = fragment.baseEntityId;
+            closedCurveLoop.fragments.push_back(fragment);
+            computeLoopProperties(closedCurveLoop, sketch);
+            loops.push_back(std::move(closedCurveLoop));
+        }
         if (config_.maxLoops > 0 && loops.size() > config_.maxLoops) {
             loops.resize(config_.maxLoops);
         }
@@ -794,7 +1014,189 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
         return graph;
     }
 
-    std::vector<Segment> segments;
+    if (config_.exactAnalyticFragments) {
+    std::vector<AnalyticSource> sources;
+    sources.reserve(sketch.getAllEntities().size());
+
+    for (const auto& entity : sketch.getAllEntities()) {
+        if (config_.isCancelled && config_.isCancelled()) {
+            graph->errorMessage = "profile refinement cancelled";
+            return graph;
+        }
+        if (!entity || entity->isConstruction()) continue;
+        if (selection && !selection->empty() && selection->find(entity->id()) == selection->end()) {
+            continue;
+        }
+        auto source = makeAnalyticSource(*entity, sketch);
+        if (!source.has_value()) continue;
+        sources.push_back(std::move(*source));
+    }
+
+    if (sources.empty()) return graph;
+    const ProfileTolerancePolicy tolerancePolicy =
+        ProfileTolerancePolicy::forSources(sources, config_.coincidenceTolerance);
+    tolerance = tolerancePolicy.coincidence;
+
+    std::set<std::pair<std::size_t, std::size_t>> candidatePairs;
+    for (std::size_t first = 0; first < sources.size(); ++first) {
+        for (std::size_t second = first + 1; second < sources.size(); ++second) {
+            if (config_.isCancelled && config_.isCancelled()) {
+                graph->errorMessage = "profile refinement cancelled";
+                return graph;
+            }
+            candidatePairs.emplace(first, second);
+            if (candidatePairs.size() > config_.maxPlanarizedCurvePairs) {
+                graph->errorMessage = "profile refinement exceeds curve-pair limit";
+                return graph;
+            }
+        }
+    }
+
+    std::vector<std::vector<CurveSplit>> splits(sources.size());
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+        if (!sources[i].closed) {
+            addCurveSplit(splits[i], sources[i].fragment.firstParameter,
+                          sources[i].fragment.startPoint, tolerance);
+            addCurveSplit(splits[i], sources[i].fragment.lastParameter,
+                          sources[i].fragment.endPoint, tolerance);
+        }
+    }
+
+    for (const auto& [first, second] : candidatePairs) {
+        if (config_.isCancelled && config_.isCancelled()) {
+            graph->errorMessage = "profile refinement cancelled";
+            return graph;
+        }
+        try {
+        Geom2dAPI_InterCurveCurve intersector(sources[first].bounded, sources[second].bounded,
+                                               tolerance);
+        for (int index = 1; index <= intersector.NbPoints(); ++index) {
+            const gp_Pnt2d point = intersector.Point(index);
+            const auto firstParameter = projectCurveParameter(sources[first], point, tolerance);
+            const auto secondParameter = projectCurveParameter(sources[second], point, tolerance);
+            if (!firstParameter || !secondParameter) {
+                graph->errorMessage = "profile refinement could not parameterize analytic intersection";
+                return graph;
+            }
+            const sk::Vec2d shared{point.X(), point.Y()};
+            addCurveSplit(splits[first], *firstParameter, shared, tolerance);
+            addCurveSplit(splits[second], *secondParameter, shared, tolerance);
+        }
+        // OCCT reports a point tangency both as a point and a zero-length
+        // segment on some curve pairs. The point is already split above; do
+        // not ask it to materialize that degenerate segment.
+        if (intersector.NbPoints() > 0) continue;
+        for (int index = 1; index <= intersector.NbSegments(); ++index) {
+            Handle(Geom2d_Curve) firstSegment;
+            Handle(Geom2d_Curve) secondSegment;
+            intersector.Segment(index, firstSegment, secondSegment);
+            if (shareAnalyticSupport(sources[first], sources[second], tolerance)) {
+                graph->errorMessage = "profile has overlapping or coincident analytic curves";
+                return graph;
+            }
+            // Different supports can only meet at a point. OCCT's tolerance may
+            // represent that tangency as a short segment; collapse it to one
+            // shared split instead of falsely refusing the profile.
+            const gp_Pnt2d point = firstSegment->Value(
+                (firstSegment->FirstParameter() + firstSegment->LastParameter()) * 0.5);
+            const auto firstParameter = projectCurveParameter(sources[first], point, tolerance);
+            const auto secondParameter = projectCurveParameter(sources[second], point, tolerance);
+            if (!firstParameter || !secondParameter) {
+                graph->errorMessage = "profile refinement could not parameterize tangent contact";
+                return graph;
+            }
+            const sk::Vec2d shared{point.X(), point.Y()};
+            addCurveSplit(splits[first], *firstParameter, shared, tolerance);
+            addCurveSplit(splits[second], *secondParameter, shared, tolerance);
+        }
+        } catch (const Standard_Failure&) {
+            // OCCT rejects two adjacent trims of the same support with U1 == U2.
+            // Their shared authored endpoint is already in `splits`; they need no
+            // intersection refinement. Other failures remain deterministic refusal.
+            if (shareAuthoredEndpoint(sources[first], sources[second], tolerance)) continue;
+            graph->errorMessage = "profile refinement failed for analytic curve pair";
+            return graph;
+        }
+    }
+
+    std::size_t fragmentCount = 0;
+    for (std::size_t sourceIndex = 0; sourceIndex < sources.size(); ++sourceIndex) {
+        if (config_.isCancelled && config_.isCancelled()) {
+            graph->errorMessage = "profile refinement cancelled";
+            return graph;
+        }
+        auto& sourceSplits = splits[sourceIndex];
+        std::sort(sourceSplits.begin(), sourceSplits.end(), [](const CurveSplit& a, const CurveSplit& b) {
+            return a.parameter < b.parameter;
+        });
+        sourceSplits.erase(std::unique(sourceSplits.begin(), sourceSplits.end(),
+            [tolerance](const CurveSplit& a, const CurveSplit& b) {
+                return std::abs(a.parameter - b.parameter) <= tolerance;
+            }), sourceSplits.end());
+
+        if (sources[sourceIndex].closed && sourceSplits.size() < 2) {
+            graph->closedCurves.push_back(sources[sourceIndex].fragment);
+            continue;
+        }
+        std::vector<CurveSplit> emittedSplits = sourceSplits;
+        if (sources[sourceIndex].closed) {
+            CurveSplit seam = sourceSplits.front();
+            seam.parameter += 2.0 * std::numbers::pi_v<double>;
+            emittedSplits.push_back(seam);
+        }
+        for (std::size_t splitIndex = 0; splitIndex + 1 < emittedSplits.size(); ++splitIndex) {
+            if (config_.isCancelled && config_.isCancelled()) {
+                graph->errorMessage = "profile refinement cancelled";
+                return graph;
+            }
+            const CurveSplit& start = emittedSplits[splitIndex];
+            const CurveSplit& end = emittedSplits[splitIndex + 1];
+            if (end.parameter - start.parameter <= tolerance) continue;
+            if (++fragmentCount > config_.maxPlanarizedFragments) {
+                graph->errorMessage = "profile refinement exceeds fragment limit";
+                return graph;
+            }
+            int startNode = graph->findOrCreateNode(start.point, std::nullopt, tolerance);
+            int endNode = graph->findOrCreateNode(end.point, std::nullopt, tolerance);
+            if (startNode == endNode) continue;
+            CurveFragment fragment = sources[sourceIndex].fragment;
+            fragment.firstParameter = start.parameter;
+            fragment.lastParameter = end.parameter;
+            fragment.startPoint = start.point;
+            fragment.endPoint = end.point;
+            const int sampleCount = fragment.kind == CurveFragmentKind::Line ? 1 : 16;
+            fragment.samples.reserve(static_cast<std::size_t>(sampleCount) + 1);
+            for (int sample = 0; sample <= sampleCount; ++sample) {
+                const double ratio = static_cast<double>(sample) / static_cast<double>(sampleCount);
+                const double parameter = fragment.firstParameter +
+                    (fragment.lastParameter - fragment.firstParameter) * ratio;
+            const gp_Pnt2d point = sources[sourceIndex].basis->Value(parameter);
+                fragment.samples.push_back({point.X(), point.Y()});
+            }
+            GraphEdge edge;
+            edge.entityId = fragment.baseEntityId + "#seg0_p" + std::to_string(splitIndex);
+            edge.startNode = startNode;
+            edge.endNode = endNode;
+            edge.startPos = start.point;
+            edge.endPos = end.point;
+            const gp_Vec2d startTangent =
+                sources[sourceIndex].basis->DN(fragment.firstParameter, 1);
+            const gp_Vec2d endTangent =
+                sources[sourceIndex].basis->DN(fragment.lastParameter, 1);
+            edge.startTangent = {startTangent.X(), startTangent.Y()};
+            edge.endTangent = {endTangent.X(), endTangent.Y()};
+            edge.fragment = std::move(fragment);
+            graph->edgeByEntity[edge.entityId] = static_cast<int>(graph->edges.size());
+            graph->edges.push_back(std::move(edge));
+            const int edgeIndex = static_cast<int>(graph->edges.size() - 1);
+            graph->nodes[startNode].edges.push_back(edgeIndex);
+            graph->nodes[endNode].edges.push_back(edgeIndex);
+        }
+    }
+    return graph;
+    }
+
+    std::vector<BroadSegment> segments;
     segments.reserve(sketch.getAllEntities().size() * 4);
 
     for (const auto& entity : sketch.getAllEntities()) {
@@ -1094,15 +1496,20 @@ std::vector<Loop> LoopDetector::findFaces(const AdjacencyGraph& graph) const {
         h1.from = edge.startNode;
         h1.to = edge.endNode;
         h1.edgeIndex = static_cast<int>(edgeIndex);
-        h1.angle = std::atan2(edge.endPos.y - edge.startPos.y,
-                              edge.endPos.x - edge.startPos.x);
+        const sk::Vec2d startDirection =
+            (edge.startTangent.x != 0.0 || edge.startTangent.y != 0.0) ?
+                edge.startTangent : diff(edge.endPos, edge.startPos);
+        h1.angle = std::atan2(startDirection.y, startDirection.x);
 
         HalfEdge h2;
         h2.from = edge.endNode;
         h2.to = edge.startNode;
         h2.edgeIndex = static_cast<int>(edgeIndex);
-        h2.angle = std::atan2(edge.startPos.y - edge.endPos.y,
-                              edge.startPos.x - edge.endPos.x);
+        const sk::Vec2d endDirection =
+            (edge.endTangent.x != 0.0 || edge.endTangent.y != 0.0) ?
+                sk::Vec2d{-edge.endTangent.x, -edge.endTangent.y} :
+                diff(edge.startPos, edge.endPos);
+        h2.angle = std::atan2(endDirection.y, endDirection.x);
 
         int idx1 = static_cast<int>(halfEdges.size());
         halfEdges.push_back(h1);
@@ -1168,12 +1575,26 @@ std::vector<Loop> LoopDetector::findFaces(const AdjacencyGraph& graph) const {
         bool closed = false;
         while (!halfEdges[current].visited) {
             halfEdges[current].visited = true;
-            loop.polygon.push_back(graph.nodes[halfEdges[current].from].position);
-
             const auto& edge = graph.edges[static_cast<size_t>(halfEdges[current].edgeIndex)];
+            const bool forward = edge.startNode == halfEdges[current].from &&
+                                 edge.endNode == halfEdges[current].to;
+            if (edge.fragment.has_value() && !edge.fragment->samples.empty()) {
+                const auto& samples = edge.fragment->samples;
+                if (forward) {
+                    loop.polygon.insert(loop.polygon.end(), samples.begin(), samples.end() - 1);
+                } else {
+                    loop.polygon.insert(loop.polygon.end(), samples.rbegin(), samples.rend() - 1);
+                }
+            } else {
+                loop.polygon.push_back(graph.nodes[halfEdges[current].from].position);
+            }
             loop.wire.edges.push_back(edge.entityId);
-            loop.wire.forward.push_back(edge.startNode == halfEdges[current].from &&
-                                        edge.endNode == halfEdges[current].to);
+            loop.wire.forward.push_back(forward);
+            if (edge.fragment.has_value()) {
+                CurveFragment fragment = *edge.fragment;
+                fragment.forward = forward;
+                loop.fragments.push_back(std::move(fragment));
+            }
 
             current = halfEdges[current].next;
             if (current < 0 || current >= static_cast<int>(halfEdges.size())) {

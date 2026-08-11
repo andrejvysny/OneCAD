@@ -444,6 +444,7 @@ fn extrude_record(rec: u128, sketch: SketchId, dist: f64) -> OperationRecord {
         profile: Some(SketchRegionRef {
             sketch,
             region: RegionId::new(""), // first-region fallback
+            region_identity_version: None,
             extra: Default::default(),
         }),
         distance: Scalar::new(dist),
@@ -481,6 +482,7 @@ fn revolve_record(
         profile: Some(SketchRegionRef {
             sketch,
             region: RegionId::new(region),
+            region_identity_version: None,
             extra: Default::default(),
         }),
         angle_deg: Scalar::new(angle_deg),
@@ -903,8 +905,11 @@ async fn revolve_region_binding_explicit_and_fallback() {
     let regions = SolverEngine::sketch_regions(&wm, &sid.to_string())
         .await
         .expect("solver-lane sketch regions");
-    assert!(!regions.is_empty(), "the rect yields ≥1 closed region");
-    let region_id = regions[0].region_id.clone();
+    assert!(
+        !regions.regions.is_empty(),
+        "the rect yields ≥1 closed region"
+    );
+    let region_id = regions.regions[0].region_id.clone();
     assert!(
         region_id.starts_with("r_"),
         "a normative FNV regionId (SCHEMA §7.4), got {region_id:?}"

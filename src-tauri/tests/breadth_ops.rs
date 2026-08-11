@@ -234,6 +234,7 @@ fn extrude_op(sketch: SketchId, dist: f64) -> Operation {
         profile: Some(SketchRegionRef {
             sketch,
             region: RegionId::new(""), // first-region fallback
+            region_identity_version: None,
             extra: Default::default(),
         }),
         distance: Scalar::new(dist),
@@ -268,6 +269,7 @@ fn extrude_to_face_record(rec: u128, sketch: SketchId, face: ElementRef) -> Oper
             profile: Some(SketchRegionRef {
                 sketch,
                 region: RegionId::new(""),
+                region_identity_version: None,
                 extra: Default::default(),
             }),
             distance: Scalar::new(1.0),

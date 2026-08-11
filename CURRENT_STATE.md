@@ -1,3 +1,15 @@
+## MODELING CORRECTNESS P2-P4 — LIVE DELTA (2026-08-11)
+
+Reviewed HEAD `5d20818`, OCCT 8.0.1 fingerprint `0a6a1dce34181289`. Implemented:
+P2 exact analytic CurveFragments/BReps, v2 region identity, bounded refinement,
+and cancellation. Not implemented: uniform publication policy, real-worker corpus
+executor. P4 coverage manifest/classifier is implemented and CI-checked.
+P2 gate: worker CTest, real-worker Rust, TypeScript/Vitest, and zero-retry browser
+lanes pass. Manual Tauri and completed unchanged T0 remain open.
+Gate passed: worker CTest 112/112; Chromium 196/196 and WebKit 196/196 with
+retries 0. See
+`OneCAD-modeling-correctness-roadmap/04-live-implementation-delta.md`.
+
 ## MODULAR-PLATFORM UI (2026-08-09, design turn 2 via `claude_design` MCP) — FE GATE PASSED
 
 The first DELIBERATE user-visible change since the platform refactor. Implements the design project's turn 2 ("Modular platform — workspaces, extensions, palette, missing add-ons", options 2a-2d) on the existing Platform, plus two follow-ups the user asked for mid-wave: one title-bar button geometry, and document rename moved out of the title bar into File.

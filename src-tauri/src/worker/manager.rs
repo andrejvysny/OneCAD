@@ -61,7 +61,7 @@ use onecad_core::regen::{
 };
 use onecad_core::sketch::Sketch;
 
-use crate::dto::{BeginGestureDto, DragSolveDto, SketchRegionDto, SketchUpsertDto};
+use crate::dto::{BeginGestureDto, DragSolveDto, FinishSketchDto, SketchUpsertDto};
 
 use super::{wire, MeshProvider, SolverEngine};
 
@@ -1332,7 +1332,7 @@ impl SolverEngine for WorkerManager {
         ok_result(resp).map(|r| wire::parse_sketch_upsert(sketch_id, &r))
     }
 
-    async fn sketch_regions(&self, sketch_id: &str) -> Result<Vec<SketchRegionDto>, EngineError> {
+    async fn sketch_regions(&self, sketch_id: &str) -> Result<FinishSketchDto, EngineError> {
         // Uses the resp binary tail (previewTriangles bins, SCHEMA §7.4 inline §5.2).
         let client = self.client_or_err()?;
         let inflight = client

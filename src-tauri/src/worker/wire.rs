@@ -319,8 +319,8 @@ fn strip_sketch_host_face(operation: &Operation, params: &mut Value) {
     }
 }
 
-/// Lifts the Rust-core `profile` (`{sketchId, regionId}`, a `SketchRegionRef`) to
-/// **top-level** `params.sketchId` + `params.regionId` and drops the `profile`
+/// Lifts the Rust-core `profile` (`{sketchId, regionId, regionIdentityVersion?}`)
+/// to **top-level** `params.sketchId` + `params.regionId` + optional version and drops the `profile`
 /// wrapper (SCHEMA §7.3 carries no `profile`).
 ///
 /// The worker reads the profile source there: `ExtrudeOp`/`RevolveOp` `find_sketch`
@@ -356,6 +356,9 @@ fn lift_profile_to_params(params: &mut Value) {
         .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
     {
         map.insert("regionId".into(), rid.clone());
+    }
+    if let Some(version) = pobj.get("regionIdentityVersion") {
+        map.insert("regionIdentityVersion".into(), version.clone());
     }
 }
 
@@ -1865,15 +1868,18 @@ pub fn parse_sketch_regions(
     result: &Value,
     bin_sections: &[BinSection],
     tail: &[u8],
-) -> Result<Vec<SketchRegionDto>, String> {
-    validate_sketch_region_header(expected_sketch_id, result)?;
+) -> Result<crate::dto::FinishSketchDto, String> {
+    let region_identity_version = validate_sketch_region_header(expected_sketch_id, result)?;
     let regions = result
         .get("regions")
         .and_then(Value::as_array)
         .ok_or("SketchRegions: missing/invalid regions array")?;
     if regions.is_empty() {
         if bin_sections.is_empty() && tail.is_empty() {
-            return Ok(Vec::new());
+            return Ok(crate::dto::FinishSketchDto {
+                region_identity_version,
+                regions: Vec::new(),
+            });
         }
         return Err("SketchRegions: empty regions must have empty binary data".into());
     }
@@ -1896,10 +1902,13 @@ pub fn parse_sketch_regions(
         parsed.push(dto);
     }
     reject_unreferenced_sections("SketchRegions", &sections, &referenced_bins)?;
-    Ok(parsed)
+    Ok(crate::dto::FinishSketchDto {
+        region_identity_version,
+        regions: parsed,
+    })
 }
 
-fn validate_sketch_region_header(expected_sketch_id: &str, result: &Value) -> Result<(), String> {
+fn validate_sketch_region_header(expected_sketch_id: &str, result: &Value) -> Result<u32, String> {
     let sketch_id = result
         .get("sketchId")
         .and_then(Value::as_str)
@@ -1914,7 +1923,16 @@ fn validate_sketch_region_header(expected_sketch_id: &str, result: &Value) -> Re
         .get("sketchRevision")
         .and_then(Value::as_u64)
         .ok_or("SketchRegions: missing/invalid sketchRevision")?;
-    Ok(())
+    let version = result
+        .get("regionIdentityVersion")
+        .and_then(Value::as_u64)
+        .ok_or("SketchRegions: missing/invalid regionIdentityVersion")?;
+    if version != 2 {
+        return Err(format!(
+            "SketchRegions: unsupported regionIdentityVersion {version}; expected 2"
+        ));
+    }
+    Ok(version as u32)
 }
 
 fn parse_sketch_region(
@@ -4174,6 +4192,7 @@ mod solver_wire_tests {
         let result = json!({
             "sketchId": "sk_1",
             "sketchRevision": 1,
+            "regionIdentityVersion": 2,
             "regions": [{
                 "regionId": "r0",
                 "outerLoop": ["outer"],
@@ -4767,6 +4786,7 @@ mod solver_wire_tests {
         let result = json!({
             "sketchId": "sk_1",
             "sketchRevision": 1,
+            "regionIdentityVersion": 2,
             "regions": [{
                 "regionId": "r0",
                 "outerLoop": ["outer"],
@@ -4782,7 +4802,8 @@ mod solver_wire_tests {
         });
 
         let regions = parse_sketch_regions("sk_1", &result, &sections, &tail).unwrap();
-        let triangles = regions[0].preview_triangles.as_ref().unwrap();
+        assert_eq!(regions.region_identity_version, 2);
+        let triangles = regions.regions[0].preview_triangles.as_ref().unwrap();
         assert_eq!(triangles.holes_subtracted, 1);
         assert_eq!(triangles.indices, vec![0, 1, 2]);
     }
@@ -4790,7 +4811,12 @@ mod solver_wire_tests {
     #[test]
     fn sketch_regions_require_response_and_region_structure() {
         let (result, sections, tail) = valid_region_response();
-        for field in ["sketchId", "sketchRevision", "regions"] {
+        for field in [
+            "sketchId",
+            "sketchRevision",
+            "regionIdentityVersion",
+            "regions",
+        ] {
             let mut malformed = result.clone();
             malformed.as_object_mut().unwrap().remove(field);
             assert_region_parse_error(&malformed, &sections, &tail);
@@ -4798,6 +4824,9 @@ mod solver_wire_tests {
         let mut wrong_sketch = result.clone();
         wrong_sketch["sketchId"] = json!("sk_other");
         assert_region_parse_error(&wrong_sketch, &sections, &tail);
+        let mut legacy_version = result.clone();
+        legacy_version["regionIdentityVersion"] = json!(1);
+        assert_region_parse_error(&legacy_version, &sections, &tail);
 
         for field in ["regionId", "outerLoop", "holes", "previewTriangles"] {
             let mut malformed = result.clone();
@@ -4807,9 +4836,15 @@ mod solver_wire_tests {
                 .remove(field);
             assert_region_parse_error(&malformed, &sections, &tail);
         }
-        let empty = json!({"sketchId": "sk_1", "sketchRevision": 1, "regions": []});
+        let empty = json!({
+            "sketchId": "sk_1",
+            "sketchRevision": 1,
+            "regionIdentityVersion": 2,
+            "regions": []
+        });
         assert!(parse_sketch_regions("sk_1", &empty, &[], &[])
             .unwrap()
+            .regions
             .is_empty());
     }
 
@@ -5395,6 +5430,7 @@ mod body_wire_tests {
         let profile = SketchRegionRef {
             sketch: sid,
             region: RegionId::new(region),
+            region_identity_version: Some(2),
             extra: Default::default(),
         };
 
@@ -5417,6 +5453,7 @@ mod body_wire_tests {
         let w = wire_op(&planned(ex.clone(), ex.derive_inputs()));
         assert_eq!(w["params"]["sketchId"], json!(sid.to_string()));
         assert_eq!(w["params"]["regionId"], json!(region));
+        assert_eq!(w["params"]["regionIdentityVersion"], json!(2));
         assert!(
             w["params"].get("profile").is_none(),
             "the core-only `profile` wrapper is dropped from the wire"
@@ -5436,6 +5473,7 @@ mod body_wire_tests {
         let w = wire_op(&planned(rev.clone(), rev.derive_inputs()));
         assert_eq!(w["params"]["sketchId"], json!(sid.to_string()));
         assert_eq!(w["params"]["regionId"], json!(region));
+        assert_eq!(w["params"]["regionIdentityVersion"], json!(2));
         assert!(w["params"].get("profile").is_none());
 
         // An EMPTY regionId is NOT forwarded (keeps the worker's first-region fallback).
@@ -5443,6 +5481,7 @@ mod body_wire_tests {
             profile: Some(SketchRegionRef {
                 sketch: sid,
                 region: RegionId::new(""),
+                region_identity_version: None,
                 extra: Default::default(),
             }),
             distance: Scalar::new(5.0),
@@ -5482,6 +5521,7 @@ mod body_wire_tests {
         let profile = SketchRegionRef {
             sketch: SketchId(Uuid::from_u128(0x99)),
             region: RegionId::new("r_non_first"),
+            region_identity_version: Some(2),
             extra: Default::default(),
         };
         let edge_ref = |body: BodyId, element: &str| ElementRef {
@@ -5600,6 +5640,7 @@ mod body_wire_tests {
             json!(body_id_wire(target))
         );
         assert_eq!(previewed["params"]["regionId"], json!("r_non_first"));
+        assert_eq!(previewed["params"]["regionIdentityVersion"], json!(2));
         assert!(previewed["params"].get("profile").is_none());
     }
 

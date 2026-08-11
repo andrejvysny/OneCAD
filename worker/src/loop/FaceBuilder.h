@@ -15,6 +15,7 @@
 
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
+#include <TopoDS_Vertex.hxx>
 #include <TopoDS_Wire.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
@@ -178,6 +179,13 @@ private:
                                            const sk::Sketch& sketch,
                                            const gp_Pln& plane,
                                            bool forward) const;
+
+    std::optional<TopoDS_Edge> createFragmentEdge(const CurveFragment& fragment,
+                                                   const sk::Sketch& sketch,
+                                                   const gp_Pln& plane,
+                                                   const TopoDS_Vertex& start,
+                                                   const TopoDS_Vertex& end,
+                                                   bool forward) const;
 
     /**
      * @brief Create OCCT plane from sketch plane

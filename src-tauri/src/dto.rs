@@ -808,6 +808,9 @@ pub struct SketchOnFaceDto {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FinishSketchDto {
+    /// Version of the canonical region ids in `regions`. P2 analytic profiles
+    /// always emit v2; absent on a stored profile remains the legacy v1 path.
+    pub region_identity_version: u32,
     pub regions: Vec<SketchRegionDto>,
 }
 

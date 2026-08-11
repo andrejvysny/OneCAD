@@ -230,9 +230,17 @@ OpOutcome execute_revolve(OpContext& ctx, const json& op, const std::string& op_
     if (!sketch_params) {
         return OpOutcome::fail("REF_UNRESOLVED", "Revolve: profile sketch not found in plan");
     }
+    std::optional<int> region_identity_version;
+    if (params.contains("regionIdentityVersion")) {
+        if (!params["regionIdentityVersion"].is_number_integer()) {
+            return OpOutcome::fail("OP_FAILED", "Revolve: regionIdentityVersion must be an integer");
+        }
+        region_identity_version = params["regionIdentityVersion"].get<int>();
+    }
     std::string perr;
     std::optional<TopoDS_Face> profile =
-        build_profile_face(*sketch_params, read_str(params, "regionId"), perr);
+        build_profile_face(*sketch_params, read_str(params, "regionId"),
+                           region_identity_version, perr);
     if (!profile) return OpOutcome::fail("OP_FAILED", perr);
 
     // --- axis ---

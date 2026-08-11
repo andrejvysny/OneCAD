@@ -289,11 +289,9 @@ impl PreparedSketchRegions {
     /// derives its closed regions. Document/session/undo state is untouched.
     pub async fn drive(self) -> Result<FinishSketchDto, EngineError> {
         self.solver.sketch_upsert(&self.sketch).await?;
-        let regions = self
-            .solver
+        self.solver
             .sketch_regions(&self.sketch.id.to_string())
-            .await?;
-        Ok(FinishSketchDto { regions })
+            .await
     }
 }
 
@@ -3032,7 +3030,7 @@ impl DocumentRuntime {
         let outcome = self
             .upsert_sketch_record(sketch_id)
             .map_err(|e| op_failed(format!("finishSketch: sketch record: {e}")))?;
-        Ok((FinishSketchDto { regions }, outcome))
+        Ok((regions, outcome))
     }
 
     /// Creates or refreshes the sketch's `Sketch` timeline record from the

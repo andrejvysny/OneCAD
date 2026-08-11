@@ -2,7 +2,8 @@
 #include "loop/RegionTable.h"
 
 #include <algorithm>
-#include <charconv>
+#include <cmath>
+#include <cstdint>
 #include <unordered_set>
 
 #include "sketch/RegionId.h"
@@ -29,39 +30,35 @@ std::vector<std::string> mappedLoopEdges(const Loop& loop,
     return result;
 }
 
-bool isSplitFragment(const sk::EntityID& edgeId) {
+bool isFragmented(const CurveFragment& fragment) {
+    constexpr double kParameterEpsilon = 1e-9;
+    return std::abs(fragment.firstParameter - fragment.sourceFirstParameter) >
+               kParameterEpsilon ||
+           std::abs(fragment.lastParameter - fragment.sourceLastParameter) >
+               kParameterEpsilon;
+}
+
+bool hasLegacyFragmentSuffix(const sk::EntityID& edgeId) {
     const std::size_t segment = edgeId.find("#seg");
-    const std::size_t part =
-        segment == std::string::npos ? segment : edgeId.find("_p", segment);
-    if (part == std::string::npos || part + 2 >= edgeId.size()) {
-        return false;
-    }
-    unsigned int ordinal = 0;
-    const char* begin = edgeId.data() + part + 2;
-    const char* end = edgeId.data() + edgeId.size();
-    const auto parsed = std::from_chars(begin, end, ordinal);
-    return parsed.ec == std::errc{} && parsed.ptr == end && ordinal > 0;
+    return segment != std::string::npos && edgeId.find("_p", segment) != std::string::npos;
 }
 
-void collectFragmentedBases(const Loop& loop,
-                            std::unordered_set<sk::EntityID>& result) {
-    for (const sk::EntityID& edgeId : loop.wire.edges) {
-        if (isSplitFragment(edgeId)) {
-            result.insert(baseEdgeId(edgeId));
-        }
+char fragmentKindToken(CurveFragmentKind kind) {
+    switch (kind) {
+        case CurveFragmentKind::Line: return 'L';
+        case CurveFragmentKind::Circle: return 'C';
+        case CurveFragmentKind::Arc: return 'A';
+        case CurveFragmentKind::Ellipse: return 'E';
     }
+    return '?';
 }
 
-std::unordered_set<sk::EntityID> fragmentedBases(
-    const std::vector<RegionDefinition>& regions) {
-    std::unordered_set<sk::EntityID> result;
-    for (const RegionDefinition& region : regions) {
-        collectFragmentedBases(region.outerLoop, result);
-        for (const Loop& hole : region.holes) {
-            collectFragmentedBases(hole, result);
-        }
-    }
-    return result;
+std::int64_t normalizedParameter(const CurveFragment& fragment, double parameter) {
+    constexpr double kIdentityScale = 1'000'000'000.0;
+    const double span = fragment.sourceLastParameter - fragment.sourceFirstParameter;
+    if (!(span > 0.0) || !std::isfinite(parameter)) return 0;
+    return static_cast<std::int64_t>(std::llround(
+        (parameter - fragment.sourceFirstParameter) / span * kIdentityScale));
 }
 
 void orientLoop(Loop& loop, bool ccw) {
@@ -72,6 +69,10 @@ void orientLoop(Loop& loop, bool ccw) {
     std::reverse(loop.wire.forward.begin(), loop.wire.forward.end());
     for (std::size_t i = 0; i < loop.wire.forward.size(); ++i) {
         loop.wire.forward[i] = !loop.wire.forward[i];
+    }
+    std::reverse(loop.fragments.begin(), loop.fragments.end());
+    for (CurveFragment& fragment : loop.fragments) {
+        fragment.forward = !fragment.forward;
     }
     std::reverse(loop.polygon.begin(), loop.polygon.end());
     loop.signedArea = -loop.signedArea;
@@ -97,9 +98,7 @@ void normalizeCycle(std::vector<std::string>& tokens) {
                 tokens.end());
 }
 
-std::vector<std::string> loopTokens(
-    const Loop& loop, const WireEdgeMapper& mapper,
-    const std::unordered_set<sk::EntityID>& fragmented) {
+std::vector<std::string> loopTokens(const Loop& loop, const WireEdgeMapper& mapper) {
     std::vector<std::string> result;
     result.reserve(loop.wire.edges.size());
     for (std::size_t i = 0; i < loop.wire.edges.size(); ++i) {
@@ -107,10 +106,17 @@ std::vector<std::string> loopTokens(
         const sk::EntityID base = baseEdgeId(edgeId);
         std::string token = mapper(base);
         if (token.empty()) return {};
-        if (fragmented.contains(base)) {
-            const std::size_t suffix = edgeId.find("#seg");
-            if (suffix == std::string::npos) return {};
-            token += edgeId.substr(suffix);
+        if (i < loop.fragments.size() && isFragmented(loop.fragments[i])) {
+            const CurveFragment& fragment = loop.fragments[i];
+            token += ":";
+            token += fragmentKindToken(fragment.kind);
+            token += "@" + std::to_string(normalizedParameter(fragment, fragment.firstParameter));
+            token += "-" + std::to_string(normalizedParameter(fragment, fragment.lastParameter));
+        } else if (loop.fragments.empty() && hasLegacyFragmentSuffix(edgeId)) {
+            // Pre-P2 in-memory callers only carried synthetic split ids. Keep
+            // their v1 canonical form for replay; live P2 loops carry analytic
+            // parameters and never enter this branch.
+            token += edgeId.substr(edgeId.find("#seg"));
         }
         const bool forward = i < loop.wire.forward.size() ? loop.wire.forward[i] : true;
         token += forward ? ":f" : ":r";
@@ -121,10 +127,8 @@ std::vector<std::string> loopTokens(
     return result;
 }
 
-std::string loopSignature(
-    const Loop& loop, const WireEdgeMapper& mapper,
-    const std::unordered_set<sk::EntityID>& fragmented) {
-    const std::vector<std::string> tokens = loopTokens(loop, mapper, fragmented);
+std::string loopSignature(const Loop& loop, const WireEdgeMapper& mapper) {
+    const std::vector<std::string> tokens = loopTokens(loop, mapper);
     std::string result;
     for (const std::string& token : tokens) {
         result += std::to_string(token.size()) + ":" + token + ";";
@@ -132,12 +136,10 @@ std::string loopSignature(
     return result;
 }
 
-bool usesFragments(const Loop& loop,
-                   const std::unordered_set<sk::EntityID>& fragmented) {
-    return std::any_of(loop.wire.edges.begin(), loop.wire.edges.end(),
-                       [&](const sk::EntityID& edgeId) {
-                           return fragmented.contains(baseEdgeId(edgeId));
-                       });
+bool usesFragments(const Loop& loop) {
+    return std::any_of(loop.fragments.begin(), loop.fragments.end(), isFragmented) ||
+           (loop.fragments.empty() && std::any_of(loop.wire.edges.begin(), loop.wire.edges.end(),
+                                                  hasLegacyFragmentSuffix));
 }
 
 bool populateWireEdges(RegionDefinition& region, const WireEdgeMapper& mapper,
@@ -160,15 +162,13 @@ bool populateWireEdges(RegionDefinition& region, const WireEdgeMapper& mapper,
     return true;
 }
 
-std::string materialSignature(
-    const RegionDefinition& region, const WireEdgeMapper& mapper,
-    const std::unordered_set<sk::EntityID>& fragmented) {
-    const std::string outer = loopSignature(region.outerLoop, mapper, fragmented);
+std::string materialSignature(const RegionDefinition& region, const WireEdgeMapper& mapper) {
+    const std::string outer = loopSignature(region.outerLoop, mapper);
     if (outer.empty()) return {};
     std::vector<std::string> holes;
     holes.reserve(region.holes.size());
     for (const Loop& hole : region.holes) {
-        std::string signature = loopSignature(hole, mapper, fragmented);
+        std::string signature = loopSignature(hole, mapper);
         if (signature.empty()) return {};
         holes.push_back(std::move(signature));
     }
@@ -180,16 +180,14 @@ std::string materialSignature(
     return result + "}";
 }
 
-bool assignIdentity(RegionDefinition& region, const WireEdgeMapper& mapper,
-                    const std::unordered_set<sk::EntityID>& fragmented,
-                    std::string& error) {
+bool assignIdentity(RegionDefinition& region, const WireEdgeMapper& mapper, std::string& error) {
     region.legacyId = onecad::region::derive_region_id(
         region.outerWireEdges, onecad::region::Winding::Ccw);
-    if (region.holes.empty() && !usesFragments(region.outerLoop, fragmented)) {
+    if (region.holes.empty() && !usesFragments(region.outerLoop)) {
         region.id = region.legacyId;
         return true;
     }
-    const std::string signature = materialSignature(region, mapper, fragmented);
+    const std::string signature = materialSignature(region, mapper);
     if (signature.empty()) {
         error = "region material boundary has no canonical identity";
         return false;
@@ -218,14 +216,13 @@ RegionTable buildRegionTable(const LoopDetectionResult& result,
 
     RegionTable table;
     table.regions = buildRegionDefinitions(result, tolerance);
-    const auto fragmented = fragmentedBases(table.regions);
     std::unordered_set<std::string> uniqueIds;
     for (RegionDefinition& region : table.regions) {
         orientLoop(region.outerLoop, true);
         for (Loop& hole : region.holes) orientLoop(hole, false);
         std::string error;
         if (!populateWireEdges(region, mapBaseEdge, error) ||
-            !assignIdentity(region, mapBaseEdge, fragmented, error)) {
+            !assignIdentity(region, mapBaseEdge, error)) {
             return failed(std::move(error));
         }
         if (!uniqueIds.insert(region.id).second) {

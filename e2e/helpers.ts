@@ -863,18 +863,25 @@ export async function commitExtrudeAtHandle(page: Page): Promise<void> {
   const extrudeBtn = page.getByRole("button", { name: "Extrude", exact: true });
   await expect(async () => {
     const { x, y } = await findExtrudeHandle(page);
-    await page.mouse.move(x, y);
-    await page.mouse.down();
-    await page.mouse.move(x, y + 12, { steps: 4 });
-    // The grab must have landed — assert the phase became "dragging" MID-drag. Without
-    // this a missed grab (scan/pointerdown are a frame apart) leaves the tool armed the
-    // whole time, so the "release keeps armed" check below passes vacuously. Inside the
-    // toPass retry, a real miss re-scans + re-grabs on the next attempt.
-    expect((await extrudeDebug(page))?.phase).toBe("dragging");
-    await page.mouse.up(); // release → stays armed (no implicit commit)
-    // Debug surface: the tool must remain armed after the release.
-    expect((await extrudeDebug(page))?.phase).toBe("armed");
-    await page.keyboard.press("Enter"); // explicit confirm → commit
-    await expect(extrudeBtn).not.toHaveAttribute("aria-pressed", "true", { timeout: 1_500 });
+    let pointerDown = false;
+    try {
+      await page.mouse.move(x, y);
+      await page.mouse.down();
+      pointerDown = true;
+      await page.mouse.move(x, y + 12, { steps: 4 });
+      // The grab must have landed — assert the phase became "dragging" MID-drag. Without
+      // this a missed grab (scan/pointerdown are a frame apart) leaves the tool armed the
+      // whole time, so the "release keeps armed" check below passes vacuously. Inside the
+      // toPass retry, a real miss re-scans + re-grabs on the next attempt.
+      expect((await extrudeDebug(page))?.phase).toBe("dragging");
+      await page.mouse.up(); // release → stays armed (no implicit commit)
+      pointerDown = false;
+      // Debug surface: the tool must remain armed after the release.
+      expect((await extrudeDebug(page))?.phase).toBe("armed");
+      await page.keyboard.press("Enter"); // explicit confirm → commit
+      await expect(extrudeBtn).not.toHaveAttribute("aria-pressed", "true", { timeout: 1_500 });
+    } finally {
+      if (pointerDown) await page.mouse.up();
+    }
   }).toPass({ timeout: 20_000, intervals: [200, 500, 1_000] });
 }

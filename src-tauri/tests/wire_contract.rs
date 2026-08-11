@@ -309,6 +309,7 @@ fn extrude_record(
             // matched no region is now a hard OP_FAILED — M4a strict rule; these
             // single-region fixtures assert the fallback, so they carry no id).
             region: RegionId::new(""),
+            region_identity_version: None,
             extra: Default::default(),
         }),
         distance: Scalar::new(dist),
@@ -337,6 +338,7 @@ fn extrude_to_face_record(rec: u128, sketch: SketchId, face: ElementRef) -> Oper
         profile: Some(SketchRegionRef {
             sketch,
             region: RegionId::new(""), // empty ⇒ V1 first-region fallback (M4a strict rule)
+            region_identity_version: None,
             extra: Default::default(),
         }),
         distance: Scalar::new(1.0),
@@ -1251,6 +1253,7 @@ fn extrude_mode_record(
         profile: Some(SketchRegionRef {
             sketch,
             region: RegionId::new(""), // empty ⇒ V1 first-region fallback
+            region_identity_version: None,
             extra: Default::default(),
         }),
         distance: Scalar::new(dist),

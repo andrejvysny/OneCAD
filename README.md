@@ -29,6 +29,9 @@ and pinned by cross-track suites. There is **no JavaScript on the model kernel
 path** — the frontend only ever sees projection DTOs produced by Rust, and the
 C++ worker speaks frames over stdio.
 
+Modeling-correctness roadmap and live implementation delta:
+[`OneCAD-modeling-correctness-roadmap/README.md`](OneCAD-modeling-correctness-roadmap/README.md).
+
 **Note:** `package-lock.json` is stale. Use Bun (see [Development](#development)).
 
 ---
