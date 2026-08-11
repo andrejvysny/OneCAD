@@ -1,36 +1,57 @@
 # Live Implementation Delta
 
 Reviewed: 2026-08-11  
-Repository head: `5d2081895a8b1f6798d935526cce4a6a95cce554` (`5d20818`)  
+Implementation commit: `055d31f7d8edcb106a881590b9b2c5a9d1e37982` (`055d31f`)
 OCCT: 8.0.1, fingerprint `0a6a1dce34181289`
 
 ## Status language
 
-"Implemented" means code exists at reviewed HEAD. "Gate passed" means a named
-command completed against that state. They are separate claims.
+"Implemented" means code exists at the reviewed commit. "Gate passed" means a
+named command completed against that state. They are separate claims.
 
-## Gate evidence captured this review
+## Gate evidence
 
-- `ctest --test-dir worker/build -R region_table --output-on-failure`: passed.
-- `bun run e2e -- e2e/boolean-preview.spec.ts --project=chromium --retries=0`:
-  2 passed. The sandboxed launch failed before test execution with Mach-port
-  permission denial; the approved desktop retry passed.
-
-Not run: full Chromium/WebKit zero-retry runs, manual Tauri smoke, T0 campaign.
+- `scripts/build-worker.sh Release` and `ctest --test-dir worker/build
+  --output-on-failure`: 112/112 passed.
+- `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D
+  warnings`, and real-worker `cargo test --workspace`: passed.
+- `npx tsc --noEmit`, `bun run build`, and Vitest: 241 files / 4115 tests
+  passed.
+- Zero-retry Playwright: Chromium 196/196 and WebKit 196/196 passed. The
+  spawned-Vite Chromium failure was infrastructure (`ERR_CONNECTION_REFUSED`);
+  WebKit exposed a helper retry leaving its pointer down, fixed with `finally`
+  cleanup and then verified by a full rerun.
+- Manual Tauri smoke remains unrun. T0 was started with the freshly built
+  runner, but emitted no completed `results.jsonl`; it is not a pass.
 
 ## Phase delta
 
-- P2: fragmented Arc/Circle/Ellipse profile paths still discover cells through
-  tessellation and author polygon wires. `RegionTable` has canonical fragmented
-  IDs and legacy aliases, but not analytic `CurveFragment` BRep authoring.
-- P3: existing shape audits are operation-specific; no shared `PublicationPolicy`
-  evaluator or `resultPolicyVersion:2` contract exists.
-- P4: `docs/qa/modeling-operation-coverage.json` classifies all frozen corpus
-  cases and `scripts/verify-modeling-coverage.mjs` enforces that census in CI.
-  It is a classifier, not yet a real-worker executor for every case.
+- P2 is implemented. `CurveFragment` retains analytic entity kind, unwrapped
+  parameter interval, traversal orientation, and shared endpoints. OCCT
+  `Geom2dAPI_InterCurveCurve` refines accepted intersections; tangencies
+  collapse, overlapping/coincident supports refuse, and periodic seams use
+  unwrapped intervals. Face construction creates trimmed analytic
+  Line/Circle/Arc/Ellipse BRep edges with shared vertices and refuses an
+  unconnected analytic wire.
+- P2 profile identity is versioned. `SketchRegions` emits
+  `regionIdentityVersion:2`; new profile refs persist it through Rust and UI
+  preview/commit paths. V2 requires one exact canonical region id. Absent
+  versions replay V1; ambiguous legacy aliases refuse rather than selecting a
+  first region.
+- P2 regression coverage includes overlapping circles, line/circle,
+  crossing arcs, rotated ellipse/chord, tangency, coincident refusal,
+  cancellation, exact curve census, and analytic area conservation.
+- P3 remains unimplemented: no shared `PublicationPolicy` evaluator or
+  `resultPolicyVersion:2` contract.
+- P4 bootstrap is implemented: `docs/qa/modeling-operation-coverage.json`
+  classifies the frozen corpus and `scripts/verify-modeling-coverage.mjs`
+  enforces the census in CI. It is not yet a real-worker executor for every
+  corpus case.
 
 ## Next gate order
 
-1. Complete P2 worker-first, retaining legacy IDs and proving analytic curve census.
+1. Complete logged manual Tauri Open -> Extrude -> Fillet -> Undo -> Save ->
+   Reopen and the unchanged T0 semantic/digest run; then mark the P2 gate
+   passed.
 2. Land P3 evaluator infrastructure with behavior-neutral controls.
-3. Add P4 corpus classifier and coverage-manifest verifier.
+3. Add the P4 real-worker corpus executor and operation evidence.

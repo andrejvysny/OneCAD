@@ -1,6 +1,7 @@
 ## MODELING CORRECTNESS P2-P4 — LIVE DELTA (2026-08-11)
 
-Reviewed HEAD `5d20818`, OCCT 8.0.1 fingerprint `0a6a1dce34181289`. Implemented:
+Reviewed implementation commit `055d31f`, OCCT 8.0.1 fingerprint
+`0a6a1dce34181289`. Implemented:
 P2 exact analytic CurveFragments/BReps, v2 region identity, bounded refinement,
 and cancellation. Not implemented: uniform publication policy, real-worker corpus
 executor. P4 coverage manifest/classifier is implemented and CI-checked.

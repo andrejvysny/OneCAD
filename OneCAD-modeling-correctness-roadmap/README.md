@@ -2,7 +2,8 @@
 
 Reviewed baseline: `1c11d4958aeadea14dd8431ba78c41f14be12142`  
 Generated: 2026-08-10  
-Scope: read-only analysis and planning; no repository files were modified.
+Scope: baseline analysis and planning. Baseline files remain read-only; the
+live implementation delta records subsequent repository changes.
 
 ## Reading order
 
