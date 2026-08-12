@@ -225,11 +225,16 @@ json execute_request(const Request &request) {
   std::string error;
   if (!generate_geometry(request.benchmark_case, request.variant, geometry, error))
     return exception_result(&request, "internal", error);
+  double effective_radius = request.benchmark_case.radius;
+  if (request.variant.name == "parameterEpsilon") {
+    effective_radius *= (1.0 + request.variant.epsilon_relative_delta);
+  } else if (request.variant.name == "scaled") {
+    effective_radius *= request.variant.scale_factor;
+  }
   const auto audit_start = Clock::now();
   const json input_audit = deep_audit(geometry.shape);
   const auto operation_start = Clock::now();
-  const AdapterResult adapter = run_fillet(request.backend, geometry,
-                                           request.benchmark_case.radius);
+  const AdapterResult adapter = run_fillet(request.backend, geometry, effective_radius);
   const auto operation_end = Clock::now();
   const json output_audit = adapter.success ? deep_audit(adapter.output) : json(nullptr);
   const auto audit_end = Clock::now();

@@ -121,6 +121,14 @@ struct VariantSpec {
   std::vector<double> translation;
   std::vector<double> rotation_axis;
   double rotation_degrees = 0.0;
+  std::vector<double> mirror_normal;
+  std::vector<double> mirror_center;
+  double scale_factor = 1.0;
+  std::vector<double> scale_center;
+  std::string epsilon_parameter;
+  double epsilon_relative_delta = 0.0;
+  std::vector<std::size_t> edge_order;
+  std::size_t contour_seed = 0;
 };
 
 struct Request {

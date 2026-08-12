@@ -34,6 +34,11 @@ fn execute(body: &str, configure: impl FnOnce(&mut Case)) -> Value {
         name: VariantName::Base,
         translation: None,
         rotation: None,
+        mirror: None,
+        scale: None,
+        parameter_epsilon: None,
+        edge_order_permutation: None,
+        contour_seed: None,
     };
     runner::execute(
         &runner_path,
@@ -85,6 +90,11 @@ fn supervisor_artifacts_respect_cumulative_cap() {
         name: VariantName::Base,
         translation: None,
         rotation: None,
+        mirror: None,
+        scale: None,
+        parameter_epsilon: None,
+        edge_order_permutation: None,
+        contour_seed: None,
     };
     let result = runner::execute(
         &runner_path,

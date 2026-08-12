@@ -12,7 +12,7 @@
 use serde_json::Value;
 
 use crate::case::{Case, ExpectedDomain, Generator, Limits, ValidatorType};
-use crate::case_v2::{CaseV2, ValidatorTypeV2};
+use crate::case_v2::{CaseV2, MetamorphV2, ValidatorTypeV2};
 
 const DEFAULT_POINT_TOLERANCE: f64 = 1e-6;
 
@@ -30,6 +30,8 @@ pub struct PreparedCase {
     pub point_tolerance: f64,
     /// The canonical case document, exactly as it goes on the wire.
     pub json: Value,
+    /// Executable metamorphs for this case (empty for v1 cases).
+    pub metamorphs: Vec<MetamorphV2>,
 }
 
 impl Case {
@@ -51,6 +53,7 @@ impl Case {
                 .and_then(|validator| validator.point_tolerance)
                 .unwrap_or(DEFAULT_POINT_TOLERANCE),
             json: serde_json::to_value(self).unwrap_or(Value::Null),
+            metamorphs: Vec::new(),
         }
     }
 }
@@ -78,6 +81,7 @@ impl CaseV2 {
                 .and_then(|validator| validator.point_tolerance)
                 .unwrap_or(DEFAULT_POINT_TOLERANCE),
             json: serde_json::to_value(self).unwrap_or(Value::Null),
+            metamorphs: self.metamorphs.clone(),
         }
     }
 }

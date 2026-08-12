@@ -84,15 +84,38 @@ fn vector3(value: &Value) -> Option<[f64; 3]> {
 fn inverse_transform(point: [f64; 3], variant: &Value, center: [f64; 3]) -> Option<[f64; 3]> {
     match variant.get("name").and_then(Value::as_str)? {
         "base" => Some(point),
-        "translated" => Some(sub(point, vector3(variant.get("translation")?)?)),
+        "translated" | "farOriginTranslated" => {
+            Some(sub(point, vector3(variant.get("translation")?)?))
+        }
         "rotated" => {
             let rotation = variant.get("rotation")?;
             let axis = normalize(vector3(rotation.get("axis")?)?)?;
             let angle = -rotation.get("angleDegrees")?.as_f64()?.to_radians();
             Some(rotate(point, center, axis, angle))
         }
+        "mirrored" => {
+            let mirror = variant.get("mirror")?;
+            let normal = normalize(vector3(mirror.get("normal")?)?)?;
+            Some(mirror_point(point, center, normal))
+        }
+        "scaled" => {
+            let scale_block = variant.get("scale")?;
+            let factor = scale_block.get("factor")?.as_f64()?;
+            let center = scale_block
+                .get("center")
+                .and_then(vector3)
+                .unwrap_or(center);
+            Some(add(center, scale(sub(point, center), 1.0 / factor)))
+        }
+        "parameterEpsilon" | "edgeOrderPermutation" | "contourSeed" => Some(point),
         _ => None,
     }
+}
+
+fn mirror_point(point: [f64; 3], center: [f64; 3], normal: [f64; 3]) -> [f64; 3] {
+    let v = sub(point, center);
+    let projection = scale(normal, 2.0 * dot(v, normal));
+    sub(point, projection)
 }
 
 fn compare_unordered(base: &[LabeledPoint], variant: &[LabeledPoint], tolerance: f64) -> bool {

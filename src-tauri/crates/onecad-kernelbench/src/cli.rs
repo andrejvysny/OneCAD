@@ -113,6 +113,11 @@ fn run_case(args: Arguments) -> AppResult<i32> {
         name: VariantName::Base,
         translation: None,
         rotation: None,
+        mirror: None,
+        scale: None,
+        parameter_epsilon: None,
+        edge_order_permutation: None,
+        contour_seed: None,
     };
     campaign::run_one(
         &runner,
