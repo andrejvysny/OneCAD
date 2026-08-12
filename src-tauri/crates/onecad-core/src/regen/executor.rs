@@ -254,6 +254,12 @@ struct Scratch {
     repair_by_step: BTreeMap<usize, Vec<RepairItem>>,
     /// Per-step diagnostics.
     diagnostics_by_step: BTreeMap<usize, Vec<Diagnostic>>,
+    /// Component Library P3 WP-3.1: per-step reseated `PlaceComponent`
+    /// placements (SCHEMA §7.2 `matePlacement`), present only for a step
+    /// whose mate resolved AutoBind and moved. Applied at the terminal, same
+    /// `last_valid` gate as `buffered` — a step beyond the last valid one
+    /// never reaches the accepted timeline (Invariant 6).
+    mate_placement_by_step: BTreeMap<usize, Box<crate::document::record::FrozenPlacement>>,
 }
 
 impl Scratch {
@@ -266,6 +272,7 @@ impl Scratch {
             step_signatures: BTreeMap::new(),
             repair_by_step: BTreeMap::new(),
             diagnostics_by_step: BTreeMap::new(),
+            mate_placement_by_step: BTreeMap::new(),
         }
     }
 
@@ -291,6 +298,9 @@ impl Scratch {
         self.step_signatures.insert(step, event.signatures);
         if !event.diagnostics.is_empty() {
             self.diagnostics_by_step.insert(step, event.diagnostics);
+        }
+        if let Some(placement) = event.mate_placement {
+            self.mate_placement_by_step.insert(step, placement);
         }
     }
 
@@ -742,6 +752,21 @@ impl<E: GeometryEngine> RegenExecutor<E> {
         session.repair.clear_from(start);
         for (step, items) in &scratch.repair_by_step {
             session.repair.set_step(*step, items.clone());
+        }
+
+        // Component Library P3 WP-3.1: apply reseated mate placements — a
+        // DERIVED writeback of that record's own `placement` field, same
+        // `≤ last_valid` gate as body/element buffering above (a step beyond
+        // the last valid one never reaches the accepted timeline, Invariant
+        // 6). `set_place_component_placement` itself no-ops (never panics)
+        // if the record moved/changed shape since the step index was
+        // captured — belt-and-suspenders, not load-bearing here.
+        if let Some(cutoff) = prepared.last_valid_step {
+            for (&step, placement) in scratch.mate_placement_by_step.range(..=cutoff) {
+                session
+                    .timeline
+                    .set_place_component_placement(step, (**placement).clone());
+            }
         }
         // A seeded step was deliberately EXCLUDED from the plan (the caller's
         // execution ceiling), so the per-step loop above never touched its state.

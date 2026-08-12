@@ -376,6 +376,17 @@ pub struct PlanStepEvent {
     pub signatures: StepSignatures,
     /// Non-fatal diagnostics.
     pub diagnostics: Vec<Diagnostic>,
+    /// Component Library P3 WP-3.1 (SCHEMA §7.2 `matePlacement`, spec §5.5).
+    /// Present ONLY when this step's `PlaceComponent.mate` resolved AutoBind
+    /// and moved past the worker's pinned reseat epsilon — the new seat, to
+    /// be persisted as a DERIVED, no-undo writeback of that record's own
+    /// `placement` field (never a fencing input; see
+    /// `document_runtime.rs::sync_mate_placements`). Absent on every other
+    /// step, including a resolved-but-unmoved mate (the common no-op tick)
+    /// and a `NeedsRepair` mate (the frozen placement stands unchanged).
+    // Boxed: `PlanEvent`'s variants are size-balanced (clippy
+    // `large_enum_variant`) and a reseat is rare — most steps carry `None`.
+    pub mate_placement: Option<Box<crate::document::record::FrozenPlacement>>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

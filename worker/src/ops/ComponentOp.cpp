@@ -1,9 +1,11 @@
 // ComponentOp.cpp — see ComponentOp.h.
 #include "ops/ComponentOp.h"
 
+#include <array>
 #include <cmath>
 #include <map>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 
@@ -36,14 +38,20 @@
 #include <gp_Pnt2d.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
+#include <gp_XYZ.hxx>
 
+#include "elementmap/ElementMapPartition.h"
+#include "elementmap/Ladder.h"
 #include "kernel/validation/ShapeAudit.h"
 #include "modeling/BooleanMode.h"
+#include "ops/ComponentMateSolver.h"
 #include "ops/OpCommon.h"
+#include "session/ClassifyElement.h"
 
 namespace onecad::ops {
 
 using nlohmann::json;
+namespace em = onecad::elementmap;
 
 namespace {
 
@@ -459,6 +467,175 @@ bool read_placement(const json& params, const std::string& op_label, gp_Trsf& tr
     return true;
 }
 
+// Component Library P3 WP-3.1 (spec §5.5): re-seat epsilons. Translation
+// reuses HoleOp.cpp's own `kPointPlaneFence` value/unit verbatim (spec: "mirrors
+// Hole's 1e-3 mm re-projection gate") — deliberate reuse, not an independent
+// choice. Rotation has no existing precedent in this worker; chosen to
+// correspond to roughly the same ~1e-3 mm of positional drift at the SHCS's
+// own characteristic ~10 mm head radius, comfortably above OCCT's
+// floating-point round-trip noise (~1e-6 rad ≈ 6e-5°).
+constexpr double kMateReseatTranslationEpsilonMm = 1e-3;
+constexpr double kMateReseatRotationEpsilonDeg = 1e-2;
+
+// A minimal §9 NeedsRepair (STATE) for a mate whose target ref is malformed,
+// whose owning body no longer exists, or whose resolved geometry can't seat
+// the requested mate kind. Mirrors `PlanExecutor.cpp`'s own
+// `missing_body_repair` shape (not reachable from here — op executors stay
+// self-contained rather than reaching into PlanExecutor internals).
+json mate_unresolved_repair(const std::string& ref_id, const std::string& element_id,
+                            const std::string& ui_label) {
+    return json{{"refId", ref_id},
+               {"elementId", element_id},
+               {"ladderFailed", "descriptor"},
+               {"reason", "no-candidates"},
+               {"scoringVersion", em::kResolverVersion},
+               {"candidates", json::array()},
+               {"anchor", json::object()},
+               {"uiLabel", ui_label}};
+}
+
+// The candidate placement a resolved mate recomputed, paired with the
+// already-solved `gp_Trsf` (avoids re-parsing the JSON a second time).
+struct MateReseat {
+    json placement;
+    gp_Trsf trsf;
+};
+
+// Component Library P3 WP-3.1 (spec §5.5): re-resolves `mate.target` through
+// the resolution ladder (cross-body-safe — target_body_id is read from
+// `mate.target.primary.bodyId`, NEVER assumed to be the op's own body,
+// exactly the discipline `worker/tests/test_cross_body_element_ref.cpp`
+// (VF-M7) exists to enforce) and recomputes the component's seat from the
+// mate kind + resolved frame + flip via `solve_mate_placement`.
+//
+// Returns the new placement + transform iff AutoBind resolved AND the
+// candidate moved beyond the reseat epsilon vs `frozen` — the caller applies
+// it and echoes it back on `OpOutcome.mate_placement` for Rust to persist
+// (a derived writeback, never dropped/moved silently otherwise). Returns
+// `std::nullopt` in every other case (unresolved target, malformed frame,
+// or resolved-but-unmoved — the common no-op tick) — the frozen placement
+// stands unchanged, and an unresolved target additionally appends a
+// NeedsRepair item to `needs_repair_out` (never a hard `OP_FAILED`: a
+// component with a broken mate still publishes at its last-good spot,
+// spec's "never drop it, never silently move it").
+std::optional<MateReseat> resolve_mate_reseat(OpContext& ctx, const json& mate, const json& frozen,
+                                              const std::string& op_id,
+                                              std::vector<json>& needs_repair_out) {
+    if (!mate.contains("target") || !mate["target"].is_object()) return std::nullopt;
+    const json& target_ref_json = mate["target"];
+    // `<opId>.input0` — NOT a real wire input anymore (P3 WP-3.1 removed
+    // `mate` from `inputs[]` on purpose, see `wire.rs::wire_op_inputs`), but
+    // this matches `parse_input_ref_id`'s addressing convention
+    // (`document_runtime.rs`) so a future manual-repair-rebind UI can still
+    // find this ref: `element_refs_mut`'s `PlaceComponent` arm returns
+    // `mate.target` as its ONLY entry, i.e. index 0.
+    const std::string ref_id = op_id + ".input0";
+    const em::LadderRef ref = em::ladder_ref_from_input(target_ref_json, ref_id);
+    const std::string target_body_id =
+        (target_ref_json.contains("primary") && target_ref_json["primary"].is_object())
+            ? read_str(target_ref_json["primary"], "bodyId")
+            : "";
+    if (target_body_id.empty() || ref.element_id.empty()) {
+        needs_repair_out.push_back(
+            mate_unresolved_repair(ref_id, ref.element_id, "mate target has no primary body reference"));
+        return std::nullopt;
+    }
+    const session::BodyRecord* target_rec = ctx.bodies.get(target_body_id);
+    if (target_rec == nullptr) {
+        needs_repair_out.push_back(mate_unresolved_repair(
+            ref_id, ref.element_id, "mate target body not found: " + target_body_id));
+        return std::nullopt;
+    }
+
+    // Tracked rung first — VF-M7-safe (body-scoped), same two-rung order
+    // `HoleOp.cpp::resolve_host_face` uses.
+    TopoDS_Shape bound;
+    const std::string topo_key = em::ElementMapPartition::topokey_for_element_in_body(
+        ctx.partition, ref.element_id, target_body_id);
+    if (!topo_key.empty()) {
+        bound = em::ElementMapPartition::shape_for_topokey(target_rec->geom, topo_key);
+    }
+    if (bound.IsNull()) {
+        std::vector<em::LadderRef> refs{ref};
+        const std::vector<em::LadderResolution> res = em::resolve_descriptor_stage(
+            target_rec->geom, target_body_id, refs,
+            em::LadderEditContext{ctx.post_upstream_edit, ctx.from_zero_replay});
+        if (res.empty() || res[0].outcome != em::LadderOutcome::AutoBind || res[0].bound_shape.IsNull()) {
+            needs_repair_out.push_back(res.empty()
+                                           ? mate_unresolved_repair(ref_id, ref.element_id,
+                                                                    "mate target unresolved")
+                                           : res[0].to_needs_repair_json());
+            return std::nullopt;
+        }
+        bound = res[0].bound_shape;
+    }
+
+    // `classify_shape` nests the seatable geometry under its own `frame` key
+    // (sibling of `kind`/`surfaceType`) — `solve_mate_placement` wants that
+    // nested object directly. Absent (e.g. a non-planar/non-cylindrical
+    // face) ⇒ an empty object, which every `read_vec3` call below fails on,
+    // same as any other unresolvable frame.
+    const json classify_result = session::classify_shape(bound);
+    const json frame = classify_result.contains("frame") ? classify_result["frame"] : json::object();
+    const std::string snap_kind = read_str(mate, "kind");
+    const bool flipped =
+        mate.contains("flipped") && mate["flipped"].is_boolean() && mate["flipped"].get<bool>();
+
+    // Seat anchor: the component's OWN current frozen translate stands in for
+    // the live cursor a fresh interactive placement would use (see
+    // ComponentMateSolver.h) — preserves how far along the axis / where on
+    // the plane the user originally seated it as the target moves, rather
+    // than snapping to the frame's raw origin every tick.
+    std::array<double, 3> seat_anchor{0.0, 0.0, 0.0};
+    if (frozen.contains("translate") && frozen["translate"].is_array() &&
+        frozen["translate"].size() == 3) {
+        for (std::size_t i = 0; i < 3; ++i) {
+            const json& v = frozen["translate"][i];
+            if (v.is_number()) {
+                seat_anchor[i] = v.get<double>();
+            } else if (v.is_object() && v.contains("value") && v["value"].is_number()) {
+                seat_anchor[i] = v["value"].get<double>();
+            }
+        }
+    }
+
+    const std::optional<json> candidate = onecad::ops::solve_mate_placement(snap_kind, frame, seat_anchor, flipped);
+    if (!candidate) {
+        needs_repair_out.push_back(mate_unresolved_repair(
+            ref_id, ref.element_id,
+            "mate target resolved but its geometry can't seat a " + snap_kind + " mate"));
+        return std::nullopt;
+    }
+
+    gp_Trsf frozen_trsf, candidate_trsf;
+    std::string terr;
+    if (!read_placement(json{{"placement", frozen}}, "mate", frozen_trsf, terr) ||
+        !read_placement(json{{"placement", *candidate}}, "mate", candidate_trsf, terr)) {
+        // Both placements are worker-authored (frozen was validated at
+        // authoring; candidate was just built by `solve_mate_placement`) —
+        // a parse failure here is an internal defect, not a repair signal.
+        // Treat as "did not move": the frozen placement stands.
+        return std::nullopt;
+    }
+
+    const gp_XYZ dt = frozen_trsf.TranslationPart() - candidate_trsf.TranslationPart();
+    const double translation_delta_mm = std::sqrt(dt.X() * dt.X() + dt.Y() * dt.Y() + dt.Z() * dt.Z());
+    // Rotation delta: how far the component's local +Z axis direction
+    // differs between the two transforms — the axis both solved orientations
+    // are built around (ComponentMateSolver's own local-Z convention), a
+    // robust proxy that avoids depending on a specific quaternion API.
+    const gp_Dir local_z(0.0, 0.0, 1.0);
+    const gp_Dir zf = local_z.Transformed(frozen_trsf);
+    const gp_Dir zc = local_z.Transformed(candidate_trsf);
+    const double rotation_delta_deg = zf.Angle(zc) * 180.0 / kPi;
+
+    if (translation_delta_mm <= kMateReseatTranslationEpsilonMm &&
+        rotation_delta_deg <= kMateReseatRotationEpsilonDeg) {
+        return std::nullopt;  // within tolerance — a no-op tick, frozen stands
+    }
+    return MateReseat{*candidate, candidate_trsf};
+}
+
 // Shared pipeline behind BOTH `PlaceComponent` and `DetachComponent`
 // (identical geometry construction — the two differ only in what the
 // RECORD's params carry: PlaceComponent keeps a library identity + optional
@@ -535,6 +712,21 @@ OpOutcome resolve_source_and_publish(OpContext& ctx, const json& params, const s
     if (!read_placement(params, op_label, trsf, err)) {
         return OpOutcome::fail("OP_FAILED", err);
     }
+
+    // Component Library P3 WP-3.1 (spec §5.5): a mated instance re-resolves
+    // its target every tick and re-seats if it moved. Absent on
+    // DetachComponent's params by construction (spec §3.4 strips mate at
+    // detach) — this branch simply never fires there.
+    std::vector<json> mate_repairs;
+    std::optional<json> mate_placement_echo;
+    if (params.contains("mate") && params["mate"].is_object()) {
+        if (const std::optional<MateReseat> reseated =
+                resolve_mate_reseat(ctx, params["mate"], params["placement"], op_id, mate_repairs)) {
+            trsf = reseated->trsf;
+            mate_placement_echo = reseated->placement;
+        }
+    }
+
     try {
         BRepBuilderAPI_Transform xf(solid, trsf, /*Copy=*/Standard_True);
         if (!xf.IsDone() || xf.Shape().IsNull()) {
@@ -562,6 +754,8 @@ OpOutcome resolve_source_and_publish(OpContext& ctx, const json& params, const s
     ctx.bodies.create(bid, op_id, solid);
     out.body_events.push_back({"created", bid, {}});
     out.body_ids.push_back(bid);
+    for (json& r : mate_repairs) out.needs_repair.push_back(std::move(r));
+    if (mate_placement_echo) out.mate_placement = std::move(*mate_placement_echo);
     return out;
 }
 

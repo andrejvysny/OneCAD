@@ -381,6 +381,45 @@ impl DocumentSession {
         changed
     }
 
+    /// Syncs reseated `PlaceComponent` placements from the regen scratch's
+    /// own timeline into the document's authoritative one — a DERIVED,
+    /// no-undo writeback (Component Library P3 WP-3.1, spec §5.5), the same
+    /// treatment `sync_record_outputs` gives `outputs`. Matched by
+    /// `RecordId`, never a raw index carried across the two timelines: the
+    /// regen scratch's timeline and the document's can differ in
+    /// length/order across a checkpoint-accelerated regen, so only an
+    /// identity-keyed lookup is safe. Only records in `executed` are
+    /// considered (same "this regen's own truth only" rule
+    /// `sync_record_outputs` documents); `set_place_component_placement`
+    /// itself no-ops on an unchanged or non-`PlaceComponent` target.
+    pub fn sync_mate_placements(
+        &mut self,
+        regen_timeline: &Timeline,
+        executed: &BTreeSet<RecordId>,
+    ) -> bool {
+        let mut changed = false;
+        for &id in executed {
+            let Some(regen_rec) = regen_timeline.record_by_id(id) else {
+                continue;
+            };
+            let Operation::Known(KnownOperation::PlaceComponent(regen_params)) = &regen_rec.op
+            else {
+                continue;
+            };
+            if regen_params.mate.is_none() {
+                continue;
+            }
+            let Some(index) = self.document.timeline.index_of(id) else {
+                continue;
+            };
+            changed |= self
+                .document
+                .timeline
+                .set_place_component_placement(index, regen_params.placement.clone());
+        }
+        changed
+    }
+
     /// Registers a document metadata row for every body in `regen` the document does
     /// not know yet (the regen row copied verbatim). Returns whether anything was
     /// adopted.

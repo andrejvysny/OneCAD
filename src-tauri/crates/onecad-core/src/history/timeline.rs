@@ -19,7 +19,7 @@
 //! after it become [`StepState::Dirty`] and are no longer editable
 //! ([`Timeline::is_editable`]).
 
-use crate::document::record::OperationRecord;
+use crate::document::record::{FrozenPlacement, KnownOperation, Operation, OperationRecord};
 use crate::error::DomainError;
 use crate::ids::{BodyId, RecordId};
 
@@ -244,6 +244,32 @@ impl Timeline {
             }
             _ => false,
         }
+    }
+
+    /// Replaces the **derived** `placement` of the `PlaceComponent` record at
+    /// `index` with the mate solver's freshly-resolved seat (Component
+    /// Library P3 WP-3.1, spec §5.5). Regen provenance sync, not an edit —
+    /// same shape as `set_record_outputs`: step states and the cursor are
+    /// deliberately untouched, so committing a reseat never re-dirties the
+    /// steps it just validated. No-op (`false`) if `index` is out of range,
+    /// the record there isn't a `PlaceComponent`, or the placement is
+    /// unchanged.
+    pub fn set_place_component_placement(
+        &mut self,
+        index: usize,
+        placement: FrozenPlacement,
+    ) -> bool {
+        let Some(rec) = self.records.get_mut(index) else {
+            return false;
+        };
+        let Operation::Known(KnownOperation::PlaceComponent(params)) = &mut rec.op else {
+            return false;
+        };
+        if params.placement == placement {
+            return false;
+        }
+        params.placement = placement;
+        true
     }
 
     /// Removes the record with the given id, keeping the cursor consistent

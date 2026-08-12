@@ -15,6 +15,7 @@
 // relabeled/removed (this op's geometry change).
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -68,6 +69,17 @@ struct OpOutcome {
     // this lets an op surface non-fatal findings (e.g. §7.3 ImportStep's
     // STEP_SEWN / STEP_HEALED vocabulary) on a step that SUCCEEDS.
     std::vector<nlohmann::json> diagnostics;
+    // Component Library P3 WP-3.1: set ONLY when `PlaceComponent`'s `mate`
+    // resolved AutoBind and the recomputed seat moved beyond the reseat
+    // epsilon (`ComponentOp.cpp`'s `kMateReseatTranslationEpsilonMm`/
+    // `kMateReseatRotationEpsilonDeg`) — a `FrozenPlacement`-shaped JSON
+    // object (`{translate,rotate}`) the wire layer echoes as
+    // `planStep.matePlacement` (SCHEMA §7.2) so Rust can persist the reseat
+    // as a derived, no-undo writeback (mirrors `sync_record_outputs`).
+    // Absent on every other outcome, including a `mate` that resolved but
+    // did not move (the common no-op case) and a `mate` that fell to
+    // NeedsRepair (the frozen `placement` stands unchanged there).
+    std::optional<nlohmann::json> mate_placement;
 
     static OpOutcome ok() { return OpOutcome{}; }
     static OpOutcome fail(std::string code, std::string msg) {

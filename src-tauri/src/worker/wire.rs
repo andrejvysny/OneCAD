@@ -23,7 +23,9 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use onecad_core::document::body::BodyLifecycleEvent;
-use onecad_core::document::record::{ExtrudeMode, KnownOperation, OffsetDistanceType, Operation};
+use onecad_core::document::record::{
+    ExtrudeMode, FrozenPlacement, KnownOperation, OffsetDistanceType, Operation,
+};
 use onecad_core::document::refs::{AnchorIntent, AxisRef, ElementKind, ElementRef};
 use onecad_core::document::repair::RepairItem;
 use onecad_core::ids::{
@@ -555,15 +557,21 @@ fn wire_op_inputs(
             }
             v
         }
-        // PlaceComponent: the (optional) mate target, the sole typed slot
-        // (spec §3.5). Absent `mate` ⇒ dropped in free space, no ref at all —
-        // mirrors Extrude's ToFace-conditional slot.
-        Operation::Known(KnownOperation::PlaceComponent(p)) => p
-            .mate
-            .as_ref()
-            .map(|m| element_ref_wire(&m.target))
-            .into_iter()
-            .collect(),
+        // PlaceComponent: NO wire input, even when `mate` is present (P3
+        // WP-3.1, spec §5.5 — deliberate change from the pre-WP-3.1 shape,
+        // which put `mate.target` here). The worker's generic
+        // `resolve_input_refs` pre-flight treats ANY unresolved `inputs[]`
+        // entry as blocking — a genuinely correct rule for a face/edge an op
+        // structurally NEEDS (Hole can't drill nowhere), but wrong for a
+        // mate: an unresolvable target must still let the component publish
+        // at its frozen `placement` (spec: "never drop it, never silently
+        // move it"), not skip the op entirely. `ComponentOp.cpp`'s
+        // `resolve_mate_reseat` now owns mate resolution completely,
+        // in-process, with exactly that non-blocking contract — putting the
+        // ref here too would silently reintroduce the drop-on-NeedsRepair
+        // bug this WP exists to prevent. `element_refs_mut`'s manual-repair
+        // rebind surface is unaffected — it is a separate mechanism.
+        Operation::Known(KnownOperation::PlaceComponent(_)) => Vec::new(),
         // DetachComponent: no mate, no identity — the record re-describes
         // geometry directly, so it has no topological input at all.
         Operation::Known(KnownOperation::DetachComponent(_)) => Vec::new(),
@@ -660,7 +668,18 @@ pub fn parse_plan_step(payload: &Value, fallback_step: usize) -> Result<PlanStep
         needs_repair: parse_needs_repair(payload.get("needsRepair"), step_index)?,
         signatures: parse_signatures(payload.get("signatures")),
         diagnostics: parse_diagnostics(payload.get("diagnostics")),
+        mate_placement: parse_mate_placement(payload.get("matePlacement")),
     })
+}
+
+/// SCHEMA §7.2 `matePlacement` (Component Library P3 WP-3.1, spec §5.5) —
+/// OPTIONAL, absent on every step but a reseated `PlaceComponent`.
+/// **Deliberately infallible, same reasoning as `parse_body_rank_keys`**:
+/// this is a derived-geometry echo, not execution input — a malformed
+/// payload here means "no reseat happened" (dropped), never a
+/// `PROTOCOL_ERROR` that tears down an otherwise valid regen step.
+fn parse_mate_placement(v: Option<&Value>) -> Option<Box<FrozenPlacement>> {
+    serde_json::from_value(v?.clone()).ok().map(Box::new)
 }
 
 fn parse_body_events(v: Option<&Value>) -> Result<Vec<BodyLifecycleEvent>, String> {
@@ -5824,18 +5843,23 @@ mod body_wire_tests {
             "anchor": { "worldPoint": [1.0, 2.0, 3.0] }
         });
 
-        // (opType, params, expected typed-ref slots). Keep in sync with BOTH
-        // `element_refs_mut` and `wire_op_inputs` — that is the point of the test.
-        let cases: Vec<(&str, Value, usize)> = vec![
+        // (opType, params, expected element_refs_mut slots, expected wire inputs[]
+        // typed-ref slots). The two counts are the SAME for every op except
+        // PlaceComponent (see its own case below) — kept as two columns rather
+        // than one shared `expected` so that deliberate exception is a data
+        // difference, not a special-cased assertion.
+        let cases: Vec<(&str, Value, usize, usize)> = vec![
             // hostFace is core-only (`strip_sketch_host_face`) ⇒ no slot either side.
             (
                 "Sketch",
                 json!({ "sketchId": sk, "plane": { "kind": "XY", "origin": [0,0,0], "xAxis": [0,1,0], "yAxis": [-1,0,0], "normal": [0,0,1] }, "hostFace": face_ref }),
                 0,
+                0,
             ),
             (
                 "Extrude",
                 json!({ "distance": 5.0, "draftAngleDeg": 0.0, "distance2": 0.0, "extrudeMode": "ToFace", "targetFace": face_ref, "twoDirections": true, "extrudeMode2": "ToFace", "targetFace2": face_ref, "booleanMode": "NewBody" }),
+                2,
                 2,
             ),
             // A typed Revolve edge axis is a semantic `inputs[0]` companion.
@@ -5843,61 +5867,73 @@ mod body_wire_tests {
                 "Revolve",
                 json!({ "angleDeg": 90.0, "booleanMode": "NewBody", "axis": { "kind": "edge", "bodyId": b, "edgeId": "e:2", "edgeRef": edge_ref } }),
                 1,
+                1,
             ),
             (
                 "Fillet",
                 json!({ "radius": 2.0, "edgeIds": ["el_1"], "edges": [edge_ref] }),
+                1,
                 1,
             ),
             (
                 "Chamfer",
                 json!({ "radius": 1.0, "edgeIds": ["el_1"], "edges": [edge_ref] }),
                 1,
+                1,
             ),
             (
                 "Shell",
                 json!({ "thickness": 1.5, "openFaces": ["el_2"], "faces": [face_ref], "targetBodyId": b }),
+                1,
                 1,
             ),
             (
                 "Boolean",
                 json!({ "operation": "Cut", "targetBodyId": b, "toolBodyId": b }),
                 0,
+                0,
             ),
             (
                 "LinearPattern",
                 json!({ "direction": [1,0,0], "count": 2, "spacing": 5.0, "sourceBodyId": b }),
+                0,
                 0,
             ),
             (
                 "CircularPattern",
                 json!({ "axisOrigin": [0,0,0], "axisDirection": [0,0,1], "count": 3, "angleDeg": 120.0, "sourceBodyId": b }),
                 0,
+                0,
             ),
             (
                 "Loft",
                 json!({ "booleanMode": "NewBody", "profiles": [] }),
                 0,
+                0,
             ),
-            ("Sweep", json!({ "booleanMode": "NewBody" }), 0),
+            ("Sweep", json!({ "booleanMode": "NewBody" }), 0, 0),
             (
                 "MirrorBody",
                 json!({ "planePoint": [0,0,0], "planeNormal": [0,0,1], "sourceBodyId": b }),
+                0,
                 0,
             ),
             (
                 "ImportStep",
                 json!({ "sourceSha256": "aa", "sourceCodec": "step", "sourceName": "x.step" }),
                 0,
+                0,
             ),
             (
                 "TransformBody",
                 json!({ "translate": [1,0,0], "targets": [b] }),
                 0,
+                0,
             ),
             (
                 "Hole",
                 json!({ "targetBodyId": b, "face": face_ref, "point": [0,0,0], "axis": [0,0,-1], "depth": null, "holeType": "simple", "diameter": 5.0 }),
+                1,
                 1,
             ),
             // OffsetFace: one stampable slot per operative face, plus the `Total`
@@ -5906,8 +5942,16 @@ mod body_wire_tests {
                 "OffsetFace",
                 json!({ "targetBodyId": b, "faceIds": ["el_2"], "faces": [face_ref], "distance": 2.5, "distanceType": "Total", "chainTangentFaces": false, "oppositeFaceId": "el_2", "oppositeFace": face_ref }),
                 2,
+                2,
             ),
-            // PlaceComponent: the (optional) mate target is the sole typed slot.
+            // PlaceComponent: `element_refs_mut` still exposes the mate target (the
+            // manual-repair-rebind UI surface, unaffected) but WIRE inputs[] is
+            // ALWAYS empty (Component Library P3 WP-3.1) — the worker's generic
+            // `resolve_input_refs` pre-flight treats an unresolved `inputs[]` entry
+            // as blocking, which is wrong for a mate (spec §5.5: "never drop it,
+            // never silently move it"). `ComponentOp.cpp::resolve_mate_reseat` now
+            // owns mate resolution entirely, in-process, non-blocking. See
+            // `wire_op_inputs`'s own `PlaceComponent` arm comment.
             (
                 "PlaceComponent",
                 json!({
@@ -5919,6 +5963,7 @@ mod body_wire_tests {
                     "placement": { "translate": [0.0, 0.0, 0.0] }
                 }),
                 1,
+                0,
             ),
             // DetachComponent: no mate, no identity — no typed slots at all.
             (
@@ -5928,16 +5973,17 @@ mod body_wire_tests {
                     "placement": { "translate": [0.0, 0.0, 0.0] }
                 }),
                 0,
+                0,
             ),
         ];
 
-        for (op_type, params, expected) in &cases {
+        for (op_type, params, expected_element_refs, expected_wire) in &cases {
             let mut known: KnownOperation =
                 serde_json::from_value(json!({ "opType": op_type, "params": params }))
                     .unwrap_or_else(|e| panic!("{op_type} fixture deserializes: {e}"));
             assert_eq!(
                 known.element_refs_mut().len(),
-                *expected,
+                *expected_element_refs,
                 "{op_type}: element_refs_mut slot count"
             );
             let operation = Operation::Known(known);
@@ -5950,9 +5996,8 @@ mod body_wire_tests {
                 .filter(|r| r.get("anchor").is_some())
                 .count();
             assert_eq!(
-                typed, *expected,
-                "{op_type}: wire inputs[] typed-ref count diverged from element_refs_mut — \
-                 got {wired}"
+                typed, *expected_wire,
+                "{op_type}: wire inputs[] typed-ref count — got {wired}"
             );
         }
 
@@ -6223,7 +6268,12 @@ mod body_wire_tests {
                 vec![],
             ),
             (
-                "placeComponent: mate present ⇒ slot 0 = mate target",
+                // P3 WP-3.1: mate is NEVER a wire input, present or not — the
+                // worker's generic pre-flight would otherwise block the op on an
+                // unresolved mate, contradicting spec §5.5 ("never drop it, never
+                // silently move it"). `ComponentOp.cpp::resolve_mate_reseat` owns
+                // mate resolution entirely, in-process, from `params.mate` alone.
+                "placeComponent: mate present ⇒ STILL no wire input slot",
                 "PlaceComponent",
                 json!({
                     "componentId": "onecad.std.iso4762", "componentVersion": "1.0.0",
@@ -6232,7 +6282,7 @@ mod body_wire_tests {
                     "mate": { "selfAttachment": "shank_axis", "target": face_ref, "kind": "concentric", "flipped": false },
                     "placement": { "translate": [0.0, 0.0, 0.0] }
                 }),
-                vec!["face"],
+                vec![],
             ),
             (
                 "detachComponent: no mate, no identity ⇒ no slots at all",

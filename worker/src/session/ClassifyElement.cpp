@@ -145,6 +145,25 @@ json classify_edge(const TopoDS_Edge& edge, json& out) {
 
 }  // namespace
 
+json classify_shape(const TopoDS_Shape& shape) {
+    json out;
+    if (shape.IsNull()) {
+        out["kind"] = "other";
+        return out;
+    }
+    const TopAbs_ShapeEnum shape_type = shape.ShapeType();
+    if (shape_type == TopAbs_FACE) {
+        out["kind"] = "face";
+        classify_face(TopoDS::Face(shape), out);
+    } else if (shape_type == TopAbs_EDGE) {
+        out["kind"] = "edge";
+        classify_edge(TopoDS::Edge(shape), out);
+    } else {
+        out["kind"] = "other";
+    }
+    return out;
+}
+
 Envelope handle_classify_element(Session& session, const Envelope& req) {
     const json& args = req.args;
     const BodyStore bodies = session.bodies_copy();
@@ -155,19 +174,8 @@ Envelope handle_classify_element(Session& session, const Envelope& req) {
         return Envelope::ok_response(req.id, json{{"present", false}});
     }
 
-    json out{{"present", true}};
-    const TopAbs_ShapeEnum shape_type = seed.shape.ShapeType();
-    if (shape_type == TopAbs_FACE) {
-        out["kind"] = "face";
-        classify_face(TopoDS::Face(seed.shape), out);
-    } else if (shape_type == TopAbs_EDGE) {
-        out["kind"] = "edge";
-        classify_edge(TopoDS::Edge(seed.shape), out);
-    } else {
-        // A vertex or other sub-shape has no surface/curve classification —
-        // an honest answer, not a repair signal.
-        out["kind"] = "other";
-    }
+    json out = classify_shape(seed.shape);
+    out["present"] = true;
     return Envelope::ok_response(req.id, std::move(out));
 }
 

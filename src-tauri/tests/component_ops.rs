@@ -25,13 +25,15 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use onecad_core::document::record::{
-    ComponentParamValue, ComponentSourceRef, DetachComponentParams, FrozenPlacement,
-    KnownOperation, Operation, OperationRecord, PlaceComponentParams,
+    ComponentMate, ComponentParamValue, ComponentSourceRef, DetachComponentParams, FrozenPlacement,
+    KnownOperation, MateKind, Operation, OperationRecord, PlaceComponentParams,
 };
+use onecad_core::document::refs::{AnchorIntent, ElementKind, ElementRef, PrimaryRef};
 use onecad_core::document::variables::Scalar;
 use onecad_core::edit::EditCommand;
-use onecad_core::ids::{BodyId, RecordId};
+use onecad_core::ids::{BodyId, ElementId, RecordId, TopoKey};
 use onecad_core::io::container::SaveMeta;
+use onecad_core::math::Vec3;
 use onecad_core::regen::{CancelToken, GeometryEngine, ModelSnapshot, Outcome, RegenRequest};
 
 use onecad_lib::document_runtime::{DocumentRuntime, RegenReport};
@@ -307,6 +309,242 @@ async fn detach_component_preserves_body_and_volume_across_the_swap() {
     assert!(
         (vol_after - vol_before).abs() < 1e-6,
         "detach volume {vol_after} != pre-detach volume {vol_before}"
+    );
+
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P3 WP-3.1: persistent mate re-seating on regen (spec §5.5), end to end
+// through the REAL worker + DocumentRuntime, not just the worker ctest matrix
+// (`worker/tests/test_component_mate_reseat.cpp`, which calls
+// `execute_place_component` directly and so cannot see the Rust-side wiring
+// this WP adds: `PlanStepEvent.mate_placement` parsing, `Scratch` buffering,
+// `Timeline::set_place_component_placement`, `sync_mate_placements`, and —
+// the REAL bug this test caught — `PlaceComponent`'s `mate` used to ride in
+// the wire `inputs[]`, which the worker's generic pre-flight resolves
+// BEFORE the op runs and treats a failure there as blocking, so an
+// unresolvable mate silently published NOTHING rather than the component at
+// its frozen `placement` (fixed: `wire.rs::wire_op_inputs` no longer emits
+// an input for `mate`; `ComponentOp.cpp::resolve_mate_reseat` owns
+// resolution entirely, in-process, non-blocking).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Classifies `body`'s faces (topo keys `f:1..=8`, generous for a fused
+/// two-cylinder SHCS) and returns the first cylindrical one near `radius_mm`
+/// — the SHCS's exact face ordering after the head/shank boolean fuse isn't
+/// guaranteed, so this searches rather than assumes an ordinal. Returns the
+/// topo key, the axis origin, AND a real point ON the surface (origin
+/// offset by `radius_mm` perpendicular to the axis) — the ladder's anchor
+/// scoring wants a point a real pick would land on, not the axis location
+/// (which sits `radius_mm` inside the material and under-scores the
+/// `anchor` feature contribution).
+async fn find_cylindrical_face(
+    wm: &WorkerManager,
+    body: BodyId,
+    radius_mm: f64,
+) -> (String, [f64; 3], [f64; 3]) {
+    for i in 1..=8 {
+        let key = format!("f:{i}");
+        let Some(dto) = ElementQuery::classify_element_by_topo_key(wm, body, &key)
+            .await
+            .expect("ClassifyElement")
+        else {
+            continue;
+        };
+        if dto.surface_type != "cylinder" {
+            continue;
+        }
+        let Some(frame) = &dto.frame else { continue };
+        if (frame.radius.unwrap_or(0.0) - radius_mm).abs() < 1e-6 {
+            let axis = frame.axis.unwrap_or([0.0, 0.0, 1.0]);
+            // Any unit vector perpendicular to `axis` — this SHCS's axis is
+            // always (0,0,±1), so (1,0,0) is never near-parallel to it.
+            let perp = if axis[0].abs() < 0.9 {
+                [1.0, 0.0, 0.0]
+            } else {
+                [0.0, 1.0, 0.0]
+            };
+            let surface_point = [
+                frame.origin[0] + perp[0] * radius_mm,
+                frame.origin[1] + perp[1] * radius_mm,
+                frame.origin[2] + perp[2] * radius_mm,
+            ];
+            return (key, frame.origin, surface_point);
+        }
+    }
+    panic!("no cylindrical face at radius {radius_mm}mm found on {body:?} within f:1..=8");
+}
+
+/// Promotes ONE snapshot-scoped `TopoKey` into a Rust-minted `ElementId`
+/// (`AcquireElementIds`), mirroring `offset_face.rs`'s own `promote` helper.
+async fn promote(
+    rt: &mut DocumentRuntime,
+    snapshot: onecad_core::ids::SnapshotId,
+    body: BodyId,
+    topo_key: &str,
+    anchor: &AnchorIntent,
+) -> ElementId {
+    let promoted = rt
+        .promote_selection(
+            snapshot,
+            body,
+            vec![(TopoKey::new(topo_key), Some(anchor.clone()))],
+        )
+        .await
+        .expect("AcquireElementIds promotes the shank face at the head snapshot");
+    ElementId::new(&promoted[0].element_id)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn place_component_mate_reseats_on_the_first_regen_when_authored_off_axis() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    // The TARGET: a plain, unmated PlaceComponent. Its shank (radius 3mm,
+    // the M6 shank) is a real cylindrical face this test mates against.
+    add_op(&mut rt, place_component_record(0xd1));
+    let report1 = regen_all(&mut rt).await;
+    let snap1 = published(&report1, "target place");
+    let target_body = snap1.bodies[0].body;
+    let snapshot = snap1.id;
+
+    let (shank_key, shank_origin, _shank_surface_point) =
+        find_cylindrical_face(&wm, target_body, 3.0).await;
+    // The ladder's anchor scoring is relative to the candidate face's own
+    // CENTROID, not the cylinder's axis-parametrization origin: `frame.
+    // origin` is the shank's BASE (z=-20, `place_component_record`'s
+    // `kDefaultLengthMm=20` shank running DOWN from the origin placement),
+    // but the trimmed face's real centroid sits at its midpoint (z=-10).
+    // Anchoring near the actual centroid — a real cursor pick would land
+    // near the middle of a long face far more often than exactly on its
+    // rim — is what a live gesture's anchor evidence would look like.
+    let shank_centroid_z = shank_origin[2] + 10.0; // length/2 of the M6 default shank
+    let anchor = AnchorIntent {
+        world_point: Vec3::new_unchecked(shank_origin[0] + 3.0, shank_origin[1], shank_centroid_z),
+        surface_uv: None,
+        local_frame: None,
+        adjacency_hint: None,
+        extra: Default::default(),
+    };
+    let element_id = promote(&mut rt, snapshot, target_body, &shank_key, &anchor).await;
+
+    // The MATED component: `concentric` to the shank, authored deliberately
+    // off-axis (translate.y shifted +5mm from the shank's actual axis) — the
+    // first regen must reseat it onto the real axis.
+    let mate_record = RecordId(Uuid::from_u128(0xd2));
+    let mut mated = place_component_record(0xd2);
+    let Operation::Known(KnownOperation::PlaceComponent(params)) = &mut mated.op else {
+        unreachable!()
+    };
+    params.mate = Some(ComponentMate {
+        self_attachment: "shankAxis".to_string(),
+        target: ElementRef {
+            primary: Some(PrimaryRef {
+                body: target_body,
+                element: element_id,
+                kind: ElementKind::Face,
+                extra: Default::default(),
+            }),
+            intent: None,
+            anchor: Some(anchor),
+            extra: Default::default(),
+        },
+        kind: MateKind::Concentric,
+        flipped: false,
+        extra: Default::default(),
+    });
+    params.placement.translate[0] = Scalar::new(shank_origin[0]);
+    params.placement.translate[1] = Scalar::new(shank_origin[1] + 5.0); // off-axis on purpose
+    params.placement.translate[2] = Scalar::new(shank_origin[2]);
+    add_op(&mut rt, mated);
+
+    let report2 = regen_all(&mut rt).await;
+    let snap2 = published(&report2, "mated place");
+    assert_eq!(snap2.bodies.len(), 2, "target body + reseated mated body");
+
+    // The RECORD's own `placement` was rewritten (the derived, no-undo
+    // writeback this WP adds — `sync_mate_placements`), not just the
+    // published geometry.
+    let params_after = rt
+        .operation_params(mate_record)
+        .expect("mated record still exists");
+    let translate = params_after["placement"]["translate"]
+        .as_array()
+        .expect("translate is an array");
+    let ty = translate[1]["value"]
+        .as_f64()
+        .or_else(|| translate[1].as_f64())
+        .expect("translate.y reads as a number");
+    assert!(
+        (ty - shank_origin[1]).abs() < 1e-3,
+        "record placement.translate.y was rewritten onto the shank axis: got {ty}, want {}",
+        shank_origin[1]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn place_component_with_an_unresolvable_mate_still_publishes_at_its_frozen_placement() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let wm = spawn_worker(bin).await;
+    let mut rt = runtime_over(&wm);
+
+    // A mate whose target body was NEVER created — simulates "the plate was
+    // deleted." This is the exact scenario `wire.rs::wire_op_inputs`'s old
+    // shape got wrong: with `mate.target` in the wire `inputs[]`, the
+    // worker's pre-flight `resolve_input_refs` failed to resolve it and
+    // `run_single_op` never ran at all — NOTHING published. Spec §5.5:
+    // "never drop it, never silently move it."
+    let mut mated = place_component_record(0xd3);
+    let Operation::Known(KnownOperation::PlaceComponent(params)) = &mut mated.op else {
+        unreachable!()
+    };
+    params.mate = Some(ComponentMate {
+        self_attachment: "shankAxis".to_string(),
+        target: ElementRef {
+            primary: Some(PrimaryRef {
+                body: BodyId(Uuid::from_u128(0xdead)),
+                element: ElementId::new("el_never_existed"),
+                kind: ElementKind::Face,
+                extra: Default::default(),
+            }),
+            intent: None,
+            anchor: None,
+            extra: Default::default(),
+        },
+        kind: MateKind::Concentric,
+        flipped: false,
+        extra: Default::default(),
+    });
+    // A recognizable frozen placement — proves it's the FROZEN one that
+    // publishes, not some fallback/default.
+    params.placement.translate = [Scalar::new(11.0), Scalar::new(22.0), Scalar::new(33.0)];
+    add_op(&mut rt, mated);
+
+    let report = regen_all(&mut rt).await;
+    let snap = published(&report, "unresolvable-mate place");
+    assert_eq!(
+        snap.bodies.len(),
+        1,
+        "the component STILL PUBLISHES — a NeedsRepair mate never drops the body"
+    );
+
+    let vol = exact_volume(&wm, snap.bodies[0].body).await;
+    assert!(
+        (vol - m6_shcs_volume()).abs() < 1.0,
+        "published at the frozen M6 SHCS geometry, unaffected by the unresolvable mate"
+    );
+
+    assert!(
+        snap.repair_summary.needs_repair_count > 0,
+        "the unresolvable mate is flagged NeedsRepair, not silently ignored"
     );
 
     wm.shutdown().await;

@@ -216,6 +216,20 @@ add_executable(test_component_ops test_component_ops.cpp)
 target_link_libraries(test_component_ops PRIVATE worker_core)
 add_test(NAME component_ops COMMAND test_component_ops)
 
+# --- COMPONENT-LIBRARY P3 WP-3.1: `solve_mate_placement` numeric parity
+#     against `placementSolver.test.ts`'s own cases. Pure math, no OCCT
+#     session needed. ---
+add_executable(test_component_mate_solver test_component_mate_solver.cpp)
+target_link_libraries(test_component_mate_solver PRIVATE worker_core)
+add_test(NAME component_mate_solver COMMAND test_component_mate_solver)
+
+# --- COMPONENT-LIBRARY P3 WP-3.1: mate re-seat on regen (spec §5.5) — reseat
+#     on move, no-op within epsilon, NeedsRepair on a vanished target, VF-M7
+#     cross-body parity. In-process, real OCCT. ---
+add_executable(test_component_mate_reseat test_component_mate_reseat.cpp)
+target_link_libraries(test_component_mate_reseat PRIVATE worker_core)
+add_test(NAME component_mate_reseat COMMAND test_component_mate_reseat)
+
 # --- VF-M7: an ElementMap entry minted on body A must never bind a face of body B.
 #     Hole + Shell against two DIFFERENT bodies, asserted by exact analytic volume
 #     (silent wrong drill / wrong seat / wrong shell wall). In-process, real OCCT. ---

@@ -1,3 +1,41 @@
+## COMPONENT LIBRARY — LIVE DELTA (2026-08-13, session 14, P3 WP-3.1)
+
+Branch `OneCAD-Component-Library` (worktree), on top of the WP-2.6 commit
+below. This session: persistent mate re-seating on regen (spec §5.5), P3's
+first WP, deliberately chosen first to de-risk the highest-architecture-
+risk piece early.
+
+Worker: new `ComponentMateSolver.h/.cpp` (verbatim port of `placementSolver
+.ts`'s WP-1.5 math, numerically pinned against its own test cases),
+`ClassifyElement`'s frame-classification logic exposed in-process (no wire
+round trip) as `session::classify_shape`, and `ComponentOp.cpp::resolve_
+mate_reseat` — cross-body-safe ladder resolution + epsilon-gated re-seat,
+resolved entirely mid-`ExecutePlan` so it sees same-tick geometry.
+
+**Two real defects found by RUNNING the real worker + DocumentRuntime
+pipeline, invisible to the worker-only ctest suite**: (1) `mate.target`
+used to ride in the wire `inputs[]`, which the worker's generic pre-flight
+resolves BEFORE the op runs and blocks on failure — an unresolvable mate
+published ZERO bodies, not the component at its frozen placement. Fixed by
+removing mate from `wire_op_inputs` entirely; resolution now lives
+entirely in `resolve_mate_reseat`. (2) `merge_outcome` unconditionally
+downgraded any step with `needs_repair` to a NeedsRepair status that
+discards `body_events` — correct for every OTHER op (all resolve-then-
+build, early-returning before geometry exists on failure) but wrong for
+mate, which is the first op that legitimately publishes geometry AND
+flags a repair simultaneously. Fixed; verified safe for all existing ops
+(worker ctest unchanged).
+
+Rust: `PlanStepEvent.mate_placement` (boxed, clippy size limit) threaded
+through `Scratch`/`Timeline::set_place_component_placement`/`DocumentSession
+::sync_mate_placements`, wired into `commit_snapshot` beside `sync_record_
+outputs` — same "derived, no-undo writeback" treatment.
+
+Gate: worker ctest 117/117 (2 new targets) · fmt/clippy clean · `cargo test
+--workspace` 100% green (two pre-existing wire.rs unit tests updated to
+match the new, correct `PlaceComponent` inputs[] shape; two new real-worker
+integration tests in `component_ops.rs`) · frontend untouched.
+
 ## COMPONENT LIBRARY — LIVE DELTA (2026-08-13, session 13, WP-2.6, P2 CLOSED)
 
 Branch `OneCAD-Component-Library` (worktree), on top of the merge commit

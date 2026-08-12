@@ -274,6 +274,7 @@ impl GeometryEngine for FakeBackend {
                     needs_repair: vec![],
                     signatures: sigs(step),
                     diagnostics: vec![],
+                    mate_placement: None,
                 }));
                 per_step.push(StepResult {
                     step_index: step,

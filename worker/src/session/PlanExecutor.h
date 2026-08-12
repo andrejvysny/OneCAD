@@ -49,6 +49,11 @@ struct CandidateResult {
     // the step's `planStep.diagnostics[]` (SCHEMA §7.2). Survives rollback: a
     // diagnostic explains what the attempt SAW, so it is still worth reporting.
     std::vector<nlohmann::json> diagnostics;
+    // Component Library P3 WP-3.1: set ONLY when `PlaceComponent`'s `mate`
+    // reseated (`ops::OpOutcome::mate_placement`, see its own doc comment).
+    // Echoed as `planStep.matePlacement` (SCHEMA §7.2) so Rust can persist
+    // the reseat as a derived, no-undo writeback.
+    std::optional<nlohmann::json> mate_placement;
 };
 
 // Execute one complete candidate step: predecessor input resolution, operation,

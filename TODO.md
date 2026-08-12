@@ -1,5 +1,104 @@
 # OneCAD-Tauri Migration TODO
 
+## COMPONENT-LIBRARY P3 WP-3.1 (2026-08-13) — GATE PASSED
+
+Persistent mate re-seating on regen (spec §5.5) — P3's first WP, chosen
+first because it's the highest architectural risk piece in the whole
+Component Library effort (de-risk-first, mirroring how this program's own
+P0 was a foundation spike). Full research (three dispatched agents:
+explore, architecture design, and extensive hand-verification against the
+actual code) preceded implementation — the initial plan's "Rust pre-pass
+resolves mate before hashing" framing was wrong; the correct design
+resolves entirely **worker-side, mid-`ExecutePlan`**, so it sees SAME-TICK
+geometry (a plate's hole moving in the SAME regen the mate re-seats
+against) for free, with zero hash-fencing changes needed.
+
+**Worker (new files + `ComponentOp.cpp` wiring):**
+`ComponentMateSolver.h/.cpp` is a verbatim C++ port of `src/modules/
+library/placementSolver.ts` (WP-1.5's interactive-gesture math) —
+numerically pinned against that file's own test cases
+(`worker/tests/test_component_mate_solver.cpp`, 9 assertions). `resolve_
+mate_reseat` (new, in `ComponentOp.cpp`) does cross-body-safe ladder
+resolution (VF-M7 discipline: target body ALWAYS read from `mate.target
+.primary.bodyId`, never assumed to be the op's own body — mirrors `HoleOp
+.cpp::resolve_host_face`'s two-rung order), classifies the resolved face/
+edge via a new in-process `session::classify_shape` (`ClassifyElement.{h,
+cpp}` refactor — no wire round trip, so it sees this-tick geometry),
+solves the candidate seat, and epsilon-gates it (`kMateReseatTranslation
+EpsilonMm = 1e-3`, reusing Hole's own `kPointPlaneFence` value/unit
+verbatim per spec's "mirrors Hole's 1e-3 mm re-projection gate";
+`kMateReseatRotationEpsilonDeg = 1e-2`, a new constant, no existing
+precedent — flagged as a judgment call). An unresolvable target pushes a
+`NeedsRepair` item and leaves the frozen `placement` untouched — the
+component ALWAYS publishes, never drops, per spec's own words.
+`worker/tests/test_component_mate_reseat.cpp` (5 assertions): reseat on
+move, no-op within epsilon, NeedsRepair-on-vanished-target-still-publishes,
+VF-M7 cross-body parity.
+
+**Two real defects found by RUNNING it against the real worker, not by
+inspection — the Rust-level integration tests exist specifically because
+the worker ctest suite (constructing `OpContext`/`ctx.bodies`/`ctx
+.partition` directly) cannot see either one:**
+
+1. **`mate.target` used to ride in the wire `inputs[]`** (shipped in
+   WP-1.5, `wire.rs::wire_op_inputs`'s `PlaceComponent` arm). The worker's
+   generic `resolve_input_refs` pre-flight treats ANY unresolved `inputs[]`
+   entry as blocking — correct for a face/edge an op structurally needs
+   (Hole can't drill nowhere), wrong for a mate: an unresolvable target
+   must still let the component publish at its frozen `placement`. Before
+   the fix, a mate to a deleted body published **zero bodies**, not the
+   component at its last-good spot. Fixed: `wire_op_inputs`'s
+   `PlaceComponent` arm now returns no input, ever — `mate.target` travels
+   only in `params`, resolved entirely by `resolve_mate_reseat`.
+   `element_refs_mut`'s manual-repair-rebind surface is UNCHANGED (still
+   exposes the mate target) — the two mechanisms are independent, and this
+   is now a deliberate, permanent divergence between them (both existing
+   wire.rs unit tests asserting the OLD 1:1 shape updated to assert the
+   new one, with the reasoning recorded inline).
+2. **`merge_outcome` (`PlanExecutor.cpp`) unconditionally downgraded any
+   step with non-empty `needs_repair` to `NeedsRepair` status**, discarding
+   `body_events` even when the op outcome carried them. Every OTHER op's
+   needs_repair path returns BEFORE building geometry (resolve-first,
+   build-second), so this was invisible until now — mate is the FIRST op
+   that legitimately wants to publish geometry AND flag a repair
+   simultaneously. Fixed: a step stays `Ok` when it produced body events,
+   even alongside needs_repair evidence; verified safe for every existing
+   op (117/117 ctest unchanged; no existing op populates both).
+
+**Rust (regen pipeline):** `PlanStepEvent.mate_placement: Option<Box
+<FrozenPlacement>>` (boxed — clippy `large_enum_variant`), parsed in `wire
+.rs::parse_mate_placement` (deliberately infallible, same reasoning as
+`parse_body_rank_keys`). `Scratch::mate_placement_by_step` buffers it per
+step, gated by `last_valid_step` (same cutoff body/element buffering
+uses), applied via new `Timeline::set_place_component_placement` (mirrors
+`set_record_outputs`'s "derived data, no undo entry" shape) directly on
+`session.timeline` inside `RegenExecutor::run` — lands in `self.regen
+.timeline` via the existing `self.regen = scratch` swap, no new hook
+needed. New `DocumentSession::sync_mate_placements` (mirrors `sync_record_
+outputs`) propagates it into the document's OWN authoritative timeline,
+matched by `RecordId` (never a raw index carried across the two
+timelines — they can differ in length/order across a checkpoint-
+accelerated regen). Wired into `document_runtime.rs::commit_snapshot`
+right beside `sync_record_outputs`.
+
+**Protocol:** SCHEMA §7.2 gains OPTIONAL `planStep.matePlacement` (purely
+additive) AND a CORRECTIVE note on `PlaceComponent`'s `inputs[]` (mate
+removed — see defect 1 above), both in one §14 changelog entry (cross-
+track, single-repo).
+
+GATE: worker ctest **117/117** (115 baseline + 2 new targets:
+`test_component_mate_solver`, 9 numeric-parity assertions;
+`test_component_mate_reseat`, 5 integration assertions) · `cargo fmt`/`clippy -D
+warnings` clean workspace-wide · `ONECAD_REQUIRE_WORKER=1 cargo test
+--workspace --no-fail-fast` **100% green** (two pre-existing wire.rs unit
+tests updated to assert the new, correct `PlaceComponent` inputs[] shape;
+new `component_ops.rs` integration tests: reseat-on-move through the REAL
+worker + `DocumentRuntime` — including a genuine `promote_selection`/
+`AcquireElementIds` round trip and a ladder-scoring anchor-placement
+lesson recorded inline — and unresolvable-mate-still-publishes, which is
+the test that caught defect 1) · frontend gates unaffected (zero frontend
+files touched, confirmed via `git status`).
+
 ## COMPONENT-LIBRARY WP-2.6 (2026-08-13) — GATE PASSED, P2 CLOSED
 
 Kernelbench cases from table extremes (spec §10) — the last named P2 WP.

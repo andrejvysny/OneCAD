@@ -601,9 +601,24 @@ Per-step `event`s (`event:"planStep"`), one per executed step:
                        "relabeled": [ /* {elementId, topoKey, kind, bodyId} */ ] },
   "needsRepair": [ /* NeedsRepair payloads — §9 — STATE, not error */ ],
   "signatures": { "geometry": "aa11…", "bodyLifecycle": "bb22…", "referencedBinding": "cc33…" },
-  "diagnostics": [ { "severity": "warning", "code": "…", "message": "…" } ]
+  "diagnostics": [ { "severity": "warning", "code": "…", "message": "…" } ],
+  "matePlacement": { "translate": [0, 0, 5], "rotate": { "center": [0,0,0], "axis": [0,0,1], "angleDeg": 0 } }
 }
 ```
+
+- **`matePlacement` (OPTIONAL, Component Library P3 WP-3.1, spec §5.5).**
+  Present ONLY on a `PlaceComponent` step whose `params.mate` resolved
+  `AutoBind` through the ladder AND the recomputed seat moved beyond the
+  worker's pinned reseat epsilon (`ComponentOp.cpp`'s
+  `kMateReseatTranslationEpsilonMm`/`kMateReseatRotationEpsilonDeg`) —
+  absent on every other step, keeping the pre-WP-3.1 wire byte-identical.
+  Same `FrozenPlacement` shape as `PlaceComponentParams.placement`
+  (`{translate, rotate:{center, axis, angleDeg}}`). Rust persists this as a
+  DERIVED, no-undo writeback of that record's `placement` field (mirrors
+  `sync_record_outputs`) — it is never itself a fencing input, and a mate
+  that resolves `NeedsRepair` (target vanished/ambiguous) never populates
+  this field; the component publishes at its last frozen `placement`
+  instead, per the "never drop it, never silently move it" rule.
 
 `diagnostics[]` is additive structured evidence. Required fields are
 `severity` (`"info" | "warning" | "error"`), `code` (≤128 bytes), and
@@ -2772,6 +2787,43 @@ edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
 
+- **2026-08-13 — §7.2 ADDITIVE `planStep.matePlacement`; §7.3 `PlaceComponent`
+  CORRECTIVE `inputs[]` — `mate.target` REMOVED** (Component Library P3
+  WP-3.1, spec §5.5, single-repo, both tracks land together). The prior
+  entry below (2026-08-12) put `mate.target` in `inputs[]`; this was
+  correct only while the worker never resolved `mate` at all. The worker's
+  generic `resolve_input_refs` pre-flight treats ANY unresolved `inputs[]`
+  entry as blocking — genuinely correct for a face/edge an op structurally
+  needs, but WRONG for a mate: an unresolvable target must still let the
+  component publish at its frozen `placement` (spec: "never drop it, never
+  silently move it"), not skip the op. Found tracing `wire_op_inputs` while
+  building the Rust-side end-to-end regen test for the NeedsRepair path —
+  `mate.target` now travels ONLY in `params` (unchanged) and is resolved
+  entirely
+  in-process by the worker's own `resolve_mate_reseat`, never through the
+  wire `inputs[]` pre-flight. Persistent
+  mate re-seating on regen: a `PlaceComponent` step whose `mate` resolves
+  `AutoBind` through the ladder (worker-side, mid-`ExecutePlan`, so it sees
+  SAME-TICK geometry — no new hashing hazard, since `params.mate` itself
+  never changes and `history_prefix_hash` never needs to see the
+  recomputed `placement` before executing) and moves past the worker's
+  pinned reseat epsilon publishes with the new seat AND echoes it via this
+  optional field; absent on every other step (byte-identical wire
+  otherwise). Rust persists it as a derived, no-undo `placement` writeback
+  (`document_runtime.rs::sync_mate_placements`, mirrors
+  `sync_record_outputs`) — never a fencing input, never touched on
+  `NeedsRepair` (the component publishes at its last frozen `placement`
+  instead, per spec's "never drop it, never silently move it"). Worker:
+  `worker/src/ops/ComponentMateSolver.h/.cpp` (a verbatim port of
+  `src/modules/library/placementSolver.ts`'s WP-1.5 interactive-gesture
+  math), `worker/src/session/ClassifyElement.{h,cpp}` (new in-process
+  `classify_shape`, no wire round trip), `worker/src/ops/ComponentOp.cpp`
+  (`resolve_mate_reseat` — cross-body-safe ladder resolution, VF-M7
+  discipline: the target body is ALWAYS read from `mate.target.primary
+  .bodyId`, never assumed to be the placed component's own body), threaded
+  through `CandidateResult`/`emit_plan_step` in
+  `worker/src/session/PlanExecutor.{h,cpp}`. Purely additive; no existing
+  wire form changes.
 - **2026-08-12 — §7.3 NEW ops `PlaceComponent`/`DetachComponent`** (Component
   Library WP-0.2/WP-1.2, single-repo, both tracks land together). Instantiate
   a library component as a first-class placed instance, and drop a placed

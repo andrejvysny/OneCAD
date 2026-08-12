@@ -19,11 +19,23 @@
 // is the stdio round-trip, which is what `classify_latency.rs` measures.
 #pragma once
 
+#include "nlohmann/json.hpp"
 #include "protocol/Envelope.h"
 #include "session/Session.h"
+
+class TopoDS_Shape;
 
 namespace onecad::session {
 
 protocol::Envelope handle_classify_element(Session& session, const protocol::Envelope& req);
+
+// The same classification `handle_classify_element` computes (`kind`,
+// `surfaceType`/`curveType`, `frame`), callable IN-PROCESS on a bare shape —
+// no wire round trip, no `Session::bodies_copy()` snapshot. For a regen-time
+// consumer (Component Library WP-3.1 mate re-seating) that must see THIS
+// TICK's geometry while an op executor is still running, not a
+// previously-published head. Never `present:false`-shaped like the wire
+// verb — the caller already has a concrete shape in hand.
+nlohmann::json classify_shape(const TopoDS_Shape& shape);
 
 }  // namespace onecad::session

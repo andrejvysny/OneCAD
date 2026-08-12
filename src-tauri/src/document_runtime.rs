@@ -1397,6 +1397,10 @@ impl DocumentRuntime {
                 // Write the just-produced body provenance back onto the records so the
                 // dependency graph gains its body edges (see `sync_record_outputs`).
                 self.sync_record_outputs(&executed);
+                // Component Library P3 WP-3.1: a reseated mate's `placement`
+                // is derived data the same way `outputs` is — write it back
+                // onto the document's own record right beside it.
+                self.sync_mate_placements(&executed);
                 // Label freshly-imported bodies from their STEP product names BEFORE
                 // the rows are adopted — `adopt_regen_bodies` is insert-only, so this
                 // is the one moment the name can reach `document.bodies`.
@@ -1714,6 +1718,16 @@ impl DocumentRuntime {
     fn sync_record_outputs(&mut self, executed: &BTreeSet<RecordId>) {
         let produced = produced_bodies_of(&self.regen.timeline, &self.regen.bodies);
         self.session.sync_record_outputs(&produced, executed);
+    }
+
+    /// Component Library P3 WP-3.1 (spec §5.5): writes a reseated mate's
+    /// `placement` from `self.regen.timeline` (already updated by the
+    /// executor, see `RegenExecutor::run`) onto the document's own record —
+    /// the same derived-writeback treatment `sync_record_outputs` gives
+    /// `outputs`, right beside it.
+    fn sync_mate_placements(&mut self, executed: &BTreeSet<RecordId>) {
+        self.session
+            .sync_mate_placements(&self.regen.timeline, executed);
     }
 
     fn inherit_v2_pattern_child_display_metadata(&mut self, existing: &HashSet<BodyId>) {

@@ -1,3 +1,135 @@
+# Handoff — Component Library (P3 WP-3.1, persistent mate re-seating)
+
+Session 14 · 2026-08-13
+
+> Continues Session 13 directly. WP-2.6/P2-closed is COMMITTED (`ce68927`);
+> this session's WP-3.1 delta is uncommitted on top, this session's own
+> commit still to come.
+
+## Goal
+
+P3 WP-3.1, spec §5.5, chosen as P3's FIRST WP deliberately — the highest
+architectural risk piece in the whole Component Library effort, mirroring
+how this program's own P0 was a foundation spike to de-risk P1. "A plate
+that moves re-seats its screws; a plate whose hole was deleted produces a
+truthful NeedsRepair, not a floating part."
+
+## Done and why
+
+Full detail in `TODO.md` § COMPONENT-LIBRARY P3 WP-3.1 (gate entry). This
+was NOT a routine WP — three research/design passes (an explore agent, a
+dedicated architecture-design agent, and extensive hand-verification
+against actual code) preceded implementation, and the implementation
+itself surfaced two real, previously-invisible defects. Worth restating
+everything, since a future reader will need all of it:
+
+- **The initial architecture plan's framing was wrong, and worth knowing
+  WHY, so nobody re-derives it incorrectly**: the first design pass
+  proposed resolving mates in a RUST-side pre-pass, before hashing the
+  regen plan. This is wrong because a mate's target is frequently a body
+  produced by an EARLIER STEP of the SAME regen tick (the plate whose hole
+  just moved, in the SAME edit) — at plan-compile time, Rust only has last
+  tick's STALE published geometry. The correct design resolves entirely
+  **worker-side, mid-`ExecutePlan`**, where `OpContext::bodies` already
+  carries every body known so far in THIS SAME PASS. This also means
+  `params.mate` itself (the actually-hashed evidence) never changes, so
+  there is zero hash-fencing hazard — the only Rust-side mutation is a
+  POST-COMMIT derived writeback of the resolved `placement`, exactly like
+  `sync_record_outputs` already does for `outputs`.
+- **The seated-transform math is a verbatim port, not new design**:
+  `src/modules/library/placementSolver.ts` (WP-1.5's interactive gesture)
+  already has this exact algorithm. `ComponentMateSolver.h/.cpp` ports it
+  1:1, and its own test file cites `placementSolver.test.ts`'s cases as
+  the numeric-parity oracle — a future edit to either side that silently
+  diverges the two should be caught by keeping both test files' cases in
+  lockstep.
+- **Cross-body safety (VF-M7) is load-bearing, not incidental**: a mate
+  target is a face/edge on a DIFFERENT body than the one `PlaceComponent`
+  mints. `resolve_mate_reseat` ALWAYS derives the target body from
+  `mate.target.primary.bodyId`, never the op's own body — the exact
+  discipline `worker/tests/test_cross_body_element_ref.cpp` exists to
+  enforce, now also covered by a dedicated mate-specific parity test.
+- **Two real defects, found by RUNNING the real worker + `DocumentRuntime`
+  pipeline in an integration test, invisible to the worker-only ctest
+  suite** (this is WHY the Rust-level `component_ops.rs` tests exist, not
+  just the C++ ones — a worker ctest constructs `OpContext` directly and
+  never exercises the Rust wire-lowering/pre-flight layer where both bugs
+  actually lived):
+  1. `mate.target` rode in the wire `inputs[]` since WP-1.5. The worker's
+     generic `resolve_input_refs` pre-flight treats ANY unresolved
+     `inputs[]` entry as BLOCKING — correct for Hole/Fillet (a face/edge
+     the op structurally needs), wrong for a mate. Before the fix, a mate
+     to a deleted body published ZERO bodies — the exact "silently drops
+     the part" failure mode spec §5.5 exists to prevent. Fixed:
+     `wire.rs::wire_op_inputs`'s `PlaceComponent` arm now NEVER emits an
+     input, mate present or not.
+  2. Even after fix 1, `PlanExecutor.cpp::merge_outcome` unconditionally
+     downgraded any step with non-empty `needs_repair` to a status that
+     DISCARDS `body_events` — because every OTHER op's needs_repair path
+     returns before building geometry (resolve-first, build-second), this
+     was invisible until mate, the FIRST op that legitimately wants to
+     publish geometry AND flag a repair at the same time. Fixed: a step
+     stays `Ok` when it produced body events, regardless of accompanying
+     needs_repair evidence. Verified safe for every other op (worker ctest
+     117/117 unchanged — no existing op populates both fields together).
+  3. A smaller lesson from building the reseat integration test itself:
+     the resolution ladder's `anchor` score contribution is relative to
+     the CANDIDATE FACE'S CENTROID, not a cylinder's axis-parametrization
+     origin. An anchor point at the axis's `frame.origin` (the shank's
+     BASE, not its middle) scored the correct candidate at 0.83 — just
+     under the 0.85 auto-bind threshold. Recorded in the test's own
+     comments so nobody re-hits this while writing a similar fixture.
+
+## How to resume
+
+1. Run the `handoff` skill with "resume".
+2. Worker rebuilt this session — staged sidecar reflects the new
+   `ComponentMateSolver`/`resolve_mate_reseat`/`merge_outcome` changes.
+   Rebuild again if stale.
+3. Next task: P3 has five more bullets per spec §10 — `document` source
+   kind, "Save as Component" (param roles + attachment placement), "Save
+   as Template" + start-screen row, `ReplaceComponent`, opt-in version
+   upgrade. No dependency ordering has been re-derived yet for these
+   (WP-3.1 was chosen first specifically to de-risk, independent of the
+   others) — scope the next WP fresh rather than assuming an order.
+4. Full gate this session:
+   ```bash
+   ONECAD_OCCT_ROOT="$HOME/.onecad-occt/8.0.1" scripts/build-worker.sh Release
+   ctest --test-dir worker/build --output-on-failure   # 117/117
+   cd src-tauri && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
+   ONECAD_WORKER_PATH=$PWD/../worker/build/onecad-worker ONECAD_REQUIRE_WORKER=1 \
+     cargo test --workspace --no-fail-fast   # 100% green
+   ```
+   Frontend gate not re-run — zero frontend files touched this session
+   (confirmed via `git status`).
+
+## Open questions
+
+- `kMateReseatRotationEpsilonDeg = 1e-2` (`ComponentOp.cpp`) is a new
+  constant with no existing precedent to cite verbatim (unlike the
+  translation epsilon, a direct reuse of Hole's `kPointPlaneFence`) —
+  defensible (derived from ~1e-3mm drift at the SHCS's ~10mm head radius)
+  but arbitrary once components with much larger characteristic radii
+  exist. Not blocking.
+- A `NeedsRepair` mate re-attempts resolution fresh every regen tick (no
+  seeding/stickiness) — consistent with how every other `NeedsRepair`
+  input already behaves in this codebase, but flagged since mate is the
+  spec-called-out differentiator feature and a reviewer may want different
+  behavior (e.g. requiring an explicit repair-panel action once flagged).
+- `DetachComponent` has no `mate` field at all (confirmed, `record.rs`) —
+  this WP does not touch it, by construction, not oversight.
+
+## Pointers
+
+- Tasks → `TODO.md` § COMPONENT-LIBRARY P3 WP-3.1 (gate entry, full detail)
+- Snapshot → `CURRENT_STATE.md` § COMPONENT LIBRARY — LIVE DELTA (session 14)
+- Spec → `TheComponentLibrary/onecad-component-library-spec.md` §5.5
+- Reference math → `src/modules/library/placementSolver.ts` +
+  `placementSolver.test.ts` (the numeric-parity oracle
+  `ComponentMateSolver.cpp`'s own test cites)
+
+---
+
 # Handoff — Component Library (WP-2.6, kernelbench extremes, P2 CLOSED)
 
 Session 13 · 2026-08-13

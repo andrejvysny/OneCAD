@@ -145,6 +145,8 @@ add_library(worker_core STATIC
     # --- COMPONENT-LIBRARY WP-0.2: placed-component op family (`PlaceComponent`,
     #     SCHEMA §7.3) ---
     src/ops/ComponentOp.cpp
+    # --- COMPONENT-LIBRARY P3 WP-3.1: mate re-seat candidate-transform math ---
+    src/ops/ComponentMateSolver.cpp
     src/io/ExportStep.cpp
     src/io/MeshExport.cpp
     src/io/Checkpoint.cpp

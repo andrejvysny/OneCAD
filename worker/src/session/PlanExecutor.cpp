@@ -173,7 +173,8 @@ json signatures_json(const BodyStore& bodies, const std::vector<BodyEvent>& even
 void emit_plan_step(HandlerContext& ctx, std::uint64_t req_id, std::uint64_t job_id,
                     std::uint64_t step_index, const std::vector<BodyEvent>& events,
                     const json& element_map_delta, const json& needs_repair, const json& signatures,
-                    const json& diagnostics) {
+                    const json& diagnostics,
+                    const std::optional<json>& mate_placement = std::nullopt) {
     json body_events = json::array();
     for (const auto& e : events) {
         json be = {{"kind", e.kind}, {"bodyId", e.body_id}};
@@ -191,6 +192,10 @@ void emit_plan_step(HandlerContext& ctx, std::uint64_t req_id, std::uint64_t job
         {"signatures", signatures},
         {"diagnostics", diagnostics},
     };
+    // Component Library P3 WP-3.1 (SCHEMA §7.2, additive): present ONLY on a
+    // step that actually reseated a mate — absence keeps every other step
+    // byte-identical to the pre-WP-3.1 wire.
+    if (mate_placement) payload["matePlacement"] = *mate_placement;
     Envelope ev = Envelope::event(req_id, "planStep", step_index, std::move(payload));
     ev.stamp.job_id = job_id;
     if (ctx.emit) ctx.emit(ev);
@@ -322,8 +327,21 @@ void merge_outcome(CandidateResult& result, ops::OpOutcome outcome) {
         result.needs_repair.push_back(std::move(repair));
     }
     for (auto& diag : outcome.diagnostics) result.diagnostics.push_back(std::move(diag));
+    if (outcome.mate_placement) result.mate_placement = std::move(outcome.mate_placement);
     if (outcome.status == ops::OpOutcome::Status::Ok) {
-        result.status = result.needs_repair.empty()
+        // A step that PUBLISHED geometry stays Ok even when it ALSO carries
+        // NeedsRepair evidence (Component Library P3 WP-3.1: a mated
+        // `PlaceComponent` publishes at its frozen `placement` AND flags a
+        // stale mate simultaneously — spec §5.5 "never drop it, never
+        // silently move it"). Every OTHER op's needs_repair path returns
+        // BEFORE building any geometry (Hole/Fillet/Chamfer/Shell/
+        // OffsetFace all early-return on an unresolved ref, e.g.
+        // `HoleOp.cpp`'s `if (face.IsNull()) { out.needs_repair...; return
+        // out; }` before the tool solid is ever built) — `result.
+        // body_events` is empty there, so this branch is unreachable for
+        // them and their existing "needsRepair ⇒ prepare m−1, no geometry"
+        // behavior is unchanged.
+        result.status = (result.needs_repair.empty() || !result.body_events.empty())
                             ? CandidateResult::Status::Ok
                             : CandidateResult::Status::NeedsRepair;
     } else if (outcome.status == ops::OpOutcome::Status::Failed) {
@@ -480,7 +498,7 @@ ExecResult execute_ops(ScratchJob& job, const json& ops, std::uint64_t job_id, s
                            candidate.delta.to_json(), candidate.needs_repair,
                            signatures_json(job.bodies, candidate.body_events,
                                            candidate.ref_bindings),
-                           diagnostics);
+                           diagnostics, candidate.mate_placement);
             StepResult r;
             r.step_index = step_index;
             r.status = "ok";
