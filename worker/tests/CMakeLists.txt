@@ -202,6 +202,14 @@ add_executable(test_hole_op test_hole_op.cpp)
 target_link_libraries(test_hole_op PRIVATE worker_core)
 add_test(NAME hole_op COMMAND test_hole_op)
 
+# --- COMPONENT-LIBRARY WP-0.2: `PlaceComponent` numerics — the hardcoded M6
+#     SHCS generator's exact analytic volume, rigid-placement invariance, and
+#     the P0-scope refusals (non-generator source, empty generatorId).
+#     In-process, real OCCT. ---
+add_executable(test_component_ops test_component_ops.cpp)
+target_link_libraries(test_component_ops PRIVATE worker_core)
+add_test(NAME component_ops COMMAND test_component_ops)
+
 # --- VF-M7: an ElementMap entry minted on body A must never bind a face of body B.
 #     Hole + Shell against two DIFFERENT bodies, asserted by exact analytic volume
 #     (silent wrong drill / wrong seat / wrong shell wall). In-process, real OCCT. ---

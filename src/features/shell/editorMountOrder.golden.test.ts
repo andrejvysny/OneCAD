@@ -17,6 +17,8 @@ import { EDITOR_MOUNT_ORDER_CONTRACT } from "@/test/contracts/shellContract";
 import { EDITOR_REGIONS } from "@/app/shell/EditorShell";
 import { MODELING_MODULE_ID } from "@/modules/modeling/manifest";
 import { contributeModelingUi } from "@/modules/modeling/ui";
+import { LIBRARY_MODULE_ID } from "@/modules/library/manifest";
+import { contributeLibraryUi } from "@/modules/library/register";
 import { SHELL_MODULE_ID } from "@/modules/shell/panelIds";
 import { contributeShellChrome } from "@/modules/shell/register";
 
@@ -46,6 +48,7 @@ describe("editor mount order", () => {
     platform = createPlatform();
     contributeShellChrome(platform.createScope(SHELL_MODULE_ID));
     contributeModelingUi(platform.createScope(MODELING_MODULE_ID));
+    contributeLibraryUi(platform.createScope(LIBRARY_MODULE_ID));
   });
 
   it("mounts exactly the frozen contribution set, in the frozen order", () => {
@@ -55,7 +58,12 @@ describe("editor mount order", () => {
   it("places every registered panel in a region the shell actually renders", () => {
     // A contribution in an unrendered slot is invisible with no error — the one
     // failure mode slot hosting introduces that the order check cannot see.
-    const rendered = new Set<string>([Slots.ShellTop, ...EDITOR_REGIONS]);
+    // `Slots.StatusSection` (WP-1.6) is the one deliberate exception to
+    // "every rendered slot is an EDITOR_REGIONS entry": it nests INSIDE
+    // `StatusBar`'s own `<SlotHost/>`, and `StatusBar` itself is the
+    // `Slots.ShellBottom` panel — genuinely rendered, just not a top-level
+    // region, so `mountOrder()`'s top-level scan correctly never sees it.
+    const rendered = new Set<string>([Slots.ShellTop, ...EDITOR_REGIONS, Slots.StatusSection]);
     for (const panel of platform.panels.entries()) {
       expect(rendered.has(panel.slot), `${panel.id} is in unrendered slot ${panel.slot}`).toBe(
         true,

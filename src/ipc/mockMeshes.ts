@@ -14,6 +14,7 @@ import { visualSegmentsForClosedCurve } from "@/tools/preview/visualTessellation
 import {
   applyPlacementToNormal,
   applyPlacementToPoint,
+  placementMatrix,
   type Mat4Rows,
 } from "@/tools/preview/patternPreview";
 import type { Vec3 } from "@/tools/preview/depthProjection";
@@ -721,4 +722,49 @@ export function makeRevolveBodyMesh(
   ];
 
   return encodeMesh1({ positions: worldPositions, normals, faces, edges, lod });
+}
+
+// ── Placed component (mock PlaceComponent) — the M6 SHCS stub ───────────────
+
+/**
+ * Head-underside-seated cylinder dims, MIRRORING the worker's hardcoded stub
+ * (`worker/src/ops/ComponentOp.cpp::build_m6_shcs`) — every P1 generator id
+ * builds this same solid, so the mock's fixture-only fabrication does too.
+ * Origin convention matches: head spans Z∈[0,6], shank spans Z∈[-20,0].
+ */
+const M6_SHCS_HEAD_RADIUS = 5; // dk/2
+const M6_SHCS_HEAD_HEIGHT = 6; // k
+const M6_SHCS_SHANK_RADIUS = 3; // d/2
+const M6_SHCS_SHANK_LENGTH = 20; // l
+
+/**
+ * Local (untransformed) M6 SHCS body — head fused to shank, origin at the
+ * seating plane. Built once per call (cheap; two `makeCylinderMesh` + one
+ * concat), then rigidly placed by {@link placeComponentGhostMesh}.
+ */
+function m6ShcsLocalMesh(): ArrayBuffer {
+  const head = transformMesh1(
+    makeCylinderMesh(M6_SHCS_HEAD_RADIUS, M6_SHCS_HEAD_HEIGHT),
+    placementMatrix([0, 0, M6_SHCS_HEAD_HEIGHT / 2], [0, 0, 0], [0, 0, 1], 0),
+  );
+  const shank = transformMesh1(
+    makeCylinderMesh(M6_SHCS_SHANK_RADIUS, M6_SHCS_SHANK_LENGTH),
+    placementMatrix([0, 0, -M6_SHCS_SHANK_LENGTH / 2], [0, 0, 0], [0, 0, 1], 0),
+  );
+  return concatMesh1(head, shank);
+}
+
+/**
+ * The placed-component ghost/committed mesh at a candidate world placement
+ * (Component Library WP-1.5). NOT a stand-in in the `makeExtrudeBodyMesh`
+ * sense — it is the SAME fixed solid the worker's v1 generator stub always
+ * builds, rigidly placed by the SAME `placementMatrix` `transformMesh1`
+ * (mock TransformBody) uses, so a mock ghost and a mock commit agree exactly.
+ */
+export function placeComponentGhostMesh(
+  translate: [number, number, number],
+  rotate: { center: [number, number, number]; axis: [number, number, number]; angleDeg: number },
+): ArrayBuffer {
+  const m = placementMatrix(translate, rotate.center, rotate.axis, rotate.angleDeg);
+  return transformMesh1(m6ShcsLocalMesh(), m);
 }

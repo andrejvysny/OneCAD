@@ -6,6 +6,7 @@ members = [
     "crates/onecad-worker-stub",
     "crates/onecad-regen",
     "crates/onecad-kernelbench",
+    "crates/onecad-library",
 ]
 
 # Shared dependency versions for every workspace member. Individual crates
@@ -50,6 +51,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 onecad-core = { workspace = true }
+onecad-library = { path = "crates/onecad-library" }
 onecad-protocol = { workspace = true, features = ["client", "tracing"] }
 # `tracing`: tauri's command macro then wraps EVERY `#[tauri::command]` in a
 # `ipc::request::handler` debug span (cmd name + timing) at the call-site module

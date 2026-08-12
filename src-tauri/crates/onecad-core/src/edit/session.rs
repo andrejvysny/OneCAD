@@ -614,6 +614,10 @@ impl DocumentSession {
         // OffsetFace params must satisfy the SCHEMA §7.3 lockstep + distance-type
         // invariants (all entry paths).
         validate_offset_face(&record.op)?;
+        // PlaceComponent params must be structurally well-formed (all entry paths).
+        validate_place_component(&record.op)?;
+        // DetachComponent params must be structurally well-formed (all entry paths).
+        validate_detach_component(&record.op)?;
         // F8: re-derive the uniform input view for Known ops (self-healing — don't
         // trust caller-supplied `inputs`; mirrors `update_operation_params` and the
         // record deserialize path). An Opaque frozen node keeps its stored inputs.
@@ -710,6 +714,10 @@ impl DocumentSession {
         // OffsetFace params must satisfy the SCHEMA §7.3 lockstep + distance-type
         // invariants (all entry paths).
         validate_offset_face(&op)?;
+        // PlaceComponent params must be structurally well-formed (all entry paths).
+        validate_place_component(&op)?;
+        // DetachComponent params must be structurally well-formed (all entry paths).
+        validate_detach_component(&op)?;
         let mut nr = prior.clone();
         nr.op = op;
         // A sanctioned Fillet⇄Chamfer swap is the only path that can strand the
@@ -1842,6 +1850,44 @@ fn validate_offset_face(op: &Operation) -> Result<(), DomainError> {
     p.validate().map_err(DomainError::Validation)
 }
 
+/// Validates a [`KnownOperation::PlaceComponent`] record's params: a
+/// namespaced `componentId`, a non-empty `componentVersion`, a well-formed
+/// `sha256:`-prefixed `componentRevision`, a non-empty generator id, a
+/// non-empty `mate.selfAttachment` when a mate is present, and a finite
+/// placement (see [`PlaceComponentParams::validate`]). Non-component and
+/// opaque ops are trivially valid. Enforced here for the same single-writer
+/// reason as [`validate_import_step`].
+///
+/// **Structural only.** Whether a `params` key is actually declared `role:
+/// free` on the component's signature cannot be checked here — `onecad-core`
+/// must not depend on the library crate that resolves a component signature
+/// (the same wall that keeps the kernel closed, ADR-0002's spirit applied to
+/// the library). That enforcement lives at the app-crate authoring entry
+/// point instead (Component Library WP-1.2/1.3).
+///
+/// [`PlaceComponentParams::validate`]: crate::document::record::PlaceComponentParams::validate
+fn validate_place_component(op: &Operation) -> Result<(), DomainError> {
+    let Operation::Known(KnownOperation::PlaceComponent(p)) = op else {
+        return Ok(());
+    };
+    p.validate().map_err(DomainError::Validation)
+}
+
+/// Validates a [`KnownOperation::DetachComponent`] record's params: the same
+/// `source`/`placement` self-consistency [`PlaceComponentParams`] requires
+/// (see [`DetachComponentParams::validate`]). Non-detach and opaque ops are
+/// trivially valid. Enforced here for the same single-writer reason as
+/// [`validate_place_component`].
+///
+/// [`DetachComponentParams::validate`]: crate::document::record::DetachComponentParams::validate
+/// [`PlaceComponentParams`]: crate::document::record::PlaceComponentParams
+fn validate_detach_component(op: &Operation) -> Result<(), DomainError> {
+    let Operation::Known(KnownOperation::DetachComponent(p)) = op else {
+        return Ok(());
+    };
+    p.validate().map_err(DomainError::Validation)
+}
+
 /// The bodies whose GEOMETRY a `TransformBody` record moves — the "target
 /// lineage" the SCHEMA §7.3 edit-safety gate is scoped to.
 ///
@@ -2065,6 +2111,15 @@ fn op_type_edit_allowed(prior: &Operation, next: &Operation) -> Result<(), &'sta
                 Ok(())
             }
         }
+        // DetachComponent (spec §3.4, "the honest break link"): a placed
+        // component may be detached in place, one-directional — the reverse
+        // (re-attaching a library identity to a bare detached body) is not a
+        // sanctioned edit, mirroring how a Chamfer with `distance2` set
+        // refuses to become a Fillet rather than silently dropping data.
+        (
+            Operation::Known(KnownOperation::PlaceComponent(_)),
+            Operation::Known(KnownOperation::DetachComponent(_)),
+        ) => Ok(()),
         _ => Err(OP_TYPE_EDIT_REASON),
     }
 }

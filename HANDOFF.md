@@ -1,3 +1,599 @@
+# Handoff — Component Library (start-screen browser)
+
+Session 11 · 2026-08-12
+
+> Continues Session 10 directly — same worktree, same uncommitted delta.
+> User-requested (with a screenshot), not a plan WP: browse the library
+> from the START screen, not only inside an opened project.
+
+## Done and why
+
+Full detail in `TODO.md` § COMPONENT-LIBRARY start-screen browser. New
+`StartNavKey = "library"` (`StartScreen.tsx`), a fourth `StartSidebar` row,
+and two new read-only components (`StartLibraryPanel.tsx`,
+`ComponentDetails.tsx`). Zero Rust changes — `list_library_components`/
+`reindex_library` never needed an open document, confirmed by reading
+`library.rs` first. Deliberately does NOT reuse the editor `LibraryPanel`'s
+placement-arm gesture (no `ViewportEngine`/`DocumentRuntime` exists on this
+screen) — a selected card's details pane says "Open a project to place this
+component" rather than faking a drag with nowhere to land it.
+
+## How to resume
+
+1. Run the `handoff` skill with "resume".
+2. This is complete and gated (`TODO.md`'s entry has the numbers). Next
+   task is whichever of WP-2.5/WP-2.6 the user picks (see Session 10's own
+   entry below), UNLESS the user wants the natural follow-up this session
+   flagged: "browse → jump into a new project with the component pre-armed"
+   — that needs `newProject()` to resolve before the editor's module
+   registration can arm anything, a real sequencing problem not designed
+   here.
+
+## Pointers
+
+- Tasks → `TODO.md` § COMPONENT-LIBRARY start-screen browser
+- Snapshot → `CURRENT_STATE.md` § COMPONENT LIBRARY — LIVE DELTA (session 11)
+
+---
+
+# Handoff — Component Library (WP-2.4, Configurator UI)
+
+Session 10 · 2026-08-12
+
+> Continues Session 9 directly (below) — same worktree, same uncommitted
+> delta, P0/P1/WP-2.1–2.3 unchanged. This entry covers WP-2.4 only.
+
+## Goal
+
+WP-2.4 per Session 9's own "How to resume": the configurator UI, spec §294
+— free params as editable controls, live designation string, committed
+through WP-2.3's `SetComponentParams` command.
+
+## Done so far (and why)
+
+Full detail in `TODO.md` § COMPONENT-LIBRARY WP-2.4. Worth restating:
+
+- **Deliberately scoped to POST-placement editing only.** Spec §294 also
+  describes a pre-placement configurator (opened from the library card,
+  before dragging) and a live 3D preview while editing. Neither is built —
+  building a real pre-placement flow means touching `LibraryPanel`'s card
+  interaction and the ghost-preview lane, and a live edit-time 3D preview
+  means wiring a `PreviewOp` session into the inspector section, both
+  genuinely separate surfaces. The slice that builds directly on WP-2.3
+  (an inspector section for an ALREADY-PLACED instance) is what shipped.
+- **Backend DTO had to widen first.** `IndexEntry`/`LibraryComponentDto`
+  only carried `parameter_keys` (names) before this session — nothing told
+  the frontend which keys are `role: "free"` (editable) vs `"table"`/
+  `"computed"` (display-only, backend-derived). Added the full
+  `parameters: BTreeMap<String, ParameterSpec>` + `designation:
+  Option<String>` to both.
+- **Found a real bug reading the file this WP needed anyway**:
+  `tauriClient.ts::placeComponent` never forwarded `rotate` to the real
+  `place_component` Tauri command. WP-1.5's handoff claimed "commit via
+  `CadClient.placeComponent` (now carrying rotate, not just translate)" —
+  true only on the mock lane. Fixed; flagged that nothing automated proves
+  the real-backend half (no real-worker Playwright lane exists here).
+- **mockClient's `setComponentParams` is a REAL implementation**, unlike
+  `detachComponent`'s honest "not yet" stub — `commitPlaceComponent` now
+  stores `featureParams` (it never did before; `PlaceComponent` bypasses
+  `commitOp`'s generic path entirely), so the mock's role=free check and
+  merge are the genuine logic, not a fake pass-through. What's NOT
+  simulated: the mock's mesh is a fixed demo shape regardless of size, so an
+  edit changes the stored value + designation but not the rendered geometry.
+- **A real spec-example inconsistency, worked around not copied**: spec
+  §2.1's designation example (`"ISO 4762 M{thread}x{length}"`) pairs a
+  literal `M` with a thread VALUE that, in this codebase's actual
+  convention (WP-2.1/2.2, both keyed `"M6"`-style), already carries the `M`
+  — doubling it. Every designation string this session authored drops the
+  literal `M`. No real `component.toml` content exists yet to conflict with.
+
+## How to resume
+
+1. Run the `handoff` skill with "resume".
+2. No worker rebuild needed — Rust changes are app-crate/library-crate DTO
+   widening only, no wire/C++ changes.
+3. Next task: **WP-2.5** (three-level thread detail: cosmetic default/
+   simplified/modeled) or **WP-2.6** (kernelbench cases from table
+   extremes) — independent of each other and of this WP per the plan's
+   dependency graph, pick either. If the user wants spec §294 covered in
+   full, the pre-placement configurator + live 3D preview this WP cut are
+   the other candidates — not yet a numbered WP, would need scoping first.
+4. Full P2 WP breakdown is in the plan file referenced below.
+
+## Open questions
+
+Unchanged from Session 9 — Q4 (template content, P3), Q5 (`document`
+source nested-replay, P3), the embedded-source reopen-without-library test
+gap. New from this session: whether pre-placement configuring + live 3D
+preview get their own WP number, or stay folded into a later pass — not
+decided, not blocking.
+
+## Pointers
+
+- Tasks → `TODO.md` § COMPONENT-LIBRARY WP-2.4 (gate entry, full detail)
+- Snapshot → `CURRENT_STATE.md` § COMPONENT LIBRARY — LIVE DELTA (session 10)
+- Plan → `~/.claude/plans/resume-implementation-of-component-twinkling-glade.md`
+- Spec → `TheComponentLibrary/onecad-component-library-spec.md`
+
+---
+
+# Handoff — Component Library (WP-2.3, SetComponentParams)
+
+Session 9 · 2026-08-12
+
+> Continues Session 8 directly (below) — same worktree, same uncommitted
+> delta, P0/P1/WP-2.1/2.2 unchanged. This entry covers WP-2.3 only.
+
+## Goal
+
+WP-2.3 per Session 8's own "How to resume" and the plan's dependency graph:
+the `SetComponentParams` command in `library.rs`, mirroring
+`place_component_at`/`detach_component_at`'s `*_at`-split shape, enforcing
+every requested param key is `role: free` on the component's actual
+signature.
+
+## Done so far (and why)
+
+Full detail in `TODO.md` § COMPONENT-LIBRARY WP-2.3 (gate entry). Worth
+restating:
+
+- **The role check needed the FULL `component.toml`, not the index.**
+  `IndexEntry` only carries `parameter_keys` (names, from WP-1.4/1.5) — no
+  `role`. New `component_package_at` helper walks `IndexEntry.path` back to
+  the package directory and re-parses `component.toml` directly (reusing
+  `onecad_library::package::parse` — no crate change needed, everything it
+  touches was already `pub`).
+- **`source.params` deliberately does NOT carry a fully resolved parameter
+  set.** The doc comment on `ComponentSourceRef::Generator::params` calls it
+  "free values merged with table/computed derivations", which read like it
+  should include `role: table` values (e.g. `head_d`) too. Checked against
+  what the worker (WP-2.1) actually reads first: `resolve_source_and_publish`
+  only looks up `source.params.thread`/`.length` by name, both `role: free`
+  on the ISO 4762 package, and derives every table value itself from its own
+  copy of the dimension table. Shipping table-derived values into
+  `source.params` would be inert data the worker never reads — same class of
+  mistake WP-1.5's `mate` field decision flagged. Kept the scope to the
+  merged free-param map only; a comment on `set_component_params_at`
+  explains why, so a future reader doesn't "fix" it into scope creep.
+- **A record that isn't a placed component needs no dedicated check** —
+  `serde_json::from_value::<PlaceComponentParams>` on a `DetachComponent`
+  record's params (which lacks `componentId` etc.) fails the deserialize
+  itself, surfaced as `InvalidCommand`. Simpler than `detach_component_at`'s
+  field-by-field `.get(...)` reads, and correct here because this WP needs
+  every field to reconstruct the record, not just two.
+- **Zero frontend/e2e changes this session** — confirmed via `git status`.
+  WP-2.4 is the first WP that gives a caller any way to actually invoke this
+  command from the UI.
+
+## How to resume
+
+1. Run the `handoff` skill with "resume".
+2. No worker rebuild needed — this WP is Rust app-crate only, no C++/wire
+   changes. The sidecar staged for WP-2.1 (20:34) is still current.
+3. Next task: **WP-2.4 — configurator UI** (param edit → live designation).
+   Needs a `CadClient.setComponentParams` method added to the `CadClient`
+   interface (append-only per the frontend seam rule) plus both `mockClient`
+   and `tauriClient` implementations, then a UI surface (likely an inspector
+   section or a panel on the placed record) that calls it and shows the
+   resulting designation string live. `component.toml`'s `metadata.designation`
+   field exists for this but nothing currently formats it from resolved
+   params — check whether that formatting belongs in this crate or the
+   frontend before writing it.
+4. Full P2 WP breakdown (2.1 through 2.7) is in the plan file referenced
+   below — don't re-derive the dependency graph.
+
+## Open questions
+
+Unchanged from Session 8 — Q4 (template content, P3), Q5 (`document` source
+nested-replay, P3), the embedded-source reopen-without-library test gap.
+New from this session: none blocking.
+
+## Pointers
+
+- Tasks → `TODO.md` § COMPONENT-LIBRARY WP-2.3 (gate entry, full detail)
+- Snapshot → `CURRENT_STATE.md` § COMPONENT LIBRARY — LIVE DELTA (session 9)
+- Plan → `~/.claude/plans/resume-implementation-of-component-twinkling-glade.md`
+  (P2 WP breakdown)
+- Spec → `TheComponentLibrary/onecad-component-library-spec.md`
+
+---
+
+# Handoff — Component Library (P2 kickoff: WP-2.1 + WP-2.2)
+
+Session 8 · 2026-08-12
+
+> Continues Session 7 directly (below) — same worktree, same uncommitted
+> delta, P0/P1 unchanged. P1 is closed; this entry starts P2.
+
+## Goal
+
+P2 (parametric fasteners, spec §10) per plan `~/.claude/plans/resume-
+implementation-of-component-twinkling-glade.md`: the first two WPs — the
+worker-side table-driven ISO 4762 generator and its Rust-side metadata
+mirror + data provenance.
+
+## Done so far (and why)
+
+Full detail in `TODO.md` § COMPONENT-LIBRARY WP-2.1/WP-2.2 (gate entries).
+Worth restating:
+
+- **BOLTS data sourcing was a real open question (Q3), now resolved for
+  the ISO 4762 family**: fetched via `gh api` from
+  `github.com/boltsparts/BOLTS_archive` (`data/hex_socket.blt`, class
+  `hexsocketheadcap`), not guessed. The repo's GitHub-reported license
+  (GPL-3.0) is a whole-repo default that does NOT apply to this data — the
+  file's own header carries LGPL 2.1+, matching spec §6.3's claim once
+  checked at the file level. `THIRD_PARTY_NOTICES` (new, repo root) records
+  this.
+- **The two dimension tables (worker C++, `onecad-library` Rust) are
+  DELIBERATE duplicates, not a shared source** — the worker owns geometry
+  generation (spec §6: generators are built-in/versioned there), the
+  library crate owns authoring/metadata (`component.toml`'s `[parameters]
+  role="table"` resolution). A cross-pinning test
+  (`tables::tests::geometry_fields_agree_with_the_worker_table_across_the_
+  seed_range`) catches future drift between the two copies.
+- **Real plan-doc deviation, caught before writing code**: the top-level
+  P2 sketch assumed `SetComponentParams` needs new C++ dispatch. It does
+  not — WP-1.2 already made it an in-place edit of `PlaceComponentParams`
+  via the generic `UpdateOperationParams` path, so this WP's table lookup
+  is automatically reachable by ANY edited `PlaceComponent` record once a
+  caller can construct that edit (WP-2.3, not yet built).
+- **Zero frontend/e2e changes this session** — confirmed via `git status`,
+  not assumed. Nothing sends `source.params.thread`/`.length` yet, so
+  WP-2.1's new table-driven path is currently reachable only by tests that
+  construct the params directly. WP-2.3 is what makes it reachable from a
+  live gesture.
+
+## How to resume
+
+1. Run the `handoff` skill with "resume".
+2. Worker rebuilt this session (`ONECAD_OCCT_ROOT="$HOME/.onecad-occt/8.0.1"
+   scripts/build-worker.sh Release`) — staged sidecar reflects WP-2.1's
+   table-driven generator. Rebuild again if stale.
+3. Next task: **WP-2.3 — `SetComponentParams` command** (`src-tauri/src/
+   library.rs`, mirroring `place_component_at`/`detach_component_at`'s
+   `*_at`-split shape): resolves the target record's component signature,
+   enforces every requested key is `role: free` (structural-only check
+   already exists in `onecad-core`; this is the app-crate half of the split
+   WP-1.2 flagged), merges into a new resolved param set, and constructs
+   `EditCommand::UpdateOperationParams`. Then **WP-2.4** (configurator UI —
+   the first WP giving a user any way to actually pick a size before/after
+   placing).
+4. Full P2 WP breakdown (2.1 through 2.7) is in the plan file referenced
+   above — dependency graph and per-WP scope already settled, don't
+   re-derive it.
+
+## Open questions
+
+Unchanged from Session 7 — Q4 (template content, P3), Q5 (`document`
+source nested-replay, P3) still open, plus the embedded-source
+reopen-without-library test gap flagged there. New from this session: none
+blocking — WP-2.1/2.2 landed exactly as planned.
+
+## Pointers
+
+- Tasks → `TODO.md` § COMPONENT-LIBRARY WP-2.1/WP-2.2 (gate entries, full detail)
+- Snapshot → `CURRENT_STATE.md` § COMPONENT LIBRARY — LIVE DELTA (session 8)
+- Plan → `~/.claude/plans/resume-implementation-of-component-twinkling-glade.md`
+  (P2 WP breakdown) and `~/.claude/plans/do-thorough-analysis-of-abstract-
+  thunder.md` (original P0/P1, P2's coarse starting sketch)
+- Spec → `TheComponentLibrary/onecad-component-library-spec.md`
+- Data provenance → `THIRD_PARTY_NOTICES`
+
+---
+
+# Handoff — Component Library (WP-1.6 + WP-1.7, P1 closed)
+
+Session 7 · 2026-08-12
+
+> Continues Session 6 directly (below) — same worktree, same uncommitted
+> delta, P0/P1.1–1.5 unchanged. This entry covers WP-1.6 + WP-1.7, which
+> closes P1 to spec §10's gate language.
+
+## Goal
+
+Resume per Session 6's own "How to resume": WP-1.6 (StatusSection + tasks-
+chip real producer) then WP-1.7 (e2e for the WP-1.5 flow), the two remaining
+P1 work packages per plan `~/.claude/plans/do-thorough-analysis-of-abstract-
+thunder.md`.
+
+## Done so far (and why)
+
+Full detail in `TODO.md` § COMPONENT-LIBRARY WP-1.6 and WP-1.7 (gate
+entries) — source of truth, not repeated here. Two things worth carrying:
+
+- **WP-1.7's real finding**: the original plan's WP-1.7 wording ("save,
+  close, delete library root, reopen, assert body present") is **not
+  provable in the Playwright MOCK lane** — `mockClient.newDocument()`/
+  `openDocument()` fabricate a fresh document on every call, nothing
+  persists for a `page.reload()` to round-trip through. Rather than write a
+  test that looks like it proves reopen-without-library but actually proves
+  nothing, the e2e spec (`e2e/library-browse-place-snap.spec.ts`) covers
+  what the mock lane genuinely can: the frontend gesture chain (browse → arm
+  → hover-classify → snap ghost → commit → tree update → Escape-cancel).
+  The reopen invariant IS proven, real-worker-side, for the generator-source
+  case: `component_ops.rs::place_component_survives_save_and_a_fresh_
+  worker_reopen`. **Residual, flagged not fixed**: the EMBEDDED-source
+  variant of that same invariant (the actual spec §12 differentiator — a
+  cached blob surviving a deleted library folder) has no automated test
+  anywhere. WP-1.3 shipped `place_component` generator-source only; the
+  embedded-blob authoring-time copy-in the original plan's WP-1.3 section
+  described was never built. Whoever picks up P2/P3 should either build it
+  or narrow spec §12's claim.
+- **WP-1.6's `StatusSection` is the first NESTED slot contribution** in the
+  codebase (it lives inside `StatusBar`'s own `<SlotHost/>`, not one of
+  `EDITOR_REGIONS`' top-level regions). `editorMountOrder.golden.test.ts`
+  needed its "every panel lands somewhere rendered" completeness check
+  taught about this — the frozen `EDITOR_MOUNT_ORDER_CONTRACT` array itself
+  is untouched, only the probe changed, per the contracts README's own rule.
+
+## How to resume
+
+1. Run the `handoff` skill with "resume".
+2. Worker binary unchanged since Session 6 — no rebuild needed for anything
+   in this entry (WP-1.6/1.7 are frontend/e2e-only).
+3. **P1 is closed.** Next task is **P2 (parametric fasteners)** per the
+   plan's coarser P2 section — needs its own follow-up plan, not started
+   here. Open question carried forward: BOLTS ingestion tooling ownership
+   (one-time offline script vs. a maintained in-repo tool re-run on BOLTS
+   updates) — unresolved, blocks nothing in P1, will matter once P2 starts.
+4. Full gate, all green this session:
+   ```bash
+   bunx tsc --noEmit && bun run test        # 243 files / 4142
+   bunx playwright test                     # 396 passed / 0 failed
+   cd src-tauri && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
+   ONECAD_WORKER_PATH=$PWD/../worker/build/onecad-worker ONECAD_REQUIRE_WORKER=1 \
+     cargo test --workspace --no-fail-fast   # 2 pre-existing failures unchanged, everything else green
+   ```
+
+## Open questions
+
+Unchanged from Session 5/6 — Q3 (BOLTS ingestion, now the gating question
+for starting P2), Q4 (template content, P3), Q5 (`document` source nested-
+replay, P3) still open. New residual from this session: the embedded-source
+"reopen without library" test gap (above) — not blocking, not yet assigned.
+
+## Pointers
+
+- Tasks → `TODO.md` § COMPONENT-LIBRARY WP-1.6 / WP-1.7 (gate entries, full detail)
+- Snapshot → `CURRENT_STATE.md` § COMPONENT LIBRARY — LIVE DELTA (session 7)
+- Plan → `~/.claude/plans/do-thorough-analysis-of-abstract-thunder.md`
+- Spec → `TheComponentLibrary/onecad-component-library-spec.md`
+- This session's own plan → `~/.claude/plans/resume-implementation-of-component-twinkling-glade.md`
+
+---
+
+# Handoff — Component Library (WP-1.5, the placement gesture)
+
+Session 6 · 2026-08-12
+
+> Continues Session 5 directly (below) — same worktree, same uncommitted
+> delta, P0/P1.1–1.4 unchanged. This entry covers WP-1.5 only.
+
+## Goal
+
+WP-1.5 per the plan and Session 5's own "How to resume": the interactive
+snap-placement gesture (spec §5.1-§5.4) — classify hovered geometry, match
+against the dragged component's attachments, preview a snapped ghost, commit.
+
+## Original plan
+
+Same as Session 5: `~/.claude/plans/do-thorough-analysis-of-abstract-thunder.md`.
+
+## Done so far (and why)
+
+Full detail, including the architecture fork this WP hit and how it was
+resolved, is in `TODO.md` § COMPONENT-LIBRARY WP-1.5 (gate entry) — that is
+the source of truth, not repeated here. The one thing worth restating because
+it will matter to whoever builds P3's persistent mates: **`mate` is
+deliberately NOT populated by this WP.** The worker's `ComponentOp.cpp`
+resolver reads `placement.{translate,rotate}` only and has no `mate` handling
+at all — checked by reading the file, not assumed. Populating a `mate` field
+now would be inert data that LOOKS like a real feature; P3's implementer
+should treat this WP's `placement`-only output as the honest baseline, not a
+regression to fix.
+
+The other load-bearing decision: **library's placement gesture is a
+module-level singleton (`placementController.ts`) that reaches
+`ViewportEngine` directly via `engineBridge`, the same pattern
+`ModelToolController` already uses** — NOT a `ViewportContribution`. That
+contract has no raw-pointer-event hook by design (contributions only draw
+into their own scene-graph slot), and `ViewportEngine.configurePicking` (the
+canvas's actual pick/hover authority) is a single hardwired seat owned by
+`ViewportRoot.tsx`. Presented this fork to the user before writing code
+(reuse-existing-primitives vs. new engine-level exclusive-gesture capability
+vs. drop live-drag entirely); "reuse existing primitives" was chosen.
+`placementController.ts`'s own header comment explains the resulting
+mechanics (capture-phase window listeners, `setOrbitSuppressed`,
+`probePick`). If a FUTURE module needs the same kind of interactive
+canvas-owning gesture, this is the precedent to follow — don't re-litigate
+the fork, and don't reach for a new platform capability unless this pattern
+genuinely doesn't fit.
+
+## Dead ends ruled out
+
+- Don't route the ghost preview's real commit through `endPreview(commit:
+  true)`. It would skip `Library::resolve_source`'s revision
+  re-verification. Ghost sessions are ALWAYS cancelled; commit is the
+  dedicated `CommandApiService.placeComponent` call.
+- Don't add a new `ViewportContext`/platform capability for body-picking.
+  `engine.probePick`/`setPreviewBody`/`clearPreviewBody` were already
+  public and generic; the "first WP touching the viewport" risk the plan
+  flagged turned out to be about INPUT ROUTING, not about the platform
+  contract being too narrow for the DRAWING half.
+- Don't build a second preview mapper for the ghost (spec §5.1 says so
+  explicitly, and `ipc/previewOps.ts`'s own header repeats it). The mock
+  lane's local-fallback synthesis in `localSolver.ts` is the sanctioned
+  per-client geometry-computation seam, not a second mapper.
+
+## How to resume
+
+1. Run the `handoff` skill with "resume".
+2. Rebuild the worker if stale (see Session 5's § How to resume below for
+   the exact command) — this WP made zero C++ changes, so the existing
+   staged sidecar from Session 5 is still valid if untouched.
+3. Next task: **WP-1.6** — StatusSection + tasks-chip real producer. The chip
+   already has `begin/setProgress/end` with zero producers (Session 4/
+   MODULAR-PLATFORM wave); `reindexLibrary` becomes its first. Then
+   **WP-1.7**: e2e (browse→place→snap→save→reopen-without-library), which
+   will need the `?mocklibrary=1` fixture this WP added (`mockClient.ts`'s
+   `MOCK_LIBRARY_FIXTURE`) wired into a real Playwright spec rather than only
+   manual verification.
+
+## Open questions
+
+Unchanged from Session 5 — Q3 (BOLTS ingestion), Q4 (template content), Q5
+(`document` source nested-replay) still open, none block WP-1.6/1.7.
+
+## Pointers
+
+- Tasks → `TODO.md` § COMPONENT-LIBRARY WP-1.5 (gate entry, full detail)
+- Snapshot → `CURRENT_STATE.md` § COMPONENT LIBRARY — LIVE DELTA (session 6)
+- Plan → `~/.claude/plans/do-thorough-analysis-of-abstract-thunder.md`
+- Spec → `TheComponentLibrary/onecad-component-library-spec.md`
+
+---
+
+# Handoff — Component Library (P0 + P1.1–1.4)
+
+Session 5 · 2026-08-12
+
+> **THREE LIVE THREADS NOW.** This entry (below) is new work, uncommitted on
+> branch `OneCAD-Component-Library` (a worktree). Session 4 and Session 3
+> (further down) are prior, committed work on the main line, kept for context —
+> read them if this session's code touches something they describe (mount-order
+> contracts, checkpoints, kernelbench).
+
+## Goal
+
+Implement the Component Library described in
+`TheComponentLibrary/onecad-component-library-spec.md`: placeable mechanical
+parts (screws, bearings, motors) with mate-like snapping, parametric
+generators, user authoring, and project templates — new capability on top of
+the Platform refactor (Session 4) and ongoing modeling-correctness work.
+
+## Original plan
+
+`~/.claude/plans/do-thorough-analysis-of-abstract-thunder.md` — full WP
+dependency graph and file-level detail for P0/P1, coarser sketches for
+P2–P4, six open questions. Followed the spec's own phasing (§10):
+P0 spike → P1 static library → P2 parametric → P3 authoring/templates/mates →
+P4 registry-later.
+
+## Done so far (and why)
+
+P0 (both WPs) and P1.1–P1.4 landed; full per-WP gate records with exact test
+counts and commands are in `TODO.md` (six dated entries, COMPONENT-LIBRARY
+WP-0.1 through WP-1.4) — that's the source of truth for gate detail, not
+repeated here. What's worth carrying that isn't just "read the diff":
+
+- **WP-0.1's latency spike came back GO** (p95 = 0.16 ms for the new
+  `ClassifyElement` read-only kernel verb, gate was < 16 ms) — WP-1.5 can use
+  live hover-to-classify for the snap gesture, no click-to-classify fallback
+  needed. This was the one real risk item in the whole plan; it's cleared.
+- **`onecad-library` crate is deliberately independent of `onecad-core`**
+  (plan's open Q1, resolved by doing it): `onecad-core` owns wire/SCHEMA-facing
+  types (`ComponentSourceRef` etc. in `record.rs`), `onecad-library` owns
+  package-format types (`component.toml`) separately, and `src-tauri/src/library.rs`
+  is the app-crate bridge that translates. Don't collapse these — the crate's
+  own `Cargo.toml` header comment states the "MUST NOT depend on tauri, MUST
+  NOT do network I/O" invariant this boundary protects.
+- **Course-correction on the op family (deviation from the plan's WP-1.2 as
+  written):** the plan assumed `SetComponentParams`/`ReplaceComponent` would
+  need new `KnownOperation` variants like `PlaceComponent`/`DetachComponent`
+  did. They don't — both are in-place param edits via `update_operation_params`,
+  same pattern Hole's profile-mode edits already use. Only `DetachComponent`
+  needed a new variant (a genuine op-TYPE swap, using the existing
+  Fillet⇄Chamfer in-place-swap precedent, one-directional this time). Caught
+  mid-implementation, recorded in TODO.md as it happened. If P2 revisits this,
+  don't re-derive — the params-only path is confirmed correct.
+- **The `AppHandle`/mock-runtime split (WP-1.3):** every mutating Tauri
+  command in `library.rs` is a thin public wrapper over a private `*_at(...)`
+  twin that takes an explicit path/root instead of `AppHandle`, because
+  `tauri::test::mock_app`'s `MockRuntime` cannot satisfy a bare `AppHandle`
+  (pinned to `Wry`) but CAN satisfy `tauri::State<'r, T>` (confirmed by
+  reading tauri's own source, not assumed). This is now the pattern for any
+  future testable Tauri command in this crate, following the precedent
+  `recents.rs` already set once.
+- **Shared-slot tab pattern for the sidebar (WP-1.4):** `LibraryPanel` and
+  `ModelTreePanel` both occupy `Slots.ShellLeft` — the platform's `SlotHost`
+  has no built-in exclusivity, so a second panel there would just overlap. Fix
+  is `sidebarTabStore` (tiny zustand store) + `SidebarTabHeader` (shared tab
+  strip both panels render at their own top); each panel returns `null` when
+  not the active tab. No slot/platform contract change. If a THIRD panel ever
+  wants `ShellLeft`, extend this store, don't invent a second mechanism.
+- **Serde camelCase gotcha, found and fixed, worth remembering for any future
+  internally-tagged enum:** `#[serde(tag="kind", rename_all="camelCase")]`
+  renames variant NAMES but does not cascade into struct-variant FIELD names —
+  each field needs its own `#[serde(rename=...)]`. Bit `ComponentSourceRef::Generator`;
+  now pinned by `place_component_source_fields_are_camel_case`.
+
+**Dead ends ruled out:**
+- Don't try to make `onecad-core`'s param validators enforce the free/table/
+  computed parameter-role rule (spec §3.2) — it needs the resolved component
+  signature, which `onecad-core` structurally cannot have (no `onecad-library`
+  dependency). That enforcement belongs at the WP-1.3 app-crate authoring
+  entry point in P2, not in `session.rs`. The plan flagged this split; it's
+  confirmed correct, don't relitigate.
+- Don't bother writing an external `tests/library_commands.rs` for the
+  `*_at`-split command tests — the `*_at` functions are private to the crate,
+  so those tests have to live in an in-file `#[cfg(test)] mod tests` block
+  inside `library.rs` itself.
+
+## How to resume
+
+1. Run the `handoff` skill with "resume" (or just start on WP-1.5 directly —
+   this entry has the detail).
+2. Rebuild the worker if it's stale: `ONECAD_OCCT_ROOT=<pinned-prefix>
+   scripts/build-worker.sh Release` (must precede any cargo command that
+   compiles the app crate — `bundle.externalBin` requires the staged sidecar
+   binary to already exist).
+3. Next task: **WP-1.5, snap solver.** Per the plan — placement ghost as a
+   `ViewportLayer` contribution modeled on
+   `src/modules/modeling/datumViewport.ts::createDatumViewportContribution()`
+   (the only existing precedent for an imperative controller reaching
+   `ViewportContext` from outside React). New
+   `src/modules/library/placementViewport.ts`. Loop: hover → raycast →
+   `ModelingServices.GeometryQuery.classifyElement` (built this session, live)
+   → match against the dragged component's `accepts` → candidate transform
+   per spec §5.3 → `CadClient.beginPreview`/`updatePreview` with a candidate
+   `PlaceComponent` (reuses `PreviewOp`) → ghost mesh. This is the first WP
+   that touches the viewport engine — read `src/viewport/engine/README.md`
+   first (Z-up hard invariant, `refreshColors()`, on-demand rendering).
+4. After WP-1.5: WP-1.6 (StatusSection + tasks-chip real producer — the chip
+   already has a real `begin/setProgress/end` API from the Session 4/
+   MODULAR-PLATFORM wave with zero producers; `contributeLibraryUi`'s
+   `reindex` call becomes its first), then WP-1.7 (e2e:
+   browse→place→snap→save→reopen-without-library).
+
+## Open questions
+
+From the plan's original six — three resolved by implementation, three still
+open (none block WP-1.5):
+- Q1 (crate boundary) — RESOLVED: `onecad-library` independent of `onecad-core`, see above.
+- Q2 (service-build scope) — MOOT, done: `GeometryQuery`/`CommandApi` both real now.
+- Q3 (BOLTS ingestion tooling ownership, P2) — still open: one-time offline
+  script vs. a maintained in-repo tool re-run on BOLTS updates?
+- Q4 (P3 starter-template content) — still open: can I author the 3-5 starter
+  templates directly (dogfooding "Save as Component"), or does the user want
+  to supply/review actual content (NEMA footprint accuracy, datum placement)?
+- Q5 (`document` source kind's nested-replay mechanism, P3) — still open, no
+  existing analog found; candidate is Rust-side load-frozen-doc-into-throwaway-
+  session, replay, extract BRep. Worth a targeted search for prior art
+  (checkpoints / `checkpointFallbackReplay`) before committing, at that time.
+- Q6 (library's own service vs. riding modeling's CommandApi) — RESOLVED:
+  library owns list/search (its own small surface), placement routes through
+  modeling's `CommandApi` per ADR-0002. This is what WP-1.3/1.4 shipped.
+
+## Pointers
+
+- Tasks → `TODO.md` § COMPONENT-LIBRARY (6 dated gate entries, WP-0.1–WP-1.4)
+- Snapshot → `CURRENT_STATE.md` § COMPONENT LIBRARY — LIVE DELTA (2026-08-12)
+- Plan → `~/.claude/plans/do-thorough-analysis-of-abstract-thunder.md`
+- Spec → `TheComponentLibrary/onecad-component-library-spec.md`
+
+---
+
 # Handoff — Platform refactor (Milestones 1 + 2), and what comes next
 
 Session 4 · 2026-08-08

@@ -1,5 +1,944 @@
 # OneCAD-Tauri Migration TODO
 
+## COMPONENT-LIBRARY start-screen browser (2026-08-12) — GATE PASSED
+
+User-requested follow-up to WP-2.4: the library must be explorable from the
+START screen too, not only inside an opened project (the screenshot the
+user attached is `StartScreen.tsx`'s sidebar — Recent/Starred/Templates —
+with no library entry point at all).
+
+**Backend-feasible with zero Rust changes, verified not assumed**:
+`list_library_components`/`reindex_library` (`library.rs`) resolve
+`library_root(app)` off `app_data_dir()` only — neither touches
+`AppState.runtime`/`DocumentRuntime`, so both already work with no document
+open. Confirmed by reading `library.rs` before writing any frontend code,
+not by trying it and hoping.
+
+New `StartNavKey` member `"library"` (`StartScreen.tsx`), a fourth
+`StartSidebar` nav row (`cube` icon, no new asset), and two new components:
+- `src/features/start/StartLibraryPanel.tsx` — list/search/reindex, own
+  toolbar, full-width responsive card grid (unlike the editor's narrow
+  `LibraryPanel`, this occupies the whole main content area).
+- `src/features/start/ComponentDetails.tsx` — a details side-pane for a
+  selected card: identity, category/tags, attachments, free params (with
+  `domain` shown inline), and an honest "Open a project to place this
+  component" line.
+
+**Deliberately NOT the editor's `LibraryPanel` reused with a flag** — that
+component's card click ARMS `placementController.ts`'s gesture, which
+reaches a live `ViewportEngine`/`DocumentRuntime` that genuinely doesn't
+exist on this screen. Faking an arm/drag affordance with nowhere for it to
+land would be the same mistake the codebase already rejected once
+(Extensions ▸ Browse's "no registry configured" empty state, over dead
+Install buttons). `StartLibraryPanel` is READ-ONLY by construction: browse,
+search, reindex, inspect — no placement path, no attempt at one. If the
+user wants "browse → jump straight into a new project with it armed" next,
+that is a real follow-up (needs `newProject()` to resolve before the
+editor's module registration can arm anything — a genuine sequencing
+problem, not sketched here), not something this change silently attempts.
+
+GATE: `bunx tsc --noEmit` clean · vitest **245 files / 4154 tests** (up from
+244/4148 — new `StartLibraryPanel.test.tsx` (5 cases) + one `StartScreen.test.tsx`
+case) · `cargo fmt --all --check` + workspace `clippy -D warnings` clean,
+unaffected (zero Rust files touched) · manual `playwright-cli` verification
+against `?mocklibrary=1` (dev server on :1420): Library nav renders the
+fixture card with NO project open, selecting it shows the details pane
+including free params + the "open a project" line, matches the screenshots
+above. **Full Playwright not re-run** — no e2e spec targets `StartScreen` at
+all (start-screen flows are vitest-only in this repo; `library-browse-
+place-snap.spec.ts` covers the in-editor placement flow, untouched by this
+change), and the prior WP-2.4 full run (396/396) already covers every start-
+screen-adjacent spec (`project-import`, `step-import`) with this addition
+being purely a new inert-until-clicked nav branch.
+
+## COMPONENT-LIBRARY WP-2.4 (2026-08-12) — GATE PASSED
+
+Configurator UI (param edit → live designation, spec §294) — the first WP
+with a real frontend surface since WP-1.7. Scoped to the POST-placement edit
+surface (an inspector section for an already-placed instance); pre-placement
+sizing (picking a size before dragging from the library card) and the live
+3D preview spec §294 also describes are cut, recorded below, not silently
+dropped.
+
+**Backend surface widened first, since neither DTO carried what the UI
+needs**: `onecad-library::index::IndexEntry` gained `parameters` (full
+`ParameterSpec` map — the index previously carried `parameter_keys`, names
+only, not `role`) and `designation` (`metadata.designation`, spec §2.1's BOM
+template). `dto::LibraryComponentDto` mirrors both, populated in
+`library.rs::index_entries_at`. `LibraryComponentDto` dropped its `Eq`
+derive — `ParameterSpec` carries `toml::Value` (via `value`/`domain`), which
+only implements `PartialEq` (it can hold an f64).
+
+**Real bug found and fixed while reading the file this WP needed to touch
+next to anyway**: `tauriClient.ts::placeComponent` never forwarded its
+`rotate` argument to the `place_component` Tauri command — the REAL backend
+placed every component unrotated regardless of the flip gesture (`A` key),
+masked only because the mock lane's `commitPlaceComponent` DOES honor
+`rotate`. WP-1.5's own handoff claimed rotate shipped end to end; it shipped
+on the mock lane only. Fixed (one line + a param), covered by the existing
+`library-browse-place-snap.spec.ts` (mock lane, so it can't itself prove the
+real-backend half — no automated coverage of the real Tauri path existed
+before or after this fix; flagged, not solved, since proving it needs a
+real-worker Playwright lane this repo doesn't have).
+
+**New `CadClient.setComponentParams`** (append-only interface addition),
+wired in both clients:
+- `tauriClient.ts` — a thin `call(CMD.setComponentParams, ...)`, same shape
+  as `placeComponent`/`detachComponent`.
+- `mockClient.ts` — a REAL implementation, not a "not yet" stub like
+  `detachComponent`'s. `commitPlaceComponent` now writes `featureParams` for
+  every placed instance (it bypasses `commitOp`'s generic `wireParamsOf` —
+  `PlaceComponent` throws there, it never reaches the generic op-preview
+  lane — so this WP is the first place anything stores it), and
+  `setComponentParams` re-derives the real role=free check against
+  `MOCK_LIBRARY_FIXTURE.parameters`, merges, and re-stores. Documented
+  limitation: the mock's synthetic mesh is a fixed demo shape regardless of
+  size, so a param edit changes the stored value + the live designation but
+  not the rendered geometry — the real worker-backed lane
+  (`component_ops.rs`) is where a size change actually resizes the body.
+
+**New `ComponentParametersSection`** (`src/features/library/`), registered
+as the library module's own inspector contribution
+(`modules/library/register.ts`, new `inspectorSectionIds.ts` mirroring
+modeling's), priority 250 (between modeling's History=200 and
+Constraints=300). DATA-DRIVEN, same honesty rule `SketchDimensionsSection`/
+`HistoryFeatureSection` already follow: `canRender` can only see "a feature
+is selected in Model mode" (platform `SelectionRef` carries no `opType` —
+ADR-0002's boundary), so the component itself reads `documentStore`'s
+`FeatureMeta.opType` and renders nothing, label included, unless it's
+`PlaceComponent`. Renders each `role: "free"` key as a domain `<select>` or
+a plain numeric `<input>` (min-checked client-side, mirroring the backend's
+own check), plus the live designation via `{key}` template substitution
+(`formatDesignation`, exported + unit-tested). Commits go through
+`client.setComponentParams` — deliberately NOT the generic
+`applyEditCommand`/`updateScalarParamsCommand` path `featureValueEdit.ts`
+uses for other ops' inline edits, since that generic path would bypass the
+role=free enforcement WP-2.3 exists specifically to apply.
+
+**A real spec-example inconsistency found and worked around, not
+copied**: spec §2.1's own designation example is `"ISO 4762
+M{thread}x{length}"` (literal `M` before the placeholder), but this
+codebase's established thread convention (WP-2.1's worker table, WP-2.2's
+Rust mirror, both keyed `"M6"`-style) stores the FULL designation as the
+`thread` value — pairing the two doubles the `M` (`"MM6"`). Every
+designation string this WP authored (`mockClient.ts`'s fixture, the
+`library.rs` test fixture) drops the literal `M`: `"ISO 4762
+{thread}x{length}"`. No real `component.toml` designation strings exist yet
+to conflict with (P3 authoring is unbuilt) — flagged for whoever writes the
+real ISO 4762 package content.
+
+**Scope cuts, recorded not discovered late**: no pre-placement configurator
+(spec §294's "selecting a card opens the configurator" before a drag) — this
+WP covers editing an already-placed instance only, the well-defined slice
+that builds directly on WP-2.3. No live 3D preview while editing — would
+need a `PreviewOp` ghost session wired into the inspector section, real
+extra surface. No `role: table`/`computed` resolution anywhere client-side
+(consistent with WP-2.3's own scope note: the worker derives those from its
+own table, nothing on the wire needs them) — a designation template
+referencing one (`{head_d}`) renders literally, not blank.
+
+GATE: `bunx tsc --noEmit` clean · vitest **244 files / 4148 tests** (up from
+243/4142 — new `ComponentParametersSection.test.tsx`, 6 cases, plus the
+existing `LibraryPanel.test.tsx` fixture updated for the new required
+`parameters` field) · full Playwright **396 passed / 0 failed** (unchanged
+from WP-1.7's own number — the rotate fix and fixture widening touch nothing
+any other spec depends on) · `cargo fmt --all --check` + workspace `clippy
+-D warnings` clean · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace
+--no-fail-fast` green except the SAME two pre-existing failures
+(`sketch_on_face`, `wire_contract`) · `cargo test -p onecad-library`
+unaffected, 28/28 unchanged · `cargo test -p onecad --lib library::` **5/5**
+(up from 4 — new `list_carries_parameters_and_designation_for_the_configurator`).
+
+Next: WP-2.5 (three-level thread detail: cosmetic/simplified/modeled) or
+WP-2.6 (kernelbench cases from table extremes) — either is independent of
+this WP per the plan's dependency graph. Pre-placement configurator + live
+3D preview remain open if the user wants spec §294 covered in full.
+
+## COMPONENT-LIBRARY WP-2.3 (2026-08-12) — GATE PASSED
+
+`SetComponentParams` command (`src-tauri/src/library.rs`) + role enforcement
+— the first WP that makes any of P2's table-driven sizing reachable from a
+live gesture (once WP-2.4 wires a caller). New `set_component_params_at`
+(private, `*_at`-split per the module's own convention) + public
+`#[tauri::command] set_component_params`, registered in `lib.rs`'s
+`invoke_handler`.
+
+**Enforcement split, as flagged by `validate_place_component`'s own doc
+comment**: `onecad-core` checks structure only (`PlaceComponentParams::validate`)
+because it cannot depend on `onecad-library` to resolve a component's actual
+`[parameters]` signature. This WP is the app-crate half — a new
+`component_package_at` helper loads the full `component.toml` (not just the
+index's `parameter_keys` names) by walking `IndexEntry.path`, and every
+requested key is checked against `ParameterRole::Free` before anything is
+merged. An unknown key or a `role: table`/`computed` key is rejected loud
+(`InvalidCommand`, naming the key and the component) — never silently
+dropped or silently applied.
+
+**`source.params` mirrors the merged free-param map only, not a fully
+resolved signature — a deliberate scope cut, not an oversight.** The worker
+(WP-2.1) reads `role: free` keys by name (`thread`/`length`) and derives
+`role: table`/`computed` values itself from its own table; shipping those
+into `source.params` here would duplicate data nothing on the wire reads.
+`component.toml`'s `[parameters]` table stays the single resolution
+authority, authoring-side only.
+
+Read path reuses `DocumentRuntime::operation_params` + a direct
+`serde_json::from_value::<PlaceComponentParams>` (not `detach_component_at`'s
+field-by-field `.get("source")`/`.get("placement")` — this WP needs every
+field to reconstruct a valid record). A record that isn't a placed component
+(e.g. already `DetachComponent`) fails that deserialize the same way a
+missing `componentId` would — no separate "is this a PlaceComponent" check
+needed. `Embedded`-source placements are rejected outright (spec's embedded
+source carries no `params` field at all — there is nothing to merge into).
+
+GATE: 2 new tests in `library.rs`'s `#[cfg(test)] mod tests`
+(`set_component_params_merges_a_free_override_and_reaches_source_params`,
+`set_component_params_rejects_a_non_free_key`, the latter covering both the
+role-mismatch and unknown-key branches) — both green. `cargo fmt --all
+--check` + workspace `clippy -D warnings` clean. `ONECAD_REQUIRE_WORKER=1
+cargo test --workspace --no-fail-fast` green except the SAME two
+pre-existing failures (`sketch_on_face`, `wire_contract`) reconfirmed
+failing identically this session. `cargo test -p onecad-library` unaffected
+(28/28, unchanged — no `onecad-library` crate files touched, only the
+app-crate bridge). Frontend/e2e untouched, confirmed via `git status` (only
+`src-tauri/src/library.rs` + `src-tauri/src/lib.rs` in this WP's diff).
+
+Next: WP-2.4 (configurator UI — param edit → live designation). This is the
+first WP with a real frontend surface since WP-1.7; will need a
+`CadClient.setComponentParams` method + both client impls (mock/tauri) per
+the append-only interface rule.
+
+## COMPONENT-LIBRARY WP-2.2 (2026-08-12) — GATE PASSED
+
+`onecad-library::tables` real content — P2's Rust-side metadata mirror of
+WP-2.1's worker table. New `Iso4762Table`/`Iso4762Row` (`tables.rs`, full
+BOLTS column set `d1/d2/b/k/s/t_min/l`, M2–M12), a spot-check harness (M3/
+M6/M12 against the BOLTS source, plus a test pinning every seed size's
+geometry-relevant fields — `d1`/`d2`/`k` — against the worker's own table so
+the two independently-typed copies can't silently diverge), and a new
+`THIRD_PARTY_NOTICES` at repo root crediting BOLTS / Johannes Reinhardt,
+LGPL 2.1+, with source URL and retrieval date (spec §6.3). Checked first:
+no existing project-authored notices file anywhere in the repo (`worker/
+third_party/{nlohmann,planegcs}` vendor code directly with none; only
+`node_modules/**` has any) — root is the standard convention.
+
+**Deliberate duplication, not a shared source**: this crate's table serves
+`component.toml`'s `[parameters] role="table"` resolution and authoring/
+metadata (designation strings), never geometry — the worker's own copy
+(WP-2.1) is the sole geometry authority, per spec §6's "generators are
+built-in and versioned [in the worker]" framing. A future change to either
+copy without the other now fails the cross-pinning test loud.
+
+GATE: `cargo test -p onecad-library` **28/28** (up from 22) · `cargo fmt
+--all --check` + workspace `clippy -D warnings` clean · full workspace
+`cargo test --workspace --no-fail-fast` green except the SAME two
+pre-existing failures (`sketch_on_face`, `wire_contract`) · frontend
+untouched, confirmed via `git status` (no `src/`/`e2e/` files in this WP's
+diff).
+
+Next: WP-2.3 (SetComponentParams command + role enforcement — the first WP
+that makes any of P2's table-driven sizing reachable from a live gesture).
+
+## COMPONENT-LIBRARY WP-2.1 (2026-08-12) — GATE PASSED
+
+Table-driven ISO 4762 generator (worker C++) — P2's first slice, kicked off
+per plan `~/.claude/plans/resume-implementation-of-component-twinkling-glade.md`.
+`ComponentOp.cpp`'s hardcoded M6×20 constants (`kHeadDiameter` etc.) are
+replaced by `iso4762Table()`, a BOLTS-seeded `std::map<std::string,
+Iso4762Size>` keyed by thread designation (M2–M12, spec §6.2's seed range).
+`resolve_source_and_publish` now reads `source.params.thread` (default
+`"M6"`) and `source.params.length` (default `20.0`) — chosen so every
+EXISTING caller, none of which send these fields yet
+(`placementController.ts`'s `placementDraftParams` only sends `translate`/
+`rotate` + `generatorId`/`generatorVersion`), stays byte-identical to P0/P1
+behavior. An unknown thread designation fails loud (`OP_FAILED`, lists the
+known sizes) — never a silent M6 substitution, the founding invariant (spec
+§0#4) applied to the new lookup path. A non-positive `length` fails loud
+too.
+
+**Data provenance**: fetched the real BOLTS project
+(`github.com/boltsparts/BOLTS_archive`, `data/hex_socket.blt`, class
+`hexsocketheadcap` = ISO 4762/DIN 912) via `gh api`, not guessed or
+hand-derived. Per-file header confirms **LGPL 2.1+**, author Johannes
+Reinhardt — the repo's GitHub API `license` field reports GPL-3.0 (a
+whole-repo default), verified to be a red herring at the file level, which
+carries its own LGPL 2.1+ header (matches spec §6.3's "LGPL 2.1+, per-part
+license tracking" claim once checked, not just assumed). Full M1.4–M64
+table retrieved; scoped implementation to spec §6.2's stated M2–M12 —
+M1.4/M1.8 carry `None` for `t_min`/`b` at the source (undersized for a
+practical hex-socket detail), not worth engineering around outside the
+spec's own range.
+
+**Real deviation from the top-level plan doc's P2 sketch, found before
+writing code, not guessed past**: the plan's item 2 ("SetComponentParams
+C++ dispatch lands, plumbing already exists from WP-1.2") assumed
+`SetComponentParams` is a distinct wire op. It is not — WP-1.2 already
+recorded that `SetComponentParams`/`ReplaceComponent` are in-place edits of
+the existing `PlaceComponentParams` record via the generic
+`EditCommand::UpdateOperationParams`, same as Hole's profile-mode edits.
+There is no new C++ dispatch arm to add for param edits — regen of an
+edited `PlaceComponent` record already reaches this WP's table lookup
+automatically. What's still missing (WP-2.3) is a Rust-side authoring
+command enforcing role=free before constructing the edit.
+
+GATE: `worker/tests/test_component_ops.cpp` extended with M6-explicit
+(matches the default path exactly), M2, M12 exact-volume cases, an
+unknown-thread failure case, and a non-positive-length failure case — **12
+assertions, 0 failures** (`ctest -R component_ops`). Full worker ctest
+**114/114**. `bunx tsc`/vitest/Playwright not re-run — zero frontend/e2e
+files touched this WP (confirmed via `git status`, not assumed).
+`ONECAD_REQUIRE_WORKER=1 cargo test --workspace` unaffected (WP-2.2's gate
+entry below covers the combined Rust run).
+
+Next: WP-2.2 (this session, immediately following).
+
+## COMPONENT-LIBRARY WP-1.7 (2026-08-12) — GATE PASSED, P1 CLOSED
+
+`e2e/library-browse-place-snap.spec.ts` — WP-1.5's manual `playwright-cli`
+verification (armed card → hover → correctly-oriented ghost → click commits
+→ tree updates → Escape cancels), converted into a repeatable Playwright
+gate. Two specs: commit flow (browse → arm → hover-snap ghost → commit → one
+new named body in the projection) and cancel flow (arm → hover-ghost →
+Escape → armed state clears, ghost clears, body count unchanged).
+
+**Scope finding, made while writing this (not assumed from the plan doc):**
+the original plan's WP-1.7 wording ("save, close, delete library root,
+reopen, assert body present") is **not provable in the Playwright MOCK
+lane** — `mockClient.newDocument()`/`openDocument()` fabricate a fresh
+synthetic document on every call; there is no in-memory or on-disk
+persistence for a `page.reload()` to round-trip through. A "reopen" step
+there would either hang (nothing to reopen) or silently prove nothing,
+which this codebase's own philosophy treats as worse than an honest gap.
+That invariant is a REAL-worker/Rust concern and **is** covered, for the
+generator-source case P1 ships:
+`src-tauri/tests/component_ops.rs::place_component_survives_save_and_a_fresh_worker_reopen`
+(save → shut worker down → spawn a FRESH worker process → reopen → assert
+identical geometry). What the new e2e spec owns instead is the frontend
+wiring chain the kernel test never sees: card → armed state → hover →
+classify → ghost → commit → tree → Escape — matching `hole.spec.ts`'s own
+stated split of responsibility ("what THIS spec owns is the chain the
+kernel never sees").
+
+**Residual flagged, not fixed here (out of WP-1.6/1.7 scope):** the
+EMBEDDED-source variant of "reopen without the library folder" — a cached
+BLOB surviving a deleted library root, spec §12's actual differentiator
+claim — has no automated test anywhere yet. WP-1.3's own gate entry above
+shipped `place_component` as "generator source only (matches the worker's
+WP-1.2 scope)"; the embedded-blob authoring-time copy-in path the original
+plan's WP-1.3 section described was never built. Whoever picks up P2/P3
+should either build that path or narrow spec §12's claim to match reality.
+
+`findFaceOnBody` (existing helper) supplies the hover pixel — the mock
+fixture's `headSeat` attachment accepts `["plane"]`, so any planar face on
+the `vpdemo` box matches; ghost presence is polled via
+`window.__vpEngine.previewBodies.size` (the same `?vpdebug` surface
+`findFaceOnBody` itself already relies on for raycasting).
+
+GATE: new spec **4/4** (chromium + webkit) · full Playwright suite
+**396/396** (up from 392 pre-existing — the new spec's 2 tests × 2 browsers),
+**zero failures**, `retries: 0`. `bunx tsc --noEmit` clean · vitest
+**243/4142** (unchanged from WP-1.6, no new frontend test file) ·
+`cargo fmt --all --check` + workspace `clippy -D warnings` clean ·
+`ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` — every
+target green except the SAME two pre-existing failures bisected to baseline
+in earlier sessions (`sketch_on_face::a_line_across_the_projected_rect_...`,
+`wire_contract::nested_inner_disk_parity_and_reopen_stability`, both `fetch
+body mesh` panics, unrelated to Component Library) · `cargo test -p
+onecad-library` **22/22**, unchanged · worker binary untouched, no rebuild
+needed (WP-1.6/1.7 are frontend/e2e-only, zero C++/Rust changes).
+
+Next: P1 is closed to spec §10's gate language (kernel CTest + Rust tests +
+a Playwright spec for browse→place→snap→save→reopen, with the save/reopen
+half's actual coverage boundary now documented above). P2 (parametric
+fasteners) is next, with its own open question (BOLTS ingestion tooling
+ownership) — needs a follow-up plan, not started here.
+
+## COMPONENT-LIBRARY WP-1.6 (2026-08-12) — GATE PASSED
+
+`Slots.StatusSection`'s first real producer — closes a platform debt named
+at the MODULAR-PLATFORM wave (the tasks chip has had a `begin/setProgress/
+end` API with zero producers since it landed).
+
+- `src/features/shell/StatusBar.tsx`: added `<SlotHost slot={Slots.
+  StatusSection}/>` beside the existing hardcoded `<TasksChip/>`.
+- `src/modules/library/register.ts` (`contributeLibraryUi`): registers a
+  new `LibraryStatusSection` panel at `Slots.StatusSection` — a static
+  "N components" count, fetched once on mount via `listLibraryComponents()`.
+  Deliberately minimal, per the plan's own instruction ("don't invent UI
+  just to fill the slot") — no shared store with `LibraryPanel`, nothing
+  live-tracks its search/filter state.
+- `src/features/library/LibraryPanel.tsx` (`reindex`): wraps the existing
+  `reindexLibrary()` call with `tasksStore.getState().begin("library.
+  reindex", …)`/`.end(...)`. `ReindexReport` (`{total, indexed, skipped}`)
+  is a single atomic response with no incremental count, so begin→end with
+  no `setProgress` in between is the honest shape — the same "progress is
+  optional" rule `tasksStore`'s own doc comment states. Local `reindexing`
+  `useState` kept alongside (drives the button's own "…" label/disabled —
+  a different UI signal than the app-wide chip, not a duplicate source of
+  truth for the same thing).
+- **`editorMountOrder.golden.test.ts` amended, recorded**: `Slots.
+  StatusSection` is a genuine exception to "every rendered slot is an
+  `EDITOR_REGIONS` entry" — it nests INSIDE `StatusBar`'s own `<SlotHost/>`,
+  and `StatusBar` itself IS the `Slots.ShellBottom` panel. The mount-order
+  CONTRACT (`EDITOR_MOUNT_ORDER_CONTRACT`) is untouched — the top-level scan
+  never saw `StatusSection` before and still doesn't; only the probe's
+  "every panel lands somewhere rendered" completeness check needed to learn
+  about the new nested slot, per the contracts README's "probe may change,
+  contract may not" rule.
+
+GATE: `bunx tsc --noEmit` clean · vitest **243 files / 4142 tests** (up from
+243/4141 at WP-1.5 — one new tasks-chip begin→end transition test in
+`LibraryPanel.test.tsx`, no new test file) · `cargo fmt --all --check` +
+workspace `clippy -D warnings` clean (Rust untouched by this WP — no Rust
+files changed).
+
+**Real bug caught mid-implementation:** `StatusBar.test.tsx` rendered
+`<StatusBar/>` bare in all 9 of its `render()` calls; adding `<SlotHost/>`
+made every one of them throw (`usePlatform()` outside a `<PlatformProvider>`)
+since `SlotHost` needs a platform context ancestor. Fixed with a
+`renderStatusBar()` helper wrapping in `<PlatformProvider platform=
+{createPlatform()}>` — the same minimal-fixture shape `reference.test.tsx`
+already uses — not a StatusBar defect, a test-fixture gap the new
+contribution surfaced.
+
+Next: WP-1.7 (e2e spec for the WP-1.5 flow).
+
+## COMPONENT-LIBRARY WP-1.5 (2026-08-12) — GATE PASSED
+
+The snap solver + interactive placement gesture (spec §5.1-§5.4): classify →
+attach → concentric/flush + flip; drag ghost via the real `PreviewOp` lane.
+The largest remaining P1 WP and the one WP-0.1's `ClassifyElement` latency
+spike de-risked.
+
+**Real architectural gap found and resolved before writing the gesture, not
+guessed past**: `ViewportEngine.configurePicking` is a single hardwired pick
+seat, owned by `ViewportRoot.tsx` and wired to modeling's selection store —
+no existing seam let a second module take hover/click during an armed
+placement. Presented the fork to the user (reuse the existing pick primitive
+vs. a new engine-level exclusive-gesture capability vs. dropping live drag);
+chose the former. Resolution: `src/modules/library/placementController.ts`
+is a module-level singleton (like `ModelToolController`, but library-owned
+and independent of it) that adds its own `window` `pointermove`/`pointerdown`/
+`keydown` listeners in CAPTURE phase only while armed —
+`stopPropagation`/`preventDefault` shuts out orbit/select without touching
+`ViewportRoot.tsx` or any platform contract, `engine.setOrbitSuppressed(true)`
+is the belt to that suspenders. Hover reuses `ViewportEngine.probePick` (the
+SAME one-shot primitive the existing dblclick-to-sketch handler already
+calls) rather than the continuous `configurePicking` feed. The ghost mesh
+renders through `engine.setPreviewBody`/`clearPreviewBody` — already generic,
+already how `ModelToolController` renders every other tool's L2 preview body,
+so no platform surface had to change at all.
+
+**Scope cut vs. the full spec, deliberate and recorded (not discovered
+late)**:
+- **No free-space ghost follow.** The ghost appears only once hovering a
+  target whose classification matches one of the component's attachments.
+  Spec step 6's "drop in free space, position later with Move" fallback path
+  is not wired — there is no Move-tool integration point yet for library.
+- **No auto-size.** P1 has exactly one seeded generator (the hardcoded M6
+  SHCS) with no size table to pick a nearest-smaller size FROM — auto-size is
+  P2 scope (spec §6) by construction, not a WP-1.5 omission.
+- **No `mate` persistence (spec §5.5).** Checked the worker first:
+  `ComponentOp.cpp`'s `resolve_source_and_publish` reads
+  `placement.{translate,rotate}` only and has no `mate` handling at all.
+  Recording a `mate` now — even a well-formed one — would be inert data
+  masquerading as a real feature, worse than omitting it. The computed snap
+  transform is written into `placement` directly; `CommandApiService`/
+  `CadClient.placeComponent` widened to carry `rotate` (previously
+  translate-only, WP-1.3's own doc comment anticipated this), still no
+  `mate` parameter. Re-seat-on-regen is P3, unchanged from the plan.
+
+**The ghost preview is the REAL PreviewOp lane, both clients, not a second
+mapper** (spec §5.1 forbids one). `ipc/previewOps.ts` gained a
+`placeComponentOp` builder and `OpType`/`OperationOp`/`PreviewParams` gained a
+`PlaceComponent` arm — same mapper Extrude/Fillet/etc. already share. The
+REAL/tauri lane needs zero C++ changes: `execute_place_component` already
+handles it (WP-1.2). The MOCK lane's local-fallback branch in
+`localSolver.ts::updatePreview` synthesizes the SAME fixed M6 SHCS mesh
+(`mockMeshes.ts::placeComponentGhostMesh`, reusing the existing
+`placementMatrix`/`transformMesh1`/`concatMesh1` trio TransformBody's mock
+already established) — a rigid placement of a KNOWN shape needs no live
+document data, unlike Extrude's profile-dependent prism.
+
+**Commit stays on the dedicated `placeComponent` command, not
+`endPreview(commit)`.** The generic preview-commit path would skip
+`Library::resolve_source`'s revision re-verification (library.rs's own doc
+comment: "never authoring a record with a lie in it") — the ghost session is
+ALWAYS cancelled (`endPreview(sessionId, false)`), the real commit is a
+separate `CommandApiService.placeComponent` call. `CommandApiService` also
+gained the generic `beginPreview`/`updatePreview`/`endPreview`/
+`onPreviewResult` pass-through (ADR-0002: the kernel touch routes through
+modeling's published services, and a further kernel-touching component
+operation arriving is exactly the widening `CommandApiService`'s own P1.3
+doc comment anticipated).
+
+**`onecad-library`'s `IndexEntry` widened**: `generator_id`/
+`generator_version` (generator-source only) and the `[attachments]` table
+verbatim, threaded through `LibraryComponentDto`/`LibraryComponent` — the
+snap solver's accepts-matching input and the ghost draft's identity fields.
+`AttachmentSpec` gained `Eq` (needed for `LibraryComponentDto`'s existing
+derive).
+
+**Candidate-transform math is a separate pure module**
+(`src/modules/library/placementSolver.ts`, 16 unit tests, no viewport/DOM
+dependency): component-local convention mirrors the worker's hardcoded stub
+exactly (origin at the seating plane, head +Z, shank -Z) — `coincident`
+(plane) aligns local +Z to the target's outward normal, seats at the pick
+point; `concentric` (cylindrical face) aligns to the axis, seats by
+projecting the pick onto the axis line (an honest "seated under the cursor"
+approximation — `ClassifyFrame` carries no face bounds, so a true
+nearest-END solve isn't possible); `concentricAndCoincident` (circular edge)
+seats exactly at the frame origin. Flip negates the alignment direction.
+Tab cycles among the component's attachments that still match the current
+hover's classification, preserving the user's choice across hovers when it
+stays valid.
+
+**Real bug caught mid-implementation**: the golden mount-order test
+(`editorMountOrder.golden.test.ts`) calls `contributeModelingUi`, not
+`contributeModeling` (the bootstrap function that registers
+`ModelingServices.GeometryQuery`/`CommandApi`) — so `services.require(...)`
+inside `contributeLibraryUi` threw in that harness even though the real app
+boot order (bootstrap before editor mount) never hits it. Fixed with a SOFT
+lookup (`services.get`) — a missing service leaves placement quietly
+unarmed (`configurePlacementController(null)`) instead of failing editor
+mount, which is also the more defensive real-world choice regardless of this
+test.
+
+Manual `playwright-cli` verification against `/?vpdebug&vpdemo&mocklibrary=1`
+(the mock lane's honest-empty-by-default library gains a `?mocklibrary=1`
+opt-in fixture, same dev-only URL-flag pattern as `?mockimport=step` —
+`listLibraryComponents()` stays `[]` by default, WP-1.4's "no fake catalog"
+rule unchanged): card click arms placement (ring highlight, status hint) →
+hovering the demo body's top face produces a correctly-oriented ghost
+(screenshotted both flip states — head-up/shank-down default, head-buried/
+shank-up flipped, both geometrically correct) → click commits → body appears
+in the model tree named after the component, `bodiesChildren` 1→2 → Escape
+cancels cleanly from an armed-but-uncommitted state. Zero console errors
+beyond the pre-existing favicon 404.
+
+GATE: `bunx tsc --noEmit` clean · vitest **243 files / 4141 tests** (up from
+242/4138) · `cargo fmt --all --check` + workspace `clippy -D warnings` clean
+· `ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` — every
+target green except the SAME two pre-existing failures already bisected to
+baseline in this session's CURRENT_STATE snapshot
+(`sketch_on_face::a_line_across_the_projected_rect_yields_two_extrudable_regions`,
+`wire_contract::nested_inner_disk_parity_and_reopen_stability`, both `fetch
+body mesh` panics, unrelated to Component Library) · ctest **114/114**
+(worker untouched this WP — zero C++ changes, `execute_place_component`
+already handled the ghost) · manual `playwright-cli` pass as above.
+
+Next: WP-1.6 (StatusSection + tasks-chip real producer — `reindexLibrary`
+becomes the tasks-chip's first real producer), then WP-1.7 (e2e:
+browse→place→snap→save→reopen-without-library).
+
+## COMPONENT-LIBRARY WP-1.4 (2026-08-12) — GATE PASSED
+
+`onecad.library` UI module scaffold + the library panel (spec §7 "The
+Library panel"). Browse + reindex only — drag-to-place and the snap solver
+are WP-1.5.
+
+- [x] `src/modules/library/` mirrors `modules/modeling/`'s shape exactly:
+  `manifest.ts` (`moduleId("onecad.library")`, schema v1), `panelIds.ts`
+  (const-map, mirrors `modeling/panelIds.ts`'s split-for-code-splitting
+  reasoning), `register.ts` (`contributeLibrary` bootstrap hook — empty in
+  P1, no tools/commands yet — + `contributeLibraryUi` editor-mount panel
+  registration). `EditorShell.tsx`'s `useEditorContributions` gained a third
+  `createScope`/`contributeLibraryUi`/dispose call, alongside modeling and
+  shell.
+- [x] **Real layout conflict found and resolved, not assumed away**: the plan
+  flagged "check how the model tree already occupies ShellLeft before
+  assuming two panels coexist trivially" — confirmed by reading
+  `ModelTreePanel.tsx` directly: it's `absolute left-0 top-0 w-[220px]`,
+  fully occupying the slot. `SlotHost` mounts every contribution in a slot
+  simultaneously (no exclusivity mechanism), so a second `Slots.ShellLeft`
+  panel would overlap it pixel-for-pixel. **Resolved with a VS Code-style
+  shared tab strip, not a platform/slot change**: a new tiny
+  `sidebarTabStore` (`"model" | "library"`) + `SidebarTabHeader` component,
+  rendered by BOTH panels at their own top; each panel reads the store and
+  returns `null` when it isn't the active tab. Zero platform contract
+  changes — `ModelTreePanel` gained exactly two lines (the store read + the
+  early return) plus the shared header; `LibraryPanel` is a normal new
+  contribution. Considered and rejected: a new shared tab-CONTAINER
+  contribution (would require modeling's existing, pinned `ShellLeft`
+  registration to change) and inventing per-workspace panel exclusivity in
+  the platform (a bigger, unrelated architecture change).
+- [x] `src/features/library/LibraryPanel.tsx`: search (client-side filter on
+  name/id/category/tags), Reindex button, card grid backed by
+  `CadClient.listLibraryComponents()`/`reindexLibrary()`. Honest states:
+  loading, read-error, "no components indexed yet" (not a fake catalog), and
+  "no matches for {query}". Selecting a card is inert — nothing to wire it to
+  before WP-1.5's placement gesture exists.
+- [x] `src/test/contracts/shellContract.ts` AMENDED (recorded here, per its
+  own README rule): `LibraryPanel` joins the frozen mount-order list right
+  after `ModelTreePanel`. `editorMountOrder.golden.test.ts` extended to
+  register the library scope too.
+- [x] **Visually verified in a real browser** (`bun run dev` + `playwright-cli`
+  against `/?vpdebug&vpdemo`, the mock-lane editor boot with a seeded body):
+  screenshotted both tab states — Model tree showing Body/Sketches/Datums
+  with the Library tab inert, then Library showing the empty state with
+  search+Reindex, then back to Model with full sketch/inspector state
+  intact. Zero console errors beyond the pre-existing favicon 404. Round
+  trip (Model→Library→Model) confirmed no state loss.
+- [x] 6 new tests (`LibraryPanel.test.tsx`): tab-gated rendering, empty
+  state, error state, card list, search filter, reindex-reloads.
+
+Gate: `bunx tsc --noEmit` clean · vitest **242 files / 4124 tests** (up from
+241/4118) · manual browser verification via `playwright-cli` (screenshots
+taken, reviewed, no regressions) · `bun run build` not re-run this WP
+(no bundling-relevant change beyond new modules already covered by tsc+vitest).
+
+Next: WP-1.5 (snap solver: classify → attach → concentric/flush + flip +
+auto-size; `PreviewOp` drag ghost) per the plan — the largest remaining P1
+WP, and the one WP-0.1's `ClassifyElement` latency spike (p95=0.16ms, GO)
+was de-risking for.
+
+## COMPONENT-LIBRARY WP-1.3 (2026-08-12) — GATE PASSED
+
+Bridges `onecad-library` into the app crate. New `src-tauri/src/library.rs`:
+`list_library_components`/`reindex_library`/`place_component`/`detach_component`
+Tauri commands, plus the codebase's first real `ModelingServices.CommandApi`
+registration (closes the WP-0.1-flagged gap's second half — `GeometryQuery`
+closed the first).
+
+- [x] Library root: `ONECAD_LIBRARY_ROOT` env override, else
+  `<app_data_dir>/library` — mirrors the established `ONECAD_WORKER_PATH`
+  precedent exactly (a real dev/test seam, not test-only plumbing).
+- [x] `place_component`: resolves `{id, version}` via `Library::resolve_source`
+  (revision-verified), builds `PlaceComponentParams` (generator source only —
+  matches the worker's WP-1.2 scope), applies via
+  `EditCommand::AddOperation`. `detach_component`: reads the target record's
+  CURRENT `source`/`placement` via `rt.operation_params` (the same read path
+  `get_operation_params` uses), re-applies them on `DetachComponentParams` via
+  `EditCommand::UpdateOperationParams` — the sanctioned in-place swap WP-1.2
+  taught `edit::session::op_type_edit_allowed`.
+- [x] **`*_at` split discovered mid-implementation, not planned upfront**:
+  `place_component`/`detach_component` take `AppHandle` (for `app.emit(...)`
+  and `app.path()`), but `AppHandle` is pinned to the concrete `Wry` runtime
+  in a compiled `#[tauri::command]` fn — `tauri::test::mock_app`'s
+  `MockRuntime` cannot satisfy it (confirmed by a real compile error, not
+  assumed). `tauri::State<'r, T>` is NOT runtime-generic, so it works fine.
+  Fix: split every command into an `AppHandle`-free `*_at(root, &State, ...)`
+  core (testable) plus a thin public wrapper that resolves `root`, calls the
+  core, then does the `AppHandle`-dependent `finish()` tail (emit + scheduler
+  + mutation-tick) separately — mirrors `crate::recents`'s OWN `*_at` split,
+  just for a different reason (that one is untestable-AppHandle-path-resolution;
+  this one is untestable-AppHandle-type-mismatch AND wanting event-emission
+  out of the tested critical path).
+- [x] **Tests moved in-crate, not `tests/*.rs`**: the same `AppHandle`
+  mismatch meant an external integration test file couldn't call the private
+  `*_at` cores (external tests only see `pub` items). Tests live in
+  `library.rs`'s own `#[cfg(test)] mod tests`, using `tauri::test::mock_app`
+  for a real `State<AppState>` exactly like `sketch_on_face.rs` does.
+- [x] **No real worker needed for these tests, deliberately**: `place_component_at`/
+  `detach_component_at` only exercise `DocumentSession::apply` (pure timeline
+  mutation) — regen never runs. `AppState::new` is built with an explicit
+  ALL-`PendingBackend` factory rather than relying on "no worker binary
+  happened to resolve", so the test is deterministic regardless of the
+  environment's `ONECAD_WORKER_PATH`. Real-worker proof that the op
+  ACTUALLY publishes correct geometry stays `component_ops.rs`'s job.
+- [x] 2 new DTOs (`LibraryComponentDto`, `ReindexReportDto`) in `dto.rs`;
+  `ApiError: From<onecad_library::LibraryError>` (uniformly `InvalidCommand`
+  — every `LibraryError` variant is a typed, per-entity, recoverable failure).
+- [x] Frontend: `CadClient.listLibraryComponents`/`reindexLibrary`/
+  `placeComponent`/`detachComponent`, both `tauriClient`/`mockClient` impls.
+  Mock lane returns an HONEST empty catalog + throws on place/detach (spec
+  precedent: "no registry configured" beats a fake catalog that outlives the
+  mock and teaches a UI bug to pass e2e) — real mock-lane behavior arrives
+  with WP-1.7's e2e lane, not invented here.
+- [x] `ModelingServices.CommandApi` registered in
+  `modules/modeling/register.ts` with `{placeComponent, detachComponent}`
+  ONLY — per Open Question 6's resolution: these two are the only
+  KERNEL-TOUCHING library operations (ADR-0002), so only they route through
+  modeling's service; `listLibraryComponents`/`reindexLibrary` are pure reads
+  library UI will call directly via `CadClient`, no service indirection.
+
+Gate: `cargo fmt --all --check` · `cargo clippy --workspace --all-targets -- -D
+warnings` clean · `cargo test -p onecad --lib library::` **2/2** (list/reindex
+round trip; place→detach through the real command core, asserting the
+record's `opType` actually flips) · full workspace `cargo test --workspace`
+against the real worker still green (same two pre-existing failures,
+untouched) · `bunx tsc --noEmit` clean · vitest **241 files / 4118 tests** ·
+`bun run build` clean.
+
+Next: WP-1.4 (`onecad.library` UI module scaffold + library panel on
+`Slots.ShellLeft`) per the plan.
+
+## COMPONENT-LIBRARY WP-1.2 (2026-08-12) — GATE PASSED
+
+Matures the op family to its P1 shape: `ComponentSourceRef::Embedded` added,
+`KnownOperation::DetachComponent` landed. SCHEMA §7.3 doc block + §14
+changelog entry (owed from WP-0.2, now caught up).
+
+**Design correction from the original plan, made and recorded here rather
+than silently guessed through**: the plan (written before implementation
+started) assumed `SetComponentParams` and `ReplaceComponent` would ALSO be
+distinct `KnownOperation` variants ("C++ falls through to `UNSUPPORTED`" only
+makes sense if they're real `opType` tags). Implementing `DetachComponent`
+first exposed why that's wrong: `Hole`'s counterbore/countersink switch — the
+actual precedent spec §3.3 cites — stays `KnownOperation::Hole` the whole
+time; only the FIELD VALUES change via `update_operation_params`. Applying
+that same logic: `SetComponentParams` (edit `.params`) and `ReplaceComponent`
+(edit `.componentId`/`.version`/`.revision`/`.source`) are BOTH just
+`update_operation_params` calls that keep `KnownOperation::PlaceComponent`
+and overwrite fields — no new variant, no new wire opType, no C++ dispatch
+line ever needed for either. Only `DetachComponent` earns a real variant,
+because it's the one case where the record's shape GENUINELY changes (drops
+`component_id`/`version`/`revision`/`mate` entirely — "no `component_*`
+fields remain"). This cuts WP-1.2's actual scope roughly in half versus the
+original plan and removes an entire (wrong) design branch before any C++ was
+written against it. `SetComponentParams`/`ReplaceComponent` are now purely
+app-crate/command-layer concerns (WP-1.3+), not core-type work.
+
+- [x] `ComponentSourceRef::Embedded { sha256, codec: ImportSourceCodec }`
+  added (reuses `ImportSourceCodec` verbatim). Widens the op's source enum to
+  the full spec §2.1 3-kind shape minus `Document` (still P3).
+- [x] `KnownOperation::DetachComponent(DetachComponentParams)` —
+  `{ source: ComponentSourceRef, placement: FrozenPlacement }`, NO
+  `component_id`/`version`/`revision`/`mate`. All 5 Rust mirror sites +
+  `validate_detach_component` (wired into both `add_operation` and
+  `update_operation_params`) landed in one pass, having already learned the
+  full mirror-site list from WP-0.2.
+- [x] **New sanctioned op-type swap** in `edit::session::op_type_edit_allowed`:
+  `PlaceComponent → DetachComponent`, one-directional (mirrors the existing
+  Fillet⇄Chamfer precedent; the reverse is deliberately NOT sanctioned — "the
+  honest break link" is one-way). 3 new integration tests in
+  `edit_session.rs` (forward swap accepted + `RecordId` preserved, reverse
+  swap rejected, swap to an unrelated op type rejected).
+- [x] Shared `validate_component_source` extracted (both `PlaceComponentParams`
+  and `DetachComponentParams` validate the same `source` shape).
+- [x] `dto.rs` — `DetachComponent` buckets into `FeatureKind::Boolean`
+  (same interim-bucket precedent as `PlaceComponent`/`TransformBody`),
+  labelled "Detach Component".
+- [x] Wire slot-order pin + H5 op-set-agreement test both extended with
+  `DetachComponent` rows (always empty — no mate, no identity, no
+  topological dependency at all).
+- [x] **Worker**: `ComponentOp.cpp` refactored — `execute_place_component`
+  and `execute_detach_component` share one `resolve_source_and_publish`
+  pipeline (the two build IDENTICAL geometry; only the RECORD's params
+  differ). `PlanExecutor.cpp` dispatch line added.
+- [x] **Gate — worker CTest**: `test_component_ops.cpp` grew from 4 to 7
+  cases (3 new: exact-volume parity with `PlaceComponent`, placement-transform
+  invariance, embedded-source refusal) — ctest still **114/114** (same target,
+  more cases inside it).
+- [x] **Gate — Rust integration**: `component_ops.rs` gained
+  `detach_component_preserves_body_and_volume_across_the_swap` — the FULL
+  swap through the REAL worker (not just the Rust-core unit test): place,
+  regen, swap via `UpdateOperationParams`, regen again, assert same `BodyId`
+  + same exact volume, and that `rt.projection()`'s `FeatureDto.op_type`
+  actually reads `"DetachComponent"` after the swap.
+
+Gate: worker CTest **114/114** · `cargo fmt --all --check` · `cargo clippy
+--workspace --all-targets -- -D warnings` clean · `ONECAD_WORKER_PATH=...
+ONECAD_REQUIRE_WORKER=1 cargo test --workspace` all green except the same two
+pre-existing failures WP-0.1 bisected to baseline (untouched by this WP).
+
+Next: WP-1.3 (bridge `onecad-library` into the app crate; build
+`ModelingServices.CommandApi`; author-time blob copy-in for `Embedded`
+sources) per the plan.
+
+## COMPONENT-LIBRARY WP-1.1 (2026-08-12) — GATE PASSED
+
+New `onecad-library` crate: package format, index, content-addressed blob
+store, resolution, registry trait. Pure domain crate — deliberately does
+**not** depend on `onecad-core` (Open Q1 resolved: op-params-facing types stay
+in `onecad-core::document::record`; this crate owns the on-disk
+`component.toml` package format independently, since its `[parameters]`
+role/domain/snap shape has no op-params analogue — the app crate, WP-1.3, is
+where the two get translated) and must not depend on `tauri` or perform
+network I/O in v1 (same walls `onecad-core` keeps; a future `RemoteRegistry`,
+P4, is the sole place network I/O may enter).
+
+- [x] `package.rs` — `ComponentPackage`/`Identity`/`Metadata`/`SourceSpec`
+  (`Embedded`/`Generator`/`Document` — the FULL 3-variant spec §2.1 shape,
+  wider than `onecad-core`'s P0-reduced `ComponentSourceRef` since this crate
+  isn't bound by the op's phased rollout)/`ParameterSpec`/`ParameterRole`/
+  `AttachmentSpec`. `parse`/`validate_identity` (namespaced id, non-empty
+  version, `sha256:`-prefixed revision) + `compute_revision` (SHA-256 over
+  every file in the package dir EXCEPT `component.toml` itself, sorted by
+  relative path — avoids the self-referential "the manifest that carries the
+  hash can't hash itself" problem).
+- [x] `blob.rs` — filesystem-backed `blobs/<sha256>` store, genuinely SEPARATE
+  from `onecad-core::io::imports`'s zip-embedded store (different lifecycle:
+  shared across documents, survives document close) but same design
+  principles: content-address filename, `MAX_BLOB_BYTES` cap, re-hash-on-every-read
+  integrity check. Regression pin `a_flipped_byte_on_disk_is_caught_on_read`
+  mirrors `onecad-core`'s `verify_blob_catches_a_flipped_byte`.
+- [x] `index.rs` — `library.json` (`indexVersion: 1`, `id -> version -> entry`),
+  atomic write (sibling temp + rename, mirrors `onecad-core::io::container`'s
+  save discipline), `reindex` walks package directories and SKIPS (not
+  aborts on) a malformed one, `load` of a missing file is an empty index (a
+  fresh library root is a legitimate state, not an error).
+- [x] `resolve.rs` — `{id, version, revision} -> ResolvedSource` (Generator
+  only — P1 scope, mirrors the op's reduction). Revision mismatch is a typed
+  `LibraryError::RevisionMismatch`, never a panic or a load-breaking `Err` —
+  converting it to `NeedsRepair` is the app-crate's job (WP-1.3), not this
+  crate's (spec §4).
+- [x] `registry.rs` — `RegistrySource` trait + `LocalRegistry` impl.
+- [x] `tables.rs` — stub (P2 content).
+- [x] `Library` struct (`lib.rs`) ties it together: `open`/`index`/`reindex`/
+  `get`/`resolve_source` all real; `save_component`/`save_template` are
+  typed-error stubs (P3 — authoring needs document/geometry access this crate
+  deliberately doesn't have) with their real signatures settled now so P3
+  doesn't redesign the surface.
+
+Gate: `cargo test -p onecad-library` **22/22** (package.toml parse/validate
+round-trip incl. a malformed-TOML fixture, revision-hash recompute-on-write
+determinism + content-sensitivity + manifest-self-exclusion, `library.json`
+atomic write + reindex-reconciles-disk + skips-bad-package, blob integrity
+incl. the flipped-byte regression pin, end-to-end open→reindex→get→resolve) ·
+`cargo fmt --all --check` · `cargo clippy --workspace --all-targets -- -D
+warnings` clean (new crate added to workspace members) · full workspace
+`cargo test --workspace` against the real worker still green (same two
+pre-existing failures, unaffected — this WP touches no worker-facing code).
+
+Next: WP-1.2 (mature the op family to the full spec shape — add
+`SetComponentParams`/`ReplaceComponent`/`DetachComponent`, wire `DetachComponent`
+in C++, extend `ComponentSourceRef` with `Embedded`) per the plan.
+
+## COMPONENT-LIBRARY WP-0.2 (2026-08-12) — GATE PASSED, P0 COMPLETE
+
+Completes P0's combined go/no-go (WP-0.1's latency GO + this WP's op skeleton).
+Lands the real `KnownOperation::PlaceComponent` (spec §3.1), generator-source-only,
+with a hardcoded (non-table-driven) ISO 4762 M6×20 SHCS generator — table-driven
+sizing is P2.
+
+- [x] **All 5 Rust mirror sites updated in one commit** (record.rs `KnownOperation`
+  enum + `KNOWN_OP_TYPES`, `element_refs_mut`, `op_type`, `derive_inputs`;
+  `worker::wire::wire_op_inputs`; `document_runtime::element_ref_input`) — plus a
+  6th the plan's survey undercounted: `edit::session`'s `validate_place_component`,
+  wired into **both** `add_operation` and `update_operation_params` (this pair, not
+  the struct's own `validate()`, is the actual authoring-time enforcement point).
+- [x] New types (`record.rs`): `PlaceComponentParams`, `ComponentSourceRef`
+  (`Generator` variant only — P0 scope), `ComponentParamValue`, `ComponentMate`,
+  `MateKind`, `FrozenPlacement` (reuses `TransformRotation` verbatim).
+- [x] **Real defect caught by the round-trip test, not by inspection**: `#[serde(tag
+  = "kind", rename_all = "camelCase")]` on `ComponentSourceRef` renames the VARIANT
+  name ("generator") but does **not** cascade `rename_all` into the struct-variant's
+  own fields — `generator_id`/`generator_version` serialized snake_case, so the
+  worker read an empty `generatorId` and every placement failed `OP_FAILED`. Fixed
+  with explicit `#[serde(rename = "generatorId"/"generatorVersion")]`, matching the
+  codebase's existing `AxisRef` precedent (which uses the same per-field rename for
+  the identical reason, not because the names differ semantically). Pinned by
+  `place_component_source_fields_are_camel_case` so this can't regress silently
+  again — this class of bug (an internally-tagged enum's struct-variant fields
+  silently keeping snake_case) is worth checking for on any FUTURE internally-tagged
+  enum added to this file.
+- [x] Wire slot-order pin (`wire_op_inputs_slot_order_is_the_repair_slot_table`,
+  `wire.rs`) and the H5 op-set-agreement test (`element_refs_mut_covers_exactly_the_
+  wire_typed_ref_slots`) both extended with `PlaceComponent` rows (mate-present and
+  no-mate cases) — the `_covered` exhaustiveness guard in the op-set test forces
+  this on every future variant.
+- [x] `dto.rs`: `feature_kind`/`default_label` non-exhaustive-match compile errors
+  (expected — new enum variant) resolved: `PlaceComponent` buckets into
+  `FeatureKind::Boolean` (same "no dedicated icon yet" interim-bucket precedent as
+  `TransformBody`), labelled "Place Component".
+- [x] **Worker**: `worker/src/ops/ComponentOp.h/.cpp` (mirrors `HoleOp.h`/`ImportOp.cpp`'s
+  shape) — validates `source.kind == "generator"` + non-empty `generatorId`
+  (P0 scope refuses `embedded`/`document` with `OP_FAILED`/`UNSUPPORTED` code,
+  `Status::Failed` — distinct from `PlanExecutor`'s dispatcher-level
+  `Status::Unsupported`, reserved for an entirely unrecognized opType), builds the
+  hardcoded M6 SHCS solid (head+shank cylinders, checked Union fuse), applies
+  `placement` (same `T ∘ R` normative order as `TransformBody`, `TransformOp.cpp`'s
+  `gp_Trsf` pattern reused), publishes through `single_solid_policy` as a NewBody.
+  Dispatch line added to `PlanExecutor.cpp::run_single_op`.
+- [x] **Gate — worker CTest**: `worker/tests/test_component_ops.cpp` (4 cases:
+  exact M6 SHCS volume ~1036.73mm³, rigid-placement volume invariance, embedded-source
+  refusal, empty-generatorId refusal) — ctest **114/114** (113→114).
+- [x] **Gate — Rust integration**: `src-tauri/tests/component_ops.rs` (worker-backed,
+  skip-if-missing, mirrors `hole_ops.rs`) — `PlaceComponent` through `DocumentRuntime`
+  end to end with the EXACT `QueryMassProperties` volume (not mesh-chord), plus a
+  save→fresh-worker-reopen round trip proving the op has zero library-root dependency
+  (nothing in it reads a library folder at all — the deliberate P0 de-risking choice
+  the plan called out for exactly this reason).
+- [x] 4 new Rust unit tests in `record.rs` (`place_component_is_a_known_op_type`,
+  `place_component_source_fields_are_camel_case`, `place_component_derives_
+  conditional_mate_input`, `place_component_validation_matrix`).
+- [x] SCHEMA §7.3 doc block not yet added (deferred — flagging as owed before P1
+  ships; WP-0.1's §7.5 `ClassifyElement` entry was landed, this op's wasn't in this
+  pass and should land alongside WP-1.2's op-family maturation, same commit as the
+  full `SetComponentParams`/`ReplaceComponent`/`DetachComponent` doc pass).
+
+**P0 combined gate: GO.** WP-0.1's p95=0.16ms latency + this WP's passing
+`component_ops` tests satisfy the spec's "one M6 screw placed concentrically on a
+hole in a dev build" framing (concentric placement itself is P1.5's live-drag job;
+this WP's test computes a fixed `placement` directly, per the plan's explicit P0/P1
+boundary).
+
+Gate: worker CTest **114/114** · `cargo fmt --all --check` · `cargo clippy
+--workspace --all-targets -- -D warnings` clean · `ONECAD_WORKER_PATH=...
+ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **74 test binaries, all green**
+except the same two pre-existing failures WP-0.1 already bisected to baseline
+(`sketch_on_face.rs::a_line_across_...`, `wire_contract.rs::nested_inner_disk_
+parity_and_reopen_stability`, both `fetch body mesh` panics, both reproduced at
+baseline commit `5036597`, neither touched by this or the prior WP). Frontend
+untouched this WP (Rust/C++ only) — tsc/vitest/build not re-run, no regression
+surface.
+
+Next: WP-1.1 (`onecad-library` crate scaffold: package/index/blob/resolve,
+embedded-only) per the plan.
+
+## COMPONENT-LIBRARY WP-0.1 (2026-08-12) — GATE PASSED, P0 GO
+
+Plan: `TheComponentLibrary/onecad-component-library-spec.md` (normative spec) +
+implementation plan at `/Users/andrejvysny/.claude/plans/do-thorough-analysis-of-abstract-thunder.md`.
+First work package of the Component Library feature (placeable mechanical
+parts, mate-like snapping, parametric generators, templates) — the P0
+foundation spike's risk item: is interactive surface classification fast
+enough for a live hover gesture.
+
+- [x] New read-only kernel verb `ClassifyElement` (SCHEMA §7.5) — surface/curve
+  classification + a seatable frame (plane origin+normal, cylinder/circle
+  axis+radius) for a picked face/edge. Addressed like `QueryElement` but with
+  no `snapshotId` (always current head — a continuously re-issued live hover
+  query, not a pick tied to one snapshot, same reasoning as
+  `QueryMassProperties`). `worker/src/session/ClassifyElement.h/.cpp`
+  (modeled on `FaceProjection.cpp`'s `resolve_seed` shape), dispatch in
+  `worker/src/main.cpp`.
+- [x] Rust plumbing: `ClassifyElementDto`/`ClassifyElementFrameDto`
+  (`dto.rs`), `classify_element_args`/`parse_classify_element` (`wire.rs`),
+  `ElementQuery::classify_element(_by_topo_key)` trait methods + `PendingBackend`
+  fallback (`worker/mod.rs`), `WorkerManager` impl (`manager.rs`),
+  `#[tauri::command] classify_element` (`api/mod.rs`), registered in `lib.rs`.
+- [x] Frontend: `ClassifyResult`/`ClassifyFrame` types (`ipc/types.ts`),
+  `CadClient.classifyElement` + both `tauriClient`/`mockClient` impls (mock is
+  honest about its gap — only the plane case gets a real frame, no cylinder
+  axis synthesized from mesh data).
+- [x] **Closed a real platform gap**: `ModelingServices.GeometryQuery` was
+  declared in `manifest.ts` since the Platform refactor but never registered
+  anywhere. `register.ts::contributeModeling` now calls the codebase's first
+  `scope.registerService(ModelingServices.GeometryQuery, …)`, proven by a new
+  vitest asserting `platform.services.require` resolves it (not just that it's
+  declared).
+- [x] **P0 go/no-go, measured**: `src-tauri/tests/classify_latency.rs`
+  (worker-backed, skip-if-missing) builds a real 20×20×25 box via
+  Sketch+Extrude, issues 500 `ClassifyElement` calls over the live stdio
+  round-trip mixing all 6 faces + 12 edges. **p50=0.08ms p95=0.16ms
+  p99=0.35ms** — gate was p95<16ms. **GO**: the live-hover gesture (WP-1.5)
+  is not blocked; no click-to-classify fallback needed.
+- [x] SCHEMA §7.5 doc block + §14 changelog entry for the new verb.
+
+**Two pre-existing test failures found and bisected, NOT this work**: both
+`sketch_on_face.rs::a_line_across_the_projected_rect_yields_two_extrudable_regions`
+and `wire_contract.rs::nested_inner_disk_parity_and_reopen_stability` panic
+identically (`fetch body mesh`, `get_mesh().expect(...)`), in isolation and in
+the full suite. Neither test file, nor `get_mesh`/tessellation/mesh-cache code,
+is touched by this WP. Confirmed pre-existing by stashing all WP-0.1 changes,
+rebuilding the worker from the unmodified baseline commit (`5036597`), and
+re-running `a_line_across_...` in isolation — **identical panic at baseline**.
+Root cause not investigated further (out of scope for this WP); flagged for
+whoever next touches mesh-fetch/tessellation.
+
+Gate: worker CTest 113/113 · `cargo fmt --all --check` · `cargo clippy
+--workspace --all-targets -- -D warnings` clean · `ONECAD_WORKER_PATH=... 
+ONECAD_REQUIRE_WORKER=1 cargo test --workspace` all green except the two
+pre-existing failures above · `bunx tsc --noEmit` clean · vitest **241 files /
+4117 tests** all pass · `bun run build` clean. Playwright not run (no viewport/
+UI surface changed this WP — WP-1.4/1.5 are where a Playwright spec is due).
+
+Next: WP-0.2 (`KnownOperation::PlaceComponent` skeleton, generator-source-only,
+hardcoded ISO 4762 M6) completes the P0 combined gate; then P1 (`onecad-library`
+crate scaffold onward) per the plan.
+
 ## MODEL-CORRECTNESS-P0 + REF-OWNERSHIP-AND-SNAPSHOT P1 (2026-08-11) — COMPLETE
 
 - [x] P0 — deferred replacement guard; authoritative `SaveOutcome`; classified terminals; zero-solid Boolean refusal; circular `angle / count`; semantic Draft refusal; per-session preview ownership; Boolean re-arm.

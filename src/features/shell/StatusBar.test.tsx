@@ -2,17 +2,30 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { render, screen, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StatusBar } from "./StatusBar";
+import { createPlatform, PlatformProvider } from "@/platform";
 import { selectionStore } from "@/stores/selectionStore";
 import { viewportStore } from "@/stores/viewportStore";
 import { settingsStore } from "@/stores/settingsStore";
 import { documentStore, seedMockDocument } from "@/stores/documentStore";
 import { resetStores } from "@/test/resetStores";
 
+// WP-1.6: StatusBar now hosts `<SlotHost slot={Slots.StatusSection}/>`, which
+// needs a `<PlatformProvider>` ancestor (`usePlatform()` throws without one) —
+// a bare platform with zero registered panels is enough for a StatusBar test,
+// same minimal-fixture shape `reference.test.tsx` uses.
+function renderStatusBar() {
+  return render(
+    <PlatformProvider platform={createPlatform()}>
+      <StatusBar />
+    </PlatformProvider>,
+  );
+}
+
 describe("StatusBar", () => {
   beforeEach(() => resetStores());
 
   it("shows DOF for a selected sketch, — for a body, and the mono read-out", () => {
-    render(<StatusBar />);
+    renderStatusBar();
     expect(screen.getByText("DOF: 0")).toBeInTheDocument();
     expect(screen.getByText(/273\.00/)).toBeInTheDocument();
 
@@ -21,7 +34,7 @@ describe("StatusBar", () => {
   });
 
   it("styles an error hint red and an info hint dimmed", () => {
-    render(<StatusBar />);
+    renderStatusBar();
 
     act(() =>
       viewportStore.getState().setStatusHint("Extrude failed: boom", { severity: "error", sticky: true }),
@@ -36,7 +49,7 @@ describe("StatusBar", () => {
 
   it("toggles projection and dims FOV in ortho", async () => {
     const user = userEvent.setup();
-    render(<StatusBar />);
+    renderStatusBar();
 
     expect(screen.getByTestId("fov")).toHaveStyle({ opacity: "1" });
     await user.click(screen.getByRole("tab", { name: "Ortho" }));
@@ -51,7 +64,7 @@ describe("StatusBar", () => {
    * fixed width so the read-out does not jitter as the pointer moves.
    */
   it("renders the cursor read-out in the display unit, named once", () => {
-    render(<StatusBar />);
+    renderStatusBar();
     // resetStores() seeds cursor = (273, 210, 0) mm at the mm default.
     expect(screen.getByText(/X\s+273\.00\s+Y\s+210\.00\s+Z\s+0\.00\s+mm/)).toBeInTheDocument();
 
@@ -75,7 +88,7 @@ describe("StatusBar regen busy (H7b)", () => {
   afterEach(() => act(() => documentStore.getState().regenIdle()));
 
   it("shows Rebuilding… only while a regen is in flight", () => {
-    render(<StatusBar />);
+    renderStatusBar();
     expect(screen.queryByTestId("regen-busy")).toBeNull();
 
     act(() => documentStore.getState().regenStarted());
@@ -86,7 +99,7 @@ describe("StatusBar regen busy (H7b)", () => {
   });
 
   it("stays up across OVERLAPPING regens and cannot go negative", () => {
-    render(<StatusBar />);
+    renderStatusBar();
     act(() => {
       documentStore.getState().regenStarted();
       documentStore.getState().regenStarted();
@@ -106,7 +119,7 @@ describe("StatusBar regen busy (H7b)", () => {
   });
 
   it("a projection snapshot landing mid-regen does not clear the indicator", () => {
-    render(<StatusBar />);
+    renderStatusBar();
     act(() => documentStore.getState().regenStarted());
     act(() => documentStore.getState().applySnapshot(seedMockDocument()));
     expect(screen.getByTestId("regen-busy")).toBeInTheDocument();
@@ -124,7 +137,7 @@ describe("StatusBar — settings", () => {
    */
   it("opens and closes the settings dialog", async () => {
     const user = userEvent.setup();
-    render(<StatusBar />);
+    renderStatusBar();
 
     await user.click(screen.getByRole("button", { name: "Open settings" }));
     expect(screen.getByRole("dialog", { name: "Settings" })).toBeInTheDocument();

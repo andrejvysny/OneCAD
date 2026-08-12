@@ -12,7 +12,12 @@ import { createPlatform, type Platform } from "@/platform";
 import { MODEL_TOOLS_CONTRACT, SKETCH_TOOLS_CONTRACT } from "@/test/contracts/toolbarContract";
 import { MODEL_KEYS_CONTRACT, SKETCH_KEYS_CONTRACT } from "@/test/contracts/keymapContract";
 import { registerModelingModule } from "./register";
-import { MODELING_MODULE_ID } from "./manifest";
+import {
+  MODELING_MODULE_ID,
+  ModelingServices,
+  type CommandApiService,
+  type GeometryQueryService,
+} from "./manifest";
 import { toolbarFromRegistry, registeredTools, toolFromId } from "./registryToolbar";
 import { ModelingCommands, ModelingModelTools, ModelingSketchTools } from "./ids";
 import { MODELING_TOOL_DESCRIPTORS } from "./tools";
@@ -84,6 +89,20 @@ describe("modeling module registration", () => {
         );
       }
     }
+  });
+
+  it("registers a real GeometryQuery service (Component Library WP-0.1)", () => {
+    // Proves the service is actually REGISTERED, not just declared in
+    // manifest.ts — `platform.services.require` throws on a merely-declared,
+    // never-registered id, which is exactly the gap this WP closes.
+    const svc = platform.services.require<GeometryQueryService>(ModelingServices.GeometryQuery);
+    expect(typeof svc.classifyElement).toBe("function");
+  });
+
+  it("registers a real CommandApi service (Component Library WP-1.3)", () => {
+    const svc = platform.services.require<CommandApiService>(ModelingServices.CommandApi);
+    expect(typeof svc.placeComponent).toBe("function");
+    expect(typeof svc.detachComponent).toBe("function");
   });
 
   it("registers the non-tool actions as commands", () => {

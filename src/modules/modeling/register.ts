@@ -13,6 +13,7 @@
 import { activateTool } from "@/tools/activateTool";
 import { runAction } from "@/shortcuts/useShortcuts";
 import type { ShortcutAction } from "@/shortcuts/keymap";
+import { createClient } from "@/ipc/client";
 import { documentStore } from "@/stores/documentStore";
 import { selectionStore } from "@/stores/selectionStore";
 import { activeTool, toolStore, type ModelTool, type SketchTool } from "@/stores/toolStore";
@@ -25,7 +26,13 @@ import type {
   Shortcut,
   ToolDefinition,
 } from "@/platform";
-import { MODELING_MODULE_ID, ModelingScopes } from "./manifest";
+import {
+  MODELING_MODULE_ID,
+  ModelingScopes,
+  ModelingServices,
+  type CommandApiService,
+  type GeometryQueryService,
+} from "./manifest";
 import {
   modelToolId,
   sketchToolId,
@@ -210,6 +217,31 @@ function bridgeActiveTool(scope: ModuleScope): void {
   scope.own({ dispose: unsubscribe });
 }
 
+/**
+ * `ModelingServices.GeometryQuery`'s implementation — a thin `CadClient`
+ * delegate (Component Library WP-0.1's first real service registration; see
+ * `manifest.ts::GeometryQueryService`).
+ */
+const geometryQueryService: GeometryQueryService = {
+  classifyElement: (bodyId, elementId, topoKey) =>
+    createClient().classifyElement(bodyId, elementId, topoKey),
+};
+
+/**
+ * `ModelingServices.CommandApi`'s implementation — a thin `CadClient`
+ * delegate (Component Library WP-1.3's first real service registration; see
+ * `manifest.ts::CommandApiService`).
+ */
+const commandApiService: CommandApiService = {
+  placeComponent: (componentId, componentVersion, translate, rotate) =>
+    createClient().placeComponent(componentId, componentVersion, translate, rotate),
+  detachComponent: (recordId) => createClient().detachComponent(recordId),
+  beginPreview: (draft) => createClient().beginPreview(draft),
+  updatePreview: (sessionId, params, epoch) => createClient().updatePreview(sessionId, params, epoch),
+  endPreview: (sessionId, commit) => createClient().endPreview(sessionId, commit),
+  onPreviewResult: (cb) => createClient().onPreviewResult(cb),
+};
+
 /** Registers every modeling contribution into `scope`. Exported for tests. */
 export function contributeModeling(scope: ModuleScope): void {
   for (const d of MODELING_TOOL_DESCRIPTORS) scope.registerTool(toolDefinition(d));
@@ -219,6 +251,9 @@ export function contributeModeling(scope: ModuleScope): void {
     scope.registerCommand(commandDefinition(key, priority));
     priority += 10;
   }
+
+  scope.registerService(ModelingServices.GeometryQuery, geometryQueryService);
+  scope.registerService(ModelingServices.CommandApi, commandApiService);
 
   bridgeActiveTool(scope);
 }

@@ -93,6 +93,19 @@ impl From<IoError> for ApiError {
     }
 }
 
+/// `onecad_library::LibraryError` → `ApiError`. Every variant is a typed,
+/// per-entity failure (bad package, missing/mismatched blob, malformed
+/// index) — recoverable, never a crash — so this maps uniformly to
+/// `InvalidCommand` rather than the `Worker`/`Io` fatal classes. A revision
+/// mismatch specifically is converted to `NeedsRepair` document STATE by the
+/// `place_component`/`detach_component` command handlers themselves (never
+/// surfaced as this error) — see `crate::library`.
+impl From<onecad_library::LibraryError> for ApiError {
+    fn from(e: onecad_library::LibraryError) -> Self {
+        ApiError::InvalidCommand(e.to_string())
+    }
+}
+
 /// The engine→API conversion is the ONE choke point every `?`-propagated engine
 /// failure crosses, so it is where the failure's structured detail is preserved:
 /// the wire shape stays the pinned `{kind, message}`, but `code`/`recoverable`

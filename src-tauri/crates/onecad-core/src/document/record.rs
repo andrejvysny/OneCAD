@@ -42,6 +42,8 @@
 //! intentional — the wire is an adversarial trust boundary, the on-disk document
 //! is not.
 
+use std::collections::BTreeMap;
+
 use serde::de::{self, DeserializeOwned};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -75,6 +77,8 @@ const KNOWN_OP_TYPES: &[&str] = &[
     "TransformBody",
     "Hole",
     "OffsetFace",
+    "PlaceComponent",
+    "DetachComponent",
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -311,6 +315,13 @@ pub enum KnownOperation {
     TransformBody(TransformBodyParams),
     Hole(HoleParams),
     OffsetFace(OffsetFaceParams),
+    /// Instantiate a library component (Component Library WP-0.2; spec §3.1).
+    /// New v2 op, no OneCAD-CPP analogue.
+    PlaceComponent(PlaceComponentParams),
+    /// Drop a placed component's library identity, keeping its cached
+    /// geometry as an ordinary body (Component Library WP-1.2; spec §3.4).
+    /// New v2 op, no OneCAD-CPP analogue.
+    DetachComponent(DetachComponentParams),
 }
 
 impl KnownOperation {
@@ -378,6 +389,14 @@ impl KnownOperation {
                 }
                 refs
             }
+            // A placed component's only topological input is its (optional) mate
+            // target — the element it seats against. Absent `mate` ⇒ dropped in
+            // free space, no ref at all.
+            KnownOperation::PlaceComponent(p) => p
+                .mate
+                .as_mut()
+                .map(|m| vec![&mut m.target])
+                .unwrap_or_default(),
             _ => Vec::new(),
         }
     }
@@ -415,6 +434,8 @@ impl Operation {
                 KnownOperation::TransformBody(_) => "TransformBody",
                 KnownOperation::Hole(_) => "Hole",
                 KnownOperation::OffsetFace(_) => "OffsetFace",
+                KnownOperation::PlaceComponent(_) => "PlaceComponent",
+                KnownOperation::DetachComponent(_) => "DetachComponent",
             },
             // The frozen node keeps its original tag inside `raw`; report it so a
             // future opType is not mislabelled as one of the known ops.
@@ -630,6 +651,25 @@ impl Operation {
                     inputs.push_element(id.clone());
                 }
             }
+
+            // PlaceComponent: no host body (it mints a NewBody), so the only
+            // dependency is a conditional mate target — mirrors Extrude's
+            // ToFace-conditional handling of `target_face`. Absent `mate` ⇒ no
+            // dependency at all (dropped in free space).
+            KnownOperation::PlaceComponent(p) => {
+                if let Some(m) = &p.mate {
+                    if let Some(primary) = &m.target.primary {
+                        inputs.push_body(primary.body);
+                        inputs.push_element(primary.element.clone());
+                    }
+                }
+            }
+
+            // DetachComponent: no library identity, no mate — the record
+            // re-describes geometry directly (same source+placement shape as
+            // PlaceComponent, minus everything component-specific), so it has
+            // no topological dependency at all. No C++ analogue (new v2 op).
+            KnownOperation::DetachComponent(_) => {}
         }
         inputs
     }
@@ -1955,6 +1995,294 @@ fn positive(field: &str, v: f64) -> Result<(), String> {
     Ok(())
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// PlaceComponent (Component Library WP-0.2; spec §3.1)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A free-parameter override value for a placed component instance (spec §3.1
+/// `params`, mirroring `component.toml`'s `[parameters]` scalar domain: a
+/// thread designation is text, a length is a number, a thread-detail level is
+/// text). Untagged: the wire form is a bare JSON scalar, matching how
+/// `component.toml` authors these values.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ComponentParamValue {
+    Number(f64),
+    Text(String),
+    Bool(bool),
+}
+
+/// Where a placed component's geometry comes from (spec §3.1 `source`).
+///
+/// WP-1.2: **`Generator` and `Embedded`**. `Document` (a frozen `.onecad`
+/// replay) lands in P3. Reduced scope, not a different shape — the wire tag
+/// matches the spec's `[source] kind` field exactly, so widening this enum
+/// later is additive.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ComponentSourceRef {
+    /// Resolves via a built-in, versioned generator running through the
+    /// worker op path (spec §6) — no blob, no library-folder dependency once
+    /// authored. This is what makes P0's spike self-contained: unlike
+    /// `Embedded`, there is no document-side blob copy-in to plumb.
+    Generator {
+        #[serde(rename = "generatorId")]
+        generator_id: String,
+        #[serde(rename = "generatorVersion")]
+        generator_version: u32,
+        /// The RESOLVED parameter set the generator ran with (free values
+        /// merged with table/computed derivations) — frozen at authoring so
+        /// regen never re-touches the library for this instance.
+        #[serde(default)]
+        params: BTreeMap<String, ComponentParamValue>,
+        #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
+        extra: Extra,
+    },
+    /// A content-addressed blob payload (spec §2.3 `<library-root>/blobs/<sha>`
+    /// at authoring; copied into the DOCUMENT's own `io::imports::ImportBlobs`
+    /// section at place time, WP-1.3) — reuses [`ImportSourceCodec`] verbatim,
+    /// the same "params carry only a pointer, never bytes/paths" discipline
+    /// [`ImportStepParams`] follows.
+    Embedded {
+        sha256: String,
+        codec: ImportSourceCodec,
+        #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
+        extra: Extra,
+    },
+}
+
+/// The snap classification a placement mate resolved to (spec §5.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MateKind {
+    /// Axis aligned to a cylinder/hole axis, seated at the near end.
+    Concentric,
+    /// Mating face coplanar, normal-aligned, at the pick point.
+    Coincident,
+    /// Both in one gesture — the preferred fastener-on-a-hole-rim snap.
+    ConcentricAndCoincident,
+}
+
+/// A placed component's recorded attachment to the document (spec §3.1
+/// `mate`). Absent on the owning [`PlaceComponentParams`] ⇒ dropped in free
+/// space, positioned by `placement` alone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentMate {
+    /// Names a key in the component's `[attachments]` table — the
+    /// component's own local frame the mate seats from.
+    pub self_attachment: String,
+    /// The target element in the document. A full [`ElementRef`] (not a bare
+    /// id) so the resolution ladder can re-resolve it after upstream edits —
+    /// this is what makes the mate PERSISTENT (spec §5.5, landing P3).
+    pub target: ElementRef,
+    pub kind: MateKind,
+    /// Orientation flip at insert (the `A`-key gesture), applied on top of
+    /// the solved frame.
+    #[serde(default)]
+    pub flipped: bool,
+    #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
+    pub extra: Extra,
+}
+
+/// A placed component's frozen world placement (spec §3.1 `placement`).
+///
+/// Reuses [`TransformRotation`] verbatim — same frozen-pivot semantics
+/// (`TransformBodyParams` docs): re-edits recompose against the stored pivot
+/// so repeated edits are exact. When `mate` is present this is the RESOLVED
+/// transform the mate produced, kept as the fallback if the mate later fails
+/// to resolve (never dropped, never silently substituted).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrozenPlacement {
+    pub translate: [Scalar; 3],
+    #[serde(default)]
+    pub rotate: TransformRotation,
+}
+
+/// Instantiate a library component (spec §3.1 `PlaceComponent`; Component
+/// Library WP-0.2; new v2 op, no OneCAD-CPP analogue).
+///
+/// **Lineage: mints a NewBody** (`body_<opId>`), `modified` on nothing — a
+/// placed component is a first-class instance, never a copied-in body (spec
+/// §3, the decision that keeps the library aligned with the founding
+/// `NeedsRepair`-over-silent-substitution invariant).
+///
+/// A component resolves to exactly ONE solid in v1 (spec §9,
+/// `single_solid_policy` — the existing single-solid publication policy every
+/// other publishing op already satisfies).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaceComponentParams {
+    /// Library identity the instance was placed from (namespaced, e.g.
+    /// `"onecad.std.iso4762"`).
+    pub component_id: String,
+    /// Semver at place time.
+    pub component_version: String,
+    /// `"sha256:…"` content hash of the package at place time — the revision
+    /// re-verified on regen (spec §4); a mismatch surfaces `NeedsRepair`,
+    /// never a silent substitution (the SolidWorks Toolbox failure mode).
+    pub component_revision: String,
+    /// Free-parameter overrides for THIS instance. Keys must exist in the
+    /// component signature and be `role: free`; enforced at authoring, not
+    /// deserialize (see `crate::edit::session`) — structurally here, and
+    /// against the resolved component signature at the app-crate entry point
+    /// (`onecad-core` cannot depend on the library crate).
+    #[serde(default)]
+    pub params: BTreeMap<String, ComponentParamValue>,
+    /// Source resolution, so regen can re-derive geometry without the
+    /// library (P0/WP-0.2: `Generator` only).
+    pub source: ComponentSourceRef,
+    /// Optional placement mate recorded at insert.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mate: Option<ComponentMate>,
+    /// Frozen world placement, frozen at authoring.
+    pub placement: FrozenPlacement,
+    #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
+    pub extra: Extra,
+}
+
+impl PlaceComponentParams {
+    /// Validates the params' self-contained invariants (spec §3.1), returning
+    /// a human-facing reason on failure. Checked at every authoring entry
+    /// point (see [`crate::edit::session`]), NOT at deserialize time — same
+    /// single-writer reason as [`ImportStepParams::validate`].
+    ///
+    /// # Errors
+    /// A message naming the violated invariant.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.component_id.trim().is_empty() {
+            return Err("PlaceComponent componentId must not be empty".into());
+        }
+        if !self.component_id.contains('.') {
+            return Err(format!(
+                "PlaceComponent componentId `{}` must be namespaced (`<ns>.<...>`)",
+                self.component_id
+            ));
+        }
+        if self.component_version.trim().is_empty() {
+            return Err("PlaceComponent componentVersion must not be empty".into());
+        }
+        match self.component_revision.strip_prefix("sha256:") {
+            Some(hex) if is_sha256_hex(hex) => {}
+            _ => {
+                return Err(format!(
+                "PlaceComponent componentRevision `{}` must be `sha256:` + 64 lowercase-hex chars",
+                self.component_revision
+            ))
+            }
+        }
+        validate_component_source(&self.source, "PlaceComponent")?;
+        if let Some(mate) = &self.mate {
+            if mate.self_attachment.trim().is_empty() {
+                return Err("PlaceComponent mate.selfAttachment must not be empty".into());
+            }
+        }
+        for (axis, s) in ["x", "y", "z"].iter().zip(self.placement.translate.iter()) {
+            if !s.value.is_finite() {
+                return Err(format!(
+                    "PlaceComponent placement.translate.{axis} must be finite (got {})",
+                    s.value
+                ));
+            }
+        }
+        if !self.placement.rotate.angle_deg.value.is_finite() {
+            return Err(format!(
+                "PlaceComponent placement.rotate.angleDeg must be finite (got {})",
+                self.placement.rotate.angle_deg.value
+            ));
+        }
+        if !self.placement.rotate.center.is_finite() {
+            return Err("PlaceComponent placement.rotate.center has a non-finite component".into());
+        }
+        if !self.placement.rotate.axis.is_finite() {
+            return Err("PlaceComponent placement.rotate.axis has a non-finite component".into());
+        }
+        Ok(())
+    }
+}
+
+/// Shared `source` self-consistency check for [`PlaceComponentParams`] and
+/// [`DetachComponentParams`] — both carry the same [`ComponentSourceRef`]
+/// shape. `op_name` names the caller in the error message.
+fn validate_component_source(source: &ComponentSourceRef, op_name: &str) -> Result<(), String> {
+    match source {
+        ComponentSourceRef::Generator { generator_id, .. } if generator_id.trim().is_empty() => {
+            Err(format!("{op_name} source.generatorId must not be empty"))
+        }
+        ComponentSourceRef::Generator { .. } => Ok(()),
+        ComponentSourceRef::Embedded { sha256, .. } if !is_sha256_hex(sha256) => Err(format!(
+            "{op_name} source.sha256 `{sha256}` is not a 64-character lowercase-hex sha256"
+        )),
+        ComponentSourceRef::Embedded { .. } => Ok(()),
+    }
+}
+
+/// Drop a placed component's library identity, keeping its cached geometry as
+/// an ordinary body (spec §3.4 `DetachComponent`; Component Library WP-1.2;
+/// new v2 op, no OneCAD-CPP analogue).
+///
+/// **The "honest break link."** Same `source`+`placement` shape as
+/// [`PlaceComponentParams`] (so regen still has enough to rebuild the exact
+/// geometry — a `generator` source re-runs deterministically; the result is
+/// indistinguishable from a static copy), but carries NO `component_id`/
+/// `component_version`/`component_revision`/`mate` — spec §3.4: "after
+/// detach, no `component_*` fields remain; the op becomes inert provenance."
+/// This is an in-place edit at the SAME `RecordId` (same trick `Hole`'s
+/// profile-mode switch uses to keep identity), not a new record — applied via
+/// `crate::edit::session`'s existing `update_operation_params`, which already
+/// supports an op-TYPE change at one `RecordId` (the Fillet⇄Chamfer
+/// precedent). No `KnownOperation::ReplaceComponent`/`SetComponentParams`
+/// variants exist for the same reason: both are ALSO in-place edits of
+/// `PlaceComponentParams`'s own fields (identity/params) at the same
+/// `RecordId`, not distinct persisted op shapes — only `DetachComponent`'s
+/// shape is genuinely different (it drops fields `PlaceComponentParams`
+/// requires), which is what earns it a real variant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetachComponentParams {
+    pub source: ComponentSourceRef,
+    pub placement: FrozenPlacement,
+    #[serde(flatten, default, skip_serializing_if = "Extra::is_empty")]
+    pub extra: Extra,
+}
+
+impl DetachComponentParams {
+    /// Validates the params' self-contained invariants, returning a
+    /// human-facing reason on failure. Checked at every authoring entry
+    /// point (see [`crate::edit::session`]), NOT at deserialize time — same
+    /// single-writer reason as [`PlaceComponentParams::validate`].
+    ///
+    /// # Errors
+    /// A message naming the violated invariant.
+    pub fn validate(&self) -> Result<(), String> {
+        validate_component_source(&self.source, "DetachComponent")?;
+        for (axis, s) in ["x", "y", "z"].iter().zip(self.placement.translate.iter()) {
+            if !s.value.is_finite() {
+                return Err(format!(
+                    "DetachComponent placement.translate.{axis} must be finite (got {})",
+                    s.value
+                ));
+            }
+        }
+        if !self.placement.rotate.angle_deg.value.is_finite() {
+            return Err(format!(
+                "DetachComponent placement.rotate.angleDeg must be finite (got {})",
+                self.placement.rotate.angle_deg.value
+            ));
+        }
+        if !self.placement.rotate.center.is_finite() {
+            return Err(
+                "DetachComponent placement.rotate.center has a non-finite component".into(),
+            );
+        }
+        if !self.placement.rotate.axis.is_finite() {
+            return Err("DetachComponent placement.rotate.axis has a non-finite component".into());
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3079,5 +3407,134 @@ mod tests {
                        "resultPolicyVersion": 1}
         });
         assert!(serde_json::from_value::<Operation>(unsupported).is_err());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // PlaceComponent (Component Library WP-0.2)
+    // ─────────────────────────────────────────────────────────────────────
+
+    fn place_component_params() -> PlaceComponentParams {
+        PlaceComponentParams {
+            component_id: "onecad.std.iso4762".to_string(),
+            component_version: "1.0.0".to_string(),
+            component_revision: format!("sha256:{}", "0".repeat(64)),
+            params: BTreeMap::new(),
+            source: ComponentSourceRef::Generator {
+                generator_id: "iso4762".to_string(),
+                generator_version: 1,
+                params: BTreeMap::new(),
+                extra: Extra::new(),
+            },
+            mate: None,
+            placement: FrozenPlacement {
+                translate: [Scalar::new(0.0), Scalar::new(0.0), Scalar::new(0.0)],
+                rotate: TransformRotation::default(),
+            },
+            extra: Extra::new(),
+        }
+    }
+
+    #[test]
+    fn place_component_is_a_known_op_type() {
+        assert!(KNOWN_OP_TYPES.contains(&"PlaceComponent"));
+        let op = Operation::Known(KnownOperation::PlaceComponent(place_component_params()));
+        assert_eq!(op.op_type(), "PlaceComponent");
+        let json = serde_json::to_value(&op).unwrap();
+        assert_eq!(json["opType"], serde_json::json!("PlaceComponent"));
+        // Round-trips through the KNOWN gate (never demoted to Opaque).
+        let back: Operation = serde_json::from_value(json).unwrap();
+        assert_eq!(back, op);
+    }
+
+    /// The serialized shape is camelCase throughout, INCLUDING the internally-tagged
+    /// `source` enum's struct-variant fields — `rename_all` on the enum renames the
+    /// VARIANT name ("generator") but does NOT cascade into struct-variant field
+    /// names (unlike a plain struct), so `generatorId`/`generatorVersion` need their
+    /// own `#[serde(rename = …)]`. Regression pin: this was silently wrong once
+    /// (the worker read an empty `generatorId` and failed every placement).
+    #[test]
+    fn place_component_source_fields_are_camel_case() {
+        let json =
+            serde_json::to_value(KnownOperation::PlaceComponent(place_component_params())).unwrap();
+        let source = &json["params"]["source"];
+        assert_eq!(source["kind"], serde_json::json!("generator"));
+        assert_eq!(source["generatorId"], serde_json::json!("iso4762"));
+        assert_eq!(source["generatorVersion"], serde_json::json!(1));
+        assert!(source.get("generator_id").is_none());
+        assert!(source.get("generator_version").is_none());
+    }
+
+    /// `inputs[]` = the mate target ONLY when a mate is present (spec §3.1); a
+    /// component dropped in free space has no topological dependency at all.
+    #[test]
+    fn place_component_derives_conditional_mate_input() {
+        let free_space = Operation::Known(KnownOperation::PlaceComponent(place_component_params()));
+        assert!(free_space.derive_inputs().bodies.is_empty());
+
+        let mut mated = place_component_params();
+        let target_body = body(1);
+        mated.mate = Some(ComponentMate {
+            self_attachment: "shank_axis".to_string(),
+            target: ElementRef {
+                primary: Some(crate::document::refs::PrimaryRef {
+                    body: target_body,
+                    element: ElementId::new("el_1"),
+                    kind: ElementKind::Face,
+                    extra: Extra::new(),
+                }),
+                intent: None,
+                anchor: None,
+                extra: Extra::new(),
+            },
+            kind: MateKind::Concentric,
+            flipped: false,
+            extra: Extra::new(),
+        });
+        let op = Operation::Known(KnownOperation::PlaceComponent(mated));
+        let inputs = op.derive_inputs();
+        assert_eq!(inputs.bodies, vec![target_body]);
+        assert_eq!(inputs.elements.len(), 1);
+    }
+
+    #[test]
+    fn place_component_validation_matrix() {
+        let ok = place_component_params();
+        assert!(ok.validate().is_ok());
+
+        let mut bad_id = ok.clone();
+        bad_id.component_id = "unnamespaced".to_string();
+        assert!(bad_id.validate().is_err());
+
+        let mut bad_version = ok.clone();
+        bad_version.component_version = "  ".to_string();
+        assert!(bad_version.validate().is_err());
+
+        let mut bad_revision = ok.clone();
+        bad_revision.component_revision = "not-a-hash".to_string();
+        assert!(bad_revision.validate().is_err());
+
+        let mut bad_generator = ok.clone();
+        bad_generator.source = ComponentSourceRef::Generator {
+            generator_id: String::new(),
+            generator_version: 1,
+            params: BTreeMap::new(),
+            extra: Extra::new(),
+        };
+        assert!(bad_generator.validate().is_err());
+
+        let mut bad_mate = ok.clone();
+        bad_mate.mate = Some(ComponentMate {
+            self_attachment: String::new(),
+            target: ElementRef {
+                primary: None,
+                intent: None,
+                anchor: None,
+                extra: Extra::new(),
+            },
+            kind: MateKind::Coincident,
+            flipped: false,
+            extra: Extra::new(),
+        });
+        assert!(bad_mate.validate().is_err());
     }
 }

@@ -14,10 +14,13 @@ import type { CadClient } from "./client";
 import type {
   ApplyOperationResult,
   BodyMeshRef,
+  ClassifyResult,
+  ComponentParamValue,
   DocumentChange,
   DocumentProjectionWire,
   DocumentSnapshot,
   ElementInfo,
+  LibraryComponent,
   MassProperties,
   EnterSketchTarget,
   FeatureDependencies,
@@ -35,6 +38,7 @@ import type {
   PromotePick,
   RecentProject,
   RecoveryInfo,
+  ReindexReport,
   SaveOutcome,
   ResolveCandidate,
   ResolveRefRequest,
@@ -45,6 +49,7 @@ import type {
   SketchSession,
   SketchUpsertResult,
   TransformBodyParams,
+  TransformRotationParams,
   Unsubscribe,
   WorkerStatus,
 } from "./types";
@@ -62,6 +67,7 @@ import {
   makeCylinderMesh,
   makeExtrudeBodyMesh,
   makeRevolveBodyMesh,
+  placeComponentGhostMesh,
   transformMesh1,
 } from "./mockMeshes";
 import { placementMatrix } from "@/tools/preview/patternPreview";
@@ -1031,6 +1037,11 @@ function mutateOp(op: OperationOp): {
     return { changed: [bodyId], removed: [], label: "Mirror", featureId };
   }
   if (op.opType === "TransformBody") return mutateTransform(op.params, op.featureId);
+  if (op.opType === "PlaceComponent") {
+    // Ghost-preview only (see `OperationOp`'s doc comment) — its session is
+    // always cancelled, never committed, so this must never actually run.
+    throw new Error("PlaceComponent must not reach commitOp — preview-only op type");
+  }
   // Boolean: MOCK removes the tool body, keeps the target (no real fusion).
   const { targetBodyId, toolBodyId, operation } = op.params;
   syntheticBodies.delete(toolBodyId);
@@ -1303,6 +1314,125 @@ function importStepAndEmit(): ApplyOperationResult {
     removedBodies: res.removedBodies,
   });
   return res;
+}
+
+// ── Component Library (WP-1.5) ────────────────────────────────────────────────
+//
+// `listLibraryComponents()` stays an HONEST EMPTY LIST by default — WP-1.4's own
+// rule (a dead catalog teaches a UI bug to pass): no components indexed, no
+// placement to arm, nothing to manually verify. `?mocklibrary=1` opts a fixture
+// IN, the same dev-only URL-flag pattern `?mockimport=step` uses for STEP import
+// (both routers are otherwise unreachable from a plain browser lane with no
+// backend to actually read a package tree). `placeComponent()` fabricates the
+// SAME M6 SHCS mesh the ghost preview uses (`placeComponentGhostMesh`), so a
+// committed body and its own preceding ghost agree exactly.
+
+const MOCK_LIBRARY_FIXTURE: LibraryComponent = {
+  id: "onecad.std.iso4762",
+  version: "1.0.0",
+  name: "Socket Head Cap Screw M6×20",
+  category: ["fasteners", "screws"],
+  tags: ["metric", "shcs", "iso4762"],
+  sourceKind: "generator",
+  revision: `sha256:${"0".repeat(64)}`,
+  generatorId: "iso4762",
+  generatorVersion: 1,
+  attachments: {
+    headSeat: { on: "face:head_underside", accepts: ["plane"] },
+    shankAxis: { on: "cylinder:shank", accepts: ["cylinder", "hole", "circularEdge"] },
+  },
+  // WP-2.4: enough of a `[parameters]` table for the configurator to render
+  // real controls in the mock/e2e lane — mirrors the real ISO 4762 package's
+  // shape (`src-tauri/src/library.rs`'s test fixture), not a distinct mock-only
+  // schema.
+  parameters: {
+    thread: { role: "free", key: "M6", domain: ["M3", "M4", "M5", "M6", "M8"] },
+    length: { role: "free", value: 20, snap: "preferred", min: 4 },
+    head_d: { role: "table", from: "iso4762.dk" },
+  },
+  // No literal "M" before `{thread}`: the stored thread VALUE is already the
+  // full designation ("M6") in this codebase's convention (WP-2.1/2.2's
+  // BOLTS-keyed tables), unlike the spec doc's own example.
+  designation: "ISO 4762 {thread}x{length}",
+};
+
+function mockLibraryEnabled(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("mocklibrary") === "1"
+  );
+}
+
+let nextComponentSeq = 1;
+
+/** Every `role: "free"` key's default value — `key` (string domain) or `value` (numeric). */
+function defaultFreeParams(component: LibraryComponent): Record<string, ComponentParamValue> {
+  const out: Record<string, ComponentParamValue> = {};
+  for (const [name, spec] of Object.entries(component.parameters)) {
+    if (spec.role !== "free") continue;
+    if (spec.key !== undefined) out[name] = spec.key;
+    else if (spec.value !== undefined) out[name] = spec.value;
+  }
+  return out;
+}
+
+function commitPlaceComponent(
+  component: LibraryComponent,
+  translate: [number, number, number],
+  rotate: TransformRotationParams | undefined,
+): ApplyOperationResult {
+  const seq = nextComponentSeq++;
+  const bodyId = nextBodyId();
+  const rot = rotate ?? { center: [0, 0, 0] as [number, number, number], axis: [0, 0, 1] as [number, number, number], angleDeg: 0 };
+  syntheticBodies.set(bodyId, placeComponentGhostMesh(translate, rot));
+  const name = seq === 1 ? component.name : `${component.name} (${seq})`;
+  const featureId = nextFeatureId();
+  mockFeatures = [
+    ...mockFeatures,
+    { id: featureId, kind: "boolean", opType: "PlaceComponent", label: "Place Component", valueText: "", status: "ok" },
+  ];
+  featureTouched.set(featureId, [bodyId]);
+  // Stored so `getOperationParams`/`setComponentParams` (WP-2.4) have a real
+  // record to read/merge against — mirrors the real backend's
+  // `PlaceComponentParams` shape (camelCase). `commitPlaceComponent` bypasses
+  // `commitOp`'s generic `wireParamsOf` (PlaceComponent throws there — it
+  // never reaches the generic op-preview lane), so this is the one place
+  // that stores it for the library op.
+  const resolvedParams = defaultFreeParams(component);
+  featureParams.set(featureId, {
+    componentId: component.id,
+    componentVersion: component.version,
+    componentRevision: component.revision,
+    params: resolvedParams,
+    source: {
+      kind: "generator",
+      generatorId: component.generatorId,
+      generatorVersion: component.generatorVersion,
+      params: resolvedParams,
+    },
+    placement: {
+      translate,
+      rotate: rot,
+    },
+  });
+  insertAtMockCursor(featureId);
+  mockRevision += 1;
+  const doc = documentStore.getState();
+  doc.applyChange({
+    revision: mockRevision,
+    features: mockFeatures.map(cloneFeature),
+    bodies: { ...doc.bodies, [bodyId]: { id: bodyId, name, visible: true } },
+    dirty: true,
+    appliedOps: mockAppliedOps,
+  });
+  writeMockMeta("body", bodyId, { name });
+  return {
+    revision: mockRevision,
+    changedBodies: [bodyRef(bodyId)],
+    removedBodies: [],
+    features: mockFeatures.map(cloneFeature),
+    opLabel: "Place Component",
+  };
 }
 
 /** Canned repair candidates for a ref (deterministic; descending score). */
@@ -2198,6 +2328,157 @@ export const mockClient: CadClient = {
       syntheticBodies.has(bodyId) || documentStore.getState().bodies[bodyId] !== undefined;
     if (!known) throw new Error(`massProperties: unknown body ${bodyId}`);
     return massPropertiesFromMesh(bodyId, mockBodyMesh(bodyId));
+  },
+
+  /**
+   * Component Library WP-0.1 mock. Reuses `elementInfo`'s same key resolution
+   * (topoKey first, then elementId) and mesh-derived planar/edge metrics.
+   *
+   * MOCK-LANE HONESTY: only the PLANE case is a real frame — the mock mesh
+   * utils expose no cylinder axis or circle radius, so a non-planar face or a
+   * curved edge answers with its kind but `frame: null` rather than
+   * fabricating an axis. Real cylinder/circle frames are pinned against the
+   * OCCT worker in `src-tauri/tests/component_ops.rs`, not here.
+   */
+  async classifyElement(
+    bodyId: string,
+    elementId: string,
+    topoKey?: string,
+  ): Promise<ClassifyResult | null> {
+    await wait(MESH_LATENCY_MS);
+    let key = topoKey;
+    if (!key && elementId) {
+      const mapped = mockElementIdToTopoKey.get(elementId);
+      if (mapped?.bodyId === bodyId) key = mapped.topoKey;
+    }
+    if (!key) return null;
+    const isEdge = key.startsWith("e:");
+    const blob = mockBodyMesh(bodyId);
+
+    if (isEdge) {
+      const edge = edgeMetricsFromMesh(blob, key);
+      if (!edge) return null;
+      return {
+        kind: "edge",
+        surfaceType: "",
+        curveType: edge.straight ? "line" : "other",
+        frame: null,
+      };
+    }
+    const face = faceMetricsFromMesh(blob, key);
+    if (!face) return null;
+    return {
+      kind: "face",
+      surfaceType: face.planar ? "plane" : "other",
+      curveType: "",
+      frame: face.planar
+        ? { origin: face.center, normal: face.normal, axis: null, radius: null }
+        : null,
+    };
+  },
+
+  // ── Component Library (WP-1.3/1.5) ──────────────────────────────────────
+  // MOCK-LANE HONESTY, DEFAULT: no fabricated catalog. A fake component list
+  // would outlive the mock and teach a UI bug ("nothing shows up") to pass
+  // e2e — the same reasoning the Extensions ▸ Browse panel's "no registry
+  // configured" empty state follows. `?mocklibrary=1` opts a fixture IN for
+  // manual verification and the e2e lane — see `MOCK_LIBRARY_FIXTURE`'s own
+  // comment for why this is the same pattern as `?mockimport=step`.
+
+  async listLibraryComponents(): Promise<LibraryComponent[]> {
+    await wait(MESH_LATENCY_MS);
+    return mockLibraryEnabled() ? [MOCK_LIBRARY_FIXTURE] : [];
+  },
+
+  async reindexLibrary(): Promise<ReindexReport> {
+    await wait(MESH_LATENCY_MS);
+    return mockLibraryEnabled()
+      ? { total: 1, indexed: 1, skipped: [] }
+      : { total: 0, indexed: 0, skipped: [] };
+  },
+
+  async placeComponent(
+    componentId: string,
+    componentVersion: string,
+    translate: [number, number, number],
+    rotate?: TransformRotationParams,
+  ): Promise<void> {
+    if (componentId !== MOCK_LIBRARY_FIXTURE.id || componentVersion !== MOCK_LIBRARY_FIXTURE.version) {
+      throw new Error(
+        `placeComponent: unknown component ${componentId}@${componentVersion} — the mock lane only knows the ?mocklibrary=1 fixture`,
+      );
+    }
+    documentStore.getState().regenStarted();
+    try {
+      await wait();
+      const res = commitPlaceComponent(MOCK_LIBRARY_FIXTURE, translate, rotate);
+      emitMockDocumentChanged({
+        revision: res.revision,
+        changedBodies: res.changedBodies,
+        removedBodies: res.removedBodies,
+      });
+    } finally {
+      documentStore.getState().regenSettled();
+    }
+  },
+
+  /**
+   * WP-2.4: unlike `detachComponent` (still genuinely nothing to detach from
+   * in the mock lane), a placed instance's stored params ARE real here since
+   * `commitPlaceComponent` writes them — so the role=free enforcement is
+   * mirrored for real, not stubbed. What's NOT simulated: the mock's
+   * synthetic mesh is a fixed demo shape regardless of size (`placeComponentGhostMesh`),
+   * so a param edit changes the STORED value + the configurator's live
+   * designation but not the rendered geometry — the real worker-backed lane
+   * (`component_ops.rs`) is where a size change actually resizes the body.
+   */
+  async setComponentParams(
+    recordId: string,
+    params: Record<string, ComponentParamValue>,
+  ): Promise<void> {
+    await wait();
+    const stored = featureParams.get(recordId);
+    if (!stored) {
+      throw new Error(`setComponentParams: no params for record ${recordId}`);
+    }
+    const componentId = stored.componentId;
+    if (componentId !== MOCK_LIBRARY_FIXTURE.id) {
+      throw new Error(`setComponentParams: record ${recordId} is not a placed component`);
+    }
+    for (const key of Object.keys(params)) {
+      const spec = MOCK_LIBRARY_FIXTURE.parameters[key];
+      if (!spec) {
+        throw new Error(`setComponentParams: unknown parameter \`${key}\` on ${componentId}`);
+      }
+      if (spec.role !== "free") {
+        throw new Error(`setComponentParams: \`${key}\` is not a free parameter on ${componentId}`);
+      }
+    }
+
+    const mergedParams: Record<string, ComponentParamValue> = {
+      ...(stored.params as Record<string, ComponentParamValue>),
+      ...params,
+    };
+    const source = stored.source as Record<string, unknown>;
+    featureParams.set(recordId, {
+      ...stored,
+      params: mergedParams,
+      source: { ...source, params: mergedParams },
+    });
+
+    mockRevision += 1;
+    const doc = documentStore.getState();
+    doc.applyChange({
+      revision: mockRevision,
+      features: mockFeatures.map(cloneFeature),
+      bodies: doc.bodies,
+      dirty: true,
+      appliedOps: mockAppliedOps,
+    });
+  },
+
+  async detachComponent(): Promise<void> {
+    throw new Error("detachComponent: the mock lane has no placed components yet (WP-1.4/1.5)");
   },
 
   // Deterministic mock promotion (Invariant 1: same pick → same id).

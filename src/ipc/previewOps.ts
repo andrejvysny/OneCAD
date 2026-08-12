@@ -52,10 +52,12 @@ import type {
   OffsetFaceParams,
   OperationOp,
   OpType,
+  PlaceComponentParams,
   PreviewParams,
   RevolveParams,
   SemanticRef,
   ShellParams,
+  TransformRotationParams,
 } from "./types";
 
 /**
@@ -523,6 +525,55 @@ function booleanOp(s: PreviewSessionState): OperationOp {
   };
 }
 
+// ── PlaceComponent (ghost preview only — see PlaceComponentParams) ──────────
+
+/**
+ * Mirrors the candidate transform `placementController.ts` computes
+ * (`placementSolver.ts`) — NOT a commit-site builder (there is no commit
+ * call-site for this op-type; see {@link OperationOp}'s `PlaceComponent` doc).
+ * `generatorId`/`generatorVersion` are required non-empty because the worker's
+ * `ComponentOp` resolver requires them present, even though v1's generator
+ * stub ignores their value.
+ */
+function placeComponentOp(s: PreviewSessionState): OperationOp {
+  const componentId = nonEmptyString(s.latestParams.componentId);
+  if (!componentId) throw new Error("PlaceComponent requires componentId");
+  const componentVersion = nonEmptyString(s.latestParams.componentVersion);
+  if (!componentVersion) throw new Error("PlaceComponent requires componentVersion");
+  const componentRevision = nonEmptyString(s.latestParams.componentRevision);
+  if (!componentRevision) throw new Error("PlaceComponent requires componentRevision");
+  const generatorId = nonEmptyString(s.latestParams.generatorId);
+  if (!generatorId) throw new Error("PlaceComponent requires generatorId");
+  const generatorVersion = Number(s.latestParams.generatorVersion);
+  if (!Number.isFinite(generatorVersion)) {
+    throw new Error("PlaceComponent generatorVersion must be finite");
+  }
+  const translate = s.latestParams.translate;
+  if (
+    !Array.isArray(translate) ||
+    translate.length !== 3 ||
+    translate.some((c) => typeof c !== "number" || !Number.isFinite(c))
+  ) {
+    throw new Error("PlaceComponent requires a [x,y,z] translate");
+  }
+  const rawRotate = s.latestParams.rotate as TransformRotationParams | undefined;
+  const rotate: TransformRotationParams = rawRotate ?? {
+    center: [0, 0, 0],
+    axis: [0, 0, 1],
+    angleDeg: 0,
+  };
+  const params: PlaceComponentParams = {
+    componentId,
+    componentVersion,
+    componentRevision,
+    generatorId,
+    generatorVersion,
+    translate: translate as [number, number, number],
+    rotate,
+  };
+  return { opType: "PlaceComponent", opId: s.opId, params };
+}
+
 /**
  * Every opType a preview session can be opened for. Membership IS the support
  * check — a tool becomes previewable by adding a builder here, never by a branch
@@ -538,6 +589,7 @@ export const OP_BUILDERS: Partial<Record<OpType, PreviewOpBuilder>> = {
   Boolean: booleanOp,
   Hole: holeOp,
   OffsetFace: offsetFaceOp,
+  PlaceComponent: placeComponentOp,
 };
 
 /** True when a preview session can be opened for `opType` (OP_BUILDERS membership). */

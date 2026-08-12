@@ -555,6 +555,18 @@ fn wire_op_inputs(
             }
             v
         }
+        // PlaceComponent: the (optional) mate target, the sole typed slot
+        // (spec §3.5). Absent `mate` ⇒ dropped in free space, no ref at all —
+        // mirrors Extrude's ToFace-conditional slot.
+        Operation::Known(KnownOperation::PlaceComponent(p)) => p
+            .mate
+            .as_ref()
+            .map(|m| element_ref_wire(&m.target))
+            .into_iter()
+            .collect(),
+        // DetachComponent: no mate, no identity — the record re-describes
+        // geometry directly, so it has no topological input at all.
+        Operation::Known(KnownOperation::DetachComponent(_)) => Vec::new(),
         _ => Vec::new(),
     };
     Value::Array(refs)
@@ -2170,6 +2182,76 @@ pub fn parse_query_element(result: &Value) -> Option<crate::dto::ElementInfoDto>
         // "0 mm²" rather than a fabricated size.
         size: num_at("size", 0.0),
         magnitude: num_at("magnitude", 0.0),
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Interactive surface classification (SCHEMA §7.5 `ClassifyElement`; Component
+// Library WP-0.1)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `ClassifyElement` args, addressed by ElementId (SCHEMA §7.5).
+///
+/// No `snapshotId` — unlike `QueryElement`'s pick-time addressing (Invariant
+/// 4), this verb serves a continuously re-issued LIVE hover query and always
+/// reads the current head, same as `QueryMassProperties`.
+#[must_use]
+pub fn classify_element_args(body: BodyId, element: &str) -> Value {
+    json!({
+        "bodyId": body_id_wire(body),
+        "elementId": element,
+    })
+}
+
+/// `ClassifyElement` args, addressed by `{bodyId, topoKey}` — the form a live
+/// raycast pick naturally has BEFORE any ElementId promotion.
+#[must_use]
+pub fn classify_element_by_topo_key_args(body: BodyId, topo_key: &str) -> Value {
+    json!({
+        "bodyId": body_id_wire(body),
+        "topoKey": topo_key,
+    })
+}
+
+/// Parses a `ClassifyElement` result. `None` when the reference does not
+/// resolve against the current head (`present: false`) — an ANSWER, not an
+/// error, matching `ProjectFaceBoundary`'s convention.
+#[must_use]
+pub fn parse_classify_element(result: &Value) -> Option<crate::dto::ClassifyElementDto> {
+    if result.get("present").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let str_at = |key: &str| {
+        result
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let vec3 = |o: &Value, key: &str| -> Option<[f64; 3]> {
+        o.get(key)
+            .and_then(Value::as_array)
+            .filter(|a| a.len() == 3)
+            .map(|a| {
+                let g = |i: usize| a[i].as_f64().unwrap_or(0.0);
+                [g(0), g(1), g(2)]
+            })
+    };
+    let frame = result
+        .get("frame")
+        .map(|f| crate::dto::ClassifyElementFrameDto {
+            // A malformed origin is a PROTOCOL break, never a fabricated (0,0,0):
+            // that would seat a mate at the world origin instead of failing loudly.
+            origin: vec3(f, "origin").unwrap_or([0.0, 0.0, 0.0]),
+            normal: vec3(f, "normal"),
+            axis: vec3(f, "axis"),
+            radius: f.get("radius").and_then(Value::as_f64),
+        });
+    Some(crate::dto::ClassifyElementDto {
+        kind: str_at("kind"),
+        surface_type: str_at("surfaceType"),
+        curve_type: str_at("curveType"),
+        frame,
     })
 }
 
@@ -5825,6 +5907,28 @@ mod body_wire_tests {
                 json!({ "targetBodyId": b, "faceIds": ["el_2"], "faces": [face_ref], "distance": 2.5, "distanceType": "Total", "chainTangentFaces": false, "oppositeFaceId": "el_2", "oppositeFace": face_ref }),
                 2,
             ),
+            // PlaceComponent: the (optional) mate target is the sole typed slot.
+            (
+                "PlaceComponent",
+                json!({
+                    "componentId": "onecad.std.iso4762",
+                    "componentVersion": "1.0.0",
+                    "componentRevision": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "source": { "kind": "generator", "generatorId": "iso4762", "generatorVersion": 1 },
+                    "mate": { "selfAttachment": "shank_axis", "target": face_ref, "kind": "concentric", "flipped": false },
+                    "placement": { "translate": [0.0, 0.0, 0.0] }
+                }),
+                1,
+            ),
+            // DetachComponent: no mate, no identity — no typed slots at all.
+            (
+                "DetachComponent",
+                json!({
+                    "source": { "kind": "generator", "generatorId": "iso4762", "generatorVersion": 1 },
+                    "placement": { "translate": [0.0, 0.0, 0.0] }
+                }),
+                0,
+            ),
         ];
 
         for (op_type, params, expected) in &cases {
@@ -5871,10 +5975,12 @@ mod body_wire_tests {
                 | KnownOperation::ImportStep(_)
                 | KnownOperation::TransformBody(_)
                 | KnownOperation::Hole(_)
-                | KnownOperation::OffsetFace(_) => {}
+                | KnownOperation::OffsetFace(_)
+                | KnownOperation::PlaceComponent(_)
+                | KnownOperation::DetachComponent(_) => {}
             }
         }
-        assert_eq!(cases.len(), 16, "one fixture per KnownOperation variant");
+        assert_eq!(cases.len(), 18, "one fixture per KnownOperation variant");
     }
 
     // ── HISTORY-HARDEN H9 — the repair SLOT TABLE ───────────────────────────
@@ -6104,6 +6210,38 @@ mod body_wire_tests {
                 "OffsetFace",
                 json!({ "targetBodyId": b, "faceIds": ["el_2"], "faces": [face_ref], "distance": 12.0, "distanceType": "Total", "chainTangentFaces": false, "oppositeFaceId": "el_2", "oppositeFace": face_ref }),
                 vec!["face", "face"],
+            ),
+            (
+                "placeComponent: no mate ⇒ dropped in free space, no slots",
+                "PlaceComponent",
+                json!({
+                    "componentId": "onecad.std.iso4762", "componentVersion": "1.0.0",
+                    "componentRevision": format!("sha256:{}", "0".repeat(64)),
+                    "source": { "kind": "generator", "generatorId": "iso4762", "generatorVersion": 1 },
+                    "placement": { "translate": [0.0, 0.0, 0.0] }
+                }),
+                vec![],
+            ),
+            (
+                "placeComponent: mate present ⇒ slot 0 = mate target",
+                "PlaceComponent",
+                json!({
+                    "componentId": "onecad.std.iso4762", "componentVersion": "1.0.0",
+                    "componentRevision": format!("sha256:{}", "0".repeat(64)),
+                    "source": { "kind": "generator", "generatorId": "iso4762", "generatorVersion": 1 },
+                    "mate": { "selfAttachment": "shank_axis", "target": face_ref, "kind": "concentric", "flipped": false },
+                    "placement": { "translate": [0.0, 0.0, 0.0] }
+                }),
+                vec!["face"],
+            ),
+            (
+                "detachComponent: no mate, no identity ⇒ no slots at all",
+                "DetachComponent",
+                json!({
+                    "source": { "kind": "generator", "generatorId": "iso4762", "generatorVersion": 1 },
+                    "placement": { "translate": [0.0, 0.0, 0.0] }
+                }),
+                vec![],
             ),
         ];
 

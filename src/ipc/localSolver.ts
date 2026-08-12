@@ -54,7 +54,7 @@ import type {
   SketchUpsertResult,
   Unsubscribe,
 } from "./types";
-import { makeExtrudeBodyMesh } from "./mockMeshes";
+import { makeExtrudeBodyMesh, placeComponentGhostMesh } from "./mockMeshes";
 import { lookupMockFace, mockProjectedContent } from "./mockFaceGeometry";
 import { planeFor, solveSketch } from "./mockSketch";
 import { profileFromRegion, type PrismProfile } from "@/tools/preview/prismPreview";
@@ -735,6 +735,24 @@ export function createLocalSolverLane(deps: LocalSolverDeps): LocalSolverLane {
           emitPreviewResult({ sessionId, epoch, bodyId, mesh });
         }, deps.latencyMs());
         return;
+      }
+      // PlaceComponent: a RIGID placement of a fixed known solid (the worker's v1
+      // generator stub always builds the same M6 SHCS shape), so unlike Extrude's
+      // profile-dependent prism this needs no live document data to synthesize —
+      // same reasoning as TransformBody's exact mock mesh.
+      if (s.opType === "PlaceComponent") {
+        const translate = s.latestParams.translate as [number, number, number] | undefined;
+        if (translate) {
+          const rotate = (s.latestParams.rotate as
+            | { center: [number, number, number]; axis: [number, number, number]; angleDeg: number }
+            | undefined) ?? { center: [0, 0, 0], axis: [0, 0, 1], angleDeg: 0 };
+          setTimeout(() => {
+            if (!previewSessions.has(sessionId)) return;
+            const mesh = placeComponentGhostMesh(translate, rotate);
+            emitPreviewResult({ sessionId, epoch, bodyId, mesh });
+          }, deps.latencyMs());
+          return;
+        }
       }
       // Boolean: no mock CSG, but half the preview IS expressible without geometry
       // — the tool body is consumed. Publish that hide truthfully, with no mesh.

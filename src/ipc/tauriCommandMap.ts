@@ -39,6 +39,7 @@ import type {
   OffsetDistanceType,
   OffsetFaceParams,
   OperationOp,
+  PlaceComponentParams,
   RevolveParams,
   Rgba,
   SemanticRef,
@@ -236,6 +237,22 @@ interface WireTransformBodyParams {
   copy: boolean;
 }
 
+/**
+ * Rust `PlaceComponentParams` (record.rs; spec §3.1) — GHOST-PREVIEW SUBSET
+ * only (see {@link PlaceComponentParams} on the TS side): `params` is always
+ * empty (no free-param overrides in P1) and `mate` is always absent (the
+ * worker's `ComponentOp` resolver ignores it on regen; recording one now
+ * would be inert at best, misleading at worst).
+ */
+interface WirePlaceComponentParams {
+  componentId: string;
+  componentVersion: string;
+  componentRevision: string;
+  params: Record<string, never>;
+  source: { kind: "generator"; generatorId: string; generatorVersion: number };
+  placement: { translate: [WireScalar, WireScalar, WireScalar]; rotate: { center: WireVec3; axis: WireVec3; angleDeg: WireScalar } };
+}
+
 /** A known op on the wire — adjacently tagged `{opType, params}` (SCHEMA §7.3). */
 type WireOperation = (
   | { opType: "Extrude"; params: WireExtrudeParams }
@@ -250,6 +267,7 @@ type WireOperation = (
   | { opType: "TransformBody"; params: WireTransformBodyParams }
   | { opType: "Hole"; params: WireHoleParams }
   | { opType: "OffsetFace"; params: WireOffsetFaceParams }
+  | { opType: "PlaceComponent"; params: WirePlaceComponentParams }
 ) & { opId?: string };
 
 /** A minimal real `OperationRecord` (every other field defaults on the Rust side). */
@@ -631,6 +649,28 @@ function transformBodyParams(p: TransformBodyParams): WireTransformBodyParams {
   };
 }
 
+function placeComponentParams(p: PlaceComponentParams): WirePlaceComponentParams {
+  return {
+    componentId: p.componentId,
+    componentVersion: p.componentVersion,
+    componentRevision: p.componentRevision,
+    params: {},
+    source: {
+      kind: "generator",
+      generatorId: p.generatorId,
+      generatorVersion: p.generatorVersion,
+    },
+    placement: {
+      translate: [scalar(p.translate[0]), scalar(p.translate[1]), scalar(p.translate[2])],
+      rotate: {
+        center: [...p.rotate.center],
+        axis: [...p.rotate.axis],
+        angleDeg: scalar(p.rotate.angleDeg),
+      },
+    },
+  };
+}
+
 /** Build the `{opType, params}` wire op for an OperationOp (no ids yet). */
 export function wireOperation(op: OperationOp): WireOperation {
   const identity = op.opId ? { opId: op.opId } : {};
@@ -686,6 +726,8 @@ export function wireOperation(op: OperationOp): WireOperation {
       return { ...identity, opType: "Hole", params: holeParams(op.params) };
     case "OffsetFace":
       return { ...identity, opType: "OffsetFace", params: offsetFaceParams(op.params) };
+    case "PlaceComponent":
+      return { ...identity, opType: "PlaceComponent", params: placeComponentParams(op.params) };
   }
 }
 

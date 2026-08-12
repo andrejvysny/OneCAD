@@ -38,6 +38,20 @@ describe("StartScreen", () => {
     expect(screen.getByText("Gearbox mount")).toBeInTheDocument();
   });
 
+  it("Library nav shows the library browser, not the recent grid, with no project open", async () => {
+    const user = userEvent.setup();
+    render(<StartScreen />);
+    await screen.findByText("Bracket v2");
+
+    await user.click(screen.getByRole("button", { name: "Library" }));
+
+    expect(screen.getByRole("heading", { name: "Library" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Search library components")).toBeInTheDocument();
+    expect(screen.queryByText("Bracket v2")).not.toBeInTheDocument();
+    // No document was ever opened to get here.
+    expect(appStore.getState().document).toBeNull();
+  });
+
   it("opens settings from the bottom sidebar item", async () => {
     const user = userEvent.setup();
     render(<StartScreen />);

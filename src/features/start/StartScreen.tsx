@@ -9,19 +9,25 @@ import { RecentGridSkeleton } from "./RecentGridSkeleton";
 import { RecoveryCard } from "./RecoveryCard";
 import { SortMenu, type SortKey } from "./SortMenu";
 import { StartSidebar } from "./StartSidebar";
+import { StartLibraryPanel } from "./StartLibraryPanel";
 import { SettingsModal } from "@/features/settings/SettingsModal";
 import { ExtensionsManager } from "@/features/extensions/ExtensionsManager";
 import { extensionsStore } from "@/stores/extensionsStore";
 
 const APP_VERSION = "v0.1.0";
 
-/** Sidebar nav sections (prototype 1b). Only "recent" has a real backing list. */
-export type StartNavKey = "recent" | "starred" | "templates";
+/**
+ * Sidebar nav sections (prototype 1b + Component Library WP-2.4's addition).
+ * "recent" and "library" have real backing data; "starred"/"templates" stay
+ * placeholders (`NAV_EMPTY_HINT`) — no starring or template feature exists yet.
+ */
+export type StartNavKey = "recent" | "starred" | "templates" | "library";
 
 const NAV_TITLE: Record<StartNavKey, string> = {
   recent: "Recent",
   starred: "Starred",
   templates: "Templates",
+  library: "Library",
 };
 
 const NAV_EMPTY_HINT: Record<"starred" | "templates", string> = {
@@ -190,7 +196,9 @@ export function StartScreen() {
             />
           )}
 
-          {nav !== "recent" ? (
+          {nav === "library" ? (
+            <StartLibraryPanel />
+          ) : nav !== "recent" ? (
             <div className="pb-5 pt-9 text-center text-[12.5px] text-ink-6">
               {NAV_EMPTY_HINT[nav]}
             </div>

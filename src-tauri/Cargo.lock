@@ -2241,6 +2241,7 @@ dependencies = [
  "base64 0.22.1",
  "libc",
  "onecad-core",
+ "onecad-library",
  "onecad-protocol",
  "serde",
  "serde_json",
@@ -2285,6 +2286,18 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+]
+
+[[package]]
+name = "onecad-library"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml 0.8.2",
 ]
 
 [[package]]

@@ -44,6 +44,8 @@ import { parseOperationDiagnostics } from "./operationDiagnostics";
 import type {
   ApplyOperationResult,
   BeginGestureResult,
+  ClassifyResult,
+  ComponentParamValue,
   CurveParams,
   DocumentChange,
   DocumentModule,
@@ -51,6 +53,7 @@ import type {
   DocumentSnapshot,
   DragSolveResult,
   ElementInfo,
+  LibraryComponent,
   MassProperties,
   ModuleState,
   EnterSketchTarget,
@@ -71,6 +74,7 @@ import type {
   RecentProject,
   RecoveryInfo,
   RegenTerminal,
+  ReindexReport,
   SaveOutcome,
   RegenFinished,
   ResolveRefRequest,
@@ -85,6 +89,7 @@ import type {
   SketchSession,
   SketchSolveStatus,
   SketchUpsertResult,
+  TransformRotationParams,
   WorkerStatus,
 } from "./types";
 import { createLocalSolverLane } from "./localSolver";
@@ -166,6 +171,12 @@ const CMD = {
   addSketchOnFace: "add_sketch_on_face",
   elementInfo: "element_info",
   massProperties: "query_mass_properties",
+  classifyElement: "classify_element",
+  listLibraryComponents: "list_library_components",
+  reindexLibrary: "reindex_library",
+  placeComponent: "place_component",
+  setComponentParams: "set_component_params",
+  detachComponent: "detach_component",
   prepareOffsetFace: "prepare_offset_face",
   prepareEdgeOp: "prepare_edge_op",
   previewOp: "preview_op",
@@ -1540,6 +1551,60 @@ export function createTauriClient(): CadClient {
   }
 
   /**
+   * Surface/curve classification of a picked face/edge + a seatable frame
+   * (Component Library WP-0.1). Read-only, always the current head — issued
+   * on every hover frame during a live drag, so no `snapshotId` is sent (same
+   * reasoning as `massProperties`).
+   */
+  async function classifyElement(
+    bodyId: string,
+    elementId: string,
+    topoKey?: string,
+  ): Promise<ClassifyResult | null> {
+    // Same `body_<uuid>` wire form promoteSelection uses (document-changed hands
+    // the frontend a bare uuid).
+    const wireBodyId = bodyId.startsWith("body_") ? bodyId : `body_${bodyId}`;
+    return call<ClassifyResult | null>(CMD.classifyElement, {
+      bodyId: wireBodyId,
+      elementId,
+      topoKey: topoKey ?? null,
+    });
+  }
+
+  // ── Component Library (WP-1.3) ────────────────────────────────────────
+
+  async function listLibraryComponents(): Promise<LibraryComponent[]> {
+    return call<LibraryComponent[]>(CMD.listLibraryComponents, {});
+  }
+
+  async function reindexLibrary(): Promise<ReindexReport> {
+    return call<ReindexReport>(CMD.reindexLibrary, {});
+  }
+
+  async function placeComponent(
+    componentId: string,
+    componentVersion: string,
+    translate: [number, number, number],
+    rotate?: TransformRotationParams,
+  ): Promise<void> {
+    // `rotate` used to be dropped here — the real backend placed every
+    // component unrotated regardless of the flip gesture (`A` key), only
+    // masked because the mock lane's `commitPlaceComponent` DOES honor it.
+    await call(CMD.placeComponent, { componentId, componentVersion, translate, rotate });
+  }
+
+  async function setComponentParams(
+    recordId: string,
+    params: Record<string, ComponentParamValue>,
+  ): Promise<void> {
+    await call(CMD.setComponentParams, { recordId, params });
+  }
+
+  async function detachComponent(recordId: string): Promise<void> {
+    await call(CMD.detachComponent, { recordId });
+  }
+
+  /**
    * `PrepareOffsetFace` (SCHEMA §7.6) — the read-only OffsetFace authoring
    * handshake. Snapshot-FENCED, unlike the advisory §7.5 reads: the closure it
    * returns is about to be FROZEN into a document record, so a stale head is
@@ -1799,6 +1864,12 @@ export function createTauriClient(): CadClient {
     faceSketchPlane,
     elementInfo,
     massProperties,
+    classifyElement,
+    listLibraryComponents,
+    reindexLibrary,
+    placeComponent,
+    setComponentParams,
+    detachComponent,
     prepareOffsetFace,
     prepareEdgeOp,
     resolveRefs,

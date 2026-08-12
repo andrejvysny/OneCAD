@@ -1906,6 +1906,38 @@ impl crate::worker::ElementQuery for WorkerManager {
         wire::parse_mass_properties(body_id_label, &ok_result(resp)?)
             .map_err(|message| EngineError::Protocol { message })
     }
+
+    async fn classify_element(
+        &self,
+        body: BodyId,
+        element: &str,
+    ) -> Result<Option<crate::dto::ClassifyElementDto>, EngineError> {
+        let client = self.client_or_err()?;
+        let resp = client
+            .request(
+                "ClassifyElement",
+                wire::classify_element_args(body, element),
+            )
+            .await
+            .map_err(protocol_err)?;
+        ok_result(resp).map(|r| wire::parse_classify_element(&r))
+    }
+
+    async fn classify_element_by_topo_key(
+        &self,
+        body: BodyId,
+        topo_key: &str,
+    ) -> Result<Option<crate::dto::ClassifyElementDto>, EngineError> {
+        let client = self.client_or_err()?;
+        let resp = client
+            .request(
+                "ClassifyElement",
+                wire::classify_element_by_topo_key_args(body, topo_key),
+            )
+            .await
+            .map_err(protocol_err)?;
+        ok_result(resp).map(|r| wire::parse_classify_element(&r))
+    }
 }
 
 #[async_trait]

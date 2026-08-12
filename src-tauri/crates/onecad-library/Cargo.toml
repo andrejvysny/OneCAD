@@ -1,0 +1,29 @@
+[package]
+name = "onecad-library"
+version = "0.1.0"
+description = "OneCAD Component Library: package format, index, content-addressed blob store, resolution"
+edition = "2021"
+
+# INVARIANT: onecad-library MUST NOT depend on `tauri` (or any UI/IPC crate) —
+# same wall `onecad-core` keeps. It MUST NOT perform network I/O in v1: every
+# remote-registry access goes behind the `RegistrySource` trait, and the only
+# implementation in this build is `LocalRegistry` (filesystem only). A future
+# `RemoteRegistry` (P4) is the sole place network I/O is allowed to enter this
+# crate. Do not add a `tauri`, `reqwest`, or other network dependency here.
+#
+# Deliberately does NOT depend on `onecad-core`: the op-params-facing types
+# (`ComponentSourceRef`, `ComponentParamValue`, …) are wire/SCHEMA-normative
+# and stay in `onecad-core::document::record`; this crate owns the on-disk
+# PACKAGE format (`component.toml`) independently, since its `[parameters]`
+# shape (role/domain/snap) has no op-params analogue. The app crate
+# (`src-tauri/src/library.rs`, WP-1.3) is where the two get translated.
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "0.8"
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

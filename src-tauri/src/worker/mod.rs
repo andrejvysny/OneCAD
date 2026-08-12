@@ -278,6 +278,29 @@ pub trait ElementQuery: Send + Sync {
         body: BodyId,
         body_id_label: String,
     ) -> Result<crate::dto::MassPropertiesDto, EngineError>;
+
+    /// `ClassifyElement` **by ElementId** (SCHEMA §7.5; Component Library
+    /// WP-0.1) — surface/curve classification + a seatable frame, for the
+    /// placement-solver's hover query. `Ok(None)` when the element is not
+    /// present in the current head.
+    ///
+    /// No `snapshotId`, unlike `query_element` above: this is a continuously
+    /// re-issued LIVE query (every hover frame), not a pick tied to a frozen
+    /// snapshot, so it always reads the current head — the same choice
+    /// `query_mass_properties` makes.
+    async fn classify_element(
+        &self,
+        body: BodyId,
+        element: &str,
+    ) -> Result<Option<crate::dto::ClassifyElementDto>, EngineError>;
+
+    /// `ClassifyElement` **by `{topoKey, bodyId}`** — the form a live raycast
+    /// pick naturally has before any ElementId promotion.
+    async fn classify_element_by_topo_key(
+        &self,
+        body: BodyId,
+        topo_key: &str,
+    ) -> Result<Option<crate::dto::ClassifyElementDto>, EngineError>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -869,6 +892,22 @@ impl ElementQuery for PendingBackend {
         _body: BodyId,
         _body_id_label: String,
     ) -> Result<crate::dto::MassPropertiesDto, EngineError> {
+        Err(Self::not_ready())
+    }
+
+    async fn classify_element(
+        &self,
+        _body: BodyId,
+        _element: &str,
+    ) -> Result<Option<crate::dto::ClassifyElementDto>, EngineError> {
+        Err(Self::not_ready())
+    }
+
+    async fn classify_element_by_topo_key(
+        &self,
+        _body: BodyId,
+        _topo_key: &str,
+    ) -> Result<Option<crate::dto::ClassifyElementDto>, EngineError> {
         Err(Self::not_ready())
     }
 }

@@ -4216,6 +4216,11 @@ fn element_ref_input(op: &Operation, index: usize) -> Option<&ElementRef> {
             }
             faces.get(index).copied()
         }
+        // The (optional) mate target is slot 0, and the only slot — mirrors
+        // `wire::wire_op_inputs`'s PlaceComponent arm.
+        KnownOperation::PlaceComponent(p) => (index == 0)
+            .then(|| p.mate.as_ref().map(|m| &m.target))
+            .flatten(),
         _ => None,
     }
 }

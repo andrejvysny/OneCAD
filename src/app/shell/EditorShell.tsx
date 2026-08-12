@@ -36,6 +36,8 @@ import { activeWorkspace, resolvePanelVisibility } from "@/modules/shell/workspa
 import { DEFAULT_WORKSPACE_ID } from "@/modules/shell/workspaceIds";
 import { MODELING_MODULE_ID } from "@/modules/modeling/manifest";
 import { contributeModelingUi } from "@/modules/modeling/ui";
+import { LIBRARY_MODULE_ID } from "@/modules/library/manifest";
+import { contributeLibraryUi } from "@/modules/library/register";
 import { SHELL_MODULE_ID, contributeShellChrome } from "@/modules/shell/register";
 
 /**
@@ -64,11 +66,14 @@ function useEditorContributions(platform: Platform): void {
   useLayoutEffect(() => {
     const modeling = platform.createScope(MODELING_MODULE_ID);
     const shell = platform.createScope(SHELL_MODULE_ID);
+    const library = platform.createScope(LIBRARY_MODULE_ID);
     contributeShellChrome(shell);
     contributeModelingUi(modeling);
+    contributeLibraryUi(library);
     return () => {
       modeling.dispose();
       shell.dispose();
+      library.dispose();
     };
   }, [platform]);
 }

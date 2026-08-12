@@ -815,11 +815,15 @@ Each op in `ExecutePlan.ops` is:
 
 `opType` ∈ `Sketch` | `Extrude` | `Revolve` | `Fillet` | `Chamfer` | `Boolean`
 | `Shell` | `LinearPattern` | `CircularPattern` | `MirrorBody` | `ImportStep`
-| `TransformBody` | `Hole`
-(the M6a breadth ops and the 2026-08-02 `ImportStep`/`TransformBody` extend the
-original vertical slice — see the [Changelog](#14-changelog)).
-`Loft` and `Sweep` remain **`UNSUPPORTED`** ([§8](#8-error-taxonomy)). Values keep
-OneCAD-CPP `operationTypeName` spelling (PascalCase).
+| `TransformBody` | `Hole` | `OffsetFace` | `PlaceComponent` | `DetachComponent`
+(the M6a breadth ops, the 2026-08-02 `ImportStep`/`TransformBody`, and the
+Component Library ops extend the original vertical slice — see the
+[Changelog](#14-changelog)).
+`Loft` and `Sweep` remain **`UNSUPPORTED`** ([§8](#8-error-taxonomy)). Values
+keep OneCAD-CPP `operationTypeName` spelling (PascalCase). Spec §3.2/§3.3's
+`SetComponentParams`/`ReplaceComponent` are NOT `opType` values at all — both
+are in-place edits of `PlaceComponent`'s own params at the Rust layer (see
+`DetachComponent`'s entry below for why only it earned a real `opType`).
 
 **Scalar / dimension fields.** Every dimensional param (`distance`, `radius`,
 `angleDeg`, `thickness`, `spacing`, …) is a **scalar**: it MAY be either a bare
@@ -1447,6 +1451,82 @@ Added 2026-08-02 (WP-B W0).
   silent-wrong.
   `body_<opId>` (NewBody lineage; source preserved). Empty `elementMapDelta`.
 
+**PlaceComponent** (`op.placeComponent`) — instantiate a Component Library
+entity as a first-class placed instance (spec §3.1). New v2 op, no
+OneCAD-CPP analogue. Added 2026-08-12 (Component Library WP-0.2/WP-1.2).
+
+```json
+// inputs: [ semanticRef(mate target) ]  — present ONLY when `mate` is set
+//          (absent `mate` ⇒ no inputs at all, dropped in free space)
+// params
+{ "componentId": "onecad.std.iso4762",
+  "componentVersion": "1.0.0",
+  "componentRevision": "sha256:9f2c…",
+  "params": { "thread": "M6" },
+  "source": { "kind": "generator", "generatorId": "iso4762", "generatorVersion": 1 },
+  "mate": { "selfAttachment": "shank_axis",
+            "target": { "primary": {"bodyId":"body_1","elementId":"el_…","kind":"face"},
+                        "anchor": {"worldPoint":[10,5,0]} },
+            "kind": "concentric", "flipped": false },
+  "placement": { "translate": [10.0, 5.0, 0.0],
+                 "rotate": { "center": [0,0,0], "axis": [0,0,1], "angleDeg": 0.0 } } }
+```
+
+- **Lineage: mints a NewBody** (`body_<opId>`), `modified` on nothing — a
+  placed component is a first-class instance, never a copied-in body (spec
+  §3). A component resolves to exactly ONE solid in v1 (spec §9,
+  `single_solid_policy`).
+- `source.kind` ∈ `generator` | `embedded` | `document`. **This build
+  implements `generator` only** — `embedded`/`document` refuse recoverably
+  with `UNSUPPORTED` (worker-side; the Rust type already carries all three as
+  of WP-1.2, `embedded` reaching the worker once WP-1.3 wires the wire-only
+  blob-path injection ImportStep's `inject_import_path` already establishes
+  the pattern for). The generator itself is **hardcoded** in this build —
+  every `generatorId` builds a fixed ISO 4762 M6×20 SHCS solid; table-driven
+  per-generator dispatch is P2 (spec §6).
+- `mate` is optional; absent ⇒ dropped in free space, positioned by
+  `placement` alone. When present, `target` is a full semantic ref so the
+  resolution ladder can re-resolve it after upstream edits — this is what
+  makes the mate PERSISTENT (spec §5.5). **Not yet re-seated by the worker**
+  in this build: `placement` is always the transform actually applied: the
+  frozen fallback the spec's `mate`-present case describes as "kept as the
+  fallback if the mate later fails to resolve" is, in this build, the ONLY
+  behavior — persistent re-seating on regen lands P3.
+- `placement` — SAME normative order as TransformBody: `X' = T ∘ R(center,
+  axis, angleDeg) · X`. `rotate` defaults to the identity rotation when
+  absent.
+- `componentRevision` is the package content hash at PLACE TIME (spec §4);
+  the library re-verifies it on regen and surfaces `NeedsRepair` on mismatch
+  at the app-crate layer (WP-1.3) — the worker itself never touches the
+  library, only the frozen `source`/`placement` this op already carries.
+
+**DetachComponent** (`op.detachComponent`) — drop a placed component's
+library identity, keeping its cached geometry as an ordinary body: "the
+honest break link" (spec §3.4). New v2 op, no OneCAD-CPP analogue. Added
+2026-08-12 (Component Library WP-1.2).
+
+```json
+// inputs: []  — no mate, no identity, no topological dependency at all
+// params
+{ "source": { "kind": "generator", "generatorId": "iso4762", "generatorVersion": 1 },
+  "placement": { "translate": [10.0, 5.0, 0.0] } }
+```
+
+- **Same `source`/`placement` shape as `PlaceComponent`, minus
+  `componentId`/`componentVersion`/`componentRevision`/`mate`** — spec §3.4:
+  "after detach, no `component_*` fields remain; the op becomes inert
+  provenance." A `generator` source re-runs deterministically, so the result
+  is indistinguishable from a static copy.
+- **This is an in-place edit at the SAME `RecordId`** — the sanctioned
+  op-type swap `PlaceComponent → DetachComponent` (mirrors the existing
+  Fillet⇄Chamfer swap precedent), applied via the ordinary
+  `UpdateOperationParams` edit command, not a new record. The reverse
+  (re-attaching a library identity to a detached body) is NOT sanctioned —
+  one-directional, matching the "honest break link" framing.
+- **Lineage: mints a NewBody** (`body_<opId>`) — identical publish shape to
+  `PlaceComponent` (the same `body_<opId>` the swap's `RecordId` already
+  produced, so the `BodyId` is unchanged across the swap).
+
 ### 7.4 Sketch solver lane
 
 A **separate worker thread/actor** runs PlaneGCS. It follows a **latest-wins**
@@ -1887,6 +1967,49 @@ Every resolution carries the exact `snapshotId`, document `revision`, `refId`, a
 the `bodyId` used to enumerate candidates when one exists. A client MUST cache a
 candidate set by `{revision, snapshotId, refId}` and MUST promote its TopoKeys only
 against that echoed snapshot; a mismatch requires a fresh resolve, never ordinal reuse.
+
+#### ClassifyElement
+
+Read-only surface/curve classification of a picked face or edge, plus a
+seatable geometric frame — the Component Library placement solver's
+interactive hover query (WP-0.1; spec §5.2). Addressed like `QueryElement`
+(`elementId`, or `{bodyId, topoKey}`), but **no `snapshotId`**: unlike
+`QueryElement`'s pick-time addressing (Invariant 4), this verb is
+continuously re-issued against a live drag gesture, so it always reads the
+current head — the same choice `QueryMassProperties` makes. It does not
+fence, prepare, accept, discard, or mint anything.
+
+```json
+// req.args
+{ "bodyId": "body_3", "elementId": "el_…4a1" }   // or { "bodyId", "topoKey" }
+// result — a planar face
+{ "present": true, "kind": "face", "surfaceType": "plane",
+  "frame": { "origin": [10.0, 5.0, 0.0], "normal": [0.0, 0.0, 1.0] } }
+// result — a cylindrical face
+{ "present": true, "kind": "face", "surfaceType": "cylinder",
+  "frame": { "origin": [10.0, 5.0, 0.0], "axis": [0.0, 0.0, 1.0], "radius": 3.0 } }
+// result — a circular edge (a hole rim)
+{ "present": true, "kind": "edge", "curveType": "circle",
+  "frame": { "origin": [10.0, 5.0, 0.0], "axis": [0.0, 0.0, 1.0], "radius": 3.0 } }
+// result — absent
+{ "present": false }
+```
+
+- `kind` ∈ `face` | `edge` | `other`. `surfaceType` ∈ `plane` | `cylinder` |
+  `cone` | `sphere` | `torus` | `other` (present only when `kind === "face"`).
+  `curveType` ∈ `line` | `circle` | `ellipse` | `other` (present only when
+  `kind === "edge"`).
+- `frame` is present only for the kinds a mate solver can seat against —
+  plane, cylinder, line, circle — and absent for everything else (a torus
+  face, an ellipse edge, `kind: "other"`). A plane frame carries `normal`; a
+  cylinder/circle/line frame carries `axis` (never both on the same frame).
+  `radius` is present only for cylinder and circle frames.
+- A stale or absent reference resolves `{ "present": false }` — an ANSWER,
+  not an error, matching `ProjectFaceBoundary`'s convention.
+- Distinct from `QueryElement`'s descriptor: that one's `normal` is a face's
+  surface normal at its UV midpoint, which is **not** an axis for a
+  cylinder, and it carries no radius at all. `ClassifyElement` exists
+  specifically for the frames a concentric/flush mate needs.
 
 ### 7.6 Geometry
 
@@ -2648,6 +2771,57 @@ contract refinements (no worker has shipped against the prior text), so they are
 edits to version 1 rather than a version bump. They still fall under the
 [§13](#13-versioningchange-policy) change policy (fixture bump + cross-track
 sign-off) once fixtures exist.
+
+- **2026-08-12 — §7.3 NEW ops `PlaceComponent`/`DetachComponent`** (Component
+  Library WP-0.2/WP-1.2, single-repo, both tracks land together). Instantiate
+  a library component as a first-class placed instance, and drop a placed
+  instance's library identity while keeping its cached geometry ("the honest
+  break link", spec §3.1/§3.4). Both mint a NewBody (`body_<opId>`); a
+  component resolves to exactly one solid in v1 (`single_solid_policy`).
+  `PlaceComponent`'s `mate`, when present, is carried as a full semantic ref
+  in `inputs[]` (absent ⇒ no inputs at all) but is READ, not yet re-seated —
+  `placement` is the only transform this build applies; persistent
+  mate-driven re-seating on regen is P3. `source.kind` ∈ `generator` |
+  `embedded` | `document`; this build implements `generator` only (a
+  HARDCODED ISO 4762 M6×20 SHCS solid, regardless of `generatorId` —
+  table-driven per-generator dispatch is P2), the other two kinds refuse
+  recoverably with `UNSUPPORTED`. `DetachComponent` is applied as an in-place
+  `PlaceComponent → DetachComponent` op-type swap at the SAME `RecordId` (the
+  Fillet⇄Chamfer swap precedent, newly sanctioned in
+  `edit::session::op_type_edit_allowed`) — one-directional, no reverse swap.
+  Spec §3.2/§3.3's `SetComponentParams`/`ReplaceComponent` are deliberately
+  NOT wire ops (in-place edits of `PlaceComponent`'s own params instead) — see
+  the `DetachComponent` entry above for the reasoning. Purely additive; no
+  existing wire form changes. Worker:
+  `worker/src/ops/ComponentOp.h/.cpp` (shared `resolve_source_and_publish`
+  pipeline), dispatch in `worker/src/session/PlanExecutor.cpp`. Rust: 6
+  mirror sites in `onecad-core::document::record` (`KnownOperation` enum +
+  `KNOWN_OP_TYPES`, `element_refs_mut`, `op_type`, `derive_inputs`) and
+  `edit::session` (`validate_place_component`/`validate_detach_component`,
+  wired into both `add_operation` and `update_operation_params`), plus
+  `worker::wire::wire_op_inputs` and `document_runtime::element_ref_input`
+  (`src-tauri/src/`). No fixture yet — gated by `worker/tests/test_component_ops.cpp`
+  (7 cases) and `src-tauri/tests/component_ops.rs` (3 cases incl. the swap
+  through the real worker) rather than a `protocol/fixtures/*.ndjson` pin; a
+  fixture lands once WP-1.3 gives the op family a non-spike consumer.
+
+- **2026-08-12 — §7.5 NEW read-only verb `ClassifyElement`** (Component
+  Library WP-0.1, single-repo, both tracks land together). Interactive
+  surface/curve classification + a seatable frame (plane origin+normal,
+  cylinder/circle axis+radius) for the placement/mate-snap solver's hover
+  gesture. Addressed like `QueryElement` (`elementId` or `{bodyId, topoKey}`)
+  but with no `snapshotId` — it always reads the current head, matching
+  `QueryMassProperties`'s reasoning, since it is re-issued every hover frame
+  rather than tied to one pick. Purely additive new verb; no existing wire
+  form changes. Worker: `worker/src/session/ClassifyElement.h/.cpp`, dispatch
+  in `worker/src/main.cpp`. Rust: `worker::wire::classify_element_args` /
+  `parse_classify_element` (`src-tauri/src/worker/wire.rs`), the
+  `ElementQuery::classify_element(_by_topo_key)` trait methods
+  (`src-tauri/src/worker/mod.rs`), `WorkerManager` impl (`manager.rs`), the
+  `#[tauri::command] classify_element` (`src-tauri/src/api/mod.rs`). No
+  fixture yet — P0 gate is `src-tauri/tests/classify_latency.rs`'s p95
+  measurement, not a wire-contract fixture; a fixture lands with WP-1.2 once
+  the verb has a non-spike consumer.
 
 - **2026-08-11 — §2, §7.2, §7.3 Pattern V2 publication/lineage policy.**
   `resultPolicyVersion` absent remains frozen V1; present values are literal `2`.

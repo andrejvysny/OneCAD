@@ -1,0 +1,38 @@
+OneCAD — Third-Party Notices
+=============================
+
+This file lists third-party data and code bundled with OneCAD, per each
+source's license terms. See CLAUDE.md / TheComponentLibrary/
+onecad-component-library-spec.md §6.3 for the sourcing policy this follows.
+
+-------------------------------------------------------------------------
+BOLTS — fastener dimension tables
+-------------------------------------------------------------------------
+
+Component:  ISO 4762 / DIN 912 socket-head cap screw dimensions
+            (src-tauri/crates/onecad-library/src/tables.rs,
+             worker/src/ops/ComponentOp.cpp::iso4762Table())
+
+Source:     BOLTS — Open Library of Technical Specifications
+            https://github.com/boltsparts/BOLTS_archive
+            data/hex_socket.blt, class "hexsocketheadcap"
+
+Author:     Johannes Reinhardt <jreinhardt@ist-dein-freund.de>
+
+License:    GNU Lesser General Public License, version 2.1 or later
+            (LGPL-2.1+), per the file's own header. Full text:
+            https://www.gnu.org/licenses/lgpl-2.1.html
+
+Retrieved:  2026-08-12
+
+Notes:      Dimension values (M2–M12) transcribed into two independent,
+            purpose-specific representations — a Rust metadata table
+            (onecad-library::tables::Iso4762Table) and a C++ worker
+            generator table (ComponentOp.cpp::iso4762Table()) — per this
+            project's architecture (generators are built-in/versioned in
+            the worker; the library crate serves authoring/metadata, not
+            geometry). Neither copy embeds BOLTS source code, only the
+            published dimension data. The repository's GitHub-reported
+            top-level license (GPL-3.0) is a whole-repo default; the
+            specific data file used here carries its own LGPL 2.1+ header,
+            which is the license that applies to this data.

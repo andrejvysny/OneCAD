@@ -20,6 +20,16 @@
  *     modal overlays in the new `shell.overlay` region, which is LAST because a
  *     modal has to cover every region above it
  * Nothing already in this list moved relative to anything else.
+ *
+ * AMENDED 2026-08-12 (Component Library WP-1.4) — recorded in TODO.md.
+ * `LibraryPanel` joined `Slots.ShellLeft` right after `ModelTreePanel`
+ * (priority 110 vs. `ModelTreePanel`'s 100). It does NOT add a second visible
+ * sidebar: both panels occupy the SAME `left:0` footprint and each renders
+ * `null` unless `sidebarTabStore.activeTab` names it (a VS Code-style tab
+ * strip both render at their own top) — see `SidebarTabHeader`'s doc
+ * comment. `LibraryPanel` is still a real, separately-registered
+ * contribution (its OWN entry in the registry, its OWN mount-order slot), so
+ * it belongs in this contract like any other panel.
  */
 export const EDITOR_MOUNT_ORDER_CONTRACT: readonly string[] = [
   "TitleBar",
@@ -37,6 +47,7 @@ export const EDITOR_MOUNT_ORDER_CONTRACT: readonly string[] = [
   "SketchChromeBar",
   "SketchConstraintToolbar",
   "ModelTreePanel",
+  "LibraryPanel",
   "InspectorPanel",
   "RepairBanner",
   "TimelineStoppedBanner",

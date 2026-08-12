@@ -22,6 +22,7 @@ pub mod error;
 pub mod events;
 pub mod export;
 pub mod imports;
+pub mod library;
 pub mod logging;
 pub mod mesh_cache;
 pub mod recents;
@@ -386,6 +387,12 @@ pub fn run() {
             api::add_sketch_on_face,
             api::element_info,
             api::query_mass_properties,
+            api::classify_element,
+            library::list_library_components,
+            library::reindex_library,
+            library::place_component,
+            library::set_component_params,
+            library::detach_component,
             api::prepare_offset_face,
             api::prepare_edge_op,
             api::preview_op,

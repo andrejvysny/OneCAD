@@ -462,6 +462,119 @@ export interface MassProperties {
   ];
 }
 
+/**
+ * A picked face/edge's surface/curve classification + a seatable frame
+ * (`classifyElement` → Rust `ClassifyElementDto` → the worker's
+ * `ClassifyElement`; SCHEMA §7.5, Component Library WP-0.1).
+ *
+ * The placement solver's hover query, distinct from `ElementInfo`: that one's
+ * `normal` is a surface normal (meaningless as an axis for a cylinder) and
+ * carries no radius. This exists specifically for concentric/flush mate
+ * seating.
+ */
+export interface ClassifyResult {
+  /** `face` | `edge` | `other`. */
+  kind: string;
+  /** `plane` | `cylinder` | `cone` | `sphere` | `torus` | `other`. Empty unless `kind === "face"`. */
+  surfaceType: string;
+  /** `line` | `circle` | `ellipse` | `other`. Empty unless `kind === "edge"`. */
+  curveType: string;
+  /**
+   * A seatable frame — present only for plane/cylinder faces and line/circle
+   * edges, the kinds a mate solver can snap against.
+   */
+  frame: ClassifyFrame | null;
+}
+
+export interface ClassifyFrame {
+  /** Plane origin, or cylinder/circle axis location. */
+  origin: [number, number, number];
+  /** Plane normal. `null` for cylinder/circle/line frames (those carry `axis`). */
+  normal: [number, number, number] | null;
+  /** Cylinder/circle axis direction, or a line's own direction. `null` for a plane frame. */
+  axis: [number, number, number] | null;
+  /** Cylinder or circle radius. `null` for plane/line frames. */
+  radius: number | null;
+}
+
+/**
+ * One indexed library component (Component Library WP-1.3; mirrors Rust
+ * `LibraryComponentDto` — `onecad-library`'s `IndexEntry` plus the identity
+ * fields the index keys on).
+ */
+export interface LibraryComponent {
+  id: string;
+  version: string;
+  name: string;
+  category: string[];
+  tags: string[];
+  sourceKind: string;
+  revision: string;
+  /** `sourceKind === "generator"` only (WP-1.5 ghost-preview draft identity). */
+  generatorId?: string;
+  generatorVersion?: number;
+  /** `[attachments]` table verbatim — keyed by attachment name (WP-1.5 snap solver input). */
+  attachments: Record<string, LibraryAttachment>;
+  /**
+   * `[parameters]` table verbatim (WP-2.4: the configurator's role/domain/
+   * snap source — role must be checked before `setComponentParams` accepts
+   * a key, same enforcement the backend applies).
+   */
+  parameters: Record<string, ComponentParameterSpec>;
+  /**
+   * `metadata.designation` (spec §2.1 BOM string template, e.g. `"ISO 4762
+   * M{thread}x{length}"`) — substitute each `{key}` with the CURRENT param
+   * value to get the live designation string. Absent when the package
+   * declares none.
+   */
+  designation?: string;
+}
+
+/** One `[attachments].<key>` entry (mirrors Rust `AttachmentSpec`, spec §2.1). */
+export interface LibraryAttachment {
+  /** Local geometry the attachment names (`"face:head_underside"`, `"cylinder:shank"`). */
+  on: string;
+  /** Geometry kinds this attachment mates with (`"plane"`/`"cylinder"`/`"hole"`/`"circularEdge"`). */
+  accepts: string[];
+}
+
+/** `component.toml` `[parameters].<key>`'s role (spec §2.1). */
+export type ComponentParameterRole = "free" | "table" | "computed";
+
+/**
+ * One `[parameters].<key>` entry (mirrors Rust `ParameterSpec`). Fields are
+ * role-dependent — `role: "free"` is the only role the configurator renders
+ * an editable control for; `"table"`/`"computed"` are display-only, derived
+ * values `setComponentParams` refuses (spec §3.2, enforced server-side).
+ */
+export interface ComponentParameterSpec {
+  role: ComponentParameterRole;
+  /** `role: "free"` only: the current/default value for a string-domain param (e.g. a thread designation). */
+  key?: string;
+  /** `role: "free"` only: the current/default value for a numeric param. */
+  value?: ComponentParamValue;
+  /** `role: "free"` only, when the value must come from a fixed set (e.g. a thread designation). */
+  domain?: ComponentParamValue[];
+  snap?: string;
+  min?: number;
+  /** `role: "table"` only: the dimension-table column this value derives from. */
+  from?: string;
+}
+
+/**
+ * A free-parameter override value (mirrors Rust `ComponentParamValue`,
+ * untagged on the wire — a bare JSON scalar, never a wrapper object).
+ */
+export type ComponentParamValue = number | string | boolean;
+
+/** A `reindexLibrary()` outcome (mirrors Rust `ReindexReportDto`). */
+export interface ReindexReport {
+  total: number;
+  indexed: number;
+  /** `"<packageDir>: <reason>"` per skipped (malformed) package. */
+  skipped: string[];
+}
+
 // ── Topology repair (SCHEMA §9; M4b) — the `needs-repair` event + `resolveRefs` ─
 //
 // These MIRROR the Rust DTOs in `src-tauri/src/dto.rs` (camelCase serde):
@@ -782,7 +895,15 @@ export type OpType =
   /** Machined hole on a planar face (SCHEMA §7.3; WP-C T3). */
   | "Hole"
   /** Direct-modelling face offset (SCHEMA §7.3 `op.offsetFace`, 2026-08-06). */
-  | "OffsetFace";
+  | "OffsetFace"
+  /**
+   * Place a library component instance (spec §3.1; Component Library WP-1.5).
+   * PREVIEW-ONLY here: the ghost session this op-type drives is always
+   * cancelled, never committed through `endPreview` — the real commit goes
+   * through the dedicated `CadClient.placeComponent` (library.rs re-verifies
+   * the package revision there, which a generic preview commit would skip).
+   */
+  | "PlaceComponent";
 
 /** Extrude end condition (SCHEMA §7.3 ExtrudeParams). */
 export type ExtrudeMode = "Blind" | "ThroughAll" | "Symmetric" | "ToNext" | "ToFace";
@@ -1150,6 +1271,26 @@ export interface TransformBodyParams {
 }
 
 /**
+ * `PlaceComponent` GHOST-preview params (Rust `PlaceComponentParams` — spec
+ * §3.1; Component Library WP-1.5). Narrower than the Rust struct: no `params`
+ * free-overrides (P1 has no size table to override against, spec §6 is P2)
+ * and no `mate` (the worker's `ComponentOp` resolver does not consume `mate`
+ * on regen yet — spec §5.5's re-seat ladder is P3). `generatorId`/
+ * `generatorVersion` come straight off the `LibraryComponent` the panel is
+ * dragging; the worker's v1 generator stub ignores their VALUE (every id
+ * builds the same hardcoded M6 SHCS solid) but still requires them non-empty.
+ */
+export interface PlaceComponentParams {
+  componentId: string;
+  componentVersion: string;
+  componentRevision: string;
+  generatorId: string;
+  generatorVersion: number;
+  translate: [number, number, number];
+  rotate: TransformRotationParams;
+}
+
+/**
  * One op in an `ExecutePlan` (SCHEMA §7.3), discriminated by `opType`. An
  * optional `featureId` re-targets an EXISTING feature (parametric edit —
  * double-click a history entry → re-drag). `sketchId`/`regionId` on Extrude tell
@@ -1250,6 +1391,19 @@ export type OperationOp =
       featureId?: string;
       inputs?: SemanticRef[];
       params: OffsetFaceParams;
+    }
+  /**
+   * Ghost-preview only (see {@link PlaceComponentParams}). `featureId`/`inputs`
+   * are structurally present (every `OperationOp` arm carries them, and code
+   * widens across the union) but never populated — this session is never
+   * re-edited or committed through the preview lane.
+   */
+  | {
+      opType: "PlaceComponent";
+      opId?: string;
+      featureId?: undefined;
+      inputs?: undefined;
+      params: PlaceComponentParams;
     };
 
 /**
@@ -1375,7 +1529,8 @@ export type PreviewParams = Partial<ExtrudeParams> &
   Partial<ShellParams> &
   Partial<BooleanParams> &
   Partial<HoleParams> &
-  Partial<OffsetFaceParams> & { [k: string]: unknown };
+  Partial<OffsetFaceParams> &
+  Partial<PlaceComponentParams> & { [k: string]: unknown };
 
 /** `beginPreview` draft — the base op the drag will refine. */
 export interface PreviewDraft {

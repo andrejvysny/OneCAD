@@ -12,12 +12,15 @@
 import type {
   ApplyOperationResult,
   BeginGestureResult,
+  ClassifyResult,
+  ComponentParamValue,
   DocumentChange,
   DocumentModule,
   DocumentProjectionWire,
   DocumentSnapshot,
   DragSolveResult,
   ElementInfo,
+  LibraryComponent,
   MassProperties,
   ModuleState,
   EnterSketchTarget,
@@ -27,6 +30,7 @@ import type {
   Lod,
   NeedsRepairEvent,
   OperationOp,
+  ReindexReport,
   PreviewDraft,
   PreviewParams,
   PreviewResult,
@@ -49,6 +53,7 @@ import type {
   SketchEntity,
   SketchSession,
   SketchUpsertResult,
+  TransformRotationParams,
   Unsubscribe,
   WorkerStatus,
 } from "./types";
@@ -366,6 +371,77 @@ export interface CadClient {
    * that genuinely encloses no volume.
    */
   massProperties(bodyId: string): Promise<MassProperties>;
+
+  /**
+   * Surface/curve classification of a picked face or edge, plus a seatable
+   * frame — the Component Library placement solver's hover query (SCHEMA §7.5
+   * `ClassifyElement`, WP-0.1).
+   *
+   * A pure read like `elementInfo`, and always the current head (no snapshot
+   * argument) since this is re-issued on every hover frame during a live
+   * drag, not tied to a frozen pick. Resolves `null` when the target isn't
+   * classifiable geometry — an ordinary outcome for a continuously-polled
+   * query, never an error. Same two-rung addressing as `elementInfo`
+   * (topoKey tried first, elementId is the fallback).
+   */
+  classifyElement(
+    bodyId: string,
+    elementId: string,
+    topoKey?: string,
+  ): Promise<ClassifyResult | null>;
+
+  // ── Component Library (WP-1.3) ──────────────────────────────────────────
+
+  /**
+   * Lists the CURRENTLY PERSISTED library index — does not reindex (that's
+   * `reindexLibrary`, a separate explicit action). Empty for a library that
+   * has never been indexed, never an error.
+   */
+  listLibraryComponents(): Promise<LibraryComponent[]>;
+
+  /** Rebuilds the library index from packages on disk (spec §4 `reindex`). */
+  reindexLibrary(): Promise<ReindexReport>;
+
+  /**
+   * Instantiates a library component as a placed instance (spec §3.1
+   * `PlaceComponent`). WP-1.5 scope: `translate` + `rotate` — the placement
+   * solver's (`placementSolver.ts`) computed candidate transform, already
+   * resolved client-side from a classify+attachment match. No `mate` yet:
+   * the worker's `ComponentOp` resolver does not consume `mate` on regen
+   * (reads `placement.{translate,rotate}` only), so recording one now would
+   * assert a persistence the document cannot honor — spec §5.5's
+   * re-seat-on-regen ladder is P3. Geometry arrives via the usual
+   * `onProjectionUpdated`/`onDocumentChanged` event stream, same as every
+   * other mutating command — this resolves once the edit is APPLIED, not
+   * once it has regenerated.
+   */
+  placeComponent(
+    componentId: string,
+    componentVersion: string,
+    translate: [number, number, number],
+    rotate?: TransformRotationParams,
+  ): Promise<void>;
+
+  /**
+   * Drops a placed component's library identity, keeping its cached
+   * geometry as an ordinary body (spec §3.4) — the sanctioned in-place
+   * `PlaceComponent` → `DetachComponent` op-type swap at the same record.
+   */
+  detachComponent(recordId: string): Promise<void>;
+
+  /**
+   * Applies free-parameter overrides to an already-placed component instance
+   * (spec §3.1 `params`; Component Library WP-2.3). Every requested key must
+   * be declared `role: "free"` on the component's `[parameters]` signature
+   * (`LibraryComponent.parameters`) — an unknown or non-free key is refused
+   * server-side, never silently dropped or silently applied. Resolves once
+   * the edit is applied, same as `placeComponent`/`detachComponent`; the
+   * regenerated geometry arrives via the usual projection event stream.
+   */
+  setComponentParams(
+    recordId: string,
+    params: Record<string, ComponentParamValue>,
+  ): Promise<void>;
 
   /**
    * The read-only first half of the OffsetFace authoring transaction

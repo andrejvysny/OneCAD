@@ -8,6 +8,7 @@ const NAV: { key: StartNavKey; label: string; icon: IconName }[] = [
   { key: "recent", label: "Recent", icon: "clock" },
   { key: "starred", label: "Starred", icon: "star" },
   { key: "templates", label: "Templates", icon: "template" },
+  { key: "library", label: "Library", icon: "cube" },
 ];
 
 type StartSidebarProps = {

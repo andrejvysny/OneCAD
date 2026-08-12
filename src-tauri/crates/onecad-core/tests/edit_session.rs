@@ -15,9 +15,10 @@ use onecad_core::document::body::BodyMeta;
 use onecad_core::document::datum::DatumPlane;
 use onecad_core::document::record::PlaneKind;
 use onecad_core::document::record::{
-    BooleanMode, BooleanOp, BooleanParams, ChamferParams, ExtrudeMode, ExtrudeParams, FilletParams,
-    HoleParams, HoleType, KnownOperation, OffsetDistanceType, OffsetFaceParams, Operation,
-    OperationRecord, RevolveParams, ShellParams, SketchOpParams, SketchPlaneRef,
+    BooleanMode, BooleanOp, BooleanParams, ChamferParams, ComponentSourceRef,
+    DetachComponentParams, ExtrudeMode, ExtrudeParams, FilletParams, FrozenPlacement, HoleParams,
+    HoleType, KnownOperation, OffsetDistanceType, OffsetFaceParams, Operation, OperationRecord,
+    PlaceComponentParams, RevolveParams, ShellParams, SketchOpParams, SketchPlaneRef,
 };
 use onecad_core::document::refs::{
     AnchorIntent, AxisRef, ElementKind, ElementRef, PrimaryRef, SketchRegionRef,
@@ -1398,6 +1399,112 @@ fn fillet_chamfer_swap_still_enforces_edge_lockstep() {
     // The record is untouched by either rejection.
     let rec = sess.document().timeline.record_by_id(rid(1)).unwrap();
     assert_eq!(rec.op.op_type(), "Fillet", "a rejected swap writes nothing");
+}
+
+// ── Component Library WP-1.2: PlaceComponent → DetachComponent swap ─────────
+
+fn place_component_op() -> Operation {
+    Operation::Known(KnownOperation::PlaceComponent(PlaceComponentParams {
+        component_id: "onecad.std.iso4762".to_string(),
+        component_version: "1.0.0".to_string(),
+        component_revision: format!("sha256:{}", "0".repeat(64)),
+        params: Default::default(),
+        source: ComponentSourceRef::Generator {
+            generator_id: "iso4762".to_string(),
+            generator_version: 1,
+            params: Default::default(),
+            extra: Default::default(),
+        },
+        mate: None,
+        placement: FrozenPlacement {
+            translate: [s(0.0), s(0.0), s(0.0)],
+            rotate: Default::default(),
+        },
+        extra: Default::default(),
+    }))
+}
+
+fn detach_component_op() -> Operation {
+    Operation::Known(KnownOperation::DetachComponent(DetachComponentParams {
+        source: ComponentSourceRef::Generator {
+            generator_id: "iso4762".to_string(),
+            generator_version: 1,
+            params: Default::default(),
+            extra: Default::default(),
+        },
+        placement: FrozenPlacement {
+            translate: [s(0.0), s(0.0), s(0.0)],
+            rotate: Default::default(),
+        },
+        extra: Default::default(),
+    }))
+}
+
+fn place_component_doc() -> DocumentSession {
+    let mut doc = Document::new(DocumentId(u(0x5E)));
+    doc.bodies.register(BodyMeta::new(BX(), "b", rid(0)));
+    doc.timeline = Timeline::from_records(vec![record(
+        rid(1),
+        "Place Component",
+        place_component_op(),
+        vec![BX()],
+    )]);
+    DocumentSession::new(doc)
+}
+
+#[test]
+fn update_operation_params_swaps_place_component_to_detach_component() {
+    let mut sess = place_component_doc();
+    sess.apply(EditCommand::UpdateOperationParams {
+        record: rid(1),
+        op: detach_component_op(),
+    })
+    .expect("the sanctioned PlaceComponent→DetachComponent swap is accepted");
+
+    let rec = sess.document().timeline.record_by_id(rid(1)).unwrap();
+    assert_eq!(rec.op.op_type(), "DetachComponent");
+    assert_eq!(rec.record_id, rid(1), "RecordId preserved across the swap");
+}
+
+#[test]
+fn detach_component_to_place_component_is_not_a_sanctioned_reverse_swap() {
+    let mut sess = place_component_doc();
+    sess.apply(EditCommand::UpdateOperationParams {
+        record: rid(1),
+        op: detach_component_op(),
+    })
+    .expect("forward swap");
+
+    // The "honest break link" is one-directional — re-attaching a library
+    // identity to an already-detached body is not a sanctioned edit.
+    let err = sess
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(1),
+            op: place_component_op(),
+        })
+        .unwrap_err();
+    assert!(err.to_string().contains("opType"), "reverse swap: {err}");
+    let rec = sess.document().timeline.record_by_id(rid(1)).unwrap();
+    assert_eq!(
+        rec.op.op_type(),
+        "DetachComponent",
+        "a rejected swap writes nothing"
+    );
+}
+
+#[test]
+fn place_component_cannot_swap_to_an_unrelated_op_type() {
+    let mut sess = place_component_doc();
+    let err = sess
+        .apply(EditCommand::UpdateOperationParams {
+            record: rid(1),
+            op: fillet_op(&["e1"], vec![edge_ref(BX(), "e1")]),
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("opType"),
+        "PlaceComponent→Fillet: {err}"
+    );
 }
 
 // ── (WP-C T2a) two-distance chamfer: `distance2` ─────────────────────────────

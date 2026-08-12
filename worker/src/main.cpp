@@ -28,6 +28,7 @@
 #include "protocol/Dispatcher.h"
 #include "protocol/Envelope.h"
 #include "protocol/SolverLane.h"
+#include "session/ClassifyElement.h"
 #include "session/ElementIdentity.h"
 #include "session/FaceProjection.h"
 #include "session/MassProperties.h"
@@ -285,6 +286,15 @@ void register_verbs(Dispatcher& dispatcher, SolverLane& solver_lane, Session& se
         "QueryElement",
         [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {
             return onecad::session::handle_query_element(session, r);
+        });
+    // --- COMPONENT-LIBRARY P0.1: interactive surface classification for the
+    //     placement/mate-snap solver (SCHEMA §7.5). Read-only, current head,
+    //     no snapshotId — a continuously re-issued LIVE hover query, unlike
+    //     QueryElement's pick-time snapshot addressing (Invariant 4). ---
+    dispatcher.register_verb(
+        "ClassifyElement",
+        [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {
+            return onecad::session::handle_classify_element(session, r);
         });
     // --- WP-C1: exact mass properties (SCHEMA §7.5). Read-only, addressed by
     //     bodyId against a head copy — no fence, no scratch, no minting. ---

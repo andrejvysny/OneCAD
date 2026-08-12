@@ -15,6 +15,7 @@
 #include "elementmap/ElementMapPartition.h"
 #include "elementmap/Ladder.h"
 #include "ops/BooleanOp.h"
+#include "ops/ComponentOp.h"
 #include "ops/ExtrudeOp.h"
 #include "ops/FilletChamferOp.h"
 #include "ops/HoleOp.h"
@@ -287,7 +288,11 @@ ops::OpOutcome run_single_op(ScratchJob& job, const json& op, const std::string&
     if (op_type == "MirrorBody") return ops::execute_mirror_body(octx, op, op_id);
     if (op_type == "ImportStep") return ops::execute_import_step(octx, op, op_id);
     if (op_type == "TransformBody") return ops::execute_transform_body(octx, op, op_id);
+    if (op_type == "PlaceComponent") return ops::execute_place_component(octx, op, op_id);
+    if (op_type == "DetachComponent") return ops::execute_detach_component(octx, op, op_id);
 
+    // SetComponentParams / ReplaceComponent (P2/P3 — in-place edits of
+    // PlaceComponentParams at the Rust layer, no distinct wire op) and
     // Loft / Sweep remain UNSUPPORTED (SCHEMA §8) — Rust freezes the node.
     return ops::OpOutcome::unsupported("unsupported opType: " + op_type);
 }

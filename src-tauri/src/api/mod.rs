@@ -1944,6 +1944,57 @@ pub async fn query_mass_properties(
         .map_err(Into::into)
 }
 
+/// Surface/curve classification of a picked face or edge (`ClassifyElement`;
+/// SCHEMA §7.5; Component Library WP-0.1) — the placement-solver's hover
+/// query: what kind of geometry is this, and what frame would a mate seat
+/// against (plane origin+normal, cylinder/circle axis+radius).
+///
+/// A pure READ, like [`query_mass_properties`]: no fence, no snapshot, always
+/// the current head — this is issued on every hover frame during a live drag,
+/// not tied to a picked snapshot the way [`element_info`] is.
+///
+/// Same two-rung addressing as [`element_info`] (topoKey tried first, the
+/// fresh-pick case; elementId is the fallback), collapsed into `Ok(None)`
+/// rather than an error when neither rung resolves — a hover target that
+/// isn't classifiable geometry (a miss, an edge of an already-detached body)
+/// is an ordinary outcome for a continuously-polled query.
+#[tauri::command]
+pub async fn classify_element(
+    state: State<'_, AppState>,
+    body_id: String,
+    element_id: String,
+    topo_key: Option<String>,
+) -> Result<Option<crate::dto::ClassifyElementDto>, ApiError> {
+    let body = wire::parse_body_id(&body_id).map_err(ApiError::InvalidCommand)?;
+    let topo_key = topo_key.unwrap_or_default();
+    if element_id.is_empty() && topo_key.is_empty() {
+        return Err(ApiError::InvalidCommand(
+            "classifyElement: one of elementId / topoKey is required".into(),
+        ));
+    }
+    {
+        // Presence check only — the runtime lock is NOT held across the worker
+        // round-trip below (the R-WP11 rule; a held lock makes fencing inert).
+        let guard = state.runtime.lock().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("classifyElement".into()))?;
+    }
+    let query = state.element_query();
+    if !topo_key.is_empty() {
+        if let Some(info) = query.classify_element_by_topo_key(body, &topo_key).await? {
+            return Ok(Some(info));
+        }
+    }
+    if element_id.is_empty() {
+        return Ok(None);
+    }
+    query
+        .classify_element(body, &element_id)
+        .await
+        .map_err(Into::into)
+}
+
 /// One picked face for [`prepare_offset_face`] — `{bodyId?, topoKey?, elementId?}`
 /// (SCHEMA §7.6 `pickedFaces[]`).
 ///

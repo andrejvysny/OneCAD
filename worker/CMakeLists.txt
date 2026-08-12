@@ -142,6 +142,9 @@ add_library(worker_core STATIC
     # --- WP-C T3: machined hole (simple / counterbore / countersink, SCHEMA §7.3) ---
     src/ops/HoleTool.cpp
     src/ops/HoleOp.cpp
+    # --- COMPONENT-LIBRARY WP-0.2: placed-component op family (`PlaceComponent`,
+    #     SCHEMA §7.3) ---
+    src/ops/ComponentOp.cpp
     src/io/ExportStep.cpp
     src/io/MeshExport.cpp
     src/io/Checkpoint.cpp
@@ -171,6 +174,8 @@ add_library(worker_core STATIC
     # --- SKETCH-ON-FACE W1: face-boundary projection (SCHEMA §7.6) ---
     src/sketch/FaceBoundaryProjector.cpp
     src/session/FaceProjection.cpp
+    # --- COMPONENT-LIBRARY P0.1: interactive surface classification (SCHEMA §7.5) ---
+    src/session/ClassifyElement.cpp
     # --- W-WP2 kernel port (mirrors OneCAD-CPP src/kernel onecad_kernel lib) ---
     src/kernel/geometry/EdgeChainer.cpp
     src/kernel/modeling/FaceExtrudeProfileBuilder.cpp

@@ -322,6 +322,52 @@ pub struct RecentProjectDto {
     pub thumbnail: Option<String>,
 }
 
+/// One library component entry for the (future) library panel (Component
+/// Library WP-1.3; `types.ts` `LibraryComponent`) — the `onecad-library`
+/// crate's `IndexEntry` plus the identity fields the index keys on but
+/// doesn't itself carry (`id`/`version`, held by the caller's map key).
+// No `Eq`: `parameters`' `ParameterSpec` carries `toml::Value` (via `value`/
+// `domain`), which only implements `PartialEq` (it can hold an f64).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryComponentDto {
+    pub id: String,
+    pub version: String,
+    pub name: String,
+    pub category: Vec<String>,
+    pub tags: Vec<String>,
+    pub source_kind: String,
+    pub revision: String,
+    /// `source_kind == "generator"` only (WP-1.5 ghost-preview draft needs
+    /// these to build a valid throwaway `PlaceComponent` op).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generator_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generator_version: Option<u32>,
+    /// `[attachments]` table verbatim — the snap solver's accepts-matching
+    /// input (WP-1.5).
+    pub attachments: std::collections::BTreeMap<String, onecad_library::package::AttachmentSpec>,
+    /// `[parameters]` table verbatim (WP-2.4: the configurator's role/domain/
+    /// snap source).
+    pub parameters: std::collections::BTreeMap<String, onecad_library::package::ParameterSpec>,
+    /// `metadata.designation` (spec §2.1 BOM string template) — the
+    /// configurator's live-preview source. Absent when the package doesn't
+    /// declare one (spec's own open Q4: not every package needs one yet).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub designation: Option<String>,
+}
+
+/// A `reindex_library` outcome (`types.ts` `ReindexReport`) — feeds the
+/// tasks-chip producer (WP-1.6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReindexReportDto {
+    pub total: usize,
+    pub indexed: usize,
+    /// `"<packageDir>: <reason>"` per skipped (malformed) package.
+    pub skipped: Vec<String>,
+}
+
 /// A crash-recovery offer surfaced at startup (`check_recovery`; `types.ts`
 /// `RecoveryInfo`). A previous session left an autosave whose owning process is
 /// gone — the start screen offers to Restore or Discard it.
@@ -570,6 +616,45 @@ pub struct ElementInfoDto {
     /// `ElementMap::computeDescriptor` is the authority; this is not an estimate
     /// derived from the tessellation.
     pub magnitude: f64,
+}
+
+/// A face or edge's surface/curve classification from `ClassifyElement`
+/// (SCHEMA §7.5; Component Library WP-0.1) — the placement-solver's hover
+/// query: given a picked target, what KIND of geometry is it, and what frame
+/// would a mate seat against.
+///
+/// Distinct from [`ElementInfoDto`]: that one's `normal` is a face's surface
+/// normal (meaningless as an axis for a cylinder), and it carries no radius at
+/// all. This DTO exists specifically for the cases a concentric/flush mate
+/// needs — cylinder axis+radius, circle center+axis+radius, plane origin+normal.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassifyElementDto {
+    /// `"face"` | `"edge"` | `"other"`.
+    pub kind: String,
+    /// `"plane"` | `"cylinder"` | `"cone"` | `"sphere"` | `"torus"` | `"other"`.
+    /// Empty when `kind != "face"`.
+    pub surface_type: String,
+    /// `"line"` | `"circle"` | `"ellipse"` | `"other"`. Empty when `kind != "edge"`.
+    pub curve_type: String,
+    /// A seatable frame — present only for plane/cylinder faces and
+    /// line/circle edges, the kinds a mate solver can snap against. `None`
+    /// for anything else (a torus face, an ellipse edge, `kind:"other"`).
+    pub frame: Option<ClassifyElementFrameDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassifyElementFrameDto {
+    /// Plane origin, or cylinder/circle axis location.
+    pub origin: [f64; 3],
+    /// Plane normal. `None` for cylinder/circle/line frames (those carry `axis`).
+    pub normal: Option<[f64; 3]>,
+    /// Cylinder or circle axis direction, or a line's own direction.
+    /// `None` for a plane frame (that carries `normal`).
+    pub axis: Option<[f64; 3]>,
+    /// Cylinder or circle radius. `None` for plane/line frames.
+    pub radius: Option<f64>,
 }
 
 /// One body's exact kernel mass properties from `QueryMassProperties`
@@ -1159,7 +1244,11 @@ pub fn feature_kind(op: &Operation) -> FeatureKind {
             | KnownOperation::TransformBody(_)
             // A Hole is a body MODIFIER (it cuts its host), so it groups with the
             // boolean family rather than the Fillet/Chamfer/Shell dress-up bucket.
-            | KnownOperation::Hole(_) => FeatureKind::Boolean,
+            | KnownOperation::Hole(_)
+            // Same interim-bucket reasoning as TransformBody: `FeatureKind` has no
+            // placed-component member yet (Component Library WP-0.2/1.2).
+            | KnownOperation::PlaceComponent(_)
+            | KnownOperation::DetachComponent(_) => FeatureKind::Boolean,
         },
         Operation::Opaque(_) => FeatureKind::Extrude,
     }
@@ -1346,6 +1435,8 @@ pub fn default_label(op: &Operation) -> &'static str {
             KnownOperation::TransformBody(_) => "Move",
             KnownOperation::Hole(_) => "Hole",
             KnownOperation::OffsetFace(_) => "Offset face",
+            KnownOperation::PlaceComponent(_) => "Place Component",
+            KnownOperation::DetachComponent(_) => "Detach Component",
         },
         // A frozen unknown node keeps its opType as the label rather than
         // masquerading as an Extrude.
