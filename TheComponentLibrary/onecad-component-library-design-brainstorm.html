@@ -1,0 +1,769 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OneCAD Component Library — Design Brainstorm</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0c0f14;
+    --bg-2: #11151d;
+    --bg-3: #161b25;
+    --panel: #131822;
+    --line: #232b3a;
+    --line-soft: #1b2230;
+    --ink: #e8edf5;
+    --ink-2: #aab4c4;
+    --ink-3: #7d8899;
+    --accent: #4da3ff;
+    --accent-2: #7c6bff;
+    --good: #3fce8f;
+    --warn: #f5b53f;
+    --bad: #f0615a;
+    --mono: 'JetBrains Mono', monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: 'Inter', system-ui, sans-serif;
+    line-height: 1.65;
+    font-size: 16px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 48px; }
+
+  /* ---- hero ---- */
+  header.hero {
+    border-bottom: 1px solid var(--line);
+    padding: 88px 0 64px;
+    background:
+      radial-gradient(1200px 500px at 85% -10%, rgba(77,163,255,.09), transparent 60%),
+      radial-gradient(900px 500px at 0% 0%, rgba(124,107,255,.07), transparent 55%),
+      var(--bg);
+    position: relative;
+    overflow: hidden;
+  }
+  .hero-grid {
+    position: absolute; inset: 0; pointer-events: none; opacity: .5;
+    background-image:
+      linear-gradient(rgba(77,163,255,.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(77,163,255,.05) 1px, transparent 1px);
+    background-size: 56px 56px;
+    mask-image: radial-gradient(800px 400px at 70% 0%, black, transparent 75%);
+  }
+  .kicker {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .22em;
+    text-transform: uppercase; color: var(--accent); margin-bottom: 20px;
+    display: flex; align-items: center; gap: 12px;
+  }
+  .kicker::before { content: ''; width: 34px; height: 1px; background: var(--accent); }
+  h1 {
+    font-family: 'Space Grotesk', sans-serif; font-size: 56px; font-weight: 700;
+    line-height: 1.04; letter-spacing: -.02em; max-width: 15ch;
+  }
+  h1 em { font-style: normal; color: var(--accent); }
+  .lede { margin-top: 26px; max-width: 62ch; color: var(--ink-2); font-size: 18px; }
+  .hero-meta { margin-top: 40px; display: flex; gap: 36px; flex-wrap: wrap; }
+  .hero-meta div { font-family: var(--mono); font-size: 12.5px; color: var(--ink-3); }
+  .hero-meta b { display: block; color: var(--ink); font-weight: 600; font-size: 13px; margin-bottom: 2px; }
+
+  /* ---- nav ---- */
+  nav.toc {
+    position: sticky; top: 0; z-index: 50; background: rgba(12,15,20,.82);
+    backdrop-filter: blur(12px); border-bottom: 1px solid var(--line-soft);
+  }
+  nav.toc .wrap { display: flex; gap: 4px; overflow-x: auto; padding-top: 0; padding-bottom: 0; }
+  nav.toc a {
+    font-family: var(--mono); font-size: 12px; color: var(--ink-3); text-decoration: none;
+    padding: 14px 14px; white-space: nowrap; border-bottom: 2px solid transparent;
+    transition: color .15s;
+  }
+  nav.toc a:hover { color: var(--ink); }
+
+  /* ---- sections ---- */
+  section { padding: 72px 0 8px; }
+  .sec-head { display: flex; align-items: baseline; gap: 18px; margin-bottom: 14px; }
+  .sec-num {
+    font-family: var(--mono); font-size: 13px; color: var(--accent);
+    border: 1px solid var(--line); border-radius: 6px; padding: 4px 9px;
+  }
+  h2 { font-family: 'Space Grotesk', sans-serif; font-size: 34px; font-weight: 600; letter-spacing: -.015em; }
+  h3 { font-family: 'Space Grotesk', sans-serif; font-size: 21px; font-weight: 600; margin: 42px 0 12px; color: var(--ink); }
+  h4 { font-size: 15px; font-weight: 600; margin: 26px 0 8px; color: var(--ink); text-transform: uppercase; letter-spacing: .06em; font-family: var(--mono); }
+  p { color: var(--ink-2); margin-bottom: 14px; max-width: 72ch; }
+  p strong, li strong { color: var(--ink); font-weight: 600; }
+  ul, ol { color: var(--ink-2); margin: 0 0 16px 22px; max-width: 70ch; }
+  li { margin-bottom: 7px; }
+  code {
+    font-family: var(--mono); font-size: .86em; background: var(--bg-3);
+    border: 1px solid var(--line-soft); border-radius: 4px; padding: 1px 6px; color: #cdd9ea;
+  }
+
+  /* ---- callouts ---- */
+  .callout {
+    border: 1px solid var(--line); border-left: 3px solid var(--accent);
+    background: var(--panel); border-radius: 8px; padding: 18px 22px; margin: 26px 0; max-width: 76ch;
+  }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.good { border-left-color: var(--good); }
+  .callout.bad { border-left-color: var(--bad); }
+  .callout .tag {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--ink-3); display: block; margin-bottom: 8px;
+  }
+  .callout.warn .tag { color: var(--warn); } .callout.good .tag { color: var(--good); }
+  .callout.bad .tag { color: var(--bad); } .callout .tag-acc { color: var(--accent); }
+  .callout p:last-child { margin-bottom: 0; }
+
+  /* ---- tables ---- */
+  .tbl { width: 100%; border-collapse: collapse; margin: 22px 0; font-size: 14px; }
+  .tbl th {
+    font-family: var(--mono); font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase;
+    text-align: left; color: var(--ink-3); padding: 10px 14px; border-bottom: 1px solid var(--line);
+  }
+  .tbl td { padding: 11px 14px; border-bottom: 1px solid var(--line-soft); color: var(--ink-2); vertical-align: top; }
+  .tbl td:first-child { color: var(--ink); font-weight: 500; }
+  .tbl tr:hover td { background: rgba(77,163,255,.03); }
+  .tbl .y { color: var(--good); } .tbl .n { color: var(--bad); } .tbl .m { color: var(--warn); }
+
+  /* ---- cards & grids ---- */
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 24px 0; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 24px 0; }
+  @media (max-width: 860px) { .grid2, .grid3 { grid-template-columns: 1fr; } h1 { font-size: 40px; } .wrap { padding: 0 24px; } }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 22px;
+  }
+  .card h4 { margin: 0 0 8px; color: var(--accent); }
+  .card p { font-size: 14px; margin-bottom: 8px; }
+  .card ul { font-size: 13.5px; margin-bottom: 0; }
+
+  .pill { display: inline-block; font-family: var(--mono); font-size: 11px; padding: 2px 9px; border-radius: 20px; border: 1px solid var(--line); color: var(--ink-3); margin-right: 6px; }
+  .pill.acc { color: var(--accent); border-color: rgba(77,163,255,.35); }
+  .pill.good { color: var(--good); border-color: rgba(63,206,143,.35); }
+  .pill.warn { color: var(--warn); border-color: rgba(245,181,63,.35); }
+
+  /* ---- code blocks ---- */
+  pre {
+    background: #0a0d12; border: 1px solid var(--line); border-radius: 10px;
+    padding: 20px 22px; overflow-x: auto; margin: 22px 0; max-width: 76ch;
+  }
+  pre code { background: none; border: none; padding: 0; font-size: 12.8px; line-height: 1.6; color: #b8c6dc; }
+  .cm { color: #54627a; } .hl { color: var(--accent); } .str { color: #8fd0a0; }
+
+  /* ---- decision vs ---- */
+  .versus { display: grid; grid-template-columns: 1fr 56px 1fr; gap: 0; align-items: stretch; margin: 26px 0; }
+  .versus .opt { background: var(--panel); border: 1px solid var(--line); padding: 22px; }
+  .versus .opt:first-child { border-radius: 10px 0 0 10px; }
+  .versus .opt:last-child { border-radius: 0 10px 10px 0; }
+  .versus .vs { display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 12px; color: var(--ink-3); background: var(--bg-2); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .versus .opt.winner { border-color: rgba(63,206,143,.5); background: linear-gradient(180deg, rgba(63,206,143,.06), var(--panel)); }
+  .versus .opt .opt-title { font-family: 'Space Grotesk'; font-size: 17px; font-weight: 600; margin-bottom: 4px; }
+  .versus .opt .opt-sub { font-family: var(--mono); font-size: 11px; color: var(--ink-3); margin-bottom: 12px; }
+  .versus .opt ul { font-size: 13.5px; margin-bottom: 0; }
+  @media (max-width: 860px) { .versus { grid-template-columns: 1fr; } .versus .vs { padding: 8px; } }
+
+  .verdict {
+    margin-top: 18px; padding: 16px 20px; border-radius: 8px; font-size: 15px;
+    background: linear-gradient(90deg, rgba(63,206,143,.1), transparent); border: 1px solid rgba(63,206,143,.3);
+  }
+  .verdict b { color: var(--good); }
+
+  /* ---- phases ---- */
+  .phase { border: 1px solid var(--line); border-radius: 10px; margin: 16px 0; overflow: hidden; }
+  .phase-head {
+    display: flex; align-items: center; gap: 16px; padding: 16px 22px; background: var(--bg-2);
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .phase-head .ph-id { font-family: var(--mono); font-size: 12px; color: var(--accent); }
+  .phase-head .ph-name { font-family: 'Space Grotesk'; font-weight: 600; font-size: 16px; flex: 1; }
+  .phase-head .ph-tag { font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+  .phase-body { padding: 16px 22px; }
+  .phase-body ul { margin-bottom: 0; font-size: 14px; }
+
+  /* ---- questions ---- */
+  .q { border-left: 2px solid var(--accent-2); padding: 6px 0 6px 20px; margin: 22px 0; }
+  .q .q-title { font-weight: 600; color: var(--ink); margin-bottom: 4px; }
+  .q p { font-size: 14.5px; margin-bottom: 6px; }
+  .q .rec { font-size: 13.5px; color: var(--accent-2); font-family: var(--mono); }
+
+  footer { border-top: 1px solid var(--line); margin-top: 80px; padding: 40px 0 64px; color: var(--ink-3); font-size: 13px; }
+  footer .wrap { display: flex; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+
+  .divider-note { font-family: var(--mono); font-size: 11px; color: var(--ink-3); letter-spacing: .14em; text-transform: uppercase; margin: 40px 0 0; }
+</style>
+<style>
+.ha-img-placeholder{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:6px;background:#f4f4f5;border:1px dashed #d4d4d8;border-radius:8px;color:#71717a;font-size:12px;font-family:system-ui,sans-serif;min-height:80px;padding:16px;box-sizing:border-box;animation:ha-img-pulse 1.5s ease-in-out infinite}
+.ha-img-placeholder.ha-failed{animation:none;opacity:.7}
+@keyframes ha-img-pulse{0%,100%{opacity:1}50%{opacity:.5}}
+@media(prefers-color-scheme:dark){.ha-img-placeholder{background:#27272a;border-color:#3f3f46;color:#a1a1aa}}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="hero-grid"></div>
+  <div class="wrap">
+    <div class="kicker">Design brainstorm · OneCAD</div>
+    <h1>The Component <em>Library</em></h1>
+    <p class="lede">Reusable mechanical components — screws, bearings, motors, and anything a user authors — placeable in one gesture, parametric where it matters, and honest about what happens when a definition is missing. Grounded in OneCAD's actual architecture and in what Fusion, SolidWorks, Onshape, and FreeCAD each got right and wrong.</p>
+    <div class="hero-meta">
+      <div><b>Scope</b>Concept &amp; UX, not code</div>
+      <div><b>Direction locked</b>Static + parametric · mate-like placement</div>
+      <div><b>Storage</b>Local now, registry-ready</div>
+      <div><b>Repo grounding</b>HEAD, 2026-08-12</div>
+    </div>
+  </div>
+</header>
+
+<nav class="toc">
+  <div class="wrap">
+    <a href="#why">Why</a>
+    <a href="#field">The field</a>
+    <a href="#model">Component model</a>
+    <a href="#placement">Placement decision</a>
+    <a href="#mates">Mates &amp; snapping</a>
+    <a href="#storage">Storage</a>
+    <a href="#parametric">Parametric engine</a>
+    <a href="#authoring">Authoring</a>
+    <a href="#templates">Templates</a>
+    <a href="#ui">The UI</a>
+    <a href="#phases">Phasing</a>
+    <a href="#questions">Open questions</a>
+  </div>
+</nav>
+
+<div class="wrap">
+
+<!-- ============ WHY ============ -->
+<section id="why">
+  <div class="sec-head"><span class="sec-num">01</span><h2>Why this, and why now</h2></div>
+  <p>OneCAD is at v0.1.0 with near-zero traction. The gap between a CAD tool and a CAD <em>workflow</em> is content: nobody wants to model an M8 socket-head screw, a 608 bearing, or a NEMA 17 stepper from scratch, and nobody wants to hunt one down on a website, download a STEP, import it, and then move-align-joint it into place. That friction is why every mainstream CAD ships or integrates a parts library — and why Shapr3D and Plasticity users file the same feature request year after year.</p>
+  <p>The timing is architectural, not just commercial. The platform refactor just landed, and a component library is the first feature that <strong>exercises every piece of it at once</strong>:</p>
+  <ul>
+    <li><strong>ADR-0002's ModelingService facade</strong> — the library must live behind it, proving the boundary is real.</li>
+    <li><strong>ADR-0003's controlled UI slots</strong> — the library panel is a slot contribution, not raw DOM.</li>
+    <li><strong>The sha256 content-addressed import-blob machinery</strong> already in <code>onecad-core/src/io/imports.rs</code> — a library store is the same idea at a larger scale.</li>
+    <li><strong>The background-tasks chip</strong> — which today has no producer. Library indexing and import are its first honest job.</li>
+    <li><strong>The start screen's ProjectCard anatomy</strong> — templates slot directly into it.</li>
+  </ul>
+  <div class="callout">
+    <span class="tag tag-acc">The core claim</span>
+    <p>A component library is not a content pack. It is the feature that turns OneCAD's topological-naming correctness spine from an internal virtue into a user-visible one: <strong>a placed library part that can never silently change shape is something SolidWorks Toolbox has failed to guarantee for twenty years.</strong> That is the pitch.</p>
+  </div>
+</section>
+
+<!-- ============ THE FIELD ============ -->
+<section id="field">
+  <div class="sec-head"><span class="sec-num">02</span><h2>What the field teaches</h2></div>
+  <p>Four archetypes dominate, and they split along exactly one axis: <strong>closed-but-polished vs. open-but-janky.</strong></p>
+
+  <table class="tbl">
+    <thead><tr><th>System</th><th>Parametric?</th><th>Insert-time alignment</th><th>Linkage</th><th>Signature failure</th></tr></thead>
+    <tbody>
+      <tr><td>Fusion 360 + McMaster</td><td class="n">No — dumb solid per part number</td><td class="n">None; drops in space, joint later</td><td class="n">None — one-shot import</td><td>Third-party CDN bug once served the wrong part for every insert</td></tr>
+      <tr><td>SolidWorks Toolbox</td><td class="y">Yes — configurations</td><td class="y">Best-in-class mate references, Smart Fasteners</td><td class="m">File reference to shared folder</td><td>Missing config → fastener <em>silently reverts to largest size</em> on another machine</td></tr>
+      <tr><td>Onshape Standard Content</td><td class="y">Yes — configs + Auto-Size</td><td class="y">Strongest: mate-connector snap, flip key, bulk/stack insert</td><td class="y">Live linked, versioned</td><td>Closed — users can't add their own parts with the same UX</td></tr>
+      <tr><td>FreeCAD Fasteners</td><td class="y">Yes — table-driven generators</td><td class="m">Attach to circular edge, auto-size from radius</td><td class="m">Live object, but file won't load without the WB</td><td>Portability: recipient must install the workbench or you bake to dumb solids</td></tr>
+      <tr><td>Shapr3D / Plasticity</td><td class="n" colspan="4" style="text-align:center">No library at all — Plasticity doesn't even have instances. The most-upvoted requests.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Patterns worth stealing outright</h3>
+  <div class="grid2">
+    <div class="card"><h4>Auto-Size (Onshape)</h4><p>Click a hole's circular edge → the library picks the nearest smaller bolt (rounds down for holes, up for shafts/nuts). Nobody wants to read a size table. FreeCAD does the same from edge radius.</p></div>
+    <div class="card"><h4>Mate-at-insert (Onshape / SolidWorks)</h4><p>Concentric + coincident created <em>by the insert gesture itself</em>, not as a follow-up command. Fusion's "drop in space, joint later" is the explicitly hated counter-example.</p></div>
+    <div class="card"><h4>Config via small dropdown set</h4><p>Size, length, thread detail — a handful of constrained choices in the insert dialog. Orientation flip on a single key (Onshape's <code>A</code>, SolidWorks' <code>Tab</code>).</p></div>
+    <div class="card"><h4>Bulk &amp; stack insertion</h4><p>Pre-select a planar face → fasten every hole on it in one gesture. Stack a washer + nut under an already-placed bolt. The common case is "populate N holes," and the tool should know it.</p></div>
+  </div>
+
+  <h3>Failure modes to design against</h3>
+  <div class="callout bad">
+    <span class="tag">The cardinal sin — silent geometry substitution</span>
+    <p>SolidWorks reverting a placed fastener to its largest size when a configuration is missing is the single most destructive failure in the field. OneCAD's answer must be structural: <strong>placed geometry is always cached locally, and a missing or changed definition surfaces <code>NeedsRepair</code> — never a silent swap.</strong> This is not a new idea for OneCAD; it is the project's founding invariant applied to a new surface.</p>
+  </div>
+  <ul>
+    <li><strong>Network fragility.</strong> Fusion's wrong-part CDN bug and Toolbox's VPN stalls both come from making the library a live external dependency. OneCAD's library is local-first and must work fully offline.</li>
+    <li><strong>All-or-nothing libraries.</strong> Every system forces "closed but polished" (Onshape) or "open but janky" (FreeCAD). The clearest market gap — requested explicitly by Onshape, Shapr3D, and Plasticity users — is <strong>first-class user libraries with the same insert UX as built-in content.</strong></li>
+    <li><strong>Timeline pollution.</strong> Fusion's capture-position clutter shows insertion must be a single atomic, undoable operation that drops only what the user picked.</li>
+  </ul>
+</section>
+
+<!-- ============ COMPONENT MODEL ============ -->
+<section id="model">
+  <div class="sec-head"><span class="sec-num">03</span><h2>The component model</h2></div>
+  <p>The direction is locked: <strong>static and parametric from day one.</strong> The design consequence is the most important sentence in this document — <strong>a static STEP solid and a parametric native definition are two kinds of the same Component concept.</strong> They share identity, metadata, parameters, attachments, and placement. They differ only in how geometry is produced.</p>
+
+  <h3>Anatomy of a Component</h3>
+  <pre><code><span class="cm">// component.toml — the manifest at the heart of every package</span>
+<span class="hl">[identity]</span>
+id        = <span class="str">"onecad.std.iso4762"</span>      <span class="cm">// stable, namespaced, never reused</span>
+version   = <span class="str">"1.0.0"</span>                  <span class="cm">// semver; drives opt-in upgrade</span>
+revision  = <span class="str">"sha256:9f2c…"</span>           <span class="cm">// content hash of the whole package</span>
+
+<span class="hl">[metadata]</span>
+name        = <span class="str">"Socket Head Cap Screw"</span>
+standard    = <span class="str">"ISO 4762"</span>
+designation = <span class="str">"ISO 4762 M{d}x{l}"</span>     <span class="cm">// BOM-ready string template</span>
+category    = [<span class="str">"fasteners"</span>, <span class="str">"socket-head"</span>]
+tags        = [<span class="str">"metric"</span>, <span class="str">"shcs"</span>, <span class="str">"cap-screw"</span>]
+
+<span class="hl">[source]</span>  <span class="cm">// exactly one of three kinds — see below</span>
+kind = <span class="str">"generator"</span>                  <span class="cm">// embedded | generator | document</span>
+
+<span class="hl">[parameters]</span>  <span class="cm">// the parametric signature — what a placed copy can vary</span>
+thread = { role = <span class="str">"free"</span>, key = <span class="str">"M6"</span>, domain = [<span class="str">"M3"</span>,<span class="str">"M4"</span>,<span class="str">"M5"</span>,<span class="str">"M6"</span>,<span class="str">"M8"</span>] }
+length = { role = <span class="str">"free"</span>, value = 20, snap = <span class="str">"preferred"</span> }   <span class="cm">// ISO 888 series</span>
+head_d = { role = <span class="str">"table"</span>, from = <span class="str">"iso4762.dk"</span> }            <span class="cm">// derived, locked</span>
+thread_detail = { role = <span class="str">"free"</span>, value = <span class="str">"cosmetic"</span> }       <span class="cm">// see §07</span>
+
+<span class="hl">[attachments]</span>  <span class="cm">// mate points — the platform feature, see §05</span>
+head_seat = { on = <span class="str">"face:head_underside"</span>, frame = <span class="str">"auto"</span>, accepts = [<span class="str">"plane"</span>] }
+shank_axis = { on = <span class="str">"cylinder:shank"</span>,    frame = <span class="str">"auto"</span>, accepts = [<span class="str">"cylinder"</span>, <span class="str">"hole"</span>] }</code></pre>
+
+  <h3>The three source kinds</h3>
+  <div class="grid3">
+    <div class="card">
+      <h4>Embedded</h4>
+      <p><span class="pill">static</span></p>
+      <p>A self-contained STEP/BREP blob, content-addressed by sha256 — the exact pattern already in <code>imports.rs</code>. Geometry is produced by reading the blob. This is how imported vendor parts and most user-dropped-in files work.</p>
+    </div>
+    <div class="card">
+      <h4>Generator</h4>
+      <p><span class="pill acc">parametric</span></p>
+      <p>A built-in, versioned recipe keyed by standard id (<code>iso4762</code>, <code>bearing.6200</code>, <code>nema.17</code>). Geometry is produced by running the generator through the existing worker op path with the instance's parameter values.</p>
+    </div>
+    <div class="card">
+      <h4>Document</h4>
+      <p><span class="pill good">user-authored</span></p>
+      <p>A reference to a frozen <code>.onecad</code> document. Geometry is produced by replaying that document's history with the instance's parameter overrides. This is how "Save as Component" works — see §08.</p>
+    </div>
+  </div>
+
+  <div class="callout good">
+    <span class="tag">Why one concept, not two features</span>
+    <p>If "static import" and "parametric standard part" were separate features, the UI would fork, placement would differ, and a user couldn't promote an imported STEP into a parametric family later. Unifying them means <strong>the panel, the search, the drag-to-place gesture, the mate snapping, and the instance machinery are built once</strong> and serve all three source kinds. The <code>source.kind</code> field is the only place the difference exists.</p>
+  </div>
+
+  <h3>Attachments — the part that makes it a platform</h3>
+  <p>A downloaded STEP file is dumb because it carries no placement intent. A OneCAD component declares <strong>attachments</strong>: named mate points, each with a local frame and a list of geometry types it accepts. This is the data that powers Onshape-style mate-snap, and it is what permanently separates a library part from a file on a website.</p>
+  <p>Critically, attachments are <strong>authored once by the library author</strong> (or inferred automatically for generator kinds — a screw's shank axis and head seat are known by construction) and <strong>consumed by every placement</strong>. The user placing the part never thinks about them; the part just snaps.</p>
+</section>
+
+<!-- ============ PLACEMENT DECISION ============ -->
+<section id="placement">
+  <div class="sec-head"><span class="sec-num">04</span><h2>The placement decision <span style="font-size:15px;color:var(--good);font-family:var(--mono);font-weight:500;margin-left:8px">— resolved</span></h2></div>
+  <p>This was the question left to the brainstorm: do placed components become ordinary document bodies (copy-in, like today's STEP import), or do they stay first-class, identifiable, editable things?</p>
+
+  <div class="versus">
+    <div class="opt">
+      <div class="opt-title">Copy bodies in</div>
+      <div class="opt-sub">like today's ImportStep</div>
+      <ul>
+        <li><strong>Simple.</strong> No new KnownOperation, no identity machinery, reuses the existing import path.</li>
+        <li><strong>Zero dependency.</strong> The document is fully self-contained the moment the bodies land.</li>
+        <li><strong>But:</strong> the part forgets what it is. No "change M6×20 → M8×30." No "replace all 8 screws with the flanged variant." No BOM identity. No answer when the library updates. It is Fusion's McMaster flow — the one users call "tedious" and "polluting."</li>
+      </ul>
+    </div>
+    <div class="vs">vs</div>
+    <div class="opt winner">
+      <div class="opt-title">First-class Instance</div>
+      <div class="opt-sub">a new Component op + cached geometry</div>
+      <ul>
+        <li><strong>Identity survives.</strong> The placed thing knows it is "ISO 4762 M6×20, instance #4." Parameters stay editable; replace-in-place is possible.</li>
+        <li><strong>Correctness-aligned.</strong> A missing/changed definition surfaces <code>NeedsRepair</code> — never SolidWorks' silent swap.</li>
+        <li><strong>Self-contained anyway.</strong> Placed geometry is cached locally, so a document opens with zero library dependency. Linkage is a convenience, not a requirement.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="verdict"><b>Decision: first-class Instance, geometry always cached.</b> The deciding argument is OneCAD's own founding invariant — <em>deterministic NeedsRepair beats a silent wrong bind</em>. That principle doesn't stop at sketch references; it is exactly the guarantee a parts library needs to avoid the field's worst failure. Copy-in is what you do when you don't trust your identity machinery. OneCAD built the machinery precisely so it never has to do copy-in.</div>
+
+  <h3>What this means concretely</h3>
+  <p>Under ADR-0002, a new <code>KnownOperation</code> variant is a <strong>built-in change, not an addon</strong> — which is correct here; the library is core product, not an extension. The recommended operation family (each a single atomic, undoable op, in keeping with the history-publication rules from the UX audit):</p>
+  <table class="tbl">
+    <thead><tr><th>Operation</th><th>Purpose</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td><code>PlaceComponent</code></td><td>Instantiate a library component into the document</td><td>Carries component id + version + revision, parameter values, an optional target attachment, and a TransformBody-style frozen-pivot placement. Publishes the cached geometry as its result.</td></tr>
+      <tr><td><code>SetComponentParams</code></td><td>Edit a placed instance's parameters</td><td>M6×20 → M8×30. Re-runs the generator / re-reads the resolved variant, re-publishes geometry, keeps identity and mates where still valid.</td></tr>
+      <tr><td><code>ReplaceComponent</code></td><td>Swap an instance to a different component</td><td>"All M6 SHCS → flanged button head." Mates re-resolve through the naming ladder; failures become NeedsRepair.</td></tr>
+      <tr><td><code>DetachComponent</code></td><td>Drop identity, keep geometry as ordinary bodies</td><td>The honest "break link" escape hatch — explicit, never silent. Result is exactly what copy-in would have produced, on demand.</td></tr>
+    </tbody>
+  </table>
+  <div class="callout">
+    <span class="tag tag-acc">Mates are a separate op tier</span>
+    <p>Instance placement does not require a full assembly-mate system to ship. <code>PlaceComponent</code> with a target attachment + frozen pivot stands on its own. Persistent, solving <em>mates</em> (concentricity that keeps working after the target moves) are a later, separable layer — see §05 and the phasing in §11. Do not let the mate system block the library.</p>
+  </div>
+</section>
+
+<!-- ============ MATES & SNAPPING ============ -->
+<section id="mates">
+  <div class="sec-head"><span class="sec-num">05</span><h2>Mates &amp; snapping — the placement UX</h2></div>
+  <p>The target is full mate-like placement: click a cylindrical face and a screw snaps concentric; click a planar face and it seats flush. The encouraging finding from the repo is that <strong>OneCAD already owns most of the machinery.</strong></p>
+
+  <div class="callout good">
+    <span class="tag">The reuse opportunity</span>
+    <p>OneCAD's <code>ElementRef</code> / <code>AnchorIntent</code> already carries a <code>localFrame</code> (origin + x/y/z basis) and <code>surface_uv</code> captured at selection time, and the resolution ladder already re-finds faces after upstream edits. A mate is, structurally, <strong>a pair of ElementRefs plus a transform constraint</strong> — which means mate snapping builds on the naming spine instead of inventing a parallel picking system.</p>
+  </div>
+
+  <h3>Attachment inference rules</h3>
+  <p>Placement snaps by <em>geometry type</em>, not by the user naming anything. When the user hovers geometry during a drag-place, the solver classifies the target and matches it against the dragged component's attachments:</p>
+  <table class="tbl">
+    <thead><tr><th>Hovered target</th><th>Component attachment it satisfies</th><th>Resulting snap</th></tr></thead>
+    <tbody>
+      <tr><td>Cylindrical face / hole bore</td><td><code>shank_axis</code> (accepts cylinder/hole)</td><td><strong>Concentric</strong> — component axis aligned to the cylinder axis, seated at the near end</td></tr>
+      <tr><td>Planar face</td><td><code>head_seat</code> (accepts plane)</td><td><strong>Flush / coincident</strong> — mating face coplanar, normal-aligned, at the pick point</td></tr>
+      <tr><td>Circular edge (hole rim)</td><td>both — axis + seat</td><td><strong>Concentric + coincident</strong> in one click; the preferred fastener gesture</td></tr>
+      <tr><td>Hole feature (from Hole op)</td><td><code>shank_axis</code> + auto-size</td><td>Snap concentric <em>and</em> set the size parameter to the nearest smaller standard size</td></tr>
+    </tbody>
+  </table>
+
+  <h3>The gesture, end to end</h3>
+  <ol>
+    <li><strong>Drag from the panel</strong> (or double-click). A live ghost of the component follows the cursor — uncommitted geometry, consistent with the modeling contract's "live result" state.</li>
+    <li><strong>Hover a target.</strong> The solver classifies it, finds the matching attachment, and previews the snap: axis line for concentric, a seating plane flash for flush, both for a hole rim.</li>
+    <li><strong>Auto-size on holes.</strong> Hovering a hole offers the nearest smaller standard size; the size chip updates live. (Onshape Auto-Size, FreeCAD edge-radius sizing.)</li>
+    <li><strong>Flip with a key</strong> — <code>A</code> flips orientation along the mate axis, <code>Tab</code> cycles alternative valid attachments when more than one matches.</li>
+    <li><strong>Click to commit.</strong> One atomic <code>PlaceComponent</code> lands: identity, parameters, frozen placement, cached geometry, and (if a target was snapped) the recorded attachment pair.</li>
+    <li><strong>Or drop in free space</strong> and position later with the Move tool — the fallback, never the required path.</li>
+  </ol>
+
+  <div class="callout warn">
+    <span class="tag">Honest constraint — picking &amp; face classification</span>
+    <p>The snap solver needs reliable surface classification (plane / cylinder / circular edge) on hover. OneCAD's ladder computes descriptors offline for refs; the interactive solver needs a fast, read-only variant of that classification on the render thread's pick result. This is real new work and the main technical risk in the placement UX — it is flagged as its own phase-0 spike in §11 rather than assumed away.</p>
+  </div>
+
+  <h3>Persistent mates — later, separable</h3>
+  <p>Snapping-at-insert is a solved problem with the machinery above. A <em>persistent</em> mate — where moving the target plate re-seats every screw in it — is a constraint solver over the attachment graph, and it is genuinely a v2 concern. The design keeps the door open: because <code>PlaceComponent</code> already records the attachment pair as ElementRefs, a future mate system reads them as constraints without re-authoring any placed part. Nothing done in v1 is thrown away.</p>
+</section>
+
+<!-- ============ STORAGE ============ -->
+<section id="storage">
+  <div class="sec-head"><span class="sec-num">06</span><h2>Storage — local now, registry-ready</h2></div>
+  <p>The direction: a local library that works fully offline, but with a package and identity format designed so a future curated community registry is <strong>additive, not a redesign.</strong></p>
+
+  <h3>The on-disk shape</h3>
+  <pre><code>~/OneCAD/library/
+├── library.json                 <span class="cm"># the index — IS the future registry manifest</span>
+├── onecad.std.iso4762/          <span class="cm"># one directory per component package</span>
+│   ├── component.toml           <span class="cm"># the manifest from §03</span>
+│   ├── tables/iso4762.json      <span class="cm"># dimension data (generator kinds)</span>
+│   └── preview.webp             <span class="cm"># thumbnail for the panel</span>
+├── onecad.std.bearing6200/
+│   └── …
+└── andrej.bracket-motor-mount/  <span class="cm"># a user-authored component</span>
+    ├── component.toml
+    ├── source.onecad            <span class="cm"># frozen document (document kind)</span>
+    └── preview.webp</code></pre>
+
+  <ul>
+    <li><strong>Package = directory.</strong> Each component is a self-describing folder. Sharing a component is zipping a folder; a registry is a hosted collection of the same folders behind the same manifest format.</li>
+    <li><strong>Content-addressed blobs.</strong> Geometry and STEP payloads reuse the existing sha256 pattern from <code>imports.rs</code> — a blob is stored once and referenced by hash, deduplicated across components, and integrity-checked on read.</li>
+    <li><strong>library.json is the index.</strong> It maps id → version → package path, and caches the search metadata. When a registry arrives, the index simply gains remote entries with a download-on-first-use cache — the local format never changes.</li>
+    <li><strong>Identity is namespaced from day one</strong> (<code>onecad.std.*</code> for built-ins, <code>&lt;user&gt;.*</code> for authored) so a future registry never has to reconcile collisions.</li>
+  </ul>
+
+  <div class="callout">
+    <span class="tag tag-acc">Registry = additive</span>
+    <p>Because identity is namespaced, packages are self-describing, and blobs are content-addressed, a registry is just <em>a remote library.json + a blob fetcher.</em> Nothing about local placement, caching, or NeedsRepair changes. The design deliberately spends a small amount of structure now to avoid a format break later — this is the "local-first, registry-designed-in" answer the direction called for.</p>
+  </div>
+
+  <h3>Integrity and trust</h3>
+  <p>Every package's <code>revision</code> is a content hash of the whole package. A placed instance records the id + version + revision it was placed from. On open, OneCAD verifies the local package still matches the recorded revision:</p>
+  <ul>
+    <li><strong>Match</strong> → the cached geometry is authoritative; nothing to do.</li>
+    <li><strong>Package missing or hash mismatch</strong> → the cached geometry still renders (the document is never broken), but the instance is flagged <code>NeedsRepair</code> with "component definition changed or unavailable" — the user chooses to adopt the new revision, locate the package, or detach. <strong>Never a silent swap.</strong></li>
+    <li><strong>New version available</strong> (same id, higher semver) → an opt-in "update available" affordance, per Onshape's versioned-link model. Upgrades are a user action, not an ambient event.</li>
+  </ul>
+</section>
+
+<!-- ============ PARAMETRIC ENGINE ============ -->
+<section id="parametric">
+  <div class="sec-head"><span class="sec-num">07</span><h2>The parametric engine</h2></div>
+  <p>The research converges on one pattern, proven by BOLTS and FreeCAD alike: <strong>separate dimension data (tables) from geometry generators (code).</strong> One row per nominal size, keyed by a canonical size string; a generator looks up the row and builds the B-rep. In OneCAD, generators are <strong>built-in and run through the existing worker op path</strong> — no new execution path, and emphatically no JavaScript on the kernel path.</p>
+
+  <h3>The parameter roles — who is allowed to change what</h3>
+  <p>From SolidWorks' Library Feature contract, the single best existing mental model for "parameters survive":</p>
+  <table class="tbl">
+    <thead><tr><th>Role</th><th>Meaning</th><th>Example (ISO 4762 M6×20)</th></tr></thead>
+    <tbody>
+      <tr><td><code>free</code></td><td>User-editable per placed instance</td><td><code>thread = M6</code>, <code>length = 20</code>, <code>thread_detail = cosmetic</code></td></tr>
+      <tr><td><code>table</code></td><td>Derived from the standard's dimension table, keyed by the free size — locked to the user</td><td><code>head_d = 10.0</code>, <code>head_h = 6.0</code>, <code>socket = 5.0</code></td></tr>
+      <tr><td><code>computed</code></td><td>Pure geometry, derived by formula</td><td>hex across-corners <code>e = 2s/√3</code>; partial-thread length <code>b = 2d+6</code> (l ≤ 125)</td></tr>
+    </tbody>
+  </table>
+  <p>The table key is the <strong>thread designation, not a raw diameter</strong> — an "M6 washer" has a 6.4 mm hole, so the key and the physical dimension must be different things. Length is free but constrained: snap to the ISO 888 preferred-length series and validate against the per-size minimum.</p>
+
+  <h3>The seed catalog — what's actually in the box</h3>
+  <div class="grid2">
+    <div class="card">
+      <h4>Fasteners — table-driven, BOLTS-seeded</h4>
+      <p>The highest-value, cleanest-licensing content. ISO 4762/DIN 912 socket cap, ISO 7380 button head, ISO 4014/4017 hex bolts, ISO 4032 nuts, ISO 7089/7093 washers — M2 through M12, the prosumer range.</p>
+      <ul><li>Dimension data seeded from <strong>BOLTS</strong> (LGPL, redistributable with notice) — see the licensing reality below.</li></ul>
+    </div>
+    <div class="card">
+      <h4>Bearings — pure lookup</h4>
+      <p>Deep-groove ball bearings per ISO 15. Only three dimensions matter for placement — bore, OD, width — fully determined by the bearing code (608 = 8×22×7). No parametric geometry needed; a stepped ring suffices.</p>
+    </div>
+    <div class="card">
+      <h4>Motors — NEMA frames</h4>
+      <p>NEMA 17 / 23 steppers: faceplate square, hole pattern, pilot Ø/height, shaft Ø/length are fixed; body length is a free per-instance value (it scales with torque). The four mounting dimensions are what placement needs.</p>
+    </div>
+    <div class="card">
+      <h4>The extension point</h4>
+      <p>Each generator is a small, versioned module declaring its table schema and build function. Adding ISO 4026 set screws or 625 bearings is adding a table + a recipe, not a new system.</p>
+    </div>
+  </div>
+
+  <h3>Threads — cosmetic by default, helical when it counts</h3>
+  <p>Mainstream CAD defaults to cosmetic threads for measured reasons: a true helical sweep is one of the most expensive features in a kernel (~7s vs ~0s per part in SolidWorks benchmarks, 60k+ triangles vs ~0), and machined threads are manufactured from the <em>callout</em>, not the solid. OneCAD should ship three detail levels, settable per instance via the <code>thread_detail</code> parameter:</p>
+  <ul>
+    <li><strong>Cosmetic</strong> (default) — a cylinder at pitch diameter plus the designation metadata. Assembly-safe, fast, and the BOM still reads "ISO 4762 M6×20."</li>
+    <li><strong>Simplified</strong> — annular grooves at the pitch, for visual weight without the sweep cost.</li>
+    <li><strong>Modeled</strong> — true helical ISO 68-1 profile, reserved for 3D-print-ready output. Opt-in, per instance, never the default.</li>
+  </ul>
+
+  <div class="callout warn">
+    <span class="tag">The licensing reality — what can actually ship in the box</span>
+    <p>This is where the research gets blunt. <strong>McMaster-Carr, GrabCAD, Misumi, SKF, and 3D ContentCentral all prohibit bundling</strong> — their models are "design-in only," no redistribution, and McMaster litigates to protect its catalog data. The one mature, legally bundleable dataset is <strong>BOLTS</strong> (~80 part classes, ISO/DIN/EN/ASME, LGPL 2.1+ with per-part license tracking) — fasteners-heavy and semi-dormant, but the dimension tables are exactly the seed the generator needs. FreeCAD's Fasteners tables are richer but GPLv2 today (an LGPL relicense is endorsed but unfinished). For everything beyond fasteners — bearings, motors, vendor-specific parts — the honest paths are <strong>table-driven models OneCAD authors itself</strong> (bearings, NEMA motors) and, later, a <strong>TraceParts API partnership</strong> (the one channel explicitly built for third-party CAD apps, with attribution) or user-credentialed McMaster API access. The built-in box ships clean: BOLTS-seeded fasteners + self-authored bearing/motor tables. No scraped content, ever.</p>
+  </div>
+</section>
+
+<!-- ============ AUTHORING ============ -->
+<section id="authoring">
+  <div class="sec-head"><span class="sec-num">08</span><h2>Authoring — "Save as Component"</h2></div>
+  <p>The market gap the research kept surfacing: every system is either closed-polished or open-janky, and Onshape users' #1 request is <em>their own parts with the built-in UX.</em> OneCAD's answer: a user captures any body or selection as a first-class component that lives in the same panel, searches the same way, and snaps with the same placement machinery as built-in content.</p>
+
+  <h3>The capture flow</h3>
+  <ol>
+    <li><strong>Select and invoke.</strong> Right-click a body (or a history subtree) → <em>Save as Component</em>.</li>
+    <li><strong>Declare the parameters.</strong> OneCAD lists the driving dimensions of the selection; the author assigns each a role — <code>free</code> (user can change at placement), <code>table</code>-like locked, or placement — the SolidWorks Locating/Internal/Size split, applied to whole parts.</li>
+    <li><strong>Place attachments.</strong> The author clicks faces/edges to define mate points ("this face seats," "this is the shaft axis"). OneCAD stores them as local frames on named geometry. This is the 60 seconds of work that makes the component snap forever after.</li>
+    <li><strong>Name, categorize, thumbnail.</strong> A viewport snapshot becomes the preview; the author sets id (<code>andrej.motor-mount</code>), category, and tags.</li>
+    <li><strong>Save.</strong> The document is frozen and written as a <code>source.onecad</code> package. It appears in the panel immediately, indistinguishable from built-ins except a "mine" badge.</li>
+  </ol>
+
+  <div class="callout good">
+    <span class="tag">Why parameters survive here when they don't in Fusion</span>
+    <p>Fusion's pain — consumers can't drive a linked component's parameters per-instance — comes from its parameters living in a foreign file. A OneCAD document-kind component replays <em>its own history</em> with the instance's parameter overrides, so parameterization is total by construction, like Onshape's FeatureScript but without asking the author to write code. The author captures a model; the parameter roles decide what stays adjustable.</p>
+  </div>
+
+  <h3>Authoring guardrails</h3>
+  <ul>
+    <li><strong>Validation at save, not at first use.</strong> A component with no attachments gets a gentle prompt ("add a mate point so it snaps into place"), not a hard error. A component whose parameters don't drive the geometry fails validation with a specific reason.</li>
+    <li><strong>The solid-only constraint is honored.</strong> OneCAD's publication policy is solid-like (single-solid at the top level, <code>single_solid_policy</code> in <code>ShapeAudit.cpp</code>). A multi-body capture is offered a choice: union into one solid, pick the primary body, or save as separate components. This constraint is stated honestly rather than discovered by the user at placement time.</li>
+    <li><strong>Versioning is automatic.</strong> Re-saving a component bumps its semver; existing placed instances keep their recorded revision and offer opt-in upgrade — never an ambient change.</li>
+  </ul>
+</section>
+
+<!-- ============ TEMPLATES ============ -->
+<section id="templates">
+  <div class="sec-head"><span class="sec-num">09</span><h2>Project templates</h2></div>
+  <p>Templates are the same idea as components, one level up: a frozen <code>.onecad</code> document offered as a starting point. The SolidWorks model is the proven one — a template is just a document that can contain starting geometry, units, and settings, offered in a picker at New.</p>
+
+  <p>The repo makes this nearly free: the start screen already has a <code>ProjectCard</code> / <code>RecentGrid</code> anatomy. Templates become a <strong>"New from template" row above the recent-projects grid</strong> — same card shape, same hover, but each card is a template. Choosing one instantiates a copy as a new untitled project; the template itself is immutable.</p>
+
+  <ul>
+    <li><strong>A template is stored as a package in the same library root</strong> (<code>templates/</code> instead of a component folder), so the same storage, integrity, and future-registry mechanics apply.</li>
+    <li><strong>Ship 3–5 honest starters:</strong> Blank, 3D-printer part (mm, XY-on-bed datum, print-oriented defaults), NEMA motor mount plate, enclosure base. Each is a real, useful starting point, not a demo.</li>
+    <li><strong>"Save as Template"</strong> sits beside "Save as Component" — a user turns any project into a reusable starting point with one action.</li>
+    <li><strong>Templates and components compose:</strong> a template can itself contain placed components, which resolve through the normal instance machinery.</li>
+  </ul>
+</section>
+
+<!-- ============ UI ============ -->
+<section id="ui">
+  <div class="sec-head"><span class="sec-num">10</span><h2>The UI surface</h2></div>
+  <p>Per ADR-0003, this is a <strong>slot contribution, not raw DOM</strong> — the host owns the panel frame, resizing, focus, and theme; the library owns only its content. This is also where the library pays down two debts the platform refactor left behind.</p>
+
+  <h3>The Library panel</h3>
+  <div class="grid2">
+    <div class="card">
+      <h4>Placement &amp; structure</h4>
+      <p>A <code>shell.left</code> contribution, sibling to the tree. Top: a search field with filter chips (category, standard, "mine"). Body: a category tree (Fasteners → Socket Head → ISO 4762) with a card grid of thumbnails. Each card shows name, designation preview, and a source badge (<span class="pill acc">parametric</span> <span class="pill">static</span> <span class="pill good">mine</span>).</p>
+    </div>
+    <div class="card">
+      <h4>Insert interaction</h4>
+      <p><strong>Drag onto the viewport</strong> → the placement gesture from §05 (ghost, snap preview, flip, auto-size). <strong>Double-click</strong> → place at origin with the parameter popover open. Selecting a card opens a small configurator: the <code>free</code> parameters as a compact dropdown set, a live 3D preview, and the resulting designation string updating in real time.</p>
+    </div>
+  </div>
+
+  <h3>Two platform debts, paid</h3>
+  <ul>
+    <li><strong>The background-tasks chip finally gets a producer.</strong> Indexing the library, importing a package, and generating a modeled-thread preview are exactly the begin/setProgress/end work the chip was built for and currently has no caller for. The library is its first honest job.</li>
+    <li><strong>The instance is a first-class history node.</strong> Consistent with the modeling UX audit's demand that Pattern/Mirror/Boolean publish as uniquely-named editable history nodes — a placed component appears in history as "ISO 4762 M6×20" with its parameters and output lineage, editable like any other operation. No inert, invisible insertions.</li>
+  </ul>
+
+  <div class="callout">
+    <span class="tag tag-acc">Consistency with the modeling contract</span>
+    <p>The whole flow obeys the OneCAD Modeling Contract the UX audit called for — Awaiting input (dragging, no target) → Live result (ghost + snap preview) → Valid/invalid (snap target found / not) → Commit (click) → Discard (Esc). Numeric entry in the configurator follows the same routing rules as every other tool: type to the primary value, every keystroke previews, Enter applies, blur never required. The library should be the <em>first feature built natively on the contract</em>, not another exception to it.</p>
+  </div>
+</section>
+
+<!-- ============ PHASING ============ -->
+<section id="phases">
+  <div class="sec-head"><span class="sec-num">11</span><h2>Phasing — how to build it without boiling the ocean</h2></div>
+  <p>The ambition (static + parametric, mate-like placement, authoring, templates) is large, so sequencing is everything. The rule: <strong>each phase ships something usable, and no phase's work is thrown away by a later one.</strong></p>
+
+  <div class="phase">
+    <div class="phase-head"><span class="ph-id">P0</span><span class="ph-name">Foundation spike — pick &amp; classify</span><span class="ph-tag">de-risk first</span></div>
+    <div class="phase-body"><ul>
+      <li>Prove the interactive surface classification (plane / cylinder / circular edge) on a hovered pick, read-only, fast enough for live preview.</li>
+      <li>Prove a generator kind end-to-end with one hard-coded fastener (ISO 4762, M6 only) through the worker op path.</li>
+      <li>Outcome is a go/no-go on the placement UX, not a feature.</li>
+    </ul></div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><span class="ph-id">P1</span><span class="ph-name">Static library + place-at-target</span><span class="ph-tag">first shippable value</span></div>
+    <div class="phase-body"><ul>
+      <li>Library root + component.toml + library.json index; Embedded (STEP) source kind only.</li>
+      <li><code>PlaceComponent</code> + <code>DetachComponent</code>; cached geometry; revision verification → NeedsRepair on mismatch.</li>
+      <li>shell.left panel with search + drag-to-place; concentric/flush snap on hover; flip key. Auto-size on holes.</li>
+      <li>Background-tasks chip wired to indexing. Seed with self-authored static bearings + NEMA motors.</li>
+    </ul></div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><span class="ph-id">P2</span><span class="ph-name">Parametric fasteners</span><span class="ph-tag">the differentiator</span></div>
+    <div class="phase-body"><ul>
+      <li>Generator source kind, general; table/generator split; BOLTS-seeded ISO fastener tables (4762, 7380, 4014/4017, 4032, 7089/7093).</li>
+      <li><code>SetComponentParams</code> — edit a placed instance's size/length. Parameter roles enforced in the configurator.</li>
+      <li>Three-level thread detail, cosmetic default. Auto-size now sets the free size parameter.</li>
+    </ul></div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><span class="ph-id">P3</span><span class="ph-name">Authoring + templates</span><span class="ph-tag">the market gap</span></div>
+    <div class="phase-body"><ul>
+      <li>Document source kind; "Save as Component" with parameter-role declaration and attachment placement.</li>
+      <li>"Save as Template" + the start-screen "New from template" row on the ProjectCard anatomy; ship 3–5 starters.</li>
+      <li><code>ReplaceComponent</code>; opt-in version upgrade on placed instances.</li>
+    </ul></div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><span class="ph-id">P4</span><span class="ph-name">Persistent mates + registry</span><span class="ph-tag">v2, separable</span></div>
+    <div class="phase-body"><ul>
+      <li>A mate solver over the recorded attachment pairs — moving a plate re-seats its screws.</li>
+      <li>The community registry as a remote library.json + blob fetcher; publish/share flows; TraceParts partnership exploration.</li>
+    </ul></div>
+  </div>
+</section>
+
+<!-- ============ OPEN QUESTIONS ============ -->
+<section id="questions">
+  <div class="sec-head"><span class="sec-num">12</span><h2>Open questions, with recommendations</h2></div>
+  <p>The decisions above are the ones the brainstorm resolves. These are the ones it surfaces — each with a recommendation so the next conversation starts from a position, not a blank page.</p>
+
+  <div class="q">
+    <div class="q-title">Does PlaceComponent belong in KnownOperation, or is it a higher-level "placement" construct?</div>
+    <p>ADR-0002 keeps KnownOperation a closed typed enum — a new variant is a built-in change. The alternative is modeling placement as a composition of existing ops (import + transform) with library metadata attached, avoiding a new variant but weakening identity.</p>
+    <p class="rec">→ Recommend a real KnownOperation family. Identity is the whole point; a composition of generic ops would make "is this body a library component?" an inference instead of a fact — the same mistake copy-in makes, one layer down.</p>
+  </div>
+
+  <div class="q">
+    <div class="q-title">How do placed instances interact with the single-solid publication policy?</div>
+    <p>Today the audit enforces a solid-like top level. A placed component is one solid, so it's compatible — but a future "placed subassembly" (a motor with its connector) is a compound. Does the policy grow a tier, or do compounds stay out of scope?</p>
+    <p class="rec">→ Recommend keeping v1 strictly single-solid. Multi-body content is authored as separate components or unioned. Revisit only when persistent mates (P4) exist to give a compound meaning.</p>
+  </div>
+
+  <div class="q">
+    <div class="q-title">Who authors the built-in generator tables, and how are they verified?</div>
+    <p>BOLTS seeds the data, but its tables need auditing before they drive geometry. Wrong dimensions in a standard part are worse than no part.</p>
+    <p class="rec">→ Recommend treating each table as a reviewed data file with a spot-check harness (assert dk, k, s against a reference source per size), and generating kernelbench-style robustness cases from the table extremes — the harness already exists and this is exactly its job.</p>
+  </div>
+
+  <div class="q">
+    <div class="q-title">Does the registry wait for traction, or is the format commitment made now?</div>
+    <p>The design makes the registry additive, but committing to a stable package/manifest format is itself a constraint on future freedom.</p>
+    <p class="rec">→ Recommend committing to the format now (it's cheap and enables sharing-by-folder immediately) but not building any hosted registry until there's a user base to put in it. The format is the promise; the service is the later bet.</p>
+  </div>
+
+  <div class="q">
+    <div class="q-title">Is interactive face classification fast enough for live snap preview?</div>
+    <p>The single real technical risk in the placement UX — the reason P0 exists.</p>
+    <p class="rec">→ Recommend the P0 spike answer this with a number before any placement UI is built. If classification is too slow on hover, the fallback is click-to-classify-then-preview, which is slightly heavier but still far ahead of Fusion's drop-and-joint.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div>OneCAD · Component Library design brainstorm<br>Concept &amp; UX — no code</div>
+    <div style="text-align:right">Grounded in the repo at HEAD (2026-08-12)<br>and field research across Fusion · SolidWorks · Onshape · FreeCAD</div>
+  </div>
+</footer>
+
+</div>
+<script>
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape' && window.parent !== window) {
+    window.parent.postMessage({ type: 'close-fullscreen' }, '*');
+  }
+});
+</script>
+<!-- broken-img-handler -->
+<script>
+(function(){
+  if(window.__brokenImgHandler)return;
+  window.__brokenImgHandler=true;
+  var MAX=5,DELAYS=[2000,4000,8000,16000,32000];
+  document.addEventListener('error',function(e){
+    var img=e.target;
+    if(!img||img.tagName!=='IMG')return;
+    var liveSrc=img.getAttribute('src');
+    var src=img.dataset.haOriginalSrc||liveSrc;
+    if(!src)return;
+    if(img.dataset.haOriginalSrc&&liveSrc&&liveSrc!==img.dataset.haOriginalSrc&&liveSrc.indexOf('_r=')<0){src=liveSrc;img.dataset.haOriginalSrc=src;img.dataset.haRetryCount='0'}
+    else if(!img.dataset.haOriginalSrc){img.dataset.haOriginalSrc=src}
+    var attempt=parseInt(img.dataset.haRetryCount||'0',10);
+    if(img.dataset.haPhId){var old=document.getElementById(img.dataset.haPhId);if(old)old.remove()}
+    var ph=document.createElement('div');
+    ph.className='ha-img-placeholder'+(attempt>=MAX?' ha-failed':'');
+    ph.id='ha-ph-'+Math.random().toString(36).slice(2,9);
+    var w=img.getAttribute('width');var h=img.getAttribute('height');
+    if(w)ph.style.width=w+(isNaN(Number(w))?'':'px');
+    else if(img.style.width)ph.style.width=img.style.width;
+    else if(img.width>1)ph.style.width=img.width+'px';
+    if(h)ph.style.height=h+(isNaN(Number(h))?'':'px');
+    else if(img.style.height)ph.style.height=img.style.height;
+    else if(img.height>1)ph.style.height=img.height+'px';
+    ph.textContent=attempt>=MAX?'Image unavailable':'Loading image\u2026';
+    img.dataset.haPhId=ph.id;
+    if(img.dataset.haOrigDisplay==null)img.dataset.haOrigDisplay=img.style.display||'';
+    img.style.display='none';
+    img.insertAdjacentElement('afterend',ph);
+    if(attempt<MAX){
+      img.dataset.haRetryCount=String(attempt+1);
+      setTimeout(function(){
+        if(!img.isConnected)return;
+        if(img.dataset.haOriginalSrc!==src)return;
+        if(img.complete&&img.naturalWidth>0)return;
+        var curSrc=img.getAttribute('src');
+        if(curSrc&&curSrc.indexOf(src)!==0)return;
+        var fresh=src+(src.indexOf('?')>=0?'&':'?')+'_r='+(attempt+1)+'_'+Date.now();
+        img.src=fresh;
+      },DELAYS[attempt]);
+    }
+  },true);
+  document.addEventListener('load',function(e){
+    var img=e.target;
+    if(!img||img.tagName!=='IMG')return;
+    if(img.dataset.haPhId){
+      var ph=document.getElementById(img.dataset.haPhId);
+      if(ph)ph.remove();
+      delete img.dataset.haPhId;
+      img.style.display=img.dataset.haOrigDisplay||'';
+      delete img.dataset.haOrigDisplay;
+      delete img.dataset.haOriginalSrc;
+      delete img.dataset.haRetryCount;
+    }
+  },true);
+})();
+</script>
+</body>
+</html>
