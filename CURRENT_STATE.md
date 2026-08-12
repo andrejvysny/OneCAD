@@ -1,3 +1,37 @@
+## COMPONENT LIBRARY — LIVE DELTA (2026-08-12, session 12, WP-2.5)
+
+Branch `OneCAD-Component-Library` (worktree), on top of `6d26b57` (P0–P2.4 +
+start-screen browser, already committed). This session landed **WP-2.5**:
+`thread_detail` (`cosmetic`/`simplified`/`modeled`, spec §6.4) on the ISO
+4762 generator, worker+Rust-table only — the configurator UI built in
+WP-2.4 already renders the new domain-enum free param generically, zero
+frontend logic changed.
+
+Files touched: `worker/src/ops/ComponentOp.{h,cpp}` (new `pitch_mm` column,
+`ThreadDetail` dispatch, `cut_simplified_thread`/`cut_modeled_thread`),
+`worker/tests/test_component_ops.cpp` (+5 assertions), `onecad-library::
+tables.rs` (`pitch_mm` column + cross-pin test widened),
+`src-tauri/src/library.rs` (test fixture gained `thread_detail`),
+`src/ipc/mockClient.ts` (`MOCK_LIBRARY_FIXTURE.parameters` gained
+`thread_detail`).
+
+Real defect found and fixed in passing: a helical edge built via
+`BRepBuilderAPI_MakeEdge(Geom2d_Curve, Geom_Surface, ...)` has no 3D
+approximation curve by default, which `BRepOffsetAPI_MakePipeShell::Build()`
+needs — the missing curve raised `Standard_NullObject` with an empty
+message, silently, deep inside OCCT. Fixed with `BRepLib::BuildCurves3d`.
+
+Deferred, not built here: the StatusSection modeled-thread progress
+producer (no async-task API exists in this codebase yet) and the
+kernelbench table-extremes suite (already named **WP-2.6**).
+`component.toml` stays test-fixture-only (Q4, still open).
+
+Gate: worker ctest 114/114 · `cargo fmt`/`clippy -D warnings` clean ·
+`cargo test -p onecad-library` 28/28 · `ONECAD_REQUIRE_WORKER=1 cargo test
+--workspace` green except the same 2 pre-existing failures every prior
+WP-2.x gate reconfirms (`sketch_on_face`, `wire_contract`) · `tsc` clean ·
+vitest 245/4154 (unchanged) · Playwright 396/396 (unchanged, 0 regressions).
+
 ## COMPONENT LIBRARY — LIVE DELTA (2026-08-12, session 11, start-screen browser)
 
 Branch `OneCAD-Component-Library` (worktree), uncommitted on top of session

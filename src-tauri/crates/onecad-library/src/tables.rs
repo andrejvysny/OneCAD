@@ -17,6 +17,11 @@
 //! spec §6.2's seed range M2–M12 (BOLTS' own table runs M1.4–M64, but
 //! M1.4/M1.8 carry `None` for `t_min`/`b` at that source — out of the
 //! spec-stated range, not worth engineering around here).
+//!
+//! `pitch_mm` (WP-2.5, spec §6.4 `thread_detail`) is a DIFFERENT provenance
+//! than the rest of this table: the ISO 261 coarse-pitch series, a public
+//! numeric standard, not BOLTS data — hand-transcribed, not subject to
+//! `THIRD_PARTY_NOTICES`.
 
 /// One ISO 4762 / DIN 912 size row, BOLTS column names verbatim.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -36,6 +41,9 @@ pub struct Iso4762Row {
     /// Full-thread length threshold — shafts at or below this nominal length
     /// thread all the way (mm).
     pub l: f64,
+    /// ISO 261 coarse-pitch series (mm) — a different provenance than the
+    /// rest of this row, see the module doc comment.
+    pub pitch_mm: f64,
 }
 
 /// `(thread designation, row)` pairs, spec §6.2's seed range (M2–M12).
@@ -50,6 +58,7 @@ const ISO4762_ROWS: &[(&str, Iso4762Row)] = &[
             s: 1.5,
             t_min: 1.0,
             l: 20.0,
+            pitch_mm: 0.40,
         },
     ),
     (
@@ -62,6 +71,7 @@ const ISO4762_ROWS: &[(&str, Iso4762Row)] = &[
             s: 2.0,
             t_min: 1.1,
             l: 25.0,
+            pitch_mm: 0.45,
         },
     ),
     (
@@ -74,6 +84,7 @@ const ISO4762_ROWS: &[(&str, Iso4762Row)] = &[
             s: 2.5,
             t_min: 1.3,
             l: 20.0,
+            pitch_mm: 0.50,
         },
     ),
     (
@@ -86,6 +97,7 @@ const ISO4762_ROWS: &[(&str, Iso4762Row)] = &[
             s: 3.0,
             t_min: 2.0,
             l: 25.0,
+            pitch_mm: 0.70,
         },
     ),
     (
@@ -98,6 +110,7 @@ const ISO4762_ROWS: &[(&str, Iso4762Row)] = &[
             s: 4.0,
             t_min: 2.5,
             l: 25.0,
+            pitch_mm: 0.80,
         },
     ),
     (
@@ -110,6 +123,7 @@ const ISO4762_ROWS: &[(&str, Iso4762Row)] = &[
             s: 5.0,
             t_min: 3.0,
             l: 30.0,
+            pitch_mm: 1.00,
         },
     ),
     (
@@ -122,6 +136,7 @@ const ISO4762_ROWS: &[(&str, Iso4762Row)] = &[
             s: 6.0,
             t_min: 4.0,
             l: 35.0,
+            pitch_mm: 1.25,
         },
     ),
     (
@@ -134,6 +149,7 @@ const ISO4762_ROWS: &[(&str, Iso4762Row)] = &[
             s: 8.0,
             t_min: 5.0,
             l: 40.0,
+            pitch_mm: 1.50,
         },
     ),
     (
@@ -146,6 +162,7 @@ const ISO4762_ROWS: &[(&str, Iso4762Row)] = &[
             s: 10.0,
             t_min: 6.0,
             l: 50.0,
+            pitch_mm: 1.75,
         },
     ),
 ];
@@ -227,22 +244,23 @@ mod tests {
     }
 
     // Pins the two copies (worker C++, this Rust table) to the SAME values
-    // for the fields the worker's generator actually consumes (d1/d2/k) —
-    // a future edit to one copy without the other now fails loud here.
+    // for the fields the worker's generator actually consumes (d1/d2/k,
+    // and pitch_mm since WP-2.5) — a future edit to one copy without the
+    // other now fails loud here.
     #[test]
     fn geometry_fields_agree_with_the_worker_table_across_the_seed_range() {
-        let expected_worker_side: &[(&str, f64, f64, f64)] = &[
-            ("M2", 3.8, 2.0, 2.0),
-            ("M2.5", 4.5, 2.5, 2.5),
-            ("M3", 5.5, 3.0, 3.0),
-            ("M4", 7.0, 4.0, 4.0),
-            ("M5", 8.5, 5.0, 5.0),
-            ("M6", 10.0, 6.0, 6.0),
-            ("M8", 13.0, 8.0, 8.0),
-            ("M10", 16.0, 10.0, 10.0),
-            ("M12", 18.0, 12.0, 12.0),
+        let expected_worker_side: &[(&str, f64, f64, f64, f64)] = &[
+            ("M2", 3.8, 2.0, 2.0, 0.40),
+            ("M2.5", 4.5, 2.5, 2.5, 0.45),
+            ("M3", 5.5, 3.0, 3.0, 0.50),
+            ("M4", 7.0, 4.0, 4.0, 0.70),
+            ("M5", 8.5, 5.0, 5.0, 0.80),
+            ("M6", 10.0, 6.0, 6.0, 1.00),
+            ("M8", 13.0, 8.0, 8.0, 1.25),
+            ("M10", 16.0, 10.0, 10.0, 1.50),
+            ("M12", 18.0, 12.0, 12.0, 1.75),
         ];
-        for (thread, d2, k, d1) in expected_worker_side {
+        for (thread, d2, k, d1, pitch_mm) in expected_worker_side {
             let row = Iso4762Table::row(thread)
                 .unwrap_or_else(|| panic!("{thread} missing from Rust-side table"));
             assert_eq!(
@@ -256,6 +274,10 @@ mod tests {
             assert_eq!(
                 row.d1, *d1,
                 "{thread} d1 (shank diameter) mismatch vs worker table"
+            );
+            assert_eq!(
+                row.pitch_mm, *pitch_mm,
+                "{thread} pitch_mm mismatch vs worker table"
             );
         }
     }

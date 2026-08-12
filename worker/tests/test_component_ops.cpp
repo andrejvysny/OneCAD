@@ -64,6 +64,17 @@ json identity_placement() {
     return json{{"translate", {0.0, 0.0, 0.0}}};
 }
 
+// WP-2.5: a generator source additionally carrying `params.thread_detail`.
+json generator_source_detailed(const std::string& thread, double length_mm,
+                               const std::string& thread_detail,
+                               const std::string& generator_id = "iso4762") {
+    return json{{"kind", "generator"},
+                {"generatorId", generator_id},
+                {"generatorVersion", 1},
+                {"params",
+                 {{"thread", thread}, {"length", length_mm}, {"thread_detail", thread_detail}}}};
+}
+
 // ── A generator-source PlaceComponent mints one body of the exact M6 SHCS volume. ─
 void test_place_component_generator_source_exact_volume() {
     BodyStore bodies;
@@ -258,6 +269,119 @@ void test_place_component_empty_generator_id_fails_loud() {
           "placeComponent: empty generatorId → OP_FAILED");
 }
 
+// ── WP-2.5: `thread_detail: "cosmetic"` explicit matches the DEFAULT (absent)
+// path exactly — proves the new param doesn't change cosmetic behavior. ──────────
+void test_place_component_thread_detail_cosmetic_matches_default() {
+    BodyStore bodies;
+    onecad::elementmap::ElementMapPartition part;
+    json op = {{"opType", "PlaceComponent"}, {"opId", "opc10"},
+               {"params", {{"componentId", "onecad.std.iso4762"},
+                           {"componentVersion", "1.0.0"},
+                           {"componentRevision", "sha256:" + std::string(64, '0')},
+                           {"source", generator_source_detailed("M6", 20.0, "cosmetic")},
+                           {"placement", identity_placement()}}}};
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    ops::OpOutcome oc = ops::execute_place_component(ctx, op, "opc10");
+    check(oc.status == ops::OpOutcome::Status::Ok, "placeComponent(cosmetic explicit): Ok");
+    const onecad::session::BodyRecord* rec = bodies.get("body_opc10");
+    check(rec != nullptr, "placeComponent(cosmetic explicit): body published");
+    if (rec != nullptr) {
+        check_near(vol(rec->geom), kM6ShcsVolume, 1.0,
+                   "placeComponent(cosmetic explicit): matches default-path volume exactly");
+    }
+}
+
+// ── WP-2.5: `simplified` cuts real material out of the shank, but stays close
+// to the blank (shallow grooves, not a gutted shank). ─────────────────────────────
+void test_place_component_thread_detail_simplified_removes_material() {
+    BodyStore bodies;
+    onecad::elementmap::ElementMapPartition part;
+    json op = {{"opType", "PlaceComponent"}, {"opId", "opc11"},
+               {"params", {{"componentId", "onecad.std.iso4762"},
+                           {"componentVersion", "1.0.0"},
+                           {"componentRevision", "sha256:" + std::string(64, '0')},
+                           {"source", generator_source_detailed("M6", 20.0, "simplified")},
+                           {"placement", identity_placement()}}}};
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    ops::OpOutcome oc = ops::execute_place_component(ctx, op, "opc11");
+    check(oc.status == ops::OpOutcome::Status::Ok, "placeComponent(simplified M6x20): Ok");
+    const onecad::session::BodyRecord* rec = bodies.get("body_opc11");
+    check(rec != nullptr, "placeComponent(simplified M6x20): body published");
+    if (rec != nullptr) {
+        const double v = vol(rec->geom);
+        check(v < kM6ShcsVolume - 1.0,
+              "placeComponent(simplified M6x20): grooves remove material vs the cosmetic blank");
+        check(v > kM6ShcsVolume * 0.5,
+              "placeComponent(simplified M6x20): grooves are shallow, not gutting the shank");
+    }
+}
+
+// ── WP-2.5: `modeled` cuts a true helical thread — real material removed, at
+// both a mid-range pitch (M6) and the seed range's tightest pitch (M2, 0.4mm),
+// the case most likely to stress `BRepOffsetAPI_MakePipeShell`. ───────────────────
+void test_place_component_thread_detail_modeled_removes_material() {
+    BodyStore bodies;
+    onecad::elementmap::ElementMapPartition part;
+    json op = {{"opType", "PlaceComponent"}, {"opId", "opc12"},
+               {"params", {{"componentId", "onecad.std.iso4762"},
+                           {"componentVersion", "1.0.0"},
+                           {"componentRevision", "sha256:" + std::string(64, '0')},
+                           {"source", generator_source_detailed("M6", 20.0, "modeled")},
+                           {"placement", identity_placement()}}}};
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    ops::OpOutcome oc = ops::execute_place_component(ctx, op, "opc12");
+    check(oc.status == ops::OpOutcome::Status::Ok, "placeComponent(modeled M6x20): Ok");
+    const onecad::session::BodyRecord* rec = bodies.get("body_opc12");
+    check(rec != nullptr, "placeComponent(modeled M6x20): body published");
+    if (rec != nullptr) {
+        const double v = vol(rec->geom);
+        check(v < kM6ShcsVolume - 1.0,
+              "placeComponent(modeled M6x20): helical cut removes material vs the cosmetic blank");
+        check(v > kM6ShcsVolume * 0.5,
+              "placeComponent(modeled M6x20): thread is shallow, not gutting the shank");
+    }
+}
+
+void test_place_component_thread_detail_modeled_m2_smallest_pitch_succeeds() {
+    BodyStore bodies;
+    onecad::elementmap::ElementMapPartition part;
+    json op = {{"opType", "PlaceComponent"}, {"opId", "opc13"},
+               {"params", {{"componentId", "onecad.std.iso4762"},
+                           {"componentVersion", "1.0.0"},
+                           {"componentRevision", "sha256:" + std::string(64, '0')},
+                           {"source", generator_source_detailed("M2", 16.0, "modeled")},
+                           {"placement", identity_placement()}}}};
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    ops::OpOutcome oc = ops::execute_place_component(ctx, op, "opc13");
+    check(oc.status == ops::OpOutcome::Status::Ok,
+          "placeComponent(modeled M2x16, smallest seed-range pitch 0.4mm): Ok");
+    check(bodies.get("body_opc13") != nullptr, "placeComponent(modeled M2): body published");
+}
+
+// ── WP-2.5: an unknown thread_detail fails loudly, never silently falls back
+// to cosmetic. ──────────────────────────────────────────────────────────────────────
+void test_place_component_unknown_thread_detail_fails_loud() {
+    BodyStore bodies;
+    onecad::elementmap::ElementMapPartition part;
+    json op = {{"opType", "PlaceComponent"}, {"opId", "opc14"},
+               {"params", {{"componentId", "onecad.std.iso4762"},
+                           {"componentVersion", "1.0.0"},
+                           {"componentRevision", "sha256:" + std::string(64, '0')},
+                           {"source", generator_source_detailed("M6", 20.0, "bogus")},
+                           {"placement", identity_placement()}}}};
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    ops::OpOutcome oc = ops::execute_place_component(ctx, op, "opc14");
+    check(oc.status == ops::OpOutcome::Status::Failed && oc.error_code == "OP_FAILED",
+          "placeComponent: unknown thread_detail 'bogus' -> OP_FAILED, not a silent cosmetic fallback");
+    check(bodies.get("body_opc14") == nullptr,
+          "placeComponent: no body published on unknown thread_detail");
+}
+
 // ── DetachComponent builds the IDENTICAL geometry PlaceComponent would (WP-1.2). ──
 void test_detach_component_exact_volume_matches_place_component() {
     BodyStore bodies;
@@ -332,6 +456,11 @@ int main() {
     test_place_component_non_positive_length_fails_loud();
     test_place_component_embedded_source_unsupported();
     test_place_component_empty_generator_id_fails_loud();
+    test_place_component_thread_detail_cosmetic_matches_default();
+    test_place_component_thread_detail_simplified_removes_material();
+    test_place_component_thread_detail_modeled_removes_material();
+    test_place_component_thread_detail_modeled_m2_smallest_pitch_succeeds();
+    test_place_component_unknown_thread_detail_fails_loud();
     test_detach_component_exact_volume_matches_place_component();
     test_detach_component_placement_transform_preserves_volume();
     test_detach_component_embedded_source_unsupported();

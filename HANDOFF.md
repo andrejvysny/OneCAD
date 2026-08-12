@@ -1,3 +1,102 @@
+# Handoff — Component Library (WP-2.5, thread detail)
+
+Session 12 · 2026-08-12
+
+> Continues Session 11 directly — same worktree. P0–P2.4 + start-screen
+> browser are already COMMITTED (`6d26b57`); this session's WP-2.5 delta is
+> uncommitted on top.
+
+## Goal
+
+WP-2.5 per Session 10's own "How to resume" and the plan's dependency
+graph: three-level thread detail (spec §6.4) — `thread_detail`
+(`cosmetic`/`simplified`/`modeled`, default `cosmetic`) on the ISO 4762
+generator.
+
+## Done and why
+
+Full detail in `TODO.md` § COMPONENT-LIBRARY WP-2.5 (gate entry). Worth
+restating:
+
+- **Worker+Rust-table WP, like WP-2.1/2.2/2.3** — `ComponentParametersSection`
+  (built in WP-2.4) already renders any domain-enum `role: free` param as a
+  dropdown generically; confirmed by reading the component BEFORE writing
+  any frontend code. Zero frontend logic touched, only the mock fixture.
+- **`pitch_mm` is a DIFFERENT provenance than the rest of the ISO 4762
+  table** — ISO 261 coarse-pitch series, a public standard, not BOLTS data,
+  not subject to `THIRD_PARTY_NOTICES`. Added to both the worker table and
+  the Rust mirror, cross-pin test widened to cover it.
+- **`simplified` accumulates all N groove rings into ONE compound before a
+  single boolean cut** — not N sequential booleans, which would both
+  accumulate tolerance debris and turn each ring into its own independent
+  failure point.
+- **`modeled` is flat-truncated (no ISO 68-1 root fillet), a stated
+  fidelity/robustness tradeoff, not a silent shortcut**: a rounded root
+  needs a fillet-on-profile step before the helical sweep, stacking a third
+  independently-fragile OCCT operation for a difference invisible outside
+  extreme close-up/3D-print slicing.
+- **A real defect, found building the helical sweep and root-caused rather
+  than worked around**: `BRepBuilderAPI_MakeEdge(Geom2d_Curve, Geom_Surface,
+  ...)` builds a p-curve-only edge with no 3D approximation curve.
+  `BRepOffsetAPI_MakePipeShell::Build()` needs a real 3D curve on its spine
+  — the missing one raised `Standard_NullObject` with an EMPTY message deep
+  inside OCCT, no hint from the message itself. Traced by bisecting the try
+  block with step-by-step debug prints (not by reading docs first — this
+  failure mode gives nothing away). Fixed with one `BRepLib::BuildCurves3d`
+  call, flagged in a code comment so a future reader doesn't rediscover it
+  the hard way. This is the single most useful thing to carry forward if
+  anyone else in this codebase builds an edge from a 2D curve on a surface.
+- **Deliberately deferred, not silently expanded** (matching WP-2.3/2.4's
+  own scoping precedent): the StatusSection modeled-thread progress
+  producer (spec §7/§10) — no `begin/setProgress/end` async-task API exists
+  ANYWHERE in this codebase yet, building one is a platform-level addition;
+  and the kernelbench table-extremes robustness suite (spec §10) — already
+  named **WP-2.6** in TODO.md, so this WP's own ctest coverage stays
+  correctness-at-a-few-sizes (M6 + M2, the tightest seed-range pitch), not
+  an extremes battery.
+- `component.toml` stays test-fixture-only — Q4 (real package authoring)
+  remains open project-wide, not resolved here.
+
+## How to resume
+
+1. Run the `handoff` skill with "resume".
+2. Worker rebuilt this session (`ONECAD_OCCT_ROOT="$HOME/.onecad-occt/8.0.1"
+   scripts/build-worker.sh Release`) — staged sidecar reflects WP-2.5's
+   thread-detail dispatch. Rebuild again if stale.
+3. Next task: **WP-2.6** (kernelbench cases from table extremes — the
+   natural home for modeled-thread robustness stress-testing this WP
+   flagged but didn't build) is the only remaining named P2 WP. Beyond
+   that: the StatusSection async-progress infrastructure (a real
+   platform-level prerequisite, not yet scoped anywhere), or P3
+   (authoring/templates/mates, spec's next phase) if the user wants to move
+   on from P2 entirely.
+4. Full gate this session, all green except the 2 pre-existing failures
+   every prior WP-2.x gate reconfirms:
+   ```bash
+   ONECAD_OCCT_ROOT="$HOME/.onecad-occt/8.0.1" scripts/build-worker.sh Release
+   ctest --test-dir worker/build --output-on-failure   # 114/114
+   bunx tsc --noEmit && bun run test                    # 245 files / 4154
+   bunx playwright test                                 # 396/396
+   cd src-tauri && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
+   ONECAD_WORKER_PATH=$PWD/../worker/build/onecad-worker ONECAD_REQUIRE_WORKER=1 \
+     cargo test --workspace --no-fail-fast   # green except sketch_on_face + wire_contract
+   ```
+
+## Open questions
+
+Unchanged from prior sessions — Q4 (template content, P3), Q5 (`document`
+source nested-replay, P3), the embedded-source reopen-without-library test
+gap. New from this session: none blocking — WP-2.5 landed as scoped.
+
+## Pointers
+
+- Tasks → `TODO.md` § COMPONENT-LIBRARY WP-2.5 (gate entry, full detail)
+- Snapshot → `CURRENT_STATE.md` § COMPONENT LIBRARY — LIVE DELTA (session 12)
+- Plan → `~/.claude/plans/resume-implementation-of-component-cheeky-cookie.md`
+- Spec → `TheComponentLibrary/onecad-component-library-spec.md`
+
+---
+
 # Handoff — Component Library (start-screen browser)
 
 Session 11 · 2026-08-12

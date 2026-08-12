@@ -529,9 +529,10 @@ generator_version = 1
     }
 
     /// Same as `write_generator_package`, plus a `[parameters]` table with
-    /// one `role: free` key (`thread`) and one `role: table` key (`head_d`)
-    /// — the minimum shape `set_component_params_at`'s role check needs to
-    /// exercise both the accept and reject paths.
+    /// two `role: free` keys (`thread`, `thread_detail`) and one
+    /// `role: table` key (`head_d`) — the minimum shape
+    /// `set_component_params_at`'s role check needs to exercise both the
+    /// accept and reject paths.
     fn write_generator_package_with_params(root: &Path, id: &str, name: &str) {
         let dir = root.join(id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -554,6 +555,7 @@ generator_version = 1
 [parameters]
 thread = {{ role = "free", key = "M6", domain = ["M3", "M4", "M5", "M6", "M8"] }}
 head_d = {{ role = "table", from = "iso4762.dk" }}
+thread_detail = {{ role = "free", key = "cosmetic", domain = ["cosmetic", "simplified", "modeled"] }}
 "#,
             "0".repeat(64)
         );
@@ -595,6 +597,10 @@ head_d = {{ role = "table", from = "iso4762.dk" }}
         assert_eq!(
             listed[0].parameters.get("head_d").map(|p| p.role),
             Some(ParameterRole::Table)
+        );
+        assert_eq!(
+            listed[0].parameters.get("thread_detail").map(|p| p.role),
+            Some(ParameterRole::Free)
         );
     }
 

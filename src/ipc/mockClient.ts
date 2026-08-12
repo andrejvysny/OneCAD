@@ -1349,6 +1349,9 @@ const MOCK_LIBRARY_FIXTURE: LibraryComponent = {
     thread: { role: "free", key: "M6", domain: ["M3", "M4", "M5", "M6", "M8"] },
     length: { role: "free", value: 20, snap: "preferred", min: 4 },
     head_d: { role: "table", from: "iso4762.dk" },
+    // WP-2.5: enum-domain free param, exercises `ComponentParametersSection`'s
+    // dropdown rendering in the mock/e2e lane without a real component.toml.
+    thread_detail: { role: "free", key: "cosmetic", domain: ["cosmetic", "simplified", "modeled"] },
   },
   // No literal "M" before `{thread}`: the stored thread VALUE is already the
   // full designation ("M6") in this codebase's convention (WP-2.1/2.2's

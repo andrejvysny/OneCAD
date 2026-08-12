@@ -1,5 +1,76 @@
 # OneCAD-Tauri Migration TODO
 
+## COMPONENT-LIBRARY WP-2.5 (2026-08-12) — GATE PASSED
+
+Three-level thread detail (spec §6.4) — `thread_detail` free param
+(`cosmetic`/`simplified`/`modeled`, default `cosmetic`) on the ISO 4762
+generator. Worker+Rust-table WP, like WP-2.1/2.2/2.3: `ComponentParameters
+Section`'s dropdown already renders any domain-enum `role: free` param
+generically (confirmed by reading the component before writing any frontend
+code — zero frontend logic changed, only the mock fixture).
+
+**New `pitch_mm` table column, DIFFERENT provenance than the rest of the ISO
+4762 table**: the ISO 261 coarse-pitch series, a public numeric standard —
+not BOLTS data, not subject to `THIRD_PARTY_NOTICES`. Added to both
+`worker/src/ops/ComponentOp.cpp::iso4762Table()` and the Rust mirror
+(`onecad-library::tables::Iso4762Row`), with the existing cross-pinning test
+extended to cover it (same drift-guard WP-2.2 established).
+
+**`cosmetic`** is the unchanged WP-2.1 blank (byte-identical when the param
+is absent, same rule `thread`/`length` already follow). **`simplified`**
+cuts N discrete annular grooves (one per pitch) from the shank: each groove
+is a shallow V revolved 360° into a ring solid, and ALL N rings are
+accumulated into ONE `TopoDS_Compound` before a SINGLE `checked_boolean`
+cut — not N sequential booleans, which would both accumulate tolerance
+debris and turn each ring into its own independent failure point.
+**`modeled`** cuts a true helical single-start V-thread via a
+`BRepOffsetAPI_MakePipeShell` sweep along a helix built on a
+`Geom_CylindricalSurface`, FLAT-TRUNCATED (no ISO 68-1 root/crest fillet) —
+a deliberate fidelity cut, not a silent shortcut: a rounded root needs a
+fillet-on-profile step BEFORE the sweep, stacking a third independently-
+fragile OCCT operation for a difference invisible outside extreme
+close-up/3D-print slicing.
+
+**Real bug found and fixed while building the helical sweep, not assumed
+away**: `BRepBuilderAPI_MakeEdge(Geom2d_Curve, Geom_Surface, first, last)`
+builds a p-curve-only edge with no 3D approximation curve —
+`BRepOffsetAPI_MakePipeShell::Build()` needs a real 3D curve on its spine, so
+without `BRepLib::BuildCurves3d(edge)` the build silently raised
+`Standard_NullObject` with an EMPTY message deep inside OCCT (traced by
+bisecting the try block with step-by-step debug prints, not by reading docs
+first — the failure mode gives no hint by itself). Fixed with one
+`BuildCurves3d` call; flagged in a code comment so a future reader doesn't
+rediscover this the hard way.
+
+**Explicitly deferred, not silently expanded** (per this program's
+narrow-scoping precedent — see WP-2.3/2.4's own entries): the StatusSection
+modeled-thread progress producer (spec §7/§10) — no `begin/setProgress/end`
+async-task API exists anywhere in this codebase yet, building one is a
+platform-level addition orthogonal to thread geometry; and the kernelbench
+table-extremes robustness suite (spec §10) — TODO.md already names **WP-2.6**
+for exactly this, so this WP's own ctest coverage is correctness-at-a-few-
+sizes (cosmetic-match, simplified M6, modeled M6 AND M2 — the seed range's
+tightest pitch, 0.4mm — plus an unknown-value failure case), not an
+extremes battery.
+
+`component.toml` stays test-fixture-only (Q4, still open project-wide, not
+resolved by this WP).
+
+GATE: worker `ctest` **114/114** (component_ops carries 5 new assertions:
+cosmetic-explicit-matches-default, simplified removes material, modeled
+removes material at M6 and M2, unknown `thread_detail` fails loud) ·
+`cargo fmt --all --check` + workspace `clippy -D warnings` clean ·
+`cargo test -p onecad-library` **28/28** (existing cross-pin test widened,
+not a new test count) · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace
+--no-fail-fast` green except the same 2 pre-existing failures every prior
+WP-2.x gate reconfirms (`sketch_on_face::a_line_across_the_projected_rect_
+yields_two_extrudable_regions`, `wire_contract::nested_inner_disk_parity_
+and_reopen_stability`) · `bunx tsc --noEmit` clean · vitest **245 files /
+4154 tests**, unchanged from WP-2.4's baseline (fixture-shape-only ripple,
+confirmed via `git status`: zero `src/` logic files touched beyond the mock
+fixture) · `bunx playwright test` **396/396**, unchanged from WP-2.4's
+baseline (0 regressions).
+
 ## COMPONENT-LIBRARY start-screen browser (2026-08-12) — GATE PASSED
 
 User-requested follow-up to WP-2.4: the library must be explorable from the
