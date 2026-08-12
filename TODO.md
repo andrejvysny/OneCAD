@@ -1,5 +1,75 @@
 # OneCAD-Tauri Migration TODO
 
+## COMPONENT-LIBRARY WP-2.6 (2026-08-13) — GATE PASSED, P2 CLOSED
+
+Kernelbench cases from table extremes (spec §10) — the last named P2 WP.
+**Real scope call made before writing code**: kernelbench's case-v2 schema
+(Rust `case_v2.rs`, C++ `Types.h`/`CaseParser.cpp`, JSON Schema) is
+architecturally fillet-only — `OperationFamily`/`OperationTypeV2` are
+closed single-variant enums (`Fillet` only), `deny_unknown_fields`
+throughout, and the selector/validator machinery is edge-blend-topology-
+shaped (edge midpoints, adjacent-surface convexity/valence) — none of it
+maps onto solid-body fastener placement. A real `OperationFamily::Component`
+extension is a genuine multi-part architecture fork (new definition type,
+new selector/validator semantics for solid-body-boolean-cut robustness),
+not a config addition — confirmed by reading `case_v2.rs`, not guessed.
+Checked master (this branch's sibling worktree) for prior art first: its
+only new kernelbench commit since divergence (`b7b47e2`) is pure
+Advanced-Fillet-roadmap metamorph-variant work, unrelated. User chose the
+lighter mechanism: extend `worker/tests/test_component_ops.cpp` into a real
+cross-product matrix, same mechanism WP-2.5 already used for its own
+few-sizes coverage, now exhaustive.
+
+**New `test_place_component_thread_detail_matrix_across_the_full_seed_range`**:
+all 9 thread sizes (M2–M12) × all 3 `thread_detail` values = 27 cases, each
+asserting `Ok` + a published body + a finite positive volume. Length is
+`4×d1` per size — a proportional synthetic value, not claiming any external
+standard, chosen so even the tightest pitch (M2, 0.4mm) clears several
+grooves/turns. All 27 pass.
+
+**A real kernel limit, found by the matrix doing its job, not assumed
+away**: a dedicated stress case at M2×60mm (~150 turns at pitch 0.4mm) makes
+`BRepOffsetAPI_MakePipeShell::Build()` fail — but SAFELY: `IsDone()` false,
+no exception, no crash, no hang (the whole 30+-case binary runs in ~12s), no
+partial/garbage shape ever reaches `checked_boolean`. `cut_modeled_thread`'s
+existing `!pipe.IsDone()` guard (built in WP-2.5) already does exactly the
+right thing here — this is the op's safe-refusal contract working, not a
+bug. The test asserts that contract (`Status::Failed`/`OP_FAILED`, no body
+published), not success. M2×16mm (WP-2.5's own gate case, 40 turns) and
+M2×8mm (this matrix, 20 turns) both succeed; M12×100mm (opposite extreme —
+coarsest pitch, similarly long shank, ~57 turns) also succeeds — isolating
+this as a turn-DENSITY limit, not a pure-length one. The exact M2 boundary
+between 16mm (fine) and 60mm (refused) is left uncharacterized — that
+precision is exactly what a real kernelbench `OperationFamily::Component`
+extension would binary-search and pin; not built this session, see above.
+
+Also added: `simplified` below one pitch (the `n<=0` guard in
+`cut_simplified_thread`) returns the cosmetic blank EXACTLY — pinned by
+volume, not just a status check.
+
+**Zero Rust/frontend changes** — confirmed via `git status`: only
+`worker/tests/test_component_ops.cpp` touched. **P2 is now closed** —
+WP-2.1 through WP-2.6 all landed.
+
+**Also this session, before WP-2.6 itself**: merged `master` (sibling
+worktree `OneCAD-Tauri`, 3 commits ahead — P3/P4 modeling-correctness work
++ the kernelbench metamorph widening above) into this branch. Two conflicts
+(`TODO.md`, `CURRENT_STATE.md`), both simple append-log splices, resolved
+by concatenating both sides' new sections — no content dropped. **The two
+"pre-existing failures" every prior WP-2.x gate entry reconfirmed
+(`sketch_on_face`, `wire_contract`) are GONE post-merge** — master's P2
+region-identity fix (`region_identity_version: 2` in both test files' own
+fixtures) landed cleanly with no conflict. `cargo test --workspace` is now
+genuinely 100% green, not "green except two known failures." Future gate
+entries should stop citing them.
+
+GATE: worker `ctest` **115/115** (`component_ops` carries the matrix + 3
+extreme-length cases, ~34 new assertions) · Rust/frontend gates unaffected
+by WP-2.6 itself (no source touched; the merge's own full gate, run once
+just before WP-2.6: `cargo fmt`/`clippy -D warnings` clean · `cargo test
+--workspace` **100% green** · `tsc` clean · vitest **245/4159** · Playwright
+**404/404**, up from 396 — master's new pattern/mirror specs).
+
 ## COMPONENT-LIBRARY WP-2.5 (2026-08-12) — GATE PASSED
 
 Three-level thread detail (spec §6.4) — `thread_detail` free param

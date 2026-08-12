@@ -382,6 +382,134 @@ void test_place_component_unknown_thread_detail_fails_loud() {
           "placeComponent: no body published on unknown thread_detail");
 }
 
+// ── WP-2.6: thread_detail × thread size matrix across the FULL seed range —
+// robustness, not just correctness-at-a-few-sizes (spec §10: "modeled
+// threads... are a natural kernelbench robustness case"). A REAL kernelbench
+// `OperationFamily::Component` would need a schema fork (case-v2's
+// selector/validator types are edge-blend-topology-shaped, not solid-body-
+// boolean-cut-shaped) — out of scope for one WP, flagged in TODO.md's WP-2.5
+// entry. This ctest matrix is the deliberately-chosen lighter mechanism
+// instead. Length is 4×d1 per size — proportional, not claiming any external
+// standard, just large enough that even the tightest pitch (M2, 0.4mm)
+// clears several grooves/turns.
+void test_place_component_thread_detail_matrix_across_the_full_seed_range() {
+    struct Size {
+        const char* thread;
+        double d1;
+    };
+    static const Size kSizes[] = {
+        {"M2", 2.0}, {"M2.5", 2.5}, {"M3", 3.0},  {"M4", 4.0},  {"M5", 5.0},
+        {"M6", 6.0}, {"M8", 8.0},  {"M10", 10.0}, {"M12", 12.0},
+    };
+    static const char* kDetails[] = {"cosmetic", "simplified", "modeled"};
+    int op_seq = 100;
+    for (const Size& size : kSizes) {
+        const double length_mm = size.d1 * 4.0;
+        for (const char* detail : kDetails) {
+            BodyStore bodies;
+            onecad::elementmap::ElementMapPartition part;
+            const std::string op_id = "opcm" + std::to_string(op_seq++);
+            json op = {{"opType", "PlaceComponent"}, {"opId", op_id},
+                       {"params", {{"componentId", "onecad.std.iso4762"},
+                                   {"componentVersion", "1.0.0"},
+                                   {"componentRevision", "sha256:" + std::string(64, '0')},
+                                   {"source", generator_source_detailed(size.thread, length_mm, detail)},
+                                   {"placement", identity_placement()}}}};
+            Ctx c;
+            ops::OpContext ctx = c.make(bodies, part);
+            ops::OpOutcome oc = ops::execute_place_component(ctx, op, op_id);
+            const std::string label = std::string(size.thread) + "/" + detail;
+            check(oc.status == ops::OpOutcome::Status::Ok,
+                  "placeComponent(matrix " + label + "): Ok");
+            const onecad::session::BodyRecord* rec = bodies.get("body_" + op_id);
+            check(rec != nullptr, "placeComponent(matrix " + label + "): body published");
+            if (rec != nullptr) {
+                const double v = vol(rec->geom);
+                check(std::isfinite(v) && v > 0.0,
+                      "placeComponent(matrix " + label + "): finite positive volume");
+            }
+        }
+    }
+}
+
+// ── WP-2.6: `simplified` below one pitch (the n<=0 guard in
+// `cut_simplified_thread`) returns the cosmetic blank EXACTLY, never a
+// malformed near-empty groove. ─────────────────────────────────────────────────────
+void test_place_component_thread_detail_simplified_below_one_pitch_matches_cosmetic() {
+    BodyStore bodies;
+    onecad::elementmap::ElementMapPartition part;
+    json op = {{"opType", "PlaceComponent"}, {"opId", "opcm200"},
+               {"params", {{"componentId", "onecad.std.iso4762"},
+                           {"componentVersion", "1.0.0"},
+                           {"componentRevision", "sha256:" + std::string(64, '0')},
+                           {"source", generator_source_detailed("M6", 0.5, "simplified")},
+                           {"placement", identity_placement()}}}};
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    ops::OpOutcome oc = ops::execute_place_component(ctx, op, "opcm200");
+    check(oc.status == ops::OpOutcome::Status::Ok, "placeComponent(simplified, length < 1 pitch): Ok");
+    const onecad::session::BodyRecord* rec = bodies.get("body_opcm200");
+    check(rec != nullptr, "placeComponent(simplified, length < 1 pitch): body published");
+    if (rec != nullptr) {
+        // M6 blank: d2=10 head Ø, k=6 head height, d1=6 shank Ø, length=0.5.
+        const double expected = kPi * 5.0 * 5.0 * 6.0 + kPi * 3.0 * 3.0 * 0.5;
+        check_near(vol(rec->geom), expected, 0.5,
+                   "placeComponent(simplified, length < 1 pitch): matches the cosmetic blank exactly");
+    }
+}
+
+// ── WP-2.6: `modeled` at the tightest pitch (M2) over a long shank — a REAL
+// kernel limit this matrix found, not a hypothetical one. M2×16mm (40 turns,
+// the WP-2.5 gate case) and M2×8mm (matrix, 20 turns) both succeed; M2×60mm
+// (~150 turns) makes `BRepOffsetAPI_MakePipeShell::Build()` fail — cleanly:
+// `IsDone()` false, no exception, no crash, no hang (this whole binary runs
+// in ~12s), no partial/garbage shape ever reaches `checked_boolean`. That is
+// the CORRECT outcome per this op's own contract (`cut_modeled_thread`'s
+// `!pipe.IsDone()` guard exists for exactly this) — a safe, deterministic
+// `OP_FAILED` refusal beats returning invalid geometry, spec §0's standing
+// invariant. This test asserts the SAFE-REFUSAL contract, not success — the
+// exact turn-count boundary between M2×16mm (fine) and M2×60mm (refused) is
+// uncharacterized further; that precision is what a real kernelbench
+// `OperationFamily::Component` extension (declined this session, see
+// TODO.md's WP-2.6 gate entry) would binary-search and pin exactly.
+void test_place_component_thread_detail_modeled_m2_long_shank_fails_safely() {
+    BodyStore bodies;
+    onecad::elementmap::ElementMapPartition part;
+    json op = {{"opType", "PlaceComponent"}, {"opId", "opcm201"},
+               {"params", {{"componentId", "onecad.std.iso4762"},
+                           {"componentVersion", "1.0.0"},
+                           {"componentRevision", "sha256:" + std::string(64, '0')},
+                           {"source", generator_source_detailed("M2", 60.0, "modeled")},
+                           {"placement", identity_placement()}}}};
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    ops::OpOutcome oc = ops::execute_place_component(ctx, op, "opcm201");
+    check(oc.status == ops::OpOutcome::Status::Failed && oc.error_code == "OP_FAILED",
+          "placeComponent(modeled M2x60, ~150 turns at pitch 0.4mm): fails safely (OP_FAILED, no "
+          "crash), a real kernel limit this matrix found");
+    check(bodies.get("body_opcm201") == nullptr,
+          "placeComponent(modeled M2x60): no body published on refusal, never a partial shape");
+}
+
+// ── WP-2.6: `modeled` at the coarsest pitch (M12) over a long shank — the
+// opposite extreme (fewer, larger turns). ──────────────────────────────────────────
+void test_place_component_thread_detail_modeled_m12_long_shank() {
+    BodyStore bodies;
+    onecad::elementmap::ElementMapPartition part;
+    json op = {{"opType", "PlaceComponent"}, {"opId", "opcm202"},
+               {"params", {{"componentId", "onecad.std.iso4762"},
+                           {"componentVersion", "1.0.0"},
+                           {"componentRevision", "sha256:" + std::string(64, '0')},
+                           {"source", generator_source_detailed("M12", 100.0, "modeled")},
+                           {"placement", identity_placement()}}}};
+    Ctx c;
+    ops::OpContext ctx = c.make(bodies, part);
+    ops::OpOutcome oc = ops::execute_place_component(ctx, op, "opcm202");
+    check(oc.status == ops::OpOutcome::Status::Ok,
+          "placeComponent(modeled M12x100, coarsest pitch 1.75mm, long shank): Ok");
+    check(bodies.get("body_opcm202") != nullptr, "placeComponent(modeled M12x100): body published");
+}
+
 // ── DetachComponent builds the IDENTICAL geometry PlaceComponent would (WP-1.2). ──
 void test_detach_component_exact_volume_matches_place_component() {
     BodyStore bodies;
@@ -461,6 +589,10 @@ int main() {
     test_place_component_thread_detail_modeled_removes_material();
     test_place_component_thread_detail_modeled_m2_smallest_pitch_succeeds();
     test_place_component_unknown_thread_detail_fails_loud();
+    test_place_component_thread_detail_matrix_across_the_full_seed_range();
+    test_place_component_thread_detail_simplified_below_one_pitch_matches_cosmetic();
+    test_place_component_thread_detail_modeled_m2_long_shank_fails_safely();
+    test_place_component_thread_detail_modeled_m12_long_shank();
     test_detach_component_exact_volume_matches_place_component();
     test_detach_component_placement_transform_preserves_volume();
     test_detach_component_embedded_source_unsupported();

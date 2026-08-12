@@ -1,3 +1,100 @@
+# Handoff — Component Library (WP-2.6, kernelbench extremes, P2 CLOSED)
+
+Session 13 · 2026-08-13
+
+> Continues Session 12 directly, plus a `master` merge in between. WP-2.5 is
+> COMMITTED (`aca56f7`); this session merged `master` (commit `77323ca`)
+> then landed WP-2.6 on top, uncommitted until this session's own commit.
+
+## Goal
+
+WP-2.6, the last named P2 WP: "kernelbench cases from table extremes"
+(spec §10) — plus, at the user's request mid-session, merging `master`
+(a sibling worktree that had drifted 3 commits ahead) into this branch
+first.
+
+## Done and why
+
+Full detail in `TODO.md` § COMPONENT-LIBRARY WP-2.6 (gate entry). Two
+things worth restating:
+
+- **The merge came first, and found something worth knowing**: master
+  (`OneCAD-Tauri` worktree, `b7b47e2`) had P3/P4 modeling-correctness work
+  plus a kernelbench metamorph-variant widening — none of it touched
+  `OperationFamily` or added component support (checked directly, not
+  assumed, before scoping WP-2.6). Two conflicts, both simple append-log
+  splices in `TODO.md`/`CURRENT_STATE.md`, resolved by keeping both sides.
+  **Bonus**: master's P2 region-identity fix silently resolved the two
+  tests (`sketch_on_face`, `wire_contract`) every WP-2.x gate since WP-1.6
+  had been reconfirming as pre-existing failures — `cargo test --workspace`
+  is genuinely 100% green now.
+- **A real scope call, made explicit to the user before writing code**:
+  kernelbench's case-v2 schema is architecturally fillet-only — closed
+  `OperationFamily`/`OperationTypeV2` enums (only `Fillet` exists),
+  `deny_unknown_fields` everywhere, selector/validator machinery shaped
+  around edge-blend topology (edge midpoints, adjacent-surface
+  convexity/valence), none of which maps onto solid-body fastener
+  placement. A real `Component` family is a genuine architecture fork —
+  new definition type, new solid-body-boolean-cut validator semantics —
+  not a config addition. Presented this to the user as a real choice
+  (kernelbench extension vs. a lighter ctest matrix); "ctest matrix" was
+  chosen, matching WP-2.5's own precedent.
+- **The matrix did its job**: 27 cases (9 sizes × 3 `thread_detail`
+  values) all pass, but a dedicated M2×60mm (~150 turns) stress case
+  found a REAL kernel limit — `BRepOffsetAPI_MakePipeShell::Build()` fails
+  there. Crucially, it fails SAFELY: no crash, no exception, no hang, no
+  partial shape ever reaches the boolean cut. WP-2.5's own `!pipe.IsDone()`
+  guard already handles this correctly; this session's test asserts that
+  safe-refusal contract instead of wrongly demanding success everywhere.
+  M12×100mm (opposite extreme, similar shank length, coarser pitch)
+  succeeds — isolating this as a turn-DENSITY limit specifically, not a
+  pure-length one. The exact M2 boundary between 16mm (fine) and 60mm
+  (refused) is deliberately left uncharacterized — pinning it precisely is
+  exactly what a real kernelbench extension would do, and wasn't built
+  this session.
+
+## How to resume
+
+1. Run the `handoff` skill with "resume".
+2. **P2 is CLOSED** — WP-2.1 through WP-2.6 all landed. Next per the
+   spec's own phasing (§10): **P3** (authoring/templates/mates) — user
+   authoring flow, starter templates, persistent mate re-seating on regen
+   (flagged as cut scope since WP-1.5). Needs its own scoping pass, not
+   started here. Q4 (starter-template content) and Q5 (`document` source
+   nested-replay) are still open from way back and become load-bearing the
+   moment P3 starts.
+3. Worker rebuilt this session — staged sidecar reflects both the merge's
+   C++ changes (master's kernelbench/benchmark widening, a new
+   `test_boolean_intersect` target) and WP-2.6's test matrix. Rebuild
+   again if stale.
+4. Full gate this session:
+   ```bash
+   ONECAD_OCCT_ROOT="$HOME/.onecad-occt/8.0.1" scripts/build-worker.sh Release
+   ctest --test-dir worker/build --output-on-failure   # 115/115
+   cd src-tauri && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
+   ONECAD_WORKER_PATH=$PWD/../worker/build/onecad-worker ONECAD_REQUIRE_WORKER=1 \
+     cargo test --workspace --no-fail-fast   # 100% green, no known failures anymore
+   bunx tsc --noEmit && bun run test         # 245 files / 4159
+   bunx playwright test                       # 404/404
+   ```
+
+## Open questions
+
+Unchanged from prior sessions — Q4 (template content, P3), Q5 (`document`
+source nested-replay, P3), the embedded-source reopen-without-library test
+gap. New from this session: the exact M2 modeled-thread turn-count
+failure boundary (between 16mm/40 turns and 60mm/150 turns) is
+uncharacterized — not blocking, would be P3/kernelbench-extension work if
+ever wanted.
+
+## Pointers
+
+- Tasks → `TODO.md` § COMPONENT-LIBRARY WP-2.6 (gate entry, full detail)
+- Snapshot → `CURRENT_STATE.md` § COMPONENT LIBRARY — LIVE DELTA (session 13)
+- Spec → `TheComponentLibrary/onecad-component-library-spec.md`
+
+---
+
 # Handoff — Component Library (WP-2.5, thread detail)
 
 Session 12 · 2026-08-12

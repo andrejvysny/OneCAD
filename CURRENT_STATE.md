@@ -1,3 +1,37 @@
+## COMPONENT LIBRARY — LIVE DELTA (2026-08-13, session 13, WP-2.6, P2 CLOSED)
+
+Branch `OneCAD-Component-Library` (worktree), on top of the merge commit
+below. This session: merged `master` in (see next paragraph), then landed
+**WP-2.6**, the last P2 WP — closing P2 (WP-2.1 through WP-2.6 all done).
+
+**Merge**: master (sibling worktree `OneCAD-Tauri`, `b7b47e2`) had 3 commits
+this branch lacked — P3/P4 modeling-correctness work + a kernelbench
+metamorph-variant widening, all unrelated to Component Library. Two
+conflicts (`TODO.md`, `CURRENT_STATE.md`), both append-log splices,
+resolved by keeping both sides' content. Post-merge, `cargo test
+--workspace` is **100% green** — master's region-identity fix resolved the
+two tests (`sketch_on_face`, `wire_contract`) every prior WP-2.x gate had
+been citing as pre-existing failures.
+
+**WP-2.6**: kernelbench is architecturally fillet-only (closed enums, edge-
+blend-shaped selectors) — a real `OperationFamily::Component` extension is
+a multi-part fork, not a config change. Chose the lighter mechanism
+instead: a full cross-product ctest matrix (9 thread sizes × 3
+`thread_detail` values = 27 cases) in `worker/tests/test_component_ops.cpp`,
+same mechanism WP-2.5 used, now exhaustive. Found a REAL kernel limit doing
+it: `modeled` thread at M2×60mm (~150 turns, tightest pitch) makes
+`BRepOffsetAPI_MakePipeShell::Build()` fail — safely (`OP_FAILED`, no
+crash, no partial shape). The existing `!pipe.IsDone()` guard from WP-2.5
+already handles this correctly; the new test asserts that safe-refusal
+contract rather than requiring success everywhere. Zero Rust/frontend
+changes.
+
+Gate: worker ctest 115/115 · Rust/frontend unaffected by WP-2.6 itself (no
+source touched there); the merge's own full gate (run once, before WP-2.6):
+`cargo fmt`/`clippy -D warnings` clean · `cargo test --workspace` **100%
+green, no known failures** · `tsc` clean · vitest **245 files / 4159 tests**
+· Playwright **404/404** (up from 396 — master's new pattern/mirror specs).
+
 ## COMPONENT LIBRARY — LIVE DELTA (2026-08-12, session 12, WP-2.5)
 
 Branch `OneCAD-Component-Library` (worktree), on top of `6d26b57` (P0–P2.4 +
