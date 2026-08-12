@@ -16,12 +16,14 @@ Gates: worker Release build; CTest 113/113 passed; `cargo fmt --all --check`; `c
 - [x] Rust real-worker tests: preview/commit parity, disjoint refusal, save/reopen, undo restoration (`src-tauri/tests/preview_boolean.rs`).
 - [x] Frontend + Playwright: Intersect tool selection, target/tool pick, Apply, single body row; added `data-testid` to boolean op chip buttons.
 
-## MODELING CORRECTNESS P4 — REMAINING COVERAGE (2026-08-12) — OPEN
+## MODELING CORRECTNESS P4 — REMAINING COVERAGE (2026-08-12) — COMPLETE
 
 - [x] MirrorBody Playwright flow (`e2e/mirror-body.spec.ts`).
 - [x] Linear/Circular Pattern Playwright flows (`e2e/linear-pattern.spec.ts`, `e2e/circular-pattern.spec.ts`).
-- [ ] Critical mode closure tests.
-- [ ] Real-worker corpus executor.
+- [x] Critical mode closure tests: Extrude/Revolve overflow hide Intersect; Mirror/Pattern chips have no fuse/union toggle (`src/features/toolbar/ModelToolChips.test.tsx`).
+- [x] Real-worker corpus executor (`src-tauri/tests/corpus_executor.rs`): enumerates all `corpus/cases/*.json`, executes `a_sketch_extrude_blind` end-to-end (volume within tolerance), and records explicit unsupported reasons for the rest. Zero unclassified files.
+
+Gates: worker Release build; CTest 114/114; `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` passed; TypeScript / Vitest passed; contract/coverage verifiers passed; targeted Playwright boolean/pattern/mirror specs 12/12 (Chromium + WebKit, retries 0). Full Playwright suite not re-run yet; prior unrelated `unsaved-guard` / `view-ux` flakes remain the only known blockers.
 
 ## MODELING CORRECTNESS P2 GATE (2026-08-12) — AUTOMATED LANES PASSED; MANUAL TAURI SMOKE OPEN
 

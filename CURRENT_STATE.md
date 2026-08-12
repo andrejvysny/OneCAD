@@ -14,10 +14,13 @@ disjoint refusal, save/reopen, undo restoration), frontend/Playwright Intersect
 coverage with chip testids, and contract updated to supported/exposed.
 Pattern/Mirror Playwright flows landed (`e2e/mirror-body.spec.ts`,
 `e2e/linear-pattern.spec.ts`, `e2e/circular-pattern.spec.ts`). Critical mode
-closure and real-worker corpus executor remain open.
+closure tests landed (`src/features/toolbar/ModelToolChips.test.tsx`) and the
+real-worker corpus executor landed (`src-tauri/tests/corpus_executor.rs`),
+running `a_sketch_extrude_blind` end-to-end and recording explicit unsupported
+reasons for the remaining corpus cases. P4 is now complete.
 Current gates: CTest 114/114; worker Release build; real-worker Rust workspace;
 fmt/clippy; TypeScript; Bun build; Vitest 241 files / 4116 tests; targeted
-Playwright boolean/pattern/mirror specs 10/10 (Chromium + WebKit, retries 0).
+Playwright boolean/pattern/mirror specs 12/12 (Chromium + WebKit, retries 0).
 Full Playwright run was aborted after unrelated pre-existing flakes in
 `unsaved-guard` and `view-ux`; not caused by this wave.
 fmt/clippy; TypeScript; Bun build; Vitest 241 files / 4116 tests; Playwright
