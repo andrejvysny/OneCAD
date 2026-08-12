@@ -200,6 +200,14 @@ OpOutcome execute_transform_body(OpContext& ctx, const json& op, const std::stri
             return OpOutcome::fail("OP_FAILED", "TransformBody raised an unknown exception");
         }
 
+        const kernel::validation::PublicationDecision decision = publication_decision(
+            result,
+            kernel::validation::single_solid_policy(
+                "TransformBody", kernel::validation::PublicationTier::TierA));
+        if (!decision.publishable()) {
+            return OpOutcome::fail(decision.code, decision.message + " on body " + target_id);
+        }
+
         if (placement.copy) {
             // NewBody lineage: a fresh body per target; the source is preserved and
             // emits NO event. Nothing is tracked on a brand-new body, so its

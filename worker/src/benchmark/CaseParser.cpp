@@ -231,12 +231,111 @@ bool parse_rotation(const json &value, VariantSpec &out, std::string &error) {
   return norm > 1.0e-12 ? true : (error = "rotation axis is zero", false);
 }
 
+bool parse_mirror(const json &value, VariantSpec &out, std::string &error) {
+  const std::set<std::string> allowed = {"normal", "center"};
+  if (!exact_fields(value, allowed, {"normal"}, error) ||
+      !parse_vector(value["normal"], 3, 3, out.mirror_normal)) {
+    error = "invalid mirror variant";
+    return false;
+  }
+  const double norm = std::hypot(out.mirror_normal[0],
+                                 std::hypot(out.mirror_normal[1], out.mirror_normal[2]));
+  if (norm <= 1.0e-12) {
+    error = "mirror normal is zero";
+    return false;
+  }
+  if (value.contains("center") &&
+      !parse_vector(value["center"], 3, 3, out.mirror_center)) {
+    error = "invalid mirror center";
+    return false;
+  }
+  return true;
+}
+
+bool parse_scale(const json &value, VariantSpec &out, std::string &error) {
+  const std::set<std::string> allowed = {"factor", "center"};
+  if (!exact_fields(value, allowed, {"factor"}, error) ||
+      !finite_number(value["factor"], 1.0e-6, 1.0e6, out.scale_factor)) {
+    error = "invalid scale variant";
+    return false;
+  }
+  if (value.contains("center") &&
+      !parse_vector(value["center"], 3, 3, out.scale_center)) {
+    error = "invalid scale center";
+    return false;
+  }
+  return true;
+}
+
+bool parse_parameter_epsilon(const json &value, VariantSpec &out,
+                             std::string &error) {
+  const std::set<std::string> fields = {"parameter", "relativeDelta"};
+  if (!exact_fields(value, fields, fields, error) || !value["parameter"].is_string() ||
+      value["parameter"] != "operation.radius" ||
+      !finite_number(value["relativeDelta"], -0.01, 0.01, out.epsilon_relative_delta)) {
+    error = "invalid parameterEpsilon variant";
+    return false;
+  }
+  out.epsilon_parameter = value["parameter"];
+  if (out.epsilon_relative_delta == 0.0) {
+    error = "parameterEpsilon relativeDelta must be non-zero";
+    return false;
+  }
+  return true;
+}
+
+bool parse_edge_order_permutation(const json &value, VariantSpec &out,
+                                  std::string &error) {
+  const std::set<std::string> fields = {"order"};
+  if (!exact_fields(value, fields, fields, error) || !value["order"].is_array()) {
+    error = "invalid edgeOrderPermutation variant";
+    return false;
+  }
+  std::set<std::size_t> seen;
+  for (const json &item : value["order"]) {
+    if (!item.is_number_unsigned()) {
+      error = "edgeOrderPermutation order entries must be unsigned integers";
+      return false;
+    }
+    const std::size_t index = item.get<std::size_t>();
+    if (!seen.insert(index).second) {
+      error = "edgeOrderPermutation order has duplicate index";
+      return false;
+    }
+    out.edge_order.push_back(index);
+  }
+  if (out.edge_order.empty()) {
+    error = "edgeOrderPermutation order must not be empty";
+    return false;
+  }
+  return true;
+}
+
+bool parse_contour_seed(const json &value, VariantSpec &out, std::string &error) {
+  const std::set<std::string> fields = {"anchorIndex"};
+  if (!exact_fields(value, fields, fields, error) ||
+      !value["anchorIndex"].is_number_unsigned()) {
+    error = "invalid contourSeed variant";
+    return false;
+  }
+  out.contour_seed = value["anchorIndex"].get<std::size_t>();
+  return true;
+}
+
 bool parse_variant(const json &value, VariantSpec &out, std::string &error) {
-  const std::set<std::string> allowed = {"name", "translation", "rotation"};
+  const std::set<std::string> allowed = {
+      "name",         "translation",        "rotation",
+      "mirror",       "scale",              "parameterEpsilon",
+      "edgeOrderPermutation", "contourSeed"};
   if (!exact_fields(value, allowed, {"name"}, error) || !value["name"].is_string())
     return false;
+  out = VariantSpec{};
   out.name = value["name"];
-  if (out.name != "base" && out.name != "translated" && out.name != "rotated") {
+  const std::set<std::string> known = {
+      "base",           "translated",          "farOriginTranslated",
+      "rotated",        "mirrored",            "scaled",
+      "parameterEpsilon", "edgeOrderPermutation", "contourSeed"};
+  if (!known.count(out.name)) {
     error = "unsupported variant";
     return false;
   }
@@ -247,13 +346,52 @@ bool parse_variant(const json &value, VariantSpec &out, std::string &error) {
   }
   if (value.contains("rotation") && !parse_rotation(value["rotation"], out, error))
     return false;
-  if (out.name == "translated" && out.translation.empty()) {
-    error = "translated variant requires translation";
+  if (value.contains("mirror") && !parse_mirror(value["mirror"], out, error))
     return false;
-  }
-  if (out.name == "rotated" && out.rotation_axis.empty()) {
-    error = "rotated variant requires rotation";
+  if (value.contains("scale") && !parse_scale(value["scale"], out, error))
     return false;
+  if (value.contains("parameterEpsilon") &&
+      !parse_parameter_epsilon(value["parameterEpsilon"], out, error))
+    return false;
+  if (value.contains("edgeOrderPermutation") &&
+      !parse_edge_order_permutation(value["edgeOrderPermutation"], out, error))
+    return false;
+  if (value.contains("contourSeed") &&
+      !parse_contour_seed(value["contourSeed"], out, error))
+    return false;
+
+  if (out.name == "translated" || out.name == "farOriginTranslated") {
+    if (out.translation.empty()) {
+      error = "translated variant requires translation";
+      return false;
+    }
+  } else if (out.name == "rotated") {
+    if (out.rotation_axis.empty()) {
+      error = "rotated variant requires rotation";
+      return false;
+    }
+  } else if (out.name == "mirrored") {
+    if (out.mirror_normal.empty()) {
+      error = "mirrored variant requires mirror";
+      return false;
+    }
+  } else if (out.name == "scaled") {
+    if (out.scale_factor == 1.0 && out.scale_center.empty()) {
+      error = "scaled variant requires scale";
+      return false;
+    }
+  } else if (out.name == "parameterEpsilon") {
+    if (out.epsilon_parameter.empty()) {
+      error = "parameterEpsilon variant requires parameterEpsilon";
+      return false;
+    }
+  } else if (out.name == "edgeOrderPermutation") {
+    if (out.edge_order.empty()) {
+      error = "edgeOrderPermutation variant requires edgeOrderPermutation";
+      return false;
+    }
+  } else if (out.name == "contourSeed") {
+    // Any anchor index is valid; empty/default is not emitted by producers.
   }
   return true;
 }

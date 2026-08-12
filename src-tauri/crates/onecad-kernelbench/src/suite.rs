@@ -12,6 +12,16 @@ pub struct Variant {
     pub translation: Option<[f64; 3]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rotation: Option<Rotation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<Mirror>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scale: Option<Scale>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parameter_epsilon: Option<ParameterEpsilon>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge_order_permutation: Option<EdgeOrderPermutation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contour_seed: Option<ContourSeed>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -19,7 +29,13 @@ pub struct Variant {
 pub enum VariantName {
     Base,
     Translated,
+    FarOriginTranslated,
     Rotated,
+    Mirrored,
+    Scaled,
+    ParameterEpsilon,
+    EdgeOrderPermutation,
+    ContourSeed,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -27,6 +43,43 @@ pub enum VariantName {
 pub struct Rotation {
     pub axis: [f64; 3],
     pub angle_degrees: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Mirror {
+    pub normal: [f64; 3],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub center: Option<[f64; 3]>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Scale {
+    pub factor: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub center: Option<[f64; 3]>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ParameterEpsilon {
+    pub parameter: String,
+    #[serde(rename = "relativeDelta")]
+    pub relative_delta: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EdgeOrderPermutation {
+    pub order: Vec<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContourSeed {
+    #[serde(rename = "anchorIndex")]
+    pub anchor_index: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -411,6 +464,11 @@ fn generated(case: Case, name: VariantName) -> GeneratedCase {
             name,
             translation,
             rotation,
+            mirror: None,
+            scale: None,
+            parameter_epsilon: None,
+            edge_order_permutation: None,
+            contour_seed: None,
         },
     }
 }

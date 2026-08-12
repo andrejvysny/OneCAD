@@ -270,21 +270,35 @@ Not started: WP-1.5 (snap solver + `PreviewOp` drag ghost — the largest remain
 
 Next action: WP-1.5. See `HANDOFF.md` new top entry for full resume detail.
 
-## MODELING CORRECTNESS P2-P4 — LIVE DELTA (2026-08-11)
+## MODELING CORRECTNESS P2-P4 — LIVE DELTA (2026-08-12)
 
 Reviewed current uncommitted worktree, OCCT 8.0.1 fingerprint
 `0a6a1dce34181289`. Implemented: P2 exact analytic CurveFragments/BReps, v2
 region identity, bounded refinement, and cancellation; P3 Tier A/B publication
-evidence, strict worker readers, Pattern/Transform limits, and Pattern V2 body
-lineage. V2 non-fused Pattern preserves source instance zero and mints only
-`body_<opId>:<k>` transformed children; V2 fused Pattern modifies source in place.
-Absent version remains V1. P3 contract rows, Transform/import policy, and UI-mode
-disposition remain open. P4 coverage manifest/classifier is implemented and
-CI-checked; real-worker corpus executor remains open.
-Current gates: CTest 113/113; real-worker Rust workspace; fmt/clippy; TypeScript;
-targeted Pattern/IPC Vitest 89; Bun build. Prior P2 browser evidence: Chromium
-196/196 and WebKit 196/196 with retries 0. Manual Tauri and completed unchanged T0
-remain open. See
+evidence, strict worker readers, Pattern/Transform limits, Pattern V2 body
+lineage, machine-readable operation contracts, Transform Tier A validator, and
+explicit ImportStep/Transform/UI-mode disposition policy. V2 non-fused Pattern
+preserves source instance zero and mints only `body_<opId>:<k>` transformed
+children; V2 fused Pattern modifies source in place. Absent version remains V1.
+P4 coverage manifest/classifier is implemented and CI-checked. P4 Boolean Intersect
+vertical is complete: C++ fixtures, Rust real-worker tests (preview/commit parity,
+disjoint refusal, save/reopen, undo restoration), frontend/Playwright Intersect
+coverage with chip testids, and contract updated to supported/exposed.
+Pattern/Mirror Playwright flows landed (`e2e/mirror-body.spec.ts`,
+`e2e/linear-pattern.spec.ts`, `e2e/circular-pattern.spec.ts`). Critical mode
+closure tests landed (`src/features/toolbar/ModelToolChips.test.tsx`) and the
+real-worker corpus executor landed (`src-tauri/tests/corpus_executor.rs`),
+running `a_sketch_extrude_blind` end-to-end and recording explicit unsupported
+reasons for the remaining corpus cases. P4 is now complete.
+Current gates: CTest 114/114; worker Release build; real-worker Rust workspace;
+fmt/clippy; TypeScript; Bun build; Vitest 241 files / 4116 tests; targeted
+Playwright boolean/pattern/mirror specs 12/12 (Chromium + WebKit, retries 0).
+Full Playwright run was aborted after unrelated pre-existing flakes in
+`unsaved-guard` and `view-ux`; not caused by this wave.
+fmt/clippy; TypeScript; Bun build; Vitest 241 files / 4116 tests; Playwright
+Chromium 196/196 and WebKit 196/196 with retries 0; kernelbench T0 both backends
+unchanged (136 records, 0 gating failures, replay stable); contracts/coverage
+verifiers pass. Manual Tauri smoke remains open. See
 `OneCAD-modeling-correctness-roadmap/04-live-implementation-delta.md`.
 
 ## MODULAR-PLATFORM UI (2026-08-09, design turn 2 via `claude_design` MCP) — FE GATE PASSED

@@ -352,3 +352,29 @@ test("boolean commit: two bodies → pick target + tool → Apply lands ONE surv
     "true",
   );
 });
+
+test("boolean commit: Intersect mode is wired through the chip and labels the feature", async ({
+  page,
+}) => {
+  const [targetId, toolId] = await setupTwoBodies(page);
+
+  await bodyOptions(page).nth(1).click();
+  await page.getByRole("button", { name: "Combine", exact: true }).click();
+  const toolPoint = await findBodyScreenPoint(page, toolId);
+  await clickAtClient(page, toolPoint.x, toolPoint.y);
+  await expect
+    .poll(async () => (await extrudeDebug(page))?.previewOwner, { timeout: BOOLEAN_LANE_TIMEOUT })
+    .toBe("boolean");
+
+  await page.getByTestId("chip-boolean-intersect").click();
+  await clickApplyButton(page);
+
+  await expect
+    .poll(async () => (await extrudeDebug(page))?.previewOwner, { timeout: BOOLEAN_LANE_TIMEOUT })
+    .toBeNull();
+  await expect(bodyOptions(page)).toHaveCount(2);
+  const remaining = await documentBodyIds(page);
+  expect(remaining).toContain(targetId);
+  expect(remaining).not.toContain(toolId);
+  await expect.poll(async () => await getFeatureLabels(page)).toContain("Intersect");
+});

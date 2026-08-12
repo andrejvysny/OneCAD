@@ -205,6 +205,11 @@ impl Executor for RunnerExecutor<'_> {
             name: VariantName::Base,
             translation: None,
             rotation: None,
+            mirror: None,
+            scale: None,
+            parameter_epsilon: None,
+            edge_order_permutation: None,
+            contour_seed: None,
         };
         let artifact_dir = self
             .out_dir

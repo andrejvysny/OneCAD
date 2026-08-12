@@ -319,9 +319,13 @@ std::vector<gp_Pnt> make_probe_points(const gp_Pnt &center, double radius) {
           gp_Pnt(center.X(), center.Y(), center.Z() - offset)};
 }
 
+gp_Pnt vector_to_point(const std::vector<double> &v) {
+  return gp_Pnt(v[0], v[1], v[2]);
+}
+
 gp_Trsf variant_transform(const VariantSpec &variant, const TopoDS_Shape &shape) {
   gp_Trsf transform;
-  if (variant.name == "translated") {
+  if (variant.name == "translated" || variant.name == "farOriginTranslated") {
     transform.SetTranslation(gp_Vec(variant.translation[0], variant.translation[1],
                                     variant.translation[2]));
   } else if (variant.name == "rotated") {
@@ -330,6 +334,18 @@ gp_Trsf variant_transform(const VariantSpec &variant, const TopoDS_Shape &shape)
     constexpr double kPi = 3.141592653589793238462643383279502884;
     transform.SetRotation(gp_Ax1(volume_center(shape), axis),
                           variant.rotation_degrees * kPi / 180.0);
+  } else if (variant.name == "mirrored") {
+    const gp_Pnt center = variant.mirror_center.empty()
+                              ? volume_center(shape)
+                              : vector_to_point(variant.mirror_center);
+    const gp_Dir normal(variant.mirror_normal[0], variant.mirror_normal[1],
+                        variant.mirror_normal[2]);
+    transform.SetMirror(gp_Ax2(center, normal));
+  } else if (variant.name == "scaled") {
+    const gp_Pnt center = variant.scale_center.empty()
+                              ? volume_center(shape)
+                              : vector_to_point(variant.scale_center);
+    transform.SetScale(center, variant.scale_factor);
   }
   return transform;
 }
@@ -337,6 +353,30 @@ gp_Trsf variant_transform(const VariantSpec &variant, const TopoDS_Shape &shape)
 void apply_variant(const VariantSpec &variant, GeneratedGeometry &geometry) {
   if (variant.name == "base")
     return;
+
+  if (variant.name == "edgeOrderPermutation") {
+    std::vector<TopoDS_Edge> reordered;
+    reordered.reserve(variant.edge_order.size());
+    for (std::size_t index : variant.edge_order) {
+      if (index >= geometry.selected_edges.size()) {
+        return;
+      }
+      reordered.push_back(geometry.selected_edges[index]);
+    }
+    geometry.selected_edges = std::move(reordered);
+    return;
+  }
+
+  if (variant.name == "contourSeed") {
+    if (!geometry.selected_edges.empty() &&
+        variant.contour_seed < geometry.selected_edges.size()) {
+      std::rotate(geometry.selected_edges.begin(),
+                  geometry.selected_edges.begin() + variant.contour_seed,
+                  geometry.selected_edges.end());
+    }
+    return;
+  }
+
   const gp_Trsf transform = variant_transform(variant, geometry.shape);
   BRepBuilderAPI_Transform builder(geometry.shape, transform, true);
   geometry.shape = builder.Shape();

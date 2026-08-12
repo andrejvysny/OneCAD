@@ -863,3 +863,99 @@ describe("extrude overflow", () => {
     expect(screen.queryByTestId("chip-overflow-panel")).toBeNull();
   });
 });
+
+// ── P4: critical mode closure ───────────────────────────────────────────────
+describe("critical mode closure", () => {
+  beforeEach(() => {
+    setViewportEngine(fakeEngine());
+    toolChipStore.getState().clear();
+  });
+  afterEach(() => {
+    setViewportEngine(null);
+    toolChipStore.getState().clear();
+  });
+
+  it("extrude overflow offers New Body / Add / Cut but not Intersect", () => {
+    render(<ModelToolChips />);
+    act(() =>
+      toolChipStore.getState().showExtrude(
+        10,
+        WORLD,
+        {
+          onValue: vi.fn(),
+          onSymmetric: vi.fn(),
+          onConfirm: vi.fn(),
+          onCancel: vi.fn(),
+          onBooleanMode: vi.fn(),
+        },
+        { showBooleanSegments: true, canBoolean: true, booleanMode: "NewBody" },
+      ),
+    );
+    openOverflow();
+    expect(screen.getByTestId("chip-bool-newbody")).toBeInTheDocument();
+    expect(screen.getByTestId("chip-bool-add")).toBeInTheDocument();
+    expect(screen.getByTestId("chip-bool-cut")).toBeInTheDocument();
+    expect(screen.queryByTestId("chip-bool-intersect")).toBeNull();
+  });
+
+  it("revolve overflow offers New Body / Add / Cut but not Intersect", () => {
+    render(<ModelToolChips />);
+    act(() =>
+      toolChipStore.getState().showRevolve(
+        360,
+        WORLD,
+        {
+          onValue: vi.fn(),
+          onResetAxis: vi.fn(),
+          onConfirm: vi.fn(),
+          onCancel: vi.fn(),
+          onBooleanMode: vi.fn(),
+        },
+        { showBooleanSegments: true, canBoolean: true, booleanMode: "NewBody" },
+      ),
+    );
+    openRevolveOverflow();
+    expect(screen.getByTestId("chip-bool-newbody")).toBeInTheDocument();
+    expect(screen.getByTestId("chip-bool-add")).toBeInTheDocument();
+    expect(screen.getByTestId("chip-bool-cut")).toBeInTheDocument();
+    expect(screen.queryByTestId("chip-bool-intersect")).toBeNull();
+  });
+
+  it("mirror chip has no fuse/union toggle", () => {
+    render(<ModelToolChips />);
+    act(() =>
+      toolChipStore.getState().showMirror("XY", WORLD, { onPlane: vi.fn(), onApply: vi.fn() }),
+    );
+    expect(screen.getByRole("button", { name: "XY" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Apply" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Fuse|Union/i })).toBeNull();
+  });
+
+  it("linear-pattern chip has no fuse/union toggle", () => {
+    render(<ModelToolChips />);
+    act(() =>
+      toolChipStore.getState().showLinearPattern("X", 3, 20, WORLD, {
+        onAxis: vi.fn(),
+        onCount: vi.fn(),
+        onSpacing: vi.fn(),
+        onApply: vi.fn(),
+      }),
+    );
+    expect(screen.getByRole("button", { name: "Apply" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Fuse|Union/i })).toBeNull();
+  });
+
+  it("circular-pattern chip has no fuse/union toggle", () => {
+    render(<ModelToolChips />);
+    act(() =>
+      toolChipStore.getState().showCircularPattern("Z", 4, 360, WORLD, {
+        onAxis: vi.fn(),
+        onCount: vi.fn(),
+        onAngle: vi.fn(),
+        onApply: vi.fn(),
+      }),
+    );
+    expect(screen.getByRole("button", { name: "Apply" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Fuse|Union/i })).toBeNull();
+  });
+});

@@ -183,6 +183,12 @@ add_executable(test_boolean_empty test_boolean_empty.cpp)
 target_link_libraries(test_boolean_empty PRIVATE worker_core)
 add_test(NAME boolean_empty COMMAND test_boolean_empty)
 
+# --- P4: standalone Boolean Intersect fixtures (overlap, containment, identity,
+#     touching). ---
+add_executable(test_boolean_intersect test_boolean_intersect.cpp)
+target_link_libraries(test_boolean_intersect PRIVATE worker_core)
+add_test(NAME boolean_intersect COMMAND test_boolean_intersect)
+
 # --- M6a: breadth ops (Shell / Linear+Circular pattern / MirrorBody) numerics. ---
 add_executable(test_m6a_ops test_m6a_ops.cpp)
 target_link_libraries(test_m6a_ops PRIVATE worker_core)

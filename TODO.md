@@ -1010,6 +1010,45 @@ Next: WP-0.2 (`KnownOperation::PlaceComponent` skeleton, generator-source-only,
 hardcoded ISO 4762 M6) completes the P0 combined gate; then P1 (`onecad-library`
 crate scaffold onward) per the plan.
 
+## MODELING CORRECTNESS P3 — PUBLICATION POLICY (2026-08-12) — COMPLETE
+
+- [x] Machine-readable per-operation contract rows: `docs/qa/modeling-operation-contracts.json` (35 rows / 16 operations) covering support status, validation tier, body lifecycle, empty/multi-solid semantics, and `uiExposure`.
+- [x] Transform policy row; wired `TransformBody` through the common `publication_decision` Tier A validator (`worker/src/ops/TransformOp.cpp`).
+- [x] ImportStep policy row and explicit invalid-solid warning exception documented in contracts.
+- [x] UI mode disposition recorded: Revolve Intersect, Mirror fuse, Extrude Intersect hidden; Pattern fuse hidden; Transform move/copy exposed; OffsetFace Total/Diameter deferred.
+- [x] `scripts/verify-modeling-contracts.mjs` validates schema, required fields, uniqueness, and coverage-manifest cross-reference.
+
+Gates: worker Release build; CTest 113/113 passed; `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` passed; contract/coverage verifiers passed.
+
+## MODELING CORRECTNESS P4 — BOOLEAN INTERSECT VERTICAL (2026-08-12) — COMPLETE
+
+- [x] C++ standalone fixtures: overlap, containment, identity, face/edge/vertex touching refusal (`worker/tests/test_boolean_intersect.cpp`). CTest 114/114.
+- [x] Rust real-worker tests: preview/commit parity, disjoint refusal, save/reopen, undo restoration (`src-tauri/tests/preview_boolean.rs`).
+- [x] Frontend + Playwright: Intersect tool selection, target/tool pick, Apply, single body row; added `data-testid` to boolean op chip buttons.
+
+## MODELING CORRECTNESS P4 — REMAINING COVERAGE (2026-08-12) — COMPLETE
+
+- [x] MirrorBody Playwright flow (`e2e/mirror-body.spec.ts`).
+- [x] Linear/Circular Pattern Playwright flows (`e2e/linear-pattern.spec.ts`, `e2e/circular-pattern.spec.ts`).
+- [x] Critical mode closure tests: Extrude/Revolve overflow hide Intersect; Mirror/Pattern chips have no fuse/union toggle (`src/features/toolbar/ModelToolChips.test.tsx`).
+- [x] Real-worker corpus executor (`src-tauri/tests/corpus_executor.rs`): enumerates all `corpus/cases/*.json`, executes `a_sketch_extrude_blind` end-to-end (volume within tolerance), and records explicit unsupported reasons for the rest. Zero unclassified files.
+
+Gates: worker Release build; CTest 114/114; `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` passed; TypeScript / Vitest passed; contract/coverage verifiers passed; targeted Playwright boolean/pattern/mirror specs 12/12 (Chromium + WebKit, retries 0). Full Playwright suite not re-run yet; prior unrelated `unsaved-guard` / `view-ux` flakes remain the only known blockers.
+
+## MODELING CORRECTNESS P2 GATE (2026-08-12) — AUTOMATED LANES PASSED; MANUAL TAURI SMOKE OPEN
+
+- [x] Build worker Release against pinned OCCT 8.0.1 fingerprint `0a6a1dce34181289`.
+- [x] CTest 113/113 passed.
+- [x] Cargo fmt/clippy/workspace tests with `ONECAD_REQUIRE_WORKER=1` all passed.
+- [x] Kernelbench T0 both backends: 136 records, 0 gating failures, replay 136 stable, metamorph 48 passed, differential same-status 136. Summary matches baseline except timing.
+- [x] TypeScript check, production build, Vitest 241 files / 4116 tests passed.
+- [x] Playwright zero retries: Chromium 196/196 passed, WebKit 196/196 passed.
+- [ ] Manual Tauri smoke (open project → extrude → fillet → undo → save → reopen) still owed; no automated equivalent exists.
+
+Fixed P2 region-identity regression found by real-worker gate:
+- `src-tauri/tests/sketch_on_face.rs`: `region_extrude_record` now authors `region_identity_version: 2` so fragmented projected regions resolve under the V2 exact-profile detector.
+- `src-tauri/tests/wire_contract.rs`: `nested_inner_disk_parity_and_reopen_stability` now sets `region_identity_version: 2` when binding the exact disk/annulus region ids.
+
 ## MODEL-CORRECTNESS-P0 + REF-OWNERSHIP-AND-SNAPSHOT P1 (2026-08-11) — COMPLETE
 
 - [x] P0 — deferred replacement guard; authoritative `SaveOutcome`; classified terminals; zero-solid Boolean refusal; circular `angle / count`; semantic Draft refusal; per-session preview ownership; Boolean re-arm.
@@ -1691,12 +1730,21 @@ The cross-language half: the worker can now execute a `schemaVersion: 2` case, a
 ### Gate — M2 part 2
 `ctest` **107/107** on the pinned OCCT 8.0.1 worker (106 → 107, the new `kernelbench_case_v2`) · `cargo fmt --all --check` · workspace `clippy -D warnings` clean · kernelbench **56 lib + 5 integration** (50 → 56) · `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` **1032 passed / 0 failed** across 73 targets against the pinned worker (1000 → 1032) · **T0 both-backend UNCHANGED: 136/136 pass, replay 136 stable, metamorph 48 pass / 0 fail / 16 notRun, differential 136 same-status, `gatingFailures: 0`** · **M1 both-backend: 120 records, 114 pass + 6 characterization (the near-tangent exploratory refusals), replay 120 stable, metamorph 72 pass / 0 fail, differential 120 same-status, `gatingFailures: 0`, p50 10.3 ms / p95 62.3 ms** · the committed v2 example executes through `run-case` on both backends, pass + replay-stable · ajv-valid under Draft 2020-12.
 
-### M3 — metamorph execution (NEXT, unstarted)
-- [ ] `VariantSpec` (`worker/src/benchmark/Types.h`) and `suite::Variant` carry only translation + rotation. The v2 metamorph set is expressible in the schema and validated on BOTH sides already — mirror, uniformScale, farOriginTranslation, parameterEpsilon, edgeOrderPermutation, contourSeed — but none of them are executed. Widening that pair is the work.
-- [ ] `apply_variant` (`Geometry.cpp`) needs the mirror and uniform-scale transforms, and `metamorph.rs` needs the matching inverse so the shape-signature comparison stays genuine rather than fabricated (see KBR-0: that evidence was fabricated once already).
-- [ ] `parameterEpsilon` is not a shape transform — it perturbs the requested radius, so it belongs on the request side, not in `apply_variant`.
-- [ ] `edgeOrderPermutation` / `contourSeed` reorder the SELECTION, not the geometry; they exercise the selector's order-independence.
-- [ ] Gate: T0 must stay 136/136 with `gatingFailures: 0`, and `m1` must stay at 0 gating failures with the new variants included.
+### M3 — metamorph execution (DONE)
+
+- [x] `VariantSpec` (`worker/src/benchmark/Types.h`) and `suite::Variant` widened to the full v2 metamorph set: `translation`, `rotation`, `mirror`, `scale`, `parameterEpsilon`, `edgeOrderPermutation`, `contourSeed`, plus `farOriginTranslation`. All fields serialize/deserialize on both sides with strict unknown-field rejection.
+- [x] `apply_variant` (`Geometry.cpp`) implements mirror (about volume center or explicit center), uniform scale (about volume center or explicit center), and keeps the existing translation/rotation. `edgeOrderPermutation` and `contourSeed` reorder `selected_edges`, exercising selector order-independence.
+- [x] `metamorph.rs` inverse-transforms mirror, scale, far-origin translation, rotation, and translation; identity no-ops for parameterEpsilon/edgeOrderPermutation/contourSeed. Shape-signature comparison is genuine, not fabricated.
+- [x] `parameterEpsilon` is handled on the request side: `Execution.cpp` multiplies the effective fillet radius by `(1 + relativeDelta)` when the variant requests it.
+- [x] `fillet/matrix:m1` preset includes the rigid/isometric metamorphs (translation, far-origin translation, rotation, mirror, edge-order permutation, contour seed). `uniformScale` and `parameterEpsilon` are expressible in the schema and runnable via `run-case`, but are NOT included in `m1` because they intentionally change mass properties and so fail the current metamorphic-equivalence gate (which compares volume/area exactly).
+- [x] Gate passed: T0 **136/136** pass, replay stable, metamorph 48 pass / 0 fail / 16 notRun, differential same-status, `gatingFailures: 0`. `fillet/matrix:m1` **264 records** (24 base cases + 18 supported × 6 variants), **258 pass + 6 characterization**, replay stable 264, metamorph 216 pass / 0 fail, differential same-status, `gatingFailures: 0`. p50 **10.9 ms** / p95 **69.3 ms** (macOS AppleClang, Release worker, debug supervisor).
+- [x] Manifest baselines updated: `bench/robustness/baselines/digests.json` now records 136 T0 rows + 264 m1 rows for `darwin-arm64`; `semantics.json` records both suites.
+
+### M3.5 — non-isometric metamorph policy (OPEN)
+- [ ] Decide how `uniformScale` and `parameterEpsilon` should gate. Options: scale the compared mass properties by `factor³`/`factor²` in the campaign; relax the metamorphic-equivalence tolerance for epsilon; or treat them as separate robustness probes with their own validator instead of `metamorphicEquivalence`.
+- [ ] Once the policy is decided, add `uniformScale` and `parameterEpsilon` back to the `m1` preset and record updated baselines.
+
+### Then — see HANDOFF.md for the resume recipe
 
 ### Then — see HANDOFF.md for the resume recipe
 M3 metamorph execution (the v2 metamorph set — mirror, uniformScale, farOriginTranslation, parameterEpsilon, edgeOrderPermutation, contourSeed — is expressible and validated on both sides but only translation/rotation are EXECUTED) → M4 failure taxonomy + the recipe-agnostic validators (`supportTangency`, `crossSectionProfile`, `noSelfIntersection`, `manifold`, `toleranceGrowth`, `microTopology`), which is what unblocks required validators on curved-support pairs → M5 `--jobs/--shard/--resume` → M6 minimizer + regression promotion → M7 SQLite ingest + static HTML dashboard → M8 large characterization campaign incl. the `scaleBand` sweep (production fillet algorithms still UNTOUCHED) → M9 baseline KPIs → M10 `FilletBuilder(FilletDefinition)` → M11 OCCT capability spike → M12 variable radius → M13 critical-radius diagnostics → M14 second campaign → M15 first evidence-driven rescue strategy → M16 measure rescue improvement → M17 chord width / verified G2 / overflow / corners → M18 Shapr3D goldens → M19 DirectEditPlanner + reblend. KBR case-v1 stays frozen.

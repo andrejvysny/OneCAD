@@ -134,6 +134,7 @@ function ApplyButton() {
   return (
     <button
       type="button"
+      data-testid="chip-apply"
       onClick={() => toolChipStore.getState().onApply?.()}
       className="rounded-full bg-accent px-2 py-1 text-[11.5px] font-medium text-on-accent hover:opacity-90"
     >
@@ -656,6 +657,7 @@ export function ModelToolChips() {
           options={PATTERN_AXES}
           active={axis}
           label="Pattern axis"
+          testid={(a) => `chip-pattern-axis-${a.toLowerCase()}`}
           onPick={(a) => toolChipStore.getState().onAxis?.(a)}
         />
         <CountStepper count={count} onCount={(n) => toolChipStore.getState().onCount?.(n)} />
@@ -670,6 +672,7 @@ export function ModelToolChips() {
           options={PATTERN_AXES}
           active={axis}
           label="Pattern axis"
+          testid={(a) => `chip-pattern-axis-${a.toLowerCase()}`}
           onPick={(a) => toolChipStore.getState().onAxis?.(a)}
         />
         <CountStepper count={count} onCount={(n) => toolChipStore.getState().onCount?.(n)} />
@@ -707,6 +710,7 @@ export function ModelToolChips() {
           options={MIRROR_PLANES}
           active={plane}
           label="Mirror plane"
+          testid={(p) => `chip-mirror-plane-${p.toLowerCase()}`}
           onPick={(p) => toolChipStore.getState().onPlane?.(p)}
         />
         <ApplyButton />
@@ -721,6 +725,7 @@ export function ModelToolChips() {
             <button
               key={o}
               type="button"
+              data-testid={`chip-boolean-${o.toLowerCase()}`}
               onClick={() => toolChipStore.getState().onOp?.(o)}
               className={cn(
                 "px-2 py-1 text-[11.5px] font-medium",

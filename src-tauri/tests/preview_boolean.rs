@@ -34,6 +34,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tempfile::TempDir;
 use uuid::Uuid;
 
 use onecad_core::document::record::{
@@ -44,6 +45,7 @@ use onecad_core::document::refs::SketchRegionRef;
 use onecad_core::document::variables::Scalar;
 use onecad_core::edit::EditCommand;
 use onecad_core::ids::{BodyId, ConstraintId, EntityId, RecordId, RegionId, SketchId};
+use onecad_core::io::container::SaveMeta;
 use onecad_core::math::{Vec2, Vec3};
 use onecad_core::regen::{CancelToken, GeometryEngine, Lod, ModelSnapshot, Outcome, RegenRequest};
 use onecad_core::sketch::{Constraint, CurvePosition, Sketch, SketchEntity, WorldPlane};
@@ -95,6 +97,15 @@ fn runtime_over(wm: &WorkerManager) -> DocumentRuntime {
     let meshes: Arc<dyn MeshProvider> = Arc::new(wm.clone());
     let solver: Arc<dyn SolverEngine> = Arc::new(wm.clone());
     DocumentRuntime::new_blank(engine, meshes, solver)
+}
+
+fn save_meta() -> SaveMeta {
+    SaveMeta {
+        app_version: "0.1.0-test".into(),
+        occt_fingerprint: Some("occt-8.0.1".into()),
+        created: "2026-08-12T00:00:00Z".into(),
+        modified: "2026-08-12T00:00:00Z".into(),
+    }
 }
 
 fn add_op(rt: &mut DocumentRuntime, record: OperationRecord) {
@@ -359,13 +370,14 @@ async fn mesh_vol(rt: &mut DocumentRuntime, body: BodyId, lod: Lod) -> f64 {
     blob_volume(&mesh, "body mesh")
 }
 
-/// Build the two overlapping boxes (A NewBody, B NewBody) and regen to a published
-/// head. Returns `(rt, wm)` with the head containing exactly A and B.
+/// Build two boxes (A NewBody, B NewBody) with B's sketch offset along the overlap
+/// axis and regen to a published head. Returns `(rt, wm)`.
 ///
+/// With `sketch_b_x0 = 20.0`:
 /// A = worldX[-20,0] × worldY[0,40] × Z[0,25] = 20000.
 /// B = worldX[-20,0] × worldY[20,60] × Z[0,25] = 20000.
 /// A∩B = worldX[-20,0] × worldY[20,40] × Z[0,25] = 10000.
-async fn two_overlapping_boxes() -> (DocumentRuntime, WorkerManager) {
+async fn two_boxes(sketch_b_x0: f64) -> (DocumentRuntime, WorkerManager) {
     let bin = real_worker().expect("worker checked by caller");
     let wm = spawn_worker(bin).await;
     let mut rt = runtime_over(&wm);
@@ -380,7 +392,10 @@ async fn two_overlapping_boxes() -> (DocumentRuntime, WorkerManager) {
     let sb = SketchId(Uuid::from_u128(0xB));
     add_op(
         &mut rt,
-        sketch_record(SKETCH_B, &rect_sketch(sb, 0x2000, 20.0, 0.0, 40.0, 20.0)),
+        sketch_record(
+            SKETCH_B,
+            &rect_sketch(sb, 0x2000, sketch_b_x0, 0.0, 40.0, 20.0),
+        ),
     );
     add_op(&mut rt, extrude_record(EXTRUDE_B, sb, 25.0));
 
@@ -388,7 +403,7 @@ async fn two_overlapping_boxes() -> (DocumentRuntime, WorkerManager) {
     assert_eq!(
         published(&base, "two boxes").bodies.len(),
         2,
-        "the head is exactly the two disjoint-then-overlapping boxes"
+        "the head is exactly the two boxes"
     );
     let vol_a = mesh_vol(&mut rt, body_of(EXTRUDE_A), Lod::Coarse).await;
     let vol_b = mesh_vol(&mut rt, body_of(EXTRUDE_B), Lod::Coarse).await;
@@ -396,6 +411,11 @@ async fn two_overlapping_boxes() -> (DocumentRuntime, WorkerManager) {
     assert!((vol_b - 20000.0).abs() < 1.0, "box B is 20000, got {vol_b}");
 
     (rt, wm)
+}
+
+/// Convenience wrapper for the standard overlapping pair.
+async fn two_overlapping_boxes() -> (DocumentRuntime, WorkerManager) {
+    two_boxes(20.0).await
 }
 
 /// Shared body: preview a standalone `op` (target=A, tool=B), assert the
@@ -516,4 +536,149 @@ async fn boolean_cut_preview_matches_the_commit() {
     }
     // A − (A∩B) = 20000 − 10000 = 10000.
     run_preview_then_commit(BooleanOp::Cut, 10_000.0, "Cut").await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3. Intersect vertical evidence (P4).
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn boolean_intersect_preview_matches_the_commit() {
+    if real_worker().is_none() {
+        eprintln!("skip: no worker binary (set ONECAD_WORKER_PATH)");
+        return;
+    }
+    // A ∩ B = 10000.
+    run_preview_then_commit(BooleanOp::Intersect, 10_000.0, "Intersect").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn boolean_intersect_disjoint_refuses_and_preserves_both_bodies() {
+    let Some(_bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let (mut rt, wm) = two_boxes(80.0).await;
+    let target = body_of(EXTRUDE_A);
+    let tool = body_of(EXTRUDE_B);
+
+    add_op(
+        &mut rt,
+        boolean_record(OP_TAIL, BooleanOp::Intersect, target, tool),
+    );
+    let report = regen_all(&mut rt).await;
+    // A failed Boolean is surfaced as a Published snapshot that stops BEFORE the
+    // failed step, not as a fatal regen error.
+    let snapshot = published(&report, "head after refusal");
+    assert_eq!(
+        snapshot.step_index,
+        Some(3),
+        "disjoint Intersect stops at the last valid pre-boolean step"
+    );
+    assert_eq!(snapshot.bodies.len(), 2, "both bodies remain after refusal");
+    assert!(
+        snapshot.bodies.iter().any(|b| b.body == target),
+        "target remains"
+    );
+    assert!(
+        snapshot.bodies.iter().any(|b| b.body == tool),
+        "tool remains"
+    );
+    wm.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn boolean_intersect_save_reopen_preserves_result() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let (mut rt, wm) = two_overlapping_boxes().await;
+    let target = body_of(EXTRUDE_A);
+    let tool = body_of(EXTRUDE_B);
+
+    add_op(
+        &mut rt,
+        boolean_record(OP_TAIL, BooleanOp::Intersect, target, tool),
+    );
+    let snap = regen_all(&mut rt).await;
+    let after = published(&snap, "commit intersect");
+    assert_eq!(after.bodies.len(), 1, "Intersect leaves one body");
+    let committed_vol = mesh_vol(&mut rt, target, Lod::Coarse).await;
+
+    let tmp = TempDir::new().expect("temp dir");
+    let path = tmp.path().join("intersect.onecad");
+    rt.save(&path, save_meta()).expect("save");
+
+    let wm2 = spawn_worker(bin).await;
+    let engine2: Arc<dyn GeometryEngine> = Arc::new(wm2.clone());
+    let meshes2: Arc<dyn MeshProvider> = Arc::new(wm2.clone());
+    let solver2: Arc<dyn SolverEngine> = Arc::new(wm2.clone());
+    let mut rt2 = DocumentRuntime::open(&path, engine2, meshes2, solver2).expect("reopen");
+    let snap2 = regen_all(&mut rt2).await;
+    let reopened = published(&snap2, "reopened intersect");
+    assert_eq!(
+        reopened.bodies.len(),
+        1,
+        "reopened Intersect leaves one body"
+    );
+    let reopened_vol = mesh_vol(&mut rt2, target, Lod::Coarse).await;
+    assert!(
+        (reopened_vol - committed_vol).abs() < 1.0,
+        "reopen volume stable: {reopened_vol} vs {committed_vol}"
+    );
+
+    wm2.shutdown().await;
+    wm.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn boolean_intersect_undo_restores_target_and_tool() {
+    let Some(_bin) = real_worker() else {
+        eprintln!("skip: no worker binary");
+        return;
+    };
+    let (mut rt, wm) = two_overlapping_boxes().await;
+    let target = body_of(EXTRUDE_A);
+    let tool = body_of(EXTRUDE_B);
+
+    let _before = rt
+        .subscribe_snapshots()
+        .borrow()
+        .clone()
+        .expect("head before intersect");
+    add_op(
+        &mut rt,
+        boolean_record(OP_TAIL, BooleanOp::Intersect, target, tool),
+    );
+    let snap = regen_all(&mut rt).await;
+    let after = published(&snap, "commit intersect");
+    assert_eq!(after.bodies.len(), 1, "Intersect leaves one body");
+
+    // Roll back past the Boolean (4 ops: two sketches + two extrudes).
+    rt.apply(EditCommand::SetRollback { cursor: 4 })
+        .expect("rollback before boolean");
+    let undo_snap = regen_all(&mut rt).await;
+    let undone = published(&undo_snap, "undo intersect");
+
+    assert_eq!(undone.bodies.len(), 2, "undo restores both bodies");
+    assert!(
+        undone.bodies.iter().any(|b| b.body == target),
+        "target restored"
+    );
+    assert!(
+        undone.bodies.iter().any(|b| b.body == tool),
+        "tool restored"
+    );
+    let vol_a = mesh_vol(&mut rt, target, Lod::Coarse).await;
+    let vol_b = mesh_vol(&mut rt, tool, Lod::Coarse).await;
+    assert!(
+        (vol_a - 20000.0).abs() < 1.0,
+        "target volume restored, got {vol_a}"
+    );
+    assert!(
+        (vol_b - 20000.0).abs() < 1.0,
+        "tool volume restored, got {vol_b}"
+    );
+    wm.shutdown().await;
 }

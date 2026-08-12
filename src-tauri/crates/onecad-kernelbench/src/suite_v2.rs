@@ -47,7 +47,10 @@ use crate::case_v2::{
     SelectorV2, SizeType, SupportSurface, SurfaceDescriptorV2, SurfaceKindV2, TopologyRoleV2,
     ValidatorTypeV2, ValidatorV2, SCHEMA_VERSION_V2,
 };
-use crate::suite::{GeneratedCase, SplitMix64, Variant, VariantName};
+use crate::suite::{
+    ContourSeed, EdgeOrderPermutation, GeneratedCase, Mirror, ParameterEpsilon, Rotation, Scale,
+    SplitMix64, Variant, VariantName,
+};
 
 const SEED: u64 = 0x6f6e_6563_6164_6d31;
 /// Extrusion length of every prismatic pair, and the frustum's height.
@@ -91,12 +94,25 @@ impl Pair {
 pub fn m1() -> Vec<GeneratedCase> {
     let mut result = Vec::new();
     for case in base_cases() {
-        let metamorphic = matches!(case.expected_domain, ExpectedDomain::Supported);
         let prepared = case.prepared();
-        result.push(generated(prepared.clone(), VariantName::Base));
-        if metamorphic {
-            result.push(generated(prepared.clone(), VariantName::Translated));
-            result.push(generated(prepared, VariantName::Rotated));
+        result.push(generated(
+            prepared.clone(),
+            Variant {
+                name: VariantName::Base,
+                translation: None,
+                rotation: None,
+                mirror: None,
+                scale: None,
+                parameter_epsilon: None,
+                edge_order_permutation: None,
+                contour_seed: None,
+            },
+        ));
+        for metamorph in &prepared.metamorphs {
+            result.push(generated(
+                prepared.clone(),
+                variant_from_metamorph(metamorph),
+            ));
         }
     }
     result
@@ -357,26 +373,103 @@ fn metamorphs(domain: ExpectedDomain) -> Vec<MetamorphV2> {
         MetamorphV2::Translation {
             vector: [1000.0, -2000.0, 3000.0],
         },
+        MetamorphV2::FarOriginTranslation {
+            vector: [1_000_000.0, 2_000_000.0, 3_000_000.0],
+        },
         MetamorphV2::Rotation {
             angle_degrees: 17.137,
             axis: [1.0, 2.0, 3.0],
             center: RotationCenterV2::InputCentroid,
         },
+        MetamorphV2::Mirror {
+            normal: [1.0, 0.0, 0.0],
+            center: RotationCenterV2::InputCentroid,
+        },
+        MetamorphV2::EdgeOrderPermutation { order: vec![0] },
+        MetamorphV2::ContourSeed { anchor_index: 0 },
     ]
 }
 
-fn generated(case: crate::prepared::PreparedCase, name: VariantName) -> GeneratedCase {
-    let translation = matches!(name, VariantName::Translated).then_some([1000.0, -2000.0, 3000.0]);
-    let rotation = matches!(name, VariantName::Rotated).then_some(crate::suite::Rotation {
-        axis: [1.0, 2.0, 3.0],
-        angle_degrees: 17.137,
-    });
-    GeneratedCase {
-        case,
-        variant: Variant {
-            name,
-            translation,
-            rotation,
+fn generated(case: crate::prepared::PreparedCase, variant: Variant) -> GeneratedCase {
+    GeneratedCase { case, variant }
+}
+
+fn variant_from_metamorph(metamorph: &MetamorphV2) -> Variant {
+    let base = Variant {
+        name: VariantName::Base,
+        translation: None,
+        rotation: None,
+        mirror: None,
+        scale: None,
+        parameter_epsilon: None,
+        edge_order_permutation: None,
+        contour_seed: None,
+    };
+    match metamorph {
+        MetamorphV2::Translation { vector } => Variant {
+            name: VariantName::Translated,
+            translation: Some(*vector),
+            ..base
+        },
+        MetamorphV2::FarOriginTranslation { vector } => Variant {
+            name: VariantName::FarOriginTranslated,
+            translation: Some(*vector),
+            ..base
+        },
+        MetamorphV2::Rotation {
+            angle_degrees,
+            axis,
+            ..
+        } => Variant {
+            name: VariantName::Rotated,
+            rotation: Some(Rotation {
+                axis: *axis,
+                angle_degrees: *angle_degrees,
+            }),
+            ..base
+        },
+        MetamorphV2::Mirror { normal, .. } => Variant {
+            name: VariantName::Mirrored,
+            mirror: Some(Mirror {
+                normal: *normal,
+                center: None,
+            }),
+            ..base
+        },
+        MetamorphV2::UniformScale { factor, .. } => Variant {
+            name: VariantName::Scaled,
+            scale: Some(Scale {
+                factor: *factor,
+                center: None,
+            }),
+            ..base
+        },
+        MetamorphV2::ParameterEpsilon {
+            parameter,
+            relative_delta,
+        } => Variant {
+            name: VariantName::ParameterEpsilon,
+            parameter_epsilon: Some(ParameterEpsilon {
+                parameter: match parameter {
+                    crate::case_v2::EpsilonParameter::OperationRadius => "operation.radius".into(),
+                },
+                relative_delta: *relative_delta,
+            }),
+            ..base
+        },
+        MetamorphV2::EdgeOrderPermutation { order } => Variant {
+            name: VariantName::EdgeOrderPermutation,
+            edge_order_permutation: Some(EdgeOrderPermutation {
+                order: order.clone(),
+            }),
+            ..base
+        },
+        MetamorphV2::ContourSeed { anchor_index } => Variant {
+            name: VariantName::ContourSeed,
+            contour_seed: Some(ContourSeed {
+                anchor_index: *anchor_index,
+            }),
+            ..base
         },
     }
 }
@@ -419,8 +512,11 @@ mod tests {
         let cases = m1();
         // 3 prismatic pairs x (5 supported + 2 exploratory) + 3 cone cases.
         assert_eq!(base_cases().len(), 24);
-        // Supported cases carry two metamorphic variants each.
-        assert_eq!(cases.len(), 24 + 2 * 18);
+        // Supported cases carry six metamorphic variants each (translation,
+        // far-origin translation, rotation, mirror, edge-order permutation,
+        // contour seed). Uniform scale and parameter epsilon are supported by
+        // the schema but not yet included in this preset.
+        assert_eq!(cases.len(), 24 + 6 * 18);
         let mut ids: Vec<_> = base_cases().into_iter().map(|case| case.case_id).collect();
         ids.sort();
         ids.dedup();
