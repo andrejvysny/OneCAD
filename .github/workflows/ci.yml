@@ -64,6 +64,7 @@ jobs:
         run: |
           node scripts/verify-modeling-coverage.mjs
           scripts/tests/verify-modeling-coverage.test.sh
+          node scripts/verify-modeling-contracts.mjs
 
   linux-worker:
     name: linux-worker

@@ -1,5 +1,42 @@
 # OneCAD-Tauri Migration TODO
 
+## MODELING CORRECTNESS P3 — PUBLICATION POLICY (2026-08-12) — COMPLETE
+
+- [x] Machine-readable per-operation contract rows: `docs/qa/modeling-operation-contracts.json` (35 rows / 16 operations) covering support status, validation tier, body lifecycle, empty/multi-solid semantics, and `uiExposure`.
+- [x] Transform policy row; wired `TransformBody` through the common `publication_decision` Tier A validator (`worker/src/ops/TransformOp.cpp`).
+- [x] ImportStep policy row and explicit invalid-solid warning exception documented in contracts.
+- [x] UI mode disposition recorded: Revolve Intersect, Mirror fuse, Extrude Intersect hidden; Pattern fuse hidden; Transform move/copy exposed; OffsetFace Total/Diameter deferred.
+- [x] `scripts/verify-modeling-contracts.mjs` validates schema, required fields, uniqueness, and coverage-manifest cross-reference.
+
+Gates: worker Release build; CTest 113/113 passed; `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` passed; contract/coverage verifiers passed.
+
+## MODELING CORRECTNESS P4 — BOOLEAN INTERSECT VERTICAL (2026-08-12) — COMPLETE
+
+- [x] C++ standalone fixtures: overlap, containment, identity, face/edge/vertex touching refusal (`worker/tests/test_boolean_intersect.cpp`). CTest 114/114.
+- [x] Rust real-worker tests: preview/commit parity, disjoint refusal, save/reopen, undo restoration (`src-tauri/tests/preview_boolean.rs`).
+- [x] Frontend + Playwright: Intersect tool selection, target/tool pick, Apply, single body row; added `data-testid` to boolean op chip buttons.
+
+## MODELING CORRECTNESS P4 — REMAINING COVERAGE (2026-08-12) — OPEN
+
+- [x] MirrorBody Playwright flow (`e2e/mirror-body.spec.ts`).
+- [x] Linear/Circular Pattern Playwright flows (`e2e/linear-pattern.spec.ts`, `e2e/circular-pattern.spec.ts`).
+- [ ] Critical mode closure tests.
+- [ ] Real-worker corpus executor.
+
+## MODELING CORRECTNESS P2 GATE (2026-08-12) — AUTOMATED LANES PASSED; MANUAL TAURI SMOKE OPEN
+
+- [x] Build worker Release against pinned OCCT 8.0.1 fingerprint `0a6a1dce34181289`.
+- [x] CTest 113/113 passed.
+- [x] Cargo fmt/clippy/workspace tests with `ONECAD_REQUIRE_WORKER=1` all passed.
+- [x] Kernelbench T0 both backends: 136 records, 0 gating failures, replay 136 stable, metamorph 48 passed, differential same-status 136. Summary matches baseline except timing.
+- [x] TypeScript check, production build, Vitest 241 files / 4116 tests passed.
+- [x] Playwright zero retries: Chromium 196/196 passed, WebKit 196/196 passed.
+- [ ] Manual Tauri smoke (open project → extrude → fillet → undo → save → reopen) still owed; no automated equivalent exists.
+
+Fixed P2 region-identity regression found by real-worker gate:
+- `src-tauri/tests/sketch_on_face.rs`: `region_extrude_record` now authors `region_identity_version: 2` so fragmented projected regions resolve under the V2 exact-profile detector.
+- `src-tauri/tests/wire_contract.rs`: `nested_inner_disk_parity_and_reopen_stability` now sets `region_identity_version: 2` when binding the exact disk/annulus region ids.
+
 ## MODEL-CORRECTNESS-P0 + REF-OWNERSHIP-AND-SNAPSHOT P1 (2026-08-11) — COMPLETE
 
 - [x] P0 — deferred replacement guard; authoritative `SaveOutcome`; classified terminals; zero-solid Boolean refusal; circular `angle / count`; semantic Draft refusal; per-session preview ownership; Boolean re-arm.

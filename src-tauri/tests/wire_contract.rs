@@ -1933,6 +1933,7 @@ async fn nested_inner_disk_parity_and_reopen_stability() {
         unreachable!();
     };
     params.profile.as_mut().unwrap().region = RegionId::new(disk.region_id.clone());
+    params.profile.as_mut().unwrap().region_identity_version = Some(2);
     candidate.inputs = candidate.op.derive_inputs();
 
     let preview = wm
@@ -1988,6 +1989,11 @@ async fn nested_inner_disk_parity_and_reopen_stability() {
         unreachable!();
     };
     annulus_params.profile.as_mut().unwrap().region = RegionId::new(annulus.region_id.clone());
+    annulus_params
+        .profile
+        .as_mut()
+        .unwrap()
+        .region_identity_version = Some(2);
     annulus_rec.inputs = annulus_rec.op.derive_inputs();
     add_op(&mut rt, annulus_rec);
     published(&regen_all(&mut rt).await, "commit annulus extrude");
