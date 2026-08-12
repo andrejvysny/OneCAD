@@ -187,7 +187,11 @@ export async function rebindCandidate(
     errorHint(REPAIR_NOT_REBINDABLE);
     return false;
   }
-  const bodyId = deriveOperatedBody(item);
+  // The candidate's own authoritative body (denormalized from `ResolveRefResult.
+  // bodyId` — see `ResolveCandidate.bodyId`) always wins over the item's stored
+  // `bodyId`, which names the body a feature HISTORICALLY operated on and can be
+  // stale by the time a candidate is resolved and picked.
+  const bodyId = candidate.bodyId ?? deriveOperatedBody(item);
   if (!bodyId) {
     const bodyCount = Object.keys(documentStore.getState().bodies).length;
     errorHint(

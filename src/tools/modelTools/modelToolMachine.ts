@@ -1232,11 +1232,21 @@ export interface CircularPatternFsm {
   axis: PatternAxis;
   count: number;
   angle: number;
+  /** Axis origin — no chip control seeds it (a fresh arm is always world origin);
+   *  a re-edit seeds it from the stored feature so a non-origin axis survives. */
+  origin: [number, number, number];
   bodyId: string | null;
 }
 
 export type CircularPatternEvent =
-  | { kind: "arm"; bodyId?: string; axis?: PatternAxis; count?: number; angle?: number }
+  | {
+      kind: "arm";
+      bodyId?: string;
+      axis?: PatternAxis;
+      count?: number;
+      angle?: number;
+      origin?: [number, number, number];
+    }
   | { kind: "setAxis"; axis: PatternAxis }
   | { kind: "setCount"; count: number }
   | { kind: "setAngle"; angle: number }
@@ -1257,7 +1267,14 @@ function clampCircularAngle(a: number): number {
 }
 
 export function circularPatternInit(): CircularPatternFsm {
-  return { phase: "idle", axis: "Z", count: DEFAULT_PATTERN_COUNT, angle: DEFAULT_CIRCULAR_ANGLE, bodyId: null };
+  return {
+    phase: "idle",
+    axis: "Z",
+    count: DEFAULT_PATTERN_COUNT,
+    angle: DEFAULT_CIRCULAR_ANGLE,
+    origin: [0, 0, 0],
+    bodyId: null,
+  };
 }
 
 export function circularPatternStep(s: CircularPatternFsm, e: CircularPatternEvent): CircularPatternStep {
@@ -1270,6 +1287,7 @@ export function circularPatternStep(s: CircularPatternFsm, e: CircularPatternEve
           axis: e.axis ?? "Z",
           count: clampCount(e.count ?? DEFAULT_PATTERN_COUNT),
           angle: clampCircularAngle(e.angle ?? DEFAULT_CIRCULAR_ANGLE),
+          origin: e.origin ?? [0, 0, 0],
           bodyId: e.bodyId,
         },
         effect: "ghost",
@@ -1305,11 +1323,14 @@ export type MirrorPlane = "XY" | "XZ" | "YZ";
 export interface MirrorFsm {
   phase: ConfigPhase;
   plane: MirrorPlane;
+  /** Plane point — no chip control seeds it (a fresh arm is always world origin);
+   *  a re-edit seeds it from the stored feature so an offset plane survives. */
+  planePoint: [number, number, number];
   bodyId: string | null;
 }
 
 export type MirrorEvent =
-  | { kind: "arm"; bodyId?: string; plane?: MirrorPlane }
+  | { kind: "arm"; bodyId?: string; plane?: MirrorPlane; planePoint?: [number, number, number] }
   | { kind: "setPlane"; plane: MirrorPlane }
   | { kind: "apply" }
   | { kind: "settle" }
@@ -1321,14 +1342,22 @@ export interface MirrorStep {
 }
 
 export function mirrorInit(): MirrorFsm {
-  return { phase: "idle", plane: "XY", bodyId: null };
+  return { phase: "idle", plane: "XY", planePoint: [0, 0, 0], bodyId: null };
 }
 
 export function mirrorStep(s: MirrorFsm, e: MirrorEvent): MirrorStep {
   switch (e.kind) {
     case "arm":
       if (!e.bodyId) return { state: mirrorInit(), effect: "none" };
-      return { state: { phase: "armed", plane: e.plane ?? "XY", bodyId: e.bodyId }, effect: "ghost" };
+      return {
+        state: {
+          phase: "armed",
+          plane: e.plane ?? "XY",
+          planePoint: e.planePoint ?? [0, 0, 0],
+          bodyId: e.bodyId,
+        },
+        effect: "ghost",
+      };
     case "setPlane":
       if (s.phase !== "armed") return { state: s, effect: "none" };
       return { state: { ...s, plane: e.plane }, effect: "ghost" };

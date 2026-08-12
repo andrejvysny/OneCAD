@@ -143,6 +143,21 @@ function ApplyButton() {
   );
 }
 
+/** The ✕ half shared by every chip that offers an explicit cancel. */
+function CancelButton({ onCancel }: { onCancel?: () => void }) {
+  return (
+    <button
+      type="button"
+      data-testid="chip-cancel"
+      aria-label="Cancel"
+      onClick={() => onCancel?.()}
+      className="rounded-full bg-chip px-2 py-1 text-[11.5px] font-medium text-ink-3 hover:bg-hover-2"
+    >
+      ✕
+    </button>
+  );
+}
+
 /** The shared ✓/✕ commit/cancel pair on the armed extrude / revolve cluster. */
 function ConfirmButtons({ onConfirm, onCancel }: { onConfirm?: () => void; onCancel?: () => void }) {
   return (
@@ -156,15 +171,7 @@ function ConfirmButtons({ onConfirm, onCancel }: { onConfirm?: () => void; onCan
       >
         ✓
       </button>
-      <button
-        type="button"
-        data-testid="chip-cancel"
-        aria-label="Cancel"
-        onClick={() => onCancel?.()}
-        className="rounded-full bg-chip px-2 py-1 text-[11.5px] font-medium text-ink-3 hover:bg-hover-2"
-      >
-        ✕
-      </button>
+      <CancelButton onCancel={onCancel} />
     </>
   );
 }
@@ -663,6 +670,7 @@ export function ModelToolChips() {
         <CountStepper count={count} onCount={(n) => toolChipStore.getState().onCount?.(n)} />
         {numericChip(LENGTH_SUFFIX)}
         <ApplyButton />
+        <CancelButton onCancel={() => toolChipStore.getState().onCancel?.()} />
       </>,
     );
   } else if (kind === "circularPattern") {
@@ -678,6 +686,7 @@ export function ModelToolChips() {
         <CountStepper count={count} onCount={(n) => toolChipStore.getState().onCount?.(n)} />
         {numericChip("°")}
         <ApplyButton />
+        <CancelButton onCancel={() => toolChipStore.getState().onCancel?.()} />
       </>,
     );
   } else if (kind === "transform") {
@@ -714,6 +723,7 @@ export function ModelToolChips() {
           onPick={(p) => toolChipStore.getState().onPlane?.(p)}
         />
         <ApplyButton />
+        <CancelButton onCancel={() => toolChipStore.getState().onCancel?.()} />
       </>,
     );
   } else {
@@ -737,6 +747,7 @@ export function ModelToolChips() {
           ))}
         </div>
         <ApplyButton />
+        <CancelButton onCancel={() => toolChipStore.getState().onCancel?.()} />
       </>,
     );
   }

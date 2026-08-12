@@ -657,4 +657,21 @@ describe("ModelToolController commit gesture (Wave 1)", () => {
       },
     });
   });
+
+  // ── WP0 red test — click-away must NOT commit ───────────────────────────────
+
+  it("clicking away from the chip does not commit an armed extrude", async () => {
+    build();
+    await armExtrude();
+    const endCallsBefore = clientMock.endPreview.mock.calls.length;
+
+    // A true click away from any chip/toolbar target.
+    window.dispatchEvent(new MouseEvent("pointerdown", { clientX: 10, clientY: 10, button: 0, bubbles: true }));
+    window.dispatchEvent(new MouseEvent("pointerup", { clientX: 10, clientY: 10, button: 0, bubbles: true }));
+    await flush();
+
+    // The click-away commit path must not exist: no preview session committed.
+    const endCallsAfter = clientMock.endPreview.mock.calls.length;
+    expect(endCallsAfter).toBe(endCallsBefore);
+  });
 });

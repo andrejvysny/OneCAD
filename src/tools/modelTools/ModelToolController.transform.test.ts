@@ -467,4 +467,29 @@ describe("ModelToolController placement (TransformBody)", () => {
     await flush();
     expect(lastOp().featureId).toBe("feat-mv");
   });
+
+  // ── WP0 red test — copy result selection ────────────────────────────────────
+
+  it("selects created copies (not sources) when copy is true", async () => {
+    build();
+    await armOn("body1");
+
+    clientMock.applyOperation.mockResolvedValue({
+      revision: 2,
+      features: [],
+      changedBodies: [{ bodyId: "body1_copy", meshKey: "body1_copy#0" }],
+      removedBodies: [],
+    });
+
+    // Enable Copy.
+    toolChipStore.getState().onCopy?.(true);
+    await flush();
+
+    toolChipStore.getState().onConfirm!();
+    await flush();
+
+    const selectedIds = selectionStore.getState().selected.map((r) => r.id);
+    expect(selectedIds).not.toContain("body1");
+    expect(selectedIds).toContain("body1_copy");
+  });
 });

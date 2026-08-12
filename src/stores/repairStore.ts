@@ -69,8 +69,15 @@ export const repairStore = createStore<RepairState>()((set) => ({
     }
     set((s) => {
       // Event delivery is asynchronous. A late N event must never resurrect
-      // TopoKeys already superseded by a published N+1 repair set.
-      if (event.revision < s.revision) return s;
+      // TopoKeys already superseded by a published N+1 repair set — and within
+      // the SAME revision, a late/out-of-order snapshot must never overwrite a
+      // newer one, so ordering is lexicographic on (revision, snapshotId).
+      if (
+        event.revision < s.revision ||
+        (event.revision === s.revision && event.snapshotId < s.snapshotId)
+      ) {
+        return s;
+      }
       const cleared = event.items.length === 0;
       // Keep an expanded ref only if it still needs repair after the new event.
       const stillExpanded =

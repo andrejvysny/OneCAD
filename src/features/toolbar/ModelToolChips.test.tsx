@@ -116,6 +116,25 @@ describe("ModelToolChips (M6b)", () => {
     expect(onApply).toHaveBeenCalled();
   });
 
+  // ── WP0 red test — every armed model tool has a visible cancel control ───────
+
+  it.each([
+    { kind: "booleanOp", setup: () => toolChipStore.getState().showBoolean("Union", WORLD, vi.fn(), vi.fn()) },
+    {
+      kind: "linearPattern",
+      setup: () => toolChipStore.getState().showLinearPattern("X", 3, 20, WORLD, { onAxis: vi.fn(), onCount: vi.fn(), onSpacing: vi.fn(), onApply: vi.fn() }),
+    },
+    {
+      kind: "circularPattern",
+      setup: () => toolChipStore.getState().showCircularPattern("Z", 4, 360, WORLD, { onAxis: vi.fn(), onCount: vi.fn(), onAngle: vi.fn(), onApply: vi.fn() }),
+    },
+    { kind: "mirror", setup: () => toolChipStore.getState().showMirror("XY", WORLD, { onPlane: vi.fn(), onApply: vi.fn() }) },
+  ])("$kind chip has a visible cancel button", ({ setup }) => {
+    render(<ModelToolChips />);
+    act(() => setup());
+    expect(screen.getByRole("button", { name: /cancel|✕/i })).toBeInTheDocument();
+  });
+
   // ── MODEL-HARDEN Wave 1: the armed extrude / revolve commit cluster ─────────
 
   const extrudeHandlers = () => ({

@@ -16,13 +16,17 @@ export function sketchStatusText(status: SketchStatus, dof: number): { label: st
     case "error":
       return { label: `Conflicting · DOF ${dof}`, tone: "warn" };
     default:
+      // DOF 0 means no freedom remains, even while the solver status label lags
+      // behind (a transient "under" between the last solve and the next status
+      // flip) — never contradict the DOF count on the label.
+      if (dof === 0) return { label: `Fully constrained · DOF 0`, tone: "ok" };
       return { label: `Under-constrained · DOF ${dof}`, tone: "warn" };
   }
 }
 
 /** Inspector card body sentence. */
 export function sketchStatusSentence(status: SketchStatus, dof: number): string {
-  if (status === "ok") return "Sketch is fully defined.";
+  if (status === "ok" || dof === 0) return "Sketch is fully defined.";
   if (status === "over") return `Over-constrained by ${dof}. Remove a conflicting constraint.`;
   if (status === "error") return "Conflicting constraints. Remove one to resolve.";
   return `${dof} degrees of freedom remain. Add distance or coincident constraints to fully define.`;

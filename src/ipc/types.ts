@@ -528,6 +528,15 @@ export interface ResolveCandidate {
   summary: string;
   /** Per-feature score contributions (opaque; SCHEMA §9). */
   featureContributions?: unknown;
+  /**
+   * The authoritative body this candidate belongs to. NOT a wire field on
+   * `ResolveCandidateDto` — the backend only carries it once, on the parent
+   * `ResolveRefResult.bodyId` (SCHEMA §9), so the FE denormalizes it onto each
+   * candidate when building this list (`RepairPanel`), letting `rebindCandidate`
+   * promote against the body the resolve ladder actually enumerated instead of
+   * guessing from the (possibly stale) repair item.
+   */
+  bodyId?: string;
 }
 
 /**

@@ -1,5 +1,24 @@
 # OneCAD-Tauri Migration TODO
 
+## MODELING UX HARDENING — WP0 through WP6 (2026-08-12/13, plan `plans/modeling-ux-wp0.md` + `act-as-senior-software-linked-graham.md`) — FE GATE PASSED, ALL 19 DEFECTS CLOSED
+
+WP0 (red evidence, no production changes): frozen `src/test/contracts/modelingInteractionContract.ts` + 11 new red tests, one per confirmed defect (D7,D8,D9,D10,D11,D12,D13,D14,D17,D19 — 17 test cases). WP1+WP2 (2026-08-12) closed D9/D1/D2/D6(partial)/D13/D17; a follow-up pass (2026-08-13) closed the remaining D7/D8/D10/D11/D12/D14/D19. D6's structural refactor (`ToolChipState` discriminated union) remains the sole deliberate non-goal — no red test forces it, pure internal type-safety, its own dedicated pass.
+
+- [x] **D9** — `commitPattern` and `commitPreviewedOp`'s fallback branch check `res.errorMessage` before treating a resolved result as success.
+- [x] **D17 + D1** — boolean/linearPattern/circularPattern/mirror chips gained a visible ✕ (`CancelButton`), wired through `toolChipStore`'s `onCancel`.
+- [x] **D2** — click-away commit removed entirely (all tools).
+- [x] **D13** — shell re-edit chip no longer auto-commits on value change; `onConfirm` is the sole commit trigger.
+- [x] **D14** — `sketchStatusText`/`sketchStatusSentence` treat DOF 0 as fully constrained regardless of a lagging solver status label.
+- [x] **D11** — `repairStore.applyEvent` orders lexicographically on `(revision, snapshotId)`, not `revision` alone.
+- [x] **D12** — `rebindCandidate` prefers `candidate.bodyId` (denormalized by `RepairPanel` from `ResolveRefResult.bodyId`, new field on the FE-only `ResolveCandidate` type — NOT a wire/dto.rs change) over the possibly-stale `deriveOperatedBody(item)`. Test fixture had two latent gaps fixed alongside: no seeded `features` entry for opId `"op1"` (path resolution returned null, so `promoteOne` was never reached — 0 calls, not a bodyId mismatch) and no `bodyId` on the candidate literal.
+- [x] **D7** — `CircularPatternFsm` gained an `origin: [number,number,number]` field, threaded through `armCircular`'s new `seedOrigin` param and `editCircularPatternFeature` (`storedVec3(stored?.axisOrigin)`); `commitCircular` sends `this.circular.origin` instead of a hardcoded `[0,0,0]`.
+- [x] **D8** — `MirrorFsm` gained `planePoint`; `armMirror` gained `seedPlanePoint`/`fuseWithOriginal` params (the latter reuses the existing shared `this.patternFuseResult` field, same as linear/circular); `editMirrorFeature` seeds both from stored params; `commitMirror` sends real values instead of hardcoded `[0,0,0]`/`false`.
+- [x] **D10 + D19** — `commitPattern` and `commitTransform` now select `res.changedBodies` minus the original source/target ids (the newly created children/copies), falling back to the sources when nothing new was created (a fused-in-place result) — same policy in both, mirroring `finishExtrude`/`finishRevolve`'s changedBodies-derived selection.
+
+Regressions caught and fixed during the WP1+WP2 pass (pre-existing tests that encoded now-removed behavior, not covered by the WP0 red set): `ModelToolController.regionPick.test.ts` "(a2) revolve two regions..." asserted a click-away commit — swapped for an explicit Enter. `ModelToolController.edgeShellPreview.test.ts` "shell re-edit's result hint SURVIVES..." called `onValue` alone expecting a commit — added the `onConfirm` call a real Enter also fires.
+
+Gates: `bun run test` 244/244 files, 4124/4124 tests green; `bunx tsc --noEmit` clean; `bun run build` clean.
+
 ## MODELING CORRECTNESS P3 — PUBLICATION POLICY (2026-08-12) — COMPLETE
 
 - [x] Machine-readable per-operation contract rows: `docs/qa/modeling-operation-contracts.json` (35 rows / 16 operations) covering support status, validation tier, body lifecycle, empty/multi-solid semantics, and `uiExposure`.

@@ -666,7 +666,10 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     await controller.editShellFeature("feat-sh");
     await flush();
 
+    // A value change alone (blur) no longer commits (WP0 D13 fix) — a real Enter
+    // fires both onValue AND onConfirm (DimensionInput's contract), so simulate that.
     toolChipStore.getState().onValue?.(3);
+    toolChipStore.getState().onConfirm?.();
     await flush();
 
     expect(toolStore.getState().modelTool).toBe("select");
@@ -824,5 +827,31 @@ describe("ModelToolController edge-op + shell kernel preview", () => {
     await flush();
     expect(toolChipStore.getState().kind).toBe("none");
     expect(clientMock.getOperationParams).not.toHaveBeenCalled();
+  });
+
+  // ── WP0 red test — Shell re-edit must not auto-commit on value change/blur ──
+
+  it("editShellFeature does not auto-commit on a value change (Enter/confirm only)", async () => {
+    build();
+    clientMock.getOperationParams.mockResolvedValue({
+      thickness: { value: 2 },
+      openFaces: ["f:2"],
+      targetBodyId: "body1",
+    } as never);
+    documentStore.setState({
+      features: [{ id: "feat-sh", kind: "fillet", opType: "Shell", label: "Shell", valueText: "2.0 mm", status: "ok" }],
+    });
+
+    await controller.editShellFeature("feat-sh");
+    await flush();
+
+    expect(toolChipStore.getState().kind).toBe("shellThickness");
+
+    // Simulate the chip input changing (which happens on every keystroke / blur).
+    toolChipStore.getState().onValue?.(5);
+    await flush();
+
+    // A value change must only update preview/edit state; explicit confirm commits.
+    expect(clientMock.applyEditCommand).not.toHaveBeenCalled();
   });
 });

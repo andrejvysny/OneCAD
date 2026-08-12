@@ -607,13 +607,6 @@ export class ModelToolController {
   // into commit time.
   private commitGen = 0;
 
-  // Click-away commit (MODEL-HARDEN Wave 1). A window-level capture pointerdown/up
-  // pair confirms an armed extrude/revolve on a true click outside the chip /
-  // toolbar / inputs and off the depth/angle handle (an orbit drag never commits).
-  private clickAwayArmed = false;
-  private clickAwayDownX = 0;
-  private clickAwayDownY = 0;
-
   // Edge-op (fillet / chamfer) context.
   private filletEdges: EntityRef[] = [];
   private filletDownX = 0;
@@ -821,10 +814,6 @@ export class ModelToolController {
     c.addEventListener("pointerup", this.onPointerUp);
     window.addEventListener("keydown", this.onKeyDown, true);
     window.addEventListener("keyup", this.onKeyUp, true);
-    // Click-away commit — window capture so a click on ANY chrome (or empty space)
-    // outside the container is seen; the handlers gate on the armed phase + target.
-    window.addEventListener("pointerdown", this.onWindowPointerDown, true);
-    window.addEventListener("pointerup", this.onWindowPointerUp, true);
 
     this.unsubs.push(deps.client.onPreviewResult((r) => this.onPreviewResult(r)));
 
@@ -3366,17 +3355,10 @@ export class ModelToolController {
     this.previewArmHint = editFeatureId ? null : hint;
     viewportStore.getState().setStatusHint(hint, { sticky: true });
     const anchor = faces[0]?.anchor?.worldPoint ?? [0, 0, 0];
-    if (editFeatureId) {
-      toolChipStore.getState().showShell(startThickness, anchor, (v) => {
-        this.onShellChip(v);
-        void this.commitShell(); // chip Enter/blur commits the thickness-only re-edit
-      });
-    } else {
-      toolChipStore.getState().showShell(startThickness, anchor, (v) => this.onShellChip(v), {
-        onConfirm: () => void this.commitShell(),
-        onCancel: () => toolStore.getState().setTool("select"),
-      });
-    }
+    toolChipStore.getState().showShell(startThickness, anchor, (v) => this.onShellChip(v), {
+      onConfirm: () => void this.commitShell(),
+      onCancel: () => toolStore.getState().setTool("select"),
+    });
     this.updateDebug();
     // A re-edit runs L1-only: PreviewOp executes against the CURRENT head, so
     // previewing an existing feature would double-apply it (the extrude re-edit
@@ -4614,6 +4596,7 @@ export class ModelToolController {
       onCount: (n) => this.onLinearCount(n),
       onSpacing: (v) => this.onLinearSpacing(v),
       onApply: () => void this.commitLinear(),
+      onCancel: () => toolStore.getState().setTool("select"),
     });
     this.updateDebug();
   }
@@ -4687,6 +4670,7 @@ export class ModelToolController {
     seedAngle?: number,
     resultPolicyVersion?: 2,
     fuseResult?: boolean,
+    seedOrigin?: [number, number, number],
   ): void {
     this.patternEditFeatureId = editFeatureId;
     this.patternResultPolicyVersion = editFeatureId ? resultPolicyVersion : 2;
@@ -4696,6 +4680,7 @@ export class ModelToolController {
       bodyId,
       count: seedCount,
       axis: seedAxis,
+      origin: seedOrigin,
       angle: seedAngle,
     }).state;
     toolStore.setState({ phase: "armed" });
@@ -4706,6 +4691,7 @@ export class ModelToolController {
       onCount: (n) => this.onCircularCount(n),
       onAngle: (v) => this.onCircularAngle(v),
       onApply: () => void this.commitCircular(),
+      onCancel: () => toolStore.getState().setTool("select"),
     });
     this.updateDebug();
   }
@@ -4732,13 +4718,13 @@ export class ModelToolController {
     if (!entry) return;
     this.deps.engine.showGhostPreview(
       entry,
-      circularGhostTransforms([0, 0, 0], WORLD_AXIS[this.circular.axis], this.circular.angle, this.circular.count),
+      circularGhostTransforms(this.circular.origin, WORLD_AXIS[this.circular.axis], this.circular.angle, this.circular.count),
     );
   }
 
   private async commitCircular(): Promise<void> {
     if (this.circular.phase !== "armed" || !this.circular.bodyId) return;
-    const { bodyId, axis, angle, count } = this.circular;
+    const { bodyId, axis, angle, count, origin } = this.circular;
     const editFeatureId = this.patternEditFeatureId;
     this.circular = circularPatternStep(this.circular, { kind: "apply" }).state;
     const op: OperationOp = {
@@ -4747,7 +4733,7 @@ export class ModelToolController {
       inputs: [{ primary: { bodyId, kind: "body" } }],
       params: {
         sourceBodyId: bodyId,
-        axisOrigin: [0, 0, 0],
+        axisOrigin: origin,
         axisDirection: WORLD_AXIS[axis],
         angleDeg: angle,
         count,
@@ -4772,15 +4758,28 @@ export class ModelToolController {
     this.armMirror(bodyId);
   }
 
-  private armMirror(bodyId: string, editFeatureId?: string, seedPlane?: MirrorPlane): void {
+  private armMirror(
+    bodyId: string,
+    editFeatureId?: string,
+    seedPlane?: MirrorPlane,
+    seedPlanePoint?: [number, number, number],
+    fuseWithOriginal?: boolean,
+  ): void {
     this.patternEditFeatureId = editFeatureId;
-    this.mirror = mirrorStep(mirrorInit(), { kind: "arm", bodyId, plane: seedPlane }).state;
+    this.patternFuseResult = editFeatureId ? fuseWithOriginal ?? true : false;
+    this.mirror = mirrorStep(mirrorInit(), {
+      kind: "arm",
+      bodyId,
+      plane: seedPlane,
+      planePoint: seedPlanePoint,
+    }).state;
     toolStore.setState({ phase: "armed" });
     viewportStore.getState().setStatusHint("Pick a mirror plane, then Apply", { sticky: true });
     this.rebuildMirrorGhost();
     toolChipStore.getState().showMirror(this.mirror.plane, this.bodyCenter(bodyId), {
       onPlane: (p) => this.onMirrorPlane(p),
       onApply: () => void this.commitMirror(),
+      onCancel: () => toolStore.getState().setTool("select"),
     });
     this.updateDebug();
   }
@@ -4795,12 +4794,15 @@ export class ModelToolController {
     if (!this.mirror.bodyId) return;
     const entry = getEntry(this.mirror.bodyId);
     if (!entry) return;
-    this.deps.engine.showGhostPreview(entry, mirrorGhostTransforms([0, 0, 0], WORLD_PLANE_NORMAL[this.mirror.plane]));
+    this.deps.engine.showGhostPreview(
+      entry,
+      mirrorGhostTransforms(this.mirror.planePoint, WORLD_PLANE_NORMAL[this.mirror.plane]),
+    );
   }
 
   private async commitMirror(): Promise<void> {
     if (this.mirror.phase !== "armed" || !this.mirror.bodyId) return;
-    const { bodyId, plane } = this.mirror;
+    const { bodyId, plane, planePoint } = this.mirror;
     const editFeatureId = this.patternEditFeatureId;
     this.mirror = mirrorStep(this.mirror, { kind: "apply" }).state;
     const op: OperationOp = {
@@ -4809,9 +4811,9 @@ export class ModelToolController {
       inputs: [{ primary: { bodyId, kind: "body" } }],
       params: {
         sourceBodyId: bodyId,
-        planePoint: [0, 0, 0],
+        planePoint,
         planeNormal: WORLD_PLANE_NORMAL[plane],
-        fuseWithOriginal: false,
+        fuseWithOriginal: this.patternFuseResult,
       },
     };
     await this.commitPattern(op, bodyId, "Mirrored");
@@ -4826,8 +4828,20 @@ export class ModelToolController {
     let failure: string | null = null;
     try {
       const res = await this.client.applyOperation(op);
-      this.applyResult(res);
-      selectionStore.getState().set([{ kind: "body", id: bodyId }]);
+      if (res.errorMessage) {
+        failure = res.errorMessage;
+      } else {
+        this.applyResult(res);
+        // Select the generated children (contract: successSelection "newBodies"),
+        // not the source — a non-fused pattern/mirror leaves the source body
+        // untouched alongside its new copies. A fused result folds everything
+        // back into the source, so there ARE no "new" ids: fall back to it.
+        const created = (res.changedBodies ?? [])
+          .map((r) => r.bodyId)
+          .filter((id) => id !== bodyId);
+        const toSelect = created.length > 0 ? created : [bodyId];
+        selectionStore.getState().set(toSelect.map((id) => ({ kind: "body" as const, id })));
+      }
     } catch (e) {
       failure = errMessage(e);
     }
@@ -4904,10 +4918,11 @@ export class ModelToolController {
     }
     const angle = scalarNumber(stored?.angleDeg);
     const count = typeof stored?.count === "number" ? stored.count : countFromValueText(feat.valueText);
+    const origin = storedVec3(stored?.axisOrigin) ?? undefined;
     toolStore.getState().setTool("circularPattern");
     const resultPolicyVersion = stored?.resultPolicyVersion === 2 ? 2 : undefined;
     const fuseResult = typeof stored?.fuseResult === "boolean" ? stored.fuseResult : true;
-    this.armCircular(bodyId, featureId, count, axis, angle, resultPolicyVersion, fuseResult);
+    this.armCircular(bodyId, featureId, count, axis, angle, resultPolicyVersion, fuseResult, origin);
   }
 
   /** Mirror counterpart of `editLinearPatternFeature` — seeds the mirror plane from
@@ -4930,8 +4945,10 @@ export class ModelToolController {
         });
       return;
     }
+    const planePoint = storedVec3(stored?.planePoint) ?? undefined;
+    const fuseWithOriginal = typeof stored?.fuseWithOriginal === "boolean" ? stored.fuseWithOriginal : true;
     toolStore.getState().setTool("mirror");
-    this.armMirror(bodyId, featureId, plane);
+    this.armMirror(bodyId, featureId, plane, planePoint, fuseWithOriginal);
   }
 
   /**
@@ -5564,7 +5581,15 @@ export class ModelToolController {
       const res = await this.client.applyOperation(op);
       this.applyResult(res);
       this.endAlign();
-      selectionStore.getState().set(params.targets.map((id) => ({ kind: "body" as const, id })));
+      // A copy leaves the sources untouched and produces NEW body ids in
+      // `changedBodies` (`body_<opId>:<k>`, see the comment above) — select
+      // those, not the sources. A non-copy move keeps the same id, so the
+      // targets ARE the changed bodies and this falls back to them unchanged.
+      const created = (res.changedBodies ?? [])
+        .map((r) => r.bodyId)
+        .filter((id) => !params.targets.includes(id));
+      const toSelect = created.length > 0 ? created : params.targets;
+      selectionStore.getState().set(toSelect.map((id) => ({ kind: "body" as const, id })));
       this.transform = transformInit();
       this.transformEditFeatureId = undefined;
       this.transformArmedInverse = null;
@@ -5664,10 +5689,9 @@ export class ModelToolController {
   //
   //   base pick — the PlanePicker gizmo is reused VERBATIM (its orbit gate,
   //               hover chip and geometric labelling all come along for free);
-  //   offset    — a live ghost quad + the datum chip. ✓ or Enter commits; there
-  //               is deliberately NO click-away commit (`isArmedForClickAway`
-  //               ignores the datum), because the offset phase has no drag
-  //               gesture and a stray canvas click would silently author a datum.
+  //   offset    — a live ghost quad + the datum chip. ✓ or Enter commits; a
+  //               stray canvas click never authors a datum (no click-away commit
+  //               exists anywhere in this controller — see the WP0 spec choice).
   //
   // V1 authors OffsetFromPlane off a WORLD plane only. The backend also accepts
   // another datum's id as the base (chained offsets) — that is a later wave, and
@@ -6179,63 +6203,7 @@ export class ModelToolController {
     }
   };
 
-  // ── click-away commit (window capture — MODEL-HARDEN Wave 1) ─────────────────
-  //
-  // The controller's own pointer listeners are container-local, so a click OUTSIDE
-  // the container (or on empty 3D space) can't reach them. A window-capture pair
-  // confirms an armed extrude/revolve on a TRUE click (within DRAG_PX of the press,
-  // so an orbit drag never commits) that lands off the chip / toolbar / inputs and
-  // does not grab the depth/angle handle. Disabled during axis / target / region
-  // pick (those phases are not `armed`).
-
-  private onWindowPointerDown = (e: PointerEvent): void => {
-    this.clickAwayArmed = false;
-    if (e.button !== 0 || !this.isArmedForClickAway()) return;
-    if (this.isExcludedClickAwayTarget(e.target)) return;
-    if (this.pressGrabsHandle(e.clientX, e.clientY)) return; // a re-drag, not a click-away
-    this.clickAwayArmed = true;
-    this.clickAwayDownX = e.clientX;
-    this.clickAwayDownY = e.clientY;
-  };
-
-  private onWindowPointerUp = (e: PointerEvent): void => {
-    if (!this.clickAwayArmed) return;
-    this.clickAwayArmed = false;
-    if (e.button !== 0) return;
-    const moved =
-      Math.abs(e.clientX - this.clickAwayDownX) > DRAG_PX ||
-      Math.abs(e.clientY - this.clickAwayDownY) > DRAG_PX;
-    if (moved) return; // an orbit / angle drag — never commits
-    if (this.isExcludedClickAwayTarget(e.target)) return;
-    if (this.extrude.phase === "armed") void this.confirmExtrude();
-    else if (this.revolve.phase === "armed") void this.confirmRevolve();
-    else if (this.offsetFace.phase === "armed") void this.commitOffsetFace();
-  };
-
-  /** True while an extrude/revolve/offset is armed and no modal pick owns the pointer. */
-  private isArmedForClickAway(): boolean {
-    if (this.regionPick) return false;
-    // OffsetFace joins ONLY in its handle gesture. The DEGRADED variant claims
-    // every viewport press as a value drag (there is no arrow to miss), and a tool
-    // that owns the press cannot also treat it as a click-away — the same reason
-    // the edge ops and shell are absent from this list entirely.
-    if (this.offsetFace.phase === "armed" && !this.offsetDegraded) return true;
-    return this.extrude.phase === "armed" || this.revolve.phase === "armed";
-  }
-
-  /** A press that grabs the depth handle is a re-drag, not a click-away (extrude). */
-  private pressGrabsHandle(x: number, y: number): boolean {
-    if (this.extrude.phase === "armed") return this.engine.hitExtrudeHandle(x, y);
-    // Same shared handle, same rule: a press ON the offset arrow starts a drag.
-    if (this.offsetFace.phase === "armed" && !this.offsetDegraded) {
-      return this.engine.hitExtrudeHandle(x, y);
-    }
-    // Revolve: any press is a potential angle drag — the moved-check decides commit
-    // vs drag on release, so never suppress the click-away arm here.
-    return false;
-  }
-
-  /** Chip / toolbar / input / overlay targets never trigger a click-away commit.
+  /** Chip / toolbar / input / overlay targets never drive an in-canvas gesture.
    *  Accepts any Element incl. SVGElement (a toolbar icon click lands on an <svg>/
    *  <path>, which is NOT an HTMLElement) — walk up via `.closest()` so an icon-inside-
    *  button still resolves to its excluded ancestor (finding 5). */
@@ -6971,7 +6939,7 @@ export class ModelToolController {
       try {
         const res = await this.client.applyOperation(fallback);
         if (gen !== this.commitGen) return { kind: "superseded" };
-        if (res.changedBodies.length === 0 && res.removedBodies.length === 0) {
+        if (res.errorMessage || (res.changedBodies.length === 0 && res.removedBodies.length === 0)) {
           await this.rollbackFailedCommit();
           if (gen !== this.commitGen) return { kind: "superseded" };
           return { kind: "failed", reason: res.errorMessage ?? "no body changed" };
@@ -7319,6 +7287,7 @@ export class ModelToolController {
       this.bodyCenter(tool),
       (op) => this.setBooleanOp(op),
       () => void this.commitBoolean(),
+      () => toolStore.getState().setTool("select"),
     );
     this.previewArmHint = "Choose Union / Cut / Intersect, then Apply";
   }
@@ -7608,6 +7577,7 @@ export class ModelToolController {
       this.bodyCenter(toolRetired ? targetBodyId : toolBodyId),
       (next) => this.setBooleanOp(next),
       () => void this.commitBoolean(),
+      () => toolStore.getState().setTool("select"),
     );
     viewportStore.getState().setStatusHint("Change the boolean operation · Apply", { sticky: true });
     this.updateDebug();
@@ -8257,8 +8227,6 @@ export class ModelToolController {
     c.removeEventListener("pointerup", this.onPointerUp);
     window.removeEventListener("keydown", this.onKeyDown, true);
     window.removeEventListener("keyup", this.onKeyUp, true);
-    window.removeEventListener("pointerdown", this.onWindowPointerDown, true);
-    window.removeEventListener("pointerup", this.onWindowPointerUp, true);
     if (this.trailingTimer) clearTimeout(this.trailingTimer);
     if (this.commitBodyTimer) clearTimeout(this.commitBodyTimer);
     if (this.commitRevolveBodyTimer) clearTimeout(this.commitRevolveBodyTimer);
