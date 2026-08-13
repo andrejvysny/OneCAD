@@ -233,6 +233,11 @@ struct LoopDetectorConfig {
     /// Bound exact refinement work before the quadratic pair pass begins.
     size_t maxPlanarizedCurvePairs = 4096;
 
+    /// Bound analytic entities collected before intersection refinement. This
+    /// prevents a malformed profile from allocating an unbounded source list
+    /// before the curve-pair ceiling can refuse it.
+    size_t maxPlanarizedSources = 256;
+
     /// Bound fragments emitted after analytic splitting.
     size_t maxPlanarizedFragments = 8192;
 

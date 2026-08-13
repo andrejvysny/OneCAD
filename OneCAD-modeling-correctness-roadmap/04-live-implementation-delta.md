@@ -10,10 +10,11 @@ OCCT: 8.0.1, fingerprint `0a6a1dce34181289`
   operations (`docs/qa/modeling-operation-contracts.json`), Transform through
   the Tier A validator, ImportStep policy row, UI mode disposition recorded,
   and `scripts/verify-modeling-contracts.mjs` enforcing all of it.
-- **P4 is complete** (`f36c960`, `f1415e8`): Boolean Intersect vertical across
-  C++/Rust/frontend/Playwright, Mirror and Linear/Circular Pattern Playwright
-  flows, critical mode closure tests, and a real-worker corpus executor with
-  zero unclassified corpus files.
+- **P4 remains partial.** C1/C2 landed (`1c76c41`, `39f5839`): Boolean Intersect
+  vertical across C++/Rust/frontend/Playwright, Mirror and Linear/Circular
+  Pattern Playwright flows, critical mode closure tests, and a real-worker corpus
+  executor with zero unclassified corpus files. C3/C4/C5/C6, Pattern
+  compatibility, and corpus-trust hardening remain before P4 can close.
 - **Phase 5 WP5.1 landed** (`b7b47e2`): mirror, far-origin translation,
   edge-order permutation and contour seed execute in the runner.
 - **Phase 5 WP5.1 residual (M3.5) closed, uncommitted** (2026-08-13):
@@ -49,8 +50,10 @@ OCCT: 8.0.1, fingerprint `0a6a1dce34181289`
   cannot disagree.
 - **Still owed from P2:** the manual Tauri smoke. Unchanged (plan Track D replaces it with an
   automated Tauri lane).
-- **Next in roadmap order:** plan item C1 — make the P4 coverage manifest true and give
-  `verify-modeling-coverage.mjs` teeth — then C2, before Phase 5 WP5.3's Boolean campaign.
+- **Next in roadmap order:** finish C3/C4/C5/C6, Pattern compatibility, and
+  corpus-trust hardening before Phase 5 WP5.3's Boolean campaign. C5 performance
+  caps await measured Tier A/B and cumulative Pattern cost; C6 needs a full
+  Chromium and WebKit zero-retry pass from persistent Vite with retained failure artifacts.
 
 The sections below are the 2026-08-11 review, kept for its evidence trail.
 

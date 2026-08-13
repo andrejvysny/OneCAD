@@ -100,6 +100,30 @@ describe("InspectorPanel", () => {
     expect(screen.getByText("Nothing selected")).toBeInTheDocument();
   });
 
+  it("renders structured failure detail in the inspector and edits for retry", () => {
+    const editEdgeOpFeature = vi.fn(() => Promise.resolve());
+    setModelToolController({ editEdgeOpFeature } as unknown as ModelToolController);
+    try {
+      documentStore.setState({
+        features: [{
+          id: "f-failed", kind: "fillet", opType: "Fillet", label: "Fillet", valueText: "2.0 mm",
+          status: "error", statusMessage: "kernel refused",
+          diagnostics: [{ severity: "error", code: "FILLET_TOO_LARGE", stage: "build", message: "radius exceeds edge", evidence: { radius: 11 } }],
+        }],
+      });
+      renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
+      act(() => selectionStore.getState().set([{ kind: "feature", id: "f-failed" }]));
+
+      expect(screen.getByText("FILLET_TOO_LARGE")).toBeInTheDocument();
+      expect(screen.getByText("Stage: build")).toBeInTheDocument();
+      expect(screen.getByTestId("operation-diagnostic-evidence-0")).toHaveTextContent('"radius": 11');
+      fireEvent.click(screen.getByTestId("feature-edit-retry"));
+      expect(editEdgeOpFeature).toHaveBeenCalledWith("f-failed", "Fillet");
+    } finally {
+      setModelToolController(null);
+    }
+  });
+
   it("shows the SKETCH state (DOF card + one row per live constraint) in sketch mode", () => {
     renderWithPlatform(<InspectorPanel />, { contribute: contributeInspectorSections });
     act(() => {

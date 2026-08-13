@@ -278,6 +278,14 @@ pub trait ElementQuery: Send + Sync {
         body: BodyId,
         body_id_label: String,
     ) -> Result<crate::dto::MassPropertiesDto, EngineError>;
+
+    /// `QueryBodyTopology` (SCHEMA §7.5): exact solid and face counts from the
+    /// head BRep, rather than an LOD-dependent mesh.
+    async fn query_body_topology(
+        &self,
+        body: BodyId,
+        body_id_label: String,
+    ) -> Result<crate::dto::BodyTopologyDto, EngineError>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -869,6 +877,14 @@ impl ElementQuery for PendingBackend {
         _body: BodyId,
         _body_id_label: String,
     ) -> Result<crate::dto::MassPropertiesDto, EngineError> {
+        Err(Self::not_ready())
+    }
+
+    async fn query_body_topology(
+        &self,
+        _body: BodyId,
+        _body_id_label: String,
+    ) -> Result<crate::dto::BodyTopologyDto, EngineError> {
         Err(Self::not_ready())
     }
 }

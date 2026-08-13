@@ -1029,6 +1029,10 @@ std::unique_ptr<AdjacencyGraph> LoopDetector::buildGraph(
         }
         auto source = makeAnalyticSource(*entity, sketch);
         if (!source.has_value()) continue;
+        if (sources.size() >= config_.maxPlanarizedSources) {
+            graph->errorMessage = "profile refinement exceeds analytic-source limit";
+            return graph;
+        }
         sources.push_back(std::move(*source));
     }
 

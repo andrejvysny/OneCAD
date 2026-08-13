@@ -45,7 +45,9 @@ export default defineConfig({
     // Fixed viewport → the canvas-relative click math is deterministic and the
     // central drawing zone never overlaps the floating DOM panels.
     viewport: { width: 1280, height: 800 },
-    trace: "on-first-retry",
+    // Retries are intentionally disabled. Keep diagnostics for every red run.
+    trace: "retain-on-failure",
+    screenshot: "only-on-failure",
     launchOptions: {
       args: [
         "--use-gl=angle",

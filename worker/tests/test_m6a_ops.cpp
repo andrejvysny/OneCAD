@@ -334,10 +334,21 @@ void test_linear_pattern_guards() {
                                {"spacing", 40.0}, {"count", 3}, {"fuseResult", true}}}};
         ops::OpContext ctx = c.make(bodies, part);
         ops::OpOutcome oc = ops::execute_linear_pattern(ctx, op, "oplpF");
+        check(oc.status == ops::OpOutcome::Status::Ok,
+              "linpat(v1): fused disjoint result preserves legacy aggregate");
+        check(bodies.contains("body_src") && bodies.contains("body_oplpF"),
+              "linpat(v1): source and aggregate both survive");
+    }
+    {
+        json op = { {"opType", "LinearPattern"}, {"opId", "oplpG"},
+                    {"params", {{"sourceBodyId", "body_src"}, {"direction", {1, 0, 0}},
+                                {"spacing", 40.0}, {"count", 3}, {"fuseResult", true},
+                                {"resultPolicyVersion", 3}}} };
+        ops::OpContext ctx = c.make(bodies, part);
+        ops::OpOutcome oc = ops::execute_linear_pattern(ctx, op, "oplpG");
         check(oc.status == ops::OpOutcome::Status::Failed &&
-                  oc.error_code == "PATTERN_DISJOINT_RESULT",
-              "linpat: fused disjoint result → PATTERN_DISJOINT_RESULT");
-        check(!bodies.contains("body_oplpF"), "linpat: refusal does not mint a body");
+                  oc.error_code == "UNSUPPORTED_PATTERN_RESULT_POLICY_VERSION",
+              "linpat: unknown result policy version refuses recoverably");
     }
 }
 

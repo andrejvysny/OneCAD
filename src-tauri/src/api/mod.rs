@@ -1944,6 +1944,26 @@ pub async fn query_mass_properties(
         .map_err(Into::into)
 }
 
+/// Exact BRep solid and face counts (`QueryBodyTopology`; SCHEMA §7.5).
+#[tauri::command]
+pub async fn query_body_topology(
+    state: State<'_, AppState>,
+    body_id: String,
+) -> Result<crate::dto::BodyTopologyDto, ApiError> {
+    let body = wire::parse_body_id(&body_id).map_err(ApiError::InvalidCommand)?;
+    {
+        let guard = state.runtime.lock().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| ApiError::NoDocument("queryBodyTopology".into()))?;
+    }
+    state
+        .element_query()
+        .query_body_topology(body, body_id)
+        .await
+        .map_err(Into::into)
+}
+
 /// One picked face for [`prepare_offset_face`] — `{bodyId?, topoKey?, elementId?}`
 /// (SCHEMA §7.6 `pickedFaces[]`).
 ///

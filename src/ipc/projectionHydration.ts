@@ -44,6 +44,7 @@ export function toFeatureMeta(f: FeatureRecord): FeatureMeta {
     // Carry the worker failure reason through to the store so the HistoryList row
     // tooltips it (MODEL-HARDEN W0.5). `undefined` for any non-error feature.
     statusMessage: f.statusMessage,
+    diagnostics: f.diagnostics,
     suppressed: f.suppressed,
   };
 }

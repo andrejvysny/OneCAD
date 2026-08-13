@@ -42,21 +42,18 @@ use onecad_core::document::refs::SketchRegionRef;
 use onecad_core::history::{DependencyGraph, Timeline};
 use onecad_core::ids::{
     BodyId, DocumentId, DocumentRevision, EntityId, JobId, RecordId, RegionId, SketchId,
-    SnapshotId, WorkerEpoch,
+    WorkerEpoch,
 };
 use onecad_core::math::Vec2;
 use onecad_core::regen::{
-    Fencing, GeometryEngine, Lod, OpenSessionRequest, PlanArtifacts, PlanContext, PlanEvent,
+    Fencing, GeometryEngine, OpenSessionRequest, PlanArtifacts, PlanContext, PlanEvent,
     PlanPrepared, PlanRequest, PolicyVersions, RegenPlanner, RegenRequest, SessionMode,
     StoppedReason,
 };
 use onecad_core::sketch::{Sketch, SketchEntity, WorldPlane};
 
 use onecad_lib::worker::manager::SupervisorConfig;
-use onecad_lib::worker::{
-    resolve_worker_path, ElementQuery, MeshProvider, SolverEngine, WorkerManager,
-};
-use onecad_protocol::mesh::validate_mesh_blob;
+use onecad_lib::worker::{resolve_worker_path, ElementQuery, SolverEngine, WorkerManager};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Case model
@@ -563,17 +560,14 @@ async fn volume_of(wm: &WorkerManager, body: BodyId) -> Result<f64, String> {
         .map_err(|e| format!("mass query failed: {e}"))
 }
 
-async fn face_count_of(
+async fn topology_of(
     wm: &WorkerManager,
     body: BodyId,
-    snapshot: SnapshotId,
-) -> Result<u32, String> {
-    let blob = wm
-        .fetch_mesh(body, Lod::Coarse, snapshot)
+) -> Result<onecad_lib::dto::BodyTopologyDto, String> {
+    let label = format!("body_{}", body.0);
+    wm.query_body_topology(body, label)
         .await
-        .map_err(|e| format!("mesh fetch failed: {e}"))?;
-    let view = validate_mesh_blob(&blob).map_err(|e| format!("MESH1 invalid: {e:?}"))?;
-    Ok(view.face_count)
+        .map_err(|e| format!("topology query failed: {e}"))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -773,9 +767,20 @@ async fn run_sketch_extrude_blind(
                 .and_then(|f| f.get("value"))
                 .and_then(Value::as_u64)
             {
-                let actual = face_count_of(wm, body, prepared.prepared_snapshot_id).await?;
-                if u64::from(actual) != faces {
-                    return Err(format!("{what}: expected {faces} faces, got {actual}"));
+                let actual = topology_of(wm, body).await?;
+                if let Some(solids) = step_expected.get("solids").and_then(Value::as_u64) {
+                    if u64::from(actual.solid_count) != solids {
+                        return Err(format!(
+                            "{what}: expected {solids} BRep solid(s), got {}",
+                            actual.solid_count
+                        ));
+                    }
+                }
+                if u64::from(actual.face_count) != faces {
+                    return Err(format!(
+                        "{what}: expected {faces} BRep faces, got {}",
+                        actual.face_count
+                    ));
                 }
             }
         }

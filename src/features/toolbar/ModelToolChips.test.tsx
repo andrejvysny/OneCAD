@@ -894,7 +894,7 @@ describe("critical mode closure", () => {
     toolChipStore.getState().clear();
   });
 
-  it("extrude overflow offers New Body / Add / Cut but not Intersect", () => {
+  it("extrude overflow offers every authored Boolean mode", () => {
     render(<ModelToolChips />);
     act(() =>
       toolChipStore.getState().showExtrude(
@@ -914,10 +914,10 @@ describe("critical mode closure", () => {
     expect(screen.getByTestId("chip-bool-newbody")).toBeInTheDocument();
     expect(screen.getByTestId("chip-bool-add")).toBeInTheDocument();
     expect(screen.getByTestId("chip-bool-cut")).toBeInTheDocument();
-    expect(screen.queryByTestId("chip-bool-intersect")).toBeNull();
+    expect(screen.getByTestId("chip-bool-intersect")).toBeInTheDocument();
   });
 
-  it("revolve overflow offers New Body / Add / Cut but not Intersect", () => {
+  it("revolve overflow offers every authored Boolean mode", () => {
     render(<ModelToolChips />);
     act(() =>
       toolChipStore.getState().showRevolve(
@@ -937,7 +937,7 @@ describe("critical mode closure", () => {
     expect(screen.getByTestId("chip-bool-newbody")).toBeInTheDocument();
     expect(screen.getByTestId("chip-bool-add")).toBeInTheDocument();
     expect(screen.getByTestId("chip-bool-cut")).toBeInTheDocument();
-    expect(screen.queryByTestId("chip-bool-intersect")).toBeNull();
+    expect(screen.getByTestId("chip-bool-intersect")).toBeInTheDocument();
   });
 
   it("mirror chip has no fuse/union toggle", () => {

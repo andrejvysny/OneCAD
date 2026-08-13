@@ -533,6 +533,24 @@ void test_analytic_refinement_honors_cancellation() {
           "analytic refinement cancellation diagnostic remains stable");
 }
 
+void test_analytic_refinement_limits_sources_before_pair_collection() {
+    const json sketch = tangent_circles();
+    onecad::wire::TranslateResult translated = onecad::wire::translate(sketch);
+    check(translated.ok, "source-limit wire sketch translates");
+    if (!translated.ok) return;
+    const sk::SolveResult solve = translated.sketch->solve();
+    check(solve.success, "source-limit wire sketch solves");
+    if (!solve.success) return;
+
+    loop::LoopDetectorConfig config = loop::makeRegionDetectionConfig();
+    config.maxPlanarizedSources = 1;
+    loop::LoopDetector detector(config);
+    const loop::LoopDetectionResult detected = detector.detect(*translated.sketch);
+    check(!detected.success, "analytic source ceiling refuses publication");
+    check(detected.errorMessage == "profile refinement exceeds analytic-source limit",
+          "analytic source ceiling diagnostic remains stable");
+}
+
 json coincident_circles() {
     return {
         {"sketchId", "coincident-circles"},
@@ -588,6 +606,7 @@ int main() {
     test_rotated_ellipse_line_planarization_keeps_exact_edges();
     test_tangent_contacts_do_not_create_degenerate_fragments();
     test_analytic_refinement_honors_cancellation();
+    test_analytic_refinement_limits_sources_before_pair_collection();
     test_coincident_analytic_curves_refuse_stably();
     test_required_hole_failure_is_fatal();
     if (g_failures == 0) {

@@ -2243,6 +2243,32 @@ pub fn parse_mass_properties(
     })
 }
 
+/// `QueryBodyTopology` args (SCHEMA §7.5).
+#[must_use]
+pub fn query_body_topology_args(body: BodyId) -> Value {
+    json!({ "bodyId": body_id_wire(body) })
+}
+
+/// Parses exact BRep topology counts. No default is honest here: a malformed
+/// result must not masquerade as an empty body.
+pub fn parse_body_topology(
+    body_id: String,
+    result: &Value,
+) -> Result<crate::dto::BodyTopologyDto, String> {
+    let count = |key: &str| {
+        result
+            .get(key)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| format!("QueryBodyTopology: missing/invalid {key:?}"))
+    };
+    Ok(crate::dto::BodyTopologyDto {
+        body_id,
+        solid_count: count("solidCount")?,
+        face_count: count("faceCount")?,
+    })
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Host-face boundary projection (SCHEMA §7.6 `ProjectFaceBoundary`)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3657,6 +3683,22 @@ mod tests {
     #[test]
     fn parse_query_element_absent_is_none() {
         assert!(parse_query_element(&json!({ "elementId": "el_9", "present": false })).is_none());
+    }
+
+    #[test]
+    fn body_topology_requires_both_bounded_counts() {
+        let body = BodyId(Uuid::from_u128(7));
+        assert_eq!(query_body_topology_args(body)["bodyId"], body_id_wire(body));
+        let parsed =
+            parse_body_topology("body_7".into(), &json!({ "solidCount": 1, "faceCount": 6 }))
+                .expect("valid topology");
+        assert_eq!((parsed.solid_count, parsed.face_count), (1, 6));
+        assert!(parse_body_topology("body_7".into(), &json!({ "solidCount": 1 })).is_err());
+        assert!(parse_body_topology(
+            "body_7".into(),
+            &json!({ "solidCount": 1, "faceCount": u64::from(u32::MAX) + 1 }),
+        )
+        .is_err());
     }
 
     #[test]

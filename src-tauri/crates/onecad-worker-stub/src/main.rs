@@ -338,6 +338,9 @@ fn handle_req<W: Write>(writer: &mut W, state: &mut StubState, req: ReqFrame) ->
         "AcceptPrepared" => handle_accept_prepared(writer, state, &req),
         "DiscardPrepared" => handle_discard_prepared(writer, state, &req),
         "Tessellate" => handle_tessellate(writer, state, &req),
+        // The stub has no BRep, but mirrors the real verb's strict addressing
+        // and returns its canonical single-prism placeholder topology.
+        "QueryBodyTopology" => handle_query_body_topology(writer, state, &req),
         // --- solver lane (SCHEMA §7.4) ---
         "SketchUpsert" => handle_sketch_upsert(writer, state, &req),
         "BeginGesture" => handle_begin_gesture(writer, state, &req),
@@ -371,6 +374,36 @@ fn handle_req<W: Write>(writer: &mut W, state: &mut StubState, req: ReqFrame) ->
         return Some(0);
     }
     None
+}
+
+fn handle_query_body_topology<W: Write>(
+    writer: &mut W,
+    state: &mut StubState,
+    req: &ReqFrame,
+) -> Result<(), ProtocolError> {
+    let body_id = req.args.get("bodyId").and_then(Value::as_str).unwrap_or("");
+    let stamp = state.stamp();
+    if !body_id.starts_with("body_") {
+        return write_resp_err(
+            writer,
+            req.id,
+            stamp,
+            ErrorObject {
+                code: ErrorCode::RefUnresolved,
+                message: format!("QueryBodyTopology: unknown bodyId '{body_id}'"),
+                detail: None,
+                retriable: false,
+            },
+        );
+    }
+    write_resp_value(
+        writer,
+        req.id,
+        stamp,
+        json!({ "solidCount": 1, "faceCount": 6 }),
+        &[],
+        &[],
+    )
 }
 
 fn handle_open_session<W: Write>(

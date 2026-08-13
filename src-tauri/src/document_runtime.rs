@@ -2650,6 +2650,14 @@ impl DocumentRuntime {
             // Surface a step's worker failure reason (`StepState::Error{reason}`) so
             // the HistoryList row can tint + tooltip it end-to-end (Codex MAJOR-4).
             status_message: feature_status_message(&state),
+            // This map and the step state share one atomic snapshot. A successful
+            // retry replaces it without this entry, clearing stale evidence.
+            diagnostics: self
+                .latest_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.diagnostics_by_step.get(&index))
+                .map(|items| items.iter().take(64).cloned().collect())
+                .unwrap_or_default(),
             // From the RECORD, not the mirror state: the record is the single source
             // of truth for suppression (the state is derived), and the mirror can lag
             // the authoritative timeline between an edit and its regen.

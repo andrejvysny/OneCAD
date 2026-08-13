@@ -386,6 +386,7 @@ pub fn run() {
             api::add_sketch_on_face,
             api::element_info,
             api::query_mass_properties,
+            api::query_body_topology,
             api::prepare_offset_face,
             api::prepare_edge_op,
             api::preview_op,

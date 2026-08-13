@@ -31,6 +31,7 @@
 #include "session/ElementIdentity.h"
 #include "session/FaceProjection.h"
 #include "session/MassProperties.h"
+#include "session/BodyTopology.h"
 #include "session/PrepareOffsetFace.h"
 #include "session/PrepareEdgeOp.h"
 #include "session/PlanExecutor.h"
@@ -292,6 +293,11 @@ void register_verbs(Dispatcher& dispatcher, SolverLane& solver_lane, Session& se
         "QueryMassProperties",
         [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {
             return onecad::session::handle_query_mass_properties(session, r);
+        });
+    dispatcher.register_verb(
+        "QueryBodyTopology",
+        [&session](const Envelope& r, const std::vector<std::uint8_t>&, HandlerContext&) {
+            return onecad::session::handle_query_body_topology(session, r);
         });
     dispatcher.register_verb(
         "ResolveRefs",

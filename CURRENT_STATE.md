@@ -1,18 +1,18 @@
 # Current State
 
-Last verified: 2026-08-13 15:05
+Last verified: 2026-08-13 — P4 follow-up commit pending
 
-- **Branch:** `master`, **14 commits ahead of `origin/master` — nothing pushed.** One of
-  them (`15e798a`, a Render-module design stub) is the CONCURRENT session's, landed mid-gate.
-- **This session:** Track A complete (`772b3d2` A1 · `6b08e27` A2 · `4b62965` A3 · `5723ab3`
-  A4/A5/A6), then plan items **C1** (`1c76c41`) and **C2**.
-- **Build/test at the C2 gate:** `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` → **1082 / 0** ·
+- **Branch:** `master`; follow-up changes recorded in this commit. Push status not verified.
+- **This session:** Track A, C1/C2, then P4 follow-up: Pattern compatibility,
+  P2 source bounding, C3 diagnostics, C4 Intersect authoring, and exact corpus topology.
+- **Build/test at follow-up gate:** `ONECAD_REQUIRE_WORKER=1 cargo test --workspace` → clean ·
   `cargo fmt --all --check` + `clippy --workspace --all-targets -D warnings` → clean ·
-  `ctest --test-dir worker/build` → **119/119** (unchanged by C1/C2, worker untouched) ·
-  `bun run test` → **249 files / 4173 tests** · `bunx tsc --noEmit` + `bun run build` → clean ·
+  `ctest --test-dir worker/build` → **119/119** · `bun run test` → **250 files / 4182 tests** ·
+  `bun run build` → clean ·
   both modeling verifiers → pass · verifier negative controls → **12/12** ·
-  targeted Playwright (preview lanes, both browsers, retries 0) → 20/20.
-  Full Playwright suite still not re-run (plan item C6); kernelbench not implicated.
+  targeted Playwright historical lanes → 20/20. Full C6 browser gate remains unverified:
+  sandbox blocks Chromium Mach-port registration; approved run started on persistent Vite but
+  executor detached after five passes. No full Chromium/WebKit claim. Kernelbench not implicated.
 - **Key decisions:** the Revolve body-edge axis stays **UI-hidden** · the SCHEMA §7.5 `ResolveRefs`
   snapshot echo was **implemented** rather than written around, and Rust validates it fail-closed ·
   `documentRevision` stays Rust-owned in the repair DTO (D4) · corpus cases are **enriched with
@@ -23,9 +23,10 @@ Last verified: 2026-08-13 15:05
   results were cached under a key Rust minted itself; and `needsRepair` was declared but never
   produced (A1).
 - **Blockers / open:**
-  - Full Playwright suite still not green-verified since the P4 landings (plan item C6).
-  - Six corpus cases still carry an explicit unsupported reason (C2 § below names each).
-  - A second session, `onecad-library-content-impl`, shares this working tree.
+  - P4 partial: C3 local diagnostics and C4 Intersect landed, but C5/C6, V3 region identity,
+    typed corpus classification/expectations, and full zero-retry browser gate remain.
+  - Corpus: 3 executable; 6 explicitly unsupported. Never claim all corpus cases execute.
+  - Pattern compatibility passed; Phases 5/6 remain partial.
 
 The per-gate detail for every wave, newest first, follows.
 

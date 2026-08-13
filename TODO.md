@@ -25,7 +25,25 @@ unbilled remainder of Phases 0–4 and came before any new Phase 5 breadth.
 - [x] C2 — the corpus runs 3 of 9 (was 1), the classification is manifest-driven, and the
       structure/provenance of all nine is checked on every machine. The blocker was NOT a thin
       interpreter: only case `a` carried complete geometry. Detail in § ROADMAP C2.
-- [ ] B1–B5, C3–C6, D, E (Phase 5 remainder), F (Phase 6), G (write the accepted residuals down).
+- [ ] C5/C6, remaining P2 V3 migration, typed corpus classification/expectations, Phase 5/6. P4 partial until full zero-retry browser gate passes. C5 performance caps remain undocumented pending measured Tier A/B and cumulative Pattern cost.
+
+- [x] C3 diagnostics: bounded worker diagnostic evidence reaches Inspector and Repair;
+      successful retry clears stale evidence; edit/retry and rebind remain explicit actions.
+- [x] C4 local verticals: Extrude/Revolve expose Intersect with exact lowering;
+      OffsetFace Total/Diameter remains Prepare-gated and re-edit-safe. Contract promotion
+      waits for C++/real-worker/browser parity.
+- [x] Corpus topology: `QueryBodyTopology` supplies actual BRep solid/face counts;
+      corpus assertions no longer infer faces from coarse MESH1.
+- [x] P2 bounded source collection: analytic profile refinement refuses above 256 sources
+      before pair collection. `regionIdentityVersion:3` remains unimplemented.
+- [ ] C6 browser gate: persistent Vite on `4178` served correctly, but sandboxed Chromium
+      aborts at Mach-port rendezvous; elevated run began cleanly then executor detached after
+      five passes, leaving no valid full-lane result. Rerun Chromium + WebKit once per lane,
+      retries `0`, retaining artifacts.
+
+- [x] Pattern compatibility baseline: V1 aggregate replay stays source-preserving;
+      only V2 applies connected-single-solid validation. Future numeric policy versions
+      load/resave losslessly and worker execution refuses `UNSUPPORTED_PATTERN_RESULT_POLICY_VERSION`.
 
 Detail per completed wave is recorded below, newest first.
 

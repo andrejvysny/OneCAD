@@ -10,6 +10,8 @@ import { useToolStore } from "@/stores/toolStore";
 import { useViewportStore } from "@/stores/viewportStore";
 import { useRepairStore } from "@/stores/repairStore";
 import { RepairPanel } from "@/features/repair/RepairPanel";
+import { OperationDiagnosticDetails } from "@/features/inspector/OperationDiagnosticDetails";
+import { editFeature } from "@/features/inspector/sections";
 import { InspectorSectionHost } from "@/modules/modeling/InspectorSectionHost";
 import { cn } from "@/ui/cn";
 import { sketchStatusText, sketchStatusSentence } from "@/features/sketch/constraintStatus";
@@ -139,6 +141,23 @@ function FeatureState({
         {feat?.kind ? `${cap(feat.kind)} feature` : "Feature"}
         {feat?.valueText ? ` · ${feat.valueText}` : ""}
       </div>
+      {feat?.status === "error" && (
+        <>
+          <div className="mt-3 rounded-sm border border-border bg-well px-2.5 py-2">
+            <div className="text-[12px] font-medium text-traffic-close">Feature failed</div>
+            {feat.statusMessage && <div className="mt-1 text-[12px] leading-normal text-ink-2">{feat.statusMessage}</div>}
+          </div>
+          <OperationDiagnosticDetails diagnostics={feat.diagnostics} />
+          <button
+            type="button"
+            data-testid="feature-edit-retry"
+            onClick={() => editFeature(feat)}
+            className="mt-3 rounded-sm bg-accent px-2.5 py-1.5 text-[12px] font-medium text-on-accent hover:bg-accent-hover"
+          >
+            Edit and retry
+          </button>
+        </>
+      )}
       <InspectorSectionHost />
     </>
   );

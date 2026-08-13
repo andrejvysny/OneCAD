@@ -304,6 +304,21 @@ describe("ModelToolController host-boolean (sketch on a face defaults to modifyi
     expect(toolChipStore.getState().booleanMode).toBe("Cut");
   });
 
+  it("an Intersect chip choice lowers the bound host target into the exact candidate", async () => {
+    seedSketch({ bodyId: "body1", elementId: "el_top" });
+    build();
+    await armExtrude();
+
+    toolChipStore.getState().onBooleanMode?.("Intersect");
+    await settleLane();
+
+    expect(debug().booleanMode).toBe("Intersect");
+    expect(debug().booleanTargetId).toBe("body1");
+    expect(lastParams().booleanMode).toBe("Intersect");
+    expect(lastParams().targetBodyId).toBe("body1");
+    expect(engineMock.setPreviewTint).toHaveBeenLastCalledWith("normal");
+  });
+
   it("a NewBody override drops the host entirely and never returns for that session", async () => {
     seedSketch({ bodyId: "body1", elementId: "el_top" });
     build();

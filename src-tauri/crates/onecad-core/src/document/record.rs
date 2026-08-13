@@ -915,13 +915,7 @@ fn default_true() -> bool {
 fn de_pattern_result_policy_version<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<u8>, D::Error> {
-    match Option::<u8>::deserialize(deserializer)? {
-        None => Ok(None),
-        Some(2) => Ok(Some(2)),
-        Some(version) => Err(de::Error::custom(format!(
-            "Pattern resultPolicyVersion must be 2, got {version}"
-        ))),
-    }
+    Option::<u8>::deserialize(deserializer)
 }
 
 /// Deserializes an optional `BodyId` where an empty string means "no body"
@@ -3067,17 +3061,21 @@ mod tests {
     }
 
     #[test]
-    fn pattern_result_policy_version_is_absent_or_v2_only() {
+    fn pattern_result_policy_version_preserves_future_numeric_values() {
         let legacy = serde_json::json!({
             "opType": "LinearPattern",
             "params": {"direction": [1.0, 0.0, 0.0], "spacing": 1.0, "count": 2}
         });
         assert!(serde_json::from_value::<Operation>(legacy).is_ok());
-        let unsupported = serde_json::json!({
+        let future = serde_json::json!({
             "opType": "LinearPattern",
             "params": {"direction": [1.0, 0.0, 0.0], "spacing": 1.0, "count": 2,
-                       "resultPolicyVersion": 1}
+                       "resultPolicyVersion": 3}
         });
-        assert!(serde_json::from_value::<Operation>(unsupported).is_err());
+        let parsed: Operation = serde_json::from_value(future.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap()["params"]["resultPolicyVersion"],
+            future["params"]["resultPolicyVersion"]
+        );
     }
 }

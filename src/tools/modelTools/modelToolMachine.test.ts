@@ -133,6 +133,18 @@ describe("extrude FSM", () => {
     expect(pick.state.targetBodyId).toBeNull();
   });
 
+  it("keeps Intersect and its target through the shared target-pick path", () => {
+    const armed: ExtrudeFsm = extrudeStep(extrudeInit(), { kind: "arm" }).state;
+    const pick = extrudeStep(armed, { kind: "setBooleanMode", mode: "Intersect", needsPick: true });
+    expect(pick.state.phase).toBe("targetPick");
+    expect(pick.state.booleanMode).toBe("Intersect");
+
+    const chosen = extrudeStep(pick.state, { kind: "pickTarget", bodyId: "b-intersect" });
+    expect(chosen.state.phase).toBe("armed");
+    expect(chosen.state.booleanMode).toBe("Intersect");
+    expect(chosen.state.targetBodyId).toBe("b-intersect");
+  });
+
   it("pickTarget arms with the body; cancelTargetPick reverts to NewBody", () => {
     const targetPick = extrudeStep(
       extrudeStep(extrudeInit(), { kind: "arm" }).state,
@@ -632,6 +644,19 @@ describe("revolve FSM", () => {
     const plain = revolveStep(revolveInit(), { kind: "arm" }).state;
     expect(plain.booleanMode).toBe("NewBody");
     expect(plain.targetBodyId).toBeNull();
+  });
+
+  it("keeps an Intersect target through the revolve axis and target-pick states", () => {
+    const axisPick = revolveStep(revolveInit(), { kind: "arm" }).state;
+    const armed = revolveStep(axisPick, { kind: "pickAxis", lineId: "L1", valid: true }).state;
+    const pick = revolveStep(armed, { kind: "setBooleanMode", mode: "Intersect", needsPick: true });
+    expect(pick.state.phase).toBe("targetPick");
+    expect(pick.state.booleanMode).toBe("Intersect");
+
+    const chosen = revolveStep(pick.state, { kind: "pickTarget", bodyId: "b-intersect" });
+    expect(chosen.state.phase).toBe("armed");
+    expect(chosen.state.booleanMode).toBe("Intersect");
+    expect(chosen.state.targetBodyId).toBe("b-intersect");
   });
 
   it("re-edit arms straight into armed with the seeded angle (skips axis-pick)", () => {

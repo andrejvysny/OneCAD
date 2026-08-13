@@ -54,8 +54,8 @@ export function clampDraftAngle(deg: number): number {
   return Math.max(-DRAFT_ANGLE_LIMIT_DEG, Math.min(DRAFT_ANGLE_LIMIT_DEG, deg));
 }
 
-/** Boolean fusion mode the extrude/revolve commit carries (Wave 2 UI). */
-export type BooleanMode = "NewBody" | "Add" | "Cut";
+/** Boolean fusion mode the extrude/revolve commit carries (SCHEMA §7.3). */
+export type BooleanMode = "NewBody" | "Add" | "Cut" | "Intersect";
 
 /**
  * The boolean default an arm is SEEDED with (SKETCH-ON-FACE HOST-BOOLEAN).

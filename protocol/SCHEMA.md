@@ -1325,16 +1325,18 @@ in place — never NewBody, never a body fan-out (>1 output solid ⇒ recoverabl
 - `count` is an integer `[2,128]`; `|spacing| ≥ 1e-9`; `direction` non-zero
   (normalized). Instance `i ∈ [1, count)` is translated `direction·spacing·i`.
 - **Absent `resultPolicyVersion` is frozen V1:** `fuseResult:true` fuses source +
-  instances into one connected legacy result body `body_<opId>`; `false` gathers the
-  same into one compound body. The source is preserved.
+  instances into legacy aggregate body `body_<opId>`; `false` gathers the same into
+  one compound body. Source remains unchanged. This compatibility path permits its
+  historic aggregate/compound result and does not apply V2 connected-solid policy.
 - **`resultPolicyVersion:2`:** source is instance zero. With `fuseResult:false`, it
   emits exactly `count−1` created children `body_<opId>:<k>`, where child `k` is
   transformed instance `k+1`; source emits no lifecycle event and stays unchanged.
   With `fuseResult:true`, the connected fused result modifies `sourceBodyId` in place;
   a disconnected result refuses `PATTERN_DISJOINT_RESULT`. New child bodies inherit
-  source body visibility/color, but not source face identities or face colors. A
-  present `resultPolicyVersion` MUST be integer `2`; re-edit preserves both legacy
-  absence and stored `fuseResult`. Count reduction removes only tail children;
+  source body visibility/color, but not source face identities or face colors. New
+  authoring emits only integer `2`. Other numeric versions load and re-save verbatim,
+  but execution refuses recoverably with `UNSUPPORTED_PATTERN_RESULT_POLICY_VERSION`.
+  Re-edit preserves both legacy absence and stored `fuseResult`. Count reduction removes only tail children;
   retained child IDs remain stable, and suppression removes children without
   modifying source.
 
@@ -1796,6 +1798,22 @@ snapshot — no fence, no scratch, no session mutation; addressed like the other
   multiplies by density). `principalAxes` rows are unit vectors, right-handed,
   paired with `principalMoments` in order.
 - Unknown `bodyId` ⇒ `REF_UNRESOLVED` error resp (recoverable).
+
+#### QueryBodyTopology
+
+Read-only exact BRep topology counts for one body. This is deliberately separate
+from `Tessellate`: faceting LOD must never change a corpus oracle.
+
+```json
+// req.args
+{ "bodyId": "body_3" }
+// result
+{ "solidCount": 1, "faceCount": 6 }
+```
+
+- Counts are `TopExp` counts over the current head body BRep; no fence, scratch,
+  session mutation, or identity minting.
+- Unknown or absent `bodyId` ⇒ recoverable `REF_UNRESOLVED` error response.
 
 #### AcquireElementIds
 Promotes snapshot-scoped TopoKeys to persistent, globally-unique `ElementId`s
@@ -2724,7 +2742,9 @@ sign-off) once fixtures exist.
   extended to assert the new diagnostic (verified to fail on a wrong code).
 
 - **2026-08-11 — §2, §7.2, §7.3 Pattern V2 publication/lineage policy.**
-  `resultPolicyVersion` absent remains frozen V1; present values are literal `2`.
+  `resultPolicyVersion` absent remains frozen V1. New records author literal `2`;
+  other numeric values load/resave losslessly and execution refuses recoverably with
+  `UNSUPPORTED_PATTERN_RESULT_POLICY_VERSION`.
   V2 non-fused Pattern preserves source as instance zero and creates only ordinal
   children for transformed instances. V2 fused Pattern modifies source in place
   and requires one connected result. This supersedes the M6a statement below that

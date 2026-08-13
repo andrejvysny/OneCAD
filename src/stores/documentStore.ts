@@ -123,6 +123,8 @@ export interface FeatureMeta {
   /** Worker failure reason for an errored feature (`status === "error"`), shown as
    *  the HistoryList row tooltip (MODEL-HARDEN W0.5). Absent for any other status. */
   statusMessage?: string;
+  /** Bounded structured diagnostics retained for the inspector failure state. */
+  diagnostics?: import("@/ipc/types").OperationDiagnostic[];
   /** Whether the feature is suppressed (backend-authoritative; see `FeatureRecord.suppressed`). */
   suppressed?: boolean;
 }

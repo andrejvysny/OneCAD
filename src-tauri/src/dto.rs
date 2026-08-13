@@ -157,6 +157,11 @@ pub struct FeatureDto {
     /// non-error status.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_message: Option<String>,
+    /// Bounded structured diagnostics for this step's latest terminal. These are
+    /// projection state, so the inspector can explain a stopped feature without
+    /// relying on a history-row tooltip.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<onecad_core::regen::Diagnostic>,
     /// Whether the op is suppressed — an axis ORTHOGONAL to [`FeatureStatus`],
     /// sourced from the RECORD flag (`OperationRecord::suppressed`), never from a
     /// [`StepState`]. Always serialized so the frontend can drop its optimistic
@@ -599,6 +604,15 @@ pub struct MassPropertiesDto {
     pub principal_moments: [f64; 3],
     /// The principal frame: three unit, right-handed, sign-canonical rows.
     pub principal_axes: [[f64; 3]; 3],
+}
+
+/// One body's exact BRep topology counts from `QueryBodyTopology` (SCHEMA §7.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BodyTopologyDto {
+    pub body_id: String,
+    pub solid_count: u32,
+    pub face_count: u32,
 }
 
 /// One face's snapshot-scoped EVIDENCE from `PrepareOffsetFace` (SCHEMA §7.6).
@@ -1462,6 +1476,7 @@ mod tests {
                 primary_value_kind: Some("length".into()),
                 status: FeatureStatus::Ok,
                 status_message: None,
+                diagnostics: Vec::new(),
                 suppressed: false,
             }],
             applied_ops: 1,
@@ -1642,6 +1657,7 @@ mod tests {
             primary_value_kind: None,
             status: FeatureStatus::Ok,
             status_message: None,
+            diagnostics: Vec::new(),
             suppressed: false,
         };
         let v = serde_json::to_value(&dimensionless).unwrap();
@@ -1712,6 +1728,7 @@ mod tests {
             primary_value_kind: None,
             status: FeatureStatus::Ok,
             status_message: None,
+            diagnostics: Vec::new(),
             suppressed: false,
         };
         assert_eq!(dto.kind, FeatureKind::Boolean);
@@ -1867,6 +1884,7 @@ mod tests {
             primary_value_kind: Some("length".into()),
             status: FeatureStatus::Ok,
             status_message: None,
+            diagnostics: Vec::new(),
             suppressed: false,
         };
         let v = serde_json::to_value(&ok).unwrap();

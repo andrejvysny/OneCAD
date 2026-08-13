@@ -30,6 +30,7 @@
 #include "nlohmann/json.hpp"
 #include "session/HistoryHash.h"
 #include "session/MassProperties.h"
+#include "session/BodyTopology.h"
 #include "session/ScratchJob.h"
 #include "session/Session.h"
 
@@ -79,6 +80,14 @@ Envelope mass_req(const std::string& body_id) {
     Envelope req;
     req.id = 11;
     req.verb = "QueryMassProperties";
+    req.args = json{{"bodyId", body_id}};
+    return req;
+}
+
+Envelope topology_req(const std::string& body_id) {
+    Envelope req;
+    req.id = 12;
+    req.verb = "QueryBodyTopology";
     req.args = json{{"bodyId", body_id}};
     return req;
 }
@@ -225,6 +234,22 @@ void test_determinism() {
     }
 }
 
+void test_body_topology() {
+    Session session;
+    seed_head(session, "body_box", BRepPrimAPI_MakeBox(20.0, 30.0, 40.0).Shape());
+    const Envelope response = onecad::session::handle_query_body_topology(
+        session, topology_req("body_box"));
+    check(response.ok.value_or(false), "topology: ok");
+    if (response.ok.value_or(false)) {
+        check(response.result["solidCount"] == 1, "topology: box has one solid");
+        check(response.result["faceCount"] == 6, "topology: box has six faces");
+    }
+    const Envelope missing = onecad::session::handle_query_body_topology(
+        session, topology_req("body_nope"));
+    check(!missing.ok.value_or(true) && missing.error->code == "REF_UNRESOLVED",
+          "topology: unknown body REF_UNRESOLVED");
+}
+
 }  // namespace
 
 int main() {
@@ -233,6 +258,7 @@ int main() {
     test_unknown_body();
     test_read_only();
     test_determinism();
+    test_body_topology();
     if (g_failures == 0) std::printf("test_mass_properties: all checks passed\n");
     return g_failures;
 }

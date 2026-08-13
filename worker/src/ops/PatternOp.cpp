@@ -57,7 +57,7 @@ bool read_result_policy(const json& params, PatternResultPolicy& policy, std::st
     if (!params.contains("resultPolicyVersion")) return true;
     const json& value = params["resultPolicyVersion"];
     if (!value.is_number_integer() || value.get<int>() != kResultPolicyVersion2) {
-        error = "Pattern resultPolicyVersion must be 2";
+        error = "UNSUPPORTED_PATTERN_RESULT_POLICY_VERSION";
         return false;
     }
     policy = PatternResultPolicy::V2;
@@ -164,7 +164,7 @@ OpOutcome build_pattern(OpContext& ctx, const json& op, const std::string& op_id
     if (result.IsNull()) {
         return OpOutcome::fail("GEOMETRY_INVALID", std::string(op_name) + " produced null shape");
     }
-    if (fuse_result) {
+    if (fuse_result && result_policy == PatternResultPolicy::V2) {
         const kernel::validation::PublicationDecision decision = publication_decision(
             result, kernel::validation::single_solid_policy(
                         std::string(op_name) + " fused result",
@@ -204,7 +204,9 @@ OpOutcome execute_linear_pattern(OpContext& ctx, const json& op, const std::stri
     std::string error;
     if (!read_count(params, count, error)) return OpOutcome::fail("OP_FAILED", error);
     PatternResultPolicy result_policy;
-    if (!read_result_policy(params, result_policy, error)) return OpOutcome::fail("OP_FAILED", error);
+    if (!read_result_policy(params, result_policy, error)) {
+        return OpOutcome::fail("UNSUPPORTED_PATTERN_RESULT_POLICY_VERSION", error);
+    }
     double spacing = 0.0;
     if (!read_scalar_strict(params, "spacing", 0.0, spacing, error)) {
         return OpOutcome::fail("OP_FAILED", error);
@@ -243,7 +245,9 @@ OpOutcome execute_circular_pattern(OpContext& ctx, const json& op, const std::st
     std::string error;
     if (!read_count(params, count, error)) return OpOutcome::fail("OP_FAILED", error);
     PatternResultPolicy result_policy;
-    if (!read_result_policy(params, result_policy, error)) return OpOutcome::fail("OP_FAILED", error);
+    if (!read_result_policy(params, result_policy, error)) {
+        return OpOutcome::fail("UNSUPPORTED_PATTERN_RESULT_POLICY_VERSION", error);
+    }
     double angle_deg = 360.0;
     if (!read_scalar_strict(params, "angleDeg", 360.0, angle_deg, error)) {
         return OpOutcome::fail("OP_FAILED", error);

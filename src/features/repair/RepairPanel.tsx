@@ -11,6 +11,7 @@ import {
   REPAIR_NOT_REBINDABLE,
 } from "@/features/inspector/historyActions";
 import type { NeedsRepairItem, ResolveCandidate } from "@/ipc/types";
+import { OperationDiagnosticDetails } from "@/features/inspector/OperationDiagnosticDetails";
 
 type CandidateLoad =
   | { status: "loading" }
@@ -192,6 +193,7 @@ export function RepairPanel() {
           const open = expandedRefId === item.refId;
           const load = loads[loadKey(revision, snapshotId, item.refId)];
           const busy = busyRefId === item.refId;
+          const diagnostics = features.find((feature) => feature.id === item.opId)?.diagnostics;
           return (
             <div
               key={item.refId}
@@ -222,6 +224,8 @@ export function RepairPanel() {
                   </span>
                 </span>
               </button>
+
+              <OperationDiagnosticDetails diagnostics={diagnostics} />
 
               {open && (
                 <div className="border-t border-warn-border px-2.5 py-2">

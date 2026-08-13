@@ -1911,6 +1911,20 @@ impl crate::worker::ElementQuery for WorkerManager {
         wire::parse_mass_properties(body_id_label, &ok_result(resp)?)
             .map_err(|message| EngineError::Protocol { message })
     }
+
+    async fn query_body_topology(
+        &self,
+        body: BodyId,
+        body_id_label: String,
+    ) -> Result<crate::dto::BodyTopologyDto, EngineError> {
+        let client = self.client_or_err()?;
+        let resp = client
+            .request("QueryBodyTopology", wire::query_body_topology_args(body))
+            .await
+            .map_err(protocol_err)?;
+        wire::parse_body_topology(body_id_label, &ok_result(resp)?)
+            .map_err(|message| EngineError::Protocol { message })
+    }
 }
 
 #[async_trait]
