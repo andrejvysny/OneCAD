@@ -412,6 +412,7 @@ pub fn run() {
             library::list_templates,
             library::save_as_template,
             library::new_from_template,
+            library::component_preview_mesh,
             library::component_upgrade_available,
             library::detach_component,
             api::prepare_offset_face,

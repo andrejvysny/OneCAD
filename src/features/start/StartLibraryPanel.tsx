@@ -19,8 +19,8 @@ import { createClient } from "@/ipc/client";
 import type { LibraryComponent } from "@/ipc/types";
 import { TextInput } from "@/ui/TextInput";
 import { Button } from "@/ui/Button";
-import { Icon } from "@/icons/Icon";
 import { ComponentDetails } from "./ComponentDetails";
+import { ComponentThumbnail } from "@/features/library/ComponentThumbnail";
 
 type LoadState = "loading" | "ready" | "error";
 
@@ -128,9 +128,12 @@ export function StartLibraryPanel() {
                     isSelected ? "border-accent ring-1 ring-accent" : "border-border bg-surface"
                   }`}
                 >
-                  <div className="flex aspect-square items-center justify-center rounded bg-well text-ink-8">
-                    <Icon name="cube" size={26} strokeWidth={1.5} />
-                  </div>
+                  <ComponentThumbnail
+                    componentId={c.id}
+                    componentVersion={c.version}
+                    size={192}
+                    className="aspect-square w-full rounded bg-well object-contain"
+                  />
                   <div className="truncate text-[12px] font-semibold text-ink">{c.name}</div>
                   <div className="truncate text-[10.5px] text-ink-6">{c.version}</div>
                 </button>

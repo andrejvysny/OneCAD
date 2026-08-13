@@ -2508,6 +2508,31 @@ export const mockClient: CadClient = {
    * designation but not the rendered geometry — the real worker-backed lane
    * (`component_ops.rs`) is where a size change actually resizes the body.
    */
+  /**
+   * The mock lane has no kernel, so every component previews as the same
+   * synthetic M6 SHCS mesh the placement ghost already uses. The FLOW (fetch →
+   * parse → render → cache) is real; the shape is not, which is why the panel's
+   * own tests assert wiring rather than geometry.
+   */
+  async componentPreviewMesh(
+    componentId: string,
+    _componentVersion: string,
+    _params?: Record<string, ComponentParamValue>,
+  ): Promise<{ bodyId: string; mesh: ArrayBuffer }[]> {
+    await wait(MESH_LATENCY_MS);
+    const identity = { center: [0, 0, 0] as const, axis: [0, 0, 1] as const, angleDeg: 0 };
+    return [
+      {
+        bodyId: `preview_${componentId}`,
+        mesh: placeComponentGhostMesh([0, 0, 0], {
+          center: [...identity.center],
+          axis: [...identity.axis],
+          angleDeg: identity.angleDeg,
+        }),
+      },
+    ];
+  },
+
   async listTemplates(): Promise<ProjectTemplate[]> {
     await wait();
     return [...mockTemplates];

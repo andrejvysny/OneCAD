@@ -957,3 +957,68 @@ async fn a_body_saved_as_a_component_places_back_as_the_same_solid() {
 
     wm.shutdown().await;
 }
+
+/// Every seeded component MESHES for the library UI (WP-B6), with no document
+/// open — which is the case that matters, because the most useful place to
+/// browse a catalog is the start screen, before any project exists.
+///
+/// A preview is a `PlaceComponent` candidate against a throwaway copy of the
+/// worker's session head (SCHEMA §7.6), and an empty head is a perfectly good
+/// thing to place into. This drives the same command the cards call and asserts
+/// a real MESH1 with vertices comes back — a card that silently falls back to
+/// its icon for the whole catalog would otherwise look exactly like the
+/// pre-WP-B6 behaviour.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_seeded_component_meshes_for_the_library_ui() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    onecad_lib::library_seed::seed_library(dir.path()).expect("seed");
+    let mut library = onecad_library::Library::open(dir.path()).expect("open");
+    library.reindex().expect("reindex");
+
+    let wm = spawn_worker(bin).await;
+    let preview: Arc<dyn onecad_lib::worker::PreviewEngine> = Arc::new(wm.clone());
+
+    let ids: Vec<(String, String)> = library
+        .index()
+        .components
+        .iter()
+        .flat_map(|(id, versions)| versions.keys().map(move |v| (id.clone(), v.clone())))
+        .collect();
+    assert!(
+        ids.len() >= 7,
+        "the seed catalog should be complete: {ids:?}"
+    );
+
+    for (id, version) in ids {
+        let result = onecad_lib::library::component_preview_mesh_at(
+            dir.path(),
+            preview.clone(),
+            id.clone(),
+            version.clone(),
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{id}@{version} did not preview: {e:?}"));
+
+        assert_eq!(
+            result.bodies.len(),
+            1,
+            "{id}: a component previews as exactly one body"
+        );
+        // MESH1 magic + a non-zero vertex count: the bytes are a mesh the
+        // frontend's own parser will accept, not an empty success. The magic is
+        // the LE u32 0x4d455348, i.e. the bytes `HSEM` on the wire, and the
+        // vertex count sits at 0x08 (see `parseMeshPayload.ts`).
+        let mesh = &result.bodies[0].mesh;
+        assert!(mesh.len() > 64, "{id}: mesh is shorter than a MESH1 header");
+        assert_eq!(&mesh[0..4], b"HSEM", "{id}: not a MESH1 blob");
+        let vertex_count = u32::from_le_bytes([mesh[8], mesh[9], mesh[10], mesh[11]]);
+        assert!(vertex_count > 0, "{id}: meshed to zero vertices");
+    }
+
+    wm.shutdown().await;
+}

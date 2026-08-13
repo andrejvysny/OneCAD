@@ -455,6 +455,22 @@ export interface CadClient {
   ): Promise<void>;
 
   /**
+   * Meshes a library component so the UI can SHOW it (WP-B6) — the card
+   * thumbnails and the detail preview in the library browser.
+   *
+   * Runs with or WITHOUT an open document: a preview is a candidate op against
+   * a throwaway copy of the worker's session head, and an empty head is a
+   * perfectly good thing to place into — which matters because the most useful
+   * place to browse a catalog is the start screen, before any project exists.
+   * Nothing is committed and the open document, if any, is untouched.
+   */
+  componentPreviewMesh(
+    componentId: string,
+    componentVersion: string,
+    params?: Record<string, ComponentParamValue>,
+  ): Promise<{ bodyId: string; mesh: ArrayBuffer }[]>;
+
+  /**
    * Every project template in the library (spec §8). An unreadable library is
    * an empty list, never an error — the start screen still has to render.
    */

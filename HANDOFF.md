@@ -1,3 +1,112 @@
+# Handoff — Component Library (Phase A content gaps + P3 closed + previews)
+
+Session 16 · 2026-08-13
+
+> Continues session 15 directly. WP-3.2 is now COMMITTED (`970b3db`); eight
+> further work packages landed on top, each with its own gate.
+
+## Goal
+
+Close the Component Library: first the content gaps earlier phases had claimed
+but never shipped, then P3's remaining bullets, then (asked for mid-session,
+with a screenshot) real 3D previews of every component.
+
+## Done and why
+
+Per-WP detail is in `TODO.md`. What a future reader most needs:
+
+- **The library was empty.** Not "thin" — empty. No seeded package existed
+  anywhere in the repo, and the worker's generator lane had no dispatch at all:
+  every `generatorId` built an ISO 4762 socket cap screw. So spec §12's
+  definition of done was unreachable in the shipped app no matter what the
+  kernel could do. WP-A1 added per-family dispatch + six more ISO families;
+  WP-A2 ships seven packages inside the binary and installs them on first run.
+- **Preview and commit did not carry free params at all.** `placeComponent` had
+  no params argument and the preview's generator source had no `params` key, so
+  every ghost previewed the generator's DEFAULT size. WP-A3's auto-size needed
+  that path built before it could exist, and the pairing now has a test that
+  watches both calls from one gesture.
+- **`platform.menus` (WP-B1) is the seam "Save as Component" needed.** A tree
+  provider's own rows could declare actions; nothing let a DIFFERENT module add
+  one, and the item belongs to `onecad.library` while the row belongs to
+  `onecad.modeling`.
+- **Authoring bakes, it does not replay** (WP-B2): the package carries the
+  frozen document AND a solid exported from the live session, and a placement
+  copies the baked solid. Single-solid (spec §9) is enforced at SAVE time, where
+  the author can still fix it.
+- **Replace is in place at the same `RecordId`** (WP-B4), and a mate rides
+  across by attachment NAME or is dropped and named. The upgrade offer is
+  report-only — nothing upgrades itself.
+- **Templates are immutable by never being the save target** (WP-B3):
+  `new_from_template` opens the container and then detaches the runtime from the
+  file.
+- **Previews are one shared offscreen renderer plus one live context**
+  (WP-B6). A WebGL context per card is how a browser runs out of them.
+
+Defects found by RUNNING, not by reading, this session:
+1. An unregistered `generatorId` silently built a screw (WP-A1's whole reason).
+2. A bare `<id>` package directory made a 1.1.0 save overwrite 1.0.0's manifest
+   (found by a test, fixed with version-qualified directories).
+3. `LibraryPanel` never reloaded its catalog, so a just-authored component
+   looked like a failed save (found by the new e2e).
+4. A preview's decorated op id (`preview_<uuid>`) made `body_<opId>` unparseable
+   as a UUID and the wire refused every preview (found by the real-worker test).
+5. BOLTS lists ISO 7089's M10 bore as 10.0; ISO 7089 and DIN 125 A publish 10.5,
+   and a 10.0 bore will not pass an M10 bolt. Corrected and pinned on both sides.
+
+## How to resume
+
+1. Run the `handoff` skill with "resume".
+2. Nothing is half-finished; the tree is clean and every suite is green.
+3. What is deliberately NOT built, in the order it is most likely wanted:
+   - **Per-attachment frames.** An authored component seats at its MODEL ORIGIN
+     because nothing on the wire carries an attachment's local frame. Lifting
+     that means `mate.selfFrame` (additive, SCHEMA §7.3 + §14) plus a
+     canonicalizing bake, and it is what "click a face to place an attachment"
+     in the authoring dialog needs to be real rather than decorative.
+   - **A re-bake lane for `document` components**, which is what would make
+     their parameters editable (`set_component_params` refuses today, with the
+     reason). `documentSha256` is already recorded for it.
+   - **Bearings (ISO 15) and NEMA 17/23**, deferred by the user's own scope
+     call, and the opinionated starter templates (carried Q4).
+   - **Auto-size has no Playwright coverage**: `mockClient.classifyElement`
+     reports only `plane`/`other` and therefore no radius. Teaching the mock to
+     classify a cylinder is its own piece of work.
+4. Full gate, every suite RUN this session:
+   ```bash
+   ONECAD_OCCT_ROOT="$HOME/.onecad-occt/8.0.1" scripts/build-worker.sh Release
+   ctest --test-dir worker/build --output-on-failure   # 119/119
+   cd src-tauri && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
+   ONECAD_WORKER_PATH=$PWD/../worker/build/onecad-worker ONECAD_REQUIRE_WORKER=1 \
+     cargo test --workspace --no-fail-fast
+   bunx tsc --noEmit && bun run test         # 251 files / 4206
+   bunx playwright test                       # 418/418
+   grep -rn '#[0-9a-fA-F]\{6\}' src --include='*.ts' --include='*.tsx'   # hex gate: empty
+   ```
+
+## Open questions
+
+- The authoring dialog says "the component seats at its model origin" because
+  that is true. If per-attachment frames land, that sentence and the dialog's
+  shape both change — it is the one piece of user-facing copy that encodes a
+  current limitation.
+- `component.toml`'s `[source]` extension (`codec`/`format`, and `document`'s
+  `geometry` pointer) is still a documented deviation from spec §2.1's comment
+  lines. A spec edit should ratify it.
+- Templates carry no versioning at all. Components need it (a placed instance
+  records a revision); a template is copied at use and never referenced again,
+  so nothing has demanded it yet.
+
+## Pointers
+
+- Tasks → `TODO.md` § the eight COMPONENT-LIBRARY entries dated 2026-08-13
+- Snapshot → `CURRENT_STATE.md` § COMPONENT LIBRARY — LIVE DELTA (session 16)
+- Spec → `TheComponentLibrary/onecad-component-library-spec.md`
+- Wire → `protocol/SCHEMA.md` §7.3 (`PlaceComponent`), §7.5
+  (`ClassifyElement`), §7.8 (`ExportGeometry`), §14 (the 2026-08-13 entries)
+
+---
+
 # Handoff — Component Library (P3 WP-3.2, blob-backed component geometry)
 
 Session 15 · 2026-08-13

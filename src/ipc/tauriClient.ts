@@ -182,6 +182,7 @@ const CMD = {
   resolveComponentSource: "resolve_component_source",
   placeComponent: "place_component",
   saveAsComponent: "save_as_component",
+  componentPreviewMesh: "component_preview_mesh",
   listTemplates: "list_templates",
   saveAsTemplate: "save_as_template",
   newFromTemplate: "new_from_template",
@@ -1619,6 +1620,23 @@ export function createTauriClient(): CadClient {
     await call(CMD.placeComponent, { componentId, componentVersion, translate, rotate, params });
   }
 
+  async function componentPreviewMesh(
+    componentId: string,
+    componentVersion: string,
+    params?: Record<string, ComponentParamValue>,
+  ): Promise<{ bodyId: string; mesh: ArrayBuffer }[]> {
+    const res = await call<{ bodies: { bodyId: string; mesh: number[] | ArrayBuffer }[] }>(
+      CMD.componentPreviewMesh,
+      { componentId, componentVersion, params },
+    );
+    // Same normalization `previewOp` does: Tauri hands a JSON number array over
+    // the IPC boundary unless the payload is already an ArrayBuffer.
+    return res.bodies.map((b) => ({
+      bodyId: b.bodyId,
+      mesh: b.mesh instanceof ArrayBuffer ? b.mesh : new Uint8Array(b.mesh).buffer,
+    }));
+  }
+
   async function listTemplates(): Promise<ProjectTemplate[]> {
     return call<ProjectTemplate[]>(CMD.listTemplates, {});
   }
@@ -1939,6 +1957,7 @@ export function createTauriClient(): CadClient {
     resolveComponentSource,
     placeComponent,
     saveAsComponent,
+    componentPreviewMesh,
     listTemplates,
     saveAsTemplate,
     newFromTemplate,

@@ -18,7 +18,7 @@ import { tasksStore } from "@/stores/tasksStore";
 import { SidebarTabHeader } from "@/features/shell/SidebarTabHeader";
 import { TextInput } from "@/ui/TextInput";
 import { Button } from "@/ui/Button";
-import { Icon } from "@/icons/Icon";
+import { ComponentThumbnail } from "./ComponentThumbnail";
 import { armPlacement, cancelPlacement, useArmedComponentKey } from "@/modules/library/placementController";
 
 type LoadState = "loading" | "ready" | "error";
@@ -56,7 +56,15 @@ export function LibraryPanel() {
       .catch(() => setState("error"));
   };
 
-  useEffect(load, []);
+  // Reload whenever this tab becomes the visible one, not just at mount: the
+  // catalog changes UNDER this panel (an authored component, WP-B2; a reindex
+  // from the start screen), and a list read once at editor mount would show a
+  // component the user just saved as missing.
+  useEffect(() => {
+    if (activeSidebarTab === "library") load();
+    // `load` is re-created every render; keying on the tab is the intent.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSidebarTab]);
 
   // WP-1.6: the tasks chip's first real producer. `reindexLibrary()` is a
   // single atomic response (`ReindexReport` has no incremental count), so
@@ -136,9 +144,7 @@ export function LibraryPanel() {
                 }`}
                 title={armed ? `Placing ${c.id} — click again to cancel` : c.id}
               >
-                <div className="flex aspect-square items-center justify-center rounded bg-panel text-ink-8">
-                  <Icon name="cube" size={22} strokeWidth={1.5} />
-                </div>
+                <ComponentThumbnail componentId={c.id} componentVersion={c.version} size={192} />
                 <div className="truncate text-[11px] font-medium text-ink-3">{c.name}</div>
                 <div className="truncate text-[10px] text-ink-7">{c.version}</div>
               </button>

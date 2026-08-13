@@ -663,6 +663,133 @@ pub async fn set_component_params(
     Ok(projection)
 }
 
+/// Meshes a library component so the UI can SHOW it (WP-B6) — the card
+/// thumbnails and the detail preview in the library browser.
+///
+/// **Runs with or without an open document.** A preview is a `PlaceComponent`
+/// candidate against a throwaway copy of the worker's session head (SCHEMA
+/// §7.6 `PreviewOp`), and an empty head is a perfectly good thing to place
+/// into — which matters because the most useful place to browse a catalog is
+/// the START SCREEN, before any project exists. It therefore picks the open
+/// document's worker when there is one and the PRE-WARMED worker otherwise,
+/// rather than going through `AppState::preview()` (which is
+/// `PendingBackend` until a document opens).
+///
+/// Nothing is committed, nothing is recorded, and the open document — if any —
+/// is untouched: `PreviewOp` never mutates the head it copies.
+#[tauri::command]
+pub async fn component_preview_mesh(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    component_id: String,
+    component_version: String,
+    params: Option<BTreeMap<String, ComponentParamValue>>,
+) -> Result<crate::dto::PreviewResultDto, ApiError> {
+    let root = library_root(&app)
+        .ok_or_else(|| ApiError::Internal("componentPreviewMesh: no app data dir".into()))?;
+    let preview: std::sync::Arc<dyn crate::worker::PreviewEngine> = state
+        .live_worker()
+        .or_else(|| state.warm_worker())
+        .map(|wm| std::sync::Arc::new(wm) as std::sync::Arc<dyn crate::worker::PreviewEngine>)
+        .ok_or_else(|| {
+            ApiError::Internal(
+                "componentPreviewMesh: no geometry worker is running (a preview needs one)".into(),
+            )
+        })?;
+    component_preview_mesh_at(&root, preview, component_id, component_version, params).await
+}
+
+/// The testable core of [`component_preview_mesh`] — takes the preview engine
+/// explicitly, so an integration test can drive it over a real worker (the
+/// `#[tauri::command]` wrapper is pinned to the `Wry` runtime, and `AppState`'s
+/// worker slots are only populated by the production factory).
+pub async fn component_preview_mesh_at(
+    root: &Path,
+    preview: std::sync::Arc<dyn crate::worker::PreviewEngine>,
+    component_id: String,
+    component_version: String,
+    params: Option<BTreeMap<String, ComponentParamValue>>,
+) -> Result<crate::dto::PreviewResultDto, ApiError> {
+    let library = open_at(root)?;
+    let (_version, entry) = library
+        .get(&component_id, Some(&component_version))
+        .ok_or_else(|| {
+            ApiError::InvalidCommand(format!(
+                "componentPreviewMesh: unknown component {component_id}@{component_version}"
+            ))
+        })?;
+    let revision = entry.revision.clone();
+    let resolved = library.resolve_source(&ResolveRequest {
+        component_id: &component_id,
+        component_version: &component_version,
+        component_revision: &revision,
+    })?;
+    let (source, blob) = component_source_from_resolved(resolved, &component_id)?;
+    let source = source_with_free_params(source, &params.unwrap_or_default(), &component_id)?;
+
+    // A blob-backed component's bytes must be readable by the worker before the
+    // op is lowered (the wire injects `source.path` from the process-global
+    // sha→path registry). With no document open there is no import workspace to
+    // stage into, so the preview lane keeps its own.
+    if let Some(staged) = blob {
+        materialize_for_preview(&staged)?;
+    }
+
+    let op = Operation::Known(KnownOperation::PlaceComponent(PlaceComponentParams {
+        component_id,
+        component_version,
+        component_revision: revision,
+        params: Default::default(),
+        source,
+        mate: None,
+        // At the origin, unrotated: the viewer frames whatever comes back, and a
+        // preview has no target to seat against.
+        placement: FrozenPlacement {
+            translate: [Scalar::new(0.0), Scalar::new(0.0), Scalar::new(0.0)],
+            rotate: Default::default(),
+        },
+        extra: Default::default(),
+    }));
+
+    crate::worker::PreviewEngine::preview_op(
+        preview.as_ref(),
+        op,
+        // A fresh UUID, NOT a decorated string: the preview mints a body id of
+        // `body_<opId>` and the adoption check requires that to parse as a
+        // UUID, so a "preview_…" prefix is refused at the wire (found by
+        // `every_seeded_component_meshes_for_the_library_ui`, not by reading).
+        uuid::Uuid::new_v4().to_string(),
+        None,
+        None,
+        onecad_core::regen::Lod::Medium,
+    )
+    .await
+    .map_err(ApiError::from)
+}
+
+/// Writes a component blob where the worker can read it, for the preview lane.
+///
+/// Its own [`crate::imports::ImportWorkspace`], process-global and never torn
+/// down: previews repeat constantly (every card, every parameter change) and
+/// the store is content-addressed, so re-materializing the same digest is a
+/// no-op after the first write.
+fn materialize_for_preview(staged: &StagedBlob) -> Result<(), ApiError> {
+    use std::sync::{Mutex, OnceLock};
+    static WORKSPACE: OnceLock<Mutex<crate::imports::ImportWorkspace>> = OnceLock::new();
+    let workspace = WORKSPACE.get_or_init(|| {
+        Mutex::new(crate::imports::ImportWorkspace::new(
+            onecad_core::ids::DocumentId::new(),
+        ))
+    });
+    let mut guard = workspace.lock().map_err(|_| {
+        ApiError::Internal("componentPreviewMesh: preview workspace poisoned".into())
+    })?;
+    guard
+        .materialize(&staged.sha256, staged.codec, &staged.bytes)
+        .map_err(|e| ApiError::Internal(format!("componentPreviewMesh: materialize blob: {e}")))?;
+    Ok(())
+}
+
 // ── Templates (spec §8) ─────────────────────────────────────────────────────
 
 /// A template's PNG thumbnail as a data URL, or `None`.

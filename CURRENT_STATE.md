@@ -1,3 +1,57 @@
+## COMPONENT LIBRARY — LIVE DELTA (2026-08-13, session 16, Phase A + P3 CLOSED)
+
+Last verified 2026-08-13. Branch `OneCAD-Component-Library`, clean at
+`0166ac4`. Seven commits this session, each its own gate:
+
+- `970b3db` WP-3.2 (the previous session's delta, committed as-is)
+- `68a3089` **WP-A1** — per-family generator dispatch + six ISO fastener
+  families. `source.generatorId` was read but never dispatched: EVERY id built
+  an ISO 4762 socket cap screw. Now `iso4014` `iso4017` `iso4032` `iso4762`
+  `iso7089` `iso7093` `iso7380`, each with an analytic exact-volume ctest, and
+  an unregistered id fails loudly.
+- `be73bf8` **WP-A2** — the catalog SHIPS. There was no seeded library anywhere
+  in the repo, so a real user's panel was empty regardless of what the kernel
+  could build. Seven `component.toml` packages are embedded in the binary and
+  installed on first run; a user's own copy is never overwritten.
+- `bee0d43` **WP-A3** — auto-size on hole rims, plus the free-param path that
+  made it possible: neither `placeComponent` nor the preview's generator source
+  carried params before, so every ghost previewed the DEFAULT size.
+- `d42f47a` **WP-B1** — `platform.menus`: cross-module context-menu items. A
+  provider's own rows could declare actions; nothing let a different module add
+  one, which is what "Save as Component" on a modeling-owned body row needs.
+- `8ffb66c` **WP-B2** — Save as Component. Author a body → `document` package →
+  place it back as the same solid, proven against the real worker.
+- `816e8a2` **WP-B4** — ReplaceComponent + opt-in upgrade UI (in place at the
+  same RecordId; a mate rides across by attachment NAME or is dropped and
+  named).
+- `0166ac4` **WP-B3** — project templates: save, list, start from. The start
+  screen's `templates` key is no longer a stub.
+- **WP-B5 + WP-B6** — e2e for authoring and templates, and real 3D previews for
+  every component: card thumbnails from ONE shared offscreen renderer (a
+  context per card is how a browser runs out of them), a live orbitable detail
+  view, and `component_preview_mesh`, which runs with NO document open because
+  the most useful place to browse a catalog is the start screen.
+
+**Spec §12's definition of done is now reachable end to end in the shipped
+app**: the library arrives populated, a hovered hole auto-sizes the fastener,
+the ghost and the commit agree, a placed instance can be re-parameterized,
+replaced, upgraded or detached, a user can author their own component from a
+body, and a project can start from a template.
+
+Known limits, all recorded rather than hidden: an authored component seats at
+its MODEL ORIGIN (no per-attachment frames on the wire yet); `document`-source
+components have no re-bake lane, so their params are not editable; auto-size has
+no Playwright coverage because the mock lane's `classifyElement` cannot report a
+cylinder; bearings/NEMA tables and the opinionated starter templates are
+deferred by decision.
+
+Gate at the session's end: worker ctest **119/119** · `cargo test --workspace`
+green · `cargo fmt`/`clippy -D warnings` clean · `tsc` clean · vitest **251
+files / 4206** · Playwright **416/416** · hex gate empty. (One Playwright sweep run under heavy
+concurrent load failed `revolve-preview.spec.ts`, a foreign spec, and it passed
+2/2 in isolation — the machine-contention flake this repo's gate notes already
+describe.)
+
 ## COMPONENT LIBRARY — LIVE DELTA (2026-08-13, session 15, P3 WP-3.2)
 
 Last verified 2026-08-13 12:15. Branch `OneCAD-Component-Library`, **dirty** —

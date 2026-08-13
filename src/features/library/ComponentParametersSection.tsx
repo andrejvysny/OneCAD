@@ -20,6 +20,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { SectionLabel } from "@/ui/SectionLabel";
 import { Button } from "@/ui/Button";
+import { ComponentPreview3D } from "./ComponentPreview3D";
 import { useDocumentStore } from "@/stores/documentStore";
 import { useSelectionStore, primarySelection } from "@/stores/selectionStore";
 import { viewportStore } from "@/stores/viewportStore";
@@ -202,6 +203,18 @@ export function ComponentParametersSection() {
           {designation}
         </div>
       ) : null}
+
+      {/* The instance AS CONFIGURED (WP-B6): the preview is keyed by the live
+          free params, so changing a size re-renders it — the same round trip
+          the placement ghost takes, at rest. */}
+      <div className="mb-2">
+        <ComponentPreview3D
+          componentId={record.componentId}
+          componentVersion={record.componentVersion}
+          params={values}
+          size={196}
+        />
+      </div>
       {freeParams.map(([key, spec]) => {
         const value = values[key];
         const disabled = pending === key;

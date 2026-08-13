@@ -6,6 +6,7 @@
  */
 import type { ReactNode } from "react";
 import { Icon } from "@/icons/Icon";
+import { ComponentPreview3D } from "@/features/library/ComponentPreview3D";
 import type { LibraryComponent } from "@/ipc/types";
 
 type ComponentDetailsProps = {
@@ -44,6 +45,15 @@ export function ComponentDetails({ component, onClose }: ComponentDetailsProps) 
           <Icon name="x" size={13} strokeWidth={1.8} />
         </button>
       </div>
+
+      {/* The live, orbitable preview (WP-B6) — one WebGL context, mounted only
+          while a component is selected. The cards above use rasterized
+          thumbnails precisely so this is the only one. */}
+      <ComponentPreview3D
+        componentId={component.id}
+        componentVersion={component.version}
+        size={248}
+      />
 
       <Row label="Version">{component.version}</Row>
       <Row label="Source">{component.sourceKind}</Row>

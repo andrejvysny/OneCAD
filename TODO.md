@@ -1,5 +1,87 @@
 # OneCAD-Tauri Migration TODO
 
+## COMPONENT-LIBRARY WP-B5 + WP-B6 (2026-08-13) — GATE PASSED, PHASE B CLOSED
+
+Two things at once: P3's remaining e2e coverage (WP-B5), and — at the user's
+request, with the screenshot that prompted it — real 3D previews for every
+component (WP-B6).
+
+### WP-B5 — e2e for authoring and templates
+
+`library-author-component.spec.ts` drives the wiring four modules only meet at
+runtime in: a body row's context menu (modeling's row, the library's item,
+`platform.menus` in between) → the `Slots.ShellOverlay` dialog → the catalog
+read the panel makes. `library-template.spec.ts` drives the whole template loop
+— command palette → dialog → close project → the start screen's Templates row →
+a NEW document from it.
+
+**A real defect the first e2e caught**: `LibraryPanel` loaded its catalog once
+at editor mount, so a component authored while the editor was open never
+appeared — the user's own save looked like it had failed. It now reloads
+whenever the library tab becomes visible, which also covers a reindex done from
+the start screen.
+
+Both specs state what they do NOT own: the geometry half (bake, single-solid
+refusal, the package that places back as the same solid) is a real-worker
+concern and is tested there. The mock lane has no kernel, and faking one would
+prove nothing.
+
+### WP-B6 — component previews
+
+Every card showed the same generic cube icon; the catalog was unbrowsable by
+eye. Components now render their real geometry.
+
+**`component_preview_mesh`** runs a `PlaceComponent` candidate through
+`PreviewOp` (SCHEMA §7.6) — a throwaway copy of the worker's session head — and
+returns MESH1. It works with **no document open**, which is the case that
+matters: the most useful place to browse a catalog is the start screen, before
+any project exists. It picks the open document's worker when there is one and
+the PRE-WARMED worker otherwise, rather than `AppState::preview()` (which is
+`PendingBackend` until a document opens). Blob-backed components materialize
+into a preview-lane `ImportWorkspace`, since there is no document carrier to
+stage into.
+
+**One WebGL context, not one per card.** A browser allows ~16 live contexts and
+a catalog can hold hundreds, so cards get a data URL from a single shared
+offscreen renderer (`componentPreviewScene`), cached per `id@version[#params]`,
+with concurrent callers sharing one request — a grid mounts every card at once,
+and 30 cards must not ask the kernel to build the same screw 30 times. The
+DETAIL view (`ComponentPreview3D`) is the only live context: its own small
+scene, drag-to-orbit, mounted only while a component is selected. It is used by
+the start-screen browser and by the inspector, where it previews the placed
+instance AS CONFIGURED (keyed on the live free params, so changing a size
+re-renders it).
+
+Colors come from `palette` — the viewport's own token-resolved colors — so a
+preview reads as the same material as a real body and re-themes with it.
+
+**Every failure degrades to the old behaviour**: no worker, no WebGL, an
+unbuildable component, a malformed mesh — all end in `null` and the card shows
+its icon. A component that cannot be pictured is still listed, searchable and
+placeable.
+
+**A defect found by RUNNING it**: the preview minted its body id from a
+decorated op id (`preview_<uuid>`), and `body_<opId>` must parse as a UUID —
+the wire refused every preview. Caught by the real-worker test, not by reading.
+
+**Contention flakes, recorded not chased.** Both appeared only while another
+full suite was saturating the machine, and both were re-proven green in
+isolation immediately after — the same SwiftShader-load signature this repo's
+own gate notes already describe:
+- two vitest runs launched DURING the Playwright sweep each reported one
+  unnamed failure; two consecutive runs on a quiet machine were 4206/4206;
+- the final Playwright sweep (run while those vitest runs were going) failed
+  `revolve-preview.spec.ts` — a foreign spec this WP touches nothing in — and
+  it passed 2/2 on re-run. The sweep 20 minutes earlier, on the same code
+  modulo two comment-level frontend edits, was **416/416**.
+
+GATE: worker ctest **119/119** · `ONECAD_REQUIRE_WORKER=1 cargo test
+--workspace` green (new: `every_seeded_component_meshes_for_the_library_ui` —
+every seeded component meshes to a real MESH1 with vertices, through the same
+command the cards call) · `cargo fmt`/`clippy -D warnings` clean · `bunx tsc
+--noEmit` clean · vitest **251 files / 4206** · Playwright **416/416** (see the flake note above) · hex
+gate empty.
+
 ## COMPONENT-LIBRARY WP-B3 (2026-08-13) — GATE PASSED
 
 Project templates (spec §8) — the start screen's `templates` nav key has been
