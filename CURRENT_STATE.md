@@ -9,9 +9,18 @@ describing "10 seeded packages" or "3 starters" is history, accurate at the time
 it was written.
 
 The dispatch, the tables' generic shape and `GeneratorRequest::text_params`
-survive on purpose: they are what a re-added family needs on day one. Full
-rationale, the seeding limitation on already-seeded roots, and the flagged seams
-are in TODO.md § CL-TRIM.
+survive on purpose: they are what a re-added family needs on day one.
+
+Seeding now also PRUNES a retired built-in (`SEED_VERSION` 5): a
+`.seed-ledger.json` records the SHA-256 of every manifest this app writes, and a
+directory is removed only when it is ledgered, no longer shipped, holds nothing
+but that one file, and still hashes to the ledgered value. Anything else is
+adopted — left alone, dropped from the ledger, it is the user's. Roots at marker
+≤ 4 have no ledger and need one manual `rm`; the dev machine's was cleared.
+Templates are not pruned (their bytes are generated per install, so there is no
+unmodified-proof to check).
+
+Full rationale and the flagged seams are in TODO.md § CL-TRIM / CL-TRIM.2.
 
 ## COMPONENT LIBRARY — LIVE DELTA (2026-08-13, session 17, PROGRAM COMPLETE)
 

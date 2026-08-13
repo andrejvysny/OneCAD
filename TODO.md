@@ -14,13 +14,7 @@ onto a hole") and the only family carrying pinned exact-volume ctests. The rest
 was breadth with no consumer.
 
 - [x] **Seed catalog** — nine `component.toml` directories deleted;
-  `SEED_PACKAGES` is one entry; `SEED_VERSION` 3 → 4.
-  **Known limit, documented at the constant:** a bump ADDS, it never removes.
-  A library root seeded at version ≤3 keeps the nine packages on disk, because
-  seeding cannot tell a stale built-in from a package the user authored under
-  the same id — "the user's copy always wins" is the rule, and guessing wrong
-  deletes their work. Clearing a dropped family from an existing root is a
-  manual `rm` of its directory.
+  `SEED_PACKAGES` is one entry; `SEED_VERSION` 3 → 4 → **5** (the ledger, below).
 - [x] **Worker** — `ComponentGenerators.cpp` keeps `build_socket_cap` and the
   three thread-detail cutters; `build_button_head` / `hex_screw` / `hex_nut` /
   `washer` / `bearing` / `stepper_motor` and their helpers (`build_hex_prism`,
@@ -56,6 +50,41 @@ assumed: `filletChamfer:181` and `sketch-multi-object:44` pass in isolation
 fails DETERMINISTICALLY on both browsers in a clean worktree at HEAD `2b9b04b`,
 i.e. before any of this. It expects 2 body options and gets 1 — pre-existing,
 unrelated to the catalog, and left for whoever owns that lane.
+
+### CL-TRIM.2 — the install ledger + safe prune (`SEED_VERSION` 5)
+
+Found by using it: after the cut the panel still listed nine dead cards on an
+already-seeded root, because seeding never removed anything. They can never
+render — the worker has no generator for those ids — so leaving them was worse
+than the risk the no-delete rule was protecting against.
+
+Seeding now keeps a **`.seed-ledger.json`** mapping each installed package id to
+the SHA-256 of the manifest it wrote. A package is pruned only when all four
+hold: the id is ledgered, the id is no longer in `SEED_PACKAGES`, the directory
+holds nothing but `component.toml`, and that file still hashes to the ledgered
+value. Fail any check and the package is **adopted** — left on disk, dropped
+from the ledger, never reconsidered, because at that point it is the user's.
+Both outcomes are reported in `SeedOutcome` and logged by name: a pass that
+deletes from the user's library says what it took.
+
+A package that is already present and byte-identical to what this build ships
+is CLAIMED into the ledger on the `kept` path. Without that, a root seeded
+before the ledger existed would never ledger anything it already had, and the
+gap would persist for the whole life of the install.
+
+- The rule is intact: seeding still never deletes anything a user wrote. It
+  takes back only what it can prove it wrote and no longer ships.
+- **Not covered:** a root at marker ≤ 4 has no ledger, so its dead directories
+  are unprovable and stay. One manual `rm` clears them; the dev machine's root
+  was cleared this session.
+- **Templates are not pruned**, and that is stated rather than skipped: their
+  bytes are generated per install (a fresh `DocumentId` each time), so there is
+  no "still unmodified" proof to check, and a prune without one is the guess
+  this whole design exists to avoid. The dead `nema17-mount` starter is removed
+  by hand, once.
+- Six prune tests, one per safety check (pruned · edited⇒adopted ·
+  added-file⇒adopted · unledgered⇒untouched · already-gone · still-shipped),
+  plus two claim tests (identical⇒claimed · user-authored⇒never claimed).
 
 **Seams flagged:**
 - `GeneratorRequest::text_params` is populated but no generator reads anything

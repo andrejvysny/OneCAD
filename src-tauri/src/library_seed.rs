@@ -17,36 +17,60 @@
 //! content (a `preview.webp`), `include_bytes!` extends this the same way.
 //!
 //! **The one rule that matters: the user's copy always wins.** Seeding only
-//! ever CREATES a package directory that does not exist. It never overwrites,
-//! never merges, and never deletes — a package the user edited, or authored
-//! themselves under the same id, is left exactly as it is. A `.seed-version`
-//! marker records that the pass ran, so deleting a built-in package keeps it
-//! deleted; bumping [`SEED_VERSION`] (adding a family, correcting a manifest)
-//! re-runs the pass, which restores anything missing.
+//! ever CREATES a package directory that does not exist. It never overwrites
+//! and never merges — a package the user edited, or authored themselves under
+//! the same id, is left exactly as it is. A `.seed-version` marker records that
+//! the pass ran, so deleting a built-in package keeps it deleted; bumping
+//! [`SEED_VERSION`] (adding a family, correcting a manifest) re-runs the pass,
+//! which restores anything missing.
+//!
+//! **The one exception, and why it is not one: pruning a RETIRED built-in.**
+//! When a family leaves [`SEED_PACKAGES`], the directory it left behind on
+//! every already-seeded root becomes dead weight — the worker no longer
+//! registers its generator, so it can never preview and can never place. The
+//! pass removes such a directory ONLY when it can PROVE it wrote it and the
+//! user never touched it: the `.seed-ledger.json` written at install time
+//! records the SHA-256 of the manifest this app put there, and prune requires
+//! the id to be ledgered, the directory to hold nothing but that one file, and
+//! the file to still hash to the ledgered value. Anything else — an edited
+//! manifest, an added preview, a package the user authored under the same id —
+//! fails a check, is left untouched, and is DROPPED FROM THE LEDGER, because
+//! at that point it is theirs and this module has no further claim on it.
+//!
+//! So the rule is unchanged. Seeding still never deletes anything a user
+//! wrote; it only takes back what it demonstrably put there and no longer
+//! ships.
 //!
 //! **Project templates seed in the same pass** (WP-F2b, spec §8) under the same
 //! marker and the same "the user's copy wins" rule — see
 //! [`crate::library_seed_templates`], which owns the starters because their
 //! content is a generated `.onecad` document rather than an embedded string.
+//! Templates are NOT pruned: their bytes are generated per install (a fresh
+//! `DocumentId` every time), so there is no "still unmodified" proof to check,
+//! and without one a prune would be the guess this design exists to avoid.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use onecad_library::package::COMPONENT_MANIFEST_FILE;
+use sha2::{Digest, Sha256};
 
 /// Bumped whenever the shipped set of packages changes (a new family, a
-/// corrected manifest). A root whose marker is missing or lower re-runs the
-/// seeding pass; one at this version is left alone.
+/// corrected manifest, a family retired). A root whose marker is missing or
+/// lower re-runs the seeding pass; one at this version is left alone.
 ///
-/// **A bump adds, it never removes.** Seeding only ever creates a package
-/// directory that is missing, so a root seeded at an EARLIER version keeps
-/// every package that version shipped — including families since dropped from
-/// [`SEED_PACKAGES`]. That is the "user's copy always wins" rule doing exactly
-/// what it says: this pass cannot tell a stale built-in from a package the user
-/// authored under the same id, and guessing wrong deletes their work. Clearing
-/// a dropped family from an existing root is a manual `rm` of its directory.
-pub const SEED_VERSION: u32 = 4;
+/// **A bump installs what is missing and prunes what is retired** — see the
+/// module header for the proof prune requires. The one population it cannot
+/// help is a root seeded BEFORE the ledger existed (marker ≤ 4): there is no
+/// record of what this app wrote there, so nothing can be proven and nothing is
+/// removed. Those roots need a manual `rm` of the dead directory, once.
+pub const SEED_VERSION: u32 = 5;
 
 const SEED_MARKER_FILE: &str = ".seed-version";
+
+/// Records what THIS app installed, so a later version can tell its own
+/// leftovers from the user's files. See the module header.
+const SEED_LEDGER_FILE: &str = ".seed-ledger.json";
 
 /// One shipped package: its directory name (which is also its component id)
 /// and its `component.toml` text.
@@ -90,11 +114,19 @@ pub const SEED_PACKAGES: &[SeedPackage] = &[seed!("onecad.std.iso4762")];
 /// templates (WP-F2b), reported separately because a template is not an
 /// [`IndexEntry`] and never enters the component index.
 ///
+/// `pruned` names retired built-ins this pass removed after proving it wrote
+/// them; `adopted` names retired built-ins it left alone because the proof
+/// failed — the user has edited or replaced them, so they are the user's now
+/// and the ledger forgets them. Both are reported rather than silent: a pass
+/// that deletes from the user's library must say what it deleted.
+///
 /// [`IndexEntry`]: onecad_library::index::IndexEntry
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SeedOutcome {
     pub installed: Vec<String>,
     pub kept: Vec<String>,
+    pub pruned: Vec<String>,
+    pub adopted: Vec<String>,
     pub templates_installed: Vec<String>,
     pub templates_kept: Vec<String>,
     /// `false` when the marker already said this version — nothing was even
@@ -121,19 +153,35 @@ pub fn seed_library(root: &Path) -> std::io::Result<SeedOutcome> {
         ..Default::default()
     };
     std::fs::create_dir_all(root)?;
+    let mut ledger = read_ledger(root);
     for pkg in SEED_PACKAGES {
         let dir = root.join(pkg.id);
+        let digest = manifest_digest(pkg.manifest.as_bytes());
         if dir.exists() {
             // The user's copy wins — including a package they authored under
             // this id, which is why the check is on the DIRECTORY and not on
             // the manifest's contents.
             outcome.kept.push(pkg.id.to_string());
+            // …but if what is there is byte-identical to what this build
+            // ships, CLAIM it in the ledger. Without this, a root seeded
+            // before the ledger existed (or by an older build) never ledgers
+            // anything it already has, so retiring this family later could
+            // never prune it — the gap would persist for the entire life of
+            // the install. The evidence standard is the prune's own: same one
+            // file, same bytes.
+            if is_untouched(&dir, &digest) {
+                ledger.insert(pkg.id.to_string(), digest);
+            }
             continue;
         }
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join(COMPONENT_MANIFEST_FILE), pkg.manifest)?;
+        // Ledger the EXACT bytes written, which is what a later prune has to
+        // match. Recording the id alone would prove nothing.
+        ledger.insert(pkg.id.to_string(), digest);
         outcome.installed.push(pkg.id.to_string());
     }
+    prune_retired(root, &mut ledger, &mut outcome)?;
     // Templates share the marker: "has this root been seeded" must stay ONE
     // question, or a half-seeded root becomes a state nothing tests.
     crate::library_seed_templates::install_missing(
@@ -141,8 +189,90 @@ pub fn seed_library(root: &Path) -> std::io::Result<SeedOutcome> {
         &mut outcome.templates_installed,
         &mut outcome.templates_kept,
     )?;
+    write_ledger(root, &ledger)?;
     std::fs::write(root.join(SEED_MARKER_FILE), SEED_VERSION.to_string())?;
     Ok(outcome)
+}
+
+/// Removes the leftovers of families this build no longer ships, but ONLY the
+/// ones it can prove it wrote — see the module header for why each check is
+/// there. A ledgered id that fails any check is adopted by the user: dropped
+/// from the ledger, left on disk, never reconsidered.
+///
+/// A prune failure is never fatal. This runs at application start, and a
+/// directory that cannot be removed (permissions, a file held open) must leave
+/// the user with a stale card, not a library that refused to open.
+fn prune_retired(
+    root: &Path,
+    ledger: &mut BTreeMap<String, String>,
+    outcome: &mut SeedOutcome,
+) -> std::io::Result<()> {
+    let retired: Vec<String> = ledger
+        .keys()
+        .filter(|id| !SEED_PACKAGES.iter().any(|p| p.id == id.as_str()))
+        .cloned()
+        .collect();
+
+    for id in retired {
+        let dir = root.join(&id);
+        if !dir.exists() {
+            // Already gone — the user deleted it, or a previous pass pruned it.
+            ledger.remove(&id);
+            continue;
+        }
+        if is_untouched(&dir, &ledger[&id]) && std::fs::remove_dir_all(&dir).is_ok() {
+            ledger.remove(&id);
+            outcome.pruned.push(id);
+        } else {
+            ledger.remove(&id);
+            outcome.adopted.push(id);
+        }
+    }
+    Ok(())
+}
+
+/// Whether `dir` still holds exactly the one manifest this app wrote there.
+///
+/// Both halves matter. The digest alone would let an ADDED file (a preview the
+/// user dropped in, a `source.onecad`) be deleted along with the directory; the
+/// file count alone would let an EDITED manifest be deleted. A retired package
+/// is only reclaimable when neither has happened.
+fn is_untouched(dir: &Path, expected_digest: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let mut names: Vec<std::ffi::OsString> = Vec::new();
+    for entry in entries.flatten() {
+        names.push(entry.file_name());
+    }
+    if names.len() != 1 || names[0] != COMPONENT_MANIFEST_FILE {
+        return false;
+    }
+    let Ok(bytes) = std::fs::read(dir.join(COMPONENT_MANIFEST_FILE)) else {
+        return false;
+    };
+    manifest_digest(&bytes) == expected_digest
+}
+
+fn manifest_digest(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+/// The ledger, or an empty map when absent/unreadable/malformed. A ledger that
+/// cannot be read means "nothing is proven", which prunes nothing — the safe
+/// direction, and the same one a pre-ledger root lands in.
+fn read_ledger(root: &Path) -> BTreeMap<String, String> {
+    std::fs::read_to_string(root.join(SEED_LEDGER_FILE))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn write_ledger(root: &Path, ledger: &BTreeMap<String, String>) -> std::io::Result<()> {
+    let text = serde_json::to_string_pretty(ledger).map_err(std::io::Error::other)?;
+    std::fs::write(root.join(SEED_LEDGER_FILE), text)
 }
 
 /// The marker's version, or `None` when absent/unreadable/malformed — all of
@@ -334,5 +464,184 @@ mod tests {
                 pkg.id
             );
         }
+    }
+
+    // ── Retiring a family: the ledger and its prune ──────────────────────────
+    //
+    // These simulate a family LEAVING `SEED_PACKAGES`, which is the only way to
+    // reach the prune. `retire` writes the package plus the ledger entry a real
+    // install would have left, then the pass runs with that id no longer
+    // shipped — exactly the state a user upgrading across the drop is in.
+
+    const RETIRED_ID: &str = "onecad.std.retired-family";
+    const RETIRED_MANIFEST: &str = "# a family this build no longer ships\n";
+
+    /// Writes a retired package and the ledger a real install of it would have
+    /// left behind. Returns its directory.
+    fn retire(root: &Path, ledger_digest: Option<&str>) -> PathBuf {
+        std::fs::create_dir_all(root).unwrap();
+        let dir = root.join(RETIRED_ID);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(COMPONENT_MANIFEST_FILE), RETIRED_MANIFEST).unwrap();
+        if let Some(digest) = ledger_digest {
+            let mut ledger = read_ledger(root);
+            ledger.insert(RETIRED_ID.to_string(), digest.to_string());
+            write_ledger(root, &ledger).unwrap();
+        }
+        dir
+    }
+
+    fn shipped_digest() -> String {
+        manifest_digest(RETIRED_MANIFEST.as_bytes())
+    }
+
+    // The case that motivated all of this: a root seeded before the drop shows
+    // dead cards for a family whose generator no longer exists. The pass takes
+    // back exactly what it put there.
+    #[test]
+    fn a_retired_package_this_app_installed_is_pruned() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let pkg_dir = retire(root, Some(&shipped_digest()));
+
+        let outcome = seed_library(root).unwrap();
+        assert_eq!(outcome.pruned, vec![RETIRED_ID.to_string()]);
+        assert!(outcome.adopted.is_empty());
+        assert!(!pkg_dir.exists(), "the dead directory is gone");
+        assert!(
+            !read_ledger(root).contains_key(RETIRED_ID),
+            "and the ledger no longer claims it"
+        );
+        // The shipped family is untouched by any of it.
+        assert!(root.join(SEED_PACKAGES[0].id).is_dir());
+    }
+
+    // The safety property, stated as its own test: an EDITED manifest fails the
+    // digest check, so the package is left alone and the ledger gives up its
+    // claim. Deleting here would be destroying the user's work.
+    #[test]
+    fn a_retired_package_the_user_edited_is_adopted_not_pruned() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let pkg_dir = retire(root, Some(&shipped_digest()));
+        std::fs::write(pkg_dir.join(COMPONENT_MANIFEST_FILE), "# mine now\n").unwrap();
+
+        let outcome = seed_library(root).unwrap();
+        assert_eq!(outcome.adopted, vec![RETIRED_ID.to_string()]);
+        assert!(outcome.pruned.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(pkg_dir.join(COMPONENT_MANIFEST_FILE)).unwrap(),
+            "# mine now\n",
+            "byte for byte"
+        );
+        assert!(!read_ledger(root).contains_key(RETIRED_ID));
+    }
+
+    // The other half of `is_untouched`, and the reason the file COUNT is
+    // checked and not just the digest: an added file means the user built on
+    // top of this package, and `remove_dir_all` would take that with it.
+    #[test]
+    fn a_retired_package_the_user_added_a_file_to_is_adopted_not_pruned() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let pkg_dir = retire(root, Some(&shipped_digest()));
+        std::fs::write(pkg_dir.join("preview.png"), b"mine").unwrap();
+
+        let outcome = seed_library(root).unwrap();
+        assert_eq!(outcome.adopted, vec![RETIRED_ID.to_string()]);
+        assert!(
+            pkg_dir.join("preview.png").is_file(),
+            "the added file lives"
+        );
+        assert!(pkg_dir.join(COMPONENT_MANIFEST_FILE).is_file());
+    }
+
+    // A package this app never installed is invisible to the prune, however
+    // dead it looks. Without a ledger entry there is no proof, and no proof
+    // means no deletion — which is also every pre-ledger root's behaviour.
+    #[test]
+    fn an_unledgered_package_is_never_pruned() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let pkg_dir = retire(root, None);
+
+        let outcome = seed_library(root).unwrap();
+        assert!(outcome.pruned.is_empty());
+        assert!(outcome.adopted.is_empty(), "never even considered");
+        assert!(pkg_dir.is_dir());
+    }
+
+    // A user who deleted a retired package first gets no error and no ghost
+    // entry: the ledger simply drops the claim.
+    #[test]
+    fn a_retired_package_already_gone_just_leaves_the_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let pkg_dir = retire(root, Some(&shipped_digest()));
+        std::fs::remove_dir_all(&pkg_dir).unwrap();
+
+        let outcome = seed_library(root).unwrap();
+        assert!(outcome.pruned.is_empty());
+        assert!(outcome.adopted.is_empty());
+        assert!(!read_ledger(root).contains_key(RETIRED_ID));
+    }
+
+    // A root that already HAS a shipped package (seeded by an older build, or
+    // before the ledger existed) still ends up ledgered, so retiring that
+    // family later can prune it. Without this the gap would never close for an
+    // existing install.
+    #[test]
+    fn an_already_present_shipped_package_is_claimed_into_the_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let pkg = &SEED_PACKAGES[0];
+        let pkg_dir = root.join(pkg.id);
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join(COMPONENT_MANIFEST_FILE), pkg.manifest).unwrap();
+        assert!(read_ledger(root).is_empty(), "no ledger to start with");
+
+        let outcome = seed_library(root).unwrap();
+        assert!(outcome.kept.contains(&pkg.id.to_string()));
+        assert_eq!(
+            read_ledger(root).get(pkg.id),
+            Some(&manifest_digest(pkg.manifest.as_bytes())),
+            "an identical copy is claimable on the prune's own evidence standard"
+        );
+    }
+
+    // …but only an IDENTICAL copy. A package the user wrote under a shipped id
+    // is never claimed, so it can never later be pruned.
+    #[test]
+    fn a_user_authored_package_under_a_shipped_id_is_never_claimed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let id = SEED_PACKAGES[0].id;
+        let pkg_dir = root.join(id);
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join(COMPONENT_MANIFEST_FILE), "# mine\n").unwrap();
+
+        seed_library(root).unwrap();
+        assert!(
+            !read_ledger(root).contains_key(id),
+            "this app has no claim on a file it did not write"
+        );
+    }
+
+    // A SHIPPED package is never a prune candidate, even though the ledger
+    // carries it — the retired set is "ledgered AND not in SEED_PACKAGES", and
+    // getting that backwards would empty the catalog on every start.
+    #[test]
+    fn a_still_shipped_package_is_never_pruned() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seed_library(root).unwrap();
+        let id = SEED_PACKAGES[0].id;
+        assert!(read_ledger(root).contains_key(id), "install ledgered it");
+
+        std::fs::write(root.join(SEED_MARKER_FILE), "0").unwrap();
+        let again = seed_library(root).unwrap();
+        assert!(again.pruned.is_empty());
+        assert!(again.adopted.is_empty());
+        assert!(root.join(id).is_dir());
     }
 }

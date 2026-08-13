@@ -146,10 +146,27 @@ pub(crate) fn seed_and_reindex_at(root: &Path) {
     tracing::info!(
         installed = outcome.installed.len(),
         kept = outcome.kept.len(),
+        pruned = outcome.pruned.len(),
+        adopted = outcome.adopted.len(),
         templates_installed = outcome.templates_installed.len(),
         templates_kept = outcome.templates_kept.len(),
         "library seed pass"
     );
+    // A pass that DELETED from the user's library names what it took, at a
+    // level a user-facing log actually shows. The counts above are the summary;
+    // this is the receipt.
+    if !outcome.pruned.is_empty() {
+        tracing::info!(
+            packages = ?outcome.pruned,
+            "pruned retired built-in packages this app installed and no longer ships"
+        );
+    }
+    if !outcome.adopted.is_empty() {
+        tracing::info!(
+            packages = ?outcome.adopted,
+            "retired built-in packages left in place — modified since install, so they are the user's now"
+        );
+    }
     match reindex_library_at(root) {
         Ok(report) => tracing::info!(
             indexed = report.indexed,
