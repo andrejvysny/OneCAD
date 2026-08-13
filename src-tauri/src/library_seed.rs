@@ -23,6 +23,11 @@
 //! marker records that the pass ran, so deleting a built-in package keeps it
 //! deleted; bumping [`SEED_VERSION`] (adding a family, correcting a manifest)
 //! re-runs the pass, which restores anything missing.
+//!
+//! **Project templates seed in the same pass** (WP-F2b, spec §8) under the same
+//! marker and the same "the user's copy wins" rule — see
+//! [`crate::library_seed_templates`], which owns the starters because their
+//! content is a generated `.onecad` document rather than an embedded string.
 
 use std::path::Path;
 
@@ -31,7 +36,7 @@ use onecad_library::package::COMPONENT_MANIFEST_FILE;
 /// Bumped whenever the shipped set of packages changes (a new family, a
 /// corrected manifest). A root whose marker is missing or lower re-runs the
 /// seeding pass; one at this version is left alone.
-pub const SEED_VERSION: u32 = 2;
+pub const SEED_VERSION: u32 = 3;
 
 const SEED_MARKER_FILE: &str = ".seed-version";
 
@@ -75,11 +80,17 @@ pub const SEED_PACKAGES: &[SeedPackage] = &[
 
 /// What one seeding pass did. `installed` names packages written now;
 /// `kept` names shipped packages already present on disk and therefore left
-/// untouched.
+/// untouched. The `templates_*` pair is the same split for the project
+/// templates (WP-F2b), reported separately because a template is not an
+/// [`IndexEntry`] and never enters the component index.
+///
+/// [`IndexEntry`]: onecad_library::index::IndexEntry
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SeedOutcome {
     pub installed: Vec<String>,
     pub kept: Vec<String>,
+    pub templates_installed: Vec<String>,
+    pub templates_kept: Vec<String>,
     /// `false` when the marker already said this version — nothing was even
     /// examined.
     pub ran: bool,
@@ -117,6 +128,13 @@ pub fn seed_library(root: &Path) -> std::io::Result<SeedOutcome> {
         std::fs::write(dir.join(COMPONENT_MANIFEST_FILE), pkg.manifest)?;
         outcome.installed.push(pkg.id.to_string());
     }
+    // Templates share the marker: "has this root been seeded" must stay ONE
+    // question, or a half-seeded root becomes a state nothing tests.
+    crate::library_seed_templates::install_missing(
+        root,
+        &mut outcome.templates_installed,
+        &mut outcome.templates_kept,
+    )?;
     std::fs::write(root.join(SEED_MARKER_FILE), SEED_VERSION.to_string())?;
     Ok(outcome)
 }
@@ -196,6 +214,43 @@ mod tests {
         for pkg in SEED_PACKAGES {
             assert!(root.join(pkg.id).join(COMPONENT_MANIFEST_FILE).is_file());
         }
+    }
+
+    // WP-F2b: the same pass installs the project starters, and they list back
+    // through the API the start screen actually calls.
+    #[test]
+    fn seeding_a_fresh_root_installs_every_template() {
+        use crate::library_seed_templates::SEED_TEMPLATES;
+        let dir = tempfile::tempdir().unwrap();
+        let outcome = seed_library(dir.path()).unwrap();
+        assert_eq!(outcome.templates_installed.len(), SEED_TEMPLATES.len());
+        assert!(outcome.templates_kept.is_empty());
+        let listed = onecad_library::template::list(dir.path());
+        assert_eq!(listed.len(), SEED_TEMPLATES.len());
+        for tpl in SEED_TEMPLATES {
+            let entry = listed
+                .iter()
+                .find(|e| e.id == tpl.id)
+                .unwrap_or_else(|| panic!("{} not listed", tpl.id));
+            assert_eq!(entry.name, tpl.name);
+            assert_eq!(entry.description.as_deref(), Some(tpl.description));
+            assert!(entry.document_path.is_file());
+        }
+    }
+
+    // Templates seed under the SAME marker as the packages: a root already at
+    // this version is not re-examined for either.
+    #[test]
+    fn a_second_pass_installs_no_template_either() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_library(dir.path()).unwrap();
+        std::fs::remove_dir_all(dir.path().join(onecad_library::template::TEMPLATES_DIR)).unwrap();
+        let again = seed_library(dir.path()).unwrap();
+        assert!(again.templates_installed.is_empty());
+        assert!(
+            onecad_library::template::list(dir.path()).is_empty(),
+            "user deletion is respected until SEED_VERSION moves"
+        );
     }
 
     #[test]

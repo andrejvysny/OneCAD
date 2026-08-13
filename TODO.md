@@ -1,5 +1,55 @@
 # OneCAD-Tauri Migration TODO
 
+## COMPONENT-LIBRARY WP-F2b (part 2: starter templates) — GATE PASSED
+
+Spec §8's "ship 3–5 honest starters" — the half WP-F2 left queued. Three seed
+beside the component packages on first run and show in the start screen's
+template grid with **no frontend change** (`listTemplates` → `TemplateGrid`
+already renders whatever the library root holds; a starter carries no preview
+PNG, so the card falls back to the existing hatch + cube well).
+
+- [x] **Documents are GENERATED at seed time, not checked in as bytes**
+  (`src-tauri/src/library_seed_templates.rs`, new). Built with `onecad-core`
+  types and frozen through the same `ContainerWriter` a real save uses, so a
+  document-schema / container-layout / record-shape change either compiles or
+  does not — a hand-frozen binary would rot silently and fail to open.
+- [x] **What the three actually contain (honest inventory, not a wish):**
+  - `onecad.std.template.blank` — "Blank". An empty document, mm. Nothing else.
+  - `onecad.std.template.printed-part` — "3D-Printed Part". Empty document plus
+    ONE resolved `OffsetFromPlane` datum on XY at 0 named "Build plate" (real,
+    selectable content — it lists in the sketch-plane picker beside the world
+    planes). Deliberately nothing more: **there is no print-settings machinery
+    in the document model** (no nozzle, layer height or bed size to encode) and
+    the variable table has no UI, so anything else would be decoration.
+  - `onecad.std.template.nema17-mount` — "NEMA 17 Motor Mount". Empty document
+    plus one `PlaceComponent` record for the seeded `onecad.std.nema17` at the
+    origin, generator source, **no mate** (there is nothing in a starter to
+    mate to, and an unresolvable recorded mate is exactly the `NeedsRepair`
+    this project exists to avoid). Version + revision are read out of the seed
+    manifest at build time, so the starter can never claim an identity the
+    shipped package does not have.
+- [x] **Seeded in the SAME pass, under the SAME marker** (`SEED_VERSION` 2 → 3,
+  which is what installs them into an already-seeded library root). The
+  component rule is reused verbatim: the check is on the DIRECTORY, the user's
+  copy always wins, and a deleted starter stays deleted until the version moves.
+  `SeedOutcome` gained `templates_installed`/`templates_kept` (reported apart
+  from the package split because a template is not an `IndexEntry` and never
+  enters the component index).
+- [x] Gate, all RUN: `cargo fmt --all --check` clean · `cargo clippy
+  --workspace --all-targets -D warnings` clean · `ONECAD_WORKER_PATH=…
+  ONECAD_REQUIRE_WORKER=1 cargo test --workspace --no-fail-fast` **0 failed**
+  (79 suites), incl. 6 new: 4 unit (`library_seed_templates`: every starter is
+  a readable container / blank is empty / the datum resolves / the NEMA record
+  matches the shipped package + kept-not-overwritten), 2 worker-backed in
+  `tests/component_ops.rs` (`the_seeded_nema17_starter_regenerates_into_a_motor`
+  hits the exact analytic volume **72636.60 mm³**, the same `motor_volume`
+  formula the C++ suite pins; the two geometry-free starters open and
+  regenerate to `NoOp`).
+- **FLAGGED SEAM (frontend, deliberately untouched):** `mockClient` backs
+  `listTemplates` with an in-session `mockTemplates` array that starts EMPTY, so
+  the mock/Playwright lane still shows no starters (only ones saved during the
+  session). The real (tauri) lane reads the seeded root and needs nothing.
+
 ## COMPONENT-LIBRARY WP-F2 (part 1: bearings + steppers) — GATE PASSED
 
 Spec §6.2's two non-fastener families. The starter-template half of WP-F2 is

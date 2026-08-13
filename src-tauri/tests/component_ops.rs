@@ -455,6 +455,7 @@ async fn place_component_mate_reseats_on_the_first_regen_when_authored_off_axis(
             extra: Default::default(),
         },
         kind: MateKind::Concentric,
+        self_frame: None,
         flipped: false,
         extra: Default::default(),
     });
@@ -520,6 +521,7 @@ async fn place_component_with_an_unresolvable_mate_still_publishes_at_its_frozen
             extra: Default::default(),
         },
         kind: MateKind::Concentric,
+        self_frame: None,
         flipped: false,
         extra: Default::default(),
     });
@@ -876,6 +878,7 @@ async fn a_body_saved_as_a_component_places_back_as_the_same_solid() {
                 onecad_lib::library::AttachmentSpecInput {
                     on: "face:seat".to_string(),
                     accepts: vec!["plane".to_string()],
+                    frame: None,
                 },
             )]
             .into_iter()
@@ -1022,6 +1025,92 @@ async fn every_seeded_component_meshes_for_the_library_ui() {
         assert_eq!(&mesh[0..4], b"HSEM", "{id}: not a MESH1 blob");
         let vertex_count = u32::from_le_bytes([mesh[8], mesh[9], mesh[10], mesh[11]]);
         assert!(vertex_count > 0, "{id}: meshed to zero vertices");
+    }
+
+    wm.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WP-F2b: the seeded project starters (spec §8)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The exact analytic volume of the NEMA 17 the `nema17-mount` starter places:
+/// the 42.3 mm frame block at the frame's own 40 mm default length, plus the
+/// Ø22 × 2 pilot boss and the Ø5 × 24 shaft (which overlaps the boss for its
+/// first 2 mm), minus the four Ø3 blind mounting holes 4.5 mm deep. Spelled
+/// from the source dimensions, exactly as `motor_volume` does on the C++ side —
+/// a divergence between the two shows up on both.
+fn nema17_default_volume() -> f64 {
+    let cyl = |d: f64, h: f64| PI * (d / 2.0) * (d / 2.0) * h;
+    42.3 * 42.3 * 40.0 + cyl(22.0, 2.0) + cyl(5.0, 24.0 - 2.0) - 4.0 * cyl(3.0, 4.5)
+}
+
+/// A seeded starter must OPEN and REGENERATE through the real worker — a
+/// template that lists on the start screen but cannot be instantiated is worse
+/// than no template at all. The motor-mount starter is the one that can fail:
+/// it carries a `PlaceComponent` record authored with no worker in sight, so
+/// this is the only place the authored record meets the generator it names.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_seeded_nema17_starter_regenerates_into_a_motor() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let library_dir = tempfile::tempdir().expect("tempdir");
+    onecad_lib::library_seed::seed_library(library_dir.path()).expect("seed");
+    let entry =
+        onecad_library::template::get(library_dir.path(), "onecad.std.template.nema17-mount")
+            .expect("the motor-mount starter seeds");
+
+    let wm = spawn_worker(bin).await;
+    let mut rt = open_over(&wm, &entry.document_path);
+    let report = regen_all(&mut rt).await;
+    let snap = published(&report, "nema17 starter");
+    assert_eq!(
+        snap.bodies.len(),
+        1,
+        "the starter opens with exactly the motor"
+    );
+
+    let vol = exact_volume(&wm, snap.bodies[0].body).await;
+    assert!(
+        (vol - nema17_default_volume()).abs() < 1.0,
+        "starter volume: got {vol}, want {} (NEMA 17 at its default 40 mm body)",
+        nema17_default_volume()
+    );
+
+    wm.shutdown().await;
+}
+
+/// The other two starters must open and regenerate too — to an EMPTY published
+/// snapshot, which is the honest content of both (`blank` is empty; the
+/// printed-part starter carries one datum and no geometry).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_seeded_geometry_free_starters_open_and_publish_nothing() {
+    let Some(bin) = real_worker() else {
+        eprintln!("skip: real worker binary not found (set ONECAD_WORKER_PATH)");
+        return;
+    };
+    let library_dir = tempfile::tempdir().expect("tempdir");
+    onecad_lib::library_seed::seed_library(library_dir.path()).expect("seed");
+    let wm = spawn_worker(bin).await;
+
+    for id in [
+        "onecad.std.template.blank",
+        "onecad.std.template.printed-part",
+    ] {
+        let entry = onecad_library::template::get(library_dir.path(), id)
+            .unwrap_or_else(|| panic!("{id} seeds"));
+        let mut rt = open_over(&wm, &entry.document_path);
+        let report = regen_all(&mut rt).await;
+        // `NoOp`, not an empty `Published`: a timeline with no step has nothing
+        // to publish. What matters here is that the container OPENED and the
+        // regen did not fail — the starter is honestly empty.
+        assert!(
+            matches!(report.outcome, Outcome::NoOp),
+            "{id}: a geometry-free starter regenerates to NoOp, got {:?}",
+            report.outcome
+        );
     }
 
     wm.shutdown().await;
